@@ -9,7 +9,7 @@ from .common import MYTT, build_formula_result, empty_formula_result, numeric_co
 from .types import FormulaResult
 
 FORMULA_ID = "indicator_one"
-DISPLAY_NAME = "指标一 · 主力资金"
+DISPLAY_NAME = "主力清洗"
 MINIMUM_BARS = 33
 RECOMMENDED_BARS = 120
 SIGNAL_NAMES = ("main_force_entry", "wash", "main_force_raise", "distribution")
@@ -64,6 +64,7 @@ def calculate_indicator_one(frame: pd.DataFrame) -> FormulaResult:
         "distribution": var51 > var51_previous,  # 出货
     }
     values = {
+        "z": np.zeros(len(low), dtype=float),
         "var1": var1,
         "var2_numerator": var2_numerator,
         "var2_denominator": var2_denominator,

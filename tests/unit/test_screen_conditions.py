@@ -158,13 +158,37 @@ def test_formula_screen_request_accepts_a_preset_indicator_condition() -> None:
     assert request.to_config().conditions[0].left_value == "indicator_two.var1"
 
 
-def test_preset_value_metadata_uses_the_indicator_output_name() -> None:
-    indicator = next(
-        item for item in FORMULA_REGISTRY.metadata() if item["id"] == "indicator_three"
-    )
-    varo7 = next(value for value in indicator["values"] if value["id"] == "indicator_three.varo7")
+def test_preset_metadata_exposes_only_the_requested_indicator_outputs() -> None:
+    expected = {
+        "indicator_one": [
+            "indicator_one.wash",
+            "indicator_one.main_force_raise",
+            "indicator_one.distribution",
+            "indicator_one.main_force_entry",
+            "indicator_one.z",
+        ],
+        "indicator_two": [
+            "indicator_two.short_line",
+            "indicator_two.mid_line",
+            "indicator_two.bottom_line",
+            "indicator_two.warning_line",
+        ],
+        "indicator_three": [
+            "indicator_three.var1",
+            "indicator_three.var2",
+            "indicator_three.prepare_rally",
+            "indicator_three.suppress_main",
+        ],
+    }
+    metadata = {item["id"]: item for item in FORMULA_REGISTRY.metadata()}
 
-    assert varo7["display_name"] == "建仓强度"
+    assert [metadata[formula_id]["display_name"] for formula_id in expected] == [
+        "主力清洗",
+        "庄家顶底",
+        "准备拉升",
+    ]
+    for formula_id, value_ids in expected.items():
+        assert [value["id"] for value in metadata[formula_id]["values"]] == value_ids
 
 
 def test_formula_screen_request_rejects_a_condition_without_right_operand() -> None:

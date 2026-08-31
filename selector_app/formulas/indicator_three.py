@@ -9,7 +9,7 @@ from .common import MYTT, build_formula_result, empty_formula_result, numeric_co
 from .types import FormulaResult
 
 FORMULA_ID = "indicator_three"
-DISPLAY_NAME = "指标三 · 拉升准备"
+DISPLAY_NAME = "准备拉升"
 MINIMUM_BARS = 34
 RECOMMENDED_BARS = 120
 SIGNAL_NAMES = ("prepare_rally", "suppress_main", "accumulation_zone", "begin_zone", "end_zone")

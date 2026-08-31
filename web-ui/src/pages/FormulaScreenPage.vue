@@ -33,7 +33,7 @@ const CONDITION_OPERATOR_OPTIONS: { value: ConditionOperator; label: string }[] 
   { value: 'cross_down', label: '下穿' },
 ]
 
-function emptyCondition(leftValue = 'indicator_three.varo7'): ScreenCondition {
+function emptyCondition(leftValue = 'indicator_three.var1'): ScreenCondition {
   return {
     left_value: leftValue,
     operator: 'lt',

@@ -152,6 +152,15 @@ def test_indicator_three_uses_fractional_sma_period_3_2() -> None:
     assert np.allclose(result.values["var1"], expected, equal_nan=True)
 
 
+def test_screenshot_named_outputs_are_present() -> None:
+    one = calculate_indicator_one(make_bars())
+    two = calculate_indicator_two(make_bars())
+
+    assert np.all(one.values["z"] == 0)
+    assert all(name in two.values for name in ("short_line", "mid_line", "bottom_line"))
+    assert np.all(two.values["warning_line"] == 85)
+
+
 def test_formulas_do_not_use_future_rows() -> None:
     original = make_bars()
     changed = original.copy(deep=True)

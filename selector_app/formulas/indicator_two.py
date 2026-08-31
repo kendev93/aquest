@@ -16,7 +16,7 @@ from .common import (
 from .types import FormulaResult
 
 FORMULA_ID = "indicator_two"
-DISPLAY_NAME = "指标二 · 成本与饱和度"
+DISPLAY_NAME = "庄家顶底"
 MINIMUM_BARS = 34
 RECOMMENDED_BARS = 120
 SIGNAL_NAMES = (
@@ -119,8 +119,10 @@ def calculate_indicator_two(frame: pd.DataFrame) -> FormulaResult:
         "holding_base": holding_base,
         "holding": holding,
         "support": support,
+        "bottom_line": support,
         "short_line": short_line,
         "mid_line": mid_line,
+        "warning_line": np.full(len(close), 85.0),
         "start": np.where(signals["start"], short_line, 0),
         "end": np.where(signals["end"], short_line, 0),
     }

@@ -56,8 +56,8 @@ _VALUE_DISPLAY_NAMES: dict[str, dict[str, str]] = {
         "var3": "低位平滑值",
         "var4": "33日最低价",
         "var5": "主力进场强度",
-        "main_force_entry": "主力进场值",
-        "wash": "洗盘值",
+        "main_force_entry": "主力进场",
+        "wash": "洗盘",
         "var21_denominator_input": "高位偏离输入",
         "var21_numerator": "高位偏离分子",
         "var21_denominator": "高位下行分母",
@@ -65,8 +65,9 @@ _VALUE_DISPLAY_NAMES: dict[str, dict[str, str]] = {
         "var31": "高位平滑值",
         "var41": "33日最高价",
         "var51": "主力拉高强度",
-        "main_force_raise": "主力拉高值",
-        "distribution": "出货值",
+        "main_force_raise": "主力拉高",
+        "distribution": "出货",
+        "z": "Z",
     },
     "indicator_two": {
         "short_cost": "短期成本线",
@@ -89,22 +90,24 @@ _VALUE_DISPLAY_NAMES: dict[str, dict[str, str]] = {
         "holding_base": "持仓位置",
         "holding": "持仓强度",
         "support": "支撑强度",
-        "short_line": "短线强度",
-        "mid_line": "中线强度",
+        "bottom_line": "底部线",
+        "short_line": "短期线",
+        "mid_line": "中期线",
         "start": "始信号值",
         "end": "终信号值",
+        "warning_line": "警戒线",
     },
     "indicator_three": {
         "n": "随机周期",
         "stochastic_base": "随机强度",
         "sma_inner": "随机平滑值",
-        "var1": "拉升强度",
-        "var2": "拉升阈值",
+        "var1": "VAR1",
+        "var2": "VAR2",
         "varo5": "27日最低价",
         "varo6": "34日最高价",
         "varo7": "建仓强度",
-        "prepare_rally": "准备拉升值",
-        "suppress_main": "压住庄家值",
+        "prepare_rally": "准备拉升",
+        "suppress_main": "压住庄家",
         "accumulation_zone": "建仓区值",
     },
 }
@@ -136,6 +139,11 @@ class FormulaDefinition:
     # Bump this whenever the formula's numerical semantics change. Cached
     # values are derived data and must never survive a semantic formula change.
     cache_version: str = "1"
+    screen_value_names: tuple[str, ...] = ()
+
+    @property
+    def selectable_value_names(self) -> tuple[str, ...]:
+        return self.screen_value_names or self.value_names
 
 
 class FormulaRegistry:
@@ -195,7 +203,7 @@ class FormulaRegistry:
                             f"（{value_name.upper()}）的数值输出"
                         ),
                     }
-                    for value_name in definition.value_names
+                    for value_name in definition.selectable_value_names
                 ],
             }
             for definition in self._definitions
@@ -247,6 +255,14 @@ FORMULA_REGISTRY = FormulaRegistry(
                 "var51",
                 "main_force_raise",
                 "distribution",
+                "z",
+            ),
+            screen_value_names=(
+                "wash",
+                "main_force_raise",
+                "distribution",
+                "main_force_entry",
+                "z",
             ),
         ),
         FormulaDefinition(
@@ -303,10 +319,18 @@ FORMULA_REGISTRY = FormulaRegistry(
                 "holding_base",
                 "holding",
                 "support",
+                "bottom_line",
                 "short_line",
                 "mid_line",
+                "warning_line",
                 "start",
                 "end",
+            ),
+            screen_value_names=(
+                "short_line",
+                "mid_line",
+                "bottom_line",
+                "warning_line",
             ),
         ),
         FormulaDefinition(
@@ -342,6 +366,12 @@ FORMULA_REGISTRY = FormulaRegistry(
                 "prepare_rally",
                 "suppress_main",
                 "accumulation_zone",
+            ),
+            screen_value_names=(
+                "var1",
+                "var2",
+                "prepare_rally",
+                "suppress_main",
             ),
         ),
     )

@@ -14,14 +14,16 @@ vi.mock('../api/formulaScreen', async () => {
 const metadata: FormulaScreenMetadata = {
   indicators: [
     {
-      id: 'indicator_three', display_name: '指标三 · 拉升准备', minimum_bars: 34, recommended_bars: 120,
+      id: 'indicator_three', display_name: '准备拉升', minimum_bars: 34, recommended_bars: 120,
       signals: [
         { id: 'indicator_three.prepare_rally', display_name: '准备拉升', description: 'VAR1 上穿 8' },
         { id: 'indicator_three.accumulation_zone', display_name: '建仓区', description: 'VARO7 < 10' },
       ],
       values: [
-        { id: 'indicator_three.varo7', display_name: '建仓强度', description: '建仓强度（VARO7）的数值输出' },
-        { id: 'indicator_three.var1', display_name: '拉升强度', description: '拉升强度（VAR1）的数值输出' },
+        { id: 'indicator_three.var1', display_name: 'VAR1', description: 'VAR1 的数值输出' },
+        { id: 'indicator_three.var2', display_name: 'VAR2', description: 'VAR2 的数值输出' },
+        { id: 'indicator_three.prepare_rally', display_name: '准备拉升', description: '准备拉升的数值输出' },
+        { id: 'indicator_three.suppress_main', display_name: '压住庄家', description: '压住庄家的数值输出' },
       ],
     },
   ],
@@ -113,12 +115,12 @@ describe('FormulaScreenPage', () => {
     await flushPromises()
 
     await wrapper.get('[data-testid="rule-mode-conditions"]').trigger('click')
-    await wrapper.get('[data-testid="condition-left-0"]').setValue('indicator_three.varo7')
+    await wrapper.get('[data-testid="condition-left-0"]').setValue('indicator_three.var1')
     await wrapper.get('[data-testid="condition-operator-0"]').setValue('lt')
     await wrapper.get('[data-testid="condition-right-type-0"]').setValue('constant')
     await wrapper.get('[data-testid="condition-constant-0"]').setValue('10')
     vi.mocked(api.getResults).mockResolvedValueOnce({
-      results: [{ market: 'SH', code: '600000', name: '浦发银行', signal_date: 20260824, last_close: 12.35, matched_signals: ['condition_1'], match_count: 1, indicator_values: { 'indicator_three.varo7': 2.2 } }],
+      results: [{ market: 'SH', code: '600000', name: '浦发银行', signal_date: 20260824, last_close: 12.35, matched_signals: ['condition_1'], match_count: 1, indicator_values: { 'indicator_three.var1': 2.2 } }],
       meta: { total_candidates: 2, total_scanned: 2, total_signals: 1, errors: 0, skipped: 0, failure_reasons: {}, skip_reasons: {} },
     })
     await wrapper.get('[data-testid="screen-config"]').trigger('submit')
@@ -127,13 +129,13 @@ describe('FormulaScreenPage', () => {
     expect(api.createJob).toHaveBeenCalledWith(expect.objectContaining({
       selected_signals: [],
       conditions: [{
-        left_value: 'indicator_three.varo7',
+        left_value: 'indicator_three.var1',
         operator: 'lt',
         right_value: null,
         right_constant: 10,
       }],
     }))
-    expect(wrapper.get('[data-testid="results-table"]').text()).toContain('建仓强度 小于 10')
+    expect(wrapper.get('[data-testid="results-table"]').text()).toContain('VAR1 小于 10')
   })
 
   it('shows readable Chinese output names in the condition selector', async () => {
@@ -142,7 +144,13 @@ describe('FormulaScreenPage', () => {
 
     await wrapper.get('[data-testid="rule-mode-conditions"]').trigger('click')
 
-    expect(wrapper.get('[data-testid="condition-left-0"]').text()).toContain('建仓强度 · VARO7')
+    expect(wrapper.get('[data-testid="condition-left-0"]').findAll('option').map((option) => option.text())).toEqual([
+      'VAR1',
+      'VAR2',
+      '准备拉升',
+      '压住庄家',
+    ])
+    expect(wrapper.get('[data-testid="condition-left-0"]').text()).not.toContain('VARO7')
     expect(wrapper.get('[data-testid="condition-right-type-0"]').text()).toContain('固定数值')
     expect(wrapper.get('[data-testid="condition-right-type-0"]').text()).toContain('另一个指标')
   })
