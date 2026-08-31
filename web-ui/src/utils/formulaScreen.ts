@@ -1,11 +1,15 @@
 import type {
   CombineMode,
+  ConditionOperator,
   CustomFormulaMetadata,
   FormulaScreenMetadata,
   InstrumentBoard,
   InstrumentType,
+  SavedConditionSet,
+  ScreenCondition,
   ScanPayload,
   ScreenFormState,
+  RuleMode,
   ScreenResult,
 } from '../types'
 
@@ -15,6 +19,42 @@ export const DEFAULT_PRESET_SIGNALS = [
 ]
 
 const FORM_STORAGE_KEY = 'indicator-lab.form.v1'
+const CONDITION_SETS_STORAGE_KEY = 'indicator-lab.condition-sets.v1'
+
+const CONDITION_OPERATORS = new Set<ConditionOperator>([
+  'gt', 'gte', 'lt', 'lte', 'eq', 'neq', 'cross_up', 'cross_down',
+])
+
+function parseCondition(value: unknown): ScreenCondition | null {
+  if (!value || typeof value !== 'object') return null
+  const record = value as Record<string, unknown>
+  const rightValue = record.right_value
+  const rightConstant = record.right_constant
+  if (
+    typeof record.left_value !== 'string'
+    || !CONDITION_OPERATORS.has(record.operator as ConditionOperator)
+    || (rightValue !== null && typeof rightValue !== 'string')
+    || (rightConstant !== null && typeof rightConstant !== 'number')
+  ) return null
+  const hasValue = typeof rightValue === 'string' && rightValue.trim().length > 0
+  const hasConstant = typeof rightConstant === 'number' && Number.isFinite(rightConstant)
+  if (hasValue === hasConstant) return null
+  return {
+    left_value: record.left_value.trim(),
+    operator: record.operator as ConditionOperator,
+    right_value: hasValue ? rightValue as string : null,
+    right_constant: hasConstant ? rightConstant as number : null,
+  }
+}
+
+function parseConditions(value: unknown): ScreenCondition[] {
+  if (!Array.isArray(value)) return []
+  return value.map(parseCondition).filter((condition): condition is ScreenCondition => condition !== null)
+}
+
+function cloneCondition(condition: ScreenCondition): ScreenCondition {
+  return { ...condition }
+}
 
 export function loadSavedForm(): Partial<ScreenFormState> {
   if (typeof window === 'undefined') return {}
@@ -25,6 +65,7 @@ export function loadSavedForm(): Partial<ScreenFormState> {
     if (!parsed || typeof parsed !== 'object') return {}
     const safe: Partial<ScreenFormState> = {}
     if (parsed.mode === 'preset' || parsed.mode === 'custom') safe.mode = parsed.mode
+    if (parsed.ruleMode === 'signals' || parsed.ruleMode === 'conditions') safe.ruleMode = parsed.ruleMode
     if (Array.isArray(parsed.selectedSignals) && parsed.selectedSignals.every((value) => typeof value === 'string')) {
       safe.selectedSignals = parsed.selectedSignals as string[]
     }
@@ -52,6 +93,7 @@ export function loadSavedForm(): Partial<ScreenFormState> {
     if (typeof parsed.workers === 'number' && Number.isFinite(parsed.workers)) safe.workers = parsed.workers
     if (parsed.period === 'daily') safe.period = parsed.period
     if (typeof parsed.formulaText === 'string') safe.formulaText = parsed.formulaText
+    if (Array.isArray(parsed.conditions)) safe.conditions = parseConditions(parsed.conditions)
     if (parsed.formulaParameters && typeof parsed.formulaParameters === 'object') {
       const parameters = Object.fromEntries(
         Object.entries(parsed.formulaParameters).filter(([, value]) => typeof value === 'number' && Number.isFinite(value)),
@@ -98,13 +140,26 @@ export function validateScreenForm(
       }
     }
   }
-  if (form.selectedSignals.length === 0) {
+  const conditionCount = form.ruleMode === 'conditions'
+    ? form.conditions.length
+    : form.selectedSignals.length
+  if (form.ruleMode === 'conditions') {
+    if (form.conditions.length === 0) {
+      errors.conditions = '至少设置一条指标条件。'
+    }
+    form.conditions.forEach((condition, index) => {
+      if (!condition.left_value.trim()) errors[`condition-${index}`] = '请选择左侧指标。'
+      const hasValue = Boolean(condition.right_value?.trim())
+      const hasConstant = typeof condition.right_constant === 'number' && Number.isFinite(condition.right_constant)
+      if (hasValue === hasConstant) errors[`condition-${index}`] = '每条条件必须设置一个右值。'
+    })
+  } else if (form.selectedSignals.length === 0) {
     errors.selectedSignals = '至少选择一个选股条件。'
   }
   if (form.combineMode === 'at_least') {
     if (form.minimumMatches === null || !Number.isInteger(form.minimumMatches)) {
       errors.minimumMatches = '“至少满足 N 个”模式需要填写整数 N。'
-    } else if (form.minimumMatches < 1 || form.minimumMatches > form.selectedSignals.length) {
+    } else if (form.minimumMatches < 1 || form.minimumMatches > conditionCount) {
       errors.minimumMatches = 'N 必须在 1 和已选择条件数量之间。'
     }
   }
@@ -116,7 +171,7 @@ export function validateScreenForm(
 
 export function buildScanPayload(form: ScreenFormState): ScanPayload {
   return {
-    selected_signals: [...form.selectedSignals],
+    selected_signals: form.ruleMode === 'conditions' ? [] : [...form.selectedSignals],
     combine_mode: form.combineMode,
     minimum_matches: form.combineMode === 'at_least' ? form.minimumMatches : null,
     universe: form.universe,
@@ -125,9 +180,103 @@ export function buildScanPayload(form: ScreenFormState): ScanPayload {
     period: form.period,
     formula_text: form.mode === 'custom' ? form.formulaText.trim() || null : null,
     formula_parameters: form.mode === 'custom' ? { ...form.formulaParameters } : {},
+    ...(form.ruleMode === 'conditions'
+      ? { conditions: form.conditions.map(cloneCondition) }
+      : {}),
     ...(form.instrumentTypes.length > 0 ? { instrument_types: [...form.instrumentTypes] } : {}),
     ...(form.boards.length > 0 ? { boards: [...form.boards] } : {}),
   }
+}
+
+export function loadSavedConditionSets(): SavedConditionSet[] {
+  if (typeof window === 'undefined') return []
+  try {
+    const raw = window.localStorage.getItem(CONDITION_SETS_STORAGE_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw) as unknown
+    if (!Array.isArray(parsed)) return []
+    return parsed.flatMap((value): SavedConditionSet[] => {
+      if (!value || typeof value !== 'object') return []
+      const record = value as Record<string, unknown>
+      const conditions = parseConditions(record.conditions)
+      if (
+        typeof record.id !== 'string'
+        || typeof record.name !== 'string'
+        || (record.ruleMode !== 'signals' && record.ruleMode !== 'conditions')
+        || (record.mode !== 'preset' && record.mode !== 'custom')
+        || (record.combineMode !== 'all' && record.combineMode !== 'any' && record.combineMode !== 'at_least')
+        || !Array.isArray(record.selectedSignals)
+        || !record.selectedSignals.every((signal) => typeof signal === 'string')
+      ) return []
+      return [{
+        id: record.id,
+        name: record.name,
+        ruleMode: record.ruleMode as RuleMode,
+        selectedSignals: [...record.selectedSignals] as string[],
+        conditions,
+        combineMode: record.combineMode as CombineMode,
+        minimumMatches: typeof record.minimumMatches === 'number' ? record.minimumMatches : null,
+        mode: record.mode,
+        formulaText: typeof record.formulaText === 'string' ? record.formulaText : '',
+        formulaParameters: record.formulaParameters && typeof record.formulaParameters === 'object'
+          ? Object.fromEntries(
+            Object.entries(record.formulaParameters).filter(([, item]) => (
+              typeof item === 'number' && Number.isFinite(item)
+            )),
+          ) as Record<string, number>
+          : {},
+      }]
+    })
+  } catch {
+    return []
+  }
+}
+
+export function createSavedConditionSet(name: string, form: ScreenFormState): SavedConditionSet {
+  const id = typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `condition-set-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  return {
+    id,
+    name: name.trim(),
+    ruleMode: form.ruleMode,
+    selectedSignals: [...form.selectedSignals],
+    conditions: form.conditions.map(cloneCondition),
+    combineMode: form.combineMode,
+    minimumMatches: form.minimumMatches,
+    mode: form.mode,
+    formulaText: form.formulaText,
+    formulaParameters: { ...form.formulaParameters },
+  }
+}
+
+export function saveConditionSet(conditionSet: SavedConditionSet): SavedConditionSet[] {
+  const next = [
+    conditionSet,
+    ...loadSavedConditionSets().filter((item) => (
+      item.id !== conditionSet.id && item.name !== conditionSet.name
+    )),
+  ]
+  if (typeof window !== 'undefined') {
+    try {
+      window.localStorage.setItem(CONDITION_SETS_STORAGE_KEY, JSON.stringify(next))
+    } catch {
+      // Restricted storage should not block the current scan configuration.
+    }
+  }
+  return next
+}
+
+export function deleteConditionSet(id: string): SavedConditionSet[] {
+  const next = loadSavedConditionSets().filter((item) => item.id !== id)
+  if (typeof window !== 'undefined') {
+    try {
+      window.localStorage.setItem(CONDITION_SETS_STORAGE_KEY, JSON.stringify(next))
+    } catch {
+      // Restricted storage should not block the current scan configuration.
+    }
+  }
+  return next
 }
 
 export function filterKnownSignals(

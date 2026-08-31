@@ -96,6 +96,10 @@ class FormulaRegistry:
         formula_ids = {self.signal(signal_id).formula_id for signal_id in signal_ids}
         return tuple(definition for definition in self._definitions if definition.id in formula_ids)
 
+    def formulas_for_values(self, value_ids: tuple[str, ...]) -> tuple[FormulaDefinition, ...]:
+        formula_ids = {value_id.split(".", 1)[0] for value_id in value_ids}
+        return tuple(definition for definition in self._definitions if definition.id in formula_ids)
+
     def metadata(self) -> list[dict[str, object]]:
         return [
             {

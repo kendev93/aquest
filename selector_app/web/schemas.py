@@ -17,7 +17,7 @@ from selector_app.portfolio_backtest.models import (
     PortfolioBacktestConfig,
     PortfolioUniverse,
 )
-from selector_app.screening.models import ScanConfig
+from selector_app.screening.models import ScanConfig, ScreenCondition
 from selector_app.strategy_fitness.models import StrategyFitnessConfig
 
 
@@ -72,6 +72,34 @@ def validate_formula_values(formula_text: str | None, value_ids: list[str]) -> N
         raise ValueError(f"未知指标输出: {', '.join(invalid)}")
 
 
+def validate_formula_conditions(
+    formula_text: str | None, conditions: list[ScreenCondition]
+) -> None:
+    """Validate every numeric output referenced by a screening condition."""
+
+    if formula_text:
+        try:
+            parsed = parse_formula(formula_text)
+        except FormulaParseError as exc:
+            raise ValueError(str(exc)) from exc
+        available = {custom_output_id(name) for name in parsed.value_names}
+        invalid = [
+            value_id
+            for condition in conditions
+            for value_id in (condition.left_value, condition.right_value)
+            if value_id is not None and value_id not in available
+        ]
+    else:
+        invalid = [
+            value_id
+            for condition in conditions
+            for value_id in (condition.left_value, condition.right_value)
+            if value_id is not None and not FORMULA_REGISTRY.has_value(value_id)
+        ]
+    if invalid:
+        raise ValueError(f"未知指标输出: {', '.join(dict.fromkeys(invalid))}")
+
+
 def validate_instrument_scope(
     universe: str,
     instrument_types: list[InstrumentType] | None,
@@ -84,10 +112,42 @@ def validate_instrument_scope(
     )
 
 
+class ScreenConditionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    left_value: str = Field(min_length=1, max_length=128)
+    operator: Literal["gt", "gte", "lt", "lte", "eq", "neq", "cross_up", "cross_down"]
+    right_value: str | None = Field(default=None, max_length=128)
+    right_constant: float | None = None
+
+    @model_validator(mode="after")
+    def validate_right_operand(self) -> ScreenConditionRequest:
+        has_value = self.right_value is not None
+        has_constant = self.right_constant is not None
+        if has_value == has_constant:
+            raise ValueError("条件必须且只能设置一个右值")
+        if self.right_value is not None and not self.right_value.strip():
+            raise ValueError("条件右侧指标不能为空")
+        if self.right_constant is not None and (
+            isinstance(self.right_constant, bool) or not math.isfinite(self.right_constant)
+        ):
+            raise ValueError("条件常数必须是有限数字")
+        return self
+
+    def to_model(self) -> ScreenCondition:
+        return ScreenCondition(
+            left_value=self.left_value,
+            operator=self.operator,
+            right_value=self.right_value,
+            right_constant=self.right_constant,
+        )
+
+
 class FormulaScreenRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    selected_signals: list[str] = Field(min_length=1, max_length=32)
+    selected_signals: list[str] = Field(default_factory=list, max_length=32)
+    conditions: list[ScreenConditionRequest] = Field(default_factory=list, max_length=32)
     combine_mode: Literal["all", "any", "at_least"] = "at_least"
     minimum_matches: int | None = Field(default=None, ge=1, le=32)
     universe: Literal["all", "sh", "sz", "custom"] = "all"
@@ -102,19 +162,38 @@ class FormulaScreenRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_selection(self) -> FormulaScreenRequest:
+        if not self.selected_signals and not self.conditions:
+            raise ValueError("至少选择一个信号或设置一条指标条件")
+        if self.selected_signals and self.conditions:
+            raise ValueError("快捷信号和指标条件不能同时使用")
         validate_formula_signals(
             self.formula_text,
             self.selected_signals,
             self.formula_parameters,
         )
+        condition_models = [condition.to_model() for condition in self.conditions]
+        if condition_models:
+            validate_formula_conditions(self.formula_text, condition_models)
         validate_instrument_scope(self.universe, self.instrument_types, self.boards)
         if len(set(self.selected_signals)) != len(self.selected_signals):
             raise ValueError("选股信号不能重复")
+        condition_keys = [
+            (
+                condition.left_value,
+                condition.operator,
+                condition.right_value,
+                condition.right_constant,
+            )
+            for condition in self.conditions
+        ]
+        if len(set(condition_keys)) != len(condition_keys):
+            raise ValueError("指标条件不能重复")
+        condition_count = len(self.conditions) or len(self.selected_signals)
         if self.combine_mode == "at_least":
             if self.minimum_matches is None:
                 raise ValueError("至少满足 N 个模式必须设置 minimum_matches")
-            if self.minimum_matches > len(self.selected_signals):
-                raise ValueError("minimum_matches 不能大于已选择信号数量")
+            if self.minimum_matches > condition_count:
+                raise ValueError("minimum_matches 不能大于已选择条件数量")
         if self.universe == "custom" and not self.universe_file:
             raise ValueError("自定义股票范围必须设置 universe_file")
         return self
@@ -133,6 +212,7 @@ class FormulaScreenRequest(BaseModel):
             boards=tuple(self.boards or ()),
             formula_text=self.formula_text,
             formula_parameters=self.formula_parameters,
+            conditions=tuple(condition.to_model() for condition in self.conditions),
         )
 
 

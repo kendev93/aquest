@@ -8,21 +8,24 @@ from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
 
 from selector_app.formulas.common import validate_market_data
 from selector_app.formulas.custom import (
     ParsedFormula,
+    custom_output_id,
     evaluate_custom_formula,
     parse_formula,
 )
 from selector_app.formulas.registry import FORMULA_REGISTRY, FormulaRegistry
+from selector_app.formulas.types import FormulaResult
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter, MarketDataAdapter
 from selector_app.market_data.day_format import classify_board, classify_instrument
 from selector_app.market_data.models import StockRef
 from selector_app.market_data.store import DuckDbMarketDataStore
 
-from .models import ScanConfig, ScanReport, ScreenMatch
+from .models import ScanConfig, ScanReport, ScreenCondition, ScreenMatch
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +51,87 @@ class ScanOutcome:
     error_reason: str | None = None
 
 
+def _value_series(value_id: str, formula_results: Mapping[str, FormulaResult]) -> np.ndarray:
+    formula_id, separator, value_name = value_id.partition(".")
+    result = formula_results.get(formula_id)
+    if not separator or result is None:
+        raise ValueError(f"未知指标输出: {value_id}")
+    if value_name in result.values:
+        return np.asarray(result.values[value_name], dtype=float)
+    if formula_id == "custom":
+        for name, values in result.values.items():
+            if custom_output_id(name) == value_id:
+                return np.asarray(values, dtype=float)
+    raise ValueError(f"未知指标输出: {value_id}")
+
+
+def _condition_mask(
+    condition: ScreenCondition, formula_results: Mapping[str, FormulaResult]
+) -> np.ndarray:
+    left = _value_series(condition.left_value, formula_results)
+    if condition.right_value is not None:
+        right = _value_series(condition.right_value, formula_results)
+    else:
+        assert condition.right_constant is not None
+        right = np.full(len(left), float(condition.right_constant), dtype=float)
+    if len(left) != len(right):
+        raise ValueError("条件两侧指标的历史长度不一致")
+
+    valid = np.isfinite(left) & np.isfinite(right)
+    operator = condition.operator
+    if operator == "gt":
+        return valid & (left > right)
+    if operator == "gte":
+        return valid & (left >= right)
+    if operator == "lt":
+        return valid & (left < right)
+    if operator == "lte":
+        return valid & (left <= right)
+    equality = np.asarray(np.isclose(left, right, rtol=1e-9, atol=1e-12), dtype=bool)
+    if operator == "eq":
+        return valid & equality
+    if operator == "neq":
+        return valid & ~equality
+
+    result = np.zeros(len(left), dtype=bool)
+    if len(left) < 2:
+        return result
+    previous_valid = valid[:-1] & valid[1:]
+    if operator == "cross_up":
+        result[1:] = previous_valid & (left[:-1] <= right[:-1]) & (left[1:] > right[1:])
+    elif operator == "cross_down":
+        result[1:] = previous_valid & (left[:-1] >= right[:-1]) & (left[1:] < right[1:])
+    else:
+        raise ValueError(f"不支持的条件运算符: {operator}")
+    return result
+
+
+def _condition_formula_results(
+    frame: pd.DataFrame,
+    config: ScanConfig,
+    registry: FormulaRegistry,
+    parsed_formula: ParsedFormula | None,
+) -> dict[str, FormulaResult]:
+    if parsed_formula is not None:
+        return {
+            "custom": evaluate_custom_formula(
+                parsed_formula,
+                frame.copy(deep=True),
+                config.formula_parameters,
+            )
+        }
+    value_ids = tuple(
+        value_id
+        for condition in config.conditions
+        for value_id in (condition.left_value, condition.right_value)
+        if value_id is not None
+    )
+    return {
+        definition.id: definition.calculate(frame.copy(deep=True))
+        for definition in registry.formulas_for_values(value_ids)
+    }
+
+
 def _date_to_int(value: object) -> int:
     timestamp = pd.Timestamp(value)
     return int(timestamp.strftime("%Y%m%d"))
@@ -64,7 +148,20 @@ def _evaluate_frame(
         return ScanOutcome(skipped_reason="数据为空")
     validate_market_data(frame)
 
-    if parsed_formula is not None:
+    if config.conditions:
+        formula_results = _condition_formula_results(frame, config, registry, parsed_formula)
+        if any(not result.sufficient_data for result in formula_results.values()):
+            return ScanOutcome(skipped_reason="数据不足")
+        condition_masks = [
+            _condition_mask(condition, formula_results) for condition in config.conditions
+        ]
+        matched_ids = tuple(
+            f"condition_{index + 1}"
+            for index, mask in enumerate(condition_masks)
+            if len(mask) > 0 and bool(mask[-1])
+        )
+        matched_bools = [len(mask) > 0 and bool(mask[-1]) for mask in condition_masks]
+    elif parsed_formula is not None:
         formula_result = evaluate_custom_formula(
             parsed_formula,
             frame.copy(deep=True),
@@ -77,12 +174,13 @@ def _evaluate_frame(
             raise ValueError("选择的自定义输出不属于当前公式")
         if not formula_result.sufficient_data:
             return ScanOutcome(skipped_reason="数据不足")
-        matched_signals = tuple(
+        matched_ids = tuple(
             signal_id
             for signal_id in config.selected_signals
             if formula_result.last_signal_state[signal_id]
         )
         formula_results = {"custom": formula_result}
+        matched_bools = [signal_id in matched_ids for signal_id in config.selected_signals]
     else:
         results = {
             definition.id: definition.calculate(frame.copy(deep=True))
@@ -90,7 +188,7 @@ def _evaluate_frame(
         }
         if any(not result.sufficient_data for result in results.values()):
             return ScanOutcome(skipped_reason="数据不足")
-        matched_signals = tuple(
+        matched_ids = tuple(
             signal_id
             for signal_id in config.selected_signals
             if results[registry.signal(signal_id).formula_id].last_signal_state[
@@ -98,7 +196,7 @@ def _evaluate_frame(
             ]
         )
         formula_results = results
-    matched_bools = [signal_id in matched_signals for signal_id in config.selected_signals]
+        matched_bools = [signal_id in matched_ids for signal_id in config.selected_signals]
     if not combine_matches(matched_bools, config.combine_mode, config.minimum_matches):
         return ScanOutcome()
 
@@ -113,8 +211,8 @@ def _evaluate_frame(
             code=ref.code,
             signal_date=_date_to_int(frame["date"].iloc[-1]),
             last_close=last_close,
-            matched_signals=matched_signals,
-            match_count=len(matched_signals),
+            matched_signals=matched_ids,
+            match_count=len(matched_ids),
             indicator_values=indicator_values,
             instrument_type=getattr(ref, "instrument_type", "stock"),
             board=getattr(ref, "board", "main"),

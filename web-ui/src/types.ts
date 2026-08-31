@@ -9,6 +9,8 @@ export type PortfolioSellValueOperator = 'gte' | 'lte'
 export type PortfolioCompareOperator = 'gt' | 'gte' | 'lt' | 'lte'
 export type InstrumentType = 'stock' | 'fund' | 'index' | 'bond'
 export type InstrumentBoard = 'main' | 'star' | 'chinext' | 'b_share' | 'fund' | 'index' | 'bond'
+export type RuleMode = 'signals' | 'conditions'
+export type ConditionOperator = 'gt' | 'gte' | 'lt' | 'lte' | 'eq' | 'neq' | 'cross_up' | 'cross_down'
 
 export interface SignalDefinition {
   id: string
@@ -31,9 +33,15 @@ export interface IndicatorDefinition {
   values?: ValueDefinition[]
 }
 
+export interface ConditionOperatorDefinition {
+  value: ConditionOperator
+  label: string
+}
+
 export interface FormulaScreenMetadata {
   indicators: IndicatorDefinition[]
   combine_modes: { value: CombineMode; label: string }[]
+  condition_operators?: ConditionOperatorDefinition[]
   supported_markets: string[]
   supported_universe: { value: Universe; label: string }[]
   periods: { value: 'daily'; label: string }[]
@@ -65,7 +73,9 @@ export interface CustomFormulaMetadata {
 
 export interface ScreenFormState {
   mode: FormulaMode
+  ruleMode: RuleMode
   selectedSignals: string[]
+  conditions: ScreenCondition[]
   combineMode: CombineMode
   minimumMatches: number | null
   universe: Universe
@@ -78,8 +88,29 @@ export interface ScreenFormState {
   formulaParameters: Record<string, number>
 }
 
+export interface ScreenCondition {
+  left_value: string
+  operator: ConditionOperator
+  right_value: string | null
+  right_constant: number | null
+}
+
+export interface SavedConditionSet {
+  id: string
+  name: string
+  ruleMode: RuleMode
+  selectedSignals: string[]
+  conditions: ScreenCondition[]
+  combineMode: CombineMode
+  minimumMatches: number | null
+  mode: FormulaMode
+  formulaText: string
+  formulaParameters: Record<string, number>
+}
+
 export interface ScanPayload {
   selected_signals: string[]
+  conditions?: ScreenCondition[]
   combine_mode: CombineMode
   minimum_matches: number | null
   universe: Universe

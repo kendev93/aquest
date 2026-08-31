@@ -19,6 +19,10 @@ const metadata: FormulaScreenMetadata = {
         { id: 'indicator_three.prepare_rally', display_name: '准备拉升', description: 'VAR1 上穿 8' },
         { id: 'indicator_three.accumulation_zone', display_name: '建仓区', description: 'VARO7 < 10' },
       ],
+      values: [
+        { id: 'indicator_three.varo7', display_name: 'VARO7', description: 'VARO7 的数值输出' },
+        { id: 'indicator_three.var1', display_name: 'VAR1', description: 'VAR1 的数值输出' },
+      ],
     },
   ],
   combine_modes: [
@@ -44,6 +48,10 @@ describe('FormulaScreenPage', () => {
     vi.mocked(api.parseFormula).mockResolvedValue({
       parameters: [{ name: 'N', default: 5, minimum: 1, maximum: 10000, step: 1 }],
       signals: [{ id: 'custom.breakout', display_name: 'BREAKOUT', description: 'BREAKOUT 的最后一根 K 线输出不为 0' }],
+      values: [
+        { id: 'custom.breakout', display_name: 'BREAKOUT', description: 'BREAKOUT 的数值输出' },
+        { id: 'custom.baseline', display_name: 'BASELINE', description: 'BASELINE 的数值输出' },
+      ],
       minimum_bars: 6,
       warnings: [],
     })
@@ -98,6 +106,101 @@ describe('FormulaScreenPage', () => {
     expect(wrapper.find('[data-testid="advanced-settings"]').exists()).toBe(false)
     await wrapper.get('[data-testid="advanced-toggle"]').trigger('click')
     expect(wrapper.get('[data-testid="advanced-settings"]').text()).toContain('市场范围')
+  })
+
+  it('builds and submits a numeric indicator condition', async () => {
+    const wrapper = mount(FormulaScreenPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="rule-mode-conditions"]').trigger('click')
+    await wrapper.get('[data-testid="condition-left-0"]').setValue('indicator_three.varo7')
+    await wrapper.get('[data-testid="condition-operator-0"]').setValue('lt')
+    await wrapper.get('[data-testid="condition-right-type-0"]').setValue('constant')
+    await wrapper.get('[data-testid="condition-constant-0"]').setValue('10')
+    vi.mocked(api.getResults).mockResolvedValueOnce({
+      results: [{ market: 'SH', code: '600000', name: '浦发银行', signal_date: 20260824, last_close: 12.35, matched_signals: ['condition_1'], match_count: 1, indicator_values: { 'indicator_three.varo7': 2.2 } }],
+      meta: { total_candidates: 2, total_scanned: 2, total_signals: 1, errors: 0, skipped: 0, failure_reasons: {}, skip_reasons: {} },
+    })
+    await wrapper.get('[data-testid="screen-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(api.createJob).toHaveBeenCalledWith(expect.objectContaining({
+      selected_signals: [],
+      conditions: [{
+        left_value: 'indicator_three.varo7',
+        operator: 'lt',
+        right_value: null,
+        right_constant: 10,
+      }],
+    }))
+    expect(wrapper.get('[data-testid="results-table"]').text()).toContain('VARO7 小于 10')
+  })
+
+  it('keeps condition values valid when switching to a parsed custom formula', async () => {
+    const wrapper = mount(FormulaScreenPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="rule-mode-conditions"]').trigger('click')
+    await wrapper.get('[data-testid="mode-custom"]').trigger('click')
+    await wrapper.get('[data-testid="custom-formula"]').setValue('BREAKOUT:CROSS(C,REF(C,1));')
+    await wrapper.get('[data-testid="parse-formula"]').trigger('click')
+    await flushPromises()
+
+    expect((wrapper.get('[data-testid="condition-left-0"]').element as HTMLSelectElement).value).toBe('custom.breakout')
+    await wrapper.get('[data-testid="condition-right-type-0"]').setValue('value')
+    expect((wrapper.get('[data-testid="condition-right-value-0"]').element as HTMLSelectElement).value).toBe('custom.baseline')
+    await wrapper.get('[data-testid="screen-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(api.createJob).toHaveBeenCalledWith(expect.objectContaining({
+      formula_text: 'BREAKOUT:CROSS(C,REF(C,1));',
+      conditions: [{
+        left_value: 'custom.breakout',
+        operator: 'lt',
+        right_value: 'custom.baseline',
+        right_constant: null,
+      }],
+    }))
+  })
+
+  it('adds, switches, reloads, and deletes a saved indicator combination', async () => {
+    const wrapper = mount(FormulaScreenPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="rule-mode-conditions"]').trigger('click')
+    await wrapper.get('[data-testid="add-condition"]').trigger('click')
+    expect(wrapper.findAll('[data-testid^="condition-row-"]')).toHaveLength(2)
+    await wrapper.get('[data-testid="remove-condition-1"]').trigger('click')
+    expect(wrapper.findAll('[data-testid^="condition-row-"]')).toHaveLength(1)
+
+    await wrapper.get('[data-testid="rule-mode-signals"]').trigger('click')
+    expect(wrapper.find('[data-testid="condition-builder"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="rule-mode-conditions"]').trigger('click')
+    await wrapper.get('[data-testid="condition-set-name"]').setValue('主力进场低位')
+    await wrapper.get('[data-testid="save-condition-set"]').trigger('click')
+
+    const conditionSetSelect = wrapper.get('[data-testid="condition-set-select"]')
+    const savedOption = conditionSetSelect.findAll('option').find((option) => option.text() === '主力进场低位')
+    expect(savedOption).toBeDefined()
+    await conditionSetSelect.setValue('')
+    await conditionSetSelect.setValue(savedOption?.element.value ?? '')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="screen-message"]').text()).toContain('已加载指标组合：主力进场低位')
+
+    await wrapper.get('[data-testid="delete-condition-set"]').trigger('click')
+    expect(conditionSetSelect.text()).not.toContain('主力进场低位')
+  })
+
+  it('saves a named indicator combination for later use', async () => {
+    const wrapper = mount(FormulaScreenPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="rule-mode-conditions"]').trigger('click')
+    await wrapper.get('[data-testid="condition-set-name"]').setValue('主力进场低位')
+    await wrapper.get('[data-testid="save-condition-set"]').trigger('click')
+
+    expect(wrapper.get('[data-testid="screen-message"]').text()).toContain('已保存指标组合：主力进场低位')
+    expect(wrapper.get('[data-testid="condition-set-select"]').text()).toContain('主力进场低位')
   })
 
   it('validates a custom universe and an invalid minimum match count', async () => {

@@ -36,6 +36,16 @@ def metadata() -> dict[str, object]:
                 {"value": "any", "label": "任一满足 OR"},
                 {"value": "at_least", "label": "至少满足 N 个"},
             ],
+            "condition_operators": [
+                {"value": "gt", "label": "大于"},
+                {"value": "gte", "label": "大于等于"},
+                {"value": "lt", "label": "小于"},
+                {"value": "lte", "label": "小于等于"},
+                {"value": "eq", "label": "等于"},
+                {"value": "neq", "label": "不等于"},
+                {"value": "cross_up", "label": "上穿"},
+                {"value": "cross_down", "label": "下穿"},
+            ],
             "supported_markets": ["SH", "SZ"],
             "supported_universe": [
                 {"value": "all", "label": "沪深全部品种"},

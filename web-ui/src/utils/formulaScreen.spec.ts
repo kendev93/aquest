@@ -1,20 +1,26 @@
 import { describe, expect, it } from 'vitest'
 
-import type { ScreenFormState } from '../types'
+import type { ScreenCondition, ScreenFormState } from '../types'
 import {
   DEFAULT_PRESET_SIGNALS,
   buildScanPayload,
   combineModeLabel,
+  createSavedConditionSet,
+  deleteConditionSet,
   filterKnownSignals,
+  loadSavedConditionSets,
   loadSavedForm,
   resultsToCsv,
+  saveConditionSet,
   saveForm,
   validateScreenForm,
 } from './formulaScreen'
 
 const baseForm = (): ScreenFormState => ({
   mode: 'preset',
+  ruleMode: 'signals',
   selectedSignals: ['indicator_three.prepare_rally', 'indicator_three.accumulation_zone'],
+  conditions: [],
   combineMode: 'at_least',
   minimumMatches: 2,
   universe: 'all',
@@ -89,6 +95,35 @@ describe('formula screen form helpers', () => {
       instrument_types: ['stock'],
       boards: ['main', 'chinext'],
     })
+  })
+
+  it('builds numeric conditions and persists named condition sets locally', () => {
+    const condition: ScreenCondition = {
+      left_value: 'indicator_three.varo7',
+      operator: 'lt',
+      right_value: null,
+      right_constant: 10,
+    }
+    const form = {
+      ...baseForm(),
+      ruleMode: 'conditions' as const,
+      selectedSignals: [],
+      conditions: [condition],
+      minimumMatches: 1,
+    }
+
+    expect(buildScanPayload(form)).toMatchObject({
+      selected_signals: [],
+      conditions: [condition],
+    })
+    expect(validateScreenForm(form)).toEqual({})
+
+    const saved = createSavedConditionSet('主力进场低位', form)
+    saveConditionSet(saved)
+    expect(loadSavedConditionSets()).toEqual([saved])
+
+    deleteConditionSet(saved.id)
+    expect(loadSavedConditionSets()).toEqual([])
   })
 
   it('filters persisted signal ids that are no longer in metadata', () => {
