@@ -75,7 +75,7 @@ def test_combine_modes_and_minimum_bounds() -> None:
     assert combine_matches([True, False, False], "at_least", 2) is False
 
 
-def test_engine_scans_multiple_stocks_and_keeps_full_result_fields(tmp_path: Path) -> None:
+def test_engine_scans_multiple_stocks_and_keeps_user_facing_result_fields(tmp_path: Path) -> None:
     refs = [
         StockRef(
             market="SH",
@@ -100,7 +100,13 @@ def test_engine_scans_multiple_stocks_and_keeps_full_result_fields(tmp_path: Pat
     assert report.results[0].name == "浦发银行"
     assert report.results[0].matched_signals == ("indicator_three.accumulation_zone",)
     assert report.results[0].match_count == 1
-    assert "indicator_three.varo7" in report.results[0].indicator_values
+    assert set(report.results[0].indicator_values) == {
+        "indicator_three.var1",
+        "indicator_three.var2",
+        "indicator_three.prepare_rally",
+        "indicator_three.suppress_main",
+    }
+    assert "indicator_three.varo7" not in report.results[0].indicator_values
 
 
 def test_engine_continues_after_one_stock_failure_and_reports_reason(tmp_path: Path) -> None:

@@ -41,7 +41,7 @@
 - AND、OR、至少满足 N 个；
 - 沪深全部可识别品种、仅上海、仅深圳、自定义品种列表；
 - 导入、同步、公式选股、组合回测和策略适配均可按市场、证券类型和板块配置范围；不勾选类型或板块表示不限制，两个维度同时选择时取交集；
-- 扫描结果展示标的中文名；名称由在线证券列表补齐，尚未同步名称时保留代码和占位符；
+- 扫描结果展示标的中文名；名称由在线证券列表补齐，尚未同步名称时保留代码和占位符；内置指标值只输出上述用户可选指标，自定义公式输出全部命名值；
 - 支持股票、B 股、ETF/基金、指数和债券，并按品种使用对应的原始价格/成交量系数；
 - 后台任务、进度、失败/跳过摘要、结果 JSON/CSV 导出；
 - 单股票公式回测：历史区间、买卖信号、全仓/固定股数、佣金/印花税/滑点、成交记录、净值曲线和绩效指标；
@@ -69,7 +69,7 @@ python -m pip install -e ".[dev]"
 启动后端：
 
 ```bash
-uvicorn selector_app.web.app:app --reload --host 127.0.0.1 --port 8000
+uvicorn selector_app.web.app:app --reload --host 127.0.0.1 --port 8123
 # 或：indicator-lab --reload
 ```
 
@@ -81,7 +81,7 @@ npm install
 npm run dev
 ```
 
-浏览器打开 <http://127.0.0.1:5173/indicator-lab>。单股回测页面是 <http://127.0.0.1:5173/backtest>，动态组合回测页面是 <http://127.0.0.1:5173/portfolio-backtest>，策略适配性页面是 <http://127.0.0.1:5173/strategy-fitness>，本地行情页面是 <http://127.0.0.1:5173/market-data>；Vite 会把 `/api` 请求代理到 `127.0.0.1:8000`。旧的 `/formula-screen` 地址仍可访问，但不再作为主入口。
+浏览器打开 <http://127.0.0.1:5173/indicator-lab>。单股回测页面是 <http://127.0.0.1:5173/backtest>，动态组合回测页面是 <http://127.0.0.1:5173/portfolio-backtest>，策略适配性页面是 <http://127.0.0.1:5173/strategy-fitness>，本地行情页面是 <http://127.0.0.1:5173/market-data>；Vite 会把 `/api` 请求代理到 `127.0.0.1:8123`。旧的 `/formula-screen` 地址仍可访问，但不再作为主入口。
 
 ## Docker Compose 启动
 

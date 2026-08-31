@@ -14,9 +14,9 @@ services:
         source: market_data
         target: /data/market
     expose:
-      - "8000"
+      - "8123"
     ports:
-      - "127.0.0.1:${API_PORT:-8000}:8000"
+      - "127.0.0.1:${API_PORT:-8123}:8123"
     restart: unless-stopped
 
   frontend:

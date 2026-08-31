@@ -159,6 +159,32 @@ def _date_to_int(value: object) -> int:
     return int(timestamp.strftime("%Y%m%d"))
 
 
+def _visible_indicator_values(
+    formula_results: Mapping[str, FormulaResult],
+    registry: FormulaRegistry,
+) -> dict[str, float | None]:
+    """Return only the stable, user-facing outputs in a scan result.
+
+    Built-in formulas keep their intermediate arrays in ``FormulaResult`` so
+    conditions and future formula changes can reuse them.  They are not part
+    of the result display contract, though: the registry's selectable output
+    list is the single source of truth for what the UI and exports expose.
+    Custom formulas have no built-in whitelist, so all named custom outputs
+    remain visible.
+    """
+
+    visible: dict[str, float | None] = {}
+    for formula_id, result in formula_results.items():
+        if formula_id == "custom":
+            names = tuple(result.last_indicator_values)
+        else:
+            names = registry.formula(formula_id).selectable_value_names
+        for name in names:
+            if name in result.last_indicator_values:
+                visible[f"{formula_id}.{name}"] = result.last_indicator_values[name]
+    return visible
+
+
 def _evaluate_frame(
     ref: StockRef,
     frame: pd.DataFrame,
@@ -251,10 +277,7 @@ def _evaluate_frame(
     if not combine_matches(matched_bools, config.combine_mode, config.minimum_matches):
         return ScanOutcome()
 
-    indicator_values: dict[str, float | None] = {}
-    for formula_id, result in formula_results.items():
-        for name, value in result.last_indicator_values.items():
-            indicator_values[f"{formula_id}.{name}"] = value
+    indicator_values = _visible_indicator_values(formula_results, registry)
     last_close = float(frame["close"].iloc[-1])
     return ScanOutcome(
         result=ScreenMatch(

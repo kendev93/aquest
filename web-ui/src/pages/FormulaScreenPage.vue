@@ -698,7 +698,7 @@ watch(() => form.formulaText, (value) => {
               <span v-if="syncLoading" class="spinner sync-spinner" aria-hidden="true"></span>
               {{ syncLoading ? '同步中…' : '同步最新行情' }}
             </button>
-            <p class="sync-helper">先增量导入本地 vipdoc，再从服务器补充最新已完成日线，统一写入本地 DuckDB。</p>
+            <p class="sync-helper">先增量导入本地 vipdoc，再从服务器补充最新已完成日线，并按 TDX 证券列表补齐中文名，统一写入本地 DuckDB。</p>
             <div v-if="syncLoading || syncJob" class="sync-progress" data-testid="sync-progress">
               <div class="sync-progress-heading"><span>{{ syncLoading ? '行情同步进度' : '最近一次同步' }}</span><strong>{{ syncProgressPercent }}%</strong></div>
               <div class="progress-track sync-progress-track"><span :style="{ width: `${syncProgressPercent}%` }"></span></div>
@@ -737,7 +737,7 @@ watch(() => form.formulaText, (value) => {
                 <tr v-for="result in results" :key="`${result.market}-${result.code}`">
                   <td><span class="market-pill" :class="result.market.toLowerCase()">{{ result.market }}</span></td>
                   <td><strong class="code">{{ result.code }}</strong><small v-if="result.instrument_type" class="muted-code">{{ result.instrument_type }}</small></td>
-                  <td class="instrument-name">{{ result.name || '—' }}</td>
+                  <td class="instrument-name">{{ result.name || '未同步名称' }}</td>
                   <td class="muted-code">{{ result.signal_date }}</td>
                   <td><strong>{{ result.last_close.toFixed(2) }}</strong></td>
                   <td><div class="signal-tags"><span v-for="signal in result.matched_signals" :key="signal" class="signal-tag">{{ resultLabel(signal) }}</span><small>{{ result.match_count }} 条</small></div></td>
