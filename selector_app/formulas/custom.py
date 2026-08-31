@@ -219,12 +219,8 @@ def evaluate_custom_formula(
     missing = [column for column in REQUIRED_BAR_COLUMNS if column not in frame.columns]
     if missing:
         raise ValueError(f"行情数据缺少字段: {', '.join(missing)}")
-    parameters = _parameter_values(parsed, parameter_values or {})
-    required_bars = _minimum_bars(
-        parsed.statements,
-        parameters,
-        parsed.minimum_bars,
-    )
+    parameters = resolve_formula_parameters(parsed, parameter_values)
+    required_bars = required_bars_for_parameters(parsed, parameters)
     length = len(frame)
     env: dict[str, object] = {
         "C": _column(frame, "close"),
@@ -264,6 +260,24 @@ def evaluate_custom_formula(
         values=values,
         signals=signals,
     )
+
+
+def resolve_formula_parameters(
+    parsed: ParsedFormula,
+    overrides: Mapping[str, float] | None = None,
+) -> dict[str, float]:
+    """Validate overrides and return the complete parameter set in formula order."""
+
+    return _parameter_values(parsed, overrides or {})
+
+
+def required_bars_for_parameters(
+    parsed: ParsedFormula,
+    parameters: Mapping[str, float],
+) -> int:
+    """Return the causal warm-up length for one resolved parameter set."""
+
+    return _minimum_bars(parsed.statements, parameters, parsed.minimum_bars)
 
 
 def _strip_comments(source: str) -> str:

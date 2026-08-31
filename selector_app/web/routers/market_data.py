@@ -13,6 +13,7 @@ from fastapi import Path as PathParameter
 from fastapi.responses import JSONResponse
 
 from selector_app.adapters.market_sync import MarketSyncConfig, MarketSyncReport, ProgressCallback
+from selector_app.indicators.cache import IndicatorCache
 from selector_app.indicators.precompute import IndicatorPrecomputeService
 from selector_app.market_data.day_importer import ProgressCallback as LocalImportProgressCallback
 from selector_app.market_data.models import (
@@ -101,6 +102,10 @@ def _precomputer(request: Request) -> IndicatorPrecomputeService:
     return cast(IndicatorPrecomputeService, request.app.state.indicator_precompute_service)
 
 
+def _indicator_cache(request: Request) -> IndicatorCache:
+    return cast(IndicatorCache, request.app.state.indicator_cache)
+
+
 def _resolved_vipdoc_path(vipdoc_path: str | None) -> str:
     return vipdoc_path or os.getenv("SELECTOR_VIPDOC_PATH") or "/data/vipdoc"
 
@@ -163,6 +168,54 @@ def _combined_result(
     }
 
 
+@router.get("/indicator-cache", response_model=None)
+def indicator_cache_status(request: Request) -> dict[str, object] | JSONResponse:
+    try:
+        return {"data": _indicator_cache(request).status()}
+    except (OSError, MarketDataStoreError, duckdb.Error) as exc:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "error": {
+                    "code": "indicator_cache_error",
+                    "message": _storage_error_message(exc),
+                }
+            },
+        )
+
+
+@router.post(
+    "/indicator-cache/precompute",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=None,
+)
+def create_indicator_precompute_job(
+    payload: MarketSyncRequest,
+    request: Request,
+) -> JSONResponse:
+    def run_precompute(progress: Callable[[int, int], None]) -> dict[str, object]:
+        try:
+            report = _precomputer(request).run(
+                vipdoc_path=_resolved_vipdoc_path(payload.vipdoc_path),
+                universe=payload.universe,
+                instrument_types=tuple(payload.instrument_types or ()),
+                boards=tuple(payload.boards or ()),
+                progress_callback=progress,
+            )
+        except (OSError, ValueError, MarketDataStoreError, duckdb.Error) as exc:
+            raise TaskUserError(_storage_error_message(exc)) from exc
+        return report.to_dict()
+
+    try:
+        job_id = _runner(request).submit_callable(run_precompute, description="指标预计算")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail="任务执行器暂不可用") from exc
+    return JSONResponse(
+        status_code=status.HTTP_202_ACCEPTED,
+        content={"data": {"job_id": job_id, "status": "queued"}},
+    )
+
+
 @router.post("/import-local", status_code=status.HTTP_202_ACCEPTED)
 def create_local_import(
     payload: LocalMarketImportRequest,
@@ -214,7 +267,12 @@ def create_local_import(
 @router.get("/jobs/{job_id}")
 def market_data_job_status(job_id: str, request: Request) -> dict[str, object]:
     state = _runner(request).get(job_id)
-    if state is None or state.description not in {"本地行情导入", "本地行情自动导入", "行情同步"}:
+    if state is None or state.description not in {
+        "本地行情导入",
+        "本地行情自动导入",
+        "行情同步",
+        "指标预计算",
+    }:
         raise HTTPException(status_code=404, detail="行情任务不存在或已过期")
     return {"data": state.snapshot()}
 

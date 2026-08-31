@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import io
-from collections import OrderedDict
-from collections.abc import Iterable
+import json
+import time
+from collections import OrderedDict, deque
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date
 from threading import RLock
@@ -14,6 +16,12 @@ from typing import cast
 import numpy as np
 import pandas as pd
 
+from selector_app.formulas.custom import (
+    ParsedFormula,
+    evaluate_custom_formula,
+    required_bars_for_parameters,
+    resolve_formula_parameters,
+)
 from selector_app.formulas.registry import FORMULA_REGISTRY, FormulaDefinition, FormulaRegistry
 from selector_app.formulas.types import FormulaResult
 from selector_app.market_data.store import DuckDbMarketDataStore
@@ -23,6 +31,7 @@ _DEFAULT_PRICE_BASIS = "raw"
 _FINGERPRINT_COLUMNS = ("date", "open", "high", "low", "close", "volume", "amount")
 _OPTIONAL_FINGERPRINT_COLUMNS = ("bar_status", "price_basis")
 _MAX_CACHE_BLOB_BYTES = 64 * 1024 * 1024
+_CUSTOM_ENGINE_VERSION = "1"
 
 
 @dataclass(frozen=True)
@@ -33,6 +42,18 @@ class _CacheKey:
     price_basis: str
     formula_id: str
     formula_version: str
+    data_fingerprint: str
+
+
+@dataclass(frozen=True)
+class _CustomCacheKey:
+    market: str
+    code: str
+    timeframe: str
+    price_basis: str
+    formula_hash: str
+    parameter_hash: str
+    engine_version: str
     data_fingerprint: str
 
 
@@ -134,15 +155,212 @@ class IndicatorCache:
             raise ValueError("指标缓存内存条目上限必须大于 0")
         self._store = store
         self._registry = registry or FORMULA_REGISTRY
-        self._memory: OrderedDict[_CacheKey, FormulaResult] = OrderedDict()
+        self._memory: OrderedDict[_CacheKey | _CustomCacheKey, FormulaResult] = OrderedDict()
         self._max_memory_entries = max_memory_entries
         self._lock = RLock()
         self._hits = 0
         self._misses = 0
         self._persistent_hits = 0
         self._computed = 0
+        self._compute_time_ms = 0.0
+        self._persistent_read_time_ms = 0.0
+        self._persistent_write_time_ms = 0.0
+        self._latency_samples: deque[float] = deque(maxlen=512)
+
+    def get_or_compute_custom(
+        self,
+        frame: pd.DataFrame,
+        parsed: ParsedFormula,
+        parameter_values: Mapping[str, float] | None,
+        *,
+        market: str = "",
+        code: str = "",
+        timeframe: str = _TIMEFRAME,
+    ) -> dict[str, FormulaResult]:
+        started = time.perf_counter()
+        try:
+            return self._get_or_compute_custom(
+                frame,
+                parsed,
+                parameter_values,
+                market=market,
+                code=code,
+                timeframe=timeframe,
+            )
+        finally:
+            self._record_latency(started)
+
+    def _get_or_compute_custom(
+        self,
+        frame: pd.DataFrame,
+        parsed: ParsedFormula,
+        parameter_values: Mapping[str, float] | None,
+        *,
+        market: str = "",
+        code: str = "",
+        timeframe: str = _TIMEFRAME,
+    ) -> dict[str, FormulaResult]:
+        """Load or calculate a custom formula for one resolved parameter set."""
+
+        parameters = resolve_formula_parameters(parsed, parameter_values)
+        fingerprint = frame_fingerprint(frame)
+        normalized_market = market.strip().upper()
+        normalized_code = code.strip()
+        price_basis = _price_basis(frame)
+        start, end = _date_bounds(frame)
+        parameter_json = json.dumps(
+            parameters,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        key = _CustomCacheKey(
+            market=normalized_market,
+            code=normalized_code,
+            timeframe=timeframe,
+            price_basis=price_basis,
+            formula_hash=_formula_hash(parsed),
+            parameter_hash=hashlib.sha256(parameter_json.encode("utf-8")).hexdigest(),
+            engine_version=_CUSTOM_ENGINE_VERSION,
+            data_fingerprint=fingerprint,
+        )
+        result = self._memory_get(key)
+        if result is not None:
+            return {"custom": result}
+
+        row = self._persistent_custom_get(key)
+        result = self._decode_custom_persistent(row, parsed, parameters, len(frame))
+        if result is not None:
+            self._memory_put(key, result)
+            with self._lock:
+                self._hits += 1
+            return {"custom": result}
+
+        with self._lock:
+            self._misses += 1
+        started = time.perf_counter()
+        result = evaluate_custom_formula(parsed, frame.copy(deep=True), parameters)
+        self._record_phase("_compute_time_ms", started)
+        with self._lock:
+            self._computed += 1
+        self._memory_put(key, result)
+        self._persistent_put_custom(key, parsed, parameter_json, result, start, end)
+        return {"custom": result}
+
+    def preload(
+        self,
+        frames: Mapping[tuple[str, str], pd.DataFrame],
+        formula_ids: Iterable[str],
+        *,
+        timeframe: str = _TIMEFRAME,
+    ) -> int:
+        """Load many existing built-in cache rows with one persistent read."""
+
+        requested = tuple(dict.fromkeys(formula_ids))
+        if not requested or not frames:
+            return 0
+        definitions = {formula_id: self._registry.formula(formula_id) for formula_id in requested}
+        pending: list[tuple[_CacheKey, FormulaDefinition]] = []
+        for (market, code), frame in frames.items():
+            fingerprint = frame_fingerprint(frame)
+            price_basis = _price_basis(frame)
+            for formula_id in requested:
+                key = _CacheKey(
+                    market=str(market).strip().upper(),
+                    code=str(code).strip(),
+                    timeframe=timeframe,
+                    price_basis=price_basis,
+                    formula_id=formula_id,
+                    formula_version=definitions[formula_id].cache_version,
+                    data_fingerprint=fingerprint,
+                )
+                if self._memory_get(key) is None:
+                    pending.append((key, definitions[formula_id]))
+        if self._store is None or not pending:
+            return 0
+        try:
+            started = time.perf_counter()
+            try:
+                rows = self._store.read_indicator_caches_batch(
+                    [
+                        {
+                            "market": key.market,
+                            "code": key.code,
+                            "timeframe": key.timeframe,
+                            "price_basis": key.price_basis,
+                            "formula_id": key.formula_id,
+                            "formula_version": key.formula_version,
+                            "data_fingerprint": key.data_fingerprint,
+                        }
+                        for key, _ in pending
+                    ]
+                )
+            finally:
+                self._record_phase("_persistent_read_time_ms", started)
+        except RuntimeError:
+            return 0
+        row_by_key = {
+            (
+                str(row["market"]),
+                str(row["code"]),
+                str(row["timeframe"]),
+                str(row["price_basis"]),
+                str(row["formula_id"]),
+                str(row["formula_version"]),
+                str(row["data_fingerprint"]),
+            ): row
+            for row in rows
+        }
+        loaded = 0
+        for key, definition in pending:
+            row = row_by_key.get(
+                (
+                    key.market,
+                    key.code,
+                    key.timeframe,
+                    key.price_basis,
+                    key.formula_id,
+                    key.formula_version,
+                    key.data_fingerprint,
+                )
+            )
+            result = (
+                self._decode_persistent(row, definition, int(cast(int, row["data_length"])))
+                if row
+                else None
+            )
+            if result is None:
+                continue
+            self._memory_put(key, result)
+            with self._lock:
+                self._hits += 1
+                self._persistent_hits += 1
+            loaded += 1
+        return loaded
 
     def get_or_compute(
+        self,
+        frame: pd.DataFrame,
+        formula_ids: Iterable[str],
+        *,
+        market: str = "",
+        code: str = "",
+        timeframe: str = _TIMEFRAME,
+    ) -> dict[str, FormulaResult]:
+        started = time.perf_counter()
+        try:
+            return self._get_or_compute(
+                frame,
+                formula_ids,
+                market=market,
+                code=code,
+                timeframe=timeframe,
+            )
+        finally:
+            self._record_latency(started)
+
+    def _get_or_compute(
         self,
         frame: pd.DataFrame,
         formula_ids: Iterable[str],
@@ -206,7 +424,9 @@ class IndicatorCache:
         for formula_id in to_compute:
             key = keys[formula_id]
             definition = definitions[formula_id]
+            started = time.perf_counter()
             result = definition.calculate(frame.copy(deep=True))
+            self._record_phase("_compute_time_ms", started)
             with self._lock:
                 self._computed += 1
             self._memory_put(key, result)
@@ -220,6 +440,9 @@ class IndicatorCache:
 
         with self._lock:
             lookups = self._hits + self._misses
+            samples = sorted(self._latency_samples)
+            p50 = _percentile(samples, 0.50)
+            p95 = _percentile(samples, 0.95)
             return {
                 "lookups": lookups,
                 "hits": self._hits,
@@ -227,9 +450,22 @@ class IndicatorCache:
                 "persistent_hits": self._persistent_hits,
                 "computed": self._computed,
                 "hit_rate": self._hits / lookups if lookups else 0.0,
+                "p50_ms": p50,
+                "p95_ms": p95,
+                "compute_time_ms": self._compute_time_ms,
+                "persistent_read_time_ms": self._persistent_read_time_ms,
+                "persistent_write_time_ms": self._persistent_write_time_ms,
             }
 
-    def _memory_get(self, key: _CacheKey) -> FormulaResult | None:
+    def status(self) -> dict[str, object]:
+        """Return memory counters plus persistent cache size metadata."""
+
+        with self._lock:
+            memory_entries = len(self._memory)
+        persistent = self._store.indicator_cache_status() if self._store is not None else {}
+        return {**self.metrics(), "memory_entries": memory_entries, "persistent": persistent}
+
+    def _memory_get(self, key: _CacheKey | _CustomCacheKey) -> FormulaResult | None:
         with self._lock:
             result = self._memory.get(key)
             if result is not None:
@@ -237,7 +473,7 @@ class IndicatorCache:
                 self._hits += 1
             return result
 
-    def _memory_put(self, key: _CacheKey, result: FormulaResult) -> None:
+    def _memory_put(self, key: _CacheKey | _CustomCacheKey, result: FormulaResult) -> None:
         with self._lock:
             self._memory[key] = result
             self._memory.move_to_end(key)
@@ -252,18 +488,43 @@ class IndicatorCache:
             return {}
         first = next(iter(keys.values()))
         try:
-            return self._store.read_indicator_caches(
-                market=first.market,
-                code=first.code,
-                timeframe=first.timeframe,
-                price_basis=first.price_basis,
-                data_fingerprint=first.data_fingerprint,
-                formula_versions={
-                    formula_id: key.formula_version for formula_id, key in keys.items()
-                },
-            )
+            started = time.perf_counter()
+            try:
+                return self._store.read_indicator_caches(
+                    market=first.market,
+                    code=first.code,
+                    timeframe=first.timeframe,
+                    price_basis=first.price_basis,
+                    data_fingerprint=first.data_fingerprint,
+                    formula_versions={
+                        formula_id: key.formula_version for formula_id, key in keys.items()
+                    },
+                )
+            finally:
+                self._record_phase("_persistent_read_time_ms", started)
         except RuntimeError:
             return {}
+
+    def _persistent_custom_get(self, key: _CustomCacheKey) -> dict[str, object] | None:
+        if self._store is None or not key.market or not key.code:
+            return None
+        try:
+            started = time.perf_counter()
+            try:
+                return self._store.read_custom_indicator_cache(
+                    market=key.market,
+                    code=key.code,
+                    timeframe=key.timeframe,
+                    price_basis=key.price_basis,
+                    formula_hash=key.formula_hash,
+                    parameter_hash=key.parameter_hash,
+                    engine_version=key.engine_version,
+                    data_fingerprint=key.data_fingerprint,
+                )
+            finally:
+                self._record_phase("_persistent_read_time_ms", started)
+        except RuntimeError:
+            return None
 
     def _decode_persistent(
         self,
@@ -340,8 +601,137 @@ class IndicatorCache:
             first = pending[0]
             if not first["market"] or not first["code"]:
                 return
-            self._store.write_indicator_caches(pending)
+            started = time.perf_counter()
+            try:
+                self._store.write_indicator_caches(pending)
+            finally:
+                self._record_phase("_persistent_write_time_ms", started)
         except RuntimeError:
             # A read-only store can still serve correct results; persistence is
             # an optimization and must not make a backtest fail.
             return
+
+    def _decode_custom_persistent(
+        self,
+        row: dict[str, object] | None,
+        parsed: ParsedFormula,
+        parameters: dict[str, float],
+        data_length: int,
+    ) -> FormulaResult | None:
+        if row is None or int(cast(int, row["data_length"])) != data_length:
+            return None
+        try:
+            value_names = _json_names(row["value_names_json"])
+            signal_names = _json_names(row["signal_names_json"])
+            expected_signals = tuple(signal.id for signal in parsed.signals)
+            if value_names != parsed.value_names or signal_names != expected_signals:
+                return None
+            values = _deserialize_arrays(
+                row["values_blob"],
+                value_names,
+                dtype=float,
+                data_length=data_length,
+            )
+            signals = _deserialize_arrays(
+                row["signals_blob"],
+                signal_names,
+                dtype=bool,
+                data_length=data_length,
+            )
+            minimum_bars = int(cast(int, row["minimum_bars"]))
+            recommended_bars = int(cast(int, row["recommended_bars"]))
+            if minimum_bars != required_bars_for_parameters(parsed, parameters):
+                return None
+            return FormulaResult.build(
+                formula_id="custom",
+                display_name="自定义公式",
+                minimum_bars=minimum_bars,
+                recommended_bars=recommended_bars,
+                data_length=data_length,
+                values=values,
+                signals=signals,
+            )
+        except (AttributeError, KeyError, TypeError, ValueError):
+            return None
+
+    def _persistent_put_custom(
+        self,
+        key: _CustomCacheKey,
+        parsed: ParsedFormula,
+        parameter_json: str,
+        result: FormulaResult,
+        start: date | None,
+        end: date | None,
+    ) -> None:
+        if self._store is None or not key.market or not key.code or not result.sufficient_data:
+            return
+        values = {name: np.asarray(value) for name, value in result.values.items()}
+        signals = {name: np.asarray(signal) for name, signal in result.signals.items()}
+        try:
+            started = time.perf_counter()
+            try:
+                self._store.write_custom_indicator_cache(
+                    market=key.market,
+                    code=key.code,
+                    timeframe=key.timeframe,
+                    price_basis=key.price_basis,
+                    formula_hash=key.formula_hash,
+                    parameter_hash=key.parameter_hash,
+                    engine_version=key.engine_version,
+                    parameter_json=parameter_json,
+                    value_names_json=json.dumps(
+                        list(parsed.value_names), ensure_ascii=False, separators=(",", ":")
+                    ),
+                    signal_names_json=json.dumps(
+                        [signal.id for signal in parsed.signals],
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
+                    data_fingerprint=key.data_fingerprint,
+                    data_start=start,
+                    data_end=end,
+                    data_length=result.data_length,
+                    minimum_bars=result.minimum_bars,
+                    recommended_bars=result.recommended_bars,
+                    values_blob=_serialize_arrays(values, parsed.value_names, dtype=float),
+                    signals_blob=_serialize_arrays(
+                        signals,
+                        tuple(signal.id for signal in parsed.signals),
+                        dtype=bool,
+                    ),
+                )
+            finally:
+                self._record_phase("_persistent_write_time_ms", started)
+        except RuntimeError:
+            return
+
+    def _record_phase(self, attribute: str, started: float) -> None:
+        elapsed = (time.perf_counter() - started) * 1000
+        with self._lock:
+            setattr(self, attribute, getattr(self, attribute) + elapsed)
+
+    def _record_latency(self, started: float) -> None:
+        elapsed = (time.perf_counter() - started) * 1000
+        with self._lock:
+            self._latency_samples.append(elapsed)
+
+
+def _formula_hash(parsed: ParsedFormula) -> str:
+    source = parsed.source.strip().replace("\r\n", "\n")
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
+def _json_names(value: object) -> tuple[str, ...]:
+    if not isinstance(value, str):
+        raise ValueError("指标缓存名称元数据无效")
+    parsed = json.loads(value)
+    if not isinstance(parsed, list) or not all(isinstance(name, str) for name in parsed):
+        raise ValueError("指标缓存名称元数据无效")
+    return tuple(parsed)
+
+
+def _percentile(samples: list[float], quantile: float) -> float:
+    if not samples:
+        return 0.0
+    index = min(len(samples) - 1, int((len(samples) - 1) * quantile))
+    return float(samples[index])

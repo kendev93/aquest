@@ -119,10 +119,20 @@ def _condition_formula_results(
 ) -> dict[str, FormulaResult]:
     if parsed_formula is not None:
         return {
-            "custom": evaluate_custom_formula(
-                parsed_formula,
-                frame.copy(deep=True),
-                config.formula_parameters,
+            "custom": (
+                indicator_cache.get_or_compute_custom(
+                    frame,
+                    parsed_formula,
+                    config.formula_parameters,
+                    market=market,
+                    code=code,
+                )["custom"]
+                if indicator_cache is not None
+                else evaluate_custom_formula(
+                    parsed_formula,
+                    frame.copy(deep=True),
+                    config.formula_parameters,
+                )
             )
         }
     value_ids = tuple(
@@ -183,10 +193,20 @@ def _evaluate_frame(
         )
         matched_bools = [len(mask) > 0 and bool(mask[-1]) for mask in condition_masks]
     elif parsed_formula is not None:
-        formula_result = evaluate_custom_formula(
-            parsed_formula,
-            frame.copy(deep=True),
-            config.formula_parameters,
+        formula_result = (
+            indicator_cache.get_or_compute_custom(
+                frame,
+                parsed_formula,
+                config.formula_parameters,
+                market=ref.market,
+                code=ref.code,
+            )["custom"]
+            if indicator_cache is not None
+            else evaluate_custom_formula(
+                parsed_formula,
+                frame.copy(deep=True),
+                config.formula_parameters,
+            )
         )
         if any(
             signal_id not in formula_result.last_signal_state

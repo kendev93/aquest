@@ -7,8 +7,10 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from selector_app.adapters.local_day_adapter import StockRef
 from selector_app.backtest.models import BacktestConfig
 from selector_app.backtest.service import BacktestService
+from selector_app.formulas.custom import evaluate_custom_formula, parse_formula
 from selector_app.formulas.registry import FORMULA_REGISTRY, FormulaRegistry
 from selector_app.indicators.cache import IndicatorCache, frame_fingerprint
 from selector_app.indicators.precompute import IndicatorPrecomputeService
@@ -209,9 +211,10 @@ def test_backtest_and_portfolio_reuse_the_same_persistent_result(tmp_path: Path)
         initial_cash=100_000.0,
     )
     portfolio = PortfolioBacktestService(adapter=adapter, registry=registry, indicator_cache=cache)
-    portfolio.run(portfolio_config)
+    portfolio_report = portfolio.run(portfolio_config)
 
     assert calls["indicator_three"] == 1
+    assert len(portfolio_report.data_fingerprint) == 64
 
 
 def test_strategy_fitness_reuses_cached_formula_across_time_windows(tmp_path: Path) -> None:
@@ -251,6 +254,7 @@ def test_strategy_fitness_reuses_cached_formula_across_time_windows(tmp_path: Pa
 
     assert report.processed == 1
     assert calls["indicator_three"] == 1
+    assert len(report.results[0].data_fingerprint) == 64
 
 
 def test_precompute_service_materializes_all_builtin_formulas(tmp_path: Path) -> None:
@@ -278,3 +282,94 @@ def test_precompute_service_materializes_all_builtin_formulas(tmp_path: Path) ->
     )
     assert cold_cache.metrics()["persistent_hits"] == 3
     assert cold_cache.metrics()["computed"] == 0
+
+
+def test_custom_formula_cache_is_separated_by_source_and_parameters(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    frame = _bars(120)
+    parsed = parse_formula("N:=5; BUY:CROSS(C,REF(C,N)); RANK:MA(C,N);")
+    cache = IndicatorCache(store)
+
+    first = cache.get_or_compute_custom(
+        frame,
+        parsed,
+        {},
+        market="SH",
+        code="600000",
+    )
+    second = IndicatorCache(store).get_or_compute_custom(
+        frame.copy(deep=True),
+        parsed,
+        {"N": 5},
+        market="SH",
+        code="600000",
+    )
+    changed_parameters = cache.get_or_compute_custom(
+        frame,
+        parsed,
+        {"N": 6},
+        market="SH",
+        code="600000",
+    )
+    different_source = cache.get_or_compute_custom(
+        frame,
+        parse_formula("N:=5; BUY:CROSS(C,REF(C,N)); RANK:MA(C,N)+0;"),
+        {},
+        market="SH",
+        code="600000",
+    )
+
+    expected = evaluate_custom_formula(parsed, frame, {})
+    assert cache.metrics()["computed"] == 3
+    assert np.array_equal(first["custom"].signals["custom.buy"], expected.signals["custom.buy"])
+    np.testing.assert_allclose(
+        second["custom"].values["RANK"], expected.values["RANK"], equal_nan=True
+    )
+    assert changed_parameters["custom"].data_length == len(frame)
+    assert different_source["custom"].data_length == len(frame)
+
+
+def test_cache_can_preload_persistent_rows_for_multiple_symbols(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars(120))
+    store.replace_local_bars("SH", "600001", "stock", _bars(120))
+    ids = FORMULA_REGISTRY.all_formula_ids()
+    writer = IndicatorCache(store)
+    for code in ("600000", "600001"):
+        writer.get_or_compute(store.read_bars("SH", code), ids, market="SH", code=code)
+
+    reader = IndicatorCache(store)
+    reader.preload(
+        {
+            ("SH", "600000"): store.read_bars("SH", "600000"),
+            ("SH", "600001"): store.read_bars("SH", "600001"),
+        },
+        ids,
+    )
+
+    assert reader.metrics()["persistent_hits"] == 6
+
+
+def test_backtest_report_records_the_input_data_fingerprint() -> None:
+    frame = _bars(120)
+
+    class Adapter:
+        def stock_ref(self, vipdoc_path, market, code):
+            return StockRef(market, code, Path(vipdoc_path) / "sh600000.day")
+
+        def read_stock(self, ref):
+            return frame.copy(deep=True)
+
+    report = BacktestService(adapter=Adapter()).run(
+        BacktestConfig(
+            market="SH",
+            code="600000",
+            vipdoc_path="/tmp/vipdoc",
+            buy_signal="custom.buy",
+            sell_signal="custom.sell",
+            formula_text="BUY:C>0; SELL:C<0;",
+        )
+    )
+
+    assert isinstance(report.configuration["data_fingerprint"], str)
+    assert len(report.configuration["data_fingerprint"]) == 64

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections import Counter, deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -23,7 +24,7 @@ from selector_app.formulas.custom import (
 )
 from selector_app.formulas.registry import FORMULA_REGISTRY, FormulaRegistry
 from selector_app.formulas.types import FormulaResult
-from selector_app.indicators.cache import IndicatorCache
+from selector_app.indicators.cache import IndicatorCache, frame_fingerprint
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
 from selector_app.market_data.day_format import classify_board, classify_instrument
 from selector_app.market_data.models import InstrumentBoard, InstrumentType, StockRef
@@ -71,6 +72,7 @@ class _StockSeries:
     signals: Mapping[str, np.ndarray]
     values: Mapping[str, np.ndarray]
     date_to_index: Mapping[int, int]
+    data_fingerprint: str
 
     @property
     def symbol(self) -> str:
@@ -165,6 +167,7 @@ class PortfolioBacktestService:
             len(refs) - len(contexts),
             failure_reasons,
             simulation,
+            _portfolio_fingerprint(contexts),
         )
         if progress_callback is not None:
             progress_callback(len(refs), len(refs))
@@ -189,7 +192,16 @@ class PortfolioBacktestService:
         if not dates:
             raise ValueError("股票没有可用于回测的日期")
         simulation = self._simulate([context], dates, config)
-        return self._build_report(config, dates, 1, 1, 0, {}, simulation)
+        return self._build_report(
+            config,
+            dates,
+            1,
+            1,
+            0,
+            {},
+            simulation,
+            context.data_fingerprint,
+        )
 
     def _build_fitness_filter(
         self,
@@ -264,6 +276,7 @@ class PortfolioBacktestService:
         frame = self._prepare_frame(frame if frame is not None else self._adapter.read_stock(ref))
         if frame.empty:
             raise ValueError("数据为空")
+        data_fingerprint = frame_fingerprint(frame)
         results = self._calculate_results(
             frame,
             config,
@@ -308,6 +321,7 @@ class PortfolioBacktestService:
             signals=signal_arrays,
             values=value_arrays,
             date_to_index={int(value): index for index, value in enumerate(dates)},
+            data_fingerprint=data_fingerprint,
         )
 
     def _batch_frames(self, refs: list[StockRef]) -> Mapping[tuple[str, str], pd.DataFrame] | None:
@@ -373,7 +387,17 @@ class PortfolioBacktestService:
         code: str = "",
     ) -> dict[str, FormulaResult]:
         if parsed is not None:
-            return {"custom": evaluate_custom_formula(parsed, frame, config.formula_parameters)}
+            return (
+                self._indicator_cache.get_or_compute_custom(
+                    frame,
+                    parsed,
+                    config.formula_parameters,
+                    market=market,
+                    code=code,
+                )
+                if self._indicator_cache is not None
+                else {"custom": evaluate_custom_formula(parsed, frame, config.formula_parameters)}
+            )
         formula_ids = {
             self._registry.signal(signal_id).formula_id for signal_id in config.selected_signals
         }
@@ -911,6 +935,7 @@ class PortfolioBacktestService:
         skipped: int,
         failure_reasons: Mapping[str, int],
         simulation: Mapping[str, object],
+        data_fingerprint: str = "",
     ) -> PortfolioBacktestReport:
         equity = cast(list[dict[str, PortfolioJsonValue]], simulation["equity"])
         trades = cast(list[dict[str, PortfolioJsonValue]], simulation["trades"])
@@ -995,6 +1020,7 @@ class PortfolioBacktestService:
             ranking_events=tuple(ranking_events),
             failure_reasons=failure_reasons,
             diagnostic=diagnostic,
+            data_fingerprint=data_fingerprint,
         )
 
     @staticmethod
@@ -1046,6 +1072,13 @@ def _compare_values(left: float, operator: CompareOperator, right: float) -> boo
 
 def _date_text(value: int) -> str:
     return str(pd.to_datetime(str(value), format="%Y%m%d").strftime("%Y-%m-%d"))
+
+
+def _portfolio_fingerprint(contexts: list[_StockSeries]) -> str:
+    digest = hashlib.sha256()
+    for context in sorted(contexts, key=lambda item: item.symbol):
+        digest.update(f"{context.symbol}:{context.data_fingerprint}\n".encode("ascii"))
+    return digest.hexdigest()
 
 
 def _date_int(value: str) -> int:

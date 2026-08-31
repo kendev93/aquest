@@ -100,6 +100,7 @@ class StrategyFitnessResult:
     validation: FitnessPhaseMetrics
     test: FitnessPhaseMetrics
     failure_reason: str | None = None
+    data_fingerprint: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -124,6 +125,7 @@ class StrategyFitnessResult:
             "validation": self.validation.to_dict(),
             "test": self.test.to_dict(),
             "failure_reason": self.failure_reason,
+            "data_fingerprint": self.data_fingerprint,
         }
 
 

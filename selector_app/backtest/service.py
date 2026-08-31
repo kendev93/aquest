@@ -14,7 +14,7 @@ from selector_app.formulas.common import validate_market_data
 from selector_app.formulas.custom import ParsedFormula, evaluate_custom_formula, parse_formula
 from selector_app.formulas.registry import FORMULA_REGISTRY, FormulaRegistry
 from selector_app.formulas.types import FormulaResult
-from selector_app.indicators.cache import IndicatorCache
+from selector_app.indicators.cache import IndicatorCache, frame_fingerprint
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
 from selector_app.market_data.models import MarketCode, StockRef
 from selector_app.market_data.store import DuckDbMarketDataStore
@@ -56,6 +56,7 @@ class BacktestService:
         frame = self._prepare_frame(self._adapter.read_stock(ref))
         if frame.empty:
             raise ValueError(f"{config.market} {config.code} 没有可用日线数据")
+        data_fingerprint = frame_fingerprint(frame)
 
         parsed_formula, formula_results = self._calculate_formula_results(
             frame, config, market=config.market, code=config.code
@@ -83,7 +84,7 @@ class BacktestService:
             parsed_formula is not None,
         )
         result = self._run_engine(window, buy_mask, sell_mask, config)
-        report = self._build_report(result, window, config)
+        report = self._build_report(result, window, config, data_fingerprint)
         if progress_callback is not None:
             progress_callback(1, 1)
         return report
@@ -101,9 +102,17 @@ class BacktestService:
             available = {signal.id for signal in parsed.signals}
             if config.buy_signal not in available or config.sell_signal not in available:
                 raise ValueError("买入或卖出信号不属于当前自定义公式")
-            return parsed, {
-                "custom": evaluate_custom_formula(parsed, frame, config.formula_parameters)
-            }
+            return parsed, (
+                self._indicator_cache.get_or_compute_custom(
+                    frame,
+                    parsed,
+                    config.formula_parameters,
+                    market=market,
+                    code=code,
+                )
+                if self._indicator_cache is not None
+                else {"custom": evaluate_custom_formula(parsed, frame, config.formula_parameters)}
+            )
 
         for signal_id in (config.buy_signal, config.sell_signal):
             if not self._registry.has_signal(signal_id):
@@ -199,6 +208,7 @@ class BacktestService:
         result: SignalBacktestResult,
         frame: pd.DataFrame,
         config: BacktestConfig,
+        data_fingerprint: str,
     ) -> BacktestReport:
         # Keep serialization here so pandas/numpy values never leak into the
         # JSON response contract.
@@ -233,6 +243,7 @@ class BacktestService:
                 "instrument_type": profile.instrument_type,
                 "board": config.board or "main",
                 "virtual": profile.virtual,
+                "data_fingerprint": data_fingerprint,
             },
             diagnostic=result.diagnostic,
         )

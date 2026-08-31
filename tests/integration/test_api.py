@@ -3,6 +3,8 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
 from fastapi.testclient import TestClient
 
 from selector_app.market_data.day_importer import LocalDayImporter
@@ -55,6 +57,22 @@ def valid_payload(tmp_path: Path) -> dict:
     }
 
 
+def _precompute_bars(length: int = 120) -> pd.DataFrame:
+    close = 10.0 + np.linspace(0.0, 8.0, length) + np.sin(np.arange(length) / 3.0)
+    return pd.DataFrame(
+        {
+            "date": pd.date_range("2024-01-01", periods=length, freq="D"),
+            "open": close - 0.2,
+            "high": close + 0.5,
+            "low": close - 0.5,
+            "close": close,
+            "volume": np.full(length, 100_000.0),
+            "amount": close * 100_000.0,
+            "bar_status": "completed",
+        }
+    )
+
+
 def test_metadata_returns_signals_modes_and_supported_markets() -> None:
     with TestClient(create_app(engine=EmptyEngine())) as client:
         response = client.get("/api/v1/formula-screen/metadata")
@@ -72,6 +90,35 @@ def test_health_endpoint_is_lightweight_and_does_not_require_vipdoc() -> None:
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+
+
+def test_indicator_cache_status_and_manual_precompute_job(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _precompute_bars())
+
+    with TestClient(create_app(market_data_store=store)) as client:
+        initial = client.get("/api/v1/market-data/indicator-cache")
+        response = client.post(
+            "/api/v1/market-data/indicator-cache/precompute",
+            json={"universe": "sh"},
+        )
+        assert response.status_code == 202
+        state = wait_for_done(
+            client,
+            response.json()["data"]["job_id"],
+            "/api/v1/market-data/jobs",
+        )
+        warmed = client.get("/api/v1/market-data/indicator-cache")
+
+    assert initial.status_code == 200
+    assert initial.json()["data"]["persistent"]["total_entries"] == 0
+    assert state["status"] == "completed"
+    assert state["description"] == "指标预计算"
+    assert state["result"]["computed"] == 3
+    assert warmed.status_code == 200
+    assert warmed.json()["data"]["lookups"] == 3
+    assert warmed.json()["data"]["p95_ms"] >= warmed.json()["data"]["p50_ms"] >= 0
+    assert warmed.json()["data"]["persistent"]["total_entries"] == 3
 
 
 def test_invalid_signal_is_rejected_without_stack_trace(tmp_path: Path) -> None:

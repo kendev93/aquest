@@ -189,6 +189,7 @@ class PortfolioBacktestReport:
     ranking_events: tuple[Mapping[str, PortfolioJsonValue], ...]
     failure_reasons: Mapping[str, int]
     diagnostic: str | None = None
+    data_fingerprint: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "performance", MappingProxyType(dict(self.performance)))
@@ -218,4 +219,5 @@ class PortfolioBacktestReport:
             "ranking_events": [dict(row) for row in self.ranking_events],
             "failure_reasons": dict(self.failure_reasons),
             "diagnostic": self.diagnostic,
+            "data_fingerprint": self.data_fingerprint,
         }

@@ -15,7 +15,7 @@ import pandas as pd
 from selector_app.formulas.common import validate_market_data
 from selector_app.formulas.custom import ParsedFormula, parse_formula
 from selector_app.formulas.registry import FORMULA_REGISTRY, FormulaRegistry
-from selector_app.indicators.cache import IndicatorCache
+from selector_app.indicators.cache import IndicatorCache, frame_fingerprint
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
 from selector_app.market_data.day_format import classify_board, classify_instrument
 from selector_app.market_data.models import InstrumentBoard, InstrumentType, StockRef
@@ -277,6 +277,7 @@ class StrategyFitnessService:
             train=train,
             validation=validation,
             test=test,
+            data_fingerprint=frame_fingerprint(frame),
         )
 
     @staticmethod

@@ -19,6 +19,7 @@ from selector_app.market_data.models import InstrumentBoard, InstrumentType, Sto
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[int, int], None]
+_PRECOMPUTE_CHUNK_SIZE = 32
 
 
 class PrecomputeMarketDataAdapter(Protocol):
@@ -97,14 +98,41 @@ class IndicatorPrecomputeService:
         processed = 0
         skipped = 0
 
-        for current, ref in enumerate(refs, start=1):
-            try:
-                source = (
-                    frames.get((ref.market, ref.code))
-                    if frames is not None
-                    else self._adapter.read_stock(ref)
-                )
-                frame = _prepare_frame(source if source is not None else pd.DataFrame())
+        for offset in range(0, len(refs), _PRECOMPUTE_CHUNK_SIZE):
+            batch = refs[offset : offset + _PRECOMPUTE_CHUNK_SIZE]
+            prepared: dict[tuple[str, str], pd.DataFrame] = {}
+            empty: set[tuple[str, str]] = set()
+            for ref in batch:
+                key = (ref.market, ref.code)
+                try:
+                    source = (
+                        frames.get(key) if frames is not None else self._adapter.read_stock(ref)
+                    )
+                    frame = _prepare_frame(source if source is not None else pd.DataFrame())
+                    if frame.empty:
+                        empty.add(key)
+                    else:
+                        prepared[key] = frame
+                except Exception as exc:  # noqa: BLE001 - one bad instrument must not abort warming
+                    reason = str(exc).strip()[:200] or type(exc).__name__
+                    failures[reason] += 1
+                    logger.warning("指标预计算 %s 失败，已跳过", ref.code, exc_info=True)
+
+            if prepared:
+                try:
+                    self._cache.preload(prepared, formula_ids)
+                except (OSError, RuntimeError, ValueError):
+                    logger.warning("指标缓存批量预加载失败，改用逐标的按需读取", exc_info=True)
+
+            for local_index, ref in enumerate(batch):
+                key = (ref.market, ref.code)
+                frame = prepared.get(key)
+                if frame is None:
+                    if key in empty:
+                        skipped += 1
+                    if progress_callback is not None:
+                        progress_callback(offset + local_index + 1, len(refs))
+                    continue
                 eligible = tuple(
                     formula_id
                     for formula_id in formula_ids
@@ -120,12 +148,8 @@ class IndicatorPrecomputeService:
                         code=ref.code,
                     )
                     processed += 1
-            except Exception as exc:  # noqa: BLE001 - one bad instrument must not abort warming
-                reason = str(exc).strip()[:200] or type(exc).__name__
-                failures[reason] += 1
-                logger.warning("指标预计算 %s 失败，已跳过", ref.code, exc_info=True)
-            if progress_callback is not None:
-                progress_callback(current, len(refs))
+                if progress_callback is not None:
+                    progress_callback(offset + local_index + 1, len(refs))
 
         after = self._cache.metrics()
         return IndicatorPrecomputeReport(
