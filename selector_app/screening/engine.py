@@ -20,6 +20,7 @@ from selector_app.formulas.custom import (
 )
 from selector_app.formulas.registry import FORMULA_REGISTRY, FormulaRegistry
 from selector_app.formulas.types import FormulaResult
+from selector_app.indicators.cache import IndicatorCache
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter, MarketDataAdapter
 from selector_app.market_data.day_format import classify_board, classify_instrument
 from selector_app.market_data.models import StockRef
@@ -111,6 +112,10 @@ def _condition_formula_results(
     config: ScanConfig,
     registry: FormulaRegistry,
     parsed_formula: ParsedFormula | None,
+    *,
+    market: str = "",
+    code: str = "",
+    indicator_cache: IndicatorCache | None = None,
 ) -> dict[str, FormulaResult]:
     if parsed_formula is not None:
         return {
@@ -126,9 +131,16 @@ def _condition_formula_results(
         for value_id in (condition.left_value, condition.right_value)
         if value_id is not None
     )
+    definitions = registry.formulas_for_values(value_ids)
+    if indicator_cache is not None:
+        return indicator_cache.get_or_compute(
+            frame,
+            (definition.id for definition in definitions),
+            market=market,
+            code=code,
+        )
     return {
-        definition.id: definition.calculate(frame.copy(deep=True))
-        for definition in registry.formulas_for_values(value_ids)
+        definition.id: definition.calculate(frame.copy(deep=True)) for definition in definitions
     }
 
 
@@ -143,13 +155,22 @@ def _evaluate_frame(
     config: ScanConfig,
     registry: FormulaRegistry,
     parsed_formula: ParsedFormula | None = None,
+    indicator_cache: IndicatorCache | None = None,
 ) -> ScanOutcome:
     if frame.empty:
         return ScanOutcome(skipped_reason="数据为空")
     validate_market_data(frame)
 
     if config.conditions:
-        formula_results = _condition_formula_results(frame, config, registry, parsed_formula)
+        formula_results = _condition_formula_results(
+            frame,
+            config,
+            registry,
+            parsed_formula,
+            market=ref.market,
+            code=ref.code,
+            indicator_cache=indicator_cache,
+        )
         if any(not result.sufficient_data for result in formula_results.values()):
             return ScanOutcome(skipped_reason="数据不足")
         condition_masks = [
@@ -182,10 +203,20 @@ def _evaluate_frame(
         formula_results = {"custom": formula_result}
         matched_bools = [signal_id in matched_ids for signal_id in config.selected_signals]
     else:
-        results = {
-            definition.id: definition.calculate(frame.copy(deep=True))
-            for definition in registry.formulas_for_signals(config.selected_signals)
-        }
+        definitions = registry.formulas_for_signals(config.selected_signals)
+        results = (
+            indicator_cache.get_or_compute(
+                frame,
+                (definition.id for definition in definitions),
+                market=ref.market,
+                code=ref.code,
+            )
+            if indicator_cache is not None
+            else {
+                definition.id: definition.calculate(frame.copy(deep=True))
+                for definition in definitions
+            }
+        )
         if any(not result.sufficient_data for result in results.values()):
             return ScanOutcome(skipped_reason="数据不足")
         matched_ids = tuple(
@@ -228,9 +259,11 @@ class ScreenEngine:
         self,
         adapter: MarketDataAdapter | None = None,
         registry: FormulaRegistry | None = None,
+        indicator_cache: IndicatorCache | None = None,
     ) -> None:
         self._adapter = adapter or DuckDbMarketDataAdapter(DuckDbMarketDataStore())
         self._registry = registry or FORMULA_REGISTRY
+        self._indicator_cache = indicator_cache
 
     def scan(
         self,
@@ -276,7 +309,14 @@ class ScreenEngine:
             if frames is None:
                 return self._scan_one(ref, config, parsed_formula)
             frame = frames.get((ref.market, ref.code), pd.DataFrame())
-            return _evaluate_frame(ref, frame, config, self._registry, parsed_formula)
+            return _evaluate_frame(
+                ref,
+                frame,
+                config,
+                self._registry,
+                parsed_formula,
+                self._indicator_cache,
+            )
 
         if config.workers <= 1:
             outcomes: list[ScanOutcome] = []
@@ -359,7 +399,14 @@ class ScreenEngine:
     ) -> ScanOutcome:
         try:
             frame = self._adapter.read_stock(ref)
-            return _evaluate_frame(ref, frame, config, self._registry, parsed_formula)
+            return _evaluate_frame(
+                ref,
+                frame,
+                config,
+                self._registry,
+                parsed_formula,
+                self._indicator_cache,
+            )
         except Exception as exc:  # noqa: BLE001 - one bad stock must not abort scan
             logger.warning("扫描 %s (%s) 失败，已跳过", ref.code, ref.path, exc_info=True)
             return ScanOutcome(error_reason=str(exc) or type(exc).__name__)

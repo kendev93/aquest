@@ -14,6 +14,7 @@ from selector_app.formulas.common import validate_market_data
 from selector_app.formulas.custom import ParsedFormula, evaluate_custom_formula, parse_formula
 from selector_app.formulas.registry import FORMULA_REGISTRY, FormulaRegistry
 from selector_app.formulas.types import FormulaResult
+from selector_app.indicators.cache import IndicatorCache
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
 from selector_app.market_data.models import MarketCode, StockRef
 from selector_app.market_data.store import DuckDbMarketDataStore
@@ -38,9 +39,11 @@ class BacktestService:
         self,
         adapter: BacktestMarketDataAdapter | None = None,
         registry: FormulaRegistry | None = None,
+        indicator_cache: IndicatorCache | None = None,
     ) -> None:
         self._adapter = adapter or DuckDbMarketDataAdapter(DuckDbMarketDataStore())
         self._registry = registry or FORMULA_REGISTRY
+        self._indicator_cache = indicator_cache
 
     def run(
         self,
@@ -54,7 +57,9 @@ class BacktestService:
         if frame.empty:
             raise ValueError(f"{config.market} {config.code} 没有可用日线数据")
 
-        parsed_formula, formula_results = self._calculate_formula_results(frame, config)
+        parsed_formula, formula_results = self._calculate_formula_results(
+            frame, config, market=config.market, code=config.code
+        )
         minimum_bars = max(result.minimum_bars for result in formula_results.values())
         if len(frame) < minimum_bars:
             raise ValueError(
@@ -87,6 +92,9 @@ class BacktestService:
         self,
         frame: pd.DataFrame,
         config: BacktestConfig,
+        *,
+        market: str = "",
+        code: str = "",
     ) -> tuple[ParsedFormula | None, dict[str, FormulaResult]]:
         if config.formula_text:
             parsed = parse_formula(config.formula_text)
@@ -100,12 +108,20 @@ class BacktestService:
         for signal_id in (config.buy_signal, config.sell_signal):
             if not self._registry.has_signal(signal_id):
                 raise ValueError(f"未知选股信号: {signal_id}")
-        results = {
-            definition.id: definition.calculate(frame.copy(deep=True))
-            for definition in self._registry.formulas_for_signals(
-                (config.buy_signal, config.sell_signal)
+        definitions = self._registry.formulas_for_signals((config.buy_signal, config.sell_signal))
+        results = (
+            self._indicator_cache.get_or_compute(
+                frame,
+                (definition.id for definition in definitions),
+                market=market,
+                code=code,
             )
-        }
+            if self._indicator_cache is not None
+            else {
+                definition.id: definition.calculate(frame.copy(deep=True))
+                for definition in definitions
+            }
+        )
         return None, results
 
     @staticmethod

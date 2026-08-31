@@ -26,7 +26,7 @@ from .models import (
     StockRef,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 _APP_DATA_DIR_NAME = ".indicator-lab"
 _BAR_COLUMNS = [
     "market",
@@ -228,6 +228,29 @@ class DuckDbMarketDataStore:
                     key VARCHAR PRIMARY KEY,
                     value VARCHAR NOT NULL,
                     updated_at TIMESTAMP NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS indicator_cache (
+                    market VARCHAR NOT NULL,
+                    code VARCHAR NOT NULL,
+                    timeframe VARCHAR NOT NULL,
+                    price_basis VARCHAR NOT NULL,
+                    formula_id VARCHAR NOT NULL,
+                    formula_version VARCHAR NOT NULL,
+                    data_fingerprint VARCHAR NOT NULL,
+                    data_start DATE,
+                    data_end DATE,
+                    data_length BIGINT NOT NULL,
+                    values_blob BLOB NOT NULL,
+                    signals_blob BLOB NOT NULL,
+                    computed_at TIMESTAMP NOT NULL,
+                    PRIMARY KEY (
+                        market, code, timeframe, price_basis, formula_id,
+                        formula_version, data_fingerprint
+                    )
                 )
                 """
             )
@@ -894,6 +917,237 @@ class DuckDbMarketDataStore:
                 """,
                 [key, value, _now()],
             )
+
+    def read_indicator_cache(
+        self,
+        *,
+        market: str,
+        code: str,
+        timeframe: str,
+        price_basis: str,
+        formula_id: str,
+        formula_version: str,
+        data_fingerprint: str,
+    ) -> dict[str, object] | None:
+        """Read one immutable, versioned indicator result from DuckDB."""
+
+        try:
+            with self._connect(read_only=True) as connection:
+                row = connection.execute(
+                    """
+                    SELECT market, code, timeframe, price_basis, formula_id,
+                           formula_version, data_fingerprint, data_start, data_end,
+                           data_length, values_blob, signals_blob, computed_at
+                    FROM indicator_cache
+                    WHERE market = ?
+                      AND code = ?
+                      AND timeframe = ?
+                      AND price_basis = ?
+                      AND formula_id = ?
+                      AND formula_version = ?
+                      AND data_fingerprint = ?
+                    """,
+                    [
+                        market.strip().upper(),
+                        code.strip(),
+                        timeframe,
+                        price_basis,
+                        formula_id,
+                        formula_version,
+                        data_fingerprint,
+                    ],
+                ).fetchone()
+        except duckdb.CatalogException:
+            # A read-only connection opened against a pre-cache database can
+            # still serve source bars; treat the absent derived table as miss.
+            return None
+        if row is None:
+            return None
+        keys = [
+            "market",
+            "code",
+            "timeframe",
+            "price_basis",
+            "formula_id",
+            "formula_version",
+            "data_fingerprint",
+            "data_start",
+            "data_end",
+            "data_length",
+            "values_blob",
+            "signals_blob",
+            "computed_at",
+        ]
+        return dict(zip(keys, row, strict=True))
+
+    def read_indicator_caches(
+        self,
+        *,
+        market: str,
+        code: str,
+        timeframe: str,
+        price_basis: str,
+        data_fingerprint: str,
+        formula_versions: Mapping[str, str],
+    ) -> dict[str, dict[str, object]]:
+        """Read several formula generations for one series in one connection."""
+
+        if not formula_versions:
+            return {}
+        predicates: list[str] = []
+        parameters: list[object] = [
+            market.strip().upper(),
+            code.strip(),
+            timeframe,
+            price_basis,
+            data_fingerprint,
+        ]
+        for formula_id, formula_version in formula_versions.items():
+            predicates.append("(formula_id = ? AND formula_version = ?)")
+            parameters.extend([formula_id, formula_version])
+        query = (
+            "SELECT market, code, timeframe, price_basis, formula_id, formula_version, "
+            "data_fingerprint, data_start, data_end, data_length, values_blob, "
+            "signals_blob, computed_at FROM indicator_cache "
+            "WHERE market = ? AND code = ? AND timeframe = ? AND price_basis = ? "
+            "AND data_fingerprint = ? AND (" + " OR ".join(predicates) + ")"
+        )
+        try:
+            with self._connect(read_only=True) as connection:
+                rows = connection.execute(query, parameters).fetchall()
+        except duckdb.CatalogException:
+            return {}
+        keys = [
+            "market",
+            "code",
+            "timeframe",
+            "price_basis",
+            "formula_id",
+            "formula_version",
+            "data_fingerprint",
+            "data_start",
+            "data_end",
+            "data_length",
+            "values_blob",
+            "signals_blob",
+            "computed_at",
+        ]
+        return {str(row[4]): dict(zip(keys, row, strict=True)) for row in rows}
+
+    def write_indicator_cache(
+        self,
+        *,
+        market: str,
+        code: str,
+        timeframe: str,
+        price_basis: str,
+        formula_id: str,
+        formula_version: str,
+        data_fingerprint: str,
+        data_start: date | None,
+        data_end: date | None,
+        data_length: int,
+        values_blob: bytes,
+        signals_blob: bytes,
+    ) -> None:
+        self.write_indicator_caches(
+            [
+                {
+                    "market": market,
+                    "code": code,
+                    "timeframe": timeframe,
+                    "price_basis": price_basis,
+                    "formula_id": formula_id,
+                    "formula_version": formula_version,
+                    "data_fingerprint": data_fingerprint,
+                    "data_start": data_start,
+                    "data_end": data_end,
+                    "data_length": data_length,
+                    "values_blob": values_blob,
+                    "signals_blob": signals_blob,
+                }
+            ]
+        )
+
+    def write_indicator_caches(self, entries: Iterable[Mapping[str, object]]) -> None:
+        """Atomically replace several formula cache generations in one transaction."""
+
+        pending = list(entries)
+        if not pending:
+            return
+
+        self._require_writer()
+        with _WRITE_LOCK, self._connect() as connection:
+            connection.execute("BEGIN")
+            try:
+                for entry in pending:
+                    normalized_market = str(entry["market"]).strip().upper()
+                    normalized_code = str(entry["code"]).strip()
+                    timeframe = str(entry["timeframe"])
+                    price_basis = str(entry["price_basis"])
+                    formula_id = str(entry["formula_id"])
+                    formula_version = str(entry["formula_version"])
+                    data_fingerprint = str(entry["data_fingerprint"])
+                    # Only the current data generation is useful. Keeping stale
+                    # generations would make this derived table grow forever.
+                    connection.execute(
+                        """
+                        DELETE FROM indicator_cache
+                        WHERE market = ?
+                          AND code = ?
+                          AND timeframe = ?
+                          AND price_basis = ?
+                          AND formula_id = ?
+                          AND (formula_version <> ? OR data_fingerprint <> ?)
+                        """,
+                        [
+                            normalized_market,
+                            normalized_code,
+                            timeframe,
+                            price_basis,
+                            formula_id,
+                            formula_version,
+                            data_fingerprint,
+                        ],
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO indicator_cache (
+                            market, code, timeframe, price_basis, formula_id,
+                            formula_version, data_fingerprint, data_start, data_end,
+                            data_length, values_blob, signals_blob, computed_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT (
+                            market, code, timeframe, price_basis, formula_id,
+                            formula_version, data_fingerprint
+                        ) DO UPDATE SET
+                            data_start = excluded.data_start,
+                            data_end = excluded.data_end,
+                            data_length = excluded.data_length,
+                            values_blob = excluded.values_blob,
+                            signals_blob = excluded.signals_blob,
+                            computed_at = excluded.computed_at
+                        """,
+                        [
+                            normalized_market,
+                            normalized_code,
+                            timeframe,
+                            price_basis,
+                            formula_id,
+                            formula_version,
+                            data_fingerprint,
+                            entry["data_start"],
+                            entry["data_end"],
+                            int(cast(int, entry["data_length"])),
+                            entry["values_blob"],
+                            entry["signals_blob"],
+                            _now(),
+                        ],
+                    )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
 
     def source_file(self, source_root: str | Path, relative_path: str) -> dict[str, object] | None:
         root = str(Path(source_root).expanduser().resolve())

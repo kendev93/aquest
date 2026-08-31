@@ -16,6 +16,8 @@ from fastapi.responses import JSONResponse
 
 from selector_app.adapters.market_sync import TdxMarketSync
 from selector_app.backtest.service import BacktestService
+from selector_app.indicators.cache import IndicatorCache
+from selector_app.indicators.precompute import IndicatorPrecomputeService
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
 from selector_app.market_data.day_importer import LocalDayImporter
 from selector_app.market_data.models import ImportReport
@@ -42,6 +44,8 @@ def create_app(
     local_market_data_service: LocalMarketDataService | object | None = None,
     market_data_store: DuckDbMarketDataStore | object | None = None,
     local_day_importer: LocalDayImporter | object | None = None,
+    indicator_cache: IndicatorCache | object | None = None,
+    indicator_precompute_service: IndicatorPrecomputeService | object | None = None,
 ) -> FastAPI:
     owns_runner = runner is None
     selected_store = cast(
@@ -49,8 +53,19 @@ def create_app(
         market_data_store if market_data_store is not None else DuckDbMarketDataStore(),
     )
     selected_adapter = DuckDbMarketDataAdapter(selected_store)
+    selected_indicator_cache = cast(
+        IndicatorCache,
+        indicator_cache if indicator_cache is not None else IndicatorCache(selected_store),
+    )
+    selected_precompute_service = cast(
+        IndicatorPrecomputeService,
+        indicator_precompute_service
+        if indicator_precompute_service is not None
+        else IndicatorPrecomputeService(selected_adapter, selected_indicator_cache),
+    )
     selected_runner = runner or ScreenJobRunner(
-        engine=engine or ScreenEngine(adapter=selected_adapter)
+        engine=engine
+        or ScreenEngine(adapter=selected_adapter, indicator_cache=selected_indicator_cache)
     )
     selected_importer = cast(
         LocalDayImporter,
@@ -76,7 +91,22 @@ def create_app(
                         vipdoc_root,
                         progress_callback=progress,
                     )
-                    return result.to_dict() if isinstance(result, ImportReport) else result
+                    payload = result.to_dict() if isinstance(result, ImportReport) else result
+                    try:
+                        precomputed = selected_precompute_service.run(
+                            vipdoc_path=str(vipdoc_root),
+                            progress_callback=progress,
+                        )
+                        return {**payload, "indicator_precompute": precomputed.to_dict()}
+                    except (OSError, RuntimeError, ValueError):
+                        logger.exception("启动导入后的指标预计算失败")
+                        return {
+                            **payload,
+                            "indicator_precompute": {
+                                "status": "failed",
+                                "message": "指标预计算未完成，后续筛选或回测会按需重建",
+                            },
+                        }
 
                 try:
                     app.state.startup_import_job_id = selected_runner.submit_callable(
@@ -97,14 +127,21 @@ def create_app(
     )
     app.state.screen_job_runner = selected_runner
     app.state.market_sync_service = market_sync or TdxMarketSync(store=selected_store)
-    app.state.backtest_service = backtest_service or BacktestService(adapter=selected_adapter)
+    app.state.backtest_service = backtest_service or BacktestService(
+        adapter=selected_adapter,
+        indicator_cache=selected_indicator_cache,
+    )
     app.state.portfolio_backtest_service = portfolio_backtest_service or PortfolioBacktestService(
-        adapter=selected_adapter
+        adapter=selected_adapter,
+        indicator_cache=selected_indicator_cache,
     )
     app.state.strategy_fitness_service = strategy_fitness_service or StrategyFitnessService(
-        adapter=selected_adapter
+        adapter=selected_adapter,
+        indicator_cache=selected_indicator_cache,
     )
     app.state.market_data_store = selected_store
+    app.state.indicator_cache = selected_indicator_cache
+    app.state.indicator_precompute_service = selected_precompute_service
     app.state.local_day_importer = selected_importer
     app.state.local_market_data_service = local_market_data_service or LocalMarketDataService(
         store=selected_store

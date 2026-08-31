@@ -15,6 +15,7 @@ import pandas as pd
 from selector_app.formulas.common import validate_market_data
 from selector_app.formulas.custom import ParsedFormula, parse_formula
 from selector_app.formulas.registry import FORMULA_REGISTRY, FormulaRegistry
+from selector_app.indicators.cache import IndicatorCache
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
 from selector_app.market_data.day_format import classify_board, classify_instrument
 from selector_app.market_data.models import InstrumentBoard, InstrumentType, StockRef
@@ -82,9 +83,11 @@ class StrategyFitnessService:
         self,
         adapter: FitnessMarketDataAdapter | None = None,
         registry: FormulaRegistry | None = None,
+        indicator_cache: IndicatorCache | None = None,
     ) -> None:
         self._adapter = adapter or DuckDbMarketDataAdapter(DuckDbMarketDataStore())
         self._registry = registry or FORMULA_REGISTRY
+        self._indicator_cache = indicator_cache
 
     def run(
         self,
@@ -109,6 +112,7 @@ class StrategyFitnessService:
         simulator = PortfolioBacktestService(
             adapter=_CachedAdapter(cached_refs, frames),
             registry=self._registry,
+            indicator_cache=self._indicator_cache,
         )
         results: list[StrategyFitnessResult] = []
         skipped = len(refs) - len(cached_refs)

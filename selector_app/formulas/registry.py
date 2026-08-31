@@ -65,6 +65,9 @@ class FormulaDefinition:
     calculate: FormulaCalculator
     signals: tuple[SignalDefinition, ...]
     value_names: tuple[str, ...]
+    # Bump this whenever the formula's numerical semantics change. Cached
+    # values are derived data and must never survive a semantic formula change.
+    cache_version: str = "1"
 
 
 class FormulaRegistry:
@@ -129,6 +132,9 @@ class FormulaRegistry:
 
     def all_signal_ids(self) -> tuple[str, ...]:
         return tuple(self._signals)
+
+    def all_formula_ids(self) -> tuple[str, ...]:
+        return tuple(definition.id for definition in self._definitions)
 
 
 FORMULA_REGISTRY = FormulaRegistry(

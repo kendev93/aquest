@@ -23,6 +23,7 @@ from selector_app.formulas.custom import (
 )
 from selector_app.formulas.registry import FORMULA_REGISTRY, FormulaRegistry
 from selector_app.formulas.types import FormulaResult
+from selector_app.indicators.cache import IndicatorCache
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
 from selector_app.market_data.day_format import classify_board, classify_instrument
 from selector_app.market_data.models import InstrumentBoard, InstrumentType, StockRef
@@ -113,9 +114,11 @@ class PortfolioBacktestService:
         self,
         adapter: PortfolioMarketDataAdapter | None = None,
         registry: FormulaRegistry | None = None,
+        indicator_cache: IndicatorCache | None = None,
     ) -> None:
         self._adapter = adapter or DuckDbMarketDataAdapter(DuckDbMarketDataStore())
         self._registry = registry or FORMULA_REGISTRY
+        self._indicator_cache = indicator_cache
 
     def run(
         self,
@@ -261,7 +264,13 @@ class PortfolioBacktestService:
         frame = self._prepare_frame(frame if frame is not None else self._adapter.read_stock(ref))
         if frame.empty:
             raise ValueError("数据为空")
-        results = self._calculate_results(frame, config, parsed)
+        results = self._calculate_results(
+            frame,
+            config,
+            parsed,
+            market=ref.market,
+            code=ref.code,
+        )
         minimum_bars = max(result.minimum_bars for result in results.values())
         if len(frame) < minimum_bars:
             raise ValueError(f"数据不足，至少需要 {minimum_bars} 根 K 线")
@@ -359,6 +368,9 @@ class PortfolioBacktestService:
         frame: pd.DataFrame,
         config: PortfolioBacktestConfig,
         parsed: ParsedFormula | None,
+        *,
+        market: str = "",
+        code: str = "",
     ) -> dict[str, FormulaResult]:
         if parsed is not None:
             return {"custom": evaluate_custom_formula(parsed, frame, config.formula_parameters)}
@@ -368,6 +380,13 @@ class PortfolioBacktestService:
         if config.sell_signal is not None:
             formula_ids.add(self._registry.signal(config.sell_signal).formula_id)
         formula_ids.update(value_id.split(".", 1)[0] for value_id in self._value_ids(config))
+        if self._indicator_cache is not None:
+            return self._indicator_cache.get_or_compute(
+                frame,
+                formula_ids,
+                market=market,
+                code=code,
+            )
         return {
             formula_id: self._registry.formula(formula_id).calculate(frame.copy(deep=True))
             for formula_id in formula_ids

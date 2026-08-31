@@ -13,6 +13,7 @@ from fastapi import Path as PathParameter
 from fastapi.responses import JSONResponse
 
 from selector_app.adapters.market_sync import MarketSyncConfig, MarketSyncReport, ProgressCallback
+from selector_app.indicators.precompute import IndicatorPrecomputeService
 from selector_app.market_data.day_importer import ProgressCallback as LocalImportProgressCallback
 from selector_app.market_data.models import (
     ImportReport,
@@ -96,6 +97,10 @@ def _importer(request: Request) -> LocalDayImporterLike:
     return cast(LocalDayImporterLike, request.app.state.local_day_importer)
 
 
+def _precomputer(request: Request) -> IndicatorPrecomputeService:
+    return cast(IndicatorPrecomputeService, request.app.state.indicator_precompute_service)
+
+
 def _resolved_vipdoc_path(vipdoc_path: str | None) -> str:
     return vipdoc_path or os.getenv("SELECTOR_VIPDOC_PATH") or "/data/vipdoc"
 
@@ -113,6 +118,37 @@ def _sync_config(payload: MarketSyncRequest, *, prefer_store_targets: bool) -> M
 
 def _result_dict(result: MarketSyncReport | ImportReport | dict[str, object]) -> dict[str, object]:
     return result.to_dict() if isinstance(result, (MarketSyncReport, ImportReport)) else result
+
+
+def _with_indicator_precompute(
+    request: Request,
+    result: dict[str, object],
+    *,
+    vipdoc_path: str | None,
+    universe: str,
+    instrument_types: list[InstrumentType] | tuple[InstrumentType, ...] | None,
+    boards: list[InstrumentBoard] | tuple[InstrumentBoard, ...] | None,
+    progress_callback: Callable[[int, int], None] | None = None,
+) -> dict[str, object]:
+    try:
+        precomputed = _precomputer(request).run(
+            vipdoc_path=vipdoc_path or _resolved_vipdoc_path(None),
+            universe=universe,
+            instrument_types=tuple(instrument_types or ()),
+            boards=tuple(boards or ()),
+            progress_callback=progress_callback,
+        )
+        return {**result, "indicator_precompute": precomputed.to_dict()}
+    except (OSError, ValueError, MarketDataStoreError, duckdb.Error):
+        # Indicator materialization is derived data. A source-data import or
+        # sync remains successful if warming the optional cache is unavailable.
+        return {
+            **result,
+            "indicator_precompute": {
+                "status": "failed",
+                "message": "指标预计算未完成，后续筛选或回测会按需重建",
+            },
+        }
 
 
 def _combined_result(
@@ -155,7 +191,15 @@ def create_local_import(
             )
         except (MarketDataStoreError, duckdb.Error) as exc:
             raise TaskUserError(_storage_error_message(exc)) from exc
-        return result.to_dict() if isinstance(result, ImportReport) else result
+        return _with_indicator_precompute(
+            request,
+            result.to_dict() if isinstance(result, ImportReport) else result,
+            vipdoc_path=root,
+            universe=payload.universe,
+            instrument_types=payload.instrument_types,
+            boards=payload.boards,
+            progress_callback=progress,
+        )
 
     try:
         job_id = _runner(request).submit_callable(run_import, description="本地行情导入")
@@ -244,7 +288,18 @@ def _create_sync_job(
             online_result = _result_dict(_service(request).sync(config, progress))
         except (MarketDataStoreError, duckdb.Error) as exc:
             raise TaskUserError(_storage_error_message(exc)) from exc
-        return online_result if not include_local else _combined_result(local_result, online_result)
+        result = (
+            online_result if not include_local else _combined_result(local_result, online_result)
+        )
+        return _with_indicator_precompute(
+            request,
+            result,
+            vipdoc_path=_resolved_vipdoc_path(payload.vipdoc_path),
+            universe=payload.universe,
+            instrument_types=payload.instrument_types,
+            boards=payload.boards,
+            progress_callback=progress,
+        )
 
     try:
         job_id = _runner(request).submit_callable(run_sync, description="行情同步")
