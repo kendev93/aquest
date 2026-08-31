@@ -155,6 +155,40 @@ describe('MarketDataPage', () => {
     expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('在线写入 1 根')
   })
 
+  it('keeps polling a slow market-data job without a fixed attempt timeout', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.mocked(marketApi.createLocalImport).mockResolvedValue({ job_id: 'slow-1', status: 'queued' })
+      let polls = 0
+      vi.mocked(marketApi.getMarketDataJob).mockImplementation(async (jobId) => {
+        polls += 1
+        return {
+          job_id: jobId,
+          status: polls <= 601 ? 'running' : 'completed',
+          progress: polls <= 601 ? 0.5 : 1,
+          total_candidates: 1703,
+          total_scanned: 850,
+          errors: 0,
+          error: null,
+          result: polls <= 601 ? null : { source: 'local', imported_files: 1703, imported_bars: 1000 },
+        }
+      })
+      const wrapper = mount(MarketDataPage)
+      await flushPromises()
+
+      await wrapper.get('[data-testid="market-import-local"]').trigger('click')
+      for (let attempt = 0; attempt < 602; attempt += 1) {
+        await vi.advanceTimersByTimeAsync(500)
+        await flushPromises()
+      }
+
+      expect(polls).toBeGreaterThan(600)
+      expect(wrapper.get('[data-testid="market-data-progress"]').text()).not.toContain('行情同步超时')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('waits for an automatic startup import before loading the local list', async () => {
     vi.mocked(marketApi.fetchStoreStatus)
       .mockResolvedValueOnce({

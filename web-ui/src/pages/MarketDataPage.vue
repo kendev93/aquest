@@ -74,6 +74,7 @@ const storeStatus = ref<DataStoreStatus | null>(null)
 const syncLoading = ref(false)
 const syncLabel = ref('')
 const marketJob = ref<MarketSyncJobState | null>(null)
+const MARKET_JOB_POLL_INTERVAL_MS = 500
 
 const selectedTitle = computed(() => (
   selected.value ? `${selected.value.market} ${selected.value.code}` : '请选择品种'
@@ -133,7 +134,7 @@ async function loadStoreStatus(): Promise<void> {
 }
 
 async function waitForJob(jobId: string): Promise<void> {
-  for (let attempt = 0; attempt < 600; attempt += 1) {
+  for (;;) {
     const state = await getMarketDataJob(jobId)
     marketJob.value = state
     if (state.status === 'completed') {
@@ -147,9 +148,8 @@ async function waitForJob(jobId: string): Promise<void> {
     if (state.status === 'failed') {
       throw new FormulaScreenApiError(state.error ?? '行情同步失败。', 500)
     }
-    await new Promise((resolve) => window.setTimeout(resolve, 100))
+    await new Promise((resolve) => window.setTimeout(resolve, MARKET_JOB_POLL_INTERVAL_MS))
   }
-  throw new FormulaScreenApiError('行情同步超时，请检查后台任务状态。', 504)
 }
 
 function beginJob(jobId: string, status: string): void {
