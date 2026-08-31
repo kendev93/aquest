@@ -79,7 +79,7 @@ npm install
 npm run dev
 ```
 
-浏览器打开 <http://127.0.0.1:5173/formula-screen>。单股回测页面是 <http://127.0.0.1:5173/backtest>，动态组合回测页面是 <http://127.0.0.1:5173/portfolio-backtest>，策略适配性页面是 <http://127.0.0.1:5173/strategy-fitness>，本地行情页面是 <http://127.0.0.1:5173/market-data>；Vite 会把 `/api` 请求代理到 `127.0.0.1:8000`。
+浏览器打开 <http://127.0.0.1:5173/indicator-lab>。单股回测页面是 <http://127.0.0.1:5173/backtest>，动态组合回测页面是 <http://127.0.0.1:5173/portfolio-backtest>，策略适配性页面是 <http://127.0.0.1:5173/strategy-fitness>，本地行情页面是 <http://127.0.0.1:5173/market-data>；Vite 会把 `/api` 请求代理到 `127.0.0.1:8000`。旧的 `/formula-screen` 地址仍可访问，但不再作为主入口。
 
 ## Docker Compose 启动
 

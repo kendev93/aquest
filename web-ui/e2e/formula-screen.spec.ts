@@ -19,7 +19,7 @@ test('user can configure a formula scan, view results, and export them', async (
   await page.route('**/api/v1/formula-screen/jobs/e2e-job', (route) => route.fulfill({ json: { data: { job_id: 'e2e-job', status: 'completed', progress: 1, total_candidates: 1, total_scanned: 1, total_signals: 1, errors: 0, skipped: 0, error: null } } }))
   await page.route('**/api/v1/formula-screen/jobs/e2e-job/results', (route) => route.fulfill({ json: { data: [{ market: 'SH', code: '600000', signal_date: 20260824, last_close: 12.35, matched_signals: ['indicator_three.accumulation_zone'], match_count: 1, indicator_values: { 'indicator_three.varo7': 2.2 } }], meta: { total_candidates: 1, total_scanned: 1, total_signals: 1, errors: 0, skipped: 0, failure_reasons: {}, skip_reasons: {} } } }))
 
-  await page.goto('/formula-screen')
+  await page.goto('/indicator-lab')
   await page.getByTestId('signal-indicator_three.prepare_rally').check()
   await page.getByTestId('signal-indicator_three.accumulation_zone').check()
   await page.getByTestId('advanced-toggle').click()
@@ -42,7 +42,7 @@ test('user can parse a custom formula and scan with an overridden parameter', as
   await page.route('**/api/v1/formula-screen/jobs/custom-job', (route) => route.fulfill({ json: { data: { job_id: 'custom-job', status: 'completed', progress: 1, total_candidates: 1, total_scanned: 1, total_signals: 1, errors: 0, skipped: 0, error: null } } }))
   await page.route('**/api/v1/formula-screen/jobs/custom-job/results', (route) => route.fulfill({ json: { data: [{ market: 'SH', code: '600001', signal_date: 20260824, last_close: 9.8, matched_signals: ['custom.breakout'], match_count: 1, indicator_values: { 'custom.N': 7, 'custom.LEVEL': 9.8 } }], meta: { total_candidates: 1, total_scanned: 1, total_signals: 1, errors: 0, skipped: 0, failure_reasons: {}, skip_reasons: {} } } }))
 
-  await page.goto('/formula-screen')
+  await page.goto('/indicator-lab')
   await page.getByTestId('mode-custom').click()
   await page.getByTestId('custom-formula').fill('N:=5; BREAKOUT:CROSS(C,REF(C,N));')
   await page.getByTestId('parse-formula').click()
@@ -60,7 +60,7 @@ test('user can sync latest market data into DuckDB', async ({ page }) => {
   await page.route('**/api/v1/market-data/sync', (route) => route.fulfill({ status: 202, json: { data: { job_id: 'sync-job', status: 'queued' } } }))
   await page.route('**/api/v1/market-data/sync/jobs/sync-job', (route) => route.fulfill({ json: { data: { job_id: 'sync-job', status: 'completed', progress: 1, total_candidates: 2, total_scanned: 2, errors: 0, error: null, result: { total_candidates: 2, processed: 2, updated_files: 2, unchanged_files: 0, written_bars: 4, errors: 0, failure_reasons: {} } } } }))
 
-  await page.goto('/formula-screen')
+  await page.goto('/indicator-lab')
   await page.getByTestId('sync-market-data').click()
 
   await expect(page.getByTestId('screen-message')).toContainText('写入 4 根')

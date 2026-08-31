@@ -299,12 +299,12 @@ watch(() => form.formulaText, (value) => {
 <template>
   <div class="screen-page backtest-page" data-testid="backtest-page">
     <header class="topbar">
-      <a class="brand" href="/formula-screen" aria-label="指标实验室首页">
+      <a class="brand" href="/indicator-lab" aria-label="指标实验室首页">
         <img class="brand-mark" src="/indicator-lab-mark.png" alt="" aria-hidden="true" width="34" height="34">
         <span><strong>Indicator Lab</strong><small>指标实验室</small></span>
       </a>
       <nav aria-label="主导航">
-        <a class="nav-link" href="/formula-screen">公式选股</a>
+        <a class="nav-link" href="/indicator-lab">公式选股</a>
         <a class="nav-link active" href="/backtest" aria-current="page">单股回测</a>
         <a class="nav-link" href="/portfolio-backtest">组合回测</a>
         <a class="nav-link" href="/strategy-fitness">策略适配性</a>
