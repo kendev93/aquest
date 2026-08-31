@@ -20,7 +20,7 @@ import type {
   Universe,
   ValueDefinition,
 } from '../types'
-import { signalDisplayName } from '../utils/formulaScreen'
+import { signalDisplayName, valueOptionLabel } from '../utils/formulaScreen'
 
 const INSTRUMENT_TYPE_OPTIONS: { key: InstrumentType; label: string }[] = [
   { key: 'stock', label: '股票/B股' },
@@ -540,7 +540,7 @@ watch(() => form.formulaText, (value) => {
 
           <fieldset class="form-section">
             <legend>排名与刷新</legend>
-            <div><label for="portfolio-ranking-value">排序指标 <span class="required">*</span></label><select id="portfolio-ranking-value" v-model="form.rankingValue" data-testid="portfolio-ranking-value" :disabled="availableValues.length === 0"><option value="" disabled>请选择指标输出</option><option v-for="value in availableValues" :key="value.id" :value="value.id">{{ value.display_name }} · {{ value.id }}</option></select></div>
+            <div><label for="portfolio-ranking-value">排序指标 <span class="required">*</span></label><select id="portfolio-ranking-value" v-model="form.rankingValue" data-testid="portfolio-ranking-value" :disabled="availableValues.length === 0"><option value="" disabled>请选择指标输出</option><option v-for="value in availableValues" :key="value.id" :value="value.id">{{ valueOptionLabel(value) }}</option></select></div>
             <p v-if="availableValues.length === 0" class="helper">当前公式没有可用的数值输出，请在公式中增加如 <code>排序:C/MA(C,20);</code> 的命名表达式。</p>
             <p v-if="errors.rankingValue" class="field-error">{{ errors.rankingValue }}</p>
             <div class="compact-fields portfolio-fields-top">

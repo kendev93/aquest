@@ -109,10 +109,14 @@ input:focus, select:focus { border-color: var(--accent); }
 .text-button { min-height: 34px; padding: 0 8px; border: 1px solid transparent; border-radius: 5px; background: transparent; color: var(--muted); cursor: pointer; font-size: 10px; }
 .text-button:hover:not(:disabled) { border-color: var(--border-strong); color: var(--accent); background: var(--accent-soft); }
 .text-button:disabled { cursor: not-allowed; opacity: 0.35; }
-.condition-row { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 0.85fr) minmax(0, 0.9fr) minmax(0, 1.2fr) auto; gap: 7px; align-items: end; margin-bottom: 10px; padding: 10px; border: 1px solid var(--border); background: rgba(8, 15, 32, 0.55); }
+.condition-row { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(118px, 0.85fr); grid-template-areas: "left left" "operator right-type" "right right" "remove remove"; gap: 10px; align-items: end; margin-bottom: 10px; padding: 10px; border: 1px solid var(--border); background: rgba(8, 15, 32, 0.55); }
 .condition-field { min-width: 0; }
-.condition-field label { margin-bottom: 5px; }
-.condition-remove { margin-bottom: 3px; }
+.condition-field label { margin-bottom: 5px; white-space: nowrap; }
+.condition-left { grid-area: left; }
+.condition-operator { grid-area: operator; }
+.condition-right-type { grid-area: right-type; }
+.condition-right { grid-area: right; }
+.condition-remove { grid-area: remove; justify-self: end; min-width: 44px; min-height: 40px; margin-bottom: 0; }
 .condition-error { grid-column: 1 / -1; margin: -3px 0 0; }
 .add-condition-button { width: 100%; margin-top: 2px; }
 .condition-save-row { margin-top: 12px; padding-top: 12px; border-top: 1px dashed rgba(59, 80, 110, 0.45); }
@@ -315,8 +319,6 @@ tbody tr:hover td { background: rgba(22, 34, 58, 0.45); }
   .fitness-metrics { grid-template-columns: repeat(2, 1fr); }
   .rule-row { grid-template-columns: minmax(0, 1fr) 48px; }
   .rule-row > :last-child { grid-column: 1 / -1; }
-  .condition-row { grid-template-columns: 1fr 1fr; }
-  .condition-remove { grid-column: 1 / -1; justify-self: end; margin-bottom: 0; }
   .results-heading { align-items: flex-start; flex-direction: column; }
   .metrics-strip { grid-template-columns: repeat(2, 1fr); }
   .empty-state { min-height: 250px; }

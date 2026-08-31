@@ -20,8 +20,8 @@ const metadata: FormulaScreenMetadata = {
         { id: 'indicator_three.accumulation_zone', display_name: '建仓区', description: 'VARO7 < 10' },
       ],
       values: [
-        { id: 'indicator_three.varo7', display_name: 'VARO7', description: 'VARO7 的数值输出' },
-        { id: 'indicator_three.var1', display_name: 'VAR1', description: 'VAR1 的数值输出' },
+        { id: 'indicator_three.varo7', display_name: '建仓强度', description: '建仓强度（VARO7）的数值输出' },
+        { id: 'indicator_three.var1', display_name: '拉升强度', description: '拉升强度（VAR1）的数值输出' },
       ],
     },
   ],
@@ -133,7 +133,18 @@ describe('FormulaScreenPage', () => {
         right_constant: 10,
       }],
     }))
-    expect(wrapper.get('[data-testid="results-table"]').text()).toContain('VARO7 小于 10')
+    expect(wrapper.get('[data-testid="results-table"]').text()).toContain('建仓强度 小于 10')
+  })
+
+  it('shows readable Chinese output names in the condition selector', async () => {
+    const wrapper = mount(FormulaScreenPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="rule-mode-conditions"]').trigger('click')
+
+    expect(wrapper.get('[data-testid="condition-left-0"]').text()).toContain('建仓强度 · VARO7')
+    expect(wrapper.get('[data-testid="condition-right-type-0"]').text()).toContain('固定数值')
+    expect(wrapper.get('[data-testid="condition-right-type-0"]').text()).toContain('另一个指标')
   })
 
   it('keeps condition values valid when switching to a parsed custom formula', async () => {

@@ -47,6 +47,74 @@ from .types import FormulaResult
 
 FormulaCalculator = Callable[[pd.DataFrame], FormulaResult]
 
+_VALUE_DISPLAY_NAMES: dict[str, dict[str, str]] = {
+    "indicator_one": {
+        "var1": "前一日均价",
+        "var2_numerator": "低位偏离分子",
+        "var2_denominator": "低位下行分母",
+        "var2": "低位偏离比",
+        "var3": "低位平滑值",
+        "var4": "33日最低价",
+        "var5": "主力进场强度",
+        "main_force_entry": "主力进场值",
+        "wash": "洗盘值",
+        "var21_denominator_input": "高位偏离输入",
+        "var21_numerator": "高位偏离分子",
+        "var21_denominator": "高位下行分母",
+        "var21": "高位偏离比",
+        "var31": "高位平滑值",
+        "var41": "33日最高价",
+        "var51": "主力拉高强度",
+        "main_force_raise": "主力拉高值",
+        "distribution": "出货值",
+    },
+    "indicator_two": {
+        "short_cost": "短期成本线",
+        "a": "加权价格",
+        "x": "加权成本输入",
+        "mid_cost": "中期成本线",
+        "var1": "常数基线",
+        "var2": "10日最低价",
+        "var3": "25日最高价",
+        "n1": "短期周期",
+        "n4": "长期周期",
+        "cq": "趋势强度",
+        "mid_term": "中期趋势",
+        "sat": "饱和度原值",
+        "saturation": "饱和度",
+        "w1": "20日新高标记",
+        "w2": "距新高天数",
+        "w3": "新高参考价",
+        "w4": "新高突破标记",
+        "holding_base": "持仓位置",
+        "holding": "持仓强度",
+        "support": "支撑强度",
+        "short_line": "短线强度",
+        "mid_line": "中线强度",
+        "start": "始信号值",
+        "end": "终信号值",
+    },
+    "indicator_three": {
+        "n": "随机周期",
+        "stochastic_base": "随机强度",
+        "sma_inner": "随机平滑值",
+        "var1": "拉升强度",
+        "var2": "拉升阈值",
+        "varo5": "27日最低价",
+        "varo6": "34日最高价",
+        "varo7": "建仓强度",
+        "prepare_rally": "准备拉升值",
+        "suppress_main": "压住庄家值",
+        "accumulation_zone": "建仓区值",
+    },
+}
+
+
+def value_display_name(formula_id: str, value_name: str) -> str:
+    """Return a user-facing name while retaining raw names as a fallback."""
+
+    return _VALUE_DISPLAY_NAMES.get(formula_id, {}).get(value_name, value_name.upper())
+
 
 @dataclass(frozen=True)
 class SignalDefinition:
@@ -121,8 +189,11 @@ class FormulaRegistry:
                 "values": [
                     {
                         "id": f"{definition.id}.{value_name}",
-                        "display_name": value_name,
-                        "description": f"{value_name} 的数值输出",
+                        "display_name": value_display_name(definition.id, value_name),
+                        "description": (
+                            f"{value_display_name(definition.id, value_name)}"
+                            f"（{value_name.upper()}）的数值输出"
+                        ),
                     }
                     for value_name in definition.value_names
                 ],

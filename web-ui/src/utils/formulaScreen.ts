@@ -115,6 +115,13 @@ export function saveForm(form: ScreenFormState): void {
   }
 }
 
+export function valueOptionLabel(value: ValueDefinition): string {
+  const shortName = value.id.split('.').at(-1)?.toUpperCase() ?? value.id
+  return value.display_name.toUpperCase() === shortName
+    ? value.display_name
+    : `${value.display_name} · ${shortName}`
+}
+
 export function validateScreenForm(
   form: ScreenFormState,
   customMetadata: CustomFormulaMetadata | null = null,

@@ -3,7 +3,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import { createJob, createSyncJob, fetchMetadata, FormulaScreenApiError, getJob, getResults, getSyncJob, parseFormula } from '../api/formulaScreen'
 import type { ConditionOperator, CustomFormulaMetadata, FormulaScreenMetadata, InstrumentBoard, InstrumentType, JobState, MarketSyncJobState, ResultsMeta, SavedConditionSet, ScreenCondition, ScreenFormState, ScreenResult, RuleMode, ValueDefinition } from '../types'
-import { buildScanPayload, createSavedConditionSet, DEFAULT_PRESET_SIGNALS, deleteConditionSet, filterKnownSignals, loadSavedConditionSets, loadSavedForm, resultsToCsv, saveConditionSet, saveForm, signalDisplayName, validateScreenForm } from '../utils/formulaScreen'
+import { buildScanPayload, createSavedConditionSet, DEFAULT_PRESET_SIGNALS, deleteConditionSet, filterKnownSignals, loadSavedConditionSets, loadSavedForm, resultsToCsv, saveConditionSet, saveForm, signalDisplayName, validateScreenForm, valueOptionLabel } from '../utils/formulaScreen'
 
 const INSTRUMENT_TYPE_OPTIONS: { key: InstrumentType; label: string }[] = [
   { key: 'stock', label: '股票/B股' },
@@ -224,6 +224,12 @@ function setConditionRightType(index: number, type: 'constant' | 'value'): void 
 function valueLabel(valueId: string | null): string {
   if (!valueId) return '未选择'
   return availableValues.value.find((value) => value.id === valueId)?.display_name ?? valueId
+}
+
+function resultValueLabel(valueId: string): string {
+  return valueLabel(valueId) === valueId
+    ? valueId.split('.').at(-1)?.toUpperCase() ?? valueId
+    : valueLabel(valueId)
 }
 
 function conditionOperatorLabel(operator: ConditionOperator): string {
@@ -644,7 +650,7 @@ watch(() => form.formulaText, (value) => {
                 <label :for="`condition-left-${index}`">指标输出</label>
                 <select :id="`condition-left-${index}`" v-model="condition.left_value" :data-testid="`condition-left-${index}`">
                   <optgroup v-for="group in valueGroups" :key="group.label" :label="group.label">
-                    <option v-for="value in group.values" :key="value.id" :value="value.id">{{ value.display_name }} · {{ value.id }}</option>
+                    <option v-for="value in group.values" :key="value.id" :value="value.id">{{ valueOptionLabel(value) }}</option>
                   </optgroup>
                 </select>
               </div>
@@ -666,7 +672,7 @@ watch(() => form.formulaText, (value) => {
                 <input v-if="condition.right_value === null" :id="`condition-constant-${index}`" v-model.number="condition.right_constant" :data-testid="`condition-constant-${index}`" type="number" step="any" placeholder="输入数值">
                 <select v-else :id="`condition-right-${index}`" v-model="condition.right_value" :data-testid="`condition-right-value-${index}`">
                   <optgroup v-for="group in valueGroups" :key="group.label" :label="group.label">
-                    <option v-for="value in group.values" :key="value.id" :value="value.id">{{ value.display_name }} · {{ value.id }}</option>
+                    <option v-for="value in group.values" :key="value.id" :value="value.id">{{ valueOptionLabel(value) }}</option>
                   </optgroup>
                 </select>
               </div>
@@ -735,7 +741,7 @@ watch(() => form.formulaText, (value) => {
                   <td class="muted-code">{{ result.signal_date }}</td>
                   <td><strong>{{ result.last_close.toFixed(2) }}</strong></td>
                   <td><div class="signal-tags"><span v-for="signal in result.matched_signals" :key="signal" class="signal-tag">{{ resultLabel(signal) }}</span><small>{{ result.match_count }} 条</small></div></td>
-                  <td><div class="value-list"><span v-for="(value, name) in result.indicator_values" :key="name"><b>{{ name.split('.').at(-1) }}</b> {{ value === null ? '—' : value.toFixed(2) }}</span></div></td>
+                  <td><div class="value-list"><span v-for="(value, name) in result.indicator_values" :key="name"><b>{{ resultValueLabel(name) }}</b> {{ value === null ? '—' : value.toFixed(2) }}</span></div></td>
                 </tr>
               </tbody>
             </table>

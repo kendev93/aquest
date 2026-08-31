@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from selector_app.adapters.local_day_adapter import StockRef
+from selector_app.formulas.registry import FORMULA_REGISTRY
 from selector_app.screening.engine import ScreenEngine
 from selector_app.screening.models import ScanConfig, ScreenCondition
 from selector_app.web.schemas import FormulaScreenRequest
@@ -155,6 +156,15 @@ def test_formula_screen_request_accepts_a_preset_indicator_condition() -> None:
     )
 
     assert request.to_config().conditions[0].left_value == "indicator_two.var1"
+
+
+def test_preset_value_metadata_uses_the_indicator_output_name() -> None:
+    indicator = next(
+        item for item in FORMULA_REGISTRY.metadata() if item["id"] == "indicator_three"
+    )
+    varo7 = next(value for value in indicator["values"] if value["id"] == "indicator_three.varo7")
+
+    assert varo7["display_name"] == "建仓强度"
 
 
 def test_formula_screen_request_rejects_a_condition_without_right_operand() -> None:
