@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from selector_app.adapters.market_sync import MarketSyncConfig, MarketSyncReport, ProgressCallback
 from selector_app.indicators.cache import IndicatorCache
 from selector_app.indicators.precompute import IndicatorPrecomputeService
+from selector_app.market_data.auto_sync import AUTO_SYNC_DESCRIPTION
 from selector_app.market_data.day_importer import ProgressCallback as LocalImportProgressCallback
 from selector_app.market_data.models import (
     ImportReport,
@@ -271,6 +272,7 @@ def market_data_job_status(job_id: str, request: Request) -> dict[str, object]:
         "本地行情导入",
         "本地行情自动导入",
         "行情同步",
+        AUTO_SYNC_DESCRIPTION,
         "指标预计算",
     }:
         raise HTTPException(status_code=404, detail="行情任务不存在或已过期")
@@ -287,6 +289,18 @@ def market_data_store_status(request: Request) -> dict[str, object] | JSONRespon
             if startup_state is None or startup_state.status in {"completed", "failed"}:
                 startup_job_id = None
         data["startup_import_job_id"] = startup_job_id
+        auto_sync_job_id = getattr(request.app.state, "auto_sync_job_id", None)
+        if auto_sync_job_id:
+            auto_sync_state = _runner(request).get(auto_sync_job_id)
+            if auto_sync_state is None or auto_sync_state.status in {"completed", "failed"}:
+                auto_sync_job_id = None
+        data["auto_sync_job_id"] = auto_sync_job_id
+        data["auto_sync_enabled"] = bool(getattr(request.app.state, "auto_sync_enabled", False))
+        data["auto_sync_interval_seconds"] = getattr(
+            request.app.state,
+            "auto_sync_interval_seconds",
+            None,
+        )
         return {"data": data}
     except (MarketDataStoreError, duckdb.Error, OSError) as exc:
         return JSONResponse(

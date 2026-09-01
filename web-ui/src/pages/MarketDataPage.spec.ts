@@ -225,4 +225,66 @@ describe('MarketDataPage', () => {
     expect(marketApi.fetchLocalInstruments).toHaveBeenCalled()
     expect(wrapper.get('[data-testid="market-store-status"]').text()).toContain('K线 2')
   })
+
+  it('discovers an automatic sync started after the page has loaded and shows progress', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.mocked(marketApi.fetchStoreStatus)
+        .mockResolvedValueOnce({
+          database_path: '/data/market/market.duckdb',
+          schema_version: 5,
+          instrument_count: 2,
+          bar_count: 580,
+          data_start: '2020-01-01',
+          data_end: '2024-12-31',
+          last_local_import_at: null,
+          last_online_sync_at: null,
+          auto_sync_enabled: true,
+          auto_sync_job_id: null,
+          auto_sync_interval_seconds: 900,
+        })
+        .mockResolvedValue({
+          database_path: '/data/market/market.duckdb',
+          schema_version: 5,
+          instrument_count: 2,
+          bar_count: 580,
+          data_start: '2020-01-01',
+          data_end: '2024-12-31',
+          last_local_import_at: null,
+          last_online_sync_at: null,
+          auto_sync_enabled: true,
+          auto_sync_job_id: 'auto-1',
+          auto_sync_interval_seconds: 900,
+        })
+      let polls = 0
+      vi.mocked(marketApi.getMarketDataJob).mockImplementation(async (jobId) => {
+        polls += 1
+        return {
+          job_id: jobId,
+          status: polls === 1 ? 'running' : 'completed',
+          progress: polls === 1 ? 0.42 : 1,
+          total_candidates: 1703,
+          total_scanned: polls === 1 ? 716 : 1703,
+          errors: 0,
+          error: null,
+          result: polls === 1 ? null : { source: 'online', updated_files: 100, written_bars: 100 },
+        }
+      })
+      const wrapper = mount(MarketDataPage)
+      await flushPromises()
+
+      await vi.advanceTimersByTimeAsync(5000)
+      await flushPromises()
+
+      expect(marketApi.getMarketDataJob).toHaveBeenCalledWith('auto-1')
+      expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('自动同步最新行情')
+      expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('42%')
+
+      await vi.advanceTimersByTimeAsync(500)
+      await flushPromises()
+    } finally {
+      vi.clearAllTimers()
+      vi.useRealTimers()
+    }
+  })
 })

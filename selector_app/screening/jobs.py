@@ -6,7 +6,7 @@ import logging
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from threading import Lock
@@ -99,6 +99,17 @@ class ScreenJobRunner:
     def get(self, job_id: str) -> JobState | None:
         with self._lock:
             return self._jobs.get(job_id)
+
+    def has_active_jobs(self, descriptions: Iterable[str] | None = None) -> bool:
+        """Return whether a queued/running job matches the optional descriptions."""
+
+        allowed = frozenset(descriptions) if descriptions is not None else None
+        with self._lock:
+            return any(
+                state.status in {"queued", "running"}
+                and (allowed is None or state.description in allowed)
+                for state in self._jobs.values()
+            )
 
     def submit_callable(self, func: GenericTask, *, description: str = "") -> str:
         """Run a non-screening task on the same lifecycle/executor infrastructure."""

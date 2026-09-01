@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import math
 import os
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -19,6 +21,10 @@ from selector_app.backtest.service import BacktestService
 from selector_app.indicators.cache import IndicatorCache
 from selector_app.indicators.precompute import IndicatorPrecomputeService
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
+from selector_app.market_data.auto_sync import (
+    DEFAULT_AUTO_SYNC_INTERVAL_SECONDS,
+    AutomaticMarketSyncScheduler,
+)
 from selector_app.market_data.day_importer import LocalDayImporter
 from selector_app.market_data.models import ImportReport
 from selector_app.market_data.service import LocalMarketDataService
@@ -46,6 +52,8 @@ def create_app(
     local_day_importer: LocalDayImporter | object | None = None,
     indicator_cache: IndicatorCache | object | None = None,
     indicator_precompute_service: IndicatorPrecomputeService | object | None = None,
+    auto_sync_enabled: bool | None = None,
+    auto_sync_interval_seconds: float | None = None,
 ) -> FastAPI:
     owns_runner = runner is None
     selected_store = cast(
@@ -63,6 +71,12 @@ def create_app(
         if indicator_precompute_service is not None
         else IndicatorPrecomputeService(selected_adapter, selected_indicator_cache),
     )
+    selected_market_sync = cast(
+        TdxMarketSync,
+        market_sync if market_sync is not None else TdxMarketSync(store=selected_store),
+    )
+    selected_auto_sync_enabled = _resolve_auto_sync_enabled(auto_sync_enabled)
+    selected_auto_sync_interval = _resolve_auto_sync_interval(auto_sync_interval_seconds)
     selected_runner = runner or ScreenJobRunner(
         engine=engine
         or ScreenEngine(adapter=selected_adapter, indicator_cache=selected_indicator_cache)
@@ -75,8 +89,10 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.startup_import_job_id = None
+        app.state.auto_sync_job_id = None
+        auto_sync_task: asyncio.Task[None] | None = None
+        vipdoc_root = Path(os.getenv("SELECTOR_VIPDOC_PATH") or "/data/vipdoc").expanduser()
         if owns_runner:
-            vipdoc_root = Path(os.getenv("SELECTOR_VIPDOC_PATH") or "/data/vipdoc").expanduser()
             has_day_files = vipdoc_root.is_dir() and any(
                 directory.glob("*.day")
                 for directory in (
@@ -115,9 +131,31 @@ def create_app(
                     )
                 except RuntimeError:
                     logger.exception("无法提交本地行情自动导入任务")
-        yield
-        if owns_runner:
-            selected_runner.shutdown()
+        if selected_auto_sync_enabled:
+            scheduler = AutomaticMarketSyncScheduler(
+                store=selected_store,
+                runner=selected_runner,
+                market_sync=selected_market_sync,
+                precomputer=selected_precompute_service,
+                vipdoc_path=vipdoc_root,
+                interval_seconds=selected_auto_sync_interval,
+            )
+            auto_sync_task = asyncio.create_task(
+                scheduler.run(
+                    on_job_submitted=lambda job_id: setattr(app.state, "auto_sync_job_id", job_id)
+                )
+            )
+        try:
+            yield
+        finally:
+            if auto_sync_task is not None:
+                auto_sync_task.cancel()
+                try:
+                    await auto_sync_task
+                except asyncio.CancelledError:
+                    pass
+            if owns_runner:
+                selected_runner.shutdown()
 
     app = FastAPI(
         title="Indicator Lab",
@@ -126,7 +164,7 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.screen_job_runner = selected_runner
-    app.state.market_sync_service = market_sync or TdxMarketSync(store=selected_store)
+    app.state.market_sync_service = selected_market_sync
     app.state.backtest_service = backtest_service or BacktestService(
         adapter=selected_adapter,
         indicator_cache=selected_indicator_cache,
@@ -146,6 +184,8 @@ def create_app(
     app.state.local_market_data_service = local_market_data_service or LocalMarketDataService(
         store=selected_store
     )
+    app.state.auto_sync_enabled = selected_auto_sync_enabled
+    app.state.auto_sync_interval_seconds = selected_auto_sync_interval
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
@@ -209,6 +249,31 @@ def create_app(
     app.include_router(portfolio_backtest_router, prefix="/api/v1")
     app.include_router(strategy_fitness_router, prefix="/api/v1")
     return app
+
+
+def _resolve_auto_sync_enabled(value: bool | None) -> bool:
+    if value is not None:
+        if not isinstance(value, bool):
+            raise ValueError("自动行情同步开关必须是布尔值")
+        return value
+    raw = os.getenv("SELECTOR_AUTO_SYNC_ENABLED")
+    if raw is None:
+        return True
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_auto_sync_interval(value: float | None) -> float:
+    if value is None:
+        raw = os.getenv("SELECTOR_AUTO_SYNC_CHECK_INTERVAL_SECONDS")
+        if raw is None:
+            return float(DEFAULT_AUTO_SYNC_INTERVAL_SECONDS)
+        try:
+            value = float(raw)
+        except ValueError as exc:
+            raise ValueError("自动行情同步检查间隔必须是数字") from exc
+    if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
+        raise ValueError("自动行情同步检查间隔必须大于 0")
+    return float(value)
 
 
 app = create_app()

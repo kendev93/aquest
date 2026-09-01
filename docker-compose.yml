@@ -6,6 +6,7 @@ services:
     environment:
       PYTHONUNBUFFERED: "1"
       SELECTOR_DATA_DIR: /data/market
+      SELECTOR_AUTO_SYNC_ENABLED: "1"
     volumes:
       - type: volume
         source: vipdoc_data

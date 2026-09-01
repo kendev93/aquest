@@ -181,6 +181,9 @@ export interface DataStoreStatus {
   last_local_import_at: string | null
   last_online_sync_at: string | null
   startup_import_job_id?: string | null
+  auto_sync_job_id?: string | null
+  auto_sync_enabled?: boolean
+  auto_sync_interval_seconds?: number | null
 }
 
 export type LocalMarketScope = 'all' | 'SH' | 'SZ'

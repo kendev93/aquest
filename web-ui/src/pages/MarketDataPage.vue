@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 
 import { FormulaScreenApiError } from '../api/formulaScreen'
 import {
@@ -75,10 +75,41 @@ const syncLoading = ref(false)
 const syncLabel = ref('')
 const marketJob = ref<MarketSyncJobState | null>(null)
 const MARKET_JOB_POLL_INTERVAL_MS = 500
+const MARKET_STATUS_POLL_INTERVAL_MS = 5000
+let storeStatusPollTimer: number | null = null
 
 const selectedTitle = computed(() => (
   selected.value ? `${selected.value.market} ${selected.value.code}` : '请选择品种'
 ))
+
+const autoSyncActive = computed(() => Boolean(
+  storeStatus.value?.auto_sync_enabled
+  && storeStatus.value.auto_sync_job_id
+  && marketJob.value?.job_id === storeStatus.value.auto_sync_job_id
+  && syncLoading.value,
+))
+
+const autoSyncStatusText = computed(() => {
+  if (storeStatus.value?.auto_sync_enabled === false) return '自动同步已关闭'
+  if (autoSyncActive.value) return syncLabel.value || '正在自动同步最新行情…'
+  if (storeStatus.value?.auto_sync_enabled) return '自动同步已开启'
+  return '自动同步状态读取中…'
+})
+
+const autoSyncScheduleText = computed(() => {
+  const seconds = storeStatus.value?.auto_sync_interval_seconds
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds)) {
+    return '启动后检查；每天至少同步一次'
+  }
+  return `启动后检查；每 ${Math.max(Math.round(seconds / 60), 1)} 分钟检查一次，当天至少同步一次`
+})
+
+const marketJobTitle = computed(() => {
+  if (syncLoading.value) return syncLabel.value || '后台任务进行中…'
+  if (marketJob.value?.status === 'queued') return '等待后台任务…'
+  if (marketJob.value?.status === 'running') return '后台任务进行中…'
+  return '最近一次任务'
+})
 
 function apiMessage(error: unknown): string {
   if (error instanceof FormulaScreenApiError) return error.message
@@ -113,12 +144,17 @@ async function loadStoreStatus(): Promise<void> {
   try {
     const status = await fetchStoreStatus()
     storeStatus.value = status
-    if (status.startup_import_job_id && !marketJob.value) {
+    const pendingJob = status.startup_import_job_id
+      ? { id: status.startup_import_job_id, label: '正在自动导入本地行情…' }
+      : status.auto_sync_job_id
+        ? { id: status.auto_sync_job_id, label: '正在自动同步最新行情…' }
+        : null
+    if (pendingJob && marketJob.value?.job_id !== pendingJob.id) {
       syncLoading.value = true
-      syncLabel.value = '正在自动导入本地行情…'
+      syncLabel.value = pendingJob.label
       try {
-        beginJob(status.startup_import_job_id, 'running')
-        await waitForJob(status.startup_import_job_id)
+        beginJob(pendingJob.id, 'running')
+        await waitForJob(pendingJob.id)
         await loadStoreStatus()
         await loadInstruments()
       } catch (error) {
@@ -244,6 +280,15 @@ async function loadInstruments(): Promise<void> {
   }
 }
 
+function scheduleStoreStatusPoll(): void {
+  if (storeStatusPollTimer !== null) window.clearTimeout(storeStatusPollTimer)
+  storeStatusPollTimer = window.setTimeout(async () => {
+    storeStatusPollTimer = null
+    if (!syncLoading.value) await loadStoreStatus()
+    scheduleStoreStatusPoll()
+  }, MARKET_STATUS_POLL_INTERVAL_MS)
+}
+
 async function loadChart(instrument = selected.value): Promise<void> {
   if (!instrument) {
     chart.value = null
@@ -302,6 +347,12 @@ function formatPrice(value: number | null): string {
 onMounted(async () => {
   await loadStoreStatus()
   if (!marketJob.value) await loadInstruments()
+  scheduleStoreStatusPoll()
+})
+
+onUnmounted(() => {
+  if (storeStatusPollTimer !== null) window.clearTimeout(storeStatusPollTimer)
+  storeStatusPollTimer = null
 })
 
 function instrumentLabel(type: LocalInstrument['instrument_type']): string {
@@ -343,6 +394,10 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
           <span>最近本地导入 {{ storeStatus?.last_local_import_at ?? '—' }}</span>
           <span>最近在线更新 {{ storeStatus?.last_online_sync_at ?? '—' }}</span>
         </div>
+        <div v-if="storeStatus?.auto_sync_enabled !== undefined" class="auto-sync-status" :class="{ active: autoSyncActive }" data-testid="auto-sync-status">
+          <span class="auto-sync-dot" aria-hidden="true"></span>
+          <div><strong>{{ autoSyncStatusText }}</strong><small>{{ autoSyncScheduleText }}</small></div>
+        </div>
         <div class="market-sync-form">
           <label for="market-vipdoc-path">通达信 vipdoc 导入源</label>
           <input id="market-vipdoc-path" v-model="form.vipdocPath" data-testid="market-vipdoc-path" type="text" placeholder="/data/vipdoc">
@@ -358,7 +413,7 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
           </div>
         </div>
         <div v-if="marketJob" class="sync-progress" data-testid="market-data-progress">
-          <div class="sync-progress-heading"><span>{{ syncLoading ? syncLabel : '最近一次任务' }}</span><strong>{{ Math.round(marketJob.progress * 100) }}%</strong></div>
+          <div class="sync-progress-heading"><span>{{ marketJobTitle }}</span><strong>{{ Math.round(marketJob.progress * 100) }}%</strong></div>
           <div class="progress-track sync-progress-track"><span :style="{ width: `${Math.round(marketJob.progress * 100)}%` }"></span></div>
           <div class="sync-progress-stats"><span>已处理 <strong>{{ marketJob.total_scanned }}</strong> / {{ marketJob.total_candidates }}</span><span :class="{ negative: marketJob.errors > 0 }">错误 <strong>{{ marketJob.errors }}</strong></span></div>
           <div v-if="marketJob.result" class="sync-result-stats">
