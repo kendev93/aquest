@@ -18,7 +18,8 @@ export const DEFAULT_PRESET_SIGNALS = [
   'indicator_three.accumulation_zone',
 ]
 
-const FORM_STORAGE_KEY = 'indicator-lab.form.v1'
+const FORM_STORAGE_KEY = 'indicator-lab.form.v2'
+const LEGACY_FORM_STORAGE_KEY = 'indicator-lab.form.v1'
 const CONDITION_SETS_STORAGE_KEY = 'indicator-lab.condition-sets.v1'
 
 const CONDITION_OPERATORS = new Set<ConditionOperator>([
@@ -60,6 +61,7 @@ export function loadSavedForm(): Partial<ScreenFormState> {
   if (typeof window === 'undefined') return {}
   try {
     const raw = window.localStorage.getItem(FORM_STORAGE_KEY)
+      ?? window.localStorage.getItem(LEGACY_FORM_STORAGE_KEY)
     if (!raw) return {}
     const parsed = JSON.parse(raw) as Record<string, unknown>
     if (!parsed || typeof parsed !== 'object') return {}
@@ -90,7 +92,9 @@ export function loadSavedForm(): Partial<ScreenFormState> {
       ))
       safe.boards = values
     }
-    if (typeof parsed.workers === 'number' && Number.isFinite(parsed.workers)) safe.workers = parsed.workers
+    if (typeof parsed.workers === 'number' && Number.isFinite(parsed.workers)) {
+      safe.workers = parsed.workers === 2 ? 8 : Math.min(Math.max(Math.round(parsed.workers), 1), 8)
+    }
     if (parsed.period === 'daily') safe.period = parsed.period
     if (typeof parsed.formulaText === 'string') safe.formulaText = parsed.formulaText
     if (Array.isArray(parsed.conditions)) safe.conditions = parseConditions(parsed.conditions)

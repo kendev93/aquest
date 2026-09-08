@@ -347,6 +347,8 @@ class IndicatorCache:
         market: str = "",
         code: str = "",
         timeframe: str = _TIMEFRAME,
+        persistent_read: bool = True,
+        persist: bool = True,
     ) -> dict[str, FormulaResult]:
         started = time.perf_counter()
         try:
@@ -356,6 +358,8 @@ class IndicatorCache:
                 market=market,
                 code=code,
                 timeframe=timeframe,
+                persistent_read=persistent_read,
+                persist=persist,
             )
         finally:
             self._record_latency(started)
@@ -368,6 +372,8 @@ class IndicatorCache:
         market: str = "",
         code: str = "",
         timeframe: str = _TIMEFRAME,
+        persistent_read: bool = True,
+        persist: bool = True,
     ) -> dict[str, FormulaResult]:
         """Load or calculate each requested built-in formula for one series."""
 
@@ -401,7 +407,7 @@ class IndicatorCache:
                 continue
             missing[formula_id] = keys[formula_id]
 
-        persistent_rows = self._persistent_get_many(missing)
+        persistent_rows = self._persistent_get_many(missing) if persistent_read else {}
         to_compute: list[str] = []
         for formula_id, key in missing.items():
             result = self._decode_persistent(
@@ -432,8 +438,50 @@ class IndicatorCache:
             self._memory_put(key, result)
             computed_entries.append((key, result, start, end))
             results[formula_id] = result
-        self._persistent_put_many(computed_entries)
+        if persist:
+            self._persistent_put_many(computed_entries)
         return results
+
+    def persist_results(
+        self,
+        frames: Mapping[tuple[str, str], pd.DataFrame],
+        results_by_key: Mapping[tuple[str, str], Mapping[str, FormulaResult]],
+        *,
+        timeframe: str = _TIMEFRAME,
+    ) -> None:
+        """Persist many already-computed results in one database write."""
+
+        if self._store is None or not results_by_key:
+            return
+        pending: list[tuple[_CacheKey, FormulaResult, date | None, date | None]] = []
+        for (market, code), results in results_by_key.items():
+            frame = frames.get((market, code))
+            if frame is None or not results:
+                continue
+            fingerprint = frame_fingerprint(frame)
+            price_basis = _price_basis(frame)
+            start, end = _date_bounds(frame)
+            for formula_id, result in results.items():
+                definition = self._registry.formula(formula_id)
+                if not result.sufficient_data:
+                    continue
+                pending.append(
+                    (
+                        _CacheKey(
+                            market=str(market).strip().upper(),
+                            code=str(code).strip(),
+                            timeframe=timeframe,
+                            price_basis=price_basis,
+                            formula_id=formula_id,
+                            formula_version=definition.cache_version,
+                            data_fingerprint=fingerprint,
+                        ),
+                        result,
+                        start,
+                        end,
+                    )
+                )
+        self._persistent_put_many(pending)
 
     def metrics(self) -> dict[str, int | float]:
         """Return lightweight counters for benchmark and operational checks."""

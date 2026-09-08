@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from threading import Lock
 from typing import Literal, Protocol
 
+from selector_app.concurrency import MAX_WORKERS
+
 from .engine import ProgressCallback, ScanOutcome, ScreenEngine
 from .models import ScanConfig, ScanReport
 
@@ -47,6 +49,7 @@ class JobState:
     report: ScanReport | None = None
     result_payload: dict[str, object] | None = None
     description: str = ""
+    worker_count: int | None = None
     created_at: float = field(default_factory=time.time)
     finished_at: float | None = None
 
@@ -63,6 +66,7 @@ class JobState:
             "error": self.error,
             "result": self.result_payload,
             "description": self.description,
+            "worker_count": self.worker_count,
             "created_at": self.created_at,
             "finished_at": self.finished_at,
         }
@@ -72,9 +76,11 @@ class ScreenJobRunner:
     def __init__(
         self,
         engine: ScanEngineLike | None = None,
-        max_workers: int = 1,
+        max_workers: int = MAX_WORKERS,
         max_results: int = 100,
     ) -> None:
+        if isinstance(max_workers, bool) or not 1 <= max_workers <= MAX_WORKERS:
+            raise ValueError(f"后台任务并发数必须在 1 到 {MAX_WORKERS} 之间")
         if max_results < 1:
             raise ValueError("任务结果上限必须大于 0")
         self._engine = engine or ScreenEngine()
@@ -91,7 +97,7 @@ class ScreenJobRunner:
         with self._lock:
             if self._shutdown:
                 raise RuntimeError("任务执行器已关闭")
-            self._jobs[job_id] = JobState(job_id=job_id)
+            self._jobs[job_id] = JobState(job_id=job_id, worker_count=config.workers)
             self._executor.submit(self._run, job_id, config)
             self._evict_if_needed_locked()
         return job_id
@@ -111,14 +117,24 @@ class ScreenJobRunner:
                 for state in self._jobs.values()
             )
 
-    def submit_callable(self, func: GenericTask, *, description: str = "") -> str:
+    def submit_callable(
+        self,
+        func: GenericTask,
+        *,
+        description: str = "",
+        worker_count: int | None = MAX_WORKERS,
+    ) -> str:
         """Run a non-screening task on the same lifecycle/executor infrastructure."""
 
         job_id = uuid.uuid4().hex
         with self._lock:
             if self._shutdown:
                 raise RuntimeError("任务执行器已关闭")
-            self._jobs[job_id] = JobState(job_id=job_id, description=description)
+            self._jobs[job_id] = JobState(
+                job_id=job_id,
+                description=description,
+                worker_count=worker_count,
+            )
             self._executor.submit(self._run_callable, job_id, func)
             self._evict_if_needed_locked()
         return job_id

@@ -41,7 +41,7 @@ describe('formula screen form helpers', () => {
     ])
     saveForm(baseForm())
 
-    expect(loadSavedForm()).toMatchObject({ mode: 'preset' })
+    expect(loadSavedForm()).toMatchObject({ mode: 'preset', workers: 8 })
   })
 
   it('rejects an empty selection and invalid minimum matches', () => {

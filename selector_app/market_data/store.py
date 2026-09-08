@@ -808,6 +808,15 @@ class DuckDbMarketDataStore:
             ).fetchone()
         return row is not None
 
+    def list_provisional_symbols(self) -> set[tuple[str, str]]:
+        """Read all symbols with provisional bars in one bounded query."""
+
+        with self._connect(read_only=True) as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT market, code FROM daily_bars WHERE bar_status = 'provisional'"
+            ).fetchall()
+        return {(str(market), str(code)) for market, code in rows}
+
     def read_many_bars(
         self,
         instruments: Iterable[InstrumentRef | StockRef] | None = None,
@@ -861,6 +870,65 @@ class DuckDbMarketDataStore:
             if symbols:
                 connection.unregister("_requested_symbols")
             return self._frame_from_query(result)
+
+    def read_latest_bars(
+        self,
+        instruments: Iterable[InstrumentRef | StockRef],
+        *,
+        count: int = 2,
+        include_provisional: bool = False,
+    ) -> pd.DataFrame:
+        """Read a bounded latest-bar snapshot for many instruments in one query."""
+
+        if isinstance(count, bool) or count < 1:
+            raise ValueError("最新行情条数必须大于 0")
+        requested = list(instruments)
+        if not requested:
+            return self._frame_from_query(pd.DataFrame())
+        symbol_frame = pd.DataFrame(
+            [{"market": item.market, "code": item.code} for item in requested]
+        ).drop_duplicates()
+        status_filter = "" if include_provisional else "WHERE bars.bar_status = 'completed'"
+        query = f"""
+            WITH ranked AS (
+                SELECT
+                    bars.market,
+                    bars.code,
+                    bars.instrument_type,
+                    bars.board,
+                    bars.trade_date,
+                    bars.open,
+                    bars.high,
+                    bars.low,
+                    bars.close,
+                    bars.volume,
+                    bars.amount,
+                    bars.source,
+                    bars.price_basis,
+                    bars.bar_status,
+                    bars.imported_at,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY bars.market, bars.code
+                        ORDER BY bars.trade_date DESC
+                    ) AS row_number
+                FROM daily_bars AS bars
+                INNER JOIN _requested_symbols AS requested
+                    ON bars.market = requested.market AND bars.code = requested.code
+                {status_filter}
+            )
+            SELECT market, code, instrument_type, board, trade_date, open, high, low, close,
+                   volume, amount, source, price_basis, bar_status, imported_at
+            FROM ranked
+            WHERE row_number <= ?
+            ORDER BY market, code, trade_date
+        """
+        with self._connect(read_only=True) as connection:
+            connection.register("_requested_symbols", symbol_frame)
+            try:
+                result = connection.execute(query, [count]).df()
+            finally:
+                connection.unregister("_requested_symbols")
+        return self._frame_from_query(result)
 
     def list_instruments(
         self,

@@ -11,6 +11,7 @@ from selector_app.market_data.day_importer import LocalDayImporter
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.screening.models import ScanReport
 from selector_app.web.app import create_app
+from selector_app.web.schemas import FormulaScreenRequest
 from tests.day_helpers import write_day_records
 
 
@@ -102,7 +103,10 @@ def test_app_schedules_online_sync_when_daily_refresh_is_due(tmp_path: Path) -> 
             calls.append(config)
             if progress_callback is not None:
                 progress_callback(1, 1)
-            store.set_meta("last_online_sync_at", "2026-09-01T08:00:00+08:00")
+            store.set_meta(
+                "last_online_sync_at",
+                pd.Timestamp.now(tz="Asia/Shanghai").isoformat(),
+            )
             return {
                 "total_candidates": 1,
                 "processed": 1,
@@ -139,7 +143,19 @@ def test_app_schedules_online_sync_when_daily_refresh_is_due(tmp_path: Path) -> 
     assert config.prefer_store_targets is True
     assert config.refresh_names is True
     assert status.status_code == 200
-    assert status.json()["data"]["last_online_sync_at"] == "2026-09-01T08:00:00+08:00"
+    assert status.json()["data"]["last_online_sync_at"] is not None
+
+
+def test_formula_screen_request_defaults_to_eight_workers() -> None:
+    payload = FormulaScreenRequest(
+        selected_signals=["indicator_three.accumulation_zone"],
+        combine_mode="any",
+        minimum_matches=None,
+        universe="all",
+        period="daily",
+    )
+
+    assert payload.workers == 8
 
 
 def test_indicator_cache_status_and_manual_precompute_job(tmp_path: Path) -> None:

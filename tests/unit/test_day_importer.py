@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import struct
+import time
 from datetime import datetime
 from pathlib import Path
+from threading import Lock
 from zoneinfo import ZoneInfo
 
+import selector_app.market_data.day_importer as day_importer_module
 from selector_app.market_data.day_importer import LocalDayImporter
 from selector_app.market_data.store import DuckDbMarketDataStore
 
@@ -119,3 +122,37 @@ def test_importer_marks_missing_source_without_deleting_history(tmp_path: Path) 
     assert report.missing_files == 1
     assert store.source_file(vipdoc, "sh/lday/sh600000.day")["status"] == "missing"
     assert len(store.read_bars("SH", "600000")) == 1
+
+
+def test_importer_decodes_independent_day_files_with_eight_workers(
+    tmp_path: Path, monkeypatch
+) -> None:
+    vipdoc = tmp_path / "vipdoc"
+    for index in range(16):
+        _append_day(vipdoc / "sh" / "lday" / f"sh600{index:03d}.day", 20240102)
+
+    original = day_importer_module.read_day_file
+    lock = Lock()
+    active = 0
+    max_active = 0
+
+    def tracking_read_day_file(*args, **kwargs):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        try:
+            time.sleep(0.02)
+            return original(*args, **kwargs)
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(day_importer_module, "read_day_file", tracking_read_day_file)
+    report = LocalDayImporter(DuckDbMarketDataStore(tmp_path / "market.duckdb")).import_vipdoc(
+        vipdoc
+    )
+
+    assert report.imported_files == 16
+    assert report.errors == 0
+    assert 1 < max_active <= 8

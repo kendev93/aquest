@@ -133,6 +133,7 @@ export interface JobState {
   errors: number
   skipped: number
   error: string | null
+  worker_count?: number | null
 }
 
 export interface MarketSyncResult {
@@ -168,6 +169,7 @@ export interface MarketSyncJobState {
   total_scanned: number
   errors: number
   error: string | null
+  worker_count?: number | null
   result: MarketSyncResult | null
 }
 

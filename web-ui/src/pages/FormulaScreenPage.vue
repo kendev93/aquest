@@ -56,7 +56,7 @@ const form = reactive<ScreenFormState>({
   universeFile: savedForm.universeFile ?? '',
   instrumentTypes: savedForm.instrumentTypes ?? [],
   boards: savedForm.boards ?? [],
-  workers: savedForm.workers ?? 2,
+  workers: savedForm.workers ?? 8,
   period: savedForm.period ?? 'daily',
   formulaText: savedForm.formulaText ?? '',
   formulaParameters: savedForm.formulaParameters ?? {},
@@ -601,7 +601,7 @@ watch(() => form.formulaText, (value) => {
             </fieldset>
 
             <fieldset class="form-section compact-fields">
-              <div><label for="workers">并发进程数</label><input id="workers" v-model.number="form.workers" data-testid="workers" type="number" min="1" max="32"></div>
+              <div><label for="workers">并发 worker 数</label><input id="workers" v-model.number="form.workers" data-testid="workers" type="number" min="1" max="8"></div>
               <div><label for="period">周期</label><select id="period" v-model="form.period" data-testid="period"><option value="daily">日线</option></select></div>
             </fieldset>
           </div>
@@ -721,6 +721,7 @@ watch(() => form.formulaText, (value) => {
             <div><span>已扫描</span><strong data-testid="scanned-count">{{ job?.total_scanned ?? 0 }}<small>/ {{ job?.total_candidates ?? 0 }}</small></strong></div>
             <div><span>命中条件</span><strong class="positive" data-testid="signal-count">{{ resultMeta?.total_signals ?? job?.total_signals ?? 0 }}</strong></div>
             <div><span>失败 / 跳过</span><strong data-testid="error-count">{{ resultMeta?.errors ?? job?.errors ?? 0 }} / {{ resultMeta?.skipped ?? job?.skipped ?? 0 }}</strong></div>
+            <div><span>worker</span><strong>{{ job?.worker_count ?? form.workers }}</strong></div>
           </div>
           <div class="progress-track" aria-label="扫描进度"><span :style="{ width: `${progressPercent}%` }"></span></div>
 

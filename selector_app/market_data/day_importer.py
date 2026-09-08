@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import hashlib
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 from zoneinfo import ZoneInfo
+
+from selector_app.concurrency import MAX_WORKERS
 
 from .day_format import (
     DayFileError,
+    DayFileResult,
     classify_board,
     classify_instrument,
     discover_day_files,
@@ -22,6 +28,30 @@ from .store import DuckDbMarketDataStore
 
 ProgressCallback = Callable[[int, int], None]
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+
+
+@dataclass(frozen=True)
+class _ImportCandidate:
+    index: int
+    path: Path
+    relative_path: str
+    market: str
+    code: str
+    instrument_type: InstrumentType
+    board: InstrumentBoard
+    old: Mapping[str, object] | None
+    needs_finalize: bool
+
+
+@dataclass(frozen=True)
+class _PreparedImport:
+    candidate: _ImportCandidate
+    size: int
+    mtime_ns: int
+    checksum: str | None
+    status: Literal["unchanged", "ready", "failed"]
+    parsed: DayFileResult | None = None
+    error: str | None = None
 
 
 def _sha256(path: Path) -> str:
@@ -62,7 +92,9 @@ class LocalDayImporter:
             instrument_types=instrument_types,
             boards=boards,
         )
-        previous = {str(item["relative_path"]): item for item in self._store.source_files(root)}
+        previous: dict[str, Mapping[str, object]] = {
+            str(item["relative_path"]): item for item in self._store.source_files(root)
+        }
         failure_reasons: Counter[str] = Counter()
         imported_files = 0
         updated_files = 0
@@ -75,6 +107,19 @@ class LocalDayImporter:
         provisional_bars = 0
         errors = 0
         seen: set[str] = set()
+        progress_count = 0
+
+        def report_progress() -> None:
+            nonlocal progress_count
+            progress_count += 1
+            self._report_progress(progress_callback, progress_count, len(files))
+
+        candidates: list[_ImportCandidate] = []
+        current = self._clock()
+        after_market_close = (current.hour, current.minute) >= (15, 5)
+        provisional_symbols = (
+            self._store.list_provisional_symbols() if after_market_close else set()
+        )
 
         for index, path in enumerate(files, start=1):
             relative_path = path.relative_to(root).as_posix()
@@ -99,108 +144,130 @@ class LocalDayImporter:
                     status="skipped",
                     error="unknown_instrument",
                 )
-                self._report_progress(progress_callback, index, len(files))
+                report_progress()
                 continue
             if not scope.matches(market, instrument_type, board):
                 skipped_files += 1
                 filtered_files += 1
                 failure_reasons["scope_filtered"] += 1
-                self._report_progress(progress_callback, index, len(files))
+                report_progress()
                 continue
-
             old = previous.get(relative_path)
-            current = self._clock()
-            after_market_close = (current.hour, current.minute) >= (15, 5)
-            needs_finalize = (
-                old is not None
-                and after_market_close
-                and self._store.has_provisional_bars(market, code)
-            )
-            if (
-                old is not None
-                and old["status"] == "imported"
-                and int(str(old["size"])) == stat.st_size
-                and int(str(old["mtime_ns"])) == stat.st_mtime_ns
-                and not needs_finalize
-            ):
-                unchanged_files += 1
-                self._report_progress(progress_callback, index, len(files))
-                continue
-
-            checksum = _sha256(path)
-            if (
-                old is not None
-                and old.get("sha256") == checksum
-                and old["status"] == "imported"
-                and not needs_finalize
-            ):
-                unchanged_files += 1
-                self._store.record_source_file(
-                    source_root=root,
+            needs_finalize = old is not None and (market, code) in provisional_symbols
+            candidates.append(
+                _ImportCandidate(
+                    index=index,
+                    path=path,
                     relative_path=relative_path,
                     market=market,
                     code=code,
                     instrument_type=instrument_type,
-                    size=stat.st_size,
-                    mtime_ns=stat.st_mtime_ns,
-                    sha256=checksum,
-                    status="imported",
-                )
-                self._report_progress(progress_callback, index, len(files))
-                continue
-
-            try:
-                parsed = read_day_file(path, now=current)
-                if parsed.frame.empty:
-                    raise DayFileError("日线文件没有完整记录")
-                count = self._store.replace_local_bars(
-                    market,
-                    code,
-                    instrument_type,
-                    parsed.frame,
-                    source_path=str(path),
                     board=board,
+                    old=old,
+                    needs_finalize=needs_finalize,
                 )
-            except (OSError, ValueError) as exc:
-                errors += 1
-                reason = str(exc).strip()[:200] or type(exc).__name__
-                failure_reasons[reason] += 1
-                self._store.record_source_file(
-                    source_root=root,
-                    relative_path=relative_path,
-                    market=market,
-                    code=code,
-                    instrument_type=instrument_type,
-                    size=stat.st_size,
-                    mtime_ns=stat.st_mtime_ns,
-                    sha256=checksum,
-                    status="failed",
-                    error=reason,
-                )
-                self._report_progress(progress_callback, index, len(files))
-                continue
-
-            if old is None:
-                imported_files += 1
-                imported_instruments += 1
-            else:
-                updated_files += 1
-                replaced_instruments += 1
-            imported_bars += count
-            provisional_bars += int((parsed.frame["bar_status"] == "provisional").sum())
-            self._store.record_source_file(
-                source_root=root,
-                relative_path=relative_path,
-                market=market,
-                code=code,
-                instrument_type=instrument_type,
-                size=stat.st_size,
-                mtime_ns=stat.st_mtime_ns,
-                sha256=checksum,
-                status="imported",
-                imported=True,
             )
-            self._report_progress(progress_callback, index, len(files))
+
+        if candidates:
+            with ThreadPoolExecutor(
+                max_workers=min(MAX_WORKERS, len(candidates)),
+                thread_name_prefix="day-import",
+            ) as executor:
+                futures = {
+                    executor.submit(self._prepare_import, candidate, current): candidate
+                    for candidate in candidates
+                }
+                for future in as_completed(futures):
+                    prepared = future.result()
+                    candidate = prepared.candidate
+                    old = candidate.old
+                    if prepared.status == "unchanged":
+                        unchanged_files += 1
+                        if prepared.checksum is not None:
+                            self._store.record_source_file(
+                                source_root=root,
+                                relative_path=candidate.relative_path,
+                                market=candidate.market,
+                                code=candidate.code,
+                                instrument_type=candidate.instrument_type,
+                                size=prepared.size,
+                                mtime_ns=prepared.mtime_ns,
+                                sha256=prepared.checksum,
+                                status="imported",
+                            )
+                        report_progress()
+                        continue
+                    if prepared.status == "failed":
+                        errors += 1
+                        reason = prepared.error or "日线文件解析失败"
+                        failure_reasons[reason] += 1
+                        self._store.record_source_file(
+                            source_root=root,
+                            relative_path=candidate.relative_path,
+                            market=candidate.market,
+                            code=candidate.code,
+                            instrument_type=candidate.instrument_type,
+                            size=prepared.size,
+                            mtime_ns=prepared.mtime_ns,
+                            sha256=prepared.checksum,
+                            status="failed",
+                            error=reason,
+                        )
+                        report_progress()
+                        continue
+
+                    assert prepared.parsed is not None
+                    try:
+                        count = self._store.replace_local_bars(
+                            candidate.market,
+                            candidate.code,
+                            candidate.instrument_type,
+                            prepared.parsed.frame,
+                            source_path=str(candidate.path),
+                            board=candidate.board,
+                        )
+                    except (OSError, ValueError) as exc:
+                        errors += 1
+                        reason = str(exc).strip()[:200] or type(exc).__name__
+                        failure_reasons[reason] += 1
+                        self._store.record_source_file(
+                            source_root=root,
+                            relative_path=candidate.relative_path,
+                            market=candidate.market,
+                            code=candidate.code,
+                            instrument_type=candidate.instrument_type,
+                            size=prepared.size,
+                            mtime_ns=prepared.mtime_ns,
+                            sha256=prepared.checksum,
+                            status="failed",
+                            error=reason,
+                        )
+                        report_progress()
+                        continue
+
+                    if old is None:
+                        imported_files += 1
+                        imported_instruments += 1
+                    else:
+                        updated_files += 1
+                        replaced_instruments += 1
+                    imported_bars += count
+                    provisional_bars += int(
+                        (prepared.parsed.frame["bar_status"] == "provisional").sum()
+                    )
+                    self._store.record_source_file(
+                        source_root=root,
+                        relative_path=candidate.relative_path,
+                        market=candidate.market,
+                        code=candidate.code,
+                        instrument_type=candidate.instrument_type,
+                        size=prepared.size,
+                        mtime_ns=prepared.mtime_ns,
+                        sha256=prepared.checksum,
+                        status="imported",
+                        imported=True,
+                    )
+                    report_progress()
 
         missing_files = 0
         for relative_path in previous:
@@ -229,6 +296,66 @@ class LocalDayImporter:
             provisional_bars=provisional_bars,
             errors=errors,
             failure_reasons=dict(failure_reasons),
+        )
+
+    def _prepare_import(
+        self,
+        candidate: _ImportCandidate,
+        current: datetime,
+    ) -> _PreparedImport:
+        stat = candidate.path.stat()
+        old = candidate.old
+        if (
+            old is not None
+            and old["status"] == "imported"
+            and int(str(old["size"])) == stat.st_size
+            and int(str(old["mtime_ns"])) == stat.st_mtime_ns
+            and not candidate.needs_finalize
+        ):
+            return _PreparedImport(
+                candidate=candidate,
+                size=stat.st_size,
+                mtime_ns=stat.st_mtime_ns,
+                checksum=None,
+                status="unchanged",
+            )
+
+        checksum = _sha256(candidate.path)
+        if (
+            old is not None
+            and old.get("sha256") == checksum
+            and old["status"] == "imported"
+            and not candidate.needs_finalize
+        ):
+            return _PreparedImport(
+                candidate=candidate,
+                size=stat.st_size,
+                mtime_ns=stat.st_mtime_ns,
+                checksum=checksum,
+                status="unchanged",
+            )
+
+        try:
+            parsed = read_day_file(candidate.path, now=current)
+            if parsed.frame.empty:
+                raise DayFileError("日线文件没有完整记录")
+        except (OSError, ValueError) as exc:
+            reason = str(exc).strip()[:200] or type(exc).__name__
+            return _PreparedImport(
+                candidate=candidate,
+                size=stat.st_size,
+                mtime_ns=stat.st_mtime_ns,
+                checksum=checksum,
+                status="failed",
+                error=reason,
+            )
+        return _PreparedImport(
+            candidate=candidate,
+            size=stat.st_size,
+            mtime_ns=stat.st_mtime_ns,
+            checksum=checksum,
+            status="ready",
+            parsed=parsed,
         )
 
     @staticmethod

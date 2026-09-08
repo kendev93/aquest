@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from threading import Event, Lock
 
 from selector_app.screening.jobs import ScreenJobRunner, TaskUserError
 
@@ -47,4 +48,36 @@ def test_runner_preserves_safe_user_error_for_background_tasks() -> None:
         assert state is not None
         assert state.error == "日期范围内没有可用行情"
     finally:
+        runner.shutdown()
+
+
+def test_runner_default_starts_eight_background_tasks_concurrently() -> None:
+    runner = ScreenJobRunner(max_results=16)
+    started = Event()
+    release = Event()
+    lock = Lock()
+    active = 0
+    max_active = 0
+
+    def task(_progress):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+            if active == 8:
+                started.set()
+        release.wait(timeout=2)
+        with lock:
+            active -= 1
+        return {}
+
+    try:
+        job_ids = [runner.submit_callable(task, description="并发测试") for _ in range(8)]
+        assert started.wait(timeout=2)
+        release.set()
+        for job_id in job_ids:
+            wait_until_complete(runner, job_id)
+        assert max_active == 8
+    finally:
+        release.set()
         runner.shutdown()

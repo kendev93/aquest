@@ -9,6 +9,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from selector_app.backtest.models import BacktestConfig
+from selector_app.concurrency import MAX_WORKERS
 from selector_app.formulas.custom import FormulaParseError, custom_output_id, parse_formula
 from selector_app.formulas.registry import FORMULA_REGISTRY
 from selector_app.market_data.models import InstrumentBoard, InstrumentType
@@ -155,7 +156,7 @@ class FormulaScreenRequest(BaseModel):
     instrument_types: list[InstrumentType] | None = Field(default=None, max_length=4)
     boards: list[InstrumentBoard] | None = Field(default=None, max_length=7)
     vipdoc_path: str = Field(default="", max_length=1024)
-    workers: int = Field(default=1, ge=1, le=32)
+    workers: int = Field(default=MAX_WORKERS, ge=1, le=MAX_WORKERS)
     period: Literal["daily"] = "daily"
     formula_text: str | None = Field(default=None, max_length=20_000)
     formula_parameters: dict[str, float] = Field(default_factory=dict, max_length=32)

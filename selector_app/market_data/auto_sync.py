@@ -18,7 +18,17 @@ from selector_app.screening.jobs import ScreenJobRunner
 logger = logging.getLogger(__name__)
 
 AUTO_SYNC_DESCRIPTION = "自动行情同步"
-ACTIVE_SYNC_DESCRIPTIONS = frozenset({"行情同步", AUTO_SYNC_DESCRIPTION})
+ACTIVE_DATA_JOB_DESCRIPTIONS = frozenset(
+    {
+        "本地行情导入",
+        "本地行情自动导入",
+        "行情同步",
+        AUTO_SYNC_DESCRIPTION,
+        "指标预计算",
+    }
+)
+# Compatibility alias for embedders that used the narrower first-release name.
+ACTIVE_SYNC_DESCRIPTIONS = ACTIVE_DATA_JOB_DESCRIPTIONS
 DEFAULT_AUTO_SYNC_INTERVAL_SECONDS = 15 * 60
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
@@ -76,7 +86,9 @@ class AutomaticMarketSyncScheduler:
 
         if not self._enabled:
             return None
-        if self._has_active_auto_job() or self._runner.has_active_jobs(ACTIVE_SYNC_DESCRIPTIONS):
+        if self._has_active_auto_job() or self._runner.has_active_jobs(
+            ACTIVE_DATA_JOB_DESCRIPTIONS
+        ):
             return None
 
         status = self._store.status()

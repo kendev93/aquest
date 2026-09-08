@@ -4,15 +4,23 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime
+from threading import Lock
 from typing import Literal, Protocol, cast
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from selector_app.concurrency import MAX_WORKERS
 from selector_app.market_data.day_format import classify_board, classify_instrument
-from selector_app.market_data.models import InstrumentBoard, InstrumentType, MarketCode
+from selector_app.market_data.models import (
+    InstrumentBoard,
+    InstrumentRef,
+    InstrumentType,
+    MarketCode,
+)
 from selector_app.market_data.scope import InstrumentScope
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.tdx_protocol.client import TdxClient
@@ -35,6 +43,7 @@ class MarketSyncConfig:
     boards: tuple[InstrumentBoard, ...] | None = None
     prefer_store_targets: bool = False
     refresh_names: bool = False
+    sync_workers: int = 8
 
     def __post_init__(self) -> None:
         if self.universe not in {"all", "sh", "sz"}:
@@ -47,6 +56,8 @@ class MarketSyncConfig:
             raise ValueError("行情同步目标来源开关必须是布尔值")
         if not isinstance(self.refresh_names, bool):
             raise ValueError("行情名称刷新开关必须是布尔值")
+        if isinstance(self.sync_workers, bool) or not 1 <= self.sync_workers <= MAX_WORKERS:
+            raise ValueError(f"行情同步并发数必须在 1 到 {MAX_WORKERS} 之间")
         scope = InstrumentScope.from_values(
             universe=self.universe,
             instrument_types=self.instrument_types,
@@ -77,6 +88,16 @@ class MarketSyncReport:
             "errors": self.errors,
             "failure_reasons": dict(self.failure_reasons),
         }
+
+
+@dataclass(frozen=True)
+class _SyncBatchReport:
+    processed: int
+    updated_files: int
+    unchanged_files: int
+    written_bars: int
+    errors: int
+    failure_reasons: Mapping[str, int]
 
 
 class TdxMarketClient(Protocol):
@@ -126,37 +147,51 @@ class TdxMarketSync:
         config: MarketSyncConfig,
         progress_callback: ProgressCallback | None = None,
     ) -> MarketSyncReport:
+        factory = self._client_factory or _default_client
+        with factory(config.timeout) as client:
+            targets = self._list_targets(client, config)
+        total = len(targets)
         failure_reasons: Counter[str] = Counter()
         processed = 0
         updated_files = 0
         unchanged_files = 0
         written_bars = 0
-        factory = self._client_factory or _default_client
-        with factory(config.timeout) as client:
-            targets = self._list_targets(client, config)
-            total = len(targets)
-            for index, (market, code, instrument_type, board, name) in enumerate(targets, start=1):
-                try:
-                    written = self._sync_one(
-                        client,
-                        market,
-                        code,
-                        instrument_type,
-                        board,
-                        name,
-                        config,
-                    )
-                    if written > 0:
-                        updated_files += 1
-                        written_bars += written
-                    else:
-                        unchanged_files += 1
-                except Exception as exc:  # noqa: BLE001 - isolate one instrument
-                    reason = str(exc).strip()[:200] or type(exc).__name__
-                    failure_reasons[reason] += 1
-                processed += 1
+        if targets:
+            existing_by_key = self._latest_existing_bars(targets)
+            batches = _partition_targets(targets, config.sync_workers)
+            progress_lock = Lock()
+            progress_count = 0
+
+            def on_target_done() -> None:
+                nonlocal progress_count
+                with progress_lock:
+                    progress_count += 1
+                    current = progress_count
                 if progress_callback is not None:
-                    progress_callback(processed, total)
+                    progress_callback(current, total)
+
+            with ThreadPoolExecutor(
+                max_workers=len(batches),
+                thread_name_prefix="tdx-sync",
+            ) as executor:
+                futures = {
+                    executor.submit(
+                        self._sync_batch,
+                        batch,
+                        factory,
+                        config,
+                        existing_by_key,
+                        on_target_done,
+                    ): batch
+                    for batch in batches
+                }
+                for future in as_completed(futures):
+                    batch_report = future.result()
+                    processed += batch_report.processed
+                    updated_files += batch_report.updated_files
+                    unchanged_files += batch_report.unchanged_files
+                    written_bars += batch_report.written_bars
+                    failure_reasons.update(batch_report.failure_reasons)
         self._store.set_meta("last_online_sync_at", self._clock().isoformat())
         return MarketSyncReport(
             total_candidates=total,
@@ -167,6 +202,86 @@ class TdxMarketSync:
             errors=sum(failure_reasons.values()),
             failure_reasons=dict(failure_reasons),
         )
+
+    def _sync_batch(
+        self,
+        batch: list[InstrumentTarget],
+        factory: ClientFactory,
+        config: MarketSyncConfig,
+        existing_by_key: Mapping[tuple[str, str], pd.DataFrame],
+        target_done: Callable[[], None],
+    ) -> _SyncBatchReport:
+        failure_reasons: Counter[str] = Counter()
+        processed = 0
+        updated_files = 0
+        unchanged_files = 0
+        written_bars = 0
+        try:
+            with factory(config.timeout) as client:
+                for market, code, instrument_type, board, name in batch:
+                    try:
+                        written = self._sync_one(
+                            client,
+                            market,
+                            code,
+                            instrument_type,
+                            board,
+                            name,
+                            config,
+                            existing=existing_by_key.get((market, code), pd.DataFrame()),
+                        )
+                        if written > 0:
+                            updated_files += 1
+                            written_bars += written
+                        else:
+                            unchanged_files += 1
+                    except Exception as exc:  # noqa: BLE001 - isolate one instrument
+                        reason = str(exc).strip()[:200] or type(exc).__name__
+                        failure_reasons[reason] += 1
+                        # An exception for one target should not stop the batch.
+                    processed += 1
+                    target_done()
+        except Exception as exc:  # noqa: BLE001 - isolate one failed worker connection
+            reason = str(exc).strip()[:200] or type(exc).__name__
+            remaining = len(batch) - processed
+            failure_reasons[reason] += remaining
+            for _ in range(remaining):
+                processed += 1
+                target_done()
+        return _SyncBatchReport(
+            processed=processed,
+            updated_files=updated_files,
+            unchanged_files=unchanged_files,
+            written_bars=written_bars,
+            errors=sum(failure_reasons.values()),
+            failure_reasons=dict(failure_reasons),
+        )
+
+    def _latest_existing_bars(
+        self,
+        targets: list[InstrumentTarget],
+    ) -> dict[tuple[str, str], pd.DataFrame]:
+        refs = [
+            InstrumentRef(
+                market=market,
+                code=code,
+                instrument_type=instrument_type,
+                board=board,
+                name=name,
+            )
+            for market, code, instrument_type, board, name in targets
+        ]
+        latest = self._store.read_latest_bars(
+            refs,
+            count=_LATEST_PROBE_BARS,
+            include_provisional=True,
+        )
+        if latest.empty:
+            return {}
+        return {
+            (str(market), str(code)): group.reset_index(drop=True)
+            for (market, code), group in latest.groupby(["market", "code"], sort=False)
+        }
 
     def _list_targets(
         self,
@@ -251,8 +366,18 @@ class TdxMarketSync:
         board: InstrumentBoard,
         name: str | None,
         config: MarketSyncConfig,
+        *,
+        existing: pd.DataFrame | None = None,
     ) -> int:
-        existing = self._store.read_bars(market, code, include_provisional=True)
+        existing = (
+            existing
+            if existing is not None
+            else self._store.read_bars(
+                market,
+                code,
+                include_provisional=True,
+            )
+        )
         if existing.empty:
             frame = client.get_security_bars(
                 _market_enum(market), code, KlineCategory.DAY, 0, config.bars
@@ -288,6 +413,13 @@ class TdxMarketSync:
             return 0
         written, _updated = self._store.upsert_online_bars(normalized)
         return written
+
+
+def _partition_targets(
+    targets: list[InstrumentTarget], worker_count: int
+) -> list[list[InstrumentTarget]]:
+    batch_count = min(max(worker_count, 1), len(targets))
+    return [targets[index::batch_count] for index in range(batch_count)]
 
 
 def _to_market(value: object) -> MarketCode | None:

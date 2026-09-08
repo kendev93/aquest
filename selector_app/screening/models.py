@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Literal
 
+from selector_app.concurrency import MAX_WORKERS
 from selector_app.market_data.models import InstrumentBoard, InstrumentType
 from selector_app.market_data.scope import InstrumentScope
 
@@ -63,6 +64,8 @@ class ScanConfig:
     conditions: tuple[ScreenCondition, ...] = ()
 
     def __post_init__(self) -> None:
+        if isinstance(self.workers, bool) or not 1 <= self.workers <= MAX_WORKERS:
+            raise ValueError(f"扫描并发数必须在 1 到 {MAX_WORKERS} 之间")
         scope = InstrumentScope.from_values(
             universe=str(self.universe),
             instrument_types=self.instrument_types,

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime
 from pathlib import Path
+from threading import Lock
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -121,3 +123,50 @@ def test_sync_uses_completed_bar_after_close(tmp_path: Path) -> None:
 
     assert report.written_bars == 6
     assert service._store.read_bars("SH", "600000").iloc[-1]["date"] == pd.Timestamp("2026-08-26")
+
+
+def test_sync_uses_eight_workers_without_duplicate_target_requests(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    frame = bars_frame()
+    store_frame = frame.rename(columns={"vol": "volume"}).copy()
+    store_frame["bar_status"] = "completed"
+    codes = [f"600{index:03d}" for index in range(16)]
+    for code in codes:
+        store.replace_local_bars("SH", code, "stock", store_frame)
+
+    lock = Lock()
+    active = 0
+    max_active = 0
+    requests: list[str] = []
+
+    class TrackingClient(FakeClient):
+        def get_security_bars(
+            self, market: object, code: str, category: object, start: int, count: int
+        ) -> pd.DataFrame:
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+                requests.append(code)
+            try:
+                time.sleep(0.02)
+                return super().get_security_bars(market, code, category, start, count)
+            finally:
+                with lock:
+                    active -= 1
+
+    client = FakeClient()
+    service = TdxMarketSync(
+        store=store,
+        client_factory=lambda _timeout: TrackingClient(frame=client.frame),
+    )
+
+    report = service.sync(
+        MarketSyncConfig(universe="sh", prefer_store_targets=True, sync_workers=8)
+    )
+
+    assert report.total_candidates == len(codes)
+    assert report.processed == len(codes)
+    assert sorted(requests) == sorted(codes)
+    assert max_active > 1
+    assert max_active <= 8

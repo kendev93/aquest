@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import time
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
+from threading import Lock
 
 import numpy as np
 import pandas as pd
@@ -282,6 +284,46 @@ def test_precompute_service_materializes_all_builtin_formulas(tmp_path: Path) ->
     )
     assert cold_cache.metrics()["persistent_hits"] == 3
     assert cold_cache.metrics()["computed"] == 0
+
+
+def test_precompute_uses_eight_workers_for_independent_instruments(tmp_path: Path) -> None:
+    refs = [
+        StockRef(
+            market="SH",
+            code=f"600{index:03d}",
+            path=tmp_path,
+        )
+        for index in range(16)
+    ]
+    lock = Lock()
+    active = 0
+    max_active = 0
+
+    class TrackingAdapter:
+        def list_stock_refs(self, *_args, **_kwargs):
+            return refs
+
+        def read_stock(self, _ref):
+            nonlocal active, max_active
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            try:
+                time.sleep(0.02)
+                return _bars(120)
+            finally:
+                with lock:
+                    active -= 1
+
+    report = IndicatorPrecomputeService(
+        adapter=TrackingAdapter(),
+        cache=IndicatorCache(),
+    ).run(vipdoc_path=str(tmp_path))
+
+    assert report.total_candidates == len(refs)
+    assert report.processed == len(refs)
+    assert report.errors == 0
+    assert 1 < max_active <= 8
 
 
 def test_custom_formula_cache_is_separated_by_source_and_parameters(tmp_path: Path) -> None:
