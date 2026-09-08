@@ -81,18 +81,18 @@ def _condition_mask(
     valid = np.isfinite(left) & np.isfinite(right)
     operator = condition.operator
     if operator == "gt":
-        return valid & (left > right)
+        return np.asarray(valid & (left > right), dtype=bool)
     if operator == "gte":
-        return valid & (left >= right)
+        return np.asarray(valid & (left >= right), dtype=bool)
     if operator == "lt":
-        return valid & (left < right)
+        return np.asarray(valid & (left < right), dtype=bool)
     if operator == "lte":
-        return valid & (left <= right)
+        return np.asarray(valid & (left <= right), dtype=bool)
     equality = np.asarray(np.isclose(left, right, rtol=1e-9, atol=1e-12), dtype=bool)
     if operator == "eq":
-        return valid & equality
+        return np.asarray(valid & equality, dtype=bool)
     if operator == "neq":
-        return valid & ~equality
+        return np.asarray(valid & ~equality, dtype=bool)
 
     result = np.zeros(len(left), dtype=bool)
     if len(left) < 2:

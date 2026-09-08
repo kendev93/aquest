@@ -107,7 +107,9 @@ def _serialize_arrays(
     arrays: dict[str, np.ndarray], names: tuple[str, ...], *, dtype: type
 ) -> bytes:
     if names:
-        matrix = np.stack([np.asarray(arrays[name], dtype=dtype) for name in names], axis=0)
+        matrix: np.ndarray = np.stack(
+            [np.asarray(arrays[name], dtype=dtype) for name in names], axis=0
+        )
     else:
         matrix = np.empty((0, 0), dtype=dtype)
     buffer = io.BytesIO()
@@ -133,7 +135,7 @@ def _deserialize_arrays(
     if len(raw) > _MAX_CACHE_BLOB_BYTES:
         raise ValueError("指标缓存内容过大")
     try:
-        matrix = np.asarray(np.load(io.BytesIO(raw), allow_pickle=False), dtype=dtype)
+        matrix: np.ndarray = np.asarray(np.load(io.BytesIO(raw), allow_pickle=False), dtype=dtype)
     except (OSError, ValueError, EOFError) as exc:
         raise ValueError("指标缓存内容无效") from exc
     if matrix.ndim != 2 or matrix.shape != (len(names), data_length):
