@@ -92,6 +92,20 @@ describe('FormulaScreenPage', () => {
     expect(api.createJob).not.toHaveBeenCalled()
   })
 
+  it('shows the condition AND/OR selector and defaults to all conditions', async () => {
+    const wrapper = mount(FormulaScreenPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="rule-mode-conditions"]').trigger('click')
+    await flushPromises()
+
+    const combineMode = wrapper.get('[data-testid="condition-combine-mode"]')
+    expect((combineMode.element as HTMLSelectElement).value).toBe('all')
+
+    await combineMode.setValue('any')
+    expect((combineMode.element as HTMLSelectElement).value).toBe('any')
+  })
+
   it('distinguishes metadata loading failures from scan failures', async () => {
     vi.mocked(api.fetchMetadata).mockRejectedValueOnce(new Error('metadata network down'))
     const wrapper = mount(FormulaScreenPage)
@@ -128,6 +142,8 @@ describe('FormulaScreenPage', () => {
 
     expect(api.createJob).toHaveBeenCalledWith(expect.objectContaining({
       selected_signals: [],
+      combine_mode: 'all',
+      minimum_matches: null,
       conditions: [{
         left_value: 'indicator_three.var1',
         operator: 'lt',

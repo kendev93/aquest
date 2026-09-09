@@ -143,9 +143,14 @@ function setMode(mode: ScreenFormState['mode']): void {
 }
 
 function setRuleMode(ruleMode: RuleMode): void {
+  const enteringConditions = ruleMode === 'conditions' && form.ruleMode !== 'conditions'
   form.ruleMode = ruleMode
   if (ruleMode === 'conditions' && form.conditions.length === 0) {
     form.conditions = [emptyCondition(availableValues.value[0]?.id)]
+  }
+  if (enteringConditions) {
+    form.combineMode = 'all'
+    form.minimumMatches = null
   }
   if (ruleMode === 'conditions' && form.combineMode === 'at_least') {
     form.minimumMatches = Math.min(
@@ -587,7 +592,7 @@ watch(() => form.formulaText, (value) => {
               </div>
             </fieldset>
 
-            <fieldset class="form-section">
+            <fieldset v-if="form.ruleMode === 'signals'" class="form-section">
               <legend>条件组合</legend>
               <label for="combine-mode">组合方式</label>
               <select id="combine-mode" v-model="form.combineMode" data-testid="combine-mode">
@@ -636,6 +641,23 @@ watch(() => form.formulaText, (value) => {
           <fieldset v-else class="form-section condition-section" data-testid="condition-builder">
             <legend>指标条件 <span class="legend-count">{{ form.conditions.length }} 条</span></legend>
             <p class="helper">选择指标输出后设置比较关系；上穿/下穿只在最近一根 K 线上判断最近一次穿越。</p>
+
+            <div class="condition-combine-control" data-testid="condition-combine">
+              <div class="condition-combine-field">
+                <label for="condition-combine-mode">条件关系</label>
+                <select id="condition-combine-mode" v-model="form.combineMode" data-testid="condition-combine-mode">
+                  <option value="all">全部满足（AND）</option>
+                  <option value="any">任一满足（OR）</option>
+                  <option value="at_least">至少满足 N 个</option>
+                </select>
+              </div>
+              <div v-if="form.combineMode === 'at_least'" class="condition-combine-field">
+                <label for="condition-minimum-matches">至少满足数量</label>
+                <input id="condition-minimum-matches" v-model.number="form.minimumMatches" data-testid="condition-minimum-matches" type="number" min="1" :max="Math.max(form.conditions.length, 1)">
+              </div>
+              <small class="condition-combine-helper">当前条件需要{{ form.combineMode === 'all' ? '全部同时满足' : form.combineMode === 'any' ? '任一满足即可' : `至少满足 ${form.minimumMatches ?? 1} 条` }}。</small>
+            </div>
+            <p v-if="errors.minimumMatches" class="field-error">{{ errors.minimumMatches }}</p>
 
             <div class="condition-set-toolbar" data-testid="condition-set-toolbar">
               <select v-model="selectedConditionSetId" data-testid="condition-set-select" aria-label="已保存指标组合" @change="applySelectedConditionSet">
