@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 import type { MarketCandle, MarketChartPeriod, MarketFormulaPanel } from '../types'
 
@@ -33,19 +33,37 @@ const VOLUME_HEIGHT = 72
 const INDICATOR_HEIGHT = 100
 const MAX_CANDLES = 220
 const MA_COLORS = ['#86efac', '#67e8f9', '#c4b5fd', '#fbbf24', '#fb7185', '#f9a8d4']
+const panStart = ref(Math.max(props.candles.length - MAX_CANDLES, 0))
+
+const maxPanStart = computed(() => Math.max(props.candles.length - MAX_CANDLES, 0))
+const windowStart = computed(() => Math.min(Math.max(panStart.value, 0), maxPanStart.value))
+const windowEnd = computed(() => Math.min(windowStart.value + MAX_CANDLES, props.candles.length))
+
+watch(() => props.candles.length, () => {
+  panStart.value = maxPanStart.value
+  selectedIndex.value = null
+})
+watch(windowStart, () => {
+  selectedIndex.value = null
+})
+
+let dragStartX: number | null = null
+let dragStartPan = 0
+let suppressNextClick = false
 
 const displayedCandles = computed(() => (
-  props.candles.length > MAX_CANDLES ? props.candles.slice(-MAX_CANDLES) : props.candles
+  props.candles.slice(windowStart.value, windowEnd.value)
 ))
 
 const displayedFormulaPanels = computed(() => props.formulaPanels.map((panel) => {
-  const start = Math.max(panel.dates.length - displayedCandles.value.length, 0)
+  const start = Math.min(windowStart.value, panel.dates.length)
+  const end = Math.min(windowEnd.value, panel.dates.length)
   return {
     ...panel,
-    dates: panel.dates.slice(start),
+    dates: panel.dates.slice(start, end),
     values: panel.values.map((value) => ({
       ...value,
-      values: value.values.slice(start),
+      values: value.values.slice(start, end),
     })),
   }
 }))
@@ -257,6 +275,42 @@ function formatAxis(value: number): string {
 function selectCandle(index: number): void {
   selectedIndex.value = selectedIndex.value === index ? null : index
 }
+
+function beginPan(event: PointerEvent): void {
+  if (event.pointerType === 'mouse' && event.button !== 0) return
+  dragStartX = event.clientX
+  dragStartPan = windowStart.value
+  suppressNextClick = false
+  const target = event.currentTarget as SVGElement | null
+  target?.setPointerCapture?.(event.pointerId)
+}
+
+function movePan(event: PointerEvent): void {
+  if (dragStartX === null || displayedCandles.value.length <= 0) return
+  if (Math.abs(event.clientX - dragStartX) > 4) suppressNextClick = true
+  const candleStep = PLOT_WIDTH / Math.max(displayedCandles.value.length, 1)
+  const shift = Math.round((event.clientX - dragStartX) / Math.max(candleStep, 1))
+  panStart.value = Math.min(Math.max(dragStartPan - shift, 0), maxPanStart.value)
+}
+
+function endPan(event: PointerEvent): void {
+  const target = event.currentTarget as SVGElement | null
+  target?.releasePointerCapture?.(event.pointerId)
+  dragStartX = null
+}
+
+function selectCandleAtPointer(event: MouseEvent): void {
+  if (suppressNextClick) {
+    suppressNextClick = false
+    return
+  }
+  const svg = event.currentTarget as SVGSVGElement | null
+  const bounds = svg?.getBoundingClientRect()
+  if (!bounds || bounds.width <= 0) return
+  const svgX = (event.clientX - bounds.left) * (WIDTH / bounds.width)
+  const index = Math.round((svgX - LEFT) / step.value - 0.5)
+  if (index >= 0 && index < displayedCandles.value.length) selectCandle(index)
+}
 </script>
 
 <template>
@@ -279,13 +333,13 @@ function selectCandle(index: number): void {
       <span>开 {{ numeric(selectedCandle.open).toFixed(2) }}</span><span>高 {{ numeric(selectedCandle.high).toFixed(2) }}</span><span>低 {{ numeric(selectedCandle.low).toFixed(2) }}</span><span>收 {{ numeric(selectedCandle.close).toFixed(2) }}</span>
       <span v-for="panel in selectedFormulaValues" :key="panel.id" class="selected-formula-values"><b>{{ panel.display_name }}</b> <em v-for="value in panel.values" :key="value.id">{{ value.display_name }} {{ value.value === null ? '—' : value.value.toFixed(2) }}</em></span>
     </div>
-    <svg class="market-chart-svg" :viewBox="`0 0 ${WIDTH} ${layout.height}`" role="img" aria-label="本地行情 K 线图">
+    <svg class="market-chart-svg" data-testid="market-chart-pan-surface" :viewBox="`0 0 ${WIDTH} ${layout.height}`" role="img" aria-label="本地行情 K 线图" @pointerdown="beginPan" @pointermove="movePan" @pointerup="endPan" @pointercancel="endPan" @click="selectCandleAtPointer">
       <g class="chart-grid">
         <line v-for="tick in priceTicks" :key="tick.y" :x1="LEFT" :x2="WIDTH - RIGHT" :y1="tick.y" :y2="tick.y"></line>
         <text v-for="tick in priceTicks" :key="`label-${tick.y}`" :x="LEFT - 8" :y="tick.y + 3" text-anchor="end">{{ formatAxis(tick.value) }}</text>
       </g>
       <g class="candles">
-        <g v-for="(candle, index) in displayedCandles" :key="candle.date" class="candle-hit-area" role="button" tabindex="0" :aria-label="`选择 ${candle.date}`" @click="selectCandle(index)" @keydown.enter="selectCandle(index)">
+        <g v-for="(candle, index) in displayedCandles" :key="candle.date" class="candle-hit-area" role="button" tabindex="0" :aria-label="`选择 ${candle.date}`" @keydown.enter="selectCandle(index)">
           <line :x1="xFor(index)" :x2="xFor(index)" :y1="priceY(numeric(candle.high))" :y2="priceY(numeric(candle.low))" :class="isUp(candle) ? 'candle-wick-up' : 'candle-wick-down'"></line>
           <rect :x="xFor(index) - candleWidth / 2" :y="bodyY(candle)" :width="candleWidth" :height="bodyHeight(candle)" :class="isUp(candle) ? 'candle-body-up' : 'candle-body-down'">
             <title>{{ candle.date }} 开 {{ numeric(candle.open).toFixed(2) }} 高 {{ numeric(candle.high).toFixed(2) }} 低 {{ numeric(candle.low).toFixed(2) }} 收 {{ numeric(candle.close).toFixed(2) }}</title>
@@ -326,6 +380,6 @@ function selectCandle(index: number): void {
         <text :x="LEFT" :y="layout.macdTop + 13">MACD</text>
       </g>
     </svg>
-    <p class="market-chart-note">{{ props.candles.length > MAX_CANDLES ? `图表显示最近 ${MAX_CANDLES} 根，完整本地数据共 ${props.candles.length} 根。` : `共 ${props.candles.length} 根 ${period === 'daily' ? '日' : period === 'monthly' ? '月' : '年'}线。` }}</p>
+    <p class="market-chart-note" data-testid="market-chart-note">{{ props.candles.length > MAX_CANDLES ? `当前显示第 ${windowStart + 1}–${windowEnd} 根，共 ${props.candles.length} 根；可左右拖动查看完整行情。` : `共 ${props.candles.length} 根 ${period === 'daily' ? '日' : period === 'monthly' ? '月' : '年'}线。` }}</p>
   </div>
 </template>

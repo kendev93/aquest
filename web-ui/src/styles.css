@@ -327,7 +327,8 @@ tbody tr:hover td { background: rgba(22, 34, 58, 0.45); }
 .legend-line i { display: inline-block; width: 14px; height: 2px; background: var(--accent); }
 .legend-line .legend-rsi { background: #f0abfc; }
 .legend-line .legend-macd { background: #67e8f9; }
-.market-chart-svg { display: block; width: 100%; min-width: 760px; height: auto; min-height: 430px; overflow: visible; }
+.market-chart-svg { display: block; width: 100%; min-width: 760px; height: auto; min-height: 430px; overflow: visible; cursor: grab; touch-action: pan-y; }
+.market-chart-svg:active { cursor: grabbing; }
 .chart-grid line, .volume-panel line { stroke: rgba(100, 116, 139, 0.2); stroke-width: 1; }
 .chart-grid text, .volume-panel text, .indicator-panel text, .chart-main-x-axis text { fill: var(--subtle); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9px; }
 .candle-wick-up, .candle-wick-down { stroke-width: 1.2; }
