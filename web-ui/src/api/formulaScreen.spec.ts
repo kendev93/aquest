@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { createJob, createSyncJob, fetchMetadata, FormulaScreenApiError, getJob, getResults, getSyncJob, parseFormula } from './formulaScreen'
+import { createJob, createSyncJob, fetchMetadata, fetchScreenHistory, FormulaScreenApiError, getJob, getResults, getScreenHistory, getSyncJob, parseFormula } from './formulaScreen'
 
 describe('formula screen API client', () => {
   afterEach(() => vi.unstubAllGlobals())
@@ -45,6 +45,17 @@ describe('formula screen API client', () => {
     await expect(fetchMetadata()).rejects.toEqual(expect.objectContaining({
       name: 'FormulaScreenApiError', message: '路径无效', status: 422,
     } satisfies Partial<FormulaScreenApiError>))
+  })
+
+  it('loads screen history summaries and a selected history record', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ history_id: 'job-1', created_at: '2026-09-09T10:00:00', result_count: 1 }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { history_id: 'job-1', created_at: '2026-09-09T10:00:00', meta: { total_candidates: 1, total_scanned: 1, total_signals: 1, errors: 0, skipped: 0, failure_reasons: {}, skip_reasons: {} }, results: [] } }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(fetchScreenHistory()).resolves.toHaveLength(1)
+    await expect(getScreenHistory('job/1')).resolves.toMatchObject({ history_id: 'job-1' })
+    expect(fetchMock.mock.calls[1][0]).toBe('/api/v1/formula-screen/history/job%2F1')
   })
 
   it('uses the fallback message when the server omits error details', async () => {

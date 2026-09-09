@@ -85,6 +85,23 @@ def test_metadata_returns_signals_modes_and_supported_markets() -> None:
     assert data["supported_markets"] == ["SH", "SZ"]
 
 
+def test_completed_screen_results_are_saved_to_history(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    with TestClient(create_app(engine=EmptyEngine(), market_data_store=store)) as client:
+        response = client.post("/api/v1/formula-screen/jobs", json=valid_payload(tmp_path))
+        assert response.status_code == 202
+        job_id = response.json()["data"]["job_id"]
+        state = wait_for_done(client, job_id)
+        results = client.get(f"/api/v1/formula-screen/jobs/{job_id}/results")
+        history = client.get("/api/v1/formula-screen/history")
+
+    assert state["status"] == "completed"
+    assert results.status_code == 200
+    assert history.status_code == 200
+    assert history.json()["data"][0]["history_id"] == job_id
+    assert history.json()["data"][0]["result_count"] == 0
+
+
 def test_health_endpoint_is_lightweight_and_does_not_require_vipdoc() -> None:
     with TestClient(create_app(engine=EmptyEngine())) as client:
         response = client.get("/healthz")

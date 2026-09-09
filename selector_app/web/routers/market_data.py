@@ -64,6 +64,7 @@ class LocalMarketDataServiceLike(Protocol):
         period: ChartPeriod,
         start_date: date | None,
         end_date: date | None,
+        formula_ids: tuple[str, ...] = (),
     ) -> LocalMarketChart: ...
 
 
@@ -432,16 +433,31 @@ def local_market_bars(
     period: ChartPeriod = Query(default="daily"),
     start_date: date | None = Query(default=None),
     end_date: date | None = Query(default=None),
+    formula_ids: str | None = Query(default=None, max_length=256),
 ) -> dict[str, object] | JSONResponse:
+    requested_formula_ids = tuple(
+        item.strip() for item in (formula_ids or "").split(",") if item.strip()
+    )
     try:
-        result = _local_service(request).get_chart(
-            _resolved_vipdoc_path(None),
-            market,
-            code,
-            period=period,
-            start_date=start_date,
-            end_date=end_date,
-        )
+        if requested_formula_ids:
+            result = _local_service(request).get_chart(
+                _resolved_vipdoc_path(None),
+                market,
+                code,
+                period=period,
+                start_date=start_date,
+                end_date=end_date,
+                formula_ids=requested_formula_ids,
+            )
+        else:
+            result = _local_service(request).get_chart(
+                _resolved_vipdoc_path(None),
+                market,
+                code,
+                period=period,
+                start_date=start_date,
+                end_date=end_date,
+            )
     except (OSError, ValueError, MarketDataStoreError, duckdb.Error) as exc:
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

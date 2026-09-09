@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import cast
 
+import duckdb
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response
 
 from selector_app.formulas.custom import FormulaParseError, parse_formula
 from selector_app.formulas.registry import FORMULA_REGISTRY
+from selector_app.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
 from selector_app.screening.export import report_to_csv, report_to_json
 from selector_app.screening.jobs import ScreenJobRunner
 from selector_app.screening.models import ScanReport
@@ -20,10 +23,15 @@ from ..schemas import (
 )
 
 router = APIRouter(prefix="/formula-screen", tags=["formula-screen"])
+logger = logging.getLogger(__name__)
 
 
 def _runner(request: Request) -> ScreenJobRunner:
     return cast(ScreenJobRunner, request.app.state.screen_job_runner)
+
+
+def _store(request: Request) -> DuckDbMarketDataStore:
+    return cast(DuckDbMarketDataStore, request.app.state.market_data_store)
 
 
 @router.get("/metadata")
@@ -116,7 +124,32 @@ def _completed_report(job_id: str, request: Request) -> ScanReport:
 @router.get("/jobs/{job_id}/results")
 def job_results(job_id: str, request: Request) -> dict[str, object]:
     report = _completed_report(job_id, request)
-    return {"data": [result.to_dict() for result in report.results], "meta": report.summary_dict()}
+    results = [result.to_dict() for result in report.results]
+    meta = report.summary_dict()
+    try:
+        _store(request).save_screen_history(job_id, results=results, meta=meta)
+    except (OSError, ValueError, MarketDataStoreError, duckdb.Error):
+        logger.exception("筛选历史保存失败: %s", job_id)
+    return {"data": results, "meta": meta}
+
+
+@router.get("/history")
+def screen_history(request: Request) -> dict[str, object]:
+    try:
+        return {"data": _store(request).list_screen_history()}
+    except (OSError, MarketDataStoreError, duckdb.Error) as exc:
+        raise HTTPException(status_code=503, detail="筛选历史暂时不可用") from exc
+
+
+@router.get("/history/{history_id}")
+def screen_history_detail(history_id: str, request: Request) -> dict[str, object]:
+    try:
+        record = _store(request).read_screen_history(history_id)
+    except (OSError, MarketDataStoreError, duckdb.Error) as exc:
+        raise HTTPException(status_code=503, detail="筛选历史暂时不可用") from exc
+    if record is None:
+        raise HTTPException(status_code=404, detail="筛选历史不存在或已过期")
+    return {"data": record}
 
 
 @router.get("/jobs/{job_id}/export.json")

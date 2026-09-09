@@ -60,6 +60,7 @@ export interface LocalChartQuery {
   period?: MarketChartPeriod
   start_date?: string
   end_date?: string
+  formula_ids?: string[]
 }
 
 export async function fetchLocalChart(query: LocalChartQuery): Promise<LocalMarketChart> {
@@ -67,6 +68,7 @@ export async function fetchLocalChart(query: LocalChartQuery): Promise<LocalMark
   if (query.period) params.set('period', query.period)
   if (query.start_date) params.set('start_date', query.start_date)
   if (query.end_date) params.set('end_date', query.end_date)
+  if (query.formula_ids?.length) params.set('formula_ids', query.formula_ids.join(','))
   const suffix = params.toString()
   const response = await request<{ data: LocalMarketChart }>(
     `${API_BASE}/local/${query.market}/${encodeURIComponent(query.code)}/bars${suffix ? `?${suffix}` : ''}`,

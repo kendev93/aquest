@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 
-import { createJob, createSyncJob, fetchMetadata, FormulaScreenApiError, getJob, getResults, getSyncJob, parseFormula } from '../api/formulaScreen'
-import type { ConditionOperator, CustomFormulaMetadata, FormulaScreenMetadata, InstrumentBoard, InstrumentType, JobState, MarketSyncJobState, ResultsMeta, SavedConditionSet, ScreenCondition, ScreenFormState, ScreenResult, RuleMode, ValueDefinition } from '../types'
+import { fetchLocalChart } from '../api/marketData'
+import MarketCandlestickChart from '../components/MarketCandlestickChart.vue'
+import { createJob, createSyncJob, fetchMetadata, fetchScreenHistory, FormulaScreenApiError, getJob, getResults, getScreenHistory, getSyncJob, parseFormula } from '../api/formulaScreen'
+import type { ConditionOperator, CustomFormulaMetadata, FormulaScreenMetadata, InstrumentBoard, InstrumentType, JobState, LocalMarketChart, MarketSyncJobState, ResultsMeta, SavedConditionSet, ScreenCondition, ScreenFormState, ScreenHistorySummary, ScreenResult, RuleMode, ValueDefinition } from '../types'
 import { buildScanPayload, createSavedConditionSet, DEFAULT_PRESET_SIGNALS, deleteConditionSet, filterKnownSignals, loadSavedConditionSets, loadSavedForm, resultsToCsv, saveConditionSet, saveForm, signalDisplayName, validateScreenForm, valueOptionLabel } from '../utils/formulaScreen'
 
 const INSTRUMENT_TYPE_OPTIONS: { key: InstrumentType; label: string }[] = [
@@ -76,6 +78,15 @@ const syncJob = ref<MarketSyncJobState | null>(null)
 const savedConditionSets = ref<SavedConditionSet[]>(loadSavedConditionSets())
 const selectedConditionSetId = ref('')
 const conditionSetName = ref('')
+const historyItems = ref<ScreenHistorySummary[]>([])
+const historyLoading = ref(false)
+const expandedResultKey = ref<string | null>(null)
+const resultCharts = reactive<Record<string, LocalMarketChart>>({})
+const resultChartLoading = ref<string | null>(null)
+const resultChartErrors = reactive<Record<string, string>>({})
+const primaryIndicatorSelections = reactive<Record<string, string[]>>({})
+
+const RESULT_CHART_MA_KEYS = ['ma5', 'ma10', 'ma20', 'ma60']
 
 const progressPercent = computed(() => Math.round((job.value?.progress ?? 0) * 100))
 const syncProgressPercent = computed(() => Math.round((syncJob.value?.progress ?? 0) * 100))
@@ -257,6 +268,130 @@ function resultLabel(signalId: string): string {
   return signalDisplayName(signalId, metadata.value, customMetadata.value)
 }
 
+function resultKey(result: ScreenResult): string {
+  return `${result.market}-${result.code}`
+}
+
+function indicatorOptions(result: ScreenResult): string[] {
+  return Object.keys(result.indicator_values)
+}
+
+function formulaIdsForResult(result: ScreenResult): string[] {
+  void result
+  return ['indicator_two', 'indicator_three', 'indicator_one']
+}
+
+function selectedIndicatorIds(result: ScreenResult): string[] {
+  const key = resultKey(result)
+  const options = indicatorOptions(result)
+  const selected = primaryIndicatorSelections[key] ?? options.slice(0, 3)
+  return selected.filter((id) => options.includes(id)).slice(0, 3)
+}
+
+function setPrimaryIndicator(result: ScreenResult, index: number, value: string): void {
+  const key = resultKey(result)
+  const next = [...selectedIndicatorIds(result)]
+  next[index] = value
+  primaryIndicatorSelections[key] = next.filter((id, current, all) => id && all.indexOf(id) === current)
+}
+
+function formatIndicatorValue(value: number | null | undefined): string {
+  return value === null || value === undefined || !Number.isFinite(value) ? '—' : value.toFixed(2)
+}
+
+function formatHistoryDate(value: string): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+function applyResultPayload(nextResults: ScreenResult[], nextMeta: ResultsMeta): void {
+  results.value = nextResults
+  resultMeta.value = nextMeta
+  expandedResultKey.value = null
+  for (const result of nextResults) {
+    const key = resultKey(result)
+    if (!primaryIndicatorSelections[key]) {
+      primaryIndicatorSelections[key] = indicatorOptions(result).slice(0, 3)
+    }
+  }
+}
+
+async function refreshScreenHistory(): Promise<void> {
+  historyLoading.value = true
+  try {
+    historyItems.value = await fetchScreenHistory()
+  } catch {
+    historyItems.value = []
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+function historyJobState(item: ScreenHistorySummary): JobState {
+  return {
+    job_id: item.history_id,
+    status: 'completed',
+    progress: 1,
+    total_candidates: item.total_candidates,
+    total_scanned: item.total_scanned,
+    total_signals: item.total_signals,
+    errors: item.errors,
+    skipped: item.skipped,
+    error: null,
+    worker_count: null,
+  }
+}
+
+async function loadScreenHistory(historyId: string): Promise<void> {
+  try {
+    const record = await getScreenHistory(historyId)
+    applyResultPayload(record.results, record.meta)
+    job.value = historyJobState(historyItems.value.find((item) => item.history_id === historyId) ?? {
+      history_id: record.history_id,
+      created_at: record.created_at,
+      total_candidates: record.meta.total_candidates,
+      total_scanned: record.meta.total_scanned,
+      total_signals: record.meta.total_signals,
+      errors: record.meta.errors,
+      skipped: record.meta.skipped,
+      result_count: record.results.length,
+    })
+    message.value = `已加载历史筛选：${formatHistoryDate(record.created_at)}`
+  } catch (error) {
+    message.value = apiMessage(error, '历史筛选加载失败')
+  }
+}
+
+async function toggleResultDetails(result: ScreenResult): Promise<void> {
+  const key = resultKey(result)
+  if (expandedResultKey.value === key) {
+    expandedResultKey.value = null
+    return
+  }
+  expandedResultKey.value = key
+  if (resultCharts[key]) return
+  resultChartLoading.value = key
+  delete resultChartErrors[key]
+  try {
+    resultCharts[key] = await fetchLocalChart({
+      market: result.market as 'SH' | 'SZ',
+      code: result.code,
+      period: 'daily',
+      formula_ids: formulaIdsForResult(result),
+    })
+  } catch (error) {
+    resultChartErrors[key] = apiMessage(error, '标的行情加载失败')
+  } finally {
+    if (resultChartLoading.value === key) resultChartLoading.value = null
+  }
+}
+
 async function applySelectedConditionSet(): Promise<void> {
   const selected = savedConditionSets.value.find((item) => item.id === selectedConditionSetId.value)
   if (!selected) return
@@ -354,8 +489,8 @@ async function pollUntilFinished(jobId: string): Promise<void> {
     job.value = state
     if (state.status === 'completed') {
       const payload = await getResults(jobId)
-      results.value = payload.results
-      resultMeta.value = payload.meta
+      applyResultPayload(payload.results, payload.meta)
+      await refreshScreenHistory()
       message.value = `扫描完成：命中 ${payload.meta.total_signals} 个条件，得到 ${payload.results.length} 只股票。`
       return
     }
@@ -416,6 +551,7 @@ async function submit(): Promise<void> {
   loading.value = true
   results.value = []
   resultMeta.value = null
+  expandedResultKey.value = null
   let jobCreated = false
   try {
     const created = await createJob(buildScanPayload(form))
@@ -482,6 +618,7 @@ onMounted(async () => {
     if (form.mode === 'custom' && form.formulaText.trim()) {
       await parseCustomFormula()
     }
+    await refreshScreenHistory()
   } catch (error) {
     message.value = apiMessage(error, '公式元数据加载失败，请检查后端服务和网络后重试')
   }
@@ -738,6 +875,16 @@ watch(() => form.formulaText, (value) => {
             <div class="export-actions"><button type="button" data-testid="export-json" :disabled="results.length === 0" @click="exportJson">导出 JSON</button><button type="button" data-testid="export-csv" :disabled="results.length === 0" @click="exportCsv">导出 CSV</button></div>
           </div>
 
+          <div class="screen-history" data-testid="screen-history">
+            <div class="screen-history-heading"><div><strong>历史筛选</strong><small>自动保留最近 10 次</small></div><span v-if="historyLoading">读取中…</span></div>
+            <div v-if="historyItems.length" class="screen-history-list">
+              <button v-for="item in historyItems" :key="item.history_id" class="screen-history-item" :class="{ active: job?.job_id === item.history_id }" :data-testid="`screen-history-item-${item.history_id}`" type="button" @click="loadScreenHistory(item.history_id)">
+                <span>{{ formatHistoryDate(item.created_at) }}</span><small>{{ item.result_count }} 条结果 · 命中 {{ item.total_signals }}</small>
+              </button>
+            </div>
+            <p v-else class="screen-history-empty">暂无历史筛选记录</p>
+          </div>
+
           <div class="metrics-strip">
             <div><span>进度</span><strong data-testid="progress-value">{{ progressPercent }}%</strong></div>
             <div><span>已扫描</span><strong data-testid="scanned-count">{{ job?.total_scanned ?? 0 }}<small>/ {{ job?.total_candidates ?? 0 }}</small></strong></div>
@@ -757,7 +904,8 @@ watch(() => form.formulaText, (value) => {
               <caption class="sr-only">公式选股结果</caption>
               <thead><tr><th>市场</th><th>代码</th><th>中文名</th><th>信号日期</th><th>最新收盘</th><th>命中条件</th><th>指标值</th></tr></thead>
               <tbody>
-                <tr v-for="result in results" :key="`${result.market}-${result.code}`">
+                <template v-for="result in results" :key="`${result.market}-${result.code}`">
+                <tr class="screen-result-row" :class="{ expanded: expandedResultKey === resultKey(result) }" role="button" tabindex="0" :aria-expanded="expandedResultKey === resultKey(result)" @click="toggleResultDetails(result)" @keydown.enter.prevent="toggleResultDetails(result)">
                   <td><span class="market-pill" :class="result.market.toLowerCase()">{{ result.market }}</span></td>
                   <td><strong class="code">{{ result.code }}</strong><small v-if="result.instrument_type" class="muted-code">{{ result.instrument_type }}</small></td>
                   <td class="instrument-name">{{ result.name || '未同步名称' }}</td>
@@ -766,6 +914,28 @@ watch(() => form.formulaText, (value) => {
                   <td><div class="signal-tags"><span v-for="signal in result.matched_signals" :key="signal" class="signal-tag">{{ resultLabel(signal) }}</span><small>{{ result.match_count }} 条</small></div></td>
                   <td><div class="value-list"><span v-for="(value, name) in result.indicator_values" :key="name"><b>{{ resultValueLabel(name) }}</b> {{ value === null ? '—' : value.toFixed(2) }}</span></div></td>
                 </tr>
+                <tr v-if="expandedResultKey === resultKey(result)" :key="`${result.market}-${result.code}-detail`" class="screen-result-detail-row">
+                  <td colspan="7">
+                    <div class="screen-result-detail" :data-testid="`result-detail-${result.market}-${result.code}`">
+                      <div class="screen-result-detail-heading"><div><strong>{{ result.name || `${result.market} ${result.code}` }}</strong><small>点击结果行收起 · 本地日线行情</small></div><span>{{ result.signal_date }}</span></div>
+                      <div v-if="resultChartLoading === resultKey(result)" class="chart-loading">正在读取 K 线…</div>
+                      <div v-else-if="resultChartErrors[resultKey(result)]" class="inline-empty">{{ resultChartErrors[resultKey(result)] }}</div>
+                      <MarketCandlestickChart v-else-if="resultCharts[resultKey(result)]" :candles="resultCharts[resultKey(result)].candles" :ma-keys="RESULT_CHART_MA_KEYS" :formula-panels="resultCharts[resultKey(result)].formula_panels ?? []" :show-volume="false" period="daily" :show-macd="false" :show-rsi="false" />
+                      <div v-if="indicatorOptions(result).length" class="result-primary-indicators">
+                        <div class="section-heading"><div><span class="section-kicker">MAIN INDICATORS</span><h3>主要指标</h3></div><small>可自定义最多 3 个</small></div>
+                        <div class="result-primary-grid">
+                          <div v-for="(indicatorId, index) in selectedIndicatorIds(result)" :key="`${resultKey(result)}-${index}`" class="result-primary-card">
+                            <select :value="indicatorId" :data-testid="`result-indicator-${result.market}-${result.code}-${index}`" @click.stop @change="setPrimaryIndicator(result, index, ($event.target as HTMLSelectElement).value)">
+                              <option v-for="option in indicatorOptions(result)" :key="option" :value="option">{{ resultValueLabel(option) }}</option>
+                            </select>
+                            <strong>{{ formatIndicatorValue(result.indicator_values[indicatorId]) }}</strong>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </td>
+                </tr>
+                </template>
               </tbody>
             </table>
           </div>

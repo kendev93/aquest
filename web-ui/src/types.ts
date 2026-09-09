@@ -225,6 +225,20 @@ export interface MarketCandle {
   macd_histogram: number | null
 }
 
+export interface MarketFormulaPanelValue {
+  id: string
+  display_name: string
+  values: Array<number | null>
+  latest: number | null
+}
+
+export interface MarketFormulaPanel {
+  id: string
+  display_name: string
+  dates: string[]
+  values: MarketFormulaPanelValue[]
+}
+
 export interface LocalMarketChart {
   market: 'SH' | 'SZ'
   code: string
@@ -236,6 +250,7 @@ export interface LocalMarketChart {
   data_start: string
   data_end: string
   candles: MarketCandle[]
+  formula_panels?: MarketFormulaPanel[]
 }
 
 export interface ScreenResult {
@@ -259,6 +274,24 @@ export interface ResultsMeta {
   skipped: number
   failure_reasons: Record<string, number>
   skip_reasons: Record<string, number>
+}
+
+export interface ScreenHistorySummary {
+  history_id: string
+  created_at: string
+  total_candidates: number
+  total_scanned: number
+  total_signals: number
+  errors: number
+  skipped: number
+  result_count: number
+}
+
+export interface ScreenHistoryRecord {
+  history_id: string
+  created_at: string
+  meta: ResultsMeta
+  results: ScreenResult[]
 }
 
 export interface BacktestPayload {

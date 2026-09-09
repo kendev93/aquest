@@ -13,6 +13,8 @@ from typing import Literal, Protocol, cast
 import numpy as np
 import pandas as pd
 
+from selector_app.formulas.registry import FORMULA_REGISTRY, value_display_name
+
 from .adapter import DuckDbMarketDataAdapter
 from .models import InstrumentBoard, MarketCode, StockRef
 from .store import DuckDbMarketDataStore
@@ -92,6 +94,7 @@ class LocalMarketChart:
     data_start: str
     data_end: str
     candles: tuple[dict[str, object], ...]
+    formula_panels: tuple[dict[str, object], ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -105,6 +108,7 @@ class LocalMarketChart:
             "data_start": self.data_start,
             "data_end": self.data_end,
             "candles": list(self.candles),
+            "formula_panels": list(self.formula_panels),
         }
 
 
@@ -165,6 +169,7 @@ class LocalMarketDataService:
         period: ChartPeriod = "daily",
         start_date: date | None = None,
         end_date: date | None = None,
+        formula_ids: tuple[str, ...] = (),
     ) -> LocalMarketChart:
         ref = self._adapter.stock_ref(vipdoc_path, market, code)
         daily = _normalise_frame(self._adapter.read_stock(ref))
@@ -180,6 +185,16 @@ class LocalMarketDataService:
 
         records = cast(list[dict[str, object]], visible.to_dict(orient="records"))
         candles = tuple(_candle(record) for record in records)
+        formula_panels = (
+            _formula_panels(
+                daily,
+                formula_ids,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            if period == "daily" and formula_ids
+            else ()
+        )
         return LocalMarketChart(
             market=market,
             code=code,
@@ -191,6 +206,7 @@ class LocalMarketDataService:
             data_start=str(candles[0]["date"]),
             data_end=str(candles[-1]["date"]),
             candles=candles,
+            formula_panels=formula_panels,
         )
 
     def _summarize_instrument(self, ref: StockRef) -> LocalInstrument:
@@ -323,6 +339,53 @@ def _candle(record: Mapping[str, object]) -> dict[str, object]:
         "macd_signal": _number(record.get("macd_signal")),
         "macd_histogram": _number(record.get("macd_histogram")),
     }
+
+
+def _formula_panels(
+    frame: pd.DataFrame,
+    formula_ids: tuple[str, ...],
+    *,
+    start_date: date | None,
+    end_date: date | None,
+) -> tuple[dict[str, object], ...]:
+    dates = pd.to_datetime(frame["date"], errors="coerce")
+    mask = pd.Series(True, index=frame.index)
+    if start_date is not None:
+        mask &= dates.dt.date >= start_date
+    if end_date is not None:
+        mask &= dates.dt.date <= end_date
+    indexes = list(frame.index[mask])
+    visible_dates = [_date_text(frame.loc[index, "date"]) for index in indexes]
+    panels: list[dict[str, object]] = []
+    for formula_id in dict.fromkeys(formula_ids):
+        try:
+            definition = FORMULA_REGISTRY.formula(formula_id)
+        except KeyError as exc:
+            raise ValueError(f"不支持的指标面板: {formula_id}") from exc
+        result = definition.calculate(frame.copy(deep=True))
+        values: list[dict[str, object]] = []
+        for value_name in definition.selectable_value_names:
+            series = result.values.get(value_name)
+            if series is None:
+                continue
+            visible_values = [_number(series[index]) for index in indexes]
+            values.append(
+                {
+                    "id": f"{formula_id}.{value_name}",
+                    "display_name": value_display_name(formula_id, value_name),
+                    "values": visible_values,
+                    "latest": visible_values[-1] if visible_values else None,
+                }
+            )
+        panels.append(
+            {
+                "id": formula_id,
+                "display_name": definition.display_name,
+                "dates": visible_dates,
+                "values": values,
+            }
+        )
+    return tuple(panels)
 
 
 def _date_text(value: object) -> str:

@@ -1,14 +1,20 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { FormulaScreenMetadata } from '../types'
+import type { FormulaScreenMetadata, LocalMarketChart } from '../types'
 import FormulaScreenPage from './FormulaScreenPage.vue'
 
 import * as api from '../api/formulaScreen'
+import * as marketApi from '../api/marketData'
 
 vi.mock('../api/formulaScreen', async () => {
   const actual = await vi.importActual<typeof import('../api/formulaScreen')>('../api/formulaScreen')
-  return { ...actual, fetchMetadata: vi.fn(), parseFormula: vi.fn(), createJob: vi.fn(), getJob: vi.fn(), getResults: vi.fn(), createSyncJob: vi.fn(), getSyncJob: vi.fn() }
+  return { ...actual, fetchMetadata: vi.fn(), parseFormula: vi.fn(), createJob: vi.fn(), getJob: vi.fn(), getResults: vi.fn(), fetchScreenHistory: vi.fn(), getScreenHistory: vi.fn(), createSyncJob: vi.fn(), getSyncJob: vi.fn() }
+})
+
+vi.mock('../api/marketData', async () => {
+  const actual = await vi.importActual<typeof import('../api/marketData')>('../api/marketData')
+  return { ...actual, fetchLocalChart: vi.fn() }
 })
 
 const metadata: FormulaScreenMetadata = {
@@ -42,6 +48,23 @@ const metadata: FormulaScreenMetadata = {
   default_vipdoc_path: '/data/vipdoc',
 }
 
+const localChart: LocalMarketChart = {
+  market: 'SH',
+  code: '600000',
+  period: 'daily',
+  total_daily_bars: 3,
+  bars: 3,
+  available_data_start: '2024-01-01',
+  available_data_end: '2024-01-03',
+  data_start: '2024-01-01',
+  data_end: '2024-01-03',
+  candles: [
+    { date: '2024-01-01', open: 10, high: 11, low: 9, close: 10.5, volume: 1000, amount: 10000, ma: {}, rsi14: null, macd: null, macd_signal: null, macd_histogram: null },
+    { date: '2024-01-02', open: 10.5, high: 11.5, low: 10, close: 11, volume: 1100, amount: 11000, ma: {}, rsi14: null, macd: null, macd_signal: null, macd_histogram: null },
+    { date: '2024-01-03', open: 11, high: 12, low: 10.5, close: 11.5, volume: 1200, amount: 12000, ma: {}, rsi14: null, macd: null, macd_signal: null, macd_histogram: null },
+  ],
+}
+
 describe('FormulaScreenPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -71,6 +94,16 @@ describe('FormulaScreenPage', () => {
       results: [{ market: 'SH', code: '600000', name: '浦发银行', signal_date: 20260824, last_close: 12.35, matched_signals: ['indicator_three.accumulation_zone'], match_count: 1, indicator_values: { 'indicator_three.varo7': 2.2, 'indicator_three.varo6': null } }],
       meta: { total_candidates: 2, total_scanned: 2, total_signals: 1, errors: 0, skipped: 0, failure_reasons: {}, skip_reasons: {} },
     })
+    vi.mocked(api.fetchScreenHistory).mockResolvedValue([
+      { history_id: 'history-1', created_at: '2026-09-09T10:00:00', total_candidates: 2, total_scanned: 2, total_signals: 1, errors: 0, skipped: 0, result_count: 1 },
+    ])
+    vi.mocked(api.getScreenHistory).mockResolvedValue({
+      history_id: 'history-1',
+      created_at: '2026-09-09T10:00:00',
+      meta: { total_candidates: 2, total_scanned: 2, total_signals: 1, errors: 0, skipped: 0, failure_reasons: {}, skip_reasons: {} },
+      results: [],
+    })
+    vi.mocked(marketApi.fetchLocalChart).mockResolvedValue(localChart)
   })
 
   it('renders signal choices and validates an empty selection', async () => {
@@ -104,6 +137,25 @@ describe('FormulaScreenPage', () => {
 
     await combineMode.setValue('any')
     expect((combineMode.element as HTMLSelectElement).value).toBe('any')
+  })
+
+  it('lists history and expands a result with local K-line and primary indicators', async () => {
+    const wrapper = mount(FormulaScreenPage)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="screen-history"]').text()).toContain('1 条结果')
+    expect(wrapper.get('[data-testid="screen-history-item-history-1"]')).toBeTruthy()
+
+    await wrapper.get('[data-testid="rule-mode-conditions"]').trigger('click')
+    await wrapper.get('[data-testid="screen-config"]').trigger('submit')
+    await flushPromises()
+    const resultRow = wrapper.get('[data-testid="results-table"] .screen-result-row')
+    await resultRow.trigger('click')
+    await flushPromises()
+
+    expect(marketApi.fetchLocalChart).toHaveBeenCalledWith(expect.objectContaining({ market: 'SH', code: '600000', period: 'daily' }))
+    expect(wrapper.get('[data-testid="result-detail-SH-600000"]').text()).toContain('主要指标')
+    expect(wrapper.get('[data-testid="result-indicator-SH-600000-0"]')).toBeTruthy()
   })
 
   it('distinguishes metadata loading failures from scan failures', async () => {

@@ -6,6 +6,8 @@ import type {
   JobState,
   MarketSyncJobState,
   ResultsMeta,
+  ScreenHistoryRecord,
+  ScreenHistorySummary,
   ScanPayload,
   ScreenResult,
 } from '../types'
@@ -75,6 +77,18 @@ export async function getResults(jobId: string): Promise<{ results: ScreenResult
     `/jobs/${encodeURIComponent(jobId)}/results`,
   )
   return { results: response.data, meta: response.meta }
+}
+
+export async function fetchScreenHistory(): Promise<ScreenHistorySummary[]> {
+  const response = await request<{ data: ScreenHistorySummary[] }>('/history')
+  return response.data
+}
+
+export async function getScreenHistory(historyId: string): Promise<ScreenHistoryRecord> {
+  const response = await request<{ data: ScreenHistoryRecord }>(
+    `/history/${encodeURIComponent(historyId)}`,
+  )
+  return response.data
 }
 
 export async function createSyncJob(payload: {

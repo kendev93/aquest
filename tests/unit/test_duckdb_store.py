@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import duckdb
@@ -189,3 +189,45 @@ def test_schema_upgrade_backups_existing_database_before_initialization(tmp_path
 
     backups = list(tmp_path.glob("market.bak-*.duckdb"))
     assert len(backups) == 1
+
+
+def test_screen_history_keeps_only_the_latest_ten_results(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    result = {
+        "market": "SH",
+        "code": "600000",
+        "signal_date": 20240103,
+        "last_close": 11.0,
+        "matched_signals": ["indicator_three.prepare_rally"],
+        "match_count": 1,
+        "indicator_values": {"indicator_three.var1": 9.0},
+    }
+    meta = {
+        "total_candidates": 1,
+        "total_scanned": 1,
+        "total_signals": 1,
+        "errors": 0,
+        "skipped": 0,
+        "failure_reasons": {},
+        "skip_reasons": {},
+    }
+
+    for index in range(12):
+        store.save_screen_history(
+            f"job-{index}",
+            results=[result],
+            meta=meta,
+            created_at=datetime(2024, 1, 1 + index, tzinfo=timezone.utc),
+        )
+
+    history = store.list_screen_history()
+    loaded = store.read_screen_history("job-11")
+
+    assert len(history) == 10
+    assert [item["history_id"] for item in history] == [
+        f"job-{index}" for index in range(11, 1, -1)
+    ]
+    assert loaded is not None
+    assert loaded["results"] == [result]
+    assert loaded["meta"] == meta
+    assert store.read_screen_history("job-0") is None

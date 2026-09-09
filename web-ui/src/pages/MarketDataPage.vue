@@ -456,7 +456,7 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
             </div>
             <div class="indicator-switches"><span>显示：</span><label v-for="option in MA_OPTIONS" :key="option.key"><input :data-testid="`toggle-${option.key}`" type="checkbox" :checked="maKeys.includes(option.key)" @change="toggleMa(option.key)">{{ option.label }}</label><label><input v-model="showRsi" data-testid="toggle-rsi" type="checkbox">RSI14</label><label><input v-model="showMacd" data-testid="toggle-macd" type="checkbox">MACD</label></div>
             <div v-if="chartLoading" class="chart-loading" data-testid="market-chart-loading">正在生成图表…</div>
-            <MarketCandlestickChart v-else-if="chart" :candles="chart.candles" :ma-keys="maKeys" :period="period" :show-macd="showMacd" :show-rsi="showRsi" />
+            <MarketCandlestickChart v-else-if="chart" :candles="chart.candles" :ma-keys="maKeys" :formula-panels="chart.formula_panels ?? []" :period="period" :show-macd="showMacd" :show-rsi="showRsi" />
             <div v-else class="market-chart-empty" data-testid="market-chart-empty">暂无该品种在所选区间内的行情数据。</div>
             <div v-if="chart" class="chart-data-summary" data-testid="market-chart-summary"><span>本地日线 {{ chart.total_daily_bars }} 根</span><span>当前 {{ chart.bars }} 根{{ period === 'daily' ? '日' : period === 'monthly' ? '月' : '年' }}线</span><span>可用区间 {{ chart.available_data_start }} → {{ chart.available_data_end }}</span></div>
           </template>

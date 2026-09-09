@@ -105,6 +105,30 @@ def test_builds_daily_monthly_and_yearly_chart_data_with_indicators() -> None:
     assert yearly.candles[-1]["ma"]["ma5"] is not None
 
 
+def test_builds_requested_formula_indicator_panels_from_full_daily_history() -> None:
+    service = LocalMarketDataService(FakeMarketDataAdapter())
+
+    chart = service.get_chart(
+        "/data/vipdoc",
+        "SH",
+        "600000",
+        period="daily",
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 3, 31),
+        formula_ids=("indicator_three", "indicator_two", "indicator_one"),
+    )
+
+    assert [panel["id"] for panel in chart.formula_panels] == [
+        "indicator_three",
+        "indicator_two",
+        "indicator_one",
+    ]
+    assert all(len(panel["dates"]) == 91 for panel in chart.formula_panels)
+    assert chart.formula_panels[0]["display_name"] == "准备拉升"
+    assert chart.formula_panels[0]["values"]
+    assert chart.formula_panels[0]["values"][0]["latest"] is not None
+
+
 def test_rejects_unknown_or_empty_local_instrument() -> None:
     service = LocalMarketDataService(FakeMarketDataAdapter())
 
