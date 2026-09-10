@@ -12,6 +12,8 @@ from typing import Literal
 
 from selector_app.market_data.models import InstrumentBoard, InstrumentType
 from selector_app.market_data.scope import InstrumentScope
+from selector_app.screening.models import ScreenCondition
+from selector_app.screening.rules import RuleGroup
 
 PortfolioUniverse = Literal["all", "sh", "sz", "custom"]
 RankOrder = Literal["asc", "desc"]
@@ -50,6 +52,8 @@ class PortfolioBacktestConfig:
     compare_left_value: str | None = None
     compare_operator: CompareOperator | None = None
     compare_right_value: str | None = None
+    buy_rule: RuleGroup | None = None
+    sell_rule: RuleGroup | None = None
     start_date: date | None = None
     end_date: date | None = None
     initial_cash: float = 1_000_000.0
@@ -72,18 +76,20 @@ class PortfolioBacktestConfig:
         )
         object.__setattr__(self, "instrument_types", scope.instrument_types)
         object.__setattr__(self, "boards", scope.boards)
-        if not self.selected_signals:
+        explicit_buy_rule = self.buy_rule is not None
+        explicit_sell_rule = self.sell_rule is not None
+        if not explicit_buy_rule and not self.selected_signals:
             raise ValueError("至少需要一个选股条件")
         if len(set(self.selected_signals)) != len(self.selected_signals):
             raise ValueError("选股条件不能重复")
         if self.combine_mode not in {"all", "any", "at_least"}:
             raise ValueError("不支持的条件组合方式")
-        if self.combine_mode == "at_least":
+        if not explicit_buy_rule and self.combine_mode == "at_least":
             if self.minimum_matches is None or not 1 <= self.minimum_matches <= len(
                 self.selected_signals
             ):
                 raise ValueError("minimum_matches 必须在选股条件数量范围内")
-        elif self.minimum_matches is not None:
+        elif not explicit_buy_rule and self.minimum_matches is not None:
             raise ValueError("all/any 模式不应设置 minimum_matches")
         if not self.ranking_value.strip():
             raise ValueError("排序指标不能为空")
@@ -140,13 +146,46 @@ class PortfolioBacktestConfig:
             value is not None for value in comparison
         ):
             raise ValueError("指标比较卖出规则需要左右指标和比较方式")
-        if (
-            self.sell_signal is None
-            and self.stop_loss_pct is None
-            and self.take_profit_pct is None
-            and self.sell_value is None
-            and self.compare_left_value is None
-        ):
+        if not explicit_buy_rule:
+            object.__setattr__(
+                self,
+                "buy_rule",
+                RuleGroup(
+                    signals=tuple(self.selected_signals),
+                    combine_mode=self.combine_mode,
+                    minimum_matches=self.minimum_matches,
+                ),
+            )
+        if not explicit_sell_rule:
+            sell_conditions: list[ScreenCondition] = []
+            if self.sell_value is not None:
+                sell_conditions.append(
+                    ScreenCondition(
+                        left_value=self.sell_value,
+                        operator=self.sell_value_operator or "gte",
+                        right_constant=self.sell_value_threshold,
+                    )
+                )
+            if self.compare_left_value is not None:
+                sell_conditions.append(
+                    ScreenCondition(
+                        left_value=self.compare_left_value,
+                        operator=self.compare_operator or "gt",
+                        right_value=self.compare_right_value,
+                    )
+                )
+            sell_signals = (self.sell_signal,) if self.sell_signal is not None else ()
+            if sell_signals or sell_conditions:
+                object.__setattr__(
+                    self,
+                    "sell_rule",
+                    RuleGroup(
+                        signals=sell_signals,
+                        conditions=tuple(sell_conditions),
+                        combine_mode="any",
+                    ),
+                )
+        if self.sell_rule is None and self.stop_loss_pct is None and self.take_profit_pct is None:
             raise ValueError("至少需要设置一个卖出规则")
         object.__setattr__(self, "ranking_value", self.ranking_value.strip())
         object.__setattr__(

@@ -8,6 +8,8 @@ import pandas as pd
 
 from selector_app.adapters.local_day_adapter import StockRef
 from selector_app.portfolio_backtest.models import PortfolioBacktestConfig
+from selector_app.screening.models import ScreenCondition
+from selector_app.screening.rules import RuleGroup
 from selector_app.strategy_fitness.models import StrategyFitnessConfig
 from selector_app.strategy_fitness.service import StrategyFitnessService
 
@@ -77,6 +79,8 @@ def config(**overrides: object) -> StrategyFitnessConfig:
         ranking_value=values.pop("ranking_value"),
         formula_text=values.pop("formula_text"),
         sell_signal=values.pop("sell_signal"),
+        buy_rule=values.pop("buy_rule", None),
+        sell_rule=values.pop("sell_rule", None),
         stop_loss_pct=values.pop("stop_loss_pct"),
         start_date=values.pop("start_date"),
         end_date=values.pop("end_date"),
@@ -114,3 +118,33 @@ def test_strategy_fitness_requires_three_non_empty_time_windows() -> None:
         assert "训练和验证比例之和" in str(exc)
     else:
         raise AssertionError("expected invalid ratio configuration")
+
+
+def test_strategy_fitness_reuses_composable_rule_groups() -> None:
+    strategy = config(
+        selected_signals=(),
+        buy_rule=RuleGroup(
+            conditions=(
+                ScreenCondition(
+                    left_value="custom.rank",
+                    operator="gt",
+                    right_constant=0,
+                ),
+            )
+        ),
+        sell_rule=RuleGroup(
+            conditions=(
+                ScreenCondition(
+                    left_value="custom.rank",
+                    operator="gte",
+                    right_constant=14,
+                ),
+            )
+        ),
+        stop_loss_pct=None,
+    )
+
+    report = StrategyFitnessService(adapter=FakeAdapter()).run(strategy)
+
+    assert report.processed == 2
+    assert all(result.train.total_trades >= 0 for result in report.results)

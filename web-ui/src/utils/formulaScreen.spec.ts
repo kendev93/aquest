@@ -10,6 +10,7 @@ import {
   filterKnownSignals,
   loadSavedConditionSets,
   loadSavedForm,
+  numericRuleForSignal,
   resultsToCsv,
   saveConditionSet,
   saveForm,
@@ -131,5 +132,22 @@ describe('formula screen form helpers', () => {
       ['removed.signal', 'indicator_three.prepare_rally', 'removed.again'],
       ['indicator_three.prepare_rally'],
     )).toEqual(['indicator_three.prepare_rally'])
+  })
+
+  it('converts preset buy and sell outputs into numeric conditions', () => {
+    const values = [
+      { id: 'indicator_three.var1', display_name: 'VAR1', description: '' },
+      { id: 'indicator_three.varo7', display_name: 'VARO7', description: '' },
+      { id: 'indicator_two.short_line', display_name: '短期线', description: '' },
+      { id: 'indicator_two.mid_line', display_name: '中期线', description: '' },
+    ]
+
+    expect(numericRuleForSignal('indicator_three.prepare_rally', values)).toMatchObject({
+      signals: [],
+      conditions: [{ left_value: 'indicator_three.var1', operator: 'cross_up', right_constant: 8 }],
+    })
+    expect(numericRuleForSignal('indicator_two.start', values)).toMatchObject({
+      conditions: [{ left_value: 'indicator_two.short_line', right_value: 'indicator_two.mid_line' }],
+    })
   })
 })

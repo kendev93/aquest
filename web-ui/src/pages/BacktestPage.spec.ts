@@ -24,6 +24,9 @@ const metadata: FormulaScreenMetadata = {
       { id: 'indicator_three.prepare_rally', display_name: '准备拉升', description: 'VAR1 上穿 8' },
       { id: 'indicator_three.end_zone', display_name: '终', description: 'VAR1 > 90' },
     ],
+    values: [
+      { id: 'indicator_three.var1', display_name: 'VAR1', description: '变量' },
+    ],
   }],
   combine_modes: [],
   supported_markets: ['SH', 'SZ'],
@@ -62,10 +65,6 @@ describe('BacktestPage', () => {
     await wrapper.get('[data-testid="backtest-code"]').setValue('600000')
     await wrapper.get('[data-testid="backtest-market"]').setValue('SZ')
     await wrapper.get('[data-testid="backtest-market"]').setValue('SH')
-    await wrapper.get('[data-testid="backtest-buy-signal"]').setValue('indicator_three.end_zone')
-    await wrapper.get('[data-testid="backtest-buy-signal"]').setValue('indicator_three.prepare_rally')
-    await wrapper.get('[data-testid="backtest-sell-signal"]').setValue('indicator_three.prepare_rally')
-    await wrapper.get('[data-testid="backtest-sell-signal"]').setValue('indicator_three.end_zone')
     await wrapper.get('[data-testid="backtest-start"]').setValue('2024-01-02')
     await wrapper.get('[data-testid="backtest-end"]').setValue('2024-01-06')
     await wrapper.get('[data-testid="backtest-config"]').trigger('submit')
@@ -73,7 +72,13 @@ describe('BacktestPage', () => {
 
     expect(backtestApi.createBacktest).toHaveBeenCalledWith(expect.objectContaining({
       market: 'SH', code: '600000',
-      buy_signal: 'indicator_three.prepare_rally', sell_signal: 'indicator_three.end_zone',
+      buy_signal: null, sell_signal: null,
+      buy_rule: expect.objectContaining({
+        conditions: [expect.objectContaining({ left_value: 'indicator_three.var1', operator: 'cross_up', right_constant: 8 })],
+      }),
+      sell_rule: expect.objectContaining({
+        conditions: [expect.objectContaining({ left_value: 'indicator_three.var1', operator: 'gt', right_constant: 90 })],
+      }),
       start_date: '2024-01-02', end_date: '2024-01-06',
     }))
     expect(wrapper.get('[data-testid="backtest-results"]').text()).toContain('4.00%')
@@ -87,6 +92,10 @@ describe('BacktestPage', () => {
       signals: [
         { id: 'custom.buy', display_name: '买入', description: '买入条件' },
         { id: 'custom.sell', display_name: '卖出', description: '卖出条件' },
+      ],
+      values: [
+        { id: 'custom.buy', display_name: '买入值', description: '买入数值' },
+        { id: 'custom.sell', display_name: '卖出值', description: '卖出数值' },
       ],
       minimum_bars: 6,
       warnings: [],
@@ -103,14 +112,14 @@ describe('BacktestPage', () => {
     await wrapper.get('[data-testid="backtest-config"]').trigger('submit')
     expect(wrapper.text()).toContain('参数 N 必须在 1 到 10000 之间')
     await wrapper.get('#backtest-param-N').setValue(8)
-    expect((wrapper.get('[data-testid="backtest-buy-signal"]').element as HTMLSelectElement).value).toBe('custom.buy')
-    expect((wrapper.get('[data-testid="backtest-sell-signal"]').element as HTMLSelectElement).value).toBe('custom.sell')
+    expect((wrapper.get('#backtest-buy-rule-left-0').element as HTMLSelectElement).value).toBe('custom.buy')
+    expect((wrapper.get('#backtest-sell-rule-left-0').element as HTMLSelectElement).value).toBe('custom.sell')
     await wrapper.get('[data-testid="backtest-formula"]').setValue('N:=8; 买入:C>10; 卖出:C<10;')
     await flushPromises()
     expect(wrapper.text()).toContain('公式已修改，请重新解析')
 
     await wrapper.get('[data-testid="backtest-mode-preset"]').trigger('click')
-    expect((wrapper.get('[data-testid="backtest-buy-signal"]').element as HTMLSelectElement).value).toBe('indicator_three.prepare_rally')
+    expect((wrapper.get('#backtest-buy-rule-left-0').element as HTMLSelectElement).value).toBe('indicator_three.var1')
   })
 
   it('validates required fields and shows a failed request message', async () => {

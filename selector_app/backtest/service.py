@@ -11,13 +11,20 @@ import numpy as np
 import pandas as pd
 
 from selector_app.formulas.common import validate_market_data
-from selector_app.formulas.custom import ParsedFormula, evaluate_custom_formula, parse_formula
+from selector_app.formulas.custom import (
+    ParsedFormula,
+    custom_output_id,
+    evaluate_custom_formula,
+    parse_formula,
+)
 from selector_app.formulas.registry import FORMULA_REGISTRY, FormulaRegistry
 from selector_app.formulas.types import FormulaResult
 from selector_app.indicators.cache import IndicatorCache, frame_fingerprint
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
 from selector_app.market_data.models import MarketCode, StockRef
 from selector_app.market_data.store import DuckDbMarketDataStore
+from selector_app.screening.engine import evaluate_rule_group
+from selector_app.screening.rules import RuleGroup
 
 from .engine import SignalBacktestConfig, SignalBacktestResult, run_signal_backtest
 from .models import BacktestConfig, BacktestReport, BacktestValue
@@ -71,17 +78,13 @@ class BacktestService:
         if len(window_indices) == 0:
             raise ValueError("指定日期范围内没有可用日线数据")
         window = frame.iloc[window_indices].reset_index(drop=True)
-        buy_mask = self._signal_window(
-            formula_results,
-            config.buy_signal,
-            window_indices,
-            parsed_formula is not None,
+        if config.buy_rule is None or config.sell_rule is None:
+            raise ValueError("买入和卖出规则不能为空")
+        buy_mask = self._rule_window(
+            formula_results, config.buy_rule, window_indices, parsed_formula is not None
         )
-        sell_mask = self._signal_window(
-            formula_results,
-            config.sell_signal,
-            window_indices,
-            parsed_formula is not None,
+        sell_mask = self._rule_window(
+            formula_results, config.sell_rule, window_indices, parsed_formula is not None
         )
         result = self._run_engine(window, buy_mask, sell_mask, config)
         report = self._build_report(result, window, config, data_fingerprint)
@@ -100,8 +103,19 @@ class BacktestService:
         if config.formula_text:
             parsed = parse_formula(config.formula_text)
             available = {signal.id for signal in parsed.signals}
-            if config.buy_signal not in available or config.sell_signal not in available:
-                raise ValueError("买入或卖出信号不属于当前自定义公式")
+            signal_ids = self._rule_signal_ids(config.buy_rule, config.sell_rule)
+            invalid_signals = [signal_id for signal_id in signal_ids if signal_id not in available]
+            value_ids = self._rule_value_ids(config.buy_rule, config.sell_rule)
+            available_values = {custom_output_id(name) for name in parsed.value_names}
+            invalid_values = [
+                value_id for value_id in value_ids if value_id not in available_values
+            ]
+            if invalid_signals:
+                raise ValueError(
+                    f"买入或卖出信号不属于当前自定义公式: {', '.join(invalid_signals)}"
+                )
+            if invalid_values:
+                raise ValueError(f"未知指标输出: {', '.join(invalid_values)}")
             return parsed, (
                 self._indicator_cache.get_or_compute_custom(
                     frame,
@@ -114,10 +128,22 @@ class BacktestService:
                 else {"custom": evaluate_custom_formula(parsed, frame, config.formula_parameters)}
             )
 
-        for signal_id in (config.buy_signal, config.sell_signal):
+        signal_ids = self._rule_signal_ids(config.buy_rule, config.sell_rule)
+        for signal_id in signal_ids:
             if not self._registry.has_signal(signal_id):
                 raise ValueError(f"未知选股信号: {signal_id}")
-        definitions = self._registry.formulas_for_signals((config.buy_signal, config.sell_signal))
+        value_ids = self._rule_value_ids(config.buy_rule, config.sell_rule)
+        definitions_by_id = {
+            definition.id: definition
+            for definition in (
+                *self._registry.formulas_for_signals(tuple(signal_ids)),
+                *self._registry.formulas_for_values(tuple(value_ids)),
+            )
+        }
+        definitions = tuple(definitions_by_id.values())
+        for value_id in value_ids:
+            if not self._registry.has_value(value_id):
+                raise ValueError(f"未知指标输出: {value_id}")
         results = (
             self._indicator_cache.get_or_compute(
                 frame,
@@ -132,6 +158,25 @@ class BacktestService:
             }
         )
         return None, results
+
+    @staticmethod
+    def _rule_signal_ids(*rules: RuleGroup | None) -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys(signal_id for rule in rules if rule for signal_id in rule.signals)
+        )
+
+    @staticmethod
+    def _rule_value_ids(*rules: RuleGroup | None) -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys(
+                value_id
+                for rule in rules
+                if rule
+                for condition in rule.conditions
+                for value_id in (condition.left_value, condition.right_value)
+                if value_id is not None
+            )
+        )
 
     @staticmethod
     def _prepare_frame(frame: pd.DataFrame) -> pd.DataFrame:
@@ -156,26 +201,15 @@ class BacktestService:
             mask &= dates <= end_date
         return np.flatnonzero(mask.to_numpy())
 
-    def _signal_window(
+    def _rule_window(
         self,
         results: Mapping[str, FormulaResult],
-        signal_id: str,
+        rule: RuleGroup,
         indices: np.ndarray,
         custom: bool,
     ) -> np.ndarray:
-        if custom:
-            result = results["custom"]
-            key = signal_id
-        else:
-            definition = self._registry.signal(signal_id)
-            result = results[definition.formula_id]
-            key = signal_id.split(".", 1)[1]
-        try:
-            values = result.signals[key]
-        except KeyError as exc:
-            raise ValueError(f"找不到信号输出: {signal_id}") from exc
-        signal_array = np.array(cast(object, values), dtype=bool, copy=True)
-        return cast(np.ndarray, signal_array[indices].copy())
+        mask = evaluate_rule_group(rule, results, self._registry, custom=custom)
+        return np.asarray(mask[indices], dtype=bool).copy()
 
     @staticmethod
     def _run_engine(

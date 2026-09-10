@@ -10,7 +10,9 @@ import type {
   ScanPayload,
   ScreenFormState,
   RuleMode,
+  RuleGroupPayload,
   ScreenResult,
+  ValueDefinition,
 } from '../types'
 
 export const DEFAULT_PRESET_SIGNALS = [
@@ -121,6 +123,47 @@ export function saveForm(form: ScreenFormState): void {
 
 export function valueOptionLabel(value: ValueDefinition): string {
   return value.display_name
+}
+
+function numericRule(
+  leftValue: string,
+  operator: ConditionOperator,
+  rightValue: string | null,
+  rightConstant: number | null,
+  values: ValueDefinition[],
+): RuleGroupPayload {
+  const available = new Set(values.map((value) => value.id))
+  if (!available.has(leftValue) || (rightValue !== null && !available.has(rightValue))) {
+    return { signals: [], conditions: [], combine_mode: 'all', minimum_matches: null }
+  }
+  return {
+    signals: [],
+    conditions: [{ left_value: leftValue, operator, right_value: rightValue, right_constant: rightConstant }],
+    combine_mode: 'all',
+    minimum_matches: null,
+  }
+}
+
+/** Convert a legacy preset signal default into a numeric indicator rule. */
+export function numericRuleForSignal(
+  signalId: string,
+  values: ValueDefinition[],
+): RuleGroupPayload {
+  const known: Record<string, [string, ConditionOperator, string | null, number | null]> = {
+    'indicator_two.start': ['indicator_two.short_line', 'cross_up', 'indicator_two.mid_line', null],
+    'indicator_two.end': ['indicator_two.short_line', 'gt', null, 90],
+    'indicator_three.prepare_rally': ['indicator_three.var1', 'cross_up', null, 8],
+    'indicator_three.suppress_main': ['indicator_three.var1', 'lte', null, 8],
+    'indicator_three.accumulation_zone': ['indicator_three.varo7', 'lt', null, 10],
+    'indicator_three.begin_zone': ['indicator_three.var1', 'lt', null, 10],
+    'indicator_three.end_zone': ['indicator_three.var1', 'gt', null, 90],
+  }
+  const mapped = known[signalId]
+  if (mapped) return numericRule(...mapped, values)
+  if (values.some((value) => value.id === signalId)) {
+    return numericRule(signalId, 'gt', null, 0, values)
+  }
+  return { signals: [], conditions: [], combine_mode: 'all', minimum_matches: null }
 }
 
 export function validateScreenForm(
@@ -296,7 +339,7 @@ export function filterKnownSignals(
 }
 
 export function signalDisplayName(
-  signalId: string,
+  signalId: string | null | undefined,
   metadata: FormulaScreenMetadata | null,
   customMetadata: CustomFormulaMetadata | null = null,
 ): string {
@@ -306,7 +349,7 @@ export function signalDisplayName(
     const signal = indicator.signals.find((candidate) => candidate.id === signalId)
     if (signal) return signal.display_name
   }
-  return signalId
+  return signalId ?? '组合规则'
 }
 
 export function resultsToCsv(results: ScreenResult[]): string {

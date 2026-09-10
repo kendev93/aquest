@@ -28,6 +28,7 @@ const metadata: FormulaScreenMetadata = {
     values: [
       { id: 'indicator_three.varo7', display_name: 'VARO7', description: '趋势值' },
       { id: 'indicator_three.varo6', display_name: 'VARO6', description: '辅助值' },
+      { id: 'indicator_three.var1', display_name: 'VAR1', description: '变量' },
     ],
   }],
   combine_modes: [{ value: 'all', label: '全部满足' }, { value: 'any', label: '任一满足' }, { value: 'at_least', label: '至少满足' }],
@@ -86,7 +87,11 @@ describe('StrategyFitnessPage', () => {
     await flushPromises()
 
     expect(fitnessApi.createStrategyFitness).toHaveBeenCalledWith(expect.objectContaining({
-      selected_signals: ['indicator_three.prepare_rally'],
+      selected_signals: [],
+      buy_rule: expect.objectContaining({
+        signals: [],
+        conditions: [expect.objectContaining({ left_value: 'indicator_three.var1', operator: 'cross_up', right_constant: 8 })],
+      }),
       ranking_value: 'indicator_three.varo7', train_ratio: 0.6, validation_ratio: 0.2,
       min_trades: 5, max_test_drawdown: 0.3,
     }))
@@ -97,11 +102,15 @@ describe('StrategyFitnessPage', () => {
     expect(wrapper.get('[data-testid="fitness-test-600000"]').text()).toContain('8.00%')
   })
 
-  it('parses a custom formula and validates an incomplete comparison rule', async () => {
+  it('parses a custom formula and configures a metric comparison rule', async () => {
     vi.mocked(formulaApi.parseFormula).mockResolvedValueOnce({
       parameters: [{ name: 'N', default: 5, minimum: 1, maximum: 100, step: 1 }],
       signals: [{ id: 'custom.buy', display_name: '买入', description: '买入' }, { id: 'custom.sell', display_name: '卖出', description: '卖出' }],
-      values: [{ id: 'custom.rank', display_name: '排序', description: '排序' }],
+      values: [
+        { id: 'custom.rank', display_name: '排序', description: '排序' },
+        { id: 'custom.buy', display_name: '买入值', description: '买入数值' },
+        { id: 'custom.sell', display_name: '卖出值', description: '卖出数值' },
+      ],
       minimum_bars: 6, warnings: [],
     })
     const wrapper = mount(StrategyFitnessPage)
@@ -111,12 +120,16 @@ describe('StrategyFitnessPage', () => {
     await wrapper.get('[data-testid="fitness-parse-formula"]').trigger('click')
     await flushPromises()
     expect((wrapper.get('[data-testid="fitness-ranking-value"]').element as HTMLSelectElement).value).toBe('custom.rank')
-    await wrapper.get('[data-testid="fitness-compare-left"]').setValue('custom.rank')
-    await wrapper.get('[data-testid="fitness-stop-loss-enabled"]').setValue(false)
-    await wrapper.get('[data-testid="fitness-sell-signal"]').setValue('')
+    await wrapper.get('#fitness-sell-rule-operator-0').setValue('gte')
+    await wrapper.get('#fitness-sell-rule-right-type-0').setValue('constant')
+    await wrapper.get('#fitness-sell-rule-right-0').setValue(20)
     await wrapper.get('[data-testid="fitness-config"]').trigger('submit')
-    expect(wrapper.text()).toContain('请选择指标比较的右侧指标')
-    expect(fitnessApi.createStrategyFitness).not.toHaveBeenCalled()
+    await flushPromises()
+    expect(fitnessApi.createStrategyFitness).toHaveBeenCalledWith(expect.objectContaining({
+      sell_rule: expect.objectContaining({
+        conditions: [expect.objectContaining({ right_constant: 20, right_value: null })],
+      }),
+    }))
   })
 
   it('shows a metadata loading error from the API', async () => {
@@ -203,8 +216,6 @@ describe('StrategyFitnessPage', () => {
     await flushPromises()
     await wrapper.get('[data-testid="fitness-universe"]').setValue('custom')
     await wrapper.get('[data-testid="fitness-ranking-value"]').setValue('')
-    await wrapper.get('[data-testid="fitness-combine-mode"]').setValue('at_least')
-    await wrapper.get('[data-testid="fitness-minimum-matches"]').setValue(0)
     await wrapper.get('[data-testid="fitness-start"]').setValue('2024-02-01')
     await wrapper.get('[data-testid="fitness-end"]').setValue('2024-01-01')
     await wrapper.get('[data-testid="fitness-train-ratio"]').setValue(0)
@@ -226,7 +237,7 @@ describe('StrategyFitnessPage', () => {
     expect(wrapper.text()).toContain('初始资金必须大于 0')
 
     await wrapper.get('[data-testid="fitness-stop-loss-enabled"]').setValue(false)
-    await wrapper.get('[data-testid="fitness-sell-signal"]').setValue('')
+    await wrapper.get('[data-testid="fitness-sell-rule-remove-0"]').trigger('click')
     await wrapper.get('[data-testid="fitness-config"]').trigger('submit')
     expect(wrapper.text()).toContain('至少配置一个卖出规则')
   })

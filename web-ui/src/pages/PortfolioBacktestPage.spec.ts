@@ -28,6 +28,7 @@ const metadata: FormulaScreenMetadata = {
     values: [
       { id: 'indicator_three.varo7', display_name: 'VARO7', description: '趋势值' },
       { id: 'indicator_three.varo6', display_name: 'VARO6', description: '辅助值' },
+      { id: 'indicator_three.var1', display_name: 'VAR1', description: '变量' },
     ],
   }],
   combine_modes: [
@@ -92,7 +93,11 @@ describe('PortfolioBacktestPage', () => {
     await flushPromises()
 
     expect(portfolioApi.createPortfolioBacktest).toHaveBeenCalledWith(expect.objectContaining({
-      selected_signals: ['indicator_three.prepare_rally'],
+      selected_signals: [],
+      buy_rule: expect.objectContaining({
+        signals: [],
+        conditions: [expect.objectContaining({ left_value: 'indicator_three.var1' })],
+      }),
       ranking_value: 'indicator_three.varo7', max_positions: 5, stop_loss_pct: 0.08,
     }))
     expect(wrapper.get('[data-testid="portfolio-results"]').text()).toContain('12.00%')
@@ -135,9 +140,9 @@ describe('PortfolioBacktestPage', () => {
     const wrapper = mount(PortfolioBacktestPage)
     await flushPromises()
 
-    await wrapper.get('[data-testid="portfolio-signal-indicator_three.end_zone"]').setValue(true)
-    await wrapper.get('[data-testid="portfolio-combine-mode"]').setValue('at_least')
-    await wrapper.get('[data-testid="portfolio-minimum-matches"]').setValue(2)
+    await wrapper.get('[data-testid="portfolio-buy-rule-add-condition"]').trigger('click')
+    await wrapper.get('[data-testid="portfolio-buy-rule-combine-mode"]').setValue('at_least')
+    await wrapper.get('[data-testid="portfolio-buy-rule-minimum-matches"]').setValue(2)
     await wrapper.get('[data-testid="portfolio-universe"]').setValue('custom')
     await wrapper.get('[data-testid="portfolio-universe-file"]').setValue('/data/list.txt')
     await wrapper.get('[data-testid="portfolio-rank-order"]').setValue('asc')
@@ -146,15 +151,9 @@ describe('PortfolioBacktestPage', () => {
     await wrapper.get('[data-testid="portfolio-fitness-score"]').setValue(60)
     await wrapper.get('[data-testid="portfolio-fitness-trades"]').setValue(3)
     await wrapper.get('[data-testid="portfolio-fitness-drawdown"]').setValue(40)
-    await wrapper.get('[data-testid="portfolio-sell-signal"]').setValue('')
+    await wrapper.get('#portfolio-sell-rule-operator-0').setValue('gte')
     await wrapper.get('[data-testid="portfolio-stop-loss-enabled"]').setValue(false)
     await wrapper.get('[data-testid="portfolio-take-profit-enabled"]').setValue(true)
-    await wrapper.get('[data-testid="portfolio-sell-value"]').setValue('indicator_three.varo7')
-    await wrapper.get('[data-testid="portfolio-sell-value-operator"]').setValue('gte')
-    await wrapper.get('[data-testid="portfolio-sell-value-threshold"]').setValue(-2)
-    await wrapper.get('[data-testid="portfolio-compare-left"]').setValue('indicator_three.varo7')
-    await wrapper.get('[data-testid="portfolio-compare-operator"]').setValue('gte')
-    await wrapper.get('[data-testid="portfolio-compare-right"]').setValue('indicator_three.varo6')
     await wrapper.get('[data-testid="portfolio-advanced-toggle"]').trigger('click')
     await wrapper.get('[data-testid="portfolio-start"]').setValue('2024-01-02')
     await wrapper.get('[data-testid="portfolio-end"]').setValue('2024-01-06')
@@ -168,14 +167,23 @@ describe('PortfolioBacktestPage', () => {
     await flushPromises()
 
     expect(portfolioApi.createPortfolioBacktest).toHaveBeenCalledWith(expect.objectContaining({
-      universe: 'custom', universe_file: '/data/list.txt', selected_signals: [
-        'indicator_three.prepare_rally', 'indicator_three.end_zone',
-      ], combine_mode: 'at_least', minimum_matches: 2, rank_order: 'asc',
+      universe: 'custom', universe_file: '/data/list.txt', selected_signals: [],
+      buy_rule: expect.objectContaining({
+        signals: [],
+        combine_mode: 'at_least', minimum_matches: 2,
+        conditions: expect.any(Array),
+      }),
+      combine_mode: 'all', minimum_matches: null, rank_order: 'asc',
       rebalance_frequency: 'weekly', sell_signal: null, stop_loss_pct: null,
-      take_profit_pct: 0.2, sell_value: 'indicator_three.varo7',
-      sell_value_operator: 'gte', sell_value_threshold: -2,
-      compare_left_value: 'indicator_three.varo7', compare_operator: 'gte',
-      compare_right_value: 'indicator_three.varo6', execution: 'next_close',
+      take_profit_pct: 0.2, sell_value: null, sell_value_operator: null,
+      sell_value_threshold: null, compare_left_value: null, compare_operator: null,
+      compare_right_value: null, execution: 'next_close',
+      sell_rule: expect.objectContaining({
+        combine_mode: 'all',
+        conditions: [expect.objectContaining({
+          left_value: 'indicator_three.var1', operator: 'gte', right_constant: 90, right_value: null,
+        })],
+      }),
       fitness_filter_enabled: true, fitness_min_score: 60, fitness_min_trades: 3,
       fitness_max_drawdown: 0.4,
     }))
@@ -226,19 +234,23 @@ describe('PortfolioBacktestPage', () => {
   it('shows validation when no buy signal is selected', async () => {
     const wrapper = mount(PortfolioBacktestPage)
     await flushPromises()
-    const checkbox = wrapper.get('[data-testid="portfolio-signal-indicator_three.prepare_rally"]')
-    await checkbox.setValue(false)
+    await wrapper.get('[data-testid="portfolio-buy-rule-remove-0"]').trigger('click')
     await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')
-    expect(wrapper.text()).toContain('至少选择一个选股条件')
+    expect(wrapper.text()).toContain('请至少设置一个买入条件')
   })
 
-  it('validates the right-hand indicator before submitting a comparison rule', async () => {
+  it('submits an indicator-to-fixed-value rule', async () => {
     const wrapper = mount(PortfolioBacktestPage)
     await flushPromises()
-    await wrapper.get('[data-testid="portfolio-compare-left"]').setValue('indicator_three.varo7')
+    await wrapper.get('#portfolio-buy-rule-right-type-0').setValue('constant')
+    await wrapper.get('#portfolio-buy-rule-right-0').setValue(60)
     await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')
+    await flushPromises()
 
-    expect(wrapper.text()).toContain('请选择指标比较的右侧指标')
-    expect(portfolioApi.createPortfolioBacktest).not.toHaveBeenCalled()
+    expect(portfolioApi.createPortfolioBacktest).toHaveBeenCalledWith(expect.objectContaining({
+      buy_rule: expect.objectContaining({
+        conditions: [expect.objectContaining({ right_constant: 60, right_value: null })],
+      }),
+    }))
   })
 })

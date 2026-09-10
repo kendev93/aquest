@@ -3,15 +3,18 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import { createBacktest, getBacktest, getBacktestResults } from '../api/backtest'
 import { FormulaScreenApiError, fetchMetadata, parseFormula } from '../api/formulaScreen'
+import RuleGroupEditor from '../components/RuleGroupEditor.vue'
 import type {
   BacktestJobState,
   BacktestPayload,
   BacktestResult,
   CustomFormulaMetadata,
   FormulaScreenMetadata,
+  RuleGroupPayload,
   SignalDefinition,
+  ValueDefinition,
 } from '../types'
-import { signalDisplayName } from '../utils/formulaScreen'
+import { numericRuleForSignal, signalDisplayName } from '../utils/formulaScreen'
 
 interface BacktestFormState {
   mode: 'preset' | 'custom'
@@ -19,6 +22,8 @@ interface BacktestFormState {
   code: string
   buySignal: string
   sellSignal: string
+  buyRule: RuleGroupPayload
+  sellRule: RuleGroupPayload
   formulaText: string
   formulaParameters: Record<string, number>
   startDate: string
@@ -42,6 +47,8 @@ const form = reactive<BacktestFormState>({
   code: '',
   buySignal: '',
   sellSignal: '',
+  buyRule: { signals: [], conditions: [], combine_mode: 'all', minimum_matches: null },
+  sellRule: { signals: [], conditions: [], combine_mode: 'all', minimum_matches: null },
   formulaText: '',
   formulaParameters: {},
   startDate: '',
@@ -71,6 +78,11 @@ const availableSignals = computed<SignalDefinition[]>(() => (
   form.mode === 'custom'
     ? customMetadata.value?.signals ?? []
     : presetSignals.value
+))
+const availableValues = computed<ValueDefinition[]>(() => (
+  form.mode === 'custom'
+    ? customMetadata.value?.values ?? []
+    : metadata.value?.indicators.flatMap((indicator) => indicator.values ?? []) ?? []
 ))
 const canSubmit = computed(() => (
   !loading.value
@@ -106,6 +118,39 @@ const chartSummary = computed(() => {
   return `净值从 ${formatMoney(first)} 变为 ${formatMoney(last)}，共 ${curve.length} 个交易日`
 })
 
+function ruleForSignal(signal: string): RuleGroupPayload {
+  return numericRuleForSignal(signal, availableValues.value)
+}
+
+function hasRuleItems(rule: RuleGroupPayload): boolean {
+  return rule.signals.length + rule.conditions.length > 0
+}
+
+function isSimpleRule(rule: RuleGroupPayload, signal: string): boolean {
+  return rule.combine_mode === 'all'
+    && rule.minimum_matches === null
+    && rule.conditions.length === 0
+    && rule.signals.length === 1
+    && rule.signals[0] === signal
+}
+
+function setBuyRule(rule: RuleGroupPayload): void {
+  form.buyRule = rule
+  form.buySignal = isSimpleRule(rule, rule.signals[0] ?? '') ? rule.signals[0] ?? '' : ''
+}
+
+function setSellRule(rule: RuleGroupPayload): void {
+  form.sellRule = rule
+  form.sellSignal = isSimpleRule(rule, rule.signals[0] ?? '') ? rule.signals[0] ?? '' : ''
+}
+
+function setLegacySignals(buySignal: string, sellSignal: string): void {
+  form.buySignal = buySignal
+  form.sellSignal = sellSignal
+  form.buyRule = ruleForSignal(buySignal)
+  form.sellRule = ruleForSignal(sellSignal)
+}
+
 function setMode(mode: BacktestFormState['mode']): void {
   if (form.mode === mode) return
   form.mode = mode
@@ -115,11 +160,12 @@ function setMode(mode: BacktestFormState['mode']): void {
   if (mode === 'preset') {
     customMetadata.value = null
     parsedFormulaText.value = ''
-    form.buySignal = presetSignals.value.find((signal) => signal.id.endsWith('prepare_rally'))?.id ?? presetSignals.value[0]?.id ?? ''
-    form.sellSignal = presetSignals.value.find((signal) => signal.id.endsWith('end_zone'))?.id ?? presetSignals.value[1]?.id ?? ''
+    setLegacySignals(
+      presetSignals.value.find((signal) => signal.id.endsWith('prepare_rally'))?.id ?? presetSignals.value[0]?.id ?? '',
+      presetSignals.value.find((signal) => signal.id.endsWith('end_zone'))?.id ?? presetSignals.value[1]?.id ?? '',
+    )
   } else {
-    form.buySignal = ''
-    form.sellSignal = ''
+    setLegacySignals('', '')
   }
 }
 
@@ -141,15 +187,13 @@ async function parseCustomFormula(): Promise<void> {
         previousParameters[parameter.name] ?? parameter.default,
       ]),
     )
-    form.buySignal = parsed.signals[0]?.id ?? ''
-    form.sellSignal = parsed.signals[1]?.id ?? ''
+    setLegacySignals(parsed.signals[0]?.id ?? '', parsed.signals[1]?.id ?? '')
     errors.value = {}
     message.value = `公式解析完成：识别 ${parsed.parameters.length} 个参数、${parsed.signals.length} 个输出。`
   } catch (error) {
     customMetadata.value = null
     parsedFormulaText.value = ''
-    form.buySignal = ''
-    form.sellSignal = ''
+    setLegacySignals('', '')
     customParseError.value = error instanceof FormulaScreenApiError
       ? error.message
       : '公式解析失败，请检查语法和函数是否受支持。'
@@ -179,9 +223,9 @@ function validate(): Record<string, string> {
       }
     }
   }
-  if (!form.buySignal) next.buySignal = '请选择买入信号。'
-  if (!form.sellSignal) next.sellSignal = '请选择卖出信号。'
-  else if (form.buySignal === form.sellSignal) next.sellSignal = '买入信号和卖出信号不能相同。'
+  if (!hasRuleItems(form.buyRule)) next.buySignal = '请至少设置一个买入指标条件。'
+  if (!hasRuleItems(form.sellRule)) next.sellSignal = '请至少设置一个卖出指标条件。'
+  else if (isSimpleRule(form.buyRule, form.buySignal) && isSimpleRule(form.sellRule, form.sellSignal) && form.buySignal === form.sellSignal) next.sellSignal = '买入信号和卖出信号不能相同。'
   if (form.startDate && form.endDate && form.startDate > form.endDate) next.endDate = '结束日期不能早于开始日期。'
   if (!Number.isFinite(form.initialCash) || form.initialCash <= 0) next.initialCash = '初始资金必须大于 0。'
   if (form.positionMode === 'fixed' && (!Number.isInteger(form.fixedSize) || !form.fixedSize || form.fixedSize < 100 || form.fixedSize % 100 !== 0)) {
@@ -191,7 +235,7 @@ function validate(): Record<string, string> {
 }
 
 function buildPayload(): BacktestPayload {
-  return {
+  const payload: BacktestPayload = {
     market: form.market,
     code: form.code.trim(),
     buy_signal: form.buySignal,
@@ -209,6 +253,15 @@ function buildPayload(): BacktestPayload {
     position_mode: form.positionMode,
     fixed_size: form.positionMode === 'fixed' ? form.fixedSize : null,
   }
+  if (!isSimpleRule(form.buyRule, form.buySignal)) {
+    payload.buy_signal = null
+    payload.buy_rule = form.buyRule
+  }
+  if (!isSimpleRule(form.sellRule, form.sellSignal)) {
+    payload.sell_signal = null
+    payload.sell_rule = form.sellRule
+  }
+  return payload
 }
 
 function apiMessage(error: unknown): string {
@@ -278,8 +331,10 @@ onMounted(async () => {
   try {
     metadata.value = await fetchMetadata()
     const signals = presetSignals.value
-    form.buySignal = signals.find((signal) => signal.id.endsWith('prepare_rally'))?.id ?? signals[0]?.id ?? ''
-    form.sellSignal = signals.find((signal) => signal.id.endsWith('end_zone'))?.id ?? signals[1]?.id ?? ''
+    setLegacySignals(
+      signals.find((signal) => signal.id.endsWith('prepare_rally'))?.id ?? signals[0]?.id ?? '',
+      signals.find((signal) => signal.id.endsWith('end_zone'))?.id ?? signals[1]?.id ?? '',
+    )
   } catch (error) {
     message.value = apiMessage(error)
   }
@@ -290,8 +345,7 @@ watch(() => form.formulaText, (value) => {
   if (value.trim() === parsedFormulaText.value) return
   customMetadata.value = null
   parsedFormulaText.value = ''
-  form.buySignal = ''
-  form.sellSignal = ''
+  setLegacySignals('', '')
   customParseError.value = '公式已修改，请重新解析。'
 })
 </script>
@@ -341,7 +395,7 @@ watch(() => form.formulaText, (value) => {
             <legend>粘贴通达信公式</legend>
             <textarea v-model="form.formulaText" data-testid="backtest-formula" rows="7" spellcheck="false" placeholder="例如：买入:CROSS(C,MA(C,20)); 卖出:CROSS(MA(C,20),C);"></textarea>
             <button class="secondary-button" data-testid="backtest-parse-formula" type="button" :disabled="customParseLoading" @click="parseCustomFormula">{{ customParseLoading ? '解析中…' : '解析公式' }}</button>
-            <p class="helper">公式需要至少两个输出，分别作为买入和卖出信号；参数使用 <code>名称:=数值</code>。</p>
+            <p class="helper">公式需要至少两个可用于买入/卖出的命名输出；参数使用 <code>名称:=数值</code>。</p>
             <p v-if="customParseError" class="field-error">{{ customParseError }}</p>
             <div v-if="customMetadata" class="custom-formula-meta"><span>{{ customMetadata.parameters.length }} 个参数</span><span>{{ customMetadata.signals.length }} 个输出</span><span>至少 {{ customMetadata.minimum_bars }} 根 K 线</span></div>
             <div v-if="customMetadata?.parameters.length" class="parameter-grid">
@@ -360,14 +414,25 @@ watch(() => form.formulaText, (value) => {
             <p class="helper">读取已导入本地 DuckDB 的已完成日线；请先在“本地行情”页面导入数据。</p>
           </fieldset>
 
-          <fieldset class="form-section signal-pair">
-            <legend>买卖信号 <span class="required">*</span></legend>
-            <div class="signal-pair-grid">
-              <div><label for="backtest-buy-signal">买入条件</label><select id="backtest-buy-signal" v-model="form.buySignal" data-testid="backtest-buy-signal" :disabled="availableSignals.length === 0"><option value="" disabled>请选择输出</option><option v-for="signal in availableSignals" :key="`buy-${signal.id}`" :value="signal.id">{{ signal.display_name }} · {{ signal.id }}</option></select></div>
-              <div><label for="backtest-sell-signal">卖出条件</label><select id="backtest-sell-signal" v-model="form.sellSignal" data-testid="backtest-sell-signal" :disabled="availableSignals.length === 0"><option value="" disabled>请选择输出</option><option v-for="signal in availableSignals" :key="`sell-${signal.id}`" :value="signal.id">{{ signal.display_name }} · {{ signal.id }}</option></select></div>
-            </div>
-            <p v-if="errors.buySignal || errors.sellSignal" class="field-error">{{ errors.buySignal || errors.sellSignal }}</p>
-          </fieldset>
+          <p class="helper rule-editor-intro">买入和卖出都使用指标条件构建器：可以比较两个指标，也可以比较指标和固定值；支持 AND、OR 或至少满足 N 个。</p>
+          <RuleGroupEditor
+            :model-value="form.buyRule"
+            :values="availableValues"
+            :condition-operators="metadata?.condition_operators"
+            title="买入条件组合"
+            testid="backtest-buy-rule"
+            @update:model-value="setBuyRule"
+          />
+          <p v-if="errors.buySignal" class="field-error">{{ errors.buySignal }}</p>
+          <RuleGroupEditor
+            :model-value="form.sellRule"
+            :values="availableValues"
+            :condition-operators="metadata?.condition_operators"
+            title="卖出条件组合"
+            testid="backtest-sell-rule"
+            @update:model-value="setSellRule"
+          />
+          <p v-if="errors.sellSignal" class="field-error">{{ errors.sellSignal }}</p>
 
           <fieldset class="form-section">
             <legend>历史区间</legend>

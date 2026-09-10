@@ -30,7 +30,8 @@ from selector_app.market_data.day_format import classify_board, classify_instrum
 from selector_app.market_data.models import InstrumentBoard, InstrumentType, StockRef
 from selector_app.market_data.scope import InstrumentScope
 from selector_app.market_data.store import DuckDbMarketDataStore
-from selector_app.screening.engine import combine_matches
+from selector_app.screening.engine import evaluate_rule_group
+from selector_app.screening.rules import RuleGroup
 from selector_app.strategy_fitness.rolling import (
     RollingFitnessDecision,
     RollingFitnessFilter,
@@ -38,7 +39,6 @@ from selector_app.strategy_fitness.rolling import (
 )
 
 from .models import (
-    CompareOperator,
     PortfolioBacktestConfig,
     PortfolioBacktestReport,
     PortfolioJsonValue,
@@ -69,6 +69,8 @@ class _StockSeries:
     dates: np.ndarray
     opens: np.ndarray
     closes: np.ndarray
+    buy_mask: np.ndarray
+    sell_mask: np.ndarray
     signals: Mapping[str, np.ndarray]
     values: Mapping[str, np.ndarray]
     date_to_index: Mapping[int, int]
@@ -235,20 +237,17 @@ class PortfolioBacktestService:
         config: PortfolioBacktestConfig,
         parsed: ParsedFormula | None,
     ) -> None:
-        signal_ids = list(config.selected_signals)
-        if config.sell_signal is not None:
-            signal_ids.append(config.sell_signal)
+        signal_ids = list(self._rule_signal_ids(config.buy_rule, config.sell_rule))
+        value_ids = self._value_ids(config)
         if parsed is not None:
             available_signals = {signal.id for signal in parsed.signals}
             invalid_signals = [signal for signal in signal_ids if signal not in available_signals]
             available_values = {custom_output_id(name) for name in parsed.value_names}
-            value_ids = self._value_ids(config)
             invalid_values = [value for value in value_ids if value not in available_values]
         else:
             invalid_signals = [
                 signal for signal in signal_ids if not self._registry.has_signal(signal)
             ]
-            value_ids = self._value_ids(config)
             invalid_values = [value for value in value_ids if not self._registry.has_value(value)]
         if invalid_signals:
             raise ValueError(f"未知选股或卖出信号: {', '.join(invalid_signals)}")
@@ -258,13 +257,20 @@ class PortfolioBacktestService:
     @staticmethod
     def _value_ids(config: PortfolioBacktestConfig) -> list[str]:
         values = [config.ranking_value]
-        if config.sell_value is not None:
-            values.append(config.sell_value)
-        if config.compare_left_value is not None:
-            values.append(config.compare_left_value)
-        if config.compare_right_value is not None:
-            values.append(config.compare_right_value)
-        return values
+        for rule in (config.buy_rule, config.sell_rule):
+            if rule is None:
+                continue
+            for condition in rule.conditions:
+                values.append(condition.left_value)
+                if condition.right_value is not None:
+                    values.append(condition.right_value)
+        return list(dict.fromkeys(values))
+
+    @staticmethod
+    def _rule_signal_ids(*rules: RuleGroup | None) -> tuple[str, ...]:
+        return tuple(
+            dict.fromkeys(signal_id for rule in rules if rule for signal_id in rule.signals)
+        )
 
     def _build_context(
         self,
@@ -293,15 +299,24 @@ class PortfolioBacktestService:
 
         signal_arrays = {
             signal_id: self._signal_array(results, signal_id, parsed is not None)[indices].copy()
-            for signal_id in (
-                *config.selected_signals,
-                *(() if config.sell_signal is None else (config.sell_signal,)),
-            )
+            for signal_id in self._rule_signal_ids(config.buy_rule, config.sell_rule)
         }
         value_arrays = {
             value_id: self._value_array(results, value_id, parsed is not None)[indices].copy()
             for value_id in self._value_ids(config)
         }
+        if config.buy_rule is None:
+            raise ValueError("买入规则不能为空")
+        buy_mask = evaluate_rule_group(
+            config.buy_rule, results, self._registry, custom=parsed is not None
+        )[indices].copy()
+        sell_mask = (
+            evaluate_rule_group(
+                config.sell_rule, results, self._registry, custom=parsed is not None
+            )[indices].copy()
+            if config.sell_rule is not None
+            else np.zeros(len(indices), dtype=bool)
+        )
         window = frame.iloc[indices].reset_index(drop=True)
         dates = np.asarray(
             [int(pd.Timestamp(value).strftime("%Y%m%d")) for value in window["date"]],
@@ -318,6 +333,8 @@ class PortfolioBacktestService:
             dates=dates,
             opens=window["open"].to_numpy(dtype=float, copy=True),
             closes=window["close"].to_numpy(dtype=float, copy=True),
+            buy_mask=np.asarray(buy_mask, dtype=bool),
+            sell_mask=np.asarray(sell_mask, dtype=bool),
             signals=signal_arrays,
             values=value_arrays,
             date_to_index={int(value): index for index, value in enumerate(dates)},
@@ -399,10 +416,9 @@ class PortfolioBacktestService:
                 else {"custom": evaluate_custom_formula(parsed, frame, config.formula_parameters)}
             )
         formula_ids = {
-            self._registry.signal(signal_id).formula_id for signal_id in config.selected_signals
+            self._registry.signal(signal_id).formula_id
+            for signal_id in self._rule_signal_ids(config.buy_rule, config.sell_rule)
         }
-        if config.sell_signal is not None:
-            formula_ids.add(self._registry.signal(config.sell_signal).formula_id)
         formula_ids.update(value_id.split(".", 1)[0] for value_id in self._value_ids(config))
         if self._indicator_cache is not None:
             return self._indicator_cache.get_or_compute(
@@ -766,25 +782,8 @@ class PortfolioBacktestService:
             reasons.append(f"止损 {return_pct:.2%}")
         if config.take_profit_pct is not None and return_pct >= config.take_profit_pct:
             reasons.append(f"止盈 {return_pct:.2%}")
-        if config.sell_signal is not None and bool(context.signals[config.sell_signal][index]):
-            reasons.append("卖出信号")
-        if config.sell_value is not None and config.sell_value_operator is not None:
-            value = context.values[config.sell_value][index]
-            if np.isfinite(value) and _compare_threshold(
-                float(value), config.sell_value_operator, cast(float, config.sell_value_threshold)
-            ):
-                reasons.append(f"指标阈值 {config.sell_value}")
-        if config.compare_left_value is not None:
-            left = context.values[config.compare_left_value][index]
-            right = context.values[cast(str, config.compare_right_value)][index]
-            if (
-                np.isfinite(left)
-                and np.isfinite(right)
-                and _compare_values(
-                    float(left), cast(CompareOperator, config.compare_operator), float(right)
-                )
-            ):
-                reasons.append("指标比较")
+        if bool(context.sell_mask[index]):
+            reasons.append("卖出条件")
         return reasons
 
     def _select_candidates(
@@ -808,10 +807,7 @@ class PortfolioBacktestService:
             index = context.date_to_index.get(current_date)
             if index is None:
                 continue
-            matches = [
-                bool(context.signals[signal_id][index]) for signal_id in config.selected_signals
-            ]
-            if not combine_matches(matches, config.combine_mode, config.minimum_matches):
+            if not bool(context.buy_mask[index]):
                 continue
             score = float(context.values[config.ranking_value][index])
             if not np.isfinite(score):
@@ -1053,21 +1049,6 @@ class PortfolioBacktestService:
             failure_reasons=failure_reasons,
             diagnostic="没有可用于回测的股票数据",
         )
-
-
-def _compare_threshold(value: float, operator: str, threshold: float) -> bool:
-    if operator == "gte":
-        return value >= threshold
-    return value <= threshold
-
-
-def _compare_values(left: float, operator: CompareOperator, right: float) -> bool:
-    return {
-        "gt": left > right,
-        "gte": left >= right,
-        "lt": left < right,
-        "lte": left <= right,
-    }[operator]
 
 
 def _date_text(value: int) -> str:

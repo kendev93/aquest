@@ -3,9 +3,9 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import { createPortfolioBacktest, getPortfolioBacktest, getPortfolioBacktestResults } from '../api/portfolioBacktest'
 import { FormulaScreenApiError, fetchMetadata, parseFormula } from '../api/formulaScreen'
+import RuleGroupEditor from '../components/RuleGroupEditor.vue'
 import type {
   BacktestExecution,
-  CombineMode,
   CustomFormulaMetadata,
   FormulaScreenMetadata,
   InstrumentBoard,
@@ -13,14 +13,13 @@ import type {
   PortfolioBacktestJobState,
   PortfolioBacktestPayload,
   PortfolioBacktestResult,
-  PortfolioCompareOperator,
   PortfolioRebalanceFrequency,
-  PortfolioSellValueOperator,
+  RuleGroupPayload,
   SignalDefinition,
   Universe,
   ValueDefinition,
 } from '../types'
-import { signalDisplayName, valueOptionLabel } from '../utils/formulaScreen'
+import { numericRuleForSignal, signalDisplayName, valueOptionLabel } from '../utils/formulaScreen'
 
 const INSTRUMENT_TYPE_OPTIONS: { key: InstrumentType; label: string }[] = [
   { key: 'stock', label: '股票/B股' },
@@ -41,9 +40,7 @@ const BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
 
 interface PortfolioFormState {
   mode: 'preset' | 'custom'
-  selectedSignals: string[]
-  combineMode: CombineMode
-  minimumMatches: number | null
+  buyRule: RuleGroupPayload
   universe: Universe
   universeFile: string
   rankingValue: string
@@ -53,17 +50,11 @@ interface PortfolioFormState {
   execution: BacktestExecution
   formulaText: string
   formulaParameters: Record<string, number>
-  sellSignal: string
+  sellRule: RuleGroupPayload
   stopLossEnabled: boolean
   stopLossPct: number
   takeProfitEnabled: boolean
   takeProfitPct: number
-  sellValue: string
-  sellValueOperator: PortfolioSellValueOperator
-  sellValueThreshold: number
-  compareLeftValue: string
-  compareOperator: PortfolioCompareOperator
-  compareRightValue: string
   startDate: string
   endDate: string
   initialCash: number
@@ -82,9 +73,7 @@ const customMetadata = ref<CustomFormulaMetadata | null>(null)
 const parsedFormulaText = ref('')
 const form = reactive<PortfolioFormState>({
   mode: 'preset',
-  selectedSignals: [],
-  combineMode: 'any',
-  minimumMatches: null,
+  buyRule: { signals: [], conditions: [], combine_mode: 'any', minimum_matches: null },
   universe: 'all',
   universeFile: '',
   instrumentTypes: [] as InstrumentType[],
@@ -96,17 +85,11 @@ const form = reactive<PortfolioFormState>({
   execution: 'next_open',
   formulaText: '',
   formulaParameters: {},
-  sellSignal: '',
+  sellRule: { signals: [], conditions: [], combine_mode: 'any', minimum_matches: null },
   stopLossEnabled: true,
   stopLossPct: 8,
   takeProfitEnabled: false,
   takeProfitPct: 20,
-  sellValue: '',
-  sellValueOperator: 'lte',
-  sellValueThreshold: 0,
-  compareLeftValue: '',
-  compareOperator: 'lt',
-  compareRightValue: '',
   startDate: '',
   endDate: '',
   initialCash: 1_000_000,
@@ -187,10 +170,23 @@ function firstValue(fallback = ''): string {
   return availableValues.value[0]?.id ?? fallback
 }
 
+function ruleForSignal(signal: string): RuleGroupPayload {
+  return numericRuleForSignal(signal, availableValues.value)
+}
+
+function setBuyRule(rule: RuleGroupPayload): void {
+  form.buyRule = rule
+}
+
+function setSellRule(rule: RuleGroupPayload): void {
+  form.sellRule = rule
+}
+
 function resetPresetDefaults(): void {
   const buySignal = firstSignal('prepare_rally')
-  form.selectedSignals = buySignal ? [buySignal] : []
-  form.sellSignal = firstSignal('end_zone')
+  const sellSignal = firstSignal('end_zone')
+  form.buyRule = ruleForSignal(buySignal)
+  form.sellRule = ruleForSignal(sellSignal)
   form.rankingValue = firstValue()
 }
 
@@ -205,18 +201,10 @@ function setMode(mode: PortfolioFormState['mode']): void {
     parsedFormulaText.value = ''
     resetPresetDefaults()
   } else {
-    form.selectedSignals = []
-    form.sellSignal = ''
+    form.buyRule = ruleForSignal('')
+    form.sellRule = ruleForSignal('')
     form.rankingValue = ''
   }
-}
-
-function toggleSignal(signalId: string, checked: boolean): void {
-  const next = new Set(form.selectedSignals)
-  if (checked) next.add(signalId)
-  else next.delete(signalId)
-  form.selectedSignals = [...next]
-  if (errors.value.selectedSignals) errors.value = { ...errors.value, selectedSignals: '' }
 }
 
 function toggleInstrumentType(type: InstrumentType): void {
@@ -249,16 +237,16 @@ async function parseCustomFormula(): Promise<void> {
         previousParameters[parameter.name] ?? parameter.default,
       ]),
     )
-    form.selectedSignals = parsed.signals.length ? [parsed.signals[0].id] : []
-    form.sellSignal = parsed.signals[1]?.id ?? ''
+    form.buyRule = ruleForSignal(parsed.signals[0]?.id ?? '')
+    form.sellRule = ruleForSignal(parsed.signals[1]?.id ?? '')
     form.rankingValue = parsed.values?.[0]?.id ?? ''
     errors.value = {}
-    message.value = `公式解析完成：识别 ${parsed.parameters.length} 个参数、${parsed.signals.length} 个信号、${parsed.values?.length ?? 0} 个指标输出。`
+    message.value = `公式解析完成：识别 ${parsed.parameters.length} 个参数、${parsed.signals.length} 个买卖输出、${parsed.values?.length ?? 0} 个指标输出。`
   } catch (error) {
     customMetadata.value = null
     parsedFormulaText.value = ''
-    form.selectedSignals = []
-    form.sellSignal = ''
+    form.buyRule = ruleForSignal('')
+    form.sellRule = ruleForSignal('')
     form.rankingValue = ''
     customParseError.value = error instanceof FormulaScreenApiError
       ? error.message
@@ -270,10 +258,9 @@ async function parseCustomFormula(): Promise<void> {
 
 function validate(): Record<string, string> {
   const next: Record<string, string> = {}
-  if (!form.selectedSignals.length) next.selectedSignals = '至少选择一个选股条件。'
-  if (form.combineMode === 'at_least' && (!form.minimumMatches || form.minimumMatches > form.selectedSignals.length)) {
-    next.minimumMatches = '至少满足数量不能超过已选择条件数。'
-  }
+  const buyRule = form.buyRule
+  const sellRule = form.sellRule
+  if (!buyRule.signals.length && !buyRule.conditions.length) next.buyRule = '请至少设置一个买入条件。'
   if (!form.rankingValue) next.rankingValue = '请选择用于排序的指标输出。'
   if (form.universe === 'custom' && !form.universeFile.trim()) next.universeFile = '请输入自定义股票列表文件。'
   if (form.mode === 'custom') {
@@ -297,14 +284,8 @@ function validate(): Record<string, string> {
   if (!Number.isFinite(form.maxPositions) || !Number.isInteger(form.maxPositions) || form.maxPositions < 1 || form.maxPositions > 100) {
     next.maxPositions = '持仓槽位必须是 1 到 100 的整数。'
   }
-  if (!form.sellSignal && !form.stopLossEnabled && !form.takeProfitEnabled && !form.sellValue && !form.compareLeftValue) {
+  if (!sellRule.signals.length && !sellRule.conditions.length && !form.stopLossEnabled && !form.takeProfitEnabled) {
     next.sellRules = '至少配置一个卖出规则。'
-  }
-  if (form.sellValue && !Number.isFinite(form.sellValueThreshold)) {
-    next.sellValue = '指标阈值必须是有限数字。'
-  }
-  if (form.compareLeftValue && !form.compareRightValue) {
-    next.compareRules = '请选择指标比较的右侧指标。'
   }
   if (form.stopLossEnabled && (!Number.isFinite(form.stopLossPct) || form.stopLossPct <= 0)) next.stopLossPct = '止损比例必须大于 0。'
   if (form.takeProfitEnabled && (!Number.isFinite(form.takeProfitPct) || form.takeProfitPct <= 0)) next.takeProfitPct = '止盈比例必须大于 0。'
@@ -318,29 +299,33 @@ function validate(): Record<string, string> {
 }
 
 function buildPayload(): PortfolioBacktestPayload {
+  const buyRule = form.buyRule
+  const sellRule = form.sellRule
   return {
     universe: form.universe,
     universe_file: form.universe === 'custom' ? form.universeFile.trim() : null,
     ...(form.instrumentTypes.length > 0 ? { instrument_types: [...form.instrumentTypes] } : {}),
     ...(form.boards.length > 0 ? { boards: [...form.boards] } : {}),
-    selected_signals: [...form.selectedSignals],
-    combine_mode: form.combineMode,
-    minimum_matches: form.combineMode === 'at_least' ? form.minimumMatches : null,
+    selected_signals: [],
+    combine_mode: 'all',
+    minimum_matches: null,
+    buy_rule: buyRule,
     ranking_value: form.rankingValue,
     rank_order: form.rankOrder,
     max_positions: form.maxPositions,
     rebalance_frequency: form.rebalanceFrequency,
     formula_text: form.mode === 'custom' ? form.formulaText.trim() : null,
     formula_parameters: form.mode === 'custom' ? { ...form.formulaParameters } : {},
-    sell_signal: form.sellSignal || null,
+    sell_signal: null,
     stop_loss_pct: form.stopLossEnabled ? form.stopLossPct / 100 : null,
     take_profit_pct: form.takeProfitEnabled ? form.takeProfitPct / 100 : null,
-    sell_value: form.sellValue || null,
-    sell_value_operator: form.sellValue ? form.sellValueOperator : null,
-    sell_value_threshold: form.sellValue ? form.sellValueThreshold : null,
-    compare_left_value: form.compareLeftValue || null,
-    compare_operator: form.compareLeftValue ? form.compareOperator : null,
-    compare_right_value: form.compareLeftValue ? form.compareRightValue || null : null,
+    sell_value: null,
+    sell_value_operator: null,
+    sell_value_threshold: null,
+    compare_left_value: null,
+    compare_operator: null,
+    compare_right_value: null,
+    sell_rule: sellRule.signals.length || sellRule.conditions.length ? sellRule : null,
     start_date: form.startDate || null,
     end_date: form.endDate || null,
     initial_cash: form.initialCash,
@@ -444,8 +429,8 @@ watch(() => form.formulaText, (value) => {
   if (value.trim() === parsedFormulaText.value) return
   customMetadata.value = null
   parsedFormulaText.value = ''
-  form.selectedSignals = []
-  form.sellSignal = ''
+  form.buyRule = ruleForSignal('')
+  form.sellRule = ruleForSignal('')
   form.rankingValue = ''
   customParseError.value = '公式已修改，请重新解析。'
 })
@@ -473,7 +458,7 @@ watch(() => form.formulaText, (value) => {
         <div>
           <p class="eyebrow">RANKED PORTFOLIO / DAILY</p>
           <h1>动态组合回测</h1>
-          <p class="intro-copy">从公式选股池中按指标排名买入，卖出后自动用排名靠前的候选补回空出的槽位。</p>
+          <p class="intro-copy">按买入条件产生候选并进行指标排名，卖出后自动用排名靠前的候选补回空出的槽位。</p>
         </div>
         <div class="intro-note"><span class="note-label">默认流程</span><strong>收盘信号 · 次日成交</strong><small>固定槽位 · 每槽等额 · 支持止盈止损与指标卖出</small></div>
       </section>
@@ -496,9 +481,9 @@ watch(() => form.formulaText, (value) => {
             <legend>粘贴通达信公式</legend>
             <textarea v-model="form.formulaText" data-testid="portfolio-formula" rows="7" spellcheck="false" placeholder="例如：买入:CROSS(C,MA(C,20)); 卖出:CROSS(MA(C,20),C); 排序:C/MA(C,20);"></textarea>
             <button class="secondary-button" data-testid="portfolio-parse-formula" type="button" :disabled="customParseLoading" @click="parseCustomFormula">{{ customParseLoading ? '解析中…' : '解析公式' }}</button>
-            <p class="helper">参数使用 <code>名称:=数值</code>；命名条件是选股/卖出信号，命名数值可用于排序和指标卖出。</p>
+            <p class="helper">参数使用 <code>名称:=数值</code>；命名输出可用于买入/卖出指标条件、指标比较和排序。</p>
             <p v-if="customParseError" class="field-error">{{ customParseError }}</p>
-            <div v-if="customMetadata" class="custom-formula-meta"><span>{{ customMetadata.parameters.length }} 个参数</span><span>{{ customMetadata.signals.length }} 个信号</span><span>{{ customMetadata.values?.length ?? 0 }} 个指标输出</span></div>
+            <div v-if="customMetadata" class="custom-formula-meta"><span>{{ customMetadata.parameters.length }} 个参数</span><span>{{ customMetadata.signals.length }} 个买卖输出</span><span>{{ customMetadata.values?.length ?? 0 }} 个指标输出</span></div>
             <div v-if="customMetadata?.parameters.length" class="parameter-grid">
               <div v-for="parameter in customMetadata.parameters" :key="parameter.name"><label :for="`portfolio-param-${parameter.name}`">{{ parameter.name }}</label><input :id="`portfolio-param-${parameter.name}`" v-model.number="form.formulaParameters[parameter.name]" :data-testid="`portfolio-param-${parameter.name}`" type="number" :min="parameter.minimum" :max="parameter.maximum" :step="parameter.step"></div>
             </div>
@@ -522,21 +507,15 @@ watch(() => form.formulaText, (value) => {
             <p v-if="errors.maxPositions" class="field-error">{{ errors.maxPositions }}</p>
           </fieldset>
 
-          <fieldset class="form-section signal-section">
-            <legend>选股条件 <span class="legend-count">已选 {{ form.selectedSignals.length }}</span></legend>
-            <div v-if="availableSignals.length === 0" class="inline-empty">请先解析公式，或等待预置指标加载。</div>
-            <div v-for="signal in availableSignals" :key="signal.id" class="signal-option">
-              <input :id="`portfolio-signal-${signal.id}`" :data-testid="`portfolio-signal-${signal.id}`" type="checkbox" :checked="form.selectedSignals.includes(signal.id)" @change="toggleSignal(signal.id, ($event.target as HTMLInputElement).checked)">
-              <span class="fake-checkbox" aria-hidden="true"></span>
-              <label class="signal-copy" :for="`portfolio-signal-${signal.id}`"><strong>{{ signal.display_name }}</strong><small>{{ signal.description }}</small></label>
-            </div>
-            <p v-if="errors.selectedSignals" class="field-error">{{ errors.selectedSignals }}</p>
-            <div class="compact-fields portfolio-fields-top">
-              <div><label for="portfolio-combine-mode">条件组合</label><select id="portfolio-combine-mode" v-model="form.combineMode" data-testid="portfolio-combine-mode"><option value="all">全部满足</option><option value="any">任一满足</option><option value="at_least">至少满足 N 个</option></select></div>
-              <div v-if="form.combineMode === 'at_least'"><label for="portfolio-minimum-matches">至少满足数量</label><input id="portfolio-minimum-matches" v-model.number="form.minimumMatches" data-testid="portfolio-minimum-matches" type="number" min="1" :max="Math.max(form.selectedSignals.length, 1)"></div>
-            </div>
-            <p v-if="errors.minimumMatches" class="field-error">{{ errors.minimumMatches }}</p>
-          </fieldset>
+          <RuleGroupEditor
+            :model-value="form.buyRule"
+            :values="availableValues"
+            :condition-operators="metadata?.condition_operators"
+            title="买入条件组合"
+            testid="portfolio-buy-rule"
+            @update:model-value="setBuyRule"
+          />
+          <p v-if="errors.buyRule" class="field-error">{{ errors.buyRule }}</p>
 
           <fieldset class="form-section">
             <legend>排名与刷新</legend>
@@ -566,17 +545,20 @@ watch(() => form.formulaText, (value) => {
 
           <fieldset class="form-section">
             <legend>卖出规则 <span class="required">至少一项</span></legend>
-            <div><label for="portfolio-sell-signal">卖出信号（可选）</label><select id="portfolio-sell-signal" v-model="form.sellSignal" data-testid="portfolio-sell-signal" :disabled="availableSignals.length === 0"><option value="">不使用信号</option><option v-for="signal in availableSignals" :key="`sell-${signal.id}`" :value="signal.id">{{ signal.display_name }} · {{ signal.id }}</option></select></div>
+            <RuleGroupEditor
+              :model-value="form.sellRule"
+              :values="availableValues"
+              :condition-operators="metadata?.condition_operators"
+              title="卖出条件"
+              testid="portfolio-sell-rule"
+              @update:model-value="setSellRule"
+            />
             <div class="rule-toggle"><label><input v-model="form.stopLossEnabled" data-testid="portfolio-stop-loss-enabled" type="checkbox"><span>止损</span></label><input v-model.number="form.stopLossPct" data-testid="portfolio-stop-loss" type="number" min="0.01" max="100" step="0.5" aria-label="止损百分比"><span>%</span></div>
             <div class="rule-toggle"><label><input v-model="form.takeProfitEnabled" data-testid="portfolio-take-profit-enabled" type="checkbox"><span>止盈</span></label><input v-model.number="form.takeProfitPct" data-testid="portfolio-take-profit" type="number" min="0.01" max="1000" step="0.5" aria-label="止盈百分比"><span>%</span></div>
-            <div class="rule-row"><select v-model="form.sellValue" data-testid="portfolio-sell-value" :disabled="availableValues.length === 0"><option value="">不使用指标阈值</option><option v-for="value in availableValues" :key="`sell-value-${value.id}`" :value="value.id">{{ value.display_name }}</option></select><select v-model="form.sellValueOperator" data-testid="portfolio-sell-value-operator" aria-label="指标阈值比较方式"><option value="lte">≤</option><option value="gte">≥</option></select><input v-model.number="form.sellValueThreshold" data-testid="portfolio-sell-value-threshold" type="number" step="0.01" aria-label="指标阈值" placeholder="阈值"></div>
-            <div class="rule-row"><select v-model="form.compareLeftValue" data-testid="portfolio-compare-left" :disabled="availableValues.length === 0"><option value="">不使用指标比较</option><option v-for="value in availableValues" :key="`compare-left-${value.id}`" :value="value.id">{{ value.display_name }}</option></select><select v-model="form.compareOperator" data-testid="portfolio-compare-operator" aria-label="指标比较方式"><option value="lt">&lt;</option><option value="lte">≤</option><option value="gt">&gt;</option><option value="gte">≥</option></select><select v-model="form.compareRightValue" data-testid="portfolio-compare-right" :disabled="availableValues.length === 0"><option value="">选择右侧指标</option><option v-for="value in availableValues" :key="`compare-right-${value.id}`" :value="value.id">{{ value.display_name }}</option></select></div>
             <p v-if="errors.sellRules" class="field-error">{{ errors.sellRules }}</p>
-            <p v-if="errors.sellValue" class="field-error">{{ errors.sellValue }}</p>
-            <p v-if="errors.compareRules" class="field-error">{{ errors.compareRules }}</p>
             <p v-if="errors.stopLossPct" class="field-error">{{ errors.stopLossPct }}</p>
             <p v-if="errors.takeProfitPct" class="field-error">{{ errors.takeProfitPct }}</p>
-            <p class="helper">多个卖出规则同时满足时合并原因；信号在收盘确认，默认下一根 K 线执行。</p>
+            <p class="helper">规则条件在收盘确认，默认下一根 K 线执行；止损和止盈作为独立的风险控制。</p>
           </fieldset>
 
           <button class="advanced-toggle" data-testid="portfolio-advanced-toggle" type="button" :aria-expanded="showAdvanced" @click="showAdvanced = !showAdvanced"><span>{{ showAdvanced ? '收起高级设置' : '高级设置' }}</span><small>日期 · 资金 · 费用</small></button>
@@ -595,7 +577,7 @@ watch(() => form.formulaText, (value) => {
 
         <section class="results-panel panel" data-testid="portfolio-results" aria-live="polite">
           <div class="panel-heading results-heading"><div><span class="section-kicker">02 / RESULTS</span><h2>组合结果</h2></div><button v-if="result" class="secondary-button export-backtest" type="button" data-testid="export-portfolio-backtest" @click="downloadResult">导出 JSON</button></div>
-          <div v-if="!result" class="empty-state" data-testid="portfolio-empty"><div class="empty-icon" aria-hidden="true">/</div><h3>{{ loading ? '正在运行动态组合回测…' : '还没有组合结果' }}</h3><p>{{ loading ? '正在逐股计算公式并模拟槽位补位，完成后显示净值与候选排名。' : '配置选股条件、排序指标和卖出规则后开始回测。' }}</p></div>
+          <div v-if="!result" class="empty-state" data-testid="portfolio-empty"><div class="empty-icon" aria-hidden="true">/</div><h3>{{ loading ? '正在运行动态组合回测…' : '还没有组合结果' }}</h3><p>{{ loading ? '正在逐股计算公式并模拟槽位补位，完成后显示净值与候选排名。' : '配置买入条件、排序指标和卖出条件后开始回测。' }}</p></div>
           <template v-else>
             <div class="backtest-summary"><span class="result-badge">{{ result.universe === 'all' ? '沪深全部品种' : result.universe.toUpperCase() }}</span><span>{{ result.start_date }} → {{ result.end_date }}</span><span>{{ result.bars }} 个交易日</span><span>{{ result.processed }} / {{ result.total_candidates }} 个标的已处理</span><span>槽位 {{ result.max_positions }}</span><span>排序：{{ valueName(result.ranking_value) }} · {{ result.rank_order === 'desc' ? '高到低' : '低到高' }}</span><span v-if="result.fitness_filter_enabled" class="result-badge">适配分 ≥ {{ result.fitness_min_score }}</span></div>
             <div class="metrics-strip portfolio-metrics">

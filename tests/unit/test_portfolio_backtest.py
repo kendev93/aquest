@@ -11,6 +11,8 @@ import pytest
 from selector_app.adapters.local_day_adapter import StockRef
 from selector_app.portfolio_backtest.models import PortfolioBacktestConfig
 from selector_app.portfolio_backtest.service import PortfolioBacktestService
+from selector_app.screening.models import ScreenCondition
+from selector_app.screening.rules import RuleGroup
 
 
 def stock_frame(close: list[float]) -> pd.DataFrame:
@@ -258,3 +260,39 @@ def test_portfolio_fitness_filter_does_not_use_current_day_results() -> None:
     assert first_event["candidates"]
     assert all(candidate["fitness_trades"] == 0 for candidate in first_event["candidates"])
     assert all(candidate["selected"] is False for candidate in first_event["candidates"])
+
+
+def test_portfolio_uses_composable_buy_and_sell_rule_groups() -> None:
+    service = PortfolioBacktestService(adapter=FakeAdapter())
+    report = service.run(
+        config(
+            selected_signals=(),
+            combine_mode="any",
+            minimum_matches=None,
+            buy_rule=RuleGroup(
+                signals=("custom.buy",),
+                conditions=(
+                    ScreenCondition(
+                        left_value="custom.rank",
+                        operator="gte",
+                        right_constant=10.0,
+                    ),
+                ),
+                combine_mode="all",
+            ),
+            sell_rule=RuleGroup(
+                conditions=(
+                    ScreenCondition(
+                        left_value="custom.rank",
+                        operator="gte",
+                        right_constant=14.0,
+                    ),
+                )
+            ),
+            formula_text="BUY:C>0; RANK:C;",
+            stop_loss_pct=None,
+            take_profit_pct=None,
+        )
+    )
+
+    assert any(trade["direction"] == "SELL" for trade in report.trades)

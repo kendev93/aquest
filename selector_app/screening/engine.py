@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
@@ -27,6 +27,7 @@ from selector_app.market_data.models import StockRef
 from selector_app.market_data.store import DuckDbMarketDataStore
 
 from .models import ScanConfig, ScanReport, ScreenCondition, ScreenMatch
+from .rules import RuleGroup
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,26 @@ def combine_matches(matches: list[bool], mode: str, minimum_matches: int | None)
     if mode == "at_least" and minimum_matches is not None:
         return sum(matches) >= minimum_matches
     return False
+
+
+def combine_masks(
+    masks: Sequence[np.ndarray], mode: str, minimum_matches: int | None
+) -> np.ndarray:
+    """Combine full-history boolean masks with the same semantics as screening."""
+
+    if not masks:
+        return np.zeros(0, dtype=bool)
+    length = len(masks[0])
+    if any(len(mask) != length for mask in masks):
+        raise ValueError("交易规则条件的历史长度不一致")
+    stacked = np.vstack([np.asarray(mask, dtype=bool) for mask in masks])
+    if mode == "all":
+        return np.all(stacked, axis=0)
+    if mode == "any":
+        return np.any(stacked, axis=0)
+    if mode == "at_least" and minimum_matches is not None:
+        return np.sum(stacked, axis=0) >= minimum_matches
+    raise ValueError(f"不支持的条件组合方式: {mode}")
 
 
 @dataclass(frozen=True)
@@ -105,6 +126,32 @@ def _condition_mask(
     else:
         raise ValueError(f"不支持的条件运算符: {operator}")
     return result
+
+
+def evaluate_rule_group(
+    rule: RuleGroup,
+    formula_results: Mapping[str, FormulaResult],
+    registry: FormulaRegistry,
+    *,
+    custom: bool = False,
+) -> np.ndarray:
+    """Evaluate signal and numeric conditions into one causal history mask."""
+
+    masks: list[np.ndarray] = []
+    for signal_id in rule.signals:
+        if custom:
+            result = formula_results["custom"]
+            signal_name = signal_id
+        else:
+            definition = registry.signal(signal_id)
+            result = formula_results[definition.formula_id]
+            signal_name = signal_id.split(".", 1)[1]
+        try:
+            masks.append(np.asarray(result.signals[signal_name], dtype=bool))
+        except KeyError as exc:
+            raise ValueError(f"找不到信号输出: {signal_id}") from exc
+    masks.extend(_condition_mask(condition, formula_results) for condition in rule.conditions)
+    return combine_masks(masks, rule.combine_mode, rule.minimum_matches)
 
 
 def _condition_formula_results(

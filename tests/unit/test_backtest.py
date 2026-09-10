@@ -11,6 +11,8 @@ import pytest
 from selector_app.adapters.local_day_adapter import StockRef
 from selector_app.backtest.models import BacktestConfig
 from selector_app.backtest.service import BacktestService
+from selector_app.screening.models import ScreenCondition
+from selector_app.screening.rules import RuleGroup
 
 
 def make_frame() -> pd.DataFrame:
@@ -140,3 +142,38 @@ def test_formula_backtest_rejects_empty_date_window() -> None:
 
     with pytest.raises(ValueError, match="日期范围"):
         service.run(config(start_date=date(2025, 1, 1), end_date=date(2025, 1, 2)))
+
+
+def test_formula_backtest_accepts_composable_buy_and_sell_rules() -> None:
+    service = BacktestService(adapter=FakeAdapter(make_frame()))
+    report = service.run(
+        config(
+            buy_signal=None,
+            sell_signal=None,
+            buy_rule=RuleGroup(
+                signals=("custom.buy",),
+                conditions=(
+                    ScreenCondition(
+                        left_value="custom.fast",
+                        operator="gte",
+                        right_constant=11.0,
+                    ),
+                ),
+                combine_mode="all",
+            ),
+            sell_rule=RuleGroup(
+                conditions=(
+                    ScreenCondition(
+                        left_value="custom.fast",
+                        operator="gt",
+                        right_value="custom.slow",
+                    ),
+                )
+            ),
+            formula_text="BUY:C>0; FAST:C; SLOW:MA(C,2);",
+        )
+    )
+
+    assert report.buy_signal is None
+    assert report.sell_signal is None
+    assert report.trades

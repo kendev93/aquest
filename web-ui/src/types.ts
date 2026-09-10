@@ -95,6 +95,13 @@ export interface ScreenCondition {
   right_constant: number | null
 }
 
+export interface RuleGroupPayload {
+  signals: string[]
+  conditions: ScreenCondition[]
+  combine_mode: CombineMode
+  minimum_matches: number | null
+}
+
 export interface SavedConditionSet {
   id: string
   name: string
@@ -297,8 +304,10 @@ export interface ScreenHistoryRecord {
 export interface BacktestPayload {
   market: 'SH' | 'SZ'
   code: string
-  buy_signal: string
-  sell_signal: string
+  buy_signal?: string | null
+  sell_signal?: string | null
+  buy_rule?: RuleGroupPayload | null
+  sell_rule?: RuleGroupPayload | null
   formula_text?: string | null
   formula_parameters?: Record<string, number>
   start_date?: string | null
@@ -348,8 +357,8 @@ export interface BacktestResult {
   bars: number
   start_date: string
   end_date: string
-  buy_signal: string
-  sell_signal: string
+  buy_signal: string | null
+  sell_signal: string | null
   performance: Record<string, number | null>
   equity_curve: BacktestEquityPoint[]
   trades: BacktestTrade[]
@@ -377,6 +386,7 @@ export interface PortfolioBacktestPayload {
   selected_signals: string[]
   combine_mode: CombineMode
   minimum_matches: number | null
+  buy_rule?: RuleGroupPayload | null
   ranking_value: string
   rank_order?: PortfolioRankOrder
   max_positions: number
@@ -392,6 +402,7 @@ export interface PortfolioBacktestPayload {
   compare_left_value?: string | null
   compare_operator?: PortfolioCompareOperator | null
   compare_right_value?: string | null
+  sell_rule?: RuleGroupPayload | null
   start_date?: string | null
   end_date?: string | null
   initial_cash?: number

@@ -19,6 +19,7 @@ from selector_app.portfolio_backtest.models import (
     PortfolioUniverse,
 )
 from selector_app.screening.models import ScanConfig, ScreenCondition
+from selector_app.screening.rules import RuleGroup
 from selector_app.strategy_fitness.models import StrategyFitnessConfig
 
 
@@ -144,6 +145,54 @@ class ScreenConditionRequest(BaseModel):
         )
 
 
+class RuleGroupRequest(BaseModel):
+    """A reusable buy/sell rule group for simulations."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    signals: list[str] = Field(default_factory=list, max_length=32)
+    conditions: list[ScreenConditionRequest] = Field(default_factory=list, max_length=32)
+    combine_mode: Literal["all", "any", "at_least"] = "all"
+    minimum_matches: int | None = Field(default=None, ge=1, le=64)
+
+    @model_validator(mode="after")
+    def validate_group(self) -> RuleGroupRequest:
+        signals = [signal.strip() for signal in self.signals]
+        object.__setattr__(self, "signals", signals)
+        if not signals and not self.conditions:
+            raise ValueError("交易规则至少需要一个信号或指标条件")
+        if any(not signal for signal in signals):
+            raise ValueError("交易规则信号不能为空")
+        if len(set(signals)) != len(signals):
+            raise ValueError("交易规则信号不能重复")
+        condition_keys = [
+            (
+                condition.left_value,
+                condition.operator,
+                condition.right_value,
+                condition.right_constant,
+            )
+            for condition in self.conditions
+        ]
+        if len(set(condition_keys)) != len(condition_keys):
+            raise ValueError("交易规则指标条件不能重复")
+        count = len(signals) + len(self.conditions)
+        if self.combine_mode == "at_least":
+            if self.minimum_matches is None or self.minimum_matches > count:
+                raise ValueError("交易规则 minimum_matches 不能大于条件数量")
+        elif self.minimum_matches is not None:
+            raise ValueError("all/any 交易规则不应设置 minimum_matches")
+        return self
+
+    def to_model(self) -> RuleGroup:
+        return RuleGroup(
+            signals=tuple(self.signals),
+            conditions=tuple(condition.to_model() for condition in self.conditions),
+            combine_mode=self.combine_mode,
+            minimum_matches=self.minimum_matches,
+        )
+
+
 class FormulaScreenRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -265,8 +314,10 @@ class BacktestRequest(BaseModel):
     market: Literal["SH", "SZ"] = "SH"
     code: str = Field(pattern=r"^\d{6}$")
     vipdoc_path: str = Field(default="", max_length=1024)
-    buy_signal: str = Field(min_length=1, max_length=128)
-    sell_signal: str = Field(min_length=1, max_length=128)
+    buy_signal: str | None = Field(default=None, min_length=1, max_length=128)
+    sell_signal: str | None = Field(default=None, min_length=1, max_length=128)
+    buy_rule: RuleGroupRequest | None = None
+    sell_rule: RuleGroupRequest | None = None
     formula_text: str | None = Field(default=None, max_length=20_000)
     formula_parameters: dict[str, float] = Field(default_factory=dict, max_length=32)
     start_date: date | None = None
@@ -282,13 +333,32 @@ class BacktestRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_backtest(self) -> BacktestRequest:
-        if self.buy_signal == self.sell_signal:
+        if self.buy_signal is None and self.buy_rule is None:
+            raise ValueError("至少设置一个买入信号或指标条件")
+        if self.sell_signal is None and self.sell_rule is None:
+            raise ValueError("至少设置一个卖出信号或指标条件")
+        if self.buy_rule is None and self.sell_rule is None and self.buy_signal == self.sell_signal:
             raise ValueError("买入信号和卖出信号不能相同")
+        signal_ids = [
+            *([self.buy_signal] if self.buy_signal is not None else []),
+            *([self.sell_signal] if self.sell_signal is not None else []),
+            *(self.buy_rule.signals if self.buy_rule is not None else []),
+            *(self.sell_rule.signals if self.sell_rule is not None else []),
+        ]
         validate_formula_signals(
             self.formula_text,
-            [self.buy_signal, self.sell_signal],
+            signal_ids,
             self.formula_parameters,
         )
+        conditions = [
+            *(self.buy_rule.conditions if self.buy_rule is not None else []),
+            *(self.sell_rule.conditions if self.sell_rule is not None else []),
+        ]
+        if conditions:
+            validate_formula_conditions(
+                self.formula_text,
+                [condition.to_model() for condition in conditions],
+            )
         if self.start_date is not None and self.end_date is not None:
             if self.start_date > self.end_date:
                 raise ValueError("回测开始日期不能晚于结束日期")
@@ -306,6 +376,8 @@ class BacktestRequest(BaseModel):
             vipdoc_path=self.vipdoc_path,
             buy_signal=self.buy_signal,
             sell_signal=self.sell_signal,
+            buy_rule=self.buy_rule.to_model() if self.buy_rule is not None else None,
+            sell_rule=self.sell_rule.to_model() if self.sell_rule is not None else None,
             formula_text=self.formula_text,
             formula_parameters=self.formula_parameters,
             start_date=self.start_date,
@@ -331,9 +403,10 @@ class PortfolioBacktestRequest(BaseModel):
     universe_file: str | None = Field(default=None, max_length=1024)
     instrument_types: list[InstrumentType] | None = Field(default=None, max_length=4)
     boards: list[InstrumentBoard] | None = Field(default=None, max_length=7)
-    selected_signals: list[str] = Field(min_length=1, max_length=32)
+    selected_signals: list[str] = Field(default_factory=list, max_length=32)
     combine_mode: Literal["all", "any", "at_least"] = "any"
     minimum_matches: int | None = Field(default=None, ge=1, le=32)
+    buy_rule: RuleGroupRequest | None = None
     ranking_value: str = Field(min_length=1, max_length=128)
     rank_order: Literal["asc", "desc"] = "desc"
     max_positions: int = Field(default=5, ge=1, le=100)
@@ -349,6 +422,7 @@ class PortfolioBacktestRequest(BaseModel):
     compare_left_value: str | None = Field(default=None, max_length=128)
     compare_operator: Literal["gt", "gte", "lt", "lte"] | None = None
     compare_right_value: str | None = Field(default=None, max_length=128)
+    sell_rule: RuleGroupRequest | None = None
     start_date: date | None = None
     end_date: date | None = None
     initial_cash: float = Field(default=1_000_000.0, gt=0, le=1_000_000_000_000)
@@ -367,8 +441,16 @@ class PortfolioBacktestRequest(BaseModel):
         signal_ids = list(self.selected_signals)
         if self.sell_signal is not None:
             signal_ids.append(self.sell_signal)
+        if self.buy_rule is not None:
+            signal_ids.extend(self.buy_rule.signals)
+        if self.sell_rule is not None:
+            signal_ids.extend(self.sell_rule.signals)
         validate_formula_signals(self.formula_text, signal_ids, self.formula_parameters)
         validate_instrument_scope(self.universe, self.instrument_types, self.boards)
+        conditions = [
+            *(self.buy_rule.conditions if self.buy_rule is not None else []),
+            *(self.sell_rule.conditions if self.sell_rule is not None else []),
+        ]
         validate_formula_values(
             self.formula_text,
             [
@@ -376,14 +458,22 @@ class PortfolioBacktestRequest(BaseModel):
                 *([self.sell_value] if self.sell_value is not None else []),
                 *([self.compare_left_value] if self.compare_left_value is not None else []),
                 *([self.compare_right_value] if self.compare_right_value is not None else []),
+                *[
+                    value_id
+                    for condition in conditions
+                    for value_id in (condition.left_value, condition.right_value)
+                    if value_id is not None
+                ],
             ],
         )
         if len(set(self.selected_signals)) != len(self.selected_signals):
             raise ValueError("选股条件不能重复")
-        if self.combine_mode == "at_least":
+        if self.buy_rule is None and not self.selected_signals:
+            raise ValueError("至少设置一个买入信号或指标条件")
+        if self.buy_rule is None and self.combine_mode == "at_least":
             if self.minimum_matches is None or self.minimum_matches > len(self.selected_signals):
                 raise ValueError("minimum_matches 不能大于已选择条件数量")
-        elif self.minimum_matches is not None:
+        elif self.buy_rule is None and self.minimum_matches is not None:
             raise ValueError("all/any 模式不应设置 minimum_matches")
         if self.universe == "custom" and not self.universe_file:
             raise ValueError("自定义股票范围必须设置 universe_file")
@@ -401,7 +491,8 @@ class PortfolioBacktestRequest(BaseModel):
         ):
             raise ValueError("指标比较卖出规则需要左右指标和比较方式")
         if (
-            self.sell_signal is None
+            self.sell_rule is None
+            and self.sell_signal is None
             and self.stop_loss_pct is None
             and self.take_profit_pct is None
             and self.sell_value is None
@@ -420,6 +511,7 @@ class PortfolioBacktestRequest(BaseModel):
             selected_signals=tuple(self.selected_signals),
             combine_mode=self.combine_mode,
             minimum_matches=self.minimum_matches,
+            buy_rule=self.buy_rule.to_model() if self.buy_rule is not None else None,
             ranking_value=self.ranking_value,
             rank_order=self.rank_order,
             max_positions=self.max_positions,
@@ -435,6 +527,7 @@ class PortfolioBacktestRequest(BaseModel):
             compare_left_value=self.compare_left_value,
             compare_operator=self.compare_operator,
             compare_right_value=self.compare_right_value,
+            sell_rule=self.sell_rule.to_model() if self.sell_rule is not None else None,
             start_date=self.start_date,
             end_date=self.end_date,
             initial_cash=self.initial_cash,

@@ -13,6 +13,7 @@ from typing import Literal
 
 from selector_app.market_data.day_format import classify_board, classify_instrument
 from selector_app.market_data.models import InstrumentBoard, InstrumentType, MarketCode
+from selector_app.screening.rules import RuleGroup
 
 ExecutionMode = Literal["next_open", "next_close"]
 PositionMode = Literal["full", "fixed"]
@@ -28,8 +29,8 @@ class BacktestConfig:
     market: MarketCode
     code: str
     vipdoc_path: str | Path
-    buy_signal: str
-    sell_signal: str
+    buy_signal: str | None = None
+    sell_signal: str | None = None
     formula_text: str | None = None
     formula_parameters: Mapping[str, float] = field(default_factory=dict)
     start_date: date | None = None
@@ -44,11 +45,13 @@ class BacktestConfig:
     fixed_size: int | None = None
     instrument_type: InstrumentType | None = None
     board: InstrumentBoard | None = None
+    buy_rule: RuleGroup | None = None
+    sell_rule: RuleGroup | None = None
 
     def __post_init__(self) -> None:
         code = self.code.strip()
-        buy_signal = self.buy_signal.strip()
-        sell_signal = self.sell_signal.strip()
+        buy_signal = self.buy_signal.strip() if self.buy_signal is not None else None
+        sell_signal = self.sell_signal.strip() if self.sell_signal is not None else None
         if self.market not in {"SH", "SZ"} or not _CODE_PATTERN.fullmatch(code):
             raise ValueError("股票市场和代码格式无效")
         detected_type = classify_instrument(self.market, code)
@@ -59,9 +62,15 @@ class BacktestConfig:
             raise ValueError("回测品种类型与市场代码不一致")
         if self.board is not None and self.board != detected_board:
             raise ValueError("回测板块与市场代码不一致")
-        if not buy_signal or not sell_signal:
-            raise ValueError("买入和卖出信号不能为空")
-        if buy_signal == sell_signal:
+        explicit_buy_rule = self.buy_rule is not None
+        explicit_sell_rule = self.sell_rule is not None
+        if self.buy_rule is None and buy_signal:
+            object.__setattr__(self, "buy_rule", RuleGroup(signals=(buy_signal,)))
+        if self.sell_rule is None and sell_signal:
+            object.__setattr__(self, "sell_rule", RuleGroup(signals=(sell_signal,)))
+        if self.buy_rule is None or self.sell_rule is None:
+            raise ValueError("买入和卖出规则不能为空")
+        if not explicit_buy_rule and not explicit_sell_rule and buy_signal == sell_signal:
             raise ValueError("买入信号和卖出信号不能相同")
         if self.execution not in {"next_open", "next_close"}:
             raise ValueError("不支持的成交方式")
@@ -111,8 +120,8 @@ class BacktestReport:
     bars: int
     start_date: str
     end_date: str
-    buy_signal: str
-    sell_signal: str
+    buy_signal: str | None
+    sell_signal: str | None
     performance: Mapping[str, float | None]
     equity_curve: tuple[Mapping[str, BacktestValue], ...]
     trades: tuple[Mapping[str, BacktestValue], ...]
