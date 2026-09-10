@@ -64,6 +64,8 @@ class DiscoveryRequest:
     splits: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
     indicator_ids: tuple[str, ...] = ()
     signal_ids: tuple[str, ...] = ()
+    required_buy_conditions: tuple[ScreenCondition, ...] = ()
+    required_sell_conditions: tuple[ScreenCondition, ...] = ()
     condition_constants: Mapping[str, tuple[float, ...]] = field(default_factory=dict)
     max_conditions_per_side: int = 3
     max_trials: int = 1_000
@@ -91,6 +93,24 @@ class DiscoveryRequest:
         )
         object.__setattr__(self, "indicator_ids", tuple(dict.fromkeys(self.indicator_ids)))
         object.__setattr__(self, "signal_ids", tuple(dict.fromkeys(self.signal_ids)))
+        for field_name in ("required_buy_conditions", "required_sell_conditions"):
+            conditions = tuple(getattr(self, field_name))
+            if len(conditions) > self.max_conditions_per_side:
+                raise ValueError(
+                    f"{field_name} 不能超过单侧条件上限 {self.max_conditions_per_side}"
+                )
+            keys = {
+                (
+                    condition.left_value,
+                    condition.operator,
+                    condition.right_value,
+                    condition.right_constant,
+                )
+                for condition in conditions
+            }
+            if len(keys) != len(conditions):
+                raise ValueError(f"{field_name} 不能包含重复条件")
+            object.__setattr__(self, field_name, conditions)
         object.__setattr__(
             self,
             "condition_constants",
@@ -124,6 +144,12 @@ class DiscoveryRequest:
             "splits": {name: dict(split) for name, split in self.splits.items()},
             "indicator_ids": list(self.indicator_ids),
             "signal_ids": list(self.signal_ids),
+            "required_buy_conditions": [
+                _condition_to_dict(condition) for condition in self.required_buy_conditions
+            ],
+            "required_sell_conditions": [
+                _condition_to_dict(condition) for condition in self.required_sell_conditions
+            ],
             "condition_constants": {
                 key: list(values) for key, values in self.condition_constants.items()
             },

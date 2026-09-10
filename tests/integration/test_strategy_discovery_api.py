@@ -114,7 +114,16 @@ def test_strategy_discovery_api_uses_all_completed_local_dates_when_omitted(tmp_
     ) as client:
         response = client.post(
             "/api/v1/strategy-discovery",
-            json={"max_positions": 2},
+            json={
+                "max_positions": 2,
+                "required_buy_conditions": [
+                    {
+                        "left_value": "technical.ma5",
+                        "operator": "gt",
+                        "right_value": "technical.ma20",
+                    }
+                ],
+            },
         )
         state = _wait(client, response.json()["data"]["job_id"])
 
@@ -123,6 +132,7 @@ def test_strategy_discovery_api_uses_all_completed_local_dates_when_omitted(tmp_
     assert len(service.requests) == 1
     assert service.requests[0].base_config["start_date"] == "2024-01-01"
     assert service.requests[0].base_config["end_date"] == "2024-01-03"
+    assert service.requests[0].required_buy_conditions[0].right_value == "technical.ma20"
 
 
 def test_strategy_discovery_api_reports_actionable_error_for_empty_store(tmp_path) -> None:

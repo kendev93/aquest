@@ -12,7 +12,11 @@ import {
   getStrategyDiscoveryHistory,
   getStrategyDiscoveryResults,
 } from '../api/strategyDiscovery'
+import RuleGroupEditor from '../components/RuleGroupEditor.vue'
 import type {
+  ConditionOperator,
+  RuleGroupPayload,
+  ScreenCondition,
   StrategyDiscoveryCandidate,
   StrategyDiscoveryJobState,
   StrategyDiscoveryPayload,
@@ -20,6 +24,7 @@ import type {
   InstrumentBoard,
   InstrumentType,
   Universe,
+  ValueDefinition,
 } from '../types'
 
 const APPLY_STORAGE_KEY = 'indicator-lab.strategy-discovery.apply'
@@ -42,11 +47,17 @@ const BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
   { key: 'bond', label: '债券' },
 ]
 
+function emptyRule(): RuleGroupPayload {
+  return { signals: [], conditions: [], combine_mode: 'all', minimum_matches: null }
+}
+
 const form = reactive({
   universe: 'all' as Universe,
   universeFile: '',
   instrumentTypes: [] as InstrumentType[],
   boards: [] as InstrumentBoard[],
+  requiredBuyRule: emptyRule(),
+  requiredSellRule: emptyRule(),
   maxPositions: 5,
   searchLevel: 'low',
 })
@@ -63,6 +74,26 @@ const errors = ref<Record<string, string>>({})
 const boards = computed(() => activeBoard.value === 'sharpe'
   ? result.value?.results_by_sharpe ?? []
   : result.value?.results_by_return ?? [])
+const availableValues = computed<ValueDefinition[]>(() => {
+  const raw = capabilities.value?.indicators
+  if (!Array.isArray(raw)) return []
+  return raw.flatMap((item) => {
+    if (!item || typeof item !== 'object') return []
+    const value = item as Record<string, unknown>
+    if (
+      value.rankable === false
+      || typeof value.id !== 'string'
+      || typeof value.display_name !== 'string'
+    ) return []
+    return [{
+      id: value.id,
+      display_name: value.display_name,
+      description: typeof value.description === 'string' ? value.description : '',
+    }]
+  })
+})
+const requiredBuySlots = computed(() => Math.max(0, 3 - form.requiredBuyRule.conditions.length))
+const requiredSellSlots = computed(() => Math.max(0, 3 - form.requiredSellRule.conditions.length))
 const canSubmit = computed(() => (
   !loading.value
   && Number.isInteger(form.maxPositions)
@@ -87,6 +118,12 @@ function buildPayload(): StrategyDiscoveryPayload {
     universe_file: form.universe === 'custom' ? form.universeFile.trim() : null,
     ...(form.instrumentTypes.length > 0 ? { instrument_types: [...form.instrumentTypes] } : {}),
     ...(form.boards.length > 0 ? { boards: [...form.boards] } : {}),
+    ...(form.requiredBuyRule.conditions.length > 0
+      ? { required_buy_conditions: form.requiredBuyRule.conditions.map((condition) => ({ ...condition })) }
+      : {}),
+    ...(form.requiredSellRule.conditions.length > 0
+      ? { required_sell_conditions: form.requiredSellRule.conditions.map((condition) => ({ ...condition })) }
+      : {}),
     max_positions: form.maxPositions,
     max_trials: trialCount,
     timeout_seconds: 7200,
@@ -115,6 +152,17 @@ function toggleBoard(board: InstrumentBoard): void {
   form.boards = form.boards.includes(board)
     ? form.boards.filter((item) => item !== board)
     : [...form.boards, board]
+}
+
+function setRequiredRule(side: 'buy' | 'sell', rule: RuleGroupPayload): void {
+  const normalized: RuleGroupPayload = {
+    signals: [],
+    conditions: rule.conditions.map((condition) => ({ ...condition })),
+    combine_mode: 'all',
+    minimum_matches: null,
+  }
+  if (side === 'buy') form.requiredBuyRule = normalized
+  else form.requiredSellRule = normalized
 }
 
 async function submit(): Promise<void> {
@@ -277,7 +325,38 @@ function restoreHistoryRequest(raw: unknown): void {
   if (Array.isArray(base.boards)) {
     form.boards = base.boards.filter((item): item is InstrumentBoard => BOARD_OPTIONS.some((option) => option.key === item))
   }
+  form.requiredBuyRule = requiredRuleFromHistory(request.required_buy_conditions)
+  form.requiredSellRule = requiredRuleFromHistory(request.required_sell_conditions)
   if (typeof base.max_positions === 'number' && Number.isInteger(base.max_positions)) form.maxPositions = base.max_positions
+}
+
+function requiredRuleFromHistory(raw: unknown): RuleGroupPayload {
+  if (!Array.isArray(raw)) return emptyRule()
+  const operators = new Set<ConditionOperator>([
+    'gt', 'gte', 'lt', 'lte', 'eq', 'neq', 'cross_up', 'cross_down',
+  ])
+  const conditions = raw.flatMap((item): ScreenCondition[] => {
+    if (!item || typeof item !== 'object') return []
+    const value = item as Record<string, unknown>
+    const left = value.left_value
+    const operator = value.operator
+    const rightValue = value.right_value
+    const rightConstant = value.right_constant
+    if (
+      typeof left !== 'string'
+      || !operators.has(operator as ConditionOperator)
+      || (rightValue !== null && typeof rightValue !== 'string')
+      || (rightConstant !== null && typeof rightConstant !== 'number')
+      || (typeof rightValue === 'string') === (typeof rightConstant === 'number')
+    ) return []
+    return [{
+      left_value: left,
+      operator: operator as ConditionOperator,
+      right_value: typeof rightValue === 'string' ? rightValue : null,
+      right_constant: typeof rightConstant === 'number' ? rightConstant : null,
+    }]
+  })
+  return { signals: [], conditions: conditions.slice(0, 3), combine_mode: 'all', minimum_matches: null }
 }
 
 async function removeHistory(historyId: string): Promise<void> {
@@ -336,6 +415,29 @@ onMounted(async () => {
             <div class="scope-config inline-scope-config" data-testid="strategy-discovery-scope"><div class="scope-options"><span>证券类型</span><label v-for="option in INSTRUMENT_TYPE_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`strategy-discovery-scope-type-${option.key}`" :checked="form.instrumentTypes.includes(option.key)" @change="toggleInstrumentType(option.key)">{{ option.label }}</label></div><div class="scope-options"><span>板块</span><label v-for="option in BOARD_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`strategy-discovery-scope-board-${option.key}`" :checked="form.boards.includes(option.key)" @change="toggleBoard(option.key)">{{ option.label }}</label></div><small class="scope-helper">未勾选表示全部；类型和板块同时选择时取交集。</small></div>
             <div v-if="form.universe === 'custom'" class="portfolio-inline-field"><label for="strategy-discovery-universe-file">品种列表文件</label><input id="strategy-discovery-universe-file" v-model="form.universeFile" data-testid="strategy-discovery-universe-file" type="text"><p v-if="errors.universeFile" class="field-error">{{ errors.universeFile }}</p></div>
             <p v-if="errors.maxPositions" class="field-error">{{ errors.maxPositions }}</p>
+          </fieldset>
+          <fieldset class="form-section required-conditions-section">
+            <legend>用户必选条件（可选）</legend>
+            <p class="helper">这里设置的指标条件会强制加入每一个候选；所有必选条件均按 AND 执行。固定条件可以减少无效搜索。</p>
+            <RuleGroupEditor
+              :model-value="form.requiredBuyRule"
+              :values="availableValues"
+              title="必选买入条件"
+              testid="strategy-required-buy-rule"
+              fixed
+              :max-conditions="3"
+              @update:model-value="setRequiredRule('buy', $event)"
+            />
+            <RuleGroupEditor
+              :model-value="form.requiredSellRule"
+              :values="availableValues"
+              title="必选卖出条件"
+              testid="strategy-required-sell-rule"
+              fixed
+              :max-conditions="3"
+              @update:model-value="setRequiredRule('sell', $event)"
+            />
+            <p class="scope-helper">自动补充规则名额：买入 {{ requiredBuySlots }} 项 · 卖出 {{ requiredSellSlots }} 项；排序、调仓和风控仍会继续寻优。</p>
           </fieldset>
           <fieldset class="form-section">
             <legend>搜索强度</legend>

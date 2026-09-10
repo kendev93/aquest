@@ -9,6 +9,7 @@ from itertools import repeat
 
 import pytest
 
+from selector_app.screening.models import ScreenCondition
 from selector_app.strategy_discovery import search as search_module
 from selector_app.strategy_discovery.candidates import (
     build_random_candidate,
@@ -64,6 +65,37 @@ def test_candidate_generator_can_create_indicator_and_constant_conditions() -> N
     assert any(condition.right_value is not None for condition in conditions)
     assert any(condition.right_constant is not None for condition in conditions)
     assert all(candidate.max_positions == 3 for candidate in candidates)
+
+
+def test_candidate_generator_includes_required_conditions_and_limits_auto_items() -> None:
+    required_buy = ScreenCondition(
+        left_value="technical.ma5",
+        operator="cross_up",
+        right_value="technical.ma20",
+    )
+    required_sell = ScreenCondition(
+        left_value="technical.rsi14",
+        operator="gte",
+        right_constant=70.0,
+    )
+    request = DiscoveryRequest(
+        base_config={"max_positions": 3},
+        indicator_ids=("technical.ma5", "technical.ma20", "technical.rsi14"),
+        signal_ids=("indicator_three.begin_zone",),
+        max_conditions_per_side=2,
+        required_buy_conditions=(required_buy,),
+        required_sell_conditions=(required_sell,),
+    )
+
+    candidates = [build_random_candidate(request, random.Random(seed)) for seed in range(20)]
+
+    for candidate in candidates:
+        assert required_buy in candidate.buy_rule.conditions
+        assert required_sell in candidate.sell_rule.conditions
+        assert len(candidate.buy_rule.conditions) + len(candidate.buy_rule.signals) <= 2
+        assert len(candidate.sell_rule.conditions) + len(candidate.sell_rule.signals) <= 2
+        assert candidate.buy_rule.combine_mode == "all"
+        assert candidate.sell_rule.combine_mode == "all"
 
 
 def test_candidate_hash_is_stable_for_mapping_order() -> None:

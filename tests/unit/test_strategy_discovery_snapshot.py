@@ -36,6 +36,20 @@ def _experiment(store_path: Path) -> DiscoveryRequest:
         },
         indicator_ids=("technical.ma5", "technical.ma20"),
         signal_ids=(),
+        required_buy_conditions=(
+            ScreenCondition(
+                left_value="technical.ma5",
+                operator="cross_up",
+                right_value="technical.ma20",
+            ),
+        ),
+        required_sell_conditions=(
+            ScreenCondition(
+                left_value="technical.ma5",
+                operator="cross_down",
+                right_value="technical.ma20",
+            ),
+        ),
         max_conditions_per_side=1,
         max_trials=1,
         min_trades=0,

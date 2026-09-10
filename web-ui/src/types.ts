@@ -538,6 +538,8 @@ export interface StrategyDiscoveryPayload {
   universe_file?: string | null
   instrument_types?: InstrumentType[]
   boards?: InstrumentBoard[]
+  required_buy_conditions?: ScreenCondition[]
+  required_sell_conditions?: ScreenCondition[]
   start_date?: string | null
   end_date?: string | null
   max_positions: number

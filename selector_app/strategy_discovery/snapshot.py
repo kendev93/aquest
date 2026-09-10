@@ -29,6 +29,7 @@ from selector_app.portfolio_backtest.service import (
     _StockSeries,
 )
 from selector_app.screening.engine import evaluate_rule_group
+from selector_app.screening.models import ScreenCondition
 from selector_app.screening.rules import RuleGroup
 
 from .catalog import default_indicator_catalog
@@ -90,11 +91,30 @@ class DiscoverySnapshot:
         self._bars = np.load(self.root / "bars.npy", mmap_mode="r", allow_pickle=False)
         self._values = np.load(self.root / "values.npy", mmap_mode="r", allow_pickle=False)
         self._signals = np.load(self.root / "signals.npy", mmap_mode="r", allow_pickle=False)
+        self._required_buy = np.load(
+            self.root / "required_buy.npy", mmap_mode="r", allow_pickle=False
+        )
+        self._required_sell = np.load(
+            self.root / "required_sell.npy", mmap_mode="r", allow_pickle=False
+        )
+        self._required_buy_conditions = tuple(
+            _condition_from_dict(item) for item in manifest["required_buy_conditions"]
+        )
+        self._required_sell_conditions = tuple(
+            _condition_from_dict(item) for item in manifest["required_sell_conditions"]
+        )
 
     def close(self) -> None:
         """Release mapped files before the temporary directory is removed."""
 
-        for name in ("_dates", "_bars", "_values", "_signals"):
+        for name in (
+            "_dates",
+            "_bars",
+            "_values",
+            "_signals",
+            "_required_buy",
+            "_required_sell",
+        ):
             setattr(self, name, None)
         gc.collect()
 
@@ -144,16 +164,18 @@ class DiscoverySnapshot:
                 offset,
                 limit,
             )
-            buy_mask = evaluate_rule_group(
+            buy_mask = self._candidate_mask(
                 config.buy_rule,
-                cast(Mapping[str, FormulaResult], formula_results),
-                FORMULA_REGISTRY,
+                self._required_buy_conditions,
+                self._required_buy[offset:limit],
+                formula_results,
             )
             sell_mask = (
-                evaluate_rule_group(
+                self._candidate_mask(
                     config.sell_rule,
-                    cast(Mapping[str, FormulaResult], formula_results),
-                    FORMULA_REGISTRY,
+                    self._required_sell_conditions,
+                    self._required_sell[offset:limit],
+                    formula_results,
                 )
                 if config.sell_rule is not None
                 else np.zeros(item.length, dtype=bool)
@@ -197,6 +219,40 @@ class DiscoverySnapshot:
                 )
             )
         return contexts
+
+    def _candidate_mask(
+        self,
+        rule: RuleGroup,
+        required_conditions: tuple[ScreenCondition, ...],
+        required_mask: np.ndarray,
+        formula_results: Mapping[str, _ArrayFormulaResult],
+    ) -> np.ndarray:
+        cast_results = cast(Mapping[str, FormulaResult], formula_results)
+        if not required_conditions:
+            return evaluate_rule_group(rule, cast_results, FORMULA_REGISTRY)
+        required_set = set(required_conditions)
+        if not required_set.issubset(set(rule.conditions)):
+            raise ValueError("候选规则缺少用户设置的必选条件")
+        auto_conditions = tuple(
+            condition for condition in rule.conditions if condition not in required_set
+        )
+        if not rule.signals and not auto_conditions:
+            return np.asarray(required_mask, dtype=bool)
+        auto_rule = RuleGroup(
+            signals=rule.signals,
+            conditions=auto_conditions,
+            combine_mode="all",
+        )
+        auto_mask = np.asarray(
+            evaluate_rule_group(
+                auto_rule,
+                cast_results,
+                FORMULA_REGISTRY,
+            ),
+            dtype=bool,
+        )
+        combined = np.asarray(required_mask, dtype=bool) & auto_mask
+        return cast(np.ndarray, combined)
 
     def _formula_results(
         self,
@@ -304,6 +360,14 @@ def _write_snapshot(
         dtype=np.bool_,
         shape=(len(signal_ids), total_rows),
     )
+    required_buy = np.lib.format.open_memmap(
+        root / "required_buy.npy", mode="w+", dtype=np.bool_, shape=(total_rows,)
+    )
+    required_sell = np.lib.format.open_memmap(
+        root / "required_sell.npy", mode="w+", dtype=np.bool_, shape=(total_rows,)
+    )
+    required_buy_rule = _required_rule(request.required_buy_conditions)
+    required_sell_rule = _required_rule(request.required_sell_conditions)
     ref_by_key = {(ref.market, ref.code): ref for ref in refs}
     memory_cache = IndicatorCache()
     symbol_rows: list[dict[str, object]] = []
@@ -336,6 +400,12 @@ def _write_snapshot(
         bars[2, cursor:end] = prepared["low"].to_numpy(dtype=float, copy=False)
         bars[3, cursor:end] = prepared["close"].to_numpy(dtype=float, copy=False)
         bars[4, cursor:end] = _atr_series(prepared, 14)
+        required_buy[cursor:end] = _evaluate_required_mask(
+            required_buy_rule, result_by_formula, length
+        )
+        required_sell[cursor:end] = _evaluate_required_mask(
+            required_sell_rule, result_by_formula, length
+        )
         for index, value_id in enumerate(value_ids):
             formula_id, _, value_name = value_id.partition(".")
             value = result_by_formula[formula_id].values.get(value_name)
@@ -368,9 +438,9 @@ def _write_snapshot(
             progress_callback(min(group_index, len(refs)), len(refs))
     if progress_callback is not None and symbol_rows:
         progress_callback(len(refs), len(refs))
-    for mapped in (bars, dates, values, signals):
+    for mapped in (bars, dates, values, signals, required_buy, required_sell):
         mapped.flush()
-    del bars, dates, values, signals, combined
+    del bars, dates, values, signals, required_buy, required_sell, combined
     gc.collect()
     (root / "manifest.json").write_text(
         json.dumps(
@@ -379,6 +449,12 @@ def _write_snapshot(
                 "total_candidates": len(refs),
                 "value_ids": list(value_ids),
                 "signal_ids": list(signal_ids),
+                "required_buy_conditions": [
+                    _condition_to_dict(condition) for condition in request.required_buy_conditions
+                ],
+                "required_sell_conditions": [
+                    _condition_to_dict(condition) for condition in request.required_sell_conditions
+                ],
                 "symbols": symbol_rows,
             },
             ensure_ascii=False,
@@ -386,6 +462,46 @@ def _write_snapshot(
         ),
         encoding="utf-8",
     )
+
+
+def _condition_to_dict(condition: ScreenCondition) -> dict[str, object]:
+    return {
+        "left_value": condition.left_value,
+        "operator": condition.operator,
+        "right_value": condition.right_value,
+        "right_constant": condition.right_constant,
+    }
+
+
+def _condition_from_dict(value: object) -> ScreenCondition:
+    if not isinstance(value, Mapping):
+        raise ValueError("策略实验快照中的必选条件格式错误")
+    right_value = value.get("right_value")
+    right_constant = value.get("right_constant")
+    return ScreenCondition(
+        left_value=str(value.get("left_value") or ""),
+        operator=str(value.get("operator") or "gt"),
+        right_value=str(right_value) if right_value is not None else None,
+        right_constant=float(right_constant) if right_constant is not None else None,
+    )
+
+
+def _required_rule(conditions: tuple[ScreenCondition, ...]) -> RuleGroup | None:
+    return RuleGroup(conditions=conditions, combine_mode="all") if conditions else None
+
+
+def _evaluate_required_mask(
+    rule: RuleGroup | None,
+    formula_results: Mapping[str, FormulaResult],
+    length: int,
+) -> np.ndarray:
+    if rule is None:
+        return np.ones(length, dtype=bool)
+    try:
+        mask = np.asarray(evaluate_rule_group(rule, formula_results, FORMULA_REGISTRY), dtype=bool)
+    except (KeyError, ValueError):
+        return np.zeros(length, dtype=bool)
+    return mask if len(mask) == length else np.zeros(length, dtype=bool)
 
 
 def _value_ids(config: PortfolioBacktestConfig) -> tuple[str, ...]:

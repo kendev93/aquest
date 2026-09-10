@@ -110,3 +110,34 @@ def test_strategy_discovery_request_can_use_the_full_local_history() -> None:
 
     assert discovery.splits["search"]["start_date"] == "2023-01-01"
     assert discovery.splits["holdout"]["end_date"] == "2025-04-30"
+
+
+def test_strategy_discovery_request_preserves_required_buy_and_sell_conditions() -> None:
+    request = StrategyDiscoveryRequest.model_validate(
+        {
+            "max_positions": 3,
+            "required_buy_conditions": [
+                {
+                    "left_value": "technical.ma5",
+                    "operator": "cross_up",
+                    "right_value": "technical.ma20",
+                }
+            ],
+            "required_sell_conditions": [
+                {
+                    "left_value": "technical.rsi14",
+                    "operator": "gte",
+                    "right_constant": 70,
+                }
+            ],
+        }
+    )
+
+    discovery = request.to_discovery_request(
+        default_start="2023-01-01",
+        default_end="2025-04-30",
+    )
+
+    assert discovery.required_buy_conditions[0].operator == "cross_up"
+    assert discovery.required_sell_conditions[0].right_constant == 70
+    assert discovery.to_dict()["required_buy_conditions"]

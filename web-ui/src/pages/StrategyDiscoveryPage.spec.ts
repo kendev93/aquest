@@ -28,6 +28,11 @@ describe('StrategyDiscoveryPage', () => {
       signal_count: 15,
       optuna_available: true,
       lightgbm_available: true,
+      indicators: [
+        { id: 'technical.ma5', display_name: 'MA5', rankable: true },
+        { id: 'technical.ma20', display_name: 'MA20', rankable: true },
+        { id: 'technical.rsi14', display_name: 'RSI14', rankable: true },
+      ],
     })
     vi.mocked(api.fetchStrategyDiscoveryHistory).mockResolvedValue([])
     vi.mocked(api.createStrategyDiscovery).mockResolvedValue({ job_id: 'discovery-1', status: 'queued' })
@@ -120,6 +125,33 @@ describe('StrategyDiscoveryPage', () => {
     await flushPromises()
 
     expect(api.createStrategyDiscovery).toHaveBeenCalledWith(expect.objectContaining({ instrument_types: ['fund'] }))
+  })
+
+  it('submits user-required buy and sell conditions as hard constraints', async () => {
+    const wrapper = mount(StrategyDiscoveryPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="strategy-required-buy-rule-add-condition"]').trigger('click')
+    await wrapper.get('[data-testid="strategy-required-sell-rule-add-condition"]').trigger('click')
+    await wrapper.get('#strategy-required-sell-rule-right-type-0').setValue('constant')
+    await wrapper.get('#strategy-required-sell-rule-right-0').setValue(70)
+    await wrapper.get('[data-testid="strategy-discovery-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(api.createStrategyDiscovery).toHaveBeenCalledWith(expect.objectContaining({
+      required_buy_conditions: [{
+        left_value: 'technical.ma5',
+        operator: 'gt',
+        right_value: 'technical.ma20',
+        right_constant: null,
+      }],
+      required_sell_conditions: [{
+        left_value: 'technical.ma5',
+        operator: 'gt',
+        right_value: null,
+        right_constant: 70,
+      }],
+    }))
+    expect(wrapper.get('[data-testid="strategy-required-buy-rule"]').text()).toContain('硬约束')
   })
 
   it('submits without a date range and uses all local history by default', async () => {

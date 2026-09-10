@@ -41,4 +41,30 @@ describe('RuleGroupEditor', () => {
     expect(wrapper.text()).toContain('中期趋势')
     expect(wrapper.text()).toContain('这里只使用指标输出')
   })
+
+  it('locks required conditions to AND and respects the condition limit', async () => {
+    const wrapper = mount(RuleGroupEditor, {
+      props: {
+        modelValue: { signals: [], conditions: [], combine_mode: 'all', minimum_matches: null },
+        fixed: true,
+        maxConditions: 2,
+        title: '必选买入条件',
+        testid: 'required',
+        values: [
+          { id: 'technical.ma5', display_name: 'MA5', description: '' },
+          { id: 'technical.ma20', display_name: 'MA20', description: '' },
+        ],
+      },
+    })
+
+    expect(wrapper.find('[data-testid="required-combine-mode"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="required-add-condition"]').trigger('click')
+    await wrapper.get('[data-testid="required-add-condition"]').trigger('click')
+
+    expect(wrapper.findAll('[data-testid^="required-condition-"]')).toHaveLength(2)
+    expect(wrapper.get('[data-testid="required-add-condition"]').attributes('disabled')).toBeDefined()
+    const latest = (wrapper.emitted('update:modelValue') ?? []).at(-1)?.[0] as RuleGroupPayload
+    expect(latest.combine_mode).toBe('all')
+    expect(latest.conditions).toHaveLength(2)
+  })
 })

@@ -17,8 +17,12 @@ const props = withDefaults(defineProps<{
   conditionOperators?: ConditionOperatorDefinition[]
   title: string
   testid: string
+  fixed?: boolean
+  maxConditions?: number
 }>(), {
   conditionOperators: () => [],
+  fixed: false,
+  maxConditions: 32,
 })
 
 const emit = defineEmits<{
@@ -44,8 +48,8 @@ function cloneRule(rule: RuleGroupPayload): RuleGroupPayload {
   return {
     signals: [],
     conditions: rule.conditions.map(cloneCondition),
-    combine_mode: rule.combine_mode,
-    minimum_matches: rule.minimum_matches,
+    combine_mode: props.fixed ? 'all' : rule.combine_mode,
+    minimum_matches: props.fixed ? null : rule.minimum_matches,
   }
 }
 
@@ -68,6 +72,7 @@ watch(draft, (value) => {
 }, { deep: true })
 
 function updateCombineMode(value: CombineMode): void {
+  if (props.fixed) return
   draft.value.combine_mode = value
   if (value === 'at_least') {
     draft.value.minimum_matches = Math.min(Math.max(draft.value.minimum_matches ?? 1, 1), Math.max(itemCount.value, 1))
@@ -88,6 +93,7 @@ function emptyCondition(): ScreenCondition {
 }
 
 function addCondition(): void {
+  if (draft.value.conditions.length >= props.maxConditions) return
   draft.value.signals = []
   draft.value.conditions = [...draft.value.conditions, emptyCondition()]
   normalizeMinimum()
@@ -136,7 +142,7 @@ function valueLabel(valueId: string): string {
   <fieldset class="form-section rule-group-editor" :data-testid="testid">
     <legend>{{ title }} <span class="legend-count">{{ itemCount }} 个条件项</span></legend>
 
-    <div class="condition-combine-control">
+    <div v-if="!fixed" class="condition-combine-control">
       <div class="condition-combine-field">
         <label :for="`${testid}-combine-mode`">条件关系</label>
         <select :id="`${testid}-combine-mode`" :value="draft.combine_mode" :data-testid="`${testid}-combine-mode`" @change="updateCombineMode(($event.target as HTMLSelectElement).value as CombineMode)">
@@ -151,6 +157,7 @@ function valueLabel(valueId: string): string {
       </div>
       <small class="condition-combine-helper">{{ draft.combine_mode === 'all' ? '所有指标条件同时满足才触发。' : draft.combine_mode === 'any' ? '任一指标条件满足就触发。' : `至少满足 ${draft.minimum_matches ?? 1} 个指标条件才触发。` }}</small>
     </div>
+    <div v-else class="condition-combine-control fixed-rule-note">每条条件都会作为硬约束，候选必须全部满足。</div>
 
     <div class="rule-condition-list">
       <span class="rule-subtitle">指标条件</span>
@@ -185,7 +192,8 @@ function valueLabel(valueId: string): string {
         <button class="condition-remove text-button" type="button" :data-testid="`${testid}-remove-${index}`" @click="removeCondition(index)">删除</button>
       </div>
       <p v-if="!draft.conditions.length" class="helper">还没有指标条件，可点击下方按钮添加。</p>
-      <button class="secondary-button add-condition-button" type="button" :data-testid="`${testid}-add-condition`" @click="addCondition">＋ 添加指标条件</button>
+      <button class="secondary-button add-condition-button" type="button" :data-testid="`${testid}-add-condition`" :disabled="draft.conditions.length >= maxConditions" @click="addCondition">＋ 添加指标条件</button>
+      <small v-if="draft.conditions.length >= maxConditions" class="scope-helper">已达到 {{ maxConditions }} 条条件上限。</small>
     </div>
   </fieldset>
 </template>

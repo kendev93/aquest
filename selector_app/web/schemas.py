@@ -612,6 +612,12 @@ class StrategyDiscoveryRequest(BaseModel):
     universe_file: str | None = Field(default=None, max_length=1024)
     instrument_types: list[InstrumentType] | None = Field(default=None, max_length=4)
     boards: list[InstrumentBoard] | None = Field(default=None, max_length=7)
+    required_buy_conditions: list[ScreenConditionRequest] = Field(
+        default_factory=list, max_length=3
+    )
+    required_sell_conditions: list[ScreenConditionRequest] = Field(
+        default_factory=list, max_length=3
+    )
     start_date: date | None = None
     end_date: date | None = None
     max_positions: int = Field(default=5, ge=1, le=100)
@@ -654,6 +660,38 @@ class StrategyDiscoveryRequest(BaseModel):
     ) -> DiscoveryRequest:
         from selector_app.strategy_discovery.catalog import default_indicator_catalog
 
+        catalog = default_indicator_catalog()
+        allowed_values = set(catalog.rankable_ids)
+
+        def canonical_conditions(
+            conditions: list[ScreenConditionRequest], field_name: str
+        ) -> tuple[ScreenCondition, ...]:
+            result: list[ScreenCondition] = []
+            for condition in conditions:
+                left_value = catalog.canonical_id(condition.left_value)
+                right_value = (
+                    catalog.canonical_id(condition.right_value)
+                    if condition.right_value is not None
+                    else None
+                )
+                referenced = [left_value, right_value] if right_value is not None else [left_value]
+                invalid = [value for value in referenced if value not in allowed_values]
+                if invalid:
+                    raise ValueError(f"{field_name} 使用了不支持的指标: {', '.join(invalid)}")
+                result.append(
+                    ScreenCondition(
+                        left_value=left_value,
+                        operator=condition.operator,
+                        right_value=right_value,
+                        right_constant=condition.right_constant,
+                    )
+                )
+            return tuple(result)
+
+        required_buy_conditions = canonical_conditions(self.required_buy_conditions, "必选买入条件")
+        required_sell_conditions = canonical_conditions(
+            self.required_sell_conditions, "必选卖出条件"
+        )
         resolved_start = self.start_date or _coerce_date(default_start)
         resolved_end = self.end_date or _coerce_date(default_end)
         if resolved_start is None or resolved_end is None:
@@ -671,7 +709,6 @@ class StrategyDiscoveryRequest(BaseModel):
         validation_end = validation_start + timedelta(days=validation_days - 1)
         holdout_start = validation_end + timedelta(days=1)
         seed = self.seed if self.seed is not None else secrets.randbits(32)
-        catalog = default_indicator_catalog()
         return DiscoveryRequest(
             base_config={
                 "vipdoc_path": self.vipdoc_path,
@@ -705,6 +742,8 @@ class StrategyDiscoveryRequest(BaseModel):
             },
             indicator_ids=tuple(catalog.rankable_ids),
             signal_ids=tuple(catalog.signal_ids),
+            required_buy_conditions=required_buy_conditions,
+            required_sell_conditions=required_sell_conditions,
             max_trials=self.max_trials,
             timeout_seconds=self.timeout_seconds,
             validation_candidates=self.validation_candidates,

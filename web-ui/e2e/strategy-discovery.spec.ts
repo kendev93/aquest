@@ -71,10 +71,24 @@ const candidateConfig = {
 
 test('user can discover a strategy, apply it, and rerun ordinary portfolio backtest', async ({ page }) => {
   await page.route('**/api/v1/strategy-discovery/capabilities', (route) => route.fulfill({ json: {
-    data: { enabled: true, indicator_count: 20, signal_count: 15, optuna_available: true, lightgbm_available: true },
+    data: {
+      enabled: true,
+      indicator_count: 20,
+      signal_count: 15,
+      optuna_available: true,
+      lightgbm_available: true,
+      indicators: [
+        { id: 'technical.ma5', display_name: 'MA5', rankable: true },
+        { id: 'technical.ma20', display_name: 'MA20', rankable: true },
+      ],
+    },
   } }))
   await page.route('**/api/v1/strategy-discovery/history', (route) => route.fulfill({ json: { data: [] } }))
-  await page.route('**/api/v1/strategy-discovery', (route) => route.fulfill({ status: 202, json: { data: { job_id: 'discovery-job', status: 'queued' } } }))
+  let discoveryPayload: Record<string, unknown> | undefined
+  await page.route('**/api/v1/strategy-discovery', (route) => {
+    discoveryPayload = route.request().postDataJSON() as Record<string, unknown>
+    return route.fulfill({ status: 202, json: { data: { job_id: 'discovery-job', status: 'queued' } } })
+  })
   await page.route('**/api/v1/strategy-discovery/discovery-job', (route) => route.fulfill({ json: {
     data: { job_id: 'discovery-job', status: 'completed', progress: 1, total_candidates: 1, total_scanned: 1, errors: 0, skipped: 0, error: null, result: null, phase: 'completed', metadata: {} },
   } }))
@@ -93,9 +107,18 @@ test('user can discover a strategy, apply it, and rerun ordinary portfolio backt
   } } }))
 
   await page.goto('/strategy-lab')
+  await page.getByTestId('strategy-required-buy-rule-add-condition').click()
   await page.getByTestId('strategy-discovery-positions').fill('2')
   await page.getByTestId('strategy-discovery-submit').click()
 
+  await expect.poll(() => discoveryPayload).toMatchObject({
+    required_buy_conditions: [{
+      left_value: 'technical.ma5',
+      operator: 'gt',
+      right_value: 'technical.ma20',
+      right_constant: null,
+    }],
+  })
   await expect(page.getByTestId('strategy-discovery-results')).toContainText('夏普榜前 10')
   await expect(page.getByTestId('strategy-discovery-results')).toContainText('VAR1 > 60')
   await page.getByTestId('strategy-discovery-apply-candidate-1').click()

@@ -133,9 +133,14 @@ def _rule(
     rng: object,
     indicators: Sequence[str],
     signals: Sequence[str],
+    required_conditions: Sequence[ScreenCondition] = (),
 ) -> RuleGroup:
     max_conditions = request.max_conditions_per_side
-    if max_conditions == 0 and not signals:
+    required = tuple(required_conditions)
+    remaining = max(0, max_conditions - len(required))
+    if required:
+        count = _int_choice(rng, tuple(range(remaining + 1)), 0) if remaining else 0
+    elif max_conditions == 0 and not signals:
         count = 1
     else:
         count = _int_choice(rng, tuple(range(1, max_conditions + 1)) or (0,), 1)
@@ -148,16 +153,22 @@ def _rule(
                 selected_signals.append(signal)
             continue
         conditions.append(_condition(request, rng, indicators))
-    if not selected_signals and not conditions:
+    if not selected_signals and not conditions and not required:
         conditions.append(_condition(request, rng, indicators))
-    item_count = len(selected_signals) + len(conditions)
-    combine_mode = "all" if item_count < 2 else str(_choice(rng, ("all", "any", "at_least"), "all"))
+    item_count = len(required) + len(selected_signals) + len(conditions)
+    combine_mode = (
+        "all"
+        if required
+        else "all"
+        if item_count < 2
+        else str(_choice(rng, ("all", "any", "at_least"), "all"))
+    )
     minimum_matches = (
         _int_choice(rng, tuple(range(1, item_count + 1)), 1) if combine_mode == "at_least" else None
     )
     return RuleGroup(
         signals=tuple(selected_signals),
-        conditions=tuple(conditions),
+        conditions=(*required, *conditions),
         combine_mode=combine_mode,
         minimum_matches=minimum_matches,
     )
@@ -199,8 +210,20 @@ def build_random_candidate(
     risk: dict[str, tuple[RiskMode, float | None, float | None, int]] = {}
     for prefix in ("take_profit", "stop_loss", "trailing_stop"):
         risk[prefix] = _risk_values(generator)
-    buy_rule = _rule(request, generator, indicators, signals)
-    sell_rule = _rule(request, generator, indicators, signals)
+    buy_rule = _rule(
+        request,
+        generator,
+        indicators,
+        signals,
+        request.required_buy_conditions,
+    )
+    sell_rule = _rule(
+        request,
+        generator,
+        indicators,
+        signals,
+        request.required_sell_conditions,
+    )
     take_profit_mode, take_profit_pct, take_profit_atr, take_profit_cooldown = risk["take_profit"]
     stop_loss_mode, stop_loss_pct, stop_loss_atr, stop_loss_cooldown = risk["stop_loss"]
     trailing_mode, trailing_pct, trailing_atr, trailing_cooldown = risk["trailing_stop"]
