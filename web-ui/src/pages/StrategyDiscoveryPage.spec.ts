@@ -117,6 +117,21 @@ describe('StrategyDiscoveryPage', () => {
     expect((wrapper.get('[data-testid="strategy-discovery-positions"]').element as HTMLInputElement).value).toBe('4')
   })
 
+  it('shows the elapsed time for each historical experiment', async () => {
+    vi.mocked(api.fetchStrategyDiscoveryHistory).mockResolvedValueOnce([{
+      history_id: 'history-2',
+      created_at: '2026-09-10T00:00:00',
+      total_trials: 120,
+      duration_seconds: 3723.5,
+      best_sharpe: null,
+      best_return: null,
+    }])
+    const wrapper = mount(StrategyDiscoveryPage)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="strategy-discovery-history"]').text()).toContain('1 小时 2 分钟')
+  })
+
   it('passes optional local instrument scope to the discovery request', async () => {
     const wrapper = mount(StrategyDiscoveryPage)
     await flushPromises()

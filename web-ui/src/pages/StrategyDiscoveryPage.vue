@@ -272,6 +272,20 @@ function formatDuration(state: StrategyDiscoveryJobState | null): string {
   return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分钟`
 }
 
+function formatHistoryDuration(value: unknown): string {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return '—'
+  if (value < 60) return `${value.toFixed(1)} 秒`
+  const totalSeconds = Math.round(value)
+  const totalMinutes = Math.floor(totalSeconds / 60)
+  if (totalMinutes < 60) {
+    const seconds = totalSeconds % 60
+    return seconds ? `${totalMinutes} 分 ${seconds} 秒` : `${totalMinutes} 分钟`
+  }
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+  return minutes ? `${hours} 小时 ${minutes} 分钟` : `${hours} 小时`
+}
+
 function holdoutStatus(candidate: StrategyDiscoveryCandidate): string {
   const value = candidate.metrics.holdout?.constraints_passed
   return value === true ? '通过' : value === false ? '未通过' : '—'
@@ -465,7 +479,7 @@ onMounted(async () => {
       <section class="panel discovery-history-panel" data-testid="strategy-discovery-history">
         <div class="panel-heading"><div><span class="section-kicker">03 / HISTORY</span><h2>历史实验</h2></div><button class="secondary-button" type="button" @click="loadHistory">刷新</button></div>
         <div v-if="!history.length" class="inline-empty">暂无历史实验。</div>
-        <div v-else class="table-wrap"><table><thead><tr><th>实验 ID</th><th>时间</th><th>候选数</th><th>最佳夏普</th><th>最佳收益</th><th>操作</th></tr></thead><tbody><tr v-for="item in history" :key="String(item.history_id)"><td>{{ item.history_id }}</td><td>{{ item.created_at }}</td><td>{{ item.total_trials }}</td><td>{{ item.best_sharpe ? '可查看' : '—' }}</td><td>{{ item.best_return ? '可查看' : '—' }}</td><td><button class="table-link" type="button" @click="loadHistoryDetail(String(item.history_id))">加载</button><button class="table-link danger-link" type="button" @click="removeHistory(String(item.history_id))">删除</button></td></tr></tbody></table></div>
+        <div v-else class="table-wrap"><table><thead><tr><th>实验 ID</th><th>时间</th><th>候选数</th><th>耗时</th><th>最佳夏普</th><th>最佳收益</th><th>操作</th></tr></thead><tbody><tr v-for="item in history" :key="String(item.history_id)"><td>{{ item.history_id }}</td><td>{{ item.created_at }}</td><td>{{ item.total_trials }}</td><td>{{ formatHistoryDuration(item.duration_seconds) }}</td><td>{{ item.best_sharpe ? '可查看' : '—' }}</td><td>{{ item.best_return ? '可查看' : '—' }}</td><td><button class="table-link" type="button" @click="loadHistoryDetail(String(item.history_id))">加载</button><button class="table-link danger-link" type="button" @click="removeHistory(String(item.history_id))">删除</button></td></tr></tbody></table></div>
       </section>
     </main>
   </div>
