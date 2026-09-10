@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import math
-from datetime import date
+import secrets
+from datetime import date, timedelta
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -20,6 +21,7 @@ from selector_app.portfolio_backtest.models import (
 )
 from selector_app.screening.models import ScanConfig, ScreenCondition
 from selector_app.screening.rules import RuleGroup
+from selector_app.strategy_discovery.models import DiscoveryRequest
 from selector_app.strategy_fitness.models import StrategyFitnessConfig
 
 
@@ -72,6 +74,19 @@ def validate_formula_values(formula_text: str | None, value_ids: list[str]) -> N
         invalid = [value_id for value_id in value_ids if not FORMULA_REGISTRY.has_value(value_id)]
     if invalid:
         raise ValueError(f"未知指标输出: {', '.join(invalid)}")
+
+
+def _coerce_date(value: date | str | None) -> date | None:
+    """Convert a local-store date snapshot into a validated calendar date."""
+
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"策略实验日期格式错误: {value}") from exc
 
 
 def validate_formula_conditions(
@@ -323,8 +338,8 @@ class BacktestRequest(BaseModel):
     start_date: date | None = None
     end_date: date | None = None
     initial_cash: float = Field(default=100_000.0, gt=0, le=1_000_000_000_000)
-    commission: float = Field(default=0.0003, ge=0, le=0.1)
-    min_commission: float = Field(default=5.0, ge=0, le=100_000)
+    commission: float = Field(default=0.0001, ge=0, le=0.1)
+    min_commission: float = Field(default=0.1, ge=0, le=100_000)
     stamp_tax: float = Field(default=0.001, ge=0, le=0.1)
     slippage: float = Field(default=0.0, ge=0, le=1_000)
     execution: Literal["next_open", "next_close"] = "next_open"
@@ -416,6 +431,17 @@ class PortfolioBacktestRequest(BaseModel):
     sell_signal: str | None = Field(default=None, max_length=128)
     stop_loss_pct: float | None = Field(default=None, gt=0, le=1)
     take_profit_pct: float | None = Field(default=None, gt=0, le=10)
+    take_profit_mode: Literal["pct", "atr"] = "pct"
+    take_profit_atr_multiplier: float | None = Field(default=None, gt=0, le=100)
+    take_profit_cooldown_days: int = Field(default=0, ge=0, le=10_000)
+    stop_loss_mode: Literal["pct", "atr"] = "pct"
+    stop_loss_atr_multiplier: float | None = Field(default=None, gt=0, le=100)
+    stop_loss_cooldown_days: int = Field(default=0, ge=0, le=10_000)
+    trailing_stop_pct: float | None = Field(default=None, gt=0, le=10)
+    trailing_stop_mode: Literal["pct", "atr"] = "pct"
+    trailing_stop_atr_multiplier: float | None = Field(default=None, gt=0, le=100)
+    trailing_stop_cooldown_days: int = Field(default=0, ge=0, le=10_000)
+    atr_period: int = Field(default=14, ge=1, le=1_000)
     sell_value: str | None = Field(default=None, max_length=128)
     sell_value_operator: Literal["gte", "lte"] | None = None
     sell_value_threshold: float | None = None
@@ -426,8 +452,8 @@ class PortfolioBacktestRequest(BaseModel):
     start_date: date | None = None
     end_date: date | None = None
     initial_cash: float = Field(default=1_000_000.0, gt=0, le=1_000_000_000_000)
-    commission: float = Field(default=0.0003, ge=0, le=0.1)
-    min_commission: float = Field(default=5.0, ge=0, le=100_000)
+    commission: float = Field(default=0.0001, ge=0, le=0.1)
+    min_commission: float = Field(default=0.1, ge=0, le=100_000)
     stamp_tax: float = Field(default=0.001, ge=0, le=0.1)
     slippage: float = Field(default=0.0, ge=0, le=1_000)
     execution: Literal["next_open", "next_close"] = "next_open"
@@ -480,6 +506,16 @@ class PortfolioBacktestRequest(BaseModel):
         if self.start_date is not None and self.end_date is not None:
             if self.start_date > self.end_date:
                 raise ValueError("回测开始日期不能晚于结束日期")
+        for prefix in ("take_profit", "stop_loss", "trailing_stop"):
+            mode = getattr(self, f"{prefix}_mode")
+            multiplier = getattr(self, f"{prefix}_atr_multiplier")
+            percentage = getattr(self, f"{prefix}_pct")
+            if mode == "atr" and multiplier is None:
+                raise ValueError(f"{prefix}_atr_multiplier 在 ATR 模式下不能为空")
+            if mode == "atr" and percentage is not None:
+                raise ValueError(f"{prefix}_pct 不能在 ATR 模式下设置")
+            if mode == "pct" and multiplier is not None:
+                raise ValueError(f"{prefix}_atr_multiplier 不能在 pct 模式下设置")
         if self.sell_value is None:
             if self.sell_value_operator is not None or self.sell_value_threshold is not None:
                 raise ValueError("指标阈值卖出规则缺少指标")
@@ -490,11 +526,23 @@ class PortfolioBacktestRequest(BaseModel):
             value is not None for value in comparison
         ):
             raise ValueError("指标比较卖出规则需要左右指标和比较方式")
+        if self.atr_period != 14:
+            raise ValueError("atr_period 固定为 14")
+        risk_enabled = any(
+            value is not None
+            for value in (
+                self.stop_loss_pct,
+                self.stop_loss_atr_multiplier,
+                self.take_profit_pct,
+                self.take_profit_atr_multiplier,
+                self.trailing_stop_pct,
+                self.trailing_stop_atr_multiplier,
+            )
+        )
         if (
             self.sell_rule is None
             and self.sell_signal is None
-            and self.stop_loss_pct is None
-            and self.take_profit_pct is None
+            and not risk_enabled
             and self.sell_value is None
             and self.compare_left_value is None
         ):
@@ -521,6 +569,17 @@ class PortfolioBacktestRequest(BaseModel):
             sell_signal=self.sell_signal,
             stop_loss_pct=self.stop_loss_pct,
             take_profit_pct=self.take_profit_pct,
+            take_profit_mode=self.take_profit_mode,
+            take_profit_atr_multiplier=self.take_profit_atr_multiplier,
+            take_profit_cooldown_days=self.take_profit_cooldown_days,
+            stop_loss_mode=self.stop_loss_mode,
+            stop_loss_atr_multiplier=self.stop_loss_atr_multiplier,
+            stop_loss_cooldown_days=self.stop_loss_cooldown_days,
+            trailing_stop_pct=self.trailing_stop_pct,
+            trailing_stop_mode=self.trailing_stop_mode,
+            trailing_stop_atr_multiplier=self.trailing_stop_atr_multiplier,
+            trailing_stop_cooldown_days=self.trailing_stop_cooldown_days,
+            atr_period=self.atr_period,
             sell_value=self.sell_value,
             sell_value_operator=self.sell_value_operator,
             sell_value_threshold=self.sell_value_threshold,
@@ -540,6 +599,122 @@ class PortfolioBacktestRequest(BaseModel):
             fitness_min_score=self.fitness_min_score,
             fitness_min_trades=self.fitness_min_trades,
             fitness_max_drawdown=self.fitness_max_drawdown,
+        )
+
+
+class StrategyDiscoveryRequest(BaseModel):
+    """User-facing inputs for automatic local portfolio strategy discovery."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    vipdoc_path: str = Field(default="", max_length=1024)
+    universe: PortfolioUniverse = "all"
+    universe_file: str | None = Field(default=None, max_length=1024)
+    instrument_types: list[InstrumentType] | None = Field(default=None, max_length=4)
+    boards: list[InstrumentBoard] | None = Field(default=None, max_length=7)
+    start_date: date | None = None
+    end_date: date | None = None
+    max_positions: int = Field(default=5, ge=1, le=100)
+    initial_cash: float = Field(default=1_000_000.0, gt=0, le=1_000_000_000_000)
+    commission: float = Field(default=0.0001, ge=0, le=0.1)
+    min_commission: float = Field(default=0.1, ge=0, le=100_000)
+    stamp_tax: float = Field(default=0.001, ge=0, le=0.1)
+    slippage: float = Field(default=0.0, ge=0, le=1_000)
+    execution: Literal["next_open", "next_close"] = "next_open"
+    max_trials: int = Field(default=1_000, ge=1, le=5_000)
+    timeout_seconds: int = Field(default=7_200, ge=1, le=86_400)
+    validation_candidates: int = Field(default=50, ge=1, le=200)
+    holdout_candidates: int = Field(default=20, ge=1, le=50)
+    min_trades: int = Field(default=5, ge=0, le=10_000)
+    max_drawdown: float | None = Field(default=0.3, ge=0, le=1)
+    max_turnover: float | None = Field(default=None, ge=0)
+    max_complexity: int = Field(default=12, ge=0, le=50)
+    multifidelity_enabled: bool = True
+    seed: int | None = Field(default=None, ge=0, le=2**32 - 1)
+
+    @model_validator(mode="after")
+    def validate_discovery(self) -> StrategyDiscoveryRequest:
+        validate_instrument_scope(self.universe, self.instrument_types, self.boards)
+        if self.universe == "custom" and not self.universe_file:
+            raise ValueError("自定义股票范围必须设置 universe_file")
+        if (self.start_date is None) != (self.end_date is None):
+            raise ValueError("开始日期和结束日期必须同时设置")
+        if self.start_date is not None and self.end_date is not None:
+            if self.start_date > self.end_date:
+                raise ValueError("策略实验开始日期不能晚于结束日期")
+            if (self.end_date - self.start_date).days < 2:
+                raise ValueError("策略实验时间范围至少需要 3 天")
+        return self
+
+    def to_discovery_request(
+        self,
+        *,
+        default_start: date | str | None = None,
+        default_end: date | str | None = None,
+    ) -> DiscoveryRequest:
+        from selector_app.strategy_discovery.catalog import default_indicator_catalog
+
+        resolved_start = self.start_date or _coerce_date(default_start)
+        resolved_end = self.end_date or _coerce_date(default_end)
+        if resolved_start is None or resolved_end is None:
+            raise ValueError("本地 DuckDB 没有已完成日线，请先在“本地行情”页面导入日线数据")
+        if resolved_start > resolved_end:
+            raise ValueError("策略实验开始日期不能晚于结束日期")
+        if (resolved_end - resolved_start).days < 2:
+            raise ValueError("策略实验时间范围至少需要 3 天")
+
+        total_days = (resolved_end - resolved_start).days + 1
+        search_days = max(1, int(total_days * 0.6))
+        validation_days = max(1, int(total_days * 0.2))
+        search_end = resolved_start + timedelta(days=search_days - 1)
+        validation_start = search_end + timedelta(days=1)
+        validation_end = validation_start + timedelta(days=validation_days - 1)
+        holdout_start = validation_end + timedelta(days=1)
+        seed = self.seed if self.seed is not None else secrets.randbits(32)
+        catalog = default_indicator_catalog()
+        return DiscoveryRequest(
+            base_config={
+                "vipdoc_path": self.vipdoc_path,
+                "universe": self.universe,
+                "universe_file": self.universe_file,
+                "instrument_types": list(self.instrument_types or ()),
+                "boards": list(self.boards or ()),
+                "start_date": resolved_start.isoformat(),
+                "end_date": resolved_end.isoformat(),
+                "max_positions": self.max_positions,
+                "initial_cash": self.initial_cash,
+                "commission": self.commission,
+                "min_commission": self.min_commission,
+                "stamp_tax": self.stamp_tax,
+                "slippage": self.slippage,
+                "execution": self.execution,
+            },
+            splits={
+                "search": {
+                    "start_date": resolved_start.isoformat(),
+                    "end_date": search_end.isoformat(),
+                },
+                "validation": {
+                    "start_date": validation_start.isoformat(),
+                    "end_date": validation_end.isoformat(),
+                },
+                "holdout": {
+                    "start_date": holdout_start.isoformat(),
+                    "end_date": resolved_end.isoformat(),
+                },
+            },
+            indicator_ids=tuple(catalog.rankable_ids),
+            signal_ids=tuple(catalog.signal_ids),
+            max_trials=self.max_trials,
+            timeout_seconds=self.timeout_seconds,
+            validation_candidates=self.validation_candidates,
+            holdout_candidates=self.holdout_candidates,
+            min_trades=self.min_trades,
+            max_drawdown=self.max_drawdown,
+            max_turnover=self.max_turnover,
+            max_complexity=self.max_complexity,
+            multifidelity_enabled=self.multifidelity_enabled,
+            seed=seed,
         )
 
 

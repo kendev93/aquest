@@ -197,11 +197,11 @@ def test_indicator_cache_status_and_manual_precompute_job(tmp_path: Path) -> Non
     assert initial.json()["data"]["persistent"]["total_entries"] == 0
     assert state["status"] == "completed"
     assert state["description"] == "指标预计算"
-    assert state["result"]["computed"] == 3
+    assert state["result"]["computed"] == 4
     assert warmed.status_code == 200
-    assert warmed.json()["data"]["lookups"] == 3
+    assert warmed.json()["data"]["lookups"] == 4
     assert warmed.json()["data"]["p95_ms"] >= warmed.json()["data"]["p50_ms"] >= 0
-    assert warmed.json()["data"]["persistent"]["total_entries"] == 3
+    assert warmed.json()["data"]["persistent"]["total_entries"] == 4
 
 
 def test_invalid_signal_is_rejected_without_stack_trace(tmp_path: Path) -> None:

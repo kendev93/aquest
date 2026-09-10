@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from selector_app.adapters.local_day_adapter import StockRef
 from selector_app.portfolio_backtest.models import PortfolioBacktestConfig
@@ -114,12 +115,42 @@ def test_take_profit_uses_daily_high_and_trigger_price_not_close() -> None:
     assert sells[0]["risk_trigger"] == "take_profit"
 
 
+def test_risk_exits_use_gap_open_instead_of_the_trigger_price() -> None:
+    stop_report = PortfolioBacktestService(
+        adapter=OneStockAdapter(
+            frame(
+                [
+                    (10.0, 10.5, 9.5, 10.0),
+                    (10.0, 10.5, 9.8, 10.0),
+                    (8.0, 8.5, 7.5, 8.0),
+                ]
+            )
+        )
+    ).run(config(stop_loss_pct=0.1))
+    take_report = PortfolioBacktestService(
+        adapter=OneStockAdapter(
+            frame(
+                [
+                    (10.0, 10.5, 9.5, 10.0),
+                    (10.0, 10.5, 9.8, 10.0),
+                    (12.0, 12.5, 11.5, 12.0),
+                ]
+            )
+        )
+    ).run(config(take_profit_pct=0.1))
+
+    stop_sell = [trade for trade in stop_report.trades if trade["direction"] == "SELL"][0]
+    take_sell = [trade for trade in take_report.trades if trade["direction"] == "SELL"][0]
+    assert stop_sell["price"] == 8.0
+    assert take_sell["price"] == 12.0
+
+
 def test_trailing_stop_tracks_highest_daily_high_and_uses_its_cooldown() -> None:
     bars = frame(
         [
             (10.0, 10.5, 9.5, 10.0),
             (10.0, 10.5, 9.8, 10.0),
-            (10.5, 12.0, 11.3, 11.5),
+            (11.5, 12.0, 11.3, 11.5),
         ]
     )
 
@@ -175,3 +206,52 @@ def test_atr_risk_parameters_require_a_positive_multiplier() -> None:
         assert "stop_loss_atr_multiplier" in str(exc)
     else:
         raise AssertionError("ATR 风控缺少倍数时应被拒绝")
+
+
+def test_atr_stop_loss_uses_full_history_warmup_and_ohlc_fill() -> None:
+    rows = [(10.0, 10.5, 9.5, 10.0)] * 15
+    rows.append((8.0, 8.5, 7.5, 8.0))
+
+    report = PortfolioBacktestService(adapter=OneStockAdapter(frame(rows))).run(
+        config(stop_loss_mode="atr", stop_loss_atr_multiplier=2)
+    )
+
+    sells = [trade for trade in report.trades if trade["direction"] == "SELL"]
+    assert len(sells) == 1
+    assert sells[0]["risk_trigger"] == "stop_loss"
+    assert sells[0]["price"] == pytest.approx(7.7857142857)
+
+
+def test_risk_priority_is_stop_loss_then_trailing_then_take_profit() -> None:
+    bars = frame(
+        [
+            (10.0, 10.5, 9.5, 10.0),
+            (10.0, 10.5, 9.8, 10.0),
+            (10.0, 12.0, 8.0, 10.0),
+        ]
+    )
+
+    report = PortfolioBacktestService(adapter=OneStockAdapter(bars)).run(
+        config(stop_loss_pct=0.1, trailing_stop_pct=0.05, take_profit_pct=0.1)
+    )
+
+    sells = [trade for trade in report.trades if trade["direction"] == "SELL"]
+    assert len(sells) == 1
+    assert sells[0]["risk_trigger"] == "stop_loss"
+
+
+def test_reusing_a_portfolio_service_does_not_leak_risk_state() -> None:
+    bars = frame(
+        [
+            (10.0, 10.5, 9.5, 10.0),
+            (10.0, 10.5, 9.8, 10.0),
+            (9.0, 9.5, 8.5, 9.0),
+            (9.0, 9.5, 8.8, 9.0),
+        ]
+    )
+    service = PortfolioBacktestService(adapter=OneStockAdapter(bars))
+    first = service.run(config(stop_loss_pct=0.1, stop_loss_cooldown_days=2))
+    second = service.run(config(stop_loss_pct=0.1, stop_loss_cooldown_days=2))
+
+    assert first.trades == second.trades
+    assert first.equity_curve == second.equity_curve

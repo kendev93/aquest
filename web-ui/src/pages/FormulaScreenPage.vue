@@ -646,6 +646,7 @@ watch(() => form.formulaText, (value) => {
         <a class="nav-link active" href="/indicator-lab" aria-current="page">公式选股</a>
         <a class="nav-link" href="/backtest">单股回测</a>
         <a class="nav-link" href="/portfolio-backtest">组合回测</a>
+        <a class="nav-link" href="/strategy-lab">策略实验室</a>
         <a class="nav-link" href="/strategy-fitness">策略适配性</a>
         <a class="nav-link" href="/market-data">本地行情</a>
       </nav>

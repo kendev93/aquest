@@ -124,16 +124,25 @@ def test_portfolio_fills_a_vacated_slot_by_rank_after_stop_loss() -> None:
 
     assert report.total_candidates == 3
     assert report.processed == 3
-    assert [trade["direction"] for trade in report.trades] == ["BUY", "BUY", "SELL", "BUY"]
+    assert [trade["direction"] for trade in report.trades] == [
+        "BUY",
+        "BUY",
+        "SELL",
+        "BUY",
+        "SELL",
+        "BUY",
+    ]
     assert [(trade["code"], trade["date"]) for trade in report.trades] == [
         ("600001", "2024-01-02"),
         ("600000", "2024-01-02"),
+        ("600001", "2024-01-03"),
         ("600001", "2024-01-04"),
-        ("600002", "2024-01-04"),
+        ("600001", "2024-01-05"),
+        ("600001", "2024-01-06"),
     ]
-    assert {holding["code"] for holding in report.states[-1]["holdings"]} == {"600000", "600002"}
+    assert {holding["code"] for holding in report.states[-1]["holdings"]} == {"600000", "600001"}
     assert report.states[-1]["positions_count"] == 2
-    assert report.performance["end_value"] == 12_400.0
+    assert report.performance["end_value"] == 11_100.0
     json.dumps(report.to_dict(), ensure_ascii=False)
 
 

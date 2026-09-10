@@ -43,6 +43,21 @@ from .indicator_two import (
 from .indicator_two import (
     calculate_indicator_two,
 )
+from .technical import (
+    DISPLAY_NAME as TECHNICAL_DISPLAY_NAME,
+)
+from .technical import (
+    MINIMUM_BARS as TECHNICAL_MINIMUM_BARS,
+)
+from .technical import (
+    RECOMMENDED_BARS as TECHNICAL_RECOMMENDED_BARS,
+)
+from .technical import (
+    VALUE_NAMES as TECHNICAL_VALUE_NAMES,
+)
+from .technical import (
+    calculate_technical_indicators,
+)
 from .types import FormulaResult
 
 FormulaCalculator = Callable[[pd.DataFrame], FormulaResult]
@@ -109,6 +124,16 @@ _VALUE_DISPLAY_NAMES: dict[str, dict[str, str]] = {
         "prepare_rally": "准备拉升",
         "suppress_main": "压住庄家",
         "accumulation_zone": "建仓区值",
+    },
+    "technical": {
+        "ma5": "MA5",
+        "ma10": "MA10",
+        "ma20": "MA20",
+        "ma60": "MA60",
+        "rsi14": "RSI14",
+        "macd": "MACD",
+        "macd_signal": "SIGNAL",
+        "macd_histogram": "MACD柱",
     },
 }
 
@@ -373,6 +398,16 @@ FORMULA_REGISTRY = FormulaRegistry(
                 "prepare_rally",
                 "suppress_main",
             ),
+        ),
+        FormulaDefinition(
+            id="technical",
+            display_name=TECHNICAL_DISPLAY_NAME,
+            minimum_bars=TECHNICAL_MINIMUM_BARS,
+            recommended_bars=TECHNICAL_RECOMMENDED_BARS,
+            calculate=calculate_technical_indicators,
+            signals=(),
+            value_names=TECHNICAL_VALUE_NAMES,
+            screen_value_names=TECHNICAL_VALUE_NAMES,
         ),
     )
 )

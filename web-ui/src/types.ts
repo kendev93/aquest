@@ -396,6 +396,17 @@ export interface PortfolioBacktestPayload {
   sell_signal?: string | null
   stop_loss_pct?: number | null
   take_profit_pct?: number | null
+  take_profit_mode?: 'pct' | 'atr'
+  take_profit_atr_multiplier?: number | null
+  take_profit_cooldown_days?: number
+  stop_loss_mode?: 'pct' | 'atr'
+  stop_loss_atr_multiplier?: number | null
+  stop_loss_cooldown_days?: number
+  trailing_stop_pct?: number | null
+  trailing_stop_mode?: 'pct' | 'atr'
+  trailing_stop_atr_multiplier?: number | null
+  trailing_stop_cooldown_days?: number
+  atr_period?: number
   sell_value?: string | null
   sell_value_operator?: PortfolioSellValueOperator | null
   sell_value_threshold?: number | null
@@ -452,6 +463,10 @@ export interface PortfolioTrade {
   pnl: number
   cost_basis: number
   reason: string
+  instrument_type?: InstrumentType
+  board?: InstrumentBoard
+  risk_trigger?: 'take_profit' | 'stop_loss' | 'trailing_stop' | null
+  cooldown_days?: number
   rejected: boolean
 }
 
@@ -515,6 +530,67 @@ export interface PortfolioBacktestResult {
   ranking_events: PortfolioRankingEvent[]
   failure_reasons: Record<string, number>
   diagnostic: string | null
+  risk_controls?: Record<string, number | string | null>
+}
+
+export interface StrategyDiscoveryPayload {
+  universe: Universe
+  universe_file?: string | null
+  instrument_types?: InstrumentType[]
+  boards?: InstrumentBoard[]
+  start_date?: string | null
+  end_date?: string | null
+  max_positions: number
+  initial_cash?: number
+  commission?: number
+  min_commission?: number
+  stamp_tax?: number
+  slippage?: number
+  execution?: BacktestExecution
+  max_trials?: number
+  timeout_seconds?: number
+  validation_candidates?: number
+  holdout_candidates?: number
+  min_trades?: number
+  max_drawdown?: number | null
+  max_turnover?: number | null
+  max_complexity?: number
+  multifidelity_enabled?: boolean
+  seed?: number | null
+}
+
+export interface StrategyDiscoveryJobState {
+  job_id: string
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+  progress: number
+  total_candidates: number
+  total_scanned: number
+  errors: number
+  skipped: number
+  error: string | null
+  result: StrategyDiscoveryResult | null
+  phase?: string | null
+  metadata?: Record<string, unknown>
+}
+
+export interface StrategyDiscoveryCandidate {
+  candidate_hash: string
+  complexity: number
+  human_readable_rules: string
+  config: PortfolioBacktestPayload
+  metrics: Record<string, Record<string, number | string | boolean | null>>
+}
+
+export interface StrategyDiscoveryResult {
+  history_id?: string
+  request: Record<string, unknown>
+  results_by_sharpe: StrategyDiscoveryCandidate[]
+  results_by_return: StrategyDiscoveryCandidate[]
+  search_metadata: Record<string, unknown>
+  validation_metadata: Record<string, unknown>
+  algorithm_metadata?: Record<string, unknown>
+  data_fingerprint?: string
+  duration_seconds?: number
 }
 
 export type FitnessLabel = 'strong' | 'watch' | 'weak' | 'insufficient'

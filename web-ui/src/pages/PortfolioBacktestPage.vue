@@ -13,6 +13,7 @@ import type {
   PortfolioBacktestJobState,
   PortfolioBacktestPayload,
   PortfolioBacktestResult,
+  PortfolioTrade,
   PortfolioRebalanceFrequency,
   RuleGroupPayload,
   SignalDefinition,
@@ -20,6 +21,22 @@ import type {
   ValueDefinition,
 } from '../types'
 import { numericRuleForSignal, signalDisplayName, valueOptionLabel } from '../utils/formulaScreen'
+
+const DISCOVERY_APPLY_KEY = 'indicator-lab.strategy-discovery.apply'
+const DISCOVERY_APPLY_META_KEY = 'indicator-lab.strategy-discovery.apply-meta'
+
+interface AppliedDiscoveryCandidate {
+  candidate_hash: string
+  data_fingerprint: string | null
+  validation_metrics: Record<string, number | string | boolean | null> | null
+}
+
+interface ReplayComparison {
+  candidateHash: string
+  tradeRecords: '一致' | '不一致' | '未提供'
+  performance: '一致' | '不一致' | '未提供'
+  dataFingerprint: '一致' | '不一致' | '未提供'
+}
 
 const INSTRUMENT_TYPE_OPTIONS: { key: InstrumentType; label: string }[] = [
   { key: 'stock', label: '股票/B股' },
@@ -43,6 +60,8 @@ interface PortfolioFormState {
   buyRule: RuleGroupPayload
   universe: Universe
   universeFile: string
+  instrumentTypes: InstrumentType[]
+  boards: InstrumentBoard[]
   rankingValue: string
   rankOrder: 'asc' | 'desc'
   maxPositions: number
@@ -52,9 +71,21 @@ interface PortfolioFormState {
   formulaParameters: Record<string, number>
   sellRule: RuleGroupPayload
   stopLossEnabled: boolean
+  stopLossMode: 'pct' | 'atr'
   stopLossPct: number
+  stopLossAtrMultiplier: number
+  stopLossCooldownDays: number
   takeProfitEnabled: boolean
+  takeProfitMode: 'pct' | 'atr'
   takeProfitPct: number
+  takeProfitAtrMultiplier: number
+  takeProfitCooldownDays: number
+  trailingStopEnabled: boolean
+  trailingStopMode: 'pct' | 'atr'
+  trailingStopPct: number
+  trailingStopAtrMultiplier: number
+  trailingStopCooldownDays: number
+  atrPeriod: number
   startDate: string
   endDate: string
   initialCash: number
@@ -87,14 +118,26 @@ const form = reactive<PortfolioFormState>({
   formulaParameters: {},
   sellRule: { signals: [], conditions: [], combine_mode: 'any', minimum_matches: null },
   stopLossEnabled: true,
+  stopLossMode: 'pct',
   stopLossPct: 8,
+  stopLossAtrMultiplier: 2,
+  stopLossCooldownDays: 0,
   takeProfitEnabled: false,
+  takeProfitMode: 'pct',
   takeProfitPct: 20,
+  takeProfitAtrMultiplier: 3,
+  takeProfitCooldownDays: 0,
+  trailingStopEnabled: false,
+  trailingStopMode: 'pct',
+  trailingStopPct: 5,
+  trailingStopAtrMultiplier: 2,
+  trailingStopCooldownDays: 0,
+  atrPeriod: 14,
   startDate: '',
   endDate: '',
   initialCash: 1_000_000,
-  commission: 0.0003,
-  minCommission: 5,
+  commission: 0.0001,
+  minCommission: 0.1,
   stampTax: 0.001,
   slippage: 0,
   fitnessFilterEnabled: false,
@@ -110,6 +153,8 @@ const customParseError = ref('')
 const showAdvanced = ref(false)
 const job = ref<PortfolioBacktestJobState | null>(null)
 const result = ref<PortfolioBacktestResult | null>(null)
+const appliedDiscoveryCandidate = ref<AppliedDiscoveryCandidate | null>(null)
+const replayComparison = ref<ReplayComparison | null>(null)
 
 const presetSignals = computed<SignalDefinition[]>(() => (
   metadata.value?.indicators.flatMap((indicator) => indicator.signals) ?? []
@@ -284,11 +329,30 @@ function validate(): Record<string, string> {
   if (!Number.isFinite(form.maxPositions) || !Number.isInteger(form.maxPositions) || form.maxPositions < 1 || form.maxPositions > 100) {
     next.maxPositions = '持仓槽位必须是 1 到 100 的整数。'
   }
-  if (!sellRule.signals.length && !sellRule.conditions.length && !form.stopLossEnabled && !form.takeProfitEnabled) {
+  if (!sellRule.signals.length && !sellRule.conditions.length && !form.stopLossEnabled && !form.takeProfitEnabled && !form.trailingStopEnabled) {
     next.sellRules = '至少配置一个卖出规则。'
   }
-  if (form.stopLossEnabled && (!Number.isFinite(form.stopLossPct) || form.stopLossPct <= 0)) next.stopLossPct = '止损比例必须大于 0。'
-  if (form.takeProfitEnabled && (!Number.isFinite(form.takeProfitPct) || form.takeProfitPct <= 0)) next.takeProfitPct = '止盈比例必须大于 0。'
+  const riskFields: Array<{
+    enabled: boolean
+    mode: 'pct' | 'atr'
+    pct: number
+    atr: number
+    cooldown: number
+    pctKey: string
+    atrKey: string
+    cooldownKey: string
+    label: string
+  }> = [
+    { enabled: form.stopLossEnabled, mode: form.stopLossMode, pct: form.stopLossPct, atr: form.stopLossAtrMultiplier, cooldown: form.stopLossCooldownDays, pctKey: 'stopLossPct', atrKey: 'stopLossAtrMultiplier', cooldownKey: 'stopLossCooldownDays', label: '止损' },
+    { enabled: form.takeProfitEnabled, mode: form.takeProfitMode, pct: form.takeProfitPct, atr: form.takeProfitAtrMultiplier, cooldown: form.takeProfitCooldownDays, pctKey: 'takeProfitPct', atrKey: 'takeProfitAtrMultiplier', cooldownKey: 'takeProfitCooldownDays', label: '止盈' },
+    { enabled: form.trailingStopEnabled, mode: form.trailingStopMode, pct: form.trailingStopPct, atr: form.trailingStopAtrMultiplier, cooldown: form.trailingStopCooldownDays, pctKey: 'trailingStopPct', atrKey: 'trailingStopAtrMultiplier', cooldownKey: 'trailingStopCooldownDays', label: '移动止盈' },
+  ]
+  for (const field of riskFields) {
+    if (!field.enabled) continue
+    if (field.mode === 'pct' && (!Number.isFinite(field.pct) || field.pct <= 0)) next[field.pctKey] = `${field.label}比例必须大于 0。`
+    if (field.mode === 'atr' && (!Number.isFinite(field.atr) || field.atr <= 0)) next[field.atrKey] = `${field.label} ATR 倍数必须大于 0。`
+    if (!Number.isInteger(field.cooldown) || field.cooldown < 0 || field.cooldown > 10000) next[field.cooldownKey] = `${field.label}冷却天数必须是 0 到 10000 的整数。`
+  }
   if (!Number.isFinite(form.initialCash) || form.initialCash <= 0) next.initialCash = '初始资金必须大于 0。'
   if (form.fitnessFilterEnabled) {
     if (!Number.isFinite(form.fitnessMinScore) || form.fitnessMinScore < 0 || form.fitnessMinScore > 100) next.fitnessMinScore = '适配分阈值必须在 0 到 100 之间。'
@@ -317,8 +381,19 @@ function buildPayload(): PortfolioBacktestPayload {
     formula_text: form.mode === 'custom' ? form.formulaText.trim() : null,
     formula_parameters: form.mode === 'custom' ? { ...form.formulaParameters } : {},
     sell_signal: null,
-    stop_loss_pct: form.stopLossEnabled ? form.stopLossPct / 100 : null,
-    take_profit_pct: form.takeProfitEnabled ? form.takeProfitPct / 100 : null,
+    stop_loss_mode: form.stopLossEnabled ? form.stopLossMode : 'pct',
+    stop_loss_pct: form.stopLossEnabled && form.stopLossMode === 'pct' ? form.stopLossPct / 100 : null,
+    stop_loss_atr_multiplier: form.stopLossEnabled && form.stopLossMode === 'atr' ? form.stopLossAtrMultiplier : null,
+    stop_loss_cooldown_days: form.stopLossEnabled ? form.stopLossCooldownDays : 0,
+    take_profit_mode: form.takeProfitEnabled ? form.takeProfitMode : 'pct',
+    take_profit_pct: form.takeProfitEnabled && form.takeProfitMode === 'pct' ? form.takeProfitPct / 100 : null,
+    take_profit_atr_multiplier: form.takeProfitEnabled && form.takeProfitMode === 'atr' ? form.takeProfitAtrMultiplier : null,
+    take_profit_cooldown_days: form.takeProfitEnabled ? form.takeProfitCooldownDays : 0,
+    trailing_stop_mode: form.trailingStopEnabled ? form.trailingStopMode : 'pct',
+    trailing_stop_pct: form.trailingStopEnabled && form.trailingStopMode === 'pct' ? form.trailingStopPct / 100 : null,
+    trailing_stop_atr_multiplier: form.trailingStopEnabled && form.trailingStopMode === 'atr' ? form.trailingStopAtrMultiplier : null,
+    trailing_stop_cooldown_days: form.trailingStopEnabled ? form.trailingStopCooldownDays : 0,
+    atr_period: form.atrPeriod,
     sell_value: null,
     sell_value_operator: null,
     sell_value_threshold: null,
@@ -346,6 +421,155 @@ function apiMessage(error: unknown): string {
   return '组合回测失败，请检查本地 DuckDB 数据和配置后重试。'
 }
 
+function finiteNumber(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+function enumValue<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
+  return typeof value === 'string' && allowed.includes(value as T) ? value as T : fallback
+}
+
+function storedRule(value: unknown): RuleGroupPayload | null {
+  if (!value || typeof value !== 'object') return null
+  const raw = value as Record<string, unknown>
+  const rawConditions = Array.isArray(raw.conditions) ? raw.conditions : []
+  const conditions = rawConditions.flatMap((item) => {
+    if (!item || typeof item !== 'object') return []
+    const condition = item as Record<string, unknown>
+    const leftValue = typeof condition.left_value === 'string' ? condition.left_value.trim() : ''
+    const operator = enumValue(condition.operator, ['gt', 'gte', 'lt', 'lte', 'eq', 'neq', 'cross_up', 'cross_down'] as const, 'gt')
+    const rightValue = typeof condition.right_value === 'string' && condition.right_value.trim()
+      ? condition.right_value.trim()
+      : null
+    const rightConstant = typeof condition.right_constant === 'number' && Number.isFinite(condition.right_constant)
+      ? condition.right_constant
+      : null
+    if (!leftValue || (rightValue === null && rightConstant === null) || (rightValue !== null && rightConstant !== null)) return []
+    return [{ left_value: leftValue, operator, right_value: rightValue, right_constant: rightConstant }]
+  })
+  const signals = Array.isArray(raw.signals)
+    ? raw.signals.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+    : []
+  if (!signals.length && !conditions.length) return null
+  const combineMode = enumValue(raw.combine_mode, ['all', 'any', 'at_least'] as const, 'all')
+  const minimumMatches = combineMode === 'at_least'
+    ? Math.min(Math.max(Math.trunc(finiteNumber(raw.minimum_matches, 1)), 1), signals.length + conditions.length)
+    : null
+  return { signals, conditions, combine_mode: combineMode, minimum_matches: minimumMatches }
+}
+
+function applyStoredCandidate(raw: unknown): void {
+  if (!raw || typeof raw !== 'object') return
+  const config = raw as Record<string, unknown>
+  const universe = enumValue(config.universe, ['all', 'sh', 'sz', 'custom'] as const, form.universe)
+  form.universe = universe
+  form.universeFile = typeof config.universe_file === 'string' ? config.universe_file : ''
+  form.instrumentTypes = Array.isArray(config.instrument_types)
+    ? config.instrument_types.filter((item): item is InstrumentType => INSTRUMENT_TYPE_OPTIONS.some((option) => option.key === item))
+    : []
+  form.boards = Array.isArray(config.boards)
+    ? config.boards.filter((item): item is InstrumentBoard => BOARD_OPTIONS.some((option) => option.key === item))
+    : []
+  form.startDate = typeof config.start_date === 'string' ? config.start_date : form.startDate
+  form.endDate = typeof config.end_date === 'string' ? config.end_date : form.endDate
+  const maxPositions = finiteNumber(config.max_positions, form.maxPositions)
+  if (Number.isInteger(maxPositions) && maxPositions >= 1 && maxPositions <= 100) form.maxPositions = maxPositions
+  if (typeof config.ranking_value === 'string' && config.ranking_value.trim()) form.rankingValue = config.ranking_value
+  form.rankOrder = enumValue(config.rank_order, ['asc', 'desc'] as const, form.rankOrder)
+  form.rebalanceFrequency = enumValue(config.rebalance_frequency, ['daily', 'weekly', 'monthly'] as const, form.rebalanceFrequency)
+  const buyRule = storedRule(config.buy_rule)
+  const sellRule = storedRule(config.sell_rule)
+  if (buyRule) form.buyRule = buyRule
+  if (sellRule) form.sellRule = sellRule
+
+  const applyRisk = (prefix: 'stop_loss' | 'take_profit' | 'trailing_stop', enabledKey: 'stopLossEnabled' | 'takeProfitEnabled' | 'trailingStopEnabled', modeKey: 'stopLossMode' | 'takeProfitMode' | 'trailingStopMode', pctKey: 'stopLossPct' | 'takeProfitPct' | 'trailingStopPct', atrKey: 'stopLossAtrMultiplier' | 'takeProfitAtrMultiplier' | 'trailingStopAtrMultiplier', cooldownKey: 'stopLossCooldownDays' | 'takeProfitCooldownDays' | 'trailingStopCooldownDays'): void => {
+    const pct = finiteNumber(config[`${prefix}_pct`], NaN)
+    const atr = finiteNumber(config[`${prefix}_atr_multiplier`], NaN)
+    const mode = enumValue(config[`${prefix}_mode`], ['pct', 'atr'] as const, Number.isFinite(atr) ? 'atr' : 'pct')
+    form[modeKey] = mode
+    form[pctKey] = Number.isFinite(pct) ? pct * 100 : form[pctKey]
+    form[atrKey] = Number.isFinite(atr) ? atr : form[atrKey]
+    form[cooldownKey] = Math.max(0, Math.trunc(finiteNumber(config[`${prefix}_cooldown_days`], 0)))
+    form[enabledKey] = Number.isFinite(pct) || Number.isFinite(atr)
+  }
+  applyRisk('stop_loss', 'stopLossEnabled', 'stopLossMode', 'stopLossPct', 'stopLossAtrMultiplier', 'stopLossCooldownDays')
+  applyRisk('take_profit', 'takeProfitEnabled', 'takeProfitMode', 'takeProfitPct', 'takeProfitAtrMultiplier', 'takeProfitCooldownDays')
+  applyRisk('trailing_stop', 'trailingStopEnabled', 'trailingStopMode', 'trailingStopPct', 'trailingStopAtrMultiplier', 'trailingStopCooldownDays')
+  form.atrPeriod = 14
+  form.initialCash = finiteNumber(config.initial_cash, form.initialCash)
+  form.commission = finiteNumber(config.commission, form.commission)
+  form.minCommission = finiteNumber(config.min_commission, form.minCommission)
+  form.stampTax = finiteNumber(config.stamp_tax, form.stampTax)
+  form.slippage = finiteNumber(config.slippage, form.slippage)
+  form.execution = enumValue(config.execution, ['next_open', 'next_close'] as const, form.execution)
+  errors.value = {}
+  message.value = '已载入策略实验室候选配置，请确认后开始普通组合回测。'
+}
+
+function readAppliedDiscoveryMeta(raw: unknown): AppliedDiscoveryCandidate | null {
+  if (!raw || typeof raw !== 'object') return null
+  const value = raw as Record<string, unknown>
+  if (typeof value.candidate_hash !== 'string' || !value.candidate_hash) return null
+  const metrics = value.validation_metrics
+  return {
+    candidate_hash: value.candidate_hash,
+    data_fingerprint: typeof value.data_fingerprint === 'string' ? value.data_fingerprint : null,
+    validation_metrics: metrics && typeof metrics === 'object'
+      ? metrics as Record<string, number | string | boolean | null>
+      : null,
+  }
+}
+
+const TRADE_FINGERPRINT_FIELDS = [
+  'board', 'code', 'commission', 'cooldown_days', 'cost_basis', 'date', 'direction', 'instrument_type', 'market', 'pnl', 'price',
+  'reason', 'risk_trigger', 'signal_date', 'size', 'slippage', 'stamp_tax',
+] as const
+
+async function tradeFingerprint(trades: PortfolioTrade[]): Promise<string | null> {
+  if (!globalThis.crypto?.subtle) return null
+  const rows = trades.map((trade) => {
+    const source = trade as unknown as Record<string, unknown>
+    const row: Record<string, string | null> = {}
+    for (const field of TRADE_FINGERPRINT_FIELDS) {
+      const value = source[field]
+      row[field] = value === null || value === undefined
+        ? null
+        : typeof value === 'number'
+          ? Number.isFinite(value) ? String(value) : null
+          : String(value)
+    }
+    return row
+  })
+  const bytes = new TextEncoder().encode(JSON.stringify(rows))
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes)
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+async function compareAppliedCandidate(backtest: PortfolioBacktestResult): Promise<void> {
+  const applied = appliedDiscoveryCandidate.value
+  if (!applied) return
+  const expected = applied.validation_metrics
+  const metricKeys = ['total_return', 'annual_return', 'sharpe', 'max_drawdown', 'total_trades', 'win_rate']
+  const comparable = metricKeys.filter((key) => typeof expected?.[key] === 'number' && typeof backtest.performance[key] === 'number')
+  const performanceMatches = comparable.length > 0 && comparable.every((key) => {
+    const expectedValue = expected?.[key]
+    const actualValue = backtest.performance[key]
+    return typeof expectedValue === 'number' && typeof actualValue === 'number'
+      && Math.abs(expectedValue - actualValue) <= 1e-9
+  })
+  const actualTradeFingerprint = await tradeFingerprint(backtest.trades)
+  replayComparison.value = {
+    candidateHash: applied.candidate_hash,
+    tradeRecords: applied.validation_metrics?.trade_fingerprint && actualTradeFingerprint
+      ? applied.validation_metrics.trade_fingerprint === actualTradeFingerprint ? '一致' : '不一致'
+      : '未提供',
+    performance: performanceMatches ? '一致' : comparable.length ? '不一致' : '未提供',
+    dataFingerprint: applied.data_fingerprint && backtest.data_fingerprint
+      ? applied.data_fingerprint === backtest.data_fingerprint ? '一致' : '不一致'
+      : '未提供',
+  }
+}
+
 async function submit(): Promise<void> {
   errors.value = validate()
   message.value = ''
@@ -369,6 +593,7 @@ async function submit(): Promise<void> {
       job.value = state
       if (state.status === 'completed') {
         result.value = await getPortfolioBacktestResults(created.job_id)
+        await compareAppliedCandidate(result.value)
         message.value = `组合回测完成：${result.value.trades.length} 笔成交，区间 ${result.value.start_date} 至 ${result.value.end_date}。`
         return
       }
@@ -419,6 +644,22 @@ onMounted(async () => {
   try {
     metadata.value = await fetchMetadata()
     resetPresetDefaults()
+    const stored = sessionStorage.getItem(DISCOVERY_APPLY_KEY)
+    if (stored) {
+      try {
+        applyStoredCandidate(JSON.parse(stored) as unknown)
+      } finally {
+        sessionStorage.removeItem(DISCOVERY_APPLY_KEY)
+      }
+    }
+    const storedMeta = sessionStorage.getItem(DISCOVERY_APPLY_META_KEY)
+    if (storedMeta) {
+      try {
+        appliedDiscoveryCandidate.value = readAppliedDiscoveryMeta(JSON.parse(storedMeta) as unknown)
+      } finally {
+        sessionStorage.removeItem(DISCOVERY_APPLY_META_KEY)
+      }
+    }
   } catch (error) {
     message.value = apiMessage(error)
   }
@@ -447,6 +688,7 @@ watch(() => form.formulaText, (value) => {
         <a class="nav-link" href="/indicator-lab">公式选股</a>
         <a class="nav-link" href="/backtest">单股回测</a>
         <a class="nav-link active" href="/portfolio-backtest" aria-current="page">组合回测</a>
+        <a class="nav-link" href="/strategy-lab">策略实验室</a>
         <a class="nav-link" href="/strategy-fitness">策略适配性</a>
         <a class="nav-link" href="/market-data">本地行情</a>
       </nav>
@@ -553,12 +795,32 @@ watch(() => form.formulaText, (value) => {
               testid="portfolio-sell-rule"
               @update:model-value="setSellRule"
             />
-            <div class="rule-toggle"><label><input v-model="form.stopLossEnabled" data-testid="portfolio-stop-loss-enabled" type="checkbox"><span>止损</span></label><input v-model.number="form.stopLossPct" data-testid="portfolio-stop-loss" type="number" min="0.01" max="100" step="0.5" aria-label="止损百分比"><span>%</span></div>
-            <div class="rule-toggle"><label><input v-model="form.takeProfitEnabled" data-testid="portfolio-take-profit-enabled" type="checkbox"><span>止盈</span></label><input v-model.number="form.takeProfitPct" data-testid="portfolio-take-profit" type="number" min="0.01" max="1000" step="0.5" aria-label="止盈百分比"><span>%</span></div>
+            <div class="risk-control" data-testid="portfolio-stop-loss-control">
+              <label class="risk-toggle"><input v-model="form.stopLossEnabled" data-testid="portfolio-stop-loss-enabled" type="checkbox"><span>止损</span></label>
+              <select v-model="form.stopLossMode" data-testid="portfolio-stop-loss-mode" :disabled="!form.stopLossEnabled"><option value="pct">百分比</option><option value="atr">ATR ×</option></select>
+              <input v-if="form.stopLossMode === 'pct'" v-model.number="form.stopLossPct" data-testid="portfolio-stop-loss" type="number" min="0.01" max="100" step="0.5" aria-label="止损百分比" :disabled="!form.stopLossEnabled"><input v-else v-model.number="form.stopLossAtrMultiplier" data-testid="portfolio-stop-loss-atr" type="number" min="0.01" max="100" step="0.1" aria-label="止损 ATR 倍数" :disabled="!form.stopLossEnabled">
+              <span>{{ form.stopLossMode === 'pct' ? '%' : '倍' }}</span>
+              <label class="cooldown-field">冷却 <input v-model.number="form.stopLossCooldownDays" data-testid="portfolio-stop-loss-cooldown" type="number" min="0" max="10000" step="1" :disabled="!form.stopLossEnabled"> <span>交易日</span></label>
+            </div>
+            <div class="risk-control" data-testid="portfolio-take-profit-control">
+              <label class="risk-toggle"><input v-model="form.takeProfitEnabled" data-testid="portfolio-take-profit-enabled" type="checkbox"><span>止盈</span></label>
+              <select v-model="form.takeProfitMode" data-testid="portfolio-take-profit-mode" :disabled="!form.takeProfitEnabled"><option value="pct">百分比</option><option value="atr">ATR ×</option></select>
+              <input v-if="form.takeProfitMode === 'pct'" v-model.number="form.takeProfitPct" data-testid="portfolio-take-profit" type="number" min="0.01" max="1000" step="0.5" aria-label="止盈百分比" :disabled="!form.takeProfitEnabled"><input v-else v-model.number="form.takeProfitAtrMultiplier" data-testid="portfolio-take-profit-atr" type="number" min="0.01" max="100" step="0.1" aria-label="止盈 ATR 倍数" :disabled="!form.takeProfitEnabled">
+              <span>{{ form.takeProfitMode === 'pct' ? '%' : '倍' }}</span>
+              <label class="cooldown-field">冷却 <input v-model.number="form.takeProfitCooldownDays" data-testid="portfolio-take-profit-cooldown" type="number" min="0" max="10000" step="1" :disabled="!form.takeProfitEnabled"> <span>交易日</span></label>
+            </div>
+            <div class="risk-control" data-testid="portfolio-trailing-stop-control">
+              <label class="risk-toggle"><input v-model="form.trailingStopEnabled" data-testid="portfolio-trailing-stop-enabled" type="checkbox"><span>移动止盈</span></label>
+              <select v-model="form.trailingStopMode" data-testid="portfolio-trailing-stop-mode" :disabled="!form.trailingStopEnabled"><option value="pct">百分比</option><option value="atr">ATR ×</option></select>
+              <input v-if="form.trailingStopMode === 'pct'" v-model.number="form.trailingStopPct" data-testid="portfolio-trailing-stop" type="number" min="0.01" max="100" step="0.5" aria-label="移动止盈百分比" :disabled="!form.trailingStopEnabled"><input v-else v-model.number="form.trailingStopAtrMultiplier" data-testid="portfolio-trailing-stop-atr" type="number" min="0.01" max="100" step="0.1" aria-label="移动止盈 ATR 倍数" :disabled="!form.trailingStopEnabled">
+              <span>{{ form.trailingStopMode === 'pct' ? '%' : '倍' }}</span>
+              <label class="cooldown-field">冷却 <input v-model.number="form.trailingStopCooldownDays" data-testid="portfolio-trailing-stop-cooldown" type="number" min="0" max="10000" step="1" :disabled="!form.trailingStopEnabled"> <span>交易日</span></label>
+            </div>
             <p v-if="errors.sellRules" class="field-error">{{ errors.sellRules }}</p>
-            <p v-if="errors.stopLossPct" class="field-error">{{ errors.stopLossPct }}</p>
-            <p v-if="errors.takeProfitPct" class="field-error">{{ errors.takeProfitPct }}</p>
-            <p class="helper">规则条件在收盘确认，默认下一根 K 线执行；止损和止盈作为独立的风险控制。</p>
+            <p v-if="errors.stopLossPct || errors.stopLossAtrMultiplier || errors.stopLossCooldownDays" class="field-error">{{ errors.stopLossPct || errors.stopLossAtrMultiplier || errors.stopLossCooldownDays }}</p>
+            <p v-if="errors.takeProfitPct || errors.takeProfitAtrMultiplier || errors.takeProfitCooldownDays" class="field-error">{{ errors.takeProfitPct || errors.takeProfitAtrMultiplier || errors.takeProfitCooldownDays }}</p>
+            <p v-if="errors.trailingStopPct || errors.trailingStopAtrMultiplier || errors.trailingStopCooldownDays" class="field-error">{{ errors.trailingStopPct || errors.trailingStopAtrMultiplier || errors.trailingStopCooldownDays }}</p>
+            <p class="helper">指标规则在收盘确认，默认下一根 K 线执行；风险控制按当日最高/最低价触发，ATR 周期固定为 {{ form.atrPeriod }}，各类冷却独立计算。</p>
           </fieldset>
 
           <button class="advanced-toggle" data-testid="portfolio-advanced-toggle" type="button" :aria-expanded="showAdvanced" @click="showAdvanced = !showAdvanced"><span>{{ showAdvanced ? '收起高级设置' : '高级设置' }}</span><small>日期 · 资金 · 费用</small></button>
@@ -580,6 +842,7 @@ watch(() => form.formulaText, (value) => {
           <div v-if="!result" class="empty-state" data-testid="portfolio-empty"><div class="empty-icon" aria-hidden="true">/</div><h3>{{ loading ? '正在运行动态组合回测…' : '还没有组合结果' }}</h3><p>{{ loading ? '正在逐股计算公式并模拟槽位补位，完成后显示净值与候选排名。' : '配置买入条件、排序指标和卖出条件后开始回测。' }}</p></div>
           <template v-else>
             <div class="backtest-summary"><span class="result-badge">{{ result.universe === 'all' ? '沪深全部品种' : result.universe.toUpperCase() }}</span><span>{{ result.start_date }} → {{ result.end_date }}</span><span>{{ result.bars }} 个交易日</span><span>{{ result.processed }} / {{ result.total_candidates }} 个标的已处理</span><span>槽位 {{ result.max_positions }}</span><span>排序：{{ valueName(result.ranking_value) }} · {{ result.rank_order === 'desc' ? '高到低' : '低到高' }}</span><span v-if="result.fitness_filter_enabled" class="result-badge">适配分 ≥ {{ result.fitness_min_score }}</span></div>
+            <div v-if="replayComparison" class="replay-comparison" data-testid="portfolio-replay-comparison"><strong>候选复核 {{ replayComparison.candidateHash.slice(0, 12) }}</strong><span>成交记录：{{ replayComparison.tradeRecords }}</span><span>绩效摘要：{{ replayComparison.performance }}</span><span>数据指纹：{{ replayComparison.dataFingerprint }}</span></div>
             <div class="metrics-strip portfolio-metrics">
               <div><span>总收益</span><strong :class="{ positive: (performanceValue('total_return') ?? 0) >= 0, negative: (performanceValue('total_return') ?? 0) < 0 }" data-testid="portfolio-total-return">{{ formatPercent(performanceValue('total_return')) }}</strong></div>
               <div><span>最大回撤</span><strong class="negative">{{ formatPercent(performanceValue('max_drawdown')) }}</strong></div>

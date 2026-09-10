@@ -68,7 +68,10 @@ class _StockSeries:
     board: InstrumentBoard
     dates: np.ndarray
     opens: np.ndarray
+    highs: np.ndarray
+    lows: np.ndarray
     closes: np.ndarray
+    atrs: np.ndarray
     buy_mask: np.ndarray
     sell_mask: np.ndarray
     signals: Mapping[str, np.ndarray]
@@ -90,6 +93,7 @@ class _Position:
     size: float
     entry_price: float
     entry_date: int
+    highest_price: float
     buy_commission: float
     buy_slippage: float
 
@@ -332,7 +336,10 @@ class PortfolioBacktestService:
             ),
             dates=dates,
             opens=window["open"].to_numpy(dtype=float, copy=True),
+            highs=window["high"].to_numpy(dtype=float, copy=True),
+            lows=window["low"].to_numpy(dtype=float, copy=True),
             closes=window["close"].to_numpy(dtype=float, copy=True),
+            atrs=_atr_series(frame, config.atr_period)[indices].copy(),
             buy_mask=np.asarray(buy_mask, dtype=bool),
             sell_mask=np.asarray(sell_mask, dtype=bool),
             signals=signal_arrays,
@@ -500,6 +507,7 @@ class PortfolioBacktestService:
         positions: dict[str, _Position] = {}
         pending_sells: dict[str, _PendingSell] = {}
         pending_buys: list[_PendingBuy] = []
+        cooldown_until: dict[str, int] = {}
         last_prices: dict[str, float] = {}
         cash = config.initial_cash
         trades: list[dict[str, PortfolioJsonValue]] = []
@@ -518,6 +526,17 @@ class PortfolioBacktestService:
                 config,
                 trades,
             )
+            cash = self._execute_risk_sells(
+                date_index,
+                current_date,
+                positions,
+                pending_sells,
+                by_symbol,
+                cash,
+                config,
+                cooldown_until,
+                trades,
+            )
             cash = self._execute_buys(
                 current_date,
                 positions,
@@ -526,6 +545,8 @@ class PortfolioBacktestService:
                 by_symbol,
                 cash,
                 config,
+                cooldown_until,
+                date_index,
                 trades,
             )
             pending_buys = [
@@ -533,6 +554,7 @@ class PortfolioBacktestService:
                 for pending in pending_buys
                 if pending.symbol not in positions
                 and pending.symbol not in pending_sells
+                and date_index >= cooldown_until.get(pending.symbol, -1)
                 and pending.signal_date >= current_date
             ]
             for context in contexts:
@@ -573,6 +595,8 @@ class PortfolioBacktestService:
                     total_value,
                     config,
                     fitness_filter,
+                    cooldown_until,
+                    date_index,
                 )
                 ranking_events.append(event)
 
@@ -649,6 +673,83 @@ class PortfolioBacktestService:
             pending_sells.pop(symbol, None)
         return cash
 
+    def _execute_risk_sells(
+        self,
+        date_index: int,
+        current_date: int,
+        positions: dict[str, _Position],
+        pending_sells: Mapping[str, _PendingSell],
+        by_symbol: Mapping[str, _StockSeries],
+        cash: float,
+        config: PortfolioBacktestConfig,
+        cooldown_until: dict[str, int],
+        trades: list[dict[str, PortfolioJsonValue]],
+    ) -> float:
+        """Execute OHLC-based risk exits on the trigger bar itself."""
+
+        for symbol in sorted(list(positions)):
+            if symbol in pending_sells:
+                continue
+            position = positions.get(symbol)
+            context = by_symbol[symbol]
+            index = context.date_to_index.get(current_date)
+            if position is None or index is None:
+                continue
+            trigger = _risk_trigger(context, index, position, config)
+            if trigger is None:
+                continue
+            trigger_name, trigger_price, cooldown_days = trigger
+            price = float(trigger_price)
+            size = position.size
+            profile = profile_from_config(
+                position.instrument_type,
+                commission=config.commission,
+                min_commission=config.min_commission,
+                stamp_tax=config.stamp_tax,
+            )
+            commission = max(size * price * profile.commission, profile.min_commission)
+            stamp_tax = size * price * profile.stamp_tax
+            slippage = size * config.slippage
+            proceeds = size * price - commission - stamp_tax - slippage
+            cash += proceeds
+            trades.append(
+                {
+                    "date": _date_text(current_date),
+                    "signal_date": _date_text(current_date),
+                    "market": position.market,
+                    "code": position.code,
+                    "instrument_type": position.instrument_type,
+                    "board": position.board,
+                    "direction": "SELL",
+                    "size": float(size),
+                    "price": price,
+                    "commission": float(commission),
+                    "stamp_tax": float(stamp_tax),
+                    "slippage": float(slippage),
+                    "pnl": float(
+                        (price - position.entry_price) * size
+                        - position.buy_commission
+                        - position.buy_slippage
+                        - commission
+                        - stamp_tax
+                        - slippage
+                    ),
+                    "cost_basis": float(
+                        position.entry_price * size
+                        + position.buy_commission
+                        + position.buy_slippage
+                    ),
+                    "reason": _risk_trigger_label(trigger_name),
+                    "risk_trigger": trigger_name,
+                    "cooldown_days": cooldown_days,
+                    "rejected": False,
+                }
+            )
+            positions.pop(symbol, None)
+            if cooldown_days > 0:
+                cooldown_until[symbol] = date_index + cooldown_days + 1
+        return cash
+
     def _execute_buys(
         self,
         current_date: int,
@@ -658,12 +759,16 @@ class PortfolioBacktestService:
         by_symbol: Mapping[str, _StockSeries],
         cash: float,
         config: PortfolioBacktestConfig,
+        cooldown_until: Mapping[str, int],
+        date_index: int,
         trades: list[dict[str, PortfolioJsonValue]],
     ) -> float:
         for pending in pending_buys:
             if len(positions) >= config.max_positions:
                 break
             if pending.symbol in positions or pending.symbol in pending_sells:
+                continue
+            if date_index < cooldown_until.get(pending.symbol, -1):
                 continue
             context = by_symbol[pending.symbol]
             index = context.date_to_index.get(current_date)
@@ -695,6 +800,7 @@ class PortfolioBacktestService:
                 size=float(shares),
                 entry_price=float(price),
                 entry_date=current_date,
+                highest_price=float(price),
                 buy_commission=float(commission),
                 buy_slippage=float(slippage),
             )
@@ -776,12 +882,6 @@ class PortfolioBacktestService:
         config: PortfolioBacktestConfig,
     ) -> list[str]:
         reasons: list[str] = []
-        close = float(context.closes[index])
-        return_pct = close / position.entry_price - 1 if position.entry_price else 0.0
-        if config.stop_loss_pct is not None and return_pct <= -config.stop_loss_pct:
-            reasons.append(f"止损 {return_pct:.2%}")
-        if config.take_profit_pct is not None and return_pct >= config.take_profit_pct:
-            reasons.append(f"止盈 {return_pct:.2%}")
         if bool(context.sell_mask[index]):
             reasons.append("卖出条件")
         return reasons
@@ -797,12 +897,16 @@ class PortfolioBacktestService:
         total_value: float,
         config: PortfolioBacktestConfig,
         fitness_filter: RollingFitnessFilter | None,
+        cooldown_until: Mapping[str, int],
+        date_index: int,
     ) -> tuple[list[_PendingBuy], dict[str, PortfolioJsonValue]]:
         excluded = set(positions) | set(pending_sells)
         candidates: list[tuple[float, _StockSeries]] = []
         ranked_candidates: list[tuple[float, _StockSeries, RollingFitnessDecision | None]] = []
         for context in by_symbol.values():
             if context.symbol in excluded:
+                continue
+            if date_index < cooldown_until.get(context.symbol, -1):
                 continue
             index = context.date_to_index.get(current_date)
             if index is None:
@@ -1017,6 +1121,7 @@ class PortfolioBacktestService:
             failure_reasons=failure_reasons,
             diagnostic=diagnostic,
             data_fingerprint=data_fingerprint,
+            risk_controls=_risk_controls(config),
         )
 
     @staticmethod
@@ -1048,6 +1153,7 @@ class PortfolioBacktestService:
             ranking_events=(),
             failure_reasons=failure_reasons,
             diagnostic="没有可用于回测的股票数据",
+            risk_controls=_risk_controls(config),
         )
 
 
@@ -1069,6 +1175,138 @@ def _date_int(value: str) -> int:
 def _finite_number(value: object) -> float | None:
     number = float(cast(float, value))
     return number if np.isfinite(number) else None
+
+
+def _atr_series(frame: pd.DataFrame, period: int) -> np.ndarray:
+    """Calculate a causal ATR series from daily OHLC data."""
+
+    high = pd.to_numeric(frame["high"], errors="coerce")
+    low = pd.to_numeric(frame["low"], errors="coerce")
+    close = pd.to_numeric(frame["close"], errors="coerce")
+    previous_close = close.shift(1)
+    true_range = pd.concat(
+        [high - low, (high - previous_close).abs(), (low - previous_close).abs()],
+        axis=1,
+    ).max(axis=1)
+    return np.asarray(
+        true_range.rolling(period, min_periods=period).mean().to_numpy(dtype=float),
+        dtype=float,
+    )
+
+
+def _risk_trigger(
+    context: _StockSeries,
+    index: int,
+    position: _Position,
+    config: PortfolioBacktestConfig,
+) -> tuple[str, float, int] | None:
+    """Return the first OHLC risk trigger using deterministic priority."""
+
+    high = float(context.highs[index])
+    low = float(context.lows[index])
+    open_price = float(context.opens[index])
+    if not (np.isfinite(high) and np.isfinite(low) and np.isfinite(open_price)):
+        return None
+    position.highest_price = max(position.highest_price, high)
+    atr = float(context.atrs[index]) if np.isfinite(context.atrs[index]) else None
+
+    stop_level = _risk_level(
+        position.entry_price,
+        config.stop_loss_mode,
+        config.stop_loss_pct,
+        config.stop_loss_atr_multiplier,
+        atr,
+        direction="down",
+    )
+    if stop_level is not None and low <= stop_level:
+        return (
+            "stop_loss",
+            _risk_fill_price(open_price, stop_level, direction="down"),
+            config.stop_loss_cooldown_days,
+        )
+
+    trailing_level = _risk_level(
+        position.highest_price,
+        config.trailing_stop_mode,
+        config.trailing_stop_pct,
+        config.trailing_stop_atr_multiplier,
+        atr,
+        direction="down",
+    )
+    if trailing_level is not None and low <= trailing_level:
+        return (
+            "trailing_stop",
+            _risk_fill_price(open_price, trailing_level, direction="down"),
+            config.trailing_stop_cooldown_days,
+        )
+
+    take_level = _risk_level(
+        position.entry_price,
+        config.take_profit_mode,
+        config.take_profit_pct,
+        config.take_profit_atr_multiplier,
+        atr,
+        direction="up",
+    )
+    if take_level is not None and high >= take_level:
+        return (
+            "take_profit",
+            _risk_fill_price(open_price, take_level, direction="up"),
+            config.take_profit_cooldown_days,
+        )
+    return None
+
+
+def _risk_level(
+    base: float,
+    mode: str,
+    percentage: float | None,
+    atr_multiplier: float | None,
+    atr: float | None,
+    *,
+    direction: str,
+) -> float | None:
+    if mode == "atr":
+        if atr_multiplier is None or atr is None:
+            return None
+        distance = atr * atr_multiplier
+    else:
+        if percentage is None:
+            return None
+        distance = base * percentage
+    return base - distance if direction == "down" else base + distance
+
+
+def _risk_fill_price(open_price: float, trigger_price: float, *, direction: str) -> float:
+    if direction == "down":
+        return open_price if open_price <= trigger_price else trigger_price
+    return open_price if open_price >= trigger_price else trigger_price
+
+
+def _risk_trigger_label(trigger: str) -> str:
+    return {
+        "stop_loss": "止损",
+        "take_profit": "止盈",
+        "trailing_stop": "移动止盈",
+    }.get(trigger, "风险卖出")
+
+
+def _risk_controls(config: PortfolioBacktestConfig) -> dict[str, object]:
+    return {
+        "take_profit_mode": config.take_profit_mode,
+        "take_profit_pct": config.take_profit_pct,
+        "take_profit_atr_multiplier": config.take_profit_atr_multiplier,
+        "take_profit_cooldown_days": config.take_profit_cooldown_days,
+        "stop_loss_mode": config.stop_loss_mode,
+        "stop_loss_pct": config.stop_loss_pct,
+        "stop_loss_atr_multiplier": config.stop_loss_atr_multiplier,
+        "stop_loss_cooldown_days": config.stop_loss_cooldown_days,
+        "trailing_stop_mode": config.trailing_stop_mode,
+        "trailing_stop_pct": config.trailing_stop_pct,
+        "trailing_stop_atr_multiplier": config.trailing_stop_atr_multiplier,
+        "trailing_stop_cooldown_days": config.trailing_stop_cooldown_days,
+        "atr_period": config.atr_period,
+    }
 
 
 def _average_holding_days(trades: list[dict[str, PortfolioJsonValue]]) -> float:

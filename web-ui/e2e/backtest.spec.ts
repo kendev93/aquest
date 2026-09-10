@@ -24,7 +24,7 @@ const result = {
     { date: '2024-01-06', total: 10400, cash: 10400, position_value: 0, drawdown: 0, drawdown_pct: 0 },
   ],
   trades: [{ date: '2024-01-03', direction: 'BUY', size: 800, price: 12, commission: 0, slippage: 0, pnl: 0, rejected: false }],
-  positions: [], configuration: { initial_cash: 10000, commission: 0.0003, execution: 'next_open', position_mode: 'full', fixed_size: null }, diagnostic: null,
+  positions: [], configuration: { initial_cash: 10000, commission: 0.0001, min_commission: 0.1, execution: 'next_open', position_mode: 'full', fixed_size: null }, diagnostic: null,
 }
 
 test('user can run a formula backtest and inspect the equity curve', async ({ page }) => {

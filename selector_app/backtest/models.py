@@ -36,8 +36,8 @@ class BacktestConfig:
     start_date: date | None = None
     end_date: date | None = None
     initial_cash: float = 100_000.0
-    commission: float = 0.0003
-    min_commission: float = 5.0
+    commission: float = 0.0001
+    min_commission: float = 0.1
     stamp_tax: float = 0.001
     slippage: float = 0.0
     execution: ExecutionMode = "next_open"

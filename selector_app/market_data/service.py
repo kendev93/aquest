@@ -10,10 +10,10 @@ from numbers import Real
 from pathlib import Path
 from typing import Literal, Protocol, cast
 
-import numpy as np
 import pandas as pd
 
 from selector_app.formulas.registry import FORMULA_REGISTRY, value_display_name
+from selector_app.formulas.technical import calculate_technical_indicators
 
 from .adapter import DuckDbMarketDataAdapter
 from .models import InstrumentBoard, MarketCode, StockRef
@@ -285,26 +285,11 @@ def _aggregate(frame: pd.DataFrame, period: ChartPeriod) -> pd.DataFrame:
 
 def _add_indicators(frame: pd.DataFrame) -> pd.DataFrame:
     enriched = frame.copy()
-    close = enriched["close"]
+    result = calculate_technical_indicators(enriched)
     for window in _MA_WINDOWS:
-        enriched[f"ma_{window}"] = close.rolling(window, min_periods=window).mean()
-
-    delta = close.diff()
-    gains = delta.clip(lower=0).ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
-    losses = (-delta.clip(upper=0)).ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
-    relative_strength = gains / losses.replace(0, np.nan)
-    rsi = 100 - (100 / (1 + relative_strength))
-    rsi = rsi.mask(losses.eq(0) & gains.gt(0), 100)
-    rsi = rsi.mask(losses.eq(0) & gains.eq(0), 50)
-    enriched["rsi14"] = rsi
-
-    ema12 = close.ewm(span=12, adjust=False, min_periods=12).mean()
-    ema26 = close.ewm(span=26, adjust=False, min_periods=26).mean()
-    macd = ema12 - ema26
-    macd_signal = macd.ewm(span=9, adjust=False, min_periods=9).mean()
-    enriched["macd"] = macd
-    enriched["macd_signal"] = macd_signal
-    enriched["macd_histogram"] = macd - macd_signal
+        enriched[f"ma_{window}"] = result.values[f"ma{window}"]
+    for value_name in ("rsi14", "macd", "macd_signal", "macd_histogram"):
+        enriched[value_name] = result.values[value_name]
     return enriched
 
 

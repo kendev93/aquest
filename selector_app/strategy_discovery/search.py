@@ -1,0 +1,551 @@
+"""TPE and optional LightGBM-assisted search over valid strategy candidates."""
+
+from __future__ import annotations
+
+import hashlib
+import math
+import os
+import random
+import time
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any
+
+from .candidates import build_random_candidate
+from .models import DiscoveryRequest, StrategyCandidate
+
+BatchEvaluator = Callable[[Sequence[StrategyCandidate], str], Sequence[Mapping[str, object]]]
+
+
+def _metric(metrics: Mapping[str, object], key: str, default: float = float("-inf")) -> float:
+    try:
+        raw = metrics.get(key, default)
+        value = float(raw) if isinstance(raw, (int, float)) else float(str(raw))
+    except (TypeError, ValueError):
+        return default
+    return value if math.isfinite(value) else default
+
+
+def _flatten(value: object, prefix: str = "") -> dict[str, float]:
+    if isinstance(value, Mapping):
+        result: dict[str, float] = {}
+        for key in sorted(value, key=str):
+            child = f"{prefix}.{key}" if prefix else str(key)
+            result.update(_flatten(value[key], child))
+        return result
+    if isinstance(value, (list, tuple)):
+        result = {f"{prefix}.__len__": float(len(value))}
+        for index, item in enumerate(value):
+            result.update(_flatten(item, f"{prefix}[{index}]"))
+        return result
+    if isinstance(value, bool):
+        return {prefix: 1.0 if value else 0.0}
+    try:
+        number = float(value) if isinstance(value, (int, float)) else float(str(value))
+    except (TypeError, ValueError):
+        number = float("nan")
+    if math.isfinite(number):
+        return {prefix: number}
+    digest = hashlib.sha256(str(value).encode("utf-8")).hexdigest()[:12]
+    return {prefix: int(digest, 16) / float(16**12)}
+
+
+class _TrialAdapter:
+    def __init__(self, trial: Any) -> None:
+        self._trial = trial
+        self._counter = 0
+
+    def _name(self) -> str:
+        name = f"candidate_choice_{self._counter}"
+        self._counter += 1
+        return name
+
+    def choice(self, values: Sequence[object]) -> object:
+        options = list(values)
+        if not options:
+            return None
+        index = self._trial.suggest_int(self._name(), 0, len(options) - 1)
+        return options[int(index)]
+
+
+class _LightGBMSurrogate:
+    """Predict search-period scores only; never replaces real backtests."""
+
+    def __init__(self, *, strict: bool = False) -> None:
+        self._model: Any = None
+        self._feature_names: list[str] = []
+        self._strict = strict
+        self.status = "unavailable"
+        self.reason = ""
+
+    def fit(self, candidates: Sequence[StrategyCandidate], objective: str) -> bool:
+        if len(candidates) < 10:
+            self.status = "warming_up"
+            self.reason = "有效样本不足"
+            return False
+        try:
+            import lightgbm as lgb
+            import numpy as np
+        except Exception as exc:
+            if self._strict:
+                raise RuntimeError(
+                    "策略实验室需要 LightGBM；请重新构建 Docker 镜像安装完整依赖"
+                ) from exc
+            self.status = "fallback"
+            self.reason = f"LightGBM 不可用: {exc}"
+            return False
+        rows = [_flatten(candidate.to_config()) for candidate in candidates]
+        self._feature_names = sorted({key for row in rows for key in row})
+        targets = np.asarray(
+            [
+                _metric(candidate.metrics.get("search", {}), objective, 0.0)
+                for candidate in candidates
+            ],
+            dtype=float,
+        )
+        if not self._feature_names or float(np.nanstd(targets)) <= 1e-12:
+            self.status = "fallback"
+            self.reason = "评分没有足够变化"
+            return False
+        matrix = np.asarray(
+            [[row.get(key, 0.0) for key in self._feature_names] for row in rows], dtype=float
+        )
+        try:
+            dataset = lgb.Dataset(
+                matrix,
+                label=targets,
+                feature_name=[f"feature_{index}" for index in range(len(self._feature_names))],
+                free_raw_data=True,
+            )
+            self._model = lgb.train(
+                {
+                    "objective": "regression",
+                    "verbosity": -1,
+                    "num_leaves": 15,
+                    "learning_rate": 0.05,
+                    "feature_fraction": 0.9,
+                    "bagging_fraction": 0.9,
+                    "bagging_freq": 1,
+                    "num_threads": 1,
+                },
+                dataset,
+                num_boost_round=60,
+            )
+        except Exception as exc:
+            self._model = None
+            if self._strict:
+                raise RuntimeError("LightGBM surrogate 训练失败") from exc
+            self.status = "fallback"
+            self.reason = f"LightGBM 训练失败: {exc}"
+            return False
+        self.status = "enabled"
+        self.reason = ""
+        return True
+
+    def predict(self, candidates: Sequence[StrategyCandidate]) -> list[float]:
+        if self._model is None or not self._feature_names:
+            return [float("-inf") for _ in candidates]
+        try:
+            import numpy as np
+
+            matrix = np.asarray(
+                [
+                    [_flatten(candidate.to_config()).get(key, 0.0) for key in self._feature_names]
+                    for candidate in candidates
+                ],
+                dtype=float,
+            )
+            return [float(value) for value in self._model.predict(matrix)]
+        except Exception:
+            return [float("-inf") for _ in candidates]
+
+
+@dataclass(frozen=True)
+class SearchResult:
+    results_by_sharpe: tuple[StrategyCandidate, ...]
+    results_by_return: tuple[StrategyCandidate, ...]
+    search_metadata: Mapping[str, object]
+    shortlist_by_sharpe: tuple[StrategyCandidate, ...] = ()
+    shortlist_by_return: tuple[StrategyCandidate, ...] = ()
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "results_by_sharpe": [candidate.to_dict() for candidate in self.results_by_sharpe],
+            "results_by_return": [candidate.to_dict() for candidate in self.results_by_return],
+            "shortlist_by_sharpe": [candidate.to_dict() for candidate in self.shortlist_by_sharpe],
+            "shortlist_by_return": [candidate.to_dict() for candidate in self.shortlist_by_return],
+            "search_metadata": dict(self.search_metadata),
+        }
+
+
+class HybridSearchEngine:
+    """Bounded, cancellable, reproducible strategy candidate search."""
+
+    def search(
+        self,
+        request: DiscoveryRequest,
+        *,
+        candidate_builder: Callable[
+            [DiscoveryRequest, object], StrategyCandidate
+        ] = build_random_candidate,
+        evaluator: Callable[[StrategyCandidate, str], Mapping[str, object]],
+        batch_evaluator: BatchEvaluator | None = None,
+        fidelity_evaluator: Callable[[StrategyCandidate, str], Mapping[str, object]] | None = None,
+        batch_size: int = 1,
+        evaluation_workers: int = 1,
+        evaluation_mode: str | None = None,
+        max_trials: int | None = None,
+        seed: int | None = None,
+        validation_limit: int = 50,
+        holdout_limit: int = 20,
+        progress_callback: Callable[[int, int, str], None] | None = None,
+        abort_check: Callable[[], bool] | None = None,
+    ) -> SearchResult:
+        trial_limit = max(1, min(5_000, int(max_trials or request.max_trials)))
+        resolved_batch_size = max(1, min(8, int(batch_size)))
+        resolved_evaluation_workers = max(1, min(8, int(evaluation_workers)))
+        resolved_seed = request.seed if seed is None else int(seed)
+        rng = random.Random(resolved_seed)
+        observed: list[StrategyCandidate] = []
+        seen: set[str] = set()
+        allow_fallback = _fallback_enabled()
+        if not allow_fallback:
+            _assert_ml_dependencies()
+        surrogate = _LightGBMSurrogate(strict=not allow_fallback)
+        optuna_module: Any = None
+        studies: dict[str, Any] = {}
+        if allow_fallback:
+            surrogate.status = "fallback"
+            surrogate.reason = "显式启用本地确定性回退"
+        else:
+            try:
+                import optuna as optuna_module
+
+                optuna_module.logging.set_verbosity(optuna_module.logging.WARNING)
+                studies = {
+                    objective: optuna_module.create_study(
+                        direction="maximize",
+                        sampler=optuna_module.samplers.TPESampler(seed=resolved_seed + index),
+                    )
+                    for index, objective in enumerate(("sharpe", "annual_return"))
+                }
+            except Exception as exc:
+                raise RuntimeError(
+                    "策略实验室需要 Optuna；请重新构建 Docker 镜像安装完整依赖"
+                ) from exc
+
+        started = time.monotonic()
+        warmup = min(50, max(10, trial_limit))
+        evaluated = 0
+        attempts = 0
+        duplicates = 0
+        direct_trials = 0
+        surrogate_trials = 0
+        stop_reason = "completed"
+        fidelity_counts: dict[str, int] = {"coarse": 0, "medium": 0, "full": 0}
+
+        def evaluate_stage_batch(
+            candidates: Sequence[StrategyCandidate], stage: str
+        ) -> list[Mapping[str, object]]:
+            if batch_evaluator is not None:
+                metrics = list(batch_evaluator(candidates, stage))
+            elif stage in {"coarse", "medium", "full"} and fidelity_evaluator is not None:
+                metrics = [fidelity_evaluator(candidate, stage) for candidate in candidates]
+            else:
+                metrics = [evaluator(candidate, stage) for candidate in candidates]
+            if len(metrics) != len(candidates):
+                raise RuntimeError("批量候选评估返回数量不一致")
+            return [dict(item) for item in metrics]
+
+        while evaluated < trial_limit and attempts < max(20, trial_limit * 20):
+            attempts += 1
+            if abort_check is not None and abort_check():
+                stop_reason = "cancelled"
+                break
+            if time.monotonic() - started >= request.timeout_seconds:
+                stop_reason = "timeout"
+                break
+            objective = "sharpe" if evaluated % 2 == 0 else "annual_return"
+            desired = min(resolved_batch_size, trial_limit - evaluated)
+            proposals: list[tuple[Any, StrategyCandidate]] = []
+            if optuna_module is not None and evaluated >= warmup:
+                surrogate.fit(observed, objective)
+                proposal_count = max(8, desired * 4)
+                for _ in range(proposal_count):
+                    trial = studies[objective].ask()
+                    try:
+                        candidate = candidate_builder(request, _TrialAdapter(trial))
+                    except Exception:
+                        studies[objective].tell(trial, state=optuna_module.trial.TrialState.PRUNED)
+                        continue
+                    proposals.append((trial, candidate))
+                if proposals:
+                    predictions = surrogate.predict([candidate for _, candidate in proposals])
+                    ranked_indexes = sorted(
+                        range(len(proposals)),
+                        key=lambda index: (predictions[index], -index),
+                        reverse=True,
+                    )
+                    selected_indexes = ranked_indexes[:desired]
+                    if len(ranked_indexes) > desired and rng.random() < 0.2:
+                        selected_indexes[-1] = rng.choice(ranked_indexes[desired:])
+                    selected_set = set(selected_indexes)
+                    for index, (trial, _candidate) in enumerate(proposals):
+                        if index not in selected_set:
+                            studies[objective].tell(
+                                trial, state=optuna_module.trial.TrialState.PRUNED
+                            )
+                    proposals = [proposals[index] for index in selected_indexes]
+                    surrogate_trials += len(proposals)
+            if not proposals:
+                direct_trials += desired
+                for _ in range(desired):
+                    if optuna_module is not None:
+                        trial = studies[objective].ask()
+                        try:
+                            candidate = candidate_builder(request, _TrialAdapter(trial))
+                        except Exception:
+                            studies[objective].tell(
+                                trial,
+                                state=optuna_module.trial.TrialState.PRUNED,
+                            )
+                            continue
+                        proposals.append((trial, candidate))
+                    else:
+                        proposals.append((None, candidate_builder(request, rng)))
+
+            accepted: list[tuple[Any, StrategyCandidate]] = []
+            for trial, candidate in proposals:
+                digest = candidate.candidate_hash
+                if digest in seen:
+                    duplicates += 1
+                    if trial is not None and optuna_module is not None:
+                        studies[objective].tell(trial, state=optuna_module.trial.TrialState.PRUNED)
+                    continue
+                seen.add(digest)
+                if candidate.complexity > request.max_complexity:
+                    if trial is not None and optuna_module is not None:
+                        studies[objective].tell(trial, state=optuna_module.trial.TrialState.PRUNED)
+                    continue
+                accepted.append((trial, candidate))
+            if not accepted:
+                continue
+            evaluation_stage = (
+                "coarse"
+                if fidelity_evaluator is not None and request.multifidelity_enabled
+                else "search"
+            )
+            metrics_batch = evaluate_stage_batch(
+                [candidate for _, candidate in accepted], evaluation_stage
+            )
+            if evaluation_stage == "coarse":
+                fidelity_counts["coarse"] += len(accepted)
+            for (trial, candidate), raw_metrics in zip(accepted, metrics_batch, strict=True):
+                candidate = candidate.with_metrics("search", raw_metrics)
+                if evaluation_stage == "coarse":
+                    candidate = candidate.with_metrics("coarse", raw_metrics)
+                evaluated += 1
+                if trial is not None and optuna_module is not None:
+                    studies[objective].tell(
+                        trial,
+                        _metric(raw_metrics, objective, -1e9),
+                    )
+                if _passes_constraints(
+                    raw_metrics,
+                    request,
+                    min_trades=_fidelity_min_trades(request, "coarse")
+                    if fidelity_evaluator is not None and request.multifidelity_enabled
+                    else None,
+                ):
+                    observed.append(candidate)
+                if progress_callback is not None:
+                    progress_callback(evaluated, trial_limit, "searching")
+        if evaluated < trial_limit and stop_reason == "completed":
+            stop_reason = "attempt_limit"
+
+        final_observed = observed
+        if fidelity_evaluator is not None and request.multifidelity_enabled and observed:
+            medium_limit = max(1, min(len(observed), math.ceil(len(observed) * 0.35)))
+            medium_source = _rank_candidates(observed, "search")[:medium_limit]
+            medium_observed: list[StrategyCandidate] = []
+            for offset in range(0, len(medium_source), resolved_batch_size):
+                chunk = medium_source[offset : offset + resolved_batch_size]
+                if abort_check is not None and abort_check():
+                    stop_reason = "cancelled"
+                    break
+                if time.monotonic() - started >= request.timeout_seconds:
+                    stop_reason = "timeout"
+                    break
+                metrics_batch = evaluate_stage_batch(chunk, "medium")
+                fidelity_counts["medium"] += len(chunk)
+                for index, (candidate, metrics) in enumerate(
+                    zip(chunk, metrics_batch, strict=True), start=offset + 1
+                ):
+                    enriched = candidate.with_metrics("medium", metrics)
+                    if _passes_constraints(
+                        metrics,
+                        request,
+                        min_trades=_fidelity_min_trades(request, "medium"),
+                    ):
+                        medium_observed.append(enriched)
+                    if progress_callback is not None:
+                        progress_callback(index, len(medium_source), "refining_medium")
+            full_source = medium_observed or medium_source
+            full_limit = max(1, min(len(full_source), math.ceil(len(observed) * 0.15)))
+            full_stage = "medium" if medium_observed else "search"
+            full_candidates = _rank_candidates(full_source, full_stage)[:full_limit]
+            full_observed: list[StrategyCandidate] = []
+            for offset in range(0, len(full_candidates), resolved_batch_size):
+                chunk = full_candidates[offset : offset + resolved_batch_size]
+                if abort_check is not None and abort_check():
+                    stop_reason = "cancelled"
+                    break
+                if time.monotonic() - started >= request.timeout_seconds:
+                    stop_reason = "timeout"
+                    break
+                metrics_batch = evaluate_stage_batch(chunk, "full")
+                fidelity_counts["full"] += len(chunk)
+                for index, (candidate, metrics) in enumerate(
+                    zip(chunk, metrics_batch, strict=True), start=offset + 1
+                ):
+                    enriched = candidate.with_metrics("full", metrics)
+                    if _passes_constraints(metrics, request):
+                        full_observed.append(enriched)
+                    if progress_callback is not None:
+                        progress_callback(index, len(full_candidates), "refining_full")
+            final_observed = full_observed
+
+        def ranking_metrics(candidate: StrategyCandidate) -> Mapping[str, object]:
+            return (
+                candidate.metrics.get("full")
+                or candidate.metrics.get("medium")
+                or candidate.metrics.get("search", {})
+            )
+
+        by_sharpe = tuple(
+            sorted(
+                final_observed,
+                key=lambda item: (
+                    _metric(ranking_metrics(item), "sharpe"),
+                    _metric(ranking_metrics(item), "annual_return"),
+                    -item.complexity,
+                ),
+                reverse=True,
+            )
+        )
+        by_return = tuple(
+            sorted(
+                final_observed,
+                key=lambda item: (
+                    _metric(ranking_metrics(item), "annual_return"),
+                    _metric(ranking_metrics(item), "sharpe"),
+                    -item.complexity,
+                ),
+                reverse=True,
+            )
+        )
+        metadata = {
+            "algorithm": "optuna_tpe_lightgbm_surrogate"
+            if optuna_module is not None
+            else "seeded_random_fallback",
+            "algorithm_version": "1",
+            "seed": resolved_seed,
+            "fallback_enabled": allow_fallback,
+            "evaluation_workers": resolved_evaluation_workers,
+            "evaluation_batch_size": resolved_batch_size,
+            "evaluation_mode": evaluation_mode
+            or ("batch" if batch_evaluator is not None else "serial"),
+            "max_trials": trial_limit,
+            "evaluated_trials": evaluated,
+            "valid_candidates": len(observed),
+            "duplicate_trials": duplicates,
+            "direct_trials": direct_trials,
+            "surrogate_trials": surrogate_trials,
+            "surrogate_status": surrogate.status,
+            "surrogate_enabled": surrogate.status == "enabled",
+            "surrogate_reason": surrogate.reason,
+            "validation_candidates": validation_limit,
+            "holdout_candidates": holdout_limit,
+            "multifidelity_plan": [
+                {"name": "coarse", "data_fraction": 0.25, "keep_ratio": None},
+                {"name": "medium", "data_fraction": 0.5, "keep_ratio": 0.35},
+                {"name": "full", "data_fraction": 1.0, "keep_ratio": 0.15},
+            ],
+            "stop_reason": stop_reason,
+            "fidelity_evaluations": fidelity_counts,
+            "promoted_to_medium": fidelity_counts["medium"],
+            "promoted_to_full": fidelity_counts["full"],
+            "final_valid_candidates": len(final_observed),
+        }
+        return SearchResult(
+            results_by_sharpe=by_sharpe[:10],
+            results_by_return=by_return[:10],
+            search_metadata=metadata,
+            shortlist_by_sharpe=by_sharpe[: max(10, validation_limit)],
+            shortlist_by_return=by_return[: max(10, validation_limit)],
+        )
+
+
+def _passes_constraints(
+    metrics: Mapping[str, object],
+    request: DiscoveryRequest,
+    *,
+    min_trades: int | None = None,
+) -> bool:
+    if metrics.get("error"):
+        return False
+    if not math.isfinite(_metric(metrics, "annual_return")):
+        return False
+    try:
+        raw_trades = metrics.get("total_trades", 0)
+        trades = (
+            int(raw_trades) if isinstance(raw_trades, (int, float)) else int(str(raw_trades or 0))
+        )
+    except (TypeError, ValueError):
+        trades = 0
+    if trades < (request.min_trades if min_trades is None else min_trades):
+        return False
+    if request.max_drawdown is not None:
+        drawdown = abs(_metric(metrics, "max_drawdown", float("inf")))
+        if not math.isfinite(drawdown) or drawdown > request.max_drawdown:
+            return False
+    if (
+        request.max_turnover is not None
+        and _metric(metrics, "turnover", float("inf")) > request.max_turnover
+    ):
+        return False
+    return True
+
+
+def _fallback_enabled() -> bool:
+    value = os.getenv("INDICATOR_LAB_DISCOVERY_ALLOW_FALLBACK", "0")
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _fidelity_min_trades(request: DiscoveryRequest, fidelity: str) -> int:
+    fraction = {"coarse": 0.25, "medium": 0.5}.get(fidelity, 1.0)
+    return min(request.min_trades, max(1, math.ceil(request.min_trades * fraction)))
+
+
+def _assert_ml_dependencies() -> None:
+    try:
+        import lightgbm  # noqa: F401
+        import optuna  # noqa: F401
+    except Exception as exc:
+        raise RuntimeError(
+            "策略实验室需要 Optuna 和 LightGBM；请重新构建 Docker 镜像安装完整依赖"
+        ) from exc
+
+
+def _rank_candidates(
+    candidates: Sequence[StrategyCandidate], stage: str
+) -> list[StrategyCandidate]:
+    return sorted(
+        candidates,
+        key=lambda item: (
+            _metric(item.metrics.get(stage, {}), "sharpe"),
+            _metric(item.metrics.get(stage, {}), "annual_return"),
+            -item.complexity,
+        ),
+        reverse=True,
+    )

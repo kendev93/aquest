@@ -54,8 +54,8 @@ const form = reactive<BacktestFormState>({
   startDate: '',
   endDate: '',
   initialCash: 100_000,
-  commission: 0.0003,
-  minCommission: 5,
+  commission: 0.0001,
+  minCommission: 0.1,
   stampTax: 0.001,
   slippage: 0,
   execution: 'next_open',
@@ -361,6 +361,7 @@ watch(() => form.formulaText, (value) => {
         <a class="nav-link" href="/indicator-lab">公式选股</a>
         <a class="nav-link active" href="/backtest" aria-current="page">单股回测</a>
         <a class="nav-link" href="/portfolio-backtest">组合回测</a>
+        <a class="nav-link" href="/strategy-lab">策略实验室</a>
         <a class="nav-link" href="/strategy-fitness">策略适配性</a>
         <a class="nav-link" href="/market-data">本地行情</a>
       </nav>

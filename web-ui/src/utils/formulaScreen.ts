@@ -159,9 +159,15 @@ export function numericRuleForSignal(
     'indicator_three.end_zone': ['indicator_three.var1', 'gt', null, 90],
   }
   const mapped = known[signalId]
-  if (mapped) return numericRule(...mapped, values)
+  if (mapped) {
+    const rule = numericRule(...mapped, values)
+    if (rule.conditions.length) return rule
+  }
   if (values.some((value) => value.id === signalId)) {
     return numericRule(signalId, 'gt', null, 0, values)
+  }
+  if (signalId.trim()) {
+    return { signals: [signalId], conditions: [], combine_mode: 'all', minimum_matches: null }
   }
   return { signals: [], conditions: [], combine_mode: 'all', minimum_matches: null }
 }

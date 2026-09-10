@@ -104,14 +104,18 @@ def _date_bounds(frame: pd.DataFrame) -> tuple[date | None, date | None]:
 
 
 def _serialize_arrays(
-    arrays: dict[str, np.ndarray], names: tuple[str, ...], *, dtype: type
+    arrays: dict[str, np.ndarray],
+    names: tuple[str, ...],
+    *,
+    dtype: type,
+    data_length: int | None = None,
 ) -> bytes:
     if names:
         matrix: np.ndarray = np.stack(
             [np.asarray(arrays[name], dtype=dtype) for name in names], axis=0
         )
     else:
-        matrix = np.empty((0, 0), dtype=dtype)
+        matrix = np.empty((0, data_length or 0), dtype=dtype)
     buffer = io.BytesIO()
     np.save(buffer, matrix, allow_pickle=False)
     return buffer.getvalue()
@@ -637,11 +641,14 @@ class IndicatorCache:
                     "data_start": start,
                     "data_end": end,
                     "data_length": result.data_length,
-                    "values_blob": _serialize_arrays(values, definition.value_names, dtype=float),
+                    "values_blob": _serialize_arrays(
+                        values, definition.value_names, dtype=float, data_length=result.data_length
+                    ),
                     "signals_blob": _serialize_arrays(
                         signals,
                         tuple(signal.id.split(".", 1)[1] for signal in definition.signals),
                         dtype=bool,
+                        data_length=result.data_length,
                     ),
                 }
             )
@@ -743,11 +750,14 @@ class IndicatorCache:
                     data_length=result.data_length,
                     minimum_bars=result.minimum_bars,
                     recommended_bars=result.recommended_bars,
-                    values_blob=_serialize_arrays(values, parsed.value_names, dtype=float),
+                    values_blob=_serialize_arrays(
+                        values, parsed.value_names, dtype=float, data_length=result.data_length
+                    ),
                     signals_blob=_serialize_arrays(
                         signals,
                         tuple(signal.id for signal in parsed.signals),
                         dtype=bool,
+                        data_length=result.data_length,
                     ),
                 )
             finally:

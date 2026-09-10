@@ -18,8 +18,10 @@ class TradeProfile:
     virtual: bool = True
 
 
-_STOCK = TradeProfile("stock", 100, 0.0003, 5.0, 0.001)
-_FUND_LIKE = TradeProfile("fund", 100, 0.00005, 0.1, 0.0)
+_DEFAULT_COMMISSION = 0.0001
+_DEFAULT_MIN_COMMISSION = 0.1
+_STOCK = TradeProfile("stock", 100, _DEFAULT_COMMISSION, _DEFAULT_MIN_COMMISSION, 0.001)
+_FUND_LIKE = TradeProfile("fund", 100, _DEFAULT_COMMISSION, _DEFAULT_MIN_COMMISSION, 0.0)
 STOCK_DEFAULT_COMMISSION = _STOCK.commission
 STOCK_DEFAULT_MIN_COMMISSION = _STOCK.min_commission
 STOCK_DEFAULT_STAMP_TAX = _STOCK.stamp_tax

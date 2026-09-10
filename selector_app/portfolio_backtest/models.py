@@ -46,6 +46,17 @@ class PortfolioBacktestConfig:
     sell_signal: str | None = None
     stop_loss_pct: float | None = None
     take_profit_pct: float | None = None
+    take_profit_mode: Literal["pct", "atr"] = "pct"
+    take_profit_atr_multiplier: float | None = None
+    take_profit_cooldown_days: int = 0
+    stop_loss_mode: Literal["pct", "atr"] = "pct"
+    stop_loss_atr_multiplier: float | None = None
+    stop_loss_cooldown_days: int = 0
+    trailing_stop_pct: float | None = None
+    trailing_stop_mode: Literal["pct", "atr"] = "pct"
+    trailing_stop_atr_multiplier: float | None = None
+    trailing_stop_cooldown_days: int = 0
+    atr_period: int = 14
     sell_value: str | None = None
     sell_value_operator: SellValueOperator | None = None
     sell_value_threshold: float | None = None
@@ -57,8 +68,8 @@ class PortfolioBacktestConfig:
     start_date: date | None = None
     end_date: date | None = None
     initial_cash: float = 1_000_000.0
-    commission: float = 0.0003
-    min_commission: float = 5.0
+    commission: float = 0.0001
+    min_commission: float = 0.1
     stamp_tax: float = 0.001
     slippage: float = 0.0
     fitness_filter_enabled: bool = False
@@ -125,11 +136,31 @@ class PortfolioBacktestConfig:
         for name, optional_value in {
             "stop_loss_pct": self.stop_loss_pct,
             "take_profit_pct": self.take_profit_pct,
+            "trailing_stop_pct": self.trailing_stop_pct,
         }.items():
             if optional_value is not None and (
-                not math.isfinite(optional_value) or optional_value < 0
+                not math.isfinite(optional_value) or optional_value <= 0
             ):
-                raise ValueError(f"{name} 必须是大于等于 0 的有限数字")
+                raise ValueError(f"{name} 必须是大于 0 的有限数字")
+        for prefix in ("take_profit", "stop_loss", "trailing_stop"):
+            mode = getattr(self, f"{prefix}_mode")
+            if mode not in {"pct", "atr"}:
+                raise ValueError(f"{prefix}_mode 必须是 pct 或 atr")
+            multiplier = getattr(self, f"{prefix}_atr_multiplier")
+            if multiplier is not None and (not math.isfinite(multiplier) or multiplier <= 0):
+                raise ValueError(f"{prefix}_atr_multiplier 必须是大于 0 的有限数字")
+            cooldown = getattr(self, f"{prefix}_cooldown_days")
+            if isinstance(cooldown, bool) or not 0 <= cooldown <= 10_000:
+                raise ValueError(f"{prefix}_cooldown_days 必须在 0 到 10000 之间")
+            percentage = getattr(self, f"{prefix}_pct")
+            if mode == "atr" and multiplier is None:
+                raise ValueError(f"{prefix}_atr_multiplier 在 ATR 模式下不能为空")
+            if mode == "atr" and percentage is not None:
+                raise ValueError(f"{prefix}_pct 不能在 ATR 模式下设置")
+            if mode == "pct" and multiplier is not None:
+                raise ValueError(f"{prefix}_atr_multiplier 不能在 pct 模式下设置")
+        if self.atr_period != 14:
+            raise ValueError("atr_period 固定为 14")
         if self.sell_value_threshold is not None and not math.isfinite(self.sell_value_threshold):
             raise ValueError("sell_value_threshold 必须是有限数字")
         if self.sell_value is None:
@@ -185,7 +216,18 @@ class PortfolioBacktestConfig:
                         combine_mode="any",
                     ),
                 )
-        if self.sell_rule is None and self.stop_loss_pct is None and self.take_profit_pct is None:
+        risk_enabled = any(
+            value is not None
+            for value in (
+                self.stop_loss_pct,
+                self.stop_loss_atr_multiplier,
+                self.take_profit_pct,
+                self.take_profit_atr_multiplier,
+                self.trailing_stop_pct,
+                self.trailing_stop_atr_multiplier,
+            )
+        )
+        if self.sell_rule is None and not risk_enabled:
             raise ValueError("至少需要设置一个卖出规则")
         object.__setattr__(self, "ranking_value", self.ranking_value.strip())
         object.__setattr__(
@@ -229,10 +271,12 @@ class PortfolioBacktestReport:
     failure_reasons: Mapping[str, int]
     diagnostic: str | None = None
     data_fingerprint: str = ""
+    risk_controls: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "performance", MappingProxyType(dict(self.performance)))
         object.__setattr__(self, "failure_reasons", MappingProxyType(dict(self.failure_reasons)))
+        object.__setattr__(self, "risk_controls", MappingProxyType(dict(self.risk_controls)))
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -259,4 +303,5 @@ class PortfolioBacktestReport:
             "failure_reasons": dict(self.failure_reasons),
             "diagnostic": self.diagnostic,
             "data_fingerprint": self.data_fingerprint,
+            "risk_controls": dict(self.risk_controls),
         }

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from selector_app.web.schemas import BacktestRequest, PortfolioBacktestRequest
+from selector_app.web.schemas import (
+    BacktestRequest,
+    PortfolioBacktestRequest,
+    StrategyDiscoveryRequest,
+)
 
 
 def condition(left: str, operator: str, **right: object) -> dict[str, object]:
@@ -50,3 +54,59 @@ def test_portfolio_request_accepts_condition_only_buy_and_sell_groups() -> None:
     assert config.selected_signals == ()
     assert config.buy_rule is not None
     assert config.sell_rule is not None
+
+
+def test_portfolio_request_supports_atr_and_trailing_risk_controls() -> None:
+    request = PortfolioBacktestRequest.model_validate(
+        {
+            "ranking_value": "technical.ma5",
+            "buy_rule": {"conditions": [condition("technical.ma5", "gt", right_constant=10)]},
+            "stop_loss_mode": "atr",
+            "stop_loss_atr_multiplier": 2,
+            "stop_loss_cooldown_days": 3,
+            "trailing_stop_mode": "pct",
+            "trailing_stop_pct": 0.05,
+            "trailing_stop_cooldown_days": 5,
+        }
+    )
+
+    config = request.to_config()
+    assert config.atr_period == 14
+    assert config.stop_loss_atr_multiplier == 2
+    assert config.stop_loss_cooldown_days == 3
+    assert config.trailing_stop_pct == 0.05
+
+
+def test_strategy_discovery_request_builds_non_overlapping_date_splits_and_fees() -> None:
+    request = StrategyDiscoveryRequest.model_validate(
+        {
+            "start_date": "2024-01-01",
+            "end_date": "2024-01-31",
+            "max_positions": 4,
+        }
+    )
+
+    discovery = request.to_discovery_request()
+    assert discovery.base_config["max_positions"] == 4
+    assert discovery.base_config["start_date"] == "2024-01-01"
+    assert discovery.base_config["end_date"] == "2024-01-31"
+    assert discovery.base_config["commission"] == 0.0001
+    assert discovery.base_config["min_commission"] == 0.1
+    assert discovery.splits["search"]["end_date"] < discovery.splits["validation"]["start_date"]
+    assert discovery.splits["validation"]["end_date"] < discovery.splits["holdout"]["start_date"]
+
+
+def test_strategy_discovery_request_can_use_the_full_local_history() -> None:
+    request = StrategyDiscoveryRequest.model_validate(
+        {
+            "max_positions": 3,
+        }
+    )
+
+    discovery = request.to_discovery_request(
+        default_start="2023-01-01",
+        default_end="2025-04-30",
+    )
+
+    assert discovery.splits["search"]["start_date"] == "2023-01-01"
+    assert discovery.splits["holdout"]["end_date"] == "2025-04-30"

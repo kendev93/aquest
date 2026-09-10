@@ -93,8 +93,8 @@ const form = reactive<FitnessFormState>({
   minTrades: 5,
   maxTestDrawdown: 30,
   initialCash: 1_000_000,
-  commission: 0.0003,
-  minCommission: 5,
+  commission: 0.0001,
+  minCommission: 0.1,
   stampTax: 0.001,
   slippage: 0,
   execution: 'next_open',
@@ -393,6 +393,7 @@ watch(() => form.formulaText, (value) => {
         <a class="nav-link" href="/indicator-lab">公式选股</a>
         <a class="nav-link" href="/backtest">单股回测</a>
         <a class="nav-link" href="/portfolio-backtest">组合回测</a>
+        <a class="nav-link" href="/strategy-lab">策略实验室</a>
         <a class="nav-link active" href="/strategy-fitness" aria-current="page">策略适配性</a>
         <a class="nav-link" href="/market-data">本地行情</a>
       </nav>

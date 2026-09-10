@@ -18,13 +18,17 @@ from .engine import ProgressCallback, ScanOutcome, ScreenEngine
 from .models import ScanConfig, ScanReport
 
 logger = logging.getLogger(__name__)
-JobStatus = Literal["queued", "running", "completed", "failed"]
+JobStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 ProgressReporter = Callable[[int, int], None]
 GenericTask = Callable[[ProgressReporter], dict[str, object]]
 
 
 class TaskUserError(Exception):
     """A safe, user-facing error raised by a background task."""
+
+
+class TaskCancelledError(TaskUserError):
+    """A user-requested cancellation that should not be reported as a failure."""
 
 
 class ScanEngineLike(Protocol):
@@ -52,6 +56,9 @@ class JobState:
     worker_count: int | None = None
     created_at: float = field(default_factory=time.time)
     finished_at: float | None = None
+    phase: str | None = None
+    metadata: dict[str, object] = field(default_factory=dict)
+    cancel_requested: bool = False
 
     def snapshot(self) -> dict[str, object]:
         return {
@@ -69,6 +76,9 @@ class JobState:
             "worker_count": self.worker_count,
             "created_at": self.created_at,
             "finished_at": self.finished_at,
+            "phase": self.phase,
+            "metadata": dict(self.metadata),
+            "cancel_requested": self.cancel_requested,
         }
 
 
@@ -105,6 +115,43 @@ class ScreenJobRunner:
     def get(self, job_id: str) -> JobState | None:
         with self._lock:
             return self._jobs.get(job_id)
+
+    def update_callable_state(
+        self,
+        job_id: str,
+        *,
+        phase: str | None = None,
+        metadata: dict[str, object] | None = None,
+        progress: float | None = None,
+    ) -> None:
+        """Update optional phase details for a generic long-running task."""
+
+        with self._lock:
+            state = self._jobs.get(job_id)
+            if state is None:
+                return
+            if phase is not None:
+                state.phase = phase
+            if progress is not None:
+                state.progress = min(1.0, max(0.0, float(progress)))
+            if metadata:
+                state.metadata = {**state.metadata, **metadata}
+
+    def request_cancel(self, job_id: str) -> bool:
+        """Mark a queued/running generic job for cooperative cancellation."""
+
+        with self._lock:
+            state = self._jobs.get(job_id)
+            if state is None or state.status not in {"queued", "running"}:
+                return False
+            state.cancel_requested = True
+            state.phase = "cancelling"
+            return True
+
+    def is_cancel_requested(self, job_id: str) -> bool:
+        with self._lock:
+            state = self._jobs.get(job_id)
+            return bool(state and state.cancel_requested)
 
     def has_active_jobs(self, descriptions: Iterable[str] | None = None) -> bool:
         """Return whether a queued/running job matches the optional descriptions."""
@@ -145,6 +192,7 @@ class ScreenJobRunner:
             return
         with self._lock:
             state.status = "running"
+            state.phase = "running"
 
         def on_progress(current: int, total: int) -> None:
             with self._lock:
@@ -154,9 +202,18 @@ class ScreenJobRunner:
 
         try:
             result = func(on_progress)
+        except TaskCancelledError as exc:
+            with self._lock:
+                state.status = "cancelled"
+                state.phase = "cancelled"
+                state.error = str(exc)
+                state.finished_at = time.time()
+                self._evict_if_needed_locked()
+            return
         except TaskUserError as exc:
             with self._lock:
                 state.status = "failed"
+                state.phase = "failed"
                 state.error = str(exc)
                 state.finished_at = time.time()
                 self._evict_if_needed_locked()
@@ -165,12 +222,14 @@ class ScreenJobRunner:
             logger.exception("后台任务 %s 执行失败", job_id)
             with self._lock:
                 state.status = "failed"
+                state.phase = "failed"
                 state.error = "后台任务失败，请检查配置和服务状态后重试"
                 state.finished_at = time.time()
                 self._evict_if_needed_locked()
             return
         with self._lock:
             state.status = "completed"
+            state.phase = "completed"
             state.progress = 1.0
             state.result_payload = result
             state.finished_at = time.time()

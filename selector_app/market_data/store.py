@@ -27,8 +27,9 @@ from .models import (
     StockRef,
 )
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 SCREEN_HISTORY_LIMIT = 10
+STRATEGY_DISCOVERY_HISTORY_LIMIT = 20
 _APP_DATA_DIR_NAME = ".indicator-lab"
 _BAR_COLUMNS = [
     "market",
@@ -302,6 +303,23 @@ class DuckDbMarketDataStore:
                     result_count BIGINT NOT NULL,
                     meta_json VARCHAR NOT NULL,
                     results_json VARCHAR NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS strategy_discovery_history (
+                    history_id VARCHAR PRIMARY KEY,
+                    created_at TIMESTAMP NOT NULL,
+                    request_json VARCHAR NOT NULL,
+                    search_metadata_json VARCHAR NOT NULL,
+                    validation_metadata_json VARCHAR NOT NULL,
+                    algorithm_metadata_json VARCHAR NOT NULL,
+                    data_fingerprint VARCHAR NOT NULL,
+                    results_by_sharpe_json VARCHAR NOT NULL,
+                    results_by_return_json VARCHAR NOT NULL,
+                    total_trials BIGINT NOT NULL,
+                    duration_seconds DOUBLE NOT NULL
                 )
                 """
             )
@@ -1167,6 +1185,223 @@ class DuckDbMarketDataStore:
             "meta": meta,
             "results": results,
         }
+
+    def save_strategy_discovery_history(
+        self,
+        history_id: str,
+        result: Mapping[str, object],
+        *,
+        created_at: datetime | None = None,
+    ) -> None:
+        """Persist one completed strategy-discovery run and retain the newest 20."""
+
+        self._require_writer()
+        normalized_id = history_id.strip()
+        if not normalized_id:
+            raise ValueError("策略实验历史 ID 不能为空")
+        payload = dict(result)
+        request = (
+            cast(Mapping[str, object], payload["request"])
+            if isinstance(payload.get("request"), Mapping)
+            else {}
+        )
+        search_metadata = (
+            cast(Mapping[str, object], payload["search_metadata"])
+            if isinstance(payload.get("search_metadata"), Mapping)
+            else {}
+        )
+        validation_metadata = (
+            cast(Mapping[str, object], payload["validation_metadata"])
+            if isinstance(payload.get("validation_metadata"), Mapping)
+            else {}
+        )
+        algorithm_metadata = (
+            cast(Mapping[str, object], payload["algorithm_metadata"])
+            if isinstance(payload.get("algorithm_metadata"), Mapping)
+            else {}
+        )
+        sharpe = payload.get("results_by_sharpe")
+        returns = payload.get("results_by_return")
+        sharpe_rows = list(sharpe) if isinstance(sharpe, (list, tuple)) else []
+        return_rows = list(returns) if isinstance(returns, (list, tuple)) else []
+        try:
+            raw_trials = search_metadata.get("evaluated_trials", 0)
+            total_trials = (
+                int(raw_trials)
+                if isinstance(raw_trials, (int, float))
+                else int(str(raw_trials or 0))
+            )
+            raw_duration = payload.get("duration_seconds", 0.0)
+            duration = (
+                float(raw_duration)
+                if isinstance(raw_duration, (int, float))
+                else float(str(raw_duration or 0.0))
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("策略实验历史指标格式无效") from exc
+        created = created_at or _now()
+        if created.tzinfo is not None:
+            created = created.astimezone(timezone.utc).replace(tzinfo=None)
+        with _WRITE_LOCK, self._connect() as connection:
+            connection.execute("BEGIN")
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO strategy_discovery_history (
+                        history_id, created_at, request_json, search_metadata_json,
+                        validation_metadata_json, algorithm_metadata_json, data_fingerprint,
+                        results_by_sharpe_json, results_by_return_json, total_trials,
+                        duration_seconds
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (history_id) DO UPDATE SET
+                        created_at = excluded.created_at,
+                        request_json = excluded.request_json,
+                        search_metadata_json = excluded.search_metadata_json,
+                        validation_metadata_json = excluded.validation_metadata_json,
+                        algorithm_metadata_json = excluded.algorithm_metadata_json,
+                        data_fingerprint = excluded.data_fingerprint,
+                        results_by_sharpe_json = excluded.results_by_sharpe_json,
+                        results_by_return_json = excluded.results_by_return_json,
+                        total_trials = excluded.total_trials,
+                        duration_seconds = excluded.duration_seconds
+                    """,
+                    [
+                        normalized_id,
+                        created,
+                        json.dumps(dict(request), ensure_ascii=False, separators=(",", ":")),
+                        json.dumps(
+                            dict(search_metadata), ensure_ascii=False, separators=(",", ":")
+                        ),
+                        json.dumps(
+                            dict(validation_metadata), ensure_ascii=False, separators=(",", ":")
+                        ),
+                        json.dumps(
+                            dict(algorithm_metadata), ensure_ascii=False, separators=(",", ":")
+                        ),
+                        str(payload.get("data_fingerprint") or ""),
+                        json.dumps(sharpe_rows, ensure_ascii=False, separators=(",", ":")),
+                        json.dumps(return_rows, ensure_ascii=False, separators=(",", ":")),
+                        max(0, total_trials),
+                        max(0.0, duration),
+                    ],
+                )
+                stale = connection.execute(
+                    """
+                    SELECT history_id FROM strategy_discovery_history
+                    ORDER BY created_at DESC, history_id DESC
+                    LIMIT 100000 OFFSET ?
+                    """,
+                    [STRATEGY_DISCOVERY_HISTORY_LIMIT],
+                ).fetchall()
+                if stale:
+                    connection.executemany(
+                        "DELETE FROM strategy_discovery_history WHERE history_id = ?", stale
+                    )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+
+    def list_strategy_discovery_history(self) -> list[dict[str, object]]:
+        """Return recent strategy-discovery summaries without full candidate payloads."""
+
+        with self._connect(read_only=True) as connection:
+            rows = connection.execute(
+                """
+                SELECT history_id, created_at, data_fingerprint,
+                       total_trials, duration_seconds,
+                       results_by_sharpe_json, results_by_return_json
+                FROM strategy_discovery_history
+                ORDER BY created_at DESC, history_id DESC
+                LIMIT ?
+                """,
+                [STRATEGY_DISCOVERY_HISTORY_LIMIT],
+            ).fetchall()
+        summaries: list[dict[str, object]] = []
+        for row in rows:
+            try:
+                sharpe = json.loads(str(row[5]))
+                returns = json.loads(str(row[6]))
+            except json.JSONDecodeError as exc:
+                raise MarketDataStoreError("策略实验历史内容损坏") from exc
+            summaries.append(
+                {
+                    "history_id": str(row[0]),
+                    "created_at": str(row[1]),
+                    "data_fingerprint": str(row[2]),
+                    "total_trials": int(row[3]),
+                    "duration_seconds": float(row[4]),
+                    "best_sharpe": sharpe[0] if isinstance(sharpe, list) and sharpe else None,
+                    "best_return": returns[0] if isinstance(returns, list) and returns else None,
+                }
+            )
+        return summaries
+
+    def read_strategy_discovery_history(self, history_id: str) -> dict[str, object] | None:
+        """Read a complete strategy-discovery history snapshot."""
+
+        with self._connect(read_only=True) as connection:
+            row = connection.execute(
+                """
+                SELECT history_id, created_at, request_json, search_metadata_json,
+                       validation_metadata_json, algorithm_metadata_json, data_fingerprint,
+                       results_by_sharpe_json, results_by_return_json, total_trials,
+                       duration_seconds
+                FROM strategy_discovery_history
+                WHERE history_id = ?
+                """,
+                [history_id.strip()],
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            request = json.loads(str(row[2]))
+            search_metadata = json.loads(str(row[3]))
+            validation_metadata = json.loads(str(row[4]))
+            algorithm_metadata = json.loads(str(row[5]))
+            results_by_sharpe = json.loads(str(row[7]))
+            results_by_return = json.loads(str(row[8]))
+        except json.JSONDecodeError as exc:
+            raise MarketDataStoreError("策略实验历史内容损坏") from exc
+        if not all(
+            isinstance(value, (dict, list))
+            for value in (
+                request,
+                search_metadata,
+                validation_metadata,
+                algorithm_metadata,
+                results_by_sharpe,
+                results_by_return,
+            )
+        ):
+            raise MarketDataStoreError("策略实验历史内容无效")
+        return {
+            "history_id": str(row[0]),
+            "created_at": str(row[1]),
+            "request": request,
+            "search_metadata": search_metadata,
+            "validation_metadata": validation_metadata,
+            "algorithm_metadata": algorithm_metadata,
+            "data_fingerprint": str(row[6]),
+            "results_by_sharpe": results_by_sharpe,
+            "results_by_return": results_by_return,
+            "total_trials": int(row[9]),
+            "duration_seconds": float(row[10]),
+        }
+
+    def delete_strategy_discovery_history(self, history_id: str) -> bool:
+        """Delete one strategy-discovery history record."""
+
+        self._require_writer()
+        normalized_id = history_id.strip()
+        if not normalized_id:
+            return False
+        with _WRITE_LOCK, self._connect() as connection:
+            deleted = connection.execute(
+                "DELETE FROM strategy_discovery_history WHERE history_id = ? RETURNING history_id",
+                [normalized_id],
+            ).fetchone()
+        return deleted is not None
 
     def read_indicator_cache(
         self,

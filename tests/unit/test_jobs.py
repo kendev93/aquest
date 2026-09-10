@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from threading import Event, Lock
 
-from selector_app.screening.jobs import ScreenJobRunner, TaskUserError
+from selector_app.screening.jobs import ScreenJobRunner, TaskCancelledError, TaskUserError
 
 
 def wait_until_complete(runner: ScreenJobRunner, job_id: str) -> None:
@@ -80,4 +80,32 @@ def test_runner_default_starts_eight_background_tasks_concurrently() -> None:
         assert max_active == 8
     finally:
         release.set()
+        runner.shutdown()
+
+
+def test_runner_cooperatively_cancels_a_generic_task() -> None:
+    runner = ScreenJobRunner(max_results=1)
+    started = Event()
+    job_id_holder = [""]
+
+    def task(_progress):
+        started.set()
+        while not runner.is_cancel_requested(job_id_holder[0]):
+            time.sleep(0.001)
+        raise TaskCancelledError("任务已取消")
+
+    try:
+        job_id_holder[0] = runner.submit_callable(task, description="可取消任务")
+        assert started.wait(timeout=1)
+        assert runner.request_cancel(job_id_holder[0]) is True
+        for _ in range(100):
+            state = runner.get(job_id_holder[0])
+            if state is not None and state.status == "cancelled":
+                break
+            time.sleep(0.005)
+        else:
+            raise AssertionError("job was not cancelled")
+        assert state is not None
+        assert state.error == "任务已取消"
+    finally:
         runner.shutdown()

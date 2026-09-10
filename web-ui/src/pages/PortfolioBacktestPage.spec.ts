@@ -76,6 +76,7 @@ const result: PortfolioBacktestResult = {
 describe('PortfolioBacktestPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    sessionStorage.clear()
     vi.mocked(formulaApi.fetchMetadata).mockResolvedValue(metadata)
     vi.mocked(portfolioApi.createPortfolioBacktest).mockResolvedValue({ job_id: 'portfolio-1', status: 'queued' })
     vi.mocked(portfolioApi.getPortfolioBacktest).mockResolvedValue({
@@ -252,5 +253,80 @@ describe('PortfolioBacktestPage', () => {
         conditions: [expect.objectContaining({ right_constant: 60, right_value: null })],
       }),
     }))
+  })
+
+  it('loads a strategy discovery candidate into the ordinary portfolio form', async () => {
+    sessionStorage.setItem('indicator-lab.strategy-discovery.apply', JSON.stringify({
+      universe: 'all',
+      start_date: '2024-01-02',
+      end_date: '2024-01-06',
+      ranking_value: 'indicator_three.varo7',
+      rank_order: 'asc',
+      max_positions: 3,
+      rebalance_frequency: 'weekly',
+      buy_rule: {
+        signals: [],
+        conditions: [{ left_value: 'indicator_three.var1', operator: 'gt', right_value: null, right_constant: 60 }],
+        combine_mode: 'all',
+        minimum_matches: null,
+      },
+      sell_rule: {
+        signals: [],
+        conditions: [{ left_value: 'indicator_three.var1', operator: 'lt', right_value: null, right_constant: 40 }],
+        combine_mode: 'all',
+        minimum_matches: null,
+      },
+      stop_loss_mode: 'atr',
+      stop_loss_pct: null,
+      stop_loss_atr_multiplier: 2,
+      stop_loss_cooldown_days: 3,
+      take_profit_mode: 'pct',
+      take_profit_pct: 0.2,
+      take_profit_atr_multiplier: null,
+      take_profit_cooldown_days: 5,
+      trailing_stop_mode: 'pct',
+      trailing_stop_pct: null,
+      trailing_stop_atr_multiplier: null,
+      trailing_stop_cooldown_days: 0,
+      atr_period: 14,
+      commission: 0.0001,
+      min_commission: 0.1,
+    }))
+    sessionStorage.setItem('indicator-lab.strategy-discovery.apply-meta', JSON.stringify({
+      candidate_hash: 'candidate-1',
+      validation_metrics: {
+        total_return: 0.12,
+        annual_return: 0.22,
+        sharpe: 1.6,
+        max_drawdown: 0.03,
+        total_trades: 4,
+        win_rate: 0.5,
+      },
+    }))
+
+    const wrapper = mount(PortfolioBacktestPage)
+    await flushPromises()
+
+    expect((wrapper.get('[data-testid="portfolio-max-positions"]').element as HTMLInputElement).value).toBe('3')
+    expect((wrapper.get('[data-testid="portfolio-ranking-value"]').element as HTMLSelectElement).value).toBe('indicator_three.varo7')
+    expect((wrapper.get('[data-testid="portfolio-rank-order"]').element as HTMLSelectElement).value).toBe('asc')
+    expect((wrapper.get('[data-testid="portfolio-stop-loss-mode"]').element as HTMLSelectElement).value).toBe('atr')
+    expect((wrapper.get('[data-testid="portfolio-stop-loss-atr"]').element as HTMLInputElement).value).toBe('2')
+    expect((wrapper.get('[data-testid="portfolio-stop-loss-cooldown"]').element as HTMLInputElement).value).toBe('3')
+
+    await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')
+    await flushPromises()
+    expect(portfolioApi.createPortfolioBacktest).toHaveBeenCalledWith(expect.objectContaining({
+      ranking_value: 'indicator_three.varo7',
+      max_positions: 3,
+      stop_loss_mode: 'atr',
+      stop_loss_pct: null,
+      stop_loss_atr_multiplier: 2,
+      stop_loss_cooldown_days: 3,
+      take_profit_pct: 0.2,
+      take_profit_cooldown_days: 5,
+    }))
+    expect(wrapper.get('[data-testid="portfolio-replay-comparison"]').text()).toContain('绩效摘要：一致')
+    expect(sessionStorage.getItem('indicator-lab.strategy-discovery.apply')).toBeNull()
   })
 })

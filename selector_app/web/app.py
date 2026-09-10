@@ -32,6 +32,7 @@ from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.portfolio_backtest.service import PortfolioBacktestService
 from selector_app.screening.engine import ScreenEngine
 from selector_app.screening.jobs import ScanEngineLike, ScreenJobRunner
+from selector_app.strategy_discovery.service import StrategyDiscoveryService
 from selector_app.strategy_fitness.service import StrategyFitnessService
 
 from .routers.formula_screen import router as formula_screen_router
@@ -46,6 +47,7 @@ def create_app(
     market_sync: TdxMarketSync | object | None = None,
     backtest_service: BacktestService | object | None = None,
     portfolio_backtest_service: PortfolioBacktestService | object | None = None,
+    strategy_discovery_service: StrategyDiscoveryService | object | None = None,
     strategy_fitness_service: StrategyFitnessService | object | None = None,
     local_market_data_service: LocalMarketDataService | object | None = None,
     market_data_store: DuckDbMarketDataStore | object | None = None,
@@ -84,6 +86,24 @@ def create_app(
     selected_importer = cast(
         LocalDayImporter,
         local_day_importer if local_day_importer is not None else LocalDayImporter(selected_store),
+    )
+    selected_portfolio_service = cast(
+        PortfolioBacktestService,
+        portfolio_backtest_service
+        if portfolio_backtest_service is not None
+        else PortfolioBacktestService(
+            adapter=selected_adapter,
+            indicator_cache=selected_indicator_cache,
+        ),
+    )
+    selected_discovery_service = cast(
+        StrategyDiscoveryService,
+        strategy_discovery_service
+        if strategy_discovery_service is not None
+        else StrategyDiscoveryService(
+            portfolio_service=selected_portfolio_service,
+            store=selected_store,
+        ),
     )
 
     @asynccontextmanager
@@ -169,10 +189,8 @@ def create_app(
         adapter=selected_adapter,
         indicator_cache=selected_indicator_cache,
     )
-    app.state.portfolio_backtest_service = portfolio_backtest_service or PortfolioBacktestService(
-        adapter=selected_adapter,
-        indicator_cache=selected_indicator_cache,
-    )
+    app.state.portfolio_backtest_service = selected_portfolio_service
+    app.state.strategy_discovery_service = selected_discovery_service
     app.state.strategy_fitness_service = strategy_fitness_service or StrategyFitnessService(
         adapter=selected_adapter,
         indicator_cache=selected_indicator_cache,
@@ -190,7 +208,7 @@ def create_app(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
         allow_credentials=False,
-        allow_methods=["GET", "POST"],
+        allow_methods=["GET", "POST", "DELETE"],
         allow_headers=["Content-Type"],
     )
 
@@ -241,12 +259,14 @@ def create_app(
     from .routers.backtest import router as backtest_router
     from .routers.market_data import router as market_data_router
     from .routers.portfolio_backtest import router as portfolio_backtest_router
+    from .routers.strategy_discovery import router as strategy_discovery_router
     from .routers.strategy_fitness import router as strategy_fitness_router
 
     app.include_router(formula_screen_router, prefix="/api/v1")
     app.include_router(market_data_router, prefix="/api/v1")
     app.include_router(backtest_router, prefix="/api/v1")
     app.include_router(portfolio_backtest_router, prefix="/api/v1")
+    app.include_router(strategy_discovery_router, prefix="/api/v1")
     app.include_router(strategy_fitness_router, prefix="/api/v1")
     return app
 

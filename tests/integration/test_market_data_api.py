@@ -173,7 +173,7 @@ def test_local_import_job_populates_duckdb_and_market_routes_read_it(tmp_path: P
 
     assert state["status"] == "completed"
     assert state["result"]["indicator_precompute"]["total_candidates"] == 1
-    assert state["result"]["indicator_precompute"]["skipped"] == 1
+    assert state["result"]["indicator_precompute"]["skipped"] == 0
     assert instruments.status_code == 200
     assert instruments.json()["data"][0]["code"] == "600000"
     assert status.status_code == 200
