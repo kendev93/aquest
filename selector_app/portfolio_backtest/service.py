@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections import Counter, deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
@@ -178,6 +178,53 @@ class PortfolioBacktestService:
         if progress_callback is not None:
             progress_callback(len(refs), len(refs))
         return report
+
+    def run_prepared_contexts(
+        self,
+        config: PortfolioBacktestConfig,
+        contexts: Sequence[_StockSeries],
+        *,
+        total_candidates: int | None = None,
+    ) -> PortfolioBacktestReport:
+        """Run the simulator on candidate-specific contexts prepared upstream.
+
+        Strategy discovery uses a read-only shared market snapshot to avoid
+        loading and calculating the same full universe for every candidate.
+        The contexts still flow through this service's canonical simulator and
+        report builder, so ordinary backtest semantics remain the source of
+        truth.
+        """
+
+        if config.formula_text:
+            raise ValueError("共享行情快照不支持自定义公式")
+        self._validate_outputs(config, None)
+        prepared = list(contexts)
+        candidate_total = max(len(prepared), total_candidates or len(prepared))
+        if not prepared:
+            return self._empty_report(
+                config,
+                candidate_total,
+                {"共享行情快照没有可用标的": candidate_total},
+            )
+        dates = self._global_dates(prepared)
+        if not dates:
+            return self._empty_report(
+                config,
+                candidate_total,
+                {"共享行情快照没有可用日期": candidate_total},
+            )
+        fitness_filter = self._build_fitness_filter(prepared, config)
+        simulation = self._simulate(prepared, dates, config, fitness_filter)
+        return self._build_report(
+            config,
+            dates,
+            candidate_total,
+            len(prepared),
+            candidate_total - len(prepared),
+            {},
+            simulation,
+            _portfolio_fingerprint(prepared),
+        )
 
     def run_stock(
         self,

@@ -154,8 +154,17 @@ def test_real_duckdb_service_evaluates_candidates_in_eight_processes(tmp_path: P
         seed=19,
     )
 
-    result = StrategyDiscoveryService(store=store).run(experiment)
+    events: list[tuple[int, int, str, dict[str, object]]] = []
+    result = StrategyDiscoveryService(store=store).run(
+        experiment,
+        progress_callback=lambda current, total, phase, metadata: events.append(
+            (current, total, phase, dict(metadata))
+        ),
+    )
 
     assert result["search_metadata"]["evaluation_mode"] == "process_pool"
     assert result["search_metadata"]["evaluation_workers"] == 8
+    assert result["algorithm_metadata"]["data_snapshot"] == "shared_memmap"
+    assert result["algorithm_metadata"]["snapshot_build_seconds"] >= 0
+    assert events[0][2] == "preparing_snapshot"
     assert len(result["data_fingerprint"]) == 64

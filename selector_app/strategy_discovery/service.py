@@ -30,6 +30,7 @@ from .catalog import default_indicator_catalog
 from .evaluation import run_validation_pipeline
 from .models import DiscoveryRequest, StrategyCandidate
 from .search import BatchEvaluator, HybridSearchEngine
+from .snapshot import DiscoverySnapshot, build_discovery_snapshot
 
 ProgressCallback = Callable[[int, int, str, Mapping[str, object]], None]
 DISCOVERY_EVALUATION_WORKERS = 8
@@ -37,7 +38,7 @@ DISCOVERY_EVALUATION_WORKERS = 8
 _WORKER_DISCOVERY_SERVICE: StrategyDiscoveryService | None = None
 
 
-def _init_discovery_worker(database_path: str) -> None:
+def _init_discovery_worker(database_path: str, snapshot_path: str | None = None) -> None:
     global _WORKER_DISCOVERY_SERVICE
     worker_store = DuckDbMarketDataStore(database_path, read_only=True)
     worker_portfolio = PortfolioBacktestService(
@@ -47,6 +48,7 @@ def _init_discovery_worker(database_path: str) -> None:
     _WORKER_DISCOVERY_SERVICE = StrategyDiscoveryService(
         portfolio_service=worker_portfolio,
         store=worker_store,
+        discovery_snapshot=(DiscoverySnapshot(snapshot_path) if snapshot_path else None),
     )
 
 
@@ -80,6 +82,7 @@ class StrategyDiscoveryService:
         *,
         portfolio_service: PortfolioServiceLike | None = None,
         store: DuckDbMarketDataStore | None = None,
+        discovery_snapshot: DiscoverySnapshot | None = None,
     ) -> None:
         selected_store = store or DuckDbMarketDataStore()
         self._portfolio_service = portfolio_service or PortfolioBacktestService(
@@ -87,6 +90,7 @@ class StrategyDiscoveryService:
             indicator_cache=IndicatorCache(selected_store),
         )
         self._store = selected_store
+        self._discovery_snapshot = discovery_snapshot
         self._parallel_enabled = isinstance(
             self._portfolio_service, PortfolioBacktestService
         ) and isinstance(
@@ -105,6 +109,7 @@ class StrategyDiscoveryService:
             "frequency": "daily",
             "evaluation_mode": "process_pool" if self._parallel_enabled else "serial",
             "evaluation_workers": (DISCOVERY_EVALUATION_WORKERS if self._parallel_enabled else 1),
+            "data_snapshot": "shared_memmap" if self._parallel_enabled else "none",
             "indicator_count": len(catalog.values),
             "signal_count": len(catalog.signal_ids),
             "indicators": [
@@ -147,18 +152,80 @@ class StrategyDiscoveryService:
         progress_callback: ProgressCallback | None = None,
         abort_check: Callable[[], bool] | None = None,
     ) -> dict[str, object]:
+        started = time.monotonic()
         if self._parallel_enabled:
             self._assert_local_data(request)
+            report_snapshot_progress: Callable[[int, int], None] | None = None
+            if progress_callback is not None:
+                estimated_total = _progress_plan(request)[2]
+
+                def report_snapshot_progress(current: int, total: int) -> None:
+                    progress_callback(
+                        current,
+                        total,
+                        "preparing_snapshot",
+                        {
+                            "overall_progress": 0.0,
+                            "phase_current": current,
+                            "phase_total": total,
+                            "phase_label": "准备行情和指标快照",
+                            "estimated_total_evaluations": estimated_total,
+                            "completed_work_units": 0.0,
+                            "elapsed_seconds": max(0.0, time.monotonic() - started),
+                            "throughput_per_second": 0.0,
+                            "estimated_seconds_remaining": None,
+                        },
+                    )
+
+                report_snapshot_progress(0, 1)
+            snapshot_started = time.monotonic()
+            with build_discovery_snapshot(
+                self._store,
+                request,
+                progress_callback=report_snapshot_progress,
+                abort_check=abort_check,
+            ) as snapshot:
+                snapshot_build_seconds = max(0.0, time.monotonic() - snapshot_started)
+                if progress_callback is not None:
+                    progress_callback(
+                        1,
+                        1,
+                        "snapshot_ready",
+                        {
+                            "overall_progress": 0.0,
+                            "phase_current": 1,
+                            "phase_total": 1,
+                            "phase_label": "快照已准备，开始寻优",
+                            "estimated_total_evaluations": _progress_plan(request)[2],
+                            "completed_work_units": 0.0,
+                            "elapsed_seconds": max(0.0, time.monotonic() - started),
+                            "throughput_per_second": 0.0,
+                            "estimated_seconds_remaining": None,
+                            "snapshot_build_seconds": snapshot_build_seconds,
+                        },
+                    )
+                with self._evaluation_executor(str(snapshot.root)) as evaluation_executor:
+                    return self._run_impl(
+                        request,
+                        progress_callback=progress_callback,
+                        abort_check=abort_check,
+                        evaluation_executor=evaluation_executor,
+                        started=started,
+                        snapshot_build_seconds=snapshot_build_seconds,
+                    )
         with self._evaluation_executor() as evaluation_executor:
             return self._run_impl(
                 request,
                 progress_callback=progress_callback,
                 abort_check=abort_check,
                 evaluation_executor=evaluation_executor,
+                started=started,
             )
 
     @contextmanager
-    def _evaluation_executor(self) -> Iterator[ProcessPoolExecutor | None]:
+    def _evaluation_executor(
+        self, snapshot_path: str | None = None
+    ) -> Iterator[ProcessPoolExecutor | None]:
         if not self._parallel_enabled:
             yield None
             return
@@ -167,7 +234,7 @@ class StrategyDiscoveryService:
             max_workers=DISCOVERY_EVALUATION_WORKERS,
             mp_context=multiprocessing.get_context("spawn"),
             initializer=_init_discovery_worker,
-            initargs=(database_path,),
+            initargs=(database_path, snapshot_path),
         )
         try:
             yield executor
@@ -204,8 +271,10 @@ class StrategyDiscoveryService:
         progress_callback: ProgressCallback | None = None,
         abort_check: Callable[[], bool] | None = None,
         evaluation_executor: ProcessPoolExecutor | None = None,
+        started: float | None = None,
+        snapshot_build_seconds: float = 0.0,
     ) -> dict[str, object]:
-        started = time.monotonic()
+        started = time.monotonic() if started is None else started
         fingerprint_holder = [""]
         best_metrics: dict[str, float | None] = {
             "sharpe": None,
@@ -356,6 +425,8 @@ class StrategyDiscoveryService:
             "algorithm_version": search_result.search_metadata.get("algorithm_version", "1"),
             "fallback_enabled": search_result.search_metadata.get("fallback_enabled", False),
             "surrogate_enabled": search_result.search_metadata.get("surrogate_enabled", False),
+            "data_snapshot": ("shared_memmap" if evaluation_executor is not None else "none"),
+            "snapshot_build_seconds": snapshot_build_seconds,
             "seed": request.seed,
             "optuna_version": _package_version("optuna"),
             "lightgbm_version": _package_version("lightgbm"),
@@ -384,7 +455,17 @@ class StrategyDiscoveryService:
         payload["end_date"] = end_text
         try:
             config = PortfolioBacktestRequest.model_validate(payload).to_config()
-            report = self._portfolio_service.run(config)
+            report: PortfolioBacktestReport | dict[str, object]
+            if self._discovery_snapshot is not None and isinstance(
+                self._portfolio_service, PortfolioBacktestService
+            ):
+                report = self._portfolio_service.run_prepared_contexts(
+                    config,
+                    self._discovery_snapshot.contexts_for_config(config),
+                    total_candidates=self._discovery_snapshot.total_candidates,
+                )
+            else:
+                report = self._portfolio_service.run(config)
         except Exception as exc:  # noqa: BLE001 - isolate one candidate
             return {
                 "error": str(exc),
