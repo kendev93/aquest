@@ -79,6 +79,7 @@ def test_strategy_discovery_api_starts_reports_and_reads_history(tmp_path) -> No
     assert capabilities.status_code == 200
     assert capabilities.json()["data"]["indicator_count"] == 1
     assert state["status"] == "completed"
+    assert state["metadata"]["overall_progress"] == 1.0
     assert results.status_code == 200
     assert history.status_code == 200
     assert history.json()["data"][0]["history_id"]

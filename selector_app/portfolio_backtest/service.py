@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import heapq
 from collections import Counter, deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -185,6 +186,7 @@ class PortfolioBacktestService:
         contexts: Sequence[_StockSeries],
         *,
         total_candidates: int | None = None,
+        include_details: bool = True,
     ) -> PortfolioBacktestReport:
         """Run the simulator on candidate-specific contexts prepared upstream.
 
@@ -214,7 +216,13 @@ class PortfolioBacktestService:
                 {"共享行情快照没有可用日期": candidate_total},
             )
         fitness_filter = self._build_fitness_filter(prepared, config)
-        simulation = self._simulate(prepared, dates, config, fitness_filter)
+        simulation = self._simulate(
+            prepared,
+            dates,
+            config,
+            fitness_filter,
+            include_details=include_details,
+        )
         return self._build_report(
             config,
             dates,
@@ -271,6 +279,7 @@ class PortfolioBacktestService:
                 [int(value) for value in context.dates],
                 history_config,
                 None,
+                include_details=False,
             )
             histories[context.symbol] = RollingFitnessHistory.from_records(
                 trades=cast(list[dict[str, PortfolioJsonValue]], simulation["trades"]),
@@ -549,6 +558,8 @@ class PortfolioBacktestService:
         dates: list[int],
         config: PortfolioBacktestConfig,
         fitness_filter: RollingFitnessFilter | None = None,
+        *,
+        include_details: bool = True,
     ) -> dict[str, object]:
         by_symbol = {context.symbol: context for context in contexts}
         positions: dict[str, _Position] = {}
@@ -604,10 +615,11 @@ class PortfolioBacktestService:
                 and date_index >= cooldown_until.get(pending.symbol, -1)
                 and pending.signal_date >= current_date
             ]
-            for context in contexts:
+            for symbol in positions:
+                context = by_symbol[symbol]
                 index = context.date_to_index.get(current_date)
                 if index is not None:
-                    last_prices[context.symbol] = float(context.closes[index])
+                    last_prices[symbol] = float(context.closes[index])
             total_value, position_value = self._portfolio_value(positions, last_prices, cash)
             equity.append(
                 {
@@ -618,11 +630,12 @@ class PortfolioBacktestService:
                     "positions_count": len(positions),
                 }
             )
-            states.append(
-                self._state_record(
-                    current_date, positions, last_prices, cash, total_value, position_value
+            if include_details:
+                states.append(
+                    self._state_record(
+                        current_date, positions, last_prices, cash, total_value, position_value
+                    )
                 )
-            )
 
             new_exit = self._schedule_exits(
                 current_date,
@@ -644,8 +657,10 @@ class PortfolioBacktestService:
                     fitness_filter,
                     cooldown_until,
                     date_index,
+                    include_event=include_details,
                 )
-                ranking_events.append(event)
+                if include_details:
+                    ranking_events.append(event)
 
         return {
             "cash": cash,
@@ -946,6 +961,8 @@ class PortfolioBacktestService:
         fitness_filter: RollingFitnessFilter | None,
         cooldown_until: Mapping[str, int],
         date_index: int,
+        *,
+        include_event: bool = True,
     ) -> tuple[list[_PendingBuy], dict[str, PortfolioJsonValue]]:
         excluded = set(positions) | set(pending_sells)
         candidates: list[tuple[float, _StockSeries]] = []
@@ -966,24 +983,44 @@ class PortfolioBacktestService:
             decision = (
                 fitness_filter.decide(context.symbol, current_date) if fitness_filter else None
             )
-            ranked_candidates.append((score, context, decision))
+            if include_event:
+                ranked_candidates.append((score, context, decision))
             if decision is None or decision.eligible:
                 candidates.append((score, context))
-        ranked_candidates.sort(
-            key=lambda item: (
-                -item[0] if config.rank_order == "desc" else item[0],
-                item[1].symbol,
+        if include_event:
+            ranked_candidates.sort(
+                key=lambda item: (
+                    -item[0] if config.rank_order == "desc" else item[0],
+                    item[1].symbol,
+                )
             )
-        )
-        candidates.sort(
-            key=lambda item: (-item[0] if config.rank_order == "desc" else item[0], item[1].symbol)
-        )
         slots = max(0, config.max_positions - len(positions) + len(pending_sells))
-        selected = candidates[:slots]
+        if include_event:
+            candidates.sort(
+                key=lambda item: (
+                    -item[0] if config.rank_order == "desc" else item[0],
+                    item[1].symbol,
+                )
+            )
+            selected = candidates[:slots]
+        else:
+            key = (
+                (lambda item: (-item[0], item[1].symbol))
+                if config.rank_order == "desc"
+                else (lambda item: (item[0], item[1].symbol))
+            )
+            selected = heapq.nsmallest(slots, candidates, key=key)
         slot_budget = total_value / config.max_positions if config.max_positions else cash
         pending = [
             _PendingBuy(context.symbol, current_date, slot_budget) for _, context in selected
         ]
+        if not include_event:
+            return pending, {
+                "date": _date_text(current_date),
+                "slots_available": slots,
+                "ranking_value": config.ranking_value,
+                "candidates": [],
+            }
         event_candidates: list[dict[str, PortfolioJsonValue]] = []
         selected_symbols = {context.symbol for _, context in selected}
         for rank, (score, context, decision) in enumerate(

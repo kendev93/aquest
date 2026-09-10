@@ -132,6 +132,39 @@ def test_candidate_normalization_deduplicates_commutative_condition_order() -> N
     assert candidate_hash(first) == candidate_hash(second)
 
 
+def test_lightgbm_surrogate_reuses_model_until_enough_new_samples(monkeypatch) -> None:
+    pytest.importorskip("lightgbm")
+    request = DiscoveryRequest(
+        base_config={"max_positions": 1},
+        indicator_ids=("technical.ma5", "technical.ma20"),
+        signal_ids=(),
+        max_conditions_per_side=1,
+        required_buy_conditions=(
+            ScreenCondition(left_value="technical.ma5", operator="gt", right_constant=10.0),
+        ),
+        required_sell_conditions=(
+            ScreenCondition(left_value="technical.ma20", operator="gt", right_constant=10.0),
+        ),
+    )
+    candidates = [
+        build_random_candidate(request, random.Random(seed)).with_metrics(
+            "search",
+            {"sharpe": float(seed), "annual_return": float(seed) / 10},
+        )
+        for seed in range(30)
+    ]
+    surrogate = search_module._LightGBMSurrogate()
+
+    assert surrogate.fit(candidates[:10], "sharpe") is True
+    assert surrogate.fit_count == 1
+    assert surrogate.fit(candidates[:15], "sharpe") is True
+    assert surrogate.fit_count == 1
+    assert surrogate.fit(candidates[:20], "sharpe") is True
+    assert surrogate.fit_count == 2
+    assert surrogate.fit(candidates[:15], "annual_return") is True
+    assert surrogate.fit_count == 3
+
+
 def test_hybrid_search_returns_separate_sharpe_and_return_boards() -> None:
     request = DiscoveryRequest(
         base_config={"max_positions": 2},
@@ -172,6 +205,36 @@ def test_hybrid_search_returns_separate_sharpe_and_return_boards() -> None:
         result.results_by_return[0].metrics["search"]["annual_return"]
         >= result.results_by_return[-1].metrics["search"]["annual_return"]
     )
+
+
+def test_hybrid_search_can_stop_after_a_long_plateau() -> None:
+    request = DiscoveryRequest(
+        base_config={"max_positions": 1},
+        indicator_ids=("technical.ma5",),
+        signal_ids=(),
+        max_conditions_per_side=0,
+        max_trials=100,
+        min_trades=0,
+        max_drawdown=None,
+    )
+
+    result = HybridSearchEngine().search(
+        request,
+        evaluator=lambda _candidate, _stage: {
+            "annual_return": 0.1,
+            "sharpe": 1.0,
+            "total_trades": 10,
+            "max_drawdown": 0.1,
+        },
+        max_trials=100,
+        batch_size=10,
+        convergence_min_trials=20,
+        convergence_patience=20,
+        seed=23,
+    )
+
+    assert result.search_metadata["stop_reason"] == "converged"
+    assert result.search_metadata["evaluated_trials"] < 100
 
 
 def test_missing_ml_dependencies_fail_without_explicit_local_fallback(monkeypatch) -> None:

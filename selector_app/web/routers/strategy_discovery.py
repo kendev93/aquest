@@ -131,7 +131,10 @@ def create_strategy_discovery(
                         "surrogate_status": search_metadata.get("surrogate_status"),
                         "surrogate_enabled": search_metadata.get("surrogate_status") == "enabled",
                         "stop_reason": search_metadata.get("stop_reason"),
+                        "overall_progress": 1.0,
+                        "estimated_seconds_remaining": 0.0,
                     },
+                    progress=1.0,
                 )
             if history_id:
                 result["history_id"] = history_id

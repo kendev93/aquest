@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
@@ -339,32 +339,27 @@ def _write_snapshot(
     signal_ids = tuple(catalog.signal_ids)
     formula_ids = tuple(FORMULA_REGISTRY.all_formula_ids())
     total_rows = len(combined)
-    bars = np.lib.format.open_memmap(
+    bars = _open_snapshot_memmap(
         root / "bars.npy",
-        mode="w+",
         dtype=np.float64,
         shape=(len(_BAR_ARRAY_NAMES), total_rows),
     )
-    dates = np.lib.format.open_memmap(
-        root / "dates.npy", mode="w+", dtype=np.int64, shape=(total_rows,)
-    )
-    values = np.lib.format.open_memmap(
+    dates = _open_snapshot_memmap(root / "dates.npy", dtype=np.int64, shape=(total_rows,))
+    values = _open_snapshot_memmap(
         root / "values.npy",
-        mode="w+",
         dtype=np.float64,
         shape=(len(value_ids), total_rows),
     )
-    signals = np.lib.format.open_memmap(
+    signals = _open_snapshot_memmap(
         root / "signals.npy",
-        mode="w+",
         dtype=np.bool_,
         shape=(len(signal_ids), total_rows),
     )
-    required_buy = np.lib.format.open_memmap(
-        root / "required_buy.npy", mode="w+", dtype=np.bool_, shape=(total_rows,)
+    required_buy = _open_snapshot_memmap(
+        root / "required_buy.npy", dtype=np.bool_, shape=(total_rows,)
     )
-    required_sell = np.lib.format.open_memmap(
-        root / "required_sell.npy", mode="w+", dtype=np.bool_, shape=(total_rows,)
+    required_sell = _open_snapshot_memmap(
+        root / "required_sell.npy", dtype=np.bool_, shape=(total_rows,)
     )
     required_buy_rule = _required_rule(request.required_buy_conditions)
     required_sell_rule = _required_rule(request.required_sell_conditions)
@@ -471,6 +466,21 @@ def _condition_to_dict(condition: ScreenCondition) -> dict[str, object]:
         "right_value": condition.right_value,
         "right_constant": condition.right_constant,
     }
+
+
+def _open_snapshot_memmap(
+    path: Path,
+    *,
+    dtype: type | str | np.dtype[Any] | None,
+    shape: tuple[int, ...],
+) -> np.memmap:
+    mapped = np.lib.format.open_memmap(
+        path,
+        mode="w+",
+        dtype=dtype,
+        shape=shape,
+    )
+    return mapped
 
 
 def _condition_from_dict(value: object) -> ScreenCondition:

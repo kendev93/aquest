@@ -425,6 +425,7 @@ class StrategyDiscoveryService:
             "algorithm_version": search_result.search_metadata.get("algorithm_version", "1"),
             "fallback_enabled": search_result.search_metadata.get("fallback_enabled", False),
             "surrogate_enabled": search_result.search_metadata.get("surrogate_enabled", False),
+            "surrogate_fit_count": search_result.search_metadata.get("surrogate_fit_count", 0),
             "data_snapshot": ("shared_memmap" if evaluation_executor is not None else "none"),
             "snapshot_build_seconds": snapshot_build_seconds,
             "seed": request.seed,
@@ -463,6 +464,7 @@ class StrategyDiscoveryService:
                     config,
                     self._discovery_snapshot.contexts_for_config(config),
                     total_candidates=self._discovery_snapshot.total_candidates,
+                    include_details=False,
                 )
             else:
                 report = self._portfolio_service.run(config)

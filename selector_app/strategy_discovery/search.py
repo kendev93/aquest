@@ -71,12 +71,31 @@ class _TrialAdapter:
 class _LightGBMSurrogate:
     """Predict search-period scores only; never replaces real backtests."""
 
+    _REFIT_INTERVAL = 10
+
     def __init__(self, *, strict: bool = False) -> None:
         self._model: Any = None
         self._feature_names: list[str] = []
+        self._models: dict[str, Any] = {}
+        self._feature_names_by_objective: dict[str, tuple[str, ...]] = {}
+        self._fitted_counts: dict[str, int] = {}
+        self._feature_cache: dict[str, dict[str, float]] = {}
+        self._fit_count = 0
         self._strict = strict
         self.status = "unavailable"
         self.reason = ""
+
+    @property
+    def fit_count(self) -> int:
+        return self._fit_count
+
+    def _features(self, candidate: StrategyCandidate) -> dict[str, float]:
+        cached = self._feature_cache.get(candidate.candidate_hash)
+        if cached is not None:
+            return cached
+        features = _flatten(candidate.to_config())
+        self._feature_cache[candidate.candidate_hash] = features
+        return features
 
     def fit(self, candidates: Sequence[StrategyCandidate], objective: str) -> bool:
         if len(candidates) < 10:
@@ -94,8 +113,23 @@ class _LightGBMSurrogate:
             self.status = "fallback"
             self.reason = f"LightGBM 不可用: {exc}"
             return False
-        rows = [_flatten(candidate.to_config()) for candidate in candidates]
-        self._feature_names = sorted({key for row in rows for key in row})
+        objective = str(objective)
+        rows = [self._features(candidate) for candidate in candidates]
+        feature_names = tuple(sorted({key for row in rows for key in row}))
+        previous_model = self._models.get(objective)
+        previous_names = self._feature_names_by_objective.get(objective, ())
+        previous_count = self._fitted_counts.get(objective, 0)
+        if (
+            previous_model is not None
+            and feature_names == previous_names
+            and len(candidates) - previous_count < self._REFIT_INTERVAL
+        ):
+            self._model = previous_model
+            self._feature_names = list(previous_names)
+            self.status = "enabled"
+            self.reason = "复用最近 surrogate 模型"
+            return True
+        self._feature_names = list(feature_names)
         targets = np.asarray(
             [
                 _metric(candidate.metrics.get("search", {}), objective, 0.0)
@@ -117,7 +151,7 @@ class _LightGBMSurrogate:
                 feature_name=[f"feature_{index}" for index in range(len(self._feature_names))],
                 free_raw_data=True,
             )
-            self._model = lgb.train(
+            model = lgb.train(
                 {
                     "objective": "regression",
                     "verbosity": -1,
@@ -138,6 +172,11 @@ class _LightGBMSurrogate:
             self.status = "fallback"
             self.reason = f"LightGBM 训练失败: {exc}"
             return False
+        self._model = model
+        self._models[objective] = model
+        self._feature_names_by_objective[objective] = feature_names
+        self._fitted_counts[objective] = len(candidates)
+        self._fit_count += 1
         self.status = "enabled"
         self.reason = ""
         return True
@@ -150,7 +189,7 @@ class _LightGBMSurrogate:
 
             matrix = np.asarray(
                 [
-                    [_flatten(candidate.to_config()).get(key, 0.0) for key in self._feature_names]
+                    [self._features(candidate).get(key, 0.0) for key in self._feature_names]
                     for candidate in candidates
                 ],
                 dtype=float,
@@ -194,6 +233,8 @@ class HybridSearchEngine:
         batch_size: int = 1,
         evaluation_workers: int = 1,
         evaluation_mode: str | None = None,
+        convergence_min_trials: int | None = None,
+        convergence_patience: int | None = None,
         max_trials: int | None = None,
         seed: int | None = None,
         validation_limit: int = 50,
@@ -205,6 +246,18 @@ class HybridSearchEngine:
         resolved_batch_size = max(1, min(8, int(batch_size)))
         resolved_evaluation_workers = max(1, min(8, int(evaluation_workers)))
         resolved_seed = request.seed if seed is None else int(seed)
+        resolved_convergence_min_trials = _resolve_convergence_parameter(
+            convergence_min_trials,
+            trial_limit,
+            default_ratio=0.25,
+            default_floor=200,
+        )
+        resolved_convergence_patience = _resolve_convergence_parameter(
+            convergence_patience,
+            trial_limit,
+            default_ratio=0.2,
+            default_floor=100,
+        )
         rng = random.Random(resolved_seed)
         observed: list[StrategyCandidate] = []
         seen: set[str] = set()
@@ -242,6 +295,8 @@ class HybridSearchEngine:
         direct_trials = 0
         surrogate_trials = 0
         stop_reason = "completed"
+        best_scores = {"sharpe": float("-inf"), "annual_return": float("-inf")}
+        last_improvement = 0
         fidelity_counts: dict[str, int] = {"coarse": 0, "medium": 0, "full": 0}
 
         def evaluate_stage_batch(
@@ -358,8 +413,24 @@ class HybridSearchEngine:
                     else None,
                 ):
                     observed.append(candidate)
+                improved = False
+                for metric_name in best_scores:
+                    score = _metric(raw_metrics, metric_name)
+                    if score > best_scores[metric_name] + 1e-9:
+                        best_scores[metric_name] = score
+                        improved = True
+                if improved:
+                    last_improvement = evaluated
                 if progress_callback is not None:
                     progress_callback(evaluated, trial_limit, "searching")
+            if (
+                resolved_convergence_min_trials is not None
+                and resolved_convergence_patience is not None
+                and evaluated >= resolved_convergence_min_trials
+                and evaluated - last_improvement >= resolved_convergence_patience
+            ):
+                stop_reason = "converged"
+                break
         if evaluated < trial_limit and stop_reason == "completed":
             stop_reason = "attempt_limit"
 
@@ -461,11 +532,15 @@ class HybridSearchEngine:
             "duplicate_trials": duplicates,
             "direct_trials": direct_trials,
             "surrogate_trials": surrogate_trials,
+            "surrogate_fit_count": surrogate.fit_count,
             "surrogate_status": surrogate.status,
             "surrogate_enabled": surrogate.status == "enabled",
             "surrogate_reason": surrogate.reason,
             "validation_candidates": validation_limit,
             "holdout_candidates": holdout_limit,
+            "convergence_enabled": resolved_convergence_min_trials is not None,
+            "convergence_min_trials": resolved_convergence_min_trials,
+            "convergence_patience": resolved_convergence_patience,
             "multifidelity_plan": [
                 {"name": "coarse", "data_fraction": 0.25, "keep_ratio": None},
                 {"name": "medium", "data_fraction": 0.5, "keep_ratio": 0.35},
@@ -484,6 +559,24 @@ class HybridSearchEngine:
             shortlist_by_sharpe=by_sharpe[: max(10, validation_limit)],
             shortlist_by_return=by_return[: max(10, validation_limit)],
         )
+
+
+def _resolve_convergence_parameter(
+    value: int | None,
+    trial_limit: int,
+    *,
+    default_ratio: float,
+    default_floor: int,
+) -> int | None:
+    if value is None and trial_limit < 400:
+        return None
+    if value is None:
+        resolved = max(default_floor, math.ceil(trial_limit * default_ratio))
+    else:
+        resolved = int(value)
+    if resolved <= 0:
+        return None
+    return min(trial_limit, resolved)
 
 
 def _passes_constraints(

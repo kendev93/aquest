@@ -134,8 +134,11 @@ def test_snapshot_replay_matches_ordinary_portfolio_backtest(tmp_path: Path) -> 
             config,
             snapshot.contexts_for_config(config),
             total_candidates=snapshot.total_candidates,
+            include_details=False,
         )
 
     assert prepared.performance == ordinary.performance
     assert prepared.trades == ordinary.trades
     assert prepared.data_fingerprint == ordinary.data_fingerprint
+    assert prepared.states == ()
+    assert prepared.ranking_events == ()

@@ -58,11 +58,11 @@ def combine_masks(
         raise ValueError("交易规则条件的历史长度不一致")
     stacked = np.vstack([np.asarray(mask, dtype=bool) for mask in masks])
     if mode == "all":
-        return np.all(stacked, axis=0)
+        return np.asarray(np.all(stacked, axis=0), dtype=bool)
     if mode == "any":
-        return np.any(stacked, axis=0)
+        return np.asarray(np.any(stacked, axis=0), dtype=bool)
     if mode == "at_least" and minimum_matches is not None:
-        return np.sum(stacked, axis=0) >= minimum_matches
+        return np.asarray(np.sum(stacked, axis=0) >= minimum_matches, dtype=bool)
     raise ValueError(f"不支持的条件组合方式: {mode}")
 
 
