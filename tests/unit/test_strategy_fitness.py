@@ -38,7 +38,12 @@ class FakeAdapter:
 
     def list_stock_refs(self, vipdoc_path, universe, universe_file=None):
         return [
-            StockRef(market="SH", code=code, path=Path(vipdoc_path) / f"sh{code}.day")
+            StockRef(
+                market="SH",
+                code=code,
+                name=f"测试{code}",
+                path=Path(vipdoc_path) / f"sh{code}.day",
+            )
             for code in self.frames
         ]
 
@@ -103,12 +108,23 @@ def test_strategy_fitness_splits_time_and_scores_each_stock() -> None:
     assert report.train_end_date == "2024-01-03"
     assert report.validation_end_date == "2024-01-04"
     assert {result.code for result in report.results} == {"600000", "600001"}
+    assert {result.name for result in report.results} == {"测试600000", "测试600001"}
     for result in report.results:
         assert result.train.bars == 3
         assert result.validation.bars == 1
         assert result.test.bars == 2
         assert result.total_checks == 8
         assert 0 <= result.suitability_score <= 100
+
+
+def test_strategy_fitness_uses_all_local_dates_when_date_window_is_blank() -> None:
+    report = StrategyFitnessService(adapter=FakeAdapter()).run(
+        config(start_date=None, end_date=None)
+    )
+
+    assert report.bars == 6
+    assert report.start_date == "2024-01-01"
+    assert report.end_date == "2024-01-06"
 
 
 def test_strategy_fitness_requires_three_non_empty_time_windows() -> None:

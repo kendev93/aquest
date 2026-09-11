@@ -82,5 +82,7 @@ def test_strategy_fitness_job_can_be_created_and_results_are_available(tmp_path:
     assert history_response.status_code == 200
     assert history_response.json()["data"][0]["history_id"] == job_id
     assert history_response.json()["data"][0]["backtest_type"] == "strategy_fitness"
+    assert history_response.json()["data"][0]["summary"]["start_date"] == "2024-01-01"
+    assert history_response.json()["data"][0]["summary"]["end_date"] == "2024-01-06"
     assert history_detail.status_code == 200
     assert history_detail.json()["data"]["result"]["train_end_date"] == "2024-01-03"

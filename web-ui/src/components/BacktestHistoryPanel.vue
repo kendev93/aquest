@@ -38,7 +38,26 @@ function formatDuration(value: number): string {
 function summaryLabel(item: BacktestHistorySummary): string {
   const summary = item.summary
   if (typeof summary.market === 'string' && typeof summary.code === 'string') {
-    return `${summary.market} ${summary.code}`
+    return typeof summary.name === 'string' && summary.name
+      ? `${summary.name}（${summary.market} ${summary.code}）`
+      : `${summary.market} ${summary.code}`
+  }
+  if (Array.isArray(summary.instrument_names)) {
+    const names = summary.instrument_names
+      .map((item) => {
+        if (!item || typeof item !== 'object') return null
+        const value = item as Record<string, unknown>
+        if (typeof value.name !== 'string' || !value.name) return null
+        if (typeof value.market === 'string' && typeof value.code === 'string') {
+          return `${value.name}（${value.market} ${value.code}）`
+        }
+        return value.name
+      })
+      .filter((name): name is string => name !== null)
+    if (names.length) {
+      const prefix = typeof summary.universe === 'string' ? summary.universe.toUpperCase() : item.backtest_type
+      return `${prefix} · ${names.slice(0, 3).join('、')}${names.length > 3 ? ' 等' : ''}`
+    }
   }
   if (typeof summary.universe === 'string') return summary.universe.toUpperCase()
   return item.backtest_type

@@ -86,8 +86,8 @@ class BacktestService:
         sell_mask = self._rule_window(
             formula_results, config.sell_rule, window_indices, parsed_formula is not None
         )
-        result = self._run_engine(window, buy_mask, sell_mask, config)
-        report = self._build_report(result, window, config, data_fingerprint)
+        result = self._run_engine(window, buy_mask, sell_mask, config, name=ref.name)
+        report = self._build_report(result, window, config, data_fingerprint, name=ref.name)
         if progress_callback is not None:
             progress_callback(1, 1)
         return report
@@ -217,6 +217,8 @@ class BacktestService:
         buy_mask: np.ndarray,
         sell_mask: np.ndarray,
         config: BacktestConfig,
+        *,
+        name: str | None = None,
     ) -> SignalBacktestResult:
         return run_signal_backtest(
             frame,
@@ -235,6 +237,7 @@ class BacktestService:
             ),
             market=config.market,
             code=config.code,
+            name=name,
         )
 
     @staticmethod
@@ -243,6 +246,8 @@ class BacktestService:
         frame: pd.DataFrame,
         config: BacktestConfig,
         data_fingerprint: str,
+        *,
+        name: str | None = None,
     ) -> BacktestReport:
         # Keep serialization here so pandas/numpy values never leak into the
         # JSON response contract.
@@ -256,6 +261,7 @@ class BacktestService:
         return BacktestReport(
             market=config.market,
             code=config.code,
+            name=name,
             bars=len(frame),
             start_date=dates.iloc[0].strftime("%Y-%m-%d"),
             end_date=dates.iloc[-1].strftime("%Y-%m-%d"),

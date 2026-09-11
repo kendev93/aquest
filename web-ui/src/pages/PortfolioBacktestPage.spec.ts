@@ -66,16 +66,16 @@ const result: PortfolioBacktestResult = {
     { date: '2024-01-06', cash: 200, position_value: 11000, total: 11200, positions_count: 2, drawdown: 0, drawdown_pct: 0 },
   ],
   trades: [
-    { date: '2024-01-03', signal_date: '2024-01-02', market: 'SH', code: '600000', direction: 'BUY', size: 400, price: 10, commission: 0, stamp_tax: 0, slippage: 0, pnl: 0, cost_basis: 0, reason: '排名入选', rejected: false },
-    { date: '2024-01-04', signal_date: '2024-01-03', market: 'SH', code: '600000', direction: 'SELL', size: 400, price: 11, commission: 0, stamp_tax: 0, slippage: 0, pnl: 400, cost_basis: 4000, reason: '止盈', rejected: false },
+    { date: '2024-01-03', signal_date: '2024-01-02', market: 'SH', code: '600000', name: '浦发银行', direction: 'BUY', size: 400, price: 10, commission: 0, stamp_tax: 0, slippage: 0, pnl: 0, cost_basis: 0, reason: '排名入选', rejected: false },
+    { date: '2024-01-04', signal_date: '2024-01-03', market: 'SH', code: '600000', name: '浦发银行', direction: 'SELL', size: 400, price: 11, commission: 0, stamp_tax: 0, slippage: 0, pnl: 400, cost_basis: 4000, reason: '止盈', rejected: false },
   ],
   states: [{
     date: '2024-01-06', cash: 200, position_value: 11000, total: 11200, positions_count: 2,
-    holdings: [{ market: 'SH', code: '600000', size: 400, entry_price: 10, close: 11, unrealized_pnl: 400 }],
+    holdings: [{ market: 'SH', code: '600000', name: '浦发银行', size: 400, entry_price: 10, close: 11, unrealized_pnl: 400 }],
   }],
   ranking_events: [{
     date: '2024-01-03', slots_available: 1, ranking_value: 'indicator_three.varo7',
-    candidates: [{ rank: 1, market: 'SZ', code: '000001', score: 9.5, selected: true }],
+    candidates: [{ rank: 1, market: 'SZ', code: '000001', name: '平安银行', score: 9.5, selected: true }],
   }],
   failure_reasons: {},
   diagnostic: null,
@@ -98,6 +98,7 @@ describe('PortfolioBacktestPage', () => {
   it('submits ranked slot configuration and renders holdings, trades, and candidates', async () => {
     const wrapper = mount(PortfolioBacktestPage)
     await flushPromises()
+    expect(wrapper.text()).toContain('日期留空（默认）表示使用股票池全部本地历史数据')
 
     await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')
     await flushPromises()
@@ -109,11 +110,15 @@ describe('PortfolioBacktestPage', () => {
         conditions: [expect.objectContaining({ left_value: 'indicator_three.var1' })],
       }),
       ranking_value: 'indicator_three.varo7', max_positions: 5, stop_loss_pct: 0.08,
+      start_date: null, end_date: null,
     }))
     expect(wrapper.get('[data-testid="portfolio-results"]').text()).toContain('12.00%')
     expect(wrapper.get('[data-testid="portfolio-holdings"]').text()).toContain('600000')
     expect(wrapper.get('[data-testid="portfolio-trades"]').text()).toContain('止盈')
+    expect(wrapper.get('[data-testid="portfolio-trades"]').text()).toContain('浦发银行')
+    expect(wrapper.get('[data-testid="portfolio-holdings"]').text()).toContain('浦发银行')
     expect(wrapper.get('[data-testid="portfolio-ranking"]').text()).toContain('000001')
+    expect(wrapper.get('[data-testid="portfolio-ranking"]').text()).toContain('平安银行')
     expect(wrapper.get('[data-testid="portfolio-equity-chart"]')).toBeTruthy()
   })
 

@@ -127,6 +127,7 @@ def _backtest_history_summary(result: Mapping[str, object]) -> dict[str, object]
     for key in (
         "market",
         "code",
+        "name",
         "universe",
         "bars",
         "start_date",
@@ -149,7 +150,73 @@ def _backtest_history_summary(result: Mapping[str, object]) -> dict[str, object]
     fitness_results = result.get("results")
     if isinstance(fitness_results, (list, tuple)):
         summary["result_count"] = len(fitness_results)
+    instrument_names = _backtest_history_instrument_names(result)
+    if instrument_names:
+        summary["instrument_names"] = instrument_names
     return summary
+
+
+def _backtest_history_instrument_names(result: Mapping[str, object]) -> list[dict[str, str]]:
+    """Collect a bounded name preview for multi-instrument history rows."""
+
+    instruments: dict[tuple[str, str], dict[str, str]] = {}
+
+    def visit(value: object) -> None:
+        if isinstance(value, Mapping):
+            market = value.get("market")
+            code = value.get("code")
+            name = _clean_name(value.get("name"))
+            if name is not None and market is not None and code is not None:
+                key = (str(market), str(code))
+                instruments[key] = {"market": key[0], "code": key[1], "name": name}
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                visit(child)
+
+    visit(result)
+    return list(instruments.values())[:12]
+
+
+def _enrich_backtest_history_names(
+    value: object,
+    names: Mapping[tuple[str, str], str],
+) -> object:
+    """Add current instrument names to old history payloads on read."""
+
+    if isinstance(value, Mapping):
+        enriched = {
+            str(key): _enrich_backtest_history_names(child, names)
+            for key, child in value.items()
+        }
+        market = enriched.get("market")
+        code = enriched.get("code")
+        if (
+            (not _clean_name(enriched.get("name")))
+            and market is not None
+            and code is not None
+        ):
+            name = names.get((str(market), str(code)))
+            if name is not None:
+                enriched["name"] = name
+        return enriched
+    if isinstance(value, list):
+        return [_enrich_backtest_history_names(child, names) for child in value]
+    if isinstance(value, tuple):
+        return tuple(_enrich_backtest_history_names(child, names) for child in value)
+    return value
+
+
+def _instrument_name_map(connection: duckdb.DuckDBPyConnection) -> dict[tuple[str, str], str]:
+    rows = connection.execute(
+        "SELECT market, code, name FROM instruments WHERE name IS NOT NULL"
+    ).fetchall()
+    return {
+        (str(row[0]), str(row[1])): str(row[2])
+        for row in rows
+        if str(row[2]).strip()
+    }
 
 
 def _clean_name(value: object) -> str | None:
@@ -1627,7 +1694,7 @@ class DuckDbMarketDataStore:
             rows = connection.execute(
                 """
                 SELECT history_id, backtest_type, created_at, started_at, finished_at,
-                       duration_seconds, summary_json
+                       duration_seconds, result_json, summary_json
                 FROM backtest_history
                 WHERE backtest_type = ?
                 ORDER BY finished_at DESC, history_id DESC
@@ -1635,14 +1702,26 @@ class DuckDbMarketDataStore:
                 """,
                 [backtest_type, BACKTEST_HISTORY_LIMIT],
             ).fetchall()
+            instrument_names = _instrument_name_map(connection)
         summaries: list[dict[str, object]] = []
         for row in rows:
+            summary: object
             try:
-                summary = json.loads(str(row[6]))
+                summary = json.loads(str(row[7]))
             except json.JSONDecodeError as exc:
                 raise MarketDataStoreError("回测历史内容损坏") from exc
             if not isinstance(summary, dict):
                 raise MarketDataStoreError("回测历史摘要无效")
+            try:
+                result = json.loads(str(row[6]))
+            except json.JSONDecodeError:
+                result = None
+            if isinstance(result, dict):
+                enriched_result = _enrich_backtest_history_names(result, instrument_names)
+                if isinstance(enriched_result, dict):
+                    enriched_summary = _enrich_backtest_history_names(summary, instrument_names)
+                    summary = dict(enriched_summary) if isinstance(enriched_summary, dict) else {}
+                    summary.update(_backtest_history_summary(enriched_result))
             summaries.append(
                 {
                     "history_id": str(row[0]),
@@ -1669,6 +1748,7 @@ class DuckDbMarketDataStore:
                 """,
                 [history_id.strip()],
             ).fetchone()
+            instrument_names = _instrument_name_map(connection)
         if row is None:
             return None
         try:
@@ -1679,6 +1759,13 @@ class DuckDbMarketDataStore:
             raise MarketDataStoreError("回测历史内容损坏") from exc
         if not all(isinstance(value, dict) for value in (request, result, summary)):
             raise MarketDataStoreError("回测历史内容无效")
+        enriched_result = _enrich_backtest_history_names(result, instrument_names)
+        enriched_summary = _enrich_backtest_history_names(summary, instrument_names)
+        if isinstance(enriched_result, dict):
+            result = enriched_result
+            if isinstance(enriched_summary, dict):
+                summary = dict(enriched_summary)
+                summary.update(_backtest_history_summary(result))
         return {
             "history_id": str(row[0]),
             "backtest_type": str(row[1]),

@@ -40,7 +40,12 @@ class FakeAdapter:
 
     def list_stock_refs(self, vipdoc_path, universe, universe_file=None):
         return [
-            StockRef(market="SH", code=code, path=Path(vipdoc_path) / f"sh{code}.day")
+            StockRef(
+                market="SH",
+                code=code,
+                name=f"测试{code}",
+                path=Path(vipdoc_path) / f"sh{code}.day",
+            )
             for code in self.frames
         ]
 
@@ -149,10 +154,25 @@ def test_portfolio_fills_a_vacated_slot_by_rank_after_stop_loss() -> None:
         ("600001", "2024-01-05"),
         ("600001", "2024-01-06"),
     ]
+    assert report.trades[0]["name"] == "测试600001"
     assert {holding["code"] for holding in report.states[-1]["holdings"]} == {"600000", "600001"}
+    assert {holding["name"] for holding in report.states[-1]["holdings"]} == {
+        "测试600000",
+        "测试600001",
+    }
     assert report.states[-1]["positions_count"] == 2
     assert report.performance["end_value"] == 11_100.0
     json.dumps(report.to_dict(), ensure_ascii=False)
+
+
+def test_portfolio_uses_all_local_dates_when_date_window_is_blank() -> None:
+    report = PortfolioBacktestService(adapter=FakeAdapter()).run(
+        config(start_date=None, end_date=None)
+    )
+
+    assert report.bars == 6
+    assert report.start_date == "2024-01-01"
+    assert report.end_date == "2024-01-06"
 
 
 def test_portfolio_supports_indicator_threshold_exit() -> None:

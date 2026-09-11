@@ -128,6 +128,7 @@ class BacktestReport:
     positions: tuple[Mapping[str, BacktestValue], ...]
     configuration: Mapping[str, BacktestValue]
     diagnostic: str | None = None
+    name: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "performance", MappingProxyType(dict(self.performance)))
@@ -137,6 +138,7 @@ class BacktestReport:
         return {
             "market": self.market,
             "code": self.code,
+            "name": self.name,
             "bars": self.bars,
             "start_date": self.start_date,
             "end_date": self.end_date,

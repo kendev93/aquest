@@ -58,7 +58,7 @@ const report: StrategyFitnessReport = {
   start_date: '2020-01-01', end_date: '2024-12-31', train_end_date: '2022-12-31', validation_end_date: '2023-12-31',
   ranking_value: 'indicator_three.varo7', train_ratio: 0.6, validation_ratio: 0.2, min_trades: 5, max_test_drawdown: 0.3,
   results: [{
-    market: 'SH', code: '600000', bars: 60, data_start: '2020-01-01', data_end: '2024-12-31', suitability_score: 87.5,
+    market: 'SH', code: '600000', name: '浦发银行', bars: 60, data_start: '2020-01-01', data_end: '2024-12-31', suitability_score: 87.5,
     passed: true, label: 'strong', passed_checks: 7, total_checks: 8, positive_periods: 3,
     checks: [{ id: 'test_return', label: '测试期总收益为正', passed: true }],
     train: phase('train', '2020-01-01', '2022-12-31', 30, 0.42),
@@ -66,7 +66,7 @@ const report: StrategyFitnessReport = {
     test: phase('test', '2024-01-01', '2024-12-31', 8, 0.08),
     failure_reason: null,
   }, {
-    market: 'SZ', code: '000001', bars: 60, data_start: '2020-01-01', data_end: '2024-12-31', suitability_score: 25,
+    market: 'SZ', code: '000001', name: '平安银行', bars: 60, data_start: '2020-01-01', data_end: '2024-12-31', suitability_score: 25,
     passed: false, label: 'insufficient', passed_checks: 2, total_checks: 8, positive_periods: 1, checks: [],
     train: phase('train', '2020-01-01', '2022-12-31', 12, 0.02),
     validation: phase('validation', '2023-01-01', '2023-12-31', 1, -0.03),
@@ -92,6 +92,7 @@ describe('StrategyFitnessPage', () => {
   it('submits the strategy and renders compatibility scores with three phases', async () => {
     const wrapper = mount(StrategyFitnessPage)
     await flushPromises()
+    expect(wrapper.text()).toContain('日期留空（默认）表示使用全市场共同可用的全部本地历史数据')
     await wrapper.get('[data-testid="fitness-config"]').trigger('submit')
     await flushPromises()
 
@@ -103,8 +104,10 @@ describe('StrategyFitnessPage', () => {
       }),
       ranking_value: 'indicator_three.varo7', train_ratio: 0.6, validation_ratio: 0.2,
       min_trades: 5, max_test_drawdown: 0.3,
+      start_date: null, end_date: null,
     }))
     expect(wrapper.get('[data-testid="fitness-results"]').text()).toContain('600000')
+    expect(wrapper.get('[data-testid="fitness-results"]').text()).toContain('浦发银行')
     expect(wrapper.get('[data-testid="fitness-results"]').text()).toContain('87.50')
     expect(wrapper.get('[data-testid="fitness-train-600000"]').text()).toContain('42.00%')
     expect(wrapper.get('[data-testid="fitness-validation-600000"]').text()).toContain('12.00%')

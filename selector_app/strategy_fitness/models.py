@@ -101,6 +101,7 @@ class StrategyFitnessResult:
     test: FitnessPhaseMetrics
     failure_reason: str | None = None
     data_fingerprint: str = ""
+    name: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -111,6 +112,7 @@ class StrategyFitnessResult:
         return {
             "market": self.market,
             "code": self.code,
+            "name": self.name,
             "bars": self.bars,
             "data_start": self.data_start,
             "data_end": self.data_end,

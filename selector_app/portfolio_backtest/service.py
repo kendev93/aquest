@@ -82,6 +82,7 @@ class _StockSeries:
     values: Mapping[str, np.ndarray]
     date_to_index: Mapping[int, int]
     data_fingerprint: str
+    name: str | None = None
 
     @property
     def symbol(self) -> str:
@@ -100,6 +101,7 @@ class _Position:
     highest_price: float
     buy_commission: float
     buy_slippage: float
+    name: str | None = None
 
     @property
     def symbol(self) -> str:
@@ -462,6 +464,7 @@ class PortfolioBacktestService:
         return _StockSeries(
             market=ref.market,
             code=ref.code,
+            name=getattr(ref, "name", None),
             instrument_type=cast(InstrumentType, getattr(ref, "instrument_type", "stock")),
             board=cast(
                 InstrumentBoard,
@@ -779,6 +782,7 @@ class PortfolioBacktestService:
                     "signal_date": _date_text(pending.signal_date),
                     "market": position.market,
                     "code": position.code,
+                    "name": position.name,
                     "instrument_type": position.instrument_type,
                     "board": position.board,
                     "direction": "SELL",
@@ -853,6 +857,7 @@ class PortfolioBacktestService:
                     "signal_date": _date_text(current_date),
                     "market": position.market,
                     "code": position.code,
+                    "name": position.name,
                     "instrument_type": position.instrument_type,
                     "board": position.board,
                     "direction": "SELL",
@@ -930,6 +935,7 @@ class PortfolioBacktestService:
             positions[pending.symbol] = _Position(
                 market=context.market,
                 code=context.code,
+                name=context.name,
                 instrument_type=context.instrument_type,
                 board=context.board,
                 size=float(shares),
@@ -945,6 +951,7 @@ class PortfolioBacktestService:
                     "signal_date": _date_text(pending.signal_date),
                     "market": context.market,
                     "code": context.code,
+                    "name": context.name,
                     "instrument_type": context.instrument_type,
                     "board": context.board,
                     "direction": "BUY",
@@ -1090,6 +1097,7 @@ class PortfolioBacktestService:
                 "rank": rank,
                 "market": context.market,
                 "code": context.code,
+                "name": context.name,
                 "score": score,
                 "selected": context.symbol in selected_symbols,
             }
@@ -1149,6 +1157,7 @@ class PortfolioBacktestService:
             {
                 "market": position.market,
                 "code": position.code,
+                "name": position.name,
                 "instrument_type": position.instrument_type,
                 "board": position.board,
                 "size": float(position.size),

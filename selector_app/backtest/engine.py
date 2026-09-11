@@ -74,6 +74,9 @@ class SignalBacktestResult:
 
 _TRADE_COLUMNS = [
     "datetime",
+    "market",
+    "code",
+    "name",
     "direction",
     "size",
     "price",
@@ -101,6 +104,7 @@ def run_signal_backtest(
     *,
     market: str = "",
     code: str = "",
+    name: str | None = None,
 ) -> SignalBacktestResult:
     """Run one long-only signal stream with next-bar execution semantics."""
 
@@ -184,6 +188,7 @@ def run_signal_backtest(
                             False,
                             market,
                             code,
+                            name,
                             signal_index,
                             prepared.iloc[signal_index]["date"],
                         )
@@ -211,6 +216,7 @@ def run_signal_backtest(
                             False,
                             market,
                             code,
+                            name,
                             signal_index,
                             prepared.iloc[signal_index]["date"],
                         )
@@ -314,6 +320,7 @@ def _trade(
     rejected: bool,
     market: str,
     code: str,
+    name: str | None,
     signal_index: int,
     signal_date: object,
 ) -> dict[str, object]:
@@ -324,6 +331,7 @@ def _trade(
         "signal_index": signal_index,
         "market": market,
         "code": code,
+        "name": name,
         "direction": direction,
         "size": float(size),
         "price": float(price),

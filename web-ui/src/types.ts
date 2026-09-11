@@ -333,6 +333,7 @@ export interface BacktestEquityPoint {
 
 export interface BacktestTrade {
   date: string
+  name?: string | null
   direction: 'BUY' | 'SELL'
   size: number
   price: number
@@ -354,6 +355,7 @@ export interface BacktestPosition {
 export interface BacktestResult {
   market: 'SH' | 'SZ'
   code: string
+  name?: string | null
   bars: number
   start_date: string
   end_date: string
@@ -471,6 +473,7 @@ export interface PortfolioTrade {
   signal_date: string
   market: 'SH' | 'SZ'
   code: string
+  name?: string | null
   direction: 'BUY' | 'SELL'
   size: number
   price: number
@@ -490,6 +493,7 @@ export interface PortfolioTrade {
 export interface PortfolioHolding {
   market: 'SH' | 'SZ'
   code: string
+  name?: string | null
   size: number
   entry_price: number
   close: number
@@ -509,6 +513,7 @@ export interface PortfolioRankingCandidate {
   rank: number
   market: 'SH' | 'SZ'
   code: string
+  name?: string | null
   score: number
   selected: boolean
   fitness_score?: number | null
@@ -649,6 +654,7 @@ export interface StrategyFitnessCheck {
 export interface StrategyFitnessResult {
   market: 'SH' | 'SZ'
   code: string
+  name?: string | null
   bars: number
   data_start: string
   data_end: string

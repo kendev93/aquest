@@ -282,6 +282,7 @@ class StrategyFitnessService:
         return StrategyFitnessResult(
             market=ref.market,
             code=ref.code,
+            name=getattr(ref, "name", None),
             bars=sum(item.bars for item in metrics),
             data_start=_date_text(_frame_start(frame, config.strategy.start_date)),
             data_end=_date_text(_frame_end(frame, config.strategy.end_date)),

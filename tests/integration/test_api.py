@@ -542,6 +542,8 @@ def test_backtest_default_service_reads_day_file_and_serializes_result(tmp_path:
     assert history_response.json()["data"][0]["history_id"] == job_id
     assert history_response.json()["data"][0]["started_at"]
     assert history_response.json()["data"][0]["finished_at"]
+    assert history_response.json()["data"][0]["summary"]["start_date"] == "2024-01-02"
+    assert history_response.json()["data"][0]["summary"]["end_date"] == "2024-01-06"
     assert history_detail.status_code == 200
     assert history_detail.json()["data"]["request"]["code"] == "600000"
 
@@ -661,6 +663,8 @@ def test_portfolio_backtest_job_can_be_created_and_polled(tmp_path: Path) -> Non
     assert history_response.status_code == 200
     assert history_response.json()["data"][0]["history_id"] == job_id
     assert history_response.json()["data"][0]["backtest_type"] == "portfolio"
+    assert history_response.json()["data"][0]["summary"]["start_date"] == "2024-01-02"
+    assert history_response.json()["data"][0]["summary"]["end_date"] == "2024-01-06"
     assert history_detail.status_code == 200
     assert history_detail.json()["data"]["result"]["max_positions"] == 2
 

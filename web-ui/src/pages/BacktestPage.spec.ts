@@ -55,14 +55,14 @@ describe('BacktestPage', () => {
       errors: 0, error: null, result: null,
     })
     vi.mocked(backtestApi.getBacktestResults).mockResolvedValue({
-      market: 'SH', code: '600000', bars: 5, start_date: '2024-01-02', end_date: '2024-01-06',
+      market: 'SH', code: '600000', name: '浦发银行', bars: 5, start_date: '2024-01-02', end_date: '2024-01-06',
       buy_signal: 'indicator_three.prepare_rally', sell_signal: 'indicator_three.end_zone',
       performance: { total_return: 0.04, annual_return: 0.1, max_drawdown: 0.02, sharpe: 1.2, total_trades: 2, win_rate: 1, end_value: 10400, start_cash: 10000 },
       equity_curve: [
         { date: '2024-01-02', total: 10000, cash: 10000, position_value: 0, drawdown: 0, drawdown_pct: 0 },
         { date: '2024-01-06', total: 10400, cash: 10400, position_value: 0, drawdown: 0, drawdown_pct: 0 },
       ],
-      trades: [{ date: '2024-01-03', direction: 'BUY', size: 800, price: 12, commission: 0, slippage: 0, pnl: 0, rejected: false }],
+      trades: [{ date: '2024-01-03', name: '浦发银行', direction: 'BUY', size: 800, price: 12, commission: 0, slippage: 0, pnl: 0, rejected: false }],
       positions: [], diagnostic: null,
     })
     vi.mocked(backtestApi.fetchBacktestHistory).mockResolvedValue([])
@@ -71,6 +71,7 @@ describe('BacktestPage', () => {
   it('submits a single-stock backtest and renders performance and trades', async () => {
     const wrapper = mount(BacktestPage)
     await flushPromises()
+    expect(wrapper.text()).toContain('日期留空（默认）表示使用该股票全部本地历史数据')
     await wrapper.get('[data-testid="backtest-code"]').setValue('600000')
     await wrapper.get('[data-testid="backtest-market"]').setValue('SZ')
     await wrapper.get('[data-testid="backtest-market"]').setValue('SH')
@@ -91,6 +92,7 @@ describe('BacktestPage', () => {
       start_date: '2024-01-02', end_date: '2024-01-06',
     }))
     expect(wrapper.get('[data-testid="backtest-results"]').text()).toContain('4.00%')
+    expect(wrapper.get('[data-testid="backtest-results"]').text()).toContain('浦发银行')
     expect(wrapper.get('[data-testid="backtest-trades"]').text()).toContain('2024-01-03')
     expect(wrapper.get('[data-testid="equity-chart"]')).toBeTruthy()
   })

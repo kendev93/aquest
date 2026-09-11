@@ -50,7 +50,12 @@ class FakeAdapter:
         self.frame = frame
 
     def stock_ref(self, vipdoc_path: str | Path, market: str, code: str) -> StockRef:
-        return StockRef(market=market, code=code, path=Path(vipdoc_path) / "sh600000.day")
+        return StockRef(
+            market=market,
+            code=code,
+            name="测试股份",
+            path=Path(vipdoc_path) / "sh600000.day",
+        )
 
     def read_stock(self, ref: StockRef) -> pd.DataFrame:
         return self.frame.copy(deep=True)
@@ -83,8 +88,10 @@ def test_formula_backtest_uses_next_bar_execution_and_returns_metrics() -> None:
 
     assert report.market == "SH"
     assert report.code == "600000"
+    assert report.name == "测试股份"
     assert report.bars == 5
     assert [trade["direction"] for trade in report.trades] == ["BUY", "SELL"]
+    assert all(trade["name"] == "测试股份" for trade in report.trades)
     assert [trade["date"] for trade in report.trades] == ["2024-01-03", "2024-01-06"]
     assert report.performance["start_cash"] == 10_000.0
     assert report.performance["end_value"] == 10_800.0
