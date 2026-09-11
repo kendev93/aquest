@@ -202,6 +202,8 @@ function valueLabel(valueId: string): string {
 .rule-group-editor {
   display: grid;
   gap: 1rem;
+  width: 100%;
+  min-width: 0;
 }
 
 .rule-subtitle {
@@ -218,11 +220,23 @@ function valueLabel(valueId: string): string {
   display: grid;
   align-items: end;
   gap: 0.65rem;
-  grid-template-columns: minmax(10rem, 1.4fr) minmax(7rem, 0.8fr) minmax(8rem, 1fr) minmax(9rem, 1fr) auto;
+  grid-template-columns: minmax(0, 1.15fr) minmax(118px, 0.85fr);
+  grid-template-areas:
+    "left left"
+    "operator right-type"
+    "right right"
+    "remove remove";
+  width: 100%;
+  min-width: 0;
   margin-bottom: 0.7rem;
 }
 
 .condition-field {
+  min-width: 0;
+}
+
+.rule-condition-list {
+  width: 100%;
   min-width: 0;
 }
 
@@ -235,10 +249,6 @@ function valueLabel(valueId: string): string {
 }
 
 @media (max-width: 900px) {
-  .condition-row {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
   .condition-remove {
     padding-bottom: 0;
   }
