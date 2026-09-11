@@ -101,6 +101,29 @@ class MarketSyncReport:
 
 
 @dataclass(frozen=True)
+class InstrumentDiscoveryReport:
+    """Result of refreshing the online instrument universe without bars."""
+
+    total_candidates: int
+    listed_instruments: int
+    filtered_instruments: int
+    new_instruments: int
+    existing_instruments: int
+    target_source: str = "tdx_security_list"
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "source": "online_discovery",
+            "total_candidates": self.total_candidates,
+            "listed_instruments": self.listed_instruments,
+            "filtered_instruments": self.filtered_instruments,
+            "new_instruments": self.new_instruments,
+            "existing_instruments": self.existing_instruments,
+            "target_source": self.target_source,
+        }
+
+
+@dataclass(frozen=True)
 class _SyncBatchReport:
     processed: int
     updated_files: int
@@ -160,35 +183,35 @@ class TdxMarketSync:
         self._client_factory = client_factory
         self._clock = clock or (lambda: datetime.now(_SHANGHAI_TZ))
 
+    def discover_instruments(self, config: MarketSyncConfig) -> InstrumentDiscoveryReport:
+        """Refresh and persist the scoped online universe without requesting bars."""
+
+        selection, new_instruments, existing_instruments = self._prepare_targets(config)
+        return InstrumentDiscoveryReport(
+            total_candidates=len(selection.targets),
+            listed_instruments=selection.listed_instruments,
+            filtered_instruments=selection.filtered_instruments,
+            new_instruments=new_instruments,
+            existing_instruments=existing_instruments,
+            target_source=selection.target_source,
+        )
+
     def sync(
         self,
         config: MarketSyncConfig,
         progress_callback: ProgressCallback | None = None,
     ) -> MarketSyncReport:
+        selection, new_instruments, existing_instruments = self._prepare_targets(config)
         factory = self._client_factory or _default_client
-        with factory(config.timeout) as client:
-            selection = self._list_targets(client, config)
         targets = selection.targets
-        new_instruments = 0
-        if selection.target_source == "tdx_security_list":
-            refs = [
-                InstrumentRef(
-                    market=market,
-                    code=code,
-                    instrument_type=instrument_type,
-                    board=board,
-                    name=name,
-                )
-                for market, code, instrument_type, board, name in targets
-            ]
-            new_instruments = self._store.ensure_instruments(refs)
-        existing_instruments = max(len(targets) - new_instruments, 0)
         total = len(targets)
         failure_reasons: Counter[str] = Counter()
         processed = 0
         updated_files = 0
         unchanged_files = 0
         written_bars = 0
+        if progress_callback is not None:
+            progress_callback(0, total)
         if targets:
             existing_by_key = self._latest_existing_bars(targets)
             batches = _partition_targets(targets, config.sync_workers)
@@ -240,6 +263,30 @@ class TdxMarketSync:
             existing_instruments=existing_instruments,
             target_source=selection.target_source,
         )
+
+    def _prepare_targets(
+        self,
+        config: MarketSyncConfig,
+    ) -> tuple[_TargetSelection, int, int]:
+        factory = self._client_factory or _default_client
+        with factory(config.timeout) as client:
+            selection = self._list_targets(client, config)
+        targets = selection.targets
+        new_instruments = 0
+        if selection.target_source == "tdx_security_list":
+            refs = [
+                InstrumentRef(
+                    market=market,
+                    code=code,
+                    instrument_type=instrument_type,
+                    board=board,
+                    name=name,
+                )
+                for market, code, instrument_type, board, name in targets
+            ]
+            new_instruments = self._store.ensure_instruments(refs)
+        existing_instruments = max(len(targets) - new_instruments, 0)
+        return selection, new_instruments, existing_instruments
 
     def _sync_batch(
         self,
@@ -599,6 +646,7 @@ def _has_new_online_data(existing: pd.DataFrame, latest: pd.DataFrame) -> bool:
 
 
 __all__ = [
+    "InstrumentDiscoveryReport",
     "MarketSyncConfig",
     "MarketSyncReport",
     "TdxMarketClient",

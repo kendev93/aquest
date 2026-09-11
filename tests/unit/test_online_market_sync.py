@@ -190,3 +190,42 @@ def test_full_security_discovery_adds_new_targets_and_reports_scope(
         "600000",
         "600001",
     ]
+
+
+def test_discovery_can_be_completed_before_bar_sync_without_refetching_list(
+    tmp_path: Path,
+) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    client = FakeClient()
+    service = TdxMarketSync(
+        store=store,
+        client_factory=lambda _timeout: client,
+    )
+
+    discovery = service.discover_instruments(MarketSyncConfig(universe="all"))
+    report = service.sync(
+        MarketSyncConfig(universe="all", prefer_store_targets=True),
+    )
+
+    assert discovery.listed_instruments == 3
+    assert discovery.new_instruments == 3
+    assert report.target_source == "store"
+    assert report.total_candidates == 3
+    assert client.list_calls == 1
+
+
+def test_sync_reports_full_target_total_before_bar_requests(tmp_path: Path) -> None:
+    client = FakeClient()
+    service = TdxMarketSync(
+        store=DuckDbMarketDataStore(tmp_path / "market.duckdb"),
+        client_factory=lambda _timeout: client,
+    )
+    progress: list[tuple[int, int]] = []
+
+    service.sync(
+        MarketSyncConfig(universe="all"),
+        lambda current, total: progress.append((current, total)),
+    )
+
+    assert progress[0] == (0, 3)
+    assert progress[-1] == (3, 3)

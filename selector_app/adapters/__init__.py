@@ -7,11 +7,17 @@ from selector_app.market_data.local_adapter import (
     suggested_vipdoc_path,
 )
 
-from .market_sync import MarketSyncConfig, MarketSyncReport, TdxMarketSync
+from .market_sync import (
+    InstrumentDiscoveryReport,
+    MarketSyncConfig,
+    MarketSyncReport,
+    TdxMarketSync,
+)
 
 __all__ = [
     "MarketSyncConfig",
     "MarketSyncReport",
+    "InstrumentDiscoveryReport",
     "StockRef",
     "LocalDayMarketDataAdapter",
     "is_supported_a_stock",

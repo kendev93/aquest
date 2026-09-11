@@ -406,7 +406,7 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
             <div><label for="market-sync-universe">同步市场</label><select id="market-sync-universe" v-model="form.syncUniverse" data-testid="market-sync-universe"><option value="all">沪深全部</option><option value="sh">仅上海</option><option value="sz">仅深圳</option></select></div>
             <div class="scope-options"><span>证券类型</span><label v-for="option in INSTRUMENT_TYPE_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-sync-type-${option.key}`" :checked="form.syncInstrumentTypes.includes(option.key)" @change="toggleInstrumentType(option.key)">{{ option.label }}</label></div>
             <div class="scope-options"><span>板块</span><label v-for="option in BOARD_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-sync-board-${option.key}`" :checked="form.syncBoards.includes(option.key)" @change="toggleBoard(option.key)">{{ option.label }}</label></div>
-            <small class="scope-helper">类型或板块未勾选表示不限制；两者同时选择时取交集。一键同步会先导入本地 vipdoc，再在线补缺。</small>
+            <small class="scope-helper">类型或板块未勾选表示不限制；两者同时选择时取交集。一键同步会先刷新完整标的列表，再导入本地 vipdoc，最后在线补充日线。</small>
           </div>
           <div class="market-sync-actions">
             <button class="primary-button" data-testid="market-import-local" type="button" :disabled="syncLoading" @click="importLocalData">{{ syncLoading ? syncLabel : '导入本地行情' }}</button>

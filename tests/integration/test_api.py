@@ -358,9 +358,26 @@ def test_one_click_sync_imports_local_vipdoc_before_online_sync(tmp_path: Path) 
         [(20240102, 10.0, 11.0, 9.0, 10.5, 1000.0, 10000.0)],
     )
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    events: list[str] = []
+    real_importer = LocalDayImporter(store)
 
     class FakeMarketSync:
+        def discover_instruments(self, config):
+            del config
+            events.append("discover")
+            return {
+                "source": "online_discovery",
+                "total_candidates": 1,
+                "listed_instruments": 1,
+                "filtered_instruments": 0,
+                "new_instruments": 1,
+                "existing_instruments": 0,
+                "target_source": "tdx_security_list",
+            }
+
         def sync(self, config, progress_callback=None):
+            events.append("sync")
+            assert config.prefer_store_targets is True
             if progress_callback:
                 progress_callback(1, 1)
             return {
@@ -374,12 +391,17 @@ def test_one_click_sync_imports_local_vipdoc_before_online_sync(tmp_path: Path) 
                 "failure_reasons": {},
             }
 
+    class TrackingImporter:
+        def import_vipdoc(self, *args, **kwargs):
+            events.append("local")
+            return real_importer.import_vipdoc(*args, **kwargs)
+
     with TestClient(
         create_app(
             engine=EmptyEngine(),
             market_sync=FakeMarketSync(),
             market_data_store=store,
-            local_day_importer=LocalDayImporter(store),
+            local_day_importer=TrackingImporter(),
         )
     ) as client:
         response = client.post(
@@ -396,6 +418,8 @@ def test_one_click_sync_imports_local_vipdoc_before_online_sync(tmp_path: Path) 
     assert state["status"] == "completed"
     assert state["result"]["local_import"]["imported_files"] == 1
     assert state["result"]["online_sync"]["written_bars"] == 0
+    assert state["result"]["online_sync"]["listed_instruments"] == 1
+    assert events == ["discover", "local", "sync"]
     assert store.status().bar_count == 1
 
 

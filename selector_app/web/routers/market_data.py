@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import date
 from typing import Literal, Protocol, cast
 
@@ -12,7 +13,12 @@ from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi import Path as PathParameter
 from fastapi.responses import JSONResponse
 
-from selector_app.adapters.market_sync import MarketSyncConfig, MarketSyncReport, ProgressCallback
+from selector_app.adapters.market_sync import (
+    InstrumentDiscoveryReport,
+    MarketSyncConfig,
+    MarketSyncReport,
+    ProgressCallback,
+)
 from selector_app.indicators.cache import IndicatorCache
 from selector_app.indicators.precompute import IndicatorPrecomputeService
 from selector_app.market_data.auto_sync import AUTO_SYNC_DESCRIPTION
@@ -38,6 +44,11 @@ router = APIRouter(prefix="/market-data", tags=["market-data"])
 
 
 class MarketSyncService(Protocol):
+    def discover_instruments(
+        self,
+        config: MarketSyncConfig,
+    ) -> InstrumentDiscoveryReport | dict[str, object]: ...
+
     def sync(
         self,
         config: MarketSyncConfig,
@@ -124,8 +135,33 @@ def _sync_config(payload: MarketSyncRequest, *, prefer_store_targets: bool) -> M
     )
 
 
-def _result_dict(result: MarketSyncReport | ImportReport | dict[str, object]) -> dict[str, object]:
-    return result.to_dict() if isinstance(result, (MarketSyncReport, ImportReport)) else result
+def _result_dict(
+    result: InstrumentDiscoveryReport | MarketSyncReport | ImportReport | dict[str, object],
+) -> dict[str, object]:
+    return (
+        result.to_dict()
+        if isinstance(result, (InstrumentDiscoveryReport, MarketSyncReport, ImportReport))
+        else result
+    )
+
+
+def _with_discovery_summary(
+    online_result: dict[str, object],
+    discovery_result: dict[str, object],
+) -> dict[str, object]:
+    summary_keys = (
+        "listed_instruments",
+        "filtered_instruments",
+        "new_instruments",
+        "existing_instruments",
+        "target_source",
+    )
+    summary = {key: discovery_result[key] for key in summary_keys if key in discovery_result}
+    return {
+        **online_result,
+        **summary,
+        "instrument_discovery": discovery_result,
+    }
 
 
 def _with_indicator_precompute(
@@ -341,6 +377,7 @@ def _create_sync_job(
             if not include_local:
                 return _result_dict(_service(request).sync(config, progress))
 
+            discovery_result = _result_dict(_service(request).discover_instruments(config))
             local_root = os.path.abspath(
                 os.path.expanduser(_resolved_vipdoc_path(payload.vipdoc_path))
             )
@@ -361,7 +398,13 @@ def _create_sync_job(
                     "reason": "未找到 vipdoc 目录",
                     "vipdoc_path": local_root,
                 }
-            online_result = _result_dict(_service(request).sync(config, progress))
+            online_result = _result_dict(
+                _service(request).sync(
+                    replace(config, prefer_store_targets=True, refresh_names=True),
+                    progress,
+                )
+            )
+            online_result = _with_discovery_summary(online_result, discovery_result)
         except TdxConnectionError as exc:
             raise TaskUserError(
                 "完整证券列表获取失败，本次同步已停止，请检查 TDX 连接后重试。"
