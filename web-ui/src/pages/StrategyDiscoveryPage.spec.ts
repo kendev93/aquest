@@ -10,6 +10,7 @@ vi.mock('../api/strategyDiscovery', async () => {
     ...actual,
     fetchStrategyDiscoveryCapabilities: vi.fn(),
     createStrategyDiscovery: vi.fn(),
+    createStrategyDiscoveryRefinement: vi.fn(),
     getStrategyDiscovery: vi.fn(),
     getStrategyDiscoveryResults: vi.fn(),
     createStrategyReplay: vi.fn(),
@@ -42,6 +43,7 @@ describe('StrategyDiscoveryPage', () => {
     vi.mocked(api.fetchStrategyDiscoveryHistory).mockResolvedValue([])
     vi.mocked(api.getStrategyReplayHistory).mockRejectedValue(new Error('no saved replay'))
     vi.mocked(api.createStrategyDiscovery).mockResolvedValue({ job_id: 'discovery-1', status: 'queued' })
+    vi.mocked(api.createStrategyDiscoveryRefinement).mockResolvedValue({ job_id: 'refine-1', status: 'queued' })
     vi.mocked(api.getStrategyDiscovery).mockResolvedValue({
       job_id: 'discovery-1', status: 'completed', progress: 1, total_candidates: 4, total_scanned: 4,
       errors: 0, skipped: 0, error: null, phase: 'completed', result: null,
@@ -88,6 +90,22 @@ describe('StrategyDiscoveryPage', () => {
     expect(JSON.parse(sessionStorage.getItem('indicator-lab.strategy-discovery.apply') ?? '{}')).toMatchObject({
       ranking_value: 'technical.ma5',
       max_positions: 3,
+    })
+  })
+
+  it('starts a refinement job from the selected parent candidate', async () => {
+    const wrapper = mount(StrategyDiscoveryPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="strategy-discovery-config"]').trigger('submit')
+    await flushPromises()
+    await wrapper.get('[data-testid="strategy-discovery-refine-s1"]').trigger('click')
+    await flushPromises()
+
+    expect(api.createStrategyDiscoveryRefinement).toHaveBeenCalledWith({
+      parent_history_id: 'discovery-1',
+      parent_candidate_hash: 's1',
+      refinement_radius: 'medium',
+      max_trials: 1000,
     })
   })
 
