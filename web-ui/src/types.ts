@@ -619,6 +619,87 @@ export interface StrategyDiscoveryResult {
   finished_at?: string
 }
 
+export type StrategyDiscoveryLeaderboard = 'sharpe' | 'return'
+
+export interface StrategyPeriodMetrics {
+  key: string
+  label: string
+  start_date: string
+  end_date: string
+  bars: number
+  total_return: number | null
+  annual_return: number | null
+  max_drawdown: number | null
+  sharpe: number | null
+  total_trades: number
+  win_rate: number | null
+  diagnostic: string | null
+  partial?: boolean
+}
+
+export interface StrategyReplayCandidate {
+  rank: number
+  candidate_hash: string
+  human_readable_rules: string
+  config: PortfolioBacktestPayload
+  leaderboard_metrics: Record<string, unknown>
+  overall_metrics: Record<string, unknown>
+  periods: {
+    ytd: StrategyPeriodMetrics
+    one_year: StrategyPeriodMetrics
+    two_year: StrategyPeriodMetrics
+  }
+  annual_metrics: StrategyPeriodMetrics[]
+  backtest: PortfolioBacktestResult
+  data_fingerprint: string
+  diagnostic: string | null
+}
+
+export interface StrategyReplayResult {
+  experiment_id: string
+  leaderboard: StrategyDiscoveryLeaderboard
+  replay_id?: string
+  started_at?: string
+  finished_at?: string
+  duration_seconds?: number
+  data_start: string
+  data_end: string
+  data_fingerprint: string
+  source_data_fingerprint: string
+  data_changed: boolean
+  candidate_count: number
+  candidates: StrategyReplayCandidate[]
+  diagnostics: Record<string, string>
+}
+
+export interface StrategyReplayJobState {
+  job_id: string
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+  progress: number
+  total_candidates: number
+  total_scanned: number
+  errors: number
+  skipped: number
+  error: string | null
+  result: StrategyReplayResult | null
+  phase?: string | null
+  metadata?: Record<string, unknown>
+}
+
+export interface StrategyReplayHistoryRecord {
+  replay_id: string
+  experiment_id: string
+  leaderboard: StrategyDiscoveryLeaderboard
+  created_at: string
+  started_at: string
+  finished_at: string
+  data_start: string
+  data_end: string
+  data_fingerprint: string
+  duration_seconds: number
+  result: StrategyReplayResult
+}
+
 export type FitnessLabel = 'strong' | 'watch' | 'weak' | 'insufficient'
 
 export interface StrategyFitnessPayload extends Omit<PortfolioBacktestPayload, 'max_positions' | 'rebalance_frequency'> {

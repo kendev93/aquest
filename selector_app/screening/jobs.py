@@ -123,6 +123,10 @@ class ScreenJobRunner:
         phase: str | None = None,
         metadata: dict[str, object] | None = None,
         progress: float | None = None,
+        errors: int | None = None,
+        skipped: int | None = None,
+        total_candidates: int | None = None,
+        total_scanned: int | None = None,
     ) -> None:
         """Update optional phase details for a generic long-running task."""
 
@@ -134,6 +138,14 @@ class ScreenJobRunner:
                 state.phase = phase
             if progress is not None:
                 state.progress = min(1.0, max(0.0, float(progress)))
+            if errors is not None:
+                state.errors = max(0, errors)
+            if skipped is not None:
+                state.skipped = max(0, skipped)
+            if total_candidates is not None:
+                state.total_candidates = max(0, total_candidates)
+            if total_scanned is not None:
+                state.total_scanned = max(0, total_scanned)
             if metadata:
                 state.metadata = {**state.metadata, **metadata}
 

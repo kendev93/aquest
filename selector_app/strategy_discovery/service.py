@@ -29,6 +29,8 @@ from .candidates import build_random_candidate
 from .catalog import default_indicator_catalog
 from .evaluation import run_validation_pipeline
 from .models import DiscoveryRequest, StrategyCandidate
+from .replay import ReplayLeaderboard
+from .replay_service import ReplayProgressCallback, StrategyReplayService
 from .search import BatchEvaluator, HybridSearchEngine
 from .snapshot import DiscoverySnapshot, build_discovery_snapshot
 
@@ -96,6 +98,10 @@ class StrategyDiscoveryService:
         ) and isinstance(
             getattr(self._portfolio_service, "_adapter", None), DuckDbMarketDataAdapter
         )
+        self._replay_service = StrategyReplayService(
+            portfolio_service=self._portfolio_service,
+            store=self._store,
+        )
 
     def capabilities(self) -> dict[str, object]:
         catalog = default_indicator_catalog()
@@ -144,6 +150,25 @@ class StrategyDiscoveryService:
                 "lightgbm": _package_version("lightgbm"),
             },
         }
+
+    def replay(
+        self,
+        experiment: Mapping[str, object],
+        leaderboard: ReplayLeaderboard,
+        *,
+        progress_callback: ReplayProgressCallback | None = None,
+        abort_check: Callable[[], bool] | None = None,
+    ) -> dict[str, object]:
+        """Replay one leaderboard against the latest completed local history."""
+
+        if leaderboard not in {"sharpe", "return"}:
+            raise ValueError("策略复核榜单类型无效")
+        return self._replay_service.run(
+            experiment,
+            leaderboard,
+            progress_callback=progress_callback,
+            abort_check=abort_check,
+        )
 
     def run(
         self,

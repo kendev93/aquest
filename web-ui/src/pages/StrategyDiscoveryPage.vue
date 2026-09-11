@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import { FormulaScreenApiError } from '../api/formulaScreen'
 import {
@@ -11,8 +11,14 @@ import {
   getStrategyDiscovery,
   getStrategyDiscoveryHistory,
   getStrategyDiscoveryResults,
+  createStrategyReplay,
+  getStrategyReplay,
+  getStrategyReplayResults,
+  cancelStrategyReplay,
+  getStrategyReplayHistory,
 } from '../api/strategyDiscovery'
 import RuleGroupEditor from '../components/RuleGroupEditor.vue'
+import StrategyReplayPanel from '../components/StrategyReplayPanel.vue'
 import type {
   ConditionOperator,
   RuleGroupPayload,
@@ -21,6 +27,10 @@ import type {
   StrategyDiscoveryJobState,
   StrategyDiscoveryPayload,
   StrategyDiscoveryResult,
+  StrategyDiscoveryLeaderboard,
+  StrategyReplayCandidate,
+  StrategyReplayJobState,
+  StrategyReplayResult,
   InstrumentBoard,
   InstrumentType,
   Universe,
@@ -67,6 +77,11 @@ const job = ref<StrategyDiscoveryJobState | null>(null)
 const result = ref<StrategyDiscoveryResult | null>(null)
 const activeBoard = ref<'sharpe' | 'return'>('sharpe')
 const selectedCandidate = ref<StrategyDiscoveryCandidate | null>(null)
+const replayJob = ref<StrategyReplayJobState | null>(null)
+const replayResult = ref<StrategyReplayResult | null>(null)
+const replayLoading = ref(false)
+const replayPeriod = ref<'overall' | 'ytd' | 'one_year' | 'two_year' | 'annual'>('overall')
+const selectedReplayCandidateHash = ref<string | null>(null)
 const loading = ref(false)
 const message = ref('')
 const errors = ref<Record<string, string>>({})
@@ -74,6 +89,7 @@ const errors = ref<Record<string, string>>({})
 const boards = computed(() => activeBoard.value === 'sharpe'
   ? result.value?.results_by_sharpe ?? []
   : result.value?.results_by_return ?? [])
+const experimentId = computed(() => result.value?.history_id ?? job.value?.job_id ?? null)
 const availableValues = computed<ValueDefinition[]>(() => {
   const raw = capabilities.value?.indicators
   if (!Array.isArray(raw)) return []
@@ -172,6 +188,9 @@ async function submit(): Promise<void> {
   loading.value = true
   result.value = null
   selectedCandidate.value = null
+  replayJob.value = null
+  replayResult.value = null
+  selectedReplayCandidateHash.value = null
   try {
     const created = await createStrategyDiscovery(buildPayload())
     job.value = {
@@ -219,6 +238,139 @@ async function cancel(): Promise<void> {
   } catch (error) {
     message.value = apiMessage(error)
   }
+}
+
+function replayApiMessage(error: unknown): string {
+  if (error instanceof FormulaScreenApiError) return `策略复核失败：${error.message}`
+  if (error instanceof Error && error.message) return `策略复核失败：${error.message}`
+  return '策略复核失败，请检查本地 DuckDB 数据和候选配置后重试。'
+}
+
+function replayProgressValue(state: StrategyReplayJobState | null): number {
+  const overall = state?.metadata?.overall_progress
+  const value = typeof overall === 'number' ? overall : state?.progress ?? 0
+  return Math.min(1, Math.max(0, value))
+}
+
+function replayProgressPercent(state: StrategyReplayJobState | null): string {
+  return `${Math.round(replayProgressValue(state) * 100)}%`
+}
+
+function replayPhase(state: StrategyReplayJobState | null): string {
+  if (!state) return '准备中'
+  if (state.status === 'completed') return '已完成'
+  if (state.status === 'failed') return '复核失败'
+  if (state.status === 'cancelled') return '已取消'
+  const label = state.metadata?.phase_label
+  return typeof label === 'string' && label ? label : state.phase ?? '准备中'
+}
+
+function replayCount(state: StrategyReplayJobState | null): number {
+  if (state?.status === 'completed') {
+    const candidateCount = state.metadata?.candidate_count
+    return typeof candidateCount === 'number' ? candidateCount : state.total_candidates
+  }
+  if (state?.phase !== 'replaying') return 0
+  const current = state?.metadata?.phase_current
+  if (typeof current === 'number') return current
+  return state?.total_scanned ?? 0
+}
+
+async function startReplay(): Promise<void> {
+  const id = experimentId.value
+  if (!id || !boards.value.length || replayLoading.value) return
+  replayLoading.value = true
+  replayResult.value = null
+  selectedReplayCandidateHash.value = null
+  message.value = ''
+  try {
+    const created = await createStrategyReplay(id, activeBoard.value)
+    replayJob.value = {
+      job_id: created.job_id,
+      status: 'queued',
+      progress: 0,
+      total_candidates: Math.min(10, boards.value.length),
+      total_scanned: 0,
+      errors: 0,
+      skipped: 0,
+      error: null,
+      result: null,
+      phase: 'queued',
+      metadata: {},
+    }
+    for (;;) {
+      const state = await getStrategyReplay(created.job_id)
+      replayJob.value = state
+      if (state.status === 'completed') {
+        replayResult.value = await getStrategyReplayResults(created.job_id)
+        message.value = `全量复核完成：${replayResult.value.candidate_count} 个策略。`
+        return
+      }
+      if (state.status === 'failed') {
+        message.value = state.error ?? '策略复核失败，请检查本地行情和候选配置后重试。'
+        return
+      }
+      if (state.status === 'cancelled') {
+        message.value = state.error ?? '策略复核已取消。'
+        return
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 220))
+    }
+  } catch (error) {
+    message.value = replayApiMessage(error)
+  } finally {
+    replayLoading.value = false
+  }
+}
+
+async function cancelReplay(): Promise<void> {
+  if (!replayJob.value || !replayLoading.value) return
+  try {
+    await cancelStrategyReplay(replayJob.value.job_id)
+    message.value = '已请求取消全量复核，正在等待当前候选结束。'
+  } catch (error) {
+    message.value = replayApiMessage(error)
+  }
+}
+
+async function loadSavedReplay(
+  historyId: string,
+  leaderboard: StrategyDiscoveryLeaderboard,
+): Promise<void> {
+  try {
+    const saved = await getStrategyReplayHistory(historyId, leaderboard)
+    replayResult.value = saved.result
+    replayJob.value = {
+      job_id: saved.replay_id,
+      status: 'completed',
+      progress: 1,
+      total_candidates: saved.result.candidate_count,
+      total_scanned: saved.result.candidate_count,
+      errors: Object.keys(saved.result.diagnostics).length,
+      skipped: 0,
+      error: null,
+      result: saved.result,
+      phase: 'completed',
+      metadata: { saved: true },
+    }
+  } catch {
+    replayResult.value = null
+    replayJob.value = null
+  }
+}
+
+function applyReplayCandidate(candidate: StrategyReplayCandidate): void {
+  sessionStorage.setItem(APPLY_STORAGE_KEY, JSON.stringify(candidate.config))
+  sessionStorage.setItem(APPLY_METADATA_KEY, JSON.stringify({
+    candidate_hash: candidate.candidate_hash,
+    data_fingerprint: candidate.data_fingerprint,
+    validation_metrics: candidate.overall_metrics,
+  }))
+  if (import.meta.env.MODE !== 'test') window.location.assign('/portfolio-backtest')
+}
+
+function selectReplayCandidate(candidateHash: string): void {
+  selectedReplayCandidateHash.value = candidateHash || null
 }
 
 function metric(candidate: StrategyDiscoveryCandidate, split: string, key: string): number | null {
@@ -324,11 +476,25 @@ async function loadHistoryDetail(historyId: string): Promise<void> {
     result.value = loaded
     restoreHistoryRequest(loaded.request)
     activeBoard.value = 'sharpe'
+    replayPeriod.value = 'overall'
+    selectedReplayCandidateHash.value = null
+    await loadSavedReplay(historyId, activeBoard.value)
     message.value = `已加载历史实验 ${historyId}。`
   } catch (error) {
     message.value = apiMessage(error)
   }
 }
+
+watch(activeBoard, (leaderboard) => {
+  selectedReplayCandidateHash.value = null
+  replayPeriod.value = 'overall'
+  if (result.value?.history_id) {
+    void loadSavedReplay(result.value.history_id, leaderboard)
+  } else {
+    replayResult.value = null
+    replayJob.value = null
+  }
+})
 
 function restoreHistoryRequest(raw: unknown): void {
   if (!raw || typeof raw !== 'object') return
@@ -381,6 +547,14 @@ function requiredRuleFromHistory(raw: unknown): RuleGroupPayload {
 async function removeHistory(historyId: string): Promise<void> {
   try {
     await deleteStrategyDiscoveryHistory(historyId)
+    if (result.value?.history_id === historyId) {
+      result.value = null
+      job.value = null
+      replayJob.value = null
+      replayResult.value = null
+      selectedCandidate.value = null
+      selectedReplayCandidateHash.value = null
+    }
     await loadHistory()
     message.value = '历史实验已删除。'
   } catch (error) {
@@ -474,9 +648,15 @@ onMounted(async () => {
           <div v-if="!result" class="empty-state"><div class="empty-icon" aria-hidden="true">/</div><h3>{{ loading ? '正在搜索策略候选…' : '还没有实验结果' }}</h3><p>实验完成后会分别展示夏普榜和收益榜。</p></div>
           <template v-else>
             <div class="formula-mode-tabs" role="tablist" aria-label="策略排行榜"><button type="button" data-testid="strategy-discovery-sharpe-board" :class="{ active: activeBoard === 'sharpe' }" role="tab" :aria-selected="activeBoard === 'sharpe'" @click="activeBoard = 'sharpe'">夏普榜前 10</button><button type="button" data-testid="strategy-discovery-return-board" :class="{ active: activeBoard === 'return' }" role="tab" :aria-selected="activeBoard === 'return'" @click="activeBoard = 'return'">收益榜前 10</button></div>
+            <div v-if="boards.length" class="discovery-replay-actions">
+              <button class="secondary-button replay-start-button" data-testid="strategy-discovery-replay" type="button" :disabled="replayLoading" @click="startReplay"><span v-if="replayLoading" class="spinner" aria-hidden="true"></span>{{ replayLoading ? '全量复核进行中…' : '一键回测当前榜单前十' }}</button>
+              <button v-if="replayLoading" class="secondary-button" data-testid="strategy-discovery-replay-cancel" type="button" @click="cancelReplay">取消全量复核</button>
+            </div>
+            <div v-if="replayJob" class="discovery-replay-progress" data-testid="strategy-discovery-replay-progress"><div class="discovery-progress-heading"><strong>{{ replayPhase(replayJob) }}</strong><span data-testid="strategy-discovery-replay-percent">{{ replayProgressPercent(replayJob) }}</span></div><div class="progress-track"><span :style="{ width: replayProgressPercent(replayJob) }"></span></div><div class="discovery-progress-stats"><span>已完成 {{ replayCount(replayJob) }} / 总数 {{ Math.min(10, boards.length) }}</span><span v-if="replayResult?.finished_at">完成于 {{ formatHistoryTimestamp(replayResult.finished_at) }}</span><span v-if="replayResult?.duration_seconds !== undefined">耗时 {{ formatHistoryDuration(replayResult.duration_seconds) }}</span></div><small v-if="replayJob.errors">有 {{ replayJob.errors }} 个候选未能完成复核，请展开诊断。</small></div>
             <div v-if="!boards.length" class="inline-empty">没有满足当前约束的候选策略。</div>
             <div v-else class="table-wrap"><table><caption class="sr-only">策略候选排行榜</caption><thead><tr><th>#</th><th>策略配置</th><th>验证收益</th><th>验证夏普</th><th>验证回撤</th><th>留出收益</th><th>留出约束</th><th>操作</th></tr></thead><tbody><tr v-for="(candidate, index) in boards" :key="candidate.candidate_hash" :data-testid="`strategy-discovery-row-${candidate.candidate_hash}`"><td>{{ index + 1 }}</td><td><button class="table-link" type="button" @click="selectCandidate(candidate)">{{ candidate.human_readable_rules }}</button></td><td>{{ formatPercent(metric(candidate, 'validation', 'annual_return')) }}</td><td>{{ formatNumber(metric(candidate, 'validation', 'sharpe')) }}</td><td>{{ formatPercent(metric(candidate, 'validation', 'max_drawdown')) }}</td><td>{{ formatPercent(metric(candidate, 'holdout', 'annual_return')) }}</td><td :class="{ positive: holdoutStatus(candidate) === '通过', negative: holdoutStatus(candidate) === '未通过' }">{{ holdoutStatus(candidate) }}</td><td><button class="secondary-button" :data-testid="`strategy-discovery-apply-${candidate.candidate_hash}`" type="button" @click="applyCandidate(candidate)">应用</button></td></tr></tbody></table></div>
             <div v-if="selectedCandidate" class="discovery-detail" data-testid="strategy-discovery-detail"><div class="section-heading"><div><span class="section-kicker">CANDIDATE DETAIL</span><h3>策略配置</h3></div><button class="secondary-button" type="button" @click="selectedCandidate = null">关闭</button></div><p>{{ selectedCandidate.human_readable_rules }}</p><div class="metrics-strip"><div><span>验证收益</span><strong>{{ formatPercent(metric(selectedCandidate, 'validation', 'annual_return')) }}</strong></div><div><span>验证夏普</span><strong>{{ formatNumber(metric(selectedCandidate, 'validation', 'sharpe')) }}</strong></div><div><span>最终留出收益</span><strong>{{ formatPercent(metric(selectedCandidate, 'holdout', 'annual_return')) }}</strong></div><div><span>复杂度</span><strong>{{ selectedCandidate.complexity }}</strong></div></div><pre>{{ JSON.stringify(selectedCandidate.config, null, 2) }}</pre></div>
+            <StrategyReplayPanel v-if="replayResult" :result="replayResult" :period="replayPeriod" :selected-candidate-hash="selectedReplayCandidateHash" @update:period="replayPeriod = $event" @select="selectReplayCandidate" @apply="applyReplayCandidate" />
           </template>
         </section>
       </div>

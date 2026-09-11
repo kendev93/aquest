@@ -12,6 +12,11 @@ vi.mock('../api/strategyDiscovery', async () => {
     createStrategyDiscovery: vi.fn(),
     getStrategyDiscovery: vi.fn(),
     getStrategyDiscoveryResults: vi.fn(),
+    createStrategyReplay: vi.fn(),
+    getStrategyReplay: vi.fn(),
+    getStrategyReplayResults: vi.fn(),
+    cancelStrategyReplay: vi.fn(),
+    getStrategyReplayHistory: vi.fn(),
     fetchStrategyDiscoveryHistory: vi.fn(),
     getStrategyDiscoveryHistory: vi.fn(),
     deleteStrategyDiscoveryHistory: vi.fn(),
@@ -35,6 +40,7 @@ describe('StrategyDiscoveryPage', () => {
       ],
     })
     vi.mocked(api.fetchStrategyDiscoveryHistory).mockResolvedValue([])
+    vi.mocked(api.getStrategyReplayHistory).mockRejectedValue(new Error('no saved replay'))
     vi.mocked(api.createStrategyDiscovery).mockResolvedValue({ job_id: 'discovery-1', status: 'queued' })
     vi.mocked(api.getStrategyDiscovery).mockResolvedValue({
       job_id: 'discovery-1', status: 'completed', progress: 1, total_candidates: 4, total_scanned: 4,
@@ -179,6 +185,71 @@ describe('StrategyDiscoveryPage', () => {
     expect(api.createStrategyDiscovery).toHaveBeenCalledWith(expect.objectContaining({ max_positions: 3 }))
     expect(api.createStrategyDiscovery.mock.calls[0]?.[0]).not.toHaveProperty('start_date')
     expect(api.createStrategyDiscovery.mock.calls[0]?.[0]).not.toHaveProperty('end_date')
+  })
+
+  it('runs the current leaderboard top ten and renders full-range period metrics', async () => {
+    const replayResult = {
+      experiment_id: 'discovery-1',
+      leaderboard: 'sharpe' as const,
+      data_start: '2024-01-01',
+      data_end: '2026-09-08',
+      data_fingerprint: 'replay-fingerprint',
+      source_data_fingerprint: 'source-fingerprint',
+      data_changed: true,
+      candidate_count: 1,
+      diagnostics: {},
+      candidates: [{
+        rank: 1,
+        candidate_hash: 's1',
+        human_readable_rules: '买入[MA5 > MA20]；卖出[RSI14 > 70]',
+        config: { ...({} as Record<string, unknown>), ranking_value: 'technical.ma5', start_date: '2024-01-01', end_date: '2026-09-08' },
+        leaderboard_metrics: { annual_return: 0.2, sharpe: 1.4 },
+        overall_metrics: { total_return: 0.55, annual_return: 0.22, max_drawdown: 0.12, sharpe: 1.1, total_trades: 8, win_rate: 0.5, trade_fingerprint: 'trade-fingerprint' },
+        periods: {
+          ytd: { key: 'ytd', label: '今年以来', start_date: '2026-01-01', end_date: '2026-09-08', bars: 3, total_return: 0.18, annual_return: 0.2, max_drawdown: 0.06, sharpe: 1.2, total_trades: 2, win_rate: 0.5, diagnostic: null },
+          one_year: { key: 'one_year', label: '最近一年', start_date: '2025-09-08', end_date: '2026-09-08', bars: 4, total_return: 0.3, annual_return: 0.3, max_drawdown: 0.1, sharpe: 1.3, total_trades: 4, win_rate: 0.5, diagnostic: null },
+          two_year: { key: 'two_year', label: '最近两年', start_date: '2024-09-08', end_date: '2026-09-08', bars: 6, total_return: 0.44, annual_return: 0.2, max_drawdown: 0.12, sharpe: 1.1, total_trades: 6, win_rate: 0.5, diagnostic: null },
+        },
+        annual_metrics: [
+          { key: 'year_2025', label: '2025', start_date: '2025-01-01', end_date: '2025-12-31', bars: 3, total_return: 0.2, annual_return: 0.2, max_drawdown: 0.08, sharpe: 1.0, total_trades: 3, win_rate: 0.5, diagnostic: null },
+          { key: 'year_2026', label: '2026', start_date: '2026-01-01', end_date: '2026-09-08', bars: 3, total_return: 0.18, annual_return: 0.2, max_drawdown: 0.06, sharpe: 1.2, total_trades: 2, win_rate: 0.5, diagnostic: null },
+        ],
+        backtest: {
+          universe: 'all', total_candidates: 1, processed: 1, skipped: 0, errors: 0, bars: 6,
+          start_date: '2024-01-01', end_date: '2026-09-08', max_positions: 3,
+          ranking_value: 'technical.ma5', rank_order: 'desc', fitness_filter_enabled: false,
+          fitness_min_score: 75, fitness_min_trades: 5, fitness_max_drawdown: 0.3,
+          performance: { total_return: 0.55, annual_return: 0.22, max_drawdown: 0.12, sharpe: 1.1, total_trades: 8, win_rate: 0.5, end_value: 155000 },
+          equity_curve: [{ date: '2024-01-01', cash: 100000, position_value: 0, total: 100000, positions_count: 0, drawdown: 0, drawdown_pct: 0 }, { date: '2026-09-08', cash: 0, position_value: 155000, total: 155000, positions_count: 3, drawdown: 0, drawdown_pct: 0 }],
+          trades: [], states: [], ranking_events: [], failure_reasons: {}, diagnostic: null,
+          data_fingerprint: 'replay-fingerprint', risk_controls: {},
+        },
+        data_fingerprint: 'replay-fingerprint', diagnostic: null,
+      }],
+    }
+    vi.mocked(api.createStrategyReplay).mockResolvedValue({ job_id: 'replay-1', status: 'queued' })
+    vi.mocked(api.getStrategyReplay).mockResolvedValue({
+      job_id: 'replay-1', status: 'completed', progress: 1, total_candidates: 1, total_scanned: 1,
+      errors: 0, skipped: 0, error: null, result: null, phase: 'completed', metadata: {},
+    })
+    vi.mocked(api.getStrategyReplayResults).mockResolvedValue(replayResult)
+
+    const wrapper = mount(StrategyDiscoveryPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="strategy-discovery-config"]').trigger('submit')
+    await flushPromises()
+    await wrapper.get('[data-testid="strategy-discovery-replay"]').trigger('click')
+    await flushPromises()
+
+    expect(api.createStrategyReplay).toHaveBeenCalledWith('discovery-1', 'sharpe')
+    expect(wrapper.get('[data-testid="strategy-replay-results"]').text()).toContain('55.00%')
+    expect(wrapper.get('[data-testid="strategy-replay-results"]').text()).toContain('行情已更新')
+    await wrapper.get('[data-testid="strategy-replay-period-ytd"]').trigger('click')
+    expect(wrapper.get('[data-testid="strategy-replay-results"]').text()).toContain('18.00%')
+    await wrapper.get('[data-testid="strategy-replay-period-annual"]').trigger('click')
+    expect(wrapper.get('[data-testid="strategy-replay-results"]').text()).toContain('2026')
+    await wrapper.get('[data-testid="strategy-replay-candidate-s1"]').trigger('click')
+    expect(wrapper.get('[data-testid="strategy-replay-detail-s1"]').text()).toContain('technical.ma5')
   })
 
   it('shows overall progress, current phase, throughput, and remaining estimate', async () => {

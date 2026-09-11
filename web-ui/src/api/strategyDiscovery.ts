@@ -1,8 +1,12 @@
 import { FormulaScreenApiError } from './formulaScreen'
 import type {
+  StrategyDiscoveryLeaderboard,
   StrategyDiscoveryJobState,
   StrategyDiscoveryPayload,
   StrategyDiscoveryResult,
+  StrategyReplayHistoryRecord,
+  StrategyReplayJobState,
+  StrategyReplayResult,
 } from '../types'
 
 const API_BASE = '/api/v1/strategy-discovery'
@@ -81,5 +85,54 @@ export async function deleteStrategyDiscoveryHistory(historyId: string): Promise
   const response = await request<{ data: { deleted: boolean } }>(`${API_BASE}/history/${encodeURIComponent(historyId)}`, {
     method: 'DELETE',
   })
+  return response.data
+}
+
+export async function createStrategyReplay(
+  experimentId: string,
+  leaderboard: StrategyDiscoveryLeaderboard,
+): Promise<{ job_id: string; status: string }> {
+  const response = await request<{ data: { job_id: string; status: string } }>(
+    `${API_BASE}/${encodeURIComponent(experimentId)}/replays`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ leaderboard }),
+    },
+  )
+  return response.data
+}
+
+export async function getStrategyReplay(jobId: string): Promise<StrategyReplayJobState> {
+  const response = await request<{ data: StrategyReplayJobState }>(
+    `${API_BASE}/replay-jobs/${encodeURIComponent(jobId)}`,
+  )
+  return response.data
+}
+
+export async function getStrategyReplayResults(jobId: string): Promise<StrategyReplayResult> {
+  const response = await request<{ data: StrategyReplayResult }>(
+    `${API_BASE}/replay-jobs/${encodeURIComponent(jobId)}/results`,
+  )
+  return response.data
+}
+
+export async function cancelStrategyReplay(
+  jobId: string,
+): Promise<{ job_id: string; status: string; cancel_requested: boolean }> {
+  const response = await request<{
+    data: { job_id: string; status: string; cancel_requested: boolean }
+  }>(`${API_BASE}/replay-jobs/${encodeURIComponent(jobId)}/cancel`, {
+    method: 'POST',
+  })
+  return response.data
+}
+
+export async function getStrategyReplayHistory(
+  experimentId: string,
+  leaderboard: StrategyDiscoveryLeaderboard,
+): Promise<StrategyReplayHistoryRecord> {
+  const response = await request<{ data: StrategyReplayHistoryRecord }>(
+    `${API_BASE}/history/${encodeURIComponent(experimentId)}/replays?leaderboard=${leaderboard}`,
+  )
   return response.data
 }

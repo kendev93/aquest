@@ -45,6 +45,7 @@
 - `indicator_cache`：按标的、周期、价格口径、内置公式版本和行情指纹保存完整指标数组与信号数组；缓存失效后可从 `daily_bars` 重建。
 - `custom_indicator_cache`：按标的、周期、价格口径、自定义公式哈希、参数哈希、公式引擎版本和行情指纹保存自定义输出。
 - `strategy_discovery_history`：策略实验请求、候选榜单、算法元数据、开始/结束时间和耗时；默认保留最近 20 次实验。
+- `strategy_discovery_replay_history`：当前夏普榜或收益榜前十的全行情复核结果、连续资金曲线、成交记录、分段绩效、数据指纹和复核耗时；同一实验和榜单只保留最近一次，删除实验时级联删除。
 - `backtest_history`：单股、组合和策略适配性回测的请求快照、完整结果、摘要、开始/结束时间和耗时；按回测类型分别保留最近 20 次。
 
 行情事实写入只由导入/同步任务执行，并使用独立事务和进程内 writer lock；派生指标缓存可由预热任务或业务请求按需填充。读操作每次建立独立只读 DuckDB 连接。全市场筛选、组合回测和策略适配通过一次批量查询得到各标的分组，避免逐文件打开 `.day`。
@@ -93,6 +94,8 @@ schema 版本变化时，初始化逻辑会先生成带时间戳的 `.bak-*.duck
 
 策略实验按寻优/验证/最终留出三段运行，排行榜只读取验证段，最终留出不参与排序。用户必选买入/卖出条件会在候选生成阶段固定加入，并在快照阶段预计算条件掩码；候选只搜索剩余条件名额。完整请求、候选配置、三段指标、数据指纹、算法版本和随机种子写入 `strategy_discovery_history`，并记录自动搜索开始/结束时间和耗时，默认按最近 20 次保留。单股、组合和策略适配性任务成功后写入 `backtest_history`；列表接口只读摘要，详情接口才读取完整结果。
 
+排行榜页面可以对当前夏普榜或收益榜前十发起独立异步全量复核。复核使用实验原始开始日期和任务启动时本地最新已完成行情日，由 8 个进程共享只读行情/指标快照；每个候选只模拟一次，整体、今年以来、滚动一年/两年和自然年度指标均从同一条连续资金曲线派生。复核结果不参与排行榜排序，行情指纹变化仅标记为“行情已更新”；页面可展开完整配置、资金曲线和成交原因，并把完整区间配置应用回普通组合回测。
+
 ## API
 
 - `POST /api/v1/market-data/import-local`
@@ -102,7 +105,7 @@ schema 版本变化时，初始化逻辑会先生成带时间戳的 `.bak-*.duck
 - `GET /api/v1/market-data/jobs/{job_id}`
 - `GET /api/v1/market-data/local/instruments`
 - `GET /api/v1/market-data/local/{market}/{code}/bars`
-- 既有公式选股、单股回测、组合回测和策略适配 API 保持路径不变，但只读取 DuckDB；单股、组合和策略适配分别提供 `/history`、`/history/{id}` 和删除接口，策略实验室继续提供同样的历史实验接口。
+- 既有公式选股、单股回测、组合回测和策略适配 API 保持路径不变，但只读取 DuckDB；单股、组合和策略适配分别提供 `/history`、`/history/{id}` 和删除接口，策略实验室继续提供同样的历史实验接口，并通过 `/strategy-discovery/{experiment_id}/replays`、`/replay-jobs/{job_id}`、`/replay-jobs/{job_id}/results`、`/replay-jobs/{job_id}/cancel` 和 `/history/{experiment_id}/replays` 管理前十全量复核。
 
 行情查询接口不需要 `vipdoc_path`；本地导入和一键同步可以指定该参数，省略时使用 `SELECTOR_VIPDOC_PATH` 或 `/data/vipdoc`。纯在线更新不读取本地目录。自定义 universe 文件仍可由筛选/回测请求指定，但其中的行情数据来自数据库。
 

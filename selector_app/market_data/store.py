@@ -28,7 +28,7 @@ from .models import (
     StockRef,
 )
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 SCREEN_HISTORY_LIMIT = 10
 STRATEGY_DISCOVERY_HISTORY_LIMIT = 20
 BACKTEST_HISTORY_LIMIT = 20
@@ -187,16 +187,11 @@ def _enrich_backtest_history_names(
 
     if isinstance(value, Mapping):
         enriched = {
-            str(key): _enrich_backtest_history_names(child, names)
-            for key, child in value.items()
+            str(key): _enrich_backtest_history_names(child, names) for key, child in value.items()
         }
         market = enriched.get("market")
         code = enriched.get("code")
-        if (
-            (not _clean_name(enriched.get("name")))
-            and market is not None
-            and code is not None
-        ):
+        if (not _clean_name(enriched.get("name"))) and market is not None and code is not None:
             name = names.get((str(market), str(code)))
             if name is not None:
                 enriched["name"] = name
@@ -212,11 +207,7 @@ def _instrument_name_map(connection: duckdb.DuckDBPyConnection) -> dict[tuple[st
     rows = connection.execute(
         "SELECT market, code, name FROM instruments WHERE name IS NOT NULL"
     ).fetchall()
-    return {
-        (str(row[0]), str(row[1])): str(row[2])
-        for row in rows
-        if str(row[2]).strip()
-    }
+    return {(str(row[0]), str(row[1])): str(row[2]) for row in rows if str(row[2]).strip()}
 
 
 def _clean_name(value: object) -> str | None:
@@ -467,6 +458,24 @@ class DuckDbMarketDataStore:
                     request_json VARCHAR NOT NULL,
                     result_json VARCHAR NOT NULL,
                     summary_json VARCHAR NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS strategy_discovery_replay_history (
+                    replay_id VARCHAR PRIMARY KEY,
+                    experiment_id VARCHAR NOT NULL,
+                    leaderboard VARCHAR NOT NULL,
+                    created_at TIMESTAMP NOT NULL,
+                    started_at TIMESTAMP NOT NULL,
+                    finished_at TIMESTAMP NOT NULL,
+                    data_start VARCHAR NOT NULL,
+                    data_end VARCHAR NOT NULL,
+                    data_fingerprint VARCHAR NOT NULL,
+                    duration_seconds DOUBLE NOT NULL,
+                    result_json VARCHAR NOT NULL,
+                    UNIQUE (experiment_id, leaderboard)
                 )
                 """
             )
@@ -1488,6 +1497,10 @@ class DuckDbMarketDataStore:
                 ).fetchall()
                 if stale:
                     connection.executemany(
+                        "DELETE FROM strategy_discovery_replay_history WHERE experiment_id = ?",
+                        stale,
+                    )
+                    connection.executemany(
                         "DELETE FROM strategy_discovery_history WHERE history_id = ?", stale
                     )
                 connection.execute("COMMIT")
@@ -1594,11 +1607,142 @@ class DuckDbMarketDataStore:
         if not normalized_id:
             return False
         with _WRITE_LOCK, self._connect() as connection:
-            deleted = connection.execute(
-                "DELETE FROM strategy_discovery_history WHERE history_id = ? RETURNING history_id",
-                [normalized_id],
-            ).fetchone()
+            connection.execute("BEGIN")
+            try:
+                connection.execute(
+                    "DELETE FROM strategy_discovery_replay_history WHERE experiment_id = ?",
+                    [normalized_id],
+                )
+                deleted = connection.execute(
+                    "DELETE FROM strategy_discovery_history "
+                    "WHERE history_id = ? RETURNING history_id",
+                    [normalized_id],
+                ).fetchone()
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
         return deleted is not None
+
+    def save_strategy_discovery_replay_history(
+        self,
+        replay_id: str,
+        result: Mapping[str, object],
+        *,
+        started_at: datetime | str,
+        finished_at: datetime | str,
+        created_at: datetime | str | None = None,
+        duration_seconds: float | None = None,
+    ) -> None:
+        """Persist the latest full-range replay for one experiment leaderboard."""
+
+        self._require_writer()
+        normalized_id = replay_id.strip()
+        if not normalized_id:
+            raise ValueError("策略复核 ID 不能为空")
+        payload = dict(result)
+        experiment_id = str(payload.get("experiment_id") or "").strip()
+        leaderboard = str(payload.get("leaderboard") or "").strip()
+        if not experiment_id:
+            raise ValueError("策略复核缺少实验 ID")
+        if leaderboard not in {"sharpe", "return"}:
+            raise ValueError("策略复核榜单类型无效")
+        started = _normalize_timestamp(started_at, _now())
+        finished = _normalize_timestamp(finished_at, started)
+        if finished < started:
+            raise ValueError("策略复核结束时间不能早于开始时间")
+        created = _normalize_timestamp(created_at, started)
+        if duration_seconds is None:
+            duration = (finished - started).total_seconds()
+        else:
+            try:
+                duration = float(duration_seconds)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("策略复核耗时格式无效") from exc
+        if not math.isfinite(duration) or duration < 0:
+            raise ValueError("策略复核耗时必须是大于等于 0 的有限数字")
+        data_start = str(payload.get("data_start") or "")
+        data_end = str(payload.get("data_end") or "")
+        data_fingerprint = str(payload.get("data_fingerprint") or "")
+        with _WRITE_LOCK, self._connect() as connection:
+            connection.execute("BEGIN")
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO strategy_discovery_replay_history (
+                        replay_id, experiment_id, leaderboard, created_at, started_at,
+                        finished_at, data_start, data_end, data_fingerprint,
+                        duration_seconds, result_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (experiment_id, leaderboard) DO UPDATE SET
+                        replay_id = excluded.replay_id,
+                        created_at = excluded.created_at,
+                        started_at = excluded.started_at,
+                        finished_at = excluded.finished_at,
+                        data_start = excluded.data_start,
+                        data_end = excluded.data_end,
+                        data_fingerprint = excluded.data_fingerprint,
+                        duration_seconds = excluded.duration_seconds,
+                        result_json = excluded.result_json
+                    """,
+                    [
+                        normalized_id,
+                        experiment_id,
+                        leaderboard,
+                        created,
+                        started,
+                        finished,
+                        data_start,
+                        data_end,
+                        data_fingerprint,
+                        duration,
+                        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                    ],
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+
+    def read_strategy_discovery_replay_history(
+        self, experiment_id: str, leaderboard: str
+    ) -> dict[str, object] | None:
+        """Read the latest persisted replay for one experiment leaderboard."""
+
+        if leaderboard not in {"sharpe", "return"}:
+            raise ValueError("策略复核榜单类型无效")
+        with self._connect(read_only=True) as connection:
+            row = connection.execute(
+                """
+                SELECT replay_id, experiment_id, leaderboard, created_at, started_at,
+                       finished_at, data_start, data_end, data_fingerprint,
+                       duration_seconds, result_json
+                FROM strategy_discovery_replay_history
+                WHERE experiment_id = ? AND leaderboard = ?
+                """,
+                [experiment_id.strip(), leaderboard],
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            result = json.loads(str(row[10]))
+        except json.JSONDecodeError as exc:
+            raise MarketDataStoreError("策略复核历史内容损坏") from exc
+        if not isinstance(result, dict):
+            raise MarketDataStoreError("策略复核历史内容无效")
+        return {
+            "replay_id": str(row[0]),
+            "experiment_id": str(row[1]),
+            "leaderboard": str(row[2]),
+            "created_at": str(row[3]),
+            "started_at": str(row[4]),
+            "finished_at": str(row[5]),
+            "data_start": str(row[6]),
+            "data_end": str(row[7]),
+            "data_fingerprint": str(row[8]),
+            "duration_seconds": float(row[9]),
+            "result": result,
+        }
 
     def save_backtest_history(
         self,

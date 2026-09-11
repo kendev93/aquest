@@ -99,6 +99,19 @@ test('user can discover a strategy, apply it, and rerun ordinary portfolio backt
     search_metadata: { evaluated_trials: 1 },
     validation_metadata: { leaderboard_period: 'validation' },
   } } }))
+  await page.route('**/api/v1/strategy-discovery/discovery-job/replays', (route) => route.fulfill({ status: 202, json: { data: { job_id: 'replay-job', status: 'queued' } } }))
+  await page.route('**/api/v1/strategy-discovery/replay-jobs/replay-job', (route) => route.fulfill({ json: {
+    data: { job_id: 'replay-job', status: 'completed', progress: 1, total_candidates: 1, total_scanned: 1, errors: 0, skipped: 0, error: null, result: null, phase: 'completed', metadata: {} },
+  } }))
+  await page.route('**/api/v1/strategy-discovery/replay-jobs/replay-job/results', (route) => route.fulfill({ json: { data: {
+    experiment_id: 'discovery-job', leaderboard: 'sharpe', replay_id: 'replay-job', started_at: '2026-09-11T08:00:00', finished_at: '2026-09-11T08:00:02', duration_seconds: 2,
+    data_start: '2024-01-01', data_end: '2026-09-11', data_fingerprint: 'replay-fingerprint', source_data_fingerprint: 'source-fingerprint', data_changed: true, candidate_count: 1, diagnostics: {},
+    candidates: [{ rank: 1, candidate_hash: 'candidate-1', human_readable_rules: '买入[VAR1 > 60]；卖出[VAR1 < 40]', config: { ...candidateConfig, start_date: '2024-01-01', end_date: '2026-09-11' }, leaderboard_metrics: { annual_return: 0.2, sharpe: 1.5 }, overall_metrics: { total_return: 0.42, annual_return: 0.18, max_drawdown: 0.14, sharpe: 1.1, total_trades: 7, win_rate: 0.57, turnover: 1.4, trade_fingerprint: 'fingerprint' }, periods: {
+      ytd: { key: 'ytd', label: '今年以来', start_date: '2026-01-01', end_date: '2026-09-11', bars: 20, total_return: 0.12, annual_return: 0.18, max_drawdown: 0.08, sharpe: 1.2, total_trades: 2, win_rate: 0.5, diagnostic: null },
+      one_year: { key: 'one_year', label: '最近一年', start_date: '2025-09-11', end_date: '2026-09-11', bars: 40, total_return: 0.2, annual_return: 0.2, max_drawdown: 0.1, sharpe: 1.3, total_trades: 4, win_rate: 0.5, diagnostic: null },
+      two_year: { key: 'two_year', label: '最近两年', start_date: '2024-09-11', end_date: '2026-09-11', bars: 60, total_return: 0.35, annual_return: 0.18, max_drawdown: 0.14, sharpe: 1.1, total_trades: 7, win_rate: 0.57, diagnostic: null },
+    }, annual_metrics: [{ key: 'year_2026', label: '2026', start_date: '2026-01-01', end_date: '2026-09-11', bars: 20, total_return: 0.12, annual_return: 0.18, max_drawdown: 0.08, sharpe: 1.2, total_trades: 2, win_rate: 0.5, diagnostic: null, partial: true }], backtest: { universe: 'all', total_candidates: 1, processed: 1, skipped: 0, errors: 0, bars: 60, start_date: '2024-01-01', end_date: '2026-09-11', max_positions: 2, ranking_value: 'indicator_three.varo7', rank_order: 'desc', performance: { total_return: 0.42, annual_return: 0.18, max_drawdown: 0.14, sharpe: 1.1, total_trades: 7, win_rate: 0.57, turnover: 1.4, end_value: 1420000 }, equity_curve: [{ date: '2024-01-01', cash: 1000000, position_value: 0, total: 1000000, positions_count: 0, drawdown: 0, drawdown_pct: 0 }, { date: '2026-09-11', cash: 0, position_value: 1420000, total: 1420000, positions_count: 2, drawdown: 0, drawdown_pct: 0 }], trades: [], states: [], ranking_events: [], failure_reasons: {}, diagnostic: null, data_fingerprint: 'replay-fingerprint', risk_controls: {} }, data_fingerprint: 'replay-fingerprint', diagnostic: null }],
+  } } }))
   await page.route('**/api/v1/formula-screen/metadata', (route) => route.fulfill({ json: { data: metadata } }))
   await page.route('**/api/v1/portfolio-backtests', (route) => route.fulfill({ status: 202, json: { data: { job_id: 'portfolio-job', status: 'queued' } } }))
   await page.route('**/api/v1/portfolio-backtests/portfolio-job', (route) => route.fulfill({ json: { data: { job_id: 'portfolio-job', status: 'completed', progress: 1, total_candidates: 1, total_scanned: 1, errors: 0, error: null, result: null } } }))
@@ -121,7 +134,13 @@ test('user can discover a strategy, apply it, and rerun ordinary portfolio backt
   })
   await expect(page.getByTestId('strategy-discovery-results')).toContainText('夏普榜前 10')
   await expect(page.getByTestId('strategy-discovery-results')).toContainText('VAR1 > 60')
-  await page.getByTestId('strategy-discovery-apply-candidate-1').click()
+  await page.getByTestId('strategy-discovery-replay').click()
+  await expect(page.getByTestId('strategy-replay-overall-table')).toContainText('42.00%')
+  await expect(page.getByTestId('strategy-replay-results')).toContainText('行情已更新')
+  await page.getByTestId('strategy-replay-period-annual').click()
+  await expect(page.getByTestId('strategy-replay-annual-table')).toContainText('2026')
+  await page.getByTestId('strategy-replay-candidate-candidate-1').click()
+  await page.getByTestId('strategy-replay-apply-candidate-1').click()
 
   await expect(page).toHaveURL(/portfolio-backtest$/)
   await expect(page.getByTestId('portfolio-max-positions')).toHaveValue('2')

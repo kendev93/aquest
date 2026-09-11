@@ -31,6 +31,20 @@ class FakeDiscoveryService:
             "duration_seconds": 0.01,
         }
 
+    def replay(self, experiment, leaderboard, progress_callback=None, abort_check=None):
+        if progress_callback is not None:
+            progress_callback(1, 1, "replaying", {"overall_progress": 1.0})
+        return {
+            "experiment_id": experiment["history_id"],
+            "leaderboard": leaderboard,
+            "data_start": "2024-01-01",
+            "data_end": "2024-12-31",
+            "data_fingerprint": "replay-fingerprint",
+            "data_changed": False,
+            "candidate_count": 1,
+            "candidates": [{"candidate_hash": "candidate-1"}],
+        }
+
 
 class CapturingDiscoveryService(FakeDiscoveryService):
     def __init__(self) -> None:
@@ -86,6 +100,72 @@ def test_strategy_discovery_api_starts_reports_and_reads_history(tmp_path) -> No
     assert history.json()["data"][0]["duration_seconds"] == 0.01
     assert history.json()["data"][0]["started_at"]
     assert history.json()["data"][0]["finished_at"]
+
+
+def test_strategy_replay_api_runs_persists_and_reads_the_selected_leaderboard(tmp_path) -> None:
+    from selector_app.market_data.store import DuckDbMarketDataStore
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.save_strategy_discovery_history(
+        "experiment-1",
+        {
+            "request": {"base_config": {"start_date": "2024-01-01", "end_date": "2024-12-31"}},
+            "search_metadata": {},
+            "validation_metadata": {},
+            "algorithm_metadata": {},
+            "data_fingerprint": "source-fingerprint",
+            "results_by_sharpe": [],
+            "results_by_return": [],
+            "duration_seconds": 1.0,
+        },
+    )
+    service = FakeDiscoveryService()
+    with TestClient(
+        create_app(
+            strategy_discovery_service=service,
+            market_data_store=store,
+        )
+    ) as client:
+        created = client.post(
+            "/api/v1/strategy-discovery/experiment-1/replays",
+            json={"leaderboard": "sharpe"},
+        )
+        assert created.status_code == 202
+        replay_job_id = created.json()["data"]["job_id"]
+        state = None
+        for _ in range(50):
+            state_response = client.get(f"/api/v1/strategy-discovery/replay-jobs/{replay_job_id}")
+            assert state_response.status_code == 200
+            state = state_response.json()["data"]
+            if state["status"] in {"completed", "failed"}:
+                break
+            time.sleep(0.01)
+        result = client.get(f"/api/v1/strategy-discovery/replay-jobs/{replay_job_id}/results")
+        saved = client.get(
+            "/api/v1/strategy-discovery/history/experiment-1/replays?leaderboard=sharpe"
+        )
+
+    assert state is not None
+    assert state["status"] == "completed"
+    assert state["total_candidates"] == 1
+    assert state["total_scanned"] == 1
+    assert result.status_code == 200
+    assert result.json()["data"]["candidate_count"] == 1
+    assert saved.status_code == 200
+    assert saved.json()["data"]["replay_id"] == replay_job_id
+
+
+def test_strategy_replay_api_rejects_unknown_leaderboard(tmp_path) -> None:
+    from selector_app.market_data.store import DuckDbMarketDataStore
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    with TestClient(create_app(market_data_store=store)) as client:
+        response = client.post(
+            "/api/v1/strategy-discovery/experiment-1/replays",
+            json={"leaderboard": "unknown"},
+        )
+
+    assert response.status_code == 422
 
 
 def test_strategy_discovery_api_uses_all_completed_local_dates_when_omitted(tmp_path) -> None:

@@ -193,6 +193,8 @@ N:=20;
 
 实验按 60% / 20% / 20% 切分为寻优、验证和最终留出区间；排行榜只按验证期 Sharpe 和年化收益排序，最终留出仅用于检验。真实组合回测先为本次实验准备一份只读内存映射行情/指标快照，再由固定 8 进程批量评估候选，避免每个进程重复加载全市场 Pandas 数据。搜索阶段只生成绩效摘要，最终应用候选时仍使用完整报告；LightGBM surrogate 按新增样本间隔重训，预算较大且长期没有改善时会保守提前收敛。主进程负责 Optuna/LightGBM 的搜索状态和结果排序。每个候选保留完整配置、三段绩效、交易次数、胜率、换手率、复杂度、行情指纹、算法版本和随机种子。实验历史保存在 DuckDB，默认保留最近 20 次；“应用”会把候选配置回填到组合回测页面，重新执行并核对成交记录、绩效和数据指纹。
 
+排行榜支持“一键回测当前榜单前十”：只复核当前正在查看的夏普榜或收益榜，使用实验原始开始日期和任务启动时本地最新已完成行情日。每个候选只执行一次全区间组合回测，再从连续资金曲线派生整体、今年以来、最近一年、最近两年和自然年度收益、回撤、Sharpe 与交易数；结果同时保存完整成交记录、资金曲线、耗时和行情指纹，行情更新会明确标记。复核结果不会反向改写验证期排行榜，同一实验和榜单默认只保留最近一次。
+
 正式 Docker 镜像在构建时通过 `requirements.lock` 安装 Optuna 和 LightGBM，策略实验室默认要求两者都可用；依赖缺失会明确提示重新构建镜像，不会静默改变寻优算法。只有本地诊断时显式设置 `INDICATOR_LAB_DISCOVERY_ALLOW_FALLBACK=1` 才允许使用带固定种子的确定性搜索。
 
 ## 策略适配性评估
@@ -241,6 +243,11 @@ POST /api/v1/strategy-discovery/{job_id}/cancel
 GET  /api/v1/strategy-discovery/history
 GET  /api/v1/strategy-discovery/history/{id}
 DELETE /api/v1/strategy-discovery/history/{id}
+POST /api/v1/strategy-discovery/{experiment_id}/replays
+GET  /api/v1/strategy-discovery/replay-jobs/{job_id}
+GET  /api/v1/strategy-discovery/replay-jobs/{job_id}/results
+POST /api/v1/strategy-discovery/replay-jobs/{job_id}/cancel
+GET  /api/v1/strategy-discovery/history/{experiment_id}/replays?leaderboard=sharpe|return
 POST /api/v1/strategy-fitness
 GET  /api/v1/strategy-fitness/{job_id}
 GET  /api/v1/strategy-fitness/{job_id}/results

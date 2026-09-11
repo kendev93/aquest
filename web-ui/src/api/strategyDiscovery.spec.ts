@@ -2,12 +2,17 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   cancelStrategyDiscovery,
+  cancelStrategyReplay,
   createStrategyDiscovery,
+  createStrategyReplay,
   deleteStrategyDiscoveryHistory,
   fetchStrategyDiscoveryCapabilities,
   fetchStrategyDiscoveryHistory,
   getStrategyDiscovery,
   getStrategyDiscoveryResults,
+  getStrategyReplay,
+  getStrategyReplayHistory,
+  getStrategyReplayResults,
 } from './strategyDiscovery'
 
 describe('strategy discovery API', () => {
@@ -46,5 +51,27 @@ describe('strategy discovery API', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(JSON.stringify({ error: { message: '策略实验失败' } }), { status: 422 }))
 
     await expect(fetchStrategyDiscoveryCapabilities()).rejects.toThrow('策略实验失败')
+  })
+
+  it('creates, polls, cancels, and reads a full-range replay', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { job_id: 'replay-1', status: 'queued' } }), { status: 202 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { job_id: 'replay-1', status: 'running' } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { candidate_count: 10 } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { job_id: 'replay-1', status: 'cancelling', cancel_requested: true } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { replay_id: 'replay-1' } }), { status: 200 }))
+
+    await expect(createStrategyReplay('experiment-1', 'sharpe')).resolves.toEqual({ job_id: 'replay-1', status: 'queued' })
+    await expect(getStrategyReplay('replay-1')).resolves.toEqual({ job_id: 'replay-1', status: 'running' })
+    await expect(getStrategyReplayResults('replay-1')).resolves.toEqual({ candidate_count: 10 })
+    await expect(cancelStrategyReplay('replay-1')).resolves.toEqual({ job_id: 'replay-1', status: 'cancelling', cancel_requested: true })
+    await expect(getStrategyReplayHistory('experiment-1', 'sharpe')).resolves.toEqual({ replay_id: 'replay-1' })
+    expect(fetchMock.mock.calls.map(([url, init]) => [url, init?.method ?? 'GET'])).toEqual([
+      ['/api/v1/strategy-discovery/experiment-1/replays', 'POST'],
+      ['/api/v1/strategy-discovery/replay-jobs/replay-1', 'GET'],
+      ['/api/v1/strategy-discovery/replay-jobs/replay-1/results', 'GET'],
+      ['/api/v1/strategy-discovery/replay-jobs/replay-1/cancel', 'POST'],
+      ['/api/v1/strategy-discovery/history/experiment-1/replays?leaderboard=sharpe', 'GET'],
+    ])
   })
 })

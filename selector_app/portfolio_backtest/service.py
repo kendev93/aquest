@@ -1241,6 +1241,7 @@ class PortfolioBacktestService:
                 name: _finite_number(value) for name, value in analyzer.compute().items()
             }
             performance["avg_holding_days"] = _average_holding_days(trades)
+            performance["turnover"] = _portfolio_turnover(trades, config.initial_cash)
             diagnostic = analyzer.diagnostic
         serialized_equity = tuple(
             {
@@ -1319,6 +1320,18 @@ def _portfolio_fingerprint(contexts: list[_StockSeries]) -> str:
     for context in sorted(contexts, key=lambda item: item.symbol):
         digest.update(f"{context.symbol}:{context.data_fingerprint}\n".encode("ascii"))
     return digest.hexdigest()
+
+
+def _portfolio_turnover(
+    trades: Sequence[Mapping[str, PortfolioJsonValue]], initial_cash: float
+) -> float:
+    if initial_cash <= 0:
+        return 0.0
+    total_notional = sum(
+        float(cast(float, trade.get("size", 0))) * float(cast(float, trade.get("price", 0)))
+        for trade in trades
+    )
+    return total_notional / initial_cash
 
 
 def _date_int(value: str) -> int:

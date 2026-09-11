@@ -757,6 +757,14 @@ class StrategyDiscoveryRequest(BaseModel):
         )
 
 
+class StrategyReplayRequest(BaseModel):
+    """Request to replay the current top-ten leaderboard on full local history."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    leaderboard: Literal["sharpe", "return"]
+
+
 class StrategyFitnessRequest(PortfolioBacktestRequest):
     """Batch single-stock strategy suitability request."""
 

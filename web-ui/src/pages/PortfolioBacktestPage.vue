@@ -560,7 +560,7 @@ async function compareAppliedCandidate(backtest: PortfolioBacktestResult): Promi
   const applied = appliedDiscoveryCandidate.value
   if (!applied) return
   const expected = applied.validation_metrics
-  const metricKeys = ['total_return', 'annual_return', 'sharpe', 'max_drawdown', 'total_trades', 'win_rate']
+  const metricKeys = ['total_return', 'annual_return', 'sharpe', 'max_drawdown', 'total_trades', 'win_rate', 'turnover']
   const comparable = metricKeys.filter((key) => typeof expected?.[key] === 'number' && typeof backtest.performance[key] === 'number')
   const performanceMatches = comparable.length > 0 && comparable.every((key) => {
     const expectedValue = expected?.[key]
