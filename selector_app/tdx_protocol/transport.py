@@ -65,6 +65,15 @@ class TdxConnection:
                 pass
             self._socket = None
 
+    def set_timeout(self, timeout: float) -> None:
+        """Apply a bounded timeout to the current socket and future reconnects."""
+
+        if timeout <= 0:
+            raise ValueError("TDX 连接超时时间必须大于 0")
+        self.timeout = timeout
+        if self._socket is not None:
+            self._socket.settimeout(timeout)
+
     def execute(self, command: Command[T]) -> T:
         sock = self._socket
         if sock is None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import struct
+import time
 import zlib
 
 import pandas as pd
@@ -96,10 +97,17 @@ def test_count_and_security_list_requests_are_available() -> None:
 def test_security_list_all_fetches_every_reported_page(monkeypatch: pytest.MonkeyPatch) -> None:
     client = object.__new__(TdxClient)
 
-    def get_count(market: Market) -> int:
+    def get_count(market: Market, *, deadline: float | None = None) -> int:
+        assert deadline is not None
         return 1001 if market is Market.SH else 0
 
-    def get_page(market: Market, start: int) -> object:
+    def get_page(
+        market: Market,
+        start: int,
+        *,
+        deadline: float | None = None,
+    ) -> object:
+        assert deadline is not None
         assert market is Market.SH
         if start == 0:
             return pd.DataFrame([{"market": "SH", "code": f"{index:06d}"} for index in range(1000)])
@@ -120,12 +128,12 @@ def test_security_list_all_does_not_hide_a_failed_page(monkeypatch: pytest.Monke
     monkeypatch.setattr(
         client,
         "get_security_count",
-        lambda market: 1001 if market is Market.SH else 0,
+        lambda market, *, deadline=None: 1001 if market is Market.SH else 0,
     )
     monkeypatch.setattr(
         client,
         "get_security_list",
-        lambda _market, start: (
+        lambda _market, start, *, deadline=None: (
             pd.DataFrame([{"market": "SH", "code": "600000"}])
             if start == 0
             else (_ for _ in ()).throw(TdxConnectionError("分页连接失败"))
@@ -134,6 +142,24 @@ def test_security_list_all_does_not_hide_a_failed_page(monkeypatch: pytest.Monke
 
     with pytest.raises(TdxConnectionError, match="证券列表分页"):
         client.get_security_list_all()
+
+
+def test_tdx_request_stops_immediately_after_security_list_deadline() -> None:
+    class UnexpectedConnection:
+        def set_timeout(self, timeout: float) -> None:
+            del timeout
+
+        def execute(self, command: object) -> object:
+            del command
+            raise AssertionError("expired request must not reach the socket")
+
+    client = object.__new__(TdxClient)
+    client._connection = UnexpectedConnection()
+    client._timeout = 30.0
+    client._hosts = []
+
+    with pytest.raises(TdxConnectionError, match="证券列表请求超时"):
+        client._execute(GetSecurityCount(Market.SH), deadline=time.monotonic() - 1)
 
 
 def test_daily_bar_request_rejects_unsafe_page_size() -> None:
