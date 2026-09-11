@@ -157,7 +157,7 @@ function valueLabel(valueId: string): string {
       </div>
       <small class="condition-combine-helper">{{ draft.combine_mode === 'all' ? '所有指标条件同时满足才触发。' : draft.combine_mode === 'any' ? '任一指标条件满足就触发。' : `至少满足 ${draft.minimum_matches ?? 1} 个指标条件才触发。` }}</small>
     </div>
-    <div v-else class="condition-combine-control fixed-rule-note">每条条件都会作为硬约束，候选必须全部满足。</div>
+    <div v-else class="condition-combine-control fixed-rule-note fixed-rule-note--compact">每条条件都会作为硬约束，候选必须全部满足。</div>
 
     <div class="rule-condition-list">
       <span class="rule-subtitle">指标条件</span>
@@ -246,6 +246,18 @@ function valueLabel(valueId: string): string {
 
 .add-condition-button {
   width: 100%;
+}
+
+.fixed-rule-note {
+  color: var(--subtle);
+  font-size: 0.7rem;
+  font-weight: 500;
+  line-height: 1.45;
+  text-wrap: pretty;
+}
+
+.fixed-rule-note--compact {
+  min-height: 0;
 }
 
 @media (max-width: 900px) {

@@ -63,6 +63,7 @@ describe('RuleGroupEditor', () => {
 
     expect(wrapper.findAll('[data-testid^="required-condition-"]')).toHaveLength(2)
     expect(wrapper.get('[data-testid="required-add-condition"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('.fixed-rule-note').classes()).toContain('fixed-rule-note--compact')
     const latest = (wrapper.emitted('update:modelValue') ?? []).at(-1)?.[0] as RuleGroupPayload
     expect(latest.combine_mode).toBe('all')
     expect(latest.conditions).toHaveLength(2)
