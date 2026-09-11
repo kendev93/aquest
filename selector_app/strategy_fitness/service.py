@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
@@ -12,6 +13,7 @@ from typing import Protocol
 import numpy as np
 import pandas as pd
 
+from selector_app.concurrency import MAX_WORKERS
 from selector_app.formulas.common import validate_market_data
 from selector_app.formulas.custom import ParsedFormula, parse_formula
 from selector_app.formulas.registry import FORMULA_REGISTRY, FormulaRegistry
@@ -116,13 +118,29 @@ class StrategyFitnessService:
         )
         results: list[StrategyFitnessResult] = []
         skipped = len(refs) - len(cached_refs)
-        for index, ref in enumerate(cached_refs, start=1):
-            result = self._evaluate_stock(
-                ref, frames[ref_key(ref)], windows, config, parsed, simulator
-            )
-            results.append(result)
-            if progress_callback is not None:
-                progress_callback(skipped + index, len(refs))
+        worker_count = min(MAX_WORKERS, len(cached_refs)) if cached_refs else 1
+        with ThreadPoolExecutor(
+            max_workers=worker_count,
+            thread_name_prefix="fitness-stock",
+        ) as executor:
+            futures = {
+                executor.submit(
+                    self._evaluate_stock,
+                    ref,
+                    frames[ref_key(ref)],
+                    windows,
+                    config,
+                    parsed,
+                    simulator,
+                ): ref
+                for ref in cached_refs
+            }
+            completed = 0
+            for future in as_completed(futures):
+                results.append(future.result())
+                completed += 1
+                if progress_callback is not None:
+                    progress_callback(skipped + completed, len(refs))
 
         results.sort(key=lambda item: (-item.suitability_score, item.market, item.code))
         return StrategyFitnessReport(

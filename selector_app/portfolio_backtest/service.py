@@ -6,6 +6,7 @@ import hashlib
 import heapq
 from collections import Counter, deque
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
@@ -16,6 +17,7 @@ import pandas as pd
 
 from selector_app.backtest.performance import PerformanceAnalyzer
 from selector_app.backtest.profiles import TradeProfile, profile_from_config
+from selector_app.concurrency import MAX_WORKERS
 from selector_app.formulas.common import validate_market_data
 from selector_app.formulas.custom import (
     ParsedFormula,
@@ -46,6 +48,7 @@ from .models import (
 )
 
 PortfolioBacktestProgressCallback = Callable[[int, int], None]
+_CONTEXT_PRELOAD_CHUNK_SIZE = 32
 
 
 class PortfolioMarketDataAdapter(Protocol):
@@ -141,22 +144,68 @@ class PortfolioBacktestService:
         contexts: list[_StockSeries] = []
         failure_reasons: Counter[str] = Counter()
         frames = self._batch_frames(refs)
-        for current, ref in enumerate(refs, start=1):
-            try:
-                context = self._build_context(
-                    ref,
+        parallel_contexts = frames is not None and len(refs) > 1
+        executor = (
+            ThreadPoolExecutor(
+                max_workers=min(MAX_WORKERS, len(refs)),
+                thread_name_prefix="portfolio-context",
+            )
+            if parallel_contexts
+            else None
+        )
+        try:
+            for offset in range(0, len(refs), _CONTEXT_PRELOAD_CHUNK_SIZE):
+                chunk = refs[offset : offset + _CONTEXT_PRELOAD_CHUNK_SIZE]
+                self._preload_indicator_cache(
+                    {
+                        (ref.market, ref.code): frames[(ref.market, ref.code)]
+                        for ref in chunk
+                        if frames is not None and (ref.market, ref.code) in frames
+                    },
                     config,
                     parsed,
-                    frame=frames.get((ref.market, ref.code)) if frames is not None else None,
                 )
-            except Exception as exc:  # noqa: BLE001 - one bad stock must not abort a portfolio
-                reason = str(exc).strip()[:200] or type(exc).__name__
-                failure_reasons[reason] += 1
-                context = None
-            if context is not None:
-                contexts.append(context)
-            if progress_callback is not None:
-                progress_callback(current, len(refs))
+
+                def build(ref: StockRef) -> _StockSeries | None:
+                    return self._build_context(
+                        ref,
+                        config,
+                        parsed,
+                        frame=frames.get((ref.market, ref.code)) if frames is not None else None,
+                    )
+
+                if executor is None:
+                    for current, ref in enumerate(chunk, start=offset + 1):
+                        try:
+                            context = build(ref)
+                        except Exception as exc:  # noqa: BLE001 - one bad stock must not abort a portfolio
+                            reason = str(exc).strip()[:200] or type(exc).__name__
+                            failure_reasons[reason] += 1
+                            context = None
+                        if context is not None:
+                            contexts.append(context)
+                        if progress_callback is not None:
+                            progress_callback(current, len(refs))
+                    continue
+
+                futures = {executor.submit(build, ref): ref for ref in chunk}
+                completed = offset
+                for future in as_completed(futures):
+                    ref = futures[future]
+                    try:
+                        context = future.result()
+                    except Exception as exc:  # noqa: BLE001 - one bad stock must not abort a portfolio
+                        reason = str(exc).strip()[:200] or type(exc).__name__
+                        failure_reasons[reason] += 1
+                        context = None
+                    if context is not None:
+                        contexts.append(context)
+                    completed += 1
+                    if progress_callback is not None:
+                        progress_callback(completed, len(refs))
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=True)
 
         if not contexts:
             return self._empty_report(config, len(refs), failure_reasons)
@@ -332,6 +381,34 @@ class PortfolioBacktestService:
             dict.fromkeys(signal_id for rule in rules if rule for signal_id in rule.signals)
         )
 
+    def _formula_ids_for_config(self, config: PortfolioBacktestConfig) -> tuple[str, ...]:
+        formula_ids = {
+            self._registry.signal(signal_id).formula_id
+            for signal_id in self._rule_signal_ids(config.buy_rule, config.sell_rule)
+        }
+        formula_ids.update(value_id.split(".", 1)[0] for value_id in self._value_ids(config))
+        return tuple(sorted(formula_ids))
+
+    def _preload_indicator_cache(
+        self,
+        frames: Mapping[tuple[str, str], pd.DataFrame] | None,
+        config: PortfolioBacktestConfig,
+        parsed: ParsedFormula | None,
+    ) -> None:
+        """Batch-load built-in cache rows before parallel context construction."""
+
+        if self._indicator_cache is None or parsed is not None or not frames:
+            return
+        formula_ids = self._formula_ids_for_config(config)
+        if not formula_ids:
+            return
+        items = list(frames.items())
+        for offset in range(0, len(items), _CONTEXT_PRELOAD_CHUNK_SIZE):
+            self._indicator_cache.preload(
+                dict(items[offset : offset + _CONTEXT_PRELOAD_CHUNK_SIZE]),
+                formula_ids,
+            )
+
     def _build_context(
         self,
         ref: StockRef,
@@ -478,11 +555,7 @@ class PortfolioBacktestService:
                 if self._indicator_cache is not None
                 else {"custom": evaluate_custom_formula(parsed, frame, config.formula_parameters)}
             )
-        formula_ids = {
-            self._registry.signal(signal_id).formula_id
-            for signal_id in self._rule_signal_ids(config.buy_rule, config.sell_rule)
-        }
-        formula_ids.update(value_id.split(".", 1)[0] for value_id in self._value_ids(config))
+        formula_ids = self._formula_ids_for_config(config)
         if self._indicator_cache is not None:
             return self._indicator_cache.get_or_compute(
                 frame,
@@ -987,29 +1060,13 @@ class PortfolioBacktestService:
                 ranked_candidates.append((score, context, decision))
             if decision is None or decision.eligible:
                 candidates.append((score, context))
-        if include_event:
-            ranked_candidates.sort(
-                key=lambda item: (
-                    -item[0] if config.rank_order == "desc" else item[0],
-                    item[1].symbol,
-                )
-            )
         slots = max(0, config.max_positions - len(positions) + len(pending_sells))
-        if include_event:
-            candidates.sort(
-                key=lambda item: (
-                    -item[0] if config.rank_order == "desc" else item[0],
-                    item[1].symbol,
-                )
-            )
-            selected = candidates[:slots]
-        else:
-            key = (
-                (lambda item: (-item[0], item[1].symbol))
-                if config.rank_order == "desc"
-                else (lambda item: (item[0], item[1].symbol))
-            )
-            selected = heapq.nsmallest(slots, candidates, key=key)
+        key = (
+            (lambda item: (-item[0], item[1].symbol))
+            if config.rank_order == "desc"
+            else (lambda item: (item[0], item[1].symbol))
+        )
+        selected = heapq.nsmallest(slots, candidates, key=key)
         slot_budget = total_value / config.max_positions if config.max_positions else cash
         pending = [
             _PendingBuy(context.symbol, current_date, slot_budget) for _, context in selected
@@ -1021,11 +1078,14 @@ class PortfolioBacktestService:
                 "ranking_value": config.ranking_value,
                 "candidates": [],
             }
+        ranked_candidates = heapq.nsmallest(
+            max(slots, 10),
+            ranked_candidates,
+            key=key,
+        )
         event_candidates: list[dict[str, PortfolioJsonValue]] = []
         selected_symbols = {context.symbol for _, context in selected}
-        for rank, (score, context, decision) in enumerate(
-            ranked_candidates[: max(slots, 10)], start=1
-        ):
+        for rank, (score, context, decision) in enumerate(ranked_candidates, start=1):
             candidate: dict[str, PortfolioJsonValue] = {
                 "rank": rank,
                 "market": context.market,

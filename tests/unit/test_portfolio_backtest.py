@@ -92,6 +92,15 @@ class StaggeredAdapter:
         return self.frames[ref.code].copy(deep=True)
 
 
+class SpyIndicatorCache:
+    def __init__(self) -> None:
+        self.calls: list[tuple[int, tuple[str, ...]]] = []
+
+    def preload(self, frames, formula_ids):
+        self.calls.append((len(frames), tuple(formula_ids)))
+        return len(frames)
+
+
 def config(**overrides: object) -> PortfolioBacktestConfig:
     values: dict[str, object] = {
         "vipdoc_path": "/tmp/vipdoc",
@@ -305,3 +314,42 @@ def test_portfolio_uses_composable_buy_and_sell_rule_groups() -> None:
     )
 
     assert any(trade["direction"] == "SELL" for trade in report.trades)
+
+
+def test_portfolio_preloads_indicator_cache_in_bounded_chunks() -> None:
+    cache = SpyIndicatorCache()
+    service = PortfolioBacktestService(adapter=FakeAdapter(), indicator_cache=cache)
+    config_with_rules = PortfolioBacktestConfig(
+        vipdoc_path="/tmp/vipdoc",
+        universe="all",
+        selected_signals=(),
+        combine_mode="all",
+        minimum_matches=None,
+        ranking_value="indicator_three.varo7",
+        buy_rule=RuleGroup(
+            conditions=(
+                ScreenCondition(
+                    left_value="indicator_three.var1",
+                    operator="gt",
+                    right_constant=8,
+                ),
+            )
+        ),
+        sell_rule=RuleGroup(
+            conditions=(
+                ScreenCondition(
+                    left_value="indicator_three.var1",
+                    operator="gt",
+                    right_constant=90,
+                ),
+            )
+        ),
+        stop_loss_pct=None,
+        take_profit_pct=None,
+    )
+    frames = {("SH", f"{600000 + index:06d}"): stock_frame([10, 11, 12]) for index in range(33)}
+
+    service._preload_indicator_cache(frames, config_with_rules, None)
+
+    assert [size for size, _ in cache.calls] == [32, 1]
+    assert all(formulas == ("indicator_three",) for _, formulas in cache.calls)
