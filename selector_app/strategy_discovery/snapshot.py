@@ -626,13 +626,13 @@ def _open_snapshot_memmap(
     dtype: type | str | np.dtype[Any] | None,
     shape: tuple[int, ...],
 ) -> np.memmap:
-    mapped = np.lib.format.open_memmap(
+    typed_open_memmap = cast(Callable[..., np.memmap], np.lib.format.open_memmap)
+    return typed_open_memmap(
         path,
         mode="w+",
         dtype=dtype,
         shape=shape,
     )
-    return mapped
 
 
 def _condition_from_dict(value: object) -> ScreenCondition:
