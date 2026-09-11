@@ -51,6 +51,41 @@ def test_runner_preserves_safe_user_error_for_background_tasks() -> None:
         runner.shutdown()
 
 
+def test_runner_exposes_live_detail_metadata_for_generic_tasks() -> None:
+    runner = ScreenJobRunner(max_results=1)
+
+    def task(progress):
+        progress.report_detail(
+            {
+                "phase": "online_bars",
+                "current_instrument": {
+                    "market": "SH",
+                    "code": "600000",
+                    "name": "浦发银行",
+                },
+                "range_label": "最新 800 根日线",
+            }
+        )
+        progress(1, 1)
+        return {}
+
+    try:
+        job_id = runner.submit_callable(task, description="行情同步")
+        wait_until_complete(runner, job_id)
+        state = runner.get(job_id)
+
+        assert state is not None
+        assert state.phase == "completed"
+        assert state.metadata["current_instrument"] == {
+            "market": "SH",
+            "code": "600000",
+            "name": "浦发银行",
+        }
+        assert state.metadata["range_label"] == "最新 800 根日线"
+    finally:
+        runner.shutdown()
+
+
 def test_runner_default_starts_eight_background_tasks_concurrently() -> None:
     runner = ScreenJobRunner(max_results=16)
     started = Event()

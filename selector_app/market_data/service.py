@@ -49,11 +49,13 @@ class LocalInstrument:
     instrument_type: str = "stock"
     error: str | None = None
     board: InstrumentBoard = "main"
+    name: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
             "market": self.market,
             "code": self.code,
+            "name": self.name,
             "instrument_type": self.instrument_type,
             "board": self.board,
             "bars": self.bars,
@@ -216,6 +218,7 @@ class LocalMarketDataService:
             return LocalInstrument(
                 market=ref.market,
                 code=ref.code,
+                name=getattr(ref, "name", None),
                 bars=0,
                 data_start=None,
                 data_end=None,
@@ -227,6 +230,7 @@ class LocalMarketDataService:
             return LocalInstrument(
                 market=ref.market,
                 code=ref.code,
+                name=getattr(ref, "name", None),
                 bars=0,
                 data_start=None,
                 data_end=None,
@@ -237,6 +241,7 @@ class LocalMarketDataService:
         return LocalInstrument(
             market=ref.market,
             code=ref.code,
+            name=getattr(ref, "name", None),
             instrument_type=getattr(ref, "instrument_type", "stock"),
             board=getattr(ref, "board", "main"),
             bars=len(frame),

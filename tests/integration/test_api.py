@@ -129,7 +129,8 @@ def test_app_schedules_online_sync_when_daily_refresh_is_due(tmp_path: Path) -> 
     calls: list[object] = []
 
     class FakeMarketSync:
-        def sync(self, config, progress_callback=None):
+        def sync(self, config, progress_callback=None, *, detail_callback=None):
+            del detail_callback
             calls.append(config)
             if progress_callback is not None:
                 progress_callback(1, 1)
@@ -310,7 +311,8 @@ def test_market_sync_job_can_be_created_and_polled() -> None:
     received = {}
 
     class FakeMarketSync:
-        def sync(self, config, progress_callback=None):
+        def sync(self, config, progress_callback=None, *, detail_callback=None):
+            del detail_callback
             received["instrument_types"] = config.instrument_types
             received["boards"] = config.boards
             received["prefer_store_targets"] = config.prefer_store_targets
@@ -375,7 +377,8 @@ def test_one_click_sync_imports_local_vipdoc_before_online_sync(tmp_path: Path) 
                 "target_source": "tdx_security_list",
             }
 
-        def sync(self, config, progress_callback=None):
+        def sync(self, config, progress_callback=None, *, detail_callback=None):
+            del detail_callback
             events.append("sync")
             assert config.prefer_store_targets is True
             if progress_callback:
@@ -473,8 +476,8 @@ def test_market_sync_rejects_an_invalid_request() -> None:
 
 def test_market_sync_reports_incomplete_security_list_without_running_bars() -> None:
     class FailingMarketSync:
-        def sync(self, config, progress_callback=None):
-            del config, progress_callback
+        def sync(self, config, progress_callback=None, *, detail_callback=None):
+            del config, progress_callback, detail_callback
             raise TdxConnectionError("证券列表分页不完整")
 
     with TestClient(create_app(engine=EmptyEngine(), market_sync=FailingMarketSync())) as client:

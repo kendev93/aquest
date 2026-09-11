@@ -14,6 +14,7 @@ from fastapi import Path as PathParameter
 from fastapi.responses import JSONResponse
 
 from selector_app.adapters.market_sync import (
+    DetailCallback,
     InstrumentDiscoveryReport,
     MarketSyncConfig,
     MarketSyncReport,
@@ -35,7 +36,12 @@ from selector_app.market_data.service import (
     LocalMarketChart,
 )
 from selector_app.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
-from selector_app.screening.jobs import ScreenJobRunner, TaskUserError
+from selector_app.screening.jobs import (
+    ProgressReporter,
+    ScreenJobRunner,
+    TaskUserError,
+    report_progress_detail,
+)
 from selector_app.tdx_protocol.errors import TdxConnectionError
 
 from ..schemas import LocalMarketImportRequest, MarketSyncRequest
@@ -53,6 +59,8 @@ class MarketSyncService(Protocol):
         self,
         config: MarketSyncConfig,
         progress_callback: LocalImportProgressCallback | None = None,
+        *,
+        detail_callback: DetailCallback | None = None,
     ) -> MarketSyncReport | dict[str, object]: ...
 
 
@@ -89,6 +97,7 @@ class LocalDayImporterLike(Protocol):
         instrument_types: list[InstrumentType] | None = None,
         boards: list[InstrumentBoard] | None = None,
         progress_callback: ProgressCallback | None = None,
+        detail_callback: DetailCallback | None = None,
     ) -> ImportReport | dict[str, object]: ...
 
 
@@ -272,7 +281,7 @@ def create_local_import(
             },
         )
 
-    def run_import(progress: Callable[[int, int], None]) -> dict[str, object]:
+    def run_import(progress: ProgressReporter) -> dict[str, object]:
         try:
             result = _importer(request).import_vipdoc(
                 root,
@@ -280,6 +289,7 @@ def create_local_import(
                 instrument_types=payload.instrument_types,
                 boards=payload.boards,
                 progress_callback=progress,
+                detail_callback=lambda detail: report_progress_detail(progress, detail),
             )
         except (MarketDataStoreError, duckdb.Error) as exc:
             raise TaskUserError(_storage_error_message(exc)) from exc
@@ -372,12 +382,26 @@ def _create_sync_job(
     # local import supplies longer history; it must not limit the universe.
     config = _sync_config(payload, prefer_store_targets=False)
 
-    def run_sync(progress: Callable[[int, int], None]) -> dict[str, object]:
+    def run_sync(progress: ProgressReporter) -> dict[str, object]:
         try:
             if not include_local:
-                return _result_dict(_service(request).sync(config, progress))
+                return _result_dict(
+                    _service(request).sync(
+                        config,
+                        progress,
+                        detail_callback=lambda detail: report_progress_detail(progress, detail),
+                    )
+                )
 
             discovery_result = _result_dict(_service(request).discover_instruments(config))
+            report_progress_detail(
+                progress,
+                {
+                    "phase": "instrument_discovery",
+                    "current_status": "completed",
+                    "discovery_summary": discovery_result,
+                },
+            )
             local_root = os.path.abspath(
                 os.path.expanduser(_resolved_vipdoc_path(payload.vipdoc_path))
             )
@@ -389,6 +413,7 @@ def _create_sync_job(
                         instrument_types=payload.instrument_types,
                         boards=payload.boards,
                         progress_callback=progress,
+                        detail_callback=lambda detail: report_progress_detail(progress, detail),
                     )
                 )
             else:
@@ -402,6 +427,7 @@ def _create_sync_job(
                 _service(request).sync(
                     replace(config, prefer_store_targets=True, refresh_names=True),
                     progress,
+                    detail_callback=lambda detail: report_progress_detail(progress, detail),
                 )
             )
             online_result = _with_discovery_summary(online_result, discovery_result)

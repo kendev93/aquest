@@ -229,3 +229,33 @@ def test_sync_reports_full_target_total_before_bar_requests(tmp_path: Path) -> N
 
     assert progress[0] == (0, 3)
     assert progress[-1] == (3, 3)
+
+
+def test_sync_reports_current_instrument_and_actual_date_range(tmp_path: Path) -> None:
+    client = FakeClient()
+    service = TdxMarketSync(
+        store=DuckDbMarketDataStore(tmp_path / "market.duckdb"),
+        client_factory=lambda _timeout: client,
+    )
+    details: list[dict[str, object]] = []
+
+    service.sync(
+        MarketSyncConfig(universe="sh", instrument_types=("stock",), boards=("main",)),
+        detail_callback=details.append,
+    )
+
+    completed = [
+        detail
+        for detail in details
+        if detail.get("current_status") == "updated"
+        and isinstance(detail.get("current_instrument"), dict)
+        and detail["current_instrument"].get("code") == "600000"
+    ]
+    assert completed
+    assert completed[-1]["current_instrument"] == {
+        "market": "SH",
+        "code": "600000",
+        "name": "浦发银行",
+    }
+    assert completed[-1]["range_start"] == "2026-08-20"
+    assert completed[-1]["range_end"] == "2026-08-22"

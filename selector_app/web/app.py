@@ -6,7 +6,7 @@ import asyncio
 import logging
 import math
 import os
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import cast
@@ -35,7 +35,12 @@ from selector_app.market_data.service import LocalMarketDataService
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.portfolio_backtest.service import PortfolioBacktestService
 from selector_app.screening.engine import ScreenEngine
-from selector_app.screening.jobs import ScanEngineLike, ScreenJobRunner
+from selector_app.screening.jobs import (
+    ProgressReporter,
+    ScanEngineLike,
+    ScreenJobRunner,
+    report_progress_detail,
+)
 from selector_app.strategy_discovery.service import StrategyDiscoveryService
 from selector_app.strategy_fitness.service import StrategyFitnessService
 
@@ -146,10 +151,11 @@ def create_app(
             )
             if has_day_files:
 
-                def run_startup_import(progress: Callable[[int, int], None]) -> dict[str, object]:
+                def run_startup_import(progress: ProgressReporter) -> dict[str, object]:
                     result = selected_importer.import_vipdoc(
                         vipdoc_root,
                         progress_callback=progress,
+                        detail_callback=lambda detail: report_progress_detail(progress, detail),
                     )
                     payload = result.to_dict() if isinstance(result, ImportReport) else result
                     try:

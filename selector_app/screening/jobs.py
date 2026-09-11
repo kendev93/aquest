@@ -6,11 +6,11 @@ import logging
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from threading import Lock
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
 from selector_app.concurrency import MAX_WORKERS
 
@@ -20,7 +20,37 @@ from .models import ScanConfig, ScanReport
 logger = logging.getLogger(__name__)
 JobStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 ProgressReporter = Callable[[int, int], None]
+ProgressDetailReporter = Callable[[Mapping[str, object]], None]
 GenericTask = Callable[[ProgressReporter], dict[str, object]]
+
+
+class _TaskProgress:
+    """Callable progress adapter that also carries live task metadata."""
+
+    def __init__(
+        self,
+        progress_callback: ProgressReporter,
+        detail_callback: ProgressDetailReporter,
+    ) -> None:
+        self._progress_callback = progress_callback
+        self._detail_callback = detail_callback
+
+    def __call__(self, current: int, total: int) -> None:
+        self._progress_callback(current, total)
+
+    def report_detail(self, details: Mapping[str, object]) -> None:
+        self._detail_callback(details)
+
+
+def report_progress_detail(
+    progress: ProgressReporter,
+    details: Mapping[str, object],
+) -> None:
+    """Forward optional live details while keeping old callback compatibility."""
+
+    reporter = cast(ProgressDetailReporter | None, getattr(progress, "report_detail", None))
+    if reporter is not None:
+        reporter(details)
 
 
 class TaskUserError(Exception):
@@ -215,8 +245,16 @@ class ScreenJobRunner:
                 state.total_candidates = total
                 state.total_scanned = current
 
+        def on_detail(details: Mapping[str, object]) -> None:
+            phase = details.get("phase")
+            self.update_callable_state(
+                job_id,
+                phase=phase if isinstance(phase, str) else None,
+                metadata=dict(details),
+            )
+
         try:
-            result = func(on_progress)
+            result = func(_TaskProgress(on_progress, on_detail))
         except TaskCancelledError as exc:
             with self._lock:
                 state.status = "cancelled"

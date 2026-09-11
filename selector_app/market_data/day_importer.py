@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Literal
 from zoneinfo import ZoneInfo
 
+import pandas as pd
+
 from selector_app.concurrency import MAX_WORKERS
 
 from .day_format import (
@@ -27,6 +29,7 @@ from .scope import InstrumentScope
 from .store import DuckDbMarketDataStore
 
 ProgressCallback = Callable[[int, int], None]
+DetailCallback = Callable[[Mapping[str, object]], None]
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 
@@ -82,6 +85,7 @@ class LocalDayImporter:
         instrument_types: Iterable[InstrumentType] | None = None,
         boards: Iterable[InstrumentBoard] | None = None,
         progress_callback: ProgressCallback | None = None,
+        detail_callback: DetailCallback | None = None,
     ) -> ImportReport:
         root = Path(vipdoc_path).expanduser().resolve()
         files = discover_day_files(root, universe)
@@ -108,6 +112,47 @@ class LocalDayImporter:
         errors = 0
         seen: set[str] = set()
         progress_count = 0
+        names_by_key: dict[tuple[str, str], str | None] = (
+            {
+                (ref.market, ref.code): ref.name
+                for ref in self._store.list_instruments(include_missing=True)
+            }
+            if detail_callback is not None
+            else {}
+        )
+
+        def report_detail(
+            candidate: _ImportCandidate,
+            *,
+            status: str,
+            parsed: DayFileResult | None = None,
+            error: str | None = None,
+            range_label: str | None = None,
+        ) -> None:
+            if detail_callback is None:
+                return
+            detail: dict[str, object] = {
+                "phase": "local_import",
+                "current_status": status,
+                "current_instrument": {
+                    "market": candidate.market,
+                    "code": candidate.code,
+                    "name": names_by_key.get((candidate.market, candidate.code)),
+                },
+                "source_path": candidate.relative_path,
+            }
+            if parsed is not None:
+                range_start, range_end = _frame_date_range(parsed.frame)
+                if range_start is not None:
+                    detail["range_start"] = range_start
+                if range_end is not None:
+                    detail["range_end"] = range_end
+                detail["bar_count"] = len(parsed.frame)
+            if range_label is not None:
+                detail["range_label"] = range_label
+            if error is not None:
+                detail["error"] = error
+            detail_callback(detail)
 
         def report_progress() -> None:
             nonlocal progress_count
@@ -195,6 +240,7 @@ class LocalDayImporter:
                                 sha256=prepared.checksum,
                                 status="imported",
                             )
+                        report_detail(candidate, status="unchanged", range_label="已有数据未变化")
                         report_progress()
                         continue
                     if prepared.status == "failed":
@@ -213,6 +259,7 @@ class LocalDayImporter:
                             status="failed",
                             error=reason,
                         )
+                        report_detail(candidate, status="error", error=reason)
                         report_progress()
                         continue
 
@@ -242,6 +289,7 @@ class LocalDayImporter:
                             status="failed",
                             error=reason,
                         )
+                        report_detail(candidate, status="error", error=reason)
                         report_progress()
                         continue
 
@@ -266,6 +314,11 @@ class LocalDayImporter:
                         sha256=prepared.checksum,
                         status="imported",
                         imported=True,
+                    )
+                    report_detail(
+                        candidate,
+                        status="imported" if old is None else "updated",
+                        parsed=prepared.parsed,
                     )
                     report_progress()
 
@@ -362,3 +415,15 @@ class LocalDayImporter:
     def _report_progress(callback: ProgressCallback | None, current: int, total: int) -> None:
         if callback is not None:
             callback(current, total)
+
+
+def _frame_date_range(frame: pd.DataFrame) -> tuple[str | None, str | None]:
+    if frame.empty or "date" not in frame.columns:
+        return None, None
+    dates = pd.to_datetime(frame["date"], errors="coerce").dropna()
+    if dates.empty:
+        return None, None
+    return (
+        pd.Timestamp(dates.iloc[0]).strftime("%Y-%m-%d"),
+        pd.Timestamp(dates.iloc[-1]).strftime("%Y-%m-%d"),
+    )

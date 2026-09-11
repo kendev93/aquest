@@ -111,6 +111,51 @@ const marketJobTitle = computed(() => {
   return '最近一次任务'
 })
 
+const currentSyncDetail = computed<Record<string, unknown> | null>(() => {
+  const value = marketJob.value?.metadata?.current_instrument
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  return value as Record<string, unknown>
+})
+
+const currentSyncInstrumentText = computed(() => {
+  const detail = currentSyncDetail.value
+  if (!detail) return '—'
+  const market = typeof detail.market === 'string' ? detail.market : ''
+  const code = typeof detail.code === 'string' ? detail.code : ''
+  const name = typeof detail.name === 'string' && detail.name ? detail.name : ''
+  const identity = [market, code].filter(Boolean).join(' ')
+  return [identity, name].filter(Boolean).join(' · ') || '—'
+})
+
+const currentSyncRangeText = computed(() => {
+  const metadata = marketJob.value?.metadata
+  if (!metadata) return '—'
+  const start = typeof metadata.range_start === 'string' ? metadata.range_start : ''
+  const end = typeof metadata.range_end === 'string' ? metadata.range_end : ''
+  if (start && end) return `${start} → ${end}`
+  return typeof metadata.range_label === 'string' ? metadata.range_label : '正在读取日期范围…'
+})
+
+const currentSyncStatusText = computed(() => {
+  const status = marketJob.value?.metadata?.current_status
+  return {
+    fetching: '正在请求',
+    imported: '已导入',
+    updated: '已更新',
+    unchanged: '无变化',
+    error: '失败',
+  }[typeof status === 'string' ? status : ''] ?? '处理中'
+})
+
+const currentSyncDetailLabel = computed(() => (
+  marketJob.value?.status === 'running' ? '当前同步' : '最近同步'
+))
+
+const currentSyncBarCount = computed(() => {
+  const value = marketJob.value?.metadata?.bar_count
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+})
+
 function apiMessage(error: unknown): string {
   if (error instanceof FormulaScreenApiError) return error.message
   return '行情数据读取失败，请检查数据导入状态后重试。'
@@ -417,6 +462,10 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
           <div class="sync-progress-heading"><span>{{ marketJobTitle }}</span><strong>{{ Math.round(marketJob.progress * 100) }}%</strong></div>
           <div class="progress-track sync-progress-track"><span :style="{ width: `${Math.round(marketJob.progress * 100)}%` }"></span></div>
           <div class="sync-progress-stats"><span>已处理 <strong>{{ marketJob.total_scanned }}</strong> / {{ marketJob.total_candidates }}</span><span>worker <strong>{{ marketJob.worker_count ?? 8 }}</strong></span><span :class="{ negative: marketJob.errors > 0 }">错误 <strong>{{ marketJob.errors }}</strong></span></div>
+          <div v-if="currentSyncDetail" class="sync-current-instrument" data-testid="market-sync-current">
+            <div class="sync-current-heading"><span>{{ currentSyncDetailLabel }}</span><strong>{{ currentSyncInstrumentText }}</strong><span>{{ currentSyncStatusText }}</span></div>
+            <div class="sync-current-meta"><span>同步区间 <strong>{{ currentSyncRangeText }}</strong></span><span v-if="currentSyncBarCount !== null">{{ currentSyncBarCount }} 根日线</span></div>
+          </div>
           <div v-if="marketJob.result" class="sync-result-stats">
             <template v-if="marketJob.result.source === 'local'"><span>导入文件 {{ marketJob.result.imported_files ?? 0 }}</span><span>替换标的 {{ marketJob.result.replaced_instruments ?? 0 }}</span><span>写入 K 线 {{ marketJob.result.imported_bars ?? 0 }}</span><span>跳过 {{ marketJob.result.skipped_files ?? 0 }}</span></template>
             <template v-else-if="marketJob.result.source === 'combined'"><span>本地导入 {{ marketJob.result.local_import?.imported_files ?? 0 }} 个文件</span><span>本地写入 {{ marketJob.result.local_import?.imported_bars ?? 0 }} 根</span><span>在线证券列表 {{ marketJob.result.online_sync?.listed_instruments ?? marketJob.result.online_sync?.total_candidates ?? 0 }}</span><span>新增标的 {{ marketJob.result.online_sync?.new_instruments ?? 0 }}</span><span>在线更新 {{ marketJob.result.online_sync?.updated_files ?? 0 }} 个标的</span><span>在线写入 {{ marketJob.result.online_sync?.written_bars ?? 0 }} 根</span></template>
@@ -440,7 +489,7 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
           <div v-if="!instruments.length" class="inline-empty" data-testid="market-instruments-empty">{{ loading ? '正在读取 DuckDB 行情…' : '数据库中暂无行情，请先导入本地数据。' }}</div>
           <div v-else class="local-instrument-list">
             <button v-for="instrument in instruments" :key="`${instrument.market}-${instrument.code}`" class="local-instrument" :class="{ selected: selected?.market === instrument.market && selected?.code === instrument.code }" :data-testid="`instrument-${instrument.market}-${instrument.code}`" type="button" @click="selectInstrument(instrument)">
-              <span class="instrument-topline"><strong>{{ instrument.code }}</strong><span class="market-pill" :class="instrument.market.toLowerCase()">{{ instrument.market }}</span></span>
+              <span class="instrument-topline"><span class="instrument-identity"><strong>{{ instrument.code }}</strong><span class="instrument-name">{{ instrument.name || '—' }}</span></span><span class="market-pill" :class="instrument.market.toLowerCase()">{{ instrument.market }}</span></span>
               <span class="instrument-meta"><span>{{ instrumentLabel(instrument.instrument_type) }} · {{ instrument.bars ? `${instrument.bars} 根` : instrument.error ?? '无数据' }}</span><span>{{ instrument.last_close === null ? '—' : `¥${formatPrice(instrument.last_close)}` }}</span></span>
               <span class="instrument-range">{{ instrument.data_start ?? '—' }} → {{ instrument.data_end ?? '—' }}</span>
             </button>

@@ -134,6 +134,14 @@ class _SyncBatchReport:
 
 
 @dataclass(frozen=True)
+class _InstrumentSyncResult:
+    written_bars: int = 0
+    bar_count: int = 0
+    range_start: str | None = None
+    range_end: str | None = None
+
+
+@dataclass(frozen=True)
 class _TargetSelection:
     targets: list[InstrumentTarget]
     listed_instruments: int
@@ -160,6 +168,7 @@ class TdxMarketClient(Protocol):
 
 ClientFactory = Callable[[float], TdxMarketClient]
 ProgressCallback = Callable[[int, int], None]
+DetailCallback = Callable[[Mapping[str, object]], None]
 
 
 def _default_client(timeout: float) -> TdxMarketClient:
@@ -200,6 +209,8 @@ class TdxMarketSync:
         self,
         config: MarketSyncConfig,
         progress_callback: ProgressCallback | None = None,
+        *,
+        detail_callback: DetailCallback | None = None,
     ) -> MarketSyncReport:
         selection, new_instruments, existing_instruments = self._prepare_targets(config)
         factory = self._client_factory or _default_client
@@ -238,6 +249,7 @@ class TdxMarketSync:
                         config,
                         existing_by_key,
                         on_target_done,
+                        detail_callback,
                     ): batch
                     for batch in batches
                 }
@@ -295,6 +307,7 @@ class TdxMarketSync:
         config: MarketSyncConfig,
         existing_by_key: Mapping[tuple[str, str], pd.DataFrame],
         target_done: Callable[[], None],
+        detail_callback: DetailCallback | None,
     ) -> _SyncBatchReport:
         failure_reasons: Counter[str] = Counter()
         processed = 0
@@ -304,8 +317,18 @@ class TdxMarketSync:
         try:
             with factory(config.timeout) as client:
                 for market, code, instrument_type, board, name in batch:
+                    _report_detail(
+                        detail_callback,
+                        _instrument_detail(
+                            market,
+                            code,
+                            name,
+                            status="fetching",
+                            range_label=f"最新 {config.bars} 根日线",
+                        ),
+                    )
                     try:
-                        written = self._sync_one(
+                        sync_result = self._sync_one(
                             client,
                             market,
                             code,
@@ -315,6 +338,19 @@ class TdxMarketSync:
                             config,
                             existing=existing_by_key.get((market, code), pd.DataFrame()),
                         )
+                        written = sync_result.written_bars
+                        _report_detail(
+                            detail_callback,
+                            _instrument_detail(
+                                market,
+                                code,
+                                name,
+                                status="updated" if written > 0 else "unchanged",
+                                bar_count=sync_result.bar_count,
+                                range_start=sync_result.range_start,
+                                range_end=sync_result.range_end,
+                            ),
+                        )
                         if written > 0:
                             updated_files += 1
                             written_bars += written
@@ -323,6 +359,16 @@ class TdxMarketSync:
                     except Exception as exc:  # noqa: BLE001 - isolate one instrument
                         reason = str(exc).strip()[:200] or type(exc).__name__
                         failure_reasons[reason] += 1
+                        _report_detail(
+                            detail_callback,
+                            _instrument_detail(
+                                market,
+                                code,
+                                name,
+                                status="error",
+                                error=reason,
+                            ),
+                        )
                         # An exception for one target should not stop the batch.
                     processed += 1
                     target_done()
@@ -330,7 +376,17 @@ class TdxMarketSync:
             reason = str(exc).strip()[:200] or type(exc).__name__
             remaining = len(batch) - processed
             failure_reasons[reason] += remaining
-            for _ in range(remaining):
+            for market, code, _instrument_type, _board, name in batch[processed:]:
+                _report_detail(
+                    detail_callback,
+                    _instrument_detail(
+                        market,
+                        code,
+                        name,
+                        status="error",
+                        error=reason,
+                    ),
+                )
                 processed += 1
                 target_done()
         return _SyncBatchReport(
@@ -470,7 +526,7 @@ class TdxMarketSync:
         config: MarketSyncConfig,
         *,
         existing: pd.DataFrame | None = None,
-    ) -> int:
+    ) -> _InstrumentSyncResult:
         existing = (
             existing
             if existing is not None
@@ -498,7 +554,12 @@ class TdxMarketSync:
                 now=self._clock(),
             )
             if not _has_new_online_data(existing, latest_frame):
-                return 0
+                range_start, range_end = _frame_date_range(existing)
+                return _InstrumentSyncResult(
+                    bar_count=len(existing),
+                    range_start=range_start,
+                    range_end=range_end,
+                )
             frame = client.get_security_bars(
                 _market_enum(market), code, KlineCategory.DAY, 0, config.bars
             )
@@ -512,9 +573,15 @@ class TdxMarketSync:
             now=self._clock(),
         )
         if normalized.empty:
-            return 0
+            return _InstrumentSyncResult()
         written, _updated = self._store.upsert_online_bars(normalized)
-        return written
+        range_start, range_end = _frame_date_range(normalized)
+        return _InstrumentSyncResult(
+            written_bars=written,
+            bar_count=len(normalized),
+            range_start=range_start,
+            range_end=range_end,
+        )
 
 
 def _partition_targets(
@@ -522,6 +589,60 @@ def _partition_targets(
 ) -> list[list[InstrumentTarget]]:
     batch_count = min(max(worker_count, 1), len(targets))
     return [targets[index::batch_count] for index in range(batch_count)]
+
+
+def _report_detail(
+    callback: DetailCallback | None,
+    detail: Mapping[str, object],
+) -> None:
+    if callback is not None:
+        callback(detail)
+
+
+def _instrument_detail(
+    market: MarketCode,
+    code: str,
+    name: str | None,
+    *,
+    status: str,
+    range_label: str | None = None,
+    range_start: str | None = None,
+    range_end: str | None = None,
+    bar_count: int | None = None,
+    error: str | None = None,
+) -> dict[str, object]:
+    detail: dict[str, object] = {
+        "phase": "online_bars",
+        "current_status": status,
+        "current_instrument": {
+            "market": market,
+            "code": code,
+            "name": name,
+        },
+    }
+    if range_label is not None:
+        detail["range_label"] = range_label
+    if range_start is not None:
+        detail["range_start"] = range_start
+    if range_end is not None:
+        detail["range_end"] = range_end
+    if bar_count is not None:
+        detail["bar_count"] = bar_count
+    if error is not None:
+        detail["error"] = error
+    return detail
+
+
+def _frame_date_range(frame: pd.DataFrame) -> tuple[str | None, str | None]:
+    if frame.empty or "date" not in frame.columns:
+        return None, None
+    dates = pd.to_datetime(frame["date"], errors="coerce").dropna()
+    if dates.empty:
+        return None, None
+    return (
+        pd.Timestamp(dates.iloc[0]).strftime("%Y-%m-%d"),
+        pd.Timestamp(dates.iloc[-1]).strftime("%Y-%m-%d"),
+    )
 
 
 def _to_market(value: object) -> MarketCode | None:

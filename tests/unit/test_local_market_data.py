@@ -30,9 +30,24 @@ def market_frame(offset: float = 0.0) -> pd.DataFrame:
 class FakeMarketDataAdapter:
     def __init__(self) -> None:
         self.refs = [
-            StockRef("SH", "600000", Path("/data/vipdoc/sh/lday/sh600000.day")),
-            StockRef("SH", "600001", Path("/data/vipdoc/sh/lday/sh600001.day")),
-            StockRef("SZ", "000001", Path("/data/vipdoc/sz/lday/sz000001.day")),
+            StockRef(
+                "SH",
+                "600000",
+                Path("/data/vipdoc/sh/lday/sh600000.day"),
+                name="浦发银行",
+            ),
+            StockRef(
+                "SH",
+                "600001",
+                Path("/data/vipdoc/sh/lday/sh600001.day"),
+                name="新标的",
+            ),
+            StockRef(
+                "SZ",
+                "000001",
+                Path("/data/vipdoc/sz/lday/sz000001.day"),
+                name="平安银行",
+            ),
         ]
         self.frames = {
             (ref.market, ref.code): market_frame(index) for index, ref in enumerate(self.refs)
@@ -66,6 +81,7 @@ def test_lists_local_instruments_with_pagination_and_summary() -> None:
     assert page.total == 2
     assert page.pages == 2
     assert page.items[0].code == "600001"
+    assert page.items[0].name == "新标的"
     assert page.items[0].bars == 1600
     assert page.items[0].data_start == "2021-01-01"
     assert page.items[0].data_end == "2025-05-19"

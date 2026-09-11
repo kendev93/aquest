@@ -182,6 +182,8 @@ export interface MarketSyncJobState {
   errors: number
   error: string | null
   worker_count?: number | null
+  phase?: string | null
+  metadata?: Record<string, unknown>
   result: MarketSyncResult | null
 }
 
@@ -206,6 +208,7 @@ export type MarketChartPeriod = 'daily' | 'monthly' | 'yearly'
 export interface LocalInstrument {
   market: 'SH' | 'SZ'
   code: string
+  name?: string | null
   instrument_type: InstrumentType
   board?: InstrumentBoard
   bars: number

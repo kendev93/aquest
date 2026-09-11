@@ -144,6 +144,12 @@ input:focus, select:focus { border-color: var(--accent); }
 .sync-progress-heading strong { color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .sync-progress-track { margin: 8px 0; }
 .sync-progress-stats strong { color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.sync-current-instrument { margin-top: 9px; padding: 9px 10px; border-left: 2px solid var(--accent); background: rgba(34, 197, 94, 0.08); color: var(--muted); font-size: 10px; }
+.sync-current-heading, .sync-current-meta { display: flex; align-items: baseline; flex-wrap: wrap; gap: 7px 12px; }
+.sync-current-heading strong { min-width: 0; overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
+.sync-current-heading > span:last-child { margin-left: auto; color: var(--accent); font-size: 9px; }
+.sync-current-meta { margin-top: 5px; color: var(--subtle); font-size: 9px; }
+.sync-current-meta strong { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 500; }
 .sync-result-stats { justify-content: flex-start; flex-wrap: wrap; margin-top: 8px; color: var(--muted); font-size: 9px; }
 .auto-sync-status { display: flex; align-items: center; gap: 9px; margin-top: 10px; padding: 9px 10px; border: 1px solid rgba(86, 105, 140, 0.35); background: rgba(11, 21, 43, 0.58); }
 .auto-sync-status.active { border-color: rgba(51, 225, 127, 0.55); background: rgba(10, 54, 34, 0.34); }
@@ -346,7 +352,9 @@ tbody tr:hover td { background: rgba(22, 34, 58, 0.45); }
 .local-instrument { display: grid; gap: 6px; padding: 10px 11px; border: 1px solid var(--border); border-radius: 5px; background: rgba(8, 15, 32, 0.55); color: var(--muted); cursor: pointer; text-align: left; }
 .local-instrument:hover, .local-instrument.selected { border-color: var(--accent); background: var(--accent-soft); }
 .instrument-topline, .instrument-meta, .instrument-range { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.instrument-identity { display: flex; min-width: 0; align-items: baseline; gap: 8px; }
 .instrument-topline strong { color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; }
+.instrument-name { min-width: 0; overflow: hidden; color: var(--text); font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .instrument-meta { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
 .instrument-range { color: var(--subtle); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9px; }
 .pagination { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 15px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }

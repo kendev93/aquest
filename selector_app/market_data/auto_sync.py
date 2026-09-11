@@ -10,10 +10,10 @@ from pathlib import Path
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
-from selector_app.adapters.market_sync import MarketSyncConfig, MarketSyncReport
+from selector_app.adapters.market_sync import DetailCallback, MarketSyncConfig, MarketSyncReport
 from selector_app.indicators.precompute import IndicatorPrecomputeService
 from selector_app.market_data.store import DuckDbMarketDataStore
-from selector_app.screening.jobs import ScreenJobRunner
+from selector_app.screening.jobs import ProgressReporter, ScreenJobRunner, report_progress_detail
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,8 @@ class MarketSyncService(Protocol):
         self,
         config: MarketSyncConfig,
         progress_callback: Callable[[int, int], None] | None = None,
+        *,
+        detail_callback: DetailCallback | None = None,
     ) -> MarketSyncReport | dict[str, object]: ...
 
 
@@ -126,7 +128,7 @@ class AutomaticMarketSyncScheduler:
         self._active_job_id = None
         return False
 
-    def _run_sync(self, progress: Callable[[int, int], None]) -> dict[str, object]:
+    def _run_sync(self, progress: ProgressReporter) -> dict[str, object]:
         result = self._market_sync.sync(
             MarketSyncConfig(
                 universe="all",
@@ -135,6 +137,7 @@ class AutomaticMarketSyncScheduler:
                 refresh_names=False,
             ),
             progress,
+            detail_callback=lambda detail: report_progress_detail(progress, detail),
         )
         payload = result.to_dict() if isinstance(result, MarketSyncReport) else dict(result)
         try:

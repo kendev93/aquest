@@ -21,8 +21,8 @@ vi.mock('../api/marketData', async () => {
 })
 
 const instruments: LocalInstrument[] = [
-  { market: 'SH', code: '600000', instrument_type: 'stock', bars: 300, data_start: '2020-01-01', data_end: '2024-12-31', last_close: 12.5, error: null },
-  { market: 'SZ', code: '000001', instrument_type: 'stock', bars: 280, data_start: '2020-01-01', data_end: '2024-12-31', last_close: 10.2, error: null },
+  { market: 'SH', code: '600000', name: '浦发银行', instrument_type: 'stock', bars: 300, data_start: '2020-01-01', data_end: '2024-12-31', last_close: 12.5, error: null },
+  { market: 'SZ', code: '000001', name: '平安银行', instrument_type: 'stock', bars: 280, data_start: '2020-01-01', data_end: '2024-12-31', last_close: 10.2, error: null },
 ]
 
 const chart: LocalMarketChart = {
@@ -60,6 +60,7 @@ describe('MarketDataPage', () => {
     await flushPromises()
 
     expect(wrapper.get('[data-testid="local-instruments"]').text()).toContain('600000')
+    expect(wrapper.get('[data-testid="local-instruments"]').text()).toContain('浦发银行')
     await wrapper.get('[data-testid="instrument-SH-600000"]').trigger('click')
     await flushPromises()
 
@@ -159,6 +160,33 @@ describe('MarketDataPage', () => {
     expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('在线写入 1 根')
     expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('证券列表 4')
     expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('新增标的 3')
+  })
+
+  it('shows the current synchronized instrument and date range', async () => {
+    vi.mocked(marketApi.createMarketDataSync).mockResolvedValue({ job_id: 'online-1', status: 'queued' })
+    let polls = 0
+    vi.mocked(marketApi.getMarketDataJob).mockImplementation(async () => {
+      polls += 1
+      return {
+        job_id: 'online-1', status: polls === 1 ? 'running' : 'completed',
+        progress: polls === 1 ? 0.42 : 1, total_candidates: 17525,
+        total_scanned: polls === 1 ? 7350 : 17525, errors: 0, error: null,
+        metadata: {
+          current_instrument: { market: 'SH', code: '600000', name: '浦发银行' },
+          current_status: 'fetching',
+          range_label: '最新 800 根日线',
+        },
+        result: polls === 1 ? null : { source: 'online', updated_files: 1, written_bars: 800 },
+      }
+    })
+    const wrapper = mount(MarketDataPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="market-sync-online"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="market-sync-current"]').text()).toContain('SH 600000 · 浦发银行')
+    expect(wrapper.get('[data-testid="market-sync-current"]').text()).toContain('最新 800 根日线')
   })
 
   it('keeps polling a slow market-data job without a fixed attempt timeout', async () => {
