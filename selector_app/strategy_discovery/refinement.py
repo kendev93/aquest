@@ -287,15 +287,23 @@ def _local_risk(
     rng: object,
 ) -> tuple[RiskMode, float | None, float | None, int]:
     cooldowns = (0, 3, 5, 10)
-    if mode == "atr":
-        multiplier = _neighbor(atr_multiplier, (1.0, 2.0, 3.0), rng)
+    target_mode = cast(
+        RiskMode,
+        _choice(rng, (mode, mode, "atr" if mode == "pct" else "pct"), mode),
+    )
+    if target_mode == "atr":
+        multiplier = _neighbor(
+            atr_multiplier if atr_multiplier is not None else 1.0,
+            (1.0, 2.0, 3.0),
+            rng,
+        )
         return (
             "atr",
             None,
             _as_float(multiplier, 1.0),
             _as_int(_neighbor(cooldown_days, cooldowns, rng), cooldown_days),
         )
-    value = _neighbor(percentage, (None, 0.05, 0.08, 0.12, 0.2), rng)
+    value = _neighbor(percentage if percentage is not None else 0.08, (0.05, 0.08, 0.12, 0.2), rng)
     return (
         "pct",
         _as_float(value, 0.0) if value is not None else None,

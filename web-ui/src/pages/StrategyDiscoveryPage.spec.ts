@@ -156,6 +156,39 @@ describe('StrategyDiscoveryPage', () => {
     expect(wrapper.get('[data-testid="strategy-discovery-history"]').text()).toContain('1 小时 2 分钟')
   })
 
+  it('labels refinement experiments with their parent candidate', async () => {
+    vi.mocked(api.fetchStrategyDiscoveryHistory).mockResolvedValueOnce([{
+      history_id: 'refinement-1',
+      mode: 'refinement',
+      parent_candidate_hash: 'parent-candidate-hash',
+      created_at: '2026-09-10T00:00:00',
+      total_trials: 20,
+      duration_seconds: 12,
+      best_sharpe: null,
+      best_return: null,
+    }])
+    const wrapper = mount(StrategyDiscoveryPage)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="strategy-discovery-history"]').text()).toContain(
+      '二次优化 · parent-ca',
+    )
+  })
+
+  it('passes board scope and surfaces a refinement request error', async () => {
+    vi.mocked(api.createStrategyDiscoveryRefinement).mockRejectedValueOnce(new Error('refinement rejected'))
+    const wrapper = mount(StrategyDiscoveryPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="strategy-discovery-scope-board-main"]').setValue(true)
+    await wrapper.get('[data-testid="strategy-discovery-config"]').trigger('submit')
+    await flushPromises()
+    await wrapper.get('[data-testid="strategy-discovery-refine-s1"]').trigger('click')
+    await flushPromises()
+
+    expect(api.createStrategyDiscovery).toHaveBeenCalledWith(expect.objectContaining({ boards: ['main'] }))
+    expect(wrapper.get('[data-testid="strategy-discovery-message"]').text()).toContain('refinement rejected')
+  })
+
   it('passes optional local instrument scope to the discovery request', async () => {
     const wrapper = mount(StrategyDiscoveryPage)
     await flushPromises()
