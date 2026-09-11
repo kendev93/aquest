@@ -765,6 +765,18 @@ class StrategyReplayRequest(BaseModel):
     leaderboard: Literal["sharpe", "return"]
 
 
+class StrategyRefinementRequest(BaseModel):
+    """Request to search a bounded neighborhood around one stored candidate."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    parent_history_id: str = Field(min_length=1, max_length=128)
+    parent_candidate_hash: str = Field(min_length=1, max_length=128)
+    refinement_radius: Literal["medium"] = "medium"
+    max_trials: int = Field(default=1_000, ge=1, le=5_000)
+    seed: int | None = Field(default=None, ge=0, le=2**32 - 1)
+
+
 class StrategyFitnessRequest(PortfolioBacktestRequest):
     """Batch single-stock strategy suitability request."""
 

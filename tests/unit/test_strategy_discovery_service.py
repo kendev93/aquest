@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from selector_app.market_data.store import DuckDbMarketDataStore
+from selector_app.strategy_discovery.candidates import build_random_candidate
 from selector_app.strategy_discovery.models import DiscoveryRequest
 from selector_app.strategy_discovery.service import StrategyDiscoveryService
 
@@ -99,6 +100,52 @@ def test_service_progress_reports_overall_estimate_and_current_phase() -> None:
     assert all("estimated_seconds_remaining" in metadata for _, _, _, metadata in events)
     assert any(metadata["phase_current"] == current for current, _, _, metadata in events)
     assert 0.0 <= float(events[-1][3]["overall_progress"]) <= 1.0
+
+
+def test_service_refines_a_parent_candidate_and_returns_both_leaderboards() -> None:
+    parent_request = request()
+    parent = build_random_candidate(parent_request, np.random.default_rng(7))
+    experiment = {
+        "history_id": "parent-1",
+        "request": parent_request.to_dict(),
+        "results_by_sharpe": [parent.to_dict()],
+        "results_by_return": [],
+        "data_fingerprint": "a" * 64,
+    }
+    portfolio = FakePortfolioService()
+
+    result = StrategyDiscoveryService(portfolio_service=portfolio).refine(
+        experiment,
+        parent.candidate_hash,
+        max_trials=4,
+        seed=23,
+    )
+
+    assert result["mode"] == "refinement"
+    assert result["refinement"]["parent_history_id"] == "parent-1"
+    assert result["refinement"]["parent_candidate_hash"] == parent.candidate_hash
+    assert result["results_by_sharpe"]
+    assert result["results_by_return"]
+
+
+def test_service_rejects_refinement_when_parent_data_fingerprint_changed() -> None:
+    parent_request = request()
+    parent = build_random_candidate(parent_request, np.random.default_rng(7))
+    experiment = {
+        "history_id": "parent-1",
+        "request": parent_request.to_dict(),
+        "results_by_sharpe": [parent.to_dict()],
+        "results_by_return": [],
+        "data_fingerprint": "changed-data",
+    }
+
+    with pytest.raises(ValueError, match="行情已变化"):
+        StrategyDiscoveryService(portfolio_service=FakePortfolioService()).refine(
+            experiment,
+            parent.candidate_hash,
+            max_trials=4,
+            seed=23,
+        )
 
 
 def test_service_rejects_an_empty_local_market_store_before_search(tmp_path: Path) -> None:

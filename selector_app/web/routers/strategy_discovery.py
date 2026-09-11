@@ -24,7 +24,7 @@ from selector_app.strategy_discovery.replay import ReplayLeaderboard
 from selector_app.strategy_discovery.replay_service import ReplayProgressCallback
 from selector_app.strategy_discovery.service import StrategyDiscoveryService
 
-from ..schemas import StrategyDiscoveryRequest, StrategyReplayRequest
+from ..schemas import StrategyDiscoveryRequest, StrategyRefinementRequest, StrategyReplayRequest
 
 router = APIRouter(prefix="/strategy-discovery", tags=["strategy-discovery"])
 logger = logging.getLogger(__name__)
@@ -50,6 +50,18 @@ class StrategyDiscoveryServiceLike(Protocol):
         abort_check: Callable[[], bool] | None = None,
     ) -> dict[str, object]: ...
 
+    def refine(
+        self,
+        experiment: Mapping[str, object],
+        parent_candidate_hash: str,
+        *,
+        max_trials: int | None = None,
+        seed: int | None = None,
+        radius: Literal["medium"] = "medium",
+        progress_callback: Callable[..., None] | None = None,
+        abort_check: Callable[[], bool] | None = None,
+    ) -> dict[str, object]: ...
+
 
 def _runner(request: Request) -> ScreenJobRunner:
     return cast(ScreenJobRunner, request.app.state.screen_job_runner)
@@ -69,14 +81,14 @@ def _utc_now() -> datetime:
 
 def _state_or_404(job_id: str, request: Request) -> JobState:
     state = _runner(request).get(job_id)
-    if state is None or state.description != "策略实验室":
+    if state is None or state.description not in {"策略实验室", "策略二次优化"}:
         raise HTTPException(status_code=404, detail="策略实验任务不存在或已过期")
     return state
 
 
 def _experiment_or_404(experiment_id: str, request: Request) -> dict[str, object]:
     state = _runner(request).get(experiment_id)
-    if state is not None and state.description == "策略实验室":
+    if state is not None and state.description in {"策略实验室", "策略二次优化"}:
         if state.status != "completed" or state.result_payload is None:
             raise HTTPException(status_code=409, detail="策略实验尚未完成，暂时不能全量复核")
         return {"history_id": experiment_id, **state.result_payload}
@@ -188,6 +200,113 @@ def create_strategy_discovery(
     try:
         job_id = _runner(request).submit_callable(run_discovery, description="策略实验室")
         job_id_holder["value"] = job_id
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail="任务执行器暂不可用") from exc
+    return JSONResponse(
+        status_code=status.HTTP_202_ACCEPTED,
+        content={"data": {"job_id": job_id, "status": "queued"}},
+    )
+
+
+@router.post("/refinements", status_code=status.HTTP_202_ACCEPTED)
+def create_strategy_refinement(
+    payload: StrategyRefinementRequest,
+    request: Request,
+) -> JSONResponse:
+    experiment = _store(request).read_strategy_discovery_history(payload.parent_history_id)
+    if experiment is None:
+        raise HTTPException(status_code=404, detail="父策略实验历史不存在")
+    parent_found = False
+    for key in ("results_by_sharpe", "results_by_return"):
+        candidates = experiment.get(key)
+        if isinstance(candidates, (list, tuple)) and any(
+            isinstance(candidate, Mapping)
+            and str(candidate.get("candidate_hash")) == payload.parent_candidate_hash
+            for candidate in candidates
+        ):
+            parent_found = True
+            break
+    if not parent_found:
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={"error": {"code": "validation_error", "message": "父实验中不存在指定候选"}},
+        )
+    job_id = uuid.uuid4().hex
+
+    def run_refinement(progress: Callable[[int, int], None]) -> dict[str, object]:
+        started_at = _utc_now()
+
+        def report_progress(
+            current: int,
+            total: int,
+            phase: str,
+            metadata: dict[str, object] | None = None,
+        ) -> None:
+            progress(current, total)
+            overall_progress = metadata.get("overall_progress") if metadata else None
+            _runner(request).update_callable_state(
+                job_id,
+                phase=phase,
+                metadata=dict(metadata or {}),
+                progress=(
+                    float(overall_progress)
+                    if isinstance(overall_progress, (int, float))
+                    else None
+                ),
+            )
+
+        try:
+            result = dict(
+                _service(request).refine(
+                    experiment,
+                    payload.parent_candidate_hash,
+                    max_trials=payload.max_trials,
+                    seed=payload.seed,
+                    radius=payload.refinement_radius,
+                    progress_callback=report_progress,
+                    abort_check=lambda: _runner(request).is_cancel_requested(job_id),
+                )
+            )
+            finished_at = _utc_now()
+            result.update(
+                {
+                    "history_id": job_id,
+                    "started_at": started_at.isoformat(),
+                    "finished_at": finished_at.isoformat(),
+                }
+            )
+            _runner(request).update_callable_state(
+                job_id,
+                phase="completed",
+                metadata={
+                    "overall_progress": 1.0,
+                    "refinement": True,
+                    "parent_candidate_hash": payload.parent_candidate_hash,
+                },
+                progress=1.0,
+            )
+            _store(request).save_strategy_discovery_history(
+                job_id,
+                result,
+                started_at=started_at,
+                finished_at=finished_at,
+            )
+            return result
+        except RuntimeError as exc:
+            if _runner(request).is_cancel_requested(job_id):
+                raise TaskCancelledError("策略二次优化已取消") from exc
+            raise TaskUserError(str(exc)) from exc
+        except (ValueError, MarketDataStoreError, OSError) as exc:
+            if _runner(request).is_cancel_requested(job_id):
+                raise TaskCancelledError("策略二次优化已取消") from exc
+            raise TaskUserError(str(exc)) from exc
+
+    try:
+        _runner(request).submit_callable(
+            run_refinement,
+            description="策略二次优化",
+            job_id=job_id,
+        )
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail="任务执行器暂不可用") from exc
     return JSONResponse(

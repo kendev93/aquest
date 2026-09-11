@@ -55,6 +55,26 @@ class CapturingDiscoveryService(FakeDiscoveryService):
         return super().run(request, progress_callback, abort_check)
 
 
+class RefinableDiscoveryService(FakeDiscoveryService):
+    def refine(self, experiment, parent_candidate_hash, **kwargs):
+        if kwargs.get("progress_callback") is not None:
+            kwargs["progress_callback"](1, 1, "searching", {"overall_progress": 1.0})
+        return {
+            "request": {
+                "mode": "refinement",
+                "refinement": {
+                    "parent_history_id": experiment["history_id"],
+                    "parent_candidate_hash": parent_candidate_hash,
+                    "refinement_radius": kwargs.get("radius"),
+                },
+            },
+            "results_by_sharpe": [{"candidate_hash": "refined-1"}],
+            "results_by_return": [{"candidate_hash": "refined-1"}],
+            "search_metadata": {"evaluated_trials": 1},
+            "data_fingerprint": "abc123",
+        }
+
+
 def _wait(client: TestClient, job_id: str) -> dict:
     for _ in range(50):
         payload = client.get(f"/api/v1/strategy-discovery/{job_id}").json()["data"]
@@ -100,6 +120,65 @@ def test_strategy_discovery_api_starts_reports_and_reads_history(tmp_path) -> No
     assert history.json()["data"][0]["duration_seconds"] == 0.01
     assert history.json()["data"][0]["started_at"]
     assert history.json()["data"][0]["finished_at"]
+
+
+def test_strategy_refinement_api_creates_independent_parent_linked_history(tmp_path) -> None:
+    from selector_app.market_data.store import DuckDbMarketDataStore
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.save_strategy_discovery_history(
+        "parent-1",
+        {
+            "request": {
+                "base_config": {"universe": "all", "max_positions": 3},
+                "splits": {},
+                "indicator_ids": ["technical.ma5"],
+                "signal_ids": [],
+                "max_conditions_per_side": 3,
+                "max_trials": 4,
+                "validation_candidates": 1,
+                "holdout_candidates": 1,
+                "min_trades": 0,
+                "max_drawdown": None,
+                "max_complexity": 12,
+                "multifidelity_enabled": False,
+                "seed": 1,
+            },
+            "results_by_sharpe": [{"candidate_hash": "parent-candidate"}],
+            "results_by_return": [],
+            "search_metadata": {"evaluated_trials": 1},
+            "data_fingerprint": "abc123",
+        },
+    )
+
+    with TestClient(
+        create_app(
+            strategy_discovery_service=RefinableDiscoveryService(),
+            market_data_store=store,
+        )
+    ) as client:
+        response = client.post(
+            "/api/v1/strategy-discovery/refinements",
+            json={
+                "parent_history_id": "parent-1",
+                "parent_candidate_hash": "parent-candidate",
+                "refinement_radius": "medium",
+                "max_trials": 4,
+            },
+        )
+        assert response.status_code == 202
+        job_id = response.json()["data"]["job_id"]
+        state = _wait(client, job_id)
+        history = client.get("/api/v1/strategy-discovery/history")
+
+    assert state["status"] == "completed"
+    assert history.status_code == 200
+    refinement_history = next(
+        item for item in history.json()["data"] if item["history_id"] == job_id
+    )
+    assert refinement_history["mode"] == "refinement"
+    assert refinement_history["parent_history_id"] == "parent-1"
+    assert refinement_history["parent_candidate_hash"] == "parent-candidate"
 
 
 def test_strategy_replay_api_runs_persists_and_reads_the_selected_leaderboard(tmp_path) -> None:

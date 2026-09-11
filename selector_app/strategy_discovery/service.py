@@ -14,6 +14,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import date, timedelta
 from typing import Protocol, cast
 
@@ -21,7 +22,10 @@ from selector_app.indicators.cache import IndicatorCache
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
 from selector_app.market_data.models import InstrumentBoard, InstrumentType
 from selector_app.market_data.store import DuckDbMarketDataStore
-from selector_app.portfolio_backtest.models import PortfolioBacktestConfig, PortfolioBacktestReport
+from selector_app.portfolio_backtest.models import (
+    PortfolioBacktestConfig,
+    PortfolioBacktestReport,
+)
 from selector_app.portfolio_backtest.service import PortfolioBacktestService
 from selector_app.web.schemas import PortfolioBacktestRequest
 
@@ -29,6 +33,12 @@ from .candidates import build_random_candidate
 from .catalog import default_indicator_catalog
 from .evaluation import run_validation_pipeline
 from .models import DiscoveryRequest, StrategyCandidate
+from .refinement import (
+    RefinementRadius,
+    build_refined_candidate,
+    candidate_from_payload,
+    discovery_request_from_dict,
+)
 from .replay import ReplayLeaderboard
 from .replay_service import ReplayProgressCallback, StrategyReplayService
 from .search import BatchEvaluator, HybridSearchEngine
@@ -176,6 +186,11 @@ class StrategyDiscoveryService:
         *,
         progress_callback: ProgressCallback | None = None,
         abort_check: Callable[[], bool] | None = None,
+    candidate_builder: Callable[
+        [DiscoveryRequest, object], StrategyCandidate
+    ] = build_random_candidate,
+        result_metadata: Mapping[str, object] | None = None,
+        expected_data_fingerprint: str | None = None,
     ) -> dict[str, object]:
         started = time.monotonic()
         if self._parallel_enabled:
@@ -237,6 +252,9 @@ class StrategyDiscoveryService:
                         evaluation_executor=evaluation_executor,
                         started=started,
                         snapshot_build_seconds=snapshot_build_seconds,
+                        candidate_builder=candidate_builder,
+                        result_metadata=result_metadata,
+                        expected_data_fingerprint=expected_data_fingerprint,
                     )
         with self._evaluation_executor() as evaluation_executor:
             return self._run_impl(
@@ -245,7 +263,80 @@ class StrategyDiscoveryService:
                 abort_check=abort_check,
                 evaluation_executor=evaluation_executor,
                 started=started,
+                candidate_builder=candidate_builder,
+                result_metadata=result_metadata,
+                expected_data_fingerprint=expected_data_fingerprint,
             )
+
+    def refine(
+        self,
+        experiment: Mapping[str, object],
+        parent_candidate_hash: str,
+        *,
+        max_trials: int | None = None,
+        seed: int | None = None,
+        radius: RefinementRadius = "medium",
+        progress_callback: ProgressCallback | None = None,
+        abort_check: Callable[[], bool] | None = None,
+    ) -> dict[str, object]:
+        """Search a bounded neighborhood around one stored parent candidate."""
+
+        raw_request = experiment.get("request")
+        if not isinstance(raw_request, Mapping):
+            raise ValueError("父实验请求内容无效")
+        discovery_request = discovery_request_from_dict(raw_request)
+        parent = _find_parent_candidate(experiment, parent_candidate_hash)
+        parent_candidate = candidate_from_payload(parent, base_config=discovery_request.base_config)
+        resolved_request = replace(
+            discovery_request,
+            required_buy_conditions=(),
+            required_sell_conditions=(),
+            max_trials=max_trials or discovery_request.max_trials,
+            seed=discovery_request.seed if seed is None else seed,
+        )
+        source_fingerprint = str(experiment.get("data_fingerprint") or "")
+
+        def builder(request: DiscoveryRequest, rng: object) -> StrategyCandidate:
+            return build_refined_candidate(parent_candidate, request, rng, radius=radius)
+
+        result = self.run(
+            resolved_request,
+            progress_callback=progress_callback,
+            abort_check=abort_check,
+            candidate_builder=builder,
+            expected_data_fingerprint=source_fingerprint or None,
+            result_metadata={
+                "mode": "refinement",
+                "refinement": {
+                    "parent_history_id": str(
+                        experiment.get("history_id") or experiment.get("experiment_id") or ""
+                    ),
+                    "parent_candidate_hash": parent_candidate_hash,
+                    "refinement_radius": radius,
+                    "parent_candidate": parent_candidate.to_dict(),
+                    "parent_metrics": (
+                        dict(parent_metrics)
+                        if isinstance(
+                            parent_metrics := parent.get("metrics"), Mapping
+                        )
+                        else {}
+                    ),
+                },
+            },
+        )
+        request_payload = result.get("request")
+        refinement_payload = result.get("refinement")
+        if isinstance(request_payload, dict) and isinstance(refinement_payload, Mapping):
+            request_payload["mode"] = "refinement"
+            request_payload["refinement"] = {
+                "parent_history_id": refinement_payload.get("parent_history_id"),
+                "parent_candidate_hash": refinement_payload.get("parent_candidate_hash"),
+                "refinement_radius": refinement_payload.get("refinement_radius"),
+            }
+        refinement = result.get("refinement")
+        if isinstance(refinement, dict):
+            refinement["parent_data_fingerprint"] = source_fingerprint
+        return result
 
     @contextmanager
     def _evaluation_executor(
@@ -298,6 +389,11 @@ class StrategyDiscoveryService:
         evaluation_executor: ProcessPoolExecutor | None = None,
         started: float | None = None,
         snapshot_build_seconds: float = 0.0,
+        candidate_builder: Callable[
+            [DiscoveryRequest, object], StrategyCandidate
+        ] = build_random_candidate,
+        result_metadata: Mapping[str, object] | None = None,
+        expected_data_fingerprint: str | None = None,
     ) -> dict[str, object]:
         started = time.monotonic() if started is None else started
         fingerprint_holder = [""]
@@ -351,6 +447,7 @@ class StrategyDiscoveryService:
                 split,
                 data_fingerprint_holder=fingerprint_holder,
             )
+            _validate_expected_fingerprint(metrics, expected_data_fingerprint)
             observe_metrics(metrics, split)
             return metrics
 
@@ -362,6 +459,7 @@ class StrategyDiscoveryService:
                 fidelity=fidelity,
                 data_fingerprint_holder=fingerprint_holder,
             )
+            _validate_expected_fingerprint(metrics, expected_data_fingerprint)
             observe_metrics(metrics, "search")
             return metrics
 
@@ -385,6 +483,7 @@ class StrategyDiscoveryService:
                     ) from exc
                 observed_stage = "search" if fidelity is not None else stage
                 for item in metrics:
+                    _validate_expected_fingerprint(item, expected_data_fingerprint)
                     observe_metrics(item, observed_stage)
                     data_fingerprint = item.get("data_fingerprint")
                     if isinstance(data_fingerprint, str) and data_fingerprint:
@@ -395,7 +494,7 @@ class StrategyDiscoveryService:
 
         search_result = HybridSearchEngine().search(
             request,
-            candidate_builder=build_random_candidate,
+            candidate_builder=candidate_builder,
             evaluator=evaluate,
             batch_evaluator=batch_evaluator,
             fidelity_evaluator=evaluate_fidelity if request.multifidelity_enabled else None,
@@ -457,6 +556,8 @@ class StrategyDiscoveryService:
             "optuna_version": _package_version("optuna"),
             "lightgbm_version": _package_version("lightgbm"),
         }
+        if result_metadata:
+            result.update(dict(result_metadata))
         result["duration_seconds"] = max(0.0, time.monotonic() - started)
         return result
 
@@ -677,6 +778,32 @@ def _fingerprint_value(value: object) -> object:
     if isinstance(value, (int, float)):
         return format(value, ".15g")
     return str(value)
+
+
+def _find_parent_candidate(
+    experiment: Mapping[str, object], candidate_hash: str
+) -> Mapping[str, object]:
+    for key in ("results_by_sharpe", "results_by_return"):
+        candidates = experiment.get(key)
+        if not isinstance(candidates, (list, tuple)):
+            continue
+        for candidate in candidates:
+            if (
+                isinstance(candidate, Mapping)
+                and str(candidate.get("candidate_hash")) == candidate_hash
+            ):
+                return candidate
+    raise ValueError("父实验中不存在指定候选")
+
+
+def _validate_expected_fingerprint(
+    metrics: Mapping[str, object], expected: str | None
+) -> None:
+    if not expected:
+        return
+    actual = metrics.get("data_fingerprint")
+    if isinstance(actual, str) and actual and actual != expected:
+        raise ValueError("本地行情已变化，无法基于旧候选执行二次优化，请重新运行策略实验")
 
 
 def _package_version(name: str) -> str | None:

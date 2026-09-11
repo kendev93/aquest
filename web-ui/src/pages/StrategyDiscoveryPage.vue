@@ -4,6 +4,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { FormulaScreenApiError } from '../api/formulaScreen'
 import {
   createStrategyDiscovery,
+  createStrategyDiscoveryRefinement,
   cancelStrategyDiscovery,
   deleteStrategyDiscoveryHistory,
   fetchStrategyDiscoveryCapabilities,
@@ -80,6 +81,8 @@ const selectedCandidate = ref<StrategyDiscoveryCandidate | null>(null)
 const replayJob = ref<StrategyReplayJobState | null>(null)
 const replayResult = ref<StrategyReplayResult | null>(null)
 const replayLoading = ref(false)
+const refinementJob = ref<StrategyDiscoveryJobState | null>(null)
+const refinementLoading = ref(false)
 const replayPeriod = ref<'overall' | 'ytd' | 'one_year' | 'two_year' | 'annual'>('overall')
 const selectedReplayCandidateHash = ref<string | null>(null)
 const loading = ref(false)
@@ -152,6 +155,10 @@ function buildPayload(): StrategyDiscoveryPayload {
   }
 }
 
+function refinementMaxTrials(): number {
+  return form.searchLevel === 'high' ? 3000 : form.searchLevel === 'medium' ? 2000 : 1000
+}
+
 function apiMessage(error: unknown): string {
   if (error instanceof FormulaScreenApiError) return error.message
   if (error instanceof Error && error.message) return `策略实验失败：${error.message}`
@@ -191,6 +198,7 @@ async function submit(): Promise<void> {
   replayJob.value = null
   replayResult.value = null
   selectedReplayCandidateHash.value = null
+  refinementJob.value = null
   try {
     const created = await createStrategyDiscovery(buildPayload())
     job.value = {
@@ -227,6 +235,58 @@ async function submit(): Promise<void> {
     message.value = apiMessage(error)
   } finally {
     loading.value = false
+  }
+}
+
+async function startRefinement(candidate: StrategyDiscoveryCandidate): Promise<void> {
+  const historyId = experimentId.value
+  if (!historyId || refinementLoading.value) return
+  refinementLoading.value = true
+  refinementJob.value = null
+  message.value = ''
+  try {
+    const created = await createStrategyDiscoveryRefinement({
+      parent_history_id: historyId,
+      parent_candidate_hash: candidate.candidate_hash,
+      refinement_radius: 'medium',
+      max_trials: refinementMaxTrials(),
+    })
+    refinementJob.value = {
+      job_id: created.job_id,
+      status: 'queued',
+      progress: 0,
+      total_candidates: 0,
+      total_scanned: 0,
+      errors: 0,
+      skipped: 0,
+      error: null,
+      result: null,
+    }
+    for (;;) {
+      const state = await getStrategyDiscovery(created.job_id)
+      refinementJob.value = state
+      if (state.status === 'completed') {
+        result.value = await getStrategyDiscoveryResults(created.job_id)
+        selectedCandidate.value = null
+        activeBoard.value = 'sharpe'
+        message.value = `二次优化完成：夏普榜 ${result.value.results_by_sharpe.length} 组，收益榜 ${result.value.results_by_return.length} 组。`
+        await loadHistory()
+        return
+      }
+      if (state.status === 'failed') {
+        message.value = state.error ?? '二次优化失败，请检查父候选和本地行情。'
+        return
+      }
+      if (state.status === 'cancelled') {
+        message.value = state.error ?? '二次优化已取消。'
+        return
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 220))
+    }
+  } catch (error) {
+    message.value = apiMessage(error)
+  } finally {
+    refinementLoading.value = false
   }
 }
 
@@ -443,6 +503,16 @@ function formatHistoryTimestamp(value: unknown): string {
   return value.replace('T', ' ').replace(/\.\d+/, '').replace('Z', '')
 }
 
+function historyMode(item: Record<string, unknown>): string {
+  if (item.mode === 'refinement') {
+    const hash = typeof item.parent_candidate_hash === 'string'
+      ? item.parent_candidate_hash.slice(0, 10)
+      : '—'
+    return `二次优化 · ${hash}`
+  }
+  return '全局搜索'
+}
+
 function holdoutStatus(candidate: StrategyDiscoveryCandidate): string {
   const value = candidate.metrics.holdout?.constraints_passed
   return value === true ? '通过' : value === false ? '未通过' : '—'
@@ -655,8 +725,8 @@ onMounted(async () => {
             </div>
             <div v-if="replayJob" class="discovery-replay-progress" data-testid="strategy-discovery-replay-progress"><div class="discovery-progress-heading"><strong>{{ replayPhase(replayJob) }}</strong><span data-testid="strategy-discovery-replay-percent">{{ replayProgressPercent(replayJob) }}</span></div><div class="progress-track"><span :style="{ width: replayProgressPercent(replayJob) }"></span></div><div class="discovery-progress-stats"><span>已完成 {{ replayCount(replayJob) }} / 总数 {{ Math.min(10, boards.length) }}</span><span v-if="replayResult?.finished_at">完成于 {{ formatHistoryTimestamp(replayResult.finished_at) }}</span><span v-if="replayResult?.duration_seconds !== undefined">耗时 {{ formatHistoryDuration(replayResult.duration_seconds) }}</span></div><small v-if="replayJob.errors">有 {{ replayJob.errors }} 个候选未能完成复核，请展开诊断。</small></div>
             <div v-if="!boards.length" class="inline-empty">没有满足当前约束的候选策略。</div>
-            <div v-else class="table-wrap"><table><caption class="sr-only">策略候选排行榜</caption><thead><tr><th>#</th><th>策略配置</th><th>验证收益</th><th>验证夏普</th><th>验证回撤</th><th>留出收益</th><th>留出约束</th><th>操作</th></tr></thead><tbody><tr v-for="(candidate, index) in boards" :key="candidate.candidate_hash" :data-testid="`strategy-discovery-row-${candidate.candidate_hash}`"><td>{{ index + 1 }}</td><td><button class="table-link" type="button" @click="selectCandidate(candidate)">{{ candidate.human_readable_rules }}</button></td><td>{{ formatPercent(metric(candidate, 'validation', 'annual_return')) }}</td><td>{{ formatNumber(metric(candidate, 'validation', 'sharpe')) }}</td><td>{{ formatPercent(metric(candidate, 'validation', 'max_drawdown')) }}</td><td>{{ formatPercent(metric(candidate, 'holdout', 'annual_return')) }}</td><td :class="{ positive: holdoutStatus(candidate) === '通过', negative: holdoutStatus(candidate) === '未通过' }">{{ holdoutStatus(candidate) }}</td><td><button class="secondary-button" :data-testid="`strategy-discovery-apply-${candidate.candidate_hash}`" type="button" @click="applyCandidate(candidate)">应用</button></td></tr></tbody></table></div>
-            <div v-if="selectedCandidate" class="discovery-detail" data-testid="strategy-discovery-detail"><div class="section-heading"><div><span class="section-kicker">CANDIDATE DETAIL</span><h3>策略配置</h3></div><button class="secondary-button" type="button" @click="selectedCandidate = null">关闭</button></div><p>{{ selectedCandidate.human_readable_rules }}</p><div class="metrics-strip"><div><span>验证收益</span><strong>{{ formatPercent(metric(selectedCandidate, 'validation', 'annual_return')) }}</strong></div><div><span>验证夏普</span><strong>{{ formatNumber(metric(selectedCandidate, 'validation', 'sharpe')) }}</strong></div><div><span>最终留出收益</span><strong>{{ formatPercent(metric(selectedCandidate, 'holdout', 'annual_return')) }}</strong></div><div><span>复杂度</span><strong>{{ selectedCandidate.complexity }}</strong></div></div><pre>{{ JSON.stringify(selectedCandidate.config, null, 2) }}</pre></div>
+            <div v-else class="table-wrap"><table><caption class="sr-only">策略候选排行榜</caption><thead><tr><th>#</th><th>策略配置</th><th>验证收益</th><th>验证夏普</th><th>验证回撤</th><th>留出收益</th><th>留出约束</th><th>操作</th></tr></thead><tbody><tr v-for="(candidate, index) in boards" :key="candidate.candidate_hash" :data-testid="`strategy-discovery-row-${candidate.candidate_hash}`"><td>{{ index + 1 }}</td><td><button class="table-link" type="button" @click="selectCandidate(candidate)">{{ candidate.human_readable_rules }}</button></td><td>{{ formatPercent(metric(candidate, 'validation', 'annual_return')) }}</td><td>{{ formatNumber(metric(candidate, 'validation', 'sharpe')) }}</td><td>{{ formatPercent(metric(candidate, 'validation', 'max_drawdown')) }}</td><td>{{ formatPercent(metric(candidate, 'holdout', 'annual_return')) }}</td><td :class="{ positive: holdoutStatus(candidate) === '通过', negative: holdoutStatus(candidate) === '未通过' }">{{ holdoutStatus(candidate) }}</td><td><button class="secondary-button" :data-testid="`strategy-discovery-apply-${candidate.candidate_hash}`" type="button" @click="applyCandidate(candidate)">应用</button><button class="secondary-button" :data-testid="`strategy-discovery-refine-${candidate.candidate_hash}`" type="button" :disabled="refinementLoading" @click="startRefinement(candidate)">{{ refinementLoading ? '优化中…' : '二次优化' }}</button></td></tr></tbody></table></div>
+            <div v-if="selectedCandidate" class="discovery-detail" data-testid="strategy-discovery-detail"><div class="section-heading"><div><span class="section-kicker">CANDIDATE DETAIL</span><h3>策略配置</h3></div><div><button class="secondary-button" type="button" :disabled="refinementLoading" @click="startRefinement(selectedCandidate)">{{ refinementLoading ? '优化中…' : '二次优化' }}</button><button class="secondary-button" type="button" @click="selectedCandidate = null">关闭</button></div></div><p>{{ selectedCandidate.human_readable_rules }}</p><div class="metrics-strip"><div><span>验证收益</span><strong>{{ formatPercent(metric(selectedCandidate, 'validation', 'annual_return')) }}</strong></div><div><span>验证夏普</span><strong>{{ formatNumber(metric(selectedCandidate, 'validation', 'sharpe')) }}</strong></div><div><span>最终留出收益</span><strong>{{ formatPercent(metric(selectedCandidate, 'holdout', 'annual_return')) }}</strong></div><div><span>复杂度</span><strong>{{ selectedCandidate.complexity }}</strong></div></div><pre>{{ JSON.stringify(selectedCandidate.config, null, 2) }}</pre></div>
             <StrategyReplayPanel v-if="replayResult" :result="replayResult" :period="replayPeriod" :selected-candidate-hash="selectedReplayCandidateHash" @update:period="replayPeriod = $event" @select="selectReplayCandidate" @apply="applyReplayCandidate" />
           </template>
         </section>
@@ -665,7 +735,7 @@ onMounted(async () => {
       <section class="panel discovery-history-panel" data-testid="strategy-discovery-history">
         <div class="panel-heading"><div><span class="section-kicker">03 / HISTORY</span><h2>历史实验</h2></div><button class="secondary-button" type="button" @click="loadHistory">刷新</button></div>
         <div v-if="!history.length" class="inline-empty">暂无历史实验。</div>
-        <div v-else class="table-wrap"><table><thead><tr><th>实验 ID</th><th>开始时间</th><th>结束时间</th><th>候选数</th><th>耗时</th><th>最佳夏普</th><th>最佳收益</th><th>操作</th></tr></thead><tbody><tr v-for="item in history" :key="String(item.history_id)"><td>{{ item.history_id }}</td><td class="muted-code">{{ formatHistoryTimestamp(item.started_at) }}</td><td class="muted-code">{{ formatHistoryTimestamp(item.finished_at) }}</td><td>{{ item.total_trials }}</td><td>{{ formatHistoryDuration(item.duration_seconds) }}</td><td>{{ item.best_sharpe ? '可查看' : '—' }}</td><td>{{ item.best_return ? '可查看' : '—' }}</td><td><button class="table-link" type="button" @click="loadHistoryDetail(String(item.history_id))">加载</button><button class="table-link danger-link" type="button" @click="removeHistory(String(item.history_id))">删除</button></td></tr></tbody></table></div>
+        <div v-else class="table-wrap"><table><thead><tr><th>实验 ID</th><th>类型</th><th>开始时间</th><th>结束时间</th><th>候选数</th><th>耗时</th><th>最佳夏普</th><th>最佳收益</th><th>操作</th></tr></thead><tbody><tr v-for="item in history" :key="String(item.history_id)"><td>{{ item.history_id }}</td><td>{{ historyMode(item) }}</td><td class="muted-code">{{ formatHistoryTimestamp(item.started_at) }}</td><td class="muted-code">{{ formatHistoryTimestamp(item.finished_at) }}</td><td>{{ item.total_trials }}</td><td>{{ formatHistoryDuration(item.duration_seconds) }}</td><td>{{ item.best_sharpe ? '可查看' : '—' }}</td><td>{{ item.best_return ? '可查看' : '—' }}</td><td><button class="table-link" type="button" @click="loadHistoryDetail(String(item.history_id))">加载</button><button class="table-link danger-link" type="button" @click="removeHistory(String(item.history_id))">删除</button></td></tr></tbody></table></div>
       </section>
     </main>
   </div>

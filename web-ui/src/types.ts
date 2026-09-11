@@ -583,6 +583,14 @@ export interface StrategyDiscoveryPayload {
   seed?: number | null
 }
 
+export interface StrategyDiscoveryRefinementPayload {
+  parent_history_id: string
+  parent_candidate_hash: string
+  refinement_radius: 'medium'
+  max_trials: number
+  seed?: number | null
+}
+
 export interface StrategyDiscoveryJobState {
   job_id: string
   status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
@@ -607,6 +615,7 @@ export interface StrategyDiscoveryCandidate {
 
 export interface StrategyDiscoveryResult {
   history_id?: string
+  mode?: 'global' | 'refinement'
   request: Record<string, unknown>
   results_by_sharpe: StrategyDiscoveryCandidate[]
   results_by_return: StrategyDiscoveryCandidate[]
@@ -617,6 +626,14 @@ export interface StrategyDiscoveryResult {
   duration_seconds?: number
   started_at?: string
   finished_at?: string
+  refinement?: {
+    parent_history_id: string
+    parent_candidate_hash: string
+    refinement_radius: 'medium'
+    parent_candidate?: StrategyDiscoveryCandidate
+    parent_metrics?: Record<string, unknown>
+    parent_data_fingerprint?: string
+  }
 }
 
 export type StrategyDiscoveryLeaderboard = 'sharpe' | 'return'

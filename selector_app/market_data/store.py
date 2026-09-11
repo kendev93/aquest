@@ -1516,7 +1516,7 @@ class DuckDbMarketDataStore:
                 """
                 SELECT history_id, created_at, data_fingerprint,
                        started_at, finished_at, total_trials, duration_seconds,
-                       results_by_sharpe_json, results_by_return_json
+                       results_by_sharpe_json, results_by_return_json, request_json
                 FROM strategy_discovery_history
                 ORDER BY created_at DESC, history_id DESC
                 LIMIT ?
@@ -1528,8 +1528,13 @@ class DuckDbMarketDataStore:
             try:
                 sharpe = json.loads(str(row[7]))
                 returns = json.loads(str(row[8]))
+                request = json.loads(str(row[9]))
             except json.JSONDecodeError as exc:
                 raise MarketDataStoreError("策略实验历史内容损坏") from exc
+            request_map = request if isinstance(request, dict) else {}
+            mode = str(request_map.get("mode") or "global")
+            refinement = request_map.get("refinement")
+            refinement_map = refinement if isinstance(refinement, dict) else {}
             summaries.append(
                 {
                     "history_id": str(row[0]),
@@ -1541,6 +1546,9 @@ class DuckDbMarketDataStore:
                     "duration_seconds": float(row[6]),
                     "best_sharpe": sharpe[0] if isinstance(sharpe, list) and sharpe else None,
                     "best_return": returns[0] if isinstance(returns, list) and returns else None,
+                    "mode": mode,
+                    "parent_history_id": refinement_map.get("parent_history_id"),
+                    "parent_candidate_hash": refinement_map.get("parent_candidate_hash"),
                 }
             )
         return summaries

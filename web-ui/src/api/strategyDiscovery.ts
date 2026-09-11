@@ -3,6 +3,7 @@ import type {
   StrategyDiscoveryLeaderboard,
   StrategyDiscoveryJobState,
   StrategyDiscoveryPayload,
+  StrategyDiscoveryRefinementPayload,
   StrategyDiscoveryResult,
   StrategyReplayHistoryRecord,
   StrategyReplayJobState,
@@ -48,6 +49,14 @@ export async function fetchStrategyDiscoveryCapabilities(): Promise<Record<strin
 
 export async function createStrategyDiscovery(payload: StrategyDiscoveryPayload): Promise<{ job_id: string; status: string }> {
   const response = await request<{ data: { job_id: string; status: string } }>(API_BASE, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+  return response.data
+}
+
+export async function createStrategyDiscoveryRefinement(payload: StrategyDiscoveryRefinementPayload): Promise<{ job_id: string; status: string }> {
+  const response = await request<{ data: { job_id: string; status: string } }>(`${API_BASE}/refinements`, {
     method: 'POST',
     body: JSON.stringify(payload),
   })
