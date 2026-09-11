@@ -3,11 +3,13 @@ from __future__ import annotations
 import struct
 import zlib
 
+import pandas as pd
 import pytest
 
+from selector_app.tdx_protocol.client import TdxClient
 from selector_app.tdx_protocol.codec import HEADER_SIZE, decode_frame_header, decompress_body
 from selector_app.tdx_protocol.commands import GetSecurityBars, GetSecurityCount, GetSecurityList
-from selector_app.tdx_protocol.errors import TdxDecodeError
+from selector_app.tdx_protocol.errors import TdxConnectionError, TdxDecodeError
 from selector_app.tdx_protocol.types import KlineCategory, Market
 
 
@@ -89,6 +91,49 @@ def test_index_bar_response_skips_breadth_fields_between_records() -> None:
 def test_count_and_security_list_requests_are_available() -> None:
     assert len(GetSecurityCount(Market.SH).build_request()) == 18
     assert len(GetSecurityList(Market.SH, 0).build_request()) == 18
+
+
+def test_security_list_all_fetches_every_reported_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = object.__new__(TdxClient)
+
+    def get_count(market: Market) -> int:
+        return 1001 if market is Market.SH else 0
+
+    def get_page(market: Market, start: int) -> object:
+        assert market is Market.SH
+        if start == 0:
+            return pd.DataFrame([{"market": "SH", "code": f"{index:06d}"} for index in range(1000)])
+        return pd.DataFrame([{"market": "SH", "code": "001000"}])
+
+    monkeypatch.setattr(client, "get_security_count", get_count)
+    monkeypatch.setattr(client, "get_security_list", get_page)
+
+    result = client.get_security_list_all()
+
+    assert len(result) == 1001
+    assert result.iloc[-1]["code"] == "001000"
+
+
+def test_security_list_all_does_not_hide_a_failed_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = object.__new__(TdxClient)
+
+    monkeypatch.setattr(
+        client,
+        "get_security_count",
+        lambda market: 1001 if market is Market.SH else 0,
+    )
+    monkeypatch.setattr(
+        client,
+        "get_security_list",
+        lambda _market, start: (
+            pd.DataFrame([{"market": "SH", "code": "600000"}])
+            if start == 0
+            else (_ for _ in ()).throw(TdxConnectionError("分页连接失败"))
+        ),
+    )
+
+    with pytest.raises(TdxConnectionError, match="证券列表分页"):
+        client.get_security_list_all()
 
 
 def test_daily_bar_request_rejects_unsafe_page_size() -> None:

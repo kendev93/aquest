@@ -30,6 +30,7 @@ from selector_app.market_data.service import (
 )
 from selector_app.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
 from selector_app.screening.jobs import ScreenJobRunner, TaskUserError
+from selector_app.tdx_protocol.errors import TdxConnectionError
 
 from ..schemas import LocalMarketImportRequest, MarketSyncRequest
 
@@ -331,7 +332,9 @@ def _create_sync_job(
     *,
     include_local: bool,
 ) -> JSONResponse:
-    config = _sync_config(payload, prefer_store_targets=include_local)
+    # Online sync discovers the current exchange list in both modes.  The
+    # local import supplies longer history; it must not limit the universe.
+    config = _sync_config(payload, prefer_store_targets=False)
 
     def run_sync(progress: Callable[[int, int], None]) -> dict[str, object]:
         try:
@@ -359,6 +362,10 @@ def _create_sync_job(
                     "vipdoc_path": local_root,
                 }
             online_result = _result_dict(_service(request).sync(config, progress))
+        except TdxConnectionError as exc:
+            raise TaskUserError(
+                "完整证券列表获取失败，本次同步已停止，请检查 TDX 连接后重试。"
+            ) from exc
         except (MarketDataStoreError, duckdb.Error) as exc:
             raise TaskUserError(_storage_error_message(exc)) from exc
         result = (

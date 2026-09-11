@@ -161,6 +161,11 @@ export interface MarketSyncResult {
   filtered_files?: number
   total_candidates?: number
   processed?: number
+  listed_instruments?: number
+  filtered_instruments?: number
+  new_instruments?: number
+  existing_instruments?: number
+  target_source?: string
   written_bars?: number
   errors?: number
   failure_reasons?: Record<string, number>

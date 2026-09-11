@@ -150,10 +150,17 @@ class TdxClient:
             for start in range(0, maximum, 1000):
                 try:
                     frame = self.get_security_list(market, start)
-                except Exception:
-                    continue
-                if frame.empty:
-                    break
+                except Exception as exc:  # noqa: BLE001 - a skipped page makes the list incomplete
+                    raise TdxConnectionError(
+                        f"证券列表分页获取失败: market={market.name}, start={start}"
+                    ) from exc
+                expected = min(1000, maximum - start)
+                if len(frame) < expected:
+                    raise TdxConnectionError(
+                        "证券列表分页不完整: "
+                        f"market={market.name}, start={start}, "
+                        f"expected={expected}, received={len(frame)}"
+                    )
                 rows.extend(frame.to_dict(orient="records"))
         return pd.DataFrame(rows)
 

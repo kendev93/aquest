@@ -76,6 +76,11 @@ class MarketSyncReport:
     written_bars: int
     errors: int
     failure_reasons: Mapping[str, int]
+    listed_instruments: int = 0
+    filtered_instruments: int = 0
+    new_instruments: int = 0
+    existing_instruments: int = 0
+    target_source: str = "tdx_security_list"
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -87,6 +92,11 @@ class MarketSyncReport:
             "written_bars": self.written_bars,
             "errors": self.errors,
             "failure_reasons": dict(self.failure_reasons),
+            "listed_instruments": self.listed_instruments,
+            "filtered_instruments": self.filtered_instruments,
+            "new_instruments": self.new_instruments,
+            "existing_instruments": self.existing_instruments,
+            "target_source": self.target_source,
         }
 
 
@@ -98,6 +108,14 @@ class _SyncBatchReport:
     written_bars: int
     errors: int
     failure_reasons: Mapping[str, int]
+
+
+@dataclass(frozen=True)
+class _TargetSelection:
+    targets: list[InstrumentTarget]
+    listed_instruments: int
+    filtered_instruments: int
+    target_source: str
 
 
 class TdxMarketClient(Protocol):
@@ -149,7 +167,22 @@ class TdxMarketSync:
     ) -> MarketSyncReport:
         factory = self._client_factory or _default_client
         with factory(config.timeout) as client:
-            targets = self._list_targets(client, config)
+            selection = self._list_targets(client, config)
+        targets = selection.targets
+        new_instruments = 0
+        if selection.target_source == "tdx_security_list":
+            refs = [
+                InstrumentRef(
+                    market=market,
+                    code=code,
+                    instrument_type=instrument_type,
+                    board=board,
+                    name=name,
+                )
+                for market, code, instrument_type, board, name in targets
+            ]
+            new_instruments = self._store.ensure_instruments(refs)
+        existing_instruments = max(len(targets) - new_instruments, 0)
         total = len(targets)
         failure_reasons: Counter[str] = Counter()
         processed = 0
@@ -201,6 +234,11 @@ class TdxMarketSync:
             written_bars=written_bars,
             errors=sum(failure_reasons.values()),
             failure_reasons=dict(failure_reasons),
+            listed_instruments=selection.listed_instruments,
+            filtered_instruments=selection.filtered_instruments,
+            new_instruments=new_instruments,
+            existing_instruments=existing_instruments,
+            target_source=selection.target_source,
         )
 
     def _sync_batch(
@@ -287,7 +325,7 @@ class TdxMarketSync:
         self,
         client: TdxMarketClient,
         config: MarketSyncConfig,
-    ) -> list[InstrumentTarget]:
+    ) -> _TargetSelection:
         if config.prefer_store_targets:
             stored = self._store.list_instruments(
                 market=None if config.universe == "all" else config.universe.upper(),
@@ -312,19 +350,29 @@ class TdxMarketSync:
                         if key in stored_keys and name is not None:
                             names_by_key[key] = name
                     self._store.update_instrument_names(names_by_key)
-                return [
-                    (
-                        ref.market,
-                        ref.code,
-                        ref.instrument_type,
-                        ref.board,
-                        names_by_key.get((ref.market, ref.code), ref.name),
-                    )
-                    for ref in stored
-                ]
+                return _TargetSelection(
+                    targets=[
+                        (
+                            ref.market,
+                            ref.code,
+                            ref.instrument_type,
+                            ref.board,
+                            names_by_key.get((ref.market, ref.code), ref.name),
+                        )
+                        for ref in stored
+                    ],
+                    listed_instruments=len(stored),
+                    filtered_instruments=0,
+                    target_source="store",
+                )
         frame = client.get_security_list_all(pages="all")
         if frame.empty:
-            return []
+            return _TargetSelection(
+                targets=[],
+                listed_instruments=0,
+                filtered_instruments=0,
+                target_source="tdx_security_list",
+            )
         scope = InstrumentScope.from_values(
             universe=config.universe,
             instrument_types=config.instrument_types,
@@ -333,6 +381,7 @@ class TdxMarketSync:
         targets: list[InstrumentTarget] = []
         names: dict[tuple[str, str], str | None] = {}
         seen: set[tuple[MarketCode, str]] = set()
+        listed: set[tuple[MarketCode, str]] = set()
         for row in frame.to_dict(orient="records"):
             market = _to_market(row.get("market"))
             raw_code = str(row.get("code", "")).strip()
@@ -345,6 +394,7 @@ class TdxMarketSync:
             board = classify_board(market, code)
             if instrument_type is None or board is None:
                 continue
+            listed.add((market, code))
             if not scope.matches(market, instrument_type, board):
                 continue
             key = (market, code)
@@ -355,7 +405,12 @@ class TdxMarketSync:
                 if name is not None:
                     names[key] = name
         self._store.update_instrument_names(names)
-        return targets
+        return _TargetSelection(
+            targets=targets,
+            listed_instruments=len(listed),
+            filtered_instruments=max(len(listed) - len(targets), 0),
+            target_source="tdx_security_list",
+        )
 
     def _sync_one(
         self,

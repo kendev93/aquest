@@ -43,6 +43,9 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
     def update_instrument_names(self, names: Mapping[tuple[str, str], str | None]) -> int:
         return self._bars.update_instrument_names(names)
 
+    def ensure_instruments(self, instruments: Iterable[InstrumentRef]) -> int:
+        return self._bars.ensure_instruments(instruments)
+
     def replace_local_bars(
         self,
         market: str,

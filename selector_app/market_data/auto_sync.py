@@ -131,8 +131,8 @@ class AutomaticMarketSyncScheduler:
             MarketSyncConfig(
                 universe="all",
                 bars=800,
-                prefer_store_targets=True,
-                refresh_names=True,
+                prefer_store_targets=False,
+                refresh_names=False,
             ),
             progress,
         )

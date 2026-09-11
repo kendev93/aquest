@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from selector_app.market_data.day_importer import LocalDayImporter
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.screening.models import ScanReport
+from selector_app.tdx_protocol.errors import TdxConnectionError
 from selector_app.web.app import create_app
 from selector_app.web.schemas import FormulaScreenRequest
 from tests.day_helpers import write_day_records
@@ -169,8 +170,8 @@ def test_app_schedules_online_sync_when_daily_refresh_is_due(tmp_path: Path) -> 
 
     assert len(calls) == 1
     config = calls[0]
-    assert config.prefer_store_targets is True
-    assert config.refresh_names is True
+    assert config.prefer_store_targets is False
+    assert config.refresh_names is False
     assert status.status_code == 200
     assert status.json()["data"]["last_online_sync_at"] is not None
 
@@ -312,6 +313,7 @@ def test_market_sync_job_can_be_created_and_polled() -> None:
         def sync(self, config, progress_callback=None):
             received["instrument_types"] = config.instrument_types
             received["boards"] = config.boards
+            received["prefer_store_targets"] = config.prefer_store_targets
             if progress_callback:
                 progress_callback(1, 1)
             return {
@@ -342,7 +344,11 @@ def test_market_sync_job_can_be_created_and_polled() -> None:
 
     assert state["status"] == "completed"
     assert state["result"]["written_bars"] == 3
-    assert received == {"instrument_types": ("stock",), "boards": ("main",)}
+    assert received == {
+        "instrument_types": ("stock",),
+        "boards": ("main",),
+        "prefer_store_targets": False,
+    }
 
 
 def test_one_click_sync_imports_local_vipdoc_before_online_sync(tmp_path: Path) -> None:
@@ -439,6 +445,29 @@ def test_market_sync_rejects_an_invalid_request() -> None:
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "validation_error"
+
+
+def test_market_sync_reports_incomplete_security_list_without_running_bars() -> None:
+    class FailingMarketSync:
+        def sync(self, config, progress_callback=None):
+            del config, progress_callback
+            raise TdxConnectionError("证券列表分页不完整")
+
+    with TestClient(create_app(engine=EmptyEngine(), market_sync=FailingMarketSync())) as client:
+        response = client.post("/api/v1/market-data/sync-online", json={})
+        assert response.status_code == 202
+        job_id = response.json()["data"]["job_id"]
+        for _ in range(50):
+            state_response = client.get(f"/api/v1/market-data/jobs/{job_id}")
+            assert state_response.status_code == 200
+            state = state_response.json()["data"]
+            if state["status"] == "failed":
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("market sync job did not fail")
+
+    assert state["error"] == "完整证券列表获取失败，本次同步已停止，请检查 TDX 连接后重试。"
 
 
 def test_backtest_job_can_be_created_and_results_are_available(tmp_path: Path) -> None:

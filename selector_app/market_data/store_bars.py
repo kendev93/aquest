@@ -74,6 +74,62 @@ class DuckDbBarsStore:
                 raise
         return int(matched[0] if matched else 0)
 
+    def ensure_instruments(self, instruments: Iterable[InstrumentRef]) -> int:
+        """Register discovered online instruments without discarding existing bars."""
+
+        self._store._require_writer()
+        rows = [
+            {
+                "market": ref.market,
+                "code": ref.code,
+                "name": _clean_name(ref.name),
+                "instrument_type": ref.instrument_type,
+                "board": ref.board,
+            }
+            for ref in instruments
+        ]
+        if not rows:
+            return 0
+        frame = pd.DataFrame(rows).drop_duplicates(subset=["market", "code"], keep="last")
+        with _WRITE_LOCK, self._store._connect() as connection:
+            connection.execute("BEGIN")
+            try:
+                connection.register("_discovered_instruments", frame)
+                matched = connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM instruments AS instruments
+                    INNER JOIN _discovered_instruments AS discovered
+                      ON instruments.market = discovered.market
+                     AND instruments.code = discovered.code
+                    """
+                ).fetchone()
+                connection.execute(
+                    """
+                    INSERT INTO instruments (
+                        market, code, name, instrument_type, board, source_path,
+                        first_date, last_date, bar_count, source_state, updated_at
+                    )
+                    SELECT market, code, name, instrument_type, board, NULL,
+                           NULL, NULL, 0, 'active', ?
+                    FROM _discovered_instruments
+                    ON CONFLICT (market, code) DO UPDATE SET
+                        name = COALESCE(excluded.name, instruments.name),
+                        instrument_type = excluded.instrument_type,
+                        board = excluded.board,
+                        source_state = 'active',
+                        updated_at = excluded.updated_at
+                    """,
+                    [_now()],
+                )
+                connection.unregister("_discovered_instruments")
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        matched_count = int(matched[0] if matched else 0)
+        return max(len(frame) - matched_count, 0)
+
     def replace_local_bars(
         self,
         market: str,

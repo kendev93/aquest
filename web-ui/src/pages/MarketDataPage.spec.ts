@@ -137,7 +137,11 @@ describe('MarketDataPage', () => {
         updated_files: 1,
         written_bars: 1,
         local_import: { source: 'local', imported_files: 1, imported_bars: 2 },
-        online_sync: { source: 'online', updated_files: 1, written_bars: 1 },
+        online_sync: {
+          source: 'online', updated_files: 1, written_bars: 1,
+          listed_instruments: 4, filtered_instruments: 2,
+          new_instruments: 3, existing_instruments: 1,
+        },
       },
     })
     const wrapper = mount(MarketDataPage)
@@ -153,6 +157,8 @@ describe('MarketDataPage', () => {
     })
     expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('本地导入 1 个文件')
     expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('在线写入 1 根')
+    expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('证券列表 4')
+    expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('新增标的 3')
   })
 
   it('keeps polling a slow market-data job without a fixed attempt timeout', async () => {

@@ -146,3 +146,47 @@ def test_store_target_sync_refreshes_missing_names_once(tmp_path: Path) -> None:
     assert client.list_calls == 1
     ref = next(ref for ref in store.list_instruments() if ref.code == "600000")
     assert ref.name == "浦发银行"
+
+
+def test_full_security_discovery_adds_new_targets_and_reports_scope(
+    tmp_path: Path,
+) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _frame())
+
+    class ExpandedClient(FakeClient):
+        def get_security_list_all(self, pages: str = "all") -> pd.DataFrame:
+            del pages
+            self.list_calls += 1
+            return pd.DataFrame(
+                [
+                    {"market": "SH", "code": "600000", "name": "浦发银行"},
+                    {"market": "SH", "code": "600001", "name": "新标的"},
+                    {"market": "SH", "code": "510300", "name": "沪深300ETF"},
+                    {"market": "SH", "code": "000001", "name": "上证指数"},
+                ]
+            )
+
+    service = TdxMarketSync(
+        store=store,
+        client_factory=lambda _timeout: ExpandedClient(),
+    )
+
+    report = service.sync(
+        MarketSyncConfig(
+            universe="sh",
+            instrument_types=("stock",),
+            boards=("main",),
+        )
+    )
+
+    assert report.listed_instruments == 4
+    assert report.filtered_instruments == 2
+    assert report.total_candidates == 2
+    assert report.existing_instruments == 1
+    assert report.new_instruments == 1
+    assert report.target_source == "tdx_security_list"
+    assert [ref.code for ref in store.list_instruments(market="SH")] == [
+        "600000",
+        "600001",
+    ]
