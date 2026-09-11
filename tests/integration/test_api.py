@@ -110,6 +110,18 @@ def test_health_endpoint_is_lightweight_and_does_not_require_vipdoc() -> None:
     assert response.json() == {"status": "ok"}
 
 
+def test_app_records_database_maintenance_check_on_startup(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _precompute_bars())
+    app = create_app(market_data_store=store, auto_sync_enabled=False)
+
+    with TestClient(app):
+        result = app.state.database_maintenance_result
+
+    assert result["status"] == "baseline"
+    assert result["record_path"].endswith("market.maintenance.json")
+
+
 def test_app_schedules_online_sync_when_daily_refresh_is_due(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     store.replace_local_bars("SH", "600000", "stock", _precompute_bars())

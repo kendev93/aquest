@@ -26,6 +26,10 @@ from selector_app.market_data.auto_sync import (
     AutomaticMarketSyncScheduler,
 )
 from selector_app.market_data.day_importer import LocalDayImporter
+from selector_app.market_data.maintenance import (
+    DatabaseMaintenanceScheduler,
+    DatabaseMaintenanceService,
+)
 from selector_app.market_data.models import ImportReport
 from selector_app.market_data.service import LocalMarketDataService
 from selector_app.market_data.store import DuckDbMarketDataStore
@@ -54,6 +58,7 @@ def create_app(
     local_day_importer: LocalDayImporter | object | None = None,
     indicator_cache: IndicatorCache | object | None = None,
     indicator_precompute_service: IndicatorPrecomputeService | object | None = None,
+    database_maintenance_service: DatabaseMaintenanceService | object | None = None,
     auto_sync_enabled: bool | None = None,
     auto_sync_interval_seconds: float | None = None,
 ) -> FastAPI:
@@ -79,6 +84,12 @@ def create_app(
     )
     selected_auto_sync_enabled = _resolve_auto_sync_enabled(auto_sync_enabled)
     selected_auto_sync_interval = _resolve_auto_sync_interval(auto_sync_interval_seconds)
+    selected_maintenance_service = cast(
+        DatabaseMaintenanceService,
+        database_maintenance_service
+        if database_maintenance_service is not None
+        else DatabaseMaintenanceService(selected_store.database_path),
+    )
     selected_runner = runner or ScreenJobRunner(
         engine=engine
         or ScreenEngine(adapter=selected_adapter, indicator_cache=selected_indicator_cache)
@@ -111,7 +122,20 @@ def create_app(
         app.state.startup_import_job_id = None
         app.state.auto_sync_job_id = None
         auto_sync_task: asyncio.Task[None] | None = None
+        maintenance_task: asyncio.Task[None] | None = None
         vipdoc_root = Path(os.getenv("SELECTOR_VIPDOC_PATH") or "/data/vipdoc").expanduser()
+        try:
+            selected_store.status()
+            maintenance_result = selected_maintenance_service.run_if_needed()
+            app.state.database_maintenance_result = maintenance_result.to_dict()
+            if maintenance_result.status == "failed":
+                logger.warning("启动时 DuckDB 整理未完成: %s", maintenance_result.error)
+        except Exception:  # noqa: BLE001 - maintenance failure must not block the app
+            logger.exception("启动时 DuckDB 整理检查失败")
+            app.state.database_maintenance_result = {
+                "status": "failed",
+                "reason": "maintenance_check_failed",
+            }
         if owns_runner:
             has_day_files = vipdoc_root.is_dir() and any(
                 directory.glob("*.day")
@@ -151,6 +175,12 @@ def create_app(
                     )
                 except RuntimeError:
                     logger.exception("无法提交本地行情自动导入任务")
+        if owns_runner:
+            maintenance_scheduler = DatabaseMaintenanceScheduler(
+                selected_maintenance_service,
+                selected_runner,
+            )
+            maintenance_task = asyncio.create_task(maintenance_scheduler.run())
         if selected_auto_sync_enabled:
             scheduler = AutomaticMarketSyncScheduler(
                 store=selected_store,
@@ -168,6 +198,12 @@ def create_app(
         try:
             yield
         finally:
+            if maintenance_task is not None:
+                maintenance_task.cancel()
+                try:
+                    await maintenance_task
+                except asyncio.CancelledError:
+                    pass
             if auto_sync_task is not None:
                 auto_sync_task.cancel()
                 try:
@@ -204,6 +240,8 @@ def create_app(
     )
     app.state.auto_sync_enabled = selected_auto_sync_enabled
     app.state.auto_sync_interval_seconds = selected_auto_sync_interval
+    app.state.database_maintenance_service = selected_maintenance_service
+    app.state.database_maintenance_result = None
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],

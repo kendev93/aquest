@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import time
 from collections.abc import Iterable
 from datetime import date, datetime, timezone
@@ -21,6 +20,7 @@ import numpy as np
 import pandas as pd
 
 from .day_format import classify_board
+from .maintenance import cleanup_database_backups, create_database_backup
 from .models import DataStoreStatus, InstrumentBoard, InstrumentType
 
 SCHEMA_VERSION = 9
@@ -366,6 +366,7 @@ class _DuckDbStoreBase:
                 """,
                 [str(SCHEMA_VERSION), _now()],
             )
+        cleanup_database_backups(self.database_path)
 
     @staticmethod
     def _migrate_schema(connection: duckdb.DuckDBPyConnection, version: int) -> None:
@@ -464,24 +465,7 @@ class _DuckDbStoreBase:
             raise RuntimeError("行情数据库 schema 版本无效") from exc
 
     def _backup_file(self) -> Path:
-        pattern = f"{self.database_path.stem}.bak-*{self.database_path.suffix}"
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
-        target = self.database_path.with_name(
-            f"{self.database_path.stem}.bak-{timestamp}{self.database_path.suffix}"
-        )
-        shutil.copy2(self.database_path, target)
-        for backup in self.database_path.parent.glob(pattern):
-            if backup == target:
-                continue
-            try:
-                backup.unlink()
-            except FileNotFoundError:
-                continue
-            except OSError:
-                # A stale backup must not make a successful database backup
-                # or schema migration fail. The next backup retries cleanup.
-                continue
-        return target
+        return create_database_backup(self.database_path)
 
     def backup_database(self) -> Path:
         """Create a recoverable copy before an operator-managed migration."""

@@ -28,7 +28,7 @@ request to refactor the oversized DuckDB store without changing behavior.
 | # | Guarantee | Test or command | Type | Result |
 |---|---|---|---|---|
 | 1 | The facade is composed of separate bars, history, indicator-cache, and source-file repositories | `tests/unit/test_store_composition.py` | unit | PASS |
-| 2 | Backup calls retain only the latest database backup | `tests/unit/test_store_base_backup.py`, `tests/unit/test_duckdb_store.py` | unit | PASS |
+| 2 | Backup cleanup retains only the newest copy and deletes it after three days | `tests/unit/test_store_base_backup.py`, `tests/unit/test_duckdb_store.py` | unit | PASS |
 | 3 | Existing market-data, history, migration, read-only, and cache behavior remains compatible | Full Python test suite | integration/unit | PASS |
 | 4 | Refactored source passes formatting and lint rules | `ruff check selector_app tests` | static | PASS |
 | 5 | Refactored source remains type-safe under strict mypy settings | `mypy selector_app` | static | PASS |

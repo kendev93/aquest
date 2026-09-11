@@ -22,6 +22,8 @@ data/vipdoc/*
 *.duckdb.wal
 *.duckdb.tmp
 *.bak-*.duckdb
+*.maintenance.json
+*.compact-*.duckdb
 
 .DS_Store
 *.log

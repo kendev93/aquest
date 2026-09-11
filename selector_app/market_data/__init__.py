@@ -11,6 +11,14 @@ from .day_format import (
 )
 from .day_importer import LocalDayImporter
 from .local_adapter import LocalDayMarketDataAdapter, suggested_vipdoc_path
+from .maintenance import (
+    BACKUP_RETENTION_DAYS,
+    COMPACTION_GROWTH_RATIO,
+    COMPACTION_MIN_SIZE_BYTES,
+    DatabaseMaintenanceScheduler,
+    DatabaseMaintenanceService,
+    MaintenanceResult,
+)
 from .models import (
     DataStoreStatus,
     ImportReport,
@@ -58,6 +66,12 @@ __all__ = [
     "MarketDataAdapter",
     "LocalDayMarketDataAdapter",
     "suggested_vipdoc_path",
+    "BACKUP_RETENTION_DAYS",
+    "COMPACTION_GROWTH_RATIO",
+    "COMPACTION_MIN_SIZE_BYTES",
+    "DatabaseMaintenanceScheduler",
+    "DatabaseMaintenanceService",
+    "MaintenanceResult",
     "DuckDbMarketDataStore",
     "MarketDataStoreError",
     "MarketDataRepository",
