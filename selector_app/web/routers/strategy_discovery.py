@@ -249,9 +249,7 @@ def create_strategy_refinement(
                 phase=phase,
                 metadata=dict(metadata or {}),
                 progress=(
-                    float(overall_progress)
-                    if isinstance(overall_progress, (int, float))
-                    else None
+                    float(overall_progress) if isinstance(overall_progress, (int, float)) else None
                 ),
             )
 

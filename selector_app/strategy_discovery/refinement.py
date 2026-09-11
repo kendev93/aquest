@@ -42,9 +42,7 @@ def discovery_request_from_dict(value: Mapping[str, object]) -> DiscoveryRequest
     if isinstance(raw_splits, Mapping):
         for name, split in raw_splits.items():
             if isinstance(split, Mapping):
-                splits[str(name)] = {
-                    str(key): str(item) for key, item in split.items()
-                }
+                splits[str(name)] = {str(key): str(item) for key, item in split.items()}
     constants: dict[str, tuple[float, ...]] = {}
     if isinstance(raw_constants, Mapping):
         for key, values in raw_constants.items():
@@ -113,9 +111,7 @@ def rule_from_dict(value: object) -> RuleGroup:
         signals=signals,
         conditions=conditions,
         combine_mode=combine_mode,
-        minimum_matches=(
-            _as_int(minimum_matches, 1) if minimum_matches is not None else None
-        ),
+        minimum_matches=(_as_int(minimum_matches, 1) if minimum_matches is not None else None),
     )
 
 
@@ -145,34 +141,22 @@ def candidate_from_payload(
             Literal["daily", "weekly", "monthly"],
             str(candidate_config.get("rebalance_frequency") or "daily"),
         ),
-        take_profit_mode=cast(
-            RiskMode, str(candidate_config.get("take_profit_mode") or "pct")
-        ),
+        take_profit_mode=cast(RiskMode, str(candidate_config.get("take_profit_mode") or "pct")),
         take_profit_pct=_optional_float(candidate_config.get("take_profit_pct")),
         take_profit_atr_multiplier=_optional_float(
             candidate_config.get("take_profit_atr_multiplier")
         ),
-        take_profit_cooldown_days=_as_int(
-            candidate_config.get("take_profit_cooldown_days"), 0
-        ),
-        stop_loss_mode=cast(
-            RiskMode, str(candidate_config.get("stop_loss_mode") or "pct")
-        ),
+        take_profit_cooldown_days=_as_int(candidate_config.get("take_profit_cooldown_days"), 0),
+        stop_loss_mode=cast(RiskMode, str(candidate_config.get("stop_loss_mode") or "pct")),
         stop_loss_pct=_optional_float(candidate_config.get("stop_loss_pct")),
-        stop_loss_atr_multiplier=_optional_float(
-            candidate_config.get("stop_loss_atr_multiplier")
-        ),
+        stop_loss_atr_multiplier=_optional_float(candidate_config.get("stop_loss_atr_multiplier")),
         stop_loss_cooldown_days=_as_int(candidate_config.get("stop_loss_cooldown_days"), 0),
-        trailing_stop_mode=cast(
-            RiskMode, str(candidate_config.get("trailing_stop_mode") or "pct")
-        ),
+        trailing_stop_mode=cast(RiskMode, str(candidate_config.get("trailing_stop_mode") or "pct")),
         trailing_stop_pct=_optional_float(candidate_config.get("trailing_stop_pct")),
         trailing_stop_atr_multiplier=_optional_float(
             candidate_config.get("trailing_stop_atr_multiplier")
         ),
-        trailing_stop_cooldown_days=_as_int(
-            candidate_config.get("trailing_stop_cooldown_days"), 0
-        ),
+        trailing_stop_cooldown_days=_as_int(candidate_config.get("trailing_stop_cooldown_days"), 0),
         atr_period=_as_int(candidate_config.get("atr_period"), 14),
         base_config=dict(base_config),
         complexity=_as_int(payload.get("complexity"), 0),
@@ -227,9 +211,7 @@ def _mutate_rule(
             options.remove("remove")
         operation = str(_choice(rng, options, "replace"))
         if operation == "add" and len(rows) < max_items:
-            insert_at = _as_int(
-                _choice(rng, tuple(range(len(rows) + 1)), len(rows)), len(rows)
-            )
+            insert_at = _as_int(_choice(rng, tuple(range(len(rows) + 1)), len(rows)), len(rows))
             rows.insert(insert_at, _new_item(request, rng))
             changed = True
         elif operation == "remove" and len(rows) > 1:
@@ -244,9 +226,7 @@ def _mutate_rule(
         rows[index] = _new_item(request, rng)
     signals = tuple(str(value) for kind, value in rows if kind == "signal")
     conditions = tuple(
-        value
-        for kind, value in rows
-        if kind == "condition" and isinstance(value, ScreenCondition)
+        value for kind, value in rows if kind == "condition" and isinstance(value, ScreenCondition)
     )
     if not signals and not conditions:
         conditions = (_condition(request, rng, tuple(request.indicator_ids)),)
@@ -331,8 +311,7 @@ def build_refined_candidate(
         1,
         min(
             100,
-            parent.max_positions
-            + _as_int(_choice(generator, (-2, -1, 0, 1, 2), 0), 0),
+            parent.max_positions + _as_int(_choice(generator, (-2, -1, 0, 1, 2), 0), 0),
         ),
     )
     rank_order = cast(

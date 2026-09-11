@@ -186,9 +186,9 @@ class StrategyDiscoveryService:
         *,
         progress_callback: ProgressCallback | None = None,
         abort_check: Callable[[], bool] | None = None,
-    candidate_builder: Callable[
-        [DiscoveryRequest, object], StrategyCandidate
-    ] = build_random_candidate,
+        candidate_builder: Callable[
+            [DiscoveryRequest, object], StrategyCandidate
+        ] = build_random_candidate,
         result_metadata: Mapping[str, object] | None = None,
         expected_data_fingerprint: str | None = None,
     ) -> dict[str, object]:
@@ -316,9 +316,7 @@ class StrategyDiscoveryService:
                     "parent_candidate": parent_candidate.to_dict(),
                     "parent_metrics": (
                         dict(parent_metrics)
-                        if isinstance(
-                            parent_metrics := parent.get("metrics"), Mapping
-                        )
+                        if isinstance(parent_metrics := parent.get("metrics"), Mapping)
                         else {}
                     ),
                 },
@@ -796,9 +794,7 @@ def _find_parent_candidate(
     raise ValueError("父实验中不存在指定候选")
 
 
-def _validate_expected_fingerprint(
-    metrics: Mapping[str, object], expected: str | None
-) -> None:
+def _validate_expected_fingerprint(metrics: Mapping[str, object], expected: str | None) -> None:
     if not expected:
         return
     actual = metrics.get("data_fingerprint")
