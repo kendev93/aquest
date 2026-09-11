@@ -465,17 +465,12 @@ class _DuckDbStoreBase:
 
     def _backup_file(self) -> Path:
         pattern = f"{self.database_path.stem}.bak-*{self.database_path.suffix}"
-        for existing in self.database_path.parent.glob(pattern):
-            if existing.is_file():
-                existing.unlink()
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
         target = self.database_path.with_name(
             f"{self.database_path.stem}.bak-{timestamp}{self.database_path.suffix}"
         )
         shutil.copy2(self.database_path, target)
-        for backup in self.database_path.parent.glob(
-            f"{self.database_path.stem}.bak-*{self.database_path.suffix}"
-        ):
+        for backup in self.database_path.parent.glob(pattern):
             if backup == target:
                 continue
             try:

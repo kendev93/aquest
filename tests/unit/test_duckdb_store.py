@@ -175,6 +175,21 @@ def test_backup_database_creates_recoverable_copy(tmp_path: Path) -> None:
     assert backup.read_bytes() == database.read_bytes()
 
 
+def test_backup_database_retains_only_the_latest_copy(tmp_path: Path) -> None:
+    database = tmp_path / "market.duckdb"
+    store = DuckDbMarketDataStore(database)
+    store.replace_local_bars("SH", "600000", "stock", _bars())
+
+    first = store.backup_database()
+    second = store.backup_database()
+
+    backups = list(tmp_path.glob("market.bak-*.duckdb"))
+    assert first != second
+    assert not first.exists()
+    assert backups == [second]
+    assert second.read_bytes() == database.read_bytes()
+
+
 def test_schema_upgrade_backups_existing_database_before_initialization(tmp_path: Path) -> None:
     database = tmp_path / "market.duckdb"
     with duckdb.connect(str(database)) as connection:
