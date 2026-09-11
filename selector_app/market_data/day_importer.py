@@ -89,6 +89,14 @@ class LocalDayImporter:
     ) -> ImportReport:
         root = Path(vipdoc_path).expanduser().resolve()
         files = discover_day_files(root, universe)
+        if detail_callback is not None:
+            detail_callback(
+                {
+                    "phase": "local_import",
+                    "current_status": "fetching",
+                    "range_label": f"正在检查 {len(files)} 个本地文件…",
+                }
+            )
         normalized_universe = universe.strip().lower()
         scanned_markets = {"sh", "sz"} if normalized_universe == "all" else {normalized_universe}
         scope = InstrumentScope.from_values(

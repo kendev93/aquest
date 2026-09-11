@@ -259,3 +259,24 @@ def test_sync_reports_current_instrument_and_actual_date_range(tmp_path: Path) -
     }
     assert completed[-1]["range_start"] == "2026-08-20"
     assert completed[-1]["range_end"] == "2026-08-22"
+
+
+def test_discovery_reports_waiting_phase_before_requesting_security_list(
+    tmp_path: Path,
+) -> None:
+    service = TdxMarketSync(
+        store=DuckDbMarketDataStore(tmp_path / "market.duckdb"),
+        client_factory=lambda _timeout: FakeClient(),
+    )
+    details: list[dict[str, object]] = []
+
+    service.discover_instruments(
+        MarketSyncConfig(universe="all"),
+        detail_callback=details.append,
+    )
+
+    assert details[0] == {
+        "phase": "instrument_discovery",
+        "current_status": "fetching",
+        "range_label": "正在刷新沪深完整证券列表…",
+    }

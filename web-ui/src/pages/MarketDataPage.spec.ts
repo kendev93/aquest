@@ -189,6 +189,47 @@ describe('MarketDataPage', () => {
     expect(wrapper.get('[data-testid="market-sync-current"]').text()).toContain('最新 800 根日线')
   })
 
+  it('shows the security-list discovery stage while the sync is waiting', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.mocked(marketApi.createMarketDataSync).mockResolvedValue({ job_id: 'waiting-1', status: 'queued' })
+      let polls = 0
+      vi.mocked(marketApi.getMarketDataJob).mockImplementation(async () => {
+        polls += 1
+        return {
+          job_id: 'waiting-1',
+          status: polls === 1 ? 'running' : 'completed',
+          progress: polls === 1 ? 0 : 1,
+          total_candidates: polls === 1 ? 0 : 17525,
+          total_scanned: polls === 1 ? 0 : 17525,
+          errors: 0,
+          error: null,
+          phase: 'instrument_discovery',
+          metadata: {
+            current_status: 'fetching',
+            range_label: '正在刷新沪深完整证券列表…',
+          },
+          result: polls === 1 ? null : { source: 'online', updated_files: 1, written_bars: 800 },
+        }
+      })
+      const wrapper = mount(MarketDataPage)
+      await flushPromises()
+
+      const click = wrapper.get('[data-testid="market-sync-online"]').trigger('click')
+      await flushPromises()
+
+      expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('正在刷新证券列表')
+      expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('等待 TDX 返回证券列表')
+
+      await vi.advanceTimersByTimeAsync(500)
+      await flushPromises()
+      await click
+    } finally {
+      vi.clearAllTimers()
+      vi.useRealTimers()
+    }
+  })
+
   it('keeps polling a slow market-data job without a fixed attempt timeout', async () => {
     vi.useFakeTimers()
     try {

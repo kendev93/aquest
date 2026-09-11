@@ -364,8 +364,8 @@ def test_one_click_sync_imports_local_vipdoc_before_online_sync(tmp_path: Path) 
     real_importer = LocalDayImporter(store)
 
     class FakeMarketSync:
-        def discover_instruments(self, config):
-            del config
+        def discover_instruments(self, config, *, detail_callback=None):
+            del config, detail_callback
             events.append("discover")
             return {
                 "source": "online_discovery",

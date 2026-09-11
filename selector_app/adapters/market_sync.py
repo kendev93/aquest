@@ -192,11 +192,24 @@ class TdxMarketSync:
         self._client_factory = client_factory
         self._clock = clock or (lambda: datetime.now(_SHANGHAI_TZ))
 
-    def discover_instruments(self, config: MarketSyncConfig) -> InstrumentDiscoveryReport:
+    def discover_instruments(
+        self,
+        config: MarketSyncConfig,
+        *,
+        detail_callback: DetailCallback | None = None,
+    ) -> InstrumentDiscoveryReport:
         """Refresh and persist the scoped online universe without requesting bars."""
 
+        _report_detail(
+            detail_callback,
+            {
+                "phase": "instrument_discovery",
+                "current_status": "fetching",
+                "range_label": "正在刷新沪深完整证券列表…",
+            },
+        )
         selection, new_instruments, existing_instruments = self._prepare_targets(config)
-        return InstrumentDiscoveryReport(
+        report = InstrumentDiscoveryReport(
             total_candidates=len(selection.targets),
             listed_instruments=selection.listed_instruments,
             filtered_instruments=selection.filtered_instruments,
@@ -204,6 +217,15 @@ class TdxMarketSync:
             existing_instruments=existing_instruments,
             target_source=selection.target_source,
         )
+        _report_detail(
+            detail_callback,
+            {
+                "phase": "instrument_discovery",
+                "current_status": "completed",
+                "discovery_summary": report.to_dict(),
+            },
+        )
+        return report
 
     def sync(
         self,
@@ -212,6 +234,14 @@ class TdxMarketSync:
         *,
         detail_callback: DetailCallback | None = None,
     ) -> MarketSyncReport:
+        _report_detail(
+            detail_callback,
+            {
+                "phase": "instrument_discovery",
+                "current_status": "fetching",
+                "range_label": "正在刷新沪深完整证券列表…",
+            },
+        )
         selection, new_instruments, existing_instruments = self._prepare_targets(config)
         factory = self._client_factory or _default_client
         targets = selection.targets
@@ -221,6 +251,21 @@ class TdxMarketSync:
         updated_files = 0
         unchanged_files = 0
         written_bars = 0
+        _report_detail(
+            detail_callback,
+            {
+                "phase": "instrument_discovery",
+                "current_status": "completed",
+                "discovery_summary": {
+                    "total_candidates": total,
+                    "listed_instruments": selection.listed_instruments,
+                    "filtered_instruments": selection.filtered_instruments,
+                    "new_instruments": new_instruments,
+                    "existing_instruments": existing_instruments,
+                    "target_source": selection.target_source,
+                },
+            },
+        )
         if progress_callback is not None:
             progress_callback(0, total)
         if targets:

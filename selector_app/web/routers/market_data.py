@@ -53,6 +53,8 @@ class MarketSyncService(Protocol):
     def discover_instruments(
         self,
         config: MarketSyncConfig,
+        *,
+        detail_callback: DetailCallback | None = None,
     ) -> InstrumentDiscoveryReport | dict[str, object]: ...
 
     def sync(
@@ -393,7 +395,12 @@ def _create_sync_job(
                     )
                 )
 
-            discovery_result = _result_dict(_service(request).discover_instruments(config))
+            discovery_result = _result_dict(
+                _service(request).discover_instruments(
+                    config,
+                    detail_callback=lambda detail: report_progress_detail(progress, detail),
+                )
+            )
             report_progress_detail(
                 progress,
                 {

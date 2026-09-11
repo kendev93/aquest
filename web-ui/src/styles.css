@@ -143,7 +143,12 @@ input:focus, select:focus { border-color: var(--accent); }
 .sync-progress-heading, .sync-progress-stats, .sync-result-stats { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--subtle); font-size: 10px; }
 .sync-progress-heading strong { color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .sync-progress-track { margin: 8px 0; }
+.sync-progress-track.indeterminate span { width: 32% !important; animation: sync-indeterminate 1.4s ease-in-out infinite; }
+@keyframes sync-indeterminate { 0% { transform: translateX(-115%); } 100% { transform: translateX(315%); } }
 .sync-progress-stats strong { color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.sync-stage-status { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 10px; margin-top: 9px; padding: 8px 10px; border-left: 2px solid var(--warning); background: rgba(245, 158, 11, 0.08); color: var(--muted); font-size: 10px; }
+.sync-stage-status strong { color: var(--text); font-weight: 600; }
+.sync-stage-status span { color: var(--subtle); font-size: 9px; }
 .sync-current-instrument { margin-top: 9px; padding: 9px 10px; border-left: 2px solid var(--accent); background: rgba(34, 197, 94, 0.08); color: var(--muted); font-size: 10px; }
 .sync-current-heading, .sync-current-meta { display: flex; align-items: baseline; flex-wrap: wrap; gap: 7px 12px; }
 .sync-current-heading strong { min-width: 0; overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
@@ -348,6 +353,8 @@ tbody tr:hover td { background: rgba(22, 34, 58, 0.45); }
 .local-instruments-panel, .market-chart-panel { min-width: 0; padding: 22px; }
 .market-filter-form { display: grid; gap: 8px; margin-bottom: 18px; }
 .market-filter-form .secondary-button { width: 100%; margin-top: 2px; }
+.market-sync-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.market-sync-actions .primary-button, .market-sync-actions .secondary-button { width: 100%; min-height: 40px; margin-top: 0; }
 .local-instrument-list { display: grid; gap: 6px; max-height: 680px; overflow-y: auto; padding-right: 3px; }
 .local-instrument { display: grid; gap: 6px; padding: 10px 11px; border: 1px solid var(--border); border-radius: 5px; background: rgba(8, 15, 32, 0.55); color: var(--muted); cursor: pointer; text-align: left; }
 .local-instrument:hover, .local-instrument.selected { border-color: var(--accent); background: var(--accent-soft); }
@@ -429,6 +436,7 @@ tbody tr:hover td { background: rgba(22, 34, 58, 0.45); }
   .intro-note { margin-top: 20px; }
   .config-panel { display: block; padding: 18px; }
   .results-panel { padding: 18px; }
+  .market-sync-actions { grid-template-columns: 1fr; }
   .parameter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .signal-pair-grid, .backtest-metrics { grid-template-columns: 1fr 1fr; }
   .portfolio-metrics { grid-template-columns: repeat(2, 1fr); }

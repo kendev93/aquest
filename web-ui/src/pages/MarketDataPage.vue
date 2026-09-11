@@ -104,8 +104,14 @@ const autoSyncScheduleText = computed(() => {
   return `启动后检查；每 ${Math.max(Math.round(seconds / 60), 1)} 分钟检查一次，当天至少同步一次`
 })
 
+const syncPhaseText = computed(() => ({
+  instrument_discovery: '正在刷新证券列表…',
+  local_import: '正在导入本地行情…',
+  online_bars: '正在同步在线日线…',
+}[marketJob.value?.phase ?? ''] ?? null))
+
 const marketJobTitle = computed(() => {
-  if (syncLoading.value) return syncLabel.value || '后台任务进行中…'
+  if (syncLoading.value) return syncPhaseText.value || syncLabel.value || '后台任务进行中…'
   if (marketJob.value?.status === 'queued') return '等待后台任务…'
   if (marketJob.value?.status === 'running') return '后台任务进行中…'
   return '最近一次任务'
@@ -155,6 +161,17 @@ const currentSyncBarCount = computed(() => {
   const value = marketJob.value?.metadata?.bar_count
   return typeof value === 'number' && Number.isFinite(value) ? value : null
 })
+
+const discoveryWaiting = computed(() => Boolean(
+  marketJob.value?.status === 'running'
+  && marketJob.value.phase === 'instrument_discovery'
+  && !currentSyncDetail.value,
+))
+
+const marketProgressIndeterminate = computed(() => Boolean(
+  marketJob.value?.status === 'running'
+  && marketJob.value.total_candidates === 0,
+))
 
 function apiMessage(error: unknown): string {
   if (error instanceof FormulaScreenApiError) return error.message
@@ -454,14 +471,15 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
             <small class="scope-helper">类型或板块未勾选表示不限制；两者同时选择时取交集。一键同步会先刷新完整标的列表，再导入本地 vipdoc，最后在线补充日线。</small>
           </div>
           <div class="market-sync-actions">
-            <button class="primary-button" data-testid="market-import-local" type="button" :disabled="syncLoading" @click="importLocalData">{{ syncLoading ? syncLabel : '导入本地行情' }}</button>
+            <button class="primary-button" data-testid="market-import-local" type="button" :disabled="syncLoading" @click="importLocalData">{{ syncLoading ? '同步进行中…' : '导入本地行情' }}</button>
             <button class="secondary-button" data-testid="market-sync-online" type="button" :disabled="syncLoading" @click="syncOnlineData">一键同步行情</button>
           </div>
         </div>
         <div v-if="marketJob" class="sync-progress" data-testid="market-data-progress">
           <div class="sync-progress-heading"><span>{{ marketJobTitle }}</span><strong>{{ Math.round(marketJob.progress * 100) }}%</strong></div>
-          <div class="progress-track sync-progress-track"><span :style="{ width: `${Math.round(marketJob.progress * 100)}%` }"></span></div>
+          <div class="progress-track sync-progress-track" :class="{ indeterminate: marketProgressIndeterminate }"><span :style="{ width: `${Math.round(marketJob.progress * 100)}%` }"></span></div>
           <div class="sync-progress-stats"><span>已处理 <strong>{{ marketJob.total_scanned }}</strong> / {{ marketJob.total_candidates }}</span><span>worker <strong>{{ marketJob.worker_count ?? 8 }}</strong></span><span :class="{ negative: marketJob.errors > 0 }">错误 <strong>{{ marketJob.errors }}</strong></span></div>
+          <div v-if="discoveryWaiting" class="sync-stage-status" data-testid="market-sync-stage"><strong>正在刷新证券列表</strong><span>等待 TDX 返回证券列表…</span></div>
           <div v-if="currentSyncDetail" class="sync-current-instrument" data-testid="market-sync-current">
             <div class="sync-current-heading"><span>{{ currentSyncDetailLabel }}</span><strong>{{ currentSyncInstrumentText }}</strong><span>{{ currentSyncStatusText }}</span></div>
             <div class="sync-current-meta"><span>同步区间 <strong>{{ currentSyncRangeText }}</strong></span><span v-if="currentSyncBarCount !== null">{{ currentSyncBarCount }} 根日线</span></div>

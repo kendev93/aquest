@@ -156,3 +156,20 @@ def test_importer_decodes_independent_day_files_with_eight_workers(
     assert report.imported_files == 16
     assert report.errors == 0
     assert 1 < max_active <= 8
+
+
+def test_importer_reports_local_phase_before_processing_files(tmp_path: Path) -> None:
+    vipdoc = tmp_path / "vipdoc"
+    _append_day(vipdoc / "sh" / "lday" / "sh600000.day", 20240102)
+    details: list[dict[str, object]] = []
+
+    LocalDayImporter(DuckDbMarketDataStore(tmp_path / "market.duckdb")).import_vipdoc(
+        vipdoc,
+        detail_callback=details.append,
+    )
+
+    assert details[0] == {
+        "phase": "local_import",
+        "current_status": "fetching",
+        "range_label": "正在检查 1 个本地文件…",
+    }
