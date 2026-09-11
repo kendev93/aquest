@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -46,6 +47,10 @@ def _service(request: Request) -> StrategyDiscoveryServiceLike:
 
 def _store(request: Request) -> DuckDbMarketDataStore:
     return cast(DuckDbMarketDataStore, request.app.state.market_data_store)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _state_or_404(job_id: str, request: Request) -> JobState:
@@ -93,6 +98,8 @@ def create_strategy_discovery(
     job_id_holder = {"value": ""}
 
     def run_discovery(progress: Callable[[int, int], None]) -> dict[str, object]:
+        started_at = _utc_now()
+
         def report_progress(
             current: int,
             total: int,
@@ -120,6 +127,9 @@ def create_strategy_discovery(
                 abort_check=lambda: _runner(request).is_cancel_requested(job_id_holder["value"]),
             )
             result = dict(result)
+            finished_at = _utc_now()
+            result["started_at"] = started_at.isoformat()
+            result["finished_at"] = finished_at.isoformat()
             history_id = job_id_holder["value"]
             search_metadata = result.get("search_metadata")
             if isinstance(search_metadata, dict):

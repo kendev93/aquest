@@ -5,6 +5,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.screening.models import ScanReport
 from selector_app.web.app import create_app
 
@@ -47,7 +48,11 @@ def test_strategy_fitness_job_can_be_created_and_results_are_available(tmp_path:
 
     (tmp_path / "vipdoc").mkdir()
     with TestClient(
-        create_app(engine=EmptyEngine(), strategy_fitness_service=FakeFitnessService())
+        create_app(
+            engine=EmptyEngine(),
+            strategy_fitness_service=FakeFitnessService(),
+            market_data_store=DuckDbMarketDataStore(tmp_path / "market.duckdb"),
+        )
     ) as client:
         response = client.post(
             "/api/v1/strategy-fitness",
@@ -67,8 +72,15 @@ def test_strategy_fitness_job_can_be_created_and_results_are_available(tmp_path:
         job_id = response.json()["data"]["job_id"]
         state = wait_for_done(client, job_id)
         result_response = client.get(f"/api/v1/strategy-fitness/{job_id}/results")
+        history_response = client.get("/api/v1/strategy-fitness/history")
+        history_detail = client.get(f"/api/v1/strategy-fitness/history/{job_id}")
 
     assert state["status"] == "completed"
     assert state["result"] is None
     assert result_response.status_code == 200
     assert result_response.json()["data"]["train_end_date"] == "2024-01-03"
+    assert history_response.status_code == 200
+    assert history_response.json()["data"][0]["history_id"] == job_id
+    assert history_response.json()["data"][0]["backtest_type"] == "strategy_fitness"
+    assert history_detail.status_code == 200
+    assert history_detail.json()["data"]["result"]["train_end_date"] == "2024-01-03"

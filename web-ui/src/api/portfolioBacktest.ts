@@ -1,5 +1,7 @@
 import { FormulaScreenApiError } from './formulaScreen'
 import type {
+  BacktestHistoryRecord,
+  BacktestHistorySummary,
   PortfolioBacktestJobState,
   PortfolioBacktestPayload,
   PortfolioBacktestResult,
@@ -41,5 +43,22 @@ export async function getPortfolioBacktest(jobId: string): Promise<PortfolioBack
 
 export async function getPortfolioBacktestResults(jobId: string): Promise<PortfolioBacktestResult> {
   const response = await request<{ data: PortfolioBacktestResult }>(`${API_BASE}/${encodeURIComponent(jobId)}/results`)
+  return response.data
+}
+
+export async function fetchPortfolioBacktestHistory(): Promise<BacktestHistorySummary[]> {
+  const response = await request<{ data: BacktestHistorySummary[] }>(`${API_BASE}/history`)
+  return response.data
+}
+
+export async function getPortfolioBacktestHistory(historyId: string): Promise<BacktestHistoryRecord<PortfolioBacktestResult>> {
+  const response = await request<{ data: BacktestHistoryRecord<PortfolioBacktestResult> }>(`${API_BASE}/history/${encodeURIComponent(historyId)}`)
+  return response.data
+}
+
+export async function deletePortfolioBacktestHistory(historyId: string): Promise<{ deleted: boolean }> {
+  const response = await request<{ data: { deleted: boolean } }>(`${API_BASE}/history/${encodeURIComponent(historyId)}`, {
+    method: 'DELETE',
+  })
   return response.data
 }

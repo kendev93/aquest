@@ -84,6 +84,8 @@ def test_strategy_discovery_api_starts_reports_and_reads_history(tmp_path) -> No
     assert history.status_code == 200
     assert history.json()["data"][0]["history_id"]
     assert history.json()["data"][0]["duration_seconds"] == 0.01
+    assert history.json()["data"][0]["started_at"]
+    assert history.json()["data"][0]["finished_at"]
 
 
 def test_strategy_discovery_api_uses_all_completed_local_dates_when_omitted(tmp_path) -> None:

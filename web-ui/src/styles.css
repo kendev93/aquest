@@ -290,6 +290,11 @@ tbody tr:hover td { background: rgba(22, 34, 58, 0.45); }
 .discovery-detail p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .discovery-detail pre { max-height: 360px; overflow: auto; margin: 0; padding: 11px; border: 1px solid var(--border); background: var(--surface); color: #d9f99d; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
 .discovery-history-panel { margin-top: 20px; padding: 22px; }
+.backtest-history-panel { margin-top: 20px; padding: 22px; }
+.backtest-history-panel .table-wrap table { min-width: 900px; }
+.backtest-history-panel .history-id { display: block; margin-top: 4px; color: var(--subtle); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9px; }
+.backtest-history-panel .history-actions { white-space: nowrap; }
+.backtest-history-panel .danger-link { margin-left: 10px; color: var(--danger); }
 .fitness-grid { grid-template-columns: minmax(350px, 430px) minmax(0, 1fr); }
 .fitness-fields-top { margin-top: 13px; }
 .field-static { min-height: 40px; margin: 0; padding: 10px 11px; border: 1px solid var(--border); background: var(--surface-raised); color: var(--subtle); font-size: 10px; line-height: 1.4; }

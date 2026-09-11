@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol, cast
@@ -9,6 +10,7 @@ from typing import Protocol, cast
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
+from selector_app.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
 from selector_app.portfolio_backtest.models import (
     PortfolioBacktestConfig,
     PortfolioBacktestReport,
@@ -19,6 +21,7 @@ from selector_app.portfolio_backtest.service import (
 )
 from selector_app.screening.jobs import JobState, ScreenJobRunner, TaskUserError
 
+from ..backtest_history import save_completed_backtest_history, utc_now
 from ..schemas import PortfolioBacktestRequest
 
 router = APIRouter(prefix="/portfolio-backtests", tags=["portfolio-backtests"])
@@ -43,6 +46,10 @@ def _service(request: Request) -> PortfolioBacktestServiceLike:
     )
 
 
+def _store(request: Request) -> DuckDbMarketDataStore:
+    return cast(DuckDbMarketDataStore, request.app.state.market_data_store)
+
+
 def _state_or_404(job_id: str, request: Request) -> JobState:
     state = _runner(request).get(job_id)
     if state is None or state.description != "组合回测":
@@ -60,15 +67,33 @@ def create_portfolio_backtest(
             if not Path(payload.universe_file).expanduser().is_file():
                 raise ValueError(f"自定义股票列表文件不存在: {payload.universe_file}")
         config = payload.to_config()
+        request_snapshot = cast(dict[str, object], payload.model_dump(mode="json"))
+        job_id = uuid.uuid4().hex
 
         def run_backtest(progress: Callable[[int, int], None]) -> dict[str, object]:
+            started_at = utc_now()
             try:
                 result = _service(request).run(config, progress)
             except ValueError as exc:
                 raise TaskUserError(str(exc)) from exc
-            return result.to_dict() if isinstance(result, PortfolioBacktestReport) else result
+            result_payload = (
+                result.to_dict() if isinstance(result, PortfolioBacktestReport) else dict(result)
+            )
+            finished_at = utc_now()
+            save_completed_backtest_history(
+                _store(request),
+                history_id=job_id,
+                backtest_type="portfolio",
+                request=request_snapshot,
+                result=result_payload,
+                started_at=started_at,
+                finished_at=finished_at,
+            )
+            return result_payload
 
-        job_id = _runner(request).submit_callable(run_backtest, description="组合回测")
+        job_id = _runner(request).submit_callable(
+            run_backtest, description="组合回测", job_id=job_id
+        )
     except ValueError as exc:
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -80,6 +105,37 @@ def create_portfolio_backtest(
         status_code=status.HTTP_202_ACCEPTED,
         content={"data": {"job_id": job_id, "status": "queued"}},
     )
+
+
+@router.get("/history")
+def portfolio_backtest_history(request: Request) -> dict[str, object]:
+    try:
+        return {"data": _store(request).list_backtest_history("portfolio")}
+    except (MarketDataStoreError, OSError) as exc:
+        raise HTTPException(status_code=503, detail="组合回测历史暂不可用") from exc
+
+
+@router.get("/history/{history_id}")
+def portfolio_backtest_history_detail(history_id: str, request: Request) -> dict[str, object]:
+    try:
+        record = _store(request).read_backtest_history(history_id)
+    except (MarketDataStoreError, OSError) as exc:
+        raise HTTPException(status_code=503, detail="组合回测历史暂不可用") from exc
+    if record is None or record.get("backtest_type") != "portfolio":
+        raise HTTPException(status_code=404, detail="组合回测历史不存在")
+    return {"data": record}
+
+
+@router.delete("/history/{history_id}")
+def delete_portfolio_backtest_history(history_id: str, request: Request) -> dict[str, object]:
+    try:
+        record = _store(request).read_backtest_history(history_id)
+        if record is None or record.get("backtest_type") != "portfolio":
+            return {"data": {"deleted": False}}
+        deleted = _store(request).delete_backtest_history(history_id)
+    except (MarketDataStoreError, OSError, RuntimeError) as exc:
+        raise HTTPException(status_code=503, detail="组合回测历史暂不可用") from exc
+    return {"data": {"deleted": deleted}}
 
 
 @router.get("/{job_id}")

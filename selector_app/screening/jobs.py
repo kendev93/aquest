@@ -170,21 +170,24 @@ class ScreenJobRunner:
         *,
         description: str = "",
         worker_count: int | None = MAX_WORKERS,
+        job_id: str | None = None,
     ) -> str:
         """Run a non-screening task on the same lifecycle/executor infrastructure."""
 
-        job_id = uuid.uuid4().hex
+        resolved_job_id = job_id.strip() if job_id is not None else uuid.uuid4().hex
+        if not resolved_job_id:
+            raise ValueError("任务 ID 不能为空")
         with self._lock:
             if self._shutdown:
                 raise RuntimeError("任务执行器已关闭")
-            self._jobs[job_id] = JobState(
-                job_id=job_id,
+            self._jobs[resolved_job_id] = JobState(
+                job_id=resolved_job_id,
                 description=description,
                 worker_count=worker_count,
             )
-            self._executor.submit(self._run_callable, job_id, func)
+            self._executor.submit(self._run_callable, resolved_job_id, func)
             self._evict_if_needed_locked()
-        return job_id
+        return resolved_job_id
 
     def _run_callable(self, job_id: str, func: GenericTask) -> None:
         state = self.get(job_id)

@@ -1,10 +1,19 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 
-import { createPortfolioBacktest, getPortfolioBacktest, getPortfolioBacktestResults } from '../api/portfolioBacktest'
+import {
+  createPortfolioBacktest,
+  deletePortfolioBacktestHistory,
+  fetchPortfolioBacktestHistory,
+  getPortfolioBacktest,
+  getPortfolioBacktestHistory,
+  getPortfolioBacktestResults,
+} from '../api/portfolioBacktest'
 import { FormulaScreenApiError, fetchMetadata, parseFormula } from '../api/formulaScreen'
+import BacktestHistoryPanel from '../components/BacktestHistoryPanel.vue'
 import RuleGroupEditor from '../components/RuleGroupEditor.vue'
 import type {
+  BacktestHistorySummary,
   BacktestExecution,
   CustomFormulaMetadata,
   FormulaScreenMetadata,
@@ -153,6 +162,8 @@ const customParseError = ref('')
 const showAdvanced = ref(false)
 const job = ref<PortfolioBacktestJobState | null>(null)
 const result = ref<PortfolioBacktestResult | null>(null)
+const history = ref<BacktestHistorySummary[]>([])
+const historyLoading = ref(false)
 const appliedDiscoveryCandidate = ref<AppliedDiscoveryCandidate | null>(null)
 const replayComparison = ref<ReplayComparison | null>(null)
 
@@ -595,6 +606,7 @@ async function submit(): Promise<void> {
         result.value = await getPortfolioBacktestResults(created.job_id)
         await compareAppliedCandidate(result.value)
         message.value = `组合回测完成：${result.value.trades.length} 笔成交，区间 ${result.value.start_date} 至 ${result.value.end_date}。`
+        await loadHistory()
         return
       }
       if (state.status === 'failed') {
@@ -607,6 +619,38 @@ async function submit(): Promise<void> {
     message.value = apiMessage(error)
   } finally {
     loading.value = false
+  }
+}
+
+async function loadHistory(): Promise<void> {
+  historyLoading.value = true
+  try {
+    history.value = await fetchPortfolioBacktestHistory()
+  } catch (error) {
+    message.value = apiMessage(error)
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+async function loadHistoryDetail(historyId: string): Promise<void> {
+  try {
+    const loaded = await getPortfolioBacktestHistory(historyId)
+    result.value = loaded.result
+    replayComparison.value = null
+    message.value = `已加载历史组合回测 ${historyId}。`
+  } catch (error) {
+    message.value = apiMessage(error)
+  }
+}
+
+async function removeHistory(historyId: string): Promise<void> {
+  try {
+    await deletePortfolioBacktestHistory(historyId)
+    await loadHistory()
+    message.value = '历史组合回测已删除。'
+  } catch (error) {
+    message.value = apiMessage(error)
   }
 }
 
@@ -660,6 +704,7 @@ onMounted(async () => {
         sessionStorage.removeItem(DISCOVERY_APPLY_META_KEY)
       }
     }
+    await loadHistory()
   } catch (error) {
     message.value = apiMessage(error)
   }
@@ -867,6 +912,17 @@ watch(() => form.formulaText, (value) => {
           </template>
         </section>
       </div>
+
+      <BacktestHistoryPanel
+        :items="history"
+        :loading="historyLoading"
+        testid="portfolio-history"
+        title="历史组合回测"
+        empty-text="暂无历史组合回测。"
+        @refresh="loadHistory"
+        @load="loadHistoryDetail"
+        @remove="removeHistory"
+      />
     </main>
   </div>
 </template>

@@ -1,6 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { createBacktest, getBacktest, getBacktestResults } from './backtest'
+import {
+  createBacktest,
+  deleteBacktestHistory,
+  fetchBacktestHistory,
+  getBacktest,
+  getBacktestHistory,
+  getBacktestResults,
+} from './backtest'
 
 describe('backtest API', () => {
   beforeEach(() => {
@@ -34,5 +41,21 @@ describe('backtest API', () => {
       message: '请求失败，请检查回测配置后重试。',
       status: 500,
     })
+  })
+
+  it('reads and deletes persisted backtest history', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ history_id: 'h-1' }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { history_id: 'h-1', result: { code: '600000' } } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { deleted: true } }), { status: 200 }))
+
+    await expect(fetchBacktestHistory()).resolves.toEqual([{ history_id: 'h-1' }])
+    await expect(getBacktestHistory('h-1')).resolves.toEqual({ history_id: 'h-1', result: { code: '600000' } })
+    await expect(deleteBacktestHistory('h-1')).resolves.toEqual({ deleted: true })
+    expect(fetchMock.mock.calls.map(([url, init]) => [url, init?.method ?? 'GET'])).toEqual([
+      ['/api/v1/backtests/history', 'GET'],
+      ['/api/v1/backtests/history/h-1', 'GET'],
+      ['/api/v1/backtests/history/h-1', 'DELETE'],
+    ])
   })
 })

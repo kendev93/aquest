@@ -15,7 +15,15 @@ vi.mock('../api/formulaScreen', async () => {
 
 vi.mock('../api/strategyFitness', async () => {
   const actual = await vi.importActual<typeof import('../api/strategyFitness')>('../api/strategyFitness')
-  return { ...actual, createStrategyFitness: vi.fn(), getStrategyFitness: vi.fn(), getStrategyFitnessResults: vi.fn() }
+  return {
+    ...actual,
+    createStrategyFitness: vi.fn(),
+    getStrategyFitness: vi.fn(),
+    getStrategyFitnessResults: vi.fn(),
+    fetchStrategyFitnessHistory: vi.fn(),
+    getStrategyFitnessHistory: vi.fn(),
+    deleteStrategyFitnessHistory: vi.fn(),
+  }
 })
 
 const metadata: FormulaScreenMetadata = {
@@ -78,6 +86,7 @@ describe('StrategyFitnessPage', () => {
       errors: 0, error: null, result: null,
     })
     vi.mocked(fitnessApi.getStrategyFitnessResults).mockResolvedValue(report)
+    vi.mocked(fitnessApi.fetchStrategyFitnessHistory).mockResolvedValue([])
   })
 
   it('submits the strategy and renders compatibility scores with three phases', async () => {

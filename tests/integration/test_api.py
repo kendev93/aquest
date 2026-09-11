@@ -530,12 +530,20 @@ def test_backtest_default_service_reads_day_file_and_serializes_result(tmp_path:
         job_id = response.json()["data"]["job_id"]
         state = wait_for_done(client, job_id, "/api/v1/backtests")
         results_response = client.get(f"/api/v1/backtests/{job_id}/results")
+        history_response = client.get("/api/v1/backtests/history")
+        history_detail = client.get(f"/api/v1/backtests/history/{job_id}")
 
     assert state["status"] == "completed"
     payload = results_response.json()["data"]
     assert payload["code"] == "600000"
     assert payload["trades"][0]["date"] == "2024-01-03"
     assert payload["equity_curve"][-1]["date"] == "2024-01-06"
+    assert history_response.status_code == 200
+    assert history_response.json()["data"][0]["history_id"] == job_id
+    assert history_response.json()["data"][0]["started_at"]
+    assert history_response.json()["data"][0]["finished_at"]
+    assert history_detail.status_code == 200
+    assert history_detail.json()["data"]["request"]["code"] == "600000"
 
 
 def test_backtest_rejects_same_buy_and_sell_signal(tmp_path: Path) -> None:
@@ -619,6 +627,7 @@ def test_portfolio_backtest_job_can_be_created_and_polled(tmp_path: Path) -> Non
         create_app(
             engine=EmptyEngine(),
             portfolio_backtest_service=FakePortfolioService(),
+            market_data_store=DuckDbMarketDataStore(tmp_path / "market.duckdb"),
         )
     ) as client:
         response = client.post(
@@ -642,11 +651,18 @@ def test_portfolio_backtest_job_can_be_created_and_polled(tmp_path: Path) -> Non
         job_id = response.json()["data"]["job_id"]
         state = wait_for_done(client, job_id, "/api/v1/portfolio-backtests")
         results_response = client.get(f"/api/v1/portfolio-backtests/{job_id}/results")
+        history_response = client.get("/api/v1/portfolio-backtests/history")
+        history_detail = client.get(f"/api/v1/portfolio-backtests/history/{job_id}")
 
     assert state["status"] == "completed"
     assert state["result"] is None
     assert results_response.status_code == 200
     assert results_response.json()["data"]["max_positions"] == 2
+    assert history_response.status_code == 200
+    assert history_response.json()["data"][0]["history_id"] == job_id
+    assert history_response.json()["data"][0]["backtest_type"] == "portfolio"
+    assert history_detail.status_code == 200
+    assert history_detail.json()["data"]["result"]["max_positions"] == 2
 
 
 def test_portfolio_backtest_requires_a_sell_rule(tmp_path: Path) -> None:

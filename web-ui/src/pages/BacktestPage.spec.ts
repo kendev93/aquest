@@ -14,7 +14,15 @@ vi.mock('../api/formulaScreen', async () => {
 
 vi.mock('../api/backtest', async () => {
   const actual = await vi.importActual<typeof import('../api/backtest')>('../api/backtest')
-  return { ...actual, createBacktest: vi.fn(), getBacktest: vi.fn(), getBacktestResults: vi.fn() }
+  return {
+    ...actual,
+    createBacktest: vi.fn(),
+    getBacktest: vi.fn(),
+    getBacktestResults: vi.fn(),
+    fetchBacktestHistory: vi.fn(),
+    getBacktestHistory: vi.fn(),
+    deleteBacktestHistory: vi.fn(),
+  }
 })
 
 const metadata: FormulaScreenMetadata = {
@@ -57,6 +65,7 @@ describe('BacktestPage', () => {
       trades: [{ date: '2024-01-03', direction: 'BUY', size: 800, price: 12, commission: 0, slippage: 0, pnl: 0, rejected: false }],
       positions: [], diagnostic: null,
     })
+    vi.mocked(backtestApi.fetchBacktestHistory).mockResolvedValue([])
   })
 
   it('submits a single-stock backtest and renders performance and trades', async () => {

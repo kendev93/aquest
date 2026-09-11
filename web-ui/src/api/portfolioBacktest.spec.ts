@@ -1,6 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { createPortfolioBacktest, getPortfolioBacktest, getPortfolioBacktestResults } from './portfolioBacktest'
+import {
+  createPortfolioBacktest,
+  deletePortfolioBacktestHistory,
+  fetchPortfolioBacktestHistory,
+  getPortfolioBacktest,
+  getPortfolioBacktestHistory,
+  getPortfolioBacktestResults,
+} from './portfolioBacktest'
 
 describe('portfolio backtest API', () => {
   beforeEach(() => {
@@ -41,5 +48,21 @@ describe('portfolio backtest API', () => {
       message: '请求失败，请检查组合回测配置后重试。',
       status: 500,
     })
+  })
+
+  it('reads and deletes persisted portfolio history', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ history_id: 'p-1' }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { history_id: 'p-1', result: { max_positions: 3 } } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { deleted: true } }), { status: 200 }))
+
+    await expect(fetchPortfolioBacktestHistory()).resolves.toEqual([{ history_id: 'p-1' }])
+    await expect(getPortfolioBacktestHistory('p-1')).resolves.toEqual({ history_id: 'p-1', result: { max_positions: 3 } })
+    await expect(deletePortfolioBacktestHistory('p-1')).resolves.toEqual({ deleted: true })
+    expect(fetchMock.mock.calls.map(([url, init]) => [url, init?.method ?? 'GET'])).toEqual([
+      ['/api/v1/portfolio-backtests/history', 'GET'],
+      ['/api/v1/portfolio-backtests/history/p-1', 'GET'],
+      ['/api/v1/portfolio-backtests/history/p-1', 'DELETE'],
+    ])
   })
 })

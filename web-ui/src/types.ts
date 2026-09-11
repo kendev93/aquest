@@ -378,6 +378,23 @@ export interface BacktestJobState {
   result: BacktestResult | null
 }
 
+export type BacktestHistoryType = 'single_stock' | 'portfolio' | 'strategy_fitness'
+
+export interface BacktestHistorySummary {
+  history_id: string
+  backtest_type: BacktestHistoryType
+  created_at: string
+  started_at: string
+  finished_at: string
+  duration_seconds: number
+  summary: Record<string, unknown>
+}
+
+export interface BacktestHistoryRecord<T = Record<string, unknown>> extends BacktestHistorySummary {
+  request: Record<string, unknown>
+  result: T
+}
+
 export interface PortfolioBacktestPayload {
   universe: Universe
   universe_file?: string | null
@@ -593,6 +610,8 @@ export interface StrategyDiscoveryResult {
   algorithm_metadata?: Record<string, unknown>
   data_fingerprint?: string
   duration_seconds?: number
+  started_at?: string
+  finished_at?: string
 }
 
 export type FitnessLabel = 'strong' | 'watch' | 'weak' | 'insufficient'

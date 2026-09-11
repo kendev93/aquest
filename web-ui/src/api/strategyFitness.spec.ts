@@ -1,6 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { createStrategyFitness, getStrategyFitness, getStrategyFitnessResults } from './strategyFitness'
+import {
+  createStrategyFitness,
+  deleteStrategyFitnessHistory,
+  fetchStrategyFitnessHistory,
+  getStrategyFitness,
+  getStrategyFitnessHistory,
+  getStrategyFitnessResults,
+} from './strategyFitness'
 
 describe('strategy fitness API', () => {
   beforeEach(() => {
@@ -37,5 +44,21 @@ describe('strategy fitness API', () => {
       message: '请求失败，请检查策略适配性配置后重试。',
       status: 500,
     })
+  })
+
+  it('reads and deletes persisted fitness history', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ history_id: 'f-1' }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { history_id: 'f-1', result: { processed: 2 } } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { deleted: true } }), { status: 200 }))
+
+    await expect(fetchStrategyFitnessHistory()).resolves.toEqual([{ history_id: 'f-1' }])
+    await expect(getStrategyFitnessHistory('f-1')).resolves.toEqual({ history_id: 'f-1', result: { processed: 2 } })
+    await expect(deleteStrategyFitnessHistory('f-1')).resolves.toEqual({ deleted: true })
+    expect(fetchMock.mock.calls.map(([url, init]) => [url, init?.method ?? 'GET'])).toEqual([
+      ['/api/v1/strategy-fitness/history', 'GET'],
+      ['/api/v1/strategy-fitness/history/f-1', 'GET'],
+      ['/api/v1/strategy-fitness/history/f-1', 'DELETE'],
+    ])
   })
 })

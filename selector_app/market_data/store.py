@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
 import time
 from collections.abc import Iterable, Mapping
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
 from typing import cast
@@ -27,9 +28,11 @@ from .models import (
     StockRef,
 )
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 SCREEN_HISTORY_LIMIT = 10
 STRATEGY_DISCOVERY_HISTORY_LIMIT = 20
+BACKTEST_HISTORY_LIMIT = 20
+_BACKTEST_HISTORY_TYPES = {"single_stock", "portfolio", "strategy_fitness"}
 _APP_DATA_DIR_NAME = ".indicator-lab"
 _BAR_COLUMNS = [
     "market",
@@ -87,6 +90,66 @@ def _date_text(value: object) -> str | None:
 
 def _timestamp_text(value: object) -> str | None:
     return None if value is None else str(value)
+
+
+def _normalize_timestamp(value: object | None, fallback: datetime) -> datetime:
+    """Normalize API or DuckDB timestamps to naive UTC datetimes."""
+
+    if value is None:
+        timestamp = fallback
+    elif isinstance(value, datetime):
+        timestamp = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            timestamp = fallback
+        else:
+            try:
+                timestamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ValueError("历史时间格式无效") from exc
+    else:
+        raise ValueError("历史时间格式无效")
+    if timestamp.tzinfo is not None:
+        return timestamp.astimezone(timezone.utc).replace(tzinfo=None)
+    return timestamp
+
+
+def _validate_backtest_history_type(backtest_type: str) -> None:
+    if backtest_type not in _BACKTEST_HISTORY_TYPES:
+        raise ValueError("回测历史类型无效")
+
+
+def _backtest_history_summary(result: Mapping[str, object]) -> dict[str, object]:
+    """Extract a small list-friendly summary without duplicating full results."""
+
+    summary: dict[str, object] = {}
+    for key in (
+        "market",
+        "code",
+        "universe",
+        "bars",
+        "start_date",
+        "end_date",
+        "train_end_date",
+        "validation_end_date",
+        "total_candidates",
+        "processed",
+        "skipped",
+        "errors",
+    ):
+        if key in result:
+            summary[key] = result[key]
+    performance = result.get("performance")
+    if isinstance(performance, Mapping):
+        summary["performance"] = dict(performance)
+    trades = result.get("trades")
+    if isinstance(trades, (list, tuple)):
+        summary["trade_count"] = len(trades)
+    fitness_results = result.get("results")
+    if isinstance(fitness_results, (list, tuple)):
+        summary["result_count"] = len(fitness_results)
+    return summary
 
 
 def _clean_name(value: object) -> str | None:
@@ -311,6 +374,8 @@ class DuckDbMarketDataStore:
                 CREATE TABLE IF NOT EXISTS strategy_discovery_history (
                     history_id VARCHAR PRIMARY KEY,
                     created_at TIMESTAMP NOT NULL,
+                    started_at TIMESTAMP NOT NULL,
+                    finished_at TIMESTAMP NOT NULL,
                     request_json VARCHAR NOT NULL,
                     search_metadata_json VARCHAR NOT NULL,
                     validation_metadata_json VARCHAR NOT NULL,
@@ -320,6 +385,21 @@ class DuckDbMarketDataStore:
                     results_by_return_json VARCHAR NOT NULL,
                     total_trials BIGINT NOT NULL,
                     duration_seconds DOUBLE NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS backtest_history (
+                    history_id VARCHAR PRIMARY KEY,
+                    backtest_type VARCHAR NOT NULL,
+                    created_at TIMESTAMP NOT NULL,
+                    started_at TIMESTAMP NOT NULL,
+                    finished_at TIMESTAMP NOT NULL,
+                    duration_seconds DOUBLE NOT NULL,
+                    request_json VARCHAR NOT NULL,
+                    result_json VARCHAR NOT NULL,
+                    summary_json VARCHAR NOT NULL
                 )
                 """
             )
@@ -385,6 +465,31 @@ class DuckDbMarketDataStore:
             }
             if "name" not in columns:
                 connection.execute("ALTER TABLE instruments ADD COLUMN name VARCHAR")
+        if version < 8 and "strategy_discovery_history" in tables:
+            columns = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = 'main' AND table_name = 'strategy_discovery_history'"
+                ).fetchall()
+            }
+            if "started_at" not in columns:
+                connection.execute(
+                    "ALTER TABLE strategy_discovery_history ADD COLUMN started_at TIMESTAMP"
+                )
+            if "finished_at" not in columns:
+                connection.execute(
+                    "ALTER TABLE strategy_discovery_history ADD COLUMN finished_at TIMESTAMP"
+                )
+            connection.execute(
+                "UPDATE strategy_discovery_history "
+                "SET started_at = created_at WHERE started_at IS NULL"
+            )
+            connection.execute(
+                "UPDATE strategy_discovery_history "
+                "SET finished_at = created_at + duration_seconds * INTERVAL '1 second' "
+                "WHERE finished_at IS NULL"
+            )
 
     def _schema_version_on_disk(self) -> int | None:
         if not self.database_path.exists():
@@ -1192,6 +1297,8 @@ class DuckDbMarketDataStore:
         result: Mapping[str, object],
         *,
         created_at: datetime | None = None,
+        started_at: datetime | str | None = None,
+        finished_at: datetime | str | None = None,
     ) -> None:
         """Persist one completed strategy-discovery run and retain the newest 20."""
 
@@ -1239,22 +1346,39 @@ class DuckDbMarketDataStore:
             )
         except (TypeError, ValueError) as exc:
             raise ValueError("策略实验历史指标格式无效") from exc
-        created = created_at or _now()
-        if created.tzinfo is not None:
-            created = created.astimezone(timezone.utc).replace(tzinfo=None)
+        created_hint: object | None = created_at
+        if created_hint is None:
+            created_hint = payload.get("created_at") or started_at or payload.get("started_at")
+        created = _normalize_timestamp(created_hint, _now())
+        started = _normalize_timestamp(
+            started_at if started_at is not None else payload.get("started_at"),
+            created,
+        )
+        finished_hint: object | None = (
+            finished_at if finished_at is not None else payload.get("finished_at")
+        )
+        finished = _normalize_timestamp(
+            finished_hint,
+            started + timedelta(seconds=duration),
+        )
+        if finished < started:
+            raise ValueError("策略实验结束时间不能早于开始时间")
         with _WRITE_LOCK, self._connect() as connection:
             connection.execute("BEGIN")
             try:
                 connection.execute(
                     """
                     INSERT INTO strategy_discovery_history (
-                        history_id, created_at, request_json, search_metadata_json,
+                        history_id, created_at, started_at, finished_at,
+                        request_json, search_metadata_json,
                         validation_metadata_json, algorithm_metadata_json, data_fingerprint,
                         results_by_sharpe_json, results_by_return_json, total_trials,
                         duration_seconds
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT (history_id) DO UPDATE SET
                         created_at = excluded.created_at,
+                        started_at = excluded.started_at,
+                        finished_at = excluded.finished_at,
                         request_json = excluded.request_json,
                         search_metadata_json = excluded.search_metadata_json,
                         validation_metadata_json = excluded.validation_metadata_json,
@@ -1268,6 +1392,8 @@ class DuckDbMarketDataStore:
                     [
                         normalized_id,
                         created,
+                        started,
+                        finished,
                         json.dumps(dict(request), ensure_ascii=False, separators=(",", ":")),
                         json.dumps(
                             dict(search_metadata), ensure_ascii=False, separators=(",", ":")
@@ -1309,7 +1435,7 @@ class DuckDbMarketDataStore:
             rows = connection.execute(
                 """
                 SELECT history_id, created_at, data_fingerprint,
-                       total_trials, duration_seconds,
+                       started_at, finished_at, total_trials, duration_seconds,
                        results_by_sharpe_json, results_by_return_json
                 FROM strategy_discovery_history
                 ORDER BY created_at DESC, history_id DESC
@@ -1320,8 +1446,8 @@ class DuckDbMarketDataStore:
         summaries: list[dict[str, object]] = []
         for row in rows:
             try:
-                sharpe = json.loads(str(row[5]))
-                returns = json.loads(str(row[6]))
+                sharpe = json.loads(str(row[7]))
+                returns = json.loads(str(row[8]))
             except json.JSONDecodeError as exc:
                 raise MarketDataStoreError("策略实验历史内容损坏") from exc
             summaries.append(
@@ -1329,8 +1455,10 @@ class DuckDbMarketDataStore:
                     "history_id": str(row[0]),
                     "created_at": str(row[1]),
                     "data_fingerprint": str(row[2]),
-                    "total_trials": int(row[3]),
-                    "duration_seconds": float(row[4]),
+                    "started_at": str(row[3]),
+                    "finished_at": str(row[4]),
+                    "total_trials": int(row[5]),
+                    "duration_seconds": float(row[6]),
                     "best_sharpe": sharpe[0] if isinstance(sharpe, list) and sharpe else None,
                     "best_return": returns[0] if isinstance(returns, list) and returns else None,
                 }
@@ -1343,10 +1471,10 @@ class DuckDbMarketDataStore:
         with self._connect(read_only=True) as connection:
             row = connection.execute(
                 """
-                SELECT history_id, created_at, request_json, search_metadata_json,
-                       validation_metadata_json, algorithm_metadata_json, data_fingerprint,
-                       results_by_sharpe_json, results_by_return_json, total_trials,
-                       duration_seconds
+                SELECT history_id, created_at, started_at, finished_at,
+                       request_json, search_metadata_json, validation_metadata_json,
+                       algorithm_metadata_json, data_fingerprint, results_by_sharpe_json,
+                       results_by_return_json, total_trials, duration_seconds
                 FROM strategy_discovery_history
                 WHERE history_id = ?
                 """,
@@ -1355,12 +1483,12 @@ class DuckDbMarketDataStore:
         if row is None:
             return None
         try:
-            request = json.loads(str(row[2]))
-            search_metadata = json.loads(str(row[3]))
-            validation_metadata = json.loads(str(row[4]))
-            algorithm_metadata = json.loads(str(row[5]))
-            results_by_sharpe = json.loads(str(row[7]))
-            results_by_return = json.loads(str(row[8]))
+            request = json.loads(str(row[4]))
+            search_metadata = json.loads(str(row[5]))
+            validation_metadata = json.loads(str(row[6]))
+            algorithm_metadata = json.loads(str(row[7]))
+            results_by_sharpe = json.loads(str(row[9]))
+            results_by_return = json.loads(str(row[10]))
         except json.JSONDecodeError as exc:
             raise MarketDataStoreError("策略实验历史内容损坏") from exc
         if not all(
@@ -1378,15 +1506,17 @@ class DuckDbMarketDataStore:
         return {
             "history_id": str(row[0]),
             "created_at": str(row[1]),
+            "started_at": str(row[2]),
+            "finished_at": str(row[3]),
             "request": request,
             "search_metadata": search_metadata,
             "validation_metadata": validation_metadata,
             "algorithm_metadata": algorithm_metadata,
-            "data_fingerprint": str(row[6]),
+            "data_fingerprint": str(row[8]),
             "results_by_sharpe": results_by_sharpe,
             "results_by_return": results_by_return,
-            "total_trials": int(row[9]),
-            "duration_seconds": float(row[10]),
+            "total_trials": int(row[11]),
+            "duration_seconds": float(row[12]),
         }
 
     def delete_strategy_discovery_history(self, history_id: str) -> bool:
@@ -1399,6 +1529,178 @@ class DuckDbMarketDataStore:
         with _WRITE_LOCK, self._connect() as connection:
             deleted = connection.execute(
                 "DELETE FROM strategy_discovery_history WHERE history_id = ? RETURNING history_id",
+                [normalized_id],
+            ).fetchone()
+        return deleted is not None
+
+    def save_backtest_history(
+        self,
+        history_id: str,
+        *,
+        backtest_type: str,
+        request: Mapping[str, object],
+        result: Mapping[str, object],
+        started_at: datetime | str,
+        finished_at: datetime | str,
+        created_at: datetime | str | None = None,
+        duration_seconds: float | None = None,
+    ) -> None:
+        """Persist a completed single, portfolio, or fitness backtest."""
+
+        self._require_writer()
+        normalized_id = history_id.strip()
+        if not normalized_id:
+            raise ValueError("回测历史 ID 不能为空")
+        if backtest_type not in _BACKTEST_HISTORY_TYPES:
+            raise ValueError("回测历史类型无效")
+        started = _normalize_timestamp(started_at, _now())
+        finished = _normalize_timestamp(finished_at, started)
+        if finished < started:
+            raise ValueError("回测结束时间不能早于开始时间")
+        created = _normalize_timestamp(created_at, started)
+        if duration_seconds is None:
+            duration = (finished - started).total_seconds()
+        else:
+            try:
+                duration = float(duration_seconds)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("回测耗时格式无效") from exc
+        if not math.isfinite(duration) or duration < 0:
+            raise ValueError("回测耗时必须是大于等于 0 的有限数字")
+        request_payload = dict(request)
+        result_payload = dict(result)
+        summary = _backtest_history_summary(result_payload)
+        with _WRITE_LOCK, self._connect() as connection:
+            connection.execute("BEGIN")
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO backtest_history (
+                        history_id, backtest_type, created_at, started_at, finished_at,
+                        duration_seconds, request_json, result_json, summary_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (history_id) DO UPDATE SET
+                        backtest_type = excluded.backtest_type,
+                        created_at = excluded.created_at,
+                        started_at = excluded.started_at,
+                        finished_at = excluded.finished_at,
+                        duration_seconds = excluded.duration_seconds,
+                        request_json = excluded.request_json,
+                        result_json = excluded.result_json,
+                        summary_json = excluded.summary_json
+                    """,
+                    [
+                        normalized_id,
+                        backtest_type,
+                        created,
+                        started,
+                        finished,
+                        duration,
+                        json.dumps(request_payload, ensure_ascii=False, separators=(",", ":")),
+                        json.dumps(result_payload, ensure_ascii=False, separators=(",", ":")),
+                        json.dumps(summary, ensure_ascii=False, separators=(",", ":")),
+                    ],
+                )
+                stale = connection.execute(
+                    """
+                    SELECT history_id FROM backtest_history
+                    WHERE backtest_type = ?
+                    ORDER BY finished_at DESC, history_id DESC
+                    LIMIT 100000 OFFSET ?
+                    """,
+                    [backtest_type, BACKTEST_HISTORY_LIMIT],
+                ).fetchall()
+                if stale:
+                    connection.executemany(
+                        "DELETE FROM backtest_history WHERE history_id = ?", stale
+                    )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+
+    def list_backtest_history(self, backtest_type: str) -> list[dict[str, object]]:
+        """Return recent summaries for one kind of backtest."""
+
+        _validate_backtest_history_type(backtest_type)
+        with self._connect(read_only=True) as connection:
+            rows = connection.execute(
+                """
+                SELECT history_id, backtest_type, created_at, started_at, finished_at,
+                       duration_seconds, summary_json
+                FROM backtest_history
+                WHERE backtest_type = ?
+                ORDER BY finished_at DESC, history_id DESC
+                LIMIT ?
+                """,
+                [backtest_type, BACKTEST_HISTORY_LIMIT],
+            ).fetchall()
+        summaries: list[dict[str, object]] = []
+        for row in rows:
+            try:
+                summary = json.loads(str(row[6]))
+            except json.JSONDecodeError as exc:
+                raise MarketDataStoreError("回测历史内容损坏") from exc
+            if not isinstance(summary, dict):
+                raise MarketDataStoreError("回测历史摘要无效")
+            summaries.append(
+                {
+                    "history_id": str(row[0]),
+                    "backtest_type": str(row[1]),
+                    "created_at": str(row[2]),
+                    "started_at": str(row[3]),
+                    "finished_at": str(row[4]),
+                    "duration_seconds": float(row[5]),
+                    "summary": summary,
+                }
+            )
+        return summaries
+
+    def read_backtest_history(self, history_id: str) -> dict[str, object] | None:
+        """Read one complete backtest history snapshot."""
+
+        with self._connect(read_only=True) as connection:
+            row = connection.execute(
+                """
+                SELECT history_id, backtest_type, created_at, started_at, finished_at,
+                       duration_seconds, request_json, result_json, summary_json
+                FROM backtest_history
+                WHERE history_id = ?
+                """,
+                [history_id.strip()],
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            request = json.loads(str(row[6]))
+            result = json.loads(str(row[7]))
+            summary = json.loads(str(row[8]))
+        except json.JSONDecodeError as exc:
+            raise MarketDataStoreError("回测历史内容损坏") from exc
+        if not all(isinstance(value, dict) for value in (request, result, summary)):
+            raise MarketDataStoreError("回测历史内容无效")
+        return {
+            "history_id": str(row[0]),
+            "backtest_type": str(row[1]),
+            "created_at": str(row[2]),
+            "started_at": str(row[3]),
+            "finished_at": str(row[4]),
+            "duration_seconds": float(row[5]),
+            "request": request,
+            "result": result,
+            "summary": summary,
+        }
+
+    def delete_backtest_history(self, history_id: str) -> bool:
+        """Delete one backtest history record."""
+
+        self._require_writer()
+        normalized_id = history_id.strip()
+        if not normalized_id:
+            return False
+        with _WRITE_LOCK, self._connect() as connection:
+            deleted = connection.execute(
+                "DELETE FROM backtest_history WHERE history_id = ? RETURNING history_id",
                 [normalized_id],
             ).fetchone()
         return deleted is not None

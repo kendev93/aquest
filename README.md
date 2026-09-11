@@ -155,7 +155,7 @@ N:=5;
 
 日期留空表示使用该股票全部本地历史；预置公式和已解析的自定义公式会优先读取 DuckDB 指标缓存。无论是否命中缓存，公式都基于完整历史计算，再截取所选区间，因此区间起点不会丢失 `REF`、均线等指标的预热数据。回测结果会记录本次使用的行情指纹，便于检查数据是否发生变化。默认信号在下一根 K 线开盘成交，也可以切换到下一根收盘；佣金、最低佣金、印花税和每股滑点均可调整。回测结果包含总收益、年化收益、最大回撤、夏普、胜率、成交记录、资金曲线和最近净值表。
 
-回测使用项目自有的日线交易模拟器和绩效计算器，结果只保存在当前服务进程内存，服务重启后不会保留。股票、基金、指数和债券默认使用 100 股/份、佣金 `0.0001`、最低佣金 `0.1` 元；股票印花税保持 `0.001`，非股票无印花税。显式传入费用时仍以显式值为准，并明确标记为虚拟研究回测。历史回测不代表未来收益，交易成本、涨跌停、流动性和幸存者偏差仍可能使实际结果不同，请勿将回测结果直接视为投资建议。
+回测使用项目自有的日线交易模拟器和绩效计算器。每次成功的单股、组合和策略适配性回测都会自动保存请求快照、完整结果、开始时间、结束时间和耗时到本地 DuckDB，分别保留最近 20 次；页面可以重新加载历史结果。股票、基金、指数和债券默认使用 100 股/份、佣金 `0.0001`、最低佣金 `0.1` 元；股票印花税保持 `0.001`，非股票无印花税。显式传入费用时仍以显式值为准，并明确标记为虚拟研究回测。历史回测不代表未来收益，交易成本、涨跌停、流动性和幸存者偏差仍可能使实际结果不同，请勿将回测结果直接视为投资建议。
 
 ## 指标条件筛选
 
@@ -183,7 +183,7 @@ N:=20;
 强度:C/MA(C,N);
 ```
 
-该版本是长仓、单一组合、固定槽位的历史模拟，不包含实盘下单、融资融券、涨跌停撮合、分红复权校准或多策略资金隔离。结果同样只保存在当前服务进程内存，服务重启后不会保留。
+该版本是长仓、单一组合、固定槽位的历史模拟，不包含实盘下单、融资融券、涨跌停撮合、分红复权校准或多策略资金隔离。组合回测成功结果会按上述历史策略保存规则落入本地 DuckDB。
 
 ## 策略实验室
 
@@ -222,9 +222,15 @@ GET  /api/v1/market-data/local/{market}/{code}/bars
 POST /api/v1/backtests
 GET  /api/v1/backtests/{job_id}
 GET  /api/v1/backtests/{job_id}/results
+GET  /api/v1/backtests/history
+GET  /api/v1/backtests/history/{id}
+DELETE /api/v1/backtests/history/{id}
 POST /api/v1/portfolio-backtests
 GET  /api/v1/portfolio-backtests/{job_id}
 GET  /api/v1/portfolio-backtests/{job_id}/results
+GET  /api/v1/portfolio-backtests/history
+GET  /api/v1/portfolio-backtests/history/{id}
+DELETE /api/v1/portfolio-backtests/history/{id}
 GET  /api/v1/strategy-discovery/capabilities
 POST /api/v1/strategy-discovery
 GET  /api/v1/strategy-discovery/{job_id}
@@ -236,6 +242,9 @@ DELETE /api/v1/strategy-discovery/history/{id}
 POST /api/v1/strategy-fitness
 GET  /api/v1/strategy-fitness/{job_id}
 GET  /api/v1/strategy-fitness/{job_id}/results
+GET  /api/v1/strategy-fitness/history
+GET  /api/v1/strategy-fitness/history/{id}
+DELETE /api/v1/strategy-fitness/history/{id}
 ```
 
 提交任务必须至少选择一个信号或一条指标条件；`at_least` 必须给出不超过当前信号/条件数量的 `minimum_matches`。条件模式的请求示例：

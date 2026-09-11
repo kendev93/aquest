@@ -1,10 +1,19 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 
-import { createBacktest, getBacktest, getBacktestResults } from '../api/backtest'
+import {
+  createBacktest,
+  deleteBacktestHistory,
+  fetchBacktestHistory,
+  getBacktest,
+  getBacktestHistory,
+  getBacktestResults,
+} from '../api/backtest'
 import { FormulaScreenApiError, fetchMetadata, parseFormula } from '../api/formulaScreen'
+import BacktestHistoryPanel from '../components/BacktestHistoryPanel.vue'
 import RuleGroupEditor from '../components/RuleGroupEditor.vue'
 import type {
+  BacktestHistorySummary,
   BacktestJobState,
   BacktestPayload,
   BacktestResult,
@@ -70,6 +79,8 @@ const customParseError = ref('')
 const showAdvanced = ref(false)
 const job = ref<BacktestJobState | null>(null)
 const result = ref<BacktestResult | null>(null)
+const history = ref<BacktestHistorySummary[]>([])
+const historyLoading = ref(false)
 
 const presetSignals = computed<SignalDefinition[]>(() => (
   metadata.value?.indicators.flatMap((indicator) => indicator.signals) ?? []
@@ -293,6 +304,7 @@ async function submit(): Promise<void> {
       if (state.status === 'completed') {
         result.value = await getBacktestResults(created.job_id)
         message.value = `回测完成：${result.value.trades.length} 笔成交，区间 ${result.value.start_date} 至 ${result.value.end_date}。`
+        await loadHistory()
         return
       }
       if (state.status === 'failed') throw new Error(state.error ?? '回测任务失败')
@@ -302,6 +314,37 @@ async function submit(): Promise<void> {
     message.value = apiMessage(error)
   } finally {
     loading.value = false
+  }
+}
+
+async function loadHistory(): Promise<void> {
+  historyLoading.value = true
+  try {
+    history.value = await fetchBacktestHistory()
+  } catch (error) {
+    message.value = apiMessage(error)
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+async function loadHistoryDetail(historyId: string): Promise<void> {
+  try {
+    const loaded = await getBacktestHistory(historyId)
+    result.value = loaded.result
+    message.value = `已加载历史回测 ${historyId}。`
+  } catch (error) {
+    message.value = apiMessage(error)
+  }
+}
+
+async function removeHistory(historyId: string): Promise<void> {
+  try {
+    await deleteBacktestHistory(historyId)
+    await loadHistory()
+    message.value = '历史回测已删除。'
+  } catch (error) {
+    message.value = apiMessage(error)
   }
 }
 
@@ -335,6 +378,7 @@ onMounted(async () => {
       signals.find((signal) => signal.id.endsWith('prepare_rally'))?.id ?? signals[0]?.id ?? '',
       signals.find((signal) => signal.id.endsWith('end_zone'))?.id ?? signals[1]?.id ?? '',
     )
+    await loadHistory()
   } catch (error) {
     message.value = apiMessage(error)
   }
@@ -456,7 +500,7 @@ watch(() => form.formulaText, (value) => {
           </div>
 
           <button class="primary-button" data-testid="start-backtest" type="submit" :disabled="!canSubmit"><span v-if="loading" class="spinner" aria-hidden="true"></span>{{ loading ? '回测中…' : '开始回测' }}</button>
-          <p class="privacy-note">回测只读取本机 DuckDB，不会上传行情数据；结果保存在当前服务进程内存。</p>
+          <p class="privacy-note">回测只读取本机 DuckDB，不会上传行情数据；成功结果会自动保存到本机历史记录。</p>
         </form>
 
         <section class="results-panel panel" data-testid="backtest-results" aria-live="polite">
@@ -482,6 +526,17 @@ watch(() => form.formulaText, (value) => {
           </template>
         </section>
       </div>
+
+      <BacktestHistoryPanel
+        :items="history"
+        :loading="historyLoading"
+        testid="backtest-history"
+        title="历史单股回测"
+        empty-text="暂无历史单股回测。"
+        @refresh="loadHistory"
+        @load="loadHistoryDetail"
+        @remove="removeHistory"
+      />
     </main>
   </div>
 </template>

@@ -15,7 +15,15 @@ vi.mock('../api/formulaScreen', async () => {
 
 vi.mock('../api/portfolioBacktest', async () => {
   const actual = await vi.importActual<typeof import('../api/portfolioBacktest')>('../api/portfolioBacktest')
-  return { ...actual, createPortfolioBacktest: vi.fn(), getPortfolioBacktest: vi.fn(), getPortfolioBacktestResults: vi.fn() }
+  return {
+    ...actual,
+    createPortfolioBacktest: vi.fn(),
+    getPortfolioBacktest: vi.fn(),
+    getPortfolioBacktestResults: vi.fn(),
+    fetchPortfolioBacktestHistory: vi.fn(),
+    getPortfolioBacktestHistory: vi.fn(),
+    deletePortfolioBacktestHistory: vi.fn(),
+  }
 })
 
 const metadata: FormulaScreenMetadata = {
@@ -84,6 +92,7 @@ describe('PortfolioBacktestPage', () => {
       total_scanned: 3, errors: 0, error: null, result: null,
     })
     vi.mocked(portfolioApi.getPortfolioBacktestResults).mockResolvedValue(result)
+    vi.mocked(portfolioApi.fetchPortfolioBacktestHistory).mockResolvedValue([])
   })
 
   it('submits ranked slot configuration and renders holdings, trades, and candidates', async () => {
