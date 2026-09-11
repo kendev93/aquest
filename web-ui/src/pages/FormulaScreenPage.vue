@@ -6,6 +6,7 @@ import MarketCandlestickChart from '../components/MarketCandlestickChart.vue'
 import { createJob, createSyncJob, fetchMetadata, fetchScreenHistory, FormulaScreenApiError, getJob, getResults, getScreenHistory, getSyncJob, parseFormula } from '../api/formulaScreen'
 import type { ConditionOperator, CustomFormulaMetadata, FormulaScreenMetadata, InstrumentBoard, InstrumentType, JobState, LocalMarketChart, MarketSyncJobState, ResultsMeta, SavedConditionSet, ScreenCondition, ScreenFormState, ScreenHistorySummary, ScreenResult, RuleMode, ValueDefinition } from '../types'
 import { buildScanPayload, createSavedConditionSet, DEFAULT_PRESET_SIGNALS, deleteConditionSet, filterKnownSignals, loadSavedConditionSets, loadSavedForm, resultsToCsv, saveConditionSet, saveForm, signalDisplayName, validateScreenForm, valueOptionLabel } from '../utils/formulaScreen'
+import { formatChinaTimestamp } from '../utils/time'
 
 const INSTRUMENT_TYPE_OPTIONS: { key: InstrumentType; label: string }[] = [
   { key: 'stock', label: '股票/B股' },
@@ -300,14 +301,7 @@ function formatIndicatorValue(value: number | null | undefined): string {
 }
 
 function formatHistoryDate(value: string): string {
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  return date.toLocaleString('zh-CN', {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
+  return formatChinaTimestamp(value)
 }
 
 function applyResultPayload(nextResults: ScreenResult[], nextMeta: ResultsMeta): void {

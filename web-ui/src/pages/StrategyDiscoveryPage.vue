@@ -20,6 +20,7 @@ import {
 } from '../api/strategyDiscovery'
 import RuleGroupEditor from '../components/RuleGroupEditor.vue'
 import StrategyReplayPanel from '../components/StrategyReplayPanel.vue'
+import { formatChinaTimestamp } from '../utils/time'
 import type {
   ConditionOperator,
   RuleGroupPayload,
@@ -505,8 +506,7 @@ function stageDuration(state: StrategyDiscoveryJobState | null, key: string): st
 }
 
 function formatHistoryTimestamp(value: unknown): string {
-  if (typeof value !== 'string' || !value) return '—'
-  return value.replace('T', ' ').replace(/\.\d+/, '').replace('Z', '')
+  return formatChinaTimestamp(value)
 }
 
 function historyTrialSummary(item: Record<string, unknown>): string {

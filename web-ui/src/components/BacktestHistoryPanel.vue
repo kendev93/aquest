@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { BacktestHistorySummary } from '../types'
+import { formatChinaTimestamp } from '../utils/time'
 
 interface Props {
   items: BacktestHistorySummary[]
@@ -20,7 +21,7 @@ const emit = defineEmits<{
 }>()
 
 function formatTimestamp(value: string): string {
-  return value.replace('T', ' ').replace(/\.\d+/, '').replace('Z', '')
+  return formatChinaTimestamp(value)
 }
 
 function formatDuration(value: number): string {

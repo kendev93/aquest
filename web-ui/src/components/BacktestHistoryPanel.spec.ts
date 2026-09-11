@@ -33,7 +33,7 @@ describe('BacktestHistoryPanel', () => {
 
     expect(wrapper.text()).toContain('浦发银行（SH 600000）')
     expect(wrapper.text()).toContain('2024-01-01 → 2024-01-10')
-    expect(wrapper.text()).toContain('2026-09-11 08:30:02')
+    expect(wrapper.text()).toContain('2026-09-11 16:30:02')
     expect(wrapper.text()).toContain('2.5 秒')
     await wrapper.get('[data-testid="history-panel-load-history-1"]').trigger('click')
     await wrapper.get('[data-testid="history-panel-remove-history-1"]').trigger('click')
