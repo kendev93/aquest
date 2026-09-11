@@ -85,9 +85,12 @@ def run_validation_pipeline(
             raw.get("shortlist_by_return") or raw.get("results_by_return", [])
         )
         search_metadata = dict(cast(Mapping[str, object], raw.get("search_metadata", {})))
-    candidates = _unique(
-        [*sharpe[: request.validation_candidates], *returns[: request.validation_candidates]]
-    )[: request.validation_candidates]
+    # Each leaderboard owns its validation budget.  Do not truncate the union
+    # after placing the Sharpe shortlist first, otherwise the return leaderboard
+    # is evaluated from a biased subset and often becomes a reordered Sharpe list.
+    sharpe_shortlist = sharpe[: request.validation_candidates]
+    return_shortlist = returns[: request.validation_candidates]
+    candidates = _unique([*sharpe_shortlist, *return_shortlist])
     if not candidates:
         raise ValueError("没有可供验证的策略候选")
 
@@ -136,7 +139,7 @@ def run_validation_pipeline(
     holdout_candidates = _unique(
         [
             *valid_by_sharpe[: max(1, (request.holdout_candidates + 1) // 2)],
-            *valid_by_return[: request.holdout_candidates],
+            *valid_by_return[: max(1, request.holdout_candidates // 2)],
         ]
     )[: request.holdout_candidates]
     holdout_by_hash: dict[str, Mapping[str, object]] = {}
@@ -174,7 +177,11 @@ def run_validation_pipeline(
         search_metadata=search_metadata,
         validation_metadata={
             "search_candidate_count": len(candidates),
+            "validation_candidate_count": len(candidates),
             "validated_candidate_count": len(validated),
+            "validation_candidate_limit_per_leaderboard": request.validation_candidates,
+            "validation_sharpe_shortlist_count": len(sharpe_shortlist),
+            "validation_return_shortlist_count": len(return_shortlist),
             "holdout_candidate_count": len(holdout_candidates),
             "leaderboard_period": "validation",
         },

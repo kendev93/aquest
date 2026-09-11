@@ -547,7 +547,10 @@ def _string_tuple(value: object) -> tuple[str, ...] | None:
 def _progress_plan(request: DiscoveryRequest) -> tuple[tuple[str, ...], dict[str, int], int]:
     units = {
         "search": max(1, request.max_trials),
-        "validation": max(1, request.validation_candidates),
+        # Validation is evaluated independently for the Sharpe and return
+        # shortlists.  The union can therefore be up to twice the per-board
+        # budget when the two leaderboards contain different candidates.
+        "validation": max(1, request.validation_candidates * 2),
         "holdout": max(1, request.holdout_candidates),
     }
     stages = ["search", "validation", "holdout"]
