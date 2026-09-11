@@ -10,7 +10,11 @@ import pytest
 
 from selector_app.adapters.local_day_adapter import StockRef
 from selector_app.portfolio_backtest.models import PortfolioBacktestConfig
-from selector_app.portfolio_backtest.service import PortfolioBacktestService
+from selector_app.portfolio_backtest.service import (
+    PortfolioBacktestService,
+    SimulationCheckpoint,
+    _StockSeries,
+)
 from selector_app.screening.models import ScreenCondition
 from selector_app.screening.rules import RuleGroup
 
@@ -173,6 +177,132 @@ def test_portfolio_uses_all_local_dates_when_date_window_is_blank() -> None:
     assert report.bars == 6
     assert report.start_date == "2024-01-01"
     assert report.end_date == "2024-01-06"
+
+
+def test_prepared_backtest_skips_simulation_when_no_candidate_can_be_bought(monkeypatch) -> None:
+    context = _StockSeries(
+        market="SH",
+        code="600000",
+        instrument_type="stock",
+        board="main",
+        dates=np.asarray([20240101, 20240102, 20240103], dtype=np.int64),
+        opens=np.asarray([10.0, 10.0, 10.0]),
+        highs=np.asarray([10.0, 10.0, 10.0]),
+        lows=np.asarray([10.0, 10.0, 10.0]),
+        closes=np.asarray([10.0, 10.0, 10.0]),
+        atrs=np.asarray([np.nan, np.nan, np.nan]),
+        buy_mask=np.asarray([False, False, False]),
+        sell_mask=np.asarray([False, False, False]),
+        signals={},
+        values={"technical.ma5": np.asarray([10.0, 10.0, 10.0])},
+        date_to_index={20240101: 0, 20240102: 1, 20240103: 2},
+        data_fingerprint="fingerprint",
+    )
+    service = PortfolioBacktestService()
+    monkeypatch.setattr(
+        service,
+        "_simulate",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("simulation should skip")),
+    )
+
+    report = service.run_prepared_contexts(
+        config(
+            formula_text=None,
+            selected_signals=(),
+            buy_rule=RuleGroup(
+                conditions=(
+                    ScreenCondition(
+                        left_value="technical.ma5",
+                        operator="gt",
+                        right_constant=100.0,
+                    ),
+                ),
+            ),
+            ranking_value="technical.ma5",
+            sell_rule=RuleGroup(
+                conditions=(
+                    ScreenCondition(
+                        left_value="technical.ma5",
+                        operator="lt",
+                        right_constant=1.0,
+                    ),
+                ),
+            ),
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 3),
+        ),
+        [context],
+        include_details=False,
+    )
+
+    assert report.performance["total_return"] == 0.0
+    assert report.trades == ()
+    assert report.diagnostic == "预检无可交易候选"
+
+
+def test_simulation_checkpoint_continuation_matches_full_run() -> None:
+    dates = np.asarray([20240101, 20240102, 20240103, 20240104, 20240105, 20240106], dtype=np.int64)
+    context = _StockSeries(
+        market="SH",
+        code="600000",
+        instrument_type="stock",
+        board="main",
+        dates=dates,
+        opens=np.asarray([10.0, 10.0, 10.5, 11.0, 11.5, 12.0]),
+        highs=np.asarray([10.0, 10.2, 10.7, 11.2, 11.7, 12.2]),
+        lows=np.asarray([9.8, 9.9, 10.2, 10.7, 11.2, 11.7]),
+        closes=np.asarray([10.0, 10.5, 11.0, 11.5, 12.0, 12.5]),
+        atrs=np.full(6, np.nan),
+        buy_mask=np.asarray([True, True, True, True, True, True]),
+        sell_mask=np.asarray([False, False, False, False, False, False]),
+        signals={},
+        values={"technical.ma5": np.asarray([10.0, 10.5, 11.0, 11.5, 12.0, 12.5])},
+        date_to_index={int(value): index for index, value in enumerate(dates)},
+        data_fingerprint="fingerprint",
+    )
+    service = PortfolioBacktestService()
+    simulation_config = config(
+        formula_text=None,
+        selected_signals=(),
+        buy_rule=RuleGroup(
+            conditions=(
+                ScreenCondition(
+                    left_value="technical.ma5",
+                    operator="gt",
+                    right_constant=1.0,
+                ),
+            ),
+        ),
+        ranking_value="technical.ma5",
+        sell_rule=RuleGroup(
+            conditions=(
+                ScreenCondition(
+                    left_value="technical.ma5",
+                    operator="lt",
+                    right_constant=0.0,
+                ),
+            ),
+        ),
+        stop_loss_pct=None,
+        trailing_stop_pct=0.05,
+        trailing_stop_cooldown_days=2,
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 1, 6),
+    )
+
+    full = service._simulate([context], dates.tolist(), simulation_config)
+    prefix = service._simulate([context], dates[:3].tolist(), simulation_config)
+    checkpoint = prefix["checkpoint"]
+    assert isinstance(checkpoint, SimulationCheckpoint)
+    restored = SimulationCheckpoint.from_dict(checkpoint.to_dict())
+    resumed = service._simulate([context], dates.tolist(), simulation_config, checkpoint=restored)
+
+    assert resumed["equity"] == full["equity"]
+    assert resumed["trades"] == full["trades"]
+    assert resumed["states"] == full["states"]
+    assert resumed["ranking_events"] == full["ranking_events"]
+    assert resumed["cash"] == full["cash"]
+    json.dumps(restored.to_dict(), ensure_ascii=False)
 
 
 def test_portfolio_supports_indicator_threshold_exit() -> None:

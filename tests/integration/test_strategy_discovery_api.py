@@ -25,7 +25,12 @@ class FakeDiscoveryService:
             "results_by_return": [
                 {"candidate_hash": "r1", "metrics": {"validation": {"annual_return": 0.3}}}
             ],
-            "search_metadata": {"evaluated_trials": 1},
+            "search_metadata": {
+                "requested_trials": 3,
+                "evaluated_trials": 1,
+                "unique_evaluated_trials": 1,
+                "duplicate_trials": 2,
+            },
             "algorithm_metadata": {"algorithm": "seeded_random_fallback"},
             "data_fingerprint": "abc123",
             "duration_seconds": 0.01,
@@ -114,6 +119,8 @@ def test_strategy_discovery_api_starts_reports_and_reads_history(tmp_path) -> No
     assert capabilities.json()["data"]["indicator_count"] == 1
     assert state["status"] == "completed"
     assert state["metadata"]["overall_progress"] == 1.0
+    assert state["metadata"]["requested_trials"] == 3
+    assert state["metadata"]["duplicate_trials"] == 2
     assert results.status_code == 200
     assert history.status_code == 200
     assert history.json()["data"][0]["history_id"]

@@ -56,6 +56,10 @@ def test_validation_pipeline_ranks_by_validation_and_attaches_holdout() -> None:
     assert result.results_by_sharpe[0].metrics["holdout"]["constraints_passed"] is True
     assert result.to_dict()["results_by_sharpe"][0]["config"]["start_date"] == "2024-01-01"
     assert result.validation_metadata["leaderboard_period"] == "validation"
+    durations = result.validation_metadata["stage_durations_seconds"]
+    assert isinstance(durations, dict)
+    assert durations["validation"] >= 0
+    assert durations["holdout"] >= 0
 
 
 def test_validation_pipeline_keeps_independent_sharpe_and_return_leaderboards() -> None:

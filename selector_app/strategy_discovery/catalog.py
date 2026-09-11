@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 
 from selector_app.formulas.registry import FORMULA_REGISTRY, FormulaRegistry
 
@@ -80,6 +81,7 @@ class IndicatorCatalog:
         )
 
 
+@lru_cache(maxsize=4)
 def default_indicator_catalog(registry: FormulaRegistry | None = None) -> IndicatorCatalog:
     selected_registry = registry or FORMULA_REGISTRY
     values: list[IndicatorDescriptor] = []

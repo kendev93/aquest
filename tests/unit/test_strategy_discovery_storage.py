@@ -25,6 +25,9 @@ def test_strategy_discovery_history_round_trip_and_limit(tmp_path) -> None:
     detail = store.read_strategy_discovery_history("run-1")
     assert records[0]["history_id"] == "run-1"
     assert records[0]["total_trials"] == 10
+    assert records[0]["requested_trials"] == 10
+    assert records[0]["unique_evaluated_trials"] == 10
+    assert records[0]["duplicate_trials"] == 0
     assert records[0]["duration_seconds"] == 1.25
     assert records[0]["started_at"]
     assert records[0]["finished_at"]

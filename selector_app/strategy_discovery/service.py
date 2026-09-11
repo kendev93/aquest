@@ -26,7 +26,10 @@ from selector_app.portfolio_backtest.models import (
     PortfolioBacktestConfig,
     PortfolioBacktestReport,
 )
-from selector_app.portfolio_backtest.service import PortfolioBacktestService
+from selector_app.portfolio_backtest.service import (
+    PortfolioBacktestService,
+    SimulationCheckpoint,
+)
 from selector_app.web.schemas import PortfolioBacktestRequest
 
 from .candidates import build_random_candidate
@@ -65,9 +68,16 @@ def _init_discovery_worker(database_path: str, snapshot_path: str | None = None)
 
 
 def _evaluate_candidate_process(
-    job: tuple[StrategyCandidate, DiscoveryRequest, str, str | None, str],
+    job: tuple[
+        StrategyCandidate,
+        DiscoveryRequest,
+        str,
+        str | None,
+        str,
+        Mapping[str, object] | None,
+    ],
 ) -> Mapping[str, object]:
-    candidate, request, stage, fidelity, database_path = job
+    candidate, request, stage, fidelity, database_path, checkpoint = job
     if _WORKER_DISCOVERY_SERVICE is None:
         _init_discovery_worker(database_path)
     assert _WORKER_DISCOVERY_SERVICE is not None
@@ -77,6 +87,7 @@ def _evaluate_candidate_process(
         request,
         split,
         fidelity=fidelity,
+        checkpoint=checkpoint,
     )
 
 
@@ -193,6 +204,7 @@ class StrategyDiscoveryService:
         expected_data_fingerprint: str | None = None,
     ) -> dict[str, object]:
         started = time.monotonic()
+        snapshot_metadata: Mapping[str, object] = {}
         if self._parallel_enabled:
             self._assert_local_data(request)
             report_snapshot_progress: Callable[[int, int], None] | None = None
@@ -226,6 +238,7 @@ class StrategyDiscoveryService:
                 abort_check=abort_check,
             ) as snapshot:
                 snapshot_build_seconds = max(0.0, time.monotonic() - snapshot_started)
+                snapshot_metadata = dict(snapshot.build_metadata)
                 if progress_callback is not None:
                     progress_callback(
                         1,
@@ -252,6 +265,7 @@ class StrategyDiscoveryService:
                         evaluation_executor=evaluation_executor,
                         started=started,
                         snapshot_build_seconds=snapshot_build_seconds,
+                        snapshot_metadata=snapshot_metadata,
                         candidate_builder=candidate_builder,
                         result_metadata=result_metadata,
                         expected_data_fingerprint=expected_data_fingerprint,
@@ -263,6 +277,7 @@ class StrategyDiscoveryService:
                 abort_check=abort_check,
                 evaluation_executor=evaluation_executor,
                 started=started,
+                snapshot_metadata=snapshot_metadata,
                 candidate_builder=candidate_builder,
                 result_metadata=result_metadata,
                 expected_data_fingerprint=expected_data_fingerprint,
@@ -304,7 +319,6 @@ class StrategyDiscoveryService:
             progress_callback=progress_callback,
             abort_check=abort_check,
             candidate_builder=builder,
-            expected_data_fingerprint=source_fingerprint or None,
             result_metadata={
                 "mode": "refinement",
                 "refinement": {
@@ -334,6 +348,12 @@ class StrategyDiscoveryService:
         refinement = result.get("refinement")
         if isinstance(refinement, dict):
             refinement["parent_data_fingerprint"] = source_fingerprint
+            current_fingerprint = str(result.get("data_fingerprint") or "")
+            refinement["data_changed"] = bool(
+                source_fingerprint
+                and current_fingerprint
+                and source_fingerprint != current_fingerprint
+            )
         return result
 
     @contextmanager
@@ -387,6 +407,7 @@ class StrategyDiscoveryService:
         evaluation_executor: ProcessPoolExecutor | None = None,
         started: float | None = None,
         snapshot_build_seconds: float = 0.0,
+        snapshot_metadata: Mapping[str, object] | None = None,
         candidate_builder: Callable[
             [DiscoveryRequest, object], StrategyCandidate
         ] = build_random_candidate,
@@ -400,6 +421,12 @@ class StrategyDiscoveryService:
             "annual_return": None,
         }
         progress_plan = _progress_plan(request)
+        fidelity_checkpoints: dict[str, Mapping[str, object]] = {}
+        checkpoint_metrics = {
+            "captured": 0,
+            "resume_attempts": 0,
+            "fallbacks": 0,
+        }
 
         def observe_metrics(metrics: Mapping[str, object], split: str) -> None:
             if split not in {"search", "validation", "holdout"}:
@@ -449,14 +476,35 @@ class StrategyDiscoveryService:
             observe_metrics(metrics, split)
             return metrics
 
+        def _prepare_fidelity_metrics(
+            candidate: StrategyCandidate,
+            metrics: Mapping[str, object],
+        ) -> dict[str, object]:
+            sanitized = dict(metrics)
+            raw_checkpoint = sanitized.pop("_simulation_checkpoint", None)
+            if isinstance(raw_checkpoint, Mapping):
+                fidelity_checkpoints[candidate.candidate_hash] = dict(raw_checkpoint)
+                checkpoint_metrics["captured"] += 1
+            if sanitized.pop("_checkpoint_resume_attempted", False) is True:
+                checkpoint_metrics["resume_attempts"] += 1
+            if sanitized.pop("_checkpoint_fallback", False) is True:
+                checkpoint_metrics["fallbacks"] += 1
+            return sanitized
+
         def evaluate_fidelity(candidate: StrategyCandidate, fidelity: str) -> Mapping[str, object]:
             metrics = self._evaluate_candidate(
                 candidate,
                 request,
                 "search",
                 fidelity=fidelity,
+                checkpoint=(
+                    fidelity_checkpoints.get(candidate.candidate_hash)
+                    if fidelity in {"medium", "full"}
+                    else None
+                ),
                 data_fingerprint_holder=fingerprint_holder,
             )
+            metrics = _prepare_fidelity_metrics(candidate, metrics)
             _validate_expected_fingerprint(metrics, expected_data_fingerprint)
             observe_metrics(metrics, "search")
             return metrics
@@ -471,7 +519,17 @@ class StrategyDiscoveryService:
             ) -> Sequence[Mapping[str, object]]:
                 fidelity = stage if stage in {"coarse", "medium", "full"} else None
                 jobs = [
-                    (candidate, request, stage, fidelity, database_path) for candidate in candidates
+                    (
+                        candidate,
+                        request,
+                        stage,
+                        fidelity,
+                        database_path,
+                        fidelity_checkpoints.get(candidate.candidate_hash)
+                        if fidelity in {"medium", "full"}
+                        else None,
+                    )
+                    for candidate in candidates
                 ]
                 try:
                     metrics = list(executor.map(_evaluate_candidate_process, jobs, chunksize=1))
@@ -479,6 +537,15 @@ class StrategyDiscoveryService:
                     raise RuntimeError(
                         "策略实验的 8 个评估进程启动失败，请检查 Docker 运行时和行情数据库权限"
                     ) from exc
+                sanitized_metrics: list[Mapping[str, object]] = []
+                for candidate, item in zip(candidates, metrics, strict=True):
+                    sanitized_metrics.append(_prepare_fidelity_metrics(candidate, item))
+                metrics = sanitized_metrics
+                if stage == "medium":
+                    promoted_hashes = {candidate.candidate_hash for candidate in candidates}
+                    for candidate_hash in tuple(fidelity_checkpoints):
+                        if candidate_hash not in promoted_hashes:
+                            fidelity_checkpoints.pop(candidate_hash, None)
                 observed_stage = "search" if fidelity is not None else stage
                 for item in metrics:
                     _validate_expected_fingerprint(item, expected_data_fingerprint)
@@ -503,6 +570,7 @@ class StrategyDiscoveryService:
             seed=request.seed,
             validation_limit=request.validation_candidates,
             holdout_limit=request.holdout_candidates,
+            convergence_enabled=request.convergence_enabled,
             progress_callback=report_progress,
             abort_check=abort_check,
         )
@@ -542,6 +610,25 @@ class StrategyDiscoveryService:
         )
         result = discovery.to_dict()
         result["data_fingerprint"] = fingerprint_holder[0]
+        search_metadata = result.get("search_metadata")
+        validation_metadata = result.get("validation_metadata")
+        snapshot_metadata_map = snapshot_metadata if isinstance(snapshot_metadata, Mapping) else {}
+        search_metadata_map = search_metadata if isinstance(search_metadata, Mapping) else {}
+        stage_durations = {
+            "snapshot": max(0.0, snapshot_build_seconds),
+            "indicators": _number(snapshot_metadata_map.get("indicator_compute_seconds")),
+            "search": _stage_duration(search_metadata, "search"),
+            "coarse": _number(search_metadata_map.get("coarse_seconds")),
+            "medium": _stage_duration(search_metadata, "medium"),
+            "full": _stage_duration(search_metadata, "full"),
+            "validation": _stage_duration(validation_metadata, "validation"),
+            "holdout": _stage_duration(validation_metadata, "holdout"),
+            "candidate_generation": _number(
+                search_metadata_map.get("candidate_generation_seconds")
+            ),
+            "surrogate": _number(search_metadata_map.get("surrogate_seconds")),
+        }
+        result["stage_durations_seconds"] = stage_durations
         result["algorithm_metadata"] = {
             "algorithm": search_result.search_metadata.get("algorithm"),
             "algorithm_version": search_result.search_metadata.get("algorithm_version", "1"),
@@ -550,6 +637,9 @@ class StrategyDiscoveryService:
             "surrogate_fit_count": search_result.search_metadata.get("surrogate_fit_count", 0),
             "data_snapshot": ("shared_memmap" if evaluation_executor is not None else "none"),
             "snapshot_build_seconds": snapshot_build_seconds,
+            "snapshot_metrics": dict(snapshot_metadata or {}),
+            "stage_durations_seconds": stage_durations,
+            "checkpoint_metrics": dict(checkpoint_metrics),
             "seed": request.seed,
             "optuna_version": _package_version("optuna"),
             "lightgbm_version": _package_version("lightgbm"),
@@ -566,6 +656,7 @@ class StrategyDiscoveryService:
         split: str,
         *,
         fidelity: str | None = None,
+        checkpoint: Mapping[str, object] | SimulationCheckpoint | None = None,
         data_fingerprint_holder: list[str] | None = None,
     ) -> Mapping[str, object]:
         split_config = request.splits.get(split)
@@ -578,18 +669,55 @@ class StrategyDiscoveryService:
         payload = candidate.to_config()
         payload["start_date"] = start_text
         payload["end_date"] = end_text
+        checkpoint_value: SimulationCheckpoint | None = None
+        checkpoint_resume_attempted = checkpoint is not None
+        checkpoint_fallback = False
+        try:
+            if isinstance(checkpoint, Mapping):
+                checkpoint_value = SimulationCheckpoint.from_dict(checkpoint)
+            elif isinstance(checkpoint, SimulationCheckpoint):
+                checkpoint_value = checkpoint
+        except Exception:
+            checkpoint_fallback = checkpoint_resume_attempted
+        captured_checkpoint: SimulationCheckpoint | None = None
         try:
             config = PortfolioBacktestRequest.model_validate(payload).to_config()
             report: PortfolioBacktestReport | dict[str, object]
             if self._discovery_snapshot is not None and isinstance(
                 self._portfolio_service, PortfolioBacktestService
             ):
-                report = self._portfolio_service.run_prepared_contexts(
-                    config,
-                    self._discovery_snapshot.contexts_for_config(config),
-                    total_candidates=self._discovery_snapshot.total_candidates,
-                    include_details=False,
-                )
+                contexts = self._discovery_snapshot.contexts_for_config(config)
+
+                def capture_checkpoint(value: SimulationCheckpoint) -> None:
+                    nonlocal captured_checkpoint
+                    captured_checkpoint = value
+
+                try:
+                    report = self._portfolio_service.run_prepared_contexts(
+                        config,
+                        contexts,
+                        total_candidates=self._discovery_snapshot.total_candidates,
+                        include_details=False,
+                        checkpoint=checkpoint_value,
+                        checkpoint_callback=(
+                            capture_checkpoint if fidelity in {"coarse", "medium", "full"} else None
+                        ),
+                    )
+                except Exception:
+                    if checkpoint_value is None:
+                        raise
+                    checkpoint_fallback = True
+                    captured_checkpoint = None
+                    report = self._portfolio_service.run_prepared_contexts(
+                        config,
+                        contexts,
+                        total_candidates=self._discovery_snapshot.total_candidates,
+                        include_details=False,
+                        checkpoint=None,
+                        checkpoint_callback=(
+                            capture_checkpoint if fidelity in {"coarse", "medium", "full"} else None
+                        ),
+                    )
             else:
                 report = self._portfolio_service.run(config)
         except Exception as exc:  # noqa: BLE001 - isolate one candidate
@@ -632,6 +760,13 @@ class StrategyDiscoveryService:
         )
         if isinstance(report, PortfolioBacktestReport):
             metrics["trade_fingerprint"] = _trade_fingerprint(report.trades)
+            metrics["preflight_skipped"] = report.diagnostic == "预检无可交易候选"
+        if captured_checkpoint is not None:
+            metrics["_simulation_checkpoint"] = captured_checkpoint.to_dict()
+        if checkpoint_resume_attempted:
+            metrics["_checkpoint_resume_attempted"] = True
+        if checkpoint_fallback:
+            metrics["_checkpoint_fallback"] = True
         metrics["data_fingerprint"] = data_fingerprint
         return metrics
 
@@ -737,6 +872,15 @@ def _number(value: object) -> float:
         return float(str(value or 0.0))
     except (TypeError, ValueError):
         return 0.0
+
+
+def _stage_duration(metadata: object, stage: str) -> float:
+    if not isinstance(metadata, Mapping):
+        return 0.0
+    durations = metadata.get("stage_durations_seconds")
+    if not isinstance(durations, Mapping):
+        return 0.0
+    return max(0.0, _number(durations.get(stage)))
 
 
 def _trade_fingerprint(trades: object) -> str:

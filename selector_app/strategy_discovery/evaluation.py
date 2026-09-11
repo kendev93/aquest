@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import cast
 
@@ -96,6 +97,7 @@ def run_validation_pipeline(
 
     validated: list[StrategyCandidate] = []
     total = len(candidates)
+    validation_started = time.perf_counter()
     for offset in range(0, total, max(1, batch_size)):
         chunk = candidates[offset : offset + max(1, batch_size)]
         if abort_check is not None and abort_check():
@@ -115,6 +117,7 @@ def run_validation_pipeline(
                 validated.append(enriched)
             if progress_callback is not None:
                 progress_callback(index, total, "validation")
+    validation_seconds = time.perf_counter() - validation_started
     if not validated:
         raise ValueError("验证区间没有满足约束的候选策略")
 
@@ -143,6 +146,7 @@ def run_validation_pipeline(
         ]
     )[: request.holdout_candidates]
     holdout_by_hash: dict[str, Mapping[str, object]] = {}
+    holdout_started = time.perf_counter()
     for offset in range(0, len(holdout_candidates), max(1, batch_size)):
         chunk = holdout_candidates[offset : offset + max(1, batch_size)]
         if abort_check is not None and abort_check():
@@ -162,6 +166,7 @@ def run_validation_pipeline(
             holdout_by_hash[candidate.candidate_hash] = metrics
             if progress_callback is not None:
                 progress_callback(index, len(holdout_candidates), "holdout")
+    holdout_seconds = time.perf_counter() - holdout_started
 
     def finalize(items: Sequence[StrategyCandidate]) -> tuple[StrategyCandidate, ...]:
         result: list[StrategyCandidate] = []
@@ -184,6 +189,16 @@ def run_validation_pipeline(
             "validation_return_shortlist_count": len(return_shortlist),
             "holdout_candidate_count": len(holdout_candidates),
             "leaderboard_period": "validation",
+            "stage_durations_seconds": {
+                "validation": validation_seconds,
+                "holdout": holdout_seconds,
+            },
+            "stage_throughput_per_second": {
+                "validation": total / validation_seconds if validation_seconds > 0 else 0.0,
+                "holdout": (
+                    len(holdout_candidates) / holdout_seconds if holdout_seconds > 0 else 0.0
+                ),
+            },
         },
     )
 

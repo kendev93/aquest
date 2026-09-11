@@ -269,7 +269,7 @@ async function startRefinement(candidate: StrategyDiscoveryCandidate): Promise<v
         result.value = await getStrategyDiscoveryResults(created.job_id)
         selectedCandidate.value = null
         activeBoard.value = 'sharpe'
-        message.value = `二次优化完成：夏普榜 ${result.value.results_by_sharpe.length} 组，收益榜 ${result.value.results_by_return.length} 组。`
+        message.value = `二次优化完成：夏普榜 ${result.value.results_by_sharpe.length} 组，收益榜 ${result.value.results_by_return.length} 组${result.value.refinement?.data_changed ? '（行情已更新，已按最新本地行情重新优化）' : ''}。`
         await loadHistory()
         return
       }
@@ -498,9 +498,26 @@ function formatHistoryDuration(value: unknown): string {
   return minutes ? `${hours} 小时 ${minutes} 分钟` : `${hours} 小时`
 }
 
+function stageDuration(state: StrategyDiscoveryJobState | null, key: string): string {
+  const raw = state?.metadata?.stage_durations_seconds
+  if (!raw || typeof raw !== 'object') return '—'
+  return formatHistoryDuration((raw as Record<string, unknown>)[key])
+}
+
 function formatHistoryTimestamp(value: unknown): string {
   if (typeof value !== 'string' || !value) return '—'
   return value.replace('T', ' ').replace(/\.\d+/, '').replace('Z', '')
+}
+
+function historyTrialSummary(item: Record<string, unknown>): string {
+  const requested = typeof item.requested_trials === 'number'
+    ? item.requested_trials
+    : typeof item.total_trials === 'number' ? item.total_trials : 0
+  const unique = typeof item.unique_evaluated_trials === 'number'
+    ? item.unique_evaluated_trials
+    : typeof item.total_trials === 'number' ? item.total_trials : 0
+  const duplicate = typeof item.duplicate_trials === 'number' ? item.duplicate_trials : 0
+  return `${requested} / ${unique} / ${duplicate}`
 }
 
 function historyMode(item: Record<string, unknown>): string {
@@ -711,7 +728,8 @@ onMounted(async () => {
           </fieldset>
           <div v-if="capabilities" class="discovery-capability-note" data-testid="strategy-discovery-capabilities">指标 {{ capabilities.indicator_count }} 个 · 信号 {{ capabilities.signal_count }} 个 · Optuna {{ capabilities.optuna_available ? '可用' : '不可用' }} · LightGBM {{ capabilities.lightgbm_available ? '可用' : '不可用' }} · 回测 {{ capabilities.evaluation_workers ?? 8 }} 进程<span v-if="capabilities.enabled === false" class="negative"> · 请重新构建 Docker 镜像安装策略寻优依赖</span></div>
           <div class="action-stack"><button class="primary-button" data-testid="strategy-discovery-submit" type="submit" :disabled="!canSubmit"><span v-if="loading" class="spinner" aria-hidden="true"></span>{{ loading ? '实验进行中…' : '开始策略实验' }}</button><button v-if="loading" class="secondary-button" data-testid="strategy-discovery-cancel" type="button" @click="cancel">取消实验</button></div>
-          <div v-if="job" class="discovery-progress" data-testid="strategy-discovery-progress"><div class="discovery-progress-heading"><strong>{{ progressPhase(job) }}</strong><span data-testid="strategy-discovery-overall-progress">总体 {{ progressPercent(job) }}</span></div><div class="progress-track"><span :style="{ width: progressPercent(job) }"></span></div><div class="discovery-progress-stats"><span>当前阶段 {{ progressCount(job, 'phase_current', job.total_scanned) }} / {{ progressCount(job, 'phase_total', job.total_candidates) }}</span><span>预计总评估 {{ progressCount(job, 'estimated_total_evaluations', job.total_candidates) }} 次</span><span data-testid="strategy-discovery-remaining">预计剩余 {{ formatDuration(job) }}</span></div><small v-if="job.metadata?.best_sharpe !== undefined">吞吐 {{ formatNumber(metadataNumber(job, 'throughput_per_second')) }} 候选/秒 · 当前最佳夏普 {{ formatNumber(typeof job.metadata.best_sharpe === 'number' ? job.metadata.best_sharpe : null) }} · 收益 {{ formatPercent(typeof job.metadata.best_return === 'number' ? job.metadata.best_return : null) }}</small></div>
+          <div v-if="job" class="discovery-progress" data-testid="strategy-discovery-progress"><div class="discovery-progress-heading"><strong>{{ progressPhase(job) }}</strong><span data-testid="strategy-discovery-overall-progress">总体 {{ progressPercent(job) }}</span></div><div class="progress-track"><span :style="{ width: progressPercent(job) }"></span></div><div class="discovery-progress-stats"><span>当前阶段 {{ progressCount(job, 'phase_current', job.total_scanned) }} / {{ progressCount(job, 'phase_total', job.total_candidates) }}</span><span>预计总评估 {{ progressCount(job, 'estimated_total_evaluations', job.total_candidates) }} 次</span><span data-testid="strategy-discovery-remaining">预计剩余 {{ formatDuration(job) }}</span></div><small v-if="job.metadata?.best_sharpe !== undefined">吞吐 {{ formatNumber(metadataNumber(job, 'throughput_per_second')) }} 候选/秒 · 当前最佳夏普 {{ formatNumber(typeof job.metadata.best_sharpe === 'number' ? job.metadata.best_sharpe : null) }} · 收益 {{ formatPercent(typeof job.metadata.best_return === 'number' ? job.metadata.best_return : null) }}</small><small v-if="job.metadata?.requested_trials !== undefined" data-testid="strategy-discovery-budget-stats">请求候选 {{ progressCount(job, 'requested_trials', 0) }} · 已评估 {{ progressCount(job, 'evaluated_trials', job.total_scanned) }} · 唯一 {{ progressCount(job, 'unique_evaluated_trials', job.total_scanned) }} · 重复 {{ progressCount(job, 'duplicate_trials', 0) }}</small><small v-if="job.metadata?.stage_durations_seconds" data-testid="strategy-discovery-stage-durations">快照 {{ stageDuration(job, 'snapshot') }} · 粗筛 {{ stageDuration(job, 'coarse') }} · 中筛 {{ stageDuration(job, 'medium') }} · 完整 {{ stageDuration(job, 'full') }} · 验证 {{ stageDuration(job, 'validation') }} · 留出 {{ stageDuration(job, 'holdout') }}</small></div>
+          <div v-if="refinementJob" class="discovery-progress refinement-progress" data-testid="strategy-refinement-progress"><div class="discovery-progress-heading"><strong>{{ progressPhase(refinementJob) }}</strong><span data-testid="strategy-refinement-overall-progress">总体 {{ progressPercent(refinementJob) }}</span></div><div class="progress-track"><span :style="{ width: progressPercent(refinementJob) }"></span></div><div class="discovery-progress-stats"><span>当前阶段 {{ progressCount(refinementJob, 'phase_current', refinementJob.total_scanned) }} / {{ progressCount(refinementJob, 'phase_total', refinementJob.total_candidates) }}</span><span>预计总评估 {{ progressCount(refinementJob, 'estimated_total_evaluations', refinementJob.total_candidates) }} 次</span><span data-testid="strategy-refinement-remaining">预计剩余 {{ formatDuration(refinementJob) }}</span></div><small v-if="refinementJob.metadata?.best_sharpe !== undefined">吞吐 {{ formatNumber(metadataNumber(refinementJob, 'throughput_per_second')) }} 候选/秒 · 当前最佳夏普 {{ formatNumber(typeof refinementJob.metadata.best_sharpe === 'number' ? refinementJob.metadata.best_sharpe : null) }} · 收益 {{ formatPercent(typeof refinementJob.metadata.best_return === 'number' ? refinementJob.metadata.best_return : null) }}</small><small v-if="refinementJob.metadata?.requested_trials !== undefined" data-testid="strategy-refinement-budget-stats">请求候选 {{ progressCount(refinementJob, 'requested_trials', 0) }} · 已评估 {{ progressCount(refinementJob, 'evaluated_trials', refinementJob.total_scanned) }} · 唯一 {{ progressCount(refinementJob, 'unique_evaluated_trials', refinementJob.total_scanned) }} · 重复 {{ progressCount(refinementJob, 'duplicate_trials', 0) }}</small></div>
         </form>
 
         <section class="results-panel panel" data-testid="strategy-discovery-results" aria-live="polite">
@@ -735,7 +753,7 @@ onMounted(async () => {
       <section class="panel discovery-history-panel" data-testid="strategy-discovery-history">
         <div class="panel-heading"><div><span class="section-kicker">03 / HISTORY</span><h2>历史实验</h2></div><button class="secondary-button" type="button" @click="loadHistory">刷新</button></div>
         <div v-if="!history.length" class="inline-empty">暂无历史实验。</div>
-        <div v-else class="table-wrap"><table><thead><tr><th>实验 ID</th><th>类型</th><th>开始时间</th><th>结束时间</th><th>候选数</th><th>耗时</th><th>最佳夏普</th><th>最佳收益</th><th>操作</th></tr></thead><tbody><tr v-for="item in history" :key="String(item.history_id)"><td>{{ item.history_id }}</td><td>{{ historyMode(item) }}</td><td class="muted-code">{{ formatHistoryTimestamp(item.started_at) }}</td><td class="muted-code">{{ formatHistoryTimestamp(item.finished_at) }}</td><td>{{ item.total_trials }}</td><td>{{ formatHistoryDuration(item.duration_seconds) }}</td><td>{{ item.best_sharpe ? '可查看' : '—' }}</td><td>{{ item.best_return ? '可查看' : '—' }}</td><td><button class="table-link" type="button" @click="loadHistoryDetail(String(item.history_id))">加载</button><button class="table-link danger-link" type="button" @click="removeHistory(String(item.history_id))">删除</button></td></tr></tbody></table></div>
+        <div v-else class="table-wrap"><table><thead><tr><th>实验 ID</th><th>类型</th><th>开始时间</th><th>结束时间</th><th>请求/唯一/重复</th><th>耗时</th><th>最佳夏普</th><th>最佳收益</th><th>操作</th></tr></thead><tbody><tr v-for="item in history" :key="String(item.history_id)"><td>{{ item.history_id }}</td><td>{{ historyMode(item) }}</td><td class="muted-code">{{ formatHistoryTimestamp(item.started_at) }}</td><td class="muted-code">{{ formatHistoryTimestamp(item.finished_at) }}</td><td>{{ historyTrialSummary(item) }}</td><td>{{ formatHistoryDuration(item.duration_seconds) }}</td><td>{{ item.best_sharpe ? '可查看' : '—' }}</td><td>{{ item.best_return ? '可查看' : '—' }}</td><td><button class="table-link" type="button" @click="loadHistoryDetail(String(item.history_id))">加载</button><button class="table-link danger-link" type="button" @click="removeHistory(String(item.history_id))">删除</button></td></tr></tbody></table></div>
       </section>
     </main>
   </div>

@@ -92,6 +92,13 @@ def _timestamp_text(value: object) -> str | None:
     return None if value is None else str(value)
 
 
+def _int_or_zero(value: object) -> int:
+    try:
+        return max(0, int(value)) if isinstance(value, (int, float, str)) else 0
+    except (TypeError, ValueError):
+        return 0
+
+
 def _normalize_timestamp(value: object | None, fallback: datetime) -> datetime:
     """Normalize API or DuckDB timestamps to naive UTC datetimes."""
 
@@ -1516,7 +1523,8 @@ class DuckDbMarketDataStore:
                 """
                 SELECT history_id, created_at, data_fingerprint,
                        started_at, finished_at, total_trials, duration_seconds,
-                       results_by_sharpe_json, results_by_return_json, request_json
+                       results_by_sharpe_json, results_by_return_json, request_json,
+                       search_metadata_json
                 FROM strategy_discovery_history
                 ORDER BY created_at DESC, history_id DESC
                 LIMIT ?
@@ -1529,12 +1537,24 @@ class DuckDbMarketDataStore:
                 sharpe = json.loads(str(row[7]))
                 returns = json.loads(str(row[8]))
                 request = json.loads(str(row[9]))
+                search_metadata = json.loads(str(row[10]))
             except json.JSONDecodeError as exc:
                 raise MarketDataStoreError("策略实验历史内容损坏") from exc
             request_map = request if isinstance(request, dict) else {}
+            search_map = search_metadata if isinstance(search_metadata, dict) else {}
             mode = str(request_map.get("mode") or "global")
             refinement = request_map.get("refinement")
             refinement_map = refinement if isinstance(refinement, dict) else {}
+            legacy_total_trials = int(row[5])
+            requested_trials = (
+                _int_or_zero(search_map.get("requested_trials")) or legacy_total_trials
+            )
+            evaluated_trials = (
+                _int_or_zero(search_map.get("evaluated_trials")) or legacy_total_trials
+            )
+            unique_trials = (
+                _int_or_zero(search_map.get("unique_evaluated_trials")) or evaluated_trials
+            )
             summaries.append(
                 {
                     "history_id": str(row[0]),
@@ -1542,7 +1562,11 @@ class DuckDbMarketDataStore:
                     "data_fingerprint": str(row[2]),
                     "started_at": str(row[3]),
                     "finished_at": str(row[4]),
-                    "total_trials": int(row[5]),
+                    "total_trials": legacy_total_trials,
+                    "requested_trials": requested_trials,
+                    "evaluated_trials": evaluated_trials,
+                    "unique_evaluated_trials": unique_trials,
+                    "duplicate_trials": _int_or_zero(search_map.get("duplicate_trials")),
                     "duration_seconds": float(row[6]),
                     "best_sharpe": sharpe[0] if isinstance(sharpe, list) and sharpe else None,
                     "best_return": returns[0] if isinstance(returns, list) and returns else None,

@@ -171,18 +171,29 @@ def create_strategy_discovery(
             history_id = job_id_holder["value"]
             search_metadata = result.get("search_metadata")
             if isinstance(search_metadata, dict):
+                stage_durations = result.get("stage_durations_seconds")
+                completion_metadata: dict[str, object] = {
+                    "algorithm": search_metadata.get("algorithm"),
+                    "surrogate_status": search_metadata.get("surrogate_status"),
+                    "surrogate_enabled": search_metadata.get("surrogate_status") == "enabled",
+                    "stop_reason": search_metadata.get("stop_reason"),
+                    "requested_trials": search_metadata.get("requested_trials"),
+                    "evaluated_trials": search_metadata.get("evaluated_trials"),
+                    "unique_evaluated_trials": search_metadata.get("unique_evaluated_trials"),
+                    "duplicate_trials": search_metadata.get("duplicate_trials"),
+                    "proposal_attempts": search_metadata.get("proposal_attempts"),
+                    "preflight_skipped": search_metadata.get("preflight_skipped"),
+                    "stage_durations_seconds": stage_durations,
+                    "overall_progress": 1.0,
+                    "estimated_seconds_remaining": 0.0,
+                }
                 _runner(request).update_callable_state(
                     history_id,
                     phase="completed",
-                    metadata={
-                        "algorithm": search_metadata.get("algorithm"),
-                        "surrogate_status": search_metadata.get("surrogate_status"),
-                        "surrogate_enabled": search_metadata.get("surrogate_status") == "enabled",
-                        "stop_reason": search_metadata.get("stop_reason"),
-                        "overall_progress": 1.0,
-                        "estimated_seconds_remaining": 0.0,
-                    },
+                    metadata=completion_metadata,
                     progress=1.0,
+                    total_candidates=int(search_metadata.get("requested_trials") or 0),
+                    total_scanned=int(search_metadata.get("evaluated_trials") or 0),
                 )
             if history_id:
                 result["history_id"] = history_id
@@ -273,6 +284,7 @@ def create_strategy_refinement(
                     "finished_at": finished_at.isoformat(),
                 }
             )
+            refinement_search_metadata = result.get("search_metadata")
             _runner(request).update_callable_state(
                 job_id,
                 phase="completed",
@@ -280,6 +292,22 @@ def create_strategy_refinement(
                     "overall_progress": 1.0,
                     "refinement": True,
                     "parent_candidate_hash": payload.parent_candidate_hash,
+                    "requested_trials": (
+                        refinement_search_metadata.get("requested_trials")
+                        if isinstance(refinement_search_metadata, Mapping)
+                        else None
+                    ),
+                    "evaluated_trials": (
+                        refinement_search_metadata.get("evaluated_trials")
+                        if isinstance(refinement_search_metadata, Mapping)
+                        else None
+                    ),
+                    "duplicate_trials": (
+                        refinement_search_metadata.get("duplicate_trials")
+                        if isinstance(refinement_search_metadata, Mapping)
+                        else None
+                    ),
+                    "stage_durations_seconds": result.get("stage_durations_seconds"),
                 },
                 progress=1.0,
             )

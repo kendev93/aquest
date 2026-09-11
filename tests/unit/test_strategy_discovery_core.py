@@ -10,6 +10,7 @@ from itertools import repeat
 import pytest
 
 from selector_app.screening.models import ScreenCondition
+from selector_app.screening.rules import RuleGroup
 from selector_app.strategy_discovery import search as search_module
 from selector_app.strategy_discovery.candidates import (
     build_random_candidate,
@@ -17,7 +18,7 @@ from selector_app.strategy_discovery.candidates import (
     normalize_candidate_config,
 )
 from selector_app.strategy_discovery.catalog import default_indicator_catalog
-from selector_app.strategy_discovery.models import DiscoveryRequest
+from selector_app.strategy_discovery.models import DiscoveryRequest, StrategyCandidate
 from selector_app.strategy_discovery.search import HybridSearchEngine
 
 
@@ -151,17 +152,19 @@ def test_lightgbm_surrogate_reuses_model_until_enough_new_samples(monkeypatch) -
             "search",
             {"sharpe": float(seed), "annual_return": float(seed) / 10},
         )
-        for seed in range(30)
+        for seed in range(40)
     ]
     surrogate = search_module._LightGBMSurrogate()
 
     assert surrogate.fit(candidates[:10], "sharpe") is True
     assert surrogate.fit_count == 1
-    assert surrogate.fit(candidates[:15], "sharpe") is True
-    assert surrogate.fit_count == 1
     assert surrogate.fit(candidates[:20], "sharpe") is True
+    assert surrogate.fit_count == 1
+    assert surrogate.fit(candidates[:25], "sharpe") is True
+    assert surrogate.fit_count == 1
+    assert surrogate.fit(candidates[:35], "sharpe") is True
     assert surrogate.fit_count == 2
-    assert surrogate.fit(candidates[:15], "annual_return") is True
+    assert surrogate.fit(candidates[:20], "annual_return") is True
     assert surrogate.fit_count == 3
 
 
@@ -230,11 +233,81 @@ def test_hybrid_search_can_stop_after_a_long_plateau() -> None:
         batch_size=10,
         convergence_min_trials=20,
         convergence_patience=20,
+        convergence_enabled=True,
         seed=23,
     )
 
     assert result.search_metadata["stop_reason"] == "converged"
     assert result.search_metadata["evaluated_trials"] < 100
+
+
+def test_hybrid_search_runs_the_requested_budget_by_default_and_reports_timings() -> None:
+    request = DiscoveryRequest(
+        base_config={"max_positions": 1},
+        indicator_ids=("technical.ma5",),
+        signal_ids=(),
+        max_conditions_per_side=1,
+        max_trials=400,
+        min_trades=0,
+        max_drawdown=None,
+        multifidelity_enabled=False,
+    )
+    counter = iter(range(10_000))
+
+    def builder(current_request, _generator):
+        index = next(counter)
+        return StrategyCandidate(
+            buy_rule=RuleGroup(
+                conditions=(
+                    ScreenCondition(
+                        left_value="technical.ma5",
+                        operator="gt",
+                        right_constant=float(index),
+                    ),
+                ),
+            ),
+            sell_rule=RuleGroup(
+                conditions=(
+                    ScreenCondition(
+                        left_value="technical.ma5",
+                        operator="lt",
+                        right_constant=float(index + 1),
+                    ),
+                ),
+            ),
+            ranking_value="technical.ma5",
+            rank_order="desc",
+            max_positions=1,
+            base_config=current_request.base_config,
+        )
+
+    result = HybridSearchEngine().search(
+        request,
+        candidate_builder=builder,
+        evaluator=lambda _candidate, _stage: {
+            "annual_return": 0.1,
+            "sharpe": 1.0,
+            "total_trades": 10,
+            "max_drawdown": 0.1,
+        },
+        max_trials=400,
+        seed=31,
+    )
+
+    assert result.search_metadata["evaluated_trials"] == 400
+    assert result.search_metadata["stop_reason"] == "completed"
+    assert result.search_metadata["convergence_enabled"] is False
+    durations = result.search_metadata["stage_durations_seconds"]
+    assert isinstance(durations, dict)
+    assert durations["search"] >= 0
+    assert result.search_metadata["candidate_generation_seconds"] >= 0
+    assert result.search_metadata["proposal_attempts"] >= 400
+    assert 0 < result.search_metadata["unique_proposal_rate"] <= 1
+    assert result.search_metadata["surrogate_refit_interval"] == 25
+    assert result.search_metadata["preflight_skipped"] == 0
+    throughput = result.search_metadata["stage_throughput_per_second"]
+    assert isinstance(throughput, dict)
+    assert "search" in throughput
 
 
 def test_missing_ml_dependencies_fail_without_explicit_local_fallback(monkeypatch) -> None:

@@ -7,8 +7,10 @@ import pandas as pd
 import pytest
 
 from selector_app.market_data.store import DuckDbMarketDataStore
+from selector_app.screening.models import ScreenCondition
+from selector_app.screening.rules import RuleGroup
 from selector_app.strategy_discovery.candidates import build_random_candidate
-from selector_app.strategy_discovery.models import DiscoveryRequest
+from selector_app.strategy_discovery.models import DiscoveryRequest, StrategyCandidate
 from selector_app.strategy_discovery.service import StrategyDiscoveryService
 
 
@@ -128,7 +130,7 @@ def test_service_refines_a_parent_candidate_and_returns_both_leaderboards() -> N
     assert result["results_by_return"]
 
 
-def test_service_rejects_refinement_when_parent_data_fingerprint_changed() -> None:
+def test_service_allows_refinement_when_parent_data_fingerprint_changed() -> None:
     parent_request = request()
     parent = build_random_candidate(parent_request, np.random.default_rng(7))
     experiment = {
@@ -139,13 +141,15 @@ def test_service_rejects_refinement_when_parent_data_fingerprint_changed() -> No
         "data_fingerprint": "changed-data",
     }
 
-    with pytest.raises(ValueError, match="行情已变化"):
-        StrategyDiscoveryService(portfolio_service=FakePortfolioService()).refine(
-            experiment,
-            parent.candidate_hash,
-            max_trials=4,
-            seed=23,
-        )
+    result = StrategyDiscoveryService(portfolio_service=FakePortfolioService()).refine(
+        experiment,
+        parent.candidate_hash,
+        max_trials=4,
+        seed=23,
+    )
+
+    assert result["refinement"]["data_changed"] is True
+    assert result["refinement"]["parent_data_fingerprint"] == "changed-data"
 
 
 def test_service_rejects_an_empty_local_market_store_before_search(tmp_path: Path) -> None:
@@ -197,13 +201,43 @@ def test_real_duckdb_service_evaluates_candidates_in_eight_processes(tmp_path: P
         holdout_candidates=1,
         min_trades=0,
         max_drawdown=None,
-        multifidelity_enabled=False,
+        multifidelity_enabled=True,
         seed=19,
     )
 
     events: list[tuple[int, int, str, dict[str, object]]] = []
+
+    def candidate_builder(discovery_request: DiscoveryRequest, rng: object) -> StrategyCandidate:
+        choice = getattr(rng, "choice")
+        threshold = float(choice((0.0, 1.0, 2.0, 3.0, 4.0, 5.0)))
+        return StrategyCandidate(
+            buy_rule=RuleGroup(
+                conditions=(
+                    ScreenCondition(
+                        left_value="technical.ma5",
+                        operator="gt",
+                        right_constant=threshold,
+                    ),
+                ),
+            ),
+            sell_rule=RuleGroup(
+                conditions=(
+                    ScreenCondition(
+                        left_value="technical.ma5",
+                        operator="lt",
+                        right_constant=-1.0,
+                    ),
+                ),
+            ),
+            ranking_value="technical.ma5",
+            rank_order="desc",
+            max_positions=1,
+            base_config=discovery_request.base_config,
+        )
+
     result = StrategyDiscoveryService(store=store).run(
         experiment,
+        candidate_builder=candidate_builder,
         progress_callback=lambda current, total, phase, metadata: events.append(
             (current, total, phase, dict(metadata))
         ),
@@ -213,5 +247,13 @@ def test_real_duckdb_service_evaluates_candidates_in_eight_processes(tmp_path: P
     assert result["search_metadata"]["evaluation_workers"] == 8
     assert result["algorithm_metadata"]["data_snapshot"] == "shared_memmap"
     assert result["algorithm_metadata"]["snapshot_build_seconds"] >= 0
+    assert result["algorithm_metadata"]["snapshot_metrics"]["indicator_compute_seconds"] >= 0
+    stage_durations = result["stage_durations_seconds"]
+    assert stage_durations["snapshot"] >= 0
+    assert stage_durations["search"] >= 0
+    assert stage_durations["validation"] >= 0
+    assert stage_durations["holdout"] >= 0
+    assert result["algorithm_metadata"]["checkpoint_metrics"]["captured"] >= 1
+    assert result["algorithm_metadata"]["checkpoint_metrics"]["resume_attempts"] >= 1
     assert events[0][2] == "preparing_snapshot"
     assert len(result["data_fingerprint"]) == 64

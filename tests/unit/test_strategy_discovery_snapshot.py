@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -57,6 +58,49 @@ def _experiment(store_path: Path) -> DiscoveryRequest:
         multifidelity_enabled=False,
         seed=7,
     )
+
+
+def _candidate_config() -> object:
+    return PortfolioBacktestRequest.model_validate(
+        {
+            "universe": "all",
+            "selected_signals": [],
+            "combine_mode": "all",
+            "minimum_matches": None,
+            "buy_rule": {
+                "signals": [],
+                "conditions": [
+                    {
+                        "left_value": "technical.ma5",
+                        "operator": "gt",
+                        "right_value": None,
+                        "right_constant": 1.0,
+                    }
+                ],
+                "combine_mode": "all",
+                "minimum_matches": None,
+            },
+            "ranking_value": "technical.ma5",
+            "rank_order": "desc",
+            "max_positions": 1,
+            "rebalance_frequency": "daily",
+            "sell_rule": {
+                "signals": [],
+                "conditions": [
+                    {
+                        "left_value": "technical.ma5",
+                        "operator": "lt",
+                        "right_value": None,
+                        "right_constant": 100.0,
+                    }
+                ],
+                "combine_mode": "all",
+                "minimum_matches": None,
+            },
+            "start_date": "2024-01-01",
+            "end_date": "2024-03-20",
+        }
+    ).to_config()
 
 
 def test_snapshot_replay_matches_ordinary_portfolio_backtest(tmp_path: Path) -> None:
@@ -142,3 +186,167 @@ def test_snapshot_replay_matches_ordinary_portfolio_backtest(tmp_path: Path) -> 
     assert prepared.data_fingerprint == ordinary.data_fingerprint
     assert prepared.states == ()
     assert prepared.ranking_events == ()
+
+
+def test_snapshot_reuses_persistent_indicator_cache_on_repeated_builds(tmp_path: Path) -> None:
+    dates = pd.date_range("2024-01-01", periods=80, freq="D")
+    close = np.linspace(10.0, 14.0, len(dates))
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars(
+        "SH",
+        "600000",
+        "stock",
+        pd.DataFrame(
+            {
+                "date": dates,
+                "open": close,
+                "high": close + 0.2,
+                "low": close - 0.2,
+                "close": close,
+                "volume": np.full(len(dates), 100_000.0),
+                "amount": close * 100_000.0,
+                "bar_status": "completed",
+            }
+        ),
+    )
+    experiment = replace(
+        _experiment(store.database_path),
+        required_buy_conditions=(),
+        required_sell_conditions=(),
+    )
+
+    with build_discovery_snapshot(store, experiment) as first_snapshot:
+        first_context = first_snapshot.contexts_for_config(
+            PortfolioBacktestRequest.model_validate(
+                {
+                    "universe": "all",
+                    "selected_signals": [],
+                    "combine_mode": "all",
+                    "minimum_matches": None,
+                    "buy_rule": {
+                        "signals": [],
+                        "conditions": [
+                            {
+                                "left_value": "technical.ma5",
+                                "operator": "gt",
+                                "right_value": None,
+                                "right_constant": 1.0,
+                            }
+                        ],
+                        "combine_mode": "all",
+                        "minimum_matches": None,
+                    },
+                    "ranking_value": "technical.ma5",
+                    "rank_order": "desc",
+                    "max_positions": 1,
+                    "rebalance_frequency": "daily",
+                    "sell_rule": {
+                        "signals": [],
+                        "conditions": [
+                            {
+                                "left_value": "technical.ma5",
+                                "operator": "lt",
+                                "right_value": None,
+                                "right_constant": 100.0,
+                            }
+                        ],
+                        "combine_mode": "all",
+                        "minimum_matches": None,
+                    },
+                    "start_date": "2024-01-01",
+                    "end_date": "2024-03-20",
+                }
+            ).to_config()
+        )[0]
+        first_metadata = dict(first_snapshot.build_metadata)
+
+    with build_discovery_snapshot(store, experiment) as second_snapshot:
+        second_context = second_snapshot.contexts_for_config(
+            PortfolioBacktestRequest.model_validate(
+                {
+                    "universe": "all",
+                    "selected_signals": [],
+                    "combine_mode": "all",
+                    "minimum_matches": None,
+                    "buy_rule": {
+                        "signals": [],
+                        "conditions": [
+                            {
+                                "left_value": "technical.ma5",
+                                "operator": "gt",
+                                "right_value": None,
+                                "right_constant": 1.0,
+                            }
+                        ],
+                        "combine_mode": "all",
+                        "minimum_matches": None,
+                    },
+                    "ranking_value": "technical.ma5",
+                    "rank_order": "desc",
+                    "max_positions": 1,
+                    "rebalance_frequency": "daily",
+                    "sell_rule": {
+                        "signals": [],
+                        "conditions": [
+                            {
+                                "left_value": "technical.ma5",
+                                "operator": "lt",
+                                "right_value": None,
+                                "right_constant": 100.0,
+                            }
+                        ],
+                        "combine_mode": "all",
+                        "minimum_matches": None,
+                    },
+                    "start_date": "2024-01-01",
+                    "end_date": "2024-03-20",
+                }
+            ).to_config()
+        )[0]
+        second_metadata = dict(second_snapshot.build_metadata)
+
+    assert first_metadata["indicator_computed"] > 0
+    assert second_metadata["indicator_persistent_hits"] > 0
+    np.testing.assert_allclose(
+        first_context.values["technical.ma5"],
+        second_context.values["technical.ma5"],
+        equal_nan=True,
+    )
+
+
+def test_snapshot_reuses_base_contexts_for_repeated_candidate_evaluations(tmp_path: Path) -> None:
+    dates = pd.date_range("2024-01-01", periods=80, freq="D")
+    close = np.linspace(10.0, 14.0, len(dates))
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars(
+        "SH",
+        "600000",
+        "stock",
+        pd.DataFrame(
+            {
+                "date": dates,
+                "open": close,
+                "high": close + 0.2,
+                "low": close - 0.2,
+                "close": close,
+                "volume": np.full(len(dates), 100_000.0),
+                "amount": close * 100_000.0,
+                "bar_status": "completed",
+            }
+        ),
+    )
+    experiment = replace(
+        _experiment(store.database_path),
+        required_buy_conditions=(),
+        required_sell_conditions=(),
+    )
+    config = _candidate_config()
+
+    with build_discovery_snapshot(store, experiment) as snapshot:
+        first = snapshot.contexts_for_config(config)
+        second = snapshot.contexts_for_config(config)
+        metrics = snapshot.context_cache_metrics
+
+    assert len(first) == len(second) == 1
+    assert metrics["base_contexts_built"] == 1
+    assert metrics["base_context_cache_hits"] > 0

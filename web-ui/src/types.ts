@@ -622,6 +622,7 @@ export interface StrategyDiscoveryResult {
   search_metadata: Record<string, unknown>
   validation_metadata: Record<string, unknown>
   algorithm_metadata?: Record<string, unknown>
+  stage_durations_seconds?: Record<string, number>
   data_fingerprint?: string
   duration_seconds?: number
   started_at?: string
@@ -633,6 +634,7 @@ export interface StrategyDiscoveryResult {
     parent_candidate?: StrategyDiscoveryCandidate
     parent_metrics?: Record<string, unknown>
     parent_data_fingerprint?: string
+    data_changed?: boolean
   }
 }
 

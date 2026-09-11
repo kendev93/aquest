@@ -77,6 +77,7 @@ class DiscoveryRequest:
     max_turnover: float | None = None
     max_complexity: int = 12
     multifidelity_enabled: bool = True
+    convergence_enabled: bool = False
     seed: int = 0
 
     def __post_init__(self) -> None:
@@ -137,6 +138,8 @@ class DiscoveryRequest:
             raise ValueError("最大换手率不能小于 0")
         if not 0 <= self.max_complexity <= 50:
             raise ValueError("策略复杂度必须在 0 到 50 之间")
+        if not isinstance(self.convergence_enabled, bool):
+            raise ValueError("提前收敛开关必须是布尔值")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -163,6 +166,7 @@ class DiscoveryRequest:
             "max_turnover": self.max_turnover,
             "max_complexity": self.max_complexity,
             "multifidelity_enabled": self.multifidelity_enabled,
+            "convergence_enabled": self.convergence_enabled,
             "seed": self.seed,
         }
 

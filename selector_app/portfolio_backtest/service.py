@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import heapq
+import math
+from bisect import bisect_right
 from collections import Counter, deque
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -119,6 +121,256 @@ class _PendingBuy:
     symbol: str
     signal_date: int
     budget: float
+
+
+@dataclass(frozen=True)
+class SimulationCheckpoint:
+    """Serializable state captured after a portfolio simulation prefix.
+
+    The checkpoint intentionally contains the accumulated output rows as well
+    as the mutable trading state.  A resumed simulation can therefore return
+    the same report as a from-scratch run instead of only matching the final
+    cash balance.
+    """
+
+    last_date: int
+    cash: float
+    positions: Mapping[str, _Position]
+    pending_sells: Mapping[str, _PendingSell]
+    pending_buys: tuple[_PendingBuy, ...]
+    cooldown_until: Mapping[str, int]
+    last_prices: Mapping[str, float]
+    peak_value: float
+    max_drawdown: float
+    processed_dates: tuple[int, ...]
+    equity: tuple[Mapping[str, PortfolioJsonValue], ...]
+    trades: tuple[Mapping[str, PortfolioJsonValue], ...]
+    states: tuple[Mapping[str, PortfolioJsonValue], ...]
+    ranking_events: tuple[Mapping[str, PortfolioJsonValue], ...]
+    include_details: bool
+    data_fingerprint: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.processed_dates or self.last_date != self.processed_dates[-1]:
+            raise ValueError("模拟检查点日期状态无效")
+        if not isinstance(self.include_details, bool):
+            raise ValueError("模拟检查点明细开关无效")
+        if len(self.equity) != len(self.processed_dates):
+            raise ValueError("模拟检查点净值状态长度无效")
+        if self.include_details and len(self.states) != len(self.processed_dates):
+            raise ValueError("模拟检查点持仓状态长度无效")
+        if not self.include_details and (self.states or self.ranking_events):
+            raise ValueError("无明细模拟检查点包含明细状态")
+        object.__setattr__(self, "positions", dict(self.positions))
+        object.__setattr__(self, "pending_sells", dict(self.pending_sells))
+        object.__setattr__(self, "pending_buys", tuple(self.pending_buys))
+        object.__setattr__(self, "cooldown_until", dict(self.cooldown_until))
+        object.__setattr__(self, "last_prices", dict(self.last_prices))
+        for field_name in ("equity", "trades", "states", "ranking_events"):
+            object.__setattr__(
+                self,
+                field_name,
+                tuple(dict(row) for row in getattr(self, field_name)),
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "version": 1,
+            "last_date": self.last_date,
+            "cash": self.cash,
+            "positions": {
+                symbol: _position_to_dict(position) for symbol, position in self.positions.items()
+            },
+            "pending_sells": {
+                symbol: {
+                    "signal_date": pending.signal_date,
+                    "reason": pending.reason,
+                }
+                for symbol, pending in self.pending_sells.items()
+            },
+            "pending_buys": [
+                {
+                    "symbol": pending.symbol,
+                    "signal_date": pending.signal_date,
+                    "budget": pending.budget,
+                }
+                for pending in self.pending_buys
+            ],
+            "cooldown_until": dict(self.cooldown_until),
+            "last_prices": dict(self.last_prices),
+            "peak_value": self.peak_value,
+            "max_drawdown": self.max_drawdown,
+            "processed_dates": list(self.processed_dates),
+            "equity": [dict(row) for row in self.equity],
+            "trades": [dict(row) for row in self.trades],
+            "states": [dict(row) for row in self.states],
+            "ranking_events": [dict(row) for row in self.ranking_events],
+            "include_details": self.include_details,
+            "data_fingerprint": self.data_fingerprint,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, object]) -> SimulationCheckpoint:
+        """Restore a checkpoint and reject malformed or unsafe state."""
+
+        if payload.get("version") != 1:
+            raise ValueError("模拟检查点版本不受支持")
+        positions_payload = _checkpoint_mapping(payload.get("positions"), "positions")
+        pending_sells_payload = _checkpoint_mapping(payload.get("pending_sells"), "pending_sells")
+        pending_buys_payload = _checkpoint_list(payload.get("pending_buys"), "pending_buys")
+        processed_dates = tuple(
+            _checkpoint_int(item, "processed_dates")
+            for item in _checkpoint_list(payload.get("processed_dates"), "processed_dates")
+        )
+        positions = {
+            str(symbol): _position_from_dict(str(symbol), value)
+            for symbol, value in positions_payload.items()
+        }
+        pending_sells = {
+            str(symbol): _PendingSell(
+                signal_date=_checkpoint_int(
+                    _checkpoint_mapping(value, "pending_sells"), "signal_date"
+                ),
+                reason=str(_checkpoint_mapping(value, "pending_sells").get("reason") or ""),
+            )
+            for symbol, value in pending_sells_payload.items()
+        }
+        pending_buys = tuple(
+            _PendingBuy(
+                symbol=str(_checkpoint_mapping(value, "pending_buys").get("symbol") or ""),
+                signal_date=_checkpoint_int(
+                    _checkpoint_mapping(value, "pending_buys"), "signal_date"
+                ),
+                budget=_checkpoint_float(_checkpoint_mapping(value, "pending_buys"), "budget"),
+            )
+            for value in pending_buys_payload
+        )
+        cooldown_until = {
+            str(symbol): _checkpoint_int(value, "cooldown_until")
+            for symbol, value in _checkpoint_mapping(
+                payload.get("cooldown_until"), "cooldown_until"
+            ).items()
+        }
+        last_prices = {
+            str(symbol): _checkpoint_float(value, "last_prices")
+            for symbol, value in _checkpoint_mapping(
+                payload.get("last_prices"), "last_prices"
+            ).items()
+        }
+
+        include_details = payload.get("include_details")
+        if not isinstance(include_details, bool):
+            raise ValueError("模拟检查点字段 include_details 必须是布尔值")
+        return cls(
+            last_date=_checkpoint_int(payload, "last_date"),
+            cash=_checkpoint_float(payload, "cash"),
+            positions=positions,
+            pending_sells=pending_sells,
+            pending_buys=pending_buys,
+            cooldown_until=cooldown_until,
+            last_prices=last_prices,
+            peak_value=_checkpoint_float(payload, "peak_value"),
+            max_drawdown=_checkpoint_float(payload, "max_drawdown"),
+            processed_dates=processed_dates,
+            equity=_checkpoint_records(payload, "equity"),
+            trades=_checkpoint_records(payload, "trades"),
+            states=_checkpoint_records(payload, "states"),
+            ranking_events=_checkpoint_records(payload, "ranking_events"),
+            include_details=include_details,
+            data_fingerprint=str(payload.get("data_fingerprint") or ""),
+        )
+
+
+def _checkpoint_mapping(payload: object, field_name: str) -> Mapping[str, object]:
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"模拟检查点字段 {field_name} 必须是对象")
+    return payload
+
+
+def _checkpoint_list(payload: object, field_name: str) -> list[object]:
+    if not isinstance(payload, list):
+        raise ValueError(f"模拟检查点字段 {field_name} 必须是数组")
+    return payload
+
+
+def _checkpoint_int(payload: object, field_name: str) -> int:
+    value = payload.get(field_name) if isinstance(payload, Mapping) else payload
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"模拟检查点字段 {field_name} 必须是整数")
+    return int(value)
+
+
+def _checkpoint_float(payload: object, field_name: str) -> float:
+    value = payload.get(field_name) if isinstance(payload, Mapping) else payload
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"模拟检查点字段 {field_name} 必须是数字")
+    numeric_value = float(value)
+    if not math.isfinite(numeric_value):
+        raise ValueError(f"模拟检查点字段 {field_name} 必须是有限数字")
+    return numeric_value
+
+
+def _checkpoint_records(
+    payload: Mapping[str, object], field_name: str
+) -> tuple[Mapping[str, PortfolioJsonValue], ...]:
+    return tuple(
+        dict(_checkpoint_mapping(row, field_name))
+        for row in _checkpoint_list(payload.get(field_name), field_name)
+    )
+
+
+def _position_to_dict(position: _Position) -> dict[str, object]:
+    return {
+        "market": position.market,
+        "code": position.code,
+        "instrument_type": position.instrument_type,
+        "board": position.board,
+        "size": position.size,
+        "entry_price": position.entry_price,
+        "entry_date": position.entry_date,
+        "highest_price": position.highest_price,
+        "buy_commission": position.buy_commission,
+        "buy_slippage": position.buy_slippage,
+        "name": position.name,
+    }
+
+
+def _position_from_dict(symbol: str, payload: object) -> _Position:
+    values = _checkpoint_mapping(payload, f"positions[{symbol}]")
+    market = str(values.get("market") or "")
+    code = str(values.get("code") or "")
+    instrument_type = str(values.get("instrument_type") or "")
+    board = str(values.get("board") or "")
+    if not market or not code or f"{market}{code}" != symbol:
+        raise ValueError(f"模拟检查点持仓标识无效: {symbol}")
+    if instrument_type not in {"stock", "fund", "index", "bond"}:
+        raise ValueError(f"模拟检查点持仓类型无效: {symbol}")
+    if board not in {"main", "star", "chinext", "b_share", "fund", "index", "bond"}:
+        raise ValueError(f"模拟检查点持仓板块无效: {symbol}")
+    size = _checkpoint_float(values.get("size"), f"positions[{symbol}].size")
+    entry_price = _checkpoint_float(values.get("entry_price"), f"positions[{symbol}].entry_price")
+    highest_price = _checkpoint_float(
+        values.get("highest_price"), f"positions[{symbol}].highest_price"
+    )
+    if size <= 0 or entry_price <= 0 or highest_price <= 0:
+        raise ValueError(f"模拟检查点持仓数值无效: {symbol}")
+    return _Position(
+        market=market,
+        code=code,
+        instrument_type=cast(InstrumentType, instrument_type),
+        board=cast(InstrumentBoard, board),
+        size=size,
+        entry_price=entry_price,
+        entry_date=_checkpoint_int(values.get("entry_date"), f"positions[{symbol}].entry_date"),
+        highest_price=highest_price,
+        buy_commission=_checkpoint_float(
+            values.get("buy_commission"), f"positions[{symbol}].buy_commission"
+        ),
+        buy_slippage=_checkpoint_float(
+            values.get("buy_slippage"), f"positions[{symbol}].buy_slippage"
+        ),
+        name=(None if values.get("name") is None else str(values.get("name"))),
+    )
 
 
 class PortfolioBacktestService:
@@ -238,6 +490,8 @@ class PortfolioBacktestService:
         *,
         total_candidates: int | None = None,
         include_details: bool = True,
+        checkpoint: SimulationCheckpoint | None = None,
+        checkpoint_callback: Callable[[SimulationCheckpoint], None] | None = None,
     ) -> PortfolioBacktestReport:
         """Run the simulator on candidate-specific contexts prepared upstream.
 
@@ -266,6 +520,19 @@ class PortfolioBacktestService:
                 candidate_total,
                 {"共享行情快照没有可用日期": candidate_total},
             )
+        data_fingerprint = _portfolio_fingerprint(prepared)
+        if not self._has_preflight_candidates(prepared, config):
+            simulation = self._no_trade_simulation(dates, config, include_details=include_details)
+            return self._build_report(
+                config,
+                dates,
+                candidate_total,
+                len(prepared),
+                candidate_total - len(prepared),
+                {},
+                simulation,
+                data_fingerprint,
+            )
         fitness_filter = self._build_fitness_filter(prepared, config)
         simulation = self._simulate(
             prepared,
@@ -273,7 +540,14 @@ class PortfolioBacktestService:
             config,
             fitness_filter,
             include_details=include_details,
+            checkpoint=checkpoint,
+            data_fingerprint=data_fingerprint,
         )
+        restored_checkpoint = simulation.get("checkpoint")
+        if checkpoint_callback is not None and isinstance(
+            restored_checkpoint, SimulationCheckpoint
+        ):
+            checkpoint_callback(restored_checkpoint)
         return self._build_report(
             config,
             dates,
@@ -282,7 +556,7 @@ class PortfolioBacktestService:
             candidate_total - len(prepared),
             {},
             simulation,
-            _portfolio_fingerprint(prepared),
+            data_fingerprint,
         )
 
     def run_stock(
@@ -628,6 +902,84 @@ class PortfolioBacktestService:
     def _global_dates(contexts: list[_StockSeries]) -> list[int]:
         return sorted({int(value) for context in contexts for value in context.dates})
 
+    @staticmethod
+    def _has_preflight_candidates(
+        contexts: Sequence[_StockSeries], config: PortfolioBacktestConfig
+    ) -> bool:
+        """Check for a logically executable buy before entering the state machine."""
+
+        for context in contexts:
+            ranking_values = context.values.get(config.ranking_value)
+            if ranking_values is None:
+                continue
+            execution_prices = context.opens if config.execution == "next_open" else context.closes
+            ranking_array = np.asarray(ranking_values, dtype=float)
+            execution_array = np.asarray(execution_prices, dtype=float)
+            candidate_mask = (
+                np.asarray(context.buy_mask, dtype=bool)
+                & np.isfinite(ranking_array)
+                & np.isfinite(execution_array)
+                & (execution_array > 0)
+            )
+            if bool(np.any(candidate_mask)):
+                return True
+        return False
+
+    @staticmethod
+    def _no_trade_simulation(
+        dates: Sequence[int],
+        config: PortfolioBacktestConfig,
+        *,
+        include_details: bool,
+    ) -> dict[str, object]:
+        """Build the all-cash result without scanning every context per date."""
+
+        equity: list[dict[str, PortfolioJsonValue]] = []
+        states: list[dict[str, PortfolioJsonValue]] = []
+        ranking_events: list[dict[str, PortfolioJsonValue]] = []
+        date_list = [int(value) for value in dates]
+        for index, current_date in enumerate(date_list):
+            equity.append(
+                {
+                    "date": _date_text(current_date),
+                    "cash": float(config.initial_cash),
+                    "position_value": 0.0,
+                    "total": float(config.initial_cash),
+                    "positions_count": 0,
+                }
+            )
+            if not include_details:
+                continue
+            states.append(
+                {
+                    "date": _date_text(current_date),
+                    "cash": float(config.initial_cash),
+                    "position_value": 0.0,
+                    "total": float(config.initial_cash),
+                    "positions_count": 0,
+                    "holdings": [],
+                }
+            )
+            if PortfolioBacktestService._should_refresh(
+                index, date_list, config.rebalance_frequency
+            ):
+                ranking_events.append(
+                    {
+                        "date": _date_text(current_date),
+                        "slots_available": config.max_positions,
+                        "ranking_value": config.ranking_value,
+                        "candidates": [],
+                    }
+                )
+        return {
+            "cash": float(config.initial_cash),
+            "equity": equity,
+            "states": states,
+            "trades": [],
+            "ranking_events": ranking_events,
+            "diagnostic": "预检无可交易候选",
+        }
+
     def _simulate(
         self,
         contexts: list[_StockSeries],
@@ -636,20 +988,55 @@ class PortfolioBacktestService:
         fitness_filter: RollingFitnessFilter | None = None,
         *,
         include_details: bool = True,
+        checkpoint: SimulationCheckpoint | None = None,
+        data_fingerprint: str = "",
     ) -> dict[str, object]:
         by_symbol = {context.symbol: context for context in contexts}
-        positions: dict[str, _Position] = {}
-        pending_sells: dict[str, _PendingSell] = {}
-        pending_buys: list[_PendingBuy] = []
-        cooldown_until: dict[str, int] = {}
-        last_prices: dict[str, float] = {}
-        cash = config.initial_cash
-        trades: list[dict[str, PortfolioJsonValue]] = []
-        equity: list[dict[str, PortfolioJsonValue]] = []
-        states: list[dict[str, PortfolioJsonValue]] = []
-        ranking_events: list[dict[str, PortfolioJsonValue]] = []
+        start_index = 0
+        if checkpoint is None:
+            positions: dict[str, _Position] = {}
+            pending_sells: dict[str, _PendingSell] = {}
+            pending_buys: list[_PendingBuy] = []
+            cooldown_until: dict[str, int] = {}
+            last_prices: dict[str, float] = {}
+            peak_value = float(config.initial_cash)
+            max_drawdown = 0.0
+            cash = config.initial_cash
+            trades: list[dict[str, PortfolioJsonValue]] = []
+            equity: list[dict[str, PortfolioJsonValue]] = []
+            states: list[dict[str, PortfolioJsonValue]] = []
+            ranking_events: list[dict[str, PortfolioJsonValue]] = []
+        else:
+            start_index = self._checkpoint_start_index(
+                checkpoint,
+                dates,
+                data_fingerprint=data_fingerprint,
+                include_details=include_details,
+            )
+            positions = {
+                symbol: replace(position) for symbol, position in checkpoint.positions.items()
+            }
+            known_symbols = set(by_symbol)
+            if any(symbol not in known_symbols for symbol in positions):
+                raise ValueError("模拟检查点持仓标的不在当前行情上下文中")
+            pending_sells = dict(checkpoint.pending_sells)
+            pending_buys = list(checkpoint.pending_buys)
+            if any(symbol not in known_symbols for symbol in pending_sells):
+                raise ValueError("模拟检查点卖出订单标的不在当前行情上下文中")
+            if any(pending.symbol not in known_symbols for pending in pending_buys):
+                raise ValueError("模拟检查点买入订单标的不在当前行情上下文中")
+            cooldown_until = dict(checkpoint.cooldown_until)
+            last_prices = dict(checkpoint.last_prices)
+            peak_value = float(checkpoint.peak_value)
+            max_drawdown = float(checkpoint.max_drawdown)
+            cash = float(checkpoint.cash)
+            trades = [dict(record) for record in checkpoint.trades]
+            equity = [dict(record) for record in checkpoint.equity]
+            states = [dict(record) for record in checkpoint.states]
+            ranking_events = [dict(record) for record in checkpoint.ranking_events]
 
-        for date_index, current_date in enumerate(dates):
+        for date_index in range(start_index, len(dates)):
+            current_date = dates[date_index]
             cash = self._execute_sells(
                 current_date,
                 positions,
@@ -697,6 +1084,9 @@ class PortfolioBacktestService:
                 if index is not None:
                     last_prices[symbol] = float(context.closes[index])
             total_value, position_value = self._portfolio_value(positions, last_prices, cash)
+            peak_value = max(peak_value, total_value)
+            current_drawdown = (peak_value - total_value) / peak_value if peak_value > 0 else 0.0
+            max_drawdown = max(max_drawdown, current_drawdown)
             equity.append(
                 {
                     "date": _date_text(current_date),
@@ -744,7 +1134,47 @@ class PortfolioBacktestService:
             "states": states,
             "trades": trades,
             "ranking_events": ranking_events,
+            "checkpoint": SimulationCheckpoint(
+                last_date=int(dates[-1]),
+                cash=float(cash),
+                positions={symbol: replace(position) for symbol, position in positions.items()},
+                pending_sells=dict(pending_sells),
+                pending_buys=tuple(pending_buys),
+                cooldown_until=dict(cooldown_until),
+                last_prices=dict(last_prices),
+                peak_value=float(peak_value),
+                max_drawdown=float(max_drawdown),
+                processed_dates=tuple(int(value) for value in dates),
+                equity=tuple(dict(record) for record in equity),
+                trades=tuple(dict(record) for record in trades),
+                states=tuple(dict(record) for record in states),
+                ranking_events=tuple(dict(record) for record in ranking_events),
+                include_details=include_details,
+                data_fingerprint=data_fingerprint,
+            ),
         }
+
+    @staticmethod
+    def _checkpoint_start_index(
+        checkpoint: SimulationCheckpoint,
+        dates: Sequence[int],
+        *,
+        data_fingerprint: str,
+        include_details: bool,
+    ) -> int:
+        if checkpoint.data_fingerprint and data_fingerprint:
+            if checkpoint.data_fingerprint != data_fingerprint:
+                raise ValueError("模拟检查点行情指纹不匹配")
+        elif checkpoint.data_fingerprint != data_fingerprint:
+            raise ValueError("模拟检查点缺少可验证的行情指纹")
+        if checkpoint.include_details != include_details:
+            raise ValueError("模拟检查点明细模式不一致")
+        prefix = tuple(int(value) for value in dates[: len(checkpoint.processed_dates)])
+        if prefix != checkpoint.processed_dates:
+            raise ValueError("模拟检查点日期前缀不连续")
+        if len(dates) < len(checkpoint.processed_dates):
+            raise ValueError("模拟检查点超出当前回测日期范围")
+        return bisect_right(dates, checkpoint.last_date)
 
     def _execute_sells(
         self,
@@ -1242,7 +1672,12 @@ class PortfolioBacktestService:
             }
             performance["avg_holding_days"] = _average_holding_days(trades)
             performance["turnover"] = _portfolio_turnover(trades, config.initial_cash)
-            diagnostic = analyzer.diagnostic
+            simulation_diagnostic = simulation.get("diagnostic")
+            diagnostic = (
+                str(simulation_diagnostic)
+                if isinstance(simulation_diagnostic, str) and simulation_diagnostic
+                else analyzer.diagnostic
+            )
         serialized_equity = tuple(
             {
                 **record,

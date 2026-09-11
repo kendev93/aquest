@@ -71,7 +71,7 @@ class _TrialAdapter:
 class _LightGBMSurrogate:
     """Predict search-period scores only; never replaces real backtests."""
 
-    _REFIT_INTERVAL = 10
+    _REFIT_INTERVAL = 25
 
     def __init__(self, *, strict: bool = False) -> None:
         self._model: Any = None
@@ -88,6 +88,10 @@ class _LightGBMSurrogate:
     @property
     def fit_count(self) -> int:
         return self._fit_count
+
+    @property
+    def refit_interval(self) -> int:
+        return self._REFIT_INTERVAL
 
     def _features(self, candidate: StrategyCandidate) -> dict[str, float]:
         cached = self._feature_cache.get(candidate.candidate_hash)
@@ -235,6 +239,7 @@ class HybridSearchEngine:
         evaluation_mode: str | None = None,
         convergence_min_trials: int | None = None,
         convergence_patience: int | None = None,
+        convergence_enabled: bool | None = None,
         max_trials: int | None = None,
         seed: int | None = None,
         validation_limit: int = 50,
@@ -246,17 +251,31 @@ class HybridSearchEngine:
         resolved_batch_size = max(1, min(8, int(batch_size)))
         resolved_evaluation_workers = max(1, min(8, int(evaluation_workers)))
         resolved_seed = request.seed if seed is None else int(seed)
-        resolved_convergence_min_trials = _resolve_convergence_parameter(
-            convergence_min_trials,
-            trial_limit,
-            default_ratio=0.25,
-            default_floor=200,
+        if convergence_enabled is None:
+            convergence_enabled = request.convergence_enabled or (
+                convergence_min_trials is not None or convergence_patience is not None
+            )
+        if not isinstance(convergence_enabled, bool):
+            raise ValueError("提前收敛开关必须是布尔值")
+        resolved_convergence_min_trials = (
+            _resolve_convergence_parameter(
+                convergence_min_trials,
+                trial_limit,
+                default_ratio=0.25,
+                default_floor=200,
+            )
+            if convergence_enabled
+            else None
         )
-        resolved_convergence_patience = _resolve_convergence_parameter(
-            convergence_patience,
-            trial_limit,
-            default_ratio=0.2,
-            default_floor=100,
+        resolved_convergence_patience = (
+            _resolve_convergence_parameter(
+                convergence_patience,
+                trial_limit,
+                default_ratio=0.2,
+                default_floor=100,
+            )
+            if convergence_enabled
+            else None
         )
         rng = random.Random(resolved_seed)
         observed: list[StrategyCandidate] = []
@@ -289,6 +308,7 @@ class HybridSearchEngine:
 
         started = time.monotonic()
         warmup = min(50, max(10, trial_limit))
+        attempt_limit = max(20, math.ceil(trial_limit / resolved_batch_size) * 2)
         evaluated = 0
         attempts = 0
         duplicates = 0
@@ -298,21 +318,131 @@ class HybridSearchEngine:
         best_scores = {"sharpe": float("-inf"), "annual_return": float("-inf")}
         last_improvement = 0
         fidelity_counts: dict[str, int] = {"coarse": 0, "medium": 0, "full": 0}
+        stage_durations: dict[str, float] = {
+            "search": 0.0,
+            "coarse": 0.0,
+            "medium": 0.0,
+            "full": 0.0,
+        }
+        evaluation_seconds: dict[str, float] = {"search": 0.0, "medium": 0.0, "full": 0.0}
+        candidate_generation_seconds = 0.0
+        surrogate_seconds = 0.0
+        proposal_attempts = 0
+        complexity_rejections = 0
+        preflight_skipped = 0
+        max_proposal_multiplier = 1
+
+        def proposal_multiplier() -> int:
+            """Adapt proposal oversampling to the observed duplicate rate."""
+
+            if proposal_attempts < 20:
+                return 4
+            duplicate_rate = duplicates / proposal_attempts
+            if duplicate_rate < 0.25:
+                return 4
+            if duplicate_rate < 0.5:
+                return 5
+            if duplicate_rate < 0.75:
+                return 6
+            if duplicate_rate < 0.9:
+                return 6
+            return 8
+
+        def proposal_attempt_budget(target: int) -> int:
+            nonlocal max_proposal_multiplier
+            multiplier = proposal_multiplier()
+            max_proposal_multiplier = max(max_proposal_multiplier, multiplier)
+            return max(target + 8, target * multiplier)
+
+        def build_candidate(generator: object) -> StrategyCandidate:
+            nonlocal candidate_generation_seconds
+            candidate_started = time.perf_counter()
+            try:
+                return candidate_builder(request, generator)
+            finally:
+                candidate_generation_seconds += time.perf_counter() - candidate_started
+
+        def propose_optuna_candidates(
+            objective_name: str,
+            target: int,
+        ) -> list[tuple[Any, StrategyCandidate]]:
+            nonlocal proposal_attempts, duplicates, complexity_rejections
+            proposals: list[tuple[Any, StrategyCandidate]] = []
+            proposal_hashes: set[str] = set()
+            max_attempts = proposal_attempt_budget(target)
+            local_attempts = 0
+            while len(proposals) < target and local_attempts < max_attempts:
+                trial = studies[objective_name].ask()
+                local_attempts += 1
+                proposal_attempts += 1
+                try:
+                    candidate = build_candidate(_TrialAdapter(trial))
+                except Exception:
+                    studies[objective_name].tell(
+                        trial,
+                        state=optuna_module.trial.TrialState.PRUNED,
+                    )
+                    continue
+                digest = candidate.candidate_hash
+                if digest in seen or digest in proposal_hashes:
+                    duplicates += 1
+                    studies[objective_name].tell(
+                        trial,
+                        state=optuna_module.trial.TrialState.PRUNED,
+                    )
+                    continue
+                if candidate.complexity > request.max_complexity:
+                    complexity_rejections += 1
+                    studies[objective_name].tell(
+                        trial,
+                        state=optuna_module.trial.TrialState.PRUNED,
+                    )
+                    continue
+                proposal_hashes.add(digest)
+                proposals.append((trial, candidate))
+            return proposals
+
+        def propose_random_candidates(target: int) -> list[tuple[Any, StrategyCandidate]]:
+            nonlocal proposal_attempts, duplicates, complexity_rejections
+            proposals: list[tuple[Any, StrategyCandidate]] = []
+            proposal_hashes: set[str] = set()
+            local_attempts = 0
+            max_attempts = proposal_attempt_budget(target)
+            while len(proposals) < target and local_attempts < max_attempts:
+                local_attempts += 1
+                proposal_attempts += 1
+                candidate = build_candidate(rng)
+                digest = candidate.candidate_hash
+                if digest in seen or digest in proposal_hashes:
+                    duplicates += 1
+                    continue
+                if candidate.complexity > request.max_complexity:
+                    complexity_rejections += 1
+                    continue
+                proposal_hashes.add(digest)
+                proposals.append((None, candidate))
+            return proposals
 
         def evaluate_stage_batch(
             candidates: Sequence[StrategyCandidate], stage: str
         ) -> list[Mapping[str, object]]:
-            if batch_evaluator is not None:
-                metrics = list(batch_evaluator(candidates, stage))
-            elif stage in {"coarse", "medium", "full"} and fidelity_evaluator is not None:
-                metrics = [fidelity_evaluator(candidate, stage) for candidate in candidates]
-            else:
-                metrics = [evaluator(candidate, stage) for candidate in candidates]
+            evaluation_started = time.perf_counter()
+            try:
+                if batch_evaluator is not None:
+                    metrics = list(batch_evaluator(candidates, stage))
+                elif stage in {"coarse", "medium", "full"} and fidelity_evaluator is not None:
+                    metrics = [fidelity_evaluator(candidate, stage) for candidate in candidates]
+                else:
+                    metrics = [evaluator(candidate, stage) for candidate in candidates]
+            finally:
+                stage_key = stage if stage in evaluation_seconds else "search"
+                evaluation_seconds[stage_key] += time.perf_counter() - evaluation_started
             if len(metrics) != len(candidates):
                 raise RuntimeError("批量候选评估返回数量不一致")
             return [dict(item) for item in metrics]
 
-        while evaluated < trial_limit and attempts < max(20, trial_limit * 20):
+        search_started = time.perf_counter()
+        while evaluated < trial_limit and attempts < attempt_limit:
             attempts += 1
             if abort_check is not None and abort_check():
                 stop_reason = "cancelled"
@@ -324,16 +454,11 @@ class HybridSearchEngine:
             desired = min(resolved_batch_size, trial_limit - evaluated)
             proposals: list[tuple[Any, StrategyCandidate]] = []
             if optuna_module is not None and evaluated >= warmup:
+                surrogate_started = time.perf_counter()
                 surrogate.fit(observed, objective)
-                proposal_count = max(8, desired * 4)
-                for _ in range(proposal_count):
-                    trial = studies[objective].ask()
-                    try:
-                        candidate = candidate_builder(request, _TrialAdapter(trial))
-                    except Exception:
-                        studies[objective].tell(trial, state=optuna_module.trial.TrialState.PRUNED)
-                        continue
-                    proposals.append((trial, candidate))
+                surrogate_seconds += time.perf_counter() - surrogate_started
+                proposal_count = max(8, desired * proposal_multiplier())
+                proposals = propose_optuna_candidates(objective, proposal_count)
                 if proposals:
                     predictions = surrogate.predict([candidate for _, candidate in proposals])
                     ranked_indexes = sorted(
@@ -354,20 +479,11 @@ class HybridSearchEngine:
                     surrogate_trials += len(proposals)
             if not proposals:
                 direct_trials += desired
-                for _ in range(desired):
-                    if optuna_module is not None:
-                        trial = studies[objective].ask()
-                        try:
-                            candidate = candidate_builder(request, _TrialAdapter(trial))
-                        except Exception:
-                            studies[objective].tell(
-                                trial,
-                                state=optuna_module.trial.TrialState.PRUNED,
-                            )
-                            continue
-                        proposals.append((trial, candidate))
-                    else:
-                        proposals.append((None, candidate_builder(request, rng)))
+                proposals = (
+                    propose_optuna_candidates(objective, desired)
+                    if optuna_module is not None
+                    else propose_random_candidates(desired)
+                )
 
             accepted: list[tuple[Any, StrategyCandidate]] = []
             for trial, candidate in proposals:
@@ -400,6 +516,8 @@ class HybridSearchEngine:
                 if evaluation_stage == "coarse":
                     candidate = candidate.with_metrics("coarse", raw_metrics)
                 evaluated += 1
+                if raw_metrics.get("preflight_skipped") is True:
+                    preflight_skipped += 1
                 if trial is not None and optuna_module is not None:
                     studies[objective].tell(
                         trial,
@@ -431,6 +549,9 @@ class HybridSearchEngine:
             ):
                 stop_reason = "converged"
                 break
+        stage_durations["search"] = time.perf_counter() - search_started
+        if fidelity_evaluator is not None and request.multifidelity_enabled:
+            stage_durations["coarse"] = stage_durations["search"]
         if evaluated < trial_limit and stop_reason == "completed":
             stop_reason = "attempt_limit"
 
@@ -439,6 +560,7 @@ class HybridSearchEngine:
             medium_limit = max(1, min(len(observed), math.ceil(len(observed) * 0.35)))
             medium_source = _rank_candidates(observed, "search")[:medium_limit]
             medium_observed: list[StrategyCandidate] = []
+            medium_started = time.perf_counter()
             for offset in range(0, len(medium_source), resolved_batch_size):
                 chunk = medium_source[offset : offset + resolved_batch_size]
                 if abort_check is not None and abort_check():
@@ -461,11 +583,13 @@ class HybridSearchEngine:
                         medium_observed.append(enriched)
                     if progress_callback is not None:
                         progress_callback(index, len(medium_source), "refining_medium")
+            stage_durations["medium"] = time.perf_counter() - medium_started
             full_source = medium_observed or medium_source
             full_limit = max(1, min(len(full_source), math.ceil(len(observed) * 0.15)))
             full_stage = "medium" if medium_observed else "search"
             full_candidates = _rank_candidates(full_source, full_stage)[:full_limit]
             full_observed: list[StrategyCandidate] = []
+            full_started = time.perf_counter()
             for offset in range(0, len(full_candidates), resolved_batch_size):
                 chunk = full_candidates[offset : offset + resolved_batch_size]
                 if abort_check is not None and abort_check():
@@ -484,6 +608,7 @@ class HybridSearchEngine:
                         full_observed.append(enriched)
                     if progress_callback is not None:
                         progress_callback(index, len(full_candidates), "refining_full")
+            stage_durations["full"] = time.perf_counter() - full_started
             final_observed = full_observed
 
         def ranking_metrics(candidate: StrategyCandidate) -> Mapping[str, object]:
@@ -527,7 +652,11 @@ class HybridSearchEngine:
             "evaluation_mode": evaluation_mode
             or ("batch" if batch_evaluator is not None else "serial"),
             "max_trials": trial_limit,
+            "attempts": attempts,
+            "attempt_limit": attempt_limit,
+            "requested_trials": trial_limit,
             "evaluated_trials": evaluated,
+            "unique_evaluated_trials": evaluated,
             "valid_candidates": len(observed),
             "duplicate_trials": duplicates,
             "direct_trials": direct_trials,
@@ -538,7 +667,7 @@ class HybridSearchEngine:
             "surrogate_reason": surrogate.reason,
             "validation_candidates": validation_limit,
             "holdout_candidates": holdout_limit,
-            "convergence_enabled": resolved_convergence_min_trials is not None,
+            "convergence_enabled": bool(convergence_enabled),
             "convergence_min_trials": resolved_convergence_min_trials,
             "convergence_patience": resolved_convergence_patience,
             "multifidelity_plan": [
@@ -551,6 +680,34 @@ class HybridSearchEngine:
             "promoted_to_medium": fidelity_counts["medium"],
             "promoted_to_full": fidelity_counts["full"],
             "final_valid_candidates": len(final_observed),
+            "stage_durations_seconds": stage_durations,
+            "coarse_seconds": stage_durations["coarse"],
+            "candidate_generation_seconds": candidate_generation_seconds,
+            "proposal_attempts": proposal_attempts,
+            "unique_proposal_rate": (
+                evaluated / proposal_attempts if proposal_attempts > 0 else 0.0
+            ),
+            "complexity_rejections": complexity_rejections,
+            "max_proposal_multiplier": max_proposal_multiplier,
+            "preflight_skipped": preflight_skipped,
+            "surrogate_refit_interval": surrogate.refit_interval,
+            "surrogate_seconds": surrogate_seconds,
+            "evaluation_durations_seconds": evaluation_seconds,
+            "stage_throughput_per_second": {
+                key: (
+                    float(
+                        evaluated
+                        if key == "search" and not request.multifidelity_enabled
+                        else fidelity_counts["coarse"]
+                        if key == "search" and request.multifidelity_enabled
+                        else fidelity_counts.get(key, 0)
+                    )
+                    / duration
+                    if duration > 0
+                    else 0.0
+                )
+                for key, duration in stage_durations.items()
+            },
         }
         return SearchResult(
             results_by_sharpe=by_sharpe[:10],

@@ -189,6 +189,45 @@ describe('StrategyDiscoveryPage', () => {
     expect(wrapper.get('[data-testid="strategy-discovery-message"]').text()).toContain('refinement rejected')
   })
 
+  it('shows the refinement progress with phase and remaining estimate', async () => {
+    const wrapper = mount(StrategyDiscoveryPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="strategy-discovery-config"]').trigger('submit')
+    await flushPromises()
+    vi.mocked(api.getStrategyDiscovery)
+      .mockResolvedValueOnce({
+      job_id: 'refine-1', status: 'running', progress: 0.4, total_candidates: 1000,
+      total_scanned: 50, errors: 0, skipped: 0, error: null, phase: 'validation', result: null,
+      metadata: {
+        overall_progress: 0.4,
+        phase_label: '验证区间',
+        phase_current: 50,
+        phase_total: 50,
+        estimated_total_evaluations: 1200,
+        estimated_seconds_remaining: 30,
+        requested_trials: 1000,
+        evaluated_trials: 500,
+      },
+    })
+      .mockResolvedValueOnce({
+        job_id: 'refine-1', status: 'completed', progress: 1, total_candidates: 1000,
+        total_scanned: 1000, errors: 0, skipped: 0, error: null, phase: 'completed', result: null,
+        metadata: {},
+      })
+    vi.useFakeTimers()
+    const refinementPromise = wrapper.get('[data-testid="strategy-discovery-refine-s1"]').trigger('click')
+    await flushPromises()
+
+    const progress = wrapper.get('[data-testid="strategy-refinement-progress"]')
+    expect(progress.text()).toContain('验证区间')
+    expect(progress.get('[data-testid="strategy-refinement-overall-progress"]').text()).toContain('总体 40%')
+    expect(progress.text()).toContain('当前阶段 50 / 50')
+    expect(progress.text()).toContain('预计剩余 30 秒')
+    await vi.advanceTimersByTimeAsync(220)
+    await refinementPromise
+    vi.useRealTimers()
+  })
+
   it('passes optional local instrument scope to the discovery request', async () => {
     const wrapper = mount(StrategyDiscoveryPage)
     await flushPromises()
@@ -323,7 +362,8 @@ describe('StrategyDiscoveryPage', () => {
       })
       .mockResolvedValueOnce({
         job_id: 'discovery-1', status: 'completed', progress: 1, total_candidates: 1, total_scanned: 1,
-        errors: 0, skipped: 0, error: null, phase: 'completed', result: null, metadata: {},
+        errors: 0, skipped: 0, error: null, phase: 'completed', result: null,
+        metadata: { requested_trials: 1000, evaluated_trials: 1000, unique_evaluated_trials: 1000, duplicate_trials: 12 },
       })
     const wrapper = mount(StrategyDiscoveryPage)
     await flushPromises()
@@ -336,6 +376,8 @@ describe('StrategyDiscoveryPage', () => {
     await vi.advanceTimersByTimeAsync(220)
     await flushPromises()
     await submitPromise
+    expect(wrapper.get('[data-testid="strategy-discovery-budget-stats"]').text()).toContain('请求候选 1000')
+    expect(wrapper.get('[data-testid="strategy-discovery-budget-stats"]').text()).toContain('重复 12')
     vi.useRealTimers()
   })
 
