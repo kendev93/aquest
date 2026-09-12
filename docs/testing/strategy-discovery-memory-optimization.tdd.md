@@ -16,7 +16,7 @@
 |---|---|---|
 | 资源预算 | 缺少 `resources` 模块 | `tests/unit/test_strategy_discovery_resources.py`：4 passed |
 | 分块快照 | 缺少批次常量/窗口函数 | 快照、store、adapter：24 passed |
-| worker 并发 | discovery/replay 固定 8 worker | discovery/replay/资源回归：19 passed |
+| worker 并发 | discovery/replay 固定 8 worker | discovery/replay/资源回归：通过 |
 | 文件队列 | 缺少 `job_store`/`worker` 模块 | job store、worker、backend：15 passed |
 | API coordinator | app 没有 strategy backend state | API 集成：10 passed |
 | 网关恢复/日期范围 | GET 不重试、页面无日期控件 | 前端 API/页面：19 passed |
@@ -36,11 +36,12 @@
 
 ## 实际验证
 
-- Python：`pytest -q` → **359 passed**，2 个既有 deprecation warnings。
+- Python：`sh scripts/verify_ci.sh python` → **360 passed**，覆盖率 **83.05%**，2 个既有 deprecation warnings。
 - Python 静态检查：`ruff check selector_app tests` → **PASS**；`mypy selector_app` → **100 source files PASS**。
-- Frontend：`npm test -- --run` → **116 passed**；`npm run typecheck` → **PASS**。
-- Compose：`docker compose config --quiet` → **PASS**；backend/worker/frontend 镜像构建成功。
-- 运行时：backend、frontend healthz 均返回 200；strategy-worker running；backend restart count 为 0。
+- Frontend：单元测试 **116 passed**，覆盖率 **84.69%**；`npm run typecheck` 和 `npm run build` → **PASS**；策略实验关键 E2E → **1 passed**。
+- 完整 Frontend E2E：**9 passed / 1 个既有 market-data 活跃任务展示断言失败**；该失败不涉及策略实验改动，沙箱内直接运行时另受 Chromium Mach port 权限限制。
+- Compose：`docker compose config --quiet`、后端/前端镜像构建 → **PASS**。
+- 运行时：backend、strategy-worker、frontend 均为 **healthy**；backend/worker restart count 均为 0，`OOMKilled=false`；backend `/healthz` 返回 200。
 - 当前库只读资源预检：16606845 行，约 4.64 GiB 估算峰值，5 GiB 预算下从 2 个 worker 自动降为 1 个。
 
 ## 已知边界
