@@ -7,6 +7,7 @@ services:
       PYTHONUNBUFFERED: "1"
       SELECTOR_DATA_DIR: /data/market
       SELECTOR_AUTO_SYNC_ENABLED: "1"
+      SELECTOR_DISCOVERY_MEMORY_BUDGET_MB: "${SELECTOR_DISCOVERY_MEMORY_BUDGET_MB:-5120}"
     volumes:
       - type: volume
         source: vipdoc_data
@@ -28,6 +29,7 @@ services:
       PYTHONUNBUFFERED: "1"
       SELECTOR_DATA_DIR: /data/market
       SELECTOR_DISCOVERY_WORKERS: "${SELECTOR_DISCOVERY_WORKERS:-2}"
+      SELECTOR_DISCOVERY_MEMORY_BUDGET_MB: "${SELECTOR_DISCOVERY_MEMORY_BUDGET_MB:-5120}"
       SELECTOR_DISCOVERY_JOB_DIR: /data/market/.strategy-jobs
     volumes:
       - type: volume
@@ -37,7 +39,7 @@ services:
       backend:
         condition: service_healthy
     command: ["python", "-m", "selector_app.strategy_discovery.worker"]
-    mem_limit: "${STRATEGY_WORKER_MEMORY_LIMIT:-5g}"
+    mem_limit: "${STRATEGY_WORKER_MEMORY_LIMIT:-6g}"
     restart: unless-stopped
 
   frontend:
