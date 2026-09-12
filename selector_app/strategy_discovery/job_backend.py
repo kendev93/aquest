@@ -48,6 +48,7 @@ class StrategyJobBackend(Protocol):
         *,
         description: str,
         worker_count: int | None = None,
+        metadata: Mapping[str, object] | None = None,
     ) -> str: ...
 
     def get(self, job_id: str) -> dict[str, object] | None: ...
@@ -146,6 +147,7 @@ class FileStrategyJobBackend:
         *,
         description: str,
         worker_count: int | None = None,
+        metadata: Mapping[str, object] | None = None,
     ) -> str:
         job_id = uuid.uuid4().hex
         self._job_store.create(
@@ -155,6 +157,8 @@ class FileStrategyJobBackend:
             description=description,
             worker_count=worker_count if worker_count is not None else self._worker_count,
         )
+        if metadata:
+            self._job_store.update(job_id, metadata=metadata)
         return job_id
 
     def get(self, job_id: str) -> dict[str, object] | None:
@@ -244,6 +248,7 @@ class InProcessStrategyJobBackend:
         *,
         description: str,
         worker_count: int | None = None,
+        metadata: Mapping[str, object] | None = None,
     ) -> str:
         job_id = uuid.uuid4().hex
 
@@ -305,6 +310,8 @@ class InProcessStrategyJobBackend:
             worker_count=1,
             job_id=job_id,
         )
+        if metadata:
+            self._runner.update_callable_state(job_id, metadata=dict(metadata))
         return job_id
 
     def get(self, job_id: str) -> dict[str, object] | None:

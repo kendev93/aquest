@@ -24,7 +24,10 @@ def test_compose_defines_an_isolated_strategy_worker() -> None:
     assert "  strategy-worker:" in compose
     assert 'command: ["python", "-m", "selector_app.strategy_discovery.worker"]' in compose
     assert "SELECTOR_DATA_DIR: /data/market" in compose
-    assert 'SELECTOR_DISCOVERY_MEMORY_BUDGET_MB: "${SELECTOR_DISCOVERY_MEMORY_BUDGET_MB:-5120}"' in compose
+    assert (
+        'SELECTOR_DISCOVERY_MEMORY_BUDGET_MB: "${SELECTOR_DISCOVERY_MEMORY_BUDGET_MB:-5120}"'
+        in compose
+    )
     assert "source: market_data" in compose
     assert "SELECTOR_DISCOVERY_WORKERS" in compose
     assert 'mem_limit: "${STRATEGY_WORKER_MEMORY_LIMIT:-6g}"' in compose

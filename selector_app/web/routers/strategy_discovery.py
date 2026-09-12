@@ -79,6 +79,22 @@ def _preflight_job(
         ) from exc
 
 
+def _resource_metadata(estimate: DiscoveryResourceEstimate | None) -> dict[str, object]:
+    if estimate is None:
+        return {}
+    return {
+        "resource_estimate": {
+            "row_count": estimate.row_count,
+            "snapshot_bytes": estimate.snapshot_bytes,
+            "estimated_peak_bytes": estimate.estimated_peak_bytes,
+            "memory_budget_bytes": estimate.memory_budget_bytes,
+            "requested_workers": estimate.requested_workers,
+            "selected_workers": estimate.selected_workers,
+            "reason": estimate.reason,
+        }
+    }
+
+
 def _state_or_404(job_id: str, request: Request) -> dict[str, object]:
     state = _backend(request).get(job_id)
     if state is None or state.get("description") not in {"策略实验室", "策略二次优化"}:
@@ -154,6 +170,11 @@ def create_strategy_discovery(
                 if isinstance(resource_estimate, DiscoveryResourceEstimate)
                 else None
             ),
+            metadata=_resource_metadata(
+                resource_estimate
+                if isinstance(resource_estimate, DiscoveryResourceEstimate)
+                else None
+            ),
         )
     except (RuntimeError, OSError, ValueError) as exc:
         raise HTTPException(status_code=503, detail="任务执行器暂不可用") from exc
@@ -203,6 +224,11 @@ def create_strategy_refinement(
             description="策略二次优化",
             worker_count=(
                 resource_estimate.selected_workers
+                if isinstance(resource_estimate, DiscoveryResourceEstimate)
+                else None
+            ),
+            metadata=_resource_metadata(
+                resource_estimate
                 if isinstance(resource_estimate, DiscoveryResourceEstimate)
                 else None
             ),
@@ -279,6 +305,11 @@ def create_strategy_replay(
             description="策略前十全量复核",
             worker_count=(
                 resource_estimate.selected_workers
+                if isinstance(resource_estimate, DiscoveryResourceEstimate)
+                else None
+            ),
+            metadata=_resource_metadata(
+                resource_estimate
                 if isinstance(resource_estimate, DiscoveryResourceEstimate)
                 else None
             ),

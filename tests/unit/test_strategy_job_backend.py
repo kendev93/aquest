@@ -80,12 +80,14 @@ def test_file_backend_submits_a_persistent_job_without_running_it(tmp_path: Path
         "discovery",
         {"request": _request().to_dict()},
         description="策略实验室",
+        metadata={"resource_estimate": {"row_count": 3, "selected_workers": 2}},
     )
 
     state = backend.get(job_id)
     assert state is not None
     assert state["status"] == "queued"
     assert state["worker_count"] == 2
+    assert state["metadata"]["resource_estimate"]["row_count"] == 3
     assert backend.result(job_id) is None
 
 
