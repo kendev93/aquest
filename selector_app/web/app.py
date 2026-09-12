@@ -38,6 +38,16 @@ from selector_app.screening.jobs import (
     ScanEngineLike,
     ScreenJobRunner,
 )
+from selector_app.strategy_discovery.job_backend import (
+    FileStrategyJobBackend,
+    InProcessStrategyJobBackend,
+    StrategyJobBackend,
+)
+from selector_app.strategy_discovery.job_store import (
+    StrategyJobStore,
+    default_strategy_job_root,
+)
+from selector_app.strategy_discovery.resources import resolve_discovery_workers
 from selector_app.strategy_discovery.service import StrategyDiscoveryService
 from selector_app.strategy_fitness.service import StrategyFitnessService
 
@@ -54,6 +64,7 @@ def create_app(
     backtest_service: BacktestService | object | None = None,
     portfolio_backtest_service: PortfolioBacktestService | object | None = None,
     strategy_discovery_service: StrategyDiscoveryService | object | None = None,
+    strategy_job_backend: StrategyJobBackend | object | None = None,
     strategy_fitness_service: StrategyFitnessService | object | None = None,
     local_market_data_service: LocalMarketDataService | object | None = None,
     market_data_store: DuckDbMarketDataStore | object | None = None,
@@ -116,6 +127,22 @@ def create_app(
         else StrategyDiscoveryService(
             portfolio_service=selected_portfolio_service,
             store=selected_store,
+        ),
+    )
+    selected_strategy_backend = cast(
+        StrategyJobBackend,
+        strategy_job_backend
+        if strategy_job_backend is not None
+        else InProcessStrategyJobBackend(
+            selected_store,
+            selected_runner,
+            selected_discovery_service,
+        )
+        if strategy_discovery_service is not None
+        else FileStrategyJobBackend(
+            selected_store,
+            StrategyJobStore(default_strategy_job_root(selected_store.database_path)),
+            worker_count=resolve_discovery_workers(),
         ),
     )
 
@@ -189,6 +216,7 @@ def create_app(
     )
     app.state.portfolio_backtest_service = selected_portfolio_service
     app.state.strategy_discovery_service = selected_discovery_service
+    app.state.strategy_job_backend = selected_strategy_backend
     app.state.strategy_fitness_service = strategy_fitness_service or StrategyFitnessService(
         adapter=selected_adapter,
         indicator_cache=selected_indicator_cache,

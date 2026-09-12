@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import logging
-import uuid
-from collections.abc import Callable, Mapping
-from datetime import datetime, timezone
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal, Protocol, cast
 
@@ -13,15 +11,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from selector_app.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
-from selector_app.screening.jobs import (
-    JobState,
-    ScreenJobRunner,
-    TaskCancelledError,
-    TaskUserError,
-)
-from selector_app.strategy_discovery.models import DiscoveryRequest
-from selector_app.strategy_discovery.replay import ReplayLeaderboard
-from selector_app.strategy_discovery.replay_service import ReplayProgressCallback
+from selector_app.strategy_discovery.job_backend import StrategyJobBackend
 from selector_app.strategy_discovery.service import StrategyDiscoveryService
 
 from ..schemas import StrategyDiscoveryRequest, StrategyRefinementRequest, StrategyReplayRequest
@@ -33,65 +23,35 @@ logger = logging.getLogger(__name__)
 class StrategyDiscoveryServiceLike(Protocol):
     def capabilities(self) -> dict[str, object]: ...
 
-    def run(
-        self,
-        request: DiscoveryRequest,
-        *,
-        progress_callback: Callable[..., None] | None = None,
-        abort_check: Callable[[], bool] | None = None,
-    ) -> dict[str, object]: ...
-
-    def replay(
-        self,
-        experiment: Mapping[str, object],
-        leaderboard: ReplayLeaderboard,
-        *,
-        progress_callback: ReplayProgressCallback | None = None,
-        abort_check: Callable[[], bool] | None = None,
-    ) -> dict[str, object]: ...
-
-    def refine(
-        self,
-        experiment: Mapping[str, object],
-        parent_candidate_hash: str,
-        *,
-        max_trials: int | None = None,
-        seed: int | None = None,
-        radius: Literal["medium"] = "medium",
-        progress_callback: Callable[..., None] | None = None,
-        abort_check: Callable[[], bool] | None = None,
-    ) -> dict[str, object]: ...
-
-
-def _runner(request: Request) -> ScreenJobRunner:
-    return cast(ScreenJobRunner, request.app.state.screen_job_runner)
-
 
 def _service(request: Request) -> StrategyDiscoveryServiceLike:
     return cast(StrategyDiscoveryService, request.app.state.strategy_discovery_service)
+
+
+def _backend(request: Request) -> StrategyJobBackend:
+    return cast(StrategyJobBackend, request.app.state.strategy_job_backend)
 
 
 def _store(request: Request) -> DuckDbMarketDataStore:
     return cast(DuckDbMarketDataStore, request.app.state.market_data_store)
 
 
-def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _state_or_404(job_id: str, request: Request) -> JobState:
-    state = _runner(request).get(job_id)
-    if state is None or state.description not in {"策略实验室", "策略二次优化"}:
+def _state_or_404(job_id: str, request: Request) -> dict[str, object]:
+    state = _backend(request).get(job_id)
+    if state is None or state.get("description") not in {"策略实验室", "策略二次优化"}:
         raise HTTPException(status_code=404, detail="策略实验任务不存在或已过期")
     return state
 
 
 def _experiment_or_404(experiment_id: str, request: Request) -> dict[str, object]:
-    state = _runner(request).get(experiment_id)
-    if state is not None and state.description in {"策略实验室", "策略二次优化"}:
-        if state.status != "completed" or state.result_payload is None:
+    state = _backend(request).get(experiment_id)
+    if state is not None and state.get("description") in {"策略实验室", "策略二次优化"}:
+        if state.get("status") != "completed":
             raise HTTPException(status_code=409, detail="策略实验尚未完成，暂时不能全量复核")
-        return {"history_id": experiment_id, **state.result_payload}
+        result = _backend(request).result(experiment_id)
+        if result is None:
+            raise HTTPException(status_code=409, detail="策略实验结果尚未准备好")
+        return {"history_id": experiment_id, **result}
     record = _store(request).read_strategy_discovery_history(experiment_id)
     if record is None:
         raise HTTPException(status_code=404, detail="策略实验历史不存在")
@@ -133,85 +93,13 @@ def create_strategy_discovery(
             status_code=503, detail="本地行情数据暂不可用，请检查 DuckDB 后重试"
         ) from exc
 
-    job_id_holder = {"value": ""}
-
-    def run_discovery(progress: Callable[[int, int], None]) -> dict[str, object]:
-        started_at = _utc_now()
-
-        def report_progress(
-            current: int,
-            total: int,
-            phase: str,
-            metadata: dict[str, object] | None = None,
-        ) -> None:
-            progress(current, total)
-            if job_id_holder["value"]:
-                overall_progress = metadata.get("overall_progress") if metadata else None
-                _runner(request).update_callable_state(
-                    job_id_holder["value"],
-                    phase=phase,
-                    metadata=dict(metadata or {}),
-                    progress=(
-                        float(overall_progress)
-                        if isinstance(overall_progress, (int, float))
-                        else None
-                    ),
-                )
-
-        try:
-            result = _service(request).run(
-                discovery_request,
-                progress_callback=report_progress,
-                abort_check=lambda: _runner(request).is_cancel_requested(job_id_holder["value"]),
-            )
-            result = dict(result)
-            finished_at = _utc_now()
-            result["started_at"] = started_at.isoformat()
-            result["finished_at"] = finished_at.isoformat()
-            history_id = job_id_holder["value"]
-            search_metadata = result.get("search_metadata")
-            if isinstance(search_metadata, dict):
-                stage_durations = result.get("stage_durations_seconds")
-                completion_metadata: dict[str, object] = {
-                    "algorithm": search_metadata.get("algorithm"),
-                    "surrogate_status": search_metadata.get("surrogate_status"),
-                    "surrogate_enabled": search_metadata.get("surrogate_status") == "enabled",
-                    "stop_reason": search_metadata.get("stop_reason"),
-                    "requested_trials": search_metadata.get("requested_trials"),
-                    "evaluated_trials": search_metadata.get("evaluated_trials"),
-                    "unique_evaluated_trials": search_metadata.get("unique_evaluated_trials"),
-                    "duplicate_trials": search_metadata.get("duplicate_trials"),
-                    "proposal_attempts": search_metadata.get("proposal_attempts"),
-                    "preflight_skipped": search_metadata.get("preflight_skipped"),
-                    "stage_durations_seconds": stage_durations,
-                    "overall_progress": 1.0,
-                    "estimated_seconds_remaining": 0.0,
-                }
-                _runner(request).update_callable_state(
-                    history_id,
-                    phase="completed",
-                    metadata=completion_metadata,
-                    progress=1.0,
-                    total_candidates=int(search_metadata.get("requested_trials") or 0),
-                    total_scanned=int(search_metadata.get("evaluated_trials") or 0),
-                )
-            if history_id:
-                result["history_id"] = history_id
-                _store(request).save_strategy_discovery_history(history_id, result)
-            return result
-        except RuntimeError as exc:
-            if _runner(request).is_cancel_requested(job_id_holder["value"]):
-                raise TaskCancelledError("策略实验已取消") from exc
-            raise TaskUserError(str(exc)) from exc
-        except (ValueError, MarketDataStoreError, OSError) as exc:
-            if _runner(request).is_cancel_requested(job_id_holder["value"]):
-                raise TaskCancelledError("策略实验已取消") from exc
-            raise TaskUserError(str(exc)) from exc
-
     try:
-        job_id = _runner(request).submit_callable(run_discovery, description="策略实验室")
-        job_id_holder["value"] = job_id
-    except RuntimeError as exc:
+        job_id = _backend(request).submit(
+            "discovery",
+            {"request": discovery_request.to_dict()},
+            description="策略实验室",
+        )
+    except (RuntimeError, OSError, ValueError) as exc:
         raise HTTPException(status_code=503, detail="任务执行器暂不可用") from exc
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
@@ -242,98 +130,19 @@ def create_strategy_refinement(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             content={"error": {"code": "validation_error", "message": "父实验中不存在指定候选"}},
         )
-    job_id = uuid.uuid4().hex
-
-    def run_refinement(progress: Callable[[int, int], None]) -> dict[str, object]:
-        started_at = _utc_now()
-
-        def report_progress(
-            current: int,
-            total: int,
-            phase: str,
-            metadata: dict[str, object] | None = None,
-        ) -> None:
-            progress(current, total)
-            overall_progress = metadata.get("overall_progress") if metadata else None
-            _runner(request).update_callable_state(
-                job_id,
-                phase=phase,
-                metadata=dict(metadata or {}),
-                progress=(
-                    float(overall_progress) if isinstance(overall_progress, (int, float)) else None
-                ),
-            )
-
-        try:
-            result = dict(
-                _service(request).refine(
-                    experiment,
-                    payload.parent_candidate_hash,
-                    max_trials=payload.max_trials,
-                    seed=payload.seed,
-                    radius=payload.refinement_radius,
-                    progress_callback=report_progress,
-                    abort_check=lambda: _runner(request).is_cancel_requested(job_id),
-                )
-            )
-            finished_at = _utc_now()
-            result.update(
-                {
-                    "history_id": job_id,
-                    "started_at": started_at.isoformat(),
-                    "finished_at": finished_at.isoformat(),
-                }
-            )
-            refinement_search_metadata = result.get("search_metadata")
-            _runner(request).update_callable_state(
-                job_id,
-                phase="completed",
-                metadata={
-                    "overall_progress": 1.0,
-                    "refinement": True,
-                    "parent_candidate_hash": payload.parent_candidate_hash,
-                    "requested_trials": (
-                        refinement_search_metadata.get("requested_trials")
-                        if isinstance(refinement_search_metadata, Mapping)
-                        else None
-                    ),
-                    "evaluated_trials": (
-                        refinement_search_metadata.get("evaluated_trials")
-                        if isinstance(refinement_search_metadata, Mapping)
-                        else None
-                    ),
-                    "duplicate_trials": (
-                        refinement_search_metadata.get("duplicate_trials")
-                        if isinstance(refinement_search_metadata, Mapping)
-                        else None
-                    ),
-                    "stage_durations_seconds": result.get("stage_durations_seconds"),
-                },
-                progress=1.0,
-            )
-            _store(request).save_strategy_discovery_history(
-                job_id,
-                result,
-                started_at=started_at,
-                finished_at=finished_at,
-            )
-            return result
-        except RuntimeError as exc:
-            if _runner(request).is_cancel_requested(job_id):
-                raise TaskCancelledError("策略二次优化已取消") from exc
-            raise TaskUserError(str(exc)) from exc
-        except (ValueError, MarketDataStoreError, OSError) as exc:
-            if _runner(request).is_cancel_requested(job_id):
-                raise TaskCancelledError("策略二次优化已取消") from exc
-            raise TaskUserError(str(exc)) from exc
-
     try:
-        _runner(request).submit_callable(
-            run_refinement,
+        job_id = _backend(request).submit(
+            "refinement",
+            {
+                "experiment": experiment,
+                "parent_candidate_hash": payload.parent_candidate_hash,
+                "max_trials": payload.max_trials,
+                "seed": payload.seed,
+                "radius": payload.refinement_radius,
+            },
             description="策略二次优化",
-            job_id=job_id,
         )
-    except RuntimeError as exc:
+    except (RuntimeError, OSError, ValueError) as exc:
         raise HTTPException(status_code=503, detail="任务执行器暂不可用") from exc
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
@@ -344,12 +153,12 @@ def create_strategy_refinement(
 @router.post("/{job_id}/cancel")
 def cancel_strategy_discovery(job_id: str, request: Request) -> dict[str, object]:
     _state_or_404(job_id, request)
-    if not _runner(request).request_cancel(job_id):
-        state = _runner(request).get(job_id)
+    if not _backend(request).cancel(job_id):
+        state = _backend(request).get(job_id)
         return {
             "data": {
                 "job_id": job_id,
-                "status": state.status if state is not None else "unknown",
+                "status": state.get("status") if state is not None else "unknown",
                 "cancel_requested": False,
             }
         }
@@ -392,93 +201,10 @@ def create_strategy_replay(
 ) -> JSONResponse:
     try:
         experiment = _experiment_or_404(experiment_id, request)
-        job_id = uuid.uuid4().hex
-
-        def run_replay(progress: Callable[[int, int], None]) -> dict[str, object]:
-            started_at = _utc_now()
-
-            def report_progress(
-                current: int,
-                total: int,
-                phase: str,
-                metadata: Mapping[str, object] | None = None,
-            ) -> None:
-                progress(current, total)
-                overall = metadata.get("overall_progress") if metadata else None
-                _runner(request).update_callable_state(
-                    job_id,
-                    phase=phase,
-                    metadata=dict(metadata or {}),
-                    progress=(float(overall) if isinstance(overall, (int, float)) else None),
-                )
-
-            try:
-                result = dict(
-                    _service(request).replay(
-                        experiment,
-                        payload.leaderboard,
-                        progress_callback=report_progress,
-                        abort_check=lambda: _runner(request).is_cancel_requested(job_id),
-                    )
-                )
-                finished_at = _utc_now()
-                duration_seconds = max(0.0, (finished_at - started_at).total_seconds())
-                result.update(
-                    {
-                        "replay_id": job_id,
-                        "started_at": started_at.isoformat(),
-                        "finished_at": finished_at.isoformat(),
-                        "duration_seconds": duration_seconds,
-                    }
-                )
-                diagnostics = result.get("diagnostics")
-                error_count = len(diagnostics) if isinstance(diagnostics, Mapping) else 0
-                raw_candidate_count = result.get("candidate_count", 0)
-                candidate_count = (
-                    max(0, int(raw_candidate_count))
-                    if isinstance(raw_candidate_count, (int, float))
-                    else 0
-                )
-                _runner(request).update_callable_state(
-                    job_id,
-                    phase="completed",
-                    metadata={
-                        "overall_progress": 1.0,
-                        "candidate_count": candidate_count,
-                        "data_changed": result.get("data_changed", False),
-                        "finished_at": finished_at.isoformat(),
-                        "duration_seconds": duration_seconds,
-                    },
-                    progress=1.0,
-                    errors=error_count,
-                    total_candidates=candidate_count,
-                    total_scanned=candidate_count,
-                )
-                try:
-                    _store(request).save_strategy_discovery_replay_history(
-                        job_id,
-                        result,
-                        started_at=started_at,
-                        finished_at=finished_at,
-                        duration_seconds=duration_seconds,
-                    )
-                except Exception:  # noqa: BLE001 - replay result remains viewable in job memory
-                    logger.exception("自动保存策略复核历史失败: %s", job_id)
-                return result
-            except RuntimeError as exc:
-                if _runner(request).is_cancel_requested(job_id):
-                    raise TaskCancelledError("策略复核已取消") from exc
-                raise TaskUserError(str(exc)) from exc
-            except (ValueError, MarketDataStoreError, OSError) as exc:
-                if _runner(request).is_cancel_requested(job_id):
-                    raise TaskCancelledError("策略复核已取消") from exc
-                raise TaskUserError(str(exc)) from exc
-
-        _runner(request).submit_callable(
-            run_replay,
+        job_id = _backend(request).submit(
+            "replay",
+            {"experiment": experiment, "leaderboard": payload.leaderboard},
             description="策略前十全量复核",
-            worker_count=8,
-            job_id=job_id,
         )
     except HTTPException:
         raise
@@ -497,9 +223,9 @@ def create_strategy_replay(
     )
 
 
-def _replay_state_or_404(job_id: str, request: Request) -> JobState:
-    state = _runner(request).get(job_id)
-    if state is None or state.description != "策略前十全量复核":
+def _replay_state_or_404(job_id: str, request: Request) -> dict[str, object]:
+    state = _backend(request).get(job_id)
+    if state is None or state.get("description") != "策略前十全量复核":
         raise HTTPException(status_code=404, detail="策略复核任务不存在或已过期")
     return state
 
@@ -507,7 +233,7 @@ def _replay_state_or_404(job_id: str, request: Request) -> JobState:
 @router.get("/replay-jobs/{job_id}")
 def strategy_replay_status(job_id: str, request: Request) -> dict[str, object]:
     state = _replay_state_or_404(job_id, request)
-    snapshot = state.snapshot()
+    snapshot = dict(state)
     snapshot["result"] = None
     return {"data": snapshot}
 
@@ -515,22 +241,25 @@ def strategy_replay_status(job_id: str, request: Request) -> dict[str, object]:
 @router.get("/replay-jobs/{job_id}/results")
 def strategy_replay_results(job_id: str, request: Request) -> dict[str, object]:
     state = _replay_state_or_404(job_id, request)
-    if state.status == "failed":
-        raise HTTPException(status_code=500, detail=state.error or "策略复核任务失败")
-    if state.status != "completed" or state.result_payload is None:
+    if state.get("status") == "failed":
+        raise HTTPException(status_code=500, detail=str(state.get("error") or "策略复核任务失败"))
+    if state.get("status") != "completed":
         raise HTTPException(status_code=409, detail="策略复核尚未完成")
-    return {"data": state.result_payload}
+    result = _backend(request).result(job_id)
+    if result is None:
+        raise HTTPException(status_code=409, detail="策略复核结果尚未准备好")
+    return {"data": result}
 
 
 @router.post("/replay-jobs/{job_id}/cancel")
 def cancel_strategy_replay(job_id: str, request: Request) -> dict[str, object]:
     _replay_state_or_404(job_id, request)
-    if not _runner(request).request_cancel(job_id):
-        state = _runner(request).get(job_id)
+    if not _backend(request).cancel(job_id):
+        state = _backend(request).get(job_id)
         return {
             "data": {
                 "job_id": job_id,
-                "status": state.status if state is not None else "unknown",
+                "status": state.get("status") if state is not None else "unknown",
                 "cancel_requested": False,
             }
         }
@@ -555,7 +284,7 @@ def strategy_replay_history(
 @router.get("/{job_id}")
 def strategy_discovery_status(job_id: str, request: Request) -> dict[str, object]:
     state = _state_or_404(job_id, request)
-    snapshot = state.snapshot()
+    snapshot = dict(state)
     snapshot["result"] = None
     return {"data": snapshot}
 
@@ -563,8 +292,11 @@ def strategy_discovery_status(job_id: str, request: Request) -> dict[str, object
 @router.get("/{job_id}/results")
 def strategy_discovery_results(job_id: str, request: Request) -> dict[str, object]:
     state = _state_or_404(job_id, request)
-    if state.status == "failed":
-        raise HTTPException(status_code=500, detail=state.error or "策略实验任务失败")
-    if state.status != "completed" or state.result_payload is None:
+    if state.get("status") == "failed":
+        raise HTTPException(status_code=500, detail=str(state.get("error") or "策略实验任务失败"))
+    if state.get("status") != "completed":
         raise HTTPException(status_code=409, detail="策略实验尚未完成")
-    return {"data": state.result_payload}
+    result = _backend(request).result(job_id)
+    if result is None:
+        raise HTTPException(status_code=409, detail="策略实验结果尚未准备好")
+    return {"data": result}

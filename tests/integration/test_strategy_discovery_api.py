@@ -6,7 +6,12 @@ from threading import Event
 import pandas as pd
 from fastapi.testclient import TestClient
 
+from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.screening.jobs import ScreenJobRunner
+from selector_app.strategy_discovery.job_backend import (
+    FileStrategyJobBackend,
+    InProcessStrategyJobBackend,
+)
 from selector_app.web.app import create_app
 
 
@@ -127,6 +132,25 @@ def test_strategy_discovery_api_starts_reports_and_reads_history(tmp_path) -> No
     assert history.json()["data"][0]["duration_seconds"] == 0.01
     assert history.json()["data"][0]["started_at"]
     assert history.json()["data"][0]["finished_at"]
+
+
+def test_create_app_uses_file_backend_for_production_service(tmp_path) -> None:
+    app = create_app(
+        market_data_store=DuckDbMarketDataStore(tmp_path / "market.duckdb"),
+        auto_sync_enabled=False,
+    )
+
+    assert isinstance(app.state.strategy_job_backend, FileStrategyJobBackend)
+
+
+def test_create_app_keeps_in_process_backend_for_injected_fake_service(tmp_path) -> None:
+    app = create_app(
+        strategy_discovery_service=FakeDiscoveryService(),
+        market_data_store=DuckDbMarketDataStore(tmp_path / "market.duckdb"),
+        auto_sync_enabled=False,
+    )
+
+    assert isinstance(app.state.strategy_job_backend, InProcessStrategyJobBackend)
 
 
 def test_strategy_refinement_api_creates_independent_parent_linked_history(tmp_path) -> None:
