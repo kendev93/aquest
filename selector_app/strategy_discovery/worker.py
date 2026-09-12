@@ -12,7 +12,7 @@ from typing import Literal, Protocol, cast
 
 from selector_app.market_data.store import DuckDbMarketDataStore
 
-from .job_backend import decorate_result
+from .job_backend import completion_state, decorate_result
 from .job_store import StrategyJobStore, default_strategy_job_root
 from .models import DiscoveryRequest
 from .refinement import discovery_request_from_dict
@@ -65,6 +65,7 @@ class StrategyDiscoveryWorker:
         job_store: StrategyJobStore,
         service: StrategyDiscoveryServiceLike,
         *,
+        service_factory: Callable[[int | None], StrategyDiscoveryServiceLike] | None = None,
         poll_interval_seconds: float = DEFAULT_WORKER_POLL_INTERVAL_SECONDS,
         stale_after_seconds: float = DEFAULT_STALE_AFTER_SECONDS,
     ) -> None:
@@ -74,6 +75,7 @@ class StrategyDiscoveryWorker:
             raise ValueError("策略 worker stale 时间必须大于轮询间隔")
         self._job_store = job_store
         self._service = service
+        self._service_factory = service_factory
         self._poll_interval_seconds = poll_interval_seconds
         self._stale_after_seconds = stale_after_seconds
 
@@ -93,15 +95,31 @@ class StrategyDiscoveryWorker:
             if operation not in {"discovery", "refinement", "replay"}:
                 raise ValueError("策略任务类型无效")
             started_at = datetime.now(timezone.utc).isoformat()
-            result = self._dispatch(job_id, request)
+            state = self._job_store.read_state(job_id) or {}
+            raw_worker_count = state.get("worker_count")
+            worker_count = (
+                int(raw_worker_count)
+                if isinstance(raw_worker_count, (int, float))
+                and not isinstance(raw_worker_count, bool)
+                else None
+            )
+            service = (
+                self._service_factory(worker_count)
+                if self._service_factory is not None
+                else self._service
+            )
+            result = self._dispatch(job_id, request, service=service)
+            normalized = decorate_result(
+                job_id,
+                operation,
+                result,
+                started_at=started_at,
+            )
+            completion = completion_state(operation, normalized)
+            self._job_store.update(job_id, {"status": "running", **completion})
             self._job_store.write_result(
                 job_id,
-                decorate_result(
-                    job_id,
-                    operation,
-                    result,
-                    started_at=started_at,
-                ),
+                normalized,
             )
         except Exception as exc:  # noqa: BLE001 - worker must keep serving later jobs
             if self._job_store.is_cancel_requested(job_id):
@@ -122,7 +140,14 @@ class StrategyDiscoveryWorker:
             if self.run_once() is None:
                 time.sleep(self._poll_interval_seconds)
 
-    def _dispatch(self, job_id: str, request: Mapping[str, object]) -> dict[str, object]:
+    def _dispatch(
+        self,
+        job_id: str,
+        request: Mapping[str, object],
+        *,
+        service: StrategyDiscoveryServiceLike | None = None,
+    ) -> dict[str, object]:
+        selected_service = service or self._service
         operation = request.get("operation")
         payload = request.get("payload")
         if not isinstance(payload, Mapping):
@@ -162,7 +187,7 @@ class StrategyDiscoveryWorker:
                 raise ValueError("策略实验请求内容无效")
             discovery_request = discovery_request_from_dict(raw_request)
             return dict(
-                self._service.run(
+                    selected_service.run(
                     discovery_request,
                     progress_callback=progress_callback,
                     abort_check=abort_check,
@@ -172,7 +197,7 @@ class StrategyDiscoveryWorker:
             experiment = _mapping(payload.get("experiment"), "父实验")
             parent_hash = _required_string(payload.get("parent_candidate_hash"), "父候选 hash")
             return dict(
-                self._service.refine(
+                selected_service.refine(
                     experiment,
                     parent_hash,
                     max_trials=_optional_int(payload.get("max_trials")),
@@ -188,7 +213,7 @@ class StrategyDiscoveryWorker:
             if leaderboard not in {"sharpe", "return"}:
                 raise ValueError("策略复核榜单类型无效")
             return dict(
-                self._service.replay(
+                selected_service.replay(
                     experiment,
                     cast(ReplayLeaderboard, leaderboard),
                     progress_callback=progress_callback,
@@ -249,6 +274,10 @@ def main() -> None:
         StrategyDiscoveryService(
             store=store,
             evaluation_workers=resolve_discovery_workers(),
+        ),
+        service_factory=lambda worker_count: StrategyDiscoveryService(
+            store=store,
+            evaluation_workers=worker_count,
         ),
     )
     stop_event = Event()
