@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from threading import Event
 
 import numpy as np
 import pandas as pd
@@ -9,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from selector_app.market_data.day_importer import LocalDayImporter
 from selector_app.market_data.store import DuckDbMarketDataStore
+from selector_app.screening.jobs import TaskCancelledError
 from selector_app.screening.models import ScanReport
 from selector_app.tdx_protocol.errors import TdxConnectionError
 from selector_app.web.app import create_app
@@ -39,7 +41,7 @@ def wait_for_done(
         response = client.get(f"{base_path}/{job_id}")
         assert response.status_code == 200
         payload = response.json()["data"]
-        if payload["status"] in {"completed", "failed"}:
+        if payload["status"] in {"completed", "failed", "cancelled"}:
             return payload
         time.sleep(0.01)
     raise AssertionError("job did not finish")
@@ -366,6 +368,71 @@ def test_market_data_capabilities_exposes_default_provider_and_tdx_compatibility
     assert data["instrument_count"] == 0
     assert data["providers"]["tdx"]["available"] is True
     assert data["providers"]["akshare"]["available"] is False
+
+
+def test_market_data_active_jobs_can_be_listed_and_cancelled() -> None:
+    app = create_app(engine=EmptyEngine(), auto_sync_enabled=False)
+    runner = app.state.screen_job_runner
+    started = Event()
+    job_id_holder = [""]
+
+    def task(_progress):
+        started.set()
+        while not runner.is_cancel_requested(job_id_holder[0]):
+            time.sleep(0.001)
+        raise TaskCancelledError("行情同步已取消")
+
+    job_id_holder[0] = runner.submit_callable(task, description="行情同步")
+    try:
+        assert started.wait(timeout=1)
+        with TestClient(app) as client:
+            active = client.get("/api/v1/market-data/jobs/active")
+            cancel = client.post(f"/api/v1/market-data/jobs/{job_id_holder[0]}/cancel")
+            state = wait_for_done(
+                client,
+                job_id_holder[0],
+                "/api/v1/market-data/jobs",
+            )
+
+        assert active.status_code == 200
+        assert active.json()["data"][0]["job_id"] == job_id_holder[0]
+        assert active.json()["data"][0]["description"] == "行情同步"
+        assert cancel.status_code == 200
+        assert cancel.json()["data"] == {
+            "job_id": job_id_holder[0],
+            "status": "cancelling",
+            "cancel_requested": True,
+        }
+        assert state["status"] == "cancelled"
+    finally:
+        runner.shutdown()
+
+
+def test_market_data_rejects_duplicate_active_sync_jobs() -> None:
+    app = create_app(engine=EmptyEngine(), auto_sync_enabled=False)
+    runner = app.state.screen_job_runner
+    release = Event()
+
+    def task(_progress):
+        release.wait(timeout=1)
+        return {}
+
+    existing_job = runner.submit_callable(task, description="行情同步")
+    try:
+        with TestClient(app) as client:
+            response = client.post("/api/v1/market-data/sync-online", json={})
+
+        assert response.status_code == 409
+        assert response.json()["error"]["code"] == "conflict"
+        assert "已有行情同步任务" in response.json()["error"]["message"]
+    finally:
+        release.set()
+        for _ in range(50):
+            state = runner.get(existing_job)
+            if state is not None and state.status == "completed":
+                break
+            time.sleep(0.01)
+        runner.shutdown()
 
 
 def test_akshare_backfill_forces_stock_full_history_without_local_import() -> None:

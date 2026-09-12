@@ -7,8 +7,13 @@ from threading import Lock
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import pytest
 
-from selector_app.adapters.market_sync import MarketSyncConfig, TdxMarketSync
+from selector_app.adapters.market_sync import (
+    MarketDataCancelledError,
+    MarketSyncConfig,
+    TdxMarketSync,
+)
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.tdx_protocol.types import KlineCategory
 
@@ -170,3 +175,13 @@ def test_sync_uses_eight_workers_without_duplicate_target_requests(tmp_path: Pat
     assert sorted(requests) == sorted(codes)
     assert max_active > 1
     assert max_active <= 8
+
+
+def test_sync_can_be_cancelled_before_fetching_bars(tmp_path: Path) -> None:
+    client = FakeClient()
+    service = _service(tmp_path, client)
+
+    with pytest.raises(MarketDataCancelledError, match="取消"):
+        service.sync(MarketSyncConfig(), abort_check=lambda: True)
+
+    assert client.requests == []

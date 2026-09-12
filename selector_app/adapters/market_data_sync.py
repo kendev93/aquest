@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import replace
+from inspect import Parameter, signature
 from typing import Protocol
 
 from selector_app.market_data.models import InstrumentBoard, ResolvedMarketDataProvider
@@ -12,8 +13,10 @@ from selector_app.market_data.store import DuckDbMarketDataStore
 
 from .akshare_market_sync import AkShareMarketSync, AkShareModuleFactory, AkShareProviderError
 from .market_sync import (
+    AbortCheck,
     DetailCallback,
     InstrumentDiscoveryReport,
+    MarketDataCancelledError,
     MarketSyncConfig,
     MarketSyncReport,
     ProgressCallback,
@@ -37,6 +40,7 @@ class ProviderSyncService(Protocol):
         progress_callback: ProgressCallback | None = None,
         *,
         detail_callback: DetailCallback | None = None,
+        abort_check: AbortCheck | None = None,
     ) -> MarketSyncReport: ...
 
 
@@ -84,12 +88,17 @@ class MarketDataSync:
         progress_callback: ProgressCallback | None = None,
         *,
         detail_callback: DetailCallback | None = None,
+        abort_check: AbortCheck | None = None,
     ) -> MarketSyncReport:
+        if abort_check is not None and abort_check():
+            raise MarketDataCancelledError("行情同步已取消")
         plans = self._plans(config)
         reports: list[MarketSyncReport] = []
         offset = 0
         known_total = _known_store_total(self._store, config, plans)
         for provider, provider_config, service in plans:
+            if abort_check is not None and abort_check():
+                raise MarketDataCancelledError("行情同步已取消")
             sub_total = _store_target_count(self._store, provider_config)
 
             def on_progress(current: int, total: int, *, base: int = offset) -> None:
@@ -102,10 +111,12 @@ class MarketDataSync:
 
             reports.append(
                 _coerce_sync_report(
-                    service.sync(
+                    _call_provider_sync(
+                        service,
                         provider_config,
                         on_progress if progress_callback is not None else None,
                         detail_callback=_provider_detail_callback(detail_callback, provider),
+                        abort_check=abort_check,
                     ),
                     provider,
                 )
@@ -207,6 +218,38 @@ def _provider_capabilities(service: ProviderSyncService) -> dict[str, object]:
         "version": None,
         "instrument_types": ["stock"],
     }
+
+
+def _call_provider_sync(
+    service: ProviderSyncService,
+    config: MarketSyncConfig,
+    progress_callback: ProgressCallback | None,
+    *,
+    detail_callback: DetailCallback | None,
+    abort_check: AbortCheck | None,
+) -> MarketSyncReport | Mapping[str, object]:
+    if abort_check is not None and _supports_abort_check(service.sync):
+        return service.sync(
+            config,
+            progress_callback,
+            detail_callback=detail_callback,
+            abort_check=abort_check,
+        )
+    return service.sync(config, progress_callback, detail_callback=detail_callback)
+
+
+def _supports_abort_check(method: object) -> bool:
+    if not callable(method):
+        return False
+    try:
+        parameters = signature(method).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == "abort_check"
+        and parameter.kind in {Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY}
+        for parameter in parameters
+    )
 
 
 def _scope_can_include_akshare_stock(config: MarketSyncConfig) -> bool:

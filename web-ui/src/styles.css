@@ -145,6 +145,18 @@ input:focus, select:focus { border-color: var(--accent); }
 .sync-progress-track { margin: 8px 0; }
 .sync-progress-track.indeterminate span { width: 32% !important; animation: sync-indeterminate 1.4s ease-in-out infinite; }
 @keyframes sync-indeterminate { 0% { transform: translateX(-115%); } 100% { transform: translateX(315%); } }
+.active-sync-jobs { display: grid; gap: 8px; margin-top: 11px; padding: 10px; border: 1px solid rgba(34, 197, 94, 0.3); background: rgba(8, 15, 32, 0.65); }
+.active-sync-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 10px; }
+.active-sync-heading strong { color: var(--text); font-size: 11px; }
+.active-sync-heading span { color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.active-sync-job { padding: 8px 9px; border: 1px solid var(--border); background: rgba(11, 18, 35, 0.72); }
+.active-sync-job-heading { display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; align-items: center; gap: 8px; color: var(--subtle); font-size: 9px; }
+.active-sync-job-heading strong { min-width: 0; overflow: hidden; color: var(--text); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.active-sync-job-heading b { color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
+.active-sync-job-heading .text-button { min-height: 28px; margin: 0; padding: 0 7px; font-size: 9px; }
+.active-sync-track { margin: 7px 0 6px; }
+.active-sync-job-meta { display: flex; align-items: baseline; flex-wrap: wrap; gap: 5px 12px; color: var(--subtle); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9px; }
+.active-sync-job-meta span:last-child { margin-left: auto; }
 .sync-progress-stats strong { color: var(--text); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .sync-stage-status { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 10px; margin-top: 9px; padding: 8px 10px; border-left: 2px solid var(--warning); background: rgba(245, 158, 11, 0.08); color: var(--muted); font-size: 10px; }
 .sync-stage-status strong { color: var(--text); font-weight: 600; }
@@ -440,6 +452,10 @@ tbody tr:hover td { background: rgba(22, 34, 58, 0.45); }
   .config-panel { display: block; padding: 18px; }
   .results-panel { padding: 18px; }
   .market-sync-actions { grid-template-columns: 1fr; }
+  .active-sync-job-heading { grid-template-columns: minmax(0, 1fr) auto; }
+  .active-sync-job-heading b { justify-self: end; }
+  .active-sync-job-heading .text-button { grid-column: 2; }
+  .active-sync-job-meta span:last-child { margin-left: 0; }
   .parameter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .signal-pair-grid, .backtest-metrics { grid-template-columns: 1fr 1fr; }
   .portfolio-metrics { grid-template-columns: repeat(2, 1fr); }

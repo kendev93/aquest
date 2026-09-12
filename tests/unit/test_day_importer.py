@@ -7,7 +7,10 @@ from pathlib import Path
 from threading import Lock
 from zoneinfo import ZoneInfo
 
+import pytest
+
 import selector_app.market_data.day_importer as day_importer_module
+from selector_app.adapters.market_sync import MarketDataCancelledError
 from selector_app.market_data.day_importer import LocalDayImporter
 from selector_app.market_data.store import DuckDbMarketDataStore
 
@@ -173,3 +176,14 @@ def test_importer_reports_local_phase_before_processing_files(tmp_path: Path) ->
         "current_status": "fetching",
         "range_label": "正在检查 1 个本地文件…",
     }
+
+
+def test_importer_can_be_cancelled_before_reading_source(tmp_path: Path) -> None:
+    vipdoc = tmp_path / "vipdoc"
+    _append_day(vipdoc / "sh" / "lday" / "sh600000.day", 20240102)
+
+    with pytest.raises(MarketDataCancelledError, match="取消"):
+        LocalDayImporter(DuckDbMarketDataStore(tmp_path / "market.duckdb")).import_vipdoc(
+            vipdoc,
+            abort_check=lambda: True,
+        )

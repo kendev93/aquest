@@ -10,9 +10,11 @@ vi.mock('../api/marketData', async () => {
   const actual = await vi.importActual<typeof import('../api/marketData')>('../api/marketData')
   return {
     ...actual,
+    cancelMarketDataJob: vi.fn(),
     fetchLocalInstruments: vi.fn(),
     fetchLocalChart: vi.fn(),
     fetchStoreStatus: vi.fn(),
+    fetchActiveMarketDataJobs: vi.fn(),
     fetchMarketDataCapabilities: vi.fn(),
     createLocalImport: vi.fn(),
     createMarketDataSync: vi.fn(),
@@ -51,6 +53,12 @@ describe('MarketDataPage', () => {
         akshare: { provider: 'akshare', available: true, version: '1.18.94', instrument_types: ['stock'] },
         tdx: { provider: 'tdx', available: true, instrument_types: ['stock', 'fund', 'index', 'bond'] },
       },
+    })
+    vi.mocked(marketApi.fetchActiveMarketDataJobs).mockResolvedValue([])
+    vi.mocked(marketApi.cancelMarketDataJob).mockResolvedValue({
+      job_id: 'active-1',
+      status: 'cancelling',
+      cancel_requested: true,
     })
     vi.mocked(marketApi.fetchStoreStatus).mockResolvedValue({
       database_path: '/data/market/market.duckdb',
@@ -252,6 +260,52 @@ describe('MarketDataPage', () => {
     expect(wrapper.get('[data-testid="market-sync-current"]').text()).toContain('最新 800 根日线')
   })
 
+  it('restores active market-data jobs and allows cancelling one', async () => {
+    vi.mocked(marketApi.fetchActiveMarketDataJobs).mockResolvedValueOnce([{
+      job_id: 'active-1',
+      description: 'AKShare历史全量回填',
+      status: 'running',
+      progress: 0.42,
+      total_candidates: 5219,
+      total_scanned: 2190,
+      errors: 0,
+      error: null,
+      worker_count: 8,
+      phase: 'online_bars',
+      metadata: {
+        provider: 'akshare',
+        current_instrument: { market: 'SZ', code: '000001', name: '平安银行' },
+        range_label: '正在读取完整日线…',
+      },
+      result: null,
+    }]).mockResolvedValueOnce([])
+    vi.mocked(marketApi.getMarketDataJob).mockResolvedValue({
+      job_id: 'active-1',
+      description: 'AKShare历史全量回填',
+      status: 'cancelled',
+      progress: 0.42,
+      total_candidates: 5219,
+      total_scanned: 2190,
+      errors: 0,
+      error: '行情同步已取消',
+      worker_count: 8,
+      phase: 'cancelled',
+      cancel_requested: true,
+      result: null,
+    })
+    const wrapper = mount(MarketDataPage)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="market-active-jobs"]').text()).toContain('42%')
+    expect(wrapper.get('[data-testid="market-active-jobs"]').text()).toContain('SZ 000001 · 平安银行')
+
+    await wrapper.get('[data-testid="market-active-job-active-1"] button').trigger('click')
+    await flushPromises()
+
+    expect(marketApi.cancelMarketDataJob).toHaveBeenCalledWith('active-1')
+    expect(wrapper.get('[data-testid="market-data-message"]').text()).toContain('已取消')
+  })
+
   it('shows the security-list discovery stage while the sync is waiting', async () => {
     vi.useFakeTimers()
     try {
@@ -415,8 +469,8 @@ describe('MarketDataPage', () => {
       await flushPromises()
 
       expect(marketApi.getMarketDataJob).toHaveBeenCalledWith('auto-1')
-      expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('自动同步最新行情')
-      expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('42%')
+      expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('100%')
+      expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('最近一次任务')
 
       await vi.advanceTimersByTimeAsync(500)
       await flushPromises()

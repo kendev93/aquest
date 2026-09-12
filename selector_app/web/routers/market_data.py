@@ -6,6 +6,7 @@ import os
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import date
+from inspect import Parameter, signature
 from typing import Literal, Protocol, cast
 
 import duckdb
@@ -15,15 +16,21 @@ from fastapi.responses import JSONResponse
 
 from selector_app.adapters.akshare_market_sync import AkShareProviderError
 from selector_app.adapters.market_sync import (
+    AbortCheck,
     DetailCallback,
     InstrumentDiscoveryReport,
+    MarketDataCancelledError,
     MarketSyncConfig,
     MarketSyncReport,
     ProgressCallback,
 )
 from selector_app.indicators.cache import IndicatorCache
 from selector_app.indicators.precompute import IndicatorPrecomputeService
-from selector_app.market_data.auto_sync import AUTO_SYNC_DESCRIPTION
+from selector_app.market_data.auto_sync import (
+    ACTIVE_DATA_JOB_DESCRIPTIONS,
+    MARKET_SYNC_EXCLUSIVE_GROUP,
+    MARKET_SYNC_JOB_DESCRIPTIONS,
+)
 from selector_app.market_data.day_importer import ProgressCallback as LocalImportProgressCallback
 from selector_app.market_data.models import (
     ImportReport,
@@ -38,8 +45,10 @@ from selector_app.market_data.service import (
 )
 from selector_app.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
 from selector_app.screening.jobs import (
+    ActiveJobConflictError,
     ProgressReporter,
     ScreenJobRunner,
+    TaskCancelledError,
     TaskUserError,
     report_progress_detail,
 )
@@ -64,6 +73,7 @@ class MarketSyncService(Protocol):
         progress_callback: LocalImportProgressCallback | None = None,
         *,
         detail_callback: DetailCallback | None = None,
+        abort_check: AbortCheck | None = None,
     ) -> MarketSyncReport | dict[str, object]: ...
 
 
@@ -101,6 +111,7 @@ class LocalDayImporterLike(Protocol):
         boards: list[InstrumentBoard] | None = None,
         progress_callback: ProgressCallback | None = None,
         detail_callback: DetailCallback | None = None,
+        abort_check: AbortCheck | None = None,
     ) -> ImportReport | dict[str, object]: ...
 
 
@@ -310,6 +321,13 @@ def create_local_import(
             },
         )
 
+    runner = _runner(request)
+    _reject_duplicate_market_job(runner)
+    job_id_holder = [""]
+
+    def abort_check() -> bool:
+        return bool(job_id_holder[0]) and runner.is_cancel_requested(job_id_holder[0])
+
     def run_import(progress: ProgressReporter) -> dict[str, object]:
         try:
             result = _importer(request).import_vipdoc(
@@ -319,9 +337,14 @@ def create_local_import(
                 boards=payload.boards,
                 progress_callback=progress,
                 detail_callback=lambda detail: report_progress_detail(progress, detail),
+                abort_check=abort_check,
             )
+        except MarketDataCancelledError as exc:
+            raise TaskCancelledError(str(exc)) from exc
         except (MarketDataStoreError, duckdb.Error) as exc:
             raise TaskUserError(_storage_error_message(exc)) from exc
+        if abort_check():
+            raise TaskCancelledError("行情导入已取消")
         return _with_indicator_precompute(
             request,
             result.to_dict() if isinstance(result, ImportReport) else result,
@@ -333,7 +356,14 @@ def create_local_import(
         )
 
     try:
-        job_id = _runner(request).submit_callable(run_import, description="本地行情导入")
+        job_id = runner.submit_callable(
+            run_import,
+            description="本地行情导入",
+            exclusive_group=MARKET_SYNC_EXCLUSIVE_GROUP,
+        )
+        job_id_holder[0] = job_id
+    except ActiveJobConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail="任务执行器暂不可用") from exc
     return JSONResponse(
@@ -342,17 +372,31 @@ def create_local_import(
     )
 
 
+@router.get("/jobs/active")
+def active_market_data_jobs(request: Request) -> dict[str, object]:
+    return {"data": _runner(request).active_snapshots(MARKET_SYNC_JOB_DESCRIPTIONS)}
+
+
+@router.post("/jobs/{job_id}/cancel")
+def cancel_market_data_job(job_id: str, request: Request) -> dict[str, object]:
+    state = _runner(request).get(job_id)
+    if state is None or state.description not in MARKET_SYNC_JOB_DESCRIPTIONS:
+        raise HTTPException(status_code=404, detail="行情同步任务不存在或已过期")
+    if not _runner(request).request_cancel(job_id):
+        return {
+            "data": {
+                "job_id": job_id,
+                "status": state.status,
+                "cancel_requested": False,
+            }
+        }
+    return {"data": {"job_id": job_id, "status": "cancelling", "cancel_requested": True}}
+
+
 @router.get("/jobs/{job_id}")
 def market_data_job_status(job_id: str, request: Request) -> dict[str, object]:
     state = _runner(request).get(job_id)
-    if state is None or state.description not in {
-        "本地行情导入",
-        "本地行情自动导入",
-        "行情同步",
-        "AKShare历史全量回填",
-        AUTO_SYNC_DESCRIPTION,
-        "指标预计算",
-    }:
+    if state is None or state.description not in ACTIVE_DATA_JOB_DESCRIPTIONS:
         raise HTTPException(status_code=404, detail="行情任务不存在或已过期")
     return {"data": state.snapshot()}
 
@@ -364,13 +408,21 @@ def market_data_store_status(request: Request) -> dict[str, object] | JSONRespon
         startup_job_id = getattr(request.app.state, "startup_import_job_id", None)
         if startup_job_id:
             startup_state = _runner(request).get(startup_job_id)
-            if startup_state is None or startup_state.status in {"completed", "failed"}:
+            if startup_state is None or startup_state.status in {
+                "completed",
+                "failed",
+                "cancelled",
+            }:
                 startup_job_id = None
         data["startup_import_job_id"] = startup_job_id
         auto_sync_job_id = getattr(request.app.state, "auto_sync_job_id", None)
         if auto_sync_job_id:
             auto_sync_state = _runner(request).get(auto_sync_job_id)
-            if auto_sync_state is None or auto_sync_state.status in {"completed", "failed"}:
+            if auto_sync_state is None or auto_sync_state.status in {
+                "completed",
+                "failed",
+                "cancelled",
+            }:
                 auto_sync_job_id = None
         data["auto_sync_job_id"] = auto_sync_job_id
         data["auto_sync_enabled"] = bool(getattr(request.app.state, "auto_sync_enabled", False))
@@ -430,18 +482,32 @@ def _create_sync_job(
 ) -> JSONResponse:
     # Online sync discovers the current exchange list in both modes.  The
     # local import supplies longer history; it must not limit the universe.
+    runner = _runner(request)
+    _reject_duplicate_market_job(runner)
+    job_id_holder = [""]
+
+    def abort_check() -> bool:
+        return bool(job_id_holder[0]) and runner.is_cancel_requested(job_id_holder[0])
+
     config = _sync_config(payload, prefer_store_targets=False)
 
     def run_sync(progress: ProgressReporter) -> dict[str, object]:
         try:
+            if abort_check():
+                raise MarketDataCancelledError("行情同步已取消")
             if not include_local:
-                return _result_dict(
-                    _service(request).sync(
+                result = _result_dict(
+                    _call_market_sync(
+                        _service(request),
                         config,
                         progress,
                         detail_callback=lambda detail: report_progress_detail(progress, detail),
+                        abort_check=abort_check,
                     )
                 )
+                if abort_check():
+                    raise MarketDataCancelledError("行情同步已取消")
+                return result
 
             discovery_result = _result_dict(
                 _service(request).discover_instruments(
@@ -449,6 +515,8 @@ def _create_sync_job(
                     detail_callback=lambda detail: report_progress_detail(progress, detail),
                 )
             )
+            if abort_check():
+                raise MarketDataCancelledError("行情同步已取消")
             report_progress_detail(
                 progress,
                 {
@@ -469,6 +537,7 @@ def _create_sync_job(
                         boards=payload.boards,
                         progress_callback=progress,
                         detail_callback=lambda detail: report_progress_detail(progress, detail),
+                        abort_check=abort_check,
                     )
                 )
             else:
@@ -479,13 +548,19 @@ def _create_sync_job(
                     "vipdoc_path": local_root,
                 }
             online_result = _result_dict(
-                _service(request).sync(
+                _call_market_sync(
+                    _service(request),
                     replace(config, prefer_store_targets=True, refresh_names=True),
                     progress,
                     detail_callback=lambda detail: report_progress_detail(progress, detail),
+                    abort_check=abort_check,
                 )
             )
             online_result = _with_discovery_summary(online_result, discovery_result)
+            if abort_check():
+                raise MarketDataCancelledError("行情同步已取消")
+        except MarketDataCancelledError as exc:
+            raise TaskCancelledError(str(exc)) from exc
         except AkShareProviderError as exc:
             raise TaskUserError(str(exc)) from exc
         except TdxConnectionError as exc:
@@ -497,6 +572,8 @@ def _create_sync_job(
         result = (
             online_result if not include_local else _combined_result(local_result, online_result)
         )
+        if abort_check():
+            raise TaskCancelledError("行情同步已取消")
         return _with_indicator_precompute(
             request,
             result,
@@ -508,7 +585,14 @@ def _create_sync_job(
         )
 
     try:
-        job_id = _runner(request).submit_callable(run_sync, description=description)
+        job_id = runner.submit_callable(
+            run_sync,
+            description=description,
+            exclusive_group=MARKET_SYNC_EXCLUSIVE_GROUP,
+        )
+        job_id_holder[0] = job_id
+    except ActiveJobConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail="任务执行器暂不可用") from exc
     return JSONResponse(
@@ -597,6 +681,46 @@ def local_market_bars(
             content={"error": {"code": "local_data_error", "message": str(exc)}},
         )
     return {"data": result.to_dict()}
+
+
+def _call_market_sync(
+    service: MarketSyncService,
+    config: MarketSyncConfig,
+    progress: ProgressReporter,
+    *,
+    detail_callback: DetailCallback,
+    abort_check: AbortCheck,
+) -> MarketSyncReport | dict[str, object]:
+    if _supports_abort_check(service.sync):
+        return service.sync(
+            config,
+            progress,
+            detail_callback=detail_callback,
+            abort_check=abort_check,
+        )
+    return service.sync(config, progress, detail_callback=detail_callback)
+
+
+def _supports_abort_check(method: object) -> bool:
+    if not callable(method):
+        return False
+    try:
+        parameters = signature(method).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == "abort_check"
+        and parameter.kind in {Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY}
+        for parameter in parameters
+    )
+
+
+def _reject_duplicate_market_job(runner: ScreenJobRunner) -> None:
+    if runner.has_active_jobs(MARKET_SYNC_JOB_DESCRIPTIONS):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="已有行情同步任务正在运行，请先查看进度或取消后再试。",
+        )
 
 
 def _storage_error_message(exc: BaseException) -> str:

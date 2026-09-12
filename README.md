@@ -137,7 +137,7 @@ vipdoc/
 
 导入读取的是 `.day` 的原始价格口径；如果桌面端在收盘前已写入今日临时记录，本应用会在 15:05 前将它标记为 `provisional`，筛选和回测默认忽略，收盘后下一次导入会自动转为 `completed`。导入或同步完成后会后台分批预热内置指标；缓存按完整行情指纹和公式版本失效，预热失败时业务会自动按需重建。自定义公式也会按公式内容和参数独立缓存。自定义列表每行支持 `SH 600000`、`SZ 000001` 或单独六位代码，空行和 `#` 注释会忽略。
 
-页面的“一键同步行情”按钮默认通过 AKShare 刷新沪深股票证券列表并登记中文名，再增量导入本地 `vipdoc`，最后按刚刷新后的完整范围下载股票日线；默认路径不再调用 TDX。AKShare 主接口失败时会尝试腾讯历史接口，新浪接口只作为最后的受限备用源。B 股、基金、指数和债券仍可通过手动选择 TDX（遗留兼容源）更新。页面新增“AKShare 全量补齐”，会强制重新读取目标股票的全部可用历史。不会写回 `.day` 文件，已有本地来源记录优先。同步过程中页面会显示 provider、实际日线接口、证券列表总数、当前标的中文名、实际同步日期范围、重试次数、进度和错误摘要。如果只需要增量在线更新，也可以调用 `/sync-online`。
+页面的“一键同步行情”按钮默认通过 AKShare 刷新沪深股票证券列表并登记中文名，再增量导入本地 `vipdoc`，最后按刚刷新后的完整范围下载股票日线；默认路径不再调用 TDX。AKShare 主接口失败时会尝试腾讯历史接口，新浪接口只作为最后的受限备用源。B 股、基金、指数和债券仍可通过手动选择 TDX（遗留兼容源）更新。页面新增“AKShare 全量补齐”，会强制重新读取目标股票的全部可用历史。不会写回 `.day` 文件，已有本地来源记录优先。行情同步任务全局只允许运行一个，页面会显示实际任务、provider、日线接口、证券列表总数、当前标的中文名、实际同步日期范围、重试次数、进度和错误摘要，并支持取消任务。如果只需要增量在线更新，也可以调用 `/sync-online`。
 
 ## 本地行情浏览
 
@@ -231,7 +231,9 @@ GET  /api/v1/market-data/capabilities                  # 行情源能力和当�
 GET  /api/v1/market-data/indicator-cache               # 缓存命中率、耗时和存储量
 POST /api/v1/market-data/indicator-cache/precompute    # 手动预热已导入行情
 GET  /api/v1/market-data/store
+GET  /api/v1/market-data/jobs/active                       # 当前运行中的行情任务
 GET  /api/v1/market-data/jobs/{job_id}
+POST /api/v1/market-data/jobs/{job_id}/cancel             # 协作取消单个行情任务
 GET  /api/v1/market-data/sync/jobs/{job_id}              # 在线/一键同步轮询
 GET  /api/v1/market-data/local/instruments
 GET  /api/v1/market-data/local/{market}/{code}/bars

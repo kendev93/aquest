@@ -14,6 +14,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from selector_app.adapters.market_sync import AbortCheck, MarketDataCancelledError
 from selector_app.concurrency import MAX_WORKERS
 
 from .day_format import (
@@ -86,7 +87,10 @@ class LocalDayImporter:
         boards: Iterable[InstrumentBoard] | None = None,
         progress_callback: ProgressCallback | None = None,
         detail_callback: DetailCallback | None = None,
+        abort_check: AbortCheck | None = None,
     ) -> ImportReport:
+        if abort_check is not None and abort_check():
+            raise MarketDataCancelledError("行情导入已取消")
         root = Path(vipdoc_path).expanduser().resolve()
         files = discover_day_files(root, universe)
         if detail_callback is not None:
@@ -175,6 +179,8 @@ class LocalDayImporter:
         )
 
         for index, path in enumerate(files, start=1):
+            if abort_check is not None and abort_check():
+                raise MarketDataCancelledError("行情导入已取消")
             relative_path = path.relative_to(root).as_posix()
             seen.add(relative_path)
             market = path.name[:2].upper()
@@ -231,6 +237,8 @@ class LocalDayImporter:
                     for candidate in candidates
                 }
                 for future in as_completed(futures):
+                    if abort_check is not None and abort_check():
+                        raise MarketDataCancelledError("行情导入已取消")
                     prepared = future.result()
                     candidate = prepared.candidate
                     old = candidate.old
@@ -332,6 +340,8 @@ class LocalDayImporter:
 
         missing_files = 0
         for relative_path in previous:
+            if abort_check is not None and abort_check():
+                raise MarketDataCancelledError("行情导入已取消")
             relative_market = relative_path.split("/", 1)[0].lower()
             if (
                 relative_market in scanned_markets

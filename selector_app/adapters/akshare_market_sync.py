@@ -29,8 +29,10 @@ from selector_app.market_data.scope import InstrumentScope
 from selector_app.market_data.store import DuckDbMarketDataStore
 
 from .market_sync import (
+    AbortCheck,
     DetailCallback,
     InstrumentDiscoveryReport,
+    MarketDataCancelledError,
     MarketSyncConfig,
     MarketSyncReport,
     ProgressCallback,
@@ -244,8 +246,13 @@ class AkShareMarketSync:
         progress_callback: ProgressCallback | None = None,
         *,
         detail_callback: DetailCallback | None = None,
+        abort_check: AbortCheck | None = None,
     ) -> MarketSyncReport:
+        if abort_check is not None and abort_check():
+            raise MarketDataCancelledError("行情同步已取消")
         selection, new_instruments, existing_instruments = self._prepare_targets(config)
+        if abort_check is not None and abort_check():
+            raise MarketDataCancelledError("行情同步已取消")
         targets = selection.targets
         total = len(targets)
         failure_reasons: Counter[str] = Counter()
@@ -299,6 +306,7 @@ class AkShareMarketSync:
                         existing_by_key,
                         on_target_done,
                         detail_callback,
+                        abort_check,
                     ): batch
                     for batch in batches
                 }
@@ -423,6 +431,7 @@ class AkShareMarketSync:
         existing_by_key: Mapping[tuple[str, str], pd.DataFrame],
         target_done: Callable[[], None],
         detail_callback: DetailCallback | None,
+        abort_check: AbortCheck | None,
     ) -> _BatchReport:
         failure_reasons: Counter[str] = Counter()
         processed = 0
@@ -432,6 +441,8 @@ class AkShareMarketSync:
         history_sources: Counter[str] = Counter()
         module = self._module_factory()
         for market, code, instrument_type, board, name in batch:
+            if abort_check is not None and abort_check():
+                raise MarketDataCancelledError("行情同步已取消")
             _report_detail(
                 detail_callback,
                 _instrument_detail(
@@ -478,6 +489,8 @@ class AkShareMarketSync:
                 else:
                     unchanged_files += 1
                 history_sources[sync_result.history_source] += 1
+            except MarketDataCancelledError:
+                raise
             except Exception as exc:  # noqa: BLE001 - isolate one instrument
                 reason = str(exc).strip()[:200] or type(exc).__name__
                 failure_reasons[reason] += 1

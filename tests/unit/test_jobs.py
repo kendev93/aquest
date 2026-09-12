@@ -3,7 +3,14 @@ from __future__ import annotations
 import time
 from threading import Event, Lock
 
-from selector_app.screening.jobs import ScreenJobRunner, TaskCancelledError, TaskUserError
+import pytest
+
+from selector_app.screening.jobs import (
+    ActiveJobConflictError,
+    ScreenJobRunner,
+    TaskCancelledError,
+    TaskUserError,
+)
 
 
 def wait_until_complete(runner: ScreenJobRunner, job_id: str) -> None:
@@ -143,4 +150,47 @@ def test_runner_cooperatively_cancels_a_generic_task() -> None:
         assert state is not None
         assert state.error == "任务已取消"
     finally:
+        runner.shutdown()
+
+
+def test_runner_lists_active_job_snapshots_by_description() -> None:
+    runner = ScreenJobRunner(max_results=2)
+    started = Event()
+    release = Event()
+
+    def task(_progress):
+        started.set()
+        release.wait(timeout=1)
+        return {}
+
+    try:
+        job_id = runner.submit_callable(task, description="行情同步")
+        assert started.wait(timeout=1)
+
+        active = runner.active_snapshots({"行情同步"})
+
+        assert len(active) == 1
+        assert active[0]["job_id"] == job_id
+        assert active[0]["description"] == "行情同步"
+        assert runner.active_snapshots({"策略实验室"}) == []
+    finally:
+        release.set()
+        runner.shutdown()
+
+
+def test_runner_rejects_a_second_job_in_the_same_exclusive_group() -> None:
+    runner = ScreenJobRunner(max_results=2)
+    release = Event()
+
+    def task(_progress):
+        release.wait(timeout=1)
+        return {}
+
+    try:
+        first = runner.submit_callable(task, description="行情同步", exclusive_group="market")
+        with pytest.raises(ActiveJobConflictError, match="已有任务"):
+            runner.submit_callable(task, description="行情同步", exclusive_group="market")
+        assert runner.get(first) is not None
+    finally:
+        release.set()
         runner.shutdown()

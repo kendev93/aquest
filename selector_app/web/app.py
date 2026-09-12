@@ -23,6 +23,7 @@ from selector_app.indicators.precompute import IndicatorPrecomputeService
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
 from selector_app.market_data.auto_sync import (
     DEFAULT_AUTO_SYNC_INTERVAL_SECONDS,
+    MARKET_SYNC_EXCLUSIVE_GROUP,
     AutomaticMarketSyncScheduler,
 )
 from selector_app.market_data.day_importer import LocalDayImporter
@@ -178,6 +179,7 @@ def create_app(
                     app.state.startup_import_job_id = selected_runner.submit_callable(
                         run_startup_import,
                         description="本地行情自动导入",
+                        exclusive_group=MARKET_SYNC_EXCLUSIVE_GROUP,
                     )
                 except RuntimeError:
                     logger.exception("无法提交本地行情自动导入任务")

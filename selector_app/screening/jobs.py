@@ -61,6 +61,10 @@ class TaskCancelledError(TaskUserError):
     """A user-requested cancellation that should not be reported as a failure."""
 
 
+class ActiveJobConflictError(RuntimeError):
+    """Raised when an exclusive task group already has active work."""
+
+
 class ScanEngineLike(Protocol):
     def scan(
         self,
@@ -89,6 +93,7 @@ class JobState:
     phase: str | None = None
     metadata: dict[str, object] = field(default_factory=dict)
     cancel_requested: bool = False
+    exclusive_group: str | None = None
 
     def snapshot(self) -> dict[str, object]:
         return {
@@ -206,6 +211,21 @@ class ScreenJobRunner:
                 for state in self._jobs.values()
             )
 
+    def active_snapshots(
+        self,
+        descriptions: Iterable[str] | None = None,
+    ) -> list[dict[str, object]]:
+        """Return immutable snapshots for queued/running jobs in stable order."""
+
+        allowed = frozenset(descriptions) if descriptions is not None else None
+        with self._lock:
+            return [
+                state.snapshot()
+                for state in self._jobs.values()
+                if state.status in {"queued", "running"}
+                and (allowed is None or state.description in allowed)
+            ]
+
     def submit_callable(
         self,
         func: GenericTask,
@@ -213,6 +233,7 @@ class ScreenJobRunner:
         description: str = "",
         worker_count: int | None = MAX_WORKERS,
         job_id: str | None = None,
+        exclusive_group: str | None = None,
     ) -> str:
         """Run a non-screening task on the same lifecycle/executor infrastructure."""
 
@@ -222,10 +243,16 @@ class ScreenJobRunner:
         with self._lock:
             if self._shutdown:
                 raise RuntimeError("任务执行器已关闭")
+            if exclusive_group is not None and any(
+                state.status in {"queued", "running"} and state.exclusive_group == exclusive_group
+                for state in self._jobs.values()
+            ):
+                raise ActiveJobConflictError("已有任务正在运行")
             self._jobs[resolved_job_id] = JobState(
                 job_id=resolved_job_id,
                 description=description,
                 worker_count=worker_count,
+                exclusive_group=exclusive_group,
             )
             self._executor.submit(self._run_callable, resolved_job_id, func)
             self._evict_if_needed_locked()

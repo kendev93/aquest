@@ -4,26 +4,46 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from collections.abc import Callable
 from datetime import datetime
+from inspect import Parameter, signature
 from pathlib import Path
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
-from selector_app.adapters.market_sync import DetailCallback, MarketSyncConfig, MarketSyncReport
+from selector_app.adapters.market_sync import (
+    AbortCheck,
+    DetailCallback,
+    MarketDataCancelledError,
+    MarketSyncConfig,
+    MarketSyncReport,
+)
 from selector_app.indicators.precompute import IndicatorPrecomputeService
 from selector_app.market_data.store import DuckDbMarketDataStore
-from selector_app.screening.jobs import ProgressReporter, ScreenJobRunner, report_progress_detail
+from selector_app.screening.jobs import (
+    ProgressReporter,
+    ScreenJobRunner,
+    TaskCancelledError,
+    report_progress_detail,
+)
 
 logger = logging.getLogger(__name__)
 
 AUTO_SYNC_DESCRIPTION = "自动行情同步"
-ACTIVE_DATA_JOB_DESCRIPTIONS = frozenset(
+MARKET_SYNC_EXCLUSIVE_GROUP = "market_data_sync"
+MARKET_SYNC_JOB_DESCRIPTIONS = frozenset(
     {
         "本地行情导入",
         "本地行情自动导入",
         "行情同步",
+        "AKShare历史全量回填",
         AUTO_SYNC_DESCRIPTION,
+    }
+)
+ACTIVE_DATA_JOB_DESCRIPTIONS = frozenset(
+    {
+        *MARKET_SYNC_JOB_DESCRIPTIONS,
         "指标预计算",
     }
 )
@@ -40,6 +60,7 @@ class MarketSyncService(Protocol):
         progress_callback: Callable[[int, int], None] | None = None,
         *,
         detail_callback: DetailCallback | None = None,
+        abort_check: AbortCheck | None = None,
     ) -> MarketSyncReport | dict[str, object]: ...
 
 
@@ -99,11 +120,18 @@ class AutomaticMarketSyncScheduler:
         if not auto_sync_due(status.last_online_sync_at, now=self._clock()):
             return None
 
-        job_id = self._runner.submit_callable(
-            self._run_sync,
-            description=AUTO_SYNC_DESCRIPTION,
-        )
+        job_id = uuid.uuid4().hex
         self._active_job_id = job_id
+        try:
+            self._runner.submit_callable(
+                self._run_sync,
+                description=AUTO_SYNC_DESCRIPTION,
+                job_id=job_id,
+                exclusive_group=MARKET_SYNC_EXCLUSIVE_GROUP,
+            )
+        except Exception:
+            self._active_job_id = None
+            raise
         logger.info("已提交每日自动行情同步任务: %s", job_id)
         return job_id
 
@@ -129,17 +157,29 @@ class AutomaticMarketSyncScheduler:
         return False
 
     def _run_sync(self, progress: ProgressReporter) -> dict[str, object]:
-        result = self._market_sync.sync(
-            MarketSyncConfig(
-                universe="all",
-                provider="akshare",
-                bars=800,
-                prefer_store_targets=False,
-                refresh_names=False,
-            ),
-            progress,
-            detail_callback=lambda detail: report_progress_detail(progress, detail),
-        )
+        job_id = self._active_job_id or ""
+
+        def abort_check() -> bool:
+            return bool(job_id) and self._runner.is_cancel_requested(job_id)
+
+        try:
+            result = _call_market_sync(
+                self._market_sync,
+                MarketSyncConfig(
+                    universe="all",
+                    provider="akshare",
+                    bars=800,
+                    prefer_store_targets=False,
+                    refresh_names=False,
+                ),
+                progress,
+                detail_callback=lambda detail: report_progress_detail(progress, detail),
+                abort_check=abort_check,
+            )
+            if abort_check():
+                raise MarketDataCancelledError("行情同步已取消")
+        except MarketDataCancelledError as exc:
+            raise TaskCancelledError(str(exc)) from exc
         payload = result.to_dict() if isinstance(result, MarketSyncReport) else dict(result)
         try:
             precomputed = self._precomputer.run(
@@ -169,8 +209,42 @@ def _has_day_files(root: Path) -> bool:
     )
 
 
+def _call_market_sync(
+    service: MarketSyncService,
+    config: MarketSyncConfig,
+    progress: ProgressReporter,
+    *,
+    detail_callback: DetailCallback,
+    abort_check: AbortCheck,
+) -> MarketSyncReport | dict[str, object]:
+    if _supports_abort_check(service.sync):
+        return service.sync(
+            config,
+            progress,
+            detail_callback=detail_callback,
+            abort_check=abort_check,
+        )
+    return service.sync(config, progress, detail_callback=detail_callback)
+
+
+def _supports_abort_check(method: object) -> bool:
+    if not callable(method):
+        return False
+    try:
+        parameters = signature(method).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.name == "abort_check"
+        and parameter.kind in {Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY}
+        for parameter in parameters
+    )
+
+
 __all__ = [
     "AUTO_SYNC_DESCRIPTION",
+    "MARKET_SYNC_JOB_DESCRIPTIONS",
+    "MARKET_SYNC_EXCLUSIVE_GROUP",
     "DEFAULT_AUTO_SYNC_INTERVAL_SECONDS",
     "AutomaticMarketSyncScheduler",
     "auto_sync_due",

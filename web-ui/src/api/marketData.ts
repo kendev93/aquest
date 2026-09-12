@@ -151,4 +151,21 @@ export async function getMarketDataJob(jobId: string): Promise<MarketSyncJobStat
   return response.data
 }
 
+export async function fetchActiveMarketDataJobs(): Promise<MarketSyncJobState[]> {
+  const response = await request<{ data: MarketSyncJobState[] }>(`${API_BASE}/jobs/active`)
+  return response.data
+}
+
+export async function cancelMarketDataJob(jobId: string): Promise<{
+  job_id: string
+  status: string
+  cancel_requested: boolean
+}> {
+  const response = await request<{ data: { job_id: string; status: string; cancel_requested: boolean } }>(
+    `${API_BASE}/jobs/${encodeURIComponent(jobId)}/cancel`,
+    { method: 'POST' },
+  )
+  return response.data
+}
+
 export type MarketDataImportResult = MarketSyncResult

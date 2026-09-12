@@ -32,6 +32,11 @@ SyncUniverse = Literal["all", "sh", "sz"]
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 _LATEST_PROBE_BARS = 2
 InstrumentTarget = tuple[MarketCode, str, InstrumentType, InstrumentBoard, str | None]
+AbortCheck = Callable[[], bool]
+
+
+class MarketDataCancelledError(RuntimeError):
+    """Raised when an operator requests cancellation of a sync job."""
 
 
 @dataclass(frozen=True)
@@ -257,7 +262,10 @@ class TdxMarketSync:
         progress_callback: ProgressCallback | None = None,
         *,
         detail_callback: DetailCallback | None = None,
+        abort_check: AbortCheck | None = None,
     ) -> MarketSyncReport:
+        if abort_check is not None and abort_check():
+            raise MarketDataCancelledError("行情同步已取消")
         _report_detail(
             detail_callback,
             {
@@ -267,6 +275,8 @@ class TdxMarketSync:
             },
         )
         selection, new_instruments, existing_instruments = self._prepare_targets(config)
+        if abort_check is not None and abort_check():
+            raise MarketDataCancelledError("行情同步已取消")
         factory = self._client_factory or _default_client
         targets = selection.targets
         total = len(targets)
@@ -319,6 +329,7 @@ class TdxMarketSync:
                         existing_by_key,
                         on_target_done,
                         detail_callback,
+                        abort_check,
                     ): batch
                     for batch in batches
                 }
@@ -378,6 +389,7 @@ class TdxMarketSync:
         existing_by_key: Mapping[tuple[str, str], pd.DataFrame],
         target_done: Callable[[], None],
         detail_callback: DetailCallback | None,
+        abort_check: AbortCheck | None,
     ) -> _SyncBatchReport:
         failure_reasons: Counter[str] = Counter()
         processed = 0
@@ -387,6 +399,8 @@ class TdxMarketSync:
         try:
             with factory(config.timeout) as client:
                 for market, code, instrument_type, board, name in batch:
+                    if abort_check is not None and abort_check():
+                        raise MarketDataCancelledError("行情同步已取消")
                     _report_detail(
                         detail_callback,
                         _instrument_detail(
@@ -426,6 +440,8 @@ class TdxMarketSync:
                             written_bars += written
                         else:
                             unchanged_files += 1
+                    except MarketDataCancelledError:
+                        raise
                     except Exception as exc:  # noqa: BLE001 - isolate one instrument
                         reason = str(exc).strip()[:200] or type(exc).__name__
                         failure_reasons[reason] += 1
@@ -442,6 +458,8 @@ class TdxMarketSync:
                         # An exception for one target should not stop the batch.
                     processed += 1
                     target_done()
+        except MarketDataCancelledError:
+            raise
         except Exception as exc:  # noqa: BLE001 - isolate one failed worker connection
             reason = str(exc).strip()[:200] or type(exc).__name__
             remaining = len(batch) - processed
@@ -843,6 +861,7 @@ __all__ = [
     "InstrumentDiscoveryReport",
     "MarketSyncConfig",
     "MarketSyncReport",
+    "MarketDataCancelledError",
     "TdxMarketClient",
     "TdxMarketSync",
 ]

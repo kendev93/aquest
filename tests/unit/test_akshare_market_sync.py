@@ -9,7 +9,7 @@ import pytest
 
 from selector_app.adapters.akshare_market_sync import AkShareMarketSync, AkShareProviderError
 from selector_app.adapters.market_data_sync import MarketDataSync
-from selector_app.adapters.market_sync import MarketSyncConfig
+from selector_app.adapters.market_sync import MarketDataCancelledError, MarketSyncConfig
 from selector_app.market_data.store import DuckDbMarketDataStore
 
 _NOW = datetime(2026, 9, 12, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
@@ -275,6 +275,21 @@ def test_akshare_empty_history_is_reported_as_a_symbol_error(tmp_path: Path) -> 
     assert report.errors == 3
     assert report.unchanged_files == 0
     assert any("没有可用日线" in reason for reason in report.failure_reasons)
+
+
+def test_akshare_sync_can_be_cancelled_before_fetching_bars(tmp_path: Path) -> None:
+    module = FakeAkShare()
+    service = AkShareMarketSync(
+        store=DuckDbMarketDataStore(tmp_path / "market.duckdb"),
+        module_factory=lambda: module,
+        clock=lambda: _NOW,
+        sleep=lambda _seconds: None,
+    )
+
+    with pytest.raises(MarketDataCancelledError, match="取消"):
+        service.sync(_config(), abort_check=lambda: True)
+
+    assert module.history_requests == []
 
 
 def test_market_data_sync_defaults_to_akshare_without_calling_tdx(

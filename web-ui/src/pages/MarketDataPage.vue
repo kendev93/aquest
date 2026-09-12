@@ -3,9 +3,11 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 
 import { FormulaScreenApiError } from '../api/formulaScreen'
 import {
+  cancelMarketDataJob,
   createLocalImport,
   createAkShareBackfill,
   createMarketDataSync,
+  fetchActiveMarketDataJobs,
   fetchMarketDataCapabilities,
   fetchLocalChart,
   fetchLocalInstruments,
@@ -79,10 +81,13 @@ const storeStatus = ref<DataStoreStatus | null>(null)
 const syncLoading = ref(false)
 const syncLabel = ref('')
 const marketJob = ref<MarketSyncJobState | null>(null)
+const activeMarketJobs = ref<MarketSyncJobState[]>([])
 const providerCapabilities = ref<MarketDataCapabilities | null>(null)
 const MARKET_JOB_POLL_INTERVAL_MS = 500
 const MARKET_STATUS_POLL_INTERVAL_MS = 5000
+const ACTIVE_JOB_POLL_INTERVAL_MS = 1000
 let storeStatusPollTimer: number | null = null
+let activeJobPollTimer: number | null = null
 
 const selectedTitle = computed(() => (
   selected.value ? `${selected.value.market} ${selected.value.code}` : '请选择品种'
@@ -209,6 +214,34 @@ const marketProgressIndeterminate = computed(() => Boolean(
   && marketJob.value.total_candidates === 0,
 ))
 
+function activeJobInstrumentText(job: MarketSyncJobState): string {
+  const value = job.metadata?.current_instrument
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return '等待第一个标的…'
+  const detail = value as Record<string, unknown>
+  const identity = [detail.market, detail.code]
+    .filter((item): item is string => typeof item === 'string' && item.length > 0)
+    .join(' ')
+  const name = typeof detail.name === 'string' && detail.name ? detail.name : ''
+  return [identity, name].filter(Boolean).join(' · ') || '处理中…'
+}
+
+function activeJobRangeText(job: MarketSyncJobState): string {
+  const start = typeof job.metadata?.range_start === 'string' ? job.metadata.range_start : ''
+  const end = typeof job.metadata?.range_end === 'string' ? job.metadata.range_end : ''
+  if (start && end) return `${start} → ${end}`
+  return typeof job.metadata?.range_label === 'string' ? job.metadata.range_label : '读取日期范围…'
+}
+
+function activeJobProviderText(job: MarketSyncJobState): string {
+  if (job.metadata?.provider === 'tdx') return 'TDX'
+  if (job.metadata?.provider === 'akshare') return 'AKShare'
+  return job.description?.includes('本地') ? '本地 vipdoc' : '—'
+}
+
+function activeJobDescription(job: MarketSyncJobState): string {
+  return job.description || (job.metadata?.provider === 'tdx' ? 'TDX 行情同步' : 'AKShare 行情同步')
+}
+
 function apiMessage(error: unknown): string {
   if (error instanceof FormulaScreenApiError) return error.message
   return '行情数据读取失败，请检查数据导入状态后重试。'
@@ -267,16 +300,73 @@ async function loadStoreStatus(): Promise<void> {
   }
 }
 
+function updateActiveMarketJob(state: MarketSyncJobState): void {
+  if (state.status === 'completed' || state.status === 'failed' || state.status === 'cancelled') {
+    activeMarketJobs.value = activeMarketJobs.value.filter((job) => job.job_id !== state.job_id)
+    return
+  }
+  const current = activeMarketJobs.value.filter((job) => job.job_id !== state.job_id)
+  activeMarketJobs.value = [...current, state]
+}
+
+async function loadActiveMarketJobs(): Promise<void> {
+  try {
+    const previous = activeMarketJobs.value
+    const jobs = (await fetchActiveMarketDataJobs()) ?? []
+    activeMarketJobs.value = jobs
+    const activeIds = new Set(jobs.map((job) => job.job_id))
+    for (const previousJob of previous) {
+      if (activeIds.has(previousJob.job_id)) continue
+      try {
+        const terminal = await getMarketDataJob(previousJob.job_id)
+        if (terminal.status === 'completed' || terminal.status === 'failed' || terminal.status === 'cancelled') {
+          if (marketJob.value?.job_id === terminal.job_id) marketJob.value = terminal
+          if (terminal.status === 'cancelled') {
+            message.value = `行情任务 ${terminal.job_id.slice(0, 8)}… 已取消，已经写入的数据已保留。`
+          }
+        }
+      } catch {
+        // The in-memory runner may evict a completed task before this refresh.
+      }
+    }
+    const activeCurrent = marketJob.value && jobs.find((job) => job.job_id === marketJob.value?.job_id)
+    if (activeCurrent) {
+      marketJob.value = activeCurrent
+    } else if (jobs.length > 0) {
+      marketJob.value = jobs[0]
+    }
+    if (jobs.length > 0) {
+      syncLoading.value = true
+      if (!syncLabel.value) syncLabel.value = activeJobDescription(jobs[0])
+    } else {
+      const currentStatus = marketJob.value?.status
+      const currentFinished = currentStatus === 'completed'
+        || currentStatus === 'failed'
+        || currentStatus === 'cancelled'
+      if (!syncLoading.value || (currentStatus && !currentFinished)) return
+      syncLoading.value = false
+      syncLabel.value = ''
+    }
+  } catch {
+    // Active-job discovery is informational; the individual task poll remains authoritative.
+  }
+}
+
 async function waitForJob(jobId: string): Promise<void> {
   for (;;) {
     const state = await getMarketDataJob(jobId)
     marketJob.value = state
+    updateActiveMarketJob(state)
     if (state.status === 'completed') {
       if (state.result?.errors) {
         message.value = `同步完成，但有 ${state.result.errors} 个错误。`
       } else {
         message.value = ''
       }
+      return
+    }
+    if (state.status === 'cancelled') {
+      message.value = '行情同步已取消，已经写入的数据已保留。'
       return
     }
     if (state.status === 'failed') {
@@ -287,7 +377,7 @@ async function waitForJob(jobId: string): Promise<void> {
 }
 
 function beginJob(jobId: string, status: string): void {
-  marketJob.value = {
+  const state: MarketSyncJobState = {
     job_id: jobId,
     status: status as MarketSyncJobState['status'],
     progress: 0,
@@ -297,6 +387,18 @@ function beginJob(jobId: string, status: string): void {
     error: null,
     result: null,
     metadata: { provider: form.syncProvider },
+  }
+  marketJob.value = state
+  updateActiveMarketJob(state)
+}
+
+async function cancelActiveMarketJob(jobId: string): Promise<void> {
+  try {
+    await cancelMarketDataJob(jobId)
+    message.value = `已请求取消任务 ${jobId.slice(0, 8)}…，正在等待当前请求结束。`
+    await loadActiveMarketJobs()
+  } catch (error) {
+    message.value = apiMessage(error)
   }
 }
 
@@ -422,6 +524,15 @@ function scheduleStoreStatusPoll(): void {
   }, MARKET_STATUS_POLL_INTERVAL_MS)
 }
 
+function scheduleActiveJobPoll(): void {
+  if (activeJobPollTimer !== null) window.clearTimeout(activeJobPollTimer)
+  activeJobPollTimer = window.setTimeout(async () => {
+    activeJobPollTimer = null
+    await loadActiveMarketJobs()
+    scheduleActiveJobPoll()
+  }, ACTIVE_JOB_POLL_INTERVAL_MS)
+}
+
 async function loadChart(instrument = selected.value): Promise<void> {
   if (!instrument) {
     chart.value = null
@@ -479,13 +590,17 @@ function formatPrice(value: number | null): string {
 
 onMounted(async () => {
   await Promise.all([loadProviderCapabilities(), loadStoreStatus()])
+  await loadActiveMarketJobs()
   if (!marketJob.value) await loadInstruments()
   scheduleStoreStatusPoll()
+  scheduleActiveJobPoll()
 })
 
 onUnmounted(() => {
   if (storeStatusPollTimer !== null) window.clearTimeout(storeStatusPollTimer)
+  if (activeJobPollTimer !== null) window.clearTimeout(activeJobPollTimer)
   storeStatusPollTimer = null
+  activeJobPollTimer = null
 })
 
 function instrumentLabel(type: LocalInstrument['instrument_type']): string {
@@ -549,8 +664,16 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
             <button class="secondary-button" data-testid="market-sync-online" type="button" :disabled="syncLoading" @click="syncOnlineData">一键同步行情</button>
             <button v-if="form.syncProvider === 'akshare'" class="secondary-button" data-testid="market-akshare-backfill" type="button" :disabled="syncLoading" @click="backfillAkShareData">{{ syncLoading ? '回填进行中…' : 'AKShare 全量补齐' }}</button>
           </div>
-        </div>
-        <div v-if="marketJob" class="sync-progress" data-testid="market-data-progress">
+          </div>
+          <div v-if="activeMarketJobs.length" class="active-sync-jobs" data-testid="market-active-jobs">
+            <div class="active-sync-heading"><strong>正在运行的行情任务</strong><span>{{ activeMarketJobs.length }} 个任务</span></div>
+            <article v-for="job in activeMarketJobs" :key="job.job_id" class="active-sync-job" :data-testid="`market-active-job-${job.job_id}`">
+              <div class="active-sync-job-heading"><strong>{{ activeJobDescription(job) }}</strong><span>{{ activeJobProviderText(job) }} · {{ job.phase === 'cancelling' || job.cancel_requested ? '取消中' : '运行中' }}</span><b>{{ Math.round(job.progress * 100) }}%</b><button class="text-button" type="button" :disabled="job.cancel_requested || job.phase === 'cancelling'" @click="cancelActiveMarketJob(job.job_id)">{{ job.cancel_requested || job.phase === 'cancelling' ? '取消中…' : '取消任务' }}</button></div>
+              <div class="progress-track active-sync-track"><span :style="{ width: `${Math.round(job.progress * 100)}%` }"></span></div>
+              <div class="active-sync-job-meta"><span>已处理 {{ job.total_scanned }} / {{ job.total_candidates }}</span><span>worker {{ job.worker_count ?? 8 }}</span><span>当前 {{ activeJobInstrumentText(job) }}</span><span>{{ activeJobRangeText(job) }}</span></div>
+            </article>
+          </div>
+          <div v-if="marketJob" class="sync-progress" data-testid="market-data-progress">
           <div class="sync-progress-heading"><span>{{ marketJobTitle }}</span><strong>{{ Math.round(marketJob.progress * 100) }}%</strong></div>
           <div class="progress-track sync-progress-track" :class="{ indeterminate: marketProgressIndeterminate }"><span :style="{ width: `${Math.round(marketJob.progress * 100)}%` }"></span></div>
           <div class="sync-progress-stats"><span>已处理 <strong>{{ marketJob.total_scanned }}</strong> / {{ marketJob.total_candidates }}</span><span>worker <strong>{{ marketJob.worker_count ?? 8 }}</strong></span><span :class="{ negative: marketJob.errors > 0 }">错误 <strong>{{ marketJob.errors }}</strong></span></div>

@@ -178,7 +178,8 @@ export interface MarketSyncResult {
 
 export interface MarketSyncJobState {
   job_id: string
-  status: 'queued' | 'running' | 'completed' | 'failed'
+  description?: string
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
   progress: number
   total_candidates: number
   total_scanned: number
@@ -187,6 +188,7 @@ export interface MarketSyncJobState {
   worker_count?: number | null
   phase?: string | null
   metadata?: Record<string, unknown>
+  cancel_requested?: boolean
   result: MarketSyncResult | null
 }
 

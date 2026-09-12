@@ -74,3 +74,45 @@ test('user can start an AKShare full-history backfill', async ({ page }) => {
   await expect(page.getByTestId('market-data-progress')).toContainText('akshare')
   expect(backfillRequest).toEqual({ provider: 'akshare', universe: 'all' })
 })
+
+test('user can see and cancel an active market-data job', async ({ page }) => {
+  const activeJob = {
+    job_id: 'active-1', description: 'AKShare历史全量回填', status: 'running', progress: 0.42,
+    total_candidates: 5219, total_scanned: 2190, errors: 0, error: null, worker_count: 8,
+    phase: 'online_bars', metadata: {
+      provider: 'akshare',
+      current_instrument: { market: 'SZ', code: '000001', name: '平安银行' },
+      range_label: '正在读取完整日线…',
+    }, result: null,
+  }
+  let activeReads = 0
+  let cancelRequest: unknown
+  await page.route('**/api/v1/market-data/capabilities', (route) => route.fulfill({ json: {
+    data: { default_provider: 'akshare', providers: { akshare: { provider: 'akshare', available: true }, tdx: { provider: 'tdx', available: true } } },
+  } }))
+  await page.route('**/api/v1/market-data/store', (route) => route.fulfill({ json: { data: {
+    database_path: '/data/market/market.duckdb', schema_version: 12, instrument_count: 1,
+    bar_count: 100, data_start: '2010-01-01', data_end: '2026-09-10',
+    last_local_import_at: null, last_online_sync_at: null,
+  } } }))
+  await page.route('**/api/v1/market-data/local/instruments**', (route) => route.fulfill({ json: instruments }))
+  await page.route('**/api/v1/market-data/local/SH/600000/bars*', (route) => route.fulfill({ json: chart('daily') }))
+  await page.route('**/api/v1/market-data/jobs/active', (route) => {
+    activeReads += 1
+    return route.fulfill({ json: { data: activeReads === 1 ? [activeJob] : [] } })
+  })
+  await page.route('**/api/v1/market-data/jobs/active-1/cancel', async (route) => {
+    cancelRequest = route.request().method()
+    await route.fulfill({ json: { data: { job_id: 'active-1', status: 'cancelling', cancel_requested: true } } })
+  })
+  await page.route('**/api/v1/market-data/jobs/active-1', (route) => route.fulfill({ json: { data: {
+    ...activeJob, status: 'cancelled', phase: 'cancelled', cancel_requested: true, error: '行情同步已取消',
+  } } }))
+
+  await page.goto('/market-data')
+  await expect(page.getByTestId('market-active-jobs')).toContainText('42%')
+  await expect(page.getByTestId('market-active-jobs')).toContainText('SZ 000001 · 平安银行')
+  await page.getByTestId('market-active-job-active-1').getByRole('button', { name: '取消任务' }).click()
+  await expect(page.getByTestId('market-data-message')).toContainText('已取消')
+  expect(cancelRequest).toBe('POST')
+})

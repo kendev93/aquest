@@ -5,9 +5,11 @@ import {
   createAkShareBackfill,
   createMarketDataSync,
   createOnlineSync,
+  cancelMarketDataJob,
   fetchLocalChart,
   fetchLocalInstruments,
   fetchMarketDataCapabilities,
+  fetchActiveMarketDataJobs,
   fetchStoreStatus,
   getMarketDataJob,
 } from './marketData'
@@ -128,5 +130,33 @@ describe('market data API', () => {
         body: JSON.stringify({ provider: 'akshare', universe: 'sh', boards: ['main'] }),
       }),
     )
+  })
+
+  it('lists active market-data jobs and cancels one job', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: [{
+          job_id: 'sync-1',
+          description: '行情同步',
+          status: 'running',
+          progress: 0.42,
+          total_candidates: 100,
+          total_scanned: 42,
+          errors: 0,
+          error: null,
+          result: null,
+        }],
+      }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: { job_id: 'sync-1', status: 'cancelling', cancel_requested: true },
+      }), { status: 200 }))
+
+    await expect(fetchActiveMarketDataJobs()).resolves.toHaveLength(1)
+    await expect(cancelMarketDataJob('sync-1')).resolves.toMatchObject({ status: 'cancelling' })
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      '/api/v1/market-data/jobs/active',
+      '/api/v1/market-data/jobs/sync-1/cancel',
+    ])
   })
 })

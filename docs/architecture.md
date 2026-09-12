@@ -77,7 +77,7 @@ AKShare 是 Docker 正式运行时的必需行情依赖，但业务层只依赖�
 - TDX 日期、价格变长整数、成交量自定义浮点和指数附加字段解码；
 - 空响应和截断响应的安全处理。
 
-在线同步直接写 DuckDB，不写回 `.day`。同一日期已有 `source='local'` 时永不覆盖；在线行可以按 provider 更新；缺失日期可以插入。AKShare 新标的首次读取完整可用历史，已有标的按最新日期增量读取并保留重叠窗口；`/backfill` 会强制所有目标股票从最早请求日期重新读取。列表刷新必须先成功，之后才启动日线请求；响应会记录 provider、版本、列表指纹、实际日线接口和单标的实际日期范围。
+在线同步直接写 DuckDB，不写回 `.day`。同一日期已有 `source='local'` 时永不覆盖；在线行可以按 provider 更新；缺失日期可以插入。AKShare 新标的首次读取完整可用历史，已有标的按最新日期增量读取并保留重叠窗口；`/backfill` 会强制所有目标股票从最早请求日期重新读取。列表刷新必须先成功，之后才启动日线请求；响应会记录 provider、版本、列表指纹、实际日线接口和单标的实际日期范围。行情同步任务使用全局互斥组，最多同时运行一个；活动任务可通过 `/jobs/active` 查询并通过 `/jobs/{job_id}/cancel` 协作取消。
 
 `.day` 文件不包含中文名，因此本地导入只建立代码和行情记录；在线证券列表的 `name` 字段会写入 `instruments`，并在扫描结果 JSON/CSV 和页面中透传。名称刷新失败不会影响已有行情扫描，结果显示 `—` 作为占位。内置公式的扫描结果只透传注册表中的用户可选输出，公式内部中间数组仍保留在指标缓存中；自定义公式透传其命名输出。
 
@@ -105,7 +105,9 @@ AKShare 是 Docker 正式运行时的必需行情依赖，但业务层只依赖�
 - `POST /api/v1/market-data/backfill`（AKShare 股票历史全量补齐）
 - `GET /api/v1/market-data/capabilities`（行情源能力、版本和当前来源）
 - `GET /api/v1/market-data/store`
+- `GET /api/v1/market-data/jobs/active`（当前运行中的行情任务和进度）
 - `GET /api/v1/market-data/jobs/{job_id}`
+- `POST /api/v1/market-data/jobs/{job_id}/cancel`（协作取消单个行情任务）
 - `GET /api/v1/market-data/local/instruments`
 - `GET /api/v1/market-data/local/{market}/{code}/bars`
 - 既有公式选股、单股回测、组合回测和策略适配 API 保持路径不变，但只读取 DuckDB；单股、组合和策略适配分别提供 `/history`、`/history/{id}` 和删除接口，策略实验室继续提供同样的历史实验接口，并通过 `/strategy-discovery/{experiment_id}/replays`、`/replay-jobs/{job_id}`、`/replay-jobs/{job_id}/results`、`/replay-jobs/{job_id}/cancel` 和 `/history/{experiment_id}/replays` 管理前十全量复核。
