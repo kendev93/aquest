@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+
 import BacktestPage from './pages/BacktestPage.vue'
 import FormulaScreenPage from './pages/FormulaScreenPage.vue'
 import MarketDataPage from './pages/MarketDataPage.vue'
@@ -6,21 +8,55 @@ import PortfolioBacktestPage from './pages/PortfolioBacktestPage.vue'
 import StrategyDiscoveryPage from './pages/StrategyDiscoveryPage.vue'
 import StrategyFitnessPage from './pages/StrategyFitnessPage.vue'
 
-const pathname = typeof window !== 'undefined' ? window.location.pathname : '/indicator-lab'
-const isIndicatorLab = pathname === '/' || pathname.startsWith('/indicator-lab') || pathname.startsWith('/formula-screen')
-const isMarketData = pathname.startsWith('/market-data')
-const isStrategyFitness = pathname.startsWith('/strategy-fitness')
-const isStrategyDiscovery = pathname.startsWith('/strategy-lab') || pathname.startsWith('/strategy-discovery')
-const isPortfolioBacktest = pathname.startsWith('/portfolio-backtest')
-const isBacktest = pathname.startsWith('/backtest')
+const currentPath = ref(typeof window !== 'undefined' ? window.location.pathname : '/indicator-lab')
+
+const routeComponent = computed(() => {
+  const pathname = currentPath.value
+  if (pathname.startsWith('/market-data')) return MarketDataPage
+  if (pathname.startsWith('/strategy-fitness')) return StrategyFitnessPage
+  if (pathname.startsWith('/strategy-lab') || pathname.startsWith('/strategy-discovery')) {
+    return StrategyDiscoveryPage
+  }
+  if (pathname.startsWith('/portfolio-backtest')) return PortfolioBacktestPage
+  if (pathname.startsWith('/backtest')) return BacktestPage
+  return FormulaScreenPage
+})
+
+function syncPath(): void {
+  currentPath.value = window.location.pathname
+}
+
+function handlePopState(): void {
+  syncPath()
+}
+
+function handleNavigation(event: MouseEvent): void {
+  if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+    return
+  }
+  const target = event.target
+  if (!(target instanceof Element)) return
+  const link = target.closest('a[href]')
+  if (!(link instanceof HTMLAnchorElement) || link.target === '_blank' || link.hasAttribute('download')) {
+    return
+  }
+  const href = link.getAttribute('href')
+  if (!href || !href.startsWith('/') || href.startsWith('//')) return
+  const url = new URL(href, window.location.origin)
+  if (url.origin !== window.location.origin) return
+  event.preventDefault()
+  window.history.pushState({}, '', `${url.pathname}${url.search}${url.hash}`)
+  syncPath()
+}
+
+onMounted(() => window.addEventListener('popstate', handlePopState))
+onUnmounted(() => window.removeEventListener('popstate', handlePopState))
 </script>
 
 <template>
-  <MarketDataPage v-if="isMarketData" />
-  <StrategyFitnessPage v-else-if="isStrategyFitness" />
-  <StrategyDiscoveryPage v-else-if="isStrategyDiscovery" />
-  <PortfolioBacktestPage v-else-if="isPortfolioBacktest" />
-  <BacktestPage v-else-if="isBacktest" />
-  <FormulaScreenPage v-else-if="isIndicatorLab" />
-  <FormulaScreenPage v-else />
+  <div class="app-shell" @click.capture="handleNavigation">
+    <KeepAlive>
+      <component :is="routeComponent" />
+    </KeepAlive>
+  </div>
 </template>

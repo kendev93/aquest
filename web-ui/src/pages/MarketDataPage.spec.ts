@@ -86,6 +86,23 @@ describe('MarketDataPage', () => {
     expect(wrapper.get('[data-testid="market-chart-panel"]').text()).toContain('MA5')
   })
 
+  it('selects a data-bearing instrument when the first catalog item has no bars', async () => {
+    vi.mocked(marketApi.fetchLocalInstruments).mockResolvedValueOnce({
+      items: [
+        { market: 'SH', code: '000001', name: '上证指数', instrument_type: 'index', bars: 0, data_start: null, data_end: null, last_close: null, error: '没有可用日线数据' },
+        instruments[0],
+      ],
+      meta: { total: 2, page: 1, page_size: 50, pages: 1 },
+    })
+
+    const wrapper = mount(MarketDataPage)
+    await flushPromises()
+
+    expect(marketApi.fetchLocalChart).toHaveBeenCalledWith(expect.objectContaining({ market: 'SH', code: '600000' }))
+    expect(wrapper.get('[data-testid="market-chart-panel"]').text()).toContain('600000')
+    expect(wrapper.find('[data-testid="market-data-message"]').exists()).toBe(false)
+  })
+
   it('shows a user-facing error when the local directory cannot be read', async () => {
     vi.mocked(marketApi.fetchLocalInstruments).mockRejectedValueOnce(new FormulaScreenApiError('vipdoc 路径无效', 422))
     const wrapper = mount(MarketDataPage)

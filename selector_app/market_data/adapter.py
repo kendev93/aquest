@@ -74,6 +74,10 @@ class DuckDbMarketDataAdapter:
                 instrument_type=ref.instrument_type,
                 board=ref.board,
                 provider=ref.provider,
+                bar_count=ref.bar_count,
+                first_date=ref.first_date,
+                last_date=ref.last_date,
+                last_close=ref.last_close,
             )
             for ref in self._store.list_instruments(
                 market=market,
@@ -119,6 +123,10 @@ class DuckDbMarketDataAdapter:
                 instrument_type=available[(market, code)].instrument_type,
                 board=available[(market, code)].board,
                 provider=available[(market, code)].provider,
+                bar_count=available[(market, code)].bar_count,
+                first_date=available[(market, code)].first_date,
+                last_date=available[(market, code)].last_date,
+                last_close=available[(market, code)].last_close,
             )
             for market, code in requested
             if (market, code) in available

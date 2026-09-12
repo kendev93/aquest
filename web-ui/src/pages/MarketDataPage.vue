@@ -396,8 +396,11 @@ async function loadInstruments(): Promise<void> {
     const current = selected.value && response.items.find(
       (item) => item.market === selected.value?.market && item.code === selected.value?.code,
     )
-    selected.value = current ?? response.items[0] ?? null
-    if (selected.value) await loadChart(selected.value)
+    const dataBearing = response.items.find((item) => item.bars > 0 && !item.error)
+    selected.value = current && current.bars > 0
+      ? current
+      : dataBearing ?? current ?? response.items[0] ?? null
+    if (selected.value?.bars > 0 && !selected.value.error) await loadChart(selected.value)
     else chart.value = null
   } catch (error) {
     instruments.value = []

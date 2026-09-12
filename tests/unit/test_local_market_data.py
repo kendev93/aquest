@@ -88,6 +88,48 @@ def test_lists_local_instruments_with_pagination_and_summary() -> None:
     assert page.items[0].last_close == pytest.approx(41.0)
 
 
+def test_lists_data_bearing_instruments_first_from_persisted_summary() -> None:
+    empty = StockRef(
+        "SH",
+        "000001",
+        Path("/data/vipdoc/sh/lday/sh000001.day"),
+        name="上证指数",
+        bar_count=0,
+    )
+    populated = StockRef(
+        "SH",
+        "600519",
+        Path("/data/vipdoc/sh/lday/sh600519.day"),
+        name="贵州茅台",
+        bar_count=807,
+        first_date=date(2023, 5, 16),
+        last_date=date(2026, 9, 8),
+        last_close=1309.3,
+    )
+
+    class SummaryOnlyAdapter:
+        def list_stock_refs(self, vipdoc_path, universe, universe_file=None):
+            del vipdoc_path, universe, universe_file
+            return [empty, populated]
+
+        def stock_ref(self, vipdoc_path, market, code):
+            del vipdoc_path, market, code
+            raise AssertionError("列表摘要不应重新读取每个标的的全部 K 线")
+
+        def read_stock(self, ref):
+            del ref
+            raise AssertionError("列表摘要不应重新读取每个标的的全部 K 线")
+
+    page = LocalMarketDataService(SummaryOnlyAdapter()).list_instruments(
+        "/data/vipdoc", page=1, page_size=2
+    )
+
+    assert [item.code for item in page.items] == ["600519", "000001"]
+    assert page.items[0].bars == 807
+    assert page.items[0].last_close == pytest.approx(1309.3)
+    assert page.items[1].error == "没有可用日线数据"
+
+
 def test_builds_daily_monthly_and_yearly_chart_data_with_indicators() -> None:
     service = LocalMarketDataService(FakeMarketDataAdapter())
 

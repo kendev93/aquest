@@ -145,7 +145,7 @@ class LocalMarketDataService:
         query = keyword.strip().upper()
         filtered = [
             ref
-            for ref in sorted(refs, key=lambda item: (item.market, item.code))
+            for ref in sorted(refs, key=_instrument_sort_key)
             if not query
             or query in ref.code
             or query in ref.market
@@ -214,6 +214,33 @@ class LocalMarketDataService:
         )
 
     def _summarize_instrument(self, ref: StockRef) -> LocalInstrument:
+        if ref.bar_count is not None:
+            if ref.bar_count <= 0:
+                return LocalInstrument(
+                    market=ref.market,
+                    code=ref.code,
+                    name=getattr(ref, "name", None),
+                    bars=0,
+                    data_start=None,
+                    data_end=None,
+                    last_close=None,
+                    error="没有可用日线数据",
+                    instrument_type=getattr(ref, "instrument_type", "stock"),
+                    board=ref.board,
+                    provider=getattr(ref, "provider", None),
+                )
+            return LocalInstrument(
+                market=ref.market,
+                code=ref.code,
+                name=getattr(ref, "name", None),
+                instrument_type=getattr(ref, "instrument_type", "stock"),
+                board=getattr(ref, "board", "main"),
+                provider=getattr(ref, "provider", None),
+                bars=ref.bar_count,
+                data_start=_optional_date_text(ref.first_date),
+                data_end=_optional_date_text(ref.last_date),
+                last_close=_number(ref.last_close),
+            )
         try:
             frame = _normalise_frame(self._adapter.read_stock(ref))
         except (OSError, ValueError) as exc:
@@ -387,6 +414,16 @@ def _formula_panels(
 
 def _date_text(value: object) -> str:
     return f"{pd.Timestamp(value):%Y-%m-%d}"
+
+
+def _optional_date_text(value: object) -> str | None:
+    return None if value is None else _date_text(value)
+
+
+def _instrument_sort_key(ref: StockRef) -> tuple[int, str, str]:
+    bar_count = ref.bar_count
+    has_no_bars = bar_count is not None and bar_count <= 0
+    return (1 if has_no_bars else 0, ref.market, ref.code)
 
 
 def _number(value: object) -> float | None:

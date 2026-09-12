@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from types import MappingProxyType
 from typing import Literal
@@ -27,6 +28,10 @@ class InstrumentRef:
     board: InstrumentBoard = "main"
     name: str | None = None
     provider: str | None = None
+    bar_count: int | None = None
+    first_date: date | None = None
+    last_date: date | None = None
+    last_close: float | None = None
 
     @property
     def symbol(self) -> str:
@@ -50,6 +55,10 @@ class StockRef:
     board: InstrumentBoard = "main"
     name: str | None = None
     provider: str | None = None
+    bar_count: int | None = None
+    first_date: date | None = None
+    last_date: date | None = None
+    last_close: float | None = None
 
     @property
     def symbol(self) -> str:

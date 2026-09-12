@@ -511,24 +511,34 @@ class DuckDbBarsStore:
         conditions: list[str] = []
         parameters: list[object] = []
         if market and market != "all":
-            conditions.append("market = ?")
+            conditions.append("instruments.market = ?")
             parameters.append(market)
         normalized_keyword = keyword.strip().upper()
         if normalized_keyword:
-            conditions.append("(code LIKE ? OR market LIKE ? OR instrument_type LIKE ?)")
+            conditions.append(
+                "(instruments.code LIKE ? OR instruments.market LIKE ? "
+                "OR instruments.instrument_type LIKE ?)"
+            )
             like = f"%{normalized_keyword}%"
             parameters.extend([like, like, like])
         if not include_missing:
-            conditions.append("source_state != 'missing'")
-        _append_filter(conditions, parameters, "instrument_type", instrument_types)
-        _append_filter(conditions, parameters, "board", boards)
+            conditions.append("instruments.source_state != 'missing'")
+        _append_filter(conditions, parameters, "instruments.instrument_type", instrument_types)
+        _append_filter(conditions, parameters, "instruments.board", boards)
         query = (
-            "SELECT market, code, name, instrument_type, board, source_path, last_provider "
-            "FROM instruments"
+            "WITH latest AS ("
+            "SELECT market, code, arg_max(close, trade_date) AS last_close "
+            "FROM daily_bars GROUP BY market, code) "
+            "SELECT instruments.market, instruments.code, instruments.name, "
+            "instruments.instrument_type, instruments.board, instruments.source_path, "
+            "instruments.last_provider, instruments.bar_count, instruments.first_date, "
+            "instruments.last_date, latest.last_close "
+            "FROM instruments LEFT JOIN latest "
+            "ON latest.market = instruments.market AND latest.code = instruments.code"
             + (f" WHERE {' AND '.join(conditions)}" if conditions else "")
-            + " ORDER BY market, code"
+            + " ORDER BY instruments.market, instruments.code"
         )
-        with self._store._connect(read_only=True) as connection:
+        with _WRITE_LOCK, self._store._connect(read_only=True) as connection:
             rows = connection.execute(query, parameters).fetchall()
         return [
             InstrumentRef(
@@ -539,6 +549,22 @@ class DuckDbBarsStore:
                 board=cast(InstrumentBoard, board),
                 source_path=Path(source_path) if source_path else None,
                 provider=cast(str | None, provider),
+                bar_count=int(bar_count) if bar_count is not None else None,
+                first_date=first_date,
+                last_date=last_date,
+                last_close=float(last_close) if last_close is not None else None,
             )
-            for market_value, code, name, instrument_type, board, source_path, provider in rows
+            for (
+                market_value,
+                code,
+                name,
+                instrument_type,
+                board,
+                source_path,
+                provider,
+                bar_count,
+                first_date,
+                last_date,
+                last_close,
+            ) in rows
         ]

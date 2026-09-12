@@ -69,7 +69,7 @@ h1 { margin-bottom: 8px; font-size: clamp(32px, 4vw, 50px); line-height: 1; lett
 .form-section legend { width: 100%; padding: 0; margin-bottom: 13px; color: var(--text); font-size: 12px; font-weight: 700; }
 .form-section label { display: block; margin-bottom: 7px; color: var(--muted); font-size: 11px; }
 .required { color: var(--accent); }
-input[type="text"], input[type="number"], input[type="date"], select { width: 100%; min-height: 40px; padding: 0 11px; border: 1px solid var(--border-strong); border-radius: 6px; outline: none; background: var(--surface-raised); color: var(--text); font-size: 12px; }
+input[type="text"], input[type="number"], input[type="date"], input[type="search"], select { width: 100%; min-height: 40px; padding: 0 11px; border: 1px solid var(--border-strong); border-radius: 6px; outline: none; background: var(--surface-raised); color: var(--text); font-size: 12px; }
 input::placeholder { color: #53637c; }
 input:hover, select:hover { border-color: #5a7295; }
 input:focus, select:focus { border-color: var(--accent); }
