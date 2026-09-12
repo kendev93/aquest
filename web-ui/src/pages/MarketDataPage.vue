@@ -127,6 +127,9 @@ const syncProviderLabel = computed(() => {
 })
 
 const marketJobTitle = computed(() => {
+  if (marketJob.value?.status === 'queued' || marketJob.value?.status === 'running') {
+    return activeJobDescription(marketJob.value)
+  }
   if (syncLoading.value) return syncPhaseText.value || syncLabel.value || '后台任务进行中…'
   if (marketJob.value?.status === 'queued') return '等待后台任务…'
   if (marketJob.value?.status === 'running') return '后台任务进行中…'
@@ -213,30 +216,6 @@ const marketProgressIndeterminate = computed(() => Boolean(
   marketJob.value?.status === 'running'
   && marketJob.value.total_candidates === 0,
 ))
-
-function activeJobInstrumentText(job: MarketSyncJobState): string {
-  const value = job.metadata?.current_instrument
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return '等待第一个标的…'
-  const detail = value as Record<string, unknown>
-  const identity = [detail.market, detail.code]
-    .filter((item): item is string => typeof item === 'string' && item.length > 0)
-    .join(' ')
-  const name = typeof detail.name === 'string' && detail.name ? detail.name : ''
-  return [identity, name].filter(Boolean).join(' · ') || '处理中…'
-}
-
-function activeJobRangeText(job: MarketSyncJobState): string {
-  const start = typeof job.metadata?.range_start === 'string' ? job.metadata.range_start : ''
-  const end = typeof job.metadata?.range_end === 'string' ? job.metadata.range_end : ''
-  if (start && end) return `${start} → ${end}`
-  return typeof job.metadata?.range_label === 'string' ? job.metadata.range_label : '读取日期范围…'
-}
-
-function activeJobProviderText(job: MarketSyncJobState): string {
-  if (job.metadata?.provider === 'tdx') return 'TDX'
-  if (job.metadata?.provider === 'akshare') return 'AKShare'
-  return job.description?.includes('本地') ? '本地 vipdoc' : '—'
-}
 
 function activeJobDescription(job: MarketSyncJobState): string {
   return job.description || (job.metadata?.provider === 'tdx' ? 'TDX 行情同步' : 'AKShare 行情同步')
@@ -678,16 +657,8 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
             <button v-if="form.syncProvider === 'akshare'" class="secondary-button" data-testid="market-akshare-backfill" type="button" :disabled="syncLoading" @click="backfillAkShareData">{{ syncLoading ? '回填进行中…' : 'AKShare 全量补齐' }}</button>
           </div>
           </div>
-          <div v-if="activeMarketJobs.length" class="active-sync-jobs" data-testid="market-active-jobs">
-            <div class="active-sync-heading"><strong>正在运行的行情任务</strong><span>{{ activeMarketJobs.length }} 个任务</span></div>
-            <article v-for="job in activeMarketJobs" :key="job.job_id" class="active-sync-job" :data-testid="`market-active-job-${job.job_id}`">
-              <div class="active-sync-job-heading"><strong>{{ activeJobDescription(job) }}</strong><span>{{ activeJobProviderText(job) }} · {{ job.phase === 'cancelling' || job.cancel_requested ? '取消中' : '运行中' }}</span><b>{{ Math.round(job.progress * 100) }}%</b><button class="text-button" type="button" :disabled="job.cancel_requested || job.phase === 'cancelling'" @click="cancelActiveMarketJob(job.job_id)">{{ job.cancel_requested || job.phase === 'cancelling' ? '取消中…' : '取消任务' }}</button></div>
-              <div class="progress-track active-sync-track"><span :style="{ width: `${Math.round(job.progress * 100)}%` }"></span></div>
-              <div class="active-sync-job-meta"><span>已处理 {{ job.total_scanned }} / {{ job.total_candidates }}</span><span>worker {{ job.worker_count ?? 8 }}</span><span>当前 {{ activeJobInstrumentText(job) }}</span><span>{{ activeJobRangeText(job) }}</span></div>
-            </article>
-          </div>
           <div v-if="marketJob" class="sync-progress" data-testid="market-data-progress">
-          <div class="sync-progress-heading"><span>{{ marketJobTitle }}</span><strong>{{ Math.round(marketJob.progress * 100) }}%</strong></div>
+          <div class="sync-progress-heading"><span>{{ marketJobTitle }}</span><div class="sync-progress-actions"><button v-if="marketJob.status === 'queued' || marketJob.status === 'running'" class="text-button" data-testid="market-sync-cancel" type="button" :disabled="marketJob.cancel_requested || marketJob.phase === 'cancelling'" @click="cancelActiveMarketJob(marketJob.job_id)">{{ marketJob.cancel_requested || marketJob.phase === 'cancelling' ? '取消中…' : '取消任务' }}</button><strong>{{ Math.round(marketJob.progress * 100) }}%</strong></div></div>
           <div class="progress-track sync-progress-track" :class="{ indeterminate: marketProgressIndeterminate }"><span :style="{ width: `${Math.round(marketJob.progress * 100)}%` }"></span></div>
           <div class="sync-progress-stats"><span>已处理 <strong>{{ marketJob.total_scanned }}</strong> / {{ marketJob.total_candidates }}</span><span>worker <strong>{{ marketJob.worker_count ?? 8 }}</strong></span><span :class="{ negative: marketJob.errors > 0 }">错误 <strong>{{ marketJob.errors }}</strong></span></div>
           <div v-if="discoveryWaiting" class="sync-stage-status" data-testid="market-sync-stage"><strong>正在刷新证券列表</strong><span>{{ discoveryProviderText }}</span></div>

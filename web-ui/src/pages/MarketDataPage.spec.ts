@@ -290,10 +290,12 @@ describe('MarketDataPage', () => {
     const wrapper = mount(MarketDataPage)
     await flushPromises()
 
-    expect(wrapper.get('[data-testid="market-active-jobs"]').text()).toContain('42%')
-    expect(wrapper.get('[data-testid="market-active-jobs"]').text()).toContain('SZ 000001 · 平安银行')
+    expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('42%')
+    expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('SZ 000001 · 平安银行')
+    expect(wrapper.find('[data-testid="market-active-jobs"]').exists()).toBe(false)
+    expect(wrapper.findAll('[data-testid="market-data-progress"] .progress-track')).toHaveLength(1)
 
-    await wrapper.get('[data-testid="market-active-job-active-1"] button').trigger('click')
+    await wrapper.get('[data-testid="market-sync-cancel"]').trigger('click')
     await flushPromises()
 
     expect(marketApi.cancelMarketDataJob).toHaveBeenCalledWith('active-1')
@@ -323,7 +325,8 @@ describe('MarketDataPage', () => {
     await flushPromises()
 
     expect(wrapper.find('[data-testid="market-data-message"]').exists()).toBe(false)
-    expect(wrapper.get('[data-testid="market-active-jobs"]').text()).toContain('10%')
+    expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('10%')
+    expect(wrapper.find('[data-testid="market-active-jobs"]').exists()).toBe(false)
     wrapper.unmount()
   })
 
