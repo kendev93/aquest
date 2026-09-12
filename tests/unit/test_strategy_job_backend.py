@@ -174,6 +174,45 @@ def test_file_backend_exposes_a_stale_worker_as_a_terminal_failure(tmp_path: Pat
     assert state["error_code"] == "worker_stale"
 
 
+def test_file_backend_preflights_refinement_and_replay_operations(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars(
+        "SH",
+        "600000",
+        "stock",
+        pd.DataFrame(
+            {
+                "date": pd.date_range("2024-01-01", periods=5, freq="D"),
+                "open": np.arange(5, dtype=float) + 10,
+                "high": np.arange(5, dtype=float) + 10.2,
+                "low": np.arange(5, dtype=float) + 9.8,
+                "close": np.arange(5, dtype=float) + 10,
+                "volume": np.full(5, 1000.0),
+                "amount": np.full(5, 10000.0),
+                "bar_status": "completed",
+            }
+        ),
+    )
+    backend = FileStrategyJobBackend(
+        store,
+        StrategyJobStore(tmp_path / "jobs"),
+        worker_count=2,
+    )
+    experiment = {"history_id": "parent-1", "request": _request().to_dict()}
+
+    refinement = backend.preflight_operation(
+        "refinement",
+        {"experiment": experiment, "parent_candidate_hash": "candidate-1"},
+    )
+    replay = backend.preflight_operation(
+        "replay",
+        {"experiment": experiment, "leaderboard": "sharpe"},
+    )
+
+    assert refinement.row_count == 3
+    assert replay.row_count == 5
+
+
 def test_in_process_backend_preserves_existing_fake_service_contract(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     runner = ScreenJobRunner(max_workers=1)
