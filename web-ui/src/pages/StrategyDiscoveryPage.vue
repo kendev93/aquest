@@ -35,6 +35,7 @@ import type {
   StrategyReplayResult,
   InstrumentBoard,
   InstrumentType,
+  StrategyDiscoveryDateMode,
   Universe,
   ValueDefinition,
 } from '../types'
@@ -68,7 +69,7 @@ const form = reactive({
   universeFile: '',
   instrumentTypes: [] as InstrumentType[],
   boards: [] as InstrumentBoard[],
-  dateMode: 'full' as 'full' | 'custom',
+  dateMode: 'recent5' as StrategyDiscoveryDateMode,
   startDate: '',
   endDate: '',
   requiredBuyRule: emptyRule(),
@@ -159,6 +160,7 @@ function buildPayload(): StrategyDiscoveryPayload {
   return {
     universe: form.universe,
     universe_file: form.universe === 'custom' ? form.universeFile.trim() : null,
+    date_mode: form.dateMode,
     ...(form.dateMode === 'custom'
       ? { start_date: form.startDate, end_date: form.endDate }
       : {}),
@@ -617,12 +619,16 @@ function restoreHistoryRequest(raw: unknown): void {
     : {}
   if (typeof base.universe === 'string' && ['all', 'sh', 'sz', 'custom'].includes(base.universe)) form.universe = base.universe as Universe
   if (typeof base.universe_file === 'string') form.universeFile = base.universe_file
-  if (typeof base.start_date === 'string' && typeof base.end_date === 'string') {
+  if (base.date_mode === 'recent5' || base.date_mode === 'full') {
+    form.dateMode = base.date_mode
+    form.startDate = ''
+    form.endDate = ''
+  } else if (typeof base.start_date === 'string' && typeof base.end_date === 'string') {
     form.dateMode = 'custom'
     form.startDate = base.start_date.slice(0, 10)
     form.endDate = base.end_date.slice(0, 10)
   } else {
-    form.dateMode = 'full'
+    form.dateMode = 'recent5'
     form.startDate = ''
     form.endDate = ''
   }
@@ -711,7 +717,7 @@ onMounted(async () => {
 
     <main class="content-shell">
       <section class="page-intro">
-        <div><p class="eyebrow">STRATEGY DISCOVERY / DAILY</p><h1>策略实验室</h1><p class="intro-copy">只设置品种范围和持仓数量，系统自动使用本地全部已完成日线寻找排序、买卖和风险控制配置。</p></div>
+        <div><p class="eyebrow">STRATEGY DISCOVERY / DAILY</p><h1>策略实验室</h1><p class="intro-copy">只设置品种范围和持仓数量，系统默认使用最近 5 年已完成日线寻找排序、买卖和风险控制配置。</p></div>
         <div class="intro-note"><span class="note-label">自动流程</span><strong>寻优 · 验证 · 最终留出</strong><small>真实组合回测裁定候选结果</small></div>
       </section>
 
@@ -722,13 +728,13 @@ onMounted(async () => {
           <div class="panel-heading"><div><span class="section-kicker">01 / CONFIGURE</span><h2>实验设置</h2></div><span class="required-hint">* 必填</span></div>
           <fieldset class="form-section">
             <legend>数据范围</legend>
-            <p class="helper">默认使用本地 DuckDB 全历史已完成日线；如果资源预算提示范围过大，可切换自定义日期。</p>
+            <p class="helper">默认使用本地最新已完成日线往前 5 年；你也可以选择全历史或自定义回测区间。</p>
             <div class="compact-fields">
               <div><label for="strategy-discovery-universe">品种范围</label><select id="strategy-discovery-universe" v-model="form.universe" data-testid="strategy-discovery-universe"><option value="all">沪深全部品种</option><option value="sh">仅上海</option><option value="sz">仅深圳</option><option value="custom">自定义列表</option></select></div>
               <div><label for="strategy-discovery-positions">持仓数量 N</label><input id="strategy-discovery-positions" v-model.number="form.maxPositions" data-testid="strategy-discovery-positions" type="number" min="1" max="100" step="1"></div>
             </div>
             <div class="compact-fields strategy-date-fields">
-              <div><label for="strategy-discovery-date-mode">历史范围</label><select id="strategy-discovery-date-mode" v-model="form.dateMode" data-testid="strategy-discovery-date-mode"><option value="full">全历史</option><option value="custom">自定义日期</option></select></div>
+              <div><label for="strategy-discovery-date-mode">回测区间</label><select id="strategy-discovery-date-mode" v-model="form.dateMode" data-testid="strategy-discovery-date-mode"><option value="recent5">最近 5 年（默认）</option><option value="full">全历史</option><option value="custom">自定义日期</option></select></div>
               <div v-if="form.dateMode === 'custom'"><label for="strategy-discovery-start-date">开始日期</label><input id="strategy-discovery-start-date" v-model="form.startDate" data-testid="strategy-discovery-start-date" type="date"><p v-if="errors.startDate" class="field-error">{{ errors.startDate }}</p></div>
               <div v-if="form.dateMode === 'custom'"><label for="strategy-discovery-end-date">结束日期</label><input id="strategy-discovery-end-date" v-model="form.endDate" data-testid="strategy-discovery-end-date" type="date"><p v-if="errors.endDate || errors.dateRange" class="field-error">{{ errors.endDate || errors.dateRange }}</p></div>
             </div>

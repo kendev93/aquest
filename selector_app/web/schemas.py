@@ -89,6 +89,40 @@ def _coerce_date(value: date | str | None) -> date | None:
         raise ValueError(f"策略实验日期格式错误: {value}") from exc
 
 
+StrategyDiscoveryDateMode = Literal["recent5", "full", "custom"]
+DEFAULT_STRATEGY_DISCOVERY_LOOKBACK_YEARS = 5
+
+
+def resolve_strategy_discovery_defaults(
+    data_start: date | str | None,
+    data_end: date | str | None,
+    mode: StrategyDiscoveryDateMode = "recent5",
+) -> tuple[date | None, date | None]:
+    """Resolve a preset range against the latest completed local bar."""
+
+    if mode not in {"recent5", "full", "custom"}:
+        raise ValueError("策略实验日期模式无效")
+    available_start = _coerce_date(data_start)
+    available_end = _coerce_date(data_end)
+    if mode != "recent5" or available_end is None:
+        return available_start, available_end
+    target_start = _subtract_calendar_years(
+        available_end,
+        DEFAULT_STRATEGY_DISCOVERY_LOOKBACK_YEARS,
+    )
+    if available_start is not None:
+        target_start = max(target_start, available_start)
+    return target_start, available_end
+
+
+def _subtract_calendar_years(value: date, years: int) -> date:
+    target_year = value.year - years
+    try:
+        return value.replace(year=target_year)
+    except ValueError:
+        return value.replace(year=target_year, day=28)
+
+
 def validate_formula_conditions(
     formula_text: str | None, conditions: list[ScreenCondition]
 ) -> None:
@@ -622,6 +656,7 @@ class StrategyDiscoveryRequest(BaseModel):
     required_sell_conditions: list[ScreenConditionRequest] = Field(
         default_factory=list, max_length=3
     )
+    date_mode: StrategyDiscoveryDateMode = "recent5"
     start_date: date | None = None
     end_date: date | None = None
     max_positions: int = Field(default=5, ge=1, le=100)
@@ -647,6 +682,8 @@ class StrategyDiscoveryRequest(BaseModel):
         validate_instrument_scope(self.universe, self.instrument_types, self.boards)
         if self.universe == "custom" and not self.universe_file:
             raise ValueError("自定义股票范围必须设置 universe_file")
+        if self.date_mode == "custom" and (self.start_date is None or self.end_date is None):
+            raise ValueError("自定义日期范围必须同时设置开始日期和结束日期")
         if (self.start_date is None) != (self.end_date is None):
             raise ValueError("开始日期和结束日期必须同时设置")
         if self.start_date is not None and self.end_date is not None:
@@ -720,6 +757,11 @@ class StrategyDiscoveryRequest(BaseModel):
                 "universe_file": self.universe_file,
                 "instrument_types": list(self.instrument_types or ()),
                 "boards": list(self.boards or ()),
+                "date_mode": (
+                    "custom"
+                    if self.start_date is not None or self.end_date is not None
+                    else self.date_mode
+                ),
                 "start_date": resolved_start.isoformat(),
                 "end_date": resolved_end.isoformat(),
                 "max_positions": self.max_positions,

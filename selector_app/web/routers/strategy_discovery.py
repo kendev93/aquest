@@ -19,7 +19,12 @@ from selector_app.strategy_discovery.resources import (
 )
 from selector_app.strategy_discovery.service import StrategyDiscoveryService
 
-from ..schemas import StrategyDiscoveryRequest, StrategyRefinementRequest, StrategyReplayRequest
+from ..schemas import (
+    StrategyDiscoveryRequest,
+    StrategyRefinementRequest,
+    StrategyReplayRequest,
+    resolve_strategy_discovery_defaults,
+)
 
 router = APIRouter(prefix="/strategy-discovery", tags=["strategy-discovery"])
 logger = logging.getLogger(__name__)
@@ -136,9 +141,14 @@ def create_strategy_discovery(
                 raise ValueError(f"自定义股票列表文件不存在: {payload.universe_file}")
         if payload.start_date is None and payload.end_date is None:
             store_status = _store(request).status()
+            default_start, default_end = resolve_strategy_discovery_defaults(
+                store_status.data_start,
+                store_status.data_end,
+                payload.date_mode,
+            )
             discovery_request = payload.to_discovery_request(
-                default_start=store_status.data_start,
-                default_end=store_status.data_end,
+                default_start=default_start,
+                default_end=default_end,
             )
         else:
             discovery_request = payload.to_discovery_request()
