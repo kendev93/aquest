@@ -7,7 +7,12 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import pytest
 
-from selector_app.adapters.akshare_market_sync import AkShareMarketSync, AkShareProviderError
+from selector_app.adapters.akshare_market_sync import (
+    AkShareMarketSync,
+    AkShareProviderError,
+    _ExistingBars,
+    _requested_ranges,
+)
 from selector_app.adapters.market_data_sync import MarketDataSync
 from selector_app.adapters.market_sync import MarketDataCancelledError, MarketSyncConfig
 from selector_app.market_data.store import DuckDbMarketDataStore
@@ -25,6 +30,21 @@ def _hist_frame(close: float = 10.0) -> pd.DataFrame:
             "最低": [close - 0.2, close - 0.1, close],
             "成交量": [1000.0, 1100.0, 1200.0],
             "成交额": [10000.0, 11000.0, 12000.0],
+        }
+    )
+
+
+def _hist_frame_for_dates(days: list[str]) -> pd.DataFrame:
+    close = [10.0 + index * 0.1 for index in range(len(days))]
+    return pd.DataFrame(
+        {
+            "日期": pd.to_datetime(days),
+            "开盘": close,
+            "收盘": [value + 0.1 for value in close],
+            "最高": [value + 0.2 for value in close],
+            "最低": [value - 0.2 for value in close],
+            "成交量": [1000.0 + index * 100 for index in range(len(days))],
+            "成交额": [10000.0 + index * 1000 for index in range(len(days))],
         }
     )
 
@@ -211,10 +231,25 @@ def test_akshare_uses_sina_only_after_tencent_fails(tmp_path: Path) -> None:
     assert set(store.read_bars("SH", "600000")["volume"]) == {10.0, 11.0, 12.0}
 
 
-def test_akshare_full_history_forces_earliest_requested_date_for_existing_rows(
+def test_akshare_full_history_fetches_only_missing_ranges_for_existing_rows(
     tmp_path: Path,
 ) -> None:
-    module = FakeAkShare()
+    class RangeAwareAkShare(FakeAkShare):
+        def stock_info_a_code_name(self) -> pd.DataFrame:
+            return pd.DataFrame([{"代码": "600000", "名称": "浦发银行"}])
+
+        def stock_zh_a_hist(self, **kwargs: object) -> pd.DataFrame:
+            self.history_requests.append(dict(kwargs))
+            start = pd.Timestamp(str(kwargs["start_date"])).date()
+            end = pd.Timestamp(str(kwargs["end_date"])).date()
+            available = [
+                day
+                for day in pd.date_range("2026-09-07", "2026-09-11", freq="D").date
+                if start <= day <= end
+            ]
+            return _hist_frame_for_dates([day.isoformat() for day in available])
+
+    module = RangeAwareAkShare()
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     service = AkShareMarketSync(
         store=store,
@@ -223,11 +258,59 @@ def test_akshare_full_history_forces_earliest_requested_date_for_existing_rows(
     )
 
     service.discover_instruments(_config())
-    service.sync(_config(prefer_store_targets=True))
+    existing = _hist_frame_for_dates(["2026-09-08", "2026-09-09", "2026-09-10"]).rename(
+        columns={
+            "日期": "date",
+            "开盘": "open",
+            "收盘": "close",
+            "最高": "high",
+            "最低": "low",
+            "成交量": "volume",
+            "成交额": "amount",
+        }
+    )
+    existing["bar_status"] = "completed"
+    store.replace_local_bars(
+        "SH",
+        "600000",
+        "stock",
+        existing,
+    )
     module.history_requests.clear()
-    service.sync(_config(prefer_store_targets=True, full_history=True))
+    report = service.sync(_config(prefer_store_targets=True, full_history=True))
 
-    assert all(request["start_date"] == "19900101" for request in module.history_requests)
+    assert {
+        (request["start_date"], request["end_date"]) for request in module.history_requests
+    } == {
+        ("19900101", "20260907"),
+        ("20260911", "20260912"),
+    }
+    assert report.written_bars == 2
+    assert list(store.read_bars("SH", "600000")["date"].dt.strftime("%Y-%m-%d")) == [
+        "2026-09-07",
+        "2026-09-08",
+        "2026-09-09",
+        "2026-09-10",
+        "2026-09-11",
+    ]
+
+
+def test_akshare_full_history_skips_a_target_covering_the_requested_window() -> None:
+    existing = _ExistingBars(
+        pd.DataFrame(),
+        first_date=pd.Timestamp("1990-01-01").date(),
+        last_date=pd.Timestamp("2026-09-12").date(),
+        bar_count=10_000,
+    )
+
+    assert (
+        _requested_ranges(
+            existing,
+            _config(full_history=True),
+            pd.Timestamp("2026-09-12").date(),
+        )
+        == []
+    )
 
 
 def test_akshare_provider_rejects_invalid_ohlc_rows(tmp_path: Path) -> None:

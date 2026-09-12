@@ -69,7 +69,7 @@ AKShare 是 Docker 正式运行时的必需行情依赖，但业务层只依赖�
 
 ## 在线同步
 
-在线同步 provider 支持 AKShare 和项目内置的最小 TDX 客户端。AKShare 股票 provider 使用 `stock_info_a_code_name` 刷新代码/简称，优先使用 `stock_zh_a_hist(period="daily", adjust="")`，失败后按顺序切换 `stock_zh_a_hist_tx` 和受限的 `stock_zh_a_daily`；另提供 `/backfill` 全量历史补齐任务。TDX provider 支持：
+在线同步 provider 支持 AKShare 和项目内置的最小 TDX 客户端。AKShare 股票 provider 使用 `stock_info_a_code_name` 刷新代码/简称，优先使用 `stock_zh_a_hist(period="daily", adjust="")`，失败后按顺序切换 `stock_zh_a_hist_tx` 和受限的 `stock_zh_a_daily`；另提供 `/backfill` 历史补齐任务：已有标的按本地首尾日期请求缺失区间，没有已有数据的标的才请求完整历史。TDX provider 支持：
 
 - TCP 建连、初始化帧、超时、有限重试和服务器故障转移；
 - `get_security_list_all`；

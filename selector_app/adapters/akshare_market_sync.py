@@ -115,6 +115,16 @@ class _SyncResult:
     history_source: str = "stock_zh_a_hist"
 
 
+@dataclass(frozen=True)
+class _ExistingBars:
+    """Bounded latest rows plus persisted coverage metadata for one target."""
+
+    latest: pd.DataFrame
+    first_date: date | None = None
+    last_date: date | None = None
+    bar_count: int = 0
+
+
 class _RateLimiter:
     def __init__(self, interval_seconds: float, sleep: SleepFunction) -> None:
         self._interval_seconds = interval_seconds
@@ -405,7 +415,7 @@ class AkShareMarketSync:
     def _latest_existing_bars(
         self,
         targets: list[AkShareTarget],
-    ) -> dict[tuple[str, str], pd.DataFrame]:
+    ) -> dict[tuple[str, str], _ExistingBars]:
         refs = [
             InstrumentRef(
                 market=market,
@@ -416,19 +426,42 @@ class AkShareMarketSync:
             )
             for market, code, instrument_type, board, name in targets
         ]
-        latest = self._store.read_latest_bars(refs, count=2, include_provisional=True)
-        if latest.empty:
-            return {}
-        return {
-            (str(market), str(code)): group.reset_index(drop=True)
-            for (market, code), group in latest.groupby(["market", "code"], sort=False)
+        stored_by_key = {
+            (ref.market, ref.code): ref
+            for ref in self._store.list_instruments(
+                include_missing=True,
+                instrument_types=("stock",),
+            )
         }
+        latest = self._store.read_latest_bars(refs, count=2, include_provisional=True)
+        latest_by_key = (
+            {
+                (str(market), str(code)): group.reset_index(drop=True)
+                for (market, code), group in latest.groupby(["market", "code"], sort=False)
+            }
+            if not latest.empty
+            else {}
+        )
+        snapshots: dict[tuple[str, str], _ExistingBars] = {}
+        for market, code, _instrument_type, _board, _name in targets:
+            key = (market, code)
+            stored = stored_by_key.get(key)
+            latest_frame = latest_by_key.get(key, pd.DataFrame())
+            snapshots[key] = _ExistingBars(
+                latest=latest_frame,
+                first_date=(stored.first_date if stored is not None else None)
+                or _first_date(latest_frame),
+                last_date=(stored.last_date if stored is not None else None)
+                or _latest_date(latest_frame),
+                bar_count=(stored.bar_count if stored is not None else None) or len(latest_frame),
+            )
+        return snapshots
 
     def _sync_batch(
         self,
         batch: list[AkShareTarget],
         config: MarketSyncConfig,
-        existing_by_key: Mapping[tuple[str, str], pd.DataFrame],
+        existing_by_key: Mapping[tuple[str, str], _ExistingBars],
         target_done: Callable[[], None],
         detail_callback: DetailCallback | None,
         abort_check: AbortCheck | None,
@@ -450,7 +483,9 @@ class AkShareMarketSync:
                     code,
                     name,
                     status="fetching",
-                    range_label="正在读取完整日线…",
+                    range_label=(
+                        "正在补齐缺失历史日线…" if config.full_history else "正在读取最新日线…"
+                    ),
                 )
                 | {"provider": "akshare", "retry": 0},
             )
@@ -463,7 +498,7 @@ class AkShareMarketSync:
                     board,
                     name,
                     config,
-                    existing=existing_by_key.get((market, code), pd.DataFrame()),
+                    existing=existing_by_key.get((market, code), _ExistingBars(pd.DataFrame())),
                 )
                 written = sync_result.written_bars
                 _report_detail(
@@ -527,58 +562,80 @@ class AkShareMarketSync:
         name: str | None,
         config: MarketSyncConfig,
         *,
-        existing: pd.DataFrame,
+        existing: _ExistingBars,
     ) -> _SyncResult:
-        latest_date = _latest_date(existing)
-        start_date = (
-            _FULL_HISTORY_START
-            if config.full_history or latest_date is None
-            else latest_date - timedelta(days=_INCREMENTAL_OVERLAP_DAYS)
-        )
         end_date = _as_shanghai(self._clock()).date()
-        frame, retries, history_source = self._fetch_with_retries(
-            module,
-            market=market,
-            code=code,
-            start_date=start_date,
-            end_date=end_date,
-            timeout=config.timeout,
+        ranges = _requested_ranges(existing, config, end_date)
+        if not ranges:
+            return _unchanged_result(existing, history_source="already_complete")
+
+        normalized_parts: list[pd.DataFrame] = []
+        history_sources: list[str] = []
+        retries = 0
+        for start_date, requested_end in ranges:
+            frame, range_retries, history_source = self._fetch_with_retries(
+                module,
+                market=market,
+                code=code,
+                start_date=start_date,
+                end_date=requested_end,
+                timeout=config.timeout,
+            )
+            retries += range_retries
+            if frame.empty:
+                continue
+            normalized = _normalize_akshare_frame(
+                frame,
+                market=market,
+                code=code,
+                instrument_type=instrument_type,
+                board=board,
+                name=name,
+                now=self._clock(),
+                volume_scale=0.01
+                if history_source in {"stock_zh_a_hist_tx", "stock_zh_a_daily"}
+                else 1.0,
+            )
+            normalized = _clip_to_range(normalized, start_date, requested_end)
+            if normalized.empty:
+                continue
+            normalized_parts.append(normalized)
+            history_sources.append(history_source)
+
+        if not normalized_parts:
+            if existing.latest.empty:
+                raise AkShareDataError(f"AKShare {code} 没有可用日线")
+            return _unchanged_result(
+                existing,
+                retries=retries,
+                history_source="already_complete" if config.full_history else "empty",
+            )
+
+        normalized = (
+            pd.concat(normalized_parts, ignore_index=True)
+            .sort_values("date", kind="stable")
+            .drop_duplicates(subset=["date"], keep="last")
+            .reset_index(drop=True)
         )
-        normalized = _normalize_akshare_frame(
-            frame,
-            market=market,
-            code=code,
-            instrument_type=instrument_type,
-            board=board,
-            name=name,
-            now=self._clock(),
-            volume_scale=0.01
-            if history_source in {"stock_zh_a_hist_tx", "stock_zh_a_daily"}
-            else 1.0,
-        )
-        range_start, range_end = _frame_date_range(normalized)
-        if normalized.empty:
-            raise AkShareDataError(f"AKShare {code} 没有可用日线")
+        range_start, result_range_end = _frame_date_range(normalized)
         if (
             not config.full_history
-            and not existing.empty
-            and not _has_new_data(existing, normalized)
+            and not existing.latest.empty
+            and not _has_new_data(existing.latest, normalized)
         ):
-            return _SyncResult(
-                bar_count=len(normalized),
-                range_start=range_start,
-                range_end=range_end,
+            return _unchanged_result(
+                existing,
                 retries=retries,
-                history_source=history_source,
+                history_source=history_sources[0],
             )
         written, _updated = self._store.upsert_online_bars(normalized, provider="akshare")
         return _SyncResult(
             written_bars=written,
             bar_count=len(normalized),
             range_start=range_start,
-            range_end=range_end,
+            range_end=result_range_end,
             retries=retries,
-            history_source=history_source,
+            history_source=_combine_history_sources(history_sources),
         )
 
     def _fetch_with_retries(
@@ -661,6 +718,63 @@ class AkShareMarketSync:
             detail = "; ".join(errors[-3:])
             raise AkShareProviderError(f"AKShare 获取 {code} 日线失败: {detail}")
         return pd.DataFrame(), retries, "empty"
+
+
+def _requested_ranges(
+    existing: _ExistingBars,
+    config: MarketSyncConfig,
+    end_date: date,
+) -> list[tuple[date, date]]:
+    """Build only the date ranges that are absent from the local store."""
+
+    if not config.full_history:
+        latest_date = _latest_date(existing.latest)
+        if latest_date is None:
+            return [(_FULL_HISTORY_START, end_date)]
+        start_date = max(
+            _FULL_HISTORY_START,
+            latest_date - timedelta(days=_INCREMENTAL_OVERLAP_DAYS),
+        )
+        return [(start_date, end_date)] if start_date <= end_date else []
+
+    if existing.first_date is None or existing.last_date is None:
+        return [(_FULL_HISTORY_START, end_date)]
+
+    ranges: list[tuple[date, date]] = []
+    if existing.first_date > _FULL_HISTORY_START:
+        ranges.append((_FULL_HISTORY_START, existing.first_date - timedelta(days=1)))
+    if existing.last_date < end_date:
+        ranges.append((existing.last_date + timedelta(days=1), end_date))
+    return ranges
+
+
+def _clip_to_range(frame: pd.DataFrame, start_date: date, end_date: date) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+    dates = pd.to_datetime(frame["date"], errors="coerce").dt.date
+    return frame.loc[(dates >= start_date) & (dates <= end_date)].reset_index(drop=True)
+
+
+def _unchanged_result(
+    existing: _ExistingBars,
+    *,
+    retries: int = 0,
+    history_source: str,
+) -> _SyncResult:
+    first_date = existing.first_date or _first_date(existing.latest)
+    last_date = existing.last_date or _latest_date(existing.latest)
+    return _SyncResult(
+        bar_count=existing.bar_count or len(existing.latest),
+        range_start=first_date.isoformat() if first_date is not None else None,
+        range_end=last_date.isoformat() if last_date is not None else None,
+        retries=retries,
+        history_source=history_source,
+    )
+
+
+def _combine_history_sources(sources: list[str]) -> str:
+    unique = list(dict.fromkeys(sources))
+    return "+".join(unique) if unique else "empty"
 
 
 def _scope_can_include_stock(config: MarketSyncConfig) -> bool:
@@ -855,6 +969,13 @@ def _latest_date(frame: pd.DataFrame) -> date | None:
         return None
     dates = pd.to_datetime(frame["date"], errors="coerce").dropna()
     return pd.Timestamp(dates.max()).date() if not dates.empty else None
+
+
+def _first_date(frame: pd.DataFrame) -> date | None:
+    if frame.empty or "date" not in frame.columns:
+        return None
+    dates = pd.to_datetime(frame["date"], errors="coerce").dropna()
+    return pd.Timestamp(dates.min()).date() if not dates.empty else None
 
 
 def _has_new_data(existing: pd.DataFrame, latest: pd.DataFrame) -> bool:
