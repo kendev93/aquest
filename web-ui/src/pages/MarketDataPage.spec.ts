@@ -300,6 +300,33 @@ describe('MarketDataPage', () => {
     expect(wrapper.get('[data-testid="market-data-message"]').text()).toContain('已取消')
   })
 
+  it('does not show a store-open error while an active sync job is running', async () => {
+    vi.mocked(marketApi.fetchStoreStatus).mockRejectedValueOnce(
+      new FormulaScreenApiError('行情数据库无法打开，请检查文件权限或数据库完整性', 503),
+    )
+    vi.mocked(marketApi.fetchActiveMarketDataJobs).mockResolvedValueOnce([{
+      job_id: 'active-store-write',
+      description: 'AKShare历史全量回填',
+      status: 'running',
+      progress: 0.1,
+      total_candidates: 10,
+      total_scanned: 1,
+      errors: 0,
+      error: null,
+      worker_count: 8,
+      phase: 'online_bars',
+      metadata: { provider: 'akshare' },
+      result: null,
+    }])
+
+    const wrapper = mount(MarketDataPage)
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="market-data-message"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="market-active-jobs"]').text()).toContain('10%')
+    wrapper.unmount()
+  })
+
   it('shows the security-list discovery stage while the sync is waiting', async () => {
     vi.useFakeTimers()
     try {

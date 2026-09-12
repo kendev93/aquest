@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 from pathlib import Path
+from threading import Event, Thread
+from time import monotonic
 
 import duckdb
 import pandas as pd
@@ -9,6 +11,7 @@ import pytest
 
 from selector_app.market_data.models import InstrumentRef
 from selector_app.market_data.store import DuckDbMarketDataStore, default_data_dir
+from selector_app.market_data.store_base import _WRITE_LOCK
 
 
 def _bars(*rows: tuple[str, str, str, float, str]) -> pd.DataFrame:
@@ -121,6 +124,40 @@ def test_store_status_reports_counts_and_range(tmp_path: Path) -> None:
     assert status.bar_count == 2
     assert status.data_start == "2024-01-02"
     assert status.data_end == "2024-01-03"
+
+
+def test_store_status_waits_for_an_in_process_writer(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars())
+    writer_started = Event()
+    release_writer = Event()
+    reader_finished = Event()
+    observed = []
+
+    def hold_write_lock() -> None:
+        with _WRITE_LOCK:
+            writer_started.set()
+            assert release_writer.wait(timeout=2)
+
+    def read_status() -> None:
+        observed.append(store.status())
+        reader_finished.set()
+
+    writer = Thread(target=hold_write_lock)
+    writer.start()
+    assert writer_started.wait(timeout=2)
+
+    reader = Thread(target=read_status)
+    reader.start()
+    started_waiting = monotonic()
+    assert not reader_finished.wait(timeout=0.1)
+    release_writer.set()
+    reader.join(timeout=2)
+    writer.join(timeout=2)
+
+    assert reader_finished.is_set()
+    assert monotonic() >= started_waiting
+    assert observed[0].bar_count == 2
 
 
 def test_store_persists_instrument_name_metadata(tmp_path: Path) -> None:

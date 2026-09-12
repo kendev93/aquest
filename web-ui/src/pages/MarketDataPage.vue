@@ -247,6 +247,19 @@ function apiMessage(error: unknown): string {
   return '行情数据读取失败，请检查数据导入状态后重试。'
 }
 
+function hasActiveMarketDataJob(): boolean {
+  return syncLoading.value
+    || activeMarketJobs.value.some((job) => job.status === 'queued' || job.status === 'running')
+    || marketJob.value?.status === 'queued'
+    || marketJob.value?.status === 'running'
+}
+
+function isTransientStoreStatusError(error: unknown): boolean {
+  return error instanceof FormulaScreenApiError
+    && error.status === 503
+    && hasActiveMarketDataJob()
+}
+
 function syncScopePayload(): {
   instrument_types?: InstrumentType[]
   boards?: InstrumentBoard[]
@@ -296,6 +309,7 @@ async function loadStoreStatus(): Promise<void> {
       }
     }
   } catch (error) {
+    if (isTransientStoreStatusError(error)) return
     message.value = apiMessage(error)
   }
 }
@@ -588,8 +602,8 @@ function formatPrice(value: number | null): string {
 }
 
 onMounted(async () => {
-  await Promise.all([loadProviderCapabilities(), loadStoreStatus()])
   await loadActiveMarketJobs()
+  await Promise.all([loadProviderCapabilities(), loadStoreStatus()])
   if (!marketJob.value) await loadInstruments()
   scheduleStoreStatusPoll()
   scheduleActiveJobPoll()

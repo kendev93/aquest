@@ -699,7 +699,11 @@ class _DuckDbStoreBase:
         )
 
     def status(self) -> DataStoreStatus:
-        with self._connect(read_only=True) as connection:
+        # Every writer in this process holds the same lock for the complete
+        # DuckDB transaction.  Taking it before opening a read-only connection
+        # prevents the status poller from racing a writer and turning a normal
+        # progress update into a misleading "database cannot be opened" error.
+        with _WRITE_LOCK, self._connect(read_only=True) as connection:
             instrument_row = connection.execute("SELECT COUNT(*) FROM instruments").fetchone()
             bar_row = connection.execute("SELECT COUNT(*) FROM daily_bars").fetchone()
             date_row = connection.execute(
