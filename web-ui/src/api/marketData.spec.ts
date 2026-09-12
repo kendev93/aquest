@@ -46,13 +46,12 @@ describe('market data API', () => {
     })
   })
 
-  it('posts a one-click local-plus-online synchronization request', async () => {
+  it('posts a one-click online-only synchronization request', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(JSON.stringify({ data: { job_id: 'sync-1', status: 'queued' } }), { status: 202 }),
     )
 
     await expect(createMarketDataSync({
-      vipdoc_path: '/data/vipdoc',
       universe: 'sh',
       instrument_types: ['stock'],
       boards: ['main'],
@@ -63,7 +62,6 @@ describe('market data API', () => {
       expect.objectContaining({
         method: 'POST',
         body: JSON.stringify({
-          vipdoc_path: '/data/vipdoc',
           universe: 'sh',
           instrument_types: ['stock'],
           boards: ['main'],

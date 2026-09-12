@@ -19,7 +19,11 @@ from selector_app.adapters.market_sync import (
     MarketSyncConfig,
     MarketSyncReport,
 )
-from selector_app.indicators.precompute import IndicatorPrecomputeService
+from selector_app.indicators.precompute import (
+    PRECOMPUTE_MAX_BARS,
+    IndicatorPrecomputeService,
+    should_defer_precompute,
+)
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.screening.jobs import (
     ProgressReporter,
@@ -87,7 +91,7 @@ class AutomaticMarketSyncScheduler:
         runner: ScreenJobRunner,
         market_sync: MarketSyncService,
         precomputer: IndicatorPrecomputeService,
-        vipdoc_path: str | Path,
+        vipdoc_path: str | Path | None = None,
         interval_seconds: float = DEFAULT_AUTO_SYNC_INTERVAL_SECONDS,
         enabled: bool = True,
         clock: Callable[[], datetime] | None = None,
@@ -98,7 +102,9 @@ class AutomaticMarketSyncScheduler:
         self._runner = runner
         self._market_sync = market_sync
         self._precomputer = precomputer
-        self._vipdoc_path = Path(vipdoc_path).expanduser()
+        # Kept as a compatibility-shaped constructor argument for embedders.
+        # Automatic sync is online-only and must never inspect this path.
+        del vipdoc_path
         self._interval_seconds = interval_seconds
         self._enabled = enabled
         self._clock = clock or (lambda: datetime.now(_SHANGHAI_TZ))
@@ -115,7 +121,7 @@ class AutomaticMarketSyncScheduler:
             return None
 
         status = self._store.status()
-        if status.instrument_count == 0 and not _has_day_files(self._vipdoc_path):
+        if status.instrument_count == 0:
             return None
         if not auto_sync_due(status.last_online_sync_at, now=self._clock()):
             return None
@@ -181,12 +187,27 @@ class AutomaticMarketSyncScheduler:
         except MarketDataCancelledError as exc:
             raise TaskCancelledError(str(exc)) from exc
         payload = result.to_dict() if isinstance(result, MarketSyncReport) else dict(result)
+        if abort_check():
+            raise TaskCancelledError("行情同步已取消")
         try:
-            precomputed = self._precomputer.run(
-                vipdoc_path=str(self._vipdoc_path),
-                progress_callback=progress,
-            )
-            payload["indicator_precompute"] = precomputed.to_dict()
+            store_status = self._store.status()
+            if should_defer_precompute(store_status.bar_count):
+                payload["indicator_precompute"] = {
+                    "status": "deferred",
+                    "reason": "large_dataset",
+                    "bar_count": store_status.bar_count,
+                    "max_bars": PRECOMPUTE_MAX_BARS,
+                    "message": (
+                        f"行情数据量为 {store_status.bar_count:,} 根，超过指标预计算上限 "
+                        f"{PRECOMPUTE_MAX_BARS:,} 根，已改为按需计算"
+                    ),
+                }
+            else:
+                precomputed = self._precomputer.run(
+                    vipdoc_path=".",
+                    progress_callback=progress,
+                )
+                payload["indicator_precompute"] = precomputed.to_dict()
         except Exception:  # noqa: BLE001 - derived cache failure must not hide a sync success
             logger.exception("自动行情同步后的指标预计算失败")
             payload["indicator_precompute"] = {
@@ -200,13 +221,6 @@ def _as_shanghai(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=_SHANGHAI_TZ)
     return value.astimezone(_SHANGHAI_TZ)
-
-
-def _has_day_files(root: Path) -> bool:
-    return any(
-        directory.is_dir() and any(directory.glob("*.day"))
-        for directory in (root / "sh" / "lday", root / "sz" / "lday")
-    )
 
 
 def _call_market_sync(

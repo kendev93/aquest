@@ -17,7 +17,6 @@ vi.mock('../api/marketData', async () => {
     fetchActiveMarketDataJobs: vi.fn(),
     fetchMarketDataCapabilities: vi.fn(),
     createLocalImport: vi.fn(),
-    createMarketDataSync: vi.fn(),
     createAkShareBackfill: vi.fn(),
     createOnlineSync: vi.fn(),
     getMarketDataJob: vi.fn(),
@@ -162,21 +161,16 @@ describe('MarketDataPage', () => {
     })
   })
 
-  it('uses one-click sync to import local data and then update online data', async () => {
-    vi.mocked(marketApi.createMarketDataSync).mockResolvedValue({ job_id: 'sync-1', status: 'queued' })
+  it('uses one-click sync to update online data without importing local files', async () => {
+    vi.mocked(marketApi.createOnlineSync).mockResolvedValue({ job_id: 'sync-1', status: 'queued' })
     vi.mocked(marketApi.getMarketDataJob).mockResolvedValue({
       job_id: 'sync-1', status: 'completed', progress: 1, total_candidates: 1,
       total_scanned: 1, errors: 0, error: null, result: {
-        source: 'combined',
-        imported_files: 0,
+        source: 'online',
         updated_files: 1,
         written_bars: 1,
-        local_import: { source: 'local', imported_files: 1, imported_bars: 2 },
-        online_sync: {
-          source: 'online', updated_files: 1, written_bars: 1,
-          listed_instruments: 4, filtered_instruments: 2,
-          new_instruments: 3, existing_instruments: 1,
-        },
+        listed_instruments: 4, filtered_instruments: 2,
+        new_instruments: 3, existing_instruments: 1,
       },
     })
     const wrapper = mount(MarketDataPage)
@@ -185,23 +179,23 @@ describe('MarketDataPage', () => {
     await wrapper.get('[data-testid="market-sync-online"]').trigger('click')
     await flushPromises()
 
-    expect(marketApi.createMarketDataSync).toHaveBeenCalledWith({
-      vipdoc_path: '/data/vipdoc',
+    expect(marketApi.createOnlineSync).toHaveBeenCalledWith({
       provider: 'akshare',
       universe: 'all',
       bars: 800,
     })
-    expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('本地导入 1 个文件')
-    expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('在线写入 1 根')
+    expect(wrapper.get('[data-testid="market-data-progress"]').text()).not.toContain('本地导入')
+    expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('更新标的 1')
+    expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('写入 K 线 1')
     expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('证券列表 4')
     expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('新增标的 3')
   })
 
   it('uses AKShare by default and allows switching to TDX', async () => {
-    vi.mocked(marketApi.createMarketDataSync).mockResolvedValue({ job_id: 'tdx-1', status: 'queued' })
+    vi.mocked(marketApi.createOnlineSync).mockResolvedValue({ job_id: 'tdx-1', status: 'queued' })
     vi.mocked(marketApi.getMarketDataJob).mockResolvedValue({
       job_id: 'tdx-1', status: 'completed', progress: 1, total_candidates: 0,
-      total_scanned: 0, errors: 0, error: null, result: { source: 'combined', provider: 'tdx' },
+      total_scanned: 0, errors: 0, error: null, result: { source: 'online', provider: 'tdx' },
     })
     const wrapper = mount(MarketDataPage)
     await flushPromises()
@@ -211,7 +205,7 @@ describe('MarketDataPage', () => {
     await wrapper.get('[data-testid="market-sync-online"]').trigger('click')
     await flushPromises()
 
-    expect(marketApi.createMarketDataSync).toHaveBeenCalledWith(expect.objectContaining({ provider: 'tdx' }))
+    expect(marketApi.createOnlineSync).toHaveBeenCalledWith(expect.objectContaining({ provider: 'tdx' }))
   })
 
   it('starts an AKShare full-history backfill for the selected scope', async () => {
@@ -234,7 +228,7 @@ describe('MarketDataPage', () => {
   })
 
   it('shows the current synchronized instrument and date range', async () => {
-    vi.mocked(marketApi.createMarketDataSync).mockResolvedValue({ job_id: 'online-1', status: 'queued' })
+    vi.mocked(marketApi.createOnlineSync).mockResolvedValue({ job_id: 'online-1', status: 'queued' })
     let polls = 0
     vi.mocked(marketApi.getMarketDataJob).mockImplementation(async () => {
       polls += 1
@@ -309,7 +303,7 @@ describe('MarketDataPage', () => {
   it('shows the security-list discovery stage while the sync is waiting', async () => {
     vi.useFakeTimers()
     try {
-      vi.mocked(marketApi.createMarketDataSync).mockResolvedValue({ job_id: 'waiting-1', status: 'queued' })
+      vi.mocked(marketApi.createOnlineSync).mockResolvedValue({ job_id: 'waiting-1', status: 'queued' })
       let polls = 0
       vi.mocked(marketApi.getMarketDataJob).mockImplementation(async () => {
         polls += 1

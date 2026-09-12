@@ -472,7 +472,7 @@ def test_akshare_backfill_forces_stock_full_history_without_local_import() -> No
     }
 
 
-def test_one_click_sync_imports_local_vipdoc_before_online_sync(tmp_path: Path) -> None:
+def test_one_click_sync_does_not_import_local_vipdoc(tmp_path: Path) -> None:
     vipdoc = tmp_path / "vipdoc"
     write_day_records(
         vipdoc / "sh" / "lday" / "sh600000.day",
@@ -480,7 +480,6 @@ def test_one_click_sync_imports_local_vipdoc_before_online_sync(tmp_path: Path) 
     )
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     events: list[str] = []
-    real_importer = LocalDayImporter(store)
 
     class FakeMarketSync:
         def discover_instruments(self, config, *, detail_callback=None):
@@ -499,24 +498,23 @@ def test_one_click_sync_imports_local_vipdoc_before_online_sync(tmp_path: Path) 
         def sync(self, config, progress_callback=None, *, detail_callback=None):
             del detail_callback
             events.append("sync")
-            assert config.prefer_store_targets is True
+            assert config.prefer_store_targets is False
             if progress_callback:
                 progress_callback(1, 1)
             return {
                 "source": "online",
                 "total_candidates": 1,
                 "processed": 1,
-                "updated_files": 0,
-                "unchanged_files": 1,
-                "written_bars": 0,
+                "updated_files": 1,
+                "unchanged_files": 0,
+                "written_bars": 1,
                 "errors": 0,
                 "failure_reasons": {},
             }
 
     class TrackingImporter:
         def import_vipdoc(self, *args, **kwargs):
-            events.append("local")
-            return real_importer.import_vipdoc(*args, **kwargs)
+            raise AssertionError("一键同步不应读取本地 vipdoc")
 
     with TestClient(
         create_app(
@@ -538,11 +536,10 @@ def test_one_click_sync_imports_local_vipdoc_before_online_sync(tmp_path: Path) 
         )
 
     assert state["status"] == "completed"
-    assert state["result"]["local_import"]["imported_files"] == 1
-    assert state["result"]["online_sync"]["written_bars"] == 0
-    assert state["result"]["online_sync"]["listed_instruments"] == 1
-    assert events == ["discover", "local", "sync"]
-    assert store.status().bar_count == 1
+    assert state["result"]["source"] == "online"
+    assert state["result"]["written_bars"] == 1
+    assert events == ["sync"]
+    assert store.status().bar_count == 0
 
 
 def test_formula_screen_scope_filters_are_forwarded_to_the_engine(tmp_path: Path) -> None:

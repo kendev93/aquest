@@ -23,6 +23,25 @@ logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[int, int], None]
 _PRECOMPUTE_CHUNK_SIZE = 32
+# Loading every bar for every instrument is an optional cache-warming task.  A
+# large store should remain available for online sync and normal queries even
+# when warming it would temporarily require several copies of the data in
+# memory.
+PRECOMPUTE_MAX_BARS = 2_000_000
+
+
+def should_defer_precompute(
+    bar_count: int,
+    *,
+    max_bars: int = PRECOMPUTE_MAX_BARS,
+) -> bool:
+    """Return whether cache warming should be deferred for a large store."""
+
+    if isinstance(bar_count, bool) or not isinstance(bar_count, int) or bar_count < 0:
+        raise ValueError("行情根数必须是非负整数")
+    if isinstance(max_bars, bool) or not isinstance(max_bars, int) or max_bars < 0:
+        raise ValueError("指标预计算上限必须是非负整数")
+    return bar_count > max_bars
 
 
 @dataclass(frozen=True)

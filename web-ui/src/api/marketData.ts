@@ -102,7 +102,6 @@ export async function createLocalImport(payload: {
 }
 
 export async function createMarketDataSync(payload: {
-  vipdoc_path?: string
   provider?: MarketDataProvider
   universe?: 'all' | 'sh' | 'sz'
   bars?: number

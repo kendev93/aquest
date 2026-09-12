@@ -6,7 +6,7 @@ import {
   cancelMarketDataJob,
   createLocalImport,
   createAkShareBackfill,
-  createMarketDataSync,
+  createOnlineSync,
   fetchActiveMarketDataJobs,
   fetchMarketDataCapabilities,
   fetchLocalChart,
@@ -440,11 +440,10 @@ async function importLocalData(): Promise<void> {
 
 async function syncOnlineData(): Promise<void> {
   syncLoading.value = true
-  syncLabel.value = '正在同步本地与在线行情…'
+  syncLabel.value = '正在同步在线行情…'
   message.value = ''
   try {
-    const job = await createMarketDataSync({
-      vipdoc_path: form.vipdocPath.trim(),
+    const job = await createOnlineSync({
       provider: form.syncProvider,
       universe: form.syncUniverse,
       bars: 800,
@@ -655,7 +654,7 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
             <div class="scope-options"><span>证券类型</span><label v-for="option in INSTRUMENT_TYPE_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-sync-type-${option.key}`" :checked="form.syncInstrumentTypes.includes(option.key)" @change="toggleInstrumentType(option.key)">{{ option.label }}</label></div>
             <div class="scope-options"><span>板块</span><label v-for="option in BOARD_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-sync-board-${option.key}`" :checked="form.syncBoards.includes(option.key)" @change="toggleBoard(option.key)">{{ option.label }}</label></div>
             <div class="scope-options provider-options"><span>行情源</span><label><input v-model="form.syncProvider" type="radio" value="akshare" data-testid="market-provider-akshare">AKShare（默认）</label><label><input v-model="form.syncProvider" type="radio" value="tdx" data-testid="market-provider-tdx">TDX（遗留）</label></div>
-            <small class="scope-helper">类型或板块未勾选表示不限制；两者同时选择时取交集。一键同步会先刷新完整证券列表，再导入本地 vipdoc，最后补充在线日线。主板、科创板和创业板股票默认使用 AKShare；全量补齐按钮会重新读取 AKShare 可提供的完整历史。</small>
+            <small class="scope-helper">类型或板块未勾选表示不限制；两者同时选择时取交集。一键同步只刷新证券列表并补充在线日线，不读取 vipdoc；只有“导入本地行情”才会读取 .day 文件。主板、科创板和创业板股票默认使用 AKShare；全量补齐按钮会重新读取 AKShare 可提供的完整历史。</small>
             <small v-if="providerCapabilities?.providers.akshare?.history_sources?.length" class="scope-helper">AKShare 备用接口：{{ providerCapabilities.providers.akshare.history_sources.join(' → ') }}</small>
             <small v-if="providerCapabilities?.providers.akshare && !providerCapabilities.providers.akshare.available" class="scope-warning">{{ providerCapabilities.providers.akshare.error || 'AKShare 当前不可用，请重新构建 Docker 镜像。' }}</small>
           </div>

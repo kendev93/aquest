@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
-from dataclasses import replace
 from datetime import date
 from inspect import Parameter, signature
 from typing import Literal, Protocol, cast
@@ -25,7 +24,11 @@ from selector_app.adapters.market_sync import (
     ProgressCallback,
 )
 from selector_app.indicators.cache import IndicatorCache
-from selector_app.indicators.precompute import IndicatorPrecomputeService
+from selector_app.indicators.precompute import (
+    PRECOMPUTE_MAX_BARS,
+    IndicatorPrecomputeService,
+    should_defer_precompute,
+)
 from selector_app.market_data.auto_sync import (
     ACTIVE_DATA_JOB_DESCRIPTIONS,
     MARKET_SYNC_EXCLUSIVE_GROUP,
@@ -170,26 +173,6 @@ def _result_dict(
     )
 
 
-def _with_discovery_summary(
-    online_result: dict[str, object],
-    discovery_result: dict[str, object],
-) -> dict[str, object]:
-    summary_keys = (
-        "listed_instruments",
-        "filtered_instruments",
-        "new_instruments",
-        "existing_instruments",
-        "target_source",
-        "provider",
-    )
-    summary = {key: discovery_result[key] for key in summary_keys if key in discovery_result}
-    return {
-        **online_result,
-        **summary,
-        "instrument_discovery": discovery_result,
-    }
-
-
 def _with_indicator_precompute(
     request: Request,
     result: dict[str, object],
@@ -201,8 +184,25 @@ def _with_indicator_precompute(
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> dict[str, object]:
     try:
+        store_status = _store(request).status()
+        if should_defer_precompute(store_status.bar_count):
+            return {
+                **result,
+                "indicator_precompute": {
+                    "status": "deferred",
+                    "reason": "large_dataset",
+                    "bar_count": store_status.bar_count,
+                    "max_bars": PRECOMPUTE_MAX_BARS,
+                    "message": (
+                        f"行情数据量为 {store_status.bar_count:,} 根，超过指标预计算上限 "
+                        f"{PRECOMPUTE_MAX_BARS:,} 根，已改为按需计算"
+                    ),
+                },
+            }
         precomputed = _precomputer(request).run(
-            vipdoc_path=vipdoc_path or _resolved_vipdoc_path(None),
+            # The DuckDB adapter uses this only as a compatibility-shaped
+            # source path on StockRef; it never scans or reads .day files.
+            vipdoc_path=vipdoc_path or ".",
             universe=universe,
             instrument_types=tuple(instrument_types or ()),
             boards=tuple(boards or ()),
@@ -219,18 +219,6 @@ def _with_indicator_precompute(
                 "message": "指标预计算未完成，后续筛选或回测会按需重建",
             },
         }
-
-
-def _combined_result(
-    local_result: dict[str, object],
-    online_result: dict[str, object],
-) -> dict[str, object]:
-    return {
-        **online_result,
-        "source": "combined",
-        "local_import": local_result,
-        "online_sync": online_result,
-    }
 
 
 @router.get("/indicator-cache", response_model=None)
@@ -283,8 +271,22 @@ def create_indicator_precompute_job(
 ) -> JSONResponse:
     def run_precompute(progress: Callable[[int, int], None]) -> dict[str, object]:
         try:
+            store_status = _store(request).status()
+            if should_defer_precompute(store_status.bar_count):
+                return {
+                    "status": "deferred",
+                    "reason": "large_dataset",
+                    "bar_count": store_status.bar_count,
+                    "max_bars": PRECOMPUTE_MAX_BARS,
+                    "message": (
+                        f"行情数据量为 {store_status.bar_count:,} 根，超过指标预计算上限 "
+                        f"{PRECOMPUTE_MAX_BARS:,} 根，已改为按需计算"
+                    ),
+                }
             report = _precomputer(request).run(
-                vipdoc_path=_resolved_vipdoc_path(payload.vipdoc_path),
+                # This task warms DuckDB-derived indicators and does not read
+                # local .day files.  Only /import-local is allowed to do that.
+                vipdoc_path=payload.vipdoc_path or ".",
                 universe=payload.universe,
                 instrument_types=tuple(payload.instrument_types or ()),
                 boards=tuple(payload.boards or ()),
@@ -446,7 +448,7 @@ def market_data_store_status(request: Request) -> dict[str, object] | JSONRespon
 
 @router.post("/sync-online", status_code=status.HTTP_202_ACCEPTED)
 def create_online_sync_job(payload: MarketSyncRequest, request: Request) -> JSONResponse:
-    return _create_sync_job(payload, request, include_local=False)
+    return _create_sync_job(payload, request)
 
 
 @router.post("/backfill", status_code=status.HTTP_202_ACCEPTED)
@@ -463,25 +465,27 @@ def create_akshare_backfill_job(payload: MarketSyncRequest, request: Request) ->
     return _create_sync_job(
         full_payload,
         request,
-        include_local=False,
         description="AKShare历史全量回填",
     )
 
 
 @router.post("/sync", status_code=status.HTTP_202_ACCEPTED)
 def create_sync_job(payload: MarketSyncRequest, request: Request) -> JSONResponse:
-    return _create_sync_job(payload, request, include_local=True)
+    return _create_sync_job(payload, request)
 
 
 def _create_sync_job(
     payload: MarketSyncRequest,
     request: Request,
     *,
-    include_local: bool,
     description: str = "行情同步",
 ) -> JSONResponse:
-    # Online sync discovers the current exchange list in both modes.  The
-    # local import supplies longer history; it must not limit the universe.
+    """Create an online-only sync job.
+
+    Reading ``.day`` files is deliberately kept in ``/import-local``.  This
+    route, its compatibility alias ``/sync``, backfill, and the automatic
+    scheduler all operate on online providers and the DuckDB store only.
+    """
     runner = _runner(request)
     _reject_duplicate_market_job(runner)
     job_id_holder = [""]
@@ -495,68 +499,15 @@ def _create_sync_job(
         try:
             if abort_check():
                 raise MarketDataCancelledError("行情同步已取消")
-            if not include_local:
-                result = _result_dict(
-                    _call_market_sync(
-                        _service(request),
-                        config,
-                        progress,
-                        detail_callback=lambda detail: report_progress_detail(progress, detail),
-                        abort_check=abort_check,
-                    )
-                )
-                if abort_check():
-                    raise MarketDataCancelledError("行情同步已取消")
-                return result
-
-            discovery_result = _result_dict(
-                _service(request).discover_instruments(
-                    config,
-                    detail_callback=lambda detail: report_progress_detail(progress, detail),
-                )
-            )
-            if abort_check():
-                raise MarketDataCancelledError("行情同步已取消")
-            report_progress_detail(
-                progress,
-                {
-                    "phase": "instrument_discovery",
-                    "current_status": "completed",
-                    "discovery_summary": discovery_result,
-                },
-            )
-            local_root = os.path.abspath(
-                os.path.expanduser(_resolved_vipdoc_path(payload.vipdoc_path))
-            )
-            if os.path.isdir(local_root):
-                local_result = _result_dict(
-                    _importer(request).import_vipdoc(
-                        local_root,
-                        universe=payload.universe,
-                        instrument_types=payload.instrument_types,
-                        boards=payload.boards,
-                        progress_callback=progress,
-                        detail_callback=lambda detail: report_progress_detail(progress, detail),
-                        abort_check=abort_check,
-                    )
-                )
-            else:
-                local_result = {
-                    "source": "local",
-                    "status": "skipped",
-                    "reason": "未找到 vipdoc 目录",
-                    "vipdoc_path": local_root,
-                }
-            online_result = _result_dict(
+            result = _result_dict(
                 _call_market_sync(
                     _service(request),
-                    replace(config, prefer_store_targets=True, refresh_names=True),
+                    config,
                     progress,
                     detail_callback=lambda detail: report_progress_detail(progress, detail),
                     abort_check=abort_check,
                 )
             )
-            online_result = _with_discovery_summary(online_result, discovery_result)
             if abort_check():
                 raise MarketDataCancelledError("行情同步已取消")
         except MarketDataCancelledError as exc:
@@ -569,15 +520,12 @@ def _create_sync_job(
             ) from exc
         except (MarketDataStoreError, duckdb.Error) as exc:
             raise TaskUserError(_storage_error_message(exc)) from exc
-        result = (
-            online_result if not include_local else _combined_result(local_result, online_result)
-        )
         if abort_check():
             raise TaskCancelledError("行情同步已取消")
         return _with_indicator_precompute(
             request,
             result,
-            vipdoc_path=_resolved_vipdoc_path(payload.vipdoc_path),
+            vipdoc_path=None,
             universe=payload.universe,
             instrument_types=payload.instrument_types,
             boards=payload.boards,

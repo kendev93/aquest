@@ -61,7 +61,7 @@ AKShare 是 Docker 正式运行时的必需行情依赖，但业务层只依赖�
 
 首次导入解析全部历史。之后先比较 `mtime_ns + size`，只有文件变化才计算 SHA-256；内容变化则重新解析，并在一个事务中替换该标的全部本地记录。解析失败保留旧数据；源文件消失只把 `source_files.status` 标为 `missing`，不删除历史。15:05（Asia/Shanghai）前的当日记录为 `provisional`，筛选和回测默认排除；收盘后的下一次同步会重新导入并转为 `completed`。
 
-应用启动时若在 `SELECTOR_VIPDOC_PATH` 或 `/data/vipdoc` 发现 `.day` 文件，会提交一个后台增量导入任务；启动过程不等待全量解析，行情页会识别该任务并在完成后自动刷新数据库状态和标的列表。独立的自动行情同步调度器会在启动后检查当天的 `last_online_sync_at`，并在持续运行时按上海本地日期每天至少提交一次在线同步；默认在线同步只从 AKShare 证券列表发现当前沪深股票并补充日线，不再自动调用 TDX。TDX 仅在显式选择遗留 provider 时使用。自动同步完成后继续预热指标缓存。没有本地文件且 DuckDB 为空时不会创建空同步任务。可用 `SELECTOR_AUTO_SYNC_ENABLED=0` 关闭，默认检查间隔为 900 秒。
+应用启动时不会扫描或导入 `SELECTOR_VIPDOC_PATH`、`/data/vipdoc` 中的 `.day` 文件；本地文件只有通过“导入本地行情”接口才会读取。独立的自动行情同步调度器会在启动后检查当天的 `last_online_sync_at`，并在持续运行时按上海本地日期每天至少提交一次在线同步；默认在线同步只从 AKShare 证券列表发现当前沪深股票并补充日线，不再自动调用 TDX。TDX 仅在显式选择遗留 provider 时使用。自动同步完成后，在数据量适合时预热指标缓存；大型 DuckDB 会跳过全量预热，后续按需计算，避免启动或同步期间产生过高内存峰值。DuckDB 为空时不会创建空同步任务。可用 `SELECTOR_AUTO_SYNC_ENABLED=0` 关闭，默认检查间隔为 900 秒。
 
 源文件不会被追加、覆盖、截断或修改。任务结果包含发现、成功、跳过、失败、未变化文件数，以及新增/替换标的、K 线数和失败原因。
 
@@ -81,7 +81,7 @@ AKShare 是 Docker 正式运行时的必需行情依赖，但业务层只依赖�
 
 `.day` 文件不包含中文名，因此本地导入只建立代码和行情记录；在线证券列表的 `name` 字段会写入 `instruments`，并在扫描结果 JSON/CSV 和页面中透传。名称刷新失败不会影响已有行情扫描，结果显示 `—` 作为占位。内置公式的扫描结果只透传注册表中的用户可选输出，公式内部中间数组仍保留在指标缓存中；自定义公式透传其命名输出。
 
-在线同步在请求日线前应用同一套市场、证券类型和板块范围，因此未选中的品种不会产生行情请求。一键同步先拉取完整沪深证券列表并登记标的，再导入配置的本地 `vipdoc`，最后以已登记的完整标的集补充在线日线；在线阶段不重复请求证券列表，也不会被本地行情子集限制。筛选、组合回测和策略适配复用该范围模型；没有设置类型或板块过滤时使用在线证券列表中的全部可识别品种，不设置项目级默认偏好。仅供内部快速更新既有标的的 `prefer_store_targets` 模式仍保留，但不用于普通 API 或自动同步。
+在线同步在请求日线前应用同一套市场、证券类型和板块范围，因此未选中的品种不会产生行情请求。一键同步只拉取在线证券列表并补充在线日线，不扫描或导入本地 `vipdoc`，也不会被本地行情子集限制；本地 `.day` 文件由独立的本地导入接口处理。筛选、组合回测和策略适配复用该范围模型；没有设置类型或板块过滤时使用在线证券列表中的全部可识别品种，不设置项目级默认偏好。仅供内部快速更新既有标的的 `prefer_store_targets` 模式仍保留，但不用于普通 API 或自动同步。
 
 ## 公式和回测一致性
 
@@ -101,7 +101,7 @@ AKShare 是 Docker 正式运行时的必需行情依赖，但业务层只依赖�
 
 - `POST /api/v1/market-data/import-local`
 - `POST /api/v1/market-data/sync-online`（仅在线更新）
-- `POST /api/v1/market-data/sync`（一键本地增量导入后在线补缺）
+- `POST /api/v1/market-data/sync`（一键在线同步兼容入口）
 - `POST /api/v1/market-data/backfill`（AKShare 股票历史全量补齐）
 - `GET /api/v1/market-data/capabilities`（行情源能力、版本和当前来源）
 - `GET /api/v1/market-data/store`
@@ -112,7 +112,7 @@ AKShare 是 Docker 正式运行时的必需行情依赖，但业务层只依赖�
 - `GET /api/v1/market-data/local/{market}/{code}/bars`
 - 既有公式选股、单股回测、组合回测和策略适配 API 保持路径不变，但只读取 DuckDB；单股、组合和策略适配分别提供 `/history`、`/history/{id}` 和删除接口，策略实验室继续提供同样的历史实验接口，并通过 `/strategy-discovery/{experiment_id}/replays`、`/replay-jobs/{job_id}`、`/replay-jobs/{job_id}/results`、`/replay-jobs/{job_id}/cancel` 和 `/history/{experiment_id}/replays` 管理前十全量复核。
 
-行情查询接口不需要 `vipdoc_path`；本地导入和一键同步可以指定该参数，省略时使用 `SELECTOR_VIPDOC_PATH` 或 `/data/vipdoc`。纯在线更新不读取本地目录。自定义 universe 文件仍可由筛选/回测请求指定，但其中的行情数据来自数据库。
+行情查询接口不需要 `vipdoc_path`；只有本地导入接口使用该参数读取 `.day` 文件。纯在线更新、自动同步和一键同步不读取本地目录。自定义 universe 文件仍可由筛选/回测请求指定，但其中的行情数据来自数据库。
 
 ## 测试重点
 

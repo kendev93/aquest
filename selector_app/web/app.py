@@ -8,7 +8,6 @@ import math
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import cast
 
 from fastapi import FastAPI, HTTPException, Request
@@ -23,7 +22,6 @@ from selector_app.indicators.precompute import IndicatorPrecomputeService
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
 from selector_app.market_data.auto_sync import (
     DEFAULT_AUTO_SYNC_INTERVAL_SECONDS,
-    MARKET_SYNC_EXCLUSIVE_GROUP,
     AutomaticMarketSyncScheduler,
 )
 from selector_app.market_data.day_importer import LocalDayImporter
@@ -31,16 +29,13 @@ from selector_app.market_data.maintenance import (
     DatabaseMaintenanceScheduler,
     DatabaseMaintenanceService,
 )
-from selector_app.market_data.models import ImportReport
 from selector_app.market_data.service import LocalMarketDataService
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.portfolio_backtest.service import PortfolioBacktestService
 from selector_app.screening.engine import ScreenEngine
 from selector_app.screening.jobs import (
-    ProgressReporter,
     ScanEngineLike,
     ScreenJobRunner,
-    report_progress_detail,
 )
 from selector_app.strategy_discovery.service import StrategyDiscoveryService
 from selector_app.strategy_fitness.service import StrategyFitnessService
@@ -129,7 +124,6 @@ def create_app(
         app.state.auto_sync_job_id = None
         auto_sync_task: asyncio.Task[None] | None = None
         maintenance_task: asyncio.Task[None] | None = None
-        vipdoc_root = Path(os.getenv("SELECTOR_VIPDOC_PATH") or "/data/vipdoc").expanduser()
         try:
             selected_store.status()
             maintenance_result = selected_maintenance_service.run_if_needed()
@@ -143,47 +137,6 @@ def create_app(
                 "reason": "maintenance_check_failed",
             }
         if owns_runner:
-            has_day_files = vipdoc_root.is_dir() and any(
-                directory.glob("*.day")
-                for directory in (
-                    vipdoc_root / "sh" / "lday",
-                    vipdoc_root / "sz" / "lday",
-                )
-            )
-            if has_day_files:
-
-                def run_startup_import(progress: ProgressReporter) -> dict[str, object]:
-                    result = selected_importer.import_vipdoc(
-                        vipdoc_root,
-                        progress_callback=progress,
-                        detail_callback=lambda detail: report_progress_detail(progress, detail),
-                    )
-                    payload = result.to_dict() if isinstance(result, ImportReport) else result
-                    try:
-                        precomputed = selected_precompute_service.run(
-                            vipdoc_path=str(vipdoc_root),
-                            progress_callback=progress,
-                        )
-                        return {**payload, "indicator_precompute": precomputed.to_dict()}
-                    except (OSError, RuntimeError, ValueError):
-                        logger.exception("启动导入后的指标预计算失败")
-                        return {
-                            **payload,
-                            "indicator_precompute": {
-                                "status": "failed",
-                                "message": "指标预计算未完成，后续筛选或回测会按需重建",
-                            },
-                        }
-
-                try:
-                    app.state.startup_import_job_id = selected_runner.submit_callable(
-                        run_startup_import,
-                        description="本地行情自动导入",
-                        exclusive_group=MARKET_SYNC_EXCLUSIVE_GROUP,
-                    )
-                except RuntimeError:
-                    logger.exception("无法提交本地行情自动导入任务")
-        if owns_runner:
             maintenance_scheduler = DatabaseMaintenanceScheduler(
                 selected_maintenance_service,
                 selected_runner,
@@ -195,7 +148,6 @@ def create_app(
                 runner=selected_runner,
                 market_sync=selected_market_sync,
                 precomputer=selected_precompute_service,
-                vipdoc_path=vipdoc_root,
                 interval_seconds=selected_auto_sync_interval,
             )
             auto_sync_task = asyncio.create_task(
