@@ -127,7 +127,7 @@ def test_snapshot_window_uses_all_discovery_split_boundaries(tmp_path: Path) -> 
 
 
 def test_snapshot_replay_matches_ordinary_portfolio_backtest(tmp_path: Path) -> None:
-    dates = pd.date_range("2024-01-01", periods=80, freq="D")
+    dates = pd.date_range("2024-01-01", periods=100, freq="D")
     close = np.linspace(10.0, 14.0, len(dates))
     store_path = tmp_path / "market.duckdb"
     store = DuckDbMarketDataStore(store_path)
@@ -213,6 +213,7 @@ def test_snapshot_replay_matches_ordinary_portfolio_backtest(tmp_path: Path) -> 
     assert snapshot_metadata["snapshot_start_date"] == "2024-01-01"
     assert snapshot_metadata["snapshot_end_date"] == "2024-03-20"
     assert snapshot_metadata["snapshot_rows"] == 80
+    assert snapshot_metadata["warmup_bars"] >= 1
     assert snapshot_metadata["snapshot_bytes"] > 0
 
 

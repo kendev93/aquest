@@ -96,8 +96,14 @@ class DuckDbMarketDataAdapter:
         *,
         start_date: date | None = None,
         end_date: date | None = None,
+        warmup_bars: int = 0,
     ) -> pd.DataFrame:
-        return self._store.read_many_bars(refs, start_date=start_date, end_date=end_date)
+        return self._store.read_many_bars(
+            refs,
+            start_date=start_date,
+            end_date=end_date,
+            warmup_bars=warmup_bars,
+        )
 
     def count_many_stocks(
         self,

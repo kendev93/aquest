@@ -518,6 +518,20 @@ def _write_snapshot(
     )
     symbol_rows: list[dict[str, object]] = []
     cursor = 0
+    full_fingerprints: dict[tuple[str, str], str] = {}
+    for ref_batch in _iter_ref_batches(refs):
+        if abort_check is not None and abort_check():
+            raise RuntimeError("策略实验已取消")
+        combined = adapter.read_many_stocks(ref_batch)
+        if combined.empty:
+            del combined
+            continue
+        for key, group in combined.groupby(["market", "code"], sort=False):
+            prepared = PortfolioBacktestService._prepare_frame(group)
+            full_fingerprints[(str(key[0]), str(key[1]))] = frame_fingerprint(prepared)
+        del combined
+        gc.collect()
+    warmup_bars = _snapshot_warmup_bars()
     indicator_compute_started = time.perf_counter()
     if progress_callback is not None:
         progress_callback(0, len(refs))
@@ -525,7 +539,12 @@ def _write_snapshot(
     for ref_batch in _iter_ref_batches(refs):
         if abort_check is not None and abort_check():
             raise RuntimeError("策略实验已取消")
-        combined = adapter.read_many_stocks(ref_batch)
+        combined = adapter.read_many_stocks(
+            ref_batch,
+            start_date=window.start,
+            end_date=window.end,
+            warmup_bars=warmup_bars,
+        )
         if combined.empty:
             group_index += len(ref_batch)
             del combined
@@ -596,6 +615,9 @@ def _write_snapshot(
                     else False
                 )
             ref = ref_by_key[(cast(MarketCode, market), code)]
+            data_fingerprint = full_fingerprints.get((market, code))
+            if data_fingerprint is None:
+                data_fingerprint = frame_fingerprint(prepared)
             symbol_rows.append(
                 {
                     "market": market,
@@ -604,7 +626,7 @@ def _write_snapshot(
                     "board": str(classify_board(market, code) or getattr(ref, "board", "main")),
                     "offset": cursor,
                     "length": length,
-                    "data_fingerprint": frame_fingerprint(prepared),
+                    "data_fingerprint": data_fingerprint,
                 }
             )
             cursor = end
@@ -662,6 +684,7 @@ def _write_snapshot(
                     "snapshot_end_date": window.end.isoformat(),
                     "snapshot_rows": total_rows,
                     "snapshot_batch_size": SNAPSHOT_SYMBOL_BATCH_SIZE,
+                    "warmup_bars": warmup_bars,
                     "snapshot_bytes": snapshot_bytes,
                 },
                 "symbols": symbol_rows,
@@ -720,6 +743,16 @@ def _parse_date(value: object) -> date | None:
         return date.fromisoformat(text[:10])
     except ValueError:
         return None
+
+
+def _snapshot_warmup_bars() -> int:
+    return max(
+        1,
+        max(
+            FORMULA_REGISTRY.formula(formula_id).minimum_bars
+            for formula_id in FORMULA_REGISTRY.all_formula_ids()
+        ),
+    )
 
 
 def _condition_to_dict(condition: ScreenCondition) -> dict[str, object]:

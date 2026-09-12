@@ -108,12 +108,14 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
         *,
         start_date: date | None = None,
         end_date: date | None = None,
+        warmup_bars: int = 0,
         include_provisional: bool = False,
     ) -> pd.DataFrame:
         return self._bars.read_many_bars(
             instruments,
             start_date=start_date,
             end_date=end_date,
+            warmup_bars=warmup_bars,
             include_provisional=include_provisional,
         )
 

@@ -518,8 +518,13 @@ class DuckDbBarsStore:
         *,
         start_date: date | None = None,
         end_date: date | None = None,
+        warmup_bars: int = 0,
         include_provisional: bool = False,
     ) -> pd.DataFrame:
+        if isinstance(warmup_bars, bool) or warmup_bars < 0:
+            raise ValueError("行情预热 K 线数量必须是非负整数")
+        if warmup_bars > 0 and start_date is None:
+            raise ValueError("行情预热 K 线需要设置开始日期")
         conditions: list[str] = []
         parameters: list[object] = []
         requested = None if instruments is None else list(instruments)
@@ -541,24 +546,60 @@ class DuckDbBarsStore:
         if not include_provisional:
             conditions.append("bars.bar_status = 'completed'")
         where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
-        query = (
-            "SELECT bars.market, bars.code, bars.instrument_type, bars.board, bars.trade_date, "
-            "bars.open, "
-            "bars.high, bars.low, bars.close, bars.volume, bars.amount, bars.source, "
-            "bars.provider, bars.price_basis, bars.bar_status, bars.imported_at "
-            "FROM daily_bars AS bars"
+        selected_columns = (
+            "bars.market, bars.code, bars.instrument_type, bars.board, bars.trade_date, "
+            "bars.open, bars.high, bars.low, bars.close, bars.volume, bars.amount, bars.source, "
+            "bars.provider, bars.price_basis, bars.bar_status, bars.imported_at"
         )
+        output_columns = selected_columns.replace("bars.", "")
+        qualified_output_columns = ", ".join(
+            f"selected.{column.strip()}" for column in output_columns.split(",")
+        )
+        join_clause = ""
+        if symbols:
+            join_clause = (
+                " INNER JOIN _requested_symbols AS requested"
+                " ON bars.market = requested.market AND bars.code = requested.code"
+            )
         with self._store._connect(read_only=True) as connection:
             if symbols:
                 connection.register("_requested_symbols", symbol_frame)
-                query += (
-                    " INNER JOIN _requested_symbols AS requested"
-                    " ON bars.market = requested.market AND bars.code = requested.code"
-                )
-            query += where + " ORDER BY bars.market, bars.code, bars.trade_date"
-            result = connection.execute(query, parameters).df()
-            if symbols:
-                connection.unregister("_requested_symbols")
+            try:
+                if warmup_bars > 0:
+                    assert start_date is not None
+                    window_query = (
+                        f"SELECT {selected_columns} FROM daily_bars AS bars{join_clause}"
+                        f"{where}"
+                    )
+                    prior_conditions = ["bars.trade_date < ?"]
+                    if not include_provisional:
+                        prior_conditions.append("bars.bar_status = 'completed'")
+                    prior_where = " WHERE " + " AND ".join(prior_conditions)
+                    query = (
+                        "WITH window_rows AS ("
+                        f"{window_query}), prior_rows AS ("
+                        f"SELECT {selected_columns}, ROW_NUMBER() OVER ("
+                        "PARTITION BY bars.market, bars.code ORDER BY bars.trade_date DESC"
+                        f") AS warmup_rank FROM daily_bars AS bars{join_clause}{prior_where}) "
+                        f"SELECT {qualified_output_columns} FROM ("
+                        f"SELECT {output_columns} FROM window_rows UNION ALL "
+                        f"SELECT {output_columns} FROM prior_rows WHERE warmup_rank <= ?"
+                        ") AS selected ORDER BY selected.market, selected.code, selected.trade_date"
+                    )
+                    prior_parameters = [start_date, warmup_bars]
+                    result = connection.execute(
+                        query,
+                        [*parameters, *prior_parameters],
+                    ).df()
+                else:
+                    query = (
+                        f"SELECT {selected_columns} FROM daily_bars AS bars{join_clause}"
+                        f"{where} ORDER BY bars.market, bars.code, bars.trade_date"
+                    )
+                    result = connection.execute(query, parameters).df()
+            finally:
+                if symbols:
+                    connection.unregister("_requested_symbols")
             return self._store._frame_from_query(result)
 
     def count_many_bars(

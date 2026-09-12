@@ -113,6 +113,32 @@ def test_batch_query_with_empty_selection_returns_empty_frame(tmp_path: Path) ->
     assert store.read_many_bars([]).empty
 
 
+def test_batch_query_can_include_bounded_warmup_bars_before_window(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    rows = _bars(
+        ("SH", "600000", "2024-01-01", 10.0, "local"),
+        ("SH", "600000", "2024-01-02", 11.0, "local"),
+        ("SH", "600000", "2024-01-03", 12.0, "local"),
+        ("SH", "600000", "2024-01-04", 13.0, "local"),
+        ("SH", "600000", "2024-01-05", 14.0, "local"),
+    )
+    store.replace_local_bars("SH", "600000", "stock", rows)
+
+    frame = store.read_many_bars(
+        [InstrumentRef("SH", "600000", "stock")],
+        start_date=date(2024, 1, 4),
+        end_date=date(2024, 1, 5),
+        warmup_bars=2,
+    )
+
+    assert list(frame["date"].dt.strftime("%Y-%m-%d")) == [
+        "2024-01-02",
+        "2024-01-03",
+        "2024-01-04",
+        "2024-01-05",
+    ]
+
+
 def test_store_status_reports_counts_and_range(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     store.replace_local_bars("SH", "600000", "stock", _bars())
