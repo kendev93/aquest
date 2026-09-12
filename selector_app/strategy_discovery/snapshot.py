@@ -161,9 +161,7 @@ class DiscoverySnapshot:
         self._max_cached_symbols = max_cached_symbols
         self._max_cached_date_indexes = max_cached_date_indexes
         self._base_series_cache: OrderedDict[str, _SnapshotBaseSeries] = OrderedDict()
-        self._date_index_cache: OrderedDict[
-            tuple[str, int, int], Mapping[int, int]
-        ] = OrderedDict()
+        self._date_index_cache: OrderedDict[tuple[str, int, int], Mapping[int, int]] = OrderedDict()
         self._base_context_cache_hits = 0
 
     @property
@@ -583,9 +581,9 @@ def _write_snapshot(
                 timestamps.iloc[positions].dt.strftime("%Y%m%d"), dtype=np.int64
             )
             for index, column in enumerate(("open", "high", "low", "close")):
-                bars[index, cursor:end] = prepared[column].to_numpy(
-                    dtype=float, copy=False
-                )[positions]
+                bars[index, cursor:end] = prepared[column].to_numpy(dtype=float, copy=False)[
+                    positions
+                ]
             bars[4, cursor:end] = _atr_series(prepared, 14)[positions]
             required_buy_mask = _evaluate_required_mask(
                 required_buy_rule, result_by_formula, len(prepared)
@@ -646,8 +644,7 @@ def _write_snapshot(
     for mapped in (bars, dates, values, signals, required_buy, required_sell):
         mapped.flush()
     snapshot_bytes = sum(
-        int(mapped.nbytes)
-        for mapped in (bars, dates, values, signals, required_buy, required_sell)
+        int(mapped.nbytes) for mapped in (bars, dates, values, signals, required_buy, required_sell)
     )
     del bars, dates, values, signals, required_buy, required_sell
     gc.collect()

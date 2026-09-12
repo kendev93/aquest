@@ -568,8 +568,7 @@ class DuckDbBarsStore:
                 if warmup_bars > 0:
                     assert start_date is not None
                     window_query = (
-                        f"SELECT {selected_columns} FROM daily_bars AS bars{join_clause}"
-                        f"{where}"
+                        f"SELECT {selected_columns} FROM daily_bars AS bars{join_clause}{where}"
                     )
                     prior_conditions = ["bars.trade_date < ?"]
                     if not include_provisional:
@@ -635,8 +634,7 @@ class DuckDbBarsStore:
         query = (
             "SELECT COUNT(*) FROM daily_bars AS bars"
             " INNER JOIN _requested_symbols AS requested"
-            " ON bars.market = requested.market AND bars.code = requested.code"
-            + where
+            " ON bars.market = requested.market AND bars.code = requested.code" + where
         )
         with self._store._connect(read_only=True) as connection:
             connection.register("_requested_symbols", symbol_frame)

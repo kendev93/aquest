@@ -111,9 +111,7 @@ def estimate_discovery_resources(
     if not 1 <= workers <= MAX_WORKERS:
         raise ValueError(f"strategy discovery worker 数必须在 1 到 {MAX_WORKERS} 之间")
     budget = (
-        resolve_discovery_memory_budget()
-        if memory_budget_bytes is None
-        else memory_budget_bytes
+        resolve_discovery_memory_budget() if memory_budget_bytes is None else memory_budget_bytes
     )
     if budget <= 0:
         raise ValueError("strategy discovery memory budget 必须大于 0")

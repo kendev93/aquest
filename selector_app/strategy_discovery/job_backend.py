@@ -162,9 +162,7 @@ class FileStrategyJobBackend:
         return job_id
 
     def get(self, job_id: str) -> dict[str, object] | None:
-        self._job_store.recover_stale_running(
-            stale_after_seconds=DEFAULT_STALE_AFTER_SECONDS
-        )
+        self._job_store.recover_stale_running(stale_after_seconds=DEFAULT_STALE_AFTER_SECONDS)
         state = self._job_store.read_state(job_id)
         if state is None:
             return None
@@ -173,9 +171,7 @@ class FileStrategyJobBackend:
         return refreshed or state
 
     def result(self, job_id: str) -> dict[str, object] | None:
-        self._job_store.recover_stale_running(
-            stale_after_seconds=DEFAULT_STALE_AFTER_SECONDS
-        )
+        self._job_store.recover_stale_running(stale_after_seconds=DEFAULT_STALE_AFTER_SECONDS)
         state = self._job_store.read_state(job_id)
         if state is None:
             return None
@@ -268,9 +264,7 @@ class InProcessStrategyJobBackend:
                     phase=phase,
                     metadata=dict(metadata or {}),
                     progress=(
-                        float(raw_progress)
-                        if isinstance(raw_progress, (int, float))
-                        else None
+                        float(raw_progress) if isinstance(raw_progress, (int, float)) else None
                     ),
                 )
 

@@ -187,7 +187,7 @@ class StrategyDiscoveryWorker:
                 raise ValueError("策略实验请求内容无效")
             discovery_request = discovery_request_from_dict(raw_request)
             return dict(
-                    selected_service.run(
+                selected_service.run(
                     discovery_request,
                     progress_callback=progress_callback,
                     abort_check=abort_check,

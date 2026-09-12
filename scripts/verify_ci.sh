@@ -47,7 +47,15 @@ cd "$REPO_ROOT"
 
 run_python_checks() {
   printf '%s\n' '验证 Python：测试、覆盖率、格式、Ruff、mypy'
-  PYTHONPATH=. python -m pytest --cov=selector_app --cov-report=term-missing
+  if command -v python >/dev/null 2>&1; then
+    python_bin=python
+  elif command -v python3 >/dev/null 2>&1; then
+    python_bin=python3
+  else
+    printf '%s\n' '未找到 python 或 python3' >&2
+    exit 1
+  fi
+  PYTHONPATH=. "$python_bin" -m pytest --cov=selector_app --cov-report=term-missing
   ruff format --check selector_app tests
   ruff check selector_app tests
   mypy selector_app
