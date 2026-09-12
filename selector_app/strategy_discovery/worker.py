@@ -6,11 +6,13 @@ import logging
 import signal
 import time
 from collections.abc import Callable, Mapping
+from datetime import datetime, timezone
 from threading import Event
 from typing import Literal, Protocol, cast
 
 from selector_app.market_data.store import DuckDbMarketDataStore
 
+from .job_backend import decorate_result
 from .job_store import StrategyJobStore, default_strategy_job_root
 from .models import DiscoveryRequest
 from .refinement import discovery_request_from_dict
@@ -87,8 +89,20 @@ class StrategyDiscoveryWorker:
             request = self._job_store.read_request(job_id)
             if request is None:
                 raise ValueError("策略任务请求文件不存在")
+            operation = request.get("operation")
+            if operation not in {"discovery", "refinement", "replay"}:
+                raise ValueError("策略任务类型无效")
+            started_at = datetime.now(timezone.utc).isoformat()
             result = self._dispatch(job_id, request)
-            self._job_store.write_result(job_id, result)
+            self._job_store.write_result(
+                job_id,
+                decorate_result(
+                    job_id,
+                    operation,
+                    result,
+                    started_at=started_at,
+                ),
+            )
         except Exception as exc:  # noqa: BLE001 - worker must keep serving later jobs
             if self._job_store.is_cancel_requested(job_id):
                 self._mark_cancelled(job_id)

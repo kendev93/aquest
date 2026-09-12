@@ -67,7 +67,10 @@ def test_worker_claims_discovery_and_persists_progress_and_result(tmp_path) -> N
     assert state["status"] == "completed"
     assert state["progress"] == 1.0
     assert state["metadata"]["overall_progress"] == 0.5
-    assert store.read_result("job-1")["results_by_sharpe"] == []
+    result = store.read_result("job-1")
+    assert result is not None
+    assert result["history_id"] == "job-1"
+    assert result["results_by_sharpe"] == []
 
 
 def test_worker_dispatches_refinement_and_replay_operations(tmp_path) -> None:

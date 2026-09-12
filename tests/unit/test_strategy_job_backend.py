@@ -6,11 +6,11 @@ from pathlib import Path
 
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.screening.jobs import ScreenJobRunner
-from selector_app.strategy_discovery.job_store import StrategyJobStore
 from selector_app.strategy_discovery.job_backend import (
     FileStrategyJobBackend,
     InProcessStrategyJobBackend,
 )
+from selector_app.strategy_discovery.job_store import StrategyJobStore
 from selector_app.strategy_discovery.models import DiscoveryRequest
 
 
