@@ -121,6 +121,40 @@ def test_file_backend_preflight_counts_the_requested_date_window(tmp_path: Path)
     assert estimate.selected_workers == 2
 
 
+def test_file_backend_reconciles_completed_result_after_backend_restart(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    job_store = StrategyJobStore(tmp_path / "jobs")
+    backend = FileStrategyJobBackend(store, job_store, worker_count=2)
+    job_id = backend.submit(
+        "discovery",
+        {"request": _request().to_dict()},
+        description="策略实验室",
+    )
+    job_store.write_result(
+        job_id,
+        {
+            "request": _request().to_dict(),
+            "results_by_sharpe": [],
+            "results_by_return": [],
+            "search_metadata": {"evaluated_trials": 1},
+            "validation_metadata": {},
+            "algorithm_metadata": {},
+            "data_fingerprint": "",
+            "started_at": "2024-01-01T00:00:00+00:00",
+            "finished_at": "2024-01-01T00:00:01+00:00",
+            "duration_seconds": 1.0,
+        },
+    )
+
+    restarted_backend = FileStrategyJobBackend(store, job_store, worker_count=2)
+    state = restarted_backend.get(job_id)
+
+    assert state is not None
+    assert state["status"] == "completed"
+    assert state["metadata"]["history_persisted"] is True
+    assert store.read_strategy_discovery_history(job_id) is not None
+
+
 def test_in_process_backend_preserves_existing_fake_service_contract(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     runner = ScreenJobRunner(max_workers=1)

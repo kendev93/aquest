@@ -53,6 +53,21 @@ describe('strategy discovery API', () => {
     await expect(fetchStrategyDiscoveryCapabilities()).rejects.toThrow('策略实验失败')
   })
 
+  it('retries GET requests on non-JSON gateway failures but does not retry POST', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response('<html>bad gateway</html>', { status: 502 }))
+      .mockResolvedValueOnce(new Response('<html>bad gateway</html>', { status: 502 }))
+      .mockResolvedValueOnce(new Response('<html>bad gateway</html>', { status: 502 }))
+
+    await expect(fetchStrategyDiscoveryHistory()).rejects.toThrow('HTTP 502')
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+
+    fetchMock.mockReset()
+    fetchMock.mockResolvedValueOnce(new Response('<html>bad gateway</html>', { status: 502 }))
+    await expect(createStrategyDiscovery({ universe: 'all', max_positions: 2 })).rejects.toThrow('HTTP 502')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
   it('creates, polls, cancels, and reads a full-range replay', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch')
       .mockResolvedValueOnce(new Response(JSON.stringify({ data: { job_id: 'replay-1', status: 'queued' } }), { status: 202 }))
