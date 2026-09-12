@@ -12,7 +12,11 @@ from fastapi.responses import JSONResponse
 
 from selector_app.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
 from selector_app.strategy_discovery.job_backend import StrategyJobBackend
-from selector_app.strategy_discovery.resources import DiscoveryResourceBudgetError
+from selector_app.strategy_discovery.job_store import JobOperation
+from selector_app.strategy_discovery.resources import (
+    DiscoveryResourceBudgetError,
+    DiscoveryResourceEstimate,
+)
 from selector_app.strategy_discovery.service import StrategyDiscoveryService
 
 from ..schemas import StrategyDiscoveryRequest, StrategyRefinementRequest, StrategyReplayRequest
@@ -35,6 +39,44 @@ def _backend(request: Request) -> StrategyJobBackend:
 
 def _store(request: Request) -> DuckDbMarketDataStore:
     return cast(DuckDbMarketDataStore, request.app.state.market_data_store)
+
+
+def _preflight_job(
+    request: Request,
+    operation: JobOperation,
+    payload: Mapping[str, object],
+) -> DiscoveryResourceEstimate | JSONResponse | None:
+    try:
+        return _backend(request).preflight_operation(operation, payload)
+    except DiscoveryResourceBudgetError as exc:
+        estimate = exc.estimate
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={
+                "error": {
+                    "code": "resource_budget_exceeded",
+                    "message": str(exc),
+                    "details": {
+                        "row_count": estimate.row_count,
+                        "snapshot_bytes": estimate.snapshot_bytes,
+                        "estimated_peak_bytes": estimate.estimated_peak_bytes,
+                        "memory_budget_bytes": estimate.memory_budget_bytes,
+                        "requested_workers": estimate.requested_workers,
+                        "selected_workers": estimate.selected_workers,
+                    },
+                }
+            },
+        )
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={"error": {"code": "validation_error", "message": str(exc)}},
+        )
+    except (MarketDataStoreError, OSError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="本地行情数据暂不可用，请检查 DuckDB 后重试",
+        ) from exc
 
 
 def _state_or_404(job_id: str, request: Request) -> dict[str, object]:
@@ -94,44 +136,24 @@ def create_strategy_discovery(
             status_code=503, detail="本地行情数据暂不可用，请检查 DuckDB 后重试"
         ) from exc
 
-    try:
-        resource_estimate = _backend(request).preflight(discovery_request)
-    except DiscoveryResourceBudgetError as exc:
-        estimate = exc.estimate
-        return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            content={
-                "error": {
-                    "code": "resource_budget_exceeded",
-                    "message": str(exc),
-                    "details": {
-                        "row_count": estimate.row_count,
-                        "snapshot_bytes": estimate.snapshot_bytes,
-                        "estimated_peak_bytes": estimate.estimated_peak_bytes,
-                        "memory_budget_bytes": estimate.memory_budget_bytes,
-                        "requested_workers": estimate.requested_workers,
-                        "selected_workers": estimate.selected_workers,
-                    },
-                }
-            },
-        )
-    except ValueError as exc:
-        return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            content={"error": {"code": "validation_error", "message": str(exc)}},
-        )
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="本地行情数据暂不可用，请检查 DuckDB 后重试",
-        ) from exc
+    resource_estimate = _preflight_job(
+        request,
+        "discovery",
+        {"request": discovery_request.to_dict()},
+    )
+    if isinstance(resource_estimate, JSONResponse):
+        return resource_estimate
 
     try:
         job_id = _backend(request).submit(
             "discovery",
             {"request": discovery_request.to_dict()},
             description="策略实验室",
-            worker_count=(resource_estimate.selected_workers if resource_estimate else None),
+            worker_count=(
+                resource_estimate.selected_workers
+                if isinstance(resource_estimate, DiscoveryResourceEstimate)
+                else None
+            ),
         )
     except (RuntimeError, OSError, ValueError) as exc:
         raise HTTPException(status_code=503, detail="任务执行器暂不可用") from exc
@@ -164,17 +186,26 @@ def create_strategy_refinement(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             content={"error": {"code": "validation_error", "message": "父实验中不存在指定候选"}},
         )
+    job_payload: dict[str, object] = {
+        "experiment": experiment,
+        "parent_candidate_hash": payload.parent_candidate_hash,
+        "max_trials": payload.max_trials,
+        "seed": payload.seed,
+        "radius": payload.refinement_radius,
+    }
+    resource_estimate = _preflight_job(request, "refinement", job_payload)
+    if isinstance(resource_estimate, JSONResponse):
+        return resource_estimate
     try:
         job_id = _backend(request).submit(
             "refinement",
-            {
-                "experiment": experiment,
-                "parent_candidate_hash": payload.parent_candidate_hash,
-                "max_trials": payload.max_trials,
-                "seed": payload.seed,
-                "radius": payload.refinement_radius,
-            },
+            job_payload,
             description="策略二次优化",
+            worker_count=(
+                resource_estimate.selected_workers
+                if isinstance(resource_estimate, DiscoveryResourceEstimate)
+                else None
+            ),
         )
     except (RuntimeError, OSError, ValueError) as exc:
         raise HTTPException(status_code=503, detail="任务执行器暂不可用") from exc
@@ -235,10 +266,22 @@ def create_strategy_replay(
 ) -> JSONResponse:
     try:
         experiment = _experiment_or_404(experiment_id, request)
+        job_payload: dict[str, object] = {
+            "experiment": experiment,
+            "leaderboard": payload.leaderboard,
+        }
+        resource_estimate = _preflight_job(request, "replay", job_payload)
+        if isinstance(resource_estimate, JSONResponse):
+            return resource_estimate
         job_id = _backend(request).submit(
             "replay",
-            {"experiment": experiment, "leaderboard": payload.leaderboard},
+            job_payload,
             description="策略前十全量复核",
+            worker_count=(
+                resource_estimate.selected_workers
+                if isinstance(resource_estimate, DiscoveryResourceEstimate)
+                else None
+            ),
         )
     except HTTPException:
         raise

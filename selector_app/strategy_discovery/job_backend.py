@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Callable, Mapping
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import date, datetime, timezone
 from typing import Literal, Protocol, cast
 
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
@@ -30,9 +31,15 @@ logger = logging.getLogger(__name__)
 
 
 class StrategyJobBackend(Protocol):
+    """Common interface consumed by the strategy discovery API router."""
+
     def preflight(self, request: DiscoveryRequest) -> DiscoveryResourceEstimate | None: ...
 
-    """Common interface consumed by the strategy discovery API router."""
+    def preflight_operation(
+        self,
+        operation: JobOperation,
+        payload: Mapping[str, object],
+    ) -> DiscoveryResourceEstimate | None: ...
 
     def submit(
         self,
@@ -65,6 +72,38 @@ class FileStrategyJobBackend:
         self._worker_count = worker_count
 
     def preflight(self, request: DiscoveryRequest) -> DiscoveryResourceEstimate:
+        return self._preflight_request(request)
+
+    def preflight_operation(
+        self,
+        operation: JobOperation,
+        payload: Mapping[str, object],
+    ) -> DiscoveryResourceEstimate:
+        if operation == "discovery":
+            raw_request = payload.get("request")
+            if not isinstance(raw_request, Mapping):
+                raise ValueError("策略实验请求内容无效")
+            request = discovery_request_from_dict(raw_request)
+        elif operation == "refinement":
+            experiment = _mapping(payload.get("experiment"), "父实验")
+            raw_request = experiment.get("request")
+            if not isinstance(raw_request, Mapping):
+                raise ValueError("父实验请求内容无效")
+            request = discovery_request_from_dict(raw_request)
+        elif operation == "replay":
+            experiment = _mapping(payload.get("experiment"), "复核实验")
+            raw_request = experiment.get("request")
+            if not isinstance(raw_request, Mapping):
+                raise ValueError("复核实验请求内容无效")
+            request = _replay_resource_request(
+                discovery_request_from_dict(raw_request),
+                self._store,
+            )
+        else:
+            raise ValueError("策略任务类型无效")
+        return self._preflight_request(request)
+
+    def _preflight_request(self, request: DiscoveryRequest) -> DiscoveryResourceEstimate:
         base = request.base_config
         instrument_types = cast(
             tuple[InstrumentType, ...] | None,
@@ -189,6 +228,13 @@ class InProcessStrategyJobBackend:
         self._service = service
 
     def preflight(self, request: DiscoveryRequest) -> None:
+        return None
+
+    def preflight_operation(
+        self,
+        operation: JobOperation,
+        payload: Mapping[str, object],
+    ) -> None:
         return None
 
     def submit(
@@ -517,3 +563,36 @@ def _string_tuple(value: object) -> tuple[str, ...] | None:
         return None
     values = tuple(str(item).strip() for item in value if str(item).strip())
     return values or None
+
+
+def _replay_resource_request(
+    request: DiscoveryRequest,
+    store: DuckDbMarketDataStore,
+) -> DiscoveryRequest:
+    store_status = store.status()
+    start = _parse_date(request.base_config.get("start_date"))
+    end = _parse_date(store_status.data_end)
+    if start is None:
+        start = _parse_date(store_status.data_start)
+    if start is None or end is None:
+        raise ValueError("本地 DuckDB 没有可用于全量复核的已完成日线")
+    if start > end:
+        raise ValueError("全量复核开始日期晚于本地最新行情日")
+    base = {**request.base_config, "start_date": start.isoformat(), "end_date": end.isoformat()}
+    return replace(
+        request,
+        base_config=base,
+        splits={"search": {"start_date": start.isoformat(), "end_date": end.isoformat()}},
+    )
+
+
+def _parse_date(value: object) -> date | None:
+    if isinstance(value, date):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
