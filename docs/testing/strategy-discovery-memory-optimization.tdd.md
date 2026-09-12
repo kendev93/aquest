@@ -36,9 +36,9 @@
 
 ## 实际验证
 
-- Python：`sh scripts/verify_ci.sh python` → **360 passed**，覆盖率 **83.05%**，2 个既有 deprecation warnings。
+- Python：`sh scripts/verify_ci.sh python` → **364 passed**，覆盖率 **83.07%**，2 个既有 deprecation warnings。
 - Python 静态检查：`ruff check selector_app tests` → **PASS**；`mypy selector_app` → **100 source files PASS**。
-- Frontend：单元测试 **116 passed**，覆盖率 **84.69%**；`npm run typecheck` 和 `npm run build` → **PASS**；策略实验关键 E2E → **1 passed**。
+- Frontend：单元测试 **117 passed**，覆盖率 **84.71%**；`npm run typecheck` 和 `npm run build` → **PASS**；策略实验关键 E2E → **1 passed**。
 - 完整 Frontend E2E：**9 passed / 1 个既有 market-data 活跃任务展示断言失败**；该失败不涉及策略实验改动，沙箱内直接运行时另受 Chromium Mach port 权限限制。
 - Compose：`docker compose config --quiet`、后端/前端镜像构建 → **PASS**。
 - 运行时：backend、strategy-worker、frontend 均为 **healthy**；backend/worker restart count 均为 0，`OOMKilled=false`；backend `/healthz` 返回 200。
