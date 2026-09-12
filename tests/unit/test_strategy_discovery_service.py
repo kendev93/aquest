@@ -87,6 +87,19 @@ def test_service_capabilities_describe_the_unified_indicator_catalog() -> None:
     assert "technical.ma5" in {item["id"] for item in capabilities["indicators"]}
 
 
+def test_real_service_capabilities_use_the_configured_worker_count(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SELECTOR_DISCOVERY_WORKERS", "2")
+
+    capabilities = StrategyDiscoveryService(
+        store=DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    ).capabilities()
+
+    assert capabilities["evaluation_workers"] == 2
+
+
 def test_service_progress_reports_overall_estimate_and_current_phase() -> None:
     events: list[tuple[int, int, str, dict[str, object]]] = []
 
@@ -244,7 +257,7 @@ def test_real_duckdb_service_evaluates_candidates_in_eight_processes(tmp_path: P
     )
 
     assert result["search_metadata"]["evaluation_mode"] == "process_pool"
-    assert result["search_metadata"]["evaluation_workers"] == 8
+    assert result["search_metadata"]["evaluation_workers"] == 2
     assert result["algorithm_metadata"]["data_snapshot"] == "shared_memmap"
     assert result["algorithm_metadata"]["snapshot_build_seconds"] >= 0
     assert result["algorithm_metadata"]["snapshot_metrics"]["indicator_compute_seconds"] >= 0

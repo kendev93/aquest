@@ -240,7 +240,7 @@ def test_real_replay_uses_the_shared_snapshot_process_pool(tmp_path: Path) -> No
         ),
     )
 
-    assert REPLAY_EVALUATION_WORKERS == 8
+    assert REPLAY_EVALUATION_WORKERS == 2
     assert result["candidate_count"] == 1
     assert len(result["data_fingerprint"]) == 64
     assert any(event[2] == "preparing_snapshot" for event in progress)
