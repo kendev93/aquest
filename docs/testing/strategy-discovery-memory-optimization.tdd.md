@@ -1,0 +1,49 @@
+# 策略实验 OOM/502 优化 TDD 证据
+
+**状态：** 已验证
+**范围：** 资源预检、分块快照、worker 并发、共享卷任务队列、backend 重启恢复和前端网关错误处理
+
+## User journeys
+
+- 用户提交策略实验时，系统在超出资源预算前给出可执行的范围/并发建议，不让 backend 被 OOM kill。
+- 用户提交 discovery、refinement 或 replay 后，可以通过原有 API 轮询共享卷任务状态并读取最终结果。
+- worker 或 backend 重启后，已完成结果可以恢复，运行中的 stale 任务会进入明确的失败状态，不会无限轮询。
+- 用户在全历史过大时可以切换自定义日期范围；默认全历史语义保持不变。
+
+## RED/GREEN 记录
+
+| 阶段 | RED 证据 | GREEN 证据 |
+|---|---|---|
+| 资源预算 | 缺少 `resources` 模块 | `tests/unit/test_strategy_discovery_resources.py`：4 passed |
+| 分块快照 | 缺少批次常量/窗口函数 | 快照、store、adapter：24 passed |
+| worker 并发 | discovery/replay 固定 8 worker | discovery/replay/资源回归：19 passed |
+| 文件队列 | 缺少 `job_store`/`worker` 模块 | job store、worker、backend：15 passed |
+| API coordinator | app 没有 strategy backend state | API 集成：10 passed |
+| 网关恢复/日期范围 | GET 不重试、页面无日期控件 | 前端 API/页面：19 passed |
+
+## 关键保证
+
+| 保证 | 验证 | 结果 |
+|---|---|---|
+| 超预算在创建 job 前返回结构化 422 | `tests/integration/test_strategy_discovery_api.py` | PASS |
+| 快照按 warm-up/窗口读取且保留完整 fingerprint | `tests/unit/test_strategy_discovery_snapshot.py`, `tests/unit/test_duckdb_store.py` | PASS |
+| 日期索引不依赖全量 Python dict | `tests/unit/test_portfolio_backtest.py` | PASS |
+| discovery/refinement/replay 共用文件任务协议 | `tests/unit/test_strategy_worker.py`, `tests/unit/test_strategy_job_backend.py` | PASS |
+| backend 重启后幂等保存完成结果 | `tests/unit/test_strategy_job_backend.py` | PASS |
+| stale worker 任务进入 terminal failure | `tests/unit/test_strategy_job_backend.py`, `tests/unit/test_strategy_job_store.py` | PASS |
+| GET 502/503/504 有限重试，POST 不重试 | `web-ui/src/api/strategyDiscovery.spec.ts` | PASS |
+| 全历史默认 payload 不传日期，自定义范围才传日期 | `web-ui/src/pages/StrategyDiscoveryPage.spec.ts` | PASS |
+
+## 实际验证
+
+- Python：`pytest -q` → **359 passed**，2 个既有 deprecation warnings。
+- Python 静态检查：`ruff check selector_app tests` → **PASS**；`mypy selector_app` → **100 source files PASS**。
+- Frontend：`npm test -- --run` → **116 passed**；`npm run typecheck` → **PASS**。
+- Compose：`docker compose config --quiet` → **PASS**；backend/worker/frontend 镜像构建成功。
+- 运行时：backend、frontend healthz 均返回 200；strategy-worker running；backend restart count 为 0。
+- 当前库只读资源预检：16606845 行，约 4.64 GiB 估算峰值，5 GiB 预算下从 2 个 worker 自动降为 1 个。
+
+## 已知边界
+
+- 尚未对当前全市场 1000 trials 执行完整压力实验，以避免重复消耗本地资源；运行时已完成真实数据库只读预检和 Docker 服务健康验证。
+- Docker worker 的最终吞吐仍需在用户可接受的时间窗口内用受控数据副本测量；首版保持 `float64`，未启用精度压缩。

@@ -28,7 +28,7 @@ AKShare / 内置 TDX ──┘                       │
 - `formulas/` 是无副作用的数组计算层。公式函数由 `formulas/tdx_math.py` 自己实现，输入输出均为项目内部的 NumPy/Pandas 数据。
 - `screening/` 负责条件合并、批量读取、单标的容错、进度和导出，不处理网络或文件格式。
 - `backtest/` 负责单标的交易模拟和绩效计算；`portfolio_backtest/` 负责动态候选、固定槽位和补位；`strategy_fitness/` 复用这些交易语义完成时间切分评估。
-- `web/` 只负责 Pydantic 校验、任务提交/轮询和安全错误响应。
+- `web/` 只负责 Pydantic 校验、任务提交/轮询和安全错误响应。策略发现、二次优化和榜单复核在 Docker 正式运行时通过 `/data/market/.strategy-jobs` 共享卷交给独立 `strategy-worker`；backend 只读写小型任务状态和最终历史，其他普通任务继续使用进程内 runner。
 - `web-ui/` 只负责导入/同步操作、状态展示、表单和图表。
 
 AKShare 是 Docker 正式运行时的必需行情依赖，但业务层只依赖项目自己的 provider 接口和规范化 DataFrame；默认应用使用 AKShare 股票行情，TDX 作为兼容 provider。历史适配模块仍只处理项目自己的 `.day` 数据。
@@ -50,6 +50,14 @@ AKShare 是 Docker 正式运行时的必需行情依赖，但业务层只依赖�
 - `backtest_history`：单股、组合和策略适配性回测的请求快照、完整结果、摘要、开始/结束时间和耗时；按回测类型分别保留最近 20 次。
 
 行情事实写入只由导入/同步任务执行，并使用独立事务和进程内 writer lock；派生指标缓存可由预热任务或业务请求按需填充。读操作每次建立独立只读 DuckDB 连接。全市场筛选、组合回测和策略适配通过一次批量查询得到各标的分组，避免逐文件打开 `.day`。
+
+## 策略实验资源与任务队列
+
+策略实验先统计目标日期窗口内的行情行数并估算快照和 worker 工作集。默认从 `SELECTOR_DISCOVERY_WORKERS=2` 开始，按 `SELECTOR_DISCOVERY_MEMORY_BUDGET_MB` 逐级降到 1；即使一个 worker 也超预算时，在创建任务前返回结构化错误，不静默截断全历史数据。
+
+快照构建按标的批次执行：完整行情指纹单独流式计算，指标计算只读取 warm-up 加实验窗口，数值数组写入只读 memmap。worker 的标的上下文和日期索引均有界，日期查找使用排序数组而不是每个进程重复建立完整 Python 字典。
+
+正式 Docker Compose 包含独立 `strategy-worker` 服务。backend、worker 通过 `/data/market/.strategy-jobs/<job_id>/` 交换 `request.json`、`state.json`、`result.json` 和取消标记；所有文件使用临时文件加 `os.replace()` 原子更新。worker OOM 或停止只会让任务进入 stale/failed 状态，不能直接杀掉 API backend；任务状态和结果在 backend 重启后仍可从共享卷恢复。共享卷中的 job 文件是临时运行状态，策略历史仍由 DuckDB 的既有历史表保存。
 
 本地导入或在线同步完成后会分批预热内置公式；已有数据库或预热未完成时，筛选和回测会按需填充缓存。缓存基于完整、有序行情的 SHA-256 指纹，公式版本变化、行情更新或价格口径变化都会自动跳过旧缓存。自定义公式按公式内容、参数和引擎版本独立缓存，不同参数不会互相复用。
 
