@@ -8,7 +8,7 @@
 - 用户提交策略实验时，系统在超出资源预算前给出可执行的范围/并发建议，不让 backend 被 OOM kill。
 - 用户提交 discovery、refinement 或 replay 后，可以通过原有 API 轮询共享卷任务状态并读取最终结果。
 - worker 或 backend 重启后，已完成结果可以恢复，运行中的 stale 任务会进入明确的失败状态，不会无限轮询。
-- 用户在全历史过大时可以切换自定义日期范围；默认全历史语义保持不变。
+- 用户默认使用最近 5 年，也可以选择全历史或设置自定义开始/结束日期。
 
 ## RED/GREEN 记录
 
@@ -32,7 +32,7 @@
 | backend 重启后幂等保存完成结果 | `tests/unit/test_strategy_job_backend.py` | PASS |
 | stale worker 任务进入 terminal failure | `tests/unit/test_strategy_job_backend.py`, `tests/unit/test_strategy_job_store.py` | PASS |
 | GET 502/503/504 有限重试，POST 不重试 | `web-ui/src/api/strategyDiscovery.spec.ts` | PASS |
-| 全历史默认 payload 不传日期，自定义范围才传日期 | `web-ui/src/pages/StrategyDiscoveryPage.spec.ts` | PASS |
+| 默认发送最近五年模式，且支持全历史/自定义范围 | `web-ui/src/pages/StrategyDiscoveryPage.spec.ts`, `tests/integration/test_strategy_discovery_api.py` | PASS |
 
 ## 实际验证
 

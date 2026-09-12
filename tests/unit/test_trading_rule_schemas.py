@@ -122,9 +122,7 @@ def test_strategy_discovery_request_defaults_to_recent_five_years_mode() -> None
 
 def test_strategy_discovery_request_requires_dates_for_custom_mode() -> None:
     with pytest.raises(ValueError, match="自定义日期范围必须同时设置开始日期和结束日期"):
-        StrategyDiscoveryRequest.model_validate(
-            {"date_mode": "custom", "max_positions": 3}
-        )
+        StrategyDiscoveryRequest.model_validate({"date_mode": "custom", "max_positions": 3})
 
 
 def test_strategy_discovery_request_records_custom_date_mode() -> None:

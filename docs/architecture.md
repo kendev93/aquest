@@ -53,7 +53,7 @@ AKShare 是 Docker 正式运行时的必需行情依赖，但业务层只依赖�
 
 ## 策略实验资源与任务队列
 
-策略实验先统计目标日期窗口内的行情行数并估算快照和 worker 工作集。默认从 `SELECTOR_DISCOVERY_WORKERS=2` 开始，按 `SELECTOR_DISCOVERY_MEMORY_BUDGET_MB` 逐级降到 1；即使一个 worker 也超预算时，在创建任务前返回结构化错误，不静默截断全历史数据。
+策略实验默认使用本地最新已完成日线往前 5 个日历年；用户可以选择全历史或显式开始/结束日期。系统先统计目标日期窗口内的行情行数并估算快照和 worker 工作集。默认从 `SELECTOR_DISCOVERY_WORKERS=2` 开始，按 `SELECTOR_DISCOVERY_MEMORY_BUDGET_MB` 逐级降到 1；即使一个 worker 也超预算时，在创建任务前返回结构化错误，不静默截断用户选定的日期范围。
 
 快照构建按标的批次执行：完整行情指纹单独流式计算，指标计算只读取 warm-up 加实验窗口，数值数组写入只读 memmap。worker 的标的上下文和日期索引均有界，日期查找使用排序数组而不是每个进程重复建立完整 Python 字典。
 
