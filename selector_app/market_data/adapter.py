@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import date
 from pathlib import Path
 from typing import Protocol
 
@@ -89,8 +90,23 @@ class DuckDbMarketDataAdapter:
     def read_stock(self, ref: StockRef) -> pd.DataFrame:
         return self._store.read_bars(ref.market, ref.code)
 
-    def read_many_stocks(self, refs: list[StockRef]) -> pd.DataFrame:
-        return self._store.read_many_bars(refs)
+    def read_many_stocks(
+        self,
+        refs: list[StockRef],
+        *,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> pd.DataFrame:
+        return self._store.read_many_bars(refs, start_date=start_date, end_date=end_date)
+
+    def count_many_stocks(
+        self,
+        refs: list[StockRef],
+        *,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> int:
+        return self._store.count_many_bars(refs, start_date=start_date, end_date=end_date)
 
     def _list_custom_refs(
         self,

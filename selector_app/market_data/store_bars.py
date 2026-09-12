@@ -561,6 +561,50 @@ class DuckDbBarsStore:
                 connection.unregister("_requested_symbols")
             return self._store._frame_from_query(result)
 
+    def count_many_bars(
+        self,
+        instruments: Iterable[InstrumentRef | StockRef] | None = None,
+        *,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        include_provisional: bool = False,
+    ) -> int:
+        """Count completed bars for a bounded set of instruments."""
+
+        requested = None if instruments is None else list(instruments)
+        symbols = requested or []
+        if requested is not None and not symbols:
+            return 0
+        if not symbols:
+            raise ValueError("批量行情计数必须提供标的范围")
+        symbol_frame = pd.DataFrame(
+            [{"market": item.market, "code": item.code} for item in symbols]
+        ).drop_duplicates()
+        conditions: list[str] = []
+        parameters: list[object] = []
+        if start_date is not None:
+            conditions.append("bars.trade_date >= ?")
+            parameters.append(start_date)
+        if end_date is not None:
+            conditions.append("bars.trade_date <= ?")
+            parameters.append(end_date)
+        if not include_provisional:
+            conditions.append("bars.bar_status = 'completed'")
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        query = (
+            "SELECT COUNT(*) FROM daily_bars AS bars"
+            " INNER JOIN _requested_symbols AS requested"
+            " ON bars.market = requested.market AND bars.code = requested.code"
+            + where
+        )
+        with self._store._connect(read_only=True) as connection:
+            connection.register("_requested_symbols", symbol_frame)
+            try:
+                row = connection.execute(query, parameters).fetchone()
+            finally:
+                connection.unregister("_requested_symbols")
+        return int(row[0]) if row and row[0] is not None else 0
+
     def read_latest_bars(
         self,
         instruments: Iterable[InstrumentRef | StockRef],

@@ -203,12 +203,17 @@ def test_snapshot_replay_matches_ordinary_portfolio_backtest(tmp_path: Path) -> 
             total_candidates=snapshot.total_candidates,
             include_details=False,
         )
+        snapshot_metadata = dict(snapshot.build_metadata)
 
     assert prepared.performance == ordinary.performance
     assert prepared.trades == ordinary.trades
     assert prepared.data_fingerprint == ordinary.data_fingerprint
     assert prepared.states == ()
     assert prepared.ranking_events == ()
+    assert snapshot_metadata["snapshot_start_date"] == "2024-01-01"
+    assert snapshot_metadata["snapshot_end_date"] == "2024-03-20"
+    assert snapshot_metadata["snapshot_rows"] == 80
+    assert snapshot_metadata["snapshot_bytes"] > 0
 
 
 def test_snapshot_reuses_persistent_indicator_cache_on_repeated_builds(tmp_path: Path) -> None:

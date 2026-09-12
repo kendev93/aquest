@@ -5,11 +5,10 @@ from __future__ import annotations
 import gc
 import json
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date
-from itertools import islice
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
@@ -22,7 +21,7 @@ from selector_app.formulas.types import FormulaResult
 from selector_app.indicators.cache import IndicatorCache, frame_fingerprint
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
 from selector_app.market_data.day_format import classify_board
-from selector_app.market_data.models import InstrumentBoard, InstrumentType, MarketCode
+from selector_app.market_data.models import InstrumentBoard, InstrumentType, MarketCode, StockRef
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.portfolio_backtest.models import PortfolioBacktestConfig
 from selector_app.portfolio_backtest.service import (
@@ -39,6 +38,7 @@ from .models import DiscoveryRequest
 
 _BAR_ARRAY_NAMES = ("open", "high", "low", "close", "atr")
 _SNAPSHOT_VERSION = 1
+SNAPSHOT_SYMBOL_BATCH_SIZE = 64
 
 
 @dataclass(frozen=True)
@@ -89,6 +89,14 @@ class _SnapshotBaseSeries:
     @property
     def symbol(self) -> str:
         return f"{self.market}{self.code}"
+
+
+@dataclass(frozen=True)
+class SnapshotWindow:
+    """The inclusive date window materialized into one discovery snapshot."""
+
+    start: date
+    end: date
 
 
 class DiscoverySnapshot:
@@ -427,6 +435,7 @@ def _write_snapshot(
 ) -> None:
     snapshot_started = time.perf_counter()
     base = request.base_config
+    window = snapshot_window(request)
     instrument_types = _string_tuple(base.get("instrument_types"))
     boards = _string_tuple(base.get("boards"))
     snapshot_store = DuckDbMarketDataStore(store.database_path, read_only=True)
@@ -438,8 +447,12 @@ def _write_snapshot(
         instrument_types=cast(tuple[InstrumentType, ...] | None, instrument_types),
         boards=cast(tuple[InstrumentBoard, ...] | None, boards),
     )
-    combined = adapter.read_many_stocks(refs)
-    if combined.empty:
+    total_rows = adapter.count_many_stocks(
+        refs,
+        start_date=window.start,
+        end_date=window.end,
+    )
+    if total_rows <= 0:
         raise ValueError("本地 DuckDB 没有可用行情，请先在“本地行情”页面导入日线数据")
     if abort_check is not None and abort_check():
         raise RuntimeError("策略实验已取消")
@@ -448,7 +461,6 @@ def _write_snapshot(
     value_ids = tuple(catalog.rankable_ids)
     signal_ids = tuple(catalog.signal_ids)
     formula_ids = tuple(FORMULA_REGISTRY.all_formula_ids())
-    total_rows = len(combined)
     bars = _open_snapshot_memmap(
         root / "bars.npy",
         dtype=np.float64,
@@ -481,18 +493,20 @@ def _write_snapshot(
     symbol_rows: list[dict[str, object]] = []
     cursor = 0
     indicator_compute_started = time.perf_counter()
-    indicator_compute_seconds = 0.0
-    grouped = iter(combined.groupby(["market", "code"], sort=False))
     if progress_callback is not None:
         progress_callback(0, len(refs))
     group_index = 0
-    while True:
-        batch = list(islice(grouped, 64))
-        if not batch:
-            break
+    for ref_batch in _iter_ref_batches(refs):
+        if abort_check is not None and abort_check():
+            raise RuntimeError("策略实验已取消")
+        combined = adapter.read_many_stocks(ref_batch)
+        if combined.empty:
+            group_index += len(ref_batch)
+            del combined
+            continue
         prepared_batch = [
             ((str(key[0]), str(key[1])), PortfolioBacktestService._prepare_frame(group))
-            for key, group in batch
+            for key, group in combined.groupby(["market", "code"], sort=False)
         ]
         frames_batch = dict(prepared_batch)
         memory_cache.preload(frames_batch, formula_ids)
@@ -502,7 +516,14 @@ def _write_snapshot(
             group_index += 1
             if abort_check is not None and abort_check():
                 raise RuntimeError("策略实验已取消")
-            length = len(prepared)
+            timestamps = pd.to_datetime(prepared["date"], errors="coerce")
+            selected = (timestamps >= pd.Timestamp(window.start)) & (
+                timestamps <= pd.Timestamp(window.end)
+            )
+            positions = np.flatnonzero(selected.to_numpy(dtype=bool, copy=False))
+            if len(positions) == 0:
+                continue
+            length = len(positions)
             end = cursor + length
             result_by_formula = memory_cache.get_or_compute(
                 prepared,
@@ -514,26 +535,28 @@ def _write_snapshot(
             )
             results_batch[(market, code)] = result_by_formula
             dates[cursor:end] = np.asarray(
-                pd.to_datetime(prepared["date"]).dt.strftime("%Y%m%d"), dtype=np.int64
+                timestamps.iloc[positions].dt.strftime("%Y%m%d"), dtype=np.int64
             )
-            bars[0, cursor:end] = prepared["open"].to_numpy(dtype=float, copy=False)
-            bars[1, cursor:end] = prepared["high"].to_numpy(dtype=float, copy=False)
-            bars[2, cursor:end] = prepared["low"].to_numpy(dtype=float, copy=False)
-            bars[3, cursor:end] = prepared["close"].to_numpy(dtype=float, copy=False)
-            bars[4, cursor:end] = _atr_series(prepared, 14)
-            required_buy[cursor:end] = _evaluate_required_mask(
-                required_buy_rule, result_by_formula, length
+            for index, column in enumerate(("open", "high", "low", "close")):
+                bars[index, cursor:end] = prepared[column].to_numpy(
+                    dtype=float, copy=False
+                )[positions]
+            bars[4, cursor:end] = _atr_series(prepared, 14)[positions]
+            required_buy_mask = _evaluate_required_mask(
+                required_buy_rule, result_by_formula, len(prepared)
             )
-            required_sell[cursor:end] = _evaluate_required_mask(
-                required_sell_rule, result_by_formula, length
+            required_sell_mask = _evaluate_required_mask(
+                required_sell_rule, result_by_formula, len(prepared)
             )
+            required_buy[cursor:end] = required_buy_mask[positions]
+            required_sell[cursor:end] = required_sell_mask[positions]
             for index, value_id in enumerate(value_ids):
                 formula_id, _, value_name = value_id.partition(".")
                 value = result_by_formula[formula_id].values.get(value_name)
                 value_array = np.asarray(value, dtype=float) if value is not None else None
                 values[index, cursor:end] = (
-                    value_array
-                    if value_array is not None and len(value_array) == length
+                    value_array[positions]
+                    if value_array is not None and len(value_array) == len(prepared)
                     else np.nan
                 )
             for index, signal_id in enumerate(signal_ids):
@@ -542,8 +565,8 @@ def _write_snapshot(
                 signal = result_by_formula[formula_id].signals.get(signal_name)
                 signal_array = np.asarray(signal, dtype=bool) if signal is not None else None
                 signals[index, cursor:end] = (
-                    signal_array
-                    if signal_array is not None and len(signal_array) == length
+                    signal_array[positions]
+                    if signal_array is not None and len(signal_array) == len(prepared)
                     else False
                 )
             ref = ref_by_key[(cast(MarketCode, market), code)]
@@ -560,17 +583,25 @@ def _write_snapshot(
             )
             cursor = end
             if progress_callback is not None and (
-                group_index % 25 == 0 or group_index == len(refs)
+                group_index % 25 == 0 or group_index >= len(refs)
             ):
                 progress_callback(min(group_index, len(refs)), len(refs))
         if int(memory_cache.metrics()["computed"]) > computed_before:
             memory_cache.persist_results(frames_batch, results_batch)
+        del results_batch, frames_batch, prepared_batch, combined
+        gc.collect()
+    if cursor != total_rows:
+        raise RuntimeError(f"策略实验行情快照行数不一致，预期 {total_rows}，实际 {cursor}")
     indicator_compute_seconds = time.perf_counter() - indicator_compute_started
     if progress_callback is not None and symbol_rows:
         progress_callback(len(refs), len(refs))
     for mapped in (bars, dates, values, signals, required_buy, required_sell):
         mapped.flush()
-    del bars, dates, values, signals, required_buy, required_sell, combined
+    snapshot_bytes = sum(
+        int(mapped.nbytes)
+        for mapped in (bars, dates, values, signals, required_buy, required_sell)
+    )
+    del bars, dates, values, signals, required_buy, required_sell
     gc.collect()
     cache_metrics = memory_cache.metrics()
     (root / "manifest.json").write_text(
@@ -601,6 +632,11 @@ def _write_snapshot(
                     "indicator_persistent_write_seconds": (
                         float(cache_metrics["persistent_write_time_ms"]) / 1000.0
                     ),
+                    "snapshot_start_date": window.start.isoformat(),
+                    "snapshot_end_date": window.end.isoformat(),
+                    "snapshot_rows": total_rows,
+                    "snapshot_batch_size": SNAPSHOT_SYMBOL_BATCH_SIZE,
+                    "snapshot_bytes": snapshot_bytes,
                 },
                 "symbols": symbol_rows,
             },
@@ -609,6 +645,55 @@ def _write_snapshot(
         ),
         encoding="utf-8",
     )
+
+
+def snapshot_window(request: DiscoveryRequest) -> SnapshotWindow:
+    """Return the inclusive window covered by all discovery splits."""
+
+    starts: list[date] = []
+    ends: list[date] = []
+    base = request.base_config
+    for key, target in (("start_date", starts), ("end_date", ends)):
+        parsed = _parse_date(base.get(key))
+        if parsed is not None:
+            target.append(parsed)
+    for split in request.splits.values():
+        parsed_start = _parse_date(split.get("start_date"))
+        parsed_end = _parse_date(split.get("end_date"))
+        if parsed_start is not None:
+            starts.append(parsed_start)
+        if parsed_end is not None:
+            ends.append(parsed_end)
+    if not starts or not ends:
+        raise ValueError("策略实验日期范围无效")
+    start = min(starts)
+    end = max(ends)
+    if start > end:
+        raise ValueError("策略实验开始日期不能晚于结束日期")
+    return SnapshotWindow(start=start, end=end)
+
+
+def _iter_ref_batches(
+    refs: Iterable[StockRef],
+    batch_size: int = SNAPSHOT_SYMBOL_BATCH_SIZE,
+) -> Iterator[list[StockRef]]:
+    if isinstance(batch_size, bool) or batch_size < 1:
+        raise ValueError("策略实验快照批次大小必须大于 0")
+    items = list(refs)
+    for offset in range(0, len(items), batch_size):
+        yield items[offset : offset + batch_size]
+
+
+def _parse_date(value: object) -> date | None:
+    if isinstance(value, date):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
 
 
 def _condition_to_dict(condition: ScreenCondition) -> dict[str, object]:

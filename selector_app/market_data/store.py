@@ -117,6 +117,21 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
             include_provisional=include_provisional,
         )
 
+    def count_many_bars(
+        self,
+        instruments: Iterable[InstrumentRef | StockRef] | None = None,
+        *,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        include_provisional: bool = False,
+    ) -> int:
+        return self._bars.count_many_bars(
+            instruments,
+            start_date=start_date,
+            end_date=end_date,
+            include_provisional=include_provisional,
+        )
+
     def read_latest_bars(
         self,
         instruments: Iterable[InstrumentRef | StockRef],
