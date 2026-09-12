@@ -13,6 +13,7 @@ from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi import Path as PathParameter
 from fastapi.responses import JSONResponse
 
+from selector_app.adapters.akshare_market_sync import AkShareProviderError
 from selector_app.adapters.market_sync import (
     DetailCallback,
     InstrumentDiscoveryReport,
@@ -138,11 +139,13 @@ def _resolved_vipdoc_path(vipdoc_path: str | None) -> str:
 def _sync_config(payload: MarketSyncRequest, *, prefer_store_targets: bool) -> MarketSyncConfig:
     return MarketSyncConfig(
         universe=payload.universe,
+        provider=payload.provider,
         bars=payload.bars,
         instrument_types=tuple(payload.instrument_types or ()),
         boards=tuple(payload.boards or ()),
         prefer_store_targets=prefer_store_targets,
         refresh_names=prefer_store_targets,
+        full_history=payload.full_history,
     )
 
 
@@ -166,6 +169,7 @@ def _with_discovery_summary(
         "new_instruments",
         "existing_instruments",
         "target_source",
+        "provider",
     )
     summary = {key: discovery_result[key] for key in summary_keys if key in discovery_result}
     return {
@@ -232,6 +236,29 @@ def indicator_cache_status(request: Request) -> dict[str, object] | JSONResponse
                 }
             },
         )
+
+
+@router.get("/capabilities", response_model=None)
+def market_data_capabilities(request: Request) -> dict[str, object]:
+    service = _service(request)
+    method = getattr(service, "provider_capabilities", None)
+    if callable(method):
+        capabilities = method()
+        if isinstance(capabilities, dict):
+            return {"data": capabilities}
+    return {
+        "data": {
+            "default_provider": "akshare",
+            "instrument_count": 0,
+            "providers": {
+                "tdx": {
+                    "provider": "tdx",
+                    "available": True,
+                    "instrument_types": ["stock", "fund", "index", "bond"],
+                }
+            },
+        }
+    }
 
 
 @router.post(
@@ -322,6 +349,7 @@ def market_data_job_status(job_id: str, request: Request) -> dict[str, object]:
         "本地行情导入",
         "本地行情自动导入",
         "行情同步",
+        "AKShare历史全量回填",
         AUTO_SYNC_DESCRIPTION,
         "指标预计算",
     }:
@@ -369,6 +397,25 @@ def create_online_sync_job(payload: MarketSyncRequest, request: Request) -> JSON
     return _create_sync_job(payload, request, include_local=False)
 
 
+@router.post("/backfill", status_code=status.HTTP_202_ACCEPTED)
+def create_akshare_backfill_job(payload: MarketSyncRequest, request: Request) -> JSONResponse:
+    if payload.provider != "akshare":
+        raise HTTPException(status_code=422, detail="AKShare 全量回填必须使用 akshare 数据源")
+    full_payload = payload.model_copy(
+        update={
+            "provider": "akshare",
+            "instrument_types": ["stock"],
+            "full_history": True,
+        }
+    )
+    return _create_sync_job(
+        full_payload,
+        request,
+        include_local=False,
+        description="AKShare历史全量回填",
+    )
+
+
 @router.post("/sync", status_code=status.HTTP_202_ACCEPTED)
 def create_sync_job(payload: MarketSyncRequest, request: Request) -> JSONResponse:
     return _create_sync_job(payload, request, include_local=True)
@@ -379,6 +426,7 @@ def _create_sync_job(
     request: Request,
     *,
     include_local: bool,
+    description: str = "行情同步",
 ) -> JSONResponse:
     # Online sync discovers the current exchange list in both modes.  The
     # local import supplies longer history; it must not limit the universe.
@@ -438,6 +486,8 @@ def _create_sync_job(
                 )
             )
             online_result = _with_discovery_summary(online_result, discovery_result)
+        except AkShareProviderError as exc:
+            raise TaskUserError(str(exc)) from exc
         except TdxConnectionError as exc:
             raise TaskUserError(
                 "完整证券列表获取失败，本次同步已停止，请检查 TDX 连接后重试。"
@@ -458,7 +508,7 @@ def _create_sync_job(
         )
 
     try:
-        job_id = _runner(request).submit_callable(run_sync, description="行情同步")
+        job_id = _runner(request).submit_callable(run_sync, description=description)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail="任务执行器暂不可用") from exc
     return JSONResponse(
@@ -470,7 +520,7 @@ def _create_sync_job(
 @router.get("/sync/jobs/{job_id}")
 def sync_job_status(job_id: str, request: Request) -> dict[str, object]:
     state = _runner(request).get(job_id)
-    if state is None or state.description != "行情同步":
+    if state is None or state.description not in {"行情同步", "AKShare历史全量回填"}:
         raise HTTPException(status_code=404, detail="行情同步任务不存在或已过期")
     return {"data": state.snapshot()}
 

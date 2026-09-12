@@ -73,6 +73,7 @@ class DuckDbMarketDataAdapter:
                 path=ref.source_path or source_path,
                 instrument_type=ref.instrument_type,
                 board=ref.board,
+                provider=ref.provider,
             )
             for ref in self._store.list_instruments(
                 market=market,
@@ -117,6 +118,7 @@ class DuckDbMarketDataAdapter:
                 path=available[(market, code)].source_path or source_path,
                 instrument_type=available[(market, code)].instrument_type,
                 board=available[(market, code)].board,
+                provider=available[(market, code)].provider,
             )
             for market, code in requested
             if (market, code) in available

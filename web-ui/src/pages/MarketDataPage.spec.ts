@@ -13,8 +13,10 @@ vi.mock('../api/marketData', async () => {
     fetchLocalInstruments: vi.fn(),
     fetchLocalChart: vi.fn(),
     fetchStoreStatus: vi.fn(),
+    fetchMarketDataCapabilities: vi.fn(),
     createLocalImport: vi.fn(),
     createMarketDataSync: vi.fn(),
+    createAkShareBackfill: vi.fn(),
     createOnlineSync: vi.fn(),
     getMarketDataJob: vi.fn(),
   }
@@ -43,6 +45,13 @@ describe('MarketDataPage', () => {
       meta: { total: 2, page: 1, page_size: 50, pages: 1 },
     })
     vi.mocked(marketApi.fetchLocalChart).mockResolvedValue(chart)
+    vi.mocked(marketApi.fetchMarketDataCapabilities).mockResolvedValue({
+      default_provider: 'akshare',
+      providers: {
+        akshare: { provider: 'akshare', available: true, version: '1.18.94', instrument_types: ['stock'] },
+        tdx: { provider: 'tdx', available: true, instrument_types: ['stock', 'fund', 'index', 'bond'] },
+      },
+    })
     vi.mocked(marketApi.fetchStoreStatus).mockResolvedValue({
       database_path: '/data/market/market.duckdb',
       schema_version: 1,
@@ -153,6 +162,7 @@ describe('MarketDataPage', () => {
 
     expect(marketApi.createMarketDataSync).toHaveBeenCalledWith({
       vipdoc_path: '/data/vipdoc',
+      provider: 'akshare',
       universe: 'all',
       bars: 800,
     })
@@ -160,6 +170,42 @@ describe('MarketDataPage', () => {
     expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('在线写入 1 根')
     expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('证券列表 4')
     expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('新增标的 3')
+  })
+
+  it('uses AKShare by default and allows switching to TDX', async () => {
+    vi.mocked(marketApi.createMarketDataSync).mockResolvedValue({ job_id: 'tdx-1', status: 'queued' })
+    vi.mocked(marketApi.getMarketDataJob).mockResolvedValue({
+      job_id: 'tdx-1', status: 'completed', progress: 1, total_candidates: 0,
+      total_scanned: 0, errors: 0, error: null, result: { source: 'combined', provider: 'tdx' },
+    })
+    const wrapper = mount(MarketDataPage)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="market-provider-akshare"]').element).toHaveProperty('checked', true)
+    await wrapper.get('[data-testid="market-provider-tdx"]').setValue()
+    await wrapper.get('[data-testid="market-sync-online"]').trigger('click')
+    await flushPromises()
+
+    expect(marketApi.createMarketDataSync).toHaveBeenCalledWith(expect.objectContaining({ provider: 'tdx' }))
+  })
+
+  it('starts an AKShare full-history backfill for the selected scope', async () => {
+    vi.mocked(marketApi.createAkShareBackfill).mockResolvedValue({ job_id: 'backfill-1', status: 'queued' })
+    vi.mocked(marketApi.getMarketDataJob).mockResolvedValue({
+      job_id: 'backfill-1', status: 'completed', progress: 1, total_candidates: 2,
+      total_scanned: 2, errors: 0, error: null, result: { source: 'online', provider: 'akshare', written_bars: 1200 },
+    })
+    const wrapper = mount(MarketDataPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="market-sync-board-main"]').setValue(true)
+    await wrapper.get('[data-testid="market-akshare-backfill"]').trigger('click')
+    await flushPromises()
+
+    expect(marketApi.createAkShareBackfill).toHaveBeenCalledWith({
+      universe: 'all',
+      boards: ['main'],
+    })
   })
 
   it('shows the current synchronized instrument and date range', async () => {
@@ -219,7 +265,7 @@ describe('MarketDataPage', () => {
       await flushPromises()
 
       expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('正在刷新证券列表')
-      expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('等待 TDX 返回证券列表')
+      expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('等待 AKShare 返回证券列表')
 
       await vi.advanceTimersByTimeAsync(500)
       await flushPromises()

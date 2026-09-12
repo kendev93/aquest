@@ -50,6 +50,7 @@ class LocalInstrument:
     error: str | None = None
     board: InstrumentBoard = "main"
     name: str | None = None
+    provider: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -58,6 +59,7 @@ class LocalInstrument:
             "name": self.name,
             "instrument_type": self.instrument_type,
             "board": self.board,
+            "provider": self.provider,
             "bars": self.bars,
             "data_start": self.data_start,
             "data_end": self.data_end,
@@ -224,7 +226,9 @@ class LocalMarketDataService:
                 data_end=None,
                 last_close=None,
                 error=str(exc),
+                instrument_type=getattr(ref, "instrument_type", "stock"),
                 board=ref.board,
+                provider=getattr(ref, "provider", None),
             )
         if frame.empty:
             return LocalInstrument(
@@ -236,7 +240,9 @@ class LocalMarketDataService:
                 data_end=None,
                 last_close=None,
                 error="没有可用日线数据",
+                instrument_type=getattr(ref, "instrument_type", "stock"),
                 board=ref.board,
+                provider=getattr(ref, "provider", None),
             )
         return LocalInstrument(
             market=ref.market,
@@ -244,6 +250,7 @@ class LocalMarketDataService:
             name=getattr(ref, "name", None),
             instrument_type=getattr(ref, "instrument_type", "stock"),
             board=getattr(ref, "board", "main"),
+            provider=getattr(ref, "provider", None),
             bars=len(frame),
             data_start=_date_text(frame["date"].iloc[0]),
             data_end=_date_text(frame["date"].iloc[-1]),

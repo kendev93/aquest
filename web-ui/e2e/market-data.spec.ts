@@ -40,3 +40,37 @@ test('user can browse local instruments and switch chart periods', async ({ page
   await page.getByTestId('toggle-ma5').uncheck()
   await expect(page.getByTestId('market-candlestick-chart')).toBeVisible()
 })
+
+test('user can start an AKShare full-history backfill', async ({ page }) => {
+  let backfillRequest: unknown
+  await page.route('**/api/v1/market-data/capabilities', (route) => route.fulfill({ json: {
+    data: {
+      default_provider: 'akshare',
+      providers: {
+        akshare: { provider: 'akshare', available: true, version: '1.18.94' },
+        tdx: { provider: 'tdx', available: true },
+      },
+    },
+  } }))
+  await page.route('**/api/v1/market-data/store', (route) => route.fulfill({ json: { data: {
+    database_path: '/data/market/market.duckdb', schema_version: 12, instrument_count: 1,
+    bar_count: 100, data_start: '2010-01-01', data_end: '2026-09-10',
+    last_local_import_at: null, last_online_sync_at: null,
+  } } }))
+  await page.route('**/api/v1/market-data/local/instruments**', (route) => route.fulfill({ json: instruments }))
+  await page.route('**/api/v1/market-data/local/SH/600000/bars*', (route) => route.fulfill({ json: chart('daily') }))
+  await page.route('**/api/v1/market-data/backfill', async (route) => {
+    backfillRequest = route.request().postDataJSON()
+    await route.fulfill({ json: { data: { job_id: 'backfill-1', status: 'queued' } } })
+  })
+  await page.route('**/api/v1/market-data/jobs/backfill-1', (route) => route.fulfill({ json: { data: {
+    job_id: 'backfill-1', status: 'completed', progress: 1, total_candidates: 2,
+    total_scanned: 2, errors: 0, error: null,
+    result: { source: 'online', provider: 'akshare', written_bars: 100 },
+  } } }))
+
+  await page.goto('/market-data')
+  await page.getByTestId('market-akshare-backfill').click()
+  await expect(page.getByTestId('market-data-progress')).toContainText('akshare')
+  expect(backfillRequest).toEqual({ provider: 'akshare', universe: 'all' })
+})

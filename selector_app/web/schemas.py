@@ -13,7 +13,7 @@ from selector_app.backtest.models import BacktestConfig
 from selector_app.concurrency import MAX_WORKERS
 from selector_app.formulas.custom import FormulaParseError, custom_output_id, parse_formula
 from selector_app.formulas.registry import FORMULA_REGISTRY
-from selector_app.market_data.models import InstrumentBoard, InstrumentType
+from selector_app.market_data.models import InstrumentBoard, InstrumentType, MarketDataProvider
 from selector_app.market_data.scope import InstrumentScope
 from selector_app.portfolio_backtest.models import (
     PortfolioBacktestConfig,
@@ -297,13 +297,17 @@ class MarketSyncRequest(BaseModel):
 
     vipdoc_path: str | None = Field(default=None, max_length=1024)
     universe: Literal["all", "sh", "sz"] = "all"
+    provider: MarketDataProvider = "akshare"
     bars: int = Field(default=800, ge=1, le=800)
     instrument_types: list[InstrumentType] | None = Field(default=None, max_length=4)
     boards: list[InstrumentBoard] | None = Field(default=None, max_length=7)
+    full_history: bool = False
 
     @model_validator(mode="after")
     def validate_scope(self) -> MarketSyncRequest:
         validate_instrument_scope(self.universe, self.instrument_types, self.boards)
+        if not isinstance(self.full_history, bool):
+            raise ValueError("是否全量同步历史行情必须是布尔值")
         return self
 
 

@@ -501,6 +501,7 @@ async function syncMarketData(): Promise<void> {
   try {
     const universe = form.universe === 'custom' ? 'all' : form.universe
     const created = await createSyncJob({
+      provider: 'akshare',
       universe,
       ...(form.instrumentTypes.length > 0 ? { instrument_types: [...form.instrumentTypes] } : {}),
       ...(form.boards.length > 0 ? { boards: [...form.boards] } : {}),
@@ -852,7 +853,7 @@ watch(() => form.formulaText, (value) => {
               <span v-if="syncLoading" class="spinner sync-spinner" aria-hidden="true"></span>
               {{ syncLoading ? '同步中…' : '同步最新行情' }}
             </button>
-            <p class="sync-helper">先增量导入本地 vipdoc，再从服务器补充最新已完成日线，并按 TDX 证券列表补齐中文名，统一写入本地 DuckDB。</p>
+            <p class="sync-helper">先刷新 AKShare 股票列表并导入本地 vipdoc，再补充最新日线；基金、指数、债券和 B 股使用 TDX 兼容通道，统一写入本地 DuckDB。</p>
             <div v-if="syncLoading || syncJob" class="sync-progress" data-testid="sync-progress">
               <div class="sync-progress-heading"><span>{{ syncLoading ? '行情同步进度' : '最近一次同步' }}</span><strong>{{ syncProgressPercent }}%</strong></div>
               <div class="progress-track sync-progress-track"><span :style="{ width: `${syncProgressPercent}%` }"></span></div>

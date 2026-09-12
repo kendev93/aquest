@@ -206,6 +206,107 @@ def test_schema_upgrade_backups_existing_database_before_initialization(tmp_path
     assert len(backups) == 1
 
 
+def test_schema_upgrade_backfills_provider_for_legacy_online_rows(tmp_path: Path) -> None:
+    database = tmp_path / "market.duckdb"
+    with duckdb.connect(str(database)) as connection:
+        connection.execute(
+            """
+            CREATE TABLE data_meta (
+                key VARCHAR PRIMARY KEY,
+                value VARCHAR,
+                updated_at TIMESTAMP
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO data_meta VALUES ('schema_version', '9', CURRENT_TIMESTAMP)"
+        )
+        connection.execute(
+            """
+            CREATE TABLE instruments (
+                market VARCHAR NOT NULL,
+                code VARCHAR NOT NULL,
+                name VARCHAR,
+                instrument_type VARCHAR NOT NULL,
+                board VARCHAR NOT NULL,
+                source_path VARCHAR,
+                first_date DATE,
+                last_date DATE,
+                bar_count BIGINT NOT NULL,
+                source_state VARCHAR NOT NULL,
+                updated_at TIMESTAMP NOT NULL,
+                PRIMARY KEY (market, code)
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE daily_bars (
+                market VARCHAR NOT NULL,
+                code VARCHAR NOT NULL,
+                instrument_type VARCHAR NOT NULL,
+                board VARCHAR NOT NULL,
+                trade_date DATE NOT NULL,
+                open DOUBLE NOT NULL,
+                high DOUBLE NOT NULL,
+                low DOUBLE NOT NULL,
+                close DOUBLE NOT NULL,
+                volume DOUBLE NOT NULL,
+                amount DOUBLE NOT NULL,
+                source VARCHAR NOT NULL,
+                price_basis VARCHAR NOT NULL,
+                bar_status VARCHAR NOT NULL,
+                imported_at TIMESTAMP NOT NULL,
+                UNIQUE (market, code, trade_date, price_basis)
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO instruments VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                "SH",
+                "600000",
+                "浦发银行",
+                "stock",
+                "main",
+                None,
+                "2024-01-02",
+                "2024-01-02",
+                1,
+                "active",
+                datetime.now(),
+            ],
+        )
+        connection.execute(
+            "INSERT INTO daily_bars VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                "SH",
+                "600000",
+                "stock",
+                "main",
+                "2024-01-02",
+                10.0,
+                11.0,
+                9.0,
+                10.5,
+                1000.0,
+                10000.0,
+                "online",
+                "raw",
+                "completed",
+                datetime.now(),
+            ],
+        )
+
+    store = DuckDbMarketDataStore(database)
+
+    ref = store.list_instruments()[0]
+    bar = store.read_bars("SH", "600000").iloc[0]
+
+    assert ref.provider == "tdx"
+    assert bar["provider"] == "tdx"
+
+
 def test_screen_history_keeps_only_the_latest_ten_results(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     result = {

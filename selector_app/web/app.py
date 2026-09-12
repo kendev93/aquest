@@ -16,7 +16,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from selector_app.adapters.market_sync import TdxMarketSync
+from selector_app.adapters.market_data_sync import MarketDataSync
 from selector_app.backtest.service import BacktestService
 from selector_app.indicators.cache import IndicatorCache
 from selector_app.indicators.precompute import IndicatorPrecomputeService
@@ -53,7 +53,7 @@ def create_app(
     *,
     engine: ScanEngineLike | None = None,
     runner: ScreenJobRunner | None = None,
-    market_sync: TdxMarketSync | object | None = None,
+    market_sync: MarketDataSync | object | None = None,
     backtest_service: BacktestService | object | None = None,
     portfolio_backtest_service: PortfolioBacktestService | object | None = None,
     strategy_discovery_service: StrategyDiscoveryService | object | None = None,
@@ -84,8 +84,8 @@ def create_app(
         else IndicatorPrecomputeService(selected_adapter, selected_indicator_cache),
     )
     selected_market_sync = cast(
-        TdxMarketSync,
-        market_sync if market_sync is not None else TdxMarketSync(store=selected_store),
+        MarketDataSync,
+        market_sync if market_sync is not None else MarketDataSync(store=selected_store),
     )
     selected_auto_sync_enabled = _resolve_auto_sync_enabled(auto_sync_enabled)
     selected_auto_sync_interval = _resolve_auto_sync_interval(auto_sync_interval_seconds)

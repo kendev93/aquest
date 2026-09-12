@@ -2,10 +2,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   createLocalImport,
+  createAkShareBackfill,
   createMarketDataSync,
   createOnlineSync,
   fetchLocalChart,
   fetchLocalInstruments,
+  fetchMarketDataCapabilities,
   fetchStoreStatus,
   getMarketDataJob,
 } from './marketData'
@@ -89,5 +91,42 @@ describe('market data API', () => {
       method: 'POST',
       body: JSON.stringify({ vipdoc_path: '/data/vipdoc', universe: 'all' }),
     })
+  })
+
+  it('reads online market-data provider capabilities', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({
+        data: {
+          default_provider: 'akshare',
+          instrument_count: 5219,
+          providers: {
+            akshare: { provider: 'akshare', available: true, version: '1.18.94' },
+            tdx: { provider: 'tdx', available: true },
+          },
+        },
+      }), { status: 200 }),
+    )
+
+    await expect(fetchMarketDataCapabilities()).resolves.toMatchObject({
+      default_provider: 'akshare',
+      instrument_count: 5219,
+    })
+  })
+
+  it('starts an AKShare full-history backfill', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ data: { job_id: 'backfill-1', status: 'queued' } }), { status: 202 }),
+    )
+
+    await expect(createAkShareBackfill({ universe: 'sh', boards: ['main'] })).resolves.toMatchObject({
+      job_id: 'backfill-1',
+    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/market-data/backfill',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ provider: 'akshare', universe: 'sh', boards: ['main'] }),
+      }),
+    )
   })
 })

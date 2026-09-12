@@ -7,6 +7,8 @@ import type {
   LocalInstrumentMeta,
   LocalMarketChart,
   LocalMarketScope,
+  MarketDataCapabilities,
+  MarketDataProvider,
   MarketChartPeriod,
 } from '../types'
 import type { MarketSyncJobState, MarketSyncResult } from '../types'
@@ -81,6 +83,11 @@ export async function fetchStoreStatus(): Promise<DataStoreStatus> {
   return response.data
 }
 
+export async function fetchMarketDataCapabilities(): Promise<MarketDataCapabilities> {
+  const response = await request<{ data: MarketDataCapabilities }>(`${API_BASE}/capabilities`)
+  return response.data
+}
+
 export async function createLocalImport(payload: {
   vipdoc_path: string
   universe?: LocalMarketScope
@@ -96,6 +103,7 @@ export async function createLocalImport(payload: {
 
 export async function createMarketDataSync(payload: {
   vipdoc_path?: string
+  provider?: MarketDataProvider
   universe?: 'all' | 'sh' | 'sz'
   bars?: number
   instrument_types?: InstrumentType[]
@@ -108,7 +116,22 @@ export async function createMarketDataSync(payload: {
   return response.data
 }
 
+export async function createAkShareBackfill(payload: {
+  universe?: 'all' | 'sh' | 'sz'
+  boards?: InstrumentBoard[]
+} = {}): Promise<{ job_id: string; status: string }> {
+  const response = await request<{ data: { job_id: string; status: string } }>(
+    `${API_BASE}/backfill`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ provider: 'akshare', ...payload }),
+    },
+  )
+  return response.data
+}
+
 export async function createOnlineSync(payload: {
+  provider?: MarketDataProvider
   universe?: 'all' | 'sh' | 'sz'
   bars?: number
   instrument_types?: InstrumentType[]

@@ -67,8 +67,13 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
             board=board,
         )
 
-    def upsert_online_bars(self, frame: pd.DataFrame) -> tuple[int, int]:
-        return self._bars.upsert_online_bars(frame)
+    def upsert_online_bars(
+        self,
+        frame: pd.DataFrame,
+        *,
+        provider: str = "tdx",
+    ) -> tuple[int, int]:
+        return self._bars.upsert_online_bars(frame, provider=provider)
 
     def read_bars(
         self,
@@ -237,6 +242,9 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
 
     def read_backtest_history(self, history_id: str) -> dict[str, object] | None:
         return self._history.read_backtest_history(history_id)
+
+    def get_meta(self, key: str) -> str | None:
+        return super().get_meta(key)
 
     def delete_backtest_history(self, history_id: str) -> bool:
         return self._history.delete_backtest_history(history_id)

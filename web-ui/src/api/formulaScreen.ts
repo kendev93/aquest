@@ -5,6 +5,7 @@ import type {
   InstrumentType,
   JobState,
   MarketSyncJobState,
+  MarketDataProvider,
   ResultsMeta,
   ScreenHistoryRecord,
   ScreenHistorySummary,
@@ -92,6 +93,7 @@ export async function getScreenHistory(historyId: string): Promise<ScreenHistory
 }
 
 export async function createSyncJob(payload: {
+  provider?: MarketDataProvider
   universe?: 'all' | 'sh' | 'sz'
   bars?: number
   instrument_types?: InstrumentType[]

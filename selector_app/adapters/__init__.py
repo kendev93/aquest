@@ -7,6 +7,7 @@ from selector_app.market_data.local_adapter import (
     suggested_vipdoc_path,
 )
 
+from .market_data_sync import MarketDataSync
 from .market_sync import (
     InstrumentDiscoveryReport,
     MarketSyncConfig,
@@ -23,4 +24,5 @@ __all__ = [
     "is_supported_a_stock",
     "suggested_vipdoc_path",
     "TdxMarketSync",
+    "MarketDataSync",
 ]

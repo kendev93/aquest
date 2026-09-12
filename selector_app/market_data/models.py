@@ -11,6 +11,8 @@ MarketCode = Literal["SH", "SZ"]
 InstrumentType = Literal["stock", "fund", "index", "bond"]
 InstrumentBoard = Literal["main", "star", "chinext", "b_share", "fund", "index", "bond"]
 DataSource = Literal["local", "online"]
+MarketDataProvider = Literal["akshare", "tdx"]
+ResolvedMarketDataProvider = Literal["akshare", "tdx", "mixed"]
 BarStatus = Literal["completed", "provisional"]
 
 
@@ -24,6 +26,7 @@ class InstrumentRef:
     source_path: Path | None = None
     board: InstrumentBoard = "main"
     name: str | None = None
+    provider: str | None = None
 
     @property
     def symbol(self) -> str:
@@ -46,6 +49,7 @@ class StockRef:
     instrument_type: InstrumentType = "stock"
     board: InstrumentBoard = "main"
     name: str | None = None
+    provider: str | None = None
 
     @property
     def symbol(self) -> str:
@@ -64,6 +68,8 @@ class DataStoreStatus:
     data_end: str | None
     last_local_import_at: str | None = None
     last_online_sync_at: str | None = None
+    last_online_provider: str | None = None
+    last_online_provider_version: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -75,6 +81,8 @@ class DataStoreStatus:
             "data_end": self.data_end,
             "last_local_import_at": self.last_local_import_at,
             "last_online_sync_at": self.last_online_sync_at,
+            "last_online_provider": self.last_online_provider,
+            "last_online_provider_version": self.last_online_provider_version,
         }
 
 

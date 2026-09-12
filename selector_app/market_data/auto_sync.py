@@ -132,6 +132,7 @@ class AutomaticMarketSyncScheduler:
         result = self._market_sync.sync(
             MarketSyncConfig(
                 universe="all",
+                provider="akshare",
                 bars=800,
                 prefer_store_targets=False,
                 refresh_names=False,

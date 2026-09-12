@@ -421,7 +421,7 @@ describe('FormulaScreenPage', () => {
     await wrapper.get('[data-testid="sync-market-data"]').trigger('click')
     await flushPromises()
 
-    expect(api.createSyncJob).toHaveBeenCalledWith({ universe: 'all' })
+    expect(api.createSyncJob).toHaveBeenCalledWith({ provider: 'akshare', universe: 'all' })
     expect(wrapper.get('[data-testid="screen-message"]').text()).toContain('写入 4 根')
     expect(wrapper.get('[data-testid="sync-progress"]').text()).toContain('已处理 2 / 2')
     expect(wrapper.get('[data-testid="sync-progress"]').text()).toContain('剩余 0')
@@ -439,6 +439,7 @@ describe('FormulaScreenPage', () => {
     await flushPromises()
 
     expect(api.createSyncJob).toHaveBeenCalledWith({
+      provider: 'akshare',
       universe: 'sh',
       instrument_types: ['stock'],
       boards: ['main'],

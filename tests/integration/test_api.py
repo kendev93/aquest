@@ -171,6 +171,7 @@ def test_app_schedules_online_sync_when_daily_refresh_is_due(tmp_path: Path) -> 
 
     assert len(calls) == 1
     config = calls[0]
+    assert config.provider == "akshare"
     assert config.prefer_store_targets is False
     assert config.refresh_names is False
     assert status.status_code == 200
@@ -313,6 +314,7 @@ def test_market_sync_job_can_be_created_and_polled() -> None:
     class FakeMarketSync:
         def sync(self, config, progress_callback=None, *, detail_callback=None):
             del detail_callback
+            received["provider"] = config.provider
             received["instrument_types"] = config.instrument_types
             received["boards"] = config.boards
             received["prefer_store_targets"] = config.prefer_store_targets
@@ -347,8 +349,58 @@ def test_market_sync_job_can_be_created_and_polled() -> None:
     assert state["status"] == "completed"
     assert state["result"]["written_bars"] == 3
     assert received == {
+        "provider": "akshare",
         "instrument_types": ("stock",),
         "boards": ("main",),
+        "prefer_store_targets": False,
+    }
+
+
+def test_market_data_capabilities_exposes_default_provider_and_tdx_compatibility() -> None:
+    with TestClient(create_app(engine=EmptyEngine())) as client:
+        response = client.get("/api/v1/market-data/capabilities")
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["default_provider"] == "akshare"
+    assert data["instrument_count"] == 0
+    assert data["providers"]["tdx"]["available"] is True
+    assert data["providers"]["akshare"]["available"] is False
+
+
+def test_akshare_backfill_forces_stock_full_history_without_local_import() -> None:
+    received: dict[str, object] = {}
+
+    class FakeMarketSync:
+        def sync(self, config, progress_callback=None, *, detail_callback=None):
+            del detail_callback
+            received["provider"] = config.provider
+            received["full_history"] = config.full_history
+            received["instrument_types"] = config.instrument_types
+            received["prefer_store_targets"] = config.prefer_store_targets
+            if progress_callback:
+                progress_callback(1, 1)
+            return {
+                "source": "online",
+                "provider": "akshare",
+                "total_candidates": 1,
+                "processed": 1,
+                "updated_files": 1,
+                "written_bars": 10,
+                "errors": 0,
+                "failure_reasons": {},
+            }
+
+    with TestClient(create_app(engine=EmptyEngine(), market_sync=FakeMarketSync())) as client:
+        response = client.post("/api/v1/market-data/backfill", json={})
+        assert response.status_code == 202
+        state = wait_for_done(client, response.json()["data"]["job_id"], "/api/v1/market-data/jobs")
+
+    assert state["status"] == "completed"
+    assert received == {
+        "provider": "akshare",
+        "full_history": True,
+        "instrument_types": ("stock",),
         "prefer_store_targets": False,
     }
 

@@ -7,7 +7,7 @@
 ```text
 通达信 vipdoc/*.day ──┐
                       ├─ LocalDayImporter ──┐
-内置 TDX 日线客户端 ──┘                     │
+AKShare / 内置 TDX ──┘                       │
                                              ▼
                                    market.duckdb
                                              │
@@ -23,6 +23,7 @@
 
 - `market_data/` 定义项目自己的行情模型、`.day` 解析器、增量导入器、DuckDB repository 和业务适配器。
 - `indicators/` 保存可重建的版本化指标缓存，并负责导入后的批量预热；缓存不是行情事实源。
+- `adapters/` 通过统一 provider 路由接入 AKShare 和 TDX；AKShare 默认负责股票列表/日线，TDX 只保留为显式遗留兼容通道。
 - `tdx_protocol/` 只实现在线日线同步需要的 TCP 帧、证券列表、日线请求和二进制解码；不暴露上游对象给业务层。
 - `formulas/` 是无副作用的数组计算层。公式函数由 `formulas/tdx_math.py` 自己实现，输入输出均为项目内部的 NumPy/Pandas 数据。
 - `screening/` 负责条件合并、批量读取、单标的容错、进度和导出，不处理网络或文件格式。
@@ -30,7 +31,7 @@
 - `web/` 只负责 Pydantic 校验、任务提交/轮询和安全错误响应。
 - `web-ui/` 只负责导入/同步操作、状态展示、表单和图表。
 
-运行时不安装或导入外部行情框架。历史适配模块仅保留早期调用方的兼容名称，内部已经改为项目自己的 `.day` 适配器；默认应用使用 `DuckDbMarketDataAdapter`。
+AKShare 是 Docker 正式运行时的必需行情依赖，但业务层只依赖项目自己的 provider 接口和规范化 DataFrame；默认应用使用 AKShare 股票行情，TDX 作为兼容 provider。历史适配模块仍只处理项目自己的 `.day` 数据。
 
 ## DuckDB 数据层
 
@@ -39,9 +40,9 @@
 核心表：
 
 - `instruments`：市场、代码、中文名、品种类型、源路径、首末日期、K 线数量和源状态；
-- `daily_bars`：原始价格口径的 OHLCV、成交额、来源、K 线状态和导入时间，`(market, code, trade_date, price_basis)` 唯一；
+- `daily_bars`：原始价格口径的 OHLCV、成交额、来源、具体 provider、K 线状态和导入时间，`(market, code, trade_date, price_basis)` 唯一；
 - `source_files`：源根目录、相对路径、文件大小、修改时间、SHA-256 和导入状态；
-- `data_meta`：schema 版本、最近一次本地导入和在线同步时间。
+- `data_meta`：schema 版本、最近一次本地导入和在线同步时间、provider 版本及证券列表指纹。
 - `indicator_cache`：按标的、周期、价格口径、内置公式版本和行情指纹保存完整指标数组与信号数组；缓存失效后可从 `daily_bars` 重建。
 - `custom_indicator_cache`：按标的、周期、价格口径、自定义公式哈希、参数哈希、公式引擎版本和行情指纹保存自定义输出。
 - `strategy_discovery_history`：策略实验请求、候选榜单、算法元数据、开始/结束时间和耗时；默认保留最近 20 次实验。
@@ -60,7 +61,7 @@
 
 首次导入解析全部历史。之后先比较 `mtime_ns + size`，只有文件变化才计算 SHA-256；内容变化则重新解析，并在一个事务中替换该标的全部本地记录。解析失败保留旧数据；源文件消失只把 `source_files.status` 标为 `missing`，不删除历史。15:05（Asia/Shanghai）前的当日记录为 `provisional`，筛选和回测默认排除；收盘后的下一次同步会重新导入并转为 `completed`。
 
-应用启动时若在 `SELECTOR_VIPDOC_PATH` 或 `/data/vipdoc` 发现 `.day` 文件，会提交一个后台增量导入任务；启动过程不等待全量解析，行情页会识别该任务并在完成后自动刷新数据库状态和标的列表。独立的自动行情同步调度器会在启动后检查当天的 `last_online_sync_at`，并在持续运行时按上海本地日期每天至少提交一次在线同步；在线同步每次先从 TDX 证券列表发现当前沪深标的，再按范围过滤并补充日线，因而不会被本地 `.day` 文件的子集限制。自动同步完成后继续预热指标缓存。没有本地文件且 DuckDB 为空时不会创建空同步任务。可用 `SELECTOR_AUTO_SYNC_ENABLED=0` 关闭，默认检查间隔为 900 秒。
+应用启动时若在 `SELECTOR_VIPDOC_PATH` 或 `/data/vipdoc` 发现 `.day` 文件，会提交一个后台增量导入任务；启动过程不等待全量解析，行情页会识别该任务并在完成后自动刷新数据库状态和标的列表。独立的自动行情同步调度器会在启动后检查当天的 `last_online_sync_at`，并在持续运行时按上海本地日期每天至少提交一次在线同步；默认在线同步只从 AKShare 证券列表发现当前沪深股票并补充日线，不再自动调用 TDX。TDX 仅在显式选择遗留 provider 时使用。自动同步完成后继续预热指标缓存。没有本地文件且 DuckDB 为空时不会创建空同步任务。可用 `SELECTOR_AUTO_SYNC_ENABLED=0` 关闭，默认检查间隔为 900 秒。
 
 源文件不会被追加、覆盖、截断或修改。任务结果包含发现、成功、跳过、失败、未变化文件数，以及新增/替换标的、K 线数和失败原因。
 
@@ -68,7 +69,7 @@
 
 ## 在线同步
 
-`tdx_protocol` 是项目内置的最小同步客户端，支持：
+在线同步 provider 支持 AKShare 和项目内置的最小 TDX 客户端。AKShare 股票 provider 使用 `stock_info_a_code_name` 刷新代码/简称，优先使用 `stock_zh_a_hist(period="daily", adjust="")`，失败后按顺序切换 `stock_zh_a_hist_tx` 和受限的 `stock_zh_a_daily`；另提供 `/backfill` 全量历史补齐任务。TDX provider 支持：
 
 - TCP 建连、初始化帧、超时、有限重试和服务器故障转移；
 - `get_security_list_all`；
@@ -76,7 +77,7 @@
 - TDX 日期、价格变长整数、成交量自定义浮点和指数附加字段解码；
 - 空响应和截断响应的安全处理。
 
-在线同步直接写 DuckDB，不写回 `.day`。同一日期已有 `source='local'` 时永不覆盖；`source='online'` 可以更新；缺失日期可以插入。已有数据时先探测最近两根日线，只有发现新增或变化才拉取配置窗口；完整历史仍优先由本地导入提供。应用启动后会检查当天是否已经在线同步；若没有且本地仓库已有标的，就提交后台自动同步任务，之后按上海本地日期周期检查，避免同一天重复提交。
+在线同步直接写 DuckDB，不写回 `.day`。同一日期已有 `source='local'` 时永不覆盖；在线行可以按 provider 更新；缺失日期可以插入。AKShare 新标的首次读取完整可用历史，已有标的按最新日期增量读取并保留重叠窗口；`/backfill` 会强制所有目标股票从最早请求日期重新读取。列表刷新必须先成功，之后才启动日线请求；响应会记录 provider、版本、列表指纹、实际日线接口和单标的实际日期范围。
 
 `.day` 文件不包含中文名，因此本地导入只建立代码和行情记录；在线证券列表的 `name` 字段会写入 `instruments`，并在扫描结果 JSON/CSV 和页面中透传。名称刷新失败不会影响已有行情扫描，结果显示 `—` 作为占位。内置公式的扫描结果只透传注册表中的用户可选输出，公式内部中间数组仍保留在指标缓存中；自定义公式透传其命名输出。
 
@@ -101,6 +102,8 @@
 - `POST /api/v1/market-data/import-local`
 - `POST /api/v1/market-data/sync-online`（仅在线更新）
 - `POST /api/v1/market-data/sync`（一键本地增量导入后在线补缺）
+- `POST /api/v1/market-data/backfill`（AKShare 股票历史全量补齐）
+- `GET /api/v1/market-data/capabilities`（行情源能力、版本和当前来源）
 - `GET /api/v1/market-data/store`
 - `GET /api/v1/market-data/jobs/{job_id}`
 - `GET /api/v1/market-data/local/instruments`

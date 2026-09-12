@@ -23,7 +23,7 @@ from .day_format import classify_board
 from .maintenance import cleanup_database_backups, create_database_backup
 from .models import DataStoreStatus, InstrumentBoard, InstrumentType
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 12
 SCREEN_HISTORY_LIMIT = 10
 STRATEGY_DISCOVERY_HISTORY_LIMIT = 20
 BACKTEST_HISTORY_LIMIT = 20
@@ -42,6 +42,7 @@ _BAR_COLUMNS = [
     "volume",
     "amount",
     "source",
+    "provider",
     "price_basis",
     "bar_status",
     "imported_at",
@@ -180,6 +181,7 @@ class _DuckDbStoreBase:
                     last_date DATE,
                     bar_count BIGINT NOT NULL DEFAULT 0,
                     source_state VARCHAR NOT NULL DEFAULT 'active',
+                    last_provider VARCHAR,
                     updated_at TIMESTAMP NOT NULL,
                     PRIMARY KEY (market, code)
                 )
@@ -200,6 +202,7 @@ class _DuckDbStoreBase:
                     volume DOUBLE NOT NULL,
                     amount DOUBLE NOT NULL,
                     source VARCHAR NOT NULL,
+                    provider VARCHAR NOT NULL DEFAULT 'tdx',
                     price_basis VARCHAR NOT NULL,
                     bar_status VARCHAR NOT NULL,
                     imported_at TIMESTAMP NOT NULL,
@@ -236,6 +239,18 @@ class _DuckDbStoreBase:
                 )
                 """
             )
+            if (existing_version or 0) < 11:
+                connection.execute(
+                    """
+                    INSERT INTO data_meta (key, value, updated_at)
+                    SELECT 'last_online_provider', 'tdx', ?
+                    WHERE EXISTS (
+                        SELECT 1 FROM daily_bars WHERE source = 'online'
+                    )
+                    ON CONFLICT (key) DO NOTHING
+                    """,
+                    [_now()],
+                )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS indicator_cache (
@@ -444,6 +459,72 @@ class _DuckDbStoreBase:
                 "SET finished_at = created_at + duration_seconds * INTERVAL '1 second' "
                 "WHERE finished_at IS NULL"
             )
+        if version < 10:
+            if "instruments" in tables:
+                instrument_columns = {
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_schema = 'main' AND table_name = 'instruments'"
+                    ).fetchall()
+                }
+                if "last_provider" not in instrument_columns:
+                    connection.execute("ALTER TABLE instruments ADD COLUMN last_provider VARCHAR")
+            if "daily_bars" in tables:
+                bar_columns = {
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_schema = 'main' AND table_name = 'daily_bars'"
+                    ).fetchall()
+                }
+                if "provider" not in bar_columns:
+                    connection.execute(
+                        "ALTER TABLE daily_bars ADD COLUMN provider VARCHAR DEFAULT 'tdx'"
+                    )
+                connection.execute(
+                    "UPDATE daily_bars SET provider = CASE "
+                    "WHEN source = 'local' THEN 'local' ELSE 'tdx' END "
+                    "WHERE provider IS NULL OR provider = ''"
+                )
+        if version < 11 and "instruments" in tables and "daily_bars" in tables:
+            connection.execute(
+                """
+                UPDATE instruments AS instruments
+                SET last_provider = (
+                    SELECT bars.provider
+                    FROM daily_bars AS bars
+                    WHERE bars.market = instruments.market
+                      AND bars.code = instruments.code
+                    ORDER BY bars.trade_date DESC
+                    LIMIT 1
+                )
+                WHERE instruments.last_provider IS NULL
+                """
+            )
+        if version < 12 and "instruments" in tables and "daily_bars" in tables:
+            connection.execute(
+                "UPDATE daily_bars SET provider = 'local' "
+                "WHERE source = 'local' AND provider <> 'local'"
+            )
+            connection.execute(
+                """
+                UPDATE instruments AS instruments
+                SET last_provider = (
+                    SELECT bars.provider
+                    FROM daily_bars AS bars
+                    WHERE bars.market = instruments.market
+                      AND bars.code = instruments.code
+                    ORDER BY bars.trade_date DESC
+                    LIMIT 1
+                )
+                WHERE EXISTS (
+                    SELECT 1 FROM daily_bars AS bars
+                    WHERE bars.market = instruments.market
+                      AND bars.code = instruments.code
+                )
+                """
+            )
 
     def _schema_version_on_disk(self) -> int | None:
         if not self.database_path.exists():
@@ -488,6 +569,7 @@ class _DuckDbStoreBase:
         instrument_type: InstrumentType,
         board: InstrumentBoard | None = None,
         source: str,
+        provider: str | None = None,
     ) -> pd.DataFrame:
         normalized_market = market.strip().upper()
         normalized_code = code.strip()
@@ -533,6 +615,7 @@ class _DuckDbStoreBase:
                 "volume": normalized["volume"].astype(float),
                 "amount": normalized["amount"].astype(float),
                 "source": source,
+                "provider": provider or ("local" if source == "local" else "tdx"),
                 "price_basis": "raw",
                 "bar_status": normalized["bar_status"].astype(str),
                 "imported_at": imported_at,
@@ -557,6 +640,7 @@ class _DuckDbStoreBase:
                     "volume",
                     "amount",
                     "source",
+                    "provider",
                     "price_basis",
                     "bar_status",
                     "imported_at",
@@ -576,14 +660,15 @@ class _DuckDbStoreBase:
         name: str | None = None,
         source_path: str | None = None,
         source_state: str = "active",
+        provider: str | None = None,
     ) -> None:
         connection.execute(
             """
             INSERT INTO instruments (
                 market, code, name, instrument_type, board, source_path, first_date, last_date,
-                bar_count, source_state, updated_at
+                bar_count, source_state, last_provider, updated_at
             )
-            SELECT ?, ?, ?, ?, ?, ?, MIN(trade_date), MAX(trade_date), COUNT(*), ?, ?
+            SELECT ?, ?, ?, ?, ?, ?, MIN(trade_date), MAX(trade_date), COUNT(*), ?, ?, ?
             FROM daily_bars
             WHERE market = ? AND code = ?
             ON CONFLICT (market, code) DO UPDATE SET
@@ -595,6 +680,7 @@ class _DuckDbStoreBase:
                 last_date = excluded.last_date,
                 bar_count = excluded.bar_count,
                 source_state = excluded.source_state,
+                last_provider = COALESCE(excluded.last_provider, instruments.last_provider),
                 updated_at = excluded.updated_at
             """,
             [
@@ -605,6 +691,7 @@ class _DuckDbStoreBase:
                 board,
                 source_path,
                 source_state,
+                provider,
                 _now(),
                 market,
                 code,
@@ -628,6 +715,12 @@ class _DuckDbStoreBase:
             online_sync = connection.execute(
                 "SELECT value FROM data_meta WHERE key = 'last_online_sync_at'"
             ).fetchone()
+            online_provider = connection.execute(
+                "SELECT value FROM data_meta WHERE key = 'last_online_provider'"
+            ).fetchone()
+            online_provider_version = connection.execute(
+                "SELECT value FROM data_meta WHERE key = 'last_online_provider_version'"
+            ).fetchone()
         return DataStoreStatus(
             database_path=str(self.database_path),
             schema_version=SCHEMA_VERSION,
@@ -637,6 +730,10 @@ class _DuckDbStoreBase:
             data_end=_date_text(last),
             last_local_import_at=str(local_import[0]) if local_import else None,
             last_online_sync_at=str(online_sync[0]) if online_sync else None,
+            last_online_provider=str(online_provider[0]) if online_provider else None,
+            last_online_provider_version=(
+                str(online_provider_version[0]) if online_provider_version else None
+            ),
         )
 
     def get_store_status(self) -> DataStoreStatus:
@@ -657,6 +754,16 @@ class _DuckDbStoreBase:
                 """,
                 [key, value, _now()],
             )
+
+    def get_meta(self, key: str) -> str | None:
+        """Read one metadata value without exposing the DuckDB connection."""
+
+        with self._connect(read_only=True) as connection:
+            row = connection.execute(
+                "SELECT value FROM data_meta WHERE key = ?",
+                [key],
+            ).fetchone()
+        return str(row[0]) if row else None
 
 
 __all__ = [

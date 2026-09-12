@@ -9,9 +9,9 @@
   一个面向指标研究与策略验证的跨平台本地工作台
 </p>
 
-一个独立的跨平台指标筛选、组合与回测应用，使用 Vue/TypeScript + FastAPI，将本地通达信 `vipdoc` 日线导入项目自己的 DuckDB 数据仓库，再计算和验证交易指标信号。
+一个独立的跨平台指标筛选、组合与回测应用，使用 Vue/TypeScript + FastAPI，将本地通达信 `vipdoc` 日线或 AKShare 在线日线导入项目自己的 DuckDB 数据仓库，再计算和验证交易指标信号。
 
-运行时不依赖外部行情框架。项目内置满足日线同步所需的最小 TDX TCP 客户端和 `.day` 读取器；协议适配的第三方许可说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+在线股票行情默认使用 AKShare；项目仍内置满足 TDX 兼容同步所需的最小 TCP 客户端和 `.day` 读取器。协议适配的第三方许可说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ![Indicator Lab workflow](assets/branding/indicator-lab-overview.png)
 
@@ -63,7 +63,7 @@
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate              # Windows: .venv\\Scripts\\activate
-python -m pip install -r requirements.lock
+python -m pip install --upgrade -r requirements.lock
 python -m pip install -e ".[dev]"
 ```
 
@@ -93,7 +93,7 @@ cd indicator-lab
 docker compose up --build -d
 ```
 
-这样克隆项目后即可直接启动页面和 API。Docker 会自动创建 `indicator_lab_vipdoc`（原始输入）和 `indicator_lab_market`（DuckDB 主库）两个持久化卷。如果之前运行过旧版本，旧卷不会被自动删除或迁移，需要在启动前自行复制数据；如果还没有导入行情，页面仍然可以打开，但扫描和回测结果会为空。
+这样克隆项目后即可直接启动页面和 API。Docker 会自动创建 `indicator_lab_vipdoc`（原始输入）和 `indicator_lab_market`（DuckDB 主库）两个持久化卷。旧版本 DuckDB 会在打开时先创建备份再自动迁移 schema，不会删除历史行情；如果还没有导入行情，页面仍然可以打开，但扫描和回测结果会为空。
 
 如果本机已经安装通达信，推荐直接共享桌面端的 `vipdoc` 目录，而不是复制一份：
 
@@ -137,7 +137,7 @@ vipdoc/
 
 导入读取的是 `.day` 的原始价格口径；如果桌面端在收盘前已写入今日临时记录，本应用会在 15:05 前将它标记为 `provisional`，筛选和回测默认忽略，收盘后下一次导入会自动转为 `completed`。导入或同步完成后会后台分批预热内置指标；缓存按完整行情指纹和公式版本失效，预热失败时业务会自动按需重建。自定义公式也会按公式内容和参数独立缓存。自定义列表每行支持 `SH 600000`、`SZ 000001` 或单独六位代码，空行和 `#` 注释会忽略。
 
-页面的“一键同步行情”按钮会先通过内置的最小 TDX 客户端读取沪深完整证券列表并登记标的，再增量导入本地 `vipdoc`，最后按刚刷新后的完整范围下载每个标的的最新 800 根日线；不会写回 `.day` 文件。已有本地来源记录优先，在线数据只补充缺失日期或更新在线来源。同步过程中页面会显示证券列表总数、新增标的、已处理数量、进度和错误摘要。较长的历史仍优先通过本地 `.day` 导入；如果只需要在线发现和更新，也可以调用 `/sync-online`。
+页面的“一键同步行情”按钮默认通过 AKShare 刷新沪深股票证券列表并登记中文名，再增量导入本地 `vipdoc`，最后按刚刷新后的完整范围下载股票日线；默认路径不再调用 TDX。AKShare 主接口失败时会尝试腾讯历史接口，新浪接口只作为最后的受限备用源。B 股、基金、指数和债券仍可通过手动选择 TDX（遗留兼容源）更新。页面新增“AKShare 全量补齐”，会强制重新读取目标股票的全部可用历史。不会写回 `.day` 文件，已有本地来源记录优先。同步过程中页面会显示 provider、实际日线接口、证券列表总数、当前标的中文名、实际同步日期范围、重试次数、进度和错误摘要。如果只需要增量在线更新，也可以调用 `/sync-online`。
 
 ## 本地行情浏览
 
@@ -197,7 +197,7 @@ N:=20;
 
 排行榜支持“一键回测当前榜单前十”：只复核当前正在查看的夏普榜或收益榜，使用实验原始开始日期和任务启动时本地最新已完成行情日。每个候选只执行一次全区间组合回测，再从连续资金曲线派生整体、今年以来、最近一年、最近两年和自然年度收益、回撤、Sharpe 与交易数；结果同时保存完整成交记录、资金曲线、耗时和行情指纹，行情更新会明确标记。复核结果不会反向改写验证期排行榜，同一实验和榜单默认只保留最近一次。
 
-正式 Docker 镜像在构建时通过 `requirements.lock` 安装 Optuna 和 LightGBM，策略实验室默认要求两者都可用；依赖缺失会明确提示重新构建镜像，不会静默改变寻优算法。只有本地诊断时显式设置 `INDICATOR_LAB_DISCOVERY_ALLOW_FALLBACK=1` 才允许使用带固定种子的确定性搜索。
+正式 Docker 镜像在构建时通过 `requirements.lock` 安装 AKShare、Optuna 和 LightGBM。`requirements.lock` 现在是最低版本依赖清单，使用 `>=` 而不是精确锁定；正式镜像缺少必需依赖时会明确提示重新构建，不会静默改变行情源或寻优算法。
 
 可以用固定合成数据运行搜索引擎基准矩阵，不会读取或修改本地行情：
 
@@ -226,6 +226,8 @@ GET  /api/v1/formula-screen/jobs/{job_id}/export.csv
 POST /api/v1/market-data/import-local
 POST /api/v1/market-data/sync-online                   # 仅在线更新
 POST /api/v1/market-data/sync                          # 一键本地导入 + 在线补缺
+POST /api/v1/market-data/backfill                      # AKShare 股票历史全量补齐
+GET  /api/v1/market-data/capabilities                  # 行情源能力和当前来源
 GET  /api/v1/market-data/indicator-cache               # 缓存命中率、耗时和存储量
 POST /api/v1/market-data/indicator-cache/precompute    # 手动预热已导入行情
 GET  /api/v1/market-data/store
@@ -304,7 +306,7 @@ sh scripts/install_hooks.sh
 首次运行前请完成 Python 和前端依赖安装，并安装 Playwright 浏览器：
 
 ```bash
-python -m pip install -r requirements.lock
+python -m pip install --upgrade -r requirements.lock
 python -m pip install -e ".[dev]"
 cd web-ui
 npm ci

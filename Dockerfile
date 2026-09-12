@@ -11,11 +11,13 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.lock ./requirements.lock
-RUN python -m pip install --no-cache-dir -r requirements.lock
+RUN python -m pip install --upgrade --no-cache-dir -r requirements.lock
 
 COPY pyproject.toml README.md LICENSE THIRD_PARTY_NOTICES.md ./
 COPY selector_app ./selector_app
-RUN python -m pip install --no-cache-dir --no-deps .
+RUN python -m pip install --upgrade --no-cache-dir . \
+    && python -m pip check \
+    && python -c "import akshare; print('AKShare', akshare.__version__)"
 
 RUN useradd --create-home --uid 10001 appuser \
     && mkdir -p /data/vipdoc /data/market \

@@ -4,7 +4,9 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { FormulaScreenApiError } from '../api/formulaScreen'
 import {
   createLocalImport,
+  createAkShareBackfill,
   createMarketDataSync,
+  fetchMarketDataCapabilities,
   fetchLocalChart,
   fetchLocalInstruments,
   fetchStoreStatus,
@@ -18,6 +20,8 @@ import type {
   LocalInstrumentMeta,
   LocalMarketChart,
   LocalMarketScope,
+  MarketDataCapabilities,
+  MarketDataProvider,
   MarketChartPeriod,
   MarketSyncJobState,
 } from '../types'
@@ -50,6 +54,7 @@ const BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
 const form = reactive({
   vipdocPath: '/data/vipdoc',
   syncUniverse: 'all' as 'all' | 'sh' | 'sz',
+  syncProvider: 'akshare' as MarketDataProvider,
   syncInstrumentTypes: [] as InstrumentType[],
   syncBoards: [] as InstrumentBoard[],
   market: 'all' as LocalMarketScope,
@@ -74,6 +79,7 @@ const storeStatus = ref<DataStoreStatus | null>(null)
 const syncLoading = ref(false)
 const syncLabel = ref('')
 const marketJob = ref<MarketSyncJobState | null>(null)
+const providerCapabilities = ref<MarketDataCapabilities | null>(null)
 const MARKET_JOB_POLL_INTERVAL_MS = 500
 const MARKET_STATUS_POLL_INTERVAL_MS = 5000
 let storeStatusPollTimer: number | null = null
@@ -105,10 +111,15 @@ const autoSyncScheduleText = computed(() => {
 })
 
 const syncPhaseText = computed(() => ({
-  instrument_discovery: '正在刷新证券列表…',
+  instrument_discovery: `正在刷新${syncProviderLabel.value}证券列表…`,
   local_import: '正在导入本地行情…',
   online_bars: '正在同步在线日线…',
 }[marketJob.value?.phase ?? ''] ?? null))
+
+const syncProviderLabel = computed(() => {
+  const provider = marketJob.value?.metadata?.provider ?? form.syncProvider
+  return provider === 'tdx' ? ' TDX ' : ' AKShare '
+})
 
 const marketJobTitle = computed(() => {
   if (syncLoading.value) return syncPhaseText.value || syncLabel.value || '后台任务进行中…'
@@ -153,6 +164,11 @@ const currentSyncStatusText = computed(() => {
   }[typeof status === 'string' ? status : ''] ?? '处理中'
 })
 
+const currentSyncProviderText = computed(() => {
+  const provider = marketJob.value?.metadata?.provider ?? form.syncProvider
+  return provider === 'tdx' ? 'TDX' : 'AKShare'
+})
+
 const currentSyncDetailLabel = computed(() => (
   marketJob.value?.status === 'running' ? '当前同步' : '最近同步'
 ))
@@ -162,10 +178,30 @@ const currentSyncBarCount = computed(() => {
   return typeof value === 'number' && Number.isFinite(value) ? value : null
 })
 
+const currentSyncRetry = computed(() => {
+  const value = marketJob.value?.metadata?.retry
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0
+})
+
+const currentSyncHistorySource = computed(() => {
+  const value = marketJob.value?.metadata?.history_source
+  return typeof value === 'string' ? value : ''
+})
+
+const historySourcesText = computed(() => {
+  const sources = marketJob.value?.result?.history_sources
+  if (!sources) return ''
+  return Object.entries(sources).map(([source, count]) => `${source} × ${count}`).join('、')
+})
+
 const discoveryWaiting = computed(() => Boolean(
   marketJob.value?.status === 'running'
   && marketJob.value.phase === 'instrument_discovery'
   && !currentSyncDetail.value,
+))
+
+const discoveryProviderText = computed(() => (
+  currentSyncProviderText.value === 'TDX' ? '等待 TDX 返回证券列表…' : '等待 AKShare 返回证券列表…'
 ))
 
 const marketProgressIndeterminate = computed(() => Boolean(
@@ -260,6 +296,16 @@ function beginJob(jobId: string, status: string): void {
     errors: 0,
     error: null,
     result: null,
+    metadata: { provider: form.syncProvider },
+  }
+}
+
+async function loadProviderCapabilities(): Promise<void> {
+  try {
+    providerCapabilities.value = await fetchMarketDataCapabilities()
+  } catch {
+    // Capability discovery is informational; the sync endpoint remains the source of truth.
+    providerCapabilities.value = null
   }
 }
 
@@ -297,9 +343,31 @@ async function syncOnlineData(): Promise<void> {
   try {
     const job = await createMarketDataSync({
       vipdoc_path: form.vipdocPath.trim(),
+      provider: form.syncProvider,
       universe: form.syncUniverse,
       bars: 800,
       ...syncScopePayload(),
+    })
+    beginJob(job.job_id, job.status)
+    await waitForJob(job.job_id)
+    await loadStoreStatus()
+    await loadInstruments()
+  } catch (error) {
+    message.value = apiMessage(error)
+  } finally {
+    syncLoading.value = false
+    syncLabel.value = ''
+  }
+}
+
+async function backfillAkShareData(): Promise<void> {
+  syncLoading.value = true
+  syncLabel.value = '正在进行 AKShare 全量回填…'
+  message.value = ''
+  try {
+    const job = await createAkShareBackfill({
+      universe: form.syncUniverse,
+      ...(form.syncBoards.length > 0 ? { boards: [...form.syncBoards] } : {}),
     })
     beginJob(job.job_id, job.status)
     await waitForJob(job.job_id)
@@ -407,7 +475,7 @@ function formatPrice(value: number | null): string {
 }
 
 onMounted(async () => {
-  await loadStoreStatus()
+  await Promise.all([loadProviderCapabilities(), loadStoreStatus()])
   if (!marketJob.value) await loadInstruments()
   scheduleStoreStatusPoll()
 })
@@ -439,7 +507,7 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
 
     <main class="content-shell">
       <section class="page-intro">
-        <div><p class="eyebrow">LOCAL MARKET DATA / DUCKDB</p><h1>本地行情</h1><p class="intro-copy">行情统一存储在本地 DuckDB，可从通达信 vipdoc 导入或在线更新。</p></div>
+        <div><p class="eyebrow">LOCAL MARKET DATA / DUCKDB</p><h1>本地行情</h1><p class="intro-copy">行情统一存储在本地 DuckDB，默认使用 AKShare 更新股票日线，也可从通达信 vipdoc 导入。</p></div>
         <div class="intro-note"><span class="note-label">数据边界</span><strong>本地 DuckDB</strong><small>源文件只读；图表、筛选和回测统一查询数据库</small></div>
       </section>
 
@@ -455,7 +523,7 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
         <div class="store-meta" data-testid="market-store-meta">
           <span>数据库 {{ storeStatus?.database_path ?? '—' }}</span>
           <span>最近本地导入 {{ storeStatus?.last_local_import_at ?? '—' }}</span>
-          <span>最近在线更新 {{ storeStatus?.last_online_sync_at ?? '—' }}</span>
+          <span>最近在线更新 {{ storeStatus?.last_online_sync_at ?? '—' }} · {{ storeStatus?.last_online_provider ?? '—' }}</span>
         </div>
         <div v-if="storeStatus?.auto_sync_enabled !== undefined" class="auto-sync-status" :class="{ active: autoSyncActive }" data-testid="auto-sync-status">
           <span class="auto-sync-dot" aria-hidden="true"></span>
@@ -468,27 +536,32 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
             <div><label for="market-sync-universe">同步市场</label><select id="market-sync-universe" v-model="form.syncUniverse" data-testid="market-sync-universe"><option value="all">沪深全部</option><option value="sh">仅上海</option><option value="sz">仅深圳</option></select></div>
             <div class="scope-options"><span>证券类型</span><label v-for="option in INSTRUMENT_TYPE_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-sync-type-${option.key}`" :checked="form.syncInstrumentTypes.includes(option.key)" @change="toggleInstrumentType(option.key)">{{ option.label }}</label></div>
             <div class="scope-options"><span>板块</span><label v-for="option in BOARD_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-sync-board-${option.key}`" :checked="form.syncBoards.includes(option.key)" @change="toggleBoard(option.key)">{{ option.label }}</label></div>
-            <small class="scope-helper">类型或板块未勾选表示不限制；两者同时选择时取交集。一键同步会先刷新完整标的列表，再导入本地 vipdoc，最后在线补充日线。</small>
+            <div class="scope-options provider-options"><span>行情源</span><label><input v-model="form.syncProvider" type="radio" value="akshare" data-testid="market-provider-akshare">AKShare（默认）</label><label><input v-model="form.syncProvider" type="radio" value="tdx" data-testid="market-provider-tdx">TDX（遗留）</label></div>
+            <small class="scope-helper">类型或板块未勾选表示不限制；两者同时选择时取交集。一键同步会先刷新完整证券列表，再导入本地 vipdoc，最后补充在线日线。主板、科创板和创业板股票默认使用 AKShare；全量补齐按钮会重新读取 AKShare 可提供的完整历史。</small>
+            <small v-if="providerCapabilities?.providers.akshare?.history_sources?.length" class="scope-helper">AKShare 备用接口：{{ providerCapabilities.providers.akshare.history_sources.join(' → ') }}</small>
+            <small v-if="providerCapabilities?.providers.akshare && !providerCapabilities.providers.akshare.available" class="scope-warning">{{ providerCapabilities.providers.akshare.error || 'AKShare 当前不可用，请重新构建 Docker 镜像。' }}</small>
           </div>
           <div class="market-sync-actions">
             <button class="primary-button" data-testid="market-import-local" type="button" :disabled="syncLoading" @click="importLocalData">{{ syncLoading ? '同步进行中…' : '导入本地行情' }}</button>
             <button class="secondary-button" data-testid="market-sync-online" type="button" :disabled="syncLoading" @click="syncOnlineData">一键同步行情</button>
+            <button v-if="form.syncProvider === 'akshare'" class="secondary-button" data-testid="market-akshare-backfill" type="button" :disabled="syncLoading" @click="backfillAkShareData">{{ syncLoading ? '回填进行中…' : 'AKShare 全量补齐' }}</button>
           </div>
         </div>
         <div v-if="marketJob" class="sync-progress" data-testid="market-data-progress">
           <div class="sync-progress-heading"><span>{{ marketJobTitle }}</span><strong>{{ Math.round(marketJob.progress * 100) }}%</strong></div>
           <div class="progress-track sync-progress-track" :class="{ indeterminate: marketProgressIndeterminate }"><span :style="{ width: `${Math.round(marketJob.progress * 100)}%` }"></span></div>
           <div class="sync-progress-stats"><span>已处理 <strong>{{ marketJob.total_scanned }}</strong> / {{ marketJob.total_candidates }}</span><span>worker <strong>{{ marketJob.worker_count ?? 8 }}</strong></span><span :class="{ negative: marketJob.errors > 0 }">错误 <strong>{{ marketJob.errors }}</strong></span></div>
-          <div v-if="discoveryWaiting" class="sync-stage-status" data-testid="market-sync-stage"><strong>正在刷新证券列表</strong><span>等待 TDX 返回证券列表…</span></div>
+          <div v-if="discoveryWaiting" class="sync-stage-status" data-testid="market-sync-stage"><strong>正在刷新证券列表</strong><span>{{ discoveryProviderText }}</span></div>
           <div v-if="currentSyncDetail" class="sync-current-instrument" data-testid="market-sync-current">
-            <div class="sync-current-heading"><span>{{ currentSyncDetailLabel }}</span><strong>{{ currentSyncInstrumentText }}</strong><span>{{ currentSyncStatusText }}</span></div>
-            <div class="sync-current-meta"><span>同步区间 <strong>{{ currentSyncRangeText }}</strong></span><span v-if="currentSyncBarCount !== null">{{ currentSyncBarCount }} 根日线</span></div>
+            <div class="sync-current-heading"><span>{{ currentSyncDetailLabel }}</span><strong>{{ currentSyncInstrumentText }}</strong><span>{{ currentSyncProviderText }} · {{ currentSyncStatusText }}</span></div>
+            <div class="sync-current-meta"><span>同步区间 <strong>{{ currentSyncRangeText }}</strong></span><span v-if="currentSyncBarCount !== null">{{ currentSyncBarCount }} 根日线</span><span v-if="currentSyncRetry > 0">重试 {{ currentSyncRetry }} 次</span></div>
+            <div v-if="currentSyncHistorySource" class="sync-current-source">本次接口 <strong>{{ currentSyncHistorySource }}</strong></div>
           </div>
           <div v-if="marketJob.result" class="sync-result-stats">
             <template v-if="marketJob.result.source === 'local'"><span>导入文件 {{ marketJob.result.imported_files ?? 0 }}</span><span>替换标的 {{ marketJob.result.replaced_instruments ?? 0 }}</span><span>写入 K 线 {{ marketJob.result.imported_bars ?? 0 }}</span><span>跳过 {{ marketJob.result.skipped_files ?? 0 }}</span></template>
             <template v-else-if="marketJob.result.source === 'combined'"><span>本地导入 {{ marketJob.result.local_import?.imported_files ?? 0 }} 个文件</span><span>本地写入 {{ marketJob.result.local_import?.imported_bars ?? 0 }} 根</span><span>在线证券列表 {{ marketJob.result.online_sync?.listed_instruments ?? marketJob.result.online_sync?.total_candidates ?? 0 }}</span><span>新增标的 {{ marketJob.result.online_sync?.new_instruments ?? 0 }}</span><span>在线更新 {{ marketJob.result.online_sync?.updated_files ?? 0 }} 个标的</span><span>在线写入 {{ marketJob.result.online_sync?.written_bars ?? 0 }} 根</span></template>
-            <template v-else><span>证券列表 {{ marketJob.result.listed_instruments ?? marketJob.result.total_candidates ?? 0 }}</span><span>新增标的 {{ marketJob.result.new_instruments ?? 0 }}</span><span>更新标的 {{ marketJob.result.updated_files ?? 0 }}</span><span>写入 K 线 {{ marketJob.result.written_bars ?? 0 }}</span><span>无变化 {{ marketJob.result.unchanged_files ?? 0 }}</span></template>
-            <span :class="{ negative: marketJob.result.errors > 0 }">失败 {{ marketJob.result.errors }}</span>
+            <template v-else><span>数据源 {{ marketJob.result.provider ?? '—' }}</span><span>证券列表 {{ marketJob.result.listed_instruments ?? marketJob.result.total_candidates ?? 0 }}</span><span>新增标的 {{ marketJob.result.new_instruments ?? 0 }}</span><span>更新标的 {{ marketJob.result.updated_files ?? 0 }}</span><span>写入 K 线 {{ marketJob.result.written_bars ?? 0 }}</span><span>无变化 {{ marketJob.result.unchanged_files ?? 0 }}</span></template>
+            <span v-if="historySourcesText">日线接口 {{ historySourcesText }}</span><span :class="{ negative: marketJob.result.errors > 0 }">失败 {{ marketJob.result.errors }}</span>
           </div>
         </div>
       </section>
@@ -508,7 +581,7 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
           <div v-else class="local-instrument-list">
             <button v-for="instrument in instruments" :key="`${instrument.market}-${instrument.code}`" class="local-instrument" :class="{ selected: selected?.market === instrument.market && selected?.code === instrument.code }" :data-testid="`instrument-${instrument.market}-${instrument.code}`" type="button" @click="selectInstrument(instrument)">
               <span class="instrument-topline"><span class="instrument-identity"><strong>{{ instrument.code }}</strong><span class="instrument-name">{{ instrument.name || '—' }}</span></span><span class="market-pill" :class="instrument.market.toLowerCase()">{{ instrument.market }}</span></span>
-              <span class="instrument-meta"><span>{{ instrumentLabel(instrument.instrument_type) }} · {{ instrument.bars ? `${instrument.bars} 根` : instrument.error ?? '无数据' }}</span><span>{{ instrument.last_close === null ? '—' : `¥${formatPrice(instrument.last_close)}` }}</span></span>
+              <span class="instrument-meta"><span>{{ instrumentLabel(instrument.instrument_type) }} · {{ instrument.bars ? `${instrument.bars} 根` : instrument.error ?? '无数据' }}</span><span>{{ instrument.provider || '—' }} · {{ instrument.last_close === null ? '—' : `¥${formatPrice(instrument.last_close)}` }}</span></span>
               <span class="instrument-range">{{ instrument.data_start ?? '—' }} → {{ instrument.data_end ?? '—' }}</span>
             </button>
           </div>

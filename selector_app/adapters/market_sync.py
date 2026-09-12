@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from threading import Lock
 from typing import Literal, Protocol, cast
@@ -20,6 +20,8 @@ from selector_app.market_data.models import (
     InstrumentRef,
     InstrumentType,
     MarketCode,
+    MarketDataProvider,
+    ResolvedMarketDataProvider,
 )
 from selector_app.market_data.scope import InstrumentScope
 from selector_app.market_data.store import DuckDbMarketDataStore
@@ -44,10 +46,16 @@ class MarketSyncConfig:
     prefer_store_targets: bool = False
     refresh_names: bool = False
     sync_workers: int = 8
+    provider: MarketDataProvider = "akshare"
+    full_history: bool = False
 
     def __post_init__(self) -> None:
         if self.universe not in {"all", "sh", "sz"}:
             raise ValueError(f"不支持的同步范围: {self.universe}")
+        if self.provider not in {"akshare", "tdx"}:
+            raise ValueError(f"行情数据源无效: {self.provider}")
+        if not isinstance(self.full_history, bool):
+            raise ValueError("是否全量同步历史行情必须是布尔值")
         if not 1 <= self.bars <= 800:
             raise ValueError("每只股票同步的 K 线数量必须在 1 到 800 之间")
         if self.timeout <= 0:
@@ -81,6 +89,10 @@ class MarketSyncReport:
     new_instruments: int = 0
     existing_instruments: int = 0
     target_source: str = "tdx_security_list"
+    provider: ResolvedMarketDataProvider = "tdx"
+    provider_version: str | None = None
+    instrument_list_fingerprint: str | None = None
+    history_sources: Mapping[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -97,6 +109,10 @@ class MarketSyncReport:
             "new_instruments": self.new_instruments,
             "existing_instruments": self.existing_instruments,
             "target_source": self.target_source,
+            "provider": self.provider,
+            "provider_version": self.provider_version,
+            "instrument_list_fingerprint": self.instrument_list_fingerprint,
+            "history_sources": dict(self.history_sources),
         }
 
 
@@ -110,6 +126,10 @@ class InstrumentDiscoveryReport:
     new_instruments: int
     existing_instruments: int
     target_source: str = "tdx_security_list"
+    provider: ResolvedMarketDataProvider = "tdx"
+    provider_reports: tuple[Mapping[str, object], ...] = ()
+    provider_version: str | None = None
+    instrument_list_fingerprint: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -120,6 +140,10 @@ class InstrumentDiscoveryReport:
             "new_instruments": self.new_instruments,
             "existing_instruments": self.existing_instruments,
             "target_source": self.target_source,
+            "provider": self.provider,
+            "provider_reports": [dict(item) for item in self.provider_reports],
+            "provider_version": self.provider_version,
+            "instrument_list_fingerprint": self.instrument_list_fingerprint,
         }
 
 
@@ -306,6 +330,7 @@ class TdxMarketSync:
                     written_bars += batch_report.written_bars
                     failure_reasons.update(batch_report.failure_reasons)
         self._store.set_meta("last_online_sync_at", self._clock().isoformat())
+        self._store.set_meta("last_online_provider", "tdx")
         return MarketSyncReport(
             total_candidates=total,
             processed=processed,
@@ -655,6 +680,7 @@ def _instrument_detail(
     range_end: str | None = None,
     bar_count: int | None = None,
     error: str | None = None,
+    retry: int | None = None,
 ) -> dict[str, object]:
     detail: dict[str, object] = {
         "phase": "online_bars",
@@ -675,6 +701,8 @@ def _instrument_detail(
         detail["bar_count"] = bar_count
     if error is not None:
         detail["error"] = error
+    if retry is not None:
+        detail["retry"] = retry
     return detail
 
 

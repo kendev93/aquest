@@ -155,6 +155,8 @@ input:focus, select:focus { border-color: var(--accent); }
 .sync-current-heading > span:last-child { margin-left: auto; color: var(--accent); font-size: 9px; }
 .sync-current-meta { margin-top: 5px; color: var(--subtle); font-size: 9px; }
 .sync-current-meta strong { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 500; }
+.sync-current-source { margin-top: 5px; color: var(--subtle); font-size: 9px; }
+.sync-current-source strong { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 500; }
 .sync-result-stats { justify-content: flex-start; flex-wrap: wrap; margin-top: 8px; color: var(--muted); font-size: 9px; }
 .auto-sync-status { display: flex; align-items: center; gap: 9px; margin-top: 10px; padding: 9px 10px; border: 1px solid rgba(86, 105, 140, 0.35); background: rgba(11, 21, 43, 0.58); }
 .auto-sync-status.active { border-color: rgba(51, 225, 127, 0.55); background: rgba(10, 54, 34, 0.34); }
@@ -172,6 +174,7 @@ input:focus, select:focus { border-color: var(--accent); }
 .scope-options label { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
 .scope-options input { accent-color: var(--accent); }
 .scope-helper { color: var(--subtle); font-size: 9px; }
+.scope-warning { display: block; padding: 7px 8px; border-left: 2px solid var(--warning); background: rgba(245, 158, 11, 0.08); color: var(--warning); font-size: 9px; line-height: 1.4; }
 
 .results-heading { align-items: center; }
 .export-actions { display: flex; gap: 8px; }
@@ -353,7 +356,7 @@ tbody tr:hover td { background: rgba(22, 34, 58, 0.45); }
 .local-instruments-panel, .market-chart-panel { min-width: 0; padding: 22px; }
 .market-filter-form { display: grid; gap: 8px; margin-bottom: 18px; }
 .market-filter-form .secondary-button { width: 100%; margin-top: 2px; }
-.market-sync-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.market-sync-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .market-sync-actions .primary-button, .market-sync-actions .secondary-button { width: 100%; min-height: 40px; margin-top: 0; }
 .local-instrument-list { display: grid; gap: 6px; max-height: 680px; overflow-y: auto; padding-right: 3px; }
 .local-instrument { display: grid; gap: 6px; padding: 10px 11px; border: 1px solid var(--border); border-radius: 5px; background: rgba(8, 15, 32, 0.55); color: var(--muted); cursor: pointer; text-align: left; }

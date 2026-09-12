@@ -9,6 +9,7 @@ export type PortfolioSellValueOperator = 'gte' | 'lte'
 export type PortfolioCompareOperator = 'gt' | 'gte' | 'lt' | 'lte'
 export type InstrumentType = 'stock' | 'fund' | 'index' | 'bond'
 export type InstrumentBoard = 'main' | 'star' | 'chinext' | 'b_share' | 'fund' | 'index' | 'bond'
+export type MarketDataProvider = 'akshare' | 'tdx'
 export type RuleMode = 'signals' | 'conditions'
 export type ConditionOperator = 'gt' | 'gte' | 'lt' | 'lte' | 'eq' | 'neq' | 'cross_up' | 'cross_down'
 
@@ -145,6 +146,7 @@ export interface JobState {
 
 export interface MarketSyncResult {
   source?: 'local' | 'online' | 'combined'
+  provider?: MarketDataProvider | 'mixed'
   status?: 'skipped'
   reason?: string
   vipdoc_path?: string
@@ -169,6 +171,7 @@ export interface MarketSyncResult {
   written_bars?: number
   errors?: number
   failure_reasons?: Record<string, number>
+  history_sources?: Record<string, number>
   local_import?: MarketSyncResult
   online_sync?: MarketSyncResult
 }
@@ -187,6 +190,28 @@ export interface MarketSyncJobState {
   result: MarketSyncResult | null
 }
 
+export interface MarketDataProviderCapability {
+  provider: MarketDataProvider
+  available: boolean
+  version?: string | null
+  error?: string | null
+  instrument_types?: InstrumentType[]
+  boards?: InstrumentBoard[]
+  adjustments?: string[]
+  history?: string
+  history_sources?: string[]
+  fallback_policy?: string
+}
+
+export interface MarketDataCapabilities {
+  default_provider: MarketDataProvider
+  instrument_count?: number
+  last_online_provider?: string | null
+  last_online_provider_version?: string | null
+  instrument_list_fingerprint?: string | null
+  providers: Partial<Record<MarketDataProvider, MarketDataProviderCapability>>
+}
+
 export interface DataStoreStatus {
   database_path: string
   schema_version: number
@@ -196,6 +221,8 @@ export interface DataStoreStatus {
   data_end: string | null
   last_local_import_at: string | null
   last_online_sync_at: string | null
+  last_online_provider?: string | null
+  last_online_provider_version?: string | null
   startup_import_job_id?: string | null
   auto_sync_job_id?: string | null
   auto_sync_enabled?: boolean
@@ -211,6 +238,7 @@ export interface LocalInstrument {
   name?: string | null
   instrument_type: InstrumentType
   board?: InstrumentBoard
+  provider?: string | null
   bars: number
   data_start: string | null
   data_end: string | null

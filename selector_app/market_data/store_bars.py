@@ -179,6 +179,7 @@ class DuckDbBarsStore:
                     board=resolved_board,
                     name=name,
                     source_path=source_path,
+                    provider="local",
                 )
                 connection.execute("COMMIT")
             except Exception:
@@ -186,10 +187,17 @@ class DuckDbBarsStore:
                 raise
         return len(incoming)
 
-    def upsert_online_bars(self, frame: pd.DataFrame) -> tuple[int, int]:
+    def upsert_online_bars(
+        self,
+        frame: pd.DataFrame,
+        *,
+        provider: str = "tdx",
+    ) -> tuple[int, int]:
         """Upsert online rows without overwriting any local row."""
 
         self._store._require_writer()
+        if provider not in {"tdx", "akshare"}:
+            raise ValueError(f"在线行情数据源无效: {provider}")
         if frame.empty:
             return (0, 0)
         incoming_frame = frame.copy(deep=True)
@@ -226,6 +234,7 @@ class DuckDbBarsStore:
                     instrument_type=cast(InstrumentType, str(instrument_type)),
                     board=cast(InstrumentBoard, str(board)),
                     source="online",
+                    provider=provider,
                 )
             )
         if not normalized_parts:
@@ -304,6 +313,7 @@ class DuckDbBarsStore:
                         instrument_type,
                         board,
                         name=names_by_key.get((str(market).upper(), str(code))),
+                        provider=provider,
                     )
                 connection.unregister("_incoming_online_bars")
                 connection.execute("COMMIT")
@@ -354,7 +364,7 @@ class DuckDbBarsStore:
             conditions.append("bar_status = 'completed'")
         query = (
             "SELECT market, code, instrument_type, board, trade_date, open, high, low, close, "
-            "volume, amount, source, price_basis, bar_status, imported_at "
+            "volume, amount, source, provider, price_basis, bar_status, imported_at "
             f"FROM daily_bars WHERE {' AND '.join(conditions)} ORDER BY trade_date"
         )
         with self._store._connect(read_only=True) as connection:
@@ -413,7 +423,8 @@ class DuckDbBarsStore:
             "SELECT bars.market, bars.code, bars.instrument_type, bars.board, bars.trade_date, "
             "bars.open, "
             "bars.high, bars.low, bars.close, bars.volume, bars.amount, bars.source, "
-            "bars.price_basis, bars.bar_status, bars.imported_at FROM daily_bars AS bars"
+            "bars.provider, bars.price_basis, bars.bar_status, bars.imported_at "
+            "FROM daily_bars AS bars"
         )
         with self._store._connect(read_only=True) as connection:
             if symbols:
@@ -461,6 +472,7 @@ class DuckDbBarsStore:
                     bars.volume,
                     bars.amount,
                     bars.source,
+                    bars.provider,
                     bars.price_basis,
                     bars.bar_status,
                     bars.imported_at,
@@ -474,7 +486,7 @@ class DuckDbBarsStore:
                 {status_filter}
             )
             SELECT market, code, instrument_type, board, trade_date, open, high, low, close,
-                   volume, amount, source, price_basis, bar_status, imported_at
+                   volume, amount, source, provider, price_basis, bar_status, imported_at
             FROM ranked
             WHERE row_number <= ?
             ORDER BY market, code, trade_date
@@ -511,7 +523,8 @@ class DuckDbBarsStore:
         _append_filter(conditions, parameters, "instrument_type", instrument_types)
         _append_filter(conditions, parameters, "board", boards)
         query = (
-            "SELECT market, code, name, instrument_type, board, source_path FROM instruments"
+            "SELECT market, code, name, instrument_type, board, source_path, last_provider "
+            "FROM instruments"
             + (f" WHERE {' AND '.join(conditions)}" if conditions else "")
             + " ORDER BY market, code"
         )
@@ -525,6 +538,7 @@ class DuckDbBarsStore:
                 instrument_type=cast(InstrumentType, instrument_type),
                 board=cast(InstrumentBoard, board),
                 source_path=Path(source_path) if source_path else None,
+                provider=cast(str | None, provider),
             )
-            for market_value, code, name, instrument_type, board, source_path in rows
+            for market_value, code, name, instrument_type, board, source_path, provider in rows
         ]

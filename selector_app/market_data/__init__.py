@@ -26,6 +26,8 @@ from .models import (
     InstrumentRef,
     InstrumentType,
     MarketCode,
+    MarketDataProvider,
+    ResolvedMarketDataProvider,
     StockRef,
 )
 from .repository import MarketDataRepository
@@ -55,6 +57,8 @@ __all__ = [
     "InstrumentType",
     "InstrumentBoard",
     "MarketCode",
+    "MarketDataProvider",
+    "ResolvedMarketDataProvider",
     "DayFileError",
     "DayFileResult",
     "classify_instrument",
