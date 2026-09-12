@@ -378,3 +378,5 @@ def test_snapshot_reuses_base_contexts_for_repeated_candidate_evaluations(tmp_pa
     assert len(first) == len(second) == 1
     assert metrics["base_contexts_built"] == 1
     assert metrics["base_context_cache_hits"] > 0
+    assert metrics["base_context_cache_limit"] == 256
+    assert metrics["date_index_cache_limit"] == 512

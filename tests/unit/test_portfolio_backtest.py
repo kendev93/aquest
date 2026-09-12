@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 from selector_app.adapters.local_day_adapter import StockRef
+from selector_app.portfolio_backtest.context import SortedDateIndex
 from selector_app.portfolio_backtest.models import PortfolioBacktestConfig
 from selector_app.portfolio_backtest.service import (
     PortfolioBacktestService,
@@ -503,3 +504,12 @@ def test_portfolio_preloads_indicator_cache_in_bounded_chunks() -> None:
 
     assert [size for size, _ in cache.calls] == [32, 1]
     assert all(formulas == ("indicator_three",) for _, formulas in cache.calls)
+
+
+def test_sorted_date_index_supports_mapping_lookup_without_a_python_date_dict() -> None:
+    index = SortedDateIndex(np.asarray([20240101, 20240103, 20240105], dtype=np.int64))
+
+    assert index.get(20240101) == 0
+    assert index.get(20240105) == 2
+    assert index.get(20240102) is None
+    assert len(index) == 3
