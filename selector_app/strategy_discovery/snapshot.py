@@ -5,6 +5,7 @@ from __future__ import annotations
 import gc
 import json
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ from selector_app.market_data.adapter import DuckDbMarketDataAdapter
 from selector_app.market_data.day_format import classify_board
 from selector_app.market_data.models import InstrumentBoard, InstrumentType, MarketCode, StockRef
 from selector_app.market_data.store import DuckDbMarketDataStore
+from selector_app.portfolio_backtest.context import SortedDateIndex
 from selector_app.portfolio_backtest.models import PortfolioBacktestConfig
 from selector_app.portfolio_backtest.service import (
     PortfolioBacktestService,
@@ -102,7 +104,17 @@ class SnapshotWindow:
 class DiscoverySnapshot:
     """Open a compact snapshot without copying its arrays into each worker."""
 
-    def __init__(self, root: str | Path) -> None:
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        max_cached_symbols: int = 256,
+        max_cached_date_indexes: int = 512,
+    ) -> None:
+        if isinstance(max_cached_symbols, bool) or max_cached_symbols < 1:
+            raise ValueError("策略实验标的缓存上限必须大于 0")
+        if isinstance(max_cached_date_indexes, bool) or max_cached_date_indexes < 1:
+            raise ValueError("策略实验日期索引缓存上限必须大于 0")
         self.root = Path(root)
         manifest = json.loads((self.root / "manifest.json").read_text(encoding="utf-8"))
         if manifest.get("version") != _SNAPSHOT_VERSION:
@@ -146,8 +158,12 @@ class DiscoverySnapshot:
         self._required_sell_conditions = tuple(
             _condition_from_dict(item) for item in manifest["required_sell_conditions"]
         )
-        self._base_series_cache: dict[str, _SnapshotBaseSeries] = {}
-        self._date_index_cache: dict[tuple[str, int, int], Mapping[int, int]] = {}
+        self._max_cached_symbols = max_cached_symbols
+        self._max_cached_date_indexes = max_cached_date_indexes
+        self._base_series_cache: OrderedDict[str, _SnapshotBaseSeries] = OrderedDict()
+        self._date_index_cache: OrderedDict[
+            tuple[str, int, int], Mapping[int, int]
+        ] = OrderedDict()
         self._base_context_cache_hits = 0
 
     @property
@@ -156,6 +172,8 @@ class DiscoverySnapshot:
             "base_contexts_built": len(self._base_series_cache),
             "base_context_cache_hits": self._base_context_cache_hits,
             "date_index_cache_entries": len(self._date_index_cache),
+            "base_context_cache_limit": self._max_cached_symbols,
+            "date_index_cache_limit": self._max_cached_date_indexes,
         }
 
     def close(self) -> None:
@@ -266,6 +284,7 @@ class DiscoverySnapshot:
         cached = self._base_series_cache.get(item.symbol)
         if cached is not None:
             self._base_context_cache_hits += 1
+            self._base_series_cache.move_to_end(item.symbol)
             return cached
         offset = item.offset
         limit = offset + item.length
@@ -317,10 +336,13 @@ class DiscoverySnapshot:
             signals=signals,
             values=values,
             formula_results=formula_results,
-            date_to_index={int(value): index for index, value in enumerate(dates)},
+            date_to_index=SortedDateIndex(dates),
             data_fingerprint=item.data_fingerprint,
         )
         self._base_series_cache[item.symbol] = base
+        self._base_series_cache.move_to_end(item.symbol)
+        while len(self._base_series_cache) > self._max_cached_symbols:
+            self._base_series_cache.popitem(last=False)
         return base
 
     def _date_index(
@@ -332,9 +354,13 @@ class DiscoverySnapshot:
         key = (base.symbol, left, right)
         cached = self._date_index_cache.get(key)
         if cached is not None:
+            self._date_index_cache.move_to_end(key)
             return cached
-        mapping = {int(value): index for index, value in enumerate(base.dates[left:right])}
+        mapping: Mapping[int, int] = SortedDateIndex(base.dates[left:right])
         self._date_index_cache[key] = mapping
+        self._date_index_cache.move_to_end(key)
+        while len(self._date_index_cache) > self._max_cached_date_indexes:
+            self._date_index_cache.popitem(last=False)
         return mapping
 
     def _candidate_mask(

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import cast
@@ -29,6 +29,34 @@ from .risk import _atr_series
 from .state import PortfolioMarketDataAdapter, _PortfolioServiceState
 
 _CONTEXT_PRELOAD_CHUNK_SIZE = 32
+DEFAULT_BASE_CONTEXT_CACHE_LIMIT = 256
+DEFAULT_DATE_INDEX_CACHE_LIMIT = 512
+
+
+class SortedDateIndex(Mapping[int, int]):
+    """Compact mapping facade over sorted integer dates."""
+
+    def __init__(self, dates: np.ndarray) -> None:
+        values = np.asarray(dates, dtype=np.int64)
+        if values.ndim != 1:
+            raise ValueError("日期索引必须是一维数组")
+        self._dates = values
+
+    def __getitem__(self, key: int) -> int:
+        try:
+            value = int(key)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise KeyError(key) from exc
+        position = int(np.searchsorted(self._dates, value, side="left"))
+        if position >= len(self._dates) or int(self._dates[position]) != value:
+            raise KeyError(key)
+        return position
+
+    def __iter__(self) -> Iterator[int]:
+        return (int(value) for value in self._dates)
+
+    def __len__(self) -> int:
+        return int(self._dates.size)
 
 
 @dataclass(frozen=True)
@@ -196,7 +224,7 @@ class PortfolioContextMixin(_PortfolioServiceState):
             sell_mask=np.asarray(sell_mask, dtype=bool),
             signals=signal_arrays,
             values=value_arrays,
-            date_to_index={int(value): index for index, value in enumerate(dates)},
+            date_to_index=SortedDateIndex(dates),
             data_fingerprint=data_fingerprint,
         )
 
@@ -371,6 +399,7 @@ class PortfolioContextMixin(_PortfolioServiceState):
 __all__ = [
     "PortfolioContextMixin",
     "PortfolioMarketDataAdapter",
+    "SortedDateIndex",
     "_CONTEXT_PRELOAD_CHUNK_SIZE",
     "_StockSeries",
 ]
