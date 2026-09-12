@@ -172,8 +172,10 @@ def test_service_rejects_an_empty_local_market_store_before_search(tmp_path: Pat
         )
 
 
-def test_real_duckdb_service_evaluates_candidates_in_eight_processes(tmp_path: Path) -> None:
-    dates = pd.date_range("2024-01-01", periods=30, freq="D")
+def test_real_duckdb_service_evaluates_candidates_in_configurable_process_pool(
+    tmp_path: Path,
+) -> None:
+    dates = pd.date_range("2024-01-01", periods=80, freq="D")
     close = np.linspace(10.0, 13.0, len(dates))
     frame = pd.DataFrame(
         {
@@ -202,9 +204,9 @@ def test_real_duckdb_service_evaluates_candidates_in_eight_processes(tmp_path: P
             "execution": "next_open",
         },
         splits={
-            "search": {"start_date": "2024-01-01", "end_date": "2024-01-18"},
-            "validation": {"start_date": "2024-01-19", "end_date": "2024-01-24"},
-            "holdout": {"start_date": "2024-01-25", "end_date": "2024-01-30"},
+            "search": {"start_date": "2024-01-01", "end_date": "2024-01-30"},
+            "validation": {"start_date": "2024-01-31", "end_date": "2024-02-10"},
+            "holdout": {"start_date": "2024-02-11", "end_date": "2024-02-20"},
         },
         indicator_ids=("technical.ma5",),
         signal_ids=(),

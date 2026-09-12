@@ -45,7 +45,13 @@ def resolve_discovery_workers() -> int:
         workers = int(raw)
     except ValueError as exc:
         raise ValueError("strategy discovery worker 数必须是整数") from exc
-    if not 1 <= workers <= MAX_WORKERS:
+    return validate_discovery_workers(workers)
+
+
+def validate_discovery_workers(workers: int) -> int:
+    """Validate an explicitly supplied discovery worker count."""
+
+    if isinstance(workers, bool) or not 1 <= workers <= MAX_WORKERS:
         raise ValueError(f"strategy discovery worker 数必须在 1 到 {MAX_WORKERS} 之间")
     return workers
 
@@ -171,4 +177,5 @@ __all__ = [
     "estimate_discovery_resources",
     "resolve_discovery_memory_budget",
     "resolve_discovery_workers",
+    "validate_discovery_workers",
 ]

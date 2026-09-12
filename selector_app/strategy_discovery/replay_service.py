@@ -23,11 +23,16 @@ from selector_app.strategy_discovery.replay import (
     StrategyReplayResult,
     build_replay_candidate,
 )
+from selector_app.strategy_discovery.resources import (
+    DEFAULT_DISCOVERY_WORKERS,
+    resolve_discovery_workers,
+    validate_discovery_workers,
+)
 from selector_app.strategy_discovery.snapshot import DiscoverySnapshot, build_discovery_snapshot
 from selector_app.web.schemas import PortfolioBacktestRequest
 
 ReplayProgressCallback = Callable[[int, int, str, Mapping[str, object]], None]
-REPLAY_EVALUATION_WORKERS = 8
+REPLAY_EVALUATION_WORKERS = DEFAULT_DISCOVERY_WORKERS
 
 
 class PortfolioServiceLike(Protocol):
@@ -76,9 +81,13 @@ class StrategyReplayService:
         *,
         portfolio_service: PortfolioServiceLike,
         store: DuckDbMarketDataStore,
+        evaluation_workers: int | None = None,
     ) -> None:
         self._portfolio_service = portfolio_service
         self._store = store
+        self._evaluation_workers = validate_discovery_workers(
+            resolve_discovery_workers() if evaluation_workers is None else evaluation_workers
+        )
         self._parallel_enabled = isinstance(
             portfolio_service, PortfolioBacktestService
         ) and isinstance(getattr(portfolio_service, "_adapter", None), DuckDbMarketDataAdapter)
@@ -304,7 +313,7 @@ class StrategyReplayService:
     @contextmanager
     def _evaluation_executor(self, snapshot_path: str) -> Iterator[ProcessPoolExecutor]:
         executor = ProcessPoolExecutor(
-            max_workers=REPLAY_EVALUATION_WORKERS,
+            max_workers=self._evaluation_workers,
             mp_context=multiprocessing.get_context("spawn"),
             initializer=_init_replay_worker,
             initargs=(str(self._store.database_path), snapshot_path),

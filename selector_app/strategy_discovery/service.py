@@ -44,11 +44,16 @@ from .refinement import (
 )
 from .replay import ReplayLeaderboard
 from .replay_service import ReplayProgressCallback, StrategyReplayService
+from .resources import (
+    DEFAULT_DISCOVERY_WORKERS,
+    resolve_discovery_workers,
+    validate_discovery_workers,
+)
 from .search import BatchEvaluator, HybridSearchEngine
 from .snapshot import DiscoverySnapshot, build_discovery_snapshot
 
 ProgressCallback = Callable[[int, int, str, Mapping[str, object]], None]
-DISCOVERY_EVALUATION_WORKERS = 8
+DISCOVERY_EVALUATION_WORKERS = DEFAULT_DISCOVERY_WORKERS
 
 _WORKER_DISCOVERY_SERVICE: StrategyDiscoveryService | None = None
 
@@ -106,6 +111,7 @@ class StrategyDiscoveryService:
         portfolio_service: PortfolioServiceLike | None = None,
         store: DuckDbMarketDataStore | None = None,
         discovery_snapshot: DiscoverySnapshot | None = None,
+        evaluation_workers: int | None = None,
     ) -> None:
         selected_store = store or DuckDbMarketDataStore()
         self._portfolio_service = portfolio_service or PortfolioBacktestService(
@@ -114,6 +120,9 @@ class StrategyDiscoveryService:
         )
         self._store = selected_store
         self._discovery_snapshot = discovery_snapshot
+        self._evaluation_workers = validate_discovery_workers(
+            resolve_discovery_workers() if evaluation_workers is None else evaluation_workers
+        )
         self._parallel_enabled = isinstance(
             self._portfolio_service, PortfolioBacktestService
         ) and isinstance(
@@ -122,6 +131,7 @@ class StrategyDiscoveryService:
         self._replay_service = StrategyReplayService(
             portfolio_service=self._portfolio_service,
             store=self._store,
+            evaluation_workers=self._evaluation_workers,
         )
 
     def capabilities(self) -> dict[str, object]:
@@ -135,7 +145,7 @@ class StrategyDiscoveryService:
             "strategy_type": "portfolio",
             "frequency": "daily",
             "evaluation_mode": "process_pool" if self._parallel_enabled else "serial",
-            "evaluation_workers": (DISCOVERY_EVALUATION_WORKERS if self._parallel_enabled else 1),
+            "evaluation_workers": (self._evaluation_workers if self._parallel_enabled else 1),
             "data_snapshot": "shared_memmap" if self._parallel_enabled else "none",
             "indicator_count": len(catalog.values),
             "signal_count": len(catalog.signal_ids),
@@ -365,7 +375,7 @@ class StrategyDiscoveryService:
             return
         database_path = str(self._store.database_path)
         executor = ProcessPoolExecutor(
-            max_workers=DISCOVERY_EVALUATION_WORKERS,
+            max_workers=self._evaluation_workers,
             mp_context=multiprocessing.get_context("spawn"),
             initializer=_init_discovery_worker,
             initargs=(database_path, snapshot_path),
@@ -563,8 +573,8 @@ class StrategyDiscoveryService:
             evaluator=evaluate,
             batch_evaluator=batch_evaluator,
             fidelity_evaluator=evaluate_fidelity if request.multifidelity_enabled else None,
-            batch_size=DISCOVERY_EVALUATION_WORKERS if batch_evaluator is not None else 1,
-            evaluation_workers=(DISCOVERY_EVALUATION_WORKERS if batch_evaluator is not None else 1),
+            batch_size=self._evaluation_workers if batch_evaluator is not None else 1,
+            evaluation_workers=(self._evaluation_workers if batch_evaluator is not None else 1),
             evaluation_mode="process_pool" if batch_evaluator is not None else "serial",
             max_trials=request.max_trials,
             seed=request.seed,
@@ -606,7 +616,7 @@ class StrategyDiscoveryService:
             progress_callback=report_validation,
             abort_check=abort_check,
             batch_evaluator=batch_evaluator,
-            batch_size=DISCOVERY_EVALUATION_WORKERS if batch_evaluator is not None else 1,
+            batch_size=self._evaluation_workers if batch_evaluator is not None else 1,
         )
         result = discovery.to_dict()
         result["data_fingerprint"] = fingerprint_holder[0]
