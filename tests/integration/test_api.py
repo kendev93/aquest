@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 from fastapi.testclient import TestClient
 
+from selector_app.adapters.akshare_market_sync import AkShareProviderUnavailable
 from selector_app.market_data.day_importer import LocalDayImporter
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.screening.jobs import TaskCancelledError
@@ -358,7 +359,17 @@ def test_market_sync_job_can_be_created_and_polled() -> None:
     }
 
 
-def test_market_data_capabilities_exposes_default_provider_and_tdx_compatibility() -> None:
+def test_market_data_capabilities_exposes_default_provider_and_tdx_compatibility(
+    monkeypatch,
+) -> None:
+    def unavailable_akshare():
+        raise AkShareProviderUnavailable("测试环境未安装 AKShare")
+
+    monkeypatch.setattr(
+        "selector_app.adapters.akshare_market_sync._default_module",
+        unavailable_akshare,
+    )
+
     with TestClient(create_app(engine=EmptyEngine())) as client:
         response = client.get("/api/v1/market-data/capabilities")
 
