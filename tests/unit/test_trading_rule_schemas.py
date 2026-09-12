@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from selector_app.web.schemas import (
     BacktestRequest,
     PortfolioBacktestRequest,
@@ -110,6 +112,34 @@ def test_strategy_discovery_request_can_use_the_full_local_history() -> None:
 
     assert discovery.splits["search"]["start_date"] == "2023-01-01"
     assert discovery.splits["holdout"]["end_date"] == "2025-04-30"
+
+
+def test_strategy_discovery_request_defaults_to_recent_five_years_mode() -> None:
+    request = StrategyDiscoveryRequest.model_validate({"max_positions": 3})
+
+    assert request.date_mode == "recent5"
+
+
+def test_strategy_discovery_request_requires_dates_for_custom_mode() -> None:
+    with pytest.raises(ValueError, match="自定义日期范围必须同时设置开始日期和结束日期"):
+        StrategyDiscoveryRequest.model_validate(
+            {"date_mode": "custom", "max_positions": 3}
+        )
+
+
+def test_strategy_discovery_request_records_custom_date_mode() -> None:
+    request = StrategyDiscoveryRequest.model_validate(
+        {
+            "date_mode": "custom",
+            "start_date": "2024-01-01",
+            "end_date": "2024-01-31",
+            "max_positions": 3,
+        }
+    )
+
+    discovery = request.to_discovery_request()
+
+    assert discovery.base_config["date_mode"] == "custom"
 
 
 def test_strategy_discovery_request_preserves_required_buy_and_sell_conditions() -> None:

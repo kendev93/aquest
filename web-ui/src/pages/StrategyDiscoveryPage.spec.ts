@@ -265,14 +265,31 @@ describe('StrategyDiscoveryPage', () => {
     expect(wrapper.get('[data-testid="strategy-required-buy-rule"]').text()).toContain('硬约束')
   })
 
-  it('submits without a date range and uses all local history by default', async () => {
+  it('submits recent-five-year mode by default', async () => {
     const wrapper = mount(StrategyDiscoveryPage)
     await flushPromises()
     await wrapper.get('[data-testid="strategy-discovery-positions"]').setValue('3')
     await wrapper.get('[data-testid="strategy-discovery-config"]').trigger('submit')
     await flushPromises()
 
-    expect(api.createStrategyDiscovery).toHaveBeenCalledWith(expect.objectContaining({ max_positions: 3 }))
+    expect(api.createStrategyDiscovery).toHaveBeenCalledWith(expect.objectContaining({
+      max_positions: 3,
+      date_mode: 'recent5',
+    }))
+    expect(api.createStrategyDiscovery.mock.calls[0]?.[0]).not.toHaveProperty('start_date')
+    expect(api.createStrategyDiscovery.mock.calls[0]?.[0]).not.toHaveProperty('end_date')
+  })
+
+  it('allows selecting full local history explicitly', async () => {
+    const wrapper = mount(StrategyDiscoveryPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="strategy-discovery-date-mode"]').setValue('full')
+    await wrapper.get('[data-testid="strategy-discovery-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(api.createStrategyDiscovery).toHaveBeenCalledWith(expect.objectContaining({
+      date_mode: 'full',
+    }))
     expect(api.createStrategyDiscovery.mock.calls[0]?.[0]).not.toHaveProperty('start_date')
     expect(api.createStrategyDiscovery.mock.calls[0]?.[0]).not.toHaveProperty('end_date')
   })
@@ -287,6 +304,7 @@ describe('StrategyDiscoveryPage', () => {
     await flushPromises()
 
     expect(api.createStrategyDiscovery).toHaveBeenCalledWith(expect.objectContaining({
+      date_mode: 'custom',
       start_date: '2024-01-01',
       end_date: '2024-12-31',
     }))

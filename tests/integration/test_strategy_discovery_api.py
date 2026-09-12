@@ -320,11 +320,11 @@ def test_strategy_replay_api_rejects_unknown_leaderboard(tmp_path) -> None:
     assert response.status_code == 422
 
 
-def test_strategy_discovery_api_uses_all_completed_local_dates_when_omitted(tmp_path) -> None:
+def test_strategy_discovery_api_defaults_to_the_recent_five_years(tmp_path) -> None:
     store = __import__(
         "selector_app.market_data.store", fromlist=["DuckDbMarketDataStore"]
     ).DuckDbMarketDataStore(tmp_path / "market.duckdb")
-    dates = pd.date_range("2024-01-01", periods=3, freq="D")
+    dates = pd.to_datetime(["2018-01-01", "2021-09-11", "2026-09-11"])
     close = [10.0, 10.5, 11.0]
     store.replace_local_bars(
         "SH",
@@ -366,9 +366,49 @@ def test_strategy_discovery_api_uses_all_completed_local_dates_when_omitted(tmp_
     assert response.status_code == 202
     assert state["status"] == "completed"
     assert len(service.requests) == 1
-    assert service.requests[0].base_config["start_date"] == "2024-01-01"
-    assert service.requests[0].base_config["end_date"] == "2024-01-03"
+    assert service.requests[0].base_config["start_date"] == "2021-09-11"
+    assert service.requests[0].base_config["end_date"] == "2026-09-11"
     assert service.requests[0].required_buy_conditions[0].right_value == "technical.ma20"
+
+
+def test_strategy_discovery_api_allows_explicit_full_history_mode(tmp_path) -> None:
+    store = __import__(
+        "selector_app.market_data.store", fromlist=["DuckDbMarketDataStore"]
+    ).DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    dates = pd.to_datetime(["2018-01-01", "2021-09-11", "2026-09-11"])
+    close = [10.0, 10.5, 11.0]
+    store.replace_local_bars(
+        "SH",
+        "600000",
+        "stock",
+        pd.DataFrame(
+            {
+                "date": dates,
+                "open": close,
+                "high": [value + 0.2 for value in close],
+                "low": [value - 0.2 for value in close],
+                "close": close,
+                "volume": [1000.0] * 3,
+                "amount": [value * 1000 for value in close],
+                "bar_status": ["completed"] * 3,
+            }
+        ),
+    )
+    service = CapturingDiscoveryService()
+
+    with TestClient(
+        create_app(strategy_discovery_service=service, market_data_store=store)
+    ) as client:
+        response = client.post(
+            "/api/v1/strategy-discovery",
+            json={"date_mode": "full", "max_positions": 2},
+        )
+        state = _wait(client, response.json()["data"]["job_id"])
+
+    assert response.status_code == 202
+    assert state["status"] == "completed"
+    assert service.requests[0].base_config["start_date"] == "2018-01-01"
+    assert service.requests[0].base_config["end_date"] == "2026-09-11"
 
 
 def test_strategy_discovery_api_reports_actionable_error_for_empty_store(tmp_path) -> None:
