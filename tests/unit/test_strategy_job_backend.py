@@ -91,6 +91,15 @@ def test_file_backend_submits_a_persistent_job_without_running_it(tmp_path: Path
     assert backend.result(job_id) is None
 
 
+def test_file_backend_treats_invalid_job_ids_as_missing(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    backend = FileStrategyJobBackend(store, StrategyJobStore(tmp_path / "jobs"))
+
+    assert backend.get("../escape") is None
+    assert backend.result("../escape") is None
+    assert backend.cancel("../escape") is False
+
+
 def test_file_backend_preflight_counts_the_requested_date_window(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     store.replace_local_bars(

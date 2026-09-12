@@ -162,8 +162,11 @@ class FileStrategyJobBackend:
         return job_id
 
     def get(self, job_id: str) -> dict[str, object] | None:
-        self._job_store.recover_stale_running(stale_after_seconds=DEFAULT_STALE_AFTER_SECONDS)
-        state = self._job_store.read_state(job_id)
+        try:
+            self._job_store.recover_stale_running(stale_after_seconds=DEFAULT_STALE_AFTER_SECONDS)
+            state = self._job_store.read_state(job_id)
+        except ValueError:
+            return None
         if state is None:
             return None
         self._reconcile_completed(job_id, state)
@@ -171,15 +174,21 @@ class FileStrategyJobBackend:
         return refreshed or state
 
     def result(self, job_id: str) -> dict[str, object] | None:
-        self._job_store.recover_stale_running(stale_after_seconds=DEFAULT_STALE_AFTER_SECONDS)
-        state = self._job_store.read_state(job_id)
+        try:
+            self._job_store.recover_stale_running(stale_after_seconds=DEFAULT_STALE_AFTER_SECONDS)
+            state = self._job_store.read_state(job_id)
+        except ValueError:
+            return None
         if state is None:
             return None
         self._reconcile_completed(job_id, state)
         return self._job_store.read_result(job_id)
 
     def cancel(self, job_id: str) -> bool:
-        return self._job_store.request_cancel(job_id)
+        try:
+            return self._job_store.request_cancel(job_id)
+        except ValueError:
+            return False
 
     def _reconcile_completed(self, job_id: str, state: Mapping[str, object]) -> None:
         if state.get("status") != "completed":
