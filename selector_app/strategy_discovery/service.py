@@ -545,7 +545,8 @@ class StrategyDiscoveryService:
                     metrics = list(executor.map(_evaluate_candidate_process, jobs, chunksize=1))
                 except (BrokenProcessPool, OSError) as exc:
                     raise RuntimeError(
-                        "策略实验的 8 个评估进程启动失败，请检查 Docker 运行时和行情数据库权限"
+                        f"策略实验的 {self._evaluation_workers} 个评估进程启动失败，"
+                        "请检查 Docker 运行时和行情数据库权限"
                     ) from exc
                 sanitized_metrics: list[Mapping[str, object]] = []
                 for candidate, item in zip(candidates, metrics, strict=True):
