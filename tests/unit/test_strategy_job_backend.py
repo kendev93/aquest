@@ -4,6 +4,9 @@ import time
 from collections.abc import Mapping
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
+
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.screening.jobs import ScreenJobRunner
 from selector_app.strategy_discovery.job_backend import (
@@ -12,6 +15,7 @@ from selector_app.strategy_discovery.job_backend import (
 )
 from selector_app.strategy_discovery.job_store import StrategyJobStore
 from selector_app.strategy_discovery.models import DiscoveryRequest
+from selector_app.strategy_discovery.resources import DiscoveryResourceEstimate
 
 
 class FakeDiscoveryService:
@@ -83,6 +87,38 @@ def test_file_backend_submits_a_persistent_job_without_running_it(tmp_path: Path
     assert state["status"] == "queued"
     assert state["worker_count"] == 2
     assert backend.result(job_id) is None
+
+
+def test_file_backend_preflight_counts_the_requested_date_window(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars(
+        "SH",
+        "600000",
+        "stock",
+        pd.DataFrame(
+            {
+                "date": pd.date_range("2024-01-01", periods=5, freq="D"),
+                "open": np.arange(5, dtype=float) + 10,
+                "high": np.arange(5, dtype=float) + 10.2,
+                "low": np.arange(5, dtype=float) + 9.8,
+                "close": np.arange(5, dtype=float) + 10,
+                "volume": np.full(5, 1000.0),
+                "amount": np.full(5, 10000.0),
+                "bar_status": "completed",
+            }
+        ),
+    )
+    backend = FileStrategyJobBackend(
+        store,
+        StrategyJobStore(tmp_path / "jobs"),
+        worker_count=2,
+    )
+
+    estimate = backend.preflight(_request())
+
+    assert isinstance(estimate, DiscoveryResourceEstimate)
+    assert estimate.row_count == 3
+    assert estimate.selected_workers == 2
 
 
 def test_in_process_backend_preserves_existing_fake_service_contract(tmp_path: Path) -> None:

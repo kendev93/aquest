@@ -8,6 +8,8 @@ from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from typing import Literal, Protocol, cast
 
+from selector_app.market_data.adapter import DuckDbMarketDataAdapter
+from selector_app.market_data.models import InstrumentBoard, InstrumentType
 from selector_app.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
 from selector_app.screening.jobs import ScreenJobRunner, TaskCancelledError, TaskUserError
 
@@ -16,12 +18,20 @@ from .models import DiscoveryRequest
 from .refinement import discovery_request_from_dict
 from .replay import ReplayLeaderboard
 from .replay_service import ReplayProgressCallback
+from .resources import (
+    DiscoveryResourceBudgetError,
+    DiscoveryResourceEstimate,
+    estimate_discovery_resources,
+)
 from .service import ProgressCallback
+from .snapshot import snapshot_window
 
 logger = logging.getLogger(__name__)
 
 
 class StrategyJobBackend(Protocol):
+    def preflight(self, request: DiscoveryRequest) -> DiscoveryResourceEstimate | None: ...
+
     """Common interface consumed by the strategy discovery API router."""
 
     def submit(
@@ -30,6 +40,7 @@ class StrategyJobBackend(Protocol):
         payload: Mapping[str, object],
         *,
         description: str,
+        worker_count: int | None = None,
     ) -> str: ...
 
     def get(self, job_id: str) -> dict[str, object] | None: ...
@@ -53,12 +64,49 @@ class FileStrategyJobBackend:
         self._job_store = job_store
         self._worker_count = worker_count
 
+    def preflight(self, request: DiscoveryRequest) -> DiscoveryResourceEstimate:
+        base = request.base_config
+        instrument_types = cast(
+            tuple[InstrumentType, ...] | None,
+            _string_tuple(base.get("instrument_types")),
+        )
+        boards = cast(
+            tuple[InstrumentBoard, ...] | None,
+            _string_tuple(base.get("boards")),
+        )
+        adapter = DuckDbMarketDataAdapter(self._store)
+        refs = adapter.list_stock_refs(
+            str(base.get("vipdoc_path") or ""),
+            str(base.get("universe") or "all"),
+            str(base["universe_file"]) if base.get("universe_file") else None,
+            instrument_types=instrument_types,
+            boards=boards,
+        )
+        if not refs:
+            raise ValueError("本地 DuckDB 没有可用行情，请先在“本地行情”页面导入日线数据")
+        window = snapshot_window(request)
+        row_count = adapter.count_many_stocks(
+            refs,
+            start_date=window.start,
+            end_date=window.end,
+        )
+        if row_count <= 0:
+            raise ValueError("本地 DuckDB 没有可用行情，请先在“本地行情”页面导入日线数据")
+        estimate = estimate_discovery_resources(
+            row_count,
+            requested_workers=self._worker_count,
+        )
+        if not estimate.within_budget:
+            raise DiscoveryResourceBudgetError(estimate)
+        return estimate
+
     def submit(
         self,
         operation: JobOperation,
         payload: Mapping[str, object],
         *,
         description: str,
+        worker_count: int | None = None,
     ) -> str:
         job_id = uuid.uuid4().hex
         self._job_store.create(
@@ -66,7 +114,7 @@ class FileStrategyJobBackend:
             operation=operation,
             payload=payload,
             description=description,
-            worker_count=self._worker_count,
+            worker_count=worker_count if worker_count is not None else self._worker_count,
         )
         return job_id
 
@@ -134,12 +182,16 @@ class InProcessStrategyJobBackend:
         self._runner = runner
         self._service = service
 
+    def preflight(self, request: DiscoveryRequest) -> None:
+        return None
+
     def submit(
         self,
         operation: JobOperation,
         payload: Mapping[str, object],
         *,
         description: str,
+        worker_count: int | None = None,
     ) -> str:
         job_id = uuid.uuid4().hex
 
@@ -174,6 +226,16 @@ class InProcessStrategyJobBackend:
                     abort_check=lambda: self._runner.is_cancel_requested(job_id),
                 )
                 normalized = decorate_result(job_id, operation, result, started_at=started_at)
+                completion = completion_state(operation, normalized)
+                self._runner.update_callable_state(
+                    job_id,
+                    phase="completed",
+                    metadata=cast(dict[str, object], completion["metadata"]),
+                    progress=1.0,
+                    errors=cast(int | None, completion.get("errors")),
+                    total_candidates=cast(int | None, completion.get("total_candidates")),
+                    total_scanned=cast(int | None, completion.get("total_scanned")),
+                )
                 _persist_result(self._store, operation, job_id, normalized)
                 return normalized
             except RuntimeError as exc:
@@ -322,6 +384,45 @@ def decorate_result(
     return normalized
 
 
+def completion_state(operation: JobOperation, result: Mapping[str, object]) -> dict[str, object]:
+    """Build the public job metadata emitted when an operation completes."""
+
+    if operation in {"discovery", "refinement"}:
+        search_metadata = result.get("search_metadata")
+        search = search_metadata if isinstance(search_metadata, Mapping) else {}
+        metadata: dict[str, object] = {
+            "overall_progress": 1.0,
+            "estimated_seconds_remaining": 0.0,
+            "requested_trials": search.get("requested_trials"),
+            "evaluated_trials": search.get("evaluated_trials"),
+            "unique_evaluated_trials": search.get("unique_evaluated_trials"),
+            "duplicate_trials": search.get("duplicate_trials"),
+            "stage_durations_seconds": result.get("stage_durations_seconds"),
+        }
+        if operation == "refinement":
+            metadata["refinement"] = True
+        return {
+            "metadata": metadata,
+            "total_candidates": _nonnegative_int(search.get("requested_trials")),
+            "total_scanned": _nonnegative_int(search.get("evaluated_trials")),
+        }
+    diagnostics = result.get("diagnostics")
+    raw_candidate_count = result.get("candidate_count")
+    candidate_count = _nonnegative_int(raw_candidate_count)
+    return {
+        "metadata": {
+            "overall_progress": 1.0,
+            "candidate_count": candidate_count,
+            "data_changed": result.get("data_changed", False),
+            "finished_at": result.get("finished_at"),
+            "duration_seconds": result.get("duration_seconds", 0.0),
+        },
+        "errors": len(diagnostics) if isinstance(diagnostics, Mapping) else 0,
+        "total_candidates": candidate_count,
+        "total_scanned": candidate_count,
+    }
+
+
 def _persist_result(
     store: DuckDbMarketDataStore,
     operation: JobOperation,
@@ -386,10 +487,27 @@ def _duration_value(value: object) -> float | None:
     return float(value) if isinstance(value, (int, float)) else None
 
 
+def _nonnegative_int(value: object) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(0, int(value)) if isinstance(value, (int, float, str)) else 0
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 __all__ = [
     "FileStrategyJobBackend",
     "InProcessStrategyJobBackend",
     "StrategyDiscoveryServiceLike",
     "StrategyJobBackend",
+    "completion_state",
     "decorate_result",
 ]
+
+
+def _string_tuple(value: object) -> tuple[str, ...] | None:
+    if not isinstance(value, (list, tuple)):
+        return None
+    values = tuple(str(item).strip() for item in value if str(item).strip())
+    return values or None

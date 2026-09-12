@@ -37,6 +37,19 @@ class DiscoveryResourceEstimate:
     reason: str
 
 
+class DiscoveryResourceBudgetError(ValueError):
+    """Raised when even one discovery worker exceeds the memory budget."""
+
+    def __init__(self, estimate: DiscoveryResourceEstimate) -> None:
+        self.estimate = estimate
+        super().__init__(
+            "策略实验预计需要 "
+            f"{estimate.estimated_peak_bytes / 1024**3:.1f} GiB，"
+            f"当前预算仅 {estimate.memory_budget_bytes / 1024**3:.1f} GiB；"
+            "请缩小证券范围或日期范围后重试"
+        )
+
+
 def resolve_discovery_workers() -> int:
     """Resolve and validate the requested discovery worker count."""
 
@@ -97,7 +110,11 @@ def estimate_discovery_resources(
     workers = resolve_discovery_workers() if requested_workers is None else requested_workers
     if not 1 <= workers <= MAX_WORKERS:
         raise ValueError(f"strategy discovery worker 数必须在 1 到 {MAX_WORKERS} 之间")
-    budget = resolve_discovery_memory_budget() if memory_budget_bytes is None else memory_budget_bytes
+    budget = (
+        resolve_discovery_memory_budget()
+        if memory_budget_bytes is None
+        else memory_budget_bytes
+    )
     if budget <= 0:
         raise ValueError("strategy discovery memory budget 必须大于 0")
 
@@ -173,6 +190,7 @@ def _read_cgroup_memory_limit() -> int | None:
 
 __all__ = [
     "DEFAULT_DISCOVERY_WORKERS",
+    "DiscoveryResourceBudgetError",
     "DiscoveryResourceEstimate",
     "estimate_discovery_resources",
     "resolve_discovery_memory_budget",

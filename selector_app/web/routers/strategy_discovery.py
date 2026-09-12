@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 
 from selector_app.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
 from selector_app.strategy_discovery.job_backend import StrategyJobBackend
+from selector_app.strategy_discovery.resources import DiscoveryResourceBudgetError
 from selector_app.strategy_discovery.service import StrategyDiscoveryService
 
 from ..schemas import StrategyDiscoveryRequest, StrategyRefinementRequest, StrategyReplayRequest
@@ -94,10 +95,43 @@ def create_strategy_discovery(
         ) from exc
 
     try:
+        resource_estimate = _backend(request).preflight(discovery_request)
+    except DiscoveryResourceBudgetError as exc:
+        estimate = exc.estimate
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={
+                "error": {
+                    "code": "resource_budget_exceeded",
+                    "message": str(exc),
+                    "details": {
+                        "row_count": estimate.row_count,
+                        "snapshot_bytes": estimate.snapshot_bytes,
+                        "estimated_peak_bytes": estimate.estimated_peak_bytes,
+                        "memory_budget_bytes": estimate.memory_budget_bytes,
+                        "requested_workers": estimate.requested_workers,
+                        "selected_workers": estimate.selected_workers,
+                    },
+                }
+            },
+        )
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={"error": {"code": "validation_error", "message": str(exc)}},
+        )
+    except (MarketDataStoreError, OSError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="本地行情数据暂不可用，请检查 DuckDB 后重试",
+        ) from exc
+
+    try:
         job_id = _backend(request).submit(
             "discovery",
             {"request": discovery_request.to_dict()},
             description="策略实验室",
+            worker_count=(resource_estimate.selected_workers if resource_estimate else None),
         )
     except (RuntimeError, OSError, ValueError) as exc:
         raise HTTPException(status_code=503, detail="任务执行器暂不可用") from exc
