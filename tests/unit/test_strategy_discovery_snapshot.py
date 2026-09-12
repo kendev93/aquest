@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -8,12 +9,18 @@ import pandas as pd
 
 from selector_app.indicators.cache import IndicatorCache
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
+from selector_app.market_data.models import StockRef
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.portfolio_backtest.service import PortfolioBacktestService
 from selector_app.screening.models import ScreenCondition
 from selector_app.screening.rules import RuleGroup
 from selector_app.strategy_discovery.models import DiscoveryRequest, StrategyCandidate
-from selector_app.strategy_discovery.snapshot import build_discovery_snapshot
+from selector_app.strategy_discovery.snapshot import (
+    SNAPSHOT_SYMBOL_BATCH_SIZE,
+    _iter_ref_batches,
+    build_discovery_snapshot,
+    snapshot_window,
+)
 from selector_app.web.schemas import PortfolioBacktestRequest
 
 
@@ -101,6 +108,22 @@ def _candidate_config() -> object:
             "end_date": "2024-03-20",
         }
     ).to_config()
+
+
+def test_snapshot_ref_batches_are_bounded() -> None:
+    refs = [StockRef("SH", f"{index:06d}", Path()) for index in range(65)]
+
+    batches = list(_iter_ref_batches(refs))
+
+    assert [len(batch) for batch in batches] == [SNAPSHOT_SYMBOL_BATCH_SIZE, 1]
+    assert [ref.code for ref in batches[0] + batches[1]] == [f"{index:06d}" for index in range(65)]
+
+
+def test_snapshot_window_uses_all_discovery_split_boundaries(tmp_path: Path) -> None:
+    window = snapshot_window(_experiment(tmp_path / "market.duckdb"))
+
+    assert window.start == date(2024, 1, 1)
+    assert window.end == date(2024, 3, 20)
 
 
 def test_snapshot_replay_matches_ordinary_portfolio_backtest(tmp_path: Path) -> None:
