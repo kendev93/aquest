@@ -13,7 +13,7 @@ from selector_app.market_data.models import InstrumentBoard, InstrumentType
 from selector_app.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
 from selector_app.screening.jobs import ScreenJobRunner, TaskCancelledError, TaskUserError
 
-from .job_store import JobOperation, StrategyJobStore
+from .job_store import DEFAULT_STALE_AFTER_SECONDS, JobOperation, StrategyJobStore
 from .models import DiscoveryRequest
 from .refinement import discovery_request_from_dict
 from .replay import ReplayLeaderboard
@@ -119,6 +119,9 @@ class FileStrategyJobBackend:
         return job_id
 
     def get(self, job_id: str) -> dict[str, object] | None:
+        self._job_store.recover_stale_running(
+            stale_after_seconds=DEFAULT_STALE_AFTER_SECONDS
+        )
         state = self._job_store.read_state(job_id)
         if state is None:
             return None
@@ -127,6 +130,9 @@ class FileStrategyJobBackend:
         return refreshed or state
 
     def result(self, job_id: str) -> dict[str, object] | None:
+        self._job_store.recover_stale_running(
+            stale_after_seconds=DEFAULT_STALE_AFTER_SECONDS
+        )
         state = self._job_store.read_state(job_id)
         if state is None:
             return None

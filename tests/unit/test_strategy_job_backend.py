@@ -155,6 +155,25 @@ def test_file_backend_reconciles_completed_result_after_backend_restart(tmp_path
     assert store.read_strategy_discovery_history(job_id) is not None
 
 
+def test_file_backend_exposes_a_stale_worker_as_a_terminal_failure(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    job_store = StrategyJobStore(tmp_path / "jobs")
+    backend = FileStrategyJobBackend(store, job_store, worker_count=2)
+    job_id = backend.submit(
+        "discovery",
+        {"request": _request().to_dict()},
+        description="策略实验室",
+    )
+    assert job_store.claim_next() == job_id
+    job_store.update(job_id, heartbeat_at=0.0)
+
+    state = backend.get(job_id)
+
+    assert state is not None
+    assert state["status"] == "failed"
+    assert state["error_code"] == "worker_stale"
+
+
 def test_in_process_backend_preserves_existing_fake_service_contract(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     runner = ScreenJobRunner(max_workers=1)

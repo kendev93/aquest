@@ -653,6 +653,7 @@ export interface StrategyDiscoveryJobState {
   errors: number
   skipped: number
   error: string | null
+  error_code?: string | null
   result: StrategyDiscoveryResult | null
   phase?: string | null
   metadata?: Record<string, unknown>
@@ -753,6 +754,7 @@ export interface StrategyReplayJobState {
   errors: number
   skipped: number
   error: string | null
+  error_code?: string | null
   result: StrategyReplayResult | null
   phase?: string | null
   metadata?: Record<string, unknown>

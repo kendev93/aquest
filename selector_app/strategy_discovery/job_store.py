@@ -17,6 +17,7 @@ JobStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 _JOB_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _OPERATIONS = frozenset({"discovery", "refinement", "replay"})
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
+DEFAULT_STALE_AFTER_SECONDS = 120.0
 
 
 class StrategyJobStore:
@@ -121,7 +122,7 @@ class StrategyJobStore:
             raise ValueError("策略任务不存在")
         explicit_updates = {**dict(fields or {}), **updates}
         merged = {**current, **explicit_updates}
-        metadata = updates.get("metadata")
+        metadata = explicit_updates.get("metadata")
         if isinstance(metadata, Mapping):
             previous = current.get("metadata")
             merged["metadata"] = {
@@ -279,5 +280,6 @@ __all__ = [
     "JobOperation",
     "JobStatus",
     "StrategyJobStore",
+    "DEFAULT_STALE_AFTER_SECONDS",
     "default_strategy_job_root",
 ]

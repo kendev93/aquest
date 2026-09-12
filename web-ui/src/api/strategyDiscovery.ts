@@ -11,6 +11,9 @@ import type {
 } from '../types'
 
 const API_BASE = '/api/v1/strategy-discovery'
+const MAX_GET_ATTEMPTS = 3
+const RETRYABLE_GATEWAY_STATUSES = new Set([502, 503, 504])
+const GET_RETRY_DELAYS_MS = [50, 100]
 
 interface ErrorPayload {
   error?: { message?: string }
@@ -18,20 +21,35 @@ interface ErrorPayload {
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method ?? 'GET').toUpperCase()
   let response: Response
-  try {
-    response = await fetch(url, {
-      ...init,
-      headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
-    })
-  } catch {
-    throw new FormulaScreenApiError('无法连接策略实验服务，请确认后端已启动或 Docker 容器健康。', 0)
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      response = await fetch(url, {
+        ...init,
+        headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
+      })
+    } catch {
+      throw new FormulaScreenApiError('无法连接策略实验服务，请确认后端已启动或 Docker 容器健康。', 0)
+    }
+    if (
+      method === 'GET'
+      && RETRYABLE_GATEWAY_STATUSES.has(response.status)
+      && attempt < MAX_GET_ATTEMPTS - 1
+    ) {
+      await new Promise((resolve) => window.setTimeout(resolve, GET_RETRY_DELAYS_MS[attempt] ?? 100))
+      continue
+    }
+    break
   }
   let payload: T & ErrorPayload
   try {
     payload = await response.json() as T & ErrorPayload
   } catch {
-    throw new FormulaScreenApiError(`策略实验服务返回了无效响应（HTTP ${response.status}）。`, response.status)
+    const message = RETRYABLE_GATEWAY_STATUSES.has(response.status)
+      ? `策略实验服务暂时不可用（HTTP ${response.status}），请稍后重试。`
+      : `策略实验服务返回了无效响应（HTTP ${response.status}）。`
+    throw new FormulaScreenApiError(message, response.status)
   }
   if (!response.ok) {
     throw new FormulaScreenApiError(

@@ -68,6 +68,9 @@ const form = reactive({
   universeFile: '',
   instrumentTypes: [] as InstrumentType[],
   boards: [] as InstrumentBoard[],
+  dateMode: 'full' as 'full' | 'custom',
+  startDate: '',
+  endDate: '',
   requiredBuyRule: emptyRule(),
   requiredSellRule: emptyRule(),
   maxPositions: 5,
@@ -128,7 +131,27 @@ function validate(): Record<string, string> {
     next.maxPositions = '持仓数量必须是 1 到 100 的整数。'
   }
   if (form.universe === 'custom' && !form.universeFile.trim()) next.universeFile = '请输入自定义品种列表文件。'
+  if (form.dateMode === 'custom') {
+    if (!form.startDate) next.startDate = '请选择开始日期。'
+    if (!form.endDate) next.endDate = '请选择结束日期。'
+    if (form.startDate && form.endDate && form.startDate > form.endDate) {
+      next.dateRange = '开始日期不能晚于结束日期。'
+    } else if (
+      form.startDate
+      && form.endDate
+      && dateDistance(form.startDate, form.endDate) < 2
+    ) {
+      next.dateRange = '策略实验时间范围至少需要 3 天。'
+    }
+  }
   return next
+}
+
+function dateDistance(start: string, end: string): number {
+  const startTime = Date.parse(`${start}T00:00:00Z`)
+  const endTime = Date.parse(`${end}T00:00:00Z`)
+  if (!Number.isFinite(startTime) || !Number.isFinite(endTime)) return -1
+  return Math.floor((endTime - startTime) / (24 * 60 * 60 * 1000))
 }
 
 function buildPayload(): StrategyDiscoveryPayload {
@@ -136,6 +159,9 @@ function buildPayload(): StrategyDiscoveryPayload {
   return {
     universe: form.universe,
     universe_file: form.universe === 'custom' ? form.universeFile.trim() : null,
+    ...(form.dateMode === 'custom'
+      ? { start_date: form.startDate, end_date: form.endDate }
+      : {}),
     ...(form.instrumentTypes.length > 0 ? { instrument_types: [...form.instrumentTypes] } : {}),
     ...(form.boards.length > 0 ? { boards: [...form.boards] } : {}),
     ...(form.requiredBuyRule.conditions.length > 0
@@ -591,6 +617,15 @@ function restoreHistoryRequest(raw: unknown): void {
     : {}
   if (typeof base.universe === 'string' && ['all', 'sh', 'sz', 'custom'].includes(base.universe)) form.universe = base.universe as Universe
   if (typeof base.universe_file === 'string') form.universeFile = base.universe_file
+  if (typeof base.start_date === 'string' && typeof base.end_date === 'string') {
+    form.dateMode = 'custom'
+    form.startDate = base.start_date.slice(0, 10)
+    form.endDate = base.end_date.slice(0, 10)
+  } else {
+    form.dateMode = 'full'
+    form.startDate = ''
+    form.endDate = ''
+  }
   if (Array.isArray(base.instrument_types)) {
     form.instrumentTypes = base.instrument_types.filter((item): item is InstrumentType => INSTRUMENT_TYPE_OPTIONS.some((option) => option.key === item))
   }
@@ -687,10 +722,15 @@ onMounted(async () => {
           <div class="panel-heading"><div><span class="section-kicker">01 / CONFIGURE</span><h2>实验设置</h2></div><span class="required-hint">* 必填</span></div>
           <fieldset class="form-section">
             <legend>数据范围</legend>
-            <p class="helper">策略实验只读取本地 DuckDB 中全部已完成日线，不会上传行情，也不需要填写日期。</p>
+            <p class="helper">默认使用本地 DuckDB 全历史已完成日线；如果资源预算提示范围过大，可切换自定义日期。</p>
             <div class="compact-fields">
               <div><label for="strategy-discovery-universe">品种范围</label><select id="strategy-discovery-universe" v-model="form.universe" data-testid="strategy-discovery-universe"><option value="all">沪深全部品种</option><option value="sh">仅上海</option><option value="sz">仅深圳</option><option value="custom">自定义列表</option></select></div>
               <div><label for="strategy-discovery-positions">持仓数量 N</label><input id="strategy-discovery-positions" v-model.number="form.maxPositions" data-testid="strategy-discovery-positions" type="number" min="1" max="100" step="1"></div>
+            </div>
+            <div class="compact-fields strategy-date-fields">
+              <div><label for="strategy-discovery-date-mode">历史范围</label><select id="strategy-discovery-date-mode" v-model="form.dateMode" data-testid="strategy-discovery-date-mode"><option value="full">全历史</option><option value="custom">自定义日期</option></select></div>
+              <div v-if="form.dateMode === 'custom'"><label for="strategy-discovery-start-date">开始日期</label><input id="strategy-discovery-start-date" v-model="form.startDate" data-testid="strategy-discovery-start-date" type="date"><p v-if="errors.startDate" class="field-error">{{ errors.startDate }}</p></div>
+              <div v-if="form.dateMode === 'custom'"><label for="strategy-discovery-end-date">结束日期</label><input id="strategy-discovery-end-date" v-model="form.endDate" data-testid="strategy-discovery-end-date" type="date"><p v-if="errors.endDate || errors.dateRange" class="field-error">{{ errors.endDate || errors.dateRange }}</p></div>
             </div>
             <div class="scope-config inline-scope-config" data-testid="strategy-discovery-scope"><div class="scope-options"><span>证券类型</span><label v-for="option in INSTRUMENT_TYPE_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`strategy-discovery-scope-type-${option.key}`" :checked="form.instrumentTypes.includes(option.key)" @change="toggleInstrumentType(option.key)">{{ option.label }}</label></div><div class="scope-options"><span>板块</span><label v-for="option in BOARD_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`strategy-discovery-scope-board-${option.key}`" :checked="form.boards.includes(option.key)" @change="toggleBoard(option.key)">{{ option.label }}</label></div><small class="scope-helper">未勾选表示全部；类型和板块同时选择时取交集。</small></div>
             <div v-if="form.universe === 'custom'" class="portfolio-inline-field"><label for="strategy-discovery-universe-file">品种列表文件</label><input id="strategy-discovery-universe-file" v-model="form.universeFile" data-testid="strategy-discovery-universe-file" type="text"><p v-if="errors.universeFile" class="field-error">{{ errors.universeFile }}</p></div>
@@ -726,7 +766,7 @@ onMounted(async () => {
             <p class="helper">排序指标、买卖条件、止盈止损、移动止盈和冷却天数均自动搜索。佣金默认万分之一，最低 0.1 元。</p>
             <p class="helper">夏普目标和收益目标分别保留各自的验证候选，验证后独立排序；两个榜单可以包含不同策略。</p>
           </fieldset>
-          <div v-if="capabilities" class="discovery-capability-note" data-testid="strategy-discovery-capabilities">指标 {{ capabilities.indicator_count }} 个 · 信号 {{ capabilities.signal_count }} 个 · Optuna {{ capabilities.optuna_available ? '可用' : '不可用' }} · LightGBM {{ capabilities.lightgbm_available ? '可用' : '不可用' }} · 回测 {{ capabilities.evaluation_workers ?? 8 }} 进程<span v-if="capabilities.enabled === false" class="negative"> · 请重新构建 Docker 镜像安装策略寻优依赖</span></div>
+          <div v-if="capabilities" class="discovery-capability-note" data-testid="strategy-discovery-capabilities">指标 {{ capabilities.indicator_count }} 个 · 信号 {{ capabilities.signal_count }} 个 · Optuna {{ capabilities.optuna_available ? '可用' : '不可用' }} · LightGBM {{ capabilities.lightgbm_available ? '可用' : '不可用' }} · 回测 {{ capabilities.evaluation_workers ?? 2 }} 进程<span v-if="capabilities.enabled === false" class="negative"> · 请重新构建 Docker 镜像安装策略寻优依赖</span></div>
           <div class="action-stack"><button class="primary-button" data-testid="strategy-discovery-submit" type="submit" :disabled="!canSubmit"><span v-if="loading" class="spinner" aria-hidden="true"></span>{{ loading ? '实验进行中…' : '开始策略实验' }}</button><button v-if="loading" class="secondary-button" data-testid="strategy-discovery-cancel" type="button" @click="cancel">取消实验</button></div>
           <div v-if="job" class="discovery-progress" data-testid="strategy-discovery-progress"><div class="discovery-progress-heading"><strong>{{ progressPhase(job) }}</strong><span data-testid="strategy-discovery-overall-progress">总体 {{ progressPercent(job) }}</span></div><div class="progress-track"><span :style="{ width: progressPercent(job) }"></span></div><div class="discovery-progress-stats"><span>当前阶段 {{ progressCount(job, 'phase_current', job.total_scanned) }} / {{ progressCount(job, 'phase_total', job.total_candidates) }}</span><span>预计总评估 {{ progressCount(job, 'estimated_total_evaluations', job.total_candidates) }} 次</span><span data-testid="strategy-discovery-remaining">预计剩余 {{ formatDuration(job) }}</span></div><small v-if="job.metadata?.best_sharpe !== undefined">吞吐 {{ formatNumber(metadataNumber(job, 'throughput_per_second')) }} 候选/秒 · 当前最佳夏普 {{ formatNumber(typeof job.metadata.best_sharpe === 'number' ? job.metadata.best_sharpe : null) }} · 收益 {{ formatPercent(typeof job.metadata.best_return === 'number' ? job.metadata.best_return : null) }}</small><small v-if="job.metadata?.requested_trials !== undefined" data-testid="strategy-discovery-budget-stats">请求候选 {{ progressCount(job, 'requested_trials', 0) }} · 已评估 {{ progressCount(job, 'evaluated_trials', job.total_scanned) }} · 唯一 {{ progressCount(job, 'unique_evaluated_trials', job.total_scanned) }} · 重复 {{ progressCount(job, 'duplicate_trials', 0) }}</small><small v-if="job.metadata?.stage_durations_seconds" data-testid="strategy-discovery-stage-durations">快照 {{ stageDuration(job, 'snapshot') }} · 粗筛 {{ stageDuration(job, 'coarse') }} · 中筛 {{ stageDuration(job, 'medium') }} · 完整 {{ stageDuration(job, 'full') }} · 验证 {{ stageDuration(job, 'validation') }} · 留出 {{ stageDuration(job, 'holdout') }}</small></div>
           <div v-if="refinementJob" class="discovery-progress refinement-progress" data-testid="strategy-refinement-progress"><div class="discovery-progress-heading"><strong>{{ progressPhase(refinementJob) }}</strong><span data-testid="strategy-refinement-overall-progress">总体 {{ progressPercent(refinementJob) }}</span></div><div class="progress-track"><span :style="{ width: progressPercent(refinementJob) }"></span></div><div class="discovery-progress-stats"><span>当前阶段 {{ progressCount(refinementJob, 'phase_current', refinementJob.total_scanned) }} / {{ progressCount(refinementJob, 'phase_total', refinementJob.total_candidates) }}</span><span>预计总评估 {{ progressCount(refinementJob, 'estimated_total_evaluations', refinementJob.total_candidates) }} 次</span><span data-testid="strategy-refinement-remaining">预计剩余 {{ formatDuration(refinementJob) }}</span></div><small v-if="refinementJob.metadata?.best_sharpe !== undefined">吞吐 {{ formatNumber(metadataNumber(refinementJob, 'throughput_per_second')) }} 候选/秒 · 当前最佳夏普 {{ formatNumber(typeof refinementJob.metadata.best_sharpe === 'number' ? refinementJob.metadata.best_sharpe : null) }} · 收益 {{ formatPercent(typeof refinementJob.metadata.best_return === 'number' ? refinementJob.metadata.best_return : null) }}</small><small v-if="refinementJob.metadata?.requested_trials !== undefined" data-testid="strategy-refinement-budget-stats">请求候选 {{ progressCount(refinementJob, 'requested_trials', 0) }} · 已评估 {{ progressCount(refinementJob, 'evaluated_trials', refinementJob.total_scanned) }} · 唯一 {{ progressCount(refinementJob, 'unique_evaluated_trials', refinementJob.total_scanned) }} · 重复 {{ progressCount(refinementJob, 'duplicate_trials', 0) }}</small></div>
