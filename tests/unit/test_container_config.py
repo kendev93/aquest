@@ -22,7 +22,7 @@ def test_compose_defines_an_isolated_strategy_worker() -> None:
     env_example = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
 
     assert "  strategy-worker:" in compose
-    assert "python -m selector_app.strategy_discovery.worker" in compose
+    assert 'command: ["python", "-m", "selector_app.strategy_discovery.worker"]' in compose
     assert "SELECTOR_DATA_DIR: /data/market" in compose
     assert "source: market_data" in compose
     assert "SELECTOR_DISCOVERY_WORKERS" in compose

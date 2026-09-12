@@ -20,6 +20,26 @@ services:
       - "127.0.0.1:${API_PORT:-8123}:8123"
     restart: unless-stopped
 
+  strategy-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      PYTHONUNBUFFERED: "1"
+      SELECTOR_DATA_DIR: /data/market
+      SELECTOR_DISCOVERY_WORKERS: "${SELECTOR_DISCOVERY_WORKERS:-2}"
+      SELECTOR_DISCOVERY_JOB_DIR: /data/market/.strategy-jobs
+    volumes:
+      - type: volume
+        source: market_data
+        target: /data/market
+    depends_on:
+      backend:
+        condition: service_healthy
+    command: ["python", "-m", "selector_app.strategy_discovery.worker"]
+    mem_limit: "${STRATEGY_WORKER_MEMORY_LIMIT:-5g}"
+    restart: unless-stopped
+
   frontend:
     build:
       context: .
