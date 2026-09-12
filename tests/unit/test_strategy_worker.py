@@ -66,7 +66,7 @@ def test_worker_claims_discovery_and_persists_progress_and_result(tmp_path) -> N
     assert state is not None
     assert state["status"] == "completed"
     assert state["progress"] == 1.0
-    assert state["metadata"]["overall_progress"] == 0.5
+    assert state["metadata"]["overall_progress"] == 1.0
     result = store.read_result("job-1")
     assert result is not None
     assert result["history_id"] == "job-1"
@@ -105,3 +105,25 @@ def test_worker_returns_none_when_no_job_is_queued(tmp_path) -> None:
     store, worker = _worker(tmp_path, FakeDiscoveryService())
 
     assert worker.run_once() is None
+
+
+def test_worker_factory_receives_the_persisted_worker_count(tmp_path) -> None:
+    service = FakeDiscoveryService()
+    store = StrategyJobStore(tmp_path / "jobs")
+    selected: list[int | None] = []
+    worker = StrategyDiscoveryWorker(
+        store,
+        service,
+        service_factory=lambda worker_count: selected.append(worker_count) or service,
+        poll_interval_seconds=0.001,
+    )
+    store.create(
+        "job-1",
+        operation="discovery",
+        payload={"request": {"base_config": {}, "splits": {}, "max_trials": 1}},
+        description="策略实验室",
+        worker_count=1,
+    )
+
+    assert worker.run_once() == "job-1"
+    assert selected == [1]
