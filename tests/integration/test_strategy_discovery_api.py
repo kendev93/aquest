@@ -153,6 +153,48 @@ def test_create_app_keeps_in_process_backend_for_injected_fake_service(tmp_path)
     assert isinstance(app.state.strategy_job_backend, InProcessStrategyJobBackend)
 
 
+def test_strategy_discovery_rejects_over_budget_before_creating_a_job(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SELECTOR_DISCOVERY_MEMORY_BUDGET_MB", "1")
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars(
+        "SH",
+        "600000",
+        "stock",
+        pd.DataFrame(
+            {
+                "date": pd.date_range("2024-01-01", periods=5, freq="D"),
+                "open": [10, 11, 12, 13, 14],
+                "high": [10.2, 11.2, 12.2, 13.2, 14.2],
+                "low": [9.8, 10.8, 11.8, 12.8, 13.8],
+                "close": [10, 11, 12, 13, 14],
+                "volume": [1000] * 5,
+                "amount": [10000] * 5,
+                "bar_status": ["completed"] * 5,
+            }
+        ),
+    )
+    app = create_app(market_data_store=store, auto_sync_enabled=False)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/strategy-discovery",
+            json={
+                "start_date": "2024-01-01",
+                "end_date": "2024-01-05",
+                "max_positions": 2,
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "resource_budget_exceeded"
+    job_root = tmp_path / ".strategy-jobs"
+    assert job_root.is_dir()
+    assert list(job_root.iterdir()) == []
+
+
 def test_strategy_refinement_api_creates_independent_parent_linked_history(tmp_path) -> None:
     from selector_app.market_data.store import DuckDbMarketDataStore
 
