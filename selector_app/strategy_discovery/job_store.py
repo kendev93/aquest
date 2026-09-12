@@ -236,6 +236,15 @@ class StrategyJobStore:
         return {str(key): cast(object, value) for key, value in raw.items()}
 
 
+def default_strategy_job_root(database_path: str | Path) -> Path:
+    """Resolve the shared job directory next to the configured market database."""
+
+    configured = os.getenv("SELECTOR_DISCOVERY_JOB_DIR")
+    if configured and configured.strip():
+        return Path(configured).expanduser().resolve()
+    return Path(database_path).expanduser().resolve().parent / ".strategy-jobs"
+
+
 def _initial_state(
     job_id: str,
     *,
@@ -266,4 +275,9 @@ def _initial_state(
     }
 
 
-__all__ = ["JobOperation", "JobStatus", "StrategyJobStore"]
+__all__ = [
+    "JobOperation",
+    "JobStatus",
+    "StrategyJobStore",
+    "default_strategy_job_root",
+]

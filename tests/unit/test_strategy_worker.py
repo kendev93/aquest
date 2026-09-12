@@ -42,7 +42,10 @@ class FakeDiscoveryService:
         return {"experiment_id": "experiment-1", "leaderboard": leaderboard, "candidates": []}
 
 
-def _worker(tmp_path, service: FakeDiscoveryService) -> tuple[StrategyJobStore, StrategyDiscoveryWorker]:
+def _worker(
+    tmp_path,
+    service: FakeDiscoveryService,
+) -> tuple[StrategyJobStore, StrategyDiscoveryWorker]:
     store = StrategyJobStore(tmp_path / "jobs")
     return store, StrategyDiscoveryWorker(store, service, poll_interval_seconds=0.001)
 
