@@ -28,4 +28,6 @@ def test_compose_defines_an_isolated_strategy_worker() -> None:
     assert "source: market_data" in compose
     assert "SELECTOR_DISCOVERY_WORKERS" in compose
     assert 'mem_limit: "${STRATEGY_WORKER_MEMORY_LIMIT:-6g}"' in compose
+    assert "healthcheck:" in compose
+    assert "disable: true" in compose
     assert "SELECTOR_DISCOVERY_WORKERS=2" in env_example
