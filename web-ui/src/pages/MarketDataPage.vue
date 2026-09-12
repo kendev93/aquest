@@ -116,9 +116,13 @@ const autoSyncScheduleText = computed(() => {
 })
 
 const syncPhaseText = computed(() => ({
+  planning: '正在规划同步区间…',
+  fetching: '正在并发下载在线日线…',
   instrument_discovery: `正在刷新${syncProviderLabel.value}证券列表…`,
   local_import: '正在导入本地行情…',
   online_bars: '正在同步在线日线…',
+  merging: '正在合并行情分片…',
+  cleanup: '正在清理临时分片…',
 }[marketJob.value?.phase ?? ''] ?? null))
 
 const syncProviderLabel = computed(() => {
@@ -211,6 +215,24 @@ const discoveryWaiting = computed(() => Boolean(
 const discoveryProviderText = computed(() => (
   currentSyncProviderText.value === 'TDX' ? '等待 TDX 返回证券列表…' : '等待 AKShare 返回证券列表…'
 ))
+
+const marketProgressSummary = computed(() => {
+  const job = marketJob.value
+  if (!job) return '已处理 0 / 0'
+  const metadata = job.metadata ?? {}
+  if (job.phase === 'merging') {
+    const merged = typeof metadata.merged_workers === 'number' ? metadata.merged_workers : job.total_scanned
+    const total = typeof metadata.total_workers === 'number' ? metadata.total_workers : job.worker_count ?? 8
+    return `已合并 ${merged} / ${total} 个分片`
+  }
+  if (job.phase === 'fetching') {
+    const downloaded = typeof metadata.downloaded_targets === 'number'
+      ? metadata.downloaded_targets
+      : job.total_scanned
+    return `已下载 ${downloaded} / ${job.total_candidates}`
+  }
+  return `已处理 ${job.total_scanned} / ${job.total_candidates}`
+})
 
 const marketProgressIndeterminate = computed(() => Boolean(
   marketJob.value?.status === 'running'
@@ -647,7 +669,7 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
             <div class="scope-options"><span>证券类型</span><label v-for="option in INSTRUMENT_TYPE_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-sync-type-${option.key}`" :checked="form.syncInstrumentTypes.includes(option.key)" @change="toggleInstrumentType(option.key)">{{ option.label }}</label></div>
             <div class="scope-options"><span>板块</span><label v-for="option in BOARD_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-sync-board-${option.key}`" :checked="form.syncBoards.includes(option.key)" @change="toggleBoard(option.key)">{{ option.label }}</label></div>
             <div class="scope-options provider-options"><span>行情源</span><label><input v-model="form.syncProvider" type="radio" value="akshare" data-testid="market-provider-akshare">AKShare（默认）</label><label><input v-model="form.syncProvider" type="radio" value="tdx" data-testid="market-provider-tdx">TDX（遗留）</label></div>
-            <small class="scope-helper">类型或板块未勾选表示不限制；两者同时选择时取交集。一键同步只刷新证券列表并补充在线日线，不读取 vipdoc；只有“导入本地行情”才会读取 .day 文件。主板、科创板和创业板股票默认使用 AKShare；全量补齐按钮会重新读取 AKShare 可提供的完整历史。</small>
+            <small class="scope-helper">类型或板块未勾选表示不限制；两者同时选择时取交集。一键同步只刷新证券列表并补充在线日线，不读取 vipdoc；只有“导入本地行情”才会读取 .day 文件。主板、科创板和创业板股票默认使用 AKShare；全量补齐按钮只请求缺失历史区间。</small>
             <small v-if="providerCapabilities?.providers.akshare?.history_sources?.length" class="scope-helper">AKShare 备用接口：{{ providerCapabilities.providers.akshare.history_sources.join(' → ') }}</small>
             <small v-if="providerCapabilities?.providers.akshare && !providerCapabilities.providers.akshare.available" class="scope-warning">{{ providerCapabilities.providers.akshare.error || 'AKShare 当前不可用，请重新构建 Docker 镜像。' }}</small>
           </div>
@@ -660,7 +682,7 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
           <div v-if="marketJob" class="sync-progress" data-testid="market-data-progress">
           <div class="sync-progress-heading"><span>{{ marketJobTitle }}</span><div class="sync-progress-actions"><button v-if="marketJob.status === 'queued' || marketJob.status === 'running'" class="text-button" data-testid="market-sync-cancel" type="button" :disabled="marketJob.cancel_requested || marketJob.phase === 'cancelling'" @click="cancelActiveMarketJob(marketJob.job_id)">{{ marketJob.cancel_requested || marketJob.phase === 'cancelling' ? '取消中…' : '取消任务' }}</button><strong>{{ Math.round(marketJob.progress * 100) }}%</strong></div></div>
           <div class="progress-track sync-progress-track" :class="{ indeterminate: marketProgressIndeterminate }"><span :style="{ width: `${Math.round(marketJob.progress * 100)}%` }"></span></div>
-          <div class="sync-progress-stats"><span>已处理 <strong>{{ marketJob.total_scanned }}</strong> / {{ marketJob.total_candidates }}</span><span>worker <strong>{{ marketJob.worker_count ?? 8 }}</strong></span><span :class="{ negative: marketJob.errors > 0 }">错误 <strong>{{ marketJob.errors }}</strong></span></div>
+          <div class="sync-progress-stats"><span>{{ marketProgressSummary }}</span><span>worker <strong>{{ marketJob.worker_count ?? 8 }}</strong></span><span :class="{ negative: marketJob.errors > 0 }">错误 <strong>{{ marketJob.errors }}</strong></span></div>
           <div v-if="discoveryWaiting" class="sync-stage-status" data-testid="market-sync-stage"><strong>正在刷新证券列表</strong><span>{{ discoveryProviderText }}</span></div>
           <div v-if="currentSyncDetail" class="sync-current-instrument" data-testid="market-sync-current">
             <div class="sync-current-heading"><span>{{ currentSyncDetailLabel }}</span><strong>{{ currentSyncInstrumentText }}</strong><span>{{ currentSyncProviderText }} · {{ currentSyncStatusText }}</span></div>
@@ -668,6 +690,9 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
             <div v-if="currentSyncHistorySource" class="sync-current-source">本次接口 <strong>{{ currentSyncHistorySource }}</strong></div>
           </div>
           <div v-if="marketJob.result" class="sync-result-stats">
+            <span v-if="marketJob.result.execution_mode === 'process_pool_staging'">执行模式 8 进程分片</span>
+            <span v-if="marketJob.result.staged_rows !== undefined">暂存 {{ marketJob.result.staged_rows }} 根</span>
+            <span v-if="marketJob.result.merged_rows !== undefined">合并 {{ marketJob.result.merged_rows }} 根</span>
             <template v-if="marketJob.result.source === 'local'"><span>导入文件 {{ marketJob.result.imported_files ?? 0 }}</span><span>替换标的 {{ marketJob.result.replaced_instruments ?? 0 }}</span><span>写入 K 线 {{ marketJob.result.imported_bars ?? 0 }}</span><span>跳过 {{ marketJob.result.skipped_files ?? 0 }}</span></template>
             <template v-else-if="marketJob.result.source === 'combined'"><span>本地导入 {{ marketJob.result.local_import?.imported_files ?? 0 }} 个文件</span><span>本地写入 {{ marketJob.result.local_import?.imported_bars ?? 0 }} 根</span><span>在线证券列表 {{ marketJob.result.online_sync?.listed_instruments ?? marketJob.result.online_sync?.total_candidates ?? 0 }}</span><span>新增标的 {{ marketJob.result.online_sync?.new_instruments ?? 0 }}</span><span>在线更新 {{ marketJob.result.online_sync?.updated_files ?? 0 }} 个标的</span><span>在线写入 {{ marketJob.result.online_sync?.written_bars ?? 0 }} 根</span></template>
             <template v-else><span>数据源 {{ marketJob.result.provider ?? '—' }}</span><span>证券列表 {{ marketJob.result.listed_instruments ?? marketJob.result.total_candidates ?? 0 }}</span><span>新增标的 {{ marketJob.result.new_instruments ?? 0 }}</span><span>更新标的 {{ marketJob.result.updated_files ?? 0 }}</span><span>写入 K 线 {{ marketJob.result.written_bars ?? 0 }}</span><span>无变化 {{ marketJob.result.unchanged_files ?? 0 }}</span></template>

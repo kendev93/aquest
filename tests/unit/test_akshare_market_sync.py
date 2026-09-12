@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -15,6 +15,7 @@ from selector_app.adapters.akshare_market_sync import (
 )
 from selector_app.adapters.market_data_sync import MarketDataSync
 from selector_app.adapters.market_sync import MarketDataCancelledError, MarketSyncConfig
+from selector_app.market_data.staging import StageTarget
 from selector_app.market_data.store import DuckDbMarketDataStore
 
 _NOW = datetime(2026, 9, 12, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
@@ -311,6 +312,36 @@ def test_akshare_full_history_skips_a_target_covering_the_requested_window() -> 
         )
         == []
     )
+
+
+def test_akshare_stage_fetch_normalizes_without_writing_main_store(tmp_path: Path) -> None:
+    module = FakeAkShare()
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    service = AkShareMarketSync(
+        store=store,
+        module_factory=lambda: module,
+        clock=lambda: _NOW,
+        sleep=lambda _seconds: None,
+    )
+    target = StageTarget(
+        provider="akshare",
+        market="SH",
+        code="600000",
+        instrument_type="stock",
+        board="main",
+        name="浦发银行",
+        requested_ranges=((date(1990, 1, 1), date(2026, 9, 12)),),
+        existing_first_date=None,
+        existing_last_date=None,
+        existing_bar_count=0,
+        existing_latest_rows=(),
+    )
+
+    result = service.fetch_stage_target(target, _config())
+
+    assert result.status == "updated"
+    assert len(result.frame) == 3
+    assert store.status().bar_count == 0
 
 
 def test_akshare_provider_rejects_invalid_ohlc_rows(tmp_path: Path) -> None:

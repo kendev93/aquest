@@ -9,6 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from .models import InstrumentBoard, InstrumentRef, InstrumentType, StockRef
+from .staging import StageMergeReport
 from .store_bars import DuckDbBarsStore
 from .store_base import (
     BACKTEST_HISTORY_LIMIT,
@@ -74,6 +75,9 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
         provider: str = "tdx",
     ) -> tuple[int, int]:
         return self._bars.upsert_online_bars(frame, provider=provider)
+
+    def merge_online_stage(self, stage_path: str | Path) -> StageMergeReport:
+        return self._bars.merge_online_stage(stage_path)
 
     def read_bars(
         self,

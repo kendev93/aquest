@@ -330,6 +330,37 @@ describe('MarketDataPage', () => {
     wrapper.unmount()
   })
 
+  it('shows staged download and merge progress in the single progress panel', async () => {
+    vi.mocked(marketApi.fetchActiveMarketDataJobs).mockResolvedValueOnce([{
+      job_id: 'staged-1',
+      description: '行情同步',
+      status: 'running',
+      progress: 0.75,
+      total_candidates: 8,
+      total_scanned: 3,
+      errors: 0,
+      error: null,
+      worker_count: 8,
+      phase: 'merging',
+      metadata: {
+        execution_mode: 'process_pool_staging',
+        merged_workers: 3,
+        total_workers: 8,
+        merged_rows: 1200,
+      },
+      result: null,
+    }])
+
+    const wrapper = mount(MarketDataPage)
+    await flushPromises()
+
+    const progress = wrapper.get('[data-testid="market-data-progress"]')
+    expect(progress.text()).toContain('已合并 3 / 8 个分片')
+    expect(progress.findAll('.progress-track')).toHaveLength(1)
+    expect(wrapper.find('[data-testid="market-active-jobs"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('shows the security-list discovery stage while the sync is waiting', async () => {
     vi.useFakeTimers()
     try {

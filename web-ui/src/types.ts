@@ -172,6 +172,16 @@ export interface MarketSyncResult {
   errors?: number
   failure_reasons?: Record<string, number>
   history_sources?: Record<string, number>
+  execution_mode?: string
+  worker_count?: number
+  staged_rows?: number
+  merged_rows?: number
+  stage_files?: string[]
+  download_seconds?: number
+  merge_seconds?: number
+  cleanup_seconds?: number
+  rate_limit_events?: number
+  rate_limit_backoffs?: number
   local_import?: MarketSyncResult
   online_sync?: MarketSyncResult
 }
@@ -208,6 +218,11 @@ export interface MarketDataProviderCapability {
 export interface MarketDataCapabilities {
   default_provider: MarketDataProvider
   instrument_count?: number
+  sync_execution?: {
+    mode: string
+    worker_count: number
+    staging_directory?: string
+  }
   last_online_provider?: string | null
   last_online_provider_version?: string | null
   instrument_list_fingerprint?: string | null

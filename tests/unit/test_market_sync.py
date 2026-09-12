@@ -14,6 +14,7 @@ from selector_app.adapters.market_sync import (
     MarketSyncConfig,
     TdxMarketSync,
 )
+from selector_app.market_data.staging import StageTarget
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.tdx_protocol.types import KlineCategory
 
@@ -185,3 +186,28 @@ def test_sync_can_be_cancelled_before_fetching_bars(tmp_path: Path) -> None:
         service.sync(MarketSyncConfig(), abort_check=lambda: True)
 
     assert client.requests == []
+
+
+def test_tdx_stage_fetch_normalizes_without_writing_main_store(tmp_path: Path) -> None:
+    client = FakeClient()
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    service = _service(tmp_path, client)
+    target = StageTarget(
+        provider="tdx",
+        market="SH",
+        code="600000",
+        instrument_type="stock",
+        board="main",
+        name="浦发银行",
+        requested_ranges=(),
+        existing_first_date=None,
+        existing_last_date=None,
+        existing_bar_count=0,
+        existing_latest_rows=(),
+    )
+
+    result = service.fetch_stage_target(target=target, client=client, config=MarketSyncConfig())
+
+    assert result.status == "updated"
+    assert len(result.frame) == 3
+    assert store.status().bar_count == 0

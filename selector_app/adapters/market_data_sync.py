@@ -2,13 +2,40 @@
 
 from __future__ import annotations
 
+import multiprocessing
+import queue
+import time
+import uuid
 from collections import Counter
 from collections.abc import Mapping
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import replace
+from datetime import datetime
 from inspect import Parameter, signature
-from typing import Protocol
+from pathlib import Path
+from typing import Any, Protocol, cast
 
-from selector_app.market_data.models import InstrumentBoard, ResolvedMarketDataProvider
+from selector_app.market_data.models import (
+    InstrumentBoard,
+    ResolvedMarketDataProvider,
+)
+from selector_app.market_data.staging import (
+    STAGE_DIRECTORY_NAME,
+    STAGE_WORKERS,
+    ProviderStagePlan,
+    StageTarget,
+    StageWorkerRequest,
+    StageWorkerResult,
+    cleanup_staging_root,
+    cleanup_stale_staging,
+    create_rate_state,
+    ensure_staging_capacity,
+    new_staging_root,
+    rate_state_snapshot,
+    run_stage_worker,
+    staging_directory,
+)
 from selector_app.market_data.store import DuckDbMarketDataStore
 
 from .akshare_market_sync import AkShareMarketSync, AkShareModuleFactory, AkShareProviderError
@@ -93,6 +120,30 @@ class MarketDataSync:
         if abort_check is not None and abort_check():
             raise MarketDataCancelledError("行情同步已取消")
         plans = self._plans(config)
+        if _can_process_stage(plans):
+            return self._sync_staged(
+                plans,
+                progress_callback=progress_callback,
+                detail_callback=detail_callback,
+                abort_check=abort_check,
+            )
+        return self._sync_direct(
+            plans,
+            config=config,
+            progress_callback=progress_callback,
+            detail_callback=detail_callback,
+            abort_check=abort_check,
+        )
+
+    def _sync_direct(
+        self,
+        plans: list[tuple[str, MarketSyncConfig, ProviderSyncService]],
+        *,
+        config: MarketSyncConfig,
+        progress_callback: ProgressCallback | None,
+        detail_callback: DetailCallback | None,
+        abort_check: AbortCheck | None,
+    ) -> MarketSyncReport:
         reports: list[MarketSyncReport] = []
         offset = 0
         known_total = _known_store_total(self._store, config, plans)
@@ -133,6 +184,283 @@ class MarketDataSync:
             )
         return combined
 
+    def _sync_staged(
+        self,
+        plans: list[tuple[str, MarketSyncConfig, ProviderSyncService]],
+        *,
+        progress_callback: ProgressCallback | None,
+        detail_callback: DetailCallback | None,
+        abort_check: AbortCheck | None,
+    ) -> MarketSyncReport:
+        prepared = [
+            cast(ProviderStagePlan, getattr(service, "prepare_stage_plan")(provider_config))
+            for _provider, provider_config, service in plans
+        ]
+        total = sum(len(plan.targets) for plan in prepared)
+        if progress_callback is not None:
+            progress_callback(0, total)
+        _report_stage_detail(
+            detail_callback,
+            {
+                "phase": "planning",
+                "current_status": "completed",
+                "execution_mode": "process_pool_staging",
+                "worker_count": STAGE_WORKERS,
+                "total_candidates": total,
+            },
+        )
+        if abort_check is not None and abort_check():
+            raise MarketDataCancelledError("行情同步已取消")
+        if not prepared:
+            return MarketSyncReport(
+                total_candidates=0,
+                processed=0,
+                updated_files=0,
+                unchanged_files=0,
+                written_bars=0,
+                errors=0,
+                failure_reasons={},
+                provider="mixed",
+                execution_mode="process_pool_staging",
+                worker_count=0,
+            )
+
+        provider = prepared[0].provider
+        run_id = uuid.uuid4().hex
+        cleanup_stale_staging(staging_directory(self._store.database_path))
+        ensure_staging_capacity(self._store.database_path)
+        stage_root = new_staging_root(self._store.database_path, run_id)
+        stage_paths: list[Path] = []
+        manager = multiprocessing.Manager()
+        rate_state, rate_lock = create_rate_state(manager)
+        cancel_event = manager.Event()
+        event_queue = manager.Queue()
+        worker_results: list[StageWorkerResult] = []
+        download_started = time.monotonic()
+        download_seconds = 0.0
+        downloaded = 0
+        try:
+            all_targets = tuple(target for plan in prepared for target in plan.targets)
+            worker_count = min(STAGE_WORKERS, len(all_targets)) if all_targets else 0
+            buckets: list[list[StageTarget]] = [[] for _ in range(worker_count)]
+            for index, target in enumerate(all_targets):
+                buckets[index % worker_count].append(target)
+            requests: list[StageWorkerRequest] = []
+            for worker_id, targets in enumerate(buckets):
+                path = stage_root / f"worker-{worker_id}.duckdb"
+                stage_paths.append(path)
+                requests.append(
+                    StageWorkerRequest(
+                        worker_id=worker_id,
+                        stage_path=str(path),
+                        provider=provider,
+                        targets=tuple(targets),
+                        config=plans[0][1],
+                        as_of=prepared[0].as_of,
+                        cancel_event=cancel_event,
+                        rate_state=rate_state,
+                        rate_lock=rate_lock,
+                        event_queue=event_queue,
+                    )
+                )
+            if worker_count:
+                _report_stage_detail(
+                    detail_callback,
+                    {
+                        "phase": "fetching",
+                        "current_status": "running",
+                        "execution_mode": "process_pool_staging",
+                        "worker_count": worker_count,
+                        "total_candidates": total,
+                        "downloaded_targets": 0,
+                    },
+                )
+                context = multiprocessing.get_context("spawn")
+                executor = ProcessPoolExecutor(
+                    max_workers=worker_count,
+                    mp_context=context,
+                )
+                futures = {
+                    executor.submit(run_stage_worker, request): request.worker_id
+                    for request in requests
+                }
+                pending = set(futures)
+                try:
+                    while pending:
+                        if abort_check is not None and abort_check():
+                            cancel_event.set()
+                            for future in pending:
+                                future.cancel()
+                            raise MarketDataCancelledError("行情同步已取消")
+                        done, pending = wait(
+                            pending,
+                            timeout=0.2,
+                            return_when=FIRST_COMPLETED,
+                        )
+                        downloaded = _drain_stage_events(
+                            event_queue,
+                            downloaded=downloaded,
+                            total=total,
+                            progress_callback=progress_callback,
+                            detail_callback=detail_callback,
+                        )
+                        for future in done:
+                            try:
+                                worker_results.append(future.result())
+                            except BrokenProcessPool as exc:
+                                raise RuntimeError(
+                                    "行情同步的 8 个进程异常退出，请检查 Docker 资源和上游连接"
+                                ) from exc
+                    downloaded = _drain_stage_events(
+                        event_queue,
+                        downloaded=downloaded,
+                        total=total,
+                        progress_callback=progress_callback,
+                        detail_callback=detail_callback,
+                    )
+                finally:
+                    executor.shutdown(wait=True, cancel_futures=True)
+            if abort_check is not None and abort_check():
+                raise MarketDataCancelledError("行情同步已取消")
+            download_seconds = max(0.0, time.monotonic() - download_started)
+            worker_summary = _combine_stage_worker_results(worker_results)
+            merged_rows = 0
+            merged_workers = 0
+            merge_started = time.monotonic()
+            _report_stage_detail(
+                detail_callback,
+                {
+                    "phase": "merging",
+                    "current_status": "running",
+                    "execution_mode": "process_pool_staging",
+                    "worker_count": worker_count,
+                    "downloaded_targets": downloaded,
+                    "staged_rows": worker_summary.staged_rows,
+                    "merged_workers": 0,
+                    "total_workers": worker_count,
+                },
+            )
+            if progress_callback is not None:
+                progress_callback(0, worker_count or 1)
+            for path in sorted(stage_paths):
+                if abort_check is not None and abort_check():
+                    raise MarketDataCancelledError("行情同步已取消")
+                merge_report = self._store.merge_online_stage(path)
+                merged_rows += merge_report.merged_rows
+                merged_workers += 1
+                if progress_callback is not None:
+                    progress_callback(merged_workers, worker_count or 1)
+                _report_stage_detail(
+                    detail_callback,
+                    {
+                        "phase": "merging",
+                        "current_status": "running",
+                        "execution_mode": "process_pool_staging",
+                        "worker_count": worker_count,
+                        "downloaded_targets": downloaded,
+                        "staged_rows": worker_summary.staged_rows,
+                        "merged_workers": merged_workers,
+                        "total_workers": worker_count,
+                        "merged_rows": merged_rows,
+                    },
+                )
+            merge_seconds = max(0.0, time.monotonic() - merge_started)
+            cleanup_started = time.monotonic()
+            _report_stage_detail(
+                detail_callback,
+                {
+                    "phase": "cleanup",
+                    "current_status": "running",
+                    "execution_mode": "process_pool_staging",
+                },
+            )
+            cleanup_staging_root(stage_root)
+            cleanup_seconds = max(0.0, time.monotonic() - cleanup_started)
+            rate = rate_state_snapshot(rate_state)
+            finished_at = datetime.now(tz=prepared[0].as_of.tzinfo)
+            self._store.set_meta("last_online_sync_at", finished_at.isoformat())
+            self._store.set_meta("last_online_provider", provider)
+            if prepared[0].provider_version is not None:
+                self._store.set_meta(
+                    "last_online_provider_version",
+                    prepared[0].provider_version,
+                )
+            if prepared[0].instrument_list_fingerprint is not None:
+                self._store.set_meta(
+                    "instrument_list_fingerprint",
+                    prepared[0].instrument_list_fingerprint,
+                )
+            _report_stage_detail(
+                detail_callback,
+                {
+                    "phase": "completed",
+                    "current_status": "completed",
+                    "execution_mode": "process_pool_staging",
+                    "worker_count": worker_count,
+                    "downloaded_targets": downloaded,
+                    "staged_rows": worker_summary.staged_rows,
+                    "merged_workers": merged_workers,
+                    "total_workers": worker_count,
+                    "merged_rows": merged_rows,
+                    **rate,
+                },
+            )
+            return MarketSyncReport(
+                total_candidates=total,
+                processed=worker_summary.processed,
+                updated_files=worker_summary.updated_files,
+                unchanged_files=worker_summary.unchanged_files,
+                written_bars=merged_rows,
+                errors=worker_summary.errors,
+                failure_reasons=worker_summary.failure_reasons,
+                listed_instruments=sum(plan.listed_instruments for plan in prepared),
+                filtered_instruments=sum(plan.filtered_instruments for plan in prepared),
+                new_instruments=sum(plan.new_instruments for plan in prepared),
+                existing_instruments=sum(plan.existing_instruments for plan in prepared),
+                target_source="+".join(plan.target_source for plan in prepared),
+                provider=cast_provider(provider),
+                provider_version=prepared[0].provider_version,
+                instrument_list_fingerprint=prepared[0].instrument_list_fingerprint,
+                history_sources=worker_summary.history_sources,
+                execution_mode="process_pool_staging",
+                worker_count=worker_count,
+                staged_rows=worker_summary.staged_rows,
+                merged_rows=merged_rows,
+                stage_files=tuple(path.name for path in stage_paths),
+                download_seconds=download_seconds,
+                merge_seconds=merge_seconds,
+                cleanup_seconds=cleanup_seconds,
+                rate_limit_events=_as_int(rate.get("rate_limit_events")),
+                rate_limit_backoffs=_as_int(rate.get("backoffs")),
+            )
+        except MarketDataCancelledError:
+            _report_stage_detail(
+                detail_callback,
+                {
+                    "phase": "cancelled",
+                    "current_status": "cancelled",
+                    "execution_mode": "process_pool_staging",
+                },
+            )
+            raise
+        except Exception as exc:
+            _report_stage_detail(
+                detail_callback,
+                {
+                    "phase": "failed",
+                    "current_status": "error",
+                    "execution_mode": "process_pool_staging",
+                    "error": str(exc).strip()[:200] or type(exc).__name__,
+                },
+            )
+            raise
+        finally:
+            try:
+                if stage_root.exists():
+                    cleanup_staging_root(stage_root)
+            finally:
+                manager.shutdown()
+
     def provider_capabilities(self) -> dict[str, object]:
         akshare_capabilities = _provider_capabilities(self._akshare_sync)
         try:
@@ -153,6 +481,11 @@ class MarketDataSync:
             "last_online_provider": last_online_provider,
             "last_online_provider_version": last_online_provider_version,
             "instrument_list_fingerprint": instrument_list_fingerprint,
+            "sync_execution": {
+                "mode": "process_pool_staging",
+                "worker_count": STAGE_WORKERS,
+                "staging_directory": STAGE_DIRECTORY_NAME,
+            },
             "providers": {
                 "akshare": akshare_capabilities,
                 "tdx": {
@@ -204,6 +537,90 @@ def _provider_detail_callback(
         callback({**detail, "provider": provider})
 
     return report
+
+
+def _can_process_stage(
+    plans: list[tuple[str, MarketSyncConfig, ProviderSyncService]],
+) -> bool:
+    if not plans:
+        return False
+    for _provider, _config, service in plans:
+        capability = getattr(service, "supports_process_staging", None)
+        if not callable(capability) or not bool(capability()):
+            return False
+        if not callable(getattr(service, "prepare_stage_plan", None)):
+            return False
+    return True
+
+
+def _report_stage_detail(
+    callback: DetailCallback | None,
+    detail: Mapping[str, object],
+) -> None:
+    if callback is not None:
+        callback(detail)
+
+
+def _drain_stage_events(
+    event_queue: Any,
+    *,
+    downloaded: int,
+    total: int,
+    progress_callback: ProgressCallback | None,
+    detail_callback: DetailCallback | None,
+) -> int:
+    while True:
+        try:
+            event = event_queue.get_nowait()
+        except queue.Empty:
+            return downloaded
+        if not isinstance(event, Mapping):
+            continue
+        kind = event.get("kind")
+        if kind == "started":
+            _report_stage_detail(
+                detail_callback,
+                {
+                    "phase": "fetching",
+                    "current_status": "fetching",
+                    "worker_id": event.get("worker_id"),
+                    "current_instrument": {
+                        "market": event.get("market"),
+                        "code": event.get("code"),
+                        "name": event.get("name"),
+                    },
+                    "provider": event.get("provider"),
+                    "range_label": event.get("range_label"),
+                },
+            )
+            continue
+        if kind != "finished":
+            continue
+        downloaded += 1
+        detail = event.get("detail")
+        if isinstance(detail, Mapping):
+            _report_stage_detail(detail_callback, dict(detail))
+        if progress_callback is not None:
+            progress_callback(downloaded, total)
+
+
+def _combine_stage_worker_results(results: list[StageWorkerResult]) -> StageWorkerResult:
+    failures: Counter[str] = Counter()
+    history_sources: Counter[str] = Counter()
+    for result in results:
+        failures.update(result.failure_reasons)
+        history_sources.update(result.history_sources)
+    return StageWorkerResult(
+        worker_id=-1,
+        stage_path="",
+        processed=sum(result.processed for result in results),
+        updated_files=sum(result.updated_files for result in results),
+        unchanged_files=sum(result.unchanged_files for result in results),
+        staged_rows=sum(result.staged_rows for result in results),
+        errors=sum(result.errors for result in results),
+        failure_reasons=dict(failures),
+        history_sources=dict(history_sources),
+    )
 
 
 def _provider_capabilities(service: ProviderSyncService) -> dict[str, object]:
@@ -379,6 +796,7 @@ def _combine_sync_reports(reports: list[MarketSyncReport]) -> MarketSyncReport:
         for report in reports
         if report.instrument_list_fingerprint
     }
+    execution_modes = {report.execution_mode for report in reports}
     return MarketSyncReport(
         total_candidates=sum(report.total_candidates for report in reports),
         processed=sum(report.processed for report in reports),
@@ -396,6 +814,16 @@ def _combine_sync_reports(reports: list[MarketSyncReport]) -> MarketSyncReport:
         provider_version=(next(iter(provider_versions)) if len(provider_versions) == 1 else None),
         instrument_list_fingerprint=(next(iter(fingerprints)) if len(fingerprints) == 1 else None),
         history_sources=dict(history_sources),
+        execution_mode=(next(iter(execution_modes)) if len(execution_modes) == 1 else "mixed"),
+        worker_count=max((report.worker_count for report in reports), default=1),
+        staged_rows=sum(report.staged_rows for report in reports),
+        merged_rows=sum(report.merged_rows for report in reports),
+        stage_files=tuple(file for report in reports for file in report.stage_files),
+        download_seconds=sum(report.download_seconds for report in reports),
+        merge_seconds=sum(report.merge_seconds for report in reports),
+        cleanup_seconds=sum(report.cleanup_seconds for report in reports),
+        rate_limit_events=sum(report.rate_limit_events for report in reports),
+        rate_limit_backoffs=sum(report.rate_limit_backoffs for report in reports),
     )
 
 
@@ -432,6 +860,16 @@ def _coerce_sync_report(
         target_source=str(value.get("target_source") or f"{provider}_unknown"),
         provider=cast_provider(str(value.get("provider") or provider)),
         history_sources=history_sources,
+        execution_mode=str(value.get("execution_mode") or "direct"),
+        worker_count=_as_int(value.get("worker_count")) or 1,
+        staged_rows=_as_int(value.get("staged_rows")),
+        merged_rows=_as_int(value.get("merged_rows")),
+        stage_files=_as_string_tuple(value.get("stage_files")),
+        download_seconds=_as_float(value.get("download_seconds")),
+        merge_seconds=_as_float(value.get("merge_seconds")),
+        cleanup_seconds=_as_float(value.get("cleanup_seconds")),
+        rate_limit_events=_as_int(value.get("rate_limit_events")),
+        rate_limit_backoffs=_as_int(value.get("rate_limit_backoffs")),
     )
 
 
@@ -444,6 +882,23 @@ def _as_int(value: object) -> int:
         return max(0, int(value))
     except (TypeError, ValueError):
         return 0
+
+
+def _as_float(value: object) -> float:
+    if value is None or isinstance(value, bool):
+        return 0.0
+    if not isinstance(value, (int, float, str)):
+        return 0.0
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _as_string_tuple(value: object) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(str(item) for item in value if isinstance(item, str))
 
 
 def cast_provider(value: str) -> ResolvedMarketDataProvider:

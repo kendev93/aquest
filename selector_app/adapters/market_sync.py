@@ -8,7 +8,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime
 from threading import Lock
-from typing import Literal, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -24,6 +24,14 @@ from selector_app.market_data.models import (
     ResolvedMarketDataProvider,
 )
 from selector_app.market_data.scope import InstrumentScope
+from selector_app.market_data.staging import (
+    ProviderStagePlan,
+    StageTarget,
+    StageTargetResult,
+    is_throttling_error,
+    latest_frame_from_rows,
+    serialize_latest_rows,
+)
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.tdx_protocol.client import TdxClient
 from selector_app.tdx_protocol.types import KlineCategory, Market
@@ -98,6 +106,16 @@ class MarketSyncReport:
     provider_version: str | None = None
     instrument_list_fingerprint: str | None = None
     history_sources: Mapping[str, int] = field(default_factory=dict)
+    execution_mode: str = "direct"
+    worker_count: int = 1
+    staged_rows: int = 0
+    merged_rows: int = 0
+    stage_files: tuple[str, ...] = ()
+    download_seconds: float = 0.0
+    merge_seconds: float = 0.0
+    cleanup_seconds: float = 0.0
+    rate_limit_events: int = 0
+    rate_limit_backoffs: int = 0
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -118,6 +136,16 @@ class MarketSyncReport:
             "provider_version": self.provider_version,
             "instrument_list_fingerprint": self.instrument_list_fingerprint,
             "history_sources": dict(self.history_sources),
+            "execution_mode": self.execution_mode,
+            "worker_count": self.worker_count,
+            "staged_rows": self.staged_rows,
+            "merged_rows": self.merged_rows,
+            "stage_files": list(self.stage_files),
+            "download_seconds": self.download_seconds,
+            "merge_seconds": self.merge_seconds,
+            "cleanup_seconds": self.cleanup_seconds,
+            "rate_limit_events": self.rate_limit_events,
+            "rate_limit_backoffs": self.rate_limit_backoffs,
         }
 
 
@@ -220,6 +248,169 @@ class TdxMarketSync:
         self._store = store or DuckDbMarketDataStore()
         self._client_factory = client_factory
         self._clock = clock or (lambda: datetime.now(_SHANGHAI_TZ))
+
+    def supports_process_staging(self) -> bool:
+        """Return whether the provider can be reconstructed safely in a child process."""
+
+        return self._client_factory is None
+
+    def prepare_stage_plan(self, config: MarketSyncConfig) -> ProviderStagePlan:
+        """Refresh the universe and build an immutable download plan in the parent."""
+
+        as_of = self._clock()
+        selection, new_instruments, existing_instruments = self._prepare_targets(config)
+        existing_by_key = self._latest_existing_bars(selection.targets)
+        stored_by_key = {
+            (ref.market, ref.code): ref
+            for ref in self._store.list_instruments(include_missing=True)
+        }
+        stage_targets: list[StageTarget] = []
+        for market, code, instrument_type, board, name in selection.targets:
+            latest = existing_by_key.get((market, code), pd.DataFrame())
+            stored = stored_by_key.get((market, code))
+            stage_targets.append(
+                StageTarget(
+                    provider="tdx",
+                    market=market,
+                    code=code,
+                    instrument_type=instrument_type,
+                    board=board,
+                    name=name,
+                    requested_ranges=(),
+                    existing_first_date=stored.first_date if stored is not None else None,
+                    existing_last_date=stored.last_date if stored is not None else None,
+                    existing_bar_count=(
+                        stored.bar_count
+                        if stored is not None and stored.bar_count is not None
+                        else len(latest)
+                    ),
+                    existing_latest_rows=serialize_latest_rows(latest),
+                )
+            )
+        return ProviderStagePlan(
+            provider="tdx",
+            targets=tuple(stage_targets),
+            listed_instruments=selection.listed_instruments,
+            filtered_instruments=selection.filtered_instruments,
+            new_instruments=new_instruments,
+            existing_instruments=existing_instruments,
+            target_source=selection.target_source,
+            provider_version=None,
+            instrument_list_fingerprint=None,
+            as_of=as_of,
+        )
+
+    def fetch_stage_target(
+        self,
+        client: TdxMarketClient,
+        target: StageTarget,
+        config: MarketSyncConfig,
+        *,
+        abort_check: AbortCheck | None = None,
+        rate_gate: Any | None = None,
+    ) -> StageTargetResult:
+        """Fetch one planned target without opening or modifying the main store."""
+
+        existing = latest_frame_from_rows(target.existing_latest_rows)
+        market = cast(MarketCode, target.market)
+        instrument_type = cast(InstrumentType, target.instrument_type)
+        board = cast(InstrumentBoard, target.board)
+        if existing.empty:
+            frame = self._fetch_stage_bars(
+                client,
+                market,
+                target.code,
+                config.bars,
+                abort_check=abort_check,
+                rate_gate=rate_gate,
+            )
+        else:
+            latest = self._fetch_stage_bars(
+                client,
+                market,
+                target.code,
+                _LATEST_PROBE_BARS,
+                abort_check=abort_check,
+                rate_gate=rate_gate,
+            )
+            latest_frame = _normalize_online_frame(
+                latest,
+                market=market,
+                code=target.code,
+                instrument_type=instrument_type,
+                board=board,
+                name=target.name,
+                now=self._clock(),
+            )
+            if not _has_new_online_data(existing, latest_frame):
+                range_start, range_end = _frame_date_range(existing)
+                return StageTargetResult(
+                    status="unchanged",
+                    frame=pd.DataFrame(),
+                    range_start=range_start,
+                    range_end=range_end,
+                    history_source="tdx_probe",
+                )
+            frame = self._fetch_stage_bars(
+                client,
+                market,
+                target.code,
+                config.bars,
+                abort_check=abort_check,
+                rate_gate=rate_gate,
+            )
+        normalized = _normalize_online_frame(
+            frame,
+            market=market,
+            code=target.code,
+            instrument_type=instrument_type,
+            board=board,
+            name=target.name,
+            now=self._clock(),
+        )
+        if normalized.empty:
+            return StageTargetResult(
+                status="unchanged", frame=pd.DataFrame(), history_source="empty"
+            )
+        range_start, range_end = _frame_date_range(normalized)
+        return StageTargetResult(
+            status="updated",
+            frame=normalized,
+            written_bars=len(normalized),
+            range_start=range_start,
+            range_end=range_end,
+            history_source="tdx",
+        )
+
+    def _fetch_stage_bars(
+        self,
+        client: TdxMarketClient,
+        market: MarketCode,
+        code: str,
+        count: int,
+        *,
+        abort_check: AbortCheck | None,
+        rate_gate: Any | None,
+    ) -> pd.DataFrame:
+        if abort_check is not None and abort_check():
+            raise MarketDataCancelledError("行情同步已取消")
+        if rate_gate is not None:
+            rate_gate.wait("tdx")
+        try:
+            result = client.get_security_bars(
+                _market_enum(market), code, KlineCategory.DAY, 0, count
+            )
+        except Exception as exc:
+            if rate_gate is not None:
+                rate_gate.report(
+                    provider="tdx",
+                    success=False,
+                    throttled=is_throttling_error(exc),
+                )
+            raise
+        if rate_gate is not None:
+            rate_gate.report(provider="tdx", success=True)
+        return result
 
     def discover_instruments(
         self,
@@ -355,6 +546,8 @@ class TdxMarketSync:
             new_instruments=new_instruments,
             existing_instruments=existing_instruments,
             target_source=selection.target_source,
+            execution_mode="thread_pool_direct",
+            worker_count=min(config.sync_workers, total) if total else 0,
         )
 
     def _prepare_targets(

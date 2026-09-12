@@ -30,6 +30,7 @@ from selector_app.market_data.maintenance import (
     DatabaseMaintenanceService,
 )
 from selector_app.market_data.service import LocalMarketDataService
+from selector_app.market_data.staging import cleanup_stale_staging, staging_directory
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.portfolio_backtest.service import PortfolioBacktestService
 from selector_app.screening.engine import ScreenEngine
@@ -126,6 +127,7 @@ def create_app(
         maintenance_task: asyncio.Task[None] | None = None
         try:
             selected_store.status()
+            cleanup_stale_staging(staging_directory(selected_store.database_path))
             maintenance_result = selected_maintenance_service.run_if_needed()
             app.state.database_maintenance_result = maintenance_result.to_dict()
             if maintenance_result.status == "failed":

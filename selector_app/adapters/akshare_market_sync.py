@@ -7,12 +7,12 @@ import importlib.metadata
 import re
 import time
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from threading import Lock
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -26,6 +26,14 @@ from selector_app.market_data.models import (
     MarketCode,
 )
 from selector_app.market_data.scope import InstrumentScope
+from selector_app.market_data.staging import (
+    ProviderStagePlan,
+    StageTarget,
+    StageTargetResult,
+    is_throttling_error,
+    latest_frame_from_rows,
+    serialize_latest_rows,
+)
 from selector_app.market_data.store import DuckDbMarketDataStore
 
 from .market_sync import (
@@ -125,6 +133,13 @@ class _ExistingBars:
     bar_count: int = 0
 
 
+@dataclass(frozen=True)
+class _FetchedTarget:
+    frame: pd.DataFrame
+    retries: int
+    history_source: str
+
+
 class _RateLimiter:
     def __init__(self, interval_seconds: float, sleep: SleepFunction) -> None:
         self._interval_seconds = interval_seconds
@@ -169,6 +184,130 @@ class AkShareMarketSync:
         self._clock = clock or (lambda: datetime.now(_SHANGHAI_TZ))
         self._sleep = sleep
         self._rate_limiter = _RateLimiter(request_interval_seconds, sleep)
+
+    def supports_process_staging(self) -> bool:
+        """Return whether the provider can be reconstructed safely in a child process."""
+
+        return self._module_factory is _default_module
+
+    def prepare_stage_plan(self, config: MarketSyncConfig) -> ProviderStagePlan:
+        """Refresh the universe and build an immutable download plan in the parent."""
+
+        as_of = self._clock()
+        selection, new_instruments, existing_instruments = self._prepare_targets(config)
+        existing_by_key = self._latest_existing_bars(selection.targets)
+        stage_targets: list[StageTarget] = []
+        for market, code, instrument_type, board, name in selection.targets:
+            snapshot = existing_by_key.get((market, code), _ExistingBars(pd.DataFrame()))
+            stage_targets.append(
+                StageTarget(
+                    provider="akshare",
+                    market=market,
+                    code=code,
+                    instrument_type=instrument_type,
+                    board=board,
+                    name=name,
+                    requested_ranges=tuple(
+                        _requested_ranges(snapshot, config, _as_shanghai(as_of).date())
+                    ),
+                    existing_first_date=snapshot.first_date,
+                    existing_last_date=snapshot.last_date,
+                    existing_bar_count=snapshot.bar_count,
+                    existing_latest_rows=serialize_latest_rows(snapshot.latest),
+                )
+            )
+        return ProviderStagePlan(
+            provider="akshare",
+            targets=tuple(stage_targets),
+            listed_instruments=selection.listed_instruments,
+            filtered_instruments=selection.filtered_instruments,
+            new_instruments=new_instruments,
+            existing_instruments=existing_instruments,
+            target_source=selection.target_source,
+            provider_version=self.provider_version(),
+            instrument_list_fingerprint=selection.fingerprint,
+            as_of=as_of,
+        )
+
+    def fetch_stage_target(
+        self,
+        target: StageTarget,
+        config: MarketSyncConfig,
+        *,
+        abort_check: AbortCheck | None = None,
+        rate_gate: Any | None = None,
+    ) -> StageTargetResult:
+        """Fetch one planned target without opening or modifying the main store."""
+
+        existing = _ExistingBars(
+            latest=latest_frame_from_rows(target.existing_latest_rows),
+            first_date=target.existing_first_date,
+            last_date=target.existing_last_date,
+            bar_count=target.existing_bar_count,
+        )
+        fetched = self._fetch_target(
+            self._module_factory(),
+            cast(MarketCode, target.market),
+            target.code,
+            cast(InstrumentType, target.instrument_type),
+            cast(InstrumentBoard, target.board),
+            target.name,
+            config,
+            existing=existing,
+            requested_ranges=target.requested_ranges,
+            abort_check=abort_check,
+            rate_gate=rate_gate,
+        )
+        if fetched.frame.empty:
+            if existing.latest.empty:
+                raise AkShareDataError(f"AKShare {target.code} 没有可用日线")
+            return StageTargetResult(
+                status="unchanged",
+                frame=pd.DataFrame(),
+                range_start=(
+                    target.existing_first_date.isoformat()
+                    if target.existing_first_date is not None
+                    else None
+                ),
+                range_end=(
+                    target.existing_last_date.isoformat()
+                    if target.existing_last_date is not None
+                    else None
+                ),
+                retries=fetched.retries,
+                history_source=(
+                    "already_complete" if config.full_history else fetched.history_source
+                ),
+            )
+        if (
+            not config.full_history
+            and not existing.latest.empty
+            and not _has_new_data(existing.latest, fetched.frame)
+        ):
+            unchanged = _unchanged_result(
+                existing,
+                retries=fetched.retries,
+                history_source=fetched.history_source,
+            )
+            return StageTargetResult(
+                status="unchanged",
+                frame=pd.DataFrame(),
+                written_bars=0,
+                range_start=unchanged.range_start,
+                range_end=unchanged.range_end,
+                retries=unchanged.retries,
+                history_source=unchanged.history_source,
+            )
+        range_start, range_end = _frame_date_range(fetched.frame)
+        return StageTargetResult(
+            status="updated",
+            frame=fetched.frame,
+            written_bars=len(fetched.frame),
+            range_start=range_start,
+            range_end=range_end,
+            retries=fetched.retries,
+            history_source=fetched.history_source,
+        )
 
     def provider_version(self) -> str | None:
         try:
@@ -351,6 +490,8 @@ class AkShareMarketSync:
             provider_version=version,
             instrument_list_fingerprint=selection.fingerprint,
             history_sources=dict(history_sources),
+            execution_mode="thread_pool_direct",
+            worker_count=min(config.sync_workers, total) if total else 0,
         )
 
     def fetch_daily_bars(
@@ -564,15 +705,76 @@ class AkShareMarketSync:
         *,
         existing: _ExistingBars,
     ) -> _SyncResult:
-        end_date = _as_shanghai(self._clock()).date()
-        ranges = _requested_ranges(existing, config, end_date)
-        if not ranges:
-            return _unchanged_result(existing, history_source="already_complete")
+        fetched = self._fetch_target(
+            module,
+            market,
+            code,
+            instrument_type,
+            board,
+            name,
+            config,
+            existing=existing,
+        )
+        if fetched.frame.empty:
+            if existing.latest.empty:
+                raise AkShareDataError(f"AKShare {code} 没有可用日线")
+            return _unchanged_result(
+                existing,
+                retries=fetched.retries,
+                history_source=(
+                    "already_complete" if config.full_history else fetched.history_source
+                ),
+            )
+        normalized = fetched.frame
+        range_start, range_end = _frame_date_range(normalized)
+        if (
+            not config.full_history
+            and not existing.latest.empty
+            and not _has_new_data(existing.latest, normalized)
+        ):
+            return _unchanged_result(
+                existing,
+                retries=fetched.retries,
+                history_source=fetched.history_source,
+            )
+        written, _updated = self._store.upsert_online_bars(normalized, provider="akshare")
+        return _SyncResult(
+            written_bars=written,
+            bar_count=len(normalized),
+            range_start=range_start,
+            range_end=range_end,
+            retries=fetched.retries,
+            history_source=fetched.history_source,
+        )
 
+    def _fetch_target(
+        self,
+        module: AkShareModule,
+        market: MarketCode,
+        code: str,
+        instrument_type: InstrumentType,
+        board: InstrumentBoard,
+        name: str | None,
+        config: MarketSyncConfig,
+        *,
+        existing: _ExistingBars,
+        requested_ranges: Sequence[tuple[date, date]] | None = None,
+        abort_check: AbortCheck | None = None,
+        rate_gate: Any | None = None,
+    ) -> _FetchedTarget:
+        ranges = list(
+            requested_ranges
+            if requested_ranges is not None
+            else _requested_ranges(existing, config, _as_shanghai(self._clock()).date())
+        )
+        if not ranges:
+            return _FetchedTarget(pd.DataFrame(), 0, "already_complete")
         normalized_parts: list[pd.DataFrame] = []
         history_sources: list[str] = []
         retries = 0
         for start_date, requested_end in ranges:
+            if abort_check is not None and abort_check():
+                raise MarketDataCancelledError("行情同步已取消")
             frame, range_retries, history_source = self._fetch_with_retries(
                 module,
                 market=market,
@@ -580,6 +782,8 @@ class AkShareMarketSync:
                 start_date=start_date,
                 end_date=requested_end,
                 timeout=config.timeout,
+                abort_check=abort_check,
+                rate_gate=rate_gate,
             )
             retries += range_retries
             if frame.empty:
@@ -601,41 +805,18 @@ class AkShareMarketSync:
                 continue
             normalized_parts.append(normalized)
             history_sources.append(history_source)
-
         if not normalized_parts:
-            if existing.latest.empty:
-                raise AkShareDataError(f"AKShare {code} 没有可用日线")
-            return _unchanged_result(
-                existing,
-                retries=retries,
-                history_source="already_complete" if config.full_history else "empty",
-            )
-
+            return _FetchedTarget(pd.DataFrame(), retries, "empty")
         normalized = (
             pd.concat(normalized_parts, ignore_index=True)
             .sort_values("date", kind="stable")
             .drop_duplicates(subset=["date"], keep="last")
             .reset_index(drop=True)
         )
-        range_start, result_range_end = _frame_date_range(normalized)
-        if (
-            not config.full_history
-            and not existing.latest.empty
-            and not _has_new_data(existing.latest, normalized)
-        ):
-            return _unchanged_result(
-                existing,
-                retries=retries,
-                history_source=history_sources[0],
-            )
-        written, _updated = self._store.upsert_online_bars(normalized, provider="akshare")
-        return _SyncResult(
-            written_bars=written,
-            bar_count=len(normalized),
-            range_start=range_start,
-            range_end=result_range_end,
-            retries=retries,
-            history_source=_combine_history_sources(history_sources),
+        return _FetchedTarget(
+            normalized,
+            retries,
+            _combine_history_sources(history_sources),
         )
 
     def _fetch_with_retries(
@@ -647,6 +828,8 @@ class AkShareMarketSync:
         start_date: date,
         end_date: date,
         timeout: float,
+        abort_check: AbortCheck | None = None,
+        rate_gate: Any | None = None,
     ) -> tuple[pd.DataFrame, int, str]:
         date_start = start_date.strftime("%Y%m%d")
         date_end = end_date.strftime("%Y%m%d")
@@ -695,18 +878,32 @@ class AkShareMarketSync:
                 continue
             available = True
             for attempt in range(_MAX_RETRIES + 1):
-                self._rate_limiter.wait()
+                if abort_check is not None and abort_check():
+                    raise MarketDataCancelledError("行情同步已取消")
+                if rate_gate is None:
+                    self._rate_limiter.wait()
+                else:
+                    rate_gate.wait("akshare")
                 try:
                     frame = method(**kwargs)
                     if not isinstance(frame, pd.DataFrame):
                         raise AkShareDataError(f"{source_name} 响应不是 DataFrame")
+                    if rate_gate is not None:
+                        rate_gate.report(success=True)
                     if frame.empty:
                         break
                     return frame, retries, source_name
                 except AkShareDataError as exc:
+                    if rate_gate is not None:
+                        rate_gate.report(success=False)
                     errors.append(f"{source_name}: {exc}")
                     break
                 except Exception as exc:  # noqa: BLE001 - upstream errors are retriable
+                    if rate_gate is not None:
+                        rate_gate.report(
+                            success=False,
+                            throttled=is_throttling_error(exc),
+                        )
                     errors.append(f"{source_name}: {exc}")
                     if attempt == _MAX_RETRIES:
                         break

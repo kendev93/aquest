@@ -11,6 +11,7 @@ import pandas as pd
 
 from .day_format import classify_board
 from .models import InstrumentBoard, InstrumentRef, InstrumentType, MarketCode, StockRef
+from .staging import StageMergeReport
 from .store_base import (
     _BAR_COLUMNS,
     _FRAME_COLUMNS,
@@ -20,6 +21,10 @@ from .store_base import (
     _DuckDbStoreBase,
     _now,
 )
+
+
+def _sql_path_literal(path: Path) -> str:
+    return "'" + str(path).replace("'", "''") + "'"
 
 
 class DuckDbBarsStore:
@@ -321,6 +326,123 @@ class DuckDbBarsStore:
                 connection.execute("ROLLBACK")
                 raise
         return (eligible_count, existing_online_count)
+
+    def merge_online_stage(self, stage_path: str | Path) -> StageMergeReport:
+        """Merge one completed process-local staging database into the main store."""
+
+        self._store._require_writer()
+        path = Path(stage_path).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"行情分片数据库不存在: {path}")
+        attached = False
+        with _WRITE_LOCK, self._store._connect() as connection:
+            try:
+                connection.execute(f"ATTACH {_sql_path_literal(path)} AS sync_stage (READ_ONLY)")
+                attached = True
+                connection.execute(
+                    """
+                    CREATE TEMP TABLE _staged_online AS
+                    SELECT market, code, instrument_type, board, trade_date,
+                           open, high, low, close, volume, amount, source,
+                           provider, price_basis, bar_status, imported_at
+                    FROM sync_stage.staged_bars
+                    """
+                )
+                staged_row = connection.execute("SELECT COUNT(*) FROM _staged_online").fetchone()
+                existing_online_row = connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM _staged_online AS incoming
+                    INNER JOIN daily_bars AS existing
+                      ON existing.market = incoming.market
+                     AND existing.code = incoming.code
+                     AND existing.trade_date = incoming.trade_date
+                     AND existing.price_basis = incoming.price_basis
+                     AND existing.source = 'online'
+                    """
+                ).fetchone()
+                keys = connection.execute(
+                    """
+                    SELECT DISTINCT market, code, instrument_type, board, provider
+                    FROM _staged_online
+                    ORDER BY market, code
+                    """
+                ).fetchall()
+                merged_row = connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM _staged_online AS incoming
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM daily_bars AS local
+                        WHERE local.market = incoming.market
+                          AND local.code = incoming.code
+                          AND local.trade_date = incoming.trade_date
+                          AND local.price_basis = incoming.price_basis
+                          AND local.source = 'local'
+                    )
+                    """
+                ).fetchone()
+                connection.execute("BEGIN")
+                try:
+                    connection.execute(
+                        """
+                        DELETE FROM daily_bars AS existing
+                        USING _staged_online AS incoming
+                        WHERE existing.market = incoming.market
+                          AND existing.code = incoming.code
+                          AND existing.trade_date = incoming.trade_date
+                          AND existing.price_basis = incoming.price_basis
+                          AND existing.source = 'online'
+                        """
+                    )
+                    connection.execute(
+                        """
+                        INSERT INTO daily_bars (
+                            market, code, instrument_type, board, trade_date,
+                            open, high, low, close, volume, amount, source,
+                            provider, price_basis, bar_status, imported_at
+                        )
+                        SELECT incoming.market, incoming.code, incoming.instrument_type,
+                               incoming.board, incoming.trade_date, incoming.open,
+                               incoming.high, incoming.low, incoming.close, incoming.volume,
+                               incoming.amount, incoming.source, incoming.provider,
+                               incoming.price_basis, incoming.bar_status, incoming.imported_at
+                        FROM _staged_online AS incoming
+                        WHERE NOT EXISTS (
+                            SELECT 1
+                            FROM daily_bars AS local
+                            WHERE local.market = incoming.market
+                              AND local.code = incoming.code
+                              AND local.trade_date = incoming.trade_date
+                              AND local.price_basis = incoming.price_basis
+                              AND local.source = 'local'
+                        )
+                        """
+                    )
+                    for market, code, instrument_type, board, provider in keys:
+                        self._store._refresh_instrument(
+                            connection,
+                            str(market),
+                            str(code),
+                            cast(InstrumentType, str(instrument_type)),
+                            cast(InstrumentBoard, str(board)),
+                            provider=str(provider),
+                        )
+                    connection.execute("COMMIT")
+                except Exception:
+                    connection.execute("ROLLBACK")
+                    raise
+            finally:
+                connection.execute("DROP TABLE IF EXISTS _staged_online")
+                if attached:
+                    connection.execute("DETACH sync_stage")
+        return StageMergeReport(
+            staged_rows=int(staged_row[0] if staged_row else 0),
+            merged_rows=int(merged_row[0] if merged_row else 0),
+            existing_online_rows=int(existing_online_row[0] if existing_online_row else 0),
+            affected_instruments=len(keys),
+        )
 
     def _count_matching_keys(self, frame: pd.DataFrame) -> int:
         if frame.empty:
