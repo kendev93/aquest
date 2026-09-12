@@ -38,6 +38,8 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+    healthcheck:
+      disable: true
     command: ["python", "-m", "selector_app.strategy_discovery.worker"]
     mem_limit: "${STRATEGY_WORKER_MEMORY_LIMIT:-6g}"
     restart: unless-stopped
