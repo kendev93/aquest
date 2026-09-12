@@ -277,6 +277,21 @@ describe('StrategyDiscoveryPage', () => {
     expect(api.createStrategyDiscovery.mock.calls[0]?.[0]).not.toHaveProperty('end_date')
   })
 
+  it('submits an explicit date range when custom history is selected', async () => {
+    const wrapper = mount(StrategyDiscoveryPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="strategy-discovery-date-mode"]').setValue('custom')
+    await wrapper.get('[data-testid="strategy-discovery-start-date"]').setValue('2024-01-01')
+    await wrapper.get('[data-testid="strategy-discovery-end-date"]').setValue('2024-12-31')
+    await wrapper.get('[data-testid="strategy-discovery-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(api.createStrategyDiscovery).toHaveBeenCalledWith(expect.objectContaining({
+      start_date: '2024-01-01',
+      end_date: '2024-12-31',
+    }))
+  })
+
   it('runs the current leaderboard top ten and renders full-range period metrics', async () => {
     const replayResult = {
       experiment_id: 'discovery-1',
