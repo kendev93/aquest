@@ -92,7 +92,8 @@ describe('StrategyFitnessPage', () => {
   it('submits the strategy and renders compatibility scores with three phases', async () => {
     const wrapper = mount(StrategyFitnessPage)
     await flushPromises()
-    expect(wrapper.text()).toContain('日期留空（默认）表示使用全市场共同可用的全部本地历史数据')
+    expect((wrapper.get('[data-testid="fitness-date-mode"]').element as HTMLSelectElement).value).toBe('recent5')
+    expect(wrapper.text()).toContain('默认使用本地最新已完成日线向前 5 年')
     await wrapper.get('[data-testid="fitness-config"]').trigger('submit')
     await flushPromises()
 
@@ -104,6 +105,7 @@ describe('StrategyFitnessPage', () => {
       }),
       ranking_value: 'indicator_three.varo7', train_ratio: 0.6, validation_ratio: 0.2,
       min_trades: 5, max_test_drawdown: 0.3,
+      date_mode: 'recent5',
       start_date: null, end_date: null,
     }))
     expect(wrapper.get('[data-testid="fitness-results"]').text()).toContain('600000')
@@ -228,6 +230,7 @@ describe('StrategyFitnessPage', () => {
     await flushPromises()
     await wrapper.get('[data-testid="fitness-universe"]').setValue('custom')
     await wrapper.get('[data-testid="fitness-ranking-value"]').setValue('')
+    await wrapper.get('[data-testid="fitness-date-mode"]').setValue('custom')
     await wrapper.get('[data-testid="fitness-start"]').setValue('2024-02-01')
     await wrapper.get('[data-testid="fitness-end"]').setValue('2024-01-01')
     await wrapper.get('[data-testid="fitness-train-ratio"]').setValue(0)

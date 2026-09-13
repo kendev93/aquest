@@ -11,11 +11,14 @@ import {
 } from '../api/strategyFitness'
 import { FormulaScreenApiError, fetchMetadata, parseFormula } from '../api/formulaScreen'
 import BacktestHistoryPanel from '../components/BacktestHistoryPanel.vue'
+import DateRangeSelector from '../components/DateRangeSelector.vue'
 import RuleGroupEditor from '../components/RuleGroupEditor.vue'
 import type {
   BacktestExecution,
   BacktestHistorySummary,
   CustomFormulaMetadata,
+  DateRangeMode,
+  DateRangeSelection,
   FitnessPhaseMetrics,
   FitnessLabel,
   FormulaScreenMetadata,
@@ -62,6 +65,7 @@ interface FitnessFormState {
   stopLossPct: number
   takeProfitEnabled: boolean
   takeProfitPct: number
+  dateMode: DateRangeMode
   startDate: string
   endDate: string
   trainRatio: number
@@ -95,6 +99,7 @@ const form = reactive<FitnessFormState>({
   stopLossPct: 8,
   takeProfitEnabled: false,
   takeProfitPct: 20,
+  dateMode: 'recent5',
   startDate: '',
   endDate: '',
   trainRatio: 60,
@@ -137,6 +142,14 @@ const canSubmit = computed(() => (
   && metadata.value !== null
   && (form.mode !== 'custom' || customMetadata.value !== null)
 ))
+const dateRange = computed<DateRangeSelection>({
+  get: () => ({ mode: form.dateMode, startDate: form.startDate, endDate: form.endDate }),
+  set: (value) => {
+    form.dateMode = value.mode
+    form.startDate = value.startDate
+    form.endDate = value.endDate
+  },
+})
 const passedCount = computed(() => report.value?.results.filter((item) => item.passed).length ?? 0)
 
 function firstSignal(suffix: string): string {
@@ -251,6 +264,10 @@ function validate(): Record<string, string> {
       }
     }
   }
+  if (form.dateMode === 'custom') {
+    if (!form.startDate) next.startDate = '请选择开始日期。'
+    if (!form.endDate) next.endDate = '请选择结束日期。'
+  }
   if (form.startDate && form.endDate && form.startDate > form.endDate) next.endDate = '结束日期不能早于开始日期。'
   if (!Number.isFinite(form.trainRatio) || form.trainRatio <= 0) next.trainRatio = '训练比例必须大于 0。'
   if (!Number.isFinite(form.validationRatio) || form.validationRatio <= 0) next.validationRatio = '验证比例必须大于 0。'
@@ -280,6 +297,7 @@ function buildPayload(): StrategyFitnessPayload {
     rank_order: form.rankOrder,
     formula_text: form.mode === 'custom' ? form.formulaText.trim() : null,
     formula_parameters: form.mode === 'custom' ? { ...form.formulaParameters } : {},
+    date_mode: form.dateMode,
     sell_signal: null,
     stop_loss_pct: form.stopLossEnabled ? form.stopLossPct / 100 : null,
     take_profit_pct: form.takeProfitEnabled ? form.takeProfitPct / 100 : null,
@@ -477,7 +495,7 @@ watch(() => form.formulaText, (value) => {
 
           <fieldset class="form-section"><legend>卖出规则 <span class="required">至少一项</span></legend><RuleGroupEditor :model-value="form.sellRule" :values="availableValues" :condition-operators="metadata?.condition_operators" title="卖出条件" testid="fitness-sell-rule" @update:model-value="setSellRule" /><div class="rule-toggle"><label><input v-model="form.stopLossEnabled" data-testid="fitness-stop-loss-enabled" type="checkbox"><span>止损</span></label><input v-model.number="form.stopLossPct" data-testid="fitness-stop-loss" type="number" min="0.01" max="100" step="0.5" aria-label="止损百分比"><span>%</span></div><div class="rule-toggle"><label><input v-model="form.takeProfitEnabled" data-testid="fitness-take-profit-enabled" type="checkbox"><span>止盈</span></label><input v-model.number="form.takeProfitPct" data-testid="fitness-take-profit" type="number" min="0.01" max="1000" step="0.5" aria-label="止盈百分比"><span>%</span></div><p v-if="errors.sellRules" class="field-error">{{ errors.sellRules }}</p><p v-if="errors.stopLossPct" class="field-error">{{ errors.stopLossPct }}</p><p v-if="errors.takeProfitPct" class="field-error">{{ errors.takeProfitPct }}</p><p class="helper">规则条件在收盘确认；止损和止盈作为独立的风险控制。</p></fieldset>
 
-          <fieldset class="form-section"><legend>时间切分</legend><div class="compact-fields"><div><label for="fitness-start">开始日期</label><input id="fitness-start" v-model="form.startDate" data-testid="fitness-start" type="date"></div><div><label for="fitness-end">结束日期</label><input id="fitness-end" v-model="form.endDate" data-testid="fitness-end" type="date"></div></div><p v-if="errors.endDate" class="field-error">{{ errors.endDate }}</p><p class="helper">日期留空（默认）表示使用全市场共同可用的全部本地历史数据，填写后按区间切分训练、验证和测试。</p><div class="compact-fields fitness-fields-top"><div><label for="fitness-train-ratio">训练比例 (%)</label><input id="fitness-train-ratio" v-model.number="form.trainRatio" data-testid="fitness-train-ratio" type="number" min="1" max="98" step="5"></div><div><label for="fitness-validation-ratio">验证比例 (%)</label><input id="fitness-validation-ratio" v-model.number="form.validationRatio" data-testid="fitness-validation-ratio" type="number" min="1" max="98" step="5"></div></div><p v-if="errors.trainRatio" class="field-error">{{ errors.trainRatio }}</p><p v-if="errors.validationRatio" class="field-error">{{ errors.validationRatio }}</p><div class="compact-fields fitness-fields-top"><div><label for="fitness-min-trades">验证/测试最少成交</label><input id="fitness-min-trades" v-model.number="form.minTrades" data-testid="fitness-min-trades" type="number" min="1" step="1"></div><div><label for="fitness-max-drawdown">测试期最大回撤 (%)</label><input id="fitness-max-drawdown" v-model.number="form.maxTestDrawdown" data-testid="fitness-max-drawdown" type="number" min="0" max="100" step="5"></div></div><p v-if="errors.minTrades" class="field-error">{{ errors.minTrades }}</p><p v-if="errors.maxTestDrawdown" class="field-error">{{ errors.maxTestDrawdown }}</p><p class="helper">默认 60% 训练、20% 验证、20% 测试；比例按全市场共同日期切分，避免股票之间时间边界不同。</p></fieldset>
+          <fieldset class="form-section"><legend>时间切分</legend><DateRangeSelector v-model="dateRange" prefix="fitness" testid="fitness-date-range" helper="默认使用本地最新已完成日线向前 5 年；选择全历史或自定义日期后，再按共同日期切分训练、验证和测试。" /><p v-if="errors.startDate" class="field-error">{{ errors.startDate }}</p><p v-if="errors.endDate" class="field-error">{{ errors.endDate }}</p><div class="compact-fields fitness-fields-top"><div><label for="fitness-train-ratio">训练比例 (%)</label><input id="fitness-train-ratio" v-model.number="form.trainRatio" data-testid="fitness-train-ratio" type="number" min="1" max="98" step="5"></div><div><label for="fitness-validation-ratio">验证比例 (%)</label><input id="fitness-validation-ratio" v-model.number="form.validationRatio" data-testid="fitness-validation-ratio" type="number" min="1" max="98" step="5"></div></div><p v-if="errors.trainRatio" class="field-error">{{ errors.trainRatio }}</p><p v-if="errors.validationRatio" class="field-error">{{ errors.validationRatio }}</p><div class="compact-fields fitness-fields-top"><div><label for="fitness-min-trades">验证/测试最少成交</label><input id="fitness-min-trades" v-model.number="form.minTrades" data-testid="fitness-min-trades" type="number" min="1" step="1"></div><div><label for="fitness-max-drawdown">测试期最大回撤 (%)</label><input id="fitness-max-drawdown" v-model.number="form.maxTestDrawdown" data-testid="fitness-max-drawdown" type="number" min="0" max="100" step="5"></div></div><p v-if="errors.minTrades" class="field-error">{{ errors.minTrades }}</p><p v-if="errors.maxTestDrawdown" class="field-error">{{ errors.maxTestDrawdown }}</p><p class="helper">默认 60% 训练、20% 验证、20% 测试；比例按全市场共同日期切分，避免股票之间时间边界不同。</p></fieldset>
 
           <button class="advanced-toggle" data-testid="fitness-advanced-toggle" type="button" :aria-expanded="showAdvanced" @click="showAdvanced = !showAdvanced"><span>{{ showAdvanced ? '收起高级设置' : '高级设置' }}</span><small>资金 · 执行 · 费用</small></button><div v-if="showAdvanced" class="advanced-settings" data-testid="fitness-advanced-settings"><fieldset class="form-section compact-fields"><div><label for="fitness-initial-cash">初始资金</label><input id="fitness-initial-cash" v-model.number="form.initialCash" data-testid="fitness-initial-cash" type="number" min="1" step="10000"></div><div><label for="fitness-execution">成交方式</label><select id="fitness-execution" v-model="form.execution" data-testid="fitness-execution"><option value="next_open">下一根开盘</option><option value="next_close">下一根收盘</option></select></div></fieldset><p v-if="errors.initialCash" class="field-error">{{ errors.initialCash }}</p><fieldset class="form-section compact-fields"><div><label for="fitness-commission">佣金费率</label><input id="fitness-commission" v-model.number="form.commission" data-testid="fitness-commission" type="number" min="0" max="0.1" step="0.0001"></div><div><label for="fitness-min-commission">最低佣金</label><input id="fitness-min-commission" v-model.number="form.minCommission" data-testid="fitness-min-commission" type="number" min="0" step="0.01"></div></fieldset><fieldset class="form-section compact-fields"><div><label for="fitness-stamp-tax">印花税率</label><input id="fitness-stamp-tax" v-model.number="form.stampTax" data-testid="fitness-stamp-tax" type="number" min="0" max="0.1" step="0.0001"></div><div><label for="fitness-slippage">每股滑点（元）</label><input id="fitness-slippage" v-model.number="form.slippage" data-testid="fitness-slippage" type="number" min="0" step="0.001"></div></fieldset></div>
           <div class="action-stack"><button class="primary-button" data-testid="start-fitness" type="button" :disabled="!canSubmit" @click="submit"><span v-if="loading" class="spinner" aria-hidden="true"></span>{{ loading ? '评估中…' : '开始适配性评估' }}</button></div><p class="privacy-note">只使用每个时间点之前的数据；结果用于研究，不是投资建议。</p>

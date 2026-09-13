@@ -71,10 +71,12 @@ describe('BacktestPage', () => {
   it('submits a single-stock backtest and renders performance and trades', async () => {
     const wrapper = mount(BacktestPage)
     await flushPromises()
-    expect(wrapper.text()).toContain('日期留空（默认）表示使用该股票全部本地历史数据')
+    expect((wrapper.get('[data-testid="backtest-date-mode"]').element as HTMLSelectElement).value).toBe('recent5')
+    expect(wrapper.text()).toContain('默认使用本地最新已完成日线向前 5 年')
     await wrapper.get('[data-testid="backtest-code"]').setValue('600000')
     await wrapper.get('[data-testid="backtest-market"]').setValue('SZ')
     await wrapper.get('[data-testid="backtest-market"]').setValue('SH')
+    await wrapper.get('[data-testid="backtest-date-mode"]').setValue('custom')
     await wrapper.get('[data-testid="backtest-start"]').setValue('2024-01-02')
     await wrapper.get('[data-testid="backtest-end"]').setValue('2024-01-06')
     await wrapper.get('[data-testid="backtest-config"]').trigger('submit')
@@ -89,7 +91,7 @@ describe('BacktestPage', () => {
       sell_rule: expect.objectContaining({
         conditions: [expect.objectContaining({ left_value: 'indicator_three.var1', operator: 'gt', right_constant: 90 })],
       }),
-      start_date: '2024-01-02', end_date: '2024-01-06',
+      date_mode: 'custom', start_date: '2024-01-02', end_date: '2024-01-06',
     }))
     expect(wrapper.get('[data-testid="backtest-results"]').text()).toContain('4.00%')
     expect(wrapper.get('[data-testid="backtest-results"]').text()).toContain('浦发银行')
@@ -144,6 +146,18 @@ describe('BacktestPage', () => {
     await wrapper.get('[data-testid="backtest-config"]').trigger('submit')
     await flushPromises()
     expect(wrapper.get('[data-testid="backtest-message"]').text()).toContain('回测失败')
+  })
+
+  it('requires both dates when a custom range is selected', async () => {
+    const wrapper = mount(BacktestPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="backtest-code"]').setValue('600000')
+    await wrapper.get('[data-testid="backtest-date-mode"]').setValue('custom')
+    await wrapper.get('[data-testid="backtest-config"]').trigger('submit')
+
+    expect(wrapper.text()).toContain('请选择开始日期')
+    expect(wrapper.text()).toContain('请选择结束日期')
+    expect(backtestApi.createBacktest).not.toHaveBeenCalled()
   })
 
   it('validates advanced cash and fixed-size settings before submitting', async () => {

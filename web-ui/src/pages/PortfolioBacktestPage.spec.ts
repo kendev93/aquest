@@ -98,7 +98,8 @@ describe('PortfolioBacktestPage', () => {
   it('submits ranked slot configuration and renders holdings, trades, and candidates', async () => {
     const wrapper = mount(PortfolioBacktestPage)
     await flushPromises()
-    expect(wrapper.text()).toContain('日期留空（默认）表示使用股票池全部本地历史数据')
+    expect((wrapper.get('[data-testid="portfolio-date-mode"]').element as HTMLSelectElement).value).toBe('recent5')
+    expect(wrapper.text()).toContain('默认使用本地最新已完成日线向前 5 年')
 
     await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')
     await flushPromises()
@@ -110,7 +111,7 @@ describe('PortfolioBacktestPage', () => {
         conditions: [expect.objectContaining({ left_value: 'indicator_three.var1' })],
       }),
       ranking_value: 'indicator_three.varo7', max_positions: 5, stop_loss_pct: 0.08,
-      start_date: null, end_date: null,
+      date_mode: 'recent5', start_date: null, end_date: null,
     }))
     expect(wrapper.get('[data-testid="portfolio-results"]').text()).toContain('12.00%')
     expect(wrapper.get('[data-testid="portfolio-holdings"]').text()).toContain('600000')
@@ -170,6 +171,7 @@ describe('PortfolioBacktestPage', () => {
     await wrapper.get('[data-testid="portfolio-stop-loss-enabled"]').setValue(false)
     await wrapper.get('[data-testid="portfolio-take-profit-enabled"]').setValue(true)
     await wrapper.get('[data-testid="portfolio-advanced-toggle"]').trigger('click')
+    await wrapper.get('[data-testid="portfolio-date-mode"]').setValue('custom')
     await wrapper.get('[data-testid="portfolio-start"]').setValue('2024-01-02')
     await wrapper.get('[data-testid="portfolio-end"]').setValue('2024-01-06')
     await wrapper.get('[data-testid="portfolio-initial-cash"]').setValue(50000)
@@ -183,6 +185,7 @@ describe('PortfolioBacktestPage', () => {
 
     expect(portfolioApi.createPortfolioBacktest).toHaveBeenCalledWith(expect.objectContaining({
       universe: 'custom', universe_file: '/data/list.txt', selected_signals: [],
+      date_mode: 'custom',
       buy_rule: expect.objectContaining({
         signals: [],
         combine_mode: 'at_least', minimum_matches: 2,

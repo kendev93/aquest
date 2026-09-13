@@ -19,6 +19,7 @@ from selector_app.strategy_fitness.service import (
 )
 
 from ..backtest_history import save_completed_backtest_history, utc_now
+from ..date_ranges import resolve_date_range
 from ..schemas import StrategyFitnessRequest
 
 router = APIRouter(prefix="/strategy-fitness", tags=["strategy-fitness"])
@@ -47,6 +48,23 @@ def _store(request: Request) -> DuckDbMarketDataStore:
     return cast(DuckDbMarketDataStore, request.app.state.market_data_store)
 
 
+def _resolve_payload_dates(
+    payload: StrategyFitnessRequest,
+    store: DuckDbMarketDataStore,
+) -> StrategyFitnessRequest:
+    if payload.start_date is not None or payload.end_date is not None:
+        return payload.model_copy(update={"date_mode": "custom"})
+    status_snapshot = store.status()
+    start_date, end_date = resolve_date_range(
+        mode=payload.date_mode,
+        requested_start=payload.start_date,
+        requested_end=payload.end_date,
+        available_start=status_snapshot.data_start,
+        available_end=status_snapshot.data_end,
+    )
+    return payload.model_copy(update={"start_date": start_date, "end_date": end_date})
+
+
 def _state_or_404(job_id: str, request: Request) -> JobState:
     state = _runner(request).get(job_id)
     if state is None or state.description != "策略适配性评估":
@@ -63,8 +81,9 @@ def create_strategy_fitness(
         if payload.universe == "custom" and payload.universe_file:
             if not Path(payload.universe_file).expanduser().is_file():
                 raise ValueError(f"自定义股票列表文件不存在: {payload.universe_file}")
-        config = payload.to_fitness_config()
-        request_snapshot = cast(dict[str, object], payload.model_dump(mode="json"))
+        resolved_payload = _resolve_payload_dates(payload, _store(request))
+        config = resolved_payload.to_fitness_config()
+        request_snapshot = cast(dict[str, object], resolved_payload.model_dump(mode="json"))
         job_id = uuid.uuid4().hex
 
         def run_fitness(progress: Callable[[int, int], None]) -> dict[str, object]:

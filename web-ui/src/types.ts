@@ -9,7 +9,13 @@ export type PortfolioSellValueOperator = 'gte' | 'lte'
 export type PortfolioCompareOperator = 'gt' | 'gte' | 'lt' | 'lte'
 export type InstrumentType = 'stock' | 'fund' | 'index' | 'bond'
 export type InstrumentBoard = 'main' | 'star' | 'chinext' | 'b_share' | 'fund' | 'index' | 'bond'
-export type StrategyDiscoveryDateMode = 'recent5' | 'full' | 'custom'
+export type DateRangeMode = 'recent5' | 'full' | 'custom'
+export type StrategyDiscoveryDateMode = DateRangeMode
+export interface DateRangeSelection {
+  mode: DateRangeMode
+  startDate: string
+  endDate: string
+}
 export type MarketDataProvider = 'akshare' | 'tdx'
 export type RuleMode = 'signals' | 'conditions'
 export type ConditionOperator = 'gt' | 'gte' | 'lt' | 'lte' | 'eq' | 'neq' | 'cross_up' | 'cross_down'
@@ -359,6 +365,7 @@ export interface ScreenHistoryRecord {
 export interface BacktestPayload {
   market: 'SH' | 'SZ'
   code: string
+  date_mode?: DateRangeMode
   buy_signal?: string | null
   sell_signal?: string | null
   buy_rule?: RuleGroupPayload | null
@@ -454,6 +461,7 @@ export interface BacktestHistoryRecord<T = Record<string, unknown>> extends Back
 
 export interface PortfolioBacktestPayload {
   universe: Universe
+  date_mode?: DateRangeMode
   universe_file?: string | null
   instrument_types?: InstrumentType[]
   boards?: InstrumentBoard[]

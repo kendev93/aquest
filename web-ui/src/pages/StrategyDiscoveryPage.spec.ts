@@ -427,4 +427,31 @@ describe('StrategyDiscoveryPage', () => {
 
     expect(wrapper.get('[data-testid="strategy-discovery-message"]').text()).toContain('先在“本地行情”页面导入')
   })
+
+  it('surfaces a capabilities loading error', async () => {
+    vi.mocked(api.fetchStrategyDiscoveryCapabilities).mockRejectedValueOnce(new Error('capabilities down'))
+
+    const wrapper = mount(StrategyDiscoveryPage)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="strategy-discovery-message"]').text()).toContain('capabilities down')
+  })
+
+  it('surfaces a history deletion error', async () => {
+    vi.mocked(api.fetchStrategyDiscoveryHistory).mockResolvedValueOnce([{
+      history_id: 'history-delete',
+      created_at: '2026-09-10T00:00:00',
+      total_trials: 1,
+      best_sharpe: null,
+      best_return: null,
+    }])
+    vi.mocked(api.deleteStrategyDiscoveryHistory).mockRejectedValueOnce(new Error('delete failed'))
+
+    const wrapper = mount(StrategyDiscoveryPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="strategy-discovery-history"] .danger-link').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="strategy-discovery-message"]').text()).toContain('delete failed')
+  })
 })

@@ -11,11 +11,14 @@ import {
 } from '../api/portfolioBacktest'
 import { FormulaScreenApiError, fetchMetadata, parseFormula } from '../api/formulaScreen'
 import BacktestHistoryPanel from '../components/BacktestHistoryPanel.vue'
+import DateRangeSelector from '../components/DateRangeSelector.vue'
 import RuleGroupEditor from '../components/RuleGroupEditor.vue'
 import type {
   BacktestHistorySummary,
   BacktestExecution,
   CustomFormulaMetadata,
+  DateRangeMode,
+  DateRangeSelection,
   FormulaScreenMetadata,
   InstrumentBoard,
   InstrumentType,
@@ -95,6 +98,7 @@ interface PortfolioFormState {
   trailingStopAtrMultiplier: number
   trailingStopCooldownDays: number
   atrPeriod: number
+  dateMode: DateRangeMode
   startDate: string
   endDate: string
   initialCash: number
@@ -142,6 +146,7 @@ const form = reactive<PortfolioFormState>({
   trailingStopAtrMultiplier: 2,
   trailingStopCooldownDays: 0,
   atrPeriod: 14,
+  dateMode: 'recent5',
   startDate: '',
   endDate: '',
   initialCash: 1_000_000,
@@ -215,6 +220,14 @@ const canSubmit = computed(() => (
   && metadata.value !== null
   && (form.mode !== 'custom' || customMetadata.value !== null)
 ))
+const dateRange = computed<DateRangeSelection>({
+  get: () => ({ mode: form.dateMode, startDate: form.startDate, endDate: form.endDate }),
+  set: (value) => {
+    form.dateMode = value.mode
+    form.startDate = value.startDate
+    form.endDate = value.endDate
+  },
+})
 
 function firstSignal(suffix: string, fallback = ''): string {
   return availableSignals.value.find((signal) => signal.id.endsWith(suffix))?.id
@@ -336,6 +349,10 @@ function validate(): Record<string, string> {
       }
     }
   }
+  if (form.dateMode === 'custom') {
+    if (!form.startDate) next.startDate = '请选择开始日期。'
+    if (!form.endDate) next.endDate = '请选择结束日期。'
+  }
   if (form.startDate && form.endDate && form.startDate > form.endDate) next.endDate = '结束日期不能早于开始日期。'
   if (!Number.isFinite(form.maxPositions) || !Number.isInteger(form.maxPositions) || form.maxPositions < 1 || form.maxPositions > 100) {
     next.maxPositions = '持仓槽位必须是 1 到 100 的整数。'
@@ -391,6 +408,7 @@ function buildPayload(): PortfolioBacktestPayload {
     rebalance_frequency: form.rebalanceFrequency,
     formula_text: form.mode === 'custom' ? form.formulaText.trim() : null,
     formula_parameters: form.mode === 'custom' ? { ...form.formulaParameters } : {},
+    date_mode: form.dateMode,
     sell_signal: null,
     stop_loss_mode: form.stopLossEnabled ? form.stopLossMode : 'pct',
     stop_loss_pct: form.stopLossEnabled && form.stopLossMode === 'pct' ? form.stopLossPct / 100 : null,
@@ -877,17 +895,17 @@ watch(() => form.formulaText, (value) => {
             <p class="helper">指标规则在收盘确认，默认下一根 K 线执行；风险控制按当日最高/最低价触发，ATR 周期固定为 {{ form.atrPeriod }}，各类冷却独立计算。</p>
           </fieldset>
 
-          <button class="advanced-toggle" data-testid="portfolio-advanced-toggle" type="button" :aria-expanded="showAdvanced" @click="showAdvanced = !showAdvanced"><span>{{ showAdvanced ? '收起高级设置' : '高级设置' }}</span><small>日期 · 资金 · 费用</small></button>
+          <DateRangeSelector v-model="dateRange" prefix="portfolio" testid="portfolio-date-range" />
+          <p v-if="errors.startDate" class="field-error">{{ errors.startDate }}</p>
+          <p v-if="errors.endDate" class="field-error">{{ errors.endDate }}</p>
+
+          <button class="advanced-toggle" data-testid="portfolio-advanced-toggle" type="button" :aria-expanded="showAdvanced" @click="showAdvanced = !showAdvanced"><span>{{ showAdvanced ? '收起高级设置' : '高级设置' }}</span><small>资金 · 执行 · 费用</small></button>
           <div v-if="showAdvanced" class="advanced-settings" data-testid="portfolio-advanced-settings">
-            <fieldset class="form-section compact-fields"><div><label for="portfolio-start">开始日期</label><input id="portfolio-start" v-model="form.startDate" data-testid="portfolio-start" type="date"></div><div><label for="portfolio-end">结束日期</label><input id="portfolio-end" v-model="form.endDate" data-testid="portfolio-end" type="date"></div></fieldset>
-            <p v-if="errors.endDate" class="field-error">{{ errors.endDate }}</p>
             <fieldset class="form-section compact-fields"><div><label for="portfolio-initial-cash">初始资金</label><input id="portfolio-initial-cash" v-model.number="form.initialCash" data-testid="portfolio-initial-cash" type="number" min="1" step="10000"></div><div><label for="portfolio-execution">成交方式</label><select id="portfolio-execution" v-model="form.execution" data-testid="portfolio-execution"><option value="next_open">下一根开盘</option><option value="next_close">下一根收盘</option></select></div></fieldset>
             <p v-if="errors.initialCash" class="field-error">{{ errors.initialCash }}</p>
             <fieldset class="form-section compact-fields"><div><label for="portfolio-commission">佣金费率</label><input id="portfolio-commission" v-model.number="form.commission" data-testid="portfolio-commission" type="number" min="0" max="0.1" step="0.0001"></div><div><label for="portfolio-min-commission">最低佣金</label><input id="portfolio-min-commission" v-model.number="form.minCommission" data-testid="portfolio-min-commission" type="number" min="0" step="0.01"></div></fieldset>
             <fieldset class="form-section compact-fields"><div><label for="portfolio-stamp-tax">印花税率</label><input id="portfolio-stamp-tax" v-model.number="form.stampTax" data-testid="portfolio-stamp-tax" type="number" min="0" max="0.1" step="0.0001"></div><div><label for="portfolio-slippage">每股滑点（元）</label><input id="portfolio-slippage" v-model.number="form.slippage" data-testid="portfolio-slippage" type="number" min="0" step="0.001"></div></fieldset>
           </div>
-
-          <p class="helper">日期留空（默认）表示使用股票池全部本地历史数据，区间边界包含当天；展开高级设置后可以手动填写起止日期。</p>
 
           <div class="action-stack"><button class="primary-button" data-testid="start-portfolio-backtest" type="button" :disabled="!canSubmit" @click="submit"><span v-if="loading" class="spinner" aria-hidden="true"></span>{{ loading ? '组合回测中…' : '开始组合回测' }}</button></div>
           <p class="privacy-note">计算在本机完成；结果基于本地日线，不代表未来收益。</p>

@@ -36,6 +36,7 @@ test('user can run a formula backtest and inspect the equity curve', async ({ pa
   await page.goto('/backtest')
   await expect(page.getByTestId('backtest-page')).toBeVisible()
   await page.getByTestId('backtest-code').fill('600000')
+  await page.getByTestId('backtest-date-mode').selectOption('custom')
   await page.getByTestId('backtest-start').fill('2024-01-02')
   await page.getByTestId('backtest-end').fill('2024-01-06')
   await page.getByTestId('start-backtest').click()

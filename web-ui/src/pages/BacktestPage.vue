@@ -11,6 +11,7 @@ import {
 } from '../api/backtest'
 import { FormulaScreenApiError, fetchMetadata, parseFormula } from '../api/formulaScreen'
 import BacktestHistoryPanel from '../components/BacktestHistoryPanel.vue'
+import DateRangeSelector from '../components/DateRangeSelector.vue'
 import RuleGroupEditor from '../components/RuleGroupEditor.vue'
 import type {
   BacktestHistorySummary,
@@ -18,6 +19,8 @@ import type {
   BacktestPayload,
   BacktestResult,
   CustomFormulaMetadata,
+  DateRangeMode,
+  DateRangeSelection,
   FormulaScreenMetadata,
   RuleGroupPayload,
   SignalDefinition,
@@ -35,6 +38,7 @@ interface BacktestFormState {
   sellRule: RuleGroupPayload
   formulaText: string
   formulaParameters: Record<string, number>
+  dateMode: DateRangeMode
   startDate: string
   endDate: string
   initialCash: number
@@ -60,6 +64,7 @@ const form = reactive<BacktestFormState>({
   sellRule: { signals: [], conditions: [], combine_mode: 'all', minimum_matches: null },
   formulaText: '',
   formulaParameters: {},
+  dateMode: 'recent5',
   startDate: '',
   endDate: '',
   initialCash: 100_000,
@@ -101,6 +106,14 @@ const canSubmit = computed(() => (
   && metadata.value !== null
   && (form.mode !== 'custom' || customMetadata.value !== null)
 ))
+const dateRange = computed<DateRangeSelection>({
+  get: () => ({ mode: form.dateMode, startDate: form.startDate, endDate: form.endDate }),
+  set: (value) => {
+    form.dateMode = value.mode
+    form.startDate = value.startDate
+    form.endDate = value.endDate
+  },
+})
 const sampledEquity = computed(() => {
   const curve = result.value?.equity_curve ?? []
   return curve.length > 60 ? curve.slice(-60) : curve
@@ -237,6 +250,10 @@ function validate(): Record<string, string> {
   if (!hasRuleItems(form.buyRule)) next.buySignal = '请至少设置一个买入指标条件。'
   if (!hasRuleItems(form.sellRule)) next.sellSignal = '请至少设置一个卖出指标条件。'
   else if (isSimpleRule(form.buyRule, form.buySignal) && isSimpleRule(form.sellRule, form.sellSignal) && form.buySignal === form.sellSignal) next.sellSignal = '买入信号和卖出信号不能相同。'
+  if (form.dateMode === 'custom') {
+    if (!form.startDate) next.startDate = '请选择开始日期。'
+    if (!form.endDate) next.endDate = '请选择结束日期。'
+  }
   if (form.startDate && form.endDate && form.startDate > form.endDate) next.endDate = '结束日期不能早于开始日期。'
   if (!Number.isFinite(form.initialCash) || form.initialCash <= 0) next.initialCash = '初始资金必须大于 0。'
   if (form.positionMode === 'fixed' && (!Number.isInteger(form.fixedSize) || !form.fixedSize || form.fixedSize < 100 || form.fixedSize % 100 !== 0)) {
@@ -251,6 +268,7 @@ function buildPayload(): BacktestPayload {
     code: form.code.trim(),
     buy_signal: form.buySignal,
     sell_signal: form.sellSignal,
+    date_mode: form.dateMode,
     formula_text: form.mode === 'custom' ? form.formulaText.trim() : null,
     formula_parameters: form.mode === 'custom' ? { ...form.formulaParameters } : {},
     start_date: form.startDate || null,
@@ -479,15 +497,9 @@ watch(() => form.formulaText, (value) => {
           />
           <p v-if="errors.sellSignal" class="field-error">{{ errors.sellSignal }}</p>
 
-          <fieldset class="form-section">
-            <legend>历史区间</legend>
-            <div class="compact-fields">
-              <div><label for="backtest-start">开始日期</label><input id="backtest-start" v-model="form.startDate" data-testid="backtest-start" type="date"></div>
-              <div><label for="backtest-end">结束日期</label><input id="backtest-end" v-model="form.endDate" data-testid="backtest-end" type="date"></div>
-            </div>
-            <p class="helper">日期留空（默认）表示使用该股票全部本地历史数据，区间边界包含当天；也可以手动填写起止日期。</p>
-            <p v-if="errors.endDate" class="field-error">{{ errors.endDate }}</p>
-          </fieldset>
+          <DateRangeSelector v-model="dateRange" prefix="backtest" testid="backtest-date-range" />
+          <p v-if="errors.startDate" class="field-error">{{ errors.startDate }}</p>
+          <p v-if="errors.endDate" class="field-error">{{ errors.endDate }}</p>
 
           <button class="advanced-toggle" data-testid="backtest-advanced-toggle" type="button" :aria-expanded="showAdvanced" @click="showAdvanced = !showAdvanced"><span>{{ showAdvanced ? '收起交易设置' : '交易设置' }}</span><small>资金 · 执行 · 成本</small></button>
           <div v-if="showAdvanced" class="advanced-settings" data-testid="backtest-advanced-settings">

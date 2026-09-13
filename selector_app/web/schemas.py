@@ -24,6 +24,13 @@ from selector_app.screening.rules import RuleGroup
 from selector_app.strategy_discovery.models import DiscoveryRequest
 from selector_app.strategy_fitness.models import StrategyFitnessConfig
 
+from .date_ranges import (
+    DateRangeMode,
+    coerce_date,
+    resolve_date_range,
+    validate_date_range_request,
+)
+
 
 def validate_formula_signals(
     formula_text: str | None,
@@ -76,20 +83,7 @@ def validate_formula_values(formula_text: str | None, value_ids: list[str]) -> N
         raise ValueError(f"未知指标输出: {', '.join(invalid)}")
 
 
-def _coerce_date(value: date | str | None) -> date | None:
-    """Convert a local-store date snapshot into a validated calendar date."""
-
-    if value is None:
-        return None
-    if isinstance(value, date):
-        return value
-    try:
-        return date.fromisoformat(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"策略实验日期格式错误: {value}") from exc
-
-
-StrategyDiscoveryDateMode = Literal["recent5", "full", "custom"]
+StrategyDiscoveryDateMode = DateRangeMode
 DEFAULT_STRATEGY_DISCOVERY_LOOKBACK_YEARS = 5
 
 
@@ -99,28 +93,13 @@ def resolve_strategy_discovery_defaults(
     mode: StrategyDiscoveryDateMode = "recent5",
 ) -> tuple[date | None, date | None]:
     """Resolve a preset range against the latest completed local bar."""
-
-    if mode not in {"recent5", "full", "custom"}:
-        raise ValueError("策略实验日期模式无效")
-    available_start = _coerce_date(data_start)
-    available_end = _coerce_date(data_end)
-    if mode != "recent5" or available_end is None:
-        return available_start, available_end
-    target_start = _subtract_calendar_years(
-        available_end,
-        DEFAULT_STRATEGY_DISCOVERY_LOOKBACK_YEARS,
+    return resolve_date_range(
+        mode=mode,
+        requested_start=None,
+        requested_end=None,
+        available_start=data_start,
+        available_end=data_end,
     )
-    if available_start is not None:
-        target_start = max(target_start, available_start)
-    return target_start, available_end
-
-
-def _subtract_calendar_years(value: date, years: int) -> date:
-    target_year = value.year - years
-    try:
-        return value.replace(year=target_year)
-    except ValueError:
-        return value.replace(year=target_year, day=28)
 
 
 def validate_formula_conditions(
@@ -377,6 +356,7 @@ class BacktestRequest(BaseModel):
     sell_rule: RuleGroupRequest | None = None
     formula_text: str | None = Field(default=None, max_length=20_000)
     formula_parameters: dict[str, float] = Field(default_factory=dict, max_length=32)
+    date_mode: DateRangeMode = "recent5"
     start_date: date | None = None
     end_date: date | None = None
     initial_cash: float = Field(default=100_000.0, gt=0, le=1_000_000_000_000)
@@ -390,6 +370,7 @@ class BacktestRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_backtest(self) -> BacktestRequest:
+        validate_date_range_request(self.date_mode, self.start_date, self.end_date)
         if self.buy_signal is None and self.buy_rule is None:
             raise ValueError("至少设置一个买入信号或指标条件")
         if self.sell_signal is None and self.sell_rule is None:
@@ -493,6 +474,7 @@ class PortfolioBacktestRequest(BaseModel):
     compare_operator: Literal["gt", "gte", "lt", "lte"] | None = None
     compare_right_value: str | None = Field(default=None, max_length=128)
     sell_rule: RuleGroupRequest | None = None
+    date_mode: DateRangeMode = "recent5"
     start_date: date | None = None
     end_date: date | None = None
     initial_cash: float = Field(default=1_000_000.0, gt=0, le=1_000_000_000_000)
@@ -508,6 +490,7 @@ class PortfolioBacktestRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_portfolio_backtest(self) -> PortfolioBacktestRequest:
+        validate_date_range_request(self.date_mode, self.start_date, self.end_date)
         signal_ids = list(self.selected_signals)
         if self.sell_signal is not None:
             signal_ids.append(self.sell_signal)
@@ -741,8 +724,8 @@ class StrategyDiscoveryRequest(BaseModel):
         required_sell_conditions = canonical_conditions(
             self.required_sell_conditions, "必选卖出条件"
         )
-        resolved_start = self.start_date or _coerce_date(default_start)
-        resolved_end = self.end_date or _coerce_date(default_end)
+        resolved_start = self.start_date or coerce_date(default_start)
+        resolved_end = self.end_date or coerce_date(default_end)
         if resolved_start is None or resolved_end is None:
             raise ValueError("本地 DuckDB 没有已完成日线，请先在“本地行情”页面导入日线数据")
         if resolved_start > resolved_end:

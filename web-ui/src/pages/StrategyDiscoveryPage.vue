@@ -18,6 +18,7 @@ import {
   cancelStrategyReplay,
   getStrategyReplayHistory,
 } from '../api/strategyDiscovery'
+import DateRangeSelector from '../components/DateRangeSelector.vue'
 import RuleGroupEditor from '../components/RuleGroupEditor.vue'
 import StrategyReplayPanel from '../components/StrategyReplayPanel.vue'
 import { formatChinaTimestamp } from '../utils/time'
@@ -35,6 +36,7 @@ import type {
   StrategyReplayResult,
   InstrumentBoard,
   InstrumentType,
+  DateRangeSelection,
   StrategyDiscoveryDateMode,
   Universe,
   ValueDefinition,
@@ -125,6 +127,14 @@ const canSubmit = computed(() => (
   && form.maxPositions <= 100
   && capabilities.value?.enabled !== false
 ))
+const dateRange = computed<DateRangeSelection>({
+  get: () => ({ mode: form.dateMode, startDate: form.startDate, endDate: form.endDate }),
+  set: (value) => {
+    form.dateMode = value.mode
+    form.startDate = value.startDate
+    form.endDate = value.endDate
+  },
+})
 
 function validate(): Record<string, string> {
   const next: Record<string, string> = {}
@@ -728,16 +738,14 @@ onMounted(async () => {
           <div class="panel-heading"><div><span class="section-kicker">01 / CONFIGURE</span><h2>实验设置</h2></div><span class="required-hint">* 必填</span></div>
           <fieldset class="form-section">
             <legend>数据范围</legend>
-            <p class="helper">默认使用本地最新已完成日线往前 5 年；你也可以选择全历史或自定义回测区间。</p>
             <div class="compact-fields">
               <div><label for="strategy-discovery-universe">品种范围</label><select id="strategy-discovery-universe" v-model="form.universe" data-testid="strategy-discovery-universe"><option value="all">沪深全部品种</option><option value="sh">仅上海</option><option value="sz">仅深圳</option><option value="custom">自定义列表</option></select></div>
               <div><label for="strategy-discovery-positions">持仓数量 N</label><input id="strategy-discovery-positions" v-model.number="form.maxPositions" data-testid="strategy-discovery-positions" type="number" min="1" max="100" step="1"></div>
             </div>
-            <div class="compact-fields strategy-date-fields">
-              <div><label for="strategy-discovery-date-mode">回测区间</label><select id="strategy-discovery-date-mode" v-model="form.dateMode" data-testid="strategy-discovery-date-mode"><option value="recent5">最近 5 年（默认）</option><option value="full">全历史</option><option value="custom">自定义日期</option></select></div>
-              <div v-if="form.dateMode === 'custom'"><label for="strategy-discovery-start-date">开始日期</label><input id="strategy-discovery-start-date" v-model="form.startDate" data-testid="strategy-discovery-start-date" type="date"><p v-if="errors.startDate" class="field-error">{{ errors.startDate }}</p></div>
-              <div v-if="form.dateMode === 'custom'"><label for="strategy-discovery-end-date">结束日期</label><input id="strategy-discovery-end-date" v-model="form.endDate" data-testid="strategy-discovery-end-date" type="date"><p v-if="errors.endDate || errors.dateRange" class="field-error">{{ errors.endDate || errors.dateRange }}</p></div>
-            </div>
+            <DateRangeSelector v-model="dateRange" prefix="strategy-discovery" field-suffix="-date" testid="strategy-discovery-date-range" helper="默认使用本地最新已完成日线向前 5 年；你也可以选择全历史或自定义回测区间。" />
+            <p v-if="errors.startDate" class="field-error">{{ errors.startDate }}</p>
+            <p v-if="errors.endDate" class="field-error">{{ errors.endDate }}</p>
+            <p v-if="errors.dateRange" class="field-error">{{ errors.dateRange }}</p>
             <div class="scope-config inline-scope-config" data-testid="strategy-discovery-scope"><div class="scope-options"><span>证券类型</span><label v-for="option in INSTRUMENT_TYPE_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`strategy-discovery-scope-type-${option.key}`" :checked="form.instrumentTypes.includes(option.key)" @change="toggleInstrumentType(option.key)">{{ option.label }}</label></div><div class="scope-options"><span>板块</span><label v-for="option in BOARD_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`strategy-discovery-scope-board-${option.key}`" :checked="form.boards.includes(option.key)" @change="toggleBoard(option.key)">{{ option.label }}</label></div><small class="scope-helper">未勾选表示全部；类型和板块同时选择时取交集。</small></div>
             <div v-if="form.universe === 'custom'" class="portfolio-inline-field"><label for="strategy-discovery-universe-file">品种列表文件</label><input id="strategy-discovery-universe-file" v-model="form.universeFile" data-testid="strategy-discovery-universe-file" type="text"><p v-if="errors.universeFile" class="field-error">{{ errors.universeFile }}</p></div>
             <p v-if="errors.maxPositions" class="field-error">{{ errors.maxPositions }}</p>

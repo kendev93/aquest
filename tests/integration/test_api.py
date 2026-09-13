@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from datetime import date
 from pathlib import Path
 from threading import Event
 
@@ -681,6 +682,63 @@ def test_backtest_job_can_be_created_and_results_are_available(tmp_path: Path) -
     assert results_response.json()["data"]["code"] == "600000"
 
 
+def test_backtest_without_dates_uses_recent_five_years(tmp_path: Path) -> None:
+    dates = pd.date_range("2020-01-01", periods=2_200, freq="D")
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars(
+        "SH",
+        "600000",
+        "stock",
+        _precompute_bars(len(dates)).assign(date=dates),
+    )
+    received: dict[str, object] = {}
+
+    class CapturingBacktestService:
+        def run(self, config, progress_callback=None):
+            received["start_date"] = config.start_date
+            received["end_date"] = config.end_date
+            if progress_callback:
+                progress_callback(1, 1)
+            return {
+                "market": config.market,
+                "code": config.code,
+                "bars": 1,
+                "start_date": str(config.start_date),
+                "end_date": str(config.end_date),
+                "buy_signal": config.buy_signal,
+                "sell_signal": config.sell_signal,
+                "performance": {},
+                "equity_curve": [],
+                "trades": [],
+                "positions": [],
+                "diagnostic": None,
+            }
+
+    with TestClient(
+        create_app(
+            engine=EmptyEngine(),
+            backtest_service=CapturingBacktestService(),
+            market_data_store=store,
+            auto_sync_enabled=False,
+        )
+    ) as client:
+        response = client.post(
+            "/api/v1/backtests",
+            json={
+                "market": "SH",
+                "code": "600000",
+                "buy_signal": "indicator_three.prepare_rally",
+                "sell_signal": "indicator_three.end_zone",
+            },
+        )
+        assert response.status_code == 202
+        state = wait_for_done(client, response.json()["data"]["job_id"], "/api/v1/backtests")
+
+    assert state["status"] == "completed"
+    assert received["start_date"] == date(2021, 1, 8)
+    assert received["end_date"] == date(2026, 1, 8)
+
+
 def test_backtest_default_service_reads_day_file_and_serializes_result(tmp_path: Path) -> None:
     vipdoc = tmp_path / "vipdoc"
     filepath = vipdoc / "sh/lday/sh600000.day"
@@ -776,6 +834,8 @@ def test_backtest_task_returns_a_safe_domain_error(tmp_path: Path) -> None:
                 "vipdoc_path": str(tmp_path),
                 "buy_signal": "indicator_three.begin_zone",
                 "sell_signal": "indicator_three.end_zone",
+                "start_date": "2024-01-02",
+                "end_date": "2024-01-06",
             },
         )
         assert response.status_code == 202
@@ -842,6 +902,8 @@ def test_portfolio_backtest_job_can_be_created_and_polled(tmp_path: Path) -> Non
                 "fitness_min_score": 60,
                 "fitness_min_trades": 3,
                 "fitness_max_drawdown": 0.4,
+                "start_date": "2024-01-02",
+                "end_date": "2024-01-06",
             },
         )
         assert response.status_code == 202
@@ -862,6 +924,75 @@ def test_portfolio_backtest_job_can_be_created_and_polled(tmp_path: Path) -> Non
     assert history_response.json()["data"][0]["summary"]["end_date"] == "2024-01-06"
     assert history_detail.status_code == 200
     assert history_detail.json()["data"]["result"]["max_positions"] == 2
+
+
+def test_portfolio_backtest_without_dates_uses_recent_five_years(tmp_path: Path) -> None:
+    dates = pd.date_range("2020-01-01", periods=2_200, freq="D")
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars(
+        "SH",
+        "600000",
+        "stock",
+        _precompute_bars(len(dates)).assign(date=dates),
+    )
+    received: dict[str, object] = {}
+
+    class CapturingPortfolioService:
+        def run(self, config, progress_callback=None):
+            received["start_date"] = config.start_date
+            received["end_date"] = config.end_date
+            if progress_callback:
+                progress_callback(1, 1)
+            return {
+                "universe": config.universe,
+                "total_candidates": 1,
+                "processed": 1,
+                "skipped": 0,
+                "errors": 0,
+                "bars": 1,
+                "start_date": str(config.start_date),
+                "end_date": str(config.end_date),
+                "max_positions": config.max_positions,
+                "ranking_value": config.ranking_value,
+                "rank_order": config.rank_order,
+                "performance": {},
+                "equity_curve": [],
+                "trades": [],
+                "states": [],
+                "ranking_events": [],
+                "failure_reasons": {},
+                "diagnostic": None,
+            }
+
+    with TestClient(
+        create_app(
+            engine=EmptyEngine(),
+            portfolio_backtest_service=CapturingPortfolioService(),
+            market_data_store=store,
+            auto_sync_enabled=False,
+        )
+    ) as client:
+        response = client.post(
+            "/api/v1/portfolio-backtests",
+            json={
+                "universe": "all",
+                "selected_signals": ["custom.buy"],
+                "combine_mode": "any",
+                "ranking_value": "custom.rank",
+                "formula_text": "BUY:C>0; RANK:C;",
+                "stop_loss_pct": 0.05,
+            },
+        )
+        assert response.status_code == 202
+        state = wait_for_done(
+            client,
+            response.json()["data"]["job_id"],
+            "/api/v1/portfolio-backtests",
+        )
+
+    assert state["status"] == "completed"
+    assert received["start_date"] == date(2021, 1, 8)
+    assert received["end_date"] == date(2026, 1, 8)
 
 
 def test_portfolio_backtest_requires_a_sell_rule(tmp_path: Path) -> None:

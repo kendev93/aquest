@@ -6,6 +6,7 @@ from selector_app.web.schemas import (
     BacktestRequest,
     PortfolioBacktestRequest,
     StrategyDiscoveryRequest,
+    StrategyFitnessRequest,
 )
 
 
@@ -35,6 +36,39 @@ def test_backtest_request_accepts_signal_and_indicator_rule_groups() -> None:
     assert config.buy_rule.conditions[0].right_value == "custom.slow"
     assert config.sell_rule is not None
     assert config.sell_rule.conditions[0].right_constant == 9
+
+
+def test_backtest_request_defaults_to_recent_five_years_mode() -> None:
+    request = BacktestRequest.model_validate(
+        {
+            "market": "SH",
+            "code": "600000",
+            "buy_signal": "indicator_three.prepare_rally",
+            "sell_signal": "indicator_three.end_zone",
+        }
+    )
+
+    assert request.date_mode == "recent5"
+
+
+def test_portfolio_and_fitness_requests_default_to_recent_five_years_mode() -> None:
+    portfolio = PortfolioBacktestRequest.model_validate(
+        {
+            "ranking_value": "technical.ma5",
+            "buy_rule": {"conditions": [condition("technical.ma5", "gt", right_constant=10)]},
+            "sell_rule": {"conditions": [condition("technical.ma5", "lt", right_constant=5)]},
+        }
+    )
+    fitness = StrategyFitnessRequest.model_validate(
+        {
+            "ranking_value": "technical.ma5",
+            "buy_rule": {"conditions": [condition("technical.ma5", "gt", right_constant=10)]},
+            "sell_rule": {"conditions": [condition("technical.ma5", "lt", right_constant=5)]},
+        }
+    )
+
+    assert portfolio.date_mode == "recent5"
+    assert fitness.date_mode == "recent5"
 
 
 def test_portfolio_request_accepts_condition_only_buy_and_sell_groups() -> None:
