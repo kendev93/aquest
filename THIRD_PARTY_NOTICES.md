@@ -50,4 +50,4 @@ easy-tdx also documents inspiration/attribution for `pytdx` and `xmtdx`; their M
 
 ## 本项目许可证
 
-本项目自身代码采用根目录 [LICENSE](LICENSE) 中的 GNU Affero General Public License v3.0 or later（`AGPL-3.0-or-later`）。本许可证不改变任何第三方依赖原有的许可证义务。
+本项目自身代码为陈垦版权所有的商业专有软件，具体授权条件见根目录 [LICENSE](LICENSE)。本项目许可证不改变任何第三方依赖原有的许可证义务。

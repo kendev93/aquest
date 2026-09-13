@@ -348,6 +348,6 @@ E2E 测试通过 Playwright 路由模拟 API，不需要真实 vipdoc；真实�
 
 ## 许可证
 
-本项目自己的源代码采用 [GNU Affero General Public License v3.0 or later](LICENSE)（`AGPL-3.0-or-later`）。这是一个 Copyleft 许可证：修改后的版本在分发时必须继续提供对应源代码；如果修改后的版本作为网络服务向用户提供，也需要向交互用户提供对应源代码。具体权利和义务以根目录的 [LICENSE](LICENSE) 全文为准。
+本项目自身源代码为陈垦版权所有的商业专有软件，不以 AGPL 或其他开源许可证发布。除非取得书面商业授权，禁止复制、修改、再分发、转售、再许可或反向工程（适用法律强制允许的范围除外）。具体权利和义务以根目录的 [LICENSE](LICENSE) 全文为准。
 
-本项目并不禁止商业使用；商业使用者仍需遵守 AGPL 的源代码提供和许可证保留要求。项目内置 TDX 协议和 `.day` 解析代码的来源、归属及 MIT 许可说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+项目内置 TDX 协议和 `.day` 解析代码的来源、归属及第三方 MIT 许可说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
