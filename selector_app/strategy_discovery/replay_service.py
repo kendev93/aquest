@@ -7,10 +7,11 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import contextmanager
 from datetime import date
-from typing import Protocol
+from typing import Protocol, cast
 
 from selector_app.indicators.cache import IndicatorCache
-from selector_app.market_data.adapter import DuckDbMarketDataAdapter
+from selector_app.market_data.adapter import DuckDbMarketDataAdapter, MarketDataAdapter
+from selector_app.market_data.etfquest_adapter import ETFQuestMarketDataAdapter
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.portfolio_backtest.models import PortfolioBacktestConfig, PortfolioBacktestReport
 from selector_app.portfolio_backtest.service import PortfolioBacktestService
@@ -44,22 +45,35 @@ _WORKER_REPLAY_SERVICE: PortfolioBacktestService | None = None
 _WORKER_REPLAY_SNAPSHOT: DiscoverySnapshot | None = None
 
 
-def _init_replay_worker(database_path: str, snapshot_path: str) -> None:
+def _init_replay_worker(
+    database_path: str,
+    snapshot_path: str,
+    market_data_path: str | None = None,
+) -> None:
     global _WORKER_REPLAY_SERVICE, _WORKER_REPLAY_SNAPSHOT
     worker_store = DuckDbMarketDataStore(database_path, read_only=True)
+    market_adapter = (
+        ETFQuestMarketDataAdapter(market_data_path)
+        if market_data_path
+        else DuckDbMarketDataAdapter(worker_store)
+    )
     _WORKER_REPLAY_SERVICE = PortfolioBacktestService(
-        adapter=DuckDbMarketDataAdapter(worker_store),
+        adapter=market_adapter,
         indicator_cache=IndicatorCache(),
     )
     _WORKER_REPLAY_SNAPSHOT = DiscoverySnapshot(snapshot_path)
 
 
 def _evaluate_replay_candidate_process(
-    job: tuple[dict[str, object], str, str, int],
+    job: tuple[object, ...],
 ) -> Mapping[str, object]:
-    candidate_config, database_path, snapshot_path, total_candidates = job
+    if len(job) == 4:
+        candidate_config, database_path, snapshot_path, total_candidates = job
+        market_data_path = None
+    else:
+        candidate_config, database_path, snapshot_path, market_data_path, total_candidates = job
     if _WORKER_REPLAY_SERVICE is None or _WORKER_REPLAY_SNAPSHOT is None:
-        _init_replay_worker(database_path, snapshot_path)
+        _init_replay_worker(database_path, snapshot_path, market_data_path)
     assert _WORKER_REPLAY_SERVICE is not None
     assert _WORKER_REPLAY_SNAPSHOT is not None
     config = PortfolioBacktestRequest.model_validate(candidate_config).to_config()
@@ -80,16 +94,23 @@ class StrategyReplayService:
         *,
         portfolio_service: PortfolioServiceLike,
         store: DuckDbMarketDataStore,
+        market_data_adapter: MarketDataAdapter | None = None,
         evaluation_workers: int | None = None,
     ) -> None:
         self._portfolio_service = portfolio_service
         self._store = store
+        self._market_data_adapter = cast(
+            MarketDataAdapter,
+            market_data_adapter or getattr(portfolio_service, "_adapter", None)
+            or DuckDbMarketDataAdapter(store),
+        )
         self._evaluation_workers = validate_discovery_workers(
             resolve_discovery_workers() if evaluation_workers is None else evaluation_workers
         )
-        self._parallel_enabled = isinstance(
-            portfolio_service, PortfolioBacktestService
-        ) and isinstance(getattr(portfolio_service, "_adapter", None), DuckDbMarketDataAdapter)
+        self._parallel_enabled = isinstance(portfolio_service, PortfolioBacktestService) and all(
+            callable(getattr(self._market_data_adapter, name, None))
+            for name in ("read_many_stocks", "count_many_stocks")
+        )
 
     def run(
         self,
@@ -108,7 +129,8 @@ class StrategyReplayService:
         if not source_candidates:
             raise ValueError("该榜单没有可用于全量复核的策略候选")
 
-        store_status = self._store.status()
+        status_reader = getattr(self._market_data_adapter, "status", None)
+        store_status = status_reader() if callable(status_reader) else self._store.status()
         data_start = _date_from_text(_base_config(experiment).get("start_date"))
         data_end = _date_from_text(store_status.data_end)
         if data_start is None:
@@ -251,6 +273,7 @@ class StrategyReplayService:
         with build_discovery_snapshot(
             self._store,
             replay_request,
+            adapter=self._market_data_adapter,
             progress_callback=snapshot_progress,
             abort_check=abort_check,
         ) as snapshot:
@@ -267,11 +290,17 @@ class StrategyReplayService:
                     },
                 )
             with self._evaluation_executor(str(snapshot.root)) as executor:
+                market_data_path = (
+                    str(getattr(self._market_data_adapter, "database_path"))
+                    if isinstance(self._market_data_adapter, ETFQuestMarketDataAdapter)
+                    else None
+                )
                 jobs = [
                     (
                         config,
                         str(self._store.database_path),
                         str(snapshot.root),
+                        market_data_path,
                         snapshot.total_candidates,
                     )
                     for config in configs
@@ -311,11 +340,16 @@ class StrategyReplayService:
 
     @contextmanager
     def _evaluation_executor(self, snapshot_path: str) -> Iterator[ProcessPoolExecutor]:
+        market_data_path = (
+            str(getattr(self._market_data_adapter, "database_path"))
+            if isinstance(self._market_data_adapter, ETFQuestMarketDataAdapter)
+            else None
+        )
         executor = ProcessPoolExecutor(
             max_workers=self._evaluation_workers,
             mp_context=multiprocessing.get_context("spawn"),
             initializer=_init_replay_worker,
-            initargs=(str(self._store.database_path), snapshot_path),
+            initargs=(str(self._store.database_path), snapshot_path, market_data_path),
         )
         try:
             yield executor

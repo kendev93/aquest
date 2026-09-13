@@ -19,6 +19,8 @@ _MARKET_PATTERN = re.compile(r"^(SH|SZ)[:\s-]?([0-9]{6})$", re.IGNORECASE)
 class MarketDataAdapter(Protocol):
     """Compatibility-shaped adapter for formula and chart consumers."""
 
+    def stock_ref(self, vipdoc_path: str | Path, market: MarketCode, code: str) -> StockRef: ...
+
     def list_stock_refs(
         self,
         vipdoc_path: str | Path,
@@ -29,6 +31,27 @@ class MarketDataAdapter(Protocol):
     ) -> list[StockRef]: ...
 
     def read_stock(self, ref: StockRef) -> pd.DataFrame: ...
+
+
+class BatchMarketDataAdapter(MarketDataAdapter, Protocol):
+    """Adapter capabilities required by batched screening and snapshots."""
+
+    def read_many_stocks(
+        self,
+        refs: list[StockRef],
+        *,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        warmup_bars: int = 0,
+    ) -> pd.DataFrame: ...
+
+    def count_many_stocks(
+        self,
+        refs: list[StockRef],
+        *,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> int: ...
 
 
 class DuckDbMarketDataAdapter:

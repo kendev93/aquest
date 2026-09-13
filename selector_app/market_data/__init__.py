@@ -1,6 +1,6 @@
 """Local market-data browsing and DuckDB storage services."""
 
-from .adapter import DuckDbMarketDataAdapter, MarketDataAdapter
+from .adapter import BatchMarketDataAdapter, DuckDbMarketDataAdapter, MarketDataAdapter
 from .day_format import (
     DayFileError,
     DayFileResult,
@@ -10,6 +10,11 @@ from .day_format import (
     read_day_file,
 )
 from .day_importer import LocalDayImporter
+from .etfquest_adapter import (
+    ETFQuestMarketDataAdapter,
+    ETFQuestMarketDataError,
+    default_etfquest_database_path,
+)
 from .local_adapter import LocalDayMarketDataAdapter, suggested_vipdoc_path
 from .maintenance import (
     BACKUP_RETENTION_DAYS,
@@ -66,7 +71,11 @@ __all__ = [
     "discover_day_files",
     "read_day_file",
     "LocalDayImporter",
+    "ETFQuestMarketDataAdapter",
+    "ETFQuestMarketDataError",
+    "default_etfquest_database_path",
     "DuckDbMarketDataAdapter",
+    "BatchMarketDataAdapter",
     "MarketDataAdapter",
     "LocalDayMarketDataAdapter",
     "suggested_vipdoc_path",

@@ -233,8 +233,16 @@ class ETFQuestMarketDataAdapter:
         raise ValueError(f"找不到 ETFQuest 行情: {normalized_market} {normalized_code}")
 
     @staticmethod
+    def _storage_symbol(ref: StockRef) -> str:
+        """Convert the normalized ref back to ETFQuest's symbol convention."""
+
+        if ref.instrument_type == "index":
+            return f"{ref.market.lower()}{ref.code}"
+        return ref.code
+
+    @staticmethod
     def _requested_frame(refs: Iterable[StockRef]) -> pd.DataFrame:
-        rows = [{"symbol": f"{ref.market.lower()}{ref.code}"} for ref in refs]
+        rows = [{"symbol": ETFQuestMarketDataAdapter._storage_symbol(ref)} for ref in refs]
         return pd.DataFrame(rows).drop_duplicates() if rows else pd.DataFrame(columns=["symbol"])
 
     def read_stock(self, ref: StockRef) -> pd.DataFrame:
@@ -323,7 +331,7 @@ class ETFQuestMarketDataAdapter:
         if result.empty:
             return _empty_bars()
         rows: list[pd.DataFrame] = []
-        ref_map = {(ref.market.lower() + ref.code): ref for ref in requested}
+        ref_map = {self._storage_symbol(ref).lower(): ref for ref in requested}
         for symbol, group in result.groupby("symbol", sort=False):
             ref = ref_map.get(str(symbol).lower())
             if ref is None:

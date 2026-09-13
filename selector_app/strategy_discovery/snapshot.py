@@ -20,7 +20,11 @@ import pandas as pd
 from selector_app.formulas.registry import FORMULA_REGISTRY
 from selector_app.formulas.types import FormulaResult
 from selector_app.indicators.cache import IndicatorCache, frame_fingerprint
-from selector_app.market_data.adapter import DuckDbMarketDataAdapter
+from selector_app.market_data.adapter import (
+    BatchMarketDataAdapter,
+    DuckDbMarketDataAdapter,
+    MarketDataAdapter,
+)
 from selector_app.market_data.day_format import classify_board
 from selector_app.market_data.models import InstrumentBoard, InstrumentType, MarketCode, StockRef
 from selector_app.market_data.store import DuckDbMarketDataStore
@@ -446,6 +450,7 @@ def build_discovery_snapshot(
     store: DuckDbMarketDataStore,
     request: DiscoveryRequest,
     *,
+    adapter: MarketDataAdapter | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
     abort_check: Callable[[], bool] | None = None,
 ) -> Iterator[DiscoverySnapshot]:
@@ -457,6 +462,7 @@ def build_discovery_snapshot(
             root,
             store,
             request,
+            adapter=adapter,
             progress_callback=progress_callback,
             abort_check=abort_check,
         )
@@ -472,6 +478,7 @@ def _write_snapshot(
     store: DuckDbMarketDataStore,
     request: DiscoveryRequest,
     *,
+    adapter: MarketDataAdapter | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
     abort_check: Callable[[], bool] | None = None,
 ) -> None:
@@ -480,16 +487,21 @@ def _write_snapshot(
     window = snapshot_window(request)
     instrument_types = _string_tuple(base.get("instrument_types"))
     boards = _string_tuple(base.get("boards"))
-    snapshot_store = DuckDbMarketDataStore(store.database_path, read_only=True)
-    adapter = DuckDbMarketDataAdapter(snapshot_store)
-    refs = adapter.list_stock_refs(
+    selected_adapter = cast(
+        BatchMarketDataAdapter,
+        adapter
+        or DuckDbMarketDataAdapter(
+            DuckDbMarketDataStore(store.database_path, read_only=True)
+        ),
+    )
+    refs = selected_adapter.list_stock_refs(
         str(base.get("vipdoc_path") or ""),
         str(base.get("universe") or "all"),
         str(base["universe_file"]) if base.get("universe_file") else None,
         instrument_types=cast(tuple[InstrumentType, ...] | None, instrument_types),
         boards=cast(tuple[InstrumentBoard, ...] | None, boards),
     )
-    total_rows = adapter.count_many_stocks(
+    total_rows = selected_adapter.count_many_stocks(
         refs,
         start_date=window.start,
         end_date=window.end,
@@ -538,7 +550,7 @@ def _write_snapshot(
     for ref_batch in _iter_ref_batches(refs):
         if abort_check is not None and abort_check():
             raise RuntimeError("策略实验已取消")
-        combined = adapter.read_many_stocks(ref_batch)
+        combined = selected_adapter.read_many_stocks(ref_batch)
         if combined.empty:
             del combined
             continue
@@ -555,7 +567,7 @@ def _write_snapshot(
     for ref_batch in _iter_ref_batches(refs):
         if abort_check is not None and abort_check():
             raise RuntimeError("策略实验已取消")
-        combined = adapter.read_many_stocks(
+        combined = selected_adapter.read_many_stocks(
             ref_batch,
             start_date=window.start,
             end_date=window.end,

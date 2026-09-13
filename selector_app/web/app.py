@@ -19,12 +19,13 @@ from selector_app.adapters.market_data_sync import MarketDataSync
 from selector_app.backtest.service import BacktestService
 from selector_app.indicators.cache import IndicatorCache
 from selector_app.indicators.precompute import IndicatorPrecomputeService
-from selector_app.market_data.adapter import DuckDbMarketDataAdapter
+from selector_app.market_data.adapter import DuckDbMarketDataAdapter, MarketDataAdapter
 from selector_app.market_data.auto_sync import (
     DEFAULT_AUTO_SYNC_INTERVAL_SECONDS,
     AutomaticMarketSyncScheduler,
 )
 from selector_app.market_data.day_importer import LocalDayImporter
+from selector_app.market_data.etfquest_adapter import ETFQuestMarketDataAdapter
 from selector_app.market_data.maintenance import (
     DatabaseMaintenanceScheduler,
     DatabaseMaintenanceService,
@@ -56,6 +57,18 @@ from .routers.formula_screen import router as formula_screen_router
 logger = logging.getLogger(__name__)
 
 
+def _resolve_market_data_adapter(store: DuckDbMarketDataStore) -> MarketDataAdapter:
+    """Select the explicit shared ETFQuest source for release deployments."""
+
+    mode = str(os.getenv("SELECTOR_MARKET_DATA_SOURCE") or "").strip().lower()
+    release_mode = str(os.getenv("SELECTOR_RELEASE_MODE") or "").strip().lower()
+    shared_path_configured = bool(str(os.getenv("SELECTOR_ETFQUEST_DATABASE_PATH") or "").strip())
+    use_shared = mode == "etfquest" or shared_path_configured or release_mode in {"1", "true", "yes", "on"}
+    if use_shared:
+        return ETFQuestMarketDataAdapter()
+    return DuckDbMarketDataAdapter(store)
+
+
 def create_app(
     *,
     engine: ScanEngineLike | None = None,
@@ -68,6 +81,7 @@ def create_app(
     strategy_fitness_service: StrategyFitnessService | object | None = None,
     local_market_data_service: LocalMarketDataService | object | None = None,
     market_data_store: DuckDbMarketDataStore | object | None = None,
+    market_data_adapter: MarketDataAdapter | object | None = None,
     local_day_importer: LocalDayImporter | object | None = None,
     indicator_cache: IndicatorCache | object | None = None,
     indicator_precompute_service: IndicatorPrecomputeService | object | None = None,
@@ -80,7 +94,10 @@ def create_app(
         DuckDbMarketDataStore,
         market_data_store if market_data_store is not None else DuckDbMarketDataStore(),
     )
-    selected_adapter = DuckDbMarketDataAdapter(selected_store)
+    selected_adapter = cast(
+        MarketDataAdapter,
+        market_data_adapter if market_data_adapter is not None else _resolve_market_data_adapter(selected_store),
+    )
     selected_indicator_cache = cast(
         IndicatorCache,
         indicator_cache if indicator_cache is not None else IndicatorCache(selected_store),
@@ -127,6 +144,7 @@ def create_app(
         else StrategyDiscoveryService(
             portfolio_service=selected_portfolio_service,
             store=selected_store,
+            market_data_adapter=selected_adapter,
         ),
     )
     selected_strategy_backend = cast(
@@ -143,6 +161,7 @@ def create_app(
             selected_store,
             StrategyJobStore(default_strategy_job_root(selected_store.database_path)),
             worker_count=resolve_discovery_workers(),
+            market_data_adapter=selected_adapter,
         ),
     )
 
@@ -222,11 +241,13 @@ def create_app(
         indicator_cache=selected_indicator_cache,
     )
     app.state.market_data_store = selected_store
+    app.state.market_data_adapter = selected_adapter
     app.state.indicator_cache = selected_indicator_cache
     app.state.indicator_precompute_service = selected_precompute_service
     app.state.local_day_importer = selected_importer
     app.state.local_market_data_service = local_market_data_service or LocalMarketDataService(
-        store=selected_store
+        adapter=selected_adapter,
+        store=selected_store,
     )
     app.state.auto_sync_enabled = selected_auto_sync_enabled
     app.state.auto_sync_interval_seconds = selected_auto_sync_interval

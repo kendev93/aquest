@@ -19,7 +19,8 @@ from datetime import date, timedelta
 from typing import Protocol, cast
 
 from selector_app.indicators.cache import IndicatorCache
-from selector_app.market_data.adapter import DuckDbMarketDataAdapter
+from selector_app.market_data.adapter import DuckDbMarketDataAdapter, MarketDataAdapter
+from selector_app.market_data.etfquest_adapter import ETFQuestMarketDataAdapter
 from selector_app.market_data.models import InstrumentBoard, InstrumentType
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.portfolio_backtest.models import (
@@ -57,33 +58,40 @@ DISCOVERY_EVALUATION_WORKERS = resolve_discovery_workers()
 _WORKER_DISCOVERY_SERVICE: StrategyDiscoveryService | None = None
 
 
-def _init_discovery_worker(database_path: str, snapshot_path: str | None = None) -> None:
+def _init_discovery_worker(
+    database_path: str,
+    snapshot_path: str | None = None,
+    market_data_path: str | None = None,
+) -> None:
     global _WORKER_DISCOVERY_SERVICE
     worker_store = DuckDbMarketDataStore(database_path, read_only=True)
+    market_adapter = (
+        ETFQuestMarketDataAdapter(market_data_path)
+        if market_data_path
+        else DuckDbMarketDataAdapter(worker_store)
+    )
     worker_portfolio = PortfolioBacktestService(
-        adapter=DuckDbMarketDataAdapter(worker_store),
+        adapter=market_adapter,
         indicator_cache=IndicatorCache(),
     )
     _WORKER_DISCOVERY_SERVICE = StrategyDiscoveryService(
         portfolio_service=worker_portfolio,
         store=worker_store,
+        market_data_adapter=market_adapter,
         discovery_snapshot=(DiscoverySnapshot(snapshot_path) if snapshot_path else None),
     )
 
 
 def _evaluate_candidate_process(
-    job: tuple[
-        StrategyCandidate,
-        DiscoveryRequest,
-        str,
-        str | None,
-        str,
-        Mapping[str, object] | None,
-    ],
+    job: tuple[object, ...],
 ) -> Mapping[str, object]:
-    candidate, request, stage, fidelity, database_path, checkpoint = job
+    if len(job) == 6:
+        candidate, request, stage, fidelity, database_path, checkpoint = job
+        market_data_path = None
+    else:
+        candidate, request, stage, fidelity, database_path, market_data_path, checkpoint = job
     if _WORKER_DISCOVERY_SERVICE is None:
-        _init_discovery_worker(database_path)
+        _init_discovery_worker(database_path, market_data_path=market_data_path)
     assert _WORKER_DISCOVERY_SERVICE is not None
     split = "search" if stage in {"coarse", "medium", "full"} else stage
     return _WORKER_DISCOVERY_SERVICE._evaluate_candidate(
@@ -109,12 +117,17 @@ class StrategyDiscoveryService:
         *,
         portfolio_service: PortfolioServiceLike | None = None,
         store: DuckDbMarketDataStore | None = None,
+        market_data_adapter: MarketDataAdapter | None = None,
         discovery_snapshot: DiscoverySnapshot | None = None,
         evaluation_workers: int | None = None,
     ) -> None:
         selected_store = store or DuckDbMarketDataStore()
+        selected_market_adapter = market_data_adapter or getattr(portfolio_service, "_adapter", None)
+        if selected_market_adapter is None:
+            selected_market_adapter = DuckDbMarketDataAdapter(selected_store)
+        self._market_data_adapter = cast(MarketDataAdapter, selected_market_adapter)
         self._portfolio_service = portfolio_service or PortfolioBacktestService(
-            adapter=DuckDbMarketDataAdapter(selected_store),
+            adapter=self._market_data_adapter,
             indicator_cache=IndicatorCache(selected_store),
         )
         self._store = selected_store
@@ -122,14 +135,14 @@ class StrategyDiscoveryService:
         self._evaluation_workers = validate_discovery_workers(
             resolve_discovery_workers() if evaluation_workers is None else evaluation_workers
         )
-        self._parallel_enabled = isinstance(
-            self._portfolio_service, PortfolioBacktestService
-        ) and isinstance(
-            getattr(self._portfolio_service, "_adapter", None), DuckDbMarketDataAdapter
+        self._parallel_enabled = isinstance(self._portfolio_service, PortfolioBacktestService) and all(
+            callable(getattr(self._market_data_adapter, name, None))
+            for name in ("read_many_stocks", "count_many_stocks")
         )
         self._replay_service = StrategyReplayService(
             portfolio_service=self._portfolio_service,
             store=self._store,
+            market_data_adapter=self._market_data_adapter,
             evaluation_workers=self._evaluation_workers,
         )
 
@@ -243,6 +256,7 @@ class StrategyDiscoveryService:
             with build_discovery_snapshot(
                 self._store,
                 request,
+                adapter=self._market_data_adapter,
                 progress_callback=report_snapshot_progress,
                 abort_check=abort_check,
             ) as snapshot:
@@ -373,11 +387,16 @@ class StrategyDiscoveryService:
             yield None
             return
         database_path = str(self._store.database_path)
+        market_data_path = (
+            str(getattr(self._market_data_adapter, "database_path"))
+            if isinstance(self._market_data_adapter, ETFQuestMarketDataAdapter)
+            else None
+        )
         executor = ProcessPoolExecutor(
             max_workers=self._evaluation_workers,
             mp_context=multiprocessing.get_context("spawn"),
             initializer=_init_discovery_worker,
-            initargs=(database_path, snapshot_path),
+            initargs=(database_path, snapshot_path, market_data_path),
         )
         try:
             yield executor
@@ -397,7 +416,7 @@ class StrategyDiscoveryService:
             tuple[InstrumentBoard, ...] | None,
             _string_tuple(base.get("boards")),
         )
-        refs = DuckDbMarketDataAdapter(self._store).list_stock_refs(
+        refs = self._market_data_adapter.list_stock_refs(
             str(base.get("vipdoc_path") or ""),
             universe,
             universe_file,
@@ -527,6 +546,11 @@ class StrategyDiscoveryService:
                 candidates: Sequence[StrategyCandidate], stage: str
             ) -> Sequence[Mapping[str, object]]:
                 fidelity = stage if stage in {"coarse", "medium", "full"} else None
+                market_data_path = (
+                    str(getattr(self._market_data_adapter, "database_path"))
+                    if isinstance(self._market_data_adapter, ETFQuestMarketDataAdapter)
+                    else None
+                )
                 jobs = [
                     (
                         candidate,
@@ -534,6 +558,7 @@ class StrategyDiscoveryService:
                         stage,
                         fidelity,
                         database_path,
+                        market_data_path,
                         fidelity_checkpoints.get(candidate.candidate_hash)
                         if fidelity in {"medium", "full"}
                         else None,
