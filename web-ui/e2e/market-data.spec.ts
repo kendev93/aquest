@@ -41,13 +41,13 @@ test('user can browse local instruments and switch chart periods', async ({ page
   await expect(page.getByTestId('market-candlestick-chart')).toBeVisible()
 })
 
-test('user can start an AKShare full-history backfill', async ({ page }) => {
+test('user can start an East Money full-history backfill', async ({ page }) => {
   let backfillRequest: unknown
   await page.route('**/api/v1/market-data/capabilities', (route) => route.fulfill({ json: {
     data: {
-      default_provider: 'akshare',
+      default_provider: 'eastmoney',
       providers: {
-        akshare: { provider: 'akshare', available: true, version: '1.18.94' },
+        eastmoney: { provider: 'eastmoney', available: true, version: 'builtin-http-1' },
         tdx: { provider: 'tdx', available: true },
       },
     },
@@ -66,21 +66,21 @@ test('user can start an AKShare full-history backfill', async ({ page }) => {
   await page.route('**/api/v1/market-data/jobs/backfill-1', (route) => route.fulfill({ json: { data: {
     job_id: 'backfill-1', status: 'completed', progress: 1, total_candidates: 2,
     total_scanned: 2, errors: 0, error: null,
-    result: { source: 'online', provider: 'akshare', written_bars: 100 },
+    result: { source: 'online', provider: 'eastmoney', written_bars: 100 },
   } } }))
 
   await page.goto('/market-data')
-  await page.getByTestId('market-akshare-backfill').click()
-  await expect(page.getByTestId('market-data-progress')).toContainText('akshare')
-  expect(backfillRequest).toEqual({ provider: 'akshare', universe: 'all' })
+  await page.getByTestId('market-eastmoney-backfill').click()
+  await expect(page.getByTestId('market-data-progress')).toContainText('eastmoney')
+  expect(backfillRequest).toEqual({ provider: 'eastmoney', universe: 'all' })
 })
 
 test('user can see and cancel an active market-data job', async ({ page }) => {
   const activeJob = {
-    job_id: 'active-1', description: 'AKShare历史全量回填', status: 'running', progress: 0.42,
+    job_id: 'active-1', description: 'East Money历史全量回填', status: 'running', progress: 0.42,
     total_candidates: 5219, total_scanned: 2190, errors: 0, error: null, worker_count: 8,
     phase: 'online_bars', metadata: {
-      provider: 'akshare',
+      provider: 'eastmoney',
       current_instrument: { market: 'SZ', code: '000001', name: '平安银行' },
       range_label: '正在读取完整日线…',
     }, result: null,
@@ -88,7 +88,7 @@ test('user can see and cancel an active market-data job', async ({ page }) => {
   let activeReads = 0
   let cancelRequest: unknown
   await page.route('**/api/v1/market-data/capabilities', (route) => route.fulfill({ json: {
-    data: { default_provider: 'akshare', providers: { akshare: { provider: 'akshare', available: true }, tdx: { provider: 'tdx', available: true } } },
+    data: { default_provider: 'eastmoney', providers: { eastmoney: { provider: 'eastmoney', available: true }, tdx: { provider: 'tdx', available: true } } },
   } }))
   await page.route('**/api/v1/market-data/store', (route) => route.fulfill({ json: { data: {
     database_path: '/data/market/market.duckdb', schema_version: 12, instrument_count: 1,
@@ -97,7 +97,7 @@ test('user can see and cancel an active market-data job', async ({ page }) => {
   } } }))
   await page.route('**/api/v1/market-data/local/instruments**', (route) => route.fulfill({ json: instruments }))
   await page.route('**/api/v1/market-data/local/SH/600000/bars*', (route) => route.fulfill({ json: chart('daily') }))
-  await page.route('**/api/v1/market-data/jobs/active', (route) => {
+  await page.route('**/api/v1/market-data/jobs/active*', (route) => {
     activeReads += 1
     return route.fulfill({ json: { data: activeReads === 1 ? [activeJob] : [] } })
   })
@@ -110,9 +110,9 @@ test('user can see and cancel an active market-data job', async ({ page }) => {
   } } }))
 
   await page.goto('/market-data')
-  await expect(page.getByTestId('market-active-jobs')).toContainText('42%')
-  await expect(page.getByTestId('market-active-jobs')).toContainText('SZ 000001 · 平安银行')
-  await page.getByTestId('market-active-job-active-1').getByRole('button', { name: '取消任务' }).click()
+  await expect(page.getByTestId('market-data-progress')).toContainText('42%')
+  await expect(page.getByTestId('market-data-progress')).toContainText('SZ 000001 · 平安银行')
+  await page.getByTestId('market-sync-cancel').click()
   await expect(page.getByTestId('market-data-message')).toContainText('已取消')
   expect(cancelRequest).toBe('POST')
 })

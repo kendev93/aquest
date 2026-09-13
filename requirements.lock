@@ -2,7 +2,6 @@
 # This file intentionally uses lower bounds instead of exact pins so clean
 # Docker builds receive compatible dependency updates. Keep major-version
 # compatibility ranges in pyproject.toml and verify upgrades in CI.
-akshare>=1.18.94
 alembic>=1.18.4
 annotated-doc>=0.0.5
 annotated-types>=0.8.0

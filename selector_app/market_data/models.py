@@ -12,8 +12,8 @@ MarketCode = Literal["SH", "SZ"]
 InstrumentType = Literal["stock", "fund", "index", "bond"]
 InstrumentBoard = Literal["main", "star", "chinext", "b_share", "fund", "index", "bond"]
 DataSource = Literal["local", "online"]
-MarketDataProvider = Literal["akshare", "tdx"]
-ResolvedMarketDataProvider = Literal["akshare", "tdx", "mixed"]
+MarketDataProvider = Literal["eastmoney", "tdx"]
+ResolvedMarketDataProvider = Literal["eastmoney", "tdx", "mixed"]
 BarStatus = Literal["completed", "provisional"]
 
 

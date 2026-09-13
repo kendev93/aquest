@@ -5,7 +5,7 @@ import { FormulaScreenApiError } from '../api/formulaScreen'
 import {
   cancelMarketDataJob,
   createLocalImport,
-  createAkShareBackfill,
+  createOnlineBackfill,
   createOnlineSync,
   fetchActiveMarketDataJobs,
   fetchMarketDataCapabilities,
@@ -56,7 +56,7 @@ const BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
 const form = reactive({
   vipdocPath: '/data/vipdoc',
   syncUniverse: 'all' as 'all' | 'sh' | 'sz',
-  syncProvider: 'akshare' as MarketDataProvider,
+  syncProvider: 'eastmoney' as MarketDataProvider,
   syncInstrumentTypes: [] as InstrumentType[],
   syncBoards: [] as InstrumentBoard[],
   market: 'all' as LocalMarketScope,
@@ -127,7 +127,7 @@ const syncPhaseText = computed(() => ({
 
 const syncProviderLabel = computed(() => {
   const provider = marketJob.value?.metadata?.provider ?? form.syncProvider
-  return provider === 'tdx' ? ' TDX ' : ' AKShare '
+  return provider === 'tdx' ? ' TDX ' : ' East Money '
 })
 
 const marketJobTitle = computed(() => {
@@ -178,7 +178,7 @@ const currentSyncStatusText = computed(() => {
 
 const currentSyncProviderText = computed(() => {
   const provider = marketJob.value?.metadata?.provider ?? form.syncProvider
-  return provider === 'tdx' ? 'TDX' : 'AKShare'
+  return provider === 'tdx' ? 'TDX' : 'East Money'
 })
 
 const currentSyncDetailLabel = computed(() => (
@@ -213,7 +213,7 @@ const discoveryWaiting = computed(() => Boolean(
 ))
 
 const discoveryProviderText = computed(() => (
-  currentSyncProviderText.value === 'TDX' ? '等待 TDX 返回证券列表…' : '等待 AKShare 返回证券列表…'
+  currentSyncProviderText.value === 'TDX' ? '等待 TDX 返回证券列表…' : '等待 East Money 返回证券列表…'
 ))
 
 const marketProgressSummary = computed(() => {
@@ -240,7 +240,7 @@ const marketProgressIndeterminate = computed(() => Boolean(
 ))
 
 function activeJobDescription(job: MarketSyncJobState): string {
-  return job.description || (job.metadata?.provider === 'tdx' ? 'TDX 行情同步' : 'AKShare 行情同步')
+  return job.description || (job.metadata?.provider === 'tdx' ? 'TDX 行情同步' : 'East Money 行情同步')
 }
 
 function apiMessage(error: unknown): string {
@@ -476,12 +476,12 @@ async function syncOnlineData(): Promise<void> {
   }
 }
 
-async function backfillAkShareData(): Promise<void> {
+async function backfillOnlineData(): Promise<void> {
   syncLoading.value = true
-  syncLabel.value = '正在进行 AKShare 全量回填…'
+  syncLabel.value = '正在进行 East Money 全量回填…'
   message.value = ''
   try {
-    const job = await createAkShareBackfill({
+    const job = await createOnlineBackfill({
       universe: form.syncUniverse,
       ...(form.syncBoards.length > 0 ? { boards: [...form.syncBoards] } : {}),
     })
@@ -639,7 +639,7 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
 
     <main class="content-shell">
       <section class="page-intro">
-        <div><p class="eyebrow">LOCAL MARKET DATA / DUCKDB</p><h1>本地行情</h1><p class="intro-copy">行情统一存储在本地 DuckDB，默认使用 AKShare 更新股票日线，也可从通达信 vipdoc 导入。</p></div>
+        <div><p class="eyebrow">LOCAL MARKET DATA / DUCKDB</p><h1>本地行情</h1><p class="intro-copy">行情统一存储在本地 DuckDB，默认使用 East Money 更新股票日线，也可从通达信 vipdoc 导入。</p></div>
         <div class="intro-note"><span class="note-label">数据边界</span><strong>本地 DuckDB</strong><small>源文件只读；图表、筛选和回测统一查询数据库</small></div>
       </section>
 
@@ -668,15 +668,15 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
             <div><label for="market-sync-universe">同步市场</label><select id="market-sync-universe" v-model="form.syncUniverse" data-testid="market-sync-universe"><option value="all">沪深全部</option><option value="sh">仅上海</option><option value="sz">仅深圳</option></select></div>
             <div class="scope-options"><span>证券类型</span><label v-for="option in INSTRUMENT_TYPE_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-sync-type-${option.key}`" :checked="form.syncInstrumentTypes.includes(option.key)" @change="toggleInstrumentType(option.key)">{{ option.label }}</label></div>
             <div class="scope-options"><span>板块</span><label v-for="option in BOARD_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-sync-board-${option.key}`" :checked="form.syncBoards.includes(option.key)" @change="toggleBoard(option.key)">{{ option.label }}</label></div>
-            <div class="scope-options provider-options"><span>行情源</span><label><input v-model="form.syncProvider" type="radio" value="akshare" data-testid="market-provider-akshare">AKShare（默认）</label><label><input v-model="form.syncProvider" type="radio" value="tdx" data-testid="market-provider-tdx">TDX（遗留）</label></div>
-            <small class="scope-helper">类型或板块未勾选表示不限制；两者同时选择时取交集。一键同步只刷新证券列表并补充在线日线，不读取 vipdoc；只有“导入本地行情”才会读取 .day 文件。主板、科创板和创业板股票默认使用 AKShare；全量补齐按钮只请求缺失历史区间。</small>
-            <small v-if="providerCapabilities?.providers.akshare?.history_sources?.length" class="scope-helper">AKShare 备用接口：{{ providerCapabilities.providers.akshare.history_sources.join(' → ') }}</small>
-            <small v-if="providerCapabilities?.providers.akshare && !providerCapabilities.providers.akshare.available" class="scope-warning">{{ providerCapabilities.providers.akshare.error || 'AKShare 当前不可用，请重新构建 Docker 镜像。' }}</small>
+            <div class="scope-options provider-options"><span>行情源</span><label><input v-model="form.syncProvider" type="radio" value="eastmoney" data-testid="market-provider-eastmoney">East Money（默认）</label><label><input v-model="form.syncProvider" type="radio" value="tdx" data-testid="market-provider-tdx">TDX（遗留）</label></div>
+            <small class="scope-helper">类型或板块未勾选表示不限制；两者同时选择时取交集。一键同步只刷新证券列表并补充在线日线，不读取 vipdoc；只有“导入本地行情”才会读取 .day 文件。主板、科创板和创业板股票默认使用 East Money；全量补齐按钮只请求缺失历史区间。</small>
+            <small v-if="providerCapabilities?.providers.eastmoney?.history_sources?.length" class="scope-helper">East Money 备用接口：{{ providerCapabilities.providers.eastmoney.history_sources.join(' → ') }}</small>
+            <small v-if="providerCapabilities?.providers.eastmoney && !providerCapabilities.providers.eastmoney.available" class="scope-warning">{{ providerCapabilities.providers.eastmoney.error || 'East Money 当前不可用，请重新构建 Docker 镜像。' }}</small>
           </div>
           <div class="market-sync-actions">
             <button class="primary-button" data-testid="market-import-local" type="button" :disabled="syncLoading" @click="importLocalData">{{ syncLoading ? '同步进行中…' : '导入本地行情' }}</button>
             <button class="secondary-button" data-testid="market-sync-online" type="button" :disabled="syncLoading" @click="syncOnlineData">一键同步行情</button>
-            <button v-if="form.syncProvider === 'akshare'" class="secondary-button" data-testid="market-akshare-backfill" type="button" :disabled="syncLoading" @click="backfillAkShareData">{{ syncLoading ? '回填进行中…' : 'AKShare 全量补齐' }}</button>
+            <button v-if="form.syncProvider === 'eastmoney'" class="secondary-button" data-testid="market-eastmoney-backfill" type="button" :disabled="syncLoading" @click="backfillOnlineData">{{ syncLoading ? '回填进行中…' : 'East Money 全量补齐' }}</button>
           </div>
           </div>
           <div v-if="marketJob" class="sync-progress" data-testid="market-data-progress">

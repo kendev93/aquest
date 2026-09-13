@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from fastapi.testclient import TestClient
 
-from selector_app.adapters.akshare_market_sync import AkShareProviderUnavailable
+from selector_app.adapters.online_market_sync import OnlineProviderUnavailable
 from selector_app.market_data.day_importer import LocalDayImporter
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.screening.jobs import TaskCancelledError
@@ -175,7 +175,7 @@ def test_app_schedules_online_sync_when_daily_refresh_is_due(tmp_path: Path) -> 
 
     assert len(calls) == 1
     config = calls[0]
-    assert config.provider == "akshare"
+    assert config.provider == "eastmoney"
     assert config.prefer_store_targets is False
     assert config.refresh_names is False
     assert status.status_code == 200
@@ -353,7 +353,7 @@ def test_market_sync_job_can_be_created_and_polled() -> None:
     assert state["status"] == "completed"
     assert state["result"]["written_bars"] == 3
     assert received == {
-        "provider": "akshare",
+        "provider": "eastmoney",
         "instrument_types": ("stock",),
         "boards": ("main",),
         "prefer_store_targets": False,
@@ -363,12 +363,12 @@ def test_market_sync_job_can_be_created_and_polled() -> None:
 def test_market_data_capabilities_exposes_default_provider_and_tdx_compatibility(
     monkeypatch,
 ) -> None:
-    def unavailable_akshare():
-        raise AkShareProviderUnavailable("测试环境未安装 AKShare")
+    def unavailable_eastmoney():
+        raise OnlineProviderUnavailable("测试环境在线客户端不可用")
 
     monkeypatch.setattr(
-        "selector_app.adapters.akshare_market_sync._default_module",
-        unavailable_akshare,
+        "selector_app.adapters.online_market_sync._default_module",
+        unavailable_eastmoney,
     )
 
     with TestClient(create_app(engine=EmptyEngine())) as client:
@@ -376,10 +376,10 @@ def test_market_data_capabilities_exposes_default_provider_and_tdx_compatibility
 
     assert response.status_code == 200
     data = response.json()["data"]
-    assert data["default_provider"] == "akshare"
+    assert data["default_provider"] == "eastmoney"
     assert data["instrument_count"] == 0
     assert data["providers"]["tdx"]["available"] is True
-    assert data["providers"]["akshare"]["available"] is False
+    assert data["providers"]["eastmoney"]["available"] is False
 
 
 def test_market_data_active_jobs_can_be_listed_and_cancelled() -> None:
@@ -474,7 +474,7 @@ def test_market_data_rejects_duplicate_active_sync_jobs() -> None:
         runner.shutdown()
 
 
-def test_akshare_backfill_forces_stock_full_history_without_local_import() -> None:
+def test_eastmoney_backfill_forces_stock_full_history_without_local_import() -> None:
     received: dict[str, object] = {}
 
     class FakeMarketSync:
@@ -488,7 +488,7 @@ def test_akshare_backfill_forces_stock_full_history_without_local_import() -> No
                 progress_callback(1, 1)
             return {
                 "source": "online",
-                "provider": "akshare",
+                "provider": "eastmoney",
                 "total_candidates": 1,
                 "processed": 1,
                 "updated_files": 1,
@@ -504,7 +504,7 @@ def test_akshare_backfill_forces_stock_full_history_without_local_import() -> No
 
     assert state["status"] == "completed"
     assert received == {
-        "provider": "akshare",
+        "provider": "eastmoney",
         "full_history": True,
         "instrument_types": ("stock",),
         "prefer_store_targets": False,

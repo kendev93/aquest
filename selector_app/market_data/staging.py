@@ -184,7 +184,7 @@ class ProcessRateGate:
         *,
         success: bool,
         throttled: bool = False,
-        provider: MarketDataProvider = "akshare",
+        provider: MarketDataProvider = "eastmoney",
     ) -> None:
         self.report_for_provider(provider, success=success, throttled=throttled)
 
@@ -192,15 +192,15 @@ class ProcessRateGate:
 def create_rate_state(manager: Any) -> tuple[Any, Any]:
     state = manager.dict(
         {
-            "next_allowed_akshare": 0.0,
+            "next_allowed_eastmoney": 0.0,
             "next_allowed_tdx": 0.0,
-            "interval_akshare": _DEFAULT_REQUEST_INTERVAL_SECONDS,
+            "interval_eastmoney": _DEFAULT_REQUEST_INTERVAL_SECONDS,
             "interval_tdx": _DEFAULT_REQUEST_INTERVAL_SECONDS,
-            "successes_akshare": 0,
+            "successes_eastmoney": 0,
             "successes_tdx": 0,
-            "rate_limit_events_akshare": 0,
+            "rate_limit_events_eastmoney": 0,
             "rate_limit_events_tdx": 0,
-            "backoffs_akshare": 0,
+            "backoffs_eastmoney": 0,
             "backoffs_tdx": 0,
         }
     )
@@ -214,7 +214,7 @@ def rate_state_snapshot(state: Any) -> dict[str, object]:
             "rate_limit_events": int(state[f"rate_limit_events_{provider}"]),
             "backoffs": int(state[f"backoffs_{provider}"]),
         }
-        for provider in ("akshare", "tdx")
+        for provider in ("eastmoney", "tdx")
     }
     return {
         "request_interval_seconds": max(
@@ -491,12 +491,12 @@ def cleanup_stale_staging(
 def run_stage_worker(request: StageWorkerRequest) -> StageWorkerResult:
     """Entry point executed in a spawned process; imports providers lazily."""
 
-    from selector_app.adapters.akshare_market_sync import AkShareMarketSync
     from selector_app.adapters.market_sync import (
         MarketDataCancelledError,
         TdxMarketSync,
         _default_client,
     )
+    from selector_app.adapters.online_market_sync import OnlineMarketSync
 
     gate = ProcessRateGate(request.rate_state, request.rate_lock)
 
@@ -512,8 +512,8 @@ def run_stage_worker(request: StageWorkerRequest) -> StageWorkerResult:
     with StageWriter(request.stage_path) as writer, ExitStack() as stack:
         provider: Any
         client: Any = None
-        if request.provider == "akshare":
-            provider = AkShareMarketSync(
+        if request.provider == "eastmoney":
+            provider = OnlineMarketSync(
                 store=None,
                 clock=lambda: request.as_of,
             )
@@ -536,7 +536,7 @@ def run_stage_worker(request: StageWorkerRequest) -> StageWorkerResult:
                 },
             )
             try:
-                if request.provider == "akshare":
+                if request.provider == "eastmoney":
                     result = provider.fetch_stage_target(
                         target,
                         request.config,

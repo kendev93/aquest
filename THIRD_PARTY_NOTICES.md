@@ -44,9 +44,12 @@ easy-tdx also documents inspiration/attribution for `pytdx` and `xmtdx`; their M
 
 本项目使用 DuckDB Python 包作为嵌入式本地数据库。DuckDB 以 MIT License 发布；其完整许可证文本随安装包和官方仓库分发。本项目没有修改 DuckDB 源码。
 
-## AKShare
+## 在线行情接口
 
-本项目使用 [AKShare](https://github.com/akfamily/akshare) 作为默认股票在线行情 provider，仅调用其公开 Python 接口并将结果转换为项目自己的行情模型；没有修改 AKShare 源码。AKShare 以 MIT License 发布，完整许可证文本随安装包和官方仓库分发。
+本项目不依赖第三方财经数据客户端库。在线股票同步由项目自己的
+`OnlineMarketClient` 直接访问公开行情接口，并将响应转换为项目自己的行情模型。
+当前实现使用 East Money 证券列表和日线接口，并以腾讯日线接口作为备用。
+这些数据服务的使用条款、访问频率限制和商业使用范围仍由各服务提供方单独决定。
 
 ## 本项目许可证
 

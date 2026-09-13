@@ -2,7 +2,7 @@
 
 本文面向需要构建并分发 Indicator Lab 的维护者。目标是让用户拿到可运行产物，而不是项目源代码。
 
-当前仓库提供的是 Nuitka standalone 文件夹产物。Nuitka 官方建议先验证 standalone，再考虑 onefile；本项目依赖 NumPy、Pandas、LightGBM 和 AKShare，默认保留文件夹模式以减少启动解包和排错成本。
+当前仓库提供的是 Nuitka standalone 文件夹产物。Nuitka 官方建议先验证 standalone，再考虑 onefile；本项目依赖 NumPy、Pandas、LightGBM，在线行情由内置 HTTP 客户端直接访问，默认保留文件夹模式以减少启动解包和排错成本。
 
 ## 先选发布方式
 

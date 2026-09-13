@@ -17,7 +17,7 @@ vi.mock('../api/marketData', async () => {
     fetchActiveMarketDataJobs: vi.fn(),
     fetchMarketDataCapabilities: vi.fn(),
     createLocalImport: vi.fn(),
-    createAkShareBackfill: vi.fn(),
+    createOnlineBackfill: vi.fn(),
     createOnlineSync: vi.fn(),
     getMarketDataJob: vi.fn(),
   }
@@ -47,9 +47,9 @@ describe('MarketDataPage', () => {
     })
     vi.mocked(marketApi.fetchLocalChart).mockResolvedValue(chart)
     vi.mocked(marketApi.fetchMarketDataCapabilities).mockResolvedValue({
-      default_provider: 'akshare',
+      default_provider: 'eastmoney',
       providers: {
-        akshare: { provider: 'akshare', available: true, version: '1.18.94', instrument_types: ['stock'] },
+        eastmoney: { provider: 'eastmoney', available: true, version: 'builtin-http-1', instrument_types: ['stock'] },
         tdx: { provider: 'tdx', available: true, instrument_types: ['stock', 'fund', 'index', 'bond'] },
       },
     })
@@ -180,7 +180,7 @@ describe('MarketDataPage', () => {
     await flushPromises()
 
     expect(marketApi.createOnlineSync).toHaveBeenCalledWith({
-      provider: 'akshare',
+      provider: 'eastmoney',
       universe: 'all',
       bars: 800,
     })
@@ -191,7 +191,7 @@ describe('MarketDataPage', () => {
     expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('新增标的 3')
   })
 
-  it('uses AKShare by default and allows switching to TDX', async () => {
+  it('uses East Money by default and allows switching to TDX', async () => {
     vi.mocked(marketApi.createOnlineSync).mockResolvedValue({ job_id: 'tdx-1', status: 'queued' })
     vi.mocked(marketApi.getMarketDataJob).mockResolvedValue({
       job_id: 'tdx-1', status: 'completed', progress: 1, total_candidates: 0,
@@ -200,7 +200,7 @@ describe('MarketDataPage', () => {
     const wrapper = mount(MarketDataPage)
     await flushPromises()
 
-    expect(wrapper.get('[data-testid="market-provider-akshare"]').element).toHaveProperty('checked', true)
+    expect(wrapper.get('[data-testid="market-provider-eastmoney"]').element).toHaveProperty('checked', true)
     await wrapper.get('[data-testid="market-provider-tdx"]').setValue()
     await wrapper.get('[data-testid="market-sync-online"]').trigger('click')
     await flushPromises()
@@ -208,20 +208,20 @@ describe('MarketDataPage', () => {
     expect(marketApi.createOnlineSync).toHaveBeenCalledWith(expect.objectContaining({ provider: 'tdx' }))
   })
 
-  it('starts an AKShare full-history backfill for the selected scope', async () => {
-    vi.mocked(marketApi.createAkShareBackfill).mockResolvedValue({ job_id: 'backfill-1', status: 'queued' })
+  it('starts an East Money full-history backfill for the selected scope', async () => {
+    vi.mocked(marketApi.createOnlineBackfill).mockResolvedValue({ job_id: 'backfill-1', status: 'queued' })
     vi.mocked(marketApi.getMarketDataJob).mockResolvedValue({
       job_id: 'backfill-1', status: 'completed', progress: 1, total_candidates: 2,
-      total_scanned: 2, errors: 0, error: null, result: { source: 'online', provider: 'akshare', written_bars: 1200 },
+      total_scanned: 2, errors: 0, error: null, result: { source: 'online', provider: 'eastmoney', written_bars: 1200 },
     })
     const wrapper = mount(MarketDataPage)
     await flushPromises()
 
     await wrapper.get('[data-testid="market-sync-board-main"]').setValue(true)
-    await wrapper.get('[data-testid="market-akshare-backfill"]').trigger('click')
+    await wrapper.get('[data-testid="market-eastmoney-backfill"]').trigger('click')
     await flushPromises()
 
-    expect(marketApi.createAkShareBackfill).toHaveBeenCalledWith({
+    expect(marketApi.createOnlineBackfill).toHaveBeenCalledWith({
       universe: 'all',
       boards: ['main'],
     })
@@ -257,7 +257,7 @@ describe('MarketDataPage', () => {
   it('restores active market-data jobs and allows cancelling one', async () => {
     vi.mocked(marketApi.fetchActiveMarketDataJobs).mockResolvedValueOnce([{
       job_id: 'active-1',
-      description: 'AKShare历史全量回填',
+      description: 'East Money历史全量回填',
       status: 'running',
       progress: 0.42,
       total_candidates: 5219,
@@ -267,7 +267,7 @@ describe('MarketDataPage', () => {
       worker_count: 8,
       phase: 'online_bars',
       metadata: {
-        provider: 'akshare',
+        provider: 'eastmoney',
         current_instrument: { market: 'SZ', code: '000001', name: '平安银行' },
         range_label: '正在读取完整日线…',
       },
@@ -275,7 +275,7 @@ describe('MarketDataPage', () => {
     }]).mockResolvedValueOnce([])
     vi.mocked(marketApi.getMarketDataJob).mockResolvedValue({
       job_id: 'active-1',
-      description: 'AKShare历史全量回填',
+      description: 'East Money历史全量回填',
       status: 'cancelled',
       progress: 0.42,
       total_candidates: 5219,
@@ -308,7 +308,7 @@ describe('MarketDataPage', () => {
     )
     vi.mocked(marketApi.fetchActiveMarketDataJobs).mockResolvedValueOnce([{
       job_id: 'active-store-write',
-      description: 'AKShare历史全量回填',
+      description: 'East Money历史全量回填',
       status: 'running',
       progress: 0.1,
       total_candidates: 10,
@@ -317,7 +317,7 @@ describe('MarketDataPage', () => {
       error: null,
       worker_count: 8,
       phase: 'online_bars',
-      metadata: { provider: 'akshare' },
+      metadata: { provider: 'eastmoney' },
       result: null,
     }])
 
@@ -391,7 +391,7 @@ describe('MarketDataPage', () => {
       await flushPromises()
 
       expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('正在刷新证券列表')
-      expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('等待 AKShare 返回证券列表')
+      expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('等待 East Money 返回证券列表')
 
       await vi.advanceTimersByTimeAsync(500)
       await flushPromises()

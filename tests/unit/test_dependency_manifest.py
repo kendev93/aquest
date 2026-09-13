@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def test_runtime_manifest_uses_lower_bounds_and_includes_akshare() -> None:
+def test_runtime_manifest_uses_lower_bounds_without_removed_online_dependency() -> None:
     manifest = Path(__file__).parents[2] / "requirements.lock"
     requirements = [
         line.strip()
@@ -13,5 +13,6 @@ def test_runtime_manifest_uses_lower_bounds_and_includes_akshare() -> None:
 
     assert requirements
     assert all("==" not in line for line in requirements)
-    assert "akshare>=1.18.94" in requirements
+    assert all("akshare" not in line.lower() for line in requirements)
+    assert all("eastmoney" not in line.lower() for line in requirements)
     assert all(">=" in line for line in requirements)

@@ -201,7 +201,7 @@ class DuckDbBarsStore:
         """Upsert online rows without overwriting any local row."""
 
         self._store._require_writer()
-        if provider not in {"tdx", "akshare"}:
+        if provider not in {"tdx", "eastmoney"}:
             raise ValueError(f"在线行情数据源无效: {provider}")
         if frame.empty:
             return (0, 0)

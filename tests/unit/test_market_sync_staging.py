@@ -28,7 +28,7 @@ from selector_app.market_data.store import DuckDbMarketDataStore
 
 def _target(code: str = "600000") -> StageTarget:
     return StageTarget(
-        provider="akshare",
+        provider="eastmoney",
         market="SH",
         code=code,
         instrument_type="stock",
@@ -69,7 +69,7 @@ def test_stage_writer_uses_an_independent_duckdb_file(tmp_path: Path) -> None:
             range_start="2024-01-02",
             range_end="2024-01-03",
             retries=0,
-            history_source="stock_zh_a_hist",
+        history_source="eastmoney",
         )
 
     assert written == 2
@@ -92,7 +92,7 @@ def test_stage_merge_preserves_local_rows_and_is_idempotent(tmp_path: Path) -> N
             range_start="2024-01-02",
             range_end="2024-01-03",
             retries=0,
-            history_source="stock_zh_a_hist",
+        history_source="eastmoney",
         )
 
     first = main.merge_online_stage(stage_path)
@@ -128,7 +128,7 @@ def test_stage_worker_entrypoint_runs_in_a_spawned_process(tmp_path: Path) -> No
     request = StageWorkerRequest(
         worker_id=0,
         stage_path=str(tmp_path / "worker-0.duckdb"),
-        provider="akshare",
+        provider="eastmoney",
         targets=(),
         config=MarketSyncConfig(),
         as_of=datetime(2026, 9, 12, 16, 0, tzinfo=timezone.utc),
@@ -157,10 +157,10 @@ def test_process_rate_gate_backoffs_and_recovers_per_provider() -> None:
         from selector_app.market_data.staging import ProcessRateGate
 
         gate = ProcessRateGate(rate_state, rate_lock)
-        gate.report(provider="akshare", success=False, throttled=True)
+        gate.report(provider="eastmoney", success=False, throttled=True)
         backed_off = rate_state_snapshot(rate_state)
         for _ in range(32):
-            gate.report(provider="akshare", success=True)
+            gate.report(provider="eastmoney", success=True)
         recovered = rate_state_snapshot(rate_state)
     finally:
         manager.shutdown()
@@ -168,8 +168,8 @@ def test_process_rate_gate_backoffs_and_recovers_per_provider() -> None:
     assert backed_off["rate_limit_events"] == 1
     assert backed_off["backoffs"] == 1
     assert (
-        recovered["by_provider"]["akshare"]["request_interval_seconds"]
-        < backed_off["by_provider"]["akshare"]["request_interval_seconds"]
+        recovered["by_provider"]["eastmoney"]["request_interval_seconds"]
+        < backed_off["by_provider"]["eastmoney"]["request_interval_seconds"]
     )
 
 
@@ -181,7 +181,7 @@ def test_market_data_sync_merges_staged_worker_results(monkeypatch, tmp_path: Pa
         def prepare_stage_plan(self, config):
             del config
             return ProviderStagePlan(
-                provider="akshare",
+                provider="eastmoney",
                 targets=(_target(),),
                 listed_instruments=1,
                 filtered_instruments=0,
@@ -220,7 +220,7 @@ def test_market_data_sync_merges_staged_worker_results(monkeypatch, tmp_path: Pa
                 range_start="2024-01-02",
                 range_end="2024-01-03",
                 retries=0,
-                history_source="stock_zh_a_hist",
+        history_source="eastmoney",
             )
         return StageWorkerResult(
             worker_id=request.worker_id,
@@ -231,7 +231,7 @@ def test_market_data_sync_merges_staged_worker_results(monkeypatch, tmp_path: Pa
             staged_rows=rows,
             errors=0,
             failure_reasons={},
-            history_sources={"stock_zh_a_hist": 1},
+        history_sources={"eastmoney": 1},
         )
 
     monkeypatch.setattr(market_data_sync_module, "ProcessPoolExecutor", ImmediateExecutor)
@@ -239,7 +239,7 @@ def test_market_data_sync_merges_staged_worker_results(monkeypatch, tmp_path: Pa
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     report = MarketDataSync(
         store=store,
-        akshare_sync=StagedProvider(),
+        eastmoney_sync=StagedProvider(),
     ).sync(MarketSyncConfig(universe="sh", sync_workers=8))
 
     assert report.execution_mode == "process_pool_staging"

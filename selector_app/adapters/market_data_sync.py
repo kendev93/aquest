@@ -38,7 +38,6 @@ from selector_app.market_data.staging import (
 )
 from selector_app.market_data.store import DuckDbMarketDataStore
 
-from .akshare_market_sync import AkShareMarketSync, AkShareModuleFactory, AkShareProviderError
 from .market_sync import (
     AbortCheck,
     DetailCallback,
@@ -49,8 +48,9 @@ from .market_sync import (
     ProgressCallback,
     TdxMarketSync,
 )
+from .online_market_sync import OnlineMarketSync, OnlineModuleFactory, OnlineProviderError
 
-_AKSHARE_STOCK_BOARDS = frozenset({"main", "star", "chinext"})
+_EASTMONEY_STOCK_BOARDS = frozenset({"main", "star", "chinext"})
 
 
 class ProviderSyncService(Protocol):
@@ -72,21 +72,21 @@ class ProviderSyncService(Protocol):
 
 
 class MarketDataSync:
-    """Route the default AKShare flow while retaining TDX compatibility."""
+    """Route the default Online flow while retaining TDX compatibility."""
 
     def __init__(
         self,
         store: DuckDbMarketDataStore | None = None,
         *,
         tdx_sync: ProviderSyncService | None = None,
-        akshare_sync: ProviderSyncService | None = None,
-        akshare_module_factory: AkShareModuleFactory | None = None,
+        eastmoney_sync: ProviderSyncService | None = None,
+        eastmoney_module_factory: OnlineModuleFactory | None = None,
     ) -> None:
         selected_store = store or DuckDbMarketDataStore()
         self._tdx_sync = tdx_sync or TdxMarketSync(store=selected_store)
-        self._akshare_sync = akshare_sync or AkShareMarketSync(
+        self._eastmoney_sync = eastmoney_sync or OnlineMarketSync(
             store=selected_store,
-            module_factory=akshare_module_factory,
+            module_factory=eastmoney_module_factory,
         )
         self._store = selected_store
 
@@ -462,7 +462,7 @@ class MarketDataSync:
                 manager.shutdown()
 
     def provider_capabilities(self) -> dict[str, object]:
-        akshare_capabilities = _provider_capabilities(self._akshare_sync)
+        eastmoney_capabilities = _provider_capabilities(self._eastmoney_sync)
         try:
             instrument_count = self._store.status().instrument_count
         except Exception:  # noqa: BLE001 - capability reporting must survive an unavailable store
@@ -476,7 +476,7 @@ class MarketDataSync:
             last_online_provider_version = None
             instrument_list_fingerprint = None
         return {
-            "default_provider": "akshare",
+            "default_provider": "eastmoney",
             "instrument_count": instrument_count,
             "last_online_provider": last_online_provider,
             "last_online_provider_version": last_online_provider_version,
@@ -487,7 +487,7 @@ class MarketDataSync:
                 "staging_directory": STAGE_DIRECTORY_NAME,
             },
             "providers": {
-                "akshare": akshare_capabilities,
+                "eastmoney": eastmoney_capabilities,
                 "tdx": {
                     "provider": "tdx",
                     "available": True,
@@ -504,24 +504,25 @@ class MarketDataSync:
     ) -> list[tuple[str, MarketSyncConfig, ProviderSyncService]]:
         if config.provider == "tdx":
             return [("tdx", config, self._tdx_sync)]
-        _validate_akshare_scope(config)
+        _validate_eastmoney_scope(config)
         plans: list[tuple[str, MarketSyncConfig, ProviderSyncService]] = []
-        if _scope_can_include_akshare_stock(config):
+        if _scope_can_include_eastmoney_stock(config):
             plans.append(
                 (
-                    "akshare",
+                    "eastmoney",
                     replace(
                         config,
-                        provider="akshare",
+                        provider="eastmoney",
                         instrument_types=("stock",),
-                        boards=_akshare_boards(config),
+                        boards=_eastmoney_boards(config),
                     ),
-                    self._akshare_sync,
+                    self._eastmoney_sync,
                 )
             )
         if not plans:
-            raise AkShareProviderError(
-                "AKShare 当前只支持主板、科创板和创业板股票；B 股、基金、指数、债券请切换为 TDX。"
+            raise OnlineProviderError(
+                "East Money 当前只支持主板、科创板和创业板股票；"
+                "B 股、基金、指数、债券请切换为 TDX。"
             )
         return plans
 
@@ -630,7 +631,7 @@ def _provider_capabilities(service: ProviderSyncService) -> dict[str, object]:
         if isinstance(result, dict):
             return result
     return {
-        "provider": "akshare",
+        "provider": "eastmoney",
         "available": True,
         "version": None,
         "instrument_types": ["stock"],
@@ -669,27 +670,27 @@ def _supports_abort_check(method: object) -> bool:
     )
 
 
-def _scope_can_include_akshare_stock(config: MarketSyncConfig) -> bool:
+def _scope_can_include_eastmoney_stock(config: MarketSyncConfig) -> bool:
     if config.instrument_types is not None and "stock" not in config.instrument_types:
         return False
-    return config.boards is None or bool(set(config.boards) & _AKSHARE_STOCK_BOARDS)
+    return config.boards is None or bool(set(config.boards) & _EASTMONEY_STOCK_BOARDS)
 
 
-def _validate_akshare_scope(config: MarketSyncConfig) -> None:
+def _validate_eastmoney_scope(config: MarketSyncConfig) -> None:
     unsupported_types = set(config.instrument_types or ()) - {"stock"}
-    unsupported_boards = set(config.boards or ()) - _AKSHARE_STOCK_BOARDS
+    unsupported_boards = set(config.boards or ()) - _EASTMONEY_STOCK_BOARDS
     if unsupported_types or unsupported_boards:
         unsupported = sorted({*unsupported_types, *unsupported_boards})
-        raise AkShareProviderError(
-            "AKShare 当前仅支持主板、科创板和创业板股票；"
+        raise OnlineProviderError(
+            "East Money 当前仅支持主板、科创板和创业板股票；"
             f"当前范围包含不支持的品种/板块: {', '.join(unsupported)}，请切换为 TDX。"
         )
 
 
-def _akshare_boards(config: MarketSyncConfig) -> tuple[InstrumentBoard, ...] | None:
+def _eastmoney_boards(config: MarketSyncConfig) -> tuple[InstrumentBoard, ...] | None:
     if config.boards is None:
         return None
-    selected = tuple(value for value in config.boards if value in _AKSHARE_STOCK_BOARDS)
+    selected = tuple(value for value in config.boards if value in _EASTMONEY_STOCK_BOARDS)
     return selected or None
 
 
@@ -902,8 +903,8 @@ def _as_string_tuple(value: object) -> tuple[str, ...]:
 
 
 def cast_provider(value: str) -> ResolvedMarketDataProvider:
-    if value == "akshare":
-        return "akshare"
+    if value == "eastmoney":
+        return "eastmoney"
     if value == "tdx":
         return "tdx"
     return "mixed"

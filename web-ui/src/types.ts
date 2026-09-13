@@ -16,7 +16,7 @@ export interface DateRangeSelection {
   startDate: string
   endDate: string
 }
-export type MarketDataProvider = 'akshare' | 'tdx'
+export type MarketDataProvider = 'eastmoney' | 'tdx'
 export type RuleMode = 'signals' | 'conditions'
 export type ConditionOperator = 'gt' | 'gte' | 'lt' | 'lte' | 'eq' | 'neq' | 'cross_up' | 'cross_down'
 

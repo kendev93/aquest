@@ -41,7 +41,7 @@ MARKET_SYNC_JOB_DESCRIPTIONS = frozenset(
         "本地行情导入",
         "本地行情自动导入",
         "行情同步",
-        "AKShare历史全量回填",
+        "East Money历史全量回填",
         AUTO_SYNC_DESCRIPTION,
     }
 )
@@ -173,7 +173,7 @@ class AutomaticMarketSyncScheduler:
                 self._market_sync,
                 MarketSyncConfig(
                     universe="all",
-                    provider="akshare",
+                    provider="eastmoney",
                     bars=800,
                     prefer_store_targets=False,
                     refresh_names=False,

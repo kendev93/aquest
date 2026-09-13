@@ -59,13 +59,13 @@ class MarketSyncConfig:
     prefer_store_targets: bool = False
     refresh_names: bool = False
     sync_workers: int = 8
-    provider: MarketDataProvider = "akshare"
+    provider: MarketDataProvider = "eastmoney"
     full_history: bool = False
 
     def __post_init__(self) -> None:
         if self.universe not in {"all", "sh", "sz"}:
             raise ValueError(f"不支持的同步范围: {self.universe}")
-        if self.provider not in {"akshare", "tdx"}:
+        if self.provider not in {"eastmoney", "tdx"}:
             raise ValueError(f"行情数据源无效: {self.provider}")
         if not isinstance(self.full_history, bool):
             raise ValueError("是否全量同步历史行情必须是布尔值")

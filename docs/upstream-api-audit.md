@@ -2,9 +2,9 @@
 
 审计日期：2026-08-30
 
-本项目使用 Docker 中的 AKShare 作为默认股票在线行情源，TDX 仅作为显式遗留兼容源保留。本文件主要记录 TDX 协议核对结果，以及两个 provider 的边界，便于后续维护者在上游变化时重新验证。
+本项目使用内置在线客户端作为默认股票在线行情源，TDX 仅作为显式遗留兼容源保留。本文件主要记录在线 HTTP 接口和 TDX 协议核对结果，以及两个 provider 的边界，便于后续维护者在上游变化时重新验证。
 
-AKShare 股票同步使用 `stock_info_a_code_name` 获取代码/简称，使用 `stock_zh_a_hist(period="daily", adjust="")` 获取未复权日线。业务层只接收项目自己的规范化 DataFrame，不直接暴露 AKShare 对象；provider、版本、列表指纹和同步错误会写入 DuckDB 元数据。
+在线客户端直接使用 East Money 证券列表接口获取代码/简称，使用 East Money K 线接口获取未复权日线；日线接口失败时切换到腾讯 JSONP 日线接口。业务层只接收项目自己的规范化 DataFrame，不直接暴露上游响应；provider、版本、列表指纹和同步错误会写入 DuckDB 元数据。
 
 ## 1. 参考版本和变更范围
 
@@ -65,13 +65,14 @@ AKShare 股票同步使用 `stock_info_a_code_name` 获取代码/简称，使用
 
 业务代码只接收项目自己的 `InstrumentRef`/`StockRef`、规范化 DataFrame、`MarketDataRepository` 和回测结果。在线同步直接写 DuckDB，本地导入才读取用户的 `.day`；任何运行时路径都不会修改源文件。
 
-## 5. AKShare 变更检查清单
+## 5. 在线 HTTP 接口变更检查清单
 
-1. 验证代码名称列表仍包含代码和简称字段，并检查沪深股票数量没有异常骤降；
-2. 用固定响应 fixture 验证中文日期、开高低收、成交量和成交额字段转换；
-3. 验证 `adjust=""` 的原始价格口径不会与现有本地 `.day` 数据混用；
-4. 验证限流、超时、空响应、重复日期和单标的失败隔离；
-5. 在 Docker 中通过 `pip check`、导入检查和 provider 能力接口确认依赖与版本。
+1. 验证 East Money 列表接口仍返回 `f12`/`f14` 代码和名称字段，并检查沪深股票数量没有异常骤降；
+2. 用固定响应 fixture 验证 East Money `klines` 的日期、开高低收、成交量和成交额字段转换；
+3. 用固定 JSONP fixture 验证腾讯日线的字段顺序、成交量/成交额单位转换和日期裁剪；
+4. 验证未复权原始价格口径不会与现有本地 `.day` 数据混用；
+5. 验证限流、超时、空响应、重复日期和单标的失败隔离；
+6. 在 Docker 中通过 `pip check`、导入检查和 provider 能力接口确认依赖与版本。
 
 ## 6. TDX 升级/协议变更检查清单
 

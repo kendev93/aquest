@@ -314,7 +314,7 @@ class MarketSyncRequest(BaseModel):
 
     vipdoc_path: str | None = Field(default=None, max_length=1024)
     universe: Literal["all", "sh", "sz"] = "all"
-    provider: MarketDataProvider = "akshare"
+    provider: MarketDataProvider = "eastmoney"
     bars: int = Field(default=800, ge=1, le=800)
     instrument_types: list[InstrumentType] | None = Field(default=None, max_length=4)
     boards: list[InstrumentBoard] | None = Field(default=None, max_length=7)

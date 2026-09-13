@@ -13,7 +13,6 @@ from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi import Path as PathParameter
 from fastapi.responses import JSONResponse
 
-from selector_app.adapters.akshare_market_sync import AkShareProviderError
 from selector_app.adapters.market_sync import (
     AbortCheck,
     DetailCallback,
@@ -23,6 +22,7 @@ from selector_app.adapters.market_sync import (
     MarketSyncReport,
     ProgressCallback,
 )
+from selector_app.adapters.online_market_sync import OnlineProviderError
 from selector_app.indicators.cache import IndicatorCache
 from selector_app.indicators.precompute import (
     PRECOMPUTE_MAX_BARS,
@@ -247,7 +247,7 @@ def market_data_capabilities(request: Request) -> dict[str, object]:
             return {"data": capabilities}
     return {
         "data": {
-            "default_provider": "akshare",
+            "default_provider": "eastmoney",
             "instrument_count": 0,
             "providers": {
                 "tdx": {
@@ -452,12 +452,12 @@ def create_online_sync_job(payload: MarketSyncRequest, request: Request) -> JSON
 
 
 @router.post("/backfill", status_code=status.HTTP_202_ACCEPTED)
-def create_akshare_backfill_job(payload: MarketSyncRequest, request: Request) -> JSONResponse:
-    if payload.provider != "akshare":
-        raise HTTPException(status_code=422, detail="AKShare 全量回填必须使用 akshare 数据源")
+def create_eastmoney_backfill_job(payload: MarketSyncRequest, request: Request) -> JSONResponse:
+    if payload.provider != "eastmoney":
+        raise HTTPException(status_code=422, detail="East Money 全量回填必须使用 eastmoney 数据源")
     full_payload = payload.model_copy(
         update={
-            "provider": "akshare",
+            "provider": "eastmoney",
             "instrument_types": ["stock"],
             "full_history": True,
         }
@@ -465,7 +465,7 @@ def create_akshare_backfill_job(payload: MarketSyncRequest, request: Request) ->
     return _create_sync_job(
         full_payload,
         request,
-        description="AKShare历史全量回填",
+        description="East Money历史全量回填",
     )
 
 
@@ -512,7 +512,7 @@ def _create_sync_job(
                 raise MarketDataCancelledError("行情同步已取消")
         except MarketDataCancelledError as exc:
             raise TaskCancelledError(str(exc)) from exc
-        except AkShareProviderError as exc:
+        except OnlineProviderError as exc:
             raise TaskUserError(str(exc)) from exc
         except TdxConnectionError as exc:
             raise TaskUserError(
@@ -552,7 +552,7 @@ def _create_sync_job(
 @router.get("/sync/jobs/{job_id}")
 def sync_job_status(job_id: str, request: Request) -> dict[str, object]:
     state = _runner(request).get(job_id)
-    if state is None or state.description not in {"行情同步", "AKShare历史全量回填"}:
+    if state is None or state.description not in {"行情同步", "East Money历史全量回填"}:
         raise HTTPException(status_code=404, detail="行情同步任务不存在或已过期")
     return {"data": state.snapshot()}
 

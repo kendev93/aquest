@@ -115,7 +115,7 @@ export async function createMarketDataSync(payload: {
   return response.data
 }
 
-export async function createAkShareBackfill(payload: {
+export async function createOnlineBackfill(payload: {
   universe?: 'all' | 'sh' | 'sz'
   boards?: InstrumentBoard[]
 } = {}): Promise<{ job_id: string; status: string }> {
@@ -123,7 +123,7 @@ export async function createAkShareBackfill(payload: {
     `${API_BASE}/backfill`,
     {
       method: 'POST',
-      body: JSON.stringify({ provider: 'akshare', ...payload }),
+      body: JSON.stringify({ provider: 'eastmoney', ...payload }),
     },
   )
   return response.data

@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   createLocalImport,
-  createAkShareBackfill,
+  createOnlineBackfill,
   createMarketDataSync,
   createOnlineSync,
   cancelMarketDataJob,
@@ -97,10 +97,10 @@ describe('market data API', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(JSON.stringify({
         data: {
-          default_provider: 'akshare',
+          default_provider: 'eastmoney',
           instrument_count: 5219,
           providers: {
-            akshare: { provider: 'akshare', available: true, version: '1.18.94' },
+            eastmoney: { provider: 'eastmoney', available: true, version: 'builtin-http-1' },
             tdx: { provider: 'tdx', available: true },
           },
         },
@@ -108,24 +108,24 @@ describe('market data API', () => {
     )
 
     await expect(fetchMarketDataCapabilities()).resolves.toMatchObject({
-      default_provider: 'akshare',
+      default_provider: 'eastmoney',
       instrument_count: 5219,
     })
   })
 
-  it('starts an AKShare full-history backfill', async () => {
+  it('starts an East Money full-history backfill', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(JSON.stringify({ data: { job_id: 'backfill-1', status: 'queued' } }), { status: 202 }),
     )
 
-    await expect(createAkShareBackfill({ universe: 'sh', boards: ['main'] })).resolves.toMatchObject({
+    await expect(createOnlineBackfill({ universe: 'sh', boards: ['main'] })).resolves.toMatchObject({
       job_id: 'backfill-1',
     })
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/v1/market-data/backfill',
       expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify({ provider: 'akshare', universe: 'sh', boards: ['main'] }),
+        body: JSON.stringify({ provider: 'eastmoney', universe: 'sh', boards: ['main'] }),
       }),
     )
   })

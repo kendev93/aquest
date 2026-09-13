@@ -7,7 +7,7 @@
 ```text
 通达信 vipdoc/*.day ──┐
                       ├─ LocalDayImporter ──┐
-AKShare / 内置 TDX ──┘                       │
+项目自有在线客户端 / 内置 TDX ──┘                       │
                                              ▼
                                    market.duckdb
                                              │
@@ -23,7 +23,7 @@ AKShare / 内置 TDX ──┘                       │
 
 - `market_data/` 定义项目自己的行情模型、`.day` 解析器、增量导入器、DuckDB repository 和业务适配器。
 - `indicators/` 保存可重建的版本化指标缓存，并负责导入后的批量预热；缓存不是行情事实源。
-- `adapters/` 通过统一 provider 路由接入 AKShare 和 TDX；AKShare 默认负责股票列表/日线，TDX 只保留为显式遗留兼容通道。
+- `adapters/` 通过统一 provider 路由接入项目自有在线客户端和 TDX；在线客户端默认负责股票列表/日线，TDX 只保留为显式遗留兼容通道。
 - `tdx_protocol/` 只实现在线日线同步需要的 TCP 帧、证券列表、日线请求和二进制解码；不暴露上游对象给业务层。
 - `formulas/` 是无副作用的数组计算层。公式函数由 `formulas/tdx_math.py` 自己实现，输入输出均为项目内部的 NumPy/Pandas 数据。
 - `screening/` 负责条件合并、批量读取、单标的容错、进度和导出，不处理网络或文件格式。
@@ -31,7 +31,7 @@ AKShare / 内置 TDX ──┘                       │
 - `web/` 只负责 Pydantic 校验、任务提交/轮询和安全错误响应。策略发现、二次优化和榜单复核在 Docker 正式运行时通过 `/data/market/.strategy-jobs` 共享卷交给独立 `strategy-worker`；backend 只读写小型任务状态和最终历史，其他普通任务继续使用进程内 runner。
 - `web-ui/` 只负责导入/同步操作、状态展示、表单和图表。
 
-AKShare 是 Docker 正式运行时的必需行情依赖，但业务层只依赖项目自己的 provider 接口和规范化 DataFrame；默认应用使用 AKShare 股票行情，TDX 作为兼容 provider。历史适配模块仍只处理项目自己的 `.day` 数据。
+在线行情客户端是项目内置实现，不引入财经数据客户端依赖；业务层只依赖项目自己的 provider 接口和规范化 DataFrame。默认应用使用项目自有在线股票行情，TDX 作为兼容 provider。历史适配模块仍只处理项目自己的 `.day` 数据。
 
 ## DuckDB 数据层
 
@@ -69,7 +69,7 @@ AKShare 是 Docker 正式运行时的必需行情依赖，但业务层只依赖�
 
 首次导入解析全部历史。之后先比较 `mtime_ns + size`，只有文件变化才计算 SHA-256；内容变化则重新解析，并在一个事务中替换该标的全部本地记录。解析失败保留旧数据；源文件消失只把 `source_files.status` 标为 `missing`，不删除历史。15:05（Asia/Shanghai）前的当日记录为 `provisional`，筛选和回测默认排除；收盘后的下一次同步会重新导入并转为 `completed`。
 
-应用启动时不会扫描或导入 `SELECTOR_VIPDOC_PATH`、`/data/vipdoc` 中的 `.day` 文件；本地文件只有通过“导入本地行情”接口才会读取。独立的自动行情同步调度器会在启动后检查当天的 `last_online_sync_at`，并在持续运行时按上海本地日期每天至少提交一次在线同步；默认在线同步只从 AKShare 证券列表发现当前沪深股票并补充日线，不再自动调用 TDX。TDX 仅在显式选择遗留 provider 时使用。自动同步完成后，在数据量适合时预热指标缓存；大型 DuckDB 会跳过全量预热，后续按需计算，避免启动或同步期间产生过高内存峰值。DuckDB 为空时不会创建空同步任务。可用 `SELECTOR_AUTO_SYNC_ENABLED=0` 关闭，默认检查间隔为 900 秒。
+应用启动时不会扫描或导入 `SELECTOR_VIPDOC_PATH`、`/data/vipdoc` 中的 `.day` 文件；本地文件只有通过“导入本地行情”接口才会读取。独立的自动行情同步调度器会在启动后检查当天的 `last_online_sync_at`，并在持续运行时按上海本地日期每天至少提交一次在线同步；默认在线同步只从项目自有证券列表客户端发现当前沪深股票并补充日线，不再自动调用 TDX。TDX 仅在显式选择遗留 provider 时使用。自动同步完成后，在数据量适合时预热指标缓存；大型 DuckDB 会跳过全量预热，后续按需计算，避免启动或同步期间产生过高内存峰值。DuckDB 为空时不会创建空同步任务。可用 `SELECTOR_AUTO_SYNC_ENABLED=0` 关闭，默认检查间隔为 900 秒。
 
 源文件不会被追加、覆盖、截断或修改。任务结果包含发现、成功、跳过、失败、未变化文件数，以及新增/替换标的、K 线数和失败原因。
 
@@ -77,7 +77,7 @@ AKShare 是 Docker 正式运行时的必需行情依赖，但业务层只依赖�
 
 ## 在线同步
 
-在线同步 provider 支持 AKShare 和项目内置的最小 TDX 客户端。AKShare 股票 provider 使用 `stock_info_a_code_name` 刷新代码/简称，优先使用 `stock_zh_a_hist(period="daily", adjust="")`，失败后按顺序切换 `stock_zh_a_hist_tx` 和受限的 `stock_zh_a_daily`；另提供 `/backfill` 历史补齐任务：已有标的按本地首尾日期请求缺失区间，没有已有数据的标的才请求完整历史。TDX provider 支持：
+在线同步 provider 支持项目自有在线客户端和项目内置的最小 TDX 客户端。在线客户端通过 East Money 列表接口刷新代码/简称，通过 East Money 日线接口获取未复权日线，失败后切换腾讯日线接口；另提供 `/backfill` 历史补齐任务：已有标的按本地首尾日期请求缺失区间，没有已有数据的标的才请求完整历史。TDX provider 支持：
 
 - TCP 建连、初始化帧、超时、有限重试和服务器故障转移；
 - `get_security_list_all`；
@@ -85,7 +85,7 @@ AKShare 是 Docker 正式运行时的必需行情依赖，但业务层只依赖�
 - TDX 日期、价格变长整数、成交量自定义浮点和指数附加字段解码；
 - 空响应和截断响应的安全处理。
 
-在线同步不写回 `.day`。正式 provider 使用 8 个 `spawn` 进程分别写入 `.sync-staging/{run_id}/worker-*.duckdb`，下载完成后由单一主库写者按分片合并；同一日期已有 `source='local'` 时永不覆盖，在线行可以按 provider 更新，缺失日期可以插入。AKShare 新标的首次读取完整可用历史，已有标的按首尾日期请求缺失区间和最新增量；`/backfill` 不重复下载已有区间。列表刷新和区间规划必须先成功，之后才启动日线请求；状态会记录 provider、版本、列表指纹、执行模式、分片下载/合并进度、实际日线接口和单标的实际日期范围。行情同步任务使用全局互斥组，最多同时运行一个；活动任务可通过 `/jobs/active` 查询并通过 `/jobs/{job_id}/cancel` 协作取消。
+在线同步不写回 `.day`。正式 provider 使用 8 个 `spawn` 进程分别写入 `.sync-staging/{run_id}/worker-*.duckdb`，下载完成后由单一主库写者按分片合并；同一日期已有 `source='local'` 时永不覆盖，在线行可以按 provider 更新，缺失日期可以插入。在线客户端新标的首次读取完整可用历史，已有标的按首尾日期请求缺失区间和最新增量；`/backfill` 不重复下载已有区间。列表刷新和区间规划必须先成功，之后才启动日线请求；状态会记录 provider、版本、列表指纹、执行模式、分片下载/合并进度、实际日线接口和单标的实际日期范围。行情同步任务使用全局互斥组，最多同时运行一个；活动任务可通过 `/jobs/active` 查询并通过 `/jobs/{job_id}/cancel` 协作取消。
 
 `.day` 文件不包含中文名，因此本地导入只建立代码和行情记录；在线证券列表的 `name` 字段会写入 `instruments`，并在扫描结果 JSON/CSV 和页面中透传。名称刷新失败不会影响已有行情扫描，结果显示 `—` 作为占位。内置公式的扫描结果只透传注册表中的用户可选输出，公式内部中间数组仍保留在指标缓存中；自定义公式透传其命名输出。
 
@@ -110,7 +110,7 @@ AKShare 是 Docker 正式运行时的必需行情依赖，但业务层只依赖�
 - `POST /api/v1/market-data/import-local`
 - `POST /api/v1/market-data/sync-online`（仅在线更新）
 - `POST /api/v1/market-data/sync`（一键在线同步兼容入口）
-- `POST /api/v1/market-data/backfill`（AKShare 股票历史分片补齐）
+- `POST /api/v1/market-data/backfill`（在线股票历史分片补齐）
 - `GET /api/v1/market-data/capabilities`（行情源能力、版本和当前来源）
 - `GET /api/v1/market-data/store`
 - `GET /api/v1/market-data/jobs/active`（当前运行中的行情任务和进度）
