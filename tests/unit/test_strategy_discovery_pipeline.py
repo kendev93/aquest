@@ -103,14 +103,28 @@ def test_validation_pipeline_keeps_independent_sharpe_and_return_leaderboards() 
     assert result.validation_metadata["search_candidate_count"] == 4
 
 
-def test_validation_pipeline_removes_duplicate_trade_behaviors_from_each_leaderboard() -> None:
+def test_validation_pipeline_deduplicates_each_top_ten_by_its_own_metric() -> None:
     request = replace(_request(), validation_candidates=12, holdout_candidates=10)
     candidates = [
         build_random_candidate(request, __import__("random").Random(seed)) for seed in range(12)
     ]
     behavior_by_hash = {
-        candidate.candidate_hash: "behavior-a" if index < 6 else "behavior-b"
+        candidate.candidate_hash: "behavior-a" if index in {0, 3} else f"behavior-{index}"
         for index, candidate in enumerate(candidates)
+    }
+    scores = {
+        candidates[0].candidate_hash: {"sharpe": 9.0, "annual_return": 0.90},
+        candidates[1].candidate_hash: {"sharpe": 8.0, "annual_return": 0.80},
+        candidates[2].candidate_hash: {"sharpe": 7.0, "annual_return": 0.70},
+        candidates[3].candidate_hash: {"sharpe": 6.0, "annual_return": 0.95},
+        candidates[4].candidate_hash: {"sharpe": 5.0, "annual_return": 0.05},
+        candidates[5].candidate_hash: {"sharpe": 4.0, "annual_return": 0.50},
+        candidates[6].candidate_hash: {"sharpe": 3.0, "annual_return": 0.40},
+        candidates[7].candidate_hash: {"sharpe": 2.0, "annual_return": 0.30},
+        candidates[8].candidate_hash: {"sharpe": 1.0, "annual_return": 0.20},
+        candidates[9].candidate_hash: {"sharpe": 0.5, "annual_return": 0.10},
+        candidates[10].candidate_hash: {"sharpe": 0.4, "annual_return": 0.04},
+        candidates[11].candidate_hash: {"sharpe": 10.0, "annual_return": -0.20},
     }
     search = SearchResult(
         results_by_sharpe=tuple(candidates),
@@ -120,8 +134,7 @@ def test_validation_pipeline_removes_duplicate_trade_behaviors_from_each_leaderb
 
     def evaluate(candidate, _split: str):
         return {
-            "annual_return": 0.1,
-            "sharpe": 1.0,
+            **scores[candidate.candidate_hash],
             "total_trades": 10,
             "max_drawdown": 0.1,
             "trade_fingerprint": behavior_by_hash[candidate.candidate_hash],
@@ -129,23 +142,28 @@ def test_validation_pipeline_removes_duplicate_trade_behaviors_from_each_leaderb
 
     result = run_validation_pipeline(search, request, evaluate)
 
-    assert len(result.results_by_sharpe) == 10
-    assert len(result.results_by_return) == 10
-    assert len({candidate.candidate_hash for candidate in result.results_by_sharpe}) == 10
-    assert len({candidate.candidate_hash for candidate in result.results_by_return}) == 10
-    sharpe_fingerprints = [
-        candidate.metrics["validation"]["trade_fingerprint"]
-        for candidate in result.results_by_sharpe
+    sharpe_hashes = [candidate.candidate_hash for candidate in result.results_by_sharpe]
+    return_hashes = [candidate.candidate_hash for candidate in result.results_by_return]
+
+    assert sharpe_hashes == [
+        candidates[index].candidate_hash for index in (11, 0, 1, 2, 4, 5, 6, 7, 8, 9)
     ]
-    return_fingerprints = [
-        candidate.metrics["validation"]["trade_fingerprint"]
-        for candidate in result.results_by_return
+    assert return_hashes == [
+        candidates[index].candidate_hash for index in (3, 1, 2, 5, 6, 7, 8, 9, 4, 10)
     ]
-    assert set(sharpe_fingerprints[:2]) == {"behavior-a", "behavior-b"}
-    assert set(return_fingerprints[:2]) == {"behavior-a", "behavior-b"}
-    assert result.validation_metadata["behavioral_deduplication"] == {
-        "validation_sharpe_removed": 10,
-        "validation_return_removed": 10,
-        "sharpe_backfilled": 8,
-        "return_backfilled": 8,
-    }
+    assert sharpe_hashes != return_hashes
+    assert [
+        candidate.metrics["validation"]["sharpe"] for candidate in result.results_by_sharpe
+    ] == sorted(
+        (candidate.metrics["validation"]["sharpe"] for candidate in result.results_by_sharpe),
+        reverse=True,
+    )
+    assert [
+        candidate.metrics["validation"]["annual_return"] for candidate in result.results_by_return
+    ] == sorted(
+        (
+            candidate.metrics["validation"]["annual_return"]
+            for candidate in result.results_by_return
+        ),
+        reverse=True,
+    )

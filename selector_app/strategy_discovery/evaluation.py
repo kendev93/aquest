@@ -5,9 +5,11 @@ from __future__ import annotations
 import math
 import time
 from collections.abc import Callable, Mapping, Sequence
-from typing import cast
+from typing import Literal, cast
 
 from .models import DiscoveryRequest, DiscoveryRun, StrategyCandidate
+
+LeaderboardMetric = Literal["sharpe", "annual_return"]
 
 
 def _metric(metrics: Mapping[str, object], key: str) -> float:
@@ -54,50 +56,76 @@ def _unique(candidates: Sequence[StrategyCandidate]) -> list[StrategyCandidate]:
     return result
 
 
-def _behavior_fingerprint(candidate: StrategyCandidate, split: str) -> str | None:
-    metrics = candidate.metrics.get(split)
-    if not isinstance(metrics, Mapping):
-        return None
+def _behavior_key(candidate: StrategyCandidate) -> str:
+    metrics = candidate.metrics.get("validation", {})
     fingerprint = metrics.get("trade_fingerprint")
-    if not isinstance(fingerprint, str):
-        return None
-    normalized = fingerprint.strip()
-    return normalized or None
+    if isinstance(fingerprint, str) and fingerprint.strip():
+        return f"trade:{fingerprint.strip()}"
+    return f"candidate:{candidate.candidate_hash}"
 
 
-def _unique_behaviors(
-    candidates: Sequence[StrategyCandidate], split: str
-) -> list[StrategyCandidate]:
-    """Keep one candidate for each observed trading behavior when available."""
-
-    result: list[StrategyCandidate] = []
-    seen: set[str] = set()
-    for candidate in candidates:
-        fingerprint = _behavior_fingerprint(candidate, split)
-        if fingerprint is not None:
-            if fingerprint in seen:
-                continue
-            seen.add(fingerprint)
-        result.append(candidate)
-    return result
-
-
-def _leaderboard_candidates(
-    candidates: Sequence[StrategyCandidate], split: str, limit: int = 10
-) -> tuple[list[StrategyCandidate], int, int]:
-    """Prefer distinct behaviors, then backfill the requested leaderboard size."""
-
-    distinct = _unique_behaviors(candidates, split)
-    selected = distinct[:limit]
-    selected_hashes = {candidate.candidate_hash for candidate in selected}
-    selected.extend(
-        candidate for candidate in candidates if candidate.candidate_hash not in selected_hashes
-    )
-    selected = selected[:limit]
+def _leaderboard_key(
+    candidate: StrategyCandidate, primary: str, secondary: str
+) -> tuple[float, float, int]:
+    metrics = candidate.metrics.get("validation", {})
     return (
-        selected,
-        len(candidates) - len(distinct),
-        max(0, len(selected) - min(len(distinct), limit)),
+        _metric(metrics, primary),
+        _metric(metrics, secondary),
+        -candidate.complexity,
+    )
+
+
+def _consider_candidate(
+    leaderboard: Sequence[StrategyCandidate],
+    candidate: StrategyCandidate,
+    metric: LeaderboardMetric,
+    *,
+    limit: int = 10,
+) -> tuple[StrategyCandidate, ...]:
+    """Keep one independently ranked, behavior-deduplicated top-k leaderboard."""
+
+    if limit <= 0:
+        return ()
+    primary, secondary = (
+        ("sharpe", "annual_return")
+        if metric == "sharpe"
+        else ("annual_return", "sharpe")
+    )
+    candidate_key = _leaderboard_key(candidate, primary, secondary)
+    behavior_key = _behavior_key(candidate)
+    duplicate_index = next(
+        (
+            index
+            for index, existing in enumerate(leaderboard)
+            if _behavior_key(existing) == behavior_key
+        ),
+        None,
+    )
+    if duplicate_index is not None:
+        existing_key = _leaderboard_key(leaderboard[duplicate_index], primary, secondary)
+        if candidate_key <= existing_key:
+            return tuple(leaderboard)
+        remaining = (
+            *leaderboard[:duplicate_index],
+            *leaderboard[duplicate_index + 1 :],
+        )
+        return tuple(
+            sorted(
+                (*remaining, candidate),
+                key=lambda item: _leaderboard_key(item, primary, secondary),
+                reverse=True,
+            )[:limit]
+        )
+    if len(leaderboard) >= limit and candidate_key <= _leaderboard_key(
+        leaderboard[-1], primary, secondary
+    ):
+        return tuple(leaderboard)
+    return tuple(
+        sorted(
+            (*leaderboard, candidate),
+            key=lambda item: _leaderboard_key(item, primary, secondary),
+            reverse=True,
+        )[:limit]
     )
 
 
@@ -143,6 +171,8 @@ def run_validation_pipeline(
         raise ValueError("没有可供验证的策略候选")
 
     validated: list[StrategyCandidate] = []
+    sharpe_leaderboard: tuple[StrategyCandidate, ...] = ()
+    return_leaderboard: tuple[StrategyCandidate, ...] = ()
     total = len(candidates)
     validation_started = time.perf_counter()
     for offset in range(0, total, max(1, batch_size)):
@@ -162,38 +192,24 @@ def run_validation_pipeline(
             enriched = candidate.with_metrics("validation", dict(metrics))
             if _passes(metrics, request):
                 validated.append(enriched)
+                sharpe_leaderboard = _consider_candidate(
+                    sharpe_leaderboard,
+                    enriched,
+                    "sharpe",
+                )
+                return_leaderboard = _consider_candidate(
+                    return_leaderboard,
+                    enriched,
+                    "annual_return",
+                )
             if progress_callback is not None:
                 progress_callback(index, total, "validation")
     validation_seconds = time.perf_counter() - validation_started
     if not validated:
         raise ValueError("验证区间没有满足约束的候选策略")
 
-    ranked_by_sharpe = sorted(
-        validated,
-        key=lambda item: (
-            _metric(item.metrics.get("validation", {}), "sharpe"),
-            _metric(item.metrics.get("validation", {}), "annual_return"),
-            -item.complexity,
-        ),
-        reverse=True,
-    )
-    ranked_by_return = sorted(
-        validated,
-        key=lambda item: (
-            _metric(item.metrics.get("validation", {}), "annual_return"),
-            _metric(item.metrics.get("validation", {}), "sharpe"),
-            -item.complexity,
-        ),
-        reverse=True,
-    )
-    valid_by_sharpe, sharpe_removed, sharpe_backfilled = _leaderboard_candidates(
-        ranked_by_sharpe,
-        "validation",
-    )
-    valid_by_return, return_removed, return_backfilled = _leaderboard_candidates(
-        ranked_by_return,
-        "validation",
-    )
+    valid_by_sharpe = sharpe_leaderboard
+    valid_by_return = return_leaderboard
     holdout_candidates = _unique(
         [
             *valid_by_sharpe[: max(1, (request.holdout_candidates + 1) // 2)],
@@ -242,11 +258,10 @@ def run_validation_pipeline(
             "validation_candidate_limit_per_leaderboard": request.validation_candidates,
             "validation_sharpe_shortlist_count": len(sharpe_shortlist),
             "validation_return_shortlist_count": len(return_shortlist),
-            "behavioral_deduplication": {
-                "validation_sharpe_removed": sharpe_removed,
-                "validation_return_removed": return_removed,
-                "sharpe_backfilled": sharpe_backfilled,
-                "return_backfilled": return_backfilled,
+            "leaderboard_selection": {
+                "method": "independent_top_10_deduplicated_by_trade_behavior",
+                "sharpe_count": len(valid_by_sharpe),
+                "return_count": len(valid_by_return),
             },
             "holdout_candidate_count": len(holdout_candidates),
             "leaderboard_period": "validation",
