@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from selector_app.strategy_discovery.candidates import build_random_candidate
 from selector_app.strategy_discovery.evaluation import run_validation_pipeline
 from selector_app.strategy_discovery.models import DiscoveryRequest
@@ -99,3 +101,43 @@ def test_validation_pipeline_keeps_independent_sharpe_and_return_leaderboards() 
         candidates[3].candidate_hash,
     ]
     assert result.validation_metadata["search_candidate_count"] == 4
+
+
+def test_validation_pipeline_removes_duplicate_trade_behaviors_from_each_leaderboard() -> None:
+    request = replace(_request(), validation_candidates=4, holdout_candidates=4)
+    candidates = [
+        build_random_candidate(request, __import__("random").Random(seed)) for seed in range(4)
+    ]
+    behavior_by_hash = {
+        candidates[0].candidate_hash: "behavior-a",
+        candidates[1].candidate_hash: "behavior-a",
+        candidates[2].candidate_hash: "behavior-b",
+        candidates[3].candidate_hash: "behavior-b",
+    }
+    search = SearchResult(
+        results_by_sharpe=tuple(candidates),
+        results_by_return=tuple(candidates),
+        search_metadata={"evaluated_trials": 4},
+    )
+
+    def evaluate(candidate, _split: str):
+        return {
+            "annual_return": 0.1,
+            "sharpe": 1.0,
+            "total_trades": 10,
+            "max_drawdown": 0.1,
+            "trade_fingerprint": behavior_by_hash[candidate.candidate_hash],
+        }
+
+    result = run_validation_pipeline(search, request, evaluate)
+
+    assert len(result.results_by_sharpe) == 2
+    assert len(result.results_by_return) == 2
+    assert [
+        candidate.metrics["validation"]["trade_fingerprint"]
+        for candidate in result.results_by_sharpe
+    ] == ["behavior-a", "behavior-b"]
+    assert [
+        candidate.metrics["validation"]["trade_fingerprint"]
+        for candidate in result.results_by_return
+    ] == ["behavior-a", "behavior-b"]

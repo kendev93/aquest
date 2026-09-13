@@ -54,6 +54,34 @@ def _unique(candidates: Sequence[StrategyCandidate]) -> list[StrategyCandidate]:
     return result
 
 
+def _behavior_fingerprint(candidate: StrategyCandidate, split: str) -> str | None:
+    metrics = candidate.metrics.get(split)
+    if not isinstance(metrics, Mapping):
+        return None
+    fingerprint = metrics.get("trade_fingerprint")
+    if not isinstance(fingerprint, str):
+        return None
+    normalized = fingerprint.strip()
+    return normalized or None
+
+
+def _unique_behaviors(
+    candidates: Sequence[StrategyCandidate], split: str
+) -> list[StrategyCandidate]:
+    """Keep one candidate for each observed trading behavior when available."""
+
+    result: list[StrategyCandidate] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        fingerprint = _behavior_fingerprint(candidate, split)
+        if fingerprint is not None:
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+        result.append(candidate)
+    return result
+
+
 def run_validation_pipeline(
     search_result: Mapping[str, object] | object,
     request: DiscoveryRequest,
@@ -121,7 +149,7 @@ def run_validation_pipeline(
     if not validated:
         raise ValueError("验证区间没有满足约束的候选策略")
 
-    valid_by_sharpe = sorted(
+    ranked_by_sharpe = sorted(
         validated,
         key=lambda item: (
             _metric(item.metrics.get("validation", {}), "sharpe"),
@@ -130,7 +158,7 @@ def run_validation_pipeline(
         ),
         reverse=True,
     )
-    valid_by_return = sorted(
+    ranked_by_return = sorted(
         validated,
         key=lambda item: (
             _metric(item.metrics.get("validation", {}), "annual_return"),
@@ -139,6 +167,8 @@ def run_validation_pipeline(
         ),
         reverse=True,
     )
+    valid_by_sharpe = _unique_behaviors(ranked_by_sharpe, "validation")
+    valid_by_return = _unique_behaviors(ranked_by_return, "validation")
     holdout_candidates = _unique(
         [
             *valid_by_sharpe[: max(1, (request.holdout_candidates + 1) // 2)],
@@ -187,6 +217,10 @@ def run_validation_pipeline(
             "validation_candidate_limit_per_leaderboard": request.validation_candidates,
             "validation_sharpe_shortlist_count": len(sharpe_shortlist),
             "validation_return_shortlist_count": len(return_shortlist),
+            "behavioral_deduplication": {
+                "validation_sharpe_removed": len(ranked_by_sharpe) - len(valid_by_sharpe),
+                "validation_return_removed": len(ranked_by_return) - len(valid_by_return),
+            },
             "holdout_candidate_count": len(holdout_candidates),
             "leaderboard_period": "validation",
             "stage_durations_seconds": {
