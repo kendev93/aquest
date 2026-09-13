@@ -24,7 +24,6 @@ from selector_app.strategy_discovery.replay import (
     build_replay_candidate,
 )
 from selector_app.strategy_discovery.resources import (
-    DEFAULT_DISCOVERY_WORKERS,
     resolve_discovery_workers,
     validate_discovery_workers,
 )
@@ -32,7 +31,7 @@ from selector_app.strategy_discovery.snapshot import DiscoverySnapshot, build_di
 from selector_app.web.schemas import PortfolioBacktestRequest
 
 ReplayProgressCallback = Callable[[int, int, str, Mapping[str, object]], None]
-REPLAY_EVALUATION_WORKERS = DEFAULT_DISCOVERY_WORKERS
+REPLAY_EVALUATION_WORKERS = resolve_discovery_workers()
 
 
 class PortfolioServiceLike(Protocol):

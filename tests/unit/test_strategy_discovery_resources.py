@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import pytest
 
+from selector_app.strategy_discovery import resources
 from selector_app.strategy_discovery.resources import (
-    DEFAULT_DISCOVERY_WORKERS,
     estimate_discovery_resources,
+    resolve_discovery_memory_budget,
     resolve_discovery_workers,
 )
 
@@ -52,9 +53,13 @@ def test_resource_plan_rejects_data_that_does_not_fit_one_worker() -> None:
     assert estimate.reason == "resource_budget_exceeded"
 
 
-def test_worker_configuration_defaults_to_two_and_validates_values(monkeypatch) -> None:
+def test_worker_configuration_auto_uses_the_available_cpu_count(monkeypatch) -> None:
     monkeypatch.delenv("SELECTOR_DISCOVERY_WORKERS", raising=False)
-    assert resolve_discovery_workers() == DEFAULT_DISCOVERY_WORKERS == 2
+    monkeypatch.setattr(resources.os, "cpu_count", lambda: 4)
+    assert resolve_discovery_workers() == 4
+
+    monkeypatch.setenv("SELECTOR_DISCOVERY_WORKERS", "auto")
+    assert resolve_discovery_workers() == 4
 
     monkeypatch.setenv("SELECTOR_DISCOVERY_WORKERS", "1")
     assert resolve_discovery_workers() == 1
@@ -62,3 +67,24 @@ def test_worker_configuration_defaults_to_two_and_validates_values(monkeypatch) 
     monkeypatch.setenv("SELECTOR_DISCOVERY_WORKERS", "0")
     with pytest.raises(ValueError, match="worker"):
         resolve_discovery_workers()
+
+
+def test_auto_worker_request_expands_when_the_memory_budget_allows(monkeypatch) -> None:
+    monkeypatch.setenv("SELECTOR_DISCOVERY_WORKERS", "auto")
+    monkeypatch.setattr(resources.os, "cpu_count", lambda: 4)
+
+    estimate = estimate_discovery_resources(
+        row_count=1_000,
+        requested_workers=None,
+        memory_budget_bytes=10 * 1024**3,
+    )
+
+    assert estimate.requested_workers == 4
+    assert estimate.selected_workers == 4
+
+
+def test_auto_memory_budget_uses_the_worker_cgroup_limit(monkeypatch) -> None:
+    monkeypatch.setenv("SELECTOR_DISCOVERY_MEMORY_BUDGET_MB", "auto")
+    monkeypatch.setattr(resources, "_read_cgroup_memory_limit", lambda: 10 * 1024**3)
+
+    assert resolve_discovery_memory_budget() == 8 * 1024**3

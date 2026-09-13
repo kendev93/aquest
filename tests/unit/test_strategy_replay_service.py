@@ -7,6 +7,7 @@ import pandas as pd
 
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.strategy_discovery.replay_service import REPLAY_EVALUATION_WORKERS
+from selector_app.strategy_discovery.resources import resolve_discovery_workers
 from selector_app.strategy_discovery.service import StrategyDiscoveryService
 
 
@@ -240,7 +241,7 @@ def test_real_replay_uses_the_shared_snapshot_process_pool(tmp_path: Path) -> No
         ),
     )
 
-    assert REPLAY_EVALUATION_WORKERS == 2
+    assert REPLAY_EVALUATION_WORKERS == resolve_discovery_workers()
     assert result["candidate_count"] == 1
     assert len(result["data_fingerprint"]) == 64
     assert any(event[2] == "preparing_snapshot" for event in progress)

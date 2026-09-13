@@ -174,7 +174,9 @@ def test_service_rejects_an_empty_local_market_store_before_search(tmp_path: Pat
 
 def test_real_duckdb_service_evaluates_candidates_in_configurable_process_pool(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
+    monkeypatch.setenv("SELECTOR_DISCOVERY_WORKERS", "2")
     dates = pd.date_range("2024-01-01", periods=80, freq="D")
     close = np.linspace(10.0, 13.0, len(dates))
     frame = pd.DataFrame(

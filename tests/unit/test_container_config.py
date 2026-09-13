@@ -25,12 +25,16 @@ def test_compose_defines_an_isolated_strategy_worker() -> None:
     assert 'command: ["python", "-m", "selector_app.strategy_discovery.worker"]' in compose
     assert "SELECTOR_DATA_DIR: /data/market" in compose
     assert (
-        'SELECTOR_DISCOVERY_MEMORY_BUDGET_MB: "${SELECTOR_DISCOVERY_MEMORY_BUDGET_MB:-5120}"'
-        in compose
+        compose.count(
+            'SELECTOR_DISCOVERY_MEMORY_BUDGET_MB: "${SELECTOR_DISCOVERY_MEMORY_BUDGET_MB:-auto}"'
+        )
+        == 2
     )
+    assert compose.count('SELECTOR_DISCOVERY_WORKERS: "${SELECTOR_DISCOVERY_WORKERS:-auto}"') == 2
     assert "source: market_data" in compose
     assert "SELECTOR_DISCOVERY_WORKERS" in compose
-    assert 'mem_limit: "${STRATEGY_WORKER_MEMORY_LIMIT:-6g}"' in compose
+    assert 'mem_limit: "${STRATEGY_WORKER_MEMORY_LIMIT:-0}"' in compose
     assert "healthcheck:" in compose
     assert 'test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]' in compose
-    assert "SELECTOR_DISCOVERY_WORKERS=2" in env_example
+    assert "SELECTOR_DISCOVERY_WORKERS=auto" in env_example
+    assert "SELECTOR_DISCOVERY_MEMORY_BUDGET_MB=auto" in env_example

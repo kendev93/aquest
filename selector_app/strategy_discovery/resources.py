@@ -8,7 +8,8 @@ from pathlib import Path
 
 from selector_app.concurrency import MAX_WORKERS
 
-DEFAULT_DISCOVERY_WORKERS = 2
+AUTO_DISCOVERY_WORKERS = "auto"
+DEFAULT_DISCOVERY_WORKERS = MAX_WORKERS
 DEFAULT_MEMORY_BUDGET_BYTES = 4 * 1024**3
 MEMORY_HEADROOM_RATIO = 0.8
 _BYTES_PER_FLOAT64 = 8
@@ -51,9 +52,11 @@ class DiscoveryResourceBudgetError(ValueError):
 
 
 def resolve_discovery_workers() -> int:
-    """Resolve and validate the requested discovery worker count."""
+    """Resolve the configured maximum worker count or an automatic CPU cap."""
 
-    raw = os.getenv("SELECTOR_DISCOVERY_WORKERS", str(DEFAULT_DISCOVERY_WORKERS)).strip()
+    raw = os.getenv("SELECTOR_DISCOVERY_WORKERS", AUTO_DISCOVERY_WORKERS).strip()
+    if raw.lower() in {"", AUTO_DISCOVERY_WORKERS}:
+        return _auto_worker_count()
     try:
         workers = int(raw)
     except ValueError as exc:
@@ -70,10 +73,10 @@ def validate_discovery_workers(workers: int) -> int:
 
 
 def resolve_discovery_memory_budget() -> int:
-    """Return the configured memory budget, reserving headroom when possible."""
+    """Return the configured or automatically detected memory budget."""
 
     raw_mb = os.getenv("SELECTOR_DISCOVERY_MEMORY_BUDGET_MB")
-    if raw_mb is not None:
+    if raw_mb is not None and raw_mb.strip().lower() not in {"", "auto"}:
         try:
             budget_mb = int(raw_mb.strip())
         except ValueError as exc:
@@ -82,7 +85,7 @@ def resolve_discovery_memory_budget() -> int:
             raise ValueError("strategy discovery memory budget 必须大于 0")
         return budget_mb * 1024**2
 
-    limit = _read_cgroup_memory_limit()
+    limit = _read_cgroup_memory_limit() or _read_host_memory_limit()
     if limit is not None:
         return max(1, int(limit * MEMORY_HEADROOM_RATIO))
     return DEFAULT_MEMORY_BUDGET_BYTES
@@ -166,6 +169,11 @@ def _require_non_negative(name: str, value: int) -> None:
         raise ValueError(f"{name} 必须是非负整数")
 
 
+def _auto_worker_count() -> int:
+    cpu_count = max(1, int(os.cpu_count() or 1))
+    return validate_discovery_workers(min(DEFAULT_DISCOVERY_WORKERS, cpu_count))
+
+
 def _read_cgroup_memory_limit() -> int | None:
     for path in (
         Path("/sys/fs/cgroup/memory.max"),
@@ -186,7 +194,18 @@ def _read_cgroup_memory_limit() -> int | None:
     return None
 
 
+def _read_host_memory_limit() -> int | None:
+    try:
+        pages = int(os.sysconf("SC_PHYS_PAGES"))
+        page_size = int(os.sysconf("SC_PAGE_SIZE"))
+    except (AttributeError, OSError, ValueError):
+        return None
+    total = pages * page_size
+    return total if total > 0 else None
+
+
 __all__ = [
+    "AUTO_DISCOVERY_WORKERS",
     "DEFAULT_DISCOVERY_WORKERS",
     "DiscoveryResourceBudgetError",
     "DiscoveryResourceEstimate",

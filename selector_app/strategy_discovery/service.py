@@ -45,7 +45,6 @@ from .refinement import (
 from .replay import ReplayLeaderboard
 from .replay_service import ReplayProgressCallback, StrategyReplayService
 from .resources import (
-    DEFAULT_DISCOVERY_WORKERS,
     resolve_discovery_workers,
     validate_discovery_workers,
 )
@@ -53,7 +52,7 @@ from .search import BatchEvaluator, HybridSearchEngine
 from .snapshot import DiscoverySnapshot, build_discovery_snapshot
 
 ProgressCallback = Callable[[int, int, str, Mapping[str, object]], None]
-DISCOVERY_EVALUATION_WORKERS = DEFAULT_DISCOVERY_WORKERS
+DISCOVERY_EVALUATION_WORKERS = resolve_discovery_workers()
 
 _WORKER_DISCOVERY_SERVICE: StrategyDiscoveryService | None = None
 

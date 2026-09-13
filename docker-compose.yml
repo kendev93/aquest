@@ -7,7 +7,8 @@ services:
       PYTHONUNBUFFERED: "1"
       SELECTOR_DATA_DIR: /data/market
       SELECTOR_AUTO_SYNC_ENABLED: "1"
-      SELECTOR_DISCOVERY_MEMORY_BUDGET_MB: "${SELECTOR_DISCOVERY_MEMORY_BUDGET_MB:-5120}"
+      SELECTOR_DISCOVERY_WORKERS: "${SELECTOR_DISCOVERY_WORKERS:-auto}"
+      SELECTOR_DISCOVERY_MEMORY_BUDGET_MB: "${SELECTOR_DISCOVERY_MEMORY_BUDGET_MB:-auto}"
     volumes:
       - type: volume
         source: vipdoc_data
@@ -19,6 +20,7 @@ services:
       - "8123"
     ports:
       - "127.0.0.1:${API_PORT:-8123}:8123"
+    mem_limit: "${STRATEGY_WORKER_MEMORY_LIMIT:-0}"
     restart: unless-stopped
 
   strategy-worker:
@@ -28,8 +30,8 @@ services:
     environment:
       PYTHONUNBUFFERED: "1"
       SELECTOR_DATA_DIR: /data/market
-      SELECTOR_DISCOVERY_WORKERS: "${SELECTOR_DISCOVERY_WORKERS:-2}"
-      SELECTOR_DISCOVERY_MEMORY_BUDGET_MB: "${SELECTOR_DISCOVERY_MEMORY_BUDGET_MB:-5120}"
+      SELECTOR_DISCOVERY_WORKERS: "${SELECTOR_DISCOVERY_WORKERS:-auto}"
+      SELECTOR_DISCOVERY_MEMORY_BUDGET_MB: "${SELECTOR_DISCOVERY_MEMORY_BUDGET_MB:-auto}"
       SELECTOR_DISCOVERY_JOB_DIR: /data/market/.strategy-jobs
     volumes:
       - type: volume
@@ -45,7 +47,7 @@ services:
       start_period: 20s
       retries: 3
     command: ["python", "-m", "selector_app.strategy_discovery.worker"]
-    mem_limit: "${STRATEGY_WORKER_MEMORY_LIMIT:-6g}"
+    mem_limit: "${STRATEGY_WORKER_MEMORY_LIMIT:-0}"
     restart: unless-stopped
 
   frontend:
