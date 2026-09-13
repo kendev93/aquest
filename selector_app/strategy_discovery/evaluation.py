@@ -87,9 +87,7 @@ def _consider_candidate(
     if limit <= 0:
         return ()
     primary, secondary = (
-        ("sharpe", "annual_return")
-        if metric == "sharpe"
-        else ("annual_return", "sharpe")
+        ("sharpe", "annual_return") if metric == "sharpe" else ("annual_return", "sharpe")
     )
     candidate_key = _leaderboard_key(candidate, primary, secondary)
     behavior_key = _behavior_key(candidate)
