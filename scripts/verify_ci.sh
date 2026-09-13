@@ -7,7 +7,7 @@ REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 
 usage() {
   cat <<'EOF'
-用法: sh scripts/verify_ci.sh [all|python|frontend|docker] [--skip-docker] [--install-playwright]
+用法: sh scripts/verify_ci.sh [all|python|frontend|docker|protected] [--skip-docker] [--install-playwright]
 
 依赖需要提前安装；脚本只执行检查，不自动安装 Python/npm 依赖。
 默认 all 会执行 Python、前端和 Docker 全部检查。
@@ -22,7 +22,7 @@ install_playwright=0
 
 for argument in "$@"; do
   case "$argument" in
-    all|python|frontend|docker)
+    all|python|frontend|docker|protected)
       mode=$argument
       ;;
     --skip-docker)
@@ -89,6 +89,12 @@ run_docker_checks() {
   docker build --file Dockerfile.frontend --tag indicator-lab-frontend:ci .
 }
 
+run_protected_docker_checks() {
+  printf '%s\n' '验证保护版 Docker：Nuitka 编译、产物源码扫描、最终镜像构建'
+  docker compose -f docker-compose.yml -f docker-compose.protected.yml config --quiet
+  docker build --file Dockerfile.protected --tag indicator-lab-protected:ci .
+}
+
 case "$mode" in
   python)
     run_python_checks
@@ -98,6 +104,9 @@ case "$mode" in
     ;;
   docker)
     run_docker_checks
+    ;;
+  protected)
+    run_protected_docker_checks
     ;;
   all)
     run_python_checks

@@ -8,6 +8,9 @@ __pycache__
 .coverage
 htmlcov
 *.egg-info
+dist
+build
+.nuitka-cache
 
 web-ui/node_modules
 web-ui/dist
@@ -17,5 +20,6 @@ web-ui/playwright-report
 
 data/vipdoc/*
 !data/vipdoc/.gitkeep
+data/market/*
 .DS_Store
 *.log

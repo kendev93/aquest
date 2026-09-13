@@ -35,6 +35,6 @@ def test_compose_defines_an_isolated_strategy_worker() -> None:
     assert "SELECTOR_DISCOVERY_WORKERS" in compose
     assert 'mem_limit: "${STRATEGY_WORKER_MEMORY_LIMIT:-0}"' in compose
     assert "healthcheck:" in compose
-    assert 'test: ["CMD", "python", "-c", "import os; os.kill(1, 0)"]' in compose
+    assert 'test: ["CMD-SHELL", "kill -0 1"]' in compose
     assert "SELECTOR_DISCOVERY_WORKERS=auto" in env_example
     assert "SELECTOR_DISCOVERY_MEMORY_BUDGET_MB=auto" in env_example

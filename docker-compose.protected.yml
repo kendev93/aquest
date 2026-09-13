@@ -1,0 +1,20 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.protected
+      args:
+        NUITKA_JOBS: "${NUITKA_JOBS:-4}"
+        NUITKA_LTO: "${NUITKA_LTO:-auto}"
+        NUITKA_REPRODUCIBLE: "${NUITKA_REPRODUCIBLE:-auto}"
+    command: ["server", "--host", "0.0.0.0", "--port", "8123"]
+
+  strategy-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.protected
+      args:
+        NUITKA_JOBS: "${NUITKA_JOBS:-4}"
+        NUITKA_LTO: "${NUITKA_LTO:-auto}"
+        NUITKA_REPRODUCIBLE: "${NUITKA_REPRODUCIBLE:-auto}"
+    command: ["worker"]

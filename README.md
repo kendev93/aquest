@@ -95,6 +95,24 @@ docker compose up --build -d
 
 这样克隆项目后即可直接启动页面和 API。Docker 会自动创建 `indicator_lab_vipdoc`（原始输入）和 `indicator_lab_market`（DuckDB 主库）两个持久化卷。旧版本 DuckDB 会在打开时先创建备份再自动迁移 schema，不会删除历史行情；如果还没有导入行情，页面仍然可以打开，但扫描和回测结果会为空。
 
+### 保护版发布镜像
+
+开发镜像会保留 Python 源码，适合本地调试；对外分发时使用 Nuitka 保护版构建。构建阶段会编译 backend 和 `strategy-worker`，最终运行阶段只复制 standalone bundle，不复制 `selector_app` 源码：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.protected.yml build
+docker compose -f docker-compose.yml -f docker-compose.protected.yml up -d
+```
+
+也可以在宿主机生成 standalone bundle：
+
+```bash
+python3 -m pip install -r requirements.lock -r requirements-build.txt
+python3 scripts/build_nuitka.py --jobs 4
+```
+
+保护版默认使用文件夹模式，避免大型 NumPy/Pandas 依赖每次启动都解包；`NUITKA_JOBS`、`NUITKA_LTO` 和 `NUITKA_REPRODUCIBLE` 可在构建时覆盖。发布前运行 `sh scripts/verify_ci.sh protected`，它会检查 Compose 配置、编译产物和最终镜像。Nuitka 只能提高本地逆向门槛，不能对完全控制运行机器的用户提供绝对源码保密；需要强保护时应将核心策略计算放在你的远程服务。
+
 如果本机已经安装通达信，推荐直接共享桌面端的 `vipdoc` 目录，而不是复制一份：
 
 ```bash
