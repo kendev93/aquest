@@ -30,3 +30,5 @@ data/vipdoc/*
 .env
 .env.*
 !.env.example
+
+.claude/work-summary-state.json

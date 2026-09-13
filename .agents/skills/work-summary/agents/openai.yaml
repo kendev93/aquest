@@ -1,0 +1,6 @@
+interface:
+  display_name: "Work Summary"
+  short_description: "按 Git 提交生成增量中文工作总结"
+  default_prompt: "使用 $work-summary 生成本次项目的增量工作总结。"
+policy:
+  allow_implicit_invocation: true
