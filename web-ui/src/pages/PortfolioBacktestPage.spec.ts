@@ -280,6 +280,7 @@ describe('PortfolioBacktestPage', () => {
       rebalance_frequency: 'weekly',
       buy_rule: {
         signals: [],
+        required_conditions: [{ left_value: 'indicator_three.varo6', operator: 'gte', right_value: null, right_constant: 20 }],
         conditions: [{ left_value: 'indicator_three.var1', operator: 'gt', right_value: null, right_constant: 60 }],
         combine_mode: 'all',
         minimum_matches: null,
@@ -333,6 +334,9 @@ describe('PortfolioBacktestPage', () => {
     expect(portfolioApi.createPortfolioBacktest).toHaveBeenCalledWith(expect.objectContaining({
       ranking_value: 'indicator_three.varo7',
       max_positions: 3,
+      buy_rule: expect.objectContaining({
+        required_conditions: [expect.objectContaining({ left_value: 'indicator_three.varo6', right_constant: 20 })],
+      }),
       stop_loss_mode: 'atr',
       stop_loss_pct: null,
       stop_loss_atr_multiplier: 2,

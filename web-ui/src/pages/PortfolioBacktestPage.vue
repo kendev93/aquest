@@ -340,7 +340,7 @@ function validate(): Record<string, string> {
   if (!Number.isFinite(form.maxPositions) || !Number.isInteger(form.maxPositions) || form.maxPositions < 1 || form.maxPositions > 100) {
     next.maxPositions = '持仓槽位必须是 1 到 100 的整数。'
   }
-  if (!sellRule.signals.length && !sellRule.conditions.length && !form.stopLossEnabled && !form.takeProfitEnabled && !form.trailingStopEnabled) {
+  if (!sellRule.signals.length && !sellRule.conditions.length && !sellRule.required_conditions?.length && !form.stopLossEnabled && !form.takeProfitEnabled && !form.trailingStopEnabled) {
     next.sellRules = '至少配置一个卖出规则。'
   }
   const riskFields: Array<{
@@ -411,7 +411,7 @@ function buildPayload(): PortfolioBacktestPayload {
     compare_left_value: null,
     compare_operator: null,
     compare_right_value: null,
-    sell_rule: sellRule.signals.length || sellRule.conditions.length ? sellRule : null,
+    sell_rule: sellRule.signals.length || sellRule.conditions.length || sellRule.required_conditions?.length ? sellRule : null,
     start_date: form.startDate || null,
     end_date: form.endDate || null,
     initial_cash: form.initialCash,
@@ -443,8 +443,7 @@ function enumValue<T extends string>(value: unknown, allowed: readonly T[], fall
 function storedRule(value: unknown): RuleGroupPayload | null {
   if (!value || typeof value !== 'object') return null
   const raw = value as Record<string, unknown>
-  const rawConditions = Array.isArray(raw.conditions) ? raw.conditions : []
-  const conditions = rawConditions.flatMap((item) => {
+  const parseConditions = (rawConditions: unknown): ScreenCondition[] => (Array.isArray(rawConditions) ? rawConditions : []).flatMap((item) => {
     if (!item || typeof item !== 'object') return []
     const condition = item as Record<string, unknown>
     const leftValue = typeof condition.left_value === 'string' ? condition.left_value.trim() : ''
@@ -458,15 +457,25 @@ function storedRule(value: unknown): RuleGroupPayload | null {
     if (!leftValue || (rightValue === null && rightConstant === null) || (rightValue !== null && rightConstant !== null)) return []
     return [{ left_value: leftValue, operator, right_value: rightValue, right_constant: rightConstant }]
   })
+  const conditions = parseConditions(raw.conditions)
+  const requiredConditions = parseConditions(raw.required_conditions)
   const signals = Array.isArray(raw.signals)
     ? raw.signals.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
     : []
-  if (!signals.length && !conditions.length) return null
-  const combineMode = enumValue(raw.combine_mode, ['all', 'any', 'at_least'] as const, 'all')
+  if (!signals.length && !conditions.length && !requiredConditions.length) return null
+  const generatedCount = signals.length + conditions.length
+  const requestedCombineMode = enumValue(raw.combine_mode, ['all', 'any', 'at_least'] as const, 'all')
+  const combineMode = generatedCount < 2 ? 'all' : requestedCombineMode
   const minimumMatches = combineMode === 'at_least'
-    ? Math.min(Math.max(Math.trunc(finiteNumber(raw.minimum_matches, 1)), 1), signals.length + conditions.length)
+    ? Math.min(Math.max(Math.trunc(finiteNumber(raw.minimum_matches, 1)), 1), generatedCount)
     : null
-  return { signals, conditions, combine_mode: combineMode, minimum_matches: minimumMatches }
+  return {
+    signals,
+    conditions,
+    required_conditions: requiredConditions,
+    combine_mode: combineMode,
+    minimum_matches: minimumMatches,
+  }
 }
 
 function applyStoredCandidate(raw: unknown): void {

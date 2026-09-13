@@ -48,6 +48,7 @@ function cloneRule(rule: RuleGroupPayload): RuleGroupPayload {
   return {
     signals: [],
     conditions: rule.conditions.map(cloneCondition),
+    required_conditions: (rule.required_conditions ?? []).map(cloneCondition),
     combine_mode: props.fixed ? 'all' : rule.combine_mode,
     minimum_matches: props.fixed ? null : rule.minimum_matches,
   }

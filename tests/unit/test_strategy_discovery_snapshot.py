@@ -17,6 +17,8 @@ from selector_app.screening.rules import RuleGroup
 from selector_app.strategy_discovery.models import DiscoveryRequest, StrategyCandidate
 from selector_app.strategy_discovery.snapshot import (
     SNAPSHOT_SYMBOL_BATCH_SIZE,
+    DiscoverySnapshot,
+    _ArrayFormulaResult,
     _iter_ref_batches,
     build_discovery_snapshot,
     snapshot_window,
@@ -124,6 +126,58 @@ def test_snapshot_window_uses_all_discovery_split_boundaries(tmp_path: Path) -> 
 
     assert window.start == date(2024, 1, 1)
     assert window.end == date(2024, 3, 20)
+
+
+def test_required_mask_keeps_required_conditions_and_ors_generated_conditions() -> None:
+    required = ScreenCondition(
+        left_value="technical.ma5",
+        operator="gt",
+        right_constant=10.0,
+    )
+    generated_one = ScreenCondition(
+        left_value="technical.ma20",
+        operator="gt",
+        right_constant=20.0,
+    )
+    generated_two = ScreenCondition(
+        left_value="technical.ma20",
+        operator="lt",
+        right_constant=5.0,
+    )
+    rule = RuleGroup(
+        conditions=(generated_one, generated_two),
+        combine_mode="any",
+        required_conditions=(required,),
+    )
+    results = {
+        "technical": _ArrayFormulaResult(
+            values={
+                "ma5": np.asarray([9.0, 11.0, 9.0, 11.0]),
+                "ma20": np.asarray([10.0, 21.0, 10.0, 4.0]),
+            },
+            signals={},
+        )
+    }
+
+    mask = DiscoverySnapshot._candidate_mask(
+        object(),
+        rule,
+        (required,),
+        np.asarray([True, True, False, True]),
+        results,
+    )
+
+    assert mask.tolist() == [False, True, False, True]
+
+    refined_mask = DiscoverySnapshot._candidate_mask(
+        object(),
+        rule,
+        (),
+        np.ones(4, dtype=bool),
+        results,
+    )
+
+    assert refined_mask.tolist() == [False, True, False, True]
 
 
 def test_snapshot_replay_matches_ordinary_portfolio_backtest(tmp_path: Path) -> None:

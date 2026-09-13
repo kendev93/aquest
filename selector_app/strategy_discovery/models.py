@@ -30,6 +30,9 @@ def rule_to_dict(rule: RuleGroup | None) -> dict[str, object] | None:
     return {
         "signals": list(rule.signals),
         "conditions": [_condition_to_dict(condition) for condition in rule.conditions],
+        "required_conditions": [
+            _condition_to_dict(condition) for condition in rule.required_conditions
+        ],
         "combine_mode": rule.combine_mode,
         "minimum_matches": rule.minimum_matches,
     }
@@ -48,11 +51,23 @@ def _normalize_rule(rule: RuleGroup) -> RuleGroup:
             ),
         )
     )
+    required_conditions = tuple(
+        sorted(
+            rule.required_conditions,
+            key=lambda item: (
+                item.left_value,
+                item.operator,
+                item.right_value or "",
+                str(item.right_constant),
+            ),
+        )
+    )
     return RuleGroup(
         signals=signals,
         conditions=conditions,
         combine_mode=rule.combine_mode,
         minimum_matches=rule.minimum_matches,
+        required_conditions=required_conditions,
     )
 
 
@@ -342,18 +357,27 @@ def _human_readable(candidate: StrategyCandidate) -> str:
     }
 
     def describe(rule: RuleGroup) -> str:
-        parts = [catalog.display_name(signal) for signal in rule.signals]
-        for condition in rule.conditions:
+        def condition_text(condition: ScreenCondition) -> str:
             right = (
                 catalog.display_name(condition.right_value)
                 if condition.right_value is not None
                 else condition.right_constant
             )
-            parts.append(
+            return (
                 f"{catalog.display_name(condition.left_value)} "
                 f"{operator_labels.get(condition.operator, condition.operator)} {right}"
             )
-        return f" {rule.combine_mode.upper()} ".join(parts) if parts else "无"
+
+        required_parts = [condition_text(condition) for condition in rule.required_conditions]
+        generated_parts = [catalog.display_name(signal) for signal in rule.signals]
+        generated_parts.extend(condition_text(condition) for condition in rule.conditions)
+        required_text = " AND ".join(required_parts)
+        generated_text = (
+            f" {rule.combine_mode.upper()} ".join(generated_parts) if generated_parts else ""
+        )
+        if required_text and generated_text:
+            return f"{required_text} AND ({generated_text})"
+        return required_text or generated_text or "无"
 
     def risk_text(
         label: str,

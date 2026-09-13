@@ -155,22 +155,22 @@ def _rule(
         conditions.append(_condition(request, rng, indicators))
     if not selected_signals and not conditions and not required:
         conditions.append(_condition(request, rng, indicators))
-    item_count = len(required) + len(selected_signals) + len(conditions)
+    generated_count = len(selected_signals) + len(conditions)
+    combinable_count = generated_count
     combine_mode = (
-        "all"
-        if required
-        else "all"
-        if item_count < 2
-        else str(_choice(rng, ("all", "any", "at_least"), "all"))
+        "all" if combinable_count < 2 else str(_choice(rng, ("all", "any", "at_least"), "all"))
     )
     minimum_matches = (
-        _int_choice(rng, tuple(range(1, item_count + 1)), 1) if combine_mode == "at_least" else None
+        _int_choice(rng, tuple(range(1, combinable_count + 1)), 1)
+        if combine_mode == "at_least"
+        else None
     )
     return RuleGroup(
         signals=tuple(selected_signals),
-        conditions=(*required, *conditions),
+        conditions=tuple(conditions),
         combine_mode=combine_mode,
         minimum_matches=minimum_matches,
+        required_conditions=required,
     )
 
 
@@ -256,8 +256,10 @@ def build_random_candidate(
         complexity=(
             len(buy_rule.signals)
             + len(buy_rule.conditions)
+            + len(buy_rule.required_conditions)
             + len(sell_rule.signals)
             + len(sell_rule.conditions)
+            + len(sell_rule.required_conditions)
             + sum(
                 1
                 for prefix in ("take_profit", "stop_loss", "trailing_stop")

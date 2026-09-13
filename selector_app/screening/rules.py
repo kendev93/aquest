@@ -18,12 +18,14 @@ class RuleGroup:
     conditions: tuple[ScreenCondition, ...] = ()
     combine_mode: RuleCombineMode | str = "all"
     minimum_matches: int | None = None
+    required_conditions: tuple[ScreenCondition, ...] = ()
 
     def __post_init__(self) -> None:
         signals = tuple(signal.strip() for signal in self.signals if signal.strip())
         conditions = tuple(self.conditions)
+        required_conditions = tuple(self.required_conditions)
         count = len(signals) + len(conditions)
-        if count == 0:
+        if count == 0 and not required_conditions:
             raise ValueError("交易规则至少需要一个信号或指标条件")
         if self.combine_mode not in {"all", "any", "at_least"}:
             raise ValueError("不支持的交易规则组合方式")
@@ -34,3 +36,4 @@ class RuleGroup:
             raise ValueError("all/any 交易规则不应设置 minimum_matches")
         object.__setattr__(self, "signals", signals)
         object.__setattr__(self, "conditions", conditions)
+        object.__setattr__(self, "required_conditions", required_conditions)

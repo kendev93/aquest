@@ -11,6 +11,7 @@ import pytest
 
 from selector_app.screening.models import ScreenCondition
 from selector_app.screening.rules import RuleGroup
+from selector_app.strategy_discovery import candidates as candidates_module
 from selector_app.strategy_discovery import search as search_module
 from selector_app.strategy_discovery.candidates import (
     build_random_candidate,
@@ -107,12 +108,70 @@ def test_candidate_generator_includes_required_conditions_and_limits_auto_items(
     candidates = [build_random_candidate(request, random.Random(seed)) for seed in range(20)]
 
     for candidate in candidates:
-        assert required_buy in candidate.buy_rule.conditions
-        assert required_sell in candidate.sell_rule.conditions
-        assert len(candidate.buy_rule.conditions) + len(candidate.buy_rule.signals) <= 2
-        assert len(candidate.sell_rule.conditions) + len(candidate.sell_rule.signals) <= 2
-        assert candidate.buy_rule.combine_mode == "all"
-        assert candidate.sell_rule.combine_mode == "all"
+        assert required_buy in candidate.buy_rule.required_conditions
+        assert required_sell in candidate.sell_rule.required_conditions
+        assert (
+            len(candidate.buy_rule.conditions)
+            + len(candidate.buy_rule.required_conditions)
+            + len(candidate.buy_rule.signals)
+            <= 2
+        )
+        assert (
+            len(candidate.sell_rule.conditions)
+            + len(candidate.sell_rule.required_conditions)
+            + len(candidate.sell_rule.signals)
+            <= 2
+        )
+
+
+def test_required_conditions_allow_or_for_generated_conditions() -> None:
+    required = ScreenCondition(
+        left_value="technical.ma5",
+        operator="gt",
+        right_constant=10.0,
+    )
+
+    class MaxChoice:
+        def __init__(self):
+            self.condition_count = 0
+
+        def choice(self, values):
+            options = list(values)
+            if "any" in options:
+                return "any"
+            if options == ["technical.ma5", "technical.ma20"]:
+                choice = options[self.condition_count % len(options)]
+                self.condition_count += 1
+                return choice
+            return options[-1]
+
+    rule = candidates_module._rule(
+        DiscoveryRequest(
+            base_config={"max_positions": 3},
+            indicator_ids=("technical.ma5", "technical.ma20"),
+            signal_ids=(),
+            max_conditions_per_side=3,
+        ),
+        MaxChoice(),
+        ("technical.ma5", "technical.ma20"),
+        (),
+        (required,),
+    )
+
+    assert rule.combine_mode == "any"
+    assert rule.required_conditions == (required,)
+    assert required not in rule.conditions
+    assert len(rule.conditions) == 2
+    PortfolioBacktestRequest.model_validate(
+        StrategyCandidate(
+            buy_rule=rule,
+            sell_rule=rule,
+            ranking_value="technical.ma5",
+            rank_order="desc",
+            max_positions=3,
+            base_config={"universe": "all", "max_positions": 3},
+        ).to_config()
+    )
 
 
 def test_candidate_hash_is_stable_for_mapping_order() -> None:

@@ -137,6 +137,9 @@ def evaluate_rule_group(
 ) -> np.ndarray:
     """Evaluate signal and numeric conditions into one causal history mask."""
 
+    required_masks = [
+        _condition_mask(condition, formula_results) for condition in rule.required_conditions
+    ]
     masks: list[np.ndarray] = []
     for signal_id in rule.signals:
         if custom:
@@ -151,7 +154,13 @@ def evaluate_rule_group(
         except KeyError as exc:
             raise ValueError(f"找不到信号输出: {signal_id}") from exc
     masks.extend(_condition_mask(condition, formula_results) for condition in rule.conditions)
-    return combine_masks(masks, rule.combine_mode, rule.minimum_matches)
+    if not required_masks:
+        return combine_masks(masks, rule.combine_mode, rule.minimum_matches)
+    required = combine_masks(required_masks, "all", None)
+    if not masks:
+        return required
+    generated = combine_masks(masks, rule.combine_mode, rule.minimum_matches)
+    return np.asarray(required & generated, dtype=bool)
 
 
 def _condition_formula_results(

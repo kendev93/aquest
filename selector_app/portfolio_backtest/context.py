@@ -115,7 +115,7 @@ class PortfolioContextMixin(_PortfolioServiceState):
         for rule in (config.buy_rule, config.sell_rule):
             if rule is None:
                 continue
-            for condition in rule.conditions:
+            for condition in (*rule.required_conditions, *rule.conditions):
                 values.append(condition.left_value)
                 if condition.right_value is not None:
                     values.append(condition.right_value)

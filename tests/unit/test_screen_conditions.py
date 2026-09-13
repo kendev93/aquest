@@ -9,8 +9,10 @@ from pydantic import ValidationError
 
 from selector_app.adapters.local_day_adapter import StockRef
 from selector_app.formulas.registry import FORMULA_REGISTRY
-from selector_app.screening.engine import ScreenEngine
+from selector_app.formulas.types import FormulaResult
+from selector_app.screening.engine import ScreenEngine, evaluate_rule_group
 from selector_app.screening.models import ScanConfig, ScreenCondition
+from selector_app.screening.rules import RuleGroup
 from selector_app.web.schemas import FormulaScreenRequest
 
 
@@ -109,6 +111,47 @@ def test_engine_evaluates_crossing_conditions(
     assert report.errors == 0
     assert report.total_signals == 1
     assert report.results[0].matched_signals == ("condition_1",)
+
+
+def test_rule_group_ands_required_conditions_with_or_generated_conditions() -> None:
+    required = ScreenCondition(
+        left_value="technical.ma5",
+        operator="gt",
+        right_constant=10.0,
+    )
+    generated_one = ScreenCondition(
+        left_value="technical.ma20",
+        operator="gt",
+        right_constant=20.0,
+    )
+    generated_two = ScreenCondition(
+        left_value="technical.ma20",
+        operator="lt",
+        right_constant=5.0,
+    )
+    rule = RuleGroup(
+        conditions=(generated_one, generated_two),
+        combine_mode="any",
+        required_conditions=(required,),
+    )
+    formula_results = {
+        "technical": FormulaResult.build(
+            formula_id="technical",
+            display_name="technical",
+            minimum_bars=1,
+            recommended_bars=1,
+            data_length=4,
+            values={
+                "ma5": [11.0, 9.0, 11.0, 11.0],
+                "ma20": [21.0, 21.0, 4.0, 4.0],
+            },
+            signals={},
+        )
+    }
+
+    mask = evaluate_rule_group(rule, formula_results, FORMULA_REGISTRY)
+
+    assert mask.tolist() == [True, False, True, True]
 
 
 def test_formula_screen_request_accepts_conditions_without_selected_signals() -> None:

@@ -369,20 +369,38 @@ class DiscoverySnapshot:
         formula_results: Mapping[str, _ArrayFormulaResult],
     ) -> np.ndarray:
         cast_results = cast(Mapping[str, FormulaResult], formula_results)
-        if not required_conditions:
+        if not required_conditions and not rule.required_conditions:
             return evaluate_rule_group(rule, cast_results, FORMULA_REGISTRY)
-        required_set = set(required_conditions)
-        if not required_set.issubset(set(rule.conditions)):
-            raise ValueError("候选规则缺少用户设置的必选条件")
-        auto_conditions = tuple(
-            condition for condition in rule.conditions if condition not in required_set
-        )
+        if rule.required_conditions:
+            if required_conditions and set(rule.required_conditions) != set(required_conditions):
+                raise ValueError("候选规则缺少用户设置的必选条件")
+            if required_conditions:
+                effective_required_mask = required_mask
+            else:
+                required_rule = RuleGroup(
+                    conditions=rule.required_conditions,
+                    combine_mode="all",
+                )
+                effective_required_mask = np.asarray(
+                    evaluate_rule_group(required_rule, cast_results, FORMULA_REGISTRY),
+                    dtype=bool,
+                )
+            auto_conditions = tuple(rule.conditions)
+        else:
+            required_set = set(required_conditions)
+            if not required_set.issubset(set(rule.conditions)):
+                raise ValueError("候选规则缺少用户设置的必选条件")
+            auto_conditions = tuple(
+                condition for condition in rule.conditions if condition not in required_set
+            )
+            effective_required_mask = required_mask
         if not rule.signals and not auto_conditions:
-            return np.asarray(required_mask, dtype=bool)
+            return np.asarray(effective_required_mask, dtype=bool)
         auto_rule = RuleGroup(
             signals=rule.signals,
             conditions=auto_conditions,
-            combine_mode="all",
+            combine_mode=rule.combine_mode,
+            minimum_matches=rule.minimum_matches,
         )
         auto_mask = np.asarray(
             evaluate_rule_group(
@@ -392,7 +410,7 @@ class DiscoverySnapshot:
             ),
             dtype=bool,
         )
-        combined = np.asarray(required_mask, dtype=bool) & auto_mask
+        combined = np.asarray(effective_required_mask, dtype=bool) & auto_mask
         return cast(np.ndarray, combined)
 
     def _formula_results(
@@ -812,7 +830,7 @@ def _value_ids(config: PortfolioBacktestConfig) -> tuple[str, ...]:
     for rule in (config.buy_rule, config.sell_rule):
         if rule is None:
             continue
-        for condition in rule.conditions:
+        for condition in (*rule.required_conditions, *rule.conditions):
             values.append(condition.left_value)
             if condition.right_value is not None:
                 values.append(condition.right_value)

@@ -58,6 +58,33 @@ def test_portfolio_request_accepts_condition_only_buy_and_sell_groups() -> None:
     assert config.sell_rule is not None
 
 
+def test_portfolio_request_preserves_required_conditions_for_or_rules() -> None:
+    request = PortfolioBacktestRequest.model_validate(
+        {
+            "ranking_value": "technical.ma5",
+            "buy_rule": {
+                "required_conditions": [
+                    condition("technical.ma5", "gt", right_constant=10),
+                ],
+                "conditions": [
+                    condition("technical.ma20", "gt", right_constant=20),
+                    condition("technical.ma20", "lt", right_constant=5),
+                ],
+                "combine_mode": "any",
+            },
+            "sell_rule": {
+                "conditions": [condition("technical.ma5", "lt", right_constant=5)],
+            },
+        }
+    )
+
+    config = request.to_config()
+
+    assert config.buy_rule is not None
+    assert config.buy_rule.required_conditions[0].right_constant == 10
+    assert config.buy_rule.combine_mode == "any"
+
+
 def test_portfolio_request_supports_atr_and_trailing_risk_controls() -> None:
     request = PortfolioBacktestRequest.model_validate(
         {

@@ -201,6 +201,7 @@ class RuleGroupRequest(BaseModel):
 
     signals: list[str] = Field(default_factory=list, max_length=32)
     conditions: list[ScreenConditionRequest] = Field(default_factory=list, max_length=32)
+    required_conditions: list[ScreenConditionRequest] = Field(default_factory=list, max_length=32)
     combine_mode: Literal["all", "any", "at_least"] = "all"
     minimum_matches: int | None = Field(default=None, ge=1, le=64)
 
@@ -208,7 +209,7 @@ class RuleGroupRequest(BaseModel):
     def validate_group(self) -> RuleGroupRequest:
         signals = [signal.strip() for signal in self.signals]
         object.__setattr__(self, "signals", signals)
-        if not signals and not self.conditions:
+        if not signals and not self.conditions and not self.required_conditions:
             raise ValueError("交易规则至少需要一个信号或指标条件")
         if any(not signal for signal in signals):
             raise ValueError("交易规则信号不能为空")
@@ -221,7 +222,7 @@ class RuleGroupRequest(BaseModel):
                 condition.right_value,
                 condition.right_constant,
             )
-            for condition in self.conditions
+            for condition in (*self.required_conditions, *self.conditions)
         ]
         if len(set(condition_keys)) != len(condition_keys):
             raise ValueError("交易规则指标条件不能重复")
@@ -239,6 +240,9 @@ class RuleGroupRequest(BaseModel):
             conditions=tuple(condition.to_model() for condition in self.conditions),
             combine_mode=self.combine_mode,
             minimum_matches=self.minimum_matches,
+            required_conditions=tuple(
+                condition.to_model() for condition in self.required_conditions
+            ),
         )
 
 
@@ -404,7 +408,9 @@ class BacktestRequest(BaseModel):
             self.formula_parameters,
         )
         conditions = [
+            *(self.buy_rule.required_conditions if self.buy_rule is not None else []),
             *(self.buy_rule.conditions if self.buy_rule is not None else []),
+            *(self.sell_rule.required_conditions if self.sell_rule is not None else []),
             *(self.sell_rule.conditions if self.sell_rule is not None else []),
         ]
         if conditions:
@@ -512,7 +518,9 @@ class PortfolioBacktestRequest(BaseModel):
         validate_formula_signals(self.formula_text, signal_ids, self.formula_parameters)
         validate_instrument_scope(self.universe, self.instrument_types, self.boards)
         conditions = [
+            *(self.buy_rule.required_conditions if self.buy_rule is not None else []),
             *(self.buy_rule.conditions if self.buy_rule is not None else []),
+            *(self.sell_rule.required_conditions if self.sell_rule is not None else []),
             *(self.sell_rule.conditions if self.sell_rule is not None else []),
         ]
         validate_formula_values(

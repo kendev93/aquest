@@ -71,6 +71,53 @@ def test_refined_candidate_mutates_parent_within_medium_neighborhood() -> None:
     assert refined.max_positions in {1, 2, 3, 4, 5}
 
 
+def test_refinement_keeps_required_conditions_outside_mutable_rule_group() -> None:
+    request = _request()
+    required_buy = ScreenCondition(
+        left_value="technical.ma20",
+        operator="gte",
+        right_constant=15.0,
+    )
+    required_sell = ScreenCondition(
+        left_value="technical.rsi14",
+        operator="lt",
+        right_constant=80.0,
+    )
+    parent = StrategyCandidate(
+        buy_rule=RuleGroup(
+            conditions=(
+                ScreenCondition(
+                    left_value="technical.ma5",
+                    operator="gt",
+                    right_value="technical.ma20",
+                ),
+            ),
+            required_conditions=(required_buy,),
+        ),
+        sell_rule=RuleGroup(
+            conditions=(
+                ScreenCondition(
+                    left_value="technical.rsi14",
+                    operator="gte",
+                    right_constant=70.0,
+                ),
+            ),
+            required_conditions=(required_sell,),
+        ),
+        ranking_value="technical.ma5",
+        rank_order="desc",
+        max_positions=3,
+        base_config=request.base_config,
+    )
+
+    refined = build_refined_candidate(parent, request, random.Random(7), radius="medium")
+
+    assert refined.buy_rule.required_conditions == (required_buy,)
+    assert refined.sell_rule.required_conditions == (required_sell,)
+    assert len(refined.buy_rule.required_conditions) + len(refined.buy_rule.conditions) <= 3
+    assert len(refined.sell_rule.required_conditions) + len(refined.sell_rule.conditions) <= 3
+
+
 def test_refinement_candidate_keeps_parent_when_requested_as_anchor() -> None:
     request = _request()
     parent = build_random_candidate(request, random.Random(3))

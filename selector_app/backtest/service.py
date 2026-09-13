@@ -172,7 +172,7 @@ class BacktestService:
                 value_id
                 for rule in rules
                 if rule
-                for condition in rule.conditions
+                for condition in (*rule.required_conditions, *rule.conditions)
                 for value_id in (condition.left_value, condition.right_value)
                 if value_id is not None
             )

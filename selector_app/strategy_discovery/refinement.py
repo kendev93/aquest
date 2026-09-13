@@ -94,16 +94,28 @@ def _condition_from_dict(value: object) -> ScreenCondition | None:
     )
 
 
+def _condition_list(value: object) -> tuple[ScreenCondition, ...]:
+    if not isinstance(value, (list, tuple)):
+        return ()
+    return tuple(
+        condition
+        for condition in (_condition_from_dict(item) for item in value)
+        if condition is not None
+    )
+
+
 def rule_from_dict(value: object) -> RuleGroup:
     if not isinstance(value, Mapping):
         raise ValueError("父候选缺少有效交易规则")
-    signals = tuple(str(item).strip() for item in value.get("signals", ()) if str(item).strip())
-    conditions = tuple(
-        condition
-        for condition in (_condition_from_dict(item) for item in value.get("conditions", ()))
-        if condition is not None
+    raw_signals = value.get("signals", ())
+    signals = (
+        tuple(str(item).strip() for item in raw_signals if str(item).strip())
+        if isinstance(raw_signals, (list, tuple))
+        else ()
     )
-    if not signals and not conditions:
+    conditions = _condition_list(value.get("conditions", ()))
+    required_conditions = _condition_list(value.get("required_conditions", ()))
+    if not signals and not conditions and not required_conditions:
         raise ValueError("父候选交易规则不能为空")
     combine_mode = str(value.get("combine_mode") or "all")
     minimum_matches = value.get("minimum_matches")
@@ -112,6 +124,7 @@ def rule_from_dict(value: object) -> RuleGroup:
         conditions=conditions,
         combine_mode=combine_mode,
         minimum_matches=(_as_int(minimum_matches, 1) if minimum_matches is not None else None),
+        required_conditions=required_conditions,
     )
 
 
@@ -200,7 +213,7 @@ def _mutate_rule(
     force_change: bool,
 ) -> RuleGroup:
     rows = _items(rule)
-    max_items = max(1, request.max_conditions_per_side)
+    max_items = max(0, request.max_conditions_per_side - len(rule.required_conditions))
     operation_count = _as_int(_choice(rng, (1, 2), 1), 1) if force_change else 0
     changed = False
     for _ in range(operation_count):
@@ -221,17 +234,19 @@ def _mutate_rule(
             index = _as_int(_choice(rng, tuple(range(len(rows))), 0), 0)
             rows[index] = _new_item(request, rng)
             changed = True
-    if force_change and not changed:
+    if force_change and not changed and rows:
         index = 0
         rows[index] = _new_item(request, rng)
     signals = tuple(str(value) for kind, value in rows if kind == "signal")
     conditions = tuple(
         value for kind, value in rows if kind == "condition" and isinstance(value, ScreenCondition)
     )
-    if not signals and not conditions:
+    if not signals and not conditions and not rule.required_conditions:
         conditions = (_condition(request, rng, tuple(request.indicator_ids)),)
     count = len(signals) + len(conditions)
-    combine_mode = str(_choice(rng, ("all", "any", "at_least"), rule.combine_mode))
+    combine_mode = (
+        "all" if count < 2 else str(_choice(rng, ("all", "any", "at_least"), rule.combine_mode))
+    )
     minimum_matches = (
         _as_int(_choice(rng, tuple(range(1, count + 1)), 1), 1)
         if combine_mode == "at_least"
@@ -242,6 +257,7 @@ def _mutate_rule(
         conditions=conditions,
         combine_mode=combine_mode,
         minimum_matches=minimum_matches,
+        required_conditions=rule.required_conditions,
     )
 
 

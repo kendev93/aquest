@@ -100,6 +100,7 @@ export interface ScreenCondition {
 export interface RuleGroupPayload {
   signals: string[]
   conditions: ScreenCondition[]
+  required_conditions?: ScreenCondition[]
   combine_mode: CombineMode
   minimum_matches: number | null
 }
