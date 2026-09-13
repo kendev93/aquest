@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import { fetchLocalChart } from '../api/marketData'
+import { fetchActiveJobs } from '../api/jobs'
 import MarketCandlestickChart from '../components/MarketCandlestickChart.vue'
 import { createJob, createSyncJob, fetchMetadata, fetchScreenHistory, FormulaScreenApiError, getJob, getResults, getScreenHistory, getSyncJob, parseFormula } from '../api/formulaScreen'
 import type { ConditionOperator, CustomFormulaMetadata, FormulaScreenMetadata, InstrumentBoard, InstrumentType, JobState, LocalMarketChart, MarketSyncJobState, ResultsMeta, SavedConditionSet, ScreenCondition, ScreenFormState, ScreenHistorySummary, ScreenResult, RuleMode, ValueDefinition } from '../types'
@@ -495,6 +496,20 @@ async function pollUntilFinished(jobId: string): Promise<void> {
   }
 }
 
+async function resumeActiveScreenJob(): Promise<void> {
+  try {
+    const active = (await fetchActiveJobs()).find((item) => item.description === '公式选股')
+    if (!active) return
+    job.value = active as unknown as JobState
+    loading.value = true
+    await pollUntilFinished(active.job_id)
+  } catch (error) {
+    message.value = apiMessage(error, '扫描任务恢复失败，请检查后端服务和本地行情')
+  } finally {
+    loading.value = false
+  }
+}
+
 async function syncMarketData(): Promise<void> {
   syncLoading.value = true
   message.value = ''
@@ -614,6 +629,7 @@ onMounted(async () => {
       await parseCustomFormula()
     }
     await refreshScreenHistory()
+    await resumeActiveScreenJob()
   } catch (error) {
     message.value = apiMessage(error, '公式元数据加载失败，请检查后端服务和网络后重试')
   }

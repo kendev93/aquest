@@ -1,11 +1,12 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { FormulaScreenMetadata, PortfolioBacktestResult } from '../types'
+import type { FormulaScreenMetadata, PortfolioBacktestJobState, PortfolioBacktestResult } from '../types'
 import PortfolioBacktestPage from './PortfolioBacktestPage.vue'
 
 import * as portfolioApi from '../api/portfolioBacktest'
 import * as formulaApi from '../api/formulaScreen'
+import * as jobsApi from '../api/jobs'
 import { FormulaScreenApiError } from '../api/formulaScreen'
 
 vi.mock('../api/formulaScreen', async () => {
@@ -24,6 +25,11 @@ vi.mock('../api/portfolioBacktest', async () => {
     getPortfolioBacktestHistory: vi.fn(),
     deletePortfolioBacktestHistory: vi.fn(),
   }
+})
+
+vi.mock('../api/jobs', async () => {
+  const actual = await vi.importActual<typeof import('../api/jobs')>('../api/jobs')
+  return { ...actual, fetchActiveJobs: vi.fn() }
 })
 
 const metadata: FormulaScreenMetadata = {
@@ -93,6 +99,32 @@ describe('PortfolioBacktestPage', () => {
     })
     vi.mocked(portfolioApi.getPortfolioBacktestResults).mockResolvedValue(result)
     vi.mocked(portfolioApi.fetchPortfolioBacktestHistory).mockResolvedValue([])
+    vi.mocked(jobsApi.fetchActiveJobs).mockResolvedValue([])
+  })
+
+  it('recovers and resumes a running portfolio backtest after the page is refreshed', async () => {
+    vi.mocked(jobsApi.fetchActiveJobs).mockResolvedValueOnce([{
+      job_id: 'portfolio-refresh', description: '组合回测', status: 'running', progress: 0.42,
+      total_candidates: 3, total_scanned: 1, errors: 0, error: null, result: null,
+    }])
+    let resolveStatus!: (state: PortfolioBacktestJobState) => void
+    vi.mocked(portfolioApi.getPortfolioBacktest).mockImplementationOnce(() => new Promise((resolve) => {
+      resolveStatus = resolve
+    }))
+
+    const wrapper = mount(PortfolioBacktestPage)
+    await flushPromises()
+
+    expect(jobsApi.fetchActiveJobs).toHaveBeenCalled()
+    expect(portfolioApi.getPortfolioBacktest).toHaveBeenCalledWith('portfolio-refresh')
+    expect(wrapper.get('[data-testid="portfolio-progress"]').text()).toContain('42%')
+
+    resolveStatus({
+      job_id: 'portfolio-refresh', status: 'completed', progress: 1, total_candidates: 3, total_scanned: 3,
+      errors: 0, error: null, result: null,
+    })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="portfolio-results"]').text()).toContain('12.00%')
   })
 
   it('submits ranked slot configuration and renders holdings, trades, and candidates', async () => {

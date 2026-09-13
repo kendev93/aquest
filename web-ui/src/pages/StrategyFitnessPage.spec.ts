@@ -1,11 +1,12 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { FormulaScreenMetadata, StrategyFitnessReport } from '../types'
+import type { FormulaScreenMetadata, StrategyFitnessJobState, StrategyFitnessReport } from '../types'
 import StrategyFitnessPage from './StrategyFitnessPage.vue'
 
 import * as fitnessApi from '../api/strategyFitness'
 import * as formulaApi from '../api/formulaScreen'
+import * as jobsApi from '../api/jobs'
 import { FormulaScreenApiError } from '../api/formulaScreen'
 
 vi.mock('../api/formulaScreen', async () => {
@@ -24,6 +25,11 @@ vi.mock('../api/strategyFitness', async () => {
     getStrategyFitnessHistory: vi.fn(),
     deleteStrategyFitnessHistory: vi.fn(),
   }
+})
+
+vi.mock('../api/jobs', async () => {
+  const actual = await vi.importActual<typeof import('../api/jobs')>('../api/jobs')
+  return { ...actual, fetchActiveJobs: vi.fn() }
 })
 
 const metadata: FormulaScreenMetadata = {
@@ -87,6 +93,32 @@ describe('StrategyFitnessPage', () => {
     })
     vi.mocked(fitnessApi.getStrategyFitnessResults).mockResolvedValue(report)
     vi.mocked(fitnessApi.fetchStrategyFitnessHistory).mockResolvedValue([])
+    vi.mocked(jobsApi.fetchActiveJobs).mockResolvedValue([])
+  })
+
+  it('recovers and resumes a running strategy fitness task after the page is refreshed', async () => {
+    vi.mocked(jobsApi.fetchActiveJobs).mockResolvedValueOnce([{
+      job_id: 'fitness-refresh', description: '策略适配性评估', status: 'running', progress: 0.42,
+      total_candidates: 2, total_scanned: 1, errors: 0, error: null, result: null,
+    }])
+    let resolveStatus!: (state: StrategyFitnessJobState) => void
+    vi.mocked(fitnessApi.getStrategyFitness).mockImplementationOnce(() => new Promise((resolve) => {
+      resolveStatus = resolve
+    }))
+
+    const wrapper = mount(StrategyFitnessPage)
+    await flushPromises()
+
+    expect(jobsApi.fetchActiveJobs).toHaveBeenCalled()
+    expect(fitnessApi.getStrategyFitness).toHaveBeenCalledWith('fitness-refresh')
+    expect(wrapper.get('[data-testid="fitness-progress"]').text()).toContain('42%')
+
+    resolveStatus({
+      job_id: 'fitness-refresh', status: 'completed', progress: 1, total_candidates: 2, total_scanned: 2,
+      errors: 0, error: null, result: null,
+    })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="fitness-results"]').text()).toContain('87.50')
   })
 
   it('submits the strategy and renders compatibility scores with three phases', async () => {

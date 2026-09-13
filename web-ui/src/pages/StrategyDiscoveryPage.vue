@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import { FormulaScreenApiError } from '../api/formulaScreen'
+import { fetchActiveJobs } from '../api/jobs'
 import {
   createStrategyDiscovery,
   createStrategyDiscoveryRefinement,
@@ -251,29 +252,46 @@ async function submit(): Promise<void> {
       error: null,
       result: null,
     }
-    for (;;) {
-      const state = await getStrategyDiscovery(created.job_id)
-      job.value = state
-      if (state.status === 'completed') {
-        result.value = await getStrategyDiscoveryResults(created.job_id)
-        message.value = `策略实验完成：夏普榜 ${result.value.results_by_sharpe.length} 组，收益榜 ${result.value.results_by_return.length} 组。`
-        await loadHistory()
-        return
-      }
-      if (state.status === 'failed') {
-        message.value = state.error ?? '策略实验任务失败，请检查配置和服务状态后重试。'
-        return
-      }
-      if (state.status === 'cancelled') {
-        message.value = state.error ?? '策略实验已取消。'
-        return
-      }
-      await new Promise((resolve) => window.setTimeout(resolve, 220))
-    }
+    await pollDiscoveryJob(created.job_id, 'discovery')
   } catch (error) {
     message.value = apiMessage(error)
   } finally {
     loading.value = false
+  }
+}
+
+type DiscoveryJobKind = 'discovery' | 'refinement'
+
+async function pollDiscoveryJob(jobId: string, kind: DiscoveryJobKind): Promise<void> {
+  for (;;) {
+    const state = await getStrategyDiscovery(jobId)
+    if (kind === 'refinement') refinementJob.value = state
+    else job.value = state
+    if (state.status === 'completed') {
+      result.value = await getStrategyDiscoveryResults(jobId)
+      if (kind === 'refinement') {
+        selectedCandidate.value = null
+        activeBoard.value = 'sharpe'
+        message.value = `二次优化完成：夏普榜 ${result.value.results_by_sharpe.length} 组，收益榜 ${result.value.results_by_return.length} 组${result.value.refinement?.data_changed ? '（行情已更新，已按最新本地行情重新优化）' : ''}。`
+      } else {
+        message.value = `策略实验完成：夏普榜 ${result.value.results_by_sharpe.length} 组，收益榜 ${result.value.results_by_return.length} 组。`
+      }
+      await loadHistory()
+      return
+    }
+    if (state.status === 'failed') {
+      message.value = kind === 'refinement'
+        ? state.error ?? '二次优化失败，请检查父候选和本地行情。'
+        : state.error ?? '策略实验任务失败，请检查配置和服务状态后重试。'
+      return
+    }
+    if (state.status === 'cancelled') {
+      message.value = kind === 'refinement'
+        ? state.error ?? '二次优化已取消。'
+        : state.error ?? '策略实验已取消。'
+      return
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 220))
   }
 }
 
@@ -301,31 +319,44 @@ async function startRefinement(candidate: StrategyDiscoveryCandidate): Promise<v
       error: null,
       result: null,
     }
-    for (;;) {
-      const state = await getStrategyDiscovery(created.job_id)
-      refinementJob.value = state
-      if (state.status === 'completed') {
-        result.value = await getStrategyDiscoveryResults(created.job_id)
-        selectedCandidate.value = null
-        activeBoard.value = 'sharpe'
-        message.value = `二次优化完成：夏普榜 ${result.value.results_by_sharpe.length} 组，收益榜 ${result.value.results_by_return.length} 组${result.value.refinement?.data_changed ? '（行情已更新，已按最新本地行情重新优化）' : ''}。`
-        await loadHistory()
-        return
-      }
-      if (state.status === 'failed') {
-        message.value = state.error ?? '二次优化失败，请检查父候选和本地行情。'
-        return
-      }
-      if (state.status === 'cancelled') {
-        message.value = state.error ?? '二次优化已取消。'
-        return
-      }
-      await new Promise((resolve) => window.setTimeout(resolve, 220))
-    }
+    await pollDiscoveryJob(created.job_id, 'refinement')
   } catch (error) {
     message.value = apiMessage(error)
   } finally {
     refinementLoading.value = false
+  }
+}
+
+async function resumeActiveDiscoveryJob(): Promise<void> {
+  try {
+    const activeJobs = await fetchActiveJobs()
+    const active = activeJobs.find((item) => (
+      item.description === '策略实验室' || item.description === '策略二次优化'
+    ))
+    if (active) {
+      const kind: DiscoveryJobKind = active.description === '策略二次优化'
+        ? 'refinement'
+        : 'discovery'
+      if (kind === 'refinement') {
+        refinementJob.value = active as unknown as StrategyDiscoveryJobState
+        refinementLoading.value = true
+      } else {
+        job.value = active as unknown as StrategyDiscoveryJobState
+        loading.value = true
+      }
+      await pollDiscoveryJob(active.job_id, kind)
+      return
+    }
+    const replay = activeJobs.find((item) => item.description === '策略前十全量复核')
+    if (replay) {
+      await resumeActiveReplay(replay as unknown as StrategyReplayJobState)
+    }
+  } catch (error) {
+    message.value = apiMessage(error)
+  } finally {
+    loading.value = false
+    refinementLoading.value = false
+    replayLoading.value = false
   }
 }
 
@@ -375,6 +406,34 @@ function replayCount(state: StrategyReplayJobState | null): number {
   return state?.total_scanned ?? 0
 }
 
+function replayTotal(state: StrategyReplayJobState | null): number {
+  const candidateCount = state?.metadata?.candidate_count
+  if (typeof candidateCount === 'number' && candidateCount > 0) return candidateCount
+  if (state?.total_candidates && state.total_candidates > 0) return state.total_candidates
+  return Math.min(10, boards.value.length)
+}
+
+async function pollReplayJob(jobId: string): Promise<void> {
+  for (;;) {
+    const state = await getStrategyReplay(jobId)
+    replayJob.value = state
+    if (state.status === 'completed') {
+      replayResult.value = await getStrategyReplayResults(jobId)
+      message.value = `全量复核完成：${replayResult.value.candidate_count} 个策略。`
+      return
+    }
+    if (state.status === 'failed') {
+      message.value = state.error ?? '策略复核失败，请检查本地行情和候选配置后重试。'
+      return
+    }
+    if (state.status === 'cancelled') {
+      message.value = state.error ?? '策略复核已取消。'
+      return
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 220))
+  }
+}
+
 async function startReplay(): Promise<void> {
   const id = experimentId.value
   if (!id || !boards.value.length || replayLoading.value) return
@@ -397,29 +456,22 @@ async function startReplay(): Promise<void> {
       phase: 'queued',
       metadata: {},
     }
-    for (;;) {
-      const state = await getStrategyReplay(created.job_id)
-      replayJob.value = state
-      if (state.status === 'completed') {
-        replayResult.value = await getStrategyReplayResults(created.job_id)
-        message.value = `全量复核完成：${replayResult.value.candidate_count} 个策略。`
-        return
-      }
-      if (state.status === 'failed') {
-        message.value = state.error ?? '策略复核失败，请检查本地行情和候选配置后重试。'
-        return
-      }
-      if (state.status === 'cancelled') {
-        message.value = state.error ?? '策略复核已取消。'
-        return
-      }
-      await new Promise((resolve) => window.setTimeout(resolve, 220))
-    }
+    await pollReplayJob(created.job_id)
   } catch (error) {
     message.value = replayApiMessage(error)
   } finally {
     replayLoading.value = false
   }
+}
+
+async function resumeActiveReplay(active: StrategyReplayJobState): Promise<void> {
+  const rawExperimentId = active.metadata?.experiment_id
+  if (typeof rawExperimentId === 'string' && rawExperimentId && !result.value) {
+    result.value = await getStrategyDiscoveryHistory(rawExperimentId)
+  }
+  replayJob.value = active
+  replayLoading.value = true
+  await pollReplayJob(active.job_id)
 }
 
 async function cancelReplay(): Promise<void> {
@@ -707,6 +759,7 @@ onMounted(async () => {
     message.value = apiMessage(error)
   }
   await loadHistory()
+  await resumeActiveDiscoveryJob()
 })
 </script>
 
@@ -795,7 +848,7 @@ onMounted(async () => {
               <button class="secondary-button replay-start-button" data-testid="strategy-discovery-replay" type="button" :disabled="replayLoading" @click="startReplay"><span v-if="replayLoading" class="spinner" aria-hidden="true"></span>{{ replayLoading ? '全量复核进行中…' : '一键回测当前榜单前十' }}</button>
               <button v-if="replayLoading" class="secondary-button" data-testid="strategy-discovery-replay-cancel" type="button" @click="cancelReplay">取消全量复核</button>
             </div>
-            <div v-if="replayJob" class="discovery-replay-progress" data-testid="strategy-discovery-replay-progress"><div class="discovery-progress-heading"><strong>{{ replayPhase(replayJob) }}</strong><span data-testid="strategy-discovery-replay-percent">{{ replayProgressPercent(replayJob) }}</span></div><div class="progress-track"><span :style="{ width: replayProgressPercent(replayJob) }"></span></div><div class="discovery-progress-stats"><span>已完成 {{ replayCount(replayJob) }} / 总数 {{ Math.min(10, boards.length) }}</span><span v-if="replayResult?.finished_at">完成于 {{ formatHistoryTimestamp(replayResult.finished_at) }}</span><span v-if="replayResult?.duration_seconds !== undefined">耗时 {{ formatHistoryDuration(replayResult.duration_seconds) }}</span></div><small v-if="replayJob.errors">有 {{ replayJob.errors }} 个候选未能完成复核，请展开诊断。</small></div>
+            <div v-if="replayJob" class="discovery-replay-progress" data-testid="strategy-discovery-replay-progress"><div class="discovery-progress-heading"><strong>{{ replayPhase(replayJob) }}</strong><span data-testid="strategy-discovery-replay-percent">{{ replayProgressPercent(replayJob) }}</span></div><div class="progress-track"><span :style="{ width: replayProgressPercent(replayJob) }"></span></div><div class="discovery-progress-stats"><span>已完成 {{ replayCount(replayJob) }} / 总数 {{ replayTotal(replayJob) }}</span><span v-if="replayResult?.finished_at">完成于 {{ formatHistoryTimestamp(replayResult.finished_at) }}</span><span v-if="replayResult?.duration_seconds !== undefined">耗时 {{ formatHistoryDuration(replayResult.duration_seconds) }}</span></div><small v-if="replayJob.errors">有 {{ replayJob.errors }} 个候选未能完成复核，请展开诊断。</small></div>
             <div v-if="!boards.length" class="inline-empty">没有满足当前约束的候选策略。</div>
             <div v-else class="table-wrap"><table><caption class="sr-only">策略候选排行榜</caption><thead><tr><th>#</th><th>策略配置</th><th>验证收益</th><th>验证夏普</th><th>验证回撤</th><th>留出收益</th><th>留出约束</th><th>操作</th></tr></thead><tbody><tr v-for="(candidate, index) in boards" :key="candidate.candidate_hash" :data-testid="`strategy-discovery-row-${candidate.candidate_hash}`"><td>{{ index + 1 }}</td><td><button class="table-link" type="button" @click="selectCandidate(candidate)">{{ candidate.human_readable_rules }}</button></td><td>{{ formatPercent(metric(candidate, 'validation', 'annual_return')) }}</td><td>{{ formatNumber(metric(candidate, 'validation', 'sharpe')) }}</td><td>{{ formatPercent(metric(candidate, 'validation', 'max_drawdown')) }}</td><td>{{ formatPercent(metric(candidate, 'holdout', 'annual_return')) }}</td><td :class="{ positive: holdoutStatus(candidate) === '通过', negative: holdoutStatus(candidate) === '未通过' }">{{ holdoutStatus(candidate) }}</td><td><button class="secondary-button" :data-testid="`strategy-discovery-apply-${candidate.candidate_hash}`" type="button" @click="applyCandidate(candidate)">应用</button><button class="secondary-button" :data-testid="`strategy-discovery-refine-${candidate.candidate_hash}`" type="button" :disabled="refinementLoading" @click="startRefinement(candidate)">{{ refinementLoading ? '优化中…' : '二次优化' }}</button></td></tr></tbody></table></div>
             <div v-if="selectedCandidate" class="discovery-detail" data-testid="strategy-discovery-detail"><div class="section-heading"><div><span class="section-kicker">CANDIDATE DETAIL</span><h3>策略配置</h3></div><div><button class="secondary-button" type="button" :disabled="refinementLoading" @click="startRefinement(selectedCandidate)">{{ refinementLoading ? '优化中…' : '二次优化' }}</button><button class="secondary-button" type="button" @click="selectedCandidate = null">关闭</button></div></div><p>{{ selectedCandidate.human_readable_rules }}</p><div class="metrics-strip"><div><span>验证收益</span><strong>{{ formatPercent(metric(selectedCandidate, 'validation', 'annual_return')) }}</strong></div><div><span>验证夏普</span><strong>{{ formatNumber(metric(selectedCandidate, 'validation', 'sharpe')) }}</strong></div><div><span>最终留出收益</span><strong>{{ formatPercent(metric(selectedCandidate, 'holdout', 'annual_return')) }}</strong></div><div><span>复杂度</span><strong>{{ selectedCandidate.complexity }}</strong></div></div><pre>{{ JSON.stringify(selectedCandidate.config, null, 2) }}</pre></div>

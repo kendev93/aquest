@@ -82,6 +82,25 @@ def _unique_behaviors(
     return result
 
 
+def _leaderboard_candidates(
+    candidates: Sequence[StrategyCandidate], split: str, limit: int = 10
+) -> tuple[list[StrategyCandidate], int, int]:
+    """Prefer distinct behaviors, then backfill the requested leaderboard size."""
+
+    distinct = _unique_behaviors(candidates, split)
+    selected = distinct[:limit]
+    selected_hashes = {candidate.candidate_hash for candidate in selected}
+    selected.extend(
+        candidate for candidate in candidates if candidate.candidate_hash not in selected_hashes
+    )
+    selected = selected[:limit]
+    return (
+        selected,
+        len(candidates) - len(distinct),
+        max(0, len(selected) - min(len(distinct), limit)),
+    )
+
+
 def run_validation_pipeline(
     search_result: Mapping[str, object] | object,
     request: DiscoveryRequest,
@@ -167,8 +186,14 @@ def run_validation_pipeline(
         ),
         reverse=True,
     )
-    valid_by_sharpe = _unique_behaviors(ranked_by_sharpe, "validation")
-    valid_by_return = _unique_behaviors(ranked_by_return, "validation")
+    valid_by_sharpe, sharpe_removed, sharpe_backfilled = _leaderboard_candidates(
+        ranked_by_sharpe,
+        "validation",
+    )
+    valid_by_return, return_removed, return_backfilled = _leaderboard_candidates(
+        ranked_by_return,
+        "validation",
+    )
     holdout_candidates = _unique(
         [
             *valid_by_sharpe[: max(1, (request.holdout_candidates + 1) // 2)],
@@ -218,8 +243,10 @@ def run_validation_pipeline(
             "validation_sharpe_shortlist_count": len(sharpe_shortlist),
             "validation_return_shortlist_count": len(return_shortlist),
             "behavioral_deduplication": {
-                "validation_sharpe_removed": len(ranked_by_sharpe) - len(valid_by_sharpe),
-                "validation_return_removed": len(ranked_by_return) - len(valid_by_return),
+                "validation_sharpe_removed": sharpe_removed,
+                "validation_return_removed": return_removed,
+                "sharpe_backfilled": sharpe_backfilled,
+                "return_backfilled": return_backfilled,
             },
             "holdout_candidate_count": len(holdout_candidates),
             "leaderboard_period": "validation",

@@ -6,6 +6,7 @@ import FormulaScreenPage from './FormulaScreenPage.vue'
 
 import * as api from '../api/formulaScreen'
 import * as marketApi from '../api/marketData'
+import * as jobsApi from '../api/jobs'
 
 vi.mock('../api/formulaScreen', async () => {
   const actual = await vi.importActual<typeof import('../api/formulaScreen')>('../api/formulaScreen')
@@ -15,6 +16,11 @@ vi.mock('../api/formulaScreen', async () => {
 vi.mock('../api/marketData', async () => {
   const actual = await vi.importActual<typeof import('../api/marketData')>('../api/marketData')
   return { ...actual, fetchLocalChart: vi.fn() }
+})
+
+vi.mock('../api/jobs', async () => {
+  const actual = await vi.importActual<typeof import('../api/jobs')>('../api/jobs')
+  return { ...actual, fetchActiveJobs: vi.fn() }
 })
 
 const metadata: FormulaScreenMetadata = {
@@ -104,6 +110,26 @@ describe('FormulaScreenPage', () => {
       results: [],
     })
     vi.mocked(marketApi.fetchLocalChart).mockResolvedValue(localChart)
+    vi.mocked(jobsApi.fetchActiveJobs).mockResolvedValue([])
+  })
+
+  it('recovers and resumes a running screening task after the page is refreshed', async () => {
+    vi.mocked(jobsApi.fetchActiveJobs).mockResolvedValueOnce([{
+      job_id: 'screen-refresh', description: '公式选股', status: 'running', progress: 0.42,
+      total_candidates: 2, total_scanned: 1, total_signals: 1, errors: 0, skipped: 0,
+      error: null, result: null,
+    }])
+    vi.mocked(api.getJob).mockResolvedValueOnce({
+      job_id: 'screen-refresh', status: 'completed', progress: 1, total_candidates: 2, total_scanned: 2,
+      total_signals: 2, errors: 0, skipped: 0, error: null,
+    })
+
+    const wrapper = mount(FormulaScreenPage)
+    await flushPromises()
+
+    expect(jobsApi.fetchActiveJobs).toHaveBeenCalled()
+    expect(api.getJob).toHaveBeenCalledWith('screen-refresh')
+    expect(wrapper.get('[data-testid="results-table"]').text()).toContain('600000')
   })
 
   it('renders signal choices and validates an empty selection', async () => {

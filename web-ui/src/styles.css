@@ -202,6 +202,11 @@ input:focus, select:focus { border-color: var(--accent); }
 .screen-history-empty { margin: 0; color: var(--subtle); font-size: 10px; }
 .progress-track { height: 3px; overflow: hidden; margin-bottom: 26px; background: var(--surface-raised); }
 .progress-track span { display: block; height: 100%; background: var(--accent); transition: width 220ms ease; }
+.task-progress-panel { margin-top: 20px; padding: 14px 16px; border: 1px solid var(--border); background: rgba(15, 23, 42, 0.42); }
+.task-progress-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; color: var(--muted); font-size: 11px; }
+.task-progress-heading strong { color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.task-progress-panel .progress-track { margin-bottom: 8px; }
+.task-progress-panel small { color: var(--subtle); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
 .empty-state { display: grid; min-height: 360px; place-content: center; justify-items: center; gap: 8px; border: 1px dashed var(--border); text-align: center; }
 .empty-icon { display: grid; width: 34px; height: 34px; place-items: center; margin-bottom: 6px; border: 1px solid var(--border-strong); color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 18px; }
 .empty-state h3 { margin-bottom: 0; font-size: 14px; }

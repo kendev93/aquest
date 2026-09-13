@@ -285,12 +285,14 @@ def create_app(
         return {"status": "ok"}
 
     from .routers.backtest import router as backtest_router
+    from .routers.jobs import router as jobs_router
     from .routers.market_data import router as market_data_router
     from .routers.portfolio_backtest import router as portfolio_backtest_router
     from .routers.strategy_discovery import router as strategy_discovery_router
     from .routers.strategy_fitness import router as strategy_fitness_router
 
     app.include_router(formula_screen_router, prefix="/api/v1")
+    app.include_router(jobs_router, prefix="/api/v1")
     app.include_router(market_data_router, prefix="/api/v1")
     app.include_router(backtest_router, prefix="/api/v1")
     app.include_router(portfolio_backtest_router, prefix="/api/v1")

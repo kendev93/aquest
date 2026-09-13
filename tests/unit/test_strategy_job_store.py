@@ -55,6 +55,21 @@ def test_job_store_claims_one_queued_job_and_preserves_progress(tmp_path) -> Non
     assert state["metadata"] == {"estimated_seconds_remaining": 12.0}
 
 
+def test_job_store_lists_active_jobs_for_a_new_api_reader(tmp_path) -> None:
+    store = StrategyJobStore(tmp_path / "jobs")
+    store.create("a-queued", operation="discovery", payload={}, description="策略实验室")
+    store.create("b-running", operation="refinement", payload={}, description="策略二次优化")
+    store.create("c-finished", operation="replay", payload={}, description="策略前十全量复核")
+    store.update("c-finished", status="completed")
+    assert store.claim_next() == "a-queued"
+
+    active = store.active_snapshots()
+
+    assert [item["job_id"] for item in active] == ["a-queued", "b-running"]
+    assert active[0]["operation"] == "discovery"
+    assert [item["job_id"] for item in store.active_snapshots({"策略二次优化"})] == ["b-running"]
+
+
 def test_job_store_cancel_and_complete_are_visible_across_instances(tmp_path) -> None:
     store = StrategyJobStore(tmp_path / "jobs")
     observer = StrategyJobStore(tmp_path / "jobs")

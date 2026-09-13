@@ -1,11 +1,12 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { FormulaScreenMetadata } from '../types'
+import type { BacktestJobState, FormulaScreenMetadata } from '../types'
 import BacktestPage from './BacktestPage.vue'
 
 import * as backtestApi from '../api/backtest'
 import * as formulaApi from '../api/formulaScreen'
+import * as jobsApi from '../api/jobs'
 
 vi.mock('../api/formulaScreen', async () => {
   const actual = await vi.importActual<typeof import('../api/formulaScreen')>('../api/formulaScreen')
@@ -23,6 +24,11 @@ vi.mock('../api/backtest', async () => {
     getBacktestHistory: vi.fn(),
     deleteBacktestHistory: vi.fn(),
   }
+})
+
+vi.mock('../api/jobs', async () => {
+  const actual = await vi.importActual<typeof import('../api/jobs')>('../api/jobs')
+  return { ...actual, fetchActiveJobs: vi.fn() }
 })
 
 const metadata: FormulaScreenMetadata = {
@@ -66,6 +72,32 @@ describe('BacktestPage', () => {
       positions: [], diagnostic: null,
     })
     vi.mocked(backtestApi.fetchBacktestHistory).mockResolvedValue([])
+    vi.mocked(jobsApi.fetchActiveJobs).mockResolvedValue([])
+  })
+
+  it('recovers and resumes a running backtest after the page is refreshed', async () => {
+    vi.mocked(jobsApi.fetchActiveJobs).mockResolvedValueOnce([{
+      job_id: 'bt-refresh', description: '历史回测', status: 'running', progress: 0.42,
+      total_candidates: 1, total_scanned: 0, errors: 0, error: null, result: null,
+    }])
+    let resolveStatus!: (state: BacktestJobState) => void
+    vi.mocked(backtestApi.getBacktest).mockImplementationOnce(() => new Promise((resolve) => {
+      resolveStatus = resolve
+    }))
+
+    const wrapper = mount(BacktestPage)
+    await flushPromises()
+
+    expect(jobsApi.fetchActiveJobs).toHaveBeenCalled()
+    expect(backtestApi.getBacktest).toHaveBeenCalledWith('bt-refresh')
+    expect(wrapper.get('[data-testid="backtest-progress"]').text()).toContain('42%')
+
+    resolveStatus({
+      job_id: 'bt-refresh', status: 'completed', progress: 1, total_candidates: 1, total_scanned: 1,
+      errors: 0, error: null, result: null,
+    })
+    await flushPromises()
+    expect(wrapper.get('[data-testid="backtest-results"]').text()).toContain('浦发银行')
   })
 
   it('submits a single-stock backtest and renders performance and trades', async () => {

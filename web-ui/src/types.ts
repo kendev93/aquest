@@ -152,6 +152,25 @@ export interface JobState {
   worker_count?: number | null
 }
 
+export interface ActiveJobState {
+  job_id: string
+  description: string
+  status: 'queued' | 'running'
+  progress: number
+  total_candidates: number
+  total_scanned: number
+  total_signals?: number
+  errors: number
+  skipped?: number
+  error: string | null
+  result?: unknown | null
+  worker_count?: number | null
+  phase?: string | null
+  metadata?: Record<string, unknown>
+  cancel_requested?: boolean
+  operation?: 'discovery' | 'refinement' | 'replay'
+}
+
 export interface MarketSyncResult {
   source?: 'local' | 'online' | 'combined'
   provider?: MarketDataProvider | 'mixed'

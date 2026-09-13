@@ -420,6 +420,33 @@ def test_market_data_active_jobs_can_be_listed_and_cancelled() -> None:
         runner.shutdown()
 
 
+def test_active_jobs_endpoint_finds_a_running_backtest_after_page_refresh() -> None:
+    app = create_app(engine=EmptyEngine(), auto_sync_enabled=False)
+    runner = app.state.screen_job_runner
+    started = Event()
+    release = Event()
+
+    def task(_progress):
+        started.set()
+        release.wait(timeout=1)
+        return {}
+
+    job_id = runner.submit_callable(task, description="历史回测")
+    try:
+        assert started.wait(timeout=1)
+        with TestClient(app) as client:
+            response = client.get("/api/v1/jobs/active")
+
+        assert response.status_code == 200
+        active = response.json()["data"]
+        assert any(
+            item["job_id"] == job_id and item["description"] == "历史回测" for item in active
+        )
+    finally:
+        release.set()
+        runner.shutdown()
+
+
 def test_market_data_rejects_duplicate_active_sync_jobs() -> None:
     app = create_app(engine=EmptyEngine(), auto_sync_enabled=False)
     runner = app.state.screen_job_runner

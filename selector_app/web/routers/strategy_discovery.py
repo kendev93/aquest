@@ -318,11 +318,15 @@ def create_strategy_replay(
                 if isinstance(resource_estimate, DiscoveryResourceEstimate)
                 else None
             ),
-            metadata=_resource_metadata(
-                resource_estimate
-                if isinstance(resource_estimate, DiscoveryResourceEstimate)
-                else None
-            ),
+            metadata={
+                **_resource_metadata(
+                    resource_estimate
+                    if isinstance(resource_estimate, DiscoveryResourceEstimate)
+                    else None
+                ),
+                "experiment_id": experiment_id,
+                "leaderboard": payload.leaderboard,
+            },
         )
     except HTTPException:
         raise

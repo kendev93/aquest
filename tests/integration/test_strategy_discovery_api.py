@@ -12,6 +12,7 @@ from selector_app.strategy_discovery.job_backend import (
     FileStrategyJobBackend,
     InProcessStrategyJobBackend,
 )
+from selector_app.strategy_discovery.job_store import StrategyJobStore
 from selector_app.web.app import create_app
 
 
@@ -141,6 +142,51 @@ def test_create_app_uses_file_backend_for_production_service(tmp_path) -> None:
     )
 
     assert isinstance(app.state.strategy_job_backend, FileStrategyJobBackend)
+
+
+def test_active_jobs_endpoint_reads_a_queued_strategy_job_from_shared_storage(tmp_path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    job_store = StrategyJobStore(tmp_path / "jobs")
+    job_store.create(
+        "discovery-active",
+        operation="discovery",
+        payload={"request": {}},
+        description="策略实验室",
+    )
+    app = create_app(
+        market_data_store=store,
+        strategy_job_backend=FileStrategyJobBackend(store, job_store),
+        auto_sync_enabled=False,
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/v1/jobs/active")
+
+    assert response.status_code == 200
+    assert response.json()["data"] == [
+        {
+            "job_id": "discovery-active",
+            "status": "queued",
+            "progress": 0.0,
+            "total_candidates": 0,
+            "total_scanned": 0,
+            "total_signals": 0,
+            "errors": 0,
+            "skipped": 0,
+            "error": None,
+            "error_code": None,
+            "result": None,
+            "description": "策略实验室",
+            "worker_count": None,
+            "created_at": response.json()["data"][0]["created_at"],
+            "finished_at": None,
+            "phase": "queued",
+            "metadata": {},
+            "cancel_requested": False,
+            "heartbeat_at": response.json()["data"][0]["heartbeat_at"],
+            "operation": "discovery",
+        }
+    ]
 
 
 def test_create_app_keeps_in_process_backend_for_injected_fake_service(tmp_path) -> None:

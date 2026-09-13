@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from typing import Literal, Protocol, cast
@@ -56,6 +56,11 @@ class StrategyJobBackend(Protocol):
     def result(self, job_id: str) -> dict[str, object] | None: ...
 
     def cancel(self, job_id: str) -> bool: ...
+
+    def active_snapshots(
+        self,
+        descriptions: Iterable[str] | None = None,
+    ) -> list[dict[str, object]]: ...
 
 
 class FileStrategyJobBackend:
@@ -189,6 +194,17 @@ class FileStrategyJobBackend:
             return self._job_store.request_cancel(job_id)
         except ValueError:
             return False
+
+    def active_snapshots(
+        self,
+        descriptions: Iterable[str] | None = None,
+    ) -> list[dict[str, object]]:
+        try:
+            self._job_store.recover_stale_running(stale_after_seconds=DEFAULT_STALE_AFTER_SECONDS)
+            return self._job_store.active_snapshots(descriptions)
+        except (OSError, ValueError):
+            logger.exception("策略活动任务状态读取失败")
+            return []
 
     def _reconcile_completed(self, job_id: str, state: Mapping[str, object]) -> None:
         if state.get("status") != "completed":
@@ -334,6 +350,12 @@ class InProcessStrategyJobBackend:
 
     def cancel(self, job_id: str) -> bool:
         return self._runner.request_cancel(job_id)
+
+    def active_snapshots(
+        self,
+        descriptions: Iterable[str] | None = None,
+    ) -> list[dict[str, object]]:
+        return self._runner.active_snapshots(descriptions)
 
 
 class StrategyDiscoveryServiceLike(Protocol):

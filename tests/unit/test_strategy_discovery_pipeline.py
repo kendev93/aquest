@@ -104,15 +104,13 @@ def test_validation_pipeline_keeps_independent_sharpe_and_return_leaderboards() 
 
 
 def test_validation_pipeline_removes_duplicate_trade_behaviors_from_each_leaderboard() -> None:
-    request = replace(_request(), validation_candidates=4, holdout_candidates=4)
+    request = replace(_request(), validation_candidates=12, holdout_candidates=10)
     candidates = [
-        build_random_candidate(request, __import__("random").Random(seed)) for seed in range(4)
+        build_random_candidate(request, __import__("random").Random(seed)) for seed in range(12)
     ]
     behavior_by_hash = {
-        candidates[0].candidate_hash: "behavior-a",
-        candidates[1].candidate_hash: "behavior-a",
-        candidates[2].candidate_hash: "behavior-b",
-        candidates[3].candidate_hash: "behavior-b",
+        candidate.candidate_hash: "behavior-a" if index < 6 else "behavior-b"
+        for index, candidate in enumerate(candidates)
     }
     search = SearchResult(
         results_by_sharpe=tuple(candidates),
@@ -131,13 +129,23 @@ def test_validation_pipeline_removes_duplicate_trade_behaviors_from_each_leaderb
 
     result = run_validation_pipeline(search, request, evaluate)
 
-    assert len(result.results_by_sharpe) == 2
-    assert len(result.results_by_return) == 2
-    assert [
+    assert len(result.results_by_sharpe) == 10
+    assert len(result.results_by_return) == 10
+    assert len({candidate.candidate_hash for candidate in result.results_by_sharpe}) == 10
+    assert len({candidate.candidate_hash for candidate in result.results_by_return}) == 10
+    sharpe_fingerprints = [
         candidate.metrics["validation"]["trade_fingerprint"]
         for candidate in result.results_by_sharpe
-    ] == ["behavior-a", "behavior-b"]
-    assert [
+    ]
+    return_fingerprints = [
         candidate.metrics["validation"]["trade_fingerprint"]
         for candidate in result.results_by_return
-    ] == ["behavior-a", "behavior-b"]
+    ]
+    assert set(sharpe_fingerprints[:2]) == {"behavior-a", "behavior-b"}
+    assert set(return_fingerprints[:2]) == {"behavior-a", "behavior-b"}
+    assert result.validation_metadata["behavioral_deduplication"] == {
+        "validation_sharpe_removed": 10,
+        "validation_return_removed": 10,
+        "sharpe_backfilled": 8,
+        "return_backfilled": 8,
+    }

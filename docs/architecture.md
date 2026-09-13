@@ -114,6 +114,7 @@ AKShare 是 Docker 正式运行时的必需行情依赖，但业务层只依赖�
 - `GET /api/v1/market-data/capabilities`（行情源能力、版本和当前来源）
 - `GET /api/v1/market-data/store`
 - `GET /api/v1/market-data/jobs/active`（当前运行中的行情任务和进度）
+- `GET /api/v1/jobs/active`（跨页面发现正在运行的回测、筛选和策略任务）
 - `GET /api/v1/market-data/jobs/{job_id}`
 - `POST /api/v1/market-data/jobs/{job_id}/cancel`（协作取消单个行情任务）
 - `GET /api/v1/market-data/local/instruments`

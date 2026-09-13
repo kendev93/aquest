@@ -7,7 +7,7 @@ import os
 import re
 import tempfile
 import time
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Literal, cast
 
@@ -76,6 +76,31 @@ class StrategyJobStore:
         state["metadata"] = dict(metadata) if isinstance(metadata, Mapping) else {}
         state["cancel_requested"] = self.is_cancel_requested(job_id)
         return state
+
+    def active_snapshots(
+        self,
+        descriptions: Iterable[str] | None = None,
+    ) -> list[dict[str, object]]:
+        """Return queued/running jobs so a new API client can resume polling."""
+
+        allowed = frozenset(descriptions) if descriptions is not None else None
+        snapshots: list[dict[str, object]] = []
+        for job_dir in sorted(self.root.iterdir(), key=lambda item: item.name):
+            if not job_dir.is_dir() or not _JOB_ID_PATTERN.fullmatch(job_dir.name):
+                continue
+            state = self.read_state(job_dir.name)
+            if state is None or state.get("status") not in {"queued", "running"}:
+                continue
+            description = state.get("description")
+            if allowed is not None and description not in allowed:
+                continue
+            snapshot = dict(state)
+            request = self.read_request(job_dir.name)
+            operation = request.get("operation") if request is not None else None
+            if operation in _OPERATIONS:
+                snapshot["operation"] = operation
+            snapshots.append(snapshot)
+        return snapshots
 
     def read_result(self, job_id: str) -> dict[str, object] | None:
         return self._read_json(self._job_dir(job_id) / "result.json")

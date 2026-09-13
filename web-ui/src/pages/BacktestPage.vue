@@ -10,6 +10,7 @@ import {
   getBacktestResults,
 } from '../api/backtest'
 import { FormulaScreenApiError, fetchMetadata, parseFormula } from '../api/formulaScreen'
+import { fetchActiveJobs } from '../api/jobs'
 import BacktestHistoryPanel from '../components/BacktestHistoryPanel.vue'
 import DateRangeSelector from '../components/DateRangeSelector.vue'
 import RuleGroupEditor from '../components/RuleGroupEditor.vue'
@@ -316,18 +317,36 @@ async function submit(): Promise<void> {
       error: null,
       result: null,
     }
-    for (;;) {
-      const state = await getBacktest(created.job_id)
-      job.value = state
-      if (state.status === 'completed') {
-        result.value = await getBacktestResults(created.job_id)
-        message.value = `回测完成：${result.value.trades.length} 笔成交，区间 ${result.value.start_date} 至 ${result.value.end_date}。`
-        await loadHistory()
-        return
-      }
-      if (state.status === 'failed') throw new Error(state.error ?? '回测任务失败')
-      await new Promise((resolve) => window.setTimeout(resolve, 220))
+    await pollBacktest(created.job_id)
+  } catch (error) {
+    message.value = apiMessage(error)
+  } finally {
+    loading.value = false
+  }
+}
+
+async function pollBacktest(jobId: string): Promise<void> {
+  for (;;) {
+    const state = await getBacktest(jobId)
+    job.value = state
+    if (state.status === 'completed') {
+      result.value = await getBacktestResults(jobId)
+      message.value = `回测完成：${result.value.trades.length} 笔成交，区间 ${result.value.start_date} 至 ${result.value.end_date}。`
+      await loadHistory()
+      return
     }
+    if (state.status === 'failed') throw new Error(state.error ?? '回测任务失败')
+    await new Promise((resolve) => window.setTimeout(resolve, 220))
+  }
+}
+
+async function resumeActiveBacktest(): Promise<void> {
+  try {
+    const active = (await fetchActiveJobs()).find((item) => item.description === '历史回测')
+    if (!active) return
+    job.value = active as unknown as BacktestJobState
+    loading.value = true
+    await pollBacktest(active.job_id)
   } catch (error) {
     message.value = apiMessage(error)
   } finally {
@@ -397,6 +416,7 @@ onMounted(async () => {
       signals.find((signal) => signal.id.endsWith('end_zone'))?.id ?? signals[1]?.id ?? '',
     )
     await loadHistory()
+    await resumeActiveBacktest()
   } catch (error) {
     message.value = apiMessage(error)
   }
@@ -538,6 +558,7 @@ watch(() => form.formulaText, (value) => {
           </template>
         </section>
       </div>
+      <div v-if="loading && job" class="task-progress task-progress-panel" data-testid="backtest-progress"><div class="task-progress-heading"><span>回测任务进度</span><strong>{{ Math.round(job.progress * 100) }}%</strong></div><div class="progress-track"><span :style="{ width: `${Math.round(job.progress * 100)}%` }"></span></div><small>已处理 {{ job.total_scanned }} / {{ job.total_candidates || 1 }}</small></div>
 
       <BacktestHistoryPanel
         :items="history"

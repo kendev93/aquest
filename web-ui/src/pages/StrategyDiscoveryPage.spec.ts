@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 
 import * as api from '../api/strategyDiscovery'
+import * as jobsApi from '../api/jobs'
 import StrategyDiscoveryPage from './StrategyDiscoveryPage.vue'
 
 vi.mock('../api/strategyDiscovery', async () => {
@@ -22,6 +23,11 @@ vi.mock('../api/strategyDiscovery', async () => {
     getStrategyDiscoveryHistory: vi.fn(),
     deleteStrategyDiscoveryHistory: vi.fn(),
   }
+})
+
+vi.mock('../api/jobs', async () => {
+  const actual = await vi.importActual<typeof import('../api/jobs')>('../api/jobs')
+  return { ...actual, fetchActiveJobs: vi.fn() }
 })
 
 describe('StrategyDiscoveryPage', () => {
@@ -62,6 +68,25 @@ describe('StrategyDiscoveryPage', () => {
       search_metadata: { evaluated_trials: 4 },
       validation_metadata: { leaderboard_period: 'validation' },
     })
+    vi.mocked(jobsApi.fetchActiveJobs).mockResolvedValue([])
+  })
+
+  it('recovers and resumes a running discovery task after the page is refreshed', async () => {
+    vi.mocked(jobsApi.fetchActiveJobs).mockResolvedValueOnce([{
+      job_id: 'discovery-refresh', description: '策略实验室', status: 'running', progress: 0.42,
+      total_candidates: 1000, total_scanned: 420, errors: 0, skipped: 0, error: null, result: null,
+    }])
+    vi.mocked(api.getStrategyDiscovery).mockResolvedValueOnce({
+      job_id: 'discovery-refresh', status: 'completed', progress: 1, total_candidates: 1000, total_scanned: 1000,
+      errors: 0, skipped: 0, error: null, phase: 'completed', result: null,
+    })
+
+    const wrapper = mount(StrategyDiscoveryPage)
+    await flushPromises()
+
+    expect(jobsApi.fetchActiveJobs).toHaveBeenCalled()
+    expect(api.getStrategyDiscovery).toHaveBeenCalledWith('discovery-refresh')
+    expect(wrapper.get('[data-testid="strategy-discovery-results"]').text()).toContain('MA5 > MA20')
   })
 
   it('submits only the user-facing universe and holding count', async () => {

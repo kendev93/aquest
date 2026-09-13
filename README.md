@@ -216,6 +216,7 @@ python3 scripts/benchmark_strategy_discovery.py --trials 100,500,1000 --workers 
 ## API 快速说明
 
 ```text
+GET  /api/v1/jobs/active                              # 页面刷新后恢复所有正在运行的任务
 GET  /api/v1/formula-screen/metadata
 POST /api/v1/formula-screen/parse
 POST /api/v1/formula-screen/jobs

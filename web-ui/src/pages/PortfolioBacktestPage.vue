@@ -10,6 +10,7 @@ import {
   getPortfolioBacktestResults,
 } from '../api/portfolioBacktest'
 import { FormulaScreenApiError, fetchMetadata, parseFormula } from '../api/formulaScreen'
+import { fetchActiveJobs } from '../api/jobs'
 import BacktestHistoryPanel from '../components/BacktestHistoryPanel.vue'
 import DateRangeSelector from '../components/DateRangeSelector.vue'
 import RuleGroupEditor from '../components/RuleGroupEditor.vue'
@@ -626,22 +627,40 @@ async function submit(): Promise<void> {
       error: null,
       result: null,
     }
-    for (;;) {
-      const state = await getPortfolioBacktest(created.job_id)
-      job.value = state
-      if (state.status === 'completed') {
-        result.value = await getPortfolioBacktestResults(created.job_id)
-        await compareAppliedCandidate(result.value)
-        message.value = `组合回测完成：${result.value.trades.length} 笔成交，区间 ${result.value.start_date} 至 ${result.value.end_date}。`
-        await loadHistory()
-        return
-      }
-      if (state.status === 'failed') {
-        message.value = state.error ?? '组合回测任务失败，请检查配置和服务状态后重试。'
-        return
-      }
-      await new Promise((resolve) => window.setTimeout(resolve, 220))
+    await pollPortfolioBacktest(created.job_id)
+  } catch (error) {
+    message.value = apiMessage(error)
+  } finally {
+    loading.value = false
+  }
+}
+
+async function pollPortfolioBacktest(jobId: string): Promise<void> {
+  for (;;) {
+    const state = await getPortfolioBacktest(jobId)
+    job.value = state
+    if (state.status === 'completed') {
+      result.value = await getPortfolioBacktestResults(jobId)
+      await compareAppliedCandidate(result.value)
+      message.value = `组合回测完成：${result.value.trades.length} 笔成交，区间 ${result.value.start_date} 至 ${result.value.end_date}。`
+      await loadHistory()
+      return
     }
+    if (state.status === 'failed') {
+      message.value = state.error ?? '组合回测任务失败，请检查配置和服务状态后重试。'
+      return
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 220))
+  }
+}
+
+async function resumeActivePortfolioBacktest(): Promise<void> {
+  try {
+    const active = (await fetchActiveJobs()).find((item) => item.description === '组合回测')
+    if (!active) return
+    job.value = active as unknown as PortfolioBacktestJobState
+    loading.value = true
+    await pollPortfolioBacktest(active.job_id)
   } catch (error) {
     message.value = apiMessage(error)
   } finally {
@@ -732,6 +751,7 @@ onMounted(async () => {
       }
     }
     await loadHistory()
+    await resumeActivePortfolioBacktest()
   } catch (error) {
     message.value = apiMessage(error)
   }
@@ -941,6 +961,7 @@ watch(() => form.formulaText, (value) => {
           </template>
         </section>
       </div>
+      <div v-if="loading && job" class="task-progress task-progress-panel" data-testid="portfolio-progress"><div class="task-progress-heading"><span>组合回测任务进度</span><strong>{{ Math.round(job.progress * 100) }}%</strong></div><div class="progress-track"><span :style="{ width: `${Math.round(job.progress * 100)}%` }"></span></div><small>已处理 {{ job.total_scanned }} / {{ job.total_candidates || 1 }}</small></div>
 
       <BacktestHistoryPanel
         :items="history"

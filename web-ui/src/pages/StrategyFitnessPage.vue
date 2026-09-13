@@ -10,6 +10,7 @@ import {
   getStrategyFitnessResults,
 } from '../api/strategyFitness'
 import { FormulaScreenApiError, fetchMetadata, parseFormula } from '../api/formulaScreen'
+import { fetchActiveJobs } from '../api/jobs'
 import BacktestHistoryPanel from '../components/BacktestHistoryPanel.vue'
 import DateRangeSelector from '../components/DateRangeSelector.vue'
 import RuleGroupEditor from '../components/RuleGroupEditor.vue'
@@ -346,21 +347,39 @@ async function submit(): Promise<void> {
       error: null,
       result: null,
     }
-    for (;;) {
-      const state = await getStrategyFitness(created.job_id)
-      job.value = state
-      if (state.status === 'completed') {
-        report.value = await getStrategyFitnessResults(created.job_id)
-        message.value = `适配性评估完成：处理 ${report.value.processed} 只股票，其中 ${passedCount.value} 只达到推荐阈值。`
-        await loadHistory()
-        return
-      }
-      if (state.status === 'failed') {
-        message.value = state.error ?? '策略适配性评估任务失败，请检查配置和服务状态后重试。'
-        return
-      }
-      await new Promise((resolve) => window.setTimeout(resolve, 220))
+    await pollStrategyFitness(created.job_id)
+  } catch (error) {
+    message.value = apiMessage(error)
+  } finally {
+    loading.value = false
+  }
+}
+
+async function pollStrategyFitness(jobId: string): Promise<void> {
+  for (;;) {
+    const state = await getStrategyFitness(jobId)
+    job.value = state
+    if (state.status === 'completed') {
+      report.value = await getStrategyFitnessResults(jobId)
+      message.value = `适配性评估完成：处理 ${report.value.processed} 只股票，其中 ${passedCount.value} 只达到推荐阈值。`
+      await loadHistory()
+      return
     }
+    if (state.status === 'failed') {
+      message.value = state.error ?? '策略适配性评估任务失败，请检查配置和服务状态后重试。'
+      return
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 220))
+  }
+}
+
+async function resumeActiveStrategyFitness(): Promise<void> {
+  try {
+    const active = (await fetchActiveJobs()).find((item) => item.description === '策略适配性评估')
+    if (!active) return
+    job.value = active as unknown as StrategyFitnessJobState
+    loading.value = true
+    await pollStrategyFitness(active.job_id)
   } catch (error) {
     message.value = apiMessage(error)
   } finally {
@@ -430,6 +449,7 @@ onMounted(async () => {
     metadata.value = await fetchMetadata()
     resetPresetDefaults()
     await loadHistory()
+    await resumeActiveStrategyFitness()
   } catch (error) {
     message.value = apiMessage(error)
   }
@@ -503,6 +523,7 @@ watch(() => form.formulaText, (value) => {
 
         <section class="results-panel panel" data-testid="fitness-results" aria-live="polite"><div class="panel-heading results-heading"><div><span class="section-kicker">02 / RESULTS</span><h2>标的适配结果</h2></div><button v-if="report" class="secondary-button export-backtest" type="button" data-testid="export-fitness" @click="downloadResult">导出 JSON</button></div><div v-if="!report" class="empty-state" data-testid="fitness-empty"><div class="empty-icon" aria-hidden="true">/</div><h3>{{ loading ? '正在逐只评估策略…' : '还没有适配性结果' }}</h3><p>{{ loading ? '按相同交易规则生成训练、验证和测试三段报告。' : '配置策略和时间切分后，开始评估股票池。' }}</p></div><template v-else><div class="backtest-summary"><span class="result-badge">通过 {{ passedCount }} / {{ report.processed }}</span><span>{{ report.start_date }} → {{ report.end_date }}</span><span>训练截止 {{ report.train_end_date }}</span><span>验证截止 {{ report.validation_end_date }}</span><span>测试最少 {{ report.min_trades }} 笔</span><span>测试回撤 ≤ {{ formatPercent(report.max_test_drawdown) }}</span></div><div class="metrics-strip fitness-metrics"><div><span>股票总数</span><strong>{{ report.total_candidates }}</strong></div><div><span>已处理</span><strong>{{ report.processed }}</strong></div><div><span>达到推荐</span><strong class="positive" data-testid="fitness-passed-count">{{ passedCount }}</strong></div><div><span>跳过 / 错误</span><strong>{{ report.skipped }} / {{ report.errors }}</strong></div></div><div class="progress-track fitness-progress" aria-label="适配性评估进度"><span :style="{ width: `${Math.round((job?.progress ?? 1) * 100)}%` }"></span></div><div v-if="!report.results.length" class="inline-empty">没有股票完成三段适配性评估。</div><div v-else class="table-wrap"><table><caption class="sr-only">策略适配性评估结果</caption><thead><tr><th>市场</th><th>代码</th><th>中文名</th><th>适配性</th><th>检查项</th><th>训练期</th><th>验证期</th><th>测试期</th><th>有效区间</th></tr></thead><tbody><tr v-for="item in report.results" :key="`${item.market}-${item.code}`"><td><span class="market-pill" :class="item.market.toLowerCase()">{{ item.market }}</span></td><td><strong class="code">{{ item.code }}</strong></td><td>{{ item.name || '—' }}</td><td><span class="fitness-score" :class="item.label"><strong>{{ item.suitability_score.toFixed(2) }}</strong><small>{{ labelText(item.label) }}</small></span></td><td><strong>{{ item.passed_checks }} / {{ item.total_checks }}</strong><div class="fitness-periods">{{ item.positive_periods }} 段收益为正</div></td><td :data-testid="`fitness-train-${item.code}`" class="fitness-phase">{{ phaseText(item.train) }}</td><td :data-testid="`fitness-validation-${item.code}`" class="fitness-phase">{{ phaseText(item.validation) }}</td><td :data-testid="`fitness-test-${item.code}`" class="fitness-phase">{{ phaseText(item.test) }}</td><td class="muted-code">{{ item.data_start }}<br>至 {{ item.data_end }}</td></tr></tbody></table></div><div v-if="report.results.length" class="fitness-details"><details v-for="item in report.results.slice(0, 20)" :key="`details-${item.market}-${item.code}`"><summary>{{ item.market }} {{ item.code }} · 查看检查项</summary><div class="fitness-checks"><span v-for="check in item.checks" :key="check.id" :class="{ passed: check.passed }">{{ check.passed ? '通过' : '未通过' }} · {{ check.label }}</span></div></details></div><div v-if="report.failure_reasons && Object.keys(report.failure_reasons).length" class="failure-summary"><strong>失败摘要</strong><span v-for="(count, reason) in report.failure_reasons" :key="reason">{{ reason }} · {{ count }}</span></div><p v-if="report.diagnostic" class="diagnostic" data-testid="fitness-diagnostic">{{ report.diagnostic }}</p></template></section>
       </div>
+      <div v-if="loading && job" class="task-progress task-progress-panel" data-testid="fitness-progress"><div class="task-progress-heading"><span>适配性评估进度</span><strong>{{ Math.round(job.progress * 100) }}%</strong></div><div class="progress-track"><span :style="{ width: `${Math.round(job.progress * 100)}%` }"></span></div><small>已处理 {{ job.total_scanned }} / {{ job.total_candidates || 1 }}</small></div>
 
       <BacktestHistoryPanel
         :items="history"
