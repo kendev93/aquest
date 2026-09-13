@@ -99,6 +99,8 @@ docker compose up --build -d
 
 开发镜像会保留 Python 源码，适合本地调试；对外分发时使用 Nuitka 保护版构建。构建阶段会编译 backend 和 `strategy-worker`，最终运行阶段只复制 standalone bundle，不复制 `selector_app` 源码：
 
+完整的 Windows、macOS 和 Docker 打包教程见 [打包与发布指南](docs/packaging.md)。
+
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.protected.yml build
 docker compose -f docker-compose.yml -f docker-compose.protected.yml up -d
