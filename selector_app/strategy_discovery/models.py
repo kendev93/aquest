@@ -224,7 +224,10 @@ class StrategyCandidate:
         return replace(self, metrics=updated)
 
     def to_config(self) -> dict[str, object]:
-        config = dict(self.base_config)
+        # ``base_config`` also carries discovery-only metadata such as the UI
+        # date preset.  Keep that metadata in the experiment request, but do
+        # not pass it to the strict portfolio-backtest schema.
+        config = {key: value for key, value in self.base_config.items() if key != "date_mode"}
         config.update(
             {
                 "selected_signals": [],

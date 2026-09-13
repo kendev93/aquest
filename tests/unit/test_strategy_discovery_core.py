@@ -20,6 +20,7 @@ from selector_app.strategy_discovery.candidates import (
 from selector_app.strategy_discovery.catalog import default_indicator_catalog
 from selector_app.strategy_discovery.models import DiscoveryRequest, StrategyCandidate
 from selector_app.strategy_discovery.search import HybridSearchEngine
+from selector_app.web.schemas import PortfolioBacktestRequest
 
 
 def _parallel_pid_evaluator(_candidate, _stage: str):
@@ -66,6 +67,21 @@ def test_candidate_generator_can_create_indicator_and_constant_conditions() -> N
     assert any(condition.right_value is not None for condition in conditions)
     assert any(condition.right_constant is not None for condition in conditions)
     assert all(candidate.max_positions == 3 for candidate in candidates)
+
+
+def test_candidate_config_excludes_strategy_only_metadata() -> None:
+    request = DiscoveryRequest(
+        base_config={"date_mode": "recent5", "max_positions": 3},
+        indicator_ids=("technical.ma5",),
+        signal_ids=(),
+        max_conditions_per_side=1,
+    )
+    candidate = build_random_candidate(request, random.Random(7))
+
+    payload = candidate.to_config()
+
+    assert "date_mode" not in payload
+    PortfolioBacktestRequest.model_validate(payload)
 
 
 def test_candidate_generator_includes_required_conditions_and_limits_auto_items() -> None:
