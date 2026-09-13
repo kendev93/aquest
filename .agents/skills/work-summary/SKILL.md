@@ -22,7 +22,7 @@ Do not use this skill for a technical code review, release note, changelog, or a
 ## Workflow
 
 1. Resolve the repository root with `git rev-parse --show-toplevel` and run all git queries from there.
-2. Read `.claude/work-summary-state.json` if it exists.
+2. Read `.work-summary-state.json` if it exists.
    - Use `last_summary.commit_hash` as the baseline when it resolves to a commit.
    - On the first run, use the parent of the oldest recent window (up to the last 10 commits) so the first summary is useful. If the repository has fewer commits, use the empty-root boundary.
    - If the stored commit no longer exists after history rewriting, fall back to the same recent window and mention that the baseline was reset.
@@ -32,7 +32,7 @@ Do not use this skill for a technical code review, release note, changelog, or a
    - `git diff --shortstat BASE..HEAD` for files changed, insertions, and deletions.
 4. Read relevant diffs when commit subjects are insufficient. Group related commits by user-visible outcome rather than by file or implementation detail.
 5. Generate the summary in the user's language. Keep it under 1000 Chinese characters unless the user requests more detail.
-6. Only after a successful summary, update `.claude/work-summary-state.json` with the latest summarized commit and statistics. Do not change source code, commit, push, or publish anything as part of this skill.
+6. Only after a successful summary, update `.work-summary-state.json` with the latest summarized commit and statistics. Do not change source code, commit, push, or publish anything as part of this skill.
 
 By default, summarize committed changes only. If there are no new commits, say so clearly and do not advance the state. Uncommitted changes may be mentioned separately only when relevant and without presenting them as delivered work.
 
