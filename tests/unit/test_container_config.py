@@ -66,8 +66,7 @@ def test_shared_start_script_handles_macos_application_support_path(tmp_path: Pa
     docker_args = tmp_path / "docker-args.txt"
     fake_docker = fake_bin / "docker"
     fake_docker.write_text(
-        "#!/bin/sh\n"
-        'printf \'%s\\n\' "$*" >> "$DOCKER_ARGS_FILE"\n',
+        '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$DOCKER_ARGS_FILE"\n',
         encoding="utf-8",
     )
     fake_docker.chmod(0o755)
