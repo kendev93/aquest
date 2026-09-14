@@ -9,7 +9,7 @@ import tempfile
 import time
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal, TypeGuard, cast
 
 JobOperation = Literal["discovery", "refinement", "replay"]
 JobStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
@@ -18,6 +18,12 @@ _JOB_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _OPERATIONS = frozenset({"discovery", "refinement", "replay"})
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 DEFAULT_STALE_AFTER_SECONDS = 120.0
+
+
+def is_job_operation(value: object) -> TypeGuard[JobOperation]:
+    """Return whether a decoded request operation is supported."""
+
+    return value in _OPERATIONS
 
 
 class StrategyJobStore:
@@ -304,6 +310,7 @@ def _initial_state(
 __all__ = [
     "JobOperation",
     "JobStatus",
+    "is_job_operation",
     "StrategyJobStore",
     "DEFAULT_STALE_AFTER_SECONDS",
     "default_strategy_job_root",

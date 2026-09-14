@@ -17,7 +17,12 @@ from selector_app.market_data.models import InstrumentBoard, InstrumentType
 from selector_app.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
 from selector_app.screening.jobs import ScreenJobRunner, TaskCancelledError, TaskUserError
 
-from .job_store import DEFAULT_STALE_AFTER_SECONDS, JobOperation, StrategyJobStore
+from .job_store import (
+    DEFAULT_STALE_AFTER_SECONDS,
+    JobOperation,
+    StrategyJobStore,
+    is_job_operation,
+)
 from .models import DiscoveryRequest
 from .refinement import discovery_request_from_dict
 from .replay import ReplayLeaderboard
@@ -225,7 +230,7 @@ class FileStrategyJobBackend:
         if request is None or result is None:
             return
         operation = request.get("operation")
-        if operation not in {"discovery", "refinement", "replay"}:
+        if not is_job_operation(operation):
             return
         try:
             normalized = decorate_result(

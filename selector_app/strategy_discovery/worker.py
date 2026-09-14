@@ -16,7 +16,7 @@ from selector_app.market_data.etfquest_adapter import ETFQuestMarketDataAdapter
 from selector_app.market_data.store import DuckDbMarketDataStore
 
 from .job_backend import completion_state, decorate_result
-from .job_store import StrategyJobStore, default_strategy_job_root
+from .job_store import StrategyJobStore, default_strategy_job_root, is_job_operation
 from .models import DiscoveryRequest
 from .refinement import discovery_request_from_dict
 from .replay import ReplayLeaderboard
@@ -95,7 +95,7 @@ class StrategyDiscoveryWorker:
             if request is None:
                 raise ValueError("策略任务请求文件不存在")
             operation = request.get("operation")
-            if operation not in {"discovery", "refinement", "replay"}:
+            if not is_job_operation(operation):
                 raise ValueError("策略任务类型无效")
             started_at = datetime.now(timezone.utc).isoformat()
             state = self._job_store.read_state(job_id) or {}
