@@ -213,25 +213,6 @@ class _DuckDbStoreBase:
             self._migrate_schema(connection, existing_version or 0)
             connection.execute(
                 """
-                CREATE TABLE IF NOT EXISTS source_files (
-                    source_root VARCHAR NOT NULL,
-                    relative_path VARCHAR NOT NULL,
-                    market VARCHAR NOT NULL,
-                    code VARCHAR NOT NULL,
-                    instrument_type VARCHAR,
-                    size BIGINT NOT NULL,
-                    mtime_ns BIGINT NOT NULL,
-                    sha256 VARCHAR,
-                    status VARCHAR NOT NULL,
-                    last_seen_at TIMESTAMP NOT NULL,
-                    last_imported_at TIMESTAMP,
-                    error VARCHAR,
-                    PRIMARY KEY (source_root, relative_path)
-                )
-                """
-            )
-            connection.execute(
-                """
                 CREATE TABLE IF NOT EXISTS data_meta (
                     key VARCHAR PRIMARY KEY,
                     value VARCHAR NOT NULL,
@@ -713,9 +694,6 @@ class _DuckDbStoreBase:
             instrument_count = int(instrument_row[0]) if instrument_row else 0
             bar_count = int(bar_row[0]) if bar_row else 0
             first, last = date_row if date_row else (None, None)
-            local_import = connection.execute(
-                "SELECT value FROM data_meta WHERE key = 'last_local_import_at'"
-            ).fetchone()
             online_sync = connection.execute(
                 "SELECT value FROM data_meta WHERE key = 'last_online_sync_at'"
             ).fetchone()
@@ -732,7 +710,6 @@ class _DuckDbStoreBase:
             bar_count=bar_count,
             data_start=_date_text(first),
             data_end=_date_text(last),
-            last_local_import_at=str(local_import[0]) if local_import else None,
             last_online_sync_at=str(online_sync[0]) if online_sync else None,
             last_online_provider=str(online_provider[0]) if online_provider else None,
             last_online_provider_version=(

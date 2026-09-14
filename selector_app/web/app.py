@@ -29,7 +29,6 @@ from selector_app.market_data.auto_sync import (
     DEFAULT_AUTO_SYNC_INTERVAL_SECONDS,
     AutomaticMarketSyncScheduler,
 )
-from selector_app.market_data.day_importer import LocalDayImporter
 from selector_app.market_data.etfquest_adapter import ETFQuestMarketDataAdapter
 from selector_app.market_data.maintenance import (
     DatabaseMaintenanceScheduler,
@@ -95,7 +94,6 @@ def create_app(
     market_data_store: DuckDbMarketDataStore | object | None = None,
     market_data_adapter: MarketDataAdapter | object | None = None,
     membership_client: ETFQuestMembershipClient | object | None = None,
-    local_day_importer: LocalDayImporter | object | None = None,
     indicator_cache: IndicatorCache | object | None = None,
     indicator_precompute_service: IndicatorPrecomputeService | object | None = None,
     database_maintenance_service: DatabaseMaintenanceService | object | None = None,
@@ -149,10 +147,6 @@ def create_app(
         engine=engine
         or ScreenEngine(adapter=selected_adapter, indicator_cache=selected_indicator_cache)
     )
-    selected_importer = cast(
-        LocalDayImporter,
-        local_day_importer if local_day_importer is not None else LocalDayImporter(selected_store),
-    )
     selected_portfolio_service = cast(
         PortfolioBacktestService,
         portfolio_backtest_service
@@ -192,7 +186,6 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        app.state.startup_import_job_id = None
         app.state.auto_sync_job_id = None
         auto_sync_task: asyncio.Task[None] | None = None
         maintenance_task: asyncio.Task[None] | None = None
@@ -270,7 +263,6 @@ def create_app(
     app.state.membership_client = selected_membership_client
     app.state.indicator_cache = selected_indicator_cache
     app.state.indicator_precompute_service = selected_precompute_service
-    app.state.local_day_importer = selected_importer
     app.state.local_market_data_service = local_market_data_service or LocalMarketDataService(
         adapter=selected_adapter,
         store=selected_store,

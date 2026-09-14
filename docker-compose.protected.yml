@@ -8,6 +8,15 @@ services:
         NUITKA_LTO: "${NUITKA_LTO:-auto}"
         NUITKA_REPRODUCIBLE: "${NUITKA_REPRODUCIBLE:-auto}"
     command: ["server", "--host", "0.0.0.0", "--port", "8123"]
+    environment:
+      SELECTOR_MARKET_DATA_SOURCE: etfquest
+      SELECTOR_RELEASE_MODE: "1"
+      SELECTOR_ETFQUEST_DATABASE_PATH: /run/etfquest/database/market_data.db
+    volumes:
+      - type: bind
+        source: ${ETFQUEST_MARKET_DATABASE_DIR:?Set ETFQUEST_MARKET_DATABASE_DIR to ETFQuest's database directory}
+        target: /run/etfquest/database
+        read_only: true
 
   strategy-worker:
     build:
@@ -18,3 +27,12 @@ services:
         NUITKA_LTO: "${NUITKA_LTO:-auto}"
         NUITKA_REPRODUCIBLE: "${NUITKA_REPRODUCIBLE:-auto}"
     command: ["worker"]
+    environment:
+      SELECTOR_MARKET_DATA_SOURCE: etfquest
+      SELECTOR_RELEASE_MODE: "1"
+      SELECTOR_ETFQUEST_DATABASE_PATH: /run/etfquest/database/market_data.db
+    volumes:
+      - type: bind
+        source: ${ETFQUEST_MARKET_DATABASE_DIR:?Set ETFQUEST_MARKET_DATABASE_DIR to ETFQuest's database directory}
+        target: /run/etfquest/database
+        read_only: true

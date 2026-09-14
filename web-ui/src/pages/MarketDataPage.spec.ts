@@ -16,7 +16,6 @@ vi.mock('../api/marketData', async () => {
     fetchStoreStatus: vi.fn(),
     fetchActiveMarketDataJobs: vi.fn(),
     fetchMarketDataCapabilities: vi.fn(),
-    createLocalImport: vi.fn(),
     createOnlineBackfill: vi.fn(),
     createOnlineSync: vi.fn(),
     getMarketDataJob: vi.fn(),
@@ -66,7 +65,6 @@ describe('MarketDataPage', () => {
       bar_count: 580,
       data_start: '2020-01-01',
       data_end: '2024-12-31',
-      last_local_import_at: null,
       last_online_sync_at: null,
     })
   })
@@ -91,6 +89,60 @@ describe('MarketDataPage', () => {
 
     expect(marketApi.fetchLocalChart).toHaveBeenLastCalledWith(expect.objectContaining({ period: 'yearly' }))
     expect(wrapper.get('[data-testid="market-chart-panel"]').text()).toContain('MA5')
+  })
+
+  it('hides local and online write controls when ETFQuest is the read-only source', async () => {
+    vi.mocked(marketApi.fetchStoreStatus).mockResolvedValueOnce({
+      database_path: '/run/etfquest/database/market_data.db',
+      schema_version: 0,
+      instrument_count: 2,
+      bar_count: 580,
+      data_start: '2020-01-01',
+      data_end: '2024-12-31',
+      last_online_sync_at: '2026-09-14T18:30:00Z',
+      last_online_provider: 'etfquest',
+      market_data_source: 'etfquest',
+      market_data_read_only: true,
+      auto_sync_enabled: false,
+    })
+    vi.mocked(marketApi.fetchMarketDataCapabilities).mockResolvedValueOnce({
+      default_provider: 'etfquest',
+      read_only: true,
+      providers: {
+        etfquest: { provider: 'etfquest', available: true, read_only: true },
+      },
+    })
+
+    const wrapper = mount(MarketDataPage)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="shared-market-source"]').text()).toContain('ETFQuest')
+    expect(wrapper.find('[data-testid="market-import-local"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="market-sync-online"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="market-eastmoney-backfill"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="market-store-panel"]').text()).toContain('只读')
+  })
+
+  it('hides legacy market write controls when the store is explicitly read-only', async () => {
+    vi.mocked(marketApi.fetchStoreStatus).mockResolvedValueOnce({
+      database_path: '/data/market/market.duckdb',
+      schema_version: 1,
+      instrument_count: 2,
+      bar_count: 580,
+      data_start: '2020-01-01',
+      data_end: '2024-12-31',
+      last_online_sync_at: null,
+      market_data_source: 'indicator_lab',
+      market_data_read_only: false,
+      legacy_market_write_enabled: false,
+    })
+
+    const wrapper = mount(MarketDataPage)
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="market-import-local"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="market-sync-online"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="read-only-market-source"]').text()).toContain('只读')
   })
 
   it('selects a data-bearing instrument when the first catalog item has no bars', async () => {
@@ -119,48 +171,6 @@ describe('MarketDataPage', () => {
     expect(wrapper.get('[data-testid="market-chart-empty"]').text()).toContain('请选择品种')
   })
 
-  it('imports local vipdoc data and refreshes the DuckDB status', async () => {
-    vi.mocked(marketApi.createLocalImport).mockResolvedValue({ job_id: 'local-1', status: 'queued' })
-    vi.mocked(marketApi.getMarketDataJob).mockResolvedValue({
-      job_id: 'local-1', status: 'completed', progress: 1, total_candidates: 1,
-      total_scanned: 1, errors: 0, error: null, result: null,
-    })
-    const wrapper = mount(MarketDataPage)
-    await flushPromises()
-
-    await wrapper.get('[data-testid="market-import-local"]').trigger('click')
-    await flushPromises()
-
-    expect(marketApi.createLocalImport).toHaveBeenCalledWith({
-      vipdoc_path: '/data/vipdoc', universe: 'all',
-    })
-    expect(marketApi.getMarketDataJob).toHaveBeenCalledWith('local-1')
-    expect(marketApi.fetchStoreStatus).toHaveBeenCalledTimes(2)
-  })
-
-  it('sends the configured market-data scope to local import', async () => {
-    vi.mocked(marketApi.createLocalImport).mockResolvedValue({ job_id: 'local-2', status: 'queued' })
-    vi.mocked(marketApi.getMarketDataJob).mockResolvedValue({
-      job_id: 'local-2', status: 'completed', progress: 1, total_candidates: 1,
-      total_scanned: 1, errors: 0, error: null, result: null,
-    })
-    const wrapper = mount(MarketDataPage)
-    await flushPromises()
-
-    await wrapper.get('[data-testid="market-sync-universe"]').setValue('sh')
-    await wrapper.get('[data-testid="market-sync-type-stock"]').setValue(true)
-    await wrapper.get('[data-testid="market-sync-board-main"]').setValue(true)
-    await wrapper.get('[data-testid="market-import-local"]').trigger('click')
-    await flushPromises()
-
-    expect(marketApi.createLocalImport).toHaveBeenCalledWith({
-      vipdoc_path: '/data/vipdoc',
-      universe: 'sh',
-      instrument_types: ['stock'],
-      boards: ['main'],
-    })
-  })
-
   it('uses one-click sync to update online data without importing local files', async () => {
     vi.mocked(marketApi.createOnlineSync).mockResolvedValue({ job_id: 'sync-1', status: 'queued' })
     vi.mocked(marketApi.getMarketDataJob).mockResolvedValue({
@@ -184,7 +194,7 @@ describe('MarketDataPage', () => {
       universe: 'all',
       bars: 800,
     })
-    expect(wrapper.get('[data-testid="market-data-progress"]').text()).not.toContain('本地导入')
+    expect(wrapper.get('[data-testid="market-data-progress"]').text()).not.toContain('文件导入')
     expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('更新标的 1')
     expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('写入 K 线 1')
     expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('证券列表 4')
@@ -405,7 +415,7 @@ describe('MarketDataPage', () => {
   it('keeps polling a slow market-data job without a fixed attempt timeout', async () => {
     vi.useFakeTimers()
     try {
-      vi.mocked(marketApi.createLocalImport).mockResolvedValue({ job_id: 'slow-1', status: 'queued' })
+      vi.mocked(marketApi.createOnlineSync).mockResolvedValue({ job_id: 'slow-1', status: 'queued' })
       let polls = 0
       vi.mocked(marketApi.getMarketDataJob).mockImplementation(async (jobId) => {
         polls += 1
@@ -417,13 +427,13 @@ describe('MarketDataPage', () => {
           total_scanned: 850,
           errors: 0,
           error: null,
-          result: polls <= 601 ? null : { source: 'local', imported_files: 1703, imported_bars: 1000 },
+          result: polls <= 601 ? null : { source: 'online', updated_files: 1703, written_bars: 1000 },
         }
       })
       const wrapper = mount(MarketDataPage)
       await flushPromises()
 
-      await wrapper.get('[data-testid="market-import-local"]').trigger('click')
+      await wrapper.get('[data-testid="market-sync-online"]').trigger('click')
       for (let attempt = 0; attempt < 602; attempt += 1) {
         await vi.advanceTimersByTimeAsync(500)
         await flushPromises()
@@ -434,43 +444,6 @@ describe('MarketDataPage', () => {
     } finally {
       vi.useRealTimers()
     }
-  })
-
-  it('waits for an automatic startup import before loading the local list', async () => {
-    vi.mocked(marketApi.fetchStoreStatus)
-      .mockResolvedValueOnce({
-        database_path: '/data/market/market.duckdb',
-        schema_version: 2,
-        instrument_count: 0,
-        bar_count: 0,
-        data_start: null,
-        data_end: null,
-        last_local_import_at: null,
-        last_online_sync_at: null,
-        startup_import_job_id: 'startup-1',
-      })
-      .mockResolvedValueOnce({
-        database_path: '/data/market/market.duckdb',
-        schema_version: 2,
-        instrument_count: 1,
-        bar_count: 2,
-        data_start: '2024-01-02',
-        data_end: '2024-01-03',
-        last_local_import_at: '2026-08-30T10:00:00',
-        last_online_sync_at: null,
-        startup_import_job_id: null,
-      })
-    vi.mocked(marketApi.getMarketDataJob).mockResolvedValue({
-      job_id: 'startup-1', status: 'completed', progress: 1, total_candidates: 1,
-      total_scanned: 1, errors: 0, error: null,
-      result: { source: 'local', imported_files: 1, imported_bars: 2 },
-    })
-    const wrapper = mount(MarketDataPage)
-    await flushPromises()
-
-    expect(marketApi.getMarketDataJob).toHaveBeenCalledWith('startup-1')
-    expect(marketApi.fetchLocalInstruments).toHaveBeenCalled()
-    expect(wrapper.get('[data-testid="market-store-status"]').text()).toContain('K线 2')
   })
 
   it('discovers an automatic sync started after the page has loaded and shows progress', async () => {
@@ -484,7 +457,6 @@ describe('MarketDataPage', () => {
           bar_count: 580,
           data_start: '2020-01-01',
           data_end: '2024-12-31',
-          last_local_import_at: null,
           last_online_sync_at: null,
           auto_sync_enabled: true,
           auto_sync_job_id: null,
@@ -497,7 +469,6 @@ describe('MarketDataPage', () => {
           bar_count: 580,
           data_start: '2020-01-01',
           data_end: '2024-12-31',
-          last_local_import_at: null,
           last_online_sync_at: null,
           auto_sync_enabled: true,
           auto_sync_job_id: 'auto-1',

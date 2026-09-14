@@ -328,20 +328,6 @@ class MarketSyncRequest(BaseModel):
         return self
 
 
-class LocalMarketImportRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    vipdoc_path: str = Field(min_length=1, max_length=1024)
-    universe: Literal["all", "sh", "sz"] = "all"
-    instrument_types: list[InstrumentType] | None = Field(default=None, max_length=4)
-    boards: list[InstrumentBoard] | None = Field(default=None, max_length=7)
-
-    @model_validator(mode="after")
-    def validate_scope(self) -> LocalMarketImportRequest:
-        validate_instrument_scope(self.universe, self.instrument_types, self.boards)
-        return self
-
-
 class BacktestRequest(BaseModel):
     """Single-stock daily backtest request."""
 

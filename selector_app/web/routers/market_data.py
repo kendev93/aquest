@@ -34,10 +34,8 @@ from selector_app.market_data.auto_sync import (
     MARKET_SYNC_EXCLUSIVE_GROUP,
     MARKET_SYNC_JOB_DESCRIPTIONS,
 )
-from selector_app.market_data.day_importer import ProgressCallback as LocalImportProgressCallback
 from selector_app.market_data.models import (
     DataStoreStatus,
-    ImportReport,
     InstrumentBoard,
     InstrumentType,
     MarketCode,
@@ -58,7 +56,7 @@ from selector_app.screening.jobs import (
 )
 from selector_app.tdx_protocol.errors import TdxConnectionError
 
-from ..schemas import LocalMarketImportRequest, MarketSyncRequest
+from ..schemas import MarketSyncRequest
 
 router = APIRouter(prefix="/market-data", tags=["market-data"])
 
@@ -74,7 +72,7 @@ class MarketSyncService(Protocol):
     def sync(
         self,
         config: MarketSyncConfig,
-        progress_callback: LocalImportProgressCallback | None = None,
+        progress_callback: ProgressCallback | None = None,
         *,
         detail_callback: DetailCallback | None = None,
         abort_check: AbortCheck | None = None,
@@ -105,20 +103,6 @@ class LocalMarketDataServiceLike(Protocol):
     ) -> LocalMarketChart: ...
 
 
-class LocalDayImporterLike(Protocol):
-    def import_vipdoc(
-        self,
-        vipdoc_path: str,
-        *,
-        universe: str = "all",
-        instrument_types: list[InstrumentType] | None = None,
-        boards: list[InstrumentBoard] | None = None,
-        progress_callback: ProgressCallback | None = None,
-        detail_callback: DetailCallback | None = None,
-        abort_check: AbortCheck | None = None,
-    ) -> ImportReport | dict[str, object]: ...
-
-
 def _runner(request: Request) -> ScreenJobRunner:
     return cast(ScreenJobRunner, request.app.state.screen_job_runner)
 
@@ -144,14 +128,19 @@ def _shared_market_source(request: Request) -> bool:
     return adapter is not None and str(adapter.__class__.__name__) == "ETFQuestMarketDataAdapter"
 
 
+def _legacy_market_write_enabled(request: Request) -> bool:
+    """Allow legacy local writes only when explicitly enabled for development."""
+
+    if _shared_market_source(request):
+        return False
+    value = str(os.getenv("SELECTOR_ENABLE_LEGACY_MARKET_WRITES") or "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
 def _market_status(request: Request) -> DataStoreStatus:
     adapter = _market_adapter(request)
     status_reader = getattr(adapter, "status", None)
     return status_reader() if callable(status_reader) else _store(request).status()
-
-
-def _importer(request: Request) -> LocalDayImporterLike:
-    return cast(LocalDayImporterLike, request.app.state.local_day_importer)
 
 
 def _precomputer(request: Request) -> IndicatorPrecomputeService:
@@ -180,11 +169,11 @@ def _sync_config(payload: MarketSyncRequest, *, prefer_store_targets: bool) -> M
 
 
 def _result_dict(
-    result: InstrumentDiscoveryReport | MarketSyncReport | ImportReport | dict[str, object],
+    result: InstrumentDiscoveryReport | MarketSyncReport | dict[str, object],
 ) -> dict[str, object]:
     return (
         result.to_dict()
-        if isinstance(result, (InstrumentDiscoveryReport, MarketSyncReport, ImportReport))
+        if isinstance(result, (InstrumentDiscoveryReport, MarketSyncReport))
         else result
     )
 
@@ -331,7 +320,7 @@ def create_indicator_precompute_job(
                 }
             report = _precomputer(request).run(
                 # This task warms DuckDB-derived indicators and does not read
-                # local .day files.  Only /import-local is allowed to do that.
+                # This task warms derived indicators and never reads local files.
                 vipdoc_path=payload.vipdoc_path or ".",
                 universe=payload.universe,
                 instrument_types=tuple(payload.instrument_types or ()),
@@ -344,79 +333,6 @@ def create_indicator_precompute_job(
 
     try:
         job_id = _runner(request).submit_callable(run_precompute, description="指标预计算")
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail="任务执行器暂不可用") from exc
-    return JSONResponse(
-        status_code=status.HTTP_202_ACCEPTED,
-        content={"data": {"job_id": job_id, "status": "queued"}},
-    )
-
-
-@router.post("/import-local", status_code=status.HTTP_202_ACCEPTED)
-def create_local_import(
-    payload: LocalMarketImportRequest,
-    request: Request,
-) -> JSONResponse:
-    if _shared_market_source(request):
-        raise HTTPException(
-            status_code=409,
-            detail="当前使用 ETFQuest 共享行情，请在 ETFQuest 中同步行情",
-        )
-    root = os.path.abspath(os.path.expanduser(payload.vipdoc_path))
-    if not os.path.isdir(root):
-        return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            content={
-                "error": {
-                    "code": "data_directory_error",
-                    "message": f"vipdoc 目录不存在或不是目录: {root}",
-                }
-            },
-        )
-
-    runner = _runner(request)
-    _reject_duplicate_market_job(runner)
-    job_id_holder = [""]
-
-    def abort_check() -> bool:
-        return bool(job_id_holder[0]) and runner.is_cancel_requested(job_id_holder[0])
-
-    def run_import(progress: ProgressReporter) -> dict[str, object]:
-        try:
-            result = _importer(request).import_vipdoc(
-                root,
-                universe=payload.universe,
-                instrument_types=payload.instrument_types,
-                boards=payload.boards,
-                progress_callback=progress,
-                detail_callback=lambda detail: report_progress_detail(progress, detail),
-                abort_check=abort_check,
-            )
-        except MarketDataCancelledError as exc:
-            raise TaskCancelledError(str(exc)) from exc
-        except (MarketDataStoreError, duckdb.Error) as exc:
-            raise TaskUserError(_storage_error_message(exc)) from exc
-        if abort_check():
-            raise TaskCancelledError("行情导入已取消")
-        return _with_indicator_precompute(
-            request,
-            result.to_dict() if isinstance(result, ImportReport) else result,
-            vipdoc_path=root,
-            universe=payload.universe,
-            instrument_types=payload.instrument_types,
-            boards=payload.boards,
-            progress_callback=progress,
-        )
-
-    try:
-        job_id = runner.submit_callable(
-            run_import,
-            description="本地行情导入",
-            exclusive_group=MARKET_SYNC_EXCLUSIVE_GROUP,
-        )
-        job_id_holder[0] = job_id
-    except ActiveJobConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail="任务执行器暂不可用") from exc
     return JSONResponse(
@@ -462,16 +378,7 @@ def market_data_store_status(request: Request) -> dict[str, object] | JSONRespon
             "etfquest" if _shared_market_source(request) else "indicator_lab"
         )
         data["market_data_read_only"] = _shared_market_source(request)
-        startup_job_id = getattr(request.app.state, "startup_import_job_id", None)
-        if startup_job_id:
-            startup_state = _runner(request).get(startup_job_id)
-            if startup_state is None or startup_state.status in {
-                "completed",
-                "failed",
-                "cancelled",
-            }:
-                startup_job_id = None
-        data["startup_import_job_id"] = startup_job_id
+        data["legacy_market_write_enabled"] = _legacy_market_write_enabled(request)
         auto_sync_job_id = getattr(request.app.state, "auto_sync_job_id", None)
         if auto_sync_job_id:
             auto_sync_state = _runner(request).get(auto_sync_job_id)
@@ -542,8 +449,7 @@ def _create_sync_job(
 ) -> JSONResponse:
     """Create an online-only sync job.
 
-    Reading ``.day`` files is deliberately kept in ``/import-local``.  This
-    route, its compatibility alias ``/sync``, backfill, and the automatic
+    This route, its compatibility alias ``/sync``, backfill, and the automatic
     scheduler all operate on online providers and the DuckDB store only.
     """
     if _shared_market_source(request):

@@ -1,7 +1,0 @@
-services:
-  backend:
-    volumes:
-      - type: bind
-        source: ${HOST_VIPDOC_PATH:?HOST_VIPDOC_PATH must point to the desktop TDX vipdoc directory}
-        target: /data/vipdoc
-        read_only: true

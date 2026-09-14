@@ -172,22 +172,12 @@ export interface ActiveJobState {
 }
 
 export interface MarketSyncResult {
-  source?: 'local' | 'online' | 'combined'
+  source?: 'online' | 'online_discovery'
   provider?: MarketDataProvider | 'mixed'
   status?: 'skipped'
   reason?: string
-  vipdoc_path?: string
-  discovered_files?: number
-  imported_files?: number
   updated_files?: number
   unchanged_files?: number
-  skipped_files?: number
-  missing_files?: number
-  imported_instruments?: number
-  replaced_instruments?: number
-  imported_bars?: number
-  provisional_bars?: number
-  filtered_files?: number
   total_candidates?: number
   processed?: number
   listed_instruments?: number
@@ -209,8 +199,6 @@ export interface MarketSyncResult {
   cleanup_seconds?: number
   rate_limit_events?: number
   rate_limit_backoffs?: number
-  local_import?: MarketSyncResult
-  online_sync?: MarketSyncResult
 }
 
 export interface MarketSyncJobState {
@@ -230,8 +218,9 @@ export interface MarketSyncJobState {
 }
 
 export interface MarketDataProviderCapability {
-  provider: MarketDataProvider
+  provider: MarketDataProvider | 'etfquest'
   available: boolean
+  read_only?: boolean
   version?: string | null
   error?: string | null
   instrument_types?: InstrumentType[]
@@ -243,7 +232,9 @@ export interface MarketDataProviderCapability {
 }
 
 export interface MarketDataCapabilities {
-  default_provider: MarketDataProvider
+  default_provider: MarketDataProvider | 'etfquest'
+  read_only?: boolean
+  database_path?: string
   instrument_count?: number
   sync_execution?: {
     mode: string
@@ -253,7 +244,7 @@ export interface MarketDataCapabilities {
   last_online_provider?: string | null
   last_online_provider_version?: string | null
   instrument_list_fingerprint?: string | null
-  providers: Partial<Record<MarketDataProvider, MarketDataProviderCapability>>
+  providers: Partial<Record<MarketDataProvider | 'etfquest', MarketDataProviderCapability>>
 }
 
 export interface DataStoreStatus {
@@ -263,14 +254,15 @@ export interface DataStoreStatus {
   bar_count: number
   data_start: string | null
   data_end: string | null
-  last_local_import_at: string | null
   last_online_sync_at: string | null
   last_online_provider?: string | null
   last_online_provider_version?: string | null
-  startup_import_job_id?: string | null
   auto_sync_job_id?: string | null
   auto_sync_enabled?: boolean
   auto_sync_interval_seconds?: number | null
+  market_data_source?: 'indicator_lab' | 'etfquest' | string
+  market_data_read_only?: boolean
+  legacy_market_write_enabled?: boolean
 }
 
 export type LocalMarketScope = 'all' | 'SH' | 'SZ'

@@ -4,7 +4,6 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { FormulaScreenApiError } from '../api/formulaScreen'
 import {
   cancelMarketDataJob,
-  createLocalImport,
   createOnlineBackfill,
   createOnlineSync,
   fetchActiveMarketDataJobs,
@@ -54,7 +53,6 @@ const BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
 ]
 
 const form = reactive({
-  vipdocPath: '/data/vipdoc',
   syncUniverse: 'all' as 'all' | 'sh' | 'sz',
   syncProvider: 'eastmoney' as MarketDataProvider,
   syncInstrumentTypes: [] as InstrumentType[],
@@ -89,18 +87,33 @@ const ACTIVE_JOB_POLL_INTERVAL_MS = 1000
 let storeStatusPollTimer: number | null = null
 let activeJobPollTimer: number | null = null
 
+const sharedMarketData = computed(() => (
+  storeStatus.value?.market_data_source === 'etfquest'
+  || storeStatus.value?.market_data_read_only === true
+  || providerCapabilities.value?.default_provider === 'etfquest'
+))
+
+const legacyMarketWriteEnabled = computed(() => (
+  !sharedMarketData.value
+  && storeStatus.value?.legacy_market_write_enabled !== false
+))
+
+const readOnlyMarketData = computed(() => !legacyMarketWriteEnabled.value)
+
 const selectedTitle = computed(() => (
   selected.value ? `${selected.value.market} ${selected.value.code}` : '请选择品种'
 ))
 
 const autoSyncActive = computed(() => Boolean(
-  storeStatus.value?.auto_sync_enabled
+  !sharedMarketData.value
+  && storeStatus.value?.auto_sync_enabled
   && storeStatus.value.auto_sync_job_id
   && marketJob.value?.job_id === storeStatus.value.auto_sync_job_id
   && syncLoading.value,
 ))
 
 const autoSyncStatusText = computed(() => {
+  if (sharedMarketData.value) return 'ETFQuest 共享行情（只读）'
   if (storeStatus.value?.auto_sync_enabled === false) return '自动同步已关闭'
   if (autoSyncActive.value) return syncLabel.value || '正在自动同步最新行情…'
   if (storeStatus.value?.auto_sync_enabled) return '自动同步已开启'
@@ -108,6 +121,7 @@ const autoSyncStatusText = computed(() => {
 })
 
 const autoSyncScheduleText = computed(() => {
+  if (sharedMarketData.value) return '由 ETFQuest 统一同步，当前页面不执行行情写入'
   const seconds = storeStatus.value?.auto_sync_interval_seconds
   if (typeof seconds !== 'number' || !Number.isFinite(seconds)) {
     return '启动后检查；每天至少同步一次'
@@ -119,7 +133,6 @@ const syncPhaseText = computed(() => ({
   planning: '正在规划同步区间…',
   fetching: '正在并发下载在线日线…',
   instrument_discovery: `正在刷新${syncProviderLabel.value}证券列表…`,
-  local_import: '正在导入本地行情…',
   online_bars: '正在同步在线日线…',
   merging: '正在合并行情分片…',
   cleanup: '正在清理临时分片…',
@@ -289,11 +302,9 @@ async function loadStoreStatus(): Promise<void> {
   try {
     const status = await fetchStoreStatus()
     storeStatus.value = status
-    const pendingJob = status.startup_import_job_id
-      ? { id: status.startup_import_job_id, label: '正在自动导入本地行情…' }
-      : status.auto_sync_job_id
-        ? { id: status.auto_sync_job_id, label: '正在自动同步最新行情…' }
-        : null
+    const pendingJob = status.auto_sync_job_id
+      ? { id: status.auto_sync_job_id, label: '正在自动同步最新行情…' }
+      : null
     if (pendingJob && marketJob.value?.job_id !== pendingJob.id) {
       syncLoading.value = true
       syncLabel.value = pendingJob.label
@@ -423,33 +434,6 @@ async function loadProviderCapabilities(): Promise<void> {
   } catch {
     // Capability discovery is informational; the sync endpoint remains the source of truth.
     providerCapabilities.value = null
-  }
-}
-
-async function importLocalData(): Promise<void> {
-  const vipdocPath = form.vipdocPath.trim()
-  if (!vipdocPath) {
-    message.value = '请输入通达信 vipdoc 数据目录。'
-    return
-  }
-  syncLoading.value = true
-  syncLabel.value = '正在导入本地行情…'
-  message.value = ''
-  try {
-    const job = await createLocalImport({
-      vipdoc_path: vipdocPath,
-      universe: form.syncUniverse,
-      ...syncScopePayload(),
-    })
-    beginJob(job.job_id, job.status)
-    await waitForJob(job.job_id)
-    await loadStoreStatus()
-    await loadInstruments()
-  } catch (error) {
-    message.value = apiMessage(error)
-  } finally {
-    syncLoading.value = false
-    syncLabel.value = ''
   }
 }
 
@@ -634,13 +618,13 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
         <a class="nav-link" href="/strategy-fitness">策略适配性</a>
         <a class="nav-link active" href="/market-data" aria-current="page">本地行情</a>
       </nav>
-      <div class="topbar-status"><span class="status-dot" aria-hidden="true"></span> 本地数据模式</div>
+      <div class="topbar-status"><span class="status-dot" aria-hidden="true"></span>{{ readOnlyMarketData ? ' 共享行情（只读）' : ' 本地数据模式' }}</div>
     </header>
 
     <main class="content-shell">
       <section class="page-intro">
-        <div><p class="eyebrow">LOCAL MARKET DATA / DUCKDB</p><h1>本地行情</h1><p class="intro-copy">行情统一存储在本地 DuckDB，默认使用 East Money 更新股票日线，也可从通达信 vipdoc 导入。</p></div>
-        <div class="intro-note"><span class="note-label">数据边界</span><strong>本地 DuckDB</strong><small>源文件只读；图表、筛选和回测统一查询数据库</small></div>
+        <div><p class="eyebrow">LOCAL MARKET DATA / DUCKDB</p><h1>本地行情</h1><p class="intro-copy">{{ readOnlyMarketData ? '行情由 ETFQuest 统一同步，本页面只读查询共享数据库。' : '当前为开发兼容模式，可在本页面执行本地行情写入。' }}</p></div>
+        <div class="intro-note"><span class="note-label">数据边界</span><strong>{{ readOnlyMarketData ? 'ETFQuest 共享数据库' : '本地 DuckDB' }}</strong><small>{{ readOnlyMarketData ? '共享行情只读；图表、筛选和回测统一查询数据库' : '仅开发兼容模式允许本地写入' }}</small></div>
       </section>
 
       <div v-if="message" class="notice error" role="alert" data-testid="market-data-message">{{ message }}</div>
@@ -654,28 +638,33 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
         </div>
         <div class="store-meta" data-testid="market-store-meta">
           <span>数据库 {{ storeStatus?.database_path ?? '—' }}</span>
-          <span>最近本地导入 {{ storeStatus?.last_local_import_at ?? '—' }}</span>
           <span>最近在线更新 {{ storeStatus?.last_online_sync_at ?? '—' }} · {{ storeStatus?.last_online_provider ?? '—' }}</span>
         </div>
-        <div v-if="storeStatus?.auto_sync_enabled !== undefined" class="auto-sync-status" :class="{ active: autoSyncActive }" data-testid="auto-sync-status">
+        <div v-if="readOnlyMarketData" class="auto-sync-status shared" data-testid="shared-market-status">
+          <span class="auto-sync-dot" aria-hidden="true"></span>
+          <div><strong>共享行情（只读）</strong><small>请在行情管理端执行同步和导入</small></div>
+        </div>
+        <div v-else-if="storeStatus?.auto_sync_enabled !== undefined" class="auto-sync-status" :class="{ active: autoSyncActive }" data-testid="auto-sync-status">
           <span class="auto-sync-dot" aria-hidden="true"></span>
           <div><strong>{{ autoSyncStatusText }}</strong><small>{{ autoSyncScheduleText }}</small></div>
         </div>
-        <div class="market-sync-form">
-          <label for="market-vipdoc-path">通达信 vipdoc 导入源</label>
-          <input id="market-vipdoc-path" v-model="form.vipdocPath" data-testid="market-vipdoc-path" type="text" placeholder="/data/vipdoc">
+        <div v-if="readOnlyMarketData" class="shared-market-source" data-testid="read-only-market-source">
+          <strong>当前为只读行情模式</strong>
+          <span v-if="sharedMarketData" data-testid="shared-market-source">ETFQuest 共享行情（只读）</span>
+          <span>{{ sharedMarketData ? '行情同步、目录更新和数据写入由 ETFQuest 负责，本页面只读取共享结果。' : '当前数据源禁止本地行情写入，请在行情管理端完成同步或导入。' }}</span>
+        </div>
+        <div v-else class="market-sync-form">
           <div class="scope-config" data-testid="market-sync-scope">
             <div><label for="market-sync-universe">同步市场</label><select id="market-sync-universe" v-model="form.syncUniverse" data-testid="market-sync-universe"><option value="all">沪深全部</option><option value="sh">仅上海</option><option value="sz">仅深圳</option></select></div>
             <div class="scope-options"><span>证券类型</span><label v-for="option in INSTRUMENT_TYPE_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-sync-type-${option.key}`" :checked="form.syncInstrumentTypes.includes(option.key)" @change="toggleInstrumentType(option.key)">{{ option.label }}</label></div>
             <div class="scope-options"><span>板块</span><label v-for="option in BOARD_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-sync-board-${option.key}`" :checked="form.syncBoards.includes(option.key)" @change="toggleBoard(option.key)">{{ option.label }}</label></div>
             <div class="scope-options provider-options"><span>行情源</span><label><input v-model="form.syncProvider" type="radio" value="eastmoney" data-testid="market-provider-eastmoney">East Money（默认）</label><label><input v-model="form.syncProvider" type="radio" value="tdx" data-testid="market-provider-tdx">TDX（遗留）</label></div>
-            <small class="scope-helper">类型或板块未勾选表示不限制；两者同时选择时取交集。一键同步只刷新证券列表并补充在线日线，不读取 vipdoc；只有“导入本地行情”才会读取 .day 文件。主板、科创板和创业板股票默认使用 East Money；全量补齐按钮只请求缺失历史区间。</small>
+            <small class="scope-helper">类型或板块未勾选表示不限制；两者同时选择时取交集。一键同步只刷新证券列表并补充在线日线。主板、科创板和创业板股票默认使用 East Money；全量补齐按钮只请求缺失历史区间。</small>
             <small v-if="providerCapabilities?.providers.eastmoney?.history_sources?.length" class="scope-helper">East Money 备用接口：{{ providerCapabilities.providers.eastmoney.history_sources.join(' → ') }}</small>
             <small v-if="providerCapabilities?.providers.eastmoney && !providerCapabilities.providers.eastmoney.available" class="scope-warning">{{ providerCapabilities.providers.eastmoney.error || 'East Money 当前不可用，请重新构建 Docker 镜像。' }}</small>
           </div>
           <div class="market-sync-actions">
-            <button class="primary-button" data-testid="market-import-local" type="button" :disabled="syncLoading" @click="importLocalData">{{ syncLoading ? '同步进行中…' : '导入本地行情' }}</button>
-            <button class="secondary-button" data-testid="market-sync-online" type="button" :disabled="syncLoading" @click="syncOnlineData">一键同步行情</button>
+            <button class="primary-button" data-testid="market-sync-online" type="button" :disabled="syncLoading" @click="syncOnlineData">一键同步行情</button>
             <button v-if="form.syncProvider === 'eastmoney'" class="secondary-button" data-testid="market-eastmoney-backfill" type="button" :disabled="syncLoading" @click="backfillOnlineData">{{ syncLoading ? '回填进行中…' : 'East Money 全量补齐' }}</button>
           </div>
           </div>
@@ -693,9 +682,7 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
             <span v-if="marketJob.result.execution_mode === 'process_pool_staging'">执行模式 8 进程分片</span>
             <span v-if="marketJob.result.staged_rows !== undefined">暂存 {{ marketJob.result.staged_rows }} 根</span>
             <span v-if="marketJob.result.merged_rows !== undefined">合并 {{ marketJob.result.merged_rows }} 根</span>
-            <template v-if="marketJob.result.source === 'local'"><span>导入文件 {{ marketJob.result.imported_files ?? 0 }}</span><span>替换标的 {{ marketJob.result.replaced_instruments ?? 0 }}</span><span>写入 K 线 {{ marketJob.result.imported_bars ?? 0 }}</span><span>跳过 {{ marketJob.result.skipped_files ?? 0 }}</span></template>
-            <template v-else-if="marketJob.result.source === 'combined'"><span>本地导入 {{ marketJob.result.local_import?.imported_files ?? 0 }} 个文件</span><span>本地写入 {{ marketJob.result.local_import?.imported_bars ?? 0 }} 根</span><span>在线证券列表 {{ marketJob.result.online_sync?.listed_instruments ?? marketJob.result.online_sync?.total_candidates ?? 0 }}</span><span>新增标的 {{ marketJob.result.online_sync?.new_instruments ?? 0 }}</span><span>在线更新 {{ marketJob.result.online_sync?.updated_files ?? 0 }} 个标的</span><span>在线写入 {{ marketJob.result.online_sync?.written_bars ?? 0 }} 根</span></template>
-            <template v-else><span>数据源 {{ marketJob.result.provider ?? '—' }}</span><span>证券列表 {{ marketJob.result.listed_instruments ?? marketJob.result.total_candidates ?? 0 }}</span><span>新增标的 {{ marketJob.result.new_instruments ?? 0 }}</span><span>更新标的 {{ marketJob.result.updated_files ?? 0 }}</span><span>写入 K 线 {{ marketJob.result.written_bars ?? 0 }}</span><span>无变化 {{ marketJob.result.unchanged_files ?? 0 }}</span></template>
+            <span>数据源 {{ marketJob.result.provider ?? '—' }}</span><span>证券列表 {{ marketJob.result.listed_instruments ?? marketJob.result.total_candidates ?? 0 }}</span><span>新增标的 {{ marketJob.result.new_instruments ?? 0 }}</span><span>更新标的 {{ marketJob.result.updated_files ?? 0 }}</span><span>写入 K 线 {{ marketJob.result.written_bars ?? 0 }}</span><span>无变化 {{ marketJob.result.unchanged_files ?? 0 }}</span>
             <span v-if="historySourcesText">日线接口 {{ historySourcesText }}</span><span :class="{ negative: marketJob.result.errors > 0 }">失败 {{ marketJob.result.errors }}</span>
           </div>
         </div>

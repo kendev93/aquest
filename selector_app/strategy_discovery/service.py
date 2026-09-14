@@ -459,7 +459,7 @@ class StrategyDiscoveryService:
             boards=boards,
         )
         if not refs:
-            raise ValueError("本地 DuckDB 没有可用行情，请先在“本地行情”页面导入日线数据")
+            raise ValueError("行情数据库没有可用日线，请先在 ETFQuest 中同步行情")
 
     def _run_impl(
         self,

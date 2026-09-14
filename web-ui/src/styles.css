@@ -162,6 +162,9 @@ input:focus, select:focus { border-color: var(--accent); }
 .sync-current-source strong { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 500; }
 .sync-result-stats { justify-content: flex-start; flex-wrap: wrap; margin-top: 8px; color: var(--muted); font-size: 9px; }
 .auto-sync-status { display: flex; align-items: center; gap: 9px; margin-top: 10px; padding: 9px 10px; border: 1px solid rgba(86, 105, 140, 0.35); background: rgba(11, 21, 43, 0.58); }
+.auto-sync-status.shared { border-color: rgba(96, 165, 250, 0.55); background: rgba(30, 64, 115, 0.22); }
+.shared-market-source { display: grid; gap: 5px; margin-top: 10px; padding: 10px 12px; border-left: 2px solid #60a5fa; background: rgba(30, 64, 115, 0.18); color: var(--muted); font-size: 10px; line-height: 1.45; }
+.shared-market-source strong { color: var(--text); font-size: 11px; }
 .auto-sync-status.active { border-color: rgba(51, 225, 127, 0.55); background: rgba(10, 54, 34, 0.34); }
 .auto-sync-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--muted); box-shadow: 0 0 0 3px rgba(148, 163, 184, 0.1); }
 .auto-sync-status.active .auto-sync-dot { background: var(--accent); box-shadow: 0 0 0 3px rgba(51, 225, 127, 0.14); animation: pulse 1.4s ease-in-out infinite; }

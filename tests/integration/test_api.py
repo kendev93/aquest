@@ -10,14 +10,12 @@ import pandas as pd
 from fastapi.testclient import TestClient
 
 from selector_app.adapters.online_market_sync import OnlineProviderUnavailable
-from selector_app.market_data.day_importer import LocalDayImporter
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.screening.jobs import TaskCancelledError
 from selector_app.screening.models import ScanReport
 from selector_app.tdx_protocol.errors import TdxConnectionError
 from selector_app.web.app import create_app
 from selector_app.web.schemas import FormulaScreenRequest
-from tests.day_helpers import write_day_records
 
 
 class EmptyEngine:
@@ -512,11 +510,6 @@ def test_eastmoney_backfill_forces_stock_full_history_without_local_import() -> 
 
 
 def test_one_click_sync_does_not_import_local_vipdoc(tmp_path: Path) -> None:
-    vipdoc = tmp_path / "vipdoc"
-    write_day_records(
-        vipdoc / "sh" / "lday" / "sh600000.day",
-        [(20240102, 10.0, 11.0, 9.0, 10.5, 1000.0, 10000.0)],
-    )
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     events: list[str] = []
 
@@ -551,21 +544,16 @@ def test_one_click_sync_does_not_import_local_vipdoc(tmp_path: Path) -> None:
                 "failure_reasons": {},
             }
 
-    class TrackingImporter:
-        def import_vipdoc(self, *args, **kwargs):
-            raise AssertionError("一键同步不应读取本地 vipdoc")
-
     with TestClient(
         create_app(
             engine=EmptyEngine(),
             market_sync=FakeMarketSync(),
             market_data_store=store,
-            local_day_importer=TrackingImporter(),
         )
     ) as client:
         response = client.post(
             "/api/v1/market-data/sync",
-            json={"vipdoc_path": str(vipdoc), "universe": "sh"},
+            json={"vipdoc_path": str(tmp_path / "unused-vipdoc"), "universe": "sh"},
         )
         assert response.status_code == 202
         state = wait_for_done(
@@ -766,27 +754,26 @@ def test_backtest_without_dates_uses_recent_five_years(tmp_path: Path) -> None:
     assert received["end_date"] == date(2026, 1, 8)
 
 
-def test_backtest_default_service_reads_day_file_and_serializes_result(tmp_path: Path) -> None:
-    vipdoc = tmp_path / "vipdoc"
-    filepath = vipdoc / "sh/lday/sh600000.day"
-    filepath.parent.mkdir(parents=True)
-    write_day_records(
-        filepath,
-        [
-            (
-                20240100 + index,
-                float(close),
-                float(close) + 0.5,
-                float(close) - 0.5,
-                float(close),
-                100_000,
-                float(close) * 100_000,
-            )
-            for index, close in enumerate((10, 11, 12, 13, 14, 13, 12, 14, 15, 14), start=1)
-        ],
-    )
+def test_backtest_default_service_reads_stored_bars_and_serializes_result(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
-    LocalDayImporter(store).import_vipdoc(vipdoc)
+    close = pd.Series([10, 11, 12, 13, 14, 13, 12, 14, 15, 14], dtype="float64")
+    store.replace_local_bars(
+        "SH",
+        "600000",
+        "stock",
+        pd.DataFrame(
+            {
+                "date": pd.date_range("2024-01-01", periods=len(close), freq="D"),
+                "open": close,
+                "high": close + 0.5,
+                "low": close - 0.5,
+                "close": close,
+                "volume": 100_000.0,
+                "amount": close * 100_000.0,
+                "bar_status": "completed",
+            }
+        ),
+    )
 
     with TestClient(create_app(market_data_store=store)) as client:
         response = client.post(
@@ -794,7 +781,7 @@ def test_backtest_default_service_reads_day_file_and_serializes_result(tmp_path:
             json={
                 "market": "SH",
                 "code": "600000",
-                "vipdoc_path": str(vipdoc),
+                "vipdoc_path": str(tmp_path),
                 "buy_signal": "custom.buy",
                 "sell_signal": "custom.sell",
                 "formula_text": "BUY:C=11; SELL:C=14;",

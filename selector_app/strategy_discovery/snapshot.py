@@ -505,7 +505,7 @@ def _write_snapshot(
         end_date=window.end,
     )
     if total_rows <= 0:
-        raise ValueError("本地 DuckDB 没有可用行情，请先在“本地行情”页面导入日线数据")
+        raise ValueError("行情数据库没有可用日线，请先在 ETFQuest 中同步行情")
     if abort_check is not None and abort_check():
         raise RuntimeError("策略实验已取消")
 

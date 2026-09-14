@@ -26,8 +26,7 @@
 - `tdx_protocol.commands`：证券数量、证券列表和日线请求构造；
 - `tdx_protocol.codec`：日期、价格变长整数、成交量自定义浮点和证券列表字段解码；
 - `tdx_protocol.client.TdxClient`：有限重试、已配置服务器故障转移、列表分页和日线 DataFrame 转换；
-- `market_data.day_format`：32 字节 `.day` 只读解析、证券类型判断、价格/成交量系数和临时 K 线状态；
-- `market_data.day_importer.LocalDayImporter`：文件指纹、全量/增量导入、错误保留旧数据和缺失标记；
+- `market_data.day_format`：开发兼容模式下的 32 字节 `.day` 只读解析、证券类型判断、价格/成交量系数和临时 K 线状态；
 - `market_data.store.DuckDbMarketDataStore`：本地/在线来源优先级、批量查询、去重和 schema 状态。
 
 响应处理有以下安全边界：
@@ -63,14 +62,14 @@
 - 上游的 `SignalScanner`、策略对象、回测引擎、组合引擎和绩效分析器；
 - 上游离线写回 `.day` 的 append/sync API。
 
-业务代码只接收项目自己的 `InstrumentRef`/`StockRef`、规范化 DataFrame、`MarketDataRepository` 和回测结果。在线同步直接写 DuckDB，本地导入才读取用户的 `.day`；任何运行时路径都不会修改源文件。
+业务代码只接收项目自己的 `InstrumentRef`/`StockRef`、规范化 DataFrame、`MarketDataRepository` 和回测结果。正式行情写入由 ETFQuest 负责；本项目发布模式只通过只读适配器读取共享库，任何运行时路径都不会修改源文件或共享数据库。
 
 ## 5. 在线 HTTP 接口变更检查清单
 
 1. 验证 East Money 列表接口仍返回 `f12`/`f14` 代码和名称字段，并检查沪深股票数量没有异常骤降；
 2. 用固定响应 fixture 验证 East Money `klines` 的日期、开高低收、成交量和成交额字段转换；
 3. 用固定 JSONP fixture 验证腾讯日线的字段顺序、成交量/成交额单位转换和日期裁剪；
-4. 验证未复权原始价格口径不会与现有本地 `.day` 数据混用；
+4. 验证未复权原始价格口径不会与开发兼容读取的 `.day` 数据混用；
 5. 验证限流、超时、空响应、重复日期和单标的失败隔离；
 6. 在 Docker 中通过 `pip check`、导入检查和 provider 能力接口确认依赖与版本。
 

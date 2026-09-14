@@ -24,7 +24,7 @@ test('user can browse local instruments and switch chart periods', async ({ page
   await page.route('**/api/v1/market-data/store', (route) => route.fulfill({ json: { data: {
     database_path: '/data/market/market.duckdb', schema_version: 1, instrument_count: 2,
     bar_count: 620, data_start: '2020-01-01', data_end: '2024-12-31',
-    last_local_import_at: null, last_online_sync_at: null,
+    last_online_sync_at: null,
   } } }))
   await page.route('**/api/v1/market-data/local/instruments**', (route) => route.fulfill({ json: instruments }))
   await page.route('**/api/v1/market-data/local/SH/600000/bars*', async (route) => {
@@ -55,7 +55,7 @@ test('user can start an East Money full-history backfill', async ({ page }) => {
   await page.route('**/api/v1/market-data/store', (route) => route.fulfill({ json: { data: {
     database_path: '/data/market/market.duckdb', schema_version: 12, instrument_count: 1,
     bar_count: 100, data_start: '2010-01-01', data_end: '2026-09-10',
-    last_local_import_at: null, last_online_sync_at: null,
+    last_online_sync_at: null,
   } } }))
   await page.route('**/api/v1/market-data/local/instruments**', (route) => route.fulfill({ json: instruments }))
   await page.route('**/api/v1/market-data/local/SH/600000/bars*', (route) => route.fulfill({ json: chart('daily') }))
@@ -93,7 +93,7 @@ test('user can see and cancel an active market-data job', async ({ page }) => {
   await page.route('**/api/v1/market-data/store', (route) => route.fulfill({ json: { data: {
     database_path: '/data/market/market.duckdb', schema_version: 12, instrument_count: 1,
     bar_count: 100, data_start: '2010-01-01', data_end: '2026-09-10',
-    last_local_import_at: null, last_online_sync_at: null,
+    last_online_sync_at: null,
   } } }))
   await page.route('**/api/v1/market-data/local/instruments**', (route) => route.fulfill({ json: instruments }))
   await page.route('**/api/v1/market-data/local/SH/600000/bars*', (route) => route.fulfill({ json: chart('daily') }))

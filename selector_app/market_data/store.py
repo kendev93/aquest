@@ -23,7 +23,6 @@ from .store_base import (
 )
 from .store_history import DuckDbHistoryStore
 from .store_indicator_cache import DuckDbIndicatorCacheStore
-from .store_source_files import DuckDbSourceFileStore
 
 
 class DuckDbMarketDataStore(_DuckDbStoreBase):
@@ -39,7 +38,6 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
         self._bars = DuckDbBarsStore(self)
         self._history = DuckDbHistoryStore(self)
         self._indicator_cache = DuckDbIndicatorCacheStore(self)
-        self._source_files = DuckDbSourceFileStore(self)
 
     def update_instrument_names(self, names: Mapping[tuple[str, str], str | None]) -> int:
         return self._bars.update_instrument_names(names)
@@ -418,44 +416,6 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
 
     def indicator_cache_status(self) -> dict[str, int | str | None]:
         return self._indicator_cache.indicator_cache_status()
-
-    def source_file(self, source_root: str | Path, relative_path: str) -> dict[str, object] | None:
-        return self._source_files.source_file(source_root, relative_path)
-
-    def source_files(self, source_root: str | Path) -> list[dict[str, object]]:
-        return self._source_files.source_files(source_root)
-
-    def record_source_file(
-        self,
-        *,
-        source_root: str | Path,
-        relative_path: str,
-        market: str,
-        code: str,
-        instrument_type: InstrumentType | None,
-        size: int,
-        mtime_ns: int,
-        sha256: str | None,
-        status: str,
-        error: str | None = None,
-        imported: bool = False,
-    ) -> None:
-        self._source_files.record_source_file(
-            source_root=source_root,
-            relative_path=relative_path,
-            market=market,
-            code=code,
-            instrument_type=instrument_type,
-            size=size,
-            mtime_ns=mtime_ns,
-            sha256=sha256,
-            status=status,
-            error=error,
-            imported=imported,
-        )
-
-    def mark_source_missing(self, source_root: str | Path, relative_path: str) -> None:
-        self._source_files.mark_source_missing(source_root, relative_path)
 
 
 __all__ = [

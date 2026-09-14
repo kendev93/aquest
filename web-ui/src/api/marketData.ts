@@ -27,7 +27,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const payload = (await response.json()) as T & ApiErrorPayload
   if (!response.ok) {
     throw new FormulaScreenApiError(
-      payload.error?.message ?? '请求失败，请检查本地行情目录后重试。',
+      payload.error?.message ?? '请求失败，请检查共享行情数据库后重试。',
       response.status,
     )
   }
@@ -85,19 +85,6 @@ export async function fetchStoreStatus(): Promise<DataStoreStatus> {
 
 export async function fetchMarketDataCapabilities(): Promise<MarketDataCapabilities> {
   const response = await request<{ data: MarketDataCapabilities }>(`${API_BASE}/capabilities`)
-  return response.data
-}
-
-export async function createLocalImport(payload: {
-  vipdoc_path: string
-  universe?: LocalMarketScope
-  instrument_types?: InstrumentType[]
-  boards?: InstrumentBoard[]
-}): Promise<{ job_id: string; status: string }> {
-  const response = await request<{ data: { job_id: string; status: string } }>(
-    `${API_BASE}/import-local`,
-    { method: 'POST', body: JSON.stringify(payload) },
-  )
   return response.data
 }
 

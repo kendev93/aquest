@@ -11,9 +11,6 @@ services:
       SELECTOR_DISCOVERY_MEMORY_BUDGET_MB: "${SELECTOR_DISCOVERY_MEMORY_BUDGET_MB:-auto}"
     volumes:
       - type: volume
-        source: vipdoc_data
-        target: /data/vipdoc
-      - type: volume
         source: market_data
         target: /data/market
     expose:
@@ -62,7 +59,5 @@ services:
     restart: unless-stopped
 
 volumes:
-  vipdoc_data:
-    name: indicator_lab_vipdoc
   market_data:
     name: indicator_lab_market

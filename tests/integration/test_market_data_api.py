@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import struct
-import time
 from datetime import date
 from pathlib import Path
 
 import duckdb
 from fastapi.testclient import TestClient
 
-from selector_app.market_data.day_importer import LocalDayImporter
 from selector_app.market_data.etfquest_adapter import ETFQuestMarketDataAdapter
 from selector_app.market_data.service import (
     LocalInstrument,
@@ -123,79 +120,14 @@ def test_local_market_bars_rejects_invalid_code() -> None:
     assert response.status_code == 422
 
 
-def _write_day(path: Path, *dates: int) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(
-        b"".join(
-            struct.pack(
-                "<IIIIIfII",
-                value,
-                1000,
-                1100,
-                900,
-                1050,
-                100000.0,
-                100000,
-                0,
-            )
-            for value in dates
-        )
-    )
-
-
-def _wait_for_job(client: TestClient, job_id: str) -> dict[str, object]:
-    for _ in range(100):
-        response = client.get(f"/api/v1/market-data/jobs/{job_id}")
-        assert response.status_code == 200
-        state = response.json()["data"]
-        if state["status"] in {"completed", "failed"}:
-            return state
-        time.sleep(0.01)
-    raise AssertionError("market data job did not finish")
-
-
-def test_local_import_job_populates_duckdb_and_market_routes_read_it(tmp_path: Path) -> None:
-    vipdoc = tmp_path / "vipdoc"
-    source = vipdoc / "sh" / "lday" / "sh600000.day"
-    _write_day(source, 20240102, 20240103)
-    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
-    importer = LocalDayImporter(store)
-
-    with TestClient(create_app(market_data_store=store, local_day_importer=importer)) as client:
+def test_local_import_endpoint_is_removed() -> None:
+    with TestClient(create_app(auto_sync_enabled=False)) as client:
         response = client.post(
             "/api/v1/market-data/import-local",
-            json={"vipdoc_path": str(vipdoc), "universe": "all"},
+            json={"vipdoc_path": "/data/vipdoc", "universe": "all"},
         )
-        assert response.status_code == 202
-        state = _wait_for_job(client, response.json()["data"]["job_id"])
-        instruments = client.get(
-            "/api/v1/market-data/local/instruments",
-            params={"market": "SH", "keyword": "600000"},
-        )
-        status = client.get("/api/v1/market-data/store")
 
-    assert state["status"] == "completed"
-    assert state["result"]["indicator_precompute"]["total_candidates"] == 1
-    assert state["result"]["indicator_precompute"]["skipped"] == 0
-    assert instruments.status_code == 200
-    assert instruments.json()["data"][0]["code"] == "600000"
-    assert status.status_code == 200
-    assert status.json()["data"]["bar_count"] == 2
-
-
-def test_app_startup_does_not_auto_import_configured_vipdoc(tmp_path: Path, monkeypatch) -> None:
-    vipdoc = tmp_path / "vipdoc"
-    _write_day(vipdoc / "sh" / "lday" / "sh600000.day", 20240102)
-    monkeypatch.setenv("SELECTOR_VIPDOC_PATH", str(vipdoc))
-    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
-    app = create_app(market_data_store=store, auto_sync_enabled=False)
-
-    with TestClient(app) as client:
-        status = client.get("/api/v1/market-data/store")
-
-    assert status.status_code == 200
-    assert status.json()["data"]["startup_import_job_id"] is None
-    assert store.status().bar_count == 0
+    assert response.status_code == 404
 
 
 def test_etfquest_shared_source_is_read_only_and_blocks_indicator_lab_sync(tmp_path: Path) -> None:

@@ -92,7 +92,7 @@ docker compose \
   up -d
 ~~~
 
-这套 Compose 仍然使用原有的 market_data 和 vipdoc_data 数据卷。不要在发布验证中使用用户的生产数据卷；应使用受控副本或临时 volume。
+这套 Compose 使用业务 `market_data` 数据卷；发布模式另外以只读方式挂载共享行情数据库。不要在发布验证中使用用户的生产数据卷；应使用受控副本或临时 volume。
 
 ### 发布前检查
 

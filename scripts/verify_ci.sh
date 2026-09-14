@@ -79,12 +79,6 @@ run_frontend_checks() {
 run_docker_checks() {
   printf '%s\n' '验证 Docker：Compose 配置、后端镜像、前端镜像'
   docker compose config --quiet
-  vipdoc_fixture=$(mktemp -d "${TMPDIR:-/tmp}/indicator-lab-vipdoc.XXXXXX")
-  trap 'rm -rf "$vipdoc_fixture"' EXIT HUP INT TERM
-  HOST_VIPDOC_PATH="$vipdoc_fixture" docker compose \
-    -f docker-compose.yml \
-    -f docker-compose.local-vipdoc.yml \
-    config --quiet
   docker build --file Dockerfile --tag indicator-lab-backend:ci .
   docker build --file Dockerfile.frontend --tag indicator-lab-frontend:ci .
 }

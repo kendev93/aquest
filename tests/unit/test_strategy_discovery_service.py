@@ -165,8 +165,8 @@ def test_service_allows_refinement_when_parent_data_fingerprint_changed() -> Non
     assert result["refinement"]["parent_data_fingerprint"] == "changed-data"
 
 
-def test_service_rejects_an_empty_local_market_store_before_search(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="先在.*导入"):
+def test_service_rejects_an_empty_market_store_before_search(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="先在 ETFQuest 中同步行情"):
         StrategyDiscoveryService(store=DuckDbMarketDataStore(tmp_path / "empty.duckdb")).run(
             request()
         )

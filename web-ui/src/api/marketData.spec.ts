@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
-  createLocalImport,
   createOnlineBackfill,
   createMarketDataSync,
   createOnlineSync,
@@ -41,7 +40,7 @@ describe('market data API', () => {
 
     await expect(fetchLocalInstruments()).rejects.toMatchObject({
       name: 'FormulaScreenApiError',
-      message: '请求失败，请检查本地行情目录后重试。',
+      message: '请求失败，请检查共享行情数据库后重试。',
       status: 422,
     })
   })
@@ -70,26 +69,23 @@ describe('market data API', () => {
     )
   })
 
-  it('starts local import and online sync jobs and reads store status', async () => {
+  it('starts online sync jobs and reads store status', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch')
-      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { job_id: 'local-1', status: 'queued' } }), { status: 202 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ data: { job_id: 'online-1', status: 'queued' } }), { status: 202 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { database_path: '/data/market/market.duckdb', schema_version: 1, instrument_count: 2, bar_count: 10, data_start: '2024-01-01', data_end: '2024-01-10', last_local_import_at: null, last_online_sync_at: null } }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { job_id: 'local-1', status: 'completed', progress: 1, total_candidates: 1, total_scanned: 1, errors: 0, error: null, result: null } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { database_path: '/data/market/market.duckdb', schema_version: 1, instrument_count: 2, bar_count: 10, data_start: '2024-01-01', data_end: '2024-01-10', last_online_sync_at: null } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { job_id: 'online-1', status: 'completed', progress: 1, total_candidates: 1, total_scanned: 1, errors: 0, error: null, result: null } }), { status: 200 }))
 
-    await expect(createLocalImport({ vipdoc_path: '/data/vipdoc', universe: 'all' })).resolves.toMatchObject({ job_id: 'local-1' })
     await expect(createOnlineSync({ universe: 'all', bars: 800 })).resolves.toMatchObject({ job_id: 'online-1' })
     await expect(fetchStoreStatus()).resolves.toMatchObject({ instrument_count: 2 })
-    await expect(getMarketDataJob('local-1')).resolves.toMatchObject({ status: 'completed' })
+    await expect(getMarketDataJob('online-1')).resolves.toMatchObject({ status: 'completed' })
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
-      '/api/v1/market-data/import-local',
       '/api/v1/market-data/sync-online',
       '/api/v1/market-data/store',
-      '/api/v1/market-data/jobs/local-1',
+      '/api/v1/market-data/jobs/online-1',
     ])
     expect(fetchMock.mock.calls[0][1]).toMatchObject({
       method: 'POST',
-      body: JSON.stringify({ vipdoc_path: '/data/vipdoc', universe: 'all' }),
+      body: JSON.stringify({ universe: 'all', bars: 800 }),
     })
   })
 

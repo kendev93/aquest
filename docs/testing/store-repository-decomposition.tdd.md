@@ -27,7 +27,7 @@ request to refactor the oversized DuckDB store without changing behavior.
 
 | # | Guarantee | Test or command | Type | Result |
 |---|---|---|---|---|
-| 1 | The facade is composed of separate bars, history, indicator-cache, and source-file repositories | `tests/unit/test_store_composition.py` | unit | PASS |
+| 1 | The facade is composed of separate bars, history, and indicator-cache repositories | `tests/unit/test_store_composition.py` | unit | PASS |
 | 2 | Backup cleanup retains only the newest copy and deletes it after three days | `tests/unit/test_store_base_backup.py`, `tests/unit/test_duckdb_store.py` | unit | PASS |
 | 3 | Existing market-data, history, migration, read-only, and cache behavior remains compatible | Full Python test suite | integration/unit | PASS |
 | 4 | Refactored source passes formatting and lint rules | `ruff check selector_app tests` | static | PASS |
@@ -39,8 +39,8 @@ request to refactor the oversized DuckDB store without changing behavior.
 
 - `store_base.py` owns DuckDB lifecycle, schema creation/migration, locking,
   frame normalization, and store status/meta operations.
-- `store_bars.py`, `store_history.py`, `store_indicator_cache.py`, and
-  `store_source_files.py` own their respective persistence domains.
+- `store_bars.py`, `store_history.py`, and `store_indicator_cache.py` own their
+  respective persistence domains.
 - `store.py` remains the stable public facade and delegates to those domains.
 
 ## Known gaps

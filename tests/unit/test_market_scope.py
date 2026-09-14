@@ -9,10 +9,8 @@ import pytest
 
 from selector_app.adapters.market_sync import MarketSyncConfig, TdxMarketSync
 from selector_app.market_data.day_format import classify_board
-from selector_app.market_data.day_importer import LocalDayImporter
 from selector_app.market_data.scope import InstrumentScope
 from selector_app.market_data.store import DuckDbMarketDataStore
-from tests.day_helpers import write_day_records
 
 
 @pytest.mark.parametrize(
@@ -76,51 +74,6 @@ def test_store_list_instruments_filters_by_type_and_board(tmp_path: Path) -> Non
     refs = store.list_instruments(instrument_types=("stock",), boards=("main",))
 
     assert [(ref.market, ref.code, ref.board) for ref in refs] == [("SH", "600000", "main")]
-
-
-def test_local_import_only_writes_selected_scope_and_keeps_other_files_available(
-    tmp_path: Path,
-) -> None:
-    vipdoc = tmp_path / "vipdoc"
-    for code in ("600000", "688001"):
-        write_day_records(
-            vipdoc / "sh" / "lday" / f"sh{code}.day",
-            [(20240102, 10.0, 11.0, 9.0, 10.5, 1000, 10000.0)],
-        )
-    write_day_records(
-        vipdoc / "sz" / "lday" / "sz110001.day",
-        [(20240102, 10.0, 11.0, 9.0, 10.5, 1000, 10000.0)],
-    )
-    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
-
-    report = LocalDayImporter(store).import_vipdoc(
-        vipdoc,
-        instrument_types=("stock",),
-        boards=("main",),
-    )
-
-    assert report.imported_instruments == 1
-    assert report.skipped_files == 2
-    assert [ref.code for ref in store.list_instruments()] == ["600000"]
-
-
-def test_partial_market_import_does_not_mark_unscanned_market_missing(tmp_path: Path) -> None:
-    vipdoc = tmp_path / "vipdoc"
-    sh_file = vipdoc / "sh" / "lday" / "sh600000.day"
-    sz_file = vipdoc / "sz" / "lday" / "sz000001.day"
-    for path in (sh_file, sz_file):
-        write_day_records(
-            path,
-            [(20240102, 10.0, 11.0, 9.0, 10.5, 1000, 10000.0)],
-        )
-    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
-    importer = LocalDayImporter(store)
-
-    importer.import_vipdoc(vipdoc)
-    report = importer.import_vipdoc(vipdoc, universe="sh")
-
-    assert report.missing_files == 0
-    assert store.source_file(vipdoc, "sz/lday/sz000001.day")["status"] == "imported"
 
 
 class _ScopeClient:

@@ -49,7 +49,7 @@ def test_custom_mode_requires_both_dates() -> None:
 
 
 def test_recent_mode_requires_available_completed_data() -> None:
-    with pytest.raises(ValueError, match="本地 DuckDB 没有已完成日线"):
+    with pytest.raises(ValueError, match="行情数据库没有已完成日线"):
         resolve_date_range(
             mode="recent5",
             requested_start=None,
