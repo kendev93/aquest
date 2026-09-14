@@ -32,4 +32,38 @@ describe('jobs API', () => {
       expect.objectContaining({ headers: { 'Content-Type': 'application/json' } }),
     )
   })
+
+  it('surfaces a structured error from the shared endpoint', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: { message: '任务服务暂不可用' } }), { status: 503 }),
+    )
+
+    await expect(fetchActiveJobs()).rejects.toMatchObject({
+      name: 'FormulaScreenApiError',
+      message: '任务服务暂不可用',
+      status: 503,
+    })
+  })
+
+  it('falls back to the detail field when the shared endpoint omits an error object', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: '任务服务正在重启' }), { status: 503 }),
+    )
+
+    await expect(fetchActiveJobs()).rejects.toMatchObject({
+      message: '任务服务正在重启',
+      status: 503,
+    })
+  })
+
+  it('uses the default message when the shared endpoint has no error details', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({}), { status: 503 }),
+    )
+
+    await expect(fetchActiveJobs()).rejects.toMatchObject({
+      message: '任务状态读取失败，请稍后重试。',
+      status: 503,
+    })
+  })
 })

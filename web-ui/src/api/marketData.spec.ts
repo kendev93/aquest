@@ -36,6 +36,40 @@ describe('market data API', () => {
     ])
   })
 
+  it('includes formula ids when requesting a local chart', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({
+        data: { market: 'SH', code: '600000', period: 'daily', candles: [] },
+      }), { status: 200 }),
+    )
+
+    await expect(fetchLocalChart({
+      market: 'SH',
+      code: '600000',
+      formula_ids: ['indicator_one.rsi14', 'indicator_two.macd'],
+    })).resolves.toMatchObject({ code: '600000' })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/market-data/local/SH/600000/bars?formula_ids=indicator_one.rsi14%2Cindicator_two.macd',
+      expect.objectContaining({ headers: { 'Content-Type': 'application/json' } }),
+    )
+  })
+
+  it('requests a local chart without optional filters', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({
+        data: { market: 'SH', code: '600000', period: 'daily', candles: [] },
+      }), { status: 200 }),
+    )
+
+    await expect(fetchLocalChart({ market: 'SH', code: '600000' })).resolves.toMatchObject({
+      code: '600000',
+    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/market-data/local/SH/600000/bars',
+      expect.objectContaining({ headers: { 'Content-Type': 'application/json' } }),
+    )
+  })
+
   it('surfaces local-data API errors', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(JSON.stringify({ error: {} }), { status: 422 }))
 
@@ -122,6 +156,16 @@ describe('market data API', () => {
       name: 'FormulaScreenApiError',
       status: 502,
       message: '<html><body>502 Bad Gateway</body></html>',
+    })
+  })
+
+  it('reports an empty successful response as an API error', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response('', { status: 200 }))
+
+    await expect(fetchStoreStatus()).rejects.toMatchObject({
+      name: 'FormulaScreenApiError',
+      status: 200,
+      message: '服务器返回了空响应，请稍后重试。',
     })
   })
 

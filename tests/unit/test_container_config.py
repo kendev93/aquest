@@ -64,6 +64,13 @@ def test_shared_start_script_handles_macos_application_support_path(tmp_path: Pa
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     docker_args = tmp_path / "docker-args.txt"
+    fake_uname = fake_bin / "uname"
+    fake_uname.write_text(
+        "#!/bin/sh\nprintf '%s\\n' Darwin\n",
+        encoding="utf-8",
+    )
+    fake_uname.chmod(0o755)
+
     fake_docker = fake_bin / "docker"
     fake_docker.write_text(
         '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "$DOCKER_ARGS_FILE"\n',
