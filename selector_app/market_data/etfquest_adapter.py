@@ -10,11 +10,11 @@ from __future__ import annotations
 import os
 import platform
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
-from typing import Iterator, cast
+from typing import cast
 
 import duckdb
 import pandas as pd
@@ -63,7 +63,14 @@ def default_etfquest_database_path() -> Path:
 
     system = platform.system()
     if system == "Darwin":
-        return Path.home() / "Library" / "Application Support" / "ETFQuest" / "database" / "market_data.db"
+        return (
+            Path.home()
+            / "Library"
+            / "Application Support"
+            / "ETFQuest"
+            / "database"
+            / "market_data.db"
+        )
     if system == "Windows":
         program_data = os.getenv("ProgramData", r"C:\ProgramData")
         return Path(program_data) / "ETFQuest" / "database" / "market_data.db"
@@ -76,6 +83,8 @@ def _empty_bars() -> pd.DataFrame:
 
 def _normalise_asset_type(raw_type: object, symbol: str) -> InstrumentType:
     value = str(raw_type or "").strip().lower()
+    if symbol.lower().startswith(("sh000", "sz399")):
+        return "index"
     if value in {"stock", "股票"}:
         return "stock"
     if value in {"index", "指数"}:
@@ -85,8 +94,6 @@ def _normalise_asset_type(raw_type: object, symbol: str) -> InstrumentType:
     if value in {"fund", "etf", "lof", "基金"}:
         return "fund"
     clean = symbol.lower().removeprefix("sh").removeprefix("sz")
-    if symbol.lower().startswith(("sh000", "sz399")):
-        return "index"
     if clean.startswith(("51", "52", "56", "58", "15", "16", "17", "18")):
         return "fund"
     return "stock"
@@ -146,7 +153,9 @@ class ETFQuestMarketDataAdapter:
                 last_error = exc
                 message = str(exc).lower()
                 if "lock" not in message and "conflict" not in message and "busy" not in message:
-                    raise ETFQuestMarketDataError("ETFQuest 行情数据库无法读取，请检查数据库版本") from exc
+                    raise ETFQuestMarketDataError(
+                        "ETFQuest 行情数据库无法读取，请检查数据库版本"
+                    ) from exc
         raise ETFQuestMarketDataError("ETFQuest 行情数据库正在同步，请稍后重试") from last_error
 
     @staticmethod
@@ -260,7 +269,9 @@ class ETFQuestMarketDataAdapter:
             raise ValueError("行情预热 K 线数量必须是非负整数")
         if warmup_bars and start_date is None:
             raise ValueError("行情预热 K 线需要设置开始日期")
-        return self._read_many(refs, start_date=start_date, end_date=end_date, warmup_bars=warmup_bars)
+        return self._read_many(
+            refs, start_date=start_date, end_date=end_date, warmup_bars=warmup_bars
+        )
 
     def _read_many(
         self,
@@ -305,7 +316,7 @@ class ETFQuestMarketDataAdapter:
                             FROM market_data AS bars
                             INNER JOIN _requested_symbols AS requested
                                 ON bars.symbol = requested.symbol
-                            WHERE {' AND '.join(conditions)}
+                            WHERE {" AND ".join(conditions)}
                         )
                         SELECT symbol, date, open, high, low, close, volume, update_time
                         FROM visible
@@ -321,7 +332,7 @@ class ETFQuestMarketDataAdapter:
                         FROM market_data AS bars
                         INNER JOIN _requested_symbols AS requested
                             ON bars.symbol = requested.symbol
-                        WHERE {' AND '.join(conditions)}
+                        WHERE {" AND ".join(conditions)}
                         ORDER BY bars.symbol, bars.date
                     """
                     result = connection.execute(query, parameters).df()
@@ -347,7 +358,9 @@ class ETFQuestMarketDataAdapter:
             frame["price_basis"] = "raw"
             frame["bar_status"] = "completed"
             frame["imported_at"] = frame["update_time"]
-            frame = frame.rename(columns={"_source_symbol": "_ignored_symbol", "update_time": "_ignored_update_time"})
+            frame = frame.rename(
+                columns={"_source_symbol": "_ignored_symbol", "update_time": "_ignored_update_time"}
+            )
             rows.append(frame[_BAR_COLUMNS])
         return pd.concat(rows, ignore_index=True) if rows else _empty_bars()
 

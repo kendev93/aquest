@@ -69,7 +69,7 @@ def test_stage_writer_uses_an_independent_duckdb_file(tmp_path: Path) -> None:
             range_start="2024-01-02",
             range_end="2024-01-03",
             retries=0,
-        history_source="eastmoney",
+            history_source="eastmoney",
         )
 
     assert written == 2
@@ -92,7 +92,7 @@ def test_stage_merge_preserves_local_rows_and_is_idempotent(tmp_path: Path) -> N
             range_start="2024-01-02",
             range_end="2024-01-03",
             retries=0,
-        history_source="eastmoney",
+            history_source="eastmoney",
         )
 
     first = main.merge_online_stage(stage_path)
@@ -220,7 +220,7 @@ def test_market_data_sync_merges_staged_worker_results(monkeypatch, tmp_path: Pa
                 range_start="2024-01-02",
                 range_end="2024-01-03",
                 retries=0,
-        history_source="eastmoney",
+                history_source="eastmoney",
             )
         return StageWorkerResult(
             worker_id=request.worker_id,
@@ -231,7 +231,7 @@ def test_market_data_sync_merges_staged_worker_results(monkeypatch, tmp_path: Pa
             staged_rows=rows,
             errors=0,
             failure_reasons={},
-        history_sources={"eastmoney": 1},
+            history_sources={"eastmoney": 1},
         )
 
     monkeypatch.setattr(market_data_sync_module, "ProcessPoolExecutor", ImmediateExecutor)

@@ -86,10 +86,41 @@ def _evaluate_candidate_process(
     job: tuple[object, ...],
 ) -> Mapping[str, object]:
     if len(job) == 6:
-        candidate, request, stage, fidelity, database_path, checkpoint = job
+        legacy_job = cast(
+            tuple[
+                StrategyCandidate,
+                DiscoveryRequest,
+                str,
+                str | None,
+                str,
+                Mapping[str, object] | None,
+            ],
+            job,
+        )
+        candidate, request, stage, fidelity, database_path, checkpoint = legacy_job
         market_data_path = None
     else:
-        candidate, request, stage, fidelity, database_path, market_data_path, checkpoint = job
+        extended_job = cast(
+            tuple[
+                StrategyCandidate,
+                DiscoveryRequest,
+                str,
+                str | None,
+                str,
+                str | None,
+                Mapping[str, object] | None,
+            ],
+            job,
+        )
+        (
+            candidate,
+            request,
+            stage,
+            fidelity,
+            database_path,
+            market_data_path,
+            checkpoint,
+        ) = extended_job
     if _WORKER_DISCOVERY_SERVICE is None:
         _init_discovery_worker(database_path, market_data_path=market_data_path)
     assert _WORKER_DISCOVERY_SERVICE is not None
@@ -122,7 +153,9 @@ class StrategyDiscoveryService:
         evaluation_workers: int | None = None,
     ) -> None:
         selected_store = store or DuckDbMarketDataStore()
-        selected_market_adapter = market_data_adapter or getattr(portfolio_service, "_adapter", None)
+        selected_market_adapter = market_data_adapter or getattr(
+            portfolio_service, "_adapter", None
+        )
         if selected_market_adapter is None:
             selected_market_adapter = DuckDbMarketDataAdapter(selected_store)
         self._market_data_adapter = cast(MarketDataAdapter, selected_market_adapter)
@@ -135,7 +168,9 @@ class StrategyDiscoveryService:
         self._evaluation_workers = validate_discovery_workers(
             resolve_discovery_workers() if evaluation_workers is None else evaluation_workers
         )
-        self._parallel_enabled = isinstance(self._portfolio_service, PortfolioBacktestService) and all(
+        self._parallel_enabled = isinstance(
+            self._portfolio_service, PortfolioBacktestService
+        ) and all(
             callable(getattr(self._market_data_adapter, name, None))
             for name in ("read_many_stocks", "count_many_stocks")
         )

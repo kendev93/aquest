@@ -12,7 +12,6 @@ from typing import Literal, Protocol, cast
 from selector_app.market_data.adapter import (
     BatchMarketDataAdapter,
     DuckDbMarketDataAdapter,
-    MarketDataAdapter,
 )
 from selector_app.market_data.models import InstrumentBoard, InstrumentType
 from selector_app.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
@@ -81,7 +80,9 @@ class FileStrategyJobBackend:
         self._store = store
         self._job_store = job_store
         self._worker_count = worker_count
-        self._market_data_adapter: BatchMarketDataAdapter = market_data_adapter or DuckDbMarketDataAdapter(store)
+        self._market_data_adapter: BatchMarketDataAdapter = (
+            market_data_adapter or DuckDbMarketDataAdapter(store)
+        )
 
     def preflight(self, request: DiscoveryRequest) -> DiscoveryResourceEstimate:
         return self._preflight_request(request)

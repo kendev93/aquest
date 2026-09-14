@@ -68,10 +68,18 @@ def _evaluate_replay_candidate_process(
     job: tuple[object, ...],
 ) -> Mapping[str, object]:
     if len(job) == 4:
-        candidate_config, database_path, snapshot_path, total_candidates = job
+        legacy_job = cast(tuple[dict[str, object], str, str, int], job)
+        candidate_config, database_path, snapshot_path, total_candidates = legacy_job
         market_data_path = None
     else:
-        candidate_config, database_path, snapshot_path, market_data_path, total_candidates = job
+        extended_job = cast(tuple[dict[str, object], str, str, str | None, int], job)
+        (
+            candidate_config,
+            database_path,
+            snapshot_path,
+            market_data_path,
+            total_candidates,
+        ) = extended_job
     if _WORKER_REPLAY_SERVICE is None or _WORKER_REPLAY_SNAPSHOT is None:
         _init_replay_worker(database_path, snapshot_path, market_data_path)
     assert _WORKER_REPLAY_SERVICE is not None
@@ -101,7 +109,8 @@ class StrategyReplayService:
         self._store = store
         self._market_data_adapter = cast(
             MarketDataAdapter,
-            market_data_adapter or getattr(portfolio_service, "_adapter", None)
+            market_data_adapter
+            or getattr(portfolio_service, "_adapter", None)
             or DuckDbMarketDataAdapter(store),
         )
         self._evaluation_workers = validate_discovery_workers(

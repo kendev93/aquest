@@ -36,6 +36,7 @@ from selector_app.market_data.auto_sync import (
 )
 from selector_app.market_data.day_importer import ProgressCallback as LocalImportProgressCallback
 from selector_app.market_data.models import (
+    DataStoreStatus,
     ImportReport,
     InstrumentBoard,
     InstrumentType,
@@ -134,6 +135,21 @@ def _store(request: Request) -> DuckDbMarketDataStore:
     return cast(DuckDbMarketDataStore, request.app.state.market_data_store)
 
 
+def _market_adapter(request: Request) -> object | None:
+    return getattr(request.app.state, "market_data_adapter", None)
+
+
+def _shared_market_source(request: Request) -> bool:
+    adapter = _market_adapter(request)
+    return adapter is not None and str(adapter.__class__.__name__) == "ETFQuestMarketDataAdapter"
+
+
+def _market_status(request: Request) -> DataStoreStatus:
+    adapter = _market_adapter(request)
+    status_reader = getattr(adapter, "status", None)
+    return status_reader() if callable(status_reader) else _store(request).status()
+
+
 def _importer(request: Request) -> LocalDayImporterLike:
     return cast(LocalDayImporterLike, request.app.state.local_day_importer)
 
@@ -184,7 +200,7 @@ def _with_indicator_precompute(
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> dict[str, object]:
     try:
-        store_status = _store(request).status()
+        store_status = _market_status(request)
         if should_defer_precompute(store_status.bar_count):
             return {
                 **result,
@@ -239,6 +255,36 @@ def indicator_cache_status(request: Request) -> dict[str, object] | JSONResponse
 
 @router.get("/capabilities", response_model=None)
 def market_data_capabilities(request: Request) -> dict[str, object]:
+    if _shared_market_source(request):
+        adapter = _market_adapter(request)
+        try:
+            source_status = _market_status(request)
+            available = True
+            instrument_count = source_status.instrument_count
+            bar_count = source_status.bar_count
+            error_message = None
+        except (OSError, MarketDataStoreError, duckdb.Error, RuntimeError) as exc:
+            available = False
+            instrument_count = 0
+            bar_count = 0
+            error_message = _storage_error_message(exc)
+        return {
+            "data": {
+                "default_provider": "etfquest",
+                "read_only": True,
+                "database_path": str(getattr(adapter, "database_path", "")),
+                "instrument_count": instrument_count,
+                "bar_count": bar_count,
+                "providers": {
+                    "etfquest": {
+                        "provider": "etfquest",
+                        "available": available,
+                        "read_only": True,
+                        **({"message": error_message} if error_message else {}),
+                    }
+                },
+            }
+        }
     service = _service(request)
     method = getattr(service, "provider_capabilities", None)
     if callable(method):
@@ -271,7 +317,7 @@ def create_indicator_precompute_job(
 ) -> JSONResponse:
     def run_precompute(progress: Callable[[int, int], None]) -> dict[str, object]:
         try:
-            store_status = _store(request).status()
+            store_status = _market_status(request)
             if should_defer_precompute(store_status.bar_count):
                 return {
                     "status": "deferred",
@@ -311,6 +357,11 @@ def create_local_import(
     payload: LocalMarketImportRequest,
     request: Request,
 ) -> JSONResponse:
+    if _shared_market_source(request):
+        raise HTTPException(
+            status_code=409,
+            detail="当前使用 ETFQuest 共享行情，请在 ETFQuest 中同步行情",
+        )
     root = os.path.abspath(os.path.expanduser(payload.vipdoc_path))
     if not os.path.isdir(root):
         return JSONResponse(
@@ -406,7 +457,11 @@ def market_data_job_status(job_id: str, request: Request) -> dict[str, object]:
 @router.get("/store", response_model=None)
 def market_data_store_status(request: Request) -> dict[str, object] | JSONResponse:
     try:
-        data = _store(request).status().to_dict()
+        data = _market_status(request).to_dict()
+        data["market_data_source"] = (
+            "etfquest" if _shared_market_source(request) else "indicator_lab"
+        )
+        data["market_data_read_only"] = _shared_market_source(request)
         startup_job_id = getattr(request.app.state, "startup_import_job_id", None)
         if startup_job_id:
             startup_state = _runner(request).get(startup_job_id)
@@ -448,6 +503,11 @@ def market_data_store_status(request: Request) -> dict[str, object] | JSONRespon
 
 @router.post("/sync-online", status_code=status.HTTP_202_ACCEPTED)
 def create_online_sync_job(payload: MarketSyncRequest, request: Request) -> JSONResponse:
+    if _shared_market_source(request):
+        raise HTTPException(
+            status_code=409,
+            detail="当前使用 ETFQuest 共享行情，请在 ETFQuest 中同步行情",
+        )
     return _create_sync_job(payload, request)
 
 
@@ -486,6 +546,11 @@ def _create_sync_job(
     route, its compatibility alias ``/sync``, backfill, and the automatic
     scheduler all operate on online providers and the DuckDB store only.
     """
+    if _shared_market_source(request):
+        raise HTTPException(
+            status_code=409,
+            detail="当前使用 ETFQuest 共享行情，请在 ETFQuest 中同步行情",
+        )
     runner = _runner(request)
     _reject_duplicate_market_job(runner)
     job_id_holder = [""]

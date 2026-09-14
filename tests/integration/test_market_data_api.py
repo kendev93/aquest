@@ -5,15 +5,18 @@ import time
 from datetime import date
 from pathlib import Path
 
+import duckdb
 from fastapi.testclient import TestClient
 
 from selector_app.market_data.day_importer import LocalDayImporter
+from selector_app.market_data.etfquest_adapter import ETFQuestMarketDataAdapter
 from selector_app.market_data.service import (
     LocalInstrument,
     LocalInstrumentPage,
     LocalMarketChart,
 )
 from selector_app.market_data.store import DuckDbMarketDataStore
+from selector_app.membership import MembershipAccessError, MembershipStatus
 from selector_app.web.app import create_app
 
 
@@ -193,3 +196,85 @@ def test_app_startup_does_not_auto_import_configured_vipdoc(tmp_path: Path, monk
     assert status.status_code == 200
     assert status.json()["data"]["startup_import_job_id"] is None
     assert store.status().bar_count == 0
+
+
+def test_etfquest_shared_source_is_read_only_and_blocks_indicator_lab_sync(tmp_path: Path) -> None:
+    shared_path = tmp_path / "etfquest.db"
+    with duckdb.connect(str(shared_path)) as connection:
+        connection.execute(
+            "CREATE TABLE asset_info ("
+            "symbol VARCHAR, name VARCHAR, type VARCHAR, update_time TIMESTAMP)"
+        )
+        connection.execute(
+            "CREATE TABLE market_data ("
+            "symbol VARCHAR, date DATE, open DOUBLE, close DOUBLE, high DOUBLE, "
+            "low DOUBLE, volume BIGINT, data_type VARCHAR, update_time TIMESTAMP)"
+        )
+        connection.execute("CREATE TABLE trade_calendar (trade_date DATE, update_time TIMESTAMP)")
+        connection.execute(
+            "CREATE TABLE system_settings (key VARCHAR, value VARCHAR, updated_at TIMESTAMP)"
+        )
+        connection.execute(
+            "INSERT INTO asset_info VALUES ('600000', '浦发银行', 'Stock', CURRENT_TIMESTAMP)"
+        )
+        connection.execute(
+            "INSERT INTO market_data VALUES "
+            "('600000', DATE '2024-01-02', 10, 10, 10, 10, 100, 'daily', CURRENT_TIMESTAMP)"
+        )
+    business_store = DuckDbMarketDataStore(tmp_path / "indicator-lab.duckdb")
+    adapter = ETFQuestMarketDataAdapter(shared_path)
+
+    with TestClient(
+        create_app(
+            market_data_store=business_store,
+            market_data_adapter=adapter,
+            auto_sync_enabled=False,
+        )
+    ) as client:
+        status = client.get("/api/v1/market-data/store")
+        capabilities = client.get("/api/v1/market-data/capabilities")
+        blocked = client.post(
+            "/api/v1/market-data/sync",
+            json={"universe": "all", "provider": "eastmoney", "bars": 800},
+        )
+
+    assert status.status_code == 200
+    assert status.json()["data"]["market_data_source"] == "etfquest"
+    assert status.json()["data"]["market_data_read_only"] is True
+    assert capabilities.json()["data"]["default_provider"] == "etfquest"
+    assert blocked.status_code == 503
+    assert blocked.json()["error"]["code"] == "membership_unavailable"
+
+
+class _DeniedMembershipClient:
+    def require_core_access(self):
+        raise MembershipAccessError("会员已到期")
+
+    def check_access(self):
+        return MembershipStatus(
+            level="free",
+            is_vip=False,
+            can_access_core=False,
+            access_state="expired",
+            message="会员已到期",
+        )
+
+
+def test_membership_gate_keeps_health_and_authorization_status_available(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    app = create_app(
+        market_data_store=store,
+        membership_client=_DeniedMembershipClient(),
+        auto_sync_enabled=False,
+    )
+
+    with TestClient(app) as client:
+        health = client.get("/healthz")
+        authorization = client.get("/api/v1/authorization/status")
+        protected = client.get("/api/v1/market-data/indicator-cache")
+
+    assert health.status_code == 200
+    assert authorization.status_code == 200
+    assert authorization.json()["data"]["can_access_core"] is False
+    assert protected.status_code == 403
+    assert protected.json()["error"]["code"] == "membership_required"

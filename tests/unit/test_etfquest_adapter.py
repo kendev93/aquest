@@ -11,21 +11,27 @@ from selector_app.market_data.etfquest_adapter import (
     ETFQuestMarketDataError,
     default_etfquest_database_path,
 )
+from selector_app.market_data.store import DuckDbMarketDataStore
+from selector_app.web.app import create_app
 
 
 def _create_etfquest_database(path: Path) -> None:
     with duckdb.connect(str(path)) as connection:
         connection.execute(
-            "CREATE TABLE asset_info (symbol VARCHAR PRIMARY KEY, name VARCHAR, type VARCHAR, update_time TIMESTAMP)"
+            "CREATE TABLE asset_info ("
+            "symbol VARCHAR PRIMARY KEY, name VARCHAR, type VARCHAR, update_time TIMESTAMP)"
         )
         connection.execute(
-            "CREATE TABLE market_data (symbol VARCHAR, date DATE, open DOUBLE, close DOUBLE, high DOUBLE, low DOUBLE, volume BIGINT, data_type VARCHAR, update_time TIMESTAMP)"
+            "CREATE TABLE market_data ("
+            "symbol VARCHAR, date DATE, open DOUBLE, close DOUBLE, high DOUBLE, "
+            "low DOUBLE, volume BIGINT, data_type VARCHAR, update_time TIMESTAMP)"
         )
         connection.execute(
             "CREATE TABLE trade_calendar (trade_date DATE PRIMARY KEY, update_time TIMESTAMP)"
         )
         connection.execute(
-            "CREATE TABLE system_settings (key VARCHAR PRIMARY KEY, value VARCHAR, updated_at TIMESTAMP)"
+            "CREATE TABLE system_settings ("
+            "key VARCHAR PRIMARY KEY, value VARCHAR, updated_at TIMESTAMP)"
         )
         connection.executemany(
             "INSERT INTO asset_info VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
@@ -94,7 +100,10 @@ def test_adapter_maps_etfquest_assets_and_reads_bars_read_only(tmp_path: Path) -
 
     with pytest.raises(duckdb.Error):
         with duckdb.connect(str(database), read_only=True) as connection:
-            connection.execute("INSERT INTO market_data VALUES ('000001', CURRENT_DATE, 1, 1, 1, 1, 0, 'daily', CURRENT_TIMESTAMP)")
+            connection.execute(
+                "INSERT INTO market_data VALUES "
+                "('000001', CURRENT_DATE, 1, 1, 1, 1, 0, 'daily', CURRENT_TIMESTAMP)"
+            )
 
 
 def test_adapter_requires_existing_etfquest_database(tmp_path: Path) -> None:
@@ -117,3 +126,41 @@ def test_adapter_filters_instrument_types_and_market(tmp_path: Path) -> None:
         ("SH", "510300", "fund"),
         ("SH", "000300", "index"),
     }
+
+
+def test_adapter_supports_batched_reads_and_counts(tmp_path: Path) -> None:
+    database = tmp_path / "market_data.db"
+    _create_etfquest_database(database)
+    adapter = ETFQuestMarketDataAdapter(database)
+    refs = adapter.list_stock_refs(".", "all")
+
+    bars = adapter.read_many_stocks(
+        refs,
+        start_date=date(2024, 1, 3),
+        end_date=date(2024, 1, 3),
+        warmup_bars=1,
+    )
+
+    assert len(bars) == 5
+    assert (
+        adapter.count_many_stocks(refs, start_date=date(2024, 1, 3), end_date=date(2024, 1, 3)) == 1
+    )
+
+
+def test_create_app_can_use_etfquest_adapter_without_changing_business_store(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    shared_database = tmp_path / "etfquest.db"
+    _create_etfquest_database(shared_database)
+    business_store = DuckDbMarketDataStore(tmp_path / "indicator-lab.duckdb")
+    monkeypatch.setenv("SELECTOR_MARKET_DATA_SOURCE", "etfquest")
+    monkeypatch.setenv("SELECTOR_ETFQUEST_DATABASE_PATH", str(shared_database))
+
+    app = create_app(market_data_store=business_store, auto_sync_enabled=True)
+
+    assert isinstance(app.state.market_data_adapter, ETFQuestMarketDataAdapter)
+    assert app.state.market_data_adapter.database_path == shared_database
+    assert app.state.market_data_store.database_path == tmp_path / "indicator-lab.duckdb"
+    assert app.state.local_market_data_service._adapter is app.state.market_data_adapter
+    assert app.state.auto_sync_enabled is False

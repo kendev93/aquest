@@ -490,9 +490,7 @@ def _write_snapshot(
     selected_adapter = cast(
         BatchMarketDataAdapter,
         adapter
-        or DuckDbMarketDataAdapter(
-            DuckDbMarketDataStore(store.database_path, read_only=True)
-        ),
+        or DuckDbMarketDataAdapter(DuckDbMarketDataStore(store.database_path, read_only=True)),
     )
     refs = selected_adapter.list_stock_refs(
         str(base.get("vipdoc_path") or ""),

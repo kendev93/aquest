@@ -117,6 +117,7 @@ class OnlineModule(Protocol):
         timeout: float,
     ) -> pd.DataFrame: ...
 
+
 OnlineModuleFactory = Callable[[], OnlineModule]
 SleepFunction = Callable[[float], None]
 OnlineTarget = tuple[MarketCode, str, InstrumentType, InstrumentBoard, str | None]
@@ -185,9 +186,7 @@ class _RateLimiter:
             self._sleep(delay)
 
 
-def _http_transport(
-    url: str, params: Mapping[str, object], timeout: float
-) -> object:
+def _http_transport(url: str, params: Mapping[str, object], timeout: float) -> object:
     query = urlencode({key: str(value) for key, value in params.items()})
     request = Request(
         f"{url}?{query}",
@@ -356,9 +355,7 @@ class OnlineMarketClient:
         if not isinstance(raw_klines, (list, tuple)):
             raise OnlineDataError("East Money 日线响应缺少有效 klines 列表")
         rows = [
-            str(item).split(",")
-            for item in raw_klines
-            if isinstance(item, str) and item.strip()
+            str(item).split(",") for item in raw_klines if isinstance(item, str) and item.strip()
         ]
         if any(len(row) < 11 for row in rows):
             raise OnlineDataError("East Money 日线响应字段数量不足")
@@ -381,9 +378,7 @@ class OnlineMarketClient:
         frame["日期"] = pd.to_datetime(frame["日期"], errors="coerce")
         for column in ("开盘", "收盘", "最高", "最低", "成交量", "成交额", "换手率"):
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
-        return frame[
-            ["日期", "开盘", "收盘", "最高", "最低", "成交量", "成交额", "换手率"]
-        ]
+        return frame[["日期", "开盘", "收盘", "最高", "最低", "成交量", "成交额", "换手率"]]
 
     def fetch_tencent_daily_history(
         self,
@@ -458,9 +453,7 @@ class OnlineMarketClient:
             frame["turnover"] = frame["turnover"] / 100
             frame["amount"] = frame["amount"] * 10_000
         frame["date"] = dates.dt.date
-        frame = frame.loc[
-            (dates.dt.date >= start) & (dates.dt.date <= end)
-        ]
+        frame = frame.loc[(dates.dt.date >= start) & (dates.dt.date <= end)]
         return frame.reset_index(drop=True)
 
     def _request(
@@ -1505,9 +1498,7 @@ def _as_shanghai(value: datetime) -> datetime:
     return value.astimezone(_SHANGHAI_TZ)
 
 
-def _partition_targets(
-    targets: list[OnlineTarget], worker_count: int
-) -> list[list[OnlineTarget]]:
+def _partition_targets(targets: list[OnlineTarget], worker_count: int) -> list[list[OnlineTarget]]:
     batch_count = min(max(worker_count, 1), len(targets))
     return [targets[index::batch_count] for index in range(batch_count)]
 

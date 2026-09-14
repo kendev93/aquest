@@ -13,9 +13,7 @@ class FakeTransport:
         self.responses = list(responses)
         self.calls: list[tuple[str, dict[str, object], float]] = []
 
-    def __call__(
-        self, url: str, params: Mapping[str, object], timeout: float
-    ) -> object:
+    def __call__(self, url: str, params: Mapping[str, object], timeout: float) -> object:
         self.calls.append((url, dict(params), timeout))
         return self.responses.pop(0)
 
@@ -103,7 +101,7 @@ def test_fetch_tencent_daily_history_decodes_jsonp_and_normalizes_units() -> Non
             'kline_day2026={"code":0,"data":{"sh600000":{"day":['
             '["2026-09-10","10.0","10.5","10.6","9.9","1000.00",{},'
             '"1.20","10500.00","0.00","0.00"]'
-            ']}}}'
+            "]}}}"
         ]
     )
 

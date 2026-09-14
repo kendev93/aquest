@@ -26,14 +26,14 @@ _REQUIRED_COLUMNS = ("date", "open", "high", "low", "close", "volume", "amount")
 
 
 class LocalMarketDataAdapter(Protocol):
+    def stock_ref(self, vipdoc_path: str | Path, market: MarketCode, code: str) -> StockRef: ...
+
     def list_stock_refs(
         self,
         vipdoc_path: str | Path,
         universe: str,
         universe_file: str | Path | None = None,
     ) -> list[StockRef]: ...
-
-    def stock_ref(self, vipdoc_path: str | Path, market: MarketCode, code: str) -> StockRef: ...
 
     def read_stock(self, ref: StockRef) -> pd.DataFrame: ...
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import time
 from collections.abc import Callable, Mapping
@@ -10,6 +11,8 @@ from datetime import datetime, timezone
 from threading import Event
 from typing import Literal, Protocol, cast
 
+from selector_app.market_data.adapter import MarketDataAdapter
+from selector_app.market_data.etfquest_adapter import ETFQuestMarketDataAdapter
 from selector_app.market_data.store import DuckDbMarketDataStore
 
 from .job_backend import completion_state, decorate_result
@@ -265,18 +268,30 @@ def _error_code(exc: Exception) -> str:
     return "worker_failed"
 
 
+def _resolve_market_data_adapter() -> MarketDataAdapter | None:
+    mode = str(os.getenv("SELECTOR_MARKET_DATA_SOURCE") or "").strip().lower()
+    configured = str(os.getenv("SELECTOR_ETFQUEST_DATABASE_PATH") or "").strip()
+    release = str(os.getenv("SELECTOR_RELEASE_MODE") or "").strip().lower()
+    if mode == "etfquest" or configured or release in {"1", "true", "yes", "on"}:
+        return ETFQuestMarketDataAdapter()
+    return None
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     store = DuckDbMarketDataStore()
+    market_adapter = _resolve_market_data_adapter()
     job_store = StrategyJobStore(default_strategy_job_root(store.database_path))
     worker = StrategyDiscoveryWorker(
         job_store,
         StrategyDiscoveryService(
             store=store,
+            market_data_adapter=market_adapter,
             evaluation_workers=resolve_discovery_workers(),
         ),
         service_factory=lambda worker_count: StrategyDiscoveryService(
             store=store,
+            market_data_adapter=_resolve_market_data_adapter(),
             evaluation_workers=worker_count,
         ),
     )

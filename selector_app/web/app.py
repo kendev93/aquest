@@ -6,7 +6,7 @@ import asyncio
 import logging
 import math
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import cast
 
@@ -14,12 +14,17 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.responses import Response
 
 from selector_app.adapters.market_data_sync import MarketDataSync
 from selector_app.backtest.service import BacktestService
 from selector_app.indicators.cache import IndicatorCache
 from selector_app.indicators.precompute import IndicatorPrecomputeService
-from selector_app.market_data.adapter import DuckDbMarketDataAdapter, MarketDataAdapter
+from selector_app.market_data.adapter import (
+    BatchMarketDataAdapter,
+    DuckDbMarketDataAdapter,
+    MarketDataAdapter,
+)
 from selector_app.market_data.auto_sync import (
     DEFAULT_AUTO_SYNC_INTERVAL_SECONDS,
     AutomaticMarketSyncScheduler,
@@ -33,6 +38,11 @@ from selector_app.market_data.maintenance import (
 from selector_app.market_data.service import LocalMarketDataService
 from selector_app.market_data.staging import cleanup_stale_staging, staging_directory
 from selector_app.market_data.store import DuckDbMarketDataStore
+from selector_app.membership import (
+    ETFQuestMembershipClient,
+    MembershipAccessError,
+    MembershipUnavailableError,
+)
 from selector_app.portfolio_backtest.service import PortfolioBacktestService
 from selector_app.screening.engine import ScreenEngine
 from selector_app.screening.jobs import (
@@ -63,7 +73,9 @@ def _resolve_market_data_adapter(store: DuckDbMarketDataStore) -> MarketDataAdap
     mode = str(os.getenv("SELECTOR_MARKET_DATA_SOURCE") or "").strip().lower()
     release_mode = str(os.getenv("SELECTOR_RELEASE_MODE") or "").strip().lower()
     shared_path_configured = bool(str(os.getenv("SELECTOR_ETFQUEST_DATABASE_PATH") or "").strip())
-    use_shared = mode == "etfquest" or shared_path_configured or release_mode in {"1", "true", "yes", "on"}
+    use_shared = (
+        mode == "etfquest" or shared_path_configured or release_mode in {"1", "true", "yes", "on"}
+    )
     if use_shared:
         return ETFQuestMarketDataAdapter()
     return DuckDbMarketDataAdapter(store)
@@ -82,6 +94,7 @@ def create_app(
     local_market_data_service: LocalMarketDataService | object | None = None,
     market_data_store: DuckDbMarketDataStore | object | None = None,
     market_data_adapter: MarketDataAdapter | object | None = None,
+    membership_client: ETFQuestMembershipClient | object | None = None,
     local_day_importer: LocalDayImporter | object | None = None,
     indicator_cache: IndicatorCache | object | None = None,
     indicator_precompute_service: IndicatorPrecomputeService | object | None = None,
@@ -96,8 +109,16 @@ def create_app(
     )
     selected_adapter = cast(
         MarketDataAdapter,
-        market_data_adapter if market_data_adapter is not None else _resolve_market_data_adapter(selected_store),
+        market_data_adapter
+        if market_data_adapter is not None
+        else _resolve_market_data_adapter(selected_store),
     )
+    selected_membership_client = membership_client
+    if selected_membership_client is None and isinstance(
+        selected_adapter,
+        ETFQuestMarketDataAdapter,
+    ):
+        selected_membership_client = ETFQuestMembershipClient(selected_adapter.database_path)
     selected_indicator_cache = cast(
         IndicatorCache,
         indicator_cache if indicator_cache is not None else IndicatorCache(selected_store),
@@ -112,7 +133,11 @@ def create_app(
         MarketDataSync,
         market_sync if market_sync is not None else MarketDataSync(store=selected_store),
     )
-    selected_auto_sync_enabled = _resolve_auto_sync_enabled(auto_sync_enabled)
+    selected_auto_sync_enabled = (
+        False
+        if isinstance(selected_adapter, ETFQuestMarketDataAdapter)
+        else _resolve_auto_sync_enabled(auto_sync_enabled)
+    )
     selected_auto_sync_interval = _resolve_auto_sync_interval(auto_sync_interval_seconds)
     selected_maintenance_service = cast(
         DatabaseMaintenanceService,
@@ -161,7 +186,7 @@ def create_app(
             selected_store,
             StrategyJobStore(default_strategy_job_root(selected_store.database_path)),
             worker_count=resolve_discovery_workers(),
-            market_data_adapter=selected_adapter,
+            market_data_adapter=cast(BatchMarketDataAdapter, selected_adapter),
         ),
     )
 
@@ -242,6 +267,7 @@ def create_app(
     )
     app.state.market_data_store = selected_store
     app.state.market_data_adapter = selected_adapter
+    app.state.membership_client = selected_membership_client
     app.state.indicator_cache = selected_indicator_cache
     app.state.indicator_precompute_service = selected_precompute_service
     app.state.local_day_importer = selected_importer
@@ -260,6 +286,50 @@ def create_app(
         allow_methods=["GET", "POST", "DELETE"],
         allow_headers=["Content-Type"],
     )
+
+    @app.middleware("http")
+    async def membership_gate(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        client = getattr(request.app.state, "membership_client", None)
+        public_paths = {
+            "/healthz",
+            "/api/v1/authorization/status",
+            "/api/v1/market-data/capabilities",
+            "/api/v1/market-data/store",
+            "/docs",
+            "/openapi.json",
+            "/redoc",
+        }
+        if (
+            client is not None
+            and request.method != "OPTIONS"
+            and request.url.path not in public_paths
+        ):
+            try:
+                client.require_core_access()
+            except MembershipAccessError as exc:
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "error": {
+                            "code": "membership_required",
+                            "message": str(exc),
+                        }
+                    },
+                )
+            except MembershipUnavailableError as exc:
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "error": {
+                            "code": "membership_unavailable",
+                            "message": str(exc),
+                        }
+                    },
+                )
+        return await call_next(request)
 
     @app.exception_handler(RequestValidationError)
     async def request_validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
@@ -304,6 +374,34 @@ def create_app(
     @app.get("/healthz", include_in_schema=False)
     async def healthz() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/api/v1/authorization/status", include_in_schema=False, response_model=None)
+    async def authorization_status(request: Request) -> dict[str, object] | JSONResponse:
+        client = getattr(request.app.state, "membership_client", None)
+        if client is None:
+            return {"data": {"required": False, "available": True, "message": "本地开发模式"}}
+        try:
+            status_snapshot = client.check_access()
+            return {"data": {"required": True, "available": True, **status_snapshot.to_dict()}}
+        except MembershipAccessError as exc:
+            return {
+                "data": {
+                    "required": True,
+                    "available": True,
+                    "can_access_core": False,
+                    "message": str(exc),
+                }
+            }
+        except MembershipUnavailableError as exc:
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": {
+                        "code": "membership_unavailable",
+                        "message": str(exc),
+                    }
+                },
+            )
 
     from .routers.backtest import router as backtest_router
     from .routers.jobs import router as jobs_router
