@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   createOnlineBackfill,
+  createFullMarketSync,
   createMarketDataSync,
   createOnlineSync,
   cancelMarketDataJob,
@@ -86,6 +87,41 @@ describe('market data API', () => {
     expect(fetchMock.mock.calls[0][1]).toMatchObject({
       method: 'POST',
       body: JSON.stringify({ universe: 'all', bars: 800 }),
+    })
+  })
+
+  it('posts a shared full-market sync range', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ data: { job_id: 'full-1', status: 'queued' } }), { status: 202 }),
+    )
+
+    await expect(createFullMarketSync({
+      range_preset: 'custom',
+      start_date: '2022-01-01',
+      end_date: '2024-12-31',
+    })).resolves.toMatchObject({ job_id: 'full-1' })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/market-data/sync-all',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({
+          range_preset: 'custom',
+          start_date: '2022-01-01',
+          end_date: '2024-12-31',
+        }),
+      }),
+    )
+  })
+
+  it('returns raw text safely for an HTML gateway error', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response('<html><body>502 Bad Gateway</body></html>', { status: 502 }),
+    )
+
+    await expect(fetchStoreStatus()).rejects.toMatchObject({
+      name: 'FormulaScreenApiError',
+      status: 502,
+      message: '<html><body>502 Bad Gateway</body></html>',
     })
   })
 

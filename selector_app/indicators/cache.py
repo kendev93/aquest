@@ -173,6 +173,12 @@ class IndicatorCache:
         self._persistent_write_time_ms = 0.0
         self._latency_samples: deque[float] = deque(maxlen=512)
 
+    def clear_memory(self) -> None:
+        """Drop in-process results after the underlying market data changes."""
+
+        with self._lock:
+            self._memory.clear()
+
     def get_or_compute_custom(
         self,
         frame: pd.DataFrame,

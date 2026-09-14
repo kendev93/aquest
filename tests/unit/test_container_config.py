@@ -38,3 +38,16 @@ def test_compose_defines_an_isolated_strategy_worker() -> None:
     assert 'test: ["CMD-SHELL", "kill -0 1"]' in compose
     assert "SELECTOR_DISCOVERY_WORKERS=auto" in env_example
     assert "SELECTOR_DISCOVERY_MEMORY_BUDGET_MB=auto" in env_example
+
+
+def test_shared_start_scripts_auto_select_the_etfquest_database() -> None:
+    shell_script = (PROJECT_ROOT / "scripts" / "start_shared.sh").read_text(encoding="utf-8")
+    powershell_script = (PROJECT_ROOT / "scripts" / "start_shared.ps1").read_text(encoding="utf-8")
+    compose = (PROJECT_ROOT / "docker-compose.etfquest.yml").read_text(encoding="utf-8")
+
+    assert "Library/Application Support/ETFQuest/database" in shell_script
+    assert "CommonApplicationData" in powershell_script
+    assert "SELECTOR_MARKET_DATA_SOURCE=etfquest" in shell_script
+    assert 'SELECTOR_MARKET_DATA_SOURCE = "etfquest"' in powershell_script
+    assert compose.count("read_only: false") == 1
+    assert compose.count("read_only: true") == 1

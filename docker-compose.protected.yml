@@ -1,5 +1,6 @@
 services:
   backend:
+    user: "${ETFQUEST_MARKET_UID:-0}:${ETFQUEST_MARKET_GID:-0}"
     build:
       context: .
       dockerfile: Dockerfile.protected
@@ -16,7 +17,7 @@ services:
       - type: bind
         source: ${ETFQUEST_MARKET_DATABASE_DIR:?Set ETFQUEST_MARKET_DATABASE_DIR to ETFQuest's database directory}
         target: /run/etfquest/database
-        read_only: true
+        read_only: false
 
   strategy-worker:
     build:

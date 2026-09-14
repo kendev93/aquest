@@ -129,3 +129,49 @@ def test_online_client_rejects_malformed_eastmoney_payload() -> None:
             "20260911",
             timeout=5.0,
         )
+
+
+def test_fetch_funds_lofs_and_indexes_uses_catalog_filters() -> None:
+    transport = FakeTransport(
+        [
+            {"data": {"total": 1, "diff": [{"f12": "510300", "f13": "1", "f14": "沪深300ETF"}]}},
+            {"data": {"total": 1, "diff": [{"f12": "163406", "f13": "0", "f14": "兴全合润"}]}},
+            {"data": {"total": 1, "diff": [{"f12": "000300", "f13": "1", "f14": "沪深300"}]}},
+        ]
+    )
+    client = OnlineMarketClient(transport=transport)
+
+    etf = client.fetch_fund_instruments(timeout=5.0)
+    lof = client.fetch_lof_instruments(timeout=5.0)
+    indexes = client.fetch_index_instruments(timeout=5.0)
+
+    assert etf.to_dict(orient="records") == [{"代码": "510300", "名称": "沪深300ETF"}]
+    assert lof.to_dict(orient="records") == [{"代码": "163406", "名称": "兴全合润"}]
+    assert indexes.to_dict(orient="records") == [{"代码": "sh000300", "名称": "沪深300"}]
+    assert transport.calls[0][1]["fs"].startswith("b:MK0021")
+    assert transport.calls[1][1]["fs"].startswith("b:MK0404")
+    assert transport.calls[2][1]["fs"].startswith("m:1 t:2")
+
+
+def test_fetch_daily_history_for_asset_uses_market_prefix_and_adjustment() -> None:
+    transport = FakeTransport(
+        [
+            {"data": {"klines": ["2026-09-10,3.5,3.6,3.7,3.4,2000,7200,8.0,1.0,0.1,0.2,1"]}},
+            {"data": {"klines": ["2026-09-10,3500,3510,3520,3490,0,0,1.0,0.2,10,0,1"]}},
+        ]
+    )
+    client = OnlineMarketClient(transport=transport)
+
+    fund = client.fetch_daily_history_for_asset(
+        "510300", "ETF", "2026-09-10", "2026-09-10", timeout=5.0
+    )
+    index = client.fetch_daily_history_for_asset(
+        "sh000300", "Index", "2026-09-10", "2026-09-10", timeout=5.0
+    )
+
+    assert fund["close"].tolist() == [3.6]
+    assert index["close"].tolist() == [3510.0]
+    assert transport.calls[0][1]["secid"] == "1.510300"
+    assert transport.calls[0][1]["fqt"] == "1"
+    assert transport.calls[1][1]["secid"] == "1.000300"
+    assert transport.calls[1][1]["fqt"] == "0"

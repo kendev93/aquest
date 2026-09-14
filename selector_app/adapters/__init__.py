@@ -7,6 +7,7 @@ from selector_app.market_data.local_adapter import (
     suggested_vipdoc_path,
 )
 
+from .full_market_source import OnlineFullMarketSource
 from .market_data_sync import MarketDataSync
 from .market_sync import (
     InstrumentDiscoveryReport,
@@ -25,4 +26,5 @@ __all__ = [
     "suggested_vipdoc_path",
     "TdxMarketSync",
     "MarketDataSync",
+    "OnlineFullMarketSource",
 ]

@@ -1,5 +1,6 @@
 services:
   backend:
+    user: "${ETFQUEST_MARKET_UID:-0}:${ETFQUEST_MARKET_GID:-0}"
     environment:
       SELECTOR_MARKET_DATA_SOURCE: etfquest
       SELECTOR_RELEASE_MODE: "1"
@@ -8,7 +9,7 @@ services:
       - type: bind
         source: ${ETFQUEST_MARKET_DATABASE_DIR:?Set ETFQUEST_MARKET_DATABASE_DIR to ETFQuest's database directory}
         target: /run/etfquest/database
-        read_only: true
+        read_only: false
 
   strategy-worker:
     environment:

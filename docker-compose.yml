@@ -6,6 +6,9 @@ services:
     environment:
       PYTHONUNBUFFERED: "1"
       SELECTOR_DATA_DIR: /data/market
+      SELECTOR_MARKET_DATA_SOURCE: etfquest
+      SELECTOR_RELEASE_MODE: "1"
+      SELECTOR_ETFQUEST_DATABASE_PATH: /run/etfquest/database/market_data.db
       SELECTOR_AUTO_SYNC_ENABLED: "1"
       SELECTOR_DISCOVERY_WORKERS: "${SELECTOR_DISCOVERY_WORKERS:-auto}"
       SELECTOR_DISCOVERY_MEMORY_BUDGET_MB: "${SELECTOR_DISCOVERY_MEMORY_BUDGET_MB:-auto}"
@@ -27,6 +30,9 @@ services:
     environment:
       PYTHONUNBUFFERED: "1"
       SELECTOR_DATA_DIR: /data/market
+      SELECTOR_MARKET_DATA_SOURCE: etfquest
+      SELECTOR_RELEASE_MODE: "1"
+      SELECTOR_ETFQUEST_DATABASE_PATH: /run/etfquest/database/market_data.db
       SELECTOR_DISCOVERY_WORKERS: "${SELECTOR_DISCOVERY_WORKERS:-auto}"
       SELECTOR_DISCOVERY_MEMORY_BUDGET_MB: "${SELECTOR_DISCOVERY_MEMORY_BUDGET_MB:-auto}"
       SELECTOR_DISCOVERY_JOB_DIR: /data/market/.strategy-jobs

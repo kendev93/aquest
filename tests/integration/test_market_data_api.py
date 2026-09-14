@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import date
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from selector_app.market_data.service import (
     LocalMarketChart,
 )
 from selector_app.market_data.store import DuckDbMarketDataStore
+from selector_app.market_data.sync_lock import MarketDataSyncLock
 from selector_app.membership import MembershipAccessError, MembershipStatus
 from selector_app.web.app import create_app
 
@@ -130,7 +132,7 @@ def test_local_import_endpoint_is_removed() -> None:
     assert response.status_code == 404
 
 
-def test_etfquest_shared_source_is_read_only_and_blocks_indicator_lab_sync(tmp_path: Path) -> None:
+def test_etfquest_shared_source_is_writable_by_the_explicit_sync_job(tmp_path: Path) -> None:
     shared_path = tmp_path / "etfquest.db"
     with duckdb.connect(str(shared_path)) as connection:
         connection.execute(
@@ -172,10 +174,138 @@ def test_etfquest_shared_source_is_read_only_and_blocks_indicator_lab_sync(tmp_p
 
     assert status.status_code == 200
     assert status.json()["data"]["market_data_source"] == "etfquest"
-    assert status.json()["data"]["market_data_read_only"] is True
+    assert status.json()["data"]["market_data_read_only"] is False
     assert capabilities.json()["data"]["default_provider"] == "etfquest"
     assert blocked.status_code == 503
     assert blocked.json()["error"]["code"] == "membership_unavailable"
+
+
+class _AllowMembershipClient:
+    def require_core_access(self):
+        return MembershipStatus(
+            level="vip",
+            is_vip=True,
+            can_access_core=True,
+            access_state="active",
+            message="ok",
+        )
+
+
+def test_shared_full_sync_endpoint_forwards_custom_range_and_workers(tmp_path: Path) -> None:
+    shared_path = tmp_path / "etfquest.db"
+    with duckdb.connect(str(shared_path)) as connection:
+        connection.execute(
+            "CREATE TABLE asset_info ("
+            "symbol VARCHAR PRIMARY KEY, name VARCHAR, type VARCHAR, update_time TIMESTAMP)"
+        )
+        connection.execute(
+            "CREATE TABLE market_data ("
+            "symbol VARCHAR, date DATE, open DOUBLE, close DOUBLE, high DOUBLE, "
+            "low DOUBLE, volume BIGINT, data_type VARCHAR, update_time TIMESTAMP, "
+            "PRIMARY KEY (symbol, date, data_type))"
+        )
+        connection.execute(
+            "CREATE TABLE trade_calendar (trade_date DATE PRIMARY KEY, update_time TIMESTAMP)"
+        )
+        connection.execute(
+            "CREATE TABLE system_settings ("
+            "key VARCHAR PRIMARY KEY, value VARCHAR, updated_at TIMESTAMP)"
+        )
+    business_store = DuckDbMarketDataStore(tmp_path / "indicator-lab.duckdb")
+    adapter = ETFQuestMarketDataAdapter(shared_path)
+    received: dict[str, object] = {}
+
+    class FakeFullSync:
+        def run(self, **kwargs):
+            received.update(kwargs)
+            kwargs["progress_callback"](1, 1)
+            kwargs["detail_callback"]({"phase": "completed"})
+            return {"success": True, "completed": 1, "failed": 0}
+
+    with TestClient(
+        create_app(
+            market_data_store=business_store,
+            market_data_adapter=adapter,
+            full_market_sync_service=FakeFullSync(),
+            membership_client=_AllowMembershipClient(),
+            auto_sync_enabled=False,
+        )
+    ) as client:
+        response = client.post(
+            "/api/v1/market-data/sync-all",
+            json={
+                "range_preset": "custom",
+                "start_date": "2024-01-01",
+                "end_date": "2024-12-31",
+                "workers": 2,
+            },
+        )
+        assert response.status_code == 202
+        job_id = response.json()["data"]["job_id"]
+        for _ in range(50):
+            state_response = client.get(f"/api/v1/market-data/jobs/{job_id}")
+            state = state_response.json()["data"]
+            if state["status"] in {"completed", "failed"}:
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError("full market sync job did not finish")
+
+    assert state["status"] == "completed"
+    assert received["start_date"] == date(2024, 1, 1)
+    assert received["end_date"] == date(2024, 12, 31)
+    assert received["workers"] == 2
+
+
+def test_shared_full_sync_reports_cross_process_lock_conflict(tmp_path: Path) -> None:
+    shared_path = tmp_path / "etfquest.db"
+    with duckdb.connect(str(shared_path)) as connection:
+        connection.execute(
+            "CREATE TABLE asset_info ("
+            "symbol VARCHAR PRIMARY KEY, name VARCHAR, type VARCHAR, update_time TIMESTAMP)"
+        )
+        connection.execute(
+            "CREATE TABLE market_data ("
+            "symbol VARCHAR, date DATE, open DOUBLE, close DOUBLE, high DOUBLE, "
+            "low DOUBLE, volume BIGINT, data_type VARCHAR, update_time TIMESTAMP, "
+            "PRIMARY KEY (symbol, date, data_type))"
+        )
+        connection.execute(
+            "CREATE TABLE trade_calendar (trade_date DATE PRIMARY KEY, update_time TIMESTAMP)"
+        )
+        connection.execute(
+            "CREATE TABLE system_settings ("
+            "key VARCHAR PRIMARY KEY, value VARCHAR, updated_at TIMESTAMP)"
+        )
+    adapter = ETFQuestMarketDataAdapter(shared_path)
+    business_store = DuckDbMarketDataStore(tmp_path / "indicator-lab.duckdb")
+    lock = MarketDataSyncLock(shared_path, owner="etfquest")
+
+    with lock.acquire(job_id="other-job", phase="fetching"):
+        with TestClient(
+            create_app(
+                market_data_store=business_store,
+                market_data_adapter=adapter,
+                full_market_sync_service=object(),
+                membership_client=_AllowMembershipClient(),
+                auto_sync_enabled=False,
+            )
+        ) as client:
+            response = client.post("/api/v1/market-data/sync-all", json={})
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "market_data_busy"
+
+
+def test_full_sync_rejects_an_incomplete_custom_date_range() -> None:
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/api/v1/market-data/sync-all",
+            json={"range_preset": "custom", "start_date": "2024-01-01"},
+        )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"
 
 
 class _DeniedMembershipClient:

@@ -41,6 +41,7 @@ MARKET_SYNC_JOB_DESCRIPTIONS = frozenset(
         "本地行情导入",
         "本地行情自动导入",
         "行情同步",
+        "全市场行情同步",
         "East Money历史全量回填",
         AUTO_SYNC_DESCRIPTION,
     }

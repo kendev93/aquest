@@ -4,6 +4,7 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { FormulaScreenApiError } from '../api/formulaScreen'
 import {
   cancelMarketDataJob,
+  createFullMarketSync,
   createOnlineBackfill,
   createOnlineSync,
   fetchActiveMarketDataJobs,
@@ -25,6 +26,7 @@ import type {
   MarketDataProvider,
   MarketChartPeriod,
   MarketSyncJobState,
+  MarketSyncRangePreset,
 } from '../types'
 import MarketCandlestickChart from '../components/MarketCandlestickChart.vue'
 
@@ -52,11 +54,23 @@ const BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
   { key: 'bond', label: '债券' },
 ]
 
+const FULL_SYNC_RANGE_OPTIONS: { key: MarketSyncRangePreset; label: string }[] = [
+  { key: 'all', label: '全部' },
+  { key: '5y', label: '最近5年' },
+  { key: '3y', label: '最近3年' },
+  { key: '1y', label: '最近1年' },
+  { key: 'ytd', label: '今年以来' },
+  { key: 'custom', label: '自定义' },
+]
+
 const form = reactive({
   syncUniverse: 'all' as 'all' | 'sh' | 'sz',
   syncProvider: 'eastmoney' as MarketDataProvider,
   syncInstrumentTypes: [] as InstrumentType[],
   syncBoards: [] as InstrumentBoard[],
+  fullSyncRangePreset: 'all' as MarketSyncRangePreset,
+  fullSyncStartDate: '',
+  fullSyncEndDate: '',
   market: 'all' as LocalMarketScope,
   keyword: '',
   page: 1,
@@ -93,12 +107,20 @@ const sharedMarketData = computed(() => (
   || providerCapabilities.value?.default_provider === 'etfquest'
 ))
 
+const sharedMarketDataWritable = computed(() => (
+  sharedMarketData.value
+  && storeStatus.value?.market_data_read_only === false
+  && storeStatus.value?.full_market_sync_supported === true
+))
+
 const legacyMarketWriteEnabled = computed(() => (
   !sharedMarketData.value
   && storeStatus.value?.legacy_market_write_enabled !== false
 ))
 
-const readOnlyMarketData = computed(() => !legacyMarketWriteEnabled.value)
+const readOnlyMarketData = computed(() => (
+  sharedMarketData.value ? !sharedMarketDataWritable.value : !legacyMarketWriteEnabled.value
+))
 
 const selectedTitle = computed(() => (
   selected.value ? `${selected.value.market} ${selected.value.code}` : '请选择品种'
@@ -113,6 +135,7 @@ const autoSyncActive = computed(() => Boolean(
 ))
 
 const autoSyncStatusText = computed(() => {
+  if (sharedMarketDataWritable.value) return 'ETFQuest 共享行情（可同步）'
   if (sharedMarketData.value) return 'ETFQuest 共享行情（只读）'
   if (storeStatus.value?.auto_sync_enabled === false) return '自动同步已关闭'
   if (autoSyncActive.value) return syncLabel.value || '正在自动同步最新行情…'
@@ -121,6 +144,7 @@ const autoSyncStatusText = computed(() => {
 })
 
 const autoSyncScheduleText = computed(() => {
+  if (sharedMarketDataWritable.value) return '可在本页面显式同步；不要与其它行情同步任务同时运行'
   if (sharedMarketData.value) return '由 ETFQuest 统一同步，当前页面不执行行情写入'
   const seconds = storeStatus.value?.auto_sync_interval_seconds
   if (typeof seconds !== 'number' || !Number.isFinite(seconds)) {
@@ -140,7 +164,9 @@ const syncPhaseText = computed(() => ({
 
 const syncProviderLabel = computed(() => {
   const provider = marketJob.value?.metadata?.provider ?? form.syncProvider
-  return provider === 'tdx' ? ' TDX ' : ' East Money '
+  if (provider === 'tdx') return ' TDX '
+  if (provider === 'tencent') return ' Tencent '
+  return ' East Money '
 })
 
 const marketJobTitle = computed(() => {
@@ -164,16 +190,22 @@ const currentSyncInstrumentText = computed(() => {
   if (!detail) return '—'
   const market = typeof detail.market === 'string' ? detail.market : ''
   const code = typeof detail.code === 'string' ? detail.code : ''
+  const symbol = typeof detail.symbol === 'string' ? detail.symbol : ''
   const name = typeof detail.name === 'string' && detail.name ? detail.name : ''
-  const identity = [market, code].filter(Boolean).join(' ')
-  return [identity, name].filter(Boolean).join(' · ') || '—'
+  const assetType = typeof detail.asset_type === 'string' ? detail.asset_type : ''
+  const identity = [market, code].filter(Boolean).join(' ') || symbol
+  return [identity, name, assetType].filter(Boolean).join(' · ') || '—'
 })
 
 const currentSyncRangeText = computed(() => {
   const metadata = marketJob.value?.metadata
   if (!metadata) return '—'
-  const start = typeof metadata.range_start === 'string' ? metadata.range_start : ''
-  const end = typeof metadata.range_end === 'string' ? metadata.range_end : ''
+  const start = typeof metadata.range_start === 'string'
+    ? metadata.range_start
+    : typeof metadata.requested_start === 'string' ? metadata.requested_start : ''
+  const end = typeof metadata.range_end === 'string'
+    ? metadata.range_end
+    : typeof metadata.requested_end === 'string' ? metadata.requested_end : ''
   if (start && end) return `${start} → ${end}`
   return typeof metadata.range_label === 'string' ? metadata.range_label : '正在读取日期范围…'
 })
@@ -191,7 +223,9 @@ const currentSyncStatusText = computed(() => {
 
 const currentSyncProviderText = computed(() => {
   const provider = marketJob.value?.metadata?.provider ?? form.syncProvider
-  return provider === 'tdx' ? 'TDX' : 'East Money'
+  if (provider === 'tdx') return 'TDX'
+  if (provider === 'tencent') return 'Tencent'
+  return 'East Money'
 })
 
 const currentSyncDetailLabel = computed(() => (
@@ -219,6 +253,22 @@ const historySourcesText = computed(() => {
   return Object.entries(sources).map(([source, count]) => `${source} × ${count}`).join('、')
 })
 
+const catalogCountsText = computed(() => {
+  const counts = marketJob.value?.result?.catalog_counts
+  if (!counts) return ''
+  return Object.entries(counts).map(([label, count]) => `${label} ${count}`).join(' · ')
+})
+
+const lastFullSyncText = computed(() => {
+  const summary = storeStatus.value?.last_market_sync_summary
+  if (!summary) return ''
+  const completed = typeof summary.completed === 'number' ? summary.completed : 0
+  const skipped = typeof summary.skipped === 'number' ? summary.skipped : 0
+  const failed = typeof summary.failed === 'number' ? summary.failed : 0
+  const finishedAt = typeof summary.finished_at === 'string' ? summary.finished_at : ''
+  return `上次全市场同步：完成 ${completed} · 跳过 ${skipped} · 失败 ${failed}${finishedAt ? ` · ${finishedAt}` : ''}`
+})
+
 const discoveryWaiting = computed(() => Boolean(
   marketJob.value?.status === 'running'
   && marketJob.value.phase === 'instrument_discovery'
@@ -234,6 +284,12 @@ const marketProgressSummary = computed(() => {
   if (!job) return '已处理 0 / 0'
   const metadata = job.metadata ?? {}
   if (job.phase === 'merging') {
+    const planned = typeof metadata.planned_jobs === 'number' ? metadata.planned_jobs : null
+    if (planned !== null) {
+      const completed = typeof metadata.completed === 'number' ? metadata.completed : job.total_scanned
+      const failed = typeof metadata.failed === 'number' ? metadata.failed : job.errors
+      return `已合并 ${completed + failed} / ${planned} 个区间`
+    }
     const merged = typeof metadata.merged_workers === 'number' ? metadata.merged_workers : job.total_scanned
     const total = typeof metadata.total_workers === 'number' ? metadata.total_workers : job.worker_count ?? 8
     return `已合并 ${merged} / ${total} 个分片`
@@ -241,8 +297,9 @@ const marketProgressSummary = computed(() => {
   if (job.phase === 'fetching') {
     const downloaded = typeof metadata.downloaded_targets === 'number'
       ? metadata.downloaded_targets
-      : job.total_scanned
-    return `已下载 ${downloaded} / ${job.total_candidates}`
+      : typeof metadata.completed === 'number' ? metadata.completed + (typeof metadata.failed === 'number' ? metadata.failed : 0) : job.total_scanned
+    const total = typeof metadata.planned_jobs === 'number' ? metadata.planned_jobs : job.total_candidates
+    return `已下载 ${downloaded} / ${total}`
   }
   return `已处理 ${job.total_scanned} / ${job.total_candidates}`
 })
@@ -460,6 +517,39 @@ async function syncOnlineData(): Promise<void> {
   }
 }
 
+async function syncFullMarketData(): Promise<void> {
+  if (form.fullSyncRangePreset === 'custom') {
+    if (!form.fullSyncStartDate || !form.fullSyncEndDate) {
+      message.value = '自定义同步区间必须同时设置开始日期和结束日期'
+      return
+    }
+    if (form.fullSyncStartDate > form.fullSyncEndDate) {
+      message.value = '同步开始日期不能晚于结束日期'
+      return
+    }
+  }
+  syncLoading.value = true
+  syncLabel.value = '正在同步全市场日线…'
+  message.value = ''
+  try {
+    const job = await createFullMarketSync({
+      range_preset: form.fullSyncRangePreset,
+      ...(form.fullSyncRangePreset === 'custom'
+        ? { start_date: form.fullSyncStartDate, end_date: form.fullSyncEndDate }
+        : {}),
+    })
+    beginJob(job.job_id, job.status)
+    await waitForJob(job.job_id)
+    await loadStoreStatus()
+    await loadInstruments()
+  } catch (error) {
+    message.value = apiMessage(error)
+  } finally {
+    syncLoading.value = false
+    syncLabel.value = ''
+  }
+}
+
 async function backfillOnlineData(): Promise<void> {
   syncLoading.value = true
   syncLabel.value = '正在进行 East Money 全量回填…'
@@ -618,13 +708,13 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
         <a class="nav-link" href="/strategy-fitness">策略适配性</a>
         <a class="nav-link active" href="/market-data" aria-current="page">本地行情</a>
       </nav>
-      <div class="topbar-status"><span class="status-dot" aria-hidden="true"></span>{{ readOnlyMarketData ? ' 共享行情（只读）' : ' 本地数据模式' }}</div>
+      <div class="topbar-status"><span class="status-dot" aria-hidden="true"></span>{{ sharedMarketDataWritable ? ' 共享行情（可同步）' : readOnlyMarketData ? ' 共享行情（只读）' : ' 本地数据模式' }}</div>
     </header>
 
     <main class="content-shell">
       <section class="page-intro">
-        <div><p class="eyebrow">LOCAL MARKET DATA / DUCKDB</p><h1>本地行情</h1><p class="intro-copy">{{ readOnlyMarketData ? '行情由 ETFQuest 统一同步，本页面只读查询共享数据库。' : '当前为开发兼容模式，可在本页面执行本地行情写入。' }}</p></div>
-        <div class="intro-note"><span class="note-label">数据边界</span><strong>{{ readOnlyMarketData ? 'ETFQuest 共享数据库' : '本地 DuckDB' }}</strong><small>{{ readOnlyMarketData ? '共享行情只读；图表、筛选和回测统一查询数据库' : '仅开发兼容模式允许本地写入' }}</small></div>
+        <div><p class="eyebrow">LOCAL MARKET DATA / DUCKDB</p><h1>本地行情</h1><p class="intro-copy">{{ sharedMarketDataWritable ? '行情读取和全市场同步均使用 ETFQuest 共享数据库。' : readOnlyMarketData ? '行情由 ETFQuest 统一同步，本页面只读查询共享数据库。' : '当前为开发兼容模式，可在本页面执行本地行情写入。' }}</p></div>
+        <div class="intro-note"><span class="note-label">数据边界</span><strong>{{ sharedMarketData ? 'ETFQuest 共享数据库' : '本地 DuckDB' }}</strong><small>{{ sharedMarketDataWritable ? '同步结果直接写入 ETFQuest，图表、筛选和回测读取同一份数据' : readOnlyMarketData ? '共享行情只读；图表、筛选和回测统一查询数据库' : '仅开发兼容模式允许本地写入' }}</small></div>
       </section>
 
       <div v-if="message" class="notice error" role="alert" data-testid="market-data-message">{{ message }}</div>
@@ -639,6 +729,7 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
         <div class="store-meta" data-testid="market-store-meta">
           <span>数据库 {{ storeStatus?.database_path ?? '—' }}</span>
           <span>最近在线更新 {{ storeStatus?.last_online_sync_at ?? '—' }} · {{ storeStatus?.last_online_provider ?? '—' }}</span>
+          <span v-if="lastFullSyncText" data-testid="last-full-market-sync">{{ lastFullSyncText }}</span>
         </div>
         <div v-if="readOnlyMarketData" class="auto-sync-status shared" data-testid="shared-market-status">
           <span class="auto-sync-dot" aria-hidden="true"></span>
@@ -652,6 +743,27 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
           <strong>当前为只读行情模式</strong>
           <span v-if="sharedMarketData" data-testid="shared-market-source">ETFQuest 共享行情（只读）</span>
           <span>{{ sharedMarketData ? '行情同步、目录更新和数据写入由 ETFQuest 负责，本页面只读取共享结果。' : '当前数据源禁止本地行情写入，请在行情管理端完成同步或导入。' }}</span>
+        </div>
+        <div v-else-if="sharedMarketDataWritable" class="market-sync-form shared-market-sync-form" data-testid="shared-market-sync-form">
+          <div class="full-market-sync-controls">
+            <div>
+              <label for="market-sync-range">快速区间</label>
+              <select id="market-sync-range" v-model="form.fullSyncRangePreset" data-testid="market-sync-range">
+                <option v-for="option in FULL_SYNC_RANGE_OPTIONS" :key="option.key" :value="option.key">{{ option.label }}</option>
+              </select>
+            </div>
+            <div v-if="form.fullSyncRangePreset === 'custom'">
+              <label for="market-sync-start">开始日期</label>
+              <input id="market-sync-start" v-model="form.fullSyncStartDate" data-testid="market-sync-start" type="date">
+            </div>
+            <div v-if="form.fullSyncRangePreset === 'custom'">
+              <label for="market-sync-end">结束日期</label>
+              <input id="market-sync-end" v-model="form.fullSyncEndDate" data-testid="market-sync-end" type="date">
+            </div>
+            <button class="primary-button" data-testid="market-sync-all" type="button" :disabled="syncLoading" :aria-busy="syncLoading" @click="syncFullMarketData">{{ syncLoading ? '同步中…' : '同步全市场日线' }}</button>
+          </div>
+          <small class="scope-helper">本次会先检查 ETFQuest 本地覆盖范围，只补缺失区间；发现中间缺口时会覆盖整个所选区间。</small>
+          <small class="scope-warning" data-testid="market-sync-conflict-warning">请不要同时在 ETFQuest 和本项目下载行情，否则可能发生写入冲突。</small>
         </div>
         <div v-else class="market-sync-form">
           <div class="scope-config" data-testid="market-sync-scope">
@@ -671,7 +783,7 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
           <div v-if="marketJob" class="sync-progress" data-testid="market-data-progress">
           <div class="sync-progress-heading"><span>{{ marketJobTitle }}</span><div class="sync-progress-actions"><button v-if="marketJob.status === 'queued' || marketJob.status === 'running'" class="text-button" data-testid="market-sync-cancel" type="button" :disabled="marketJob.cancel_requested || marketJob.phase === 'cancelling'" @click="cancelActiveMarketJob(marketJob.job_id)">{{ marketJob.cancel_requested || marketJob.phase === 'cancelling' ? '取消中…' : '取消任务' }}</button><strong>{{ Math.round(marketJob.progress * 100) }}%</strong></div></div>
           <div class="progress-track sync-progress-track" :class="{ indeterminate: marketProgressIndeterminate }"><span :style="{ width: `${Math.round(marketJob.progress * 100)}%` }"></span></div>
-          <div class="sync-progress-stats"><span>{{ marketProgressSummary }}</span><span>worker <strong>{{ marketJob.worker_count ?? 8 }}</strong></span><span :class="{ negative: marketJob.errors > 0 }">错误 <strong>{{ marketJob.errors }}</strong></span></div>
+          <div class="sync-progress-stats"><span>{{ marketProgressSummary }}</span><span>worker <strong>{{ typeof marketJob.metadata?.worker_count === 'number' ? marketJob.metadata.worker_count : marketJob.worker_count ?? 8 }}</strong></span><span :class="{ negative: marketJob.errors > 0 }">错误 <strong>{{ marketJob.errors }}</strong></span></div>
           <div v-if="discoveryWaiting" class="sync-stage-status" data-testid="market-sync-stage"><strong>正在刷新证券列表</strong><span>{{ discoveryProviderText }}</span></div>
           <div v-if="currentSyncDetail" class="sync-current-instrument" data-testid="market-sync-current">
             <div class="sync-current-heading"><span>{{ currentSyncDetailLabel }}</span><strong>{{ currentSyncInstrumentText }}</strong><span>{{ currentSyncProviderText }} · {{ currentSyncStatusText }}</span></div>
@@ -679,10 +791,11 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
             <div v-if="currentSyncHistorySource" class="sync-current-source">本次接口 <strong>{{ currentSyncHistorySource }}</strong></div>
           </div>
           <div v-if="marketJob.result" class="sync-result-stats">
-            <span v-if="marketJob.result.execution_mode === 'process_pool_staging'">执行模式 8 进程分片</span>
+            <span v-if="marketJob.result.execution_mode === 'process_pool_staging'">执行模式 {{ marketJob.result.worker_count ?? 0 }} 进程分片</span>
             <span v-if="marketJob.result.staged_rows !== undefined">暂存 {{ marketJob.result.staged_rows }} 根</span>
             <span v-if="marketJob.result.merged_rows !== undefined">合并 {{ marketJob.result.merged_rows }} 根</span>
-            <span>数据源 {{ marketJob.result.provider ?? '—' }}</span><span>证券列表 {{ marketJob.result.listed_instruments ?? marketJob.result.total_candidates ?? 0 }}</span><span>新增标的 {{ marketJob.result.new_instruments ?? 0 }}</span><span>更新标的 {{ marketJob.result.updated_files ?? 0 }}</span><span>写入 K 线 {{ marketJob.result.written_bars ?? 0 }}</span><span>无变化 {{ marketJob.result.unchanged_files ?? 0 }}</span>
+            <span>数据源 {{ marketJob.result.provider ?? '—' }}</span><span>证券列表 {{ marketJob.result.listed_instruments ?? marketJob.result.total_candidates ?? marketJob.result.total_targets ?? 0 }}</span><span>新增标的 {{ marketJob.result.new_instruments ?? 0 }}</span><span>更新标的 {{ marketJob.result.updated_files ?? marketJob.result.completed ?? 0 }}</span><span>写入 K 线 {{ marketJob.result.written_bars ?? marketJob.result.rows ?? 0 }}</span><span>无变化 {{ marketJob.result.unchanged_files ?? marketJob.result.skipped ?? 0 }}</span><span v-if="marketJob.result.actual_start || marketJob.result.actual_end">实际覆盖 {{ marketJob.result.actual_start ?? '—' }} → {{ marketJob.result.actual_end ?? '—' }}</span>
+            <span v-if="catalogCountsText">分类 {{ catalogCountsText }}</span>
             <span v-if="historySourcesText">日线接口 {{ historySourcesText }}</span><span :class="{ negative: marketJob.result.errors > 0 }">失败 {{ marketJob.result.errors }}</span>
           </div>
         </div>

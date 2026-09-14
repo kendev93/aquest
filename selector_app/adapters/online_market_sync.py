@@ -60,6 +60,7 @@ _RETRY_BASE_SECONDS = 0.25
 _REQUEST_INTERVAL_SECONDS = 0.15
 _STOCK_BOARDS = frozenset({"main", "star", "chinext"})
 _EASTMONEY_LIST_URL = "https://82.push2.eastmoney.com/api/qt/clist/get"
+_EASTMONEY_FUND_LIST_URL = "https://88.push2.eastmoney.com/api/qt/clist/get"
 _EASTMONEY_HISTORY_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 _TENCENT_HISTORY_URL = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get"
 _EASTMONEY_PAGE_SIZE = 5_000
@@ -309,6 +310,79 @@ class OnlineMarketClient:
             columns=["代码", "名称"],
         )
 
+    def fetch_fund_instruments(self, *, timeout: float) -> pd.DataFrame:
+        """Fetch ETF instruments from East Money's fund quote lists."""
+
+        return self._fetch_catalog_by_filter(
+            "b:MK0021,b:MK0022,b:MK0023,b:MK0024,b:MK0827",
+            timeout=timeout,
+        )
+
+    def fetch_lof_instruments(self, *, timeout: float) -> pd.DataFrame:
+        """Fetch LOF instruments from East Money's dedicated quote lists."""
+
+        return self._fetch_catalog_by_filter(
+            "b:MK0404,b:MK0405,b:MK0406,b:MK0407",
+            timeout=timeout,
+        )
+
+    def fetch_index_instruments(self, *, timeout: float) -> pd.DataFrame:
+        """Fetch the main SH/SZ index catalog with market prefixes."""
+
+        return self._fetch_catalog_by_filter(
+            "m:1 t:2,m:1 t:23,m:0 t:5,m:0 t:6,m:0 t:7,m:0 t:13",
+            timeout=timeout,
+            include_market=True,
+        )
+
+    def _fetch_catalog_by_filter(
+        self,
+        market_filter: str,
+        *,
+        timeout: float,
+        include_market: bool = False,
+    ) -> pd.DataFrame:
+        page = 1
+        rows: list[Mapping[str, object]] = []
+        while page <= 100:
+            payload = self._request(
+                _EASTMONEY_FUND_LIST_URL,
+                {
+                    "pn": str(page),
+                    "pz": str(self._page_size),
+                    "po": "1",
+                    "np": "1",
+                    "ut": _EASTMONEY_UT,
+                    "fltt": "2",
+                    "invt": "2",
+                    "fid": "f12",
+                    "fs": market_filter,
+                    "fields": "f12,f13,f14",
+                },
+                timeout,
+            )
+            data = _mapping_value(payload.get("data"))
+            page_rows = _mapping_rows(data.get("diff"))
+            if not page_rows:
+                break
+            rows.extend(page_rows)
+            total = _nonnegative_int(data.get("total"))
+            if total <= len(rows) or len(page_rows) < self._page_size:
+                break
+            page += 1
+        result: list[dict[str, object]] = []
+        for row in rows:
+            code = _clean_code(row.get("f12"))
+            if code is None:
+                continue
+            symbol = code
+            if include_market:
+                market_value = str(row.get("f13") or "").strip()
+                market = "sh" if market_value == "1" or code.startswith(("0", "88", "99")) else "sz"
+                symbol = f"{market}{code}"
+            result.append({"代码": symbol, "名称": row.get("f14")})
+        return pd.DataFrame(result, columns=["代码", "名称"])
+
     def fetch_daily_history(
         self,
         symbol: str,
@@ -379,6 +453,56 @@ class OnlineMarketClient:
         for column in ("开盘", "收盘", "最高", "最低", "成交量", "成交额", "换手率"):
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
         return frame[["日期", "开盘", "收盘", "最高", "最低", "成交量", "成交额", "换手率"]]
+
+    def fetch_daily_history_for_asset(
+        self,
+        symbol: str,
+        asset_type: str,
+        start_date: str,
+        end_date: str,
+        *,
+        timeout: float,
+    ) -> pd.DataFrame:
+        """Fetch daily bars for stock, fund, LOF, or index symbols."""
+
+        raw_symbol = str(symbol).strip().lower()
+        if raw_symbol[:2] in {"sh", "sz"}:
+            market = cast(MarketCode, raw_symbol[:2].upper())
+            code = _clean_code(raw_symbol[2:])
+        else:
+            code = _clean_code(raw_symbol)
+            market = _market_for_stock_code(code or "") or _market_for_fund_code(code or "") or "SZ"
+        if code is None:
+            raise OnlineDataError(f"证券代码无效: {symbol}")
+        payload = self._request(
+            _EASTMONEY_HISTORY_URL,
+            {
+                "fields1": "f1,f2,f3,f4,f5,f6",
+                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f116",
+                "ut": _EASTMONEY_HISTORY_UT,
+                "klt": "101",
+                "fqt": "0" if str(asset_type).strip().lower() in {"index", "指数"} else "1",
+                "secid": f"{'1' if market == 'SH' else '0'}.{code}",
+                "beg": start_date.replace("-", ""),
+                "end": end_date.replace("-", ""),
+            },
+            timeout,
+        )
+        data = _mapping_value(payload.get("data"))
+        raw_klines = data.get("klines")
+        if not isinstance(raw_klines, (list, tuple)):
+            return pd.DataFrame(columns=_EMPTY_COLUMNS)
+        rows = [str(item).split(",") for item in raw_klines if isinstance(item, str)]
+        if not rows or any(len(row) < 7 for row in rows):
+            raise OnlineDataError("在线行情日线响应字段数量不足")
+        result = pd.DataFrame(
+            [row[:7] for row in rows],
+            columns=["date", "open", "close", "high", "low", "volume", "amount"],
+        )
+        result["date"] = pd.to_datetime(result["date"], errors="coerce")
+        for column in ("open", "close", "high", "low", "volume", "amount"):
+            result[column] = pd.to_numeric(result[column], errors="coerce")
+        return result
 
     def fetch_tencent_daily_history(
         self,
@@ -1373,6 +1497,14 @@ def _market_for_stock_code(code: str) -> MarketCode | None:
         return "SZ"
     # The broad online list can also contain Beijing A shares. The current
     # store and backtest contracts are SH/SZ-only, so leave them out explicitly.
+    return None
+
+
+def _market_for_fund_code(code: str) -> MarketCode | None:
+    if code.startswith(("5", "6", "9")):
+        return "SH"
+    if code.startswith(("15", "16", "17", "18")):
+        return "SZ"
     return None
 
 

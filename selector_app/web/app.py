@@ -30,6 +30,8 @@ from selector_app.market_data.auto_sync import (
     AutomaticMarketSyncScheduler,
 )
 from selector_app.market_data.etfquest_adapter import ETFQuestMarketDataAdapter
+from selector_app.market_data.etfquest_writer import ETFQuestMarketDataWriter
+from selector_app.market_data.full_sync import FullMarketSync
 from selector_app.market_data.maintenance import (
     DatabaseMaintenanceScheduler,
     DatabaseMaintenanceService,
@@ -90,6 +92,7 @@ def create_app(
     strategy_discovery_service: StrategyDiscoveryService | object | None = None,
     strategy_job_backend: StrategyJobBackend | object | None = None,
     strategy_fitness_service: StrategyFitnessService | object | None = None,
+    full_market_sync_service: FullMarketSync | object | None = None,
     local_market_data_service: LocalMarketDataService | object | None = None,
     market_data_store: DuckDbMarketDataStore | object | None = None,
     market_data_adapter: MarketDataAdapter | object | None = None,
@@ -127,6 +130,14 @@ def create_app(
         if indicator_precompute_service is not None
         else IndicatorPrecomputeService(selected_adapter, selected_indicator_cache),
     )
+    selected_market_writer = (
+        ETFQuestMarketDataWriter(selected_adapter.database_path)
+        if isinstance(selected_adapter, ETFQuestMarketDataAdapter)
+        else None
+    )
+    selected_full_market_sync = full_market_sync_service
+    if selected_full_market_sync is None and selected_market_writer is not None:
+        selected_full_market_sync = FullMarketSync(selected_market_writer)
     selected_market_sync = cast(
         MarketDataSync,
         market_sync if market_sync is not None else MarketDataSync(store=selected_store),
@@ -260,6 +271,8 @@ def create_app(
     )
     app.state.market_data_store = selected_store
     app.state.market_data_adapter = selected_adapter
+    app.state.market_data_writer = selected_market_writer
+    app.state.full_market_sync_service = selected_full_market_sync
     app.state.membership_client = selected_membership_client
     app.state.indicator_cache = selected_indicator_cache
     app.state.indicator_precompute_service = selected_precompute_service

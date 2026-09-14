@@ -17,6 +17,7 @@ export interface DateRangeSelection {
   endDate: string
 }
 export type MarketDataProvider = 'eastmoney' | 'tdx'
+export type MarketSyncRangePreset = 'all' | '5y' | '3y' | '1y' | 'ytd' | 'custom'
 export type RuleMode = 'signals' | 'conditions'
 export type ConditionOperator = 'gt' | 'gte' | 'lt' | 'lte' | 'eq' | 'neq' | 'cross_up' | 'cross_down'
 
@@ -199,6 +200,20 @@ export interface MarketSyncResult {
   cleanup_seconds?: number
   rate_limit_events?: number
   rate_limit_backoffs?: number
+  operation?: string
+  success?: boolean
+  range_preset?: string
+  requested_start?: string | null
+  requested_end?: string | null
+  actual_start?: string | null
+  actual_end?: string | null
+  total_targets?: number
+  planned_jobs?: number
+  completed?: number
+  skipped?: number
+  failed?: number
+  rows?: number
+  catalog_counts?: Record<string, number>
 }
 
 export interface MarketSyncJobState {
@@ -234,6 +249,7 @@ export interface MarketDataProviderCapability {
 export interface MarketDataCapabilities {
   default_provider: MarketDataProvider | 'etfquest'
   read_only?: boolean
+  supports_full_sync?: boolean
   database_path?: string
   instrument_count?: number
   sync_execution?: {
@@ -262,6 +278,10 @@ export interface DataStoreStatus {
   auto_sync_interval_seconds?: number | null
   market_data_source?: 'indicator_lab' | 'etfquest' | string
   market_data_read_only?: boolean
+  market_data_write_target?: 'indicator_lab' | 'etfquest' | string
+  full_market_sync_supported?: boolean
+  market_sync_lock?: Record<string, unknown> | null
+  last_market_sync_summary?: Record<string, unknown> | null
   legacy_market_write_enabled?: boolean
 }
 

@@ -9,7 +9,7 @@
   一个面向指标研究与策略验证的跨平台本地工作台
 </p>
 
-一个独立的跨平台指标筛选、组合与回测应用，使用 Vue/TypeScript + FastAPI，通过只读适配器读取 ETFQuest 维护的行情数据库，再计算和验证交易指标信号。
+一个独立的跨平台指标筛选、组合与回测应用，使用 Vue/TypeScript + FastAPI，通过共享适配器读取 ETFQuest 行情数据库，并可从本项目发起受保护的全市场行情同步，再计算和验证交易指标信号。
 
 在线股票行情默认使用项目自有客户端；项目仍内置满足 TDX 兼容同步所需的最小 TCP 客户端和 `.day` 读取器。数据接口来源及第三方许可说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
@@ -48,12 +48,12 @@
 - 动态组合回测：从公式选股池按指标排序，按固定槽位等额买入，卖出后自动用排名靠前的候选补位；支持每日/每周/每月刷新、百分比/ATR 止盈止损、移动止盈、独立冷却、指标阈值和指标比较卖出；
 - 策略实验室：用户只设置品种范围和持仓数量，默认使用本地最新已完成日线往前 5 年寻优排序指标/方向、调仓频率、买卖条件和风险控制，也可选择全历史或自定义区间，并按验证期 Sharpe 与年化收益生成排行榜；候选可回填普通组合回测复核；
 - 策略适配性评估：批量对股票池进行时间顺序的训练/验证/测试回测，按成交样本、期望收益、盈亏比、收益、回撤和稳定性生成透明适配分；
-- 通过 ETFQuest 共享数据库读取最新日线，行情写入和同步由 ETFQuest 统一负责；
+- 通过 ETFQuest 共享数据库读取最新日线，也可在本项目发起股票、ETF、LOF 和指数的全市场日线同步；
 - 本地行情浏览：查看共享数据库中的品种，点击生成日线、月线、年线 K 线，支持 MA5/10/20/60、RSI14 和 MACD；
 - 公式层安全除零、数据不足跳过、无未来数据；
 - Python 单元/集成测试、Vue 单元测试和 Playwright E2E 流程。
 
-应用启动时不会扫描或导入本地通达信文件。启动后会读取 ETFQuest 共享行情数据库；行情同步、通达信批量导入和增量更新均在 ETFQuest 中完成。共享数据库不可用时，页面仍可打开，但筛选和回测不会产生有效结果。预置模式会默认选中“准备拉升”和“建仓区”；市场范围、条件组合、并发和周期收在“高级设置”中。页面会在浏览器本地记住上次配置，不会上传这些配置。
+应用启动时不会扫描或导入本地通达信文件。启动后会读取 ETFQuest 共享行情数据库；全市场同步可以从本项目页面显式发起，结果仍写入 ETFQuest 的既有行情表。共享数据库不可用时，不会静默回退到容器内旧行情库。预置模式会默认选中“准备拉升”和“建仓区”；市场范围、条件组合、并发和周期收在“高级设置”中。页面会在浏览器本地记住上次配置，不会上传这些配置。
 
 ## 启动
 
@@ -89,10 +89,10 @@ npm run dev
 
 ```bash
 cd indicator-lab
-docker compose up --build -d
+./scripts/start_shared.sh
 ```
 
-这样克隆项目后即可直接启动页面和 API。Docker 只创建 `indicator_lab_market` 业务数据卷；发布模式通过只读挂载 ETFQuest 的行情数据库提供行情。旧版本 DuckDB 会在打开时先创建备份再自动迁移 schema，不会删除历史业务数据；如果共享行情不可用，页面仍然可以打开，但扫描和回测结果会为空。
+Windows PowerShell 使用 `./scripts/start_shared.ps1`（PowerShell 中也可写作 `.\scripts\start_shared.ps1`）。脚本会自动匹配 ETFQuest 数据库目录、校验文件存在后启动 Compose；缺少数据库时直接退出，不会使用容器内旧行情库。Docker 只创建 `indicator_lab_market` 业务数据卷，并把 ETFQuest 行情目录单独挂载给同步 backend；strategy-worker 对共享行情保持只读。Indicator Lab 的业务 DuckDB 仍会在打开时先创建备份再自动迁移 schema，不会删除历史业务数据。
 
 ### 保护版发布镜像
 
@@ -101,8 +101,7 @@ docker compose up --build -d
 完整的 Windows、macOS 和 Docker 打包教程见 [打包与发布指南](docs/packaging.md)。
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.protected.yml build
-docker compose -f docker-compose.yml -f docker-compose.protected.yml up -d
+./scripts/start_shared.sh --protected
 ```
 
 也可以在宿主机生成 standalone bundle：
@@ -114,7 +113,7 @@ python3 scripts/build_nuitka.py --jobs 4
 
 保护版默认使用文件夹模式，避免大型 NumPy/Pandas 依赖每次启动都解包；`NUITKA_JOBS`、`NUITKA_LTO` 和 `NUITKA_REPRODUCIBLE` 可在构建时覆盖。发布前运行 `sh scripts/verify_ci.sh protected`，它会检查 Compose 配置、编译产物和最终镜像。Nuitka 只能提高本地逆向门槛，不能对完全控制运行机器的用户提供绝对源码保密；需要强保护时应将核心策略计算放在你的远程服务。
 
-共享行情模式的启动方式、数据库路径和只读挂载要求见 [ETFQuest 共享行情说明](docs/etfquest-shared-data.md)。行情导入不再在本项目中执行。
+共享行情模式的启动方式、数据库路径、全市场同步和冲突锁说明见 [ETFQuest 共享行情说明](docs/etfquest-shared-data.md)。通达信文件导入不再在本项目中执行。
 
 普通 `docker compose down` 或删除容器不会删除业务数据。不要使用 `docker compose down -v` 或执行 `docker volume rm indicator_lab_market`，除非确认要删除本地业务数据库。查看卷使用 `docker volume inspect indicator_lab_market`，查看状态使用 `docker compose ps`，停止使用 `docker compose down`。`WEB_PORT` 和 `API_PORT` 仍可通过 `.env` 修改。
 
@@ -122,7 +121,7 @@ DuckDB 数据卷会自动做维护：同一数据库的 `.bak-*.duckdb` 备份�
 
 ## 行情配置
 
-发布模式从 ETFQuest 共享数据库读取股票、ETF、LOF 和指数日线；本项目不提供通达信文件导入或在线行情写入入口。共享数据库的同步范围、增量补齐、通达信批量导入和自动更新由 ETFQuest 数据管理页负责。
+发布模式从 ETFQuest 共享数据库读取股票、ETF、LOF 和指数日线；本项目不提供通达信文件导入，但提供受统一文件锁保护的全市场在线行情同步入口。同步会先检查本地覆盖范围，自动跳过完整区间并补齐缺失区间；Indicator Lab 与 ETFQuest 不应同时下载行情。
 
 本项目的行情页只负责按市场和代码查询 K 线，并生成日线、月线和年线图表。自定义列表仍可用于筛选和回测，但其中的行情数据来自已配置的行情数据库。
 

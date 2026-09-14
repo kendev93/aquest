@@ -328,6 +328,29 @@ class MarketSyncRequest(BaseModel):
         return self
 
 
+class FullMarketSyncRequest(BaseModel):
+    """Date window for the shared ETFQuest full-market daily sync."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    range_preset: Literal["all", "5y", "3y", "1y", "ytd", "custom"] = "all"
+    start_date: date | None = None
+    end_date: date | None = None
+    workers: int | None = Field(default=None, ge=1, le=8)
+
+    @model_validator(mode="after")
+    def validate_range(self) -> FullMarketSyncRequest:
+        has_dates = self.start_date is not None or self.end_date is not None
+        if self.range_preset == "custom":
+            if self.start_date is None or self.end_date is None:
+                raise ValueError("自定义同步区间必须同时设置开始日期和结束日期")
+            if self.start_date > self.end_date:
+                raise ValueError("同步开始日期不能晚于结束日期")
+        elif has_dates:
+            raise ValueError("快速同步区间不能同时设置自定义日期")
+        return self
+
+
 class BacktestRequest(BaseModel):
     """Single-stock daily backtest request."""
 

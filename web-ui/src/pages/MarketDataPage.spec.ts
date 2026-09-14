@@ -11,6 +11,7 @@ vi.mock('../api/marketData', async () => {
   return {
     ...actual,
     cancelMarketDataJob: vi.fn(),
+    createFullMarketSync: vi.fn(),
     fetchLocalInstruments: vi.fn(),
     fetchLocalChart: vi.fn(),
     fetchStoreStatus: vi.fn(),
@@ -143,6 +144,58 @@ describe('MarketDataPage', () => {
     expect(wrapper.find('[data-testid="market-import-local"]').exists()).toBe(false)
     expect(wrapper.find('[data-testid="market-sync-online"]').exists()).toBe(false)
     expect(wrapper.get('[data-testid="read-only-market-source"]').text()).toContain('只读')
+  })
+
+  it('shows shared full-market sync controls and forwards a custom range', async () => {
+    const sharedStatus = {
+      database_path: '/run/etfquest/database/market_data.db',
+      schema_version: 0,
+      instrument_count: 2,
+      bar_count: 580,
+      data_start: '2020-01-01',
+      data_end: '2024-12-31',
+      last_online_sync_at: null,
+      market_data_source: 'etfquest' as const,
+      market_data_read_only: false,
+      full_market_sync_supported: true,
+      auto_sync_enabled: false,
+    }
+    vi.mocked(marketApi.fetchStoreStatus).mockResolvedValue(sharedStatus)
+    vi.mocked(marketApi.fetchMarketDataCapabilities).mockResolvedValue({
+      default_provider: 'etfquest',
+      read_only: false,
+      supports_full_sync: true,
+      providers: { etfquest: { provider: 'etfquest', available: true, read_only: false } },
+    })
+    vi.mocked(marketApi.createFullMarketSync).mockResolvedValue({ job_id: 'full-1', status: 'queued' })
+    vi.mocked(marketApi.getMarketDataJob).mockResolvedValue({
+      job_id: 'full-1',
+      status: 'completed',
+      progress: 1,
+      total_candidates: 1,
+      total_scanned: 1,
+      errors: 0,
+      error: null,
+      result: { operation: 'full_market_sync', completed: 1, failed: 0 },
+    })
+
+    const wrapper = mount(MarketDataPage)
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="market-sync-all"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="market-sync-online"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="market-sync-range"]').setValue('custom')
+    await wrapper.get('[data-testid="market-sync-start"]').setValue('2022-01-01')
+    await wrapper.get('[data-testid="market-sync-end"]').setValue('2024-12-31')
+    await wrapper.get('[data-testid="market-sync-all"]').trigger('click')
+    await flushPromises()
+
+    expect(marketApi.createFullMarketSync).toHaveBeenCalledWith({
+      range_preset: 'custom',
+      start_date: '2022-01-01',
+      end_date: '2024-12-31',
+    })
+    expect(wrapper.get('[data-testid="market-sync-conflict-warning"]').text()).toContain('不要同时')
   })
 
   it('selects a data-bearing instrument when the first catalog item has no bars', async () => {

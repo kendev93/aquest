@@ -62,7 +62,7 @@
 - 上游的 `SignalScanner`、策略对象、回测引擎、组合引擎和绩效分析器；
 - 上游离线写回 `.day` 的 append/sync API。
 
-业务代码只接收项目自己的 `InstrumentRef`/`StockRef`、规范化 DataFrame、`MarketDataRepository` 和回测结果。正式行情写入由 ETFQuest 负责；本项目发布模式只通过只读适配器读取共享库，任何运行时路径都不会修改源文件或共享数据库。
+业务代码只接收项目自己的 `InstrumentRef`/`StockRef`、规范化 DataFrame、`MarketDataRepository` 和回测结果。正式行情 schema 由 ETFQuest 负责；本项目发布模式通过专用 writer 更新既有共享行情表，不执行共享库迁移、备份或压缩，也不会修改源文件。
 
 ## 5. 在线 HTTP 接口变更检查清单
 

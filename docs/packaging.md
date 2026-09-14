@@ -92,7 +92,15 @@ docker compose \
   up -d
 ~~~
 
-这套 Compose 使用业务 `market_data` 数据卷；发布模式另外以只读方式挂载共享行情数据库。不要在发布验证中使用用户的生产数据卷；应使用受控副本或临时 volume。
+跨平台运行时推荐使用共享启动脚本，它会自动匹配 ETFQuest 数据库目录并注入挂载路径：
+
+~~~bash
+./scripts/start_shared.sh --protected
+~~~
+
+Windows PowerShell 使用 `.\scripts\start_shared.ps1 -Protected`。
+
+这套 Compose 使用业务 `market_data` 数据卷；发布模式另外挂载共享行情数据库，backend 需要可写以支持显式全市场同步，strategy-worker 仍只读。不要在发布验证中使用用户的生产数据卷；应使用受控副本或临时 volume。
 
 ### 发布前检查
 

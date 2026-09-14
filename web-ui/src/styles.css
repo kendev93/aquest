@@ -181,6 +181,11 @@ input:focus, select:focus { border-color: var(--accent); }
 .scope-options input { accent-color: var(--accent); }
 .scope-helper { color: var(--subtle); font-size: 9px; }
 .scope-warning { display: block; padding: 7px 8px; border-left: 2px solid var(--warning); background: rgba(245, 158, 11, 0.08); color: var(--warning); font-size: 9px; line-height: 1.4; }
+.full-market-sync-controls { display: grid; grid-template-columns: minmax(150px, 1.1fr) repeat(2, minmax(145px, 1fr)) minmax(180px, 0.9fr); gap: 10px; align-items: end; margin-top: 10px; padding: 10px; border: 1px solid var(--border); background: rgba(8, 15, 32, 0.42); }
+.full-market-sync-controls > div { min-width: 0; }
+.full-market-sync-controls input, .full-market-sync-controls select { min-height: 40px; }
+.full-market-sync-controls .primary-button { min-height: 40px; margin-top: 0; }
+.shared-market-sync-form > .scope-helper { display: block; margin-top: 8px; }
 
 .results-heading { align-items: center; }
 .export-actions { display: flex; gap: 8px; }
@@ -451,6 +456,7 @@ tbody tr:hover td { background: rgba(22, 34, 58, 0.45); }
   .config-panel { display: block; padding: 18px; }
   .results-panel { padding: 18px; }
   .market-sync-actions { grid-template-columns: 1fr; }
+  .full-market-sync-controls { grid-template-columns: 1fr; }
   .sync-progress-heading { align-items: flex-start; }
   .sync-progress-heading > span { white-space: normal; }
   .parameter-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
