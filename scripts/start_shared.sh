@@ -7,9 +7,9 @@ REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 
 database_dir=${ETFQUEST_MARKET_DATABASE_DIR:-}
 if [ -z "$database_dir" ]; then
-  case "$(uname -s)" in
+    case "$(uname -s)" in
     Darwin)
-      database_dir=${HOME}/Library/Application Support/ETFQuest/database
+      database_dir="${HOME}/Library/Application Support/ETFQuest/database"
       ;;
     Linux)
       database_dir=${XDG_DATA_HOME:-${HOME}/.local/share}/ETFQuest/database
@@ -21,7 +21,7 @@ if [ -z "$database_dir" ]; then
   esac
 fi
 
-database_file=$database_dir/market_data.db
+database_file="${database_dir}/market_data.db"
 if [ ! -f "$database_file" ]; then
   printf '未找到 ETFQuest 行情数据库：%s\n' "$database_file" >&2
   printf '%s\n' '请先安装并初始化最新版 ETFQuest，或设置 ETFQUEST_MARKET_DATABASE_DIR 后重试。' >&2
@@ -39,7 +39,7 @@ else
   compose_mode=development
 fi
 
-export ETFQUEST_MARKET_DATABASE_DIR=$database_dir
+export ETFQUEST_MARKET_DATABASE_DIR="$database_dir"
 export SELECTOR_MARKET_DATA_SOURCE=etfquest
 export SELECTOR_RELEASE_MODE=1
 export SELECTOR_ETFQUEST_DATABASE_PATH=/run/etfquest/database/market_data.db

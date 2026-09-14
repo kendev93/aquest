@@ -1,3 +1,5 @@
+import os
+import subprocess
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -51,3 +53,41 @@ def test_shared_start_scripts_auto_select_the_etfquest_database() -> None:
     assert 'SELECTOR_MARKET_DATA_SOURCE = "etfquest"' in powershell_script
     assert compose.count("read_only: false") == 1
     assert compose.count("read_only: true") == 1
+
+
+def test_shared_start_script_handles_macos_application_support_path(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    database_dir = home / "Library" / "Application Support" / "ETFQuest" / "database"
+    database_dir.mkdir(parents=True)
+    (database_dir / "market_data.db").touch()
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker_args = tmp_path / "docker-args.txt"
+    fake_docker = fake_bin / "docker"
+    fake_docker.write_text(
+        "#!/bin/sh\n"
+        'printf \'%s\\n\' "$*" >> "$DOCKER_ARGS_FILE"\n',
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+
+    environment = os.environ.copy()
+    environment.pop("ETFQUEST_MARKET_DATABASE_DIR", None)
+    environment["HOME"] = str(home)
+    environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
+    environment["DOCKER_ARGS_FILE"] = str(docker_args)
+
+    result = subprocess.run(
+        [str(PROJECT_ROOT / "scripts" / "start_shared.sh")],
+        cwd=PROJECT_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = docker_args.read_text(encoding="utf-8")
+    assert "docker-compose.etfquest.yml" in calls
+    assert "up --build -d" in calls
