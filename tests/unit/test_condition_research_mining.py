@@ -163,3 +163,35 @@ def test_mining_rejects_misaligned_sample_columns() -> None:
             min_support=1,
             min_instruments=1,
         )
+
+
+def test_baseline_rate_weights_every_sample_group_equally() -> None:
+    """基准胜率按每组等权（2/3），而不是按样本池化（1/2）。
+
+    组内结局混合且各组样本数不同时，两种口径才会分开；只按样本池化会让
+    多决策点的交易主导基准，进而放宽候选条件的准入门槛。
+    """
+
+    features = pd.DataFrame({"technical.rsi14": [8.0, 1.0, 2.0, 3.0]})
+    outcomes = pd.Series([True, True, False, False])
+    instruments = pd.Series(["SH600000", "SH600000", "SZ000001", "SZ000001"])
+    # A 组 1 个样本（盈利）；B 组 3 个样本（1 盈 2 亏）。
+    groups = pd.Series(["A", "B", "B", "B"])
+
+    candidates = mine_binary_conditions(
+        features,
+        outcomes,
+        instruments,
+        sample_groups=groups,
+        quantiles=(0.5,),
+        min_support=1,
+        min_instruments=1,
+        limit=10,
+    )
+
+    assert len(candidates) == 1
+    best = candidates[0]
+    assert best.condition.operator == "lte"
+    assert best.condition.right_constant == pytest.approx(2.5)
+    assert best.baseline_rate == pytest.approx((1.0 + 1 / 3) / 2)
+    assert best.baseline_rate != pytest.approx(0.5)

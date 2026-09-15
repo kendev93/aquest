@@ -31,10 +31,15 @@ def build_buy_trade_samples(
     *,
     market: str,
     code: str,
+    feature_rows: Mapping[str, dict[str, object]] | None = None,
 ) -> MiningSamples:
-    """Pair completed trades and take features visible on each buy signal date."""
+    """Pair completed trades and take features visible on each buy signal date.
 
-    feature_rows = _feature_rows_by_date(feature_values)
+    ``feature_rows`` lets one research pass reuse the same date index for the
+    buy and the early-exit samplers instead of rebuilding it per call.
+    """
+
+    feature_rows = feature_rows_by_date(feature_values) if feature_rows is None else feature_rows
     rows: list[dict[str, object]] = []
     outcomes: list[bool] = []
     instruments: list[str] = []
@@ -75,12 +80,13 @@ def build_early_exit_samples(
     market: str,
     code: str,
     max_decision_points_per_trade: int = 8,
+    feature_rows: Mapping[str, dict[str, object]] | None = None,
 ) -> MiningSamples:
     """Label holding-period decisions by whether an earlier exit beats the base exit."""
 
     if max_decision_points_per_trade < 1:
         raise ValueError("每笔交易的卖出决策样本上限必须大于 0")
-    feature_rows = _feature_rows_by_date(feature_values)
+    feature_rows = feature_rows_by_date(feature_values) if feature_rows is None else feature_rows
     prepared_bars = bars.copy(deep=False)
     prepared_bars["date"] = pd.to_datetime(prepared_bars["date"], errors="coerce")
     date_to_index = {
@@ -167,14 +173,20 @@ def build_early_exit_samples(
     return _samples(feature_values, rows, outcomes, instruments, groups)
 
 
-def _feature_rows_by_date(feature_values: pd.DataFrame) -> dict[str, dict[str, object]]:
+def feature_rows_by_date(feature_values: pd.DataFrame) -> dict[str, dict[str, object]]:
+    """Index one stock's feature rows by ``YYYY-MM-DD`` for sample lookups.
+
+    ``to_dict`` already returns a fresh dict per row, so the date column is
+    popped in place instead of copying every record again.
+    """
+
     if "date" not in feature_values.columns:
         raise ValueError("指标样本缺少日期列")
     indexed: dict[str, dict[str, object]] = {}
     for record in feature_values.to_dict(orient="records"):
-        date_text = _date_text(record.get("date"))
+        date_text = _date_text(record.pop("date", None))
         if date_text is not None:
-            indexed[date_text] = {key: value for key, value in record.items() if key != "date"}
+            indexed[date_text] = record
     return indexed
 
 

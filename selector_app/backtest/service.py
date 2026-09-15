@@ -349,13 +349,14 @@ class BacktestService:
         start_date: date | None,
         end_date: date | None,
     ) -> np.ndarray:
-        dates = frame["date"].dt.date
-        mask = pd.Series(True, index=frame.index)
+        # 数组比较替代逐次构建 pandas Series：研究流程会对同一只股票反复切片。
+        days = frame["date"].to_numpy(dtype="datetime64[D]")
+        mask = np.ones(days.shape, dtype=bool)
         if start_date is not None:
-            mask &= dates >= start_date
+            mask &= days >= np.datetime64(start_date, "D")
         if end_date is not None:
-            mask &= dates <= end_date
-        return np.flatnonzero(mask.to_numpy())
+            mask &= days <= np.datetime64(end_date, "D")
+        return np.flatnonzero(mask)
 
     def _rule_window(
         self,

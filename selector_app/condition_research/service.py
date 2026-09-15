@@ -29,7 +29,12 @@ from selector_app.strategy_discovery.catalog import default_indicator_catalog
 from .metrics import summarize_backtests
 from .mining import MinedCondition, mine_binary_conditions
 from .models import ConditionResearchConfig
-from .samples import MiningSamples, build_buy_trade_samples, build_early_exit_samples
+from .samples import (
+    MiningSamples,
+    build_buy_trade_samples,
+    build_early_exit_samples,
+    feature_rows_by_date,
+)
 from .time_split import DateWindow, ResearchSplits, split_calendar_range
 
 ProgressCallback = Callable[[int, int], None]
@@ -101,6 +106,7 @@ class ConditionResearchService:
                 train_reports.append(_compact_report(baseline))
                 full_period_reports.append(_compact_report(self._run_full_period(prepared)))
                 processed.add((ref.market, ref.code))
+                feature_rows = feature_rows_by_date(prepared.feature_values)
                 if config.search_sides in {"buy", "both"}:
                     buy_samples.append(
                         build_buy_trade_samples(
@@ -108,6 +114,7 @@ class ConditionResearchService:
                             prepared.feature_values,
                             market=ref.market,
                             code=ref.code,
+                            feature_rows=feature_rows,
                         )
                     )
                 if config.search_sides in {"sell", "both"}:
@@ -119,6 +126,7 @@ class ConditionResearchService:
                             prepared.config,
                             market=ref.market,
                             code=ref.code,
+                            feature_rows=feature_rows,
                         )
                     )
             except (ValueError, OSError) as exc:

@@ -54,6 +54,11 @@ def mine_binary_conditions(
     losing trades for sell-trigger discovery. Candidate thresholds are derived
     only from the samples passed by the caller, allowing chronological
     train/validation/holdout separation.
+
+    Sample keys are factorized to integer codes once so the per-candidate work
+    stays vectorized. ``pd.factorize`` hands out codes in order of first
+    appearance, which is the same order the earlier dict-based implementation
+    iterated, keeping results reproducible.
     """
 
     if min_support < 1:
@@ -88,6 +93,15 @@ def mine_binary_conditions(
         feature_id: pd.to_numeric(features[feature_id], errors="coerce").to_numpy(dtype=float)
         for feature_id in feature_ids
     }
+    finite = {feature_id: np.isfinite(values) for feature_id, values in arrays.items()}
+    comparable = {
+        feature_id: _has_two_distinct(arrays[feature_id], finite[feature_id])
+        for feature_id in feature_ids
+    }
+    target_float = target.astype(np.float64)
+    group_codes = pd.factorize(groups)[0]
+    instrument_codes = pd.factorize(symbols)[0]
+
     candidates: list[MinedCondition] = []
     seen_rules: set[tuple[str, str, str | None, float | None]] = set()
 
@@ -95,16 +109,16 @@ def mine_binary_conditions(
         if feature_id in _PRICE_SCALE_FEATURES:
             continue
         values = arrays[feature_id]
-        valid = np.isfinite(values) & valid_symbols
+        valid = finite[feature_id] & valid_symbols
         if int(valid.sum()) < min_support:
             continue
         valid_values = values[valid]
         if len(np.unique(valid_values)) < 2:
             continue
 
-        valid_target = target[valid]
-        valid_instruments = symbols[valid]
-        valid_groups = groups[valid]
+        valid_target = target_float[valid]
+        valid_instruments = instrument_codes[valid]
+        valid_groups = group_codes[valid]
         baseline_rate = _grouped_outcome_rate(valid_target, valid_groups)
         if not 0.0 < baseline_rate < 1.0:
             continue
@@ -138,23 +152,24 @@ def mine_binary_conditions(
                     candidates.append(candidate)
 
     for left_index, left_id in enumerate(feature_ids):
+        if not comparable[left_id]:
+            continue
         left_values = arrays[left_id]
+        left_finite = finite[left_id]
         for right_id in feature_ids[left_index + 1 :]:
+            if not comparable[right_id]:
+                continue
             right_values = arrays[right_id]
-            if len(np.unique(left_values[np.isfinite(left_values)])) < 2:
-                continue
-            if len(np.unique(right_values[np.isfinite(right_values)])) < 2:
-                continue
-            valid = np.isfinite(left_values) & np.isfinite(right_values) & valid_symbols
+            valid = left_finite & finite[right_id] & valid_symbols
             if int(valid.sum()) < min_support:
                 continue
             valid_left = left_values[valid]
             valid_right = right_values[valid]
             if np.all(valid_left == valid_right):
                 continue
-            valid_target = target[valid]
-            valid_instruments = symbols[valid]
-            valid_groups = groups[valid]
+            valid_target = target_float[valid]
+            valid_instruments = instrument_codes[valid]
+            valid_groups = group_codes[valid]
             baseline_rate = _grouped_outcome_rate(valid_target, valid_groups)
             if not 0.0 < baseline_rate < 1.0:
                 continue
@@ -198,32 +213,40 @@ def mine_binary_conditions(
     return tuple(candidates[:limit])
 
 
+def _has_two_distinct(values: np.ndarray, finite_mask: np.ndarray) -> bool:
+    finite_values = values[finite_mask]
+    return finite_values.size >= 2 and np.unique(finite_values).size >= 2
+
+
 def _candidate_for_mask(
     condition: ScreenCondition,
     condition_mask: np.ndarray,
     outcomes: np.ndarray,
-    instruments: np.ndarray,
-    groups: np.ndarray,
+    instrument_codes: np.ndarray,
+    group_codes: np.ndarray,
     *,
     min_support: int,
     min_instruments: int,
     baseline_rate: float,
 ) -> MinedCondition | None:
-    first_match_by_group: dict[object, int] = {}
-    for index_value in np.flatnonzero(condition_mask):
-        index = int(index_value)
-        first_match_by_group.setdefault(groups[index], index)
-    support_count = len(first_match_by_group)
+    order = np.flatnonzero(condition_mask)
+    if order.size == 0:
+        return None
+    # A group contributes at most one sample: its first matching row.
+    # np.unique(..., return_index=True) reports that first occurrence, and
+    # sorting restores the ascending order the previous dict loop produced.
+    _, first_positions = np.unique(group_codes[order], return_index=True)
+    matched_indices = np.sort(order[first_positions])
+    support_count = int(matched_indices.size)
     if support_count < min_support:
         return None
-    matched_indices = np.fromiter(first_match_by_group.values(), dtype=int)
     outcome_rate = float(np.mean(outcomes[matched_indices]))
     if outcome_rate <= baseline_rate:
         return None
-    instrument_count = int(pd.unique(instruments[matched_indices]).size)
+    instrument_count = int(np.unique(instrument_codes[matched_indices]).size)
     if instrument_count < min_instruments:
         return None
-    group_count = len(pd.unique(groups))
+    group_count = int(np.unique(group_codes).size)
     return MinedCondition(
         condition=condition,
         support_count=support_count,
@@ -235,11 +258,21 @@ def _candidate_for_mask(
     )
 
 
-def _grouped_outcome_rate(outcomes: np.ndarray, groups: np.ndarray) -> float:
-    outcomes_by_group: dict[object, list[bool]] = {}
-    for outcome, group in zip(outcomes, groups, strict=True):
-        outcomes_by_group.setdefault(group, []).append(bool(outcome))
-    return float(np.mean([np.mean(values) for values in outcomes_by_group.values()]))
+def _grouped_outcome_rate(outcomes: np.ndarray, group_codes: np.ndarray) -> float:
+    """Equal-weight mean of per-group outcome rates.
+
+    Encoded with ``bincount`` so no Python loop runs per candidate. Group codes
+    come from ``pd.factorize``, i.e. first-appearance order, so the summation
+    order matches the previous dict-based implementation.
+    """
+
+    if group_codes.size == 0:
+        return float("nan")
+    size = int(group_codes.max()) + 1
+    counts = np.bincount(group_codes, minlength=size)
+    wins = np.bincount(group_codes, weights=outcomes, minlength=size)
+    present = counts > 0
+    return float(np.mean(wins[present] / counts[present]))
 
 
 def _condition_key(
