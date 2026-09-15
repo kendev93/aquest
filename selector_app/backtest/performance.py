@@ -49,9 +49,9 @@ class PerformanceAnalyzer:
 
         total_return = float(total[-1] / total[0] - 1) if total[0] != 0 else 0.0
         annual_return = float((1 + total_return) ** (self.ANNUAL_DAYS / len(daily_returns)) - 1)
-        drawdown = self._drawdown_columns(total)
-        max_drawdown = float(np.max(drawdown["drawdown_pct"]))
-        max_dd_duration = self._max_drawdown_duration(total, drawdown["drawdown"])
+        drawdown, drawdown_pct = self._drawdown_arrays(total)
+        max_drawdown = float(np.max(drawdown_pct))
+        max_dd_duration = self._max_drawdown_duration(total, drawdown)
         rf_daily = self._risk_free_rate / self.ANNUAL_DAYS
         excess = daily_returns - rf_daily
         daily_std = float(np.std(daily_returns))
@@ -132,19 +132,21 @@ class PerformanceAnalyzer:
         return metrics
 
     @staticmethod
-    def _drawdown_columns(total: np.ndarray) -> pd.DataFrame:
+    def _drawdown_arrays(total: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """回撤序列。研究流程每次回测都要算，因此不构造 DataFrame。"""
+
         peak = np.maximum.accumulate(total)
         drawdown = peak - total
         drawdown_pct = np.divide(drawdown, peak, out=np.zeros_like(drawdown), where=peak != 0)
-        return pd.DataFrame({"drawdown": drawdown, "drawdown_pct": drawdown_pct})
+        return drawdown, drawdown_pct
 
     @staticmethod
-    def _max_drawdown_duration(total: np.ndarray, drawdown: pd.Series) -> int:
-        values = drawdown.to_numpy(dtype=float)
-        if not len(values) or float(np.max(values)) == 0:
+    def _max_drawdown_duration(total: np.ndarray, drawdown: np.ndarray) -> int:
+        if not len(drawdown) or float(np.max(drawdown)) == 0:
             return 0
-        max_index = int(np.argmax(values))
+        max_index = int(np.argmax(drawdown))
         peak_index = max_index
+        # 逐格回扫通常在几步内命中，实测比 flatnonzero 向量化更省（分配开销更大）。
         for index in range(max_index - 1, -1, -1):
             if total[index] > total[max_index]:
                 peak_index = index

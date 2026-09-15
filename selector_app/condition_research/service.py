@@ -874,16 +874,34 @@ def _mine_sample_sets(
     )
 
 
+_COMPACT_TRADE_KEYS = ("direction", "pnl", "cost_basis", "rejected")
+
+
 def _compact_report(report: BacktestReport) -> dict[str, object]:
-    result = report.to_dict()
-    trades = result.get("trades")
-    result["trades"] = [
-        {key: trade.get(key) for key in ("direction", "pnl", "cost_basis", "rejected")}
-        for trade in cast(Sequence[Mapping[str, object]], trades or ())
-    ]
-    result["equity_curve"] = []
-    result["positions"] = []
-    return result
+    """Research keeps only trade outcomes, so build the compact dict directly.
+
+    Going through ``report.to_dict()`` materialized every trade's full record
+    (13 fields) and immediately replaced it with a 4-field copy.
+    """
+
+    return {
+        "market": report.market,
+        "code": report.code,
+        "name": report.name,
+        "bars": report.bars,
+        "start_date": report.start_date,
+        "end_date": report.end_date,
+        "buy_signal": report.buy_signal,
+        "sell_signal": report.sell_signal,
+        "performance": dict(report.performance),
+        "equity_curve": [],
+        "trades": [
+            {key: trade.get(key) for key in _COMPACT_TRADE_KEYS} for trade in report.trades
+        ],
+        "positions": [],
+        "configuration": dict(report.configuration),
+        "diagnostic": report.diagnostic,
+    }
 
 
 def _condition_dict(condition: ScreenCondition) -> dict[str, object]:

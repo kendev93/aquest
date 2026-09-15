@@ -4,8 +4,10 @@ from datetime import date
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from selector_app.backtest.engine import SignalBacktestConfig, run_signal_backtest
+from selector_app.backtest.performance import PerformanceAnalyzer
 
 
 def _frame() -> pd.DataFrame:
@@ -60,3 +62,45 @@ def test_signal_engine_supports_fixed_size_and_date_window() -> None:
 
     assert result.trades.iloc[0]["size"] == 200
     assert len(result.equity_curve) == 4
+
+
+@pytest.mark.parametrize(
+    "total",
+    [
+        [10_000.0],
+        [10_000.0, 10_000.0, 10_000.0],
+        [10_000.0, 11_000.0, 12_000.0],
+        [12_000.0, 11_000.0, 10_000.0],
+        [10_000.0, 12_000.0, 9_000.0, 11_000.0, 8_000.0, 13_000.0],
+        [13_000.0, 12_000.0, 12_500.0, 9_000.0],
+        [10_000.0, 10_500.0, 10_200.0, 10_800.0, 10_400.0],
+        [],
+    ],
+)
+def test_drawdown_helpers_match_the_reference_implementation(total: list[float]) -> None:
+    """回归：回撤序列与最长回撤期必须与旧的 DataFrame/逐格回扫写法一致。"""
+
+    values = np.asarray(total, dtype=float)
+
+    drawdown, drawdown_pct = PerformanceAnalyzer._drawdown_arrays(values)
+
+    peak = np.maximum.accumulate(values)
+    expected_drawdown = peak - values
+    expected_pct = np.divide(
+        expected_drawdown, peak, out=np.zeros_like(expected_drawdown), where=peak != 0
+    )
+    assert np.array_equal(drawdown, expected_drawdown)
+    assert np.array_equal(drawdown_pct, expected_pct)
+
+    if not len(expected_drawdown) or float(np.max(expected_drawdown)) == 0:
+        expected_duration = 0
+    else:
+        max_index = int(np.argmax(expected_drawdown))
+        peak_index = max_index
+        for index in range(max_index - 1, -1, -1):
+            if values[index] > values[max_index]:
+                peak_index = index
+                break
+        expected_duration = max_index - peak_index
+
+    assert PerformanceAnalyzer._max_drawdown_duration(values, drawdown) == expected_duration

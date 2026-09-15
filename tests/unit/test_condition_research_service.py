@@ -11,6 +11,7 @@ from selector_app.backtest.models import BacktestReport
 from selector_app.condition_research.models import ConditionResearchConfig
 from selector_app.condition_research.service import (
     ConditionResearchService,
+    _compact_report,
     candidate_constraint_failures,
 )
 from selector_app.market_data.models import StockRef
@@ -259,3 +260,59 @@ def test_service_aborts_if_market_data_changes_between_time_split_passes() -> No
 
     with pytest.raises(TaskUserError, match="行情数据在研究期间发生变化"):
         service.run(config)
+
+
+def _report_with_trades() -> BacktestReport:
+    trade = {
+        "datetime": pd.Timestamp("2024-01-03"),
+        "market": "SH",
+        "code": "600000",
+        "name": "测试股份",
+        "direction": "SELL",
+        "size": 100.0,
+        "price": 11.0,
+        "commission": 0.11,
+        "stamp_tax": 1.1,
+        "slippage": 0.0,
+        "pnl": 90.0,
+        "cost_basis": 1000.0,
+        "rejected": False,
+    }
+    return BacktestReport(
+        market="SH",
+        code="600000",
+        name="测试股份",
+        bars=5,
+        start_date="2024-01-02",
+        end_date="2024-01-06",
+        buy_signal="custom.buy",
+        sell_signal="custom.sell",
+        performance={"total_return": 0.09, "win_rate": 1.0},
+        equity_curve=({"date": "2024-01-02", "total": 10_000.0},),
+        trades=(trade,),
+        positions=({"datetime": pd.Timestamp("2024-01-03"), "size": 0.0},),
+        configuration={"initial_cash": 10_000.0},
+        diagnostic=None,
+    )
+
+
+def test_compact_report_equals_the_full_serialisation_projection() -> None:
+    """回归：精简报告必须与「先 to_dict 再裁剪」的旧写法逐字段一致。"""
+
+    report = _report_with_trades()
+
+    legacy = report.to_dict()
+    legacy["trades"] = [
+        {key: trade.get(key) for key in ("direction", "pnl", "cost_basis", "rejected")}
+        for trade in legacy["trades"]
+    ]
+    legacy["equity_curve"] = []
+    legacy["positions"] = []
+
+    compact = _compact_report(report)
+
+    assert compact == legacy
+    assert list(compact) == list(legacy)
+    assert compact["trades"] == [
+        {"direction": "SELL", "pnl": 90.0, "cost_basis": 1000.0, "rejected": False}
+    ]

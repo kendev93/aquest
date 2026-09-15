@@ -114,7 +114,11 @@ def init_local_worker(service: BacktestService, payload: object) -> None:
 
 
 def init_research_worker(adapter_kind: str, database_path: str, payload: object) -> None:
-    """Process-pool initializer: build one read-only pipeline per worker."""
+    """Process-pool initializer: build one read-only pipeline per worker.
+
+    刻意不接持久化指标缓存：实测（4 worker、真实全市场库）并行时缓存查询会把
+    可并行的 CPU 计算换成共享库的 I/O 争用，整体反而慢 27%，因此 worker 选择重算。
+    """
 
     _STATE["service"] = BacktestService(
         adapter=cast(BacktestMarketDataAdapter, _build_adapter(adapter_kind, database_path))
