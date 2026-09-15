@@ -109,7 +109,7 @@ ETFQuest market_data.db ──只读读取──► ETFQuestMarketDataAdapter �
 
 验证段按跨股票合并成交胜率提升、盈亏比、平均单笔净收益、成交数和覆盖股票数筛选候选；默认每侧最多挖掘 5 条规则，每侧取 1 条进入最终留出。最终留出结果不参与搜索和排名。跨股票总胜率和盈亏比按独立股票的平仓成交汇总；收益率、最大回撤和 Sharpe 只按个股计算并展示分布，不生成或暗含组合净值。
 
-任务运行在通用后台任务执行器中，支持进度、取消和错误摘要；成功结果写入 backtest_history 的 condition_research 类型，并可从历史接口加载。
+任务运行在通用后台任务执行器中，支持进度、取消和错误摘要；成功结果写入 backtest_history 的 condition_research 类型，并可从历史接口加载。逐股票的训练、验证和留出复验按股票拆分为独立任务，通过 spawn 进程池并行执行：每个 worker 自行以只读方式打开行情库、一次只处理一只股票，只回传精简报告和挖掘样本，行情聚合、条件挖掘、约束过滤和排序仍由主进程完成。worker 数由 `SELECTOR_CONDITION_RESEARCH_WORKERS`（默认 `auto`，取可见 CPU 的一半，上限 8）或显式整数决定，并受 `SELECTOR_CONDITION_RESEARCH_MEMORY_BUDGET_MB` 预算约束（按每 worker 约 256 MB 估算，不足时降级）；无法重建的注入了自定义适配器的场景自动退回进程内执行。
 
 ## API
 

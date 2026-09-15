@@ -60,6 +60,12 @@ class DuckDbMarketDataAdapter:
     def __init__(self, store: DuckDbMarketDataStore) -> None:
         self._store = store
 
+    @property
+    def database_path(self) -> Path:
+        """Expose the store path so worker processes can rebuild this adapter."""
+
+        return self._store.database_path
+
     def stock_ref(self, vipdoc_path: str | Path, market: MarketCode, code: str) -> StockRef:
         normalized_code = code.strip()
         refs = self.list_stock_refs(vipdoc_path, market.lower())

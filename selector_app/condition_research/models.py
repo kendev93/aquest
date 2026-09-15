@@ -128,6 +128,22 @@ class ConditionResearchConfig:
             validation_ratio=self.validation_ratio,
         )
 
+    def __getstate__(self) -> dict[str, object]:
+        """Pickle support: ``MappingProxyType`` cannot cross a spawn boundary."""
+
+        state = dict(self.__dict__)
+        state["formula_parameters"] = dict(self.formula_parameters)
+        return state
+
+    def __setstate__(self, state: Mapping[str, object]) -> None:
+        for key, value in state.items():
+            object.__setattr__(self, key, value)
+        object.__setattr__(
+            self,
+            "formula_parameters",
+            MappingProxyType(dict(self.formula_parameters)),
+        )
+
     def to_dict(self) -> dict[str, object]:
         return {
             "vipdoc_path": self.vipdoc_path,

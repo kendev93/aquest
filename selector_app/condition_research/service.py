@@ -6,8 +6,11 @@ import hashlib
 import math
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import as_completed
+from concurrent.futures.process import BrokenProcessPool
+from datetime import date
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Protocol, TypeVar, cast
 
 import pandas as pd
 
@@ -26,19 +29,37 @@ from selector_app.screening.jobs import TaskCancelledError, TaskUserError, repor
 from selector_app.screening.models import ScreenCondition
 from selector_app.strategy_discovery.catalog import default_indicator_catalog
 
+from . import parallel
 from .metrics import summarize_backtests
 from .mining import MinedCondition, mine_binary_conditions
 from .models import ConditionResearchConfig
+from .parallel import (
+    CandidateWindowOutcome,
+    CandidateWindowPayload,
+    HoldoutOutcome,
+    HoldoutPayload,
+    TrainOutcome,
+    TrainPayload,
+)
+from .resources import ResearchWorkerPlan, plan_research_workers
 from .samples import (
     MiningSamples,
     build_buy_trade_samples,
     build_early_exit_samples,
     feature_rows_by_date,
 )
-from .time_split import DateWindow, ResearchSplits, split_calendar_range
+from .time_split import ResearchSplits, split_calendar_range
 
 ProgressCallback = Callable[[int, int], None]
 CancelCheck = Callable[[], bool]
+
+
+class _KeyedOutcome(Protocol):
+    @property
+    def key(self) -> str: ...
+
+
+OutcomeT = TypeVar("OutcomeT", bound=_KeyedOutcome)
 
 
 class ResearchMarketDataAdapter(Protocol):
@@ -52,6 +73,215 @@ class ResearchMarketDataAdapter(Protocol):
     ) -> list[StockRef]: ...
 
 
+def _backtest_config(config: ConditionResearchConfig, ref: StockRef) -> BacktestConfig:
+    return BacktestConfig(
+        market=ref.market,
+        code=ref.code,
+        vipdoc_path=config.vipdoc_path,
+        buy_rule=config.buy_rule,
+        sell_rule=config.sell_rule,
+        formula_text=config.formula_text,
+        formula_parameters=config.formula_parameters,
+        start_date=config.start_date,
+        end_date=config.end_date,
+        initial_cash=config.initial_cash,
+        commission=config.commission,
+        min_commission=config.min_commission,
+        stamp_tax=config.stamp_tax,
+        slippage=config.slippage,
+        execution=config.execution,
+        position_mode=config.position_mode,
+        fixed_size=config.fixed_size,
+        instrument_type=ref.instrument_type,
+        board=ref.board,
+    )
+
+
+def _prepare_stock(
+    service: BacktestService,
+    config: ConditionResearchConfig,
+    ref: StockRef,
+    feature_ids: tuple[str, ...],
+) -> PreparedBacktest:
+    return service.prepare_for_ref(_backtest_config(config, ref), ref, feature_ids=feature_ids)
+
+
+def _window_report(
+    service: BacktestService,
+    prepared: PreparedBacktest,
+    start_date: date,
+    end_date: date,
+) -> BacktestReport:
+    return service.run_prepared(
+        prepared,
+        start_date=start_date,
+        end_date=end_date,
+        summary_only=True,
+    )
+
+
+def _candidate_report(
+    service: BacktestService,
+    prepared: PreparedBacktest,
+    condition: ScreenCondition,
+    side: str,
+    start_date: date,
+    end_date: date,
+) -> BacktestReport:
+    return service.run_prepared(
+        prepared,
+        buy_filter=condition if side == "buy" else None,
+        sell_trigger=condition if side == "sell" else None,
+        start_date=start_date,
+        end_date=end_date,
+        summary_only=True,
+    )
+
+
+def _full_candidate_report(
+    service: BacktestService,
+    prepared: PreparedBacktest,
+    condition: ScreenCondition,
+    side: str,
+) -> BacktestReport:
+    return service.run_prepared(
+        prepared,
+        buy_filter=condition if side == "buy" else None,
+        sell_trigger=condition if side == "sell" else None,
+        summary_only=True,
+    )
+
+
+def _verify_fingerprint(
+    prepared: PreparedBacktest,
+    ref: StockRef,
+    fingerprints: Mapping[str, str],
+) -> None:
+    previous = fingerprints.get(_symbol_key(ref))
+    if previous is None:
+        raise ValueError("该股票在寻优期没有有效行情，跳过后续复验")
+    if previous != prepared.data_fingerprint:
+        raise TaskUserError("行情数据在研究期间发生变化，请重新运行以保证各阶段一致")
+
+
+def _train_task(ref: StockRef) -> TrainOutcome:
+    """Worker entry point: training-window baseline plus mining samples."""
+
+    payload = cast(TrainPayload, parallel.worker_payload())
+    service = parallel.worker_service()
+    key = _symbol_key(ref)
+    try:
+        prepared = _prepare_stock(service, payload.config, ref, payload.feature_ids)
+        baseline = _window_report(service, prepared, payload.train_start, payload.train_end)
+        full_period = service.run_prepared(prepared, summary_only=True)
+        rows = feature_rows_by_date(prepared.feature_values)
+        buy_samples = None
+        sell_samples = None
+        if payload.config.search_sides in {"buy", "both"}:
+            buy_samples = build_buy_trade_samples(
+                baseline.trades,
+                prepared.feature_values,
+                market=ref.market,
+                code=ref.code,
+                feature_rows=rows,
+            )
+        if payload.config.search_sides in {"sell", "both"}:
+            sell_samples = build_early_exit_samples(
+                baseline.trades,
+                prepared.feature_values,
+                prepared.frame,
+                prepared.config,
+                market=ref.market,
+                code=ref.code,
+                feature_rows=rows,
+            )
+    except (ValueError, OSError) as exc:
+        return TrainOutcome(key=key, failure=_reason(exc))
+    return TrainOutcome(
+        key=key,
+        fingerprint=prepared.data_fingerprint,
+        train_report=_compact_report(baseline),
+        full_report=_compact_report(full_period),
+        buy_samples=buy_samples,
+        sell_samples=sell_samples,
+    )
+
+
+def _candidate_window_task(ref: StockRef) -> CandidateWindowOutcome:
+    """Worker entry point: one window's baseline plus every candidate replay."""
+
+    payload = cast(CandidateWindowPayload, parallel.worker_payload())
+    service = parallel.worker_service()
+    key = _symbol_key(ref)
+    try:
+        prepared = _prepare_stock(service, payload.config, ref, payload.feature_ids)
+        _verify_fingerprint(prepared, ref, payload.fingerprints)
+        baseline = _compact_report(
+            _window_report(service, prepared, payload.start_date, payload.end_date)
+        )
+        reports = {
+            candidate_id: _compact_report(
+                _candidate_report(
+                    service,
+                    prepared,
+                    condition,
+                    side,
+                    payload.start_date,
+                    payload.end_date,
+                )
+            )
+            for candidate_id, side, condition in payload.candidates
+        }
+    except (ValueError, OSError) as exc:
+        return CandidateWindowOutcome(key=key, failure=_reason(exc))
+    return CandidateWindowOutcome(
+        key=key,
+        baseline=baseline,
+        candidates=parallel.phase_candidates(payload.candidates, reports),
+    )
+
+
+def _holdout_task(ref: StockRef) -> HoldoutOutcome:
+    """Worker entry point: holdout replay and the candidates' full-period replay."""
+
+    payload = cast(HoldoutPayload, parallel.worker_payload())
+    service = parallel.worker_service()
+    key = _symbol_key(ref)
+    try:
+        prepared = _prepare_stock(service, payload.config, ref, payload.feature_ids)
+        _verify_fingerprint(prepared, ref, payload.fingerprints)
+        baseline = _compact_report(
+            _window_report(service, prepared, payload.start_date, payload.end_date)
+        )
+        holdout = {
+            candidate_id: _compact_report(
+                _candidate_report(
+                    service,
+                    prepared,
+                    condition,
+                    side,
+                    payload.start_date,
+                    payload.end_date,
+                )
+            )
+            for candidate_id, side, condition in payload.candidates
+        }
+        full_period = {
+            candidate_id: _compact_report(
+                _full_candidate_report(service, prepared, condition, side)
+            )
+            for candidate_id, side, condition in payload.candidates
+        }
+    except (ValueError, OSError) as exc:
+        return HoldoutOutcome(key=key, failure=_reason(exc))
+    return HoldoutOutcome(
+        key=key,
+        baseline=baseline,
+        holdout=parallel.phase_candidates(payload.candidates, holdout),
+        full_period=parallel.phase_candidates(payload.candidates, full_period),
+    )
+
+
 class ConditionResearchService:
     """Run fixed base rules, mine outcome-contrast rules, then replay candidates."""
 
@@ -59,15 +289,31 @@ class ConditionResearchService:
         self,
         *,
         adapter: ResearchMarketDataAdapter | None = None,
+        store: DuckDbMarketDataStore | None = None,
         backtest_service: BacktestService | None = None,
         registry: FormulaRegistry | None = None,
+        workers: int | None = None,
     ) -> None:
-        selected_store = DuckDbMarketDataStore()
-        self._adapter = adapter or DuckDbMarketDataAdapter(selected_store)
+        selected_store = store
+        if adapter is None and selected_store is None:
+            selected_store = DuckDbMarketDataStore()
+        self._adapter = (
+            adapter
+            if adapter is not None
+            else DuckDbMarketDataAdapter(cast(DuckDbMarketDataStore, selected_store))
+        )
         self._registry = registry or FORMULA_REGISTRY
         self._backtest_service = backtest_service or BacktestService(
             adapter=cast(BacktestMarketDataAdapter, self._adapter),
             registry=self._registry,
+        )
+        self._worker_plan: ResearchWorkerPlan = plan_research_workers(workers)
+        # Workers rebuild the pipeline from a database path and always use the
+        # default registry, so anything else stays on the in-process path.
+        self._parallel_target = (
+            parallel.adapter_worker_target(self._adapter)
+            if self._registry is FORMULA_REGISTRY
+            else None
         )
 
     def run(
@@ -89,98 +335,91 @@ class ConditionResearchService:
         work_total = max(1, len(refs) * 3)
         self._progress(progress_callback, 0, work_total, "准备训练样本", 0, len(refs))
 
-        train_reports: list[dict[str, object]] = []
-        full_period_reports: list[dict[str, object]] = []
+        train_reports: list[Mapping[str, object]] = []
+        full_period_reports: list[Mapping[str, object]] = []
         buy_samples: list[MiningSamples] = []
         sell_samples: list[MiningSamples] = []
         failures: Counter[str] = Counter()
-        processed: set[tuple[str, str]] = set()
+        processed: set[str] = set()
         fingerprints: dict[str, str] = {}
 
-        for index, ref in enumerate(refs):
-            self._raise_if_cancelled(cancel_check)
-            try:
-                prepared = self._prepare(config, ref, feature_ids)
-                fingerprints[_symbol_key(ref)] = prepared.data_fingerprint
-                baseline = self._run_window(prepared, splits.train)
-                train_reports.append(_compact_report(baseline))
-                full_period_reports.append(_compact_report(self._run_full_period(prepared)))
-                processed.add((ref.market, ref.code))
-                feature_rows = feature_rows_by_date(prepared.feature_values)
-                if config.search_sides in {"buy", "both"}:
-                    buy_samples.append(
-                        build_buy_trade_samples(
-                            baseline.trades,
-                            prepared.feature_values,
-                            market=ref.market,
-                            code=ref.code,
-                            feature_rows=feature_rows,
-                        )
-                    )
-                if config.search_sides in {"sell", "both"}:
-                    sell_samples.append(
-                        build_early_exit_samples(
-                            baseline.trades,
-                            prepared.feature_values,
-                            prepared.frame,
-                            prepared.config,
-                            market=ref.market,
-                            code=ref.code,
-                            feature_rows=feature_rows,
-                        )
-                    )
-            except (ValueError, OSError) as exc:
-                failures[_reason(exc)] += 1
-            self._progress(
-                progress_callback,
-                index + 1,
-                work_total,
-                "挖掘盈利/亏损样本特征",
-                index + 1,
-                len(refs),
-            )
+        train_payload = TrainPayload(
+            config=config,
+            feature_ids=feature_ids,
+            train_start=splits.train.start_date,
+            train_end=splits.train.end_date,
+        )
+        for train_outcome in self._run_phase(
+            train_payload,
+            refs,
+            _train_task,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+            progress_offset=0,
+            work_total=work_total,
+            phase_label="挖掘盈利/亏损样本特征",
+        ):
+            if train_outcome.failure is not None:
+                failures[train_outcome.failure] += 1
+                continue
+            train_reports.append(cast(Mapping[str, object], train_outcome.train_report))
+            full_period_reports.append(cast(Mapping[str, object], train_outcome.full_report))
+            fingerprints[train_outcome.key] = cast(str, train_outcome.fingerprint)
+            processed.add(train_outcome.key)
+            if train_outcome.buy_samples is not None:
+                buy_samples.append(train_outcome.buy_samples)
+            if train_outcome.sell_samples is not None:
+                sell_samples.append(train_outcome.sell_samples)
 
         mined = self._mine_candidates(config, buy_samples, sell_samples)
         baseline_train = summarize_backtests(train_reports)
         if not mined:
-            validation_reports: list[dict[str, object]] = []
-            holdout_reports: list[dict[str, object]] = []
-            for index, ref in enumerate(refs):
-                self._raise_if_cancelled(cancel_check)
-                try:
-                    prepared = self._prepare(config, ref, feature_ids)
-                    self._verify_data_fingerprint(prepared, ref, fingerprints)
-                    validation_reports.append(
-                        _compact_report(self._run_window(prepared, splits.validation))
-                    )
-                except (ValueError, OSError) as exc:
-                    failures[_reason(exc)] += 1
-                self._progress(
-                    progress_callback,
-                    len(refs) + index + 1,
-                    work_total,
-                    "计算基础规则验证结果",
-                    index + 1,
-                    len(refs),
+            validation_reports: list[Mapping[str, object]] = []
+            holdout_reports: list[Mapping[str, object]] = []
+            for validation_outcome in self._run_phase(
+                CandidateWindowPayload(
+                    config=config,
+                    feature_ids=feature_ids,
+                    start_date=splits.validation.start_date,
+                    end_date=splits.validation.end_date,
+                    fingerprints=dict(fingerprints),
+                    candidates=(),
+                ),
+                refs,
+                _candidate_window_task,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+                progress_offset=len(refs),
+                work_total=work_total,
+                phase_label="计算基础规则验证结果",
+            ):
+                if validation_outcome.failure is not None:
+                    failures[validation_outcome.failure] += 1
+                    continue
+                validation_reports.append(
+                    cast(Mapping[str, object], validation_outcome.baseline)
                 )
-            for index, ref in enumerate(refs):
-                self._raise_if_cancelled(cancel_check)
-                try:
-                    prepared = self._prepare(config, ref, feature_ids)
-                    self._verify_data_fingerprint(prepared, ref, fingerprints)
-                    holdout_reports.append(
-                        _compact_report(self._run_window(prepared, splits.holdout))
-                    )
-                except (ValueError, OSError) as exc:
-                    failures[_reason(exc)] += 1
-                self._progress(
-                    progress_callback,
-                    len(refs) * 2 + index + 1,
-                    work_total,
-                    "计算基础规则留出结果",
-                    index + 1,
-                    len(refs),
-                )
+            for holdout_outcome in self._run_phase(
+                HoldoutPayload(
+                    config=config,
+                    feature_ids=feature_ids,
+                    start_date=splits.holdout.start_date,
+                    end_date=splits.holdout.end_date,
+                    fingerprints=dict(fingerprints),
+                    candidates=(),
+                ),
+                refs,
+                _holdout_task,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+                progress_offset=len(refs) * 2,
+                work_total=work_total,
+                phase_label="计算基础规则留出结果",
+            ):
+                if holdout_outcome.failure is not None:
+                    failures[holdout_outcome.failure] += 1
+                    continue
+                holdout_reports.append(cast(Mapping[str, object], holdout_outcome.baseline))
             empty_result = self._empty_result(
                 config,
                 splits,
@@ -199,34 +438,36 @@ class ConditionResearchService:
             baseline_payload["holdout"] = summarize_backtests(holdout_reports)
             return empty_result
 
-        validation_candidates: dict[str, list[dict[str, object]]] = {
+        validation_candidates: dict[str, list[Mapping[str, object]]] = {
             candidate_id: [] for candidate_id, _, _ in mined
         }
-        validation_baseline: list[dict[str, object]] = []
-        for index, ref in enumerate(refs):
-            self._raise_if_cancelled(cancel_check)
-            try:
-                prepared = self._prepare(config, ref, feature_ids)
-                self._verify_data_fingerprint(prepared, ref, fingerprints)
-                validation_baseline.append(
-                    _compact_report(self._run_window(prepared, splits.validation))
-                )
-                for candidate_id, side, candidate in mined:
-                    self._raise_if_cancelled(cancel_check)
-                    report = self._run_candidate(
-                        prepared, candidate.condition, side, splits.validation
-                    )
-                    validation_candidates[candidate_id].append(_compact_report(report))
-            except (ValueError, OSError) as exc:
-                failures[_reason(exc)] += 1
-            self._progress(
-                progress_callback,
-                len(refs) + index + 1,
-                work_total,
-                "验证候选条件",
-                index + 1,
-                len(refs),
-            )
+        validation_baseline: list[Mapping[str, object]] = []
+        candidate_specs = tuple(
+            (candidate_id, side, candidate.condition) for candidate_id, side, candidate in mined
+        )
+        for validation_outcome in self._run_phase(
+            CandidateWindowPayload(
+                config=config,
+                feature_ids=feature_ids,
+                start_date=splits.validation.start_date,
+                end_date=splits.validation.end_date,
+                fingerprints=dict(fingerprints),
+                candidates=candidate_specs,
+            ),
+            refs,
+            _candidate_window_task,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+            progress_offset=len(refs),
+            work_total=work_total,
+            phase_label="验证候选条件",
+        ):
+            if validation_outcome.failure is not None:
+                failures[validation_outcome.failure] += 1
+                continue
+            validation_baseline.append(cast(Mapping[str, object], validation_outcome.baseline))
+            for candidate_id, report in validation_outcome.candidates:
+                validation_candidates[candidate_id].append(report)
 
         validation_baseline_summary = summarize_backtests(validation_baseline)
         results: list[dict[str, object]] = []
@@ -264,42 +505,39 @@ class ConditionResearchService:
         )
         holdout_ids = _select_holdout_candidates(results, config.holdout_candidates)
 
-        holdout_candidates: dict[str, list[dict[str, object]]] = {
+        holdout_candidates: dict[str, list[Mapping[str, object]]] = {
             candidate_id: [] for candidate_id in holdout_ids
         }
-        full_period_candidates: dict[str, list[dict[str, object]]] = {
+        full_period_candidates: dict[str, list[Mapping[str, object]]] = {
             candidate_id: [] for candidate_id in holdout_ids
         }
-        holdout_baseline: list[dict[str, object]] = []
-        for index, ref in enumerate(refs):
-            self._raise_if_cancelled(cancel_check)
-            try:
-                prepared = self._prepare(config, ref, feature_ids)
-                self._verify_data_fingerprint(prepared, ref, fingerprints)
-                holdout_baseline.append(_compact_report(self._run_window(prepared, splits.holdout)))
-                for candidate_id, side, candidate in mined:
-                    if candidate_id not in holdout_ids:
-                        continue
-                    self._raise_if_cancelled(cancel_check)
-                    report = self._run_candidate(
-                        prepared, candidate.condition, side, splits.holdout
-                    )
-                    holdout_candidates[candidate_id].append(_compact_report(report))
-                    full_period_candidates[candidate_id].append(
-                        _compact_report(
-                            self._run_full_candidate(prepared, candidate.condition, side)
-                        )
-                    )
-            except (ValueError, OSError) as exc:
-                failures[_reason(exc)] += 1
-            self._progress(
-                progress_callback,
-                len(refs) * 2 + index + 1,
-                work_total,
-                "复验最终留出期",
-                index + 1,
-                len(refs),
-            )
+        holdout_baseline: list[Mapping[str, object]] = []
+        holdout_specs = tuple(spec for spec in candidate_specs if spec[0] in holdout_ids)
+        for holdout_outcome in self._run_phase(
+            HoldoutPayload(
+                config=config,
+                feature_ids=feature_ids,
+                start_date=splits.holdout.start_date,
+                end_date=splits.holdout.end_date,
+                fingerprints=dict(fingerprints),
+                candidates=holdout_specs,
+            ),
+            refs,
+            _holdout_task,
+            progress_callback=progress_callback,
+            cancel_check=cancel_check,
+            progress_offset=len(refs) * 2,
+            work_total=work_total,
+            phase_label="复验最终留出期",
+        ):
+            if holdout_outcome.failure is not None:
+                failures[holdout_outcome.failure] += 1
+                continue
+            holdout_baseline.append(cast(Mapping[str, object], holdout_outcome.baseline))
+            for candidate_id, report in holdout_outcome.holdout:
+                holdout_candidates[candidate_id].append(report)
+            for candidate_id, report in holdout_outcome.full_period:
+                full_period_candidates[candidate_id].append(report)
 
         for result in results:
             candidate_id = cast(str, result["candidate_id"])
@@ -370,74 +608,63 @@ class ConditionResearchService:
             item.id for item in default_indicator_catalog(self._registry).values if item.rankable
         )
 
-    def _prepare(
+    def _run_phase(
         self,
-        config: ConditionResearchConfig,
-        ref: StockRef,
-        feature_ids: tuple[str, ...],
-    ) -> PreparedBacktest:
-        backtest_config = BacktestConfig(
-            market=ref.market,
-            code=ref.code,
-            vipdoc_path=config.vipdoc_path,
-            buy_rule=config.buy_rule,
-            sell_rule=config.sell_rule,
-            formula_text=config.formula_text,
-            formula_parameters=config.formula_parameters,
-            start_date=config.start_date,
-            end_date=config.end_date,
-            initial_cash=config.initial_cash,
-            commission=config.commission,
-            min_commission=config.min_commission,
-            stamp_tax=config.stamp_tax,
-            slippage=config.slippage,
-            execution=config.execution,
-            position_mode=config.position_mode,
-            fixed_size=config.fixed_size,
-            instrument_type=ref.instrument_type,
-            board=ref.board,
-        )
-        return self._backtest_service.prepare_for_ref(backtest_config, ref, feature_ids=feature_ids)
+        payload: object,
+        refs: Sequence[StockRef],
+        task: Callable[[StockRef], OutcomeT],
+        *,
+        progress_callback: ProgressCallback | None,
+        cancel_check: CancelCheck | None,
+        progress_offset: int,
+        work_total: int,
+        phase_label: str,
+    ) -> list[OutcomeT]:
+        """Run one per-stock phase, in worker processes when parallel is enabled.
 
-    def _run_window(self, prepared: PreparedBacktest, window: DateWindow) -> BacktestReport:
-        return self._backtest_service.run_prepared(
-            prepared,
-            start_date=window.start_date,
-            end_date=window.end_date,
-            summary_only=True,
-        )
+        Outcomes come back in universe order so summaries stay reproducible
+        regardless of completion order.
+        """
 
-    def _run_full_period(self, prepared: PreparedBacktest) -> BacktestReport:
-        return self._backtest_service.run_prepared(prepared, summary_only=True)
-
-    def _run_candidate(
-        self,
-        prepared: PreparedBacktest,
-        condition: ScreenCondition,
-        side: str,
-        window: DateWindow,
-    ) -> BacktestReport:
-        return self._backtest_service.run_prepared(
-            prepared,
-            buy_filter=condition if side == "buy" else None,
-            sell_trigger=condition if side == "sell" else None,
-            start_date=window.start_date,
-            end_date=window.end_date,
-            summary_only=True,
-        )
-
-    def _run_full_candidate(
-        self,
-        prepared: PreparedBacktest,
-        condition: ScreenCondition,
-        side: str,
-    ) -> BacktestReport:
-        return self._backtest_service.run_prepared(
-            prepared,
-            buy_filter=condition if side == "buy" else None,
-            sell_trigger=condition if side == "sell" else None,
-            summary_only=True,
-        )
+        order = {_symbol_key(ref): index for index, ref in enumerate(refs)}
+        outcomes: list[OutcomeT] = []
+        if self._parallel_target is None or self._worker_plan.selected_workers <= 1:
+            parallel.init_local_worker(self._backtest_service, payload)
+            for index, ref in enumerate(refs):
+                self._raise_if_cancelled(cancel_check)
+                outcomes.append(task(ref))
+                self._progress(
+                    progress_callback,
+                    progress_offset + index + 1,
+                    work_total,
+                    phase_label,
+                    index + 1,
+                    len(refs),
+                )
+        else:
+            adapter_kind, database_path = self._parallel_target
+            try:
+                with parallel.research_executor(
+                    self._worker_plan, adapter_kind, database_path, payload
+                ) as executor:
+                    futures = {executor.submit(task, ref): ref for ref in refs}
+                    for completed, future in enumerate(as_completed(futures), start=1):
+                        self._raise_if_cancelled(cancel_check)
+                        outcomes.append(future.result())
+                        self._progress(
+                            progress_callback,
+                            progress_offset + completed,
+                            work_total,
+                            phase_label,
+                            completed,
+                            len(refs),
+                        )
+            except BrokenProcessPool as exc:
+                raise TaskUserError(
+                    "买卖条件研究工作进程意外退出，请重试或减少并发数"
+                ) from exc
+        outcomes.sort(key=lambda outcome: order.get(outcome.key, len(order)))
+        return outcomes
 
     def _mine_candidates(
         self,
@@ -498,23 +725,11 @@ class ConditionResearchService:
             raise TaskCancelledError("买卖条件研究任务已取消")
 
     @staticmethod
-    def _verify_data_fingerprint(
-        prepared: PreparedBacktest,
-        ref: StockRef,
-        fingerprints: Mapping[str, str],
-    ) -> None:
-        previous = fingerprints.get(_symbol_key(ref))
-        if previous is None:
-            raise ValueError("该股票在寻优期没有有效行情，跳过后续复验")
-        if previous != prepared.data_fingerprint:
-            raise TaskUserError("行情数据在研究期间发生变化，请重新运行以保证各阶段一致")
-
-    @staticmethod
     def _empty_result(
         config: ConditionResearchConfig,
         splits: ResearchSplits,
         total: int,
-        processed: set[tuple[str, str]],
+        processed: set[str],
         feature_ids: tuple[str, ...],
         baseline: Mapping[str, object],
         failures: Counter[str],
