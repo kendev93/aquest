@@ -216,8 +216,7 @@ def plan_research_workers(
         )
     elif selected < requested:
         reason = (
-            f"预算 {budget / 1024**2:.0f} MiB 只允许 {selected} 个 worker，"
-            f"低于请求的 {requested}"
+            f"预算 {budget / 1024**2:.0f} MiB 只允许 {selected} 个 worker，低于请求的 {requested}"
         )
     else:
         reason = f"按请求使用 {selected} 个 worker"

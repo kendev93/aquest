@@ -36,6 +36,7 @@ class WorkerPlanLike(Protocol):
     @property
     def selected_workers(self) -> int: ...
 
+
 # (candidate_id, side, condition)
 CandidateSpec = tuple[str, str, ScreenCondition]
 CandidateReports = tuple[tuple[str, Mapping[str, object]], ...]
@@ -116,8 +117,9 @@ def init_local_worker(service: BacktestService, payload: object) -> None:
 def init_research_worker(adapter_kind: str, database_path: str, payload: object) -> None:
     """Process-pool initializer: build one read-only pipeline per worker.
 
-    刻意不接持久化指标缓存：实测（4 worker、真实全市场库）并行时缓存查询会把
-    可并行的 CPU 计算换成共享库的 I/O 争用，整体反而慢 27%，因此 worker 选择重算。
+    刻意不接持久化指标缓存。两次实测（4 worker、真实全市场库）都更慢：连接复用前
+    慢 27%，把缓存读取也接到可复用连接之后仍然慢 10%。原因是缓存命中要查共享库，
+    而公式重算本身在多进程下几乎线性扩展——用可并行的 CPU 换共享库 I/O 不划算。
     """
 
     _STATE["service"] = BacktestService(

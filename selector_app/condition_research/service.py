@@ -423,9 +423,7 @@ class ConditionResearchService:
                 if validation_outcome.failure is not None:
                     failures[validation_outcome.failure] += 1
                     continue
-                validation_reports.append(
-                    cast(Mapping[str, object], validation_outcome.baseline)
-                )
+                validation_reports.append(cast(Mapping[str, object], validation_outcome.baseline))
             for holdout_outcome in self._run_phase(
                 HoldoutPayload(
                     config=config,
@@ -721,9 +719,7 @@ class ConditionResearchService:
                             len(refs),
                         )
             except BrokenProcessPool as exc:
-                raise TaskUserError(
-                    "买卖条件研究工作进程意外退出，请重试或减少并发数"
-                ) from exc
+                raise TaskUserError("买卖条件研究工作进程意外退出，请重试或减少并发数") from exc
         outcomes.sort(key=lambda outcome: order.get(outcome.key, len(order)))
         return outcomes
 
@@ -895,9 +891,7 @@ def _compact_report(report: BacktestReport) -> dict[str, object]:
         "sell_signal": report.sell_signal,
         "performance": dict(report.performance),
         "equity_curve": [],
-        "trades": [
-            {key: trade.get(key) for key in _COMPACT_TRADE_KEYS} for trade in report.trades
-        ],
+        "trades": [{key: trade.get(key) for key in _COMPACT_TRADE_KEYS} for trade in report.trades],
         "positions": [],
         "configuration": dict(report.configuration),
         "diagnostic": report.diagnostic,
