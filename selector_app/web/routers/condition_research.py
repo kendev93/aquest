@@ -1,0 +1,189 @@
+"""Independent per-stock buy/sell condition research endpoints."""
+
+from __future__ import annotations
+
+import uuid
+from collections.abc import Callable
+from typing import Protocol, cast
+
+from fastapi import APIRouter, HTTPException, Request, status
+from fastapi.responses import JSONResponse
+
+from selector_app.condition_research.models import ConditionResearchConfig
+from selector_app.condition_research.service import ConditionResearchService
+from selector_app.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
+from selector_app.screening.jobs import JobState, ProgressReporter, ScreenJobRunner, TaskUserError
+
+from ..backtest_history import save_completed_backtest_history, utc_now
+from ..date_ranges import resolve_date_range
+from ..schemas import ConditionResearchRequest
+
+router = APIRouter(prefix="/condition-research", tags=["condition-research"])
+
+
+class ConditionResearchServiceLike(Protocol):
+    def run(
+        self,
+        config: ConditionResearchConfig,
+        progress_callback: Callable[[int, int], None] | None = None,
+        cancel_check: Callable[[], bool] | None = None,
+    ) -> dict[str, object]: ...
+
+
+def _runner(request: Request) -> ScreenJobRunner:
+    return cast(ScreenJobRunner, request.app.state.screen_job_runner)
+
+
+def _service(request: Request) -> ConditionResearchServiceLike:
+    return cast(
+        ConditionResearchService | ConditionResearchServiceLike,
+        request.app.state.condition_research_service,
+    )
+
+
+def _store(request: Request) -> DuckDbMarketDataStore:
+    return cast(DuckDbMarketDataStore, request.app.state.market_data_store)
+
+
+def _state_or_404(job_id: str, request: Request) -> JobState:
+    state = _runner(request).get(job_id)
+    if state is None or state.description != "买卖条件研究":
+        raise HTTPException(status_code=404, detail="买卖条件研究任务不存在或已过期")
+    return state
+
+
+@router.get("/capabilities")
+def condition_research_capabilities() -> dict[str, object]:
+    return {
+        "data_frequency": "daily",
+        "universe": "all_stock_refs",
+        "portfolio": False,
+        "max_positions": None,
+        "default_range": "recent5",
+        "default_split": {"train": 0.6, "validation": 0.2, "holdout": 0.2},
+        "search_sides": ["buy", "sell", "both"],
+        "default_candidate_limit_per_side": 5,
+        "default_holdout_candidates_per_side": 1,
+        "search_type": "contrastive_threshold_and_pairwise_rules",
+    }
+
+
+@router.post("", status_code=status.HTTP_202_ACCEPTED)
+def create_condition_research(
+    payload: ConditionResearchRequest,
+    request: Request,
+) -> JSONResponse:
+    try:
+        store_status = _store(request).status()
+        start_date, end_date = resolve_date_range(
+            mode=payload.date_mode,
+            requested_start=payload.start_date,
+            requested_end=payload.end_date,
+            available_start=store_status.data_start,
+            available_end=store_status.data_end,
+        )
+        resolved_payload = payload.model_copy(
+            update={
+                "date_mode": "custom",
+                "start_date": start_date,
+                "end_date": end_date,
+            }
+        )
+        config = resolved_payload.to_config()
+        request_snapshot = cast(
+            dict[str, object],
+            resolved_payload.model_dump(mode="json"),
+        )
+        job_id = uuid.uuid4().hex
+
+        def run_task(progress: ProgressReporter) -> dict[str, object]:
+            started_at = utc_now()
+            try:
+                result = _service(request).run(
+                    config,
+                    progress,
+                    lambda: _runner(request).is_cancel_requested(job_id),
+                )
+            except ValueError as exc:
+                raise TaskUserError(str(exc)) from exc
+            finished_at = utc_now()
+            save_completed_backtest_history(
+                _store(request),
+                history_id=job_id,
+                backtest_type="condition_research",
+                request=request_snapshot,
+                result=result,
+                started_at=started_at,
+                finished_at=finished_at,
+            )
+            return result
+
+        job_id = _runner(request).submit_callable(
+            run_task,
+            description="买卖条件研究",
+            job_id=job_id,
+            worker_count=1,
+            exclusive_group="condition-research",
+        )
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content={"error": {"code": "validation_error", "message": str(exc)}},
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail="研究任务执行器暂不可用") from exc
+    return JSONResponse(
+        status_code=status.HTTP_202_ACCEPTED,
+        content={"data": {"job_id": job_id, "status": "queued"}},
+    )
+
+
+@router.get("/history")
+def condition_research_history(request: Request) -> dict[str, object]:
+    try:
+        return {"data": _store(request).list_backtest_history("condition_research")}
+    except (MarketDataStoreError, OSError) as exc:
+        raise HTTPException(status_code=503, detail="买卖条件研究历史暂不可用") from exc
+
+
+@router.get("/history/{history_id}")
+def condition_research_history_detail(
+    history_id: str,
+    request: Request,
+) -> dict[str, object]:
+    try:
+        record = _store(request).read_backtest_history(history_id)
+    except (MarketDataStoreError, OSError) as exc:
+        raise HTTPException(status_code=503, detail="买卖条件研究历史暂不可用") from exc
+    if record is None or record.get("backtest_type") != "condition_research":
+        raise HTTPException(status_code=404, detail="买卖条件研究历史不存在")
+    return {"data": record}
+
+
+@router.get("/{job_id}")
+def condition_research_status(job_id: str, request: Request) -> dict[str, object]:
+    state = _state_or_404(job_id, request)
+    snapshot = state.snapshot()
+    snapshot["result"] = None
+    return {"data": snapshot}
+
+
+@router.get("/{job_id}/results")
+def condition_research_results(job_id: str, request: Request) -> dict[str, object]:
+    state = _state_or_404(job_id, request)
+    if state.status == "failed":
+        raise HTTPException(status_code=500, detail=state.error or "买卖条件研究失败")
+    if state.status == "cancelled":
+        raise HTTPException(status_code=409, detail="买卖条件研究任务已取消")
+    if state.status != "completed" or state.result_payload is None:
+        raise HTTPException(status_code=409, detail="买卖条件研究尚未完成")
+    return {"data": state.result_payload}
+
+
+@router.post("/{job_id}/cancel")
+def cancel_condition_research(job_id: str, request: Request) -> dict[str, object]:
+    _state_or_404(job_id, request)
+    return {"data": {"cancelled": _runner(request).request_cancel(job_id)}}
+
+
+__all__ = ["router"]

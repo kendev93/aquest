@@ -105,6 +105,7 @@ def run_signal_backtest(
     market: str = "",
     code: str = "",
     name: str | None = None,
+    summary_only: bool = False,
 ) -> SignalBacktestResult:
     """Run one long-only signal stream with next-bar execution semantics."""
 
@@ -156,11 +157,16 @@ def run_signal_backtest(
     trades: list[dict[str, object]] = []
     equity: list[dict[str, object]] = []
     positions: list[dict[str, object]] = []
+    totals: list[float] = []
+    dates = prepared["date"].to_numpy()
+    opens = prepared["open"].to_numpy(dtype=float, copy=False)
+    closes = prepared["close"].to_numpy(dtype=float, copy=False)
 
-    for index, row in prepared.iterrows():
+    for index in range(len(prepared)):
+        current_date = pd.Timestamp(dates[index])
         if pending is not None:
             direction, signal_index = pending
-            price = float(row["open"] if config.execution == "next_open" else row["close"])
+            price = float(opens[index] if config.execution == "next_open" else closes[index])
             if direction == "BUY":
                 size = _buy_size(cash, price, config, profile)
                 if size > 0:
@@ -176,7 +182,7 @@ def run_signal_backtest(
                     position += size
                     trades.append(
                         _trade(
-                            row,
+                            current_date,
                             direction,
                             size,
                             price,
@@ -190,7 +196,7 @@ def run_signal_backtest(
                             code,
                             name,
                             signal_index,
-                            prepared.iloc[signal_index]["date"],
+                            dates[signal_index],
                         )
                     )
             else:
@@ -204,7 +210,7 @@ def run_signal_backtest(
                     cash += size * price - commission - stamp_tax - slippage
                     trades.append(
                         _trade(
-                            row,
+                            current_date,
                             direction,
                             size,
                             price,
@@ -218,34 +224,37 @@ def run_signal_backtest(
                             code,
                             name,
                             signal_index,
-                            prepared.iloc[signal_index]["date"],
+                            dates[signal_index],
                         )
                     )
                     position = 0.0
                     average_cost = 0.0
             pending = None
 
-        close = float(row["close"])
+        close = float(closes[index])
         position_value = position * close
         total = cash + position_value
-        equity.append(
-            {
-                "date": row["date"].strftime("%Y-%m-%d"),
-                "datetime": row["date"],
-                "cash": cash,
-                "position_value": position_value,
-                "total": total,
-            }
-        )
-        positions.append(
-            {
-                "datetime": row["date"],
-                "size": position,
-                "avg_price": average_cost,
-                "market_value": position_value,
-                "unrealized_pnl": (close - average_cost) * position,
-            }
-        )
+        if summary_only:
+            totals.append(total)
+        else:
+            equity.append(
+                {
+                    "date": current_date.strftime("%Y-%m-%d"),
+                    "datetime": current_date,
+                    "cash": cash,
+                    "position_value": position_value,
+                    "total": total,
+                }
+            )
+            positions.append(
+                {
+                    "datetime": current_date,
+                    "size": position,
+                    "avg_price": average_cost,
+                    "market_value": position_value,
+                    "unrealized_pnl": (close - average_cost) * position,
+                }
+            )
 
         if index < len(prepared) - 1:
             if position > 0 and sells[index]:
@@ -253,15 +262,16 @@ def run_signal_backtest(
             elif position <= 0 and buys[index]:
                 pending = ("BUY", index)
 
-    equity_frame = pd.DataFrame(equity)
-    peak = equity_frame["total"].cummax()
-    equity_frame["drawdown"] = peak - equity_frame["total"]
-    equity_frame["drawdown_pct"] = np.divide(
-        equity_frame["drawdown"],
-        peak,
-        out=np.zeros(len(equity_frame), dtype=float),
-        where=peak.to_numpy() != 0,
-    )
+    equity_frame = pd.DataFrame({"total": totals}) if summary_only else pd.DataFrame(equity)
+    if not summary_only:
+        peak = equity_frame["total"].cummax()
+        equity_frame["drawdown"] = peak - equity_frame["total"]
+        equity_frame["drawdown_pct"] = np.divide(
+            equity_frame["drawdown"],
+            peak,
+            out=np.zeros(len(equity_frame), dtype=float),
+            where=peak.to_numpy() != 0,
+        )
     trade_frame = pd.DataFrame(trades, columns=_TRADE_COLUMNS)
     position_frame = pd.DataFrame(positions, columns=_POSITION_COLUMNS)
     analyzer = PerformanceAnalyzer(equity_frame, trade_frame)
@@ -308,7 +318,7 @@ def _affordable_size(
 
 
 def _trade(
-    row: pd.Series,
+    execution_date: pd.Timestamp,
     direction: str,
     size: float,
     price: float,
@@ -325,8 +335,8 @@ def _trade(
     signal_date: object,
 ) -> dict[str, object]:
     return {
-        "datetime": row["date"],
-        "date": row["date"].strftime("%Y-%m-%d"),
+        "datetime": execution_date,
+        "date": execution_date.strftime("%Y-%m-%d"),
         "signal_date": pd.Timestamp(signal_date).strftime("%Y-%m-%d"),
         "signal_index": signal_index,
         "market": market,

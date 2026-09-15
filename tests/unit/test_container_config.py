@@ -49,7 +49,9 @@ def test_compose_defines_an_isolated_strategy_worker() -> None:
 
 def test_indicator_lab_start_scripts_auto_select_the_etfquest_database() -> None:
     shell_script = (PROJECT_ROOT / "scripts" / "start_indicator_lab.sh").read_text(encoding="utf-8")
-    powershell_script = (PROJECT_ROOT / "scripts" / "start_indicator_lab.ps1").read_text(encoding="utf-8")
+    powershell_script = (PROJECT_ROOT / "scripts" / "start_indicator_lab.ps1").read_text(
+        encoding="utf-8"
+    )
     compose = (PROJECT_ROOT / "docker-compose.etfquest.yml").read_text(encoding="utf-8")
 
     assert "Library/Application Support/ETFQuest/database" in shell_script

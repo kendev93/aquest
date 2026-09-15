@@ -21,6 +21,10 @@ vi.mock('./pages/BacktestPage.vue', () => ({
   default: { name: 'BacktestPage', template: '<main>单股回测</main>' },
 }))
 
+vi.mock('./pages/ConditionResearchPage.vue', () => ({
+  default: { name: 'ConditionResearchPage', template: '<main>买卖条件研究</main>' },
+}))
+
 vi.mock('./pages/PortfolioBacktestPage.vue', () => ({
   default: { name: 'PortfolioBacktestPage', template: '<main>组合回测</main>' },
 }))
@@ -57,5 +61,14 @@ describe('App navigation', () => {
     await flushPromises()
 
     expect((wrapper.get('[data-testid="formula-draft"]').element as HTMLInputElement).value).toBe('用户正在编辑的条件')
+  })
+
+  it('opens the independent buy and sell condition research section', async () => {
+    const wrapper = mount(App)
+    window.history.pushState({}, '', '/condition-research')
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('买卖条件研究')
   })
 })

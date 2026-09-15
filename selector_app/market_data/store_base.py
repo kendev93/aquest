@@ -27,7 +27,12 @@ SCHEMA_VERSION = 13
 SCREEN_HISTORY_LIMIT = 10
 STRATEGY_DISCOVERY_HISTORY_LIMIT = 20
 BACKTEST_HISTORY_LIMIT = 20
-_BACKTEST_HISTORY_TYPES = {"single_stock", "portfolio", "strategy_fitness"}
+_BACKTEST_HISTORY_TYPES = {
+    "single_stock",
+    "portfolio",
+    "strategy_fitness",
+    "condition_research",
+}
 _APP_DATA_DIR_NAME = ".indicator-lab"
 _BAR_COLUMNS = [
     "market",

@@ -772,6 +772,7 @@ onMounted(async () => {
         <a class="nav-link" href="/backtest">单股回测</a>
         <a class="nav-link" href="/portfolio-backtest">组合回测</a>
         <a class="nav-link active" href="/strategy-lab" aria-current="page">策略实验室</a>
+        <a class="nav-link" href="/condition-research">买卖条件研究</a>
         <a class="nav-link" href="/strategy-fitness">策略适配性</a>
         <a class="nav-link" href="/market-data">本地行情</a>
       </nav>

@@ -100,6 +100,41 @@ def test_formula_backtest_uses_next_bar_execution_and_returns_metrics() -> None:
     json.dumps(report.to_dict(), ensure_ascii=False)
 
 
+def test_prepared_backtest_exposes_features_and_reuses_them_for_rule_variants() -> None:
+    service = BacktestService(adapter=FakeAdapter(make_frame()))
+    prepared = service.prepare(
+        config(
+            formula_text="BUY:C=11; SELL:C=14; MOM:C-REF(C,1);",
+        ),
+        feature_ids=("custom.mom",),
+    )
+
+    assert prepared.feature_values["custom.mom"].iloc[1] == 1.0
+    report = service.run_prepared(
+        prepared,
+        buy_filter=ScreenCondition(
+            left_value="custom.mom",
+            operator="gt",
+            right_constant=2.0,
+        ),
+    )
+
+    assert report.performance["total_trades"] == 0
+
+
+def test_summary_backtest_preserves_metrics_and_trades_without_daily_details() -> None:
+    service = BacktestService(adapter=FakeAdapter(make_frame()))
+    prepared = service.prepare(config())
+
+    complete = service.run_prepared(prepared)
+    summary = service.run_prepared(prepared, summary_only=True)
+
+    assert summary.performance == complete.performance
+    assert summary.trades == complete.trades
+    assert summary.equity_curve == ()
+    assert summary.positions == ()
+
+
 def test_formula_backtest_calculates_signals_before_date_window() -> None:
     frame = make_frame()
     frame.loc[1, "close"] = 10.0

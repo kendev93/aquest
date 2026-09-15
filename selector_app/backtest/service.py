@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 from typing import Protocol, cast
@@ -24,6 +25,7 @@ from selector_app.market_data.adapter import DuckDbMarketDataAdapter
 from selector_app.market_data.models import MarketCode, StockRef
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.screening.engine import evaluate_rule_group
+from selector_app.screening.models import ScreenCondition
 from selector_app.screening.rules import RuleGroup
 
 from .engine import SignalBacktestConfig, SignalBacktestResult, run_signal_backtest
@@ -37,6 +39,19 @@ class BacktestMarketDataAdapter(Protocol):
     def stock_ref(self, vipdoc_path: str | Path, market: MarketCode, code: str) -> StockRef: ...
 
     def read_stock(self, ref: StockRef) -> pd.DataFrame: ...
+
+
+@dataclass(frozen=True)
+class PreparedBacktest:
+    """One stock's loaded indicators and bars reusable across rule variants."""
+
+    config: BacktestConfig
+    ref: StockRef
+    frame: pd.DataFrame
+    formula_results: Mapping[str, FormulaResult]
+    custom_formula: bool
+    data_fingerprint: str
+    feature_values: pd.DataFrame
 
 
 class BacktestService:
@@ -59,38 +74,172 @@ class BacktestService:
     ) -> BacktestReport:
         if progress_callback is not None:
             progress_callback(0, 1)
+        prepared = self.prepare(config)
+        report = self.run_prepared(prepared)
+        if progress_callback is not None:
+            progress_callback(1, 1)
+        return report
+
+    def prepare(
+        self,
+        config: BacktestConfig,
+        *,
+        feature_ids: tuple[str, ...] = (),
+    ) -> PreparedBacktest:
+        """Load a stock and calculate indicators once for repeated rule tests."""
+
         ref = self._adapter.stock_ref(config.vipdoc_path, config.market, config.code)
+        return self.prepare_for_ref(config, ref, feature_ids=feature_ids)
+
+    def prepare_for_ref(
+        self,
+        config: BacktestConfig,
+        ref: StockRef,
+        *,
+        feature_ids: tuple[str, ...] = (),
+    ) -> PreparedBacktest:
+        """Prepare an already enumerated stock without rescanning the universe."""
+
         frame = self._prepare_frame(self._adapter.read_stock(ref))
         if frame.empty:
-            raise ValueError(f"{config.market} {config.code} 没有可用日线数据")
+            raise ValueError(f"{ref.market} {ref.code} 没有可用日线数据")
         data_fingerprint = frame_fingerprint(frame)
-
         parsed_formula, formula_results = self._calculate_formula_results(
-            frame, config, market=config.market, code=config.code
+            frame,
+            config,
+            market=ref.market,
+            code=ref.code,
+            additional_value_ids=feature_ids,
         )
         minimum_bars = max(result.minimum_bars for result in formula_results.values())
         if len(frame) < minimum_bars:
             raise ValueError(
                 f"历史数据不足，至少需要 {minimum_bars} 根 K 线，当前只有 {len(frame)} 根"
             )
-
         window_indices = self._window_indices(frame, config.start_date, config.end_date)
         if len(window_indices) == 0:
             raise ValueError("指定日期范围内没有可用日线数据")
-        window = frame.iloc[window_indices].reset_index(drop=True)
         if config.buy_rule is None or config.sell_rule is None:
             raise ValueError("买入和卖出规则不能为空")
+        feature_values = self._feature_frame(
+            frame,
+            formula_results,
+            custom=parsed_formula is not None,
+            feature_ids=feature_ids,
+        )
+        return PreparedBacktest(
+            config=config,
+            ref=ref,
+            frame=frame,
+            formula_results=formula_results,
+            custom_formula=parsed_formula is not None,
+            data_fingerprint=data_fingerprint,
+            feature_values=feature_values,
+        )
+
+    def run_prepared(
+        self,
+        prepared: PreparedBacktest,
+        *,
+        buy_rule: RuleGroup | None = None,
+        sell_rule: RuleGroup | None = None,
+        buy_filter: ScreenCondition | None = None,
+        sell_trigger: ScreenCondition | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        summary_only: bool = False,
+    ) -> BacktestReport:
+        """Simulate a rule variant without rereading bars or recalculating indicators.
+
+        A buy filter is ANDed with the base buy rule. An added sell trigger is
+        ORed with the base sell rule, preserving the user's original logic.
+        """
+
+        config = prepared.config
+        selected_buy_rule = buy_rule or config.buy_rule
+        selected_sell_rule = sell_rule or config.sell_rule
+        if selected_buy_rule is None or selected_sell_rule is None:
+            raise ValueError("买入和卖出规则不能为空")
+        if start_date is None and end_date is None:
+            start_date = config.start_date
+            end_date = config.end_date
+        indices = self._window_indices(prepared.frame, start_date, end_date)
+        if len(indices) == 0:
+            raise ValueError("指定日期范围内没有可用日线数据")
+        window = prepared.frame.iloc[indices].reset_index(drop=True)
         buy_mask = self._rule_window(
-            formula_results, config.buy_rule, window_indices, parsed_formula is not None
+            prepared.formula_results,
+            selected_buy_rule,
+            indices,
+            prepared.custom_formula,
         )
         sell_mask = self._rule_window(
-            formula_results, config.sell_rule, window_indices, parsed_formula is not None
+            prepared.formula_results,
+            selected_sell_rule,
+            indices,
+            prepared.custom_formula,
         )
-        result = self._run_engine(window, buy_mask, sell_mask, config, name=ref.name)
-        report = self._build_report(result, window, config, data_fingerprint, name=ref.name)
-        if progress_callback is not None:
-            progress_callback(1, 1)
-        return report
+        if buy_filter is not None:
+            buy_mask &= self._condition_window(prepared, buy_filter, indices)
+        if sell_trigger is not None:
+            sell_mask |= self._condition_window(prepared, sell_trigger, indices)
+        variant_config = replace(
+            config,
+            buy_rule=selected_buy_rule,
+            sell_rule=selected_sell_rule,
+            buy_signal=config.buy_signal if buy_rule is None else None,
+            sell_signal=config.sell_signal if sell_rule is None else None,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        result = self._run_engine(
+            window,
+            buy_mask,
+            sell_mask,
+            variant_config,
+            name=prepared.ref.name,
+            summary_only=summary_only,
+        )
+        return self._build_report(
+            result,
+            window,
+            variant_config,
+            prepared.data_fingerprint,
+            name=prepared.ref.name,
+            summary_only=summary_only,
+        )
+
+    def _condition_window(
+        self,
+        prepared: PreparedBacktest,
+        condition: ScreenCondition,
+        indices: np.ndarray,
+    ) -> np.ndarray:
+        rule = RuleGroup(conditions=(condition,), combine_mode="all")
+        mask = evaluate_rule_group(
+            rule,
+            prepared.formula_results,
+            self._registry,
+            custom=prepared.custom_formula,
+        )
+        return np.asarray(mask[indices], dtype=bool).copy()
+
+    @staticmethod
+    def _feature_frame(
+        frame: pd.DataFrame,
+        results: Mapping[str, FormulaResult],
+        *,
+        custom: bool,
+        feature_ids: tuple[str, ...],
+    ) -> pd.DataFrame:
+        selected = set(feature_ids)
+        values: dict[str, np.ndarray] = {}
+        for formula_id, result in results.items():
+            for value_name, array in result.values.items():
+                value_id = custom_output_id(value_name) if custom else f"{formula_id}.{value_name}"
+                if not selected or value_id in selected:
+                    values[value_id] = np.asarray(array, dtype=float)
+        return pd.DataFrame({"date": frame["date"].to_numpy(), **values})
 
     def _calculate_formula_results(
         self,
@@ -99,13 +248,17 @@ class BacktestService:
         *,
         market: str = "",
         code: str = "",
+        additional_value_ids: tuple[str, ...] = (),
     ) -> tuple[ParsedFormula | None, dict[str, FormulaResult]]:
         if config.formula_text:
             parsed = parse_formula(config.formula_text)
             available = {signal.id for signal in parsed.signals}
             signal_ids = self._rule_signal_ids(config.buy_rule, config.sell_rule)
             invalid_signals = [signal_id for signal_id in signal_ids if signal_id not in available]
-            value_ids = self._rule_value_ids(config.buy_rule, config.sell_rule)
+            value_ids = (
+                *self._rule_value_ids(config.buy_rule, config.sell_rule),
+                *additional_value_ids,
+            )
             available_values = {custom_output_id(name) for name in parsed.value_names}
             invalid_values = [
                 value_id for value_id in value_ids if value_id not in available_values
@@ -132,7 +285,10 @@ class BacktestService:
         for signal_id in signal_ids:
             if not self._registry.has_signal(signal_id):
                 raise ValueError(f"未知选股信号: {signal_id}")
-        value_ids = self._rule_value_ids(config.buy_rule, config.sell_rule)
+        value_ids = (
+            *self._rule_value_ids(config.buy_rule, config.sell_rule),
+            *additional_value_ids,
+        )
         definitions_by_id = {
             definition.id: definition
             for definition in (
@@ -219,6 +375,7 @@ class BacktestService:
         config: BacktestConfig,
         *,
         name: str | None = None,
+        summary_only: bool = False,
     ) -> SignalBacktestResult:
         return run_signal_backtest(
             frame,
@@ -238,6 +395,7 @@ class BacktestService:
             market=config.market,
             code=config.code,
             name=name,
+            summary_only=summary_only,
         )
 
     @staticmethod
@@ -248,6 +406,7 @@ class BacktestService:
         data_fingerprint: str,
         *,
         name: str | None = None,
+        summary_only: bool = False,
     ) -> BacktestReport:
         # Keep serialization here so pandas/numpy values never leak into the
         # JSON response contract.
@@ -268,9 +427,9 @@ class BacktestService:
             buy_signal=config.buy_signal,
             sell_signal=config.sell_signal,
             performance={name: _number(value) for name, value in result.performance.items()},
-            equity_curve=tuple(_frame_records(result.equity_curve)),
+            equity_curve=() if summary_only else tuple(_frame_records(result.equity_curve)),
             trades=tuple(_frame_records(result.trades)),
-            positions=tuple(_frame_records(result.positions)),
+            positions=() if summary_only else tuple(_frame_records(result.positions)),
             configuration={
                 "initial_cash": config.initial_cash,
                 "commission": profile.commission,

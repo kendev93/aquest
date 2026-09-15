@@ -473,7 +473,7 @@ export interface BacktestJobState {
   result: BacktestResult | null
 }
 
-export type BacktestHistoryType = 'single_stock' | 'portfolio' | 'strategy_fitness'
+export type BacktestHistoryType = 'single_stock' | 'portfolio' | 'strategy_fitness' | 'condition_research'
 
 export interface BacktestHistorySummary {
   history_id: string
@@ -898,4 +898,136 @@ export interface StrategyFitnessJobState {
   errors: number
   error: string | null
   result: StrategyFitnessReport | null
+}
+
+export type ConditionResearchSide = 'buy' | 'sell' | 'both'
+
+export interface ConditionResearchPayload {
+  universe: 'all' | 'sh' | 'sz'
+  vipdoc_path?: string
+  boards?: InstrumentBoard[]
+  buy_rule: RuleGroupPayload
+  sell_rule: RuleGroupPayload
+  formula_text?: string | null
+  formula_parameters?: Record<string, number>
+  date_mode?: DateRangeMode
+  start_date?: string | null
+  end_date?: string | null
+  search_sides?: ConditionResearchSide
+  initial_cash?: number
+  commission?: number
+  min_commission?: number
+  stamp_tax?: number
+  slippage?: number
+  execution?: BacktestExecution
+  position_mode?: BacktestPositionMode
+  fixed_size?: number | null
+  min_trades?: number
+  min_instruments?: number
+  candidate_limit?: number
+  holdout_candidates?: number
+}
+
+export interface ConditionResearchJobState {
+  job_id: string
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+  progress: number
+  total_candidates: number
+  total_scanned: number
+  errors: number
+  skipped: number
+  error: string | null
+  result: ConditionResearchReport | null
+  phase?: string | null
+  metadata?: Record<string, unknown>
+}
+
+export interface ConditionResearchMiningMetrics {
+  support_count: number
+  support_ratio: number
+  instrument_count: number
+  outcome_rate: number
+  baseline_rate: number
+  lift: number
+}
+
+export interface ConditionResearchStockResult {
+  market: string
+  code: string
+  name: string | null
+  closed_trades: number
+  win_rate: number | null
+  payoff_ratio: number | null
+  profit_factor: number | null
+  mean_trade_return: number | null
+  median_trade_return: number | null
+  total_return: number | null
+  annual_return: number | null
+  max_drawdown: number | null
+  sharpe: number | null
+  baseline_win_rate?: number | null
+  improved_win_rate?: boolean | null
+}
+
+export interface ConditionResearchSummary {
+  pooled_trades: {
+    closed_trades: number
+    wins: number
+    losses: number
+    win_rate: number | null
+    payoff_ratio: number | null
+    profit_factor: number | null
+    mean_trade_return: number | null
+    median_trade_return: number | null
+    stocks_with_trades: number
+  }
+  per_stock: {
+    stock_count: number
+    median_win_rate: number | null
+    median_payoff_ratio: number | null
+    median_total_return: number | null
+    median_annual_return: number | null
+    median_max_drawdown: number | null
+    median_sharpe: number | null
+    compared_stock_count: number
+    improved_stock_count: number
+    improved_stock_ratio: number | null
+  }
+  stocks?: ConditionResearchStockResult[]
+}
+
+export interface ConditionResearchCandidate {
+  candidate_id: string
+  side: 'buy' | 'sell'
+  condition: ScreenCondition
+  mining: ConditionResearchMiningMetrics
+  validation: ConditionResearchSummary
+  passed_constraints: boolean
+  constraint_failures: string[]
+  full_period: ConditionResearchSummary | null
+  holdout: ConditionResearchSummary | null
+}
+
+export interface ConditionResearchReport {
+  universe: 'all' | 'sh' | 'sz'
+  start_date: string
+  end_date: string
+  data_fingerprint?: string | null
+  search_sides: ConditionResearchSide
+  feature_count: number
+  total_candidates: number
+  processed: number
+  skipped: number
+  errors: number
+  failure_reasons: Record<string, number>
+  splits: Record<'train' | 'validation' | 'holdout', { start_date: string; end_date: string }>
+  baseline: {
+    train: ConditionResearchSummary
+    validation?: ConditionResearchSummary
+    full_period?: ConditionResearchSummary
+    holdout?: ConditionResearchSummary
+  }
+  candidates: ConditionResearchCandidate[]
+  diagnostic?: string
+  algorithm: Record<string, string | number>
 }

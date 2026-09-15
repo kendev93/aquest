@@ -9,7 +9,12 @@ from typing import Literal
 
 from selector_app.market_data.store import DuckDbMarketDataStore
 
-BacktestHistoryType = Literal["single_stock", "portfolio", "strategy_fitness"]
+BacktestHistoryType = Literal[
+    "single_stock",
+    "portfolio",
+    "strategy_fitness",
+    "condition_research",
+]
 
 logger = logging.getLogger(__name__)
 

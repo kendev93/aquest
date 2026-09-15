@@ -19,6 +19,7 @@ from starlette.responses import Response
 
 from selector_app.adapters.market_data_sync import MarketDataSync
 from selector_app.backtest.service import BacktestService
+from selector_app.condition_research.service import ConditionResearchService
 from selector_app.indicators.cache import IndicatorCache
 from selector_app.indicators.precompute import IndicatorPrecomputeService
 from selector_app.market_data.adapter import (
@@ -89,6 +90,7 @@ def create_app(
     runner: ScreenJobRunner | None = None,
     market_sync: MarketDataSync | object | None = None,
     backtest_service: BacktestService | object | None = None,
+    condition_research_service: ConditionResearchService | object | None = None,
     portfolio_backtest_service: PortfolioBacktestService | object | None = None,
     strategy_discovery_service: StrategyDiscoveryService | object | None = None,
     strategy_job_backend: StrategyJobBackend | object | None = None,
@@ -160,6 +162,24 @@ def create_app(
     selected_runner = runner or ScreenJobRunner(
         engine=engine
         or ScreenEngine(adapter=selected_adapter, indicator_cache=selected_indicator_cache)
+    )
+    selected_backtest_service = cast(
+        BacktestService,
+        backtest_service
+        if backtest_service is not None
+        else BacktestService(
+            adapter=selected_adapter,
+            indicator_cache=selected_indicator_cache,
+        ),
+    )
+    selected_condition_research_service = cast(
+        ConditionResearchService,
+        condition_research_service
+        if condition_research_service is not None
+        else ConditionResearchService(
+            adapter=selected_adapter,
+            backtest_service=selected_backtest_service,
+        ),
     )
     selected_portfolio_service = cast(
         PortfolioBacktestService,
@@ -269,10 +289,8 @@ def create_app(
     )
     app.state.screen_job_runner = selected_runner
     app.state.market_sync_service = selected_market_sync
-    app.state.backtest_service = backtest_service or BacktestService(
-        adapter=selected_adapter,
-        indicator_cache=selected_indicator_cache,
-    )
+    app.state.backtest_service = selected_backtest_service
+    app.state.condition_research_service = selected_condition_research_service
     app.state.portfolio_backtest_service = selected_portfolio_service
     app.state.strategy_discovery_service = selected_discovery_service
     app.state.strategy_job_backend = selected_strategy_backend
@@ -424,6 +442,7 @@ def create_app(
             )
 
     from .routers.backtest import router as backtest_router
+    from .routers.condition_research import router as condition_research_router
     from .routers.jobs import router as jobs_router
     from .routers.market_data import router as market_data_router
     from .routers.portfolio_backtest import router as portfolio_backtest_router
@@ -435,6 +454,7 @@ def create_app(
     app.include_router(jobs_router, prefix="/api/v1")
     app.include_router(market_data_router, prefix="/api/v1")
     app.include_router(backtest_router, prefix="/api/v1")
+    app.include_router(condition_research_router, prefix="/api/v1")
     app.include_router(portfolio_backtest_router, prefix="/api/v1")
     app.include_router(strategy_discovery_router, prefix="/api/v1")
     app.include_router(strategy_fitness_router, prefix="/api/v1")

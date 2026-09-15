@@ -101,6 +101,16 @@ ETFQuest market_data.db ──只读读取──► ETFQuestMarketDataAdapter �
 
 排行榜页面可以对当前夏普榜或收益榜前十发起独立异步全量复核。复核使用实验原始开始日期和任务启动时本地最新已完成行情日，自动共享只读行情/指标快照，并按 CPU 和资源预检选择实际并发；每个候选只模拟一次，整体、今年以来、滚动一年/两年和自然年度指标均从同一条连续资金曲线派生。复核结果不参与排行榜排序，行情指纹变化仅标记为“行情已更新”；页面可展开完整配置、资金曲线和成交原因，并把完整区间配置应用回普通组合回测。
 
+## 买卖条件研究
+
+买卖条件研究是独立于策略实验室的单股规则挖掘流程。用户给定的基础买入和卖出规则固定保留；买入候选作为额外 AND 过滤条件，卖出候选作为额外 OR 退出触发。所有股票分别使用同一单股交易模拟器、费用和成交语义回测，不共享资金，也不限制跨股票的持仓数。
+
+研究任务分寻优、验证和最终留出三段。寻优段先从已完成交易抽取入场特征和持仓期退出决策样本，以净盈利交易或“提前退出优于基础退出”的样本作为目标，使用分位阈值和跨指标比较生成可读规则；卖出挖掘每笔交易最多采样 8 个均匀分布的持仓决策点，候选规则仍在完整日线上重放。候选按支持样本、覆盖股票数和相对基准胜率 lift 筛选。每只股票在每一阶段只准备一次行情和指标数据，随后在内存中复用已计算指标重跑候选规则。每只股票的行情指纹在各阶段保持一致；任务期间数据变化时终止研究，避免不同阶段混用行情。候选回测使用 summary-only 模式，只生成绩效所需的日净值和成交统计，不保存每个候选的逐日持仓明细；最终结果仍包含逐股票绩效摘要。
+
+验证段按跨股票合并成交胜率提升、盈亏比、平均单笔净收益、成交数和覆盖股票数筛选候选；默认每侧最多挖掘 5 条规则，每侧取 1 条进入最终留出。最终留出结果不参与搜索和排名。跨股票总胜率和盈亏比按独立股票的平仓成交汇总；收益率、最大回撤和 Sharpe 只按个股计算并展示分布，不生成或暗含组合净值。
+
+任务运行在通用后台任务执行器中，支持进度、取消和错误摘要；成功结果写入 backtest_history 的 condition_research 类型，并可从历史接口加载。
+
 ## API
 
 - `POST /api/v1/market-data/sync-online`（仅在线更新）
@@ -115,6 +125,10 @@ ETFQuest market_data.db ──只读读取──► ETFQuestMarketDataAdapter �
 - `POST /api/v1/market-data/jobs/{job_id}/cancel`（协作取消单个行情任务）
 - `GET /api/v1/market-data/local/instruments`
 - `GET /api/v1/market-data/local/{market}/{code}/bars`
+- `GET /api/v1/condition-research/capabilities`
+- `POST /api/v1/condition-research`（异步启动全股票逐只规则研究）
+- `GET /api/v1/condition-research/{job_id}`、`GET /api/v1/condition-research/{job_id}/results` 和 `POST /api/v1/condition-research/{job_id}/cancel`
+- `GET /api/v1/condition-research/history` 与 `GET /api/v1/condition-research/history/{history_id}`
 - 既有公式选股、单股回测、组合回测和策略适配 API 保持路径不变，但只读取 DuckDB；单股、组合和策略适配分别提供 `/history`、`/history/{id}` 和删除接口，策略实验室继续提供同样的历史实验接口，并通过 `/strategy-discovery/{experiment_id}/replays`、`/replay-jobs/{job_id}`、`/replay-jobs/{job_id}/results`、`/replay-jobs/{job_id}/cancel` 和 `/history/{experiment_id}/replays` 管理前十全量复核。
 
 行情查询接口不需要 `vipdoc_path`；发布模式下行情来自 ETFQuest 共享数据库。自定义 universe 文件仍可由筛选/回测请求指定，但其中的行情数据来自数据库。

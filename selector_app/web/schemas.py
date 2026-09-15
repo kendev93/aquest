@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from selector_app.backtest.models import BacktestConfig
 from selector_app.concurrency import MAX_WORKERS
+from selector_app.condition_research.models import ConditionResearchConfig
 from selector_app.formulas.custom import FormulaParseError, custom_output_id, parse_formula
 from selector_app.formulas.registry import FORMULA_REGISTRY
 from selector_app.market_data.models import InstrumentBoard, InstrumentType, MarketDataProvider
@@ -439,6 +440,108 @@ class BacktestRequest(BaseModel):
             execution=self.execution,
             position_mode=self.position_mode,
             fixed_size=self.fixed_size,
+        )
+
+
+class ConditionResearchRequest(BaseModel):
+    """Cross-stock independent backtests with rule discovery."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    universe: Literal["all", "sh", "sz"] = "all"
+    vipdoc_path: str = Field(default="", max_length=1024)
+    boards: list[InstrumentBoard] = Field(default_factory=list, max_length=4)
+    buy_rule: RuleGroupRequest
+    sell_rule: RuleGroupRequest
+    formula_text: str | None = Field(default=None, max_length=20_000)
+    formula_parameters: dict[str, float] = Field(default_factory=dict, max_length=32)
+    date_mode: DateRangeMode = "recent5"
+    start_date: date | None = None
+    end_date: date | None = None
+    search_sides: Literal["buy", "sell", "both"] = "both"
+    initial_cash: float = Field(default=100_000.0, gt=0, le=1_000_000_000_000)
+    commission: float = Field(default=0.0001, ge=0, le=0.1)
+    min_commission: float = Field(default=0.1, ge=0, le=100_000)
+    stamp_tax: float = Field(default=0.001, ge=0, le=0.1)
+    slippage: float = Field(default=0.0, ge=0, le=1_000)
+    execution: Literal["next_open", "next_close"] = "next_open"
+    position_mode: Literal["full", "fixed"] = "full"
+    fixed_size: int | None = Field(default=None, ge=100, le=100_000_000)
+    min_trades: int = Field(default=20, ge=1, le=100_000)
+    min_instruments: int = Field(default=5, ge=1, le=10_000)
+    candidate_limit: int = Field(default=5, ge=1, le=10)
+    holdout_candidates: int = Field(default=1, ge=1, le=3)
+
+    @model_validator(mode="after")
+    def validate_research(self) -> ConditionResearchRequest:
+        validate_date_range_request(self.date_mode, self.start_date, self.end_date)
+        if any(board not in {"main", "star", "chinext", "b_share"} for board in self.boards):
+            raise ValueError("买卖条件研究的范围只支持股票板块")
+        if self.start_date is not None and self.end_date is not None:
+            if self.start_date > self.end_date:
+                raise ValueError("研究开始日期不能晚于结束日期")
+        signal_ids = [
+            *self.buy_rule.signals,
+            *self.sell_rule.signals,
+        ]
+        validate_formula_signals(
+            self.formula_text,
+            signal_ids,
+            self.formula_parameters,
+        )
+        if self.formula_text and not parse_formula(self.formula_text).value_names:
+            raise ValueError("自定义公式至少需要包含一个数值输出，才能自动挖掘条件")
+        conditions = [
+            *self.buy_rule.required_conditions,
+            *self.buy_rule.conditions,
+            *self.sell_rule.required_conditions,
+            *self.sell_rule.conditions,
+        ]
+        if conditions:
+            validate_formula_conditions(
+                self.formula_text,
+                [condition.to_model() for condition in conditions],
+            )
+        if self.position_mode == "fixed":
+            if self.fixed_size is None or self.fixed_size % 100 != 0:
+                raise ValueError("固定股数必须是 100 的整数倍")
+        elif self.fixed_size is not None:
+            raise ValueError("全仓模式不应设置固定股数")
+        return self
+
+    def to_config(
+        self,
+        *,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> ConditionResearchConfig:
+        resolved_start = self.start_date or start_date
+        resolved_end = self.end_date or end_date
+        if resolved_start is None or resolved_end is None:
+            raise ValueError("本地行情没有可用日期范围")
+        return ConditionResearchConfig(
+            vipdoc_path=self.vipdoc_path,
+            universe=self.universe,
+            buy_rule=self.buy_rule.to_model(),
+            sell_rule=self.sell_rule.to_model(),
+            start_date=resolved_start,
+            end_date=resolved_end,
+            formula_text=self.formula_text,
+            formula_parameters=self.formula_parameters,
+            boards=tuple(self.boards),
+            search_sides=self.search_sides,
+            initial_cash=self.initial_cash,
+            commission=self.commission,
+            min_commission=self.min_commission,
+            stamp_tax=self.stamp_tax,
+            slippage=self.slippage,
+            execution=self.execution,
+            position_mode=self.position_mode,
+            fixed_size=self.fixed_size,
+            min_trades=self.min_trades,
+            min_instruments=self.min_instruments,
+            candidate_limit=self.candidate_limit,
+            holdout_candidates=self.holdout_candidates,
         )
 
 
