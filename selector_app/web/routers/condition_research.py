@@ -10,6 +10,10 @@ from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from selector_app.condition_research.models import ConditionResearchConfig
+from selector_app.condition_research.resources import (
+    ResearchResourceBudgetError,
+    ResearchResourceEstimate,
+)
 from selector_app.condition_research.service import ConditionResearchService
 from selector_app.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
 from selector_app.screening.jobs import JobState, ProgressReporter, ScreenJobRunner, TaskUserError
@@ -17,6 +21,21 @@ from selector_app.screening.jobs import JobState, ProgressReporter, ScreenJobRun
 from ..backtest_history import save_completed_backtest_history, utc_now
 from ..date_ranges import resolve_date_range
 from ..schemas import ConditionResearchRequest
+
+
+def _estimate_payload(estimate: ResearchResourceEstimate) -> dict[str, object]:
+    return {
+        "stock_count": estimate.stock_count,
+        "candidates_per_stock": estimate.candidates_per_stock,
+        "bars_per_stock": estimate.bars_per_stock,
+        "selected_workers": estimate.selected_workers,
+        "worker_bytes": estimate.worker_bytes,
+        "parent_bytes": estimate.parent_bytes,
+        "estimated_peak_bytes": estimate.estimated_peak_bytes,
+        "memory_budget_bytes": estimate.memory_budget_bytes,
+        "reason": estimate.reason,
+    }
+
 
 router = APIRouter(prefix="/condition-research", tags=["condition-research"])
 
@@ -28,6 +47,8 @@ class ConditionResearchServiceLike(Protocol):
         progress_callback: Callable[[int, int], None] | None = None,
         cancel_check: Callable[[], bool] | None = None,
     ) -> dict[str, object]: ...
+
+    def estimate_resources(self, config: ConditionResearchConfig) -> ResearchResourceEstimate: ...
 
 
 def _runner(request: Request) -> ScreenJobRunner:
@@ -90,6 +111,18 @@ def create_condition_research(
             }
         )
         config = resolved_payload.to_config()
+        estimate = _service(request).estimate_resources(config)
+        if not estimate.within_budget:
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                content={
+                    "error": {
+                        "code": "resource_budget_exceeded",
+                        "message": str(ResearchResourceBudgetError(estimate)),
+                        "estimate": _estimate_payload(estimate),
+                    }
+                },
+            )
         request_snapshot = cast(
             dict[str, object],
             resolved_payload.model_dump(mode="json"),

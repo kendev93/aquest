@@ -17,11 +17,10 @@ from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date
-from typing import Literal, cast
+from typing import Literal, Protocol, cast
 
 from selector_app.backtest.service import BacktestMarketDataAdapter, BacktestService
 from selector_app.condition_research.models import ConditionResearchConfig
-from selector_app.condition_research.resources import ResearchWorkerPlan
 from selector_app.condition_research.samples import MiningSamples
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
 from selector_app.market_data.etfquest_adapter import ETFQuestMarketDataAdapter
@@ -29,6 +28,13 @@ from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.screening.models import ScreenCondition
 
 AdapterKind = Literal["duckdb", "etfquest"]
+
+
+class WorkerPlanLike(Protocol):
+    """Either the data-free or the data-aware plan; both expose a worker count."""
+
+    @property
+    def selected_workers(self) -> int: ...
 
 # (candidate_id, side, condition)
 CandidateSpec = tuple[str, str, ScreenCondition]
@@ -145,7 +151,7 @@ def adapter_worker_target(adapter: object) -> tuple[AdapterKind, str] | None:
 
 @contextmanager
 def research_executor(
-    plan: ResearchWorkerPlan,
+    plan: WorkerPlanLike,
     adapter_kind: str,
     database_path: str,
     payload: object,
@@ -195,6 +201,7 @@ __all__ = [
     "HoldoutOutcome",
     "HoldoutPayload",
     "TrainOutcome",
+    "WorkerPlanLike",
     "TrainPayload",
     "adapter_worker_target",
     "init_local_worker",

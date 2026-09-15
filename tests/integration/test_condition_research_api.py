@@ -8,13 +8,31 @@ import numpy as np
 import pandas as pd
 from fastapi.testclient import TestClient
 
+from selector_app.condition_research.resources import ResearchResourceEstimate
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.web.app import create_app
 
 
 class FakeConditionResearchService:
-    def __init__(self) -> None:
+    def __init__(self, *, within_budget: bool = True) -> None:
         self.config = None
+        self._within_budget = within_budget
+
+    def estimate_resources(self, config):
+        peak = 4 * 1024**3 if self._within_budget else 99 * 1024**3
+        return ResearchResourceEstimate(
+            stock_count=1,
+            candidates_per_stock=2,
+            bars_per_stock=120,
+            requested_workers=4,
+            selected_workers=4 if self._within_budget else 1,
+            worker_bytes=224 * 1024**2,
+            parent_bytes=160 * 1024**2,
+            estimated_peak_bytes=peak,
+            memory_budget_bytes=4 * 1024**3,
+            within_budget=self._within_budget,
+            reason="fixture",
+        )
 
     def run(self, config, progress_callback=None, cancel_check=None):
         self.config = config
@@ -126,3 +144,25 @@ def test_condition_research_api_rejects_missing_sell_rule(tmp_path: Path) -> Non
         response = client.post("/api/v1/condition-research", json=invalid)
 
     assert response.status_code == 422
+
+
+def test_condition_research_api_rejects_a_run_over_the_memory_budget(tmp_path: Path) -> None:
+    """预算不足时必须在创建任务前返回 422，并带上可执行的估算信息。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", bars())
+    app = create_app(
+        market_data_store=store,
+        condition_research_service=FakeConditionResearchService(within_budget=False),
+        auto_sync_enabled=False,
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/api/v1/condition-research", json=payload(tmp_path))
+
+    assert response.status_code == 422
+    error = response.json()["error"]
+    assert error["code"] == "resource_budget_exceeded"
+    assert "内存" in error["message"]
+    assert error["estimate"]["estimated_peak_bytes"] == 99 * 1024**3
+    assert error["estimate"]["memory_budget_bytes"] == 4 * 1024**3

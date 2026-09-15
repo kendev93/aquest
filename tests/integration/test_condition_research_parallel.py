@@ -5,8 +5,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from selector_app.condition_research.models import ConditionResearchConfig
+from selector_app.condition_research.resources import ResearchResourceBudgetError
 from selector_app.condition_research.service import ConditionResearchService
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.screening.rules import RuleGroup
@@ -110,3 +112,20 @@ def test_unknown_adapter_stays_in_process(tmp_path: Path) -> None:
     )
 
     assert service._parallel_target is None  # noqa: SLF001
+
+
+def test_service_refuses_to_start_when_memory_budget_is_too_small(tmp_path: Path) -> None:
+    """预算连单进程都放不下时，必须在跑任何股票之前就报错。"""
+
+    store_path = tmp_path / "market.duckdb"
+    writer = DuckDbMarketDataStore(store_path)
+    writer.replace_local_bars("SH", "600000", "stock", _bars("SH", "600000", 0.0))
+
+    service = ConditionResearchService(
+        store=_store(store_path),
+        workers=4,
+        memory_budget_bytes=1,
+    )
+
+    with pytest.raises(ResearchResourceBudgetError, match="内存"):
+        service.run(_config())

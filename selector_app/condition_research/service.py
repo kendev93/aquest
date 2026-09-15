@@ -41,7 +41,13 @@ from .parallel import (
     TrainOutcome,
     TrainPayload,
 )
-from .resources import ResearchWorkerPlan, plan_research_workers
+from .resources import (
+    ResearchResourceBudgetError,
+    ResearchResourceEstimate,
+    ResearchWorkerPlan,
+    estimate_research_resources,
+    plan_research_workers,
+)
 from .samples import (
     MiningSamples,
     build_buy_trade_samples,
@@ -282,6 +288,19 @@ def _holdout_task(ref: StockRef) -> HoldoutOutcome:
     )
 
 
+def _candidates_per_stock(config: ConditionResearchConfig) -> int:
+    """Compact reports the parent keeps per stock: both sides plus holdout replays."""
+
+    return 2 * config.candidate_limit + 4 * config.holdout_candidates
+
+
+def _estimated_bars_per_stock(config: ConditionResearchConfig) -> int:
+    """Rough trading-bar count for the requested window (calendar days x 5/7)."""
+
+    window_days = (config.end_date - config.start_date).days + 1
+    return max(1, int(window_days * 5 / 7))
+
+
 class ConditionResearchService:
     """Run fixed base rules, mine outcome-contrast rules, then replay candidates."""
 
@@ -293,10 +312,12 @@ class ConditionResearchService:
         backtest_service: BacktestService | None = None,
         registry: FormulaRegistry | None = None,
         workers: int | None = None,
+        memory_budget_bytes: int | None = None,
     ) -> None:
         selected_store = store
         if adapter is None and selected_store is None:
             selected_store = DuckDbMarketDataStore()
+        self._store = selected_store
         self._adapter = (
             adapter
             if adapter is not None
@@ -307,7 +328,10 @@ class ConditionResearchService:
             adapter=cast(BacktestMarketDataAdapter, self._adapter),
             registry=self._registry,
         )
-        self._worker_plan: ResearchWorkerPlan = plan_research_workers(workers)
+        self._memory_budget_bytes = memory_budget_bytes
+        self._worker_plan: ResearchWorkerPlan = plan_research_workers(
+            workers, memory_budget_bytes=memory_budget_bytes
+        )
         # Workers rebuild the pipeline from a database path and always use the
         # default registry, so anything else stays on the in-process path.
         self._parallel_target = (
@@ -332,6 +356,7 @@ class ConditionResearchService:
             validation_ratio=config.validation_ratio,
         )
         feature_ids = self._feature_ids(config)
+        plan = self._plan_for(refs, config)
         work_total = max(1, len(refs) * 3)
         self._progress(progress_callback, 0, work_total, "准备训练样本", 0, len(refs))
 
@@ -358,6 +383,7 @@ class ConditionResearchService:
             progress_offset=0,
             work_total=work_total,
             phase_label="挖掘盈利/亏损样本特征",
+            plan=plan,
         ):
             if train_outcome.failure is not None:
                 failures[train_outcome.failure] += 1
@@ -392,6 +418,7 @@ class ConditionResearchService:
                 progress_offset=len(refs),
                 work_total=work_total,
                 phase_label="计算基础规则验证结果",
+                plan=plan,
             ):
                 if validation_outcome.failure is not None:
                     failures[validation_outcome.failure] += 1
@@ -415,6 +442,7 @@ class ConditionResearchService:
                 progress_offset=len(refs) * 2,
                 work_total=work_total,
                 phase_label="计算基础规则留出结果",
+                plan=plan,
             ):
                 if holdout_outcome.failure is not None:
                     failures[holdout_outcome.failure] += 1
@@ -461,6 +489,7 @@ class ConditionResearchService:
             progress_offset=len(refs),
             work_total=work_total,
             phase_label="验证候选条件",
+            plan=plan,
         ):
             if validation_outcome.failure is not None:
                 failures[validation_outcome.failure] += 1
@@ -529,6 +558,7 @@ class ConditionResearchService:
             progress_offset=len(refs) * 2,
             work_total=work_total,
             phase_label="复验最终留出期",
+            plan=plan,
         ):
             if holdout_outcome.failure is not None:
                 failures[holdout_outcome.failure] += 1
@@ -578,6 +608,36 @@ class ConditionResearchService:
             },
         }
 
+    def estimate_resources(self, config: ConditionResearchConfig) -> ResearchResourceEstimate:
+        """Pre-flight memory estimate for one configuration, without running it."""
+
+        refs = self._list_stock_refs(config)
+        return estimate_research_resources(
+            len(refs),
+            candidates_per_stock=_candidates_per_stock(config),
+            bars_per_stock=_estimated_bars_per_stock(config),
+            requested_workers=self._worker_plan.requested_workers,
+            memory_budget_bytes=self._memory_budget_bytes,
+        )
+
+    def _plan_for(
+        self,
+        refs: Sequence[StockRef],
+        config: ConditionResearchConfig,
+    ) -> ResearchResourceEstimate:
+        """Data-aware worker plan; refuses to start when even one worker cannot fit."""
+
+        estimate = estimate_research_resources(
+            len(refs),
+            candidates_per_stock=_candidates_per_stock(config),
+            bars_per_stock=_estimated_bars_per_stock(config),
+            requested_workers=self._worker_plan.requested_workers,
+            memory_budget_bytes=self._memory_budget_bytes,
+        )
+        if not estimate.within_budget:
+            raise ResearchResourceBudgetError(estimate)
+        return estimate
+
     def _list_stock_refs(self, config: ConditionResearchConfig) -> list[StockRef]:
         try:
             refs = self._adapter.list_stock_refs(
@@ -619,6 +679,7 @@ class ConditionResearchService:
         progress_offset: int,
         work_total: int,
         phase_label: str,
+        plan: ResearchResourceEstimate,
     ) -> list[OutcomeT]:
         """Run one per-stock phase, in worker processes when parallel is enabled.
 
@@ -628,7 +689,7 @@ class ConditionResearchService:
 
         order = {_symbol_key(ref): index for index, ref in enumerate(refs)}
         outcomes: list[OutcomeT] = []
-        if self._parallel_target is None or self._worker_plan.selected_workers <= 1:
+        if self._parallel_target is None or plan.selected_workers <= 1:
             parallel.init_local_worker(self._backtest_service, payload)
             for index, ref in enumerate(refs):
                 self._raise_if_cancelled(cancel_check)
@@ -645,7 +706,7 @@ class ConditionResearchService:
             adapter_kind, database_path = self._parallel_target
             try:
                 with parallel.research_executor(
-                    self._worker_plan, adapter_kind, database_path, payload
+                    plan, adapter_kind, database_path, payload
                 ) as executor:
                     futures = {executor.submit(task, ref): ref for ref in refs}
                     for completed, future in enumerate(as_completed(futures), start=1):
