@@ -24,6 +24,7 @@ def test_nuitka_command_builds_one_shared_standalone_bundle(tmp_path: Path) -> N
     assert "--mode=standalone" in command
     assert "--onefile" not in command
     assert "--include-package=selector_app" in command
+    assert "--include-package=cryptography" in command
     assert "--include-package=akshare" not in command
     assert "--include-package=duckdb" in command
     assert "--include-package=numpy" in command

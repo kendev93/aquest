@@ -32,6 +32,18 @@ if [ ! -r "$database_file" ]; then
   exit 1
 fi
 
+app_data_dir=${ETFQUEST_APP_DATA_DIR:-$(dirname "$database_dir")}
+secret_key_file="${app_data_dir}/.secret.key"
+if [ ! -f "$secret_key_file" ]; then
+  printf '未找到 ETFQuest 授权快照密钥：%s\n' "$secret_key_file" >&2
+  printf '%s\n' '请确认这是 ETFQuest 应用数据目录，且该目录包含 .secret.key。' >&2
+  exit 1
+fi
+if [ ! -r "$secret_key_file" ]; then
+  printf 'ETFQuest 授权快照密钥不可读：%s\n' "$secret_key_file" >&2
+  exit 1
+fi
+
 if [ "${1:-}" = "--protected" ]; then
   shift
   compose_mode=protected
@@ -40,9 +52,11 @@ else
 fi
 
 export ETFQUEST_MARKET_DATABASE_DIR="$database_dir"
+export ETFQUEST_APP_DATA_DIR="$app_data_dir"
 export SELECTOR_MARKET_DATA_SOURCE=etfquest
 export SELECTOR_RELEASE_MODE=1
 export SELECTOR_ETFQUEST_DATABASE_PATH=/run/etfquest/database/market_data.db
+export SELECTOR_ETFQUEST_SECRET_KEY_PATH=/run/etfquest/.secret.key
 
 cd "$REPO_ROOT"
 if [ "$compose_mode" = "protected" ]; then

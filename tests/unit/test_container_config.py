@@ -51,8 +51,23 @@ def test_shared_start_scripts_auto_select_the_etfquest_database() -> None:
     assert "CommonApplicationData" in powershell_script
     assert "SELECTOR_MARKET_DATA_SOURCE=etfquest" in shell_script
     assert 'SELECTOR_MARKET_DATA_SOURCE = "etfquest"' in powershell_script
+    assert "SELECTOR_ETFQUEST_SECRET_KEY_PATH" in shell_script
+    assert "ETFQUEST_APP_DATA_DIR" in powershell_script
+    assert "ETFQUEST_APP_DATA_DIR" in shell_script
+    assert "/run/etfquest/.secret.key" in compose
     assert compose.count("read_only: false") == 1
-    assert compose.count("read_only: true") == 1
+    assert compose.count("read_only: true") == 2
+
+
+def test_membership_secret_key_is_readonly_and_backend_only() -> None:
+    compose = (PROJECT_ROOT / "docker-compose.etfquest.yml").read_text(encoding="utf-8")
+    backend, strategy_worker = compose.split("  strategy-worker:", maxsplit=1)
+
+    assert "ETFQUEST_APP_DATA_DIR" in backend
+    assert "target: /run/etfquest/.secret.key" in backend
+    assert "create_host_path: false" in backend
+    assert "target: /run/etfquest/.secret.key\n        read_only: true" in backend
+    assert ".secret.key" not in strategy_worker
 
 
 def test_shared_start_script_handles_macos_application_support_path(tmp_path: Path) -> None:
@@ -60,6 +75,7 @@ def test_shared_start_script_handles_macos_application_support_path(tmp_path: Pa
     database_dir = home / "Library" / "Application Support" / "ETFQuest" / "database"
     database_dir.mkdir(parents=True)
     (database_dir / "market_data.db").touch()
+    (database_dir.parent / ".secret.key").write_text("test-key", encoding="utf-8")
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -80,6 +96,7 @@ def test_shared_start_script_handles_macos_application_support_path(tmp_path: Pa
 
     environment = os.environ.copy()
     environment.pop("ETFQUEST_MARKET_DATABASE_DIR", None)
+    environment.pop("ETFQUEST_APP_DATA_DIR", None)
     environment["HOME"] = str(home)
     environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
     environment["DOCKER_ARGS_FILE"] = str(docker_args)

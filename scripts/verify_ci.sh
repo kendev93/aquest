@@ -85,7 +85,9 @@ run_docker_checks() {
 
 run_protected_docker_checks() {
   printf '%s\n' '验证保护版 Docker：Nuitka 编译、产物源码扫描、最终镜像构建'
-  docker compose -f docker-compose.yml -f docker-compose.protected.yml config --quiet
+  ETFQUEST_MARKET_DATABASE_DIR="${TMPDIR:-/tmp}/ETFQuest/database" \
+    ETFQUEST_APP_DATA_DIR="${TMPDIR:-/tmp}/ETFQuest" \
+    docker compose -f docker-compose.yml -f docker-compose.protected.yml config --quiet
   docker build --file Dockerfile.protected --tag indicator-lab-protected:ci .
 }
 

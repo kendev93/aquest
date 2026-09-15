@@ -5,11 +5,18 @@ services:
       SELECTOR_MARKET_DATA_SOURCE: etfquest
       SELECTOR_RELEASE_MODE: "1"
       SELECTOR_ETFQUEST_DATABASE_PATH: /run/etfquest/database/market_data.db
+      SELECTOR_ETFQUEST_SECRET_KEY_PATH: /run/etfquest/.secret.key
     volumes:
       - type: bind
         source: ${ETFQUEST_MARKET_DATABASE_DIR:?Set ETFQUEST_MARKET_DATABASE_DIR to ETFQuest's database directory}
         target: /run/etfquest/database
         read_only: false
+      - type: bind
+        source: ${ETFQUEST_APP_DATA_DIR:?Set ETFQUEST_APP_DATA_DIR to ETFQuest's application data directory}/.secret.key
+        target: /run/etfquest/.secret.key
+        read_only: true
+        bind:
+          create_host_path: false
 
   strategy-worker:
     environment:

@@ -101,6 +101,7 @@ def build_nuitka_command(
         f"--output-dir={config.output_dir}",
         f"--output-filename={BINARY_NAME}",
         "--include-package=selector_app",
+        "--include-package=cryptography",
         "--include-package=duckdb",
         "--include-package=numpy",
         "--include-package=pandas",

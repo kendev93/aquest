@@ -65,6 +65,11 @@ indicator-lab worker   启动 strategy-worker
 
 ## 保护版 Docker 发布
 
+直接运行下面的 Compose 命令前，须设置 `ETFQUEST_MARKET_DATABASE_DIR` 和
+`ETFQUEST_APP_DATA_DIR`。后者应指向包含 `database/` 和 `.secret.key` 的 ETFQuest
+应用数据目录；backend 只读挂载 `.secret.key` 用于离线验证会员快照，strategy-worker 不会
+获得该密钥。日常运行优先用 `scripts/start_shared.*`，由脚本自动推导并校验路径。
+
 ### 构建
 
 ~~~bash

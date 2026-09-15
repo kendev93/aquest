@@ -32,8 +32,17 @@ Windows PowerShell：
 - Linux：`$XDG_DATA_HOME/ETFQuest/database/market_data.db`，未设置时使用
   `~/.local/share/ETFQuest/database/market_data.db`。
 
+脚本也会检查同一 ETFQuest 应用数据目录下的 `.secret.key`。Indicator Lab 只读取
+ETFQuest 已保存的 v3 加密会员快照：检查同步状态、用该密钥解密，并验证服务端签发、
+绑定机器码的会员签名、有效期和核心功能授权策略；不会为每个请求访问注册/会员服务器。
+旧版、缺失、未同步或无法验证的快照会拒绝核心功能，需先在 ETFQuest 中联网刷新授权。
+
+Docker 仅将 `.secret.key` 以只读方式挂载到 backend，strategy-worker 不挂载该密钥；
+不要把密钥复制进仓库或镜像。手动启动 Compose overlay 时，设置
+`ETFQUEST_APP_DATA_DIR` 为包含 `database/` 和 `.secret.key` 的 ETFQuest 应用数据目录。
+
 也可以通过 `ETFQUEST_MARKET_DATABASE_DIR` 覆盖数据库目录。数据库不存在或不可读时，
-脚本直接退出，不会启动到容器内的旧行情库。
+脚本或授权密钥不存在/不可读时，脚本直接退出，不会启动到容器内的旧行情库或使用未经验证的会员状态。
 
 ## 全市场同步
 
