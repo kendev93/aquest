@@ -489,7 +489,7 @@ class DuckDbBarsStore:
             "volume, amount, source, provider, price_basis, bar_status, imported_at "
             f"FROM daily_bars WHERE {' AND '.join(conditions)} ORDER BY trade_date"
         )
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             return self._store._frame_from_query(connection.execute(query, parameters).df())
 
     def has_provisional_bars(self, market: str, code: str) -> bool:

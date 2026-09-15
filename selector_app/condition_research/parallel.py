@@ -178,7 +178,9 @@ def _build_adapter(
     adapter_kind: str, database_path: str
 ) -> DuckDbMarketDataAdapter | ETFQuestMarketDataAdapter:
     if adapter_kind == "duckdb":
-        return DuckDbMarketDataAdapter(DuckDbMarketDataStore(database_path, read_only=True))
+        return DuckDbMarketDataAdapter(
+            DuckDbMarketDataStore(database_path, read_only=True, pool_read_connections=True)
+        )
     if adapter_kind == "etfquest":
         return ETFQuestMarketDataAdapter(database_path)
     raise ValueError(f"不支持的买卖条件研究行情适配器: {adapter_kind}")

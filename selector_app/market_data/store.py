@@ -33,8 +33,16 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
     normalization logic remains in :mod:`store_base`.
     """
 
-    def __init__(self, database_path: str | Path | None = None, *, read_only: bool = False) -> None:
-        super().__init__(database_path, read_only=read_only)
+    def __init__(
+        self,
+        database_path: str | Path | None = None,
+        *,
+        read_only: bool = False,
+        pool_read_connections: bool = False,
+    ) -> None:
+        super().__init__(
+            database_path, read_only=read_only, pool_read_connections=pool_read_connections
+        )
         self._bars = DuckDbBarsStore(self)
         self._history = DuckDbHistoryStore(self)
         self._indicator_cache = DuckDbIndicatorCacheStore(self)

@@ -10,10 +10,11 @@ from __future__ import annotations
 import os
 import re
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from pathlib import Path
-from threading import RLock
+from threading import RLock, local
 
 import duckdb
 import numpy as np
@@ -120,10 +121,23 @@ def _append_filter(
 class _DuckDbStoreBase:
     """Own connections and shared invariants for all storage repositories."""
 
-    def __init__(self, database_path: str | Path | None = None, *, read_only: bool = False) -> None:
+    def __init__(
+        self,
+        database_path: str | Path | None = None,
+        *,
+        read_only: bool = False,
+        pool_read_connections: bool = False,
+    ) -> None:
         self.database_path = Path(database_path or default_database_path()).expanduser()
         self.read_only = read_only
         self._initialized = False
+        # 打开一条 DuckDB 连接实测约 9.5 ms（占 read_bars 的 57%），逐标的读取时
+        # 是主要开销。研究 worker 是只读短命进程，复用同一条只读连接可以省掉这部分。
+        # 默认关闭：写库进程里长期持有只读连接可能读到本进程刚写入前的快照。
+        # 跨阶段一致性不受影响——研究的三个阶段各自新建进程池，也就是各自新建连接，
+        # 因此阶段之间的行情变化仍会被指纹校验捕获。
+        self.pool_read_connections = pool_read_connections
+        self._read_sessions = local()
 
     def _connect(self, *, read_only: bool | None = None) -> duckdb.DuckDBPyConnection:
         mode = self.read_only if read_only is None else read_only
@@ -150,6 +164,23 @@ class _DuckDbStoreBase:
         raise MarketDataStoreError(
             "行情数据库当前被其它进程占用，请关闭其它写入进程后重试"
         ) from last_error
+
+    @contextmanager
+    def read_session(self) -> Iterator[duckdb.DuckDBPyConnection]:
+        """Yield a read-only connection, reusing one per thread when pooling is on."""
+
+        if not self.pool_read_connections:
+            connection = self._connect(read_only=True)
+            try:
+                yield connection
+            finally:
+                connection.close()
+            return
+        existing = getattr(self._read_sessions, "connection", None)
+        if existing is None:
+            existing = self._connect(read_only=True)
+            self._read_sessions.connection = existing
+        yield existing
 
     def _ensure_initialized(self) -> None:
         if self._initialized:

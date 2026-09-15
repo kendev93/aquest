@@ -410,3 +410,56 @@ def test_screen_history_keeps_only_the_latest_ten_results(tmp_path: Path) -> Non
     assert loaded["results"] == [result]
     assert loaded["meta"] == meta
     assert store.read_screen_history("job-0") is None
+
+
+def test_pooled_read_session_reuses_one_connection_per_thread(tmp_path: Path) -> None:
+    """回归：开启复用时同一线程必须复用同一条只读连接（每次建连约 9.5 ms）。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars())
+    pooled = DuckDbMarketDataStore(
+        tmp_path / "market.duckdb", read_only=True, pool_read_connections=True
+    )
+
+    with pooled.read_session() as first:
+        with pooled.read_session() as second:
+            assert first is second
+
+    assert list(pooled.read_bars("SH", "600000")["close"]) == [10.0, 11.0]
+
+
+def test_unpooled_read_session_opens_a_fresh_connection(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars())
+    plain = DuckDbMarketDataStore(tmp_path / "market.duckdb", read_only=True)
+
+    with plain.read_session() as first:
+        with plain.read_session() as second:
+            assert first is not second
+
+    assert list(plain.read_bars("SH", "600000")["close"]) == [10.0, 11.0]
+
+
+def test_pooled_read_session_is_per_thread(tmp_path: Path) -> None:
+    """不同线程各自持有连接，避免跨线程共用 DuckDB 连接。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars())
+    pooled = DuckDbMarketDataStore(
+        tmp_path / "market.duckdb", read_only=True, pool_read_connections=True
+    )
+    # 持有对象引用，否则连接被回收后 id() 会被复用，断言会失真。
+    seen: list[object] = []
+
+    def collect() -> None:
+        with pooled.read_session() as connection:
+            seen.append(connection)
+
+    with pooled.read_session() as main_connection:
+        threads = [Thread(target=collect) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert all(connection is not main_connection for connection in seen)
+    assert seen[0] is not seen[1]
