@@ -23,7 +23,7 @@ from .day_format import classify_board
 from .maintenance import cleanup_database_backups, create_database_backup
 from .models import DataStoreStatus, InstrumentBoard, InstrumentType
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 SCREEN_HISTORY_LIMIT = 10
 STRATEGY_DISCOVERY_HISTORY_LIMIT = 20
 BACKTEST_HISTORY_LIMIT = 20
@@ -349,6 +349,23 @@ class _DuckDbStoreBase:
                     duration_seconds DOUBLE NOT NULL,
                     result_json VARCHAR NOT NULL,
                     UNIQUE (experiment_id, leaderboard)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS strategy_jobs (
+                    job_id VARCHAR PRIMARY KEY,
+                    operation VARCHAR NOT NULL,
+                    request_json VARCHAR NOT NULL,
+                    state_json VARCHAR NOT NULL,
+                    result_json VARCHAR,
+                    status VARCHAR NOT NULL,
+                    cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
+                    worker_id VARCHAR,
+                    created_at DOUBLE NOT NULL,
+                    heartbeat_at DOUBLE NOT NULL,
+                    updated_at DOUBLE NOT NULL
                 )
                 """
             )

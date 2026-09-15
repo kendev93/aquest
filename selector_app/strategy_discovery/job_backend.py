@@ -17,6 +17,7 @@ from selector_app.market_data.models import InstrumentBoard, InstrumentType
 from selector_app.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
 from selector_app.screening.jobs import ScreenJobRunner, TaskCancelledError, TaskUserError
 
+from .duckdb_job_store import DuckDbStrategyJobStore
 from .job_store import (
     DEFAULT_STALE_AFTER_SECONDS,
     JobOperation,
@@ -72,12 +73,12 @@ class StrategyJobBackend(Protocol):
 
 
 class FileStrategyJobBackend:
-    """Submit jobs to the shared-volume queue used by ``strategy-worker``."""
+    """Compatibility backend for legacy tests using file-backed job state."""
 
     def __init__(
         self,
         store: DuckDbMarketDataStore,
-        job_store: StrategyJobStore,
+        job_store: StrategyJobStore | DuckDbStrategyJobStore,
         *,
         worker_count: int | None = None,
         market_data_adapter: BatchMarketDataAdapter | None = None,
@@ -250,6 +251,25 @@ class FileStrategyJobBackend:
                 job_id,
                 metadata={"history_persistence_error": str(exc)[:500]},
             )
+
+
+class DuckDbStrategyJobBackend(FileStrategyJobBackend):
+    """Persist queued jobs in the same DuckDB as app histories and caches."""
+
+    def __init__(
+        self,
+        store: DuckDbMarketDataStore,
+        job_store: DuckDbStrategyJobStore,
+        *,
+        worker_count: int | None = None,
+        market_data_adapter: BatchMarketDataAdapter | None = None,
+    ) -> None:
+        super().__init__(
+            store,
+            job_store,
+            worker_count=worker_count,
+            market_data_adapter=market_data_adapter,
+        )
 
 
 class InProcessStrategyJobBackend:
@@ -594,6 +614,7 @@ def _nonnegative_int(value: object) -> int:
 
 
 __all__ = [
+    "DuckDbStrategyJobBackend",
     "FileStrategyJobBackend",
     "InProcessStrategyJobBackend",
     "StrategyDiscoveryServiceLike",

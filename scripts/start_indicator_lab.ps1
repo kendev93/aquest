@@ -1,5 +1,8 @@
+# Start Indicator Lab with ETFQuest market data and host-local application storage.
 param(
     [switch]$Protected,
+    [switch]$NoBuild,
+    [switch]$BuildOnly,
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]]$ComposeArguments
 )
@@ -30,6 +33,41 @@ if (-not (Test-Path -LiteralPath $secretKeyFile -PathType Leaf)) {
     throw "未找到 ETFQuest 授权快照密钥：$secretKeyFile。请确认 ETFQUEST_APP_DATA_DIR 指向包含 .secret.key 的应用数据目录。"
 }
 
+$workerDataDir = Join-Path $appDataDir "indicator-lab"
+New-Item -ItemType Directory -Force -Path $workerDataDir | Out-Null
+$workerTokenFile = Join-Path $workerDataDir ".strategy-worker-token"
+if (-not (Test-Path -LiteralPath $workerTokenFile -PathType Leaf) -or
+    (Get-Item -LiteralPath $workerTokenFile).Length -eq 0) {
+    $tokenBytes = New-Object byte[] 32
+    $random = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $random.GetBytes($tokenBytes)
+    } finally {
+        $random.Dispose()
+    }
+    $token = [System.BitConverter]::ToString($tokenBytes).Replace("-", "").ToLowerInvariant()
+    $temporaryTokenFile = Join-Path $workerDataDir ".strategy-worker-token.$([guid]::NewGuid().ToString('N')).tmp"
+    [System.IO.File]::WriteAllText($temporaryTokenFile, $token, [System.Text.Encoding]::ASCII)
+    Move-Item -LiteralPath $temporaryTokenFile -Destination $workerTokenFile -Force
+}
+
+$tokenAcl = Get-Acl -LiteralPath $workerTokenFile
+$tokenAcl.SetAccessRuleProtection($true, $false)
+foreach ($accessRule in @($tokenAcl.Access)) {
+    $tokenAcl.RemoveAccessRuleAll($accessRule)
+}
+$rights = [System.Security.AccessControl.FileSystemRights]::FullControl
+$inheritance = [System.Security.AccessControl.InheritanceFlags]::None
+$propagation = [System.Security.AccessControl.PropagationFlags]::None
+$allow = [System.Security.AccessControl.AccessControlType]::Allow
+foreach ($identity in @([System.Security.Principal.WindowsIdentity]::GetCurrent().Name, "NT AUTHORITY\SYSTEM", "BUILTIN\Administrators")) {
+    $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+        $identity, $rights, $inheritance, $propagation, $allow
+    )
+    $tokenAcl.AddAccessRule($rule)
+}
+Set-Acl -LiteralPath $workerTokenFile -AclObject $tokenAcl
+
 $env:ETFQUEST_MARKET_DATABASE_DIR = $databaseDir
 $env:ETFQUEST_APP_DATA_DIR = $appDataDir
 $env:SELECTOR_MARKET_DATA_SOURCE = "etfquest"
@@ -56,7 +94,13 @@ try {
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
-    & docker compose @composeFiles up --build -d @ComposeArguments
+    if ($BuildOnly) {
+        & docker compose @composeFiles build backend strategy-worker
+    } elseif ($NoBuild) {
+        & docker compose @composeFiles up --no-build -d @ComposeArguments
+    } else {
+        & docker compose @composeFiles up --build -d @ComposeArguments
+    }
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }

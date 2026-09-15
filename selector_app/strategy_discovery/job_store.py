@@ -1,4 +1,4 @@
-"""Crash-tolerant file-backed state for strategy discovery jobs."""
+"""Legacy JSON job state reader retained for migration and compatibility tests."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def is_job_operation(value: object) -> TypeGuard[JobOperation]:
 
 
 class StrategyJobStore:
-    """Persist small task envelopes and status snapshots on a shared volume."""
+    """Read/write the pre-DuckDB job format; production no longer uses this store."""
 
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root).expanduser().resolve()
@@ -110,6 +110,24 @@ class StrategyJobStore:
 
     def read_result(self, job_id: str) -> dict[str, object] | None:
         return self._read_json(self._job_dir(job_id) / "result.json")
+
+    def iter_records(
+        self,
+    ) -> list[tuple[str, dict[str, object], dict[str, object], dict[str, object] | None]]:
+        """Return complete legacy records in stable order for one-time import."""
+
+        records: list[
+            tuple[str, dict[str, object], dict[str, object], dict[str, object] | None]
+        ] = []
+        for job_dir in sorted(self.root.iterdir(), key=lambda item: item.name):
+            if not job_dir.is_dir() or not _JOB_ID_PATTERN.fullmatch(job_dir.name):
+                continue
+            request = self.read_request(job_dir.name)
+            state = self.read_state(job_dir.name)
+            if request is None or state is None:
+                raise ValueError(f"策略任务文件不完整: {job_dir.name}")
+            records.append((job_dir.name, request, state, self.read_result(job_dir.name)))
+        return records
 
     def claim_next(self) -> str | None:
         for job_dir in sorted(self.root.iterdir(), key=lambda item: item.name):
@@ -269,7 +287,7 @@ class StrategyJobStore:
 
 
 def default_strategy_job_root(database_path: str | Path) -> Path:
-    """Resolve the shared job directory next to the configured market database."""
+    """Resolve the legacy JSON directory read only during one-time migration."""
 
     configured = os.getenv("SELECTOR_DISCOVERY_JOB_DIR")
     if configured and configured.strip():

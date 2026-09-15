@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.screening.jobs import ScreenJobRunner
 from selector_app.strategy_discovery.job_backend import (
+    DuckDbStrategyJobBackend,
     FileStrategyJobBackend,
     InProcessStrategyJobBackend,
 )
@@ -135,13 +136,38 @@ def test_strategy_discovery_api_starts_reports_and_reads_history(tmp_path) -> No
     assert history.json()["data"][0]["finished_at"]
 
 
-def test_create_app_uses_file_backend_for_production_service(tmp_path) -> None:
+def test_create_app_uses_duckdb_backend_for_production_service(tmp_path) -> None:
     app = create_app(
         market_data_store=DuckDbMarketDataStore(tmp_path / "market.duckdb"),
         auto_sync_enabled=False,
     )
 
-    assert isinstance(app.state.strategy_job_backend, FileStrategyJobBackend)
+    assert isinstance(app.state.strategy_job_backend, DuckDbStrategyJobBackend)
+
+
+def test_app_imports_legacy_job_files_into_duckdb_on_startup(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("SELECTOR_DISCOVERY_JOB_DIR", raising=False)
+    legacy = StrategyJobStore(tmp_path / ".strategy-jobs")
+    legacy.create(
+        "legacy-completed",
+        operation="discovery",
+        payload={"request": {"max_trials": 2}},
+        description="策略实验室",
+    )
+    legacy.write_result("legacy-completed", {"history_id": "legacy-completed"})
+    app = create_app(
+        market_data_store=DuckDbMarketDataStore(tmp_path / "market.duckdb"),
+        auto_sync_enabled=False,
+    )
+
+    with TestClient(app):
+        state = app.state.strategy_job_store.read_state("legacy-completed")
+        result = app.state.strategy_job_store.read_result("legacy-completed")
+
+    assert state is not None
+    assert state["status"] == "completed"
+    assert result == {"history_id": "legacy-completed"}
+    assert (tmp_path / ".strategy-jobs" / "legacy-completed" / "state.json").is_file()
 
 
 def test_active_jobs_endpoint_reads_a_queued_strategy_job_from_shared_storage(tmp_path) -> None:
@@ -236,9 +262,7 @@ def test_strategy_discovery_rejects_over_budget_before_creating_a_job(
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "resource_budget_exceeded"
-    job_root = tmp_path / ".strategy-jobs"
-    assert job_root.is_dir()
-    assert list(job_root.iterdir()) == []
+    assert app.state.strategy_job_store.list_snapshots() == []
 
 
 def test_strategy_refinement_api_creates_independent_parent_linked_history(tmp_path) -> None:

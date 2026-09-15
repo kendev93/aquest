@@ -27,6 +27,7 @@ services:
           create_host_path: false
 
   strategy-worker:
+    user: "${ETFQUEST_MARKET_UID:-0}:${ETFQUEST_MARKET_GID:-0}"
     build:
       context: .
       dockerfile: Dockerfile.protected

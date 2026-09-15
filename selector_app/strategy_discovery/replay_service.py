@@ -104,6 +104,7 @@ class StrategyReplayService:
         store: DuckDbMarketDataStore,
         market_data_adapter: MarketDataAdapter | None = None,
         evaluation_workers: int | None = None,
+        persist_indicator_cache: bool = True,
     ) -> None:
         self._portfolio_service = portfolio_service
         self._store = store
@@ -116,6 +117,7 @@ class StrategyReplayService:
         self._evaluation_workers = validate_discovery_workers(
             resolve_discovery_workers() if evaluation_workers is None else evaluation_workers
         )
+        self._persist_indicator_cache = persist_indicator_cache
         self._parallel_enabled = isinstance(portfolio_service, PortfolioBacktestService) and all(
             callable(getattr(self._market_data_adapter, name, None))
             for name in ("read_many_stocks", "count_many_stocks")
@@ -285,6 +287,7 @@ class StrategyReplayService:
             adapter=self._market_data_adapter,
             progress_callback=snapshot_progress,
             abort_check=abort_check,
+            persist_indicator_cache=self._persist_indicator_cache,
         ) as snapshot:
             if progress_callback is not None:
                 progress_callback(

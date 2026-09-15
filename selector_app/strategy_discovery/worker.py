@@ -1,4 +1,4 @@
-"""Independent executor for file-backed strategy discovery jobs."""
+"""Independent strategy executor coordinated by the backend worker API."""
 
 from __future__ import annotations
 
@@ -16,13 +16,14 @@ from selector_app.market_data.etfquest_adapter import ETFQuestMarketDataAdapter
 from selector_app.market_data.store import DuckDbMarketDataStore
 
 from .job_backend import completion_state, decorate_result
-from .job_store import StrategyJobStore, default_strategy_job_root, is_job_operation
+from .job_store import is_job_operation
 from .models import DiscoveryRequest
 from .refinement import discovery_request_from_dict
 from .replay import ReplayLeaderboard
 from .replay_service import ReplayProgressCallback
 from .resources import resolve_discovery_workers
 from .service import ProgressCallback, StrategyDiscoveryService
+from .worker_api_client import HttpStrategyJobClient
 
 logger = logging.getLogger(__name__)
 DEFAULT_WORKER_POLL_INTERVAL_SECONDS = 0.5
@@ -60,12 +61,33 @@ class StrategyDiscoveryServiceLike(Protocol):
     ) -> dict[str, object]: ...
 
 
+class StrategyJobClient(Protocol):
+    def recover_stale_running(self, *, stale_after_seconds: float) -> list[str]: ...
+
+    def claim_next(self) -> str | None: ...
+
+    def read_request(self, job_id: str) -> dict[str, object] | None: ...
+
+    def read_state(self, job_id: str) -> dict[str, object] | None: ...
+
+    def is_cancel_requested(self, job_id: str) -> bool: ...
+
+    def update(
+        self,
+        job_id: str,
+        fields: Mapping[str, object] | None = None,
+        **updates: object,
+    ) -> None: ...
+
+    def write_result(self, job_id: str, result: Mapping[str, object]) -> None: ...
+
+
 class StrategyDiscoveryWorker:
     """Claim and execute at most one strategy job at a time."""
 
     def __init__(
         self,
-        job_store: StrategyJobStore,
+        job_store: StrategyJobClient,
         service: StrategyDiscoveryServiceLike,
         *,
         service_factory: Callable[[int | None], StrategyDiscoveryServiceLike] | None = None,
@@ -279,22 +301,8 @@ def _resolve_market_data_adapter() -> MarketDataAdapter | None:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
-    store = DuckDbMarketDataStore()
+    store = DuckDbMarketDataStore(read_only=True)
     market_adapter = _resolve_market_data_adapter()
-    job_store = StrategyJobStore(default_strategy_job_root(store.database_path))
-    worker = StrategyDiscoveryWorker(
-        job_store,
-        StrategyDiscoveryService(
-            store=store,
-            market_data_adapter=market_adapter,
-            evaluation_workers=resolve_discovery_workers(),
-        ),
-        service_factory=lambda worker_count: StrategyDiscoveryService(
-            store=store,
-            market_data_adapter=_resolve_market_data_adapter(),
-            evaluation_workers=worker_count,
-        ),
-    )
     stop_event = Event()
 
     def stop(_signum: int, _frame: object) -> None:
@@ -302,7 +310,23 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    worker.run_forever(stop_event=stop_event)
+    with HttpStrategyJobClient.from_env() as job_client:
+        worker = StrategyDiscoveryWorker(
+            job_client,
+            StrategyDiscoveryService(
+                store=store,
+                market_data_adapter=market_adapter,
+                evaluation_workers=resolve_discovery_workers(),
+                persist_indicator_cache=False,
+            ),
+            service_factory=lambda worker_count: StrategyDiscoveryService(
+                store=store,
+                market_data_adapter=_resolve_market_data_adapter(),
+                evaluation_workers=worker_count,
+                persist_indicator_cache=False,
+            ),
+        )
+        worker.run_forever(stop_event=stop_event)
 
 
 if __name__ == "__main__":

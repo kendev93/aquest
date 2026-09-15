@@ -19,6 +19,7 @@ EOF
 mode=all
 skip_docker=0
 install_playwright=0
+compose_fixture=""
 
 for argument in "$@"; do
   case "$argument" in
@@ -44,6 +45,23 @@ for argument in "$@"; do
 done
 
 cd "$REPO_ROOT"
+
+cleanup_compose_fixture() {
+  if [ -n "$compose_fixture" ] && [ -d "$compose_fixture" ]; then
+    rm -r "$compose_fixture"
+  fi
+  compose_fixture=""
+}
+
+prepare_compose_fixture() {
+  compose_fixture=$(mktemp -d "${TMPDIR:-/tmp}/indicator-lab-compose.XXXXXX")
+  mkdir -p "$compose_fixture/database" "$compose_fixture/indicator-lab"
+  : > "$compose_fixture/database/market_data.db"
+  : > "$compose_fixture/.secret.key"
+  printf '%s\n' 'ci-test-worker-token' > "$compose_fixture/indicator-lab/.strategy-worker-token"
+}
+
+trap cleanup_compose_fixture EXIT
 
 run_python_checks() {
   printf '%s\n' '验证 Python：测试、覆盖率、格式、Ruff、mypy'
@@ -78,16 +96,24 @@ run_frontend_checks() {
 
 run_docker_checks() {
   printf '%s\n' '验证 Docker：Compose 配置、后端镜像、前端镜像'
-  docker compose config --quiet
+  prepare_compose_fixture
+  ETFQUEST_APP_DATA_DIR="$compose_fixture" \
+    docker compose -f docker-compose.yml config --quiet
+  ETFQUEST_APP_DATA_DIR="$compose_fixture" \
+    ETFQUEST_MARKET_DATABASE_DIR="$compose_fixture/database" \
+    docker compose -f docker-compose.yml -f docker-compose.etfquest.yml config --quiet
+  cleanup_compose_fixture
   docker build --file Dockerfile --tag indicator-lab-backend:ci .
   docker build --file Dockerfile.frontend --tag indicator-lab-frontend:ci .
 }
 
 run_protected_docker_checks() {
   printf '%s\n' '验证保护版 Docker：Nuitka 编译、产物源码扫描、最终镜像构建'
-  ETFQUEST_MARKET_DATABASE_DIR="${TMPDIR:-/tmp}/ETFQuest/database" \
-    ETFQUEST_APP_DATA_DIR="${TMPDIR:-/tmp}/ETFQuest" \
+  prepare_compose_fixture
+  ETFQUEST_MARKET_DATABASE_DIR="$compose_fixture/database" \
+    ETFQUEST_APP_DATA_DIR="$compose_fixture" \
     docker compose -f docker-compose.yml -f docker-compose.protected.yml config --quiet
+  cleanup_compose_fixture
   docker build --file Dockerfile.protected --tag indicator-lab-protected:ci .
 }
 

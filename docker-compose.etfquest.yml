@@ -19,6 +19,7 @@ services:
           create_host_path: false
 
   strategy-worker:
+    user: "${ETFQUEST_MARKET_UID:-0}:${ETFQUEST_MARKET_GID:-0}"
     environment:
       SELECTOR_MARKET_DATA_SOURCE: etfquest
       SELECTOR_RELEASE_MODE: "1"

@@ -68,7 +68,7 @@ indicator-lab worker   启动 strategy-worker
 直接运行下面的 Compose 命令前，须设置 `ETFQUEST_MARKET_DATABASE_DIR` 和
 `ETFQUEST_APP_DATA_DIR`。后者应指向包含 `database/` 和 `.secret.key` 的 ETFQuest
 应用数据目录；backend 只读挂载 `.secret.key` 用于离线验证会员快照，strategy-worker 不会
-获得该密钥。日常运行优先用 `scripts/start_shared.*`，由脚本自动推导并校验路径。
+获得该密钥。日常运行优先用 `scripts/start_indicator_lab.*`，由脚本自动推导并校验路径。
 
 ### 构建
 
@@ -90,28 +90,21 @@ NUITKA_JOBS=2 docker compose \
 
 ### 启动
 
-~~~bash
-docker compose \
-  -f docker-compose.yml \
-  -f docker-compose.protected.yml \
-  up -d
-~~~
-
-跨平台运行时推荐使用共享启动脚本，它会自动匹配 ETFQuest 数据库目录并注入挂载路径：
+使用 Indicator Lab 启动脚本启动保护版。它会自动匹配 ETFQuest 数据库目录、创建 worker secret，
+并注入本机 DuckDB bind mount 路径：
 
 ~~~bash
-./scripts/start_shared.sh --protected
+./scripts/start_indicator_lab.sh --protected
 ~~~
 
-Windows PowerShell 使用 `.\scripts\start_shared.ps1 -Protected`。
+Windows PowerShell 使用 `.\scripts\start_indicator_lab.ps1 -Protected`。
 
-这套 Compose 使用业务 `market_data` 数据卷；发布模式另外挂载共享行情数据库，backend 需要可写以支持显式全市场同步，strategy-worker 仍只读。不要在发布验证中使用用户的生产数据卷；应使用受控副本或临时 volume。
+这套 Compose 将 `${ETFQUEST_APP_DATA_DIR}/indicator-lab/` bind mount 到容器 `/data/market`，不使用 Docker named volume 持久化。发布模式另外挂载 ETFQuest 行情数据库：backend 需要可写以支持显式全市场同步，strategy-worker 对 ETFQuest 数据库和 Indicator Lab sidecar 数据库均只读；任务写入通过 backend 内网 API 完成。不要在发布验证中使用用户的生产数据库，应使用受控副本或临时目录。
 
 ### 发布前检查
 
 ~~~bash
 sh scripts/verify_ci.sh protected
-docker compose -f docker-compose.yml -f docker-compose.protected.yml config --quiet
 ~~~
 
 Dockerfile.protected 的 builder 阶段会执行 verify_nuitka_bundle.py。如果 standalone 目录内出现 .py、.pyc 或 .pyo，构建会失败。

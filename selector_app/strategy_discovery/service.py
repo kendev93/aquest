@@ -151,6 +151,7 @@ class StrategyDiscoveryService:
         market_data_adapter: MarketDataAdapter | None = None,
         discovery_snapshot: DiscoverySnapshot | None = None,
         evaluation_workers: int | None = None,
+        persist_indicator_cache: bool = True,
     ) -> None:
         selected_store = store or DuckDbMarketDataStore()
         selected_market_adapter = market_data_adapter or getattr(
@@ -165,6 +166,7 @@ class StrategyDiscoveryService:
         )
         self._store = selected_store
         self._discovery_snapshot = discovery_snapshot
+        self._persist_indicator_cache = persist_indicator_cache
         self._evaluation_workers = validate_discovery_workers(
             resolve_discovery_workers() if evaluation_workers is None else evaluation_workers
         )
@@ -179,6 +181,7 @@ class StrategyDiscoveryService:
             store=self._store,
             market_data_adapter=self._market_data_adapter,
             evaluation_workers=self._evaluation_workers,
+            persist_indicator_cache=persist_indicator_cache,
         )
 
     def capabilities(self) -> dict[str, object]:
@@ -294,6 +297,7 @@ class StrategyDiscoveryService:
                 adapter=self._market_data_adapter,
                 progress_callback=report_snapshot_progress,
                 abort_check=abort_check,
+                persist_indicator_cache=self._persist_indicator_cache,
             ) as snapshot:
                 snapshot_build_seconds = max(0.0, time.monotonic() - snapshot_started)
                 snapshot_metadata = dict(snapshot.build_metadata)

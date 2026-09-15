@@ -538,13 +538,35 @@ class DatabaseMaintenanceService:
         return path
 
     def _load_record(self) -> dict[str, object]:
+        try:
+            if self.database_path.is_file():
+                from .store_base import _WRITE_LOCK
+
+                with (
+                    _WRITE_LOCK,
+                    duckdb.connect(str(self.database_path), read_only=False) as connection,
+                ):
+                    row = connection.execute(
+                        "SELECT value FROM data_meta WHERE key = 'maintenance_state'"
+                    ).fetchone()
+                if row is not None:
+                    payload = json.loads(str(row[0]))
+                    return dict(payload) if isinstance(payload, Mapping) else {}
+        except (OSError, duckdb.Error, json.JSONDecodeError):
+            logger.warning("读取 DuckDB 维护状态失败: %s", self.database_path, exc_info=True)
+
         if not self.record_path.is_file():
             return {}
         try:
-            payload = json.loads(self.record_path.read_text(encoding="utf-8"))
+            legacy_payload = json.loads(self.record_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return {}
-        return dict(payload) if isinstance(payload, Mapping) else {}
+        if not isinstance(legacy_payload, Mapping):
+            return {}
+        record = dict(legacy_payload)
+        self._write_record(record)
+        logger.info("已将旧 DuckDB 维护状态迁入 data_meta")
+        return record
 
     def _recover_running_record(
         self,
@@ -573,22 +595,35 @@ class DatabaseMaintenanceService:
         }
 
     def _write_record(self, payload: Mapping[str, object]) -> None:
-        self.record_path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor, raw_path = tempfile.mkstemp(
-            prefix=f"{self.record_path.name}.",
-            suffix=".tmp",
-            dir=self.record_path.parent,
+        serialized = json.dumps(
+            dict(payload),
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
         )
-        os.close(descriptor)
-        temporary = Path(raw_path)
-        try:
-            temporary.write_text(
-                json.dumps(dict(payload), ensure_ascii=False, indent=2),
-                encoding="utf-8",
+        updated_at = _utc_now(self._clock()).replace(tzinfo=None)
+        from .store_base import _WRITE_LOCK
+
+        with _WRITE_LOCK, duckdb.connect(str(self.database_path), read_only=False) as connection:
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS data_meta (
+                    key VARCHAR PRIMARY KEY,
+                    value VARCHAR NOT NULL,
+                    updated_at TIMESTAMP NOT NULL
+                )
+                """
             )
-            os.replace(temporary, self.record_path)
-        finally:
-            temporary.unlink(missing_ok=True)
+            connection.execute(
+                """
+                INSERT INTO data_meta (key, value, updated_at)
+                VALUES ('maintenance_state', ?, ?)
+                ON CONFLICT (key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                """,
+                [serialized, updated_at],
+            )
 
     def _result(
         self,
@@ -614,7 +649,7 @@ class DatabaseMaintenanceService:
             started_at=started_at,
             finished_at=finished_at,
             duration_seconds=max(0.0, float(duration_seconds)),
-            record_path=str(self.record_path),
+            record_path=f"{self.database_path}#data_meta.maintenance_state",
             backup_path=backup_path,
             deleted_backups=tuple(str(path) for path in deleted_backups),
             error=error,

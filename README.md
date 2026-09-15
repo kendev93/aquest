@@ -89,10 +89,20 @@ npm run dev
 
 ```bash
 cd indicator-lab
-./scripts/start_shared.sh
+./scripts/start_indicator_lab.sh
 ```
 
-Windows PowerShell 使用 `./scripts/start_shared.ps1`（PowerShell 中也可写作 `.\scripts\start_shared.ps1`）。脚本会自动匹配 ETFQuest 数据库目录、校验文件存在后启动 Compose；缺少数据库时直接退出，不会使用容器内旧行情库。Docker 只创建 `indicator_lab_market` 业务数据卷，并把 ETFQuest 行情目录单独挂载给同步 backend；strategy-worker 对共享行情保持只读。Indicator Lab 的业务 DuckDB 仍会在打开时先创建备份再自动迁移 schema，不会删除历史业务数据。
+Windows PowerShell 使用 `./scripts/start_indicator_lab.ps1`（PowerShell 中也可写作 `.\scripts\start_indicator_lab.ps1`）。脚本会校验 ETFQuest 数据库和本机授权密钥，并在 ETFQuest 应用数据目录下创建独立的 `indicator-lab/market.duckdb`。该目录以宿主机 bind mount 提供给 Docker，backend 负责持久化写入；独立 strategy-worker 只读访问该目录，并通过本机生成的只读 bearer secret 调用 backend 内网任务 API。ETFQuest 行情库仍是行情事实源，Indicator Lab 不会向其中添加业务表。
+
+只构建 backend 和 strategy-worker 镜像、不启动或重启容器：
+
+```bash
+sh scripts/start_indicator_lab.sh --build-only
+```
+
+要构建镜像并启动/更新服务，运行 `sh scripts/start_indicator_lab.sh`；Windows PowerShell 对应命令为 `./scripts/start_indicator_lab.ps1 -BuildOnly` 和 `./scripts/start_indicator_lab.ps1`。Indicator Lab 数据保存在宿主机的 `indicator-lab/market.duckdb`，镜像重建不需要复制或迁移数据。
+
+本机 DuckDB 保存 Indicator Lab 的行情缓存、回测/策略历史、策略任务状态和维护元数据。为兼容遗留文件，backend 仍会幂等导入本地数据目录中残留的旧任务 JSON 和维护记录；日常更新不需要手动执行数据迁移。DuckDB schema 升级仍会先创建备份，原有历史和行情表都会保留。
 
 ### 保护版发布镜像
 
@@ -101,7 +111,7 @@ Windows PowerShell 使用 `./scripts/start_shared.ps1`（PowerShell 中也可写
 完整的 Windows、macOS 和 Docker 打包教程见 [打包与发布指南](docs/packaging.md)。
 
 ```bash
-./scripts/start_shared.sh --protected
+./scripts/start_indicator_lab.sh --protected
 ```
 
 也可以在宿主机生成 standalone bundle：
@@ -115,9 +125,9 @@ python3 scripts/build_nuitka.py --jobs 4
 
 共享行情模式的启动方式、数据库路径、全市场同步和冲突锁说明见 [ETFQuest 共享行情说明](docs/etfquest-shared-data.md)。通达信文件导入不再在本项目中执行。
 
-普通 `docker compose down` 或删除容器不会删除业务数据。不要使用 `docker compose down -v` 或执行 `docker volume rm indicator_lab_market`，除非确认要删除本地业务数据库。查看卷使用 `docker volume inspect indicator_lab_market`，查看状态使用 `docker compose ps`，停止使用 `docker compose down`。`WEB_PORT` 和 `API_PORT` 仍可通过 `.env` 修改。
+宿主机数据库位于 `ETFQUEST_APP_DATA_DIR/indicator-lab/market.duckdb`，停止或删除容器不会删除它；Compose 不使用 Docker 命名卷保存 Indicator Lab 数据。重建镜像或容器会继续使用同一份本机数据库，不需要再迁移数据。`WEB_PORT` 和 `API_PORT` 仍可通过 `.env` 修改。
 
-DuckDB 数据卷会自动做维护：同一数据库的 `.bak-*.duckdb` 备份最多保留最近一份；同一天多次触发时，新备份成功后会替换旧备份，唯一备份超过 3 天后自动删除。应用启动时和空闲期间会检查数据库物理文件大小。如果当前文件相对上次成功整理后的大小增长达到 50%，系统会先在同目录创建临时库，通过 `COPY FROM DATABASE` 重写并校验表行数和 schema，确认成功后再原子替换主库。整理记录保存在 `market.maintenance.json`，包含时间、触发原因、整理前后大小、耗时和状态；维护失败会保留原主库不变。
+本机 DuckDB 会自动维护：同一数据库的 `.bak-*.duckdb` 备份最多保留最近一份；唯一备份超过 3 天后自动删除。应用启动时和空闲期间会检查数据库物理文件大小；达到 50% 增长阈值后，系统会用临时库和 `COPY FROM DATABASE` 重写、校验后再原子替换。维护记录保存在 DuckDB 的 `data_meta` 表中；维护失败会保留原主库不变。
 
 ## 行情配置
 

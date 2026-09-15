@@ -30,14 +30,14 @@ ETFQuest market_data.db ──只读读取──► ETFQuestMarketDataAdapter �
 - `formulas/` 是无副作用的数组计算层。公式函数由 `formulas/tdx_math.py` 自己实现，输入输出均为项目内部的 NumPy/Pandas 数据。
 - `screening/` 负责条件合并、批量读取、单标的容错、进度和导出，不处理网络或文件格式。
 - `backtest/` 负责单标的交易模拟和绩效计算；`portfolio_backtest/` 负责动态候选、固定槽位和补位；`strategy_fitness/` 复用这些交易语义完成时间切分评估。
-- `web/` 只负责 Pydantic 校验、任务提交/轮询、共享锁和安全错误响应。策略发现、二次优化和榜单复核在 Docker 正式运行时通过 `/data/market/.strategy-jobs` 共享卷交给独立 `strategy-worker`；backend 只读写小型任务状态和最终历史，其他普通任务继续使用进程内 runner。
+- `web/` 负责 Pydantic 校验、任务提交/轮询、共享锁和安全错误响应。正式 Docker 运行时，策略发现、二次优化和榜单复核由独立 `strategy-worker` 执行；worker 使用容器内认证 API 上报领取、进度、取消和结果，backend 是 DuckDB 的唯一写入者。worker 对 Indicator Lab 数据库只读，计算期指标缓存留在内存，普通任务继续使用进程内 runner。
 - `web-ui/` 负责行情状态展示、同步区间表单、进度和图表；共享模式下只提供显式的全市场同步入口，不提供本地行情文件导入。
 
 在线行情客户端是项目内置实现，不引入财经数据客户端依赖；业务层只依赖项目自己的 provider 接口和规范化 DataFrame。默认应用使用项目自有在线股票行情，TDX 作为兼容 provider。历史适配模块仍只处理项目自己的 `.day` 数据。
 
 ## DuckDB 数据层
 
-默认数据库路径为 `${SELECTOR_DATA_DIR}/market.duckdb`；未设置环境变量时使用用户数据目录。Docker 将 `SELECTOR_DATA_DIR` 设置为 `/data/market`，并通过独立的 `market_data` named volume 持久化。
+默认数据库路径为 `${SELECTOR_DATA_DIR}/market.duckdb`；未设置环境变量时使用用户数据目录。Docker 将 `SELECTOR_DATA_DIR` 设置为 `/data/market`，并把 ETFQuest 应用数据目录下的 `indicator-lab/` bind mount 到该位置；ETFQuest 的 `market_data.db` 保持独立，Indicator Lab 不向其添加业务表。
 
 核心表：
 
@@ -48,6 +48,7 @@ ETFQuest market_data.db ──只读读取──► ETFQuestMarketDataAdapter �
 - `custom_indicator_cache`：按标的、周期、价格口径、自定义公式哈希、参数哈希、公式引擎版本和行情指纹保存自定义输出。
 - `strategy_discovery_history`：策略实验请求、候选榜单、算法元数据、开始/结束时间和耗时；默认保留最近 20 次实验。
 - `strategy_discovery_replay_history`：当前夏普榜或收益榜前十的全行情复核结果、连续资金曲线、成交记录、分段绩效、数据指纹和复核耗时；同一实验和榜单只保留最近一次，删除实验时级联删除。
+- `strategy_jobs`：策略实验、二次优化和全量复核的请求、状态、进度、结果、取消标记、worker 租约及时间戳；只由 backend 写入，旧版 `.strategy-jobs` JSON 在首次启动时幂等导入。
 - `backtest_history`：单股、组合和策略适配性回测的请求快照、完整结果、摘要、开始/结束时间和耗时；按回测类型分别保留最近 20 次。
 
 行情事实写入由 ETFQuest 或本项目的共享全市场同步任务执行，并使用同一份跨进程 lease 锁和逐标的事务；派生指标缓存可由预热任务或业务请求按需填充。读操作每次建立独立只读 DuckDB 连接。全市场筛选、组合回测和策略适配通过一次批量查询得到各标的分组，避免逐文件打开 `.day`。
@@ -58,15 +59,15 @@ ETFQuest market_data.db ──只读读取──► ETFQuestMarketDataAdapter �
 
 快照构建按标的批次执行：完整行情指纹单独流式计算，指标计算只读取 warm-up 加实验窗口，数值数组写入只读 memmap。worker 的标的上下文和日期索引均有界，日期查找使用排序数组而不是每个进程重复建立完整 Python 字典。
 
-正式 Docker Compose 包含独立 `strategy-worker` 服务。backend、worker 通过 `/data/market/.strategy-jobs/<job_id>/` 交换 `request.json`、`state.json`、`result.json` 和取消标记；所有文件使用临时文件加 `os.replace()` 原子更新。worker OOM 或停止只会让任务进入 stale/failed 状态，不能直接杀掉 API backend；任务状态和结果在 backend 重启后仍可从共享卷恢复。共享卷中的 job 文件是临时运行状态，策略历史仍由 DuckDB 的既有历史表保存。
+正式 Docker Compose 包含独立 `strategy-worker` 服务。backend 与 worker 共享一个宿主机本地生成的只读 bearer secret；worker 仅通过未公开到 OpenAPI 的容器内接口领取任务、上报进度/心跳/取消和完成/失败结果。所有任务状态及最终历史均由 backend 写入同一 DuckDB；过期 worker 租约会由 backend 标记为失败。容器重建不会影响宿主机上的策略任务或历史。
 
 在线同步完成后会分批预热内置公式；已有数据库或预热未完成时，筛选和回测会按需填充缓存。缓存基于完整、有序行情的 SHA-256 指纹，公式版本变化、行情更新或价格口径变化都会自动跳过旧缓存。自定义公式按公式内容、参数和引擎版本独立缓存，不同参数不会互相复用。
 
- schema 版本变化或维护备份时，初始化逻辑会先生成带时间戳的 `.bak-*.duckdb` 副本，并在复制成功后只保留最近一份；该备份超过 3 天后自动清理，再执行升级。更高版本数据库会拒绝打开，避免静默破坏数据。数据库文件和备份均不提交 Git。应用空闲时会检查数据库物理文件是否比上次成功整理后的大小增长至少 50%；达到阈值后通过同目录临时库和 `COPY FROM DATABASE` 重写，校验表行数及 schema 后才原子替换，并将整理前后大小、时间、触发原因和状态写入 `market.maintenance.json`。
+ schema 版本变化或维护备份时，初始化逻辑会先生成带时间戳的 `.bak-*.duckdb` 副本，并在复制成功后只保留最近一份；该备份超过 3 天后自动清理，再执行升级。更高版本数据库会拒绝打开，避免静默破坏数据。数据库文件和备份均不提交 Git。应用空闲时会检查数据库物理文件是否比上次成功整理后的大小增长至少 50%；达到阈值后通过同目录临时库和 `COPY FROM DATABASE` 重写，校验表行数及 schema 后才原子替换，并将整理状态写入 `data_meta`。旧版 `market.maintenance.json` 会在首次维护时导入该元数据表。
 
 ## 行情来源与写入边界
 
-发布模式只从 ETFQuest 的 `market_data`、`trade_calendar` 和 `asset_info` 读取行情，不扫描、不解析、不导入本地 `.day` 文件。全市场在线同步的网络 worker 只写 Indicator Lab 业务卷中的临时结果，主进程通过 `ETFQuestMarketDataWriter` 写入 ETFQuest 的既有 `market_data`、`asset_info`、`trade_calendar` 和 `system_settings` 表；不会执行共享库迁移、压缩或备份。
+发布模式只从 ETFQuest 的 `market_data`、`trade_calendar` 和 `asset_info` 读取行情，不扫描、不解析、不导入本地 `.day` 文件。全市场在线同步的网络 worker 只写宿主机本地挂载目录中的临时结果，主进程通过 `ETFQuestMarketDataWriter` 写入 ETFQuest 的既有 `market_data`、`asset_info`、`trade_calendar` 和 `system_settings` 表；不会执行共享库迁移、压缩或备份。
 
 本地开发兼容模式仍可使用只读本地适配器或显式在线同步入口进行诊断；该模式不属于发布架构，不能把本地行情库挂载给正式共享实例。
 

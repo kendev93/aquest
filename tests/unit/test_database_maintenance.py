@@ -4,6 +4,7 @@ import asyncio
 import json
 from pathlib import Path
 
+import duckdb
 import pandas as pd
 import pytest
 
@@ -54,10 +55,10 @@ def test_maintenance_records_a_baseline_for_a_small_database(tmp_path: Path) -> 
     result = service.run_if_needed()
 
     assert result.status == "baseline"
-    record = json.loads(service.record_path.read_text(encoding="utf-8"))
-    assert record["baseline_size_bytes"] == store.database_path.stat().st_size
+    record = service._load_record()
+    assert record["baseline_size_bytes"] == result.before_size_bytes
     assert record["last_successful_after_size_bytes"] is None
-    assert result.before_size_bytes == store.database_path.stat().st_size
+    assert result.after_size_bytes == result.before_size_bytes
 
 
 def test_maintenance_rewrites_database_and_preserves_table_data(tmp_path: Path) -> None:
@@ -76,7 +77,7 @@ def test_maintenance_rewrites_database_and_preserves_table_data(tmp_path: Path) 
     assert result.after_size_bytes is not None
     assert database.is_file()
     assert len(store.read_bars("SH", "600000")) == 2
-    record = json.loads(service.record_path.read_text(encoding="utf-8"))
+    record = service._load_record()
     assert record["status"] == "completed"
     assert record["last_successful_after_size_bytes"] == result.after_size_bytes
     assert record["last_compacted_at"]
@@ -87,7 +88,6 @@ def test_failed_maintenance_keeps_original_database_and_records_error(
 ) -> None:
     store = _store(tmp_path)
     database = store.database_path
-    original_bytes = database.read_bytes()
     service = DatabaseMaintenanceService(
         database,
         minimum_size_bytes=1,
@@ -102,11 +102,36 @@ def test_failed_maintenance_keeps_original_database_and_records_error(
 
     assert result.status == "failed"
     assert result.error == "copy failed"
-    assert database.read_bytes() == original_bytes
+    assert len(store.read_bars("SH", "600000")) == 2
     assert not list(tmp_path.glob("market.compact-*.duckdb"))
-    record = json.loads(service.record_path.read_text(encoding="utf-8"))
+    record = service._load_record()
     assert record["status"] == "failed"
     assert record["error"] == "copy failed"
+
+
+def test_maintenance_record_is_persisted_in_duckdb_and_imports_legacy_json(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    service = DatabaseMaintenanceService(store.database_path, minimum_size_bytes=10**12)
+    legacy = {
+        "version": 1,
+        "status": "baseline",
+        "last_successful_after_size_bytes": 1234,
+    }
+    service.record_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    assert service._load_record() == legacy
+    with duckdb.connect(str(store.database_path), read_only=True) as connection:
+        saved = connection.execute(
+            "SELECT value FROM data_meta WHERE key = 'maintenance_state'"
+        ).fetchone()
+    assert saved is not None
+    assert json.loads(saved[0]) == legacy
+
+    service._write_record({**legacy, "status": "checked"})
+    assert json.loads(saved[0]) == legacy
+    assert service._load_record()["status"] == "checked"
 
 
 def test_maintenance_scheduler_skips_active_jobs_and_runs_when_idle() -> None:

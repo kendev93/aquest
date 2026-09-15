@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import date
 from pathlib import Path
 
+import duckdb
 import numpy as np
 import pandas as pd
 
@@ -395,6 +396,45 @@ def test_snapshot_reuses_persistent_indicator_cache_on_repeated_builds(tmp_path:
         second_context.values["technical.ma5"],
         equal_nan=True,
     )
+
+
+def test_worker_snapshot_can_skip_all_persistent_indicator_cache_io(tmp_path: Path) -> None:
+    dates = pd.date_range("2024-01-01", periods=80, freq="D")
+    close = np.linspace(10.0, 14.0, len(dates))
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars(
+        "SH",
+        "600000",
+        "stock",
+        pd.DataFrame(
+            {
+                "date": dates,
+                "open": close,
+                "high": close + 0.2,
+                "low": close - 0.2,
+                "close": close,
+                "volume": np.full(len(dates), 100_000.0),
+                "amount": close * 100_000.0,
+                "bar_status": "completed",
+            }
+        ),
+    )
+    experiment = replace(
+        _experiment(store.database_path),
+        required_buy_conditions=(),
+        required_sell_conditions=(),
+    )
+
+    with build_discovery_snapshot(
+        store,
+        experiment,
+        persist_indicator_cache=False,
+    ) as snapshot:
+        assert snapshot.build_metadata["indicator_computed"] > 0
+
+    with duckdb.connect(str(store.database_path), read_only=True) as connection:
+        row = connection.execute("SELECT COUNT(*) FROM indicator_cache").fetchone()
+    assert row == (0,)
 
 
 def test_snapshot_reuses_base_contexts_for_repeated_candidate_evaluations(tmp_path: Path) -> None:

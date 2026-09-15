@@ -122,7 +122,7 @@ def test_app_records_database_maintenance_check_on_startup(tmp_path: Path) -> No
         result = app.state.database_maintenance_result
 
     assert result["status"] == "baseline"
-    assert result["record_path"].endswith("market.maintenance.json")
+    assert result["record_path"].endswith("market.duckdb#data_meta.maintenance_state")
 
 
 def test_app_schedules_online_sync_when_daily_refresh_is_due(tmp_path: Path) -> None:

@@ -453,6 +453,7 @@ def build_discovery_snapshot(
     adapter: MarketDataAdapter | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
     abort_check: Callable[[], bool] | None = None,
+    persist_indicator_cache: bool = True,
 ) -> Iterator[DiscoverySnapshot]:
     """Materialize one run snapshot and keep it alive for all workers."""
 
@@ -465,6 +466,7 @@ def build_discovery_snapshot(
             adapter=adapter,
             progress_callback=progress_callback,
             abort_check=abort_check,
+            persist_indicator_cache=persist_indicator_cache,
         )
         snapshot = DiscoverySnapshot(root)
         try:
@@ -481,6 +483,7 @@ def _write_snapshot(
     adapter: MarketDataAdapter | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
     abort_check: Callable[[], bool] | None = None,
+    persist_indicator_cache: bool = True,
 ) -> None:
     snapshot_started = time.perf_counter()
     base = request.base_config
@@ -539,7 +542,7 @@ def _write_snapshot(
     required_sell_rule = _required_rule(request.required_sell_conditions)
     ref_by_key = {(ref.market, ref.code): ref for ref in refs}
     memory_cache = IndicatorCache(
-        store,
+        store if persist_indicator_cache else None,
         max_memory_entries=max(128, len(formula_ids) * 64),
     )
     symbol_rows: list[dict[str, object]] = []
@@ -660,7 +663,7 @@ def _write_snapshot(
                 group_index % 25 == 0 or group_index >= len(refs)
             ):
                 progress_callback(min(group_index, len(refs)), len(refs))
-        if int(memory_cache.metrics()["computed"]) > computed_before:
+        if persist_indicator_cache and int(memory_cache.metrics()["computed"]) > computed_before:
             memory_cache.persist_results(frames_batch, results_batch)
         del results_batch, frames_batch, prepared_batch, combined
         gc.collect()

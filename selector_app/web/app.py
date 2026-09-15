@@ -8,6 +8,7 @@ import math
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import cast
 
 from fastapi import FastAPI, HTTPException, Request
@@ -50,13 +51,13 @@ from selector_app.screening.jobs import (
     ScanEngineLike,
     ScreenJobRunner,
 )
+from selector_app.strategy_discovery.duckdb_job_store import DuckDbStrategyJobStore
 from selector_app.strategy_discovery.job_backend import (
-    FileStrategyJobBackend,
+    DuckDbStrategyJobBackend,
     InProcessStrategyJobBackend,
     StrategyJobBackend,
 )
 from selector_app.strategy_discovery.job_store import (
-    StrategyJobStore,
     default_strategy_job_root,
 )
 from selector_app.strategy_discovery.resources import resolve_discovery_workers
@@ -97,6 +98,7 @@ def create_app(
     market_data_store: DuckDbMarketDataStore | object | None = None,
     market_data_adapter: MarketDataAdapter | object | None = None,
     membership_client: ETFQuestMembershipClient | object | None = None,
+    strategy_worker_token: str | None = None,
     indicator_cache: IndicatorCache | object | None = None,
     indicator_precompute_service: IndicatorPrecomputeService | object | None = None,
     database_maintenance_service: DatabaseMaintenanceService | object | None = None,
@@ -108,6 +110,7 @@ def create_app(
         DuckDbMarketDataStore,
         market_data_store if market_data_store is not None else DuckDbMarketDataStore(),
     )
+    selected_strategy_job_store = DuckDbStrategyJobStore(selected_store)
     selected_adapter = cast(
         MarketDataAdapter,
         market_data_adapter
@@ -187,9 +190,9 @@ def create_app(
             selected_discovery_service,
         )
         if strategy_discovery_service is not None
-        else FileStrategyJobBackend(
+        else DuckDbStrategyJobBackend(
             selected_store,
-            StrategyJobStore(default_strategy_job_root(selected_store.database_path)),
+            selected_strategy_job_store,
             worker_count=resolve_discovery_workers(),
             market_data_adapter=cast(BatchMarketDataAdapter, selected_adapter),
         ),
@@ -200,8 +203,16 @@ def create_app(
         app.state.auto_sync_job_id = None
         auto_sync_task: asyncio.Task[None] | None = None
         maintenance_task: asyncio.Task[None] | None = None
+        selected_store.status()
+        imported_strategy_jobs = selected_strategy_job_store.initialize(
+            default_strategy_job_root(selected_store.database_path)
+        )
+        if imported_strategy_jobs:
+            logger.info(
+                "已将 %d 条旧策略任务状态迁入 Indicator Lab DuckDB",
+                imported_strategy_jobs,
+            )
         try:
-            selected_store.status()
             cleanup_stale_staging(staging_directory(selected_store.database_path))
             maintenance_result = selected_maintenance_service.run_if_needed()
             app.state.database_maintenance_result = maintenance_result.to_dict()
@@ -265,6 +276,8 @@ def create_app(
     app.state.portfolio_backtest_service = selected_portfolio_service
     app.state.strategy_discovery_service = selected_discovery_service
     app.state.strategy_job_backend = selected_strategy_backend
+    app.state.strategy_job_store = selected_strategy_job_store
+    app.state.strategy_worker_token = _resolve_strategy_worker_token(strategy_worker_token)
     app.state.strategy_fitness_service = strategy_fitness_service or StrategyFitnessService(
         adapter=selected_adapter,
         indicator_cache=selected_indicator_cache,
@@ -307,10 +320,12 @@ def create_app(
             "/openapi.json",
             "/redoc",
         }
+        internal_worker_path = request.url.path.startswith("/internal/strategy-worker")
         if (
             client is not None
             and request.method != "OPTIONS"
             and request.url.path not in public_paths
+            and not internal_worker_path
         ):
             try:
                 client.require_core_access()
@@ -414,6 +429,7 @@ def create_app(
     from .routers.portfolio_backtest import router as portfolio_backtest_router
     from .routers.strategy_discovery import router as strategy_discovery_router
     from .routers.strategy_fitness import router as strategy_fitness_router
+    from .routers.strategy_worker import router as strategy_worker_router
 
     app.include_router(formula_screen_router, prefix="/api/v1")
     app.include_router(jobs_router, prefix="/api/v1")
@@ -422,7 +438,22 @@ def create_app(
     app.include_router(portfolio_backtest_router, prefix="/api/v1")
     app.include_router(strategy_discovery_router, prefix="/api/v1")
     app.include_router(strategy_fitness_router, prefix="/api/v1")
+    app.include_router(strategy_worker_router)
     return app
+
+
+def _resolve_strategy_worker_token(value: str | None) -> str | None:
+    if value is not None:
+        return value.strip() or None
+    token_path = str(os.getenv("SELECTOR_STRATEGY_WORKER_TOKEN_FILE") or "").strip()
+    if not token_path:
+        return None
+    try:
+        token = Path(token_path).expanduser().read_text(encoding="utf-8").strip()
+    except OSError:
+        logger.exception("策略 worker token 文件不可读")
+        return None
+    return token or None
 
 
 def _resolve_auto_sync_enabled(value: bool | None) -> bool:

@@ -33,7 +33,12 @@ def test_compose_defines_an_isolated_strategy_worker() -> None:
         == 2
     )
     assert compose.count('SELECTOR_DISCOVERY_WORKERS: "${SELECTOR_DISCOVERY_WORKERS:-auto}"') == 2
-    assert "source: market_data" in compose
+    assert "source: ${ETFQUEST_APP_DATA_DIR" in compose
+    assert "indicator_lab_market" not in compose
+    assert "SELECTOR_DISCOVERY_JOB_DIR" not in compose
+    assert "SELECTOR_STRATEGY_WORKER_API_URL: http://backend:8123" in compose
+    assert "SELECTOR_STRATEGY_WORKER_TOKEN_FILE: /run/secrets/strategy_worker_token" in compose
+    assert "strategy_worker_token:" in compose
     assert "SELECTOR_DISCOVERY_WORKERS" in compose
     assert 'mem_limit: "${STRATEGY_WORKER_MEMORY_LIMIT:-0}"' in compose
     assert "healthcheck:" in compose
@@ -42,9 +47,9 @@ def test_compose_defines_an_isolated_strategy_worker() -> None:
     assert "SELECTOR_DISCOVERY_MEMORY_BUDGET_MB=auto" in env_example
 
 
-def test_shared_start_scripts_auto_select_the_etfquest_database() -> None:
-    shell_script = (PROJECT_ROOT / "scripts" / "start_shared.sh").read_text(encoding="utf-8")
-    powershell_script = (PROJECT_ROOT / "scripts" / "start_shared.ps1").read_text(encoding="utf-8")
+def test_indicator_lab_start_scripts_auto_select_the_etfquest_database() -> None:
+    shell_script = (PROJECT_ROOT / "scripts" / "start_indicator_lab.sh").read_text(encoding="utf-8")
+    powershell_script = (PROJECT_ROOT / "scripts" / "start_indicator_lab.ps1").read_text(encoding="utf-8")
     compose = (PROJECT_ROOT / "docker-compose.etfquest.yml").read_text(encoding="utf-8")
 
     assert "Library/Application Support/ETFQuest/database" in shell_script
@@ -70,7 +75,7 @@ def test_membership_secret_key_is_readonly_and_backend_only() -> None:
     assert ".secret.key" not in strategy_worker
 
 
-def test_shared_start_script_handles_macos_application_support_path(tmp_path: Path) -> None:
+def test_indicator_lab_start_script_handles_macos_application_support_path(tmp_path: Path) -> None:
     home = tmp_path / "home"
     database_dir = home / "Library" / "Application Support" / "ETFQuest" / "database"
     database_dir.mkdir(parents=True)
@@ -94,6 +99,13 @@ def test_shared_start_script_handles_macos_application_support_path(tmp_path: Pa
     )
     fake_docker.chmod(0o755)
 
+    fake_openssl = fake_bin / "openssl"
+    fake_openssl.write_text(
+        "#!/bin/sh\nprintf '%s\\n' test-worker-token\n",
+        encoding="utf-8",
+    )
+    fake_openssl.chmod(0o755)
+
     environment = os.environ.copy()
     environment.pop("ETFQUEST_MARKET_DATABASE_DIR", None)
     environment.pop("ETFQUEST_APP_DATA_DIR", None)
@@ -102,7 +114,7 @@ def test_shared_start_script_handles_macos_application_support_path(tmp_path: Pa
     environment["DOCKER_ARGS_FILE"] = str(docker_args)
 
     result = subprocess.run(
-        [str(PROJECT_ROOT / "scripts" / "start_shared.sh")],
+        [str(PROJECT_ROOT / "scripts" / "start_indicator_lab.sh")],
         cwd=PROJECT_ROOT,
         env=environment,
         capture_output=True,
@@ -114,3 +126,6 @@ def test_shared_start_script_handles_macos_application_support_path(tmp_path: Pa
     calls = docker_args.read_text(encoding="utf-8")
     assert "docker-compose.etfquest.yml" in calls
     assert "up --build -d" in calls
+    token_file = database_dir.parent / "indicator-lab" / ".strategy-worker-token"
+    assert token_file.read_text(encoding="utf-8").strip() == "test-worker-token"
+    assert token_file.stat().st_mode & 0o777 == 0o600
