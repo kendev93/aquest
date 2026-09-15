@@ -86,6 +86,9 @@ _TRADE_COLUMNS = [
     "pnl",
     "cost_basis",
     "rejected",
+    # 买卖条件研究按信号日的可见特征抽取样本；缺这一列会让样本恒为空，
+    # 因此 _trade 写入的 signal_date 必须保留在这个投影里。
+    "signal_date",
 ]
 _POSITION_COLUMNS = [
     "datetime",

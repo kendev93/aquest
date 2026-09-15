@@ -135,6 +135,18 @@ def test_summary_backtest_preserves_metrics_and_trades_without_daily_details() -
     assert summary.positions == ()
 
 
+def test_trade_records_expose_signal_date_for_condition_mining() -> None:
+    """回归：买卖条件研究按信号日抽取样本，成交记录投影不能丢掉 signal_date。"""
+
+    service = BacktestService(adapter=FakeAdapter(make_frame()))
+
+    report = service.run(config())
+
+    assert [trade["direction"] for trade in report.trades] == ["BUY", "SELL"]
+    assert all("signal_date" in trade for trade in report.trades)
+    assert all(str(trade["signal_date"]) <= str(trade["date"]) for trade in report.trades)
+
+
 def test_formula_backtest_calculates_signals_before_date_window() -> None:
     frame = make_frame()
     frame.loc[1, "close"] = 10.0
