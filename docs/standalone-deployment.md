@@ -9,8 +9,25 @@
 
 ```bash
 export INDICATOR_LAB_IMAGE=<你的镜像标签>
-docker compose -f docker-compose.yml up -d
+sh scripts/start.sh
 ```
+
+`scripts/start.sh` 是日常入口，默认带 `--build`——改完代码直接跑它就会重建镜像：
+
+| 命令 | 作用 |
+|---|---|
+| `sh scripts/start.sh` | 重建镜像并启动 |
+| `sh scripts/start.sh --build-only` | 只构建，不启动 |
+| `sh scripts/start.sh --no-build` | 不重建，直接启动 |
+| `sh scripts/start.sh --protected` | 用 Nuitka 编译版镜像 |
+
+它会先跑 `docker compose config --quiet` 预校验再动手；`DATA_DIR` 无论来自环境变量还是
+`.env` 都会被识别，并自动叠加绑定挂载覆盖文件。
+
+不用脚本也行，等价命令是 `docker compose up --build -d`。
+
+> ⚠️ 直接敲 `docker compose up -d` **不会**重建已有镜像。代码改了却忘记 `--build`，
+> 容器会静默继续跑旧镜像——这是从旧启动脚本迁过来最容易踩的坑。
 
 打开 `http://127.0.0.1:${WEB_PORT:-5173}`。首次进入后触发一次全市场同步，行情会存进数据卷。
 

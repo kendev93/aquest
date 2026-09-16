@@ -90,8 +90,12 @@ npm run dev
 
 ```bash
 export INDICATOR_LAB_IMAGE=<你的镜像标签>
-docker compose up -d
+sh scripts/start.sh
 ```
+
+脚本默认带 `--build`，改完代码直接跑就会重建镜像；配置写在 `.env` 里，不用每次 export。完整命令见部署文档。
+
+> ⚠️ 直接敲 `docker compose up -d` **不会**重建已有镜像——改了代码却忘记 `--build` 会静默跑旧镜像。
 
 容器自带行情同步能力，不依赖任何外部行情软件。数据默认放在 Docker 命名卷 `indicator-lab_indicator-lab-data`，容器重建不会丢；想放到自己管理的宿主目录就叠加绑定挂载覆盖文件（注意该目录必须允许容器内的 `appuser`(uid 10001) 写入）：
 
@@ -117,7 +121,7 @@ docker compose build
 
 ```bash
 export INDICATOR_LAB_IMAGE=<你的镜像标签>
-docker compose -f docker-compose.yml -f docker-compose.protected.yml up -d --build
+sh scripts/start.sh --protected
 ```
 
 也可以在宿主机生成 standalone bundle：
