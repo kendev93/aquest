@@ -498,7 +498,7 @@ def test_strategy_discovery_api_reports_actionable_error_for_empty_store(tmp_pat
         )
 
     assert response.status_code == 422
-    assert "请先在 ETFQuest 中同步行情" in response.json()["error"]["message"]
+    assert "请先同步行情" in response.json()["error"]["message"]
 
 
 class BlockingDiscoveryService:

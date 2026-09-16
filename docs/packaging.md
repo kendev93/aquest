@@ -45,12 +45,17 @@ scripts/nuitka_entrypoint.py
 scripts/verify_nuitka_bundle.py
 ~~~
 
-统一入口支持两个模式：
+统一入口按子命令启动：
 
 ~~~text
-indicator-lab server   启动 FastAPI backend
-indicator-lab worker   启动 strategy-worker
+indicator-lab server              启动 FastAPI backend
+indicator-lab worker              启动 strategy-worker
+indicator-lab export [-o 目标]    导出用户资产备份
+indicator-lab import <zip>        合并导入用户资产备份
+indicator-lab manifest <zip>      查看备份内容，不写入
 ~~~
+
+不带子命令时等同于 `server`，旧的 `--host/--port` 调用方式继续可用。
 
 构建参数可以通过命令行或环境变量设置：
 
@@ -65,14 +70,17 @@ indicator-lab worker   启动 strategy-worker
 
 ## 保护版 Docker 发布
 
-直接运行下面的 Compose 命令前，须设置 `ETFQUEST_MARKET_DATABASE_DIR` 和
-`ETFQUEST_APP_DATA_DIR`。后者应指向包含 `database/` 和 `.secret.key` 的 ETFQuest
-应用数据目录；backend 只读挂载 `.secret.key` 用于离线验证会员快照，strategy-worker 不会
-获得该密钥。日常运行优先用 `scripts/start_indicator_lab.*`，由脚本自动推导并校验路径。
+保护版直接复用默认编排，只替换构建方式和启动入口。运行下面的 Compose 命令前，先设置
+`INDICATOR_LAB_IMAGE` 为本次发布的镜像标签；数据落在默认命名卷里，不需要任何外部行情软件
+的目录，也不需要额外的密钥文件。后端首次启动会在数据目录生成
+`/data/market/.strategy-worker-token`，backend 与 strategy-worker 共用这一个 token
+（由 `docker-compose.yml` 中的 `SELECTOR_STRATEGY_WORKER_TOKEN_AUTOGENERATE=1` 打开，
+worker 只读取它）。
 
 ### 构建
 
 ~~~bash
+export INDICATOR_LAB_IMAGE=indicator-lab-protected:1.0.0
 docker compose \
   -f docker-compose.yml \
   -f docker-compose.protected.yml \
@@ -90,16 +98,29 @@ NUITKA_JOBS=2 docker compose \
 
 ### 启动
 
-使用 Indicator Lab 启动脚本启动保护版。它会自动匹配 ETFQuest 数据库目录、创建 worker secret，
-并注入本机 DuckDB bind mount 路径：
+构建出的镜像用同一组 Compose 文件启动；命名卷 `indicator-lab-data` 会在首次启动时创建，
+数据落在 `/data/market`，容器重建不会丢：
 
 ~~~bash
-./scripts/start_indicator_lab.sh --protected
+docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.protected.yml \
+  up -d
 ~~~
 
-Windows PowerShell 使用 `.\scripts\start_indicator_lab.ps1 -Protected`。
+打开 `http://127.0.0.1:${WEB_PORT:-5173}`，后端在 `127.0.0.1:${API_PORT:-8123}`。
 
-这套 Compose 将 `${ETFQUEST_APP_DATA_DIR}/indicator-lab/` bind mount 到容器 `/data/market`，不使用 Docker named volume 持久化。发布模式另外挂载 ETFQuest 行情数据库：backend 需要可写以支持显式全市场同步，strategy-worker 对 ETFQuest 数据库和 Indicator Lab sidecar 数据库均只读；任务写入通过 backend 内网 API 完成。不要在发布验证中使用用户的生产数据库，应使用受控副本或临时目录。
+这套 Compose 把命名卷 `indicator-lab-data` 挂到容器 `/data/market`，backend 与 strategy-worker 共用它：backend 是 DuckDB 的唯一写者，负责在线同步和任务状态写入；strategy-worker 只读打开同一个数据库，并通过 backend 的容器内认证接口回传领取、进度和结果。默认不是绑定挂载；想让数据落在自己管理的宿主目录（便于直接备份或迁移），叠加 `docker-compose.bind.yml` 并把 `DATA_DIR` 指向该目录，此时宿主目录必须允许容器内 `appuser`（uid 10001）写入：
+
+~~~bash
+DATA_DIR=/srv/indicator-lab docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.bind.yml \
+  -f docker-compose.protected.yml \
+  up -d
+~~~
+
+绑定挂载时 Docker 不会把镜像里的目录属主带过来，必须先 `sudo mkdir -p "$DATA_DIR" && sudo chown 10001:10001 "$DATA_DIR"`；群晖/NAS 或 macOS/Windows 上的共享目录往往改不了属主，那种情况直接用默认命名卷。发布验证不要在用户的真实数据上做，换成临时命名卷或临时 `DATA_DIR`。
 
 ### 发布前检查
 
@@ -238,6 +259,20 @@ ditto -c -k --sequesterRsrc --keepParent "$bundle" dist/indicator-lab-macos-arm6
 
 当前仓库还没有自动化 macOS .app、Developer ID 签名和 notarization。给外部用户发布前，需要在 macOS 构建机补齐这些步骤；本地 standalone 文件夹只适合内部验证。
 
+## 原生运行的数据与备份
+
+原生（非 Docker）运行时行情数据库默认落在用户数据目录 `~/.indicator-lab/market.duckdb`，可以用 `SELECTOR_DATA_DIR` 改到别处；数据库由这个 bundle 自己从在线数据源同步，不需要外部行情软件的任何文件或目录。
+
+备份用户自己的研究成果用 bundle 自带的子命令：
+
+~~~bash
+indicator-lab export -o /path/to/backups     # 目标目录存在时写入 indicator-lab-backup-<时间戳>.zip
+indicator-lab manifest <zip>                 # 只查看归档内容，不写入
+indicator-lab import <zip>                   # 合并导入，已存在的记录跳过
+~~~
+
+归档只包含回测、选股、策略发现和复核记录这四类用户资产，行情和指标缓存不在其中——它们可以重新同步或重算。原生部署同样可以跑独立的 strategy-worker：backend 用 `SELECTOR_STRATEGY_WORKER_TOKEN_FILE` 指定 token 文件并用 `SELECTOR_STRATEGY_WORKER_TOKEN_AUTOGENERATE=1` 允许首次启动自动生成，worker 端设置同一个 `SELECTOR_STRATEGY_WORKER_TOKEN_FILE`，并用 `SELECTOR_STRATEGY_WORKER_API_URL` 指向 backend（默认值 `http://backend:8123` 只适用于 Compose 网络）。
+
 ## 运行前端
 
 Nuitka bundle 只包含 Python backend 和 strategy-worker。原生分发如果不使用 Docker，需要另外构建并提供前端：
@@ -259,7 +294,9 @@ npm run build
 - [ ] 产物内没有 .py、.pyc、.pyo 或项目源码目录；
 - [ ] backend /healthz 正常；
 - [ ] strategy-worker 可以领取并完成一个受控测试任务；
-- [ ] 使用受控行情副本验证导入、回测和策略实验；
+- [ ] 使用一次受控的在线同步验证行情写入，再跑通回测和策略实验；
+- [ ] 用 export/import 往返验证用户资产备份（行情和指标缓存不应出现在归档里）；
+- [ ] 确认首次启动自动生成了 worker token，且容器重建后数据卷内容仍在；
 - [ ] Windows 版本完成 VC++ 运行库、签名和安装器测试；
 - [ ] macOS 版本完成 libomp、代码签名和 notarization 测试；
 - [ ] 发布包只包含编译产物、前端静态文件、配置示例、许可证和第三方声明；
@@ -268,8 +305,11 @@ npm run build
 ## 相关文件
 
 - [Dockerfile.protected](../Dockerfile.protected)
+- [docker-compose.yml](../docker-compose.yml)
+- [docker-compose.bind.yml](../docker-compose.bind.yml)
 - [docker-compose.protected.yml](../docker-compose.protected.yml)
 - [build_nuitka.py](../scripts/build_nuitka.py)
 - [nuitka_entrypoint.py](../scripts/nuitka_entrypoint.py)
 - [verify_nuitka_bundle.py](../scripts/verify_nuitka_bundle.py)
+- [独立分发部署](standalone-deployment.md)
 - [Nuitka standalone 文档](https://nuitka.net/user-documentation/tutorial-setup-and-build.html)

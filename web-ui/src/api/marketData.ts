@@ -9,7 +9,6 @@ import type {
   LocalMarketScope,
   MarketDataCapabilities,
   MarketDataProvider,
-  MarketSyncRangePreset,
   MarketChartPeriod,
 } from '../types'
 import type { MarketSyncJobState, MarketSyncResult } from '../types'
@@ -139,19 +138,6 @@ export async function createOnlineSync(payload: {
 } = {}): Promise<{ job_id: string; status: string }> {
   const response = await request<{ data: { job_id: string; status: string } }>(
     `${API_BASE}/sync-online`,
-    { method: 'POST', body: JSON.stringify(payload) },
-  )
-  return response.data
-}
-
-export async function createFullMarketSync(payload: {
-  range_preset?: MarketSyncRangePreset
-  start_date?: string
-  end_date?: string
-  workers?: number
-} = {}): Promise<{ job_id: string; status: string }> {
-  const response = await request<{ data: { job_id: string; status: string } }>(
-    `${API_BASE}/sync-all`,
     { method: 'POST', body: JSON.stringify(payload) },
   )
   return response.data

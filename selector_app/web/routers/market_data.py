@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from datetime import date
 from inspect import Parameter, signature
 from typing import Literal, Protocol, cast
@@ -36,13 +35,6 @@ from selector_app.market_data.auto_sync import (
     MARKET_SYNC_EXCLUSIVE_GROUP,
     MARKET_SYNC_JOB_DESCRIPTIONS,
 )
-from selector_app.market_data.etfquest_writer import ETFQuestMarketDataWriter
-from selector_app.market_data.full_sync import (
-    MarketSyncCancelledError as FullMarketSyncCancelledError,
-)
-from selector_app.market_data.full_sync import (
-    resolve_sync_range,
-)
 from selector_app.market_data.models import (
     DataStoreStatus,
     InstrumentBoard,
@@ -55,7 +47,6 @@ from selector_app.market_data.service import (
     LocalMarketChart,
 )
 from selector_app.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
-from selector_app.market_data.sync_lock import MarketDataSyncBusyError, MarketDataSyncLock
 from selector_app.screening.jobs import (
     ActiveJobConflictError,
     ProgressReporter,
@@ -67,7 +58,7 @@ from selector_app.screening.jobs import (
 from selector_app.tdx_protocol.errors import TdxConnectionError
 
 from ..market_source import resolve_market_status
-from ..schemas import FullMarketSyncRequest, MarketSyncRequest
+from ..schemas import MarketSyncRequest
 
 router = APIRouter(prefix="/market-data", tags=["market-data"])
 
@@ -88,19 +79,6 @@ class MarketSyncService(Protocol):
         detail_callback: DetailCallback | None = None,
         abort_check: AbortCheck | None = None,
     ) -> MarketSyncReport | dict[str, object]: ...
-
-
-class FullMarketSyncService(Protocol):
-    def run(
-        self,
-        *,
-        start_date: date | None = None,
-        end_date: date | None = None,
-        workers: int | None = None,
-        progress_callback: Callable[[int, int], None] | None = None,
-        detail_callback: DetailCallback | None = None,
-        abort_check: AbortCheck | None = None,
-    ) -> dict[str, object]: ...
 
 
 class LocalMarketDataServiceLike(Protocol):
@@ -135,44 +113,12 @@ def _service(request: Request) -> MarketSyncService:
     return cast(MarketSyncService, request.app.state.market_sync_service)
 
 
-def _full_market_sync(request: Request) -> FullMarketSyncService | None:
-    return cast(
-        FullMarketSyncService | None,
-        getattr(request.app.state, "full_market_sync_service", None),
-    )
-
-
 def _local_service(request: Request) -> LocalMarketDataServiceLike:
     return cast(LocalMarketDataServiceLike, request.app.state.local_market_data_service)
 
 
 def _store(request: Request) -> DuckDbMarketDataStore:
     return cast(DuckDbMarketDataStore, request.app.state.market_data_store)
-
-
-def _market_writer(request: Request) -> ETFQuestMarketDataWriter | None:
-    return cast(
-        ETFQuestMarketDataWriter | None,
-        getattr(request.app.state, "market_data_writer", None),
-    )
-
-
-def _market_adapter(request: Request) -> object | None:
-    return getattr(request.app.state, "market_data_adapter", None)
-
-
-def _shared_market_source(request: Request) -> bool:
-    adapter = _market_adapter(request)
-    return adapter is not None and str(adapter.__class__.__name__) == "ETFQuestMarketDataAdapter"
-
-
-def _legacy_market_write_enabled(request: Request) -> bool:
-    """Allow legacy local writes only when explicitly enabled for development."""
-
-    if _shared_market_source(request):
-        return False
-    value = str(os.getenv("SELECTOR_ENABLE_LEGACY_MARKET_WRITES") or "").strip().lower()
-    return value in {"1", "true", "yes", "on"}
 
 
 def _market_status(request: Request) -> DataStoreStatus:
@@ -280,39 +226,6 @@ def indicator_cache_status(request: Request) -> dict[str, object] | JSONResponse
 
 @router.get("/capabilities", response_model=None)
 def market_data_capabilities(request: Request) -> dict[str, object]:
-    if _shared_market_source(request):
-        adapter = _market_adapter(request)
-        writer = _market_writer(request)
-        try:
-            source_status = _market_status(request)
-            available = True
-            instrument_count = source_status.instrument_count
-            bar_count = source_status.bar_count
-            error_message = None
-        except (OSError, MarketDataStoreError, duckdb.Error, RuntimeError) as exc:
-            available = False
-            instrument_count = 0
-            bar_count = 0
-            error_message = _storage_error_message(exc)
-        return {
-            "data": {
-                "default_provider": "etfquest",
-                "read_only": writer is None,
-                "supports_full_sync": writer is not None,
-                "database_path": str(getattr(adapter, "database_path", "")),
-                "instrument_count": instrument_count,
-                "bar_count": bar_count,
-                "providers": {
-                    "etfquest": {
-                        "provider": "etfquest",
-                        "available": available,
-                        "read_only": writer is None,
-                        "supports_full_sync": writer is not None,
-                        **({"message": error_message} if error_message else {}),
-                    }
-                },
-            }
-        }
     service = _service(request)
     method = getattr(service, "provider_capabilities", None)
     if callable(method):
@@ -413,20 +326,12 @@ def market_data_job_status(job_id: str, request: Request) -> dict[str, object]:
 def market_data_store_status(request: Request) -> dict[str, object] | JSONResponse:
     try:
         data = _market_status(request).to_dict()
-        data["market_data_source"] = (
-            "etfquest" if _shared_market_source(request) else "indicator_lab"
-        )
-        writer = _market_writer(request)
-        data["market_data_read_only"] = _shared_market_source(request) and writer is None
-        data["market_data_write_target"] = "etfquest" if writer is not None else "indicator_lab"
-        data["full_market_sync_supported"] = writer is not None
-        data["market_sync_lock"] = (
-            MarketDataSyncLock(writer.database_path, owner="indicator-lab").current()
-            if writer is not None
-            else None
-        )
-        data["last_market_sync_summary"] = _last_market_sync_summary(writer)
-        data["legacy_market_write_enabled"] = _legacy_market_write_enabled(request)
+        data["market_data_source"] = "indicator_lab"
+        data["market_data_read_only"] = False
+        data["market_data_write_target"] = "indicator_lab"
+        data["full_market_sync_supported"] = False
+        data["market_sync_lock"] = None
+        data["last_market_sync_summary"] = _last_market_sync_summary(None)
         auto_sync_job_id = getattr(request.app.state, "auto_sync_job_id", None)
         if auto_sync_job_id:
             auto_sync_state = _runner(request).get(auto_sync_job_id)
@@ -456,106 +361,8 @@ def market_data_store_status(request: Request) -> dict[str, object] | JSONRespon
         )
 
 
-@router.post("/sync-all", status_code=status.HTTP_202_ACCEPTED)
-def create_full_market_sync_job(
-    payload: FullMarketSyncRequest,
-    request: Request,
-) -> JSONResponse:
-    """Start a bounded full-market sync into ETFQuest's shared database."""
-
-    writer = _market_writer(request)
-    service = _full_market_sync(request)
-    if writer is None or service is None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="全市场行情同步需要已配置的 ETFQuest 共享行情数据库",
-        )
-    lock = MarketDataSyncLock(writer.database_path, owner="indicator-lab")
-    if lock.current() is not None:
-        return JSONResponse(
-            status_code=409,
-            content={
-                "error": {
-                    "code": "market_data_busy",
-                    "message": "其他行情同步任务正在运行，请等待当前任务完成",
-                }
-            },
-        )
-    try:
-        writer.validate_schema()
-    except (FileNotFoundError, OSError, RuntimeError, duckdb.Error) as exc:
-        raise HTTPException(status_code=503, detail=_storage_error_message(exc)) from exc
-    _reject_duplicate_market_job(_runner(request))
-    start_date, end_date = resolve_sync_range(
-        payload.range_preset,
-        payload.start_date,
-        payload.end_date,
-    )
-    job_id_holder = [uuid.uuid4().hex]
-
-    def abort_check() -> bool:
-        return _runner(request).is_cancel_requested(job_id_holder[0])
-
-    def run_sync(progress: ProgressReporter) -> dict[str, object]:
-        try:
-            with lock.acquire(job_id=job_id_holder[0], phase="planning") as lease:
-
-                def report_detail(detail: Mapping[str, object]) -> None:
-                    phase = detail.get("phase")
-                    lease.heartbeat(phase=str(phase) if phase else None)
-                    report_progress_detail(progress, detail)
-
-                result = service.run(
-                    start_date=start_date,
-                    end_date=end_date,
-                    workers=payload.workers,
-                    progress_callback=progress,
-                    detail_callback=report_detail,
-                    abort_check=abort_check,
-                )
-                result = {**result, "range_preset": payload.range_preset}
-            if abort_check():
-                raise FullMarketSyncCancelledError("全市场行情同步已取消")
-            cache = getattr(request.app.state, "indicator_cache", None)
-            invalidate = getattr(cache, "clear_memory", None)
-            if callable(invalidate):
-                invalidate()
-            return result
-        except FullMarketSyncCancelledError as exc:
-            raise TaskCancelledError(str(exc)) from exc
-        except MarketDataSyncBusyError as exc:
-            raise TaskUserError(str(exc)) from exc
-        except OnlineProviderError as exc:
-            raise TaskUserError(str(exc)) from exc
-        except ValueError as exc:
-            raise TaskUserError(str(exc)) from exc
-        except (FileNotFoundError, OSError, RuntimeError, duckdb.Error) as exc:
-            raise TaskUserError(_storage_error_message(exc)) from exc
-
-    try:
-        job_id = _runner(request).submit_callable(
-            run_sync,
-            description="全市场行情同步",
-            job_id=job_id_holder[0],
-            exclusive_group=MARKET_SYNC_EXCLUSIVE_GROUP,
-        )
-    except ActiveJobConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail="任务执行器暂不可用") from exc
-    return JSONResponse(
-        status_code=status.HTTP_202_ACCEPTED,
-        content={"data": {"job_id": job_id, "status": "queued"}},
-    )
-
-
 @router.post("/sync-online", status_code=status.HTTP_202_ACCEPTED)
 def create_online_sync_job(payload: MarketSyncRequest, request: Request) -> JSONResponse:
-    if _shared_market_source(request):
-        return create_full_market_sync_job(
-            FullMarketSyncRequest(range_preset="all"),
-            request,
-        )
     return _create_sync_job(payload, request)
 
 
@@ -591,13 +398,9 @@ def _create_sync_job(
     """Create an online-only sync job.
 
     This route, its compatibility alias ``/sync``, backfill, and the automatic
-    scheduler all operate on online providers and the selected write target.
+    scheduler all operate on online providers and the local database.
     """
-    if _shared_market_source(request):
-        return create_full_market_sync_job(
-            FullMarketSyncRequest(range_preset="all"),
-            request,
-        )
+
     runner = _runner(request)
     _reject_duplicate_market_job(runner)
     job_id_holder = [""]
@@ -791,10 +594,10 @@ def _storage_error_message(exc: BaseException) -> str:
     if isinstance(exc, MarketDataStoreError):
         return str(exc)
     if isinstance(exc, FileNotFoundError):
-        return "未找到 ETFQuest 行情数据库，请安装并初始化最新版 ETFQuest 后重试"
+        return "未找到行情数据库，请先同步行情后重试"
     detail = str(exc).strip()
     if isinstance(exc, RuntimeError) and "schema" in detail.lower():
-        return detail[:240] or "ETFQuest 行情数据库 schema 不兼容"
+        return detail[:240] or "行情数据库 schema 不兼容"
     message = str(exc).lower()
     if "lock" in message or "conflicting" in message:
         return "行情数据库当前被其它进程占用，请关闭其它写入进程后重试"
@@ -802,12 +605,19 @@ def _storage_error_message(exc: BaseException) -> str:
 
 
 def _last_market_sync_summary(
-    writer: ETFQuestMarketDataWriter | None,
+    writer: object | None,
 ) -> dict[str, object] | None:
-    if writer is None:
+    """Read the last sync summary off a writer, when one is supplied.
+
+    Kept tolerant of the historical writer object so callers that no longer have
+    one can pass ``None`` without special-casing.
+    """
+
+    reader = getattr(writer, "get_system_setting", None)
+    if not callable(reader):
         return None
     try:
-        raw = writer.get_system_setting("market_sync_last_summary")
+        raw = reader("market_sync_last_summary")
         value = json.loads(raw) if raw else None
     except (OSError, RuntimeError, ValueError, duckdb.Error):
         return None

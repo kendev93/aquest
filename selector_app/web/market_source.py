@@ -1,13 +1,10 @@
 """Resolve the authoritative market-data status for a request.
 
-Indicator Lab can read bars from two places: the project-owned DuckDB sidecar
-(``market.duckdb``) or the shared ETFQuest database.  Only one of them holds the
-bars that a request will actually read, so any endpoint that derives a default
-date window must ask the *same* source it is about to read from.
-
-Reading the sidecar while the bars come from ETFQuest silently produces a stale
-window: the sidecar is a legacy copy that stops advancing once shared mode is
-enabled, so "最近五年" would be computed against an old ``data_end``.
+Indicator Lab now reads bars only from its own DuckDB database, but endpoints
+that derive a default date window must still ask the *same* object that will
+serve those bars — the adapter — rather than assembling bounds from somewhere
+else.  Keeping that question in one module is what made the previous
+two-source setup safe to remove.
 """
 
 from __future__ import annotations
@@ -23,8 +20,8 @@ from selector_app.market_data.store import DuckDbMarketDataStore
 def resolve_market_status(request: Request) -> DataStoreStatus:
     """Return the status of the data source this request will actually read.
 
-    The market-data adapter wins when it can report a status; only then does the
-    local sidecar act as the fallback for deployments that still read it.
+    The adapter wins when it can report a status; the store is the fallback for
+    adapters that cannot.
     """
 
     adapter = getattr(request.app.state, "market_data_adapter", None)

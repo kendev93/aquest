@@ -16,3 +16,34 @@ def test_runtime_manifest_uses_lower_bounds_without_removed_online_dependency() 
     assert all("akshare" not in line.lower() for line in requirements)
     assert all("eastmoney" not in line.lower() for line in requirements)
     assert all(">=" in line for line in requirements)
+
+
+def test_multipart_is_declared_because_the_import_endpoint_uploads_a_file() -> None:
+    """回归：数据导入端点用 UploadFile，缺 python-multipart 时容器启动即崩。
+
+    本地开发环境通常已经装了它，所以这个缺失只会在正式镜像里暴露——
+    也就是部署时才炸。这里直接对着清单断言。
+    """
+
+    root = Path(__file__).parents[2]
+    manifest = (root / "requirements.lock").read_text(encoding="utf-8").lower()
+    project = (root / "pyproject.toml").read_text(encoding="utf-8").lower()
+
+    assert "python-multipart" in manifest
+    assert "python-multipart" in project
+
+
+def test_every_fastapi_file_upload_route_has_its_dependency_declared() -> None:
+    """凡是代码里出现 ``UploadFile``，运行依赖里就必须有 python-multipart。"""
+
+    root = Path(__file__).parents[2]
+    users = [
+        path
+        for path in (root / "selector_app").rglob("*.py")
+        if "UploadFile" in path.read_text(encoding="utf-8")
+    ]
+
+    if not users:
+        return
+    manifest = (root / "requirements.lock").read_text(encoding="utf-8").lower()
+    assert "python-multipart" in manifest, f"以下文件需要 python-multipart: {users}"

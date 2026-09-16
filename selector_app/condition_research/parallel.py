@@ -23,11 +23,10 @@ from selector_app.backtest.service import BacktestMarketDataAdapter, BacktestSer
 from selector_app.condition_research.models import ConditionResearchConfig
 from selector_app.condition_research.samples import MiningSamples
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
-from selector_app.market_data.etfquest_adapter import ETFQuestMarketDataAdapter
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.screening.models import ScreenCondition
 
-AdapterKind = Literal["duckdb", "etfquest"]
+AdapterKind = Literal["duckdb"]
 
 
 class WorkerPlanLike(Protocol):
@@ -150,8 +149,6 @@ def adapter_worker_target(adapter: object) -> tuple[AdapterKind, str] | None:
 
     if isinstance(adapter, DuckDbMarketDataAdapter):
         return "duckdb", str(adapter.database_path)
-    if isinstance(adapter, ETFQuestMarketDataAdapter):
-        return "etfquest", str(adapter.database_path)
     return None
 
 
@@ -176,15 +173,11 @@ def research_executor(
         executor.shutdown(wait=True, cancel_futures=True)
 
 
-def _build_adapter(
-    adapter_kind: str, database_path: str
-) -> DuckDbMarketDataAdapter | ETFQuestMarketDataAdapter:
+def _build_adapter(adapter_kind: str, database_path: str) -> DuckDbMarketDataAdapter:
     if adapter_kind == "duckdb":
         return DuckDbMarketDataAdapter(
             DuckDbMarketDataStore(database_path, read_only=True, pool_read_connections=True)
         )
-    if adapter_kind == "etfquest":
-        return ETFQuestMarketDataAdapter(database_path)
     raise ValueError(f"不支持的买卖条件研究行情适配器: {adapter_kind}")
 
 

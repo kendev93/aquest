@@ -1,21 +1,15 @@
 # 独立分发部署（Docker）
 
-面向最终用户的部署方式：用户拉镜像、起容器，不需要本机装过 ETFQuest。
+面向最终用户的部署方式：用户拉镜像、起容器，容器自己同步行情，不需要本机装过任何外部行情软件。
 
-与 `docs/etfquest-shared-data.md` 里的共享模式是两条独立的路：
-
-| | 独立分发 | 共享模式 |
-|---|---|---|
-| 编排文件 | `docker-compose.standalone.yml` | `docker-compose.yml` |
-| 行情来源 | 容器自己同步 | 读 ETFQuest 的 `market_data.db` |
-| 数据落盘 | Docker 命名卷 | 绑定挂载到 ETFQuest 应用目录 |
-| worker token | 首次启动自动生成 | 由 ETFQuest 提供、只读挂载 |
+项目只有这一种形态。历史上曾经支持的"读取 ETFQuest 共享行情库"模式已随 4 个模块一并移除，
+数据边界因此变得很窄：**本机 DuckDB 是唯一的行情事实源**。
 
 ## 快速开始
 
 ```bash
 export INDICATOR_LAB_IMAGE=<你的镜像标签>
-docker compose -f docker-compose.standalone.yml up -d
+docker compose -f docker-compose.yml up -d
 ```
 
 打开 `http://127.0.0.1:${WEB_PORT:-5173}`。首次进入后触发一次全市场同步，行情会存进数据卷。
@@ -51,20 +45,20 @@ docker volume inspect indicator-lab_indicator-lab-data
 
 ```bash
 # 导出（默认写到当前目录，或用 -o 指定文件/目录）
-docker compose -f docker-compose.standalone.yml exec backend \
+docker compose -f docker-compose.yml exec backend \
   python -m selector_app export -o /data/market
 
 # 导出的文件在数据卷里，拷出来：
-docker compose -f docker-compose.standalone.yml cp \
+docker compose -f docker-compose.yml cp \
   backend:/data/market/indicator-lab-backup-<时间戳>.zip .
 
 # 查看备份里有什么
 python -m selector_app manifest indicator-lab-backup-<时间戳>.zip
 
 # 导入（合并，已存在的记录跳过，不会覆盖或删除任何东西）
-docker compose -f docker-compose.standalone.yml cp \
+docker compose -f docker-compose.yml cp \
   indicator-lab-backup-<时间戳>.zip backend:/tmp/
-docker compose -f docker-compose.standalone.yml exec backend \
+docker compose -f docker-compose.yml exec backend \
   python -m selector_app import /tmp/indicator-lab-backup-<时间戳>.zip
 ```
 
@@ -78,7 +72,7 @@ docker compose -f docker-compose.standalone.yml exec backend \
 要保留几天就设成天数，但注意**每份备份都和数据卷一样大**：
 
 ```bash
-SELECTOR_DB_BACKUP_RETENTION_DAYS=3 docker compose -f docker-compose.standalone.yml up -d
+SELECTOR_DB_BACKUP_RETENTION_DAYS=3 docker compose -f docker-compose.yml up -d
 ```
 
 压缩用的是硬链接而不是整库拷贝，所以压缩期间的峰值是两份库大小而不是三份。
@@ -92,8 +86,8 @@ sudo mkdir -p /srv/indicator-lab
 sudo chown 10001:10001 /srv/indicator-lab     # ← 必须，否则容器起不来
 
 DATA_DIR=/srv/indicator-lab docker compose \
-  -f docker-compose.standalone.yml \
-  -f docker-compose.standalone-bind.yml up -d
+  -f docker-compose.yml \
+  -f docker-compose.bind.yml up -d
 ```
 
 覆盖文件只改变卷的落盘位置，服务定义不动。**属主必须自己改**：绑定挂载时 Docker 不会
@@ -102,8 +96,8 @@ DATA_DIR=/srv/indicator-lab docker compose \
 ## 升级
 
 ```bash
-docker compose -f docker-compose.standalone.yml pull
-docker compose -f docker-compose.standalone.yml up -d
+docker compose -f docker-compose.yml pull
+docker compose -f docker-compose.yml up -d
 ```
 
 命名卷在容器重建时保持不变，行情和研究记录都会留着。

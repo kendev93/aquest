@@ -25,6 +25,7 @@ PyYAML>=6.0.3
 pydantic>=2.12.5,<3
 pydantic-core>=2.41.5
 python-dateutil>=2.9.0.post0
+python-multipart>=0.0.22
 pytz>=2026.3.post1
 scipy>=1.18.1
 six>=1.17.0

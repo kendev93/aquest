@@ -20,7 +20,6 @@ from typing import Protocol, cast
 
 from selector_app.indicators.cache import IndicatorCache
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter, MarketDataAdapter
-from selector_app.market_data.etfquest_adapter import ETFQuestMarketDataAdapter
 from selector_app.market_data.models import InstrumentBoard, InstrumentType
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.portfolio_backtest.models import (
@@ -61,15 +60,10 @@ _WORKER_DISCOVERY_SERVICE: StrategyDiscoveryService | None = None
 def _init_discovery_worker(
     database_path: str,
     snapshot_path: str | None = None,
-    market_data_path: str | None = None,
 ) -> None:
     global _WORKER_DISCOVERY_SERVICE
     worker_store = DuckDbMarketDataStore(database_path, read_only=True)
-    market_adapter = (
-        ETFQuestMarketDataAdapter(market_data_path)
-        if market_data_path
-        else DuckDbMarketDataAdapter(worker_store)
-    )
+    market_adapter = DuckDbMarketDataAdapter(worker_store)
     worker_portfolio = PortfolioBacktestService(
         adapter=market_adapter,
         indicator_cache=IndicatorCache(),
@@ -85,44 +79,23 @@ def _init_discovery_worker(
 def _evaluate_candidate_process(
     job: tuple[object, ...],
 ) -> Mapping[str, object]:
-    if len(job) == 6:
-        legacy_job = cast(
-            tuple[
-                StrategyCandidate,
-                DiscoveryRequest,
-                str,
-                str | None,
-                str,
-                Mapping[str, object] | None,
-            ],
-            job,
-        )
-        candidate, request, stage, fidelity, database_path, checkpoint = legacy_job
-        market_data_path = None
-    else:
-        extended_job = cast(
-            tuple[
-                StrategyCandidate,
-                DiscoveryRequest,
-                str,
-                str | None,
-                str,
-                str | None,
-                Mapping[str, object] | None,
-            ],
-            job,
-        )
-        (
-            candidate,
-            request,
-            stage,
-            fidelity,
-            database_path,
-            market_data_path,
-            checkpoint,
-        ) = extended_job
+    # 旧版本在 database_path 之后还带一个 ETFQuest 行情库路径。那一整套共享
+    # 行情集成已经移除，这里容忍历史元组形状并丢掉多余的字段。
+    if len(job) == 7:
+        job = (*job[:5], job[6])
+    candidate, request, stage, fidelity, database_path, checkpoint = cast(
+        tuple[
+            StrategyCandidate,
+            DiscoveryRequest,
+            str,
+            str | None,
+            str,
+            Mapping[str, object] | None,
+        ],
+        job,
+    )
     if _WORKER_DISCOVERY_SERVICE is None:
-        _init_discovery_worker(database_path, market_data_path=market_data_path)
+        _init_discovery_worker(database_path)
     assert _WORKER_DISCOVERY_SERVICE is not None
     split = "search" if stage in {"coarse", "medium", "full"} else stage
     return _WORKER_DISCOVERY_SERVICE._evaluate_candidate(
@@ -426,16 +399,11 @@ class StrategyDiscoveryService:
             yield None
             return
         database_path = str(self._store.database_path)
-        market_data_path = (
-            str(getattr(self._market_data_adapter, "database_path"))
-            if isinstance(self._market_data_adapter, ETFQuestMarketDataAdapter)
-            else None
-        )
         executor = ProcessPoolExecutor(
             max_workers=self._evaluation_workers,
             mp_context=multiprocessing.get_context("spawn"),
             initializer=_init_discovery_worker,
-            initargs=(database_path, snapshot_path, market_data_path),
+            initargs=(database_path, snapshot_path),
         )
         try:
             yield executor
@@ -463,7 +431,7 @@ class StrategyDiscoveryService:
             boards=boards,
         )
         if not refs:
-            raise ValueError("行情数据库没有可用日线，请先在 ETFQuest 中同步行情")
+            raise ValueError("行情数据库没有可用日线，请先同步行情")
 
     def _run_impl(
         self,
@@ -585,11 +553,6 @@ class StrategyDiscoveryService:
                 candidates: Sequence[StrategyCandidate], stage: str
             ) -> Sequence[Mapping[str, object]]:
                 fidelity = stage if stage in {"coarse", "medium", "full"} else None
-                market_data_path = (
-                    str(getattr(self._market_data_adapter, "database_path"))
-                    if isinstance(self._market_data_adapter, ETFQuestMarketDataAdapter)
-                    else None
-                )
                 jobs = [
                     (
                         candidate,
@@ -597,7 +560,6 @@ class StrategyDiscoveryService:
                         stage,
                         fidelity,
                         database_path,
-                        market_data_path,
                         fidelity_checkpoints.get(candidate.candidate_hash)
                         if fidelity in {"medium", "full"}
                         else None,

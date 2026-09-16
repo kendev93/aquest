@@ -11,7 +11,6 @@ from typing import Protocol, cast
 
 from selector_app.indicators.cache import IndicatorCache
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter, MarketDataAdapter
-from selector_app.market_data.etfquest_adapter import ETFQuestMarketDataAdapter
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.portfolio_backtest.models import PortfolioBacktestConfig, PortfolioBacktestReport
 from selector_app.portfolio_backtest.service import PortfolioBacktestService
@@ -48,15 +47,10 @@ _WORKER_REPLAY_SNAPSHOT: DiscoverySnapshot | None = None
 def _init_replay_worker(
     database_path: str,
     snapshot_path: str,
-    market_data_path: str | None = None,
 ) -> None:
     global _WORKER_REPLAY_SERVICE, _WORKER_REPLAY_SNAPSHOT
     worker_store = DuckDbMarketDataStore(database_path, read_only=True)
-    market_adapter = (
-        ETFQuestMarketDataAdapter(market_data_path)
-        if market_data_path
-        else DuckDbMarketDataAdapter(worker_store)
-    )
+    market_adapter = DuckDbMarketDataAdapter(worker_store)
     _WORKER_REPLAY_SERVICE = PortfolioBacktestService(
         adapter=market_adapter,
         indicator_cache=IndicatorCache(),
@@ -67,21 +61,15 @@ def _init_replay_worker(
 def _evaluate_replay_candidate_process(
     job: tuple[object, ...],
 ) -> Mapping[str, object]:
-    if len(job) == 4:
-        legacy_job = cast(tuple[dict[str, object], str, str, int], job)
-        candidate_config, database_path, snapshot_path, total_candidates = legacy_job
-        market_data_path = None
-    else:
-        extended_job = cast(tuple[dict[str, object], str, str, str | None, int], job)
-        (
-            candidate_config,
-            database_path,
-            snapshot_path,
-            market_data_path,
-            total_candidates,
-        ) = extended_job
+    # 旧版本在 snapshot_path 之后还带一个 ETFQuest 行情库路径。共享行情集成
+    # 已移除，这里容忍历史元组形状并丢掉多余的字段。
+    if len(job) == 5:
+        job = (*job[:3], job[4])
+    candidate_config, database_path, snapshot_path, total_candidates = cast(
+        tuple[dict[str, object], str, str, int], job
+    )
     if _WORKER_REPLAY_SERVICE is None or _WORKER_REPLAY_SNAPSHOT is None:
-        _init_replay_worker(database_path, snapshot_path, market_data_path)
+        _init_replay_worker(database_path, snapshot_path)
     assert _WORKER_REPLAY_SERVICE is not None
     assert _WORKER_REPLAY_SNAPSHOT is not None
     config = PortfolioBacktestRequest.model_validate(candidate_config).to_config()
@@ -302,17 +290,11 @@ class StrategyReplayService:
                     },
                 )
             with self._evaluation_executor(str(snapshot.root)) as executor:
-                market_data_path = (
-                    str(getattr(self._market_data_adapter, "database_path"))
-                    if isinstance(self._market_data_adapter, ETFQuestMarketDataAdapter)
-                    else None
-                )
                 jobs = [
                     (
                         config,
                         str(self._store.database_path),
                         str(snapshot.root),
-                        market_data_path,
                         snapshot.total_candidates,
                     )
                     for config in configs
@@ -352,16 +334,11 @@ class StrategyReplayService:
 
     @contextmanager
     def _evaluation_executor(self, snapshot_path: str) -> Iterator[ProcessPoolExecutor]:
-        market_data_path = (
-            str(getattr(self._market_data_adapter, "database_path"))
-            if isinstance(self._market_data_adapter, ETFQuestMarketDataAdapter)
-            else None
-        )
         executor = ProcessPoolExecutor(
             max_workers=self._evaluation_workers,
             mp_context=multiprocessing.get_context("spawn"),
             initializer=_init_replay_worker,
-            initargs=(str(self._store.database_path), snapshot_path, market_data_path),
+            initargs=(str(self._store.database_path), snapshot_path),
         )
         try:
             yield executor

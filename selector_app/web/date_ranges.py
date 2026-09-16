@@ -59,7 +59,7 @@ def resolve_date_range(
     resolved_start = coerce_date(available_start)
     resolved_end = coerce_date(available_end)
     if resolved_start is None or resolved_end is None:
-        raise ValueError("行情数据库没有已完成日线，请先在 ETFQuest 中同步行情")
+        raise ValueError("行情数据库没有已完成日线，请先同步行情")
     if resolved_start > resolved_end:
         raise ValueError("本地行情日期范围无效")
     if mode == "full":

@@ -55,10 +55,6 @@ cleanup_compose_fixture() {
 
 prepare_compose_fixture() {
   compose_fixture=$(mktemp -d "${TMPDIR:-/tmp}/indicator-lab-compose.XXXXXX")
-  mkdir -p "$compose_fixture/database" "$compose_fixture/indicator-lab"
-  : > "$compose_fixture/database/market_data.db"
-  : > "$compose_fixture/.secret.key"
-  printf '%s\n' 'ci-test-worker-token' > "$compose_fixture/indicator-lab/.strategy-worker-token"
 }
 
 trap cleanup_compose_fixture EXIT
@@ -95,13 +91,12 @@ run_frontend_checks() {
 }
 
 run_docker_checks() {
-  printf '%s\n' '验证 Docker：Compose 配置、后端镜像、前端镜像'
+  printf '%s\n' '验证 Docker：Compose 配置（默认与绑定挂载）、后端镜像、前端镜像'
   prepare_compose_fixture
-  ETFQUEST_APP_DATA_DIR="$compose_fixture" \
+  INDICATOR_LAB_IMAGE=indicator-lab-backend:ci \
     docker compose -f docker-compose.yml config --quiet
-  ETFQUEST_APP_DATA_DIR="$compose_fixture" \
-    ETFQUEST_MARKET_DATABASE_DIR="$compose_fixture/database" \
-    docker compose -f docker-compose.yml -f docker-compose.etfquest.yml config --quiet
+  INDICATOR_LAB_IMAGE=indicator-lab-backend:ci DATA_DIR="$compose_fixture" \
+    docker compose -f docker-compose.yml -f docker-compose.bind.yml config --quiet
   cleanup_compose_fixture
   docker build --file Dockerfile --tag indicator-lab-backend:ci .
   docker build --file Dockerfile.frontend --tag indicator-lab-frontend:ci .
@@ -109,11 +104,8 @@ run_docker_checks() {
 
 run_protected_docker_checks() {
   printf '%s\n' '验证保护版 Docker：Nuitka 编译、产物源码扫描、最终镜像构建'
-  prepare_compose_fixture
-  ETFQUEST_MARKET_DATABASE_DIR="$compose_fixture/database" \
-    ETFQUEST_APP_DATA_DIR="$compose_fixture" \
+  INDICATOR_LAB_IMAGE=indicator-lab-protected:ci \
     docker compose -f docker-compose.yml -f docker-compose.protected.yml config --quiet
-  cleanup_compose_fixture
   docker build --file Dockerfile.protected --tag indicator-lab-protected:ci .
 }
 

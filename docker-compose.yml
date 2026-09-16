@@ -1,16 +1,15 @@
-# 面向最终用户的独立分发编排。
+# 指标实验室的默认编排。
 #
-# 与 docker-compose.yml（共享 ETFQuest 行情库的开发/自用编排）的区别：
-#   · 行情由容器自己同步，不需要本机装过 ETFQuest
+#   · 行情由容器自己从在线数据源同步，不依赖任何外部行情软件
 #   · 数据放 Docker 命名卷，避开绑定挂载的宿主 uid 与文件共享层问题
 #   · 策略 worker token 首次启动自动生成，用户无需任何手工步骤
 #
 # 用法：
 #   export INDICATOR_LAB_IMAGE=<你的镜像标签>
-#   docker compose -f docker-compose.standalone.yml up -d
+#   docker compose -f docker-compose.yml up -d
 #
 # 想自己管理数据目录（便于备份/迁移）就叠加绑定挂载覆盖文件，
-# 见 docker-compose.standalone-bind.yml。
+# 见 docker-compose.bind.yml。
 
 services:
   backend:

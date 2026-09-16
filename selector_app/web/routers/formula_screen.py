@@ -62,7 +62,7 @@ def metadata() -> dict[str, object]:
                 {"value": "custom", "label": "自定义品种列表"},
             ],
             "periods": [{"value": "daily", "label": "日线"}],
-            "data_directory_help": ("行情统一读取已配置的行情数据库；请先在 ETFQuest 中同步行情。"),
+            "data_directory_help": ("行情统一读取本机行情数据库；请先同步行情。"),
         }
     }
 

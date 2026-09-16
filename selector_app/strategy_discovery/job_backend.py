@@ -142,7 +142,7 @@ class FileStrategyJobBackend:
             boards=boards,
         )
         if not refs:
-            raise ValueError("行情数据库没有可用日线，请先在 ETFQuest 中同步行情")
+            raise ValueError("行情数据库没有可用日线，请先同步行情")
         window = snapshot_window(request)
         row_count = adapter.count_many_stocks(
             refs,
@@ -150,7 +150,7 @@ class FileStrategyJobBackend:
             end_date=window.end,
         )
         if row_count <= 0:
-            raise ValueError("行情数据库没有可用日线，请先在 ETFQuest 中同步行情")
+            raise ValueError("行情数据库没有可用日线，请先同步行情")
         estimate = estimate_discovery_resources(
             row_count,
             requested_workers=self._worker_count,

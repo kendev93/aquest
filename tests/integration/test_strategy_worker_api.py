@@ -162,12 +162,8 @@ def test_worker_api_cancellation_is_returned_by_heartbeat(tmp_path) -> None:
     assert app.state.strategy_job_backend.get(job_id)["status"] == "cancelled"
 
 
-def test_worker_api_bypasses_membership_gate_but_still_requires_worker_token(tmp_path) -> None:
-    class MembershipUnavailable:
-        def require_core_access(self) -> None:
-            raise RuntimeError("membership must not be consulted by worker API")
-
-    app = _app(tmp_path, membership_client=MembershipUnavailable())
+def test_worker_api_still_requires_a_worker_token(tmp_path) -> None:
+    app = _app(tmp_path)
     with TestClient(app) as client:
         response = client.post(
             "/internal/strategy-worker/jobs/claim",

@@ -1,8 +1,8 @@
 # 把数据目录换成用户自己管理的宿主目录。
 #
 #   DATA_DIR=/srv/indicator-lab docker compose \
-#     -f docker-compose.standalone.yml \
-#     -f docker-compose.standalone-bind.yml up -d
+#     -f docker-compose.yml \
+#     -f docker-compose.bind.yml up -d
 #
 # 只改变命名卷的落盘位置，服务定义完全不动，因此不存在多个文件里
 # volumes 列表谁覆盖谁的问题。

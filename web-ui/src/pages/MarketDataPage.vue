@@ -4,7 +4,6 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { FormulaScreenApiError } from '../api/formulaScreen'
 import {
   cancelMarketDataJob,
-  createFullMarketSync,
   createOnlineBackfill,
   createOnlineSync,
   fetchActiveMarketDataJobs,
@@ -26,7 +25,6 @@ import type {
   MarketDataProvider,
   MarketChartPeriod,
   MarketSyncJobState,
-  MarketSyncRangePreset,
 } from '../types'
 import MarketCandlestickChart from '../components/MarketCandlestickChart.vue'
 
@@ -54,23 +52,12 @@ const BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
   { key: 'bond', label: '债券' },
 ]
 
-const FULL_SYNC_RANGE_OPTIONS: { key: MarketSyncRangePreset; label: string }[] = [
-  { key: 'all', label: '全部' },
-  { key: '5y', label: '最近5年' },
-  { key: '3y', label: '最近3年' },
-  { key: '1y', label: '最近1年' },
-  { key: 'ytd', label: '今年以来' },
-  { key: 'custom', label: '自定义' },
-]
 
 const form = reactive({
   syncUniverse: 'all' as 'all' | 'sh' | 'sz',
   syncProvider: 'eastmoney' as MarketDataProvider,
   syncInstrumentTypes: [] as InstrumentType[],
   syncBoards: [] as InstrumentBoard[],
-  fullSyncRangePreset: 'all' as MarketSyncRangePreset,
-  fullSyncStartDate: '',
-  fullSyncEndDate: '',
   market: 'all' as LocalMarketScope,
   keyword: '',
   page: 1,
@@ -101,42 +88,18 @@ const ACTIVE_JOB_POLL_INTERVAL_MS = 1000
 let storeStatusPollTimer: number | null = null
 let activeJobPollTimer: number | null = null
 
-const sharedMarketData = computed(() => (
-  storeStatus.value?.market_data_source === 'etfquest'
-  || storeStatus.value?.market_data_read_only === true
-  || providerCapabilities.value?.default_provider === 'etfquest'
-))
-
-const sharedMarketDataWritable = computed(() => (
-  sharedMarketData.value
-  && storeStatus.value?.market_data_read_only === false
-  && storeStatus.value?.full_market_sync_supported === true
-))
-
-const legacyMarketWriteEnabled = computed(() => (
-  !sharedMarketData.value
-  && storeStatus.value?.legacy_market_write_enabled !== false
-))
-
-const readOnlyMarketData = computed(() => (
-  sharedMarketData.value ? !sharedMarketDataWritable.value : !legacyMarketWriteEnabled.value
-))
-
 const selectedTitle = computed(() => (
   selected.value ? `${selected.value.market} ${selected.value.code}` : '请选择品种'
 ))
 
 const autoSyncActive = computed(() => Boolean(
-  !sharedMarketData.value
-  && storeStatus.value?.auto_sync_enabled
+  storeStatus.value?.auto_sync_enabled
   && storeStatus.value.auto_sync_job_id
   && marketJob.value?.job_id === storeStatus.value.auto_sync_job_id
   && syncLoading.value,
 ))
 
 const autoSyncStatusText = computed(() => {
-  if (sharedMarketDataWritable.value) return 'ETFQuest 共享行情（可同步）'
-  if (sharedMarketData.value) return 'ETFQuest 共享行情（只读）'
   if (storeStatus.value?.auto_sync_enabled === false) return '自动同步已关闭'
   if (autoSyncActive.value) return syncLabel.value || '正在自动同步最新行情…'
   if (storeStatus.value?.auto_sync_enabled) return '自动同步已开启'
@@ -144,8 +107,6 @@ const autoSyncStatusText = computed(() => {
 })
 
 const autoSyncScheduleText = computed(() => {
-  if (sharedMarketDataWritable.value) return '可在本页面显式同步；不要与其它行情同步任务同时运行'
-  if (sharedMarketData.value) return '由 ETFQuest 统一同步，当前页面不执行行情写入'
   const seconds = storeStatus.value?.auto_sync_interval_seconds
   if (typeof seconds !== 'number' || !Number.isFinite(seconds)) {
     return '启动后检查；每天至少同步一次'
@@ -517,39 +478,6 @@ async function syncOnlineData(): Promise<void> {
   }
 }
 
-async function syncFullMarketData(): Promise<void> {
-  if (form.fullSyncRangePreset === 'custom') {
-    if (!form.fullSyncStartDate || !form.fullSyncEndDate) {
-      message.value = '自定义同步区间必须同时设置开始日期和结束日期'
-      return
-    }
-    if (form.fullSyncStartDate > form.fullSyncEndDate) {
-      message.value = '同步开始日期不能晚于结束日期'
-      return
-    }
-  }
-  syncLoading.value = true
-  syncLabel.value = '正在同步全市场日线…'
-  message.value = ''
-  try {
-    const job = await createFullMarketSync({
-      range_preset: form.fullSyncRangePreset,
-      ...(form.fullSyncRangePreset === 'custom'
-        ? { start_date: form.fullSyncStartDate, end_date: form.fullSyncEndDate }
-        : {}),
-    })
-    beginJob(job.job_id, job.status)
-    await waitForJob(job.job_id)
-    await loadStoreStatus()
-    await loadInstruments()
-  } catch (error) {
-    message.value = apiMessage(error)
-  } finally {
-    syncLoading.value = false
-    syncLabel.value = ''
-  }
-}
-
 async function backfillOnlineData(): Promise<void> {
   syncLoading.value = true
   syncLabel.value = '正在进行 East Money 全量回填…'
@@ -709,13 +637,13 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
         <a class="nav-link" href="/strategy-fitness">策略适配性</a>
         <a class="nav-link active" href="/market-data" aria-current="page">本地行情</a>
       </nav>
-      <div class="topbar-status"><span class="status-dot" aria-hidden="true"></span>{{ sharedMarketDataWritable ? ' 共享行情（可同步）' : readOnlyMarketData ? ' 共享行情（只读）' : ' 本地数据模式' }}</div>
+      <div class="topbar-status"><span class="status-dot" aria-hidden="true"></span> 本地数据模式</div>
     </header>
 
     <main class="content-shell">
       <section class="page-intro">
-        <div><p class="eyebrow">LOCAL MARKET DATA / DUCKDB</p><h1>本地行情</h1><p class="intro-copy">{{ sharedMarketDataWritable ? '行情读取和全市场同步均使用 ETFQuest 共享数据库。' : readOnlyMarketData ? '行情由 ETFQuest 统一同步，本页面只读查询共享数据库。' : '当前为开发兼容模式，可在本页面执行本地行情写入。' }}</p></div>
-        <div class="intro-note"><span class="note-label">数据边界</span><strong>{{ sharedMarketData ? 'ETFQuest 共享数据库' : '本地 DuckDB' }}</strong><small>{{ sharedMarketDataWritable ? '同步结果直接写入 ETFQuest，图表、筛选和回测读取同一份数据' : readOnlyMarketData ? '共享行情只读；图表、筛选和回测统一查询数据库' : '仅开发兼容模式允许本地写入' }}</small></div>
+        <div><p class="eyebrow">LOCAL MARKET DATA / DUCKDB</p><h1>本地行情</h1><p class="intro-copy">行情由本机 DuckDB 保存，可在本页面直接同步在线数据源。</p></div>
+        <div class="intro-note"><span class="note-label">数据边界</span><strong>本地 DuckDB</strong><small>同步结果直接写入本机数据库，图表、筛选和回测读取同一份数据</small></div>
       </section>
 
       <div v-if="message" class="notice error" role="alert" data-testid="market-data-message">{{ message }}</div>
@@ -732,41 +660,7 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
           <span>最近在线更新 {{ storeStatus?.last_online_sync_at ?? '—' }} · {{ storeStatus?.last_online_provider ?? '—' }}</span>
           <span v-if="lastFullSyncText" data-testid="last-full-market-sync">{{ lastFullSyncText }}</span>
         </div>
-        <div v-if="readOnlyMarketData" class="auto-sync-status shared" data-testid="shared-market-status">
-          <span class="auto-sync-dot" aria-hidden="true"></span>
-          <div><strong>共享行情（只读）</strong><small>请在行情管理端执行同步和导入</small></div>
-        </div>
-        <div v-else-if="storeStatus?.auto_sync_enabled !== undefined" class="auto-sync-status" :class="{ active: autoSyncActive }" data-testid="auto-sync-status">
-          <span class="auto-sync-dot" aria-hidden="true"></span>
-          <div><strong>{{ autoSyncStatusText }}</strong><small>{{ autoSyncScheduleText }}</small></div>
-        </div>
-        <div v-if="readOnlyMarketData" class="shared-market-source" data-testid="read-only-market-source">
-          <strong>当前为只读行情模式</strong>
-          <span v-if="sharedMarketData" data-testid="shared-market-source">ETFQuest 共享行情（只读）</span>
-          <span>{{ sharedMarketData ? '行情同步、目录更新和数据写入由 ETFQuest 负责，本页面只读取共享结果。' : '当前数据源禁止本地行情写入，请在行情管理端完成同步或导入。' }}</span>
-        </div>
-        <div v-else-if="sharedMarketDataWritable" class="market-sync-form shared-market-sync-form" data-testid="shared-market-sync-form">
-          <div class="full-market-sync-controls">
-            <div>
-              <label for="market-sync-range">快速区间</label>
-              <select id="market-sync-range" v-model="form.fullSyncRangePreset" data-testid="market-sync-range">
-                <option v-for="option in FULL_SYNC_RANGE_OPTIONS" :key="option.key" :value="option.key">{{ option.label }}</option>
-              </select>
-            </div>
-            <div v-if="form.fullSyncRangePreset === 'custom'">
-              <label for="market-sync-start">开始日期</label>
-              <input id="market-sync-start" v-model="form.fullSyncStartDate" data-testid="market-sync-start" type="date">
-            </div>
-            <div v-if="form.fullSyncRangePreset === 'custom'">
-              <label for="market-sync-end">结束日期</label>
-              <input id="market-sync-end" v-model="form.fullSyncEndDate" data-testid="market-sync-end" type="date">
-            </div>
-            <button class="primary-button" data-testid="market-sync-all" type="button" :disabled="syncLoading" :aria-busy="syncLoading" @click="syncFullMarketData">{{ syncLoading ? '同步中…' : '同步全市场日线' }}</button>
-          </div>
-          <small class="scope-helper">本次会先检查 ETFQuest 本地覆盖范围，只补缺失区间；发现中间缺口时会覆盖整个所选区间。</small>
-          <small class="scope-warning" data-testid="market-sync-conflict-warning">请不要同时在 ETFQuest 和本项目下载行情，否则可能发生写入冲突。</small>
-        </div>
-        <div v-else class="market-sync-form">
+        <div class="market-sync-form">
           <div class="scope-config" data-testid="market-sync-scope">
             <div><label for="market-sync-universe">同步市场</label><select id="market-sync-universe" v-model="form.syncUniverse" data-testid="market-sync-universe"><option value="all">沪深全部</option><option value="sh">仅上海</option><option value="sz">仅深圳</option></select></div>
             <div class="scope-options"><span>证券类型</span><label v-for="option in INSTRUMENT_TYPE_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-sync-type-${option.key}`" :checked="form.syncInstrumentTypes.includes(option.key)" @change="toggleInstrumentType(option.key)">{{ option.label }}</label></div>
@@ -813,7 +707,7 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
             <button class="secondary-button" data-testid="market-refresh" type="submit" :disabled="loading">{{ loading ? '读取中…' : '刷新本地列表' }}</button>
           </form>
 
-          <div v-if="!instruments.length" class="inline-empty" data-testid="market-instruments-empty">{{ loading ? '正在读取 DuckDB 行情…' : '数据库中暂无行情，请先导入本地数据。' }}</div>
+          <div v-if="!instruments.length" class="inline-empty" data-testid="market-instruments-empty">{{ loading ? '正在读取 DuckDB 行情…' : '数据库中暂无行情，请先在上方同步在线数据。' }}</div>
           <div v-else class="local-instrument-list">
             <button v-for="instrument in instruments" :key="`${instrument.market}-${instrument.code}`" class="local-instrument" :class="{ selected: selected?.market === instrument.market && selected?.code === instrument.code }" :data-testid="`instrument-${instrument.market}-${instrument.code}`" type="button" @click="selectInstrument(instrument)">
               <span class="instrument-topline"><span class="instrument-identity"><strong>{{ instrument.code }}</strong><span class="instrument-name">{{ instrument.name || '—' }}</span></span><span class="market-pill" :class="instrument.market.toLowerCase()">{{ instrument.market }}</span></span>

@@ -9,7 +9,7 @@
   一个面向指标研究与策略验证的跨平台本地工作台
 </p>
 
-一个独立的跨平台指标筛选、组合与回测应用，使用 Vue/TypeScript + FastAPI，通过共享适配器读取 ETFQuest 行情数据库，并可从本项目发起受保护的全市场行情同步，再计算和验证交易指标信号。
+一个独立的跨平台指标筛选、组合与回测应用，使用 Vue/TypeScript + FastAPI。行情保存在本机 DuckDB，可在本项目内自行同步，在此基础上计算和验证交易指标信号。
 
 在线股票行情默认使用项目自有客户端；项目仍内置满足 TDX 兼容同步所需的最小 TCP 客户端和 `.day` 读取器。数据接口来源及第三方许可说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
@@ -49,12 +49,12 @@
 - 策略实验室：用户只设置品种范围和持仓数量，默认使用本地最新已完成日线往前 5 年寻优排序指标/方向、调仓频率、买卖条件和风险控制，也可选择全历史或自定义区间，并按验证期 Sharpe 与年化收益生成排行榜；候选可回填普通组合回测复核；
 - 买卖条件研究：用户设置基础买入、卖出规则，系统对沪深全部本地股票逐只独立回测，从盈利交易与亏损交易的特征差异中挖掘阈值条件，再按 60%/20%/20% 时间切分回测验证；不构建组合、不设持仓数量上限；
 - 策略适配性评估：批量对股票池进行时间顺序的训练/验证/测试回测，按成交样本、期望收益、盈亏比、收益、回撤和稳定性生成透明适配分；
-- 通过 ETFQuest 共享数据库读取最新日线，也可在本项目发起股票、ETF、LOF 和指数的全市场日线同步；
-- 本地行情浏览：查看共享数据库中的品种，点击生成日线、月线、年线 K 线，支持 MA5/10/20/60、RSI14 和 MACD；
+- 行情保存在本机 DuckDB，可在本项目发起股票、ETF、LOF 和指数的在线日线同步；
+- 本地行情浏览：查看本机数据库中的品种，点击生成日线、月线、年线 K 线，支持 MA5/10/20/60、RSI14 和 MACD；
 - 公式层安全除零、数据不足跳过、无未来数据；
 - Python 单元/集成测试、Vue 单元测试和 Playwright E2E 流程。
 
-应用启动时不会扫描或导入本地通达信文件。启动后会读取 ETFQuest 共享行情数据库；全市场同步可以从本项目页面显式发起，结果仍写入 ETFQuest 的既有行情表。共享数据库不可用时，不会静默回退到容器内旧行情库。预置模式会默认选中“准备拉升”和“建仓区”；市场范围、条件组合、并发和周期收在“高级设置”中。页面会在浏览器本地记住上次配置，不会上传这些配置。
+应用启动时不会扫描或导入本地通达信文件。行情由本项目自己从在线数据源同步并写入本机 DuckDB，不需要任何外部行情软件。预置模式会默认选中“准备拉升”和“建仓区”；市场范围、条件组合、并发和周期收在“高级设置”中。页面会在浏览器本地记住上次配置，不会上传这些配置。
 
 ## 启动
 
@@ -89,19 +89,23 @@ npm run dev
 如果不想在宿主机安装 Python 或 Node.js，可以直接使用 Docker：
 
 ```bash
-cd indicator-lab
-./scripts/start_indicator_lab.sh
+export INDICATOR_LAB_IMAGE=<你的镜像标签>
+docker compose up -d
 ```
 
-Windows PowerShell 使用 `./scripts/start_indicator_lab.ps1`（PowerShell 中也可写作 `.\scripts\start_indicator_lab.ps1`）。脚本会校验 ETFQuest 数据库和本机授权密钥，并在 ETFQuest 应用数据目录下创建独立的 `indicator-lab/market.duckdb`。该目录以宿主机 bind mount 提供给 Docker，backend 负责持久化写入；独立 strategy-worker 只读访问该目录，并通过本机生成的只读 bearer secret 调用 backend 内网任务 API。ETFQuest 行情库仍是行情事实源，Indicator Lab 不会向其中添加业务表。
-
-只构建 backend 和 strategy-worker 镜像、不启动或重启容器：
+容器自带行情同步能力，不依赖任何外部行情软件。数据默认放在 Docker 命名卷 `indicator-lab_indicator-lab-data`，容器重建不会丢；想放到自己管理的宿主目录就叠加绑定挂载覆盖文件（注意该目录必须允许容器内的 `appuser`(uid 10001) 写入）：
 
 ```bash
-sh scripts/start_indicator_lab.sh --build-only
+DATA_DIR=/srv/indicator-lab docker compose -f docker-compose.yml -f docker-compose.bind.yml up -d
 ```
 
-要构建镜像并启动/更新服务，运行 `sh scripts/start_indicator_lab.sh`；Windows PowerShell 对应命令为 `./scripts/start_indicator_lab.ps1 -BuildOnly` 和 `./scripts/start_indicator_lab.ps1`。Indicator Lab 数据保存在宿主机的 `indicator-lab/market.duckdb`，镜像重建不需要复制或迁移数据。
+只构建镜像、不启动或重启容器：
+
+```bash
+docker compose build
+```
+
+完整的存储布局、备份恢复与升级说明见 [独立分发部署](docs/standalone-deployment.md)。
 
 本机 DuckDB 保存 Indicator Lab 的行情缓存、回测/策略历史、策略任务状态和维护元数据。为兼容遗留文件，backend 仍会幂等导入本地数据目录中残留的旧任务 JSON 和维护记录；日常更新不需要手动执行数据迁移。DuckDB schema 升级仍会先创建备份，原有历史和行情表都会保留。
 
@@ -112,7 +116,8 @@ sh scripts/start_indicator_lab.sh --build-only
 完整的 Windows、macOS 和 Docker 打包教程见 [打包与发布指南](docs/packaging.md)。
 
 ```bash
-./scripts/start_indicator_lab.sh --protected
+export INDICATOR_LAB_IMAGE=<你的镜像标签>
+docker compose -f docker-compose.yml -f docker-compose.protected.yml up -d --build
 ```
 
 也可以在宿主机生成 standalone bundle：
@@ -124,15 +129,15 @@ python3 scripts/build_nuitka.py --jobs 4
 
 保护版默认使用文件夹模式，避免大型 NumPy/Pandas 依赖每次启动都解包；`NUITKA_JOBS`、`NUITKA_LTO` 和 `NUITKA_REPRODUCIBLE` 可在构建时覆盖。发布前运行 `sh scripts/verify_ci.sh protected`，它会检查 Compose 配置、编译产物和最终镜像。Nuitka 只能提高本地逆向门槛，不能对完全控制运行机器的用户提供绝对源码保密；需要强保护时应将核心策略计算放在你的远程服务。
 
-共享行情模式的启动方式、数据库路径、全市场同步和冲突锁说明见 [ETFQuest 共享行情说明](docs/etfquest-shared-data.md)。通达信文件导入不再在本项目中执行。
+部署方式、数据目录、备份与恢复见 [独立分发部署](docs/standalone-deployment.md)。通达信文件导入不在本项目中执行。
 
-宿主机数据库位于 `ETFQUEST_APP_DATA_DIR/indicator-lab/market.duckdb`，停止或删除容器不会删除它；Compose 不使用 Docker 命名卷保存 Indicator Lab 数据。重建镜像或容器会继续使用同一份本机数据库，不需要再迁移数据。`WEB_PORT` 和 `API_PORT` 仍可通过 `.env` 修改。
+数据库位于数据卷或 `DATA_DIR` 下的 `market.duckdb`，停止或删除容器不会删除它，重建镜像或容器会继续使用同一份数据。`WEB_PORT` 和 `API_PORT` 可通过 `.env` 修改。⚠️ `docker compose down -v`、`docker volume prune` 和 Docker Desktop 的 Reset 会**删除命名卷**，执行前请先导出备份（见部署文档）。
 
 本机 DuckDB 会自动维护：同一数据库的 `.bak-*.duckdb` 备份最多保留最近一份；唯一备份超过 3 天后自动删除。应用启动时和空闲期间会检查数据库物理文件大小；达到 50% 增长阈值后，系统会用临时库和 `COPY FROM DATABASE` 重写、校验后再原子替换。维护记录保存在 DuckDB 的 `data_meta` 表中；维护失败会保留原主库不变。
 
 ## 行情配置
 
-发布模式从 ETFQuest 共享数据库读取股票、ETF、LOF 和指数日线；本项目不提供通达信文件导入，但提供受统一文件锁保护的全市场在线行情同步入口。同步会先检查本地覆盖范围，自动跳过完整区间并补齐缺失区间；Indicator Lab 与 ETFQuest 不应同时下载行情。
+行情从在线数据源（East Money，免费无需密钥；另有 TDX 通路）同步股票、ETF、LOF 和指数日线并写入本机数据库。同步会先检查本地覆盖范围，自动跳过完整区间并补齐缺失区间。本项目不提供通达信文件导入。
 
 本项目的行情页只负责按市场和代码查询 K 线，并生成日线、月线和年线图表。自定义列表仍可用于筛选和回测，但其中的行情数据来自已配置的行情数据库。
 

@@ -237,7 +237,7 @@ export interface MarketSyncJobState {
 }
 
 export interface MarketDataProviderCapability {
-  provider: MarketDataProvider | 'etfquest'
+  provider: MarketDataProvider
   available: boolean
   read_only?: boolean
   version?: string | null
@@ -251,7 +251,7 @@ export interface MarketDataProviderCapability {
 }
 
 export interface MarketDataCapabilities {
-  default_provider: MarketDataProvider | 'etfquest'
+  default_provider: MarketDataProvider
   read_only?: boolean
   supports_full_sync?: boolean
   database_path?: string
@@ -264,7 +264,7 @@ export interface MarketDataCapabilities {
   last_online_provider?: string | null
   last_online_provider_version?: string | null
   instrument_list_fingerprint?: string | null
-  providers: Partial<Record<MarketDataProvider | 'etfquest', MarketDataProviderCapability>>
+  providers: Partial<Record<MarketDataProvider, MarketDataProviderCapability>>
 }
 
 export interface DataStoreStatus {
@@ -280,9 +280,9 @@ export interface DataStoreStatus {
   auto_sync_job_id?: string | null
   auto_sync_enabled?: boolean
   auto_sync_interval_seconds?: number | null
-  market_data_source?: 'indicator_lab' | 'etfquest' | string
+  market_data_source?: 'indicator_lab' | string
   market_data_read_only?: boolean
-  market_data_write_target?: 'indicator_lab' | 'etfquest' | string
+  market_data_write_target?: 'indicator_lab' | string
   full_market_sync_supported?: boolean
   market_sync_lock?: Record<string, unknown> | null
   last_market_sync_summary?: Record<string, unknown> | null
