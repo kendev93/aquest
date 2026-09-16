@@ -10,6 +10,7 @@ from typing import Protocol, cast
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
+from selector_app.market_data.models import DataStoreStatus
 from selector_app.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
 from selector_app.portfolio_backtest.models import (
     PortfolioBacktestConfig,
@@ -23,6 +24,7 @@ from selector_app.screening.jobs import JobState, ScreenJobRunner, TaskUserError
 
 from ..backtest_history import save_completed_backtest_history, utc_now
 from ..date_ranges import resolve_date_range
+from ..market_source import resolve_market_status
 from ..schemas import PortfolioBacktestRequest
 
 router = APIRouter(prefix="/portfolio-backtests", tags=["portfolio-backtests"])
@@ -53,11 +55,10 @@ def _store(request: Request) -> DuckDbMarketDataStore:
 
 def _resolve_payload_dates(
     payload: PortfolioBacktestRequest,
-    store: DuckDbMarketDataStore,
+    status_snapshot: DataStoreStatus,
 ) -> PortfolioBacktestRequest:
     if payload.start_date is not None or payload.end_date is not None:
         return payload.model_copy(update={"date_mode": "custom"})
-    status_snapshot = store.status()
     start_date, end_date = resolve_date_range(
         mode=payload.date_mode,
         requested_start=payload.start_date,
@@ -84,7 +85,7 @@ def create_portfolio_backtest(
         if payload.universe == "custom" and payload.universe_file:
             if not Path(payload.universe_file).expanduser().is_file():
                 raise ValueError(f"自定义股票列表文件不存在: {payload.universe_file}")
-        resolved_payload = _resolve_payload_dates(payload, _store(request))
+        resolved_payload = _resolve_payload_dates(payload, resolve_market_status(request))
         config = resolved_payload.to_config()
         request_snapshot = cast(dict[str, object], resolved_payload.model_dump(mode="json"))
         job_id = uuid.uuid4().hex

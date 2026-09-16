@@ -177,3 +177,31 @@ def test_formulas_do_not_use_future_rows() -> None:
         after = calculator(changed)
         for name in before.values:
             assert np.allclose(before.values[name][:-1], after.values[name][:-1], equal_nan=True)
+
+
+def test_only_zero_centred_outputs_are_marked_bidirectional() -> None:
+    """页面用 ``> 0`` / ``< 0`` 做默认买卖条件，只有零轴输出两侧才都成立。
+
+    ``indicator_one.wash`` 实测 22,886 根 bar 中从不为负，因此旧的默认卖出
+    条件 ``wash < 0`` 恒不成立；这条测试锁住“哪些输出可以安全地这样用”。
+    """
+
+    from selector_app.formulas.registry import BIDIRECTIONAL_VALUE_IDS, FORMULA_REGISTRY
+
+    metadata = FORMULA_REGISTRY.metadata()
+    flagged = {
+        value["id"]
+        for indicator in metadata
+        for value in indicator["values"]
+        if value["bidirectional"]
+    }
+
+    assert flagged == set(BIDIRECTIONAL_VALUE_IDS)
+    assert flagged == {
+        "technical.macd",
+        "technical.macd_signal",
+        "technical.macd_histogram",
+    }
+    # 一侧恒为 0 的输出绝不能进入默认条件。
+    assert "indicator_one.wash" not in flagged
+    assert "indicator_one.distribution" not in flagged

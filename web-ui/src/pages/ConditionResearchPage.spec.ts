@@ -77,6 +77,22 @@ const result = {
   feature_count: 12,
   min_trades: 20,
   min_instruments: 5,
+  sample_totals: {
+    buy: { count: 40, unit: 'entry' },
+    sell: { count: 200, unit: 'decision_point' },
+  },
+  disclosure: {
+    universe_scope: 'current_listed_only',
+    universe: 'all',
+    survivorship_bias: true,
+    requested_instruments: 100,
+    processed_instruments: 98,
+    coverage_ratio: 0.98,
+    notes: [
+      '标的范围取自当前行情库中的在市标的，无法还原历史时点成分或退市标的，结果存在幸存者偏差，不应视为完整历史全市场。',
+      '本次仅 98/100 只标的进入统计，未覆盖标的未参与任何汇总。',
+    ],
+  },
   total_candidates: 100,
   processed: 100,
   skipped: 0,
@@ -148,10 +164,17 @@ describe('ConditionResearchPage', () => {
       }),
       sell_rule: expect.objectContaining({
         signals: [],
-        conditions: [expect.objectContaining({ left_value: 'indicator.score', operator: 'lt' })],
+        conditions: [expect.objectContaining({ left_value: 'indicator.score', operator: 'lte' })],
       }),
     }))
+    // 该 fixture 没有零轴输出，页面必须提示默认条件只是互补占位。
+    expect(wrapper.find('[data-testid="condition-sell-default-hint"]').exists()).toBe(true)
     expect(wrapper.get('[data-testid="condition-research-results"]').text()).toContain('70.00%')
+    // 结果页必须披露数据覆盖与幸存者偏差限制。
+    const notice = wrapper.get('[data-testid="condition-survivorship-notice"]').text()
+    expect(notice).toContain('幸存者偏差')
+    expect(notice).toContain('98')
+    expect(notice).toContain('100')
     expect(wrapper.get('[data-testid="condition-research-candidate-buy-1"]').text()).toContain('强度')
     expect(wrapper.get('[data-testid="condition-research-candidate-buy-1"]').text()).toContain('100.000%')
     expect(wrapper.get('[data-testid="condition-research-candidate-buy-1"]').text()).toContain('40 / 20')
@@ -167,6 +190,75 @@ describe('ConditionResearchPage', () => {
     expect(wrapper.get('[data-testid="condition-research-results"]').text()).toContain('筛选出 1 / 1')
     await wrapper.get('[data-testid="show-condition-stock-buy-1"]').trigger('click')
     expect((wrapper.get('[data-testid="condition-stock-view"]').element as HTMLSelectElement).value).toBe('buy-1:full')
+  })
+
+  it('defaults to a zero-centred operand so the sell condition can actually fire', async () => {
+    vi.mocked(formulaApi.fetchMetadata).mockResolvedValueOnce({
+      ...metadata,
+      indicators: [
+        ...metadata.indicators,
+        {
+          id: 'technical',
+          display_name: '技术指标',
+          minimum_bars: 1,
+          recommended_bars: 20,
+          signals: [],
+          values: [
+            {
+              id: 'technical.macd_histogram',
+              display_name: 'MACD 柱',
+              description: 'MACD 柱数值输出',
+              bidirectional: true,
+            },
+          ],
+        },
+      ],
+    })
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(researchApi.createConditionResearch).toHaveBeenCalledWith(expect.objectContaining({
+      buy_rule: expect.objectContaining({
+        conditions: [expect.objectContaining({ left_value: 'technical.macd_histogram', operator: 'gt' })],
+      }),
+      sell_rule: expect.objectContaining({
+        conditions: [expect.objectContaining({ left_value: 'technical.macd_histogram', operator: 'lt' })],
+      }),
+    }))
+    expect(wrapper.find('[data-testid="condition-sell-default-hint"]').exists()).toBe(false)
+  })
+
+  it('scores a sell candidate against early-exit decision points, not closed trades', async () => {
+    // 卖出候选的 50 个命中来自持仓期决策点（分母 200），若错用成交笔数 40
+    // 会显示成 125.000%，即超过 100% 的“命中率”。
+    vi.mocked(researchApi.getConditionResearchResults).mockResolvedValueOnce({
+      ...result,
+      candidates: [{
+        candidate_id: 'sell-1',
+        side: 'sell',
+        condition: { left_value: 'indicator.score', operator: 'lte', right_value: null, right_constant: 2.5 },
+        mining: {
+          support_count: 50, support_ratio: 0.25, instrument_count: 10,
+          outcome_rate: 0.8, baseline_rate: 0.6, lift: 1.33,
+        },
+        validation: summary,
+        passed_constraints: true,
+        constraint_failures: [],
+        full_period: summary,
+        holdout: summary,
+      }],
+    } as unknown as ConditionResearchReport)
+
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+
+    const sellRow = wrapper.get('[data-testid="condition-research-candidate-sell-1"]')
+    expect(sellRow.text()).toContain('25.000%')
+    expect(sellRow.text()).not.toContain('125.000%')
   })
 
   it('resumes an active research job after a page refresh', async () => {

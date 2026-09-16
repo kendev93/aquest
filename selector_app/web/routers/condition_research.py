@@ -20,6 +20,7 @@ from selector_app.screening.jobs import JobState, ProgressReporter, ScreenJobRun
 
 from ..backtest_history import save_completed_backtest_history, utc_now
 from ..date_ranges import resolve_date_range
+from ..market_source import resolve_market_status
 from ..schemas import ConditionResearchRequest
 
 
@@ -95,7 +96,7 @@ def create_condition_research(
     request: Request,
 ) -> JSONResponse:
     try:
-        store_status = _store(request).status()
+        store_status = resolve_market_status(request)
         start_date, end_date = resolve_date_range(
             mode=payload.date_mode,
             requested_start=payload.start_date,

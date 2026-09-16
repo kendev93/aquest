@@ -167,22 +167,57 @@ watch([selectedStockView, stockFilter, stockSort], () => {
   stockPage.value = 1
 })
 
-function initialRule(operator: 'gt' | 'lt'): RuleGroupPayload {
-  const firstValue = availableValues.value[0]?.id ?? ''
-  return {
-    signals: [],
-    conditions: firstValue
-      ? [{ left_value: firstValue, operator, right_value: null, right_constant: 0 }]
-      : [],
-    required_conditions: [],
-    combine_mode: 'all',
-    minimum_matches: null,
+// A bare `> 0` / `< 0` pair is only meaningful for an output that crosses zero.
+// Most catalog outputs are one-sided (indicator_one.wash is 0 or positive), and
+// the previous default of `availableValues[0] < 0` could never fire at all.
+const BIDIRECTIONAL_PREFERENCE = [
+  'technical.macd_histogram',
+  'technical.macd',
+  'technical.macd_signal',
+]
+
+function defaultSellOperand(): ValueDefinition | undefined {
+  const values = availableValues.value
+  for (const id of BIDIRECTIONAL_PREFERENCE) {
+    const preferred = values.find((value) => value.id === id)
+    if (preferred) return preferred
   }
+  return values.find((value) => value.bidirectional === true)
+}
+
+const noBidirectionalValue = computed(() => availableValues.value.length > 0 && !defaultSellOperand())
+
+// 自定义公式里保持价格量纲的输出会被后端排除在挖掘特征之外，这里同步说明。
+const priceScaleOutputs = computed(() => (
+  mode.value === 'custom'
+    ? (customMetadata.value?.values ?? []).filter((value) => value.price_scale === true)
+    : []
+))
+
+function condition(
+  leftValue: string,
+  operator: 'gt' | 'lt' | 'gte' | 'lte',
+): RuleGroupPayload['conditions'][number] {
+  return { left_value: leftValue, operator, right_value: null, right_constant: 0 }
+}
+
+function initialRule(side: 'buy' | 'sell'): RuleGroupPayload {
+  const bidirectional = defaultSellOperand()
+  const fallback = availableValues.value[0]?.id ?? ''
+  const operand = bidirectional?.id ?? fallback
+  if (!operand) return emptyRule()
+  if (bidirectional) {
+    // Zero-centred operand: buy above zero, sell below zero, both reachable.
+    return { ...emptyRule(), conditions: [condition(operand, side === 'buy' ? 'gt' : 'lt')] }
+  }
+  // One-sided operand: a strict mirror is unsatisfiable, so sell uses the
+  // complementary operator to keep both sides able to produce trades.
+  return { ...emptyRule(), conditions: [condition(operand, side === 'buy' ? 'gt' : 'lte')] }
 }
 
 function resetRules(): void {
-  form.buyRule = initialRule('gt')
-  form.sellRule = initialRule('lt')
+  form.buyRule = initialRule('buy')
+  form.sellRule = initialRule('sell')
 }
 
 function toggleBoard(board: InstrumentBoard): void {
@@ -433,10 +468,27 @@ function conditionText(candidate: ConditionResearchCandidate): string {
   return leftLabel + ' ' + operator + ' ' + rightLabel
 }
 
-function entryHitRate(candidate: ConditionResearchCandidate): string {
-  const baselineTrades = report.value?.baseline.train.pooled_trades.closed_trades
-  if (!baselineTrades) return '—'
-  return ((candidate.mining.support_count / baselineTrades) * 100).toFixed(3) + '%'
+// 买卖两侧的样本口径不同：买样本 = 每次入场 1 条，卖样本 = 持仓期内每个
+// 提前离场决策点 1 条（同一笔交易可贡献多条）。因此卖出候选不能拿成交笔数
+// 当分母，否则命中率会被高估甚至超过 100%。
+function hitRateDenominator(candidate: ConditionResearchCandidate): number {
+  const side = candidate.side === 'sell' ? 'sell' : 'buy'
+  const sampleCount = report.value?.sample_totals?.[side]?.count
+  if (typeof sampleCount === 'number' && sampleCount > 0) return sampleCount
+  // 兼容没有 sample_totals 的历史结果。
+  return report.value?.baseline.train.pooled_trades.closed_trades ?? 0
+}
+
+function conditionHitRate(candidate: ConditionResearchCandidate): string {
+  const denominator = hitRateDenominator(candidate)
+  if (!denominator) return '—'
+  return ((candidate.mining.support_count / denominator) * 100).toFixed(3) + '%'
+}
+
+function hitRateTitle(candidate: ConditionResearchCandidate): string {
+  return candidate.side === 'sell'
+    ? '该条件在持仓期提前离场决策点上的命中比例（全市场合并）'
+    : '该条件在基础规则入场日上的命中比例（全市场合并）'
 }
 
 function validationTrades(candidate: ConditionResearchCandidate): string {
@@ -528,6 +580,11 @@ onMounted(async () => {
             <textarea v-model="form.formulaText" data-testid="condition-formula" rows="6" spellcheck="false" placeholder="例如：买入:CROSS(C,MA(C,20)); 卖出:CROSS(MA(C,20),C); 强度:C/MA(C,20);"></textarea>
             <button class="secondary-button" data-testid="condition-parse-formula" type="button" :disabled="customParseLoading" @click="parseCustomFormula">{{ customParseLoading ? '解析中…' : '解析公式' }}</button>
             <p class="helper">自动搜索会使用公式里的数值输出作为候选特征。</p>
+            <p v-if="priceScaleOutputs.length" class="field-error" data-testid="condition-price-scale-warning">
+              以下输出仍是原始价格/成交量量纲，挖掘出的绝对阈值无法跨股票比较，已排除：
+              {{ priceScaleOutputs.map((value) => value.display_name).join('、') }}。
+              请改用比值类输出，例如 <code>C/MA(C,20)</code>。
+            </p>
             <p v-if="customParseError" class="field-error">{{ customParseError }}</p>
             <div v-if="customMetadata?.parameters.length" class="parameter-grid">
               <div v-for="parameter in customMetadata.parameters" :key="parameter.name">
@@ -584,6 +641,10 @@ onMounted(async () => {
             @update:model-value="setSellRule"
           />
           <p v-if="errors.sellRule" class="field-error">{{ errors.sellRule }}</p>
+          <p v-if="noBidirectionalValue" class="helper" data-testid="condition-sell-default-hint">
+            当前可用输出里没有零轴震荡指标（如 MACD 柱），阈值 0 的两侧并不都成立；
+            卖出默认条件已改为买入条件的互补写法以避免恒不成立，请按研究目标自行调整。
+          </p>
 
           <fieldset class="form-section">
             <legend>搜索目标与验证</legend>
@@ -665,6 +726,20 @@ onMounted(async () => {
             <p>{{ loading ? '候选条件会先在训练样本中发现，再经过验证期和最终留出期复验。' : '设置基础买卖规则后，系统会逐只股票回测并寻找盈利、亏损交易的共同特征。' }}</p>
           </div>
           <template v-else>
+            <div
+              v-if="report.disclosure"
+              class="condition-disclosure"
+              data-testid="condition-survivorship-notice"
+            >
+              <strong>数据覆盖与偏差提示</strong>
+              <p v-for="note in report.disclosure.notes" :key="note">{{ note }}</p>
+              <span class="condition-disclosure-meta">
+                标的范围 {{ report.disclosure.universe }} ·
+                已覆盖 {{ report.disclosure.processed_instruments }} /
+                {{ report.disclosure.requested_instruments }} 只
+                （{{ formatPercent(report.disclosure.coverage_ratio) }}）
+              </span>
+            </div>
             <div class="backtest-summary">
               <span class="result-badge">{{ report.processed }} / {{ report.total_candidates }} 只股票</span>
               <span>{{ report.start_date }} → {{ report.end_date }}</span>
@@ -688,7 +763,7 @@ onMounted(async () => {
             <div v-else class="table-wrap">
               <table>
                 <caption class="sr-only">买卖条件候选验证结果</caption>
-                <thead><tr><th>方向</th><th>新增条件</th><th>样本 / 股票</th><th>训练 lift</th><th title="该条件在基础规则入场日上的命中比例（全市场合并）">入场命中率</th><th title="验证期合并成交笔数 / 你设置的最少交易样本">验证成交 / 门槛</th><th>验证胜率</th><th>全区间胜率</th><th>股票胜率提升率</th><th>盈亏比</th><th>留出胜率</th><th>状态</th></tr></thead>
+                <thead><tr><th>方向</th><th>新增条件</th><th>样本 / 股票</th><th>训练 lift</th><th title="买入按基础规则入场日计，卖出按持仓期提前离场决策点计（全市场合并，分母见结果字段 sample_totals）">条件命中率</th><th title="验证期合并成交笔数 / 你设置的最少交易样本">验证成交 / 门槛</th><th>验证胜率</th><th>全区间胜率</th><th>股票胜率提升率</th><th>盈亏比</th><th>留出胜率</th><th>状态</th></tr></thead>
                 <tbody>
                   <tr
                     v-for="candidate in report.candidates"
@@ -700,7 +775,7 @@ onMounted(async () => {
                     <td class="condition-rule">{{ conditionText(candidate) }}</td>
                     <td>{{ candidate.mining.support_count }} / {{ candidate.mining.instrument_count }}</td>
                     <td>{{ formatNumber(candidate.mining.lift) }}</td>
-                    <td>{{ entryHitRate(candidate) }}</td>
+                    <td :title="hitRateTitle(candidate)">{{ conditionHitRate(candidate) }}</td>
                     <td>{{ validationTrades(candidate) }}</td>
                     <td>{{ formatPercent(candidate.validation.pooled_trades.win_rate) }}</td>
                     <td>{{ formatPercent(candidate.full_period?.pooled_trades.win_rate) }}</td>
@@ -864,6 +939,26 @@ onMounted(async () => {
 
 .condition-history {
   margin-top: 1.25rem;
+}
+
+.condition-disclosure {
+  display: grid;
+  gap: 0.35rem;
+  margin-bottom: 1rem;
+  padding: 0.75rem 0.9rem;
+  border: 1px solid color-mix(in srgb, var(--warning, #b45309) 35%, transparent);
+  border-radius: 0.6rem;
+  background: color-mix(in srgb, var(--warning, #b45309) 8%, transparent);
+  font-size: 0.86rem;
+  line-height: 1.5;
+}
+
+.condition-disclosure p {
+  margin: 0;
+}
+
+.condition-disclosure-meta {
+  opacity: 0.75;
 }
 
 @media (max-width: 1050px) {

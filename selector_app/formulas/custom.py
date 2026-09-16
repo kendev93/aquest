@@ -50,6 +50,64 @@ _ALLOWED_FUNCTIONS = frozenset(
 )
 _PERIOD_FUNCTIONS = frozenset({"REF", "SMA", "EMA", "MA", "LLV", "HHV", "SUM", "COUNT"})
 
+# Formula variables that carry a raw per-stock level (price in yuan, volume in
+# shares, amount in yuan) instead of a dimensionless ratio.
+_LEVEL_VARIABLES = frozenset(
+    {
+        "C",
+        "CLOSE",
+        "O",
+        "OPEN",
+        "H",
+        "HIGH",
+        "L",
+        "LOW",
+        "V",
+        "VOL",
+        "VOLUME",
+        "AMOUNT",
+    }
+)
+# Functions whose result keeps the physical scale of their input, so a level
+# argument makes the whole call a level again. Anything outside this set
+# (CROSS/COUNT/BARSLAST/DRAWNULL) yields a flag or count and is dimensionless.
+_SCALE_PRESERVING_FUNCTIONS = frozenset(
+    {"ABS", "EMA", "HHV", "IF", "LLV", "MA", "MAX", "MIN", "REF", "SMA", "SUM"}
+)
+
+
+def _is_level_expression(node: ast.AST, levels: Mapping[str, bool]) -> bool:
+    """Report whether an expression evaluates to a raw price/volume level.
+
+    Constants and parameters are dimensionless, so they never make a result a
+    level on their own; ``C / MA(C, 20)`` is a ratio because the division
+    cancels the price unit, while ``(C - MA(C, 20)) / 2`` is still a price.
+    """
+
+    if isinstance(node, ast.Constant):
+        return False
+    if isinstance(node, ast.Name):
+        if node.id.upper() in _LEVEL_VARIABLES:
+            return True
+        return bool(levels.get(node.id, False))
+    if isinstance(node, ast.UnaryOp):
+        return _is_level_expression(node.operand, levels)
+    if isinstance(node, ast.BinOp):
+        left = _is_level_expression(node.left, levels)
+        right = _is_level_expression(node.right, levels)
+        if isinstance(node.op, ast.Div):
+            # A level divided by another level is a ratio.
+            return left and not right
+        if isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Pow, ast.Mod)):
+            return left or right
+        return False
+    if isinstance(node, ast.Call):
+        function_name = node.func.id.upper() if isinstance(node.func, ast.Name) else ""
+        if function_name not in _SCALE_PRESERVING_FUNCTIONS:
+            return False
+        return any(_is_level_expression(argument, levels) for argument in node.args)
+    return False
+
 
 class FormulaParseError(ValueError):
     """User-correctable formula syntax or safety error."""
@@ -96,7 +154,25 @@ class ParsedFormula:
             + [statement.target for statement in self.statements if statement.target is not None]
         )
 
+    @property
+    def price_scale_names(self) -> frozenset[str]:
+        """Outputs that are still a raw price/volume level, not a ratio.
+
+        Mining a cross-stock threshold on such an output really means "share
+        price below 7.8 yuan", which is meaningless across stocks with
+        different price levels.  They stay usable as condition operands but
+        must never become mined features.
+        """
+
+        levels: dict[str, bool] = {}
+        for statement in self.statements:
+            if statement.target is None:
+                continue
+            levels[statement.target] = _is_level_expression(statement.tree.body, levels)
+        return frozenset(name for name, is_level in levels.items() if is_level)
+
     def metadata(self) -> dict[str, object]:
+        price_scale = self.price_scale_names
         return {
             "parameters": [
                 {
@@ -121,6 +197,7 @@ class ParsedFormula:
                     "id": custom_output_id(name),
                     "display_name": name,
                     "description": f"{name} 的数值输出",
+                    "price_scale": name in price_scale,
                 }
                 for name in self.value_names
             ],

@@ -316,3 +316,35 @@ def test_compact_report_equals_the_full_serialisation_projection() -> None:
     assert compact["trades"] == [
         {"direction": "SELL", "pnl": 90.0, "cost_basis": 1000.0, "rejected": False}
     ]
+
+
+def _service_for_features() -> ConditionResearchService:
+    return ConditionResearchService(adapter=SimpleNamespace(), backtest_service=SimpleNamespace())
+
+
+def _config_with_formula(formula_text: str) -> ConditionResearchConfig:
+    return ConditionResearchConfig(
+        vipdoc_path="/tmp/vipdoc",
+        universe="all",
+        buy_rule=RuleGroup(signals=("custom.buy",)),
+        sell_rule=RuleGroup(signals=("custom.sell",)),
+        formula_text=formula_text,
+        start_date=date(2020, 1, 1),
+        end_date=date(2020, 12, 31),
+    )
+
+
+def test_price_scale_custom_outputs_are_excluded_from_mining() -> None:
+    service = _service_for_features()
+    # 用 ``:=`` 让 SCORE/RATIO 只作为数值输出，避免信号语句也带出同名输出。
+    config = _config_with_formula("SCORE:=C; RATIO:=C/MA(C,20); CROSS(REF(C,1),C);")
+
+    assert service._feature_ids(config) == ("custom.ratio",)
+
+
+def test_a_purely_price_scale_formula_is_rejected_with_a_readable_error() -> None:
+    service = _service_for_features()
+    config = _config_with_formula("SCORE:=C; CROSS(REF(C,1),C);")
+
+    with pytest.raises(ValueError, match="价格/成交量量纲"):
+        service._feature_ids(config)

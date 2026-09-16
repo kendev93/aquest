@@ -399,6 +399,7 @@ class ConditionResearchService:
                 sell_samples.append(train_outcome.sell_samples)
 
         mined = self._mine_candidates(config, buy_samples, sell_samples)
+        sample_totals = _sample_totals(buy_samples, sell_samples)
         baseline_train = summarize_backtests(train_reports)
         if not mined:
             validation_reports: list[Mapping[str, object]] = []
@@ -456,6 +457,7 @@ class ConditionResearchService:
                 baseline_train,
                 failures,
                 fingerprints,
+                sample_totals,
             )
             baseline_payload = cast(dict[str, object], empty_result["baseline"])
             baseline_payload["validation"] = _without_stock_rows(
@@ -589,6 +591,8 @@ class ConditionResearchService:
             "feature_count": len(feature_ids),
             "min_trades": config.min_trades,
             "min_instruments": config.min_instruments,
+            "sample_totals": sample_totals,
+            "disclosure": _disclosure(config.universe, len(refs), len(processed)),
             "total_candidates": len(refs),
             "processed": len(processed),
             "skipped": max(0, len(refs) - len(processed)),
@@ -661,9 +665,16 @@ class ConditionResearchService:
     def _feature_ids(self, config: ConditionResearchConfig) -> tuple[str, ...]:
         if config.formula_text:
             parsed = parse_formula(config.formula_text)
-            value_ids = tuple(custom_output_id(name) for name in parsed.value_names)
+            price_scale = parsed.price_scale_names
+            value_ids = tuple(
+                custom_output_id(name) for name in parsed.value_names if name not in price_scale
+            )
             if not value_ids:
-                raise ValueError("自定义公式至少需要包含一个数值输出，才能自动挖掘条件")
+                raise ValueError(
+                    "自定义公式的数值输出都是原始价格/成交量量纲，"
+                    "据此挖出的绝对阈值无法跨股票比较；"
+                    "请改用比值类输出，例如 SCORE:C/MA(C,20);"
+                )
             return value_ids
         return tuple(
             item.id for item in default_indicator_catalog(self._registry).values if item.rankable
@@ -796,6 +807,7 @@ class ConditionResearchService:
         baseline: Mapping[str, object],
         failures: Counter[str],
         fingerprints: Mapping[str, str],
+        sample_totals: Mapping[str, Mapping[str, object]],
     ) -> dict[str, object]:
         return {
             "universe": config.universe,
@@ -806,6 +818,8 @@ class ConditionResearchService:
             "feature_count": len(feature_ids),
             "min_trades": config.min_trades,
             "min_instruments": config.min_instruments,
+            "sample_totals": dict(sample_totals),
+            "disclosure": _disclosure(config.universe, total, len(processed)),
             "total_candidates": total,
             "processed": len(processed),
             "skipped": max(0, total - len(processed)),
@@ -941,6 +955,56 @@ def _mining_dict(candidate: MinedCondition) -> dict[str, object]:
         "outcome_rate": candidate.outcome_rate,
         "baseline_rate": candidate.baseline_rate,
         "lift": candidate.lift,
+    }
+
+
+def _disclosure(
+    universe: str,
+    total: int,
+    processed: int,
+) -> dict[str, object]:
+    """Data-coverage and survivorship-bias disclosure required by the contract.
+
+    The universe is whatever the current market-data store lists, so delisted
+    symbols and historical index membership simply are not there.  The product
+    contract forbids presenting that as a complete historical market without
+    saying so, so every report carries the limitation explicitly.
+    """
+
+    return {
+        "universe_scope": "current_listed_only",
+        "universe": universe,
+        "survivorship_bias": True,
+        "requested_instruments": total,
+        "processed_instruments": processed,
+        "coverage_ratio": (processed / total) if total else 0.0,
+        "notes": [
+            "标的范围取自当前行情库中的在市标的，无法还原历史时点成分或退市标的，"
+            "结果存在幸存者偏差，不应视为完整历史全市场。",
+            f"本次仅 {processed}/{total} 只标的进入统计，未覆盖标的未参与任何汇总。",
+        ],
+    }
+
+
+def _sample_totals(
+    buy_samples: Sequence[MiningSamples],
+    sell_samples: Sequence[MiningSamples],
+) -> dict[str, dict[str, object]]:
+    """Per-side mined sample totals, so the UI can show a correct hit ratio.
+
+    The two sides count different units.  A buy sample is taken on the entry
+    signal date, so ``support_count / buy total`` really is an entry hit rate.
+    A sell sample is taken on every early-exit decision point inside a holding
+    period, so several samples can belong to one trade; dividing those by the
+    closed-trade count would overstate the ratio and could exceed 100%.
+    """
+
+    return {
+        "buy": {"count": sum(len(samples) for samples in buy_samples), "unit": "entry"},
+        "sell": {
+            "count": sum(len(samples) for samples in sell_samples),
+            "unit": "decision_point",
+        },
     }
 
 

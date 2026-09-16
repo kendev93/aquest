@@ -99,6 +99,16 @@ def test_condition_research_runs_independent_stock_baselines_and_time_splits() -
     assert result["splits"]["train"]["end_date"] < result["splits"]["validation"]["start_date"]
     assert result["splits"]["validation"]["end_date"] < result["splits"]["holdout"]["start_date"]
 
+    # 契约要求：无法还原历史成分时必须披露当前覆盖与幸存者偏差，
+    # 不得把“当前在市标的集合”静默当作完整历史全市场。
+    disclosure = result["disclosure"]
+    assert disclosure["universe_scope"] == "current_listed_only"
+    assert disclosure["survivorship_bias"] is True
+    assert disclosure["requested_instruments"] == 2
+    assert disclosure["processed_instruments"] == 2
+    assert disclosure["coverage_ratio"] == 1.0
+    assert any("幸存者偏差" in note for note in disclosure["notes"])
+
 
 def test_condition_research_mines_candidates_from_real_engine_trades() -> None:
     """真实引擎的成交记录必须能转成挖掘样本，否则研究恒返回空候选。
@@ -132,3 +142,11 @@ def test_condition_research_mines_candidates_from_real_engine_trades() -> None:
     assert pooled["closed_trades"] > 0
     assert 0.0 < pooled["win_rate"] < 1.0
     assert result["candidates"], str(result.get("diagnostic") or "未挖出候选条件")
+
+    # 买卖两侧的样本单位不同，接口必须如实报告，否则前端会把卖出候选的
+    # 决策点命中数除以成交笔数，显示成虚高的“入场命中率”。
+    totals = result["sample_totals"]
+    assert totals["buy"]["unit"] == "entry"
+    assert totals["sell"]["unit"] == "decision_point"
+    assert 0 < totals["buy"]["count"] <= pooled["closed_trades"]
+    assert totals["sell"]["count"] >= totals["buy"]["count"]

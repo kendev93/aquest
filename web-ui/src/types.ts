@@ -31,6 +31,10 @@ export interface ValueDefinition {
   id: string
   display_name: string
   description: string
+  /** Output crosses zero on both sides, so `> 0` / `< 0` are both satisfiable. */
+  bidirectional?: boolean
+  /** Custom-formula output that is still a raw price/volume level, not a ratio. */
+  price_scale?: boolean
 }
 
 export interface IndicatorDefinition {
@@ -1017,6 +1021,21 @@ export interface ConditionResearchReport {
   feature_count: number
   min_trades?: number
   min_instruments?: number
+  /**
+   * 每侧参与挖掘的样本总数。买样本按入场日计（unit=entry），
+   * 卖样本按持仓期提前离场决策点计（unit=decision_point），两者口径不同。
+   */
+  sample_totals?: Partial<Record<ConditionResearchSide, { count: number; unit: string }>>
+  /** 数据覆盖与幸存者偏差披露；契约要求不得静默当作完整历史全市场。 */
+  disclosure?: {
+    universe_scope: string
+    universe: string
+    survivorship_bias: boolean
+    requested_instruments: number
+    processed_instruments: number
+    coverage_ratio: number
+    notes: string[]
+  }
   total_candidates: number
   processed: number
   skipped: number

@@ -77,6 +77,21 @@ from .types import FormulaResult
 
 FormulaCalculator = Callable[[pd.DataFrame], FormulaResult]
 
+# Outputs that were measured to cross zero on both sides, so a bare
+# ``> 0`` / ``< 0`` pair yields two conditions that can both actually fire.
+# Measured over five A-shares (~23k bars): only the MACD family is two-sided
+# (macd 47.9%/52.1%, macd_signal 47.8%/52.2%, macd_histogram 51.5%/48.5%).
+# Every other catalog output is one-sided or constant, e.g. indicator_one.wash
+# is ``0`` or a non-negative value and never went below zero in 22,886 bars,
+# so the old page default ``indicator_one.wash < 0`` could never be satisfied.
+BIDIRECTIONAL_VALUE_IDS = frozenset(
+    {
+        "technical.macd",
+        "technical.macd_signal",
+        "technical.macd_histogram",
+    }
+)
+
 _VALUE_DISPLAY_NAMES: dict[str, dict[str, str]] = {
     "indicator_one": {
         "var1": "前一日均价",
@@ -247,6 +262,9 @@ class FormulaRegistry:
                         "description": (
                             f"{value_display_name(definition.id, value_name)}"
                             f"（{value_name.upper()}）的数值输出"
+                        ),
+                        "bidirectional": (
+                            f"{definition.id}.{value_name}" in BIDIRECTIONAL_VALUE_IDS
                         ),
                     }
                     for value_name in definition.selectable_value_names

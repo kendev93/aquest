@@ -9,6 +9,7 @@ import pandas as pd
 from fastapi.testclient import TestClient
 
 from selector_app.condition_research.resources import ResearchResourceEstimate
+from selector_app.market_data.models import DataStoreStatus
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.web.app import create_app
 
@@ -166,3 +167,57 @@ def test_condition_research_api_rejects_a_run_over_the_memory_budget(tmp_path: P
     assert "内存" in error["message"]
     assert error["estimate"]["estimated_peak_bytes"] == 99 * 1024**3
     assert error["estimate"]["memory_budget_bytes"] == 4 * 1024**3
+
+
+class _SharedSourceAdapter:
+    """Stand-in for the ETFQuest adapter that reports its own data bounds."""
+
+    def __init__(self, root: Path, start: date, end: date) -> None:
+        self.database_path = root / "etfquest_market_data.db"
+        self._start = start
+        self._end = end
+
+    def status(self):
+        return DataStoreStatus(
+            database_path=str(self.database_path),
+            schema_version=0,
+            instrument_count=1,
+            bar_count=100,
+            data_start=self._start,
+            data_end=self._end,
+        )
+
+    def list_stock_refs(self, *_args, **_kwargs):
+        return []
+
+
+def test_recent5_window_follows_the_shared_source_not_the_local_store(tmp_path: Path) -> None:
+    """共享行情模式下，默认区间必须按实际读取的库计算。
+
+    本地 sidecar 在开启共享模式后不再推进，若拿它的 data_end 去算“最近五年”，
+    研究会静默跑在一个过期的窗口上。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", bars())
+    service = FakeConditionResearchService()
+    adapter = _SharedSourceAdapter(tmp_path, date(1990, 12, 19), date(2026, 9, 11))
+    app = create_app(
+        market_data_store=store,
+        market_data_adapter=adapter,
+        condition_research_service=service,
+        auto_sync_enabled=False,
+    )
+
+    request = payload(tmp_path)
+    request["date_mode"] = "recent5"
+    request.pop("start_date")
+    request.pop("end_date")
+
+    with TestClient(app) as client:
+        created = client.post("/api/v1/condition-research", json=request)
+        assert created.status_code == 202
+        wait_for_job(client, created.json()["data"]["job_id"])
+
+    assert service.config.end_date == date(2026, 9, 11)
+    assert service.config.start_date == date(2021, 9, 11)

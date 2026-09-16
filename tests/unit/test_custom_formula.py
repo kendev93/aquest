@@ -143,3 +143,41 @@ def test_rolling_function_periods_must_be_positive_integers(formula: str) -> Non
 
     with pytest.raises(ValueError, match="周期必须是正整数"):
         evaluate_custom_formula(parsed, bars())
+
+
+def test_price_scale_outputs_are_detected_from_the_expression() -> None:
+    """原始价格量纲的输出不能被当成跨股票可比的挖掘特征。
+
+    回归背景：``SCORE:C;`` 会被挖成 ``custom.score <= 7.8`` 这样的绝对阈值，
+    实质是“股价低于 7.8 元”，在不同价位的股票之间没有可比性。
+    """
+
+    def price_scale(source: str) -> set[str]:
+        return set(parse_formula(source).price_scale_names)
+
+    tail = " SELL:CROSS(REF(C,1),C);"
+    # 价格/成交量本身，以及任何保持量纲的变换。
+    assert price_scale(f"SCORE:C;{tail}") == {"SCORE"}
+    assert price_scale(f"SCORE:MA(C,20);{tail}") == {"SCORE"}
+    assert price_scale(f"SCORE:(O+H)/2;{tail}") == {"SCORE"}
+    assert price_scale(f"SCORE:ABS(C-MA(C,5));{tail}") == {"SCORE"}
+    assert price_scale(f"SCORE:IF(C>10,C,0);{tail}") == {"SCORE"}
+    assert price_scale(f"SCORE:V;{tail}") == {"SCORE"}
+    # 中间变量要把量纲继续传递下去。
+    assert price_scale(f"A:C; SCORE:A*2;{tail}") == {"A", "SCORE"}
+
+    # 比值类输出是无量纲的，必须保持可挖掘。
+    assert price_scale(f"SCORE:C/MA(C,20);{tail}") == set()
+    assert price_scale(f"SCORE:(C-MA(C,20))/MA(C,20);{tail}") == set()
+    assert price_scale(f"N:=20; SCORE:C/MA(C,N);{tail}") == set()
+    assert price_scale(f"SCORE:COUNT(C>REF(C,1),5);{tail}") == set()
+    assert price_scale(f"SCORE:CROSS(C,MA(C,5));{tail}") == set()
+
+
+def test_custom_formula_metadata_flags_price_scale_outputs() -> None:
+    metadata = parse_formula("SCORE:C; RATIO:C/MA(C,20); SELL:CROSS(REF(C,1),C);").metadata()
+
+    flagged = {value["id"]: value["price_scale"] for value in metadata["values"]}
+
+    assert flagged["custom.score"] is True
+    assert flagged["custom.ratio"] is False

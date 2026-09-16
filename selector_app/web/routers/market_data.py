@@ -66,6 +66,7 @@ from selector_app.screening.jobs import (
 )
 from selector_app.tdx_protocol.errors import TdxConnectionError
 
+from ..market_source import resolve_market_status
 from ..schemas import FullMarketSyncRequest, MarketSyncRequest
 
 router = APIRouter(prefix="/market-data", tags=["market-data"])
@@ -175,9 +176,7 @@ def _legacy_market_write_enabled(request: Request) -> bool:
 
 
 def _market_status(request: Request) -> DataStoreStatus:
-    adapter = _market_adapter(request)
-    status_reader = getattr(adapter, "status", None)
-    return status_reader() if callable(status_reader) else _store(request).status()
+    return resolve_market_status(request)
 
 
 def _precomputer(request: Request) -> IndicatorPrecomputeService:
