@@ -25,7 +25,6 @@ import type {
   FormulaScreenMetadata,
   InstrumentBoard,
   RuleGroupPayload,
-  SignalDefinition,
   ValueDefinition,
 } from '../types'
 import { valueOptionLabel } from '../utils/formulaScreen'
@@ -47,8 +46,6 @@ const mode = ref<'preset' | 'custom'>('preset')
 const form = reactive({
   universe: 'all' as 'all' | 'sh' | 'sz',
   boards: [] as InstrumentBoard[],
-  buySignal: '',
-  sellSignal: '',
   buyRule: emptyRule(),
   sellRule: emptyRule(),
   formulaText: '',
@@ -85,11 +82,6 @@ const stockSort = ref<'win_rate' | 'payoff_ratio' | 'total_return' | 'sharpe' | 
 const stockPage = ref(1)
 const stockPageSize = 50
 
-const availableSignals = computed<SignalDefinition[]>(() => (
-  mode.value === 'custom'
-    ? customMetadata.value?.signals ?? []
-    : metadata.value?.indicators.flatMap((indicator) => indicator.signals) ?? []
-))
 const availableValues = computed<ValueDefinition[]>(() => (
   mode.value === 'custom'
     ? customMetadata.value?.values ?? []
@@ -175,10 +167,10 @@ watch([selectedStockView, stockFilter, stockSort], () => {
   stockPage.value = 1
 })
 
-function initialRule(signalId: string, operator: 'gt' | 'lt'): RuleGroupPayload {
+function initialRule(operator: 'gt' | 'lt'): RuleGroupPayload {
   const firstValue = availableValues.value[0]?.id ?? ''
   return {
-    signals: signalId ? [signalId] : [],
+    signals: [],
     conditions: firstValue
       ? [{ left_value: firstValue, operator, right_value: null, right_constant: 0 }]
       : [],
@@ -189,21 +181,8 @@ function initialRule(signalId: string, operator: 'gt' | 'lt'): RuleGroupPayload 
 }
 
 function resetRules(): void {
-  const signals = availableSignals.value
-  form.buySignal = signals[0]?.id ?? ''
-  form.sellSignal = signals.find((signal) => signal.id !== form.buySignal)?.id ?? ''
-  form.buyRule = initialRule(form.buySignal, 'gt')
-  form.sellRule = initialRule(form.sellSignal, 'lt')
-}
-
-function setBuySignal(value: string): void {
-  form.buySignal = value
-  form.buyRule = { ...form.buyRule, signals: value ? [value] : [] }
-}
-
-function setSellSignal(value: string): void {
-  form.sellSignal = value
-  form.sellRule = { ...form.sellRule, signals: value ? [value] : [] }
+  form.buyRule = initialRule('gt')
+  form.sellRule = initialRule('lt')
 }
 
 function toggleBoard(board: InstrumentBoard): void {
@@ -213,11 +192,11 @@ function toggleBoard(board: InstrumentBoard): void {
 }
 
 function setBuyRule(rule: RuleGroupPayload): void {
-  form.buyRule = { ...rule, signals: form.buySignal ? [form.buySignal] : [] }
+  form.buyRule = { ...rule, signals: [] }
 }
 
 function setSellRule(rule: RuleGroupPayload): void {
-  form.sellRule = { ...rule, signals: form.sellSignal ? [form.sellSignal] : [] }
+  form.sellRule = { ...rule, signals: [] }
 }
 
 function setMode(next: 'preset' | 'custom'): void {
@@ -229,8 +208,6 @@ function setMode(next: 'preset' | 'custom'): void {
     parsedFormulaText.value = ''
     resetRules()
   } else {
-    form.buySignal = ''
-    form.sellSignal = ''
     form.buyRule = emptyRule()
     form.sellRule = emptyRule()
   }
@@ -253,15 +230,13 @@ async function parseCustomFormula(): Promise<void> {
         form.formulaParameters[parameter.name] ?? parameter.default,
       ]),
     )
-    form.buySignal = parsed.signals[0]?.id ?? ''
-    form.sellSignal = parsed.signals.find((signal) => signal.id !== form.buySignal)?.id ?? ''
-    form.buyRule = initialRule(form.buySignal, 'gt')
-    form.sellRule = initialRule(form.sellSignal, 'lt')
+    form.buyRule = initialRule('gt')
+    form.sellRule = initialRule('lt')
     errors.value = {}
   } catch (error) {
     customMetadata.value = null
-    form.buySignal = ''
-    form.sellSignal = ''
+    form.buyRule = emptyRule()
+    form.sellRule = emptyRule()
     customParseError.value = error instanceof FormulaScreenApiError
       ? error.message
       : '公式解析失败，请检查语法。'
@@ -272,11 +247,11 @@ async function parseCustomFormula(): Promise<void> {
 
 function validate(): Record<string, string> {
   const next: Record<string, string> = {}
-  if (!form.buyRule.signals.length && !form.buyRule.conditions.length) {
-    next.buyRule = '请至少设置一个基础买入信号或指标条件。'
+  if (!form.buyRule.conditions.length) {
+    next.buyRule = '请至少设置一个买入指标条件。'
   }
-  if (!form.sellRule.signals.length && !form.sellRule.conditions.length) {
-    next.sellRule = '请至少设置一个基础卖出信号或指标条件。'
+  if (!form.sellRule.conditions.length) {
+    next.sellRule = '请至少设置一个卖出指标条件。'
   }
   if (mode.value === 'custom') {
     if (!form.formulaText.trim()) next.formulaText = '请输入自定义公式。'
@@ -571,28 +546,11 @@ onMounted(async () => {
             <p class="helper">每只股票独立运行同一套规则，不设置跨股票资金分配或持仓数量上限。</p>
           </fieldset>
 
-          <div class="condition-signal-grid">
-            <div>
-              <label for="condition-buy-signal">买入基础信号</label>
-              <select id="condition-buy-signal" :value="form.buySignal" data-testid="condition-buy-signal" @change="setBuySignal(($event.target as HTMLSelectElement).value)">
-                <option value="">仅使用下方数值条件</option>
-                <option v-for="signal in availableSignals" :key="signal.id" :value="signal.id">{{ signal.display_name }}</option>
-              </select>
-            </div>
-            <div>
-              <label for="condition-sell-signal">卖出基础信号</label>
-              <select id="condition-sell-signal" :value="form.sellSignal" data-testid="condition-sell-signal" @change="setSellSignal(($event.target as HTMLSelectElement).value)">
-                <option value="">仅使用下方数值条件</option>
-                <option v-for="signal in availableSignals" :key="signal.id" :value="signal.id">{{ signal.display_name }}</option>
-              </select>
-            </div>
-          </div>
-
           <RuleGroupEditor
             :model-value="form.buyRule"
             :values="availableValues"
             :condition-operators="metadata?.condition_operators"
-            title="买入数值条件"
+            title="买入基础条件"
             testid="condition-buy-rule"
             :max-conditions="3"
             @update:model-value="setBuyRule"
@@ -602,7 +560,7 @@ onMounted(async () => {
             :model-value="form.sellRule"
             :values="availableValues"
             :condition-operators="metadata?.condition_operators"
-            title="卖出数值条件"
+            title="卖出基础条件"
             testid="condition-sell-rule"
             :max-conditions="3"
             @update:model-value="setSellRule"
@@ -838,7 +796,6 @@ onMounted(async () => {
   min-width: 0;
 }
 
-.condition-signal-grid,
 .condition-fields-top {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -896,7 +853,6 @@ onMounted(async () => {
 }
 
 @media (max-width: 640px) {
-  .condition-signal-grid,
   .condition-fields-top,
   .condition-stock-controls {
     grid-template-columns: 1fr;

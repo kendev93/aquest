@@ -130,8 +130,14 @@ describe('ConditionResearchPage', () => {
       search_sides: 'both',
       date_mode: 'recent5',
       min_trades: 20,
-      buy_rule: expect.objectContaining({ signals: ['indicator.buy'] }),
-      sell_rule: expect.objectContaining({ signals: ['indicator.sell'] }),
+      buy_rule: expect.objectContaining({
+        signals: [],
+        conditions: [expect.objectContaining({ left_value: 'indicator.score', operator: 'gt' })],
+      }),
+      sell_rule: expect.objectContaining({
+        signals: [],
+        conditions: [expect.objectContaining({ left_value: 'indicator.score', operator: 'lt' })],
+      }),
     }))
     expect(wrapper.get('[data-testid="condition-research-results"]').text()).toContain('70.00%')
     expect(wrapper.get('[data-testid="condition-research-candidate-buy-1"]').text()).toContain('强度')

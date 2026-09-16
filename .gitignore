@@ -10,6 +10,7 @@ htmlcov/
 dist/
 build/
 .nuitka-cache/
+.workbuddy/
 
 web-ui/node_modules/
 web-ui/dist/
