@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from datetime import date, datetime
 from pathlib import Path
 
@@ -275,6 +275,26 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
 
     def delete_backtest_history(self, history_id: str) -> bool:
         return self._history.delete_backtest_history(history_id)
+
+    def history_table_columns(self, table: str) -> tuple[str, ...]:
+        return self._history.history_table_columns(table)
+
+    def iter_history_rows(
+        self,
+        table: str,
+        *,
+        batch_size: int = 200,
+    ) -> Iterator[dict[str, object]]:
+        return self._history.iter_history_rows(table, batch_size=batch_size)
+
+    def insert_history_rows(
+        self,
+        table: str,
+        rows: Iterable[Mapping[str, object]],
+        *,
+        batch_size: int = 200,
+    ) -> tuple[int, int]:
+        return self._history.insert_history_rows(table, rows, batch_size=batch_size)
 
     def read_indicator_cache(
         self,

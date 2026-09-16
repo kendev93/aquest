@@ -20,6 +20,7 @@ import duckdb
 logger = logging.getLogger(__name__)
 
 BACKUP_RETENTION_DAYS = 3
+BACKUP_RETENTION_DAYS_ENV = "SELECTOR_DB_BACKUP_RETENTION_DAYS"
 COMPACTION_GROWTH_RATIO = 0.5
 COMPACTION_MIN_SIZE_BYTES = 512 * 1024 * 1024
 INITIAL_COMPACTION_FREE_RATIO = 0.2
@@ -104,8 +105,8 @@ def cleanup_database_backups(
 ) -> tuple[Path, ...]:
     """Keep at most the newest backup, and remove it after the retention window."""
 
-    if isinstance(retention_days, bool) or retention_days < 1:
-        raise ValueError("数据库备份保留天数必须大于 0")
+    if isinstance(retention_days, bool) or retention_days < 0:
+        raise ValueError("数据库备份保留天数不能为负数")
     path = Path(database_path).expanduser()
     candidates: list[tuple[Path, int]] = []
     for backup in path.parent.glob(_backup_pattern(path)):
@@ -142,13 +143,92 @@ def create_database_backup(
     """Create a backup first, then clean only expired sibling backups."""
 
     path = Path(database_path).expanduser()
-    timestamp = _utc_now(now).strftime("%Y%m%d%H%M%S%f")
-    target = path.with_name(f"{path.stem}.bak-{timestamp}{path.suffix}")
+    target = _backup_target(path, now)
     shutil.copy2(path, target)
     created_timestamp = _utc_now(now).timestamp()
     os.utime(target, (created_timestamp, created_timestamp))
     cleanup_database_backups(path, retention_days=retention_days, now=now)
     return target
+
+
+def _backup_target(database_path: Path, now: datetime | None) -> Path:
+    timestamp = _utc_now(now).strftime("%Y%m%d%H%M%S%f")
+    return database_path.with_name(f"{database_path.stem}.bak-{timestamp}{database_path.suffix}")
+
+
+def swap_in_compacted_database(
+    database_path: str | Path,
+    temp_path: str | Path,
+    *,
+    validate: Callable[[Path], object],
+    retention_days: int = BACKUP_RETENTION_DAYS,
+    now: datetime | None = None,
+) -> Path | None:
+    """Replace the database with an already-validated compacted copy.
+
+    The previous file is kept by *hard link* instead of a second full copy, so
+    compaction peaks at two database sizes rather than three: the link costs no
+    data blocks, and the swap then moves the live name onto the new inode while
+    the backup name keeps the previous one alive.  The mtime is only stamped
+    after the swap, because until then the two names share an inode.
+
+    ``validate`` runs against the swapped-in file; if it raises, the previous
+    file is copied back before the error propagates.
+
+    Returns the retained backup path, or ``None`` when ``retention_days`` is 0,
+    which keeps the backup only for the duration of the swap.
+    """
+
+    path = Path(database_path).expanduser()
+    temp = Path(temp_path)
+    backup_path = _backup_target(path, now)
+    try:
+        os.link(path, backup_path)
+    except OSError:
+        logger.info("文件系统不支持硬链接，回退为整库拷贝备份: %s", path)
+        shutil.copy2(path, backup_path)
+
+    os.replace(temp, path)
+    try:
+        validate(path)
+    except (OSError, duckdb.Error, RuntimeError, ValueError):
+        if backup_path.is_file():
+            shutil.copy2(backup_path, path)
+        raise
+
+    if retention_days <= 0:
+        backup_path.unlink(missing_ok=True)
+        return None
+
+    created_timestamp = _utc_now(now).timestamp()
+    try:
+        os.utime(backup_path, (created_timestamp, created_timestamp))
+    except OSError:
+        logger.warning("备份时间戳写入失败: %s", backup_path, exc_info=True)
+    cleanup_database_backups(path, retention_days=retention_days, now=now)
+    return backup_path
+
+
+def resolve_backup_retention_days(raw: str | None = None) -> int:
+    """Read the backup retention window.
+
+    Zero is a valid value and means "keep a backup only for the duration of the
+    compaction that created it" — the right default for single-user Docker
+    installs, where a retained copy would otherwise double a multi-gigabyte
+    database on disk for days.
+    """
+
+    value = raw if raw is not None else os.getenv(BACKUP_RETENTION_DAYS_ENV)
+    text = str(value or "").strip()
+    if not text:
+        return BACKUP_RETENTION_DAYS
+    try:
+        parsed = int(text)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{BACKUP_RETENTION_DAYS_ENV} 必须是整数天数") from exc
+    if parsed < 0:
+        raise ValueError(f"{BACKUP_RETENTION_DAYS_ENV} 不能为负数")
+    return parsed
 
 
 def should_compact(
@@ -179,8 +259,8 @@ class DatabaseMaintenanceService:
         initial_free_ratio: float = INITIAL_COMPACTION_FREE_RATIO,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        if isinstance(retention_days, bool) or retention_days < 1:
-            raise ValueError("数据库备份保留天数必须大于 0")
+        if isinstance(retention_days, bool) or retention_days < 0:
+            raise ValueError("数据库备份保留天数不能为负数")
         if growth_ratio < 0:
             raise ValueError("数据库整理增长阈值不能小于 0")
         if isinstance(minimum_size_bytes, bool) or minimum_size_bytes < 0:
@@ -315,6 +395,8 @@ class DatabaseMaintenanceService:
                 duration_seconds=max(0.0, time.perf_counter() - started),
             )
         if available_bytes < before_size_bytes * 2:
+            # 压缩本身只需要再放下一份临时副本，但备份在文件系统不支持硬链接时
+            # 会退化成整库拷贝，所以守卫按最坏情况留两份库大小的余量。
             finished_at = _utc_now(self._clock())
             self._write_record(
                 {
@@ -395,18 +477,13 @@ class DatabaseMaintenanceService:
                         deleted_backups=deleted_backups,
                         duration_seconds=max(0.0, time.perf_counter() - started),
                     )
-                backup_path = create_database_backup(
+                backup_path = swap_in_compacted_database(
                     self.database_path,
+                    temp_path,
+                    validate=self._database_snapshot,
                     retention_days=self.retention_days,
                     now=now,
                 )
-                os.replace(temp_path, self.database_path)
-                try:
-                    self._database_snapshot(self.database_path)
-                except (OSError, duckdb.Error, RuntimeError, ValueError):
-                    if backup_path.is_file():
-                        shutil.copy2(backup_path, self.database_path)
-                    raise
                 after_size = self.database_path.stat().st_size
             finished_at = _utc_now(self._clock())
             duration = max(0.0, time.perf_counter() - started)

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import tempfile
 from pathlib import Path
 
 import duckdb
@@ -9,10 +11,13 @@ import pandas as pd
 import pytest
 
 from selector_app.market_data.maintenance import (
+    BACKUP_RETENTION_DAYS,
     DatabaseMaintenanceScheduler,
     DatabaseMaintenanceService,
     MaintenanceResult,
+    resolve_backup_retention_days,
     should_compact,
+    swap_in_compacted_database,
 )
 from selector_app.market_data.store import DuckDbMarketDataStore
 
@@ -174,3 +179,157 @@ def test_maintenance_scheduler_skips_active_jobs_and_runs_when_idle() -> None:
     result = asyncio.run(idle_scheduler.check_once())
     assert result is not None
     assert service.calls == 1
+
+
+def _make_database(path: Path, value: str) -> None:
+    with duckdb.connect(str(path)) as connection:
+        connection.execute("CREATE TABLE marker (value VARCHAR)")
+        connection.execute("INSERT INTO marker VALUES (?)", [value])
+
+
+def _marker(path: Path) -> str:
+    with duckdb.connect(str(path), read_only=True) as connection:
+        return str(connection.execute("SELECT value FROM marker").fetchone()[0])
+
+
+def _supports_hard_links(directory: Path) -> bool:
+    source = directory / "link-probe-src"
+    target = directory / "link-probe-dst"
+    source.write_text("x", encoding="utf-8")
+    try:
+        os.link(source, target)
+        return True
+    except OSError:
+        return False
+    finally:
+        source.unlink(missing_ok=True)
+        target.unlink(missing_ok=True)
+
+
+def test_compaction_swap_keeps_the_previous_file_as_the_backup(tmp_path: Path) -> None:
+    database = tmp_path / "market.duckdb"
+    temp = tmp_path / "market.compact.duckdb"
+    _make_database(database, "old")
+    _make_database(temp, "new")
+
+    backup_path = swap_in_compacted_database(
+        database,
+        temp,
+        validate=lambda path: _marker(path),
+        retention_days=3,
+    )
+
+    assert backup_path is not None
+    assert _marker(database) == "new"
+    assert _marker(backup_path) == "old"
+    assert not temp.exists()
+
+
+@pytest.mark.skipif(
+    not _supports_hard_links(Path(tempfile.gettempdir())),
+    reason="文件系统不支持硬链接",
+)
+def test_compaction_backup_is_a_hard_link_not_a_copy(tmp_path: Path) -> None:
+    """备份必须复用原文件的 inode，否则压缩仍要第三份磁盘拷贝。"""
+
+    database = tmp_path / "market.duckdb"
+    temp = tmp_path / "market.compact.duckdb"
+    _make_database(database, "old")
+    _make_database(temp, "new")
+    original_inode = database.stat().st_ino
+
+    backup_path = swap_in_compacted_database(
+        database,
+        temp,
+        validate=lambda path: _marker(path),
+        retention_days=3,
+    )
+
+    assert backup_path is not None
+    assert backup_path.stat().st_ino == original_inode
+    assert database.stat().st_ino != original_inode
+
+
+def test_zero_retention_keeps_no_backup_after_a_successful_swap(tmp_path: Path) -> None:
+    database = tmp_path / "market.duckdb"
+    temp = tmp_path / "market.compact.duckdb"
+    _make_database(database, "old")
+    _make_database(temp, "new")
+
+    backup_path = swap_in_compacted_database(
+        database,
+        temp,
+        validate=lambda path: _marker(path),
+        retention_days=0,
+    )
+
+    assert backup_path is None
+    assert _marker(database) == "new"
+    assert list(tmp_path.glob("*.bak-*")) == []
+
+
+def test_failed_validation_restores_the_previous_database(tmp_path: Path) -> None:
+    database = tmp_path / "market.duckdb"
+    temp = tmp_path / "market.compact.duckdb"
+    _make_database(database, "old")
+    _make_database(temp, "new")
+
+    def _reject(_path: Path) -> None:
+        raise RuntimeError("临时 DuckDB 校验失败：表行数或 schema 不一致")
+
+    with pytest.raises(RuntimeError, match="校验失败"):
+        swap_in_compacted_database(
+            database,
+            temp,
+            validate=_reject,
+            retention_days=3,
+        )
+
+    assert _marker(database) == "old"
+
+
+def test_swap_falls_back_to_a_real_copy_without_hard_link_support(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "market.duckdb"
+    temp = tmp_path / "market.compact.duckdb"
+    _make_database(database, "old")
+    _make_database(temp, "new")
+    original_inode = database.stat().st_ino
+
+    def _no_links(*_args: object, **_kwargs: object) -> None:
+        raise OSError("hard links unsupported")
+
+    monkeypatch.setattr(os, "link", _no_links)
+
+    backup_path = swap_in_compacted_database(
+        database,
+        temp,
+        validate=lambda path: _marker(path),
+        retention_days=3,
+    )
+
+    assert backup_path is not None
+    assert backup_path.stat().st_ino != original_inode
+    assert _marker(backup_path) == "old"
+    assert _marker(database) == "new"
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, BACKUP_RETENTION_DAYS),
+        ("", BACKUP_RETENTION_DAYS),
+        ("  ", BACKUP_RETENTION_DAYS),
+        ("0", 0),
+        ("7", 7),
+    ],
+)
+def test_backup_retention_days_resolution(raw: str | None, expected: int) -> None:
+    assert resolve_backup_retention_days(raw) == expected
+
+
+@pytest.mark.parametrize("raw", ["abc", "-1", "1.5"])
+def test_backup_retention_days_rejects_invalid_values(raw: str) -> None:
+    with pytest.raises(ValueError):
+        resolve_backup_retention_days(raw)

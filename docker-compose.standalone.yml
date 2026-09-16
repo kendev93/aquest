@@ -1,0 +1,81 @@
+# 面向最终用户的独立分发编排。
+#
+# 与 docker-compose.yml（共享 ETFQuest 行情库的开发/自用编排）的区别：
+#   · 行情由容器自己同步，不需要本机装过 ETFQuest
+#   · 数据放 Docker 命名卷，避开绑定挂载的宿主 uid 与文件共享层问题
+#   · 策略 worker token 首次启动自动生成，用户无需任何手工步骤
+#
+# 用法：
+#   export INDICATOR_LAB_IMAGE=<你的镜像标签>
+#   docker compose -f docker-compose.standalone.yml up -d
+#
+# 想自己管理数据目录（便于备份/迁移）就叠加绑定挂载覆盖文件，
+# 见 docker-compose.standalone-bind.yml。
+
+services:
+  backend:
+    image: ${INDICATOR_LAB_IMAGE:?请设置 INDICATOR_LAB_IMAGE 为已发布的镜像标签}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      PYTHONUNBUFFERED: "1"
+      SELECTOR_DATA_DIR: /data/market
+      SELECTOR_AUTO_SYNC_ENABLED: "${SELECTOR_AUTO_SYNC_ENABLED:-1}"
+      SELECTOR_DISCOVERY_WORKERS: "${SELECTOR_DISCOVERY_WORKERS:-auto}"
+      SELECTOR_DISCOVERY_MEMORY_BUDGET_MB: "${SELECTOR_DISCOVERY_MEMORY_BUDGET_MB:-auto}"
+      SELECTOR_STRATEGY_WORKER_TOKEN_FILE: /data/market/.strategy-worker-token
+      SELECTOR_STRATEGY_WORKER_TOKEN_AUTOGENERATE: "1"
+      # 单用户分发默认不保留整库备份：压缩期间仍需一份用于回滚，成功后立即删除。
+      # 想保留几天就把它设成天数；数据库有数 GB 时每份备份都要占同样大的空间。
+      SELECTOR_DB_BACKUP_RETENTION_DAYS: "${SELECTOR_DB_BACKUP_RETENTION_DAYS:-0}"
+    volumes:
+      - indicator-lab-data:/data/market
+    expose:
+      - "8123"
+    ports:
+      - "127.0.0.1:${API_PORT:-8123}:8123"
+    mem_limit: "${STRATEGY_WORKER_MEMORY_LIMIT:-0}"
+    restart: unless-stopped
+
+  strategy-worker:
+    image: ${INDICATOR_LAB_IMAGE:?请设置 INDICATOR_LAB_IMAGE 为已发布的镜像标签}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      PYTHONUNBUFFERED: "1"
+      SELECTOR_DATA_DIR: /data/market
+      SELECTOR_DISCOVERY_WORKERS: "${SELECTOR_DISCOVERY_WORKERS:-auto}"
+      SELECTOR_DISCOVERY_MEMORY_BUDGET_MB: "${SELECTOR_DISCOVERY_MEMORY_BUDGET_MB:-auto}"
+      SELECTOR_STRATEGY_WORKER_API_URL: http://backend:8123
+      SELECTOR_STRATEGY_WORKER_TOKEN_FILE: /data/market/.strategy-worker-token
+    volumes:
+      - indicator-lab-data:/data/market
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    command: ["python", "-m", "selector_app.strategy_discovery.worker"]
+    mem_limit: "${STRATEGY_WORKER_MEMORY_LIMIT:-0}"
+    restart: unless-stopped
+
+  frontend:
+    image: ${INDICATOR_LAB_FRONTEND_IMAGE:-}
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${WEB_PORT:-5173}:80"
+    restart: unless-stopped
+
+volumes:
+  indicator-lab-data:

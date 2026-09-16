@@ -6,6 +6,7 @@ import asyncio
 import logging
 import math
 import os
+import secrets
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -37,6 +38,7 @@ from selector_app.market_data.full_sync import FullMarketSync
 from selector_app.market_data.maintenance import (
     DatabaseMaintenanceScheduler,
     DatabaseMaintenanceService,
+    resolve_backup_retention_days,
 )
 from selector_app.market_data.service import LocalMarketDataService
 from selector_app.market_data.staging import cleanup_stale_staging, staging_directory
@@ -157,7 +159,10 @@ def create_app(
         DatabaseMaintenanceService,
         database_maintenance_service
         if database_maintenance_service is not None
-        else DatabaseMaintenanceService(selected_store.database_path),
+        else DatabaseMaintenanceService(
+            selected_store.database_path,
+            retention_days=resolve_backup_retention_days(),
+        ),
     )
     selected_runner = runner or ScreenJobRunner(
         engine=engine
@@ -443,6 +448,7 @@ def create_app(
 
     from .routers.backtest import router as backtest_router
     from .routers.condition_research import router as condition_research_router
+    from .routers.data_transfer import router as data_transfer_router
     from .routers.jobs import router as jobs_router
     from .routers.market_data import router as market_data_router
     from .routers.portfolio_backtest import router as portfolio_backtest_router
@@ -453,6 +459,7 @@ def create_app(
     app.include_router(formula_screen_router, prefix="/api/v1")
     app.include_router(jobs_router, prefix="/api/v1")
     app.include_router(market_data_router, prefix="/api/v1")
+    app.include_router(data_transfer_router, prefix="/api/v1")
     app.include_router(backtest_router, prefix="/api/v1")
     app.include_router(condition_research_router, prefix="/api/v1")
     app.include_router(portfolio_backtest_router, prefix="/api/v1")
@@ -468,12 +475,46 @@ def _resolve_strategy_worker_token(value: str | None) -> str | None:
     token_path = str(os.getenv("SELECTOR_STRATEGY_WORKER_TOKEN_FILE") or "").strip()
     if not token_path:
         return None
+    path = Path(token_path).expanduser()
     try:
-        token = Path(token_path).expanduser().read_text(encoding="utf-8").strip()
+        token = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return _generate_strategy_worker_token(path)
     except OSError:
         logger.exception("策略 worker token 文件不可读")
         return None
     return token or None
+
+
+def _generate_strategy_worker_token(path: Path) -> str | None:
+    """Create the worker token on first boot of a self-hosted installation.
+
+    Shared deployments mount the token from ETFQuest, where a missing file means
+    a misconfiguration and must stay visible instead of being papered over — so
+    generation is opt-in and never the default.
+    """
+
+    if str(os.getenv("SELECTOR_STRATEGY_WORKER_TOKEN_AUTOGENERATE") or "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        logger.warning("策略 worker token 文件不存在: %s", path)
+        return None
+    if not path.parent.is_dir():
+        logger.warning("策略 worker token 目录不存在，无法生成: %s", path.parent)
+        return None
+    token = secrets.token_hex(32)
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(token)
+    except OSError:
+        logger.exception("策略 worker token 生成失败: %s", path)
+        return None
+    logger.info("已生成策略 worker token: %s", path)
+    return token
 
 
 def _resolve_auto_sync_enabled(value: bool | None) -> bool:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from datetime import datetime, timedelta, timezone
 from typing import cast
 
@@ -21,6 +21,28 @@ from .store_base import (
     _DuckDbStoreBase,
     _now,
 )
+
+# 用户资产表：记录的是用户自己的研究成果，丢了无法重建，所以支持导出导入。
+# 行情与指标缓存刻意不在其中——它们可以从数据源重新同步/重算。
+ASSET_TABLES: tuple[str, ...] = (
+    "backtest_history",
+    "screen_history",
+    "strategy_discovery_history",
+    "strategy_discovery_replay_history",
+)
+
+
+def _require_asset_table(table: str) -> str:
+    """Reject anything that is not a known user-asset table.
+
+    The table name is interpolated into SQL, so it must never come straight
+    from a caller.
+    """
+
+    normalized = str(table or "").strip()
+    if normalized not in ASSET_TABLES:
+        raise MarketDataStoreError(f"不支持的资产表: {table}")
+    return normalized
 
 
 def _int_or_zero(value: object) -> int:
@@ -878,3 +900,99 @@ class DuckDbHistoryStore:
                 [normalized_id],
             ).fetchone()
         return deleted is not None
+
+    def history_table_columns(self, table: str) -> tuple[str, ...]:
+        """Column names of one user-asset table, in physical order."""
+
+        _require_asset_table(table)
+        with self._store._connect(read_only=True) as connection:
+            rows = connection.execute(
+                """
+                SELECT column_name FROM information_schema.columns
+                WHERE table_name = ?
+                ORDER BY ordinal_position
+                """,
+                [table],
+            ).fetchall()
+        return tuple(str(row[0]) for row in rows)
+
+    def iter_history_rows(
+        self,
+        table: str,
+        *,
+        batch_size: int = 200,
+    ) -> Iterator[dict[str, object]]:
+        """Stream every row of one user-asset table as plain dictionaries.
+
+        Rows are fetched in batches so exporting a multi-megabyte research
+        report never materialises the whole table in memory.
+        """
+
+        _require_asset_table(table)
+        if batch_size < 1:
+            raise ValueError("批量读取行数必须大于 0")
+        columns = self.history_table_columns(table)
+        if not columns:
+            return
+        projection = ", ".join(f'"{column}"' for column in columns)
+        with self._store._connect(read_only=True) as connection:
+            cursor = connection.execute(f'SELECT {projection} FROM "{table}"')
+            while True:
+                batch = cursor.fetchmany(batch_size)
+                if not batch:
+                    return
+                for row in batch:
+                    yield dict(zip(columns, row, strict=True))
+
+    def insert_history_rows(
+        self,
+        table: str,
+        rows: Iterable[Mapping[str, object]],
+        *,
+        batch_size: int = 200,
+    ) -> tuple[int, int]:
+        """Insert user-asset rows, skipping any that already exist.
+
+        Returns ``(inserted, attempted)``.  Conflicts are matched by primary key
+        *and* by any unique constraint, so importing the same backup twice is a
+        no-op instead of a duplicate or an error.
+        """
+
+        self._store._require_writer()
+        _require_asset_table(table)
+        if batch_size < 1:
+            raise ValueError("批量写入行数必须大于 0")
+        columns = self.history_table_columns(table)
+        if not columns:
+            return (0, 0)
+        projection = ", ".join(f'"{column}"' for column in columns)
+        placeholders = ", ".join("?" for _ in columns)
+        statement = (
+            f'INSERT INTO "{table}" ({projection}) VALUES ({placeholders}) ON CONFLICT DO NOTHING'
+        )
+        count_statement = f'SELECT COUNT(*) FROM "{table}"'
+
+        inserted = 0
+        attempted = 0
+        batch: list[tuple[object, ...]] = []
+        with _WRITE_LOCK, self._store._connect() as connection:
+            for row in rows:
+                batch.append(tuple(row.get(column) for column in columns))
+                if len(batch) < batch_size:
+                    continue
+                before = _count_rows(connection, count_statement)
+                connection.executemany(statement, batch)
+                inserted += _count_rows(connection, count_statement) - before
+                attempted += len(batch)
+                batch.clear()
+            if batch:
+                before = _count_rows(connection, count_statement)
+                connection.executemany(statement, batch)
+                inserted += _count_rows(connection, count_statement) - before
+                attempted += len(batch)
+        return inserted, attempted
+
+
+def _count_rows(connection: duckdb.DuckDBPyConnection, statement: str) -> int:
+    row = connection.execute(statement).fetchone()
+    return int(row[0]) if row is not None else 0
