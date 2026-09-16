@@ -155,14 +155,9 @@ class _DuckDbStoreBase:
             try:
                 return duckdb.connect(str(self.database_path), read_only=mode)
             except duckdb.Error as exc:
-                message = str(exc).lower()
-                if "lock" not in message and "conflicting" not in message:
-                    raise MarketDataStoreError(
-                        "行情数据库无法打开，请检查文件权限或数据库完整性"
-                    ) from exc
                 last_error = exc
         raise MarketDataStoreError(
-            "行情数据库当前被其它进程占用，请关闭其它写入进程后重试"
+            "行情数据库当前被其它进程占用或存在瞬态 I/O 错误，请稍后重试"
         ) from last_error
 
     @contextmanager
