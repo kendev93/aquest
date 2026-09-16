@@ -4,7 +4,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from selector_app.condition_research.mining import mine_binary_conditions
+from selector_app.condition_research.mining import (
+    equivalent_condition_signatures,
+    mine_binary_conditions,
+)
+from selector_app.screening.models import ScreenCondition
 
 
 def test_mines_a_threshold_that_enriches_for_profitable_trades() -> None:
@@ -152,6 +156,139 @@ def test_sell_samples_count_a_trade_once_even_when_it_has_many_holding_days() ->
     )
 
     assert candidates == ()
+
+
+def _condition_masks(features: pd.DataFrame, candidates: tuple) -> list[np.ndarray]:
+    """Rebuild each candidate's sample mask so duplicates can be detected."""
+
+    masks: list[np.ndarray] = []
+    for candidate in candidates:
+        condition = candidate.condition
+        left = features[condition.left_value].to_numpy(dtype=float)
+        if condition.right_value is not None:
+            right = features[condition.right_value].to_numpy(dtype=float)
+        else:
+            right = np.full(len(left), float(condition.right_constant))
+        if condition.operator == "gte":
+            masks.append(left >= right)
+        elif condition.operator == "lte":
+            masks.append(left <= right)
+        elif condition.operator == "gt":
+            masks.append(left > right)
+        else:
+            masks.append(left < right)
+    return masks
+
+
+def test_mining_drops_comparisons_whose_scales_are_incompatible() -> None:
+    features = pd.DataFrame(
+        {
+            "technical.ma5": [12.0, 14.0, 8.0, 9.0],
+            "technical.ma20": [10.0, 12.0, 10.0, 11.0],
+            "indicator_two.saturation": [0.001, 0.003, 0.002, 0.004],
+        }
+    )
+    winners = pd.Series([True, True, False, False])
+    symbols = pd.Series(["SH600000", "SZ000001", "SH600000", "SZ000001"])
+
+    candidates = mine_binary_conditions(
+        features,
+        winners,
+        symbols,
+        quantiles=(0.5,),
+        min_support=2,
+        min_instruments=2,
+        limit=20,
+    )
+
+    # The 0-1 saturation value is orders of magnitude away from a price moving
+    # average, so a pairwise comparison between them only means "the average vs
+    # ~0". Threshold conditions on the feature itself stay legitimate.
+    assert all(
+        candidate.condition.right_value is None
+        or "indicator_two.saturation"
+        not in (candidate.condition.left_value, candidate.condition.right_value)
+        for candidate in candidates
+    )
+    assert any(
+        candidate.condition.left_value == "technical.ma5"
+        and candidate.condition.right_value == "technical.ma20"
+        for candidate in candidates
+    )
+
+
+def test_mining_keeps_only_one_candidate_per_sample_mask() -> None:
+    features = pd.DataFrame(
+        {
+            "indicator.x": [1.0, 2.0, 3.0, 4.0],
+            "indicator.y": [1.0, 1.0, 1.0, 5.0],
+            "indicator.z": [1.0, 1.0, 1.0, 4.0],
+        }
+    )
+    winners = pd.Series([False, True, True, False])
+    symbols = pd.Series(["A", "B", "C", "D"])
+
+    candidates = mine_binary_conditions(
+        features,
+        winners,
+        symbols,
+        quantiles=(0.5,),
+        min_support=2,
+        min_instruments=2,
+        limit=20,
+    )
+
+    masks = _condition_masks(features, candidates)
+    assert candidates
+    for index, mask in enumerate(masks):
+        for other in masks[index + 1 :]:
+            assert not np.array_equal(mask, other)
+
+
+def test_mining_never_reproposes_a_condition_the_base_rule_already_applies() -> None:
+    features = pd.DataFrame(
+        {
+            "indicator_one.main_force_raise": [5.0, 1.0, 5.0, 1.0],
+            "indicator_three.var1": [1.0, 5.0, 1.0, 5.0],
+        }
+    )
+    winners = pd.Series([True, False, True, False])
+    symbols = pd.Series(["A", "B", "C", "D"])
+    base_condition = ScreenCondition(
+        left_value="indicator_one.main_force_raise",
+        operator="gt",
+        right_value="indicator_three.var1",
+    )
+
+    without_exclusion = mine_binary_conditions(
+        features,
+        winners,
+        symbols,
+        quantiles=(0.5,),
+        min_support=2,
+        min_instruments=2,
+        limit=20,
+    )
+    excluded = frozenset(signature for signature in equivalent_condition_signatures(base_condition))
+    with_exclusion = mine_binary_conditions(
+        features,
+        winners,
+        symbols,
+        quantiles=(0.5,),
+        min_support=2,
+        min_instruments=2,
+        limit=20,
+        excluded=excluded,
+    )
+
+    def touches_base_pair(candidate) -> bool:
+        return {
+            candidate.condition.left_value,
+            candidate.condition.right_value,
+        } == {"indicator_one.main_force_raise", "indicator_three.var1"}
+
+    assert any(touches_base_pair(candidate) for candidate in without_exclusion)
+    assert not any(touches_base_pair(candidate) for candidate in with_exclusion)
 
 
 def test_mining_rejects_misaligned_sample_columns() -> None:

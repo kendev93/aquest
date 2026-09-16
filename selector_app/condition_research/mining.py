@@ -11,6 +11,15 @@ import pandas as pd
 from selector_app.screening.models import ScreenCondition
 
 DEFAULT_QUANTILES = (0.2, 0.4, 0.6, 0.8)
+# Comparing two series whose spreads differ by orders of magnitude degenerates
+# into "the varying series vs roughly zero". That is how five different feature
+# pairs collapsed into the same `indicator_three.var1 < 0` condition, so pairs
+# beyond this ratio are rejected. Scale-compatible pairs (ma5 vs ma20,
+# rsi14 vs ma20) stay well inside the limit.
+_MAX_SCALE_RATIO = 100.0
+# Two conditions whose matching samples agree this closely are the same finding
+# for the study; only the best-ranked one is reported.
+_DUPLICATE_AGREEMENT = 0.995
 _PRICE_SCALE_FEATURES = frozenset(
     {
         "technical.ma5",
@@ -28,6 +37,83 @@ _PRICE_SCALE_FEATURES = frozenset(
         "price.close",
     }
 )
+
+
+def condition_signature(condition: ScreenCondition) -> str:
+    """Stable textual key for one condition, including its constant operand."""
+
+    right = (
+        condition.right_value
+        if condition.right_value is not None
+        else f"={condition.right_constant}"
+    )
+    return f"{condition.left_value}|{condition.operator}|{right}"
+
+
+def equivalent_condition_signatures(condition: ScreenCondition) -> frozenset[str]:
+    """Every signature that means the same thing as one condition.
+
+    ``a > b`` equals ``b < a`` and ``a 上穿 b`` equals ``b 下穿 a``. Mining must
+    not re-propose a rule the base strategy already applies, because ANDing a
+    condition with itself cannot change a single trade.
+    """
+
+    signature = condition_signature(condition)
+    right = condition.right_value
+    if right is None:
+        return frozenset({signature})
+    mirrored = {
+        "gt": "lt",
+        "lt": "gt",
+        "gte": "lte",
+        "lte": "gte",
+        "cross_up": "cross_down",
+        "cross_down": "cross_up",
+    }.get(str(condition.operator))
+    if mirrored is None:
+        return frozenset({signature})
+    return frozenset(
+        {
+            signature,
+            condition_signature(
+                ScreenCondition(
+                    left_value=right, operator=mirrored, right_value=condition.left_value
+                )
+            ),
+        }
+    )
+
+
+def _spread(values: np.ndarray) -> float:
+    """Interquartile range; 0 means the comparison treats the series as constant."""
+
+    low, high = np.percentile(values, [25, 75])
+    spread = float(high) - float(low)
+    return spread if np.isfinite(spread) and spread > 0.0 else 0.0
+
+
+def _comparable_scale(left: np.ndarray, right: np.ndarray) -> bool:
+    """Reject pairwise comparisons dominated by one operand's magnitude."""
+
+    left_spread = _spread(left)
+    right_spread = _spread(right)
+    if left_spread == 0.0 or right_spread == 0.0:
+        return False
+    return max(left_spread, right_spread) / min(left_spread, right_spread) <= _MAX_SCALE_RATIO
+
+
+def _masks_agree(
+    left: np.ndarray,
+    right: np.ndarray,
+    *,
+    threshold: float = _DUPLICATE_AGREEMENT,
+) -> bool:
+    """True when two candidate masks select effectively the same samples."""
+
+    comparable = left | right
+    if not comparable.any():
+        return False
+    return float(np.mean(left[comparable] == right[comparable])) >= threshold
 
 
 @dataclass(frozen=True)
@@ -53,6 +139,7 @@ def mine_binary_conditions(
     min_support: int = 20,
     min_instruments: int = 5,
     limit: int = 50,
+    excluded: frozenset[str] = frozenset(),
 ) -> tuple[MinedCondition, ...]:
     """Find readable thresholds whose matching samples are enriched for an outcome.
 
@@ -60,6 +147,9 @@ def mine_binary_conditions(
     losing trades for sell-trigger discovery. Candidate thresholds are derived
     only from the samples passed by the caller, allowing chronological
     train/validation/holdout separation.
+
+    ``excluded`` carries ``equivalent_condition_signatures`` of the base rule so
+    the miner never proposes a condition the strategy already applies.
 
     Sample keys are factorized to integer codes once so the per-candidate work
     stays vectorized. ``pd.factorize`` hands out codes in order of first
@@ -108,8 +198,15 @@ def mine_binary_conditions(
     group_codes = pd.factorize(groups)[0]
     instrument_codes = pd.factorize(symbols)[0]
 
-    candidates: list[MinedCondition] = []
+    candidates: list[tuple[MinedCondition, np.ndarray]] = []
     seen_rules: set[tuple[str, str, str | None, float | None]] = set()
+
+    def record(candidate: MinedCondition | None, valid: np.ndarray, mask: np.ndarray) -> None:
+        if candidate is None:
+            return
+        full_mask = np.zeros(len(target), dtype=bool)
+        full_mask[valid] = mask
+        candidates.append((candidate, full_mask))
 
     for feature_id in feature_ids:
         if feature_id in _PRICE_SCALE_FEATURES:
@@ -141,7 +238,7 @@ def mine_binary_conditions(
                     right_constant=float(threshold),
                 )
                 key = _condition_key(condition)
-                if key in seen_rules:
+                if key in seen_rules or condition_signature(condition) in excluded:
                     continue
                 seen_rules.add(key)
                 candidate = _candidate_for_mask(
@@ -154,8 +251,7 @@ def mine_binary_conditions(
                     min_instruments=min_instruments,
                     baseline_rate=baseline_rate,
                 )
-                if candidate is not None:
-                    candidates.append(candidate)
+                record(candidate, valid, condition_mask)
 
     for left_index, left_id in enumerate(feature_ids):
         if not comparable[left_id]:
@@ -173,6 +269,10 @@ def mine_binary_conditions(
             valid_right = right_values[valid]
             if np.all(valid_left == valid_right):
                 continue
+            # One side nearly constant next to a wide-ranging side means the rule
+            # is really "the wide side vs ~0"; those collapse into duplicates.
+            if not _comparable_scale(valid_left, valid_right):
+                continue
             valid_target = target_float[valid]
             valid_instruments = instrument_codes[valid]
             valid_groups = group_codes[valid]
@@ -189,7 +289,7 @@ def mine_binary_conditions(
                     right_value=right_id,
                 )
                 key = _condition_key(condition)
-                if key in seen_rules:
+                if key in seen_rules or condition_signature(condition) in excluded:
                     continue
                 seen_rules.add(key)
                 candidate = _candidate_for_mask(
@@ -202,21 +302,30 @@ def mine_binary_conditions(
                     min_instruments=min_instruments,
                     baseline_rate=baseline_rate,
                 )
-                if candidate is not None:
-                    candidates.append(candidate)
+                record(candidate, valid, condition_mask)
 
-    candidates.sort(
-        key=lambda candidate: (
-            -candidate.lift,
-            -candidate.outcome_rate,
-            -candidate.support_count,
-            -candidate.instrument_count,
-            candidate.condition.left_value,
-            str(candidate.condition.operator),
-            float(candidate.condition.right_constant or 0.0),
-        )
+    ranked = sorted(
+        candidates,
+        key=lambda item: (
+            -item[0].lift,
+            -item[0].outcome_rate,
+            -item[0].support_count,
+            -item[0].instrument_count,
+            item[0].condition.left_value,
+            str(item[0].condition.operator),
+            float(item[0].condition.right_constant or 0.0),
+        ),
     )
-    return tuple(candidates[:limit])
+    selected: list[MinedCondition] = []
+    kept_masks: list[np.ndarray] = []
+    for candidate, mask in ranked:
+        if any(_masks_agree(mask, kept) for kept in kept_masks):
+            continue
+        selected.append(candidate)
+        kept_masks.append(mask)
+        if len(selected) == limit:
+            break
+    return tuple(selected)
 
 
 def _has_two_distinct(values: np.ndarray, finite_mask: np.ndarray) -> bool:
@@ -237,6 +346,10 @@ def _candidate_for_mask(
 ) -> MinedCondition | None:
     order = np.flatnonzero(condition_mask)
     if order.size == 0:
+        # Never true: it cannot produce a single trade.
+        return None
+    if order.size == outcomes.size:
+        # Always true: an AND with it cannot change any trade.
         return None
     # A group contributes at most one sample: its first matching row.
     # np.unique(..., return_index=True) reports that first occurrence, and

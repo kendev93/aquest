@@ -27,11 +27,12 @@ from selector_app.market_data.models import InstrumentBoard, InstrumentType, Sto
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.screening.jobs import TaskCancelledError, TaskUserError, report_progress_detail
 from selector_app.screening.models import ScreenCondition
+from selector_app.screening.rules import RuleGroup
 from selector_app.strategy_discovery.catalog import default_indicator_catalog
 
 from . import parallel
 from .metrics import summarize_backtests
-from .mining import MinedCondition, mine_binary_conditions
+from .mining import MinedCondition, equivalent_condition_signatures, mine_binary_conditions
 from .models import ConditionResearchConfig
 from .parallel import (
     CandidateWindowOutcome,
@@ -586,6 +587,8 @@ class ConditionResearchService:
             "search_sides": config.search_sides,
             "data_fingerprint": _combined_fingerprint(fingerprints),
             "feature_count": len(feature_ids),
+            "min_trades": config.min_trades,
+            "min_instruments": config.min_instruments,
             "total_candidates": len(refs),
             "processed": len(processed),
             "skipped": max(0, len(refs) - len(processed)),
@@ -739,6 +742,7 @@ class ConditionResearchService:
                         min_support=config.min_trades,
                         min_instruments=config.min_instruments,
                         limit=config.candidate_limit,
+                        excluded=_rule_condition_signatures(config.buy_rule),
                     )
                 )
             )
@@ -751,6 +755,7 @@ class ConditionResearchService:
                         min_support=config.min_trades,
                         min_instruments=config.min_instruments,
                         limit=config.candidate_limit,
+                        excluded=_rule_condition_signatures(config.sell_rule),
                     )
                 )
             )
@@ -799,6 +804,8 @@ class ConditionResearchService:
             "search_sides": config.search_sides,
             "data_fingerprint": _combined_fingerprint(fingerprints),
             "feature_count": len(feature_ids),
+            "min_trades": config.min_trades,
+            "min_instruments": config.min_instruments,
             "total_candidates": total,
             "processed": len(processed),
             "skipped": max(0, total - len(processed)),
@@ -855,6 +862,7 @@ def _mine_sample_sets(
     min_support: int,
     min_instruments: int,
     limit: int,
+    excluded: frozenset[str] = frozenset(),
 ) -> tuple[MinedCondition, ...]:
     usable = [sample for sample in samples if len(sample)]
     if not usable:
@@ -867,6 +875,24 @@ def _mine_sample_sets(
         min_support=min_support,
         min_instruments=min_instruments,
         limit=limit,
+        excluded=excluded,
+    )
+
+
+def _rule_condition_signatures(rule: RuleGroup | None) -> frozenset[str]:
+    """Signatures of a base rule, so mining never re-proposes its own conditions.
+
+    A buy candidate is ANDed with the base buy rule and a sell candidate is ORed
+    with the base sell rule; a condition already present on the same side can
+    therefore only produce a no-op candidate.
+    """
+
+    if rule is None:
+        return frozenset()
+    return frozenset(
+        signature
+        for condition in (*rule.required_conditions, *rule.conditions)
+        for signature in equivalent_condition_signatures(condition)
     )
 
 

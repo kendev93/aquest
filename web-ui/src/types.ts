@@ -1015,6 +1015,8 @@ export interface ConditionResearchReport {
   data_fingerprint?: string | null
   search_sides: ConditionResearchSide
   feature_count: number
+  min_trades?: number
+  min_instruments?: number
   total_candidates: number
   processed: number
   skipped: number

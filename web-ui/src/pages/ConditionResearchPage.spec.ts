@@ -75,6 +75,8 @@ const result = {
   end_date: '2024-12-31',
   search_sides: 'both',
   feature_count: 12,
+  min_trades: 20,
+  min_instruments: 5,
   total_candidates: 100,
   processed: 100,
   skipped: 0,
@@ -96,6 +98,16 @@ const result = {
     constraint_failures: [],
     full_period: summary,
     holdout: summary,
+  }, {
+    candidate_id: 'buy-2',
+    side: 'buy',
+    condition: { left_value: 'indicator.score', operator: 'gte', right_value: null, right_constant: 9.5 },
+    mining: { support_count: 2, support_ratio: 0.01, instrument_count: 2, outcome_rate: 0.9, baseline_rate: 0.6, lift: 1.5 },
+    validation: summary,
+    passed_constraints: false,
+    constraint_failures: ['交易样本不足', '胜率未高于基础规则'],
+    full_period: null,
+    holdout: null,
   }],
   algorithm: { mining: 'contrastive_threshold_rules', search: 'single_condition_then_full_stock_replay' },
 } as unknown as ConditionResearchReport
@@ -141,6 +153,13 @@ describe('ConditionResearchPage', () => {
     }))
     expect(wrapper.get('[data-testid="condition-research-results"]').text()).toContain('70.00%')
     expect(wrapper.get('[data-testid="condition-research-candidate-buy-1"]').text()).toContain('强度')
+    expect(wrapper.get('[data-testid="condition-research-candidate-buy-1"]').text()).toContain('100.000%')
+    expect(wrapper.get('[data-testid="condition-research-candidate-buy-1"]').text()).toContain('40 / 20')
+    const rejected = wrapper.get('[data-testid="condition-research-candidate-buy-2"]').text()
+    expect(rejected).toContain('5.000%')
+    expect(rejected).toContain('交易样本不足')
+    expect(rejected).toContain('胜率未高于基础规则')
+    expect(rejected).toContain('未进留出期')
     expect((wrapper.get('[data-testid="condition-stock-view"]').element as HTMLSelectElement).value).toBe('baseline:full')
     expect(wrapper.get('[data-testid="condition-research-results"]').text()).toContain('浦发银行')
     expect(wrapper.text()).toContain('留出期')

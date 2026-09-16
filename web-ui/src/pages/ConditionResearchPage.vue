@@ -433,6 +433,24 @@ function conditionText(candidate: ConditionResearchCandidate): string {
   return leftLabel + ' ' + operator + ' ' + rightLabel
 }
 
+function entryHitRate(candidate: ConditionResearchCandidate): string {
+  const baselineTrades = report.value?.baseline.train.pooled_trades.closed_trades
+  if (!baselineTrades) return '—'
+  return ((candidate.mining.support_count / baselineTrades) * 100).toFixed(3) + '%'
+}
+
+function validationTrades(candidate: ConditionResearchCandidate): string {
+  const trades = candidate.validation.pooled_trades.closed_trades
+  const threshold = report.value?.min_trades
+  return threshold ? trades + ' / ' + threshold : String(trades)
+}
+
+function constraintText(candidate: ConditionResearchCandidate): string {
+  if (candidate.passed_constraints) return '通过验证'
+  const failures = candidate.constraint_failures ?? []
+  return failures.length ? failures.join(' · ') : '未入围'
+}
+
 function phaseCount(state: ConditionResearchJobState | null, key: 'phase_current' | 'phase_total'): number {
   const value = state?.metadata?.[key]
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
@@ -670,7 +688,7 @@ onMounted(async () => {
             <div v-else class="table-wrap">
               <table>
                 <caption class="sr-only">买卖条件候选验证结果</caption>
-                <thead><tr><th>方向</th><th>新增条件</th><th>样本 / 股票</th><th>训练 lift</th><th>验证胜率</th><th>全区间胜率</th><th>股票胜率提升率</th><th>盈亏比</th><th>留出胜率</th><th>状态</th></tr></thead>
+                <thead><tr><th>方向</th><th>新增条件</th><th>样本 / 股票</th><th>训练 lift</th><th title="该条件在基础规则入场日上的命中比例（全市场合并）">入场命中率</th><th title="验证期合并成交笔数 / 你设置的最少交易样本">验证成交 / 门槛</th><th>验证胜率</th><th>全区间胜率</th><th>股票胜率提升率</th><th>盈亏比</th><th>留出胜率</th><th>状态</th></tr></thead>
                 <tbody>
                   <tr
                     v-for="candidate in report.candidates"
@@ -682,13 +700,15 @@ onMounted(async () => {
                     <td class="condition-rule">{{ conditionText(candidate) }}</td>
                     <td>{{ candidate.mining.support_count }} / {{ candidate.mining.instrument_count }}</td>
                     <td>{{ formatNumber(candidate.mining.lift) }}</td>
+                    <td>{{ entryHitRate(candidate) }}</td>
+                    <td>{{ validationTrades(candidate) }}</td>
                     <td>{{ formatPercent(candidate.validation.pooled_trades.win_rate) }}</td>
                     <td>{{ formatPercent(candidate.full_period?.pooled_trades.win_rate) }}</td>
                     <td>{{ formatPercent(candidate.validation.per_stock.improved_stock_ratio) }}</td>
                     <td>{{ formatNumber(candidate.validation.pooled_trades.payoff_ratio) }}</td>
                     <td>{{ formatPercent(candidate.holdout?.pooled_trades.win_rate) }}</td>
                     <td>
-                      <span :class="candidate.passed_constraints ? 'positive' : 'muted-code'">{{ candidate.passed_constraints ? '通过验证' : candidate.constraint_failures[0] ?? '未入围' }}</span>
+                      <span :class="candidate.passed_constraints ? 'positive' : 'muted-code'">{{ constraintText(candidate) }}</span>
                       <button
                         v-if="candidate.full_period"
                         class="text-button"
