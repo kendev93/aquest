@@ -20,6 +20,12 @@ _PRICE_SCALE_FEATURES = frozenset(
         "technical.macd",
         "technical.macd_signal",
         "technical.macd_histogram",
+        # Raw prices are absolute per stock; they are supported as user-written
+        # condition operands but must never become a mined cross-stock threshold.
+        "price.open",
+        "price.high",
+        "price.low",
+        "price.close",
     }
 )
 

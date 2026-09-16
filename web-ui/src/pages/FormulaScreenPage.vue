@@ -99,6 +99,9 @@ const syncRemaining = computed(() => Math.max(
 const presetSignals = computed(() => (
   metadata.value?.indicators.flatMap((indicator) => indicator.signals) ?? []
 ))
+const signalIndicators = computed(() => (
+  metadata.value?.indicators.filter((indicator) => indicator.signals.length) ?? []
+))
 const valueGroups = computed<{ label: string; values: ValueDefinition[] }[]>(() => {
   if (form.mode === 'custom') {
     return customMetadata.value?.values?.length
@@ -766,7 +769,7 @@ watch(() => form.formulaText, (value) => {
             <p v-if="errors.selectedSignals" class="field-error" data-testid="signals-error">{{ errors.selectedSignals }}</p>
             <template v-if="form.mode === 'preset'">
               <div v-if="!metadata" class="skeleton-list" aria-label="正在加载信号"></div>
-              <div v-for="indicator in metadata?.indicators ?? []" :key="indicator.id" class="indicator-block">
+              <div v-for="indicator in signalIndicators" :key="indicator.id" class="indicator-block">
                 <div class="indicator-heading"><strong>{{ indicator.display_name }}</strong><small>建议预热 {{ indicator.recommended_bars }} 根 · 最少 {{ indicator.minimum_bars }} 根</small></div>
                 <label v-for="signal in indicator.signals" :key="signal.id" class="signal-option" :for="signal.id">
                   <input :id="signal.id" :data-testid="`signal-${signal.id}`" type="checkbox" :checked="form.selectedSignals.includes(signal.id)" @change="toggleSignal(signal.id, ($event.target as HTMLInputElement).checked)">

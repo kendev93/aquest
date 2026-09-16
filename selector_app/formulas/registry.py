@@ -43,6 +43,21 @@ from .indicator_two import (
 from .indicator_two import (
     calculate_indicator_two,
 )
+from .price import (
+    DISPLAY_NAME as PRICE_DISPLAY_NAME,
+)
+from .price import (
+    MINIMUM_BARS as PRICE_MINIMUM_BARS,
+)
+from .price import (
+    RECOMMENDED_BARS as PRICE_RECOMMENDED_BARS,
+)
+from .price import (
+    VALUE_NAMES as PRICE_VALUE_NAMES,
+)
+from .price import (
+    calculate_price_series,
+)
 from .technical import (
     DISPLAY_NAME as TECHNICAL_DISPLAY_NAME,
 )
@@ -134,6 +149,12 @@ _VALUE_DISPLAY_NAMES: dict[str, dict[str, str]] = {
         "macd": "MACD",
         "macd_signal": "SIGNAL",
         "macd_histogram": "MACD柱",
+    },
+    "price": {
+        "open": "开盘价",
+        "high": "最高价",
+        "low": "最低价",
+        "close": "收盘价",
     },
 }
 
@@ -408,6 +429,15 @@ FORMULA_REGISTRY = FormulaRegistry(
             signals=(),
             value_names=TECHNICAL_VALUE_NAMES,
             screen_value_names=TECHNICAL_VALUE_NAMES,
+        ),
+        FormulaDefinition(
+            id="price",
+            display_name=PRICE_DISPLAY_NAME,
+            minimum_bars=PRICE_MINIMUM_BARS,
+            recommended_bars=PRICE_RECOMMENDED_BARS,
+            calculate=calculate_price_series,
+            signals=(),
+            value_names=PRICE_VALUE_NAMES,
         ),
     )
 )

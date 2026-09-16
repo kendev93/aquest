@@ -90,6 +90,34 @@ def test_engine_reads_numeric_outputs_from_a_preset_indicator() -> None:
     assert report.results[0].matched_signals == ("condition_1",)
 
 
+def test_registry_exposes_kline_prices_as_condition_operands() -> None:
+    frame = _bars([1, 2, 3, 4])
+    result = FORMULA_REGISTRY.formula("price").calculate(frame)
+
+    assert FORMULA_REGISTRY.has_value("price.close")
+    assert FORMULA_REGISTRY.has_value("price.open")
+    assert result.values["close"].tolist() == [1.0, 2.0, 3.0, 4.0]
+    assert result.values["high"].tolist() == [1.5, 2.5, 3.5, 4.5]
+    assert result.values["low"].tolist() == [0.5, 1.5, 2.5, 3.5]
+
+
+def test_engine_compares_a_price_with_an_indicator() -> None:
+    condition = ScreenCondition(
+        left_value="price.close",
+        operator="cross_up",
+        right_value="technical.ma5",
+    )
+
+    report = ScreenEngine(_Adapter(_bars([1, 1, 1, 1, 1, 10]))).scan(
+        _config(condition, formula_text=None)
+    )
+
+    assert report.errors == 0
+    assert report.total_signals == 1
+    assert report.results[0].matched_signals == ("condition_1",)
+    assert report.results[0].indicator_values["price.close"] == 10.0
+
+
 @pytest.mark.parametrize(
     ("operator", "closes", "threshold"),
     [

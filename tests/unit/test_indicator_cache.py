@@ -272,7 +272,7 @@ def test_precompute_service_materializes_all_builtin_formulas(tmp_path: Path) ->
 
     assert report.total_candidates == 1
     assert report.processed == 1
-    assert report.computed == 4
+    assert report.computed == 5
     assert report.errors == 0
 
     cold_cache = IndicatorCache(store)
@@ -282,7 +282,7 @@ def test_precompute_service_materializes_all_builtin_formulas(tmp_path: Path) ->
         market="SH",
         code="600000",
     )
-    assert cold_cache.metrics()["persistent_hits"] == 4
+    assert cold_cache.metrics()["persistent_hits"] == 5
     assert cold_cache.metrics()["computed"] == 0
 
 
@@ -389,7 +389,7 @@ def test_cache_can_preload_persistent_rows_for_multiple_symbols(tmp_path: Path) 
         ids,
     )
 
-    assert reader.metrics()["persistent_hits"] == 8
+    assert reader.metrics()["persistent_hits"] == 10
 
 
 def test_backtest_report_records_the_input_data_fingerprint() -> None:

@@ -9,6 +9,13 @@ from functools import lru_cache
 from selector_app.formulas.registry import FORMULA_REGISTRY, FormulaRegistry
 
 _CONSTANT_VALUE_IDS = frozenset({"indicator_one.z", "indicator_two.warning_line"})
+# Raw prices are valid condition operands (close 上穿 MA20) but never ranking
+# features: an absolute price is not comparable across stocks, so mining a
+# cross-stock threshold on it would be meaningless.
+_PRICE_VALUE_IDS = frozenset(
+    {"price.open", "price.high", "price.low", "price.close"}
+)
+_NON_RANKABLE_VALUE_IDS = _CONSTANT_VALUE_IDS | _PRICE_VALUE_IDS
 
 
 @dataclass(frozen=True)
@@ -97,7 +104,7 @@ def default_indicator_catalog(registry: FormulaRegistry | None = None) -> Indica
                 IndicatorDescriptor(
                     id=value_id,
                     display_name=str(raw_value["display_name"]),
-                    rankable=value_id not in _CONSTANT_VALUE_IDS,
+                    rankable=value_id not in _NON_RANKABLE_VALUE_IDS,
                 )
             )
     signals = [

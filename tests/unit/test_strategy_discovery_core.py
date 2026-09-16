@@ -45,6 +45,10 @@ def test_default_catalog_contains_existing_formula_and_chart_outputs() -> None:
     assert "macd_signal" in catalog.numeric_ids
     assert "indicator_one.z" not in catalog.rankable_ids
     assert "indicator_two.warning_line" not in catalog.rankable_ids
+    # Prices are usable condition operands but never cross-stock ranking features.
+    assert "price.close" in catalog.numeric_ids
+    assert "price.close" not in catalog.rankable_ids
+    assert "price.open" not in catalog.rankable_ids
     assert len(catalog.signal_ids) == 15
 
 
