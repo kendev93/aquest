@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 
 import {
   cancelConditionResearch,
@@ -14,6 +14,7 @@ import { fetchActiveJobs } from '../api/jobs'
 import DateRangeSelector from '../components/DateRangeSelector.vue'
 import RuleGroupEditor from '../components/RuleGroupEditor.vue'
 import type {
+  BacktestExecution,
   ConditionResearchCandidate,
   ConditionResearchJobState,
   ConditionResearchPayload,
@@ -26,9 +27,10 @@ import type {
   InstrumentBoard,
   InstrumentType,
   RuleGroupPayload,
+  ScreenCondition,
   ValueDefinition,
 } from '../types'
-import { valueOptionLabel } from '../utils/formulaScreen'
+import { parseStoredRuleGroup, valueOptionLabel } from '../utils/formulaScreen'
 
 function emptyRule(): RuleGroupPayload {
   return { signals: [], conditions: [], required_conditions: [], combine_mode: 'all', minimum_matches: null }
@@ -65,7 +67,7 @@ const form = reactive({
   minCommission: 0.1,
   stampTax: 0.001,
   slippage: 0,
-  execution: 'next_open' as const,
+  execution: 'next_open' as BacktestExecution,
 })
 const errors = ref<Record<string, string>>({})
 const message = ref('')
@@ -79,6 +81,10 @@ const history = ref<ResearchHistorySummary[]>([])
 const historyLoading = ref(false)
 const selectedHistoryId = ref('')
 const selectedStockView = ref('baseline:full')
+// 结果里勾选的候选条件，直接追加进基础规则后再跑一次研究。
+const selectedCandidateIds = ref<string[]>([])
+// 正在把历史记录回填进表单：此时不要让它触发的 watch 改写费用或板块。
+const restoring = ref(false)
 const stockFilter = ref('')
 const stockSort = ref<'win_rate' | 'payoff_ratio' | 'total_return' | 'sharpe' | 'code'>('win_rate')
 const stockPage = ref(1)
@@ -106,6 +112,7 @@ const STOCK_BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
 const STOCK_COSTS = { commission: 0.0001, stampTax: 0.001 }
 const FUND_COSTS = { commission: 0.00005, stampTax: 0 }
 watch(() => form.instrumentType, (next, previous) => {
+  if (restoring.value) return
   const from = previous === 'fund' ? FUND_COSTS : STOCK_COSTS
   const to = next === 'fund' ? FUND_COSTS : STOCK_COSTS
   if (form.commission === from.commission) form.commission = to.commission
@@ -391,6 +398,8 @@ async function pollJob(jobId: string): Promise<void> {
     if (state.status === 'completed') {
       report.value = await getConditionResearchResults(jobId)
       selectedStockView.value = 'baseline:full'
+      // 旧候选 id 已经不属于这份结果，勾选状态一并作废。
+      clearCandidateSelection()
       message.value = '研究完成：处理 ' + report.value.processed + ' 只股票，发现 '
         + report.value.candidates.length + ' 条候选规则。'
       await loadHistory()
@@ -442,13 +451,172 @@ async function resumeActiveJob(): Promise<void> {
   }
 }
 
+function isSameCondition(left: ScreenCondition, right: ScreenCondition): boolean {
+  return left.left_value === right.left_value
+    && left.operator === right.operator
+    && left.right_value === right.right_value
+    && left.right_constant === right.right_constant
+}
+
+function toggleCandidate(candidateId: string): void {
+  selectedCandidateIds.value = selectedCandidateIds.value.includes(candidateId)
+    ? selectedCandidateIds.value.filter((item) => item !== candidateId)
+    : [...selectedCandidateIds.value, candidateId]
+}
+
+function clearCandidateSelection(): void {
+  selectedCandidateIds.value = []
+}
+
+/**
+ * 把勾选的候选条件按方向追加进基础规则，然后立刻重跑一次研究。
+ *
+ * 买入候选只进买入规则、卖出候选只进卖出规则：挖出来的方向就是它当初被
+ * 评估时的位置，换到另一侧没有依据。已存在的相同条件不再重复添加。
+ */
+async function applySelectedCandidates(): Promise<void> {
+  const selected = (report.value?.candidates ?? []).filter((candidate) => (
+    selectedCandidateIds.value.includes(candidate.candidate_id)
+  ))
+  if (!selected.length) return
+  let added = 0
+  for (const candidate of selected) {
+    const incoming: ScreenCondition = { ...candidate.condition }
+    const target = candidate.side === 'sell' ? form.sellRule : form.buyRule
+    if (target.conditions.some((item) => isSameCondition(item, incoming))) continue
+    const merged: RuleGroupPayload = {
+      ...target,
+      signals: [],
+      conditions: [...target.conditions, incoming],
+    }
+    if (candidate.side === 'sell') setSellRule(merged)
+    else setBuyRule(merged)
+    added += 1
+  }
+  if (!added) {
+    message.value = '勾选的条件都已经在基础规则里了，无需重复添加。'
+    return
+  }
+  clearCandidateSelection()
+  await submit()
+}
+
+function finiteNumber(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+function storedBoards(value: unknown): InstrumentBoard[] {
+  if (!Array.isArray(value)) return []
+  const allowed = new Set<string>(STOCK_BOARD_OPTIONS.map((option) => option.key))
+  return value.filter(
+    (item): item is InstrumentBoard => typeof item === 'string' && allowed.has(item),
+  )
+}
+
+/**
+ * 把历史记录里保存的请求回填进表单。
+ *
+ * 后端存的是解析后的请求：日期已经是具体区间，板块在 ETF 下已被清空，所以
+ * 这里还原的就是"当时真正跑的那套配置"，而不是用户填的原始模式。回填期间
+ * 置位 ``restoring``，避免证券类型的 watch 顺手改写费用和板块。
+ */
+async function applyStoredRequest(raw: unknown): Promise<void> {
+  if (!raw || typeof raw !== 'object') return
+  const request = raw as Record<string, unknown>
+  restoring.value = true
+  try {
+    const types = Array.isArray(request.instrument_types) ? request.instrument_types : []
+    const type = types.find(
+      (item): item is InstrumentType => item === 'stock' || item === 'fund',
+    )
+    if (type) form.instrumentType = type
+    if (request.universe === 'all' || request.universe === 'sh' || request.universe === 'sz') {
+      form.universe = request.universe
+    }
+    form.boards = type === 'fund' ? [] : storedBoards(request.boards)
+
+    const start = typeof request.start_date === 'string' ? request.start_date : ''
+    const end = typeof request.end_date === 'string' ? request.end_date : ''
+    if (start && end) {
+      form.dateMode = 'custom'
+      form.startDate = start
+      form.endDate = end
+    } else if (
+      request.date_mode === 'recent5'
+      || request.date_mode === 'full'
+      || request.date_mode === 'custom'
+    ) {
+      form.dateMode = request.date_mode
+      form.startDate = ''
+      form.endDate = ''
+    }
+
+    if (
+      request.search_sides === 'buy'
+      || request.search_sides === 'sell'
+      || request.search_sides === 'both'
+    ) {
+      form.searchSides = request.search_sides
+    }
+    form.minTrades = finiteNumber(request.min_trades, form.minTrades)
+    form.minInstruments = finiteNumber(request.min_instruments, form.minInstruments)
+    form.candidateLimit = finiteNumber(request.candidate_limit, form.candidateLimit)
+    form.holdoutCandidates = finiteNumber(request.holdout_candidates, form.holdoutCandidates)
+    form.initialCash = finiteNumber(request.initial_cash, form.initialCash)
+    form.commission = finiteNumber(request.commission, form.commission)
+    form.minCommission = finiteNumber(request.min_commission, form.minCommission)
+    form.stampTax = finiteNumber(request.stamp_tax, form.stampTax)
+    form.slippage = finiteNumber(request.slippage, form.slippage)
+    if (request.execution === 'next_open' || request.execution === 'next_close') {
+      form.execution = request.execution
+    }
+
+    const formulaText = typeof request.formula_text === 'string' ? request.formula_text.trim() : ''
+    if (formulaText) {
+      form.formulaText = formulaText
+      if (mode.value !== 'custom') {
+        mode.value = 'custom'
+        customMetadata.value = null
+        customParseError.value = ''
+      }
+      // 解析成功后公式输出才会进 availableValues，规则才能还原出可读标签。
+      await parseCustomFormula()
+      const parameters = request.formula_parameters
+      if (parameters && typeof parameters === 'object') {
+        for (const [name, value] of Object.entries(parameters as Record<string, unknown>)) {
+          if (typeof value === 'number' && Number.isFinite(value)) {
+            form.formulaParameters[name] = value
+          }
+        }
+      }
+    } else if (mode.value !== 'preset') {
+      mode.value = 'preset'
+      customMetadata.value = null
+      parsedFormulaText.value = ''
+    }
+
+    // 规则放在最后：解析公式会把规则重置成默认值。
+    const buyRule = parseStoredRuleGroup(request.buy_rule)
+    if (buyRule) setBuyRule(buyRule)
+    const sellRule = parseStoredRuleGroup(request.sell_rule)
+    if (sellRule) setSellRule(sellRule)
+    errors.value = {}
+  } finally {
+    // watch 是 pre-flush，同步赋值结束后才跑，所以等一个 tick 再解除屏蔽。
+    await nextTick()
+    restoring.value = false
+  }
+}
+
 async function loadHistoryDetail(): Promise<void> {
   if (!selectedHistoryId.value) return
   try {
     const saved = await getConditionResearchHistory(selectedHistoryId.value)
+    await applyStoredRequest(saved.request)
     report.value = saved.result
     selectedStockView.value = 'baseline:full'
-    message.value = '已加载历史买卖条件研究。'
+    clearCandidateSelection()
+    message.value = '已加载历史买卖条件研究，并还原当时的研究配置。'
   } catch (error) {
     message.value = apiMessage(error)
   }
@@ -785,42 +953,74 @@ onMounted(async () => {
             <div v-if="!report.candidates.length" class="inline-empty">
               {{ report.diagnostic ?? '没有候选条件同时满足样本数和股票覆盖要求。' }}
             </div>
-            <div v-else class="table-wrap">
-              <table>
-                <caption class="sr-only">买卖条件候选验证结果</caption>
-                <thead><tr><th>方向</th><th>新增条件</th><th>样本 / 股票</th><th>训练 lift</th><th title="买入按基础规则入场日计，卖出按持仓期提前离场决策点计（全市场合并，分母见结果字段 sample_totals）">条件命中率</th><th title="验证期合并成交笔数 / 你设置的最少交易样本">验证成交 / 门槛</th><th>验证胜率</th><th>全区间胜率</th><th>股票胜率提升率</th><th>盈亏比</th><th>留出胜率</th><th>状态</th></tr></thead>
-                <tbody>
-                  <tr
-                    v-for="candidate in report.candidates"
-                    :key="candidate.candidate_id"
-                    :data-testid="'condition-research-candidate-' + candidate.candidate_id"
-                    :class="{ 'condition-candidate-selected': selectedStockView === candidate.candidate_id }"
-                  >
-                    <td>{{ candidate.side === 'buy' ? '买入过滤' : '卖出触发' }}</td>
-                    <td class="condition-rule">{{ conditionText(candidate) }}</td>
-                    <td>{{ candidate.mining.support_count }} / {{ candidate.mining.instrument_count }}</td>
-                    <td>{{ formatNumber(candidate.mining.lift) }}</td>
-                    <td :title="hitRateTitle(candidate)">{{ conditionHitRate(candidate) }}</td>
-                    <td>{{ validationTrades(candidate) }}</td>
-                    <td>{{ formatPercent(candidate.validation.pooled_trades.win_rate) }}</td>
-                    <td>{{ formatPercent(candidate.full_period?.pooled_trades.win_rate) }}</td>
-                    <td>{{ formatPercent(candidate.validation.per_stock.improved_stock_ratio) }}</td>
-                    <td>{{ formatNumber(candidate.validation.pooled_trades.payoff_ratio) }}</td>
-                    <td>{{ formatPercent(candidate.holdout?.pooled_trades.win_rate) }}</td>
-                    <td>
-                      <span :class="candidate.passed_constraints ? 'positive' : 'muted-code'">{{ constraintText(candidate) }}</span>
-                      <button
-                        v-if="candidate.full_period"
-                        class="text-button"
-                        :data-testid="'show-condition-stock-' + candidate.candidate_id"
-                        type="button"
-                        @click="selectedStockView = candidate.candidate_id + ':full'"
-                      >个股</button>
-                      <span v-else class="muted-code">未进留出期</span>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
+            <div v-else>
+              <div class="condition-candidate-actions" data-testid="condition-candidate-actions">
+                <span>已选 {{ selectedCandidateIds.length }} / {{ report.candidates.length }} 条</span>
+                <button
+                  class="secondary-button"
+                  data-testid="apply-selected-conditions"
+                  type="button"
+                  :disabled="loading || !selectedCandidateIds.length"
+                  @click="applySelectedCandidates"
+                >加入基础规则并重测</button>
+                <button
+                  class="text-button"
+                  data-testid="clear-selected-conditions"
+                  type="button"
+                  :disabled="!selectedCandidateIds.length"
+                  @click="clearCandidateSelection"
+                >清空选择</button>
+              </div>
+              <p class="helper">
+                勾选后按方向追加：买入候选进「买入基础条件」，卖出候选进「卖出基础条件」，
+                然后立即用新规则重跑一次研究。
+              </p>
+              <div class="table-wrap">
+                <table>
+                  <caption class="sr-only">买卖条件候选验证结果</caption>
+                  <thead><tr><th>选择</th><th>方向</th><th>新增条件</th><th>样本 / 股票</th><th>训练 lift</th><th title="买入按基础规则入场日计，卖出按持仓期提前离场决策点计（全市场合并，分母见结果字段 sample_totals）">条件命中率</th><th title="验证期合并成交笔数 / 你设置的最少交易样本">验证成交 / 门槛</th><th>验证胜率</th><th>全区间胜率</th><th>股票胜率提升率</th><th>盈亏比</th><th>留出胜率</th><th>状态</th></tr></thead>
+                  <tbody>
+                    <tr
+                      v-for="candidate in report.candidates"
+                      :key="candidate.candidate_id"
+                      :data-testid="'condition-research-candidate-' + candidate.candidate_id"
+                      :class="{ 'condition-candidate-selected': selectedStockView === candidate.candidate_id }"
+                    >
+                      <td>
+                        <input
+                          type="checkbox"
+                          :data-testid="'select-condition-' + candidate.candidate_id"
+                          :checked="selectedCandidateIds.includes(candidate.candidate_id)"
+                          :aria-label="'选择候选条件 ' + conditionText(candidate)"
+                          @change="toggleCandidate(candidate.candidate_id)"
+                        >
+                      </td>
+                      <td>{{ candidate.side === 'buy' ? '买入过滤' : '卖出触发' }}</td>
+                      <td class="condition-rule">{{ conditionText(candidate) }}</td>
+                      <td>{{ candidate.mining.support_count }} / {{ candidate.mining.instrument_count }}</td>
+                      <td>{{ formatNumber(candidate.mining.lift) }}</td>
+                      <td :title="hitRateTitle(candidate)">{{ conditionHitRate(candidate) }}</td>
+                      <td>{{ validationTrades(candidate) }}</td>
+                      <td>{{ formatPercent(candidate.validation.pooled_trades.win_rate) }}</td>
+                      <td>{{ formatPercent(candidate.full_period?.pooled_trades.win_rate) }}</td>
+                      <td>{{ formatPercent(candidate.validation.per_stock.improved_stock_ratio) }}</td>
+                      <td>{{ formatNumber(candidate.validation.pooled_trades.payoff_ratio) }}</td>
+                      <td>{{ formatPercent(candidate.holdout?.pooled_trades.win_rate) }}</td>
+                      <td>
+                        <span :class="candidate.passed_constraints ? 'positive' : 'muted-code'">{{ constraintText(candidate) }}</span>
+                        <button
+                          v-if="candidate.full_period"
+                          class="text-button"
+                          :data-testid="'show-condition-stock-' + candidate.candidate_id"
+                          type="button"
+                          @click="selectedStockView = candidate.candidate_id + ':full'"
+                        >个股</button>
+                        <span v-else class="muted-code">未进留出期</span>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
             </div>
             <section class="condition-stock-details">
               <div class="section-heading">
@@ -897,7 +1097,8 @@ onMounted(async () => {
               </option>
             </select>
           </div>
-          <button class="secondary-button" data-testid="load-condition-history" type="button" :disabled="historyLoading || !selectedHistoryId" @click="loadHistoryDetail">加载历史结果</button>
+          <button class="secondary-button" data-testid="load-condition-history" type="button" :disabled="historyLoading || !selectedHistoryId" @click="loadHistoryDetail">加载历史研究</button>
+          <p class="helper">加载时会一并还原当时的标的范围、买卖规则、日期区间和交易费用，方便在此基础上继续调整。</p>
         </div>
       </section>
     </main>
@@ -924,6 +1125,20 @@ onMounted(async () => {
 
 .condition-candidate-selected {
   background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.condition-candidate-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.35rem;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+
+.condition-candidate-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .condition-rule {

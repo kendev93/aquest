@@ -172,6 +172,49 @@ export function numericRuleForSignal(
   return { signals: [], conditions: [], combine_mode: 'all', minimum_matches: null }
 }
 
+const COMBINE_MODES = new Set<CombineMode>(['all', 'any', 'at_least'])
+
+/**
+ * Rebuild a rule group saved inside a history record.
+ *
+ * Stored payloads come back as plain JSON, so every field has to be re-validated
+ * before it reaches an editor: a rule with neither a right operand nor a
+ * constant, or one carrying both, would render as a condition the user cannot
+ * fix. ``null`` means "nothing usable here", which callers read as "keep the
+ * current rule".
+ */
+export function parseStoredRuleGroup(value: unknown): RuleGroupPayload | null {
+  if (!value || typeof value !== 'object') return null
+  const record = value as Record<string, unknown>
+  const conditions = parseConditions(record.conditions)
+  const requiredConditions = parseConditions(record.required_conditions)
+  const signals = Array.isArray(record.signals)
+    ? record.signals.filter(
+      (item): item is string => typeof item === 'string' && item.trim().length > 0,
+    )
+    : []
+  if (!signals.length && !conditions.length && !requiredConditions.length) return null
+  const generatedCount = signals.length + conditions.length
+  const requested = COMBINE_MODES.has(record.combine_mode as CombineMode)
+    ? record.combine_mode as CombineMode
+    : 'all'
+  // A single item has nothing to combine, so force the plainest mode back.
+  const combineMode = generatedCount < 2 ? 'all' : requested
+  const rawMinimum = record.minimum_matches
+  const minimumMatches = combineMode === 'at_least'
+    && typeof rawMinimum === 'number'
+    && Number.isFinite(rawMinimum)
+    ? Math.min(Math.max(Math.trunc(rawMinimum), 1), generatedCount)
+    : null
+  return {
+    signals,
+    conditions,
+    required_conditions: requiredConditions,
+    combine_mode: combineMode,
+    minimum_matches: minimumMatches,
+  }
+}
+
 export function validateScreenForm(
   form: ScreenFormState,
   customMetadata: CustomFormulaMetadata | null = null,

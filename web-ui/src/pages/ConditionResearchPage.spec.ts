@@ -124,6 +124,16 @@ const result = {
     constraint_failures: ['交易样本不足', '胜率未高于基础规则'],
     full_period: null,
     holdout: null,
+  }, {
+    candidate_id: 'sell-1',
+    side: 'sell',
+    condition: { left_value: 'indicator.score', operator: 'lte', right_value: null, right_constant: -1.5 },
+    mining: { support_count: 50, support_ratio: 0.25, instrument_count: 9, outcome_rate: 0.7, baseline_rate: 0.5, lift: 1.4 },
+    validation: summary,
+    passed_constraints: true,
+    constraint_failures: [],
+    full_period: summary,
+    holdout: summary,
   }],
   algorithm: { mining: 'contrastive_threshold_rules', search: 'single_condition_then_full_stock_replay' },
 } as unknown as ConditionResearchReport
@@ -366,5 +376,204 @@ describe('ConditionResearchPage', () => {
 
     expect(researchApi.getConditionResearch).toHaveBeenCalledWith('research-running')
     expect(wrapper.get('[data-testid="condition-research-results"]').text()).toContain('2.500')
+  })
+
+  it('appends a selected candidate to its own side and reruns the study', async () => {
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+    expect(researchApi.createConditionResearch).toHaveBeenCalledTimes(1)
+
+    await wrapper.get('[data-testid="select-condition-buy-1"]').setValue(true)
+    await wrapper.get('[data-testid="select-condition-sell-1"]').setValue(true)
+    await wrapper.get('[data-testid="apply-selected-conditions"]').trigger('click')
+    await flushPromises()
+
+    expect(researchApi.createConditionResearch).toHaveBeenCalledTimes(2)
+    const payload = vi.mocked(researchApi.createConditionResearch).mock.calls[1][0]
+    // 买入候选只进买入规则，卖出候选只进卖出规则，两侧互不串台。
+    expect(payload.buy_rule.conditions).toEqual([
+      expect.objectContaining({ left_value: 'indicator.score', operator: 'gt' }),
+      { left_value: 'indicator.score', operator: 'gte', right_value: null, right_constant: 2.5 },
+    ])
+    expect(payload.sell_rule.conditions).toEqual([
+      expect.objectContaining({ left_value: 'indicator.score', operator: 'lte' }),
+      { left_value: 'indicator.score', operator: 'lte', right_value: null, right_constant: -1.5 },
+    ])
+    // 勾选状态在重跑后作废，避免残留指向旧结果的 id。
+    expect((wrapper.get('[data-testid="select-condition-buy-1"]').element as HTMLInputElement).checked).toBe(false)
+  })
+
+  it('adds a candidate only once when it is applied twice', async () => {
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="select-condition-buy-1"]').setValue(true)
+    await wrapper.get('[data-testid="apply-selected-conditions"]').trigger('click')
+    await flushPromises()
+    expect(researchApi.createConditionResearch).toHaveBeenCalledTimes(2)
+
+    // 同一条候选再点一次：不该重复塞进规则，也不该白跑一次研究。
+    await wrapper.get('[data-testid="select-condition-buy-1"]').setValue(true)
+    await wrapper.get('[data-testid="apply-selected-conditions"]').trigger('click')
+    await flushPromises()
+    expect(researchApi.createConditionResearch).toHaveBeenCalledTimes(2)
+    expect(wrapper.get('[data-testid="condition-research-message"]').text()).toContain('已经在基础规则里')
+  })
+
+  it('restores the saved configuration when loading a history record', async () => {
+    vi.mocked(researchApi.fetchConditionResearchHistory).mockResolvedValueOnce([
+      {
+        history_id: 'hist-1',
+        backtest_type: 'condition_research',
+        created_at: '2024-05-01T09:00:00',
+        started_at: '2024-05-01T09:00:00',
+        finished_at: '2024-05-01T09:02:00',
+        duration_seconds: 120,
+        summary: {},
+      },
+    ])
+    vi.mocked(researchApi.getConditionResearchHistory).mockResolvedValueOnce({
+      history_id: 'hist-1',
+      created_at: '2024-05-01T09:00:00',
+      started_at: '2024-05-01T09:00:00',
+      finished_at: '2024-05-01T09:02:00',
+      duration_seconds: 120,
+      summary: {},
+      backtest_type: 'condition_research',
+      request: {
+        universe: 'sz',
+        instrument_types: ['stock'],
+        boards: ['chinext'],
+        buy_rule: {
+          signals: [],
+          conditions: [
+            { left_value: 'indicator.score', operator: 'gte', right_value: null, right_constant: 3 },
+          ],
+          required_conditions: [],
+          combine_mode: 'all',
+          minimum_matches: null,
+        },
+        sell_rule: {
+          signals: [],
+          conditions: [
+            { left_value: 'indicator.score', operator: 'lte', right_value: null, right_constant: -2 },
+          ],
+          required_conditions: [],
+          combine_mode: 'all',
+          minimum_matches: null,
+        },
+        // 后端保存的是解析后的区间，不是用户选的模式。
+        date_mode: 'custom',
+        start_date: '2021-03-01',
+        end_date: '2024-09-30',
+        search_sides: 'buy',
+        min_trades: 33,
+        min_instruments: 7,
+        candidate_limit: 4,
+        holdout_candidates: 2,
+        initial_cash: 250_000,
+        commission: 0.0002,
+        min_commission: 1,
+        stamp_tax: 0.0005,
+        slippage: 0.02,
+        execution: 'next_close',
+        formula_text: null,
+        formula_parameters: {},
+      },
+      result,
+    })
+
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="load-condition-history"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="condition-research-results"]').text()).toContain('浦发银行')
+    expect((wrapper.get('[data-testid="condition-universe"]').element as HTMLSelectElement).value).toBe('sz')
+    expect((wrapper.get('[data-testid="condition-board-chinext"]').element as HTMLInputElement).checked).toBe(true)
+    expect((wrapper.get('[data-testid="condition-search-sides"]').element as HTMLSelectElement).value).toBe('buy')
+    expect((wrapper.get('[data-testid="condition-min-trades"]').element as HTMLInputElement).value).toBe('33')
+    expect((wrapper.get('[data-testid="condition-min-instruments"]').element as HTMLInputElement).value).toBe('7')
+    expect((wrapper.get('[data-testid="condition-date-mode"]').element as HTMLSelectElement).value).toBe('custom')
+    expect((wrapper.get('[data-testid="condition-start"]').element as HTMLInputElement).value).toBe('2021-03-01')
+    expect((wrapper.get('[data-testid="condition-end"]').element as HTMLInputElement).value).toBe('2024-09-30')
+
+    // 还原后的配置要能直接再次提交。
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+    expect(researchApi.createConditionResearch).toHaveBeenCalledWith(expect.objectContaining({
+      universe: 'sz',
+      boards: ['chinext'],
+      search_sides: 'buy',
+      min_trades: 33,
+      min_instruments: 7,
+      candidate_limit: 4,
+      holdout_candidates: 2,
+      buy_rule: expect.objectContaining({
+        conditions: [expect.objectContaining({ operator: 'gte', right_constant: 3 })],
+      }),
+      sell_rule: expect.objectContaining({
+        conditions: [expect.objectContaining({ operator: 'lte', right_constant: -2 })],
+      }),
+    }))
+  })
+
+  it('restores an ETF study without re-introducing stock board filters', async () => {
+    vi.mocked(researchApi.fetchConditionResearchHistory).mockResolvedValueOnce([
+      {
+        history_id: 'hist-etf',
+        backtest_type: 'condition_research',
+        created_at: '2024-06-01T09:00:00',
+        started_at: '2024-06-01T09:00:00',
+        finished_at: '2024-06-01T09:01:00',
+        duration_seconds: 60,
+        summary: {},
+      },
+    ])
+    vi.mocked(researchApi.getConditionResearchHistory).mockResolvedValueOnce({
+      history_id: 'hist-etf',
+      created_at: '2024-06-01T09:00:00',
+      started_at: '2024-06-01T09:00:00',
+      finished_at: '2024-06-01T09:01:00',
+      duration_seconds: 60,
+      summary: {},
+      backtest_type: 'condition_research',
+      request: {
+        universe: 'all',
+        instrument_types: ['fund'],
+        boards: [],
+        buy_rule: { signals: [], conditions: [], required_conditions: [], combine_mode: 'all', minimum_matches: null },
+        sell_rule: { signals: [], conditions: [], required_conditions: [], combine_mode: 'all', minimum_matches: null },
+        date_mode: 'custom',
+        start_date: '2022-01-01',
+        end_date: '2024-12-31',
+        search_sides: 'both',
+        commission: 0.00005,
+        stamp_tax: 0,
+        min_commission: 0.1,
+        slippage: 0,
+        initial_cash: 100_000,
+        execution: 'next_open',
+        formula_text: null,
+        formula_parameters: {},
+      },
+      result,
+    })
+
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="load-condition-history"]').trigger('click')
+    await flushPromises()
+
+    expect((wrapper.get('[data-testid="condition-instrument-type"]').element as HTMLSelectElement).value).toBe('fund')
+    // 选 ETF 时板块整块隐藏，历史里的板块过滤也不该回来。
+    expect(wrapper.find('[data-testid="condition-board-scope"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="condition-advanced-toggle"]').trigger('click')
+    expect((wrapper.get('[data-testid="condition-commission"]').element as HTMLInputElement).value).toBe('0.00005')
+    expect((wrapper.get('[data-testid="condition-stamp-tax"]').element as HTMLInputElement).value).toBe('0')
   })
 })

@@ -29,12 +29,16 @@ import type {
   PortfolioTrade,
   PortfolioRebalanceFrequency,
   RuleGroupPayload,
-  ScreenCondition,
   SignalDefinition,
   Universe,
   ValueDefinition,
 } from '../types'
-import { numericRuleForSignal, signalDisplayName, valueOptionLabel } from '../utils/formulaScreen'
+import {
+  numericRuleForSignal,
+  parseStoredRuleGroup,
+  signalDisplayName,
+  valueOptionLabel,
+} from '../utils/formulaScreen'
 
 const DISCOVERY_APPLY_KEY = 'indicator-lab.strategy-discovery.apply'
 const DISCOVERY_APPLY_META_KEY = 'indicator-lab.strategy-discovery.apply-meta'
@@ -456,43 +460,6 @@ function enumValue<T extends string>(value: unknown, allowed: readonly T[], fall
   return typeof value === 'string' && allowed.includes(value as T) ? value as T : fallback
 }
 
-function storedRule(value: unknown): RuleGroupPayload | null {
-  if (!value || typeof value !== 'object') return null
-  const raw = value as Record<string, unknown>
-  const parseConditions = (rawConditions: unknown): ScreenCondition[] => (Array.isArray(rawConditions) ? rawConditions : []).flatMap((item) => {
-    if (!item || typeof item !== 'object') return []
-    const condition = item as Record<string, unknown>
-    const leftValue = typeof condition.left_value === 'string' ? condition.left_value.trim() : ''
-    const operator = enumValue(condition.operator, ['gt', 'gte', 'lt', 'lte', 'eq', 'neq', 'cross_up', 'cross_down'] as const, 'gt')
-    const rightValue = typeof condition.right_value === 'string' && condition.right_value.trim()
-      ? condition.right_value.trim()
-      : null
-    const rightConstant = typeof condition.right_constant === 'number' && Number.isFinite(condition.right_constant)
-      ? condition.right_constant
-      : null
-    if (!leftValue || (rightValue === null && rightConstant === null) || (rightValue !== null && rightConstant !== null)) return []
-    return [{ left_value: leftValue, operator, right_value: rightValue, right_constant: rightConstant }]
-  })
-  const conditions = parseConditions(raw.conditions)
-  const requiredConditions = parseConditions(raw.required_conditions)
-  const signals = Array.isArray(raw.signals)
-    ? raw.signals.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
-    : []
-  if (!signals.length && !conditions.length && !requiredConditions.length) return null
-  const generatedCount = signals.length + conditions.length
-  const requestedCombineMode = enumValue(raw.combine_mode, ['all', 'any', 'at_least'] as const, 'all')
-  const combineMode = generatedCount < 2 ? 'all' : requestedCombineMode
-  const minimumMatches = combineMode === 'at_least'
-    ? Math.min(Math.max(Math.trunc(finiteNumber(raw.minimum_matches, 1)), 1), generatedCount)
-    : null
-  return {
-    signals,
-    conditions,
-    required_conditions: requiredConditions,
-    combine_mode: combineMode,
-    minimum_matches: minimumMatches,
-  }
-}
 
 function applyStoredCandidate(raw: unknown): void {
   if (!raw || typeof raw !== 'object') return
@@ -513,8 +480,8 @@ function applyStoredCandidate(raw: unknown): void {
   if (typeof config.ranking_value === 'string' && config.ranking_value.trim()) form.rankingValue = config.ranking_value
   form.rankOrder = enumValue(config.rank_order, ['asc', 'desc'] as const, form.rankOrder)
   form.rebalanceFrequency = enumValue(config.rebalance_frequency, ['daily', 'weekly', 'monthly'] as const, form.rebalanceFrequency)
-  const buyRule = storedRule(config.buy_rule)
-  const sellRule = storedRule(config.sell_rule)
+  const buyRule = parseStoredRuleGroup(config.buy_rule)
+  const sellRule = parseStoredRuleGroup(config.sell_rule)
   if (buyRule) form.buyRule = buyRule
   if (sellRule) form.sellRule = sellRule
 

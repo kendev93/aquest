@@ -20,6 +20,7 @@ import {
   loadSavedConditionSets,
   loadSavedForm,
   numericRuleForSignal,
+  parseStoredRuleGroup,
   resultsToCsv,
   saveConditionSet,
   saveForm,
@@ -438,5 +439,65 @@ describe('formula screen defensive parsing and fallbacks', () => {
     expect(header).toContain('"name"')
     expect(first).toContain('""')
     expect(second).toContain('"平安""银行"""')
+  })
+  it('rebuilds a rule group saved in a history record', () => {
+    const restored = parseStoredRuleGroup({
+      signals: [],
+      conditions: [
+        { left_value: 'technical.rsi14', operator: 'gte', right_value: null, right_constant: 55 },
+      ],
+      required_conditions: [],
+      combine_mode: 'all',
+      minimum_matches: null,
+    })
+    expect(restored).toEqual({
+      signals: [],
+      conditions: [
+        { left_value: 'technical.rsi14', operator: 'gte', right_value: null, right_constant: 55 },
+      ],
+      required_conditions: [],
+      combine_mode: 'all',
+      minimum_matches: null,
+    })
+  })
+
+  it('drops unusable conditions and normalises at_least thresholds', () => {
+    // 左右操作数同时缺失或同时存在都无法在编辑器里表达，必须整条丢弃。
+    const restored = parseStoredRuleGroup({
+      conditions: [
+        // 右操作数缺失 / 两侧都有值 / 运算符非法，三种都无法在编辑器里表达。
+        { left_value: 'technical.rsi14', operator: 'gt', right_value: null, right_constant: null },
+        { left_value: 'technical.rsi14', operator: 'gt', right_value: 'technical.ma20', right_constant: 1 },
+        { left_value: 'technical.rsi14', operator: 'nope', right_value: null, right_constant: 1 },
+        { left_value: 'technical.rsi14', operator: 'lt', right_value: null, right_constant: 30 },
+        { left_value: 'technical.rsi14', operator: 'gte', right_value: null, right_constant: 55 },
+      ],
+      combine_mode: 'at_least',
+      minimum_matches: 9,
+    })
+    expect(restored?.conditions).toEqual([
+      { left_value: 'technical.rsi14', operator: 'lt', right_value: null, right_constant: 30 },
+      { left_value: 'technical.rsi14', operator: 'gte', right_value: null, right_constant: 55 },
+    ])
+    // 阈值被夹到实际条目数，避免出现「至少满足 9 / 2 条」。
+    expect(restored?.minimum_matches).toBe(2)
+  })
+
+  it('returns null when nothing usable is stored', () => {
+    expect(parseStoredRuleGroup(null)).toBeNull()
+    expect(parseStoredRuleGroup('rule')).toBeNull()
+    expect(parseStoredRuleGroup({ conditions: [] })).toBeNull()
+    expect(parseStoredRuleGroup({ conditions: [{ left_value: 'x' }] })).toBeNull()
+  })
+
+  it('forces the plain combine mode when only one item survives', () => {
+    const restored = parseStoredRuleGroup({
+      signals: ['indicator_one.buy'],
+      conditions: [],
+      combine_mode: 'any',
+      minimum_matches: 3,
+    })
+    expect(restored?.combine_mode).toBe('all')
+    expect(restored?.minimum_matches).toBeNull()
   })
 })
