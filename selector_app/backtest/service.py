@@ -119,8 +119,10 @@ class BacktestService:
         window_indices = self._window_indices(frame, config.start_date, config.end_date)
         if len(window_indices) == 0:
             raise ValueError("指定日期范围内没有可用日线数据")
-        if config.buy_rule is None or config.sell_rule is None:
-            raise ValueError("买入和卖出规则不能为空")
+        if config.buy_rule is None and not config.always_in_market:
+            raise ValueError("买入规则不能为空，或者开启「持续满仓」由系统在每个交易日尝试入场")
+        if config.sell_rule is None and not config.close_at_end:
+            raise ValueError("卖出规则不能为空，或者开启「持有到期末」由系统在最后一根 K 线平仓")
         feature_values = self._feature_frame(
             frame,
             formula_results,
@@ -153,13 +155,20 @@ class BacktestService:
 
         A buy filter is ANDed with the base buy rule. An added sell trigger is
         ORed with the base sell rule, preserving the user's original logic.
+
+        Both sides fall back to their combining operation's identity element when
+        the base rule is missing: the buy side to "always" (AND) and the sell side
+        to "never" (OR). A candidate added to an empty side is therefore the whole
+        rule on that side.
         """
 
         config = prepared.config
         selected_buy_rule = buy_rule or config.buy_rule
         selected_sell_rule = sell_rule or config.sell_rule
-        if selected_buy_rule is None or selected_sell_rule is None:
-            raise ValueError("买入和卖出规则不能为空")
+        if selected_buy_rule is None and not config.always_in_market:
+            raise ValueError("买入规则不能为空，或者开启「持续满仓」由系统在每个交易日尝试入场")
+        if selected_sell_rule is None and not config.close_at_end:
+            raise ValueError("卖出规则不能为空，或者开启「持有到期末」由系统在最后一根 K 线平仓")
         if start_date is None and end_date is None:
             start_date = config.start_date
             end_date = config.end_date
@@ -172,6 +181,7 @@ class BacktestService:
             selected_buy_rule,
             indices,
             prepared.custom_formula,
+            default=config.always_in_market,
         )
         sell_mask = self._rule_window(
             prepared.formula_results,
@@ -361,10 +371,16 @@ class BacktestService:
     def _rule_window(
         self,
         results: Mapping[str, FormulaResult],
-        rule: RuleGroup,
+        rule: RuleGroup | None,
         indices: np.ndarray,
         custom: bool,
+        *,
+        default: bool = False,
     ) -> np.ndarray:
+        if rule is None:
+            # 空规则取合并运算的单位元：卖出侧是「恒不卖」（OR 的单位元 False，
+            # 只等收官平仓），买入侧在「持续满仓」下是「天天买」（AND 的单位元 True）。
+            return np.full(len(indices), default, dtype=bool)
         mask = evaluate_rule_group(rule, results, self._registry, custom=custom)
         return np.asarray(mask[indices], dtype=bool).copy()
 
@@ -392,6 +408,7 @@ class BacktestService:
                 position_mode=config.position_mode,
                 fixed_size=config.fixed_size,
                 instrument_type=config.instrument_type or "stock",
+                close_at_end=config.close_at_end,
             ),
             market=config.market,
             code=config.code,

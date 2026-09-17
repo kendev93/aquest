@@ -231,3 +231,137 @@ def test_formula_backtest_accepts_composable_buy_and_sell_rules() -> None:
     assert report.buy_signal is None
     assert report.sell_signal is None
     assert report.trades
+
+
+def test_backtest_without_a_sell_rule_holds_until_the_last_bar() -> None:
+    """开启「持有到期末」后，没有卖出规则也能回测，并在最后一根按收盘价平仓。"""
+
+    service = BacktestService(adapter=FakeAdapter(make_frame()))
+    report = service.run(
+        config(
+            buy_signal=None,
+            sell_signal=None,
+            buy_rule=RuleGroup(signals=("custom.buy",)),
+            sell_rule=None,
+            formula_text="BUY:C=11;",
+            close_at_end=True,
+            end_date=date(2024, 1, 10),
+        )
+    )
+
+    assert [trade["direction"] for trade in report.trades] == ["BUY", "SELL"]
+    # 买入落在 01-03，平仓落在窗口最后一根 01-10。
+    assert [trade["date"] for trade in report.trades] == ["2024-01-03", "2024-01-10"]
+
+
+def test_backtest_without_a_sell_rule_is_rejected_unless_hold_to_end_is_on() -> None:
+    """不给卖出规则又不勾「持有到期末」必须报错，不能悄悄跑出一个永不卖出的回测。"""
+
+    with pytest.raises(ValueError, match="卖出规则不能为空"):
+        config(
+            buy_signal=None,
+            sell_signal=None,
+            buy_rule=RuleGroup(signals=("custom.buy",)),
+            sell_rule=None,
+            formula_text="BUY:C=11;",
+        )
+
+
+def test_hold_to_end_replay_treats_a_candidate_sell_trigger_as_the_whole_rule() -> None:
+    """基础卖出为空时，候选条件是 OR 上去的，所以它本身就是完整卖出规则。"""
+
+    service = BacktestService(adapter=FakeAdapter(make_frame()))
+    prepared = service.prepare(
+        config(
+            buy_signal=None,
+            sell_signal=None,
+            buy_rule=RuleGroup(signals=("custom.buy",)),
+            sell_rule=None,
+            formula_text="BUY:C=11; FAST:C;",
+            close_at_end=True,
+            end_date=date(2024, 1, 10),
+        )
+    )
+
+    triggered = service.run_prepared(
+        prepared,
+        sell_trigger=ScreenCondition(left_value="custom.fast", operator="gt", right_constant=11.5),
+    )
+
+    # 12.0 那天触发卖出，次日以 13.0 离场，而不是一路持有到 01-10。
+    assert [trade["date"] for trade in triggered.trades] == ["2024-01-03", "2024-01-04"]
+
+
+def test_backtest_without_a_buy_rule_reenters_right_after_each_exit() -> None:
+    """开启「持续满仓」后，没有买入规则也能回测：每次离场后下一个交易日立即再入场。"""
+
+    service = BacktestService(adapter=FakeAdapter(make_frame()))
+    report = service.run(
+        config(
+            buy_signal=None,
+            sell_signal=None,
+            buy_rule=None,
+            sell_rule=RuleGroup(signals=("custom.sell",)),
+            formula_text="SELL:C=14;",
+            always_in_market=True,
+            end_date=date(2024, 1, 10),
+        )
+    )
+
+    assert [trade["direction"] for trade in report.trades] == [
+        "BUY",
+        "SELL",
+        "BUY",
+        "SELL",
+        "BUY",
+    ]
+    assert [trade["date"] for trade in report.trades] == [
+        "2024-01-03",
+        "2024-01-06",
+        "2024-01-07",
+        "2024-01-09",
+        "2024-01-10",
+    ]
+
+
+def test_backtest_without_a_buy_rule_is_rejected_unless_always_in_market_is_on() -> None:
+    """不给买入规则又不勾「持续满仓」必须报错，不能悄悄跑出一个永不入场的回测。"""
+
+    with pytest.raises(ValueError, match="买入规则不能为空"):
+        config(
+            buy_signal=None,
+            sell_signal=None,
+            buy_rule=None,
+            sell_rule=RuleGroup(signals=("custom.sell",)),
+            formula_text="SELL:C=14;",
+        )
+
+
+def test_always_in_market_replay_treats_a_candidate_buy_filter_as_the_whole_rule() -> None:
+    """基础买入为空时，候选条件是 AND 到「天天买」上的，所以它本身就是完整买入规则。"""
+
+    service = BacktestService(adapter=FakeAdapter(make_frame()))
+    prepared = service.prepare(
+        config(
+            buy_signal=None,
+            sell_signal=None,
+            buy_rule=None,
+            sell_rule=RuleGroup(signals=("custom.sell",)),
+            formula_text="SELL:C=14; FAST:C;",
+            always_in_market=True,
+            end_date=date(2024, 1, 10),
+        )
+    )
+
+    filtered = service.run_prepared(
+        prepared,
+        buy_filter=ScreenCondition(left_value="custom.fast", operator="lt", right_constant=12.5),
+    )
+
+    # 01-06 离场后收盘价已经高于 12.5，直到 01-07 才重新满足入场，比持续满仓晚一天。
+    assert [trade["date"] for trade in filtered.trades] == [
+        "2024-01-03",
+        "2024-01-06",
+        "2024-01-08",
+        "2024-01-09",
+    ]

@@ -136,8 +136,45 @@ def test_condition_research_job_returns_results_and_persists_history(tmp_path: P
     assert not hasattr(service.config, "max_positions")
 
 
-def test_condition_research_api_rejects_missing_sell_rule(tmp_path: Path) -> None:
+def test_condition_research_api_accepts_missing_sell_rule_as_hold_to_end(tmp_path: Path) -> None:
+    """不传卖出规则表示「持有到期末」，应该被接受而不是当作缺字段。"""
+
+    body = payload(tmp_path)
+    body.pop("sell_rule")
+    service = FakeConditionResearchService()
+    app = create_app(condition_research_service=service, auto_sync_enabled=False)
+
+    with TestClient(app) as client:
+        created = client.post("/api/v1/condition-research", json=body)
+        assert created.status_code == 202
+        job_id = created.json()["data"]["job_id"]
+        assert wait_for_job(client, job_id)["status"] == "completed"
+
+    assert service.config is not None
+    assert service.config.sell_rule is None
+
+
+def test_condition_research_api_accepts_missing_buy_rule(tmp_path: Path) -> None:
+    """不传买入规则表示「持续满仓」，应该被接受而不是当作缺字段。"""
+
+    body = payload(tmp_path)
+    body.pop("buy_rule")
+    service = FakeConditionResearchService()
+    app = create_app(condition_research_service=service, auto_sync_enabled=False)
+
+    with TestClient(app) as client:
+        created = client.post("/api/v1/condition-research", json=body)
+        assert created.status_code == 202
+        job_id = created.json()["data"]["job_id"]
+        assert wait_for_job(client, job_id)["status"] == "completed"
+
+    assert service.config is not None
+    assert service.config.buy_rule is None
+
+
+def test_condition_research_api_rejects_both_rules_missing(tmp_path: Path) -> None:
     invalid = payload(tmp_path)
+    invalid.pop("buy_rule")
     invalid.pop("sell_rule")
     app = create_app(auto_sync_enabled=False)
 
@@ -145,6 +182,7 @@ def test_condition_research_api_rejects_missing_sell_rule(tmp_path: Path) -> Non
         response = client.post("/api/v1/condition-research", json=invalid)
 
     assert response.status_code == 422
+    assert "不能同时留空" in response.json()["error"]["message"]
 
 
 def test_condition_research_api_rejects_a_run_over_the_memory_budget(tmp_path: Path) -> None:

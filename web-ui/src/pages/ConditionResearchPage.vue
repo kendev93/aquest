@@ -83,6 +83,10 @@ const selectedHistoryId = ref('')
 const selectedStockView = ref('baseline:full')
 // 结果里勾选的候选条件，直接追加进基础规则后再跑一次研究。
 const selectedCandidateIds = ref<string[]>([])
+// 「持有到期末」：不设基础卖出条件，让研究以「一直持有」为基准去搜索卖点。
+const holdToEnd = ref(false)
+// 「持续满仓」：持有到期末的对偶。不设基础买入条件，让研究以「天天买」为基准去搜索买点。
+const alwaysInMarket = ref(false)
 // 正在把历史记录回填进表单：此时不要让它触发的 watch 改写费用或板块。
 const restoring = ref(false)
 const stockFilter = ref('')
@@ -242,6 +246,20 @@ function initialRule(side: 'buy' | 'sell'): RuleGroupPayload {
 function resetRules(): void {
   form.buyRule = initialRule('buy')
   form.sellRule = initialRule('sell')
+  holdToEnd.value = false
+  alwaysInMarket.value = false
+}
+
+function setHoldToEnd(next: boolean): void {
+  holdToEnd.value = next
+  // 关掉开关后必须有卖出条件可填，否则提交会被拦下来；回到默认写法最省事。
+  if (!next && !form.sellRule.conditions.length) form.sellRule = initialRule('sell')
+}
+
+function setAlwaysInMarket(next: boolean): void {
+  alwaysInMarket.value = next
+  // 同理：关掉开关后买入条件不能是空的。
+  if (!next && !form.buyRule.conditions.length) form.buyRule = initialRule('buy')
 }
 
 function toggleBoard(board: InstrumentBoard): void {
@@ -306,11 +324,14 @@ async function parseCustomFormula(): Promise<void> {
 
 function validate(): Record<string, string> {
   const next: Record<string, string> = {}
-  if (!form.buyRule.conditions.length) {
-    next.buyRule = '请至少设置一个买入指标条件。'
+  if (!alwaysInMarket.value && !form.buyRule.conditions.length) {
+    next.buyRule = '请至少设置一个买入指标条件，或勾选「持续满仓」。'
   }
-  if (!form.sellRule.conditions.length) {
-    next.sellRule = '请至少设置一个卖出指标条件。'
+  if (!holdToEnd.value && !form.sellRule.conditions.length) {
+    next.sellRule = '请至少设置一个卖出指标条件，或勾选「持有到期末」。'
+  }
+  if (alwaysInMarket.value && holdToEnd.value) {
+    next.buyRule = '买入和卖出不能同时留空，至少要保留一侧条件作为研究基准。'
   }
   if (mode.value === 'custom') {
     if (!form.formulaText.trim()) next.formulaText = '请输入自定义公式。'
@@ -342,8 +363,10 @@ function buildPayload(): ConditionResearchPayload {
     universe: form.universe,
     instrument_types: [form.instrumentType] as ConditionResearchPayload['instrument_types'],
     ...(form.boards.length ? { boards: [...form.boards] as ConditionResearchPayload['boards'] } : {}),
-    buy_rule: form.buyRule,
-    sell_rule: form.sellRule,
+    // null 表示「不设基础买入条件」，后端据此按持续满仓处理。
+    buy_rule: alwaysInMarket.value ? null : form.buyRule,
+    // null 表示「不设基础卖出条件」，后端据此按持有到期末处理。
+    sell_rule: holdToEnd.value ? null : form.sellRule,
     formula_text: mode.value === 'custom' ? form.formulaText.trim() : null,
     formula_parameters: mode.value === 'custom' ? { ...form.formulaParameters } : {},
     date_mode: form.dateMode,
@@ -482,6 +505,21 @@ async function applySelectedCandidates(): Promise<void> {
   let added = 0
   for (const candidate of selected) {
     const incoming: ScreenCondition = { ...candidate.condition }
+    if (candidate.side === 'sell' && holdToEnd.value) {
+      // 基准从「一直持有」换成这条候选，否则重测还是以持有到期末为参照，
+      // 只会挖出同一批条件。
+      holdToEnd.value = false
+      setSellRule({ ...emptyRule(), conditions: [incoming] })
+      added += 1
+      continue
+    }
+    if (candidate.side === 'buy' && alwaysInMarket.value) {
+      // 对偶：基准从「天天买」换成这条候选，否则重测还是以持续满仓为参照。
+      alwaysInMarket.value = false
+      setBuyRule({ ...emptyRule(), conditions: [incoming] })
+      added += 1
+      continue
+    }
     const target = candidate.side === 'sell' ? form.sellRule : form.buyRule
     if (target.conditions.some((item) => isSameCondition(item, incoming))) continue
     const merged: RuleGroupPayload = {
@@ -596,10 +634,19 @@ async function applyStoredRequest(raw: unknown): Promise<void> {
     }
 
     // 规则放在最后：解析公式会把规则重置成默认值。
+    // 历史里 buy_rule / sell_rule 为 null 就表示当年用的是「持续满仓」/「持有到期末」。
     const buyRule = parseStoredRuleGroup(request.buy_rule)
-    if (buyRule) setBuyRule(buyRule)
+    alwaysInMarket.value = request.buy_rule === null
+    if (buyRule) {
+      setBuyRule(buyRule)
+      alwaysInMarket.value = false
+    }
     const sellRule = parseStoredRuleGroup(request.sell_rule)
-    if (sellRule) setSellRule(sellRule)
+    holdToEnd.value = request.sell_rule === null
+    if (sellRule) {
+      setSellRule(sellRule)
+      holdToEnd.value = false
+    }
     errors.value = {}
   } finally {
     // watch 是 pre-flush，同步赋值结束后才跑，所以等一个 tick 再解除屏蔽。
@@ -815,6 +862,7 @@ onMounted(async () => {
           </fieldset>
 
           <RuleGroupEditor
+            v-if="!alwaysInMarket"
             :model-value="form.buyRule"
             :values="availableValues"
             :condition-operators="metadata?.condition_operators"
@@ -823,8 +871,24 @@ onMounted(async () => {
             :max-conditions="3"
             @update:model-value="setBuyRule"
           />
-          <p v-if="errors.buyRule" class="field-error">{{ errors.buyRule }}</p>
+          <p v-if="errors.buyRule" class="field-error" data-testid="condition-buy-error">{{ errors.buyRule }}</p>
+          <div class="condition-hold-to-end">
+            <label>
+              <input
+                type="checkbox"
+                data-testid="condition-always-in-market"
+                :checked="alwaysInMarket"
+                @change="setAlwaysInMarket(($event.target as HTMLInputElement).checked)"
+              >
+              不设基础买入条件（持续满仓，让研究自己找买点）
+            </label>
+            <small v-if="alwaysInMarket" data-testid="condition-always-in-market-hint">
+              每次离场后下一个交易日立即再买入，全程持有。研究以这条「一直持有」的基线为参照挖掘买入条件 ——
+              挖出来的候选就是完整买入规则，可以直接拿去用。
+            </small>
+          </div>
           <RuleGroupEditor
+            v-if="!holdToEnd"
             :model-value="form.sellRule"
             :values="availableValues"
             :condition-operators="metadata?.condition_operators"
@@ -834,6 +898,21 @@ onMounted(async () => {
             @update:model-value="setSellRule"
           />
           <p v-if="errors.sellRule" class="field-error">{{ errors.sellRule }}</p>
+          <div class="condition-hold-to-end">
+            <label>
+              <input
+                type="checkbox"
+                data-testid="condition-hold-to-end"
+                :checked="holdToEnd"
+                @change="setHoldToEnd(($event.target as HTMLInputElement).checked)"
+              >
+              不设基础卖出条件（持有到期末，让研究自己找卖点）
+            </label>
+            <small v-if="holdToEnd" data-testid="condition-hold-to-end-hint">
+              买入后一直持有到回测区间最后一天按收盘价平仓。研究以这条「一直持有」的基线为参照挖掘卖出条件 ——
+              挖出来的候选就是完整卖出规则，可以直接拿去用。
+            </small>
+          </div>
           <p v-if="noBidirectionalValue" class="helper" data-testid="condition-sell-default-hint">
             当前可用输出里没有零轴震荡指标（如 MACD 柱），阈值 0 的两侧并不都成立；
             卖出默认条件已改为买入条件的互补写法以避免恒不成立，请按研究目标自行调整。
@@ -1139,6 +1218,24 @@ onMounted(async () => {
 .condition-candidate-actions button:disabled {
   cursor: not-allowed;
   opacity: 0.5;
+}
+
+.condition-hold-to-end {
+  margin: 0.6rem 0 0.8rem;
+}
+
+.condition-hold-to-end label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.9rem;
+}
+
+.condition-hold-to-end small {
+  display: block;
+  margin-top: 0.35rem;
+  color: var(--text-muted, #6b7280);
+  line-height: 1.5;
 }
 
 .condition-rule {

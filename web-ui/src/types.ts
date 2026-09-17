@@ -915,8 +915,10 @@ export interface ConditionResearchPayload {
   vipdoc_path?: string
   instrument_types?: InstrumentType[]
   boards?: InstrumentBoard[]
-  buy_rule: RuleGroupPayload
-  sell_rule: RuleGroupPayload
+  // null = 不设基础买入条件（持续满仓），由研究直接搜索买入时机。
+  buy_rule: RuleGroupPayload | null
+  // null = 不设基础卖出条件（持有到期末），由研究直接搜索卖出时机。
+  sell_rule: RuleGroupPayload | null
   formula_text?: string | null
   formula_parameters?: Record<string, number>
   date_mode?: DateRangeMode

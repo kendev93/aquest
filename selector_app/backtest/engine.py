@@ -33,6 +33,9 @@ class SignalBacktestConfig:
     start_date: date | None = None
     end_date: date | None = None
     instrument_type: InstrumentType = "stock"
+    # 收官时把还没卖掉的仓位按最后一根收盘价平掉。只有「不设卖出规则」的场景需要它，
+    # 默认关闭以免改变既有回测的交易笔数。
+    close_at_end: bool = False
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.initial_cash) or self.initial_cash <= 0:
@@ -264,6 +267,41 @@ def run_signal_backtest(
                 pending = ("SELL", index)
             elif position <= 0 and buys[index]:
                 pending = ("BUY", index)
+
+    if config.close_at_end and position > 0:
+        # 没有卖出规则时的收官平仓：按最后一根收盘价成交，signal 与成交同日。
+        # 权益曲线此前已经按收盘价计过市值，这里只补一笔交易记录，不再改曲线。
+        last_index = len(prepared) - 1
+        current_date = pd.Timestamp(dates[last_index])
+        price = float(closes[last_index])
+        size = position
+        commission = max(size * price * profile.commission, profile.min_commission)
+        stamp_tax = size * price * profile.stamp_tax
+        slippage = size * config.slippage
+        cost_basis = average_cost * size
+        pnl = size * price - commission - stamp_tax - slippage - cost_basis
+        cash += size * price - commission - stamp_tax - slippage
+        trades.append(
+            _trade(
+                current_date,
+                "SELL",
+                size,
+                price,
+                commission,
+                stamp_tax,
+                slippage,
+                pnl,
+                cost_basis,
+                False,
+                market,
+                code,
+                name,
+                last_index,
+                dates[last_index],
+            )
+        )
+        position = 0.0
+        average_cost = 0.0
 
     equity_frame = pd.DataFrame({"total": totals}) if summary_only else pd.DataFrame(equity)
     if not summary_only:

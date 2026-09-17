@@ -45,8 +45,15 @@ def rule_to_dict(rule: RuleGroup) -> dict[str, object]:
 class ConditionResearchConfig:
     vipdoc_path: str
     universe: Universe
-    buy_rule: RuleGroup
-    sell_rule: RuleGroup
+    # 留空 = 不设基准买入条件，以「持续满仓」为基准（卖出后下一个交易日立即再买入）。
+    # 此时研究挖出的买入候选就是完整买入规则（基础为空，候选 AND 上去等于候选本身）。
+    # 与 sell_rule 一样刻意不给默认值，理由见下。
+    buy_rule: RuleGroup | None
+    # 留空 = 不设基准卖出规则，持仓一直拿到期末按收盘价平仓。此时研究挖出的卖出候选
+    # 就是完整卖出规则（基础为空，候选 OR 上去等于候选本身）。
+    # 刻意不给默认值：dataclass 里它后面还有无默认的 start_date/end_date，而且
+    # 「不设买入/卖出」应当是一次显式的表达，不是漏填。
+    sell_rule: RuleGroup | None
     start_date: date
     end_date: date
     formula_text: str | None = None
@@ -78,10 +85,12 @@ class ConditionResearchConfig:
             raise ValueError("买卖条件研究一次只能选择一类证券，避免跨类型样本混池影响阈值可比性")
         if self.start_date > self.end_date:
             raise ValueError("研究开始日期不能晚于结束日期")
-        if not _has_rule(self.buy_rule):
-            raise ValueError("基础买入条件不能为空")
-        if not _has_rule(self.sell_rule):
-            raise ValueError("基础卖出条件不能为空")
+        if self.buy_rule is None and self.sell_rule is None:
+            raise ValueError("买入和卖出条件不能同时留空，至少要保留一侧作为研究基准")
+        if self.buy_rule is not None and not _has_rule(self.buy_rule):
+            raise ValueError("基础买入条件为空时请直接留空，表示持续满仓由研究寻找买点")
+        if self.sell_rule is not None and not _has_rule(self.sell_rule):
+            raise ValueError("基础卖出条件为空时请直接留空，表示持有到期末由研究寻找卖点")
         if self.search_sides not in {"buy", "sell", "both"}:
             raise ValueError("条件搜索范围无效")
         if not 0.0 < self.train_ratio < 1.0:
@@ -161,8 +170,9 @@ class ConditionResearchConfig:
         return {
             "vipdoc_path": self.vipdoc_path,
             "universe": self.universe,
-            "buy_rule": rule_to_dict(self.buy_rule),
-            "sell_rule": rule_to_dict(self.sell_rule),
+            # None 是两种「让研究自己找」的模式，历史记录要能还原它。
+            "buy_rule": rule_to_dict(self.buy_rule) if self.buy_rule is not None else None,
+            "sell_rule": rule_to_dict(self.sell_rule) if self.sell_rule is not None else None,
             "start_date": self.start_date.isoformat(),
             "end_date": self.end_date.isoformat(),
             "formula_text": self.formula_text,

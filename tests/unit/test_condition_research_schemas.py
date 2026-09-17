@@ -67,11 +67,56 @@ def test_research_request_rejects_unsupported_instrument_types(
         ConditionResearchRequest.model_validate(body)
 
 
-def test_research_request_requires_both_base_rules() -> None:
+def test_research_request_allows_an_empty_sell_rule_for_hold_to_end() -> None:
+    """不传卖出规则是合法的：表示持有到期末，让研究自己找卖点。"""
+
     body = payload()
     del body["sell_rule"]
 
-    with pytest.raises(ValidationError, match="sell_rule"):
+    request = ConditionResearchRequest.model_validate(body)
+    config = request.to_config(start_date=date(2020, 1, 1), end_date=date(2024, 12, 31))
+
+    assert config.sell_rule is None
+
+
+def test_research_request_rejects_an_empty_sell_rule_object() -> None:
+    """传了卖出规则但没有内容时直接拒绝：要么给条件，要么整个留空表示持有到期末。"""
+
+    body = payload()
+    body["sell_rule"] = {"signals": [], "conditions": []}
+
+    with pytest.raises(ValidationError, match="至少需要一个信号或指标条件"):
+        ConditionResearchRequest.model_validate(body)
+
+
+def test_research_request_allows_an_empty_buy_rule_for_always_in_market() -> None:
+    """不传买入规则是合法的：表示持续满仓，让研究自己找买点。"""
+
+    body = payload()
+    del body["buy_rule"]
+
+    request = ConditionResearchRequest.model_validate(body)
+    config = request.to_config(start_date=date(2020, 1, 1), end_date=date(2024, 12, 31))
+
+    assert config.buy_rule is None
+
+
+def test_research_request_rejects_an_empty_buy_rule_object() -> None:
+    """传了买入规则但没有内容时直接拒绝：要么给条件，要么整个留空表示持续满仓。"""
+
+    body = payload()
+    body["buy_rule"] = {"signals": [], "conditions": []}
+
+    with pytest.raises(ValidationError, match="至少需要一个信号或指标条件"):
+        ConditionResearchRequest.model_validate(body)
+
+
+def test_research_request_rejects_both_rules_missing() -> None:
+    body = payload()
+    del body["buy_rule"]
+    del body["sell_rule"]
+
+    with pytest.raises(ValidationError, match="不能同时留空"):
         ConditionResearchRequest.model_validate(body)
 
 

@@ -393,11 +393,11 @@ describe('ConditionResearchPage', () => {
     expect(researchApi.createConditionResearch).toHaveBeenCalledTimes(2)
     const payload = vi.mocked(researchApi.createConditionResearch).mock.calls[1][0]
     // 买入候选只进买入规则，卖出候选只进卖出规则，两侧互不串台。
-    expect(payload.buy_rule.conditions).toEqual([
+    expect(payload.buy_rule?.conditions).toEqual([
       expect.objectContaining({ left_value: 'indicator.score', operator: 'gt' }),
       { left_value: 'indicator.score', operator: 'gte', right_value: null, right_constant: 2.5 },
     ])
-    expect(payload.sell_rule.conditions).toEqual([
+    expect(payload.sell_rule?.conditions).toEqual([
       expect.objectContaining({ left_value: 'indicator.score', operator: 'lte' }),
       { left_value: 'indicator.score', operator: 'lte', right_value: null, right_constant: -1.5 },
     ])
@@ -522,6 +522,193 @@ describe('ConditionResearchPage', () => {
     }))
   })
 
+  it('can mine the sell side without setting a base sell rule', async () => {
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-hold-to-end"]').setValue(true)
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(researchApi.createConditionResearch).toHaveBeenCalledTimes(1)
+    const payload = vi.mocked(researchApi.createConditionResearch).mock.calls[0][0]
+    expect(payload.sell_rule).toBeNull()
+    expect(payload.buy_rule?.conditions?.length ?? 0).toBeGreaterThan(0)
+    // 选了「持有到期末」就不再显示卖出编辑器，但要说清楚基线是什么。
+    expect(wrapper.find('[data-testid="condition-sell-rule"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="condition-hold-to-end-hint"]').exists()).toBe(true)
+  })
+
+  it('keeps the study blocked when the sell rule is empty and hold-to-end is off', async () => {
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-hold-to-end"]').setValue(true)
+    await wrapper.get('[data-testid="condition-hold-to-end"]').setValue(false)
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+
+    // 关掉开关会自动补回默认卖出条件，所以这里应当照常提交。
+    expect(researchApi.createConditionResearch).toHaveBeenCalledTimes(1)
+    expect(researchApi.createConditionResearch).toHaveBeenCalledWith(
+      expect.objectContaining({ sell_rule: expect.objectContaining({ conditions: expect.any(Array) }) }),
+    )
+  })
+
+  it('turns hold-to-end off once a mined sell condition becomes the base rule', async () => {
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-hold-to-end"]').setValue(true)
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="select-condition-sell-1"]').setValue(true)
+    await wrapper.get('[data-testid="apply-selected-conditions"]').trigger('click')
+    await flushPromises()
+
+    // 基准换成挖出来的条件再重测，否则还是以「一直持有」为参照，只会挖出同一批。
+    expect(researchApi.createConditionResearch).toHaveBeenCalledTimes(2)
+    const payload = vi.mocked(researchApi.createConditionResearch).mock.calls[1][0]
+    expect(payload.sell_rule).toEqual(expect.objectContaining({
+      conditions: [
+        { left_value: 'indicator.score', operator: 'lte', right_value: null, right_constant: -1.5 },
+      ],
+    }))
+    expect((wrapper.get('[data-testid="condition-hold-to-end"]').element as HTMLInputElement).checked).toBe(false)
+  })
+
+  it('can mine the buy side without setting a base buy rule', async () => {
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-always-in-market"]').setValue(true)
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(researchApi.createConditionResearch).toHaveBeenCalledTimes(1)
+    const payload = vi.mocked(researchApi.createConditionResearch).mock.calls[0][0]
+    expect(payload.buy_rule).toBeNull()
+    expect(payload.sell_rule?.conditions?.length ?? 0).toBeGreaterThan(0)
+    // 选了「持续满仓」就不再显示买入编辑器，但要说清楚基线是什么。
+    expect(wrapper.find('[data-testid="condition-buy-rule"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="condition-always-in-market-hint"]').exists()).toBe(true)
+  })
+
+  it('keeps the study runnable when always-in-market is switched back off', async () => {
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-always-in-market"]').setValue(true)
+    await wrapper.get('[data-testid="condition-always-in-market"]').setValue(false)
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+
+    // 关掉开关会自动补回默认买入条件，所以这里应当照常提交。
+    expect(researchApi.createConditionResearch).toHaveBeenCalledTimes(1)
+    expect(researchApi.createConditionResearch).toHaveBeenCalledWith(
+      expect.objectContaining({ buy_rule: expect.objectContaining({ conditions: expect.any(Array) }) }),
+    )
+  })
+
+  it('turns always-in-market off once a mined buy condition becomes the base rule', async () => {
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-always-in-market"]').setValue(true)
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="select-condition-buy-1"]').setValue(true)
+    await wrapper.get('[data-testid="apply-selected-conditions"]').trigger('click')
+    await flushPromises()
+
+    // 基准换成挖出来的条件再重测，否则还是以「天天买」为参照，只会挖出同一批。
+    expect(researchApi.createConditionResearch).toHaveBeenCalledTimes(2)
+    const payload = vi.mocked(researchApi.createConditionResearch).mock.calls[1][0]
+    expect(payload.buy_rule).toEqual(expect.objectContaining({
+      conditions: [
+        { left_value: 'indicator.score', operator: 'gte', right_value: null, right_constant: 2.5 },
+      ],
+    }))
+    expect((wrapper.get('[data-testid="condition-always-in-market"]').element as HTMLInputElement).checked).toBe(false)
+  })
+
+  it('refuses to run when both sides are handed over to the research', async () => {
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-always-in-market"]').setValue(true)
+    await wrapper.get('[data-testid="condition-hold-to-end"]').setValue(true)
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(researchApi.createConditionResearch).not.toHaveBeenCalled()
+    expect(wrapper.get('[data-testid="condition-buy-error"]').text()).toContain('不能同时留空')
+  })
+
+  it('restores always-in-market when the saved request has no buy rule', async () => {
+    vi.mocked(researchApi.fetchConditionResearchHistory).mockResolvedValueOnce([
+      {
+        history_id: 'hist-buy',
+        backtest_type: 'condition_research',
+        created_at: '2024-07-01T09:00:00',
+        started_at: '2024-07-01T09:00:00',
+        finished_at: '2024-07-01T09:03:00',
+        duration_seconds: 180,
+        summary: {},
+      },
+    ])
+    vi.mocked(researchApi.getConditionResearchHistory).mockResolvedValueOnce({
+      history_id: 'hist-buy',
+      created_at: '2024-07-01T09:00:00',
+      started_at: '2024-07-01T09:00:00',
+      finished_at: '2024-07-01T09:03:00',
+      duration_seconds: 180,
+      summary: {},
+      backtest_type: 'condition_research',
+      request: {
+        universe: 'all',
+        instrument_types: ['stock'],
+        boards: [],
+        buy_rule: null,
+        sell_rule: {
+          signals: [],
+          conditions: [
+            { left_value: 'indicator.score', operator: 'lte', right_value: null, right_constant: -2 },
+          ],
+          required_conditions: [],
+          combine_mode: 'all',
+          minimum_matches: null,
+        },
+        date_mode: 'custom',
+        start_date: '2022-01-01',
+        end_date: '2024-12-31',
+        search_sides: 'buy',
+        initial_cash: 100_000,
+        commission: 0.0001,
+        min_commission: 0.1,
+        stamp_tax: 0.001,
+        slippage: 0,
+        execution: 'next_open',
+        formula_text: null,
+        formula_parameters: {},
+      },
+      result,
+    })
+
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="load-condition-history"]').trigger('click')
+    await flushPromises()
+
+    expect((wrapper.get('[data-testid="condition-always-in-market"]').element as HTMLInputElement).checked).toBe(true)
+    expect(wrapper.find('[data-testid="condition-buy-rule"]').exists()).toBe(false)
+
+    // 还原后的配置要能原样再跑一次。
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+    expect(researchApi.createConditionResearch).toHaveBeenCalledWith(expect.objectContaining({
+      buy_rule: null,
+      sell_rule: expect.objectContaining({
+        conditions: [expect.objectContaining({ operator: 'lte', right_constant: -2 })],
+      }),
+    }))
+  })
+
   it('restores an ETF study without re-introducing stock board filters', async () => {
     vi.mocked(researchApi.fetchConditionResearchHistory).mockResolvedValueOnce([
       {
@@ -575,5 +762,71 @@ describe('ConditionResearchPage', () => {
     await wrapper.get('[data-testid="condition-advanced-toggle"]').trigger('click')
     expect((wrapper.get('[data-testid="condition-commission"]').element as HTMLInputElement).value).toBe('0.00005')
     expect((wrapper.get('[data-testid="condition-stamp-tax"]').element as HTMLInputElement).value).toBe('0')
+  })
+
+  it('restores a hold-to-end study from history', async () => {
+    // 当年没设卖出规则时，历史里存的就是 null，还原后开关必须回到选中。
+    vi.mocked(researchApi.fetchConditionResearchHistory).mockResolvedValueOnce([
+      {
+        history_id: 'hist-hold',
+        backtest_type: 'condition_research',
+        created_at: '2024-07-01T09:00:00',
+        started_at: '2024-07-01T09:00:00',
+        finished_at: '2024-07-01T09:02:00',
+        duration_seconds: 120,
+        summary: {},
+      },
+    ])
+    vi.mocked(researchApi.getConditionResearchHistory).mockResolvedValueOnce({
+      history_id: 'hist-hold',
+      created_at: '2024-07-01T09:00:00',
+      started_at: '2024-07-01T09:00:00',
+      finished_at: '2024-07-01T09:02:00',
+      duration_seconds: 120,
+      summary: {},
+      backtest_type: 'condition_research',
+      request: {
+        universe: 'all',
+        instrument_types: ['stock'],
+        boards: [],
+        buy_rule: {
+          signals: [],
+          conditions: [
+            { left_value: 'indicator.score', operator: 'gt', right_value: null, right_constant: 1 },
+          ],
+          required_conditions: [],
+          combine_mode: 'all',
+          minimum_matches: null,
+        },
+        sell_rule: null,
+        date_mode: 'custom',
+        start_date: '2021-01-01',
+        end_date: '2024-12-31',
+        search_sides: 'sell',
+        commission: 0.0001,
+        stamp_tax: 0.001,
+        min_commission: 0.1,
+        slippage: 0,
+        initial_cash: 100_000,
+        execution: 'next_open',
+        formula_text: null,
+        formula_parameters: {},
+      },
+      result,
+    })
+
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="load-condition-history"]').trigger('click')
+    await flushPromises()
+
+    expect((wrapper.get('[data-testid="condition-hold-to-end"]').element as HTMLInputElement).checked).toBe(true)
+    expect(wrapper.find('[data-testid="condition-sell-rule"]').exists()).toBe(false)
+
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+    expect(researchApi.createConditionResearch).toHaveBeenCalledWith(
+      expect.objectContaining({ sell_rule: null, search_sides: 'sell' }),
+    )
   })
 })

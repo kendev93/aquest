@@ -125,3 +125,76 @@ def test_max_drawdown_duration_starts_at_the_historical_peak(
     values = np.asarray(total, dtype=float)
     drawdown, _ = PerformanceAnalyzer._drawdown_arrays(values)
     assert PerformanceAnalyzer._max_drawdown_duration(values, drawdown) == expected
+
+
+def test_close_at_end_closes_the_open_position_on_the_last_bar() -> None:
+    """没有卖出信号时，开启「持有到期末」也要在最后一根收盘价平掉仓位。"""
+
+    result = run_signal_backtest(
+        _frame(),
+        np.array([False, True, False, False, False, False]),
+        np.zeros(6, dtype=bool),
+        SignalBacktestConfig(
+            initial_cash=10_000, commission=0, min_commission=0, stamp_tax=0, close_at_end=True
+        ),
+    )
+
+    assert result.trades["direction"].tolist() == ["BUY", "SELL"]
+    # 买入在 01-03（信号 01-02 的次日开盘），平仓落在最后一根 01-06。
+    assert result.trades["datetime"].dt.strftime("%Y-%m-%d").tolist() == [
+        "2024-01-03",
+        "2024-01-06",
+    ]
+    # 01-03 以 12.0 买入 800 股（9600），期末按最后一根 close 13.0 平仓 → 10400 + 400 现金。
+    assert result.trades.iloc[0]["price"] == 12.0
+    assert result.trades.iloc[1]["price"] == 13.0
+    assert result.trades.iloc[1]["size"] == 800
+    assert result.performance["end_value"] == pytest.approx(10_800.0)
+
+
+def test_close_at_end_is_off_by_default() -> None:
+    """默认行为不变：没卖出的持仓不产生交易记录。"""
+
+    result = run_signal_backtest(
+        _frame(),
+        np.array([False, True, False, False, False, False]),
+        np.zeros(6, dtype=bool),
+        SignalBacktestConfig(initial_cash=10_000, commission=0, min_commission=0, stamp_tax=0),
+    )
+
+    assert result.trades["direction"].tolist() == ["BUY"]
+
+
+def test_close_at_end_charges_the_same_costs_as_a_normal_sell() -> None:
+    """收官平仓要照常扣佣金与印花税，不能是一笔零成本的假交易。"""
+
+    result = run_signal_backtest(
+        _frame(),
+        np.array([False, True, False, False, False, False]),
+        np.zeros(6, dtype=bool),
+        SignalBacktestConfig(
+            initial_cash=10_000, commission=0.001, min_commission=0.1, stamp_tax=0.001
+        ),
+    )
+
+    assert result.trades["direction"].tolist() == ["BUY"]
+
+    with_tax = run_signal_backtest(
+        _frame(),
+        np.array([False, True, False, False, False, False]),
+        np.zeros(6, dtype=bool),
+        SignalBacktestConfig(
+            initial_cash=10_000,
+            commission=0.001,
+            min_commission=0.1,
+            stamp_tax=0.001,
+            close_at_end=True,
+        ),
+    )
+
+    trade = with_tax.trades.iloc[1]
+    proceeds = 800 * 13.0
+    assert trade["commission"] == pytest.approx(proceeds * 0.001)
+    assert trade["stamp_tax"] == pytest.approx(proceeds * 0.001)
+    # 平仓盈亏要扣掉双边成本，不能等于毛收益。
+    assert trade["pnl"] < proceeds - 800 * 12.0

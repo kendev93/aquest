@@ -95,6 +95,12 @@ def _backtest_config(config: ConditionResearchConfig, ref: StockRef) -> Backtest
         vipdoc_path=config.vipdoc_path,
         buy_rule=config.buy_rule,
         sell_rule=config.sell_rule,
+        # 没有基准卖出规则时让回测在期末按收盘价平仓，否则持仓永远不产生卖出交易，
+        # 「提前离场」样本就无从构造。
+        close_at_end=config.sell_rule is None,
+        # 对偶：没有基准买入规则时让回测持续满仓，否则永远不入场，
+        # 「盈利/亏损入场」样本同样无从构造。
+        always_in_market=config.buy_rule is None,
         formula_text=config.formula_text,
         formula_parameters=config.formula_parameters,
         start_date=config.start_date,

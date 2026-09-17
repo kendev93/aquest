@@ -409,6 +409,62 @@ def test_etf_research_uses_fund_costs_without_stamp_tax() -> None:
     assert fund_backtest.stamp_tax == 0.0
 
 
+def test_missing_sell_rule_switches_on_hold_to_end() -> None:
+    """只给买入条件时，回测必须开启期末平仓，否则持仓永远不产生卖出交易。"""
+
+    config = _research_config(sell_rule=None)
+    ref = StockRef("SH", "600000", Path("/tmp/vipdoc"), instrument_type="stock")
+
+    backtest = _backtest_config(config, ref)
+
+    assert backtest.sell_rule is None
+    assert backtest.close_at_end is True
+
+
+def test_missing_buy_rule_switches_on_always_in_market() -> None:
+    """只给卖出条件时，回测必须持续满仓，否则永远不入场、一笔交易也没有。"""
+
+    config = _research_config(buy_rule=None)
+    ref = StockRef("SH", "600000", Path("/tmp/vipdoc"), instrument_type="stock")
+
+    backtest = _backtest_config(config, ref)
+
+    assert backtest.buy_rule is None
+    assert backtest.always_in_market is True
+    assert backtest.close_at_end is False
+
+
+def test_explicit_buy_rule_keeps_the_original_entry_behaviour() -> None:
+    config = _research_config()
+    ref = StockRef("SH", "600000", Path("/tmp/vipdoc"), instrument_type="stock")
+
+    assert _backtest_config(config, ref).always_in_market is False
+
+
+def test_both_rules_may_not_be_left_out_at_once() -> None:
+    with pytest.raises(ValueError, match="不能同时留空"):
+        _research_config(buy_rule=None, sell_rule=None)
+
+
+def test_explicit_sell_rule_keeps_the_original_close_behaviour() -> None:
+    """给了卖出条件就保持原样：期末不平仓，避免悄悄改变既有研究结果。"""
+
+    config = _research_config()
+    ref = StockRef("SH", "600000", Path("/tmp/vipdoc"), instrument_type="stock")
+
+    assert _backtest_config(config, ref).close_at_end is False
+
+
+def test_sell_rule_may_be_left_out_but_not_left_empty() -> None:
+    """「持有到期末」只能用 None 表达：空规则组在规则层就被拒，不会蒙混过关。"""
+
+    with pytest.raises(ValueError, match="至少需要一个信号或指标条件"):
+        _research_config(sell_rule=RuleGroup())
+
+    with pytest.raises(ValueError, match="至少需要一个信号或指标条件"):
+        _research_config(buy_rule=RuleGroup())
+
+
 def test_etf_research_keeps_fund_commission_when_stamp_tax_is_cleared() -> None:
     """回归：只改印花税不应让 ETF 退回股票佣金。"""
 

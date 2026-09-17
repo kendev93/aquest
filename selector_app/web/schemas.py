@@ -429,8 +429,10 @@ class ConditionResearchRequest(BaseModel):
     vipdoc_path: str = Field(default="", max_length=1024)
     instrument_types: list[InstrumentType] | None = Field(default=None, max_length=2)
     boards: list[InstrumentBoard] = Field(default_factory=list, max_length=4)
-    buy_rule: RuleGroupRequest
-    sell_rule: RuleGroupRequest
+    # 留空表示「不设基准买入条件，持续满仓」，由研究直接搜索买入时机。
+    buy_rule: RuleGroupRequest | None = None
+    # 留空表示「不设基准卖出条件，持有到期末」，由研究直接搜索卖出时机。
+    sell_rule: RuleGroupRequest | None = None
     formula_text: str | None = Field(default=None, max_length=20_000)
     formula_parameters: dict[str, float] = Field(default_factory=dict, max_length=32)
     date_mode: DateRangeMode = "recent5"
@@ -465,9 +467,11 @@ class ConditionResearchRequest(BaseModel):
         if self.start_date is not None and self.end_date is not None:
             if self.start_date > self.end_date:
                 raise ValueError("研究开始日期不能晚于结束日期")
+        if self.buy_rule is None and self.sell_rule is None:
+            raise ValueError("买入和卖出条件不能同时留空，至少要保留一侧作为研究基准")
         signal_ids = [
-            *self.buy_rule.signals,
-            *self.sell_rule.signals,
+            *(self.buy_rule.signals if self.buy_rule is not None else []),
+            *(self.sell_rule.signals if self.sell_rule is not None else []),
         ]
         validate_formula_signals(
             self.formula_text,
@@ -477,10 +481,10 @@ class ConditionResearchRequest(BaseModel):
         if self.formula_text and not parse_formula(self.formula_text).value_names:
             raise ValueError("自定义公式至少需要包含一个数值输出，才能自动挖掘条件")
         conditions = [
-            *self.buy_rule.required_conditions,
-            *self.buy_rule.conditions,
-            *self.sell_rule.required_conditions,
-            *self.sell_rule.conditions,
+            *(self.buy_rule.required_conditions if self.buy_rule is not None else []),
+            *(self.buy_rule.conditions if self.buy_rule is not None else []),
+            *(self.sell_rule.required_conditions if self.sell_rule is not None else []),
+            *(self.sell_rule.conditions if self.sell_rule is not None else []),
         ]
         if conditions:
             validate_formula_conditions(
@@ -507,8 +511,8 @@ class ConditionResearchRequest(BaseModel):
         return ConditionResearchConfig(
             vipdoc_path=self.vipdoc_path,
             universe=self.universe,
-            buy_rule=self.buy_rule.to_model(),
-            sell_rule=self.sell_rule.to_model(),
+            buy_rule=self.buy_rule.to_model() if self.buy_rule is not None else None,
+            sell_rule=self.sell_rule.to_model() if self.sell_rule is not None else None,
             start_date=resolved_start,
             end_date=resolved_end,
             formula_text=self.formula_text,

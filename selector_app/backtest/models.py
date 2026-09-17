@@ -47,6 +47,13 @@ class BacktestConfig:
     board: InstrumentBoard | None = None
     buy_rule: RuleGroup | None = None
     sell_rule: RuleGroup | None = None
+    # 「持有到期末」：没有卖出规则时也不报错，持仓一直留到最后一根 K 线按收盘价平掉。
+    # 买卖条件研究靠它表达「我只给买入条件，卖出时机让研究去找」。
+    close_at_end: bool = False
+    # 「持续满仓」：close_at_end 的对偶。没有买入规则时也不报错，每根 K 线都是候选买点
+    # （实际表现是卖出后下一个交易日立即再买入）。买卖条件研究靠它表达
+    # 「我只给卖出条件，买入时机让研究去找」。
+    always_in_market: bool = False
 
     def __post_init__(self) -> None:
         code = self.code.strip()
@@ -68,8 +75,11 @@ class BacktestConfig:
             object.__setattr__(self, "buy_rule", RuleGroup(signals=(buy_signal,)))
         if self.sell_rule is None and sell_signal:
             object.__setattr__(self, "sell_rule", RuleGroup(signals=(sell_signal,)))
-        if self.buy_rule is None or self.sell_rule is None:
-            raise ValueError("买入和卖出规则不能为空")
+        if self.buy_rule is None:
+            if not self.always_in_market:
+                raise ValueError("买入规则不能为空，或者开启「持续满仓」由系统在每个交易日尝试入场")
+        if self.sell_rule is None and not self.close_at_end:
+            raise ValueError("卖出规则不能为空，或者开启「持有到期末」由系统在最后一根 K 线平仓")
         if not explicit_buy_rule and not explicit_sell_rule and buy_signal == sell_signal:
             raise ValueError("买入信号和卖出信号不能相同")
         if self.execution not in {"next_open", "next_close"}:
