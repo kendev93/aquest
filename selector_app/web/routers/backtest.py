@@ -108,7 +108,7 @@ def create_backtest(payload: BacktestRequest, request: Request) -> JSONResponse:
         )
     except ValueError as exc:
         return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             content={"error": {"code": "validation_error", "message": str(exc)}},
         )
     except RuntimeError as exc:

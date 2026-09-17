@@ -115,7 +115,7 @@ def create_condition_research(
         estimate = _service(request).estimate_resources(config)
         if not estimate.within_budget:
             return JSONResponse(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 content={
                     "error": {
                         "code": "resource_budget_exceeded",
@@ -161,7 +161,7 @@ def create_condition_research(
         )
     except ValueError as exc:
         return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             content={"error": {"code": "validation_error", "message": str(exc)}},
         )
     except RuntimeError as exc:

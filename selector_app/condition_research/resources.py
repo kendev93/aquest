@@ -237,10 +237,16 @@ def _auto_worker_count() -> int:
     worker, so matching the CPU count oversubscribes the machine.
     """
 
-    try:
-        visible = len(os.sched_getaffinity(0))  # type: ignore[attr-defined]
-    except AttributeError:
-        visible = os.cpu_count() or 1
+    # ``os.sched_getaffinity`` 只在 Linux 存在（Windows/macOS 没有）。这里用 getattr
+    # 而不是直接访问 + 行内忽略注释：直接访问时 mypy 在 macOS 需要忽略、在 Linux
+    # （CI）又会因 strict 模式的 warn_unused_ignores 报"多余"，无法同时满足。
+    affinity = getattr(os, "sched_getaffinity", None)
+    visible = os.cpu_count() or 1
+    if affinity is not None:
+        try:
+            visible = len(affinity(0))
+        except OSError:  # pragma: no cover - 取决于容器/procfs 权限
+            visible = os.cpu_count() or 1
     return max(1, min(MAX_WORKERS, visible // 2))
 
 

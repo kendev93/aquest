@@ -73,7 +73,7 @@ def parse_custom_formula(payload: CustomFormulaParseRequest) -> JSONResponse:
         parsed = parse_formula(payload.formula_text)
     except FormulaParseError as exc:
         return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             content={"error": {"code": "formula_parse_error", "message": str(exc)}},
         )
     return JSONResponse(status_code=status.HTTP_200_OK, content={"data": parsed.metadata()})
@@ -89,7 +89,7 @@ def create_job(payload: FormulaScreenRequest, request: Request) -> JSONResponse:
         job_id = _runner(request).submit(payload.to_config())
     except ValueError as exc:
         return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             content={"error": {"code": "validation_error", "message": str(exc)}},
         )
     except RuntimeError as exc:

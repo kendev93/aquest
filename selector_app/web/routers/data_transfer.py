@@ -110,7 +110,7 @@ async def data_transfer_import(
                     return _error(
                         "data_import_too_large",
                         "备份文件过大，无法导入",
-                        status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        status.HTTP_413_CONTENT_TOO_LARGE,
                     )
                 handle.write(chunk)
 
@@ -119,7 +119,7 @@ async def data_transfer_import(
             summary = import_user_assets(store, staged)
         except MarketDataStoreError as exc:
             return _error(
-                "data_import_rejected", _message(exc), status.HTTP_422_UNPROCESSABLE_ENTITY
+                "data_import_rejected", _message(exc), status.HTTP_422_UNPROCESSABLE_CONTENT
             )
         except (OSError, RuntimeError) as exc:
             return _error("data_import_failed", _message(exc), status.HTTP_503_SERVICE_UNAVAILABLE)

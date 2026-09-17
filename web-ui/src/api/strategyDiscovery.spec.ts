@@ -9,6 +9,7 @@ import {
   fetchStrategyDiscoveryCapabilities,
   fetchStrategyDiscoveryHistory,
   getStrategyDiscovery,
+  getStrategyDiscoveryHistory,
   getStrategyDiscoveryResults,
   getStrategyReplay,
   getStrategyReplayHistory,
@@ -87,6 +88,25 @@ describe('strategy discovery API', () => {
       ['/api/v1/strategy-discovery/replay-jobs/replay-1/results', 'GET'],
       ['/api/v1/strategy-discovery/replay-jobs/replay-1/cancel', 'POST'],
       ['/api/v1/strategy-discovery/history/experiment-1/replays?leaderboard=sharpe', 'GET'],
+    ])
+  })
+
+  it('loads a single discovery history entry', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        data: {
+          history_id: 'discovery-1',
+          results_by_sharpe: [],
+          results_by_return: [],
+          request: {},
+          search_metadata: {},
+          validation_metadata: {},
+        },
+      }), { status: 200 }))
+
+    await expect(getStrategyDiscoveryHistory('discovery-1')).resolves.toMatchObject({ history_id: 'discovery-1' })
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      '/api/v1/strategy-discovery/history/discovery-1',
     ])
   })
 })

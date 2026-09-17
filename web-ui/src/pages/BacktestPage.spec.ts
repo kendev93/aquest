@@ -1,7 +1,8 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { BacktestJobState, FormulaScreenMetadata } from '../types'
+import type { BacktestJobState, FormulaScreenMetadata, RuleGroupPayload } from '../types'
+import RuleGroupEditor from '../components/RuleGroupEditor.vue'
 import BacktestPage from './BacktestPage.vue'
 
 import * as backtestApi from '../api/backtest'
@@ -130,6 +131,40 @@ describe('BacktestPage', () => {
     expect(wrapper.get('[data-testid="backtest-results"]').text()).toContain('浦发银行')
     expect(wrapper.get('[data-testid="backtest-trades"]').text()).toContain('2024-01-03')
     expect(wrapper.get('[data-testid="equity-chart"]')).toBeTruthy()
+  })
+
+  it('forwards rule editor updates into the buy and sell payload', async () => {
+    const wrapper = mount(BacktestPage)
+    await flushPromises()
+
+    const buyRule: RuleGroupPayload = {
+      signals: [],
+      combine_mode: 'all',
+      minimum_matches: null,
+      conditions: [{ left_value: 'indicator_three.var1', operator: 'gt', right_value: null, right_constant: 5 }],
+    }
+    const sellRule: RuleGroupPayload = {
+      signals: [],
+      combine_mode: 'all',
+      minimum_matches: null,
+      conditions: [{ left_value: 'indicator_three.var1', operator: 'lt', right_value: null, right_constant: 95 }],
+    }
+    wrapper.findComponent(RuleGroupEditor).vm.$emit('update:modelValue', buyRule)
+    wrapper.findAllComponents(RuleGroupEditor)[1].vm.$emit('update:modelValue', sellRule)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="backtest-code"]').setValue('600000')
+    await wrapper.get('[data-testid="backtest-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(backtestApi.createBacktest).toHaveBeenCalledWith(expect.objectContaining({
+      buy_rule: expect.objectContaining({
+        conditions: [expect.objectContaining({ operator: 'gt', right_constant: 5 })],
+      }),
+      sell_rule: expect.objectContaining({
+        conditions: [expect.objectContaining({ operator: 'lt', right_constant: 95 })],
+      }),
+    }))
   })
 
   it('parses custom buy and sell outputs and invalidates them after editing', async () => {

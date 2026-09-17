@@ -56,7 +56,7 @@ def _preflight_job(
     except DiscoveryResourceBudgetError as exc:
         estimate = exc.estimate
         return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             content={
                 "error": {
                     "code": "resource_budget_exceeded",
@@ -74,7 +74,7 @@ def _preflight_job(
         )
     except ValueError as exc:
         return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             content={"error": {"code": "validation_error", "message": str(exc)}},
         )
     except (MarketDataStoreError, OSError) as exc:
@@ -154,7 +154,7 @@ def create_strategy_discovery(
             discovery_request = payload.to_discovery_request()
     except ValueError as exc:
         return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             content={"error": {"code": "validation_error", "message": str(exc)}},
         )
     except (MarketDataStoreError, OSError) as exc:
@@ -214,7 +214,7 @@ def create_strategy_refinement(
             break
     if not parent_found:
         return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             content={"error": {"code": "validation_error", "message": "父实验中不存在指定候选"}},
         )
     job_payload: dict[str, object] = {
@@ -334,7 +334,7 @@ def create_strategy_replay(
         raise HTTPException(status_code=503, detail="本地行情或策略实验历史暂不可用") from exc
     except ValueError as exc:
         return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             content={"error": {"code": "validation_error", "message": str(exc)}},
         )
     except RuntimeError as exc:

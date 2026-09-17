@@ -452,4 +452,30 @@ describe('MarketDataPage', () => {
       vi.useRealTimers()
     }
   })
+
+  it('toggles sync scope, MA overlays, and paginates the instrument list', async () => {
+    vi.mocked(marketApi.fetchLocalInstruments).mockResolvedValue({
+      items: instruments,
+      meta: { total: 4, page: 1, page_size: 2, pages: 2 },
+    })
+    const wrapper = mount(MarketDataPage)
+    await flushPromises()
+
+    const syncType = wrapper.get<HTMLInputElement>('[data-testid="market-sync-type-stock"]')
+    expect(syncType.element.checked).toBe(false)
+    await syncType.setValue(true)
+    expect(wrapper.get<HTMLInputElement>('[data-testid="market-sync-type-stock"]').element.checked).toBe(true)
+
+    const ma5 = wrapper.get<HTMLInputElement>('[data-testid="toggle-ma5"]')
+    expect(ma5.element.checked).toBe(true)
+    await ma5.setValue(false)
+    expect(wrapper.get<HTMLInputElement>('[data-testid="toggle-ma5"]').element.checked).toBe(false)
+
+    const pagination = wrapper.get('[data-testid="market-pagination"]')
+    expect(pagination.text()).toContain('1 / 2')
+    await pagination.findAll('button')[1].trigger('click')
+    await flushPromises()
+
+    expect(marketApi.fetchLocalInstruments).toHaveBeenLastCalledWith(expect.objectContaining({ page: 2 }))
+  })
 })

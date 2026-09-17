@@ -494,7 +494,7 @@ def local_instruments(
         )
     except (OSError, ValueError, MarketDataStoreError, duckdb.Error) as exc:
         return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             content={"error": {"code": "local_data_error", "message": str(exc)}},
         )
     payload = result.to_dict()
@@ -544,7 +544,7 @@ def local_market_bars(
             )
     except (OSError, ValueError, MarketDataStoreError, duckdb.Error) as exc:
         return JSONResponse(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             content={"error": {"code": "local_data_error", "message": str(exc)}},
         )
     return {"data": result.to_dict()}
