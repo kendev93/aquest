@@ -32,6 +32,7 @@ _PARAMETER_MAX = 10_000.0
 _ALLOWED_FUNCTIONS = frozenset(
     {
         "ABS",
+        "AVEDEV",
         "BARSLAST",
         "COUNT",
         "CROSS",
@@ -45,10 +46,14 @@ _ALLOWED_FUNCTIONS = frozenset(
         "MIN",
         "REF",
         "SMA",
+        "SQRT",
+        "STD",
         "SUM",
     }
 )
-_PERIOD_FUNCTIONS = frozenset({"REF", "SMA", "EMA", "MA", "LLV", "HHV", "SUM", "COUNT"})
+_PERIOD_FUNCTIONS = frozenset(
+    {"REF", "SMA", "EMA", "MA", "LLV", "HHV", "SUM", "COUNT", "STD", "AVEDEV"}
+)
 
 # Formula variables that carry a raw per-stock level (price in yuan, volume in
 # shares, amount in yuan) instead of a dimensionless ratio.
@@ -72,7 +77,22 @@ _LEVEL_VARIABLES = frozenset(
 # argument makes the whole call a level again. Anything outside this set
 # (CROSS/COUNT/BARSLAST/DRAWNULL) yields a flag or count and is dimensionless.
 _SCALE_PRESERVING_FUNCTIONS = frozenset(
-    {"ABS", "EMA", "HHV", "IF", "LLV", "MA", "MAX", "MIN", "REF", "SMA", "SUM"}
+    {
+        "ABS",
+        "AVEDEV",
+        "EMA",
+        "HHV",
+        "IF",
+        "LLV",
+        "MA",
+        "MAX",
+        "MIN",
+        "REF",
+        "SMA",
+        "SQRT",
+        "STD",
+        "SUM",
+    }
 )
 
 
@@ -478,6 +498,7 @@ def _validate_node(node: ast.AST) -> None:
         function_name = node.func.id.upper()
         arity = {
             "ABS": (1, 1),
+            "AVEDEV": (2, 2),
             "BARSLAST": (1, 1),
             "COUNT": (2, 2),
             "CROSS": (2, 2),
@@ -491,6 +512,8 @@ def _validate_node(node: ast.AST) -> None:
             "MIN": (2, 2),
             "REF": (2, 2),
             "SMA": (2, 3),
+            "SQRT": (1, 1),
+            "STD": (2, 2),
             "SUM": (2, 2),
         }[function_name]
         if not arity[0] <= len(node.args) <= arity[1]:
@@ -737,6 +760,12 @@ def _call(name: str, arguments: list[object]) -> object:
         return MYTT.EMA(np.asarray(arguments[0], dtype=float), _period(arguments[1], "EMA"))
     if name == "MA":
         return MYTT.MA(np.asarray(arguments[0], dtype=float), _period(arguments[1], "MA"))
+    if name == "STD":
+        return MYTT.STD(np.asarray(arguments[0], dtype=float), _period(arguments[1], "STD"))
+    if name == "AVEDEV":
+        return MYTT.AVEDEV(np.asarray(arguments[0], dtype=float), _period(arguments[1], "AVEDEV"))
+    if name == "SQRT":
+        return MYTT.SQRT(np.asarray(arguments[0], dtype=float))
     if name == "LLV":
         return MYTT.LLV(np.asarray(arguments[0], dtype=float), _period(arguments[1], "LLV"))
     if name == "HHV":

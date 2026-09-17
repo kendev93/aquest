@@ -181,7 +181,13 @@ def test_formulas_do_not_use_future_rows() -> None:
         999_500_000.0,
     ]
 
-    for calculator in (calculate_indicator_one, calculate_indicator_two, calculate_indicator_three):
+    for calculator in (
+        calculate_indicator_one,
+        calculate_indicator_two,
+        calculate_indicator_three,
+        # KDJ/布林/威廉/CCI 都是滚动窗口，同样不能回看未来。
+        calculate_technical_indicators,
+    ):
         before = calculator(original)
         after = calculator(changed)
         for name in before.values:
@@ -213,12 +219,22 @@ def test_only_zero_centred_outputs_are_marked_bidirectional() -> None:
         # 围绕 0 的百分比，两侧由构造保证而非实测。
         "technical.bias20",
         "technical.return20",
+        "technical.cci14",
     }
     # 一侧恒为 0 的输出绝不能进入默认条件。
     assert "indicator_one.wash" not in flagged
     assert "indicator_one.distribution" not in flagged
     # 恒为正的比值/有界位置同样只能单向。
-    for one_sided in ("technical.atr_pct", "technical.volume_ratio5", "technical.position20"):
+    for one_sided in (
+        "technical.atr_pct",
+        "technical.volume_ratio5",
+        "technical.position20",
+        "technical.boll_bandwidth",
+        # WR 与 KDJ 的 K/D 都是 0~100 的有界量，没有负侧。
+        "technical.wr14",
+        "technical.kdj_k",
+        "technical.kdj_d",
+    ):
         assert one_sided not in flagged
 
 
@@ -237,9 +253,7 @@ def test_dimensionless_outputs_match_hand_computed_values() -> None:
 
     ma20 = close.rolling(20).mean().iloc[-1]
     assert result.values["bias20"][-1] == pytest.approx((last - ma20) / ma20 * 100)
-    assert result.values["return20"][-1] == pytest.approx(
-        (last / close.iloc[-21] - 1) * 100
-    )
+    assert result.values["return20"][-1] == pytest.approx((last / close.iloc[-21] - 1) * 100)
 
     window_low = bars["low"].iloc[-20:].min()
     window_high = bars["high"].iloc[-20:].max()
@@ -276,6 +290,75 @@ def test_volume_ratio_ignores_the_current_bar_and_never_looks_ahead() -> None:
     )
 
 
+def test_kdj_bollinger_wr_and_cci_match_hand_computed_values() -> None:
+    """第二批无量纲输出的手工核对，期望值全部用 pandas 原语独立算出。
+
+    KDJ 的 K/D 用递推平滑，抄实现就失去意义，所以这里只复算 RSV 再交给
+    ``ewm``；CCI 的分母刻意用 ``rolling().apply`` 复算，与实现里的滑动窗口
+    版本互为交叉验证。
+    """
+
+    bars = make_bars(180)
+    result = calculate_technical_indicators(bars)
+    close = bars["close"]
+    high = bars["high"]
+    low = bars["low"]
+
+    kdj_low = low.rolling(9).min()
+    kdj_high = high.rolling(9).max()
+    rsv = (close - kdj_low) / (kdj_high - kdj_low) * 100
+    expected_k = rsv.ewm(alpha=1 / 3, adjust=False).mean()
+    expected_d = expected_k.ewm(alpha=1 / 3, adjust=False).mean()
+    assert np.allclose(result.values["kdj_k"], expected_k, equal_nan=True)
+    assert np.allclose(result.values["kdj_d"], expected_d, equal_nan=True)
+    assert np.allclose(result.values["kdj_j"], 3 * expected_k - 2 * expected_d, equal_nan=True)
+    # 前 8 根没有 9 日区间，必须是 NaN 而不是 0。
+    assert np.isnan(result.values["kdj_k"][:8]).all()
+
+    middle = close.rolling(20).mean()
+    deviation = close.rolling(20).std()
+    upper = middle + 2 * deviation
+    lower = middle - 2 * deviation
+    assert np.allclose(
+        result.values["boll_percent_b"],
+        (close - lower) / (upper - lower) * 100,
+        equal_nan=True,
+    )
+    assert np.allclose(
+        result.values["boll_bandwidth"], (upper - lower) / middle * 100, equal_nan=True
+    )
+
+    wr_low = low.rolling(14).min()
+    wr_high = high.rolling(14).max()
+    assert np.allclose(
+        result.values["wr14"], (wr_high - close) / (wr_high - wr_low) * 100, equal_nan=True
+    )
+
+    typical = (high + low + close) / 3
+    mean_deviation = typical.rolling(14).apply(lambda x: np.abs(x - x.mean()).mean(), raw=True)
+    assert np.allclose(
+        result.values["cci14"],
+        (typical - typical.rolling(14).mean()) / (0.015 * mean_deviation),
+        equal_nan=True,
+    )
+
+
+def test_flat_window_yields_nan_instead_of_inf_for_kdj_and_bollinger() -> None:
+    """一字板（区间宽度为 0）时所有带分母的输出必须是 NaN。"""
+
+    bars = make_bars(60)
+    bars.loc[:, ["open", "high", "low", "close"]] = 10.0
+
+    result = calculate_technical_indicators(bars)
+
+    for name in ("kdj_k", "kdj_d", "kdj_j", "boll_percent_b", "wr14", "cci14"):
+        values = result.values[name]
+        assert np.isnan(values).all(), name
+        assert not np.isinf(values).any(), name
+    # 带宽是 (上轨 − 下轨) / 中轨，无波动时答案就是 0，不是除零。
+    assert np.all(result.values["boll_bandwidth"][19:] == 0.0)
+
+
 def test_dimensionless_outputs_are_usable_as_cross_stock_ranking_features() -> None:
     """补这批指标的目的就是让挖掘池和排序有可跨股票比较的输入。"""
 
@@ -283,7 +366,20 @@ def test_dimensionless_outputs_are_usable_as_cross_stock_ranking_features() -> N
 
     catalog = default_indicator_catalog()
     rankable = set(catalog.rankable_ids)
-    for name in ("atr_pct", "volume_ratio5", "bias20", "return20", "position20"):
+    for name in (
+        "atr_pct",
+        "volume_ratio5",
+        "bias20",
+        "return20",
+        "position20",
+        "kdj_k",
+        "kdj_d",
+        "kdj_j",
+        "boll_percent_b",
+        "boll_bandwidth",
+        "wr14",
+        "cci14",
+    ):
         assert f"technical.{name}" in rankable
         # 短名别名也必须能解析，否则校验放行但解析失败。
         assert catalog.canonical_id(name) == f"technical.{name}"

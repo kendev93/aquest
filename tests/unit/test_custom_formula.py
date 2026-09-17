@@ -145,6 +145,65 @@ def test_rolling_function_periods_must_be_positive_integers(formula: str) -> Non
         evaluate_custom_formula(parsed, bars())
 
 
+def test_std_avedev_and_sqrt_are_available_to_formulas() -> None:
+    """这三个函数是让用户能自己写出布林带和 CCI 的最小集合。
+
+    期望值用 pandas 原语独立复算，不抄 ``tdx_math`` 的实现。
+    """
+
+    frame = bars(60)
+    close = frame["close"]
+
+    std_result = evaluate_custom_formula(parse_formula("WIDTH:STD(C,20);"), frame, {})
+    assert np.allclose(std_result.values["WIDTH"], close.rolling(20).std(), equal_nan=True)
+
+    # 典型价的 14 日平均绝对偏差，即 CCI 的分母。
+    typical = (frame["high"] + frame["low"] + close) / 3
+    deviation_result = evaluate_custom_formula(parse_formula("MD:AVEDEV((H+L+C)/3,14);"), frame, {})
+    assert np.allclose(
+        deviation_result.values["MD"],
+        typical.rolling(14).apply(lambda x: np.abs(x - x.mean()).mean(), raw=True),
+        equal_nan=True,
+    )
+
+    sqrt_result = evaluate_custom_formula(parse_formula("ROOT:SQRT(C);"), frame, {})
+    assert np.allclose(sqrt_result.values["ROOT"], np.sqrt(close), equal_nan=True)
+
+
+def test_sqrt_of_a_negative_expression_is_nan_not_a_warning() -> None:
+    result = evaluate_custom_formula(parse_formula("ROOT:SQRT(C-C-1);"), bars(10), {})
+
+    assert np.isnan(result.values["ROOT"]).all()
+
+
+def test_std_and_avedev_keep_the_price_scale_flag() -> None:
+    """STD/AVEDEV/SQRT 都保留输入的量纲，不能变成可挖掘特征。"""
+
+    def price_scale(source: str) -> set[str]:
+        return set(parse_formula(source).price_scale_names)
+
+    tail = " SELL:CROSS(REF(C,1),C);"
+    assert price_scale(f"SCORE:STD(C,20);{tail}") == {"SCORE"}
+    assert price_scale(f"SCORE:AVEDEV(C,20);{tail}") == {"SCORE"}
+    assert price_scale(f"SCORE:SQRT(C);{tail}") == {"SCORE"}
+    # 除以轨线之后才是无量纲的。
+    assert price_scale(f"SCORE:(C-MA(C,20))/STD(C,20);{tail}") == set()
+
+
+@pytest.mark.parametrize(
+    "formula",
+    [
+        "LEVEL:STD(C,0);",
+        "LEVEL:AVEDEV(C,2.5);",
+    ],
+)
+def test_new_rolling_functions_reject_invalid_periods(formula: str) -> None:
+    parsed = parse_formula(formula)
+
+    with pytest.raises(ValueError, match="周期必须是正整数"):
+        evaluate_custom_formula(parsed, bars())
+
+
 def test_price_scale_outputs_are_detected_from_the_expression() -> None:
     """原始价格量纲的输出不能被当成跨股票可比的挖掘特征。
 

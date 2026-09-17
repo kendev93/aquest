@@ -90,6 +90,10 @@ FormulaCalculator = Callable[[pd.DataFrame], FormulaResult]
 # and the N-bar return is negative whenever the close is below its own value N
 # bars ago. Both signs occur in any real sample, so a bare ``> 0`` / ``< 0``
 # pair is reachable on both sides.
+#
+# CCI joins on the same construction argument: it is (TP - MA(TP)) scaled by a
+# positive constant, so it is positive whenever the typical price trades above
+# its own 14-bar mean and negative otherwise.
 BIDIRECTIONAL_VALUE_IDS = frozenset(
     {
         "technical.macd",
@@ -97,6 +101,7 @@ BIDIRECTIONAL_VALUE_IDS = frozenset(
         "technical.macd_histogram",
         "technical.bias20",
         "technical.return20",
+        "technical.cci14",
     }
 )
 
@@ -177,6 +182,13 @@ _VALUE_DISPLAY_NAMES: dict[str, dict[str, str]] = {
         "bias20": "乖离率20",
         "return20": "20日涨幅",
         "position20": "20日位置",
+        "kdj_k": "KDJ-K",
+        "kdj_d": "KDJ-D",
+        "kdj_j": "KDJ-J",
+        "boll_percent_b": "布林带%B",
+        "boll_bandwidth": "布林带宽度",
+        "wr14": "WR14",
+        "cci14": "CCI14",
     },
     "price": {
         "open": "开盘价",
@@ -460,6 +472,10 @@ FORMULA_REGISTRY = FormulaRegistry(
             signals=(),
             value_names=TECHNICAL_VALUE_NAMES,
             screen_value_names=TECHNICAL_VALUE_NAMES,
+            # v2: KDJ / Bollinger %B+bandwidth / Williams %R / CCI joined the
+            # output set. Cached rows written by v1 would come back without
+            # those keys, so the version bump is what retires them.
+            cache_version="2",
         ),
         FormulaDefinition(
             id="price",

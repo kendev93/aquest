@@ -57,7 +57,48 @@ def _rolling(values: Any, period: int, operation: str) -> np.ndarray:
         return np.asarray(rolling.max(), dtype=float)
     if operation == "min":
         return np.asarray(rolling.min(), dtype=float)
+    if operation == "std":
+        # Sample standard deviation (ddof=1), matching the Bollinger bands of
+        # the built-in technical formula so a hand-written STD formula agrees
+        # with the registered indicator.
+        return np.asarray(rolling.std(), dtype=float)
     return np.asarray(rolling.mean(), dtype=float)
+
+
+def STD(values: Any, period: int) -> np.ndarray:
+    return _rolling(values, period, "std")
+
+
+def AVEDEV(values: Any, period: int) -> np.ndarray:
+    """Average absolute deviation over the window, the CCI denominator.
+
+    ``mean(|x - mean(x)|)`` has no direct rolling method, and
+    ``rolling().apply`` would call back into Python once per bar. The sliding
+    window view keeps it vectorised; windows that contain a NaN yield NaN,
+    which is the same contract as ``min_periods=period``.
+    """
+
+    source = np.asarray(values, dtype=float)
+    if isinstance(period, bool) or not isinstance(period, (int, np.integer)) or period <= 0:
+        raise ValueError("滚动周期必须是大于 0 的整数")
+    window = int(period)
+    result = np.full(source.shape, np.nan, dtype=float)
+    if source.size < window:
+        return result
+    windows = np.lib.stride_tricks.sliding_window_view(source, window)
+    deviations = np.abs(windows - windows.mean(axis=1, keepdims=True))
+    result[window - 1 :] = deviations.mean(axis=1)
+    return result
+
+
+def SQRT(values: Any) -> np.ndarray:
+    source = np.asarray(values, dtype=float)
+    with np.errstate(invalid="ignore"):
+        result = np.sqrt(source)
+    # Negative inputs are NaN rather than a runtime warning: user formulas
+    # routinely square-root expressions that dip below zero (RS- or variance
+    # style terms) and a silent warning would be harder to debug than a NaN.
+    return np.asarray(np.where(source < 0, np.nan, result), dtype=float)
 
 
 def EMA(values: Any, period: int) -> np.ndarray:
@@ -119,6 +160,9 @@ class _TdxMath:
     MA = staticmethod(MA)
     EMA = staticmethod(EMA)
     SMA = staticmethod(SMA)
+    STD = staticmethod(STD)
+    AVEDEV = staticmethod(AVEDEV)
+    SQRT = staticmethod(SQRT)
     COUNT = staticmethod(COUNT)
     BARSLAST = staticmethod(BARSLAST)
     CROSS = staticmethod(CROSS)

@@ -705,7 +705,7 @@ watch(() => form.formulaText, (value) => {
             <button class="secondary-button" data-testid="parse-formula" type="button" :disabled="customParseLoading" @click="parseCustomFormula">
               {{ customParseLoading ? '解析中…' : '解析公式' }}
             </button>
-            <p class="helper">支持常用数组函数：REF、SMA、EMA、MA、LLV、HHV、BARSLAST、COUNT、CROSS、IF、MAX、MIN、ABS。参数需用 <code>名称:=数值</code> 显式声明。</p>
+            <p class="helper">支持常用数组函数：REF、SMA、EMA、MA、STD、AVEDEV、SQRT、LLV、HHV、BARSLAST、COUNT、CROSS、IF、MAX、MIN、ABS。参数需用 <code>名称:=数值</code> 显式声明。</p>
             <p v-if="customParseError" class="field-error" data-testid="formula-parse-error">{{ customParseError }}</p>
             <div v-if="customMetadata" class="custom-formula-meta" data-testid="custom-formula-meta">
               <span>已识别 {{ customMetadata.parameters.length }} 个参数</span>

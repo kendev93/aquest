@@ -32,7 +32,45 @@ VALUE_NAMES = (
     "bias20",
     "return20",
     "position20",
+    "kdj_k",
+    "kdj_d",
+    "kdj_j",
+    "boll_percent_b",
+    "boll_bandwidth",
+    "wr14",
+    "cci14",
 )
+
+_KDJ_PERIOD = 9
+_KDJ_SMOOTHING = 3
+_BOLL_PERIOD = 20
+_BOLL_STD = 2.0
+_WR_PERIOD = 14
+_CCI_PERIOD = 14
+# CCI divides by ``0.015 * mean absolute deviation``; the constant is the
+# original Lambert factor that puts roughly 70-80% of values inside ±100.
+_CCI_SCALE = 0.015
+
+
+def _rolling_mean_abs_deviation(values: np.ndarray, window: int) -> np.ndarray:
+    """Rolling ``mean(|x - mean(x)|)`` computed without a Python callback.
+
+    CCI and AVEDEV need the mean absolute deviation of every window.  Going
+    through ``Series.rolling().apply`` would call back into Python once per
+    bar, which matters because the indicator cache precomputes every formula
+    for the whole universe.  A sliding-window view keeps it in NumPy while
+    preserving the NaN semantics of ``min_periods=window``: a window that
+    contains a NaN yields NaN.
+    """
+
+    source = np.asarray(values, dtype=float)
+    result = np.full(source.shape, np.nan, dtype=float)
+    if source.size < window:
+        return result
+    windows = np.lib.stride_tricks.sliding_window_view(source, window)
+    deviations = np.abs(windows - windows.mean(axis=1, keepdims=True))
+    result[window - 1 :] = deviations.mean(axis=1)
+    return result
 
 
 def calculate_technical_indicators(frame: pd.DataFrame) -> FormulaResult:
@@ -97,6 +135,70 @@ def calculate_technical_indicators(frame: pd.DataFrame) -> FormulaResult:
         )
         * 100
     )
+
+    # KDJ (9, 3, 3), ported from ETFQuest ``core/indicators.py::kdj``. RSV is
+    # already a 0-100 position inside the 9-bar range, so K/D inherit that
+    # scale and stay comparable across stocks. J = 3K - 2D is not bounded but
+    # is a pure function of the same two series, so it is dimensionless too.
+    kdj_low = low.rolling(_KDJ_PERIOD, min_periods=_KDJ_PERIOD).min()
+    kdj_high = high.rolling(_KDJ_PERIOD, min_periods=_KDJ_PERIOD).max()
+    raw_stochastic = (
+        safe_divide(
+            close_values - kdj_low.to_numpy(),
+            kdj_high.to_numpy() - kdj_low.to_numpy(),
+        )
+        * 100
+    )
+    # A flat window (一字板/停牌) makes RSV NaN; EWM skips NaN rather than
+    # propagating inf, so the rest of the series stays usable.
+    k_line = (
+        pd.Series(raw_stochastic, index=frame.index)
+        .ewm(alpha=1 / _KDJ_SMOOTHING, adjust=False)
+        .mean()
+    )
+    d_line = k_line.ewm(alpha=1 / _KDJ_SMOOTHING, adjust=False).mean()
+    values["kdj_k"] = k_line.to_numpy()
+    values["kdj_d"] = d_line.to_numpy()
+    values["kdj_j"] = (3 * k_line - 2 * d_line).to_numpy()
+
+    # Bollinger (20, 2). Only the two dimensionless derivatives are exposed:
+    # the bands themselves are prices, and a condition on them is exactly
+    # equivalent to a condition on %B (%B > 100 means the close is above the
+    # upper band, %B < 0 below the lower one), so the raw bands would only add
+    # three non-rankable price-scale outputs.
+    boll_middle = close.rolling(_BOLL_PERIOD, min_periods=_BOLL_PERIOD).mean()
+    boll_deviation = close.rolling(_BOLL_PERIOD, min_periods=_BOLL_PERIOD).std()
+    boll_upper = boll_middle + (_BOLL_STD * boll_deviation)
+    boll_lower = boll_middle - (_BOLL_STD * boll_deviation)
+    boll_width = (boll_upper - boll_lower).to_numpy()
+    values["boll_percent_b"] = safe_divide(close_values - boll_lower.to_numpy(), boll_width) * 100
+    # Band width over the middle band: a volatility level in percent, so a
+    # squeeze is comparable between a 3 CNY stock and a 300 CNY one.
+    values["boll_bandwidth"] = safe_divide(boll_width, boll_middle.to_numpy()) * 100
+
+    # Williams %R (14). Mirrored relative to the usual -100..0 convention:
+    # ETFQuest returns (Hn - C) / (Hn - Ln) * 100, so 0 = at the window high
+    # and 100 = at the window low. Kept as-is to stay comparable with the
+    # upstream project.
+    wr_low = low.rolling(_WR_PERIOD, min_periods=_WR_PERIOD).min()
+    wr_high = high.rolling(_WR_PERIOD, min_periods=_WR_PERIOD).max()
+    values["wr14"] = (
+        safe_divide(wr_high.to_numpy() - close_values, wr_high.to_numpy() - wr_low.to_numpy()) * 100
+    )
+
+    # CCI (14) on the typical price. It is dimensionless because both the
+    # numerator and the denominator scale with the price, and it straddles
+    # zero, so it is one of the few outputs that suits a ``> 0`` / ``< 0``
+    # default condition pair.
+    typical_price = ((high + low + close) / 3).to_numpy()
+    typical_mean = (
+        pd.Series(typical_price, index=frame.index)
+        .rolling(_CCI_PERIOD, min_periods=_CCI_PERIOD)
+        .mean()
+        .to_numpy()
+    )
+    mean_deviation = _rolling_mean_abs_deviation(typical_price, _CCI_PERIOD)
+    values["cci14"] = safe_divide(typical_price - typical_mean, _CCI_SCALE * mean_deviation)
     return build_formula_result(
         formula_id=FORMULA_ID,
         display_name=DISPLAY_NAME,
