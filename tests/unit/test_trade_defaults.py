@@ -7,9 +7,12 @@ from selector_app.portfolio_backtest.models import PortfolioBacktestConfig
 
 
 def test_trade_profiles_use_the_new_project_default_costs() -> None:
-    for instrument_type in ("stock", "fund", "index", "bond"):
+    stock = profile_for("stock")
+    assert stock.commission == 0.0001
+    assert stock.min_commission == 0.1
+    for instrument_type in ("fund", "index", "bond"):
         profile = profile_for(instrument_type)
-        assert profile.commission == 0.0001
+        assert profile.commission == 0.00005
         assert profile.min_commission == 0.1
 
 

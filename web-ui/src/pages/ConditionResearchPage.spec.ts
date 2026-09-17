@@ -291,6 +291,51 @@ describe('ConditionResearchPage', () => {
     expect(sellRow.text()).not.toContain('125.000%')
   })
 
+  it('switches to an ETF study with fund costs and no board filters', async () => {
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="condition-advanced-toggle"]').trigger('click')
+    await wrapper.get('[data-testid="condition-board-star"]').setValue(true)
+    await wrapper.get('[data-testid="condition-instrument-type"]').setValue('fund')
+    await flushPromises()
+
+    // 板块是股票概念，ETF 场景下必须隐藏，残留的板块选择也要一并丢弃。
+    expect(wrapper.find('[data-testid="condition-board-scope"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('沪深全部ETF')
+    expect(wrapper.text()).toContain('ETF 免印花税')
+    expect((wrapper.get('[data-testid="condition-commission"]').element as HTMLInputElement).value).toBe('0.00005')
+    expect((wrapper.get('[data-testid="condition-stamp-tax"]').element as HTMLInputElement).value).toBe('0')
+
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(researchApi.createConditionResearch).toHaveBeenCalledWith(expect.objectContaining({
+      instrument_types: ['fund'],
+      commission: 0.00005,
+      stamp_tax: 0,
+    }))
+    expect(vi.mocked(researchApi.createConditionResearch).mock.calls[0][0].boards).toBeUndefined()
+
+    await wrapper.get('[data-testid="condition-instrument-type"]').setValue('stock')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="condition-board-scope"]').exists()).toBe(true)
+    expect((wrapper.get('[data-testid="condition-commission"]').element as HTMLInputElement).value).toBe('0.0001')
+  })
+
+  it('keeps costs the user customised when switching instrument type', async () => {
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="condition-advanced-toggle"]').trigger('click')
+    await wrapper.get('[data-testid="condition-commission"]').setValue(0.0008)
+    await wrapper.get('[data-testid="condition-instrument-type"]').setValue('fund')
+    await flushPromises()
+
+    expect((wrapper.get('[data-testid="condition-commission"]').element as HTMLInputElement).value).toBe('0.0008')
+    expect((wrapper.get('[data-testid="condition-stamp-tax"]').element as HTMLInputElement).value).toBe('0')
+  })
+
   it('resumes an active research job after a page refresh', async () => {
     vi.mocked(jobsApi.fetchActiveJobs).mockResolvedValueOnce([{
       job_id: 'research-running',

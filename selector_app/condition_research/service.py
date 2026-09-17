@@ -15,6 +15,7 @@ from typing import Protocol, TypeVar, cast
 import pandas as pd
 
 from selector_app.backtest.models import BacktestConfig, BacktestReport
+from selector_app.backtest.profiles import profile_from_overrides
 from selector_app.backtest.service import (
     BacktestMarketDataAdapter,
     BacktestService,
@@ -81,6 +82,13 @@ class ResearchMarketDataAdapter(Protocol):
 
 
 def _backtest_config(config: ConditionResearchConfig, ref: StockRef) -> BacktestConfig:
+    instrument_type: InstrumentType = getattr(ref, "instrument_type", "stock")
+    profile = profile_from_overrides(
+        instrument_type,
+        commission=config.commission,
+        min_commission=config.min_commission,
+        stamp_tax=config.stamp_tax,
+    )
     return BacktestConfig(
         market=ref.market,
         code=ref.code,
@@ -92,14 +100,14 @@ def _backtest_config(config: ConditionResearchConfig, ref: StockRef) -> Backtest
         start_date=config.start_date,
         end_date=config.end_date,
         initial_cash=config.initial_cash,
-        commission=config.commission,
-        min_commission=config.min_commission,
-        stamp_tax=config.stamp_tax,
+        commission=profile.commission,
+        min_commission=profile.min_commission,
+        stamp_tax=profile.stamp_tax,
         slippage=config.slippage,
         execution=config.execution,
         position_mode=config.position_mode,
         fixed_size=config.fixed_size,
-        instrument_type=ref.instrument_type,
+        instrument_type=instrument_type,
         board=ref.board,
     )
 
@@ -644,11 +652,12 @@ class ConditionResearchService:
         return estimate
 
     def _list_stock_refs(self, config: ConditionResearchConfig) -> list[StockRef]:
+        wanted = config.instrument_types or ("stock",)
         try:
             refs = self._adapter.list_stock_refs(
                 config.vipdoc_path,
                 config.universe,
-                instrument_types=("stock",),
+                instrument_types=wanted,
                 boards=config.boards or None,
             )
         except TypeError as exc:
@@ -658,7 +667,7 @@ class ConditionResearchService:
         return [
             ref
             for ref in refs
-            if getattr(ref, "instrument_type", "stock") == "stock"
+            if getattr(ref, "instrument_type", "stock") in wanted
             and (not config.boards or getattr(ref, "board", None) in config.boards)
         ]
 

@@ -29,6 +29,29 @@ def test_config_defaults_to_separate_buy_and_sell_search_without_portfolio_limit
     assert research.min_instruments == 5
     assert research.position_mode == "full"
     assert not hasattr(research, "max_positions")
+    assert research.instrument_types == ("stock",)
+
+
+def test_fund_research_ignores_stock_board_filters() -> None:
+    research = config(instrument_types=("fund",), boards=("main", "star"))
+
+    assert research.instrument_types == ("fund",)
+    assert research.boards == ()
+
+
+@pytest.mark.parametrize(
+    ("instrument_types", "message"),
+    [
+        (("index",), "只支持股票或 ETF"),
+        (("bond",), "只支持股票或 ETF"),
+        (("stock", "fund"), "一次只能选择一类证券"),
+    ],
+)
+def test_config_rejects_unsupported_instrument_types(
+    instrument_types: tuple[str, ...], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        config(instrument_types=instrument_types)
 
 
 @pytest.mark.parametrize(

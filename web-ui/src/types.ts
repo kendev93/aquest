@@ -915,6 +915,7 @@ export type ConditionResearchSide = 'buy' | 'sell' | 'both'
 export interface ConditionResearchPayload {
   universe: 'all' | 'sh' | 'sz'
   vipdoc_path?: string
+  instrument_types?: InstrumentType[]
   boards?: InstrumentBoard[]
   buy_rule: RuleGroupPayload
   sell_rule: RuleGroupPayload

@@ -32,6 +32,41 @@ def test_research_request_resolves_into_independent_stock_config() -> None:
     assert config.position_mode == "full"
 
 
+def test_research_request_defaults_to_stock_only_instrument_types() -> None:
+    request = ConditionResearchRequest.model_validate(payload())
+
+    config = request.to_config(start_date=date(2020, 1, 1), end_date=date(2024, 12, 31))
+
+    assert config.instrument_types == ("stock",)
+
+
+def test_research_request_accepts_an_etf_only_study() -> None:
+    body = payload()
+    body["instrument_types"] = ["fund"]
+
+    request = ConditionResearchRequest.model_validate(body)
+
+    assert request.instrument_types == ["fund"]
+
+
+@pytest.mark.parametrize(
+    ("instrument_types", "message"),
+    [
+        (["index"], "只支持股票或 ETF"),
+        (["bond"], "只支持股票或 ETF"),
+        (["stock", "fund"], "一次只能选择一类证券"),
+    ],
+)
+def test_research_request_rejects_unsupported_instrument_types(
+    instrument_types: list[str], message: str
+) -> None:
+    body = payload()
+    body["instrument_types"] = instrument_types
+
+    with pytest.raises(ValidationError, match=message):
+        ConditionResearchRequest.model_validate(body)
+
+
 def test_research_request_requires_both_base_rules() -> None:
     body = payload()
     del body["sell_rule"]

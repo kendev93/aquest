@@ -24,6 +24,7 @@ import type {
   DateRangeSelection,
   FormulaScreenMetadata,
   InstrumentBoard,
+  InstrumentType,
   RuleGroupPayload,
   ValueDefinition,
 } from '../types'
@@ -45,6 +46,7 @@ const parsedFormulaText = ref('')
 const mode = ref<'preset' | 'custom'>('preset')
 const form = reactive({
   universe: 'all' as 'all' | 'sh' | 'sz',
+  instrumentType: 'stock' as InstrumentType,
   boards: [] as InstrumentBoard[],
   buyRule: emptyRule(),
   sellRule: emptyRule(),
@@ -101,6 +103,21 @@ const STOCK_BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
   { key: 'chinext', label: '创业板' },
   { key: 'b_share', label: 'B 股' },
 ]
+const STOCK_COSTS = { commission: 0.0001, stampTax: 0.001 }
+const FUND_COSTS = { commission: 0.00005, stampTax: 0 }
+watch(() => form.instrumentType, (next, previous) => {
+  const from = previous === 'fund' ? FUND_COSTS : STOCK_COSTS
+  const to = next === 'fund' ? FUND_COSTS : STOCK_COSTS
+  if (form.commission === from.commission) form.commission = to.commission
+  if (form.stampTax === from.stampTax) form.stampTax = to.stampTax
+  if (next === 'fund') form.boards = []
+})
+const scopeNoun = computed(() => (form.instrumentType === 'fund' ? 'ETF' : '股票'))
+const scopeHelper = computed(() => (
+  form.instrumentType === 'fund'
+    ? '每只 ETF 独立运行同一套规则，不设置跨标的资金分配或持仓数量上限。ETF 免印花税，佣金默认万 0.5、最低 0.1 元。'
+    : '每只股票独立运行同一套规则，不设置跨股票资金分配或持仓数量上限。'
+))
 const selectedStockRows = computed(() => {
   if (!report.value) return []
   const [ruleId, period] = selectedStockView.value.split(':')
@@ -316,6 +333,7 @@ function validate(): Record<string, string> {
 function buildPayload(): ConditionResearchPayload {
   return {
     universe: form.universe,
+    instrument_types: [form.instrumentType] as ConditionResearchPayload['instrument_types'],
     ...(form.boards.length ? { boards: [...form.boards] as ConditionResearchPayload['boards'] } : {}),
     buy_rule: form.buyRule,
     sell_rule: form.sellRule,
@@ -595,18 +613,25 @@ onMounted(async () => {
           </fieldset>
 
           <fieldset class="form-section">
-            <legend>股票范围</legend>
+            <legend>标的范围</legend>
             <div class="compact-fields">
+              <div>
+                <label for="condition-instrument-type">证券类型</label>
+                <select id="condition-instrument-type" v-model="form.instrumentType" data-testid="condition-instrument-type">
+                  <option value="stock">股票</option>
+                  <option value="fund">ETF / 基金</option>
+                </select>
+              </div>
               <div>
                 <label for="condition-universe">市场</label>
                 <select id="condition-universe" v-model="form.universe" data-testid="condition-universe">
-                  <option value="all">沪深全部股票</option>
+                  <option value="all">沪深全部{{ scopeNoun }}</option>
                   <option value="sh">仅上海</option>
                   <option value="sz">仅深圳</option>
                 </select>
               </div>
             </div>
-            <div class="scope-options condition-board-options" data-testid="condition-board-scope">
+            <div v-if="form.instrumentType === 'stock'" class="scope-options condition-board-options" data-testid="condition-board-scope">
               <span>板块</span>
               <label v-for="option in STOCK_BOARD_OPTIONS" :key="option.key">
                 <input
@@ -618,7 +643,7 @@ onMounted(async () => {
               </label>
               <small>未勾选表示所选市场的全部股票板块。</small>
             </div>
-            <p class="helper">每只股票独立运行同一套规则，不设置跨股票资金分配或持仓数量上限。</p>
+            <p class="helper">{{ scopeHelper }}</p>
           </fieldset>
 
           <RuleGroupEditor

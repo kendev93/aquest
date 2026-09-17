@@ -9,7 +9,7 @@ from datetime import date
 from types import MappingProxyType
 from typing import Literal
 
-from selector_app.market_data.models import InstrumentBoard
+from selector_app.market_data.models import InstrumentBoard, InstrumentType
 from selector_app.screening.models import Universe
 from selector_app.screening.rules import RuleGroup
 
@@ -18,6 +18,8 @@ from .time_split import split_calendar_range
 SearchSides = Literal["buy", "sell", "both"]
 ExecutionMode = Literal["next_open", "next_close"]
 PositionMode = Literal["full", "fixed"]
+
+RESEARCH_INSTRUMENT_TYPES: tuple[InstrumentType, ...] = ("stock", "fund")
 
 
 def _condition_dict(condition: object) -> dict[str, object]:
@@ -49,6 +51,7 @@ class ConditionResearchConfig:
     end_date: date
     formula_text: str | None = None
     formula_parameters: Mapping[str, float] = field(default_factory=dict)
+    instrument_types: tuple[InstrumentType, ...] = ("stock",)
     boards: tuple[InstrumentBoard, ...] = ()
     search_sides: SearchSides = "both"
     initial_cash: float = 100_000.0
@@ -69,6 +72,10 @@ class ConditionResearchConfig:
     def __post_init__(self) -> None:
         if self.universe not in {"all", "sh", "sz"}:
             raise ValueError("股票范围必须是 all、sh 或 sz")
+        if any(item not in RESEARCH_INSTRUMENT_TYPES for item in self.instrument_types):
+            raise ValueError("买卖条件研究只支持股票或 ETF")
+        if len(set(self.instrument_types)) > 1:
+            raise ValueError("买卖条件研究一次只能选择一类证券，避免跨类型样本混池影响阈值可比性")
         if self.start_date > self.end_date:
             raise ValueError("研究开始日期不能晚于结束日期")
         if not _has_rule(self.buy_rule):
@@ -120,7 +127,13 @@ class ConditionResearchConfig:
             "formula_parameters",
             MappingProxyType(parameters),
         )
-        object.__setattr__(self, "boards", tuple(dict.fromkeys(self.boards)))
+        object.__setattr__(
+            self,
+            "instrument_types",
+            tuple(dict.fromkeys(self.instrument_types)) or ("stock",),
+        )
+        boards = tuple(dict.fromkeys(self.boards))
+        object.__setattr__(self, "boards", () if "fund" in self.instrument_types else boards)
         split_calendar_range(
             self.start_date,
             self.end_date,
@@ -154,6 +167,7 @@ class ConditionResearchConfig:
             "end_date": self.end_date.isoformat(),
             "formula_text": self.formula_text,
             "formula_parameters": dict(self.formula_parameters),
+            "instrument_types": list(self.instrument_types),
             "boards": list(self.boards),
             "search_sides": self.search_sides,
             "initial_cash": self.initial_cash,

@@ -18,13 +18,17 @@ class TradeProfile:
     virtual: bool = True
 
 
-_DEFAULT_COMMISSION = 0.0001
+_STOCK_COMMISSION = 0.0001
+_FUND_COMMISSION = 0.00005
 _DEFAULT_MIN_COMMISSION = 0.1
-_STOCK = TradeProfile("stock", 100, _DEFAULT_COMMISSION, _DEFAULT_MIN_COMMISSION, 0.001)
-_FUND_LIKE = TradeProfile("fund", 100, _DEFAULT_COMMISSION, _DEFAULT_MIN_COMMISSION, 0.0)
+_STOCK = TradeProfile("stock", 100, _STOCK_COMMISSION, _DEFAULT_MIN_COMMISSION, 0.001)
+_FUND_LIKE = TradeProfile("fund", 100, _FUND_COMMISSION, _DEFAULT_MIN_COMMISSION, 0.0)
 STOCK_DEFAULT_COMMISSION = _STOCK.commission
 STOCK_DEFAULT_MIN_COMMISSION = _STOCK.min_commission
 STOCK_DEFAULT_STAMP_TAX = _STOCK.stamp_tax
+FUND_DEFAULT_COMMISSION = _FUND_LIKE.commission
+FUND_DEFAULT_MIN_COMMISSION = _FUND_LIKE.min_commission
+FUND_DEFAULT_STAMP_TAX = _FUND_LIKE.stamp_tax
 
 
 def profile_for(
@@ -75,4 +79,28 @@ def profile_from_config(
         commission=commission,
         min_commission=min_commission,
         stamp_tax=stamp_tax,
+    )
+
+
+def profile_from_overrides(
+    instrument_type: InstrumentType,
+    *,
+    commission: float,
+    min_commission: float,
+    stamp_tax: float,
+) -> TradeProfile:
+    """Resolve legacy request defaults one field at a time.
+
+    Unlike :func:`profile_from_config` this does not require the whole stock
+    default triple to be present. A field still equal to the legacy stock
+    default counts as untouched and falls back to the instrument default, so
+    an ETF study that only clears the stamp tax keeps the fund commission
+    instead of silently reverting to the stock rate.
+    """
+
+    return profile_for(
+        instrument_type,
+        commission=None if commission == STOCK_DEFAULT_COMMISSION else commission,
+        min_commission=None if min_commission == STOCK_DEFAULT_MIN_COMMISSION else min_commission,
+        stamp_tax=None if stamp_tax == STOCK_DEFAULT_STAMP_TAX else stamp_tax,
     )
