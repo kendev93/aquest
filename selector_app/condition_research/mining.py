@@ -127,6 +127,53 @@ class MinedCondition:
     outcome_rate: float
     baseline_rate: float
     lift: float
+    # Read-only "would this survive a slot-limited portfolio?" diagnostic. The
+    # study itself backtests every qualifying signal, so its win rate describes
+    # the whole pool; a portfolio only fills ``max_positions`` slots by ranking.
+    # These fields re-score the same matched samples after keeping just the
+    # top-ranked ones per signal day. They never influence mining order.
+    top_n_outcome_rate: float | None = None
+    top_n_support_count: int = 0
+    # Days where more stocks matched than there are slots - i.e. days the
+    # ranking actually had to choose. Without them the top-N split is a no-op
+    # and the column would silently duplicate the pool-wide rate.
+    top_n_filtered_days: int = 0
+
+
+@dataclass(frozen=True)
+class TopNContext:
+    """Everything needed to re-score matches as a slot-limited portfolio would.
+
+    ``day_codes`` is a factorized signal-day id per sample, so grouping is an
+    integer operation inside the candidate loop instead of a string sort.
+    """
+
+    day_codes: np.ndarray
+    values: np.ndarray
+    top_n: int
+    ascending: bool
+
+
+def build_top_n_context(
+    dates: pd.Series,
+    values: pd.Series,
+    *,
+    top_n: int,
+    ascending: bool,
+) -> TopNContext | None:
+    """Build a diagnostic context, or None when the value cannot be used."""
+
+    if top_n < 1 or len(dates) == 0 or len(dates) != len(values):
+        return None
+    numeric = pd.to_numeric(values, errors="coerce").to_numpy(dtype=float)
+    if not np.isfinite(numeric).any():
+        return None
+    return TopNContext(
+        day_codes=pd.factorize(dates)[0],
+        values=numeric,
+        top_n=top_n,
+        ascending=ascending,
+    )
 
 
 def mine_binary_conditions(
@@ -140,6 +187,7 @@ def mine_binary_conditions(
     min_instruments: int = 5,
     limit: int = 50,
     excluded: frozenset[str] = frozenset(),
+    top_n_context: TopNContext | None = None,
 ) -> tuple[MinedCondition, ...]:
     """Find readable thresholds whose matching samples are enriched for an outcome.
 
@@ -250,6 +298,7 @@ def mine_binary_conditions(
                     min_support=min_support,
                     min_instruments=min_instruments,
                     baseline_rate=baseline_rate,
+                    top_n_context=top_n_context,
                 )
                 record(candidate, valid, condition_mask)
 
@@ -301,6 +350,7 @@ def mine_binary_conditions(
                     min_support=min_support,
                     min_instruments=min_instruments,
                     baseline_rate=baseline_rate,
+                    top_n_context=top_n_context,
                 )
                 record(candidate, valid, condition_mask)
 
@@ -333,6 +383,48 @@ def _has_two_distinct(values: np.ndarray, finite_mask: np.ndarray) -> bool:
     return finite_values.size >= 2 and np.unique(finite_values).size >= 2
 
 
+def _top_n_diagnosis(
+    matched_indices: np.ndarray,
+    outcomes: np.ndarray,
+    context: TopNContext | None,
+) -> tuple[float | None, int, int]:
+    """Re-score matched samples the way a slot-limited portfolio would.
+
+    Returns ``(outcome_rate, support_count, filtered_days)``. ``filtered_days``
+    counts signal days where ranking actually had to drop something - when it is
+    zero the top-N split changed nothing, and the caller must say so instead of
+    showing a column that silently duplicates the pool-wide rate.
+    """
+
+    if context is None or matched_indices.size == 0:
+        return None, 0, 0
+    score = context.values[matched_indices]
+    usable = np.flatnonzero(np.isfinite(score))
+    if usable.size == 0:
+        return None, 0, 0
+    day = context.day_codes[matched_indices][usable]
+    score = score[usable]
+    day_outcomes = outcomes[matched_indices][usable]
+    # Sort by day, then by rank quality: a running counter then yields each
+    # sample's position within its own signal day.
+    key = score if context.ascending else -score
+    order = np.lexsort((key, day))
+    sorted_day = day[order]
+    is_new_day = np.concatenate(([True], sorted_day[1:] != sorted_day[:-1]))
+    starts = np.flatnonzero(is_new_day)
+    group_sizes = np.diff(np.append(starts, sorted_day.size))
+    group_index = np.cumsum(is_new_day) - 1
+    rank_in_group = np.arange(sorted_day.size) - starts[group_index]
+    chosen = order[rank_in_group < context.top_n]
+    if chosen.size == 0:
+        return None, 0, 0
+    return (
+        float(np.mean(day_outcomes[chosen])),
+        int(chosen.size),
+        int(np.sum(group_sizes > context.top_n)),
+    )
+
+
 def _candidate_for_mask(
     condition: ScreenCondition,
     condition_mask: np.ndarray,
@@ -343,6 +435,7 @@ def _candidate_for_mask(
     min_support: int,
     min_instruments: int,
     baseline_rate: float,
+    top_n_context: TopNContext | None = None,
 ) -> MinedCondition | None:
     order = np.flatnonzero(condition_mask)
     if order.size == 0:
@@ -366,6 +459,9 @@ def _candidate_for_mask(
     if instrument_count < min_instruments:
         return None
     group_count = int(np.unique(group_codes).size)
+    top_n_rate, top_n_support, filtered_days = _top_n_diagnosis(
+        matched_indices, outcomes, top_n_context
+    )
     return MinedCondition(
         condition=condition,
         support_count=support_count,
@@ -374,6 +470,9 @@ def _candidate_for_mask(
         outcome_rate=outcome_rate,
         baseline_rate=baseline_rate,
         lift=float(outcome_rate / baseline_rate),
+        top_n_outcome_rate=top_n_rate,
+        top_n_support_count=top_n_support,
+        top_n_filtered_days=filtered_days,
     )
 
 

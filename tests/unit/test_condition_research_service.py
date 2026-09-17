@@ -15,6 +15,7 @@ from selector_app.condition_research.service import (
     _backtest_config,
     _compact_report,
     _daily_hits,
+    _resolved_ranking,
     candidate_constraint_failures,
 )
 from selector_app.market_data.models import StockRef
@@ -381,6 +382,26 @@ def _research_config(**overrides: object) -> ConditionResearchConfig:
     }
     values.update(overrides)
     return ConditionResearchConfig(**values)  # type: ignore[arg-type]
+
+
+def test_resolved_ranking_prefers_the_explicit_choice() -> None:
+    """用户手选的排序指标优先，推荐值再好也不能覆盖它。"""
+
+    config = _research_config(ranking_value="technical.score", rank_order="asc")
+    assert _resolved_ranking(config, {"recommended": None}) == ("technical.score", "asc")
+
+
+def test_resolved_ranking_falls_back_to_the_recommendation() -> None:
+    """没手选时用推荐值，这样「前 N 名」那一列不会凭空消失。"""
+
+    config = _research_config()
+    ranking = {"recommended": {"value_id": "technical.score", "order": "asc"}}
+    assert _resolved_ranking(config, ranking) == ("technical.score", "asc")
+
+
+def test_resolved_ranking_is_empty_without_choice_or_recommendation() -> None:
+    config = _research_config()
+    assert _resolved_ranking(config, {"recommended": None})[0] is None
 
 
 def test_research_pool_follows_the_selected_instrument_type() -> None:

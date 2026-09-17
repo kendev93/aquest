@@ -968,6 +968,12 @@ export interface ConditionResearchMiningMetrics {
   outcome_rate: number
   baseline_rate: number
   lift: number
+  /** 前 N 名口径的胜率：只统计每个信号日排序前 N 名的命中样本。null = 没解析出排序指标。 */
+  top_n_outcome_rate?: number | null
+  /** 前 N 名口径的样本数。 */
+  top_n_support_count?: number
+  /** 命中数超过槽位数、排序真正起作用的交易日数。0 = 前 N 等于全池。 */
+  top_n_filtered_days?: number
 }
 
 export interface ConditionResearchStockResult {

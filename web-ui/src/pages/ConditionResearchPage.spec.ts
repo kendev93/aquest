@@ -147,7 +147,7 @@ const result = {
     candidate_id: 'buy-1',
     side: 'buy',
     condition: { left_value: 'indicator.score', operator: 'gte', right_value: null, right_constant: 2.5 },
-    mining: { support_count: 40, support_ratio: 0.2, instrument_count: 10, outcome_rate: 0.8, baseline_rate: 0.6, lift: 1.33 },
+    mining: { support_count: 40, support_ratio: 0.2, instrument_count: 10, outcome_rate: 0.8, baseline_rate: 0.6, lift: 1.33, top_n_outcome_rate: 0.92, top_n_support_count: 25, top_n_filtered_days: 18 },
     validation: summary,
     passed_constraints: true,
     constraint_failures: [],
@@ -338,6 +338,20 @@ describe('ConditionResearchPage', () => {
     const sellRow = wrapper.get('[data-testid="condition-research-candidate-sell-1"]')
     expect(sellRow.text()).toContain('25.000%')
     expect(sellRow.text()).not.toContain('125.000%')
+  })
+
+  it('scores each candidate under the slot limit and marks days ranking actually decided', async () => {
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="top-n-rate-buy-1"]').text()).toBe('92.00%')
+    // 有 18 天的命中数超过槽位数，提示要说清这一列只统计那些日子。
+    expect(wrapper.get('[data-testid="top-n-rate-buy-1"]').attributes('title')).toContain('18')
+    // 没有解析出排序值的候选显示占位，不能显示成 0%。
+    expect(wrapper.get('[data-testid="top-n-rate-buy-2"]').text()).toBe('—')
+    expect(wrapper.get('[data-testid="top-n-rate-buy-2"]').attributes('title')).toContain('没有解析出排序指标')
   })
 
   it('switches to an ETF study with fund costs and no board filters', async () => {

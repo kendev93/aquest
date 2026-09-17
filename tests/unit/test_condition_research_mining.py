@@ -5,6 +5,7 @@ import pandas as pd
 import pytest
 
 from selector_app.condition_research.mining import (
+    build_top_n_context,
     equivalent_condition_signatures,
     mine_binary_conditions,
 )
@@ -332,3 +333,87 @@ def test_baseline_rate_weights_every_sample_group_equally() -> None:
     assert best.condition.right_constant == pytest.approx(2.5)
     assert best.baseline_rate == pytest.approx((1.0 + 1 / 3) / 2)
     assert best.baseline_rate != pytest.approx(0.5)
+
+
+def _slot_frame() -> tuple[pd.DataFrame, pd.Series, pd.Series, pd.Series, pd.Series]:
+    """3 天 × 4 只：每天排序值 1~4，排序值 ≥ 3 的盈利，行序打乱。"""
+
+    rows = [
+        {"date": f"2024-01-0{day + 1}", "score": float(score), "win": score >= 3}
+        for day in range(3)
+        for score in (1, 2, 3, 4)
+    ]
+    frame = pd.DataFrame(rows).sample(frac=1.0, random_state=3).reset_index(drop=True)
+    return (
+        frame[["score"]],
+        frame["win"],
+        frame["date"],
+        pd.Series([f"SH60000{index}" for index in range(len(frame))]),
+        pd.Series([f"g{index}" for index in range(len(frame))]),
+    )
+
+
+def _mine_with_slots(
+    top_n: int,
+) -> tuple[object, ...]:
+    features, outcomes, dates, symbols, groups = _slot_frame()
+    return tuple(
+        mine_binary_conditions(
+            features,
+            outcomes,
+            symbols,
+            sample_groups=groups,
+            min_support=3,
+            min_instruments=2,
+            limit=20,
+            top_n_context=build_top_n_context(
+                dates, features["score"], top_n=top_n, ascending=False
+            ),
+        )
+    )
+
+
+def test_top_n_diagnosis_scores_matches_as_a_slot_limited_pool() -> None:
+    """前 N 名口径要能看出「这个条件在组合里更值钱」。
+
+    命中 2/3/4 三条时全池只有 2/3 盈利，但每天排序第 1 名（score=4）全盈利 ——
+    这正是「条件够宽、真正决定买谁的是排序」的场景。
+    """
+
+    candidates = _mine_with_slots(1)
+    broad = next(item for item in candidates if item.support_count == 9)
+
+    assert broad.outcome_rate == pytest.approx(2 / 3)
+    assert broad.top_n_outcome_rate == pytest.approx(1.0)
+    assert broad.top_n_support_count == 3
+    assert broad.top_n_filtered_days == 3
+
+
+def test_top_n_diagnosis_reports_when_the_slot_limit_never_binds() -> None:
+    """每天命中数不超过槽位数时，前 N 就是全池，必须报 0 天而不是假装筛过。"""
+
+    candidates = _mine_with_slots(1)
+    narrow = next(item for item in candidates if item.support_count == 3)
+
+    assert narrow.top_n_filtered_days == 0
+    # 没有发生筛选时胜率自然等于全池口径，界面据此提示「排序未起作用」。
+    assert narrow.top_n_outcome_rate == pytest.approx(narrow.outcome_rate)
+
+
+def test_top_n_diagnosis_is_absent_without_a_ranking_value() -> None:
+    """没解析出排序值就不该编一个，字段保持为空由界面决定要不要显示。"""
+
+    features, outcomes, _, symbols, groups = _slot_frame()
+    candidates = mine_binary_conditions(
+        features,
+        outcomes,
+        symbols,
+        sample_groups=groups,
+        min_support=3,
+        min_instruments=2,
+        limit=1,
+    )
+
+    assert candidates[0].top_n_outcome_rate is None
+    assert candidates[0].top_n_support_count == 0
+    assert candidates[0].top_n_filtered_days == 0

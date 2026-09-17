@@ -817,6 +817,27 @@ function hitRateTitle(candidate: ConditionResearchCandidate): string {
     : '该条件在基础规则入场日上的命中比例（全市场合并）'
 }
 
+/** 前 N 名口径胜率：只统计每个信号日排序后真会成交的那批样本。 */
+function topNWinRate(candidate: ConditionResearchCandidate): string {
+  const rate = candidate.mining.top_n_outcome_rate
+  return rate === null || rate === undefined ? '—' : formatPercent(rate)
+}
+
+function topNTitle(candidate: ConditionResearchCandidate): string {
+  const slots = report.value?.ranking?.top_n
+  const days = candidate.mining.top_n_filtered_days ?? 0
+  if (candidate.mining.top_n_outcome_rate === null || candidate.mining.top_n_outcome_rate === undefined) {
+    return '这次研究没有解析出排序指标，无法按前 N 名口径评估。'
+  }
+  if (days === 0) {
+    return `没有任何一天的命中数超过槽位数（${slots ?? '—'} 个），排序没起作用，这一列等于全池胜率。`
+  }
+  return (
+    `有 ${days} 个交易日的命中数超过槽位数（${slots ?? '—'} 个），` +
+    '这一列只统计这些日子里排序靠前、真正会成交的样本。'
+  )
+}
+
 function validationTrades(candidate: ConditionResearchCandidate): string {
   const trades = candidate.validation.pooled_trades.closed_trades
   const threshold = report.value?.min_trades
@@ -1201,7 +1222,7 @@ onMounted(async () => {
             </p>
             <div class="condition-bridge-actions">
               <button
-                class="secondary-button"
+                class="primary-button"
                 data-testid="condition-apply-to-portfolio"
                 type="button"
                 @click="applyToPortfolio"
@@ -1239,7 +1260,7 @@ onMounted(async () => {
               <div class="table-wrap">
                 <table>
                   <caption class="sr-only">买卖条件候选验证结果</caption>
-                  <thead><tr><th>选择</th><th>方向</th><th>新增条件</th><th>样本 / 股票</th><th>训练 lift</th><th title="买入按基础规则入场日计，卖出按持仓期提前离场决策点计（全市场合并，分母见结果字段 sample_totals）">条件命中率</th><th title="验证期合并成交笔数 / 你设置的最少交易样本">验证成交 / 门槛</th><th>验证胜率</th><th>全区间胜率</th><th>股票胜率提升率</th><th>盈亏比</th><th>留出胜率</th><th>状态</th></tr></thead>
+                  <thead><tr><th>选择</th><th>方向</th><th>新增条件</th><th>样本 / 股票</th><th>训练 lift</th><th>前 N 名胜率<TermHint term="topNWinRate" /></th><th title="买入按基础规则入场日计，卖出按持仓期提前离场决策点计（全市场合并，分母见结果字段 sample_totals）">条件命中率</th><th title="验证期合并成交笔数 / 你设置的最少交易样本">验证成交 / 门槛</th><th>验证胜率</th><th>全区间胜率</th><th>股票胜率提升率</th><th>盈亏比</th><th>留出胜率</th><th>状态</th></tr></thead>
                   <tbody>
                     <tr
                       v-for="candidate in report.candidates"
@@ -1260,6 +1281,10 @@ onMounted(async () => {
                       <td class="condition-rule">{{ conditionText(candidate) }}</td>
                       <td>{{ candidate.mining.support_count }} / {{ candidate.mining.instrument_count }}</td>
                       <td>{{ formatNumber(candidate.mining.lift) }}</td>
+                      <td
+                        :title="topNTitle(candidate)"
+                        :data-testid="'top-n-rate-' + candidate.candidate_id"
+                      >{{ topNWinRate(candidate) }}</td>
                       <td :title="hitRateTitle(candidate)">{{ conditionHitRate(candidate) }}</td>
                       <td>{{ validationTrades(candidate) }}</td>
                       <td>{{ formatPercent(candidate.validation.pooled_trades.win_rate) }}</td>
@@ -1592,6 +1617,14 @@ onMounted(async () => {
 .condition-bridge-actions small {
   color: var(--subtle);
   font-size: 11px;
+}
+
+/* 主按钮默认占满整行，这里只需要它醒目的配色。 */
+.condition-bridge-actions .primary-button {
+  width: auto;
+  min-height: 36px;
+  margin-top: 0;
+  padding: 0 18px;
 }
 
 @media (max-width: 640px) {

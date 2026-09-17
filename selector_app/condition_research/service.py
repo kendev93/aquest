@@ -33,7 +33,13 @@ from selector_app.strategy_discovery.catalog import default_indicator_catalog
 
 from . import parallel
 from .metrics import summarize_backtests
-from .mining import MinedCondition, equivalent_condition_signatures, mine_binary_conditions
+from .mining import (
+    MinedCondition,
+    TopNContext,
+    build_top_n_context,
+    equivalent_condition_signatures,
+    mine_binary_conditions,
+)
 from .models import ConditionResearchConfig
 from .parallel import (
     CandidateWindowOutcome,
@@ -413,9 +419,19 @@ class ConditionResearchService:
             if train_outcome.sell_samples is not None:
                 sell_samples.append(train_outcome.sell_samples)
 
-        mined = self._mine_candidates(config, buy_samples, sell_samples)
-        sample_totals = _sample_totals(buy_samples, sell_samples)
+        # The ranking advice needs only the signal samples, not the mined
+        # candidates, so it is computed first: that lets mining score every
+        # candidate under the slot limit the portfolio will actually face.
         ranking = self._ranking_assessment(config, buy_samples, feature_ids)
+        ranking_value, rank_order = _resolved_ranking(config, ranking)
+        mined = self._mine_candidates(
+            config,
+            buy_samples,
+            sell_samples,
+            ranking_value=ranking_value,
+            rank_order=rank_order,
+        )
+        sample_totals = _sample_totals(buy_samples, sell_samples)
         baseline_train = summarize_backtests(train_reports)
         if not mined:
             validation_reports: list[Mapping[str, object]] = []
@@ -792,7 +808,17 @@ class ConditionResearchService:
         config: ConditionResearchConfig,
         buy_samples: Sequence[MiningSamples],
         sell_samples: Sequence[MiningSamples],
+        *,
+        ranking_value: str | None,
+        rank_order: str,
     ) -> list[tuple[str, str, MinedCondition]]:
+        # Slots are competed for on entry only, so the top-N diagnostic is
+        # meaningful for buy candidates and meaningless for sell triggers.
+        buy_context = (
+            _top_n_context(buy_samples, ranking_value, rank_order, config.ranking_top_n)
+            if config.search_sides in {"buy", "both"}
+            else None
+        )
         results: list[tuple[str, str, MinedCondition]] = []
         if config.search_sides in {"buy", "both"}:
             results.extend(
@@ -804,6 +830,7 @@ class ConditionResearchService:
                         min_instruments=config.min_instruments,
                         limit=config.candidate_limit,
                         excluded=_rule_condition_signatures(config.buy_rule),
+                        top_n_context=buy_context,
                     )
                 )
             )
@@ -927,6 +954,7 @@ def _mine_sample_sets(
     min_instruments: int,
     limit: int,
     excluded: frozenset[str] = frozenset(),
+    top_n_context: TopNContext | None = None,
 ) -> tuple[MinedCondition, ...]:
     usable = [sample for sample in samples if len(sample)]
     if not usable:
@@ -940,6 +968,53 @@ def _mine_sample_sets(
         min_instruments=min_instruments,
         limit=limit,
         excluded=excluded,
+        top_n_context=top_n_context,
+    )
+
+
+def _resolved_ranking(
+    config: ConditionResearchConfig,
+    ranking: Mapping[str, object],
+) -> tuple[str | None, str]:
+    """Pick the ranking value mining should assume: explicit choice first.
+
+    Without a choice we fall back to the recommendation rather than skipping the
+    diagnostic, so the top-N column still reflects a sensible slot order.
+    """
+
+    if config.ranking_value:
+        return config.ranking_value, config.rank_order
+    recommended = ranking.get("recommended")
+    if isinstance(recommended, Mapping):
+        value = recommended.get("value_id")
+        order = recommended.get("order")
+        if isinstance(value, str) and value:
+            return value, order if isinstance(order, str) else config.rank_order
+    return None, config.rank_order
+
+
+def _top_n_context(
+    samples: Sequence[MiningSamples],
+    ranking_value: str | None,
+    rank_order: str,
+    top_n: int,
+) -> TopNContext | None:
+    """Build the slot-limited diagnostic input for one sample set.
+
+    Returns None when no ranking value was resolved, which simply means the
+    candidate table omits the top-N column instead of inventing a ranking.
+    """
+
+    if not ranking_value:
+        return None
+    usable = [sample for sample in samples if len(sample)]
+    if not usable or ranking_value not in usable[0].features.columns:
+        return None
+    return build_top_n_context(
+        pd.concat([sample.dates for sample in usable], ignore_index=True),
+        pd.concat([sample.features[ranking_value] for sample in usable], ignore_index=True),
+        top_n=top_n,
+        ascending=rank_order == "asc",
     )
 
 
@@ -1005,6 +1080,11 @@ def _mining_dict(candidate: MinedCondition) -> dict[str, object]:
         "outcome_rate": candidate.outcome_rate,
         "baseline_rate": candidate.baseline_rate,
         "lift": candidate.lift,
+        # Read-only slot-limit diagnostic; None when no ranking value was
+        # resolved, and only meaningful when top_n_filtered_days > 0.
+        "top_n_outcome_rate": candidate.top_n_outcome_rate,
+        "top_n_support_count": candidate.top_n_support_count,
+        "top_n_filtered_days": candidate.top_n_filtered_days,
     }
 
 
