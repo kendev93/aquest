@@ -8,7 +8,10 @@ from selector_app.formulas.indicator_one import calculate_indicator_one
 from selector_app.formulas.indicator_three import calculate_indicator_three
 from selector_app.formulas.indicator_two import calculate_indicator_two
 from selector_app.formulas.tdx_math import BARSLAST, COUNT, CROSS, EMA, HHV, LLV, REF, SMA
-from selector_app.formulas.technical import calculate_technical_indicators
+from selector_app.formulas.technical import (
+    RECOMMENDED_BARS,
+    calculate_technical_indicators,
+)
 
 
 def make_bars(length: int = 180, *, descending: bool = False) -> pd.DataFrame:
@@ -510,3 +513,16 @@ def test_dimensionless_outputs_are_usable_as_cross_stock_ranking_features() -> N
     # 价格量纲的均线/MACD 仍然被排除。
     for excluded in ("technical.ma20", "technical.macd"):
         assert excluded not in rankable
+
+
+def test_recommended_bars_covers_the_longest_warmup() -> None:
+    """建议预热根数必须覆盖最长窗口，否则会有输出长时间为空。
+
+    RSRS 标准分是瓶颈：18 根回归出 beta，再要 250 根才能标准化。以后加更长
+    窗口的输出而忘了同步 ``RECOMMENDED_BARS``，这个断言会失败。
+    """
+
+    for bars in (make_bars(RECOMMENDED_BARS), make_trend_bars(RECOMMENDED_BARS)):
+        result = calculate_technical_indicators(bars)
+        unfinished = sorted(name for name, values in result.values.items() if np.isnan(values[-1]))
+        assert not unfinished, unfinished

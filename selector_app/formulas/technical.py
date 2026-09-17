@@ -11,7 +11,6 @@ from .types import FormulaResult
 FORMULA_ID = "technical"
 DISPLAY_NAME = "K线技术指标"
 MINIMUM_BARS = 1
-RECOMMENDED_BARS = 60
 SIGNAL_NAMES: tuple[str, ...] = ()
 # The trailing entries are dimensionless (percentages, ratios, bounded scores)
 # and are the reason this module exists beyond charting: unlike MA/MACD they
@@ -76,6 +75,14 @@ _RSRS_PERIOD = 18
 # backtests usually cover 2-3 years, where 600 would leave most of the range
 # undefined, so the standardisation window is one trading year instead.
 _RSRS_ZSCORE_PERIOD = 250
+# Warm-up before *every* output carries a value. RSRS is the binding
+# constraint: its standard score needs the 18-bar regression to yield a beta
+# and then a further 250 bars to standardise that beta, so roughly a trading
+# year. The volatility/trend-quality family is ready within 60 bars, but
+# quoting 60 here would promise a column that is still NaN across most of a
+# one-year backtest. Raising this only changes the advertised warm-up — the
+# cache and ``sufficient_data`` gate on ``minimum_bars``, not on this.
+RECOMMENDED_BARS = _RSRS_PERIOD + _RSRS_ZSCORE_PERIOD
 
 
 def _rolling_mean_abs_deviation(values: np.ndarray, window: int) -> np.ndarray:
