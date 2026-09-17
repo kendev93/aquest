@@ -230,6 +230,36 @@ describe('ConditionResearchPage', () => {
     expect(wrapper.find('[data-testid="condition-sell-default-hint"]').exists()).toBe(false)
   })
 
+  it('uses opposite operators for buy/sell after parsing a custom formula', async () => {
+    // 回归：解析自定义公式后若把运算符 'gt'/'lt' 当成 'buy'/'sell' 传入 initialRule，
+    // 两侧都会落进 else 分支拿到同一个 'lte'，买卖条件完全同构，研究结论失真。
+    vi.mocked(formulaApi.parseFormula).mockResolvedValueOnce({
+      parameters: [],
+      signals: [],
+      values: [{ id: 'custom.score', display_name: '强度', description: '自定义数值', bidirectional: true }],
+      minimum_bars: 20,
+      warnings: [],
+    })
+
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-mode-custom"]').trigger('click')
+    await wrapper.get('[data-testid="condition-formula"]').setValue('强度:C/MA(C,20);')
+    await wrapper.get('[data-testid="condition-parse-formula"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(researchApi.createConditionResearch).toHaveBeenCalledWith(expect.objectContaining({
+      buy_rule: expect.objectContaining({
+        conditions: [expect.objectContaining({ left_value: 'custom.score', operator: 'gt' })],
+      }),
+      sell_rule: expect.objectContaining({
+        conditions: [expect.objectContaining({ left_value: 'custom.score', operator: 'lt' })],
+      }),
+    }))
+  })
+
   it('scores a sell candidate against early-exit decision points, not closed trades', async () => {
     // 卖出候选的 50 个命中来自持仓期决策点（分母 200），若错用成交笔数 40
     // 会显示成 125.000%，即超过 100% 的“命中率”。

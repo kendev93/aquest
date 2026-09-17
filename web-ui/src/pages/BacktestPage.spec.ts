@@ -70,6 +70,7 @@ describe('BacktestPage', () => {
       ],
       trades: [{ date: '2024-01-03', name: '浦发银行', direction: 'BUY', size: 800, price: 12, commission: 0, slippage: 0, pnl: 0, rejected: false }],
       positions: [], diagnostic: null,
+      configuration: { initial_cash: 10000 },
     })
     vi.mocked(backtestApi.fetchBacktestHistory).mockResolvedValue([])
     vi.mocked(jobsApi.fetchActiveJobs).mockResolvedValue([])

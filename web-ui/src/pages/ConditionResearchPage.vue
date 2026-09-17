@@ -265,8 +265,8 @@ async function parseCustomFormula(): Promise<void> {
         form.formulaParameters[parameter.name] ?? parameter.default,
       ]),
     )
-    form.buyRule = initialRule('gt')
-    form.sellRule = initialRule('lt')
+    form.buyRule = initialRule('buy')
+    form.sellRule = initialRule('sell')
     errors.value = {}
   } catch (error) {
     customMetadata.value = null

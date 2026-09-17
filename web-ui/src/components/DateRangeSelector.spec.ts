@@ -25,8 +25,9 @@ describe('DateRangeSelector', () => {
 
     await wrapper.get('[data-testid="backtest-date-mode"]').setValue('custom')
     await wrapper.setProps({ modelValue: { mode: 'custom', startDate: '', endDate: '' } })
-    expect(wrapper.get('[data-testid="backtest-start"]').exists()).toBe(true)
-    expect(wrapper.get('[data-testid="backtest-end"]').exists()).toBe(true)
+    // 用 find 而非 get：get 找不到会直接抛异常，.exists() 就成了恒真断言。
+    expect(wrapper.find('[data-testid="backtest-start"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="backtest-end"]').exists()).toBe(true)
     expect(wrapper.emitted('update:modelValue')?.at(-1)?.[0]).toEqual({
       mode: 'custom',
       startDate: '',

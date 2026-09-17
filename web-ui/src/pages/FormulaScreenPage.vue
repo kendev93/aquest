@@ -753,7 +753,7 @@ watch(() => form.formulaText, (value) => {
               </select>
               <template v-if="form.combineMode === 'at_least'">
                 <label for="minimum-matches">最少满足条件数 <span class="required">*</span></label>
-                <input id="minimum-matches" v-model.number="form.minimumMatches" data-testid="minimum-matches" type="number" min="1" :max="Math.max(form.ruleMode === 'conditions' ? form.conditions.length : form.selectedSignals.length, 1)">
+                <input id="minimum-matches" v-model.number="form.minimumMatches" data-testid="minimum-matches" type="number" min="1" :max="Math.max(form.selectedSignals.length, 1)">
                 <p v-if="errors.minimumMatches" class="field-error">{{ errors.minimumMatches }}</p>
               </template>
             </fieldset>
@@ -878,7 +878,7 @@ watch(() => form.formulaText, (value) => {
               <div class="sync-progress-heading"><span>{{ syncLoading ? '行情同步进度' : '最近一次同步' }}</span><strong>{{ syncProgressPercent }}%</strong></div>
               <div class="progress-track sync-progress-track"><span :style="{ width: `${syncProgressPercent}%` }"></span></div>
               <div class="sync-progress-stats"><span>已处理 <strong data-testid="sync-processed">{{ syncJob?.total_scanned ?? 0 }}</strong> / {{ syncJob?.total_candidates ?? 0 }}</span><span>剩余 <strong data-testid="sync-remaining">{{ syncRemaining }}</strong></span></div>
-              <div v-if="syncJob?.result" class="sync-result-stats"><span>写入 {{ syncJob.result.written_bars }} 根</span><span>更新 {{ syncJob.result.updated_files }} 个文件</span><span>无变化 {{ syncJob.result.unchanged_files }} 个文件</span><span :class="{ negative: syncJob.result.errors > 0 }">错误 {{ syncJob.result.errors }}</span></div>
+              <div v-if="syncJob?.result" class="sync-result-stats"><span>写入 {{ syncJob.result.written_bars }} 根</span><span>更新 {{ syncJob.result.updated_files }} 个文件</span><span>无变化 {{ syncJob.result.unchanged_files }} 个文件</span><span :class="{ negative: (syncJob.result.errors ?? 0) > 0 }">错误 {{ syncJob.result.errors ?? 0 }}</span></div>
               <p v-if="syncJob?.error" class="field-error">{{ syncJob.error }}</p>
             </div>
           </div>

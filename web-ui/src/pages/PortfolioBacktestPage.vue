@@ -29,6 +29,7 @@ import type {
   PortfolioTrade,
   PortfolioRebalanceFrequency,
   RuleGroupPayload,
+  ScreenCondition,
   SignalDefinition,
   Universe,
   ValueDefinition,

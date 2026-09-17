@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import type { ScreenCondition, ScreenFormState } from '../types'
+import type { InstrumentBoard, InstrumentType, ScreenCondition, ScreenFormState } from '../types'
 import {
   DEFAULT_PRESET_SIGNALS,
   buildScanPayload,
@@ -88,8 +88,8 @@ describe('formula screen form helpers', () => {
 
     const filtered = {
       ...baseForm(),
-      instrumentTypes: ['stock'] as const,
-      boards: ['main', 'chinext'] as const,
+      instrumentTypes: ['stock'] as InstrumentType[],
+      boards: ['main', 'chinext'] as InstrumentBoard[],
     }
 
     expect(buildScanPayload(filtered)).toMatchObject({

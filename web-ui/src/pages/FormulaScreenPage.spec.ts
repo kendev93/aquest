@@ -432,7 +432,7 @@ describe('FormulaScreenPage', () => {
     await wrapper.get('[data-testid="parse-formula"]').trigger('click')
     await flushPromises()
 
-    expect(wrapper.get('[data-testid="custom-formula-meta"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="custom-formula-meta"]').exists()).toBe(true)
     await wrapper.get('[data-testid="custom-formula"]').setValue('N:=6; BREAKOUT:CROSS(C,REF(C,N));')
     await flushPromises()
 

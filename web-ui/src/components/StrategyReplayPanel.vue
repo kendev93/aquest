@@ -34,8 +34,11 @@ const selectedCandidate = computed(() => props.result.candidates.find(
   (candidate) => candidate.candidate_hash === props.selectedCandidateHash,
 ) ?? null)
 
-function metricValue(metrics: Record<string, unknown>, key: string): number | null {
-  const value = metrics[key]
+// 入参既可能是开放字典（leaderboard_metrics），也可能是有固定字段的周期指标对象，
+// 统一按未知对象收，取值完全交给运行时校验。
+function metricValue(metrics: unknown, key: string): number | null {
+  if (typeof metrics !== 'object' || metrics === null) return null
+  const value = (metrics as Record<string, unknown>)[key]
   return typeof value === 'number' && Number.isFinite(value) ? value : null
 }
 

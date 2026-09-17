@@ -135,8 +135,6 @@ const marketJobTitle = computed(() => {
     return activeJobDescription(marketJob.value)
   }
   if (syncLoading.value) return syncPhaseText.value || syncLabel.value || '后台任务进行中…'
-  if (marketJob.value?.status === 'queued') return '等待后台任务…'
-  if (marketJob.value?.status === 'running') return '后台任务进行中…'
   return '最近一次任务'
 })
 
@@ -691,7 +689,7 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
             <span v-if="marketJob.result.merged_rows !== undefined">合并 {{ marketJob.result.merged_rows }} 根</span>
             <span>数据源 {{ marketJob.result.provider ?? '—' }}</span><span>证券列表 {{ marketJob.result.listed_instruments ?? marketJob.result.total_candidates ?? marketJob.result.total_targets ?? 0 }}</span><span>新增标的 {{ marketJob.result.new_instruments ?? 0 }}</span><span>更新标的 {{ marketJob.result.updated_files ?? marketJob.result.completed ?? 0 }}</span><span>写入 K 线 {{ marketJob.result.written_bars ?? marketJob.result.rows ?? 0 }}</span><span>无变化 {{ marketJob.result.unchanged_files ?? marketJob.result.skipped ?? 0 }}</span><span v-if="marketJob.result.actual_start || marketJob.result.actual_end">实际覆盖 {{ marketJob.result.actual_start ?? '—' }} → {{ marketJob.result.actual_end ?? '—' }}</span>
             <span v-if="catalogCountsText">分类 {{ catalogCountsText }}</span>
-            <span v-if="historySourcesText">日线接口 {{ historySourcesText }}</span><span :class="{ negative: marketJob.result.errors > 0 }">失败 {{ marketJob.result.errors }}</span>
+            <span v-if="historySourcesText">日线接口 {{ historySourcesText }}</span><span :class="{ negative: (marketJob.result.errors ?? 0) > 0 }">失败 {{ marketJob.result.errors ?? 0 }}</span>
           </div>
         </div>
       </section>

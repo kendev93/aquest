@@ -203,14 +203,16 @@ const selectedCandle = computed(() => (
 ))
 
 const selectedFormulaValues = computed(() => {
-  if (selectedIndex.value === null) return []
+  // 捕获成局部常量：在 .map 闭包里直接读 ref 无法被 TS 收窄为非空。
+  const index = selectedIndex.value
+  if (index === null) return []
   return formulaPanelLayouts.value.map((panel) => ({
     id: panel.id,
     display_name: panel.display_name,
     values: panel.series.map((series) => ({
       id: series.id,
       display_name: series.display_name,
-      value: series.values[selectedIndex.value] ?? null,
+      value: series.values[index] ?? null,
     })),
   }))
 })

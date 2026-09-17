@@ -85,6 +85,7 @@ const result: PortfolioBacktestResult = {
   }],
   failure_reasons: {},
   diagnostic: null,
+  data_fingerprint: 'portfolio-fingerprint',
 }
 
 describe('PortfolioBacktestPage', () => {

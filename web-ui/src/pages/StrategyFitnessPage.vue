@@ -57,6 +57,8 @@ interface FitnessFormState {
   buyRule: RuleGroupPayload
   universe: Universe
   universeFile: string
+  instrumentTypes: InstrumentType[]
+  boards: InstrumentBoard[]
   rankingValue: string
   rankOrder: 'asc' | 'desc'
   formulaText: string

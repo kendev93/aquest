@@ -99,8 +99,8 @@ describe('StrategyDiscoveryPage', () => {
     expect(api.createStrategyDiscovery).toHaveBeenCalledWith(expect.objectContaining({
       max_positions: 3, max_trials: 1000,
     }))
-    expect(api.createStrategyDiscovery.mock.calls[0]?.[0]).not.toHaveProperty('start_date')
-    expect(api.createStrategyDiscovery.mock.calls[0]?.[0]).not.toHaveProperty('end_date')
+    expect(vi.mocked(api.createStrategyDiscovery).mock.calls[0]?.[0]).not.toHaveProperty('start_date')
+    expect(vi.mocked(api.createStrategyDiscovery).mock.calls[0]?.[0]).not.toHaveProperty('end_date')
     expect(wrapper.get('[data-testid="strategy-discovery-results"]').text()).toContain('MA5 > MA20')
     expect(wrapper.get('[data-testid="strategy-discovery-sharpe-board"]').text()).toContain('夏普榜')
   })
@@ -301,8 +301,8 @@ describe('StrategyDiscoveryPage', () => {
       max_positions: 3,
       date_mode: 'recent5',
     }))
-    expect(api.createStrategyDiscovery.mock.calls[0]?.[0]).not.toHaveProperty('start_date')
-    expect(api.createStrategyDiscovery.mock.calls[0]?.[0]).not.toHaveProperty('end_date')
+    expect(vi.mocked(api.createStrategyDiscovery).mock.calls[0]?.[0]).not.toHaveProperty('start_date')
+    expect(vi.mocked(api.createStrategyDiscovery).mock.calls[0]?.[0]).not.toHaveProperty('end_date')
   })
 
   it('allows selecting full local history explicitly', async () => {
@@ -315,8 +315,8 @@ describe('StrategyDiscoveryPage', () => {
     expect(api.createStrategyDiscovery).toHaveBeenCalledWith(expect.objectContaining({
       date_mode: 'full',
     }))
-    expect(api.createStrategyDiscovery.mock.calls[0]?.[0]).not.toHaveProperty('start_date')
-    expect(api.createStrategyDiscovery.mock.calls[0]?.[0]).not.toHaveProperty('end_date')
+    expect(vi.mocked(api.createStrategyDiscovery).mock.calls[0]?.[0]).not.toHaveProperty('start_date')
+    expect(vi.mocked(api.createStrategyDiscovery).mock.calls[0]?.[0]).not.toHaveProperty('end_date')
   })
 
   it('submits an explicit date range when custom history is selected', async () => {
@@ -350,7 +350,7 @@ describe('StrategyDiscoveryPage', () => {
         rank: 1,
         candidate_hash: 's1',
         human_readable_rules: '买入[MA5 > MA20]；卖出[RSI14 > 70]',
-        config: { ...({} as Record<string, unknown>), ranking_value: 'technical.ma5', start_date: '2024-01-01', end_date: '2026-09-08' },
+        config: { ranking_value: 'technical.ma5', start_date: '2024-01-01', end_date: '2026-09-08' },
         leaderboard_metrics: { annual_return: 0.2, sharpe: 1.4 },
         overall_metrics: { total_return: 0.55, annual_return: 0.22, max_drawdown: 0.12, sharpe: 1.1, total_trades: 8, win_rate: 0.5, trade_fingerprint: 'trade-fingerprint' },
         periods: {
@@ -363,9 +363,9 @@ describe('StrategyDiscoveryPage', () => {
           { key: 'year_2026', label: '2026', start_date: '2026-01-01', end_date: '2026-09-08', bars: 3, total_return: 0.18, annual_return: 0.2, max_drawdown: 0.06, sharpe: 1.2, total_trades: 2, win_rate: 0.5, diagnostic: null },
         ],
         backtest: {
-          universe: 'all', total_candidates: 1, processed: 1, skipped: 0, errors: 0, bars: 6,
+          universe: 'all' as const, total_candidates: 1, processed: 1, skipped: 0, errors: 0, bars: 6,
           start_date: '2024-01-01', end_date: '2026-09-08', max_positions: 3,
-          ranking_value: 'technical.ma5', rank_order: 'desc', fitness_filter_enabled: false,
+          ranking_value: 'technical.ma5', rank_order: 'desc' as const, fitness_filter_enabled: false,
           fitness_min_score: 75, fitness_min_trades: 5, fitness_max_drawdown: 0.3,
           performance: { total_return: 0.55, annual_return: 0.22, max_drawdown: 0.12, sharpe: 1.1, total_trades: 8, win_rate: 0.5, end_value: 155000 },
           equity_curve: [{ date: '2024-01-01', cash: 100000, position_value: 0, total: 100000, positions_count: 0, drawdown: 0, drawdown_pct: 0 }, { date: '2026-09-08', cash: 0, position_value: 155000, total: 155000, positions_count: 3, drawdown: 0, drawdown_pct: 0 }],

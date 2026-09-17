@@ -651,6 +651,8 @@ export interface PortfolioBacktestResult {
   failure_reasons: Record<string, number>
   diagnostic: string | null
   risk_controls?: Record<string, number | string | null>
+  // 后端 portfolio_backtest/service.py 会在结果上附带行情指纹，用于复核时判断数据是否变化。
+  data_fingerprint: string
 }
 
 export interface StrategyDiscoveryPayload {
@@ -709,7 +711,9 @@ export interface StrategyDiscoveryCandidate {
   candidate_hash: string
   complexity: number
   human_readable_rules: string
-  config: PortfolioBacktestPayload
+  // 后端 strategy_discovery/models.py::StrategyCandidate.to_config 只回填部分字段，
+  // 且刻意不套用严格的组合回测 schema，因此这里是开放字典而非完整 payload。
+  config: Record<string, unknown>
   metrics: Record<string, Record<string, number | string | boolean | null>>
 }
 
@@ -760,7 +764,9 @@ export interface StrategyReplayCandidate {
   rank: number
   candidate_hash: string
   human_readable_rules: string
-  config: PortfolioBacktestPayload
+  // 与后端 replay.py 的 `config: Mapping[str, object]` 对齐：候选配置是开放字典，
+  // 复核时还会再注入 start_date/end_date，不是完整的组合回测 payload。
+  config: Record<string, unknown>
   leaderboard_metrics: Record<string, unknown>
   overall_metrics: Record<string, unknown>
   periods: {

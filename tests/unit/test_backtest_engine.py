@@ -96,11 +96,32 @@ def test_drawdown_helpers_match_the_reference_implementation(total: list[float])
         expected_duration = 0
     else:
         max_index = int(np.argmax(expected_drawdown))
-        peak_index = max_index
-        for index in range(max_index - 1, -1, -1):
-            if values[index] > values[max_index]:
-                peak_index = index
-                break
+        # 峰值取谷底之前的历史最高点，而不是回扫遇到的第一个高于谷底的点。
+        peak_index = int(np.argmax(values[: max_index + 1]))
         expected_duration = max_index - peak_index
 
     assert PerformanceAnalyzer._max_drawdown_duration(values, drawdown) == expected_duration
+
+
+@pytest.mark.parametrize(
+    ("total", "expected"),
+    [
+        # 单调下跌：回撤从首个峰值一直持续到谷底，长度为 n-1 而不是 1。
+        ([100.0, 90.0, 80.0, 70.0], 3),
+        # 谷底前出现小反弹：峰值仍是起点，不能被反弹点截断。
+        ([100.0, 90.0, 95.0, 80.0], 3),
+        # 无回撤。
+        ([100.0, 110.0, 120.0], 0),
+    ],
+)
+def test_max_drawdown_duration_starts_at_the_historical_peak(
+    total: list[float], expected: int
+) -> None:
+    """回归：回撤期必须从谷底之前的历史最高点起算。
+
+    旧实现回扫时停在「第一个高于谷底的点」，单调下跌恒为 1 天，严重低估回撤持续期。
+    """
+
+    values = np.asarray(total, dtype=float)
+    drawdown, _ = PerformanceAnalyzer._drawdown_arrays(values)
+    assert PerformanceAnalyzer._max_drawdown_duration(values, drawdown) == expected

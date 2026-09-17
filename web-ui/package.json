@@ -9,9 +9,9 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc --noEmit && vite build",
+    "build": "vue-tsc --build && vite build",
     "preview": "vite preview",
-    "typecheck": "vue-tsc --noEmit",
+    "typecheck": "vue-tsc --build",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "e2e": "playwright test"

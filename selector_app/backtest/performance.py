@@ -145,12 +145,9 @@ class PerformanceAnalyzer:
         if not len(drawdown) or float(np.max(drawdown)) == 0:
             return 0
         max_index = int(np.argmax(drawdown))
-        peak_index = max_index
-        # 逐格回扫通常在几步内命中，实测比 flatnonzero 向量化更省（分配开销更大）。
-        for index in range(max_index - 1, -1, -1):
-            if total[index] > total[max_index]:
-                peak_index = index
-                break
+        # 回撤区间必须从「谷底之前的历史最高点」起算。此前用「回扫遇到的第一个高于
+        # 谷底的点」近似，单调下跌时会退化成 1 天（正确值应为整段下跌长度）。
+        peak_index = int(np.argmax(total[: max_index + 1]))
         return max_index - peak_index
 
     def _average_holding_days(self) -> float:
