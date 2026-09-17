@@ -575,8 +575,7 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
         include_event: bool = True,
     ) -> tuple[list[_PendingBuy], dict[str, PortfolioJsonValue]]:
         excluded = set(positions) | set(pending_sells)
-        candidates: list[tuple[float, _StockSeries]] = []
-        ranked_candidates: list[tuple[float, _StockSeries, RollingFitnessDecision | None]] = []
+        entries: list[tuple[float, _StockSeries, RollingFitnessDecision | None]] = []
         for context in by_symbol.values():
             if context.symbol in excluded:
                 continue
@@ -593,17 +592,23 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
             decision = (
                 fitness_filter.decide(context.symbol, current_date) if fitness_filter else None
             )
-            if include_event:
-                ranked_candidates.append((score, context, decision))
-            if decision is None or decision.eligible:
-                candidates.append((score, context))
-        slots = max(0, config.max_positions - len(positions) + len(pending_sells))
-        key = (
-            (lambda item: (-item[0], item[1].symbol))
-            if config.rank_order == "desc"
-            else (lambda item: (item[0], item[1].symbol))
+            entries.append((score, context, decision))
+        weighted = (
+            self._weighted_scores(entries, config)
+            if fitness_filter is not None and config.fitness_rank_weight > 0
+            else None
         )
-        selected = heapq.nsmallest(slots, candidates, key=key)
+        sort_values: list[float] = []
+        for position, (raw, _context, _decision) in enumerate(entries):
+            if weighted is not None:
+                sort_values.append(weighted[position])
+            elif config.rank_order == "desc":
+                sort_values.append(raw)
+            else:
+                sort_values.append(-raw)
+        candidates = [(sort_values[position], entry[1]) for position, entry in enumerate(entries)]
+        slots = max(0, config.max_positions - len(positions) + len(pending_sells))
+        selected = heapq.nsmallest(slots, candidates, key=_candidate_sort_key)
         slot_budget = total_value / config.max_positions if config.max_positions else cash
         pending = [
             _PendingBuy(context.symbol, current_date, slot_budget) for _, context in selected
@@ -617,27 +622,39 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
             }
         ranked_candidates = heapq.nsmallest(
             max(slots, 10),
-            ranked_candidates,
-            key=key,
+            candidates,
+            key=_candidate_sort_key,
         )
         event_candidates: list[dict[str, PortfolioJsonValue]] = []
         selected_symbols = {context.symbol for _, context in selected}
-        for rank, (score, context, decision) in enumerate(ranked_candidates, start=1):
+        raw_by_symbol = {context.symbol: raw for raw, context, _ in entries}
+        decisions = {context.symbol: decision for _, context, decision in entries}
+        weighted_by_symbol = (
+            {
+                context.symbol: weighted[position]
+                for position, (_raw, context, _decision) in enumerate(entries)
+            }
+            if weighted is not None
+            else None
+        )
+        for rank, (_value, context) in enumerate(ranked_candidates, start=1):
             candidate: dict[str, PortfolioJsonValue] = {
                 "rank": rank,
                 "market": context.market,
                 "code": context.code,
                 "name": context.name,
-                "score": score,
+                "score": raw_by_symbol[context.symbol],
                 "selected": context.symbol in selected_symbols,
             }
+            if weighted_by_symbol is not None:
+                candidate["rank_score"] = weighted_by_symbol[context.symbol]
+            decision = decisions.get(context.symbol)
             if decision is not None:
                 candidate.update(
                     {
                         "fitness_score": decision.score,
                         "fitness_trades": decision.trades,
-                        "fitness_passed": decision.eligible,
-                        "excluded_reason": None if decision.eligible else decision.reason,
+                        "fitness_note": decision.note,
                     }
                 )
             event_candidates.append(candidate)
@@ -647,6 +664,29 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
             "ranking_value": config.ranking_value,
             "candidates": event_candidates,
         }
+
+    @staticmethod
+    def _weighted_scores(
+        entries: list[tuple[float, _StockSeries, RollingFitnessDecision | None]],
+        config: PortfolioBacktestConfig,
+    ) -> list[float]:
+        """Blend cross-sectional ranking with decayed fitness scores."""
+        weight = config.fitness_rank_weight
+        percentiles = _percentile_ranks([entry[0] for entry in entries])
+        fitness_raw: list[float] = []
+        decay: list[float] = []
+        for _raw, _context, decision in entries:
+            score = float(decision.score) if decision is not None else 0.0
+            trades = float(decision.trades) if decision is not None else 0.0
+            fitness_raw.append(score / 100.0)
+            decay.append(min(1.0, trades / config.fitness_min_trades))
+        neutral = _decay_weighted_mean(fitness_raw, decay)
+        results: list[float] = []
+        for position, percentile in enumerate(percentiles):
+            oriented = percentile if config.rank_order == "desc" else 1.0 - percentile
+            component = decay[position] * fitness_raw[position] + (1.0 - decay[position]) * neutral
+            results.append((1.0 - weight) * oriented + weight * component)
+        return results
 
     @staticmethod
     def _should_refresh(
@@ -708,6 +748,37 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
             "positions_count": len(holdings),
             "holdings": holdings,
         }
+
+
+def _percentile_ranks(values: list[float]) -> list[float]:
+    """Average-rank percentile in [0, 1]; tied values share the mean rank."""
+    count = len(values)
+    if count <= 1:
+        return [0.5] * count
+    array = np.asarray(values, dtype=float)
+    order = np.argsort(array, kind="stable")
+    ordered = array[order]
+    ranks = np.empty(count, dtype=float)
+    start = 0
+    while start < count:
+        stop = start
+        while stop + 1 < count and ordered[stop + 1] == ordered[start]:
+            stop += 1
+        ranks[order[start : stop + 1]] = (start + stop) / 2.0
+        start = stop + 1
+    return [float(value) for value in ranks / (count - 1)]
+
+
+def _decay_weighted_mean(values: list[float], weights: list[float]) -> float:
+    """Neutral fill-in for candidates whose history is too thin to trust."""
+    total = sum(weights)
+    if total <= 0:
+        return 0.0
+    return sum(value * weight for value, weight in zip(values, weights)) / total
+
+
+def _candidate_sort_key(item: tuple[float, _StockSeries]) -> tuple[float, str]:
+    return (-item[0], item[1].symbol)
 
 
 __all__ = ["PortfolioSimulationMixin"]

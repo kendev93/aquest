@@ -21,7 +21,6 @@ def test_rolling_fitness_excludes_trades_from_the_current_signal_date() -> None:
     )
     fitness = RollingFitnessFilter(
         {"SH600000": history},
-        min_score=0.0,
         min_trades=1,
         max_drawdown=0.3,
     )
@@ -29,10 +28,11 @@ def test_rolling_fitness_excludes_trades_from_the_current_signal_date() -> None:
     before_sell = fitness.decide("SH600000", 20240102)
     after_sell = fitness.decide("SH600000", 20240103)
 
-    assert before_sell.eligible is False
     assert before_sell.trades == 0
-    assert after_sell.eligible is True
+    assert before_sell.score == 20.0
+    assert before_sell.note.startswith("历史成交不足")
     assert after_sell.trades == 1
+    assert after_sell.score == 100.0
 
 
 def test_rolling_fitness_derives_drawdown_when_raw_equity_has_no_drawdown_field() -> None:
@@ -53,7 +53,6 @@ def test_rolling_fitness_derives_drawdown_when_raw_equity_has_no_drawdown_field(
     )
     fitness = RollingFitnessFilter(
         {"SH600000": history},
-        min_score=100.0,
         min_trades=1,
         max_drawdown=0.1,
     )
@@ -61,4 +60,5 @@ def test_rolling_fitness_derives_drawdown_when_raw_equity_has_no_drawdown_field(
     decision = fitness.decide("SH600000", 20240103)
 
     assert decision.max_drawdown == 0.2
-    assert decision.eligible is False
+    assert decision.score == 60.0
+    assert decision.note == "历史成交 1 笔"

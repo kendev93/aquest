@@ -397,9 +397,7 @@ def test_research_pool_follows_the_selected_instrument_type() -> None:
 def test_etf_research_uses_fund_costs_without_stamp_tax() -> None:
     config = _research_config()
     stock_ref = StockRef("SH", "600000", Path("/tmp/vipdoc"), instrument_type="stock")
-    fund_ref = StockRef(
-        "SZ", "159919", Path("/tmp/vipdoc"), instrument_type="fund", board="fund"
-    )
+    fund_ref = StockRef("SZ", "159919", Path("/tmp/vipdoc"), instrument_type="fund", board="fund")
 
     stock_backtest = _backtest_config(config, stock_ref)
     fund_backtest = _backtest_config(config, fund_ref)
@@ -415,9 +413,7 @@ def test_etf_research_keeps_fund_commission_when_stamp_tax_is_cleared() -> None:
     """回归：只改印花税不应让 ETF 退回股票佣金。"""
 
     config = _research_config(stamp_tax=0.0)
-    fund_ref = StockRef(
-        "SZ", "159919", Path("/tmp/vipdoc"), instrument_type="fund", board="fund"
-    )
+    fund_ref = StockRef("SZ", "159919", Path("/tmp/vipdoc"), instrument_type="fund", board="fund")
 
     fund_backtest = _backtest_config(config, fund_ref)
 

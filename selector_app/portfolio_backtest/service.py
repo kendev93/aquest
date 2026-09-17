@@ -257,9 +257,9 @@ class PortfolioBacktestService(
         contexts: list[_StockSeries],
         config: PortfolioBacktestConfig,
     ) -> RollingFitnessFilter | None:
-        if not config.fitness_filter_enabled:
+        if config.fitness_rank_weight <= 0:
             return None
-        history_config = replace(config, fitness_filter_enabled=False, max_positions=1)
+        history_config = replace(config, fitness_rank_weight=0.0, max_positions=1)
         histories: dict[str, RollingFitnessHistory] = {}
         for context in contexts:
             simulation = self._simulate(
@@ -275,7 +275,6 @@ class PortfolioBacktestService(
             )
         return RollingFitnessFilter(
             histories,
-            min_score=config.fitness_min_score,
             min_trades=config.fitness_min_trades,
             max_drawdown=config.fitness_max_drawdown,
         )

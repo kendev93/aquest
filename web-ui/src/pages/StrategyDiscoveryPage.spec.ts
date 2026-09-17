@@ -365,8 +365,8 @@ describe('StrategyDiscoveryPage', () => {
         backtest: {
           universe: 'all' as const, total_candidates: 1, processed: 1, skipped: 0, errors: 0, bars: 6,
           start_date: '2024-01-01', end_date: '2026-09-08', max_positions: 3,
-          ranking_value: 'technical.ma5', rank_order: 'desc' as const, fitness_filter_enabled: false,
-          fitness_min_score: 75, fitness_min_trades: 5, fitness_max_drawdown: 0.3,
+          ranking_value: 'technical.ma5', rank_order: 'desc' as const, fitness_rank_weight: 0,
+          fitness_min_trades: 5, fitness_max_drawdown: 0.3,
           performance: { total_return: 0.55, annual_return: 0.22, max_drawdown: 0.12, sharpe: 1.1, total_trades: 8, win_rate: 0.5, end_value: 155000 },
           equity_curve: [{ date: '2024-01-01', cash: 100000, position_value: 0, total: 100000, positions_count: 0, drawdown: 0, drawdown_pct: 0 }, { date: '2026-09-08', cash: 0, position_value: 155000, total: 155000, positions_count: 3, drawdown: 0, drawdown_pct: 0 }],
           trades: [], states: [], ranking_events: [], failure_reasons: {}, diagnostic: null,

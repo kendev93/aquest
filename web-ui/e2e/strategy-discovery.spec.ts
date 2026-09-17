@@ -116,7 +116,7 @@ test('user can discover a strategy, apply it, and rerun ordinary portfolio backt
   await page.route('**/api/v1/portfolio-backtests', (route) => route.fulfill({ status: 202, json: { data: { job_id: 'portfolio-job', status: 'queued' } } }))
   await page.route('**/api/v1/portfolio-backtests/portfolio-job', (route) => route.fulfill({ json: { data: { job_id: 'portfolio-job', status: 'completed', progress: 1, total_candidates: 1, total_scanned: 1, errors: 0, error: null, result: null } } }))
   await page.route('**/api/v1/portfolio-backtests/portfolio-job/results', (route) => route.fulfill({ json: { data: {
-    universe: 'all', total_candidates: 1, processed: 1, skipped: 0, errors: 0, bars: 20, start_date: '2024-01-01', end_date: '2024-12-31', max_positions: 2, ranking_value: 'indicator_three.varo7', rank_order: 'desc', fitness_filter_enabled: false, fitness_min_score: 75, fitness_min_trades: 5, fitness_max_drawdown: 0.3, performance: { total_return: 0.1, annual_return: 0.1, max_drawdown: 0.05, sharpe: 1.2, total_trades: 6, win_rate: 0.5, end_value: 1100000 }, equity_curve: [], trades: [], states: [], ranking_events: [], failure_reasons: {}, diagnostic: null,
+    universe: 'all', total_candidates: 1, processed: 1, skipped: 0, errors: 0, bars: 20, start_date: '2024-01-01', end_date: '2024-12-31', max_positions: 2, ranking_value: 'indicator_three.varo7', rank_order: 'desc', fitness_rank_weight: 0, fitness_min_trades: 5, fitness_max_drawdown: 0.3, performance: { total_return: 0.1, annual_return: 0.1, max_drawdown: 0.05, sharpe: 1.2, total_trades: 6, win_rate: 0.5, end_value: 1100000 }, equity_curve: [], trades: [], states: [], ranking_events: [], failure_reasons: {}, diagnostic: null,
   } } }))
 
   await page.goto('/strategy-lab')

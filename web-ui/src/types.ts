@@ -539,8 +539,7 @@ export interface PortfolioBacktestPayload {
   stamp_tax?: number
   slippage?: number
   execution?: BacktestExecution
-  fitness_filter_enabled?: boolean
-  fitness_min_score?: number
+  fitness_rank_weight?: number
   fitness_min_trades?: number
   fitness_max_drawdown?: number
 }
@@ -614,10 +613,10 @@ export interface PortfolioRankingCandidate {
   name?: string | null
   score: number
   selected: boolean
+  rank_score?: number | null
   fitness_score?: number | null
   fitness_trades?: number | null
-  fitness_passed?: boolean | null
-  excluded_reason?: string | null
+  fitness_note?: string | null
 }
 
 export interface PortfolioRankingEvent {
@@ -639,8 +638,7 @@ export interface PortfolioBacktestResult {
   max_positions: number
   ranking_value: string
   rank_order: PortfolioRankOrder
-  fitness_filter_enabled?: boolean
-  fitness_min_score?: number
+  fitness_rank_weight?: number
   fitness_min_trades?: number
   fitness_max_drawdown?: number
   performance: Record<string, number | null>

@@ -108,8 +108,7 @@ interface PortfolioFormState {
   minCommission: number
   stampTax: number
   slippage: number
-  fitnessFilterEnabled: boolean
-  fitnessMinScore: number
+  fitnessRankWeight: number
   fitnessMinTrades: number
   fitnessMaxDrawdown: number
 }
@@ -156,8 +155,7 @@ const form = reactive<PortfolioFormState>({
   minCommission: 0.1,
   stampTax: 0.001,
   slippage: 0,
-  fitnessFilterEnabled: false,
-  fitnessMinScore: 75,
+  fitnessRankWeight: 0,
   fitnessMinTrades: 5,
   fitnessMaxDrawdown: 30,
 })
@@ -384,8 +382,7 @@ function validate(): Record<string, string> {
     if (!Number.isInteger(field.cooldown) || field.cooldown < 0 || field.cooldown > 10000) next[field.cooldownKey] = `${field.label}冷却天数必须是 0 到 10000 的整数。`
   }
   if (!Number.isFinite(form.initialCash) || form.initialCash <= 0) next.initialCash = '初始资金必须大于 0。'
-  if (form.fitnessFilterEnabled) {
-    if (!Number.isFinite(form.fitnessMinScore) || form.fitnessMinScore < 0 || form.fitnessMinScore > 100) next.fitnessMinScore = '适配分阈值必须在 0 到 100 之间。'
+  if (form.fitnessRankWeight > 0) {
     if (!Number.isInteger(form.fitnessMinTrades) || form.fitnessMinTrades < 1) next.fitnessMinTrades = '适配性最少成交笔数必须是正整数。'
     if (!Number.isFinite(form.fitnessMaxDrawdown) || form.fitnessMaxDrawdown < 0 || form.fitnessMaxDrawdown > 100) next.fitnessMaxDrawdown = '适配性最大回撤必须在 0 到 100% 之间。'
   }
@@ -440,8 +437,7 @@ function buildPayload(): PortfolioBacktestPayload {
     stamp_tax: form.stampTax,
     slippage: form.slippage,
     execution: form.execution,
-    fitness_filter_enabled: form.fitnessFilterEnabled,
-    fitness_min_score: form.fitnessMinScore,
+    fitness_rank_weight: form.fitnessRankWeight,
     fitness_min_trades: form.fitnessMinTrades,
     fitness_max_drawdown: form.fitnessMaxDrawdown / 100,
   }
@@ -866,17 +862,23 @@ watch(() => form.formulaText, (value) => {
           </fieldset>
 
           <fieldset class="form-section">
-            <legend>适配性过滤（可选）</legend>
-            <label class="filter-toggle"><input v-model="form.fitnessFilterEnabled" data-testid="portfolio-fitness-enabled" type="checkbox"><span>只使用历史适配分达标的标的</span></label>
-            <div v-if="form.fitnessFilterEnabled" class="compact-fields portfolio-fields-top">
-              <div><label for="portfolio-fitness-score">最低适配分</label><input id="portfolio-fitness-score" v-model.number="form.fitnessMinScore" data-testid="portfolio-fitness-score" type="number" min="0" max="100" step="5"></div>
-              <div><label for="portfolio-fitness-trades">历史最少成交</label><input id="portfolio-fitness-trades" v-model.number="form.fitnessMinTrades" data-testid="portfolio-fitness-trades" type="number" min="1" step="1"></div>
+            <legend>适配性权重（可选）</legend>
+            <div class="portfolio-inline-field">
+              <label for="portfolio-fitness-weight">排序时参考历史适配分</label>
+              <select id="portfolio-fitness-weight" v-model.number="form.fitnessRankWeight" data-testid="portfolio-fitness-weight">
+                <option :value="0">不使用</option>
+                <option :value="0.25">轻参考 25%</option>
+                <option :value="0.5">均衡 50%</option>
+                <option :value="0.75">重适配 75%</option>
+              </select>
             </div>
-            <div v-if="form.fitnessFilterEnabled" class="portfolio-inline-field"><label for="portfolio-fitness-drawdown">历史最大回撤上限 (%)</label><input id="portfolio-fitness-drawdown" v-model.number="form.fitnessMaxDrawdown" data-testid="portfolio-fitness-drawdown" type="number" min="0" max="100" step="5"></div>
-            <p v-if="errors.fitnessMinScore" class="field-error">{{ errors.fitnessMinScore }}</p>
+            <div v-if="form.fitnessRankWeight > 0" class="compact-fields portfolio-fields-top">
+              <div><label for="portfolio-fitness-trades">历史最少成交</label><input id="portfolio-fitness-trades" v-model.number="form.fitnessMinTrades" data-testid="portfolio-fitness-trades" type="number" min="1" step="1"></div>
+              <div><label for="portfolio-fitness-drawdown">历史最大回撤上限 (%)</label><input id="portfolio-fitness-drawdown" v-model.number="form.fitnessMaxDrawdown" data-testid="portfolio-fitness-drawdown" type="number" min="0" max="100" step="5"></div>
+            </div>
             <p v-if="errors.fitnessMinTrades" class="field-error">{{ errors.fitnessMinTrades }}</p>
             <p v-if="errors.fitnessMaxDrawdown" class="field-error">{{ errors.fitnessMaxDrawdown }}</p>
-            <p class="helper">启用后，历史每个调仓日只使用更早日期的成交和净值计算适配分；评估样本不足的标的不参与补位。</p>
+            <p class="helper">每个调仓日只用更早日期的成交和净值算适配分；历史样本不足时权重自动衰减，既不加分也不扣分。</p>
           </fieldset>
 
           <fieldset class="form-section">
@@ -937,7 +939,7 @@ watch(() => form.formulaText, (value) => {
           <div class="panel-heading results-heading"><div><span class="section-kicker">02 / RESULTS</span><h2>组合结果</h2></div><button v-if="result" class="secondary-button export-backtest" type="button" data-testid="export-portfolio-backtest" @click="downloadResult">导出 JSON</button></div>
           <div v-if="!result" class="empty-state" data-testid="portfolio-empty"><div class="empty-icon" aria-hidden="true">/</div><h3>{{ loading ? '正在运行动态组合回测…' : '还没有组合结果' }}</h3><p>{{ loading ? '正在逐股计算公式并模拟槽位补位，完成后显示净值与候选排名。' : '配置买入条件、排序指标和卖出条件后开始回测。' }}</p></div>
           <template v-else>
-            <div class="backtest-summary"><span class="result-badge">{{ result.universe === 'all' ? '沪深全部品种' : result.universe.toUpperCase() }}</span><span>{{ result.start_date }} → {{ result.end_date }}</span><span>{{ result.bars }} 个交易日</span><span>{{ result.processed }} / {{ result.total_candidates }} 个标的已处理</span><span>槽位 {{ result.max_positions }}</span><span>排序：{{ valueName(result.ranking_value) }} · {{ result.rank_order === 'desc' ? '高到低' : '低到高' }}</span><span v-if="result.fitness_filter_enabled" class="result-badge">适配分 ≥ {{ result.fitness_min_score }}</span></div>
+            <div class="backtest-summary"><span class="result-badge">{{ result.universe === 'all' ? '沪深全部品种' : result.universe.toUpperCase() }}</span><span>{{ result.start_date }} → {{ result.end_date }}</span><span>{{ result.bars }} 个交易日</span><span>{{ result.processed }} / {{ result.total_candidates }} 个标的已处理</span><span>槽位 {{ result.max_positions }}</span><span>排序：{{ valueName(result.ranking_value) }} · {{ result.rank_order === 'desc' ? '高到低' : '低到高' }}</span><span v-if="result.fitness_rank_weight" class="result-badge">适配性权重 {{ Math.round(result.fitness_rank_weight * 100) }}%</span></div>
             <div v-if="replayComparison" class="replay-comparison" data-testid="portfolio-replay-comparison"><strong>候选复核 {{ replayComparison.candidateHash.slice(0, 12) }}</strong><span>成交记录：{{ replayComparison.tradeRecords }}</span><span>绩效摘要：{{ replayComparison.performance }}</span><span>数据指纹：{{ replayComparison.dataFingerprint }}</span></div>
             <div class="metrics-strip portfolio-metrics">
               <div><span>总收益</span><strong :class="{ positive: (performanceValue('total_return') ?? 0) >= 0, negative: (performanceValue('total_return') ?? 0) < 0 }" data-testid="portfolio-total-return">{{ formatPercent(performanceValue('total_return')) }}</strong></div>
@@ -955,7 +957,7 @@ watch(() => form.formulaText, (value) => {
 
             <section class="data-section"><div class="section-heading"><div><span class="section-kicker">TRADES</span><h3>成交记录</h3></div><span>最近 {{ recentTrades.length }} 笔</span></div><div v-if="!recentTrades.length" class="inline-empty">区间内没有形成可执行成交。</div><div v-else class="table-wrap"><table data-testid="portfolio-trades"><caption class="sr-only">组合成交记录</caption><thead><tr><th>成交日期</th><th>标的</th><th>方向</th><th>数量</th><th>价格</th><th>盈亏</th><th>原因</th></tr></thead><tbody><tr v-for="(trade, index) in recentTrades" :key="`${trade.date}-${trade.code}-${index}`"><td class="muted-code">{{ trade.date }}</td><td><span v-if="trade.name">{{ trade.name }} · </span><span class="market-pill" :class="trade.market.toLowerCase()">{{ trade.market }}</span> <strong class="code">{{ trade.code }}</strong></td><td><span class="direction" :class="trade.direction.toLowerCase()">{{ trade.direction === 'BUY' ? '买入' : '卖出' }}</span></td><td>{{ formatNumber(trade.size, 0) }}</td><td>{{ formatMoney(trade.price) }}</td><td :class="{ positive: trade.pnl >= 0, negative: trade.pnl < 0 }">{{ formatMoney(trade.pnl) }}</td><td>{{ trade.reason }}</td></tr></tbody></table></div></section>
 
-            <section class="data-section"><div class="section-heading"><div><span class="section-kicker">LATEST RANKING</span><h3>最近候选排名</h3></div><span>{{ latestRanking?.date ?? '—' }}</span></div><div v-if="!latestRanking?.candidates.length" class="inline-empty">没有可展示的排名候选。</div><div v-else class="table-wrap"><table data-testid="portfolio-ranking"><caption class="sr-only">最近候选排名</caption><thead><tr><th>排名</th><th>标的</th><th>当前指标</th><th>适配性</th><th>动作</th></tr></thead><tbody><tr v-for="candidate in latestRanking.candidates" :key="`${candidate.market}-${candidate.code}`"><td class="muted-code">{{ candidate.rank }}</td><td><span v-if="candidate.name">{{ candidate.name }} · </span><span class="market-pill" :class="candidate.market.toLowerCase()">{{ candidate.market }}</span> <strong class="code">{{ candidate.code }}</strong></td><td>{{ formatNumber(candidate.score, 4) }}</td><td v-if="candidate.fitness_score !== undefined"><strong>{{ formatNumber(candidate.fitness_score, 2) }}</strong><small class="muted-code"> · {{ candidate.fitness_trades ?? 0 }} 笔</small></td><td v-else class="muted-code">未启用</td><td><span v-if="candidate.excluded_reason" class="negative">{{ candidate.excluded_reason }}</span><span class="result-badge" v-else-if="candidate.selected">进入候选槽位</span><span class="muted-code" v-else>等待补位</span></td></tr></tbody></table></div></section>
+            <section class="data-section"><div class="section-heading"><div><span class="section-kicker">LATEST RANKING</span><h3>最近候选排名</h3></div><span>{{ latestRanking?.date ?? '—' }}</span></div><div v-if="!latestRanking?.candidates.length" class="inline-empty">没有可展示的排名候选。</div><div v-else class="table-wrap"><table data-testid="portfolio-ranking"><caption class="sr-only">最近候选排名</caption><thead><tr><th>排名</th><th>标的</th><th>当前指标 / 综合分</th><th>适配性</th><th>动作</th></tr></thead><tbody><tr v-for="candidate in latestRanking.candidates" :key="`${candidate.market}-${candidate.code}`"><td class="muted-code">{{ candidate.rank }}</td><td><span v-if="candidate.name">{{ candidate.name }} · </span><span class="market-pill" :class="candidate.market.toLowerCase()">{{ candidate.market }}</span> <strong class="code">{{ candidate.code }}</strong></td><td>{{ formatNumber(candidate.score, 4) }}<small v-if="candidate.rank_score !== undefined" class="muted-code"> · {{ formatNumber(candidate.rank_score, 3) }}</small></td><td v-if="candidate.fitness_score !== undefined" :title="candidate.fitness_note ?? ''"><strong>{{ formatNumber(candidate.fitness_score, 2) }}</strong><small class="muted-code"> · {{ candidate.fitness_trades ?? 0 }} 笔</small></td><td v-else class="muted-code">未启用</td><td><span class="result-badge" v-if="candidate.selected">进入候选槽位</span><span class="muted-code" v-else>等待补位</span></td></tr></tbody></table></div></section>
 
             <section class="data-section"><div class="section-heading"><div><span class="section-kicker">RECENT EQUITY</span><h3>最近净值</h3></div><span>最近 {{ sampledEquity.length }} 日</span></div><div class="table-wrap"><table data-testid="portfolio-equity-table"><caption class="sr-only">组合最近资金曲线数据</caption><thead><tr><th>日期</th><th>现金</th><th>持仓市值</th><th>总资产</th><th>持仓数</th><th>回撤</th></tr></thead><tbody><tr v-for="point in sampledEquity" :key="point.date"><td class="muted-code">{{ point.date }}</td><td>{{ formatMoney(point.cash) }}</td><td>{{ formatMoney(point.position_value) }}</td><td><strong>{{ formatMoney(point.total) }}</strong></td><td>{{ point.positions_count }}</td><td>{{ formatPercent(point.drawdown_pct) }}</td></tr></tbody></table></div></section>
             <div v-if="result.failure_reasons && Object.keys(result.failure_reasons).length" class="failure-summary"><strong>失败摘要</strong><span v-for="(count, reason) in result.failure_reasons" :key="reason">{{ reason }} · {{ count }}</span></div>

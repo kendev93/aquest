@@ -581,8 +581,7 @@ class PortfolioBacktestRequest(BaseModel):
     stamp_tax: float = Field(default=0.001, ge=0, le=0.1)
     slippage: float = Field(default=0.0, ge=0, le=1_000)
     execution: Literal["next_open", "next_close"] = "next_open"
-    fitness_filter_enabled: bool = False
-    fitness_min_score: float = Field(default=75.0, ge=0, le=100)
+    fitness_rank_weight: float = Field(default=0.0, ge=0, le=1)
     fitness_min_trades: int = Field(default=5, ge=1, le=10_000)
     fitness_max_drawdown: float = Field(default=0.3, ge=0, le=1)
 
@@ -722,8 +721,7 @@ class PortfolioBacktestRequest(BaseModel):
             stamp_tax=self.stamp_tax,
             slippage=self.slippage,
             execution=self.execution,
-            fitness_filter_enabled=self.fitness_filter_enabled,
-            fitness_min_score=self.fitness_min_score,
+            fitness_rank_weight=self.fitness_rank_weight,
             fitness_min_trades=self.fitness_min_trades,
             fitness_max_drawdown=self.fitness_max_drawdown,
         )

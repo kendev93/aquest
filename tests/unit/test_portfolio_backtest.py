@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -16,8 +17,10 @@ from selector_app.portfolio_backtest.service import (
     SimulationCheckpoint,
     _StockSeries,
 )
+from selector_app.portfolio_backtest.simulation import PortfolioSimulationMixin
 from selector_app.screening.models import ScreenCondition
 from selector_app.screening.rules import RuleGroup
+from selector_app.strategy_fitness.rolling import RollingFitnessDecision
 
 
 def stock_frame(close: list[float]) -> pd.DataFrame:
@@ -414,11 +417,10 @@ def test_portfolio_rejects_unknown_sell_comparison_operators() -> None:
         )
 
 
-def test_portfolio_fitness_filter_does_not_use_current_day_results() -> None:
+def test_portfolio_fitness_weight_uses_only_history_before_the_signal_date() -> None:
     report = PortfolioBacktestService(adapter=FakeAdapter()).run(
         config(
-            fitness_filter_enabled=True,
-            fitness_min_score=0.0,
+            fitness_rank_weight=0.5,
             fitness_min_trades=1,
             fitness_max_drawdown=1.0,
         )
@@ -428,7 +430,55 @@ def test_portfolio_fitness_filter_does_not_use_current_day_results() -> None:
     assert first_event["date"] == "2024-01-01"
     assert first_event["candidates"]
     assert all(candidate["fitness_trades"] == 0 for candidate in first_event["candidates"])
-    assert all(candidate["selected"] is False for candidate in first_event["candidates"])
+    assert all("rank_score" in candidate for candidate in first_event["candidates"])
+
+
+def _decision(score: float, trades: int) -> RollingFitnessDecision:
+    return RollingFitnessDecision(
+        score=score,
+        trades=trades,
+        expectancy=None,
+        profit_factor=None,
+        total_return=None,
+        max_drawdown=None,
+        note="",
+    )
+
+
+def test_zero_fitness_weight_leaves_ranking_untouched_and_unreported() -> None:
+    report = PortfolioBacktestService(adapter=FakeAdapter()).run(config())
+
+    assert report.fitness_rank_weight == 0.0
+    for event in report.ranking_events:
+        assert all("rank_score" not in candidate for candidate in event["candidates"])
+        assert all("fitness_score" not in candidate for candidate in event["candidates"])
+
+
+def test_fitness_weight_can_outweigh_the_plain_indicator_ranking() -> None:
+    strong_indicator = (30.0, SimpleNamespace(symbol="SH600000"), _decision(0.0, 5))
+    strong_fitness = (10.0, SimpleNamespace(symbol="SH600001"), _decision(100.0, 5))
+    entries = [strong_indicator, strong_fitness]
+
+    plain = PortfolioSimulationMixin._weighted_scores(
+        entries, config(fitness_rank_weight=0.0, fitness_min_trades=5)
+    )
+    blended = PortfolioSimulationMixin._weighted_scores(
+        entries, config(fitness_rank_weight=0.75, fitness_min_trades=5)
+    )
+
+    assert plain[0] > plain[1]
+    assert blended[1] > blended[0]
+
+
+def test_fitness_weight_fills_thin_history_with_the_pool_mean() -> None:
+    fresh = (30.0, SimpleNamespace(symbol="SH600000"), _decision(0.0, 0))
+    seasoned = (10.0, SimpleNamespace(symbol="SH600001"), _decision(100.0, 5))
+
+    scores = PortfolioSimulationMixin._weighted_scores(
+        [fresh, seasoned], config(fitness_rank_weight=0.5, fitness_min_trades=5)
+    )
+
+    assert scores[0] > scores[1]
 
 
 def test_portfolio_uses_composable_buy_and_sell_rule_groups() -> None:

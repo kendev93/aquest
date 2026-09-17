@@ -12,14 +12,15 @@ import numpy as np
 
 @dataclass(frozen=True)
 class RollingFitnessDecision:
-    eligible: bool
+    """Causal suitability snapshot for one candidate on one signal date."""
+
     score: float
     trades: int
     expectancy: float | None
     profit_factor: float | None
     total_return: float | None
     max_drawdown: float | None
-    reason: str
+    note: str
 
 
 @dataclass(frozen=True)
@@ -115,25 +116,23 @@ class RollingFitnessFilter:
         self,
         histories: Mapping[str, RollingFitnessHistory],
         *,
-        min_score: float,
         min_trades: int,
         max_drawdown: float,
     ) -> None:
         self._histories = histories
-        self._min_score = min_score
         self._min_trades = min_trades
         self._max_drawdown = max_drawdown
 
     def decide(self, symbol: str, current_date: int) -> RollingFitnessDecision:
         history = self._histories.get(symbol)
         if history is None:
-            return _rejected("没有历史评估数据")
+            return _no_history("没有历史评估数据")
 
         trade_end = bisect_left(history.trade_dates, current_date)
         equity_end = bisect_left(history.equity_dates, current_date)
         trades = history.trade_count_prefix[trade_end]
         if equity_end == 0:
-            return _rejected(f"历史净值不足（{trades}/{self._min_trades} 笔成交）", trades=trades)
+            return _no_history(f"历史净值不足（{trades}/{self._min_trades} 笔成交）", trades=trades)
 
         expectancy = history.trade_return_prefix[trade_end] / trades if trades else None
         profit = history.trade_profit_prefix[trade_end]
@@ -156,35 +155,31 @@ class RollingFitnessFilter:
             max_drawdown <= self._max_drawdown,
         )
         score = round(sum(checks) / len(checks) * 100, 2)
-        eligible = trades >= self._min_trades and score >= self._min_score
-        if trades < self._min_trades:
-            reason = f"历史成交不足（{trades}/{self._min_trades}）"
-        elif eligible:
-            reason = "通过适配性过滤"
-        else:
-            reason = f"适配分 {score:.2f} 低于阈值 {self._min_score:.2f}"
+        note = (
+            f"历史成交不足（{trades}/{self._min_trades}）"
+            if trades < self._min_trades
+            else f"历史成交 {trades} 笔"
+        )
         return RollingFitnessDecision(
-            eligible=eligible,
             score=score,
             trades=trades,
             expectancy=expectancy,
             profit_factor=profit_factor,
             total_return=total_return,
             max_drawdown=max_drawdown,
-            reason=reason,
+            note=note,
         )
 
 
-def _rejected(reason: str, *, trades: int = 0) -> RollingFitnessDecision:
+def _no_history(note: str, *, trades: int = 0) -> RollingFitnessDecision:
     return RollingFitnessDecision(
-        eligible=False,
         score=0.0,
         trades=trades,
         expectancy=None,
         profit_factor=None,
         total_return=None,
         max_drawdown=None,
-        reason=reason,
+        note=note,
     )
 
 
