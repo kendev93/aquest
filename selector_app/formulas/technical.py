@@ -13,11 +13,17 @@ DISPLAY_NAME = "K线技术指标"
 MINIMUM_BARS = 1
 RECOMMENDED_BARS = 60
 SIGNAL_NAMES: tuple[str, ...] = ()
-# The trailing five are dimensionless (percentages or ratios) and are the
-# reason this module exists beyond charting: unlike MA/MACD they stay
-# comparable across stocks, so the mining pool and cross-section ranking can
-# consume them. Keep new entries appended — the UI defaults a fresh condition
-# to the first available value.
+# The trailing entries are dimensionless (percentages, ratios, bounded scores)
+# and are the reason this module exists beyond charting: unlike MA/MACD they
+# stay comparable across stocks, so the mining pool and cross-section ranking
+# can consume them. Keep new entries appended — the UI defaults a fresh
+# condition to the first available value.
+#
+# They come in three families: volatility/position (atr_pct … cci14), volume
+# pressure (vr24, obv_flow20) and trend quality (r2_24, annual_trend24,
+# trend_quality, rsrs_*). The last family is deliberately regression-based:
+# oscillator readings say where a stock sits, trend quality says how cleanly
+# it has been moving, which transfers far better to a cross-sectional ranking.
 VALUE_NAMES = (
     "ma5",
     "ma10",
@@ -39,6 +45,13 @@ VALUE_NAMES = (
     "boll_bandwidth",
     "wr14",
     "cci14",
+    "vr24",
+    "obv_flow20",
+    "r2_24",
+    "annual_trend24",
+    "trend_quality",
+    "rsrs_slope",
+    "rsrs_zscore",
 )
 
 _KDJ_PERIOD = 9
@@ -50,6 +63,19 @@ _CCI_PERIOD = 14
 # CCI divides by ``0.015 * mean absolute deviation``; the constant is the
 # original Lambert factor that puts roughly 70-80% of values inside ±100.
 _CCI_SCALE = 0.015
+_VR_PERIOD = 24
+_OBV_PERIOD = 20
+# Window of the log-price regression that feeds R², the annualised trend and
+# the trend-quality score. ETFQuest uses the same 24 for all three.
+_TREND_PERIOD = 24
+# Window of the realised volatility used as the trend-quality denominator.
+_VOLATILITY_PERIOD = 60
+_ANNUALISATION = 252.0
+_RSRS_PERIOD = 18
+# ETFQuest standardises the RSRS beta over 600 bars (~2.4 years). A-share
+# backtests usually cover 2-3 years, where 600 would leave most of the range
+# undefined, so the standardisation window is one trading year instead.
+_RSRS_ZSCORE_PERIOD = 250
 
 
 def _rolling_mean_abs_deviation(values: np.ndarray, window: int) -> np.ndarray:
@@ -71,6 +97,54 @@ def _rolling_mean_abs_deviation(values: np.ndarray, window: int) -> np.ndarray:
     deviations = np.abs(windows - windows.mean(axis=1, keepdims=True))
     result[window - 1 :] = deviations.mean(axis=1)
     return result
+
+
+def _rolling_regression(values: np.ndarray, window: int) -> tuple[np.ndarray, np.ndarray]:
+    """Rolling OLS of each window against ``0 .. window - 1``.
+
+    Returns ``(slope, r_squared)``. The regressor is a fixed arithmetic
+    sequence, so the closed-form solution ``cov(x, y) / var(x)`` needs only
+    windowed sums and the whole thing stays in NumPy; ETFQuest computes it
+    with ``rolling().apply``, which calls back into Python once per bar and is
+    too slow for precomputing the full universe.
+    """
+
+    source = np.asarray(values, dtype=float)
+    empty = np.full(source.shape, np.nan, dtype=float)
+    if source.size < window:
+        return empty, empty.copy()
+
+    x_centered = np.arange(window, dtype=float) - (window - 1) / 2.0
+    denominator = float((x_centered**2).sum())
+    windows = np.lib.stride_tricks.sliding_window_view(source, window)
+    slope = (windows * x_centered).sum(axis=1) / denominator
+    centered = windows - windows.mean(axis=1, keepdims=True)
+    residuals = centered - slope[:, None] * x_centered
+    total = (centered**2).sum(axis=1)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        r_squared = 1.0 - (residuals**2).sum(axis=1) / total
+
+    slope_output = empty.copy()
+    r2_output = empty.copy()
+    # A perfectly flat window has no variance to explain, so R² is undefined
+    # rather than 1 (or 0/0).
+    r_squared = np.where(total > 0, r_squared, np.nan)
+    slope_output[window - 1 :] = slope
+    r2_output[window - 1 :] = r_squared
+    return slope_output, r2_output
+
+
+def _rolling_standard_score(values: pd.Series, window: int) -> pd.Series:
+    """Subtract the rolling mean and divide by the rolling standard deviation.
+
+    Used for RSRS: the raw beta hovers around 1 for every stock, so only its
+    distance from its own recent distribution carries information, and that
+    distance is comparable across stocks while the level is not.
+    """
+
+    mean = values.rolling(window, min_periods=window).mean()
+    deviation = values.rolling(window, min_periods=window).std()
+    return (values - mean) / deviation.replace(0, np.nan)
 
 
 def calculate_technical_indicators(frame: pd.DataFrame) -> FormulaResult:
@@ -199,6 +273,70 @@ def calculate_technical_indicators(frame: pd.DataFrame) -> FormulaResult:
     )
     mean_deviation = _rolling_mean_abs_deviation(typical_price, _CCI_PERIOD)
     values["cci14"] = safe_divide(typical_price - typical_mean, _CCI_SCALE * mean_deviation)
+
+    # --- Volume pressure: VR (24) and the dimensionless OBV derivative ---
+    # VR is already a ratio of up-volume to down-volume, so it transfers
+    # across stocks unchanged.
+    change = close.diff()
+    up_volume = volume.where(change > 0, 0.0)
+    down_volume = volume.where(change < 0, 0.0)
+    flat_volume = volume.where(change == 0, 0.0)
+    up_sum = up_volume.rolling(_VR_PERIOD, min_periods=_VR_PERIOD).sum()
+    down_sum = down_volume.rolling(_VR_PERIOD, min_periods=_VR_PERIOD).sum()
+    flat_sum = flat_volume.rolling(_VR_PERIOD, min_periods=_VR_PERIOD).sum()
+    values["vr24"] = (
+        safe_divide(
+            (up_sum + 0.5 * flat_sum).to_numpy(),
+            (down_sum + 0.5 * flat_sum).to_numpy(),
+        )
+        * 100
+    )
+
+    # Raw OBV is a *cumulative* volume total, so its level tracks the size of
+    # the float and ETFQuest lists it as non-comparable across symbols for
+    # exactly that reason. What is comparable is the share of the window's
+    # volume that flowed in on up days: (Σ sign·volume) / Σ volume lands in
+    # [-100, 100] no matter how big the stock is. It is also just the 20-day
+    # OBV increment, so it keeps the "energy" reading OBV is used for.
+    direction = np.sign(change.fillna(0.0))
+    signed_volume = (direction * volume).rolling(_OBV_PERIOD, min_periods=_OBV_PERIOD).sum()
+    window_volume = volume.rolling(_OBV_PERIOD, min_periods=_OBV_PERIOD).sum()
+    values["obv_flow20"] = safe_divide(signed_volume.to_numpy(), window_volume.to_numpy()) * 100
+
+    # --- Trend quality: log-price regression, then three scores built on it ---
+    with np.errstate(divide="ignore", invalid="ignore"):
+        log_close = np.log(close_values)
+    trend_slope, trend_r2 = _rolling_regression(log_close, _TREND_PERIOD)
+    values["r2_24"] = trend_r2
+
+    # Annualised exponential trend times its own fit quality: how fast the
+    # stock has been compounding, discounted by how noisy the path was.
+    with np.errstate(over="ignore", invalid="ignore"):
+        annualised = np.exp(trend_slope * _ANNUALISATION) - 1
+    annual_trend = annualised * trend_r2
+    values["annual_trend24"] = np.where(np.isfinite(annual_trend), annual_trend, np.nan)
+
+    # ETFQuest's trend_quality_momentum: 24-day return × R² / annualised
+    # 60-day volatility. Same ingredients, but risk-adjusted, so a volatile
+    # stock has to trend that much harder to score well.
+    momentum = close.pct_change(_TREND_PERIOD)
+    volatility = (
+        close.pct_change().rolling(_VOLATILITY_PERIOD, min_periods=_VOLATILITY_PERIOD).std()
+        * np.sqrt(_ANNUALISATION)
+    ).to_numpy()
+    values["trend_quality"] = safe_divide((momentum * trend_r2).to_numpy(), volatility)
+
+    # --- RSRS: regress the high on the low, then standardise the slope ---
+    # beta = dHigh/dLoy measures how much of a day's range is kept as support
+    # rises; it is dimensionless because both axes are prices. Its level is
+    # not comparable between stocks though, hence the standard score.
+    rolling_corr = high.rolling(_RSRS_PERIOD, min_periods=_RSRS_PERIOD).corr(low)
+    beta = rolling_corr * (
+        high.rolling(_RSRS_PERIOD, min_periods=_RSRS_PERIOD).std()
+        / low.rolling(_RSRS_PERIOD, min_periods=_RSRS_PERIOD).std().replace(0, np.nan)
+    )
+    values["rsrs_slope"] = beta.to_numpy()
+    values["rsrs_zscore"] = _rolling_standard_score(beta, _RSRS_ZSCORE_PERIOD).to_numpy()
     return build_formula_result(
         formula_id=FORMULA_ID,
         display_name=DISPLAY_NAME,

@@ -94,6 +94,11 @@ FormulaCalculator = Callable[[pd.DataFrame], FormulaResult]
 # CCI joins on the same construction argument: it is (TP - MA(TP)) scaled by a
 # positive constant, so it is positive whenever the typical price trades above
 # its own 14-bar mean and negative otherwise.
+#
+# The trend-quality family is two-sided for the same reason: OBV flow is a net
+# signed volume share, the annualised trend inherits the sign of the log-price
+# slope, trend quality inherits the sign of the 24-day return, and an RSRS
+# standard score is zero-mean by construction.
 BIDIRECTIONAL_VALUE_IDS = frozenset(
     {
         "technical.macd",
@@ -102,6 +107,10 @@ BIDIRECTIONAL_VALUE_IDS = frozenset(
         "technical.bias20",
         "technical.return20",
         "technical.cci14",
+        "technical.obv_flow20",
+        "technical.annual_trend24",
+        "technical.trend_quality",
+        "technical.rsrs_zscore",
     }
 )
 
@@ -189,6 +198,13 @@ _VALUE_DISPLAY_NAMES: dict[str, dict[str, str]] = {
         "boll_bandwidth": "布林带宽度",
         "wr14": "WR14",
         "cci14": "CCI14",
+        "vr24": "VR24",
+        "obv_flow20": "20日资金流向",
+        "r2_24": "24日趋势R²",
+        "annual_trend24": "年化趋势强度",
+        "trend_quality": "趋势质量动量",
+        "rsrs_slope": "RSRS斜率",
+        "rsrs_zscore": "RSRS标准分",
     },
     "price": {
         "open": "开盘价",
@@ -472,10 +488,10 @@ FORMULA_REGISTRY = FormulaRegistry(
             signals=(),
             value_names=TECHNICAL_VALUE_NAMES,
             screen_value_names=TECHNICAL_VALUE_NAMES,
-            # v2: KDJ / Bollinger %B+bandwidth / Williams %R / CCI joined the
-            # output set. Cached rows written by v1 would come back without
-            # those keys, so the version bump is what retires them.
-            cache_version="2",
+            # v3: VR / OBV flow / trend-quality family / RSRS joined the output
+            # set. Cached rows written by an older version would come back
+            # without those keys, so the version bump is what retires them.
+            cache_version="3",
         ),
         FormulaDefinition(
             id="price",

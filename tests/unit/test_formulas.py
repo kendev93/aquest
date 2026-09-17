@@ -32,6 +32,34 @@ def make_bars(length: int = 180, *, descending: bool = False) -> pd.DataFrame:
     )
 
 
+def make_trend_bars(length: int = 320) -> pd.DataFrame:
+    """Deterministic pseudo-random bars with a *varying* intraday range.
+
+    ``make_bars`` keeps ``high = close + 1`` and ``low = close - 1``, which
+    degenerates the RSRS regression: high is an exact shift of low, so beta is
+    a constant 1, its rolling standard deviation is 0 and the standard score
+    would be NaN everywhere.
+    """
+
+    rng = np.random.default_rng(20260917)
+    close = 30.0 * np.cumprod(1.0 + rng.normal(0.0003, 0.016, length))
+    spread = close * rng.uniform(0.004, 0.05, length)
+    high = close + spread * rng.uniform(0.2, 0.9, length)
+    low = close - spread * rng.uniform(0.2, 0.9, length)
+    volume = rng.uniform(80_000.0, 900_000.0, length)
+    return pd.DataFrame(
+        {
+            "date": pd.bdate_range("2023-01-02", periods=length),
+            "open": close,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": volume,
+            "amount": close * volume,
+        }
+    )
+
+
 def test_mytt_core_functions_have_expected_warmup_and_cross_semantics() -> None:
     values = np.arange(1.0, 8.0)
 
@@ -220,6 +248,12 @@ def test_only_zero_centred_outputs_are_marked_bidirectional() -> None:
         "technical.bias20",
         "technical.return20",
         "technical.cci14",
+        # 趋势质量族：净流向可正可负，年化趋势/趋势质量继承斜率与收益的符号，
+        # RSRS 标准分按构造零均值。
+        "technical.obv_flow20",
+        "technical.annual_trend24",
+        "technical.trend_quality",
+        "technical.rsrs_zscore",
     }
     # 一侧恒为 0 的输出绝不能进入默认条件。
     assert "indicator_one.wash" not in flagged
@@ -234,6 +268,9 @@ def test_only_zero_centred_outputs_are_marked_bidirectional() -> None:
         "technical.wr14",
         "technical.kdj_k",
         "technical.kdj_d",
+        # VR 是上涨量/下跌量之比，R² 恒在 0~1，都不跨零。
+        "technical.vr24",
+        "technical.r2_24",
     ):
         assert one_sided not in flagged
 
@@ -343,6 +380,68 @@ def test_kdj_bollinger_wr_and_cci_match_hand_computed_values() -> None:
     )
 
 
+def test_volume_pressure_and_trend_quality_match_hand_computed_values() -> None:
+    """第三批（量能 + 趋势质量）手工核对。
+
+    期望值全部用与实现无关的办法复算：回归用 ``np.polyfit`` /
+    ``np.corrcoef``（实现用的是闭式解 + 滑动窗口），RSRS 用逐窗口
+    ``polyfit(low, high)``（实现用的是 ``corr × std比``），互为交叉验证。
+    """
+
+    bars = make_trend_bars()
+    result = calculate_technical_indicators(bars)
+    close = bars["close"]
+    high = bars["high"]
+    low = bars["low"]
+    volume = bars["volume"]
+
+    change = close.diff()
+    up = volume.where(change > 0, 0.0).rolling(24).sum()
+    down = volume.where(change < 0, 0.0).rolling(24).sum()
+    flat = volume.where(change == 0, 0.0).rolling(24).sum()
+    assert np.allclose(
+        result.values["vr24"], (up + 0.5 * flat) / (down + 0.5 * flat) * 100, equal_nan=True
+    )
+
+    signed = (np.sign(change.fillna(0.0)) * volume).rolling(20).sum()
+    assert np.allclose(
+        result.values["obv_flow20"], signed / volume.rolling(20).sum() * 100, equal_nan=True
+    )
+    # 净流向是有界的：无论流通盘多大都落在 ±100 之间。
+    assert np.nanmin(result.values["obv_flow20"]) >= -100.0
+    assert np.nanmax(result.values["obv_flow20"]) <= 100.0
+
+    x = np.arange(24)
+    expected_slope = close.rolling(24).apply(lambda y: np.polyfit(x, np.log(y), 1)[0], raw=True)
+    expected_r2 = close.rolling(24).apply(lambda y: np.corrcoef(x, np.log(y))[0, 1] ** 2, raw=True)
+    assert np.allclose(result.values["r2_24"], expected_r2, equal_nan=True, atol=1e-9)
+    assert np.allclose(
+        result.values["annual_trend24"],
+        (np.exp(expected_slope * 252.0) - 1.0) * expected_r2,
+        equal_nan=True,
+    )
+
+    momentum = close.pct_change(24)
+    volatility = close.pct_change().rolling(60).std() * np.sqrt(252.0)
+    assert np.allclose(
+        result.values["trend_quality"], momentum * expected_r2 / volatility, equal_nan=True
+    )
+
+    expected_beta = np.full(len(close), np.nan)
+    low_windows = np.lib.stride_tricks.sliding_window_view(low.to_numpy(), 18)
+    high_windows = np.lib.stride_tricks.sliding_window_view(high.to_numpy(), 18)
+    for index, (window_low, window_high) in enumerate(zip(low_windows, high_windows)):
+        expected_beta[index + 17] = np.polyfit(window_low, window_high, 1)[0]
+    assert np.allclose(result.values["rsrs_slope"], expected_beta, equal_nan=True)
+
+    beta = pd.Series(expected_beta)
+    expected_zscore = (beta - beta.rolling(250).mean()) / beta.rolling(250).std()
+    assert np.allclose(result.values["rsrs_zscore"], expected_zscore, equal_nan=True)
+    # 标准分要 18 根回归预热 + 250 根标准化窗口，第一个有效值在第 267 根（索引 266）。
+    assert np.isnan(result.values["rsrs_zscore"][:266]).all()
+    assert not np.isnan(result.values["rsrs_zscore"][266:]).any()
+
+
 def test_flat_window_yields_nan_instead_of_inf_for_kdj_and_bollinger() -> None:
     """一字板（区间宽度为 0）时所有带分母的输出必须是 NaN。"""
 
@@ -351,12 +450,29 @@ def test_flat_window_yields_nan_instead_of_inf_for_kdj_and_bollinger() -> None:
 
     result = calculate_technical_indicators(bars)
 
-    for name in ("kdj_k", "kdj_d", "kdj_j", "boll_percent_b", "wr14", "cci14"):
+    for name in (
+        "kdj_k",
+        "kdj_d",
+        "kdj_j",
+        "boll_percent_b",
+        "wr14",
+        "cci14",
+        # 无量纲方差为 0：R²、年化趋势、趋势质量、RSRS 全部无定义。
+        "r2_24",
+        "annual_trend24",
+        "trend_quality",
+        "rsrs_slope",
+        "rsrs_zscore",
+    ):
         values = result.values[name]
         assert np.isnan(values).all(), name
         assert not np.isinf(values).any(), name
     # 带宽是 (上轨 − 下轨) / 中轨，无波动时答案就是 0，不是除零。
     assert np.all(result.values["boll_bandwidth"][19:] == 0.0)
+    # VR 把平盘量各分一半给分子分母，所以完全平盘时恰好是 100（买卖平衡），
+    # 不是除零；净流向是 0/总量 = 0。
+    assert np.all(result.values["vr24"][23:] == 100.0)
+    assert np.all(result.values["obv_flow20"][19:] == 0.0)
 
 
 def test_dimensionless_outputs_are_usable_as_cross_stock_ranking_features() -> None:
@@ -379,6 +495,13 @@ def test_dimensionless_outputs_are_usable_as_cross_stock_ranking_features() -> N
         "boll_bandwidth",
         "wr14",
         "cci14",
+        "vr24",
+        "obv_flow20",
+        "r2_24",
+        "annual_trend24",
+        "trend_quality",
+        "rsrs_slope",
+        "rsrs_zscore",
     ):
         assert f"technical.{name}" in rankable
         # 短名别名也必须能解析，否则校验放行但解析失败。
