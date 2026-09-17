@@ -18,6 +18,7 @@ from typing import Any, Protocol, cast
 
 from selector_app.market_data.models import (
     InstrumentBoard,
+    InstrumentType,
     ResolvedMarketDataProvider,
 )
 from selector_app.market_data.staging import (
@@ -51,6 +52,11 @@ from .market_sync import (
 from .online_market_sync import OnlineMarketSync, OnlineModuleFactory, OnlineProviderError
 
 _EASTMONEY_STOCK_BOARDS = frozenset({"main", "star", "chinext"})
+# East Money exposes exchange-traded funds through a separate quote catalog, and
+# the local store already models them as instrument_type="fund", board="fund".
+_EASTMONEY_FUND_BOARDS = frozenset({"fund"})
+_EASTMONEY_SUPPORTED_BOARDS = _EASTMONEY_STOCK_BOARDS | _EASTMONEY_FUND_BOARDS
+_EASTMONEY_SUPPORTED_TYPES = frozenset({"stock", "fund"})
 
 
 class ProviderSyncService(Protocol):
@@ -505,26 +511,24 @@ class MarketDataSync:
         if config.provider == "tdx":
             return [("tdx", config, self._tdx_sync)]
         _validate_eastmoney_scope(config)
-        plans: list[tuple[str, MarketSyncConfig, ProviderSyncService]] = []
-        if _scope_can_include_eastmoney_stock(config):
-            plans.append(
-                (
-                    "eastmoney",
-                    replace(
-                        config,
-                        provider="eastmoney",
-                        instrument_types=("stock",),
-                        boards=_eastmoney_boards(config),
-                    ),
-                    self._eastmoney_sync,
-                )
-            )
-        if not plans:
+        eastmoney_types = _eastmoney_types(config)
+        if not eastmoney_types:
             raise OnlineProviderError(
-                "East Money 当前只支持主板、科创板和创业板股票；"
-                "B 股、基金、指数、债券请切换为 TDX。"
+                "East Money 当前只支持主板、科创板、创业板股票和场内基金；"
+                "B 股、指数、债券请切换为 TDX。"
             )
-        return plans
+        return [
+            (
+                "eastmoney",
+                replace(
+                    config,
+                    provider="eastmoney",
+                    instrument_types=eastmoney_types,
+                    boards=_eastmoney_boards(config),
+                ),
+                self._eastmoney_sync,
+            )
+        ]
 
 
 def _provider_detail_callback(
@@ -670,19 +674,29 @@ def _supports_abort_check(method: object) -> bool:
     )
 
 
-def _scope_can_include_eastmoney_stock(config: MarketSyncConfig) -> bool:
-    if config.instrument_types is not None and "stock" not in config.instrument_types:
-        return False
-    return config.boards is None or bool(set(config.boards) & _EASTMONEY_STOCK_BOARDS)
+def _eastmoney_types(config: MarketSyncConfig) -> tuple[InstrumentType, ...] | None:
+    """Instrument kinds the East Money channel can serve for this request.
+
+    An unspecified request keeps resolving to stocks only: silently pulling the
+    whole ETF catalog into every "sync everything" run would multiply the
+    download volume for users who never asked for funds.
+    """
+
+    if config.instrument_types is None:
+        return ("stock",)
+    supported = tuple(
+        value for value in config.instrument_types if value in _EASTMONEY_SUPPORTED_TYPES
+    )
+    return supported or None
 
 
 def _validate_eastmoney_scope(config: MarketSyncConfig) -> None:
-    unsupported_types = set(config.instrument_types or ()) - {"stock"}
-    unsupported_boards = set(config.boards or ()) - _EASTMONEY_STOCK_BOARDS
+    unsupported_types = set(config.instrument_types or ()) - _EASTMONEY_SUPPORTED_TYPES
+    unsupported_boards = set(config.boards or ()) - _EASTMONEY_SUPPORTED_BOARDS
     if unsupported_types or unsupported_boards:
         unsupported = sorted({*unsupported_types, *unsupported_boards})
         raise OnlineProviderError(
-            "East Money 当前仅支持主板、科创板和创业板股票；"
+            "East Money 当前仅支持主板、科创板、创业板股票和场内基金；"
             f"当前范围包含不支持的品种/板块: {', '.join(unsupported)}，请切换为 TDX。"
         )
 
@@ -690,7 +704,7 @@ def _validate_eastmoney_scope(config: MarketSyncConfig) -> None:
 def _eastmoney_boards(config: MarketSyncConfig) -> tuple[InstrumentBoard, ...] | None:
     if config.boards is None:
         return None
-    selected = tuple(value for value in config.boards if value in _EASTMONEY_STOCK_BOARDS)
+    selected = tuple(value for value in config.boards if value in _EASTMONEY_SUPPORTED_BOARDS)
     return selected or None
 
 

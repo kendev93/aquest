@@ -49,6 +49,17 @@ def test_default_catalog_contains_existing_formula_and_chart_outputs() -> None:
     assert "price.close" in catalog.numeric_ids
     assert "price.close" not in catalog.rankable_ids
     assert "price.open" not in catalog.rankable_ids
+    # Currency-denominated indicators stay usable operands but must not be
+    # ranking features: sorting on them is sorting by share price, which breaks
+    # outright once ETFs (0.5-5 CNY) and stocks (3-300 CNY) share a universe.
+    for price_scaled in ("technical.ma5", "technical.ma10", "technical.ma20", "technical.ma60"):
+        assert price_scaled in catalog.numeric_ids
+        assert price_scaled not in catalog.rankable_ids
+    for macd_scaled in ("technical.macd", "technical.macd_signal", "technical.macd_histogram"):
+        assert macd_scaled in catalog.numeric_ids
+        assert macd_scaled not in catalog.rankable_ids
+    # RSI is dimensionless, so it must survive as a ranking feature.
+    assert "technical.rsi14" in catalog.rankable_ids
     assert len(catalog.signal_ids) == 15
 
 

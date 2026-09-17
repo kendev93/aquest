@@ -99,6 +99,8 @@ class OnlineModule(Protocol):
 
     def fetch_instruments(self, *, timeout: float) -> pd.DataFrame: ...
 
+    def fetch_fund_instruments(self, *, timeout: float) -> pd.DataFrame: ...
+
     def fetch_daily_history(
         self,
         symbol: str,
@@ -765,8 +767,8 @@ class OnlineMarketSync:
             "provider": "eastmoney",
             "available": True,
             "version": version,
-            "instrument_types": ["stock"],
-            "boards": sorted(_STOCK_BOARDS),
+            "instrument_types": ["stock", "fund"],
+            "boards": sorted(_STOCK_BOARDS | _ONLINE_FUND_BOARDS),
             "history_sources": [
                 "eastmoney",
                 "tencent",
@@ -942,19 +944,18 @@ class OnlineMarketSync:
         self,
         config: MarketSyncConfig,
     ) -> tuple[_TargetSelection, int, int]:
-        if not _scope_can_include_stock(config):
-            return _empty_selection("eastmoney_stock_list"), 0, 0
+        wanted = _online_supported_types(config)
+        if not wanted:
+            return _empty_selection("eastmoney_list"), 0, 0
         if config.prefer_store_targets:
             stored = self._store.list_instruments(
                 market=None if config.universe == "all" else config.universe.upper(),
-                instrument_types=("stock",),
+                instrument_types=wanted,
                 boards=config.boards,
             )
-            selection = _selection_from_stored(stored)
+            selection = _selection_from_stored(stored, instrument_types=wanted)
         else:
-            module = self._module_factory()
-            frame = module.fetch_instruments(timeout=config.timeout)
-            selection = _selection_from_eastmoney_list(frame, config)
+            selection = self._selection_from_online_catalogs(config, wanted)
         selection = replace(selection, fingerprint=_fingerprint_targets(selection.targets))
         if selection.fingerprint is not None:
             self._store.set_meta("instrument_list_fingerprint", selection.fingerprint)
@@ -978,6 +979,37 @@ class OnlineMarketSync:
         new_instruments = self._store.ensure_instruments(refs) if refs else 0
         return selection, new_instruments, max(len(refs) - new_instruments, 0)
 
+    def _selection_from_online_catalogs(
+        self,
+        config: MarketSyncConfig,
+        wanted: tuple[InstrumentType, ...],
+    ) -> _TargetSelection:
+        """Fetch one East Money catalog per requested instrument kind.
+
+        Stocks and funds live in different quote endpoints, so a mixed request
+        has to walk both and merge the results by (market, code).
+        """
+
+        module = self._module_factory()
+        selections: list[_TargetSelection] = []
+        if "stock" in wanted:
+            selections.append(
+                _selection_from_eastmoney_list(
+                    module.fetch_instruments(timeout=config.timeout),
+                    config,
+                    instrument_type="stock",
+                )
+            )
+        if "fund" in wanted:
+            selections.append(
+                _selection_from_eastmoney_list(
+                    module.fetch_fund_instruments(timeout=config.timeout),
+                    config,
+                    instrument_type="fund",
+                )
+            )
+        return _merge_selections(selections)
+
     def _latest_existing_bars(
         self,
         targets: list[OnlineTarget],
@@ -996,7 +1028,9 @@ class OnlineMarketSync:
             (ref.market, ref.code): ref
             for ref in self._store.list_instruments(
                 include_missing=True,
-                instrument_types=("stock",),
+                # Restrict to the kinds actually targeted, but never assume the
+                # targets are all stocks: a fund run must see its stored funds.
+                instrument_types=tuple(sorted({target[2] for target in targets})) or None,
             )
         }
         latest = self._store.read_latest_bars(refs, count=2, include_provisional=True)
@@ -1384,21 +1418,57 @@ def _combine_history_sources(sources: list[str]) -> str:
     return "+".join(unique) if unique else "empty"
 
 
-def _scope_can_include_stock(config: MarketSyncConfig) -> bool:
-    if config.instrument_types is not None and "stock" not in config.instrument_types:
+def _scope_can_include(
+    config: MarketSyncConfig,
+    *,
+    instrument_type: InstrumentType,
+    boards: frozenset[str],
+) -> bool:
+    """Whether the requested scope still overlaps one provider capability."""
+
+    if config.instrument_types is not None and instrument_type not in config.instrument_types:
         return False
-    return config.boards is None or bool(set(config.boards) & _STOCK_BOARDS)
+    return config.boards is None or bool(set(config.boards) & boards)
+
+
+# The online East Money catalogs carry these instrument kinds. Bond rows exist in
+# the quote lists but the local store has no bar source for them, so they stay
+# out of the downloadable set on purpose.
+_ONLINE_FUND_BOARDS = frozenset({"fund"})
+_ONLINE_SUPPORTED_TYPES: tuple[tuple[InstrumentType, frozenset[str]], ...] = (
+    ("stock", _STOCK_BOARDS),
+    ("fund", _ONLINE_FUND_BOARDS),
+)
+
+
+def _online_supported_types(config: MarketSyncConfig) -> tuple[InstrumentType, ...]:
+    if config.instrument_types is None:
+        # An unscoped request keeps resolving to stocks only. Funds live behind
+        # a second catalog request, so folding them into every unscoped run
+        # would silently multiply the download volume for callers that never
+        # asked for ETFs.
+        return ("stock",)
+    return tuple(
+        instrument_type
+        for instrument_type, boards in _ONLINE_SUPPORTED_TYPES
+        if _scope_can_include(config, instrument_type=instrument_type, boards=boards)
+    )
 
 
 def _empty_selection(target_source: str) -> _TargetSelection:
     return _TargetSelection([], 0, 0, target_source)
 
 
-def _selection_from_stored(stored: list[InstrumentRef]) -> _TargetSelection:
+def _selection_from_stored(
+    stored: list[InstrumentRef],
+    *,
+    instrument_types: tuple[InstrumentType, ...],
+) -> _TargetSelection:
+    allowed = set(instrument_types)
     targets: list[OnlineTarget] = [
         (ref.market, ref.code, ref.instrument_type, ref.board, ref.name)
         for ref in stored
-        if ref.instrument_type == "stock"
+        if ref.instrument_type in allowed
     ]
     return _TargetSelection(
         targets=targets,
@@ -1411,7 +1481,16 @@ def _selection_from_stored(stored: list[InstrumentRef]) -> _TargetSelection:
 def _selection_from_eastmoney_list(
     frame: pd.DataFrame,
     config: MarketSyncConfig,
+    *,
+    instrument_type: InstrumentType,
 ) -> _TargetSelection:
+    """Turn one East Money catalog page into download targets of a single kind.
+
+    ``instrument_type`` is the kind the caller asked this frame for. Fund codes
+    live in ranges the stock helper rejects (51xxxx/15xxxx), so the market has
+    to be resolved with the matching helper before classification.
+    """
+
     if not isinstance(frame, pd.DataFrame):
         raise OnlineDataError("在线行情证券列表响应不是 DataFrame")
     if frame.empty:
@@ -1422,35 +1501,68 @@ def _selection_from_eastmoney_list(
         raise OnlineDataError("在线行情证券列表缺少代码字段")
     scope = InstrumentScope.from_values(
         universe=config.universe,
-        instrument_types=("stock",),
+        instrument_types=(instrument_type,),
         boards=config.boards,
     )
     seen: set[tuple[MarketCode, str]] = set()
     listed: set[tuple[MarketCode, str]] = set()
     targets: list[OnlineTarget] = []
+    # Keep the per-kind board gate: the East Money stock catalog also lists
+    # B shares, which this channel does not serve.
+    allowed_boards = _STOCK_BOARDS if instrument_type == "stock" else _ONLINE_FUND_BOARDS
     for row in frame.to_dict(orient="records"):
         code = _clean_code(row.get(code_column))
         if code is None:
             continue
-        market = _market_for_stock_code(code)
+        market = _market_for_online_code(code, instrument_type)
         if market is None:
             continue
-        instrument_type = classify_instrument(market, code)
+        classified_type = classify_instrument(market, code)
         board = classify_board(market, code)
-        if instrument_type != "stock" or board not in _STOCK_BOARDS:
+        if classified_type != instrument_type or board not in allowed_boards:
             continue
         key = (market, code)
         listed.add(key)
         name = _clean_name(row.get(name_column)) if name_column is not None else None
-        if key in seen or not scope.matches(market, instrument_type, board):
+        if key in seen or not scope.matches(market, classified_type, board):
             continue
         seen.add(key)
-        targets.append((market, code, instrument_type, board, name))
+        targets.append((market, code, classified_type, board, name))
     return _TargetSelection(
         targets=targets,
         listed_instruments=len(listed),
         filtered_instruments=max(len(listed) - len(targets), 0),
-        target_source="eastmoney_stock_list",
+        target_source=f"eastmoney_{instrument_type}_list",
+    )
+
+
+def _market_for_online_code(code: str, instrument_type: InstrumentType) -> MarketCode | None:
+    if instrument_type == "fund":
+        return _market_for_fund_code(code)
+    return _market_for_stock_code(code)
+
+
+def _merge_selections(selections: list[_TargetSelection]) -> _TargetSelection:
+    """Merge per-kind catalog selections, de-duplicating by (market, code)."""
+
+    if not selections:
+        return _empty_selection("eastmoney_list")
+    if len(selections) == 1:
+        return selections[0]
+    targets: list[OnlineTarget] = []
+    seen: set[tuple[MarketCode, str]] = set()
+    for selection in selections:
+        for target in selection.targets:
+            key = (target[0], target[1])
+            if key in seen:
+                continue
+            seen.add(key)
+            targets.append(target)
+    return _TargetSelection(
+        targets=targets,
+        listed_instruments=sum(item.listed_instruments for item in selections),
+        filtered_instruments=sum(item.filtered_instruments for item in selections),
+        target_source="eastmoney_mixed_list",
     )
 
 

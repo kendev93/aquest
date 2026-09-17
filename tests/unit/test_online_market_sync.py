@@ -69,6 +69,17 @@ class FakeOnline:
             ]
         )
 
+    def fetch_fund_instruments(self, *, timeout: float) -> pd.DataFrame:
+        del timeout
+        return pd.DataFrame(
+            [
+                {"代码": "510300", "名称": "沪深300ETF"},
+                {"代码": "510500", "名称": "中证500ETF"},
+                {"代码": "159915", "名称": "创业板ETF"},
+                {"代码": "600000", "名称": "浦发银行"},
+            ]
+        )
+
     def fetch_daily_history(
         self,
         symbol: str,
@@ -161,6 +172,66 @@ def test_eastmoney_discovers_sh_sz_a_shares_and_preserves_names(tmp_path: Path) 
     assert report.filtered_instruments == 0
     assert {ref.code for ref in store.list_instruments()} == {"000001", "600000", "688001"}
     assert next(ref for ref in store.list_instruments() if ref.code == "600000").name == "浦发银行"
+
+
+def test_eastmoney_discovers_etfs_when_funds_are_requested(tmp_path: Path) -> None:
+    module = FakeOnline()
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+
+    report = OnlineMarketSync(
+        store=store,
+        module_factory=lambda: module,
+        clock=lambda: _NOW,
+    ).discover_instruments(_config(instrument_types=("fund",)))
+
+    assert report.target_source == "eastmoney_fund_list"
+    # 600000 is a stock smuggled into the fund catalog; it must not leak in.
+    assert report.listed_instruments == 3
+    assert report.total_candidates == 3
+    stored = store.list_instruments(instrument_types=("fund",))
+    assert {ref.code for ref in stored} == {"510300", "510500", "159915"}
+    assert all(ref.instrument_type == "fund" and ref.board == "fund" for ref in stored)
+    # Fund codes need the fund market helper: 51xxxx is SH, 15xxxx is SZ.
+    assert next(ref for ref in stored if ref.code == "510300").market == "SH"
+    assert next(ref for ref in stored if ref.code == "159915").market == "SZ"
+    assert next(ref for ref in stored if ref.code == "510300").name == "沪深300ETF"
+
+
+def test_eastmoney_merges_stock_and_fund_catalogs(tmp_path: Path) -> None:
+    module = FakeOnline()
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+
+    report = OnlineMarketSync(
+        store=store,
+        module_factory=lambda: module,
+        clock=lambda: _NOW,
+    ).discover_instruments(_config(instrument_types=("stock", "fund")))
+
+    assert report.target_source == "eastmoney_mixed_list"
+    assert {ref.code for ref in store.list_instruments()} == {
+        "000001",
+        "600000",
+        "688001",
+        "510300",
+        "510500",
+        "159915",
+    }
+
+
+def test_eastmoney_unscoped_request_stays_stock_only(tmp_path: Path) -> None:
+    """An unscoped request must not silently pull the whole ETF catalog."""
+
+    module = FakeOnline()
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+
+    report = OnlineMarketSync(
+        store=store,
+        module_factory=lambda: module,
+        clock=lambda: _NOW,
+    ).discover_instruments(MarketSyncConfig(universe="all", sync_workers=1))
+
+    assert report.target_source == "eastmoney_stock_list"
+    assert {ref.code for ref in store.list_instruments()} == {"000001", "600000", "688001"}
 
 
 def test_eastmoney_sync_uses_full_history_for_new_instruments_and_writes_provider(
@@ -532,8 +603,10 @@ def test_market_data_sync_can_use_legacy_tdx_explicitly(tmp_path: Path) -> None:
 def test_eastmoney_mode_rejects_explicitly_unsupported_instrument_scope(tmp_path: Path) -> None:
     service = MarketDataSync(store=DuckDbMarketDataStore(tmp_path / "market.duckdb"))
 
+    # Stocks and exchange-traded funds are served by East Money; bonds and
+    # indexes still are not, so they keep falling back to TDX.
     with pytest.raises(OnlineProviderError, match="TDX"):
-        service.discover_instruments(MarketSyncConfig(instrument_types=("fund",), sync_workers=1))
+        service.discover_instruments(MarketSyncConfig(instrument_types=("bond",), sync_workers=1))
 
 
 def test_market_sync_config_rejects_unknown_provider() -> None:

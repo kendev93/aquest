@@ -513,7 +513,11 @@ def _write_snapshot(
         raise RuntimeError("策略实验已取消")
 
     catalog = default_indicator_catalog()
-    value_ids = tuple(catalog.rankable_ids)
+    # Warm every numeric output, not just the rankable ones. Snapshot columns
+    # are a compute cache: a candidate may legitimately reference a price-scaled
+    # value in a condition ("close 上穿 MA20") even though that value must never
+    # be mined into a cross-stock threshold.
+    value_ids = tuple(catalog.value_ids)
     signal_ids = tuple(catalog.signal_ids)
     formula_ids = tuple(FORMULA_REGISTRY.all_formula_ids())
     bars = _open_snapshot_memmap(

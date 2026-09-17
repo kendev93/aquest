@@ -782,7 +782,12 @@ class StrategyDiscoveryRequest(BaseModel):
         from selector_app.strategy_discovery.catalog import default_indicator_catalog
 
         catalog = default_indicator_catalog()
-        allowed_values = set(catalog.rankable_ids)
+        # Condition operands span every numeric output, not just the rankable
+        # ones. Rankability is a cross-stock sorting concern: prices and moving
+        # averages are perfectly valid operands ("close 上穿 MA20") but must
+        # never become ranking features. Using rankable_ids here wrongly
+        # rejected price-based conditions.
+        allowed_values = set(catalog.numeric_ids)
 
         def canonical_conditions(
             conditions: list[ScreenConditionRequest], field_name: str

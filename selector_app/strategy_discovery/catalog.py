@@ -13,7 +13,25 @@ _CONSTANT_VALUE_IDS = frozenset({"indicator_one.z", "indicator_two.warning_line"
 # features: an absolute price is not comparable across stocks, so mining a
 # cross-stock threshold on it would be meaningless.
 _PRICE_VALUE_IDS = frozenset({"price.open", "price.high", "price.low", "price.close"})
-_NON_RANKABLE_VALUE_IDS = _CONSTANT_VALUE_IDS | _PRICE_VALUE_IDS
+# Values quoted in currency units. They remain perfectly good condition
+# operands, but ranking stocks on them is just ranking them by share price:
+# a 200 CNY stock always beats a 3 CNY one regardless of momentum. The damage
+# gets worse once ETFs share the universe, because ETF quotes cluster around
+# 0.5-5 CNY while stocks span 3-300, so a cross-section sort degenerates into
+# "every ETF beats every stock". MACD belongs here too: DIF/DEA are differences
+# of two EMAs, so they inherit the price scale.
+_PRICE_SCALE_VALUE_IDS = frozenset(
+    {
+        "technical.ma5",
+        "technical.ma10",
+        "technical.ma20",
+        "technical.ma60",
+        "technical.macd",
+        "technical.macd_signal",
+        "technical.macd_histogram",
+    }
+)
+_NON_RANKABLE_VALUE_IDS = _CONSTANT_VALUE_IDS | _PRICE_VALUE_IDS | _PRICE_SCALE_VALUE_IDS
 
 
 @dataclass(frozen=True)
@@ -42,6 +60,16 @@ class IndicatorCatalog:
             item.id.split(".", 1)[1] for item in self.values if item.id.startswith("technical.")
         )
         return tuple(dict.fromkeys((*canonical, *aliases)))
+
+    @property
+    def value_ids(self) -> tuple[str, ...]:
+        """Canonical id of every numeric output, without ``numeric_ids`` aliases.
+
+        Use this when the ids become storage or compute slots (snapshot columns,
+        cache keys) so an aliased id cannot produce a duplicate slot.
+        """
+
+        return tuple(item.id for item in self.values)
 
     @property
     def rankable_ids(self) -> tuple[str, ...]:
