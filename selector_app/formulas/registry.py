@@ -84,11 +84,19 @@ FormulaCalculator = Callable[[pd.DataFrame], FormulaResult]
 # Every other catalog output is one-sided or constant, e.g. indicator_one.wash
 # is ``0`` or a non-negative value and never went below zero in 22,886 bars,
 # so the old page default ``indicator_one.wash < 0`` could never be satisfied.
+#
+# The two zero-centred percentages below are two-sided by construction rather
+# than by measurement: BIAS is negative whenever the close sits under its MA
+# and the N-bar return is negative whenever the close is below its own value N
+# bars ago. Both signs occur in any real sample, so a bare ``> 0`` / ``< 0``
+# pair is reachable on both sides.
 BIDIRECTIONAL_VALUE_IDS = frozenset(
     {
         "technical.macd",
         "technical.macd_signal",
         "technical.macd_histogram",
+        "technical.bias20",
+        "technical.return20",
     }
 )
 
@@ -164,6 +172,11 @@ _VALUE_DISPLAY_NAMES: dict[str, dict[str, str]] = {
         "macd": "MACD",
         "macd_signal": "SIGNAL",
         "macd_histogram": "MACD柱",
+        "atr_pct": "ATR%",
+        "volume_ratio5": "量比5日",
+        "bias20": "乖离率20",
+        "return20": "20日涨幅",
+        "position20": "20日位置",
     },
     "price": {
         "open": "开盘价",

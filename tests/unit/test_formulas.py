@@ -8,6 +8,7 @@ from selector_app.formulas.indicator_one import calculate_indicator_one
 from selector_app.formulas.indicator_three import calculate_indicator_three
 from selector_app.formulas.indicator_two import calculate_indicator_two
 from selector_app.formulas.tdx_math import BARSLAST, COUNT, CROSS, EMA, HHV, LLV, REF, SMA
+from selector_app.formulas.technical import calculate_technical_indicators
 
 
 def make_bars(length: int = 180, *, descending: bool = False) -> pd.DataFrame:
@@ -103,11 +104,19 @@ def test_formula_results_mark_empty_and_insufficient_data_as_skipped() -> None:
 
 
 def test_constant_price_data_does_not_produce_infinite_values() -> None:
+    """一字板行情（最高=最低）会让位置类指标的分母为 0，必须产出 NaN 而非 inf。"""
+
     bars = make_bars()
     for column in ("open", "high", "low", "close"):
         bars[column] = 10.0
 
-    for calculator in (calculate_indicator_one, calculate_indicator_two, calculate_indicator_three):
+    calculators = (
+        calculate_indicator_one,
+        calculate_indicator_two,
+        calculate_indicator_three,
+        calculate_technical_indicators,
+    )
+    for calculator in calculators:
         result = calculator(bars)
         assert all(not np.isinf(array).any() for array in result.values.values())
 
@@ -201,7 +210,84 @@ def test_only_zero_centred_outputs_are_marked_bidirectional() -> None:
         "technical.macd",
         "technical.macd_signal",
         "technical.macd_histogram",
+        # 围绕 0 的百分比，两侧由构造保证而非实测。
+        "technical.bias20",
+        "technical.return20",
     }
     # 一侧恒为 0 的输出绝不能进入默认条件。
     assert "indicator_one.wash" not in flagged
     assert "indicator_one.distribution" not in flagged
+    # 恒为正的比值/有界位置同样只能单向。
+    for one_sided in ("technical.atr_pct", "technical.volume_ratio5", "technical.position20"):
+        assert one_sided not in flagged
+
+
+def test_dimensionless_outputs_match_hand_computed_values() -> None:
+    """五个无量纲输出的手工核对。
+
+    ``make_bars`` 的 high/low 恒为 close ± 1，且日内涨幅远小于 1，因此真实波幅
+    ``max(high-low, |high-prev_close|, |low-prev_close|)`` 恒等于 2 —— 这让 ATR
+    有一个不需要复制实现就能算出的精确期望值。
+    """
+
+    bars = make_bars(180)
+    result = calculate_technical_indicators(bars)
+    close = bars["close"]
+    last = close.iloc[-1]
+
+    ma20 = close.rolling(20).mean().iloc[-1]
+    assert result.values["bias20"][-1] == pytest.approx((last - ma20) / ma20 * 100)
+    assert result.values["return20"][-1] == pytest.approx(
+        (last / close.iloc[-21] - 1) * 100
+    )
+
+    window_low = bars["low"].iloc[-20:].min()
+    window_high = bars["high"].iloc[-20:].max()
+    assert result.values["position20"][-1] == pytest.approx(
+        (last - window_low) / (window_high - window_low) * 100
+    )
+    # 真实波幅恒为 2，ATR 收敛到 2。
+    assert result.values["atr_pct"][-1] == pytest.approx(2.0 / last * 100)
+
+    volume = bars["volume"]
+    # 均量窗口不含当日：这是量比不被自身成交抬高的关键。
+    assert result.values["volume_ratio5"][-1] == pytest.approx(
+        volume.iloc[-1] / volume.iloc[-6:-1].mean()
+    )
+
+
+def test_volume_ratio_ignores_the_current_bar_and_never_looks_ahead() -> None:
+    """当日放量只应改变当日的量比，不能回改历史。"""
+
+    bars = make_bars(180)
+    before = calculate_technical_indicators(bars)
+
+    inflated = bars.copy(deep=True)
+    inflated.loc[len(inflated) - 1, "volume"] = bars["volume"].iloc[-1] * 10
+    after = calculate_technical_indicators(inflated)
+
+    assert after.values["volume_ratio5"][-1] == pytest.approx(
+        before.values["volume_ratio5"][-1] * 10
+    )
+    assert np.allclose(
+        before.values["volume_ratio5"][:-1],
+        after.values["volume_ratio5"][:-1],
+        equal_nan=True,
+    )
+
+
+def test_dimensionless_outputs_are_usable_as_cross_stock_ranking_features() -> None:
+    """补这批指标的目的就是让挖掘池和排序有可跨股票比较的输入。"""
+
+    from selector_app.strategy_discovery.catalog import default_indicator_catalog
+
+    catalog = default_indicator_catalog()
+    rankable = set(catalog.rankable_ids)
+    for name in ("atr_pct", "volume_ratio5", "bias20", "return20", "position20"):
+        assert f"technical.{name}" in rankable
+        # 短名别名也必须能解析，否则校验放行但解析失败。
+        assert catalog.canonical_id(name) == f"technical.{name}"
+
+    # 价格量纲的均线/MACD 仍然被排除。
+    for excluded in ("technical.ma20", "technical.macd"):
+        assert excluded not in rankable

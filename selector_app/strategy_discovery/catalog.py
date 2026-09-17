@@ -20,6 +20,11 @@ _PRICE_VALUE_IDS = frozenset({"price.open", "price.high", "price.low", "price.cl
 # 0.5-5 CNY while stocks span 3-300, so a cross-section sort degenerates into
 # "every ETF beats every stock". MACD belongs here too: DIF/DEA are differences
 # of two EMAs, so they inherit the price scale.
+#
+# This is an exclusion, not a verdict: trend deviation and volatility are still
+# wanted, just not in currency units. Their dimensionless counterparts live in
+# the same formula (``bias20``, ``atr_pct``, ``position20``) and are rankable,
+# so dropping the raw MA/MACD outputs costs no information.
 _PRICE_SCALE_VALUE_IDS = frozenset(
     {
         "technical.ma5",
@@ -97,21 +102,16 @@ class IndicatorCatalog:
 
     @staticmethod
     def canonical_id(value_id: str) -> str:
-        return (
-            f"technical.{value_id}"
-            if value_id
-            in {
-                "ma5",
-                "ma10",
-                "ma20",
-                "ma60",
-                "rsi14",
-                "macd",
-                "macd_signal",
-                "macd_histogram",
-            }
-            else value_id
-        )
+        """Resolve a bare ``technical`` name such as ``ma5`` to its full id.
+
+        The names are read from the registry rather than listed here so that
+        adding an output cannot silently desync this from ``numeric_ids``,
+        which derives its aliases the same way: a name accepted by one and not
+        the other would validate as a condition operand but fail to resolve.
+        """
+
+        technical_names = FORMULA_REGISTRY.formula("technical").value_names
+        return f"technical.{value_id}" if value_id in technical_names else value_id
 
 
 @lru_cache(maxsize=4)
