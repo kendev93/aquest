@@ -35,6 +35,8 @@ export interface ValueDefinition {
   bidirectional?: boolean
   /** Custom-formula output that is still a raw price/volume level, not a ratio. */
   price_scale?: boolean
+  /** Safe to sort a cross-section of stocks by (no currency units, not constant). */
+  rankable?: boolean
 }
 
 export interface IndicatorDefinition {
@@ -937,7 +939,13 @@ export interface ConditionResearchPayload {
   min_instruments?: number
   candidate_limit?: number
   holdout_candidates?: number
+  // 排序规则：研究不建组合，但结论要落到组合回测的「候选池 + 有限槽位」模型上。
+  ranking_value?: string | null
+  rank_order?: RankOrder
+  ranking_top_n?: number
 }
+
+export type RankOrder = 'asc' | 'desc'
 
 export interface ConditionResearchJobState {
   job_id: string
@@ -1019,6 +1027,32 @@ export interface ConditionResearchCandidate {
   holdout: ConditionResearchSummary | null
 }
 
+export interface ConditionResearchRankingEvidence {
+  value_id: string
+  display_name: string
+  order: 'asc' | 'desc'
+  ic_mean: number
+  icir: number | null
+  segments: number
+  same_sign_segments: number
+  quantile_returns: (number | null)[]
+  top_n_lift: number | null
+  sample_days: number
+  confidence: 'high' | 'medium' | 'low' | 'none'
+  note: string
+}
+
+export interface ConditionResearchRanking {
+  top_n: number
+  min_cross_section: number
+  sample_days: number
+  evaluated: ConditionResearchRankingEvidence[]
+  recommended: ConditionResearchRankingEvidence | null
+  reason: string | null
+  available: boolean
+  selection: { value: string | null; order: 'asc' | 'desc' }
+}
+
 export interface ConditionResearchReport {
   universe: 'all' | 'sh' | 'sz'
   start_date: string
@@ -1031,8 +1065,16 @@ export interface ConditionResearchReport {
   /**
    * 每侧参与挖掘的样本总数。买样本按入场日计（unit=entry），
    * 卖样本按持仓期提前离场决策点计（unit=decision_point），两者口径不同。
+   * daily_hits 是「日均命中股票数」，直接和组合槽位数比大小就能判断条件是否还有意义。
    */
-  sample_totals?: Partial<Record<ConditionResearchSide, { count: number; unit: string }>>
+  sample_totals?: Partial<
+    Record<
+      ConditionResearchSide,
+      { count: number; unit: string; hit_days?: number; daily_hits?: number | null }
+    >
+  >
+  /** 排序指标推荐：只读结论，不改变研究自身的评估口径。 */
+  ranking?: ConditionResearchRanking
   /** 数据覆盖与幸存者偏差披露；契约要求不得静默当作完整历史全市场。 */
   disclosure?: {
     universe_scope: string

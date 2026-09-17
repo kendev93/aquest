@@ -13,11 +13,13 @@ import { FormulaScreenApiError, fetchMetadata, parseFormula } from '../api/formu
 import { fetchActiveJobs } from '../api/jobs'
 import DateRangeSelector from '../components/DateRangeSelector.vue'
 import RuleGroupEditor from '../components/RuleGroupEditor.vue'
+import TermHint from '../components/TermHint.vue'
 import type {
   BacktestExecution,
   ConditionResearchCandidate,
   ConditionResearchJobState,
   ConditionResearchPayload,
+  ConditionResearchRanking,
   ConditionResearchReport,
   ConditionResearchStockResult,
   CustomFormulaMetadata,
@@ -26,6 +28,7 @@ import type {
   FormulaScreenMetadata,
   InstrumentBoard,
   InstrumentType,
+  RankOrder,
   RuleGroupPayload,
   ScreenCondition,
   ValueDefinition,
@@ -83,6 +86,12 @@ const selectedHistoryId = ref('')
 const selectedStockView = ref('baseline:full')
 // 结果里勾选的候选条件，直接追加进基础规则后再跑一次研究。
 const selectedCandidateIds = ref<string[]>([])
+// 排序规则：研究不建组合，但结论要落到组合回测的「候选池 + 有限槽位」模型上。
+const rankingValue = ref('')
+const rankingOrder = ref<RankOrder>('desc')
+const rankingTopN = ref(5)
+// 条件研究页 → 组合回测页的桥接，走独立的键，避免和策略实验室的回填互相覆盖。
+const RESEARCH_APPLY_KEY = 'indicator-lab.condition-research.apply'
 // 「持有到期末」：不设基础卖出条件，让研究以「一直持有」为基准去搜索卖点。
 const holdToEnd = ref(false)
 // 「持续满仓」：持有到期末的对偶。不设基础买入条件，让研究以「天天买」为基准去搜索买点。
@@ -98,6 +107,55 @@ const availableValues = computed<ValueDefinition[]>(() => (
   mode.value === 'custom'
     ? customMetadata.value?.values ?? []
     : metadata.value?.indicators.flatMap((indicator) => indicator.values ?? []) ?? []
+))
+// 排序下拉只列能跨股票比较的输出：按收盘价从高到低排序只是「谁股价贵谁排前面」。
+const rankableValues = computed<ValueDefinition[]>(() => (
+  availableValues.value.filter((value) => value.rankable === true)
+))
+const rankingReport = computed<ConditionResearchRanking | null>(() => (
+  report.value?.ranking ?? null
+))
+const rankingRecommendation = computed(() => rankingReport.value?.recommended ?? null)
+/** 用户没指定排序指标时，「应用到组合回测」就用研究推荐的那一个。 */
+const effectiveRankingValue = computed(() => (
+  rankingValue.value || (rankingRecommendation.value?.value_id ?? '')
+))
+const effectiveRankOrder = computed<RankOrder>(() => (
+  rankingValue.value ? rankingOrder.value : (rankingRecommendation.value?.order ?? rankingOrder.value)
+))
+/** 日均命中股票数 vs 槽位数：判断这个条件在组合里到底还有没有话语权。 */
+const slotHint = computed<string | null>(() => {
+  const totals = report.value?.sample_totals?.buy
+  const daily = totals?.daily_hits
+  if (daily === null || daily === undefined) return null
+  const slots = rankingTopN.value
+  const hits = daily.toFixed(1)
+  if (daily <= slots) {
+    return `日均命中 ${hits} 只，不超过 ${slots} 个槽位：买谁基本由这个条件说了算，排序只是补位时的兜底。`
+  }
+  if (daily >= slots * 10) {
+    const ratio = Math.round(daily / slots)
+    return `日均命中 ${hits} 只，是 ${slots} 个槽位的约 ${ratio} 倍：真正决定买谁的是排序规则，这个条件只负责筛掉不合格的。`
+  }
+  return `日均命中 ${hits} 只、槽位 ${slots} 个：条件和排序共同决定结果，两边都值得调。`
+})
+const RANKING_CONFIDENCE_LABELS: Record<string, string> = {
+  high: '证据充分',
+  medium: '可用，建议先复验',
+  low: '证据不足',
+  none: '暂无法判断',
+}
+const rankingConfidenceLabel = computed(() => (
+  RANKING_CONFIDENCE_LABELS[rankingRecommendation.value?.confidence ?? 'none'] ?? '暂无法判断'
+))
+const rankingValueName = computed(() => (
+  rankingRecommendation.value?.display_name || rankingRecommendation.value?.value_id || '—'
+))
+const rankingOrderText = computed(() => (
+  rankingRecommendation.value?.order === 'asc' ? '从小到大' : '从大到小'
+))
+const rankingQuantiles = computed(() => (
+  (rankingRecommendation.value?.quantile_returns ?? []).map((item) => formatPercent(item))
 ))
 const dateRange = computed<DateRangeSelection>({
   get: () => ({ mode: form.dateMode, startDate: form.startDate, endDate: form.endDate }),
@@ -384,7 +442,38 @@ function buildPayload(): ConditionResearchPayload {
     min_instruments: form.minInstruments,
     candidate_limit: form.candidateLimit,
     holdout_candidates: form.holdoutCandidates,
+    ranking_value: rankingValue.value || null,
+    rank_order: rankingOrder.value,
+    ranking_top_n: rankingTopN.value,
   }
+}
+
+function applyRecommendedRanking(): void {
+  const recommended = rankingRecommendation.value
+  if (!recommended) return
+  rankingValue.value = recommended.value_id
+  rankingOrder.value = recommended.order
+  message.value = `已采用推荐的排序规则：${recommended.display_name ?? recommended.value_id}。`
+}
+
+/** 把研究结果整包搬到组合回测：规则 + 排序 + 槽位，省掉手动重填一遍。 */
+function applyToPortfolio(): void {
+  sessionStorage.setItem(RESEARCH_APPLY_KEY, JSON.stringify({
+    universe: form.universe,
+    instrument_types: [form.instrumentType],
+    boards: form.instrumentType === 'fund' ? [] : [...form.boards],
+    ...(form.dateMode === 'custom' && form.startDate && form.endDate
+      ? { start_date: form.startDate, end_date: form.endDate }
+      : {}),
+    buy_rule: alwaysInMarket.value ? null : form.buyRule,
+    sell_rule: holdToEnd.value ? null : form.sellRule,
+    ranking_value: effectiveRankingValue.value || null,
+    rank_order: effectiveRankOrder.value,
+    max_positions: rankingTopN.value,
+    formula_text: mode.value === 'custom' ? form.formulaText.trim() : null,
+    formula_parameters: mode.value === 'custom' ? { ...form.formulaParameters } : {},
+  }))
+  if (import.meta.env.MODE !== 'test') window.location.assign('/portfolio-backtest')
 }
 
 async function submit(): Promise<void> {
@@ -600,6 +689,10 @@ async function applyStoredRequest(raw: unknown): Promise<void> {
     form.minInstruments = finiteNumber(request.min_instruments, form.minInstruments)
     form.candidateLimit = finiteNumber(request.candidate_limit, form.candidateLimit)
     form.holdoutCandidates = finiteNumber(request.holdout_candidates, form.holdoutCandidates)
+    // 排序规则：存的时候是 null 表示「当年没指定」，别把它变成一个空字符串。
+    rankingValue.value = typeof request.ranking_value === 'string' ? request.ranking_value : ''
+    rankingOrder.value = request.rank_order === 'asc' ? 'asc' : 'desc'
+    rankingTopN.value = finiteNumber(request.ranking_top_n, rankingTopN.value)
     form.initialCash = finiteNumber(request.initial_cash, form.initialCash)
     form.commission = finiteNumber(request.commission, form.commission)
     form.minCommission = finiteNumber(request.min_commission, form.minCommission)
@@ -960,6 +1053,38 @@ onMounted(async () => {
             <p class="helper">主目标是提高跨股票合并交易胜率；候选还需保持盈亏比和平均单笔净收益，并通过最终留出期复验。</p>
           </fieldset>
 
+          <fieldset class="form-section">
+            <legend>排序规则（与组合回测联动）</legend>
+            <div class="compact-fields condition-fields-top">
+              <div>
+                <label for="condition-ranking-value">排序指标</label>
+                <select id="condition-ranking-value" v-model="rankingValue" data-testid="condition-ranking-value">
+                  <option value="">不指定，但仍给出排序建议</option>
+                  <option v-for="value in rankableValues" :key="value.id" :value="value.id">{{ value.display_name }}</option>
+                </select>
+              </div>
+              <div>
+                <label for="condition-rank-order">排序方向<TermHint term="rankOrder" /></label>
+                <select id="condition-rank-order" v-model="rankingOrder" data-testid="condition-rank-order">
+                  <option value="desc">指标值越大越优先</option>
+                  <option value="asc">指标值越小越优先</option>
+                </select>
+              </div>
+            </div>
+            <div class="compact-fields condition-fields-top">
+              <div>
+                <label for="condition-ranking-top-n">持仓槽位<TermHint term="slot" /></label>
+                <input id="condition-ranking-top-n" v-model.number="rankingTopN" data-testid="condition-ranking-top-n" type="number" min="1" max="50" step="1">
+              </div>
+              <div><label>用途</label><p class="field-static">判断条件在有限槽位下是否还有意义</p></div>
+            </div>
+            <p class="helper">
+              研究本身不建组合、不抢槽位；带上排序规则后，结果会额外给出「该按什么排序」的推荐，
+              并告诉你这个买入条件在 {{ rankingTopN }} 个槽位里到底还有没有话语权。
+              排序下拉只列出能跨股票比较的输出（价格、均线这类按绝对值排序没有意义）。
+            </p>
+          </fieldset>
+
           <button class="advanced-toggle" data-testid="condition-advanced-toggle" type="button" :aria-expanded="showAdvanced" @click="showAdvanced = !showAdvanced">
             <span>{{ showAdvanced ? '收起交易费用' : '交易费用' }}</span><small>费用 · 执行</small>
           </button>
@@ -1025,6 +1150,63 @@ onMounted(async () => {
               <div><span>全区间交易数</span><strong>{{ report.baseline.full_period?.pooled_trades.closed_trades ?? '—' }}</strong></div>
               <div><span>基础全区间盈亏比</span><strong>{{ formatNumber(report.baseline.full_period?.pooled_trades.payoff_ratio) }}</strong></div>
               <div><span>跳过 / 错误</span><strong>{{ report.skipped }} / {{ report.errors }}</strong></div>
+            </div>
+            <div v-if="rankingReport" class="ranking-advice" data-testid="condition-ranking-advice">
+              <div class="ranking-advice-head">
+                <strong>排序规则推荐</strong>
+                <span class="ranking-confidence" data-testid="condition-ranking-confidence">{{ rankingConfidenceLabel }}</span>
+              </div>
+              <template v-if="rankingRecommendation">
+                <p class="ranking-advice-line">
+                  建议按 <b>{{ rankingValueName }}</b> {{ rankingOrderText }} 排序
+                  <button
+                    class="link-button"
+                    data-testid="condition-use-recommended-ranking"
+                    type="button"
+                    @click="applyRecommendedRanking"
+                  >采用这个排序</button>
+                </p>
+                <div class="ranking-evidence">
+                  <div>
+                    <span>平均信息系数<TermHint term="icMean" /></span>
+                    <strong>{{ formatNumber(rankingRecommendation.ic_mean, 3) }}</strong>
+                  </div>
+                  <div>
+                    <span>信息系数信息比率<TermHint term="icir" /></span>
+                    <strong>{{ formatNumber(rankingRecommendation.icir, 2) }}</strong>
+                  </div>
+                  <div>
+                    <span>分段同号<TermHint term="segment" /></span>
+                    <strong>{{ rankingRecommendation.same_sign_segments }} / {{ rankingRecommendation.segments }}</strong>
+                  </div>
+                  <div>
+                    <span>前 {{ rankingReport.top_n }} 名提升<TermHint term="topNLift" /></span>
+                    <strong>{{ formatPercent(rankingRecommendation.top_n_lift) }}</strong>
+                  </div>
+                </div>
+                <div v-if="rankingQuantiles.length" class="ranking-quantiles">
+                  <span>分层收益<TermHint term="quantile" /></span>
+                  <span v-for="(value, index) in rankingQuantiles" :key="index" class="ranking-quantile">
+                    <small>第 {{ index + 1 }} 档</small>{{ value }}
+                  </span>
+                </div>
+                <p class="ranking-note">{{ rankingRecommendation.note }}</p>
+              </template>
+              <p v-else class="ranking-note" data-testid="condition-ranking-reason">
+                {{ rankingReport.reason ?? '这次研究没有形成可用的排序结论。' }}
+              </p>
+            </div>
+            <p v-if="slotHint" class="ranking-hint" data-testid="condition-slot-hint">
+              <TermHint term="dailyHits" />{{ slotHint }}
+            </p>
+            <div class="condition-bridge-actions">
+              <button
+                class="secondary-button"
+                data-testid="condition-apply-to-portfolio"
+                type="button"
+                @click="applyToPortfolio"
+              >用这套规则去跑组合回测</button>
+              <small>会把买卖规则、排序规则（没指定就用推荐值）和槽位数一起带到组合回测页。</small>
             </div>
             <div v-if="loading && job" class="progress-track condition-progress" aria-label="条件研究进度">
               <span :style="{ width: Math.round(job.progress * 100) + '%' }"></span>
@@ -1302,6 +1484,114 @@ onMounted(async () => {
   .condition-research-grid {
     grid-template-columns: 1fr;
   }
+}
+
+.ranking-advice {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--accent);
+  background: rgba(34, 197, 94, 0.05);
+}
+
+.ranking-advice-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ranking-confidence {
+  padding: 2px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.ranking-advice-line {
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.link-button {
+  margin-left: 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font-size: 13px;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.ranking-evidence {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+}
+
+.ranking-evidence > div {
+  display: grid;
+  gap: 3px;
+}
+
+.ranking-evidence span {
+  color: var(--subtle);
+  font-size: 11px;
+}
+
+.ranking-evidence strong {
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.ranking-quantiles {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 10px;
+  color: var(--subtle);
+  font-size: 11px;
+}
+
+.ranking-quantile {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.ranking-quantile small {
+  margin-right: 4px;
+  color: var(--subtle);
+  font-size: 10px;
+}
+
+.ranking-note,
+.ranking-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.ranking-hint {
+  margin-top: 8px;
+}
+
+.condition-bridge-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.condition-bridge-actions small {
+  color: var(--subtle);
+  font-size: 11px;
 }
 
 @media (max-width: 640px) {

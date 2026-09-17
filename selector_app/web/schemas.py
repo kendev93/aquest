@@ -22,6 +22,7 @@ from selector_app.portfolio_backtest.models import (
 )
 from selector_app.screening.models import ScanConfig, ScreenCondition
 from selector_app.screening.rules import RuleGroup
+from selector_app.strategy_discovery.catalog import default_indicator_catalog
 from selector_app.strategy_discovery.models import DiscoveryRequest
 from selector_app.strategy_fitness.models import StrategyFitnessConfig
 
@@ -420,6 +421,24 @@ class BacktestRequest(BaseModel):
         )
 
 
+def _rankable_research_values(formula_text: str | None) -> frozenset[str]:
+    """Numeric outputs that may be used as a cross-stock ranking key.
+
+    Mirrors ``ConditionResearchService._feature_ids``: a custom formula decides
+    its own outputs (minus raw price/volume levels), otherwise the shared
+    catalog decides which built-in values are comparable across stocks.
+    """
+
+    if formula_text:
+        parsed = parse_formula(formula_text)
+        return frozenset(
+            custom_output_id(name)
+            for name in parsed.value_names
+            if name not in parsed.price_scale_names
+        )
+    return frozenset(default_indicator_catalog().rankable_ids)
+
+
 class ConditionResearchRequest(BaseModel):
     """Cross-stock independent backtests with rule discovery."""
 
@@ -451,6 +470,11 @@ class ConditionResearchRequest(BaseModel):
     min_instruments: int = Field(default=5, ge=1, le=10_000)
     candidate_limit: int = Field(default=5, ge=1, le=10)
     holdout_candidates: int = Field(default=1, ge=1, le=3)
+    # 排序规则：研究不建组合，但结论要落到组合回测的「候选池 + 有限槽位」模型上，
+    # 带上它才能顺带给「该按什么排序」和「这个条件在 N 槽位下还有没有意义」的答案。
+    ranking_value: str | None = Field(default=None, max_length=128)
+    rank_order: Literal["asc", "desc"] = "desc"
+    ranking_top_n: int = Field(default=5, ge=1, le=50)
 
     @model_validator(mode="after")
     def validate_research(self) -> ConditionResearchRequest:
@@ -480,6 +504,10 @@ class ConditionResearchRequest(BaseModel):
         )
         if self.formula_text and not parse_formula(self.formula_text).value_names:
             raise ValueError("自定义公式至少需要包含一个数值输出，才能自动挖掘条件")
+        if self.ranking_value is not None and self.ranking_value not in _rankable_research_values(
+            self.formula_text
+        ):
+            raise ValueError("排序指标必须是可跨股票比较的数值输出（例如涨跌幅、RSI，不能是价格）")
         conditions = [
             *(self.buy_rule.required_conditions if self.buy_rule is not None else []),
             *(self.buy_rule.conditions if self.buy_rule is not None else []),
@@ -532,6 +560,9 @@ class ConditionResearchRequest(BaseModel):
             min_instruments=self.min_instruments,
             candidate_limit=self.candidate_limit,
             holdout_candidates=self.holdout_candidates,
+            ranking_value=self.ranking_value,
+            rank_order=self.rank_order,
+            ranking_top_n=self.ranking_top_n,
         )
 
 

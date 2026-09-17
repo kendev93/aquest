@@ -9,10 +9,12 @@ import pytest
 
 from selector_app.backtest.models import BacktestReport
 from selector_app.condition_research.models import ConditionResearchConfig
+from selector_app.condition_research.samples import MiningSamples
 from selector_app.condition_research.service import (
     ConditionResearchService,
     _backtest_config,
     _compact_report,
+    _daily_hits,
     candidate_constraint_failures,
 )
 from selector_app.market_data.models import StockRef
@@ -486,3 +488,80 @@ def test_etf_research_pool_ignores_stock_board_filters() -> None:
 
     assert config.boards == ()
     assert [ref.code for ref in service._list_stock_refs(config)] == ["159919"]
+
+
+def test_ranking_settings_round_trip_through_the_config_dict() -> None:
+    """排序规则要随历史记录一起存下来，否则回看时无法知道当年按什么推荐。"""
+
+    config = _research_config(ranking_value="technical.rsi14", rank_order="asc", ranking_top_n=3)
+
+    payload = config.to_dict()
+
+    assert payload["ranking_value"] == "technical.rsi14"
+    assert payload["rank_order"] == "asc"
+    assert payload["ranking_top_n"] == 3
+
+
+def test_ranking_settings_are_validated() -> None:
+    with pytest.raises(ValueError, match="排序方向"):
+        _research_config(rank_order="sideways")
+
+    with pytest.raises(ValueError, match="排序槽位数"):
+        _research_config(ranking_top_n=0)
+
+    with pytest.raises(ValueError, match="排序指标"):
+        _research_config(ranking_value="   ")
+
+
+def _samples_for(dates: list[str]) -> MiningSamples:
+    frame = pd.DataFrame({"technical.score": [1.0] * len(dates)})
+    return MiningSamples(
+        features=frame,
+        outcomes=pd.Series([True] * len(dates)),
+        instruments=pd.Series(["SH600000"] * len(dates)),
+        groups=pd.Series([f"g{index}" for index in range(len(dates))]),
+        dates=pd.Series(dates),
+        returns=pd.Series([0.1] * len(dates)),
+    )
+
+
+def test_daily_hits_counts_stocks_per_active_day() -> None:
+    """日均命中股票数是判断「条件在 N 槽位组合里还有没有意义」的唯一依据。"""
+
+    first = _samples_for(["2024-01-01", "2024-01-01", "2024-01-02"])
+    second = _samples_for(["2024-01-02", "2024-01-03"])
+
+    assert _daily_hits([first, second]) == {"hit_days": 3, "daily_hits": pytest.approx(5 / 3)}
+    assert _daily_hits([]) == {"hit_days": 0, "daily_hits": None}
+
+
+def test_result_carries_ranking_advice_and_hit_diagnostics() -> None:
+    service = ConditionResearchService(
+        adapter=FakeResearchAdapter(),
+        backtest_service=FakePreparedBacktests(),  # type: ignore[arg-type]
+    )
+    config = ConditionResearchConfig(
+        vipdoc_path="/tmp/vipdoc",
+        universe="all",
+        buy_rule=RuleGroup(signals=("custom.buy",)),
+        sell_rule=RuleGroup(signals=("custom.sell",)),
+        formula_text="BUY:C>0; SELL:C<0; SCORE:C;",
+        start_date=date(2020, 1, 1),
+        end_date=date(2020, 4, 30),
+        min_trades=1,
+        min_instruments=1,
+        ranking_value="custom.score",
+        rank_order="desc",
+        ranking_top_n=5,
+    )
+
+    result = service.run(config)
+
+    ranking = result["ranking"]
+    assert ranking["top_n"] == 5
+    assert ranking["selection"] == {"value": "custom.score", "order": "desc"}
+    assert isinstance(ranking["evaluated"], list)
+    assert "reason" in ranking
+    buy_totals = result["sample_totals"]["buy"]
+    assert buy_totals["hit_days"] > 0
+    assert buy_totals["daily_hits"] > 0

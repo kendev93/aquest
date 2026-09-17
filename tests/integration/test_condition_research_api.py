@@ -259,3 +259,34 @@ def test_recent5_window_follows_the_shared_source_not_the_local_store(tmp_path: 
 
     assert service.config.end_date == date(2026, 9, 11)
     assert service.config.start_date == date(2021, 9, 11)
+
+
+def test_ranking_value_must_be_cross_stock_comparable(tmp_path: Path) -> None:
+    """按价格排序只是「谁股价贵谁排前面」，必须在 API 层就拦掉。"""
+
+    request = payload(tmp_path)
+    request["ranking_value"] = "price.close"
+
+    app = create_app(auto_sync_enabled=False)
+    with TestClient(app) as client:
+        assert client.post("/api/v1/condition-research", json=request).status_code == 422
+
+    request["ranking_value"] = "technical.rsi14"
+    request["rank_order"] = "asc"
+    request["ranking_top_n"] = 3
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", bars())
+    service = FakeConditionResearchService()
+    app = create_app(
+        market_data_store=store,
+        condition_research_service=service,
+        auto_sync_enabled=False,
+    )
+    with TestClient(app) as client:
+        created = client.post("/api/v1/condition-research", json=request)
+        assert created.status_code == 202
+        wait_for_job(client, created.json()["data"]["job_id"])
+
+    assert service.config.ranking_value == "technical.rsi14"
+    assert service.config.rank_order == "asc"
+    assert service.config.ranking_top_n == 3

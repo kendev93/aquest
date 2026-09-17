@@ -20,6 +20,12 @@ class MiningSamples:
     outcomes: pd.Series
     instruments: pd.Series
     groups: pd.Series
+    # 信号/决策发生日期。挖掘本身不看日期（样本是横着比的），但「日均命中多少只股票」
+    # 和「排序指标的横截面 IC」都要求把同一天的样本归到一起，所以日期必须随样本走。
+    dates: pd.Series
+    # 对应的收益率，用于排序推荐的横截面相关度；买入样本是整笔交易收益率，
+    # 卖出样本是「按该决策点卖出」的收益率，与基准同一口径（都除以成本）。
+    returns: pd.Series
 
     def __len__(self) -> int:
         return len(self.outcomes)
@@ -44,6 +50,8 @@ def build_buy_trade_samples(
     outcomes: list[bool] = []
     instruments: list[str] = []
     groups: list[str] = []
+    dates: list[str] = []
+    returns: list[float] = []
     pending_entry: Mapping[str, object] | None = None
 
     for trade in trades:
@@ -66,9 +74,11 @@ def build_buy_trade_samples(
             outcomes.append(pnl > 0)
             instruments.append(f"{market}{code}")
             groups.append(_trade_group(market, code, pending_entry))
+            dates.append(signal_date)
+            returns.append(_number(trade.get("return")) or 0.0)
         pending_entry = None
 
-    return _samples(feature_values, rows, outcomes, instruments, groups)
+    return _samples(feature_values, rows, outcomes, instruments, groups, dates, returns)
 
 
 def build_early_exit_samples(
@@ -105,6 +115,8 @@ def build_early_exit_samples(
     outcomes: list[bool] = []
     instruments: list[str] = []
     groups: list[str] = []
+    dates: list[str] = []
+    returns: list[float] = []
     pending_entry: Mapping[str, object] | None = None
 
     for trade in trades:
@@ -168,9 +180,11 @@ def build_early_exit_samples(
                 outcomes.append(early_exit_pnl > base_pnl + 1e-9)
                 instruments.append(f"{market}{code}")
                 groups.append(group)
+                dates.append(decision_date)
+                returns.append(early_exit_pnl / cost_basis)
         pending_entry = None
 
-    return _samples(feature_values, rows, outcomes, instruments, groups)
+    return _samples(feature_values, rows, outcomes, instruments, groups, dates, returns)
 
 
 def feature_rows_by_date(feature_values: pd.DataFrame) -> dict[str, dict[str, object]]:
@@ -196,6 +210,8 @@ def _samples(
     outcomes: list[bool],
     instruments: list[str],
     groups: list[str],
+    dates: list[str],
+    returns: list[float],
 ) -> MiningSamples:
     feature_columns = [column for column in feature_values.columns if column != "date"]
     return MiningSamples(
@@ -203,6 +219,8 @@ def _samples(
         outcomes=pd.Series(outcomes, dtype=bool),
         instruments=pd.Series(instruments, dtype=str),
         groups=pd.Series(groups, dtype=str),
+        dates=pd.Series(dates, dtype=str),
+        returns=pd.Series(returns, dtype=float),
     )
 
 

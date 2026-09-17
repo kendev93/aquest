@@ -18,6 +18,8 @@ from .time_split import split_calendar_range
 SearchSides = Literal["buy", "sell", "both"]
 ExecutionMode = Literal["next_open", "next_close"]
 PositionMode = Literal["full", "fixed"]
+# 排序方向：desc = 指标值越大越优先，asc = 越小越优先。
+RankOrder = Literal["asc", "desc"]
 
 RESEARCH_INSTRUMENT_TYPES: tuple[InstrumentType, ...] = ("stock", "fund")
 
@@ -75,6 +77,14 @@ class ConditionResearchConfig:
     min_instruments: int = 5
     candidate_limit: int = 5
     holdout_candidates: int = 1
+    # 排序规则：研究本身不构建组合、不设槽位，但它挖出的条件最终要落到组合回测里，
+    # 而组合是「先按条件筛出候选池，再按排序抢有限槽位」。带上排序规则，研究才能
+    # 顺带回答「该按什么排序」以及「这个条件在 N 个槽位下还有没有意义」。
+    # 不填 = 不指定，研究照常跑，只是不给排序建议。
+    ranking_value: str | None = None
+    rank_order: RankOrder = "desc"
+    # 用于估算「前 N 名」的槽位数，默认对齐组合回测的默认持仓上限。
+    ranking_top_n: int = 5
 
     def __post_init__(self) -> None:
         if self.universe not in {"all", "sh", "sz"}:
@@ -107,6 +117,12 @@ class ConditionResearchConfig:
             raise ValueError("候选条件上限必须在 1 到 10 之间")
         if not 1 <= self.holdout_candidates <= 3:
             raise ValueError("留出期复验候选数必须在 1 到 3 之间")
+        if self.ranking_value is not None and not self.ranking_value.strip():
+            raise ValueError("排序指标不能是空字符串，不指定请直接留空")
+        if self.rank_order not in {"asc", "desc"}:
+            raise ValueError("排序方向必须是 asc 或 desc")
+        if not 1 <= self.ranking_top_n <= 50:
+            raise ValueError("排序槽位数必须在 1 到 50 之间")
         if not math.isfinite(self.initial_cash) or self.initial_cash <= 0:
             raise ValueError("每只股票的初始资金必须大于 0")
         for name, value in {
@@ -194,6 +210,10 @@ class ConditionResearchConfig:
             "min_instruments": self.min_instruments,
             "candidate_limit": self.candidate_limit,
             "holdout_candidates": self.holdout_candidates,
+            # 排序规则要能随历史记录一起还原，否则回看时无法知道当年是按什么排序推荐的。
+            "ranking_value": self.ranking_value,
+            "rank_order": self.rank_order,
+            "ranking_top_n": self.ranking_top_n,
         }
 
 

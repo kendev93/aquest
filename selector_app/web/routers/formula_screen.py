@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 from typing import cast
 
@@ -16,6 +17,7 @@ from selector_app.market_data.store import DuckDbMarketDataStore, MarketDataStor
 from selector_app.screening.export import report_to_csv, report_to_json
 from selector_app.screening.jobs import ScreenJobRunner
 from selector_app.screening.models import ScanReport
+from selector_app.strategy_discovery.catalog import default_indicator_catalog
 
 from ..schemas import (
     CustomFormulaParseRequest,
@@ -34,11 +36,54 @@ def _store(request: Request) -> DuckDbMarketDataStore:
     return cast(DuckDbMarketDataStore, request.app.state.market_data_store)
 
 
+def _rankable_value_ids() -> frozenset[str]:
+    """Built-in outputs that are safe to sort a cross-section by."""
+
+    return frozenset(default_indicator_catalog().rankable_ids)
+
+
+def _value_rankable(value_id: str, price_scale: bool, rankable: frozenset[str]) -> bool:
+    """Whether one numeric output can rank stocks against each other.
+
+    Custom-formula outputs are not in the built-in catalog, so they default to
+    rankable unless the parser flagged them as raw price/volume levels.
+    """
+
+    if price_scale:
+        return False
+    return value_id in rankable or value_id.startswith("custom.")
+
+
+def _annotated_values(raw_values: object, rankable: frozenset[str]) -> list[dict[str, object]]:
+    values: list[dict[str, object]] = []
+    for raw_value in raw_values if isinstance(raw_values, list) else ():
+        if not isinstance(raw_value, Mapping):
+            continue
+        value_id = str(raw_value.get("id", ""))
+        values.append(
+            {
+                **raw_value,
+                "rankable": _value_rankable(
+                    value_id, bool(raw_value.get("price_scale", False)), rankable
+                ),
+            }
+        )
+    return values
+
+
+def _with_rankable(indicators: list[dict[str, object]]) -> list[dict[str, object]]:
+    rankable = _rankable_value_ids()
+    return [
+        {**indicator, "values": _annotated_values(indicator.get("values"), rankable)}
+        for indicator in indicators
+    ]
+
+
 @router.get("/metadata")
 def metadata() -> dict[str, object]:
     return {
         "data": {
-            "indicators": FORMULA_REGISTRY.metadata(),
+            "indicators": _with_rankable(FORMULA_REGISTRY.metadata()),
             "combine_modes": [
                 {"value": "all", "label": "全部满足 AND"},
                 {"value": "any", "label": "任一满足 OR"},
@@ -76,7 +121,11 @@ def parse_custom_formula(payload: CustomFormulaParseRequest) -> JSONResponse:
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             content={"error": {"code": "formula_parse_error", "message": str(exc)}},
         )
-    return JSONResponse(status_code=status.HTTP_200_OK, content={"data": parsed.metadata()})
+    parsed_metadata = dict(parsed.metadata())
+    parsed_metadata["values"] = _annotated_values(
+        parsed_metadata.get("values"), _rankable_value_ids()
+    )
+    return JSONResponse(status_code=status.HTTP_200_OK, content={"data": parsed_metadata})
 
 
 @router.post("/jobs", status_code=status.HTTP_202_ACCEPTED)

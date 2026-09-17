@@ -42,6 +42,8 @@ import {
 
 const DISCOVERY_APPLY_KEY = 'indicator-lab.strategy-discovery.apply'
 const DISCOVERY_APPLY_META_KEY = 'indicator-lab.strategy-discovery.apply-meta'
+// 条件研究页的桥接，键独立于策略实验室，两者不会互相覆盖。
+const RESEARCH_APPLY_KEY = 'indicator-lab.condition-research.apply'
 
 interface AppliedDiscoveryCandidate {
   candidate_hash: string
@@ -509,6 +511,57 @@ function applyStoredCandidate(raw: unknown): void {
   message.value = '已载入策略实验室候选配置，请确认后开始普通组合回测。'
 }
 
+/**
+ * 从买卖条件研究页过来：规则 + 排序 + 槽位。
+ *
+ * 自定义公式必须先解析再回填 —— parseCustomFormula 会把买卖规则和排序值
+ * 重置成公式的默认输出，顺序反了用户填的东西就没了（踩过一次）。
+ */
+async function applyStoredResearch(raw: unknown): Promise<void> {
+  if (!raw || typeof raw !== 'object') return
+  const config = raw as Record<string, unknown>
+  const formulaText = typeof config.formula_text === 'string' ? config.formula_text.trim() : ''
+  if (formulaText) {
+    form.mode = 'custom'
+    form.formulaText = formulaText
+    const parameters = config.formula_parameters
+    if (parameters && typeof parameters === 'object') {
+      const entries = Object.entries(parameters as Record<string, unknown>)
+        .filter((entry): entry is [string, number] => typeof entry[1] === 'number' && Number.isFinite(entry[1]))
+      form.formulaParameters = Object.fromEntries(entries)
+    }
+    await parseCustomFormula()
+  } else if (form.mode !== 'preset') {
+    form.mode = 'preset'
+  }
+
+  if (typeof config.universe === 'string') {
+    form.universe = enumValue(config.universe, ['all', 'sh', 'sz', 'custom'] as const, form.universe)
+  }
+  form.instrumentTypes = Array.isArray(config.instrument_types)
+    ? config.instrument_types.filter((item): item is InstrumentType => INSTRUMENT_TYPE_OPTIONS.some((option) => option.key === item))
+    : form.instrumentTypes
+  form.boards = Array.isArray(config.boards)
+    ? config.boards.filter((item): item is InstrumentBoard => BOARD_OPTIONS.some((option) => option.key === item))
+    : form.boards
+  form.startDate = typeof config.start_date === 'string' ? config.start_date : form.startDate
+  form.endDate = typeof config.end_date === 'string' ? config.end_date : form.endDate
+  const maxPositions = finiteNumber(config.max_positions, form.maxPositions)
+  if (Number.isInteger(maxPositions) && maxPositions >= 1 && maxPositions <= 100) {
+    form.maxPositions = maxPositions
+  }
+  if (typeof config.ranking_value === 'string' && config.ranking_value.trim()) {
+    form.rankingValue = config.ranking_value
+  }
+  form.rankOrder = enumValue(config.rank_order, ['asc', 'desc'] as const, form.rankOrder)
+  const buyRule = parseStoredRuleGroup(config.buy_rule)
+  if (buyRule) form.buyRule = buyRule
+  const sellRule = parseStoredRuleGroup(config.sell_rule)
+  if (sellRule) form.sellRule = sellRule
+  errors.value = {}
+  message.value = '已载入买卖条件研究的规则与排序建议，请确认后开始组合回测。'
+}
+
 function readAppliedDiscoveryMeta(raw: unknown): AppliedDiscoveryCandidate | null {
   if (!raw || typeof raw !== 'object') return null
   const value = raw as Record<string, unknown>
@@ -712,6 +765,15 @@ onMounted(async () => {
         appliedDiscoveryCandidate.value = readAppliedDiscoveryMeta(JSON.parse(storedMeta) as unknown)
       } finally {
         sessionStorage.removeItem(DISCOVERY_APPLY_META_KEY)
+      }
+    }
+    // 条件研究的桥接要放在最后：它可能自己解析公式并改写买卖规则。
+    const storedResearch = sessionStorage.getItem(RESEARCH_APPLY_KEY)
+    if (storedResearch) {
+      try {
+        await applyStoredResearch(JSON.parse(storedResearch) as unknown)
+      } finally {
+        sessionStorage.removeItem(RESEARCH_APPLY_KEY)
       }
     }
     await loadHistory()

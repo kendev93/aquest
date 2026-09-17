@@ -41,7 +41,10 @@ const metadata: FormulaScreenMetadata = {
       { id: 'indicator.buy', display_name: '买入信号', description: '测试买入' },
       { id: 'indicator.sell', display_name: '卖出信号', description: '测试卖出' },
     ],
-    values: [{ id: 'indicator.score', display_name: '强度', description: '测试指标值' }],
+    values: [
+      { id: 'indicator.score', display_name: '强度', description: '测试指标值', rankable: true },
+      { id: 'indicator.price', display_name: '绝对价位', description: '价格量纲，不能跨股票排序', rankable: false },
+    ],
   }],
   combine_modes: [{ value: 'all', label: '全部满足' }, { value: 'any', label: '任一满足' }],
   condition_operators: [{ value: 'gt', label: '大于' }, { value: 'lt', label: '小于' }],
@@ -78,8 +81,8 @@ const result = {
   min_trades: 20,
   min_instruments: 5,
   sample_totals: {
-    buy: { count: 40, unit: 'entry' },
-    sell: { count: 200, unit: 'decision_point' },
+    buy: { count: 40, unit: 'entry', hit_days: 20, daily_hits: 2 },
+    sell: { count: 200, unit: 'decision_point', hit_days: 20, daily_hits: 10 },
   },
   disclosure: {
     universe_scope: 'current_listed_only',
@@ -104,6 +107,42 @@ const result = {
     holdout: { start_date: '2024-01-01', end_date: '2024-12-31' },
   },
   baseline: { train: summary, validation: summary, full_period: summary, holdout: summary },
+  ranking: {
+    top_n: 5,
+    min_cross_section: 5,
+    sample_days: 240,
+    available: true,
+    recommended: {
+      value_id: 'indicator.score',
+      display_name: '强度',
+      order: 'desc',
+      ic_mean: 0.0612,
+      icir: 0.82,
+      segments: 6,
+      same_sign_segments: 6,
+      quantile_returns: [0.021, 0.012, 0.004, -0.003, -0.011],
+      top_n_lift: 0.018,
+      sample_days: 240,
+      confidence: 'high',
+      note: '三条证据同向：平均信息系数 0.061、信息比率 0.82、6/6 段同号',
+    },
+    evaluated: [{
+      value_id: 'indicator.score',
+      display_name: '强度',
+      order: 'desc',
+      ic_mean: 0.0612,
+      icir: 0.82,
+      segments: 6,
+      same_sign_segments: 6,
+      quantile_returns: [0.021, 0.012, 0.004, -0.003, -0.011],
+      top_n_lift: 0.018,
+      sample_days: 240,
+      confidence: 'high',
+      note: '三条证据同向：平均信息系数 0.061、信息比率 0.82、6/6 段同号',
+    }],
+    reason: null,
+    selection: { value: null, order: 'desc' },
+  },
   candidates: [{
     candidate_id: 'buy-1',
     side: 'buy',
@@ -828,5 +867,69 @@ describe('ConditionResearchPage', () => {
     expect(researchApi.createConditionResearch).toHaveBeenCalledWith(
       expect.objectContaining({ sell_rule: null, search_sides: 'sell' }),
     )
+  })
+
+  it('offers only cross-stock comparable values as ranking keys', async () => {
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+
+    const options = wrapper.get('[data-testid="condition-ranking-value"]').findAll('option')
+    const values = options.map((option) => (option.element as HTMLOptionElement).value)
+    expect(values).toContain('indicator.score')
+    expect(values).not.toContain('indicator.price')
+  })
+
+  it('shows the ranking recommendation in Chinese and can adopt it', async () => {
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+
+    const card = wrapper.get('[data-testid="condition-ranking-advice"]').text()
+    expect(card).toContain('强度')
+    expect(card).toContain('从大到小')
+    // 界面主文案不出现英文缩写，英文名只留在问号提示里（tooltip 默认不显示）。
+    expect(card).toContain('平均信息系数')
+    expect(card).toContain('信息系数信息比率')
+    expect(wrapper.find('[data-testid="term-hint-icMean"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="term-hint-icir"]').exists()).toBe(true)
+    const note = wrapper.get('[data-testid="condition-ranking-advice"]').get('.ranking-note').text()
+    expect(note).not.toMatch(/[A-Za-z]/)
+    expect(wrapper.get('[data-testid="condition-ranking-confidence"]').text()).toBe('证据充分')
+    // 日均命中 2 只 ≤ 5 个槽位：条件说了算。
+    expect(wrapper.get('[data-testid="condition-slot-hint"]').text()).toContain('日均命中 2.0 只')
+
+    await wrapper.get('[data-testid="condition-use-recommended-ranking"]').trigger('click')
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(researchApi.createConditionResearch).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        ranking_value: 'indicator.score',
+        rank_order: 'desc',
+        ranking_top_n: 5,
+      }),
+    )
+  })
+
+  it('bridges rules and ranking into the portfolio backtest page', async () => {
+    sessionStorage.clear()
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-ranking-top-n"]').setValue(3)
+
+    await wrapper.get('[data-testid="condition-apply-to-portfolio"]').trigger('click')
+
+    const stored = JSON.parse(sessionStorage.getItem('indicator-lab.condition-research.apply') ?? '{}')
+    expect(stored).toMatchObject({
+      ranking_value: 'indicator.score',
+      rank_order: 'desc',
+      max_positions: 3,
+      formula_text: null,
+    })
+    expect(stored.buy_rule.conditions.length).toBeGreaterThan(0)
+    sessionStorage.clear()
   })
 })

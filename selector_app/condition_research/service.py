@@ -43,6 +43,7 @@ from .parallel import (
     TrainOutcome,
     TrainPayload,
 )
+from .ranking import assess_ranking_values
 from .resources import (
     ResearchResourceBudgetError,
     ResearchResourceEstimate,
@@ -414,6 +415,7 @@ class ConditionResearchService:
 
         mined = self._mine_candidates(config, buy_samples, sell_samples)
         sample_totals = _sample_totals(buy_samples, sell_samples)
+        ranking = self._ranking_assessment(config, buy_samples, feature_ids)
         baseline_train = summarize_backtests(train_reports)
         if not mined:
             validation_reports: list[Mapping[str, object]] = []
@@ -479,6 +481,7 @@ class ConditionResearchService:
             )
             baseline_payload["full_period"] = summarize_backtests(full_period_reports)
             baseline_payload["holdout"] = summarize_backtests(holdout_reports)
+            empty_result["ranking"] = ranking
             return empty_result
 
         validation_candidates: dict[str, list[Mapping[str, object]]] = {
@@ -620,12 +623,44 @@ class ConditionResearchService:
                 "holdout": summarize_backtests(holdout_baseline),
             },
             "candidates": results,
+            "ranking": ranking,
             "algorithm": {
                 "mining": "contrastive_threshold_and_pairwise_rules",
                 "search": "single_condition_then_full_stock_replay",
                 "holdout_candidates_per_side": config.holdout_candidates,
             },
         }
+
+    def _ranking_assessment(
+        self,
+        config: ConditionResearchConfig,
+        buy_samples: Sequence[MiningSamples],
+        feature_ids: Sequence[str],
+    ) -> dict[str, object]:
+        """Advise on a ranking value, reusing the signal days mining built.
+
+        Purely additive: it reads the mined entry samples and never changes how
+        candidates are evaluated, so a wrong ranking suggestion cannot corrupt
+        the study itself.
+        """
+
+        display_names = {
+            item.id: item.display_name for item in default_indicator_catalog(self._registry).values
+        }
+        if config.formula_text:
+            parsed = parse_formula(config.formula_text)
+            display_names.update({custom_output_id(name): name for name in parsed.value_names})
+        payload = assess_ranking_values(
+            buy_samples,
+            feature_ids,
+            top_n=config.ranking_top_n,
+            display_names=display_names,
+        ).to_dict()
+        payload["selection"] = {
+            "value": config.ranking_value,
+            "order": config.rank_order,
+        }
+        return payload
 
     def estimate_resources(self, config: ConditionResearchConfig) -> ResearchResourceEstimate:
         """Pre-flight memory estimate for one configuration, without running it."""
@@ -1015,11 +1050,39 @@ def _sample_totals(
     """
 
     return {
-        "buy": {"count": sum(len(samples) for samples in buy_samples), "unit": "entry"},
+        "buy": {
+            "count": sum(len(samples) for samples in buy_samples),
+            "unit": "entry",
+            **_daily_hits(buy_samples),
+        },
         "sell": {
             "count": sum(len(samples) for samples in sell_samples),
             "unit": "decision_point",
+            **_daily_hits(sell_samples),
         },
+    }
+
+
+def _daily_hits(samples: Sequence[MiningSamples]) -> dict[str, object]:
+    """Average number of stocks hitting the rule on a day that had any hit.
+
+    This is the number that decides whether a condition matters in a slot-based
+    portfolio at all: if the rule flags 300 stocks a day and the portfolio has
+    five slots, the ranking - not the condition - chooses what gets bought.
+    Dividing by days that had at least one hit (rather than every trading day)
+    keeps the figure comparable to a slot count, which is also only spent on
+    days when something passes the filter.
+    """
+
+    total = 0
+    days: set[str] = set()
+    for item in samples:
+        total += len(item)
+        days.update(str(value) for value in item.dates.tolist())
+    hit_days = len(days)
+    return {
+        "hit_days": hit_days,
+        "daily_hits": (total / hit_days) if hit_days else None,
     }
 
 

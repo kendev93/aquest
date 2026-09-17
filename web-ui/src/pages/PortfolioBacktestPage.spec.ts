@@ -382,4 +382,48 @@ describe('PortfolioBacktestPage', () => {
     expect(wrapper.get('[data-testid="portfolio-replay-comparison"]').text()).toContain('绩效摘要：一致')
     expect(sessionStorage.getItem('indicator-lab.strategy-discovery.apply')).toBeNull()
   })
+
+  it('loads a condition-research study including its ranking advice', async () => {
+    sessionStorage.clear()
+    sessionStorage.setItem('indicator-lab.condition-research.apply', JSON.stringify({
+      universe: 'sh',
+      instrument_types: ['stock'],
+      boards: ['main'],
+      start_date: '2023-01-01',
+      end_date: '2024-12-31',
+      buy_rule: {
+        signals: [],
+        conditions: [{ left_value: 'indicator_three.var1', operator: 'gt', right_value: null, right_constant: 12 }],
+        combine_mode: 'all',
+        minimum_matches: null,
+      },
+      sell_rule: null,
+      ranking_value: 'indicator_three.varo7',
+      rank_order: 'asc',
+      max_positions: 4,
+      formula_text: null,
+      formula_parameters: {},
+    }))
+
+    const wrapper = mount(PortfolioBacktestPage)
+    await flushPromises()
+
+    expect((wrapper.get('[data-testid="portfolio-ranking-value"]').element as HTMLSelectElement).value).toBe('indicator_three.varo7')
+    expect((wrapper.get('[data-testid="portfolio-rank-order"]').element as HTMLSelectElement).value).toBe('asc')
+    expect((wrapper.get('[data-testid="portfolio-max-positions"]').element as HTMLInputElement).value).toBe('4')
+    expect(wrapper.text()).toContain('买卖条件研究')
+
+    await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')
+    await flushPromises()
+    expect(portfolioApi.createPortfolioBacktest).toHaveBeenCalledWith(expect.objectContaining({
+      ranking_value: 'indicator_three.varo7',
+      rank_order: 'asc',
+      max_positions: 4,
+      buy_rule: expect.objectContaining({
+        conditions: [expect.objectContaining({ right_constant: 12 })],
+      }),
+    }))
+    expect(sessionStorage.getItem('indicator-lab.condition-research.apply')).toBeNull()
+    sessionStorage.clear()
+  })
 })
