@@ -11,7 +11,6 @@ vi.mock('../api/marketData', async () => {
   return {
     ...actual,
     cancelMarketDataJob: vi.fn(),
-    createFullMarketSync: vi.fn(),
     fetchLocalInstruments: vi.fn(),
     fetchLocalChart: vi.fn(),
     fetchStoreStatus: vi.fn(),

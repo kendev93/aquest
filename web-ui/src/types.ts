@@ -286,7 +286,6 @@ export interface DataStoreStatus {
   market_data_source?: 'indicator_lab' | string
   market_data_read_only?: boolean
   market_data_write_target?: 'indicator_lab' | string
-  full_market_sync_supported?: boolean
   market_sync_lock?: Record<string, unknown> | null
   last_market_sync_summary?: Record<string, unknown> | null
   legacy_market_write_enabled?: boolean

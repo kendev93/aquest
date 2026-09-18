@@ -331,6 +331,18 @@ def _parse_compact_date(value: str) -> date:
         raise OnlineDataError(f"在线行情日期格式无效: {value}") from exc
 
 
+def _tencent_reports_shares(market: MarketCode, code: str) -> bool:
+    """Whether Tencent already reports volume in shares instead of lots.
+
+    Verified against Sina's share-denominated feed on 2026-09-17: every board
+    (main, SME, ChiNext, ETF, index) answers in lots of 100 and needs scaling,
+    while the STAR Market (688) comes back as raw shares, so scaling it would
+    inflate the volume a hundredfold.
+    """
+
+    return market == "SH" and code.startswith("688")
+
+
 class OnlineMarketClient:
     """Small project-owned HTTP client for the online stock data we require."""
 
@@ -659,10 +671,14 @@ class OnlineMarketClient:
         dates = pd.to_datetime(frame["date"], errors="coerce")
         for column in ("open", "close", "high", "low", "volume", "turnover", "amount"):
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
-        if not symbol.startswith(("sh688", "sz399", "sh000", "sz000")):
+        # 腾讯对科创板直接给"股"，其余品种（含 ETF 和指数）给的都是"手"。
+        # 成交额一律是万元、换手率一律是百分数，这两项跟板块无关。旧实现把三者
+        # 绑在同一个前缀判断里，于是被 "sz000" 误伤的深市主板成交量少算 100
+        # 倍，科创板与指数的成交额少算 1 万倍。
+        if not _tencent_reports_shares(market, code):
             frame["volume"] = frame["volume"] * 100
-            frame["turnover"] = frame["turnover"] / 100
-            frame["amount"] = frame["amount"] * 10_000
+        frame["turnover"] = frame["turnover"] / 100
+        frame["amount"] = frame["amount"] * 10_000
         frame["date"] = dates.dt.date
         frame = frame.loc[(dates.dt.date >= start) & (dates.dt.date <= end)]
         return frame.reset_index(drop=True)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import cast
 
 import pandas as pd
 import pytest
@@ -10,6 +11,7 @@ from selector_app.adapters.online_market_sync import (
     OnlineMarketClient,
     OnlineProviderError,
 )
+from selector_app.market_data.models import MarketCode
 
 
 class FakeTransport:
@@ -146,6 +148,54 @@ def test_fetch_tencent_daily_history_decodes_jsonp_and_normalizes_units() -> Non
     assert frame["volume"].tolist() == [100000.0]
     assert frame["amount"].tolist() == [105000000.0]
     assert transport.calls[0][1]["param"] == "sh600000,day,2026-01-01,2027-12-31,640,"
+
+
+@pytest.mark.parametrize(
+    ("market", "code", "expected_volume"),
+    [
+        ("SH", "600000", 100_000.0),  # 沪主板：手
+        ("SZ", "000001", 100_000.0),  # 深主板：手（"sz000" 曾误伤）
+        ("SZ", "002415", 100_000.0),  # 中小板：手
+        ("SZ", "300750", 100_000.0),  # 创业板：手
+        ("SH", "688981", 1_000.0),  # 科创板：腾讯直接给股
+        ("SH", "510300", 100_000.0),  # 沪 ETF：手
+        ("SZ", "159915", 100_000.0),  # 深 ETF：手
+        ("SH", "000300", 100_000.0),  # 沪指数：手（"sh000" 曾误伤）
+        ("SZ", "399006", 100_000.0),  # 深指数：手（"sz399" 曾误伤）
+    ],
+)
+def test_fetch_tencent_daily_history_scales_units_per_board(
+    market: str, code: str, expected_volume: float
+) -> None:
+    """成交量按板块换算，成交额与换手率与板块无关。
+
+    旧实现把三者绑在同一个前缀判断里：深市 000/001 被 "sz000" 误伤后成交量
+    少算 100 倍，科创板与两个指数前缀被排除后成交额少算 1 万倍。
+    """
+
+    symbol = f"{market.lower()}{code}"
+    transport = FakeTransport(
+        [
+            'kline_day2026={"code":0,"data":{"'
+            f"{symbol}"
+            '":{"day":['
+            '["2026-09-10","10.0","10.5","10.6","9.9","1000.00",{},'
+            '"1.20","10500.00","0.00","0.00"]'
+            "]}}}"
+        ]
+    )
+
+    frame = OnlineMarketClient(transport=transport).fetch_tencent_daily_history(
+        cast(MarketCode, market),
+        code,
+        "20260910",
+        "20260910",
+        timeout=9.0,
+    )
+
+    assert frame["volume"].tolist() == [expected_volume]
+    assert frame["amount"].tolist() == [105_000_000.0]
+    assert frame["turnover"].tolist() == [0.012]
 
 
 def test_online_client_rejects_malformed_eastmoney_payload() -> None:
