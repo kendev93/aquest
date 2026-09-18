@@ -7,6 +7,7 @@ import type {
   LocalInstrumentMeta,
   LocalMarketChart,
   LocalMarketScope,
+  LocalVipdocCandidate,
   MarketDataCapabilities,
   MarketChartPeriod,
 } from '../types'
@@ -123,6 +124,33 @@ export async function createOnlineBackfill(payload: {
       method: 'POST',
       body: JSON.stringify(payload),
     },
+  )
+  return response.data
+}
+
+export interface LocalVipdocDetection {
+  candidates: LocalVipdocCandidate[]
+  default_path: string
+  mount_hint: string
+  host_mount_prefix?: string | null
+}
+
+export async function detectLocalVipdoc(): Promise<LocalVipdocDetection> {
+  const response = await request<{ data: LocalVipdocDetection }>(
+    `${API_BASE}/local-import/detect`,
+  )
+  return response.data
+}
+
+export async function createLocalImport(payload: {
+  vipdoc_path?: string
+  universe?: 'all' | 'sh' | 'sz'
+  instrument_types?: InstrumentType[]
+  boards?: InstrumentBoard[]
+} = {}): Promise<{ job_id: string; status: string }> {
+  const response = await request<{ data: { job_id: string; status: string } }>(
+    `${API_BASE}/local-import`,
+    { method: 'POST', body: JSON.stringify(payload) },
   )
   return response.data
 }

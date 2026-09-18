@@ -4,8 +4,10 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { FormulaScreenApiError } from '../api/formulaScreen'
 import {
   cancelMarketDataJob,
+  createLocalImport,
   createOnlineBackfill,
   createOnlineSync,
+  detectLocalVipdoc,
   fetchActiveMarketDataJobs,
   fetchMarketDataCapabilities,
   fetchLocalChart,
@@ -21,11 +23,13 @@ import type {
   LocalInstrumentMeta,
   LocalMarketChart,
   LocalMarketScope,
+  LocalVipdocCandidate,
   MarketDataCapabilities,
   MarketChartPeriod,
   MarketSyncJobState,
 } from '../types'
 import MarketCandlestickChart from '../components/MarketCandlestickChart.vue'
+import TermHint from '../components/TermHint.vue'
 
 const MA_OPTIONS = [
   { key: 'ma5', label: 'MA5' },
@@ -56,6 +60,12 @@ const form = reactive({
   syncUniverse: 'all' as 'all' | 'sh' | 'sz',
   syncInstrumentTypes: ['stock'] as InstrumentType[],
   syncBoards: [] as InstrumentBoard[],
+  vipdocPath: '',
+  vipdocDetected: [] as LocalVipdocCandidate[],
+  vipdocMountHint: '',
+  vipdocDetecting: false,
+  vipdocDetectNote: '',
+  vipdocHostPrefix: '',
   market: 'all' as LocalMarketScope,
   keyword: '',
   page: 1,
@@ -495,6 +505,56 @@ async function backfillOnlineData(): Promise<void> {
   }
 }
 
+async function detectVipdocPath(fillWhenEmpty: boolean): Promise<void> {
+  form.vipdocDetecting = true
+  form.vipdocDetectNote = ''
+  try {
+    const result = await detectLocalVipdoc()
+    form.vipdocDetected = result.candidates
+    form.vipdocMountHint = result.mount_hint
+    form.vipdocHostPrefix = result.host_mount_prefix ?? ''
+    if (!result.candidates.length) {
+      form.vipdocDetectNote = '没有在容器里找到通达信行情目录。' + result.mount_hint
+      return
+    }
+    const best = result.candidates[0]
+    if (fillWhenEmpty && !form.vipdocPath.trim()) {
+      form.vipdocPath = best.path
+    }
+    const total = result.candidates.reduce((sum, item) => sum + item.file_count, 0)
+    const hostHint = form.vipdocHostPrefix
+      ? `；也可以直接填电脑上 ${form.vipdocHostPrefix} 开头的路径`
+      : ''
+    form.vipdocDetectNote = `找到 ${result.candidates.length} 个目录、共 ${total} 个日线文件，已填入文件最多的：${best.path}${hostHint}`
+  } catch (error) {
+    form.vipdocDetectNote = apiMessage(error)
+  } finally {
+    form.vipdocDetecting = false
+  }
+}
+
+async function importLocalDayFiles(): Promise<void> {
+  syncLoading.value = true
+  syncLabel.value = '正在导入本地行情…'
+  message.value = ''
+  try {
+    const job = await createLocalImport({
+      universe: form.syncUniverse,
+      ...(form.vipdocPath.trim() ? { vipdoc_path: form.vipdocPath.trim() } : {}),
+      ...syncScopePayload(),
+    })
+    beginJob(job.job_id, job.status)
+    await waitForJob(job.job_id)
+    await loadStoreStatus()
+    await loadInstruments()
+  } catch (error) {
+    message.value = apiMessage(error)
+  } finally {
+    syncLoading.value = false
+    syncLabel.value = ''
+  }
+}
+
 async function loadInstruments(): Promise<void> {
   loading.value = true
   message.value = ''
@@ -604,6 +664,7 @@ onMounted(async () => {
   await loadActiveMarketJobs()
   await Promise.all([loadProviderCapabilities(), loadStoreStatus()])
   if (!marketJob.value) await loadInstruments()
+  await detectVipdocPath(true)
   scheduleStoreStatusPoll()
   scheduleActiveJobPoll()
 })
@@ -668,6 +729,20 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
             <button class="primary-button" data-testid="market-sync-online" type="button" :disabled="syncLoading" @click="syncOnlineData">一键同步行情</button>
             <button class="secondary-button" data-testid="market-eastmoney-backfill" type="button" :disabled="syncLoading" @click="backfillOnlineData">{{ syncLoading ? '回填进行中…' : 'East Money 全量补齐' }}</button>
           </div>
+          <div class="local-import-row">
+            <div class="local-import-field">
+              <label for="market-local-import-path">通达信行情目录<TermHint term="vipdoc" /></label>
+              <input id="market-local-import-path" v-model="form.vipdocPath" data-testid="market-local-import-path" type="text" :placeholder="form.vipdocDetected.length ? form.vipdocDetected[0].path : '/data/vipdoc（容器内路径）'" :list="'vipdoc-candidates'">
+              <datalist id="vipdoc-candidates">
+                <option v-for="item in form.vipdocDetected" :key="item.path" :value="item.path">{{ item.file_count }} 个日线文件 · {{ item.markets.join('/') }}</option>
+              </datalist>
+            </div>
+            <button class="secondary-button" data-testid="market-local-import-detect" type="button" :disabled="form.vipdocDetecting" @click="detectVipdocPath(false)">{{ form.vipdocDetecting ? '检测中…' : '自动检测' }}</button>
+            <button class="secondary-button" data-testid="market-local-import" type="button" :disabled="syncLoading" @click="importLocalDayFiles">导入通达信行情</button>
+          </div>
+          <small v-if="form.vipdocDetectNote" class="scope-helper" data-testid="market-local-import-note">{{ form.vipdocDetectNote }}</small>
+          <small v-if="!form.vipdocDetected.length && form.vipdocMountHint" class="scope-warning">{{ form.vipdocMountHint }}在宿主机上执行：<code>TDX_VIPDOC_PATH=/你的/通达信/vipdoc docker compose -f docker-compose.yml -f docker-compose.tdx.yml up -d</code>，然后重建镜像 <code>docker compose build backend</code>。</small>
+          <small class="scope-helper">先在通达信里「盘后数据下载」下载日线，再点「自动检测」让后端找目录<template v-if="form.vipdocHostPrefix">；也可以直接填电脑上 {{ form.vipdocHostPrefix }} 开头的路径</template>。导入会按同一只股票同一天覆盖库里已有的行情，目录里没有的日期保持原样。</small>
           </div>
           <div v-if="marketJob" class="sync-progress" data-testid="market-data-progress">
           <div class="sync-progress-heading"><span>{{ marketJobTitle }}</span><div class="sync-progress-actions"><button v-if="marketJob.status === 'queued' || marketJob.status === 'running'" class="text-button" data-testid="market-sync-cancel" type="button" :disabled="marketJob.cancel_requested || marketJob.phase === 'cancelling'" @click="cancelActiveMarketJob(marketJob.job_id)">{{ marketJob.cancel_requested || marketJob.phase === 'cancelling' ? '取消中…' : '取消任务' }}</button><strong>{{ Math.round(marketJob.progress * 100) }}%</strong></div></div>

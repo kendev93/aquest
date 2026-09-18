@@ -82,4 +82,12 @@ export const TERMS: Record<string, TermDefinition> = {
       '组合回测里同时最多持有几只标的。买入条件决定谁有资格进候选池，' +
       '排序规则决定谁抢到这有限的几个槽位，两者是互补又竞争的关系。',
   },
+  vipdoc: {
+    name: '通达信行情目录',
+    english: 'TongDaXin vipdoc directory',
+    intro:
+      '通达信把下载的日线按 <目录>/sh/lday/sh600000.day、<目录>/sz/lday/sz000001.day 这样的结构存盘。' +
+      '后端跑在 Docker 容器里，看不到你电脑上的目录，所以要把这个目录挂载进容器才能导入；' +
+      '这里的路径要填「容器里看到的路径」，不是电脑上的原始路径。',
+  },
 }

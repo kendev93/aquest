@@ -53,7 +53,7 @@
 - 公式层安全除零、数据不足跳过、无未来数据；
 - Python 单元/集成测试、Vue 单元测试和 Playwright E2E 流程。
 
-应用启动时不会扫描或导入本地通达信文件。行情由本项目自己从在线数据源同步并写入本机 DuckDB，不需要任何外部行情软件。预置模式会默认选中“准备拉升”和“建仓区”；市场范围、条件组合、并发和周期收在“高级设置”中。页面会在浏览器本地记住上次配置，不会上传这些配置。
+应用启动时不会扫描本地通达信文件。行情由本项目自己从在线数据源同步并写入本机 DuckDB，不需要任何外部行情软件；需要时也可以在「行情数据」页手动导入通达信日线。预置模式会默认选中“准备拉升”和“建仓区”；市场范围、条件组合、并发和周期收在“高级设置”中。页面会在浏览器本地记住上次配置，不会上传这些配置。
 
 ## 启动
 
@@ -132,7 +132,7 @@ python3 scripts/build_nuitka.py --jobs 4
 
 保护版默认使用文件夹模式，避免大型 NumPy/Pandas 依赖每次启动都解包；`NUITKA_JOBS`、`NUITKA_LTO` 和 `NUITKA_REPRODUCIBLE` 可在构建时覆盖。发布前运行 `sh scripts/verify_ci.sh protected`，它会检查 Compose 配置、编译产物和最终镜像。Nuitka 只能提高本地逆向门槛，不能对完全控制运行机器的用户提供绝对源码保密；需要强保护时应将核心策略计算放在你的远程服务。
 
-部署方式、数据目录、备份与恢复见 [独立分发部署](docs/standalone-deployment.md)。通达信文件导入不在本项目中执行。
+部署方式、数据目录、备份与恢复见 [独立分发部署](docs/standalone-deployment.md)。通达信日线导入是可选功能，不配置不影响在线同步。
 
 数据库位于数据卷或 `DATA_DIR` 下的 `market.duckdb`，停止或删除容器不会删除它，重建镜像或容器会继续使用同一份数据。`WEB_PORT` 和 `API_PORT` 可通过 `.env` 修改。⚠️ `docker compose down -v`、`docker volume prune` 和 Docker Desktop 的 Reset 会**删除命名卷**，执行前请先导出备份（见部署文档）。
 
@@ -140,7 +140,22 @@ python3 scripts/build_nuitka.py --jobs 4
 
 ## 行情配置
 
-行情从在线数据源（East Money，免费无需密钥）同步股票和场内基金日线并写入本机数据库。同步会先检查本地覆盖范围，自动跳过完整区间并补齐缺失区间。指数与债券没有可用的在线 K 线源。本项目不提供通达信文件导入。
+行情从在线数据源（East Money，免费无需密钥）同步股票和场内基金日线并写入本机数据库。同步会先检查本地覆盖范围，自动跳过完整区间并补齐缺失区间。指数与债券没有可用的在线 K 线源。
+
+### 导入通达信日线（可选）
+
+在通达信里执行「盘后数据下载」下载日线，然后把 vipdoc 目录挂进容器：
+
+```bash
+TDX_VIPDOC_PATH=/你的/通达信/vipdoc docker compose \
+  -f docker-compose.yml -f docker-compose.tdx.yml up -d
+docker compose build backend && docker compose \
+  -f docker-compose.yml -f docker-compose.tdx.yml up -d
+```
+
+也可以只挂上级目录 `TDX_HOST_ROOT=...`（挂到容器内 `/host`），之后在页面上填 `/host` 下的任意子路径即可。后端跑在容器里，只能看到已挂载的路径，直接填电脑上的原始目录是找不到的。
+
+之后在「行情数据」页点「自动检测」，找到的目录会自动填入；导入按同一只股票同一天覆盖库里已有的行情，目录里没有的日期保持原样。
 
 本项目的行情页只负责按市场和代码查询 K 线，并生成日线、月线和年线图表。自定义列表仍可用于筛选和回测，但其中的行情数据来自已配置的行情数据库。
 

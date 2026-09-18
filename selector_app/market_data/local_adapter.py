@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Callable
+from collections import deque
+from collections.abc import Callable, Iterable, Iterator
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -19,12 +21,144 @@ from .scope import InstrumentScope
 _CODE_PATTERN = re.compile(r"^\d{6}$")
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
+# Where a host directory may be mounted inside the container. ``/host`` is the
+# conventional catch-all mount: bind a parent directory of the TongDaXin tree
+# there and any path below it becomes reachable without editing compose again.
+_DETECT_SCAN_ROOTS: tuple[str, ...] = ("/host", "/data", "/mnt", "/media")
+_DETECT_SKIP_DIRS = frozenset(
+    {
+        ".git",
+        ".venv",
+        "__pycache__",
+        "build",
+        "dist",
+        "Library",
+        "node_modules",
+        "venv",
+    }
+)
+_DETECT_MAX_DEPTH = 4
+_DETECT_MAX_DIRS = 600
+
+
+# ``/host`` is where a host directory gets mounted. When the operator also sets
+# ``SELECTOR_HOST_MOUNT_PREFIX`` to the matching host path (e.g. ``/Users/me``),
+# users may paste their own machine's path and it is rewritten automatically.
+_HOST_MOUNT_POINT = "/host"
+_HOST_MOUNT_PREFIX_ENV = "SELECTOR_HOST_MOUNT_PREFIX"
+
+
+def host_mount_prefix() -> str:
+    return os.getenv(_HOST_MOUNT_PREFIX_ENV, "").strip().rstrip("/")
+
+
+def map_host_path(path: str | Path) -> str:
+    """Rewrite a host-side path onto the container mount point when possible.
+
+    Paths that already resolve inside the container are returned untouched, so
+    both spellings work once the host tree is mounted at ``/host``.
+    """
+
+    resolved = Path(path).expanduser()
+    if resolved.is_dir():
+        return str(resolved)
+    prefix = host_mount_prefix()
+    candidate_path = Path(str(resolved))
+    if prefix and str(candidate_path).startswith(prefix + "/"):
+        mapped = Path(_HOST_MOUNT_POINT + str(candidate_path)[len(prefix) :])
+        if mapped.is_dir():
+            return str(mapped)
+    return str(candidate_path)
+
 
 def suggested_vipdoc_path() -> str:
     configured = os.getenv("SELECTOR_VIPDOC_PATH")
     if configured:
         return str(Path(configured).expanduser())
     return "/data/vipdoc" if Path("/data/vipdoc").is_dir() else str(Path.home() / "vipdoc")
+
+
+@dataclass(frozen=True)
+class VipdocCandidate:
+    """A directory that looks like a TongDaXin ``vipdoc`` tree."""
+
+    path: str
+    file_count: int
+    markets: tuple[str, ...]
+
+
+def _day_markets(root: Path) -> tuple[str, ...]:
+    return tuple(market for market in ("sh", "sz") if (root / market / "lday").is_dir())
+
+
+def _count_day_files(root: Path, markets: tuple[str, ...]) -> int:
+    total = 0
+    for market in markets:
+        try:
+            total += sum(1 for entry in (root / market / "lday").iterdir() if entry.is_file())
+        except OSError:
+            continue
+    return total
+
+
+def _walk_for_vipdoc(root: Path) -> Iterator[Path]:
+    """Yield directories named ``vipdoc`` below ``root`` within a small budget."""
+
+    queue: deque[tuple[Path, int]] = deque([(root, 0)])
+    visited = 0
+    while queue:
+        current, depth = queue.popleft()
+        if depth >= _DETECT_MAX_DEPTH or visited >= _DETECT_MAX_DIRS:
+            continue
+        try:
+            children = [child for child in current.iterdir() if child.is_dir()]
+        except OSError:
+            continue
+        for child in children:
+            visited += 1
+            if child.name.startswith(".") or child.name in _DETECT_SKIP_DIRS:
+                continue
+            if child.name.lower() == "vipdoc":
+                yield child
+            else:
+                queue.append((child, depth + 1))
+
+
+def detect_vipdoc_roots(extra_roots: Iterable[str | Path] | None = None) -> list[VipdocCandidate]:
+    """Find reachable ``vipdoc`` trees, best (most files) first.
+
+    The backend usually runs inside a container, so host paths are invisible
+    unless mounted. This only reports what the process can actually see.
+    """
+
+    roots: list[Path] = []
+    for value in (suggested_vipdoc_path(), *(extra_roots or ()), *_DETECT_SCAN_ROOTS):
+        candidate = Path(value).expanduser()
+        if candidate.is_dir() and candidate not in roots:
+            roots.append(candidate)
+    found: dict[str, VipdocCandidate] = {}
+    for root in roots:
+        markets = _day_markets(root)
+        if markets:
+            _record_candidate(found, root, markets)
+            continue
+        for child in _walk_for_vipdoc(root):
+            child_markets = _day_markets(child)
+            if child_markets:
+                _record_candidate(found, child, child_markets)
+    return sorted(found.values(), key=lambda item: (-item.file_count, item.path))
+
+
+def _record_candidate(
+    found: dict[str, VipdocCandidate], path: Path, markets: tuple[str, ...]
+) -> None:
+    key = str(path)
+    if key in found:
+        return
+    file_count = _count_day_files(path, markets)
+    if file_count == 0:
+        return  # 目录结构对但没有 .day 文件，多半是挂错了或还没下载
+    found[key] = VipdocCandidate(path=key, file_count=file_count, markets=markets)
 
 
 def is_supported_instrument(market: MarketCode, code: str) -> bool:
@@ -180,7 +314,11 @@ __all__ = [
     "MarketCode",
     "MarketDataAdapter",
     "StockRef",
+    "VipdocCandidate",
+    "detect_vipdoc_roots",
+    "host_mount_prefix",
     "is_supported_a_stock",
     "is_supported_instrument",
+    "map_host_path",
     "suggested_vipdoc_path",
 ]

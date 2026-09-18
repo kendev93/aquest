@@ -18,6 +18,7 @@ vi.mock('../api/marketData', async () => {
     fetchMarketDataCapabilities: vi.fn(),
     createOnlineBackfill: vi.fn(),
     createOnlineSync: vi.fn(),
+    detectLocalVipdoc: vi.fn(),
     getMarketDataJob: vi.fn(),
   }
 })
@@ -56,6 +57,11 @@ describe('MarketDataPage', () => {
       job_id: 'active-1',
       status: 'cancelling',
       cancel_requested: true,
+    })
+    vi.mocked(marketApi.detectLocalVipdoc).mockResolvedValue({
+      candidates: [{ path: '/data/vipdoc', file_count: 5400, markets: ['SH', 'SZ'] }],
+      default_path: '/data/vipdoc',
+      mount_hint: '后端运行在容器里，需要先挂载。',
     })
     vi.mocked(marketApi.fetchStoreStatus).mockResolvedValue({
       database_path: '/data/market/market.duckdb',
@@ -483,5 +489,28 @@ describe('MarketDataPage', () => {
     await flushPromises()
 
     expect(marketApi.fetchLocalInstruments).toHaveBeenLastCalledWith(expect.objectContaining({ page: 2 }))
+  })
+
+  it('auto-fills the vipdoc path from backend detection', async () => {
+    const wrapper = mount(MarketDataPage)
+    await flushPromises()
+
+    expect(marketApi.detectLocalVipdoc).toHaveBeenCalled()
+    expect(wrapper.get<HTMLInputElement>('[data-testid="market-local-import-path"]').element.value).toBe('/data/vipdoc')
+    expect(wrapper.get('[data-testid="market-local-import-note"]').text()).toContain('5400')
+  })
+
+  it('shows the mount hint when no vipdoc is reachable', async () => {
+    vi.mocked(marketApi.detectLocalVipdoc).mockResolvedValue({
+      candidates: [],
+      default_path: '/data/vipdoc',
+      mount_hint: '后端运行在容器里，需要先挂载。',
+    })
+    const wrapper = mount(MarketDataPage)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="market-local-import-note"]').text()).toContain('没有在容器里找到')
+    expect(wrapper.text()).toContain('docker-compose.tdx.yml')
+    expect(wrapper.get<HTMLInputElement>('[data-testid="market-local-import-path"]').element.value).toBe('')
   })
 })

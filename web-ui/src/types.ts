@@ -292,6 +292,12 @@ export interface DataStoreStatus {
 }
 
 export type LocalMarketScope = 'all' | 'SH' | 'SZ'
+
+export interface LocalVipdocCandidate {
+  path: string
+  file_count: number
+  markets: string[]
+}
 export type MarketChartPeriod = 'daily' | 'monthly' | 'yearly'
 
 export interface LocalInstrument {

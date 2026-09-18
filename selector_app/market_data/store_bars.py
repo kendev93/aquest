@@ -192,6 +192,110 @@ class DuckDbBarsStore:
                 raise
         return len(incoming)
 
+    def upsert_local_bars(self, frame: pd.DataFrame) -> tuple[int, int]:
+        """Write local rows, overwriting any row on the same date.
+
+        Local data wins over online data: every incoming ``(market, code,
+        trade_date, price_basis)`` key replaces whatever already sits there,
+        regardless of whether the previous row came from an online sync or an
+        earlier local import. Dates absent from ``frame`` are left untouched so
+        a partial import cannot silently drop history.
+
+        Returns ``(written_rows, replaced_rows)``.
+        """
+
+        self._store._require_writer()
+        if frame.empty:
+            return (0, 0)
+        incoming_frame = frame.copy(deep=True)
+        if "board" not in incoming_frame.columns:
+            incoming_frame["board"] = [
+                classify_board(str(market), str(code))
+                for market, code in incoming_frame[["market", "code"]].itertuples(
+                    index=False, name=None
+                )
+            ]
+        required = {"market", "code", "instrument_type", "board", *_FRAME_COLUMNS}
+        missing = sorted(required - set(incoming_frame.columns))
+        if missing:
+            raise ValueError(f"本地行情数据缺少字段: {', '.join(missing)}")
+        if incoming_frame[["market", "code", "instrument_type", "board"]].isna().any().any():
+            raise ValueError("本地行情数据缺少标的身份字段")
+        normalized_parts: list[pd.DataFrame] = []
+        for (market, code, instrument_type, board), group in incoming_frame.groupby(
+            ["market", "code", "instrument_type", "board"], sort=False
+        ):
+            normalized_parts.append(
+                self._store._normalize_frame(
+                    group,
+                    market=str(market),
+                    code=str(code),
+                    instrument_type=cast(InstrumentType, str(instrument_type)),
+                    board=cast(InstrumentBoard, str(board)),
+                    source="local",
+                )
+            )
+        if not normalized_parts:
+            return (0, 0)
+        incoming = pd.concat(normalized_parts, ignore_index=True)
+        incoming = incoming.drop_duplicates(
+            subset=["market", "code", "trade_date", "price_basis"], keep="last"
+        )
+        incoming = incoming.sort_values(
+            ["market", "code", "trade_date"], kind="stable"
+        ).reset_index(drop=True)
+        with _WRITE_LOCK, self._store._connect() as connection:
+            connection.execute("BEGIN")
+            try:
+                connection.register("_incoming_local_upsert", incoming)
+                replaced_row = connection.execute(
+                    """
+                    SELECT COUNT(*)
+                    FROM _incoming_local_upsert AS incoming
+                    INNER JOIN daily_bars AS existing
+                      ON existing.market = incoming.market
+                     AND existing.code = incoming.code
+                     AND existing.trade_date = incoming.trade_date
+                     AND existing.price_basis = incoming.price_basis
+                    """
+                ).fetchone()
+                connection.execute(
+                    """
+                    DELETE FROM daily_bars AS existing
+                    USING _incoming_local_upsert AS incoming
+                    WHERE existing.market = incoming.market
+                      AND existing.code = incoming.code
+                      AND existing.trade_date = incoming.trade_date
+                      AND existing.price_basis = incoming.price_basis
+                    """
+                )
+                connection.execute(
+                    f"""
+                    INSERT INTO daily_bars ({", ".join(_BAR_COLUMNS)})
+                    SELECT {", ".join(f"incoming.{column}" for column in _BAR_COLUMNS)}
+                    FROM _incoming_local_upsert AS incoming
+                    """
+                )
+                for market, code, instrument_type, board in (
+                    incoming[["market", "code", "instrument_type", "board"]]
+                    .drop_duplicates()
+                    .itertuples(index=False, name=None)
+                ):
+                    self._store._refresh_instrument(
+                        connection,
+                        market,
+                        code,
+                        instrument_type,
+                        board,
+                        provider="local",
+                    )
+                connection.unregister("_incoming_local_upsert")
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        return (len(incoming), int(replaced_row[0] if replaced_row else 0))
+
     def upsert_online_bars(
         self,
         frame: pd.DataFrame,

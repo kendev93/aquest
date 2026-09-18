@@ -1,0 +1,40 @@
+# 把通达信的行情目录挂进 backend 容器，供「导入通达信行情」使用。
+#
+# 两种挂法，挑一种（也可以都用）：
+#
+# 1) 精确挂载（推荐）：把 vipdoc 直接挂到 /data/vipdoc
+#      TDX_VIPDOC_PATH=/Users/you/Tdx/vipdoc docker compose \
+#        -f docker-compose.yml -f docker-compose.tdx.yml up -d
+#    页面上路径留空即可（默认就是 /data/vipdoc）。
+#
+# 2) 宽口径挂载：把 vipdoc 的「上级目录」挂到 /host
+#      TDX_HOST_ROOT=/Users/you docker compose \
+#        -f docker-compose.yml -f docker-compose.tdx.yml up -d
+#    之后页面上可以填 /host 下面的任意子路径，比如
+#      /host/Tdx/vipdoc 或 /host/Documents/通达信/vipdoc
+#    换目录、加目录都不用再动 compose，改页面上的路径就行。
+#
+# 两条都是只读挂载：导入只读 .day 文件，不需要写权限。
+# 命名卷 indicator-lab-data 不受影响，重建容器不会丢行情数据。
+# 挂好之后重建一次后端：docker compose build backend && docker compose ... up -d
+#
+# 目录结构必须是通达信原样导出的：
+#   <vipdoc>/sh/lday/sh600000.day
+#   <vipdoc>/sz/lday/sz000001.day
+
+# 可选：设了 TDX_HOST_PREFIX 之后，页面上可以直接填电脑上的原始路径
+# （比如 /Users/you/Tdx/vipdoc），后端会自动改写成 /host 下面的对应路径。
+#
+#   TDX_HOST_ROOT=/Users/you TDX_HOST_PREFIX=/Users/you docker compose \
+#     -f docker-compose.yml -f docker-compose.tdx.yml up -d
+
+services:
+  backend:
+    environment:
+      SELECTOR_VIPDOC_PATH: /data/vipdoc
+      SELECTOR_HOST_MOUNT_PREFIX: ${TDX_HOST_PREFIX:-}
+    volumes:
+      # 未设置 TDX_VIPDOC_PATH 时挂到自身空目录，等于不挂，不会报错。
+      - ${TDX_VIPDOC_PATH:-/data/vipdoc}:/data/vipdoc:ro
+      # 未设置 TDX_HOST_ROOT 时挂 /data（容器内），同样无副作用。
+      - ${TDX_HOST_ROOT:-/data}:/host:ro

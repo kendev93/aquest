@@ -10,6 +10,11 @@ from .day_format import (
     read_day_file,
 )
 from .local_adapter import LocalDayMarketDataAdapter, suggested_vipdoc_path
+from .local_import import (
+    LocalDayImportCancelled,
+    LocalDayImportError,
+    LocalDayImportService,
+)
 from .maintenance import (
     BACKUP_RETENTION_DAYS,
     COMPACTION_GROWTH_RATIO,
@@ -66,6 +71,9 @@ __all__ = [
     "BatchMarketDataAdapter",
     "MarketDataAdapter",
     "LocalDayMarketDataAdapter",
+    "LocalDayImportCancelled",
+    "LocalDayImportError",
+    "LocalDayImportService",
     "suggested_vipdoc_path",
     "BACKUP_RETENTION_DAYS",
     "COMPACTION_GROWTH_RATIO",

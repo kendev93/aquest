@@ -312,6 +312,27 @@ class CustomFormulaParseRequest(BaseModel):
     formula_text: str = Field(min_length=1, max_length=20_000)
 
 
+class LocalImportRequest(BaseModel):
+    """Import bars from a local TongDaXin ``vipdoc`` tree.
+
+    Every parsed bar overwrites the stored row on the same ``(market, code,
+    trade_date)`` key, so a freshly downloaded full history wins over whatever
+    an earlier online sync wrote.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    vipdoc_path: str | None = Field(default=None, max_length=1024)
+    universe: Literal["all", "sh", "sz"] = "all"
+    instrument_types: list[InstrumentType] | None = Field(default=None, max_length=4)
+    boards: list[InstrumentBoard] | None = Field(default=None, max_length=7)
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> LocalImportRequest:
+        validate_instrument_scope(self.universe, self.instrument_types, self.boards)
+        return self
+
+
 class MarketSyncRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

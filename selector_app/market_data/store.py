@@ -74,6 +74,9 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
             board=board,
         )
 
+    def upsert_local_bars(self, frame: pd.DataFrame) -> tuple[int, int]:
+        return self._bars.upsert_local_bars(frame)
+
     def upsert_online_bars(
         self,
         frame: pd.DataFrame,

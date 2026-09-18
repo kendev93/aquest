@@ -10,6 +10,8 @@
 #
 # 想自己管理数据目录（便于备份/迁移）就叠加绑定挂载覆盖文件，
 # 见 docker-compose.bind.yml。
+#
+# 想用通达信下载的本地日线覆盖/补全行情，叠加 docker-compose.tdx.yml。
 
 services:
   backend:
