@@ -253,6 +253,12 @@ watch([selectedStockView, stockFilter, stockSort], () => {
   stockPage.value = 1
 })
 
+// 新报告（或历史记录）到达时必须回到第一页：沿用旧页码会出现
+// 「第 3 / 1 页 + 空表体」，既不显示数据也不命中空态提示。
+watch(() => report.value, () => {
+  stockPage.value = 1
+})
+
 // A bare `> 0` / `< 0` pair is only meaningful for an output that crosses zero.
 // Most catalog outputs are one-sided (indicator_one.wash is 0 or positive), and
 // the previous default of `availableValues[0] < 0` could never fire at all.
@@ -462,6 +468,9 @@ function applyToPortfolio(): void {
     universe: form.universe,
     instrument_types: [form.instrumentType],
     boards: form.instrumentType === 'fund' ? [] : [...form.boards],
+    // date_mode 必须一起带过去：研究用「全历史/最近五年」时只传绝对日期会让
+    // 组合页的下拉仍显示最近五年、实际却按研究区间跑（或反过来被收窄）。
+    date_mode: form.dateMode,
     ...(form.dateMode === 'custom' && form.startDate && form.endDate
       ? { start_date: form.startDate, end_date: form.endDate }
       : {}),
@@ -609,14 +618,19 @@ async function applySelectedCandidates(): Promise<void> {
       added += 1
       continue
     }
-    const target = candidate.side === 'sell' ? form.sellRule : form.buyRule
+    const isSell = candidate.side === 'sell'
+    const target = isSell ? form.sellRule : form.buyRule
     if (target.conditions.some((item) => isSameCondition(item, incoming))) continue
+    // 买入候选是 AND 到基础买入规则上的（收窄入场），卖出候选是 OR 上去的
+    // （多一个离场触发）—— 后端 sell_mask |= condition_window，界面必须同口径，
+    // 否则重测跑的是与候选当初被评估时不同的规则。
     const merged: RuleGroupPayload = {
       ...target,
       signals: [],
+      combine_mode: isSell ? 'any' : target.combine_mode,
       conditions: [...target.conditions, incoming],
     }
-    if (candidate.side === 'sell') setSellRule(merged)
+    if (isSell) setSellRule(merged)
     else setBuyRule(merged)
     added += 1
   }
@@ -827,6 +841,11 @@ function topNTitle(candidate: ConditionResearchCandidate): string {
   const slots = report.value?.ranking?.top_n
   const days = candidate.mining.top_n_filtered_days ?? 0
   if (candidate.mining.top_n_outcome_rate === null || candidate.mining.top_n_outcome_rate === undefined) {
+    // 卖出候选本就不参与该诊断（槽位竞争只发生在入场，卖出是触发式的），
+    // 不能统一说成「没解析出排序指标」—— 上方卡片明明给了推荐。
+    if (candidate.side === 'sell') {
+      return '槽位竞争只发生在入场，卖出是触发式的，没有「先卖谁」这回事，因此卖出候选不做前 N 名诊断。'
+    }
     return '这次研究没有解析出排序指标，无法按前 N 名口径评估。'
   }
   if (days === 0) {
@@ -1253,6 +1272,9 @@ onMounted(async () => {
                   @click="clearCandidateSelection"
                 >清空选择</button>
               </div>
+              <p class="helper" data-testid="condition-merge-hint">
+                买入候选以「同时满足」并入基础买入规则（收窄入场）；卖出候选以「任一满足」并入（多一个离场触发，与研究评估口径一致）。
+              </p>
               <p class="helper">
                 勾选后按方向追加：买入候选进「买入基础条件」，卖出候选进「卖出基础条件」，
                 然后立即用新规则重跑一次研究。

@@ -126,7 +126,8 @@ test('user can submit full-market buy/sell research and inspect per-stock result
   await page.route('**/api/v1/condition-research/research-e2e/results', (route) => route.fulfill({ json: { data: report } }))
 
   await page.goto('/condition-research')
-  await expect(page.getByRole('heading', { name: '买卖条件研究' })).toBeVisible()
+  // 严格模式：空态的 h3「还没有买卖条件研究结果」也含这个子串。
+  await expect(page.getByRole('heading', { name: '买卖条件研究', exact: true })).toBeVisible()
   await page.getByTestId('condition-board-star').check()
   await page.getByTestId('condition-research-config').locator('button[type="submit"]').click()
 
@@ -137,7 +138,37 @@ test('user can submit full-market buy/sell research and inspect per-stock result
     universe: 'all',
     boards: ['star'],
     search_sides: 'both',
-    buy_rule: { signals: ['indicator.buy'] },
-    sell_rule: { signals: ['indicator.sell'] },
   })
+  // 页面只提交指标数值条件（信号下拉已移除），断言语义而不是具体阈值。
+  const payload = submitted as {
+    buy_rule: { conditions: unknown[]; signals: unknown[] }
+    sell_rule: { conditions: unknown[] } | null
+  }
+  expect(payload.buy_rule.signals).toEqual([])
+  expect(payload.buy_rule.conditions.length).toBeGreaterThan(0)
+  expect(payload.sell_rule?.conditions.length).toBeGreaterThan(0)
+})
+
+test('sell-only research sends a null sell rule so the engine can search exits', async ({ page }) => {
+  let submitted: Record<string, unknown> | null = null
+  await page.route('**/api/v1/formula-screen/metadata', (route) => route.fulfill({ json: { data: metadata } }))
+  await page.route('**/api/v1/jobs/active', (route) => route.fulfill({ json: { data: [] } }))
+  await page.route('**/api/v1/condition-research/history', (route) => route.fulfill({ json: { data: [] } }))
+  await page.route('**/api/v1/condition-research', async (route) => {
+    if (route.request().method() === 'POST') {
+      submitted = route.request().postDataJSON() as Record<string, unknown>
+      await route.fulfill({ status: 202, json: { data: { job_id: 'research-e2e', status: 'queued' } } })
+      return
+    }
+    await route.fallback()
+  })
+
+  await page.goto('/condition-research')
+  await page.getByTestId('condition-hold-to-end').check()
+  await expect(page.getByTestId('condition-sell-rule')).toHaveCount(0)
+  await page.getByTestId('condition-research-config').locator('button[type="submit"]').click()
+
+  // null 才是「不设基准卖出、持有到期末」的表达；少了它后端会按默认卖出规则跑。
+  expect(submitted).toMatchObject({ sell_rule: null })
+  expect((submitted as { buy_rule: { conditions: unknown[] } }).buy_rule.conditions.length).toBeGreaterThan(0)
 })

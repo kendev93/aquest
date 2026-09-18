@@ -10,6 +10,22 @@ from selector_app.strategy_discovery.resources import (
 )
 
 
+def test_default_column_counts_follow_the_catalog_not_a_stale_constant() -> None:
+    """快照列数写死会低估每行成本，预检会放过本该 422 拒绝的运行。"""
+
+    from selector_app.strategy_discovery.catalog import default_indicator_catalog
+
+    catalog = default_indicator_catalog()
+    estimate = estimate_discovery_resources(
+        row_count=1_000,
+        requested_workers=2,
+        memory_budget_bytes=10 * 1024**3,
+    )
+
+    assert estimate.value_count == len(catalog.value_ids)
+    assert estimate.signal_count == len(catalog.signal_ids)
+
+
 def test_snapshot_estimate_uses_the_current_float64_layout() -> None:
     estimate = estimate_discovery_resources(
         row_count=1_000,

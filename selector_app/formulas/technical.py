@@ -70,6 +70,10 @@ _TREND_PERIOD = 24
 # Window of the realised volatility used as the trend-quality denominator.
 _VOLATILITY_PERIOD = 60
 _ANNUALISATION = 252.0
+# Bounds on the *annualised log* return before it is compounded, i.e. the trend
+# score lands in [exp(floor)-1, exp(ceiling)-1] = [-95%, +1000%].
+_ANNUAL_TREND_FLOOR = -3.0
+_ANNUAL_TREND_CEILING = 2.398  # log(11)
 _RSRS_PERIOD = 18
 # ETFQuest standardises the RSRS beta over 600 bars (~2.4 years). A-share
 # backtests usually cover 2-3 years, where 600 would leave most of the range
@@ -318,17 +322,33 @@ def calculate_technical_indicators(frame: pd.DataFrame) -> FormulaResult:
 
     # Annualised exponential trend times its own fit quality: how fast the
     # stock has been compounding, discounted by how noisy the path was.
+    #
+    # The 24-day slope is extrapolated 252 days out, so a clean run of limit-ups
+    # compounds into absurd values (24 bars of +5% → 218,625). That is both a
+    # meaningless magnitude and the least sustainable pattern in the market,
+    # yet it would dominate a descending ranking. Clip the *log* return before
+    # compounding, which bounds the result to [-95%, +1000%] while leaving
+    # ordinary trends untouched.
     with np.errstate(over="ignore", invalid="ignore"):
-        annualised = np.exp(trend_slope * _ANNUALISATION) - 1
+        annualised = (
+            np.exp(
+                np.clip(trend_slope * _ANNUALISATION, _ANNUAL_TREND_FLOOR, _ANNUAL_TREND_CEILING)
+            )
+            - 1
+        )
     annual_trend = annualised * trend_r2
     values["annual_trend24"] = np.where(np.isfinite(annual_trend), annual_trend, np.nan)
 
     # ETFQuest's trend_quality_momentum: 24-day return × R² / annualised
     # 60-day volatility. Same ingredients, but risk-adjusted, so a volatile
     # stock has to trend that much harder to score well.
-    momentum = close.pct_change(_TREND_PERIOD)
+    # fill_method=None：缺口/停牌不应被前向填充后当成真实涨跌，这与自定义公式里
+    # MA/REF 遇缺口变 NaN 的语义一致；pandas 2.x 的默认 'pad' 也会告警。
+    momentum = close.pct_change(_TREND_PERIOD, fill_method=None)
     volatility = (
-        close.pct_change().rolling(_VOLATILITY_PERIOD, min_periods=_VOLATILITY_PERIOD).std()
+        close.pct_change(fill_method=None)
+        .rolling(_VOLATILITY_PERIOD, min_periods=_VOLATILITY_PERIOD)
+        .std()
         * np.sqrt(_ANNUALISATION)
     ).to_numpy()
     values["trend_quality"] = safe_divide((momentum * trend_r2).to_numpy(), volatility)

@@ -905,7 +905,7 @@ class ConditionResearchService:
             "splits": _splits_dict(splits),
             "baseline": {"train": _without_stock_rows(baseline)},
             "candidates": [],
-            "diagnostic": "基础交易样本不足，未发现满足样本和覆盖要求的候选条件",
+            "diagnostic": _empty_diagnostic(config, sample_totals),
             "algorithm": {
                 "mining": "contrastive_threshold_and_pairwise_rules",
                 "search": "single_condition_then_full_stock_replay",
@@ -1114,6 +1114,34 @@ def _disclosure(
             f"本次仅 {processed}/{total} 只标的进入统计，未覆盖标的未参与任何汇总。",
         ],
     }
+
+
+def _empty_diagnostic(
+    config: ConditionResearchConfig,
+    sample_totals: Mapping[str, Mapping[str, object]],
+) -> str:
+    """Explain *why* nothing was mined.
+
+    "Not enough trades" used to be the only answer, but the common cause is a
+    saturated baseline: when every base trade is profitable (or every one is a
+    loss) there is nothing to contrast against and no threshold can look better
+    than 100%/0%. Telling the user to widen the range in that case sends them
+    chasing the wrong fix.
+    """
+
+    counts: dict[str, int] = {}
+    for side, payload in sample_totals.items():
+        raw = payload.get("count")
+        counts[side] = raw if isinstance(raw, int) and not isinstance(raw, bool) else 0
+    searched = {side for side in ("buy", "sell") if config.search_sides in {side, "both"}}
+    if searched and all(counts.get(side, 0) >= config.min_trades for side in searched):
+        return (
+            "样本量足够，但基准交易的盈亏方向过于一致（胜率接近 0% 或 100%），"
+            "没有可对照的样本，挖不出有区分度的条件。"
+            "单边模式（持续满仓 / 持有到期末）更容易出现这种饱和基线，"
+            "可以换一侧搜索、放宽日期区间，或让基础条件更宽松一些。"
+        )
+    return "基础交易样本不足，未发现满足样本和覆盖要求的候选条件"
 
 
 def _sample_totals(

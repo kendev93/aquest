@@ -16,7 +16,13 @@ from selector_app.condition_research.resources import (
 )
 from selector_app.condition_research.service import ConditionResearchService
 from selector_app.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
-from selector_app.screening.jobs import JobState, ProgressReporter, ScreenJobRunner, TaskUserError
+from selector_app.screening.jobs import (
+    ActiveJobConflictError,
+    JobState,
+    ProgressReporter,
+    ScreenJobRunner,
+    TaskUserError,
+)
 
 from ..backtest_history import save_completed_backtest_history, utc_now
 from ..date_ranges import resolve_date_range
@@ -164,6 +170,10 @@ def create_condition_research(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             content={"error": {"code": "validation_error", "message": str(exc)}},
         )
+    except ActiveJobConflictError as exc:
+        # 它是 RuntimeError 的子类，落到下面的兜底会变成 503「执行器暂不可用」；
+        # 其他路由对同一情况返回 409，这里保持一致。
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail="研究任务执行器暂不可用") from exc
     return JSONResponse(

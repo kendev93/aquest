@@ -6,7 +6,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from selector_app.concurrency import MAX_WORKERS
+from selector_app.concurrency import MAX_WORKERS, visible_cpu_count
 
 AUTO_DISCOVERY_WORKERS = "auto"
 DEFAULT_DISCOVERY_WORKERS = MAX_WORKERS
@@ -14,8 +14,6 @@ DEFAULT_MEMORY_BUDGET_BYTES = 4 * 1024**3
 MEMORY_HEADROOM_RATIO = 0.8
 _BYTES_PER_FLOAT64 = 8
 _SNAPSHOT_BAR_ARRAYS = 5
-_SNAPSHOT_VALUE_COUNT = 21
-_SNAPSHOT_SIGNAL_COUNT = 15
 _SNAPSHOT_BOOL_ARRAYS = 2
 _SNAPSHOT_BUILD_OVERHEAD_BYTES = 512 * 1024**2
 _MIN_WORKER_OVERHEAD_BYTES = 128 * 1024**2
@@ -91,11 +89,26 @@ def resolve_discovery_memory_budget() -> int:
     return DEFAULT_MEMORY_BUDGET_BYTES
 
 
+def _snapshot_column_counts() -> tuple[int, int]:
+    """Value and signal column counts the snapshot actually allocates.
+
+    Derived from the catalog instead of hardcoded: the snapshot warms every
+    numeric output (``value_ids``), not just the rankable subset, and a stale
+    constant under-estimates the per-row cost by ~40%, letting oversized runs
+    past the pre-flight check.
+    """
+
+    from selector_app.strategy_discovery.catalog import default_indicator_catalog
+
+    catalog = default_indicator_catalog()
+    return len(catalog.value_ids), len(catalog.signal_ids)
+
+
 def estimate_discovery_resources(
     row_count: int,
     *,
-    value_count: int = _SNAPSHOT_VALUE_COUNT,
-    signal_count: int = _SNAPSHOT_SIGNAL_COUNT,
+    value_count: int | None = None,
+    signal_count: int | None = None,
     requested_workers: int | None = None,
     memory_budget_bytes: int | None = None,
 ) -> DiscoveryResourceEstimate:
@@ -107,6 +120,10 @@ def estimate_discovery_resources(
     rather than a replacement for runtime RSS measurements.
     """
 
+    if value_count is None or signal_count is None:
+        default_values, default_signals = _snapshot_column_counts()
+        value_count = default_values if value_count is None else value_count
+        signal_count = default_signals if signal_count is None else signal_count
     _require_non_negative("row_count", row_count)
     _require_non_negative("value_count", value_count)
     _require_non_negative("signal_count", signal_count)
@@ -170,7 +187,7 @@ def _require_non_negative(name: str, value: int) -> None:
 
 
 def _auto_worker_count() -> int:
-    cpu_count = max(1, int(os.cpu_count() or 1))
+    cpu_count = visible_cpu_count()
     return validate_discovery_workers(min(DEFAULT_DISCOVERY_WORKERS, cpu_count))
 
 

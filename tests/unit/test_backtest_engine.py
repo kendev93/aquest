@@ -198,3 +198,35 @@ def test_close_at_end_charges_the_same_costs_as_a_normal_sell() -> None:
     assert trade["stamp_tax"] == pytest.approx(proceeds * 0.001)
     # 平仓盈亏要扣掉双边成本，不能等于毛收益。
     assert trade["pnl"] < proceeds - 800 * 12.0
+
+
+def test_close_at_end_costs_reach_the_equity_curve() -> None:
+    """收官平仓的费用必须体现在净值上。
+
+    成交记录扣了费而权益曲线不扣，同一份结果里两个口径就会对不上（净值类
+    指标偏高）。平仓按收盘价成交，市值那部分曲线早已计过，所以末帧只需回到
+    「已平仓」的真实状态：市值归零、现金是扣费后的现金。
+    """
+
+    signals = np.array([False, True, False, False, False, False])
+    empty = np.zeros(6, dtype=bool)
+    costs = dict(commission=0.001, min_commission=0.1, stamp_tax=0.001)
+
+    closed = run_signal_backtest(
+        _frame(),
+        signals,
+        empty,
+        SignalBacktestConfig(initial_cash=10_000, close_at_end=True, **costs),
+    )
+    held = run_signal_backtest(
+        _frame(),
+        signals,
+        empty,
+        SignalBacktestConfig(initial_cash=10_000, **costs),
+    )
+
+    trade = closed.trades.iloc[1]
+    fees = float(trade["commission"]) + float(trade["stamp_tax"]) + float(trade["slippage"])
+    assert fees > 0
+    # 一直持有的末帧权益 = 现金 + 市值；收官后应恰好少掉这笔费用。
+    assert closed.performance["end_value"] == pytest.approx(held.performance["end_value"] - fees)

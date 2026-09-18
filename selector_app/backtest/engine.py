@@ -270,7 +270,6 @@ def run_signal_backtest(
 
     if config.close_at_end and position > 0:
         # 没有卖出规则时的收官平仓：按最后一根收盘价成交，signal 与成交同日。
-        # 权益曲线此前已经按收盘价计过市值，这里只补一笔交易记录，不再改曲线。
         last_index = len(prepared) - 1
         current_date = pd.Timestamp(dates[last_index])
         price = float(closes[last_index])
@@ -302,6 +301,16 @@ def run_signal_backtest(
         )
         position = 0.0
         average_cost = 0.0
+        # 收官平仓按收盘价成交，市值那部分权益曲线已经计过；但手续费是真金白银
+        # 的支出，成交记录扣了、净值不扣就会让同一份结果内部口径不一致。这里让
+        # 最后一帧回到「已平仓」的真实状态：市值归零、现金是扣费后的现金。
+        if summary_only:
+            if totals:
+                totals[-1] = cash
+        elif equity:
+            equity[-1]["cash"] = cash
+            equity[-1]["position_value"] = 0.0
+            equity[-1]["total"] = cash
 
     equity_frame = pd.DataFrame({"total": totals}) if summary_only else pd.DataFrame(equity)
     if not summary_only:

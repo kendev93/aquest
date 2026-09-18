@@ -95,6 +95,29 @@ def test_fetch_daily_history_maps_eastmoney_kline_rows() -> None:
     assert transport.calls[0][1]["fqt"] == "0"
 
 
+@pytest.mark.parametrize(
+    ("code", "expected_secid"),
+    [
+        ("600000", "1.600000"),  # 沪市股票
+        ("000001", "0.000001"),  # 深市股票
+        ("510300", "1.510300"),  # 沪市 ETF
+        ("588000", "1.588000"),  # 沪市科创板 ETF
+        ("501018", "1.501018"),  # 沪市 LOF
+        ("159919", "0.159919"),  # 深市 ETF
+    ],
+)
+def test_fetch_daily_history_uses_the_right_market_prefix(code: str, expected_secid: str) -> None:
+    """secid 前缀错了东财就返回空，沪市基金（5 开头）尤其容易踩。"""
+
+    transport = FakeTransport([{"data": {"klines": ["2026-09-10,10,10,10,10,1,10,0,0,0,0,1"]}}])
+
+    OnlineMarketClient(transport=transport).fetch_daily_history(
+        code, "20260910", "20260910", timeout=8.0
+    )
+
+    assert transport.calls[0][1]["secid"] == expected_secid
+
+
 def test_fetch_tencent_daily_history_decodes_jsonp_and_normalizes_units() -> None:
     transport = FakeTransport(
         [

@@ -8,6 +8,7 @@ import duckdb
 import numpy as np
 import pandas as pd
 
+from selector_app.formulas.registry import FORMULA_REGISTRY
 from selector_app.indicators.cache import IndicatorCache
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
 from selector_app.market_data.models import StockRef
@@ -268,7 +269,13 @@ def test_snapshot_replay_matches_ordinary_portfolio_backtest(tmp_path: Path) -> 
     assert snapshot_metadata["snapshot_start_date"] == "2024-01-01"
     assert snapshot_metadata["snapshot_end_date"] == "2024-03-20"
     assert snapshot_metadata["snapshot_rows"] == 80
-    assert snapshot_metadata["warmup_bars"] >= 1
+    # 预热必须覆盖 recommended_bars 而不是 minimum_bars，否则长窗口指标
+    # （rsrs_zscore 需 268 根）在窗口里绝大多数是 NaN，挖掘与全量复核会打架。
+    recommended = max(
+        FORMULA_REGISTRY.formula(formula_id).recommended_bars
+        for formula_id in FORMULA_REGISTRY.all_formula_ids()
+    )
+    assert snapshot_metadata["warmup_bars"] >= recommended
     assert snapshot_metadata["snapshot_bytes"] > 0
 
 

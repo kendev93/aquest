@@ -398,7 +398,12 @@ class OnlineMarketClient:
         normalized_symbol = _clean_code(symbol)
         if normalized_symbol is None:
             raise OnlineDataError(f"股票代码无效: {symbol}")
-        market_code = "1" if normalized_symbol.startswith(("6", "9")) else "0"
+        # 沪市 ETF/LOF 以 5 开头（50/51/52/53/55/56/58），只按股票前缀判会发成
+        # 深市 secid 而取不到数据；深市 ETF 以 15/16/17/18 开头。
+        market = _market_for_stock_code(normalized_symbol) or _market_for_fund_code(
+            normalized_symbol
+        )
+        market_code = "1" if (market or "SZ") == "SH" else "0"
         payload = self._request(
             _EASTMONEY_HISTORY_URL,
             {

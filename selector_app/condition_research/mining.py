@@ -20,6 +20,11 @@ _MAX_SCALE_RATIO = 100.0
 # Two conditions whose matching samples agree this closely are the same finding
 # for the study; only the best-ranked one is reported.
 _DUPLICATE_AGREEMENT = 0.995
+# Defence in depth. The caller already restricts mined features to the
+# cross-stock comparable set, so none of these should arrive today; they stay
+# listed because "never mine an absolute price level into a shared threshold" is
+# a correctness rule, not an incidental consequence of whoever builds the
+# feature list. Nothing here is dead weight if that list ever widens.
 _PRICE_SCALE_FEATURES = frozenset(
     {
         "technical.ma5",
@@ -232,6 +237,10 @@ def mine_binary_conditions(
         return ()
 
     valid_symbols = pd.notna(symbols) & pd.notna(groups)
+    if top_n_context is not None and top_n_context.values.size != len(target):
+        # The context is indexed by full-sample position. A length mismatch would
+        # silently score unrelated rows, so drop the diagnostic instead.
+        top_n_context = None
     feature_ids = tuple(str(column) for column in features.columns)
     arrays = {
         feature_id: pd.to_numeric(features[feature_id], errors="coerce").to_numpy(dtype=float)
@@ -266,6 +275,7 @@ def mine_binary_conditions(
         valid_values = values[valid]
         if len(np.unique(valid_values)) < 2:
             continue
+        positions = np.flatnonzero(valid)
 
         valid_target = target_float[valid]
         valid_instruments = instrument_codes[valid]
@@ -299,6 +309,7 @@ def mine_binary_conditions(
                     min_instruments=min_instruments,
                     baseline_rate=baseline_rate,
                     top_n_context=top_n_context,
+                    sample_positions=positions,
                 )
                 record(candidate, valid, condition_mask)
 
@@ -322,6 +333,7 @@ def mine_binary_conditions(
             # is really "the wide side vs ~0"; those collapse into duplicates.
             if not _comparable_scale(valid_left, valid_right):
                 continue
+            positions = np.flatnonzero(valid)
             valid_target = target_float[valid]
             valid_instruments = instrument_codes[valid]
             valid_groups = group_codes[valid]
@@ -351,6 +363,7 @@ def mine_binary_conditions(
                     min_instruments=min_instruments,
                     baseline_rate=baseline_rate,
                     top_n_context=top_n_context,
+                    sample_positions=positions,
                 )
                 record(candidate, valid, condition_mask)
 
@@ -387,6 +400,7 @@ def _top_n_diagnosis(
     matched_indices: np.ndarray,
     outcomes: np.ndarray,
     context: TopNContext | None,
+    sample_positions: np.ndarray | None = None,
 ) -> tuple[float | None, int, int]:
     """Re-score matched samples the way a slot-limited portfolio would.
 
@@ -394,15 +408,21 @@ def _top_n_diagnosis(
     counts signal days where ranking actually had to drop something - when it is
     zero the top-N split changed nothing, and the caller must say so instead of
     showing a column that silently duplicates the pool-wide rate.
+
+    ``matched_indices`` live in the candidate's compressed sample space (rows
+    where the mined feature is finite). The context is indexed by full-sample
+    position, so ``sample_positions`` (``flatnonzero(valid)``) must map them
+    back; skipping that step silently reads the wrong rows.
     """
 
     if context is None or matched_indices.size == 0:
         return None, 0, 0
-    score = context.values[matched_indices]
+    positions = matched_indices if sample_positions is None else sample_positions[matched_indices]
+    score = context.values[positions]
     usable = np.flatnonzero(np.isfinite(score))
     if usable.size == 0:
         return None, 0, 0
-    day = context.day_codes[matched_indices][usable]
+    day = context.day_codes[positions][usable]
     score = score[usable]
     day_outcomes = outcomes[matched_indices][usable]
     # Sort by day, then by rank quality: a running counter then yields each
@@ -436,6 +456,7 @@ def _candidate_for_mask(
     min_instruments: int,
     baseline_rate: float,
     top_n_context: TopNContext | None = None,
+    sample_positions: np.ndarray | None = None,
 ) -> MinedCondition | None:
     order = np.flatnonzero(condition_mask)
     if order.size == 0:
@@ -460,7 +481,7 @@ def _candidate_for_mask(
         return None
     group_count = int(np.unique(group_codes).size)
     top_n_rate, top_n_support, filtered_days = _top_n_diagnosis(
-        matched_indices, outcomes, top_n_context
+        matched_indices, outcomes, top_n_context, sample_positions
     )
     return MinedCondition(
         condition=condition,

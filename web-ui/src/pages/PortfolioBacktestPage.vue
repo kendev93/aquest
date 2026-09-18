@@ -544,8 +544,6 @@ async function applyStoredResearch(raw: unknown): Promise<void> {
   form.boards = Array.isArray(config.boards)
     ? config.boards.filter((item): item is InstrumentBoard => BOARD_OPTIONS.some((option) => option.key === item))
     : form.boards
-  form.startDate = typeof config.start_date === 'string' ? config.start_date : form.startDate
-  form.endDate = typeof config.end_date === 'string' ? config.end_date : form.endDate
   const maxPositions = finiteNumber(config.max_positions, form.maxPositions)
   if (Number.isInteger(maxPositions) && maxPositions >= 1 && maxPositions <= 100) {
     form.maxPositions = maxPositions
@@ -554,12 +552,33 @@ async function applyStoredResearch(raw: unknown): Promise<void> {
     form.rankingValue = config.ranking_value
   }
   form.rankOrder = enumValue(config.rank_order, ['asc', 'desc'] as const, form.rankOrder)
+  // 日期要连 mode 一起还原：只回填绝对日期会让下拉仍显示「最近五年」，
+  // 而研究跑的其实是全历史。
+  const dateMode = enumValue(config.date_mode, ['recent5', 'full', 'custom'] as const, form.dateMode)
+  if (dateMode === 'custom') {
+    const start = typeof config.start_date === 'string' ? config.start_date : ''
+    const end = typeof config.end_date === 'string' ? config.end_date : ''
+    if (start && end) {
+      form.dateMode = 'custom'
+      form.startDate = start
+      form.endDate = end
+    }
+  } else {
+    form.dateMode = dateMode
+  }
   const buyRule = parseStoredRuleGroup(config.buy_rule)
   if (buyRule) form.buyRule = buyRule
   const sellRule = parseStoredRuleGroup(config.sell_rule)
   if (sellRule) form.sellRule = sellRule
+  // 单边研究（持续满仓 / 持有到期末）会传 null，此时不能默默沿用组合页默认
+  // 规则 —— 否则用户以为在复现研究基线，实际用的是默认卖出条件 + 8% 止损。
+  const missing: string[] = []
+  if (config.buy_rule === null) missing.push('买入')
+  if (config.sell_rule === null) missing.push('卖出')
   errors.value = {}
-  message.value = '已载入买卖条件研究的规则与排序建议，请确认后开始组合回测。'
+  message.value = missing.length
+    ? `已载入研究的规则与排序建议；研究未设${missing.join('、')}条件，该侧已保留当前默认，请确认后再回测。`
+    : '已载入买卖条件研究的规则与排序建议，请确认后开始组合回测。'
 }
 
 function readAppliedDiscoveryMeta(raw: unknown): AppliedDiscoveryCandidate | null {

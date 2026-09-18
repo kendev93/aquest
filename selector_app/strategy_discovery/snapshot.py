@@ -778,10 +778,19 @@ def _parse_date(value: object) -> date | None:
 
 
 def _snapshot_warmup_bars() -> int:
+    """Extra bars read before the window so indicators are fully warmed up.
+
+    Uses ``recommended_bars``, not ``minimum_bars``: the latter only guarantees
+    ``sufficient_data`` is true, not that a value is actually produced. Reading
+    just 34 bars left ``rsrs_zscore`` (268-bar warmup) finite on ~11 of 243
+    bars, so mining and the portfolio replay - which computes on full history -
+    disagreed on the same indicator.
+    """
+
     return max(
         1,
         max(
-            FORMULA_REGISTRY.formula(formula_id).minimum_bars
+            FORMULA_REGISTRY.formula(formula_id).recommended_bars
             for formula_id in FORMULA_REGISTRY.all_formula_ids()
         ),
     )

@@ -454,6 +454,9 @@ describe('ConditionResearchPage', () => {
       expect.objectContaining({ left_value: 'indicator.score', operator: 'lte' }),
       { left_value: 'indicator.score', operator: 'lte', right_value: null, right_constant: -1.5 },
     ])
+    // 卖出候选是研究按「OR」评估出来的，回填也必须是任一满足；买入是 AND。
+    expect(payload.buy_rule?.combine_mode).toBe('all')
+    expect(payload.sell_rule?.combine_mode).toBe('any')
     // 勾选状态在重跑后作废，避免残留指向旧结果的 id。
     expect((wrapper.get('[data-testid="select-condition-buy-1"]').element as HTMLInputElement).checked).toBe(false)
   })
@@ -942,8 +945,39 @@ describe('ConditionResearchPage', () => {
       rank_order: 'desc',
       max_positions: 3,
       formula_text: null,
+      // 只传绝对日期会让组合页「悄悄换个窗口」，mode 必须一起过去。
+      date_mode: 'recent5',
     })
     expect(stored.buy_rule.conditions.length).toBeGreaterThan(0)
     sessionStorage.clear()
+  })
+
+  it('marks an unset side as null when bridging so the portfolio page can warn', async () => {
+    sessionStorage.clear()
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    // 桥接按钮在结果卡片里，得先跑出一次报告。
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-hold-to-end"]').setValue(true)
+
+    await wrapper.get('[data-testid="condition-apply-to-portfolio"]').trigger('click')
+
+    const stored = JSON.parse(sessionStorage.getItem('indicator-lab.condition-research.apply') ?? '{}')
+    expect(stored.sell_rule).toBeNull()
+    expect(stored.buy_rule).not.toBeNull()
+    sessionStorage.clear()
+  })
+
+  it('explains that sell candidates are not scored in the top-N column', async () => {
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+
+    // 上方明明给了排序推荐，卖出候选却说「没解析出排序指标」会让人以为坏了。
+    const title = wrapper.get('[data-testid="top-n-rate-sell-1"]').attributes('title') ?? ''
+    expect(title).toContain('卖出是触发式的')
+    expect(title).not.toContain('没有解析出排序指标')
   })
 })

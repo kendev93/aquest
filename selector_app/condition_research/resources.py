@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-from selector_app.concurrency import MAX_WORKERS
+from selector_app.concurrency import MAX_WORKERS, visible_cpu_count
 from selector_app.strategy_discovery.resources import (
     _read_cgroup_memory_limit,
     _read_host_memory_limit,
@@ -237,17 +237,10 @@ def _auto_worker_count() -> int:
     worker, so matching the CPU count oversubscribes the machine.
     """
 
-    # ``os.sched_getaffinity`` 只在 Linux 存在（Windows/macOS 没有）。这里用 getattr
-    # 而不是直接访问 + 行内忽略注释：直接访问时 mypy 在 macOS 需要忽略、在 Linux
-    # （CI）又会因 strict 模式的 warn_unused_ignores 报"多余"，无法同时满足。
-    affinity = getattr(os, "sched_getaffinity", None)
-    visible = os.cpu_count() or 1
-    if affinity is not None:
-        try:
-            visible = len(affinity(0))
-        except OSError:  # pragma: no cover - 取决于容器/procfs 权限
-            visible = os.cpu_count() or 1
-    return max(1, min(MAX_WORKERS, visible // 2))
+    # 一半可见 CPU：DuckDB 在每个 worker 内部已经多线程，按核数起 worker 会超卖。
+    # 可见 CPU 由 concurrency.visible_cpu_count 判定（亲和性 → cgroup 配额 → 核数），
+    # 容器里 --cpuset-cpus 限制下不会按宿主核数起 worker。
+    return max(1, min(MAX_WORKERS, visible_cpu_count() // 2))
 
 
 def _require_non_negative(name: str, value: int) -> None:

@@ -62,19 +62,16 @@ def profile_from_config(
 ) -> TradeProfile:
     """Resolve legacy request defaults into the selected type profile.
 
-    Existing callers that explicitly pass non-default costs keep those costs.
-    A non-stock request that carries the old stock defaults receives the
-    fund-like defaults selected by the application policy.
+    Kept as the single entry point for callers, and now identical to
+    :func:`profile_from_overrides`: costs equal to the legacy stock default are
+    treated as untouched and fall back to the instrument default **per field**.
+    The old behaviour required the whole stock default triple to be present,
+    so an ETF run that only changed the commission kept the 0.1% stock stamp
+    tax - a 20x overcharge on every exit, and inconsistent with the research
+    path, which already resolved costs field by field.
     """
 
-    if (
-        instrument_type != "stock"
-        and commission == STOCK_DEFAULT_COMMISSION
-        and min_commission == STOCK_DEFAULT_MIN_COMMISSION
-        and stamp_tax == STOCK_DEFAULT_STAMP_TAX
-    ):
-        return profile_for(instrument_type)
-    return profile_for(
+    return profile_from_overrides(
         instrument_type,
         commission=commission,
         min_commission=min_commission,

@@ -400,6 +400,65 @@ def test_top_n_diagnosis_reports_when_the_slot_limit_never_binds() -> None:
     assert narrow.top_n_outcome_rate == pytest.approx(narrow.outcome_rate)
 
 
+def test_top_n_diagnosis_maps_compressed_indices_back_to_full_samples() -> None:
+    """被挖特征含 NaN 时压缩下标与全量下标会错位，诊断必须映射回去。
+
+    第一天特征全为 NaN（预热期/停牌常见），于是候选的 matched_indices 是
+    压缩空间的下标，而 TopNContext 按全量样本构建。少了映射就会读到别的
+    交易日的排序值，胜率和发生筛选的天数都会静默出错。
+    """
+
+    rows: list[dict[str, object]] = []
+    for day in (1, 2, 3):
+        for index in range(4):
+            if day == 1:
+                # 特征缺失，但排序值有值 —— 错位时正是这些行被误读。
+                rows.append(
+                    {
+                        "date": f"2024-01-0{day}",
+                        "score": None,
+                        "rank": 400.0 - 100.0 * index,
+                        "win": False,
+                    }
+                )
+            elif day == 2:
+                rows.append(
+                    {
+                        "date": f"2024-01-0{day}",
+                        "score": float(index + 1),
+                        "rank": float(10 * (index + 1)),
+                        "win": index >= 2,
+                    }
+                )
+            else:
+                rows.append(
+                    {
+                        "date": f"2024-01-0{day}",
+                        "score": float(index + 1),
+                        "rank": float(10 * (4 - index)),
+                        "win": index >= 1,
+                    }
+                )
+    frame = pd.DataFrame(rows)
+    candidates = mine_binary_conditions(
+        frame[["score"]],
+        frame["win"],
+        pd.Series([f"SH60000{index}" for index in range(len(frame))]),
+        sample_groups=pd.Series([f"g{index}" for index in range(len(frame))]),
+        min_support=2,
+        min_instruments=2,
+        limit=20,
+        top_n_context=build_top_n_context(frame["date"], frame["rank"], top_n=1, ascending=False),
+    )
+
+    broad = next(item for item in candidates if item.support_count == 6)
+    assert broad.outcome_rate == pytest.approx(5 / 6)
+    # 每天第 1 名都盈利；错位实现会给出 0.5。
+    assert broad.top_n_outcome_rate == pytest.approx(1.0)
+    assert broad.top_n_support_count == 2
+    assert broad.top_n_filtered_days == 2
+
+
 def test_top_n_diagnosis_is_absent_without_a_ranking_value() -> None:
     """没解析出排序值就不该编一个，字段保持为空由界面决定要不要显示。"""
 

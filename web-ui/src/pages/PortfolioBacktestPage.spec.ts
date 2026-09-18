@@ -426,4 +426,36 @@ describe('PortfolioBacktestPage', () => {
     expect(sessionStorage.getItem('indicator-lab.condition-research.apply')).toBeNull()
     sessionStorage.clear()
   })
+
+  it('warns when a one-sided study leaves a rule unset instead of reusing defaults', async () => {
+    sessionStorage.clear()
+    sessionStorage.setItem('indicator-lab.condition-research.apply', JSON.stringify({
+      universe: 'sh',
+      instrument_types: ['stock'],
+      boards: [],
+      date_mode: 'full',
+      buy_rule: {
+        signals: [],
+        conditions: [{ left_value: 'indicator_three.var1', operator: 'gt', right_value: null, right_constant: 12 }],
+        combine_mode: 'all',
+        minimum_matches: null,
+      },
+      sell_rule: null,
+      ranking_value: 'indicator_three.varo7',
+      rank_order: 'desc',
+      max_positions: 4,
+      formula_text: null,
+      formula_parameters: {},
+    }))
+
+    const wrapper = mount(PortfolioBacktestPage)
+    await flushPromises()
+
+    // 研究没设卖出条件时不能默默沿用组合页默认（默认卖出 + 8% 止损），
+    // 否则用户以为在复现研究基线。
+    expect(wrapper.get('[data-testid="portfolio-message"]').text()).toContain('未设卖出')
+    // 日期区间要连 mode 一起还原，只回填绝对日期会显示错误的窗口。
+    expect((wrapper.get('[data-testid="portfolio-date-mode"]').element as HTMLSelectElement).value).toBe('full')
+    sessionStorage.clear()
+  })
 })

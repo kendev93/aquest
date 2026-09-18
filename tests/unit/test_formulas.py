@@ -526,3 +526,34 @@ def test_recommended_bars_covers_the_longest_warmup() -> None:
         result = calculate_technical_indicators(bars)
         unfinished = sorted(name for name, values in result.values.items() if np.isnan(values[-1]))
         assert not unfinished, unfinished
+
+
+def test_annual_trend_is_capped_before_compounding() -> None:
+    """24 根各 +5% 外推一年会得 21 万倍，必须封顶。
+
+    这种「连续涨停」恰恰是最不可持续的形态，不封顶时按分值降序排会长期
+    霸占第一，也会让分位阈值挖出「annual_trend24 > 1000」这种废条件。
+    """
+
+    length = 300
+    close = np.concatenate([np.full(length - 24, 10.0), 10.0 * np.cumprod(np.full(24, 1.05))])
+    bars = pd.DataFrame(
+        {
+            "date": pd.bdate_range("2023-01-02", periods=length),
+            "open": close,
+            "high": close * 1.01,
+            "low": close * 0.99,
+            "close": close,
+            "volume": np.full(length, 1_000_000.0),
+            "amount": close * 1_000_000.0,
+        }
+    )
+
+    values = calculate_technical_indicators(bars).values["annual_trend24"]
+
+    assert np.isfinite(values[-1])
+    # 上界 +1000%（log(11) 取整后略有余量）。
+    assert values[-1] == pytest.approx(10.0, abs=0.01)
+    assert np.nanmax(values) <= 10.01
+    # 下界 -95%，不会外推出小于 -100% 的收益。
+    assert np.nanmin(values) >= -0.96
