@@ -13,7 +13,6 @@ from .market_sync import (
     InstrumentDiscoveryReport,
     MarketSyncConfig,
     MarketSyncReport,
-    TdxMarketSync,
 )
 
 __all__ = [
@@ -24,7 +23,6 @@ __all__ = [
     "LocalDayMarketDataAdapter",
     "is_supported_a_stock",
     "suggested_vipdoc_path",
-    "TdxMarketSync",
     "MarketDataSync",
     "OnlineFullMarketSource",
 ]

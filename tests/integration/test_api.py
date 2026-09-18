@@ -14,7 +14,6 @@ from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.portfolio_backtest.models import PortfolioBacktestConfig
 from selector_app.screening.jobs import TaskCancelledError
 from selector_app.screening.models import ScanReport
-from selector_app.tdx_protocol.errors import TdxConnectionError
 from selector_app.web.app import create_app
 from selector_app.web.schemas import FormulaScreenRequest
 
@@ -359,7 +358,7 @@ def test_market_sync_job_can_be_created_and_polled() -> None:
     }
 
 
-def test_market_data_capabilities_exposes_default_provider_and_tdx_compatibility(
+def test_market_data_capabilities_expose_the_only_remaining_provider(
     monkeypatch,
 ) -> None:
     def unavailable_eastmoney():
@@ -377,7 +376,8 @@ def test_market_data_capabilities_exposes_default_provider_and_tdx_compatibility
     data = response.json()["data"]
     assert data["default_provider"] == "eastmoney"
     assert data["instrument_count"] == 0
-    assert data["providers"]["tdx"]["available"] is True
+    # TDX 通道已移除，能力清单里只剩 East Money。
+    assert list(data["providers"]) == ["eastmoney"]
     assert data["providers"]["eastmoney"]["available"] is False
 
 
@@ -525,7 +525,7 @@ def test_one_click_sync_does_not_import_local_vipdoc(tmp_path: Path) -> None:
                 "filtered_instruments": 0,
                 "new_instruments": 1,
                 "existing_instruments": 0,
-                "target_source": "tdx_security_list",
+                "target_source": "eastmoney_stock_list",
             }
 
         def sync(self, config, progress_callback=None, *, detail_callback=None):
@@ -616,29 +616,6 @@ def test_market_sync_rejects_an_invalid_request() -> None:
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "validation_error"
-
-
-def test_market_sync_reports_incomplete_security_list_without_running_bars() -> None:
-    class FailingMarketSync:
-        def sync(self, config, progress_callback=None, *, detail_callback=None):
-            del config, progress_callback, detail_callback
-            raise TdxConnectionError("证券列表分页不完整")
-
-    with TestClient(create_app(engine=EmptyEngine(), market_sync=FailingMarketSync())) as client:
-        response = client.post("/api/v1/market-data/sync-online", json={})
-        assert response.status_code == 202
-        job_id = response.json()["data"]["job_id"]
-        for _ in range(50):
-            state_response = client.get(f"/api/v1/market-data/jobs/{job_id}")
-            assert state_response.status_code == 200
-            state = state_response.json()["data"]
-            if state["status"] == "failed":
-                break
-            time.sleep(0.01)
-        else:
-            raise AssertionError("market sync job did not fail")
-
-    assert state["error"] == "完整证券列表获取失败，本次同步已停止，请检查 TDX 连接后重试。"
 
 
 def test_portfolio_backtest_job_can_be_created_and_polled(tmp_path: Path) -> None:

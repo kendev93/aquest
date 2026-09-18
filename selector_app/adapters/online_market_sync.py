@@ -14,7 +14,7 @@ from datetime import date, datetime, timedelta
 from threading import Lock
 from typing import Any, Protocol, cast
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
@@ -57,14 +57,24 @@ _FULL_HISTORY_START = date(1990, 1, 1)
 _INCREMENTAL_OVERLAP_DAYS = 10
 _MAX_RETRIES = 3
 _RETRY_BASE_SECONDS = 0.25
-# 证券列表：服务端每页只给 100 条，全量目录要几百个请求，任一页重试耗尽就会
-# 让整次同步失败，所以退避比逐只日线更慢、次数更多。
-_CATALOG_RETRIES = 5
+# 证券列表：服务端每页只给 100 条，全量目录要几十个请求，任一页重试耗尽就会
+# 让整次同步失败，所以单页按"时间预算 + 上限次数"重试，而不是固定 2~3 次。
+_CATALOG_RETRY_SECONDS = 45.0
+_CATALOG_MAX_ATTEMPTS = 24
 _CATALOG_RETRY_BASE_SECONDS = 1.0
+_CATALOG_RETRY_MAX_SECONDS = 4.0
 _REQUEST_INTERVAL_SECONDS = 0.15
 _STOCK_BOARDS = frozenset({"main", "star", "chinext"})
 _EASTMONEY_LIST_URL = "https://82.push2.eastmoney.com/api/qt/clist/get"
 _EASTMONEY_FUND_LIST_URL = "https://88.push2.eastmoney.com/api/qt/clist/get"
+# East Money 的 clist 节点各自独立限流：同一时刻有的正常返回、有的直接断开连接。
+# 目录请求失败时轮换到下一个节点，避免整次同步因为恰好选中一个被限流的节点而中止。
+_EASTMONEY_CATALOG_HOSTS = (
+    "82.push2.eastmoney.com",
+    "7.push2.eastmoney.com",
+    "2.push2.eastmoney.com",
+    "88.push2.eastmoney.com",
+)
 _EASTMONEY_HISTORY_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 _TENCENT_HISTORY_URL = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get"
 _EASTMONEY_PAGE_SIZE = 5_000
@@ -85,6 +95,11 @@ _EMPTY_COLUMNS = [
     "amount",
     "bar_status",
 ]
+
+# SH main (t:2) + SH STAR (t:23) + SZ main (t:6) + SZ ChiNext (t:80).  Matches
+# ``_STOCK_BOARDS`` (main/star/chinext) server-side; B shares and the Beijing
+# exchange - which this project's SH/SZ market model does not cover - stay out.
+_EASTMONEY_STOCK_FILTER = "m:0 t:6,m:0 t:80,m:1 t:2,m:1 t:23"
 
 
 class OnlineProviderError(RuntimeError):
@@ -263,6 +278,17 @@ def _mapping_payload(value: object) -> Mapping[str, object]:
     raise OnlineDataError("在线行情响应格式无效")
 
 
+def _catalog_url_candidates(url: str) -> list[str]:
+    """Return the given catalog URL followed by the same path on peer hosts."""
+
+    split = urlsplit(url)
+    hosts: list[str] = [split.netloc]
+    hosts.extend(host for host in _EASTMONEY_CATALOG_HOSTS if host != split.netloc)
+    return [
+        urlunsplit((split.scheme, host, split.path, split.query, split.fragment)) for host in hosts
+    ]
+
+
 def _should_fetch_next_page(total: int, fetched: int, page_rows: int, page_size: int) -> bool:
     """Whether the catalog has more pages after the one just fetched.
 
@@ -322,7 +348,15 @@ class OnlineMarketClient:
         self._page_size = page_size
 
     def fetch_instruments(self, *, timeout: float) -> pd.DataFrame:
-        """Fetch the SH/SZ security list from the public quote list endpoint."""
+        """Fetch the SH/SZ A-share list from the public quote list endpoint.
+
+        The filter is narrowed server-side to the boards this project serves
+        (SH main/star, SZ main/ChiNext) instead of pulling every SH/SZ security
+        (``m:0,m:1`` is ~59k rows including bonds, funds and indices that the
+        board filter discards afterwards).  East Money hard-caps a page at 100
+        rows regardless of ``pz``, so the unfiltered form costs ~590 requests;
+        the narrowed one is ~56.
+        """
 
         page = 1
         rows: list[Mapping[str, object]] = []
@@ -339,7 +373,7 @@ class OnlineMarketClient:
                     "fltt": "2",
                     "invt": "2",
                     "fid": "f12",
-                    "fs": "m:0,m:1",
+                    "fs": _EASTMONEY_STOCK_FILTER,
                     "fields": "f12,f14",
                 },
                 timeout,
@@ -649,7 +683,7 @@ class OnlineMarketClient:
         params: Mapping[str, object],
         timeout: float,
     ) -> Mapping[str, object]:
-        """Fetch one catalog page, retrying provider-side failures.
+        """Fetch one catalog page, retrying provider-side failures across hosts.
 
         East Money answers throttling two different ways: HTTP 200 with
         ``rc != 0`` / ``data: null`` (now rejected by ``_reject_failed_payload``)
@@ -657,23 +691,40 @@ class OnlineMarketClient:
         security list, which made the sync report a clean success with zero
         targets.
 
-        The backoff is deliberately slower than the per-symbol history retry:
-        the server caps a page at 100 rows, so a full catalog is hundreds of
-        requests and any page that exhausts its retries aborts the whole run.
+        Throttling is tracked per host, and one ``push2`` node being closed does
+        not mean the others are, so each retry rotates to the next candidate
+        host.
+
+        A full catalog is dozens of pages and every page has to succeed, so a
+        fixed small attempt count is not enough: at a 50% per-request failure
+        rate five attempts leave roughly a one-in-five chance that *some* page
+        gives up and aborts the whole run.  Each page therefore retries until a
+        time budget is spent instead of a fixed number of tries.
         """
 
+        candidates = _catalog_url_candidates(url)
+        deadline = time.monotonic() + _CATALOG_RETRY_SECONDS
         last_error: OnlineProviderError | None = None
-        for attempt in range(_CATALOG_RETRIES):
+        attempt = 0
+        while True:
+            candidate = candidates[attempt % len(candidates)]
             try:
-                return self._request(url, params, timeout)
+                return self._request(candidate, params, timeout)
             except OnlineProviderError as exc:
                 last_error = exc
+                attempt += 1
+                if attempt >= _CATALOG_MAX_ATTEMPTS or time.monotonic() >= deadline:
+                    break
                 self._sleep_catalog_retry(attempt)
         assert last_error is not None
         raise last_error
 
     def _sleep_catalog_retry(self, attempt: int) -> None:
-        time.sleep(_CATALOG_RETRY_BASE_SECONDS * (2**attempt))
+        delay = min(
+            _CATALOG_RETRY_BASE_SECONDS * (2 ** (attempt - 1)),
+            _CATALOG_RETRY_MAX_SECONDS,
+        )
+        time.sleep(delay)
 
 
 def _default_module() -> OnlineModule:

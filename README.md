@@ -11,7 +11,7 @@
 
 一个独立的跨平台指标筛选、组合与回测应用，使用 Vue/TypeScript + FastAPI。行情保存在本机 DuckDB，可在本项目内自行同步，在此基础上计算和验证交易指标信号。
 
-在线股票行情默认使用项目自有客户端；项目仍内置满足 TDX 兼容同步所需的最小 TCP 客户端和 `.day` 读取器。数据接口来源及第三方许可说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+在线股票行情默认使用项目自有客户端；项目内置 `.day` 读取器用于本地文件导入。数据接口来源及第三方许可说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ![Indicator Lab workflow](assets/branding/indicator-lab-overview.png)
 
@@ -140,7 +140,7 @@ python3 scripts/build_nuitka.py --jobs 4
 
 ## 行情配置
 
-行情从在线数据源（East Money，免费无需密钥；另有 TDX 通路）同步股票、ETF、LOF 和指数日线并写入本机数据库。同步会先检查本地覆盖范围，自动跳过完整区间并补齐缺失区间。本项目不提供通达信文件导入。
+行情从在线数据源（East Money，免费无需密钥）同步股票和场内基金日线并写入本机数据库。同步会先检查本地覆盖范围，自动跳过完整区间并补齐缺失区间。指数与债券没有可用的在线 K 线源。本项目不提供通达信文件导入。
 
 本项目的行情页只负责按市场和代码查询 K 线，并生成日线、月线和年线图表。自定义列表仍可用于筛选和回测，但其中的行情数据来自已配置的行情数据库。
 
@@ -370,9 +370,9 @@ npm run e2e
 
 E2E 测试通过 Playwright 路由模拟 API，不需要真实行情数据库；真实页面运行需要同时启动后端和前端。
 
-## TDX 协议和数据升级流程
+## 在线接口和数据升级流程
 
-1. 需要调整协议时，先阅读 [docs/upstream-api-audit.md](docs/upstream-api-audit.md) 和 `selector_app/tdx_protocol/` 的测试；
+1. 需要调整在线行情接口时，先阅读 [docs/upstream-api-audit.md](docs/upstream-api-audit.md)；
 2. 修改 `.day` 系数、字段或 DuckDB schema 时，先补迁移/备份和回归测试；
 3. 运行后端公式、导入、协议、回测和 API 集成测试；
 4. 运行前端 typecheck/build 及 E2E；
@@ -382,4 +382,4 @@ E2E 测试通过 Playwright 路由模拟 API，不需要真实行情数据库；
 
 本项目自身源代码为陈垦版权所有的商业专有软件，不以 AGPL 或其他开源许可证发布。除非取得书面商业授权，禁止复制、修改、再分发、转售、再许可或反向工程（适用法律强制允许的范围除外）。具体权利和义务以根目录的 [LICENSE](LICENSE) 全文为准。
 
-项目内置 TDX 协议和 `.day` 解析代码的来源、归属及第三方 MIT 许可说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+项目内置 `.day` 解析代码的来源、归属及第三方 MIT 许可说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。

@@ -48,7 +48,6 @@ test('user can start an East Money full-history backfill', async ({ page }) => {
       default_provider: 'eastmoney',
       providers: {
         eastmoney: { provider: 'eastmoney', available: true, version: 'builtin-http-1' },
-        tdx: { provider: 'tdx', available: true },
       },
     },
   } }))
@@ -72,7 +71,7 @@ test('user can start an East Money full-history backfill', async ({ page }) => {
   await page.goto('/market-data')
   await page.getByTestId('market-eastmoney-backfill').click()
   await expect(page.getByTestId('market-data-progress')).toContainText('eastmoney')
-  expect(backfillRequest).toEqual({ provider: 'eastmoney', universe: 'all' })
+  expect(backfillRequest).toEqual({ universe: 'all' })
 })
 
 test('user can see and cancel an active market-data job', async ({ page }) => {
@@ -88,7 +87,7 @@ test('user can see and cancel an active market-data job', async ({ page }) => {
   let activeReads = 0
   let cancelRequest: unknown
   await page.route('**/api/v1/market-data/capabilities', (route) => route.fulfill({ json: {
-    data: { default_provider: 'eastmoney', providers: { eastmoney: { provider: 'eastmoney', available: true }, tdx: { provider: 'tdx', available: true } } },
+    data: { default_provider: 'eastmoney', providers: { eastmoney: { provider: 'eastmoney', available: true } } },
   } }))
   await page.route('**/api/v1/market-data/store', (route) => route.fulfill({ json: { data: {
     database_path: '/data/market/market.duckdb', schema_version: 12, instrument_count: 1,

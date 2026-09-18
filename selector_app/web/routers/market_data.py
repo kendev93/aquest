@@ -55,7 +55,6 @@ from selector_app.screening.jobs import (
     TaskUserError,
     report_progress_detail,
 )
-from selector_app.tdx_protocol.errors import TdxConnectionError
 
 from ..market_source import resolve_market_status
 from ..schemas import MarketSyncRequest
@@ -236,13 +235,7 @@ def market_data_capabilities(request: Request) -> dict[str, object]:
         "data": {
             "default_provider": "eastmoney",
             "instrument_count": 0,
-            "providers": {
-                "tdx": {
-                    "provider": "tdx",
-                    "available": True,
-                    "instrument_types": ["stock", "fund", "index", "bond"],
-                }
-            },
+            "providers": {},
         }
     }
 
@@ -429,10 +422,6 @@ def _create_sync_job(
             raise TaskCancelledError(str(exc)) from exc
         except OnlineProviderError as exc:
             raise TaskUserError(str(exc)) from exc
-        except TdxConnectionError as exc:
-            raise TaskUserError(
-                "完整证券列表获取失败，本次同步已停止，请检查 TDX 连接后重试。"
-            ) from exc
         except (MarketDataStoreError, duckdb.Error) as exc:
             raise TaskUserError(_storage_error_message(exc)) from exc
         if abort_check():

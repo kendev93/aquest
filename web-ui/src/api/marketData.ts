@@ -8,7 +8,6 @@ import type {
   LocalMarketChart,
   LocalMarketScope,
   MarketDataCapabilities,
-  MarketDataProvider,
   MarketChartPeriod,
 } from '../types'
 import type { MarketSyncJobState, MarketSyncResult } from '../types'
@@ -102,7 +101,6 @@ export async function fetchMarketDataCapabilities(): Promise<MarketDataCapabilit
 }
 
 export async function createMarketDataSync(payload: {
-  provider?: MarketDataProvider
   universe?: 'all' | 'sh' | 'sz'
   bars?: number
   instrument_types?: InstrumentType[]
@@ -123,14 +121,13 @@ export async function createOnlineBackfill(payload: {
     `${API_BASE}/backfill`,
     {
       method: 'POST',
-      body: JSON.stringify({ provider: 'eastmoney', ...payload }),
+      body: JSON.stringify(payload),
     },
   )
   return response.data
 }
 
 export async function createOnlineSync(payload: {
-  provider?: MarketDataProvider
   universe?: 'all' | 'sh' | 'sz'
   bars?: number
   instrument_types?: InstrumentType[]

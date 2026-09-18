@@ -56,6 +56,8 @@ def test_fetch_instruments_maps_eastmoney_rows_and_paginates() -> None:
     assert transport.calls[1][1]["pn"] == "2"
     assert transport.calls[0][1]["pz"] == "2"
     assert transport.calls[0][1]["fields"] == "f12,f14"
+    # 股票目录必须在服务端就按板块收窄，否则会拉全市场 59k 条再丢掉大半。
+    assert transport.calls[0][1]["fs"] == "m:0 t:6,m:0 t:80,m:1 t:2,m:1 t:23"
     assert transport.calls[0][2] == 12.5
 
 
@@ -215,13 +217,16 @@ def test_security_list_rejects_eastmoney_soft_failure(monkeypatch) -> None:
     from selector_app.adapters import online_market_sync as module
 
     monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
-    transport = FakeTransport([{"rc": 102, "data": None}] * module._CATALOG_RETRIES)
+    # 单页重试是"时间预算 + 次数上限"；测试把上限压到 3，预算给足以免提前退出。
+    monkeypatch.setattr(module, "_CATALOG_RETRY_SECONDS", 60.0)
+    monkeypatch.setattr(module, "_CATALOG_MAX_ATTEMPTS", 3)
+    transport = FakeTransport([{"rc": 102, "data": None}] * 3)
 
     with pytest.raises(OnlineProviderError, match="rc=102"):
         OnlineMarketClient(transport=transport).fetch_instruments(timeout=5.0)
 
-    # 失败要重试，而不是第一次就放弃。
-    assert len(transport.calls) == module._CATALOG_RETRIES
+    # 失败要重试到上限，而不是第一次就放弃。
+    assert len(transport.calls) == 3
 
 
 def test_security_list_retries_soft_failure_then_succeeds(monkeypatch) -> None:
@@ -238,6 +243,29 @@ def test_security_list_retries_soft_failure_then_succeeds(monkeypatch) -> None:
     frame = OnlineMarketClient(transport=transport).fetch_instruments(timeout=5.0)
 
     assert frame.to_dict(orient="records") == [{"代码": "600000", "名称": "浦发银行"}]
+
+
+def test_security_list_rotates_hosts_when_one_node_is_throttled(monkeypatch) -> None:
+    """East Money 的 clist 节点各自独立限流，重试必须换节点而不是打同一个。"""
+
+    from selector_app.adapters import online_market_sync as module
+
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+    transport = FakeTransport(
+        [
+            {"rc": 102, "data": None},  # 第一个节点被限流
+            {"rc": 0, "data": {"total": 1, "diff": [{"f12": "600000", "f14": "浦发银行"}]}},
+        ]
+    )
+
+    OnlineMarketClient(transport=transport).fetch_instruments(timeout=5.0)
+
+    first_host = transport.calls[0][0].split("/")[2]
+    second_host = transport.calls[1][0].split("/")[2]
+    assert first_host != second_host
+    # 路径保持不变，只是换节点。
+    assert transport.calls[0][0].endswith("/api/qt/clist/get")
+    assert transport.calls[1][0].endswith("/api/qt/clist/get")
 
 
 def test_empty_security_list_stays_empty_when_the_provider_reports_success() -> None:

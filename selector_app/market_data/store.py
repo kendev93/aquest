@@ -78,7 +78,7 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
         self,
         frame: pd.DataFrame,
         *,
-        provider: str = "tdx",
+        provider: str = "eastmoney",
     ) -> tuple[int, int]:
         return self._bars.upsert_online_bars(frame, provider=provider)
 

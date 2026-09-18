@@ -196,11 +196,13 @@ class DuckDbBarsStore:
         self,
         frame: pd.DataFrame,
         *,
-        provider: str = "tdx",
+        provider: str = "eastmoney",
     ) -> tuple[int, int]:
         """Upsert online rows without overwriting any local row."""
 
         self._store._require_writer()
+        # "tdx" stays accepted for compatibility with callers replaying rows that
+        # were downloaded by the removed legacy provider.
         if provider not in {"tdx", "eastmoney"}:
             raise ValueError(f"在线行情数据源无效: {provider}")
         if frame.empty:

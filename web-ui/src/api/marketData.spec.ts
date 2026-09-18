@@ -153,7 +153,6 @@ describe('market data API', () => {
           instrument_count: 5219,
           providers: {
             eastmoney: { provider: 'eastmoney', available: true, version: 'builtin-http-1' },
-            tdx: { provider: 'tdx', available: true },
           },
         },
       }), { status: 200 }),
@@ -177,7 +176,7 @@ describe('market data API', () => {
       '/api/v1/market-data/backfill',
       expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify({ provider: 'eastmoney', universe: 'sh', boards: ['main'] }),
+        body: JSON.stringify({ universe: 'sh', boards: ['main'] }),
       }),
     )
   })

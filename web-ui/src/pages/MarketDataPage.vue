@@ -22,7 +22,6 @@ import type {
   LocalMarketChart,
   LocalMarketScope,
   MarketDataCapabilities,
-  MarketDataProvider,
   MarketChartPeriod,
   MarketSyncJobState,
 } from '../types'
@@ -55,8 +54,7 @@ const BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
 
 const form = reactive({
   syncUniverse: 'all' as 'all' | 'sh' | 'sz',
-  syncProvider: 'eastmoney' as MarketDataProvider,
-  syncInstrumentTypes: [] as InstrumentType[],
+  syncInstrumentTypes: ['stock'] as InstrumentType[],
   syncBoards: [] as InstrumentBoard[],
   market: 'all' as LocalMarketScope,
   keyword: '',
@@ -124,7 +122,8 @@ const syncPhaseText = computed(() => ({
 }[marketJob.value?.phase ?? ''] ?? null))
 
 const syncProviderLabel = computed(() => {
-  const provider = marketJob.value?.metadata?.provider ?? form.syncProvider
+  // 只用于展示：历史任务可能来自已移除的 TDX 通道。
+  const provider = marketJob.value?.metadata?.provider
   if (provider === 'tdx') return ' TDX '
   if (provider === 'tencent') return ' Tencent '
   return ' East Money '
@@ -181,7 +180,7 @@ const currentSyncStatusText = computed(() => {
 })
 
 const currentSyncProviderText = computed(() => {
-  const provider = marketJob.value?.metadata?.provider ?? form.syncProvider
+  const provider = marketJob.value?.metadata?.provider
   if (provider === 'tdx') return 'TDX'
   if (provider === 'tencent') return 'Tencent'
   return 'East Money'
@@ -269,7 +268,7 @@ const marketProgressIndeterminate = computed(() => Boolean(
 ))
 
 function activeJobDescription(job: MarketSyncJobState): string {
-  return job.description || (job.metadata?.provider === 'tdx' ? 'TDX 行情同步' : 'East Money 行情同步')
+  return job.description || 'East Money 行情同步'
 }
 
 function apiMessage(error: unknown): string {
@@ -428,7 +427,7 @@ function beginJob(jobId: string, status: string): void {
     errors: 0,
     error: null,
     result: null,
-    metadata: { provider: form.syncProvider },
+    metadata: { provider: 'eastmoney' },
   }
   marketJob.value = state
   updateActiveMarketJob(state)
@@ -459,7 +458,6 @@ async function syncOnlineData(): Promise<void> {
   message.value = ''
   try {
     const job = await createOnlineSync({
-      provider: form.syncProvider,
       universe: form.syncUniverse,
       bars: 800,
       ...syncScopePayload(),
@@ -662,14 +660,13 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
             <div><label for="market-sync-universe">同步市场</label><select id="market-sync-universe" v-model="form.syncUniverse" data-testid="market-sync-universe"><option value="all">沪深全部</option><option value="sh">仅上海</option><option value="sz">仅深圳</option></select></div>
             <div class="scope-options"><span>证券类型</span><label v-for="option in INSTRUMENT_TYPE_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-sync-type-${option.key}`" :checked="form.syncInstrumentTypes.includes(option.key)" @change="toggleInstrumentType(option.key)">{{ option.label }}</label></div>
             <div class="scope-options"><span>板块</span><label v-for="option in BOARD_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-sync-board-${option.key}`" :checked="form.syncBoards.includes(option.key)" @change="toggleBoard(option.key)">{{ option.label }}</label></div>
-            <div class="scope-options provider-options"><span>行情源</span><label><input v-model="form.syncProvider" type="radio" value="eastmoney" data-testid="market-provider-eastmoney">East Money（默认）</label><label><input v-model="form.syncProvider" type="radio" value="tdx" data-testid="market-provider-tdx">TDX（遗留）</label></div>
-            <small class="scope-helper">板块未勾选表示不限制；类型和板块同时选择时取交集。证券类型未勾选时默认只同步股票，需要 ETF 请显式勾选「基金/ETF」。主板、科创板和创业板股票以及场内基金默认使用 East Money；全量补齐按钮只请求缺失历史区间。</small>
+            <small class="scope-helper">板块未勾选表示不限制；类型和板块同时选择时取交集。证券类型默认勾选「股票/B股」，要下 ETF 再勾选「基金/ETF」；指数和债券暂无在线 K 线数据源。全量补齐按钮只请求缺失历史区间。</small>
             <small v-if="providerCapabilities?.providers.eastmoney?.history_sources?.length" class="scope-helper">East Money 备用接口：{{ providerCapabilities.providers.eastmoney.history_sources.join(' → ') }}</small>
             <small v-if="providerCapabilities?.providers.eastmoney && !providerCapabilities.providers.eastmoney.available" class="scope-warning">{{ providerCapabilities.providers.eastmoney.error || 'East Money 当前不可用，请重新构建 Docker 镜像。' }}</small>
           </div>
           <div class="market-sync-actions">
             <button class="primary-button" data-testid="market-sync-online" type="button" :disabled="syncLoading" @click="syncOnlineData">一键同步行情</button>
-            <button v-if="form.syncProvider === 'eastmoney'" class="secondary-button" data-testid="market-eastmoney-backfill" type="button" :disabled="syncLoading" @click="backfillOnlineData">{{ syncLoading ? '回填进行中…' : 'East Money 全量补齐' }}</button>
+            <button class="secondary-button" data-testid="market-eastmoney-backfill" type="button" :disabled="syncLoading" @click="backfillOnlineData">{{ syncLoading ? '回填进行中…' : 'East Money 全量补齐' }}</button>
           </div>
           </div>
           <div v-if="marketJob" class="sync-progress" data-testid="market-data-progress">

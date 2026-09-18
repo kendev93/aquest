@@ -17,7 +17,6 @@ export interface DateRangeSelection {
   startDate: string
   endDate: string
 }
-export type MarketDataProvider = 'eastmoney' | 'tdx'
 export type MarketSyncRangePreset = 'all' | '5y' | '3y' | '1y' | 'ytd' | 'custom'
 export type RuleMode = 'signals' | 'conditions'
 export type ConditionOperator = 'gt' | 'gte' | 'lt' | 'lte' | 'eq' | 'neq' | 'cross_up' | 'cross_down'
@@ -181,7 +180,8 @@ export interface ActiveJobState {
 
 export interface MarketSyncResult {
   source?: 'online' | 'online_discovery'
-  provider?: MarketDataProvider | 'mixed'
+  /** 后端返回的字符串；历史记录里可能是已移除的 'tdx'。 */
+  provider?: string
   status?: 'skipped'
   reason?: string
   updated_files?: number
@@ -240,7 +240,7 @@ export interface MarketSyncJobState {
 }
 
 export interface MarketDataProviderCapability {
-  provider: MarketDataProvider
+  provider: string
   available: boolean
   read_only?: boolean
   version?: string | null
@@ -254,7 +254,7 @@ export interface MarketDataProviderCapability {
 }
 
 export interface MarketDataCapabilities {
-  default_provider: MarketDataProvider
+  default_provider: string
   read_only?: boolean
   supports_full_sync?: boolean
   database_path?: string
@@ -267,7 +267,7 @@ export interface MarketDataCapabilities {
   last_online_provider?: string | null
   last_online_provider_version?: string | null
   instrument_list_fingerprint?: string | null
-  providers: Partial<Record<MarketDataProvider, MarketDataProviderCapability>>
+  providers: Partial<Record<string, MarketDataProviderCapability>>
 }
 
 export interface DataStoreStatus {

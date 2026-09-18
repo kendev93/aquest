@@ -366,6 +366,7 @@ def test_schema_upgrade_backfills_provider_for_legacy_online_rows(tmp_path: Path
     ref = store.list_instruments()[0]
     bar = store.read_bars("SH", "600000").iloc[0]
 
+    # 历史在线行由已移除的 TDX 通道写入，迁移仍按 tdx 标记保留原貌。
     assert ref.provider == "tdx"
     assert bar["provider"] == "tdx"
 

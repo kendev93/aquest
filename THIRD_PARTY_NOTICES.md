@@ -1,12 +1,16 @@
 # Third-party notices
 
-## TDX 协议和 `.day` 解析参考
+## `.day` 文件解析参考
 
 本节中的上游项目名称仅用于许可证归属和技术参考，不代表指标实验室与任何上游项目存在品牌或官方关联。
 
-本项目运行时不依赖 `easy-tdx`。`selector_app/tdx_protocol/` 和
-`selector_app/market_data/day_format.py` 的协议字段、`.day` 记录格式、价格/成交量系数和部分容错行为，参考并改写自 MIT 许可的
+本项目运行时不依赖 `easy-tdx`。`selector_app/market_data/day_format.py` 的
+`.day` 记录格式、价格/成交量系数和部分容错行为，参考并改写自 MIT 许可的
 `easy-tdx`/`pytdx`/`xmtdx` 相关实现与测试；项目没有把上游包作为依赖，也没有在运行时导入其模块。
+
+> 说明：原有基于同批参考实现的 TDX 在线行情协议客户端（`selector_app/tdx_protocol/`）已于
+> 2026-09-18 移除，因为公共 TDX 行情服务器已不再稳定响应，且 East Money 已覆盖其全部可下载品种。
+> 因此本节的上游归属现在只适用于仍保留的 `.day` 读取器。
 
 上游项目及其相关声明：
 

@@ -50,7 +50,6 @@ describe('MarketDataPage', () => {
       default_provider: 'eastmoney',
       providers: {
         eastmoney: { provider: 'eastmoney', available: true, version: 'builtin-http-1', instrument_types: ['stock'] },
-        tdx: { provider: 'tdx', available: true, instrument_types: ['stock', 'fund', 'index', 'bond'] },
       },
     })
     vi.mocked(marketApi.fetchActiveMarketDataJobs).mockResolvedValue([])
@@ -137,9 +136,9 @@ describe('MarketDataPage', () => {
     await flushPromises()
 
     expect(marketApi.createOnlineSync).toHaveBeenCalledWith({
-      provider: 'eastmoney',
       universe: 'all',
       bars: 800,
+      instrument_types: ['stock'],
     })
     expect(wrapper.get('[data-testid="market-data-progress"]').text()).not.toContain('文件导入')
     expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('更新标的 1')
@@ -148,21 +147,25 @@ describe('MarketDataPage', () => {
     expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('新增标的 3')
   })
 
-  it('uses East Money by default and allows switching to TDX', async () => {
-    vi.mocked(marketApi.createOnlineSync).mockResolvedValue({ job_id: 'tdx-1', status: 'queued' })
+  it('syncs through East Money without offering a provider switch', async () => {
+    vi.mocked(marketApi.createOnlineSync).mockResolvedValue({ job_id: 'online-2', status: 'queued' })
     vi.mocked(marketApi.getMarketDataJob).mockResolvedValue({
-      job_id: 'tdx-1', status: 'completed', progress: 1, total_candidates: 0,
-      total_scanned: 0, errors: 0, error: null, result: { source: 'online', provider: 'tdx' },
+      job_id: 'online-2', status: 'completed', progress: 1, total_candidates: 0,
+      total_scanned: 0, errors: 0, error: null, result: { source: 'online', provider: 'eastmoney' },
     })
     const wrapper = mount(MarketDataPage)
     await flushPromises()
 
-    expect(wrapper.get('[data-testid="market-provider-eastmoney"]').element).toHaveProperty('checked', true)
-    await wrapper.get('[data-testid="market-provider-tdx"]').setValue()
+    // TDX 通道已移除，界面上不再有行情源单选。
+    expect(wrapper.find('[data-testid="market-provider-tdx"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="market-provider-eastmoney"]').exists()).toBe(false)
+
     await wrapper.get('[data-testid="market-sync-online"]').trigger('click')
     await flushPromises()
 
-    expect(marketApi.createOnlineSync).toHaveBeenCalledWith(expect.objectContaining({ provider: 'tdx' }))
+    expect(marketApi.createOnlineSync).toHaveBeenCalledWith(
+      expect.not.objectContaining({ provider: expect.anything() }),
+    )
   })
 
   it('starts an East Money full-history backfill for the selected scope', async () => {
@@ -462,8 +465,11 @@ describe('MarketDataPage', () => {
     const wrapper = mount(MarketDataPage)
     await flushPromises()
 
+    // 证券类型默认勾选「股票/B股」；可以取消再勾回。
     const syncType = wrapper.get<HTMLInputElement>('[data-testid="market-sync-type-stock"]')
-    expect(syncType.element.checked).toBe(false)
+    expect(syncType.element.checked).toBe(true)
+    await syncType.setValue(false)
+    expect(wrapper.get<HTMLInputElement>('[data-testid="market-sync-type-stock"]').element.checked).toBe(false)
     await syncType.setValue(true)
     expect(wrapper.get<HTMLInputElement>('[data-testid="market-sync-type-stock"]').element.checked).toBe(true)
 

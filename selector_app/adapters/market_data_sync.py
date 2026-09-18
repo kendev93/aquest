@@ -47,7 +47,6 @@ from .market_sync import (
     MarketSyncConfig,
     MarketSyncReport,
     ProgressCallback,
-    TdxMarketSync,
 )
 from .online_market_sync import OnlineMarketSync, OnlineModuleFactory, OnlineProviderError
 
@@ -78,18 +77,16 @@ class ProviderSyncService(Protocol):
 
 
 class MarketDataSync:
-    """Route the default Online flow while retaining TDX compatibility."""
+    """Route the default Online flow (East Money is the only provider)."""
 
     def __init__(
         self,
         store: DuckDbMarketDataStore | None = None,
         *,
-        tdx_sync: ProviderSyncService | None = None,
         eastmoney_sync: ProviderSyncService | None = None,
         eastmoney_module_factory: OnlineModuleFactory | None = None,
     ) -> None:
         selected_store = store or DuckDbMarketDataStore()
-        self._tdx_sync = tdx_sync or TdxMarketSync(store=selected_store)
         self._eastmoney_sync = eastmoney_sync or OnlineMarketSync(
             store=selected_store,
             module_factory=eastmoney_module_factory,
@@ -494,13 +491,6 @@ class MarketDataSync:
             },
             "providers": {
                 "eastmoney": eastmoney_capabilities,
-                "tdx": {
-                    "provider": "tdx",
-                    "available": True,
-                    "version": None,
-                    "instrument_types": ["stock", "fund", "index", "bond"],
-                    "boards": ["main", "star", "chinext", "b_share", "fund", "index", "bond"],
-                },
             },
         }
 
@@ -508,14 +498,12 @@ class MarketDataSync:
         self,
         config: MarketSyncConfig,
     ) -> list[tuple[str, MarketSyncConfig, ProviderSyncService]]:
-        if config.provider == "tdx":
-            return [("tdx", config, self._tdx_sync)]
         _validate_eastmoney_scope(config)
         eastmoney_types = _eastmoney_types(config)
         if not eastmoney_types:
             raise OnlineProviderError(
                 "East Money 当前只支持主板、科创板、创业板股票和场内基金；"
-                "B 股、指数、债券请切换为 TDX。"
+                "指数与债券没有可用的在线 K 线数据源。"
             )
         return [
             (
@@ -697,7 +685,8 @@ def _validate_eastmoney_scope(config: MarketSyncConfig) -> None:
         unsupported = sorted({*unsupported_types, *unsupported_boards})
         raise OnlineProviderError(
             "East Money 当前仅支持主板、科创板、创业板股票和场内基金；"
-            f"当前范围包含不支持的品种/板块: {', '.join(unsupported)}，请切换为 TDX。"
+            f"当前范围包含不支持的品种/板块: {', '.join(unsupported)}，"
+            "指数与债券暂无在线 K 线数据源。"
         )
 
 
@@ -917,11 +906,9 @@ def _as_string_tuple(value: object) -> tuple[str, ...]:
 
 
 def cast_provider(value: str) -> ResolvedMarketDataProvider:
-    if value == "eastmoney":
-        return "eastmoney"
-    if value == "tdx":
-        return "tdx"
-    return "mixed"
+    # Historical metadata written by the removed legacy TDX provider maps to the
+    # "mixed" catch-all so old store rows keep deserializing.
+    return "eastmoney" if value == "eastmoney" else "mixed"
 
 
 __all__ = ["MarketDataSync", "ProviderSyncService"]

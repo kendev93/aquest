@@ -15,7 +15,7 @@ from selector_app.condition_research.models import ConditionResearchConfig
 from selector_app.formulas.custom import FormulaParseError, custom_output_id, parse_formula
 from selector_app.formulas.registry import FORMULA_REGISTRY
 from selector_app.market_data.adapter import parse_universe_code
-from selector_app.market_data.models import InstrumentBoard, InstrumentType, MarketDataProvider
+from selector_app.market_data.models import InstrumentBoard, InstrumentType
 from selector_app.market_data.scope import InstrumentScope
 from selector_app.portfolio_backtest.models import (
     PortfolioBacktestConfig,
@@ -317,7 +317,9 @@ class MarketSyncRequest(BaseModel):
 
     vipdoc_path: str | None = Field(default=None, max_length=1024)
     universe: Literal["all", "sh", "sz"] = "all"
-    provider: MarketDataProvider = "eastmoney"
+    # The legacy TDX provider was removed; the field stays for API compatibility
+    # and only accepts the default so old callers sending it do not 422.
+    provider: Literal["eastmoney"] = "eastmoney"
     bars: int = Field(default=800, ge=1, le=800)
     instrument_types: list[InstrumentType] | None = Field(default=None, max_length=4)
     boards: list[InstrumentBoard] | None = Field(default=None, max_length=7)

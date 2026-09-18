@@ -7,7 +7,6 @@ import shutil
 import time
 from collections import Counter
 from collections.abc import Mapping
-from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -193,15 +192,10 @@ def create_rate_state(manager: Any) -> tuple[Any, Any]:
     state = manager.dict(
         {
             "next_allowed_eastmoney": 0.0,
-            "next_allowed_tdx": 0.0,
             "interval_eastmoney": _DEFAULT_REQUEST_INTERVAL_SECONDS,
-            "interval_tdx": _DEFAULT_REQUEST_INTERVAL_SECONDS,
             "successes_eastmoney": 0,
-            "successes_tdx": 0,
             "rate_limit_events_eastmoney": 0,
-            "rate_limit_events_tdx": 0,
             "backoffs_eastmoney": 0,
-            "backoffs_tdx": 0,
         }
     )
     return state, manager.Lock()
@@ -214,7 +208,7 @@ def rate_state_snapshot(state: Any) -> dict[str, object]:
             "rate_limit_events": int(state[f"rate_limit_events_{provider}"]),
             "backoffs": int(state[f"backoffs_{provider}"]),
         }
-        for provider in ("eastmoney", "tdx")
+        for provider in ("eastmoney",)
     }
     return {
         "request_interval_seconds": max(
@@ -491,11 +485,7 @@ def cleanup_stale_staging(
 def run_stage_worker(request: StageWorkerRequest) -> StageWorkerResult:
     """Entry point executed in a spawned process; imports providers lazily."""
 
-    from selector_app.adapters.market_sync import (
-        MarketDataCancelledError,
-        TdxMarketSync,
-        _default_client,
-    )
+    from selector_app.adapters.market_sync import MarketDataCancelledError
     from selector_app.adapters.online_market_sync import OnlineMarketSync
 
     gate = ProcessRateGate(request.rate_state, request.rate_lock)
@@ -509,17 +499,11 @@ def run_stage_worker(request: StageWorkerRequest) -> StageWorkerResult:
     staged_rows = 0
     failures: Counter[str] = Counter()
     history_sources: Counter[str] = Counter()
-    with StageWriter(request.stage_path) as writer, ExitStack() as stack:
-        provider: Any
-        client: Any = None
-        if request.provider == "eastmoney":
-            provider = OnlineMarketSync(
-                store=None,
-                clock=lambda: request.as_of,
-            )
-        else:
-            provider = TdxMarketSync(store=None, clock=lambda: request.as_of)
-            client = stack.enter_context(_default_client(float(request.config.timeout)))
+    with StageWriter(request.stage_path) as writer:
+        provider = OnlineMarketSync(
+            store=None,
+            clock=lambda: request.as_of,
+        )
         for target in request.targets:
             if cancel():
                 raise MarketDataCancelledError("行情同步已取消")
@@ -536,21 +520,12 @@ def run_stage_worker(request: StageWorkerRequest) -> StageWorkerResult:
                 },
             )
             try:
-                if request.provider == "eastmoney":
-                    result = provider.fetch_stage_target(
-                        target,
-                        request.config,
-                        abort_check=cancel,
-                        rate_gate=gate,
-                    )
-                else:
-                    result = provider.fetch_stage_target(
-                        client,
-                        target,
-                        request.config,
-                        abort_check=cancel,
-                        rate_gate=gate,
-                    )
+                result = provider.fetch_stage_target(
+                    target,
+                    request.config,
+                    abort_check=cancel,
+                    rate_gate=gate,
+                )
                 staged = writer.write_target(
                     target,
                     result.frame,

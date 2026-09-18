@@ -506,50 +506,18 @@ def test_eastmoney_sync_can_be_cancelled_before_fetching_bars(tmp_path: Path) ->
     assert module.history_requests == []
 
 
-def test_market_data_sync_defaults_to_eastmoney_without_calling_tdx(
-    tmp_path: Path,
-) -> None:
+def test_market_data_sync_routes_every_run_through_eastmoney(tmp_path: Path) -> None:
     eastmoney = FakeOnline()
-    calls: list[str] = []
-
-    class FakeTdx:
-        def discover_instruments(self, config: MarketSyncConfig, *, detail_callback=None):
-            calls.append(f"discover:{config.instrument_types}")
-            return {
-                "source": "online_discovery",
-                "total_candidates": 1,
-                "listed_instruments": 1,
-                "filtered_instruments": 0,
-                "new_instruments": 0,
-                "existing_instruments": 1,
-                "target_source": "tdx_security_list",
-            }
-
-        def sync(self, config: MarketSyncConfig, progress_callback=None, *, detail_callback=None):
-            calls.append(f"sync:{config.instrument_types}")
-            return {
-                "source": "online",
-                "provider": "tdx",
-                "total_candidates": 1,
-                "processed": 1,
-                "updated_files": 0,
-                "unchanged_files": 1,
-                "written_bars": 0,
-                "errors": 0,
-                "failure_reasons": {},
-            }
 
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     service = MarketDataSync(
         store=store,
         eastmoney_module_factory=lambda: eastmoney,
-        tdx_sync=FakeTdx(),
     )
 
     report = service.discover_instruments(MarketSyncConfig(sync_workers=1))
 
     assert report.provider == "eastmoney"
-    assert calls == []
     assert report.listed_instruments == 3
 
     sync_report = service.sync(MarketSyncConfig(sync_workers=1))
@@ -558,57 +526,17 @@ def test_market_data_sync_defaults_to_eastmoney_without_calling_tdx(
     assert store.get_meta("last_online_provider") == "eastmoney"
 
 
-def test_market_data_sync_can_use_legacy_tdx_explicitly(tmp_path: Path) -> None:
-    calls: list[str] = []
-
-    class FakeTdx:
-        def discover_instruments(self, config: MarketSyncConfig, *, detail_callback=None):
-            del detail_callback
-            calls.append(f"discover:{config.provider}")
-            return {
-                "source": "online_discovery",
-                "total_candidates": 1,
-                "listed_instruments": 1,
-                "filtered_instruments": 0,
-                "new_instruments": 0,
-                "existing_instruments": 1,
-                "target_source": "tdx_security_list",
-            }
-
-        def sync(self, config: MarketSyncConfig, progress_callback=None, *, detail_callback=None):
-            del config, progress_callback, detail_callback
-            return {
-                "source": "online",
-                "provider": "tdx",
-                "total_candidates": 1,
-                "processed": 1,
-                "updated_files": 0,
-                "unchanged_files": 1,
-                "written_bars": 0,
-                "errors": 0,
-                "failure_reasons": {},
-            }
-
-    service = MarketDataSync(
-        store=DuckDbMarketDataStore(tmp_path / "market.duckdb"),
-        tdx_sync=FakeTdx(),
-    )
-
-    report = service.discover_instruments(MarketSyncConfig(provider="tdx", sync_workers=1))
-
-    assert report.provider == "tdx"
-    assert calls == ["discover:tdx"]
-
-
 def test_eastmoney_mode_rejects_explicitly_unsupported_instrument_scope(tmp_path: Path) -> None:
     service = MarketDataSync(store=DuckDbMarketDataStore(tmp_path / "market.duckdb"))
 
     # Stocks and exchange-traded funds are served by East Money; bonds and
-    # indexes still are not, so they keep falling back to TDX.
-    with pytest.raises(OnlineProviderError, match="TDX"):
+    # indexes have no online daily-bar source at all.
+    with pytest.raises(OnlineProviderError, match="暂无在线"):
         service.discover_instruments(MarketSyncConfig(instrument_types=("bond",), sync_workers=1))
 
 
-def test_market_sync_config_rejects_unknown_provider() -> None:
+def test_market_sync_config_rejects_unknown_and_removed_providers() -> None:
     with pytest.raises(ValueError, match="行情数据源"):
         MarketSyncConfig(provider="unknown")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="行情数据源"):
+        MarketSyncConfig(provider="tdx")  # type: ignore[arg-type]
