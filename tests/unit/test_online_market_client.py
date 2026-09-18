@@ -5,7 +5,11 @@ from collections.abc import Mapping
 import pandas as pd
 import pytest
 
-from selector_app.adapters.online_market_sync import OnlineDataError, OnlineMarketClient
+from selector_app.adapters.online_market_sync import (
+    OnlineDataError,
+    OnlineMarketClient,
+    OnlineProviderError,
+)
 
 
 class FakeTransport:
@@ -152,6 +156,98 @@ def test_online_client_rejects_malformed_eastmoney_payload() -> None:
             "20260911",
             timeout=5.0,
         )
+
+
+def test_security_list_keeps_paging_when_the_server_caps_page_size() -> None:
+    """East Money caps a page at 100 rows even when ``pz`` asks for more.
+
+    Stopping on "short page" truncates the catalog to the first page, which is
+    sorted by code descending and holds no A-share at all - the sync then finds
+    zero targets and reports a clean success.
+    """
+
+    def page_of(start: int, count: int) -> dict[str, object]:
+        return {
+            "rc": 0,
+            "data": {
+                "total": 250,
+                "diff": [
+                    {"f12": f"{start + index:06d}", "f14": f"样本{index}"} for index in range(count)
+                ],
+            },
+        }
+
+    transport = FakeTransport(
+        [
+            page_of(0, 100),  # 服务端把 pz=5000 截成 100
+            page_of(100, 100),
+            page_of(200, 50),
+        ]
+    )
+
+    frame = OnlineMarketClient(transport=transport).fetch_instruments(timeout=5.0)
+
+    assert len(frame) == 250
+    assert [call[1]["pn"] for call in transport.calls] == ["1", "2", "3"]
+
+
+def test_security_list_stops_on_a_short_page_when_total_is_unknown() -> None:
+    transport = FakeTransport(
+        [
+            {"data": {"diff": [{"f12": "600000", "f14": "浦发银行"}]}},
+            {"data": {"diff": []}},
+        ]
+    )
+
+    frame = OnlineMarketClient(transport=transport, page_size=100).fetch_instruments(timeout=5.0)
+
+    assert len(frame) == 1
+    assert len(transport.calls) == 1
+
+
+def test_security_list_rejects_eastmoney_soft_failure(monkeypatch) -> None:
+    """HTTP 200 + ``rc != 0`` must not be mistaken for "no securities".
+
+    East Money answers throttling this way.  Treating it as an empty list makes a
+    broken sync look like a successful one with zero targets.
+    """
+
+    from selector_app.adapters import online_market_sync as module
+
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+    transport = FakeTransport([{"rc": 102, "data": None}] * module._CATALOG_RETRIES)
+
+    with pytest.raises(OnlineProviderError, match="rc=102"):
+        OnlineMarketClient(transport=transport).fetch_instruments(timeout=5.0)
+
+    # 失败要重试，而不是第一次就放弃。
+    assert len(transport.calls) == module._CATALOG_RETRIES
+
+
+def test_security_list_retries_soft_failure_then_succeeds(monkeypatch) -> None:
+    from selector_app.adapters import online_market_sync as module
+
+    monkeypatch.setattr(module.time, "sleep", lambda _seconds: None)
+    transport = FakeTransport(
+        [
+            {"rc": 102, "data": None},
+            {"rc": 0, "data": {"total": 1, "diff": [{"f12": "600000", "f14": "浦发银行"}]}},
+        ]
+    )
+
+    frame = OnlineMarketClient(transport=transport).fetch_instruments(timeout=5.0)
+
+    assert frame.to_dict(orient="records") == [{"代码": "600000", "名称": "浦发银行"}]
+
+
+def test_empty_security_list_stays_empty_when_the_provider_reports_success() -> None:
+    """``rc == 0`` with no rows is a genuinely empty catalog, not an error."""
+
+    transport = FakeTransport([{"rc": 0, "data": {"total": 0, "diff": []}}])
+
+    frame = OnlineMarketClient(transport=transport).fetch_instruments(timeout=5.0)
+
+    assert frame.empty
 
 
 def test_fetch_funds_lofs_and_indexes_uses_catalog_filters() -> None:

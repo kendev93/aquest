@@ -57,6 +57,10 @@ _FULL_HISTORY_START = date(1990, 1, 1)
 _INCREMENTAL_OVERLAP_DAYS = 10
 _MAX_RETRIES = 3
 _RETRY_BASE_SECONDS = 0.25
+# 证券列表：服务端每页只给 100 条，全量目录要几百个请求，任一页重试耗尽就会
+# 让整次同步失败，所以退避比逐只日线更慢、次数更多。
+_CATALOG_RETRIES = 5
+_CATALOG_RETRY_BASE_SECONDS = 1.0
 _REQUEST_INTERVAL_SECONDS = 0.15
 _STOCK_BOARDS = frozenset({"main", "star", "chinext"})
 _EASTMONEY_LIST_URL = "https://82.push2.eastmoney.com/api/qt/clist/get"
@@ -64,6 +68,10 @@ _EASTMONEY_FUND_LIST_URL = "https://88.push2.eastmoney.com/api/qt/clist/get"
 _EASTMONEY_HISTORY_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 _TENCENT_HISTORY_URL = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get"
 _EASTMONEY_PAGE_SIZE = 5_000
+# East Money silently caps ``pz`` at 100 rows per page no matter what we ask for,
+# so a full A-share catalog needs hundreds of pages.  The old 100-page ceiling
+# truncated the list to whatever the first pages happened to contain.
+_MAX_CATALOG_PAGES = 1_000
 _EASTMONEY_UT = "bd1d9ddb04089700cf9c27f6f7426281"
 _EASTMONEY_HISTORY_UT = "7eea3edcaed734bea9cbfc24409ed989"
 _USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
@@ -208,6 +216,30 @@ def _http_transport(url: str, params: Mapping[str, object], timeout: float) -> o
         raise OnlineProviderError(f"在线行情网络请求失败: {exc}") from exc
 
 
+def _reject_failed_payload(payload: Mapping[str, object]) -> Mapping[str, object]:
+    """Reject East Money's soft failures (HTTP 200 with ``rc != 0``).
+
+    Throttling and provider-side errors come back as ``{"rc": 102, "data": null}``
+    rather than a failing status code.  Treating that as "no rows" makes a broken
+    security list look like an empty market: the sync then finishes "successfully"
+    with zero targets, zero bars and zero errors, which is indistinguishable from
+    a genuinely up-to-date store.
+    """
+
+    raw = payload.get("rc")
+    if raw is None or isinstance(raw, bool):
+        return payload
+    if not isinstance(raw, (int, float, str, bytes, bytearray)):
+        return payload
+    try:
+        code = int(raw)
+    except (TypeError, ValueError):
+        return payload
+    if code != 0:
+        raise OnlineProviderError(f"在线行情接口返回错误码 rc={code}")
+    return payload
+
+
 def _mapping_payload(value: object) -> Mapping[str, object]:
     if isinstance(value, Mapping):
         return value
@@ -229,6 +261,20 @@ def _mapping_payload(value: object) -> Mapping[str, object]:
         if isinstance(decoded, Mapping):
             return decoded
     raise OnlineDataError("在线行情响应格式无效")
+
+
+def _should_fetch_next_page(total: int, fetched: int, page_rows: int, page_size: int) -> bool:
+    """Whether the catalog has more pages after the one just fetched.
+
+    The server caps a page at 100 rows even when a larger ``pz`` was requested,
+    so "page shorter than requested" no longer means "last page".  Trust the
+    reported ``total`` whenever it is available and fall back to the page-size
+    heuristic only when the provider omits it.
+    """
+
+    if total > 0:
+        return fetched < total
+    return page_rows >= page_size
 
 
 def _mapping_value(value: object) -> Mapping[str, object]:
@@ -281,8 +327,8 @@ class OnlineMarketClient:
         page = 1
         rows: list[Mapping[str, object]] = []
         total = 0
-        while page <= 100:
-            payload = self._request(
+        while page <= _MAX_CATALOG_PAGES:
+            payload = self._request_catalog(
                 _EASTMONEY_LIST_URL,
                 {
                     "pn": str(page),
@@ -304,7 +350,7 @@ class OnlineMarketClient:
                 break
             rows.extend(page_rows)
             total = _nonnegative_int(data.get("total"))
-            if total <= len(rows) or len(page_rows) < self._page_size:
+            if not _should_fetch_next_page(total, len(rows), len(page_rows), self._page_size):
                 break
             page += 1
         return pd.DataFrame(
@@ -346,8 +392,8 @@ class OnlineMarketClient:
     ) -> pd.DataFrame:
         page = 1
         rows: list[Mapping[str, object]] = []
-        while page <= 100:
-            payload = self._request(
+        while page <= _MAX_CATALOG_PAGES:
+            payload = self._request_catalog(
                 _EASTMONEY_FUND_LIST_URL,
                 {
                     "pn": str(page),
@@ -369,7 +415,7 @@ class OnlineMarketClient:
                 break
             rows.extend(page_rows)
             total = _nonnegative_int(data.get("total"))
-            if total <= len(rows) or len(page_rows) < self._page_size:
+            if not _should_fetch_next_page(total, len(rows), len(page_rows), self._page_size):
                 break
             page += 1
         result: list[dict[str, object]] = []
@@ -595,7 +641,39 @@ class OnlineMarketClient:
     ) -> Mapping[str, object]:
         if timeout <= 0:
             raise ValueError("在线行情请求超时时间必须大于 0")
-        return _mapping_payload(self._transport(url, params, timeout))
+        return _reject_failed_payload(_mapping_payload(self._transport(url, params, timeout)))
+
+    def _request_catalog(
+        self,
+        url: str,
+        params: Mapping[str, object],
+        timeout: float,
+    ) -> Mapping[str, object]:
+        """Fetch one catalog page, retrying provider-side failures.
+
+        East Money answers throttling two different ways: HTTP 200 with
+        ``rc != 0`` / ``data: null`` (now rejected by ``_reject_failed_payload``)
+        and a plain dropped connection.  Either one used to surface as an empty
+        security list, which made the sync report a clean success with zero
+        targets.
+
+        The backoff is deliberately slower than the per-symbol history retry:
+        the server caps a page at 100 rows, so a full catalog is hundreds of
+        requests and any page that exhausts its retries aborts the whole run.
+        """
+
+        last_error: OnlineProviderError | None = None
+        for attempt in range(_CATALOG_RETRIES):
+            try:
+                return self._request(url, params, timeout)
+            except OnlineProviderError as exc:
+                last_error = exc
+                self._sleep_catalog_retry(attempt)
+        assert last_error is not None
+        raise last_error
+
+    def _sleep_catalog_retry(self, attempt: int) -> None:
+        time.sleep(_CATALOG_RETRY_BASE_SECONDS * (2**attempt))
 
 
 def _default_module() -> OnlineModule:
