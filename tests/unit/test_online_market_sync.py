@@ -535,6 +535,21 @@ def test_eastmoney_mode_rejects_explicitly_unsupported_instrument_scope(tmp_path
         service.discover_instruments(MarketSyncConfig(instrument_types=("bond",), sync_workers=1))
 
 
+def test_eastmoney_mode_rejects_an_empty_type_board_intersection(tmp_path: Path) -> None:
+    """基金 + 主板：类型和板块各自都合法，但交集为空。
+
+    旧实现只做两次差集检查，这种组合一路走到目标解析才变成 0 个标的，
+    任务照样报「成功」而不解释为什么什么都没同步。
+    """
+
+    service = MarketDataSync(store=DuckDbMarketDataStore(tmp_path / "market.duckdb"))
+
+    with pytest.raises(OnlineProviderError, match="没有交集"):
+        service.discover_instruments(
+            MarketSyncConfig(instrument_types=("fund",), boards=("main",), sync_workers=1)
+        )
+
+
 def test_market_sync_config_rejects_unknown_and_removed_providers() -> None:
     with pytest.raises(ValueError, match="行情数据源"):
         MarketSyncConfig(provider="unknown")  # type: ignore[arg-type]

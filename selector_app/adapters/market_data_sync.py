@@ -688,6 +688,25 @@ def _validate_eastmoney_scope(config: MarketSyncConfig) -> None:
             f"当前范围包含不支持的品种/板块: {', '.join(unsupported)}，"
             "指数与债券暂无在线 K 线数据源。"
         )
+    # Both sides can be legal on their own and still describe nothing: 基金 +
+    # 主板 passes both set checks, then resolves to zero targets and the job
+    # reports success with no explanation. Reject the empty intersection here.
+    selected_types = set(config.instrument_types or ())
+    selected_boards = set(config.boards or ())
+    if selected_types and selected_boards:
+        reachable: set[str] = set()
+        for item in selected_types:
+            if item == "fund":
+                reachable |= _EASTMONEY_FUND_BOARDS
+            else:
+                reachable |= _EASTMONEY_STOCK_BOARDS
+        if not reachable & selected_boards:
+            raise OnlineProviderError(
+                "所选品种与板块没有交集，不会命中任何标的："
+                f"品种 {', '.join(sorted(selected_types))} 只能落在 "
+                f"{', '.join(sorted(reachable))} 板块，而当前选的是 "
+                f"{', '.join(sorted(selected_boards))}。"
+            )
 
 
 def _eastmoney_boards(config: MarketSyncConfig) -> tuple[InstrumentBoard, ...] | None:

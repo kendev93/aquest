@@ -132,19 +132,25 @@ def _masks_agree(
 
 
 def _permutation_max_lifts(
-    candidates: Sequence[tuple[MinedCondition, np.ndarray, str]],
-    baselines: Mapping[str, tuple[np.ndarray, np.ndarray]],
+    pool: Sequence[tuple[np.ndarray, bytes]],
+    baselines: Mapping[bytes, tuple[np.ndarray, np.ndarray]],
     target: np.ndarray,
     *,
     permutations: int,
     seed: int | None,
 ) -> list[float]:
-    """Best lift each shuffled label set produces across the same candidates.
+    """Best lift each shuffled label set produces across the mask pool.
 
-    Only the labels move: the candidate masks, the trade-group reduction and
-    the support/instrument floors are all label-independent, so they are
-    reused. That makes a shuffle roughly an order of magnitude cheaper than
-    re-running the whole search.
+    Only the labels move: the masks, the trade-group reduction and the
+    support/instrument floors are all label-independent, so they are reused.
+    That makes a shuffle roughly an order of magnitude cheaper than re-running
+    the whole search.
+
+    The pool must be every structurally usable mask, **not** the shortlist that
+    beat the baseline on the real labels. Selecting the pool on the labels
+    shrinks it, and the maximum over a smaller pool is smaller, so the
+    resulting threshold lets through exactly the lucky-but-empty conditions the
+    test is meant to reject.
 
     Each run reports the *maximum* lift, matching the selection pressure the
     real search applies - this is the max-T null distribution, not the null
@@ -160,7 +166,7 @@ def _permutation_max_lifts(
             for key, (valid, groups) in baselines.items()
         }
         best = 0.0
-        for _candidate, matched, baseline_key in candidates:
+        for matched, baseline_key in pool:
             baseline = baseline_rates[baseline_key]
             if not baseline > 0.0:
                 continue
@@ -180,6 +186,8 @@ def _with_significance(
     candidate: MinedCondition,
     threshold: float | None,
     null_max_lifts: Sequence[float],
+    *,
+    quantile: float,
 ) -> MinedCondition:
     if threshold is None or not null_max_lifts:
         return candidate
@@ -189,6 +197,12 @@ def _with_significance(
         candidate,
         lift_threshold=threshold,
         permutation_pvalue=pvalue,
+        # One verdict, one number. Deriving "significant" from ``lift > threshold``
+        # while showing a p-value computed as ``(1 + reached) / (1 + n)`` made the
+        # badge and the tooltip disagree: with 20 permutations the 0.95 quantile
+        # sits near the second-largest null lift, so finishing runner-up to noise
+        # counted as significant (2/21) even though p was 0.095.
+        significant=pvalue <= (1.0 - quantile),
     )
 
 
@@ -221,14 +235,10 @@ class MinedCondition:
     lift_threshold: float | None = None
     # Fraction of shuffled runs whose best lift reached this candidate's lift.
     permutation_pvalue: float | None = None
-
-    @property
-    def significant(self) -> bool | None:
-        """True when the lift clears the permutation threshold, None if untested."""
-
-        if self.lift_threshold is None:
-            return None
-        return self.lift > self.lift_threshold
+    # The single verdict, derived from ``permutation_pvalue`` against the
+    # configured quantile so it can never contradict the p-value shown next to
+    # it. None when no permutation test ran.
+    significant: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -358,20 +368,29 @@ def mine_binary_conditions(
     # one per trade group) plus the key of the valid-sample window its baseline
     # was measured on. That is everything the permutation test needs to rescore
     # it without recomputing a single threshold mask.
-    candidates: list[tuple[MinedCondition, np.ndarray, str]] = []
-    baselines: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+    candidates: list[tuple[MinedCondition, np.ndarray, bytes]] = []
+    # The null distribution draws from every structurally usable mask, winners
+    # and losers alike. See ``_candidate_for_mask`` for why the losers matter.
+    null_pool: list[tuple[np.ndarray, bytes]] = []
+    # Keyed by the valid-sample mask itself rather than by the feature pair:
+    # when no feature has gaps, every pair shares one mask, and keying by pair
+    # used to store hundreds of identical copies of it.
+    baselines: dict[bytes, tuple[np.ndarray, np.ndarray]] = {}
     seen_rules: set[tuple[str, str, str | None, float | None]] = set()
 
     def record(
-        scored: tuple[MinedCondition, np.ndarray] | None,
+        scored: tuple[MinedCondition | None, np.ndarray | None],
         valid: np.ndarray,
-        baseline_key: str,
     ) -> None:
-        if scored is None:
-            return
         candidate, matched_global = scored
-        baselines.setdefault(baseline_key, (valid, group_codes[valid]))
-        candidates.append((candidate, matched_global, baseline_key))
+        if matched_global is None:
+            return
+        token = valid.tobytes()
+        if token not in baselines:
+            baselines[token] = (valid, group_codes[valid])
+        null_pool.append((matched_global, token))
+        if candidate is not None:
+            candidates.append((candidate, matched_global, token))
 
     for feature_id in feature_ids:
         if feature_id in _PRICE_SCALE_FEATURES:
@@ -419,7 +438,7 @@ def mine_binary_conditions(
                     top_n_context=top_n_context,
                     sample_positions=positions,
                 )
-                record(candidate, valid, feature_id)
+                record(candidate, valid)
 
     for left_index, left_id in enumerate(feature_ids):
         if not comparable[left_id]:
@@ -473,7 +492,7 @@ def mine_binary_conditions(
                     top_n_context=top_n_context,
                     sample_positions=positions,
                 )
-                record(candidate, valid, f"{left_id}|{right_id}")
+                record(candidate, valid)
 
     ranked = sorted(
         candidates,
@@ -489,13 +508,13 @@ def mine_binary_conditions(
     )
     null_max_lifts = (
         _permutation_max_lifts(
-            candidates,
+            null_pool,
             baselines,
             target_float,
             permutations=permutations,
             seed=permutation_seed,
         )
-        if permutations > 0 and candidates
+        if permutations > 0 and null_pool
         else ()
     )
     threshold = (
@@ -508,7 +527,14 @@ def mine_binary_conditions(
     for scored_candidate, matched, _baseline_key in ranked:
         if any(_masks_agree(matched, kept) for kept in kept_matches):
             continue
-        selected.append(_with_significance(scored_candidate, threshold, null_max_lifts))
+        selected.append(
+            _with_significance(
+                scored_candidate,
+                threshold,
+                null_max_lifts,
+                quantile=significance_quantile,
+            )
+        )
         kept_matches.append(matched)
         if len(selected) == limit:
             break
@@ -581,38 +607,50 @@ def _candidate_for_mask(
     baseline_rate: float,
     top_n_context: TopNContext | None = None,
     sample_positions: np.ndarray | None = None,
-) -> tuple[MinedCondition, np.ndarray] | None:
+) -> tuple[MinedCondition | None, np.ndarray | None]:
     """Score one mask, returning the candidate and the global rows it matched.
 
     ``sample_positions`` maps the compressed indices back to full-sample
     positions; the returned rows are global so a permutation test can rescore
     the same match set against shuffled labels.
+
+    ``matched_global`` stays populated for every structurally usable mask even
+    when ``candidate`` is None because the mask lost on the real labels. That
+    distinction is what keeps the permutation null honest: dropping
+    losers from the pool would shrink it to the masks that already got lucky,
+    and the maximum over a smaller pool is smaller — which quietly loosens the
+    threshold into the very false positives the test exists to reject.
     """
 
     order = np.flatnonzero(condition_mask)
     if order.size == 0:
         # Never true: it cannot produce a single trade.
-        return None
+        return None, None
     if order.size == outcomes.size:
         # Always true: an AND with it cannot change any trade.
-        return None
+        return None, None
     # A group contributes at most one sample: its first matching row.
     # np.unique(..., return_index=True) reports that first occurrence, and
     # sorting restores the ascending order the previous dict loop produced.
     _, first_positions = np.unique(group_codes[order], return_index=True)
     matched_indices = np.sort(order[first_positions])
-    matched_global = (
-        matched_indices if sample_positions is None else sample_positions[matched_indices]
+    # uint32, not intp: every match set is stored per candidate, and with tens
+    # of thousands of samples the pointer-sized indices were the single largest
+    # allocation in a full-market study. Sample counts never approach 2**32.
+    matched_global = np.asarray(
+        matched_indices if sample_positions is None else sample_positions[matched_indices],
+        dtype=np.uint32,
     )
     support_count = int(matched_indices.size)
     if support_count < min_support:
-        return None
+        return None, None
     outcome_rate = float(np.mean(outcomes[matched_indices]))
     if outcome_rate <= baseline_rate:
-        return None
+        # Lost on the labels only — the mask is still a fair draw under the null.
+        return None, matched_global
     instrument_count = int(np.unique(instrument_codes[matched_indices]).size)
     if instrument_count < min_instruments:
-        return None
+        return None, None
     group_count = int(np.unique(group_codes).size)
     top_n_rate, top_n_support, filtered_days = _top_n_diagnosis(
         matched_indices, outcomes, top_n_context, sample_positions
@@ -629,7 +667,7 @@ def _candidate_for_mask(
         top_n_support_count=top_n_support,
         top_n_filtered_days=filtered_days,
     )
-    return scored, np.asarray(matched_global, dtype=np.intp)
+    return scored, matched_global
 
 
 def _grouped_outcome_rate(outcomes: np.ndarray, group_codes: np.ndarray) -> float:

@@ -80,7 +80,9 @@ class ConditionResearchConfig:
     # 置换检验：挖掘会评估上千个阈值，即使全是噪声，"最好的那一个"lift 也会很好看。
     # 这里把标签随机打乱重新评分若干次，看纯运气能把 lift 推到多高，用它当门槛。
     # 0 = 不做检验（结果里没有显著性标记）。
-    significance_permutations: int = 20
+    # 200 而不是 20：标定过纯噪声数据集，20 次时名义 5% 的门槛实际误报 11.7%，
+    # 200 次回到 5.0%。次数少了 p 值的分辨率也不够（20 次最细只能到 1/21）。
+    significance_permutations: int = 200
     # 门槛取噪声最大 lift 分布的这个分位数，越大越严格。
     significance_quantile: float = 0.95
     # 排序规则：研究本身不构建组合、不设槽位，但它挖出的条件最终要落到组合回测里，

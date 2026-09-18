@@ -71,7 +71,8 @@ test('user can start an East Money full-history backfill', async ({ page }) => {
   await page.goto('/market-data')
   await page.getByTestId('market-eastmoney-backfill').click()
   await expect(page.getByTestId('market-data-progress')).toContainText('eastmoney')
-  expect(backfillRequest).toEqual({ universe: 'all' })
+  // 回填现在把证券类型一起带过去，勾了 ETF 也能补齐。
+  expect(backfillRequest).toEqual({ universe: 'all', instrument_types: ['stock'] })
 })
 
 test('user can see and cancel an active market-data job', async ({ page }) => {

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import date
 from pathlib import Path
 from typing import cast
@@ -295,6 +295,61 @@ class DuckDbBarsStore:
                 connection.execute("ROLLBACK")
                 raise
         return (len(incoming), int(replaced_row[0] if replaced_row else 0))
+
+    def delete_bars(
+        self,
+        *,
+        source: str | None = None,
+        markets: Sequence[str] | None = None,
+        codes: Sequence[str] | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> int:
+        """Delete stored daily bars, returning how many rows were removed.
+
+        This is the recovery path for a bad import. Rows written by
+        ``upsert_local_bars`` outrank online rows forever, so without a way to
+        drop them a single wrong import can only be undone by rebuilding the
+        database. Pass ``source="local"`` to undo an import while keeping
+        everything an online sync produced; omit every filter to clear the
+        table outright.
+        """
+
+        self._store._require_writer()
+        conditions: list[str] = []
+        parameters: list[object] = []
+        normalized_source = source.strip().lower() if source else ""
+        if normalized_source:
+            conditions.append("source = ?")
+            parameters.append(normalized_source)
+        _append_filter(
+            conditions,
+            parameters,
+            "market",
+            (item.strip().upper() for item in markets or ()),
+        )
+        _append_filter(conditions, parameters, "code", (item.strip() for item in codes or ()))
+        if start_date is not None:
+            conditions.append("trade_date >= ?")
+            parameters.append(start_date)
+        if end_date is not None:
+            conditions.append("trade_date <= ?")
+            parameters.append(end_date)
+        where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
+        with _WRITE_LOCK, self._store._connect() as connection:
+            connection.execute("BEGIN")
+            try:
+                row = connection.execute(
+                    f"SELECT COUNT(*) FROM daily_bars{where}", parameters
+                ).fetchone()
+                removed = int(row[0] if row else 0)
+                if removed:
+                    connection.execute(f"DELETE FROM daily_bars{where}", parameters)
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        return removed
 
     def upsert_online_bars(
         self,

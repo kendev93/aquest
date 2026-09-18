@@ -67,7 +67,7 @@ from selector_app.screening.jobs import (
 )
 
 from ..market_source import resolve_market_status
-from ..schemas import LocalImportRequest, MarketSyncRequest
+from ..schemas import BarDeleteRequest, LocalImportRequest, MarketSyncRequest
 
 router = APIRouter(prefix="/market-data", tags=["market-data"])
 
@@ -382,10 +382,12 @@ def create_online_sync_job(payload: MarketSyncRequest, request: Request) -> JSON
 def create_eastmoney_backfill_job(payload: MarketSyncRequest, request: Request) -> JSONResponse:
     if payload.provider != "eastmoney":
         raise HTTPException(status_code=422, detail="East Money 全量回填必须使用 eastmoney 数据源")
+    # 回填曾经硬编码只补股票，勾了 ETF 也补不到。现在尊重调用方传的类型，
+    # 没传才回落到股票（东财的主战场），保持旧调用的行为不变。
     full_payload = payload.model_copy(
         update={
             "provider": "eastmoney",
-            "instrument_types": ["stock"],
+            "instrument_types": payload.instrument_types or ["stock"],
             "full_history": True,
         }
     )
@@ -394,6 +396,35 @@ def create_eastmoney_backfill_job(payload: MarketSyncRequest, request: Request) 
         request,
         description="East Money历史全量回填",
     )
+
+
+@router.post("/bars/delete", response_model=None)
+def delete_market_bars(
+    payload: BarDeleteRequest,
+    request: Request,
+) -> dict[str, object] | JSONResponse:
+    """Drop stored bars so a wrong import can be undone.
+
+    Local rows outrank online rows forever, so without this a single bad
+    ``.day`` import can only be fixed by rebuilding the database.
+    """
+
+    try:
+        removed = _store(request).delete_bars(
+            source=payload.source,
+            markets=payload.markets,
+            codes=payload.codes,
+            start_date=payload.start_date,
+            end_date=payload.end_date,
+        )
+    except (MarketDataStoreError, duckdb.Error, OSError, RuntimeError) as exc:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "error": {"code": "market_data_store_error", "message": _storage_error_message(exc)}
+            },
+        )
+    return {"data": {"deleted_bars": removed, "source": payload.source}}
 
 
 @router.post("/sync", status_code=status.HTTP_202_ACCEPTED)

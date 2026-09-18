@@ -883,7 +883,7 @@ function topNTitle(candidate: ConditionResearchCandidate): string {
   )
 }
 
-/** 噪声门槛：随机打乱标签重挖若干次，纯运气能把「最好的那个条件」推到多高的 lift。 */
+/** 噪声门槛：随机打乱标签重挖若干次，看纯运气能把「最好的那个条件」推到多高的 lift。 */
 function significanceTitle(candidate: ConditionResearchCandidate): string {
   const threshold = candidate.mining.lift_threshold
   if (threshold === null || threshold === undefined) {
@@ -891,9 +891,13 @@ function significanceTitle(candidate: ConditionResearchCandidate): string {
   }
   const pvalue = candidate.mining.permutation_pvalue
   const p = pvalue === null || pvalue === undefined ? '—' : pvalue.toFixed(3)
+  // 门槛是「随机重挖里最好成绩」分布的 95 分位，不是那批随机重挖的最好成绩
+  // 本身 —— 后者要更极端一些，早期文案把它说成「纯运气最好的一次」是错的。
   return (
-    `把交易结果随机打乱重新挖掘，纯运气最好的一次能把 lift 推到 ${threshold.toFixed(3)}。` +
-    `这个候选的 lift 是 ${candidate.mining.lift.toFixed(3)}，随机重挖里有 p=${p} 的比例达到或超过它。`
+    `把交易结果随机打乱重新挖掘 ${form.significancePermutations} 次，` +
+    `其中 95% 的随机重挖里「表现最好的那个条件」lift 都超不过 ${threshold.toFixed(3)}。` +
+    `这个候选的 lift 是 ${candidate.mining.lift.toFixed(3)}，随机重挖里有 p=${p} 的比例达到或超过它。` +
+    'p 大于 0.05 就判为疑似噪声 —— 徽标和这里的 p 值是同一个判断，不会互相矛盾。'
   )
 }
 
@@ -913,11 +917,15 @@ const significanceSummary = computed(() => {
   const threshold = Math.max(...thresholds)
   const passed = candidates.filter((item) => item.mining.significant === true).length
   if (passed > 0) {
-    return `噪声门槛 ${threshold.toFixed(3)}：${candidates.length} 个候选里有 ${passed} 个超过了纯运气能达到的水平。`
+    return (
+      `噪声门槛 ${threshold.toFixed(3)}：${candidates.length} 个候选里有 ${passed} 个超过了纯运气能达到的水平。` +
+      '未过门槛的候选不会进入留出期复验。'
+    )
   }
   return (
     `噪声门槛 ${threshold.toFixed(3)}：没有一个候选超过随机打乱能达到的水平，` +
-    '这次挖到的条件很可能是运气，建议扩大股票范围、延长时间区间或放宽基础规则以增加样本。'
+    '这次挖到的条件很可能是运气，建议扩大股票范围、延长时间区间或放宽基础规则以增加样本。' +
+    '未过门槛的候选不会进入留出期复验。'
   )
 })
 

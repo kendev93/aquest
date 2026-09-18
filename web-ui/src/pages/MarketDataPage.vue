@@ -7,6 +7,7 @@ import {
   createLocalImport,
   createOnlineBackfill,
   createOnlineSync,
+  deleteMarketBars,
   detectLocalVipdoc,
   fetchActiveMarketDataJobs,
   fetchMarketDataCapabilities,
@@ -38,8 +39,14 @@ const MA_OPTIONS = [
   { key: 'ma60', label: 'MA60' },
 ]
 
+// 在线通道（East Money）只服务股票与场内基金，指数和债券没有在线日线源。
+// 本地通达信导入不受此限 —— 这四个品种在 .day 文件里都有，所以只是"在线
+// 同步"这一栏要把不可选项标出来，而不是把它们从产品里删掉。
+const ONLINE_SUPPORTED_TYPES: InstrumentType[] = ['stock', 'fund']
+const ONLINE_SUPPORTED_BOARDS: InstrumentBoard[] = ['main', 'star', 'chinext', 'fund']
+
 const INSTRUMENT_TYPE_OPTIONS: { key: InstrumentType; label: string }[] = [
-  { key: 'stock', label: '股票/B股' },
+  { key: 'stock', label: '股票' },
   { key: 'fund', label: '基金/ETF' },
   { key: 'index', label: '指数' },
   { key: 'bond', label: '债券' },
@@ -60,6 +67,10 @@ const form = reactive({
   syncUniverse: 'all' as 'all' | 'sh' | 'sz',
   syncInstrumentTypes: ['stock'] as InstrumentType[],
   syncBoards: [] as InstrumentBoard[],
+  // 本地导入走自己的范围：默认不限制，否则会沿用在线的默认「只导股票」，
+  // 把 ETF/指数/债券静默过滤掉而界面上完全看不出来。
+  localInstrumentTypes: [] as InstrumentType[],
+  localBoards: [] as InstrumentBoard[],
   vipdocPath: '',
   vipdocDetected: [] as LocalVipdocCandidate[],
   vipdocMountHint: '',
@@ -311,10 +322,42 @@ function syncScopePayload(): {
   }
 }
 
+function localScopePayload(): {
+  instrument_types?: InstrumentType[]
+  boards?: InstrumentBoard[]
+} {
+  return {
+    ...(form.localInstrumentTypes.length > 0
+      ? { instrument_types: [...form.localInstrumentTypes] }
+      : {}),
+    ...(form.localBoards.length > 0 ? { boards: [...form.localBoards] } : {}),
+  }
+}
+
 function toggleInstrumentType(type: InstrumentType): void {
   form.syncInstrumentTypes = form.syncInstrumentTypes.includes(type)
     ? form.syncInstrumentTypes.filter((item) => item !== type)
     : [...form.syncInstrumentTypes, type]
+}
+
+function toggleLocalInstrumentType(type: InstrumentType): void {
+  form.localInstrumentTypes = form.localInstrumentTypes.includes(type)
+    ? form.localInstrumentTypes.filter((item) => item !== type)
+    : [...form.localInstrumentTypes, type]
+}
+
+function toggleLocalBoard(board: InstrumentBoard): void {
+  form.localBoards = form.localBoards.includes(board)
+    ? form.localBoards.filter((item) => item !== board)
+    : [...form.localBoards, board]
+}
+
+function onlineTypeDisabled(type: InstrumentType): boolean {
+  return !ONLINE_SUPPORTED_TYPES.includes(type)
+}
+
+function onlineBoardDisabled(board: InstrumentBoard): boolean {
+  return !ONLINE_SUPPORTED_BOARDS.includes(board)
 }
 
 function toggleBoard(board: InstrumentBoard): void {
@@ -491,7 +534,8 @@ async function backfillOnlineData(): Promise<void> {
   try {
     const job = await createOnlineBackfill({
       universe: form.syncUniverse,
-      ...(form.syncBoards.length > 0 ? { boards: [...form.syncBoards] } : {}),
+      // 回填曾经只发股票，勾了 ETF 也补不到。现在把类型一起传过去。
+      ...syncScopePayload(),
     })
     beginJob(job.job_id, job.status)
     await waitForJob(job.job_id)
@@ -541,7 +585,7 @@ async function importLocalDayFiles(): Promise<void> {
     const job = await createLocalImport({
       universe: form.syncUniverse,
       ...(form.vipdocPath.trim() ? { vipdoc_path: form.vipdocPath.trim() } : {}),
-      ...syncScopePayload(),
+      ...localScopePayload(),
     })
     beginJob(job.job_id, job.status)
     await waitForJob(job.job_id)
@@ -554,6 +598,53 @@ async function importLocalDayFiles(): Promise<void> {
     syncLabel.value = ''
   }
 }
+
+const undoingLocalImport = ref(false)
+
+async function undoLocalImport(): Promise<void> {
+  if (!window.confirm('将删除所有「本地导入」写入的日线，在线同步写入的数据保留。删除后需要重新导入或重新在线同步补齐。确定继续？')) {
+    return
+  }
+  undoingLocalImport.value = true
+  message.value = ''
+  try {
+    const result = await deleteMarketBars({ source: 'local', universe: form.syncUniverse, confirm: true })
+    await loadStoreStatus()
+    await loadInstruments()
+    // loadInstruments() 会把 message 清空，所以提示必须放在刷新之后。
+    message.value = `已删除 ${result.deleted_bars} 根本地导入的日线，请重新导入或在线同步补齐。`
+  } catch (error) {
+    message.value = apiMessage(error)
+  } finally {
+    undoingLocalImport.value = false
+  }
+}
+
+/** 本地导入的报告用的是另一套键名，结果面板要单独渲染，否则全是 0。 */
+function isLocalImportResult(result: Record<string, unknown> | null | undefined): boolean {
+  if (!result) return false
+  return result.source === 'local' || typeof result.discovered_files === 'number'
+}
+
+const localImportSummary = computed(() => {
+  const result = marketJob.value?.result as Record<string, unknown> | undefined
+  if (!isLocalImportResult(result)) return null
+  const value = result as Record<string, any>
+  const reasons = Object.entries(value.failure_reasons ?? {}).map(
+    ([reason, count]) => `${reason} × ${count}`,
+  )
+  return {
+    discovered: value.discovered_files ?? 0,
+    selected: value.selected_files ?? 0,
+    filtered: value.filtered_files ?? 0,
+    instruments: value.imported_instruments ?? 0,
+    bars: value.imported_bars ?? 0,
+    replaced: value.replaced_bars ?? 0,
+    skipped: value.skipped_files ?? 0,
+    range: value.range_start && value.range_end ? `${value.range_start} → ${value.range_end}` : '—',
+    reasons,
+  }
+})
 
 async function loadInstruments(): Promise<void> {
   loading.value = true
@@ -719,9 +810,9 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
         <div class="market-sync-form">
           <div class="scope-config" data-testid="market-sync-scope">
             <div><label for="market-sync-universe">同步市场</label><select id="market-sync-universe" v-model="form.syncUniverse" data-testid="market-sync-universe"><option value="all">沪深全部</option><option value="sh">仅上海</option><option value="sz">仅深圳</option></select></div>
-            <div class="scope-options"><span>证券类型</span><label v-for="option in INSTRUMENT_TYPE_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-sync-type-${option.key}`" :checked="form.syncInstrumentTypes.includes(option.key)" @change="toggleInstrumentType(option.key)">{{ option.label }}</label></div>
-            <div class="scope-options"><span>板块</span><label v-for="option in BOARD_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-sync-board-${option.key}`" :checked="form.syncBoards.includes(option.key)" @change="toggleBoard(option.key)">{{ option.label }}</label></div>
-            <small class="scope-helper">板块未勾选表示不限制；类型和板块同时选择时取交集。证券类型默认勾选「股票/B股」，要下 ETF 再勾选「基金/ETF」；指数和债券暂无在线 K 线数据源。全量补齐按钮只请求缺失历史区间。</small>
+            <div class="scope-options"><span>证券类型</span><label v-for="option in INSTRUMENT_TYPE_OPTIONS" :key="option.key" :class="{ 'scope-option-off': onlineTypeDisabled(option.key) }"><input type="checkbox" :data-testid="`market-sync-type-${option.key}`" :disabled="onlineTypeDisabled(option.key)" :checked="form.syncInstrumentTypes.includes(option.key)" @change="toggleInstrumentType(option.key)">{{ option.label }}</label></div>
+            <div class="scope-options"><span>板块</span><label v-for="option in BOARD_OPTIONS" :key="option.key" :class="{ 'scope-option-off': onlineBoardDisabled(option.key) }"><input type="checkbox" :data-testid="`market-sync-board-${option.key}`" :disabled="onlineBoardDisabled(option.key)" :checked="form.syncBoards.includes(option.key)" @change="toggleBoard(option.key)">{{ option.label }}</label></div>
+            <small class="scope-helper">板块未勾选表示不限制；类型和板块同时选择时取交集。证券类型默认勾选「股票」，要下 ETF 再勾选「基金/ETF」。置灰的指数、债券、B股在线同步没有 K 线数据源（勾选会直接报错），但它们可以走下面的本地通达信导入。全量补齐按钮只请求缺失历史区间。</small>
             <small v-if="providerCapabilities?.providers.eastmoney?.history_sources?.length" class="scope-helper">East Money 备用接口：{{ providerCapabilities.providers.eastmoney.history_sources.join(' → ') }}</small>
             <small v-if="providerCapabilities?.providers.eastmoney && !providerCapabilities.providers.eastmoney.available" class="scope-warning">{{ providerCapabilities.providers.eastmoney.error || 'East Money 当前不可用，请重新构建 Docker 镜像。' }}</small>
           </div>
@@ -739,7 +830,9 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
             </div>
             <button class="secondary-button" data-testid="market-local-import-detect" type="button" :disabled="form.vipdocDetecting" @click="detectVipdocPath(false)">{{ form.vipdocDetecting ? '检测中…' : '自动检测' }}</button>
             <button class="secondary-button" data-testid="market-local-import" type="button" :disabled="syncLoading" @click="importLocalDayFiles">导入通达信行情</button>
+            <button class="text-button" data-testid="market-local-import-undo" type="button" :disabled="undoingLocalImport" @click="undoLocalImport">{{ undoingLocalImport ? '清理中…' : '撤销本地导入' }}</button>
           </div>
+          <div class="scope-options local-import-scope" data-testid="market-local-import-scope"><span>导入范围</span><label v-for="option in INSTRUMENT_TYPE_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-local-type-${option.key}`" :checked="form.localInstrumentTypes.includes(option.key)" @change="toggleLocalInstrumentType(option.key)">{{ option.label }}</label><label v-for="option in BOARD_OPTIONS" :key="`board-${option.key}`"><input type="checkbox" :data-testid="`market-local-board-${option.key}`" :checked="form.localBoards.includes(option.key)" @change="toggleLocalBoard(option.key)">{{ option.label }}</label><small>全部不勾 = 导入目录里所有品种（默认）。在线同步不支持的指数、债券、B股在这里都可用。</small></div>
           <small v-if="form.vipdocDetectNote" class="scope-helper" data-testid="market-local-import-note">{{ form.vipdocDetectNote }}</small>
           <small v-if="!form.vipdocDetected.length && form.vipdocMountHint" class="scope-warning">{{ form.vipdocMountHint }}在宿主机上执行：<code>TDX_VIPDOC_PATH=/你的/通达信/vipdoc docker compose -f docker-compose.yml -f docker-compose.tdx.yml up -d</code>，然后重建镜像 <code>docker compose build backend</code>。</small>
           <small class="scope-helper">先在通达信里「盘后数据下载」下载日线，再点「自动检测」让后端找目录<template v-if="form.vipdocHostPrefix">；也可以直接填电脑上 {{ form.vipdocHostPrefix }} 开头的路径</template>。导入会按同一只股票同一天覆盖库里已有的行情，目录里没有的日期保持原样。</small>
@@ -754,7 +847,18 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
             <div class="sync-current-meta"><span>同步区间 <strong>{{ currentSyncRangeText }}</strong></span><span v-if="currentSyncBarCount !== null">{{ currentSyncBarCount }} 根日线</span><span v-if="currentSyncRetry > 0">重试 {{ currentSyncRetry }} 次</span></div>
             <div v-if="currentSyncHistorySource" class="sync-current-source">本次接口 <strong>{{ currentSyncHistorySource }}</strong></div>
           </div>
-          <div v-if="marketJob.result" class="sync-result-stats">
+          <div v-if="localImportSummary" class="sync-result-stats" data-testid="local-import-result">
+            <span>发现文件 {{ localImportSummary.discovered }}</span>
+            <span>符合范围 {{ localImportSummary.selected }}</span>
+            <span>范围外跳过 {{ localImportSummary.filtered }}</span>
+            <span>写入标的 {{ localImportSummary.instruments }}</span>
+            <span>写入 K 线 {{ localImportSummary.bars }}</span>
+            <span>覆盖旧数据 {{ localImportSummary.replaced }}</span>
+            <span :class="{ negative: localImportSummary.skipped > 0 }">跳过文件 {{ localImportSummary.skipped }}</span>
+            <span>覆盖区间 {{ localImportSummary.range }}</span>
+            <span v-for="reason in localImportSummary.reasons" :key="reason" class="negative">{{ reason }}</span>
+          </div>
+          <div v-else-if="marketJob.result" class="sync-result-stats">
             <span v-if="marketJob.result.execution_mode === 'process_pool_staging'">执行模式 {{ marketJob.result.worker_count ?? 0 }} 进程分片</span>
             <span v-if="marketJob.result.staged_rows !== undefined">暂存 {{ marketJob.result.staged_rows }} 根</span>
             <span v-if="marketJob.result.merged_rows !== undefined">合并 {{ marketJob.result.merged_rows }} 根</span>

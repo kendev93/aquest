@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import date, datetime
 from pathlib import Path
 
@@ -76,6 +76,23 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
 
     def upsert_local_bars(self, frame: pd.DataFrame) -> tuple[int, int]:
         return self._bars.upsert_local_bars(frame)
+
+    def delete_bars(
+        self,
+        *,
+        source: str | None = None,
+        markets: Sequence[str] | None = None,
+        codes: Sequence[str] | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> int:
+        return self._bars.delete_bars(
+            source=source,
+            markets=markets,
+            codes=codes,
+            start_date=start_date,
+            end_date=end_date,
+        )
 
     def upsert_online_bars(
         self,

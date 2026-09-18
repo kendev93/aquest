@@ -18,6 +18,8 @@ vi.mock('../api/marketData', async () => {
     fetchMarketDataCapabilities: vi.fn(),
     createOnlineBackfill: vi.fn(),
     createOnlineSync: vi.fn(),
+    createLocalImport: vi.fn(),
+    deleteMarketBars: vi.fn(),
     detectLocalVipdoc: vi.fn(),
     getMarketDataJob: vi.fn(),
   }
@@ -186,8 +188,10 @@ describe('MarketDataPage', () => {
     await wrapper.get('[data-testid="market-eastmoney-backfill"]').trigger('click')
     await flushPromises()
 
+    // 回填要把类型一起带过去：以前硬编码只发股票，勾了 ETF 也补不到。
     expect(marketApi.createOnlineBackfill).toHaveBeenCalledWith({
       universe: 'all',
+      instrument_types: ['stock'],
       boards: ['main'],
     })
   })
@@ -512,5 +516,94 @@ describe('MarketDataPage', () => {
     expect(wrapper.get('[data-testid="market-local-import-note"]').text()).toContain('没有在容器里找到')
     expect(wrapper.text()).toContain('docker-compose.tdx.yml')
     expect(wrapper.get<HTMLInputElement>('[data-testid="market-local-import-path"]').element.value).toBe('')
+  })
+
+  it('imports local files without the online default of stocks only', async () => {
+    // 本地导入曾经复用在线的范围（默认只勾股票），ETF/指数/债券被静默过滤掉。
+    vi.mocked(marketApi.createLocalImport).mockResolvedValue({ job_id: 'local-1', status: 'queued' })
+    vi.mocked(marketApi.getMarketDataJob).mockResolvedValue({
+      job_id: 'local-1', status: 'completed', progress: 1, total_candidates: 1,
+      total_scanned: 1, errors: 0, error: null, result: {
+        source: 'local', discovered_files: 10, selected_files: 10, filtered_files: 0,
+        imported_instruments: 10, imported_bars: 5000, replaced_bars: 0, skipped_files: 0,
+      },
+    })
+    const wrapper = mount(MarketDataPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="market-local-import"]').trigger('click')
+    await flushPromises()
+
+    // 不勾任何范围 = 不限制，不能把在线默认的 instrument_types 带过去。
+    expect(marketApi.createLocalImport).toHaveBeenCalledWith({
+      universe: 'all',
+      vipdoc_path: '/data/vipdoc',
+    })
+  })
+
+  it('renders the local import report with its own keys', async () => {
+    // 结果面板以前只认在线同步那套键名，导入 5000 根后显示「写入 K 线 0」。
+    vi.mocked(marketApi.createLocalImport).mockResolvedValue({ job_id: 'local-2', status: 'queued' })
+    vi.mocked(marketApi.getMarketDataJob).mockResolvedValue({
+      job_id: 'local-2', status: 'completed', progress: 1, total_candidates: 1,
+      total_scanned: 1, errors: 1, error: null, result: {
+        source: 'local', discovered_files: 12, selected_files: 10, filtered_files: 2,
+        imported_instruments: 9, imported_bars: 5000, replaced_bars: 300, skipped_files: 1,
+        range_start: '2024-01-02', range_end: '2026-09-15',
+        failure_reasons: { day_file_truncated: 1 },
+      },
+    })
+    const wrapper = mount(MarketDataPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="market-local-import"]').trigger('click')
+    await flushPromises()
+
+    const result = wrapper.get('[data-testid="local-import-result"]').text()
+    expect(result).toContain('写入 K 线 5000')
+    expect(result).toContain('范围外跳过 2')
+    expect(result).toContain('day_file_truncated × 1')
+  })
+
+  it('undoes a local import through the delete endpoint', async () => {
+    // 本地行永久压过在线行，导错了必须能撤销，否则只能重建数据库。
+    vi.mocked(marketApi.deleteMarketBars).mockResolvedValue({ deleted_bars: 4321, source: 'local' })
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const wrapper = mount(MarketDataPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="market-local-import-undo"]').trigger('click')
+    await flushPromises()
+
+    expect(marketApi.deleteMarketBars).toHaveBeenCalledWith({
+      source: 'local',
+      universe: 'all',
+      confirm: true,
+    })
+    expect(wrapper.get('[data-testid="market-data-message"]').text()).toContain('4321')
+    confirmSpy.mockRestore()
+  })
+
+  it('does not delete anything when the undo prompt is dismissed', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const wrapper = mount(MarketDataPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="market-local-import-undo"]').trigger('click')
+    await flushPromises()
+
+    expect(marketApi.deleteMarketBars).not.toHaveBeenCalled()
+    confirmSpy.mockRestore()
+  })
+
+  it('greys out scopes the online channel cannot serve', async () => {
+    const wrapper = mount(MarketDataPage)
+    await flushPromises()
+
+    expect(wrapper.get<HTMLInputElement>('[data-testid="market-sync-type-index"]').element.disabled).toBe(true)
+    expect(wrapper.get<HTMLInputElement>('[data-testid="market-sync-type-bond"]').element.disabled).toBe(true)
+    expect(wrapper.get<HTMLInputElement>('[data-testid="market-sync-board-b_share"]').element.disabled).toBe(true)
+    // 在线不支持的品种对本地导入仍然可用。
+    expect(wrapper.get<HTMLInputElement>('[data-testid="market-local-type-index"]').element.disabled).toBe(false)
   })
 })

@@ -464,3 +464,48 @@ def test_pooled_read_session_is_per_thread(tmp_path: Path) -> None:
             thread.join()
         assert all(connection is not main_connection for connection in seen)
     assert seen[0] is not seen[1]
+
+
+def test_delete_bars_drops_only_the_requested_source(tmp_path: Path) -> None:
+    """撤销一次本地导入：只删 local 行，在线同步写下的行必须留下。
+
+    本地行永久压过在线行，没有这个入口，一次导错的 .day 只能靠重建数据库来收拾。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.upsert_online_bars(
+        _bars(
+            ("SH", "600000", "2024-01-02", 10.0, "online"),
+            ("SZ", "000001", "2024-01-02", 5.0, "online"),
+        )
+    )
+    store.upsert_local_bars(_bars(("SH", "600000", "2024-01-02", 10.0, "local")))
+
+    assert store.delete_bars(source="local") == 1
+    # 本地写入是"同 key 删 + 插"，被覆盖掉的在线行不会自己回来，所以回退之后
+    # 这一段要重新在线同步补齐 —— 这是回退入口的语义，不是"恢复覆盖前的数据"。
+    assert store.read_bars("SH", "600000").empty
+    assert store.read_bars("SZ", "000001")["source"].tolist() == ["online"]
+
+
+def test_delete_bars_honours_the_date_window(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.upsert_local_bars(
+        _bars(
+            ("SH", "600000", "2024-01-02", 10.0, "local"),
+            ("SH", "600000", "2024-01-05", 11.0, "local"),
+            ("SH", "600000", "2024-01-09", 12.0, "local"),
+        )
+    )
+
+    removed = store.delete_bars(
+        source="local",
+        start_date=date(2024, 1, 3),
+        end_date=date(2024, 1, 6),
+    )
+
+    assert removed == 1
+    assert [str(value.date()) for value in store.read_bars("SH", "600000")["date"].tolist()] == [
+        "2024-01-02",
+        "2024-01-09",
+    ]

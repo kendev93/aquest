@@ -334,6 +334,39 @@ class LocalImportRequest(BaseModel):
         return self
 
 
+class BarDeleteRequest(BaseModel):
+    """Undo a bad import by dropping stored bars.
+
+    ``source`` is required on purpose: local rows outrank online rows forever,
+    so dropping them is the only way back from a wrong import — but a request
+    with no filter at all would wipe the whole table, and that must never be
+    one missing field away.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source: Literal["local", "online"]
+    universe: Literal["all", "sh", "sz"] = "all"
+    codes: list[str] | None = Field(default=None, max_length=5_000)
+    start_date: date | None = None
+    end_date: date | None = None
+    confirm: bool = False
+
+    @model_validator(mode="after")
+    def validate_range(self) -> BarDeleteRequest:
+        if not self.confirm:
+            raise ValueError("删除日线数据不可撤销，请传 confirm=true 明确确认")
+        if self.start_date and self.end_date and self.start_date > self.end_date:
+            raise ValueError("开始日期不能晚于结束日期")
+        return self
+
+    @property
+    def markets(self) -> tuple[str, ...]:
+        if self.universe == "all":
+            return ("SH", "SZ")
+        return (self.universe.upper(),)
+
+
 class MarketSyncRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -495,8 +528,10 @@ class ConditionResearchRequest(BaseModel):
     min_instruments: int = Field(default=5, ge=1, le=10_000)
     candidate_limit: int = Field(default=5, ge=1, le=10)
     holdout_candidates: int = Field(default=1, ge=1, le=3)
-    # 置换检验：0 = 不检验，越大门槛越稳但越慢（每次约等价于挖掘耗时的 1/10）。
-    significance_permutations: int = Field(default=20, ge=0, le=500)
+    # 置换检验：0 = 不检验，越大门槛越稳但越慢（单次约等价于挖掘耗时的 1/13，
+    # 但零分布池是所有可用掩码而不仅是入围候选，实测按 1/6 估更稳妥）。
+    # 默认 200：20 次时名义 5% 的门槛实测误报 11.7%。
+    significance_permutations: int = Field(default=200, ge=0, le=500)
     significance_quantile: float = Field(default=0.95, gt=0, le=1)
     # 排序规则：研究不建组合，但结论要落到组合回测的「候选池 + 有限槽位」模型上，
     # 带上它才能顺带给「该按什么排序」和「这个条件在 N 槽位下还有没有意义」的答案。

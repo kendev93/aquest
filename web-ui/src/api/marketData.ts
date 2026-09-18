@@ -192,4 +192,20 @@ export async function cancelMarketDataJob(jobId: string): Promise<{
   return response.data
 }
 
+/** 撤销一次本地导入：本地行永久压过在线行，没有这个入口导错了只能重建数据库。 */
+export async function deleteMarketBars(payload: {
+  source: 'local' | 'online'
+  universe?: 'all' | 'sh' | 'sz'
+  codes?: string[]
+  start_date?: string
+  end_date?: string
+  confirm: boolean
+}): Promise<{ deleted_bars: number; source: string }> {
+  const response = await request<{ data: { deleted_bars: number; source: string } }>(
+    `${API_BASE}/bars/delete`,
+    { method: 'POST', body: JSON.stringify(payload) },
+  )
+  return response.data
+}
+
 export type MarketDataImportResult = MarketSyncResult

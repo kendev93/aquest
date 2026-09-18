@@ -78,6 +78,8 @@ _EASTMONEY_CATALOG_HOSTS = (
 _EASTMONEY_HISTORY_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 _TENCENT_HISTORY_URL = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get"
 _EASTMONEY_PAGE_SIZE = 5_000
+# What the server actually returns per page when ``pz`` asks for more.
+_EASTMONEY_SERVER_PAGE_CAP = 100
 # East Money silently caps ``pz`` at 100 rows per page no matter what we ask for,
 # so a full A-share catalog needs hundreds of pages.  The old 100-page ceiling
 # truncated the list to whatever the first pages happened to contain.
@@ -296,11 +298,16 @@ def _should_fetch_next_page(total: int, fetched: int, page_rows: int, page_size:
     so "page shorter than requested" no longer means "last page".  Trust the
     reported ``total`` whenever it is available and fall back to the page-size
     heuristic only when the provider omits it.
+
+    The fallback compares against the *server* cap rather than the requested
+    page size: asking for 5000 and receiving 100 is a full page as far as the
+    provider is concerned, and comparing 100 against 5000 would stop after the
+    first page and report a complete-looking catalog of 100 instruments.
     """
 
     if total > 0:
         return fetched < total
-    return page_rows >= page_size
+    return page_rows >= min(page_size, _EASTMONEY_SERVER_PAGE_CAP)
 
 
 def _mapping_value(value: object) -> Mapping[str, object]:
@@ -332,15 +339,19 @@ def _parse_compact_date(value: str) -> date:
 
 
 def _tencent_reports_shares(market: MarketCode, code: str) -> bool:
-    """Whether Tencent already reports volume in shares instead of lots.
+    """Whether Tencent reports volume in shares instead of lots.
 
     Verified against Sina's share-denominated feed on 2026-09-17: every board
-    (main, SME, ChiNext, ETF, index) answers in lots of 100 and needs scaling,
-    while the STAR Market (688) comes back as raw shares, so scaling it would
-    inflate the volume a hundredfold.
+    (main, SME, ChiNext, ETF, index) answers in lots of 100, while the STAR
+    Market comes back as raw shares.
+
+    STAR is not just 688: 689 is the CDR/red-chip segment of the same board and
+    also answers in shares (verified on 2026-09-18 with sh689009, where
+    ``amount / volume`` lands on the close price rather than a hundred times
+    it). Treating 689 as lots inflated its volume a hundredfold.
     """
 
-    return market == "SH" and code.startswith("688")
+    return market == "SH" and code.startswith(("688", "689"))
 
 
 class OnlineMarketClient:
@@ -399,6 +410,14 @@ class OnlineMarketClient:
             if not _should_fetch_next_page(total, len(rows), len(page_rows), self._page_size):
                 break
             page += 1
+        # Stopping on an empty page or on the page-size heuristic is a guess.
+        # When the server told us how many rows exist, hold it to that: a
+        # truncated catalog silently yields a study over a handful of stocks
+        # with no error anywhere, which is far harder to notice than a failure.
+        if total and len(rows) < total:
+            raise OnlineDataError(
+                f"在线证券列表不完整：服务端声明 {total} 条，实际只取到 {len(rows)} 条"
+            )
         return pd.DataFrame(
             [{"代码": row.get("f12"), "名称": row.get("f14")} for row in rows],
             columns=["代码", "名称"],
@@ -464,6 +483,10 @@ class OnlineMarketClient:
             if not _should_fetch_next_page(total, len(rows), len(page_rows), self._page_size):
                 break
             page += 1
+        if total and len(rows) < total:
+            raise OnlineDataError(
+                f"在线证券列表不完整：服务端声明 {total} 条，实际只取到 {len(rows)} 条"
+            )
         result: list[dict[str, object]] = []
         for row in rows:
             code = _clean_code(row.get("f12"))
@@ -671,12 +694,14 @@ class OnlineMarketClient:
         dates = pd.to_datetime(frame["date"], errors="coerce")
         for column in ("open", "close", "high", "low", "volume", "turnover", "amount"):
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
-        # 腾讯对科创板直接给"股"，其余品种（含 ETF 和指数）给的都是"手"。
-        # 成交额一律是万元、换手率一律是百分数，这两项跟板块无关。旧实现把三者
-        # 绑在同一个前缀判断里，于是被 "sz000" 误伤的深市主板成交量少算 100
-        # 倍，科创板与指数的成交额少算 1 万倍。
-        if not _tencent_reports_shares(market, code):
-            frame["volume"] = frame["volume"] * 100
+        # 成交量以"手"入库（与通达信 .day 导入、东财 f56 的口径一致）。
+        # 腾讯对科创板（688/689）直接给"股"，其余品种（含 ETF 和指数）给的就是
+        # "手"，所以只有科创板需要换算，方向是股 → 手。成交额一律是万元、换手率
+        # 一律是百分数，这两项跟板块无关。旧实现把三者绑在同一个前缀判断里，于是
+        # 被 "sz000" 误伤的深市主板成交量少算 100 倍，科创板与指数的成交额少算
+        # 1 万倍。
+        if _tencent_reports_shares(market, code):
+            frame["volume"] = frame["volume"] / 100
         frame["turnover"] = frame["turnover"] / 100
         frame["amount"] = frame["amount"] * 10_000
         frame["date"] = dates.dt.date

@@ -127,10 +127,11 @@ def test_fetch_daily_history_uses_the_right_market_prefix(code: str, expected_se
 
 
 def test_fetch_tencent_daily_history_decodes_jsonp_and_normalizes_units() -> None:
+    # 原始成交量 100000 手、成交额 10500 万元 ⇒ 均价 10.5 = close，量纲自洽。
     transport = FakeTransport(
         [
             'kline_day2026={"code":0,"data":{"sh600000":{"day":['
-            '["2026-09-10","10.0","10.5","10.6","9.9","1000.00",{},'
+            '["2026-09-10","10.0","10.5","10.6","9.9","100000.00",{},'
             '"1.20","10500.00","0.00","0.00"]'
             "]}}}"
         ]
@@ -153,11 +154,12 @@ def test_fetch_tencent_daily_history_decodes_jsonp_and_normalizes_units() -> Non
 @pytest.mark.parametrize(
     ("market", "code", "expected_volume"),
     [
-        ("SH", "600000", 100_000.0),  # 沪主板：手
+        ("SH", "600000", 100_000.0),  # 沪主板：手，原样入库
         ("SZ", "000001", 100_000.0),  # 深主板：手（"sz000" 曾误伤）
         ("SZ", "002415", 100_000.0),  # 中小板：手
         ("SZ", "300750", 100_000.0),  # 创业板：手
-        ("SH", "688981", 1_000.0),  # 科创板：腾讯直接给股
+        ("SH", "688981", 1_000.0),  # 科创板 688：腾讯给股，股 → 手
+        ("SH", "689009", 1_000.0),  # 科创板 689：同为股，曾因只判 688 被漏掉
         ("SH", "510300", 100_000.0),  # 沪 ETF：手
         ("SZ", "159915", 100_000.0),  # 深 ETF：手
         ("SH", "000300", 100_000.0),  # 沪指数：手（"sh000" 曾误伤）
@@ -167,8 +169,9 @@ def test_fetch_tencent_daily_history_decodes_jsonp_and_normalizes_units() -> Non
 def test_fetch_tencent_daily_history_scales_units_per_board(
     market: str, code: str, expected_volume: float
 ) -> None:
-    """成交量按板块换算，成交额与换手率与板块无关。
+    """成交量统一以"手"入库，只有科创板（688/689）需要从"股"换算。
 
+    成交额一律万元 → 元、换手率一律百分数 → 小数，这两项与板块无关。
     旧实现把三者绑在同一个前缀判断里：深市 000/001 被 "sz000" 误伤后成交量
     少算 100 倍，科创板与两个指数前缀被排除后成交额少算 1 万倍。
     """
@@ -179,7 +182,7 @@ def test_fetch_tencent_daily_history_scales_units_per_board(
             'kline_day2026={"code":0,"data":{"'
             f"{symbol}"
             '":{"day":['
-            '["2026-09-10","10.0","10.5","10.6","9.9","1000.00",{},'
+            '["2026-09-10","10.0","10.5","10.6","9.9","100000.00",{},'
             '"1.20","10500.00","0.00","0.00"]'
             "]}}}"
         ]
@@ -255,6 +258,46 @@ def test_security_list_stops_on_a_short_page_when_total_is_unknown() -> None:
 
     assert len(frame) == 1
     assert len(transport.calls) == 1
+
+
+def test_security_list_pages_on_when_total_is_unknown_and_the_server_caps_at_100() -> None:
+    """total 缺失时也要按服务端真实每页上限（100）判断，不能拿请求的 pz=5000 比。
+
+    拿 5000 比的话，100 行的满页会被当成"最后一页"，同步只取到第一页就收工；
+    而目录按代码倒序返回，第一页全是非 A 股代码，过滤后一个不剩 —— 任务报成功，
+    研究却在空数据上跑。
+    """
+
+    def page_of(offset: int) -> dict[str, object]:
+        return {
+            "data": {
+                "diff": [
+                    {"f12": f"{600000 - offset - index:06d}", "f14": f"样本{index}"}
+                    for index in range(100)
+                ]
+            }
+        }
+
+    transport = FakeTransport([page_of(0), page_of(100), {"data": {"diff": []}}])
+
+    frame = OnlineMarketClient(transport=transport).fetch_instruments(timeout=5.0)
+
+    assert len(frame) == 200
+    assert [call[1]["pn"] for call in transport.calls] == ["1", "2", "3"]
+
+
+def test_security_list_raises_when_the_catalog_comes_back_short() -> None:
+    """提前遇到空页会 break，之后必须拿 total 对账，否则目录被截断却报成功。"""
+
+    transport = FakeTransport(
+        [
+            {"data": {"total": 250, "diff": [{"f12": "600000", "f14": "浦发银行"}]}},
+            {"data": {"total": 250, "diff": []}},
+        ]
+    )
+
+    with pytest.raises(OnlineDataError, match="不完整"):
+        OnlineMarketClient(transport=transport).fetch_instruments(timeout=5.0)
 
 
 def test_security_list_rejects_eastmoney_soft_failure(monkeypatch) -> None:

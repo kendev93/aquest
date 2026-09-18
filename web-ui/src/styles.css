@@ -187,6 +187,10 @@ input:focus, select:focus { border-color: var(--accent); }
 .local-import-field label { color: var(--subtle); font-size: 10px; }
 .local-import-field input { min-height: 40px; width: 100%; }
 .local-import-row .secondary-button { min-height: 40px; margin-top: 0; }
+.scope-option-off { opacity: 0.4; }
+.scope-option-off input { cursor: not-allowed; }
+.local-import-scope { margin-top: 9px; }
+.local-import-scope > small { flex: 1 0 100%; line-height: 1.5; }
 
 .results-heading { align-items: center; }
 .export-actions { display: flex; gap: 8px; }

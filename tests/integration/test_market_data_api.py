@@ -115,6 +115,18 @@ def test_local_market_bars_rejects_invalid_code() -> None:
     assert response.status_code == 422
 
 
+def test_bar_delete_endpoint_rejects_an_unconfirmed_request() -> None:
+    """删除日线不可撤销，没有 confirm 的请求必须被挡下。"""
+
+    with TestClient(create_app(auto_sync_enabled=False)) as client:
+        response = client.post(
+            "/api/v1/market-data/bars/delete",
+            json={"source": "local", "universe": "all"},
+        )
+
+    assert response.status_code == 422
+
+
 def test_local_import_endpoint_is_removed() -> None:
     with TestClient(create_app(auto_sync_enabled=False)) as client:
         response = client.post(

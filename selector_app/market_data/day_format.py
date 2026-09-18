@@ -14,6 +14,8 @@ import pandas as pd
 from .models import InstrumentBoard, InstrumentType
 
 _DAILY_RECORD = struct.Struct("<IIIIIfII")
+# Exposed so callers can detect a truncated file without decoding it again.
+DAY_RECORD_SIZE = _DAILY_RECORD.size
 _FILENAME = re.compile(r"^(sh|sz)(\d{6})\.day$", re.IGNORECASE)
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 _MARKET_CLOSE = (15, 5)
