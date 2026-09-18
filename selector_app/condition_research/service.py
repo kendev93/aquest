@@ -539,18 +539,21 @@ class ConditionResearchService:
                 validation_candidates[candidate_id],
                 baseline_reports=validation_baseline,
             )
+            mining_payload = _mining_dict(candidate)
+            raw_significant = mining_payload["significant"]
             reasons = candidate_constraint_failures(
                 summary,
                 validation_baseline_summary,
                 min_trades=config.min_trades,
                 min_instruments=config.min_instruments,
+                significant=raw_significant if isinstance(raw_significant, bool) else None,
             )
             results.append(
                 {
                     "candidate_id": candidate_id,
                     "side": side,
                     "condition": _condition_dict(candidate.condition),
-                    "mining": _mining_dict(candidate),
+                    "mining": mining_payload,
                     "validation": _without_stock_rows(summary),
                     "passed_constraints": not reasons,
                     "constraint_failures": list(reasons),
@@ -831,6 +834,8 @@ class ConditionResearchService:
                         limit=config.candidate_limit,
                         excluded=_rule_condition_signatures(config.buy_rule),
                         top_n_context=buy_context,
+                        permutations=config.significance_permutations,
+                        significance_quantile=config.significance_quantile,
                     )
                 )
             )
@@ -844,6 +849,8 @@ class ConditionResearchService:
                         min_instruments=config.min_instruments,
                         limit=config.candidate_limit,
                         excluded=_rule_condition_signatures(config.sell_rule),
+                        permutations=config.significance_permutations,
+                        significance_quantile=config.significance_quantile,
                     )
                 )
             )
@@ -920,10 +927,14 @@ def candidate_constraint_failures(
     *,
     min_trades: int,
     min_instruments: int,
+    significant: bool | None = None,
 ) -> tuple[str, ...]:
     candidate = _pooled(candidate_summary)
     baseline = _pooled(baseline_summary)
     failures: list[str] = []
+    # None 表示这次没做置换检验，此时不判断显著性；False 表示做过但没通过。
+    if significant is False:
+        failures.append("提升未超过噪声门槛")
     if (_number(candidate.get("closed_trades")) or 0.0) < min_trades:
         failures.append("交易样本不足")
     if (_number(candidate.get("stocks_with_trades")) or 0.0) < min_instruments:
@@ -944,7 +955,22 @@ def candidate_constraint_failures(
             candidate_metric is None or candidate_metric + 1e-12 < baseline_metric
         ):
             failures.append(label)
+    # A buy filter removes trades, and capital sitting in cash earns nothing.
+    # Win rate and payoff both describe the trades that *did* happen, so a
+    # filter that skips most of them can look better on every per-trade metric
+    # while leaving the study worse off overall.
+    candidate_total = _number(_per_stock(candidate_summary).get("median_total_return"))
+    baseline_total = _number(_per_stock(baseline_summary).get("median_total_return"))
+    if baseline_total is not None and (
+        candidate_total is None or candidate_total + 1e-12 < baseline_total
+    ):
+        failures.append("总收益低于基础规则")
     return tuple(failures)
+
+
+def _per_stock(summary: Mapping[str, object]) -> Mapping[str, object]:
+    value = summary.get("per_stock")
+    return value if isinstance(value, Mapping) else {}
 
 
 def _mine_sample_sets(
@@ -955,6 +981,8 @@ def _mine_sample_sets(
     limit: int,
     excluded: frozenset[str] = frozenset(),
     top_n_context: TopNContext | None = None,
+    permutations: int = 0,
+    significance_quantile: float = 0.95,
 ) -> tuple[MinedCondition, ...]:
     usable = [sample for sample in samples if len(sample)]
     if not usable:
@@ -969,6 +997,8 @@ def _mine_sample_sets(
         limit=limit,
         excluded=excluded,
         top_n_context=top_n_context,
+        permutations=permutations,
+        significance_quantile=significance_quantile,
     )
 
 
@@ -1085,6 +1115,10 @@ def _mining_dict(candidate: MinedCondition) -> dict[str, object]:
         "top_n_outcome_rate": candidate.top_n_outcome_rate,
         "top_n_support_count": candidate.top_n_support_count,
         "top_n_filtered_days": candidate.top_n_filtered_days,
+        # 置换检验结果。三个字段同时为 None 表示这次没做检验，界面就不显示显著性列。
+        "lift_threshold": candidate.lift_threshold,
+        "permutation_pvalue": candidate.permutation_pvalue,
+        "significant": candidate.significant,
     }
 
 

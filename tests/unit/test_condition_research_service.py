@@ -100,6 +100,83 @@ def test_candidate_without_baseline_win_rate_is_not_claimed_as_improved() -> Non
     assert "基础规则样本不足，无法比较胜率" in failures
 
 
+def test_candidate_fails_when_total_return_falls_behind_the_baseline() -> None:
+    """每笔都更好，但过滤掉太多交易让资金闲着 —— 整体是变差的。"""
+
+    baseline = {
+        "pooled_trades": {
+            "closed_trades": 100,
+            "win_rate": 0.50,
+            "payoff_ratio": 1.2,
+            "mean_trade_return": 0.01,
+            "stocks_with_trades": 20,
+        },
+        "per_stock": {"median_total_return": 0.08},
+    }
+    candidate = {
+        "pooled_trades": {
+            "closed_trades": 30,
+            "win_rate": 0.70,
+            "payoff_ratio": 1.6,
+            "mean_trade_return": 0.02,
+            "stocks_with_trades": 12,
+        },
+        "per_stock": {"median_total_return": 0.03},
+    }
+
+    failures = candidate_constraint_failures(
+        candidate,
+        baseline,
+        min_trades=20,
+        min_instruments=5,
+    )
+
+    assert "总收益低于基础规则" in failures
+    # 逐笔指标确实都更好了，不该再报那些，否则看不出真正的问题在哪
+    assert "胜率未高于基础规则" not in failures
+    assert "盈亏比低于基础规则" not in failures
+
+
+def test_candidate_fails_when_its_lift_is_within_the_noise_threshold() -> None:
+    summary = {
+        "pooled_trades": {
+            "closed_trades": 100,
+            "win_rate": 0.60,
+            "payoff_ratio": 1.5,
+            "mean_trade_return": 0.02,
+            "stocks_with_trades": 20,
+        }
+    }
+    baseline = {
+        "pooled_trades": {
+            "closed_trades": 120,
+            "win_rate": 0.50,
+            "payoff_ratio": 1.2,
+            "mean_trade_return": 0.01,
+            "stocks_with_trades": 20,
+        }
+    }
+
+    failures = candidate_constraint_failures(
+        summary,
+        baseline,
+        min_trades=20,
+        min_instruments=5,
+        significant=False,
+    )
+    assert "提升未超过噪声门槛" in failures
+
+    # 没做置换检验时不能凭空判一个候选不合格
+    without_test = candidate_constraint_failures(
+        summary,
+        baseline,
+        min_trades=20,
+        min_instruments=5,
+        significant=None,
+    )
+    assert without_test == ()
+
+
 class FakeResearchAdapter:
     def __init__(self) -> None:
         self.refs = [
@@ -214,6 +291,9 @@ def test_service_mines_on_train_and_replays_winner_filter_on_validation_and_hold
         min_instruments=1,
         candidate_limit=5,
         holdout_candidates=1,
+        # 这个数据集只有两笔交易，置换检验会正确地判定「两笔全赢也可能是运气」，
+        # 这里要验证的是挖掘→验证→留出的链路，所以显式关掉检验。
+        significance_permutations=0,
     )
 
     result = service.run(config)
@@ -225,6 +305,7 @@ def test_service_mines_on_train_and_replays_winner_filter_on_validation_and_hold
     assert result["candidates"]
     candidate = result["candidates"][0]
     assert candidate["side"] == "buy"
+    assert candidate["mining"]["lift_threshold"] is None
     assert candidate["passed_constraints"] is True
     assert candidate["validation"]["pooled_trades"]["win_rate"] == pytest.approx(2 / 3)
     assert candidate["full_period"]["pooled_trades"]["win_rate"] == pytest.approx(2 / 3)

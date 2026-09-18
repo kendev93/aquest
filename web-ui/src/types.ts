@@ -868,6 +868,10 @@ export interface ConditionResearchPayload {
   min_instruments?: number
   candidate_limit?: number
   holdout_candidates?: number
+  /** 置换检验次数：0 = 不检验。 */
+  significance_permutations?: number
+  /** 门槛分位数，默认 0.95。 */
+  significance_quantile?: number
   // 排序规则：研究不建组合，但结论要落到组合回测的「候选池 + 有限槽位」模型上。
   ranking_value?: string | null
   rank_order?: RankOrder
@@ -903,6 +907,12 @@ export interface ConditionResearchMiningMetrics {
   top_n_support_count?: number
   /** 命中数超过槽位数、排序真正起作用的交易日数。0 = 前 N 等于全池。 */
   top_n_filtered_days?: number
+  /** 噪声门槛：把标签随机打乱重挖，纯运气能把 lift 推到的分位值。null = 这次没做置换检验。 */
+  lift_threshold?: number | null
+  /** 随机重挖中达到该候选 lift 的比例，越小越可信。 */
+  permutation_pvalue?: number | null
+  /** lift 是否超过噪声门槛。null = 没做检验，不判断。 */
+  significant?: boolean | null
 }
 
 export interface ConditionResearchStockResult {

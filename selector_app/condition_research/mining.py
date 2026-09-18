@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 
 import numpy as np
 import pandas as pd
@@ -11,6 +11,10 @@ import pandas as pd
 from selector_app.screening.models import ScreenCondition
 
 DEFAULT_QUANTILES = (0.2, 0.4, 0.6, 0.8)
+# Fixed shuffle seed: a permutation test must not make a study less
+# reproducible than the search it audits, and a fixed seed keeps the same
+# inputs producing the same threshold run after run.
+_PERMUTATION_SEED = 20240918
 # Comparing two series whose spreads differ by orders of magnitude degenerates
 # into "the varying series vs roughly zero". That is how five different feature
 # pairs collapsed into the same `indicator_three.var1 < 0` condition, so pairs
@@ -113,12 +117,79 @@ def _masks_agree(
     *,
     threshold: float = _DUPLICATE_AGREEMENT,
 ) -> bool:
-    """True when two candidate masks select effectively the same samples."""
+    """True when two candidate match sets select effectively the same samples.
 
-    comparable = left | right
-    if not comparable.any():
+    Both arguments are sorted arrays of sample positions. Overlap is measured
+    as ``intersection / union`` over those positions, which is the same ratio
+    the earlier boolean-mask version computed on the rows where either matched.
+    """
+
+    union = np.union1d(left, right)
+    if union.size == 0:
         return False
-    return float(np.mean(left[comparable] == right[comparable])) >= threshold
+    intersection = np.intersect1d(left, right)
+    return float(intersection.size / union.size) >= threshold
+
+
+def _permutation_max_lifts(
+    candidates: Sequence[tuple[MinedCondition, np.ndarray, str]],
+    baselines: Mapping[str, tuple[np.ndarray, np.ndarray]],
+    target: np.ndarray,
+    *,
+    permutations: int,
+    seed: int | None,
+) -> list[float]:
+    """Best lift each shuffled label set produces across the same candidates.
+
+    Only the labels move: the candidate masks, the trade-group reduction and
+    the support/instrument floors are all label-independent, so they are
+    reused. That makes a shuffle roughly an order of magnitude cheaper than
+    re-running the whole search.
+
+    Each run reports the *maximum* lift, matching the selection pressure the
+    real search applies - this is the max-T null distribution, not the null
+    distribution of a single fixed rule.
+    """
+
+    rng = np.random.default_rng(_PERMUTATION_SEED if seed is None else seed)
+    results: list[float] = []
+    for _ in range(permutations):
+        shuffled = rng.permutation(target)
+        baseline_rates = {
+            key: _grouped_outcome_rate(shuffled[valid], groups)
+            for key, (valid, groups) in baselines.items()
+        }
+        best = 0.0
+        for _candidate, matched, baseline_key in candidates:
+            baseline = baseline_rates[baseline_key]
+            if not baseline > 0.0:
+                continue
+            rate = float(np.mean(shuffled[matched]))
+            if rate <= baseline:
+                continue
+            lift = rate / baseline
+            if lift > best:
+                best = lift
+        # No candidate survived the shuffle: nothing beat chance, so the
+        # run contributes the neutral lift instead of a misleading 0.
+        results.append(best if best > 0.0 else 1.0)
+    return results
+
+
+def _with_significance(
+    candidate: MinedCondition,
+    threshold: float | None,
+    null_max_lifts: Sequence[float],
+) -> MinedCondition:
+    if threshold is None or not null_max_lifts:
+        return candidate
+    reached = sum(1 for value in null_max_lifts if value >= candidate.lift)
+    pvalue = (1 + reached) / (1 + len(null_max_lifts))
+    return replace(
+        candidate,
+        lift_threshold=threshold,
+        permutation_pvalue=pvalue,
+    )
 
 
 @dataclass(frozen=True)
@@ -143,6 +214,21 @@ class MinedCondition:
     # ranking actually had to choose. Without them the top-N split is a no-op
     # and the column would silently duplicate the pool-wide rate.
     top_n_filtered_days: int = 0
+    # Permutation-test diagnostics. Both stay None when the caller did not ask
+    # for a permutation test, so a study can still run without one.
+    # ``lift_threshold`` is the lift a candidate has to beat before it is
+    # distinguishable from the best of ``permutations`` shuffled label sets.
+    lift_threshold: float | None = None
+    # Fraction of shuffled runs whose best lift reached this candidate's lift.
+    permutation_pvalue: float | None = None
+
+    @property
+    def significant(self) -> bool | None:
+        """True when the lift clears the permutation threshold, None if untested."""
+
+        if self.lift_threshold is None:
+            return None
+        return self.lift > self.lift_threshold
 
 
 @dataclass(frozen=True)
@@ -193,6 +279,9 @@ def mine_binary_conditions(
     limit: int = 50,
     excluded: frozenset[str] = frozenset(),
     top_n_context: TopNContext | None = None,
+    permutations: int = 0,
+    significance_quantile: float = 0.95,
+    permutation_seed: int | None = None,
 ) -> tuple[MinedCondition, ...]:
     """Find readable thresholds whose matching samples are enriched for an outcome.
 
@@ -208,6 +297,12 @@ def mine_binary_conditions(
     stays vectorized. ``pd.factorize`` hands out codes in order of first
     appearance, which is the same order the earlier dict-based implementation
     iterated, keeping results reproducible.
+
+    ``permutations > 0`` runs a label-shuffling test. Thousands of thresholds
+    are scored here, so the best lift among them is inflated even on pure
+    noise; the test re-scores the *same* candidate masks against shuffled
+    labels and reports how high the best lift gets by chance. Results stay
+    deterministic because the shuffle uses a fixed seed by default.
     """
 
     if min_support < 1:
@@ -216,6 +311,10 @@ def mine_binary_conditions(
         raise ValueError("最少覆盖股票数必须大于 0")
     if limit < 1:
         raise ValueError("候选条件上限必须大于 0")
+    if permutations < 0:
+        raise ValueError("置换检验次数不能为负数")
+    if not 0.0 < significance_quantile <= 1.0:
+        raise ValueError("显著性分位数必须在 0 和 1 之间")
     resolved_quantiles = tuple(sorted(set(float(value) for value in quantiles)))
     if not resolved_quantiles or any(not 0.0 < value < 1.0 for value in resolved_quantiles):
         raise ValueError("候选分位数必须在 0 和 1 之间")
@@ -255,15 +354,24 @@ def mine_binary_conditions(
     group_codes = pd.factorize(groups)[0]
     instrument_codes = pd.factorize(symbols)[0]
 
-    candidates: list[tuple[MinedCondition, np.ndarray]] = []
+    # Each scored candidate keeps the sample rows it matched (already reduced to
+    # one per trade group) plus the key of the valid-sample window its baseline
+    # was measured on. That is everything the permutation test needs to rescore
+    # it without recomputing a single threshold mask.
+    candidates: list[tuple[MinedCondition, np.ndarray, str]] = []
+    baselines: dict[str, tuple[np.ndarray, np.ndarray]] = {}
     seen_rules: set[tuple[str, str, str | None, float | None]] = set()
 
-    def record(candidate: MinedCondition | None, valid: np.ndarray, mask: np.ndarray) -> None:
-        if candidate is None:
+    def record(
+        scored: tuple[MinedCondition, np.ndarray] | None,
+        valid: np.ndarray,
+        baseline_key: str,
+    ) -> None:
+        if scored is None:
             return
-        full_mask = np.zeros(len(target), dtype=bool)
-        full_mask[valid] = mask
-        candidates.append((candidate, full_mask))
+        candidate, matched_global = scored
+        baselines.setdefault(baseline_key, (valid, group_codes[valid]))
+        candidates.append((candidate, matched_global, baseline_key))
 
     for feature_id in feature_ids:
         if feature_id in _PRICE_SCALE_FEATURES:
@@ -311,7 +419,7 @@ def mine_binary_conditions(
                     top_n_context=top_n_context,
                     sample_positions=positions,
                 )
-                record(candidate, valid, condition_mask)
+                record(candidate, valid, feature_id)
 
     for left_index, left_id in enumerate(feature_ids):
         if not comparable[left_id]:
@@ -365,7 +473,7 @@ def mine_binary_conditions(
                     top_n_context=top_n_context,
                     sample_positions=positions,
                 )
-                record(candidate, valid, condition_mask)
+                record(candidate, valid, f"{left_id}|{right_id}")
 
     ranked = sorted(
         candidates,
@@ -379,13 +487,29 @@ def mine_binary_conditions(
             float(item[0].condition.right_constant or 0.0),
         ),
     )
+    null_max_lifts = (
+        _permutation_max_lifts(
+            candidates,
+            baselines,
+            target_float,
+            permutations=permutations,
+            seed=permutation_seed,
+        )
+        if permutations > 0 and candidates
+        else ()
+    )
+    threshold = (
+        float(np.quantile(np.asarray(null_max_lifts, dtype=float), significance_quantile))
+        if null_max_lifts
+        else None
+    )
     selected: list[MinedCondition] = []
-    kept_masks: list[np.ndarray] = []
-    for candidate, mask in ranked:
-        if any(_masks_agree(mask, kept) for kept in kept_masks):
+    kept_matches: list[np.ndarray] = []
+    for scored_candidate, matched, _baseline_key in ranked:
+        if any(_masks_agree(matched, kept) for kept in kept_matches):
             continue
-        selected.append(candidate)
-        kept_masks.append(mask)
+        selected.append(_with_significance(scored_candidate, threshold, null_max_lifts))
+        kept_matches.append(matched)
         if len(selected) == limit:
             break
     return tuple(selected)
@@ -457,7 +581,14 @@ def _candidate_for_mask(
     baseline_rate: float,
     top_n_context: TopNContext | None = None,
     sample_positions: np.ndarray | None = None,
-) -> MinedCondition | None:
+) -> tuple[MinedCondition, np.ndarray] | None:
+    """Score one mask, returning the candidate and the global rows it matched.
+
+    ``sample_positions`` maps the compressed indices back to full-sample
+    positions; the returned rows are global so a permutation test can rescore
+    the same match set against shuffled labels.
+    """
+
     order = np.flatnonzero(condition_mask)
     if order.size == 0:
         # Never true: it cannot produce a single trade.
@@ -470,6 +601,9 @@ def _candidate_for_mask(
     # sorting restores the ascending order the previous dict loop produced.
     _, first_positions = np.unique(group_codes[order], return_index=True)
     matched_indices = np.sort(order[first_positions])
+    matched_global = (
+        matched_indices if sample_positions is None else sample_positions[matched_indices]
+    )
     support_count = int(matched_indices.size)
     if support_count < min_support:
         return None
@@ -483,7 +617,7 @@ def _candidate_for_mask(
     top_n_rate, top_n_support, filtered_days = _top_n_diagnosis(
         matched_indices, outcomes, top_n_context, sample_positions
     )
-    return MinedCondition(
+    scored = MinedCondition(
         condition=condition,
         support_count=support_count,
         support_ratio=float(support_count / group_count),
@@ -495,6 +629,7 @@ def _candidate_for_mask(
         top_n_support_count=top_n_support,
         top_n_filtered_days=filtered_days,
     )
+    return scored, np.asarray(matched_global, dtype=np.intp)
 
 
 def _grouped_outcome_rate(outcomes: np.ndarray, group_codes: np.ndarray) -> float:

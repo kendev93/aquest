@@ -66,6 +66,8 @@ const form = reactive({
   minInstruments: 5,
   candidateLimit: 5,
   holdoutCandidates: 1,
+  // 0 = 不做检验。默认 20 次在典型样本量下只多花不到 1 秒。
+  significancePermutations: 20,
   initialCash: 100_000,
   commission: 0.0001,
   minCommission: 0.1,
@@ -420,6 +422,13 @@ function validate(): Record<string, string> {
   if (!Number.isInteger(form.holdoutCandidates) || form.holdoutCandidates < 1 || form.holdoutCandidates > 3) {
     next.holdoutCandidates = '最终留出候选数必须在 1 到 3 之间。'
   }
+  if (
+    !Number.isInteger(form.significancePermutations)
+    || form.significancePermutations < 0
+    || form.significancePermutations > 500
+  ) {
+    next.significancePermutations = '噪声门槛检验次数必须在 0 到 500 之间（0 表示不检验）。'
+  }
   return next
 }
 
@@ -449,6 +458,7 @@ function buildPayload(): ConditionResearchPayload {
     min_instruments: form.minInstruments,
     candidate_limit: form.candidateLimit,
     holdout_candidates: form.holdoutCandidates,
+    significance_permutations: form.significancePermutations,
     ranking_value: rankingValue.value || null,
     rank_order: rankingOrder.value,
     ranking_top_n: rankingTopN.value,
@@ -709,6 +719,10 @@ async function applyStoredRequest(raw: unknown): Promise<void> {
     form.minInstruments = finiteNumber(request.min_instruments, form.minInstruments)
     form.candidateLimit = finiteNumber(request.candidate_limit, form.candidateLimit)
     form.holdoutCandidates = finiteNumber(request.holdout_candidates, form.holdoutCandidates)
+    form.significancePermutations = finiteNumber(
+      request.significance_permutations,
+      form.significancePermutations,
+    )
     // 排序规则：存的时候是 null 表示「当年没指定」，别把它变成一个空字符串。
     rankingValue.value = typeof request.ranking_value === 'string' ? request.ranking_value : ''
     rankingOrder.value = request.rank_order === 'asc' ? 'asc' : 'desc'
@@ -868,6 +882,44 @@ function topNTitle(candidate: ConditionResearchCandidate): string {
     '这一列只统计这些日子里排序靠前、真正会成交的样本。'
   )
 }
+
+/** 噪声门槛：随机打乱标签重挖若干次，纯运气能把「最好的那个条件」推到多高的 lift。 */
+function significanceTitle(candidate: ConditionResearchCandidate): string {
+  const threshold = candidate.mining.lift_threshold
+  if (threshold === null || threshold === undefined) {
+    return '这次研究没有做置换检验，无法判断这个提升是不是运气。'
+  }
+  const pvalue = candidate.mining.permutation_pvalue
+  const p = pvalue === null || pvalue === undefined ? '—' : pvalue.toFixed(3)
+  return (
+    `把交易结果随机打乱重新挖掘，纯运气最好的一次能把 lift 推到 ${threshold.toFixed(3)}。` +
+    `这个候选的 lift 是 ${candidate.mining.lift.toFixed(3)}，随机重挖里有 p=${p} 的比例达到或超过它。`
+  )
+}
+
+function significanceLabel(candidate: ConditionResearchCandidate): string {
+  if (candidate.mining.significant === true) return '显著'
+  if (candidate.mining.significant === false) return '疑似噪声'
+  return ''
+}
+
+/** 有门槛数据时给一句总结，避免用户看到五个候选全是「疑似噪声」却不知道意味着什么。 */
+const significanceSummary = computed(() => {
+  const candidates = report.value?.candidates ?? []
+  const thresholds = candidates
+    .map((item) => item.mining.lift_threshold)
+    .filter((value): value is number => typeof value === 'number')
+  if (!thresholds.length) return ''
+  const threshold = Math.max(...thresholds)
+  const passed = candidates.filter((item) => item.mining.significant === true).length
+  if (passed > 0) {
+    return `噪声门槛 ${threshold.toFixed(3)}：${candidates.length} 个候选里有 ${passed} 个超过了纯运气能达到的水平。`
+  }
+  return (
+    `噪声门槛 ${threshold.toFixed(3)}：没有一个候选超过随机打乱能达到的水平，` +
+    '这次挖到的条件很可能是运气，建议扩大股票范围、延长时间区间或放宽基础规则以增加样本。'
+  )
+})
 
 function validationTrades(candidate: ConditionResearchCandidate): string {
   const trades = candidate.validation.pooled_trades.closed_trades
@@ -1096,6 +1148,13 @@ onMounted(async () => {
                 <label for="condition-holdout-candidates">最终留出候选/侧</label>
                 <input id="condition-holdout-candidates" v-model.number="form.holdoutCandidates" data-testid="condition-holdout-candidates" type="number" min="1" max="3" step="1">
               </div>
+              <div>
+                <label for="condition-permutations">噪声门槛检验次数<TermHint term="噪声门槛检验次数" /></label>
+                <input id="condition-permutations" v-model.number="form.significancePermutations" data-testid="condition-permutations" type="number" min="0" max="500" step="10">
+              </div>
+            </div>
+            <p v-if="errors.significancePermutations" class="field-error">{{ errors.significancePermutations }}</p>
+            <div class="compact-fields condition-fields-top">
               <div><label>主目标</label><p class="field-static">跨股票交易胜率提升</p></div>
             </div>
             <p v-if="errors.holdoutCandidates" class="field-error">{{ errors.holdoutCandidates }}</p>
@@ -1290,6 +1349,7 @@ onMounted(async () => {
                 勾选后按方向追加：买入候选进「买入基础条件」，卖出候选进「卖出基础条件」，
                 然后立即用新规则重跑一次研究。
               </p>
+              <p v-if="significanceSummary" class="scope-helper" data-testid="condition-research-significance-summary">{{ significanceSummary }}</p>
               <div class="table-wrap">
                 <table>
                   <caption class="sr-only">买卖条件候选验证结果</caption>
@@ -1313,7 +1373,15 @@ onMounted(async () => {
                       <td>{{ candidate.side === 'buy' ? '买入过滤' : '卖出触发' }}</td>
                       <td class="condition-rule">{{ conditionText(candidate) }}</td>
                       <td>{{ candidate.mining.support_count }} / {{ candidate.mining.instrument_count }}</td>
-                      <td>{{ formatNumber(candidate.mining.lift) }}</td>
+                      <td :data-testid="'mining-lift-' + candidate.candidate_id">
+                        {{ formatNumber(candidate.mining.lift) }}
+                        <span
+                          v-if="significanceLabel(candidate)"
+                          :class="candidate.mining.significant ? 'positive' : 'muted-code'"
+                          :title="significanceTitle(candidate)"
+                          :data-testid="'significance-' + candidate.candidate_id"
+                        >{{ significanceLabel(candidate) }}</span>
+                      </td>
                       <td
                         :title="topNTitle(candidate)"
                         :data-testid="'top-n-rate-' + candidate.candidate_id"

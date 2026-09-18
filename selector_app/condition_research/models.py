@@ -77,6 +77,12 @@ class ConditionResearchConfig:
     min_instruments: int = 5
     candidate_limit: int = 5
     holdout_candidates: int = 1
+    # 置换检验：挖掘会评估上千个阈值，即使全是噪声，"最好的那一个"lift 也会很好看。
+    # 这里把标签随机打乱重新评分若干次，看纯运气能把 lift 推到多高，用它当门槛。
+    # 0 = 不做检验（结果里没有显著性标记）。
+    significance_permutations: int = 20
+    # 门槛取噪声最大 lift 分布的这个分位数，越大越严格。
+    significance_quantile: float = 0.95
     # 排序规则：研究本身不构建组合、不设槽位，但它挖出的条件最终要落到组合回测里，
     # 而组合是「先按条件筛出候选池，再按排序抢有限槽位」。带上排序规则，研究才能
     # 顺带回答「该按什么排序」以及「这个条件在 N 个槽位下还有没有意义」。
@@ -117,6 +123,10 @@ class ConditionResearchConfig:
             raise ValueError("候选条件上限必须在 1 到 10 之间")
         if not 1 <= self.holdout_candidates <= 3:
             raise ValueError("留出期复验候选数必须在 1 到 3 之间")
+        if not 0 <= self.significance_permutations <= 500:
+            raise ValueError("置换检验次数必须在 0 到 500 之间")
+        if not 0.0 < self.significance_quantile <= 1.0:
+            raise ValueError("显著性分位数必须在 0 和 1 之间")
         if self.ranking_value is not None and not self.ranking_value.strip():
             raise ValueError("排序指标不能是空字符串，不指定请直接留空")
         if self.rank_order not in {"asc", "desc"}:
@@ -210,6 +220,8 @@ class ConditionResearchConfig:
             "min_instruments": self.min_instruments,
             "candidate_limit": self.candidate_limit,
             "holdout_candidates": self.holdout_candidates,
+            "significance_permutations": self.significance_permutations,
+            "significance_quantile": self.significance_quantile,
             # 排序规则要能随历史记录一起还原，否则回看时无法知道当年是按什么排序推荐的。
             "ranking_value": self.ranking_value,
             "rank_order": self.rank_order,

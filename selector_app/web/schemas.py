@@ -494,6 +494,9 @@ class ConditionResearchRequest(BaseModel):
     min_instruments: int = Field(default=5, ge=1, le=10_000)
     candidate_limit: int = Field(default=5, ge=1, le=10)
     holdout_candidates: int = Field(default=1, ge=1, le=3)
+    # 置换检验：0 = 不检验，越大门槛越稳但越慢（每次约等价于挖掘耗时的 1/10）。
+    significance_permutations: int = Field(default=20, ge=0, le=500)
+    significance_quantile: float = Field(default=0.95, gt=0, le=1)
     # 排序规则：研究不建组合，但结论要落到组合回测的「候选池 + 有限槽位」模型上，
     # 带上它才能顺带给「该按什么排序」和「这个条件在 N 槽位下还有没有意义」的答案。
     ranking_value: str | None = Field(default=None, max_length=128)
@@ -584,6 +587,8 @@ class ConditionResearchRequest(BaseModel):
             min_instruments=self.min_instruments,
             candidate_limit=self.candidate_limit,
             holdout_candidates=self.holdout_candidates,
+            significance_permutations=self.significance_permutations,
+            significance_quantile=self.significance_quantile,
             ranking_value=self.ranking_value,
             rank_order=self.rank_order,
             ranking_top_n=self.ranking_top_n,

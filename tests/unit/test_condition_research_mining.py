@@ -476,3 +476,88 @@ def test_top_n_diagnosis_is_absent_without_a_ranking_value() -> None:
     assert candidates[0].top_n_outcome_rate is None
     assert candidates[0].top_n_support_count == 0
     assert candidates[0].top_n_filtered_days == 0
+
+
+def _permutation_frame(
+    *,
+    strength: float,
+    seed: int = 20260918,
+) -> tuple[pd.DataFrame, pd.Series, pd.Series, pd.Series]:
+    """3,000 个决策样本，第 0 号特征高分段的胜率更高。
+
+    ``strength=0`` 时标签与特征完全无关，是纯噪声基线。
+    """
+
+    stocks = 300
+    rows = 3_000
+    rng = np.random.default_rng(seed)
+    codes = np.repeat(np.arange(stocks), rows // stocks)
+    trades = np.arange(rows) // 2
+    driver = rng.normal(size=rows)
+    cut = np.quantile(driver, 0.7)
+    probability = np.where(driver >= cut, 0.42 + strength, 0.42)
+    features = pd.DataFrame(
+        {"technical.f0": driver, **{f"technical.f{i}": rng.normal(size=rows) for i in range(1, 8)}}
+    )
+    outcomes = pd.Series(rng.random(rows) < probability)
+    symbols = pd.Series([f"SH{code:06d}" for code in codes])
+    groups = pd.Series([f"SH{code:06d}:{trade}" for code, trade in zip(codes, trades)])
+    return features, outcomes, symbols, groups
+
+
+def _mine_with_permutations(strength: float, *, permutations: int = 20) -> tuple:
+    features, outcomes, symbols, groups = _permutation_frame(strength=strength)
+    candidates = mine_binary_conditions(
+        features,
+        outcomes,
+        symbols,
+        sample_groups=groups,
+        min_support=20,
+        min_instruments=5,
+        limit=5,
+        permutations=permutations,
+    )
+    return tuple(candidates)
+
+
+def test_permutation_threshold_rejects_pure_noise() -> None:
+    """纯噪声里最好的那个条件不该被当成发现。"""
+
+    candidates = _mine_with_permutations(0.0)
+    assert candidates
+    best = max(candidates, key=lambda item: item.lift)
+    assert best.lift_threshold is not None
+    assert best.lift > 1.0
+    assert best.significant is False
+    assert best.permutation_pvalue is not None
+    assert best.permutation_pvalue > 0.05
+
+
+def test_permutation_threshold_accepts_a_strong_signal() -> None:
+    candidates = _mine_with_permutations(0.2)
+    assert candidates
+    best = max(candidates, key=lambda item: item.lift)
+    assert best.condition.left_value == "technical.f0"
+    assert best.significant is True
+    assert best.permutation_pvalue is not None
+    assert best.permutation_pvalue <= 0.05
+
+
+def test_permutation_threshold_is_deterministic() -> None:
+    """打乱必须用固定种子，否则研究本身的可复现性就没了。"""
+
+    first = _mine_with_permutations(0.1)
+    second = _mine_with_permutations(0.1)
+    assert [item.lift_threshold for item in first] == [item.lift_threshold for item in second]
+    assert [item.permutation_pvalue for item in first] == [
+        item.permutation_pvalue for item in second
+    ]
+
+
+def test_significance_fields_are_absent_without_a_permutation_test() -> None:
+    candidates = _mine_with_permutations(0.2, permutations=0)
+    assert candidates
+    best = max(candidates, key=lambda item: item.lift)
+    assert best.lift_threshold is None
+    assert best.permutation_pvalue is None
+    assert best.significant is None

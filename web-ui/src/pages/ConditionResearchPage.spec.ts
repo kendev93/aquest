@@ -241,6 +241,37 @@ describe('ConditionResearchPage', () => {
     expect((wrapper.get('[data-testid="condition-stock-view"]').element as HTMLSelectElement).value).toBe('buy-1:full')
   })
 
+  it('flags lifts that a shuffled-label search could have produced by chance', async () => {
+    const noisy = {
+      ...result,
+      candidates: [{
+        ...result.candidates[0],
+        mining: {
+          ...result.candidates[0].mining,
+          lift: 1.09,
+          lift_threshold: 1.13,
+          permutation_pvalue: 0.62,
+          significant: false,
+        },
+        passed_constraints: false,
+        constraint_failures: ['提升未超过噪声门槛'],
+      }],
+    } as unknown as ConditionResearchReport
+    vi.mocked(researchApi.getConditionResearchResults).mockResolvedValue(noisy)
+
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="significance-buy-1"]').text()).toBe('疑似噪声')
+    const summary = wrapper.get('[data-testid="condition-research-significance-summary"]').text()
+    expect(summary).toContain('噪声门槛 1.130')
+    expect(summary).toContain('没有一个候选超过')
+    expect(wrapper.get('[data-testid="condition-research-candidate-buy-1"]').text())
+      .toContain('提升未超过噪声门槛')
+  })
+
   it('defaults to a zero-centred operand so the sell condition can actually fire', async () => {
     vi.mocked(formulaApi.fetchMetadata).mockResolvedValueOnce({
       ...metadata,
