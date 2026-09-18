@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from fastapi.testclient import TestClient
 
@@ -46,6 +47,28 @@ def _store(tmp_path: Path) -> DuckDbMarketDataStore:
     return store
 
 
+def _wide_store(tmp_path: Path) -> DuckDbMarketDataStore:
+    """Four independent walkers, enough for a two-name cross-section."""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    rng = np.random.default_rng(9)
+    for index in range(4):
+        code = f"60000{index}"
+        closes = [10.0]
+        for _ in range(79):
+            closes.append(closes[-1] * (1 + float(rng.normal(0.001, 0.02))))
+        store.replace_local_bars("SH", code, "stock", _bars("SH", code, closes))
+    return store
+
+
+def _app(store: DuckDbMarketDataStore):
+    return create_app(
+        market_data_store=store,
+        auto_sync_enabled=False,
+        swing_research_service=SwingResearchService(adapter=DuckDbMarketDataAdapter(store)),
+    )
+
+
 def test_overview_reports_one_scenario_per_threshold(tmp_path: Path) -> None:
     store = _store(tmp_path)
     app = create_app(
@@ -68,6 +91,58 @@ def test_overview_reports_one_scenario_per_threshold(tmp_path: Path) -> None:
     assert payload["scanned_stocks"] == 1
     assert [item["reversal_multiple"] for item in payload["scenarios"]] == [2.0, 3.0]
     assert payload["date_range"]["start"] == "2024-01-01"
+
+
+def test_indicator_study_scores_every_pair(tmp_path: Path) -> None:
+    store = _wide_store(tmp_path)
+
+    with TestClient(_app(store)) as client:
+        response = client.post(
+            "/api/v1/swing-research/indicator-study",
+            json={
+                "min_cross_section": 2,
+                "permutations": 10,
+                "horizon": 5,
+                "labels": ["up_onset_ahead", "down_onset_ahead"],
+            },
+        )
+
+    assert response.status_code == 200, response.text
+    payload = response.json()["data"]
+    assert payload["scanned_stocks"] == 4
+    # Every dimensionless technical output is a candidate; the price-scaled ones
+    # are excluded because they cannot be compared across stocks.
+    assert payload["value_count"] >= 20
+    assert len(payload["scores"]) == payload["value_count"] * 2
+    assert {item["label"] for item in payload["scores"]} == {
+        "up_onset_ahead",
+        "down_onset_ahead",
+    }
+    for item in payload["scores"]:
+        assert isinstance(item["threshold_hint"], float | None)
+        assert item["note"]
+
+
+def test_indicator_study_rejects_foreign_indicators(tmp_path: Path) -> None:
+    store = _wide_store(tmp_path)
+
+    with TestClient(_app(store)) as client:
+        response = client.post(
+            "/api/v1/swing-research/indicator-study",
+            json={"value_ids": ["indicator_one.var1"]},
+        )
+
+    assert response.status_code == 400
+    assert "不能用于波段研究" in response.json()["error"]["message"]
+
+
+def test_indicator_study_rejects_out_of_range_horizon(tmp_path: Path) -> None:
+    store = _wide_store(tmp_path)
+
+    with TestClient(_app(store)) as client:
+        response = client.post("/api/v1/swing-research/indicator-study", json={"horizon": 0})
+
+    assert response.status_code == 422
 
 
 def test_overview_rejects_unusable_thresholds(tmp_path: Path) -> None:

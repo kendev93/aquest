@@ -26,7 +26,8 @@ from selector_app.screening.rules import RuleGroup
 from selector_app.strategy_discovery.catalog import default_indicator_catalog
 from selector_app.strategy_discovery.models import DiscoveryRequest
 from selector_app.strategy_fitness.models import StrategyFitnessConfig
-from selector_app.swing_research.models import SwingOverviewConfig
+from selector_app.swing_research.labels import ALL_LABELS as ALL_SWING_LABELS
+from selector_app.swing_research.models import SwingIndicatorConfig, SwingOverviewConfig
 
 from .date_ranges import (
     DateRangeMode,
@@ -670,6 +671,68 @@ class SwingOverviewRequest(BaseModel):
             min_bars=self.min_bars,
             atr_window=self.atr_window,
             include_pending=self.include_pending,
+            limit_stocks=self.limit_stocks,
+        )
+
+
+SwingLabel = Literal[
+    "up_leg_start",
+    "down_leg_start",
+    "up_onset_ahead",
+    "down_onset_ahead",
+]
+
+
+class SwingIndicatorRequest(BaseModel):
+    """Score technical indicators against swing-derived labels.
+
+    This is the study proper, so unlike the overview it fixes a *single*
+    threshold: sweeping several here would multiply the very multiplicity the
+    significance test is trying to control.
+
+    ``labels`` picks the question. ``*_leg_start`` attributes big moves to the
+    state of the bar they began from; ``*_onset_ahead`` asks whether a move
+    starts running soon, which is the tradable version.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    vipdoc_path: str = Field(default="", max_length=1024)
+    universe: Literal["all", "sh", "sz"] = "all"
+    instrument_types: list[InstrumentType] | None = Field(default=None, max_length=4)
+    boards: list[InstrumentBoard] | None = Field(default=None, max_length=7)
+    start_date: date | None = None
+    end_date: date | None = None
+    reversal_multiple: float = Field(default=3.0, gt=0, le=20)
+    min_bars: int = Field(default=5, ge=0, le=1_000)
+    atr_window: int = Field(default=14, ge=1, le=1_000)
+    horizon: int = Field(default=10, ge=1, le=250)
+    labels: list[SwingLabel] | None = Field(default=None, max_length=4)
+    value_ids: list[str] | None = Field(default=None, max_length=64)
+    min_cross_section: int = Field(default=20, ge=2, le=10_000)
+    permutations: int = Field(default=200, ge=0, le=5_000)
+    block_size: int = Field(default=20, ge=1, le=500)
+    alpha: float = Field(default=0.05, gt=0, lt=1)
+    limit_stocks: int | None = Field(default=None, ge=1, le=100_000)
+
+    def to_config(self) -> SwingIndicatorConfig:
+        return SwingIndicatorConfig(
+            universe=self.universe,
+            instrument_types=tuple(self.instrument_types or ("stock",)),
+            boards=tuple(self.boards or ()),
+            vipdoc_path=self.vipdoc_path,
+            start_date=self.start_date,
+            end_date=self.end_date,
+            reversal_multiple=self.reversal_multiple,
+            min_bars=self.min_bars,
+            atr_window=self.atr_window,
+            horizon=self.horizon,
+            labels=tuple(self.labels) if self.labels else ALL_SWING_LABELS,
+            value_ids=tuple(self.value_ids or ()),
+            min_cross_section=self.min_cross_section,
+            permutations=self.permutations,
+            block_size=self.block_size,
+            alpha=self.alpha,
             limit_stocks=self.limit_stocks,
         )
 

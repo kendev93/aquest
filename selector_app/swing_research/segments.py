@@ -141,7 +141,7 @@ def split_swings(
 
     if atr is None:
         atr = atr_percent(frame, window=atr_window)
-    median = np.nanmedian(atr) if count else np.nan
+    median = np.nanmedian(atr) if np.isfinite(atr).any() else np.nan
     fallback = float(median) if np.isfinite(median) else 0.0
 
     def threshold_at(index: int) -> float:
