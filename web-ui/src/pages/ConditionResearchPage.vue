@@ -1404,7 +1404,7 @@ onMounted(async () => {
               </option>
             </select>
           </div>
-          <button class="secondary-button" data-testid="load-condition-history" type="button" :disabled="historyLoading || !selectedHistoryId" @click="loadHistoryDetail">加载历史研究</button>
+          <button class="secondary-button load-history-button" data-testid="load-condition-history" type="button" :disabled="historyLoading || !selectedHistoryId" @click="loadHistoryDetail">加载历史研究</button>
           <p class="helper">加载时会一并还原当时的标的范围、买卖规则、日期区间和交易费用，方便在此基础上继续调整。</p>
         </div>
       </section>
@@ -1504,6 +1504,15 @@ onMounted(async () => {
 
 .condition-history {
   margin-top: 1.25rem;
+}
+
+.condition-history .compact-fields {
+  align-items: end;
+}
+
+.condition-history .compact-fields .load-history-button {
+  min-height: 40px;
+  margin-top: 0;
 }
 
 .condition-disclosure {
