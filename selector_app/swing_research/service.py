@@ -10,8 +10,11 @@ segments, which is what would otherwise make a 5,000-stock scan fall over.
 from __future__ import annotations
 
 import os
+import shutil
+import time
 from collections.abc import Callable
-from tempfile import TemporaryDirectory
+from pathlib import Path
+from tempfile import TemporaryDirectory, gettempdir
 
 import numpy as np
 import pandas as pd
@@ -29,6 +32,28 @@ from .segments import atr_percent, split_swings
 
 ProgressCallback = Callable[[int, int], None] | None
 PANEL_DTYPE = np.float32
+PANEL_DIR_PREFIX = "swing-panel-"
+#: A panel directory older than this can only be debris from a killed run.
+STALE_PANEL_SECONDS = 3600.0
+
+
+def _clear_stale_panels() -> None:
+    """Delete panel scratch directories that a crashed run left behind.
+
+    A healthy run removes its own directory, but an OOM kill arrives as
+    SIGKILL and skips that cleanup, potentially leaving gigabytes in the temp
+    root. Anything older than an hour is debris; a run still in progress is
+    skipped because its directory is recent. On POSIX, unlinking a file that a
+    live process has mmap'd is harmless - the mapper keeps its descriptor.
+    """
+
+    cutoff = time.time() - STALE_PANEL_SECONDS
+    for entry in Path(gettempdir()).glob(f"{PANEL_DIR_PREFIX}*"):
+        try:
+            if entry.stat().st_mtime < cutoff:
+                shutil.rmtree(entry, ignore_errors=True)
+        except OSError:
+            continue
 
 
 class SwingResearchService:
@@ -125,7 +150,8 @@ class SwingResearchService:
             empty["reason"] = "选定区间内没有任何日线数据"
             return empty
 
-        with TemporaryDirectory(prefix="swing-panel-") as directory:
+        _clear_stale_panels()
+        with TemporaryDirectory(prefix=PANEL_DIR_PREFIX) as directory:
             path = os.path.join(directory, "panel.dat")
             shape = (len(value_ids), len(rows), calendar.size)
             required = int(np.prod(shape)) * np.dtype(PANEL_DTYPE).itemsize

@@ -40,7 +40,12 @@ packages = ["selector_app"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-addopts = "--tb=short"
+# Pin the scratch directory outside the working tree and let pytest wipe it at
+# the start of every run (see tmpdir.py: it rm_rf's a pinned basetemp, but
+# stacks numbered copies otherwise).  Without this the macOS per-user temp root
+# is reused across runs and test scratch files pile up in the repository.
+# Requires a POSIX temp root; override with --basetemp=<dir> if needed.
+addopts = "--tb=short --basetemp=/tmp/indicator-lab-pytest"
 
 [tool.coverage.run]
 source = ["selector_app"]
