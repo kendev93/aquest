@@ -34,6 +34,7 @@ import type {
   ValueDefinition,
 } from '../types'
 import { parseStoredRuleGroup, valueOptionLabel } from '../utils/formulaScreen'
+import { formatChinaTimestamp } from '../utils/time'
 
 function emptyRule(): RuleGroupPayload {
   return { signals: [], conditions: [], required_conditions: [], combine_mode: 'all', minimum_matches: null }
@@ -524,6 +525,11 @@ async function pollJob(jobId: string): Promise<void> {
       message.value = '研究完成：处理 ' + report.value.processed + ' 只股票，发现 '
         + report.value.candidates.length + ' 条候选规则。'
       await loadHistory()
+      // 完成后把下拉切到这条新记录。否则它还停在挂载时选中的旧记录上，
+      // 看起来就像是这次研究没被保存。
+      if (history.value.some((item) => item.history_id === jobId)) {
+        selectedHistoryId.value = jobId
+      }
       return
     }
     if (state.status === 'failed' || state.status === 'cancelled') {
@@ -774,6 +780,12 @@ async function loadHistoryDetail(): Promise<void> {
   } catch (error) {
     message.value = apiMessage(error)
   }
+}
+
+// 历史记录的 created_at 存的是朴素 UTC 时间，直接渲染会比北京时间慢 8 小时，
+// 让人误以为刚跑完的研究没保存。
+function formatHistoryDate(value: string): string {
+  return formatChinaTimestamp(value)
 }
 
 function formatPercent(value: number | null | undefined): string {
@@ -1400,7 +1412,7 @@ onMounted(async () => {
             <select id="condition-history-select" v-model="selectedHistoryId" data-testid="condition-history-select">
               <option value="">选择历史记录</option>
               <option v-for="item in history" :key="item.history_id" :value="item.history_id">
-                {{ item.created_at }} · {{ item.history_id.slice(0, 8) }}
+                {{ formatHistoryDate(item.created_at) }} · {{ item.history_id.slice(0, 8) }}
               </option>
             </select>
           </div>
