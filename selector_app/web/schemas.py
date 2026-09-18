@@ -26,6 +26,7 @@ from selector_app.screening.rules import RuleGroup
 from selector_app.strategy_discovery.catalog import default_indicator_catalog
 from selector_app.strategy_discovery.models import DiscoveryRequest
 from selector_app.strategy_fitness.models import StrategyFitnessConfig
+from selector_app.swing_research.models import SwingOverviewConfig
 
 from .date_ranges import (
     DateRangeMode,
@@ -592,6 +593,49 @@ class ConditionResearchRequest(BaseModel):
             ranking_value=self.ranking_value,
             rank_order=self.rank_order,
             ranking_top_n=self.ranking_top_n,
+        )
+
+
+class SwingOverviewRequest(BaseModel):
+    """Swing segmentation overview - the calibration step before a study.
+
+    Every field that decides what counts as a leg is exposed, because the
+    first run exists to answer "what should these be?" rather than to produce
+    a finding. ``reversal_multiples`` takes several thresholds at once so the
+    trade-off between how many legs appear and how far they travel is visible
+    in a single pass.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    vipdoc_path: str = Field(default="", max_length=1024)
+    universe: Literal["all", "sh", "sz"] = "all"
+    instrument_types: list[InstrumentType] | None = Field(default=None, max_length=4)
+    boards: list[InstrumentBoard] | None = Field(default=None, max_length=7)
+    start_date: date | None = None
+    end_date: date | None = None
+    reversal_multiples: list[float] = Field(
+        default_factory=lambda: [2.0, 3.0, 4.0],
+        max_length=8,
+    )
+    min_bars: int = Field(default=5, ge=0, le=1_000)
+    atr_window: int = Field(default=14, ge=1, le=1_000)
+    include_pending: bool = False
+    limit_stocks: int | None = Field(default=None, ge=1, le=100_000)
+
+    def to_config(self) -> SwingOverviewConfig:
+        return SwingOverviewConfig(
+            universe=self.universe,
+            instrument_types=tuple(self.instrument_types or ("stock",)),
+            boards=tuple(self.boards or ()),
+            vipdoc_path=self.vipdoc_path,
+            start_date=self.start_date,
+            end_date=self.end_date,
+            reversal_multiples=tuple(self.reversal_multiples),
+            min_bars=self.min_bars,
+            atr_window=self.atr_window,
+            include_pending=self.include_pending,
+            limit_stocks=self.limit_stocks,
         )
 
 

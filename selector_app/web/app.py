@@ -57,6 +57,7 @@ from selector_app.strategy_discovery.job_store import (
 from selector_app.strategy_discovery.resources import resolve_discovery_workers
 from selector_app.strategy_discovery.service import StrategyDiscoveryService
 from selector_app.strategy_fitness.service import StrategyFitnessService
+from selector_app.swing_research.service import SwingResearchService
 
 from .routers.formula_screen import router as formula_screen_router
 
@@ -80,6 +81,7 @@ def create_app(
     strategy_discovery_service: StrategyDiscoveryService | object | None = None,
     strategy_job_backend: StrategyJobBackend | object | None = None,
     strategy_fitness_service: StrategyFitnessService | object | None = None,
+    swing_research_service: SwingResearchService | object | None = None,
     local_market_data_service: LocalMarketDataService | object | None = None,
     market_data_store: DuckDbMarketDataStore | object | None = None,
     market_data_adapter: MarketDataAdapter | object | None = None,
@@ -267,6 +269,9 @@ def create_app(
         adapter=selected_adapter,
         indicator_cache=selected_indicator_cache,
     )
+    app.state.swing_research_service = swing_research_service or SwingResearchService(
+        adapter=cast(BatchMarketDataAdapter, selected_adapter),
+    )
     app.state.market_data_store = selected_store
     app.state.market_data_adapter = selected_adapter
     app.state.indicator_cache = selected_indicator_cache
@@ -358,6 +363,7 @@ def create_app(
     from .routers.strategy_discovery import router as strategy_discovery_router
     from .routers.strategy_fitness import router as strategy_fitness_router
     from .routers.strategy_worker import router as strategy_worker_router
+    from .routers.swing_research import router as swing_research_router
 
     app.include_router(formula_screen_router, prefix="/api/v1")
     app.include_router(jobs_router, prefix="/api/v1")
@@ -367,6 +373,7 @@ def create_app(
     app.include_router(portfolio_backtest_router, prefix="/api/v1")
     app.include_router(strategy_discovery_router, prefix="/api/v1")
     app.include_router(strategy_fitness_router, prefix="/api/v1")
+    app.include_router(swing_research_router, prefix="/api/v1")
     app.include_router(strategy_worker_router)
     return app
 
