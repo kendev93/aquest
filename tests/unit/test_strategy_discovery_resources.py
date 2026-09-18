@@ -70,8 +70,10 @@ def test_resource_plan_rejects_data_that_does_not_fit_one_worker() -> None:
 
 
 def test_worker_configuration_auto_uses_the_available_cpu_count(monkeypatch) -> None:
+    # 可见 CPU 数由 concurrency.visible_cpu_count 判定（亲和性 → cgroup 配额 → 核数），
+    # 所以 patch 要打在 resources 里导入的那个名字上；patch os.cpu_count 已经无效了。
     monkeypatch.delenv("SELECTOR_DISCOVERY_WORKERS", raising=False)
-    monkeypatch.setattr(resources.os, "cpu_count", lambda: 4)
+    monkeypatch.setattr(resources, "visible_cpu_count", lambda: 4)
     assert resolve_discovery_workers() == 4
 
     monkeypatch.setenv("SELECTOR_DISCOVERY_WORKERS", "auto")
@@ -87,7 +89,7 @@ def test_worker_configuration_auto_uses_the_available_cpu_count(monkeypatch) -> 
 
 def test_auto_worker_request_expands_when_the_memory_budget_allows(monkeypatch) -> None:
     monkeypatch.setenv("SELECTOR_DISCOVERY_WORKERS", "auto")
-    monkeypatch.setattr(resources.os, "cpu_count", lambda: 4)
+    monkeypatch.setattr(resources, "visible_cpu_count", lambda: 4)
 
     estimate = estimate_discovery_resources(
         row_count=1_000,
