@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 
-import BacktestPage from './pages/BacktestPage.vue'
 import ConditionResearchPage from './pages/ConditionResearchPage.vue'
 import FormulaScreenPage from './pages/FormulaScreenPage.vue'
 import MarketDataPage from './pages/MarketDataPage.vue'
@@ -20,7 +19,6 @@ const routeComponent = computed(() => {
     return StrategyDiscoveryPage
   }
   if (pathname.startsWith('/portfolio-backtest')) return PortfolioBacktestPage
-  if (pathname.startsWith('/backtest')) return BacktestPage
   return FormulaScreenPage
 })
 

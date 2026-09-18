@@ -31,7 +31,7 @@ class InstrumentScope:
         boards: Iterable[str] | None = None,
     ) -> InstrumentScope:
         normalized_universe = universe.strip().lower()
-        if normalized_universe == "custom":
+        if normalized_universe in {"custom", "codes"}:
             normalized_universe = "all"
         if normalized_universe not in {"all", "sh", "sz"}:
             raise ValueError(f"不支持的行情范围: {universe}")

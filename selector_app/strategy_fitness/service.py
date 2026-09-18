@@ -20,7 +20,12 @@ from selector_app.formulas.registry import FORMULA_REGISTRY, FormulaRegistry
 from selector_app.indicators.cache import IndicatorCache, frame_fingerprint
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
 from selector_app.market_data.day_format import classify_board, classify_instrument
-from selector_app.market_data.models import InstrumentBoard, InstrumentType, StockRef
+from selector_app.market_data.models import (
+    InstrumentBoard,
+    InstrumentType,
+    MarketCode,
+    StockRef,
+)
 from selector_app.market_data.scope import InstrumentScope
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.portfolio_backtest.models import PortfolioBacktestReport
@@ -73,6 +78,13 @@ class _CachedAdapter:
         boards: tuple[InstrumentBoard, ...] | None = None,
     ) -> list[StockRef]:
         return list(self._refs)
+
+    def stock_ref(self, vipdoc_path: str | Path, market: MarketCode, code: str) -> StockRef:
+        normalized = code.strip()
+        for ref in self._refs:
+            if ref.market == market and ref.code == normalized:
+                return ref
+        raise ValueError(f"找不到已导入的行情: {market} {normalized}")
 
     def read_stock(self, ref: StockRef) -> pd.DataFrame:
         return self._frames[ref_key(ref)].copy(deep=True)

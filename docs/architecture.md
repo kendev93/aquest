@@ -51,7 +51,7 @@ East Money / TDX 在线数据源 ──在线同步──► MarketDataSync + On
 - `strategy_discovery_replay_history`：当前夏普榜或收益榜前十的全行情复核结果、连续资金曲线、成交记录、分段绩效、数据指纹和复核耗时；同一实验和榜单只保留最近一次，删除实验时级联删除。
 - `strategy_jobs`：策略实验、二次优化和全量复核的请求、状态、进度、结果、取消标记、worker 租约及时间戳；只由 backend 写入，旧版 `.strategy-jobs` JSON 在首次启动时幂等导入。
 - `screen_history`：公式筛选的请求元数据、计数摘要和完整结果 JSON，默认保留最近 10 次。
-- `backtest_history`：单股、组合和策略适配性回测的请求快照、完整结果、摘要、开始/结束时间和耗时；按回测类型分别保留最近 20 次，买卖条件研究也写入该表。
+- `backtest_history`：组合和策略适配性回测的请求快照、完整结果、摘要、开始/结束时间和耗时；按回测类型分别保留最近 20 次，买卖条件研究也写入该表。历史遗留的 `single_stock` 记录仍保留在库中，但单股回测页面与 `/api/v1/backtests` 路由已移除，其单票能力并入组合回测的「指定标的」。
 
 行情事实写入只由本项目的主进程执行：在线同步的 provider worker 先把规范化结果写进各自的分片数据库，再由主进程按标的事务合并；派生指标缓存可由预热任务或业务请求按需填充。库内并发写由进程内写锁和 DuckDB 连接串行化，跨进程不再有 lease 锁或锁文件，策略 worker 始终以只读方式打开同一数据库。读操作每次建立独立只读 DuckDB 连接。全市场筛选、组合回测和策略适配通过一次批量查询得到各标的分组，不逐标的往返查询。
 
@@ -169,7 +169,7 @@ schema 版本变化或维护备份时，初始化逻辑会先生成带时间戳�
 - `POST /api/v1/condition-research`（异步启动全股票逐只规则研究）
 - `GET /api/v1/condition-research/{job_id}`、`GET /api/v1/condition-research/{job_id}/results` 和 `POST /api/v1/condition-research/{job_id}/cancel`
 - `GET /api/v1/condition-research/history` 与 `GET /api/v1/condition-research/history/{history_id}`
-- 既有公式选股、单股回测、组合回测和策略适配 API 保持路径不变，但只读取 DuckDB；单股、组合和策略适配分别提供 `/history`、`/history/{id}` 和删除接口，策略实验室继续提供同样的历史实验接口，并通过 `/strategy-discovery/{experiment_id}/replays`、`/replay-jobs/{job_id}`、`/replay-jobs/{job_id}/results`、`/replay-jobs/{job_id}/cancel` 和 `/history/{experiment_id}/replays` 管理前十全量复核。
+- 既有公式选股、组合回测和策略适配 API 保持路径不变，但只读取 DuckDB；组合和策略适配分别提供 `/history`、`/history/{id}` 和删除接口，策略实验室继续提供同样的历史实验接口，并通过 `/strategy-discovery/{experiment_id}/replays`、`/replay-jobs/{job_id}`、`/replay-jobs/{job_id}/results`、`/replay-jobs/{job_id}/cancel` 和 `/history/{experiment_id}/replays` 管理前十全量复核。
 
 行情查询接口不需要 `vipdoc_path`；请求体里仍保留该字段只为兼容旧客户端，行情统一来自本机 `market.duckdb`。自定义 universe 文件仍可由筛选/回测请求指定，但其中的行情数据来自数据库。
 

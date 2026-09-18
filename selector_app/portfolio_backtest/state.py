@@ -9,7 +9,12 @@ import pandas as pd
 
 from selector_app.formulas.registry import FormulaRegistry
 from selector_app.indicators.cache import IndicatorCache
-from selector_app.market_data.models import InstrumentBoard, InstrumentType, StockRef
+from selector_app.market_data.models import (
+    InstrumentBoard,
+    InstrumentType,
+    MarketCode,
+    StockRef,
+)
 
 
 class PortfolioMarketDataAdapter(Protocol):
@@ -21,6 +26,8 @@ class PortfolioMarketDataAdapter(Protocol):
         instrument_types: tuple[InstrumentType, ...] | None = None,
         boards: tuple[InstrumentBoard, ...] | None = None,
     ) -> list[StockRef]: ...
+
+    def stock_ref(self, vipdoc_path: str | Path, market: MarketCode, code: str) -> StockRef: ...
 
     def read_stock(self, ref: StockRef) -> pd.DataFrame: ...
 

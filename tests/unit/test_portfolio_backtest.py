@@ -57,6 +57,17 @@ class FakeAdapter:
             for code in self.frames
         ]
 
+    def stock_ref(self, vipdoc_path, market, code):
+        normalized = code.strip()
+        if normalized not in self.frames or market != "SH":
+            raise ValueError(f"找不到已导入的行情: {market} {normalized}")
+        return StockRef(
+            market=market,
+            code=normalized,
+            name=f"测试{normalized}",
+            path=Path(vipdoc_path) / f"sh{normalized}.day",
+        )
+
     def read_stock(self, ref: StockRef) -> pd.DataFrame:
         return self.frames[ref.code].copy(deep=True)
 
@@ -563,3 +574,63 @@ def test_sorted_date_index_supports_mapping_lookup_without_a_python_date_dict() 
     assert index.get(20240105) == 2
     assert index.get(20240102) is None
     assert len(index) == 3
+
+
+def test_codes_universe_limits_the_backtest_to_the_requested_symbols() -> None:
+    report = PortfolioBacktestService(adapter=FakeAdapter()).run(
+        config(universe="codes", codes=("SH:600000", "600002"), max_positions=1)
+    )
+
+    assert report.total_candidates == 2
+    assert {trade["code"] for trade in report.trades} <= {"600000", "600002"}
+
+
+def test_codes_universe_deduplicates_and_accepts_bare_codes() -> None:
+    report = PortfolioBacktestService(adapter=FakeAdapter()).run(
+        config(universe="codes", codes=("600000", "SH600000", "600000"), max_positions=1)
+    )
+
+    assert report.total_candidates == 1
+
+
+def test_codes_universe_requires_at_least_one_code() -> None:
+    with pytest.raises(ValueError, match="指定标的范围必须提供至少一个代码"):
+        config(universe="codes", codes=())
+
+
+def test_codes_are_rejected_outside_the_codes_universe() -> None:
+    with pytest.raises(ValueError, match="只有指定标的范围才需要填写代码列表"):
+        config(universe="all", codes=("600000",))
+
+
+def test_unknown_codes_raise_a_readable_error() -> None:
+    with pytest.raises(ValueError, match="找不到已导入的行情"):
+        PortfolioBacktestService(adapter=FakeAdapter()).run(
+            config(universe="codes", codes=("600999",))
+        )
+
+
+def test_fixed_position_mode_buys_a_constant_share_count() -> None:
+    service = PortfolioBacktestService(adapter=FakeAdapter())
+
+    fixed = service.run(
+        config(
+            universe="codes",
+            codes=("600000",),
+            max_positions=1,
+            position_mode="fixed",
+            fixed_size=200,
+        )
+    )
+    scaled = service.run(
+        config(universe="codes", codes=("600000",), max_positions=1, position_mode="full")
+    )
+
+    # 次日开盘价 11 元：等额模式按 10000 元预算买到 900 股（整手向下取整），固定模式仍只买 200 股。
+    assert fixed.trades[0]["size"] == 200
+    assert scaled.trades[0]["size"] == 900
+
+
+def test_fixed_position_mode_requires_a_positive_size() -> None:
+    with pytest.raises(ValueError, match="固定股数模式必须设置大于 0 的买入股数"):
+        config(position_mode="fixed", fixed_size=None)

@@ -257,7 +257,6 @@ def create_app(
     )
     app.state.screen_job_runner = selected_runner
     app.state.market_sync_service = selected_market_sync
-    app.state.backtest_service = selected_backtest_service
     app.state.condition_research_service = selected_condition_research_service
     app.state.portfolio_backtest_service = selected_portfolio_service
     app.state.strategy_discovery_service = selected_discovery_service
@@ -351,7 +350,6 @@ def create_app(
             }
         }
 
-    from .routers.backtest import router as backtest_router
     from .routers.condition_research import router as condition_research_router
     from .routers.data_transfer import router as data_transfer_router
     from .routers.jobs import router as jobs_router
@@ -365,7 +363,6 @@ def create_app(
     app.include_router(jobs_router, prefix="/api/v1")
     app.include_router(market_data_router, prefix="/api/v1")
     app.include_router(data_transfer_router, prefix="/api/v1")
-    app.include_router(backtest_router, prefix="/api/v1")
     app.include_router(condition_research_router, prefix="/api/v1")
     app.include_router(portfolio_backtest_router, prefix="/api/v1")
     app.include_router(strategy_discovery_router, prefix="/api/v1")

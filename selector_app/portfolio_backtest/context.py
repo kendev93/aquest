@@ -18,8 +18,9 @@ from selector_app.formulas.custom import (
 )
 from selector_app.formulas.types import FormulaResult
 from selector_app.indicators.cache import frame_fingerprint
+from selector_app.market_data.adapter import parse_universe_code
 from selector_app.market_data.day_format import classify_board, classify_instrument
-from selector_app.market_data.models import InstrumentBoard, InstrumentType, StockRef
+from selector_app.market_data.models import InstrumentBoard, InstrumentType, MarketCode, StockRef
 from selector_app.market_data.scope import InstrumentScope
 from selector_app.screening.engine import evaluate_rule_group
 from selector_app.screening.rules import RuleGroup
@@ -241,6 +242,8 @@ class PortfolioContextMixin(_PortfolioServiceState):
         return frames
 
     def _list_refs(self, config: PortfolioBacktestConfig) -> list[StockRef]:
+        if config.universe == "codes":
+            return self._list_refs_by_codes(config)
         if not config.instrument_types and not config.boards:
             return self._adapter.list_stock_refs(
                 config.vipdoc_path,
@@ -263,6 +266,46 @@ class PortfolioContextMixin(_PortfolioServiceState):
                 config.universe,
                 config.universe_file,
             )
+        scope = InstrumentScope.from_values(
+            universe=config.universe,
+            instrument_types=config.instrument_types,
+            boards=config.boards,
+        )
+        return [
+            ref
+            for ref in refs
+            if scope.matches(
+                ref.market,
+                str(
+                    classify_instrument(ref.market, ref.code)
+                    or getattr(ref, "instrument_type", "stock")
+                ),
+                str(classify_board(ref.market, ref.code) or getattr(ref, "board", "main")),
+            )
+        ]
+
+    def _list_refs_by_codes(self, config: PortfolioBacktestConfig) -> list[StockRef]:
+        """Resolve an explicit code list, preserving the user's ordering."""
+
+        requested: list[tuple[MarketCode, str]] = []
+        seen: set[tuple[MarketCode, str]] = set()
+        for raw in config.codes or ():
+            parsed = parse_universe_code(raw)
+            if parsed is None or parsed in seen:
+                continue
+            seen.add(parsed)
+            requested.append(parsed)
+        if not requested:
+            raise ValueError("指定标的范围必须提供至少一个有效代码")
+        refs: list[StockRef] = []
+        missing: list[str] = []
+        for market, code in requested:
+            try:
+                refs.append(self._adapter.stock_ref(config.vipdoc_path, market, code))
+            except (ValueError, KeyError, LookupError):
+                missing.append(f"{market}{code}")
+        if missing and not refs:
+            raise ValueError(f"找不到已导入的行情: {', '.join(missing)}")
         scope = InstrumentScope.from_values(
             universe=config.universe,
             instrument_types=config.instrument_types,

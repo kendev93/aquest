@@ -66,3 +66,33 @@ test('user can run a ranked portfolio backtest and inspect replacement candidate
   await expect(page.getByTestId('portfolio-ranking')).toContainText('000001')
   await expect(page.getByTestId('portfolio-equity-chart')).toBeVisible()
 })
+
+test('user can restrict a portfolio backtest to explicitly named symbols', async ({ page }) => {
+  let payload: Record<string, unknown> | null = null
+  await page.route(/\/api\/v1\/formula-screen\/metadata$/, (route) => route.fulfill({ json: { data: metadata } }))
+  await page.route(/\/api\/v1\/portfolio-backtests$/, async (route) => {
+    payload = route.request().postDataJSON() as Record<string, unknown>
+    await route.fulfill({ status: 202, json: { data: { job_id: 'codes-job', status: 'queued' } } })
+  })
+  await page.route(/\/api\/v1\/portfolio-backtests\/codes-job$/, async (route) => {
+    await route.fulfill({ json: { data: { job_id: 'codes-job', status: 'completed', progress: 1, total_candidates: 2, total_scanned: 2, errors: 0, error: null, result: null } } })
+  })
+  await page.route(/\/api\/v1\/portfolio-backtests\/codes-job\/results$/, async (route) => {
+    await route.fulfill({ json: { data: { ...result, universe: 'codes' } } })
+  })
+
+  await page.goto('/portfolio-backtest')
+  await page.getByTestId('portfolio-universe').selectOption('codes')
+  await page.getByTestId('portfolio-codes').fill('600519\nSH:510300')
+  await page.getByTestId('portfolio-position-mode').selectOption('fixed')
+  await page.getByTestId('portfolio-fixed-size').fill('1000')
+  await page.getByTestId('start-portfolio-backtest').click()
+
+  await expect(page.getByTestId('portfolio-results')).toBeVisible()
+  expect(payload).toMatchObject({
+    universe: 'codes',
+    codes: ['600519', 'SH:510300'],
+    position_mode: 'fixed',
+    fixed_size: 1000,
+  })
+})

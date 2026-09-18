@@ -1,5 +1,6 @@
 export type CombineMode = 'all' | 'any' | 'at_least'
 export type Universe = 'all' | 'sh' | 'sz' | 'custom'
+export type PortfolioUniverse = Universe | 'codes'
 export type FormulaMode = 'preset' | 'custom'
 export type BacktestExecution = 'next_open' | 'next_close'
 export type BacktestPositionMode = 'full' | 'fixed'
@@ -399,86 +400,6 @@ export interface ScreenHistoryRecord {
   results: ScreenResult[]
 }
 
-export interface BacktestPayload {
-  market: 'SH' | 'SZ'
-  code: string
-  date_mode?: DateRangeMode
-  buy_signal?: string | null
-  sell_signal?: string | null
-  buy_rule?: RuleGroupPayload | null
-  sell_rule?: RuleGroupPayload | null
-  formula_text?: string | null
-  formula_parameters?: Record<string, number>
-  start_date?: string | null
-  end_date?: string | null
-  initial_cash?: number
-  commission?: number
-  min_commission?: number
-  stamp_tax?: number
-  slippage?: number
-  execution?: BacktestExecution
-  position_mode?: BacktestPositionMode
-  fixed_size?: number | null
-}
-
-export interface BacktestEquityPoint {
-  date: string
-  cash: number | null
-  position_value: number | null
-  total: number | null
-  drawdown: number | null
-  drawdown_pct: number | null
-}
-
-export interface BacktestTrade {
-  date: string
-  name?: string | null
-  direction: 'BUY' | 'SELL'
-  size: number
-  price: number
-  commission: number
-  slippage: number
-  pnl: number
-  cost_basis?: number
-  rejected: boolean
-}
-
-export interface BacktestPosition {
-  date: string
-  size: number
-  avg_price: number
-  market_value: number
-  unrealized_pnl: number
-}
-
-export interface BacktestResult {
-  market: 'SH' | 'SZ'
-  code: string
-  name?: string | null
-  bars: number
-  start_date: string
-  end_date: string
-  buy_signal: string | null
-  sell_signal: string | null
-  performance: Record<string, number | null>
-  equity_curve: BacktestEquityPoint[]
-  trades: BacktestTrade[]
-  positions: BacktestPosition[]
-  configuration: Record<string, number | string | boolean | null>
-  diagnostic: string | null
-}
-
-export interface BacktestJobState {
-  job_id: string
-  status: 'queued' | 'running' | 'completed' | 'failed'
-  progress: number
-  total_candidates: number
-  total_scanned: number
-  errors: number
-  error: string | null
-  result: BacktestResult | null
-}
-
 export type BacktestHistoryType = 'single_stock' | 'portfolio' | 'strategy_fitness' | 'condition_research'
 
 export interface BacktestHistorySummary {
@@ -497,9 +418,10 @@ export interface BacktestHistoryRecord<T = Record<string, unknown>> extends Back
 }
 
 export interface PortfolioBacktestPayload {
-  universe: Universe
+  universe: PortfolioUniverse
   date_mode?: DateRangeMode
   universe_file?: string | null
+  codes?: string[] | null
   instrument_types?: InstrumentType[]
   boards?: InstrumentBoard[]
   selected_signals: string[]
@@ -544,6 +466,8 @@ export interface PortfolioBacktestPayload {
   fitness_rank_weight?: number
   fitness_min_trades?: number
   fitness_max_drawdown?: number
+  position_mode?: BacktestPositionMode
+  fixed_size?: number | null
 }
 
 export interface PortfolioBacktestJobState {
@@ -828,7 +752,7 @@ export interface StrategyReplayHistoryRecord {
 
 export type FitnessLabel = 'strong' | 'watch' | 'weak' | 'insufficient'
 
-export interface StrategyFitnessPayload extends Omit<PortfolioBacktestPayload, 'max_positions' | 'rebalance_frequency'> {
+export interface StrategyFitnessPayload extends Omit<PortfolioBacktestPayload, 'max_positions' | 'rebalance_frequency' | 'codes' | 'position_mode' | 'fixed_size'> {
   train_ratio?: number
   validation_ratio?: number
   min_trades?: number

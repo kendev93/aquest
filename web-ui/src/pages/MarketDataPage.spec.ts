@@ -391,7 +391,8 @@ describe('MarketDataPage', () => {
     } finally {
       vi.useRealTimers()
     }
-  })
+    // 600+ 次 fake timer 迭代在覆盖率插桩下会明显变慢，单独放宽超时。
+  }, 20_000)
 
   it('discovers an automatic sync started after the page has loaded and shows progress', async () => {
     vi.useFakeTimers()

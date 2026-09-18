@@ -14,6 +14,7 @@ from selector_app.concurrency import MAX_WORKERS
 from selector_app.condition_research.models import ConditionResearchConfig
 from selector_app.formulas.custom import FormulaParseError, custom_output_id, parse_formula
 from selector_app.formulas.registry import FORMULA_REGISTRY
+from selector_app.market_data.adapter import parse_universe_code
 from selector_app.market_data.models import InstrumentBoard, InstrumentType, MarketDataProvider
 from selector_app.market_data.scope import InstrumentScope
 from selector_app.portfolio_backtest.models import (
@@ -574,6 +575,7 @@ class PortfolioBacktestRequest(BaseModel):
     vipdoc_path: str = Field(default="", max_length=1024)
     universe: PortfolioUniverse = "all"
     universe_file: str | None = Field(default=None, max_length=1024)
+    codes: list[str] | None = Field(default=None, max_length=200)
     instrument_types: list[InstrumentType] | None = Field(default=None, max_length=4)
     boards: list[InstrumentBoard] | None = Field(default=None, max_length=7)
     selected_signals: list[str] = Field(default_factory=list, max_length=32)
@@ -619,6 +621,8 @@ class PortfolioBacktestRequest(BaseModel):
     fitness_rank_weight: float = Field(default=0.0, ge=0, le=1)
     fitness_min_trades: int = Field(default=5, ge=1, le=10_000)
     fitness_max_drawdown: float = Field(default=0.3, ge=0, le=1)
+    position_mode: Literal["full", "fixed"] = "full"
+    fixed_size: int | None = Field(default=None, ge=100, le=100_000_000)
 
     @model_validator(mode="after")
     def validate_portfolio_backtest(self) -> PortfolioBacktestRequest:
@@ -664,6 +668,20 @@ class PortfolioBacktestRequest(BaseModel):
             raise ValueError("all/any 模式不应设置 minimum_matches")
         if self.universe == "custom" and not self.universe_file:
             raise ValueError("自定义股票范围必须设置 universe_file")
+        if self.universe == "codes":
+            if not self.codes:
+                raise ValueError("指定标的范围必须填写至少一个证券代码")
+            for raw in self.codes:
+                try:
+                    parse_universe_code(raw)
+                except ValueError as exc:
+                    raise ValueError(f"证券代码格式无效: {raw}") from exc
+        elif self.codes:
+            raise ValueError("只有指定标的范围才需要填写证券代码")
+        if self.position_mode == "fixed" and self.fixed_size is None:
+            raise ValueError("固定股数模式必须设置买入股数")
+        if self.position_mode == "full" and self.fixed_size is not None:
+            raise ValueError("按比例建仓不应设置买入股数")
         if self.start_date is not None and self.end_date is not None:
             if self.start_date > self.end_date:
                 raise ValueError("回测开始日期不能晚于结束日期")
@@ -715,6 +733,7 @@ class PortfolioBacktestRequest(BaseModel):
             vipdoc_path=self.vipdoc_path,
             universe=self.universe,
             universe_file=self.universe_file,
+            codes=tuple(self.codes) if self.codes is not None else None,
             instrument_types=tuple(self.instrument_types or ()),
             boards=tuple(self.boards or ()),
             selected_signals=tuple(self.selected_signals),
@@ -759,6 +778,8 @@ class PortfolioBacktestRequest(BaseModel):
             fitness_rank_weight=self.fitness_rank_weight,
             fitness_min_trades=self.fitness_min_trades,
             fitness_max_drawdown=self.fitness_max_drawdown,
+            position_mode=self.position_mode,
+            fixed_size=self.fixed_size,
         )
 
 

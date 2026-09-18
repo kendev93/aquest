@@ -451,11 +451,7 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
                 min_commission=config.min_commission,
                 stamp_tax=config.stamp_tax,
             )
-            shares = (
-                int(max(pending.budget, 0) / price / profile.lot_size) * profile.lot_size
-                if price > 0
-                else 0
-            )
+            shares = self._planned_shares(pending, price, profile, config)
             shares = self._affordable_shares(shares, price, cash, profile, config.slippage)
             if shares <= 0:
                 continue
@@ -497,6 +493,26 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
                 }
             )
         return cash
+
+    @staticmethod
+    def _planned_shares(
+        pending: _PendingBuy,
+        price: float,
+        profile: TradeProfile,
+        config: PortfolioBacktestConfig,
+    ) -> int:
+        """Shares to buy before affordability trimming.
+
+        ``fixed`` mode buys a constant share count per slot (the single-stock
+        backtest behaviour), ``full`` mode spreads the slot budget evenly.
+        """
+
+        if price <= 0:
+            return 0
+        if config.position_mode == "fixed":
+            target = int(config.fixed_size or 0)
+            return max(target // profile.lot_size * profile.lot_size, 0)
+        return int(max(pending.budget, 0) / price / profile.lot_size) * profile.lot_size
 
     @staticmethod
     def _affordable_shares(

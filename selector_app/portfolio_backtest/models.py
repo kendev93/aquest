@@ -15,12 +15,13 @@ from selector_app.market_data.scope import InstrumentScope
 from selector_app.screening.models import ScreenCondition
 from selector_app.screening.rules import RuleGroup
 
-PortfolioUniverse = Literal["all", "sh", "sz", "custom"]
+PortfolioUniverse = Literal["all", "sh", "sz", "custom", "codes"]
 RankOrder = Literal["asc", "desc"]
 RebalanceFrequency = Literal["daily", "weekly", "monthly"]
 ExecutionMode = Literal["next_open", "next_close"]
 SellValueOperator = Literal["gte", "lte"]
 CompareOperator = Literal["gt", "gte", "lt", "lte"]
+PositionMode = Literal["full", "fixed"]
 PortfolioJsonValue = object
 
 
@@ -75,10 +76,21 @@ class PortfolioBacktestConfig:
     fitness_rank_weight: float = 0.0
     fitness_min_trades: int = 5
     fitness_max_drawdown: float = 0.3
+    codes: tuple[str, ...] | None = None
+    position_mode: PositionMode = "full"
+    fixed_size: int | None = None
 
     def __post_init__(self) -> None:
-        if self.universe not in {"all", "sh", "sz", "custom"}:
+        if self.universe not in {"all", "sh", "sz", "custom", "codes"}:
             raise ValueError("不支持的组合回测范围")
+        if self.universe == "codes" and not self.codes:
+            raise ValueError("指定标的范围必须提供至少一个代码")
+        if self.universe != "codes" and self.codes:
+            raise ValueError("只有指定标的范围才需要填写代码列表")
+        if self.position_mode not in {"full", "fixed"}:
+            raise ValueError("不支持的建仓方式")
+        if self.position_mode == "fixed" and (self.fixed_size is None or self.fixed_size <= 0):
+            raise ValueError("固定股数模式必须设置大于 0 的买入股数")
         scope = InstrumentScope.from_values(
             universe=self.universe,
             instrument_types=self.instrument_types,

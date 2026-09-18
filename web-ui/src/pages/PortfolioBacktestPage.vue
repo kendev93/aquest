@@ -17,6 +17,7 @@ import RuleGroupEditor from '../components/RuleGroupEditor.vue'
 import type {
   BacktestHistorySummary,
   BacktestExecution,
+  BacktestPositionMode,
   CustomFormulaMetadata,
   DateRangeMode,
   DateRangeSelection,
@@ -28,9 +29,9 @@ import type {
   PortfolioBacktestResult,
   PortfolioTrade,
   PortfolioRebalanceFrequency,
+  PortfolioUniverse,
   RuleGroupPayload,
   SignalDefinition,
-  Universe,
   ValueDefinition,
 } from '../types'
 import {
@@ -78,8 +79,9 @@ const BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
 interface PortfolioFormState {
   mode: 'preset' | 'custom'
   buyRule: RuleGroupPayload
-  universe: Universe
+  universe: PortfolioUniverse
   universeFile: string
+  codesText: string
   instrumentTypes: InstrumentType[]
   boards: InstrumentBoard[]
   rankingValue: string
@@ -117,6 +119,8 @@ interface PortfolioFormState {
   fitnessRankWeight: number
   fitnessMinTrades: number
   fitnessMaxDrawdown: number
+  positionMode: BacktestPositionMode
+  fixedSize: number
 }
 
 const metadata = ref<FormulaScreenMetadata | null>(null)
@@ -127,6 +131,7 @@ const form = reactive<PortfolioFormState>({
   buyRule: { signals: [], conditions: [], combine_mode: 'any', minimum_matches: null },
   universe: 'all',
   universeFile: '',
+  codesText: '',
   instrumentTypes: [] as InstrumentType[],
   boards: [] as InstrumentBoard[],
   rankingValue: '',
@@ -164,6 +169,8 @@ const form = reactive<PortfolioFormState>({
   fitnessRankWeight: 0,
   fitnessMinTrades: 5,
   fitnessMaxDrawdown: 30,
+  positionMode: 'full',
+  fixedSize: 1000,
 })
 const errors = ref<Record<string, string>>({})
 const message = ref('')
@@ -331,6 +338,14 @@ async function parseCustomFormula(): Promise<void> {
   }
 }
 
+/** Split the 指定标的 textarea into individual codes (comma, whitespace or newline). */
+function parsedCodes(): string[] {
+  return form.codesText
+    .split(/[\s,，;；]+/)
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+}
+
 function validate(): Record<string, string> {
   const next: Record<string, string> = {}
   const buyRule = form.buyRule
@@ -338,6 +353,12 @@ function validate(): Record<string, string> {
   if (!buyRule.signals.length && !buyRule.conditions.length) next.buyRule = '请至少设置一个买入条件。'
   if (!form.rankingValue) next.rankingValue = '请选择用于排序的指标输出。'
   if (form.universe === 'custom' && !form.universeFile.trim()) next.universeFile = '请输入自定义股票列表文件。'
+  if (form.universe === 'codes' && parsedCodes().length === 0) next.codesText = '请填写至少一个证券代码。'
+  if (form.positionMode === 'fixed') {
+    if (!Number.isInteger(form.fixedSize) || form.fixedSize < 100 || form.fixedSize > 100_000_000) {
+      next.fixedSize = '固定买入股数必须是 100 到 100000000 的整数。'
+    }
+  }
   if (form.mode === 'custom') {
     if (!form.formulaText.trim()) next.formulaText = '请输入通达信公式。'
     else if (!customMetadata.value) next.formulaText = '请先解析公式，再配置组合回测。'
@@ -401,6 +422,7 @@ function buildPayload(): PortfolioBacktestPayload {
   return {
     universe: form.universe,
     universe_file: form.universe === 'custom' ? form.universeFile.trim() : null,
+    codes: form.universe === 'codes' ? parsedCodes() : null,
     ...(form.instrumentTypes.length > 0 ? { instrument_types: [...form.instrumentTypes] } : {}),
     ...(form.boards.length > 0 ? { boards: [...form.boards] } : {}),
     selected_signals: [],
@@ -446,6 +468,8 @@ function buildPayload(): PortfolioBacktestPayload {
     fitness_rank_weight: form.fitnessRankWeight,
     fitness_min_trades: form.fitnessMinTrades,
     fitness_max_drawdown: form.fitnessMaxDrawdown / 100,
+    position_mode: form.positionMode,
+    fixed_size: form.positionMode === 'fixed' ? form.fixedSize : null,
   }
 }
 
@@ -466,9 +490,12 @@ function enumValue<T extends string>(value: unknown, allowed: readonly T[], fall
 function applyStoredCandidate(raw: unknown): void {
   if (!raw || typeof raw !== 'object') return
   const config = raw as Record<string, unknown>
-  const universe = enumValue(config.universe, ['all', 'sh', 'sz', 'custom'] as const, form.universe)
+  const universe = enumValue(config.universe, ['all', 'sh', 'sz', 'custom', 'codes'] as const, form.universe)
   form.universe = universe
   form.universeFile = typeof config.universe_file === 'string' ? config.universe_file : ''
+  form.codesText = Array.isArray(config.codes) ? config.codes.filter((item): item is string => typeof item === 'string').join('\n') : ''
+  form.positionMode = enumValue(config.position_mode, ['full', 'fixed'] as const, form.positionMode)
+  form.fixedSize = Math.round(finiteNumber(config.fixed_size, form.fixedSize))
   form.instrumentTypes = Array.isArray(config.instrument_types)
     ? config.instrument_types.filter((item): item is InstrumentType => INSTRUMENT_TYPE_OPTIONS.some((option) => option.key === item))
     : []
@@ -537,6 +564,9 @@ async function applyStoredResearch(raw: unknown): Promise<void> {
 
   if (typeof config.universe === 'string') {
     form.universe = enumValue(config.universe, ['all', 'sh', 'sz', 'custom'] as const, form.universe)
+  }
+  if (Array.isArray(config.codes)) {
+    form.codesText = config.codes.filter((item): item is string => typeof item === 'string').join('\n')
   }
   form.instrumentTypes = Array.isArray(config.instrument_types)
     ? config.instrument_types.filter((item): item is InstrumentType => INSTRUMENT_TYPE_OPTIONS.some((option) => option.key === item))
@@ -823,8 +853,7 @@ watch(() => form.formulaText, (value) => {
       </a>
       <nav aria-label="主导航">
         <a class="nav-link" href="/indicator-lab">公式选股</a>
-        <a class="nav-link" href="/backtest">单股回测</a>
-        <a class="nav-link active" href="/portfolio-backtest" aria-current="page">组合回测</a>
+                <a class="nav-link active" href="/portfolio-backtest" aria-current="page">组合回测</a>
         <a class="nav-link" href="/strategy-lab">策略实验室</a>
         <a class="nav-link" href="/condition-research">买卖条件研究</a>
         <a class="nav-link" href="/strategy-fitness">策略适配性</a>
@@ -875,10 +904,13 @@ watch(() => form.formulaText, (value) => {
             <legend>数据范围</legend>
             <p class="helper">读取已经导入本地 DuckDB 的日线，不会上传行情文件。请先在“本地行情”页面导入数据。</p>
             <div class="compact-fields portfolio-fields-top">
-              <div><label for="portfolio-universe">品种范围</label><select id="portfolio-universe" v-model="form.universe" data-testid="portfolio-universe"><option value="all">沪深全部品种</option><option value="sh">仅上海</option><option value="sz">仅深圳</option><option value="custom">自定义列表</option></select></div>
+              <div><label for="portfolio-universe">品种范围</label><select id="portfolio-universe" v-model="form.universe" data-testid="portfolio-universe"><option value="all">沪深全部品种</option><option value="sh">仅上海</option><option value="sz">仅深圳</option><option value="custom">自定义列表</option><option value="codes">指定标的</option></select></div>
               <div><label for="portfolio-max-positions">持仓槽位</label><input id="portfolio-max-positions" v-model.number="form.maxPositions" data-testid="portfolio-max-positions" type="number" min="1" max="100" step="1"></div>
+              <div><label for="portfolio-position-mode">建仓方式</label><select id="portfolio-position-mode" v-model="form.positionMode" data-testid="portfolio-position-mode"><option value="full">每槽等额</option><option value="fixed">固定股数</option></select></div>
             </div>
+            <div v-if="form.positionMode === 'fixed'" class="portfolio-inline-field"><label for="portfolio-fixed-size">每槽买入股数</label><input id="portfolio-fixed-size" v-model.number="form.fixedSize" data-testid="portfolio-fixed-size" type="number" min="100" max="100000000" step="100"><small class="scope-helper">每笔建仓都买入相同股数（100 的整数倍），资金不足时会按整手递减或跳过。</small><p v-if="errors.fixedSize" class="field-error">{{ errors.fixedSize }}</p></div>
             <div v-if="form.universe === 'custom'" class="portfolio-inline-field"><label for="portfolio-universe-file">股票列表文件</label><input id="portfolio-universe-file" v-model="form.universeFile" data-testid="portfolio-universe-file" type="text" placeholder="每行 SH 600000 或 SZ 000001"><p v-if="errors.universeFile" class="field-error">{{ errors.universeFile }}</p></div>
+            <div v-if="form.universe === 'codes'" class="portfolio-inline-field"><label for="portfolio-codes">证券代码</label><textarea id="portfolio-codes" v-model="form.codesText" data-testid="portfolio-codes" rows="3" placeholder="600519&#10;SH:510300&#10;000001，300750"></textarea><small class="scope-helper">支持逗号或换行分隔；可带 SH/SZ 前缀，不带前缀时按代码规则推断市场。只回测这些标的时把持仓槽位设为 1。</small><p v-if="errors.codesText" class="field-error">{{ errors.codesText }}</p></div>
             <div class="scope-config inline-scope-config" data-testid="portfolio-scope">
               <div class="scope-options"><span>证券类型</span><label v-for="option in INSTRUMENT_TYPE_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`portfolio-scope-type-${option.key}`" :checked="form.instrumentTypes.includes(option.key)" @change="toggleInstrumentType(option.key)">{{ option.label }}</label></div>
               <div class="scope-options"><span>板块</span><label v-for="option in BOARD_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`portfolio-scope-board-${option.key}`" :checked="form.boards.includes(option.key)" @change="toggleBoard(option.key)">{{ option.label }}</label></div>

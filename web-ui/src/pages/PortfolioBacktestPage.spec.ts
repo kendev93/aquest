@@ -304,6 +304,77 @@ describe('PortfolioBacktestPage', () => {
     }))
   })
 
+  it('submits an explicit code list when the 指定标的 universe is selected', async () => {
+    const wrapper = mount(PortfolioBacktestPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="portfolio-universe"]').setValue('codes')
+    await wrapper.get('[data-testid="portfolio-codes"]').setValue('600519\nSH:510300，000001')
+    await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(portfolioApi.createPortfolioBacktest).toHaveBeenCalledWith(expect.objectContaining({
+      universe: 'codes',
+      codes: ['600519', 'SH:510300', '000001'],
+    }))
+  })
+
+  it('requires at least one code in the 指定标的 universe', async () => {
+    const wrapper = mount(PortfolioBacktestPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="portfolio-universe"]').setValue('codes')
+    await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('请填写至少一个证券代码')
+    expect(portfolioApi.createPortfolioBacktest).not.toHaveBeenCalled()
+  })
+
+  it('toggles instrument scope filters and removes a history record', async () => {
+    vi.mocked(portfolioApi.fetchPortfolioBacktestHistory).mockResolvedValue([{
+      history_id: 'history-1', backtest_type: 'portfolio', created_at: '2024-01-06T08:00:00Z',
+      started_at: '2024-01-06T08:00:00Z', finished_at: '2024-01-06T08:01:00Z',
+      duration_seconds: 60, summary: {},
+    }])
+    vi.mocked(portfolioApi.deletePortfolioBacktestHistory).mockResolvedValue({ deleted: true })
+    const wrapper = mount(PortfolioBacktestPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="portfolio-scope-type-fund"]').setValue(true)
+    await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(portfolioApi.createPortfolioBacktest).toHaveBeenCalledWith(expect.objectContaining({
+      instrument_types: ['fund'],
+    }))
+
+    await wrapper.get('[data-testid="portfolio-history-remove-history-1"]').trigger('click')
+    await flushPromises()
+
+    expect(portfolioApi.deletePortfolioBacktestHistory).toHaveBeenCalledWith('history-1')
+    expect(wrapper.text()).toContain('历史组合回测已删除')
+  })
+
+  it('submits a fixed share count and validates its range', async () => {
+    const wrapper = mount(PortfolioBacktestPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="portfolio-position-mode"]').setValue('fixed')
+    await wrapper.get('[data-testid="portfolio-fixed-size"]').setValue(10)
+    await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('固定买入股数必须是 100 到 100000000 的整数')
+    expect(portfolioApi.createPortfolioBacktest).not.toHaveBeenCalled()
+
+    await wrapper.get('[data-testid="portfolio-fixed-size"]').setValue(300)
+    await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(portfolioApi.createPortfolioBacktest).toHaveBeenCalledWith(expect.objectContaining({
+      position_mode: 'fixed',
+      fixed_size: 300,
+    }))
+  })
+
   it('loads a strategy discovery candidate into the ordinary portfolio form', async () => {
     sessionStorage.setItem('indicator-lab.strategy-discovery.apply', JSON.stringify({
       universe: 'all',

@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from selector_app.adapters.online_market_sync import OnlineProviderUnavailable
 from selector_app.market_data.store import DuckDbMarketDataStore
+from selector_app.portfolio_backtest.models import PortfolioBacktestConfig
 from selector_app.screening.jobs import TaskCancelledError
 from selector_app.screening.models import ScanReport
 from selector_app.tdx_protocol.errors import TdxConnectionError
@@ -640,234 +641,6 @@ def test_market_sync_reports_incomplete_security_list_without_running_bars() -> 
     assert state["error"] == "完整证券列表获取失败，本次同步已停止，请检查 TDX 连接后重试。"
 
 
-def test_backtest_job_can_be_created_and_results_are_available(tmp_path: Path) -> None:
-    class FakeBacktestService:
-        def run(self, config, progress_callback=None):
-            if progress_callback:
-                progress_callback(1, 1)
-            return {
-                "market": "SH",
-                "code": "600000",
-                "bars": 5,
-                "start_date": "2024-01-02",
-                "end_date": "2024-01-06",
-                "buy_signal": config.buy_signal,
-                "sell_signal": config.sell_signal,
-                "performance": {"total_return": 0.04, "end_value": 10400.0},
-                "equity_curve": [],
-                "trades": [],
-                "positions": [],
-                "diagnostic": None,
-            }
-
-    with TestClient(
-        create_app(engine=EmptyEngine(), backtest_service=FakeBacktestService())
-    ) as client:
-        response = client.post(
-            "/api/v1/backtests",
-            json={
-                "market": "SH",
-                "code": "600000",
-                "vipdoc_path": str(tmp_path),
-                "buy_signal": "custom.buy",
-                "sell_signal": "custom.sell",
-                "formula_text": "BUY:C>10; SELL:C<10;",
-                "start_date": "2024-01-02",
-                "end_date": "2024-01-06",
-            },
-        )
-        assert response.status_code == 202
-        job_id = response.json()["data"]["job_id"]
-        state = None
-        for _ in range(50):
-            status_response = client.get(f"/api/v1/backtests/{job_id}")
-            assert status_response.status_code == 200
-            state = status_response.json()["data"]
-            if state["status"] in {"completed", "failed"}:
-                break
-            time.sleep(0.01)
-        else:
-            raise AssertionError("backtest job did not finish")
-        results_response = client.get(f"/api/v1/backtests/{job_id}/results")
-
-    assert state is not None
-    assert state["status"] == "completed"
-    assert state["result"] is None
-    assert results_response.status_code == 200
-    assert results_response.json()["data"]["code"] == "600000"
-
-
-def test_backtest_without_dates_uses_recent_five_years(tmp_path: Path) -> None:
-    dates = pd.date_range("2020-01-01", periods=2_200, freq="D")
-    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
-    store.replace_local_bars(
-        "SH",
-        "600000",
-        "stock",
-        _precompute_bars(len(dates)).assign(date=dates),
-    )
-    received: dict[str, object] = {}
-
-    class CapturingBacktestService:
-        def run(self, config, progress_callback=None):
-            received["start_date"] = config.start_date
-            received["end_date"] = config.end_date
-            if progress_callback:
-                progress_callback(1, 1)
-            return {
-                "market": config.market,
-                "code": config.code,
-                "bars": 1,
-                "start_date": str(config.start_date),
-                "end_date": str(config.end_date),
-                "buy_signal": config.buy_signal,
-                "sell_signal": config.sell_signal,
-                "performance": {},
-                "equity_curve": [],
-                "trades": [],
-                "positions": [],
-                "diagnostic": None,
-            }
-
-    with TestClient(
-        create_app(
-            engine=EmptyEngine(),
-            backtest_service=CapturingBacktestService(),
-            market_data_store=store,
-            auto_sync_enabled=False,
-        )
-    ) as client:
-        response = client.post(
-            "/api/v1/backtests",
-            json={
-                "market": "SH",
-                "code": "600000",
-                "buy_signal": "indicator_three.prepare_rally",
-                "sell_signal": "indicator_three.end_zone",
-            },
-        )
-        assert response.status_code == 202
-        state = wait_for_done(client, response.json()["data"]["job_id"], "/api/v1/backtests")
-
-    assert state["status"] == "completed"
-    assert received["start_date"] == date(2021, 1, 8)
-    assert received["end_date"] == date(2026, 1, 8)
-
-
-def test_backtest_default_service_reads_stored_bars_and_serializes_result(tmp_path: Path) -> None:
-    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
-    close = pd.Series([10, 11, 12, 13, 14, 13, 12, 14, 15, 14], dtype="float64")
-    store.replace_local_bars(
-        "SH",
-        "600000",
-        "stock",
-        pd.DataFrame(
-            {
-                "date": pd.date_range("2024-01-01", periods=len(close), freq="D"),
-                "open": close,
-                "high": close + 0.5,
-                "low": close - 0.5,
-                "close": close,
-                "volume": 100_000.0,
-                "amount": close * 100_000.0,
-                "bar_status": "completed",
-            }
-        ),
-    )
-
-    with TestClient(create_app(market_data_store=store)) as client:
-        response = client.post(
-            "/api/v1/backtests",
-            json={
-                "market": "SH",
-                "code": "600000",
-                "vipdoc_path": str(tmp_path),
-                "buy_signal": "custom.buy",
-                "sell_signal": "custom.sell",
-                "formula_text": "BUY:C=11; SELL:C=14;",
-                "start_date": "2024-01-02",
-                "end_date": "2024-01-06",
-                "initial_cash": 10_000,
-                "commission": 0,
-                "min_commission": 0,
-                "stamp_tax": 0,
-            },
-        )
-        assert response.status_code == 202
-        job_id = response.json()["data"]["job_id"]
-        state = wait_for_done(client, job_id, "/api/v1/backtests")
-        results_response = client.get(f"/api/v1/backtests/{job_id}/results")
-        history_response = client.get("/api/v1/backtests/history")
-        history_detail = client.get(f"/api/v1/backtests/history/{job_id}")
-
-    assert state["status"] == "completed"
-    payload = results_response.json()["data"]
-    assert payload["code"] == "600000"
-    assert payload["trades"][0]["date"] == "2024-01-03"
-    assert payload["equity_curve"][-1]["date"] == "2024-01-06"
-    assert history_response.status_code == 200
-    assert history_response.json()["data"][0]["history_id"] == job_id
-    assert history_response.json()["data"][0]["started_at"]
-    assert history_response.json()["data"][0]["finished_at"]
-    assert history_response.json()["data"][0]["summary"]["start_date"] == "2024-01-02"
-    assert history_response.json()["data"][0]["summary"]["end_date"] == "2024-01-06"
-    assert history_detail.status_code == 200
-    assert history_detail.json()["data"]["request"]["code"] == "600000"
-
-
-def test_backtest_rejects_same_buy_and_sell_signal(tmp_path: Path) -> None:
-    with TestClient(create_app(engine=EmptyEngine())) as client:
-        response = client.post(
-            "/api/v1/backtests",
-            json={
-                "market": "SH",
-                "code": "600000",
-                "vipdoc_path": str(tmp_path),
-                "buy_signal": "indicator_three.begin_zone",
-                "sell_signal": "indicator_three.begin_zone",
-            },
-        )
-
-    assert response.status_code == 422
-    assert response.json()["error"]["code"] == "validation_error"
-
-
-def test_backtest_task_returns_a_safe_domain_error(tmp_path: Path) -> None:
-    class FailingBacktestService:
-        def run(self, config, progress_callback=None):
-            raise ValueError("指定日期范围内没有可用日线数据")
-
-    with TestClient(
-        create_app(engine=EmptyEngine(), backtest_service=FailingBacktestService())
-    ) as client:
-        response = client.post(
-            "/api/v1/backtests",
-            json={
-                "market": "SH",
-                "code": "600000",
-                "vipdoc_path": str(tmp_path),
-                "buy_signal": "indicator_three.begin_zone",
-                "sell_signal": "indicator_three.end_zone",
-                "start_date": "2024-01-02",
-                "end_date": "2024-01-06",
-            },
-        )
-        assert response.status_code == 202
-        job_id = response.json()["data"]["job_id"]
-        state = None
-        for _ in range(50):
-            state_response = client.get(f"/api/v1/backtests/{job_id}")
-            state = state_response.json()["data"]
-            if state["status"] == "failed":
-                break
-            time.sleep(0.01)
-        else:
-            raise AssertionError("backtest job did not fail")
-
-    assert state is not None
-    assert state["error"] == "指定日期范围内没有可用日线数据"
-
-
 def test_portfolio_backtest_job_can_be_created_and_polled(tmp_path: Path) -> None:
     class FakePortfolioService:
         def run(self, config, progress_callback=None):
@@ -1019,6 +792,110 @@ def test_portfolio_backtest_requires_a_sell_rule(tmp_path: Path) -> None:
                 "combine_mode": "any",
                 "ranking_value": "indicator_three.varo7",
                 "max_positions": 2,
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"
+
+
+def test_portfolio_backtest_accepts_an_explicit_code_list(tmp_path: Path) -> None:
+    class CapturingPortfolioService:
+        seen: PortfolioBacktestConfig | None = None
+
+        def run(self, config, progress_callback=None):
+            if progress_callback:
+                progress_callback(1, 1)
+            CapturingPortfolioService.seen = config
+            return {
+                "universe": "codes",
+                "total_candidates": 1,
+                "processed": 1,
+                "skipped": 0,
+                "errors": 0,
+                "bars": 5,
+                "start_date": "2024-01-02",
+                "end_date": "2024-01-06",
+                "max_positions": 1,
+                "ranking_value": config.ranking_value,
+                "rank_order": "desc",
+                "performance": {},
+                "equity_curve": [],
+                "trades": [],
+                "states": [],
+                "ranking_events": [],
+                "failure_reasons": {},
+                "diagnostic": None,
+            }
+
+    with TestClient(
+        create_app(
+            engine=EmptyEngine(),
+            portfolio_backtest_service=CapturingPortfolioService(),
+            market_data_store=DuckDbMarketDataStore(tmp_path / "market.duckdb"),
+        )
+    ) as client:
+        response = client.post(
+            "/api/v1/portfolio-backtests",
+            json={
+                "vipdoc_path": str(tmp_path),
+                "universe": "codes",
+                "codes": ["600519", "SH:510300"],
+                "selected_signals": ["custom.buy"],
+                "combine_mode": "any",
+                "ranking_value": "custom.rank",
+                "max_positions": 1,
+                "position_mode": "fixed",
+                "fixed_size": 500,
+                "formula_text": "BUY:C>0; RANK:C;",
+                "stop_loss_pct": 0.05,
+                "start_date": "2024-01-02",
+                "end_date": "2024-01-06",
+            },
+        )
+        assert response.status_code == 202
+
+    config = CapturingPortfolioService.seen
+    assert config is not None
+    assert config.universe == "codes"
+    assert config.codes == ("600519", "SH:510300")
+    assert config.position_mode == "fixed"
+    assert config.fixed_size == 500
+
+
+def test_portfolio_backtest_rejects_codes_without_the_matching_universe(tmp_path: Path) -> None:
+    with TestClient(create_app(engine=EmptyEngine())) as client:
+        response = client.post(
+            "/api/v1/portfolio-backtests",
+            json={
+                "vipdoc_path": str(tmp_path),
+                "universe": "all",
+                "codes": ["600519"],
+                "selected_signals": ["indicator_three.begin_zone"],
+                "combine_mode": "any",
+                "ranking_value": "indicator_three.varo7",
+                "max_positions": 2,
+                "stop_loss_pct": 0.05,
+            },
+        )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "validation_error"
+
+
+def test_portfolio_backtest_rejects_fixed_mode_without_a_size(tmp_path: Path) -> None:
+    with TestClient(create_app(engine=EmptyEngine())) as client:
+        response = client.post(
+            "/api/v1/portfolio-backtests",
+            json={
+                "vipdoc_path": str(tmp_path),
+                "universe": "all",
+                "selected_signals": ["indicator_three.begin_zone"],
+                "combine_mode": "any",
+                "ranking_value": "indicator_three.varo7",
+                "max_positions": 2,
+                "position_mode": "fixed",
+                "stop_loss_pct": 0.05,
             },
         )
 

@@ -11,13 +11,12 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from .adapter import MarketDataAdapter
+from .adapter import MarketDataAdapter, parse_universe_code
 from .day_format import classify_board, classify_instrument, discover_day_files, read_day_file
 from .models import InstrumentBoard, InstrumentType, MarketCode, StockRef
 from .scope import InstrumentScope
 
 _CODE_PATTERN = re.compile(r"^\d{6}$")
-_MARKET_PATTERN = re.compile(r"^(SH|SZ)[:\s-]?([0-9]{6})$", re.IGNORECASE)
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 
@@ -44,17 +43,10 @@ def is_supported_a_stock(market: MarketCode, code: str) -> bool:
 
 
 def _parse_universe_line(line: str) -> tuple[MarketCode, str] | None:
-    normalized = line.split("#", 1)[0].strip()
-    if not normalized:
-        return None
-    match = _MARKET_PATTERN.fullmatch(normalized)
-    if match:
-        market: MarketCode = "SH" if match.group(1).upper() == "SH" else "SZ"
-        return market, match.group(2)
-    if _CODE_PATTERN.fullmatch(normalized):
-        market = "SH" if normalized.startswith(("6", "9")) else "SZ"
-        return market, normalized
-    raise ValueError(f"自定义股票列表中的格式无效: {line.strip()}")
+    try:
+        return parse_universe_code(line)
+    except ValueError as exc:
+        raise ValueError(f"自定义股票列表中的格式无效: {line.strip()}") from exc
 
 
 class LocalDayMarketDataAdapter:

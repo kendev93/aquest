@@ -16,6 +16,28 @@ _CODE_PATTERN = re.compile(r"^\d{6}$")
 _MARKET_PATTERN = re.compile(r"^(SH|SZ)[:\s-]?([0-9]{6})$", re.IGNORECASE)
 
 
+def parse_universe_code(raw: str) -> tuple[MarketCode, str] | None:
+    """Parse a single universe entry into ``(market, code)``.
+
+    Accepts ``600519``, ``SH600519``, ``SH:600519`` and ``sh 600519``. Returns
+    ``None`` for blank lines. Market inference follows the fund-code rules used
+    by the online sync (5/6/9 -> SH, everything else -> SZ) so ETF prefixes
+    such as ``51xxxx`` resolve to 沪市.
+    """
+
+    normalized = raw.split("#", 1)[0].strip()
+    if not normalized:
+        return None
+    match = _MARKET_PATTERN.fullmatch(normalized)
+    if match is not None:
+        market: MarketCode = "SH" if match.group(1).upper() == "SH" else "SZ"
+        return market, match.group(2)
+    if _CODE_PATTERN.fullmatch(normalized):
+        market = "SH" if normalized.startswith(("5", "6", "9")) else "SZ"
+        return market, normalized
+    raise ValueError(f"无效的证券代码: {raw.strip()}")
+
+
 class MarketDataAdapter(Protocol):
     """Compatibility-shaped adapter for formula and chart consumers."""
 
@@ -190,14 +212,7 @@ class DuckDbMarketDataAdapter:
 
     @staticmethod
     def _parse_universe_line(line: str) -> tuple[MarketCode, str] | None:
-        normalized = line.split("#", 1)[0].strip()
-        if not normalized:
-            return None
-        match = _MARKET_PATTERN.fullmatch(normalized)
-        if match:
-            market: MarketCode = "SH" if match.group(1).upper() == "SH" else "SZ"
-            return market, match.group(2)
-        if _CODE_PATTERN.fullmatch(normalized):
-            market = "SH" if normalized.startswith("6") else "SZ"
-            return market, normalized
-        raise ValueError(f"自定义股票列表中的格式无效: {line.strip()}")
+        try:
+            return parse_universe_code(line)
+        except ValueError as exc:
+            raise ValueError(f"自定义股票列表中的格式无效: {line.strip()}") from exc

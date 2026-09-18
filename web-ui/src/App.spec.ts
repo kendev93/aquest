@@ -17,10 +17,6 @@ vi.mock('./pages/MarketDataPage.vue', () => ({
   },
 }))
 
-vi.mock('./pages/BacktestPage.vue', () => ({
-  default: { name: 'BacktestPage', template: '<main>单股回测</main>' },
-}))
-
 vi.mock('./pages/ConditionResearchPage.vue', () => ({
   default: { name: 'ConditionResearchPage', template: '<main>买卖条件研究</main>' },
 }))
