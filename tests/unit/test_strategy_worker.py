@@ -107,6 +107,54 @@ def test_worker_returns_none_when_no_job_is_queued(tmp_path) -> None:
     assert worker.run_once() is None
 
 
+def test_worker_survives_a_transient_claim_failure(tmp_path) -> None:
+    """A failed poll must not end the worker process.
+
+    The backend restarts holding the DuckDB write lock for a moment; claim
+    raises then. Letting that escape killed the worker, so every queued
+    backtest sat unclaimed until Docker restarted the container.
+    """
+
+    service = FakeDiscoveryService()
+    store = StrategyJobStore(tmp_path / "jobs")
+    worker = StrategyDiscoveryWorker(store, service, poll_interval_seconds=0.001)
+    store.create(
+        "job-1",
+        operation="discovery",
+        payload={"request": {"base_config": {}, "splits": {}, "max_trials": 1}},
+        description="策略实验室",
+    )
+
+    attempts = {"count": 0}
+    original_claim = store.claim_next
+
+    def flaky_claim() -> str | None:
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise RuntimeError("策略 worker API 请求失败")
+        return original_claim()
+
+    store.claim_next = flaky_claim  # type: ignore[method-assign]
+
+    worker.run_forever(stop_event=_StopAfter(4))
+
+    assert attempts["count"] >= 2
+    assert service.calls == ["discovery"]
+    assert store.read_state("job-1")["status"] == "completed"
+
+
+class _StopAfter:
+    """Stop the polling loop after ``limit`` iterations, whatever happened."""
+
+    def __init__(self, limit: int) -> None:
+        self._limit = limit
+        self._seen = 0
+
+    def is_set(self) -> bool:
+        self._seen += 1
+        return self._seen > self._limit
+
+
 def test_worker_factory_receives_the_persisted_worker_count(tmp_path) -> None:
     service = FakeDiscoveryService()
     store = StrategyJobStore(tmp_path / "jobs")

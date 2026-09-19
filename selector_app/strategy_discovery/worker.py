@@ -159,8 +159,24 @@ class StrategyDiscoveryWorker:
         return job_id
 
     def run_forever(self, *, stop_event: Event | None = None) -> None:
+        """Poll for work, surviving failures in the polling path itself.
+
+        ``run_once`` only guards the job it is executing. A transient failure in
+        ``recover_stale_running`` or ``claim_next`` escapes it - the backend
+        restarting while it still holds the DuckDB write lock is the usual one -
+        and used to take the whole worker down. Docker's restart policy brings
+        the container back, but until it does nothing claims any job, and a
+        portfolio backtest that is merely waiting reads to the user as
+        "backtest failed, check your data". A transient error is no reason to
+        stop serving the next job, so it is logged and the loop goes on.
+        """
+
         while stop_event is None or not stop_event.is_set():
-            if self.run_once() is None:
+            try:
+                if self.run_once() is None:
+                    time.sleep(self._poll_interval_seconds)
+            except Exception:  # noqa: BLE001 - one poll failing must not end the loop
+                logger.exception("策略 worker 领取任务失败，稍后重试")
                 time.sleep(self._poll_interval_seconds)
 
     def _dispatch(
