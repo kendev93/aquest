@@ -7,9 +7,11 @@ from collections import Counter
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Protocol
 
+import numpy as np
 import pandas as pd
 
 from selector_app.concurrency import MAX_WORKERS
@@ -23,7 +25,17 @@ logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[int, int], None]
 _PRECOMPUTE_CHUNK_SIZE = 32
-# 分批加载之后总根数不再是内存风险（每批只留 32 只的行情在内存里），
+# 预计算按自然年分块：一次只把"一年 + 预热"的行情读进内存，算完留下当年那一段，
+# 各年段首尾相接后再落库。一次读全市场全历史会同时带来十几 GB 的峰值内存和
+# 十几 GB 的 blob 写入，实测会把容器打崩。
+# 8 年会把缓存顶到 ~19GB，而容器卷的写入只有本机磁盘的十分之一，一轮要跑近
+# 一小时且期间会拖慢正常查询。5 年覆盖回测/条件研究，也让波段研究的默认区间
+# 落在缓存内；需要更长区间时通过 `precompute_years` 单独指定。
+DEFAULT_PRECOMPUTE_YEARS = 5
+#: 每年段额外向前读取的根数。长周期指标（如 RSRS 的 250 日回归）没有这段预热，
+#  年初那几十根的值是不可信的——它会被当成"该年一开始就是这样"参与后续计算。
+DEFAULT_PRECOMPUTE_WARMUP_BARS = 268
+# 分批加载之后总根数不再是内存风险（每批只留 32 只一年的行情在内存里），
 # 这个上限只是避免小机器上的同步任务被一轮全量预热拖太久。
 PRECOMPUTE_MAX_BARS = 20_000_000
 
@@ -40,14 +52,6 @@ def should_defer_precompute(
     if isinstance(max_bars, bool) or not isinstance(max_bars, int) or max_bars < 0:
         raise ValueError("指标预计算上限必须是非负整数")
     return bar_count > max_bars
-
-
-@dataclass(frozen=True)
-class _PrecomputeOutcome:
-    processed: int = 0
-    skipped: int = 0
-    failure_reason: str | None = None
-    results: Mapping[str, FormulaResult] | None = None
 
 
 class PrecomputeMarketDataAdapter(Protocol):
@@ -106,8 +110,14 @@ class IndicatorPrecomputeService:
         universe_file: str | Path | None = None,
         instrument_types: tuple[InstrumentType, ...] | None = None,
         boards: tuple[InstrumentBoard, ...] | None = None,
+        years: int = DEFAULT_PRECOMPUTE_YEARS,
+        warmup_bars: int = DEFAULT_PRECOMPUTE_WARMUP_BARS,
         progress_callback: ProgressCallback | None = None,
     ) -> IndicatorPrecomputeReport:
+        if isinstance(years, bool) or not isinstance(years, int) or years < 1:
+            raise ValueError("预计算年份范围必须是正整数")
+        if isinstance(warmup_bars, bool) or not isinstance(warmup_bars, int) or warmup_bars < 0:
+            raise ValueError("预计算预热根数必须是非负整数")
         refs = self._adapter.list_stock_refs(
             vipdoc_path,
             universe,
@@ -120,10 +130,11 @@ class IndicatorPrecomputeService:
             formula_id: self._registry.formula(formula_id).minimum_bars
             for formula_id in formula_ids
         }
-        before = self._cache.metrics()
+        windows = _year_windows(years)
         failures: Counter[str] = Counter()
         processed = 0
         skipped = 0
+        computed = 0
         progress_count = 0
 
         def report_progress() -> None:
@@ -134,149 +145,218 @@ class IndicatorPrecomputeService:
 
         for offset in range(0, len(refs), _PRECOMPUTE_CHUNK_SIZE):
             batch = refs[offset : offset + _PRECOMPUTE_CHUNK_SIZE]
-            # 每批只把这一批的行情读进内存，算完即弃；一次性读全市场全历史
-            # 会把峰值内存顶到十几 GB。
-            frames = self._batch_frames(batch)
-            prepared: dict[tuple[str, str], pd.DataFrame] = {}
-            empty: set[tuple[str, str]] = set()
-            failed: set[tuple[str, str]] = set()
-            with ThreadPoolExecutor(
-                max_workers=min(MAX_WORKERS, len(batch)),
-                thread_name_prefix="indicator-precompute",
-            ) as executor:
-                preparation_futures = {
-                    executor.submit(self._prepare_ref, ref, frames): ref for ref in batch
-                }
-                for future in as_completed(preparation_futures):
-                    ref = preparation_futures[future]
-                    key = (ref.market, ref.code)
-                    try:
-                        frame = future.result()
-                    except Exception as exc:  # noqa: BLE001 - isolate one instrument
-                        failed.add(key)
-                        reason = str(exc).strip()[:200] or type(exc).__name__
-                        failures[reason] += 1
-                        logger.warning("指标预计算 %s 失败，已跳过", ref.code, exc_info=True)
-                    else:
-                        if frame.empty:
-                            empty.add(key)
-                        else:
-                            prepared[key] = frame
-
-            preloaded = 0
-            if prepared:
-                try:
-                    preloaded = self._cache.preload(prepared, formula_ids)
-                except (OSError, RuntimeError, ValueError):
-                    logger.warning("指标缓存批量预加载失败，改用逐标的按需读取", exc_info=True)
-
-            for ref in batch:
-                key = (ref.market, ref.code)
-                if key in failed or key in empty:
-                    if key in empty:
-                        skipped += 1
-                    report_progress()
-
-            compute_targets = [
-                (ref, prepared[(ref.market, ref.code)])
-                for ref in batch
-                if (ref.market, ref.code) in prepared
-            ]
-            if compute_targets:
-                computed_results: dict[tuple[str, str], Mapping[str, FormulaResult]] = {}
-                eligible_total = sum(
-                    sum(len(frame) >= minimum_bars[formula_id] for formula_id in formula_ids)
-                    for _, frame in compute_targets
+            pieces: dict[tuple[str, str], dict[str, list[FormulaResult]]] = {}
+            segments: dict[tuple[str, str], list[pd.DataFrame]] = {}
+            for year_start, year_end in windows:
+                year_frames = self._batch_frames(
+                    batch,
+                    start_date=year_start,
+                    end_date=year_end,
+                    warmup_bars=warmup_bars,
                 )
+                if not year_frames:
+                    continue
                 with ThreadPoolExecutor(
-                    max_workers=min(MAX_WORKERS, len(compute_targets)),
+                    max_workers=min(MAX_WORKERS, len(year_frames)),
                     thread_name_prefix="indicator-precompute",
                 ) as executor:
-                    compute_futures = {
+                    futures = {
                         executor.submit(
-                            self._compute_ref,
-                            ref,
+                            self._compute_year,
                             frame,
+                            year_start,
                             formula_ids,
                             minimum_bars,
-                        ): ref
-                        for ref, frame in compute_targets
+                        ): key
+                        for key, frame in year_frames.items()
                     }
-                    for future in as_completed(compute_futures):
-                        ref = compute_futures[future]
+                    for future in as_completed(futures):
+                        key = futures[future]
                         try:
                             outcome = future.result()
                         except Exception as exc:  # noqa: BLE001 - isolate one instrument
                             reason = str(exc).strip()[:200] or type(exc).__name__
                             failures[reason] += 1
-                            logger.warning("指标预计算 %s 失败，已跳过", ref.code, exc_info=True)
-                        else:
-                            processed += outcome.processed
-                            skipped += outcome.skipped
-                            if outcome.failure_reason is not None:
-                                failures[outcome.failure_reason] += 1
-                            if outcome.results is not None:
-                                computed_results[(ref.market, ref.code)] = outcome.results
-                        report_progress()
-                if computed_results and preloaded < eligible_total:
-                    self._cache.persist_results(prepared, computed_results)
+                            logger.warning("指标预计算 %s 失败，已跳过", key[1], exc_info=True)
+                            continue
+                        if outcome is None:
+                            continue
+                        year_frame, year_results = outcome
+                        segments.setdefault(key, []).append(year_frame)
+                        bucket = pieces.setdefault(key, {})
+                        for formula_id, result in year_results.items():
+                            bucket.setdefault(formula_id, []).append(result)
+                        computed += len(year_results)
 
-        after = self._cache.metrics()
+            write_frames: dict[tuple[str, str], pd.DataFrame] = {}
+            write_results: dict[tuple[str, str], dict[str, FormulaResult]] = {}
+            for key, bucket in pieces.items():
+                frame_parts = segments.get(key) or []
+                if not frame_parts:
+                    continue
+                write_frames[key] = (
+                    pd.concat(frame_parts, ignore_index=True)
+                    if len(frame_parts) > 1
+                    else frame_parts[0]
+                )
+                write_results[key] = {
+                    formula_id: _merge_segments(group)
+                    for formula_id, group in bucket.items()
+                    if len(group) == len(frame_parts)
+                }
+            if write_results:
+                try:
+                    self._cache.persist_results(write_frames, write_results)
+                except (OSError, RuntimeError, ValueError) as exc:
+                    reason = str(exc).strip()[:200] or type(exc).__name__
+                    failures[reason] += 1
+                    logger.warning("指标缓存写入失败，本批跳过", exc_info=True)
+                else:
+                    processed += len(write_results)
+            skipped += len(batch) - len(write_results)
+            for _ in batch:
+                report_progress()
+
         return IndicatorPrecomputeReport(
             total_candidates=len(refs),
             processed=processed,
             skipped=skipped,
             errors=sum(failures.values()),
-            computed=int(after["computed"]) - int(before["computed"]),
-            cache_hits=int(after["hits"]) - int(before["hits"]),
+            computed=computed,
+            cache_hits=0,
             failure_reasons=failures,
         )
 
-    def _prepare_ref(
-        self,
-        ref: StockRef,
-        frames: Mapping[tuple[str, str], pd.DataFrame] | None,
-    ) -> pd.DataFrame:
-        key = (ref.market, ref.code)
-        source = frames.get(key) if frames is not None else self._adapter.read_stock(ref)
-        return _prepare_frame(source if source is not None else pd.DataFrame())
+    def _read_one(self, ref: StockRef) -> pd.DataFrame:
+        return _prepare_frame(self._adapter.read_stock(ref))
 
-    def _compute_ref(
+    def _compute_year(
         self,
-        ref: StockRef,
         frame: pd.DataFrame,
+        year_start: date,
         formula_ids: tuple[str, ...],
         minimum_bars: Mapping[str, int],
-    ) -> _PrecomputeOutcome:
+    ) -> tuple[pd.DataFrame, dict[str, FormulaResult]] | None:
+        """Compute one calendar year, keeping only that year's own bars.
+
+        The frame carries `warmup_bars` extra bars before the year so rolling
+        indicators are already warmed up on 1 January; those bars are dropped
+        again so consecutive years concatenate without double counting.
+        """
+
+        prepared = _prepare_frame(frame)
+        if prepared.empty:
+            return None
+        dates = pd.to_datetime(prepared["date"], errors="coerce")
+        in_year = dates >= pd.Timestamp(year_start)
+        year_bars = int(in_year.sum())
+        if year_bars <= 0:
+            return None
         eligible = tuple(
-            formula_id for formula_id in formula_ids if len(frame) >= minimum_bars[formula_id]
+            formula_id for formula_id in formula_ids if len(prepared) >= minimum_bars[formula_id]
         )
         if not eligible:
-            return _PrecomputeOutcome(skipped=1)
-        results = self._cache.get_or_compute(
-            frame,
-            eligible,
-            market=ref.market,
-            code=ref.code,
-            persistent_read=False,
-            persist=False,
-        )
-        return _PrecomputeOutcome(processed=1, results=results)
+            return None
+        results: dict[str, FormulaResult] = {}
+        for formula_id in eligible:
+            definition = self._registry.formula(formula_id)
+            computed = definition.calculate(prepared.copy(deep=True))
+            results[formula_id] = _tail(computed, year_bars)
+        return prepared.loc[in_year].reset_index(drop=True), results
 
     def _batch_frames(
         self,
         refs: list[StockRef],
-    ) -> Mapping[tuple[str, str], pd.DataFrame] | None:
+        *,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        warmup_bars: int = 0,
+    ) -> Mapping[tuple[str, str], pd.DataFrame]:
         reader = getattr(self._adapter, "read_many_stocks", None)
         if reader is None:
-            return None
-        combined = reader(refs)
-        frames: dict[tuple[str, str], pd.DataFrame] = {}
-        if combined.empty:
+            # 适配器不支持批量读取时退回逐个读取，但仍并行——串行 I/O 会把整批
+            # 拖到单线程速度。年份过滤随后在 `_compute_year` 里做。
+            frames: dict[tuple[str, str], pd.DataFrame] = {}
+            with ThreadPoolExecutor(
+                max_workers=min(MAX_WORKERS, len(refs)),
+                thread_name_prefix="indicator-precompute-read",
+            ) as executor:
+                futures = {executor.submit(self._read_one, ref): ref for ref in refs}
+                for future in as_completed(futures):
+                    ref = futures[future]
+                    try:
+                        frame = future.result()
+                    except (OSError, ValueError):
+                        logger.warning("读取 %s 行情失败，已跳过", ref.code, exc_info=True)
+                        continue
+                    if not frame.empty:
+                        frames[(ref.market, ref.code)] = frame
             return frames
+        try:
+            combined = reader(
+                refs, start_date=start_date, end_date=end_date, warmup_bars=warmup_bars
+            )
+        except TypeError:
+            combined = reader(refs)
+        yearly: dict[tuple[str, str], pd.DataFrame] = {}
+        if combined.empty:
+            return yearly
         for key, group in combined.groupby(["market", "code"], sort=False):
-            frames[(str(key[0]), str(key[1]))] = group.reset_index(drop=True)
-        return frames
+            yearly[(str(key[0]), str(key[1]))] = group.reset_index(drop=True)
+        return yearly
+
+
+def _year_windows(years: int) -> list[tuple[date, date]]:
+    """Return the `[Jan 1, Dec 31]` windows of the last `years` calendar years."""
+
+    last = date.today().year
+    return [
+        (date(year, 1, 1), date(year, 12, 31))
+        for year in range(last - years + 1, last + 1)
+    ]
+
+
+def _tail(result: FormulaResult, length: int) -> FormulaResult:
+    """Return the trailing `length` bars of a computed result."""
+
+    if length <= 0 or length >= result.data_length:
+        return result
+    values = {name: np.asarray(value)[length * -1 :] for name, value in result.values.items()}
+    signals = {name: np.asarray(value)[length * -1 :] for name, value in result.signals.items()}
+    return FormulaResult.build(
+        formula_id=result.formula_id,
+        display_name=result.display_name,
+        minimum_bars=result.minimum_bars,
+        recommended_bars=result.recommended_bars,
+        data_length=length,
+        values=values,
+        signals=signals,
+    )
+
+
+def _merge_segments(segments: list[FormulaResult]) -> FormulaResult:
+    """Concatenate consecutive yearly segments back into one series."""
+
+    if len(segments) == 1:
+        return segments[0]
+    first = segments[0]
+    values = {
+        name: np.concatenate([np.asarray(segment.values[name]) for segment in segments])
+        for name in first.values
+    }
+    signals = {
+        name: np.concatenate([np.asarray(segment.signals[name]) for segment in segments])
+        for name in first.signals
+    }
+    return FormulaResult.build(
+        formula_id=first.formula_id,
+        display_name=first.display_name,
+        minimum_bars=first.minimum_bars,
+        recommended_bars=first.recommended_bars,
+        data_length=sum(int(segment.data_length) for segment in segments),
+        values=values,
+        signals=signals,
+    )
 
 
 def _prepare_frame(frame: pd.DataFrame) -> pd.DataFrame:

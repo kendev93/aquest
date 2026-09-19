@@ -380,6 +380,8 @@ class MarketSyncRequest(BaseModel):
     instrument_types: list[InstrumentType] | None = Field(default=None, max_length=4)
     boards: list[InstrumentBoard] | None = Field(default=None, max_length=7)
     full_history: bool = False
+    # 指标预计算按自然年分批执行，这里决定往前算几年（None = 用服务端默认值）。
+    precompute_years: int | None = Field(default=None, ge=1, le=30)
 
     @model_validator(mode="after")
     def validate_scope(self) -> MarketSyncRequest:

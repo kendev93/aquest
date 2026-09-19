@@ -542,6 +542,34 @@ class DuckDbIndicatorCacheStore:
                 connection.execute("ROLLBACK")
                 raise
 
+    def clear_indicator_caches(self) -> dict[str, int]:
+        """Drop every persisted derived result so later requests recompute it.
+
+        Required whenever the cache key semantics change: rows written under the
+        old scheme can never match again, so they only occupy store space.
+        """
+
+        self._store._require_writer()
+        removed = {"builtin_entries": 0, "custom_entries": 0}
+        with _WRITE_LOCK, self._store._connect() as connection:
+            connection.execute("BEGIN")
+            try:
+                for table, key in (
+                    ("indicator_cache", "builtin_entries"),
+                    ("custom_indicator_cache", "custom_entries"),
+                ):
+                    try:
+                        row = connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+                    except duckdb.CatalogException:
+                        continue
+                    removed[key] = int(row[0]) if row else 0
+                    connection.execute(f"DELETE FROM {table}")
+                connection.execute("COMMIT")
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
+        return removed
+
     def indicator_cache_status(self) -> dict[str, int | str | None]:
         """Return persistent cache size and freshness metadata."""
 

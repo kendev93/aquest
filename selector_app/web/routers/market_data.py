@@ -26,6 +26,7 @@ from selector_app.adapters.market_sync import (
 from selector_app.adapters.online_market_sync import OnlineProviderError
 from selector_app.indicators.cache import IndicatorCache
 from selector_app.indicators.precompute import (
+    DEFAULT_PRECOMPUTE_YEARS,
     PRECOMPUTE_MAX_BARS,
     IndicatorPrecomputeService,
     should_defer_precompute,
@@ -242,6 +243,35 @@ def indicator_cache_status(request: Request) -> dict[str, object] | JSONResponse
         )
 
 
+@router.delete("/indicator-cache", response_model=None)
+def clear_indicator_cache(request: Request) -> dict[str, object] | JSONResponse:
+    """Drop every persisted derived result so the next request recomputes it.
+
+    Needed after the cache key semantics change: rows written under the old
+    scheme can never match again and would only occupy store space.
+    """
+
+    try:
+        _indicator_cache(request).clear_memory()
+        removed = _store(request).clear_indicator_caches()
+    except (OSError, MarketDataStoreError, duckdb.Error) as exc:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "error": {
+                    "code": "indicator_cache_error",
+                    "message": _storage_error_message(exc),
+                }
+            },
+        )
+    return {
+        "data": {
+            **removed,
+            "total_entries": int(removed["builtin_entries"]) + int(removed["custom_entries"]),
+        }
+    }
+
+
 @router.get("/capabilities", response_model=None)
 def market_data_capabilities(request: Request) -> dict[str, object]:
     service = _service(request)
@@ -289,6 +319,7 @@ def create_indicator_precompute_job(
                 universe=payload.universe,
                 instrument_types=tuple(payload.instrument_types or ()),
                 boards=tuple(payload.boards or ()),
+                years=payload.precompute_years or DEFAULT_PRECOMPUTE_YEARS,
                 progress_callback=progress,
             )
         except (OSError, ValueError, MarketDataStoreError, duckdb.Error) as exc:

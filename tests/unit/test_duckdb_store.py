@@ -214,12 +214,12 @@ def test_store_retries_transient_duckdb_lock(tmp_path: Path, monkeypatch) -> Non
     original_connect = duckdb.connect
     attempts = 0
 
-    def flaky_connect(path, *, read_only=False):
+    def flaky_connect(path, *, read_only=False, **kwargs):
         nonlocal attempts
         attempts += 1
         if attempts <= 2:
             raise duckdb.IOException("Could not set lock on file: transient lock")
-        return original_connect(path, read_only=read_only)
+        return original_connect(path, read_only=read_only, **kwargs)
 
     monkeypatch.setattr(duckdb, "connect", flaky_connect)
 

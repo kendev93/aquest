@@ -474,6 +474,9 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
     def indicator_cache_status(self) -> dict[str, int | str | None]:
         return self._indicator_cache.indicator_cache_status()
 
+    def clear_indicator_caches(self) -> dict[str, int]:
+        return self._indicator_cache.clear_indicator_caches()
+
 
 __all__ = [
     "BACKTEST_HISTORY_LIMIT",

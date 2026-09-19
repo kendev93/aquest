@@ -326,6 +326,80 @@ def test_precompute_uses_eight_workers_for_independent_instruments(tmp_path: Pat
     assert 1 < max_active <= 8
 
 
+def test_precompute_stitches_yearly_segments_into_full_history(tmp_path: Path) -> None:
+    """Year-by-year segments must rejoin into one series equal to a full run."""
+
+    # 需要真实波动：若 high/low 恒为 close ± 常数，RSRS 回归的 beta 近似恒定，
+    # 滚动标准差趋近 0，z-score 会把浮点噪声放大成 O(1) 的假差异。
+    rng = np.random.default_rng(7)
+    length = 900
+    # 起点要够高：随机游走一旦被下限截断成常数，RSI 之类的指标会退化成常数，
+    # 分段与全量的"冷启动 vs 已收敛"差异就会被放大成假失败。
+    close = 25.0 + np.cumsum(rng.normal(0.0, 0.08, length))
+    frame = pd.DataFrame(
+        {
+            "date": pd.bdate_range("2023-01-02", periods=length),
+            "open": np.clip(close + rng.normal(0, 0.04, length), close * 0.95, close * 1.05),
+            "high": close * (1 + np.abs(rng.normal(0, 0.012, length))),
+            "low": close * (1 - np.abs(rng.normal(0, 0.012, length))),
+            "close": close,
+            "volume": rng.integers(1000, 99999, length).astype(float),
+            "amount": close * rng.integers(1000, 99999, length),
+            "bar_status": "completed",
+        }
+    )
+    frame["market"] = "SH"
+    frame["code"] = "600000"
+
+    class WindowAdapter:
+        def list_stock_refs(self, *_args, **_kwargs):
+            return [StockRef(market="SH", code="600000", path=tmp_path)]
+
+        def read_many_stocks(self, _refs, *, start_date=None, end_date=None, warmup_bars=0):
+            sub = frame
+            if start_date is not None:
+                sub = sub[sub["date"] >= pd.Timestamp(start_date)]
+            if end_date is not None:
+                sub = sub[sub["date"] <= pd.Timestamp(end_date)]
+            if warmup_bars and not sub.empty:
+                position = frame.index.get_loc(sub.index[0])
+                head = frame.iloc[max(0, position - warmup_bars) : position]
+                sub = pd.concat([head, sub])
+            return sub.reset_index(drop=True)
+
+        def read_stock(self, _ref):
+            return frame
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    report = IndicatorPrecomputeService(WindowAdapter(), IndicatorCache(store)).run(
+        vipdoc_path=str(tmp_path), years=4, warmup_bars=268
+    )
+    assert report.processed == 1
+    assert report.errors == 0
+
+    cold = IndicatorCache(store)
+    cached = cold.get_or_compute(
+        frame.copy(),
+        FORMULA_REGISTRY.all_formula_ids(),
+        market="SH",
+        code="600000",
+    )
+    assert cold.metrics()["computed"] == 0
+    assert cold.metrics()["persistent_hits"] == len(FORMULA_REGISTRY.all_formula_ids())
+
+    for formula_id, result in cached.items():
+        expected = FORMULA_REGISTRY.formula(formula_id).calculate(frame.copy(deep=True))
+        assert result.data_length == expected.data_length
+        for name, array in expected.values.items():
+            left = np.asarray(array, dtype=float)[400:]
+            right = np.asarray(result.values[name], dtype=float)[400:]
+            if not np.isfinite(left).any():  # 合成数据下个别输出恒为 NaN
+                continue
+            scale = max(float(np.nanmax(np.abs(left))), 1.0)
+            drift = float(np.nanmax(np.abs(left - right))) / scale
+            assert drift < 1e-6, f"{formula_id}.{name} drift={drift}"
+
+
 def test_custom_formula_cache_is_separated_by_source_and_parameters(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     frame = _bars(120)

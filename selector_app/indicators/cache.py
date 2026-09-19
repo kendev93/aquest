@@ -142,6 +142,20 @@ def _row_ends_at(row: Mapping[str, object], end: date | None) -> bool:
     return False
 
 
+def _row_end(row: Mapping[str, object]) -> date | None:
+    """Return the last date covered by a cached row, if it records one."""
+
+    row_end = row.get("data_end")
+    if isinstance(row_end, date) and not isinstance(row_end, datetime):
+        return row_end
+    if isinstance(row_end, str) and row_end:
+        try:
+            return date.fromisoformat(row_end)
+        except ValueError:
+            return None
+    return None
+
+
 def _revision_bar_count(revision: str) -> int | None:
     """Extract the stored bar count from a revision, if it has one."""
 
@@ -210,7 +224,9 @@ class IndicatorCache:
             raise ValueError("指标缓存内存条目上限必须大于 0")
         self._store = store
         self._registry = registry or FORMULA_REGISTRY
-        self._memory: OrderedDict[_CacheKey | _CustomCacheKey, FormulaResult] = OrderedDict()
+        self._memory: OrderedDict[
+            _CacheKey | _CustomCacheKey, tuple[FormulaResult, date | None]
+        ] = OrderedDict()
         self._max_memory_entries = max_memory_entries
         self._revisions: dict[tuple[str, str], str] = {}
         self._lock = RLock()
@@ -329,7 +345,7 @@ class IndicatorCache:
             engine_version=_CUSTOM_ENGINE_VERSION,
             data_revision=revision,
         )
-        cached = self._memory_get(key)
+        cached = self._memory_get(key, end)
         sliced = _tail_slice(cached, target_length) if cached is not None else None
         if sliced is not None:
             return {"custom": sliced}
@@ -342,7 +358,7 @@ class IndicatorCache:
         )
         result = _tail_slice(decoded, target_length) if decoded is not None else None
         if result is not None and decoded is not None:
-            self._memory_put(key, decoded)
+            self._memory_put(key, decoded, end)
             with self._lock:
                 self._hits += 1
             return {"custom": result}
@@ -356,7 +372,7 @@ class IndicatorCache:
             self._computed += 1
         bar_count = _revision_bar_count(revision)
         if bar_count is None or bar_count == target_length:
-            self._memory_put(key, result)
+            self._memory_put(key, result, end)
             self._persistent_put_custom(key, parsed, parameter_json, result, start, end)
         return {"custom": result}
 
@@ -441,7 +457,7 @@ class IndicatorCache:
             result = self._decode_persistent(row, definition) if row else None
             if result is None:
                 continue
-            self._memory_put(key, result)
+            self._memory_put(key, result, _row_end(row) if row else None)
             with self._lock:
                 self._hits += 1
                 self._persistent_hits += 1
@@ -511,7 +527,7 @@ class IndicatorCache:
         results: dict[str, FormulaResult] = {}
         missing: dict[str, _CacheKey] = {}
         for formula_id in requested:
-            cached = self._memory_get(keys[formula_id])
+            cached = self._memory_get(keys[formula_id], end)
             sliced = _tail_slice(cached, target_length) if cached is not None else None
             if sliced is not None:
                 results[formula_id] = sliced
@@ -530,7 +546,7 @@ class IndicatorCache:
             )
             sliced = _tail_slice(decoded, target_length) if decoded is not None else None
             if sliced is not None and decoded is not None:
-                self._memory_put(key, decoded)
+                self._memory_put(key, decoded, end)
                 with self._lock:
                     self._hits += 1
                     self._persistent_hits += 1
@@ -555,7 +571,7 @@ class IndicatorCache:
                 self._computed += 1
             # 只缓存完整序列：窗口结果按同一个键存进去会污染后续更长的请求。
             if full_history:
-                self._memory_put(key, result)
+                self._memory_put(key, result, end)
             computed_entries.append((key, result, start, end))
             results[formula_id] = result
         if persist:
@@ -633,17 +649,33 @@ class IndicatorCache:
         persistent = self._store.indicator_cache_status() if self._store is not None else {}
         return {**self.metrics(), "memory_entries": memory_entries, "persistent": persistent}
 
-    def _memory_get(self, key: _CacheKey | _CustomCacheKey) -> FormulaResult | None:
+    def _memory_get(
+        self,
+        key: _CacheKey | _CustomCacheKey,
+        end: date | None = None,
+    ) -> FormulaResult | None:
+        # 缓存里存的是以 `end` 收尾的序列。只按 key（标的+公式+版本号）命中会
+        # 拿最新一段去切一个历史窗口的尾部——长度够但内容全错，所以必须对齐
+        # 结束日期，和持久层的判定保持一致。
         with self._lock:
-            result = self._memory.get(key)
-            if result is not None:
-                self._memory.move_to_end(key)
-                self._hits += 1
+            entry = self._memory.get(key)
+            if entry is None:
+                return None
+            result, stored_end = entry
+            if end is not None and stored_end is not None and stored_end != end:
+                return None
+            self._memory.move_to_end(key)
+            self._hits += 1
             return result
 
-    def _memory_put(self, key: _CacheKey | _CustomCacheKey, result: FormulaResult) -> None:
+    def _memory_put(
+        self,
+        key: _CacheKey | _CustomCacheKey,
+        result: FormulaResult,
+        end: date | None = None,
+    ) -> None:
         with self._lock:
-            self._memory[key] = result
+            self._memory[key] = (result, end)
             self._memory.move_to_end(key)
             while len(self._memory) > self._max_memory_entries:
                 self._memory.popitem(last=False)

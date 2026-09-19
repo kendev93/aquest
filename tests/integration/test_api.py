@@ -161,7 +161,8 @@ def test_indicator_cache_status_and_manual_precompute_job(tmp_path: Path) -> Non
     assert state["description"] == "指标预计算"
     assert state["result"]["computed"] == 5
     assert warmed.status_code == 200
-    assert warmed.json()["data"]["lookups"] == 5
+    # 预计算按年分段直接计算后落库，不走查询路径，因此 lookups 保持为 0。
+    assert warmed.json()["data"]["lookups"] == 0
     assert warmed.json()["data"]["p95_ms"] >= warmed.json()["data"]["p50_ms"] >= 0
     assert warmed.json()["data"]["persistent"]["total_entries"] == 5
 

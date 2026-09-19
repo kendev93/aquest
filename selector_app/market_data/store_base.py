@@ -13,6 +13,7 @@ import time
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from threading import RLock, local
 
@@ -58,6 +59,11 @@ _FRAME_COLUMNS = ["date", "open", "high", "low", "close", "volume", "amount", "b
 _WRITE_LOCK = RLock()
 _CONNECT_RETRY_DELAYS = (0.05, 0.1, 0.25, 0.5, 1.0)
 _INSTRUMENT_TYPES = {"stock", "fund", "index", "bond"}
+# DuckDB 默认按**宿主机**内存给自己配额，看不到容器的 cgroup 上限。批量写指标
+# 缓存（十几 GB 的 blob）时它会一路吃内存直到被容器 OOM 杀掉——实测就是这样
+# 把整个后端打崩的。显式给定一个上限，DuckDB 才会主动淘汰缓冲页。
+_DUCKDB_MEMORY_RATIO = 0.5
+_DUCKDB_MIN_MEMORY_BYTES = 1 << 30
 _INSTRUMENT_BOARDS = {"main", "star", "chinext", "b_share", "fund", "index", "bond"}
 
 
@@ -119,6 +125,41 @@ def _append_filter(
     parameters.extend(selected)
 
 
+def _read_memory_limit_bytes() -> int | None:
+    for raw_path in (
+        "/sys/fs/cgroup/memory.max",
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+    ):
+        try:
+            raw = Path(raw_path).read_text(encoding="ascii").strip()
+        except (OSError, ValueError):
+            continue
+        if not raw or raw == "max":
+            continue
+        try:
+            limit = int(raw)
+        except ValueError:
+            continue
+        if 0 < limit < 1 << 60:
+            return limit
+    try:
+        total = int(os.sysconf("SC_PHYS_PAGES")) * int(os.sysconf("SC_PAGE_SIZE"))
+    except (AttributeError, OSError, ValueError):
+        return None
+    return total if total > 0 else None
+
+
+@lru_cache(maxsize=1)
+def _duckdb_memory_limit() -> str | None:
+    """Return a DuckDB `memory_limit` matching what this process may really use."""
+
+    limit = _read_memory_limit_bytes()
+    if limit is None:
+        return None
+    budget = max(int(limit * _DUCKDB_MEMORY_RATIO), _DUCKDB_MIN_MEMORY_BYTES)
+    return f"{budget // (1 << 30)}GiB" if budget >= (1 << 30) else f"{budget // (1 << 20)}MiB"
+
+
 class _DuckDbStoreBase:
     """Own connections and shared invariants for all storage repositories."""
 
@@ -154,12 +195,31 @@ class _DuckDbStoreBase:
             if delay:
                 time.sleep(delay)
             try:
-                return duckdb.connect(str(self.database_path), read_only=mode)
+                connection = self._open(read_only=mode)
             except duckdb.Error as exc:
                 last_error = exc
+                continue
+            return connection
         raise MarketDataStoreError(
             "行情数据库当前被其它进程占用或存在瞬态 I/O 错误，请稍后重试"
         ) from last_error
+
+    @contextmanager
+    def _open_session(self, *, read_only: bool) -> Iterator[duckdb.DuckDBPyConnection]:
+        connection = self._open(read_only=read_only)
+        try:
+            yield connection
+        finally:
+            connection.close()
+
+    def _open(self, *, read_only: bool) -> duckdb.DuckDBPyConnection:
+        # 必须在 connect 时通过 config 传入：事后 `SET memory_limit` 在只读连接上
+        # 会失败，而同一库文件的连接配置不一致时 DuckDB 会直接拒绝再开连接。
+        limit = _duckdb_memory_limit()
+        config: dict[str, str | bool | int | float | list[str]] | None = None
+        if limit is not None:
+            config = {"memory_limit": limit}
+        return duckdb.connect(str(self.database_path), read_only=read_only, config=config)
 
     @contextmanager
     def read_session(self) -> Iterator[duckdb.DuckDBPyConnection]:
@@ -199,7 +259,7 @@ class _DuckDbStoreBase:
             raise RuntimeError(f"行情数据库 schema 版本过高: {existing_version} > {SCHEMA_VERSION}")
         if existing_version is not None and existing_version < SCHEMA_VERSION:
             self._backup_file()
-        with duckdb.connect(str(self.database_path), read_only=False) as connection:
+        with self._open_session(read_only=False) as connection:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS instruments (
