@@ -30,6 +30,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from selector_app.strategy_discovery.catalog import default_indicator_catalog
+
 from .labels import LABEL_DISPLAY_NAMES
 from .scoring import IndicatorScore
 
@@ -104,7 +106,10 @@ class ConditionTemplate:
     icir: float | None
     significant: bool
     condition: dict[str, Any]
-    rule: dict[str, Any]
+    rule: dict[str, Any] | None
+    #: False when the output is not registered as a screenable value, so the
+    #: finding is still worth reading but cannot be pasted into a run.
+    condition_supported: bool
     note: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -122,11 +127,12 @@ class ConditionTemplate:
             "significant": self.significant,
             "condition": self.condition,
             "rule": self.rule,
+            "condition_supported": self.condition_supported,
             "note": self.note,
         }
 
 
-def _note(score: IndicatorScore, *, side: str, tradeable: bool) -> str:
+def _note(score: IndicatorScore, *, side: str, tradeable: bool, condition_supported: bool) -> str:
     direction = "不高于" if score.order == "low" else "不低于"
     action = "买入" if side == "buy" else "卖出"
     threshold = _rounded(score.threshold_hint or 0.0)
@@ -135,10 +141,14 @@ def _note(score: IndicatorScore, *, side: str, tradeable: bool) -> str:
     if score.icir is not None:
         text += f"，信息比率 {score.icir:.2f}"
     if not tradeable:
-        return (
+        text = (
             text + "。注意：这条来自「段起点归因」，当天无法确认那是底部，"
             "只能作为参考，不能直接当成可交易信号"
         )
+    if not condition_supported:
+        text += "。该输出未登记为可筛选指标，暂时只能作为研究结论参考"
+    if not tradeable:
+        return text
     return (
         text + "。阈值取自横截面分位的中位数，会随行情强弱漂移，"
         "实际取值请让条件研究在自己的三段数据上重新搜索"
@@ -146,8 +156,14 @@ def _note(score: IndicatorScore, *, side: str, tradeable: bool) -> str:
 
 
 def build_templates(scores: Sequence[IndicatorScore]) -> list[ConditionTemplate]:
-    """Convert every scored finding that carries a usable threshold."""
+    """Convert every scored finding that carries a usable threshold.
 
+    Findings whose value is not a registered screenable output still come back
+    - they are the ones saying "this custom lever does move with swings" - but
+    without a rule, because the condition research would reject the payload.
+    """
+
+    screenable = set(default_indicator_catalog().value_ids)
     templates: list[ConditionTemplate] = []
     for score in scores:
         side = LABEL_SIDES.get(score.label)
@@ -157,6 +173,7 @@ def build_templates(scores: Sequence[IndicatorScore]) -> list[ConditionTemplate]
         operator = _operator(score.order)
         condition = _condition_dict(score.value_id, operator, threshold)
         tradeable = score.label in TRADEABLE_LABELS
+        supported = score.value_id in screenable
         templates.append(
             ConditionTemplate(
                 value_id=score.value_id,
@@ -171,8 +188,9 @@ def build_templates(scores: Sequence[IndicatorScore]) -> list[ConditionTemplate]
                 icir=score.icir,
                 significant=score.significant,
                 condition=condition,
-                rule=_rule_dict(condition),
-                note=_note(score, side=side, tradeable=tradeable),
+                rule=_rule_dict(condition) if supported else None,
+                condition_supported=supported,
+                note=_note(score, side=side, tradeable=tradeable, condition_supported=supported),
             )
         )
     return templates
@@ -189,7 +207,11 @@ def _pick(
     """
 
     for label in labels:
-        matching = [item for item in templates if item.label == label and item.significant]
+        matching = [
+            item
+            for item in templates
+            if item.label == label and item.significant and item.rule is not None
+        ]
         if matching:
             return max(matching, key=lambda item: (item.ic_mean, item.icir or 0.0))
     return None
@@ -231,10 +253,16 @@ def build_condition_plan(scores: Sequence[IndicatorScore]) -> dict[str, Any]:
     if not templates:
         reason = "没有可转换的结论：所有指标都没算出可用的阈值"
     elif buy is None and sell is None:
-        reason = (
-            "没有任何结论通过显著性检验，不建议把这次结果当作交易规则；"
-            "可以放宽区间或改用更大的波段阈值再跑一次"
-        )
+        if any(item.significant and item.rule is None for item in templates):
+            reason = (
+                "最强的结论都来自尚未登记为可筛选指标的输出，暂不能直接带去条件研究；"
+                "可以照着表格里的阈值手动配置，或先把该输出登记成指标"
+            )
+        else:
+            reason = (
+                "没有任何结论通过显著性检验，不建议把这次结果当作交易规则；"
+                "可以放宽区间或改用更大的波段阈值再跑一次"
+            )
 
     return {
         "templates": [item.to_dict() for item in templates],

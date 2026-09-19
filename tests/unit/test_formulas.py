@@ -557,3 +557,26 @@ def test_annual_trend_is_capped_before_compounding() -> None:
     assert np.nanmax(values) <= 10.01
     # 下界 -95%，不会外推出小于 -100% 的收益。
     assert np.nanmin(values) >= -0.96
+
+
+def test_custom_formula_continuous_outputs_are_screenable() -> None:
+    """三个自定义公式的连续无量纲输出要能在选股页和条件研究里直接用。
+
+    常量、脉冲、价纲那部分已经排除在外，但连续部分是实测最强的横截面特征
+    （建仓强度在波段研究里拿过全场第一），不进目录就只能看、不能用。
+    """
+
+    from selector_app.strategy_discovery.catalog import default_indicator_catalog
+
+    catalog = default_indicator_catalog()
+    rankable = set(catalog.rankable_ids)
+    for value_id in (
+        "indicator_one.var3",
+        "indicator_two.saturation",
+        "indicator_two.holding",
+        "indicator_three.stochastic_base",
+        "indicator_three.varo7",
+    ):
+        assert value_id in rankable
+        # 目录不带中文名的话，下拉里会露出一串 VARO7 之类的原名。
+        assert catalog.display_name(value_id) != value_id.split(".", 1)[1]

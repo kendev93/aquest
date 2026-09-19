@@ -269,8 +269,7 @@ def _market(
     rng: np.random.Generator, count: int, length: int
 ) -> dict[tuple[str, str], pd.DataFrame]:
     return {
-        ("SH", f"{600000 + index:06d}"): _frame(_random_walk(rng, length))
-        for index in range(count)
+        ("SH", f"{600000 + index:06d}"): _frame(_random_walk(rng, length)) for index in range(count)
     }
 
 
@@ -338,6 +337,76 @@ def test_indicator_study_validates_the_study_window() -> None:
         service.indicator_study(SwingIndicatorConfig(horizon=0))
 
 
+def _studied_value_ids(**overrides: object) -> tuple[str, ...]:
+    rng = np.random.default_rng(21)
+    frames = _market(rng, count=24, length=520)
+    service = SwingResearchService(_FakeAdapter(frames))
+    payload = service.indicator_study(
+        SwingIndicatorConfig(
+            start_date=date(2023, 6, 1),
+            min_cross_section=10,
+            permutations=0,
+            batch_size=12,
+            labels=("up_onset_ahead",),
+            **overrides,  # type: ignore[arg-type]
+        )
+    )
+    return tuple(dict.fromkeys(item["value_id"] for item in payload["scores"]))
+
+
+def test_indicator_study_scores_custom_formula_outputs_too() -> None:
+    """The custom formulas are in by default - that was the whole question."""
+
+    value_ids = _studied_value_ids()
+
+    assert "indicator_three.var1" in value_ids
+    assert "indicator_two.mid_line" in value_ids
+    assert "indicator_one.main_force_entry" in value_ids
+    assert any(item.startswith("technical.") for item in value_ids)
+
+
+def test_indicator_study_can_stick_to_the_technical_family() -> None:
+    value_ids = _studied_value_ids(include_custom=False)
+
+    assert value_ids
+    assert all(item.startswith("technical.") for item in value_ids)
+
+
+def test_indicator_study_rejects_constants_pulses_and_prices() -> None:
+    """The allow-list is the point: these three all measure as unrankable."""
+
+    service = SwingResearchService(_FakeAdapter({}))
+    for value_id in (
+        "indicator_one.z",  # literally zeros
+        "indicator_three.var2",  # literally 8.0
+        "indicator_three.prepare_rally",  # 0 or 80, 98% ties
+        "indicator_three.varo5",  # LLV(low, 27): the price
+    ):
+        with pytest.raises(ValueError, match="不能用于波段研究"):
+            service.indicator_study(SwingIndicatorConfig(value_ids=(value_id,)))
+
+
+def test_custom_outputs_are_named_with_their_formula() -> None:
+    rng = np.random.default_rng(21)
+    frames = _market(rng, count=24, length=520)
+    service = SwingResearchService(_FakeAdapter(frames))
+
+    payload = service.indicator_study(
+        SwingIndicatorConfig(
+            start_date=date(2023, 6, 1),
+            min_cross_section=10,
+            permutations=0,
+            batch_size=12,
+            labels=("up_onset_ahead",),
+        )
+    )
+
+    names = {item["value_id"]: item["display_name"] for item in payload["scores"]}
+    # A table mixing four formulas cannot just say "短期线".
+    assert names["indicator_two.short_line"] == "庄家顶底 · 短期线"
+    assert names["indicator_three.varo7"] == "准备拉升 · 建仓强度"
+
+
 def test_indicator_study_reports_when_nothing_was_scanned() -> None:
     service = SwingResearchService(_FakeAdapter({}))
 
@@ -389,9 +458,7 @@ def test_indicator_study_progress_covers_every_stage() -> None:
             permutations=20,
             batch_size=12,
         ),
-        progress_callback=lambda current, total, stage: events.append(
-            (current, total, stage)
-        ),
+        progress_callback=lambda current, total, stage: events.append((current, total, stage)),
     )
 
     assert events

@@ -101,6 +101,7 @@ const study: SwingStudyResult = {
       ic_mean: 0.111,
       icir: 1.4,
       significant: true,
+      condition_supported: true,
       condition,
       rule,
       note: '阈值取自横截面分位的中位数，会随行情强弱漂移。',
@@ -219,5 +220,50 @@ describe('SwingResearchPage', () => {
     await flushPromises()
 
     expect(wrapper.get('[data-testid="swing-message"]').text()).toContain('超出上限 3 GB')
+  })
+
+  it('studies the custom formulas by default and can switch them off', async () => {
+    const wrapper = mount(SwingResearchPage)
+    const toggle = wrapper.get('[data-testid="swing-study-include-custom"]')
+      .element as HTMLInputElement
+    expect(toggle.checked).toBe(true)
+
+    await wrapper.get('[data-testid="swing-study-run"]').trigger('click')
+    await flushPromises()
+    expect(vi.mocked(swingApi.runSwingIndicatorStudy).mock.calls[0]?.[0]?.include_custom).toBe(
+      true,
+    )
+
+    await wrapper.get('[data-testid="swing-study-include-custom"]').setValue(false)
+    await wrapper.get('[data-testid="swing-study-run"]').trigger('click')
+    await flushPromises()
+    expect(vi.mocked(swingApi.runSwingIndicatorStudy).mock.calls[1]?.[0]?.include_custom).toBe(
+      false,
+    )
+  })
+
+  it('marks a finding that cannot become a rule as reference only', async () => {
+    vi.mocked(swingApi.runSwingIndicatorStudy).mockResolvedValue({
+      ...study,
+      condition_plan: {
+        ...study.condition_plan!,
+        templates: [{
+          ...study.condition_plan!.templates[0]!,
+          value_id: 'indicator_three.varo7',
+          display_name: '准备拉升 · 建仓强度',
+          condition_supported: false,
+          rule: null,
+        }],
+        buy_rule: null,
+      },
+    })
+
+    const wrapper = mount(SwingResearchPage)
+    await wrapper.get('[data-testid="swing-study-run"]').trigger('click')
+    await flushPromises()
+
+    const row = wrapper.get('[data-testid="swing-template-row"]')
+    expect(row.text()).toContain('准备拉升 · 建仓强度')
+    expect(row.text()).toContain('仅参考')
   })
 })

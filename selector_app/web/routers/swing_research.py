@@ -70,9 +70,7 @@ def swing_overview(payload: SwingOverviewRequest, request: Request) -> dict[str,
 
 
 @router.post("/indicator-study")
-def swing_indicator_study(
-    payload: SwingIndicatorRequest, request: Request
-) -> dict[str, object]:
+def swing_indicator_study(payload: SwingIndicatorRequest, request: Request) -> dict[str, object]:
     try:
         result = _service(request).indicator_study(payload.to_config())
     except ValueError as exc:

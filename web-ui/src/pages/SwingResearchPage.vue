@@ -9,6 +9,7 @@ import {
 } from '../api/swingResearch'
 import TermHint from '../components/TermHint.vue'
 import type {
+  SwingConditionTemplate,
   SwingLabel,
   SwingOverviewResult,
   SwingScenario,
@@ -66,6 +67,7 @@ const study = reactive({
   alpha: 0.05,
   minCrossSection: 20,
   limitStocks: 1000,
+  includeCustom: true,
 })
 
 const message = ref('')
@@ -144,6 +146,7 @@ async function runStudy(): Promise<void> {
         atr_window: study.atrWindow,
         horizon: study.horizon,
         labels: study.labels,
+        include_custom: study.includeCustom,
         permutations: study.permutations,
         block_size: study.blockSize,
         alpha: study.alpha,
@@ -218,6 +221,14 @@ const noiseFloor = computed<number | null>(() => {
 
 function operatorText(operator: string | null | undefined): string {
   return operator === 'gte' ? '≥' : '≤'
+}
+
+/** 技术面指标用短名，自定义指标用中文名（id 太长也看不懂）。 */
+function conditionText(template: SwingConditionTemplate): string {
+  const id = template.value_id.startsWith('technical.')
+    ? template.value_id.slice('technical.'.length)
+    : template.display_name
+  return `${id} ${operatorText(template.operator)} ${formatNumber(template.threshold, 4)}`
 }
 
 function handoffToResearch(): void {
@@ -493,6 +504,19 @@ async function copyPlan(): Promise<void> {
           <p class="helper">默认只勾「近期将启动」——这两条当天就算得出来；「段起点」只有事后才知道，勾上只作参考。</p>
         </fieldset>
 
+        <fieldset class="form-section swing-label-section">
+          <legend>自定义指标</legend>
+          <label class="scope-option">
+            <input v-model="study.includeCustom" data-testid="swing-study-include-custom" type="checkbox">
+            把主力清洗 / 庄家顶底 / 准备拉升一起研究
+          </label>
+          <p class="helper">
+            这三个公式里只有连续、无量纲的那几个输出能用（比如准备拉升的建仓强度、庄家顶底的三条线）。
+            像「准备拉升」「压住庄家」这种只有 0 和 80 两种取值的开关、以及恒等于 0 的 Z、还有直接就是股价的 LLV／成本线，
+            横截面排不出名次，算出来的相关性没有意义，所以不放进来。
+          </p>
+        </fieldset>
+
         <button class="primary-button" type="button" :disabled="studyRunning || study.labels.length === 0" data-testid="swing-study-run" @click="runStudy">
           <span v-if="studyRunning" class="spinner" aria-hidden="true"></span>
           {{ studyRunning ? '计算中…' : '运行指标研究' }}
@@ -617,7 +641,10 @@ async function copyPlan(): Promise<void> {
                     <td><span class="direction" :class="template.side">{{ template.side === 'buy' ? '买' : '卖' }}</span></td>
                     <td>{{ template.display_name }}</td>
                     <td>{{ template.label_display }}</td>
-                    <td class="code">{{ template.value_id.replace('technical.', '') }} {{ operatorText(template.operator) }} {{ formatNumber(template.threshold, 4) }}</td>
+                    <td class="code">
+                      {{ conditionText(template) }}
+                      <span v-if="!template.condition_supported" class="swing-tag muted" title="该输出还没登记成可筛选指标，只能照着阈值手动配置">仅参考</span>
+                    </td>
                     <td>
                       <span v-if="template.tradeable" class="swing-tag">可交易</span>
                       <span v-else class="swing-tag muted">归因</span>

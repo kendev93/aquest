@@ -105,6 +105,10 @@ class SwingIndicatorConfig:
     horizon: int = DEFAULT_HORIZON
     labels: tuple[LabelKind, ...] = ALL_LABELS
     value_ids: tuple[str, ...] = ()
+    #: Study the continuous outputs of the three custom TDX formulas alongside
+    #: the technical ones. On by default: measured on the same labels, they
+    #: scored higher than most of the technical family.
+    include_custom: bool = True
     min_cross_section: int = MIN_CROSS_SECTION
     permutations: int = DEFAULT_PERMUTATIONS
     block_size: int = DEFAULT_BLOCK_SIZE
@@ -151,6 +155,7 @@ class SwingIndicatorConfig:
             horizon=self.horizon,
             labels=tuple(dict.fromkeys(self.labels)) or ALL_LABELS,
             value_ids=tuple(dict.fromkeys(self.value_ids)),
+            include_custom=bool(self.include_custom),
             min_cross_section=self.min_cross_section,
             permutations=self.permutations,
             block_size=self.block_size,

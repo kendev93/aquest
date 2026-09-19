@@ -709,6 +709,9 @@ class SwingIndicatorRequest(BaseModel):
     horizon: int = Field(default=10, ge=1, le=250)
     labels: list[SwingLabel] | None = Field(default=None, max_length=4)
     value_ids: list[str] | None = Field(default=None, max_length=64)
+    #: Study the continuous outputs of 主力清洗 / 庄家顶底 / 准备拉升 alongside
+    #: the technical family.
+    include_custom: bool = True
     min_cross_section: int = Field(default=20, ge=2, le=10_000)
     permutations: int = Field(default=200, ge=0, le=5_000)
     block_size: int = Field(default=20, ge=1, le=500)
@@ -729,6 +732,7 @@ class SwingIndicatorRequest(BaseModel):
             horizon=self.horizon,
             labels=tuple(self.labels) if self.labels else ALL_SWING_LABELS,
             value_ids=tuple(self.value_ids or ()),
+            include_custom=self.include_custom,
             min_cross_section=self.min_cross_section,
             permutations=self.permutations,
             block_size=self.block_size,

@@ -30,6 +30,7 @@ from .models import MAX_PANEL_BYTES, SwingIndicatorConfig, SwingOverviewConfig
 from .overview import SwingAccumulator
 from .scoring import DEFAULT_SEED, IndicatorScore, annotate_significance, score_indicator
 from .segments import atr_percent, split_swings
+from .values import custom_value_ids, display_name_for, formula_groups
 
 ProgressCallback = Callable[[int, int], None] | None
 #: ``indicator_study`` reports ``(current, total, stage)``. The stage is what
@@ -231,9 +232,7 @@ class SwingResearchService:
                     labels,
                     panel_progress,
                 )
-                scores = self._score_panel(
-                    panel, labels, resolved, value_ids, score_progress
-                )
+                scores = self._score_panel(panel, labels, resolved, value_ids, score_progress)
             finally:
                 del panel
 
@@ -270,12 +269,13 @@ class SwingResearchService:
         return payload
 
     def _resolve_value_ids(self, config: SwingIndicatorConfig) -> tuple[str, ...]:
-        """Rankable technical outputs, or the caller's subset of them.
+        """Rankable technical outputs plus the allow-listed custom ones.
 
-        Only ``technical`` is supported: the other formulas expose intermediate
-        variables of one specific trading formula rather than general-purpose
-        measurements, so treating them as candidate market factors would be a
-        category error.
+        The custom formulas (主力清洗 / 庄家顶底 / 准备拉升) are trading formulas
+        rather than measurement libraries, so only their continuous,
+        dimensionless outputs are offered - see :mod:`.values` for the
+        measurement that picked them. Everything else about them is either a
+        constant, a two-valued pulse, or the price itself.
         """
 
         catalog: IndicatorCatalog = default_indicator_catalog()
@@ -283,13 +283,16 @@ class SwingResearchService:
         available = {
             value_id for value_id in catalog.rankable_ids if value_id.startswith("technical.")
         }
+        if config.include_custom:
+            available.update(custom_value_ids())
         if config.value_ids:
             requested = tuple(catalog.canonical_id(item) for item in config.value_ids)
             unknown = tuple(item for item in requested if item not in available)
             if unknown:
                 raise ValueError(
                     f"以下指标不能用于波段研究: {', '.join(unknown)}；"
-                    "只支持 technical 公式中可排序的无量纲指标"
+                    "只支持 technical 公式中可排序的无量纲指标，"
+                    "以及三个自定义公式里已核实的连续输出"
                 )
             return tuple(item for item in requested if item in available)
         ordered = tuple(
@@ -297,6 +300,8 @@ class SwingResearchService:
             for name in technical.value_names
             if f"technical.{name}" in available
         )
+        if config.include_custom:
+            ordered += tuple(item for item in custom_value_ids() if item in available)
         return ordered
 
     def _scan_calendar(
@@ -347,12 +352,15 @@ class SwingResearchService:
     ) -> int:
         """Second pass: compute indicators, cut swings, write both to the panel."""
 
-        technical = FORMULA_REGISTRY.formula("technical")
-        names = tuple(value_id.split(".", 1)[1] for value_id in value_ids)
+        groups = formula_groups(value_ids)
+        # Every involved formula needs its own warm-up, and the longest one wins:
+        # a formula computed on too little history returns NaNs, which would
+        # silently shrink the cross-section instead of failing loudly.
+        warmup = max(FORMULA_REGISTRY.formula(formula_id).recommended_bars for formula_id in groups)
         # Warm-up only makes sense against a window: without a start date the
         # read already begins at the first bar on record, and the store rejects
         # a warm-up it cannot anchor.
-        warmup = technical.recommended_bars if config.start_date else 0
+        warmup = warmup if config.start_date else 0
         start_timestamp = pd.Timestamp(config.start_date) if config.start_date else None
         end_timestamp = pd.Timestamp(config.end_date) if config.end_date else None
         calendar_index = pd.DatetimeIndex(dates)
@@ -376,7 +384,8 @@ class SwingResearchService:
                     if _write_stock(
                         group,
                         config,
-                        names,
+                        groups,
+                        len(value_ids),
                         calendar_index,
                         start_timestamp,
                         end_timestamp,
@@ -408,7 +417,7 @@ class SwingResearchService:
                         matrix,
                         np.asarray(labels[label_index], dtype=float),
                         value_id=value_id,
-                        display_name=catalog.display_name(value_id),
+                        display_name=display_name_for(value_id, catalog),
                         label=label,
                         min_cross_section=config.min_cross_section,
                         block_size=config.block_size,
@@ -495,7 +504,8 @@ def _study_reason(scores: list[IndicatorScore], significant: int) -> str | None:
 def _write_stock(
     group: pd.DataFrame,
     config: SwingIndicatorConfig,
-    names: tuple[str, ...],
+    groups: dict[str, list[tuple[int, str]]],
+    column_count: int,
     calendar_index: pd.DatetimeIndex,
     start_timestamp: pd.Timestamp | None,
     end_timestamp: pd.Timestamp | None,
@@ -503,7 +513,15 @@ def _write_stock(
     labels: np.ndarray,
     row: int,
 ) -> bool:
-    """Write one stock's indicator rows and swing labels into the panel."""
+    """Write one stock's indicator rows and swing labels into the panel.
+
+    Each formula is evaluated once per stock and its requested outputs are
+    scattered into their own panel columns. A formula that cannot produce
+    values for this stock (too few bars, or a denominator it refuses to
+    divide by) leaves those columns NaN rather than aborting the row: the
+    study scores each column independently, and one silent formula should not
+    cost the stock its swing labels.
+    """
 
     if len(group) < 2:
         return False
@@ -517,8 +535,13 @@ def _write_stock(
     if kept.size == 0:
         return False
 
-    result = FORMULA_REGISTRY.formula("technical").calculate(group)
-    values = np.column_stack([np.asarray(result.values[name], dtype=float) for name in names])
+    values = np.full((len(group), column_count), np.nan, dtype=float)
+    for formula_id, items in groups.items():
+        result = FORMULA_REGISTRY.formula(formula_id).calculate(group)
+        for index, name in items:
+            array = np.asarray(result.values.get(name), dtype=float)
+            if array.shape == (len(group),):
+                values[:, index] = array
     segments = split_swings(
         group,
         reversal_multiple=config.reversal_multiple,

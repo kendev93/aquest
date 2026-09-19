@@ -1136,8 +1136,10 @@ export interface SwingConditionTemplate {
   ic_mean: number
   icir: number | null
   significant: boolean
+  /** 未登记为可筛选指标的输出只给结论，不给可粘贴的规则。 */
+  condition_supported: boolean
   condition: ScreenCondition
-  rule: RuleGroupPayload
+  rule: RuleGroupPayload | null
   note: string
 }
 

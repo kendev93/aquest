@@ -154,3 +154,58 @@ def test_tradeable_count_only_counts_onset_labels(label: str) -> None:
     plan = build_condition_plan([_score(label=label), _score(label="up_leg_start")])
 
     assert plan["tradeable_count"] == 1
+
+
+def test_registered_custom_output_carries_a_usable_rule() -> None:
+    """准备拉升 · 建仓强度 is the study's strongest finding, so it must be usable.
+
+    It used to be excluded from the catalog, which meant the study could point
+    at it but never hand a rule over. It is registered now (registry
+    ``screen_value_names``), so the round trip has to produce a payload the
+    condition research accepts.
+    """
+
+    template = build_templates(
+        [_score(value_id="indicator_three.varo7", display_name="准备拉升 · 建仓强度")]
+    )[0]
+
+    assert template.condition_supported is True
+    assert template.rule["conditions"][0]["left_value"] == "indicator_three.varo7"
+
+
+def test_unregistered_output_scores_but_carries_no_rule() -> None:
+    """庄家顶底 · 支撑强度 measures well but is not a screenable value.
+
+    Handing the research a rule it would reject is worse than handing it
+    nothing, so the finding still shows up in the table - that is the useful
+    part - and says so instead of pretending to be a rule.
+    """
+
+    template = build_templates(
+        [_score(value_id="indicator_two.support", display_name="庄家顶底 · 支撑强度")]
+    )[0]
+
+    assert template.condition_supported is False
+    assert template.rule is None
+    assert "未登记为可筛选指标" in template.note
+
+
+def test_plan_says_so_when_only_unregistered_outputs_won() -> None:
+    plan = build_condition_plan([_score(value_id="indicator_two.support")])
+
+    assert plan["buy_rule"] is None
+    assert plan["ranking"] is None
+    assert "暂不能直接带去条件研究" in (plan["reason"] or "")
+
+
+def test_plan_falls_back_to_a_registered_output() -> None:
+    """A weaker registered finding beats a stronger unregistered one."""
+
+    plan = build_condition_plan(
+        [
+            _score(value_id="indicator_two.support", ic_mean=0.4),
+            _score(value_id="technical.rsi14", ic_mean=0.1),
+        ]
+    )
+
+    assert plan["buy_rule"]["conditions"][0]["left_value"] == "technical.rsi14"
