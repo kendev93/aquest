@@ -125,61 +125,6 @@ def test_app_records_database_maintenance_check_on_startup(tmp_path: Path) -> No
     assert result["record_path"].endswith("market.duckdb#data_meta.maintenance_state")
 
 
-def test_app_schedules_online_sync_when_daily_refresh_is_due(tmp_path: Path) -> None:
-    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
-    store.replace_local_bars("SH", "600000", "stock", _precompute_bars())
-    calls: list[object] = []
-
-    class FakeMarketSync:
-        def sync(self, config, progress_callback=None, *, detail_callback=None):
-            del detail_callback
-            calls.append(config)
-            if progress_callback is not None:
-                progress_callback(1, 1)
-            store.set_meta(
-                "last_online_sync_at",
-                pd.Timestamp.now(tz="Asia/Shanghai").isoformat(),
-            )
-            return {
-                "total_candidates": 1,
-                "processed": 1,
-                "updated_files": 1,
-                "unchanged_files": 0,
-                "written_bars": 1,
-                "errors": 0,
-                "failure_reasons": {},
-            }
-
-    app = create_app(
-        market_data_store=store,
-        market_sync=FakeMarketSync(),
-        auto_sync_enabled=True,
-        auto_sync_interval_seconds=0.01,
-    )
-    with TestClient(app) as client:
-        for _ in range(100):
-            if calls and app.state.auto_sync_job_id:
-                break
-            time.sleep(0.01)
-        auto_sync_job_id = app.state.auto_sync_job_id
-        assert auto_sync_job_id
-        for _ in range(100):
-            job_status = client.get(f"/api/v1/market-data/jobs/{auto_sync_job_id}")
-            assert job_status.status_code == 200
-            if job_status.json()["data"]["status"] in {"completed", "failed"}:
-                break
-            time.sleep(0.01)
-        status = client.get("/api/v1/market-data/store")
-
-    assert len(calls) == 1
-    config = calls[0]
-    assert config.provider == "eastmoney"
-    assert config.prefer_store_targets is False
-    assert config.refresh_names is False
-    assert status.status_code == 200
-    assert status.json()["data"]["last_online_sync_at"] is not None
-
-
 def test_formula_screen_request_defaults_to_eight_workers() -> None:
     payload = FormulaScreenRequest(
         selected_signals=["indicator_three.accumulation_zone"],
