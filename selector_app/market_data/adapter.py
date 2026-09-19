@@ -131,11 +131,15 @@ class DuckDbMarketDataAdapter:
                 last_date=ref.last_date,
                 last_close=ref.last_close,
             )
+            # 只导入了目录、没有 K 线的标的（债券/指数/基金经常是这样）既不能回测
+            # 也不能排序。把它们留在候选池里，全市场任务会为每一只做一次注定落空的
+            # 读库和指标查询——导入一次就可能让候选数从五千涨到一万七，回测随之超时。
             for ref in self._store.list_instruments(
                 market=market,
                 instrument_types=instrument_types,
                 boards=boards,
             )
+            if (ref.bar_count or 0) > 0
         ]
 
     def read_stock(self, ref: StockRef) -> pd.DataFrame:

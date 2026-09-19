@@ -42,6 +42,37 @@ def test_duckdb_adapter_lists_and_reads_instruments_without_vipdoc(tmp_path: Pat
     assert list(adapter.read_stock(ref)["close"]) == [10.5, 11.5]
 
 
+def _register_without_bars(store: DuckDbMarketDataStore, market: str, code: str) -> None:
+    """Insert an instrument row that has no ``daily_bars`` behind it.
+
+    This is what a catalog-only import leaves behind: the directory was read, so
+    the instrument exists, but no price series ever arrived.
+    """
+
+    with store._connect() as connection:
+        connection.execute(
+            """
+            INSERT INTO instruments (
+                market, code, name, instrument_type, board, bar_count, source_state, updated_at
+            ) VALUES (?, ?, ?, ?, ?, 0, 'active', now())
+            """,
+            [market, code, "空标的", "fund", "main"],
+        )
+
+
+def test_duckdb_adapter_skips_instruments_without_bars(tmp_path: Path) -> None:
+    """A catalog-only row cannot be backtested, so it must not reach the pool."""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _frame())
+    _register_without_bars(store, "SH", "510050")
+    adapter = DuckDbMarketDataAdapter(store)
+
+    assert [(item.market, item.code) for item in adapter.list_stock_refs("/unused", "all")] == [
+        ("SH", "600000")
+    ]
+
+
 def test_duckdb_adapter_custom_universe_uses_codes_from_file(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     store.replace_local_bars("SH", "600000", "stock", _frame())

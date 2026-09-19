@@ -551,19 +551,9 @@ def _write_snapshot(
     )
     symbol_rows: list[dict[str, object]] = []
     cursor = 0
-    full_fingerprints: dict[tuple[str, str], str] = {}
-    for ref_batch in _iter_ref_batches(refs):
-        if abort_check is not None and abort_check():
-            raise RuntimeError("策略实验已取消")
-        combined = selected_adapter.read_many_stocks(ref_batch)
-        if combined.empty:
-            del combined
-            continue
-        for key, group in combined.groupby(["market", "code"], sort=False):
-            prepared = PortfolioBacktestService._prepare_frame(group)
-            full_fingerprints[(str(key[0]), str(key[1]))] = frame_fingerprint(prepared)
-        del combined
-        gc.collect()
+    # 指纹取自"窗口 + 预热"这份 frame，跟组合回测读的是同一份。早先为了对齐"用全
+    # 历史复核"的回测，这里会先把全历史整读一遍来算指纹——多一次全市场扫描，而现在
+    # 回测本身也只读窗口，那份指纹反而是唯一对不上的东西。
     warmup_bars = _snapshot_warmup_bars()
     indicator_compute_started = time.perf_counter()
     if progress_callback is not None:
@@ -648,9 +638,6 @@ def _write_snapshot(
                     else False
                 )
             ref = ref_by_key[(cast(MarketCode, market), code)]
-            data_fingerprint = full_fingerprints.get((market, code))
-            if data_fingerprint is None:
-                data_fingerprint = frame_fingerprint(prepared)
             symbol_rows.append(
                 {
                     "market": market,
@@ -659,7 +646,7 @@ def _write_snapshot(
                     "board": str(classify_board(market, code) or getattr(ref, "board", "main")),
                     "offset": cursor,
                     "length": length,
-                    "data_fingerprint": data_fingerprint,
+                    "data_fingerprint": frame_fingerprint(prepared),
                 }
             )
             cursor = end

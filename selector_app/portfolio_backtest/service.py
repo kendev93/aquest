@@ -60,8 +60,11 @@ class PortfolioBacktestService(
 
         contexts: list[_StockSeries] = []
         failure_reasons: Counter[str] = Counter()
-        frames = self._batch_frames(refs)
-        parallel_contexts = frames is not None and len(refs) > 1
+        # 一次只装一批。曾经是整批读进来再慢慢算：全市场 5000 只 × 全历史常驻在内存里
+        # 是十几 GB，回测会把整个后端进程一起带下水（容器直接被 VM 回收，前端只看到
+        # 一句含糊的报错）。分批后峰值只跟批次大小有关，算完的批次可以立刻丢掉。
+        batched = self._supports_batch_frames()
+        parallel_contexts = batched and len(refs) > 1
         executor = (
             ThreadPoolExecutor(
                 max_workers=min(MAX_WORKERS, len(refs)),
@@ -73,6 +76,7 @@ class PortfolioBacktestService(
         try:
             for offset in range(0, len(refs), _CONTEXT_PRELOAD_CHUNK_SIZE):
                 chunk = refs[offset : offset + _CONTEXT_PRELOAD_CHUNK_SIZE]
+                frames = self._batch_frames(chunk, config) if batched else None
                 self._preload_indicator_cache(
                     {
                         (ref.market, ref.code): frames[(ref.market, ref.code)]

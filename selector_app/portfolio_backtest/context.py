@@ -16,6 +16,7 @@ from selector_app.formulas.custom import (
     custom_output_id,
     evaluate_custom_formula,
 )
+from selector_app.formulas.registry import FORMULA_REGISTRY
 from selector_app.formulas.types import FormulaResult
 from selector_app.indicators.cache import frame_fingerprint
 from selector_app.market_data.adapter import parse_universe_code
@@ -32,6 +33,15 @@ from .state import PortfolioMarketDataAdapter, _PortfolioServiceState
 _CONTEXT_PRELOAD_CHUNK_SIZE = 32
 DEFAULT_BASE_CONTEXT_CACHE_LIMIT = 256
 DEFAULT_DATE_INDEX_CACHE_LIMIT = 512
+
+#: How much history to load *before* the backtest window so rolling indicators
+#: have something to roll over. Without it every stock was loaded from its first
+#: ever bar - thousands of bars of indicator work for a few hundred days of
+#: backtest, which is why shortening the range never made a run any faster.
+_WARMUP_BARS = max(
+    (cast(int, item["recommended_bars"]) for item in FORMULA_REGISTRY.metadata()),
+    default=0,
+)
 
 
 class SortedDateIndex(Mapping[int, int]):
@@ -229,11 +239,25 @@ class PortfolioContextMixin(_PortfolioServiceState):
             data_fingerprint=data_fingerprint,
         )
 
-    def _batch_frames(self, refs: list[StockRef]) -> Mapping[tuple[str, str], pd.DataFrame] | None:
+    def _supports_batch_frames(self) -> bool:
+        """Whether the adapter can serve many instruments in one round trip."""
+
+        return getattr(self._adapter, "read_many_stocks", None) is not None
+
+    def _batch_frames(
+        self,
+        refs: list[StockRef],
+        config: PortfolioBacktestConfig,
+    ) -> Mapping[tuple[str, str], pd.DataFrame] | None:
         reader = getattr(self._adapter, "read_many_stocks", None)
         if reader is None:
             return None
-        combined = reader(refs)
+        combined = reader(
+            refs,
+            start_date=config.start_date,
+            end_date=config.end_date,
+            warmup_bars=_WARMUP_BARS if config.start_date is not None else 0,
+        )
         frames: dict[tuple[str, str], pd.DataFrame] = {}
         if combined.empty:
             return frames

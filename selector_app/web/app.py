@@ -157,7 +157,11 @@ def create_app(
         if portfolio_backtest_service is not None
         else PortfolioBacktestService(
             adapter=selected_adapter,
-            indicator_cache=selected_indicator_cache,
+            # 回测刻意不落库。它读的是"窗口 + 预热"，指纹随区间变化，缓存几乎必然
+            # 落空；而每次落空都会往库里写一份，8 个线程抢同一把写锁，实测比计算
+            # 本身贵三个数量级（计算 1.1 秒，写入 2356 秒 / 32 只）。不落库之后
+            # 重算反而是最便宜的那条路。
+            indicator_cache=IndicatorCache(max_memory_entries=512),
         ),
     )
     selected_discovery_service = cast(
