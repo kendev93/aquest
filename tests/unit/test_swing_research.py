@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import pandas as pd
@@ -19,6 +20,7 @@ from selector_app.swing_research import (
     atr_percent,
     split_swings,
 )
+from selector_app.swing_research import service as swing_service
 
 
 def _path(returns: Sequence[float], start_price: float = 10.0) -> list[float]:
@@ -310,3 +312,83 @@ def test_config_normalization_rejects_unusable_thresholds() -> None:
     normalized = SwingOverviewConfig(reversal_multiples=(3.0, 3.0, 2.0)).normalized()
 
     assert normalized.reversal_multiples == (3.0, 2.0)
+
+
+_GIB = 1024**3
+
+
+class _Usage(NamedTuple):
+    """Stand-in for ``shutil.disk_usage`` - only ``free`` is ever read."""
+
+    total: int
+    used: int
+    free: int
+
+
+@pytest.fixture
+def ample_resources(monkeypatch: pytest.MonkeyPatch):
+    """A machine with no shortage of anything, so the ceiling is the only wall."""
+
+    monkeypatch.setattr(
+        swing_service.shutil, "disk_usage", lambda _path: _Usage(500 * _GIB, 0, 500 * _GIB)
+    )
+    monkeypatch.setattr(swing_service, "_available_memory_bytes", lambda: 32 * _GIB)
+
+
+def test_panel_budget_allows_a_full_market_full_history_run(ample_resources) -> None:
+    """The case that used to be refused: ~5.5 GB of panel plus the labels."""
+
+    swing_service._check_panel_budget(6 * _GIB)
+
+
+def test_panel_budget_rejects_a_run_past_the_ceiling(
+    ample_resources, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(swing_service, "MAX_PANEL_BYTES", _GIB)
+
+    with pytest.raises(ValueError, match="超出上限"):
+        swing_service._check_panel_budget(2 * _GIB)
+
+
+def test_panel_budget_rejects_a_run_that_exceeds_free_ram(
+    ample_resources, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Disk is not the binding constraint - an 8 GB box cannot hold a 6 GB run."""
+
+    monkeypatch.setattr(swing_service, "_available_memory_bytes", lambda: 8 * _GIB)
+
+    with pytest.raises(ValueError, match="可用内存"):
+        swing_service._check_panel_budget(6 * _GIB)
+
+
+def test_panel_budget_honours_an_explicit_memory_override(
+    ample_resources, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(swing_service, "_available_memory_bytes", lambda: 8 * _GIB)
+    monkeypatch.setenv("SWING_PANEL_MAX_MEMORY_BYTES", str(20 * _GIB))
+
+    swing_service._check_panel_budget(6 * _GIB)
+
+
+def test_panel_budget_rejects_a_run_that_will_not_fit_on_disk(
+    ample_resources, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The panel is a real file: hearing it up front beats dying on ENOSPC."""
+
+    monkeypatch.setattr(
+        swing_service.shutil, "disk_usage", lambda _path: _Usage(total=0, used=0, free=_GIB)
+    )
+
+    with pytest.raises(ValueError, match="临时目录只剩"):
+        swing_service._check_panel_budget(2 * _GIB)
+
+
+def test_panel_budget_ignores_a_temp_root_it_cannot_stat(
+    ample_resources, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def boom(_path: str) -> _Usage:
+        raise OSError("no such temp root")
+
+    monkeypatch.setattr(swing_service.shutil, "disk_usage", boom)
+
+    swing_service._check_panel_budget(_GIB)

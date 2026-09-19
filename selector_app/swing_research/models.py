@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import date
 
@@ -77,10 +78,27 @@ class SwingOverviewConfig:
         )
 
 
-#: Rough ceiling on the temporary panel file. A full-market, full-history run
-#: would spill several gigabytes into /tmp; refusing early is friendlier than a
-#: half-written file and an out-of-space crash ten minutes in.
-MAX_PANEL_BYTES = 3 * 1024**3
+def _env_int(name: str, default: int) -> int:
+    """Read one environment override, ignoring anything that is not positive."""
+
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+#: Ceiling on the temporary panel file. The panel is a memmap on disk, not RAM,
+#: so this is a time guard more than a memory one: a full-market, full-history
+#: run needs ~5.5 GB and takes tens of minutes, and refusing only *after* it is
+#: half written would be far crueler than refusing up front. Sized to leave room
+#: for that worst case plus the labels; raise it with SWING_PANEL_MAX_BYTES if
+#: a machine has the disk and the patience for more.
+DEFAULT_MAX_PANEL_BYTES = 12 * 1024**3
+MAX_PANEL_BYTES = _env_int("SWING_PANEL_MAX_BYTES", DEFAULT_MAX_PANEL_BYTES)
 
 
 @dataclass(frozen=True)

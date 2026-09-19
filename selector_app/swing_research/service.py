@@ -55,6 +55,11 @@ _PANEL_FILL_WEIGHT = 6.0
 _SCORE_PAIR_WEIGHT = 0.00125
 PANEL_DTYPE = np.float32
 PANEL_DIR_PREFIX = "swing-panel-"
+#: How much free RAM a panel must leave for itself. The memmap's page cache, the
+#: resident label array and the float64 slice the scoring pass copies all sit on
+#: top of the file size, so peak memory is roughly twice ``required``. Measured
+#: the hard way: a 6 GB panel on an 8 GB container killed the backend.
+PANEL_MEMORY_SAFETY = 2
 #: A panel directory older than this can only be debris from a killed run.
 STALE_PANEL_SECONDS = 3600.0
 
@@ -76,6 +81,69 @@ def _clear_stale_panels() -> None:
                 shutil.rmtree(entry, ignore_errors=True)
         except OSError:
             continue
+
+
+def _available_memory_bytes() -> int | None:
+    """Free RAM as the kernel sees it, or None where that cannot be read."""
+
+    try:
+        with open("/proc/meminfo", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def _check_panel_budget(required: int) -> None:
+    """Refuse a run that cannot fit, naming the wall it hit.
+
+    Three different walls, and they need different advice.
+
+    ``MAX_PANEL_BYTES`` is our own ceiling: a request past it is not dangerous,
+    just slow enough that finishing was never the likely outcome. The free space
+    in the temp root is next - the panel is a real file, and discovering that
+    halfway through, as the run dies on ENOSPC, is much worse than hearing it up
+    front.
+
+    RAM is the one that bites. The panel is a memmap, but the kernel caches it,
+    the labels are a resident array, and scoring copies each slice into float64,
+    so peak memory runs well above the file size: a 6 GB panel on an 8 GB
+    container got the backend killed about five minutes in. Refusing before the
+    run beats taking the whole process down with it.
+    """
+
+    gib = 1024**3
+    if required > MAX_PANEL_BYTES:
+        raise ValueError(
+            f"面板需要 {required / gib:.1f} GB 临时空间，超出上限 "
+            f"{MAX_PANEL_BYTES / gib:.0f} GB；请缩短区间、减少股票数或"
+            "减少指标数量后重试"
+        )
+
+    raw = os.environ.get("SWING_PANEL_MAX_MEMORY_BYTES", "").strip()
+    memory_ceiling = int(raw) if raw.isdigit() else 0
+    if memory_ceiling == 0:
+        available = _available_memory_bytes()
+        memory_ceiling = available // PANEL_MEMORY_SAFETY if available is not None else 0
+    if memory_ceiling > 0 and required > memory_ceiling:
+        raise ValueError(
+            f"面板需要 {required / gib:.1f} GB，但当前可用内存 "
+            f"{memory_ceiling * PANEL_MEMORY_SAFETY / gib:.1f} GB 不足以安全容纳，"
+            "运行中很可能把后端拖垮；请减少股票数或缩短区间"
+            "（确要强行运行可设置 SWING_PANEL_MAX_MEMORY_BYTES）"
+        )
+
+    try:
+        free = shutil.disk_usage(gettempdir()).free
+    except OSError:  # pragma: no cover - a temp root we cannot stat is exotic
+        return
+    if required > free:
+        raise ValueError(
+            f"面板需要 {required / gib:.1f} GB 临时空间，但临时目录只剩 "
+            f"{free / gib:.1f} GB；请清理磁盘后重试"
+        )
 
 
 class SwingResearchService:
@@ -207,13 +275,13 @@ class SwingResearchService:
         with TemporaryDirectory(prefix=PANEL_DIR_PREFIX) as directory:
             path = os.path.join(directory, "panel.dat")
             shape = (len(value_ids), len(rows), calendar.size)
-            required = int(np.prod(shape)) * np.dtype(PANEL_DTYPE).itemsize
-            if required > MAX_PANEL_BYTES:
-                raise ValueError(
-                    f"面板需要 {required / 1024**3:.1f} GB 临时空间，超出上限 "
-                    f"{MAX_PANEL_BYTES / 1024**3:.0f} GB；请缩短区间、减少股票数或"
-                    "减少指标数量后重试"
-                )
+            cell = np.dtype(PANEL_DTYPE).itemsize
+            # The panel is a memmap, but the labels sit in RAM beside it, so a
+            # budget that only counted the file would understate what the run
+            # actually asks the machine for.
+            cells = int(np.prod(shape)) + len(resolved.labels) * len(rows) * calendar.size
+            required = cells * cell
+            _check_panel_budget(required)
             panel = np.memmap(path, dtype=PANEL_DTYPE, mode="w+", shape=shape)
             panel[:] = np.nan
             labels = np.full(
