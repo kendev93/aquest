@@ -162,3 +162,73 @@ def test_overview_rejects_unusable_thresholds(tmp_path: Path) -> None:
         )
 
     assert response.status_code == 400
+
+
+def _sse_events(body: str) -> list[dict[str, object]]:
+    import json as _json
+
+    return [
+        _json.loads(line[len("data: ") :])
+        for line in body.splitlines()
+        if line.startswith("data: ")
+    ]
+
+
+def test_indicator_study_stream_emits_progress_before_the_result(tmp_path: Path) -> None:
+    """The whole point of the stream: the bar moves while the work happens."""
+
+    store = _wide_store(tmp_path)
+
+    with TestClient(_app(store)) as client:
+        with client.stream(
+            "POST",
+            "/api/v1/swing-research/indicator-study/stream",
+            json={
+                "min_cross_section": 2,
+                "permutations": 10,
+                "horizon": 5,
+                "labels": ["up_onset_ahead", "down_onset_ahead"],
+            },
+        ) as response:
+            assert response.status_code == 200, response.text
+            assert response.headers["content-type"].startswith("text/event-stream")
+            # Without this nginx would buffer every event until the run ended.
+            assert response.headers.get("x-accel-buffering") == "no"
+            body = "".join(response.iter_text())
+
+    events = _sse_events(body)
+    assert events, body
+    kinds = [item["type"] for item in events]
+    assert kinds[-1] == "result"
+    assert kinds.count("result") == 1
+
+    progress = [item for item in events if item["type"] == "progress"]
+    assert progress, "进度条会一直停在 0"
+    steps = [int(str(item["current"])) for item in progress]
+    assert steps == sorted(steps)
+    assert steps[-1] == progress[-1]["total"], "结束时必须报到满格"
+    assert {item["stage"] for item in progress} & {
+        "正在扫描交易日",
+        "正在计算指标与切分波段",
+        "正在逐日横截面打分",
+    }
+    assert events[-1]["data"]["scanned_stocks"] == 4
+
+
+def test_indicator_study_stream_reports_errors_as_events(tmp_path: Path) -> None:
+    """The stream already answered 200, so a failure has to arrive as an event."""
+
+    store = _wide_store(tmp_path)
+
+    with TestClient(_app(store)) as client:
+        with client.stream(
+            "POST",
+            "/api/v1/swing-research/indicator-study/stream",
+            json={"value_ids": ["indicator_one.var1"]},
+        ) as response:
+            assert response.status_code == 200
+            body = "".join(response.iter_text())
+
+    events = _sse_events(body)
+    assert events[-1]["type"] == "error"
+    assert "不能用于波段研究" in str(events[-1]["detail"])

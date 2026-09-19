@@ -32,6 +32,26 @@ from .scoring import DEFAULT_SEED, IndicatorScore, annotate_significance, score_
 from .segments import atr_percent, split_swings
 
 ProgressCallback = Callable[[int, int], None] | None
+#: ``indicator_study`` reports ``(current, total, stage)``. The stage is what
+#: the UI prints; the two numbers are steps of one shared unit so a single bar
+#: can span "read the calendar", "fill the panel" and "score every day" without
+#: jumping backwards. Two passes over the stocks plus one step per
+#: indicator/label pair is the honest unit - the scoring pass is easily half the
+#: wall clock once permutations are involved, and a bar that stops at the panel
+#: would sit at 100% for that long.
+StudyProgressCallback = Callable[[int, int, str], None] | None
+#: One step per indicator/label pair while scoring.
+ScoreProgressCallback = Callable[[int], None] | None
+#: A calendar-scan step reads one stock's bars; a panel-fill step re-reads them
+#: with warm-up, computes every indicator and cuts the swings. Measured on a
+#: 1,000-stock / five-year run: 12.7s against 2.1s for the same number of steps.
+_PANEL_FILL_WEIGHT = 6.0
+#: Cost of one indicator/label pair, in scan-steps, per pass over the
+#: cross-section and per stock in it. Scoring is where the permutations live,
+#: so it scales with both. Also measured: 40 pairs over 1,000 stocks with 200
+#: permutations took 20.9s - more than half the run - while a bar built from
+#: step counts alone would have given it 2% of the width and sat there.
+_SCORE_PAIR_WEIGHT = 0.00125
 PANEL_DTYPE = np.float32
 PANEL_DIR_PREFIX = "swing-panel-"
 #: A panel directory older than this can only be debris from a killed run.
@@ -134,21 +154,52 @@ class SwingResearchService:
     def indicator_study(
         self,
         config: SwingIndicatorConfig,
-        progress_callback: ProgressCallback = None,
+        progress_callback: StudyProgressCallback = None,
     ) -> dict[str, object]:
         """Score every indicator against every requested swing label."""
+
+        def report(current: int, total: int, stage: str) -> None:
+            if progress_callback is not None:
+                progress_callback(min(current, total), total, stage)
 
         resolved = config.normalized()
         value_ids = self._resolve_value_ids(resolved)
         refs = self._list_refs(resolved)
+        # Progress is budgeted by measured cost, not by step count: the three
+        # passes have wildly different per-step prices, and a bar that charges
+        # them equally reaches 98% two thirds of the way through the wait.
+        ref_total = len(refs)
+        scan_units = float(ref_total)
+        fill_units = scan_units * _PANEL_FILL_WEIGHT
+        score_steps = max(len(value_ids) * len(resolved.labels), 1)
+        score_units = score_steps * max(
+            1.0, _SCORE_PAIR_WEIGHT * (1 + resolved.permutations) * ref_total
+        )
+        total_steps = max(int(round(scan_units + fill_units + score_units)), 1)
+
+        def panel_progress(current: int, _total: int) -> None:
+            if current <= ref_total:
+                done = float(current)
+                stage = "正在扫描交易日"
+            else:
+                done = scan_units + (current - ref_total) * _PANEL_FILL_WEIGHT
+                stage = "正在计算指标与切分波段"
+            report(int(round(done)), total_steps, stage)
+
+        def score_progress(done: int) -> None:
+            earned = scan_units + fill_units + (done / score_steps) * score_units
+            report(int(round(earned)), total_steps, "正在逐日横截面打分")
+
         empty = _empty_study_payload(resolved, value_ids, stock_count=len(refs))
         if not refs or not value_ids:
             empty["reason"] = "没有可研究的股票或指标"
+            report(total_steps, total_steps, "没有可研究的对象")
             return empty
 
-        calendar, rows = self._scan_calendar(refs, resolved, progress_callback)
+        calendar, rows = self._scan_calendar(refs, resolved, panel_progress)
         if calendar.size == 0 or not rows:
             empty["reason"] = "选定区间内没有任何日线数据"
+            report(total_steps, total_steps, "区间内没有数据")
             return empty
 
         _clear_stale_panels()
@@ -178,15 +229,20 @@ class SwingResearchService:
                     rows,
                     panel,
                     labels,
-                    progress_callback,
+                    panel_progress,
                 )
-                scores = self._score_panel(panel, labels, resolved, value_ids)
+                scores = self._score_panel(
+                    panel, labels, resolved, value_ids, score_progress
+                )
             finally:
                 del panel
 
         if filled == 0:
             empty["reason"] = "没有股票能同时在区间内提供指标与波段标签"
+            report(total_steps, total_steps, "没有可用的样本")
             return empty
+
+        report(total_steps, total_steps, "正在整理结论")
 
         scores = annotate_significance(scores, alpha=resolved.alpha)
         ordered = sorted(
@@ -339,9 +395,11 @@ class SwingResearchService:
         labels: np.ndarray,
         config: SwingIndicatorConfig,
         value_ids: tuple[str, ...],
+        progress_callback: ScoreProgressCallback = None,
     ) -> list[IndicatorScore]:
         catalog = default_indicator_catalog()
         scores: list[IndicatorScore] = []
+        done = 0
         for value_index, value_id in enumerate(value_ids):
             matrix = np.asarray(panel[value_index], dtype=float)
             for label_index, label in enumerate(config.labels):
@@ -359,6 +417,9 @@ class SwingResearchService:
                         alpha=config.alpha,
                     )
                 )
+                done += 1
+                if progress_callback is not None:
+                    progress_callback(done)
         return scores
 
     def _list_refs(self, config: SwingOverviewConfig | SwingIndicatorConfig) -> list[StockRef]:

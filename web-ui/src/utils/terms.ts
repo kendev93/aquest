@@ -98,4 +98,53 @@ export const TERMS: Record<string, TermDefinition> = {
       '检验的做法是把交易结果随机打乱再挖一遍，看纯运气能把提升推到多高，用那个数当门槛。' +
       '次数越多门槛越稳，但每次大约要多花挖掘耗时的十分之一；填 0 表示不检验，结果里就不显示显著性。',
   },
+  swingThreshold: {
+    name: '波段阈值',
+    english: 'Reversal multiple（× ATR）',
+    intro:
+      '一段行情要从高点回撤多少个 ATR 才算换了一个方向。阈值取 3 表示回撤 3 倍 ATR 就认为上一段结束、新的反向段开始。' +
+      '阈值越大切出的段越少、每段走得越远；太小会把日常震荡也算成波段。',
+  },
+  swingLabel: {
+    name: '波段标签',
+    english: 'Swing label',
+    intro:
+      '给每个交易日打的是/否标记。「段起点」是事后归因：回头看才知道那天是底部，当时看不出来；' +
+      '「近期将启动」是当天就能算出来的：未来若干天内会不会走出一段。只有后者能直接拿去交易。',
+  },
+  noiseFloor: {
+    name: '噪声门槛',
+    english: 'IC noise floor / permutation threshold',
+    intro:
+      '把日期顺序打乱后重算信息系数，纯运气能得到的最大值就是门槛。' +
+      '平均信息系数要超过它，且经过多重检验校正，才认为这个指标真的有预测力。',
+  },
+  falseDiscovery: {
+    name: '假发现率校正',
+    english: 'Benjamini-Hochberg FDR（q 值）',
+    intro:
+      '同时检验几十个「指标 × 标签」组合，就算全是噪声也会有幾個看起来显著。' +
+      '这里按假发现率把 p 值校正成 q 值：q < 0.05 表示这批结论里错误的最多占 5%。',
+  },
+  blockPermutation: {
+    name: '分块置换',
+    english: 'Block permutation',
+    intro:
+      '打乱数据时按连续的交易日整块搬动，而不是逐日打乱。' +
+      '因为相邻几天的行情高度相关，逐日打乱会低估噪声、把运气误判成本事。',
+  },
+  thresholdHint: {
+    name: '阈值提示',
+    english: 'Threshold hint',
+    intro:
+      '每个交易日把全部股票按这个指标排序，取第 80 百分位的数值，再对所有交易日取中位数。' +
+      '它只是「从哪里开始试」的起点，会随行情强弱漂移，不能直接当成固定参数。',
+  },
+  tradeable: {
+    name: '可交易',
+    english: 'Tradable / observable in real time',
+    intro:
+      '标记这条结论当天能不能真的判断出来。「近期将启动」当天就算得出来，可以直接用；' +
+      '「段起点」只有事后才知道，拿它做条件回测不会偷看未来，但它并不保证那段涨幅能兑现。',
+  },
 }

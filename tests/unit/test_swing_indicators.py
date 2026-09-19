@@ -367,3 +367,47 @@ def test_indicator_study_window_moves_with_start_date() -> None:
 
     assert early["date_range"]["days"] > late["date_range"]["days"]
     assert late["date_range"]["end"] <= "2023-07-01"
+
+
+def test_indicator_study_progress_covers_every_stage() -> None:
+    """The UI draws one bar across three passes, so none may be silent.
+
+    The scoring pass is the one that matters: it runs the permutations, and a
+    bar that stopped when the panel was full would sit at 100% for the second
+    half of the wait.
+    """
+
+    rng = np.random.default_rng(21)
+    frames = _market(rng, count=24, length=520)
+    service = SwingResearchService(_FakeAdapter(frames))
+    events: list[tuple[int, int, str]] = []
+
+    service.indicator_study(
+        SwingIndicatorConfig(
+            start_date=date(2023, 6, 1),
+            min_cross_section=10,
+            permutations=20,
+            batch_size=12,
+        ),
+        progress_callback=lambda current, total, stage: events.append(
+            (current, total, stage)
+        ),
+    )
+
+    assert events
+    totals = {total for _, total, _ in events}
+    assert len(totals) == 1, "进度总量中途变了，进度条会跳回去"
+    total = events[0][1]
+
+    steps = [current for current, _, _ in events]
+    assert steps == sorted(steps), "进度必须单调不减"
+    assert steps[0] < total
+    assert steps[-1] == total, "结束时必须报到满格"
+
+    stages = [stage for _, _, stage in events]
+    assert "正在扫描交易日" in stages
+    assert "正在计算指标与切分波段" in stages
+    assert "正在逐日横截面打分" in stages
+    # 打分必须在填面板之后开始，否则两个阶段会互相穿插。
+    first_score = stages.index("正在逐日横截面打分")
+    assert "正在计算指标与切分波段" in stages[:first_score]

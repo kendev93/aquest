@@ -33,6 +33,10 @@ vi.mock('./pages/StrategyFitnessPage.vue', () => ({
   default: { name: 'StrategyFitnessPage', template: '<main>策略适配性</main>' },
 }))
 
+vi.mock('./pages/SwingResearchPage.vue', () => ({
+  default: { name: 'SwingResearchPage', template: '<main>波段研究</main>' },
+}))
+
 describe('App navigation', () => {
   beforeEach(() => {
     window.history.replaceState({}, '', '/indicator-lab')
@@ -66,5 +70,14 @@ describe('App navigation', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('买卖条件研究')
+  })
+
+  it('opens the swing research section on its own route', async () => {
+    const wrapper = mount(App)
+    window.history.pushState({}, '', '/swing-research')
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('波段研究')
   })
 })

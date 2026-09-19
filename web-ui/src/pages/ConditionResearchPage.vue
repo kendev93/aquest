@@ -34,6 +34,7 @@ import type {
   ValueDefinition,
 } from '../types'
 import { parseStoredRuleGroup, valueOptionLabel } from '../utils/formulaScreen'
+import { consumeSwingPlan } from '../utils/swingHandoff'
 import { formatChinaTimestamp } from '../utils/time'
 
 function emptyRule(): RuleGroupPayload {
@@ -952,10 +953,35 @@ function apiMessage(error: unknown): string {
     : '买卖条件研究失败，请检查行情数据和配置后重试。'
 }
 
+/**
+ * 从波段研究页带过来的结论：只把买卖规则和排序建议落到表单里，
+ * 阈值本身不算数 —— 本页会在训练/验证/留出三段上重新搜索。
+ */
+function applySwingPlan(): void {
+  const plan = consumeSwingPlan()
+  if (!plan) return
+  if (plan.buy_rule) {
+    form.buyRule = plan.buy_rule
+    alwaysInMarket.value = false
+  }
+  if (plan.sell_rule) {
+    form.sellRule = plan.sell_rule
+    holdToEnd.value = false
+  }
+  if (plan.ranking) {
+    rankingValue.value = plan.ranking.value
+    rankingOrder.value = plan.ranking.order
+  }
+  message.value =
+    '已带入波段研究的结论。阈值只是起点，研究会在自己的三段数据上重新搜索；' +
+    '排序建议同样以本页按实际收益率的评估为准。'
+}
+
 onMounted(async () => {
   try {
     metadata.value = await fetchMetadata()
     resetRules()
+    applySwingPlan()
     await loadHistory()
     await resumeActiveJob()
   } catch (error) {
@@ -978,6 +1004,7 @@ onMounted(async () => {
         <a class="nav-link active" href="/condition-research" aria-current="page">买卖条件研究</a>
         <a class="nav-link" href="/strategy-fitness">策略适配性</a>
         <a class="nav-link" href="/market-data">本地行情</a>
+        <a class="nav-link" href="/swing-research">波段研究</a>
       </nav>
       <div class="topbar-status"><span class="status-dot" aria-hidden="true"></span> 本地数据模式</div>
     </header>

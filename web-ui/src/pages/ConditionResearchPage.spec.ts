@@ -7,6 +7,7 @@ import ConditionResearchPage from './ConditionResearchPage.vue'
 import * as researchApi from '../api/conditionResearch'
 import * as formulaApi from '../api/formulaScreen'
 import * as jobsApi from '../api/jobs'
+import { SWING_PLAN_STORAGE_KEY } from '../utils/swingHandoff'
 
 vi.mock('../api/formulaScreen', async () => {
   const actual = await vi.importActual<typeof import('../api/formulaScreen')>('../api/formulaScreen')
@@ -1010,5 +1011,45 @@ describe('ConditionResearchPage', () => {
     const title = wrapper.get('[data-testid="top-n-rate-sell-1"]').attributes('title') ?? ''
     expect(title).toContain('卖出是触发式的')
     expect(title).not.toContain('没有解析出排序指标')
+  })
+
+  it('takes over the rules the swing research page handed over', async () => {
+    // 波段研究给的阈值只是起点，带过来后本页仍会在自己的三段数据上重新搜索。
+    sessionStorage.setItem(SWING_PLAN_STORAGE_KEY, JSON.stringify({
+      buy_rule: {
+        signals: [],
+        conditions: [{
+          left_value: 'indicator.score',
+          operator: 'lte',
+          right_value: null,
+          right_constant: -0.273902,
+        }],
+        required_conditions: [],
+        combine_mode: 'all',
+        minimum_matches: null,
+      },
+      sell_rule: null,
+      ranking: { value: 'indicator.score', order: 'asc', display_name: '强度' },
+    }))
+
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('已带入波段研究的结论')
+    expect(sessionStorage.getItem(SWING_PLAN_STORAGE_KEY)).toBeNull()
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(researchApi.createConditionResearch).toHaveBeenCalledWith(expect.objectContaining({
+      buy_rule: expect.objectContaining({
+        conditions: [expect.objectContaining({
+          left_value: 'indicator.score',
+          operator: 'lte',
+          right_constant: -0.273902,
+        })],
+      }),
+      ranking_value: 'indicator.score',
+      rank_order: 'asc',
+    }))
   })
 })

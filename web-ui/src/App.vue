@@ -7,6 +7,7 @@ import MarketDataPage from './pages/MarketDataPage.vue'
 import PortfolioBacktestPage from './pages/PortfolioBacktestPage.vue'
 import StrategyDiscoveryPage from './pages/StrategyDiscoveryPage.vue'
 import StrategyFitnessPage from './pages/StrategyFitnessPage.vue'
+import SwingResearchPage from './pages/SwingResearchPage.vue'
 
 const currentPath = ref(typeof window !== 'undefined' ? window.location.pathname : '/indicator-lab')
 
@@ -14,6 +15,7 @@ const routeComponent = computed(() => {
   const pathname = currentPath.value
   if (pathname.startsWith('/market-data')) return MarketDataPage
   if (pathname.startsWith('/condition-research')) return ConditionResearchPage
+  if (pathname.startsWith('/swing-research')) return SwingResearchPage
   if (pathname.startsWith('/strategy-fitness')) return StrategyFitnessPage
   if (pathname.startsWith('/strategy-lab') || pathname.startsWith('/strategy-discovery')) {
     return StrategyDiscoveryPage
