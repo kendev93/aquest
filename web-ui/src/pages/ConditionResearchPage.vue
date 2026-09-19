@@ -1505,7 +1505,7 @@ onMounted(async () => {
                           @change="toggleCandidate(candidate.candidate_id)"
                         >
                       </td>
-                      <td>{{ candidate.side === 'buy' ? '买入过滤' : '卖出触发' }}</td>
+                      <td class="condition-side">{{ candidate.side === 'buy' ? '买入过滤' : '卖出触发' }}</td>
                       <td class="condition-rule">{{ conditionText(candidate) }}</td>
                       <td>{{ candidate.mining.support_count }} / {{ candidate.mining.instrument_count }}</td>
                       <td :data-testid="'mining-lift-' + candidate.candidate_id">
@@ -1528,7 +1528,7 @@ onMounted(async () => {
                       <td>{{ formatPercent(candidate.validation.per_stock.improved_stock_ratio) }}</td>
                       <td>{{ formatNumber(candidate.validation.pooled_trades.payoff_ratio) }}</td>
                       <td>{{ formatPercent(candidate.holdout?.pooled_trades.win_rate) }}</td>
-                      <td>
+                      <td class="condition-status">
                         <span :class="candidate.passed_constraints ? 'positive' : 'muted-code'">{{ constraintText(candidate) }}</span>
                         <button
                           v-if="candidate.full_period"
@@ -1723,6 +1723,17 @@ onMounted(async () => {
   min-width: 180px;
   font-family: var(--font-mono, monospace);
   font-size: 0.85rem;
+}
+
+/* 候选表 14 列，全局 table 的 min-width=720px 远远不够：中文可以在任意
+   字符间断行，auto 布局会把「状态」「方向」压到一字宽、每字一行。
+   给这两列明确的最小宽度，放不下的部分交给 .table-wrap 横向滚动。 */
+.condition-side {
+  white-space: nowrap;
+}
+
+.condition-status {
+  min-width: 240px;
 }
 
 .condition-stock-details {
