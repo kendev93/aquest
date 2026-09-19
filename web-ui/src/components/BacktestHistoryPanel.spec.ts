@@ -68,4 +68,47 @@ describe('BacktestHistoryPanel', () => {
     expect(wrapper.text()).toContain('浦发银行（SH 600000）')
     expect(wrapper.text()).toContain('平安银行（SZ 000001）')
   })
+
+  it('renders core performance metrics when the summary carries them', () => {
+    const wrapper = mount(BacktestHistoryPanel, {
+      props: {
+        items: [{
+          ...item,
+          summary: {
+            ...item.summary,
+            performance: {
+              total_return: 0.1234,
+              annual_return: 0.0812,
+              max_drawdown: 0.052,
+              sharpe: 1.234,
+              win_rate: 0.55,
+            },
+          },
+        }],
+        testid: 'portfolio-history-panel',
+        title: '历史组合回测',
+        emptyText: '暂无历史组合回测。',
+      },
+    })
+
+    expect(wrapper.text()).toContain('绩效')
+    expect(wrapper.text()).toContain('12.34%')
+    expect(wrapper.text()).toContain('8.12%')
+    expect(wrapper.text()).toContain('5.20%')
+    expect(wrapper.text()).toContain('1.23')
+    expect(wrapper.text()).toContain('55.00%')
+  })
+
+  it('falls back to a dash when a row has no performance block', () => {
+    const wrapper = mount(BacktestHistoryPanel, {
+      props: {
+        items: [item],
+        testid: 'history-panel',
+        title: '历史回测',
+        emptyText: '暂无历史回测。',
+      },
+    })
+
+    expect(wrapper.text()).not.toContain('绩效')
+  })
 })

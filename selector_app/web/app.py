@@ -157,11 +157,10 @@ def create_app(
         if portfolio_backtest_service is not None
         else PortfolioBacktestService(
             adapter=selected_adapter,
-            # 回测刻意不落库。它读的是"窗口 + 预热"，指纹随区间变化，缓存几乎必然
-            # 落空；而每次落空都会往库里写一份，8 个线程抢同一把写锁，实测比计算
-            # 本身贵三个数量级（计算 1.1 秒，写入 2356 秒 / 32 只）。不落库之后
-            # 重算反而是最便宜的那条路。
-            indicator_cache=IndicatorCache(max_memory_entries=512),
+            # 回测读缓存但不写缓存。缓存键现在是标的级数据版本、存的是全历史，
+            # 所以窗口请求能命中预计算出来的结果；写入则留给预计算任务单线程
+            # 批量做——8 个线程抢同一把写锁实测比计算贵三个数量级。
+            indicator_cache=IndicatorCache(selected_store, max_memory_entries=512),
         ),
     )
     selected_discovery_service = cast(

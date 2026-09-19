@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from 'vue'
 import type { BacktestHistorySummary } from '../types'
 import { formatChinaTimestamp } from '../utils/time'
 
@@ -70,6 +71,31 @@ function dateRange(item: BacktestHistorySummary): string {
   if (typeof start === 'string' && typeof end === 'string') return `${start} → ${end}`
   return '区间未记录'
 }
+
+function performanceOf(item: BacktestHistorySummary): Record<string, unknown> | null {
+  const performance = item.summary.performance
+  if (!performance || typeof performance !== 'object') return null
+  return performance as Record<string, unknown>
+}
+
+function metricValue(item: BacktestHistorySummary, key: string): number | null {
+  const performance = performanceOf(item)
+  if (!performance) return null
+  const value = performance[key]
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function formatPercent(value: number | null): string {
+  if (value === null) return '—'
+  return `${(value * 100).toFixed(2)}%`
+}
+
+function formatNumber(value: number | null, digits = 2): string {
+  if (value === null) return '—'
+  return value.toFixed(digits)
+}
+
+const showPerformanceColumn = computed(() => props.items.some((item) => performanceOf(item) !== null))
 </script>
 
 <template>
@@ -83,11 +109,21 @@ function dateRange(item: BacktestHistorySummary): string {
     <div v-else class="table-wrap">
       <table>
         <caption class="sr-only">{{ props.title }}</caption>
-        <thead><tr><th>实验/回测</th><th>数据区间</th><th>开始时间</th><th>结束时间</th><th>耗时</th><th>操作</th></tr></thead>
+        <thead><tr><th>实验/回测</th><th>数据区间</th><th v-if="showPerformanceColumn">绩效</th><th>开始时间</th><th>结束时间</th><th>耗时</th><th>操作</th></tr></thead>
         <tbody>
           <tr v-for="item in props.items" :key="item.history_id">
             <td><strong class="code">{{ summaryLabel(item) }}</strong><small class="history-id">{{ item.history_id }}</small></td>
             <td class="muted-code">{{ dateRange(item) }}</td>
+            <td v-if="showPerformanceColumn">
+              <div v-if="performanceOf(item)" class="history-metrics">
+                <span>收益<strong :class="{ positive: (metricValue(item, 'total_return') ?? 0) >= 0, negative: (metricValue(item, 'total_return') ?? 0) < 0 }">{{ formatPercent(metricValue(item, 'total_return')) }}</strong></span>
+                <span>年化<strong :class="{ positive: (metricValue(item, 'annual_return') ?? 0) >= 0, negative: (metricValue(item, 'annual_return') ?? 0) < 0 }">{{ formatPercent(metricValue(item, 'annual_return')) }}</strong></span>
+                <span>回撤<strong class="negative">{{ formatPercent(metricValue(item, 'max_drawdown')) }}</strong></span>
+                <span>夏普<strong>{{ formatNumber(metricValue(item, 'sharpe')) }}</strong></span>
+                <span>胜率<strong>{{ formatPercent(metricValue(item, 'win_rate')) }}</strong></span>
+              </div>
+              <span v-else class="muted-code">—</span>
+            </td>
             <td class="muted-code">{{ formatTimestamp(item.started_at) }}</td>
             <td class="muted-code">{{ formatTimestamp(item.finished_at) }}</td>
             <td>{{ formatDuration(item.duration_seconds) }}</td>

@@ -23,11 +23,9 @@ logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[int, int], None]
 _PRECOMPUTE_CHUNK_SIZE = 32
-# Loading every bar for every instrument is an optional cache-warming task.  A
-# large store should remain available for online sync and normal queries even
-# when warming it would temporarily require several copies of the data in
-# memory.
-PRECOMPUTE_MAX_BARS = 2_000_000
+# 分批加载之后总根数不再是内存风险（每批只留 32 只的行情在内存里），
+# 这个上限只是避免小机器上的同步任务被一轮全量预热拖太久。
+PRECOMPUTE_MAX_BARS = 20_000_000
 
 
 def should_defer_precompute(
@@ -117,7 +115,6 @@ class IndicatorPrecomputeService:
             instrument_types=instrument_types,
             boards=boards,
         )
-        frames = self._batch_frames(refs)
         formula_ids = self._registry.all_formula_ids()
         minimum_bars = {
             formula_id: self._registry.formula(formula_id).minimum_bars
@@ -137,6 +134,9 @@ class IndicatorPrecomputeService:
 
         for offset in range(0, len(refs), _PRECOMPUTE_CHUNK_SIZE):
             batch = refs[offset : offset + _PRECOMPUTE_CHUNK_SIZE]
+            # 每批只把这一批的行情读进内存，算完即弃；一次性读全市场全历史
+            # 会把峰值内存顶到十几 GB。
+            frames = self._batch_frames(batch)
             prepared: dict[tuple[str, str], pd.DataFrame] = {}
             empty: set[tuple[str, str]] = set()
             failed: set[tuple[str, str]] = set()

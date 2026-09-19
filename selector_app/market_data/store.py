@@ -362,6 +362,15 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
     ) -> list[dict[str, object]]:
         return self._indicator_cache.read_indicator_caches_batch(keys)
 
+    def data_revisions(
+        self,
+        refs: Iterable[tuple[str, str]] | None = None,
+    ) -> dict[tuple[str, str], str]:
+        return self._indicator_cache.data_revisions(refs)
+
+    def data_revision(self, market: str, code: str) -> str | None:
+        return self._indicator_cache.data_revision(market, code)
+
     def read_custom_indicator_cache(
         self,
         *,

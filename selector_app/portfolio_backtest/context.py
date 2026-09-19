@@ -371,11 +371,14 @@ class PortfolioContextMixin(_PortfolioServiceState):
             )
         formula_ids = self._formula_ids_for_config(config)
         if self._indicator_cache is not None:
+            # 只读：回测请求的是窗口，写回缓存只会留下无法复用的碎片，
+            # 而且每个线程都要抢同一把写锁。
             return self._indicator_cache.get_or_compute(
                 frame,
                 formula_ids,
                 market=market,
                 code=code,
+                persist=False,
             )
         return {
             formula_id: self._registry.formula(formula_id).calculate(frame.copy(deep=True))

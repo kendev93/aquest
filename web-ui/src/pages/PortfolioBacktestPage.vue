@@ -1024,6 +1024,7 @@ watch(() => form.formulaText, (value) => {
             <div v-if="replayComparison" class="replay-comparison" data-testid="portfolio-replay-comparison"><strong>候选复核 {{ replayComparison.candidateHash.slice(0, 12) }}</strong><span>成交记录：{{ replayComparison.tradeRecords }}</span><span>绩效摘要：{{ replayComparison.performance }}</span><span>数据指纹：{{ replayComparison.dataFingerprint }}</span></div>
             <div class="metrics-strip portfolio-metrics">
               <div><span>总收益</span><strong :class="{ positive: (performanceValue('total_return') ?? 0) >= 0, negative: (performanceValue('total_return') ?? 0) < 0 }" data-testid="portfolio-total-return">{{ formatPercent(performanceValue('total_return')) }}</strong></div>
+              <div><span>年化收益</span><strong :class="{ positive: (performanceValue('annual_return') ?? 0) >= 0, negative: (performanceValue('annual_return') ?? 0) < 0 }" data-testid="portfolio-annual-return">{{ formatPercent(performanceValue('annual_return')) }}</strong></div>
               <div><span>最大回撤</span><strong class="negative">{{ formatPercent(performanceValue('max_drawdown')) }}</strong></div>
               <div><span>夏普</span><strong>{{ formatNumber(performanceValue('sharpe')) }}</strong></div>
               <div><span>成交笔数</span><strong>{{ formatNumber(performanceValue('total_trades'), 0) }}</strong></div>

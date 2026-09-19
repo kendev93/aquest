@@ -18,6 +18,62 @@ class DuckDbIndicatorCacheStore:
     def __init__(self, store: _DuckDbStoreBase) -> None:
         self._store = store
 
+    def data_revisions(
+        self,
+        refs: Iterable[tuple[str, str]] | None = None,
+    ) -> dict[tuple[str, str], str]:
+        """Per-instrument data revision used to invalidate cached indicators.
+
+        A revision changes whenever the stored bar series for one instrument
+        changes, which is exactly the granularity an indicator cache needs.  It
+        deliberately ignores the requested window so a full-history cache entry
+        can serve any shorter request.
+        """
+
+        wanted = (
+            {(str(market).strip().upper(), str(code).strip()) for market, code in refs}
+            if refs is not None
+            else None
+        )
+        if wanted is not None and not wanted:
+            return {}
+        try:
+            with self._store._connect(read_only=True) as connection:
+                rows = connection.execute(
+                    """
+                    SELECT market, code, bar_count, last_date, updated_at
+                    FROM instruments
+                    """
+                ).fetchall()
+        except duckdb.CatalogException:
+            return {}
+        revisions: dict[tuple[str, str], str] = {}
+        for market, code, bar_count, last_date, updated_at in rows:
+            key = (str(market).strip().upper(), str(code).strip())
+            if wanted is not None and key not in wanted:
+                continue
+            revisions[key] = _revision_text(bar_count, last_date, updated_at)
+        return revisions
+
+    def data_revision(self, market: str, code: str) -> str | None:
+        """Return the data revision of a single instrument."""
+
+        try:
+            with self._store._connect(read_only=True) as connection:
+                row = connection.execute(
+                    """
+                    SELECT bar_count, last_date, updated_at
+                    FROM instruments
+                    WHERE market = ? AND code = ?
+                    """,
+                    [str(market).strip().upper(), str(code).strip()],
+                ).fetchone()
+        except duckdb.CatalogException:
+            return None
+        if row is None:
+            return None
+        return _revision_text(row[0], row[1], row[2])
+
     def read_indicator_cache(
         self,
         *,
@@ -540,3 +596,13 @@ class DuckDbIndicatorCacheStore:
                 )
             ),
         }
+
+
+def _revision_text(bar_count: object, last_date: object, updated_at: object) -> str:
+    """Render one instrument's data revision as a stable comparable string."""
+
+    try:
+        count = int(cast(int, bar_count))
+    except (TypeError, ValueError):
+        count = 0
+    return f"{count}|{last_date}|{updated_at}"

@@ -9,7 +9,7 @@ import time
 from collections import OrderedDict, deque
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from threading import RLock
 from typing import cast
 
@@ -42,7 +42,10 @@ class _CacheKey:
     price_basis: str
     formula_id: str
     formula_version: str
-    data_fingerprint: str
+    # 标的级数据版本号（不是传入 frame 的哈希）。同一个标的无论请求哪个
+    # 时间窗口都得到同一个版本号，缓存里存的是全历史序列，读取时按长度
+    # 从尾部切片。落库时仍写进 data_fingerprint 列（沿用旧列名，避免迁移）。
+    data_revision: str
 
 
 @dataclass(frozen=True)
@@ -54,7 +57,7 @@ class _CustomCacheKey:
     formula_hash: str
     parameter_hash: str
     engine_version: str
-    data_fingerprint: str
+    data_revision: str
 
 
 def frame_fingerprint(frame: pd.DataFrame) -> str:
@@ -101,6 +104,52 @@ def _date_bounds(frame: pd.DataFrame) -> tuple[date | None, date | None]:
     if dates.isna().any():
         raise ValueError("行情数据包含无效日期")
     return dates.iloc[0].date(), dates.iloc[-1].date()
+
+
+def _tail_slice(result: FormulaResult, length: int) -> FormulaResult | None:
+    """Return the trailing `length` bars of a cached full-history result."""
+
+    if length <= 0 or result.data_length < length:
+        return None
+    if result.data_length == length:
+        return result
+    values = {name: np.asarray(value)[length * -1 :] for name, value in result.values.items()}
+    signals = {name: np.asarray(value)[length * -1 :] for name, value in result.signals.items()}
+    return FormulaResult.build(
+        formula_id=result.formula_id,
+        display_name=result.display_name,
+        minimum_bars=result.minimum_bars,
+        recommended_bars=result.recommended_bars,
+        data_length=length,
+        values=values,
+        signals=signals,
+    )
+
+
+def _row_ends_at(row: Mapping[str, object], end: date | None) -> bool:
+    """Whether a cached full-history row ends on the requested last date."""
+
+    if end is None:
+        return False
+    row_end = row.get("data_end")
+    if isinstance(row_end, date) and not isinstance(row_end, datetime):
+        return row_end == end
+    if isinstance(row_end, str) and row_end:
+        try:
+            return date.fromisoformat(row_end) == end
+        except ValueError:
+            return False
+    return False
+
+
+def _revision_bar_count(revision: str) -> int | None:
+    """Extract the stored bar count from a revision, if it has one."""
+
+    head = revision.split("|", 1)[0]
+    try:
+        return int(head)
+    except ValueError:
+        return None
 
 
 def _serialize_arrays(
@@ -163,6 +212,7 @@ class IndicatorCache:
         self._registry = registry or FORMULA_REGISTRY
         self._memory: OrderedDict[_CacheKey | _CustomCacheKey, FormulaResult] = OrderedDict()
         self._max_memory_entries = max_memory_entries
+        self._revisions: dict[tuple[str, str], str] = {}
         self._lock = RLock()
         self._hits = 0
         self._misses = 0
@@ -178,6 +228,47 @@ class IndicatorCache:
 
         with self._lock:
             self._memory.clear()
+            self._revisions.clear()
+
+    def warm_revisions(self, refs: Iterable[tuple[str, str]]) -> None:
+        """Pre-fetch per-instrument data revisions in one store round-trip."""
+
+        if self._store is None:
+            return
+        pending = [
+            (str(market).strip().upper(), str(code).strip())
+            for market, code in refs
+            if (str(market).strip().upper(), str(code).strip()) not in self._revisions
+        ]
+        if not pending:
+            return
+        try:
+            fetched = self._store.data_revisions(pending)
+        except (AttributeError, RuntimeError, OSError):
+            return
+        with self._lock:
+            self._revisions.update(fetched)
+
+    def _revision(self, market: str, code: str, frame: pd.DataFrame) -> str:
+        """Resolve the revision identifying one instrument's bar series."""
+
+        key = (market.strip().upper(), code.strip())
+        with self._lock:
+            cached = self._revisions.get(key)
+        if cached is not None:
+            return cached
+        revision: str | None = None
+        if self._store is not None and key[0] and key[1]:
+            try:
+                revision = self._store.data_revision(key[0], key[1])
+            except (AttributeError, RuntimeError, OSError):
+                revision = None
+        if not revision:
+            # 拿不到版本号时退化为帧指纹：缓存退回"同一窗口才命中"，结果仍然正确。
+            return frame_fingerprint(frame)
+        with self._lock:
+            self._revisions[key] = revision
+        return revision
 
     def get_or_compute_custom(
         self,
@@ -215,11 +306,12 @@ class IndicatorCache:
         """Load or calculate a custom formula for one resolved parameter set."""
 
         parameters = resolve_formula_parameters(parsed, parameter_values)
-        fingerprint = frame_fingerprint(frame)
+        revision = self._revision(market, code, frame)
         normalized_market = market.strip().upper()
         normalized_code = code.strip()
         price_basis = _price_basis(frame)
         start, end = _date_bounds(frame)
+        target_length = len(frame)
         parameter_json = json.dumps(
             parameters,
             ensure_ascii=False,
@@ -235,16 +327,22 @@ class IndicatorCache:
             formula_hash=_formula_hash(parsed),
             parameter_hash=hashlib.sha256(parameter_json.encode("utf-8")).hexdigest(),
             engine_version=_CUSTOM_ENGINE_VERSION,
-            data_fingerprint=fingerprint,
+            data_revision=revision,
         )
-        result = self._memory_get(key)
-        if result is not None:
-            return {"custom": result}
+        cached = self._memory_get(key)
+        sliced = _tail_slice(cached, target_length) if cached is not None else None
+        if sliced is not None:
+            return {"custom": sliced}
 
         row = self._persistent_custom_get(key)
-        result = self._decode_custom_persistent(row, parsed, parameters, len(frame))
-        if result is not None:
-            self._memory_put(key, result)
+        decoded = (
+            self._decode_custom_persistent(row, parsed, parameters)
+            if row is not None and _row_ends_at(row, end)
+            else None
+        )
+        result = _tail_slice(decoded, target_length) if decoded is not None else None
+        if result is not None and decoded is not None:
+            self._memory_put(key, decoded)
             with self._lock:
                 self._hits += 1
             return {"custom": result}
@@ -256,8 +354,10 @@ class IndicatorCache:
         self._record_phase("_compute_time_ms", started)
         with self._lock:
             self._computed += 1
-        self._memory_put(key, result)
-        self._persistent_put_custom(key, parsed, parameter_json, result, start, end)
+        bar_count = _revision_bar_count(revision)
+        if bar_count is None or bar_count == target_length:
+            self._memory_put(key, result)
+            self._persistent_put_custom(key, parsed, parameter_json, result, start, end)
         return {"custom": result}
 
     def preload(
@@ -272,10 +372,11 @@ class IndicatorCache:
         requested = tuple(dict.fromkeys(formula_ids))
         if not requested or not frames:
             return 0
+        self.warm_revisions(frames.keys())
         definitions = {formula_id: self._registry.formula(formula_id) for formula_id in requested}
         pending: list[tuple[_CacheKey, FormulaDefinition]] = []
         for (market, code), frame in frames.items():
-            fingerprint = frame_fingerprint(frame)
+            revision = self._revision(str(market), str(code), frame)
             price_basis = _price_basis(frame)
             for formula_id in requested:
                 key = _CacheKey(
@@ -285,7 +386,7 @@ class IndicatorCache:
                     price_basis=price_basis,
                     formula_id=formula_id,
                     formula_version=definitions[formula_id].cache_version,
-                    data_fingerprint=fingerprint,
+                    data_revision=revision,
                 )
                 if self._memory_get(key) is None:
                     pending.append((key, definitions[formula_id]))
@@ -303,7 +404,7 @@ class IndicatorCache:
                             "price_basis": key.price_basis,
                             "formula_id": key.formula_id,
                             "formula_version": key.formula_version,
-                            "data_fingerprint": key.data_fingerprint,
+                            "data_fingerprint": key.data_revision,
                         }
                         for key, _ in pending
                     ]
@@ -334,14 +435,10 @@ class IndicatorCache:
                     key.price_basis,
                     key.formula_id,
                     key.formula_version,
-                    key.data_fingerprint,
+                    key.data_revision,
                 )
             )
-            result = (
-                self._decode_persistent(row, definition, int(cast(int, row["data_length"])))
-                if row
-                else None
-            )
+            result = self._decode_persistent(row, definition) if row else None
             if result is None:
                 continue
             self._memory_put(key, result)
@@ -392,11 +489,12 @@ class IndicatorCache:
         requested = tuple(dict.fromkeys(formula_ids))
         if not requested:
             return {}
-        fingerprint = frame_fingerprint(frame)
         normalized_market = market.strip().upper()
         normalized_code = code.strip()
+        revision = self._revision(market, code, frame)
         price_basis = _price_basis(frame)
         start, end = _date_bounds(frame)
+        target_length = len(frame)
         definitions = {formula_id: self._registry.formula(formula_id) for formula_id in requested}
         keys = {
             formula_id: _CacheKey(
@@ -406,39 +504,47 @@ class IndicatorCache:
                 price_basis=price_basis,
                 formula_id=formula_id,
                 formula_version=definitions[formula_id].cache_version,
-                data_fingerprint=fingerprint,
+                data_revision=revision,
             )
             for formula_id in requested
         }
         results: dict[str, FormulaResult] = {}
         missing: dict[str, _CacheKey] = {}
         for formula_id in requested:
-            result = self._memory_get(keys[formula_id])
-            if result is not None:
-                results[formula_id] = result
+            cached = self._memory_get(keys[formula_id])
+            sliced = _tail_slice(cached, target_length) if cached is not None else None
+            if sliced is not None:
+                results[formula_id] = sliced
                 continue
             missing[formula_id] = keys[formula_id]
 
         persistent_rows = self._persistent_get_many(missing) if persistent_read else {}
         to_compute: list[str] = []
         for formula_id, key in missing.items():
-            result = self._decode_persistent(
-                persistent_rows.get(formula_id),
-                definitions[formula_id],
-                len(frame),
+            row = persistent_rows.get(formula_id)
+            # 缓存存的是全历史，只有当请求区间正好是它的后缀时才可切片复用。
+            decoded = (
+                self._decode_persistent(row, definitions[formula_id])
+                if row is not None and _row_ends_at(row, end)
+                else None
             )
-            if result is not None:
-                self._memory_put(key, result)
+            sliced = _tail_slice(decoded, target_length) if decoded is not None else None
+            if sliced is not None and decoded is not None:
+                self._memory_put(key, decoded)
                 with self._lock:
                     self._hits += 1
                     self._persistent_hits += 1
-                results[formula_id] = result
+                results[formula_id] = sliced
                 continue
             to_compute.append(formula_id)
 
             with self._lock:
                 self._misses += 1
         computed_entries: list[tuple[_CacheKey, FormulaResult, date | None, date | None]] = []
+        bar_count = _revision_bar_count(revision)
+        # 版本号拿不到时键已绑定窗口（帧指纹），缓存同样安全；拿得到时只有
+        # 完整序列可缓存，否则窗口结果会污染后续更长的请求。
+        full_history = bar_count is None or bar_count == target_length
         for formula_id in to_compute:
             key = keys[formula_id]
             definition = definitions[formula_id]
@@ -447,7 +553,9 @@ class IndicatorCache:
             self._record_phase("_compute_time_ms", started)
             with self._lock:
                 self._computed += 1
-            self._memory_put(key, result)
+            # 只缓存完整序列：窗口结果按同一个键存进去会污染后续更长的请求。
+            if full_history:
+                self._memory_put(key, result)
             computed_entries.append((key, result, start, end))
             results[formula_id] = result
         if persist:
@@ -470,7 +578,7 @@ class IndicatorCache:
             frame = frames.get((market, code))
             if frame is None or not results:
                 continue
-            fingerprint = frame_fingerprint(frame)
+            revision = self._revision(str(market), str(code), frame)
             price_basis = _price_basis(frame)
             start, end = _date_bounds(frame)
             for formula_id, result in results.items():
@@ -486,7 +594,7 @@ class IndicatorCache:
                             price_basis=price_basis,
                             formula_id=formula_id,
                             formula_version=definition.cache_version,
-                            data_fingerprint=fingerprint,
+                            data_revision=revision,
                         ),
                         result,
                         start,
@@ -555,7 +663,7 @@ class IndicatorCache:
                     code=first.code,
                     timeframe=first.timeframe,
                     price_basis=first.price_basis,
-                    data_fingerprint=first.data_fingerprint,
+                    data_fingerprint=first.data_revision,
                     formula_versions={
                         formula_id: key.formula_version for formula_id, key in keys.items()
                     },
@@ -579,7 +687,7 @@ class IndicatorCache:
                     formula_hash=key.formula_hash,
                     parameter_hash=key.parameter_hash,
                     engine_version=key.engine_version,
-                    data_fingerprint=key.data_fingerprint,
+                    data_fingerprint=key.data_revision,
                 )
             finally:
                 self._record_phase("_persistent_read_time_ms", started)
@@ -590,9 +698,14 @@ class IndicatorCache:
         self,
         row: dict[str, object] | None,
         definition: FormulaDefinition,
-        data_length: int,
     ) -> FormulaResult | None:
-        if row is None or int(cast(int, row["data_length"])) != data_length:
+        if row is None:
+            return None
+        try:
+            data_length = int(cast(int, row["data_length"]))
+        except (TypeError, ValueError):
+            return None
+        if data_length <= 0:
             return None
         try:
             signal_names = tuple(signal.id.split(".", 1)[1] for signal in definition.signals)
@@ -643,7 +756,7 @@ class IndicatorCache:
                     "price_basis": key.price_basis,
                     "formula_id": key.formula_id,
                     "formula_version": key.formula_version,
-                    "data_fingerprint": key.data_fingerprint,
+                    "data_fingerprint": key.data_revision,
                     "data_start": start,
                     "data_end": end,
                     "data_length": result.data_length,
@@ -679,9 +792,14 @@ class IndicatorCache:
         row: dict[str, object] | None,
         parsed: ParsedFormula,
         parameters: dict[str, float],
-        data_length: int,
     ) -> FormulaResult | None:
-        if row is None or int(cast(int, row["data_length"])) != data_length:
+        if row is None:
+            return None
+        try:
+            data_length = int(cast(int, row["data_length"]))
+        except (TypeError, ValueError):
+            return None
+        if data_length <= 0:
             return None
         try:
             value_names = _json_names(row["value_names_json"])
@@ -750,7 +868,7 @@ class IndicatorCache:
                         ensure_ascii=False,
                         separators=(",", ":"),
                     ),
-                    data_fingerprint=key.data_fingerprint,
+                    data_fingerprint=key.data_revision,
                     data_start=start,
                     data_end=end,
                     data_length=result.data_length,

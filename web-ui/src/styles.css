@@ -351,6 +351,8 @@ tbody tr:hover td { background: rgba(22, 34, 58, 0.45); }
 .backtest-history-panel .table-wrap table { min-width: 900px; }
 .backtest-history-panel .history-id { display: block; margin-top: 4px; color: var(--subtle); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 9px; }
 .backtest-history-panel .history-actions { white-space: nowrap; }
+.backtest-history-panel .history-metrics { display: flex; flex-wrap: wrap; gap: 3px 10px; font-size: 10px; color: var(--muted); white-space: nowrap; }
+.backtest-history-panel .history-metrics strong { margin-left: 4px; font-weight: 500; color: var(--text); }
 .backtest-history-panel .danger-link { margin-left: 10px; color: var(--danger); }
 .fitness-grid { grid-template-columns: minmax(350px, 430px) minmax(0, 1fr); }
 .fitness-fields-top { margin-top: 13px; }
