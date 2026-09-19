@@ -204,6 +204,22 @@ def condition_research_history_detail(
     return {"data": record}
 
 
+@router.delete("/history/{history_id}")
+def delete_condition_research_history(
+    history_id: str,
+    request: Request,
+) -> dict[str, object]:
+    try:
+        record = _store(request).read_backtest_history(history_id)
+    except (MarketDataStoreError, OSError) as exc:
+        raise HTTPException(status_code=503, detail="买卖条件研究历史暂不可用") from exc
+    # 别的历史类型共用一张表，删错了只剩一句「已删除」会让人以为删的是研究。
+    if record is None or record.get("backtest_type") != "condition_research":
+        return {"data": {"deleted": False}}
+    deleted = _store(request).delete_backtest_history(history_id)
+    return {"data": {"deleted": deleted}}
+
+
 @router.get("/{job_id}")
 def condition_research_status(job_id: str, request: Request) -> dict[str, object]:
     state = _state_or_404(job_id, request)

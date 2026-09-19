@@ -717,6 +717,11 @@ class SwingIndicatorRequest(BaseModel):
     block_size: int = Field(default=20, ge=1, le=500)
     alpha: float = Field(default=0.05, gt=0, lt=1)
     limit_stocks: int | None = Field(default=None, ge=1, le=100_000)
+    #: 存档用，不参与计算。研究分两步跑，第一步（切分校准）的表单与结果
+    #: 只存在于浏览器里；不带过来，历史记录就只能还原第二步，加载后第一步
+    #: 的表格会是空的。后端原样存进 request_json，不做校验。
+    overview_request: dict[str, object] | None = None
+    overview_result: dict[str, object] | None = None
 
     def to_config(self) -> SwingIndicatorConfig:
         return SwingIndicatorConfig(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
@@ -67,6 +68,10 @@ def _app(store: DuckDbMarketDataStore):
         auto_sync_enabled=False,
         swing_research_service=SwingResearchService(adapter=DuckDbMarketDataAdapter(store)),
     )
+
+
+def _moment(offset_minutes: int) -> datetime:
+    return datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(minutes=offset_minutes)
 
 
 def test_overview_reports_one_scenario_per_threshold(tmp_path: Path) -> None:
@@ -213,6 +218,101 @@ def test_indicator_study_stream_emits_progress_before_the_result(tmp_path: Path)
         "正在逐日横截面打分",
     }
     assert events[-1]["data"]["scanned_stocks"] == 4
+
+
+def test_indicator_study_is_saved_with_step_one_and_can_be_reloaded(tmp_path: Path) -> None:
+    """A study is minutes of work - it must survive a reload, both steps of it."""
+
+    store = _wide_store(tmp_path)
+
+    with TestClient(_app(store)) as client:
+        response = client.post(
+            "/api/v1/swing-research/indicator-study",
+            json={
+                "min_cross_section": 2,
+                "permutations": 10,
+                "horizon": 5,
+                "labels": ["up_onset_ahead", "down_onset_ahead"],
+                # 第一步只活在浏览器里，不一起存档就还原不回来。
+                "overview_request": {"multiplesText": "2, 3", "limitStocks": 4},
+                "overview_result": {"stock_count": 4},
+            },
+        )
+        assert response.status_code == 200, response.text
+        history_id = response.json()["history_id"]
+        assert history_id
+
+        listed = client.get("/api/v1/swing-research/history").json()["data"]
+        assert [item["history_id"] for item in listed] == [history_id]
+        summary = listed[0]["summary"]
+        assert summary["scanned_stocks"] == 4
+        assert summary["horizon"] == 5
+        assert summary["significant_count"] >= 0
+        assert "top_indicator" in summary
+
+        detail = client.get(f"/api/v1/swing-research/history/{history_id}").json()["data"]
+        assert detail["backtest_type"] == "swing_research"
+        assert detail["request"]["overview_request"] == {
+            "multiplesText": "2, 3",
+            "limitStocks": 4,
+        }
+        assert detail["request"]["overview_result"] == {"stock_count": 4}
+        assert detail["result"]["scanned_stocks"] == 4
+
+        deleted = client.delete(f"/api/v1/swing-research/history/{history_id}").json()["data"]
+        assert deleted["deleted"] is True
+        assert client.get("/api/v1/swing-research/history").json()["data"] == []
+
+
+def test_indicator_study_stream_hands_back_the_history_id(tmp_path: Path) -> None:
+    """The UI only ever uses the stream, so the id has to ride the result event."""
+
+    store = _wide_store(tmp_path)
+
+    with TestClient(_app(store)) as client:
+        with client.stream(
+            "POST",
+            "/api/v1/swing-research/indicator-study/stream",
+            json={
+                "min_cross_section": 2,
+                "permutations": 10,
+                "horizon": 5,
+                "labels": ["up_onset_ahead", "down_onset_ahead"],
+            },
+        ) as response:
+            assert response.status_code == 200
+            body = "".join(response.iter_text())
+        events = _sse_events(body)
+        history_id = events[-1].get("history_id")
+        assert history_id, "流式结果不带历史 id，页面就没法刷新列表"
+        listed = client.get("/api/v1/swing-research/history").json()["data"]
+        assert [item["history_id"] for item in listed] == [history_id]
+
+
+def test_swing_history_endpoints_do_not_touch_other_types(tmp_path: Path) -> None:
+    """Research histories share one table with backtests - deleting must check."""
+
+    store = _wide_store(tmp_path)
+    store.save_backtest_history(
+        "portfolio-1",
+        backtest_type="portfolio",
+        request={"universe": "all"},
+        result={"performance": {"total_return": 0.1}},
+        started_at=_moment(1),
+        finished_at=_moment(2),
+    )
+
+    with TestClient(_app(store)) as client:
+        assert client.get("/api/v1/swing-research/history").json()["data"] == []
+        assert client.get("/api/v1/swing-research/history/portfolio-1").status_code == 404
+        assert client.delete("/api/v1/swing-research/history/portfolio-1").json() == {
+            "data": {"deleted": False}
+        }
+        assert client.get("/api/v1/swing-research/history/missing").status_code == 404
+        # 别人的历史还好好的。
+        assert [item["history_id"] for item in store.list_backtest_history("portfolio")] == [
+            "portfolio-1"
+        ]
 
 
 def test_indicator_study_stream_reports_errors_as_events(tmp_path: Path) -> None:

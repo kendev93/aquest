@@ -188,3 +188,154 @@ def test_strategy_discovery_history_upgrade_backfills_missing_timestamps(tmp_pat
     assert detail is not None
     assert str(detail["started_at"]).startswith("2026-01-01 08:00:00")
     assert str(detail["finished_at"]).startswith("2026-01-01 08:00:12")
+
+
+def _saved(store: DuckDbMarketDataStore, history_id: str, backtest_type: str, result) -> dict:
+    started = datetime(2026, 9, 19, 8, 0, tzinfo=timezone.utc)
+    store.save_backtest_history(
+        history_id,
+        backtest_type=backtest_type,
+        request={"universe": "all"},
+        result=result,
+        started_at=started,
+        finished_at=started + timedelta(minutes=2),
+    )
+    return store.list_backtest_history(backtest_type)[0]["summary"]
+
+
+def test_condition_research_summary_prefers_the_strongest_qualified_candidate(
+    tmp_path,
+) -> None:
+    """列表要拿合格候选当门面：提升再高，没过约束也只是噪声。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    summary = _saved(
+        store,
+        "cond-1",
+        "condition_research",
+        {
+            "universe": "sz",
+            "start_date": "2021-01-01",
+            "end_date": "2025-12-31",
+            "search_sides": "buy",
+            "processed": 300,
+            "baseline": {"train": {"pooled_trades": {"closed_trades": 40, "win_rate": 0.7}}},
+            "candidates": [
+                {
+                    "candidate_id": "noise",
+                    "side": "buy",
+                    "condition": {
+                        "left_value": "technical.rsi14",
+                        "operator": "gte",
+                        "right_constant": 70.0,
+                    },
+                    "mining": {"lift": 2.0, "outcome_rate": 0.44},
+                    "passed_constraints": False,
+                },
+                {
+                    "candidate_id": "solid",
+                    "side": "sell",
+                    "condition": {
+                        "left_value": "technical.rsi14",
+                        "operator": "lte",
+                        "right_constant": 30.0,
+                    },
+                    "mining": {
+                        "lift": 1.42,
+                        "outcome_rate": 0.61,
+                        "baseline_rate": 0.43,
+                        "support_count": 90,
+                        "instrument_count": 27,
+                    },
+                    "passed_constraints": True,
+                },
+            ],
+        },
+    )
+
+    assert summary["candidate_count"] == 2
+    assert summary["qualified_count"] == 1
+    assert summary["top_lift"] == 1.42
+    assert summary["top_side"] == "sell"
+    assert summary["top_outcome_rate"] == 0.61
+    assert summary["top_instrument_count"] == 27
+    assert summary["top_condition"]["operator"] == "lte"
+    assert summary["top_condition"]["right_constant"] == 30.0
+    assert summary["baseline_win_rate"] == 0.7
+
+
+def test_swing_research_summary_reports_parameters_and_the_strongest_indicator(
+    tmp_path,
+) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    summary = _saved(
+        store,
+        "swing-1",
+        "swing_research",
+        {
+            "universe": "all",
+            "stock_count": 1000,
+            "scanned_stocks": 980,
+            "reversal_multiple": 3.0,
+            "min_bars": 5,
+            "atr_window": 14,
+            "horizon": 10,
+            "permutations": 200,
+            "value_count": 20,
+            "significant_count": 1,
+            "date_range": {"start": "2021-09-01", "end": "2026-09-11", "days": 1219},
+            "labels": [{"id": "up_onset_ahead", "display_name": "近期将启动上涨"}],
+            "scores": [
+                {
+                    "value_id": "technical.weak",
+                    "display_name": "弱指标",
+                    "ic_mean": 0.02,
+                    "ic_threshold": 0.01,
+                    "order": "high",
+                    "significant": False,
+                },
+                {
+                    "value_id": "technical.strong",
+                    "display_name": "强指标",
+                    "ic_mean": 0.24,
+                    "ic_threshold": 0.017,
+                    "order": "low",
+                    "significant": True,
+                },
+            ],
+            "condition_plan": {"tradeable_count": 3},
+        },
+    )
+
+    assert summary["scanned_stocks"] == 980
+    assert summary["reversal_multiple"] == 3.0
+    assert summary["horizon"] == 10
+    assert summary["significant_count"] == 1
+    # 噪声门槛取所有指标里最严的那一个，而不是某个指标的。
+    assert summary["noise_floor"] == 0.017
+    assert summary["top_indicator"]["display_name"] == "强指标"
+    assert summary["top_indicator"]["ic_mean"] == 0.24
+    assert summary["tradeable_count"] == 3
+    assert summary["label_names"] == ["近期将启动上涨"]
+    assert summary["date_range"]["days"] == 1219
+
+
+def test_plain_backtest_summary_is_untouched_by_research_fields(tmp_path) -> None:
+    """摘要扩展是按类型分派的，回测历史不该多出一堆研究字段。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    summary = _saved(
+        store,
+        "portfolio-1",
+        "portfolio",
+        {
+            "universe": "all",
+            "performance": {"total_return": 0.1},
+            "trades": [{"direction": "BUY"}],
+        },
+    )
+
+    assert summary["performance"]["total_return"] == 0.1
+    assert summary["trade_count"] == 1
+    assert "top_indicator" not in summary
+    assert "candidate_count" not in summary

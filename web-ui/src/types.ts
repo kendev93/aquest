@@ -418,7 +418,12 @@ export interface ScreenHistoryRecord {
   results: ScreenResult[]
 }
 
-export type BacktestHistoryType = 'single_stock' | 'portfolio' | 'strategy_fitness' | 'condition_research'
+export type BacktestHistoryType =
+  | 'single_stock'
+  | 'portfolio'
+  | 'strategy_fitness'
+  | 'condition_research'
+  | 'swing_research'
 
 export interface BacktestHistorySummary {
   history_id: string

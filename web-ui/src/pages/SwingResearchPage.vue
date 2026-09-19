@@ -1,14 +1,19 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import {
   SwingResearchApiError,
+  deleteSwingResearchHistory,
+  fetchSwingResearchHistory,
+  getSwingResearchHistory,
   runSwingIndicatorStudy,
   runSwingOverview,
+  type SwingHistoryRecord,
   type SwingProgress,
 } from '../api/swingResearch'
 import TermHint from '../components/TermHint.vue'
 import type {
+  BacktestHistorySummary,
   SwingConditionTemplate,
   SwingLabel,
   SwingOverviewResult,
@@ -16,6 +21,25 @@ import type {
   SwingStudyResult,
 } from '../types'
 import { saveSwingPlan } from '../utils/swingHandoff'
+import { formatChinaTimestamp } from '../utils/time'
+
+/** 第一步表单的存档形状。存的是表单本身而不是请求体，回填时才能直接赋值。 */
+interface OverviewFormSnapshot {
+  universe?: 'all' | 'sh' | 'sz'
+  startDate?: string
+  endDate?: string
+  multiplesText?: string
+  minBars?: number
+  atrWindow?: number
+  limitStocks?: number
+}
+
+const SWING_LABELS: SwingLabel[] = [
+  'up_onset_ahead',
+  'down_onset_ahead',
+  'up_leg_start',
+  'down_leg_start',
+]
 
 interface LabelOption {
   id: SwingLabel
@@ -78,6 +102,12 @@ const studyResult = ref<SwingStudyResult | null>(null)
 const copied = ref(false)
 const overviewProgress = ref<SwingProgress | null>(null)
 const studyProgress = ref<SwingProgress | null>(null)
+// 历史列表：后端已按完成时间由近到远排好，这里只管切片分页。
+const history = ref<BacktestHistorySummary[]>([])
+const historyLoading = ref(false)
+const activeHistoryId = ref('')
+const historyPage = ref(1)
+const historyPageSize = 10
 
 function isTradeable(label: SwingLabel): boolean {
   return LABEL_OPTIONS.find((item) => item.id === label)?.tradeable ?? false
@@ -136,7 +166,7 @@ async function runStudy(): Promise<void> {
   message.value = ''
   studyProgress.value = { current: 0, total: 0, stage: '准备中', ratio: 0 }
   try {
-    studyResult.value = await runSwingIndicatorStudy(
+    const outcome = await runSwingIndicatorStudy(
       {
         universe: study.universe,
         start_date: optionalDate(study.startDate),
@@ -152,17 +182,197 @@ async function runStudy(): Promise<void> {
         alpha: study.alpha,
         min_cross_section: study.minCrossSection,
         limit_stocks: study.limitStocks > 0 ? study.limitStocks : null,
+        // 第一步的表单与结果只活在浏览器里，不一起存档的话，加载历史后
+        // 第一步的校准表会是空的。后端只负责原样存起来。
+        overview_request: { ...overview },
+        overview_result: overviewResult.value,
       },
       (progress) => {
         studyProgress.value = progress
       },
     )
+    studyResult.value = outcome.result
+    await loadHistory()
+    if (outcome.historyId) {
+      // 新记录排在最前面；不回到第一页的话，看起来就像这次没被保存。
+      historyPage.value = 1
+      activeHistoryId.value = outcome.historyId
+    }
   } catch (error) {
     message.value = errorMessage(error)
   } finally {
     studyRunning.value = false
   }
 }
+
+async function loadHistory(): Promise<void> {
+  historyLoading.value = true
+  try {
+    history.value = await fetchSwingResearchHistory()
+  } catch (error) {
+    message.value = errorMessage(error)
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+function finiteOr(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+function assignUniverse(
+  target: { universe: 'all' | 'sh' | 'sz' },
+  value: unknown,
+): void {
+  if (value === 'all' || value === 'sh' || value === 'sz') target.universe = value
+}
+
+/**
+ * 把历史记录里存的两步参数回填进表单。
+ *
+ * 第一步优先用存档的表单快照（连候选阈值那种纯界面的输入都还原）；老记录
+ * 没有快照时，用第二步的同名参数凑一个 —— 这两步的口径本来就是一致的。
+ */
+function applyStoredForm(record: SwingHistoryRecord): void {
+  const request = record.request ?? {}
+  assignUniverse(study, request.universe)
+  study.startDate = typeof request.start_date === 'string' ? request.start_date : ''
+  study.endDate = typeof request.end_date === 'string' ? request.end_date : ''
+  study.reversalMultiple = finiteOr(request.reversal_multiple, study.reversalMultiple)
+  study.minBars = finiteOr(request.min_bars, study.minBars)
+  study.atrWindow = finiteOr(request.atr_window, study.atrWindow)
+  study.horizon = finiteOr(request.horizon, study.horizon)
+  study.permutations = finiteOr(request.permutations, study.permutations)
+  study.blockSize = finiteOr(request.block_size, study.blockSize)
+  study.alpha = finiteOr(request.alpha, study.alpha)
+  study.minCrossSection = finiteOr(request.min_cross_section, study.minCrossSection)
+  study.limitStocks = finiteOr(request.limit_stocks, study.limitStocks)
+  if (typeof request.include_custom === 'boolean') study.includeCustom = request.include_custom
+  const labels = Array.isArray(request.labels)
+    ? request.labels.filter((item): item is SwingLabel => SWING_LABELS.includes(item as SwingLabel))
+    : []
+  // 一个标签都不剩会让「运行」按钮禁用，宁可保持原来的选择。
+  if (labels.length) study.labels = labels
+
+  const snapshot = (request.overview_request ?? null) as OverviewFormSnapshot | null
+  assignUniverse(overview, snapshot?.universe)
+  overview.startDate = typeof snapshot?.startDate === 'string'
+    ? snapshot.startDate
+    : study.startDate
+  overview.endDate = typeof snapshot?.endDate === 'string' ? snapshot.endDate : study.endDate
+  overview.multiplesText = typeof snapshot?.multiplesText === 'string'
+    ? snapshot.multiplesText
+    : String(study.reversalMultiple)
+  overview.minBars = finiteOr(snapshot?.minBars, study.minBars)
+  overview.atrWindow = finiteOr(snapshot?.atrWindow, study.atrWindow)
+  overview.limitStocks = finiteOr(snapshot?.limitStocks, study.limitStocks)
+}
+
+async function loadHistoryDetail(historyId: string): Promise<void> {
+  if (!historyId) return
+  try {
+    const record = await getSwingResearchHistory(historyId)
+    applyStoredForm(record)
+    overviewResult.value = record.request?.overview_result ?? null
+    studyResult.value = record.result ?? null
+    activeHistoryId.value = historyId
+    message.value = '已加载历史波段研究，并还原当时两步的参数与结论。'
+  } catch (error) {
+    message.value = errorMessage(error)
+  }
+}
+
+/**
+ * 删除一条历史。页面上的结果刻意保留：删的是存档，不是已经算出来的结论。
+ */
+async function removeHistory(historyId: string): Promise<void> {
+  try {
+    const deleted = await deleteSwingResearchHistory(historyId)
+    if (!deleted) {
+      message.value = '这条历史记录不存在，或已经删掉了。'
+      await loadHistory()
+      return
+    }
+    if (activeHistoryId.value === historyId) activeHistoryId.value = ''
+    await loadHistory()
+    message.value = '历史记录已删除；页面上的结果保持不变。'
+  } catch (error) {
+    message.value = errorMessage(error)
+  }
+}
+
+const historyPageCount = computed(() => Math.max(1, Math.ceil(history.value.length / historyPageSize)))
+const historyPageRows = computed(() => history.value.slice(
+  (historyPage.value - 1) * historyPageSize,
+  historyPage.value * historyPageSize,
+))
+// 删到只剩一页时把页码收回来，否则会停在一个空白页上。
+watch(historyPageCount, () => {
+  if (historyPage.value > historyPageCount.value) historyPage.value = historyPageCount.value
+})
+
+/** created_at 存的是朴素 UTC 时间，不换算会比北京时间慢 8 小时。 */
+function formatHistoryDate(value: string): string {
+  return formatChinaTimestamp(value)
+}
+
+function summaryNumber(item: BacktestHistorySummary, key: string): number | null {
+  const value = item.summary?.[key]
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function summaryStrings(item: BacktestHistorySummary, key: string): string[] {
+  const value = item.summary?.[key]
+  if (!Array.isArray(value)) return []
+  return value.filter((item): item is string => typeof item === 'string' && item.length > 0)
+}
+
+function summaryIndicator(item: BacktestHistorySummary): Record<string, unknown> | null {
+  const value = item.summary?.top_indicator
+  return value && typeof value === 'object' ? value as Record<string, unknown> : null
+}
+
+function indicatorNumber(item: BacktestHistorySummary, key: string): number | null {
+  const value = summaryIndicator(item)?.[key]
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function indicatorText(item: BacktestHistorySummary, key: string): string {
+  const value = summaryIndicator(item)?.[key]
+  return typeof value === 'string' && value ? value : ''
+}
+
+function historyRangeText(item: BacktestHistorySummary): string {
+  const range = item.summary?.date_range
+  if (!range || typeof range !== 'object') return '区间未知'
+  const start = typeof (range as Record<string, unknown>).start === 'string'
+    ? String((range as Record<string, unknown>).start)
+    : ''
+  const end = typeof (range as Record<string, unknown>).end === 'string'
+    ? String((range as Record<string, unknown>).end)
+    : ''
+  if (!start && !end) return '区间未知'
+  return `${start || '起点'} → ${end || '最新'}`
+}
+
+function historyUniverseText(item: BacktestHistorySummary): string {
+  const universe = item.summary?.universe
+  if (universe === 'sh') return '仅上海'
+  if (universe === 'sz') return '仅深圳'
+  if (universe === 'all') return '沪深全部'
+  return '范围未知'
+}
+
+function historyDurationText(item: BacktestHistorySummary): string {
+  const seconds = item.duration_seconds
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) return ''
+  if (seconds < 60) return `耗时 ${Math.round(seconds)} 秒`
+  return `耗时 ${Math.round(seconds / 60)} 分钟`
+}
+
+onMounted(() => {
+  void loadHistory()
+})
 
 function percentOf(progress: SwingProgress | null): number {
   return progress ? Math.round(progress.ratio * 100) : 0
@@ -658,6 +868,61 @@ async function copyPlan(): Promise<void> {
           </div>
         </div>
       </section>
+      <section class="panel swing-panel swing-history" data-testid="swing-research-history">
+        <div class="panel-heading">
+          <div><span class="section-kicker">SAVED RESEARCH</span><h2>历史研究</h2></div>
+          <div class="history-head-actions">
+            <span v-if="historyLoading" class="history-status">读取中…</span>
+            <button class="secondary-button" type="button" :disabled="historyLoading" data-testid="swing-history-refresh" @click="loadHistory">刷新</button>
+          </div>
+        </div>
+        <p class="helper">第二步跑完会自动保存一条，只留最近 20 次。加载会还原当时两步的参数和结论，包括第一步的校准表。</p>
+        <div v-if="!history.length" class="inline-empty">暂无历史研究记录。</div>
+        <template v-else>
+          <ul class="history-list">
+            <li
+              v-for="item in historyPageRows"
+              :key="item.history_id"
+              class="history-card"
+              :class="{ 'history-card-active': activeHistoryId === item.history_id }"
+              :data-testid="`swing-history-item-${item.history_id}`"
+            >
+              <div class="history-card-head">
+                <strong>{{ formatHistoryDate(item.created_at) }}</strong>
+                <span v-if="activeHistoryId === item.history_id" class="history-badge">当前</span>
+                <span v-if="historyDurationText(item)" class="history-duration">{{ historyDurationText(item) }}</span>
+              </div>
+              <div class="history-row">
+                <span class="history-chip">{{ historyRangeText(item) }}</span>
+                <span class="history-chip">{{ historyUniverseText(item) }}</span>
+                <span v-if="summaryNumber(item, 'stock_count') !== null" class="history-chip">{{ summaryNumber(item, 'stock_count') }} 只</span>
+                <span v-if="summaryNumber(item, 'reversal_multiple') !== null" class="history-chip">{{ formatNumber(summaryNumber(item, 'reversal_multiple'), 1) }} 倍 ATR</span>
+                <span v-if="summaryNumber(item, 'min_bars') !== null" class="history-chip">持续 ≥ {{ summaryNumber(item, 'min_bars') }} 天</span>
+                <span v-if="summaryNumber(item, 'horizon') !== null" class="history-chip">预测 {{ summaryNumber(item, 'horizon') }} 日</span>
+              </div>
+              <div class="history-row">
+                <span class="history-metric">显著 <strong>{{ summaryNumber(item, 'significant_count') ?? 0 }} / {{ summaryNumber(item, 'value_count') ?? 0 }}</strong></span>
+                <span class="history-metric">最强 <strong class="history-condition">{{ indicatorText(item, 'display_name') || '—' }}</strong></span>
+                <span class="history-metric">信息系数 <strong>{{ formatNumber(indicatorNumber(item, 'ic_mean'), 3) }}</strong></span>
+                <span class="history-metric">噪声门槛 <strong>{{ formatNumber(summaryNumber(item, 'noise_floor'), 3) }}</strong></span>
+                <span class="history-metric">可交易 <strong>{{ summaryNumber(item, 'tradeable_count') ?? 0 }}</strong> 条</span>
+                <span v-for="label in summaryStrings(item, 'label_names')" :key="label" class="history-chip">{{ label }}</span>
+              </div>
+              <div class="history-card-actions">
+                <button class="table-link" type="button" :disabled="historyLoading" :data-testid="`swing-history-load-${item.history_id}`" @click="loadHistoryDetail(item.history_id)">加载</button>
+                <button class="table-link danger-link" type="button" :disabled="historyLoading" :data-testid="`swing-history-remove-${item.history_id}`" @click="removeHistory(item.history_id)">删除</button>
+              </div>
+            </li>
+          </ul>
+          <div v-if="historyPageCount > 1" class="history-pagination" data-testid="swing-history-pagination">
+            <span>共 {{ history.length }} 条 · 第 {{ historyPage }} / {{ historyPageCount }} 页</span>
+            <div>
+              <button class="secondary-button" type="button" :disabled="historyPage <= 1" data-testid="swing-history-prev" @click="historyPage -= 1">上一页</button>
+              <button class="secondary-button" type="button" :disabled="historyPage >= historyPageCount" data-testid="swing-history-next" @click="historyPage += 1">下一页</button>
+            </div>
+          </div>
+        </template>
+      </section>
     </main>
   </div>
 </template>
@@ -666,6 +931,10 @@ async function copyPlan(): Promise<void> {
 .swing-panel {
   margin-bottom: 20px;
   padding: 22px;
+}
+
+.swing-history {
+  margin-bottom: 0;
 }
 
 .swing-fields {

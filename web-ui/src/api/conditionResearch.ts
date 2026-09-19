@@ -89,3 +89,11 @@ export async function getConditionResearchHistory(
   }>(API_BASE + '/history/' + encodeURIComponent(historyId))
   return response.data
 }
+
+export async function deleteConditionResearchHistory(historyId: string): Promise<boolean> {
+  const response = await request<{ data: { deleted: boolean } }>(
+    API_BASE + '/history/' + encodeURIComponent(historyId),
+    { method: 'DELETE' },
+  )
+  return response.data.deleted
+}

@@ -50,7 +50,7 @@ East Money 在线数据源 ──在线同步──► MarketDataSync + OnlineMa
 - `strategy_discovery_replay_history`：当前夏普榜或收益榜前十的全行情复核结果、连续资金曲线、成交记录、分段绩效、数据指纹和复核耗时；同一实验和榜单只保留最近一次，删除实验时级联删除。
 - `strategy_jobs`：策略实验、二次优化和全量复核的请求、状态、进度、结果、取消标记、worker 租约及时间戳；只由 backend 写入，旧版 `.strategy-jobs` JSON 在首次启动时幂等导入。
 - `screen_history`：公式筛选的请求元数据、计数摘要和完整结果 JSON，默认保留最近 10 次。
-- `backtest_history`：组合和策略适配性回测的请求快照、完整结果、摘要、开始/结束时间和耗时；按回测类型分别保留最近 20 次，买卖条件研究也写入该表。历史遗留的 `single_stock` 记录仍保留在库中，但单股回测页面与 `/api/v1/backtests` 路由已移除，其单票能力并入组合回测的「指定标的」。
+- `backtest_history`：组合和策略适配性回测的请求快照、完整结果、摘要、开始/结束时间和耗时；按回测类型分别保留最近 20 次，买卖条件研究与波段研究也写入该表（波段研究存的是第二步的完整参数，外加第一步表单与结果的存档快照）。历史遗留的 `single_stock` 记录仍保留在库中，但单股回测页面与 `/api/v1/backtests` 路由已移除，其单票能力并入组合回测的「指定标的」。
 
 行情事实写入只由本项目的主进程执行：在线同步的 provider worker 先把规范化结果写进各自的分片数据库，再由主进程按标的事务合并；派生指标缓存可由预热任务或业务请求按需填充。库内并发写由进程内写锁和 DuckDB 连接串行化，跨进程不再有 lease 锁或锁文件，策略 worker 始终以只读方式打开同一数据库。读操作每次建立独立只读 DuckDB 连接。全市场筛选、组合回测和策略适配通过一次批量查询得到各标的分组，不逐标的往返查询。
 
@@ -74,7 +74,7 @@ schema 版本变化或维护备份时，初始化逻辑会先生成带时间戳�
 
 ## 用户资产备份与恢复
 
-`market_data/transfer.py` 导出用户无法重建的记录：`backtest_history`（含单股、组合、策略适配和买卖条件研究）、`screen_history`、`strategy_discovery_history` 和 `strategy_discovery_replay_history` 四张表，打包成一个 zip。行情和指标缓存刻意不导出，它们总能重新同步或重算；一份完整安装里资产约 13 MB，而数据库本身在 GB 量级。
+`market_data/transfer.py` 导出用户无法重建的记录：`backtest_history`（含单股、组合、策略适配、买卖条件研究和波段研究）、`screen_history`、`strategy_discovery_history` 和 `strategy_discovery_replay_history` 四张表，打包成一个 zip。行情和指标缓存刻意不导出，它们总能重新同步或重算；一份完整安装里资产约 13 MB，而数据库本身在 GB 量级。
 
 归档内容是每张表一个 JSONL 条目，外加 `manifest.json`（格式标识、格式版本、schema 版本、逐表行数与列名、导出时的行情规模）。导入是幂等合并：主键已存在的记录记为 skipped，不覆盖也不删除；备份里出现当前 schema 不认识的列、或备份来自更高的 schema 版本时，在写入前直接拒绝。上传上限为 1 GiB。
 

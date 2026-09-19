@@ -24,6 +24,7 @@ vi.mock('../api/conditionResearch', async () => {
     getConditionResearchResults: vi.fn(),
     fetchConditionResearchHistory: vi.fn(),
     getConditionResearchHistory: vi.fn(),
+    deleteConditionResearchHistory: vi.fn(),
   }
 })
 
@@ -577,7 +578,7 @@ describe('ConditionResearchPage', () => {
 
     const wrapper = mount(ConditionResearchPage)
     await flushPromises()
-    await wrapper.get('[data-testid="load-condition-history"]').trigger('click')
+    await wrapper.get('[data-testid="condition-history-load-hist-1"]').trigger('click')
     await flushPromises()
 
     expect(wrapper.get('[data-testid="condition-research-results"]').text()).toContain('浦发银行')
@@ -780,7 +781,7 @@ describe('ConditionResearchPage', () => {
 
     const wrapper = mount(ConditionResearchPage)
     await flushPromises()
-    await wrapper.get('[data-testid="load-condition-history"]').trigger('click')
+    await wrapper.get('[data-testid="condition-history-load-hist-buy"]').trigger('click')
     await flushPromises()
 
     expect((wrapper.get('[data-testid="condition-always-in-market"]').element as HTMLInputElement).checked).toBe(true)
@@ -841,7 +842,7 @@ describe('ConditionResearchPage', () => {
 
     const wrapper = mount(ConditionResearchPage)
     await flushPromises()
-    await wrapper.get('[data-testid="load-condition-history"]').trigger('click')
+    await wrapper.get('[data-testid="condition-history-load-hist-etf"]').trigger('click')
     await flushPromises()
 
     expect((wrapper.get('[data-testid="condition-instrument-type"]').element as HTMLSelectElement).value).toBe('fund')
@@ -905,7 +906,7 @@ describe('ConditionResearchPage', () => {
 
     const wrapper = mount(ConditionResearchPage)
     await flushPromises()
-    await wrapper.get('[data-testid="load-condition-history"]').trigger('click')
+    await wrapper.get('[data-testid="condition-history-load-hist-hold"]').trigger('click')
     await flushPromises()
 
     expect((wrapper.get('[data-testid="condition-hold-to-end"]').element as HTMLInputElement).checked).toBe(true)
@@ -1052,4 +1053,92 @@ describe('ConditionResearchPage', () => {
       rank_order: 'asc',
     }))
   })
+
+  it('lists a saved study with its parameters and headline numbers', async () => {
+    vi.mocked(researchApi.fetchConditionResearchHistory).mockResolvedValue([
+      conditionHistoryItem(0),
+    ])
+
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+
+    const card = wrapper.get('[data-testid="condition-history-item-cond-0"]')
+    expect(card.text()).toContain('2021-01-01 → 2025-12-31')
+    expect(card.text()).toContain('仅深圳')
+    expect(card.text()).toContain('只搜买入')
+    expect(card.text()).toContain('跑了 300 只')
+    expect(card.text()).toContain('候选 12 条')
+    expect(card.text()).toContain('合格 3 条')
+    // 摘要里存的是 id，列表要还原成和结果表一致的中文写法。
+    expect(card.text()).toContain('强度 ≤ -0.274')
+    expect(card.text()).toContain('提升 1.42')
+    expect(card.text()).toContain('61.00%')
+    expect(card.text()).toContain('覆盖 27 只')
+  })
+
+  it('deletes a saved study from the list', async () => {
+    vi.mocked(researchApi.fetchConditionResearchHistory)
+      .mockResolvedValueOnce([conditionHistoryItem(0)])
+      .mockResolvedValueOnce([])
+    vi.mocked(researchApi.deleteConditionResearchHistory).mockResolvedValue(true)
+
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-history-remove-cond-0"]').trigger('click')
+    await flushPromises()
+
+    expect(researchApi.deleteConditionResearchHistory).toHaveBeenCalledWith('cond-0')
+    expect(wrapper.find('[data-testid="condition-history-item-cond-0"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="condition-research-history"]').text()).toContain('暂无历史研究记录')
+  })
+
+  it('pages the saved studies ten at a time, newest first', async () => {
+    // 后端已按完成时间由近到远排好，这里倒序就是「最近跑的在前」。
+    const items = Array.from({ length: 12 }, (_, index) => conditionHistoryItem(index)).reverse()
+    vi.mocked(researchApi.fetchConditionResearchHistory).mockResolvedValue(items)
+
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+
+    const rows = wrapper.findAll('[data-testid^="condition-history-item-"]')
+    expect(rows).toHaveLength(10)
+    expect(rows[0]?.attributes('data-testid')).toBe('condition-history-item-cond-11')
+
+    await wrapper.get('[data-testid="condition-history-next"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('[data-testid^="condition-history-item-"]')).toHaveLength(2)
+  })
+
+  /** 一条够列表渲染的历史记录：参数与核心指标都在 summary 里。 */
+  function conditionHistoryItem(index: number) {
+    const day = String(index + 1).padStart(2, '0')
+    return {
+      history_id: `cond-${index}`,
+      backtest_type: 'condition_research' as const,
+      created_at: `2026-09-${day}T02:00:00`,
+      started_at: `2026-09-${day}T01:58:00`,
+      finished_at: `2026-09-${day}T02:00:00`,
+      duration_seconds: 120,
+      summary: {
+        universe: 'sz',
+        start_date: '2021-01-01',
+        end_date: '2025-12-31',
+        search_sides: 'buy',
+        processed: 300,
+        candidate_count: 12,
+        qualified_count: 3,
+        top_lift: 1.42,
+        top_side: 'buy',
+        top_outcome_rate: 0.61,
+        top_baseline_rate: 0.43,
+        top_instrument_count: 27,
+        top_condition: {
+          left_value: 'indicator.score',
+          operator: 'lte',
+          right_value: null,
+          right_constant: -0.273902,
+        },
+      },
+    }
+  }
 })

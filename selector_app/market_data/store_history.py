@@ -80,7 +80,152 @@ def _validate_backtest_history_type(backtest_type: str) -> None:
         raise ValueError("回测历史类型无效")
 
 
-def _backtest_history_summary(result: Mapping[str, object]) -> dict[str, object]:
+def _finite_or_none(value: object) -> float | None:
+    """Return a finite float, or None for anything unusable (NaN, None, text)."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _typed_history_summary(
+    backtest_type: str | None,
+    result: Mapping[str, object],
+) -> dict[str, object]:
+    """Extra list-friendly fields for the two research flavours.
+
+    Plain backtests are described well enough by the shared fields, but a
+    condition or swing study is judged by what it found, and that lives deep
+    inside the result. Pulling it out here keeps the history list readable
+    without loading every full result into the page.
+    """
+
+    if backtest_type == "condition_research":
+        return _condition_research_summary(result)
+    if backtest_type == "swing_research":
+        return _swing_research_summary(result)
+    return {}
+
+
+def _condition_research_summary(result: Mapping[str, object]) -> dict[str, object]:
+    """Candidate counts plus the strongest surviving condition."""
+
+    summary: dict[str, object] = {}
+    baseline = result.get("baseline")
+    if isinstance(baseline, Mapping):
+        train = baseline.get("train")
+        if isinstance(train, Mapping):
+            pooled = train.get("pooled_trades")
+            if isinstance(pooled, Mapping):
+                win_rate = _finite_or_none(pooled.get("win_rate"))
+                if win_rate is not None:
+                    summary["baseline_win_rate"] = win_rate
+    candidates = result.get("candidates")
+    if not isinstance(candidates, (list, tuple)):
+        return summary
+    rows = [item for item in candidates if isinstance(item, Mapping)]
+    qualified = [item for item in rows if item.get("passed_constraints") is True]
+    summary["candidate_count"] = len(rows)
+    summary["qualified_count"] = len(qualified)
+    # 合格候选优先：一个提升很高但连约束都没过的条件只是噪声，不该当门面。
+    best: Mapping[str, object] | None = None
+    best_lift = 0.0
+    for item in (qualified or rows):
+        mining = item.get("mining")
+        if not isinstance(mining, Mapping):
+            continue
+        lift = _finite_or_none(mining.get("lift"))
+        if lift is None:
+            continue
+        if best is None or lift > best_lift:
+            best, best_lift = item, lift
+    if best is None:
+        return summary
+    mining = best.get("mining")
+    summary["top_lift"] = best_lift
+    side = best.get("side")
+    if isinstance(side, str):
+        summary["top_side"] = side
+    condition = best.get("condition")
+    if isinstance(condition, Mapping):
+        summary["top_condition"] = dict(condition)
+    if isinstance(mining, Mapping):
+        for key in ("outcome_rate", "baseline_rate", "support_count", "instrument_count"):
+            value = _finite_or_none(mining.get(key))
+            if value is not None:
+                summary[f"top_{key}"] = value
+    return summary
+
+
+def _swing_research_summary(result: Mapping[str, object]) -> dict[str, object]:
+    """Study parameters plus the strongest indicator it surfaced."""
+
+    summary: dict[str, object] = {}
+    for key in (
+        "stock_count",
+        "scanned_stocks",
+        "reversal_multiple",
+        "min_bars",
+        "atr_window",
+        "horizon",
+        "permutations",
+        "block_size",
+        "alpha",
+        "value_count",
+        "significant_count",
+    ):
+        if key in result:
+            summary[key] = result[key]
+    date_range = result.get("date_range")
+    if isinstance(date_range, Mapping):
+        summary["date_range"] = dict(date_range)
+    labels = result.get("labels")
+    if isinstance(labels, (list, tuple)):
+        summary["label_names"] = [
+            str(item.get("display_name") or item.get("id"))
+            for item in labels
+            if isinstance(item, Mapping)
+        ]
+    scores = result.get("scores")
+    if isinstance(scores, (list, tuple)):
+        rows = [item for item in scores if isinstance(item, Mapping)]
+        thresholds = [
+            value
+            for value in (_finite_or_none(item.get("ic_threshold")) for item in rows)
+            if value is not None
+        ]
+        if thresholds:
+            summary["noise_floor"] = max(thresholds)
+        best: Mapping[str, object] | None = None
+        best_ic = 0.0
+        for item in rows:
+            ic_mean = _finite_or_none(item.get("ic_mean"))
+            if ic_mean is None:
+                continue
+            if best is None or ic_mean > best_ic:
+                best, best_ic = item, ic_mean
+        if best is not None:
+            summary["top_indicator"] = {
+                "value_id": str(best.get("value_id") or ""),
+                "display_name": str(best.get("display_name") or best.get("value_id") or ""),
+                "ic_mean": best_ic,
+                "label": str(best.get("label") or ""),
+                "order": str(best.get("order") or ""),
+                "significant": bool(best.get("significant")),
+            }
+    plan = result.get("condition_plan")
+    if isinstance(plan, Mapping):
+        tradeable = _finite_or_none(plan.get("tradeable_count"))
+        if tradeable is not None:
+            summary["tradeable_count"] = tradeable
+    return summary
+
+
+def _backtest_history_summary(
+    result: Mapping[str, object],
+    backtest_type: str | None = None,
+) -> dict[str, object]:
     """Extract a small list-friendly summary without duplicating full results."""
 
     summary: dict[str, object] = {}
@@ -113,6 +258,7 @@ def _backtest_history_summary(result: Mapping[str, object]) -> dict[str, object]
     instrument_names = _backtest_history_instrument_names(result)
     if instrument_names:
         summary["instrument_names"] = instrument_names
+    summary.update(_typed_history_summary(backtest_type, result))
     return summary
 
 
@@ -745,7 +891,7 @@ class DuckDbHistoryStore:
             raise ValueError("回测耗时必须是大于等于 0 的有限数字")
         request_payload = dict(request)
         result_payload = dict(result)
-        summary = _backtest_history_summary(result_payload)
+        summary = _backtest_history_summary(result_payload, backtest_type)
         with _WRITE_LOCK, self._store._connect() as connection:
             connection.execute("BEGIN")
             try:
@@ -830,7 +976,7 @@ class DuckDbHistoryStore:
                 if isinstance(enriched_result, dict):
                     enriched_summary = _enrich_backtest_history_names(summary, instrument_names)
                     summary = dict(enriched_summary) if isinstance(enriched_summary, dict) else {}
-                    summary.update(_backtest_history_summary(enriched_result))
+                    summary.update(_backtest_history_summary(enriched_result, backtest_type))
             summaries.append(
                 {
                     "history_id": str(row[0]),
@@ -874,7 +1020,7 @@ class DuckDbHistoryStore:
             result = enriched_result
             if isinstance(enriched_summary, dict):
                 summary = dict(enriched_summary)
-                summary.update(_backtest_history_summary(result))
+                summary.update(_backtest_history_summary(result, str(row[1])))
         return {
             "history_id": str(row[0]),
             "backtest_type": str(row[1]),

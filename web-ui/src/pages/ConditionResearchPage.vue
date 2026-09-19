@@ -4,6 +4,7 @@ import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import {
   cancelConditionResearch,
   createConditionResearch,
+  deleteConditionResearchHistory,
   fetchConditionResearchHistory,
   getConditionResearch,
   getConditionResearchHistory,
@@ -44,7 +45,20 @@ function emptyRule(): RuleGroupPayload {
 interface ResearchHistorySummary {
   history_id: string
   created_at: string
+  finished_at?: string
+  duration_seconds?: number
   summary?: Record<string, unknown>
+}
+
+const OPERATOR_LABELS: Record<string, string> = {
+  gt: '>',
+  gte: '≥',
+  lt: '<',
+  lte: '≤',
+  eq: '=',
+  neq: '≠',
+  cross_up: '上穿',
+  cross_down: '下穿',
 }
 
 const metadata = ref<FormulaScreenMetadata | null>(null)
@@ -86,8 +100,11 @@ const job = ref<ConditionResearchJobState | null>(null)
 const report = ref<ConditionResearchReport | null>(null)
 const history = ref<ResearchHistorySummary[]>([])
 const historyLoading = ref(false)
-const selectedHistoryId = ref('')
 const selectedStockView = ref('baseline:full')
+// 历史列表：后端已按完成时间由近到远排好，这里只管切片分页。
+const activeHistoryId = ref('')
+const historyPage = ref(1)
+const historyPageSize = 10
 // 结果里勾选的候选条件，直接追加进基础规则后再跑一次研究。
 const selectedCandidateIds = ref<string[]>([])
 // 排序规则：研究不建组合，但结论要落到组合回测的「候选池 + 有限槽位」模型上。
@@ -536,10 +553,11 @@ async function pollJob(jobId: string): Promise<void> {
       message.value = '研究完成：处理 ' + report.value.processed + ' 只股票，发现 '
         + report.value.candidates.length + ' 条候选规则。'
       await loadHistory()
-      // 完成后把下拉切到这条新记录。否则它还停在挂载时选中的旧记录上，
+      // 新记录排在最前面。回到第一页并把它标成当前，否则页面还停在第二页，
       // 看起来就像是这次研究没被保存。
+      historyPage.value = 1
       if (history.value.some((item) => item.history_id === jobId)) {
-        selectedHistoryId.value = jobId
+        activeHistoryId.value = jobId
       }
       return
     }
@@ -565,9 +583,6 @@ async function loadHistory(): Promise<void> {
   historyLoading.value = true
   try {
     history.value = await fetchConditionResearchHistory() as ResearchHistorySummary[]
-    if (!selectedHistoryId.value && history.value.length) {
-      selectedHistoryId.value = history.value[0].history_id
-    }
   } catch (error) {
     message.value = apiMessage(error)
   } finally {
@@ -783,18 +798,106 @@ async function applyStoredRequest(raw: unknown): Promise<void> {
   }
 }
 
-async function loadHistoryDetail(): Promise<void> {
-  if (!selectedHistoryId.value) return
+async function loadHistoryDetail(historyId: string): Promise<void> {
+  if (!historyId) return
   try {
-    const saved = await getConditionResearchHistory(selectedHistoryId.value)
+    const saved = await getConditionResearchHistory(historyId)
     await applyStoredRequest(saved.request)
     report.value = saved.result
     selectedStockView.value = 'baseline:full'
     clearCandidateSelection()
+    activeHistoryId.value = historyId
     message.value = '已加载历史买卖条件研究，并还原当时的研究配置。'
   } catch (error) {
     message.value = apiMessage(error)
   }
+}
+
+/**
+ * 删除一条历史。
+ *
+ * 页面上的结果刻意保留：删的是存档，不是这次已经算出来的结论。把结果一起
+ * 清空会让人以为点错了，还得重新加载一遍才看得见。
+ */
+async function removeHistory(historyId: string): Promise<void> {
+  try {
+    const deleted = await deleteConditionResearchHistory(historyId)
+    if (!deleted) {
+      message.value = '这条历史记录不存在，或已经删掉了。'
+      await loadHistory()
+      return
+    }
+    if (activeHistoryId.value === historyId) activeHistoryId.value = ''
+    await loadHistory()
+    message.value = '历史记录已删除；页面上的结果保持不变，可以直接另存或继续调整。'
+  } catch (error) {
+    message.value = apiMessage(error)
+  }
+}
+
+const historyPageCount = computed(() => Math.max(1, Math.ceil(history.value.length / historyPageSize)))
+const historyPageRows = computed(() => history.value.slice(
+  (historyPage.value - 1) * historyPageSize,
+  historyPage.value * historyPageSize,
+))
+// 删到只剩一页时把页码收回来，否则会停在一个空白页上。
+watch([historyPageCount], () => {
+  if (historyPage.value > historyPageCount.value) historyPage.value = historyPageCount.value
+})
+
+function summaryNumber(item: ResearchHistorySummary, key: string): number | null {
+  const value = item.summary?.[key]
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function summaryText(item: ResearchHistorySummary, key: string): string {
+  const value = item.summary?.[key]
+  return typeof value === 'string' && value ? value : ''
+}
+
+/** 摘要里的条件只有 id，还原成和结果表一致的中文写法。 */
+function summaryConditionText(item: ResearchHistorySummary): string {
+  const raw = item.summary?.top_condition
+  if (!raw || typeof raw !== 'object') return '—'
+  const condition = raw as Record<string, unknown>
+  const operator = OPERATOR_LABELS[String(condition.operator ?? '')] ?? String(condition.operator ?? '')
+  const leftId = String(condition.left_value ?? '')
+  const left = availableValues.value.find((value) => value.id === leftId)
+  const leftLabel = left ? valueOptionLabel(left) : leftId.replace('technical.', '')
+  const rightId = typeof condition.right_value === 'string' ? condition.right_value : ''
+  const right = rightId ? availableValues.value.find((value) => value.id === rightId) : null
+  const constant = typeof condition.right_constant === 'number' ? condition.right_constant : null
+  return `${leftLabel} ${operator} ${right ? valueOptionLabel(right) : formatNumber(constant, 3)}`
+}
+
+function historyRangeText(item: ResearchHistorySummary): string {
+  const start = summaryText(item, 'start_date')
+  const end = summaryText(item, 'end_date')
+  if (!start && !end) return '区间未知'
+  return `${start || '起点'} → ${end || '最新'}`
+}
+
+function historyUniverseText(item: ResearchHistorySummary): string {
+  const universe = summaryText(item, 'universe')
+  if (universe === 'sh') return '仅上海'
+  if (universe === 'sz') return '仅深圳'
+  if (universe === 'all') return '沪深全部'
+  return '范围未知'
+}
+
+function historySideText(item: ResearchHistorySummary): string {
+  const side = summaryText(item, 'search_sides')
+  if (side === 'buy') return '只搜买入'
+  if (side === 'sell') return '只搜卖出'
+  if (side === 'both') return '买卖两侧'
+  return '方向未知'
+}
+
+function historyDurationText(item: ResearchHistorySummary): string {
+  const seconds = item.duration_seconds
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) return ''
+  if (seconds < 60) return `耗时 ${Math.round(seconds)} 秒`
+  return `耗时 ${Math.round(seconds / 60)} 分钟`
 }
 
 // 历史记录的 created_at 存的是朴素 UTC 时间，直接渲染会比北京时间慢 8 小时，
@@ -820,10 +923,7 @@ function winRateDelta(stock: ConditionResearchStockResult): string {
 }
 
 function conditionText(candidate: ConditionResearchCandidate): string {
-  const labels: Record<string, string> = {
-    gt: '>', gte: '≥', lt: '<', lte: '≤', eq: '=', neq: '≠', cross_up: '上穿', cross_down: '下穿',
-  }
-  const operator = labels[candidate.condition.operator] ?? candidate.condition.operator
+  const operator = OPERATOR_LABELS[candidate.condition.operator] ?? candidate.condition.operator
   const leftValue = availableValues.value.find((value) => value.id === candidate.condition.left_value)
   const rightValue = candidate.condition.right_value
     ? availableValues.value.find((value) => value.id === candidate.condition.right_value)
@@ -1508,20 +1608,58 @@ onMounted(async () => {
       </div>
 
       <section class="panel condition-history" data-testid="condition-research-history">
-        <div class="panel-heading"><div><span class="section-kicker">SAVED RESEARCH</span><h2>历史研究</h2></div></div>
-        <div class="compact-fields">
-          <div>
-            <label for="condition-history-select">已完成研究</label>
-            <select id="condition-history-select" v-model="selectedHistoryId" data-testid="condition-history-select">
-              <option value="">选择历史记录</option>
-              <option v-for="item in history" :key="item.history_id" :value="item.history_id">
-                {{ formatHistoryDate(item.created_at) }} · {{ item.history_id.slice(0, 8) }}
-              </option>
-            </select>
+        <div class="panel-heading">
+          <div><span class="section-kicker">SAVED RESEARCH</span><h2>历史研究</h2></div>
+          <div class="history-head-actions">
+            <span v-if="historyLoading" class="history-status">读取中…</span>
+            <button class="secondary-button" type="button" :disabled="historyLoading" data-testid="condition-history-refresh" @click="loadHistory">刷新</button>
           </div>
-          <button class="secondary-button load-history-button" data-testid="load-condition-history" type="button" :disabled="historyLoading || !selectedHistoryId" @click="loadHistoryDetail">加载历史研究</button>
-          <p class="helper">加载时会一并还原当时的标的范围、买卖规则、日期区间和交易费用，方便在此基础上继续调整。</p>
         </div>
+        <p class="helper">每次研究跑完会自动保存，只留最近 20 次。加载会一并还原当时的标的范围、买卖规则、日期区间和交易费用，方便在此基础上继续调整。</p>
+        <div v-if="!history.length" class="inline-empty">暂无历史研究记录。</div>
+        <template v-else>
+          <ul class="history-list">
+            <li
+              v-for="item in historyPageRows"
+              :key="item.history_id"
+              class="history-card"
+              :class="{ 'history-card-active': activeHistoryId === item.history_id }"
+              :data-testid="`condition-history-item-${item.history_id}`"
+            >
+              <div class="history-card-head">
+                <strong>{{ formatHistoryDate(item.created_at) }}</strong>
+                <span v-if="activeHistoryId === item.history_id" class="history-badge">当前</span>
+                <span v-if="historyDurationText(item)" class="history-duration">{{ historyDurationText(item) }}</span>
+              </div>
+              <div class="history-row">
+                <span class="history-chip">{{ historyRangeText(item) }}</span>
+                <span class="history-chip">{{ historyUniverseText(item) }}</span>
+                <span class="history-chip">{{ historySideText(item) }}</span>
+                <span v-if="summaryNumber(item, 'processed') !== null" class="history-chip">跑了 {{ summaryNumber(item, 'processed') }} 只</span>
+              </div>
+              <div class="history-row">
+                <span class="history-metric">候选 <strong>{{ summaryNumber(item, 'candidate_count') ?? 0 }}</strong> 条</span>
+                <span class="history-metric">合格 <strong>{{ summaryNumber(item, 'qualified_count') ?? 0 }}</strong> 条</span>
+                <span class="history-metric">最强 <strong class="history-condition">{{ summaryConditionText(item) }}</strong></span>
+                <span v-if="summaryNumber(item, 'top_lift') !== null" class="history-metric">提升 <strong>{{ formatNumber(summaryNumber(item, 'top_lift'), 2) }}</strong></span>
+                <span v-if="summaryNumber(item, 'top_outcome_rate') !== null" class="history-metric">命中后胜率 <strong>{{ formatPercent(summaryNumber(item, 'top_outcome_rate')) }}</strong></span>
+                <span v-if="summaryNumber(item, 'top_baseline_rate') !== null" class="history-metric">基线 <strong>{{ formatPercent(summaryNumber(item, 'top_baseline_rate')) }}</strong></span>
+                <span v-if="summaryNumber(item, 'top_instrument_count') !== null" class="history-metric">覆盖 <strong>{{ summaryNumber(item, 'top_instrument_count') }}</strong> 只</span>
+              </div>
+              <div class="history-card-actions">
+                <button class="table-link" type="button" :disabled="historyLoading" :data-testid="`condition-history-load-${item.history_id}`" @click="loadHistoryDetail(item.history_id)">加载</button>
+                <button class="table-link danger-link" type="button" :disabled="historyLoading" :data-testid="`condition-history-remove-${item.history_id}`" @click="removeHistory(item.history_id)">删除</button>
+              </div>
+            </li>
+          </ul>
+          <div v-if="historyPageCount > 1" class="history-pagination" data-testid="condition-history-pagination">
+            <span>共 {{ history.length }} 条 · 第 {{ historyPage }} / {{ historyPageCount }} 页</span>
+            <div>
+              <button class="secondary-button" type="button" :disabled="historyPage <= 1" data-testid="condition-history-prev" @click="historyPage -= 1">上一页</button>
+              <button class="secondary-button" type="button" :disabled="historyPage >= historyPageCount" data-testid="condition-history-next" @click="historyPage += 1">下一页</button>
+            </div>
+          </div>
+        </template>
       </section>
     </main>
   </div>
@@ -1619,15 +1757,6 @@ onMounted(async () => {
 
 .condition-history {
   margin-top: 1.25rem;
-}
-
-.condition-history .compact-fields {
-  align-items: end;
-}
-
-.condition-history .compact-fields .load-history-button {
-  min-height: 40px;
-  margin-top: 0;
 }
 
 .condition-disclosure {

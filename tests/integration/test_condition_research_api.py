@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -134,6 +134,50 @@ def test_condition_research_job_returns_results_and_persists_history(tmp_path: P
     assert service.config.start_date == date(2020, 1, 1)
     assert service.config.end_date == date(2020, 4, 29)
     assert not hasattr(service.config, "max_positions")
+
+
+def test_condition_research_history_can_be_deleted_and_spares_other_types(
+    tmp_path: Path,
+) -> None:
+    """研究历史和回测共用一张表，删除必须先认类型。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.save_backtest_history(
+        "portfolio-1",
+        backtest_type="portfolio",
+        request={"universe": "all"},
+        result={"performance": {"total_return": 0.1}},
+        started_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        finished_at=datetime(2026, 1, 1, 0, 2, tzinfo=timezone.utc),
+    )
+    service = FakeConditionResearchService()
+    app = create_app(
+        market_data_store=store,
+        condition_research_service=service,
+        auto_sync_enabled=False,
+    )
+
+    with TestClient(app) as client:
+        created = client.post("/api/v1/condition-research", json=payload(tmp_path))
+        assert created.status_code == 202
+        job_id = created.json()["data"]["job_id"]
+        assert wait_for_job(client, job_id)["status"] == "completed"
+
+        assert client.delete("/api/v1/condition-research/history/portfolio-1").json() == {
+            "data": {"deleted": False}
+        }
+        assert client.delete("/api/v1/condition-research/history/missing").json() == {
+            "data": {"deleted": False}
+        }
+        # 别人的回测历史还好好的，不能被顺手删掉。
+        assert [item["history_id"] for item in store.list_backtest_history("portfolio")] == [
+            "portfolio-1"
+        ]
+
+        assert client.delete(f"/api/v1/condition-research/history/{job_id}").json() == {
+            "data": {"deleted": True}
+        }
+        assert client.get("/api/v1/condition-research/history").json()["data"] == []
 
 
 def test_condition_research_api_accepts_missing_sell_rule_as_hold_to_end(tmp_path: Path) -> None:

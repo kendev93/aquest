@@ -52,7 +52,7 @@ describe('swing research API', () => {
 
     await expect(
       runSwingIndicatorStudy({ labels: ['up_onset_ahead'], reversal_multiple: 3 }),
-    ).resolves.toEqual(data)
+    ).resolves.toEqual({ result: data, historyId: null })
 
     const [url, init] = fetchMock.mock.calls[0]
     expect(url).toBe('/api/v1/swing-research/indicator-study/stream')
@@ -79,14 +79,19 @@ describe('swing research API', () => {
       sseResponse([
         JSON.stringify({ type: 'progress', current: 1, total: 4, stage: '正在扫描交易日' }),
         JSON.stringify({ type: 'progress', current: 3, total: 4, stage: '正在逐日横截面打分' }),
-        JSON.stringify({ type: 'result', data: { scores: [1, 2] } }),
+        JSON.stringify({
+          type: 'result',
+          data: { scores: [1, 2] },
+          history_id: 'hist-9',
+        }),
       ]),
     )
 
     const seen: SwingProgress[] = []
     await expect(
       runSwingIndicatorStudy({}, (progress) => seen.push(progress)),
-    ).resolves.toEqual({ scores: [1, 2] })
+      // 后端自动存档的 id 要跟着结果回来，页面才能刷新历史列表。
+    ).resolves.toEqual({ result: { scores: [1, 2] }, historyId: 'hist-9' })
 
     expect(seen.map((item) => item.stage)).toEqual(['正在扫描交易日', '正在逐日横截面打分'])
     expect(seen[1].ratio).toBeCloseTo(0.75)
