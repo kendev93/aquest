@@ -151,10 +151,7 @@ def block_permutations(
     # the identity permutation and "confirm" whatever it was given.
     if day_count // size < 2:
         size = max(1, day_count // 2)
-    blocks = [
-        np.arange(start, min(start + size, day_count))
-        for start in range(0, day_count, size)
-    ]
+    blocks = [np.arange(start, min(start + size, day_count)) for start in range(0, day_count, size)]
     rng = np.random.default_rng(seed)
     permutations: list[np.ndarray] = []
     for _ in range(count):
@@ -240,7 +237,7 @@ def score_indicator(
 
     row_norms = (left * left).sum(axis=0)
     col_norms = (right * right).sum(axis=0)
-    overlap = (mask.astype(float).T @ mask.astype(float))
+    overlap = mask.astype(float).T @ mask.astype(float)
     gram = left.T @ right
 
     # r[t, u] is the rank correlation between day t's indicators and day u's

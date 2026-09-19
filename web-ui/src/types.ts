@@ -179,7 +179,8 @@ export interface ActiveJobState {
 }
 
 export interface MarketSyncResult {
-  source?: 'online' | 'online_discovery'
+  /** 日线来源：在线同步 online/online_discovery，通达信本地导入 local。 */
+  source?: 'online' | 'online_discovery' | 'local'
   /** 后端返回的字符串；历史记录里可能是已移除的 'tdx'。 */
   provider?: string
   status?: 'skipped'
@@ -221,6 +222,18 @@ export interface MarketSyncResult {
   failed?: number
   rows?: number
   catalog_counts?: Record<string, number>
+  /** 以下是通达信本地导入（source='local'）专用的键，在线同步不会返回。 */
+  vipdoc_path?: string
+  discovered_files?: number
+  selected_files?: number
+  filtered_files?: number
+  imported_instruments?: number
+  imported_bars?: number
+  replaced_bars?: number
+  skipped_files?: number
+  missing_files?: number
+  range_start?: string | null
+  range_end?: string | null
 }
 
 export interface MarketSyncJobState {

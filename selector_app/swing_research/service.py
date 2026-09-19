@@ -24,6 +24,7 @@ from selector_app.market_data.adapter import BatchMarketDataAdapter
 from selector_app.market_data.models import StockRef
 from selector_app.strategy_discovery.catalog import IndicatorCatalog, default_indicator_catalog
 
+from .conditions import build_condition_plan
 from .labels import LABEL_DISPLAY_NAMES, bar_labels
 from .models import MAX_PANEL_BYTES, SwingIndicatorConfig, SwingOverviewConfig
 from .overview import SwingAccumulator
@@ -205,6 +206,9 @@ class SwingResearchService:
                 "scores": [item.to_dict() for item in ordered],
                 "significant_count": significant_count,
                 "reason": _study_reason(ordered, significant_count),
+                # Ready-to-paste rules: the study's findings expressed in the
+                # shape the condition research consumes as its baseline.
+                "condition_plan": build_condition_plan(ordered),
             }
         )
         return payload
@@ -221,9 +225,7 @@ class SwingResearchService:
         catalog: IndicatorCatalog = default_indicator_catalog()
         technical = FORMULA_REGISTRY.formula("technical")
         available = {
-            value_id
-            for value_id in catalog.rankable_ids
-            if value_id.startswith("technical.")
+            value_id for value_id in catalog.rankable_ids if value_id.startswith("technical.")
         }
         if config.value_ids:
             requested = tuple(catalog.canonical_id(item) for item in config.value_ids)
@@ -267,9 +269,7 @@ class SwingResearchService:
             )
             if not frame.empty:
                 seen_days.update(pd.to_datetime(frame["date"]).unique())
-                for key in pd.unique(
-                    frame["market"].astype(str) + frame["code"].astype(str)
-                ):
+                for key in pd.unique(frame["market"].astype(str) + frame["code"].astype(str)):
                     if key not in rows:
                         rows[key] = len(rows)
             if progress_callback is not None:
@@ -417,9 +417,7 @@ def _study_reason(scores: list[IndicatorScore], significant: int) -> str | None:
     if not significant:
         if not scores:
             return "没有可用于评估的指标样本"
-        return (
-            "没有任何指标在多重检验校正后仍然显著，建议放宽区间或改用更大的波段阈值再试"
-        )
+        return "没有任何指标在多重检验校正后仍然显著，建议放宽区间或改用更大的波段阈值再试"
     if significant * 2 <= len(scores):
         return None
     # Twenty technical outputs are not twenty independent hypotheses: they are
@@ -459,9 +457,7 @@ def _write_stock(
         return False
 
     result = FORMULA_REGISTRY.formula("technical").calculate(group)
-    values = np.column_stack(
-        [np.asarray(result.values[name], dtype=float) for name in names]
-    )
+    values = np.column_stack([np.asarray(result.values[name], dtype=float) for name in names])
     segments = split_swings(
         group,
         reversal_multiple=config.reversal_multiple,
