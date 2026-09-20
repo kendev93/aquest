@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import sqlite3
 import time
 from collections import OrderedDict, deque
 from collections.abc import Iterable, Mapping, Sequence
@@ -547,7 +548,7 @@ class IndicatorCache:
                 )
             finally:
                 self._record_phase("_persistent_read_time_ms", started)
-        except RuntimeError:
+        except (RuntimeError, sqlite3.Error):
             return 0
         grouped: dict[tuple[str, ...], list[dict[str, object]]] = {}
         for row in rows:
@@ -844,7 +845,7 @@ class IndicatorCache:
                 )
             finally:
                 self._record_phase("_persistent_read_time_ms", started)
-        except RuntimeError:
+        except (RuntimeError, sqlite3.Error):
             return {}
 
     def _persistent_custom_get(self, key: _CustomCacheKey) -> dict[str, object] | None:
@@ -865,7 +866,7 @@ class IndicatorCache:
                 )
             finally:
                 self._record_phase("_persistent_read_time_ms", started)
-        except RuntimeError:
+        except (RuntimeError, sqlite3.Error):
             return None
 
     def _decode_chunks(
@@ -1010,9 +1011,9 @@ class IndicatorCache:
                 self._store.write_indicator_caches(pending)
             finally:
                 self._record_phase("_persistent_write_time_ms", started)
-        except RuntimeError:
-            # A read-only store can still serve correct results; persistence is
-            # an optimization and must not make a backtest fail.
+        except (RuntimeError, sqlite3.Error):
+            # 只读存储、以及 SQLite 后端的锁冲突/表缺失都属于「派生缓存不可用」：
+            # 结果仍然算得出来，缓存只是加速，不能反过来让同步或回测失败。
             return
 
     def _decode_custom_persistent(
@@ -1117,7 +1118,7 @@ class IndicatorCache:
                 )
             finally:
                 self._record_phase("_persistent_write_time_ms", started)
-        except RuntimeError:
+        except (RuntimeError, sqlite3.Error):
             return
 
     def _record_phase(self, attribute: str, started: float) -> None:

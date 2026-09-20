@@ -41,16 +41,8 @@ test('user can browse local instruments and switch chart periods', async ({ page
   await expect(page.getByTestId('market-candlestick-chart')).toBeVisible()
 })
 
-test('user can start an East Money full-history backfill', async ({ page }) => {
+test('user can start a full-history backfill', async ({ page }) => {
   let backfillRequest: unknown
-  await page.route('**/api/v1/market-data/capabilities', (route) => route.fulfill({ json: {
-    data: {
-      default_provider: 'eastmoney',
-      providers: {
-        eastmoney: { provider: 'eastmoney', available: true, version: 'builtin-http-1' },
-      },
-    },
-  } }))
   await page.route('**/api/v1/market-data/store', (route) => route.fulfill({ json: { data: {
     database_path: '/data/market/market.duckdb', schema_version: 12, instrument_count: 1,
     bar_count: 100, data_start: '2010-01-01', data_end: '2026-09-10',
@@ -69,15 +61,17 @@ test('user can start an East Money full-history backfill', async ({ page }) => {
   } } }))
 
   await page.goto('/market-data')
-  await page.getByTestId('market-eastmoney-backfill').click()
-  await expect(page.getByTestId('market-data-progress')).toContainText('eastmoney')
+  await page.getByTestId('market-online-backfill').click()
+  // 上游行情源是内部实现细节：结果里带着 provider，但界面不展示它。
+  await expect(page.getByTestId('market-data-progress')).toContainText('写入 K 线 100')
+  await expect(page.getByTestId('market-data-progress')).not.toContainText('eastmoney')
   // 回填现在把证券类型一起带过去，勾了 ETF 也能补齐。
   expect(backfillRequest).toEqual({ universe: 'all', instrument_types: ['stock'] })
 })
 
 test('user can see and cancel an active market-data job', async ({ page }) => {
   const activeJob = {
-    job_id: 'active-1', description: 'East Money历史全量回填', status: 'running', progress: 0.42,
+    job_id: 'active-1', description: '历史全量回填', status: 'running', progress: 0.42,
     total_candidates: 5219, total_scanned: 2190, errors: 0, error: null, worker_count: 8,
     phase: 'online_bars', metadata: {
       provider: 'eastmoney',
@@ -87,9 +81,6 @@ test('user can see and cancel an active market-data job', async ({ page }) => {
   }
   let activeReads = 0
   let cancelRequest: unknown
-  await page.route('**/api/v1/market-data/capabilities', (route) => route.fulfill({ json: {
-    data: { default_provider: 'eastmoney', providers: { eastmoney: { provider: 'eastmoney', available: true } } },
-  } }))
   await page.route('**/api/v1/market-data/store', (route) => route.fulfill({ json: { data: {
     database_path: '/data/market/market.duckdb', schema_version: 12, instrument_count: 1,
     bar_count: 100, data_start: '2010-01-01', data_end: '2026-09-10',

@@ -32,9 +32,25 @@ _SAMPLE = "\n".join(
 def test_parse_keeps_only_six_digit_sh_sz_codes() -> None:
     frame = fetch_all_securities(runner=lambda _day, _timeout: _SAMPLE)
 
-    assert list(frame.columns) == ["代码", "名称"]
+    assert list(frame.columns) == ["代码", "名称", "市场"]
     assert frame["代码"].tolist() == ["600000", "000001", "300750", "688001", "200001"]
     assert frame["名称"].tolist() == ["浦发银行", "平安银行", "宁德时代", "科创样本", "深市 B 股"]
+    assert frame["市场"].tolist() == ["SH", "SZ", "SZ", "SH", "SZ"]
+
+
+def test_parse_keeps_the_exchange_so_equal_codes_stay_distinct() -> None:
+    """sh.000001（上证指数）和 sz.000001（平安银行）代码数字完全相同。
+
+    丢掉交易所前缀后二者无法区分：下游按代码猜市场会把指数判成深市，再按
+    ``(市场, 代码)`` 去重时两只里的一只会被静默丢掉。
+    """
+
+    frame = fetch_all_securities(
+        runner=lambda _day, _timeout: "sh.000001\t1\t上证综合指数\nsz.000001\t1\t平安银行\n"
+    )
+
+    assert frame["代码"].tolist() == ["000001", "000001"]
+    assert frame["市场"].tolist() == ["SH", "SZ"]
 
 
 def test_parse_turns_a_blank_name_into_none() -> None:

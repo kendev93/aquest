@@ -230,6 +230,7 @@ def create_app(
                 market_sync=selected_market_sync,
                 precomputer=selected_precompute_service,
                 interval_seconds=selected_auto_sync_interval,
+                indicator_cache=selected_indicator_cache,
             )
             auto_sync_task = asyncio.create_task(
                 scheduler.run(

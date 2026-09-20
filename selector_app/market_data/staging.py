@@ -25,6 +25,17 @@ _DEFAULT_REQUEST_INTERVAL_SECONDS = 0.15
 _MIN_REQUEST_INTERVAL_SECONDS = 0.05
 _MAX_REQUEST_INTERVAL_SECONDS = 2.0
 _SUCCESS_STEP = 32
+# 限流状态是按 provider 分桶存的，每个桶有 5 个键。腾讯在 2026-09 提为日线主源后
+# 也必须有一份，否则 worker 第一次请求就会 KeyError——东财那个桶是历史遗留，
+# 只给它建状态会让「主源」反而没有限流记录。
+_RATE_LIMITED_PROVIDERS: tuple[MarketDataProvider, ...] = ("eastmoney", "tencent")
+_RATE_STATE_KEYS = (
+    "next_allowed_{provider}",
+    "interval_{provider}",
+    "successes_{provider}",
+    "rate_limit_events_{provider}",
+    "backoffs_{provider}",
+)
 _LATEST_COLUMNS = ("date", "open", "high", "low", "close", "volume", "amount", "bar_status")
 _STAGE_COLUMNS = (
     "market",
@@ -136,6 +147,7 @@ class ProcessRateGate:
         next_allowed_key = f"next_allowed_{provider}"
         interval_key = f"interval_{provider}"
         with self._lock:
+            _ensure_provider_state(self._state, provider)
             now = time.monotonic()
             delay = max(0.0, float(self._state[next_allowed_key]) - now)
             interval = max(
@@ -160,6 +172,7 @@ class ProcessRateGate:
         events_key = f"rate_limit_events_{provider}"
         backoffs_key = f"backoffs_{provider}"
         with self._lock:
+            _ensure_provider_state(self._state, provider)
             if throttled:
                 self._state[interval_key] = min(
                     _MAX_REQUEST_INTERVAL_SECONDS,
@@ -189,26 +202,49 @@ class ProcessRateGate:
 
 
 def create_rate_state(manager: Any) -> tuple[Any, Any]:
-    state = manager.dict(
-        {
-            "next_allowed_eastmoney": 0.0,
-            "interval_eastmoney": _DEFAULT_REQUEST_INTERVAL_SECONDS,
-            "successes_eastmoney": 0,
-            "rate_limit_events_eastmoney": 0,
-            "backoffs_eastmoney": 0,
-        }
-    )
-    return state, manager.Lock()
+    initial: dict[str, object] = {}
+    for provider in _RATE_LIMITED_PROVIDERS:
+        initial.update(_provider_state_defaults(provider))
+    return manager.dict(initial), manager.Lock()
+
+
+def _provider_state_defaults(provider: MarketDataProvider) -> dict[str, object]:
+    """One provider's five counters, ready to be merged into the shared state."""
+
+    return {
+        f"next_allowed_{provider}": 0.0,
+        f"interval_{provider}": _DEFAULT_REQUEST_INTERVAL_SECONDS,
+        f"successes_{provider}": 0,
+        f"rate_limit_events_{provider}": 0,
+        f"backoffs_{provider}": 0,
+    }
+
+
+def _ensure_provider_state(state: Any, provider: MarketDataProvider) -> None:
+    """Backfill a provider's counters if the state predates it.
+
+    状态字典由父进程创建、经 Manager 代理共享。旧进程（或将来新增的数据源）可能
+    带着没有某个 provider 的状态进来，这里补默认值，省得第一次请求就 KeyError。
+    """
+
+    if f"interval_{provider}" in state:
+        return
+    state.update(_provider_state_defaults(provider))
 
 
 def rate_state_snapshot(state: Any) -> dict[str, object]:
+    providers = tuple(_RATE_LIMITED_PROVIDERS) + tuple(
+        provider
+        for provider in ("baostock", "tdx")
+        if f"interval_{provider}" in state
+    )
     by_provider = {
         provider: {
             "request_interval_seconds": float(state[f"interval_{provider}"]),
             "rate_limit_events": int(state[f"rate_limit_events_{provider}"]),
             "backoffs": int(state[f"backoffs_{provider}"]),
         }
-        for provider in ("eastmoney",)
+        for provider in providers
     }
     return {
         "request_interval_seconds": max(

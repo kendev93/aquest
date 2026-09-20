@@ -24,6 +24,7 @@ from selector_app.indicators.precompute import (
     IndicatorPrecomputeService,
     should_defer_precompute,
 )
+from selector_app.market_data.models import stored_end_year
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.screening.jobs import (
     ProgressReporter,
@@ -42,7 +43,7 @@ MARKET_SYNC_JOB_DESCRIPTIONS = frozenset(
         "本地行情自动导入",
         "行情同步",
         "全市场行情同步",
-        "East Money历史全量回填",
+        "历史全量回填",
         AUTO_SYNC_DESCRIPTION,
     }
 )
@@ -56,6 +57,16 @@ ACTIVE_DATA_JOB_DESCRIPTIONS = frozenset(
 ACTIVE_SYNC_DESCRIPTIONS = ACTIVE_DATA_JOB_DESCRIPTIONS
 DEFAULT_AUTO_SYNC_INTERVAL_SECONDS = 15 * 60
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+
+
+class IndicatorCacheLike(Protocol):
+    """The slice of ``IndicatorCache`` the scheduler needs.
+
+    刻意只用 Protocol：``indicators.cache`` 反过来依赖 ``market_data.store``，
+    从本模块直接导入会把两个包锁成环。
+    """
+
+    def clear_memory(self) -> None: ...
 
 
 class MarketSyncService(Protocol):
@@ -96,6 +107,7 @@ class AutomaticMarketSyncScheduler:
         interval_seconds: float = DEFAULT_AUTO_SYNC_INTERVAL_SECONDS,
         enabled: bool = True,
         clock: Callable[[], datetime] | None = None,
+        indicator_cache: IndicatorCacheLike | None = None,
     ) -> None:
         if interval_seconds <= 0:
             raise ValueError("自动行情同步检查间隔必须大于 0")
@@ -103,6 +115,7 @@ class AutomaticMarketSyncScheduler:
         self._runner = runner
         self._market_sync = market_sync
         self._precomputer = precomputer
+        self._indicator_cache = indicator_cache
         # Kept as a compatibility-shaped constructor argument for embedders.
         # Automatic sync is online-only and must never inspect this path.
         del vipdoc_path
@@ -154,6 +167,14 @@ class AutomaticMarketSyncScheduler:
                 logger.exception("每日自动行情同步调度检查失败")
             await asyncio.sleep(self._interval_seconds)
 
+    def _drop_indicator_cache(self) -> None:
+        if self._indicator_cache is None:
+            return
+        try:
+            self._indicator_cache.clear_memory()
+        except Exception:  # noqa: BLE001 - cache is derived; never fail the sync
+            logger.exception("自动行情同步后清理指标缓存失败")
+
     def _has_active_auto_job(self) -> bool:
         if self._active_job_id is None:
             return False
@@ -190,6 +211,10 @@ class AutomaticMarketSyncScheduler:
         payload = result.to_dict() if isinstance(result, MarketSyncReport) else dict(result)
         if abort_check():
             raise TaskCancelledError("行情同步已取消")
+        # 行情已经写进库了，进程内的指标缓存和标的版本号副本必须一起丢掉，
+        # 否则「日期不变、数值变了」的重写会继续命中旧条目——自动同步每天都
+        # 可能触发这种重写。必须在预计算之前做：预计算也会读版本号。
+        self._drop_indicator_cache()
         try:
             store_status = self._store.status()
             if should_defer_precompute(store_status.bar_count):
@@ -207,6 +232,9 @@ class AutomaticMarketSyncScheduler:
                 precomputed = self._precomputer.run(
                     vipdoc_path=".",
                     progress_callback=progress,
+                    # 与手动同步同一套参数：增量补算 + 按行情库实际末年锚定。
+                    only_changed=True,
+                    end_year=stored_end_year(store_status),
                 )
                 payload["indicator_precompute"] = precomputed.to_dict()
         except Exception:  # noqa: BLE001 - derived cache failure must not hide a sync success

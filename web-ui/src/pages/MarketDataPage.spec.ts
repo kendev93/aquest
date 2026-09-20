@@ -15,7 +15,6 @@ vi.mock('../api/marketData', async () => {
     fetchLocalChart: vi.fn(),
     fetchStoreStatus: vi.fn(),
     fetchActiveMarketDataJobs: vi.fn(),
-    fetchMarketDataCapabilities: vi.fn(),
     createOnlineBackfill: vi.fn(),
     createOnlineSync: vi.fn(),
     createLocalImport: vi.fn(),
@@ -48,12 +47,6 @@ describe('MarketDataPage', () => {
       meta: { total: 2, page: 1, page_size: 50, pages: 1 },
     })
     vi.mocked(marketApi.fetchLocalChart).mockResolvedValue(chart)
-    vi.mocked(marketApi.fetchMarketDataCapabilities).mockResolvedValue({
-      default_provider: 'eastmoney',
-      providers: {
-        eastmoney: { provider: 'eastmoney', available: true, version: 'builtin-http-1', instrument_types: ['stock'] },
-      },
-    })
     vi.mocked(marketApi.fetchActiveMarketDataJobs).mockResolvedValue([])
     vi.mocked(marketApi.cancelMarketDataJob).mockResolvedValue({
       job_id: 'active-1',
@@ -154,28 +147,34 @@ describe('MarketDataPage', () => {
     expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('新增标的 3')
   })
 
-  it('syncs through East Money without offering a provider switch', async () => {
+  it('keeps the upstream data source out of the sync UI', async () => {
     vi.mocked(marketApi.createOnlineSync).mockResolvedValue({ job_id: 'online-2', status: 'queued' })
     vi.mocked(marketApi.getMarketDataJob).mockResolvedValue({
       job_id: 'online-2', status: 'completed', progress: 1, total_candidates: 0,
       total_scanned: 0, errors: 0, error: null, result: { source: 'online', provider: 'eastmoney' },
+      metadata: { provider: 'eastmoney', history_source: 'eastmoney' },
     })
     const wrapper = mount(MarketDataPage)
     await flushPromises()
 
-    // TDX 通道已移除，界面上不再有行情源单选。
-    expect(wrapper.find('[data-testid="market-provider-tdx"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="market-provider-eastmoney"]').exists()).toBe(false)
+    // 行情源属于内部实现细节，界面不暴露：进度面板和仓储元信息里都不该出现
+    // provider / 接口名（"East Money"、"eastmoney" 等）。
+    expect(wrapper.text()).not.toContain('East Money')
+    expect(wrapper.text()).not.toContain('eastmoney')
 
     await wrapper.get('[data-testid="market-sync-online"]').trigger('click')
     await flushPromises()
 
+    const progress = wrapper.get('[data-testid="market-data-progress"]').text()
+    expect(progress).not.toContain('eastmoney')
+    expect(progress).not.toContain('East Money')
+    expect(progress).not.toContain('数据源')
     expect(marketApi.createOnlineSync).toHaveBeenCalledWith(
       expect.not.objectContaining({ provider: expect.anything() }),
     )
   })
 
-  it('starts an East Money full-history backfill for the selected scope', async () => {
+  it('starts a full-history backfill for the selected scope', async () => {
     vi.mocked(marketApi.createOnlineBackfill).mockResolvedValue({ job_id: 'backfill-1', status: 'queued' })
     vi.mocked(marketApi.getMarketDataJob).mockResolvedValue({
       job_id: 'backfill-1', status: 'completed', progress: 1, total_candidates: 2,
@@ -185,7 +184,7 @@ describe('MarketDataPage', () => {
     await flushPromises()
 
     await wrapper.get('[data-testid="market-sync-board-main"]').setValue(true)
-    await wrapper.get('[data-testid="market-eastmoney-backfill"]').trigger('click')
+    await wrapper.get('[data-testid="market-online-backfill"]').trigger('click')
     await flushPromises()
 
     // 回填要把类型一起带过去：以前硬编码只发股票，勾了 ETF 也补不到。
@@ -226,7 +225,7 @@ describe('MarketDataPage', () => {
   it('restores active market-data jobs and allows cancelling one', async () => {
     vi.mocked(marketApi.fetchActiveMarketDataJobs).mockResolvedValueOnce([{
       job_id: 'active-1',
-      description: 'East Money历史全量回填',
+      description: '历史全量回填',
       status: 'running',
       progress: 0.42,
       total_candidates: 5219,
@@ -244,7 +243,7 @@ describe('MarketDataPage', () => {
     }]).mockResolvedValueOnce([])
     vi.mocked(marketApi.getMarketDataJob).mockResolvedValue({
       job_id: 'active-1',
-      description: 'East Money历史全量回填',
+      description: '历史全量回填',
       status: 'cancelled',
       progress: 0.42,
       total_candidates: 5219,
@@ -277,7 +276,7 @@ describe('MarketDataPage', () => {
     )
     vi.mocked(marketApi.fetchActiveMarketDataJobs).mockResolvedValueOnce([{
       job_id: 'active-store-write',
-      description: 'East Money历史全量回填',
+      description: '历史全量回填',
       status: 'running',
       progress: 0.1,
       total_candidates: 10,
@@ -360,7 +359,7 @@ describe('MarketDataPage', () => {
       await flushPromises()
 
       expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('正在刷新证券列表')
-      expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('等待 East Money 返回证券列表')
+      expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('等待在线证券列表返回')
 
       await vi.advanceTimersByTimeAsync(500)
       await flushPromises()

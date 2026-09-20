@@ -51,6 +51,7 @@ from selector_app.market_data.models import (
     InstrumentBoard,
     InstrumentType,
     MarketCode,
+    stored_end_year,
 )
 from selector_app.market_data.service import (
     ChartPeriod,
@@ -172,13 +173,7 @@ def _invalidate_indicator_cache(request: Request) -> None:
 def _stored_end_year(status: DataStoreStatus) -> int | None:
     """Calendar year of the newest stored bar, or None when the store is empty."""
 
-    raw = (status.data_end or "").strip()
-    if not raw:
-        return None
-    try:
-        return date.fromisoformat(raw[:10]).year
-    except ValueError:
-        return None
+    return stored_end_year(status)
 
 
 def _resolved_vipdoc_path(vipdoc_path: str | None) -> str:
@@ -455,7 +450,7 @@ def create_online_sync_job(payload: MarketSyncRequest, request: Request) -> JSON
 @router.post("/backfill", status_code=status.HTTP_202_ACCEPTED)
 def create_eastmoney_backfill_job(payload: MarketSyncRequest, request: Request) -> JSONResponse:
     if payload.provider != "eastmoney":
-        raise HTTPException(status_code=422, detail="East Money 全量回填必须使用 eastmoney 数据源")
+        raise HTTPException(status_code=422, detail="全量回填只支持在线日线通道")
     # 回填曾经硬编码只补股票，勾了 ETF 也补不到。现在尊重调用方传的类型，
     # 没传才回落到股票（东财的主战场），保持旧调用的行为不变。
     full_payload = payload.model_copy(
@@ -468,7 +463,7 @@ def create_eastmoney_backfill_job(payload: MarketSyncRequest, request: Request) 
     return _create_sync_job(
         full_payload,
         request,
-        description="East Money历史全量回填",
+        description="历史全量回填",
     )
 
 
@@ -678,7 +673,7 @@ def sync_job_status(job_id: str, request: Request) -> dict[str, object]:
     if state is None or state.description not in {
         "行情同步",
         "全市场行情同步",
-        "East Money历史全量回填",
+        "历史全量回填",
     }:
         raise HTTPException(status_code=404, detail="行情同步任务不存在或已过期")
     return {"data": state.snapshot()}

@@ -21,6 +21,23 @@ ResolvedMarketDataProvider = Literal["eastmoney", "tdx", "tencent", "baostock", 
 BarStatus = Literal["completed", "provisional"]
 
 
+def stored_end_year(status: DataStoreStatus) -> int | None:
+    """Calendar year of the newest stored bar, or None when the store is empty.
+
+    预计算按自然年分批，窗口终点不能取系统当前年份：行情库如果停在较早的年份，
+    「最近五年」会把最该算的那几年切掉。所有触发预计算的入口（手动同步、本地
+    导入、自动同步）都要走这里，保持一致。
+    """
+
+    raw = (status.data_end or "").strip()
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw[:10]).year
+    except ValueError:
+        return None
+
+
 @dataclass(frozen=True)
 class InstrumentRef:
     """Stable identity for one instrument in the local data store."""

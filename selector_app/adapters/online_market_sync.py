@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import time
 from collections import Counter
@@ -51,6 +52,8 @@ from .market_sync import (
     _instrument_detail,
     _report_detail,
 )
+
+logger = logging.getLogger(__name__)
 
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 _MARKET_CLOSE = (15, 5)
@@ -1228,11 +1231,31 @@ class OnlineMarketSync:
         timeout = max(float(config.timeout), _BAOSTOCK_CATALOG_MIN_TIMEOUT)
         try:
             frame = fetch_all_securities(timeout=timeout)
-        except (BaostockCatalogError, OnlineDataError):
+        except (BaostockCatalogError, OnlineDataError) as exc:
+            self._warn_catalog_unavailable(exc)
             return None, "eastmoney"
         if frame.empty:
+            self._warn_catalog_unavailable(None)
             return None, "eastmoney"
         return frame, "baostock"
+
+    @staticmethod
+    def _warn_catalog_unavailable(detail: BaseException | None) -> None:
+        """Log the one fallback that is not actually a fallback.
+
+        东财 ``clist`` 目录接口已被封禁（调研 2026-09-20 第二节），所以
+        「baostock 不可用 → 退回东财」在多数环境里等于「目录直接断供」。
+        静默退回会让人以为只是这一次运气不好，实际上同步只会覆盖库里已有的
+        标的。这里必须留下一条能看懂的告警，把补救命令一起写出来。
+        """
+
+        reason = f"（原因：{detail}）" if detail is not None else ""
+        logger.warning(
+            "证券目录源 baostock 不可用%s，已退回东方财富目录接口；"
+            "该接口目前处于封禁状态，本次同步可能拿不到新标的。"
+            "安装目录依赖后重试：pip install -e '.[catalog]'",
+            reason,
+        )
 
     def _latest_existing_bars(
         self,
@@ -1730,6 +1753,9 @@ def _selection_from_online_list(
         raise OnlineDataError("在线行情证券列表为空")
     code_column = _find_column(frame, ("代码", "code", "证券代码"))
     name_column = _find_column(frame, ("名称", "name", "证券简称"))
+    # baostock 这类目录会直接给出交易所；它能区分代码完全相同但分属两市的两只
+    # 标的（sh.000001 上证指数 / sz.000001 平安银行），比按代码猜可靠。
+    market_column = _find_column(frame, ("市场", "market", "交易所"))
     if code_column is None:
         raise OnlineDataError("在线行情证券列表缺少代码字段")
     scope = InstrumentScope.from_values(
@@ -1747,7 +1773,8 @@ def _selection_from_online_list(
         code = _clean_code(row.get(code_column))
         if code is None:
             continue
-        market = _market_for_online_code(code, instrument_type)
+        stated = _clean_market(row.get(market_column)) if market_column is not None else None
+        market = stated or _market_for_online_code(code, instrument_type)
         if market is None:
             continue
         classified_type = classify_instrument(market, code)
@@ -1837,6 +1864,33 @@ def _clean_name(value: object) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+def _clean_market(value: object) -> MarketCode | None:
+    """Normalize a catalog's explicit exchange into ``SH``/``SZ``.
+
+    目录里可能写成 ``SH``/``sh``/``sh.000001``/``上海``；认不出来就返回 None，
+    交给调用方按代码推断，不要让一个脏字段把整只标的丢掉。
+    """
+
+    if value is None:
+        return None
+    missing = pd.isna(value)
+    if isinstance(missing, (bool, np.bool_)) and bool(missing):
+        return None
+    text = str(value).strip().upper()
+    if not text:
+        return None
+    prefix = text.partition(".")[0]
+    if prefix in {"SH", "SZ"}:
+        return cast(MarketCode, prefix)
+    if prefix in {"XSHG", "XSHE"}:
+        return "SH" if prefix == "XSHG" else "SZ"
+    if "上海" in text or "SHANGHAI" in text:
+        return "SH"
+    if "深圳" in text or "SHENZHEN" in text:
+        return "SZ"
+    return None
 
 
 def _market_for_stock_code(code: str) -> MarketCode | None:

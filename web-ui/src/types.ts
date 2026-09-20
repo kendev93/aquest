@@ -252,37 +252,6 @@ export interface MarketSyncJobState {
   result: MarketSyncResult | null
 }
 
-export interface MarketDataProviderCapability {
-  provider: string
-  available: boolean
-  read_only?: boolean
-  version?: string | null
-  error?: string | null
-  instrument_types?: InstrumentType[]
-  boards?: InstrumentBoard[]
-  adjustments?: string[]
-  history?: string
-  history_sources?: string[]
-  fallback_policy?: string
-}
-
-export interface MarketDataCapabilities {
-  default_provider: string
-  read_only?: boolean
-  supports_full_sync?: boolean
-  database_path?: string
-  instrument_count?: number
-  sync_execution?: {
-    mode: string
-    worker_count: number
-    staging_directory?: string
-  }
-  last_online_provider?: string | null
-  last_online_provider_version?: string | null
-  instrument_list_fingerprint?: string | null
-  providers: Partial<Record<string, MarketDataProviderCapability>>
-}
-
 export interface DataStoreStatus {
   database_path: string
   schema_version: number

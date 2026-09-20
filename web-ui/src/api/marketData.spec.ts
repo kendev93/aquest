@@ -10,7 +10,6 @@ import {
   detectLocalVipdoc,
   fetchLocalChart,
   fetchLocalInstruments,
-  fetchMarketDataCapabilities,
   fetchActiveMarketDataJobs,
   fetchStoreStatus,
   getMarketDataJob,
@@ -148,26 +147,7 @@ describe('market data API', () => {
     })
   })
 
-  it('reads online market-data provider capabilities', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      new Response(JSON.stringify({
-        data: {
-          default_provider: 'eastmoney',
-          instrument_count: 5219,
-          providers: {
-            eastmoney: { provider: 'eastmoney', available: true, version: 'builtin-http-1' },
-          },
-        },
-      }), { status: 200 }),
-    )
-
-    await expect(fetchMarketDataCapabilities()).resolves.toMatchObject({
-      default_provider: 'eastmoney',
-      instrument_count: 5219,
-    })
-  })
-
-  it('starts an East Money full-history backfill', async () => {
+  it('starts a full-history backfill', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
       new Response(JSON.stringify({ data: { job_id: 'backfill-1', status: 'queued' } }), { status: 202 }),
     )

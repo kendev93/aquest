@@ -12,6 +12,8 @@ from selector_app.adapters import market_data_sync as market_data_sync_module
 from selector_app.adapters.market_data_sync import MarketDataSync
 from selector_app.adapters.market_sync import MarketSyncConfig
 from selector_app.market_data.staging import (
+    _DEFAULT_REQUEST_INTERVAL_SECONDS,
+    ProcessRateGate,
     ProviderStagePlan,
     StageTarget,
     StageWorkerRequest,
@@ -171,6 +173,53 @@ def test_process_rate_gate_backoffs_and_recovers_per_provider() -> None:
         recovered["by_provider"]["eastmoney"]["request_interval_seconds"]
         < backed_off["by_provider"]["eastmoney"]["request_interval_seconds"]
     )
+
+
+def test_process_rate_gate_tracks_the_tencent_source() -> None:
+    """腾讯是日线主源，限流状态里必须有它那一份。
+
+    只给东财建状态的话，worker 第一次请求就会 ``KeyError: next_allowed_tencent``，
+    整个进程池同步一起失败——而且崩溃前还会把请求误记到东财的桶里。
+    """
+
+    manager = multiprocessing.Manager()
+    try:
+        rate_state, rate_lock = create_rate_state(manager)
+        gate = ProcessRateGate(rate_state, rate_lock)
+        gate.wait("tencent")
+        gate.report(provider="tencent", success=False, throttled=True)
+        gate.wait("tencent")
+        snapshot = rate_state_snapshot(rate_state)
+    finally:
+        manager.shutdown()
+
+    assert snapshot["rate_limit_events"] == 1
+    assert snapshot["backoffs"] == 1
+    tencent = snapshot["by_provider"]["tencent"]
+    # 退避必须只作用在被限流的那个源上，东财的间隔不受影响。
+    assert tencent["request_interval_seconds"] > _DEFAULT_REQUEST_INTERVAL_SECONDS
+    assert (
+        snapshot["by_provider"]["eastmoney"]["request_interval_seconds"]
+        == _DEFAULT_REQUEST_INTERVAL_SECONDS
+    )
+
+
+def test_process_rate_gate_backfills_a_provider_missing_from_the_state() -> None:
+    """旧进程传来的状态可能缺某个 provider，不能让它直接 KeyError。"""
+
+    manager = multiprocessing.Manager()
+    try:
+        rate_state = manager.dict({"next_allowed_eastmoney": 0.0})
+        gate = ProcessRateGate(rate_state, manager.Lock())
+        gate.wait("tencent")
+        gate.report(provider="tencent", success=True)
+        interval = float(rate_state["interval_tencent"])
+        successes = int(rate_state["successes_tencent"])
+    finally:
+        manager.shutdown()
+
+    assert interval > 0
+    assert successes == 1
 
 
 def test_market_data_sync_merges_staged_worker_results(monkeypatch, tmp_path: Path) -> None:

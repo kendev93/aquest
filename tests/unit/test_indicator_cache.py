@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import time
 from dataclasses import replace
 from datetime import date, datetime
@@ -774,3 +775,38 @@ def test_sqlite_backend_reports_status_and_stale_symbols(tmp_path: Path) -> None
     removed = store.clear_indicator_caches()
     assert removed["builtin_entries"] >= 1
     assert store.indicator_cache_status()["total_entries"] == 0
+
+
+def test_a_sqlite_outage_degrades_to_computing_instead_of_failing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SQLite 后端的锁冲突/表缺失属于派生缓存故障，不能打断同步或回测。
+
+    ``sqlite3.Error`` 不是 ``RuntimeError`` 的子类，只捕 RuntimeError 会让
+    "database is locked" 一路冒到调用方。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    cache = IndicatorCache(store)
+    frame = _bars(80)
+
+    def locked(*_args: object, **_kwargs: object) -> None:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(store._indicator_cache, "write_indicator_caches", locked)
+    monkeypatch.setattr(store._indicator_cache, "read_indicator_caches", locked)
+
+    result = cache.get_or_compute(frame, ("price",), market="SH", code="600000")["price"]
+
+    assert np.allclose(result.values["close"], np.asarray(frame["close"], dtype=float))
+
+    # 自定义公式走另一条读写路径，同样要能降级。
+    custom = cache.get_or_compute_custom(
+        frame,
+        parse_formula("N:=5; BUY:CROSS(C,REF(C,N)); RANK:MA(C,N);"),
+        None,
+        market="SH",
+        code="600000",
+    )
+    assert "custom" in custom

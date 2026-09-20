@@ -502,8 +502,8 @@ class MarketDataSync:
         eastmoney_types = _eastmoney_types(config)
         if not eastmoney_types:
             raise OnlineProviderError(
-                "East Money 当前只支持主板、科创板、创业板股票和场内基金；"
-                "指数与债券没有可用的在线 K 线数据源。"
+                "在线同步当前只支持主板、科创板、创业板股票和场内基金；"
+                "指数与债券没有可用的在线 K 线。"
             )
         return [
             (
@@ -684,9 +684,9 @@ def _validate_eastmoney_scope(config: MarketSyncConfig) -> None:
     if unsupported_types or unsupported_boards:
         unsupported = sorted({*unsupported_types, *unsupported_boards})
         raise OnlineProviderError(
-            "East Money 当前仅支持主板、科创板、创业板股票和场内基金；"
+            "在线同步当前仅支持主板、科创板、创业板股票和场内基金；"
             f"当前范围包含不支持的品种/板块: {', '.join(unsupported)}，"
-            "指数与债券暂无在线 K 线数据源。"
+            "指数与债券没有可用的在线 K 线。"
         )
     # Both sides can be legal on their own and still describe nothing: 基金 +
     # 主板 passes both set checks, then resolves to zero targets and the job

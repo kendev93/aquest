@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -17,7 +18,11 @@ from selector_app.adapters.online_market_sync import (
     _ExistingBars,
     _requested_ranges,
 )
-from selector_app.market_data.staging import StageTarget
+from selector_app.market_data.staging import (
+    ProcessRateGate,
+    StageTarget,
+    create_rate_state,
+)
 from selector_app.market_data.store import DuckDbMarketDataStore
 
 _NOW = datetime(2026, 9, 12, 16, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
@@ -424,6 +429,70 @@ def test_baostock_catalog_serves_stock_and_fund_from_one_frame(
     assert module.catalog_requests == []
 
 
+def test_baostock_index_codes_do_not_collide_with_same_numbered_stocks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """上证指数 sh.000001 不能被当成平安银行 sz.000001。
+
+    baostock 目录里两市代码会撞车；带着交易所进来后，指数会被正确分类成
+    ``index`` 从而不进入股票标的，深市那只个股也才不会被去重丢掉。
+    """
+
+    monkeypatch.setattr(
+        online_market_sync_module,
+        "fetch_all_securities",
+        lambda **_kwargs: pd.DataFrame(
+            [
+                {"代码": "000001", "名称": "上证综合指数", "市场": "SH"},
+                {"代码": "000001", "名称": "平安银行", "市场": "SZ"},
+                {"代码": "399001", "名称": "深证成份指数", "市场": "SZ"},
+                {"代码": "600000", "名称": "浦发银行", "市场": "SH"},
+            ]
+        ),
+    )
+    module = RecordingOnline()
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+
+    report = OnlineMarketSync(
+        store=store,
+        module_factory=lambda: module,
+        clock=lambda: _NOW,
+    ).discover_instruments(_config())
+
+    instruments = {(ref.market, ref.code, ref.name) for ref in store.list_instruments()}
+    assert instruments == {("SH", "600000", "浦发银行"), ("SZ", "000001", "平安银行")}
+    # 两只指数都不该混进股票池，更不能把上证指数记成深市。
+    assert report.listed_instruments == 2
+
+
+def test_a_catalog_without_a_market_column_still_infers_by_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """东财目录只有代码列，缺市场列时必须退回按代码推断。"""
+
+    monkeypatch.setattr(
+        online_market_sync_module,
+        "fetch_all_securities",
+        lambda **_kwargs: pd.DataFrame(
+            [{"代码": "600000", "名称": "浦发银行"}, {"代码": "000001", "名称": "平安银行"}]
+        ),
+    )
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+
+    OnlineMarketSync(
+        store=store,
+        module_factory=lambda: RecordingOnline(),
+        clock=lambda: _NOW,
+    ).discover_instruments(_config())
+
+    assert {(ref.market, ref.code) for ref in store.list_instruments()} == {
+        ("SH", "600000"),
+        ("SZ", "000001"),
+    }
+
+
 def test_catalog_falls_back_to_eastmoney_when_baostock_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -445,6 +514,36 @@ def test_catalog_falls_back_to_eastmoney_when_baostock_fails(
 
     assert report.target_source == "eastmoney_stock_list"
     assert {ref.code for ref in store.list_instruments()} == {"000001", "600000", "688001"}
+
+
+def test_a_broken_catalog_source_warns_instead_of_failing_silently(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """退回东财目录不能是静默的。
+
+    东财 clist 处于封禁状态，「退回」实际上等于目录断供：同步照常报成功，
+    但只会覆盖库里已有的标的。必须留一条能看懂的告警。
+    """
+
+    def refuse(**_kwargs: object) -> pd.DataFrame:
+        raise BaostockCatalogError("未安装可选依赖 baostock")
+
+    monkeypatch.setattr(online_market_sync_module, "fetch_all_securities", refuse)
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+
+    with caplog.at_level("WARNING", logger="selector_app.adapters.online_market_sync"):
+        OnlineMarketSync(
+            store=store,
+            module_factory=lambda: FakeOnline(),
+            clock=lambda: _NOW,
+        ).discover_instruments(_config())
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("baostock 不可用" in message for message in messages), messages
+    # 告警里要给出补救办法，否则看到的人不知道该装什么。
+    assert any("[catalog]" in message for message in messages), messages
 
 
 def test_catalog_sources_can_be_pinned_to_eastmoney(tmp_path: Path) -> None:
@@ -617,6 +716,54 @@ def test_eastmoney_stage_fetch_normalizes_without_writing_main_store(tmp_path: P
     assert store.status().bar_count == 0
 
 
+def test_staged_tencent_request_uses_the_shared_rate_gate(tmp_path: Path) -> None:
+    """进程池同步里，腾讯请求必须能被共享限流状态接纳。
+
+    这是线上真实组合：staging worker 把 ``ProcessRateGate`` 传给 ``fetch_stage_target``，
+    而腾讯是主源，第一个被 wait 的就是它。状态里只建了东财时会 KeyError，
+    而 worker 会把每个标的都记成 error，表现为「全市场同步全部失败」。
+    """
+
+    class _FakeManager:
+        def dict(self, initial: dict[str, object]) -> dict[str, object]:
+            return dict(initial)
+
+        def Lock(self) -> threading.Lock:
+            return threading.Lock()
+
+    module = BothSourcesOnline()
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    service = OnlineMarketSync(
+        store=store,
+        module_factory=lambda: module,
+        clock=lambda: _NOW,
+        sleep=lambda _seconds: None,
+    )
+    target = StageTarget(
+        provider="eastmoney",
+        market="SH",
+        code="600000",
+        instrument_type="stock",
+        board="main",
+        name="浦发银行",
+        requested_ranges=((date(1990, 1, 1), date(2026, 9, 12)),),
+        existing_first_date=None,
+        existing_last_date=None,
+        existing_bar_count=0,
+        existing_latest_rows=(),
+    )
+    rate_state, rate_lock = create_rate_state(_FakeManager())
+    gate = ProcessRateGate(rate_state, rate_lock)
+
+    result = service.fetch_stage_target(target, _config(), rate_gate=gate)
+
+    assert result.status == "updated"
+    assert result.history_source == "tencent"
+    # 腾讯真的占了限流状态的名额，而不是被记到东财桶里。
+    assert float(rate_state["next_allowed_tencent"]) > 0
+    assert float(rate_state["next_allowed_eastmoney"]) == 0.0
+
+
 def test_eastmoney_provider_rejects_invalid_ohlc_rows(tmp_path: Path) -> None:
     class InvalidOnline(FakeOnline):
         def fetch_daily_history(
@@ -718,7 +865,7 @@ def test_eastmoney_mode_rejects_explicitly_unsupported_instrument_scope(tmp_path
 
     # Stocks and exchange-traded funds are served by East Money; bonds and
     # indexes have no online daily-bar source at all.
-    with pytest.raises(OnlineProviderError, match="暂无在线"):
+    with pytest.raises(OnlineProviderError, match="在线同步当前仅支持"):
         service.discover_instruments(MarketSyncConfig(instrument_types=("bond",), sync_workers=1))
 
 

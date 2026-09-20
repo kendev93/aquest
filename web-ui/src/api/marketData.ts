@@ -8,7 +8,6 @@ import type {
   LocalMarketChart,
   LocalMarketScope,
   LocalVipdocCandidate,
-  MarketDataCapabilities,
   MarketChartPeriod,
 } from '../types'
 import type { MarketSyncJobState, MarketSyncResult } from '../types'
@@ -93,11 +92,6 @@ export async function fetchLocalChart(query: LocalChartQuery): Promise<LocalMark
 
 export async function fetchStoreStatus(): Promise<DataStoreStatus> {
   const response = await request<{ data: DataStoreStatus }>(`${API_BASE}/store`)
-  return response.data
-}
-
-export async function fetchMarketDataCapabilities(): Promise<MarketDataCapabilities> {
-  const response = await request<{ data: MarketDataCapabilities }>(`${API_BASE}/capabilities`)
   return response.data
 }
 

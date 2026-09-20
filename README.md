@@ -63,7 +63,7 @@
 python3 -m venv .venv
 source .venv/bin/activate              # Windows: .venv\\Scripts\\activate
 python -m pip install --upgrade -r requirements.lock
-python -m pip install -e ".[dev]"
+python -m pip install -e ".[dev,catalog]"
 ```
 
 启动后端：
@@ -140,7 +140,22 @@ python3 scripts/build_nuitka.py --jobs 4
 
 ## 行情配置
 
-行情从在线数据源（East Money，免费无需密钥）同步股票和场内基金日线并写入本机数据库。同步会先检查本地覆盖范围，自动跳过完整区间并补齐缺失区间。指数与债券没有可用的在线 K 线源。
+行情按用途分两层取源（选型实测见 `docs/datasource-survey-2026-09-20.md`）：
+
+- **日线**：腾讯日 K 为主源，东方财富作为容错备用。两者都免费、无需密钥。
+- **证券目录**：baostock 的 `query_all_stock`（可选依赖，见下），东方财富目录接口兜底。
+
+同步会先检查本地覆盖范围，自动跳过完整区间并补齐缺失区间。指数与债券没有可用的在线 K 线源。
+
+#### 证券目录依赖（`catalog`）
+
+东方财富的 `clist` 目录接口已被封禁，全市场标的发现现在主要靠 baostock。它放在可选依赖 `catalog` 里：
+
+```bash
+python -m pip install -e ".[dev,catalog]"   # 上面「快速开始」里已经带上
+```
+
+没装也能正常启动，只是目录会退回东方财富——**而那个接口目前是封禁状态，所以表现是「同步成功但拿不到新标的」**，日志里会有明确告警。Docker 镜像已默认安装。
 
 ### 导入通达信日线（可选）
 
@@ -357,7 +372,7 @@ sh scripts/install_hooks.sh
 
 ```bash
 python -m pip install --upgrade -r requirements.lock
-python -m pip install -e ".[dev]"
+python -m pip install -e ".[dev,catalog]"
 cd web-ui
 npm ci
 npx playwright install --with-deps chromium

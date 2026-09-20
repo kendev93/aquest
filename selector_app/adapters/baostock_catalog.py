@@ -140,10 +140,11 @@ def fetch_all_securities(
     timeout: float = _DEFAULT_TIMEOUT_SECONDS,
     runner: CatalogRunner | None = None,
 ) -> pd.DataFrame:
-    """Return the whole SH/SZ security catalog as ``代码``/``名称`` rows.
+    """Return the whole SH/SZ security catalog as ``代码``/``名称``/``市场`` rows.
 
-    返回的帧与东方财富目录同构，可以直接喂给 ``_selection_from_eastmoney_list``。
-    北京证券交易所的标的会被丢掉——行情库与回测契约目前都是 SH/SZ 两市。
+    返回的帧与东方财富目录同构（多一列 ``市场``），可以直接喂给
+    ``_selection_from_online_list``。北京证券交易所的标的会被丢掉——行情库与
+    回测契约目前都是 SH/SZ 两市。
     """
 
     if timeout <= 0:
@@ -198,10 +199,13 @@ def _parse_catalog(raw: str) -> pd.DataFrame:
             continue
         raw_name = fields[_NAME_COLUMN].strip() if len(fields) > _NAME_COLUMN else ""
         name = raw_name or None
-        rows.append({"代码": code, "名称": name})
+        # 交易所前缀必须带出去：sh.000001（上证指数）和 sz.000001（平安银行）的
+        # 数字部分完全相同，丢掉前缀后只能靠代码猜市场，猜错就会把指数挂到个股
+        # 上、并且因为按 (市场, 代码) 去重而把另一只静默丢掉。
+        rows.append({"代码": code, "名称": name, "市场": market})
     if not rows:
         raise BaostockUnavailable("baostock 证券目录为空")
-    return pd.DataFrame(rows, columns=["代码", "名称"])
+    return pd.DataFrame(rows, columns=["代码", "名称", "市场"])
 
 
 def _market_for_symbol(symbol: str) -> str | None:

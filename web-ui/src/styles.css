@@ -158,8 +158,6 @@ input:focus, select:focus { border-color: var(--accent); }
 .sync-current-heading > span:last-child { margin-left: auto; color: var(--accent); font-size: 9px; }
 .sync-current-meta { margin-top: 5px; color: var(--subtle); font-size: 9px; }
 .sync-current-meta strong { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 500; }
-.sync-current-source { margin-top: 5px; color: var(--subtle); font-size: 9px; }
-.sync-current-source strong { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 500; }
 .sync-result-stats { justify-content: flex-start; flex-wrap: wrap; margin-top: 8px; color: var(--muted); font-size: 9px; }
 .auto-sync-status { display: flex; align-items: center; gap: 9px; margin-top: 10px; padding: 9px 10px; border: 1px solid rgba(86, 105, 140, 0.35); background: rgba(11, 21, 43, 0.58); }
 .auto-sync-status.shared { border-color: rgba(96, 165, 250, 0.55); background: rgba(30, 64, 115, 0.22); }

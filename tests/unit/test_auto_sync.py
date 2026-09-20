@@ -124,3 +124,118 @@ def test_auto_sync_submits_one_online_refresh_per_day() -> None:
     assert config.prefer_store_targets is False
     assert config.refresh_names is False
     assert payload["written_bars"] == 1
+
+
+def test_auto_sync_invalidates_the_cache_and_precomputes_incrementally() -> None:
+    """自动同步也要走手动同步那套：清内存缓存 + 增量 + 按行情末年锚定。
+
+    少了清缓存这一步，同日重写行情后指标缓存会继续返回旧值；少了
+    ``end_year``，历史数据停在较早年份时「最近五年」会少算早期年份。
+    """
+
+    today = datetime(2026, 9, 1, 9, 0, tzinfo=SHANGHAI)
+
+    class Store:
+        def status(self):
+            return SimpleNamespace(
+                instrument_count=1,
+                bar_count=10,
+                data_end="2024-06-30",
+                last_online_sync_at=None,
+            )
+
+    class Runner:
+        def has_active_jobs(self, descriptions):
+            del descriptions
+            return False
+
+        def get(self, job_id):
+            del job_id
+            return None
+
+        def is_cancel_requested(self, job_id):
+            del job_id
+            return False
+
+    class Sync:
+        def sync(self, config, progress_callback=None, *, detail_callback=None, abort_check=None):
+            del config, progress_callback, detail_callback, abort_check
+            return {"written_bars": 1, "errors": 0}
+
+    class Precomputer:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def run(self, **kwargs):
+            self.calls.append(kwargs)
+            return SimpleNamespace(to_dict=lambda: {"status": "completed"})
+
+    class Cache:
+        def __init__(self) -> None:
+            self.cleared = 0
+
+        def clear_memory(self) -> None:
+            self.cleared += 1
+
+    precomputer = Precomputer()
+    cache = Cache()
+    scheduler = AutomaticMarketSyncScheduler(
+        store=Store(),
+        runner=Runner(),
+        market_sync=Sync(),
+        precomputer=precomputer,
+        clock=lambda: today,
+        indicator_cache=cache,
+    )
+
+    scheduler._run_sync(lambda done, total: None)
+
+    assert cache.cleared == 1
+    assert precomputer.calls[0]["only_changed"] is True
+    # 行情库停在 2024 年，窗口终点就不能是系统当前年份。
+    assert precomputer.calls[0]["end_year"] == 2024
+
+
+def test_auto_sync_precompute_failure_does_not_fail_the_sync() -> None:
+    """缓存清理本身也不能把同步拖垮。"""
+
+    today = datetime(2026, 9, 1, 9, 0, tzinfo=SHANGHAI)
+
+    class Store:
+        def status(self):
+            return SimpleNamespace(
+                instrument_count=1,
+                bar_count=PRECOMPUTE_MAX_BARS + 1,
+                last_online_sync_at=None,
+            )
+
+    class Runner:
+        def has_active_jobs(self, descriptions):
+            del descriptions
+            return False
+
+        def is_cancel_requested(self, job_id):
+            del job_id
+            return False
+
+    class Sync:
+        def sync(self, config, progress_callback=None, *, detail_callback=None, abort_check=None):
+            del config, progress_callback, detail_callback, abort_check
+            return {"written_bars": 1, "errors": 0}
+
+    class ExplodingCache:
+        def clear_memory(self) -> None:
+            raise RuntimeError("cache poisoned")
+
+    scheduler = AutomaticMarketSyncScheduler(
+        store=Store(),
+        runner=Runner(),
+        market_sync=Sync(),
+        precomputer=object(),
+        clock=lambda: today,
+        indicator_cache=ExplodingCache(),
+    )
+
+    payload = scheduler._run_sync(lambda done, total: None)
+
+    assert payload["written_bars"] == 1
