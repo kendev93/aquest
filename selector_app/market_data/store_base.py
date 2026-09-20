@@ -334,6 +334,7 @@ class _DuckDbStoreBase:
                     formula_id VARCHAR NOT NULL,
                     formula_version VARCHAR NOT NULL,
                     data_fingerprint VARCHAR NOT NULL,
+                    bar_offset BIGINT NOT NULL,
                     data_start DATE,
                     data_end DATE,
                     data_length BIGINT NOT NULL,
@@ -342,11 +343,47 @@ class _DuckDbStoreBase:
                     computed_at TIMESTAMP NOT NULL,
                     PRIMARY KEY (
                         market, code, timeframe, price_basis, formula_id,
-                        formula_version, data_fingerprint
+                        formula_version, data_fingerprint, bar_offset
                     )
                 )
                 """
             )
+            # 缓存按自然年分块后主键多了 bar_offset。旧行没有这一列，且块边界与
+            # 新布局不兼容（旧的一行就是全历史），留着只会占空间——缓存是可重建
+            # 的派生数据，直接整表重建比逐行转换简单也安全。
+            cache_columns = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = 'main' AND table_name = 'indicator_cache'"
+                ).fetchall()
+            }
+            if cache_columns and "bar_offset" not in cache_columns:
+                connection.execute("DROP TABLE indicator_cache")
+                connection.execute(
+                    """
+                    CREATE TABLE indicator_cache (
+                        market VARCHAR NOT NULL,
+                        code VARCHAR NOT NULL,
+                        timeframe VARCHAR NOT NULL,
+                        price_basis VARCHAR NOT NULL,
+                        formula_id VARCHAR NOT NULL,
+                        formula_version VARCHAR NOT NULL,
+                        data_fingerprint VARCHAR NOT NULL,
+                        bar_offset BIGINT NOT NULL,
+                        data_start DATE,
+                        data_end DATE,
+                        data_length BIGINT NOT NULL,
+                        values_blob BLOB NOT NULL,
+                        signals_blob BLOB NOT NULL,
+                        computed_at TIMESTAMP NOT NULL,
+                        PRIMARY KEY (
+                            market, code, timeframe, price_basis, formula_id,
+                            formula_version, data_fingerprint, bar_offset
+                        )
+                    )
+                    """
+                )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS custom_indicator_cache (

@@ -286,6 +286,100 @@ def test_precompute_service_materializes_all_builtin_formulas(tmp_path: Path) ->
     assert cold_cache.metrics()["computed"] == 0
 
 
+def test_cache_persists_one_chunk_per_calendar_year(tmp_path: Path) -> None:
+    """缓存按自然年分块，块之间首尾相接且覆盖整个序列。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    frame = _bars(800)  # 2024-01-01 起 800 天，跨 2024 / 2025 / 2026 三个自然年
+    store.replace_local_bars("SH", "600000", "stock", frame)
+    IndicatorCache(store).get_or_compute(
+        store.read_bars("SH", "600000"), ("indicator_three",), market="SH", code="600000"
+    )
+
+    with store._connect(read_only=True) as connection:
+        rows = connection.execute(
+            "SELECT bar_offset, data_length FROM indicator_cache ORDER BY bar_offset"
+        ).fetchall()
+    assert len(rows) == 3
+    cursor = 0
+    for offset, length in rows:
+        assert offset == cursor
+        cursor += length
+    assert cursor == len(frame)
+
+
+def test_window_request_reuses_cache_without_recomputing(tmp_path: Path) -> None:
+    """请求最近若干根时命中缓存，且不必把整个序列重算一遍。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars(800))
+    calls: dict[str, int] = {}
+    registry = _counting_registry(calls)
+    full = store.read_bars("SH", "600000")
+
+    IndicatorCache(store, registry=registry).get_or_compute(
+        full, ("indicator_three",), market="SH", code="600000"
+    )
+    assert calls["indicator_three"] == 1
+
+    short = full.iloc[-60:].reset_index(drop=True)
+    result = IndicatorCache(store, registry=registry).get_or_compute(
+        short, ("indicator_three",), market="SH", code="600000"
+    )["indicator_three"]
+
+    assert calls["indicator_three"] == 1
+    assert result.data_length == 60
+
+
+def test_values_blob_is_persisted_as_float32(tmp_path: Path) -> None:
+    """落库用 float32：体积约为 float64 的一半，读回来仍是 float64。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars(400))
+    cache = IndicatorCache(store)
+    frame = store.read_bars("SH", "600000")
+    computed = cache.get_or_compute(frame, ("technical",), market="SH", code="600000")[
+        "technical"
+    ]
+
+    columns = len(FORMULA_REGISTRY.formula("technical").value_names)
+    with store._connect(read_only=True) as connection:
+        bars, blob_bytes = connection.execute(
+            "SELECT SUM(data_length), SUM(octet_length(values_blob)) FROM indicator_cache"
+        ).fetchone()
+    expected_float32 = bars * columns * 4
+    # 每块有 .npy 头，留一点余量；关键是明显小于 float64 的两倍体积。
+    assert expected_float32 <= blob_bytes <= expected_float32 + 1024
+    assert blob_bytes < expected_float32 * 1.5
+    assert np.asarray(next(iter(computed.values.values()))).dtype == np.float64
+
+
+def test_precompute_only_changed_skips_fresh_instruments(tmp_path: Path) -> None:
+    """只补算缓存缺失或过期的标的：第二轮不应重复处理已经算过的。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    for code in ("600000", "600001"):
+        store.replace_local_bars("SH", code, "stock", _bars(400))
+    adapter = DuckDbMarketDataAdapter(store)
+    cache = IndicatorCache(store)
+    service = IndicatorPrecomputeService(adapter=adapter, cache=cache)
+
+    first = service.run(vipdoc_path=str(tmp_path), universe="all", only_changed=True)
+    assert first.total_candidates == 2
+    assert first.processed == 2
+
+    # 第二轮的候选集合是空的：两个标的的缓存都还在有效期内。
+    second = service.run(vipdoc_path=str(tmp_path), universe="all", only_changed=True)
+    assert second.total_candidates == 0
+    assert second.processed == 0
+
+    # 行情一变，版本号随之变化，该标的重新进入待算集合。
+    changed = _bars(410)
+    store.replace_local_bars("SH", "600000", "stock", changed)
+    third = service.run(vipdoc_path=str(tmp_path), universe="all", only_changed=True)
+    assert third.processed == 1
+
+
 def test_precompute_uses_eight_workers_for_independent_instruments(tmp_path: Path) -> None:
     refs = [
         StockRef(

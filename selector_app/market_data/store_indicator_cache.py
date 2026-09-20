@@ -84,16 +84,16 @@ class DuckDbIndicatorCacheStore:
         formula_id: str,
         formula_version: str,
         data_fingerprint: str,
-    ) -> dict[str, object] | None:
-        """Read one immutable, versioned indicator result from DuckDB."""
+    ) -> list[dict[str, object]]:
+        """Read every stored chunk of one immutable, versioned indicator result."""
 
         try:
             with self._store._connect(read_only=True) as connection:
-                row = connection.execute(
+                rows = connection.execute(
                     """
                     SELECT market, code, timeframe, price_basis, formula_id,
-                           formula_version, data_fingerprint, data_start, data_end,
-                           data_length, values_blob, signals_blob, computed_at
+                           formula_version, data_fingerprint, bar_offset, data_start,
+                           data_end, data_length, values_blob, signals_blob, computed_at
                     FROM indicator_cache
                     WHERE market = ?
                       AND code = ?
@@ -102,6 +102,7 @@ class DuckDbIndicatorCacheStore:
                       AND formula_id = ?
                       AND formula_version = ?
                       AND data_fingerprint = ?
+                    ORDER BY bar_offset
                     """,
                     [
                         market.strip().upper(),
@@ -112,13 +113,13 @@ class DuckDbIndicatorCacheStore:
                         formula_version,
                         data_fingerprint,
                     ],
-                ).fetchone()
+                ).fetchall()
         except duckdb.CatalogException:
             # A read-only connection opened against a pre-cache database can
             # still serve source bars; treat the absent derived table as miss.
-            return None
-        if row is None:
-            return None
+            return []
+        if not rows:
+            return []
         keys = [
             "market",
             "code",
@@ -127,6 +128,7 @@ class DuckDbIndicatorCacheStore:
             "formula_id",
             "formula_version",
             "data_fingerprint",
+            "bar_offset",
             "data_start",
             "data_end",
             "data_length",
@@ -134,7 +136,7 @@ class DuckDbIndicatorCacheStore:
             "signals_blob",
             "computed_at",
         ]
-        return dict(zip(keys, row, strict=True))
+        return [dict(zip(keys, row, strict=True)) for row in rows]
 
     def read_indicator_caches(
         self,
@@ -145,8 +147,15 @@ class DuckDbIndicatorCacheStore:
         price_basis: str,
         data_fingerprint: str,
         formula_versions: Mapping[str, str],
-    ) -> dict[str, dict[str, object]]:
-        """Read several formula generations for one series in one connection."""
+        min_end_date: date | None = None,
+    ) -> dict[str, list[dict[str, object]]]:
+        """Read several formula generations for one series in one connection.
+
+        缓存按自然年分块存放，一个公式对应多行。`min_end_date` 让调用方只取覆盖
+        请求窗口的那几块——读最近 250 根不必把 5 年的 blob 都读出来。这里按日期
+        而不是按根数过滤：缓存可能只覆盖最近几年，块的下标基准和「全历史」并不
+        一致，日期才是两边都能对齐的坐标。
+        """
 
         if not formula_versions:
             return {}
@@ -161,12 +170,16 @@ class DuckDbIndicatorCacheStore:
         for formula_id, formula_version in formula_versions.items():
             predicates.append("(formula_id = ? AND formula_version = ?)")
             parameters.extend([formula_id, formula_version])
+        window = " AND data_end >= ?" if min_end_date is not None else ""
+        if window:
+            parameters.append(min_end_date)
         query = (
             "SELECT market, code, timeframe, price_basis, formula_id, formula_version, "
-            "data_fingerprint, data_start, data_end, data_length, values_blob, "
+            "data_fingerprint, bar_offset, data_start, data_end, data_length, values_blob, "
             "signals_blob, computed_at FROM indicator_cache "
             "WHERE market = ? AND code = ? AND timeframe = ? AND price_basis = ? "
-            "AND data_fingerprint = ? AND (" + " OR ".join(predicates) + ")"
+            "AND data_fingerprint = ? AND (" + " OR ".join(predicates) + ")" + window + " "
+            "ORDER BY formula_id, bar_offset"
         )
         try:
             with self._store._connect(read_only=True) as connection:
@@ -181,6 +194,7 @@ class DuckDbIndicatorCacheStore:
             "formula_id",
             "formula_version",
             "data_fingerprint",
+            "bar_offset",
             "data_start",
             "data_end",
             "data_length",
@@ -188,7 +202,10 @@ class DuckDbIndicatorCacheStore:
             "signals_blob",
             "computed_at",
         ]
-        return {str(row[4]): dict(zip(keys, row, strict=True)) for row in rows}
+        grouped: dict[str, list[dict[str, object]]] = {}
+        for row in rows:
+            grouped.setdefault(str(row[4]), []).append(dict(zip(keys, row, strict=True)))
+        return grouped
 
     def read_indicator_caches_batch(
         self,
@@ -218,8 +235,9 @@ class DuckDbIndicatorCacheStore:
                         SELECT cache.market, cache.code, cache.timeframe,
                                cache.price_basis, cache.formula_id,
                                cache.formula_version, cache.data_fingerprint,
-                               cache.data_start, cache.data_end, cache.data_length,
-                               cache.values_blob, cache.signals_blob, cache.computed_at
+                               cache.bar_offset, cache.data_start, cache.data_end,
+                               cache.data_length, cache.values_blob, cache.signals_blob,
+                               cache.computed_at
                         FROM indicator_cache AS cache
                         INNER JOIN _indicator_cache_keys AS keys
                           ON cache.market = keys.market
@@ -229,6 +247,7 @@ class DuckDbIndicatorCacheStore:
                          AND cache.formula_id = keys.formula_id
                          AND cache.formula_version = keys.formula_version
                          AND cache.data_fingerprint = keys.data_fingerprint
+                        ORDER BY cache.market, cache.code, cache.formula_id, cache.bar_offset
                         """
                     ).fetchall()
                 finally:
@@ -243,6 +262,7 @@ class DuckDbIndicatorCacheStore:
             "formula_id",
             "formula_version",
             "data_fingerprint",
+            "bar_offset",
             "data_start",
             "data_end",
             "data_length",
@@ -338,6 +358,7 @@ class DuckDbIndicatorCacheStore:
         data_length: int,
         values_blob: bytes,
         signals_blob: bytes,
+        bar_offset: int = 0,
     ) -> None:
         self.write_indicator_caches(
             [
@@ -349,6 +370,7 @@ class DuckDbIndicatorCacheStore:
                     "formula_id": formula_id,
                     "formula_version": formula_version,
                     "data_fingerprint": data_fingerprint,
+                    "bar_offset": bar_offset,
                     "data_start": data_start,
                     "data_end": data_end,
                     "data_length": data_length,
@@ -366,17 +388,29 @@ class DuckDbIndicatorCacheStore:
             return
 
         self._store._require_writer()
+        # 同一个公式的多个分块共用一次清理：先按公式身份去重删除过期版本，
+        # 再逐块写入，避免每一块都重复扫一遍表。
+        stale: dict[tuple[str, str, str, str, str], tuple[str, str]] = {}
+        for entry in pending:
+            stale[
+                (
+                    str(entry["market"]).strip().upper(),
+                    str(entry["code"]).strip(),
+                    str(entry["timeframe"]),
+                    str(entry["price_basis"]),
+                    str(entry["formula_id"]),
+                )
+            ] = (str(entry["formula_version"]), str(entry["data_fingerprint"]))
         with _WRITE_LOCK, self._store._connect() as connection:
             connection.execute("BEGIN")
             try:
-                for entry in pending:
-                    normalized_market = str(entry["market"]).strip().upper()
-                    normalized_code = str(entry["code"]).strip()
-                    timeframe = str(entry["timeframe"])
-                    price_basis = str(entry["price_basis"])
-                    formula_id = str(entry["formula_id"])
-                    formula_version = str(entry["formula_version"])
-                    data_fingerprint = str(entry["data_fingerprint"])
+                for (
+                    market,
+                    code,
+                    timeframe,
+                    price_basis,
+                    formula_id,
+                ), (formula_version, data_fingerprint) in stale.items():
                     # Only the current data generation is useful. Keeping stale
                     # generations would make this derived table grow forever.
                     connection.execute(
@@ -390,8 +424,8 @@ class DuckDbIndicatorCacheStore:
                           AND (formula_version <> ? OR data_fingerprint <> ?)
                         """,
                         [
-                            normalized_market,
-                            normalized_code,
+                            market,
+                            code,
                             timeframe,
                             price_basis,
                             formula_id,
@@ -399,16 +433,17 @@ class DuckDbIndicatorCacheStore:
                             data_fingerprint,
                         ],
                     )
+                for entry in pending:
                     connection.execute(
                         """
                         INSERT INTO indicator_cache (
                             market, code, timeframe, price_basis, formula_id,
-                            formula_version, data_fingerprint, data_start, data_end,
-                            data_length, values_blob, signals_blob, computed_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            formula_version, data_fingerprint, bar_offset, data_start,
+                            data_end, data_length, values_blob, signals_blob, computed_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT (
                             market, code, timeframe, price_basis, formula_id,
-                            formula_version, data_fingerprint
+                            formula_version, data_fingerprint, bar_offset
                         ) DO UPDATE SET
                             data_start = excluded.data_start,
                             data_end = excluded.data_end,
@@ -418,13 +453,14 @@ class DuckDbIndicatorCacheStore:
                             computed_at = excluded.computed_at
                         """,
                         [
-                            normalized_market,
-                            normalized_code,
-                            timeframe,
-                            price_basis,
-                            formula_id,
-                            formula_version,
-                            data_fingerprint,
+                            str(entry["market"]).strip().upper(),
+                            str(entry["code"]).strip(),
+                            str(entry["timeframe"]),
+                            str(entry["price_basis"]),
+                            str(entry["formula_id"]),
+                            str(entry["formula_version"]),
+                            str(entry["data_fingerprint"]),
+                            int(cast(int, entry["bar_offset"])),
                             entry["data_start"],
                             entry["data_end"],
                             int(cast(int, entry["data_length"])),
@@ -569,6 +605,41 @@ class DuckDbIndicatorCacheStore:
                 connection.execute("ROLLBACK")
                 raise
         return removed
+
+    def stale_symbols(self, formula_ids: Iterable[str]) -> set[tuple[str, str]]:
+        """Instruments whose cached indicators are missing or out of date.
+
+        增量预计算靠它缩小范围：行情更新往往只动一小部分标的，全市场重算会把
+        没变化的标的也重写一遍。判据是「该标的在当前数据版本号下是否每个公式
+        都有缓存」，版本号变化后旧行自然不再匹配。
+        """
+
+        wanted = {str(formula_id) for formula_id in formula_ids}
+        if not wanted:
+            return set()
+        revisions = self.data_revisions()
+        if not revisions:
+            return set()
+        try:
+            with self._store._connect(read_only=True) as connection:
+                rows = connection.execute(
+                    "SELECT market, code, data_fingerprint, formula_id FROM indicator_cache"
+                ).fetchall()
+        except duckdb.CatalogException:
+            return set(revisions)
+        covered: dict[tuple[str, str], dict[str, set[str]]] = {}
+        for market, code, fingerprint, formula_id in rows:
+            key = (str(market).strip().upper(), str(code).strip())
+            covered.setdefault(key, {}).setdefault(str(fingerprint), set()).add(str(formula_id))
+        stale: set[tuple[str, str]] = set()
+        for key, revision in revisions.items():
+            by_fingerprint = covered.get(key)
+            if not by_fingerprint:
+                stale.add(key)
+                continue
+            if wanted - by_fingerprint.get(revision, set()):
+                stale.add(key)
+        return stale
 
     def indicator_cache_status(self) -> dict[str, int | str | None]:
         """Return persistent cache size and freshness metadata."""

@@ -382,12 +382,16 @@ class MarketSyncRequest(BaseModel):
     full_history: bool = False
     # 指标预计算按自然年分批执行，这里决定往前算几年（None = 用服务端默认值）。
     precompute_years: int | None = Field(default=None, ge=1, le=30)
+    # 只补算缓存缺失或已过期的标的，而不是整个 universe 重算一遍。
+    precompute_only_changed: bool = False
 
     @model_validator(mode="after")
     def validate_scope(self) -> MarketSyncRequest:
         validate_instrument_scope(self.universe, self.instrument_types, self.boards)
         if not isinstance(self.full_history, bool):
             raise ValueError("是否全量同步历史行情必须是布尔值")
+        if not isinstance(self.precompute_only_changed, bool):
+            raise ValueError("是否只补算变化标的必须是布尔值")
         return self
 
 

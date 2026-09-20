@@ -18,7 +18,7 @@ from selector_app.concurrency import MAX_WORKERS
 from selector_app.formulas.common import validate_market_data
 from selector_app.formulas.registry import FORMULA_REGISTRY, FormulaRegistry
 from selector_app.formulas.types import FormulaResult
-from selector_app.indicators.cache import IndicatorCache
+from selector_app.indicators.cache import IndicatorCache, merge_results
 from selector_app.market_data.models import InstrumentBoard, InstrumentType, StockRef
 
 logger = logging.getLogger(__name__)
@@ -112,6 +112,7 @@ class IndicatorPrecomputeService:
         boards: tuple[InstrumentBoard, ...] | None = None,
         years: int = DEFAULT_PRECOMPUTE_YEARS,
         warmup_bars: int = DEFAULT_PRECOMPUTE_WARMUP_BARS,
+        only_changed: bool = False,
         progress_callback: ProgressCallback | None = None,
     ) -> IndicatorPrecomputeReport:
         if isinstance(years, bool) or not isinstance(years, int) or years < 1:
@@ -126,6 +127,8 @@ class IndicatorPrecomputeService:
             boards=boards,
         )
         formula_ids = self._registry.all_formula_ids()
+        if only_changed:
+            refs = self._changed_refs(refs, formula_ids)
         minimum_bars = {
             formula_id: self._registry.formula(formula_id).minimum_bars
             for formula_id in formula_ids
@@ -188,6 +191,9 @@ class IndicatorPrecomputeService:
                             bucket.setdefault(formula_id, []).append(result)
                         computed += len(year_results)
 
+            # 按批拼回整条再落库。缓存键里的数据版本号是标的级的，逐年写会让每
+            # 一年各自带一个版本号、互相把前几年的块删掉；而且一批只有 32 只，
+            # 拼起来也就几十 MB，分批计算已经把内存峰值压住了。
             write_frames: dict[tuple[str, str], pd.DataFrame] = {}
             write_results: dict[tuple[str, str], dict[str, FormulaResult]] = {}
             for key, bucket in pieces.items():
@@ -226,6 +232,26 @@ class IndicatorPrecomputeService:
             cache_hits=0,
             failure_reasons=failures,
         )
+
+    def _changed_refs(
+        self,
+        refs: list[StockRef],
+        formula_ids: tuple[str, ...],
+    ) -> list[StockRef]:
+        """Keep only instruments whose cache is missing or out of date.
+
+        行情更新往往只动一小部分标的，全市场重算等于把没变的也重写一遍。无从
+        判断（返回 None）时按全量处理，宁可多算也不能漏算。
+        """
+
+        stale = self._cache.stale_symbols(formula_ids)
+        if stale is None:
+            return refs
+        return [
+            ref
+            for ref in refs
+            if (str(ref.market).strip().upper(), str(ref.code).strip()) in stale
+        ]
 
     def _read_one(self, ref: StockRef) -> pd.DataFrame:
         return _prepare_frame(self._adapter.read_stock(ref))
@@ -334,29 +360,24 @@ def _tail(result: FormulaResult, length: int) -> FormulaResult:
     )
 
 
+def _frame_bounds(frame: pd.DataFrame) -> tuple[date | None, date | None]:
+    """First and last bar date of one yearly segment."""
+
+    if frame.empty:
+        return None, None
+    dates = pd.to_datetime(frame["date"], errors="coerce")
+    head = dates.iloc[0]
+    tail = dates.iloc[-1]
+    return (
+        head.date() if hasattr(head, "date") else None,
+        tail.date() if hasattr(tail, "date") else None,
+    )
+
+
 def _merge_segments(segments: list[FormulaResult]) -> FormulaResult:
     """Concatenate consecutive yearly segments back into one series."""
 
-    if len(segments) == 1:
-        return segments[0]
-    first = segments[0]
-    values = {
-        name: np.concatenate([np.asarray(segment.values[name]) for segment in segments])
-        for name in first.values
-    }
-    signals = {
-        name: np.concatenate([np.asarray(segment.signals[name]) for segment in segments])
-        for name in first.signals
-    }
-    return FormulaResult.build(
-        formula_id=first.formula_id,
-        display_name=first.display_name,
-        minimum_bars=first.minimum_bars,
-        recommended_bars=first.recommended_bars,
-        data_length=sum(int(segment.data_length) for segment in segments),
-        values=values,
-        signals=signals,
-    )
+    return merge_results(segments)
 
 
 def _prepare_frame(frame: pd.DataFrame) -> pd.DataFrame:

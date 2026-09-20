@@ -188,6 +188,7 @@ def _with_indicator_precompute(
     instrument_types: list[InstrumentType] | tuple[InstrumentType, ...] | None,
     boards: list[InstrumentBoard] | tuple[InstrumentBoard, ...] | None,
     progress_callback: Callable[[int, int], None] | None = None,
+    only_changed: bool = False,
 ) -> dict[str, object]:
     try:
         store_status = _market_status(request)
@@ -212,6 +213,8 @@ def _with_indicator_precompute(
             universe=universe,
             instrument_types=tuple(instrument_types or ()),
             boards=tuple(boards or ()),
+            # 行情更新通常只动一部分标的，只重算缓存缺失/过期的那些。
+            only_changed=only_changed,
             progress_callback=progress_callback,
         )
         return {**result, "indicator_precompute": precomputed.to_dict()}
@@ -320,6 +323,7 @@ def create_indicator_precompute_job(
                 instrument_types=tuple(payload.instrument_types or ()),
                 boards=tuple(payload.boards or ()),
                 years=payload.precompute_years or DEFAULT_PRECOMPUTE_YEARS,
+                only_changed=payload.precompute_only_changed,
                 progress_callback=progress,
             )
         except (OSError, ValueError, MarketDataStoreError, duckdb.Error) as exc:
@@ -507,6 +511,7 @@ def _create_sync_job(
             raise TaskUserError(_storage_error_message(exc)) from exc
         if abort_check():
             raise TaskCancelledError("行情同步已取消")
+        # 同步只影响一部分标的，缓存也只补算那些缺失或过期的。
         return _with_indicator_precompute(
             request,
             result,
@@ -515,6 +520,7 @@ def _create_sync_job(
             instrument_types=payload.instrument_types,
             boards=payload.boards,
             progress_callback=progress,
+            only_changed=True,
         )
 
     try:
@@ -595,6 +601,7 @@ def create_local_import_job(payload: LocalImportRequest, request: Request) -> JS
             raise TaskUserError(_storage_error_message(exc)) from exc
         except OSError as exc:
             raise TaskUserError(f"读取本地行情文件失败: {exc}") from exc
+        # 导入只影响一部分标的，缓存也只补算那些缺失或过期的。
         return _with_indicator_precompute(
             request,
             result,
@@ -603,6 +610,7 @@ def create_local_import_job(payload: LocalImportRequest, request: Request) -> JS
             instrument_types=payload.instrument_types,
             boards=payload.boards,
             progress_callback=progress,
+            only_changed=True,
         )
 
     try:

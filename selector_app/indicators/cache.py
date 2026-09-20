@@ -7,7 +7,7 @@ import io
 import json
 import time
 from collections import OrderedDict, deque
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from threading import RLock
@@ -32,6 +32,64 @@ _FINGERPRINT_COLUMNS = ("date", "open", "high", "low", "close", "volume", "amoun
 _OPTIONAL_FINGERPRINT_COLUMNS = ("bar_status", "price_basis")
 _MAX_CACHE_BLOB_BYTES = 64 * 1024 * 1024
 _CUSTOM_ENGINE_VERSION = "1"
+# 落库用 float32：价格只有两位小数、指标值不需要 float64 的 17 位有效数字，
+# 实测缓存体积直接减半。读回来仍转成 float64，下游无感。
+_VALUE_DTYPE = np.float32
+
+
+@dataclass(frozen=True)
+class Chunk:
+    """缓存里的一个自然年分块。
+
+    `offset` 是这一块在传入结果里的切片起点，`bar_offset` 是它写进库里的位置。
+    两者多数时候相同；预计算是逐年算完就落库的，它手上的结果只有一年，切片
+    起点恒为 0，而库里的位置要从前面几年累加出来——所以要分开记。
+    """
+
+    offset: int
+    length: int
+    start: date | None
+    end: date | None
+    bar_offset: int | None = None
+
+    @property
+    def store_offset(self) -> int:
+        return self.offset if self.bar_offset is None else self.bar_offset
+
+
+def _chunk_plan(frame: pd.DataFrame) -> tuple[Chunk, ...]:
+    """Split one bar series into consecutive calendar-year chunks.
+
+    缓存按自然年分块存储：行情每天只会在尾部多一根 K 线，整条重写意味着每天
+    要把 5 年序列全部再写一遍（实测全市场约 13.6 秒）。分块之后只有当年那一块
+    需要重写。块用「在全历史中的起始下标 + 长度」描述，读取时靠它校验连续性。
+    """
+
+    if frame.empty or "date" not in frame.columns:
+        return ()
+    dates = pd.to_datetime(frame["date"], errors="coerce")
+    if dates.isna().any():
+        return ()
+    years = dates.dt.year.to_numpy()
+    chunks: list[Chunk] = []
+    start = 0
+    for index in range(1, len(years)):
+        if years[index] != years[start]:
+            chunks.append(_make_chunk(dates, start, index))
+            start = index
+    chunks.append(_make_chunk(dates, start, len(years)))
+    return tuple(chunks)
+
+
+def _make_chunk(dates: pd.Series, start: int, stop: int) -> Chunk:
+    head = dates.iloc[start]
+    tail = dates.iloc[stop - 1]
+    return Chunk(
+        offset=int(start),
+        length=int(stop - start),
+        start=head.date() if hasattr(head, "date") else None,
+        end=tail.date() if hasattr(tail, "date") else None,
+    )
 
 
 @dataclass(frozen=True)
@@ -210,6 +268,51 @@ def _deserialize_arrays(
     return {name: np.asarray(matrix[index]) for index, name in enumerate(names)}
 
 
+def _chunk_offset(row: Mapping[str, object]) -> int:
+    """Start index of one cached chunk inside the full-history series."""
+
+    try:
+        return int(cast(int, row.get("bar_offset")))
+    except (TypeError, ValueError):
+        return -1
+
+
+def _chunk_length(row: Mapping[str, object]) -> int:
+    """Number of bars covered by one cached chunk."""
+
+    try:
+        return int(cast(int, row.get("data_length")))
+    except (TypeError, ValueError):
+        return -1
+
+
+def merge_results(pieces: Sequence[FormulaResult]) -> FormulaResult:
+    """Concatenate consecutive chunks back into one continuous result."""
+
+    if not pieces:
+        raise ValueError("没有可合并的指标结果")
+    if len(pieces) == 1:
+        return pieces[0]
+    first = pieces[0]
+    values = {
+        name: np.concatenate([np.asarray(piece.values[name]) for piece in pieces])
+        for name in first.values
+    }
+    signals = {
+        name: np.concatenate([np.asarray(piece.signals[name]) for piece in pieces])
+        for name in first.signals
+    }
+    return FormulaResult.build(
+        formula_id=first.formula_id,
+        display_name=first.display_name,
+        minimum_bars=first.minimum_bars,
+        recommended_bars=first.recommended_bars,
+        data_length=sum(int(piece.data_length) for piece in pieces),
+        values=values,
+        signals=signals,
+    )
+
+
 class IndicatorCache:
     """Cache built-in formula arrays in memory and, when available, DuckDB."""
 
@@ -376,6 +479,23 @@ class IndicatorCache:
             self._persistent_put_custom(key, parsed, parameter_json, result, start, end)
         return {"custom": result}
 
+    def stale_symbols(
+        self,
+        formula_ids: Iterable[str],
+    ) -> set[tuple[str, str]] | None:
+        """Instruments whose cache is missing or outdated, or None if unknown.
+
+        返回 None 表示「无从判断」（没有持久化层或查询失败），调用方此时应当
+        按全量处理，不能把空集合当成「都已缓存」。
+        """
+
+        if self._store is None:
+            return None
+        try:
+            return self._store.stale_indicator_symbols(tuple(formula_ids))
+        except (AttributeError, RuntimeError, OSError):
+            return None
+
     def preload(
         self,
         frames: Mapping[tuple[str, str], pd.DataFrame],
@@ -429,21 +549,23 @@ class IndicatorCache:
                 self._record_phase("_persistent_read_time_ms", started)
         except RuntimeError:
             return 0
-        row_by_key = {
-            (
-                str(row["market"]),
-                str(row["code"]),
-                str(row["timeframe"]),
-                str(row["price_basis"]),
-                str(row["formula_id"]),
-                str(row["formula_version"]),
-                str(row["data_fingerprint"]),
-            ): row
-            for row in rows
-        }
+        grouped: dict[tuple[str, ...], list[dict[str, object]]] = {}
+        for row in rows:
+            grouped.setdefault(
+                (
+                    str(row["market"]),
+                    str(row["code"]),
+                    str(row["timeframe"]),
+                    str(row["price_basis"]),
+                    str(row["formula_id"]),
+                    str(row["formula_version"]),
+                    str(row["data_fingerprint"]),
+                ),
+                [],
+            ).append(row)
         loaded = 0
         for key, definition in pending:
-            row = row_by_key.get(
+            chunk_rows = grouped.get(
                 (
                     key.market,
                     key.code,
@@ -454,10 +576,15 @@ class IndicatorCache:
                     key.data_revision,
                 )
             )
-            result = self._decode_persistent(row, definition) if row else None
+            last = chunk_rows[-1] if chunk_rows else None
+            # 预热要的是整条序列，不按窗口裁剪，所以这里没有总长度可校验；
+            # 块本身连续且末块日期存在即认为可用。
+            result = self._decode_chunks(
+                chunk_rows or [], definition, _row_end(last) if last else None
+            )
             if result is None:
                 continue
-            self._memory_put(key, result, _row_end(row) if row else None)
+            self._memory_put(key, result, _row_end(last) if last else None)
             with self._lock:
                 self._hits += 1
                 self._persistent_hits += 1
@@ -534,16 +661,15 @@ class IndicatorCache:
                 continue
             missing[formula_id] = keys[formula_id]
 
-        persistent_rows = self._persistent_get_many(missing) if persistent_read else {}
+        # 只取覆盖请求窗口的那几块：读最近 250 根不必把 5 年的 blob 都读出来。
+        persistent_rows = (
+            self._persistent_get_many(missing, min_end_date=start) if persistent_read else {}
+        )
         to_compute: list[str] = []
         for formula_id, key in missing.items():
-            row = persistent_rows.get(formula_id)
-            # 缓存存的是全历史，只有当请求区间正好是它的后缀时才可切片复用。
-            decoded = (
-                self._decode_persistent(row, definitions[formula_id])
-                if row is not None and _row_ends_at(row, end)
-                else None
-            )
+            rows = persistent_rows.get(formula_id) or []
+            # 缓存存的是一段连续序列，只有当请求区间正好是它的后缀时才可切片复用。
+            decoded = self._decode_chunks(rows, definitions[formula_id], end)
             sliced = _tail_slice(decoded, target_length) if decoded is not None else None
             if sliced is not None and decoded is not None:
                 self._memory_put(key, decoded, end)
@@ -556,11 +682,15 @@ class IndicatorCache:
 
             with self._lock:
                 self._misses += 1
-        computed_entries: list[tuple[_CacheKey, FormulaResult, date | None, date | None]] = []
-        bar_count = _revision_bar_count(revision)
+        computed_entries: list[
+            tuple[_CacheKey, FormulaResult, date | None, date | None, tuple[Chunk, ...]]
+        ] = []
         # 版本号拿不到时键已绑定窗口（帧指纹），缓存同样安全；拿得到时只有
         # 完整序列可缓存，否则窗口结果会污染后续更长的请求。
-        full_history = bar_count is None or bar_count == target_length
+        full_history = _revision_bar_count(revision) is None or (
+            _revision_bar_count(revision) == target_length
+        )
+        chunks = _chunk_plan(frame)
         for formula_id in to_compute:
             key = keys[formula_id]
             definition = definitions[formula_id]
@@ -572,7 +702,7 @@ class IndicatorCache:
             # 只缓存完整序列：窗口结果按同一个键存进去会污染后续更长的请求。
             if full_history:
                 self._memory_put(key, result, end)
-            computed_entries.append((key, result, start, end))
+            computed_entries.append((key, result, start, end, chunks))
             results[formula_id] = result
         if persist:
             self._persistent_put_many(computed_entries)
@@ -584,12 +714,19 @@ class IndicatorCache:
         results_by_key: Mapping[tuple[str, str], Mapping[str, FormulaResult]],
         *,
         timeframe: str = _TIMEFRAME,
+        chunks_by_key: Mapping[tuple[str, str], tuple[Chunk, ...]] | None = None,
     ) -> None:
-        """Persist many already-computed results in one database write."""
+        """Persist many already-computed results in one database write.
+
+        `chunks_by_key` 让调用方直接给出分块位置：预计算是逐年算完就落库的，
+        它知道每一年在全历史中的偏移，无需再凑出一条完整序列去推断块边界。
+        """
 
         if self._store is None or not results_by_key:
             return
-        pending: list[tuple[_CacheKey, FormulaResult, date | None, date | None]] = []
+        pending: list[
+            tuple[_CacheKey, FormulaResult, date | None, date | None, tuple[Chunk, ...]]
+        ] = []
         for (market, code), results in results_by_key.items():
             frame = frames.get((market, code))
             if frame is None or not results:
@@ -597,6 +734,7 @@ class IndicatorCache:
             revision = self._revision(str(market), str(code), frame)
             price_basis = _price_basis(frame)
             start, end = _date_bounds(frame)
+            chunks = (chunks_by_key or {}).get((market, code)) or _chunk_plan(frame)
             for formula_id, result in results.items():
                 definition = self._registry.formula(formula_id)
                 if not result.sufficient_data:
@@ -615,6 +753,7 @@ class IndicatorCache:
                         result,
                         start,
                         end,
+                        chunks,
                     )
                 )
         self._persistent_put_many(pending)
@@ -683,7 +822,9 @@ class IndicatorCache:
     def _persistent_get_many(
         self,
         keys: dict[str, _CacheKey],
-    ) -> dict[str, dict[str, object]]:
+        *,
+        min_end_date: date | None = None,
+    ) -> dict[str, list[dict[str, object]]]:
         if self._store is None or not keys:
             return {}
         first = next(iter(keys.values()))
@@ -699,6 +840,7 @@ class IndicatorCache:
                     formula_versions={
                         formula_id: key.formula_version for formula_id, key in keys.items()
                     },
+                    min_end_date=min_end_date,
                 )
             finally:
                 self._record_phase("_persistent_read_time_ms", started)
@@ -726,9 +868,49 @@ class IndicatorCache:
         except RuntimeError:
             return None
 
+    def _decode_chunks(
+        self,
+        rows: Sequence[Mapping[str, object]],
+        definition: FormulaDefinition,
+        end: date | None,
+        total_length: int | None = None,
+    ) -> FormulaResult | None:
+        """Reassemble the cached chunks that cover the requested window.
+
+        任一块缺失、长度对不上或末块日期不是请求的结束日，都按未命中处理——
+        宁可重算也不要拿一条拼接错误的历史序列去回测。
+        """
+
+        if not rows:
+            return None
+        ordered = sorted(rows, key=_chunk_offset)
+        pieces: list[FormulaResult] = []
+        cursor: int | None = None
+        for row in ordered:
+            offset = _chunk_offset(row)
+            length = _chunk_length(row)
+            if offset < 0 or length <= 0:
+                return None
+            if cursor is None:
+                cursor = offset
+            elif offset != cursor:
+                return None
+            piece = self._decode_persistent(row, definition)
+            if piece is None:
+                return None
+            pieces.append(piece)
+            cursor = offset + length
+        if cursor is None:
+            return None
+        if total_length is not None and cursor != total_length:
+            return None
+        if not _row_ends_at(ordered[-1], end):
+            return None
+        return merge_results(pieces)
+
     def _decode_persistent(
         self,
-        row: dict[str, object] | None,
+        row: Mapping[str, object] | None,
         definition: FormulaDefinition,
     ) -> FormulaResult | None:
         if row is None:
@@ -741,6 +923,7 @@ class IndicatorCache:
             return None
         try:
             signal_names = tuple(signal.id.split(".", 1)[1] for signal in definition.signals)
+            # 落库是 float32，读回来统一升成 float64，下游不必感知存储精度。
             values = _deserialize_arrays(
                 row["values_blob"],
                 definition.value_names,
@@ -769,40 +952,59 @@ class IndicatorCache:
 
     def _persistent_put_many(
         self,
-        entries: list[tuple[_CacheKey, FormulaResult, date | None, date | None]],
+        entries: Sequence[
+            tuple[_CacheKey, FormulaResult, date | None, date | None, tuple[Chunk, ...]]
+        ],
     ) -> None:
         if self._store is None or not entries:
             return
         pending: list[dict[str, object]] = []
-        for key, result, start, end in entries:
+        for key, result, start, end, chunks in entries:
             if not key.market or not key.code or not result.sufficient_data:
                 continue
             definition = self._registry.formula(key.formula_id)
             values = {name: np.asarray(value) for name, value in result.values.items()}
             signals = {name: np.asarray(signal) for name, signal in result.signals.items()}
-            pending.append(
-                {
-                    "market": key.market,
-                    "code": key.code,
-                    "timeframe": key.timeframe,
-                    "price_basis": key.price_basis,
-                    "formula_id": key.formula_id,
-                    "formula_version": key.formula_version,
-                    "data_fingerprint": key.data_revision,
-                    "data_start": start,
-                    "data_end": end,
-                    "data_length": result.data_length,
-                    "values_blob": _serialize_arrays(
-                        values, definition.value_names, dtype=float, data_length=result.data_length
-                    ),
-                    "signals_blob": _serialize_arrays(
-                        signals,
-                        tuple(signal.id.split(".", 1)[1] for signal in definition.signals),
-                        dtype=bool,
-                        data_length=result.data_length,
-                    ),
-                }
-            )
+            signal_names = tuple(signal.id.split(".", 1)[1] for signal in definition.signals)
+            # 拿不到日期分块信息（例如调用方只给了结果）时退回整条单块写入。
+            plan = chunks or (Chunk(0, result.data_length, start, end),)
+            for chunk in plan:
+                if chunk.length <= 0 or chunk.offset + chunk.length > result.data_length:
+                    continue
+                stop = chunk.offset + chunk.length
+                pending.append(
+                    {
+                        "market": key.market,
+                        "code": key.code,
+                        "timeframe": key.timeframe,
+                        "price_basis": key.price_basis,
+                        "formula_id": key.formula_id,
+                        "formula_version": key.formula_version,
+                        "data_fingerprint": key.data_revision,
+                        "bar_offset": chunk.store_offset,
+                        "data_start": chunk.start,
+                        "data_end": chunk.end,
+                        "data_length": chunk.length,
+                        "values_blob": _serialize_arrays(
+                            {
+                                name: value[chunk.offset : stop]
+                                for name, value in values.items()
+                            },
+                            definition.value_names,
+                            dtype=_VALUE_DTYPE,
+                            data_length=chunk.length,
+                        ),
+                        "signals_blob": _serialize_arrays(
+                            {
+                                name: signal[chunk.offset : stop]
+                                for name, signal in signals.items()
+                            },
+                            signal_names,
+                            dtype=bool,
+                            data_length=chunk.length,
+                        ),
+                    }
+                )
         if not pending:
             return
         try:
@@ -907,7 +1109,10 @@ class IndicatorCache:
                     minimum_bars=result.minimum_bars,
                     recommended_bars=result.recommended_bars,
                     values_blob=_serialize_arrays(
-                        values, parsed.value_names, dtype=float, data_length=result.data_length
+                        values,
+                        parsed.value_names,
+                        dtype=_VALUE_DTYPE,
+                        data_length=result.data_length,
                     ),
                     signals_blob=_serialize_arrays(
                         signals,

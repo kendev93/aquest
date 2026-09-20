@@ -326,7 +326,7 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
         formula_id: str,
         formula_version: str,
         data_fingerprint: str,
-    ) -> dict[str, object] | None:
+    ) -> list[dict[str, object]]:
         return self._indicator_cache.read_indicator_cache(
             market=market,
             code=code,
@@ -346,7 +346,8 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
         price_basis: str,
         data_fingerprint: str,
         formula_versions: Mapping[str, str],
-    ) -> dict[str, dict[str, object]]:
+        min_end_date: date | None = None,
+    ) -> dict[str, list[dict[str, object]]]:
         return self._indicator_cache.read_indicator_caches(
             market=market,
             code=code,
@@ -354,7 +355,14 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
             price_basis=price_basis,
             data_fingerprint=data_fingerprint,
             formula_versions=formula_versions,
+            min_end_date=min_end_date,
         )
+
+    def stale_indicator_symbols(
+        self,
+        formula_ids: Iterable[str],
+    ) -> set[tuple[str, str]]:
+        return self._indicator_cache.stale_symbols(formula_ids)
 
     def read_indicator_caches_batch(
         self,
@@ -409,6 +417,7 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
         data_length: int,
         values_blob: bytes,
         signals_blob: bytes,
+        bar_offset: int = 0,
     ) -> None:
         self._indicator_cache.write_indicator_cache(
             market=market,
@@ -423,6 +432,7 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
             data_length=data_length,
             values_blob=values_blob,
             signals_blob=signals_blob,
+            bar_offset=bar_offset,
         )
 
     def write_indicator_caches(self, entries: Iterable[Mapping[str, object]]) -> None:
