@@ -234,9 +234,7 @@ def _ensure_provider_state(state: Any, provider: MarketDataProvider) -> None:
 
 def rate_state_snapshot(state: Any) -> dict[str, object]:
     providers = tuple(_RATE_LIMITED_PROVIDERS) + tuple(
-        provider
-        for provider in ("baostock", "tdx")
-        if f"interval_{provider}" in state
+        provider for provider in ("baostock", "tdx") if f"interval_{provider}" in state
     )
     by_provider = {
         provider: {
