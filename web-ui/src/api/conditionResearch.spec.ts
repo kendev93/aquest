@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   cancelConditionResearch,
   createConditionResearch,
+  deleteConditionResearchHistory,
   fetchConditionResearchHistory,
   getConditionResearch,
   getConditionResearchHistory,
@@ -50,5 +51,17 @@ describe('condition research API', () => {
       '/api/v1/condition-research/history',
       '/api/v1/condition-research/history/history-1',
     ])
+  })
+
+  it('deletes a saved condition research history', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ data: { deleted: true } }), { status: 200 }),
+    )
+
+    await expect(deleteConditionResearchHistory('history-1')).resolves.toBe(true)
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/v1/condition-research/history/history-1')
+    expect(init?.method).toBe('DELETE')
   })
 })

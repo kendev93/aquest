@@ -400,4 +400,57 @@ describe('SwingResearchPage', () => {
     await flushPromises()
     expect(wrapper.findAll('[data-testid^="swing-history-item-"]')).toHaveLength(2)
   })
+
+  it('edits every overview and study control, then copies the resulting plan', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+
+    const wrapper = mount(SwingResearchPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="swing-overview-universe"]').setValue('sh')
+    await wrapper.get('[data-testid="swing-overview-multiples"]').setValue('2, 3')
+    await wrapper.get('[data-testid="swing-overview-min-bars"]').setValue('6')
+    await wrapper.get('[data-testid="swing-overview-atr"]').setValue('1.5')
+    await wrapper.get('[data-testid="swing-overview-start"]').setValue('2024-01-01')
+    await wrapper.get('[data-testid="swing-overview-end"]').setValue('2024-12-31')
+    await wrapper.get('[data-testid="swing-overview-limit"]').setValue('600')
+
+    await wrapper.get('[data-testid="swing-study-universe"]').setValue('sz')
+    await wrapper.get('[data-testid="swing-study-multiple"]').setValue('4')
+    await wrapper.get('[data-testid="swing-study-min-bars"]').setValue('7')
+    await wrapper.get('[data-testid="swing-study-atr"]').setValue('1.25')
+    await wrapper.get('[data-testid="swing-study-horizon"]').setValue('12')
+    await wrapper.get('[data-testid="swing-study-permutations"]').setValue('200')
+    await wrapper.get('[data-testid="swing-study-block"]').setValue('10')
+    await wrapper.get('[data-testid="swing-study-alpha"]').setValue('0.05')
+    await wrapper.get('[data-testid="swing-study-cross"]').setValue('0.4')
+    await wrapper.get('[data-testid="swing-study-start"]').setValue('2024-02-01')
+    await wrapper.get('[data-testid="swing-study-end"]').setValue('2024-11-30')
+    await wrapper.get('[data-testid="swing-study-limit"]').setValue('500')
+    await wrapper.get('[data-testid="swing-label-up_leg_start"]').setValue(true)
+
+    await wrapper.get('[data-testid="swing-study-run"]').trigger('click')
+    await flushPromises()
+
+    expect(vi.mocked(swingApi.runSwingIndicatorStudy).mock.calls[0][0]).toEqual(expect.objectContaining({
+      universe: 'sz',
+      reversal_multiple: 4,
+      min_bars: 7,
+      atr_window: 1.25,
+      horizon: 12,
+      permutations: 200,
+      min_cross_section: 0.4,
+      start_date: '2024-02-01',
+      end_date: '2024-11-30',
+      limit_stocks: 500,
+      labels: expect.arrayContaining(['up_leg_start']),
+    }))
+
+    await wrapper.get('[data-testid="swing-plan-copy"]').trigger('click')
+    await flushPromises()
+
+    expect(writeText).toHaveBeenCalledTimes(1)
+    expect(wrapper.get('[data-testid="swing-plan-copy"]').text()).toContain('已复制')
+  })
 })

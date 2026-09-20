@@ -606,4 +606,57 @@ describe('MarketDataPage', () => {
     // 在线不支持的品种对本地导入仍然可用。
     expect(wrapper.get<HTMLInputElement>('[data-testid="market-local-type-index"]').element.disabled).toBe(false)
   })
+
+  it('filters the catalog, pages through it and narrows the local import scope', async () => {
+    vi.mocked(marketApi.fetchLocalInstruments).mockResolvedValue({
+      items: instruments,
+      meta: { total: 4, page: 1, page_size: 2, pages: 2 },
+    })
+    const wrapper = mount(MarketDataPage)
+    await flushPromises()
+
+    // 本地导入范围独立于在线同步范围。
+    await wrapper.get('[data-testid="market-local-type-fund"]').setValue(true)
+    await wrapper.get('[data-testid="market-local-board-main"]').setValue(true)
+
+    await wrapper.get('[data-testid="market-scope"]').setValue('SH')
+    await wrapper.get('[data-testid="market-keyword"]').setValue('600')
+    await wrapper.get('form.market-filter-form').trigger('submit')
+    await flushPromises()
+
+    expect(marketApi.fetchLocalInstruments).toHaveBeenLastCalledWith(expect.objectContaining({
+      market: 'SH', keyword: '600', page: 1,
+    }))
+
+    const pageButtons = wrapper.findAll('[data-testid="market-pagination"] button')
+    expect(pageButtons).toHaveLength(2)
+    await pageButtons[1].trigger('click')
+    await flushPromises()
+    expect(marketApi.fetchLocalInstruments).toHaveBeenLastCalledWith(expect.objectContaining({ page: 2 }))
+    expect(wrapper.get('[data-testid="market-pagination"]').text()).toContain('2 / 2')
+  })
+
+  it('reloads a chart with an explicit date range and indicator switches', async () => {
+    const wrapper = mount(MarketDataPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="instrument-SH-600000"]').trigger('click')
+    await flushPromises()
+
+    vi.mocked(marketApi.fetchLocalChart).mockClear()
+    await wrapper.get('[data-testid="market-chart-start"]').setValue('2024-12-01')
+    await wrapper.get('[data-testid="market-chart-end"]').setValue('2024-12-31')
+    await wrapper.get('[data-testid="market-chart-refresh"]').trigger('click')
+    await flushPromises()
+
+    expect(marketApi.fetchLocalChart).toHaveBeenCalledWith(expect.objectContaining({
+      start_date: '2024-12-01', end_date: '2024-12-31',
+    }))
+
+    await wrapper.get('[data-testid="toggle-ma5"]').setValue(false)
+    await wrapper.get('[data-testid="toggle-ma20"]').setValue(true)
+    await wrapper.get('[data-testid="toggle-rsi"]').setValue(false)
+    await wrapper.get('[data-testid="toggle-macd"]').setValue(false)
+
+    expect(wrapper.get('[data-testid="market-candlestick-chart"]').text()).not.toContain('RSI')
+  })
 })

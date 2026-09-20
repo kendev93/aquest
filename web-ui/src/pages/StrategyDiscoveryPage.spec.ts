@@ -12,6 +12,7 @@ vi.mock('../api/strategyDiscovery', async () => {
     fetchStrategyDiscoveryCapabilities: vi.fn(),
     createStrategyDiscovery: vi.fn(),
     createStrategyDiscoveryRefinement: vi.fn(),
+    cancelStrategyDiscovery: vi.fn(),
     getStrategyDiscovery: vi.fn(),
     getStrategyDiscoveryResults: vi.fn(),
     createStrategyReplay: vi.fn(),
@@ -478,5 +479,157 @@ describe('StrategyDiscoveryPage', () => {
     await flushPromises()
 
     expect(wrapper.get('[data-testid="strategy-discovery-message"]').text()).toContain('delete failed')
+  })
+
+  it('cancels a running discovery job', async () => {
+    vi.mocked(api.getStrategyDiscovery).mockImplementationOnce(
+      () => new Promise(() => undefined),
+    )
+    vi.mocked(api.cancelStrategyDiscovery).mockResolvedValue({
+      job_id: 'discovery-1', status: 'cancelling', cancel_requested: true,
+    })
+
+    const wrapper = mount(StrategyDiscoveryPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="strategy-discovery-config"]').trigger('submit')
+    await flushPromises()
+    await wrapper.get('[data-testid="strategy-discovery-cancel"]').trigger('click')
+    await flushPromises()
+
+    expect(api.cancelStrategyDiscovery).toHaveBeenCalledWith('discovery-1')
+    expect(wrapper.get('[data-testid="strategy-discovery-message"]').text()).toContain('已请求取消策略实验')
+  })
+
+  it('reports a replay failure and cancels a running replay', async () => {
+    vi.mocked(api.createStrategyReplay).mockRejectedValueOnce(new Error('候选为空'))
+    const wrapper = mount(StrategyDiscoveryPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="strategy-discovery-config"]').trigger('submit')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="strategy-discovery-replay"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="strategy-discovery-message"]').text()).toContain('策略复核失败：候选为空')
+
+    vi.mocked(api.getStrategyReplay).mockImplementationOnce(
+      () => new Promise(() => undefined),
+    )
+    vi.mocked(api.cancelStrategyReplay).mockResolvedValue({
+      job_id: 'replay-1', status: 'cancelling', cancel_requested: true,
+    })
+    await wrapper.get('[data-testid="strategy-discovery-replay"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid="strategy-discovery-replay-cancel"]').trigger('click')
+    await flushPromises()
+
+    expect(api.cancelStrategyReplay).toHaveBeenCalledWith('replay-1')
+    expect(wrapper.get('[data-testid="strategy-discovery-message"]').text()).toContain('已请求取消全量复核')
+  })
+
+  it('resumes an in-flight replay after a page refresh', async () => {
+    vi.mocked(jobsApi.fetchActiveJobs).mockResolvedValueOnce([{
+      job_id: 'replay-refresh', description: '策略前十全量复核', status: 'running', progress: 0.3,
+      total_candidates: 1, total_scanned: 0, errors: 0, error: null,
+      metadata: { experiment_id: 'discovery-1' },
+    }])
+    vi.mocked(api.getStrategyDiscoveryHistory).mockResolvedValueOnce({
+      history_id: 'discovery-1',
+      request: {}, results_by_sharpe: [], results_by_return: [], search_metadata: {}, validation_metadata: {},
+    })
+    vi.mocked(api.getStrategyReplay).mockResolvedValueOnce({
+      job_id: 'replay-refresh', status: 'completed', progress: 1, total_candidates: 1, total_scanned: 1,
+      errors: 0, skipped: 0, error: null, result: null, phase: 'completed', metadata: {},
+    })
+    vi.mocked(api.getStrategyReplayResults).mockResolvedValueOnce({
+      experiment_id: 'discovery-1', leaderboard: 'sharpe', data_start: '2024-01-01', data_end: '2026-09-08',
+      data_fingerprint: 'replay-fingerprint', source_data_fingerprint: 'source-fingerprint', data_changed: false,
+      candidate_count: 1, diagnostics: {}, candidates: [],
+    })
+
+    const wrapper = mount(StrategyDiscoveryPage)
+    await flushPromises()
+
+    expect(api.getStrategyDiscoveryHistory).toHaveBeenCalledWith('discovery-1')
+    expect(api.getStrategyReplay).toHaveBeenCalledWith('replay-refresh')
+  })
+
+  it('selects a leaderboard candidate, walks the replay periods and applies one', async () => {
+    vi.mocked(api.getStrategyDiscovery).mockResolvedValue({
+      job_id: 'discovery-1', status: 'completed', progress: 1, total_candidates: 4, total_scanned: 4,
+      errors: 0, skipped: 0, error: null, phase: 'completed', result: null,
+      metadata: {
+        stage_durations_seconds: { snapshot: 12, coarse: 640, medium: 3600, full: 7200, validation: 65, holdout: 30 },
+      },
+    })
+    const trade = {
+      date: '2024-03-01', signal_date: '2024-02-29', market: 'SH', code: '600000', name: '浦发银行',
+      direction: 'SELL', size: 100, price: 11, commission: 0.5, stamp_tax: 1, slippage: 0, pnl: 120,
+      cost_basis: 1000, reason: '止盈', risk_trigger: 'take_profit', rejected: false,
+    }
+    vi.mocked(api.createStrategyReplay).mockResolvedValue({ job_id: 'replay-1', status: 'queued' })
+    vi.mocked(api.getStrategyReplay).mockResolvedValue({
+      job_id: 'replay-1', status: 'completed', progress: 1, total_candidates: 1, total_scanned: 1,
+      errors: 0, skipped: 0, error: null, result: null, phase: 'completed', metadata: {},
+    })
+    vi.mocked(api.getStrategyReplayResults).mockResolvedValue({
+      experiment_id: 'discovery-1', leaderboard: 'sharpe', data_start: '2024-01-01', data_end: '2026-09-08',
+      data_fingerprint: 'replay-fingerprint', source_data_fingerprint: 'source-fingerprint', data_changed: false,
+      candidate_count: 1, diagnostics: {},
+      candidates: [{
+        rank: 1, candidate_hash: 's1', human_readable_rules: '买入[MA5 > MA20]',
+        config: { ranking_value: 'technical.ma5' },
+        leaderboard_metrics: { annual_return: 0.2, sharpe: 1.4 },
+        overall_metrics: { total_return: 0.5, annual_return: 0.2, max_drawdown: 0.1, sharpe: 1.1, total_trades: 6, win_rate: 0.5 },
+        periods: {
+          ytd: { key: 'ytd', label: '今年以来', start_date: '2026-01-01', end_date: '2026-09-08', bars: 3, total_return: 0.1, annual_return: 0.1, max_drawdown: 0.05, sharpe: 1.0, total_trades: 2, win_rate: 0.5, diagnostic: null },
+          one_year: { key: 'one_year', label: '最近一年', start_date: '2025-09-08', end_date: '2026-09-08', bars: 4, total_return: 0.3, annual_return: 0.3, max_drawdown: 0.1, sharpe: 1.3, total_trades: 4, win_rate: 0.5, diagnostic: null },
+          two_year: { key: 'two_year', label: '最近两年', start_date: '2024-09-08', end_date: '2026-09-08', bars: 6, total_return: 0.44, annual_return: 0.2, max_drawdown: 0.12, sharpe: 1.1, total_trades: 6, win_rate: 0.5, diagnostic: null },
+        },
+        annual_metrics: [{ key: 'year_2025', label: '2025', start_date: '2025-01-01', end_date: '2025-12-31', bars: 3, total_return: 0.2, annual_return: 0.2, max_drawdown: 0.08, sharpe: 1.0, total_trades: 3, win_rate: 0.5, diagnostic: null }],
+        backtest: {
+          universe: 'all', total_candidates: 1, processed: 1, skipped: 0, errors: 0, bars: 6,
+          start_date: '2024-01-01', end_date: '2026-09-08', max_positions: 3,
+          ranking_value: 'technical.ma5', rank_order: 'desc', fitness_rank_weight: 0,
+          fitness_min_trades: 5, fitness_max_drawdown: 0.3,
+          performance: { total_return: 0.5, annual_return: 0.2, max_drawdown: 0.1, sharpe: 1.1, total_trades: 6, win_rate: 0.5, end_value: 150000 },
+          equity_curve: [
+            { date: '2024-01-01', cash: 100000, position_value: 0, total: 100000, positions_count: 0, drawdown: 0, drawdown_pct: 0 },
+            { date: '2026-09-08', cash: 0, position_value: 150000, total: 150000, positions_count: 3, drawdown: 0, drawdown_pct: 0 },
+          ],
+          trades: [trade as never], states: [], ranking_events: [], failure_reasons: {}, diagnostic: null,
+          data_fingerprint: 'replay-fingerprint', risk_controls: {},
+        },
+        data_fingerprint: 'replay-fingerprint', diagnostic: null,
+      }],
+    })
+
+    const wrapper = mount(StrategyDiscoveryPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="strategy-discovery-config"]').trigger('submit')
+    await flushPromises()
+
+    // 阶段耗时只在元数据里带 stage_durations_seconds 时才渲染。
+    expect(wrapper.get('[data-testid="strategy-discovery-stage-durations"]').text()).toContain('粗筛')
+
+    await wrapper.get('[data-testid="strategy-discovery-row-s1"] button').trigger('click')
+    expect(wrapper.get('[data-testid="strategy-discovery-detail"]').text()).toContain('MA5 > MA20')
+
+    await wrapper.get('[data-testid="strategy-discovery-replay"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="strategy-replay-period-one-year"]').trigger('click')
+    expect(wrapper.get('[data-testid="strategy-replay-period-table"]').text()).toContain('30.00%')
+    await wrapper.get('[data-testid="strategy-replay-period-two-year"]').trigger('click')
+    expect(wrapper.get('[data-testid="strategy-replay-period-table"]').text()).toContain('44.00%')
+    await wrapper.get('[data-testid="strategy-replay-period-overall"]').trigger('click')
+    await wrapper.get('[data-testid="strategy-replay-candidate-s1"]').trigger('click')
+    expect(wrapper.get('[data-testid="strategy-replay-detail-s1"]').text()).toContain('止盈')
+
+    await wrapper.get('[data-testid="strategy-replay-apply-s1"]').trigger('click')
+    await flushPromises()
+    expect(JSON.parse(sessionStorage.getItem('indicator-lab.strategy-discovery.apply') ?? '{}')).toEqual({
+      ranking_value: 'technical.ma5',
+    })
+    expect(sessionStorage.getItem('indicator-lab.strategy-discovery.apply-meta')).toContain('s1')
   })
 })

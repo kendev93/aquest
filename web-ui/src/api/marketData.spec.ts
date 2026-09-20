@@ -1,10 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  createLocalImport,
   createOnlineBackfill,
   createMarketDataSync,
   createOnlineSync,
   cancelMarketDataJob,
+  deleteMarketBars,
+  detectLocalVipdoc,
   fetchLocalChart,
   fetchLocalInstruments,
   fetchMarketDataCapabilities,
@@ -207,5 +210,57 @@ describe('market data API', () => {
       '/api/v1/market-data/jobs/active',
       '/api/v1/market-data/jobs/sync-1/cancel',
     ])
+  })
+
+  it('detects the local vipdoc directory', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(JSON.stringify({
+      data: { candidates: [{ path: '/vipdoc', exists: true, bar_files: 5200 }], default_path: '/vipdoc', mount_hint: '挂载到 /host' },
+    }), { status: 200 }))
+
+    await expect(detectLocalVipdoc()).resolves.toMatchObject({ default_path: '/vipdoc' })
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/market-data/local-import/detect')
+  })
+
+  it('starts a local import with an instrument scope', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(JSON.stringify({
+      data: { job_id: 'import-1', status: 'queued' },
+    }), { status: 200 }))
+
+    await expect(createLocalImport({
+      vipdoc_path: '/vipdoc',
+      universe: 'sh',
+      instrument_types: ['stock'],
+      boards: ['main'],
+    })).resolves.toEqual({ job_id: 'import-1', status: 'queued' })
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/v1/market-data/local-import')
+    expect(init?.method).toBe('POST')
+    expect(JSON.parse(String(init?.body))).toEqual({
+      vipdoc_path: '/vipdoc',
+      universe: 'sh',
+      instrument_types: ['stock'],
+      boards: ['main'],
+    })
+  })
+
+  it('undoes a local import by deleting its bars', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(JSON.stringify({
+      data: { deleted_bars: 1200, source: 'local' },
+    }), { status: 200 }))
+
+    await expect(deleteMarketBars({
+      source: 'local',
+      universe: 'sh',
+      codes: ['600000'],
+      start_date: '2024-01-01',
+      end_date: '2024-12-31',
+      confirm: true,
+    })).resolves.toEqual({ deleted_bars: 1200, source: 'local' })
+
+    const [url, init] = fetchMock.mock.calls[0]
+    expect(url).toBe('/api/v1/market-data/bars/delete')
+    expect(init?.method).toBe('POST')
+    expect(JSON.parse(String(init?.body))).toMatchObject({ source: 'local', confirm: true, codes: ['600000'] })
   })
 })

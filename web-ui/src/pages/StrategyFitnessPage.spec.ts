@@ -288,4 +288,62 @@ describe('StrategyFitnessPage', () => {
     await wrapper.get('[data-testid="fitness-config"]').trigger('submit')
     expect(wrapper.text()).toContain('至少配置一个卖出规则')
   })
+
+  it('edits the buy rule, scope filters and advanced execution settings', async () => {
+    const wrapper = mount(StrategyFitnessPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="fitness-buy-rule-add-condition"]').trigger('click')
+    await wrapper.get('[data-testid="fitness-scope-type-fund"]').setValue(true)
+    await wrapper.get('[data-testid="fitness-scope-board-main"]').setValue(true)
+    await wrapper.get('[data-testid="fitness-rank-order"]').setValue('asc')
+    await wrapper.get('[data-testid="fitness-advanced-toggle"]').trigger('click')
+    await wrapper.get('[data-testid="fitness-execution"]').setValue('next_close')
+    await wrapper.get('[data-testid="fitness-commission"]').setValue(0.0005)
+    await wrapper.get('[data-testid="fitness-min-commission"]').setValue(1)
+    await wrapper.get('[data-testid="fitness-stamp-tax"]').setValue(0.001)
+    await wrapper.get('[data-testid="fitness-slippage"]').setValue(0.02)
+    await wrapper.get('[data-testid="fitness-initial-cash"]').setValue(200000)
+    await wrapper.get('[data-testid="fitness-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(fitnessApi.createStrategyFitness).toHaveBeenCalledWith(expect.objectContaining({
+      instrument_types: ['fund'],
+      boards: ['main'],
+      rank_order: 'asc',
+      execution: 'next_close',
+      commission: 0.0005,
+      min_commission: 1,
+      stamp_tax: 0.001,
+      slippage: 0.02,
+      initial_cash: 200000,
+    }))
+  })
+
+  it('loads and deletes a saved fitness history record', async () => {
+    vi.mocked(fitnessApi.fetchStrategyFitnessHistory).mockResolvedValue([{
+      history_id: 'fitness-history-1', backtest_type: 'strategy_fitness', created_at: '2024-01-06T08:00:00Z',
+      started_at: '2024-01-06T08:00:00Z', finished_at: '2024-01-06T08:01:00Z',
+      duration_seconds: 60, summary: {},
+    }])
+    vi.mocked(fitnessApi.getStrategyFitnessHistory).mockResolvedValue({
+      history_id: 'fitness-history-1', backtest_type: 'strategy_fitness', created_at: '2024-01-06T08:00:00Z',
+      started_at: '2024-01-06T08:00:00Z', finished_at: '2024-01-06T08:01:00Z',
+      duration_seconds: 60, summary: {}, request: {}, result: report,
+    })
+    vi.mocked(fitnessApi.deleteStrategyFitnessHistory).mockResolvedValue({ deleted: true })
+
+    const wrapper = mount(StrategyFitnessPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="fitness-history-load-fitness-history-1"]').trigger('click')
+    await flushPromises()
+    expect(fitnessApi.getStrategyFitnessHistory).toHaveBeenCalledWith('fitness-history-1')
+    expect(wrapper.get('[data-testid="fitness-message"]').text()).toContain('已加载历史策略适配性评估')
+
+    await wrapper.get('[data-testid="fitness-history-remove-fitness-history-1"]').trigger('click')
+    await flushPromises()
+    expect(fitnessApi.deleteStrategyFitnessHistory).toHaveBeenCalledWith('fitness-history-1')
+    expect(wrapper.get('[data-testid="fitness-message"]').text()).toContain('历史策略适配性评估已删除')
+  })
 })

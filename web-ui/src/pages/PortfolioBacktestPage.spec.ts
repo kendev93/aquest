@@ -529,4 +529,101 @@ describe('PortfolioBacktestPage', () => {
     expect((wrapper.get('[data-testid="portfolio-date-mode"]').element as HTMLSelectElement).value).toBe('full')
     sessionStorage.clear()
   })
+
+  it('loads a saved history detail and toggles board filters', async () => {
+    vi.mocked(portfolioApi.fetchPortfolioBacktestHistory).mockResolvedValue([{
+      history_id: 'history-1', backtest_type: 'portfolio', created_at: '2024-01-06T08:00:00Z',
+      started_at: '2024-01-06T08:00:00Z', finished_at: '2024-01-06T08:01:00Z',
+      duration_seconds: 60, summary: {},
+    }])
+    vi.mocked(portfolioApi.getPortfolioBacktestHistory).mockResolvedValue({
+      history_id: 'history-1', backtest_type: 'portfolio', created_at: '2024-01-06T08:00:00Z',
+      started_at: '2024-01-06T08:00:00Z', finished_at: '2024-01-06T08:01:00Z',
+      duration_seconds: 60, summary: {}, request: {}, result,
+    })
+    const wrapper = mount(PortfolioBacktestPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="portfolio-history-load-history-1"]').trigger('click')
+    await flushPromises()
+
+    expect(portfolioApi.getPortfolioBacktestHistory).toHaveBeenCalledWith('history-1')
+    expect(wrapper.get('[data-testid="portfolio-message"]').text()).toContain('已加载历史组合回测')
+    expect(wrapper.get('[data-testid="portfolio-results"]').text()).toContain('12.00%')
+
+    await wrapper.get('[data-testid="portfolio-scope-board-star"]').setValue(true)
+    await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(portfolioApi.createPortfolioBacktest).toHaveBeenCalledWith(expect.objectContaining({
+      boards: ['star'],
+    }))
+  })
+
+  it('binds the slot count, ranking value and risk cooldowns', async () => {
+    const wrapper = mount(PortfolioBacktestPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="portfolio-max-positions"]').setValue(8)
+    await wrapper.get('[data-testid="portfolio-ranking-value"]').setValue('indicator_three.var1')
+    await wrapper.get('[data-testid="portfolio-stop-loss-cooldown"]').setValue(2)
+    await wrapper.get('[data-testid="portfolio-take-profit-enabled"]').setValue(true)
+    await wrapper.get('[data-testid="portfolio-take-profit-cooldown"]').setValue(3)
+    await wrapper.get('[data-testid="portfolio-trailing-stop-enabled"]').setValue(true)
+    await wrapper.get('[data-testid="portfolio-trailing-stop-cooldown"]').setValue(4)
+    await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(portfolioApi.createPortfolioBacktest).toHaveBeenCalledWith(expect.objectContaining({
+      max_positions: 8,
+      ranking_value: 'indicator_three.var1',
+      stop_loss_cooldown_days: 2,
+      take_profit_cooldown_days: 3,
+      trailing_stop_cooldown_days: 4,
+    }))
+  })
+
+  it('switches every risk control to the ATR mode', async () => {
+    const wrapper = mount(PortfolioBacktestPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="portfolio-stop-loss-mode"]').setValue('atr')
+    await wrapper.get('[data-testid="portfolio-take-profit-enabled"]').setValue(true)
+    await wrapper.get('[data-testid="portfolio-take-profit-mode"]').setValue('atr')
+    await wrapper.get('[data-testid="portfolio-trailing-stop-enabled"]').setValue(true)
+    await wrapper.get('[data-testid="portfolio-trailing-stop-mode"]').setValue('atr')
+    await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(portfolioApi.createPortfolioBacktest).toHaveBeenCalledWith(expect.objectContaining({
+      stop_loss_mode: 'atr',
+      take_profit_mode: 'atr',
+      trailing_stop_mode: 'atr',
+    }))
+  })
+
+  it('edits a custom formula parameter before submitting', async () => {
+    vi.mocked(formulaApi.parseFormula).mockResolvedValueOnce({
+      parameters: [{ name: 'N', default: 5, minimum: 1, maximum: 100, step: 1 }],
+      signals: [{ id: 'custom.buy', display_name: '买入', description: '' }, { id: 'custom.sell', display_name: '卖出', description: '' }],
+      values: [{ id: 'custom.rank', display_name: '排序值', description: '' }],
+      minimum_bars: 6,
+      warnings: [],
+    })
+    const wrapper = mount(PortfolioBacktestPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="portfolio-mode-custom"]').trigger('click')
+    await wrapper.get('[data-testid="portfolio-formula"]').setValue('N:=5; 买入:C>10; 卖出:C<10; 排序:C;')
+    await wrapper.get('[data-testid="portfolio-parse-formula"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="portfolio-param-N"]').setValue(12)
+    await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(portfolioApi.createPortfolioBacktest).toHaveBeenCalledWith(expect.objectContaining({
+      formula_parameters: { N: 12 },
+      ranking_value: 'custom.rank',
+    }))
+  })
 })

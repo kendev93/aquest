@@ -2,6 +2,9 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   SwingResearchApiError,
+  deleteSwingResearchHistory,
+  fetchSwingResearchHistory,
+  getSwingResearchHistory,
   runSwingIndicatorStudy,
   runSwingOverview,
   type SwingProgress,
@@ -118,6 +121,43 @@ describe('swing research API', () => {
 
     await expect(runSwingIndicatorStudy({})).rejects.toMatchObject({
       message: '波段研究没有返回结果，请重试。',
+    })
+  })
+
+  it('lists, reads and deletes swing research history', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ history_id: 'swing-1' }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { history_id: 'swing-1', result: {} } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { deleted: true } }), { status: 200 }))
+
+    await expect(fetchSwingResearchHistory()).resolves.toEqual([{ history_id: 'swing-1' }])
+    await expect(getSwingResearchHistory('swing-1')).resolves.toMatchObject({ history_id: 'swing-1' })
+    await expect(deleteSwingResearchHistory('swing/1')).resolves.toBe(true)
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      '/api/v1/swing-research/history',
+      '/api/v1/swing-research/history/swing-1',
+      '/api/v1/swing-research/history/swing%2F1',
+    ])
+    expect(fetchMock.mock.calls[2][1]?.method).toBe('DELETE')
+  })
+
+  it('reports a connection failure when the service is unreachable', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('fetch failed'))
+
+    await expect(fetchSwingResearchHistory()).rejects.toMatchObject({
+      name: 'SwingResearchApiError',
+      message: '无法连接波段研究服务，请确认后端已启动。',
+    })
+  })
+
+  it('surfaces the server message for a failed history request', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ error: { message: '历史记录不存在' } }), { status: 404 }),
+    )
+
+    await expect(getSwingResearchHistory('missing')).rejects.toMatchObject({
+      message: '历史记录不存在',
     })
   })
 })
