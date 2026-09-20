@@ -13,7 +13,7 @@ import pandas as pd
 
 from selector_app.backtest.performance import PerformanceAnalyzer
 
-from .context import _StockSeries
+from .context import _ResolvedRefs, _StockSeries
 from .models import PortfolioBacktestConfig, PortfolioBacktestReport, PortfolioJsonValue
 from .risk import _risk_controls
 from .state import _PortfolioServiceState
@@ -32,6 +32,7 @@ class PortfolioReportMixin(_PortfolioServiceState):
         failure_reasons: Mapping[str, int],
         simulation: Mapping[str, object],
         data_fingerprint: str = "",
+        resolved: _ResolvedRefs | None = None,
     ) -> PortfolioBacktestReport:
         equity = cast(list[dict[str, PortfolioJsonValue]], simulation["equity"])
         trades = cast(list[dict[str, PortfolioJsonValue]], simulation["trades"])
@@ -123,6 +124,8 @@ class PortfolioReportMixin(_PortfolioServiceState):
             diagnostic=diagnostic,
             data_fingerprint=data_fingerprint,
             risk_controls=_risk_controls(config),
+            missing_codes=resolved.missing if resolved is not None else (),
+            filtered_codes=resolved.filtered if resolved is not None else (),
         )
 
     @staticmethod
@@ -130,6 +133,7 @@ class PortfolioReportMixin(_PortfolioServiceState):
         config: PortfolioBacktestConfig,
         total_candidates: int,
         failure_reasons: Mapping[str, int],
+        resolved: _ResolvedRefs | None = None,
     ) -> PortfolioBacktestReport:
         return PortfolioBacktestReport(
             universe=config.universe,
@@ -154,6 +158,8 @@ class PortfolioReportMixin(_PortfolioServiceState):
             failure_reasons=failure_reasons,
             diagnostic="没有可用于回测的股票数据",
             risk_controls=_risk_controls(config),
+            missing_codes=resolved.missing if resolved is not None else (),
+            filtered_codes=resolved.filtered if resolved is not None else (),
         )
 
 

@@ -8,6 +8,7 @@ from threading import Lock
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from selector_app.adapters.local_day_adapter import StockRef
 from selector_app.backtest.models import BacktestConfig
@@ -15,7 +16,7 @@ from selector_app.backtest.service import BacktestService
 from selector_app.formulas.custom import evaluate_custom_formula, parse_formula
 from selector_app.formulas.registry import FORMULA_REGISTRY, FormulaRegistry
 from selector_app.indicators.cache import IndicatorCache, frame_fingerprint
-from selector_app.indicators.precompute import IndicatorPrecomputeService
+from selector_app.indicators.precompute import IndicatorPrecomputeService, _year_windows
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.portfolio_backtest.models import PortfolioBacktestConfig
@@ -583,3 +584,50 @@ def test_backtest_report_records_the_input_data_fingerprint() -> None:
 
     assert isinstance(report.configuration["data_fingerprint"], str)
     assert len(report.configuration["data_fingerprint"]) == 64
+
+
+def test_year_windows_anchor_on_the_stored_data_not_the_wall_clock() -> None:
+    """「最近 N 年」说的是数据的最近 N 年，不是系统时间的。
+
+    行情停在 2024 年而今年是 2026 年时，按墙上时钟算会给出 2022..2026：两个
+    空年份白算，真正存着数据的 2020、2021 反而被切掉。
+    """
+
+    assert _year_windows(3, 2024) == [
+        (date(2022, 1, 1), date(2022, 12, 31)),
+        (date(2023, 1, 1), date(2023, 12, 31)),
+        (date(2024, 1, 1), date(2024, 12, 31)),
+    ]
+    with pytest.raises(ValueError, match="年份锚点"):
+        _year_windows(3, 0)
+
+
+def test_replacing_bars_on_the_same_dates_needs_an_explicit_cache_reset(
+    tmp_path: Path,
+) -> None:
+    """日期不变、数值变了：缓存不会自己察觉，必须靠调用方失效。
+
+    缓存键里带的是标的级版本号（`bar_count|last_date|updated_at`），它在进程
+    内是缓存住的。行情重写之后它必然变化，但手上的副本不会——结束日期又没变，
+    于是内存命中校验也过得去，回测就这样拿到了上一版行情算出来的指标，且不
+    报错。这就是 `clear_memory()` 存在的理由，也是每条写入行情的路径都必须
+    调它的原因。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    cache = IndicatorCache(store)
+    first = _bars(80)
+    store.replace_local_bars("SH", "600000", "stock", first)
+    cache.get_or_compute(first, ("price",), market="SH", code="600000")
+
+    second = _bars(80)
+    second["close"] = second["close"] + 100.0
+    store.replace_local_bars("SH", "600000", "stock", second)
+    stale = cache.get_or_compute(second, ("price",), market="SH", code="600000")["price"]
+
+    assert np.allclose(stale.values["close"], np.asarray(first["close"], dtype=float))
+
+    cache.clear_memory()
+    fresh = cache.get_or_compute(second, ("price",), market="SH", code="600000")["price"]
+
+    assert np.allclose(fresh.values["close"], np.asarray(second["close"], dtype=float))

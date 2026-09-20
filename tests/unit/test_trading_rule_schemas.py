@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from selector_app.web.schemas import (
     BacktestRequest,
@@ -230,3 +231,20 @@ def test_strategy_discovery_request_preserves_required_buy_and_sell_conditions()
     assert discovery.required_buy_conditions[0].operator == "cross_up"
     assert discovery.required_sell_conditions[0].right_constant == 70
     assert discovery.to_dict()["required_buy_conditions"]
+
+
+def test_portfolio_request_rejects_a_fixed_size_that_is_not_a_whole_lot() -> None:
+    """150 股会被模拟器静默取整成 100 股，请求层必须直接拒绝。"""
+
+    base = {
+        "ranking_value": "technical.ma5",
+        "buy_rule": {"conditions": [condition("technical.ma5", "gt", right_constant=10)]},
+        "sell_rule": {"conditions": [condition("technical.ma5", "lt", right_constant=5)]},
+        "position_mode": "fixed",
+    }
+
+    with pytest.raises(ValidationError, match="100 的整数倍"):
+        PortfolioBacktestRequest.model_validate({**base, "fixed_size": 150})
+
+    accepted = PortfolioBacktestRequest.model_validate({**base, "fixed_size": 300})
+    assert accepted.fixed_size == 300

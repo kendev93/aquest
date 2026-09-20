@@ -204,6 +204,12 @@ const sampledEquity = computed(() => {
   return curve.length > 60 ? curve.slice(-60) : curve
 })
 const recentTrades = computed(() => (result.value?.trades ?? []).slice(-100).reverse())
+// 指定标的里没进回测的代码必须让用户看见：否则填了 10 只、实际只跑 8 只，
+// 报告照样完整，只有「已处理 N / M」里的 M 会小一点，没人会去数。
+const droppedCodes = computed(() => [
+  ...(result.value?.missing_codes ?? []).map(code => ({ code, reason: '行情库里没有' })),
+  ...(result.value?.filtered_codes ?? []).map(code => ({ code, reason: '被板块或类型范围排除' })),
+])
 const chartPoints = computed(() => {
   const curve = result.value?.equity_curve ?? []
   if (curve.length < 2) return ''
@@ -357,6 +363,9 @@ function validate(): Record<string, string> {
   if (form.positionMode === 'fixed') {
     if (!Number.isInteger(form.fixedSize) || form.fixedSize < 100 || form.fixedSize > 100_000_000) {
       next.fixedSize = '固定买入股数必须是 100 到 100000000 的整数。'
+    } else if (form.positionMode === 'fixed' && form.fixedSize % 100 !== 0) {
+      // 后端会把非整手向下取整，这里先挡住，免得填 150 实际按 100 跑还毫无提示。
+      next.fixedSize = '固定买入股数必须是 100 的整数倍（A 股一手 100 股）。'
     }
   }
   if (form.mode === 'custom') {
@@ -1043,6 +1052,7 @@ watch(() => form.formulaText, (value) => {
 
             <section class="data-section"><div class="section-heading"><div><span class="section-kicker">RECENT EQUITY</span><h3>最近净值</h3></div><span>最近 {{ sampledEquity.length }} 日</span></div><div class="table-wrap"><table data-testid="portfolio-equity-table"><caption class="sr-only">组合最近资金曲线数据</caption><thead><tr><th>日期</th><th>现金</th><th>持仓市值</th><th>总资产</th><th>持仓数</th><th>回撤</th></tr></thead><tbody><tr v-for="point in sampledEquity" :key="point.date"><td class="muted-code">{{ point.date }}</td><td>{{ formatMoney(point.cash) }}</td><td>{{ formatMoney(point.position_value) }}</td><td><strong>{{ formatMoney(point.total) }}</strong></td><td>{{ point.positions_count }}</td><td>{{ formatPercent(point.drawdown_pct) }}</td></tr></tbody></table></div></section>
             <div v-if="result.failure_reasons && Object.keys(result.failure_reasons).length" class="failure-summary"><strong>失败摘要</strong><span v-for="(count, reason) in result.failure_reasons" :key="reason">{{ reason }} · {{ count }}</span></div>
+            <div v-if="droppedCodes.length" class="failure-summary" data-testid="portfolio-dropped-codes"><strong>未参与回测的指定标的</strong><span v-for="item in droppedCodes" :key="item.code">{{ item.code }} · {{ item.reason }}</span></div>
             <p v-if="result.diagnostic" class="diagnostic" data-testid="portfolio-diagnostic">{{ result.diagnostic }}</p>
           </template>
         </section>

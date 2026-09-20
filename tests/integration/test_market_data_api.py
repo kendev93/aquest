@@ -1,15 +1,36 @@
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
+import numpy as np
+import pandas as pd
 from fastapi.testclient import TestClient
 
+from selector_app.indicators.cache import IndicatorCache
 from selector_app.market_data.service import (
     LocalInstrument,
     LocalInstrumentPage,
     LocalMarketChart,
 )
+from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.web.app import create_app
+
+
+def _bars(length: int = 80, base: float = 1.0) -> pd.DataFrame:
+    close = base + np.arange(length, dtype=float)
+    return pd.DataFrame(
+        {
+            "date": pd.date_range("2024-01-01", periods=length, freq="D"),
+            "open": close - 0.2,
+            "high": close + 0.5,
+            "low": close - 0.5,
+            "close": close,
+            "volume": np.full(length, 100_000.0),
+            "amount": close * 100_000.0,
+            "bar_status": "completed",
+        }
+    )
 
 
 class FakeLocalMarketDataService:
@@ -125,6 +146,36 @@ def test_bar_delete_endpoint_rejects_an_unconfirmed_request() -> None:
         )
 
     assert response.status_code == 422
+
+
+def test_bar_delete_drops_the_in_process_indicator_cache(tmp_path: Path) -> None:
+    """删掉行情后指标缓存必须跟着失效。
+
+    缓存键里带着标的级版本号，而版本号在进程内是缓存住的。行情一变它必然
+    变化，但缓存里的副本不会——于是「日期不变、数值变了」的重写会命中旧
+    条目，回测拿到上一版行情算出来的指标，且不报错。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars())
+    cache = IndicatorCache(store)
+    cache.get_or_compute(
+        store.read_bars("SH", "600000"), ("price",), market="SH", code="600000"
+    )
+    assert cache._revisions, "预热之后版本号应当已经缓存住"
+
+    with TestClient(
+        create_app(market_data_store=store, indicator_cache=cache, auto_sync_enabled=False)
+    ) as client:
+        response = client.post(
+            "/api/v1/market-data/bars/delete",
+            json={"source": "local", "universe": "all", "confirm": True},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["deleted_bars"] > 0
+    assert cache._revisions == {}
+    assert cache.status()["memory_entries"] == 0
 
 
 def test_local_import_endpoint_is_removed() -> None:

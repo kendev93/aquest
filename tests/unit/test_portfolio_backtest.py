@@ -603,6 +603,31 @@ def test_codes_are_rejected_outside_the_codes_universe() -> None:
         config(universe="all", codes=("600000",))
 
 
+def test_codes_universe_reports_codes_that_never_reached_the_simulation() -> None:
+    """点名指定的标的一个都不能悄悄丢掉。
+
+    只有「一个都没找到」才报错的话，填 10 只实际跑 8 只时回测照样出报告，
+    用户从结果里看不出样本少了。
+    """
+
+    report = PortfolioBacktestService(adapter=FakeAdapter()).run(
+        config(universe="codes", codes=("600000", "600999"), max_positions=1)
+    )
+
+    assert report.total_candidates == 1
+    assert report.missing_codes == ("SH600999",)
+    assert report.filtered_codes == ()
+
+
+def test_codes_universe_reports_codes_dropped_by_the_scope() -> None:
+    report = PortfolioBacktestService(adapter=FakeAdapter()).run(
+        config(universe="codes", codes=("600000",), boards=("star",), max_positions=1)
+    )
+
+    assert report.filtered_codes == ("SH600000",)
+    assert report.missing_codes == ()
+
+
 def test_unknown_codes_raise_a_readable_error() -> None:
     with pytest.raises(ValueError, match="找不到已导入的行情"):
         PortfolioBacktestService(adapter=FakeAdapter()).run(

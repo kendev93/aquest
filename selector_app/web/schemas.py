@@ -867,6 +867,10 @@ class PortfolioBacktestRequest(BaseModel):
             raise ValueError("固定股数模式必须设置买入股数")
         if self.position_mode == "full" and self.fixed_size is not None:
             raise ValueError("按比例建仓不应设置买入股数")
+        # A 股一手 100 股，模拟器会把固定股数向下取整到整手。不在这里挡住，
+        # 填 150 会被静默变成 100——用户以为自己改了仓位，实际没变。
+        if self.fixed_size is not None and self.fixed_size % 100 != 0:
+            raise ValueError("买入股数必须是 100 的整数倍（A 股一手 100 股）")
         if self.start_date is not None and self.end_date is not None:
             if self.start_date > self.end_date:
                 raise ValueError("回测开始日期不能晚于结束日期")

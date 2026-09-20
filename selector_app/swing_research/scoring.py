@@ -334,13 +334,16 @@ def _top_bucket_evidence(
     """Hit-rate ratio of the extreme bucket, plus the value that defines it."""
 
     share = min(max(top_quantile, 0.01), 0.5)
-    filled = np.where(mask, values, np.nan)
-    ordered = np.sort(np.where(mask, filled, np.nan), axis=0)
-    rows = values.shape[0]
-    cut = int(round(rows * share))
-    cut = min(max(cut, 1), rows)
-    edge_index = (rows - cut) if high else (cut - 1)
-    hints = ordered[edge_index, :]
+    ordered = np.sort(np.where(mask, values, np.nan), axis=0)
+    rows, days = ordered.shape
+    # 分位点必须按"当天有效样本数"取，不能按总行数：np.sort 把缺失值排到列尾，
+    # 用总行数算下标时，稀疏日（100 行里只有 20 个有效值）会取到 NaN，于是
+    # threshold_hint 变 None，conditions.py 直接跳过这个指标、条件计划生成不出来。
+    # 下面入选用的 boundary 本来就是按 counts 算的，两边必须一致。
+    cuts = np.clip(np.rint(np.asarray(counts, dtype=float) * share), 1, counts)
+    edge = np.where(high, counts - cuts, cuts - 1)
+    edge = np.clip(edge, 0, max(rows - 1, 0)).astype(int)
+    hints = ordered[edge, np.arange(days)]
 
     rank = tie_average_rank(values, mask)
     if high:

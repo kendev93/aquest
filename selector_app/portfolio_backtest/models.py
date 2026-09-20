@@ -280,6 +280,11 @@ class PortfolioBacktestReport:
     diagnostic: str | None = None
     data_fingerprint: str = ""
     risk_controls: Mapping[str, object] = field(default_factory=dict)
+    #: 指定标的中行情库里根本找不到的代码。以前只在"一个都没找到"时报错，
+    #: 少几个就被悄悄丢掉，回测看上去跑通了，实际样本少了一块。
+    missing_codes: tuple[str, ...] = ()
+    #: 指定标的中被板块/类型过滤掉的代码。
+    filtered_codes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "performance", MappingProxyType(dict(self.performance)))
@@ -311,4 +316,6 @@ class PortfolioBacktestReport:
             "diagnostic": self.diagnostic,
             "data_fingerprint": self.data_fingerprint,
             "risk_controls": dict(self.risk_controls),
+            "missing_codes": list(self.missing_codes),
+            "filtered_codes": list(self.filtered_codes),
         }

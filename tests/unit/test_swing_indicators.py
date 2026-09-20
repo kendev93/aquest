@@ -202,6 +202,42 @@ def test_injected_edge_is_significant() -> None:
     assert score.top_lift is not None and score.top_lift > 1.0
 
 
+def test_threshold_hint_survives_a_sparse_cross_section() -> None:
+    """横截面稀疏时阈值提示不能退化成 NaN。
+
+    面板里每天只有一小部分标的有值（未上市、指标在预热、标签的未来窗口不存
+    在）。分位点若按总行数取，np.sort 把缺失值排到列尾，稀疏日取到的就是
+    NaN —— threshold_hint 变 None，conditions.py 会直接跳过这个指标，条件
+    计划连一条都生成不出来。
+    """
+
+    rng = np.random.default_rng(7)
+    stocks, days, valid = 100, 60, 20
+    values = np.full((stocks, days), np.nan)
+    labels = np.full((stocks, days), np.nan)
+    for day in range(days):
+        rows = rng.choice(stocks, size=valid, replace=False)
+        column = rng.normal(size=valid)
+        values[rows, day] = column
+        # 标签就是当天的排名，信息系数接近 1，order 必定是 high。
+        labels[rows, day] = np.argsort(np.argsort(column)) / (valid - 1)
+
+    score = score_indicator(
+        values,
+        labels,
+        value_id="sparse",
+        display_name="稀疏",
+        label="l",
+        min_cross_section=10,
+        permutations=0,
+    )
+
+    assert score.order == "high"
+    assert score.threshold_hint is not None
+    # 提示值必须落在真实数据的取值范围里，而不是排到缺失值那一段。
+    assert min(np.nanmin(values), 0.0) <= score.threshold_hint <= np.nanmax(values)
+
+
 def test_block_permutations_keep_days_inside_a_block_together() -> None:
     permutations = block_permutations(10, block_size=5, count=4, seed=3)
 

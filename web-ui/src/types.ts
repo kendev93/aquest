@@ -600,6 +600,10 @@ export interface PortfolioBacktestResult {
   risk_controls?: Record<string, number | string | null>
   // 后端 portfolio_backtest/service.py 会在结果上附带行情指纹，用于复核时判断数据是否变化。
   data_fingerprint: string
+  /** 指定标的中行情库里找不到的代码（只有 universe === 'codes' 时才可能有）。 */
+  missing_codes?: string[]
+  /** 指定标的中被板块/类型范围过滤掉的代码。 */
+  filtered_codes?: string[]
 }
 
 export interface StrategyDiscoveryPayload {

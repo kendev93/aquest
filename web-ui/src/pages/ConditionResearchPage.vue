@@ -81,8 +81,9 @@ const form = reactive({
   minInstruments: 5,
   candidateLimit: 5,
   holdoutCandidates: 1,
-  // 0 = 不做检验。默认 20 次在典型样本量下只多花不到 1 秒。
-  significancePermutations: 20,
+  // 0 = 不做检验。默认 200 次：20 次时名义 5% 的门槛实测误报 11.7%，
+  // 200 次回落到 3.3%（后端默认值已同步为 200，前端不能把它覆盖回 20）。
+  significancePermutations: 200,
   initialCash: 100_000,
   commission: 0.0001,
   minCommission: 0.1,

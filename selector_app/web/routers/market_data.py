@@ -151,6 +151,36 @@ def _indicator_cache(request: Request) -> IndicatorCache:
     return cast(IndicatorCache, request.app.state.indicator_cache)
 
 
+def _invalidate_indicator_cache(request: Request) -> None:
+    """Drop in-process indicator results after market data changed.
+
+    指标缓存的键里带着标的级版本号（`bar_count|last_date|updated_at`），而这个
+    版本号在进程内是缓存住的：行情一变它必然变化，但缓存里的副本不会自己失效。
+    于是「日期不变、数值变了」的重写（本地重新导入同一段历史就是这种）会命中
+    旧条目，回测拿到上一版行情算出来的指标，且不报错。持久层反而是对的——新
+    进程会重新查版本号，所以表现为「重启后端就正常」。
+
+    内存缓存只有几百条，重建的代价远小于算错，所以这里直接整片丢掉。
+    """
+
+    cache = getattr(request.app.state, "indicator_cache", None)
+    if cache is None:
+        return
+    cast(IndicatorCache, cache).clear_memory()
+
+
+def _stored_end_year(status: DataStoreStatus) -> int | None:
+    """Calendar year of the newest stored bar, or None when the store is empty."""
+
+    raw = (status.data_end or "").strip()
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw[:10]).year
+    except ValueError:
+        return None
+
+
 def _resolved_vipdoc_path(vipdoc_path: str | None) -> str:
     raw = vipdoc_path or os.getenv("SELECTOR_VIPDOC_PATH") or "/data/vipdoc"
     return map_host_path(raw)
@@ -189,7 +219,11 @@ def _with_indicator_precompute(
     boards: list[InstrumentBoard] | tuple[InstrumentBoard, ...] | None,
     progress_callback: Callable[[int, int], None] | None = None,
     only_changed: bool = False,
+    years: int | None = None,
 ) -> dict[str, object]:
+    # 调用方刚写完行情：先把进程内的指标缓存和版本号丢掉，否则下面的预计算
+    # 会带着旧版本号入库，把新算出来的结果又存成旧键。
+    _invalidate_indicator_cache(request)
     try:
         store_status = _market_status(request)
         if should_defer_precompute(store_status.bar_count):
@@ -213,6 +247,10 @@ def _with_indicator_precompute(
             universe=universe,
             instrument_types=tuple(instrument_types or ()),
             boards=tuple(boards or ()),
+            years=years if years is not None else DEFAULT_PRECOMPUTE_YEARS,
+            # 区间终点锚在行情的最后一天：数据停在 2024 年时，"最近五年"应当是
+            # 2020..2024，而不是按系统年份算出来的 2022..2026。
+            end_year=_stored_end_year(store_status),
             # 行情更新通常只动一部分标的，只重算缓存缺失/过期的那些。
             only_changed=only_changed,
             progress_callback=progress_callback,
@@ -323,6 +361,7 @@ def create_indicator_precompute_job(
                 instrument_types=tuple(payload.instrument_types or ()),
                 boards=tuple(payload.boards or ()),
                 years=payload.precompute_years or DEFAULT_PRECOMPUTE_YEARS,
+                end_year=_stored_end_year(store_status),
                 only_changed=payload.precompute_only_changed,
                 progress_callback=progress,
             )
@@ -459,6 +498,8 @@ def delete_market_bars(
                 "error": {"code": "market_data_store_error", "message": _storage_error_message(exc)}
             },
         )
+    # 删掉的行情可能正躺在指标缓存里，版本号副本不清掉下一次查询还会命中它。
+    _invalidate_indicator_cache(request)
     return {"data": {"deleted_bars": removed, "source": payload.source}}
 
 
@@ -521,6 +562,7 @@ def _create_sync_job(
             boards=payload.boards,
             progress_callback=progress,
             only_changed=True,
+            years=payload.precompute_years,
         )
 
     try:

@@ -243,6 +243,24 @@ describe('ConditionResearchPage', () => {
     expect((wrapper.get('[data-testid="condition-stock-view"]').element as HTMLSelectElement).value).toBe('buy-1:full')
   })
 
+  it('submits the backend permutation default instead of the old 20', async () => {
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+
+    // 20 次置换时名义 5% 的门槛实测误报 11.7%，后端默认早已改成 200；
+    // 前端一旦把它覆盖回 20，用户看到的就是重新校准前的假阳性率。
+    expect(
+      (wrapper.get('[data-testid="condition-permutations"]').element as HTMLInputElement).value,
+    ).toBe('200')
+
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(researchApi.createConditionResearch).toHaveBeenCalledWith(
+      expect.objectContaining({ significance_permutations: 200 }),
+    )
+  })
+
   it('flags lifts that a shuffled-label search could have produced by chance', async () => {
     const noisy = {
       ...result,

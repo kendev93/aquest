@@ -113,12 +113,17 @@ class IndicatorPrecomputeService:
         years: int = DEFAULT_PRECOMPUTE_YEARS,
         warmup_bars: int = DEFAULT_PRECOMPUTE_WARMUP_BARS,
         only_changed: bool = False,
+        end_year: int | None = None,
         progress_callback: ProgressCallback | None = None,
     ) -> IndicatorPrecomputeReport:
         if isinstance(years, bool) or not isinstance(years, int) or years < 1:
             raise ValueError("预计算年份范围必须是正整数")
         if isinstance(warmup_bars, bool) or not isinstance(warmup_bars, int) or warmup_bars < 0:
             raise ValueError("预计算预热根数必须是非负整数")
+        if end_year is not None and (
+            isinstance(end_year, bool) or not isinstance(end_year, int) or end_year < 1
+        ):
+            raise ValueError("预计算年份锚点必须是正整数")
         refs = self._adapter.list_stock_refs(
             vipdoc_path,
             universe,
@@ -133,7 +138,7 @@ class IndicatorPrecomputeService:
             formula_id: self._registry.formula(formula_id).minimum_bars
             for formula_id in formula_ids
         }
-        windows = _year_windows(years)
+        windows = _year_windows(years, end_year)
         failures: Counter[str] = Counter()
         processed = 0
         skipped = 0
@@ -332,10 +337,17 @@ class IndicatorPrecomputeService:
         return yearly
 
 
-def _year_windows(years: int) -> list[tuple[date, date]]:
-    """Return the `[Jan 1, Dec 31]` windows of the last `years` calendar years."""
+def _year_windows(years: int, end_year: int | None = None) -> list[tuple[date, date]]:
+    """Return the `[Jan 1, Dec 31]` windows of the last `years` calendar years.
 
-    last = date.today().year
+    `end_year` 把窗口锚在行情上而不是墙上时钟：数据停在 2024 年而今天是 2026
+    年时，默认锚点会给出 2022..2026——两个空年份白算，真正存着数据的 2020、
+    2021 反而被切掉，而"最近五年"这个说法说的正是数据的最近五年。
+    """
+
+    last = end_year if end_year is not None else date.today().year
+    if isinstance(last, bool) or not isinstance(last, int) or last < 1:
+        raise ValueError("预计算年份锚点必须是正整数")
     return [
         (date(year, 1, 1), date(year, 12, 31))
         for year in range(last - years + 1, last + 1)

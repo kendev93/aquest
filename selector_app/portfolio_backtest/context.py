@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
-from typing import cast
+from typing import NamedTuple, cast
 
 import numpy as np
 import pandas as pd
@@ -42,6 +42,16 @@ _WARMUP_BARS = max(
     (cast(int, item["recommended_bars"]) for item in FORMULA_REGISTRY.metadata()),
     default=0,
 )
+
+
+class _ResolvedRefs(NamedTuple):
+    """解析出来的标的，外加没能进入回测的两类代码。"""
+
+    refs: list[StockRef]
+    #: 行情库里找不到的代码。
+    missing: tuple[str, ...] = ()
+    #: 找到了但被板块/类型范围过滤掉的代码。
+    filtered: tuple[str, ...] = ()
 
 
 class SortedDateIndex(Mapping[int, int]):
@@ -265,9 +275,12 @@ class PortfolioContextMixin(_PortfolioServiceState):
             frames[(str(key[0]), str(key[1]))] = group.reset_index(drop=True)
         return frames
 
-    def _list_refs(self, config: PortfolioBacktestConfig) -> list[StockRef]:
+    def _list_refs(self, config: PortfolioBacktestConfig) -> _ResolvedRefs:
         if config.universe == "codes":
             return self._list_refs_by_codes(config)
+        return _ResolvedRefs(refs=self._list_universe_refs(config))
+
+    def _list_universe_refs(self, config: PortfolioBacktestConfig) -> list[StockRef]:
         if not config.instrument_types and not config.boards:
             return self._adapter.list_stock_refs(
                 config.vipdoc_path,
@@ -308,8 +321,13 @@ class PortfolioContextMixin(_PortfolioServiceState):
             )
         ]
 
-    def _list_refs_by_codes(self, config: PortfolioBacktestConfig) -> list[StockRef]:
-        """Resolve an explicit code list, preserving the user's ordering."""
+    def _list_refs_by_codes(self, config: PortfolioBacktestConfig) -> _ResolvedRefs:
+        """Resolve an explicit code list, preserving the user's ordering.
+
+        找不到或被范围过滤掉的代码不能悄悄丢掉：用户明确点名的标的少了几只，
+        回测照样跑完、报告照样好看，只有 `total_candidates` 会小一点——而没人
+        会去数它。所以两者都一并返回，交给报告显示。
+        """
 
         requested: list[tuple[MarketCode, str]] = []
         seen: set[tuple[MarketCode, str]] = set()
@@ -335,9 +353,9 @@ class PortfolioContextMixin(_PortfolioServiceState):
             instrument_types=config.instrument_types,
             boards=config.boards,
         )
-        return [
-            ref
-            for ref in refs
+        kept: list[StockRef] = []
+        filtered: list[str] = []
+        for ref in refs:
             if scope.matches(
                 ref.market,
                 str(
@@ -345,8 +363,15 @@ class PortfolioContextMixin(_PortfolioServiceState):
                     or getattr(ref, "instrument_type", "stock")
                 ),
                 str(classify_board(ref.market, ref.code) or getattr(ref, "board", "main")),
-            )
-        ]
+            ):
+                kept.append(ref)
+            else:
+                filtered.append(f"{ref.market}{ref.code}")
+        return _ResolvedRefs(
+            refs=kept,
+            missing=tuple(missing),
+            filtered=tuple(filtered),
+        )
 
     def _calculate_results(
         self,

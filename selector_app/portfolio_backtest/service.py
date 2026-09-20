@@ -54,7 +54,8 @@ class PortfolioBacktestService(
         config: PortfolioBacktestConfig,
         progress_callback: PortfolioBacktestProgressCallback | None = None,
     ) -> PortfolioBacktestReport:
-        refs = self._list_refs(config)
+        resolved = self._list_refs(config)
+        refs = resolved.refs
         parsed = parse_formula(config.formula_text) if config.formula_text else None
         self._validate_outputs(config, parsed)
 
@@ -129,10 +130,10 @@ class PortfolioBacktestService(
                 executor.shutdown(wait=True)
 
         if not contexts:
-            return self._empty_report(config, len(refs), failure_reasons)
+            return self._empty_report(config, len(refs), failure_reasons, resolved)
         dates = self._global_dates(contexts)
         if not dates:
-            return self._empty_report(config, len(refs), failure_reasons)
+            return self._empty_report(config, len(refs), failure_reasons, resolved)
 
         fitness_filter = self._build_fitness_filter(contexts, config)
         simulation = self._simulate(contexts, dates, config, fitness_filter)
@@ -145,6 +146,7 @@ class PortfolioBacktestService(
             failure_reasons,
             simulation,
             _portfolio_fingerprint(contexts),
+            resolved,
         )
         if progress_callback is not None:
             progress_callback(len(refs), len(refs))
