@@ -39,6 +39,7 @@ from selector_app.market_data.staging import (
 )
 from selector_app.market_data.store import DuckDbMarketDataStore
 
+from .baostock_catalog import BaostockCatalogError, fetch_all_securities
 from .market_sync import (
     AbortCheck,
     DetailCallback,
@@ -65,6 +66,11 @@ _CATALOG_RETRY_BASE_SECONDS = 1.0
 _CATALOG_RETRY_MAX_SECONDS = 4.0
 _REQUEST_INTERVAL_SECONDS = 0.15
 _STOCK_BOARDS = frozenset({"main", "star", "chinext"})
+# 一次 baostock 目录查询要覆盖「起解释器 + TCP 登录 + 约 7.4k 行回传」，单根 K 线
+# 的 30 秒超时对它太紧，给一个下限。
+_BAOSTOCK_CATALOG_MIN_TIMEOUT = 150.0
+# 证券目录的取源顺序。baostock 打头，东财兜底。
+_DEFAULT_CATALOG_SOURCES: tuple[str, ...] = ("baostock", "eastmoney")
 _EASTMONEY_LIST_URL = "https://82.push2.eastmoney.com/api/qt/clist/get"
 _EASTMONEY_FUND_LIST_URL = "https://88.push2.eastmoney.com/api/qt/clist/get"
 # East Money 的 clist 节点各自独立限流：同一时刻有的正常返回、有的直接断开连接。
@@ -782,6 +788,7 @@ class OnlineMarketSync:
         clock: Callable[[], datetime] | None = None,
         sleep: SleepFunction = time.sleep,
         request_interval_seconds: float = _REQUEST_INTERVAL_SECONDS,
+        catalog_sources: tuple[str, ...] | None = None,
     ) -> None:
         if request_interval_seconds < 0:
             raise ValueError("在线行情请求间隔不能小于 0")
@@ -790,6 +797,9 @@ class OnlineMarketSync:
         self._clock = clock or (lambda: datetime.now(_SHANGHAI_TZ))
         self._sleep = sleep
         self._rate_limiter = _RateLimiter(request_interval_seconds, sleep)
+        self._catalog_sources = tuple(
+            catalog_sources if catalog_sources is not None else _DEFAULT_CATALOG_SOURCES
+        )
 
     def supports_process_staging(self) -> bool:
         """Return whether the provider can be reconstructed safely in a child process."""
@@ -1159,17 +1169,35 @@ class OnlineMarketSync:
         config: MarketSyncConfig,
         wanted: tuple[InstrumentType, ...],
     ) -> _TargetSelection:
-        """Fetch one East Money catalog per requested instrument kind.
+        """Build the download targets from the layered catalog sources.
 
-        Stocks and funds live in different quote endpoints, so a mixed request
-        has to walk both and merge the results by (market, code).
+        East Money's quote-list endpoint (``clist``) is the part that got blocked,
+        so the catalog is no longer a single-provider concern: baostock answers
+        the whole SH/SZ universe in one call and leads, East Money stays as the
+        fallback.  See docs/datasource-survey-2026-09-20.md section VII.
         """
 
         module = self._module_factory()
         selections: list[_TargetSelection] = []
+        frame, provider = self._fetch_catalog_frame(config)
+        if frame is not None:
+            # baostock hands back every SH/SZ security at once, so one frame
+            # serves every requested kind; the per-kind classifier drops the rest.
+            selections.extend(
+                _selection_from_online_list(
+                    frame,
+                    config,
+                    instrument_type=instrument_type,
+                    provider=provider,
+                )
+                for instrument_type in wanted
+            )
+            return _merge_selections(selections, provider=provider)
+        # Stocks and funds live in different quote endpoints on East Money, so a
+        # mixed request has to walk both and merge the results by (market, code).
         if "stock" in wanted:
             selections.append(
-                _selection_from_eastmoney_list(
+                _selection_from_online_list(
                     module.fetch_instruments(timeout=config.timeout),
                     config,
                     instrument_type="stock",
@@ -1177,13 +1205,34 @@ class OnlineMarketSync:
             )
         if "fund" in wanted:
             selections.append(
-                _selection_from_eastmoney_list(
+                _selection_from_online_list(
                     module.fetch_fund_instruments(timeout=config.timeout),
                     config,
                     instrument_type="fund",
                 )
             )
         return _merge_selections(selections)
+
+    def _fetch_catalog_frame(
+        self,
+        config: MarketSyncConfig,
+    ) -> tuple[pd.DataFrame | None, str]:
+        """Return the whole-universe catalog frame, or ``None`` to use East Money.
+
+        baostock needs more headroom than a single bar request: a fresh
+        interpreter, a TCP login and ~7.4k rows all land inside one timeout.
+        """
+
+        if "baostock" not in self._catalog_sources:
+            return None, "eastmoney"
+        timeout = max(float(config.timeout), _BAOSTOCK_CATALOG_MIN_TIMEOUT)
+        try:
+            frame = fetch_all_securities(timeout=timeout)
+        except (BaostockCatalogError, OnlineDataError):
+            return None, "eastmoney"
+        if frame.empty:
+            return None, "eastmoney"
+        return frame, "baostock"
 
     def _latest_existing_bars(
         self,
@@ -1464,23 +1513,28 @@ class OnlineMarketSync:
     ) -> tuple[pd.DataFrame, int, str]:
         date_start = start_date.strftime("%Y%m%d")
         date_end = end_date.strftime("%Y%m%d")
+        # Tencent leads: East Money's day-kline endpoint is only intermittently
+        # reachable (measured 2026-09-20, see docs/datasource-survey-2026-09-20.md
+        # section II) while Tencent's stayed up across every probe and carries
+        # `amount` plus full ETF history.  East Money stays as the fallback so a
+        # Tencent outage does not take the channel down entirely.
         source_requests: tuple[tuple[str, str, dict[str, object]], ...] = (
-            (
-                "eastmoney",
-                "fetch_daily_history",
-                {
-                    "symbol": code,
-                    "start_date": date_start,
-                    "end_date": date_end,
-                    "timeout": timeout,
-                },
-            ),
             (
                 "tencent",
                 "fetch_tencent_daily_history",
                 {
                     "market": market,
                     "code": code,
+                    "start_date": date_start,
+                    "end_date": date_end,
+                    "timeout": timeout,
+                },
+            ),
+            (
+                "eastmoney",
+                "fetch_daily_history",
+                {
+                    "symbol": code,
                     "start_date": date_start,
                     "end_date": date_end,
                     "timeout": timeout,
@@ -1501,19 +1555,19 @@ class OnlineMarketSync:
                 if rate_gate is None:
                     self._rate_limiter.wait()
                 else:
-                    rate_gate.wait("eastmoney")
+                    rate_gate.wait(source_name)
                 try:
                     frame = method(**kwargs)
                     if not isinstance(frame, pd.DataFrame):
                         raise OnlineDataError(f"{source_name} 响应不是 DataFrame")
                     if rate_gate is not None:
-                        rate_gate.report(success=True, provider="eastmoney")
+                        rate_gate.report(success=True, provider=source_name)
                     if frame.empty:
                         break
                     return frame, retries, source_name
                 except OnlineDataError as exc:
                     if rate_gate is not None:
-                        rate_gate.report(success=False, provider="eastmoney")
+                        rate_gate.report(success=False, provider=source_name)
                     errors.append(f"{source_name}: {exc}")
                     break
                 except Exception as exc:  # noqa: BLE001 - upstream errors are retriable
@@ -1521,7 +1575,7 @@ class OnlineMarketSync:
                         rate_gate.report(
                             success=False,
                             throttled=is_throttling_error(exc),
-                            provider="eastmoney",
+                            provider=source_name,
                         )
                     errors.append(f"{source_name}: {exc}")
                     if attempt == _MAX_RETRIES:
@@ -1653,17 +1707,21 @@ def _selection_from_stored(
     )
 
 
-def _selection_from_eastmoney_list(
+def _selection_from_online_list(
     frame: pd.DataFrame,
     config: MarketSyncConfig,
     *,
     instrument_type: InstrumentType,
+    provider: str = "eastmoney",
 ) -> _TargetSelection:
-    """Turn one East Money catalog page into download targets of a single kind.
+    """Turn one catalog frame into download targets of a single kind.
 
     ``instrument_type`` is the kind the caller asked this frame for. Fund codes
     live in ranges the stock helper rejects (51xxxx/15xxxx), so the market has
     to be resolved with the matching helper before classification.
+
+    The catalog no longer comes from East Money alone (baostock leads, see
+    ``_fetch_catalog_frame``), so ``provider`` only decides the provenance label.
     """
 
     if not isinstance(frame, pd.DataFrame):
@@ -1707,7 +1765,7 @@ def _selection_from_eastmoney_list(
         targets=targets,
         listed_instruments=len(listed),
         filtered_instruments=max(len(listed) - len(targets), 0),
-        target_source=f"eastmoney_{instrument_type}_list",
+        target_source=f"{provider}_{instrument_type}_list",
     )
 
 
@@ -1717,11 +1775,15 @@ def _market_for_online_code(code: str, instrument_type: InstrumentType) -> Marke
     return _market_for_stock_code(code)
 
 
-def _merge_selections(selections: list[_TargetSelection]) -> _TargetSelection:
+def _merge_selections(
+    selections: list[_TargetSelection],
+    *,
+    provider: str = "eastmoney",
+) -> _TargetSelection:
     """Merge per-kind catalog selections, de-duplicating by (market, code)."""
 
     if not selections:
-        return _empty_selection("eastmoney_list")
+        return _empty_selection(f"{provider}_list")
     if len(selections) == 1:
         return selections[0]
     targets: list[OnlineTarget] = []
@@ -1737,7 +1799,7 @@ def _merge_selections(selections: list[_TargetSelection]) -> _TargetSelection:
         targets=targets,
         listed_instruments=sum(item.listed_instruments for item in selections),
         filtered_instruments=sum(item.filtered_instruments for item in selections),
-        target_source="eastmoney_mixed_list",
+        target_source=f"{provider}_mixed_list",
     )
 
 

@@ -15,7 +15,10 @@ RUN python -m pip install --upgrade --no-cache-dir -r requirements.lock
 
 COPY pyproject.toml README.md LICENSE THIRD_PARTY_NOTICES.md ./
 COPY selector_app ./selector_app
-RUN python -m pip install --upgrade --no-cache-dir . \
+# [catalog] 带上 baostock：东财 clist 目录接口被封后，它是唯一稳定的全市场标的
+# 发现通道（docs/datasource-survey-2026-09-20.md）。没装时目录会自动回退到东财，
+# 不会让启动失败，所以这个 extra 是「装上才更好」而不是「必须装」。
+RUN python -m pip install --upgrade --no-cache-dir '.[catalog]' \
     && python -m pip check \
     && python -c "import selector_app; print('Indicator Lab runtime ready')"
 

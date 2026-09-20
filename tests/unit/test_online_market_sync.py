@@ -7,6 +7,8 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import pytest
 
+from selector_app.adapters import online_market_sync as online_market_sync_module
+from selector_app.adapters.baostock_catalog import BaostockCatalogError
 from selector_app.adapters.market_data_sync import MarketDataSync
 from selector_app.adapters.market_sync import MarketDataCancelledError, MarketSyncConfig
 from selector_app.adapters.online_market_sync import (
@@ -144,6 +146,60 @@ class FallbackOnline(FakeOnline):
             }
         )
         return frame
+
+
+class RecordingOnline(FakeOnline):
+    """FakeOnline that also records how often the East Money catalog was asked."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.catalog_requests: list[str] = []
+
+    def fetch_instruments(self, *, timeout: float) -> pd.DataFrame:
+        self.catalog_requests.append("stock")
+        return super().fetch_instruments(timeout=timeout)
+
+    def fetch_fund_instruments(self, *, timeout: float) -> pd.DataFrame:
+        self.catalog_requests.append("fund")
+        return super().fetch_fund_instruments(timeout=timeout)
+
+
+class BothSourcesOnline(FakeOnline):
+    """East Money and Tencent both answer; Tencent must win."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tencent_requests: list[dict[str, object]] = []
+
+    def fetch_tencent_daily_history(
+        self,
+        market: str,
+        code: str,
+        start_date: str,
+        end_date: str,
+        *,
+        timeout: float,
+    ) -> pd.DataFrame:
+        self.tencent_requests.append(
+            {
+                "market": market,
+                "code": code,
+                "start_date": start_date,
+                "end_date": end_date,
+                "timeout": timeout,
+            }
+        )
+        return _hist_frame().rename(
+            columns={
+                "日期": "date",
+                "开盘": "open",
+                "收盘": "close",
+                "最高": "high",
+                "最低": "low",
+                "成交量": "volume",
+                "成交额": "amount",
+            }
+        )
 
 
 def _config(**overrides: object) -> MarketSyncConfig:
@@ -301,6 +357,137 @@ def test_eastmoney_falls_back_to_tencent_daily_history(tmp_path: Path) -> None:
         f"{request['market'].lower()}{request['code']}" in {"sh600000", "sz000001", "sh688001"}
         for request in module.history_requests
     )
+
+
+def test_baostock_leads_the_instrument_catalog_when_it_answers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """东财 clist 已封禁，目录源由 baostock 打头（调研 2026-09-20 第七节）。"""
+
+    monkeypatch.setattr(
+        online_market_sync_module,
+        "fetch_all_securities",
+        lambda **_kwargs: pd.DataFrame(
+            [
+                {"代码": "600000", "名称": "浦发银行"},
+                {"代码": "000001", "名称": "平安银行"},
+                {"代码": "510300", "名称": "沪深300ETF"},
+                {"代码": "830001", "名称": "北交样本"},
+            ]
+        ),
+    )
+    module = RecordingOnline()
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+
+    report = OnlineMarketSync(
+        store=store,
+        module_factory=lambda: module,
+        clock=lambda: _NOW,
+    ).discover_instruments(_config())
+
+    assert report.target_source == "baostock_stock_list"
+    assert report.listed_instruments == 2
+    # 目录拿到了就完全不该再打东财的目录接口。
+    assert module.catalog_requests == []
+    assert {ref.code for ref in store.list_instruments()} == {"000001", "600000"}
+
+
+def test_baostock_catalog_serves_stock_and_fund_from_one_frame(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """baostock 一次返回全市场，同一份帧复用于股票与 ETF，不必按品种各拉一次。"""
+
+    monkeypatch.setattr(
+        online_market_sync_module,
+        "fetch_all_securities",
+        lambda **_kwargs: pd.DataFrame(
+            [
+                {"代码": "600000", "名称": "浦发银行"},
+                {"代码": "510300", "名称": "沪深300ETF"},
+                {"代码": "159915", "名称": "创业板ETF"},
+            ]
+        ),
+    )
+    module = RecordingOnline()
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+
+    report = OnlineMarketSync(
+        store=store,
+        module_factory=lambda: module,
+        clock=lambda: _NOW,
+    ).discover_instruments(_config(instrument_types=("stock", "fund")))
+
+    assert report.target_source == "baostock_mixed_list"
+    assert {ref.code for ref in store.list_instruments()} == {"600000", "510300", "159915"}
+    assert module.catalog_requests == []
+
+
+def test_catalog_falls_back_to_eastmoney_when_baostock_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """baostock 没装或查询失败时，目录必须仍能靠东财走通。"""
+
+    def refuse(**_kwargs: object) -> pd.DataFrame:
+        raise BaostockCatalogError("未安装可选依赖 baostock")
+
+    monkeypatch.setattr(online_market_sync_module, "fetch_all_securities", refuse)
+    module = FakeOnline()
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+
+    report = OnlineMarketSync(
+        store=store,
+        module_factory=lambda: module,
+        clock=lambda: _NOW,
+    ).discover_instruments(_config())
+
+    assert report.target_source == "eastmoney_stock_list"
+    assert {ref.code for ref in store.list_instruments()} == {"000001", "600000", "688001"}
+
+
+def test_catalog_sources_can_be_pinned_to_eastmoney(tmp_path: Path) -> None:
+    """保留一条不走 baostock 的显式通道，方便排查与回归。"""
+
+    module = RecordingOnline()
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+
+    report = OnlineMarketSync(
+        store=store,
+        module_factory=lambda: module,
+        clock=lambda: _NOW,
+        catalog_sources=("eastmoney",),
+    ).discover_instruments(_config())
+
+    assert report.target_source == "eastmoney_stock_list"
+    assert len(module.catalog_requests) == 1
+
+
+def test_tencent_is_the_primary_daily_source_when_both_are_reachable(tmp_path: Path) -> None:
+    """东财日线属于「间歇可用」，腾讯才是稳定主源（调研 2026-09-20 第四节）。
+
+    两个源都能返回数据时必须先走腾讯，东财一次都不该被打扰。
+    """
+
+    module = BothSourcesOnline()
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    service = OnlineMarketSync(
+        store=store,
+        module_factory=lambda: module,
+        clock=lambda: _NOW,
+        sleep=lambda _seconds: None,
+    )
+
+    service.discover_instruments(_config())
+    report = service.sync(_config(prefer_store_targets=True))
+
+    assert report.errors == 0
+    assert report.written_bars == 9
+    assert report.history_sources == {"tencent": 3}
+    assert len(module.tencent_requests) == 3
+    # 主源成功时东财应保持零请求：它现在只是容错路径。
+    assert module.history_requests == []
 
 
 def test_eastmoney_full_history_fetches_only_missing_ranges_for_existing_rows(
