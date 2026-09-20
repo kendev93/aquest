@@ -986,19 +986,13 @@ class IndicatorCache:
                         "data_end": chunk.end,
                         "data_length": chunk.length,
                         "values_blob": _serialize_arrays(
-                            {
-                                name: value[chunk.offset : stop]
-                                for name, value in values.items()
-                            },
+                            {name: value[chunk.offset : stop] for name, value in values.items()},
                             definition.value_names,
                             dtype=_VALUE_DTYPE,
                             data_length=chunk.length,
                         ),
                         "signals_blob": _serialize_arrays(
-                            {
-                                name: signal[chunk.offset : stop]
-                                for name, signal in signals.items()
-                            },
+                            {name: signal[chunk.offset : stop] for name, signal in signals.items()},
                             signal_names,
                             dtype=bool,
                             data_length=chunk.length,

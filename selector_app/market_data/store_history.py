@@ -131,7 +131,7 @@ def _condition_research_summary(result: Mapping[str, object]) -> dict[str, objec
     # 合格候选优先：一个提升很高但连约束都没过的条件只是噪声，不该当门面。
     best: Mapping[str, object] | None = None
     best_lift = 0.0
-    for item in (qualified or rows):
+    for item in qualified or rows:
         mining = item.get("mining")
         if not isinstance(mining, Mapping):
             continue

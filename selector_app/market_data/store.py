@@ -45,8 +45,7 @@ def resolve_indicator_cache_backend(requested: str | None = None) -> str:
     normalized = raw.strip().lower()
     if normalized not in (SQLITE_INDICATOR_CACHE, DUCKDB_INDICATOR_CACHE):
         raise ValueError(
-            f"指标缓存后端必须是 {SQLITE_INDICATOR_CACHE} 或 {DUCKDB_INDICATOR_CACHE}"
-            f"，收到 {raw!r}"
+            f"指标缓存后端必须是 {SQLITE_INDICATOR_CACHE} 或 {DUCKDB_INDICATOR_CACHE}，收到 {raw!r}"
         )
     return normalized
 

@@ -96,9 +96,7 @@ def test_persistent_cache_reuses_formula_result_without_recalculating(
     tmp_path: Path,
     backend: str,
 ) -> None:
-    store = DuckDbMarketDataStore(
-        tmp_path / "market.duckdb", indicator_cache_backend=backend
-    )
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb", indicator_cache_backend=backend)
     frame = _bars()
     calls: dict[str, int] = {}
     registry = _counting_registry(calls)
@@ -125,9 +123,7 @@ def test_cache_fingerprint_invalidates_after_market_data_changes(
     tmp_path: Path,
     backend: str,
 ) -> None:
-    store = DuckDbMarketDataStore(
-        tmp_path / "market.duckdb", indicator_cache_backend=backend
-    )
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb", indicator_cache_backend=backend)
     frame = _bars()
     calls: dict[str, int] = {}
     registry = _counting_registry(calls)
@@ -143,9 +139,7 @@ def test_cache_fingerprint_invalidates_after_market_data_changes(
 
 
 def test_formula_version_and_corrupt_payload_are_cache_misses(tmp_path: Path, backend: str) -> None:
-    store = DuckDbMarketDataStore(
-        tmp_path / "market.duckdb", indicator_cache_backend=backend
-    )
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb", indicator_cache_backend=backend)
     frame = _bars()
     calls: dict[str, int] = {}
     version_one = _counting_registry(calls)
@@ -194,9 +188,7 @@ def test_formula_version_and_corrupt_payload_are_cache_misses(tmp_path: Path, ba
 
 
 def test_screen_engine_uses_shared_indicator_cache(tmp_path: Path, backend: str) -> None:
-    store = DuckDbMarketDataStore(
-        tmp_path / "market.duckdb", indicator_cache_backend=backend
-    )
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb", indicator_cache_backend=backend)
     store.replace_local_bars("SH", "600000", "stock", _bars())
     adapter = DuckDbMarketDataAdapter(store)
     calls: dict[str, int] = {}
@@ -228,9 +220,7 @@ def test_backtest_and_portfolio_reuse_the_same_persistent_result(
     tmp_path: Path,
     backend: str,
 ) -> None:
-    store = DuckDbMarketDataStore(
-        tmp_path / "market.duckdb", indicator_cache_backend=backend
-    )
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb", indicator_cache_backend=backend)
     store.replace_local_bars("SH", "600000", "stock", _bars(120))
     adapter = DuckDbMarketDataAdapter(store)
     calls: dict[str, int] = {}
@@ -281,9 +271,7 @@ def test_strategy_fitness_reuses_cached_formula_across_time_windows(
     tmp_path: Path,
     backend: str,
 ) -> None:
-    store = DuckDbMarketDataStore(
-        tmp_path / "market.duckdb", indicator_cache_backend=backend
-    )
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb", indicator_cache_backend=backend)
     store.replace_local_bars("SH", "600000", "stock", _bars(120))
     adapter = DuckDbMarketDataAdapter(store)
     calls: dict[str, int] = {}
@@ -323,9 +311,7 @@ def test_strategy_fitness_reuses_cached_formula_across_time_windows(
 
 
 def test_precompute_service_materializes_all_builtin_formulas(tmp_path: Path, backend: str) -> None:
-    store = DuckDbMarketDataStore(
-        tmp_path / "market.duckdb", indicator_cache_backend=backend
-    )
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb", indicator_cache_backend=backend)
     store.replace_local_bars("SH", "600000", "stock", _bars(120))
     adapter = DuckDbMarketDataAdapter(store)
     cache = IndicatorCache(store)
@@ -354,9 +340,7 @@ def test_precompute_service_materializes_all_builtin_formulas(tmp_path: Path, ba
 def test_cache_persists_one_chunk_per_calendar_year(tmp_path: Path, backend: str) -> None:
     """缓存按自然年分块，块之间首尾相接且覆盖整个序列。"""
 
-    store = DuckDbMarketDataStore(
-        tmp_path / "market.duckdb", indicator_cache_backend=backend
-    )
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb", indicator_cache_backend=backend)
     frame = _bars(800)  # 2024-01-01 起 800 天，跨 2024 / 2025 / 2026 三个自然年
     store.replace_local_bars("SH", "600000", "stock", frame)
     IndicatorCache(store).get_or_compute(
@@ -377,9 +361,7 @@ def test_cache_persists_one_chunk_per_calendar_year(tmp_path: Path, backend: str
 def test_window_request_reuses_cache_without_recomputing(tmp_path: Path, backend: str) -> None:
     """请求最近若干根时命中缓存，且不必把整个序列重算一遍。"""
 
-    store = DuckDbMarketDataStore(
-        tmp_path / "market.duckdb", indicator_cache_backend=backend
-    )
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb", indicator_cache_backend=backend)
     store.replace_local_bars("SH", "600000", "stock", _bars(800))
     calls: dict[str, int] = {}
     registry = _counting_registry(calls)
@@ -402,15 +384,11 @@ def test_window_request_reuses_cache_without_recomputing(tmp_path: Path, backend
 def test_values_blob_is_persisted_as_float32(tmp_path: Path, backend: str) -> None:
     """落库用 float32：体积约为 float64 的一半，读回来仍是 float64。"""
 
-    store = DuckDbMarketDataStore(
-        tmp_path / "market.duckdb", indicator_cache_backend=backend
-    )
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb", indicator_cache_backend=backend)
     store.replace_local_bars("SH", "600000", "stock", _bars(400))
     cache = IndicatorCache(store)
     frame = store.read_bars("SH", "600000")
-    computed = cache.get_or_compute(frame, ("technical",), market="SH", code="600000")[
-        "technical"
-    ]
+    computed = cache.get_or_compute(frame, ("technical",), market="SH", code="600000")["technical"]
 
     columns = len(FORMULA_REGISTRY.formula("technical").value_names)
     bars, blob_bytes = _cache_row(
@@ -426,9 +404,7 @@ def test_values_blob_is_persisted_as_float32(tmp_path: Path, backend: str) -> No
 def test_precompute_only_changed_skips_fresh_instruments(tmp_path: Path, backend: str) -> None:
     """只补算缓存缺失或过期的标的：第二轮不应重复处理已经算过的。"""
 
-    store = DuckDbMarketDataStore(
-        tmp_path / "market.duckdb", indicator_cache_backend=backend
-    )
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb", indicator_cache_backend=backend)
     for code in ("600000", "600001"):
         store.replace_local_bars("SH", code, "stock", _bars(400))
     adapter = DuckDbMarketDataAdapter(store)
@@ -541,9 +517,7 @@ def test_precompute_stitches_yearly_segments_into_full_history(
         def read_stock(self, _ref):
             return frame
 
-    store = DuckDbMarketDataStore(
-        tmp_path / "market.duckdb", indicator_cache_backend=backend
-    )
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb", indicator_cache_backend=backend)
     report = IndicatorPrecomputeService(WindowAdapter(), IndicatorCache(store)).run(
         vipdoc_path=str(tmp_path), years=4, warmup_bars=268
     )
@@ -577,9 +551,7 @@ def test_custom_formula_cache_is_separated_by_source_and_parameters(
     tmp_path: Path,
     backend: str,
 ) -> None:
-    store = DuckDbMarketDataStore(
-        tmp_path / "market.duckdb", indicator_cache_backend=backend
-    )
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb", indicator_cache_backend=backend)
     frame = _bars(120)
     parsed = parse_formula("N:=5; BUY:CROSS(C,REF(C,N)); RANK:MA(C,N);")
     cache = IndicatorCache(store)
@@ -627,9 +599,7 @@ def test_cache_can_preload_persistent_rows_for_multiple_symbols(
     tmp_path: Path,
     backend: str,
 ) -> None:
-    store = DuckDbMarketDataStore(
-        tmp_path / "market.duckdb", indicator_cache_backend=backend
-    )
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb", indicator_cache_backend=backend)
     store.replace_local_bars("SH", "600000", "stock", _bars(120))
     store.replace_local_bars("SH", "600001", "stock", _bars(120))
     ids = FORMULA_REGISTRY.all_formula_ids()
@@ -703,9 +673,7 @@ def test_replacing_bars_on_the_same_dates_needs_an_explicit_cache_reset(
     调它的原因。
     """
 
-    store = DuckDbMarketDataStore(
-        tmp_path / "market.duckdb", indicator_cache_backend=backend
-    )
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb", indicator_cache_backend=backend)
     cache = IndicatorCache(store)
     first = _bars(80)
     store.replace_local_bars("SH", "600000", "stock", first)
@@ -741,9 +709,7 @@ def test_default_indicator_cache_backend_is_sqlite(tmp_path: Path) -> None:
 def test_backend_can_be_pinned_back_to_duckdb(tmp_path: Path) -> None:
     """出问题时要能不改代码退回旧实现。"""
 
-    store = DuckDbMarketDataStore(
-        tmp_path / "market.duckdb", indicator_cache_backend="duckdb"
-    )
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb", indicator_cache_backend="duckdb")
     assert store.indicator_cache_backend == "duckdb"
     assert isinstance(store._indicator_cache, DuckDbIndicatorCacheStore)
 

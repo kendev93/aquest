@@ -253,9 +253,7 @@ class IndicatorPrecomputeService:
         if stale is None:
             return refs
         return [
-            ref
-            for ref in refs
-            if (str(ref.market).strip().upper(), str(ref.code).strip()) in stale
+            ref for ref in refs if (str(ref.market).strip().upper(), str(ref.code).strip()) in stale
         ]
 
     def _read_one(self, ref: StockRef) -> pd.DataFrame:
@@ -348,10 +346,7 @@ def _year_windows(years: int, end_year: int | None = None) -> list[tuple[date, d
     last = end_year if end_year is not None else date.today().year
     if isinstance(last, bool) or not isinstance(last, int) or last < 1:
         raise ValueError("预计算年份锚点必须是正整数")
-    return [
-        (date(year, 1, 1), date(year, 12, 31))
-        for year in range(last - years + 1, last + 1)
-    ]
+    return [(date(year, 1, 1), date(year, 12, 31)) for year in range(last - years + 1, last + 1)]
 
 
 def _tail(result: FormulaResult, length: int) -> FormulaResult:

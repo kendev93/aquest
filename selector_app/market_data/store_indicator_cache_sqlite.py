@@ -239,9 +239,7 @@ class SqliteIndicatorCacheStore:
             # isolation_level=None 关掉 sqlite3 的隐式 BEGIN：写路径自己发
             # BEGIN IMMEDIATE，否则两条 BEGIN 会撞成
             # "cannot start a transaction within a transaction"。
-            connection = sqlite3.connect(
-                str(self._path), timeout=30.0, isolation_level=None
-            )
+            connection = sqlite3.connect(str(self._path), timeout=30.0, isolation_level=None)
             connection.execute("PRAGMA busy_timeout=30000")
             try:
                 # WAL lets the read paths run while a precompute batch is
@@ -729,9 +727,7 @@ class SqliteIndicatorCacheStore:
         revisions = self.data_revisions()
         if not revisions:
             return set()
-        rows = self._query(
-            "SELECT market, code, data_fingerprint, formula_id FROM indicator_cache"
-        )
+        rows = self._query("SELECT market, code, data_fingerprint, formula_id FROM indicator_cache")
         covered: dict[tuple[str, str], dict[str, set[str]]] = {}
         for market, code, fingerprint, formula_id in rows:
             key = (str(market).strip().upper(), str(code).strip())

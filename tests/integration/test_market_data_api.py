@@ -159,9 +159,7 @@ def test_bar_delete_drops_the_in_process_indicator_cache(tmp_path: Path) -> None
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     store.replace_local_bars("SH", "600000", "stock", _bars())
     cache = IndicatorCache(store)
-    cache.get_or_compute(
-        store.read_bars("SH", "600000"), ("price",), market="SH", code="600000"
-    )
+    cache.get_or_compute(store.read_bars("SH", "600000"), ("price",), market="SH", code="600000")
     assert cache._revisions, "预热之后版本号应当已经缓存住"
 
     with TestClient(
