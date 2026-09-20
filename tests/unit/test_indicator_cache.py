@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from threading import Lock
 
@@ -18,13 +18,51 @@ from selector_app.formulas.registry import FORMULA_REGISTRY, FormulaRegistry
 from selector_app.indicators.cache import IndicatorCache, frame_fingerprint
 from selector_app.indicators.precompute import IndicatorPrecomputeService, _year_windows
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
-from selector_app.market_data.store import DuckDbMarketDataStore
+from selector_app.market_data.store import (
+    DuckDbMarketDataStore,
+    resolve_indicator_cache_backend,
+)
+from selector_app.market_data.store_indicator_cache import DuckDbIndicatorCacheStore
+from selector_app.market_data.store_indicator_cache_sqlite import (
+    SqliteIndicatorCacheStore,
+    default_indicator_cache_path,
+)
 from selector_app.portfolio_backtest.models import PortfolioBacktestConfig
 from selector_app.portfolio_backtest.service import PortfolioBacktestService
 from selector_app.screening.engine import ScreenEngine
 from selector_app.screening.models import ScanConfig
 from selector_app.strategy_fitness.models import StrategyFitnessConfig
 from selector_app.strategy_fitness.service import StrategyFitnessService
+
+
+def _cache_rows(store: DuckDbMarketDataStore, sql: str) -> list[tuple[object, ...]]:
+    """查询缓存表本身，不关心当前挂的是 DuckDB 还是 SQLite 后端。
+
+    两个后端只差在 blob 长度函数名上（``octet_length`` vs ``length``），
+    其余 SQL 完全一致，所以这里做一次替换就能共用断言。
+    """
+
+    backend = store._indicator_cache
+    if isinstance(backend, SqliteIndicatorCacheStore):
+        return backend._query(sql.replace("octet_length", "length"))
+    with store._connect(read_only=True) as connection:
+        return connection.execute(sql).fetchall()
+
+
+def _cache_row(store: DuckDbMarketDataStore, sql: str) -> tuple[object, ...] | None:
+    rows = _cache_rows(store, sql)
+    return rows[0] if rows else None
+
+
+@pytest.fixture(params=["duckdb", "sqlite"])
+def backend(request: pytest.FixtureRequest) -> str:
+    """让每个持久化用例在两条缓存后端上都跑一遍。
+
+    派生缓存既能留在 DuckDB 也能挪到 SQLite，两条实现必须给出同样的结果；
+    参数化比写两遍断言更能保证它们不会各自漂移。
+    """
+
+    return str(request.param)
 
 
 def _bars(length: int = 80) -> pd.DataFrame:
@@ -54,8 +92,13 @@ def _counting_registry(calls: dict[str, int]) -> FormulaRegistry:
     return FormulaRegistry((replace(definition, calculate=calculate),))
 
 
-def test_persistent_cache_reuses_formula_result_without_recalculating(tmp_path: Path) -> None:
-    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+def test_persistent_cache_reuses_formula_result_without_recalculating(
+    tmp_path: Path,
+    backend: str,
+) -> None:
+    store = DuckDbMarketDataStore(
+        tmp_path / "market.duckdb", indicator_cache_backend=backend
+    )
     frame = _bars()
     calls: dict[str, int] = {}
     registry = _counting_registry(calls)
@@ -78,8 +121,13 @@ def test_persistent_cache_reuses_formula_result_without_recalculating(tmp_path: 
     np.testing.assert_allclose(first.values["varo7"], second.values["varo7"], equal_nan=True)
 
 
-def test_cache_fingerprint_invalidates_after_market_data_changes(tmp_path: Path) -> None:
-    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+def test_cache_fingerprint_invalidates_after_market_data_changes(
+    tmp_path: Path,
+    backend: str,
+) -> None:
+    store = DuckDbMarketDataStore(
+        tmp_path / "market.duckdb", indicator_cache_backend=backend
+    )
     frame = _bars()
     calls: dict[str, int] = {}
     registry = _counting_registry(calls)
@@ -94,8 +142,10 @@ def test_cache_fingerprint_invalidates_after_market_data_changes(tmp_path: Path)
     assert calls["indicator_three"] == 2
 
 
-def test_formula_version_and_corrupt_payload_are_cache_misses(tmp_path: Path) -> None:
-    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+def test_formula_version_and_corrupt_payload_are_cache_misses(tmp_path: Path, backend: str) -> None:
+    store = DuckDbMarketDataStore(
+        tmp_path / "market.duckdb", indicator_cache_backend=backend
+    )
     frame = _bars()
     calls: dict[str, int] = {}
     version_one = _counting_registry(calls)
@@ -143,8 +193,10 @@ def test_formula_version_and_corrupt_payload_are_cache_misses(tmp_path: Path) ->
     assert calls["indicator_three"] == 3
 
 
-def test_screen_engine_uses_shared_indicator_cache(tmp_path: Path) -> None:
-    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+def test_screen_engine_uses_shared_indicator_cache(tmp_path: Path, backend: str) -> None:
+    store = DuckDbMarketDataStore(
+        tmp_path / "market.duckdb", indicator_cache_backend=backend
+    )
     store.replace_local_bars("SH", "600000", "stock", _bars())
     adapter = DuckDbMarketDataAdapter(store)
     calls: dict[str, int] = {}
@@ -172,8 +224,13 @@ def test_screen_engine_uses_shared_indicator_cache(tmp_path: Path) -> None:
     ]
 
 
-def test_backtest_and_portfolio_reuse_the_same_persistent_result(tmp_path: Path) -> None:
-    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+def test_backtest_and_portfolio_reuse_the_same_persistent_result(
+    tmp_path: Path,
+    backend: str,
+) -> None:
+    store = DuckDbMarketDataStore(
+        tmp_path / "market.duckdb", indicator_cache_backend=backend
+    )
     store.replace_local_bars("SH", "600000", "stock", _bars(120))
     adapter = DuckDbMarketDataAdapter(store)
     calls: dict[str, int] = {}
@@ -220,8 +277,13 @@ def test_backtest_and_portfolio_reuse_the_same_persistent_result(tmp_path: Path)
     assert len(portfolio_report.data_fingerprint) == 64
 
 
-def test_strategy_fitness_reuses_cached_formula_across_time_windows(tmp_path: Path) -> None:
-    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+def test_strategy_fitness_reuses_cached_formula_across_time_windows(
+    tmp_path: Path,
+    backend: str,
+) -> None:
+    store = DuckDbMarketDataStore(
+        tmp_path / "market.duckdb", indicator_cache_backend=backend
+    )
     store.replace_local_bars("SH", "600000", "stock", _bars(120))
     adapter = DuckDbMarketDataAdapter(store)
     calls: dict[str, int] = {}
@@ -260,8 +322,10 @@ def test_strategy_fitness_reuses_cached_formula_across_time_windows(tmp_path: Pa
     assert len(report.results[0].data_fingerprint) == 64
 
 
-def test_precompute_service_materializes_all_builtin_formulas(tmp_path: Path) -> None:
-    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+def test_precompute_service_materializes_all_builtin_formulas(tmp_path: Path, backend: str) -> None:
+    store = DuckDbMarketDataStore(
+        tmp_path / "market.duckdb", indicator_cache_backend=backend
+    )
     store.replace_local_bars("SH", "600000", "stock", _bars(120))
     adapter = DuckDbMarketDataAdapter(store)
     cache = IndicatorCache(store)
@@ -287,32 +351,35 @@ def test_precompute_service_materializes_all_builtin_formulas(tmp_path: Path) ->
     assert cold_cache.metrics()["computed"] == 0
 
 
-def test_cache_persists_one_chunk_per_calendar_year(tmp_path: Path) -> None:
+def test_cache_persists_one_chunk_per_calendar_year(tmp_path: Path, backend: str) -> None:
     """缓存按自然年分块，块之间首尾相接且覆盖整个序列。"""
 
-    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store = DuckDbMarketDataStore(
+        tmp_path / "market.duckdb", indicator_cache_backend=backend
+    )
     frame = _bars(800)  # 2024-01-01 起 800 天，跨 2024 / 2025 / 2026 三个自然年
     store.replace_local_bars("SH", "600000", "stock", frame)
     IndicatorCache(store).get_or_compute(
         store.read_bars("SH", "600000"), ("indicator_three",), market="SH", code="600000"
     )
 
-    with store._connect(read_only=True) as connection:
-        rows = connection.execute(
-            "SELECT bar_offset, data_length FROM indicator_cache ORDER BY bar_offset"
-        ).fetchall()
+    rows = _cache_rows(
+        store, "SELECT bar_offset, data_length FROM indicator_cache ORDER BY bar_offset"
+    )
     assert len(rows) == 3
     cursor = 0
     for offset, length in rows:
         assert offset == cursor
-        cursor += length
+        cursor += int(length)  # type: ignore[call-overload]
     assert cursor == len(frame)
 
 
-def test_window_request_reuses_cache_without_recomputing(tmp_path: Path) -> None:
+def test_window_request_reuses_cache_without_recomputing(tmp_path: Path, backend: str) -> None:
     """请求最近若干根时命中缓存，且不必把整个序列重算一遍。"""
 
-    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store = DuckDbMarketDataStore(
+        tmp_path / "market.duckdb", indicator_cache_backend=backend
+    )
     store.replace_local_bars("SH", "600000", "stock", _bars(800))
     calls: dict[str, int] = {}
     registry = _counting_registry(calls)
@@ -332,10 +399,12 @@ def test_window_request_reuses_cache_without_recomputing(tmp_path: Path) -> None
     assert result.data_length == 60
 
 
-def test_values_blob_is_persisted_as_float32(tmp_path: Path) -> None:
+def test_values_blob_is_persisted_as_float32(tmp_path: Path, backend: str) -> None:
     """落库用 float32：体积约为 float64 的一半，读回来仍是 float64。"""
 
-    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store = DuckDbMarketDataStore(
+        tmp_path / "market.duckdb", indicator_cache_backend=backend
+    )
     store.replace_local_bars("SH", "600000", "stock", _bars(400))
     cache = IndicatorCache(store)
     frame = store.read_bars("SH", "600000")
@@ -344,10 +413,9 @@ def test_values_blob_is_persisted_as_float32(tmp_path: Path) -> None:
     ]
 
     columns = len(FORMULA_REGISTRY.formula("technical").value_names)
-    with store._connect(read_only=True) as connection:
-        bars, blob_bytes = connection.execute(
-            "SELECT SUM(data_length), SUM(octet_length(values_blob)) FROM indicator_cache"
-        ).fetchone()
+    bars, blob_bytes = _cache_row(
+        store, "SELECT SUM(data_length), SUM(octet_length(values_blob)) FROM indicator_cache"
+    )
     expected_float32 = bars * columns * 4
     # 每块有 .npy 头，留一点余量；关键是明显小于 float64 的两倍体积。
     assert expected_float32 <= blob_bytes <= expected_float32 + 1024
@@ -355,10 +423,12 @@ def test_values_blob_is_persisted_as_float32(tmp_path: Path) -> None:
     assert np.asarray(next(iter(computed.values.values()))).dtype == np.float64
 
 
-def test_precompute_only_changed_skips_fresh_instruments(tmp_path: Path) -> None:
+def test_precompute_only_changed_skips_fresh_instruments(tmp_path: Path, backend: str) -> None:
     """只补算缓存缺失或过期的标的：第二轮不应重复处理已经算过的。"""
 
-    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store = DuckDbMarketDataStore(
+        tmp_path / "market.duckdb", indicator_cache_backend=backend
+    )
     for code in ("600000", "600001"):
         store.replace_local_bars("SH", code, "stock", _bars(400))
     adapter = DuckDbMarketDataAdapter(store)
@@ -381,7 +451,10 @@ def test_precompute_only_changed_skips_fresh_instruments(tmp_path: Path) -> None
     assert third.processed == 1
 
 
-def test_precompute_uses_eight_workers_for_independent_instruments(tmp_path: Path) -> None:
+def test_precompute_uses_eight_workers_for_independent_instruments(
+    tmp_path: Path,
+    backend: str,
+) -> None:
     refs = [
         StockRef(
             market="SH",
@@ -421,7 +494,10 @@ def test_precompute_uses_eight_workers_for_independent_instruments(tmp_path: Pat
     assert 1 < max_active <= 8
 
 
-def test_precompute_stitches_yearly_segments_into_full_history(tmp_path: Path) -> None:
+def test_precompute_stitches_yearly_segments_into_full_history(
+    tmp_path: Path,
+    backend: str,
+) -> None:
     """Year-by-year segments must rejoin into one series equal to a full run."""
 
     # 需要真实波动：若 high/low 恒为 close ± 常数，RSRS 回归的 beta 近似恒定，
@@ -465,7 +541,9 @@ def test_precompute_stitches_yearly_segments_into_full_history(tmp_path: Path) -
         def read_stock(self, _ref):
             return frame
 
-    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store = DuckDbMarketDataStore(
+        tmp_path / "market.duckdb", indicator_cache_backend=backend
+    )
     report = IndicatorPrecomputeService(WindowAdapter(), IndicatorCache(store)).run(
         vipdoc_path=str(tmp_path), years=4, warmup_bars=268
     )
@@ -495,8 +573,13 @@ def test_precompute_stitches_yearly_segments_into_full_history(tmp_path: Path) -
             assert drift < 1e-6, f"{formula_id}.{name} drift={drift}"
 
 
-def test_custom_formula_cache_is_separated_by_source_and_parameters(tmp_path: Path) -> None:
-    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+def test_custom_formula_cache_is_separated_by_source_and_parameters(
+    tmp_path: Path,
+    backend: str,
+) -> None:
+    store = DuckDbMarketDataStore(
+        tmp_path / "market.duckdb", indicator_cache_backend=backend
+    )
     frame = _bars(120)
     parsed = parse_formula("N:=5; BUY:CROSS(C,REF(C,N)); RANK:MA(C,N);")
     cache = IndicatorCache(store)
@@ -540,8 +623,13 @@ def test_custom_formula_cache_is_separated_by_source_and_parameters(tmp_path: Pa
     assert different_source["custom"].data_length == len(frame)
 
 
-def test_cache_can_preload_persistent_rows_for_multiple_symbols(tmp_path: Path) -> None:
-    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+def test_cache_can_preload_persistent_rows_for_multiple_symbols(
+    tmp_path: Path,
+    backend: str,
+) -> None:
+    store = DuckDbMarketDataStore(
+        tmp_path / "market.duckdb", indicator_cache_backend=backend
+    )
     store.replace_local_bars("SH", "600000", "stock", _bars(120))
     store.replace_local_bars("SH", "600001", "stock", _bars(120))
     ids = FORMULA_REGISTRY.all_formula_ids()
@@ -604,6 +692,7 @@ def test_year_windows_anchor_on_the_stored_data_not_the_wall_clock() -> None:
 
 def test_replacing_bars_on_the_same_dates_needs_an_explicit_cache_reset(
     tmp_path: Path,
+    backend: str,
 ) -> None:
     """日期不变、数值变了：缓存不会自己察觉，必须靠调用方失效。
 
@@ -614,7 +703,9 @@ def test_replacing_bars_on_the_same_dates_needs_an_explicit_cache_reset(
     调它的原因。
     """
 
-    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store = DuckDbMarketDataStore(
+        tmp_path / "market.duckdb", indicator_cache_backend=backend
+    )
     cache = IndicatorCache(store)
     first = _bars(80)
     store.replace_local_bars("SH", "600000", "stock", first)
@@ -631,3 +722,89 @@ def test_replacing_bars_on_the_same_dates_needs_an_explicit_cache_reset(
     fresh = cache.get_or_compute(second, ("price",), market="SH", code="600000")["price"]
 
     assert np.allclose(fresh.values["close"], np.asarray(second["close"], dtype=float))
+
+
+def test_default_indicator_cache_backend_is_sqlite(tmp_path: Path) -> None:
+    """派生缓存默认落在 SQLite：落库快 22.5 倍，批量读只是持平。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    assert store.indicator_cache_backend == "sqlite"
+    assert isinstance(store._indicator_cache, SqliteIndicatorCacheStore)
+    expected = default_indicator_cache_path(tmp_path / "market.duckdb")
+    assert store._indicator_cache.database_path == expected
+    # 建表是惰性的：构造 store 不该凭空落一个文件，第一次读缓存才建。
+    assert not expected.exists()
+    store.indicator_cache_status()
+    assert expected.exists()
+
+
+def test_backend_can_be_pinned_back_to_duckdb(tmp_path: Path) -> None:
+    """出问题时要能不改代码退回旧实现。"""
+
+    store = DuckDbMarketDataStore(
+        tmp_path / "market.duckdb", indicator_cache_backend="duckdb"
+    )
+    assert store.indicator_cache_backend == "duckdb"
+    assert isinstance(store._indicator_cache, DuckDbIndicatorCacheStore)
+
+
+def test_unknown_indicator_cache_backend_is_rejected() -> None:
+    """拼错的后端名必须立刻报错，而不是悄悄退回默认值。"""
+
+    with pytest.raises(ValueError, match="sqlite 或 duckdb"):
+        resolve_indicator_cache_backend("postgres")
+
+
+def test_sqlite_rows_carry_real_dates_not_iso_strings(tmp_path: Path) -> None:
+    """SQLite 存的是 ISO 文本，读出来必须还原成 date。
+
+    `_row_ends_at` 现在既认 date 也认字符串，所以这里错了也不会立刻报错——
+    它属于那种「今天能跑、明天加个调用方就静默失效」的坑。和 DuckDB 保持
+    一致的类型，将来任何新代码都拿得到同一形态。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars(80))
+    IndicatorCache(store).get_or_compute(
+        store.read_bars("SH", "600000"), ("indicator_three",), market="SH", code="600000"
+    )
+
+    # 库里确实是文本，类型转换发生在读取层。
+    raw = _cache_row(store, "SELECT data_end FROM indicator_cache")
+    assert raw is not None and isinstance(raw[0], str)
+
+    rows = store.read_indicator_cache(
+        market="SH",
+        code="600000",
+        timeframe="daily",
+        price_basis="raw",
+        formula_id="indicator_three",
+        formula_version=FORMULA_REGISTRY.formula("indicator_three").cache_version,
+        data_fingerprint=store.data_revision("SH", "600000") or "",
+    )
+    assert rows
+    assert isinstance(rows[0]["data_end"], date)
+    assert not isinstance(rows[0]["data_end"], str)
+    assert isinstance(rows[0]["computed_at"], datetime)
+
+
+def test_sqlite_backend_reports_status_and_stale_symbols(tmp_path: Path) -> None:
+    """运维用到的 status / stale_symbols 在 SQLite 后端上同样成立。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars(80))
+    IndicatorCache(store).get_or_compute(
+        store.read_bars("SH", "600000"), ("indicator_three",), market="SH", code="600000"
+    )
+
+    status = store.indicator_cache_status()
+    assert status["builtin_entries"] >= 1
+    assert status["bytes"] > 0
+    assert status["latest_computed_at"]
+
+    assert store.stale_indicator_symbols(("indicator_three",)) == set()
+    assert store.stale_indicator_symbols(("technical",)) == {("SH", "600000")}
+
+    removed = store.clear_indicator_caches()
+    assert removed["builtin_entries"] >= 1
+    assert store.indicator_cache_status()["total_entries"] == 0
