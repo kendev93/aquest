@@ -257,11 +257,11 @@ describe('StrategyDiscoveryPage', () => {
   it('passes optional local instrument scope to the discovery request', async () => {
     const wrapper = mount(StrategyDiscoveryPage)
     await flushPromises()
-    await wrapper.get('[data-testid="strategy-discovery-scope-type-fund"]').setValue(true)
+    await wrapper.get('[data-testid="strategy-discovery-scope-type-stock"]').setValue(true)
     await wrapper.get('[data-testid="strategy-discovery-config"]').trigger('submit')
     await flushPromises()
 
-    expect(api.createStrategyDiscovery).toHaveBeenCalledWith(expect.objectContaining({ instrument_types: ['fund'] }))
+    expect(api.createStrategyDiscovery).toHaveBeenCalledWith(expect.objectContaining({ instrument_types: ['stock'] }))
   })
 
   it('submits user-required buy and sell conditions as hard constraints', async () => {

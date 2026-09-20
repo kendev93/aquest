@@ -441,11 +441,11 @@ class FakeMixedResearchAdapter(FakeResearchAdapter):
             StockRef("SH", "600000", Path("/tmp/vipdoc"), name="甲", instrument_type="stock"),
             StockRef(
                 "SZ",
-                "159919",
+                "300001",
                 Path("/tmp/vipdoc"),
-                name="乙ETF",
-                instrument_type="fund",
-                board="fund",
+                name="乙创业板",
+                instrument_type="stock",
+                board="chinext",
             ),
         ]
 
@@ -485,32 +485,27 @@ def test_resolved_ranking_is_empty_without_choice_or_recommendation() -> None:
     assert _resolved_ranking(config, {"recommended": None})[0] is None
 
 
-def test_research_pool_follows_the_selected_instrument_type() -> None:
+def test_research_pool_follows_the_selected_board() -> None:
     service = ConditionResearchService(
         adapter=FakeMixedResearchAdapter(),
         backtest_service=FakePreparedBacktests(),  # type: ignore[arg-type]
     )
 
     stock_pool = service._list_stock_refs(_research_config())
-    fund_pool = service._list_stock_refs(_research_config(instrument_types=("fund",)))
+    main_pool = service._list_stock_refs(_research_config(boards=("main",)))
 
-    assert [ref.code for ref in stock_pool] == ["600000"]
-    assert [ref.code for ref in fund_pool] == ["159919"]
+    assert [ref.code for ref in stock_pool] == ["600000", "300001"]
+    assert [ref.code for ref in main_pool] == ["600000"]
 
 
-def test_etf_research_uses_fund_costs_without_stamp_tax() -> None:
+def test_stock_research_uses_stock_costs_with_stamp_tax() -> None:
     config = _research_config()
     stock_ref = StockRef("SH", "600000", Path("/tmp/vipdoc"), instrument_type="stock")
-    fund_ref = StockRef("SZ", "159919", Path("/tmp/vipdoc"), instrument_type="fund", board="fund")
 
     stock_backtest = _backtest_config(config, stock_ref)
-    fund_backtest = _backtest_config(config, fund_ref)
 
     assert stock_backtest.commission == 0.0001
     assert stock_backtest.stamp_tax == 0.001
-    assert fund_backtest.commission == 0.00005
-    assert fund_backtest.min_commission == 0.1
-    assert fund_backtest.stamp_tax == 0.0
 
 
 def test_missing_sell_rule_switches_on_hold_to_end() -> None:
@@ -569,27 +564,16 @@ def test_sell_rule_may_be_left_out_but_not_left_empty() -> None:
         _research_config(buy_rule=RuleGroup())
 
 
-def test_etf_research_keeps_fund_commission_when_stamp_tax_is_cleared() -> None:
-    """回归：只改印花税不应让 ETF 退回股票佣金。"""
+def test_stock_research_keeps_stock_commission_when_stamp_tax_is_cleared() -> None:
+    """回归：逐字段回退不能因为改了一项就把其他项退回别的口径。"""
 
     config = _research_config(stamp_tax=0.0)
-    fund_ref = StockRef("SZ", "159919", Path("/tmp/vipdoc"), instrument_type="fund", board="fund")
+    stock_ref = StockRef("SH", "600000", Path("/tmp/vipdoc"), instrument_type="stock")
 
-    fund_backtest = _backtest_config(config, fund_ref)
+    stock_backtest = _backtest_config(config, stock_ref)
 
-    assert fund_backtest.commission == 0.00005
-    assert fund_backtest.stamp_tax == 0.0
-
-
-def test_etf_research_pool_ignores_stock_board_filters() -> None:
-    service = ConditionResearchService(
-        adapter=FakeMixedResearchAdapter(),
-        backtest_service=FakePreparedBacktests(),  # type: ignore[arg-type]
-    )
-    config = _research_config(instrument_types=("fund",), boards=("main",))
-
-    assert config.boards == ()
-    assert [ref.code for ref in service._list_stock_refs(config)] == ["159919"]
+    assert stock_backtest.commission == 0.0001
+    assert stock_backtest.stamp_tax == 0.0
 
 
 def test_ranking_settings_round_trip_through_the_config_dict() -> None:

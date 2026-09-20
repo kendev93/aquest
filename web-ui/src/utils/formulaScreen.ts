@@ -83,14 +83,13 @@ export function loadSavedForm(): Partial<ScreenFormState> {
     if (typeof parsed.universeFile === 'string') safe.universeFile = parsed.universeFile
     if (Array.isArray(parsed.instrumentTypes)) {
       const values = parsed.instrumentTypes.filter((value): value is InstrumentType => (
-        value === 'stock' || value === 'fund' || value === 'index' || value === 'bond'
+        value === 'stock'
       ))
       safe.instrumentTypes = values
     }
     if (Array.isArray(parsed.boards)) {
       const values = parsed.boards.filter((value): value is InstrumentBoard => (
         value === 'main' || value === 'star' || value === 'chinext' || value === 'b_share'
-        || value === 'fund' || value === 'index' || value === 'bond'
       ))
       safe.boards = values
     }

@@ -11,9 +11,6 @@ import { formatChinaTimestamp } from '../utils/time'
 
 const INSTRUMENT_TYPE_OPTIONS: { key: InstrumentType; label: string }[] = [
   { key: 'stock', label: '股票/B股' },
-  { key: 'fund', label: '基金/ETF' },
-  { key: 'index', label: '指数' },
-  { key: 'bond', label: '债券' },
 ]
 
 const BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
@@ -21,9 +18,6 @@ const BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
   { key: 'star', label: '科创板' },
   { key: 'chinext', label: '创业板' },
   { key: 'b_share', label: 'B股' },
-  { key: 'fund', label: '基金/ETF' },
-  { key: 'index', label: '指数' },
-  { key: 'bond', label: '债券' },
 ]
 
 const CONDITION_OPERATOR_OPTIONS: { value: ConditionOperator; label: string }[] = [
@@ -872,7 +866,7 @@ watch(() => form.formulaText, (value) => {
               <span v-if="syncLoading" class="spinner sync-spinner" aria-hidden="true"></span>
               {{ syncLoading ? '同步中…' : '同步最新行情' }}
             </button>
-            <p class="sync-helper">先在「本地行情」页面刷新证券列表并补充最新日线；主板、科创板和创业板股票以及场内基金统一写入本地 DuckDB。</p>
+            <p class="sync-helper">先在「本地行情」页面刷新证券列表并补充最新日线；沪深股票统一写入本地 DuckDB。</p>
             <div v-if="syncLoading || syncJob" class="sync-progress" data-testid="sync-progress">
               <div class="sync-progress-heading"><span>{{ syncLoading ? '行情同步进度' : '最近一次同步' }}</span><strong>{{ syncProgressPercent }}%</strong></div>
               <div class="progress-track sync-progress-track"><span :style="{ width: `${syncProgressPercent}%` }"></span></div>

@@ -294,7 +294,7 @@ describe('StrategyFitnessPage', () => {
     await flushPromises()
 
     await wrapper.get('[data-testid="fitness-buy-rule-add-condition"]').trigger('click')
-    await wrapper.get('[data-testid="fitness-scope-type-fund"]').setValue(true)
+    await wrapper.get('[data-testid="fitness-scope-type-stock"]').setValue(true)
     await wrapper.get('[data-testid="fitness-scope-board-main"]').setValue(true)
     await wrapper.get('[data-testid="fitness-rank-order"]').setValue('asc')
     await wrapper.get('[data-testid="fitness-advanced-toggle"]').trigger('click')
@@ -308,7 +308,7 @@ describe('StrategyFitnessPage', () => {
     await flushPromises()
 
     expect(fitnessApi.createStrategyFitness).toHaveBeenCalledWith(expect.objectContaining({
-      instrument_types: ['fund'],
+      instrument_types: ['stock'],
       boards: ['main'],
       rank_order: 'asc',
       execution: 'next_close',

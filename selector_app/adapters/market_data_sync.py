@@ -51,11 +51,10 @@ from .market_sync import (
 from .online_market_sync import OnlineMarketSync, OnlineModuleFactory, OnlineProviderError
 
 _EASTMONEY_STOCK_BOARDS = frozenset({"main", "star", "chinext"})
-# East Money exposes exchange-traded funds through a separate quote catalog, and
-# the local store already models them as instrument_type="fund", board="fund".
-_EASTMONEY_FUND_BOARDS = frozenset({"fund"})
-_EASTMONEY_SUPPORTED_BOARDS = _EASTMONEY_STOCK_BOARDS | _EASTMONEY_FUND_BOARDS
-_EASTMONEY_SUPPORTED_TYPES = frozenset({"stock", "fund"})
+# 本系统只研究股票。基金（含 ETF）与指数既不在同步范围内也不进候选池：ETF 跟踪
+# 同一指数会产生大量共线标的，指数本身不可交易。
+_EASTMONEY_SUPPORTED_BOARDS = _EASTMONEY_STOCK_BOARDS
+_EASTMONEY_SUPPORTED_TYPES = frozenset({"stock"})
 
 
 class ProviderSyncService(Protocol):
@@ -502,8 +501,8 @@ class MarketDataSync:
         eastmoney_types = _eastmoney_types(config)
         if not eastmoney_types:
             raise OnlineProviderError(
-                "在线同步当前只支持主板、科创板、创业板股票和场内基金；"
-                "指数与债券没有可用的在线 K 线。"
+                "在线同步当前只支持主板、科创板、创业板股票。"
+                "B 股请改用本地通达信导入。"
             )
         return [
             (
@@ -684,22 +683,16 @@ def _validate_eastmoney_scope(config: MarketSyncConfig) -> None:
     if unsupported_types or unsupported_boards:
         unsupported = sorted({*unsupported_types, *unsupported_boards})
         raise OnlineProviderError(
-            "在线同步当前仅支持主板、科创板、创业板股票和场内基金；"
-            f"当前范围包含不支持的品种/板块: {', '.join(unsupported)}，"
-            "指数与债券没有可用的在线 K 线。"
+            "在线同步当前仅支持主板、科创板、创业板股票；"
+            f"当前范围包含不支持的品种/板块: {', '.join(unsupported)}。"
         )
     # Both sides can be legal on their own and still describe nothing: 基金 +
-    # 主板 passes both set checks, then resolves to zero targets and the job
-    # reports success with no explanation. Reject the empty intersection here.
+    # 主板 used to pass both set checks, then resolved to zero targets and made
+    # the job report success with no explanation. Reject the empty intersection.
     selected_types = set(config.instrument_types or ())
     selected_boards = set(config.boards or ())
     if selected_types and selected_boards:
-        reachable: set[str] = set()
-        for item in selected_types:
-            if item == "fund":
-                reachable |= _EASTMONEY_FUND_BOARDS
-            else:
-                reachable |= _EASTMONEY_STOCK_BOARDS
+        reachable: set[str] = set(_EASTMONEY_STOCK_BOARDS)
         if not reachable & selected_boards:
             raise OnlineProviderError(
                 "所选品种与板块没有交集，不会命中任何标的："

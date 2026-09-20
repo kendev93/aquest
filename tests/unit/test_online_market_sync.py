@@ -76,17 +76,6 @@ class FakeOnline:
             ]
         )
 
-    def fetch_fund_instruments(self, *, timeout: float) -> pd.DataFrame:
-        del timeout
-        return pd.DataFrame(
-            [
-                {"代码": "510300", "名称": "沪深300ETF"},
-                {"代码": "510500", "名称": "中证500ETF"},
-                {"代码": "159915", "名称": "创业板ETF"},
-                {"代码": "600000", "名称": "浦发银行"},
-            ]
-        )
-
     def fetch_daily_history(
         self,
         symbol: str,
@@ -164,10 +153,6 @@ class RecordingOnline(FakeOnline):
         self.catalog_requests.append("stock")
         return super().fetch_instruments(timeout=timeout)
 
-    def fetch_fund_instruments(self, *, timeout: float) -> pd.DataFrame:
-        self.catalog_requests.append("fund")
-        return super().fetch_fund_instruments(timeout=timeout)
-
 
 class BothSourcesOnline(FakeOnline):
     """East Money and Tencent both answer; Tencent must win."""
@@ -233,50 +218,6 @@ def test_eastmoney_discovers_sh_sz_a_shares_and_preserves_names(tmp_path: Path) 
     assert report.filtered_instruments == 0
     assert {ref.code for ref in store.list_instruments()} == {"000001", "600000", "688001"}
     assert next(ref for ref in store.list_instruments() if ref.code == "600000").name == "浦发银行"
-
-
-def test_eastmoney_discovers_etfs_when_funds_are_requested(tmp_path: Path) -> None:
-    module = FakeOnline()
-    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
-
-    report = OnlineMarketSync(
-        store=store,
-        module_factory=lambda: module,
-        clock=lambda: _NOW,
-    ).discover_instruments(_config(instrument_types=("fund",)))
-
-    assert report.target_source == "eastmoney_fund_list"
-    # 600000 is a stock smuggled into the fund catalog; it must not leak in.
-    assert report.listed_instruments == 3
-    assert report.total_candidates == 3
-    stored = store.list_instruments(instrument_types=("fund",))
-    assert {ref.code for ref in stored} == {"510300", "510500", "159915"}
-    assert all(ref.instrument_type == "fund" and ref.board == "fund" for ref in stored)
-    # Fund codes need the fund market helper: 51xxxx is SH, 15xxxx is SZ.
-    assert next(ref for ref in stored if ref.code == "510300").market == "SH"
-    assert next(ref for ref in stored if ref.code == "159915").market == "SZ"
-    assert next(ref for ref in stored if ref.code == "510300").name == "沪深300ETF"
-
-
-def test_eastmoney_merges_stock_and_fund_catalogs(tmp_path: Path) -> None:
-    module = FakeOnline()
-    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
-
-    report = OnlineMarketSync(
-        store=store,
-        module_factory=lambda: module,
-        clock=lambda: _NOW,
-    ).discover_instruments(_config(instrument_types=("stock", "fund")))
-
-    assert report.target_source == "eastmoney_mixed_list"
-    assert {ref.code for ref in store.list_instruments()} == {
-        "000001",
-        "600000",
-        "688001",
-        "510300",
-        "510500",
-        "159915",
-    }
 
 
 def test_eastmoney_unscoped_request_stays_stock_only(tmp_path: Path) -> None:
@@ -398,11 +339,11 @@ def test_baostock_leads_the_instrument_catalog_when_it_answers(
     assert {ref.code for ref in store.list_instruments()} == {"000001", "600000"}
 
 
-def test_baostock_catalog_serves_stock_and_fund_from_one_frame(
+def test_baostock_catalog_drops_funds_from_the_stock_selection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """baostock 一次返回全市场，同一份帧复用于股票与 ETF，不必按品种各拉一次。"""
+    """baostock 一次返回全市场，ETF 行必须在同一份帧里被剔掉。"""
 
     monkeypatch.setattr(
         online_market_sync_module,
@@ -422,10 +363,10 @@ def test_baostock_catalog_serves_stock_and_fund_from_one_frame(
         store=store,
         module_factory=lambda: module,
         clock=lambda: _NOW,
-    ).discover_instruments(_config(instrument_types=("stock", "fund")))
+    ).discover_instruments(_config(instrument_types=("stock",)))
 
-    assert report.target_source == "baostock_mixed_list"
-    assert {ref.code for ref in store.list_instruments()} == {"600000", "510300", "159915"}
+    assert report.target_source == "baostock_stock_list"
+    assert {ref.code for ref in store.list_instruments()} == {"600000"}
     assert module.catalog_requests == []
 
 
@@ -860,28 +801,22 @@ def test_market_data_sync_routes_every_run_through_eastmoney(tmp_path: Path) -> 
     assert store.get_meta("last_online_provider") == "eastmoney"
 
 
-def test_eastmoney_mode_rejects_explicitly_unsupported_instrument_scope(tmp_path: Path) -> None:
+def test_eastmoney_mode_rejects_the_b_share_board(tmp_path: Path) -> None:
+    """在线通道只服务主板、科创板、创业板，B 股没有在线日线。"""
+
     service = MarketDataSync(store=DuckDbMarketDataStore(tmp_path / "market.duckdb"))
 
-    # Stocks and exchange-traded funds are served by East Money; bonds and
-    # indexes have no online daily-bar source at all.
     with pytest.raises(OnlineProviderError, match="在线同步当前仅支持"):
-        service.discover_instruments(MarketSyncConfig(instrument_types=("bond",), sync_workers=1))
-
-
-def test_eastmoney_mode_rejects_an_empty_type_board_intersection(tmp_path: Path) -> None:
-    """基金 + 主板：类型和板块各自都合法，但交集为空。
-
-    旧实现只做两次差集检查，这种组合一路走到目标解析才变成 0 个标的，
-    任务照样报「成功」而不解释为什么什么都没同步。
-    """
-
-    service = MarketDataSync(store=DuckDbMarketDataStore(tmp_path / "market.duckdb"))
-
-    with pytest.raises(OnlineProviderError, match="没有交集"):
         service.discover_instruments(
-            MarketSyncConfig(instrument_types=("fund",), boards=("main",), sync_workers=1)
+            MarketSyncConfig(instrument_types=("stock",), boards=("b_share",), sync_workers=1)
         )
+
+
+def test_sync_config_rejects_non_stock_instrument_types() -> None:
+    """基金、债券、指数在配置层就被拒，不会一路走到在线同步才报错。"""
+
+    with pytest.raises(ValueError, match="不支持的证券类型"):
+        MarketSyncConfig(instrument_types=("bond",), sync_workers=1)
 
 
 def test_market_sync_config_rejects_unknown_and_removed_providers() -> None:

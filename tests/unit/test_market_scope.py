@@ -19,9 +19,6 @@ from selector_app.market_data.store import DuckDbMarketDataStore
         ("SZ", "000001", "main"),
         ("SZ", "300001", "chinext"),
         ("SZ", "200001", "b_share"),
-        ("SH", "510300", "fund"),
-        ("SZ", "399001", "index"),
-        ("SZ", "110001", "bond"),
     ],
 )
 def test_code_ranges_are_exposed_as_stable_board_segments(
@@ -34,11 +31,11 @@ def test_unrestricted_scope_matches_every_supported_instrument() -> None:
     scope = InstrumentScope.from_values()
 
     assert scope.matches("SH", "stock", "star")
-    assert scope.matches("SZ", "fund", "fund")
-    assert scope.matches("SZ", "bond", "bond")
+    assert scope.matches("SZ", "stock", "chinext")
+    assert scope.matches("SZ", "stock", "b_share")
 
 
-def test_scope_can_select_stock_boards_without_selecting_funds_or_bonds() -> None:
+def test_scope_can_select_stock_boards() -> None:
     scope = InstrumentScope.from_values(
         instrument_types=("stock",),
         boards=("main", "chinext"),
@@ -47,7 +44,6 @@ def test_scope_can_select_stock_boards_without_selecting_funds_or_bonds() -> Non
     assert scope.matches("SH", "stock", "main")
     assert scope.matches("SZ", "stock", "chinext")
     assert not scope.matches("SH", "stock", "star")
-    assert not scope.matches("SZ", "fund", "fund")
 
 
 def test_store_list_instruments_filters_by_type_and_board(tmp_path: Path) -> None:
@@ -66,7 +62,7 @@ def test_store_list_instruments_filters_by_type_and_board(tmp_path: Path) -> Non
     )
     store.replace_local_bars("SH", "600000", "stock", frame)
     store.replace_local_bars("SH", "688001", "stock", frame)
-    store.replace_local_bars("SH", "510300", "fund", frame)
+    store.replace_local_bars("SZ", "300001", "stock", frame)
 
     refs = store.list_instruments(instrument_types=("stock",), boards=("main",))
 

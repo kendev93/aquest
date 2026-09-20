@@ -40,21 +40,21 @@ def test_research_request_defaults_to_stock_only_instrument_types() -> None:
     assert config.instrument_types == ("stock",)
 
 
-def test_research_request_accepts_an_etf_only_study() -> None:
+def test_research_request_accepts_an_explicit_stock_study() -> None:
     body = payload()
-    body["instrument_types"] = ["fund"]
+    body["instrument_types"] = ["stock"]
 
     request = ConditionResearchRequest.model_validate(body)
 
-    assert request.instrument_types == ["fund"]
+    assert request.instrument_types == ["stock"]
 
 
 @pytest.mark.parametrize(
     ("instrument_types", "message"),
     [
-        (["index"], "只支持股票或 ETF"),
-        (["bond"], "只支持股票或 ETF"),
-        (["stock", "fund"], "一次只能选择一类证券"),
+        (["index"], "Input should be 'stock'"),
+        (["bond"], "Input should be 'stock'"),
+        (["fund"], "Input should be 'stock'"),
     ],
 )
 def test_research_request_rejects_unsupported_instrument_types(
@@ -141,7 +141,7 @@ def test_research_request_rejects_non_stock_board_filters() -> None:
     body = payload()
     body["boards"] = ["fund"]
 
-    with pytest.raises(ValidationError, match="只支持股票板块"):
+    with pytest.raises(ValidationError, match="Input should be 'main'"):
         ConditionResearchRequest.model_validate(body)
 
 

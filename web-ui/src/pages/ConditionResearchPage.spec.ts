@@ -405,49 +405,39 @@ describe('ConditionResearchPage', () => {
     expect(wrapper.get('[data-testid="top-n-rate-buy-2"]').attributes('title')).toContain('没有解析出排序指标')
   })
 
-  it('switches to an ETF study with fund costs and no board filters', async () => {
+  it('runs a stock study with the stock cost defaults and board filters', async () => {
     const wrapper = mount(ConditionResearchPage)
     await flushPromises()
 
     await wrapper.get('[data-testid="condition-advanced-toggle"]').trigger('click')
     await wrapper.get('[data-testid="condition-board-star"]').setValue(true)
-    await wrapper.get('[data-testid="condition-instrument-type"]').setValue('fund')
     await flushPromises()
 
-    // 板块是股票概念，ETF 场景下必须隐藏，残留的板块选择也要一并丢弃。
-    expect(wrapper.find('[data-testid="condition-board-scope"]').exists()).toBe(false)
-    expect(wrapper.text()).toContain('沪深全部ETF')
-    expect(wrapper.text()).toContain('ETF 免印花税')
-    expect((wrapper.get('[data-testid="condition-commission"]').element as HTMLInputElement).value).toBe('0.00005')
-    expect((wrapper.get('[data-testid="condition-stamp-tax"]').element as HTMLInputElement).value).toBe('0')
+    expect(wrapper.find('[data-testid="condition-board-scope"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('沪深全部股票')
+    expect((wrapper.get('[data-testid="condition-commission"]').element as HTMLInputElement).value).toBe('0.0001')
+    expect((wrapper.get('[data-testid="condition-stamp-tax"]').element as HTMLInputElement).value).toBe('0.001')
 
     await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
     await flushPromises()
 
     expect(researchApi.createConditionResearch).toHaveBeenCalledWith(expect.objectContaining({
-      instrument_types: ['fund'],
-      commission: 0.00005,
-      stamp_tax: 0,
+      instrument_types: ['stock'],
+      commission: 0.0001,
     }))
-    expect(vi.mocked(researchApi.createConditionResearch).mock.calls[0][0].boards).toBeUndefined()
-
-    await wrapper.get('[data-testid="condition-instrument-type"]').setValue('stock')
-    await flushPromises()
-    expect(wrapper.find('[data-testid="condition-board-scope"]').exists()).toBe(true)
-    expect((wrapper.get('[data-testid="condition-commission"]').element as HTMLInputElement).value).toBe('0.0001')
+    expect(vi.mocked(researchApi.createConditionResearch).mock.calls[0][0].boards).toEqual(['star'])
   })
 
-  it('keeps costs the user customised when switching instrument type', async () => {
+  it('keeps the costs the user customised', async () => {
     const wrapper = mount(ConditionResearchPage)
     await flushPromises()
 
     await wrapper.get('[data-testid="condition-advanced-toggle"]').trigger('click')
     await wrapper.get('[data-testid="condition-commission"]').setValue(0.0008)
-    await wrapper.get('[data-testid="condition-instrument-type"]').setValue('fund')
     await flushPromises()
 
     expect((wrapper.get('[data-testid="condition-commission"]').element as HTMLInputElement).value).toBe('0.0008')
-    expect((wrapper.get('[data-testid="condition-stamp-tax"]').element as HTMLInputElement).value).toBe('0')
+    expect((wrapper.get('[data-testid="condition-stamp-tax"]').element as HTMLInputElement).value).toBe('0.001')
   })
 
   it('resumes an active research job after a page refresh', async () => {
@@ -816,7 +806,7 @@ describe('ConditionResearchPage', () => {
     }))
   })
 
-  it('restores an ETF study without re-introducing stock board filters', async () => {
+  it('restores a stock study from history', async () => {
     vi.mocked(researchApi.fetchConditionResearchHistory).mockResolvedValueOnce([
       {
         history_id: 'hist-etf',
@@ -838,7 +828,7 @@ describe('ConditionResearchPage', () => {
       backtest_type: 'condition_research',
       request: {
         universe: 'all',
-        instrument_types: ['fund'],
+        instrument_types: ['stock'],
         boards: [],
         buy_rule: { signals: [], conditions: [], required_conditions: [], combine_mode: 'all', minimum_matches: null },
         sell_rule: { signals: [], conditions: [], required_conditions: [], combine_mode: 'all', minimum_matches: null },
@@ -846,8 +836,8 @@ describe('ConditionResearchPage', () => {
         start_date: '2022-01-01',
         end_date: '2024-12-31',
         search_sides: 'both',
-        commission: 0.00005,
-        stamp_tax: 0,
+        commission: 0.0001,
+        stamp_tax: 0.001,
         min_commission: 0.1,
         slippage: 0,
         initial_cash: 100_000,
@@ -863,12 +853,12 @@ describe('ConditionResearchPage', () => {
     await wrapper.get('[data-testid="condition-history-load-hist-etf"]').trigger('click')
     await flushPromises()
 
-    expect((wrapper.get('[data-testid="condition-instrument-type"]').element as HTMLSelectElement).value).toBe('fund')
-    // 选 ETF 时板块整块隐藏，历史里的板块过滤也不该回来。
-    expect(wrapper.find('[data-testid="condition-board-scope"]').exists()).toBe(false)
+    expect((wrapper.get('[data-testid="condition-instrument-type"]').element as HTMLSelectElement).value).toBe('stock')
+    // 只研究股票，板块过滤器始终可用。
+    expect(wrapper.find('[data-testid="condition-board-scope"]').exists()).toBe(true)
     await wrapper.get('[data-testid="condition-advanced-toggle"]').trigger('click')
-    expect((wrapper.get('[data-testid="condition-commission"]').element as HTMLInputElement).value).toBe('0.00005')
-    expect((wrapper.get('[data-testid="condition-stamp-tax"]').element as HTMLInputElement).value).toBe('0')
+    expect((wrapper.get('[data-testid="condition-commission"]').element as HTMLInputElement).value).toBe('0.0001')
+    expect((wrapper.get('[data-testid="condition-stamp-tax"]').element as HTMLInputElement).value).toBe('0.001')
   })
 
   it('restores a hold-to-end study from history', async () => {

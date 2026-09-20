@@ -451,8 +451,7 @@ def create_online_sync_job(payload: MarketSyncRequest, request: Request) -> JSON
 def create_eastmoney_backfill_job(payload: MarketSyncRequest, request: Request) -> JSONResponse:
     if payload.provider != "eastmoney":
         raise HTTPException(status_code=422, detail="全量回填只支持在线日线通道")
-    # 回填曾经硬编码只补股票，勾了 ETF 也补不到。现在尊重调用方传的类型，
-    # 没传才回落到股票（东财的主战场），保持旧调用的行为不变。
+    # 回填只覆盖股票；没显式给类型时回落到股票，保持旧调用的行为不变。
     full_payload = payload.model_copy(
         update={
             "provider": "eastmoney",

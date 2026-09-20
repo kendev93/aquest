@@ -29,15 +29,12 @@ def test_adapter_lists_all_known_shenzhen_and_shanghai_day_files(tmp_path: Path)
 
     refs = LocalDayMarketDataAdapter().list_stock_refs(str(vipdoc), "all")
 
+    # 基金与指数的文件依然存在，但不再被列举：本系统只研究股票。
     assert [(ref.market, ref.code, ref.instrument_type) for ref in refs] == [
-        ("SH", "000001", "index"),
-        ("SH", "510300", "fund"),
         ("SH", "600000", "stock"),
         ("SH", "688001", "stock"),
         ("SZ", "000001", "stock"),
-        ("SZ", "159919", "fund"),
         ("SZ", "300001", "stock"),
-        ("SZ", "399001", "index"),
     ]
 
 

@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Literal
 
-InstrumentType = Literal["stock", "fund", "index", "bond"]
+from selector_app.market_data.models import InstrumentType
 
 
 @dataclass(frozen=True)
@@ -19,16 +18,11 @@ class TradeProfile:
 
 
 _STOCK_COMMISSION = 0.0001
-_FUND_COMMISSION = 0.00005
 _DEFAULT_MIN_COMMISSION = 0.1
 _STOCK = TradeProfile("stock", 100, _STOCK_COMMISSION, _DEFAULT_MIN_COMMISSION, 0.001)
-_FUND_LIKE = TradeProfile("fund", 100, _FUND_COMMISSION, _DEFAULT_MIN_COMMISSION, 0.0)
 STOCK_DEFAULT_COMMISSION = _STOCK.commission
 STOCK_DEFAULT_MIN_COMMISSION = _STOCK.min_commission
 STOCK_DEFAULT_STAMP_TAX = _STOCK.stamp_tax
-FUND_DEFAULT_COMMISSION = _FUND_LIKE.commission
-FUND_DEFAULT_MIN_COMMISSION = _FUND_LIKE.min_commission
-FUND_DEFAULT_STAMP_TAX = _FUND_LIKE.stamp_tax
 
 
 def profile_for(
@@ -40,16 +34,12 @@ def profile_for(
 ) -> TradeProfile:
     """Return a profile, applying explicit cost overrides when provided."""
 
-    base = (
-        _STOCK
-        if instrument_type == "stock"
-        else replace(_FUND_LIKE, instrument_type=instrument_type)
-    )
+    del instrument_type
     return replace(
-        base,
-        commission=base.commission if commission is None else commission,
-        min_commission=base.min_commission if min_commission is None else min_commission,
-        stamp_tax=base.stamp_tax if stamp_tax is None else stamp_tax,
+        _STOCK,
+        commission=_STOCK.commission if commission is None else commission,
+        min_commission=_STOCK.min_commission if min_commission is None else min_commission,
+        stamp_tax=_STOCK.stamp_tax if stamp_tax is None else stamp_tax,
     )
 
 
@@ -65,10 +55,7 @@ def profile_from_config(
     Kept as the single entry point for callers, and now identical to
     :func:`profile_from_overrides`: costs equal to the legacy stock default are
     treated as untouched and fall back to the instrument default **per field**.
-    The old behaviour required the whole stock default triple to be present,
-    so an ETF run that only changed the commission kept the 0.1% stock stamp
-    tax - a 20x overcharge on every exit, and inconsistent with the research
-    path, which already resolved costs field by field.
+    The old behaviour required the whole stock default triple to be present.
     """
 
     return profile_from_overrides(
@@ -90,9 +77,7 @@ def profile_from_overrides(
 
     Unlike :func:`profile_from_config` this does not require the whole stock
     default triple to be present. A field still equal to the legacy stock
-    default counts as untouched and falls back to the instrument default, so
-    an ETF study that only clears the stamp tax keeps the fund commission
-    instead of silently reverting to the stock rate.
+    default counts as untouched and falls back to the instrument default.
     """
 
     return profile_for(

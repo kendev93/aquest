@@ -20,9 +20,9 @@ def parse_universe_code(raw: str) -> tuple[MarketCode, str] | None:
     """Parse a single universe entry into ``(market, code)``.
 
     Accepts ``600519``, ``SH600519``, ``SH:600519`` and ``sh 600519``. Returns
-    ``None`` for blank lines. Market inference follows the fund-code rules used
-    by the online sync (5/6/9 -> SH, everything else -> SZ) so ETF prefixes
-    such as ``51xxxx`` resolve to 沪市.
+    ``None`` for blank lines. Market inference follows the stock-code rules used
+    by the online sync: 6xxxxx and the 900xxx B share board are Shanghai,
+    everything else resolves to Shenzhen.
     """
 
     normalized = raw.split("#", 1)[0].strip()
@@ -33,7 +33,7 @@ def parse_universe_code(raw: str) -> tuple[MarketCode, str] | None:
         market: MarketCode = "SH" if match.group(1).upper() == "SH" else "SZ"
         return market, match.group(2)
     if _CODE_PATTERN.fullmatch(normalized):
-        market = "SH" if normalized.startswith(("5", "6", "9")) else "SZ"
+        market = "SH" if normalized.startswith(("6", "9")) else "SZ"
         return market, normalized
     raise ValueError(f"无效的证券代码: {raw.strip()}")
 
@@ -131,7 +131,7 @@ class DuckDbMarketDataAdapter:
                 last_date=ref.last_date,
                 last_close=ref.last_close,
             )
-            # 只导入了目录、没有 K 线的标的（债券/指数/基金经常是这样）既不能回测
+            # 只导入了目录、没有 K 线的标的（在线同步偶尔留下空壳）既不能回测
             # 也不能排序。把它们留在候选池里，全市场任务会为每一只做一次注定落空的
             # 读库和指标查询——导入一次就可能让候选数从五千涨到一万七，回测随之超时。
             for ref in self._store.list_instruments(

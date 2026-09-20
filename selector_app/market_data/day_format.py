@@ -55,12 +55,6 @@ def classify_board(market: str, code: str) -> InstrumentBoard | None:
             return "star"
         if head == "90":
             return "b_share"
-        if head in {"50", "51", "52", "53", "55", "56", "58"}:
-            return "fund"
-        if head in {"00", "88", "99"}:
-            return "index"
-        if head in {"01", "10", "11", "12", "13", "14", "20"}:
-            return "bond"
         return None
     if head == "00":
         return "main"
@@ -68,25 +62,13 @@ def classify_board(market: str, code: str) -> InstrumentBoard | None:
         return "b_share"
     if head == "30":
         return "chinext"
-    if head in {"15", "16", "17", "18"}:
-        return "fund"
-    if head == "39":
-        return "index"
-    if head in {"10", "11", "12", "13", "14"}:
-        return "bond"
     return None
 
 
 def classify_instrument(market: str, code: str) -> InstrumentType | None:
     board = classify_board(market, code)
-    if board in {"main", "star", "chinext", "b_share"}:
+    if board is not None:
         return "stock"
-    if board == "fund":
-        return "fund"
-    if board == "index":
-        return "index"
-    if board == "bond":
-        return "bond"
     return None
 
 
@@ -95,13 +77,8 @@ def _coefficients(
     code: str,
     instrument_type: InstrumentType,
 ) -> tuple[float, float]:
-    if instrument_type == "stock":
-        return (0.001, 0.01) if market == "SH" and code.startswith("90") else (0.01, 0.01)
-    if instrument_type == "index":
-        return (0.01, 1.0)
-    if instrument_type == "fund":
-        return (0.001, 1.0) if market == "SH" else (0.001, 0.01)
-    return (0.001, 1.0)
+    del instrument_type
+    return (0.001, 0.01) if market == "SH" and code.startswith("90") else (0.01, 0.01)
 
 
 def _normalized_now(now: datetime | None) -> datetime:

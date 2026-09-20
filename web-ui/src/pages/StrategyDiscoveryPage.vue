@@ -48,9 +48,6 @@ const APPLY_METADATA_KEY = 'indicator-lab.strategy-discovery.apply-meta'
 
 const INSTRUMENT_TYPE_OPTIONS: { key: InstrumentType; label: string }[] = [
   { key: 'stock', label: '股票/B股' },
-  { key: 'fund', label: '基金/ETF' },
-  { key: 'index', label: '指数' },
-  { key: 'bond', label: '债券' },
 ]
 
 const BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
@@ -58,9 +55,6 @@ const BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
   { key: 'star', label: '科创板' },
   { key: 'chinext', label: '创业板' },
   { key: 'b_share', label: 'B股' },
-  { key: 'fund', label: '基金/ETF' },
-  { key: 'index', label: '指数' },
-  { key: 'bond', label: '债券' },
 ]
 
 function emptyRule(): RuleGroupPayload {

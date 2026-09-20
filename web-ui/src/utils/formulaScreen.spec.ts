@@ -188,7 +188,7 @@ describe('formula screen defensive parsing and fallbacks', () => {
       mode: 'broken',
       ruleMode: 'broken',
       universe: 'broken',
-      instrumentTypes: ['stock', 'crypto', 'fund'],
+      instrumentTypes: ['stock', 'crypto'],
       boards: ['main', 'crypto', 'b_share'],
       workers: 99,
       conditions: 'not-an-array',
@@ -197,7 +197,7 @@ describe('formula screen defensive parsing and fallbacks', () => {
     expect(saved.mode).toBeUndefined()
     expect(saved.ruleMode).toBeUndefined()
     expect(saved.universe).toBeUndefined()
-    expect(saved.instrumentTypes).toEqual(['stock', 'fund'])
+    expect(saved.instrumentTypes).toEqual(['stock'])
     expect(saved.boards).toEqual(['main', 'b_share'])
     expect(saved.workers).toBe(8)
     expect(saved.conditions).toBeUndefined()

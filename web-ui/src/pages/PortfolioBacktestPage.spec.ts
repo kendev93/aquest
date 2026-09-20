@@ -339,12 +339,12 @@ describe('PortfolioBacktestPage', () => {
     const wrapper = mount(PortfolioBacktestPage)
     await flushPromises()
 
-    await wrapper.get('[data-testid="portfolio-scope-type-fund"]').setValue(true)
+    await wrapper.get('[data-testid="portfolio-scope-type-stock"]').setValue(true)
     await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')
     await flushPromises()
 
     expect(portfolioApi.createPortfolioBacktest).toHaveBeenCalledWith(expect.objectContaining({
-      instrument_types: ['fund'],
+      instrument_types: ['stock'],
     }))
 
     await wrapper.get('[data-testid="portfolio-history-remove-history-1"]').trigger('click')

@@ -21,7 +21,7 @@ PositionMode = Literal["full", "fixed"]
 # 排序方向：desc = 指标值越大越优先，asc = 越小越优先。
 RankOrder = Literal["asc", "desc"]
 
-RESEARCH_INSTRUMENT_TYPES: tuple[InstrumentType, ...] = ("stock", "fund")
+RESEARCH_INSTRUMENT_TYPES: tuple[InstrumentType, ...] = ("stock",)
 
 
 def _condition_dict(condition: object) -> dict[str, object]:
@@ -98,9 +98,7 @@ class ConditionResearchConfig:
         if self.universe not in {"all", "sh", "sz"}:
             raise ValueError("股票范围必须是 all、sh 或 sz")
         if any(item not in RESEARCH_INSTRUMENT_TYPES for item in self.instrument_types):
-            raise ValueError("买卖条件研究只支持股票或 ETF")
-        if len(set(self.instrument_types)) > 1:
-            raise ValueError("买卖条件研究一次只能选择一类证券，避免跨类型样本混池影响阈值可比性")
+            raise ValueError("买卖条件研究只支持股票，ETF、指数与债券不参与候选池")
         if self.start_date > self.end_date:
             raise ValueError("研究开始日期不能晚于结束日期")
         if self.buy_rule is None and self.sell_rule is None:
@@ -170,7 +168,7 @@ class ConditionResearchConfig:
             tuple(dict.fromkeys(self.instrument_types)) or ("stock",),
         )
         boards = tuple(dict.fromkeys(self.boards))
-        object.__setattr__(self, "boards", () if "fund" in self.instrument_types else boards)
+        object.__setattr__(self, "boards", boards)
         split_calendar_range(
             self.start_date,
             self.end_date,

@@ -239,7 +239,7 @@ class FormulaScreenRequest(BaseModel):
     minimum_matches: int | None = Field(default=None, ge=1, le=32)
     universe: Literal["all", "sh", "sz", "custom"] = "all"
     universe_file: str | None = Field(default=None, max_length=1024)
-    instrument_types: list[InstrumentType] | None = Field(default=None, max_length=4)
+    instrument_types: list[InstrumentType] | None = Field(default=None, max_length=1)
     boards: list[InstrumentBoard] | None = Field(default=None, max_length=7)
     vipdoc_path: str = Field(default="", max_length=1024)
     workers: int = Field(default=MAX_WORKERS, ge=1, le=MAX_WORKERS)
@@ -326,7 +326,7 @@ class LocalImportRequest(BaseModel):
 
     vipdoc_path: str | None = Field(default=None, max_length=1024)
     universe: Literal["all", "sh", "sz"] = "all"
-    instrument_types: list[InstrumentType] | None = Field(default=None, max_length=4)
+    instrument_types: list[InstrumentType] | None = Field(default=None, max_length=1)
     boards: list[InstrumentBoard] | None = Field(default=None, max_length=7)
 
     @model_validator(mode="after")
@@ -377,7 +377,7 @@ class MarketSyncRequest(BaseModel):
     # and only accepts the default so old callers sending it do not 422.
     provider: Literal["eastmoney"] = "eastmoney"
     bars: int = Field(default=800, ge=1, le=800)
-    instrument_types: list[InstrumentType] | None = Field(default=None, max_length=4)
+    instrument_types: list[InstrumentType] | None = Field(default=None, max_length=1)
     boards: list[InstrumentBoard] | None = Field(default=None, max_length=7)
     full_history: bool = False
     # 指标预计算按自然年分批执行，这里决定往前算几年（None = 用服务端默认值）。
@@ -511,7 +511,7 @@ class ConditionResearchRequest(BaseModel):
 
     universe: Literal["all", "sh", "sz"] = "all"
     vipdoc_path: str = Field(default="", max_length=1024)
-    instrument_types: list[InstrumentType] | None = Field(default=None, max_length=2)
+    instrument_types: list[InstrumentType] | None = Field(default=None, max_length=1)
     boards: list[InstrumentBoard] = Field(default_factory=list, max_length=4)
     # 留空表示「不设基准买入条件，持续满仓」，由研究直接搜索买入时机。
     buy_rule: RuleGroupRequest | None = None
@@ -550,12 +550,8 @@ class ConditionResearchRequest(BaseModel):
     def validate_research(self) -> ConditionResearchRequest:
         validate_date_range_request(self.date_mode, self.start_date, self.end_date)
         if self.instrument_types is not None:
-            if any(item not in {"stock", "fund"} for item in self.instrument_types):
-                raise ValueError("买卖条件研究只支持股票或 ETF")
-            if len(set(self.instrument_types)) > 1:
-                raise ValueError(
-                    "买卖条件研究一次只能选择一类证券，避免跨类型样本混池影响阈值可比性"
-                )
+            if any(item != "stock" for item in self.instrument_types):
+                raise ValueError("买卖条件研究只支持股票，ETF、指数与债券不参与候选池")
         if any(board not in {"main", "star", "chinext", "b_share"} for board in self.boards):
             raise ValueError("买卖条件研究的范围只支持股票板块")
         if self.start_date is not None and self.end_date is not None:
@@ -652,7 +648,7 @@ class SwingOverviewRequest(BaseModel):
 
     vipdoc_path: str = Field(default="", max_length=1024)
     universe: Literal["all", "sh", "sz"] = "all"
-    instrument_types: list[InstrumentType] | None = Field(default=None, max_length=4)
+    instrument_types: list[InstrumentType] | None = Field(default=None, max_length=1)
     boards: list[InstrumentBoard] | None = Field(default=None, max_length=7)
     start_date: date | None = None
     end_date: date | None = None
@@ -705,7 +701,7 @@ class SwingIndicatorRequest(BaseModel):
 
     vipdoc_path: str = Field(default="", max_length=1024)
     universe: Literal["all", "sh", "sz"] = "all"
-    instrument_types: list[InstrumentType] | None = Field(default=None, max_length=4)
+    instrument_types: list[InstrumentType] | None = Field(default=None, max_length=1)
     boards: list[InstrumentBoard] | None = Field(default=None, max_length=7)
     start_date: date | None = None
     end_date: date | None = None
@@ -761,7 +757,7 @@ class PortfolioBacktestRequest(BaseModel):
     universe: PortfolioUniverse = "all"
     universe_file: str | None = Field(default=None, max_length=1024)
     codes: list[str] | None = Field(default=None, max_length=200)
-    instrument_types: list[InstrumentType] | None = Field(default=None, max_length=4)
+    instrument_types: list[InstrumentType] | None = Field(default=None, max_length=1)
     boards: list[InstrumentBoard] | None = Field(default=None, max_length=7)
     selected_signals: list[str] = Field(default_factory=list, max_length=32)
     combine_mode: Literal["all", "any", "at_least"] = "any"
@@ -980,7 +976,7 @@ class StrategyDiscoveryRequest(BaseModel):
     vipdoc_path: str = Field(default="", max_length=1024)
     universe: PortfolioUniverse = "all"
     universe_file: str | None = Field(default=None, max_length=1024)
-    instrument_types: list[InstrumentType] | None = Field(default=None, max_length=4)
+    instrument_types: list[InstrumentType] | None = Field(default=None, max_length=1)
     boards: list[InstrumentBoard] | None = Field(default=None, max_length=7)
     required_buy_conditions: list[ScreenConditionRequest] = Field(
         default_factory=list, max_length=3

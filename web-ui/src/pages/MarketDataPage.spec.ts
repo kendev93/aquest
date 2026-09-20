@@ -94,7 +94,7 @@ describe('MarketDataPage', () => {
   it('selects a data-bearing instrument when the first catalog item has no bars', async () => {
     vi.mocked(marketApi.fetchLocalInstruments).mockResolvedValueOnce({
       items: [
-        { market: 'SH', code: '000001', name: '上证指数', instrument_type: 'index', bars: 0, data_start: null, data_end: null, last_close: null, error: '没有可用日线数据' },
+        { market: 'SH', code: '600001', name: '邯郸钢铁', instrument_type: 'stock', bars: 0, data_start: null, data_end: null, last_close: null, error: '没有可用日线数据' },
         instruments[0],
       ],
       meta: { total: 2, page: 1, page_size: 50, pages: 1 },
@@ -518,7 +518,7 @@ describe('MarketDataPage', () => {
   })
 
   it('imports local files without the online default of stocks only', async () => {
-    // 本地导入曾经复用在线的范围（默认只勾股票），ETF/指数/债券被静默过滤掉。
+    // 本地导入曾经复用在线的范围（默认只勾股票），未勾选的板块会被静默过滤掉。
     vi.mocked(marketApi.createLocalImport).mockResolvedValue({ job_id: 'local-1', status: 'queued' })
     vi.mocked(marketApi.getMarketDataJob).mockResolvedValue({
       job_id: 'local-1', status: 'completed', progress: 1, total_candidates: 1,
@@ -595,15 +595,18 @@ describe('MarketDataPage', () => {
     confirmSpy.mockRestore()
   })
 
-  it('greys out scopes the online channel cannot serve', async () => {
+  it('offers only stocks and greys out the boards the online channel cannot serve', async () => {
     const wrapper = mount(MarketDataPage)
     await flushPromises()
 
-    expect(wrapper.get<HTMLInputElement>('[data-testid="market-sync-type-index"]').element.disabled).toBe(true)
-    expect(wrapper.get<HTMLInputElement>('[data-testid="market-sync-type-bond"]').element.disabled).toBe(true)
+    // 只做股票：指数/ETF/债券这些选项根本不再渲染，而不是置灰。
+    expect(wrapper.find('[data-testid="market-sync-type-index"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="market-sync-type-fund"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="market-sync-type-bond"]').exists()).toBe(false)
+    expect(wrapper.get<HTMLInputElement>('[data-testid="market-sync-type-stock"]').element.disabled).toBe(false)
+    // 在线通道取不到 B 股，B 股只能靠本地导入。
     expect(wrapper.get<HTMLInputElement>('[data-testid="market-sync-board-b_share"]').element.disabled).toBe(true)
-    // 在线不支持的品种对本地导入仍然可用。
-    expect(wrapper.get<HTMLInputElement>('[data-testid="market-local-type-index"]').element.disabled).toBe(false)
+    expect(wrapper.get<HTMLInputElement>('[data-testid="market-local-board-b_share"]').element.disabled).toBe(false)
   })
 
   it('filters the catalog, pages through it and narrows the local import scope', async () => {
@@ -615,7 +618,7 @@ describe('MarketDataPage', () => {
     await flushPromises()
 
     // 本地导入范围独立于在线同步范围。
-    await wrapper.get('[data-testid="market-local-type-fund"]').setValue(true)
+    await wrapper.get('[data-testid="market-local-type-stock"]').setValue(true)
     await wrapper.get('[data-testid="market-local-board-main"]').setValue(true)
 
     await wrapper.get('[data-testid="market-scope"]').setValue('SH')

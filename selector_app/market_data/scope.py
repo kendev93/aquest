@@ -9,8 +9,8 @@ from typing import cast
 from .models import InstrumentBoard, InstrumentType, MarketCode
 
 _ALLOWED_MARKETS = {"SH", "SZ"}
-_ALLOWED_TYPES = {"stock", "fund", "index", "bond"}
-_ALLOWED_BOARDS = {"main", "star", "chinext", "b_share", "fund", "index", "bond"}
+_ALLOWED_TYPES = {"stock"}
+_ALLOWED_BOARDS = {"main", "star", "chinext", "b_share"}
 
 
 @dataclass(frozen=True)

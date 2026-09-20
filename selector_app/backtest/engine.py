@@ -11,9 +11,10 @@ import numpy as np
 import pandas as pd
 
 from selector_app.formulas.common import validate_market_data
+from selector_app.market_data.models import InstrumentType
 
 from .performance import PerformanceAnalyzer
-from .profiles import InstrumentType, TradeProfile, profile_from_config
+from .profiles import TradeProfile, profile_from_config
 
 ExecutionMode = Literal["next_open", "next_close"]
 PositionMode = Literal["full", "fixed"]

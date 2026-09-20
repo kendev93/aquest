@@ -108,14 +108,14 @@ def test_fetch_daily_history_maps_eastmoney_kline_rows() -> None:
     [
         ("600000", "1.600000"),  # 沪市股票
         ("000001", "0.000001"),  # 深市股票
-        ("510300", "1.510300"),  # 沪市 ETF
-        ("588000", "1.588000"),  # 沪市科创板 ETF
-        ("501018", "1.501018"),  # 沪市 LOF
-        ("159919", "0.159919"),  # 深市 ETF
+        ("600000", "1.600000"),  # 沪市主板
+        ("688001", "1.688001"),  # 科创板
+        ("900001", "1.900001"),  # 沪市 B 股
+        ("000001", "0.000001"),  # 深市主板
     ],
 )
 def test_fetch_daily_history_uses_the_right_market_prefix(code: str, expected_secid: str) -> None:
-    """secid 前缀错了东财就返回空，沪市基金（5 开头）尤其容易踩。"""
+    """secid 前缀填错了在线数据源就返回空 K 线。"""
 
     transport = FakeTransport([{"data": {"klines": ["2026-09-10,10,10,10,10,1,10,0,0,0,0,1"]}}])
 
@@ -369,49 +369,3 @@ def test_empty_security_list_stays_empty_when_the_provider_reports_success() -> 
     frame = OnlineMarketClient(transport=transport).fetch_instruments(timeout=5.0)
 
     assert frame.empty
-
-
-def test_fetch_funds_lofs_and_indexes_uses_catalog_filters() -> None:
-    transport = FakeTransport(
-        [
-            {"data": {"total": 1, "diff": [{"f12": "510300", "f13": "1", "f14": "沪深300ETF"}]}},
-            {"data": {"total": 1, "diff": [{"f12": "163406", "f13": "0", "f14": "兴全合润"}]}},
-            {"data": {"total": 1, "diff": [{"f12": "000300", "f13": "1", "f14": "沪深300"}]}},
-        ]
-    )
-    client = OnlineMarketClient(transport=transport)
-
-    etf = client.fetch_fund_instruments(timeout=5.0)
-    lof = client.fetch_lof_instruments(timeout=5.0)
-    indexes = client.fetch_index_instruments(timeout=5.0)
-
-    assert etf.to_dict(orient="records") == [{"代码": "510300", "名称": "沪深300ETF"}]
-    assert lof.to_dict(orient="records") == [{"代码": "163406", "名称": "兴全合润"}]
-    assert indexes.to_dict(orient="records") == [{"代码": "sh000300", "名称": "沪深300"}]
-    assert transport.calls[0][1]["fs"].startswith("b:MK0021")
-    assert transport.calls[1][1]["fs"].startswith("b:MK0404")
-    assert transport.calls[2][1]["fs"].startswith("m:1 t:2")
-
-
-def test_fetch_daily_history_for_asset_uses_market_prefix_and_adjustment() -> None:
-    transport = FakeTransport(
-        [
-            {"data": {"klines": ["2026-09-10,3.5,3.6,3.7,3.4,2000,7200,8.0,1.0,0.1,0.2,1"]}},
-            {"data": {"klines": ["2026-09-10,3500,3510,3520,3490,0,0,1.0,0.2,10,0,1"]}},
-        ]
-    )
-    client = OnlineMarketClient(transport=transport)
-
-    fund = client.fetch_daily_history_for_asset(
-        "510300", "ETF", "2026-09-10", "2026-09-10", timeout=5.0
-    )
-    index = client.fetch_daily_history_for_asset(
-        "sh000300", "Index", "2026-09-10", "2026-09-10", timeout=5.0
-    )
-
-    assert fund["close"].tolist() == [3.6]
-    assert index["close"].tolist() == [3510.0]
-    assert transport.calls[0][1]["secid"] == "1.510300"
-    assert transport.calls[0][1]["fqt"] == "1"
-    assert transport.calls[1][1]["secid"] == "1.000300"
-    assert transport.calls[1][1]["fqt"] == "0"

@@ -193,21 +193,9 @@ const STOCK_BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
   { key: 'chinext', label: '创业板' },
   { key: 'b_share', label: 'B 股' },
 ]
-const STOCK_COSTS = { commission: 0.0001, stampTax: 0.001 }
-const FUND_COSTS = { commission: 0.00005, stampTax: 0 }
-watch(() => form.instrumentType, (next, previous) => {
-  if (restoring.value) return
-  const from = previous === 'fund' ? FUND_COSTS : STOCK_COSTS
-  const to = next === 'fund' ? FUND_COSTS : STOCK_COSTS
-  if (form.commission === from.commission) form.commission = to.commission
-  if (form.stampTax === from.stampTax) form.stampTax = to.stampTax
-  if (next === 'fund') form.boards = []
-})
-const scopeNoun = computed(() => (form.instrumentType === 'fund' ? 'ETF' : '股票'))
+const scopeNoun = computed(() => '股票')
 const scopeHelper = computed(() => (
-  form.instrumentType === 'fund'
-    ? '每只 ETF 独立运行同一套规则，不设置跨标的资金分配或持仓数量上限。ETF 免印花税，佣金默认万 0.5、最低 0.1 元。'
-    : '每只股票独立运行同一套规则，不设置跨股票资金分配或持仓数量上限。'
+  '每只股票独立运行同一套规则，不设置跨股票资金分配或持仓数量上限。'
 ))
 const selectedStockRows = computed(() => {
   if (!report.value) return []
@@ -497,7 +485,7 @@ function applyToPortfolio(): void {
   sessionStorage.setItem(RESEARCH_APPLY_KEY, JSON.stringify({
     universe: form.universe,
     instrument_types: [form.instrumentType],
-    boards: form.instrumentType === 'fund' ? [] : [...form.boards],
+    boards: [...form.boards],
     // date_mode 必须一起带过去：研究用「全历史/最近五年」时只传绝对日期会让
     // 组合页的下拉仍显示最近五年、实际却按研究区间跑（或反过来被收窄）。
     date_mode: form.dateMode,
@@ -690,9 +678,9 @@ function storedBoards(value: unknown): InstrumentBoard[] {
 /**
  * 把历史记录里保存的请求回填进表单。
  *
- * 后端存的是解析后的请求：日期已经是具体区间，板块在 ETF 下已被清空，所以
- * 这里还原的就是"当时真正跑的那套配置"，而不是用户填的原始模式。回填期间
- * 置位 ``restoring``，避免证券类型的 watch 顺手改写费用和板块。
+ * 后端存的是解析后的请求：日期已经是具体区间，所以这里还原的就是"当时真正跑的
+ * 那套配置"，而不是用户填的原始模式。回填期间置位 ``restoring``，避免证券范围
+ * 的 watch 顺手改写费用和板块。
  */
 async function applyStoredRequest(raw: unknown): Promise<void> {
   if (!raw || typeof raw !== 'object') return
@@ -701,13 +689,13 @@ async function applyStoredRequest(raw: unknown): Promise<void> {
   try {
     const types = Array.isArray(request.instrument_types) ? request.instrument_types : []
     const type = types.find(
-      (item): item is InstrumentType => item === 'stock' || item === 'fund',
+      (item): item is InstrumentType => item === 'stock',
     )
     if (type) form.instrumentType = type
     if (request.universe === 'all' || request.universe === 'sh' || request.universe === 'sz') {
       form.universe = request.universe
     }
-    form.boards = type === 'fund' ? [] : storedBoards(request.boards)
+    form.boards = storedBoards(request.boards)
 
     const start = typeof request.start_date === 'string' ? request.start_date : ''
     const end = typeof request.end_date === 'string' ? request.end_date : ''
@@ -1166,7 +1154,6 @@ onMounted(async () => {
                 <label for="condition-instrument-type">证券类型</label>
                 <select id="condition-instrument-type" v-model="form.instrumentType" data-testid="condition-instrument-type">
                   <option value="stock">股票</option>
-                  <option value="fund">ETF / 基金</option>
                 </select>
               </div>
               <div>
@@ -1178,7 +1165,7 @@ onMounted(async () => {
                 </select>
               </div>
             </div>
-            <div v-if="form.instrumentType === 'stock'" class="scope-options condition-board-options" data-testid="condition-board-scope">
+            <div class="scope-options condition-board-options" data-testid="condition-board-scope">
               <span>板块</span>
               <label v-for="option in STOCK_BOARD_OPTIONS" :key="option.key">
                 <input

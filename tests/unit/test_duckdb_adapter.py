@@ -27,18 +27,18 @@ def _frame(instrument_type: str = "stock") -> pd.DataFrame:
 def test_duckdb_adapter_lists_and_reads_instruments_without_vipdoc(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     store.replace_local_bars("SH", "600000", "stock", _frame())
-    store.replace_local_bars("SH", "510300", "fund", _frame("fund"))
+    store.replace_local_bars("SH", "601398", "stock", _frame())
     adapter = DuckDbMarketDataAdapter(store)
 
     refs = adapter.list_stock_refs("/unused", "all")
-    ref = adapter.stock_ref("/unused", "SH", "510300")
+    ref = adapter.stock_ref("/unused", "SH", "601398")
 
     assert [(item.market, item.code, item.instrument_type) for item in refs] == [
-        ("SH", "510300", "fund"),
         ("SH", "600000", "stock"),
+        ("SH", "601398", "stock"),
     ]
     assert ref.path == Path("/unused")
-    assert ref.instrument_type == "fund"
+    assert ref.instrument_type == "stock"
     assert list(adapter.read_stock(ref)["close"]) == [10.5, 11.5]
 
 
@@ -76,11 +76,11 @@ def test_duckdb_adapter_skips_instruments_without_bars(tmp_path: Path) -> None:
 def test_duckdb_adapter_custom_universe_uses_codes_from_file(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     store.replace_local_bars("SH", "600000", "stock", _frame())
-    store.replace_local_bars("SH", "510300", "fund", _frame("fund"))
+    store.replace_local_bars("SH", "601398", "stock", _frame())
     universe = tmp_path / "universe.txt"
-    universe.write_text("SH 600000\nSH 510300\n", encoding="utf-8")
+    universe.write_text("SH 600000\nSH 601398\n", encoding="utf-8")
     adapter = DuckDbMarketDataAdapter(store)
 
     refs = adapter.list_stock_refs("/unused", "custom", universe)
 
-    assert [(item.market, item.code) for item in refs] == [("SH", "600000"), ("SH", "510300")]
+    assert [(item.market, item.code) for item in refs] == [("SH", "600000"), ("SH", "601398")]

@@ -58,13 +58,14 @@ _BAR_COLUMNS = [
 _FRAME_COLUMNS = ["date", "open", "high", "low", "close", "volume", "amount", "bar_status"]
 _WRITE_LOCK = RLock()
 _CONNECT_RETRY_DELAYS = (0.05, 0.1, 0.25, 0.5, 1.0)
-_INSTRUMENT_TYPES = {"stock", "fund", "index", "bond"}
+# 本系统只研究股票；基金、债券、指数都不入库。
+_INSTRUMENT_TYPES = {"stock"}
 # DuckDB 默认按**宿主机**内存给自己配额，看不到容器的 cgroup 上限。批量写指标
 # 缓存（十几 GB 的 blob）时它会一路吃内存直到被容器 OOM 杀掉——实测就是这样
 # 把整个后端打崩的。显式给定一个上限，DuckDB 才会主动淘汰缓冲页。
 _DUCKDB_MEMORY_RATIO = 0.5
 _DUCKDB_MIN_MEMORY_BYTES = 1 << 30
-_INSTRUMENT_BOARDS = {"main", "star", "chinext", "b_share", "fund", "index", "bond"}
+_INSTRUMENT_BOARDS = {"main", "star", "chinext", "b_share"}
 
 
 class MarketDataStoreError(RuntimeError):
@@ -533,22 +534,15 @@ class _DuckDbStoreBase:
                 if "board" in columns:
                     continue
                 connection.execute(f"ALTER TABLE {table} ADD COLUMN board VARCHAR DEFAULT 'main'")
+                # 只区分股票的板块。基金/债券/指数不再是合法板块值：这种老库里如果
+                # 还留着非股票标的，用 scripts/prune_non_stock_data.py 清掉
+                # （它按 instrument_type 判定，不依赖这里的板块）。
                 connection.execute(
                     f"UPDATE {table} SET board = CASE "
                     "WHEN market = 'SH' AND substr(code, 1, 2) = '68' THEN 'star' "
                     "WHEN market = 'SZ' AND substr(code, 1, 2) = '30' THEN 'chinext' "
                     "WHEN (market = 'SH' AND substr(code, 1, 2) = '90') "
                     "OR (market = 'SZ' AND substr(code, 1, 2) = '20') THEN 'b_share' "
-                    "WHEN (market = 'SH' AND substr(code, 1, 2) IN "
-                    "('50','51','52','53','55','56','58')) "
-                    "OR (market = 'SZ' AND substr(code, 1, 2) IN "
-                    "('15','16','17','18')) THEN 'fund' "
-                    "WHEN (market = 'SH' AND substr(code, 1, 2) IN ('00','88','99')) "
-                    "OR (market = 'SZ' AND substr(code, 1, 2) = '39') THEN 'index' "
-                    "WHEN (market = 'SH' AND substr(code, 1, 2) IN "
-                    "('01','10','11','12','13','14','20')) "
-                    "OR (market = 'SZ' AND substr(code, 1, 2) IN "
-                    "('10','11','12','13','14')) THEN 'bond' "
                     "ELSE 'main' END"
                 )
         if version < 3 and "instruments" in tables:

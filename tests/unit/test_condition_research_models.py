@@ -32,19 +32,19 @@ def test_config_defaults_to_separate_buy_and_sell_search_without_portfolio_limit
     assert research.instrument_types == ("stock",)
 
 
-def test_fund_research_ignores_stock_board_filters() -> None:
-    research = config(instrument_types=("fund",), boards=("main", "star"))
+def test_stock_research_keeps_the_selected_board_filters() -> None:
+    research = config(instrument_types=("stock",), boards=("main", "star"))
 
-    assert research.instrument_types == ("fund",)
-    assert research.boards == ()
+    assert research.instrument_types == ("stock",)
+    assert research.boards == ("main", "star")
 
 
 @pytest.mark.parametrize(
     ("instrument_types", "message"),
     [
-        (("index",), "只支持股票或 ETF"),
-        (("bond",), "只支持股票或 ETF"),
-        (("stock", "fund"), "一次只能选择一类证券"),
+        (("index",), "只支持股票"),
+        (("bond",), "只支持股票"),
+        (("fund",), "只支持股票"),
     ],
 )
 def test_config_rejects_unsupported_instrument_types(

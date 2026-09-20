@@ -39,21 +39,28 @@ def _write_day(path: Path, *dates: int, tail: bytes = b"") -> None:
     ("market", "code", "expected"),
     [
         ("SH", "600000", "stock"),
+        ("SH", "688001", "stock"),
         ("SH", "900001", "stock"),
-        ("SH", "510300", "fund"),
-        ("SH", "000001", "index"),
-        ("SH", "110001", "bond"),
         ("SZ", "000001", "stock"),
+        ("SZ", "300001", "stock"),
         ("SZ", "200001", "stock"),
-        ("SZ", "159915", "fund"),
-        ("SZ", "399001", "index"),
-        ("SZ", "110001", "bond"),
     ],
 )
 def test_classify_instrument_supports_all_known_day_types(
     market: str, code: str, expected: str
 ) -> None:
     assert classify_instrument(market, code) == expected
+
+
+def test_classify_instrument_rejects_non_stock_ranges() -> None:
+    """基金、指数、债券都不再是本系统的研究对象。"""
+
+    assert classify_instrument("SH", "510300") is None
+    assert classify_instrument("SH", "000001") is None
+    assert classify_instrument("SH", "110001") is None
+    assert classify_instrument("SZ", "159915") is None
+    assert classify_instrument("SZ", "399001") is None
+    assert classify_instrument("SZ", "110001") is None
 
 
 def test_classify_instrument_rejects_unknown_market_or_code() -> None:
