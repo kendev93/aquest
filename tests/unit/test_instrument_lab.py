@@ -457,3 +457,20 @@ def test_service_runs_condition_check_end_to_end_with_real_indicators() -> None:
     assert report.code == "600000"
     assert report.sample_days > 0
     assert len(report.items) == 1
+
+
+def test_library_falls_back_to_processed_for_scan_size() -> None:
+    store = FakeStore(
+        [
+            {
+                "history_id": "h2",
+                "finished_at": "2026-09-02T10:00:00",
+                "summary": {"processed": 5045},
+                "result": {"candidates": [_candidate("a", significant=True, lift=1.2)]},
+            }
+        ]
+    )
+
+    items = significant_conditions(store, limit=10)
+
+    assert items[0].scanned_stocks == 5045

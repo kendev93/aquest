@@ -184,7 +184,7 @@ def significant_conditions(
                 instrument_count=_as_int(mining.get("instrument_count")),
                 history_id=str(record.get("history_id") or "") or None,
                 created_at=_text(record.get("finished_at")),
-                scanned_stocks=_as_int(_mapping(record.get("summary")).get("scanned_stocks")),
+                scanned_stocks=_scanned_stocks(record),
             )
     ordered = sorted(best.values(), key=lambda item: (item.lift is None, -(item.lift or 0.0)))
     return ordered[: max(1, limit)]
@@ -194,6 +194,17 @@ def _as_int(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return int(value)
+
+
+def _scanned_stocks(record: Mapping[str, object]) -> int | None:
+    """How many instruments the mining run actually looked at.
+
+    条件研究的历史摘要里叫 ``processed``，别的类型叫 ``scanned_stocks``；两种都认，
+    都没有就留 ``None``——宁可显示「—」，也不要拿一个猜出来的数冒充规模。
+    """
+
+    summary = _mapping(record.get("summary"))
+    return _as_int(summary.get("scanned_stocks")) or _as_int(summary.get("processed"))
 
 
 def _text(value: object) -> str | None:
