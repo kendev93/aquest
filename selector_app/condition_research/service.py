@@ -64,6 +64,7 @@ from .samples import (
     build_early_exit_samples,
     feature_rows_by_date,
 )
+from .sensitivity import build_sensitivity_for_samples, sensitivity_dict
 from .time_split import (
     MIN_WINDOW_DAYS,
     DateWindow,
@@ -567,6 +568,15 @@ class ConditionResearchService:
                 baseline_reports=validation_baseline,
             )
             mining_payload = _mining_dict(candidate)
+            # 参数敏感性在挖掘样本（寻优期）上重算邻域，所以每个候选都能算，
+            # 不需要等它进留出期。口径与 mining_payload 同源，可逐个数字核对。
+            sensitivity_payload = sensitivity_dict(
+                build_sensitivity_for_samples(
+                    candidate.condition,
+                    buy_samples if side == "buy" else sell_samples,
+                    min_support=config.min_trades,
+                )
+            )
             raw_significant = mining_payload["significant"]
             reasons = candidate_constraint_failures(
                 summary,
@@ -581,6 +591,8 @@ class ConditionResearchService:
                     "side": side,
                     "condition": _condition_dict(candidate.condition),
                     "mining": mining_payload,
+                    # 邻域曲线：阈值往两边挪一点，优势还在不在。
+                    "sensitivity": sensitivity_payload,
                     "validation": _without_stock_rows(summary),
                     "passed_constraints": not reasons,
                     "constraint_failures": list(reasons),

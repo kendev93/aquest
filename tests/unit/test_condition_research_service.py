@@ -784,6 +784,27 @@ def test_merged_duplicates_reach_the_report() -> None:
     assert duplicates[0]["condition"]["right_constant"] == pytest.approx(1.2)
 
 
+def test_every_candidate_carries_its_threshold_neighbourhood() -> None:
+    """邻域曲线挂在每个候选上，不需要等它进留出期；基点必须和挖掘给的 lift 同源。"""
+
+    service = ConditionResearchService(
+        adapter=FakeResearchAdapter(),
+        backtest_service=FakePreparedBacktests(),  # type: ignore[arg-type]
+    )
+
+    result = service.run(_rolling_config())
+
+    candidates = result["candidates"]
+    assert candidates, "这一组假数据应当挖出候选"
+    for candidate in candidates:
+        sensitivity = candidate["sensitivity"]
+        assert sensitivity is not None
+        assert len(sensitivity["points"]) == 5
+        base = next(point for point in sensitivity["points"] if point["offset"] == 0.0)
+        assert base["lift"] == pytest.approx(candidate["mining"]["lift"])
+        assert base["retention"] == pytest.approx(1.0)
+
+
 def test_duplicate_correlation_travels_with_the_configuration() -> None:
     """门槛要能随历史记录还原，否则回看时不知道当年的候选是按什么口径合并的。"""
 
