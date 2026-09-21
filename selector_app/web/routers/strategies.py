@@ -1,4 +1,4 @@
-"""Saved strategy library: persist, load, rename and delete portfolio strategies."""
+"""Saved strategy library: persist, load, rename, delete, and track."""
 
 from __future__ import annotations
 
@@ -6,10 +6,19 @@ import uuid
 from collections.abc import Mapping
 from typing import cast
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi.responses import JSONResponse
 
 from selector_app.market_data.models import DataStoreStatus
 from selector_app.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
+from selector_app.portfolio_backtest.service import PortfolioBacktestService
+from selector_app.portfolio_backtest.tracking import StrategyTrackingService
+from selector_app.screening.jobs import (
+    JobState,
+    ProgressReporter,
+    ScreenJobRunner,
+    TaskUserError,
+)
 
 from ..date_ranges import resolve_date_range
 from ..market_source import resolve_market_status
@@ -20,6 +29,8 @@ from ..schemas import (
 )
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
+
+TRACKING_DESCRIPTION = "策略追踪"
 
 #: 列表页要展示的标量字段。其余一律不存。
 _SUMMARY_SCALAR_KEYS = (
@@ -46,6 +57,19 @@ _PERFORMANCE_KEYS = (
 
 def _store(request: Request) -> DuckDbMarketDataStore:
     return cast(DuckDbMarketDataStore, request.app.state.market_data_store)
+
+
+def _runner(request: Request) -> ScreenJobRunner:
+    return cast(ScreenJobRunner, request.app.state.screen_job_runner)
+
+
+def _tracking_service(request: Request) -> StrategyTrackingService:
+    """一次完整的重跑是分钟级（要重算全历史），所以追踪全部走后台任务。"""
+
+    return StrategyTrackingService(
+        store=_store(request),
+        runner=cast(PortfolioBacktestService, request.app.state.portfolio_backtest_service),
+    )
 
 
 def _numeric_performance(performance: Mapping[str, object]) -> dict[str, float | None]:
@@ -138,6 +162,128 @@ def list_strategies(request: Request) -> dict[str, object]:
         return {"data": _store(request).list_strategies()}
     except (MarketDataStoreError, OSError) as exc:
         raise HTTPException(status_code=503, detail="策略库暂不可用") from exc
+
+
+@router.get("/tracking")
+def list_strategy_tracking(request: Request) -> dict[str, object]:
+    """Every saved strategy together with how it has behaved since going online."""
+
+    try:
+        service = _tracking_service(request)
+        rows: list[dict[str, object]] = []
+        for record in _store(request).list_strategies():
+            snapshot = service.snapshot(str(record["strategy_id"])).to_dict()
+            snapshot["name"] = record["name"]
+            snapshot["note"] = record["note"]
+            rows.append(snapshot)
+    except (MarketDataStoreError, OSError) as exc:
+        raise HTTPException(status_code=503, detail="策略追踪暂不可用") from exc
+    return {"data": rows}
+
+
+@router.get("/tracking/jobs/{job_id}")
+def tracking_job_state(job_id: str, request: Request) -> dict[str, object]:
+    """Poll one tracking job. The result is only attached once it succeeded."""
+
+    state = _job_state_or_404(job_id, request)
+    snapshot = state.snapshot()
+    if state.status != "completed":
+        snapshot["result"] = None
+    return {"data": snapshot}
+
+
+@router.get("/tracking/{strategy_id}")
+def read_strategy_tracking(strategy_id: str, request: Request) -> dict[str, object]:
+    """One strategy's full tracking snapshot, including the observation curve."""
+
+    try:
+        snapshot = _tracking_service(request).snapshot(strategy_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (MarketDataStoreError, OSError) as exc:
+        raise HTTPException(status_code=503, detail="策略追踪暂不可用") from exc
+    return {"data": snapshot.to_dict()}
+
+
+@router.post("/tracking/{strategy_id}/launch")
+def launch_strategy_tracking(strategy_id: str, request: Request) -> Response:
+    """Put a strategy online. Replays its frozen window once to set the yardstick."""
+
+    record = _require_strategy(strategy_id, request)
+    if _tracking_status(record) == "active":
+        # 重新上线会把研究段再跑一遍、覆盖已冻结的基线。要更新观察段用 rerun。
+        raise HTTPException(status_code=409, detail="策略已上线，要更新请用「立即重算」")
+    return _submit_tracking_job(strategy_id, request, launch=True)
+
+
+@router.post("/tracking/{strategy_id}/rerun")
+def rerun_strategy_tracking(strategy_id: str, request: Request) -> Response:
+    """Replay up to the newest market day. Idempotent, and it backfills gaps."""
+
+    record = _require_strategy(strategy_id, request)
+    if _tracking_status(record) != "active":
+        # 停止之后的策略不该再被任何入口推进，否则「停止」这个动作形同虚设。
+        raise HTTPException(status_code=409, detail="策略未上线，请先开始追踪")
+    return _submit_tracking_job(strategy_id, request, launch=False)
+
+
+@router.post("/tracking/{strategy_id}/stop", status_code=status.HTTP_200_OK)
+def stop_strategy_tracking(strategy_id: str, request: Request) -> dict[str, object]:
+    """Take it offline, keeping whatever it already observed."""
+
+    try:
+        snapshot = _tracking_service(request).stop(strategy_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (MarketDataStoreError, OSError) as exc:
+        raise HTTPException(status_code=503, detail="策略追踪暂不可用") from exc
+    return {"data": snapshot.to_dict()}
+
+
+def _submit_tracking_job(strategy_id: str, request: Request, *, launch: bool) -> Response:
+    service = _tracking_service(request)
+    job_id = uuid.uuid4().hex
+
+    def run_tracking(progress: ProgressReporter) -> dict[str, object]:
+        del progress
+        try:
+            snapshot = service.launch(strategy_id) if launch else service.refresh(strategy_id)
+        except ValueError as exc:
+            raise TaskUserError(str(exc)) from exc
+        return snapshot.to_dict()
+
+    try:
+        _runner(request).submit_callable(
+            run_tracking, description=TRACKING_DESCRIPTION, job_id=job_id
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail="任务执行器暂不可用") from exc
+    return JSONResponse(
+        status_code=status.HTTP_202_ACCEPTED,
+        content={"data": {"job_id": job_id, "status": "queued"}},
+    )
+
+
+def _require_strategy(strategy_id: str, request: Request) -> Mapping[str, object]:
+    try:
+        record = _store(request).read_strategy(strategy_id)
+    except (MarketDataStoreError, OSError) as exc:
+        raise HTTPException(status_code=503, detail="策略库暂不可用") from exc
+    if record is None:
+        raise HTTPException(status_code=404, detail="策略不存在")
+    return record
+
+
+def _tracking_status(record: Mapping[str, object]) -> str:
+    value = record.get("tracking_status")
+    return str(value) if value is not None else "off"
+
+
+def _job_state_or_404(job_id: str, request: Request) -> JobState:
+    state = _runner(request).get(job_id.strip())
+    if state is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return state
 
 
 @router.get("/{strategy_id}")

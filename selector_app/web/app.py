@@ -39,6 +39,10 @@ from selector_app.market_data.maintenance import (
 from selector_app.market_data.service import LocalMarketDataService
 from selector_app.market_data.staging import cleanup_stale_staging, staging_directory
 from selector_app.market_data.store import DuckDbMarketDataStore
+from selector_app.portfolio_backtest.auto_tracking import (
+    DEFAULT_TRACKING_INTERVAL_SECONDS,
+    StrategyTrackingScheduler,
+)
 from selector_app.portfolio_backtest.service import PortfolioBacktestService
 from selector_app.screening.engine import ScreenEngine
 from selector_app.screening.jobs import (
@@ -91,6 +95,8 @@ def create_app(
     database_maintenance_service: DatabaseMaintenanceService | object | None = None,
     auto_sync_enabled: bool | None = None,
     auto_sync_interval_seconds: float | None = None,
+    strategy_tracking_enabled: bool | None = None,
+    strategy_tracking_interval_seconds: float | None = None,
 ) -> FastAPI:
     owns_runner = runner is None
     selected_store = cast(
@@ -120,6 +126,10 @@ def create_app(
     )
     selected_auto_sync_enabled = _resolve_auto_sync_enabled(auto_sync_enabled)
     selected_auto_sync_interval = _resolve_auto_sync_interval(auto_sync_interval_seconds)
+    selected_tracking_enabled = _resolve_strategy_tracking_enabled(strategy_tracking_enabled)
+    selected_tracking_interval = _resolve_strategy_tracking_interval(
+        strategy_tracking_interval_seconds
+    )
     selected_maintenance_service = cast(
         DatabaseMaintenanceService,
         database_maintenance_service
@@ -196,6 +206,7 @@ def create_app(
         app.state.auto_sync_job_id = None
         auto_sync_task: asyncio.Task[None] | None = None
         maintenance_task: asyncio.Task[None] | None = None
+        tracking_task: asyncio.Task[None] | None = None
         selected_store.status()
         imported_strategy_jobs = selected_strategy_job_store.initialize(
             default_strategy_job_root(selected_store.database_path)
@@ -237,6 +248,15 @@ def create_app(
                     on_job_submitted=lambda job_id: setattr(app.state, "auto_sync_job_id", job_id)
                 )
             )
+        if selected_tracking_enabled:
+            tracking_task = asyncio.create_task(
+                StrategyTrackingScheduler(
+                    store=selected_store,
+                    runner=selected_runner,
+                    runner_service=selected_portfolio_service,
+                    interval_seconds=selected_tracking_interval,
+                ).run()
+            )
         try:
             yield
         finally:
@@ -250,6 +270,12 @@ def create_app(
                 auto_sync_task.cancel()
                 try:
                     await auto_sync_task
+                except asyncio.CancelledError:
+                    pass
+            if tracking_task is not None:
+                tracking_task.cancel()
+                try:
+                    await tracking_task
                 except asyncio.CancelledError:
                     pass
             if owns_runner:
@@ -286,6 +312,8 @@ def create_app(
     )
     app.state.auto_sync_enabled = selected_auto_sync_enabled
     app.state.auto_sync_interval_seconds = selected_auto_sync_interval
+    app.state.strategy_tracking_enabled = selected_tracking_enabled
+    app.state.strategy_tracking_interval_seconds = selected_tracking_interval
     app.state.database_maintenance_service = selected_maintenance_service
     app.state.database_maintenance_result = None
     app.add_middleware(
@@ -430,6 +458,31 @@ def _generate_strategy_worker_token(path: Path) -> str | None:
         return None
     logger.info("已生成策略 worker token: %s", path)
     return token
+
+
+def _resolve_strategy_tracking_enabled(value: bool | None) -> bool:
+    if value is not None:
+        if not isinstance(value, bool):
+            raise ValueError("策略追踪开关必须是布尔值")
+        return value
+    raw = os.getenv("SELECTOR_STRATEGY_TRACKING_ENABLED")
+    if raw is None:
+        return True
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _resolve_strategy_tracking_interval(value: float | None) -> float:
+    if value is None:
+        raw = os.getenv("SELECTOR_STRATEGY_TRACKING_CHECK_INTERVAL_SECONDS")
+        if raw is None:
+            return float(DEFAULT_TRACKING_INTERVAL_SECONDS)
+        try:
+            value = float(raw)
+        except ValueError as exc:
+            raise ValueError("策略追踪检查间隔必须是数字") from exc
+    if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
+        raise ValueError("策略追踪检查间隔必须大于 0")
+    return float(value)
 
 
 def _resolve_auto_sync_enabled(value: bool | None) -> bool:
