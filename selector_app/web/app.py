@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse
 
 from selector_app.adapters.market_data_sync import MarketDataSync
 from selector_app.backtest.service import BacktestService
+from selector_app.candidate_library.service import CandidateLibraryService
 from selector_app.condition_research.service import ConditionResearchService
 from selector_app.factor_test.service import FactorTestService
 from selector_app.history_compare.service import HistoryCompareService
@@ -94,6 +95,7 @@ def create_app(
     history_compare_service: HistoryCompareService | object | None = None,
     instrument_lab_service: InstrumentLabService | object | None = None,
     screen_preset_service: ScreenPresetService | object | None = None,
+    candidate_library_service: CandidateLibraryService | object | None = None,
     local_market_data_service: LocalMarketDataService | object | None = None,
     market_data_store: DuckDbMarketDataStore | object | None = None,
     market_data_adapter: MarketDataAdapter | object | None = None,
@@ -326,6 +328,9 @@ def create_app(
     app.state.screen_preset_service = screen_preset_service or ScreenPresetService(
         selected_store,
     )
+    app.state.candidate_library_service = candidate_library_service or CandidateLibraryService(
+        selected_store,
+    )
     app.state.market_data_store = selected_store
     app.state.market_data_adapter = selected_adapter
     app.state.indicator_cache = selected_indicator_cache
@@ -411,6 +416,7 @@ def create_app(
             }
         }
 
+    from .routers.candidate_library import router as candidate_library_router
     from .routers.condition_research import router as condition_research_router
     from .routers.data_transfer import router as data_transfer_router
     from .routers.factor_test import router as factor_test_router
@@ -426,6 +432,7 @@ def create_app(
     from .routers.strategy_worker import router as strategy_worker_router
     from .routers.swing_research import router as swing_research_router
 
+    app.include_router(candidate_library_router, prefix="/api/v1")
     app.include_router(formula_screen_router, prefix="/api/v1")
     app.include_router(jobs_router, prefix="/api/v1")
     app.include_router(market_data_router, prefix="/api/v1")

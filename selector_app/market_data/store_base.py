@@ -25,7 +25,7 @@ from .day_format import classify_board
 from .maintenance import cleanup_database_backups, create_database_backup
 from .models import DataStoreStatus, InstrumentBoard, InstrumentType
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 SCREEN_HISTORY_LIMIT = 10
 STRATEGY_DISCOVERY_HISTORY_LIMIT = 20
 BACKTEST_HISTORY_LIMIT = 20
@@ -557,6 +557,31 @@ class _DuckDbStoreBase:
                     updated_at TIMESTAMP NOT NULL,
                     payload_json VARCHAR NOT NULL,
                     UNIQUE (name)
+                )
+                """
+            )
+            # 候选库：条件研究挖出来的候选条件，带证据快照与采纳状态。和
+            # backtest_history 的区别是——历史记"跑过什么"（满了自动淘汰），候选记
+            # "我当时认不认可这条"（只有显式删才消失）。evidence_json 存的是入库
+            # 那一刻的证据快照，不回指历史记录：历史只留最近 20 条，候选不能跟着
+            # 一起消失。
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS candidate_library (
+                    candidate_id VARCHAR PRIMARY KEY,
+                    source VARCHAR NOT NULL,
+                    source_history_id VARCHAR NOT NULL,
+                    source_candidate_id VARCHAR NOT NULL,
+                    side VARCHAR NOT NULL,
+                    label VARCHAR NOT NULL,
+                    condition_json VARCHAR NOT NULL,
+                    evidence_json VARCHAR NOT NULL,
+                    status VARCHAR NOT NULL DEFAULT 'pending',
+                    note VARCHAR NOT NULL DEFAULT '',
+                    published_strategy_id VARCHAR,
+                    created_at TIMESTAMP NOT NULL,
+                    updated_at TIMESTAMP NOT NULL,
+                    UNIQUE (source_history_id, source_candidate_id)
                 )
                 """
             )

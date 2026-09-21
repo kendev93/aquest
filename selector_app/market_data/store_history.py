@@ -32,6 +32,7 @@ ASSET_TABLES: tuple[str, ...] = (
     "strategy_discovery_history",
     "strategy_discovery_replay_history",
     "screen_presets",
+    "candidate_library",
 )
 SAVED_STRATEGY_TABLE = "saved_strategies"
 STRATEGY_TRACKING_TABLE = "strategy_tracking"
@@ -40,6 +41,22 @@ STRATEGY_NOTE_MAX_LENGTH = 500
 SCREEN_PRESET_TABLE = "screen_presets"
 PRESET_NAME_MAX_LENGTH = 60
 PRESET_NOTE_MAX_LENGTH = 200
+CANDIDATE_LIBRARY_TABLE = "candidate_library"
+CANDIDATE_NOTE_MAX_LENGTH = 300
+#: 候选状态。adopted 是人的表态，published 是人的二次确认——没有自动从 pending
+#: 跳到 published 的路径，因为「通过置换检验」和「我认可这条」是两件事。
+CANDIDATE_STATUS_PENDING = "pending"
+CANDIDATE_STATUS_ADOPTED = "adopted"
+CANDIDATE_STATUS_REJECTED = "rejected"
+CANDIDATE_STATUS_PUBLISHED = "published"
+_CANDIDATE_STATUSES = frozenset(
+    {
+        CANDIDATE_STATUS_PENDING,
+        CANDIDATE_STATUS_ADOPTED,
+        CANDIDATE_STATUS_REJECTED,
+        CANDIDATE_STATUS_PUBLISHED,
+    }
+)
 #: 策略追踪状态。只有 off / active 两态——上线后要改规则只能停掉旧的、新开一个，
 #: 没有「暂停后改参数继续」这种说法，否则样本外就不再是样本外了。
 STRATEGY_TRACKING_OFF = "off"
@@ -53,6 +70,10 @@ _STRATEGY_COLUMNS = (
     "request_json, summary_json, tracking_status, launched_at, last_tracked_date, last_error"
 )
 _PRESET_COLUMNS = "preset_id, name, note, created_at, updated_at, payload_json"
+_CANDIDATE_COLUMNS = (
+    "candidate_id, source, source_history_id, source_candidate_id, side, label, "
+    "condition_json, evidence_json, status, note, published_strategy_id, created_at, updated_at"
+)
 
 
 def _require_asset_table(table: str) -> str:
@@ -387,6 +408,34 @@ def _decode_preset_row(row: tuple[object, ...]) -> dict[str, object]:
         "created_at": str(row[3]),
         "updated_at": str(row[4]),
         "payload": payload,
+    }
+
+
+def _decode_candidate_row(row: tuple[object, ...]) -> dict[str, object]:
+    """Decode one ``candidate_library`` row into an API-ready dict."""
+
+    try:
+        condition = json.loads(str(row[6]))
+        evidence = json.loads(str(row[7]))
+    except json.JSONDecodeError as exc:
+        raise MarketDataStoreError("候选内容损坏") from exc
+    if not isinstance(condition, dict) or not isinstance(evidence, dict):
+        raise MarketDataStoreError("候选内容无效")
+    published = row[10]
+    return {
+        "candidate_id": str(row[0]),
+        "source": str(row[1]),
+        "source_history_id": str(row[2]),
+        "source_candidate_id": str(row[3]),
+        "side": str(row[4]),
+        "label": str(row[5]),
+        "condition": condition,
+        "evidence": evidence,
+        "status": str(row[8]),
+        "note": str(row[9]),
+        "published_strategy_id": None if published is None else str(published),
+        "created_at": str(row[11]),
+        "updated_at": str(row[12]),
     }
 
 
@@ -1737,6 +1786,209 @@ class DuckDbHistoryStore:
         with _WRITE_LOCK, self._store._connect() as connection:
             deleted = connection.execute(
                 f"DELETE FROM {SCREEN_PRESET_TABLE} WHERE preset_id = ? RETURNING preset_id",
+                [normalized_id],
+            ).fetchone()
+        return deleted is not None
+
+    # ------------------------------------------------------------------
+    # 候选库：条件研究挖出来的候选条件，带证据快照与采纳状态。和 backtest_history
+    # 的关系跟策略库一样——历史记"跑过什么"（满了自动淘汰），候选记"我当时认不认可
+    # 这条"（只有显式删才消失）。evidence_json 存的是入库那一刻的快照，不回指历史
+    # 记录，否则第 21 次研究跑完，最早那批候选的证据就没了。
+    # ------------------------------------------------------------------
+
+    def find_candidate_by_source(
+        self,
+        source_history_id: str,
+        source_candidate_id: str,
+    ) -> dict[str, object] | None:
+        """Look up a candidate by where it came from (入库去重用)。"""
+
+        with self._store._connect(read_only=True) as connection:
+            row = connection.execute(
+                f"SELECT {_CANDIDATE_COLUMNS} FROM {CANDIDATE_LIBRARY_TABLE} "
+                "WHERE source_history_id = ? AND source_candidate_id = ? LIMIT 1",
+                [str(source_history_id).strip(), str(source_candidate_id).strip()],
+            ).fetchone()
+        if row is None:
+            return None
+        return _decode_candidate_row(row)
+
+    def save_candidate(
+        self,
+        candidate_id: str,
+        *,
+        source: str,
+        source_history_id: str,
+        source_candidate_id: str,
+        side: str,
+        label: str,
+        condition: Mapping[str, object],
+        evidence: Mapping[str, object],
+        status: str,
+        note: str = "",
+        published_strategy_id: str | None = None,
+        created_at: datetime | str | None = None,
+    ) -> dict[str, object]:
+        """Persist one mined candidate together with its evidence snapshot."""
+
+        self._store._require_writer()
+        normalized_id = candidate_id.strip()
+        if not normalized_id:
+            raise ValueError("候选 ID 不能为空")
+        if status not in _CANDIDATE_STATUSES:
+            raise ValueError(f"候选状态无效: {status}")
+        normalized_note = note.strip()
+        if len(normalized_note) > CANDIDATE_NOTE_MAX_LENGTH:
+            raise ValueError(f"候选备注不能超过 {CANDIDATE_NOTE_MAX_LENGTH} 个字符")
+        created = _normalize_timestamp(created_at, _now())
+        with _WRITE_LOCK, self._store._connect() as connection:
+            connection.execute("BEGIN")
+            try:
+                connection.execute(
+                    f"""
+                    INSERT INTO {CANDIDATE_LIBRARY_TABLE} (
+                        candidate_id, source, source_history_id, source_candidate_id,
+                        side, label, condition_json, evidence_json, status, note,
+                        published_strategy_id, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (candidate_id) DO UPDATE SET
+                        label = excluded.label,
+                        evidence_json = excluded.evidence_json,
+                        status = excluded.status,
+                        note = excluded.note,
+                        published_strategy_id = excluded.published_strategy_id,
+                        updated_at = excluded.updated_at
+                    """,
+                    [
+                        normalized_id,
+                        source,
+                        str(source_history_id).strip(),
+                        str(source_candidate_id).strip(),
+                        side,
+                        label,
+                        json.dumps(dict(condition), ensure_ascii=False, separators=(",", ":")),
+                        json.dumps(dict(evidence), ensure_ascii=False, separators=(",", ":")),
+                        status,
+                        normalized_note,
+                        published_strategy_id,
+                        created,
+                        created,
+                    ],
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        record = self.read_candidate(normalized_id)
+        if record is None:  # pragma: no cover - 刚写入的行必然读得到
+            raise MarketDataStoreError("候选写入后无法读回")
+        return record
+
+    def list_candidates(self, status: str | None = None) -> list[dict[str, object]]:
+        """Return stored candidates, most recently updated first."""
+
+        normalized = status.strip() if isinstance(status, str) else ""
+        if normalized and normalized not in _CANDIDATE_STATUSES:
+            raise ValueError(f"候选状态无效: {normalized}")
+        if normalized:
+            sql = (
+                f"SELECT {_CANDIDATE_COLUMNS} FROM {CANDIDATE_LIBRARY_TABLE} "
+                "WHERE status = ? ORDER BY updated_at DESC, candidate_id DESC"
+            )
+            parameters: list[object] = [normalized]
+        else:
+            sql = (
+                f"SELECT {_CANDIDATE_COLUMNS} FROM {CANDIDATE_LIBRARY_TABLE} "
+                "ORDER BY updated_at DESC, candidate_id DESC"
+            )
+            parameters = []
+        with self._store._connect(read_only=True) as connection:
+            rows = connection.execute(sql, parameters).fetchall()
+        return [_decode_candidate_row(row) for row in rows]
+
+    def read_candidate(self, candidate_id: str) -> dict[str, object] | None:
+        """Read one stored candidate."""
+
+        with self._store._connect(read_only=True) as connection:
+            row = connection.execute(
+                f"SELECT {_CANDIDATE_COLUMNS} FROM {CANDIDATE_LIBRARY_TABLE} "
+                "WHERE candidate_id = ?",
+                [str(candidate_id).strip()],
+            ).fetchone()
+        if row is None:
+            return None
+        return _decode_candidate_row(row)
+
+    def update_candidate(
+        self,
+        candidate_id: str,
+        *,
+        status: str | None = None,
+        note: str | None = None,
+        published_strategy_id: str | None = None,
+        publish: bool = False,
+    ) -> dict[str, object] | None:
+        """Change the adoption status, the note, or the linked strategy.
+
+        ``publish=True`` 时才写 published_strategy_id；撤回传 ``publish=True``
+        且 ``published_strategy_id=None``，这样"清掉链接"和"不动链接"是两种明
+        确的调用，不会靠 None 的歧义蒙混过去。
+        """
+
+        self._store._require_writer()
+        normalized_id = candidate_id.strip()
+        if not normalized_id:
+            return None
+        normalized_status = status.strip() if isinstance(status, str) else None
+        if normalized_status is not None and normalized_status not in _CANDIDATE_STATUSES:
+            raise ValueError(f"候选状态无效: {normalized_status}")
+        normalized_note = note.strip() if isinstance(note, str) else None
+        if normalized_note is not None and len(normalized_note) > CANDIDATE_NOTE_MAX_LENGTH:
+            raise ValueError(f"候选备注不能超过 {CANDIDATE_NOTE_MAX_LENGTH} 个字符")
+        if normalized_status is None and normalized_note is None and not publish:
+            return self.read_candidate(normalized_id)
+        assignments: list[str] = []
+        parameters: list[object] = []
+        if normalized_status is not None:
+            assignments.append("status = ?")
+            parameters.append(normalized_status)
+        if normalized_note is not None:
+            assignments.append("note = ?")
+            parameters.append(normalized_note)
+        if publish:
+            assignments.append("published_strategy_id = ?")
+            parameters.append(published_strategy_id)
+        assignments.append("updated_at = ?")
+        parameters.append(_now())
+        parameters.append(normalized_id)
+        with _WRITE_LOCK, self._store._connect() as connection:
+            connection.execute("BEGIN")
+            try:
+                updated = connection.execute(
+                    f"UPDATE {CANDIDATE_LIBRARY_TABLE} SET {', '.join(assignments)} "
+                    "WHERE candidate_id = ? RETURNING candidate_id",
+                    parameters,
+                ).fetchone()
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        if updated is None:
+            return None
+        return self.read_candidate(normalized_id)
+
+    def delete_candidate(self, candidate_id: str) -> bool:
+        """Delete one stored candidate."""
+
+        self._store._require_writer()
+        normalized_id = candidate_id.strip()
+        if not normalized_id:
+            return False
+        with _WRITE_LOCK, self._store._connect() as connection:
+            deleted = connection.execute(
+                f"DELETE FROM {CANDIDATE_LIBRARY_TABLE} WHERE candidate_id = ? "
+                "RETURNING candidate_id",
                 [normalized_id],
             ).fetchone()
         return deleted is not None

@@ -427,6 +427,70 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
     def delete_screen_preset(self, preset_id: str) -> bool:
         return self._history.delete_screen_preset(preset_id)
 
+    def find_candidate_by_source(
+        self,
+        source_history_id: str,
+        source_candidate_id: str,
+    ) -> dict[str, object] | None:
+        return self._history.find_candidate_by_source(source_history_id, source_candidate_id)
+
+    def save_candidate(
+        self,
+        candidate_id: str,
+        *,
+        source: str,
+        source_history_id: str,
+        source_candidate_id: str,
+        side: str,
+        label: str,
+        condition: Mapping[str, object],
+        evidence: Mapping[str, object],
+        status: str,
+        note: str = "",
+        published_strategy_id: str | None = None,
+        created_at: datetime | str | None = None,
+    ) -> dict[str, object]:
+        return self._history.save_candidate(
+            candidate_id,
+            source=source,
+            source_history_id=source_history_id,
+            source_candidate_id=source_candidate_id,
+            side=side,
+            label=label,
+            condition=condition,
+            evidence=evidence,
+            status=status,
+            note=note,
+            published_strategy_id=published_strategy_id,
+            created_at=created_at,
+        )
+
+    def list_candidates(self, status: str | None = None) -> list[dict[str, object]]:
+        return self._history.list_candidates(status)
+
+    def read_candidate(self, candidate_id: str) -> dict[str, object] | None:
+        return self._history.read_candidate(candidate_id)
+
+    def update_candidate(
+        self,
+        candidate_id: str,
+        *,
+        status: str | None = None,
+        note: str | None = None,
+        published_strategy_id: str | None = None,
+        publish: bool = False,
+    ) -> dict[str, object] | None:
+        return self._history.update_candidate(
+            candidate_id,
+            status=status,
+            note=note,
+            published_strategy_id=published_strategy_id,
+            publish=publish,
+        )
+
+    def delete_candidate(self, candidate_id: str) -> bool:
+        return self._history.delete_candidate(candidate_id)
+
     def update_strategy_summary(
         self,
         strategy_id: str,

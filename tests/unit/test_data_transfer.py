@@ -67,6 +67,7 @@ def test_asset_tables_never_include_market_or_cache_data() -> None:
         "strategy_discovery_history",
         "strategy_discovery_replay_history",
         "screen_presets",
+        "candidate_library",
     }
 
 
