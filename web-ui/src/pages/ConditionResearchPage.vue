@@ -23,6 +23,8 @@ import type {
   ConditionResearchPayload,
   ConditionResearchRanking,
   ConditionResearchReport,
+  ConditionResearchSensitivity,
+  ConditionResearchSensitivityPoint,
   ConditionResearchStockResult,
   CustomFormulaMetadata,
   DateRangeMode,
@@ -1107,6 +1109,59 @@ function rollingNote(candidate: ConditionResearchCandidate): string {
   return parts.join('；')
 }
 
+/**
+ * 参数敏感性：把每个候选的阈值往松、往紧各挪两档重新计分。
+ * 只挑出真的算出了邻域的候选——交叉条件之类没有可挪的标量参数，后端给 null。
+ */
+interface SensitivityRow {
+  candidate: ConditionResearchCandidate
+  sensitivity: ConditionResearchSensitivity
+}
+
+const sensitivityRows = computed<SensitivityRow[]>(() => {
+  const rows = (report.value?.candidates ?? []).map((candidate) => ({
+    candidate,
+    sensitivity: candidate.sensitivity,
+  }))
+  return rows.filter(
+    (row): row is SensitivityRow => row.sensitivity != null,
+  )
+})
+
+/** 保持率的颜色：优势打反是红（危险），保持得多是深绿，未计入的是灰。 */
+function retentionClass(point: ConditionResearchSensitivityPoint): string {
+  if (point.insufficient || point.degenerate) return 'sens-excluded'
+  if (point.retention === null) return 'sens-excluded'
+  if (point.retention < 0) return 'sens-flipped'
+  if (point.retention >= 0.8) return 'sens-good'
+  if (point.retention >= 0.5) return 'sens-mid'
+  return 'sens-weak'
+}
+
+function retentionText(value: number | null | undefined): string {
+  return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : '—'
+}
+
+function sensitivityTitle(point: ConditionResearchSensitivityPoint): string {
+  const direction =
+    point.offset < 0 ? '更宽松' : point.offset > 0 ? '更严格' : '基点'
+  const parts = [
+    `分位偏移 ${(point.offset * 100).toFixed(0)}%（${direction}）`,
+    `阈值 ${point.threshold.toFixed(4)}`,
+    `命中样本 ${point.support_count}`,
+  ]
+  if (point.lift !== null) {
+    parts.push(`胜率 ${formatPercent(point.outcome_rate)} / 基线 ${formatPercent(point.baseline_rate)}`)
+    parts.push(`lift ${point.lift.toFixed(3)}`)
+  }
+  if (point.retention !== null) {
+    parts.push(`保持率 ${point.retention.toFixed(2)}`)
+  }
+  if (point.degenerate) parts.push('阈值退化到恒真，不计入统计')
+  if (point.insufficient) parts.push('命中样本不足，不计入统计')
+  return parts.join(' · ')
+}
+
 function constraintText(candidate: ConditionResearchCandidate): string {
   if (candidate.passed_constraints) return '通过验证'
   const failures = candidate.constraint_failures ?? []
@@ -1643,6 +1698,69 @@ onMounted(async () => {
                 </table>
               </div>
             </div>
+            <section v-if="sensitivityRows.length" class="condition-sensitivity">
+              <div class="section-heading">
+                <div>
+                  <span class="section-kicker">PARAMETER SENSITIVITY</span>
+                  <h3>参数敏感性<TermHint term="sensitivity" /></h3>
+                </div>
+              </div>
+              <p class="helper">
+                把每个候选的阈值往松、往紧各挪两档（分位 ±5% / ±10%）重新计分，看优势还在不在：
+                <strong>保持率</strong> 1.00 是一点没掉，0.50 是掉了一半，负数表示优势打反了。
+                邻域都在是台地，只有基这一个点好用是悬崖——后者是过拟合最典型的形状。
+              </p>
+              <p class="scope-helper">
+                邻域是在挖掘样本（寻优期）上重算的，回答的是「这个切点是不是噪声尖峰」，
+                <strong>不代表样本外表现</strong>；样本外由验证期、留出期和滚动复验负责。
+              </p>
+              <div class="table-wrap">
+                <table>
+                  <caption class="sr-only">参数敏感性邻域</caption>
+                  <thead>
+                    <tr>
+                      <th>候选</th>
+                      <th>更宽松 −10%</th>
+                      <th>−5%</th>
+                      <th>基点<TermHint term="sensitivityRetention" /></th>
+                      <th>+5%</th>
+                      <th>更严格 +10%</th>
+                      <th>仍有提升</th>
+                      <th>中位保持率</th>
+                      <th>最差保持率</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr
+                      v-for="row in sensitivityRows"
+                      :key="row.candidate.candidate_id"
+                      :data-testid="'condition-sensitivity-' + row.candidate.candidate_id"
+                    >
+                      <td class="condition-rule">{{ conditionText(row.candidate) }}</td>
+                      <td
+                        v-for="point in row.sensitivity.points"
+                        :key="point.offset"
+                        class="sensitivity-cell"
+                        :class="retentionClass(point)"
+                        :title="sensitivityTitle(point)"
+                        :data-testid="'sensitivity-point-' + row.candidate.candidate_id + '-' + point.offset"
+                      >
+                        <template v-if="point.insufficient || point.degenerate">
+                          <span class="muted-code">{{ point.degenerate ? '恒真' : '样本不足' }}</span>
+                        </template>
+                        <template v-else>{{ retentionText(point.retention) }}</template>
+                      </td>
+                      <td :data-testid="'sensitivity-stable-' + row.candidate.candidate_id">
+                        {{ row.sensitivity.stable_offsets }}/{{ row.sensitivity.evaluated_offsets }}
+                        <span v-if="row.sensitivity.skipped > 0" class="muted-code">（{{ row.sensitivity.skipped }} 档未计入）</span>
+                      </td>
+                      <td>{{ retentionText(row.sensitivity.median_retention) }}</td>
+                      <td>{{ retentionText(row.sensitivity.worst_retention) }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
             <div v-if="report?.rolling?.enabled" class="condition-rolling">
               <div class="section-heading">
                 <div>
@@ -1906,6 +2024,42 @@ onMounted(async () => {
 
 .condition-status {
   min-width: 240px;
+}
+
+.condition-sensitivity {
+  margin-top: 1.4rem;
+}
+
+.sensitivity-cell {
+  min-width: 84px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  cursor: help;
+}
+
+.sensitivity-cell.sens-good {
+  background: rgba(34, 197, 94, 0.26);
+  color: #d1fae5;
+}
+
+.sensitivity-cell.sens-mid {
+  background: rgba(34, 197, 94, 0.13);
+  color: #bbf7d0;
+}
+
+.sensitivity-cell.sens-weak {
+  background: rgba(148, 163, 184, 0.16);
+  color: var(--text-muted, #94a3b8);
+}
+
+/* 优势打反：邻域比基线还差，是最需要看见的一格。 */
+.sensitivity-cell.sens-flipped {
+  background: rgba(248, 113, 113, 0.2);
+  color: #fecaca;
+}
+
+.sensitivity-cell.sens-excluded {
+  color: var(--text-subtle, #64748b);
 }
 
 .condition-stock-details {

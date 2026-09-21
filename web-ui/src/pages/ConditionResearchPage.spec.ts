@@ -305,6 +305,47 @@ describe('ConditionResearchPage', () => {
     expect(wrapper.text()).toContain('滚动复验')
   })
 
+  it('renders the threshold neighbourhood and marks offsets that cannot be judged', async () => {
+    const sensitivity = {
+      ...result,
+      candidates: [{
+        ...result.candidates[0],
+        sensitivity: {
+          points: [
+            { offset: -0.1, quantile: 0.5, threshold: 2.1, support_count: 52, outcome_rate: 0.72, baseline_rate: 0.6, lift: 1.2, retention: 0.606, insufficient: false, degenerate: false },
+            { offset: -0.05, quantile: 0.55, threshold: 2.3, support_count: 46, outcome_rate: 0.78, baseline_rate: 0.6, lift: 1.3, retention: 0.909, insufficient: false, degenerate: false },
+            { offset: 0, quantile: 0.6, threshold: 2.5, support_count: 40, outcome_rate: 0.8, baseline_rate: 0.6, lift: 1.33, retention: 1, insufficient: false, degenerate: false },
+            { offset: 0.05, quantile: 0.65, threshold: 2.8, support_count: 8, outcome_rate: null, baseline_rate: 0.6, lift: null, retention: null, insufficient: true, degenerate: false },
+            { offset: 0.1, quantile: 0.7, threshold: 3.1, support_count: 30, outcome_rate: 0.5, baseline_rate: 0.6, lift: 0.9, retention: -0.3, insufficient: false, degenerate: false },
+          ],
+          stable_offsets: 2,
+          evaluated_offsets: 3,
+          skipped: 1,
+          median_retention: 0.606,
+          worst_retention: -0.3,
+          note: '1 个偏移没有形成可判定的邻域条件（命中样本不足 20 个或阈值退化到恒真），未计入统计',
+        },
+      }],
+    } as unknown as ConditionResearchReport
+    vi.mocked(researchApi.getConditionResearchResults).mockResolvedValue(sensitivity)
+
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('参数敏感性')
+    const row = wrapper.get('[data-testid="condition-sensitivity-buy-1"]')
+    // 样本不足的那一档既不算保持也不算没保持，分母要跟着减。
+    expect(wrapper.get('[data-testid="sensitivity-stable-buy-1"]').text()).toContain('2/3')
+    expect(wrapper.get('[data-testid="sensitivity-stable-buy-1"]').text()).toContain('1 档未计入')
+    expect(row.text()).toContain('样本不足')
+    // 优势打反的那一格必须单独标出来。
+    expect(wrapper.get('[data-testid="sensitivity-point-buy-1-0.1"]').classes()).toContain('sens-flipped')
+    expect(wrapper.get('[data-testid="sensitivity-point-buy-1-0.05"]').classes()).toContain('sens-excluded')
+    expect(wrapper.get('[data-testid="sensitivity-point-buy-1-0"]').text()).toContain('1.00')
+  })
+
   it('shows the conditions a candidate absorbed instead of dropping them silently', async () => {
     const merged = {
       ...result,

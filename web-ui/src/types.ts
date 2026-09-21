@@ -1133,6 +1133,39 @@ export interface ConditionResearchCandidate {
   holdout: ConditionResearchSummary | null
   windows?: ConditionResearchWindow[]
   consistency?: ConditionResearchConsistency | null
+  /** 阈值邻域曲线。没有可挪的标量参数时（比如交叉条件）为 null。 */
+  sensitivity?: ConditionResearchSensitivity | null
+}
+
+/** 邻域里的一个切点：把阈值往松/往紧挪一档之后重新计分。 */
+export interface ConditionResearchSensitivityPoint {
+  /** 分位偏移：负=更宽松，0=基点，正=更严格。 */
+  offset: number
+  /** 偏移后的分位。 */
+  quantile: number
+  /** 偏移后的阈值（两两比较的条件是「差值」的阈值）。 */
+  threshold: number
+  support_count: number
+  outcome_rate: number | null
+  baseline_rate: number
+  lift: number | null
+  /** 优势保持率：(lift-1)/(基点 lift-1)。基点没有优势时为 null。 */
+  retention: number | null
+  /** 命中样本不足：这一格不计入统计。 */
+  insufficient: boolean
+  /** 阈值退化到条件恒真，同样不计入统计。 */
+  degenerate: boolean
+}
+
+export interface ConditionResearchSensitivity {
+  points: ConditionResearchSensitivityPoint[]
+  /** 仍然有提升的偏移数 / 计入统计的偏移数。 */
+  stable_offsets: number
+  evaluated_offsets: number
+  skipped: number
+  median_retention: number | null
+  worst_retention: number | null
+  note: string | null
 }
 
 export interface ConditionResearchRankingEvidence {
