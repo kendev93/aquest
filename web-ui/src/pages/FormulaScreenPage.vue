@@ -5,8 +5,21 @@ import { fetchLocalChart } from '../api/marketData'
 import { fetchActiveJobs } from '../api/jobs'
 import MarketCandlestickChart from '../components/MarketCandlestickChart.vue'
 import { createJob, createSyncJob, fetchMetadata, fetchScreenHistory, FormulaScreenApiError, getJob, getResults, getScreenHistory, getSyncJob, parseFormula } from '../api/formulaScreen'
-import type { ConditionOperator, CustomFormulaMetadata, FormulaScreenMetadata, InstrumentBoard, InstrumentType, JobState, LocalMarketChart, MarketSyncJobState, ResultsMeta, SavedConditionSet, ScreenCondition, ScreenFormState, ScreenHistorySummary, ScreenResult, RuleMode, ValueDefinition } from '../types'
-import { buildScanPayload, createSavedConditionSet, DEFAULT_PRESET_SIGNALS, deleteConditionSet, filterKnownSignals, loadSavedConditionSets, loadSavedForm, resultsToCsv, saveConditionSet, saveForm, signalDisplayName, validateScreenForm, valueOptionLabel } from '../utils/formulaScreen'
+import type { ConditionOperator, CustomFormulaMetadata, FormulaScreenMetadata, InstrumentBoard, InstrumentType, JobState, LocalMarketChart, MarketSyncJobState, ResultsMeta, SavedConditionSet, ScreenCondition, ScreenFormState, ScreenHistorySummary, ScreenPresetSummary, ScreenResult, RuleMode, ValueDefinition } from '../types'
+import {
+  buildPresetPayload,
+  conditionSetToPayload,
+  presetLoadMessage,
+  presetToFormState,
+} from '../utils/screenPresets'
+import {
+  createScreenPreset,
+  deleteScreenPreset,
+  fetchScreenPresets,
+  getScreenPreset,
+  updateScreenPreset,
+} from '../api/screenPresets'
+import { buildScanPayload, DEFAULT_PRESET_SIGNALS, filterKnownSignals, loadSavedConditionSets, loadSavedForm, resultsToCsv, saveForm, signalDisplayName, validateScreenForm, valueOptionLabel } from '../utils/formulaScreen'
 import { formatChinaTimestamp } from '../utils/time'
 
 const INSTRUMENT_TYPE_OPTIONS: { key: InstrumentType; label: string }[] = [
@@ -70,9 +83,13 @@ const parsedFormulaText = ref('')
 const showAdvanced = ref(false)
 const syncLoading = ref(false)
 const syncJob = ref<MarketSyncJobState | null>(null)
-const savedConditionSets = ref<SavedConditionSet[]>(loadSavedConditionSets())
-const selectedConditionSetId = ref('')
-const conditionSetName = ref('')
+const screenPresets = ref<ScreenPresetSummary[]>([])
+const selectedPresetId = ref('')
+const presetName = ref('')
+const presetBusy = ref(false)
+// 旧的「指标组合」存在浏览器本地、只存条件。页面不再提供保存入口，但读出来
+// 让用户一键转成方案——数据不能凭空丢掉。
+const legacyConditionSets = ref<SavedConditionSet[]>(loadSavedConditionSets())
 const historyItems = ref<ScreenHistorySummary[]>([])
 const historyLoading = ref(false)
 const expandedResultKey = ref<string | null>(null)
@@ -383,48 +400,149 @@ async function toggleResultDetails(result: ScreenResult): Promise<void> {
   }
 }
 
-async function applySelectedConditionSet(): Promise<void> {
-  const selected = savedConditionSets.value.find((item) => item.id === selectedConditionSetId.value)
-  if (!selected) return
-  form.ruleMode = selected.ruleMode
-  form.selectedSignals = [...selected.selectedSignals]
-  form.conditions = selected.conditions.map((condition) => ({ ...condition }))
-  form.combineMode = selected.combineMode
-  form.minimumMatches = selected.minimumMatches
-  form.mode = selected.mode
-  form.formulaText = selected.formulaText
-  form.formulaParameters = { ...selected.formulaParameters }
-  customMetadata.value = null
-  parsedFormulaText.value = ''
-  errors.value = {}
-  if (form.mode === 'custom' && form.formulaText.trim()) await parseCustomFormula()
-  else normalizeConditionsToAvailableValues()
-  message.value = `已加载指标组合：${selected.name}`
+async function refreshScreenPresets(): Promise<void> {
+  try {
+    screenPresets.value = await fetchScreenPresets()
+  } catch {
+    // 列表拉不到不影响扫描，只在方案区留空即可。
+  }
 }
 
-function saveCurrentConditionSet(): void {
-  const name = conditionSetName.value.trim()
+async function loadSelectedPreset(): Promise<void> {
+  const presetId = selectedPresetId.value
+  if (!presetId) return
+  presetBusy.value = true
+  try {
+    const preset = await getScreenPreset(presetId)
+    const result = presetToFormState(preset.payload, {
+      valueIds: availableValues.value.map((value) => value.id),
+      signalIds: presetSignals.value.map((signal) => signal.id),
+    })
+    const state = result.state
+    form.mode = state.mode
+    form.ruleMode = state.ruleMode
+    form.selectedSignals = [...state.selectedSignals]
+    form.conditions = state.conditions.length > 0 ? state.conditions : [emptyCondition()]
+    form.combineMode = state.combineMode
+    form.minimumMatches = state.minimumMatches
+    form.universe = state.universe
+    form.universeFile = state.universeFile
+    form.instrumentTypes = [...state.instrumentTypes]
+    form.boards = [...state.boards]
+    form.workers = state.workers
+    form.period = state.period
+    form.formulaText = state.formulaText
+    form.formulaParameters = { ...state.formulaParameters }
+    customMetadata.value = null
+    parsedFormulaText.value = ''
+    errors.value = {}
+    if (form.mode === 'custom' && form.formulaText.trim()) await parseCustomFormula()
+    else normalizeConditionsToAvailableValues()
+    presetName.value = preset.name
+    message.value = presetLoadMessage(preset.name, result)
+  } catch (error) {
+    message.value = apiMessage(error, '方案加载失败')
+  } finally {
+    presetBusy.value = false
+  }
+}
+
+async function savePresetAsNew(): Promise<void> {
+  const name = presetName.value.trim()
   if (!name) {
-    errors.value = { ...errors.value, conditionSetName: '请输入组合名称。' }
+    errors.value = { ...errors.value, presetName: '请输入方案名称。' }
     return
   }
-  const validationErrors = validateScreenForm(form, customMetadata.value)
-  if (Object.keys(validationErrors).length > 0) {
-    errors.value = validationErrors
-    return
+  errors.value = { ...errors.value, presetName: '' }
+  presetBusy.value = true
+  try {
+    const created = await createScreenPreset({ name, payload: buildPresetPayload(form) })
+    await refreshScreenPresets()
+    selectedPresetId.value = created.preset_id
+    message.value = created.notes?.length
+      ? `已保存方案「${created.name}」，但内容被调整过：${created.notes.join('；')}`
+      : `已保存方案「${created.name}」。`
+  } catch (error) {
+    message.value = apiMessage(error, '方案保存失败')
+  } finally {
+    presetBusy.value = false
   }
-  const saved = createSavedConditionSet(name, form)
-  savedConditionSets.value = saveConditionSet(saved)
-  selectedConditionSetId.value = saved.id
-  conditionSetName.value = ''
-  message.value = `已保存指标组合：${saved.name}`
 }
 
-function deleteSelectedConditionSet(): void {
-  if (!selectedConditionSetId.value) return
-  savedConditionSets.value = deleteConditionSet(selectedConditionSetId.value)
-  selectedConditionSetId.value = ''
-  message.value = '已删除指标组合。'
+async function overwritePreset(): Promise<void> {
+  const presetId = selectedPresetId.value
+  if (!presetId) return
+  presetBusy.value = true
+  try {
+    const updated = await updateScreenPreset(presetId, { payload: buildPresetPayload(form) })
+    await refreshScreenPresets()
+    message.value = `已用当前设置覆盖方案「${updated.name}」。`
+  } catch (error) {
+    message.value = apiMessage(error, '方案覆盖失败')
+  } finally {
+    presetBusy.value = false
+  }
+}
+
+async function renamePreset(): Promise<void> {
+  const presetId = selectedPresetId.value
+  const name = presetName.value.trim()
+  if (!presetId) return
+  if (!name) {
+    errors.value = { ...errors.value, presetName: '请输入新的方案名称。' }
+    return
+  }
+  presetBusy.value = true
+  try {
+    const updated = await updateScreenPreset(presetId, { name })
+    await refreshScreenPresets()
+    message.value = `方案已重命名为「${updated.name}」。`
+  } catch (error) {
+    message.value = apiMessage(error, '方案重命名失败')
+  } finally {
+    presetBusy.value = false
+  }
+}
+
+async function deleteSelectedPreset(): Promise<void> {
+  const presetId = selectedPresetId.value
+  if (!presetId) return
+  presetBusy.value = true
+  try {
+    await deleteScreenPreset(presetId)
+    selectedPresetId.value = ''
+    presetName.value = ''
+    await refreshScreenPresets()
+    message.value = '已删除方案。'
+  } catch (error) {
+    message.value = apiMessage(error, '方案删除失败')
+  } finally {
+    presetBusy.value = false
+  }
+}
+
+async function importLegacyConditionSets(): Promise<void> {
+  presetBusy.value = true
+  let imported = 0
+  try {
+    for (const set of legacyConditionSets.value) {
+      try {
+        await createScreenPreset({
+          name: set.name.slice(0, 60),
+          payload: conditionSetToPayload(set),
+        })
+        imported += 1
+      } catch {
+        // 重名或名字非法就跳过这一个，不中断其余的导入。
+      }
+    }
+    await refreshScreenPresets()
+    message.value = imported > 0
+      ? `已导入 ${imported} 个本地指标组合为筛选方案。`
+      : '没有导入任何组合（可能已重名）。'
+  } finally {
+    presetBusy.value = false
+  }
 }
 
 function apiMessage(error: unknown, context: string): string {
@@ -625,6 +743,7 @@ onMounted(async () => {
     }
     await refreshScreenHistory()
     await resumeActiveScreenJob()
+    await refreshScreenPresets()
   } catch (error) {
     message.value = apiMessage(error, '公式元数据加载失败，请检查后端服务和网络后重试')
   }
@@ -760,6 +879,30 @@ watch(() => form.formulaText, (value) => {
             </fieldset>
           </div>
 
+          <fieldset class="form-section preset-section" data-testid="screen-preset">
+            <legend>筛选方案 <span class="legend-count">{{ screenPresets.length }} 个</span></legend>
+            <div class="preset-toolbar">
+              <select v-model="selectedPresetId" data-testid="preset-select" aria-label="已保存筛选方案">
+                <option value="">选择已保存方案</option>
+                <option v-for="preset in screenPresets" :key="preset.preset_id" :value="preset.preset_id">{{ preset.name }}</option>
+              </select>
+              <button class="text-button" type="button" data-testid="load-preset" :disabled="!selectedPresetId || presetBusy" @click="loadSelectedPreset">加载</button>
+              <button class="text-button" type="button" data-testid="delete-preset" :disabled="!selectedPresetId || presetBusy" @click="deleteSelectedPreset">删除</button>
+            </div>
+            <div class="preset-save-row">
+              <input v-model="presetName" data-testid="preset-name" type="text" maxlength="60" placeholder="方案名称，例如：主板主力进场">
+              <button class="secondary-button" type="button" data-testid="save-preset" :disabled="presetBusy" @click="savePresetAsNew">保存为新方案</button>
+              <button class="secondary-button" type="button" data-testid="overwrite-preset" :disabled="!selectedPresetId || presetBusy" @click="overwritePreset">覆盖当前</button>
+              <button class="secondary-button" type="button" data-testid="rename-preset" :disabled="!selectedPresetId || presetBusy" @click="renamePreset">重命名</button>
+            </div>
+            <p v-if="errors.presetName" class="field-error" data-testid="preset-name-error">{{ errors.presetName }}</p>
+            <p class="helper">方案存的是<b>整套设置</b>（信号 / 条件 / 市场范围 / 板块 / 并发），存在服务端数据库里，换浏览器也在。加载只还原设置，不会自动重新扫描。</p>
+            <p v-if="legacyConditionSets.length" class="preset-import-row" data-testid="preset-import">
+              还有 {{ legacyConditionSets.length }} 个保存在浏览器本地的旧「指标组合」（只存条件、清缓存会丢）。
+              <button class="text-button" type="button" data-testid="import-legacy-sets" :disabled="presetBusy" @click="importLegacyConditionSets">导入为筛选方案</button>
+            </p>
+          </fieldset>
+
           <fieldset v-if="form.ruleMode === 'signals'" class="form-section signal-section">
             <legend>选择信号 <span class="legend-count">{{ form.selectedSignals.length }} selected</span></legend>
             <p v-if="errors.selectedSignals" class="field-error" data-testid="signals-error">{{ errors.selectedSignals }}</p>
@@ -808,14 +951,6 @@ watch(() => form.formulaText, (value) => {
             </div>
             <p v-if="errors.minimumMatches" class="field-error">{{ errors.minimumMatches }}</p>
 
-            <div class="condition-set-toolbar" data-testid="condition-set-toolbar">
-              <select v-model="selectedConditionSetId" data-testid="condition-set-select" aria-label="已保存指标组合" @change="applySelectedConditionSet">
-                <option value="">选择已保存组合</option>
-                <option v-for="conditionSet in savedConditionSets" :key="conditionSet.id" :value="conditionSet.id">{{ conditionSet.name }}</option>
-              </select>
-              <button class="text-button" type="button" data-testid="delete-condition-set" :disabled="!selectedConditionSetId" @click="deleteSelectedConditionSet">删除组合</button>
-            </div>
-
             <div v-for="(condition, index) in form.conditions" :key="`condition-${index}`" class="condition-row" :data-testid="`condition-row-${index}`">
               <div class="condition-field condition-left">
                 <label :for="`condition-left-${index}`">指标输出</label>
@@ -853,11 +988,6 @@ watch(() => form.formulaText, (value) => {
             <p v-if="errors.conditions" class="field-error" data-testid="conditions-error">{{ errors.conditions }}</p>
             <button class="secondary-button add-condition-button" type="button" data-testid="add-condition" @click="addCondition">＋ 添加条件</button>
 
-            <div class="condition-save-row">
-              <input v-model="conditionSetName" data-testid="condition-set-name" type="text" maxlength="64" placeholder="例如：主力进场低位">
-              <button class="secondary-button" type="button" data-testid="save-condition-set" @click="saveCurrentConditionSet">保存组合</button>
-            </div>
-            <p v-if="errors.conditionSetName" class="field-error">{{ errors.conditionSetName }}</p>
           </fieldset>
 
           <div class="action-stack">

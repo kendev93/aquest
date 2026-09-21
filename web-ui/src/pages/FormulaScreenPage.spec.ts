@@ -1,12 +1,25 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { FormulaScreenMetadata, LocalMarketChart } from '../types'
+import type { FormulaScreenMetadata, LocalMarketChart, ScreenPresetPayload } from '../types'
 import FormulaScreenPage from './FormulaScreenPage.vue'
 
 import * as api from '../api/formulaScreen'
 import * as marketApi from '../api/marketData'
 import * as jobsApi from '../api/jobs'
+import * as presetApi from '../api/screenPresets'
+
+vi.mock('../api/screenPresets', async () => {
+  const actual = await vi.importActual<typeof import('../api/screenPresets')>('../api/screenPresets')
+  return {
+    ...actual,
+    fetchScreenPresets: vi.fn(),
+    getScreenPreset: vi.fn(),
+    createScreenPreset: vi.fn(),
+    updateScreenPreset: vi.fn(),
+    deleteScreenPreset: vi.fn(),
+  }
+})
 
 vi.mock('../api/formulaScreen', async () => {
   const actual = await vi.importActual<typeof import('../api/formulaScreen')>('../api/formulaScreen')
@@ -52,6 +65,25 @@ const metadata: FormulaScreenMetadata = {
   periods: [{ value: 'daily', label: '日线' }],
   data_directory_help: '本地目录',
   default_vipdoc_path: '/data/vipdoc',
+}
+
+const presetPayload: ScreenPresetPayload = {
+  mode: 'preset',
+  rule_mode: 'conditions',
+  selected_signals: [],
+  conditions: [
+    { left_value: 'indicator_three.var1', operator: 'lt', right_value: null, right_constant: 5 },
+  ],
+  combine_mode: 'all',
+  minimum_matches: null,
+  universe: 'sh',
+  universe_file: '',
+  instrument_types: ['stock'],
+  boards: ['main'],
+  workers: 8,
+  period: 'daily',
+  formula_text: '',
+  formula_parameters: {},
 }
 
 const localChart: LocalMarketChart = {
@@ -111,6 +143,23 @@ describe('FormulaScreenPage', () => {
     })
     vi.mocked(marketApi.fetchLocalChart).mockResolvedValue(localChart)
     vi.mocked(jobsApi.fetchActiveJobs).mockResolvedValue([])
+    vi.mocked(presetApi.fetchScreenPresets).mockResolvedValue([])
+    vi.mocked(presetApi.createScreenPreset).mockResolvedValue({
+      preset_id: 'preset-1', name: 'x', note: '',
+      created_at: '2026-09-21T10:00:00', updated_at: '2026-09-21T10:00:00',
+      payload: presetPayload, notes: [],
+    })
+    vi.mocked(presetApi.updateScreenPreset).mockResolvedValue({
+      preset_id: 'preset-1', name: 'x', note: '',
+      created_at: '2026-09-21T10:00:00', updated_at: '2026-09-21T10:00:00',
+      payload: presetPayload, notes: [],
+    })
+    vi.mocked(presetApi.deleteScreenPreset).mockResolvedValue({ deleted: true })
+    vi.mocked(presetApi.getScreenPreset).mockResolvedValue({
+      preset_id: 'preset-1', name: 'x', note: '',
+      created_at: '2026-09-21T10:00:00', updated_at: '2026-09-21T10:00:00',
+      payload: presetPayload,
+    })
   })
 
   it('recovers and resumes a running screening task after the page is refreshed', async () => {
@@ -276,7 +325,7 @@ describe('FormulaScreenPage', () => {
     }))
   })
 
-  it('adds, switches, reloads, and deletes a saved indicator combination', async () => {
+  it('adds and removes conditions', async () => {
     const wrapper = mount(FormulaScreenPage)
     await flushPromises()
 
@@ -285,35 +334,128 @@ describe('FormulaScreenPage', () => {
     expect(wrapper.findAll('[data-testid^="condition-row-"]')).toHaveLength(2)
     await wrapper.get('[data-testid="remove-condition-1"]').trigger('click')
     expect(wrapper.findAll('[data-testid^="condition-row-"]')).toHaveLength(1)
-
-    await wrapper.get('[data-testid="rule-mode-signals"]').trigger('click')
-    expect(wrapper.find('[data-testid="condition-builder"]').exists()).toBe(false)
-    await wrapper.get('[data-testid="rule-mode-conditions"]').trigger('click')
-    await wrapper.get('[data-testid="condition-set-name"]').setValue('主力进场低位')
-    await wrapper.get('[data-testid="save-condition-set"]').trigger('click')
-
-    const conditionSetSelect = wrapper.get('[data-testid="condition-set-select"]')
-    const savedOption = conditionSetSelect.findAll('option').find((option) => option.text() === '主力进场低位')
-    expect(savedOption).toBeDefined()
-    await conditionSetSelect.setValue('')
-    await conditionSetSelect.setValue(savedOption?.element.value ?? '')
-    await flushPromises()
-    expect(wrapper.get('[data-testid="screen-message"]').text()).toContain('已加载指标组合：主力进场低位')
-
-    await wrapper.get('[data-testid="delete-condition-set"]').trigger('click')
-    expect(conditionSetSelect.text()).not.toContain('主力进场低位')
   })
 
-  it('saves a named indicator combination for later use', async () => {
+  it('saves the whole configuration as a named preset', async () => {
+    vi.mocked(presetApi.createScreenPreset).mockResolvedValue({
+      preset_id: 'preset-1', name: '主力进场低位', note: '',
+      created_at: '2026-09-21T10:00:00', updated_at: '2026-09-21T10:00:00',
+      payload: presetPayload, notes: [],
+    })
+    vi.mocked(presetApi.fetchScreenPresets).mockResolvedValue([
+      { preset_id: 'preset-1', name: '主力进场低位', note: '', created_at: '2026-09-21T10:00:00', updated_at: '2026-09-21T10:00:00' },
+    ])
+
     const wrapper = mount(FormulaScreenPage)
     await flushPromises()
 
-    await wrapper.get('[data-testid="rule-mode-conditions"]').trigger('click')
-    await wrapper.get('[data-testid="condition-set-name"]').setValue('主力进场低位')
-    await wrapper.get('[data-testid="save-condition-set"]').trigger('click')
+    await wrapper.get('[data-testid="preset-name"]').setValue('主力进场低位')
+    await wrapper.get('[data-testid="save-preset"]').trigger('click')
+    await flushPromises()
 
-    expect(wrapper.get('[data-testid="screen-message"]').text()).toContain('已保存指标组合：主力进场低位')
-    expect(wrapper.get('[data-testid="condition-set-select"]').text()).toContain('主力进场低位')
+    expect(presetApi.createScreenPreset).toHaveBeenCalledWith(
+      expect.objectContaining({ name: '主力进场低位' }),
+    )
+    expect(wrapper.get('[data-testid="screen-message"]').text()).toContain('已保存方案')
+    expect(wrapper.get('[data-testid="preset-select"]').text()).toContain('主力进场低位')
+  })
+
+  it('loads a preset into the form without running a scan', async () => {
+    vi.mocked(presetApi.fetchScreenPresets).mockResolvedValue([
+      { preset_id: 'preset-1', name: '主板低位', note: '', created_at: '2026-09-21T10:00:00', updated_at: '2026-09-21T10:00:00' },
+    ])
+    vi.mocked(presetApi.getScreenPreset).mockResolvedValue({
+      preset_id: 'preset-1', name: '主板低位', note: '',
+      created_at: '2026-09-21T10:00:00', updated_at: '2026-09-21T10:00:00',
+      payload: presetPayload,
+    })
+
+    const wrapper = mount(FormulaScreenPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="preset-select"]').setValue('preset-1')
+    await wrapper.get('[data-testid="load-preset"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="screen-message"]').text()).toContain('已载入方案「主板低位」')
+    expect(wrapper.get('[data-testid="screen-message"]').text()).toContain('需要重新扫描')
+    // 加载只还原设置，不自动跑扫描。
+    expect(api.createJob).not.toHaveBeenCalled()
+  })
+
+  it('renames and deletes a preset', async () => {
+    vi.mocked(presetApi.fetchScreenPresets).mockResolvedValue([
+      { preset_id: 'preset-1', name: '甲', note: '', created_at: '2026-09-21T10:00:00', updated_at: '2026-09-21T10:00:00' },
+    ])
+    vi.mocked(presetApi.updateScreenPreset).mockResolvedValue({
+      preset_id: 'preset-1', name: '乙', note: '',
+      created_at: '2026-09-21T10:00:00', updated_at: '2026-09-21T10:00:00',
+      payload: presetPayload,
+    })
+    vi.mocked(presetApi.deleteScreenPreset).mockResolvedValue({ deleted: true })
+
+    const wrapper = mount(FormulaScreenPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="preset-select"]').setValue('preset-1')
+    await wrapper.get('[data-testid="preset-name"]').setValue('乙')
+    await wrapper.get('[data-testid="rename-preset"]').trigger('click')
+    await flushPromises()
+    expect(presetApi.updateScreenPreset).toHaveBeenCalledWith('preset-1', { name: '乙' })
+    expect(wrapper.get('[data-testid="screen-message"]').text()).toContain('已重命名')
+
+    await wrapper.get('[data-testid="delete-preset"]').trigger('click')
+    await flushPromises()
+    expect(presetApi.deleteScreenPreset).toHaveBeenCalledWith('preset-1')
+    expect(wrapper.get('[data-testid="screen-message"]').text()).toContain('已删除方案')
+  })
+
+  it('tells the user when a preset references indicators that no longer exist', async () => {
+    vi.mocked(presetApi.fetchScreenPresets).mockResolvedValue([
+      { preset_id: 'preset-1', name: '旧方案', note: '', created_at: '2026-09-21T10:00:00', updated_at: '2026-09-21T10:00:00' },
+    ])
+    vi.mocked(presetApi.getScreenPreset).mockResolvedValue({
+      preset_id: 'preset-1', name: '旧方案', note: '',
+      created_at: '2026-09-21T10:00:00', updated_at: '2026-09-21T10:00:00',
+      payload: {
+        ...presetPayload,
+        conditions: [{ left_value: 'indicator_three.gone', operator: 'lt', right_value: null, right_constant: 5 }],
+      },
+    })
+
+    const wrapper = mount(FormulaScreenPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="preset-select"]').setValue('preset-1')
+    await wrapper.get('[data-testid="load-preset"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="screen-message"]').text()).toContain('1 条条件引用了当前不存在的指标')
+  })
+
+  it('offers to import the legacy browser-local condition sets', async () => {
+    localStorage.setItem('indicator-lab.condition-sets.v1', JSON.stringify([{
+      id: 'legacy-1', name: '旧组合', ruleMode: 'conditions',
+      selectedSignals: [], conditions: [{ left_value: 'indicator_three.var1', operator: 'lt', right_value: null, right_constant: 5 }],
+      combineMode: 'all', minimumMatches: null, mode: 'preset', formulaText: '',
+      formulaParameters: {},
+    }]))
+    vi.mocked(presetApi.createScreenPreset).mockResolvedValue({
+      preset_id: 'preset-9', name: '旧组合', note: '',
+      created_at: '2026-09-21T10:00:00', updated_at: '2026-09-21T10:00:00',
+      payload: presetPayload, notes: [],
+    })
+
+    const wrapper = mount(FormulaScreenPage)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="preset-import"]').text()).toContain('1 个')
+    await wrapper.get('[data-testid="import-legacy-sets"]').trigger('click')
+    await flushPromises()
+
+    expect(presetApi.createScreenPreset).toHaveBeenCalledWith(
+      expect.objectContaining({ name: '旧组合' }),
+    )
   })
 
   it('validates a custom universe and an invalid minimum match count', async () => {

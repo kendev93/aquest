@@ -133,6 +133,38 @@ export interface SavedConditionSet {
   formulaParameters: Record<string, number>
 }
 
+/** 筛选方案存的内容：整套可复现的输入，不含任何结果。字段用 snake_case，与接口一致。 */
+export interface ScreenPresetPayload {
+  mode: FormulaMode
+  rule_mode: RuleMode
+  selected_signals: string[]
+  conditions: ScreenCondition[]
+  combine_mode: CombineMode
+  minimum_matches: number | null
+  universe: Universe
+  universe_file: string
+  instrument_types: InstrumentType[]
+  boards: InstrumentBoard[]
+  workers: number
+  period: 'daily'
+  formula_text: string
+  formula_parameters: Record<string, number>
+}
+
+export interface ScreenPresetSummary {
+  preset_id: string
+  name: string
+  note: string
+  created_at: string
+  updated_at: string
+}
+
+export interface ScreenPreset extends ScreenPresetSummary {
+  payload: ScreenPresetPayload
+  /** 服务端裁剪时改动了什么。只有写操作会带。 */
+  notes?: string[]
+}
+
 export interface ScanPayload {
   selected_signals: string[]
   conditions?: ScreenCondition[]
