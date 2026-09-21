@@ -188,8 +188,25 @@ schema 版本变化或维护备份时，初始化逻辑会先生成带时间戳�
 
 **跨类型只比规模与显著性**：统一指标表的每一格都带 `source`（如「组合资金曲线」「逐标的 test 段中位数」「最强候选 · 留出期合并交易」），拿不出来的格子显示「—」+ 原因，绝不用 0 填。可比性警告（曲线口径混杂、区间不重叠、类型混合、样本长度差 ≥3 倍）由服务端生成，前端只负责展示。细节见 `docs/history-compare-plan.md`。
 
+## 标的检验台
+
+`selector_app/instrument_lab/` 回答一只票的三个问题：它在已有指标上取过什么值（`values.py`，
+复用 `BacktestService.prepare_for_ref` 的 `feature_values`，走指标缓存）、一组规则放到它身上跑成
+什么样（直接调既有的 `BacktestService.run`）、**在全市场通过置换检验的条件放到它身上还成立吗**
+（`conditions.py`）。条件库从 `condition_research` 的历史里只取 `significant=True` 的候选。
+
+**不打分。** 没有权重就没有可证伪的依据，所以只给读数。证据一律是**差值**（命中组前瞻收益
+均值 − 全样本均值，百分点），显著性走连续日期块置换（复用 `swing_research.scoring` 的
+`block_permutations` 与 `benjamini_hochberg`，与因子检验同一口径）。命中 < 20 标「样本不足」
+且**不判显著**；可用交易日 < 60 不做置换；分位是**自身历史分位**，不是全市场排名。细节见
+`docs/instrument-lab-plan.md`。
+
 ## API
 
+- `POST /api/v1/instrument-lab/values`（一只票的指标取值序列 + 自身历史分位）
+- `GET /api/v1/instrument-lab/conditions/library`（历史里通过置换检验的条件）
+- `POST /api/v1/instrument-lab/conditions/check`（把选中的条件放到这只票上检验）
+- `POST /api/v1/instrument-lab/backtest`（单标的回测，吃既有的 `BacktestRequest`）
 - `POST /api/v1/market-data/sync-online`（按所选 provider、市场和品种范围在线更新）
 - `POST /api/v1/market-data/sync`（一键在线同步兼容入口，与 `sync-online` 同一实现）
 - `POST /api/v1/market-data/backfill`（East Money 股票历史全量补齐，固定使用 `eastmoney` provider）
