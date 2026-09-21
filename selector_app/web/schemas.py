@@ -1180,3 +1180,43 @@ class StrategyFitnessRequest(PortfolioBacktestRequest):
             min_trades=self.min_trades,
             max_test_drawdown=self.max_test_drawdown,
         )
+
+
+class SavedStrategyCreateRequest(BaseModel):
+    """One reusable portfolio strategy to persist.
+
+    The request is validated with the same model the backtest endpoint uses, so
+    a strategy that cannot be replayed is rejected at save time instead of
+    failing months later when the tracking job tries to run it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=60)
+    note: str = Field(default="", max_length=500)
+    request: PortfolioBacktestRequest
+    summary: dict[str, object] = Field(default_factory=dict)
+    source_history_id: str | None = Field(default=None, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_name(self) -> SavedStrategyCreateRequest:
+        if not self.name.strip():
+            raise ValueError("策略名称不能为空")
+        return self
+
+
+class SavedStrategyUpdateRequest(BaseModel):
+    """Rename or re-note a saved strategy. The configuration stays frozen."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=60)
+    note: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_payload(self) -> SavedStrategyUpdateRequest:
+        if self.name is None and self.note is None:
+            raise ValueError("至少要修改名称或备注之一")
+        if self.name is not None and not self.name.strip():
+            raise ValueError("策略名称不能为空")
+        return self

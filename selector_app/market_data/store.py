@@ -333,6 +333,48 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
     def delete_backtest_history(self, history_id: str) -> bool:
         return self._history.delete_backtest_history(history_id)
 
+    def strategy_name_taken(self, name: str, *, exclude_strategy_id: str = "") -> bool:
+        return self._history.strategy_name_taken(name, exclude_strategy_id=exclude_strategy_id)
+
+    def save_strategy(
+        self,
+        strategy_id: str,
+        *,
+        name: str,
+        request: Mapping[str, object],
+        summary: Mapping[str, object],
+        note: str = "",
+        source_history_id: str | None = None,
+        created_at: datetime | str | None = None,
+    ) -> dict[str, object]:
+        return self._history.save_strategy(
+            strategy_id,
+            name=name,
+            request=request,
+            summary=summary,
+            note=note,
+            source_history_id=source_history_id,
+            created_at=created_at,
+        )
+
+    def list_strategies(self) -> list[dict[str, object]]:
+        return self._history.list_strategies()
+
+    def read_strategy(self, strategy_id: str) -> dict[str, object] | None:
+        return self._history.read_strategy(strategy_id)
+
+    def update_strategy(
+        self,
+        strategy_id: str,
+        *,
+        name: str | None = None,
+        note: str | None = None,
+    ) -> dict[str, object] | None:
+        return self._history.update_strategy(strategy_id, name=name, note=note)
+
+    def delete_strategy(self, strategy_id: str) -> bool:
+        return self._history.delete_strategy(strategy_id)
+
     def history_table_columns(self, table: str) -> tuple[str, ...]:
         return self._history.history_table_columns(table)
 

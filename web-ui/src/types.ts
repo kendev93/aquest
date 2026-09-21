@@ -590,6 +590,48 @@ export interface PortfolioBacktestResult {
   benchmark?: PortfolioBenchmark | null
 }
 
+/** 策略库里只保留可比的数字指标，曲线与成交明细不进策略表。 */
+export interface SavedStrategyPerformance {
+  total_return?: number | null
+  annual_return?: number | null
+  max_drawdown?: number | null
+  sharpe?: number | null
+  volatility?: number | null
+  calmar?: number | null
+  total_trades?: number | null
+  win_rate?: number | null
+}
+
+/** 保存策略时顺手记下的结果快照，只够列表页展示。 */
+export interface SavedStrategySnapshot {
+  start_date?: string
+  end_date?: string
+  bars?: number
+  max_positions?: number
+  ranking_value?: string
+  rank_order?: string
+  universe?: string
+  total_candidates?: number
+  performance?: SavedStrategyPerformance
+  benchmark_performance?: SavedStrategyPerformance
+}
+
+/** 策略库列表项：刻意不带 request——列表一次读全部策略，带着它太重。 */
+export interface SavedStrategySummary {
+  strategy_id: string
+  name: string
+  note: string
+  source_history_id: string | null
+  created_at: string
+  updated_at: string
+  summary: SavedStrategySnapshot
+}
+
+/** 策略详情，带可重放的原始配置（日期区间在保存时已固化成绝对日期）。 */
+export interface SavedStrategyDetail extends SavedStrategySummary {
+  request: PortfolioBacktestPayload
+}
+
 export interface StrategyDiscoveryPayload {
   universe: Universe
   universe_file?: string | null

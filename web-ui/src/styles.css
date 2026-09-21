@@ -548,3 +548,55 @@ tbody tr:hover td { background: rgba(22, 34, 58, 0.45); }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
+
+/* 策略库（组合回测页内嵌）：载入 / 重命名 / 删除 */
+.strategy-library { margin-bottom: 18px; }
+.strategy-library .panel-heading { margin-bottom: 10px; }
+.library-count { color: var(--subtle); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; }
+.library-hint { margin: 0 0 12px; color: var(--muted); font-size: 11px; line-height: 1.6; }
+.library-empty { margin: 0; padding: 14px 0; color: var(--subtle); font-size: 11px; }
+.strategy-list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.strategy-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-raised);
+}
+.strategy-main { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; min-width: 0; }
+.strategy-name { font-size: 13px; }
+.strategy-range { color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums; }
+.strategy-metric { color: var(--subtle); font-size: 10px; font-variant-numeric: tabular-nums; }
+.strategy-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+.strategy-actions .secondary-button,
+.strategy-main .secondary-button { min-height: 30px; margin-top: 0; padding: 0 10px; }
+.strategy-row .danger-button {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--danger);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--danger);
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 700;
+}
+.strategy-row .danger-button:disabled { cursor: wait; opacity: 0.5; }
+.strategy-rename-input,
+.strategy-name-input {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 11px;
+}
+.strategy-rename-input { min-width: 180px; }
+.strategy-save-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
+.strategy-save-bar .strategy-name-input { min-width: 220px; }
+.strategy-save-bar .primary-button { width: auto; min-height: 32px; margin-top: 0; padding: 0 14px; }
+.strategy-save-bar small { color: var(--subtle); font-size: 10px; }

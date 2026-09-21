@@ -25,7 +25,7 @@ from .day_format import classify_board
 from .maintenance import cleanup_database_backups, create_database_backup
 from .models import DataStoreStatus, InstrumentBoard, InstrumentType
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 SCREEN_HISTORY_LIMIT = 10
 STRATEGY_DISCOVERY_HISTORY_LIMIT = 20
 BACKTEST_HISTORY_LIMIT = 20
@@ -496,6 +496,26 @@ class _DuckDbStoreBase:
                     created_at DOUBLE NOT NULL,
                     heartbeat_at DOUBLE NOT NULL,
                     updated_at DOUBLE NOT NULL
+                )
+                """
+            )
+            # 策略库：一套可重放的组合回测配置 + 保存时的绩效快照。它和
+            # backtest_history 的区别是——历史记录"跑过什么"（满了自动淘汰），
+            # 策略记录"还想再跑一遍"（只有用户显式删才消失）。request_json 里
+            # 的日期区间在保存时就固化成绝对日期，否则"近一年"这类相对模式
+            # 会让三个月后的追踪重算悄悄换样本。
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS saved_strategies (
+                    strategy_id VARCHAR PRIMARY KEY,
+                    name VARCHAR NOT NULL,
+                    note VARCHAR NOT NULL DEFAULT '',
+                    source_history_id VARCHAR,
+                    created_at TIMESTAMP NOT NULL,
+                    updated_at TIMESTAMP NOT NULL,
+                    request_json VARCHAR NOT NULL,
+                    summary_json VARCHAR NOT NULL,
+                    UNIQUE (name)
                 )
                 """
             )

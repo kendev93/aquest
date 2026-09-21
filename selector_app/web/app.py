@@ -364,6 +364,7 @@ def create_app(
     from .routers.jobs import router as jobs_router
     from .routers.market_data import router as market_data_router
     from .routers.portfolio_backtest import router as portfolio_backtest_router
+    from .routers.strategies import router as strategies_router
     from .routers.strategy_discovery import router as strategy_discovery_router
     from .routers.strategy_fitness import router as strategy_fitness_router
     from .routers.strategy_worker import router as strategy_worker_router
@@ -377,6 +378,7 @@ def create_app(
     app.include_router(portfolio_backtest_router, prefix="/api/v1")
     app.include_router(strategy_discovery_router, prefix="/api/v1")
     app.include_router(strategy_fitness_router, prefix="/api/v1")
+    app.include_router(strategies_router, prefix="/api/v1")
     app.include_router(swing_research_router, prefix="/api/v1")
     app.include_router(strategy_worker_router)
     return app

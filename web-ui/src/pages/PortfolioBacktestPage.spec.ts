@@ -1,12 +1,19 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { FormulaScreenMetadata, PortfolioBacktestJobState, PortfolioBacktestResult } from '../types'
+import type {
+  FormulaScreenMetadata,
+  PortfolioBacktestJobState,
+  PortfolioBacktestResult,
+  SavedStrategyDetail,
+  SavedStrategySummary,
+} from '../types'
 import PortfolioBacktestPage from './PortfolioBacktestPage.vue'
 
 import * as portfolioApi from '../api/portfolioBacktest'
 import * as formulaApi from '../api/formulaScreen'
 import * as jobsApi from '../api/jobs'
+import * as strategiesApi from '../api/savedStrategies'
 import { FormulaScreenApiError } from '../api/formulaScreen'
 
 vi.mock('../api/formulaScreen', async () => {
@@ -30,6 +37,18 @@ vi.mock('../api/portfolioBacktest', async () => {
 vi.mock('../api/jobs', async () => {
   const actual = await vi.importActual<typeof import('../api/jobs')>('../api/jobs')
   return { ...actual, fetchActiveJobs: vi.fn() }
+})
+
+vi.mock('../api/savedStrategies', async () => {
+  const actual = await vi.importActual<typeof import('../api/savedStrategies')>('../api/savedStrategies')
+  return {
+    ...actual,
+    fetchStrategies: vi.fn(),
+    getStrategy: vi.fn(),
+    createStrategy: vi.fn(),
+    updateStrategy: vi.fn(),
+    deleteStrategy: vi.fn(),
+  }
 })
 
 const metadata: FormulaScreenMetadata = {
@@ -111,7 +130,42 @@ describe('PortfolioBacktestPage', () => {
     vi.mocked(portfolioApi.getPortfolioBacktestResults).mockResolvedValue(result)
     vi.mocked(portfolioApi.fetchPortfolioBacktestHistory).mockResolvedValue([])
     vi.mocked(jobsApi.fetchActiveJobs).mockResolvedValue([])
+    vi.mocked(strategiesApi.fetchStrategies).mockResolvedValue([])
+    vi.mocked(strategiesApi.deleteStrategy).mockResolvedValue({ deleted: true })
   })
+
+  const savedStrategy: SavedStrategySummary = {
+    strategy_id: 'strategy-1',
+    name: '主力进场轮动',
+    note: '',
+    source_history_id: null,
+    created_at: '2026-09-21 01:00:00',
+    updated_at: '2026-09-21 01:00:00',
+    summary: {
+      start_date: '2024-01-02',
+      end_date: '2024-01-06',
+      max_positions: 2,
+      performance: { annual_return: 0.22, max_drawdown: 0.03 },
+    },
+  }
+  const savedStrategyDetail: SavedStrategyDetail = {
+    ...savedStrategy,
+    request: {
+      universe: 'all',
+      date_mode: 'custom',
+      start_date: '2024-01-02',
+      end_date: '2024-01-06',
+      selected_signals: [],
+      combine_mode: 'all',
+      minimum_matches: null,
+      buy_rule: { signals: ['indicator_three.prepare_rally'], conditions: [], combine_mode: 'any', minimum_matches: null },
+      sell_rule: { signals: [], conditions: [], combine_mode: 'any', minimum_matches: null },
+      ranking_value: 'indicator_three.varo7',
+      rank_order: 'desc',
+      max_positions: 2,
+      rebalance_frequency: 'daily',
+    },
+  }
 
   it('shows the equal-weight benchmark and how much the strategy beat it by', async () => {
     const wrapper = mount(PortfolioBacktestPage)
@@ -666,5 +720,111 @@ describe('PortfolioBacktestPage', () => {
       formula_parameters: { N: 12 },
       ranking_value: 'custom.rank',
     }))
+  })
+
+  it('tells the user where strategies come from before any is saved', async () => {
+    const wrapper = mount(PortfolioBacktestPage)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="strategy-count"]').text()).toBe('0 个策略')
+    expect(wrapper.get('[data-testid="strategy-empty"]').text()).toContain('保存为策略')
+    expect(wrapper.find('[data-testid="strategy-save-bar"]').exists()).toBe(false)
+  })
+
+  it('saves the current configuration with the result snapshot', async () => {
+    vi.mocked(strategiesApi.createStrategy).mockResolvedValue(savedStrategyDetail)
+    vi.mocked(strategiesApi.fetchStrategies)
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([savedStrategy])
+
+    const wrapper = mount(PortfolioBacktestPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="strategy-name-input"]').setValue('主力进场轮动')
+    await wrapper.get('[data-testid="strategy-save"]').trigger('click')
+    await flushPromises()
+
+    expect(strategiesApi.createStrategy).toHaveBeenCalledWith(expect.objectContaining({
+      name: '主力进场轮动',
+    }))
+    const payload = vi.mocked(strategiesApi.createStrategy).mock.calls[0][0]
+    // 存的是当前表单配置，不是这次回测的请求快照——用户可能在结果上微调过。
+    expect(payload.request.ranking_value).toBe('indicator_three.varo7')
+    const savedSummary = payload.summary as { performance: { annual_return: number } }
+    expect(savedSummary.performance.annual_return).toBe(0.22)
+    expect(wrapper.get('[data-testid="strategy-count"]').text()).toBe('1 个策略')
+    expect(wrapper.get('[data-testid="portfolio-message"]').text()).toContain('已保存')
+  })
+
+  it('refuses to save without a name', async () => {
+    const wrapper = mount(PortfolioBacktestPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="strategy-save"]').trigger('click')
+    await flushPromises()
+
+    expect(strategiesApi.createStrategy).not.toHaveBeenCalled()
+    expect(wrapper.get('[data-testid="portfolio-message"]').text()).toContain('策略名称')
+  })
+
+  it('loads a saved strategy back into the form', async () => {
+    vi.mocked(strategiesApi.fetchStrategies).mockResolvedValue([savedStrategy])
+    vi.mocked(strategiesApi.getStrategy).mockResolvedValue(savedStrategyDetail)
+
+    const wrapper = mount(PortfolioBacktestPage)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="strategy-range-strategy-1"]').text()).toBe('2024-01-02 ~ 2024-01-06')
+    expect(wrapper.get('[data-testid="strategy-row-strategy-1"]').text()).toContain('22.00%')
+
+    await wrapper.get('[data-testid="strategy-load-strategy-1"]').trigger('click')
+    await flushPromises()
+
+    expect(strategiesApi.getStrategy).toHaveBeenCalledWith('strategy-1')
+    expect(wrapper.get('[data-testid="portfolio-message"]').text()).toContain('已载入策略「主力进场轮动」')
+    // 固化下来的绝对区间要回到日期选择器上，而不是"最近五年"。
+    expect((wrapper.get('[data-testid="portfolio-date-mode"]').element as HTMLSelectElement).value).toBe('custom')
+  })
+
+  it('renames a strategy inline without touching its configuration', async () => {
+    vi.mocked(strategiesApi.fetchStrategies).mockResolvedValue([savedStrategy])
+    vi.mocked(strategiesApi.updateStrategy).mockResolvedValue({ ...savedStrategyDetail, name: '新名字' })
+
+    const wrapper = mount(PortfolioBacktestPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="strategy-rename-strategy-1"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="strategy-rename-input-strategy-1"]').setValue('新名字')
+    await wrapper.get('[data-testid="strategy-rename-save-strategy-1"]').trigger('click')
+    await flushPromises()
+
+    expect(strategiesApi.updateStrategy).toHaveBeenCalledWith('strategy-1', { name: '新名字' })
+    expect(wrapper.get('[data-testid="portfolio-message"]').text()).toContain('已重命名')
+  })
+
+  it('deletes a strategy only after a second confirmation', async () => {
+    vi.mocked(strategiesApi.fetchStrategies).mockResolvedValue([savedStrategy])
+
+    const wrapper = mount(PortfolioBacktestPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="strategy-delete-strategy-1"]').trigger('click')
+    await flushPromises()
+
+    // 第一下只是把按钮换成"确认删除"，策略还在。
+    expect(strategiesApi.deleteStrategy).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="strategy-confirm-delete-strategy-1"]').exists()).toBe(true)
+
+    vi.mocked(strategiesApi.fetchStrategies).mockResolvedValue([])
+    await wrapper.get('[data-testid="strategy-confirm-delete-strategy-1"]').trigger('click')
+    await flushPromises()
+
+    expect(strategiesApi.deleteStrategy).toHaveBeenCalledWith('strategy-1')
+    expect(wrapper.get('[data-testid="strategy-count"]').text()).toBe('0 个策略')
+    expect(wrapper.get('[data-testid="portfolio-message"]').text()).toContain('已删除')
   })
 })

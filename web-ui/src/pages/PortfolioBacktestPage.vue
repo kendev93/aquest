@@ -11,6 +11,13 @@ import {
 } from '../api/portfolioBacktest'
 import { FormulaScreenApiError, fetchMetadata, parseFormula } from '../api/formulaScreen'
 import { fetchActiveJobs } from '../api/jobs'
+import {
+  createStrategy,
+  deleteStrategy,
+  fetchStrategies,
+  getStrategy,
+  updateStrategy,
+} from '../api/savedStrategies'
 import BacktestHistoryPanel from '../components/BacktestHistoryPanel.vue'
 import DateRangeSelector from '../components/DateRangeSelector.vue'
 import RuleGroupEditor from '../components/RuleGroupEditor.vue'
@@ -32,6 +39,7 @@ import type {
   PortfolioRebalanceFrequency,
   PortfolioUniverse,
   RuleGroupPayload,
+  SavedStrategySummary,
   SignalDefinition,
   ValueDefinition,
 } from '../types'
@@ -585,7 +593,7 @@ function applyStoredCandidate(raw: unknown): void {
  * 自定义公式必须先解析再回填 —— parseCustomFormula 会把买卖规则和排序值
  * 重置成公式的默认输出，顺序反了用户填的东西就没了（踩过一次）。
  */
-async function applyStoredResearch(raw: unknown): Promise<void> {
+async function applyStoredResearch(raw: unknown, notice?: string): Promise<void> {
   if (!raw || typeof raw !== 'object') return
   const config = raw as Record<string, unknown>
   const formulaText = typeof config.formula_text === 'string' ? config.formula_text.trim() : ''
@@ -604,7 +612,8 @@ async function applyStoredResearch(raw: unknown): Promise<void> {
   }
 
   if (typeof config.universe === 'string') {
-    form.universe = enumValue(config.universe, ['all', 'sh', 'sz', 'custom'] as const, form.universe)
+    // 'codes' 也要认：条件研究不会传它，但策略库保存的配置可能就是指定标的的。
+    form.universe = enumValue(config.universe, ['all', 'sh', 'sz', 'custom', 'codes'] as const, form.universe)
   }
   if (Array.isArray(config.codes)) {
     form.codesText = config.codes.filter((item): item is string => typeof item === 'string').join('\n')
@@ -647,9 +656,10 @@ async function applyStoredResearch(raw: unknown): Promise<void> {
   if (config.buy_rule === null) missing.push('买入')
   if (config.sell_rule === null) missing.push('卖出')
   errors.value = {}
-  message.value = missing.length
+  // 策略库加载时由调用方给整句话：策略场景不该出现"研究未设条件"这种措辞。
+  message.value = notice ?? (missing.length
     ? `已载入研究的规则与排序建议；研究未设${missing.join('、')}条件，该侧已保留当前默认，请确认后再回测。`
-    : '已载入买卖条件研究的规则与排序建议，请确认后开始组合回测。'
+    : '已载入买卖条件研究的规则与排序建议，请确认后开始组合回测。')
 }
 
 function readAppliedDiscoveryMeta(raw: unknown): AppliedDiscoveryCandidate | null {
@@ -807,6 +817,131 @@ async function removeHistory(historyId: string): Promise<void> {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 策略库
+//
+// 历史记录的是"跑过什么"（满了自动淘汰），策略记录的是"还想再跑一遍"
+// （只有用户显式删才消失）。日期区间在后端保存时固化成绝对日期，所以三个月
+// 后载入同一策略，回测的还是当初看的那个样本。
+// ---------------------------------------------------------------------------
+const strategies = ref<SavedStrategySummary[]>([])
+const newStrategyName = ref('')
+const strategyLoading = ref(false)
+const strategySaving = ref(false)
+const strategyBusyId = ref('')
+const renamingId = ref('')
+const renameDraft = ref('')
+const pendingDeleteId = ref('')
+
+async function loadStrategies(): Promise<void> {
+  strategyLoading.value = true
+  try {
+    strategies.value = await fetchStrategies()
+  } catch (error) {
+    message.value = apiMessage(error)
+  } finally {
+    strategyLoading.value = false
+  }
+}
+
+async function saveCurrentStrategy(): Promise<void> {
+  if (!result.value) return
+  const name = newStrategyName.value.trim()
+  if (!name) {
+    message.value = '请先填写策略名称。'
+    return
+  }
+  strategySaving.value = true
+  try {
+    await createStrategy({
+      name,
+      request: buildPayload(),
+      summary: {
+        start_date: result.value.start_date,
+        end_date: result.value.end_date,
+        bars: result.value.bars,
+        max_positions: result.value.max_positions,
+        ranking_value: result.value.ranking_value,
+        universe: result.value.universe,
+        performance: result.value.performance,
+        benchmark: result.value.benchmark ?? null,
+      },
+    })
+    newStrategyName.value = ''
+    await loadStrategies()
+    message.value = `策略「${name}」已保存。`
+  } catch (error) {
+    message.value = apiMessage(error)
+  } finally {
+    strategySaving.value = false
+  }
+}
+
+async function applyStrategy(strategyId: string): Promise<void> {
+  strategyBusyId.value = strategyId
+  try {
+    const detail = await getStrategy(strategyId)
+    await applyStoredResearch(
+      detail.request,
+      `已载入策略「${detail.name}」的配置，请确认后开始回测。`,
+    )
+  } catch (error) {
+    message.value = apiMessage(error)
+  } finally {
+    strategyBusyId.value = ''
+  }
+}
+
+function startRename(strategy: SavedStrategySummary): void {
+  renamingId.value = strategy.strategy_id
+  renameDraft.value = strategy.name
+  pendingDeleteId.value = ''
+}
+
+function cancelRename(): void {
+  renamingId.value = ''
+  renameDraft.value = ''
+}
+
+async function commitRename(strategyId: string): Promise<void> {
+  const name = renameDraft.value.trim()
+  if (!name) {
+    message.value = '策略名称不能为空。'
+    return
+  }
+  strategyBusyId.value = strategyId
+  try {
+    await updateStrategy(strategyId, { name })
+    renamingId.value = ''
+    await loadStrategies()
+    message.value = '策略已重命名。'
+  } catch (error) {
+    message.value = apiMessage(error)
+  } finally {
+    strategyBusyId.value = ''
+  }
+}
+
+async function confirmDelete(strategyId: string): Promise<void> {
+  strategyBusyId.value = strategyId
+  try {
+    await deleteStrategy(strategyId)
+    pendingDeleteId.value = ''
+    await loadStrategies()
+    message.value = '策略已删除。'
+  } catch (error) {
+    message.value = apiMessage(error)
+  } finally {
+    strategyBusyId.value = ''
+  }
+}
+
+function strategyRange(strategy: SavedStrategySummary): string {
+  const start = strategy.summary.start_date
+  const end = strategy.summary.end_date
+  return start && end ? `${start} ~ ${end}` : '区间未记录'
+}
+
 function formatPercent(value: number | null | undefined): string {
   return value === null || value === undefined ? '—' : `${(value * 100).toFixed(2)}%`
 }
@@ -871,6 +1006,7 @@ onMounted(async () => {
       }
     }
     await loadHistory()
+    await loadStrategies()
     await resumeActivePortfolioBacktest()
   } catch (error) {
     message.value = apiMessage(error)
@@ -919,6 +1055,39 @@ watch(() => form.formulaText, (value) => {
       </section>
 
       <div v-if="message" class="notice" :class="{ error: !message.includes('完成') }" role="alert" data-testid="portfolio-message">{{ message }}</div>
+
+      <section class="panel strategy-library" data-testid="strategy-library" aria-labelledby="strategy-library-title">
+        <div class="panel-heading">
+          <div><span class="section-kicker">MY STRATEGIES</span><h2 id="strategy-library-title">策略库</h2></div>
+          <span class="library-count" data-testid="strategy-count">{{ strategies.length }} 个策略</span>
+        </div>
+        <p class="library-hint">存下来的配置可以一键载回表单重跑。保存时日期区间会固化成绝对日期，避免"最近五年"这类相对区间在几个月后悄悄换成另一段样本。</p>
+        <p v-if="strategyLoading && !strategies.length" class="library-empty">正在加载策略…</p>
+        <p v-else-if="!strategies.length" class="library-empty" data-testid="strategy-empty">还没有保存的策略。跑完一次组合回测后，在「组合结果」面板顶部填写名称并点「保存为策略」。</p>
+        <ul v-else class="strategy-list">
+          <li v-for="strategy in strategies" :key="strategy.strategy_id" class="strategy-row" :data-testid="`strategy-row-${strategy.strategy_id}`">
+            <div class="strategy-main">
+              <template v-if="renamingId === strategy.strategy_id">
+                <input class="strategy-rename-input" :data-testid="`strategy-rename-input-${strategy.strategy_id}`" v-model="renameDraft" maxlength="60" aria-label="策略名称" @keyup.enter="commitRename(strategy.strategy_id)">
+                <button class="secondary-button" type="button" :data-testid="`strategy-rename-save-${strategy.strategy_id}`" :disabled="strategyBusyId === strategy.strategy_id" @click="commitRename(strategy.strategy_id)">保存</button>
+                <button class="text-button" type="button" @click="cancelRename">取消</button>
+              </template>
+              <template v-else>
+                <strong class="strategy-name">{{ strategy.name }}</strong>
+                <span class="strategy-range" :data-testid="`strategy-range-${strategy.strategy_id}`">{{ strategyRange(strategy) }}</span>
+                <span class="strategy-metric">年化 {{ formatPercent(strategy.summary.performance?.annual_return) }}</span>
+                <span class="strategy-metric">回撤 {{ formatPercent(strategy.summary.performance?.max_drawdown) }}</span>
+              </template>
+            </div>
+            <div v-if="renamingId !== strategy.strategy_id" class="strategy-actions">
+              <button class="secondary-button" type="button" :data-testid="`strategy-load-${strategy.strategy_id}`" :disabled="strategyBusyId === strategy.strategy_id" @click="applyStrategy(strategy.strategy_id)">载入配置</button>
+              <button class="text-button" type="button" :data-testid="`strategy-rename-${strategy.strategy_id}`" @click="startRename(strategy)">重命名</button>
+              <button v-if="pendingDeleteId === strategy.strategy_id" class="danger-button" type="button" :data-testid="`strategy-confirm-delete-${strategy.strategy_id}`" :disabled="strategyBusyId === strategy.strategy_id" @click="confirmDelete(strategy.strategy_id)">确认删除</button>
+              <button v-else class="text-button" type="button" :data-testid="`strategy-delete-${strategy.strategy_id}`" @click="pendingDeleteId = strategy.strategy_id">删除</button>
+            </div>
+          </li>
+        </ul>
+      </section>
 
       <div class="workspace-grid portfolio-grid">
         <form class="config-panel panel portfolio-config" data-testid="portfolio-config" @submit.prevent="submit">
@@ -1063,6 +1232,11 @@ watch(() => form.formulaText, (value) => {
 
         <section class="results-panel panel" data-testid="portfolio-results" aria-live="polite">
           <div class="panel-heading results-heading"><div><span class="section-kicker">02 / RESULTS</span><h2>组合结果</h2></div><button v-if="result" class="secondary-button export-backtest" type="button" data-testid="export-portfolio-backtest" @click="downloadResult">导出 JSON</button></div>
+          <div v-if="result" class="strategy-save-bar" data-testid="strategy-save-bar">
+            <input v-model="newStrategyName" class="strategy-name-input" data-testid="strategy-name-input" maxlength="60" placeholder="给这套配置起个名字" aria-label="策略名称" @keyup.enter="saveCurrentStrategy">
+            <button class="primary-button" type="button" data-testid="strategy-save" :disabled="strategySaving" @click="saveCurrentStrategy">{{ strategySaving ? '保存中…' : '保存为策略' }}</button>
+            <small>存的是当前表单配置 + 这次结果的绩效快照；下次可在「策略库」一键载回。</small>
+          </div>
           <div v-if="!result" class="empty-state" data-testid="portfolio-empty"><div class="empty-icon" aria-hidden="true">/</div><h3>{{ loading ? '正在运行动态组合回测…' : '还没有组合结果' }}</h3><p>{{ loading ? '正在逐股计算公式并模拟槽位补位，完成后显示净值与候选排名。' : '配置买入条件、排序指标和卖出条件后开始回测。' }}</p></div>
           <template v-else>
             <div class="backtest-summary"><span class="result-badge">{{ result.universe === 'all' ? '沪深全部品种' : result.universe.toUpperCase() }}</span><span>{{ result.start_date }} → {{ result.end_date }}</span><span>{{ result.bars }} 个交易日</span><span>{{ result.processed }} / {{ result.total_candidates }} 个标的已处理</span><span>槽位 {{ result.max_positions }}</span><span>排序：{{ valueName(result.ranking_value) }} · {{ result.rank_order === 'desc' ? '高到低' : '低到高' }}</span><span v-if="result.fitness_rank_weight" class="result-badge">适配性权重 {{ Math.round(result.fitness_rank_weight * 100) }}%</span></div>
