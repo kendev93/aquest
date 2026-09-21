@@ -5,6 +5,7 @@ import type { ConditionResearchReport, FormulaScreenMetadata } from '../types'
 import ConditionResearchPage from './ConditionResearchPage.vue'
 
 import * as researchApi from '../api/conditionResearch'
+import * as candidateApi from '../api/candidateLibrary'
 import * as formulaApi from '../api/formulaScreen'
 import * as jobsApi from '../api/jobs'
 import { SWING_PLAN_STORAGE_KEY } from '../utils/swingHandoff'
@@ -31,6 +32,13 @@ vi.mock('../api/conditionResearch', async () => {
 vi.mock('../api/jobs', async () => {
   const actual = await vi.importActual<typeof import('../api/jobs')>('../api/jobs')
   return { ...actual, fetchActiveJobs: vi.fn() }
+})
+
+vi.mock('../api/candidateLibrary', async () => {
+  const actual = await vi.importActual<typeof import('../api/candidateLibrary')>(
+    '../api/candidateLibrary',
+  )
+  return { ...actual, importCandidates: vi.fn() }
 })
 
 const metadata: FormulaScreenMetadata = {
@@ -182,6 +190,7 @@ const result = {
 describe('ConditionResearchPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.mocked(candidateApi.importCandidates).mockResolvedValue({ added: [], skipped: [] })
     vi.mocked(formulaApi.fetchMetadata).mockResolvedValue(metadata)
     vi.mocked(researchApi.createConditionResearch).mockResolvedValue({ job_id: 'research-1', status: 'queued' })
     vi.mocked(researchApi.getConditionResearch).mockResolvedValue({
@@ -241,6 +250,52 @@ describe('ConditionResearchPage', () => {
     expect(wrapper.get('[data-testid="condition-research-results"]').text()).toContain('筛选出 1 / 1')
     await wrapper.get('[data-testid="show-condition-stock-buy-1"]').trigger('click')
     expect((wrapper.get('[data-testid="condition-stock-view"]').element as HTMLSelectElement).value).toBe('buy-1:full')
+  })
+
+  it('stores selected candidates in the library so they outlive the history list', async () => {
+    // 历史只留最近 20 条，候选编号也只在本次报告里有效——入库是把证据复制一份
+    // 存下来，不是再跑一次研究。
+    vi.mocked(researchApi.fetchConditionResearchHistory).mockResolvedValue([
+      { history_id: 'research-1', created_at: '2026-09-20 10:00:00' },
+    ] as never)
+    vi.mocked(candidateApi.importCandidates).mockResolvedValue({
+      added: [{ candidate_id: 'c1' } as never],
+      skipped: [],
+    })
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="select-condition-buy-1"]').setValue(true)
+    await wrapper.get('[data-testid="save-selected-conditions"]').trigger('click')
+    await flushPromises()
+
+    expect(candidateApi.importCandidates).toHaveBeenCalledWith({
+      history_id: 'research-1',
+      candidate_ids: ['buy-1'],
+    })
+    expect(wrapper.get('[data-testid="condition-research-message"]').text()).toContain('已入库 1 条')
+  })
+
+  it('refuses to store candidates when the run has no history record yet', async () => {
+    vi.mocked(researchApi.fetchConditionResearchHistory).mockResolvedValue([])
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="select-condition-buy-1"]').setValue(true)
+    await flushPromises()
+
+    // 没有历史记录可溯源时按钮直接变灰：入库要能追回来源研究，追不回就不该建
+    // 一条没有出处的候选。
+    expect(
+      wrapper.get('[data-testid="save-selected-conditions"]').attributes('disabled'),
+    ).toBeDefined()
+    await wrapper.get('[data-testid="save-selected-conditions"]').trigger('click')
+    await flushPromises()
+    expect(candidateApi.importCandidates).not.toHaveBeenCalled()
   })
 
   it('submits the backend permutation default instead of the old 20', async () => {

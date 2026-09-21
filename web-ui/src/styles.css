@@ -720,3 +720,41 @@ tbody tr:hover td { background: rgba(22, 34, 58, 0.45); }
 .preset-save-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
 .preset-save-row input { flex: 1 1 200px; min-width: 160px; }
 .preset-import-row { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
+.filter-active { color: var(--text); font-weight: 600; }
+.candidate-list { display: grid; gap: 12px; margin-top: 12px; }
+.candidate-card {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.candidate-card header { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.candidate-title { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.candidate-side { font-size: 11px; color: var(--muted); }
+.candidate-status { font-size: 11px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border); }
+.candidate-status.tone-adopted { color: #fbbf24; border-color: rgba(251, 191, 36, 0.4); }
+.candidate-status.tone-rejected { color: var(--subtle); }
+.candidate-status.tone-published { color: #67e8f9; border-color: rgba(103, 232, 249, 0.4); }
+.candidate-source { color: var(--subtle); font-size: 11px; }
+.candidate-significance { margin: 8px 0 0; font-size: 12px; }
+.candidate-significance.tone-up { color: #f87171; }
+.candidate-significance.tone-muted { color: var(--muted); }
+.candidate-significance.tone-warn { color: #fbbf24; }
+.candidate-evidence {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px 14px;
+  margin: 10px 0 0;
+}
+.candidate-evidence dt { color: var(--muted); font-size: 11px; }
+.candidate-evidence dd { margin: 2px 0 0; font-size: 13px; font-variant-numeric: tabular-nums; }
+.candidate-note { margin: 8px 0 0; color: var(--subtle); font-size: 11px; }
+.candidate-actions { display: flex; align-items: center; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+.candidate-publish {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+.publish-warning { color: #fbbf24; }
+.publish-notes { margin: 8px 0 0; padding-left: 18px; color: var(--muted); font-size: 11px; line-height: 1.7; }
+@media (max-width: 900px) { .candidate-evidence { grid-template-columns: 1fr 1fr; } }

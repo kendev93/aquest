@@ -37,7 +37,9 @@ import type {
   ScreenCondition,
   ValueDefinition,
 } from '../types'
+import { importCandidates } from '../api/candidateLibrary'
 import { parseStoredRuleGroup, valueOptionLabel } from '../utils/formulaScreen'
+import { importSummaryText } from '../utils/candidateLibrary'
 import { consumeSwingPlan } from '../utils/swingHandoff'
 import { formatChinaTimestamp } from '../utils/time'
 
@@ -101,6 +103,7 @@ const form = reactive({
 const errors = ref<Record<string, string>>({})
 const message = ref('')
 const loading = ref(false)
+const saving = ref(false)
 const customParseLoading = ref(false)
 const customParseError = ref('')
 const showAdvanced = ref(false)
@@ -604,6 +607,34 @@ async function resumeActiveJob(): Promise<void> {
     message.value = apiMessage(error)
   } finally {
     loading.value = false
+  }
+}
+
+/**
+ * 把勾选的候选存进候选库。
+ *
+ * 和「加入基础规则并重测」是两件事：那条是继续往下挖（改规则、立刻重跑），
+ * 这条是留档——候选编号只在本次报告里有效，研究结果保存在历史里也就只留最近
+ * 20 条。存进库里的证据是快照，不回指这条历史记录。
+ */
+async function saveSelectedCandidates(): Promise<void> {
+  if (!selectedCandidateIds.value.length) return
+  if (!activeHistoryId.value) {
+    message.value = '这次研究还没有历史记录，无法入库。'
+    return
+  }
+  saving.value = true
+  try {
+    const outcome = await importCandidates({
+      history_id: activeHistoryId.value,
+      candidate_ids: [...selectedCandidateIds.value],
+    })
+    message.value = importSummaryText(outcome.added.length, outcome.skipped.length)
+    clearCandidateSelection()
+  } catch (error) {
+    message.value = apiMessage(error)
+  } finally {
+    saving.value = false
   }
 }
 
@@ -1235,6 +1266,7 @@ onMounted(async () => {
         <a class="nav-link" href="/factor-test">因子检验</a>
         <a class="nav-link" href="/history-compare">历史对比</a>
         <a class="nav-link" href="/instrument-lab">标的检验台</a>
+        <a class="nav-link" href="/candidate-library">候选库</a>
       </nav>
       <div class="topbar-status"><span class="status-dot" aria-hidden="true"></span> 本地数据模式</div>
     </header>
@@ -1610,6 +1642,13 @@ onMounted(async () => {
             <div v-else>
               <div class="condition-candidate-actions" data-testid="condition-candidate-actions">
                 <span>已选 {{ selectedCandidateIds.length }} / {{ report.candidates.length }} 条</span>
+                <button
+                  class="primary-button"
+                  data-testid="save-selected-conditions"
+                  type="button"
+                  :disabled="saving || !selectedCandidateIds.length || !activeHistoryId"
+                  @click="saveSelectedCandidates"
+                >加入候选库</button>
                 <button
                   class="secondary-button"
                   data-testid="apply-selected-conditions"
