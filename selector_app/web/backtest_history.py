@@ -15,6 +15,7 @@ BacktestHistoryType = Literal[
     "strategy_fitness",
     "condition_research",
     "swing_research",
+    "factor_test",
 ]
 
 logger = logging.getLogger(__name__)

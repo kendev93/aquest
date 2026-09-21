@@ -35,6 +35,7 @@ _BACKTEST_HISTORY_TYPES = {
     "strategy_fitness",
     "condition_research",
     "swing_research",
+    "factor_test",
 }
 _APP_DATA_DIR_NAME = ".indicator-lab"
 _BAR_COLUMNS = [

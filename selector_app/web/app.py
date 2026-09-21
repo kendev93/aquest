@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse
 from selector_app.adapters.market_data_sync import MarketDataSync
 from selector_app.backtest.service import BacktestService
 from selector_app.condition_research.service import ConditionResearchService
+from selector_app.factor_test.service import FactorTestService
 from selector_app.indicators.cache import IndicatorCache
 from selector_app.indicators.precompute import IndicatorPrecomputeService
 from selector_app.market_data.adapter import (
@@ -86,6 +87,7 @@ def create_app(
     strategy_job_backend: StrategyJobBackend | object | None = None,
     strategy_fitness_service: StrategyFitnessService | object | None = None,
     swing_research_service: SwingResearchService | object | None = None,
+    factor_test_service: FactorTestService | object | None = None,
     local_market_data_service: LocalMarketDataService | object | None = None,
     market_data_store: DuckDbMarketDataStore | object | None = None,
     market_data_adapter: MarketDataAdapter | object | None = None,
@@ -302,6 +304,9 @@ def create_app(
     app.state.swing_research_service = swing_research_service or SwingResearchService(
         adapter=cast(BatchMarketDataAdapter, selected_adapter),
     )
+    app.state.factor_test_service = factor_test_service or FactorTestService(
+        adapter=cast(BatchMarketDataAdapter, selected_adapter),
+    )
     app.state.market_data_store = selected_store
     app.state.market_data_adapter = selected_adapter
     app.state.indicator_cache = selected_indicator_cache
@@ -389,6 +394,7 @@ def create_app(
 
     from .routers.condition_research import router as condition_research_router
     from .routers.data_transfer import router as data_transfer_router
+    from .routers.factor_test import router as factor_test_router
     from .routers.jobs import router as jobs_router
     from .routers.market_data import router as market_data_router
     from .routers.portfolio_backtest import router as portfolio_backtest_router
@@ -403,6 +409,7 @@ def create_app(
     app.include_router(market_data_router, prefix="/api/v1")
     app.include_router(data_transfer_router, prefix="/api/v1")
     app.include_router(condition_research_router, prefix="/api/v1")
+    app.include_router(factor_test_router, prefix="/api/v1")
     app.include_router(portfolio_backtest_router, prefix="/api/v1")
     app.include_router(strategy_discovery_router, prefix="/api/v1")
     app.include_router(strategy_fitness_router, prefix="/api/v1")
