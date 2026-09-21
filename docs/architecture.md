@@ -178,6 +178,16 @@ schema 版本变化或维护备份时，初始化逻辑会先生成带时间戳�
 
 **不做样本外切分**：方向是看全样本的符号定的，前后半段一致只说明「不是某一段独撑」，页面上照此写出来。31 个指标 × 多个前瞻天数的多重性由 BH-FDR 统一校正。细节见 `docs/factor-test-plan.md`。
 
+## 回测历史对比
+
+`selector_app/history_compare/` 把散在各处的 `backtest_history` 记录拉到同一张表里：**只读历史，不重跑任何回测**。取数在 `extract.py`（按类型抽曲线与指标），编排与可比性判断在 `service.py`。
+
+**曲线口径只有三种，不同口径绝不叠绘**：资金曲线（`portfolio` / `single_stock` 的 `equity_curve[].total`）、多空累计价差、累计 IC（后两者只来自 `factor_test`）。条件研究、波段研究、策略适配性**都不产生曲线**——它们只能比样本规模、显著性与各自的专属指标。因子类曲线**不做归一化**（没有本金概念），画进净值图里会被当成收益曲线。
+
+**净值归一化只除以本金**（`performance.start_cash`），取不到才退回除以首值，并在结果里写明用了哪一种。曲线点数上限 1200，超出等距抽样但首尾必留。
+
+**跨类型只比规模与显著性**：统一指标表的每一格都带 `source`（如「组合资金曲线」「逐标的 test 段中位数」「最强候选 · 留出期合并交易」），拿不出来的格子显示「—」+ 原因，绝不用 0 填。可比性警告（曲线口径混杂、区间不重叠、类型混合、样本长度差 ≥3 倍）由服务端生成，前端只负责展示。细节见 `docs/history-compare-plan.md`。
+
 ## API
 
 - `POST /api/v1/market-data/sync-online`（按所选 provider、市场和品种范围在线更新）
@@ -202,6 +212,7 @@ schema 版本变化或维护备份时，初始化逻辑会先生成带时间戳�
 - `POST /api/v1/condition-research`（异步启动全股票逐只规则研究）
 - `GET /api/v1/condition-research/{job_id}`、`GET /api/v1/condition-research/{job_id}/results` 和 `POST /api/v1/condition-research/{job_id}/cancel`
 - `GET /api/v1/condition-research/history` 与 `GET /api/v1/condition-research/history/{history_id}`
+- `GET /api/v1/history-compare/candidates`（跨类型列出可选的历史记录）与 `POST /api/v1/history-compare`（2~5 条一起对比）
 - 既有公式选股、组合回测和策略适配 API 保持路径不变，但只读取 DuckDB；组合和策略适配分别提供 `/history`、`/history/{id}` 和删除接口，策略实验室继续提供同样的历史实验接口，并通过 `/strategy-discovery/{experiment_id}/replays`、`/replay-jobs/{job_id}`、`/replay-jobs/{job_id}/results`、`/replay-jobs/{job_id}/cancel` 和 `/history/{experiment_id}/replays` 管理前十全量复核。
 
 行情查询接口不需要 `vipdoc_path`；请求体里仍保留该字段只为兼容旧客户端，行情统一来自本机 `market.duckdb`。自定义 universe 文件仍可由筛选/回测请求指定，但其中的行情数据来自数据库。
