@@ -13,6 +13,7 @@ from selector_app.market_data.models import InstrumentBoard, InstrumentType
 from selector_app.screening.models import Universe
 from selector_app.screening.rules import RuleGroup
 
+from .mining import DEFAULT_DUPLICATE_CORRELATION
 from .time_split import split_calendar_range
 
 SearchSides = Literal["buy", "sell", "both"]
@@ -76,6 +77,12 @@ class ConditionResearchConfig:
     min_trades: int = 20
     min_instruments: int = 5
     candidate_limit: int = 5
+    # 同义条件合并门槛：两条候选的命中向量相关性达到这个值就算同一个发现，
+    # 只保留排序最好的那条，其余挂在它的 duplicates 里（不静默丢弃）。
+    # 默认 0.6：同一指标的相邻分位阈值相关性约 0.61~0.67，会合并；
+    # 相隔一个分位的降到 0.41，保留为独立候选（它们代表不同的激进度）。
+    # 调到 1.0 ≈ 关闭（仍会合并命中集合几乎完全一致的条件）。
+    duplicate_correlation: float = DEFAULT_DUPLICATE_CORRELATION
     holdout_candidates: int = 1
     # 滚动复验窗口数：把留出段再切成几段，逐个回放同一批候选。1 = 不拆（现状）。
     # 它回答的是"这条挖出来的条件换个时间段还成立吗"，不是真 walk-forward
@@ -125,6 +132,8 @@ class ConditionResearchConfig:
             raise ValueError("最少覆盖股票数必须在 1 到 10000 之间")
         if not 1 <= self.candidate_limit <= 10:
             raise ValueError("候选条件上限必须在 1 到 10 之间")
+        if not 0.5 <= self.duplicate_correlation <= 1.0:
+            raise ValueError("同义条件合并门槛必须在 0.5 和 1 之间")
         if not 1 <= self.holdout_candidates <= 3:
             raise ValueError("留出期复验候选数必须在 1 到 3 之间")
         if not 1 <= self.walk_forward_windows <= 5:
@@ -225,6 +234,7 @@ class ConditionResearchConfig:
             "min_trades": self.min_trades,
             "min_instruments": self.min_instruments,
             "candidate_limit": self.candidate_limit,
+            "duplicate_correlation": self.duplicate_correlation,
             "holdout_candidates": self.holdout_candidates,
             "walk_forward_windows": self.walk_forward_windows,
             "significance_permutations": self.significance_permutations,

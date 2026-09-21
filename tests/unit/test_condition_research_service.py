@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from selector_app.backtest.models import BacktestReport
+from selector_app.condition_research.mining import DuplicateCondition, MinedCondition
 from selector_app.condition_research.models import ConditionResearchConfig
 from selector_app.condition_research.samples import MiningSamples
 from selector_app.condition_research.service import (
@@ -20,6 +21,7 @@ from selector_app.condition_research.service import (
 )
 from selector_app.market_data.models import StockRef
 from selector_app.screening.jobs import TaskUserError
+from selector_app.screening.models import ScreenCondition
 from selector_app.screening.rules import RuleGroup
 
 
@@ -737,6 +739,62 @@ def test_rolling_windows_are_downgraded_when_the_holdout_is_too_short() -> None:
     assert result["rolling"]["enabled"] is False
     # 降级要说出来，不能悄悄少跑几个窗口。
     assert "切不出 3 个窗口" in (result["rolling"]["note"] or "")
+
+
+def test_merged_duplicates_reach_the_report() -> None:
+    """被合并掉的同义条件必须出现在报告里，不能静默消失。"""
+
+    class FixedCandidates(ConditionResearchService):
+        def _mine_candidates(self, config, buy_samples, sell_samples, **kwargs):
+            kept = MinedCondition(
+                condition=ScreenCondition(
+                    left_value="technical.ma5", operator="gte", right_constant=1.0
+                ),
+                support_count=30,
+                support_ratio=0.5,
+                instrument_count=5,
+                outcome_rate=0.8,
+                baseline_rate=0.5,
+                lift=1.6,
+                duplicates=(
+                    DuplicateCondition(
+                        condition=ScreenCondition(
+                            left_value="technical.ma5", operator="gte", right_constant=1.2
+                        ),
+                        correlation=0.612,
+                        lift=1.55,
+                        support_count=28,
+                    ),
+                ),
+            )
+            return [("buy-1", "buy", kept)]
+
+    service = FixedCandidates(
+        adapter=FakeResearchAdapter(),
+        backtest_service=FakePreparedBacktests(),  # type: ignore[arg-type]
+    )
+
+    result = service.run(_rolling_config())
+
+    assert result["duplicate_correlation"] == pytest.approx(0.6)
+    assert result["merged_duplicate_count"] == 1
+    duplicates = result["candidates"][0]["mining"]["duplicates"]
+    assert len(duplicates) == 1
+    assert duplicates[0]["correlation"] == pytest.approx(0.612)
+    assert duplicates[0]["condition"]["right_constant"] == pytest.approx(1.2)
+
+
+def test_duplicate_correlation_travels_with_the_configuration() -> None:
+    """门槛要能随历史记录还原，否则回看时不知道当年的候选是按什么口径合并的。"""
+
+    assert _rolling_config().to_dict()["duplicate_correlation"] == pytest.approx(0.6)
+    assert _rolling_config(duplicate_correlation=0.9).to_dict()["duplicate_correlation"] == (
+        pytest.approx(0.9)
+    )
+    with pytest.raises(ValueError, match="同义条件合并门槛"):
+        _rolling_config(duplicate_correlation=0.2)
+    with pytest.raises(ValueError, match="同义条件合并门槛"):
+        _rolling_config(duplicate_correlation=1.5)
 
 
 def test_rolling_is_skipped_when_no_candidate_reaches_the_holdout() -> None:

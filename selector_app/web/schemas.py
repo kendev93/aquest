@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from selector_app.backtest.models import BacktestConfig
 from selector_app.concurrency import MAX_WORKERS
+from selector_app.condition_research.mining import DEFAULT_DUPLICATE_CORRELATION
 from selector_app.condition_research.models import ConditionResearchConfig
 from selector_app.formulas.custom import FormulaParseError, custom_output_id, parse_formula
 from selector_app.formulas.registry import FORMULA_REGISTRY
@@ -534,6 +535,9 @@ class ConditionResearchRequest(BaseModel):
     min_trades: int = Field(default=20, ge=1, le=100_000)
     min_instruments: int = Field(default=5, ge=1, le=10_000)
     candidate_limit: int = Field(default=5, ge=1, le=10)
+    # 同义条件合并门槛：命中向量相关性达到它就只留一条，其余列在被保留那条下面。
+    # 1.0 ≈ 关闭。
+    duplicate_correlation: float = Field(default=DEFAULT_DUPLICATE_CORRELATION, ge=0.5, le=1.0)
     holdout_candidates: int = Field(default=1, ge=1, le=3)
     # 滚动复验：把留出段再切成几段，逐个回放同一批候选。1 = 不拆（现状）。
     walk_forward_windows: int = Field(default=1, ge=1, le=5)
@@ -627,6 +631,7 @@ class ConditionResearchRequest(BaseModel):
             min_trades=self.min_trades,
             min_instruments=self.min_instruments,
             candidate_limit=self.candidate_limit,
+            duplicate_correlation=self.duplicate_correlation,
             holdout_candidates=self.holdout_candidates,
             walk_forward_windows=self.walk_forward_windows,
             significance_permutations=self.significance_permutations,

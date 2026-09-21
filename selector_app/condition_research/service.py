@@ -34,6 +34,7 @@ from selector_app.strategy_discovery.catalog import default_indicator_catalog
 from . import parallel
 from .metrics import summarize_backtests
 from .mining import (
+    DEFAULT_DUPLICATE_CORRELATION,
     MinedCondition,
     TopNContext,
     build_top_n_context,
@@ -676,6 +677,10 @@ class ConditionResearchService:
             "feature_count": len(feature_ids),
             "min_trades": config.min_trades,
             "min_instruments": config.min_instruments,
+            # 同义条件合并：门槛 + 本次一共合并掉多少条。合并是"换了别条进榜"
+            # 不是"少给几条"，所以数量要能被用户看见。
+            "duplicate_correlation": config.duplicate_correlation,
+            "merged_duplicate_count": sum(len(candidate.duplicates) for _, _, candidate in mined),
             "sample_totals": sample_totals,
             "disclosure": _disclosure(config.universe, len(refs), len(processed)),
             "total_candidates": len(refs),
@@ -986,6 +991,7 @@ class ConditionResearchService:
                         top_n_context=buy_context,
                         permutations=config.significance_permutations,
                         significance_quantile=config.significance_quantile,
+                        duplicate_correlation=config.duplicate_correlation,
                     )
                 )
             )
@@ -1001,6 +1007,7 @@ class ConditionResearchService:
                         excluded=_rule_condition_signatures(config.sell_rule),
                         permutations=config.significance_permutations,
                         significance_quantile=config.significance_quantile,
+                        duplicate_correlation=config.duplicate_correlation,
                     )
                 )
             )
@@ -1052,6 +1059,8 @@ class ConditionResearchService:
             "feature_count": len(feature_ids),
             "min_trades": config.min_trades,
             "min_instruments": config.min_instruments,
+            "duplicate_correlation": config.duplicate_correlation,
+            "merged_duplicate_count": 0,
             "sample_totals": dict(sample_totals),
             "disclosure": _disclosure(config.universe, total, len(processed)),
             "total_candidates": total,
@@ -1166,6 +1175,7 @@ def _mine_sample_sets(
     top_n_context: TopNContext | None = None,
     permutations: int = 0,
     significance_quantile: float = 0.95,
+    duplicate_correlation: float = DEFAULT_DUPLICATE_CORRELATION,
 ) -> tuple[MinedCondition, ...]:
     usable = [sample for sample in samples if len(sample)]
     if not usable:
@@ -1182,6 +1192,7 @@ def _mine_sample_sets(
         top_n_context=top_n_context,
         permutations=permutations,
         significance_quantile=significance_quantile,
+        duplicate_correlation=duplicate_correlation,
     )
 
 
@@ -1302,6 +1313,16 @@ def _mining_dict(candidate: MinedCondition) -> dict[str, object]:
         "lift_threshold": candidate.lift_threshold,
         "permutation_pvalue": candidate.permutation_pvalue,
         "significant": candidate.significant,
+        # 被这条候选合并掉的同义条件。列出来而不是静默删掉，用户才能判断门槛合不合适。
+        "duplicates": [
+            {
+                "condition": _condition_dict(item.condition),
+                "correlation": item.correlation,
+                "lift": item.lift,
+                "support_count": item.support_count,
+            }
+            for item in candidate.duplicates
+        ],
     }
 
 
