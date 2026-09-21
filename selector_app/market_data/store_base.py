@@ -25,7 +25,7 @@ from .day_format import classify_board
 from .maintenance import cleanup_database_backups, create_database_backup
 from .models import DataStoreStatus, InstrumentBoard, InstrumentType
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 SCREEN_HISTORY_LIMIT = 10
 STRATEGY_DISCOVERY_HISTORY_LIMIT = 20
 BACKTEST_HISTORY_LIMIT = 20
@@ -540,6 +540,23 @@ class _DuckDbStoreBase:
                     benchmark_value DOUBLE,
                     drawdown DOUBLE,
                     PRIMARY KEY (strategy_id, trade_date)
+                )
+                """
+            )
+            # 筛选方案：公式选股页整套可复现的输入。和 screen_history 的区别是——
+            # 历史记"跑过什么"（满了自动淘汰），方案记"还想再跑一遍"（只有显式删
+            # 才消失）。payload_json 只存输入，绝不存扫描结果：结果依赖当时行情，
+            # 存下来下次加载的人会以为它还成立。
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS screen_presets (
+                    preset_id VARCHAR PRIMARY KEY,
+                    name VARCHAR NOT NULL,
+                    note VARCHAR NOT NULL DEFAULT '',
+                    created_at TIMESTAMP NOT NULL,
+                    updated_at TIMESTAMP NOT NULL,
+                    payload_json VARCHAR NOT NULL,
+                    UNIQUE (name)
                 )
                 """
             )

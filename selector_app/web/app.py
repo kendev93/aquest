@@ -47,6 +47,7 @@ from selector_app.portfolio_backtest.auto_tracking import (
     StrategyTrackingScheduler,
 )
 from selector_app.portfolio_backtest.service import PortfolioBacktestService
+from selector_app.screen_presets.service import ScreenPresetService
 from selector_app.screening.engine import ScreenEngine
 from selector_app.screening.jobs import (
     ScanEngineLike,
@@ -92,6 +93,7 @@ def create_app(
     factor_test_service: FactorTestService | object | None = None,
     history_compare_service: HistoryCompareService | object | None = None,
     instrument_lab_service: InstrumentLabService | object | None = None,
+    screen_preset_service: ScreenPresetService | object | None = None,
     local_market_data_service: LocalMarketDataService | object | None = None,
     market_data_store: DuckDbMarketDataStore | object | None = None,
     market_data_adapter: MarketDataAdapter | object | None = None,
@@ -321,6 +323,9 @@ def create_app(
             indicator_cache=selected_indicator_cache,
         ),
     )
+    app.state.screen_preset_service = screen_preset_service or ScreenPresetService(
+        selected_store,
+    )
     app.state.market_data_store = selected_store
     app.state.market_data_adapter = selected_adapter
     app.state.indicator_cache = selected_indicator_cache
@@ -414,6 +419,7 @@ def create_app(
     from .routers.jobs import router as jobs_router
     from .routers.market_data import router as market_data_router
     from .routers.portfolio_backtest import router as portfolio_backtest_router
+    from .routers.screen_presets import router as screen_presets_router
     from .routers.strategies import router as strategies_router
     from .routers.strategy_discovery import router as strategy_discovery_router
     from .routers.strategy_fitness import router as strategy_fitness_router
@@ -429,6 +435,7 @@ def create_app(
     app.include_router(history_compare_router, prefix="/api/v1")
     app.include_router(instrument_lab_router, prefix="/api/v1")
     app.include_router(portfolio_backtest_router, prefix="/api/v1")
+    app.include_router(screen_presets_router, prefix="/api/v1")
     app.include_router(strategy_discovery_router, prefix="/api/v1")
     app.include_router(strategy_fitness_router, prefix="/api/v1")
     app.include_router(strategies_router, prefix="/api/v1")

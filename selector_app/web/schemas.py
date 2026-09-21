@@ -1298,6 +1298,44 @@ class SavedStrategyUpdateRequest(BaseModel):
         return self
 
 
+class ScreenPresetCreateRequest(BaseModel):
+    """One named screening configuration.
+
+    ``payload`` 只收「可复现的输入」。服务端会做白名单裁剪并把改了什么写进 notes，
+    所以这里的类型刻意放得宽——真正的约束在 screen_presets.payload 里。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=60)
+    note: str = Field(default="", max_length=200)
+    payload: dict[str, object] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_name(self) -> ScreenPresetCreateRequest:
+        if not self.name.strip():
+            raise ValueError("方案名称不能为空")
+        return self
+
+
+class ScreenPresetUpdateRequest(BaseModel):
+    """Rename, re-note, or overwrite a preset's payload."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=60)
+    note: str | None = Field(default=None, max_length=200)
+    payload: dict[str, object] | None = None
+
+    @model_validator(mode="after")
+    def validate_payload(self) -> ScreenPresetUpdateRequest:
+        if self.name is None and self.note is None and self.payload is None:
+            raise ValueError("至少要修改名称、备注或内容之一")
+        if self.name is not None and not self.name.strip():
+            raise ValueError("方案名称不能为空")
+        return self
+
+
 class HistoryCompareRequest(BaseModel):
     """Two to five archived runs to lay out side by side.
 

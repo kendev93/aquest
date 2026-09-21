@@ -388,6 +388,45 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
     def delete_strategy(self, strategy_id: str) -> bool:
         return self._history.delete_strategy(strategy_id)
 
+    def screen_preset_name_taken(self, name: str, *, exclude_preset_id: str = "") -> bool:
+        return self._history.screen_preset_name_taken(name, exclude_preset_id=exclude_preset_id)
+
+    def save_screen_preset(
+        self,
+        preset_id: str,
+        *,
+        name: str,
+        payload: Mapping[str, object],
+        note: str = "",
+        created_at: datetime | str | None = None,
+    ) -> dict[str, object]:
+        return self._history.save_screen_preset(
+            preset_id,
+            name=name,
+            payload=payload,
+            note=note,
+            created_at=created_at,
+        )
+
+    def list_screen_presets(self) -> list[dict[str, object]]:
+        return self._history.list_screen_presets()
+
+    def read_screen_preset(self, preset_id: str) -> dict[str, object] | None:
+        return self._history.read_screen_preset(preset_id)
+
+    def update_screen_preset(
+        self,
+        preset_id: str,
+        *,
+        name: str | None = None,
+        note: str | None = None,
+        payload: Mapping[str, object] | None = None,
+    ) -> dict[str, object] | None:
+        return self._history.update_screen_preset(preset_id, name=name, note=note, payload=payload)
+
+    def delete_screen_preset(self, preset_id: str) -> bool:
+        return self._history.delete_screen_preset(preset_id)
+
     def update_strategy_summary(
         self,
         strategy_id: str,

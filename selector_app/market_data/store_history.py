@@ -31,11 +31,15 @@ ASSET_TABLES: tuple[str, ...] = (
     "strategy_tracking",
     "strategy_discovery_history",
     "strategy_discovery_replay_history",
+    "screen_presets",
 )
 SAVED_STRATEGY_TABLE = "saved_strategies"
 STRATEGY_TRACKING_TABLE = "strategy_tracking"
 STRATEGY_NAME_MAX_LENGTH = 60
 STRATEGY_NOTE_MAX_LENGTH = 500
+SCREEN_PRESET_TABLE = "screen_presets"
+PRESET_NAME_MAX_LENGTH = 60
+PRESET_NOTE_MAX_LENGTH = 200
 #: 策略追踪状态。只有 off / active 两态——上线后要改规则只能停掉旧的、新开一个，
 #: 没有「暂停后改参数继续」这种说法，否则样本外就不再是样本外了。
 STRATEGY_TRACKING_OFF = "off"
@@ -48,6 +52,7 @@ _STRATEGY_COLUMNS = (
     "strategy_id, name, note, source_history_id, created_at, updated_at, "
     "request_json, summary_json, tracking_status, launched_at, last_tracked_date, last_error"
 )
+_PRESET_COLUMNS = "preset_id, name, note, created_at, updated_at, payload_json"
 
 
 def _require_asset_table(table: str) -> str:
@@ -363,6 +368,39 @@ def _decode_strategy_row(row: tuple[object, ...]) -> dict[str, object]:
         "request": request,
         "summary": summary,
         **_tracking_fields(row),
+    }
+
+
+def _decode_preset_row(row: tuple[object, ...]) -> dict[str, object]:
+    """Decode one ``screen_presets`` row into an API-ready dict."""
+
+    try:
+        payload = json.loads(str(row[5]))
+    except json.JSONDecodeError as exc:
+        raise MarketDataStoreError("方案内容损坏") from exc
+    if not isinstance(payload, dict):
+        raise MarketDataStoreError("方案内容无效")
+    return {
+        "preset_id": str(row[0]),
+        "name": str(row[1]),
+        "note": str(row[2]),
+        "created_at": str(row[3]),
+        "updated_at": str(row[4]),
+        "payload": payload,
+    }
+
+
+def _preset_record(record: Mapping[str, object]) -> dict[str, object]:
+    """Render an in-memory preset record (datetimes) into its API shape."""
+
+    payload = record.get("payload")
+    return {
+        "preset_id": str(record["preset_id"]),
+        "name": str(record["name"]),
+        "note": str(record["note"]),
+        "created_at": str(record["created_at"]),
+        "updated_at": str(record["updated_at"]),
+        "payload": dict(payload) if isinstance(payload, Mapping) else {},
     }
 
 
@@ -1513,6 +1551,194 @@ class DuckDbHistoryStore:
             except Exception:
                 connection.execute("ROLLBACK")
                 raise
+        return deleted is not None
+
+    # ------------------------------------------------------------------
+    # 筛选方案：公式选股页整套可复现的输入，命名保存、随时加载。和 screen_history
+    # 的关系跟策略库/backtest_history 一样——历史记"跑过什么"（满了自动淘汰），
+    # 方案记"还想再跑一遍"（只有显式删才消失）。payload_json 只存输入，不存扫描
+    # 结果：结果依赖当时行情，存下来下次加载的人会以为它还成立。
+    # ------------------------------------------------------------------
+
+    def screen_preset_name_taken(self, name: str, *, exclude_preset_id: str = "") -> bool:
+        """Whether a preset name is already used by another record."""
+
+        normalized = name.strip()
+        if not normalized:
+            return False
+        with self._store._connect(read_only=True) as connection:
+            row = connection.execute(
+                f"SELECT 1 FROM {SCREEN_PRESET_TABLE} WHERE name = ? AND preset_id <> ? LIMIT 1",
+                [normalized, exclude_preset_id.strip()],
+            ).fetchone()
+        return row is not None
+
+    def save_screen_preset(
+        self,
+        preset_id: str,
+        *,
+        name: str,
+        payload: Mapping[str, object],
+        note: str = "",
+        created_at: datetime | str | None = None,
+    ) -> dict[str, object]:
+        """Persist one reusable screening configuration."""
+
+        self._store._require_writer()
+        normalized_id = preset_id.strip()
+        if not normalized_id:
+            raise ValueError("方案 ID 不能为空")
+        normalized_name = name.strip()
+        if not normalized_name:
+            raise ValueError("方案名称不能为空")
+        if len(normalized_name) > PRESET_NAME_MAX_LENGTH:
+            raise ValueError(f"方案名称不能超过 {PRESET_NAME_MAX_LENGTH} 个字符")
+        normalized_note = note.strip()
+        if len(normalized_note) > PRESET_NOTE_MAX_LENGTH:
+            raise ValueError(f"方案备注不能超过 {PRESET_NOTE_MAX_LENGTH} 个字符")
+        if self.screen_preset_name_taken(normalized_name, exclude_preset_id=normalized_id):
+            raise ValueError(f"已存在同名方案: {normalized_name}")
+        created = _normalize_timestamp(created_at, _now())
+        record = {
+            "preset_id": normalized_id,
+            "name": normalized_name,
+            "note": normalized_note,
+            "created_at": created,
+            "updated_at": created,
+            "payload": dict(payload),
+        }
+        with _WRITE_LOCK, self._store._connect() as connection:
+            connection.execute("BEGIN")
+            try:
+                connection.execute(
+                    f"""
+                    INSERT INTO {SCREEN_PRESET_TABLE} (
+                        preset_id, name, note, created_at, updated_at, payload_json
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (preset_id) DO UPDATE SET
+                        name = excluded.name,
+                        note = excluded.note,
+                        updated_at = excluded.updated_at,
+                        payload_json = excluded.payload_json
+                    """,
+                    [
+                        normalized_id,
+                        normalized_name,
+                        normalized_note,
+                        created,
+                        created,
+                        json.dumps(record["payload"], ensure_ascii=False, separators=(",", ":")),
+                    ],
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        return _preset_record(record)
+
+    def list_screen_presets(self) -> list[dict[str, object]]:
+        """Return every saved preset, most recently updated first, without payloads."""
+
+        with self._store._connect(read_only=True) as connection:
+            rows = connection.execute(
+                f"""
+                SELECT {_PRESET_COLUMNS}
+                FROM {SCREEN_PRESET_TABLE}
+                ORDER BY updated_at DESC, preset_id DESC
+                """
+            ).fetchall()
+        records: list[dict[str, object]] = []
+        for row in rows:
+            payload = _decode_preset_row(row)
+            payload.pop("payload", None)
+            records.append(payload)
+        return records
+
+    def read_screen_preset(self, preset_id: str) -> dict[str, object] | None:
+        """Read one saved preset including its replayable payload."""
+
+        with self._store._connect(read_only=True) as connection:
+            row = connection.execute(
+                f"SELECT {_PRESET_COLUMNS} FROM {SCREEN_PRESET_TABLE} WHERE preset_id = ?",
+                [str(preset_id).strip()],
+            ).fetchone()
+        if row is None:
+            return None
+        return _decode_preset_row(row)
+
+    def update_screen_preset(
+        self,
+        preset_id: str,
+        *,
+        name: str | None = None,
+        note: str | None = None,
+        payload: Mapping[str, object] | None = None,
+    ) -> dict[str, object] | None:
+        """Rename, re-note or overwrite the payload of one preset.
+
+        覆盖保存只改 payload 与 updated_at，created_at 不动——「这个方案是什么时候
+        建的」是它自己的历史，不该被最后一次保存抹掉。
+        """
+
+        self._store._require_writer()
+        normalized_id = preset_id.strip()
+        if not normalized_id:
+            return None
+        if name is None and note is None and payload is None:
+            return self.read_screen_preset(normalized_id)
+        normalized_name = name.strip() if isinstance(name, str) else None
+        if normalized_name is not None:
+            if not normalized_name:
+                raise ValueError("方案名称不能为空")
+            if len(normalized_name) > PRESET_NAME_MAX_LENGTH:
+                raise ValueError(f"方案名称不能超过 {PRESET_NAME_MAX_LENGTH} 个字符")
+            if self.screen_preset_name_taken(normalized_name, exclude_preset_id=normalized_id):
+                raise ValueError(f"已存在同名方案: {normalized_name}")
+        normalized_note = note.strip() if isinstance(note, str) else None
+        if normalized_note is not None and len(normalized_note) > PRESET_NOTE_MAX_LENGTH:
+            raise ValueError(f"方案备注不能超过 {PRESET_NOTE_MAX_LENGTH} 个字符")
+        assignments: list[str] = []
+        parameters: list[object] = []
+        if normalized_name is not None:
+            assignments.append("name = ?")
+            parameters.append(normalized_name)
+        if normalized_note is not None:
+            assignments.append("note = ?")
+            parameters.append(normalized_note)
+        if payload is not None:
+            assignments.append("payload_json = ?")
+            parameters.append(json.dumps(dict(payload), ensure_ascii=False, separators=(",", ":")))
+        assignments.append("updated_at = ?")
+        parameters.append(_now())
+        parameters.append(normalized_id)
+        with _WRITE_LOCK, self._store._connect() as connection:
+            connection.execute("BEGIN")
+            try:
+                updated = connection.execute(
+                    f"UPDATE {SCREEN_PRESET_TABLE} SET {', '.join(assignments)} "
+                    "WHERE preset_id = ? RETURNING preset_id",
+                    parameters,
+                ).fetchone()
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        if updated is None:
+            return None
+        return self.read_screen_preset(normalized_id)
+
+    def delete_screen_preset(self, preset_id: str) -> bool:
+        """Delete one saved preset."""
+
+        self._store._require_writer()
+        normalized_id = preset_id.strip()
+        if not normalized_id:
+            return False
+        with _WRITE_LOCK, self._store._connect() as connection:
+            deleted = connection.execute(
+                f"DELETE FROM {SCREEN_PRESET_TABLE} WHERE preset_id = ? RETURNING preset_id",
+                [normalized_id],
+            ).fetchone()
         return deleted is not None
 
     # ------------------------------------------------------------------
