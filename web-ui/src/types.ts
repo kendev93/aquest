@@ -305,6 +305,12 @@ export interface LocalInstrumentMeta {
   pages: number
 }
 
+/** 画在 K 线上的买卖点（回测成交）。 */
+export interface ChartMarker {
+  date: string
+  side: 'buy' | 'sell'
+}
+
 export interface MarketCandle {
   date: string
   open: number | null

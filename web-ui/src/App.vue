@@ -5,6 +5,7 @@ import ConditionResearchPage from './pages/ConditionResearchPage.vue'
 import FactorTestPage from './pages/FactorTestPage.vue'
 import FormulaScreenPage from './pages/FormulaScreenPage.vue'
 import HistoryComparePage from './pages/HistoryComparePage.vue'
+import InstrumentLabPage from './pages/InstrumentLabPage.vue'
 import MarketDataPage from './pages/MarketDataPage.vue'
 import PortfolioBacktestPage from './pages/PortfolioBacktestPage.vue'
 import StrategyDiscoveryPage from './pages/StrategyDiscoveryPage.vue'
@@ -27,6 +28,7 @@ const routeComponent = computed(() => {
   if (pathname.startsWith('/strategy-tracking')) return StrategyTrackingPage
   if (pathname.startsWith('/factor-test')) return FactorTestPage
   if (pathname.startsWith('/history-compare')) return HistoryComparePage
+  if (pathname.startsWith('/instrument-lab')) return InstrumentLabPage
   return FormulaScreenPage
 })
 

@@ -271,4 +271,19 @@ export const TERMS: Record<string, TermDefinition> = {
       '只有记录里查不到本金时才退回「除以首值」——那样曲线的起点会被强制拉到 0%，' +
       '起点本来不是本金这件事就被藏起来了，界面会写明用的是哪一种。',
   },
+  selfPercentile: {
+    name: '自身历史分位',
+    english: 'Self-history percentile',
+    intro:
+      '把这只票自己的历史取值从小到大排一列，看当前值排在什么位置：P80 表示它比自己 80% 的历史取值都高。' +
+      '它只跟这只票自己的过去比，不是跟全市场比——单只票没有横截面可比性，' +
+      '所以不能拿两只票的分位直接比大小。',
+  },
+  conditionDifference: {
+    name: '收益差（百分点）',
+    english: 'Return difference（percentage points）',
+    intro:
+      '命中组的前瞻收益均值减去全样本的前瞻收益均值，用百分点表示。' +
+      '为什么不用倍数：收益能取负，两个负数相除会读成"差三倍"，方向还可能被翻过来。',
+  },
 }

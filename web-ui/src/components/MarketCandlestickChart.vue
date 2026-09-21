@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 
-import type { MarketCandle, MarketChartPeriod, MarketFormulaPanel } from '../types'
+import type {
+  ChartMarker,
+  MarketCandle,
+  MarketChartPeriod,
+  MarketFormulaPanel,
+} from '../types'
 
 interface Props {
   candles: MarketCandle[]
@@ -11,6 +16,8 @@ interface Props {
   showRsi: boolean
   showVolume?: boolean
   formulaPanels: MarketFormulaPanel[]
+  /** 买卖点标记（回测成交）。老页面不传就不画，行为不变。 */
+  markers?: ChartMarker[]
 }
 
 interface Bounds {
@@ -20,6 +27,7 @@ interface Bounds {
 
 const props = withDefaults(defineProps<Props>(), {
   showVolume: true,
+  markers: () => [],
 })
 const selectedIndex = ref<number | null>(null)
 
@@ -198,6 +206,28 @@ const formulaPanelLayouts = computed(() => displayedFormulaPanels.value.map((pan
   }
 }))
 
+const markerLayouts = computed(() => {
+  const byDate = new Map<string, ChartMarker['side']>()
+  for (const marker of props.markers) {
+    if (marker?.date) byDate.set(String(marker.date).slice(0, 10), marker.side)
+  }
+  if (!byDate.size) return []
+  const layouts: { key: string; points: string; side: ChartMarker['side'] }[] = []
+  displayedCandles.value.forEach((candle, index) => {
+    const side = byDate.get(String(candle.date).slice(0, 10))
+    if (!side) return
+    const x = xFor(index)
+    // 买点画在最低价下方（三角形朝上指），卖点画在最高价上方（朝下指）：
+    // 画在 K 线体内会被实体颜色吃掉，看不出方向。
+    const anchor = side === 'buy' ? priceY(numeric(candle.low)) + 16 : priceY(numeric(candle.high)) - 16
+    const points = side === 'buy'
+      ? `${x - 4.5},${anchor} ${x + 4.5},${anchor} ${x},${anchor - 7}`
+      : `${x - 4.5},${anchor} ${x + 4.5},${anchor} ${x},${anchor + 7}`
+    layouts.push({ key: `${candle.date}-${side}`, points, side })
+  })
+  return layouts
+})
+
 const selectedCandle = computed(() => (
   selectedIndex.value === null ? null : displayedCandles.value[selectedIndex.value] ?? null
 ))
@@ -325,6 +355,8 @@ function selectCandleAtPointer(event: MouseEvent): void {
       <span v-for="series in maSeries" :key="series.key" class="legend-line"><i :style="{ background: series.color }"></i>{{ series.label }}</span>
       <span v-if="showRsi" class="legend-line"><i class="legend-rsi"></i>RSI14</span>
       <span v-if="showMacd" class="legend-line"><i class="legend-macd"></i>MACD</span>
+      <span v-if="markerLayouts.length" class="legend-line"><i class="legend-buy"></i>买点</span>
+      <span v-if="markerLayouts.length" class="legend-line"><i class="legend-sell"></i>卖点</span>
     </div>
     <div v-for="panel in formulaPanelLayouts" :key="panel.id" class="formula-panel-summary">
       <strong>{{ panel.display_name }}</strong>
@@ -350,6 +382,16 @@ function selectCandleAtPointer(event: MouseEvent): void {
       </g>
       <g class="ma-lines">
         <polyline v-for="series in maSeries" :key="series.key" :points="series.points" :stroke="series.color"></polyline>
+      </g>
+      <g v-if="markerLayouts.length" class="trade-markers" data-testid="market-chart-markers">
+        <polygon
+          v-for="marker in markerLayouts"
+          :key="marker.key"
+          :points="marker.points"
+          :class="marker.side === 'buy' ? 'marker-buy' : 'marker-sell'"
+        >
+          <title>{{ marker.side === 'buy' ? '买入' : '卖出' }} {{ marker.key.slice(0, 10) }}</title>
+        </polygon>
       </g>
       <line v-if="selectedIndex !== null" class="chart-crosshair" :x1="xFor(selectedIndex)" :x2="xFor(selectedIndex)" :y1="PRICE_TOP" :y2="layout.height" />
       <g class="chart-main-x-axis">
