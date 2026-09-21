@@ -201,8 +201,23 @@ schema 版本变化或维护备份时，初始化逻辑会先生成带时间戳�
 且**不判显著**；可用交易日 < 60 不做置换；分位是**自身历史分位**，不是全市场排名。细节见
 `docs/instrument-lab-plan.md`。
 
+## 筛选方案
+
+`selector_app/screen_presets/` 把公式选股页整套可复现的输入存成命名方案，落在
+`screen_presets` 表（在 `ASSET_TABLES` 里，随用户资产备份导出）。`payload.py` 只做一件事
+——**白名单裁剪**：不认识的字段丢弃、越界值钳回合法区间，改了什么写进 `notes` 一并返回。
+`service.py` 收口名字唯一性与条数上限（200）。
+
+存的内容只有输入：信号 / 条件 / 市场范围 / 板块 / 并发 / 周期 / 自定义公式。**结果、任务
+状态、页码都不存**——结果依赖当时行情，存下来下次加载的人会以为它还成立。
+
 ## API
 
+- `GET /api/v1/screen-presets`（方案列表，不带 payload）
+- `POST /api/v1/screen-presets`（新建，返回被裁剪掉/调整过的字段说明）
+- `GET /api/v1/screen-presets/{id}`（含 payload）
+- `PATCH /api/v1/screen-presets/{id}`（改名 / 改备注 / 覆盖 payload）
+- `DELETE /api/v1/screen-presets/{id}`
 - `POST /api/v1/instrument-lab/values`（一只票的指标取值序列 + 自身历史分位）
 - `GET /api/v1/instrument-lab/conditions/library`（历史里通过置换检验的条件）
 - `POST /api/v1/instrument-lab/conditions/check`（把选中的条件放到这只票上检验）
