@@ -261,6 +261,63 @@ describe('ConditionResearchPage', () => {
     )
   })
 
+  it('renders rolling re-validation windows and marks thin windows as unusable', async () => {
+    const rolling = {
+      ...result,
+      baseline: {
+        ...result.baseline,
+        windows: [
+          { index: 1, start_date: '2024-01-01', end_date: '2024-04-30', calendar_days: 121, trades: 80, win_rate: 0.5 },
+          { index: 2, start_date: '2024-05-01', end_date: '2024-08-31', calendar_days: 123, trades: 70, win_rate: 0.48 },
+          { index: 3, start_date: '2024-09-01', end_date: '2024-12-31', calendar_days: 122, trades: 4, win_rate: 0.75 },
+        ],
+      },
+      rolling: { enabled: true, requested: 3, used: 3, note: null },
+      candidates: [{
+        ...result.candidates[0],
+        windows: [
+          { index: 1, start_date: '2024-01-01', end_date: '2024-04-30', calendar_days: 121, trades: 80, win_rate: 0.62, baseline_win_rate: 0.5, improved_stock_ratio: 0.6, improved_win_rate: true, insufficient_sample: false },
+          { index: 2, start_date: '2024-05-01', end_date: '2024-08-31', calendar_days: 123, trades: 70, win_rate: 0.55, baseline_win_rate: 0.48, improved_stock_ratio: 0.55, improved_win_rate: true, insufficient_sample: false },
+          { index: 3, start_date: '2024-09-01', end_date: '2024-12-31', calendar_days: 122, trades: 4, win_rate: 0.75, baseline_win_rate: 0.4, improved_stock_ratio: 0.8, improved_win_rate: true, insufficient_sample: true },
+        ],
+        consistency: {
+          requested: 3, used: 3, evaluated: 2, skipped: 1, better_than_baseline: 2,
+          median_win_rate: 0.585, worst_win_rate: 0.55,
+          median_improved_stock_ratio: 0.575,
+          note: '1 个窗口成交数不足 20 笔，未计入一致性统计',
+        },
+      }],
+    } as unknown as ConditionResearchReport
+    vi.mocked(researchApi.getConditionResearchResults).mockResolvedValue(rolling)
+
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+
+    const row = wrapper.get('[data-testid="condition-rolling-buy-1"]')
+    // 样本不足的窗口既不算通过也不算没通过，分母要跟着减。
+    expect(wrapper.get('[data-testid="rolling-consistency-buy-1"]').text()).toContain('2/2')
+    expect(wrapper.get('[data-testid="rolling-consistency-buy-1"]').text()).toContain('1 窗样本不足')
+    expect(row.text()).toContain('样本不足')
+    expect(row.text()).toContain('62.00%')
+    expect(row.text()).toContain('基线 50.00%')
+    expect(wrapper.text()).toContain('滚动复验')
+  })
+
+  it('submits the rolling window count and restores it from history', async () => {
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="condition-walk-forward"]').setValue('3')
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(researchApi.createConditionResearch).toHaveBeenCalledWith(
+      expect.objectContaining({ walk_forward_windows: 3 }),
+    )
+  })
+
   it('flags lifts that a shuffled-label search could have produced by chance', async () => {
     const noisy = {
       ...result,

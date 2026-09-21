@@ -81,6 +81,7 @@ const form = reactive({
   minInstruments: 5,
   candidateLimit: 5,
   holdoutCandidates: 1,
+  walkForwardWindows: 1,
   // 0 = 不做检验。默认 200 次：20 次时名义 5% 的门槛实测误报 11.7%，
   // 200 次回落到 3.3%（后端默认值已同步为 200，前端不能把它覆盖回 20）。
   significancePermutations: 200,
@@ -428,6 +429,9 @@ function validate(): Record<string, string> {
   if (!Number.isInteger(form.holdoutCandidates) || form.holdoutCandidates < 1 || form.holdoutCandidates > 3) {
     next.holdoutCandidates = '最终留出候选数必须在 1 到 3 之间。'
   }
+  if (!Number.isInteger(form.walkForwardWindows) || form.walkForwardWindows < 1 || form.walkForwardWindows > 5) {
+    next.walkForwardWindows = '滚动复验窗口数必须在 1 到 5 之间。'
+  }
   if (
     !Number.isInteger(form.significancePermutations)
     || form.significancePermutations < 0
@@ -464,6 +468,7 @@ function buildPayload(): ConditionResearchPayload {
     min_instruments: form.minInstruments,
     candidate_limit: form.candidateLimit,
     holdout_candidates: form.holdoutCandidates,
+    walk_forward_windows: form.walkForwardWindows,
     significance_permutations: form.significancePermutations,
     ranking_value: rankingValue.value || null,
     rank_order: rankingOrder.value,
@@ -723,6 +728,10 @@ async function applyStoredRequest(raw: unknown): Promise<void> {
     form.minInstruments = finiteNumber(request.min_instruments, form.minInstruments)
     form.candidateLimit = finiteNumber(request.candidate_limit, form.candidateLimit)
     form.holdoutCandidates = finiteNumber(request.holdout_candidates, form.holdoutCandidates)
+    form.walkForwardWindows = finiteNumber(
+      request.walk_forward_windows,
+      form.walkForwardWindows,
+    )
     form.significancePermutations = finiteNumber(
       request.significance_permutations,
       form.significancePermutations,
@@ -1024,6 +1033,30 @@ function validationTrades(candidate: ConditionResearchCandidate): string {
   return threshold ? trades + ' / ' + threshold : String(trades)
 }
 
+const rollingCandidates = computed(() =>
+  (report.value?.candidates ?? []).filter(
+    (candidate) => (candidate.windows ?? []).length > 0 && candidate.consistency,
+  ),
+)
+
+const rollingBaselineWindows = computed(() => report.value?.baseline.windows ?? [])
+
+function rollingWindowBaseline(index: number): number | null {
+  return rollingBaselineWindows.value.find((item) => item.index === index)?.win_rate ?? null
+}
+
+function rollingNote(candidate: ConditionResearchCandidate): string {
+  const consistency = candidate.consistency
+  if (!consistency) return ''
+  const parts = [
+    `${consistency.better_than_baseline}/${consistency.evaluated} 个窗口优于基线`,
+  ]
+  if (consistency.skipped > 0) {
+    parts.push(`${consistency.skipped} 个窗口成交数不足，未计入`)
+  }
+  return parts.join('；')
+}
+
 function constraintText(candidate: ConditionResearchCandidate): string {
   if (candidate.passed_constraints) return '通过验证'
   const failures = candidate.constraint_failures ?? []
@@ -1276,6 +1309,19 @@ onMounted(async () => {
                 <input id="condition-permutations" v-model.number="form.significancePermutations" data-testid="condition-permutations" type="number" min="0" max="500" step="10">
               </div>
             </div>
+            <div class="compact-fields condition-fields-top">
+              <div>
+                <label for="condition-walk-forward">滚动复验窗口数<TermHint term="rollingWindows" /></label>
+                <select id="condition-walk-forward" v-model.number="form.walkForwardWindows" data-testid="condition-walk-forward">
+                  <option :value="1">不拆（只复验一次）</option>
+                  <option :value="2">2 个窗口</option>
+                  <option :value="3">3 个窗口</option>
+                  <option :value="4">4 个窗口</option>
+                  <option :value="5">5 个窗口</option>
+                </select>
+              </div>
+            </div>
+            <p class="helper">把最终留出期再切成几段，逐个回放同一批候选，看这条条件在不同时间段是否都成立。窗口太短会自动减少，并在结果里说明。</p>
             <p v-if="errors.significancePermutations" class="field-error">{{ errors.significancePermutations }}</p>
             <div class="compact-fields condition-fields-top">
               <div><label>主目标</label><p class="field-static">跨股票交易胜率提升</p></div>
@@ -1526,6 +1572,66 @@ onMounted(async () => {
                           @click="selectedStockView = candidate.candidate_id + ':full'"
                         >个股</button>
                         <span v-else class="muted-code">未进留出期</span>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div v-if="report?.rolling?.enabled" class="condition-rolling">
+              <div class="section-heading">
+                <div>
+                  <span class="section-kicker">ROLLING RE-VALIDATION</span>
+                  <h3>滚动复验<TermHint term="rollingConsistency" /></h3>
+                </div>
+              </div>
+              <p class="helper">
+                同一批候选在留出期的 {{ report.rolling.used }} 个连续窗口上各回放一次。
+                表里只列事实——几个窗口跑赢了同一窗口的基线规则，以及各窗的原始胜率。
+              </p>
+              <p v-if="report.rolling.note" class="scope-helper" data-testid="condition-rolling-note">{{ report.rolling.note }}</p>
+              <div class="table-wrap">
+                <table>
+                  <caption class="sr-only">滚动复验逐窗结果</caption>
+                  <thead>
+                    <tr>
+                      <th>候选</th>
+                      <th>优于基线</th>
+                      <th>中位胜率</th>
+                      <th>最差窗口</th>
+                      <th
+                        v-for="window in rollingBaselineWindows"
+                        :key="window.index"
+                        :title="'窗口 ' + window.index + '：' + window.start_date + ' 至 ' + window.end_date + '，基线胜率 ' + formatPercent(window.win_rate)"
+                      >窗口 {{ window.index }}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr
+                      v-for="candidate in rollingCandidates"
+                      :key="candidate.candidate_id"
+                      :data-testid="'condition-rolling-' + candidate.candidate_id"
+                    >
+                      <td class="condition-rule">{{ conditionText(candidate) }}</td>
+                      <td :data-testid="'rolling-consistency-' + candidate.candidate_id">
+                        {{ candidate.consistency?.better_than_baseline }}/{{ candidate.consistency?.evaluated }}
+                        <span v-if="(candidate.consistency?.skipped ?? 0) > 0" class="muted-code">（{{ candidate.consistency?.skipped }} 窗样本不足）</span>
+                      </td>
+                      <td>{{ formatPercent(candidate.consistency?.median_win_rate) }}</td>
+                      <td>{{ formatPercent(candidate.consistency?.worst_win_rate) }}</td>
+                      <td
+                        v-for="window in candidate.windows ?? []"
+                        :key="window.index"
+                        :class="{ positive: window.improved_win_rate === true, negative: window.improved_win_rate === false }"
+                        :title="rollingNote(candidate)"
+                      >
+                        <template v-if="window.insufficient_sample">
+                          <span class="muted-code" title="该窗口成交笔数不足，不判优劣">样本不足</span>
+                        </template>
+                        <template v-else>
+                          {{ formatPercent(window.win_rate) }}
+                          <small class="muted-code">基线 {{ formatPercent(window.baseline_win_rate ?? rollingWindowBaseline(window.index)) }}</small>
+                        </template>
                       </td>
                     </tr>
                   </tbody>

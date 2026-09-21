@@ -98,6 +98,22 @@ export const TERMS: Record<string, TermDefinition> = {
       '检验的做法是把交易结果随机打乱再挖一遍，看纯运气能把提升推到多高，用那个数当门槛。' +
       '次数越多门槛越稳，但每次大约要多花挖掘耗时的十分之一；填 0 表示不检验，结果里就不显示显著性。',
   },
+  rollingWindows: {
+    name: '滚动复验窗口数',
+    english: 'Rolling re-validation windows',
+    intro:
+      '把最终留出期再切成几段，用同一批候选条件在每一段上各回放一次，看它在几个时间段里都成立。' +
+      '挖掘只在训练段做一次，各窗口共用同一批条件，所以窗口之间可以直接比较——' +
+      '这不是「每个窗口重新挖一遍」的真 walk-forward。窗口太短（少于 30 个自然日）会自动减少并在结果里说明。',
+  },
+  rollingConsistency: {
+    name: '滚动一致性',
+    english: 'Rolling consistency（windows better than baseline）',
+    intro:
+      '几个窗口里有几个跑赢了同一窗口的基线规则，以及这些窗口的中位胜率和最差胜率。' +
+      '窗口内成交笔数不足时该窗标「样本不足」，并从统计里剔掉——没样本不等于没通过。' +
+      '我们只给这些数字，不替你判定「算不算稳健」，阈值该由你的用途决定。',
+  },
   swingThreshold: {
     name: '波段阈值',
     english: 'Reversal multiple（× ATR）',

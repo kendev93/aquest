@@ -970,6 +970,8 @@ export interface ConditionResearchPayload {
   min_instruments?: number
   candidate_limit?: number
   holdout_candidates?: number
+  /** 滚动复验窗口数：1 = 不拆，只复验一次。 */
+  walk_forward_windows?: number
   /** 置换检验次数：0 = 不检验。 */
   significance_permutations?: number
   /** 门槛分位数，默认 0.95。 */
@@ -1062,6 +1064,47 @@ export interface ConditionResearchSummary {
   stocks?: ConditionResearchStockResult[]
 }
 
+/** 滚动复验里单个窗口的基线成绩。 */
+export interface ConditionResearchBaselineWindow {
+  index: number
+  start_date: string
+  end_date: string
+  calendar_days: number
+  trades: number
+  win_rate: number | null
+}
+
+/** 滚动复验里单个窗口的成绩：同一批候选在同一个切片上的表现。 */
+export interface ConditionResearchWindow {
+  index: number
+  start_date: string
+  end_date: string
+  calendar_days: number
+  trades: number
+  win_rate: number | null
+  baseline_win_rate: number | null
+  improved_stock_ratio: number | null
+  improved_win_rate: boolean | null
+  /** 窗口内成交数不足：不判优劣，直接从一致性统计里剔除。 */
+  insufficient_sample: boolean
+}
+
+/**
+ * 一致性汇总。刻意不给「稳健/不稳健」的结论——只给「几个窗口里几个优于基线」
+ * 加每窗原始数值，判定阈值交给用户。
+ */
+export interface ConditionResearchConsistency {
+  requested: number
+  used: number
+  evaluated: number
+  skipped: number
+  better_than_baseline: number
+  median_win_rate: number | null
+  worst_win_rate: number | null
+  median_improved_stock_ratio: number | null
+  note: string | null
+}
+
 export interface ConditionResearchCandidate {
   candidate_id: string
   side: 'buy' | 'sell'
@@ -1072,6 +1115,8 @@ export interface ConditionResearchCandidate {
   constraint_failures: string[]
   full_period: ConditionResearchSummary | null
   holdout: ConditionResearchSummary | null
+  windows?: ConditionResearchWindow[]
+  consistency?: ConditionResearchConsistency | null
 }
 
 export interface ConditionResearchRankingEvidence {
@@ -1143,6 +1188,15 @@ export interface ConditionResearchReport {
     validation?: ConditionResearchSummary
     full_period?: ConditionResearchSummary
     holdout?: ConditionResearchSummary
+    /** 滚动复验时逐窗的基线成绩，候选的胜率要拿它当对照。 */
+    windows?: ConditionResearchBaselineWindow[]
+  }
+  /** 滚动复验是否真的跑了（留出段太短会自动降级到 1 窗 = 未启用）。 */
+  rolling?: {
+    enabled: boolean
+    requested: number
+    used: number
+    note: string | null
   }
   candidates: ConditionResearchCandidate[]
   diagnostic?: string
