@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
@@ -22,8 +23,17 @@ _PERMUTATION_SEED = 20240918
 # rsi14 vs ma20) stay well inside the limit.
 _MAX_SCALE_RATIO = 100.0
 # Two conditions whose matching samples agree this closely are the same finding
-# for the study; only the best-ranked one is reported.
+# for the study; only the best-ranked one is reported. This is the fallback rule:
+# it fires even when the correlation cannot be computed.
 _DUPLICATE_AGREEMENT = 0.995
+# Two conditions whose hit vectors correlate at least this strongly are the same
+# finding wearing different thresholds. See ``docs/duplicate-merging-plan.md``:
+# the same indicator at adjacent quantile thresholds lands near 0.6~0.7, while
+# thresholds two quantiles apart drop to ~0.4 and stay separate - they are a
+# different aggressiveness, not a repeat. Picking a cut point *within* one
+# finding is what parameter sensitivity analysis is for, not what a candidate
+# slot is for.
+DEFAULT_DUPLICATE_CORRELATION = 0.6
 # Defence in depth. The caller already restricts mined features to the
 # cross-stock comparable set, so none of these should arrive today; they stay
 # listed because "never mine an absolute price level into a shared threshold" is
@@ -111,24 +121,78 @@ def _comparable_scale(left: np.ndarray, right: np.ndarray) -> bool:
     return max(left_spread, right_spread) / min(left_spread, right_spread) <= _MAX_SCALE_RATIO
 
 
-def _masks_agree(
-    left: np.ndarray,
-    right: np.ndarray,
-    *,
-    threshold: float = _DUPLICATE_AGREEMENT,
-) -> bool:
-    """True when two candidate match sets select effectively the same samples.
+def _jaccard(left: np.ndarray, right: np.ndarray) -> float:
+    """Overlap of two match sets, measured as ``intersection / union``.
 
-    Both arguments are sorted arrays of sample positions. Overlap is measured
-    as ``intersection / union`` over those positions, which is the same ratio
-    the earlier boolean-mask version computed on the rows where either matched.
+    Both arguments are sorted arrays of sample positions. This is the same ratio
+    the earlier boolean-mask version computed on the rows where either matched,
+    and it is the cheap pre-filter in front of ``_phi_correlation``: a Jaccard of
+    ``j`` caps the correlation at roughly ``2j / (1 + j)``, so a pair below
+    ``t / (2 - t)`` can never reach a threshold of ``t`` and is skipped before
+    any of the expensive counting happens.
     """
 
     union = np.union1d(left, right)
     if union.size == 0:
-        return False
+        return 0.0
     intersection = np.intersect1d(left, right)
-    return float(intersection.size / union.size) >= threshold
+    return float(intersection.size / union.size)
+
+
+def _bits(mask: np.ndarray) -> int:
+    """Pack a sample-space mask into one integer for O(n/64) intersections.
+
+    Counting the intersection of two evaluable-sample sets is the only step in
+    the duplicate check that touches the whole sample space, and it runs once
+    per candidate pair. Packing turns that into a single machine-word-wise AND
+    plus a popcount instead of a full-length boolean pass.
+    """
+
+    return int.from_bytes(np.packbits(mask).tobytes(), "big")
+
+
+def _phi_correlation(
+    matched: np.ndarray,
+    other_matched: np.ndarray,
+    *,
+    valid: np.ndarray,
+    other_valid: np.ndarray,
+    valid_bits: int,
+    other_valid_bits: int,
+) -> float | None:
+    """Correlation of two conditions' hit vectors (the phi coefficient).
+
+    Two conditions are scored on different sample spaces - every indicator has
+    its own gaps - so the comparison is restricted to the samples both can
+    evaluate. Everything else would silently credit one condition with hits it
+    never had a chance to make.
+
+    Returns None when the coefficient is undefined (an empty overlap, or a
+    degenerate table where the two masks together cover every evaluable sample).
+    The caller decides what to do; nothing here guesses a value.
+    """
+
+    total = (valid_bits & other_valid_bits).bit_count()
+    if total == 0:
+        return None
+    both = int(np.intersect1d(matched, other_matched).size)
+    # A match set is always inside its own valid space, so what remains is how
+    # much of it survives into the *other* condition's space.
+    only_left = int(other_valid[matched].sum()) - both
+    only_right = int(valid[other_matched].sum()) - both
+    neither = total - both - only_left - only_right
+    if min(only_left, only_right, neither) < 0:
+        return None
+    numerator = both * neither - only_left * only_right
+    denominator = math.sqrt(
+        float(both + only_left)
+        * float(only_right + neither)
+        * float(both + only_right)
+        * float(only_left + neither)
+    )
+    if denominator <= 0.0:
+        return None
+    return float(numerator / denominator)
 
 
 def _permutation_max_lifts(
@@ -207,6 +271,22 @@ def _with_significance(
 
 
 @dataclass(frozen=True)
+class DuplicateCondition:
+    """A condition the study dropped because it repeats the one it is listed on.
+
+    Dropping is invisible by default, which is exactly the problem: a condition
+    the study threw away and a condition it never found look identical on the
+    report. Keeping the text, the correlation and the lift makes the merge
+    auditable - the reader can disagree with the threshold and see what it cost.
+    """
+
+    condition: ScreenCondition
+    correlation: float
+    lift: float
+    support_count: int
+
+
+@dataclass(frozen=True)
 class MinedCondition:
     """A single numeric condition enriched for the requested trade outcome."""
 
@@ -239,6 +319,9 @@ class MinedCondition:
     # configured quantile so it can never contradict the p-value shown next to
     # it. None when no permutation test ran.
     significant: bool | None = None
+    # Conditions this one absorbed: same finding, different wording, ranked
+    # lower. Empty when nothing was merged into it.
+    duplicates: tuple[DuplicateCondition, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -292,6 +375,7 @@ def mine_binary_conditions(
     permutations: int = 0,
     significance_quantile: float = 0.95,
     permutation_seed: int | None = None,
+    duplicate_correlation: float = DEFAULT_DUPLICATE_CORRELATION,
 ) -> tuple[MinedCondition, ...]:
     """Find readable thresholds whose matching samples are enriched for an outcome.
 
@@ -313,6 +397,12 @@ def mine_binary_conditions(
     noise; the test re-scores the *same* candidate masks against shuffled
     labels and reports how high the best lift gets by chance. Results stay
     deterministic because the shuffle uses a fixed seed by default.
+
+    Conditions whose hit vectors correlate at ``duplicate_correlation`` or above
+    are the same finding, so only the best-ranked one is returned and the rest
+    are attached to it as ``duplicates`` rather than vanishing. Slots freed this
+    way are refilled from further down the ranking, so merging never shrinks the
+    result - it changes which conditions occupy it.
     """
 
     if min_support < 1:
@@ -325,6 +415,10 @@ def mine_binary_conditions(
         raise ValueError("置换检验次数不能为负数")
     if not 0.0 < significance_quantile <= 1.0:
         raise ValueError("显著性分位数必须在 0 和 1 之间")
+    # 1.0 means "only merge exact repeats", which is as close to off as the rule
+    # gets - the 0.995 overlap fallback still applies below it.
+    if not 0.5 <= duplicate_correlation <= 1.0:
+        raise ValueError("同义条件合并门槛必须在 0.5 和 1 之间")
     resolved_quantiles = tuple(sorted(set(float(value) for value in quantiles)))
     if not resolved_quantiles or any(not 0.0 < value < 1.0 for value in resolved_quantiles):
         raise ValueError("候选分位数必须在 0 和 1 之间")
@@ -376,6 +470,9 @@ def mine_binary_conditions(
     # when no feature has gaps, every pair shares one mask, and keying by pair
     # used to store hundreds of identical copies of it.
     baselines: dict[bytes, tuple[np.ndarray, np.ndarray]] = {}
+    # Packed form of each distinct evaluable-sample mask, built once per mask
+    # rather than once per candidate pair.
+    bit_cache: dict[bytes, int] = {}
     seen_rules: set[tuple[str, str, str | None, float | None]] = set()
 
     def record(
@@ -522,10 +619,53 @@ def mine_binary_conditions(
         if null_max_lifts
         else None
     )
+    # A Jaccard below this cannot reach ``duplicate_correlation`` no matter how
+    # the rest of the table falls out, so those pairs never pay for a count.
+    prefilter = min(duplicate_correlation / (2.0 - duplicate_correlation), _DUPLICATE_AGREEMENT)
     selected: list[MinedCondition] = []
     kept_matches: list[np.ndarray] = []
-    for scored_candidate, matched, _baseline_key in ranked:
-        if any(_masks_agree(matched, kept) for kept in kept_matches):
+    kept_valid: list[np.ndarray] = []
+    kept_bits: list[int] = []
+    # Parallel to ``selected``: what each kept condition absorbed. Filled in
+    # place because a candidate only learns its duplicates after the whole
+    # ranked list has been walked.
+    merged: list[list[DuplicateCondition]] = []
+    for scored_candidate, matched, baseline_key in ranked:
+        valid_mask, _valid_groups = baselines[baseline_key]
+        valid_bits = bit_cache.setdefault(baseline_key, _bits(valid_mask))
+        duplicate_of: int | None = None
+        correlation = 0.0
+        for index, kept in enumerate(kept_matches):
+            overlap = _jaccard(matched, kept)
+            if overlap < prefilter:
+                continue
+            value = _phi_correlation(
+                matched,
+                kept,
+                valid=valid_mask,
+                other_valid=kept_valid[index],
+                valid_bits=valid_bits,
+                other_valid_bits=kept_bits[index],
+            )
+            if value is None:
+                # Undefined, not zero. Fall back to the plain overlap rule
+                # rather than pretending the pair is independent.
+                if overlap < _DUPLICATE_AGREEMENT:
+                    continue
+                value = 1.0
+            if value >= duplicate_correlation or overlap >= _DUPLICATE_AGREEMENT:
+                duplicate_of = index
+                correlation = value
+                break
+        if duplicate_of is not None:
+            merged[duplicate_of].append(
+                DuplicateCondition(
+                    condition=scored_candidate.condition,
+                    correlation=correlation,
+                    lift=scored_candidate.lift,
+                    support_count=scored_candidate.support_count,
+                )
+            )
             continue
         selected.append(
             _with_significance(
@@ -536,9 +676,14 @@ def mine_binary_conditions(
             )
         )
         kept_matches.append(matched)
+        kept_valid.append(valid_mask)
+        kept_bits.append(valid_bits)
+        merged.append([])
         if len(selected) == limit:
             break
-    return tuple(selected)
+    return tuple(
+        replace(candidate, duplicates=tuple(items)) for candidate, items in zip(selected, merged)
+    )
 
 
 def _has_two_distinct(values: np.ndarray, finite_mask: np.ndarray) -> bool:

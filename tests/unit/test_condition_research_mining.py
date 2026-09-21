@@ -5,6 +5,8 @@ import pandas as pd
 import pytest
 
 from selector_app.condition_research.mining import (
+    _bits,
+    _phi_correlation,
     build_top_n_context,
     equivalent_condition_signatures,
     mine_binary_conditions,
@@ -561,3 +563,166 @@ def test_significance_fields_are_absent_without_a_permutation_test() -> None:
     assert best.lift_threshold is None
     assert best.permutation_pvalue is None
     assert best.significant is None
+
+
+# --- 同义条件合并 -----------------------------------------------------------
+
+
+def _duplicate_frame() -> tuple[pd.DataFrame, pd.Series, pd.Series]:
+    """一个单调递增的特征：高分段的样本全部盈利，低分段全部亏损。
+
+    默认分位会给出 4 个嵌套阈值（命中前 80% / 60% / 40% / 20%），正是
+    「同一个发现的四个写法」——合并逻辑要收敛它们，而不是全列出来。
+    """
+
+    size = 200
+    values = np.arange(size, dtype=float)
+    return (
+        pd.DataFrame({"technical.f0": values}),
+        pd.Series(values >= size / 2),
+        pd.Series([f"SH60000{index % 5}" for index in range(size)]),
+    )
+
+
+def _mine_duplicates(*, duplicate_correlation: float, limit: int = 5) -> tuple:
+    features, outcomes, symbols = _duplicate_frame()
+    return mine_binary_conditions(
+        features,
+        outcomes,
+        symbols,
+        min_support=20,
+        min_instruments=3,
+        limit=limit,
+        duplicate_correlation=duplicate_correlation,
+    )
+
+
+def test_phi_correlation_matches_the_closed_form_of_nested_masks() -> None:
+    """嵌套掩码可以解析地算：√(p(1−q) / q(1−p))，用它把实现锚住。"""
+
+    valid = np.ones(100, dtype=bool)
+    bits = _bits(valid)
+    # 外层命中 40%、内层命中 20% ⇒ φ = √(0.2·0.6 / 0.4·0.8) = 0.612
+    outer = np.arange(40)
+    inner = np.arange(20)
+    value = _phi_correlation(
+        inner, outer, valid=valid, other_valid=valid, valid_bits=bits, other_valid_bits=bits
+    )
+    assert value == pytest.approx(0.612, abs=1e-3)
+    assert _phi_correlation(
+        inner, inner, valid=valid, other_valid=valid, valid_bits=bits, other_valid_bits=bits
+    ) == pytest.approx(1.0)
+
+
+def test_phi_correlation_is_negative_for_complementary_conditions() -> None:
+    """互补条件是相反的发现（ρ = −1），绝不能被当成同义合并掉。"""
+
+    valid = np.ones(100, dtype=bool)
+    bits = _bits(valid)
+    value = _phi_correlation(
+        np.arange(50),
+        np.arange(50, 100),
+        valid=valid,
+        other_valid=valid,
+        valid_bits=bits,
+        other_valid_bits=bits,
+    )
+    assert value == pytest.approx(-1.0)
+
+
+def test_phi_correlation_is_restricted_to_samples_both_can_evaluate() -> None:
+    """两条条件的可评估样本不同，φ 只能在交集上算，否则会白送命中。"""
+
+    everything = np.ones(100, dtype=bool)
+    first_half = np.zeros(100, dtype=bool)
+    first_half[:50] = True
+    # 交集只有前 50 个样本：A 命中其中 40 个，B 命中其中 30 个且全在 A 里。
+    value = _phi_correlation(
+        np.arange(40),
+        np.arange(30),
+        valid=everything,
+        other_valid=first_half,
+        valid_bits=_bits(everything),
+        other_valid_bits=_bits(first_half),
+    )
+    assert value == pytest.approx(0.612, abs=1e-3)
+
+
+def test_phi_correlation_is_none_when_it_cannot_be_computed() -> None:
+    """并集覆盖全部可评估样本时列联表退化：返回 None，不猜一个数。"""
+
+    valid = np.ones(100, dtype=bool)
+    bits = _bits(valid)
+    assert (
+        _phi_correlation(
+            np.arange(100),
+            np.arange(50),
+            valid=valid,
+            other_valid=valid,
+            valid_bits=bits,
+            other_valid_bits=bits,
+        )
+        is None
+    )
+
+
+def test_adjacent_thresholds_of_one_finding_are_merged_and_listed() -> None:
+    candidates = _mine_duplicates(duplicate_correlation=0.6)
+
+    assert [item.condition.right_constant for item in candidates] == pytest.approx(
+        [119.4, 39.8], abs=0.05
+    )
+    merged = candidates[0].duplicates
+    assert len(merged) == 2
+    # 相邻分位阈值：40%/20% 与 60%/40% 分别约 0.667 与 0.612。
+    assert sorted(item.correlation for item in merged) == pytest.approx([0.612, 0.667], abs=1e-3)
+    assert {round(item.support_count) for item in merged} == {40, 120}
+    # 被合并掉的条件必须留痕：条件文本 + lift 都在，用户能自己判断门槛合不合适。
+    assert all(item.lift > 1.0 for item in merged)
+    assert candidates[-1].duplicates == ()
+
+
+def test_thresholds_two_quantiles_apart_stay_separate() -> None:
+    """相隔一个分位的相关性只有 ~0.41：那是不同的激进度，不是重复。"""
+
+    candidates = _mine_duplicates(duplicate_correlation=0.6)
+
+    assert len(candidates) == 2
+    assert candidates[1].condition.right_constant == pytest.approx(39.8, abs=0.05)
+
+
+def test_merging_frees_the_slot_for_a_different_condition() -> None:
+    """合并不是"少给几条"，空出的名额由更靠后的不同义条件顶上。"""
+
+    merged = _mine_duplicates(duplicate_correlation=0.6, limit=2)
+    unmerged = _mine_duplicates(duplicate_correlation=1.0, limit=2)
+
+    assert [item.condition.right_constant for item in unmerged] == pytest.approx(
+        [119.4, 159.2], abs=0.05
+    )
+    # 第二名从"同一个发现的另一个阈值"换成了一个真正不同的切点。
+    assert merged[1].condition.right_constant == pytest.approx(39.8, abs=0.05)
+
+
+def test_a_correlation_of_one_keeps_repeats_but_still_merges_identical_masks() -> None:
+    """门槛调到 1 ≈ 关闭：重复写法会保留下来，由用户自己看。"""
+
+    candidates = _mine_duplicates(duplicate_correlation=1.0)
+
+    assert len(candidates) == 4
+    assert all(item.duplicates == () for item in candidates)
+
+
+def test_duplicate_correlation_must_stay_in_a_meaningful_range() -> None:
+    features, outcomes, symbols = _duplicate_frame()
+    for value in (0.0, 0.49, 1.01, 2.0):
+        with pytest.raises(ValueError, match="同义条件合并门槛"):
+            mine_binary_conditions(
+                features,
+                outcomes,
+                symbols,
+                min_support=20,
+                min_instruments=3,
+                limit=5,
+                duplicate_correlation=value,
+            )
