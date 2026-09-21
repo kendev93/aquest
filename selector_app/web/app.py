@@ -24,6 +24,7 @@ from selector_app.factor_test.service import FactorTestService
 from selector_app.history_compare.service import HistoryCompareService
 from selector_app.indicators.cache import IndicatorCache
 from selector_app.indicators.precompute import IndicatorPrecomputeService
+from selector_app.instrument_lab.service import InstrumentLabService
 from selector_app.market_data.adapter import (
     BatchMarketDataAdapter,
     DuckDbMarketDataAdapter,
@@ -90,6 +91,7 @@ def create_app(
     swing_research_service: SwingResearchService | object | None = None,
     factor_test_service: FactorTestService | object | None = None,
     history_compare_service: HistoryCompareService | object | None = None,
+    instrument_lab_service: InstrumentLabService | object | None = None,
     local_market_data_service: LocalMarketDataService | object | None = None,
     market_data_store: DuckDbMarketDataStore | object | None = None,
     market_data_adapter: MarketDataAdapter | object | None = None,
@@ -312,6 +314,13 @@ def create_app(
     app.state.history_compare_service = history_compare_service or HistoryCompareService(
         selected_store,
     )
+    app.state.instrument_lab_service = instrument_lab_service or InstrumentLabService(
+        selected_store,
+        backtest_service=BacktestService(
+            adapter=selected_adapter,
+            indicator_cache=selected_indicator_cache,
+        ),
+    )
     app.state.market_data_store = selected_store
     app.state.market_data_adapter = selected_adapter
     app.state.indicator_cache = selected_indicator_cache
@@ -401,6 +410,7 @@ def create_app(
     from .routers.data_transfer import router as data_transfer_router
     from .routers.factor_test import router as factor_test_router
     from .routers.history_compare import router as history_compare_router
+    from .routers.instrument_lab import router as instrument_lab_router
     from .routers.jobs import router as jobs_router
     from .routers.market_data import router as market_data_router
     from .routers.portfolio_backtest import router as portfolio_backtest_router
@@ -417,6 +427,7 @@ def create_app(
     app.include_router(condition_research_router, prefix="/api/v1")
     app.include_router(factor_test_router, prefix="/api/v1")
     app.include_router(history_compare_router, prefix="/api/v1")
+    app.include_router(instrument_lab_router, prefix="/api/v1")
     app.include_router(portfolio_backtest_router, prefix="/api/v1")
     app.include_router(strategy_discovery_router, prefix="/api/v1")
     app.include_router(strategy_fitness_router, prefix="/api/v1")

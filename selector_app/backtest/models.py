@@ -80,7 +80,15 @@ class BacktestConfig:
                 raise ValueError("买入规则不能为空，或者开启「持续满仓」由系统在每个交易日尝试入场")
         if self.sell_rule is None and not self.close_at_end:
             raise ValueError("卖出规则不能为空，或者开启「持有到期末」由系统在最后一根 K 线平仓")
-        if not explicit_buy_rule and not explicit_sell_rule and buy_signal == sell_signal:
+        # 「持续满仓 + 持有到期末」下两侧规则都可以为空（检验台只要指标值和条件
+        # 命中），此时 buy_signal 与 sell_signal 都是 None，相等是正常的，不该被
+        # 「买卖信号不能相同」这条规则拦下。
+        if (
+            buy_signal is not None
+            and buy_signal == sell_signal
+            and not explicit_buy_rule
+            and not explicit_sell_rule
+        ):
             raise ValueError("买入信号和卖出信号不能相同")
         if self.execution not in {"next_open", "next_close"}:
             raise ValueError("不支持的成交方式")
