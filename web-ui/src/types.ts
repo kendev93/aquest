@@ -11,7 +11,7 @@ export type PortfolioCompareOperator = 'gt' | 'gte' | 'lt' | 'lte'
 // 本系统只研究股票：基金（含 ETF）与指数不进候选池——ETF 跟踪同一指数会产生
 // 大量共线标的，指数本身不可交易。
 export type InstrumentType = 'stock'
-export type InstrumentBoard = 'main' | 'star' | 'chinext' | 'b_share'
+export type InstrumentBoard = 'main' | 'star' | 'chinext'
 export type DateRangeMode = 'recent5' | 'full' | 'custom'
 export type StrategyDiscoveryDateMode = DateRangeMode
 export interface DateRangeSelection {

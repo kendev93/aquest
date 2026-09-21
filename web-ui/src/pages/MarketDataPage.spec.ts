@@ -473,7 +473,7 @@ describe('MarketDataPage', () => {
     const wrapper = mount(MarketDataPage)
     await flushPromises()
 
-    // 证券类型默认勾选「股票/B股」；可以取消再勾回。
+    // 证券类型默认勾选「股票」；可以取消再勾回。
     const syncType = wrapper.get<HTMLInputElement>('[data-testid="market-sync-type-stock"]')
     expect(syncType.element.checked).toBe(true)
     await syncType.setValue(false)
@@ -595,18 +595,19 @@ describe('MarketDataPage', () => {
     confirmSpy.mockRestore()
   })
 
-  it('offers only stocks and greys out the boards the online channel cannot serve', async () => {
+  it('offers only A-share stocks and boards, with nothing greyed out', async () => {
     const wrapper = mount(MarketDataPage)
     await flushPromises()
 
-    // 只做股票：指数/ETF/债券这些选项根本不再渲染，而不是置灰。
-    expect(wrapper.find('[data-testid="market-sync-type-index"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="market-sync-type-fund"]').exists()).toBe(false)
-    expect(wrapper.find('[data-testid="market-sync-type-bond"]').exists()).toBe(false)
+    // 只做 A 股：指数/ETF/债券/B股这些选项根本不再渲染，而不是置灰。
+    for (const gone of ['index', 'fund', 'bond']) {
+      expect(wrapper.find(`[data-testid="market-sync-type-${gone}"]`).exists()).toBe(false)
+    }
+    expect(wrapper.find('[data-testid="market-sync-board-b_share"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="market-local-board-b_share"]').exists()).toBe(false)
+    // 在线与本地现在是同一套范围，没有需要置灰的项。
     expect(wrapper.get<HTMLInputElement>('[data-testid="market-sync-type-stock"]').element.disabled).toBe(false)
-    // 在线通道取不到 B 股，B 股只能靠本地导入。
-    expect(wrapper.get<HTMLInputElement>('[data-testid="market-sync-board-b_share"]').element.disabled).toBe(true)
-    expect(wrapper.get<HTMLInputElement>('[data-testid="market-local-board-b_share"]').element.disabled).toBe(false)
+    expect(wrapper.get<HTMLInputElement>('[data-testid="market-sync-board-main"]').element.disabled).toBe(false)
   })
 
   it('filters the catalog, pages through it and narrows the local import scope', async () => {

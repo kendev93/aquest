@@ -65,7 +65,7 @@ _INSTRUMENT_TYPES = {"stock"}
 # 把整个后端打崩的。显式给定一个上限，DuckDB 才会主动淘汰缓冲页。
 _DUCKDB_MEMORY_RATIO = 0.5
 _DUCKDB_MIN_MEMORY_BYTES = 1 << 30
-_INSTRUMENT_BOARDS = {"main", "star", "chinext", "b_share"}
+_INSTRUMENT_BOARDS = {"main", "star", "chinext"}
 
 
 class MarketDataStoreError(RuntimeError):
@@ -534,15 +534,13 @@ class _DuckDbStoreBase:
                 if "board" in columns:
                     continue
                 connection.execute(f"ALTER TABLE {table} ADD COLUMN board VARCHAR DEFAULT 'main'")
-                # 只区分股票的板块。基金/债券/指数不再是合法板块值：这种老库里如果
-                # 还留着非股票标的，用 scripts/prune_non_stock_data.py 清掉
-                # （它按 instrument_type 判定，不依赖这里的板块）。
+                # 只区分股票的板块。B 股/基金/债券/指数不再是合法板块值：这种老库
+                # 里如果还留着它们，用 scripts/prune_non_stock_data.py 清掉
+                # （脚本按 instrument_type + 板块白名单判定）。
                 connection.execute(
                     f"UPDATE {table} SET board = CASE "
                     "WHEN market = 'SH' AND substr(code, 1, 2) = '68' THEN 'star' "
                     "WHEN market = 'SZ' AND substr(code, 1, 2) = '30' THEN 'chinext' "
-                    "WHEN (market = 'SH' AND substr(code, 1, 2) = '90') "
-                    "OR (market = 'SZ' AND substr(code, 1, 2) = '20') THEN 'b_share' "
                     "ELSE 'main' END"
                 )
         if version < 3 and "instruments" in tables:

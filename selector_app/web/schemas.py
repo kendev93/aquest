@@ -552,7 +552,7 @@ class ConditionResearchRequest(BaseModel):
         if self.instrument_types is not None:
             if any(item != "stock" for item in self.instrument_types):
                 raise ValueError("买卖条件研究只支持股票，ETF、指数与债券不参与候选池")
-        if any(board not in {"main", "star", "chinext", "b_share"} for board in self.boards):
+        if any(board not in {"main", "star", "chinext"} for board in self.boards):
             raise ValueError("买卖条件研究的范围只支持股票板块")
         if self.start_date is not None and self.end_date is not None:
             if self.start_date > self.end_date:

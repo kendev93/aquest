@@ -15,10 +15,8 @@ from selector_app.market_data.store import DuckDbMarketDataStore
     [
         ("SH", "600000", "main"),
         ("SH", "688001", "star"),
-        ("SH", "900001", "b_share"),
         ("SZ", "000001", "main"),
         ("SZ", "300001", "chinext"),
-        ("SZ", "200001", "b_share"),
     ],
 )
 def test_code_ranges_are_exposed_as_stable_board_segments(
@@ -27,12 +25,19 @@ def test_code_ranges_are_exposed_as_stable_board_segments(
     assert classify_board(market, code) == expected
 
 
+def test_b_share_code_ranges_are_no_longer_classified() -> None:
+    """B 股已移出候选池：900/200 开头的 .day 文件不再被识别。"""
+
+    assert classify_board("SH", "900001") is None
+    assert classify_board("SZ", "200001") is None
+
+
 def test_unrestricted_scope_matches_every_supported_instrument() -> None:
     scope = InstrumentScope.from_values()
 
     assert scope.matches("SH", "stock", "star")
     assert scope.matches("SZ", "stock", "chinext")
-    assert scope.matches("SZ", "stock", "b_share")
+    assert scope.matches("SH", "stock", "main")
 
 
 def test_scope_can_select_stock_boards() -> None:

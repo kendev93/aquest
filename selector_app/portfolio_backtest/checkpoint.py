@@ -235,7 +235,7 @@ def _position_from_dict(symbol: str, payload: object) -> _Position:
         raise ValueError(f"模拟检查点持仓标识无效: {symbol}")
     if instrument_type != "stock":
         raise ValueError(f"模拟检查点持仓类型无效: {symbol}")
-    if board not in {"main", "star", "chinext", "b_share"}:
+    if board not in {"main", "star", "chinext"}:
         raise ValueError(f"模拟检查点持仓板块无效: {symbol}")
     size = _checkpoint_float(values.get("size"), f"positions[{symbol}].size")
     entry_price = _checkpoint_float(values.get("entry_price"), f"positions[{symbol}].entry_price")

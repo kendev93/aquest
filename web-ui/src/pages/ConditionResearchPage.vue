@@ -191,7 +191,6 @@ const STOCK_BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
   { key: 'main', label: '主板' },
   { key: 'star', label: '科创板' },
   { key: 'chinext', label: '创业板' },
-  { key: 'b_share', label: 'B 股' },
 ]
 const scopeNoun = computed(() => '股票')
 const scopeHelper = computed(() => (

@@ -12,7 +12,7 @@ MarketCode = Literal["SH", "SZ"]
 # 产生大量共线标的，指数本身不可交易；两者混进候选池会让横截面排序失去意义。
 # 保留单值 Literal 而不是直接用 str，是为了让非法值在静态检查和运行时都被拒绝。
 InstrumentType = Literal["stock"]
-InstrumentBoard = Literal["main", "star", "chinext", "b_share"]
+InstrumentBoard = Literal["main", "star", "chinext"]
 DataSource = Literal["local", "online"]
 # "tencent" / "baostock" are upstream channel ids used for per-source rate-limit
 # accounting and catalog provenance. They are not accepted as

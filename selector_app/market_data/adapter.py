@@ -33,7 +33,7 @@ def parse_universe_code(raw: str) -> tuple[MarketCode, str] | None:
         market: MarketCode = "SH" if match.group(1).upper() == "SH" else "SZ"
         return market, match.group(2)
     if _CODE_PATTERN.fullmatch(normalized):
-        market = "SH" if normalized.startswith(("6", "9")) else "SZ"
+        market = "SH" if normalized.startswith("6") else "SZ"
         return market, normalized
     raise ValueError(f"无效的证券代码: {raw.strip()}")
 

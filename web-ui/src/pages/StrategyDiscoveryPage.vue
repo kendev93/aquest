@@ -47,14 +47,13 @@ const APPLY_STORAGE_KEY = 'indicator-lab.strategy-discovery.apply'
 const APPLY_METADATA_KEY = 'indicator-lab.strategy-discovery.apply-meta'
 
 const INSTRUMENT_TYPE_OPTIONS: { key: InstrumentType; label: string }[] = [
-  { key: 'stock', label: '股票/B股' },
+  { key: 'stock', label: '股票' },
 ]
 
 const BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
   { key: 'main', label: '主板' },
   { key: 'star', label: '科创板' },
   { key: 'chinext', label: '创业板' },
-  { key: 'b_share', label: 'B股' },
 ]
 
 function emptyRule(): RuleGroupPayload {

@@ -198,7 +198,7 @@ describe('formula screen defensive parsing and fallbacks', () => {
     expect(saved.ruleMode).toBeUndefined()
     expect(saved.universe).toBeUndefined()
     expect(saved.instrumentTypes).toEqual(['stock'])
-    expect(saved.boards).toEqual(['main', 'b_share'])
+    expect(saved.boards).toEqual(['main'])
     expect(saved.workers).toBe(8)
     expect(saved.conditions).toBeUndefined()
   })

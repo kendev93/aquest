@@ -10,7 +10,7 @@ from .models import InstrumentBoard, InstrumentType, MarketCode
 
 _ALLOWED_MARKETS = {"SH", "SZ"}
 _ALLOWED_TYPES = {"stock"}
-_ALLOWED_BOARDS = {"main", "star", "chinext", "b_share"}
+_ALLOWED_BOARDS = {"main", "star", "chinext"}
 
 
 @dataclass(frozen=True)

@@ -501,8 +501,7 @@ class MarketDataSync:
         eastmoney_types = _eastmoney_types(config)
         if not eastmoney_types:
             raise OnlineProviderError(
-                "在线同步当前只支持主板、科创板、创业板股票。"
-                "B 股请改用本地通达信导入。"
+                "在线同步当前只支持沪市主板、科创板和创业板股票。"
             )
         return [
             (

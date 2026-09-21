@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""删除行情库里的非股票标的（基金/ETF/债券/指数）及其 K 线与指标缓存。
+"""删除行情库里的非股票标的（基金/ETF/债券/指数）与 B 股，及其 K 线和指标缓存。
 
-本系统只研究股票，非股票标的在界面与接口层面已经不再出现；但历史库里可能
-还留着以前同步/导入进来的行。这个脚本负责把它们清掉。
+本系统只研究 A 股（主板、科创板、创业板）：ETF/基金、指数、债券在界面与接口
+层面已经不再出现，B 股流动性枯竭、回测结论不可信，也已从候选池移除；但历史库
+里可能还留着以前同步/导入进来的行。这个脚本负责把它们清掉。
+
+判定条件是「instrument_type 不是 stock **或** 板块不在 main/star/chinext」——
+B 股的 instrument_type 同样是 stock，只看类型会漏掉。
 
 安全约定（重要）：
   * 默认只体检，不改任何数据。必须显式加 `--apply` 才会删除。
@@ -33,10 +37,17 @@ from pathlib import Path
 import duckdb
 
 KEPT_TYPE = "stock"
-# 缓存表没有 instrument_type 列，只能按标的反查。
+# B 股的 instrument_type 也是 stock，只能靠板块把它剔掉。
+KEPT_BOARDS = ("main", "star", "chinext")
+# 缓存表没有 instrument_type / board 列，只能按标的反查。
 CACHE_TABLES = ("indicator_cache", "custom_indicator_cache")
 BAR_TABLE = "daily_bars"
 INSTRUMENT_TABLE = "instruments"
+
+# instruments / daily_bars 两张表都带的判定条件：非股票类型，或不在保留板块里。
+# board 可能缺失（老库），缺失时按 instrument_type 判定。
+_KEEP_SQL = "instrument_type = ? AND (board IS NULL OR board IN (?, ?, ?))"
+_KEEP_PARAMS = (KEPT_TYPE, *KEPT_BOARDS)
 
 
 def resolve_database_path(explicit: str | None) -> Path:
@@ -59,46 +70,60 @@ def existing_tables(connection: duckdb.DuckDBPyConnection) -> set[str]:
     return {str(row[0]) for row in rows}
 
 
-def instrument_type_counts(connection: duckdb.DuckDBPyConnection) -> list[tuple[str, int]]:
+def instrument_columns(connection: duckdb.DuckDBPyConnection) -> set[str]:
     rows = connection.execute(
-        f"SELECT instrument_type, COUNT(*) FROM {INSTRUMENT_TABLE} GROUP BY 1 ORDER BY 2 DESC"
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = 'main' AND table_name = ?",
+        [INSTRUMENT_TABLE],
+    ).fetchall()
+    return {str(row[0]) for row in rows}
+
+
+def drop_predicate(has_board: bool) -> tuple[str, tuple[str, ...]]:
+    """返回「要删的行」的 WHERE 条件与参数。
+
+    非股票类型（基金/指数/债券）+ 非保留板块（B 股）都要删。B 股的
+    instrument_type 是 stock，所以只看类型会漏掉。
+    """
+
+    if not has_board:  # 极老的库没有板块列，只能按类型判。
+        return "instrument_type <> ?", (KEPT_TYPE,)
+    return f"NOT ({_KEEP_SQL})", _KEEP_PARAMS
+
+
+def type_counts(
+    connection: duckdb.DuckDBPyConnection, table: str, column: str
+) -> list[tuple[str, int]]:
+    rows = connection.execute(
+        f"SELECT {column}, COUNT(*) FROM {table} GROUP BY 1 ORDER BY 2 DESC"
     ).fetchall()
     return [(str(row[0]), int(row[1])) for row in rows]
 
 
-def bar_type_counts(connection: duckdb.DuckDBPyConnection) -> list[tuple[str, int, int]]:
-    """按类型统计 K 线：行数 + 涉及标的数。"""
+def _scan(
+    connection: duckdb.DuckDBPyConnection, tables: set[str], has_board: bool
+) -> dict[str, object]:
+    """统计将要被删除的行数。缓存表没有类型/板块列，只能按标的反查。"""
 
-    rows = connection.execute(
-        f"""
-        SELECT instrument_type, COUNT(*) AS bars, COUNT(DISTINCT market || '.' || code) AS codes
-        FROM {BAR_TABLE} GROUP BY 1 ORDER BY 2 DESC
-        """
-    ).fetchall()
-    return [(str(row[0]), int(row[1]), int(row[2])) for row in rows]
-
-
-def _scan(connection: duckdb.DuckDBPyConnection, tables: set[str]) -> dict[str, object]:
-    """统计将要被删除的行数。缓存表没有类型列，只能按非股票标的反查。"""
-
+    where, params = drop_predicate(has_board)
     report: dict[str, object] = {}
     if INSTRUMENT_TABLE in tables:
-        report["instruments_by_type"] = instrument_type_counts(connection)
+        report["instruments_by_type"] = type_counts(connection, INSTRUMENT_TABLE, "instrument_type")
+        if has_board:
+            report["instruments_by_board"] = type_counts(connection, INSTRUMENT_TABLE, "board")
         report["instruments_to_delete"] = int(
             connection.execute(
-                f"SELECT COUNT(*) FROM {INSTRUMENT_TABLE} WHERE instrument_type <> ?",
-                [KEPT_TYPE],
+                f"SELECT COUNT(*) FROM {INSTRUMENT_TABLE} WHERE {where}", list(params)
             ).fetchone()[0]
         )
         report["instruments_total"] = int(
             connection.execute(f"SELECT COUNT(*) FROM {INSTRUMENT_TABLE}").fetchone()[0]
         )
     if BAR_TABLE in tables:
-        report["bars_by_type"] = bar_type_counts(connection)
+        report["bars_by_type"] = type_counts(connection, BAR_TABLE, "instrument_type")
         report["bars_to_delete"] = int(
             connection.execute(
-                f"SELECT COUNT(*) FROM {BAR_TABLE} WHERE instrument_type <> ?",
-                [KEPT_TYPE],
+                f"SELECT COUNT(*) FROM {BAR_TABLE} WHERE {where}", list(params)
             ).fetchone()[0]
         )
         report["bars_total"] = int(
@@ -113,10 +138,10 @@ def _scan(connection: duckdb.DuckDBPyConnection, tables: set[str]) -> dict[str, 
                 f"""
                 SELECT COUNT(*) FROM {table}
                 WHERE (market, code) IN (
-                    SELECT market, code FROM {INSTRUMENT_TABLE} WHERE instrument_type <> ?
+                    SELECT market, code FROM {INSTRUMENT_TABLE} WHERE {where}
                 )
                 """,
-                [KEPT_TYPE],
+                list(params),
             ).fetchone()[0]
         )
     report["cache_rows_to_delete"] = cache_rows
@@ -132,13 +157,20 @@ def print_report(path: Path, report: dict[str, object]) -> None:
         for type_name, count in counts:
             mark = "保留" if type_name == KEPT_TYPE else "删除"
             print(f"  {type_name:<8} {count:>8}  → {mark}")
+    boards = report.get("instruments_by_board") or []
+    if boards:
+        print()
+        print("标的 board 分布（B 股靠这一列识别）：")
+        for board_name, count in boards:
+            mark = "保留" if board_name in KEPT_BOARDS else "删除"
+            print(f"  {board_name:<8} {count:>8}  → {mark}")
     bars = report.get("bars_by_type") or []
     if bars:
         print()
         print("日线 instrument_type 分布：")
-        for type_name, count, codes in bars:
+        for type_name, count in bars:
             mark = "保留" if type_name == KEPT_TYPE else "删除"
-            print(f"  {type_name:<8} {count:>12} 行 / {codes:>6} 只  → {mark}")
+            print(f"  {type_name:<8} {count:>12} 行  → {mark}")
     print()
     print(
         "将删除：标的 {instruments} 只、日线 {bars} 行".format(
@@ -159,42 +191,40 @@ def backup_database(path: Path) -> Path:
     return target
 
 
-# 缓存表按「标的已被判定为非股票」反查；日线除此之外还看自己的类型列。
-_NON_STOCK_CODES = (
-    f"(market, code) IN (SELECT market, code FROM {INSTRUMENT_TABLE} WHERE instrument_type <> ?)"
-)
-
-
-def prune(connection: duckdb.DuckDBPyConnection, tables: set[str]) -> dict[str, int]:
+def prune(
+    connection: duckdb.DuckDBPyConnection, tables: set[str], has_board: bool
+) -> dict[str, int]:
     # DuckDB 没有 changes()，删除前先把命中行数记下来。
+    where, params = drop_predicate(has_board)
+    # 缓存表按「标的已被判定要删」反查；日线除此之外还看自己的类型/板块列，
+    # 这样连 instruments 里没有登记的孤儿行也一起清掉。
+    dropped_codes = f"(market, code) IN (SELECT market, code FROM {INSTRUMENT_TABLE} WHERE {where})"
     deleted: dict[str, int] = {}
     connection.execute("BEGIN TRANSACTION")
     try:
         for table in CACHE_TABLES:
             if table not in tables:
                 continue
-            where = f"WHERE {_NON_STOCK_CODES}"
+            clause = f"WHERE {dropped_codes}"
             count = connection.execute(
-                f"SELECT COUNT(*) FROM {table} {where}", [KEPT_TYPE]
+                f"SELECT COUNT(*) FROM {table} {clause}", list(params)
             ).fetchone()[0]
             deleted[table] = int(count)
-            connection.execute(f"DELETE FROM {table} {where}", [KEPT_TYPE])
+            connection.execute(f"DELETE FROM {table} {clause}", list(params))
         if BAR_TABLE in tables:
-            where = f"WHERE instrument_type <> ? OR {_NON_STOCK_CODES}"
-            deleted[BAR_TABLE] = int(
-                connection.execute(
-                    f"SELECT COUNT(*) FROM {BAR_TABLE} {where}", [KEPT_TYPE, KEPT_TYPE]
-                ).fetchone()[0]
-            )
-            connection.execute(f"DELETE FROM {BAR_TABLE} {where}", [KEPT_TYPE, KEPT_TYPE])
+            clause = f"WHERE {where} OR {dropped_codes}"
+            counts = connection.execute(
+                f"SELECT COUNT(*) FROM {BAR_TABLE} {clause}", [*params, *params]
+            ).fetchone()[0]
+            deleted[BAR_TABLE] = int(counts)
+            connection.execute(f"DELETE FROM {BAR_TABLE} {clause}", [*params, *params])
         if INSTRUMENT_TABLE in tables:
-            where = "WHERE instrument_type <> ?"
-            deleted[INSTRUMENT_TABLE] = int(
-                connection.execute(
-                    f"SELECT COUNT(*) FROM {INSTRUMENT_TABLE} {where}", [KEPT_TYPE]
-                ).fetchone()[0]
-            )
-            connection.execute(f"DELETE FROM {INSTRUMENT_TABLE} {where}", [KEPT_TYPE])
+            clause = f"WHERE {where}"
+            count = connection.execute(
+                f"SELECT COUNT(*) FROM {INSTRUMENT_TABLE} {clause}", list(params)
+            ).fetchone()[0]
+            deleted[INSTRUMENT_TABLE] = int(count)
+            connection.execute(f"DELETE FROM {INSTRUMENT_TABLE} {clause}", list(params))
     except Exception:
         connection.execute("ROLLBACK")
         raise
@@ -238,7 +268,8 @@ def main(argv: list[str] | None = None) -> int:
         if INSTRUMENT_TABLE not in tables:
             print(f"库里没有 {INSTRUMENT_TABLE} 表，无需清理: {path}")
             return 0
-        report = _scan(connection, tables)
+        has_board = "board" in instrument_columns(connection)
+        report = _scan(connection, tables, has_board)
         print_report(path, report)
 
         to_delete = int(report.get("instruments_to_delete", 0)) + int(
@@ -264,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
         connection.execute("CHECKPOINT")
         backup = backup_database(path)
         print(f"已备份到: {backup}")
-        deleted = prune(connection, tables)
+        deleted = prune(connection, tables, has_board)
         print("已删除：" + "、".join(f"{table} {count} 行" for table, count in deleted.items()))
         print()
         print("库文件不会立刻变小，被释放的空间会被后续写入复用。")

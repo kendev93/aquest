@@ -53,15 +53,13 @@ def classify_board(market: str, code: str) -> InstrumentBoard | None:
             return "main"
         if head == "68":
             return "star"
-        if head == "90":
-            return "b_share"
+        # 90 开头是沪市 B 股：B 股不进候选池，直接不识别。
         return None
     if head == "00":
         return "main"
-    if head == "20":
-        return "b_share"
     if head == "30":
         return "chinext"
+    # 20 开头是深市 B 股，同上。
     return None
 
 
@@ -77,8 +75,9 @@ def _coefficients(
     code: str,
     instrument_type: InstrumentType,
 ) -> tuple[float, float]:
-    del instrument_type
-    return (0.001, 0.01) if market == "SH" and code.startswith("90") else (0.01, 0.01)
+    # 只研究股票，系数不再有品种分支（沪市 B 股的 0.001 特例随 B 股一起删掉）。
+    del market, code, instrument_type
+    return (0.01, 0.01)
 
 
 def _normalized_now(now: datetime | None) -> datetime:

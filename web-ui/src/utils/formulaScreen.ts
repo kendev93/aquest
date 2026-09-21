@@ -89,7 +89,7 @@ export function loadSavedForm(): Partial<ScreenFormState> {
     }
     if (Array.isArray(parsed.boards)) {
       const values = parsed.boards.filter((value): value is InstrumentBoard => (
-        value === 'main' || value === 'star' || value === 'chinext' || value === 'b_share'
+        value === 'main' || value === 'star' || value === 'chinext'
       ))
       safe.boards = values
     }

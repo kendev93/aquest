@@ -37,11 +37,8 @@ const MA_OPTIONS = [
   { key: 'ma60', label: 'MA60' },
 ]
 
-// 本系统只研究股票：基金（含 ETF）与指数既不在线同步也不本地导入，
-// 所以不再作为可选项出现。
-const ONLINE_SUPPORTED_TYPES: InstrumentType[] = ['stock']
-const ONLINE_SUPPORTED_BOARDS: InstrumentBoard[] = ['main', 'star', 'chinext']
-
+// 本系统只研究股票：基金（含 ETF）、指数和 B 股既不在线同步也不本地导入，
+// 所以不再作为可选项出现。在线通道与本地导入的范围现在是同一套。
 const INSTRUMENT_TYPE_OPTIONS: { key: InstrumentType; label: string }[] = [
   { key: 'stock', label: '股票' },
 ]
@@ -50,7 +47,6 @@ const BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
   { key: 'main', label: '主板' },
   { key: 'star', label: '科创板' },
   { key: 'chinext', label: '创业板' },
-  { key: 'b_share', label: 'B股' },
 ]
 
 
@@ -310,14 +306,6 @@ function toggleLocalBoard(board: InstrumentBoard): void {
   form.localBoards = form.localBoards.includes(board)
     ? form.localBoards.filter((item) => item !== board)
     : [...form.localBoards, board]
-}
-
-function onlineTypeDisabled(type: InstrumentType): boolean {
-  return !ONLINE_SUPPORTED_TYPES.includes(type)
-}
-
-function onlineBoardDisabled(board: InstrumentBoard): boolean {
-  return !ONLINE_SUPPORTED_BOARDS.includes(board)
 }
 
 function toggleBoard(board: InstrumentBoard): void {
@@ -762,9 +750,9 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
         <div class="market-sync-form">
           <div class="scope-config" data-testid="market-sync-scope">
             <div><label for="market-sync-universe">同步市场</label><select id="market-sync-universe" v-model="form.syncUniverse" data-testid="market-sync-universe"><option value="all">沪深全部</option><option value="sh">仅上海</option><option value="sz">仅深圳</option></select></div>
-            <div class="scope-options"><span>证券类型</span><label v-for="option in INSTRUMENT_TYPE_OPTIONS" :key="option.key" :class="{ 'scope-option-off': onlineTypeDisabled(option.key) }"><input type="checkbox" :data-testid="`market-sync-type-${option.key}`" :disabled="onlineTypeDisabled(option.key)" :checked="form.syncInstrumentTypes.includes(option.key)" @change="toggleInstrumentType(option.key)">{{ option.label }}</label></div>
-            <div class="scope-options"><span>板块</span><label v-for="option in BOARD_OPTIONS" :key="option.key" :class="{ 'scope-option-off': onlineBoardDisabled(option.key) }"><input type="checkbox" :data-testid="`market-sync-board-${option.key}`" :disabled="onlineBoardDisabled(option.key)" :checked="form.syncBoards.includes(option.key)" @change="toggleBoard(option.key)">{{ option.label }}</label></div>
-            <small class="scope-helper">板块未勾选表示不限制；类型和板块同时选择时取交集。置灰的「B股」在线同步没有 K 线数据源（勾选会直接报错），但可以走下面的本地通达信导入。全量补齐按钮只请求缺失历史区间。</small>
+            <div class="scope-options"><span>证券类型</span><label v-for="option in INSTRUMENT_TYPE_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-sync-type-${option.key}`" :checked="form.syncInstrumentTypes.includes(option.key)" @change="toggleInstrumentType(option.key)">{{ option.label }}</label></div>
+            <div class="scope-options"><span>板块</span><label v-for="option in BOARD_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-sync-board-${option.key}`" :checked="form.syncBoards.includes(option.key)" @change="toggleBoard(option.key)">{{ option.label }}</label></div>
+            <small class="scope-helper">板块未勾选表示不限制；类型和板块同时选择时取交集。全量补齐按钮只请求缺失历史区间。</small>
           </div>
           <div class="market-sync-actions">
             <button class="primary-button" data-testid="market-sync-online" type="button" :disabled="syncLoading" @click="syncOnlineData">一键同步行情</button>
@@ -782,7 +770,7 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
             <button class="secondary-button" data-testid="market-local-import" type="button" :disabled="syncLoading" @click="importLocalDayFiles">导入通达信行情</button>
             <button class="text-button" data-testid="market-local-import-undo" type="button" :disabled="undoingLocalImport" @click="undoLocalImport">{{ undoingLocalImport ? '清理中…' : '撤销本地导入' }}</button>
           </div>
-          <div class="scope-options local-import-scope" data-testid="market-local-import-scope"><span>导入范围</span><label v-for="option in INSTRUMENT_TYPE_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-local-type-${option.key}`" :checked="form.localInstrumentTypes.includes(option.key)" @change="toggleLocalInstrumentType(option.key)">{{ option.label }}</label><label v-for="option in BOARD_OPTIONS" :key="`board-${option.key}`"><input type="checkbox" :data-testid="`market-local-board-${option.key}`" :checked="form.localBoards.includes(option.key)" @change="toggleLocalBoard(option.key)">{{ option.label }}</label><small>全部不勾 = 导入目录里所有品种（默认）。在线同步拿不到 K 线的 B 股在这里可用。</small></div>
+          <div class="scope-options local-import-scope" data-testid="market-local-import-scope"><span>导入范围</span><label v-for="option in INSTRUMENT_TYPE_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-local-type-${option.key}`" :checked="form.localInstrumentTypes.includes(option.key)" @change="toggleLocalInstrumentType(option.key)">{{ option.label }}</label><label v-for="option in BOARD_OPTIONS" :key="`board-${option.key}`"><input type="checkbox" :data-testid="`market-local-board-${option.key}`" :checked="form.localBoards.includes(option.key)" @change="toggleLocalBoard(option.key)">{{ option.label }}</label><small>全部不勾 = 导入目录里所有股票（默认）。目录里的非股票文件会自动跳过。</small></div>
           <small v-if="form.vipdocDetectNote" class="scope-helper" data-testid="market-local-import-note">{{ form.vipdocDetectNote }}</small>
           <small v-if="!form.vipdocDetected.length && form.vipdocMountHint" class="scope-warning">{{ form.vipdocMountHint }}在宿主机上执行：<code>TDX_VIPDOC_PATH=/你的/通达信/vipdoc docker compose -f docker-compose.yml -f docker-compose.tdx.yml up -d</code>，然后重建镜像 <code>docker compose build backend</code>。</small>
           <small class="scope-helper">先在通达信里「盘后数据下载」下载日线，再点「自动检测」让后端找目录<template v-if="form.vipdocHostPrefix">；也可以直接填电脑上 {{ form.vipdocHostPrefix }} 开头的路径</template>。导入会按同一只股票同一天覆盖库里已有的行情，目录里没有的日期保持原样。</small>

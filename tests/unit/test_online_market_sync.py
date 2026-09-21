@@ -14,7 +14,6 @@ from selector_app.adapters.market_data_sync import MarketDataSync
 from selector_app.adapters.market_sync import MarketDataCancelledError, MarketSyncConfig
 from selector_app.adapters.online_market_sync import (
     OnlineMarketSync,
-    OnlineProviderError,
     _ExistingBars,
     _requested_ranges,
 )
@@ -801,15 +800,11 @@ def test_market_data_sync_routes_every_run_through_eastmoney(tmp_path: Path) -> 
     assert store.get_meta("last_online_provider") == "eastmoney"
 
 
-def test_eastmoney_mode_rejects_the_b_share_board(tmp_path: Path) -> None:
-    """在线通道只服务主板、科创板、创业板，B 股没有在线日线。"""
+def test_sync_config_rejects_the_b_share_board(tmp_path: Path) -> None:
+    """B 股已从板块取值里移除，配置层就拒绝，不会走到在线同步。"""
 
-    service = MarketDataSync(store=DuckDbMarketDataStore(tmp_path / "market.duckdb"))
-
-    with pytest.raises(OnlineProviderError, match="在线同步当前仅支持"):
-        service.discover_instruments(
-            MarketSyncConfig(instrument_types=("stock",), boards=("b_share",), sync_workers=1)
-        )
+    with pytest.raises(ValueError, match="不支持的板块范围"):
+        MarketSyncConfig(instrument_types=("stock",), boards=("b_share",), sync_workers=1)
 
 
 def test_sync_config_rejects_non_stock_instrument_types() -> None:
