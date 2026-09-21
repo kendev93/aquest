@@ -178,6 +178,31 @@ export const TERMS: Record<string, TermDefinition> = {
       '打乱数据时按连续的交易日整块搬动，而不是逐日打乱。' +
       '因为相邻几天的行情高度相关，逐日打乱会低估噪声、把运气误判成本事。',
   },
+  longShort: {
+    name: '多空价差',
+    english: 'Long-short spread',
+    intro:
+      '买分层收益最好的那一档、同时卖空最差的那一档，两个平均收益之差就是多空价差。' +
+      '它把市场整体的涨跌抵消掉，只看这个指标挑股的能力；曲线按每日累加而不是复利，' +
+      '因为持仓期相互重叠，复合出一个净值会凭空放大。',
+  },
+  factorSignificant: {
+    name: '通过多重检验校正',
+    english: 'Significant after FDR control',
+    intro:
+      '一次看了十几个指标，就算全是噪声也总有一两个看着「显著」，' +
+      '所以每个 p 值都要按指标总数校正后再判断。' +
+      '注意它只说明「不像纯运气」，不说明「够强」——' +
+      '实测信息系数只有噪声门槛的一两倍时，仍然可能通过校正，结论列会写清楚。',
+  },
+  forwardHorizon: {
+    name: '前瞻天数',
+    english: 'Forward horizon',
+    intro:
+      '标签就是它：从当日收盘价到 N 个交易日后的收盘价的收益。' +
+      '一个指标可能在一个月尺度上是因子、在一周尺度上完全没用，光看指标名字分不出来，' +
+      '所以这个天数必须显式选，不能藏在默认值里。',
+  },
   thresholdHint: {
     name: '阈值提示',
     english: 'Threshold hint',

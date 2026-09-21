@@ -941,6 +941,97 @@ export interface StrategyFitnessJobState {
   result: StrategyFitnessReport | null
 }
 
+/** 一个分位档的未来收益表现。第 1 档是信息系数指出该买的那一组。 */
+export interface FactorLayer {
+  index: number
+  /** 该档每天的平均股票数。三只股票的档位不是证据，这个数字必须看得见。 */
+  size: number | null
+  mean_return: number | null
+  beat_market_rate: number | null
+}
+
+/** 首档减末档的每日价差。曲线是累加而非复利：持仓期重叠，复合会凭空放大。 */
+export interface FactorLongShort {
+  mean_spread: number | null
+  std: number | null
+  t_stat: number | null
+  win_rate: number | null
+  final: number | null
+  max_drawdown: number | null
+  days: number
+  cumulative: number[]
+}
+
+export interface FactorEvidence {
+  value_id: string
+  display_name: string
+  /** high = 买指标值最高的一组；low = 买最低的一组。由信息系数的符号决定。 */
+  order: 'high' | 'low'
+  ic_mean: number
+  icir: number | null
+  ic_days: number
+  ic_positive_rate: number | null
+  ic_series: (number | null)[]
+  ic_cumulative: number[]
+  ic_first_half: number | null
+  ic_second_half: number | null
+  layers: FactorLayer[]
+  layer_inversions: number
+  long_short: FactorLongShort
+  ic_threshold: number | null
+  pvalue: number | null
+  qvalue: number | null
+  significant: boolean
+  note: string
+}
+
+export interface FactorTestReport {
+  universe: Universe
+  stock_count: number
+  scanned_stocks: number
+  value_count: number
+  horizon: number
+  min_cross_section: number
+  permutations: number
+  block_size: number
+  alpha: number
+  quantile_count: number
+  date_range: { start: string | null; end: string | null; days: number }
+  dates: string[]
+  factors: FactorEvidence[]
+  significant_count: number
+  reason: string | null
+  /** 口径边界，页面原文照抄展示。 */
+  boundaries: string[]
+}
+
+export interface FactorTestJobState {
+  job_id: string
+  status: 'queued' | 'running' | 'completed' | 'failed'
+  progress: number
+  error: string | null
+  result: FactorTestReport | null
+}
+
+export interface FactorTestPayload {
+  universe?: 'all' | 'sh' | 'sz'
+  vipdoc_path?: string
+  instrument_types?: InstrumentType[]
+  boards?: InstrumentBoard[]
+  start_date?: string | null
+  end_date?: string | null
+  /** 前瞻天数：标签就是「未来 N 个交易日的收益」。 */
+  horizon?: number
+  value_ids?: string[] | null
+  include_custom?: boolean
+  min_cross_section?: number
+  permutations?: number
+  block_size?: number
+  alpha?: number
+  quantile_count?: number
+  limit_stocks?: number | null
+}
+
 export type ConditionResearchSide = 'buy' | 'sell' | 'both'
 
 export interface ConditionResearchPayload {

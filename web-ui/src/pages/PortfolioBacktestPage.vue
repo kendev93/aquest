@@ -1041,6 +1041,7 @@ watch(() => form.formulaText, (value) => {
         <a class="nav-link" href="/market-data">本地行情</a>
         <a class="nav-link" href="/swing-research">波段研究</a>
         <a class="nav-link" href="/strategy-tracking">策略追踪</a>
+        <a class="nav-link" href="/factor-test">因子检验</a>
       </nav>
       <div class="topbar-status"><span class="status-dot" aria-hidden="true"></span> 本地数据模式</div>
     </header>

@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 
 import ConditionResearchPage from './pages/ConditionResearchPage.vue'
+import FactorTestPage from './pages/FactorTestPage.vue'
 import FormulaScreenPage from './pages/FormulaScreenPage.vue'
 import MarketDataPage from './pages/MarketDataPage.vue'
 import PortfolioBacktestPage from './pages/PortfolioBacktestPage.vue'
@@ -23,6 +24,7 @@ const routeComponent = computed(() => {
   }
   if (pathname.startsWith('/portfolio-backtest')) return PortfolioBacktestPage
   if (pathname.startsWith('/strategy-tracking')) return StrategyTrackingPage
+  if (pathname.startsWith('/factor-test')) return FactorTestPage
   return FormulaScreenPage
 })
 
