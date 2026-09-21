@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Iterable, Iterator, Mapping
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import cast
 
 import duckdb
@@ -28,12 +28,26 @@ ASSET_TABLES: tuple[str, ...] = (
     "backtest_history",
     "screen_history",
     "saved_strategies",
+    "strategy_tracking",
     "strategy_discovery_history",
     "strategy_discovery_replay_history",
 )
 SAVED_STRATEGY_TABLE = "saved_strategies"
+STRATEGY_TRACKING_TABLE = "strategy_tracking"
 STRATEGY_NAME_MAX_LENGTH = 60
 STRATEGY_NOTE_MAX_LENGTH = 500
+#: 策略追踪状态。只有 off / active 两态——上线后要改规则只能停掉旧的、新开一个，
+#: 没有「暂停后改参数继续」这种说法，否则样本外就不再是样本外了。
+STRATEGY_TRACKING_OFF = "off"
+STRATEGY_TRACKING_ACTIVE = "active"
+_STRATEGY_TRACKING_STATUSES = frozenset({STRATEGY_TRACKING_OFF, STRATEGY_TRACKING_ACTIVE})
+#: 策略列。上线曾经打算存一份「上线日末的模拟状态快照」用来增量重跑，后来确认
+#: 走不通（见 docs/strategy-tracking-plan.md §2.1 的行情指纹校验），改全量重跑后
+#: 这个字段就没用了——重算所需的全部信息就是 request_json 本身。
+_STRATEGY_COLUMNS = (
+    "strategy_id, name, note, source_history_id, created_at, updated_at, "
+    "request_json, summary_json, tracking_status, launched_at, last_tracked_date, last_error"
+)
 
 
 def _require_asset_table(table: str) -> str:
@@ -313,6 +327,18 @@ def _enrich_backtest_history_names(
     return value
 
 
+def _tracking_fields(row: tuple[object, ...]) -> dict[str, object]:
+    """Decode the strategy-tracking columns that follow the base eight."""
+
+    tracking: dict[str, object] = {
+        "tracking_status": str(row[8] or STRATEGY_TRACKING_OFF),
+        "launched_at": str(row[9]) if row[9] is not None else None,
+        "last_tracked_date": None if row[10] is None else _tracking_date(row[10]),
+        "last_error": str(row[11] or ""),
+    }
+    return tracking
+
+
 def _decode_strategy_row(row: tuple[object, ...]) -> dict[str, object]:
     """Decode one ``saved_strategies`` row into an API-ready dict."""
 
@@ -332,6 +358,7 @@ def _decode_strategy_row(row: tuple[object, ...]) -> dict[str, object]:
         "updated_at": str(row[5]),
         "request": request,
         "summary": summary,
+        **_tracking_fields(row),
     }
 
 
@@ -347,7 +374,90 @@ def _strategy_record(payload: Mapping[str, object]) -> dict[str, object]:
         "updated_at": str(payload["updated_at"]),
         "request": dict(cast(Mapping[str, object], payload["request"])),
         "summary": dict(cast(Mapping[str, object], payload["summary"])),
+        "tracking_status": str(payload.get("tracking_status") or STRATEGY_TRACKING_OFF),
+        "launched_at": payload.get("launched_at"),
+        "last_tracked_date": payload.get("last_tracked_date"),
+        "last_error": str(payload.get("last_error") or ""),
     }
+
+
+def _tracking_date(value: object) -> int:
+    """Narrow one ``YYYYMMDD`` observation key."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise ValueError("追踪交易日期无效")
+    try:
+        converted = int(str(value).strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"追踪交易日期无效: {value}") from exc
+    try:
+        datetime.strptime(str(converted), "%Y%m%d")
+    except ValueError as exc:
+        raise ValueError(f"追踪交易日期无效: {converted}") from exc
+    return converted
+
+
+def _trade_date_to_iso(trade_date: int) -> date:
+    """Convert a ``YYYYMMDD`` observation key into the DATE column type."""
+
+    return datetime.strptime(str(_tracking_date(trade_date)), "%Y%m%d").date()
+
+
+def _tracking_number(value: object, label: str) -> float:
+    """Narrow one numeric observation field.
+
+    这些值来自重算服务而不是用户输入，但仍然逐个校验：一个 NaN 净值会顺着
+    JSON 一路走到页面上的曲线里，并且在持久化后就再也无法挽回了。
+    """
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"追踪{label}无效")
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"追踪{label}必须是有限数字")
+    return number
+
+
+def _write_tracking_points(
+    connection: duckdb.DuckDBPyConnection,
+    strategy_id: str,
+    points: Iterable[Mapping[str, object]],
+) -> int:
+    """Upsert observation rows inside an open transaction."""
+
+    rows: list[tuple[object, ...]] = []
+    for point in points:
+        benchmark = point.get("benchmark_value")
+        drawdown = point.get("drawdown")
+        rows.append(
+            (
+                strategy_id,
+                _tracking_date(point["trade_date"]),
+                _tracking_number(point["equity"], "净值"),
+                _tracking_number(point["cash"], "现金"),
+                max(0, int(_tracking_number(point["positions_count"], "持仓数"))),
+                None if benchmark is None else _tracking_number(benchmark, "基准值"),
+                None if drawdown is None else _tracking_number(drawdown, "回撤"),
+            )
+        )
+    if not rows:
+        return 0
+    connection.executemany(
+        f"""
+        INSERT INTO {STRATEGY_TRACKING_TABLE} (
+            strategy_id, trade_date, equity, cash, positions_count,
+            benchmark_value, drawdown
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (strategy_id, trade_date) DO UPDATE SET
+            equity = excluded.equity,
+            cash = excluded.cash,
+            positions_count = excluded.positions_count,
+            benchmark_value = excluded.benchmark_value,
+            drawdown = excluded.drawdown
+        """,
+        rows,
+    )
+    return len(rows)
 
 
 def _instrument_name_map(connection: duckdb.DuckDBPyConnection) -> dict[tuple[str, str], str]:
@@ -1184,8 +1294,7 @@ class DuckDbHistoryStore:
         with self._store._connect(read_only=True) as connection:
             rows = connection.execute(
                 f"""
-                SELECT strategy_id, name, note, source_history_id,
-                       created_at, updated_at, request_json, summary_json
+                SELECT {_STRATEGY_COLUMNS}
                 FROM {SAVED_STRATEGY_TABLE}
                 ORDER BY updated_at DESC, strategy_id DESC
                 """
@@ -1203,8 +1312,7 @@ class DuckDbHistoryStore:
         with self._store._connect(read_only=True) as connection:
             row = connection.execute(
                 f"""
-                SELECT strategy_id, name, note, source_history_id,
-                       created_at, updated_at, request_json, summary_json
+                SELECT {_STRATEGY_COLUMNS}
                 FROM {SAVED_STRATEGY_TABLE}
                 WHERE strategy_id = ?
                 """,
@@ -1267,19 +1375,264 @@ class DuckDbHistoryStore:
             return None
         return self.read_strategy(normalized_id)
 
+    def update_strategy_summary(
+        self,
+        strategy_id: str,
+        summary: Mapping[str, object],
+    ) -> dict[str, object] | None:
+        """Replace the stored performance snapshot.
+
+        追踪上线时用它把「研究段绩效」钉进策略里，之后**永不再改**——分母要是
+        会动，衰减比就没有意义了。
+        """
+
+        self._store._require_writer()
+        normalized_id = strategy_id.strip()
+        if not normalized_id:
+            return None
+        with _WRITE_LOCK, self._store._connect() as connection:
+            updated = connection.execute(
+                f"UPDATE {SAVED_STRATEGY_TABLE} SET summary_json = ?, updated_at = ? "
+                "WHERE strategy_id = ? RETURNING strategy_id",
+                [
+                    json.dumps(dict(summary), ensure_ascii=False, separators=(",", ":")),
+                    _now(),
+                    normalized_id,
+                ],
+            ).fetchone()
+        if updated is None:
+            return None
+        return self.read_strategy(normalized_id)
+
     def delete_strategy(self, strategy_id: str) -> bool:
-        """Delete one saved strategy."""
+        """Delete one saved strategy together with its tracking observations."""
 
         self._store._require_writer()
         normalized_id = strategy_id.strip()
         if not normalized_id:
             return False
         with _WRITE_LOCK, self._store._connect() as connection:
-            deleted = connection.execute(
-                f"DELETE FROM {SAVED_STRATEGY_TABLE} WHERE strategy_id = ? RETURNING strategy_id",
-                [normalized_id],
-            ).fetchone()
+            connection.execute("BEGIN")
+            try:
+                deleted = connection.execute(
+                    f"DELETE FROM {SAVED_STRATEGY_TABLE} "
+                    "WHERE strategy_id = ? RETURNING strategy_id",
+                    [normalized_id],
+                ).fetchone()
+                if deleted is not None:
+                    # 追踪观察值是策略的附属品，留着会变成永远查不到的孤儿行。
+                    connection.execute(
+                        f"DELETE FROM {STRATEGY_TRACKING_TABLE} WHERE strategy_id = ?",
+                        [normalized_id],
+                    )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
         return deleted is not None
+
+    # ------------------------------------------------------------------
+    # 策略追踪：上线日冻结规则，此后每个交易日收盘后重算一次，把「上线前的
+    # 回测」和「上线后的模拟观察」并排——用来回答"从今天起它还灵不灵"。
+    # 存储上只留每日一行净值（画曲线 + 算衰减比）。交易明细不存，也不存什么
+    # "上线状态快照"——重算是全量跑，所需的全部信息就是策略自己的 request_json。
+    # ------------------------------------------------------------------
+
+    def start_strategy_tracking(
+        self,
+        strategy_id: str,
+        *,
+        launched_at: int,
+        seed_points: Iterable[Mapping[str, object]] = (),
+    ) -> dict[str, object] | None:
+        """Put one strategy online and seed the hand-over day.
+
+        上线日那一行既是研究段的终点也是观察段的起点，两边共用它——曲线才
+        接得上，衰减比也才有统一的零点。
+        """
+
+        self._store._require_writer()
+        normalized_id = strategy_id.strip()
+        if not normalized_id:
+            return None
+        with _WRITE_LOCK, self._store._connect() as connection:
+            connection.execute("BEGIN")
+            try:
+                updated = connection.execute(
+                    f"""
+                    UPDATE {SAVED_STRATEGY_TABLE} SET
+                        tracking_status = ?,
+                        launched_at = ?,
+                        last_tracked_date = ?,
+                        last_error = '',
+                        updated_at = ?
+                    WHERE strategy_id = ? RETURNING strategy_id
+                    """,
+                    [
+                        STRATEGY_TRACKING_ACTIVE,
+                        _trade_date_to_iso(launched_at),
+                        launched_at,
+                        _now(),
+                        normalized_id,
+                    ],
+                ).fetchone()
+                if updated is not None:
+                    _write_tracking_points(connection, normalized_id, seed_points)
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        if updated is None:
+            return None
+        return self.read_strategy(normalized_id)
+
+    def finish_strategy_tracking(
+        self,
+        strategy_id: str,
+        *,
+        last_tracked_date: int | None = None,
+        error: str | None = None,
+    ) -> dict[str, object] | None:
+        """Record one rerun outcome.
+
+        失败时只写 ``last_error`` 并**保留旧的** ``last_tracked_date``——
+        停在旧日期比静默写一条"成功"重要得多，否则用户会以为今天也算过了。
+        """
+
+        self._store._require_writer()
+        normalized_id = strategy_id.strip()
+        if not normalized_id:
+            return None
+        assignments = ["updated_at = ?"]
+        parameters: list[object] = [_now()]
+        if error:
+            assignments.append("last_error = ?")
+            parameters.append(str(error).strip()[:500])
+        else:
+            assignments.append("last_error = ''")
+            if last_tracked_date is not None:
+                assignments.append("last_tracked_date = ?")
+                parameters.append(int(last_tracked_date))
+        parameters.append(normalized_id)
+        with _WRITE_LOCK, self._store._connect() as connection:
+            updated = connection.execute(
+                f"UPDATE {SAVED_STRATEGY_TABLE} SET {', '.join(assignments)} "
+                "WHERE strategy_id = ? RETURNING strategy_id",
+                parameters,
+            ).fetchone()
+        if updated is None:
+            return None
+        return self.read_strategy(normalized_id)
+
+    def stop_strategy_tracking(self, strategy_id: str) -> dict[str, object] | None:
+        """Take one strategy offline, keeping the observations it already made."""
+
+        self._store._require_writer()
+        normalized_id = strategy_id.strip()
+        if not normalized_id:
+            return None
+        with _WRITE_LOCK, self._store._connect() as connection:
+            updated = connection.execute(
+                f"""
+                UPDATE {SAVED_STRATEGY_TABLE} SET
+                    tracking_status = ?,
+                    last_error = '',
+                    updated_at = ?
+                WHERE strategy_id = ? AND tracking_status <> ?
+                RETURNING strategy_id
+                """,
+                [
+                    STRATEGY_TRACKING_OFF,
+                    _now(),
+                    normalized_id,
+                    STRATEGY_TRACKING_OFF,
+                ],
+            ).fetchone()
+        if updated is None:
+            return None
+        return self.read_strategy(normalized_id)
+
+    def save_tracking_points(
+        self,
+        strategy_id: str,
+        points: Iterable[Mapping[str, object]],
+    ) -> int:
+        """Upsert the daily observation rows of one strategy.
+
+        按 (策略, 日期) 覆盖写，所以同一天重跑几次结果都一样——这就是幂等的
+        来源，也是"机器关机漏跑几天、开机后一次补齐"能成立的原因。
+        """
+
+        self._store._require_writer()
+        normalized_id = strategy_id.strip()
+        if not normalized_id:
+            return 0
+        rows = list(points)
+        if not rows:
+            return 0
+        with _WRITE_LOCK, self._store._connect() as connection:
+            connection.execute("BEGIN")
+            try:
+                written = _write_tracking_points(connection, normalized_id, rows)
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        return written
+
+    def list_tracking_points(
+        self,
+        strategy_id: str,
+        *,
+        since: int | None = None,
+    ) -> list[dict[str, object]]:
+        """Read the observation rows of one strategy, oldest first."""
+
+        normalized_id = strategy_id.strip()
+        if not normalized_id:
+            return []
+        statement = (
+            "SELECT trade_date, equity, cash, positions_count, benchmark_value, drawdown "
+            f"FROM {STRATEGY_TRACKING_TABLE} WHERE strategy_id = ?"
+        )
+        parameters: list[object] = [normalized_id]
+        if since is not None:
+            statement += " AND trade_date >= ?"
+            parameters.append(int(since))
+        statement += " ORDER BY trade_date"
+        with self._store._connect(read_only=True) as connection:
+            rows = connection.execute(statement, parameters).fetchall()
+        return [
+            {
+                "trade_date": int(row[0]),
+                "equity": float(row[1]),
+                "cash": float(row[2]),
+                "positions_count": int(row[3]),
+                "benchmark_value": None if row[4] is None else float(row[4]),
+                "drawdown": None if row[5] is None else float(row[5]),
+            }
+            for row in rows
+        ]
+
+    def list_tracked_strategies(self) -> list[dict[str, object]]:
+        """Return every strategy that is currently online."""
+
+        with self._store._connect(read_only=True) as connection:
+            rows = connection.execute(
+                f"""
+                SELECT {_STRATEGY_COLUMNS}
+                FROM {SAVED_STRATEGY_TABLE}
+                WHERE tracking_status = ?
+                ORDER BY launched_at, strategy_id
+                """,
+                [STRATEGY_TRACKING_ACTIVE],
+            ).fetchall()
+        records: list[dict[str, object]] = []
+        for row in rows:
+            payload = _decode_strategy_row(row)
+            payload.pop("request", None)
+            records.append(payload)
+        return records
 
     def history_table_columns(self, table: str) -> tuple[str, ...]:
         """Column names of one user-asset table, in physical order."""

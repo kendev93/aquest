@@ -25,7 +25,7 @@ from .day_format import classify_board
 from .maintenance import cleanup_database_backups, create_database_backup
 from .models import DataStoreStatus, InstrumentBoard, InstrumentType
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 SCREEN_HISTORY_LIMIT = 10
 STRATEGY_DISCOVERY_HISTORY_LIMIT = 20
 BACKTEST_HISTORY_LIMIT = 20
@@ -515,7 +515,30 @@ class _DuckDbStoreBase:
                     updated_at TIMESTAMP NOT NULL,
                     request_json VARCHAR NOT NULL,
                     summary_json VARCHAR NOT NULL,
+                    tracking_status VARCHAR NOT NULL DEFAULT 'off',
+                    launched_at DATE,
+                    last_tracked_date INTEGER,
+                    last_error VARCHAR NOT NULL DEFAULT '',
                     UNIQUE (name)
+                )
+                """
+            )
+            # 策略追踪：每个策略每个交易日一行净值。主键是 (策略, 日期)，写入用
+            # upsert —— 重跑同一段会覆盖而不是翻倍，所以重算天然幂等，机器关机
+            # 漏跑几天也能一次补齐。这里刻意不存交易明细（需要时从上线快照重算），
+            # 也不存 Checkpoint 全量（它会把研究段的整份 equity/trades/states
+            # 复制进来，每天重写会撑爆表）。
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS strategy_tracking (
+                    strategy_id VARCHAR NOT NULL,
+                    trade_date INTEGER NOT NULL,
+                    equity DOUBLE NOT NULL,
+                    cash DOUBLE NOT NULL,
+                    positions_count INTEGER NOT NULL,
+                    benchmark_value DOUBLE,
+                    drawdown DOUBLE,
+                    PRIMARY KEY (strategy_id, trade_date)
                 )
                 """
             )
@@ -663,6 +686,33 @@ class _DuckDbStoreBase:
                       AND bars.code = instruments.code
                 )
                 """
+            )
+
+        if version < 15 and "saved_strategies" in tables:
+            columns = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema = 'main' AND table_name = 'saved_strategies'"
+                ).fetchall()
+            }
+            # DuckDB 不支持 ADD COLUMN 带约束（NOT NULL / DEFAULT），
+            # 所以先加裸列，再用 UPDATE 把已有行回填成建表时的默认值。
+            for column, definition in (
+                ("tracking_status", "VARCHAR"),
+                ("launched_at", "DATE"),
+                ("last_tracked_date", "INTEGER"),
+                ("last_error", "VARCHAR"),
+            ):
+                if column not in columns:
+                    connection.execute(
+                        f"ALTER TABLE saved_strategies ADD COLUMN {column} {definition}"
+                    )
+            connection.execute(
+                "UPDATE saved_strategies SET tracking_status = 'off' WHERE tracking_status IS NULL"
+            )
+            connection.execute(
+                "UPDATE saved_strategies SET last_error = '' WHERE last_error IS NULL"
             )
 
     def _schema_version_on_disk(self) -> int | None:

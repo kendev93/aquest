@@ -63,6 +63,7 @@ def test_asset_tables_never_include_market_or_cache_data() -> None:
         "backtest_history",
         "screen_history",
         "saved_strategies",
+        "strategy_tracking",
         "strategy_discovery_history",
         "strategy_discovery_replay_history",
     }

@@ -375,6 +375,60 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
     def delete_strategy(self, strategy_id: str) -> bool:
         return self._history.delete_strategy(strategy_id)
 
+    def update_strategy_summary(
+        self,
+        strategy_id: str,
+        summary: Mapping[str, object],
+    ) -> dict[str, object] | None:
+        return self._history.update_strategy_summary(strategy_id, summary)
+
+    def start_strategy_tracking(
+        self,
+        strategy_id: str,
+        *,
+        launched_at: int,
+        seed_points: Iterable[Mapping[str, object]] = (),
+    ) -> dict[str, object] | None:
+        return self._history.start_strategy_tracking(
+            strategy_id,
+            launched_at=launched_at,
+            seed_points=seed_points,
+        )
+
+    def finish_strategy_tracking(
+        self,
+        strategy_id: str,
+        *,
+        last_tracked_date: int | None = None,
+        error: str | None = None,
+    ) -> dict[str, object] | None:
+        return self._history.finish_strategy_tracking(
+            strategy_id,
+            last_tracked_date=last_tracked_date,
+            error=error,
+        )
+
+    def stop_strategy_tracking(self, strategy_id: str) -> dict[str, object] | None:
+        return self._history.stop_strategy_tracking(strategy_id)
+
+    def save_tracking_points(
+        self,
+        strategy_id: str,
+        points: Iterable[Mapping[str, object]],
+    ) -> int:
+        return self._history.save_tracking_points(strategy_id, points)
+
+    def list_tracking_points(
+        self,
+        strategy_id: str,
+        *,
+        since: int | None = None,
+    ) -> list[dict[str, object]]:
+        return self._history.list_tracking_points(strategy_id, since=since)
+
+    def list_tracked_strategies(self) -> list[dict[str, object]]:
+        return self._history.list_tracked_strategies()
+
     def history_table_columns(self, table: str) -> tuple[str, ...]:
         return self._history.history_table_columns(table)
 

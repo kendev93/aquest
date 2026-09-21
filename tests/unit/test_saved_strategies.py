@@ -225,3 +225,129 @@ def test_strategy_request_must_be_replayable() -> None:
 
     with pytest.raises(ValueError):
         _make_request(ranking_value="不存在的指标")
+
+
+def _save(
+    store: DuckDbMarketDataStore,
+    strategy_id: str = "strategy-1",
+    name: str = "主力进场轮动",
+) -> None:
+    store.save_strategy(strategy_id, name=name, request=dict(_REQUEST), summary={})
+
+
+def _point(trade_date: int, equity: float, **rest: object) -> dict[str, object]:
+    return {
+        "trade_date": trade_date,
+        "equity": equity,
+        "cash": 1000.0,
+        "positions_count": 3,
+        **rest,
+    }
+
+
+def test_tracking_start_seeds_the_hand_over_day(tmp_path) -> None:
+    """上线日那一行是接力点：研究段到它为止，观察段从它开始。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    _save(store)
+
+    record = store.start_strategy_tracking(
+        "strategy-1",
+        launched_at=20260901,
+        seed_points=[_point(20260901, 100000.0, positions_count=0, drawdown=0.0)],
+    )
+
+    assert record is not None
+    assert record["tracking_status"] == "active"
+    assert record["launched_at"] == "2026-09-01"
+    assert record["last_tracked_date"] == 20260901
+    assert store.list_tracking_points("strategy-1") == [
+        {
+            "trade_date": 20260901,
+            "equity": 100000.0,
+            "cash": 1000.0,
+            "positions_count": 0,
+            "benchmark_value": None,
+            "drawdown": 0.0,
+        }
+    ]
+
+
+def test_tracking_points_are_idempotent_across_reruns(tmp_path) -> None:
+    """同一天重算几次都一样——这是幂等，也是「漏跑几天后一键补齐」的前提。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    _save(store)
+    store.start_strategy_tracking("strategy-1", launched_at=20260901)
+
+    store.save_tracking_points("strategy-1", [_point(20260902, 101000.0)])
+    store.save_tracking_points("strategy-1", [_point(20260902, 102000.0)])
+
+    points = store.list_tracking_points("strategy-1")
+    assert [point["trade_date"] for point in points] == [20260902]
+    assert points[0]["equity"] == 102000.0
+
+
+def test_failed_rerun_keeps_the_old_date(tmp_path) -> None:
+    """失败只能停在旧日期。静默改成"今天"会让用户以为数据已经算过了。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    _save(store)
+    store.start_strategy_tracking("strategy-1", launched_at=20260901)
+    store.finish_strategy_tracking("strategy-1", last_tracked_date=20260905)
+
+    record = store.finish_strategy_tracking(
+        "strategy-1", last_tracked_date=20260908, error="行情缺失"
+    )
+
+    assert record is not None
+    assert record["last_tracked_date"] == 20260905
+    assert record["last_error"] == "行情缺失"
+    # 失败之后成功一次，错误必须被清掉，否则它会一直挂着吓人。
+    recovered = store.finish_strategy_tracking("strategy-1", last_tracked_date=20260908)
+    assert recovered is not None
+    assert recovered["last_tracked_date"] == 20260908
+    assert recovered["last_error"] == ""
+
+
+def test_stop_tracking_keeps_observations(tmp_path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    _save(store)
+    store.start_strategy_tracking(
+        "strategy-1",
+        launched_at=20260901,
+        seed_points=[_point(20260901, 100000.0)],
+    )
+
+    record = store.stop_strategy_tracking("strategy-1")
+
+    assert record is not None
+    assert record["tracking_status"] == "off"
+    # 观察值是已经跑出来的事实，停了也不该抹掉。
+    assert len(store.list_tracking_points("strategy-1")) == 1
+
+
+def test_deleting_a_strategy_removes_its_observations(tmp_path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    _save(store)
+    store.start_strategy_tracking(
+        "strategy-1", launched_at=20260901, seed_points=[_point(20260901, 1.0)]
+    )
+
+    assert store.delete_strategy("strategy-1") is True
+    assert store.list_tracking_points("strategy-1") == []
+
+
+def test_list_tracked_strategies_only_returns_online_ones(tmp_path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    _save(store, "strategy-1", "上线策略")
+    _save(store, "strategy-2", "仅保存")
+    store.start_strategy_tracking("strategy-1", launched_at=20260901)
+
+    assert [row["strategy_id"] for row in store.list_tracked_strategies()] == ["strategy-1"]
+
+
+def test_tracking_table_is_part_of_user_assets() -> None:
+    """观察到的东西是我攒下来的证据，它和策略本身一样丢不起。"""
+
+    assert "strategy_tracking" in ASSET_TABLES
