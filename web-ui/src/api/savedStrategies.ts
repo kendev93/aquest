@@ -3,6 +3,8 @@ import type {
   PortfolioBacktestPayload,
   SavedStrategyDetail,
   SavedStrategySummary,
+  StrategyTrackingJobState,
+  StrategyTrackingSnapshot,
 } from '../types'
 
 const API_BASE = '/api/v1/strategies'
@@ -71,6 +73,68 @@ export async function deleteStrategy(strategyId: string): Promise<{ deleted: boo
   const response = await request<{ data: { deleted: boolean } }>(
     `${API_BASE}/${encodeURIComponent(strategyId)}`,
     { method: 'DELETE' },
+  )
+  return response.data
+}
+
+// ---------------------------------------------------------------------------
+// 策略追踪：把保存下来的策略沿着交易日历往前推，让它回答"上线之后还灵不灵"。
+// ---------------------------------------------------------------------------
+
+export async function fetchStrategyTracking(): Promise<StrategyTrackingSnapshot[]> {
+  const response = await request<{ data: StrategyTrackingSnapshot[] }>(`${API_BASE}/tracking`)
+  return response.data
+}
+
+export async function getStrategyTracking(
+  strategyId: string,
+): Promise<StrategyTrackingSnapshot> {
+  const response = await request<{ data: StrategyTrackingSnapshot }>(
+    `${API_BASE}/tracking/${encodeURIComponent(strategyId)}`,
+  )
+  return response.data
+}
+
+interface TrackingJobAccepted {
+  job_id: string
+  status: string
+}
+
+/** 上线。会把当时那段回测固化成"研究段"，之后不再改动。 */
+export async function launchStrategyTracking(
+  strategyId: string,
+): Promise<TrackingJobAccepted> {
+  const response = await request<{ data: TrackingJobAccepted }>(
+    `${API_BASE}/tracking/${encodeURIComponent(strategyId)}/launch`,
+    { method: 'POST' },
+  )
+  return response.data
+}
+
+/** 用最新行情重跑。同一天跑几次都一样；漏了几天也能一次补齐。 */
+export async function rerunStrategyTracking(
+  strategyId: string,
+): Promise<TrackingJobAccepted> {
+  const response = await request<{ data: TrackingJobAccepted }>(
+    `${API_BASE}/tracking/${encodeURIComponent(strategyId)}/rerun`,
+    { method: 'POST' },
+  )
+  return response.data
+}
+
+export async function stopStrategyTracking(
+  strategyId: string,
+): Promise<StrategyTrackingSnapshot> {
+  const response = await request<{ data: StrategyTrackingSnapshot }>(
+    `${API_BASE}/tracking/${encodeURIComponent(strategyId)}/stop`,
+    { method: 'POST' },
+  )
+  return response.data
+}
+
+export async function getTrackingJob(jobId: string): Promise<StrategyTrackingJobState> {
+  const response = await request<{ data: StrategyTrackingJobState }>(
+    `${API_BASE}/tracking/jobs/${encodeURIComponent(jobId)}`,
   )
   return response.data
 }

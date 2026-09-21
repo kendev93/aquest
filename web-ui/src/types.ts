@@ -632,6 +632,60 @@ export interface SavedStrategyDetail extends SavedStrategySummary {
   request: PortfolioBacktestPayload
 }
 
+/** 追踪任务的状态。重跑是分钟级的全历史，所以永远走后台任务。 */
+export interface StrategyTrackingJobState {
+  job_id: string
+  status: 'queued' | 'running' | 'completed' | 'failed'
+  progress: number
+  total_candidates: number
+  total_scanned: number
+  errors: number
+  error: string | null
+  result: StrategyTrackingSnapshot | null
+}
+
+/** 追踪里的一个交易日。上线日那一行是接力点，研究段和观察段共用它。 */
+export interface StrategyTrackingPoint {
+  trade_date: number
+  equity: number
+  cash: number
+  positions_count: number
+  benchmark_value: number | null
+  drawdown: number | null
+}
+
+/** 一段窗口（研究段 = 上线前，观察段 = 上线后）的绩效。 */
+export interface StrategyTrackingSegment {
+  start_date: string
+  end_date: string
+  bars: number
+  performance: SavedStrategyPerformance
+}
+
+/**
+ * 一次追踪的全貌。
+ * `decay` 是观察段 / 研究段，`excess_annual_return` 是观察段相对同期基准的年化差——
+ * 这两个数是这个功能唯一想给出的答案，其余都只是支撑它们的证据。
+ */
+export interface StrategyTrackingSnapshot {
+  strategy_id: string
+  name?: string
+  note?: string
+  tracking_status: string
+  launched_at: number | null
+  last_tracked_date: number | null
+  /** 失败原因。有值时 last_tracked_date 一定停在旧日期。 */
+  last_error: string
+  observations: StrategyTrackingPoint[]
+  research: StrategyTrackingSegment | null
+  observation: StrategyTrackingSegment | null
+  decay: Record<string, number | null>
+  benchmark_performance: SavedStrategyPerformance | null
+  excess_annual_return: number | null
+  /** 观察段太短，还没到可以谈"衰减"的程度。界面必须据此标注。 */
+  observation_is_short: boolean
+}
+
 export interface StrategyDiscoveryPayload {
   universe: Universe
   universe_file?: string | null

@@ -600,3 +600,48 @@ tbody tr:hover td { background: rgba(22, 34, 58, 0.45); }
 .strategy-save-bar .strategy-name-input { min-width: 220px; }
 .strategy-save-bar .primary-button { width: auto; min-height: 32px; margin-top: 0; padding: 0 14px; }
 .strategy-save-bar small { color: var(--subtle); font-size: 10px; }
+
+/* 策略追踪：总览表 + 分段详情。 */
+.tracking-detail { margin-top: 18px; }
+.tracking-detail .panel-heading { margin-bottom: 14px; }
+.tracking-actions { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
+.tracking-actions .secondary-button { min-height: 28px; padding: 0 10px; font-size: 10px; }
+.status-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.status-pill.live { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.status-pill.idle { background: var(--surface-raised); }
+.error-pill {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 7px;
+  border: 1px solid var(--danger);
+  border-radius: 999px;
+  color: var(--danger);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.sample-warning {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--accent);
+  background: var(--surface-raised);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.65;
+}
+.segment-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media (max-width: 900px) { .segment-grid { grid-template-columns: 1fr; } }
+.segment-card { padding: 14px 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.segment-card h4 { margin: 5px 0 4px; font-size: 14px; letter-spacing: -0.02em; }
+.segment-card .metrics-strip { margin-top: 12px; margin-bottom: 0; grid-template-columns: repeat(2, 1fr); }
+.benchmark-inline { margin-top: 10px; color: var(--muted); font-size: 11px; }
+.tracking-detail .equity-chart { height: 200px; }

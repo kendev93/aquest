@@ -7,6 +7,7 @@ import MarketDataPage from './pages/MarketDataPage.vue'
 import PortfolioBacktestPage from './pages/PortfolioBacktestPage.vue'
 import StrategyDiscoveryPage from './pages/StrategyDiscoveryPage.vue'
 import StrategyFitnessPage from './pages/StrategyFitnessPage.vue'
+import StrategyTrackingPage from './pages/StrategyTrackingPage.vue'
 import SwingResearchPage from './pages/SwingResearchPage.vue'
 
 const currentPath = ref(typeof window !== 'undefined' ? window.location.pathname : '/indicator-lab')
@@ -21,6 +22,7 @@ const routeComponent = computed(() => {
     return StrategyDiscoveryPage
   }
   if (pathname.startsWith('/portfolio-backtest')) return PortfolioBacktestPage
+  if (pathname.startsWith('/strategy-tracking')) return StrategyTrackingPage
   return FormulaScreenPage
 })
 
