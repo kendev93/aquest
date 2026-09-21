@@ -14,6 +14,7 @@ import { fetchActiveJobs } from '../api/jobs'
 import BacktestHistoryPanel from '../components/BacktestHistoryPanel.vue'
 import DateRangeSelector from '../components/DateRangeSelector.vue'
 import RuleGroupEditor from '../components/RuleGroupEditor.vue'
+import TermHint from '../components/TermHint.vue'
 import type {
   BacktestHistorySummary,
   BacktestExecution,
@@ -203,21 +204,59 @@ const droppedCodes = computed(() => [
   ...(result.value?.missing_codes ?? []).map(code => ({ code, reason: '行情库里没有' })),
   ...(result.value?.filtered_codes ?? []).map(code => ({ code, reason: '被板块或类型范围排除' })),
 ])
-const chartPoints = computed(() => {
+// 基准对照：同一批股票各买一点然后不动。没有它，年化 20% 在牛市里可能只是没跑赢。
+const benchmark = computed(() => result.value?.benchmark ?? null)
+const excessAnnualReturn = computed(() => {
+  const strategy = performanceValue('annual_return')
+  const base = benchmark.value?.performance.annual_return ?? null
+  return strategy === null || base === null ? null : strategy - base
+})
+// 抽稀后的曲线下标。策略线和基准线共用同一批下标，两条线才对得上同一天。
+const chartIndices = computed(() => {
   const curve = result.value?.equity_curve ?? []
-  if (curve.length < 2) return ''
-  const sample = curve.length > 120
-    ? curve.filter((_, index) => index % Math.ceil(curve.length / 120) === 0)
-    : curve
-  const values = sample.map((point) => point.total)
+  if (curve.length < 2) return []
+  const step = curve.length > 120 ? Math.ceil(curve.length / 120) : 1
+  const indices: number[] = []
+  for (let index = 0; index < curve.length; index += step) indices.push(index)
+  if (indices[indices.length - 1] !== curve.length - 1) indices.push(curve.length - 1)
+  return indices
+})
+// 纵轴范围要同时装下策略与基准，否则基准跑出画框，看着像"策略完胜"。
+const chartRange = computed(() => {
+  const curve = result.value?.equity_curve ?? []
+  const base = benchmark.value?.totals ?? []
+  const values: number[] = []
+  for (const index of chartIndices.value) {
+    values.push(curve[index].total)
+    if (index < base.length) values.push(base[index])
+  }
+  if (!values.length) return { minimum: 0, span: 1 }
   const minimum = Math.min(...values)
   const maximum = Math.max(...values)
-  const span = maximum - minimum || 1
-  return sample.map((point, index) => {
-    const x = (index / Math.max(sample.length - 1, 1)) * 800
-    const y = 220 - ((point.total - minimum) / span) * 190
-    return `${x.toFixed(1)},${y.toFixed(1)}`
-  }).join(' ')
+  return { minimum, span: maximum - minimum || 1 }
+})
+function toChartPoints(values: (number | undefined)[]): string {
+  const indices = chartIndices.value
+  const { minimum, span } = chartRange.value
+  return values
+    .map((value, position) => {
+      if (value === undefined) return null
+      const x = (position / Math.max(indices.length - 1, 1)) * 800
+      const y = 220 - ((value - minimum) / span) * 190
+      return `${x.toFixed(1)},${y.toFixed(1)}`
+    })
+    .filter((point): point is string => point !== null)
+    .join(' ')
+}
+const chartPoints = computed(() => {
+  const curve = result.value?.equity_curve ?? []
+  if (!curve.length) return ''
+  return toChartPoints(chartIndices.value.map((index) => curve[index].total))
+})
+const benchmarkPoints = computed(() => {
+  const base = benchmark.value?.totals
+  if (!base) return ''
+  return toChartPoints(chartIndices.value.map((index) => (index < base.length ? base[index] : undefined)))
 })
 const chartSummary = computed(() => {
   const curve = result.value?.equity_curve ?? []
@@ -788,6 +827,10 @@ function performanceValue(key: string): number | null {
   return result.value?.performance[key] ?? null
 }
 
+function benchmarkValue(key: string): number | null {
+  return benchmark.value?.performance[key] ?? null
+}
+
 function downloadResult(): void {
   if (!result.value) return
   const url = URL.createObjectURL(new Blob([JSON.stringify(result.value, null, 2)], { type: 'application/json' }))
@@ -1035,7 +1078,9 @@ watch(() => form.formulaText, (value) => {
             </div>
             <div class="progress-track portfolio-progress" aria-label="组合数据处理进度"><span :style="{ width: `${Math.round((job?.progress ?? 1) * 100)}%` }"></span></div>
 
-            <section class="chart-card" aria-labelledby="portfolio-equity-title"><div class="chart-heading"><div><span class="section-kicker">EQUITY CURVE</span><h3 id="portfolio-equity-title">组合资金曲线</h3></div><span class="chart-legend"><i aria-hidden="true"></i>总资产</span></div><svg class="equity-chart" data-testid="portfolio-equity-chart" viewBox="0 0 800 240" role="img" :aria-label="chartSummary"><polyline :points="chartPoints" fill="none" stroke="var(--accent)" stroke-linecap="round" stroke-linejoin="round" stroke-width="3"></polyline></svg><p class="chart-summary">{{ chartSummary }}</p></section>
+            <section v-if="benchmark" class="benchmark-card" data-testid="portfolio-benchmark" aria-labelledby="portfolio-benchmark-title"><div class="benchmark-heading"><div><span class="section-kicker">BENCHMARK</span><h3 id="portfolio-benchmark-title">基准对照<TermHint term="benchmark" /></h3></div><span class="muted-code">{{ benchmark.label }} · {{ benchmark.instrument_count }} 只标的</span></div><div class="metrics-strip benchmark-metrics"><div><span>基准总收益</span><strong data-testid="portfolio-benchmark-total">{{ formatPercent(benchmarkValue('total_return')) }}</strong></div><div><span>基准年化</span><strong data-testid="portfolio-benchmark-annual">{{ formatPercent(benchmarkValue('annual_return')) }}</strong></div><div><span>基准最大回撤</span><strong class="negative" data-testid="portfolio-benchmark-drawdown">{{ formatPercent(benchmarkValue('max_drawdown')) }}</strong></div><div><span>基准夏普</span><strong data-testid="portfolio-benchmark-sharpe">{{ formatNumber(benchmarkValue('sharpe')) }}</strong></div><div><span>超额年化<TermHint term="excessReturn" /></span><strong :class="{ positive: (excessAnnualReturn ?? 0) > 0, negative: (excessAnnualReturn ?? 0) <= 0 }" data-testid="portfolio-excess-annual">{{ formatPercent(excessAnnualReturn) }}</strong></div></div><p class="benchmark-note">基准用同一笔本金、同一段区间，第一天按收盘价把池内标的各买一点，之后一直不动；不计手续费也不取整手，因为它是用来比的尺子，不是真去执行的策略。第一天还没有价格的标的（新股、长期停牌）不进基准。</p></section>
+
+            <section class="chart-card" aria-labelledby="portfolio-equity-title"><div class="chart-heading"><div><span class="section-kicker">EQUITY CURVE</span><h3 id="portfolio-equity-title">组合资金曲线</h3></div><span class="chart-legend"><i aria-hidden="true"></i>总资产<template v-if="benchmark"><i class="legend-benchmark" aria-hidden="true"></i>基准</template></span></div><svg class="equity-chart" data-testid="portfolio-equity-chart" viewBox="0 0 800 240" role="img" :aria-label="chartSummary"><polyline v-if="benchmarkPoints" :points="benchmarkPoints" fill="none" stroke="var(--muted)" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" stroke-dasharray="6 4" data-testid="portfolio-benchmark-chart"></polyline><polyline :points="chartPoints" fill="none" stroke="var(--accent)" stroke-linecap="round" stroke-linejoin="round" stroke-width="3"></polyline></svg><p class="chart-summary">{{ chartSummary }}</p></section>
 
             <section class="data-section"><div class="section-heading"><div><span class="section-kicker">CURRENT HOLDINGS</span><h3>最新持仓</h3></div><span>{{ latestState?.positions_count ?? 0 }} / {{ result.max_positions }} 个槽位</span></div><div v-if="!latestState?.holdings.length" class="inline-empty">回测结束时没有持仓。</div><div v-else class="table-wrap"><table data-testid="portfolio-holdings"><caption class="sr-only">组合最新持仓</caption><thead><tr><th>市场</th><th>代码</th><th>中文名</th><th>数量</th><th>成本</th><th>收盘</th><th>浮动盈亏</th></tr></thead><tbody><tr v-for="holding in latestState.holdings" :key="`${holding.market}-${holding.code}`"><td><span class="market-pill" :class="holding.market.toLowerCase()">{{ holding.market }}</span></td><td><strong class="code">{{ holding.code }}</strong></td><td>{{ holding.name || '—' }}</td><td>{{ formatNumber(holding.size, 0) }}</td><td>{{ formatMoney(holding.entry_price) }}</td><td>{{ formatMoney(holding.close) }}</td><td :class="{ positive: holding.unrealized_pnl >= 0, negative: holding.unrealized_pnl < 0 }">{{ formatMoney(holding.unrealized_pnl) }}</td></tr></tbody></table></div></section>
 

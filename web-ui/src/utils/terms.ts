@@ -147,4 +147,19 @@ export const TERMS: Record<string, TermDefinition> = {
       '标记这条结论当天能不能真的判断出来。「近期将启动」当天就算得出来，可以直接用；' +
       '「段起点」只有事后才知道，拿它做条件回测不会偷看未来，但它并不保证那段涨幅能兑现。',
   },
+  benchmark: {
+    name: '基准对照',
+    english: 'Equal-weight buy-and-hold benchmark',
+    intro:
+      '同一批股票、同一笔本金，在回测第一天按收盘价各买一点、然后一直不动，' +
+      '这就是基准。它回答的是「这套选股规则，是不是比闭着眼各买一点更强」。' +
+      '基准不计手续费、不考虑必须用整手买，因为它是拿来比的尺子，不是真去执行的策略。',
+  },
+  excessReturn: {
+    name: '超额收益',
+    english: 'Excess return over benchmark',
+    intro:
+      '策略的年化收益减去基准的年化收益。为正说明这套规则确实挑出了更强的标的，' +
+      '为负说明它还不如把池子里的股票各买一点然后躺着。',
+  },
 }

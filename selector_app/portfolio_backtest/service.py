@@ -147,6 +147,7 @@ class PortfolioBacktestService(
             simulation,
             _portfolio_fingerprint(contexts),
             resolved,
+            contexts,
         )
         if progress_callback is not None:
             progress_callback(len(refs), len(refs))
@@ -201,6 +202,8 @@ class PortfolioBacktestService(
                 {},
                 simulation,
                 data_fingerprint,
+                None,
+                prepared,
             )
         fitness_filter = self._build_fitness_filter(prepared, config)
         simulation = self._simulate(
@@ -226,6 +229,8 @@ class PortfolioBacktestService(
             {},
             simulation,
             data_fingerprint,
+            None,
+            prepared,
         )
 
     def run_stock(
@@ -256,6 +261,8 @@ class PortfolioBacktestService(
             {},
             simulation,
             context.data_fingerprint,
+            None,
+            [context],
         )
 
     def _build_fitness_filter(

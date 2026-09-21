@@ -86,6 +86,16 @@ const result: PortfolioBacktestResult = {
   failure_reasons: {},
   diagnostic: null,
   data_fingerprint: 'portfolio-fingerprint',
+  benchmark: {
+    label: '标的池等权买入持有',
+    instrument_count: 3,
+    dates: [20240102, 20240106],
+    totals: [10000, 10800],
+    performance: {
+      total_return: 0.08, annual_return: 0.08, max_drawdown: 0.05, max_dd_duration: 9,
+      sharpe: 0.9, sortino: 1.1, calmar: 1.6, volatility: 0.18, start_cash: 10000, end_value: 10800,
+    },
+  },
 }
 
 describe('PortfolioBacktestPage', () => {
@@ -101,6 +111,37 @@ describe('PortfolioBacktestPage', () => {
     vi.mocked(portfolioApi.getPortfolioBacktestResults).mockResolvedValue(result)
     vi.mocked(portfolioApi.fetchPortfolioBacktestHistory).mockResolvedValue([])
     vi.mocked(jobsApi.fetchActiveJobs).mockResolvedValue([])
+  })
+
+  it('shows the equal-weight benchmark and how much the strategy beat it by', async () => {
+    const wrapper = mount(PortfolioBacktestPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')
+    await flushPromises()
+
+    const benchmark = wrapper.get('[data-testid="portfolio-benchmark"]')
+    expect(benchmark.text()).toContain('标的池等权买入持有')
+    expect(benchmark.text()).toContain('3 只标的')
+    expect(benchmark.get('[data-testid="portfolio-benchmark-total"]').text()).toBe('8.00%')
+    expect(benchmark.get('[data-testid="portfolio-benchmark-annual"]').text()).toBe('8.00%')
+    expect(benchmark.get('[data-testid="portfolio-benchmark-drawdown"]').text()).toBe('5.00%')
+    // 策略年化 22% − 基准年化 8% = 14%
+    expect(benchmark.get('[data-testid="portfolio-excess-annual"]').text()).toBe('14.00%')
+    // 基准要和策略画在同一张图上，否则"跑赢了"只是个说法。
+    expect(wrapper.get('[data-testid="portfolio-benchmark-chart"]').attributes('points')).toBeTruthy()
+  })
+
+  it('hides the benchmark block when the backtest cannot produce one', async () => {
+    vi.mocked(portfolioApi.getPortfolioBacktestResults).mockResolvedValue({ ...result, benchmark: null })
+    const wrapper = mount(PortfolioBacktestPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="portfolio-benchmark"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="portfolio-benchmark-chart"]').exists()).toBe(false)
+    // 没有基准不代表没有结果。
+    expect(wrapper.get('[data-testid="portfolio-results"]').text()).toContain('12.00%')
   })
 
   it('recovers and resumes a running portfolio backtest after the page is refreshed', async () => {

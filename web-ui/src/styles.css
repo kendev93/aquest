@@ -271,6 +271,12 @@ tbody tr:hover td { background: rgba(22, 34, 58, 0.45); }
 .chart-heading h3, .section-heading h3 { margin: 5px 0 0; font-size: 14px; letter-spacing: -0.02em; }
 .chart-legend { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; }
 .chart-legend i { display: inline-block; width: 18px; height: 3px; border-radius: 2px; background: var(--accent); }
+.chart-legend i.legend-benchmark { margin-left: 8px; background: repeating-linear-gradient(90deg, var(--muted) 0 5px, transparent 5px 9px); }
+.benchmark-card { margin-top: 14px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.benchmark-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; margin-bottom: 11px; }
+.benchmark-heading h3 { margin: 4px 0 0; font-size: 14px; letter-spacing: -0.02em; }
+.benchmark-metrics { grid-template-columns: repeat(5, 1fr); margin-bottom: 9px; }
+.benchmark-note { margin: 0; color: var(--subtle); font-size: 11px; line-height: 1.65; }
 .equity-chart { display: block; width: 100%; height: 220px; margin-top: 15px; overflow: visible; }
 .chart-summary { margin: 6px 0 0; color: var(--subtle); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
 .data-section { margin-top: 20px; }

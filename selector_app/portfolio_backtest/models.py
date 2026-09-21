@@ -285,6 +285,10 @@ class PortfolioBacktestReport:
     missing_codes: tuple[str, ...] = ()
     #: 指定标的中被板块/类型过滤掉的代码。
     filtered_codes: tuple[str, ...] = ()
+    #: 基准对照（标的池等权买入持有）。算不出来时是 None——比如窗口只有一天，
+    #: 或者池里没有一只标的在窗口首日就有价格。没有基准时报告照常出，只是
+    #: "跑赢了没有"这件事没人回答。
+    benchmark: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "performance", MappingProxyType(dict(self.performance)))
@@ -318,4 +322,5 @@ class PortfolioBacktestReport:
             "risk_controls": dict(self.risk_controls),
             "missing_codes": list(self.missing_codes),
             "filtered_codes": list(self.filtered_codes),
+            "benchmark": dict(self.benchmark) if self.benchmark is not None else None,
         }

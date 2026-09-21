@@ -13,6 +13,7 @@ import pandas as pd
 
 from selector_app.backtest.performance import PerformanceAnalyzer
 
+from .benchmark import equal_weight_buy_hold
 from .context import _ResolvedRefs, _StockSeries
 from .models import PortfolioBacktestConfig, PortfolioBacktestReport, PortfolioJsonValue
 from .risk import _risk_controls
@@ -33,6 +34,7 @@ class PortfolioReportMixin(_PortfolioServiceState):
         simulation: Mapping[str, object],
         data_fingerprint: str = "",
         resolved: _ResolvedRefs | None = None,
+        benchmark_contexts: Sequence[_StockSeries] | None = None,
     ) -> PortfolioBacktestReport:
         equity = cast(list[dict[str, PortfolioJsonValue]], simulation["equity"])
         trades = cast(list[dict[str, PortfolioJsonValue]], simulation["trades"])
@@ -126,6 +128,7 @@ class PortfolioReportMixin(_PortfolioServiceState):
             risk_controls=_risk_controls(config),
             missing_codes=resolved.missing if resolved is not None else (),
             filtered_codes=resolved.filtered if resolved is not None else (),
+            benchmark=_benchmark_block(benchmark_contexts, dates, config),
         )
 
     @staticmethod
@@ -161,6 +164,19 @@ class PortfolioReportMixin(_PortfolioServiceState):
             missing_codes=resolved.missing if resolved is not None else (),
             filtered_codes=resolved.filtered if resolved is not None else (),
         )
+
+
+def _benchmark_block(
+    contexts: Sequence[_StockSeries] | None,
+    dates: list[int],
+    config: PortfolioBacktestConfig,
+) -> dict[str, object] | None:
+    """基准对照。算不出来就返回 None，报告其余部分照常。"""
+
+    if not contexts:
+        return None
+    curve = equal_weight_buy_hold(contexts, dates, config.initial_cash)
+    return curve.to_dict() if curve is not None else None
 
 
 def _date_text(value: int) -> str:

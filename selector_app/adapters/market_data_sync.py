@@ -500,9 +500,7 @@ class MarketDataSync:
         _validate_eastmoney_scope(config)
         eastmoney_types = _eastmoney_types(config)
         if not eastmoney_types:
-            raise OnlineProviderError(
-                "在线同步当前只支持沪市主板、科创板和创业板股票。"
-            )
+            raise OnlineProviderError("在线同步当前只支持沪市主板、科创板和创业板股票。")
         return [
             (
                 "eastmoney",

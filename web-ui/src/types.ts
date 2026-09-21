@@ -546,6 +546,17 @@ export interface PortfolioRankingEvent {
   candidates: PortfolioRankingCandidate[]
 }
 
+export interface PortfolioBenchmark {
+  /** 基准口径的名称，界面上直接显示。 */
+  label: string
+  /** 真正进入基准的标的数（首日就有价格的才算）。 */
+  instrument_count: number
+  /** 与 equity_curve 同序的交易日，YYYYMMDD。 */
+  dates: number[]
+  totals: number[]
+  performance: Record<string, number | null>
+}
+
 export interface PortfolioBacktestResult {
   universe: Universe
   total_candidates: number
@@ -575,6 +586,8 @@ export interface PortfolioBacktestResult {
   missing_codes?: string[]
   /** 指定标的中被板块/类型范围过滤掉的代码。 */
   filtered_codes?: string[]
+  /** 基准对照（标的池等权买入持有）。窗口太短或池内无可用标的时为 null。 */
+  benchmark?: PortfolioBenchmark | null
 }
 
 export interface StrategyDiscoveryPayload {
