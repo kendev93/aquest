@@ -535,6 +535,8 @@ class ConditionResearchRequest(BaseModel):
     min_instruments: int = Field(default=5, ge=1, le=10_000)
     candidate_limit: int = Field(default=5, ge=1, le=10)
     holdout_candidates: int = Field(default=1, ge=1, le=3)
+    # 滚动复验：把留出段再切成几段，逐个回放同一批候选。1 = 不拆（现状）。
+    walk_forward_windows: int = Field(default=1, ge=1, le=5)
     # 置换检验：0 = 不检验，越大门槛越稳但越慢（单次约等价于挖掘耗时的 1/13，
     # 但零分布池是所有可用掩码而不仅是入围候选，实测按 1/6 估更稳妥）。
     # 默认 200：20 次时名义 5% 的门槛实测误报 11.7%。
@@ -626,6 +628,7 @@ class ConditionResearchRequest(BaseModel):
             min_instruments=self.min_instruments,
             candidate_limit=self.candidate_limit,
             holdout_candidates=self.holdout_candidates,
+            walk_forward_windows=self.walk_forward_windows,
             significance_permutations=self.significance_permutations,
             significance_quantile=self.significance_quantile,
             ranking_value=self.ranking_value,

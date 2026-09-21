@@ -651,3 +651,109 @@ def test_result_carries_ranking_advice_and_hit_diagnostics() -> None:
     buy_totals = result["sample_totals"]["buy"]
     assert buy_totals["hit_days"] > 0
     assert buy_totals["daily_hits"] > 0
+
+
+def _rolling_config(**overrides: object) -> ConditionResearchConfig:
+    """五年区间：留出段约 366 天，切 3 窗每窗约 122 天，够 30 天的下限。"""
+
+    payload: dict[str, object] = {
+        "vipdoc_path": "/tmp/vipdoc",
+        "universe": "all",
+        "buy_rule": RuleGroup(signals=("custom.buy",)),
+        "sell_rule": RuleGroup(signals=("custom.sell",)),
+        "formula_text": "BUY:C>0; SELL:C<0; SCORE:C;",
+        "start_date": date(2020, 1, 1),
+        "end_date": date(2024, 12, 31),
+        "min_trades": 1,
+        "min_instruments": 1,
+        "significance_permutations": 0,
+    }
+    payload.update(overrides)
+    return ConditionResearchConfig(**payload)  # type: ignore[arg-type]
+
+
+def test_rolling_windows_replay_the_same_candidates_on_every_slice() -> None:
+    service = ConditionResearchService(
+        adapter=FakeResearchAdapter(),
+        backtest_service=FakePreparedBacktests(),  # type: ignore[arg-type]
+    )
+
+    result = service.run(_rolling_config(walk_forward_windows=3))
+
+    assert result["rolling"]["enabled"] is True
+    assert result["rolling"]["requested"] == 3
+    assert result["rolling"]["used"] == 3
+    assert result["rolling"]["note"] is None
+    # 基线也要逐窗给，否则候选的胜率没有对照物。
+    assert [item["index"] for item in result["baseline"]["windows"]] == [1, 2, 3]
+
+    tracked = [item for item in result["candidates"] if item["windows"]]
+    assert tracked, "进了留出期的候选必须带上逐窗结果"
+    for candidate in tracked:
+        assert len(candidate["windows"]) == 3
+        # 逐窗首尾相接，铺满整个留出段，不多不少。
+        assert candidate["windows"][0]["start_date"] == result["splits"]["holdout"]["start_date"]
+        assert candidate["windows"][-1]["end_date"] == result["splits"]["holdout"]["end_date"]
+        consistency = candidate["consistency"]
+        assert consistency["evaluated"] == 3
+        assert consistency["median_win_rate"] == pytest.approx(2 / 3)
+
+
+def test_rolling_is_off_by_default_and_leaves_the_result_unchanged() -> None:
+    service = ConditionResearchService(
+        adapter=FakeResearchAdapter(),
+        backtest_service=FakePreparedBacktests(),  # type: ignore[arg-type]
+    )
+
+    result = service.run(_rolling_config())
+
+    assert result["rolling"]["enabled"] is False
+    assert result["rolling"]["requested"] == 1
+    assert result["rolling"]["used"] == 1
+    assert result["rolling"]["note"] is None
+    assert result["baseline"]["windows"] == []
+    assert all(candidate["windows"] == [] for candidate in result["candidates"])
+    assert all(candidate["consistency"] is None for candidate in result["candidates"])
+
+
+def test_rolling_windows_are_downgraded_when_the_holdout_is_too_short() -> None:
+    """留出段只有 24 天时切不出 3 个 30 天的窗口，要降级而不是报错。"""
+
+    service = ConditionResearchService(
+        adapter=FakeResearchAdapter(),
+        backtest_service=FakePreparedBacktests(),  # type: ignore[arg-type]
+    )
+
+    result = service.run(
+        _rolling_config(
+            start_date=date(2020, 1, 1),
+            end_date=date(2020, 4, 30),
+            walk_forward_windows=3,
+        )
+    )
+
+    assert result["rolling"]["requested"] == 3
+    assert result["rolling"]["used"] == 1
+    assert result["rolling"]["enabled"] is False
+    # 降级要说出来，不能悄悄少跑几个窗口。
+    assert "切不出 3 个窗口" in (result["rolling"]["note"] or "")
+
+
+def test_rolling_is_skipped_when_no_candidate_reaches_the_holdout() -> None:
+    """没有候选可比时，逐窗基线没有对照对象，不该再跑 K 轮逐股回放。"""
+
+    class NoCandidates(ConditionResearchService):
+        def _mine_candidates(self, config, buy_samples, sell_samples, **kwargs):
+            return []
+
+    service = NoCandidates(
+        adapter=FakeResearchAdapter(),
+        backtest_service=FakePreparedBacktests(),  # type: ignore[arg-type]
+    )
+
+    result = service.run(_rolling_config(walk_forward_windows=3))
+
+    assert result["candidates"] == []
+    assert result["rolling"]["enabled"] is False
+    assert result["baseline"]["windows"] == []
+    assert "没有候选通过验证" in (result["rolling"]["note"] or "")

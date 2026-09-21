@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import math
 from collections import Counter
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from concurrent.futures import as_completed
 from concurrent.futures.process import BrokenProcessPool
 from datetime import date
@@ -63,7 +63,18 @@ from .samples import (
     build_early_exit_samples,
     feature_rows_by_date,
 )
-from .time_split import ResearchSplits, split_calendar_range
+from .time_split import (
+    MIN_WINDOW_DAYS,
+    DateWindow,
+    ResearchSplits,
+    split_calendar_range,
+    split_windows,
+)
+from .windows import (
+    build_baseline_window_payload,
+    build_consistency,
+    build_window_payload,
+)
 
 ProgressCallback = Callable[[int, int], None]
 CancelCheck = Callable[[], bool]
@@ -379,7 +390,21 @@ class ConditionResearchService:
         )
         feature_ids = self._feature_ids(config)
         plan = self._plan_for(refs, config)
-        work_total = max(1, len(refs) * 3)
+        # 滚动复验：留出段再切几段逐个回放。每多一个窗口就多一轮逐股回放，
+        # 进度条的总量要跟着涨，否则后半程进度会卡在不动。
+        rolling_windows = (
+            split_windows(
+                splits.holdout.start_date,
+                splits.holdout.end_date,
+                config.walk_forward_windows,
+            )
+            if config.walk_forward_windows > 1
+            else ()
+        )
+        # 窗口数后来还会被「有没有候选进留出期」再收一次：没有候选可比时，
+        # 逐窗基线没有对照对象，跑 K 轮逐股回放纯属浪费（见下面的 rolling）。
+        rolling = len(rolling_windows) > 1
+        work_total = max(1, len(refs) * (3 + len(rolling_windows)))
         self._progress(progress_callback, 0, work_total, "准备训练样本", 0, len(refs))
 
         train_reports: list[Mapping[str, object]] = []
@@ -497,6 +522,7 @@ class ConditionResearchService:
             )
             baseline_payload["full_period"] = summarize_backtests(full_period_reports)
             baseline_payload["holdout"] = summarize_backtests(holdout_reports)
+            baseline_payload["windows"] = []
             empty_result["ranking"] = ranking
             return empty_result
 
@@ -559,6 +585,8 @@ class ConditionResearchService:
                     "constraint_failures": list(reasons),
                     "full_period": None,
                     "holdout": None,
+                    "windows": [],
+                    "consistency": None,
                 }
             )
         results.sort(
@@ -618,6 +646,27 @@ class ConditionResearchService:
                     baseline_reports=holdout_baseline,
                 )
 
+        baseline_windows: list[dict[str, object]] = []
+        if rolling and not holdout_ids:
+            # 没有候选进留出期，逐窗基线没有对照对象，不必再跑 K 轮。
+            rolling = False
+        if rolling:
+            baseline_windows = self._rolling_windows(
+                config,
+                rolling_windows,
+                refs=refs,
+                feature_ids=feature_ids,
+                fingerprints=fingerprints,
+                holdout_ids=holdout_ids,
+                holdout_specs=holdout_specs,
+                results=results,
+                failures=failures,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+                plan=plan,
+                work_total=work_total,
+            )
+
         return {
             "universe": config.universe,
             "start_date": config.start_date.isoformat(),
@@ -640,6 +689,18 @@ class ConditionResearchService:
                 "validation": _without_stock_rows(validation_baseline_summary),
                 "full_period": summarize_backtests(full_period_reports),
                 "holdout": summarize_backtests(holdout_baseline),
+                "windows": baseline_windows,
+            },
+            "rolling": {
+                "enabled": rolling,
+                "requested": config.walk_forward_windows,
+                "used": len(rolling_windows) if rolling else 1,
+                "note": _rolling_note(
+                    config.walk_forward_windows,
+                    used=len(rolling_windows),
+                    holdout=splits.holdout,
+                    has_candidates=bool(holdout_ids),
+                ),
             },
             "candidates": results,
             "ranking": ranking,
@@ -649,6 +710,95 @@ class ConditionResearchService:
                 "holdout_candidates_per_side": config.holdout_candidates,
             },
         }
+
+    def _rolling_windows(
+        self,
+        config: ConditionResearchConfig,
+        windows: Sequence[DateWindow],
+        *,
+        refs: Sequence[StockRef],
+        feature_ids: tuple[str, ...],
+        fingerprints: Mapping[str, str],
+        holdout_ids: Collection[str],
+        holdout_specs: tuple[tuple[str, str, ScreenCondition], ...],
+        results: Sequence[dict[str, object]],
+        failures: Counter[str],
+        progress_callback: ProgressCallback | None,
+        cancel_check: CancelCheck | None,
+        plan: ResearchResourceEstimate,
+        work_total: int,
+    ) -> list[dict[str, object]]:
+        """Replay the same candidates on each slice of the holdout window.
+
+        挖掘只在训练段做一次，所以各窗用的是同一批条件——这才谈得上"同一个条件
+        在几个窗口里的表现"。真 walk-forward（每窗重挖）要等能判定跨窗条件是否
+        同义之后再说，见 docs/rolling-validation-plan.md。
+        """
+
+        per_window_candidates: list[dict[str, list[Mapping[str, object]]]] = [
+            {candidate_id: [] for candidate_id in holdout_ids} for _ in windows
+        ]
+        per_window_baseline: list[list[Mapping[str, object]]] = [[] for _ in windows]
+        for index, window in enumerate(windows):
+            for outcome in self._run_phase(
+                CandidateWindowPayload(
+                    config=config,
+                    feature_ids=feature_ids,
+                    start_date=window.start_date,
+                    end_date=window.end_date,
+                    fingerprints=dict(fingerprints),
+                    candidates=holdout_specs,
+                ),
+                refs,
+                _candidate_window_task,
+                progress_callback=progress_callback,
+                cancel_check=cancel_check,
+                progress_offset=len(refs) * (3 + index),
+                work_total=work_total,
+                phase_label=f"复验第 {index + 1}/{len(windows)} 个窗口",
+                plan=plan,
+            ):
+                if outcome.failure is not None:
+                    failures[outcome.failure] += 1
+                    continue
+                per_window_baseline[index].append(cast(Mapping[str, object], outcome.baseline))
+                for candidate_id, report in outcome.candidates:
+                    per_window_candidates[index][candidate_id].append(report)
+
+        baseline_summaries = [summarize_backtests(reports) for reports in per_window_baseline]
+        baseline_payloads = [
+            build_baseline_window_payload(
+                index=index + 1,
+                window=window,
+                baseline_summary=baseline_summaries[index],
+            )
+            for index, window in enumerate(windows)
+        ]
+        for result in results:
+            candidate_id = cast(str, result["candidate_id"])
+            if candidate_id not in holdout_ids:
+                continue
+            payloads = [
+                build_window_payload(
+                    index=index + 1,
+                    window=window,
+                    summary=summarize_backtests(
+                        per_window_candidates[index][candidate_id],
+                        baseline_reports=per_window_baseline[index],
+                    ),
+                    baseline_summary=baseline_summaries[index],
+                    min_trades=config.min_trades,
+                )
+                for index, window in enumerate(windows)
+            ]
+            result["windows"] = payloads
+            result["consistency"] = build_consistency(
+                payloads,
+                requested=config.walk_forward_windows,
+                used=len(windows),
+                min_trades=config.min_trades,
+            )
+        return baseline_payloads
 
     def _ranking_assessment(
         self,
@@ -910,7 +1060,18 @@ class ConditionResearchService:
             "errors": sum(failures.values()),
             "failure_reasons": dict(failures),
             "splits": _splits_dict(splits),
-            "baseline": {"train": _without_stock_rows(baseline)},
+            "baseline": {"train": _without_stock_rows(baseline), "windows": []},
+            # 没有候选就没有滚动复验的对象，但字段要有，前端才能统一读。
+            "rolling": {
+                "enabled": False,
+                "requested": config.walk_forward_windows,
+                "used": 1,
+                "note": (
+                    "没有候选通过验证进入留出期，未做滚动复验"
+                    if config.walk_forward_windows > 1
+                    else None
+                ),
+            },
             "candidates": [],
             "diagnostic": _empty_diagnostic(config, sample_totals),
             "algorithm": {
@@ -919,6 +1080,28 @@ class ConditionResearchService:
                 "holdout_candidates_per_side": config.holdout_candidates,
             },
         }
+
+
+def _rolling_note(
+    requested: int,
+    *,
+    used: int,
+    holdout: DateWindow,
+    has_candidates: bool,
+) -> str | None:
+    """Explain why fewer (or no) windows ran instead of doing it silently."""
+
+    if requested <= 1:
+        return None
+    if not has_candidates:
+        return "没有候选通过验证进入留出期，未做滚动复验"
+    if used >= requested:
+        return None
+    days = (holdout.end_date - holdout.start_date).days + 1
+    return (
+        f"留出期只有 {days} 个自然日，切不出 {requested} 个窗口"
+        f"（每窗至少 {MIN_WINDOW_DAYS} 个自然日），本次按 {max(used, 1)} 个窗口处理"
+    )
 
 
 def candidate_constraint_failures(

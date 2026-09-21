@@ -77,6 +77,10 @@ class ConditionResearchConfig:
     min_instruments: int = 5
     candidate_limit: int = 5
     holdout_candidates: int = 1
+    # 滚动复验窗口数：把留出段再切成几段，逐个回放同一批候选。1 = 不拆（现状）。
+    # 它回答的是"这条挖出来的条件换个时间段还成立吗"，不是真 walk-forward
+    # ——挖掘仍然只在训练段做一次，各窗共用同一批候选，所以窗口之间可比。
+    walk_forward_windows: int = 1
     # 置换检验：挖掘会评估上千个阈值，即使全是噪声，"最好的那一个"lift 也会很好看。
     # 这里把标签随机打乱重新评分若干次，看纯运气能把 lift 推到多高，用它当门槛。
     # 0 = 不做检验（结果里没有显著性标记）。
@@ -123,6 +127,8 @@ class ConditionResearchConfig:
             raise ValueError("候选条件上限必须在 1 到 10 之间")
         if not 1 <= self.holdout_candidates <= 3:
             raise ValueError("留出期复验候选数必须在 1 到 3 之间")
+        if not 1 <= self.walk_forward_windows <= 5:
+            raise ValueError("滚动复验窗口数必须在 1 到 5 之间")
         if not 0 <= self.significance_permutations <= 500:
             raise ValueError("置换检验次数必须在 0 到 500 之间")
         if not 0.0 < self.significance_quantile <= 1.0:
@@ -220,6 +226,7 @@ class ConditionResearchConfig:
             "min_instruments": self.min_instruments,
             "candidate_limit": self.candidate_limit,
             "holdout_candidates": self.holdout_candidates,
+            "walk_forward_windows": self.walk_forward_windows,
             "significance_permutations": self.significance_permutations,
             "significance_quantile": self.significance_quantile,
             # 排序规则要能随历史记录一起还原，否则回看时无法知道当年是按什么排序推荐的。
