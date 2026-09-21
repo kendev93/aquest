@@ -339,3 +339,59 @@ def test_plain_backtest_summary_is_untouched_by_research_fields(tmp_path) -> Non
     assert summary["trade_count"] == 1
     assert "top_indicator" not in summary
     assert "candidate_count" not in summary
+
+
+def test_cross_type_history_keeps_a_quota_for_every_type(tmp_path) -> None:
+    """热门类型不该把冷门类型挤出对比列表。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for index in range(25):
+        started = base + timedelta(minutes=index)
+        store.save_backtest_history(
+            f"portfolio-{index}",
+            backtest_type="portfolio",
+            request={},
+            result={"performance": {"total_return": index / 100}},
+            started_at=started,
+            finished_at=started + timedelta(seconds=1),
+        )
+    started = base + timedelta(hours=6)
+    store.save_backtest_history(
+        "factor-1",
+        backtest_type="factor_test",
+        request={},
+        result={"date_range": {"start": "2024-01-01", "end": "2024-06-30", "days": 120}},
+        started_at=started,
+        finished_at=started + timedelta(seconds=1),
+    )
+
+    rows = store.list_backtest_history_all(limit_per_type=3)
+
+    assert [row["history_id"] for row in rows][:3] == [
+        "factor-1",
+        "portfolio-24",
+        "portfolio-23",
+    ]
+    assert sum(1 for row in rows if row["backtest_type"] == "portfolio") == 3
+    assert sum(1 for row in rows if row["backtest_type"] == "factor_test") == 1
+
+
+def test_read_backtest_histories_keeps_request_order_and_skips_missing(tmp_path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    timestamp = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for history_id in ("a", "b"):
+        store.save_backtest_history(
+            history_id,
+            backtest_type="portfolio",
+            request={"max_positions": 5},
+            result={"performance": {"total_return": 0.1}},
+            started_at=timestamp,
+            finished_at=timestamp + timedelta(seconds=1),
+        )
+
+    records = store.read_backtest_histories(["b", "a", "missing", "b"])
+
+    assert [record["history_id"] for record in records] == ["b", "a"]
+    assert records[0]["request"] == {"max_positions": 5}
+    assert store.read_backtest_histories([]) == []

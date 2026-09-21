@@ -1284,3 +1284,28 @@ class SavedStrategyUpdateRequest(BaseModel):
         if self.name is not None and not self.name.strip():
             raise ValueError("策略名称不能为空")
         return self
+
+
+class HistoryCompareRequest(BaseModel):
+    """Two to five archived runs to lay out side by side.
+
+    上限不是随手定的：五条以上曲线叠在一张图上，颜色都分不出来，读图的人只会
+    记住最上面那条。归一化默认除以本金——本金不同的两次实验，收益率口径才是
+    可比的（取不到本金时服务端会退回按首值归一，并在结果里写明）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    history_ids: list[str] = Field(min_length=2, max_length=5)
+    normalize: Literal["capital", "first"] = "capital"
+    x_axis: Literal["date", "index"] = "date"
+
+    @model_validator(mode="after")
+    def validate_ids(self) -> HistoryCompareRequest:
+        cleaned = [item.strip() for item in self.history_ids if item.strip()]
+        if len(cleaned) < 2:
+            raise ValueError("至少需要选择 2 条历史记录")
+        if len(set(cleaned)) != len(cleaned):
+            raise ValueError("同一条历史记录不能重复选择")
+        self.history_ids = cleaned
+        return self

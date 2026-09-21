@@ -255,6 +255,10 @@ def _backtest_history_summary(
         "bars",
         "start_date",
         "end_date",
+        # 因子检验与波段研究把区间放在 date_range 里，没有顶层 start/end；
+        # 摘要缺了它，历史列表就显示不出区间，对比页也判断不了有没有曲线。
+        "date_range",
+        "scanned_stocks",
         "train_end_date",
         "validation_end_date",
         "total_candidates",
@@ -465,6 +469,90 @@ def _instrument_name_map(connection: duckdb.DuckDBPyConnection) -> dict[tuple[st
         "SELECT market, code, name FROM instruments WHERE name IS NOT NULL"
     ).fetchall()
     return {(str(row[0]), str(row[1])): str(row[2]) for row in rows if str(row[2]).strip()}
+
+
+def _decode_backtest_history_row(
+    row: tuple[object, ...],
+    instrument_names: Mapping[tuple[str, str], str],
+    backtest_type: str,
+) -> dict[str, object]:
+    """Decode one ``backtest_history`` row into a list-friendly summary.
+
+    摘要在写入时就落库了，但**曲线只在完整 result 里**，而列表页为了性能和体积
+    不返回 result；这里把 result 一起解出来只是为了重算摘要（老记录的摘要字段
+    可能比现在少），解完就丢，不进返回值。
+    """
+
+    try:
+        summary: object = json.loads(str(row[7]))
+    except json.JSONDecodeError as exc:
+        raise MarketDataStoreError("回测历史内容损坏") from exc
+    if not isinstance(summary, dict):
+        raise MarketDataStoreError("回测历史摘要无效")
+    try:
+        result = json.loads(str(row[6]))
+    except json.JSONDecodeError:
+        result = None
+    if isinstance(result, dict):
+        enriched_result = _enrich_backtest_history_names(result, instrument_names)
+        if isinstance(enriched_result, dict):
+            enriched_summary = _enrich_backtest_history_names(summary, instrument_names)
+            summary = dict(enriched_summary) if isinstance(enriched_summary, dict) else {}
+            summary.update(_backtest_history_summary(enriched_result, backtest_type))
+    return {
+        "history_id": str(row[0]),
+        "backtest_type": str(row[1]),
+        "created_at": str(row[2]),
+        "started_at": str(row[3]),
+        "finished_at": str(row[4]),
+        "duration_seconds": float(row[5]) if isinstance(row[5], (int, float)) else 0.0,
+        "summary": summary,
+    }
+
+
+def _decode_full_backtest_history_row(
+    row: tuple[object, ...],
+    instrument_names: Mapping[tuple[str, str], str],
+) -> dict[str, object]:
+    """Decode one ``backtest_history`` row into a complete snapshot."""
+
+    try:
+        request = json.loads(str(row[6]))
+        result = json.loads(str(row[7]))
+        summary = json.loads(str(row[8]))
+    except json.JSONDecodeError as exc:
+        raise MarketDataStoreError("回测历史内容损坏") from exc
+    if not all(isinstance(value, dict) for value in (request, result, summary)):
+        raise MarketDataStoreError("回测历史内容无效")
+    backtest_type = str(row[1])
+    enriched_result = _enrich_backtest_history_names(result, instrument_names)
+    enriched_summary = _enrich_backtest_history_names(summary, instrument_names)
+    if isinstance(enriched_result, dict):
+        result = enriched_result
+        if isinstance(enriched_summary, dict):
+            summary = dict(enriched_summary)
+            summary.update(_backtest_history_summary(result, backtest_type))
+    return {
+        "history_id": str(row[0]),
+        "backtest_type": backtest_type,
+        "created_at": str(row[2]),
+        "started_at": str(row[3]),
+        "finished_at": str(row[4]),
+        "duration_seconds": float(row[5]) if isinstance(row[5], (int, float)) else 0.0,
+        "request": request,
+        "result": result,
+        "summary": summary,
+    }
+
+
+_BACKTEST_HISTORY_LIST_COLUMNS = (
+    "history_id, backtest_type, created_at, started_at, finished_at, "
+    "duration_seconds, result_json, summary_json"
+)
+_BACKTEST_HISTORY_FULL_COLUMNS = (
+    "history_id, backtest_type, created_at, started_at, finished_at, "
+    "duration_seconds, request_json, result_json, summary_json"
+)
 
 
 class DuckDbHistoryStore:
@@ -1098,9 +1186,8 @@ class DuckDbHistoryStore:
         _validate_backtest_history_type(backtest_type)
         with self._store._connect(read_only=True) as connection:
             rows = connection.execute(
-                """
-                SELECT history_id, backtest_type, created_at, started_at, finished_at,
-                       duration_seconds, result_json, summary_json
+                f"""
+                SELECT {_BACKTEST_HISTORY_LIST_COLUMNS}
                 FROM backtest_history
                 WHERE backtest_type = ?
                 ORDER BY finished_at DESC, history_id DESC
@@ -1109,80 +1196,77 @@ class DuckDbHistoryStore:
                 [backtest_type, BACKTEST_HISTORY_LIMIT],
             ).fetchall()
             instrument_names = _instrument_name_map(connection)
-        summaries: list[dict[str, object]] = []
+        return [_decode_backtest_history_row(row, instrument_names, backtest_type) for row in rows]
+
+    def list_backtest_history_all(
+        self,
+        *,
+        limit_per_type: int = BACKTEST_HISTORY_LIMIT,
+    ) -> list[dict[str, object]]:
+        """Return recent summaries across every backtest kind, newest first.
+
+        各类型分别截断：热门类型（比如组合回测）不该把冷门类型挤出对比列表，
+        否则「跨类型对比」这个卖点自己就把自己废了。
+        """
+
+        limit = max(1, limit_per_type)
+        with self._store._connect(read_only=True) as connection:
+            rows = connection.execute(
+                f"""
+                SELECT {_BACKTEST_HISTORY_LIST_COLUMNS}
+                FROM backtest_history
+                ORDER BY finished_at DESC, history_id DESC
+                """
+            ).fetchall()
+            instrument_names = _instrument_name_map(connection)
+        kept: dict[str, int] = {}
+        decoded: list[dict[str, object]] = []
         for row in rows:
-            summary: object
-            try:
-                summary = json.loads(str(row[7]))
-            except json.JSONDecodeError as exc:
-                raise MarketDataStoreError("回测历史内容损坏") from exc
-            if not isinstance(summary, dict):
-                raise MarketDataStoreError("回测历史摘要无效")
-            try:
-                result = json.loads(str(row[6]))
-            except json.JSONDecodeError:
-                result = None
-            if isinstance(result, dict):
-                enriched_result = _enrich_backtest_history_names(result, instrument_names)
-                if isinstance(enriched_result, dict):
-                    enriched_summary = _enrich_backtest_history_names(summary, instrument_names)
-                    summary = dict(enriched_summary) if isinstance(enriched_summary, dict) else {}
-                    summary.update(_backtest_history_summary(enriched_result, backtest_type))
-            summaries.append(
-                {
-                    "history_id": str(row[0]),
-                    "backtest_type": str(row[1]),
-                    "created_at": str(row[2]),
-                    "started_at": str(row[3]),
-                    "finished_at": str(row[4]),
-                    "duration_seconds": float(row[5]),
-                    "summary": summary,
-                }
-            )
-        return summaries
+            backtest_type = str(row[1])
+            if kept.get(backtest_type, 0) >= limit:
+                continue
+            kept[backtest_type] = kept.get(backtest_type, 0) + 1
+            decoded.append(_decode_backtest_history_row(row, instrument_names, backtest_type))
+        return decoded
 
     def read_backtest_history(self, history_id: str) -> dict[str, object] | None:
         """Read one complete backtest history snapshot."""
 
+        records = self.read_backtest_histories([history_id])
+        return records[0] if records else None
+
+    def read_backtest_histories(
+        self,
+        history_ids: Iterable[str],
+    ) -> list[dict[str, object]]:
+        """Read several complete snapshots in one connection, in the given order.
+
+        对比要一次性取 2~5 条完整结果（曲线只在 result_json 里），逐条开连接会
+        把 DuckDB 的连接开销乘以条目数，而它们本来就是同一次点击要用的数据。
+        """
+
+        ids: list[str] = []
+        for value in history_ids:
+            text = str(value or "").strip()
+            if text and text not in ids:
+                ids.append(text)
+        if not ids:
+            return []
+        placeholders = ", ".join("?" for _ in ids)
         with self._store._connect(read_only=True) as connection:
-            row = connection.execute(
-                """
-                SELECT history_id, backtest_type, created_at, started_at, finished_at,
-                       duration_seconds, request_json, result_json, summary_json
+            rows = connection.execute(
+                f"""
+                SELECT {_BACKTEST_HISTORY_FULL_COLUMNS}
                 FROM backtest_history
-                WHERE history_id = ?
+                WHERE history_id IN ({placeholders})
                 """,
-                [history_id.strip()],
-            ).fetchone()
+                ids,
+            ).fetchall()
             instrument_names = _instrument_name_map(connection)
-        if row is None:
-            return None
-        try:
-            request = json.loads(str(row[6]))
-            result = json.loads(str(row[7]))
-            summary = json.loads(str(row[8]))
-        except json.JSONDecodeError as exc:
-            raise MarketDataStoreError("回测历史内容损坏") from exc
-        if not all(isinstance(value, dict) for value in (request, result, summary)):
-            raise MarketDataStoreError("回测历史内容无效")
-        enriched_result = _enrich_backtest_history_names(result, instrument_names)
-        enriched_summary = _enrich_backtest_history_names(summary, instrument_names)
-        if isinstance(enriched_result, dict):
-            result = enriched_result
-            if isinstance(enriched_summary, dict):
-                summary = dict(enriched_summary)
-                summary.update(_backtest_history_summary(result, str(row[1])))
-        return {
-            "history_id": str(row[0]),
-            "backtest_type": str(row[1]),
-            "created_at": str(row[2]),
-            "started_at": str(row[3]),
-            "finished_at": str(row[4]),
-            "duration_seconds": float(row[5]),
-            "request": request,
-            "result": result,
-            "summary": summary,
-        }
+        records = [_decode_full_backtest_history_row(row, instrument_names) for row in rows]
+        order = {value: index for index, value in enumerate(ids)}
+        records.sort(key=lambda item: order.get(str(item["history_id"]), len(order)))
+        return records
 
     def delete_backtest_history(self, history_id: str) -> bool:
         """Delete one backtest history record."""

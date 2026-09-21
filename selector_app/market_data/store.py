@@ -324,8 +324,21 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
     def list_backtest_history(self, backtest_type: str) -> list[dict[str, object]]:
         return self._history.list_backtest_history(backtest_type)
 
+    def list_backtest_history_all(
+        self,
+        *,
+        limit_per_type: int = BACKTEST_HISTORY_LIMIT,
+    ) -> list[dict[str, object]]:
+        return self._history.list_backtest_history_all(limit_per_type=limit_per_type)
+
     def read_backtest_history(self, history_id: str) -> dict[str, object] | None:
         return self._history.read_backtest_history(history_id)
+
+    def read_backtest_histories(
+        self,
+        history_ids: Iterable[str],
+    ) -> list[dict[str, object]]:
+        return self._history.read_backtest_histories(history_ids)
 
     def get_meta(self, key: str) -> str | None:
         return super().get_meta(key)
