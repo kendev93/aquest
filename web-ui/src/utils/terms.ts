@@ -106,6 +106,17 @@ export const TERMS: Record<string, TermDefinition> = {
       '挖掘只在训练段做一次，各窗口共用同一批条件，所以窗口之间可以直接比较——' +
       '这不是「每个窗口重新挖一遍」的真 walk-forward。窗口太短（少于 30 个自然日）会自动减少并在结果里说明。',
   },
+  duplicateCorrelation: {
+    name: '同义条件合并门槛',
+    english: 'Duplicate correlation threshold（phi coefficient）',
+    intro:
+      '两条候选条件在所有样本上各有一个「命中 / 未命中」的是非序列，这两条序列的相关性（φ 系数）'
+      + '达到门槛，就认定它们是同一个发现，只保留排序最好的那条。'
+      + '默认 0.6：同一个指标的相邻分位阈值相关性约 0.61~0.67，会被合并；'
+      + '相隔一个分位的降到约 0.41，保留为独立候选（那是不同的激进度，不是重复）。'
+      + '被合并掉的条件不会消失，列在保留那条下面，你能看到它们的相关性和 lift。'
+      + '调到 1 等于基本不合并（仍会合并命中集合几乎完全相同的条件）。',
+  },
   rollingConsistency: {
     name: '滚动一致性',
     english: 'Rolling consistency（windows better than baseline）',

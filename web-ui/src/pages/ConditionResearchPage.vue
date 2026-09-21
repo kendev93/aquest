@@ -18,6 +18,7 @@ import TermHint from '../components/TermHint.vue'
 import type {
   BacktestExecution,
   ConditionResearchCandidate,
+  ConditionResearchDuplicate,
   ConditionResearchJobState,
   ConditionResearchPayload,
   ConditionResearchRanking,
@@ -80,6 +81,9 @@ const form = reactive({
   minTrades: 20,
   minInstruments: 5,
   candidateLimit: 5,
+  // 同义条件合并门槛：0.6 会合并同一指标相邻分位的阈值（实测相关性 0.61~0.67），
+  // 相隔一个分位的（0.41）保留为独立候选。
+  duplicateCorrelation: 0.6,
   holdoutCandidates: 1,
   walkForwardWindows: 1,
   // 0 = 不做检验。默认 200 次：20 次时名义 5% 的门槛实测误报 11.7%，
@@ -426,6 +430,9 @@ function validate(): Record<string, string> {
   if (!Number.isInteger(form.candidateLimit) || form.candidateLimit < 1 || form.candidateLimit > 10) {
     next.candidateLimit = '候选条件数量必须在 1 到 10 之间。'
   }
+  if (!Number.isFinite(form.duplicateCorrelation) || form.duplicateCorrelation < 0.5 || form.duplicateCorrelation > 1) {
+    next.duplicateCorrelation = '同义条件合并门槛必须在 0.5 到 1 之间。'
+  }
   if (!Number.isInteger(form.holdoutCandidates) || form.holdoutCandidates < 1 || form.holdoutCandidates > 3) {
     next.holdoutCandidates = '最终留出候选数必须在 1 到 3 之间。'
   }
@@ -467,6 +474,7 @@ function buildPayload(): ConditionResearchPayload {
     min_trades: form.minTrades,
     min_instruments: form.minInstruments,
     candidate_limit: form.candidateLimit,
+    duplicate_correlation: form.duplicateCorrelation,
     holdout_candidates: form.holdoutCandidates,
     walk_forward_windows: form.walkForwardWindows,
     significance_permutations: form.significancePermutations,
@@ -727,6 +735,10 @@ async function applyStoredRequest(raw: unknown): Promise<void> {
     form.minTrades = finiteNumber(request.min_trades, form.minTrades)
     form.minInstruments = finiteNumber(request.min_instruments, form.minInstruments)
     form.candidateLimit = finiteNumber(request.candidate_limit, form.candidateLimit)
+    form.duplicateCorrelation = finiteNumber(
+      request.duplicate_correlation,
+      form.duplicateCorrelation,
+    )
     form.holdoutCandidates = finiteNumber(request.holdout_candidates, form.holdoutCandidates)
     form.walkForwardWindows = finiteNumber(
       request.walk_forward_windows,
@@ -919,17 +931,41 @@ function winRateDelta(stock: ConditionResearchStockResult): string {
   return (delta > 0 ? '+' : '') + delta.toFixed(2) + ' pp'
 }
 
-function conditionText(candidate: ConditionResearchCandidate): string {
-  const operator = OPERATOR_LABELS[candidate.condition.operator] ?? candidate.condition.operator
-  const leftValue = availableValues.value.find((value) => value.id === candidate.condition.left_value)
-  const rightValue = candidate.condition.right_value
-    ? availableValues.value.find((value) => value.id === candidate.condition.right_value)
+function screenConditionText(condition: ScreenCondition): string {
+  const operator = OPERATOR_LABELS[condition.operator] ?? condition.operator
+  const leftValue = availableValues.value.find((value) => value.id === condition.left_value)
+  const rightValue = condition.right_value
+    ? availableValues.value.find((value) => value.id === condition.right_value)
     : null
-  const leftLabel = leftValue ? valueOptionLabel(leftValue) : candidate.condition.left_value
+  const leftLabel = leftValue ? valueOptionLabel(leftValue) : condition.left_value
   const rightLabel = rightValue
     ? valueOptionLabel(rightValue)
-    : formatNumber(candidate.condition.right_constant, 3)
+    : formatNumber(condition.right_constant, 3)
   return leftLabel + ' ' + operator + ' ' + rightLabel
+}
+
+function conditionText(candidate: ConditionResearchCandidate): string {
+  return screenConditionText(candidate.condition)
+}
+
+/** 被这条候选合并掉的同义条件：同一个发现的不同写法，多数只是阈值差一点。 */
+function mergedDuplicates(candidate: ConditionResearchCandidate): ConditionResearchDuplicate[] {
+  return candidate.mining.duplicates ?? []
+}
+
+function duplicateTitle(candidate: ConditionResearchCandidate): string {
+  const items = mergedDuplicates(candidate)
+  if (!items.length) return ''
+  return (
+    '判定为同一个发现而合并掉的条件（相关性 / 训练 lift / 样本数）：\n'
+    + items
+      .map(
+        (item) =>
+          `· ${screenConditionText(item.condition)} — ρ=${item.correlation.toFixed(3)}`
+          + `，lift=${item.lift.toFixed(3)}，样本 ${item.support_count}`,
+      )
+      .join('\n')
+  )
 }
 
 // 买卖两侧的样本口径不同：买样本 = 每次入场 1 条，卖样本 = 持仓期内每个
@@ -1032,6 +1068,20 @@ function validationTrades(candidate: ConditionResearchCandidate): string {
   const threshold = report.value?.min_trades
   return threshold ? trades + ' / ' + threshold : String(trades)
 }
+
+/**
+ * 合并了多少条同义条件。合并不等于"少给几条"——空出来的名额由更靠后的、
+ * 不同义的条件顶上，所以这里要说明清楚，别让用户以为名额被砍了。
+ */
+const duplicateSummary = computed(() => {
+  const merged = report.value?.merged_duplicate_count ?? 0
+  const threshold = report.value?.duplicate_correlation
+  if (!merged || threshold === undefined) return ''
+  return (
+    `按相关性门槛 ${threshold.toFixed(2)} 合并了 ${merged} 条同义条件（同一个发现的不同写法，`
+    + '多数只是阈值差一点）。空出的名额由更靠后、不同义的条件顶上，明细见每行条件名后的「已合并」。'
+  )
+})
 
 const rollingCandidates = computed(() =>
   (report.value?.candidates ?? []).filter(
@@ -1301,6 +1351,10 @@ onMounted(async () => {
             </div>
             <div class="compact-fields condition-fields-top">
               <div>
+                <label for="condition-duplicate-correlation">同义条件合并门槛<TermHint term="duplicateCorrelation" /></label>
+                <input id="condition-duplicate-correlation" v-model.number="form.duplicateCorrelation" data-testid="condition-duplicate-correlation" type="number" min="0.5" max="1" step="0.05">
+              </div>
+              <div>
                 <label for="condition-holdout-candidates">最终留出候选/侧</label>
                 <input id="condition-holdout-candidates" v-model.number="form.holdoutCandidates" data-testid="condition-holdout-candidates" type="number" min="1" max="3" step="1">
               </div>
@@ -1329,6 +1383,8 @@ onMounted(async () => {
             <p v-if="errors.holdoutCandidates" class="field-error">{{ errors.holdoutCandidates }}</p>
             <p v-if="errors.minInstruments" class="field-error">{{ errors.minInstruments }}</p>
             <p v-if="errors.candidateLimit" class="field-error">{{ errors.candidateLimit }}</p>
+            <p v-if="errors.duplicateCorrelation" class="field-error">{{ errors.duplicateCorrelation }}</p>
+            <p class="helper">两条候选的命中向量相关性达到门槛就算同一个发现，只留排序最好的那条，其余列在它下面。0.6 会合并同一指标相邻分位的阈值；调到 1 等于基本不合并。</p>
             <p class="helper">主目标是提高跨股票合并交易胜率；候选还需保持盈亏比和平均单笔净收益，并通过最终留出期复验。</p>
           </fieldset>
 
@@ -1519,6 +1575,7 @@ onMounted(async () => {
                 然后立即用新规则重跑一次研究。
               </p>
               <p v-if="significanceSummary" class="scope-helper" data-testid="condition-research-significance-summary">{{ significanceSummary }}</p>
+              <p v-if="duplicateSummary" class="scope-helper" data-testid="condition-duplicate-summary">{{ duplicateSummary }}</p>
               <div class="table-wrap">
                 <table>
                   <caption class="sr-only">买卖条件候选验证结果</caption>
@@ -1540,7 +1597,15 @@ onMounted(async () => {
                         >
                       </td>
                       <td class="condition-side">{{ candidate.side === 'buy' ? '买入过滤' : '卖出触发' }}</td>
-                      <td class="condition-rule">{{ conditionText(candidate) }}</td>
+                      <td class="condition-rule">
+                        {{ conditionText(candidate) }}
+                        <span
+                          v-if="mergedDuplicates(candidate).length"
+                          class="condition-merged"
+                          :title="duplicateTitle(candidate)"
+                          :data-testid="'merged-duplicates-' + candidate.candidate_id"
+                        >已合并 {{ mergedDuplicates(candidate).length }} 条</span>
+                      </td>
                       <td>{{ candidate.mining.support_count }} / {{ candidate.mining.instrument_count }}</td>
                       <td :data-testid="'mining-lift-' + candidate.candidate_id">
                         {{ formatNumber(candidate.mining.lift) }}
@@ -1817,6 +1882,19 @@ onMounted(async () => {
   min-width: 180px;
   font-family: var(--font-mono, monospace);
   font-size: 0.85rem;
+}
+
+.condition-merged {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 0 0.35rem;
+  border: 1px solid var(--border, #d1d5db);
+  border-radius: 999px;
+  font-family: var(--font-body, inherit);
+  font-size: 0.7rem;
+  color: var(--text-muted, #6b7280);
+  cursor: help;
+  white-space: nowrap;
 }
 
 /* 候选表 14 列，全局 table 的 min-width=720px 远远不够：中文可以在任意

@@ -969,6 +969,8 @@ export interface ConditionResearchPayload {
   min_trades?: number
   min_instruments?: number
   candidate_limit?: number
+  /** 同义条件合并门槛：命中向量相关性达到它就只留排序最好的一条。1 = 不合并。 */
+  duplicate_correlation?: number
   holdout_candidates?: number
   /** 滚动复验窗口数：1 = 不拆，只复验一次。 */
   walk_forward_windows?: number
@@ -1017,6 +1019,20 @@ export interface ConditionResearchMiningMetrics {
   permutation_pvalue?: number | null
   /** lift 是否超过噪声门槛。null = 没做检验，不判断。 */
   significant?: boolean | null
+  /**
+   * 被这条候选合并掉的同义条件：同一个发现的不同写法（多为阈值差一点）。
+   * 列出来而不是静默删掉，用户才能判断合并门槛合不合适。
+   */
+  duplicates?: ConditionResearchDuplicate[]
+}
+
+/** 一条被判定为「同义」而合并掉的候选条件。 */
+export interface ConditionResearchDuplicate {
+  condition: ScreenCondition
+  /** 与保留条件的命中向量相关性（φ 系数）。 */
+  correlation: number
+  lift: number
+  support_count: number
 }
 
 export interface ConditionResearchStockResult {
@@ -1154,6 +1170,10 @@ export interface ConditionResearchReport {
   feature_count: number
   min_trades?: number
   min_instruments?: number
+  /** 同义条件合并门槛（命中向量相关性）。 */
+  duplicate_correlation?: number
+  /** 本次一共合并掉多少条同义条件。 */
+  merged_duplicate_count?: number
   /**
    * 每侧参与挖掘的样本总数。买样本按入场日计（unit=entry），
    * 卖样本按持仓期提前离场决策点计（unit=decision_point），两者口径不同。

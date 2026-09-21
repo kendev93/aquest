@@ -305,6 +305,65 @@ describe('ConditionResearchPage', () => {
     expect(wrapper.text()).toContain('滚动复验')
   })
 
+  it('shows the conditions a candidate absorbed instead of dropping them silently', async () => {
+    const merged = {
+      ...result,
+      duplicate_correlation: 0.6,
+      merged_duplicate_count: 2,
+      candidates: [{
+        ...result.candidates[0],
+        mining: {
+          ...result.candidates[0].mining,
+          duplicates: [
+            {
+              condition: { left_value: 'indicator.score', operator: 'gte', right_value: null, right_constant: 2.9 },
+              correlation: 0.612,
+              lift: 1.31,
+              support_count: 34,
+            },
+            {
+              condition: { left_value: 'indicator.ma5', operator: 'gte', right_value: null, right_constant: 0.4 },
+              correlation: 0.667,
+              lift: 1.28,
+              support_count: 44,
+            },
+          ],
+        },
+      }],
+    } as unknown as ConditionResearchReport
+    vi.mocked(researchApi.getConditionResearchResults).mockResolvedValue(merged)
+
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+
+    const badge = wrapper.get('[data-testid="merged-duplicates-buy-1"]')
+    expect(badge.text()).toContain('已合并 2 条')
+    // 明细要给出相关性和 lift，用户才能判断这个门槛合不合适。
+    expect(badge.attributes('title')).toContain('ρ=0.612')
+    expect(badge.attributes('title')).toContain('ρ=0.667')
+    expect(wrapper.get('[data-testid="condition-duplicate-summary"]').text()).toContain('合并了 2 条同义条件')
+  })
+
+  it('submits the duplicate merge threshold and defaults it to 0.6', async () => {
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+
+    expect(
+      (wrapper.get('[data-testid="condition-duplicate-correlation"]').element as HTMLInputElement)
+        .value,
+    ).toBe('0.6')
+
+    await wrapper.get('[data-testid="condition-duplicate-correlation"]').setValue('0.8')
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(researchApi.createConditionResearch).toHaveBeenCalledWith(
+      expect.objectContaining({ duplicate_correlation: 0.8 }),
+    )
+  })
+
   it('submits the rolling window count and restores it from history', async () => {
     const wrapper = mount(ConditionResearchPage)
     await flushPromises()
