@@ -3,6 +3,10 @@
 # Docker builds receive compatible dependency updates. Keep major-version
 # compatibility ranges in pyproject.toml and verify upgrades in CI.
 alembic>=1.18.4
+# baostock 来自 pyproject 的 catalog extra：东财 clist 目录接口被封后它是唯一稳定的
+# 全市场标的发现通道。正式镜像需要它，所以直接并进运行时清单，由 Dockerfile 在
+# COPY 源码之前那一层装好，避免为它再跑一次需要联网的 pip。
+baostock>=0.8,<1
 annotated-doc>=0.0.5
 annotated-types>=0.8.0
 anyio>=4.14.2

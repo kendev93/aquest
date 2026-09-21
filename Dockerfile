@@ -13,14 +13,20 @@ RUN apt-get update \
 COPY requirements.lock ./requirements.lock
 RUN python -m pip install --upgrade --no-cache-dir -r requirements.lock
 
-COPY pyproject.toml README.md LICENSE THIRD_PARTY_NOTICES.md ./
+COPY README.md LICENSE THIRD_PARTY_NOTICES.md ./
 COPY selector_app ./selector_app
-# [catalog] 带上 baostock：东财 clist 目录接口被封后，它是唯一稳定的全市场标的
-# 发现通道（docs/datasource-survey-2026-09-20.md）。没装时目录会自动回退到东财，
-# 不会让启动失败，所以这个 extra 是「装上才更好」而不是「必须装」。
-RUN python -m pip install --upgrade --no-cache-dir '.[catalog]' \
-    && python -m pip check \
-    && python -c "import selector_app; print('Indicator Lab runtime ready')"
+# 运行时刻意不把 selector_app 装成 Python 包：源码已经在 /app 里、WORKDIR 就是 /app，
+# `import selector_app` 直接可用；镜像里也没有任何地方读 indicator-lab 自身的包元数据
+# （strategy_discovery/service.py 的 _package_version 只查 optuna 和 lightgbm）。
+#
+# 所以这里不走 `pip install '.[catalog]'`：那会触发 PEP 517 构建隔离，每次构建都要额外
+# 联网拉 hatchling，代理一关就 SSL EOF 失败，而装出来的东西我们根本用不上。
+# catalog extra 里唯一的包 baostock（全市场标的发现通道，见
+# docs/datasource-survey-2026-09-20.md）已并入 requirements.lock，跟着上面那层一起装。
+#
+# 副作用：源码变化不再让 pip 重装，构建只剩「拉 baostock 等 wheel」这一处联网点。
+RUN python -m pip check \
+    && python -c "import selector_app, baostock; print('Indicator Lab runtime ready')"
 
 RUN useradd --create-home --uid 10001 appuser \
     && mkdir -p /data/vipdoc /data/market \
