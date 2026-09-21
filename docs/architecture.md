@@ -211,8 +211,29 @@ schema 版本变化或维护备份时，初始化逻辑会先生成带时间戳�
 存的内容只有输入：信号 / 条件 / 市场范围 / 板块 / 并发 / 周期 / 自定义公式。**结果、任务
 状态、页码都不存**——结果依赖当时行情，存下来下次加载的人会以为它还成立。
 
+## 候选库
+
+`selector_app/candidate_library/` 给条件研究挖出的候选条件一个持久归宿。`evidence.py` 在入库时
+把证据**整份复制**（提升倍数、置换 p 值、支持数、留出期、滚动复验、参数敏感性），`publish.py`
+把候选条件按方向合并进**来源研究那套配置**再用 `PortfolioBacktestRequest` 校验，`service.py`
+收口状态机与「发布后仍是离线」这条承诺。
+
+证据是快照而不是引用：`backtest_history` 只留最近 20 条，第 21 次研究跑完，最早那批候选的
+数据就没了。所以 `candidate_library` 表自带 `evidence_json`，同时存 `source_history_id`
+与研究区间以便溯源。落在 `ASSET_TABLES` 里，随用户资产备份导出。
+
+状态机 `pending → adopted → published`，外加 `rejected`（否决后可恢复成 pending）与
+`published → adopted`（撤回，同时删掉由它生成的策略；那条策略已上线则拒绝）。
+
 ## API
 
+- `GET /api/v1/candidate-library?status=`（候选列表，带证据快照）
+- `POST /api/v1/candidate-library/import`（从一次研究入库，幂等，返回 added / skipped）
+- `GET /api/v1/candidate-library/{id}`
+- `PATCH /api/v1/candidate-library/{id}`（采纳 / 否决 / 恢复 / 撤回）
+- `DELETE /api/v1/candidate-library/{id}`（已发布的要先撤回）
+- `GET /api/v1/candidate-library/{id}/publish-preview`（发布将写入的配置、说明与拦着的事）
+- `POST /api/v1/candidate-library/{id}/publish`（写一条 **offline** 策略，永不自动上线）
 - `GET /api/v1/screen-presets`（方案列表，不带 payload）
 - `POST /api/v1/screen-presets`（新建，返回被裁剪掉/调整过的字段说明）
 - `GET /api/v1/screen-presets/{id}`（含 payload）
