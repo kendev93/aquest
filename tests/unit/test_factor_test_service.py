@@ -10,8 +10,8 @@ import pandas as pd
 import pytest
 
 from selector_app.factor_test import panel as panel_module
-from selector_app.factor_test.service import FactorTestService
 from selector_app.factor_test.models import FactorTestConfig
+from selector_app.factor_test.service import FactorTestService
 from selector_app.market_data.models import StockRef
 
 DAYS = 320

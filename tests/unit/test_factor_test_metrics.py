@@ -27,7 +27,12 @@ def _config(**overrides: object) -> FactorTestConfig:
     return FactorTestConfig(**defaults).normalized()  # type: ignore[arg-type]
 
 
-def _panel(scale: float = 0.04, *, noise: float = 0.02, seed: int = 7) -> tuple[np.ndarray, np.ndarray]:
+def _panel(
+    scale: float = 0.04,
+    *,
+    noise: float = 0.02,
+    seed: int = 7,
+) -> tuple[np.ndarray, np.ndarray]:
     """A value that genuinely predicts, and the forward return it predicts."""
 
     rng = np.random.default_rng(seed)
@@ -74,9 +79,7 @@ def test_a_negative_ic_is_reported_as_buying_the_low_end() -> None:
     """Upside-down is still a finding; only the direction it is traded flips."""
 
     values, forward = _panel()
-    evidence = evaluate_factor(
-        -values, forward, value_id="f", display_name="f", config=_config()
-    )
+    evidence = evaluate_factor(-values, forward, value_id="f", display_name="f", config=_config())
 
     assert evidence.order == "low"
     assert evidence.ic_mean > 0.3
@@ -125,8 +128,12 @@ def test_long_short_effective_sample_size_shrinks_with_the_horizon() -> None:
     """Overlapping windows are not independent: a longer horizon is fewer trials."""
 
     values, forward = _panel()
-    short = evaluate_factor(values, forward, value_id="f", display_name="f", config=_config(horizon=5))
-    long = evaluate_factor(values, forward, value_id="f", display_name="f", config=_config(horizon=20))
+    short = evaluate_factor(
+        values, forward, value_id="f", display_name="f", config=_config(horizon=5)
+    )
+    long = evaluate_factor(
+        values, forward, value_id="f", display_name="f", config=_config(horizon=20)
+    )
 
     assert short.long_short.t_stat is not None
     assert long.long_short.t_stat is not None
