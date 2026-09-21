@@ -395,6 +395,7 @@ export type BacktestHistoryType =
   | 'strategy_fitness'
   | 'condition_research'
   | 'swing_research'
+  | 'factor_test'
 
 export interface BacktestHistorySummary {
   history_id: string

@@ -645,3 +645,37 @@ tbody tr:hover td { background: rgba(22, 34, 58, 0.45); }
 .segment-card .metrics-strip { margin-top: 12px; margin-bottom: 0; grid-template-columns: repeat(2, 1fr); }
 .benchmark-inline { margin-top: 10px; color: var(--muted); font-size: 11px; }
 .tracking-detail .equity-chart { height: 200px; }
+
+/* 历史对比：选择表 + 叠绘图 + 并排指标。 */
+.compare-heading-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.compare-heading-actions .primary-button, .compare-heading-actions .secondary-button { width: auto; min-height: 30px; margin-top: 0; padding: 0 12px; }
+.compare-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-bottom: 8px; }
+.compare-options label { display: block; margin-bottom: 4px; color: var(--muted); font-size: 11px; }
+/* 警告不是失败：用橙色左边条，红色会被读成「对比出错」。 */
+.compare-warnings { margin: 0 0 16px; padding: 12px 14px; border: 1px solid rgba(245, 158, 11, 0.45); border-left: 3px solid var(--warning); border-radius: 8px; background: rgba(245, 158, 11, 0.08); list-style: none; }
+.compare-warnings li { color: var(--muted); font-size: 11px; line-height: 1.7; }
+.compare-warnings li + li { margin-top: 6px; }
+.compare-chart { margin: 0 0 20px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.compare-chart figcaption { display: flex; flex-direction: column; gap: 3px; margin-bottom: 10px; }
+.compare-chart figcaption span { font-size: 13px; font-weight: 700; }
+.compare-chart figcaption small, .compare-axis-note { color: var(--subtle); font-size: 10px; }
+.compare-chart svg { display: block; width: 100%; height: auto; }
+.compare-grid { stroke: rgba(148, 163, 184, 0.2); stroke-width: 1; }
+.compare-zero { stroke: var(--border-strong); stroke-width: 1; stroke-dasharray: 6 4; }
+.compare-line { stroke-width: 2; fill: none; }
+.compare-axis-text { fill: var(--subtle); font-size: 10px; }
+.compare-legend { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; margin-top: 10px; }
+.compare-legend-item { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; }
+.compare-legend-item i { width: 10px; height: 10px; border-radius: 3px; }
+.compare-legend-item strong.positive { color: #f87171; }
+.compare-legend-item strong.negative { color: #22c55e; }
+.compare-missing { color: var(--subtle); }
+.compare-native-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-top: 18px; }
+.compare-native-card { padding: 14px 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
+.compare-native-card h3 { margin: 0 0 3px; font-size: 13px; }
+.compare-native-card dl { margin: 10px 0 0; }
+.compare-native-card dl > div { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; padding: 5px 0; border-top: 1px solid rgba(148, 163, 184, 0.15); }
+.compare-native-card dt { color: var(--muted); font-size: 11px; }
+.compare-native-card dd { margin: 0; font-size: 12px; font-variant-numeric: tabular-nums; }
+.compare-native-note { margin: 8px 0 0; color: var(--subtle); font-size: 10px; line-height: 1.6; }
+@media (max-width: 900px) { .compare-native-grid { grid-template-columns: 1fr; } }

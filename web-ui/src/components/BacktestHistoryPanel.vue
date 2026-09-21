@@ -127,7 +127,7 @@ const showPerformanceColumn = computed(() => props.items.some((item) => performa
             <td class="muted-code">{{ formatTimestamp(item.started_at) }}</td>
             <td class="muted-code">{{ formatTimestamp(item.finished_at) }}</td>
             <td>{{ formatDuration(item.duration_seconds) }}</td>
-            <td class="history-actions"><button class="table-link" type="button" :data-testid="`${props.testid}-load-${item.history_id}`" @click="emit('load', item.history_id)">加载</button><button class="table-link danger-link" type="button" :data-testid="`${props.testid}-remove-${item.history_id}`" @click="emit('remove', item.history_id)">删除</button></td>
+            <td class="history-actions"><button class="table-link" type="button" :data-testid="`${props.testid}-load-${item.history_id}`" @click="emit('load', item.history_id)">加载</button><a class="table-link" :href="`/history-compare?ids=${item.history_id}`" :data-testid="`${props.testid}-compare-${item.history_id}`">对比</a><button class="table-link danger-link" type="button" :data-testid="`${props.testid}-remove-${item.history_id}`" @click="emit('remove', item.history_id)">删除</button></td>
           </tr>
         </tbody>
       </table>
