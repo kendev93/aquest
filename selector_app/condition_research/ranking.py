@@ -289,7 +289,7 @@ def assess_ranking_values(
         if order == "asc":
             quantiles = quantiles[::-1]
         lift_source = daily_lift_desc[value_id] if order == "desc" else daily_lift_asc[value_id]
-        top_n_lift = float(np.mean(lift_source)) if lift_source else None
+        top_n_excess = float(np.mean(lift_source)) if lift_source else None
         confidence, note = _confidence(
             sample_days=len(ic_series),
             ic_mean=strength,
@@ -310,7 +310,7 @@ def assess_ranking_values(
                 segments=len(segment_means),
                 same_sign_segments=same_sign,
                 quantile_returns=tuple(quantiles),
-                top_n_lift=top_n_lift,
+                top_n_lift=top_n_excess,
                 sample_days=len(ic_series),
                 confidence=confidence,
                 note=note,

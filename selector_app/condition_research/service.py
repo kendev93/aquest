@@ -605,9 +605,7 @@ class ConditionResearchService:
         results.sort(
             key=lambda item: (
                 not bool(item.get("passed_constraints")),
-                -_summary_number(item, "win_rate"),
-                -_summary_number(item, "improved_stock_ratio"),
-                -_mining_number(item, "lift"),
+                *_candidate_evidence_key(item),
             )
         )
         holdout_ids = _select_holdout_candidates(results, config.holdout_candidates)
@@ -1505,11 +1503,24 @@ def _summary_number(result: Mapping[str, object], key: str) -> float:
     return number if number is not None else float("-inf")
 
 
-def _mining_number(result: Mapping[str, object], key: str) -> float:
-    mining = result.get("mining")
-    value = mining.get(key) if isinstance(mining, Mapping) else None
-    number = _number(value)
-    return number if number is not None else float("-inf")
+def _candidate_evidence_key(result: Mapping[str, object]) -> tuple[float, float, float, str]:
+    """候选排序键：只用样本外证据，并列时用稳定键定格。
+
+    前两项取自验证段，也就是寻优段之外。第三项是验证段的成交笔数——同样是
+    样本外，它表达的只是「这条证据有多厚」，不是「这个条件有多强」，所以垫在
+    胜率与改善比例后面。
+
+    特意不用 mining 的 lift：它是寻优段算出来的，拿它决定「先看哪条候选、送
+    哪条去留出期复验」等于按过拟合程度挑人。挖掘输出本身是 lift 降序，末尾不
+    放一个显式稳定键的话，并列顺序会顺着输入把 lift 又漏回来。
+    """
+
+    return (
+        -_summary_number(result, "win_rate"),
+        -_summary_number(result, "improved_stock_ratio"),
+        -_summary_number(result, "closed_trades"),
+        str(result.get("candidate_id") or ""),
+    )
 
 
 def _select_holdout_candidates(
@@ -1522,13 +1533,7 @@ def _select_holdout_candidates(
             by_side.setdefault(str(result.get("side")), []).append(result)
     selected: set[str] = set()
     for candidates in by_side.values():
-        candidates.sort(
-            key=lambda item: (
-                -_summary_number(item, "win_rate"),
-                -_summary_number(item, "improved_stock_ratio"),
-                -_mining_number(item, "lift"),
-            )
-        )
+        candidates.sort(key=_candidate_evidence_key)
         selected.update(
             str(candidate["candidate_id"])
             for candidate in candidates[:limit_per_side]

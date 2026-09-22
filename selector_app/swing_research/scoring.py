@@ -56,6 +56,8 @@ class IndicatorScore:
     icir: float | None
     ic_days: int
     ic_threshold: float | None
+    #: 头桶命中率 / 全样本命中率，是**倍数**（1.0 = 与全样本持平）。
+    #: 条件研究里那个 `top_n_lift` 是差值、不是倍数，两者别共用格式化。
     top_lift: float | None
     threshold_hint: float | None
     pvalue: float | None

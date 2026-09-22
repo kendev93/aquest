@@ -17,6 +17,7 @@ from selector_app.condition_research.service import (
     _compact_report,
     _daily_hits,
     _resolved_ranking,
+    _select_holdout_candidates,
     candidate_constraint_failures,
 )
 from selector_app.market_data.models import StockRef
@@ -836,3 +837,54 @@ def test_rolling_is_skipped_when_no_candidate_reaches_the_holdout() -> None:
     assert result["rolling"]["enabled"] is False
     assert result["baseline"]["windows"] == []
     assert "没有候选通过验证" in (result["rolling"]["note"] or "")
+
+
+def _holdout_row(
+    candidate_id: str,
+    *,
+    win_rate: float,
+    improved_stock_ratio: float,
+    closed_trades: int,
+    lift: float,
+) -> dict[str, object]:
+    return {
+        "candidate_id": candidate_id,
+        "side": "buy",
+        "passed_constraints": True,
+        "mining": {"lift": lift},
+        "validation": {
+            "pooled_trades": {"win_rate": win_rate, "closed_trades": closed_trades},
+            "per_stock": {"improved_stock_ratio": improved_stock_ratio},
+        },
+    }
+
+
+def test_holdout_selection_never_ranks_by_in_sample_lift() -> None:
+    """验证段指标打平时，不能拿寻优段的 lift 决定送谁去留出期复验。
+
+    挖掘输出本身就是 lift 降序，所以「并列时保持输入顺序」等于照样按 lift 挑人。
+    这里让样本内 lift 最高的恰好是证据最薄的那条：它必须落选。
+    """
+
+    thick = _holdout_row(
+        "buy-1", win_rate=0.6, improved_stock_ratio=0.6, closed_trades=80, lift=1.2
+    )
+    thin = _holdout_row("buy-2", win_rate=0.6, improved_stock_ratio=0.6, closed_trades=5, lift=9.9)
+
+    selected = _select_holdout_candidates([thin, thick], 1)
+
+    assert selected == {"buy-1"}
+
+
+def test_holdout_selection_breaks_a_full_tie_deterministically() -> None:
+    """连成交笔数都一样时，用稳定键定格，别的什么都不看。"""
+
+    first = _holdout_row(
+        "buy-1", win_rate=0.6, improved_stock_ratio=0.6, closed_trades=20, lift=1.1
+    )
+    second = _holdout_row(
+        "buy-2", win_rate=0.6, improved_stock_ratio=0.6, closed_trades=20, lift=9.9
+    )
+
+    assert _select_holdout_candidates([second, first], 1) == {"buy-1"}
+    assert _select_holdout_candidates([first, second], 1) == {"buy-1"}
