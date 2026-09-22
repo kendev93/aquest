@@ -34,6 +34,10 @@ from .models import (
 SCHEMA_VERSION = 17
 SCREEN_HISTORY_LIMIT = 10
 STRATEGY_DISCOVERY_HISTORY_LIMIT = 20
+# 每种类型最多保留这么多条，超出的最旧记录会被删掉。
+# ⚠️ 这条限制有个容易被忽略的连带影响：想统计「这个库累计跑过多少次研究」时不能数
+# 这张表——数出来最多就是这个数。跨运行的试验次数校正（候选池 #20）要的是累计值，
+# 必须另建持久化计数，别在这里取巧。
 BACKTEST_HISTORY_LIMIT = 20
 # 从 BacktestHistoryType 派生，而不是再抄一份字面量：抄一份就会漏更新。
 _BACKTEST_HISTORY_TYPES = set(get_args(BacktestHistoryType))

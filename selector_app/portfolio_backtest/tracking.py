@@ -39,6 +39,10 @@ from selector_app.web.schemas import PortfolioBacktestRequest
 logger = logging.getLogger(__name__)
 
 #: 观察段不到这么多交易日，衰减比基本是噪声——页面要标注而不是当成结论。
+#: ⚠️ 20 这个值当年是拍出来的，不是算出来的。它没有考虑观察段的收益波动有多大：
+#: 一条很稳的策略其实更少的交易日就够判断，而一条大起大落的策略要远不止 20 天。
+#: 候选池 #21 要换成按观察段实际收益算出来的最小跟踪记录长度（MinTRL），在那之前
+#: 请不要把这个数字当成有依据的门槛——它是个占位值。
 MIN_OBSERVATION_BARS = 20
 
 _PERFORMANCE_KEYS = (
