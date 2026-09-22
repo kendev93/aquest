@@ -341,7 +341,8 @@ def test_market_data_active_jobs_can_be_listed_and_cancelled() -> None:
 
     job_id_holder[0] = runner.submit_callable(task, description="行情同步")
     try:
-        assert started.wait(timeout=1)
+        # 只是等任务起来，不是断言目标；跑满整套测试时 1 秒不一定够。
+        assert started.wait(timeout=5)
         with TestClient(app) as client:
             active = client.get("/api/v1/market-data/jobs/active")
             cancel = client.post(f"/api/v1/market-data/jobs/{job_id_holder[0]}/cancel")
@@ -373,14 +374,21 @@ def test_active_jobs_endpoint_finds_a_running_backtest_after_page_refresh() -> N
 
     def task(_progress):
         started.set()
-        release.wait(timeout=1)
+        # 这个测试要验的就是「刷新页面后还能找到运行中的任务」，所以任务在整个断言期间
+        # 必须还活着——超时写 1 秒时，跑满整套测试的机器上 TestClient 起来就要 1 秒以上，
+        # 任务先结束、active 列表里就没有它，测试偶发假红。30 秒只是防止 finally 没跑到
+        # 时永久挂起，正常路径拿到响应就 set。
+        release.wait(timeout=30)
         return {}
 
     job_id = runner.submit_callable(task, description="历史回测")
     try:
-        assert started.wait(timeout=1)
+        assert started.wait(timeout=5)
         with TestClient(app) as client:
             response = client.get("/api/v1/jobs/active")
+            # 必须在 with 退出前放人：lifespan 关闭会 join 执行器，
+            # 任务还在等 release 的话整个测试会卡死在 shutdown 上。
+            release.set()
 
         assert response.status_code == 200
         active = response.json()["data"]
@@ -398,13 +406,15 @@ def test_market_data_rejects_duplicate_active_sync_jobs() -> None:
     release = Event()
 
     def task(_progress):
-        release.wait(timeout=1)
+        # 同上：409 的前提是「已有任务还在跑」，任务自己结束就验不到冲突了。
+        release.wait(timeout=30)
         return {}
 
     existing_job = runner.submit_callable(task, description="行情同步")
     try:
         with TestClient(app) as client:
             response = client.post("/api/v1/market-data/sync-online", json={})
+            release.set()  # 同上：别让 lifespan 的 shutdown 等这个任务
 
         assert response.status_code == 409
         assert response.json()["error"]["code"] == "conflict"
