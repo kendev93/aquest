@@ -43,6 +43,7 @@ from selector_app.screening.jobs import (
     ScanEngineLike,
     ScreenJobRunner,
 )
+from selector_app.stock_groups.service import StockGroupService
 from selector_app.strategy_discovery.duckdb_job_store import DuckDbStrategyJobStore
 from selector_app.strategy_discovery.job_backend import (
     DuckDbStrategyJobBackend,
@@ -92,6 +93,7 @@ def create_app(
     instrument_lab_service: InstrumentLabService | object | None = None,
     screen_preset_service: ScreenPresetService | object | None = None,
     candidate_library_service: CandidateLibraryService | object | None = None,
+    stock_group_service: StockGroupService | object | None = None,
     local_market_data_service: LocalMarketDataService | object | None = None,
     market_data_store: DuckDbMarketDataStore | object | None = None,
     market_data_adapter: MarketDataAdapter | object | None = None,
@@ -329,6 +331,9 @@ def create_app(
         selected_store,
     )
     app.state.candidate_library_service = candidate_library_service or CandidateLibraryService(
+        selected_store,
+    )
+    app.state.stock_group_service = stock_group_service or StockGroupService(
         selected_store,
     )
     app.state.market_data_store = selected_store

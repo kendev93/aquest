@@ -25,6 +25,10 @@ from .library import (
     HistoryCompareRequest,
     ScreenPresetCreateRequest,
     ScreenPresetUpdateRequest,
+    StockGroupCreateRequest,
+    StockGroupMemberRequest,
+    StockGroupRemoveMembersRequest,
+    StockGroupUpdateRequest,
 )
 from .market import BarDeleteRequest, HealthRepairRequest, MarketSyncRequest
 from .portfolio import PortfolioBacktestRequest
@@ -73,6 +77,10 @@ __all__ = [
     "ScreenConditionRequest",
     "ScreenPresetCreateRequest",
     "ScreenPresetUpdateRequest",
+    "StockGroupCreateRequest",
+    "StockGroupMemberRequest",
+    "StockGroupRemoveMembersRequest",
+    "StockGroupUpdateRequest",
     "StrategyDiscoveryRequest",
     "StrategyFitnessRequest",
     "StrategyRefinementRequest",

@@ -99,6 +99,74 @@ class CandidatePublishRequest(BaseModel):
         return self
 
 
+class StockGroupMemberRequest(BaseModel):
+    """One instrument inside a group."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    market: str = Field(min_length=1, max_length=8)
+    code: str = Field(min_length=1, max_length=16)
+    name: str | None = Field(default=None, max_length=64)
+
+    @model_validator(mode="after")
+    def validate_identity(self) -> StockGroupMemberRequest:
+        if not self.market.strip():
+            raise ValueError("标的市场不能为空")
+        if not self.code.strip():
+            raise ValueError("标的代码不能为空")
+        object.__setattr__(self, "market", self.market.strip().upper())
+        object.__setattr__(self, "code", self.code.strip())
+        return self
+
+
+class StockGroupCreateRequest(BaseModel):
+    """Save a basket of instruments.
+
+    ``items`` 上限 200 与组合回测的 codes 上限一致：组最终是要拿去观察表现的，
+    超过这个数后面那步会被拒，不如在存的时候就拦住。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=60)
+    note: str = Field(default="", max_length=300)
+    items: list[StockGroupMemberRequest] = Field(min_length=1, max_length=200)
+    source: Literal["manual", "screen"] = "manual"
+    source_history_id: str | None = Field(default=None, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_name(self) -> StockGroupCreateRequest:
+        if not self.name.strip():
+            raise ValueError("分组名称不能为空")
+        return self
+
+
+class StockGroupUpdateRequest(BaseModel):
+    """Rename, re-note or replace the members of one group."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=60)
+    note: str | None = Field(default=None, max_length=300)
+    items: list[StockGroupMemberRequest] | None = Field(default=None, min_length=1, max_length=200)
+
+    @model_validator(mode="after")
+    def validate_payload(self) -> StockGroupUpdateRequest:
+        if self.name is None and self.note is None and self.items is None:
+            raise ValueError("至少要修改名称、备注或成员之一")
+        if self.name is not None and not self.name.strip():
+            raise ValueError("分组名称不能为空")
+        return self
+
+
+class StockGroupRemoveMembersRequest(BaseModel):
+    """Drop individual members from a group."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    members: list[StockGroupMemberRequest] = Field(min_length=1, max_length=200)
+
+
 class HistoryCompareRequest(BaseModel):
     """Two to five archived runs to lay out side by side.
 
