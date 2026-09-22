@@ -44,6 +44,10 @@ SAMPLE_LENGTH_WARNING_RATIO = 3.0
 #: 浏览器端画到那个密度已经看不出差别了——等距抽样并注明。
 MAX_CURVE_POINTS = 1200
 
+#: 键覆盖 BacktestHistoryType 的全部成员。这里刻意不标注成
+#: dict[BacktestHistoryType, str]：历史记录的 backtest_type 从库里读出来是 str，
+#: 收紧键类型会让每个 .get() 调用点都要先做窄化，代价远大于收益。改用
+#: tests/unit/test_backtest_history_types.py 断言两处集合一致。
 TYPE_LABELS: dict[str, str] = {
     "single_stock": "单股回测",
     "portfolio": "组合回测",

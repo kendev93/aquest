@@ -16,6 +16,7 @@ from datetime import date, datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from threading import RLock, local
+from typing import get_args
 
 import duckdb
 import numpy as np
@@ -23,20 +24,19 @@ import pandas as pd
 
 from .day_format import classify_board
 from .maintenance import cleanup_database_backups, create_database_backup
-from .models import DataStoreStatus, InstrumentBoard, InstrumentType
+from .models import (
+    BacktestHistoryType,
+    DataStoreStatus,
+    InstrumentBoard,
+    InstrumentType,
+)
 
 SCHEMA_VERSION = 17
 SCREEN_HISTORY_LIMIT = 10
 STRATEGY_DISCOVERY_HISTORY_LIMIT = 20
 BACKTEST_HISTORY_LIMIT = 20
-_BACKTEST_HISTORY_TYPES = {
-    "single_stock",
-    "portfolio",
-    "strategy_fitness",
-    "condition_research",
-    "swing_research",
-    "factor_test",
-}
+# 从 BacktestHistoryType 派生，而不是再抄一份字面量：抄一份就会漏更新。
+_BACKTEST_HISTORY_TYPES = set(get_args(BacktestHistoryType))
 _APP_DATA_DIR_NAME = ".indicator-lab"
 _BAR_COLUMNS = [
     "market",
@@ -1004,6 +1004,7 @@ __all__ = [
     "STRATEGY_DISCOVERY_HISTORY_LIMIT",
     "BACKTEST_HISTORY_LIMIT",
     "_BACKTEST_HISTORY_TYPES",
+    "BacktestHistoryType",
     "MarketDataStoreError",
     "_BAR_COLUMNS",
     "_WRITE_LOCK",

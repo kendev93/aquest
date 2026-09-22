@@ -5,18 +5,12 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from typing import Literal
 
+from selector_app.market_data.models import BacktestHistoryType
 from selector_app.market_data.store import DuckDbMarketDataStore
 
-BacktestHistoryType = Literal[
-    "single_stock",
-    "portfolio",
-    "strategy_fitness",
-    "condition_research",
-    "swing_research",
-    "factor_test",
-]
+# 类型本体在 market_data.models：这里有第二份字面量时，两者会各自漂移。
+__all__ = ["BacktestHistoryType", "save_completed_backtest_history", "utc_now"]
 
 logger = logging.getLogger(__name__)
 

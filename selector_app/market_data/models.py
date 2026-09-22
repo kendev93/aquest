@@ -22,6 +22,18 @@ DataSource = Literal["local", "online"]
 MarketDataProvider = Literal["eastmoney", "tdx", "tencent", "baostock"]
 ResolvedMarketDataProvider = Literal["eastmoney", "tdx", "tencent", "baostock", "mixed"]
 BarStatus = Literal["completed", "provisional"]
+# 回测历史类型的唯一登记处。新增一种回测要同时满足三处：store 用它校验入库、
+# web 用它约束路由参数、history_compare 用它做中文名映射。把类型放在这里并让
+# 后两处都按 BacktestHistoryType 取键，漏改任何一处都会在静态检查阶段报错，
+# 而不是等到运行时才发现历史存得进去、读不出来。
+BacktestHistoryType = Literal[
+    "single_stock",
+    "portfolio",
+    "strategy_fitness",
+    "condition_research",
+    "swing_research",
+    "factor_test",
+]
 
 
 def stored_end_year(status: DataStoreStatus) -> int | None:
