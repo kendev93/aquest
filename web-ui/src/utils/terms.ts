@@ -205,6 +205,37 @@ export const TERMS: Record<string, TermDefinition> = {
       '一个指标可能在一个月尺度上是因子、在一周尺度上完全没用，光看指标名字分不出来，' +
       '所以这个天数必须显式选，不能藏在默认值里。',
   },
+  netReturn: {
+    name: '净收益',
+    english: 'Net return (after costs)',
+    intro:
+      '归因里的"这笔单赚了还是亏了"用的是 pnl / 成本，pnl 已经扣掉买卖两边的佣金、' +
+      '印花税和滑点。它和因子检验里那个"前瞻收益"不是一回事——' +
+      '后者是裸价格收益，一个数字比另一个总是更大，别拿来做对比。',
+  },
+  signalDay: {
+    name: '入场信号日',
+    english: 'Entry signal day',
+    intro:
+      '信号触发、决定要买的那一天，不是真正成交的那一天（多数策略是次日开盘成交）。' +
+      '归因比的是这一天的指标取值：只有它才是"当时看到的信息"，' +
+      '成交日的指标里混进了信号日之后才发生的价格变化。',
+  },
+  standardizedDifference: {
+    name: '标准化差',
+    english: 'Standardized difference (Cohen-style)',
+    intro:
+      '差值除以两组的合并标准差，把不同量纲的指标放到同一把尺子上，' +
+      '只用来给"哪个指标最能区分胜负"排序。真正读数请看差值本身：' +
+      '"胜组 RSI 平均高 12"比"标准化差 1.4"好懂得多。',
+  },
+  openPosition: {
+    name: '未平仓',
+    english: 'Open position',
+    intro:
+      '到回测最后一天还持有、没有卖出的买入。它没有已实现收益，' +
+      '所以既不算胜单也不算败单——把浮盈当赚到，等于凭空造出一批"赢家"。',
+  },
   thresholdHint: {
     name: '阈值提示',
     english: 'Threshold hint',

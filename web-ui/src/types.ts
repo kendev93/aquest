@@ -1148,6 +1148,82 @@ export interface FactorTestJobState {
   result: FactorTestReport | null
 }
 
+export interface AttributionFactor {
+  value_id: string
+  display_name: string
+  win_mean: number | null
+  loss_mean: number | null
+  /** 胜组均值 − 败组均值。**差值不是倍数**：指标值可以取负，比值会读反方向。 */
+  difference: number | null
+  /** 差值除以合并标准差，只用来把不同量纲的指标排个先后。 */
+  standardized: number | null
+  win_count: number
+  loss_count: number
+  /** 入场信号日取不到值的成交笔数：丢弃，绝不当 0 填进来。 */
+  missing: number
+  p_value: number | null
+  adjusted_p_value: number | null
+  /** null = 没判（样本太小或没有噪声门槛），和 false（判了但不显著）不是一回事。 */
+  significant: boolean | null
+  note: string | null
+}
+
+export interface AttributionSamples {
+  trades: number
+  wins: number
+  losses: number
+  /** 期末还持有的买入：没有已实现收益，不算胜单。 */
+  open_positions: number
+  orphan_sells: number
+  rejected: number
+  unparsable: number
+  signal_days: number
+  stocks: number
+  holding_days: number | null
+  win_holding_days: number | null
+  loss_holding_days: number | null
+  missing_stocks: string[]
+}
+
+export interface FactorAttributionReport {
+  source: {
+    history_id: string | null
+    backtest_type: string | null
+    finished_at: string | null
+    date_range: { start: string | null; end: string | null }
+  }
+  samples: AttributionSamples
+  value_count: number
+  significant_count: number
+  permutations: number
+  block_size_days: number
+  block_size_trades: number | null
+  alpha: number
+  factors: AttributionFactor[]
+  notes: string[]
+  /** 口径边界，页面原文照抄展示。 */
+  boundaries: string[]
+  reason: string | null
+}
+
+export interface FactorAttributionJobState {
+  job_id: string
+  status: 'queued' | 'running' | 'completed' | 'failed'
+  progress: number
+  error: string | null
+  result: FactorAttributionReport | null
+}
+
+export interface FactorAttributionPayload {
+  source_history_id?: string
+  value_ids?: string[] | null
+  include_custom?: boolean
+  min_group_trades?: number
+  permutations?: number
+  block_size?: number
+  alpha?: number
+}
+
 export interface FactorTestPayload {
   universe?: 'all' | 'sh' | 'sz'
   vipdoc_path?: string
