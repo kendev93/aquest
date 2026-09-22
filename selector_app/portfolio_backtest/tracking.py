@@ -469,10 +469,17 @@ class StrategyTrackingService:
         research, observation = build_segments(report, launched_at=launched_at)
         if not observations:
             return self._failed(strategy_id, "重算结果里没有上线日之后的交易日")
-        self._store.save_tracking_points(strategy_id, [row.to_dict() for row in observations])
-        summary = self._research_summary(record, research)
-        if summary is not None and research is not None:
-            self._store.update_strategy_summary(strategy_id, summary)
+        try:
+            self._store.save_tracking_points(strategy_id, [row.to_dict() for row in observations])
+            summary = self._research_summary(record, research)
+            if summary is not None and research is not None:
+                self._store.update_strategy_summary(strategy_id, summary)
+        except Exception as exc:  # noqa: BLE001 - 写失败必须在库里留痕再上抛
+            # 只上抛的话库里 `last_error` 仍是空的、`last_tracked_date` 停在旧值，
+            # 界面上是「一切正常、只是没更新」——日志里的原因没人会去看。
+            logger.exception("策略追踪写入失败: %s", strategy_id)
+            self._store.finish_strategy_tracking(strategy_id, error=str(exc)[:500])
+            raise
         self._store.finish_strategy_tracking(
             strategy_id, last_tracked_date=observations[-1].trade_date
         )

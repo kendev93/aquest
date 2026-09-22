@@ -10,12 +10,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.portfolio_backtest import tracking as tracking_module
+from selector_app.portfolio_backtest.auto_tracking import StrategyTrackingScheduler
 from selector_app.portfolio_backtest.tracking import (
     MIN_OBSERVATION_BARS,
     StrategyTrackingService,
@@ -326,6 +329,30 @@ def test_failed_refresh_keeps_the_old_date(tmp_path) -> None:
     assert "行情缺失" in snapshot.last_error
 
 
+def test_failed_write_keeps_the_date_and_records_the_error(tmp_path) -> None:
+    """写盘失败也必须留下痕迹：只上抛的话库里还是「正常、只是没更新」。"""
+
+    runner = _FakeRunner(_report(tuple(100000.0 + index * 1000 for index in range(10))))
+    service = _service(tmp_path, runner)
+    store = service._store  # noqa: SLF001
+    _save(store)
+    service.launch("strategy-1")
+
+    def explode(*_args: Any, **_kwargs: Any) -> int:
+        raise OSError("磁盘写满了")
+
+    store.save_tracking_points = explode  # type: ignore[method-assign]
+
+    with pytest.raises(OSError, match="磁盘写满了"):
+        service.refresh("strategy-1")
+
+    record = store.read_strategy("strategy-1")
+    assert record is not None
+    assert "磁盘写满了" in str(record["last_error"])
+    # 日期没有被推进——停在旧值，下次成功重跑会把整段补齐。
+    assert record["last_tracked_date"] == _LAUNCH_DAY
+
+
 def test_short_observations_are_flagged(tmp_path) -> None:
     """刚上线几天就谈"衰减"是噪声，前端必须标注，不能当结论用。"""
 
@@ -361,3 +388,55 @@ def test_stop_keeps_what_was_observed(tmp_path) -> None:
     assert len(snapshot.observations) == 5
     # 研究段绩效还在——它是历史事实，停不停都一样。
     assert snapshot.research is not None
+
+
+class _OnlineStore:
+    """批处理只问一件事：现在还有哪些策略在线。"""
+
+    def __init__(self, online: set[str]) -> None:
+        self.online = online
+
+    def list_tracked_strategies(self) -> list[dict[str, object]]:
+        return [{"strategy_id": strategy_id} for strategy_id in sorted(self.online)]
+
+
+class _RecordingService:
+    def __init__(
+        self,
+        snapshot: object,
+        on_refresh: Callable[[str], None] | None = None,
+    ) -> None:
+        self.refreshed: list[str] = []
+        self._snapshot = snapshot
+        self._on_refresh = on_refresh
+
+    def refresh(self, strategy_id: str) -> object:
+        self.refreshed.append(strategy_id)
+        if self._on_refresh is not None:
+            self._on_refresh(strategy_id)
+        return self._snapshot
+
+
+def test_batch_skips_a_strategy_stopped_mid_run() -> None:
+    """跑的过程中被停掉的策略不能继续被推进日期。
+
+    `refresh` 只拒绝「从未上线」的策略，对已停止的照跑不误；批处理自己不确认
+    在线状态的话，停掉之后它还会长出新数据——和 `stop()` 的「已观测即冻结」
+    相矛盾。
+    """
+
+    store = _OnlineStore({"strategy-1", "strategy-2"})
+    scheduler = StrategyTrackingScheduler(
+        store=store,  # type: ignore[arg-type]
+        runner=object(),  # type: ignore[arg-type]
+        runner_service=object(),  # type: ignore[arg-type]
+    )
+    snapshot = SimpleNamespace(last_error="", last_tracked_date=20260306, observations=())
+    # 处理第一个策略的期间，用户停掉了第二个。
+    service = _RecordingService(snapshot, lambda _sid: store.online.discard("strategy-2"))
+    scheduler._service = service  # type: ignore[assignment] # noqa: SLF001
+
+    report = scheduler._run_batch(lambda done, total: None)
+
+    assert service.refreshed == ["strategy-1"]
+    assert report["total"] == 1

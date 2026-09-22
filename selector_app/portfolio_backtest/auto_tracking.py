@@ -115,7 +115,16 @@ class StrategyTrackingScheduler:
         failed: list[dict[str, object]] = []
         for record in self._store.list_tracked_strategies():
             strategy_id = str(record["strategy_id"])
-            # 每次都重新读在线清单：跑的过程中用户可能停掉了某个策略。
+            # 每次都重新读在线清单：跑的过程中用户可能停掉某个策略。
+            # `refresh` 只拒绝「从未上线」的策略，对已停止的会照跑并推进
+            # `last_tracked_date`——那就等于停掉之后还在长出新数据，和
+            # `stop()` 的「已观测即冻结」相矛盾。所以这里自己确认一次。
+            # 反过来，这一批开始之后才上线的策略不会被捡进来：上线流程自己
+            # 已经完整跑过一遍，这里再跑就是并发写同一行。
+            if strategy_id not in {
+                str(item["strategy_id"]) for item in self._store.list_tracked_strategies()
+            }:
+                continue
             try:
                 snapshot = self._service.refresh(strategy_id)
             except Exception as exc:  # noqa: BLE001 - one bad strategy must not stop the rest
