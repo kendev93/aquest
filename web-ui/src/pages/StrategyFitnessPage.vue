@@ -33,7 +33,7 @@ import type {
   Universe,
   ValueDefinition,
 } from '../types'
-import { numericRuleForSignal, valueOptionLabel } from '../utils/formulaScreen'
+import { numericRuleForSignal, parseStoredRuleGroup, valueOptionLabel } from '../utils/formulaScreen'
 
 const INSTRUMENT_TYPE_OPTIONS: { key: InstrumentType; label: string }[] = [
   { key: 'stock', label: '股票' },
@@ -393,11 +393,97 @@ async function loadHistory(): Promise<void> {
   }
 }
 
+function finiteNumber(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+function enumValue<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
+  return typeof value === 'string' && allowed.includes(value as T) ? value as T : fallback
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : []
+}
+
+/**
+ * 还原某次适配性评估的输入。
+ *
+ * 两条坑是从别的页面搬过来的：
+ *   1. **自定义公式必须先解析再回填规则**。`parseCustomFormula` 会把买卖规则和排序值重置成
+ *      公式的默认输出，顺序反了用户填的东西就没了。
+ *   2. **date_mode 要和绝对日期一起看**。只传日期不传 mode，下拉会显示「最近五年」但实际按
+ *      自定义区间跑；反过来也一样。
+ *
+ * 加载不等于重跑：历史存的是当时那份输入，页面上的报告还是旧的，必须重新运行才会更新。
+ */
+async function applyStoredRequest(raw: unknown): Promise<void> {
+  if (!raw || typeof raw !== 'object') return
+  const request = raw as Record<string, unknown>
+  form.universe = enumValue(request.universe, ['all', 'sh', 'sz', 'custom'] as const, form.universe)
+  form.universeFile = typeof request.universe_file === 'string' ? request.universe_file : ''
+  form.instrumentTypes = stringList(request.instrument_types)
+    .filter((item): item is InstrumentType => INSTRUMENT_TYPE_OPTIONS.some((option) => option.key === item))
+  form.boards = stringList(request.boards)
+    .filter((item): item is InstrumentBoard => BOARD_OPTIONS.some((option) => option.key === item))
+
+  const formulaText = typeof request.formula_text === 'string' ? request.formula_text.trim() : ''
+  if (formulaText) {
+    form.mode = 'custom'
+    form.formulaText = formulaText
+    await parseCustomFormula()
+  } else {
+    form.mode = 'preset'
+  }
+
+  // 公式解析之后再回填：上面那一步会重写这三个字段。
+  if (typeof request.ranking_value === 'string' && request.ranking_value) {
+    form.rankingValue = request.ranking_value
+  }
+  form.rankOrder = enumValue(request.rank_order, ['asc', 'desc'] as const, form.rankOrder)
+  const buyRule = parseStoredRuleGroup(request.buy_rule)
+  const sellRule = parseStoredRuleGroup(request.sell_rule)
+  if (buyRule) form.buyRule = buyRule
+  if (sellRule) form.sellRule = sellRule
+
+  const start = typeof request.start_date === 'string' ? request.start_date : ''
+  const end = typeof request.end_date === 'string' ? request.end_date : ''
+  const dateMode = enumValue(request.date_mode, ['recent5', 'full', 'custom'] as const, 'custom')
+  if (start && end && dateMode === 'custom') {
+    form.dateMode = 'custom'
+    form.startDate = start
+    form.endDate = end
+  } else if (request.date_mode === 'recent5' || request.date_mode === 'full') {
+    form.dateMode = request.date_mode
+    form.startDate = ''
+    form.endDate = ''
+  }
+
+  const stopLoss = finiteNumber(request.stop_loss_pct, NaN)
+  form.stopLossEnabled = Number.isFinite(stopLoss)
+  form.stopLossPct = Number.isFinite(stopLoss) ? stopLoss * 100 : form.stopLossPct
+  const takeProfit = finiteNumber(request.take_profit_pct, NaN)
+  form.takeProfitEnabled = Number.isFinite(takeProfit)
+  form.takeProfitPct = Number.isFinite(takeProfit) ? takeProfit * 100 : form.takeProfitPct
+
+  form.trainRatio = finiteNumber(request.train_ratio, form.trainRatio) * 100
+  form.validationRatio = finiteNumber(request.validation_ratio, form.validationRatio) * 100
+  form.minTrades = Math.trunc(finiteNumber(request.min_trades, form.minTrades))
+  form.maxTestDrawdown = finiteNumber(request.max_test_drawdown, form.maxTestDrawdown / 100) * 100
+  form.initialCash = finiteNumber(request.initial_cash, form.initialCash)
+  form.commission = finiteNumber(request.commission, form.commission)
+  form.minCommission = finiteNumber(request.min_commission, form.minCommission)
+  form.stampTax = finiteNumber(request.stamp_tax, form.stampTax)
+  form.slippage = finiteNumber(request.slippage, form.slippage)
+  form.execution = enumValue(request.execution, ['next_open', 'next_close'] as const, form.execution)
+  errors.value = {}
+}
+
 async function loadHistoryDetail(historyId: string): Promise<void> {
   try {
     const loaded = await getStrategyFitnessHistory(historyId)
     report.value = loaded.result
-    message.value = `已加载历史策略适配性评估 ${historyId}。`
+    await applyStoredRequest(loaded.request)
+    message.value = `已还原历史策略适配性评估 ${historyId} 的输入配置，请确认后重新运行。`
   } catch (error) {
     message.value = apiMessage(error)
   }

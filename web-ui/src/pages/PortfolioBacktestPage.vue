@@ -796,12 +796,58 @@ async function loadHistory(): Promise<void> {
   }
 }
 
+/**
+ * 还原某次历史回测的输入。
+ *
+ * 复用策略实验室的回填（`applyStoredCandidate`）覆盖规则、排序、风控与成本，这里只补它
+ * 不管的三样：**日期模式、自定义公式、ATR 与适配性阈值**。
+ *
+ * 顺序上有两条硬约束：
+ *   1. 自定义公式**先解析再回填规则**。`parseCustomFormula` 会重置买卖规则与排序值，
+ *      顺序反了这一份就白还原了。
+ *   2. date_mode 必须和绝对日期一起还原。只还原日期不还原 mode，下拉会显示「最近五年」
+ *      而实际按自定义区间跑。
+ *
+ * 加载不是重跑：页面上的结果仍是当时那一版，必须重新运行才会更新。
+ */
+async function applyHistoryRequest(raw: unknown, notice: string): Promise<void> {
+  if (!raw || typeof raw !== 'object') return
+  const config = raw as Record<string, unknown>
+  const formulaText = typeof config.formula_text === 'string' ? config.formula_text.trim() : ''
+  if (formulaText) {
+    form.mode = 'custom'
+    form.formulaText = formulaText
+    const parameters = config.formula_parameters
+    if (parameters && typeof parameters === 'object') {
+      const entries = Object.entries(parameters as Record<string, unknown>)
+        .filter((entry): entry is [string, number] => typeof entry[1] === 'number' && Number.isFinite(entry[1]))
+      form.formulaParameters = Object.fromEntries(entries)
+    }
+    await parseCustomFormula()
+  } else {
+    form.mode = 'preset'
+  }
+  applyStoredCandidate(config)
+  if (config.date_mode === 'recent5' || config.date_mode === 'full' || config.date_mode === 'custom') {
+    form.dateMode = config.date_mode
+  }
+  const atrPeriod = finiteNumber(config.atr_period, NaN)
+  if (Number.isInteger(atrPeriod) && atrPeriod >= 1) form.atrPeriod = atrPeriod
+  form.fitnessRankWeight = finiteNumber(config.fitness_rank_weight, form.fitnessRankWeight)
+  form.fitnessMinTrades = finiteNumber(config.fitness_min_trades, form.fitnessMinTrades)
+  form.fitnessMaxDrawdown = finiteNumber(config.fitness_max_drawdown, form.fitnessMaxDrawdown / 100) * 100
+  message.value = notice
+}
+
 async function loadHistoryDetail(historyId: string): Promise<void> {
   try {
     const loaded = await getPortfolioBacktestHistory(historyId)
     result.value = loaded.result
     replayComparison.value = null
-    message.value = `已加载历史组合回测 ${historyId}。`
+    await applyHistoryRequest(
+      loaded.request,
+      `已还原历史组合回测 ${historyId} 的输入配置，请确认后重新运行。`,
+    )
   } catch (error) {
     message.value = apiMessage(error)
   }

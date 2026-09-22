@@ -189,20 +189,41 @@ async function loadHistory(): Promise<void> {
   }
 }
 
+function finiteNumber(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+/**
+ * 还原某次归因的输入。
+ *
+ * 加载的是"当时那份输入"，不是新跑一版结果：页面上的报告仍然是旧的，必须重新运行
+ * 才会更新，提示语照实写。
+ *
+ * 来源回测记录（`source_history_id`）不在受影响范围内的假设之上——历史记录会被淘汰，
+ * 还原后提交时后端会重新校验它还在不在，这里只负责把选择搬回表单。
+ */
+function applyStoredRequest(raw: unknown): void {
+  if (!raw || typeof raw !== 'object') return
+  const request = raw as Record<string, unknown>
+  if (typeof request.source_history_id === 'string' && request.source_history_id) {
+    form.sourceHistoryId = request.source_history_id
+  }
+  form.valueIds = Array.isArray(request.value_ids)
+    ? request.value_ids.filter((item): item is string => typeof item === 'string')
+    : form.valueIds
+  if (typeof request.include_custom === 'boolean') form.includeCustom = request.include_custom
+  form.minGroupTrades = Math.trunc(finiteNumber(request.min_group_trades, form.minGroupTrades))
+  form.permutations = Math.trunc(finiteNumber(request.permutations, form.permutations))
+  form.blockSize = Math.trunc(finiteNumber(request.block_size, form.blockSize))
+  form.alpha = finiteNumber(request.alpha, form.alpha)
+}
+
 async function loadHistoryDetail(historyId: string): Promise<void> {
   try {
     const loaded = await getFactorAttributionHistory(historyId)
     report.value = loaded.result
-    const request = loaded.request as Partial<FactorAttributionPayload>
-    if (typeof request.source_history_id === 'string') {
-      form.sourceHistoryId = request.source_history_id
-    }
-    if (Array.isArray(request.value_ids)) form.valueIds = [...request.value_ids]
-    if (typeof request.min_group_trades === 'number') {
-      form.minGroupTrades = request.min_group_trades
-    }
-    if (typeof request.permutations === 'number') form.permutations = request.permutations
-    message.value = `已加载历史因子归因 ${historyId}。`
+    applyStoredRequest(loaded.request)
+    message.value = `已还原历史因子归因 ${historyId} 的输入配置，请确认后重新运行。`
   } catch (error) {
     message.value = apiMessage(error)
   }

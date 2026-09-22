@@ -218,19 +218,54 @@ async function loadHistory(): Promise<void> {
   }
 }
 
+function finiteNumber(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+}
+
+/**
+ * 把某次历史请求的输入还原回表单。
+ *
+ * 这不是"重跑"：历史记录存的是当时那份输入，加载后页面上的结果仍然是旧的那一版，
+ * 必须重新运行才会更新 —— 提示语要照实说，不然用户会把加载当成又跑了一次。
+ *
+ * `date_mode` 不在 FactorTestRequest 里（后端只存绝对日期），所以有起止日期就切成
+ * 自定义区间、没有就保持默认的「最近五年」；推断不出第三种可能，也别猜。
+ */
+function applyStoredRequest(raw: unknown): void {
+  if (!raw || typeof raw !== 'object') return
+  const request = raw as Record<string, unknown>
+  if (request.universe === 'all' || request.universe === 'sh' || request.universe === 'sz') {
+    form.universe = request.universe
+  }
+  form.horizon = Math.trunc(finiteNumber(request.horizon, form.horizon))
+  form.valueIds = Array.isArray(request.value_ids)
+    ? request.value_ids.filter((item): item is string => typeof item === 'string')
+    : form.valueIds
+  if (typeof request.include_custom === 'boolean') form.includeCustom = request.include_custom
+  form.quantileCount = Math.trunc(finiteNumber(request.quantile_count, form.quantileCount))
+  form.minCrossSection = Math.trunc(finiteNumber(request.min_cross_section, form.minCrossSection))
+  form.permutations = Math.trunc(finiteNumber(request.permutations, form.permutations))
+  form.blockSize = Math.trunc(finiteNumber(request.block_size, form.blockSize))
+  form.alpha = finiteNumber(request.alpha, form.alpha)
+  form.limitStocks = typeof request.limit_stocks === 'number' && Number.isFinite(request.limit_stocks)
+    ? request.limit_stocks
+    : null
+  const start = typeof request.start_date === 'string' ? request.start_date : ''
+  const end = typeof request.end_date === 'string' ? request.end_date : ''
+  if (start && end) {
+    form.dateMode = 'custom'
+    form.startDate = start
+    form.endDate = end
+  }
+}
+
 async function loadHistoryDetail(historyId: string): Promise<void> {
   try {
     const loaded = await getFactorTestHistory(historyId)
     report.value = loaded.result
     selectedValueId.value = report.value.factors[0]?.value_id ?? ''
-    const request = loaded.request as Partial<FactorTestPayload>
-    if (typeof request.horizon === 'number') form.horizon = request.horizon
-    if (Array.isArray(request.value_ids)) form.valueIds = [...request.value_ids]
-    if (typeof request.min_cross_section === 'number') {
-      form.minCrossSection = request.min_cross_section
-    }
-    if (typeof request.permutations === 'number') form.permutations = request.permutations
-    message.value = `已加载历史因子检验 ${historyId}。`
+    applyStoredRequest(loaded.request)
+    message.value = `已还原历史因子检验 ${historyId} 的输入配置，请确认后重新运行。`
   } catch (error) {
     message.value = apiMessage(error)
   }
