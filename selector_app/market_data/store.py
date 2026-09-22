@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from .health import DEFAULT_EXAMPLE_LIMIT, HealthReport
 from .models import InstrumentBoard, InstrumentRef, InstrumentType, StockRef
 from .staging import StageMergeReport
 from .store_bars import DuckDbBarsStore
@@ -22,6 +23,7 @@ from .store_base import (
     default_data_dir,
     default_database_path,
 )
+from .store_health import DuckDbHealthStore, build_report
 from .store_history import DuckDbHistoryStore
 from .store_indicator_cache import DuckDbIndicatorCacheStore
 from .store_indicator_cache_sqlite import SqliteIndicatorCacheStore
@@ -71,6 +73,7 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
         )
         self._bars = DuckDbBarsStore(self)
         self._history = DuckDbHistoryStore(self)
+        self._health = DuckDbHealthStore(self)
         self._indicator_cache_backend = resolve_indicator_cache_backend(indicator_cache_backend)
         self._indicator_cache: _IndicatorCacheStore = (
             DuckDbIndicatorCacheStore(self)
@@ -83,6 +86,28 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
         """Which backend holds the derived indicator caches."""
 
         return self._indicator_cache_backend
+
+    @property
+    def health(self) -> DuckDbHealthStore:
+        """Read-only health scan over the stored daily bars."""
+
+        return self._health
+
+    def health_report(
+        self,
+        *,
+        generated_at: str,
+        duration_seconds: float = 0.0,
+        example_limit: int = DEFAULT_EXAMPLE_LIMIT,
+    ) -> HealthReport:
+        """Run every health check and return the assembled report."""
+
+        return build_report(
+            self._health,
+            generated_at=generated_at,
+            duration_seconds=duration_seconds,
+            example_limit=example_limit,
+        )
 
     def update_instrument_names(self, names: Mapping[tuple[str, str], str | None]) -> int:
         return self._bars.update_instrument_names(names)
