@@ -58,6 +58,7 @@ const online: StrategyTrackingSnapshot = {
   benchmark_performance: { annual_return: 0.09 },
   excess_annual_return: 0.03,
   observation_is_short: true,
+  min_track_record_length: null,
 }
 
 const offline: StrategyTrackingSnapshot = {
@@ -106,6 +107,63 @@ describe('StrategyTrackingPage', () => {
 
     // 刚上线三天就谈"衰减"是噪声，这一条必须拦住。
     expect(wrapper.get('[data-testid="tracking-short-warning"]').text()).toContain('基本是噪声')
+  })
+
+  it('says how many more trading days are needed before the result is significant', async () => {
+    // 观察段已经不算短，但离"能谈显著"还差得远——这正是 MinTRL 要传达的。
+    const longRun: StrategyTrackingSnapshot = {
+      ...online,
+      observation_is_short: false,
+      min_track_record_length: 900,
+    }
+    vi.mocked(strategiesApi.fetchStrategyTracking).mockResolvedValue([longRun])
+
+    const wrapper = mount(StrategyTrackingPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="tracking-toggle-strategy-1"]').trigger('click')
+    await flushPromises()
+
+    const note = wrapper.get('[data-testid="tracking-mintrl-note"]').text()
+    expect(note).toContain('900 个交易日')
+    // 上线日那一行是接力点不算观察日，3 行 = 已观察 2 个，还差 898。
+    expect(note).toContain('已观察 2 个')
+    expect(note).toContain('还差 898 个')
+    expect(note).toContain('3.6 年')
+  })
+
+  it('stays quiet when the minimum length cannot be computed', async () => {
+    // 观察段够长但算不出（平均收益不为正、零波动等）：null 不是"不需要样本"，
+    // 显示一条空提示或"还差 0 个"都会误导。
+    const noAnswer: StrategyTrackingSnapshot = {
+      ...online,
+      observation_is_short: false,
+      min_track_record_length: null,
+    }
+    vi.mocked(strategiesApi.fetchStrategyTracking).mockResolvedValue([noAnswer])
+
+    const wrapper = mount(StrategyTrackingPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="tracking-toggle-strategy-1"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="tracking-mintrl-note"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="tracking-short-warning"]').exists()).toBe(false)
+  })
+
+  it('stays quiet once the observation window is already long enough', async () => {
+    const enough: StrategyTrackingSnapshot = {
+      ...online,
+      observation_is_short: false,
+      min_track_record_length: 2,
+    }
+    vi.mocked(strategiesApi.fetchStrategyTracking).mockResolvedValue([enough])
+
+    const wrapper = mount(StrategyTrackingPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="tracking-toggle-strategy-1"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="tracking-mintrl-note"]').exists()).toBe(false)
   })
 
   it('launches a strategy by submitting a job and then reloading', async () => {

@@ -295,4 +295,9 @@ export interface StrategyTrackingSnapshot {
   excess_annual_return: number | null
   /** 观察段太短，还没到可以谈"衰减"的程度。界面必须据此标注。 */
   observation_is_short: boolean
+  /**
+   * 最小跟踪记录长度：按观察段目前的表现，还要多少个交易日才能说它显著为正。
+   * null 表示算不出来（观察段太短、零波动、或平均收益不为正），不是"不需要"。
+   */
+  min_track_record_length: number | null
 }

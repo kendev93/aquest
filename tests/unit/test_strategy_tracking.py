@@ -10,10 +10,12 @@
 
 from __future__ import annotations
 
+import datetime
 from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 
+import numpy as np
 import pytest
 
 from selector_app.market_data.store import DuckDbMarketDataStore
@@ -52,6 +54,18 @@ _DATES = (
     20260305,
     20260306,
 )
+
+
+def _business_dates(count: int) -> tuple[int, ...]:
+    """``count`` 个工作日，从 2026-01-02 起。整数 ``YYYYMMDD``."""
+
+    day = datetime.date(2026, 1, 2)
+    out: list[int] = []
+    while len(out) < count:
+        if day.weekday() < 5:
+            out.append(int(day.strftime("%Y%m%d")))
+        day += datetime.timedelta(days=1)
+    return tuple(out)
 
 
 def _report(
@@ -364,6 +378,44 @@ def test_short_observations_are_flagged(tmp_path) -> None:
 
     assert snapshot.observation_is_short is True
     assert len(snapshot.observations) - 1 < MIN_OBSERVATION_BARS
+    # 二十个收益率都凑不出来，偏度峰度估不准——此时 MinTRL 必须不给，
+    # 给一个数会让人以为它算准了。
+    assert snapshot.min_track_record_length is None
+
+
+def test_min_track_record_length_is_reported_for_long_windows(tmp_path) -> None:
+    """观察段够长时给 MinTRL：它通常远大于观察段，那是进度不是错误。"""
+
+    dates = _business_dates(60)
+    launch_day = dates[9]
+    # 交替 +1% / −0.9%：确定性序列，日夏普约 0.053。用它是因为随机序列下
+    # 样本均值本身不稳——而那正是 MinTRL 存在的理由，会让断言跟着抖。
+    step = np.array([0.01 if index % 2 == 0 else -0.009 for index in range(len(dates))])
+    totals = tuple(float(value) for value in 100000.0 * np.cumprod(1.0 + step))
+    runner = _FakeRunner(_report(totals, dates=dates))
+    service = _service(
+        tmp_path,
+        runner,
+        available_until=f"{str(dates[-1])[:4]}-{str(dates[-1])[4:6]}-{str(dates[-1])[6:]}",
+    )
+    service._store.save_strategy(  # noqa: SLF001
+        "strategy-1",
+        name="上线策略",
+        request={
+            **_REQUEST,
+            "start_date": "2025-12-01",
+            "end_date": f"{str(launch_day)[:4]}-{str(launch_day)[4:6]}-{str(launch_day)[6:]}",
+        },
+        summary={},
+    )
+    # launch 只种下上线日一行，观察段要靠 refresh 补齐——这也是真实用法。
+    service.launch("strategy-1")
+    snapshot = service.refresh("strategy-1")
+
+    assert snapshot.observation_is_short is False
+    assert snapshot.min_track_record_length is not None
+    # 要的远比已有的多——这正是它要传达的信息：别急。
+    assert snapshot.min_track_record_length > len(snapshot.observations)
 
 
 def test_refresh_requires_an_online_strategy(tmp_path) -> None:

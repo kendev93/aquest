@@ -34,6 +34,30 @@ const decayedCount = computed(
   () => online.value.filter((item) => (item.decay?.annual_return ?? 1) < 0.5).length,
 )
 
+/** 一年按 252 个交易日折算，和后端绩效口径保持一致。 */
+const TRADING_DAYS_PER_YEAR = 252
+
+/**
+ * 最小跟踪记录长度（MinTRL）的提示文案。返回空串表示不用提示：
+ * 要么算不出来（观察段太短、零波动、平均收益不为正），要么已经够了。
+ *
+ * 这不是错误提示而是进度：MinTRL 通常远大于观察段（年化夏普 0.6 要七八年），
+ * 显示的是"还要等多少个交易日"，不是"你做错了什么"。
+ */
+function minTrlNote(item: StrategyTrackingSnapshot): string {
+  const needed = item.min_track_record_length
+  if (needed === null) return ''
+  // 上线日那一行是接力点，不算观察日。
+  const have = Math.max(0, item.observations.length - 1)
+  const target = Math.ceil(needed)
+  if (target <= have) return ''
+  const years = target / TRADING_DAYS_PER_YEAR
+  return (
+    `按目前的表现，要在 95% 的把握下说它真的赚钱，需要 ${target} 个交易日` +
+    `（约 ${years.toFixed(1)} 年）；已观察 ${have} 个，还差 ${target - have} 个。`
+  )
+}
+
 function showMessage(text: string, isError = false): void {
   message.value = text
   messageIsError.value = isError
@@ -323,6 +347,9 @@ function chartFor(item: StrategyTrackingSnapshot) {
 
         <p v-if="item.observation_is_short" class="sample-warning" data-testid="tracking-short-warning">
           观察段还不到 20 个交易日，此时的年化和衰减比基本是噪声，先当参考，别当结论。
+        </p>
+        <p v-else-if="minTrlNote(item)" class="sample-warning" data-testid="tracking-mintrl-note">
+          {{ minTrlNote(item) }}<TermHint term="minTrackRecordLength" />
         </p>
 
         <div class="segment-grid">

@@ -34,15 +34,16 @@ from selector_app.portfolio_backtest.models import (
     PortfolioBacktestReport,
 )
 from selector_app.portfolio_backtest.service import PortfolioBacktestProgressCallback
+from selector_app.statistics.deflated import daily_returns, min_track_record_length
 from selector_app.web.schemas import PortfolioBacktestRequest
 
 logger = logging.getLogger(__name__)
 
-#: 观察段不到这么多交易日，衰减比基本是噪声——页面要标注而不是当成结论。
-#: ⚠️ 20 这个值当年是拍出来的，不是算出来的。它没有考虑观察段的收益波动有多大：
-#: 一条很稳的策略其实更少的交易日就够判断，而一条大起大落的策略要远不止 20 天。
-#: 候选池 #21 要换成按观察段实际收益算出来的最小跟踪记录长度（MinTRL），在那之前
-#: 请不要把这个数字当成有依据的门槛——它是个占位值。
+#: 观察段不到这么多交易日，连描述性指标都不可靠——页面要标注而不是当成结论。
+#:
+#: 注意它管的是「数据太少，描述都做不了」，和 MinTRL（``min_track_record_length``）
+#: 管的是两件事：后者回答「够不够谈显著」，答案经常是「还要好几年」，那不是错误
+#: 而是进度。样本少于这个数时连偏度峰度都估不出来，MinTRL 一律不给。
 MIN_OBSERVATION_BARS = 20
 
 _PERFORMANCE_KEYS = (
@@ -141,6 +142,10 @@ class TrackingSnapshot:
     excess_annual_return: float | None
     #: 观察段够不够长到可以谈"衰减"。前端必须据此标注，不能装作是结论。
     observation_is_short: bool
+    #: 最小跟踪记录长度（MinTRL）：按观察段目前的表现，还要多少个交易日才能在
+    #: 95% 下说"它显著为正"。``None`` 是算不出来（观察段太短、零波动、或者平均
+    #: 收益不为正），不是"不需要"。它通常远大于观察段长度——那不是错误，是进度。
+    min_track_record_length: float | None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -158,6 +163,7 @@ class TrackingSnapshot:
             ),
             "excess_annual_return": self.excess_annual_return,
             "observation_is_short": self.observation_is_short,
+            "min_track_record_length": self.min_track_record_length,
         }
 
 
@@ -525,6 +531,7 @@ class StrategyTrackingService:
             excess_annual_return=_excess(observation, benchmark),
             # 上线日那一行是接力点，不是观察日，所以阈值要 +1。
             observation_is_short=len(observations) < MIN_OBSERVATION_BARS + 1,
+            min_track_record_length=_min_track_record_length(observations),
         )
 
     # ------------------------------------------------------------------
@@ -591,6 +598,21 @@ class StrategyTrackingService:
         if len(values) < 2:
             return None
         return _performance(values, _EMPTY_TRADES)
+
+
+def _min_track_record_length(
+    observations: Sequence[TrackedObservation],
+) -> float | None:
+    """观察段还要多久才谈得上显著。
+
+    样本少于 ``MIN_OBSERVATION_BARS`` 时直接不给：偏度和峰度是三四阶矩，二十来个
+    点估出来的值能把 MinTRL 从几百翻到几千，给一个数只会让人以为它算准了。
+    """
+
+    returns = daily_returns([row.equity for row in observations])
+    if len(returns) < MIN_OBSERVATION_BARS:
+        return None
+    return min_track_record_length(returns)
 
 
 def _read_launched_at(record: Mapping[str, object]) -> int | None:
