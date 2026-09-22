@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import PageGuide from '../components/PageGuide.vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import { fetchLocalChart } from '../api/marketData'
@@ -794,6 +795,8 @@ watch(() => form.formulaText, (value) => {
         </div>
         <div class="intro-note"><span class="note-label">扫描范围</span><strong>DuckDB 全量行情</strong><small>信号筛选和回测统一读取本地数据仓库</small></div>
       </section>
+
+      <PageGuide page-key="formula-screen" />
 
       <div v-if="message" class="notice" :class="{ error: !message.includes('完成') }" role="alert" data-testid="screen-message">
         <span>{{ message }}</span>

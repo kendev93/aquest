@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import PageGuide from '../components/PageGuide.vue'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 
 import TermHint from '../components/TermHint.vue'
@@ -226,6 +227,8 @@ function chartFor(item: StrategyTrackingSnapshot) {
         </div>
         <div class="intro-note"><span class="note-label">研究方法</span><strong>规则上线即冻结</strong><small>要改规则请新开一个追踪，改了就不是样本外了</small></div>
       </section>
+
+      <PageGuide page-key="strategy-tracking" />
 
       <p v-if="message" class="notice" :class="{ error: messageIsError }" role="alert" data-testid="tracking-message">{{ message }}</p>
 

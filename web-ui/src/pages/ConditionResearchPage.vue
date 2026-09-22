@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import PageGuide from '../components/PageGuide.vue'
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 
 import {
@@ -1308,6 +1309,8 @@ onMounted(async () => {
           <small>基础规则固定，候选条件按时间留出验证</small>
         </div>
       </section>
+
+      <PageGuide page-key="condition-research" />
 
       <div v-if="message" class="notice" :class="{ error: message.includes('失败') || message.includes('错误') }" role="alert" data-testid="condition-research-message">
         {{ message }}

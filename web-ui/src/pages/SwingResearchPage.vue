@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import PageGuide from '../components/PageGuide.vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import {
@@ -527,6 +528,8 @@ async function copyPlan(): Promise<void> {
           <small>给的是相关性排序，不是交易信号；结论要拿去买卖条件研究重新搜阈值才算数</small>
         </div>
       </section>
+
+      <PageGuide page-key="swing-research" />
 
       <div v-if="message" class="notice error" role="alert" data-testid="swing-message">{{ message }}</div>
 

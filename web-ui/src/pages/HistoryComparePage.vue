@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import PageGuide from '../components/PageGuide.vue'
 import { computed, onMounted, ref } from 'vue'
 
 import {
@@ -187,6 +188,8 @@ onMounted(async () => {
           <small>跨类型时收益类数字只能定性参照；界面会写明每个数字来自哪一口径</small>
         </div>
       </section>
+
+      <PageGuide page-key="history-compare" />
 
       <div v-if="message" class="notice" role="alert" data-testid="compare-message">{{ message }}</div>
 

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import PageGuide from '../components/PageGuide.vue'
 import { computed, onMounted, reactive, ref } from 'vue'
 
 import {
@@ -313,6 +314,8 @@ onMounted(async () => {
           <small>事后解释，不是预测；和因子检验（指标能不能预测未来收益）方向相反</small>
         </div>
       </section>
+
+      <PageGuide page-key="factor-attribution" />
 
       <div v-if="message" class="notice" role="alert" data-testid="attribution-message">{{ message }}</div>
 

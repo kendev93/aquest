@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import PageGuide from '../components/PageGuide.vue'
 import { computed, onMounted, reactive, ref } from 'vue'
 
 import {
@@ -407,6 +408,8 @@ onMounted(async () => {
           <small>无条件全样本，和条件研究（只看信号日）、波段研究（只看事件）不是一回事</small>
         </div>
       </section>
+
+      <PageGuide page-key="factor-test" />
 
       <div v-if="message" class="notice" role="alert" data-testid="factor-message">{{ message }}</div>
 

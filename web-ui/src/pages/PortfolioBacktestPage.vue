@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import PageGuide from '../components/PageGuide.vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import {
@@ -1105,6 +1106,8 @@ watch(() => form.formulaText, (value) => {
         </div>
         <div class="intro-note"><span class="note-label">默认流程</span><strong>收盘信号 · 次日成交</strong><small>固定槽位 · 每槽等额 · 支持止盈止损与指标卖出</small></div>
       </section>
+
+      <PageGuide page-key="portfolio-backtest" />
 
       <div v-if="message" class="notice" :class="{ error: !message.includes('完成') }" role="alert" data-testid="portfolio-message">{{ message }}</div>
 

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import PageGuide from '../components/PageGuide.vue'
 import { computed, onMounted, ref } from 'vue'
 
 import { fetchMetadata, FormulaScreenApiError } from '../api/formulaScreen'
@@ -332,6 +333,8 @@ onMounted(async () => {
           <small>综合评分的权重没有可证伪的依据，所以只给可核对的读数：取值、命中、收益差、置换 p 值</small>
         </div>
       </section>
+
+      <PageGuide page-key="instrument-lab" />
 
       <div v-if="message" class="notice" role="alert" data-testid="lab-message">{{ message }}</div>
 

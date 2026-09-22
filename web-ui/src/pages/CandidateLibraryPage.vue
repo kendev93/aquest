@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import PageGuide from '../components/PageGuide.vue'
 import { computed, onMounted, ref } from 'vue'
 
 import { getConditionResearchHistory } from '../api/conditionResearch'
@@ -259,6 +260,8 @@ onMounted(async () => {
           </p>
         </div>
       </section>
+
+      <PageGuide page-key="candidate-library" />
 
       <section class="panel">
         <div class="panel-head">
