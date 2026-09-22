@@ -9,11 +9,17 @@ from typing import cast
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 
+from selector_app.market_data.auto_sync import ACTIVE_DATA_JOB_DESCRIPTIONS
 from selector_app.market_data.models import DataStoreStatus
 from selector_app.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
+from selector_app.portfolio_backtest.auto_tracking import (
+    TRACKING_DESCRIPTION,
+    TRACKING_EXCLUSIVE_GROUP,
+)
 from selector_app.portfolio_backtest.service import PortfolioBacktestService
 from selector_app.portfolio_backtest.tracking import StrategyTrackingService
 from selector_app.screening.jobs import (
+    ActiveJobConflictError,
     JobState,
     ProgressReporter,
     ScreenJobRunner,
@@ -29,8 +35,6 @@ from ..schemas import (
 )
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
-
-TRACKING_DESCRIPTION = "策略追踪"
 
 #: 列表页要展示的标量字段。其余一律不存。
 _SUMMARY_SCALAR_KEYS = (
@@ -242,6 +246,7 @@ def stop_strategy_tracking(strategy_id: str, request: Request) -> dict[str, obje
 
 def _submit_tracking_job(strategy_id: str, request: Request, *, launch: bool) -> Response:
     service = _tracking_service(request)
+    runner = _runner(request)
     job_id = uuid.uuid4().hex
 
     def run_tracking(progress: ProgressReporter) -> dict[str, object]:
@@ -252,10 +257,27 @@ def _submit_tracking_job(strategy_id: str, request: Request, *, launch: bool) ->
             raise TaskUserError(str(exc)) from exc
         return snapshot.to_dict()
 
-    try:
-        _runner(request).submit_callable(
-            run_tracking, description=TRACKING_DESCRIPTION, job_id=job_id
+    # 两道守卫，和调度器对齐：一次重算要跑全历史（分钟级），行情同步进行中拿到的
+    # 还是同步前的行情，算出来是份看着正常、实际过时的结果；而两个重算并发跑会同
+    # 时写 saved_strategies 与 tracking_points 的同一批行。
+    if runner.has_active_jobs(ACTIVE_DATA_JOB_DESCRIPTIONS):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="行情同步或指标预计算正在运行，等它跑完再重算，否则用的是旧行情",
         )
+    try:
+        runner.submit_callable(
+            run_tracking,
+            description=TRACKING_DESCRIPTION,
+            job_id=job_id,
+            exclusive_group=TRACKING_EXCLUSIVE_GROUP,
+        )
+    except ActiveJobConflictError as exc:
+        # 它是 RuntimeError 的子类，不单独接住会落到下面的兜底变成 503。
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="已有策略追踪任务正在运行，请等它跑完",
+        ) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail="任务执行器暂不可用") from exc
     return JSONResponse(
