@@ -428,7 +428,9 @@ describe('SwingResearchPage', () => {
     await wrapper.get('[data-testid="swing-study-start"]').setValue('2024-02-01')
     await wrapper.get('[data-testid="swing-study-end"]').setValue('2024-11-30')
     await wrapper.get('[data-testid="swing-study-limit"]').setValue('500')
-    await wrapper.get('[data-testid="swing-label-up_leg_start"]').setValue(true)
+    // 默认四个都勾，所以这里**取消**勾选才验证得到 toggle 真的生效——
+    // 勾一个本来就选中的框是 no-op，即使 toggleLabel 坏了测试也会过。
+    await wrapper.get('[data-testid="swing-label-up_leg_start"]').setValue(false)
 
     await wrapper.get('[data-testid="swing-study-run"]').trigger('click')
     await flushPromises()
@@ -444,7 +446,7 @@ describe('SwingResearchPage', () => {
       start_date: '2024-02-01',
       end_date: '2024-11-30',
       limit_stocks: 500,
-      labels: expect.arrayContaining(['up_leg_start']),
+      labels: expect.not.arrayContaining(['up_leg_start']),
     }))
 
     await wrapper.get('[data-testid="swing-plan-copy"]').trigger('click')
@@ -452,5 +454,20 @@ describe('SwingResearchPage', () => {
 
     expect(writeText).toHaveBeenCalledTimes(1)
     expect(wrapper.get('[data-testid="swing-plan-copy"]').text()).toContain('已复制')
+  })
+
+  it('checks all four labels by default, pivot ones included', async () => {
+    // 只默认勾「近期将启动」时，页面看起来在研究「什么时候启动」，而真正研究顶和底
+    // 的两条（波段最低点 / 最高点）藏在不勾的框里——默认全勾才让人一眼看到它们。
+    const wrapper = mount(SwingResearchPage)
+    await flushPromises()
+
+    const ids = ['up_onset_ahead', 'down_onset_ahead', 'up_leg_start', 'down_leg_start']
+    const checked = ids.filter((id) => {
+      const input = wrapper.get(`[data-testid="swing-label-${id}"]`).element as HTMLInputElement
+      return input.checked
+    })
+
+    expect(checked).toEqual(ids)
   })
 })

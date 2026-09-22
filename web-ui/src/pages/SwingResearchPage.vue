@@ -50,8 +50,8 @@ interface LabelOption {
 const LABEL_OPTIONS: LabelOption[] = [
   { id: 'up_onset_ahead', name: '近期将启动上涨', tradeable: true },
   { id: 'down_onset_ahead', name: '近期将启动下跌', tradeable: true },
-  { id: 'up_leg_start', name: '大涨段起点（归因）', tradeable: false },
-  { id: 'down_leg_start', name: '大跌段起点（归因）', tradeable: false },
+  { id: 'up_leg_start', name: '波段最低点（事后归因）', tradeable: false },
+  { id: 'down_leg_start', name: '波段最高点（事后归因）', tradeable: false },
 ]
 
 /**
@@ -85,7 +85,14 @@ const study = reactive({
   minBars: 5,
   atrWindow: 14,
   horizon: 10,
-  labels: ['up_onset_ahead', 'down_onset_ahead'] as SwingLabel[],
+  // 四个都默认勾上。只勾「近期将启动」时，看起来像在研究「什么时候启动」，
+  // 但真正研究顶和底的是下面那两条——它们的名字必须说清自己打在极值点上。
+  labels: [
+    'up_onset_ahead',
+    'down_onset_ahead',
+    'up_leg_start',
+    'down_leg_start',
+  ] as SwingLabel[],
   permutations: 200,
   blockSize: 20,
   alpha: 0.05,
@@ -717,7 +724,7 @@ async function copyPlan(): Promise<void> {
               <span v-else class="swing-tag">可交易</span>
             </label>
           </div>
-          <p class="helper">默认只勾「近期将启动」——这两条当天就算得出来；「段起点」只有事后才知道，勾上只作参考。</p>
+          <p class="helper">默认四个都勾：「近期将启动」当天就算得出来，能直接拿去交易；「波段最低点 / 最高点」只有事后才知道，用来回答顶和底长什么样。注意后者的样本少得多——一波行情才有一个转折点。</p>
         </fieldset>
 
         <fieldset class="form-section swing-label-section">
