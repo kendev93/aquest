@@ -211,11 +211,25 @@ describe('FactorTestPage', () => {
     expect(wrapper.text()).toContain('2 处倒挂')
   })
 
-  it('restores the horizon and value selection from history', async () => {
+  // 每个字段都故意给非默认值：将来表单加了字段而还原逻辑忘了同步，这条就会红。
+  it('restores every input field from history, not just the headline ones', async () => {
     vi.mocked(factorApi.getFactorTestHistory).mockResolvedValue({
       history_id: 'h1',
       backtest_type: 'factor_test',
-      request: { horizon: 20, value_ids: ['technical.rsi14'], min_cross_section: 30, permutations: 0 },
+      request: {
+        universe: 'sz',
+        start_date: '2024-01-01',
+        end_date: '2024-06-30',
+        horizon: 20,
+        value_ids: ['technical.rsi14'],
+        include_custom: false,
+        quantile_count: 4,
+        min_cross_section: 30,
+        permutations: 0,
+        block_size: 7,
+        alpha: 0.1,
+        limit_stocks: 120,
+      },
       result: report,
       started_at: '2026-09-21T00:00:00Z',
       finished_at: '2026-09-21T00:01:00Z',
@@ -235,9 +249,21 @@ describe('FactorTestPage', () => {
     await wrapper.get('[data-testid="factor-history-load-h1"]').trigger('click')
     await flushPromises()
 
-    expect((wrapper.get('[data-testid="factor-horizon"]').element as HTMLInputElement).value).toBe('20')
-    expect((wrapper.get('[data-testid="factor-permutations"]').element as HTMLInputElement).value).toBe('0')
-    expect(wrapper.text()).toContain('已加载历史因子检验 h1')
+    const value = (testid: string): string =>
+      (wrapper.get(`[data-testid="${testid}"]`).element as HTMLInputElement | HTMLSelectElement).value
+    expect(value('factor-universe')).toBe('sz')
+    expect(value('factor-date-mode')).toBe('custom')
+    expect(value('factor-start')).toBe('2024-01-01')
+    expect(value('factor-end')).toBe('2024-06-30')
+    expect(value('factor-limit-stocks')).toBe('120')
+    expect(value('factor-horizon')).toBe('20')
+    expect(value('factor-quantile')).toBe('4')
+    expect(value('factor-min-cross-section')).toBe('30')
+    expect(value('factor-permutations')).toBe('0')
+    expect((wrapper.get('[data-testid="factor-include-custom"]').element as HTMLInputElement).checked).toBe(false)
+    // 加载不是重跑：提示要说清楚还得再运行一次。
+    expect(wrapper.get('[data-testid="factor-message"]').text()).toContain('已还原历史因子检验 h1')
+    expect(wrapper.get('[data-testid="factor-message"]').text()).toContain('请确认后重新运行')
   })
 
   it('refuses to run without a value selected', async () => {

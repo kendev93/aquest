@@ -320,30 +320,71 @@ describe('StrategyFitnessPage', () => {
     }))
   })
 
-  it('loads and deletes a saved fitness history record', async () => {
+  it('restores the saved configuration when loading a fitness history record', async () => {
     vi.mocked(fitnessApi.fetchStrategyFitnessHistory).mockResolvedValue([{
       history_id: 'fitness-history-1', backtest_type: 'strategy_fitness', created_at: '2024-01-06T08:00:00Z',
       started_at: '2024-01-06T08:00:00Z', finished_at: '2024-01-06T08:01:00Z',
       duration_seconds: 60, summary: {},
     }])
+    // 每个字段都故意偏离默认值，漏掉哪一个这条测试都会红。
     vi.mocked(fitnessApi.getStrategyFitnessHistory).mockResolvedValue({
       history_id: 'fitness-history-1', backtest_type: 'strategy_fitness', created_at: '2024-01-06T08:00:00Z',
       started_at: '2024-01-06T08:00:00Z', finished_at: '2024-01-06T08:01:00Z',
-      duration_seconds: 60, summary: {}, request: {}, result: report,
+      duration_seconds: 60, summary: {}, result: report,
+      request: {
+        universe: 'sz',
+        buy_rule: { signals: [], conditions: [], combine_mode: 'any', minimum_matches: null },
+        sell_rule: { signals: [], conditions: [], combine_mode: 'any', minimum_matches: null },
+        ranking_value: 'indicator_three.varo6',
+        rank_order: 'asc',
+        date_mode: 'custom',
+        start_date: '2023-01-01',
+        end_date: '2023-12-31',
+        stop_loss_pct: 0.12,
+        take_profit_pct: 0.25,
+        train_ratio: 0.7,
+        validation_ratio: 0.15,
+        min_trades: 9,
+        max_test_drawdown: 0.4,
+        initial_cash: 500000,
+        commission: 0.0005,
+        min_commission: 1,
+        stamp_tax: 0.001,
+        slippage: 0.02,
+        execution: 'next_close',
+      },
     })
     vi.mocked(fitnessApi.deleteStrategyFitnessHistory).mockResolvedValue({ deleted: true })
 
     const wrapper = mount(StrategyFitnessPage)
     await flushPromises()
-
     await wrapper.get('[data-testid="fitness-history-load-fitness-history-1"]').trigger('click')
     await flushPromises()
-    expect(fitnessApi.getStrategyFitnessHistory).toHaveBeenCalledWith('fitness-history-1')
-    expect(wrapper.get('[data-testid="fitness-message"]').text()).toContain('已加载历史策略适配性评估')
-
-    await wrapper.get('[data-testid="fitness-history-remove-fitness-history-1"]').trigger('click')
+    await wrapper.get('[data-testid="fitness-advanced-toggle"]').trigger('click')
     await flushPromises()
-    expect(fitnessApi.deleteStrategyFitnessHistory).toHaveBeenCalledWith('fitness-history-1')
-    expect(wrapper.get('[data-testid="fitness-message"]').text()).toContain('历史策略适配性评估已删除')
+
+    expect(fitnessApi.getStrategyFitnessHistory).toHaveBeenCalledWith('fitness-history-1')
+    const value = (testid: string): string =>
+      (wrapper.get(`[data-testid="${testid}"]`).element as HTMLInputElement | HTMLSelectElement).value
+    expect(value('fitness-universe')).toBe('sz')
+    expect(value('fitness-ranking-value')).toBe('indicator_three.varo6')
+    expect(value('fitness-rank-order')).toBe('asc')
+    expect(value('fitness-date-mode')).toBe('custom')
+    expect(value('fitness-start')).toBe('2023-01-01')
+    expect(value('fitness-end')).toBe('2023-12-31')
+    expect(value('fitness-stop-loss')).toBe('12')
+    expect(value('fitness-take-profit')).toBe('25')
+    expect(value('fitness-train-ratio')).toBe('70')
+    expect(value('fitness-validation-ratio')).toBe('15')
+    expect(value('fitness-min-trades')).toBe('9')
+    expect(value('fitness-max-drawdown')).toBe('40')
+    expect(value('fitness-initial-cash')).toBe('500000')
+    expect(value('fitness-commission')).toBe('0.0005')
+    expect(value('fitness-min-commission')).toBe('1')
+    expect(value('fitness-stamp-tax')).toBe('0.001')
+    expect(value('fitness-slippage')).toBe('0.02')
+    expect(value('fitness-execution')).toBe('next_close')
+    expect(wrapper.get('[data-testid="fitness-message"]').text()).toContain('已还原历史策略适配性评估')
+    expect(wrapper.get('[data-testid="fitness-message"]').text()).toContain('请确认后重新运行')
   })
 })

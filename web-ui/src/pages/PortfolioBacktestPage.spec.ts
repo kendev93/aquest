@@ -643,7 +643,8 @@ describe('PortfolioBacktestPage', () => {
     await flushPromises()
 
     expect(portfolioApi.getPortfolioBacktestHistory).toHaveBeenCalledWith('history-1')
-    expect(wrapper.get('[data-testid="portfolio-message"]').text()).toContain('已加载历史组合回测')
+    expect(wrapper.get('[data-testid="portfolio-message"]').text()).toContain('已还原历史组合回测')
+    expect(wrapper.get('[data-testid="portfolio-message"]').text()).toContain('请确认后重新运行')
     expect(wrapper.get('[data-testid="portfolio-results"]').text()).toContain('12.00%')
 
     await wrapper.get('[data-testid="portfolio-scope-board-star"]').setValue(true)

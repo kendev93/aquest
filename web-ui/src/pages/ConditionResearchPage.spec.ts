@@ -831,6 +831,34 @@ describe('ConditionResearchPage', () => {
     }))
   })
 
+  it('restores the configuration handed over by the candidate library', async () => {
+    sessionStorage.setItem('indicator-lab.condition-research.restore', JSON.stringify({
+      universe: 'sh',
+      boards: ['main'],
+      date_mode: 'custom',
+      start_date: '2022-01-01',
+      end_date: '2022-12-31',
+      search_sides: 'sell',
+      min_trades: 44,
+      candidate_limit: 6,
+    }))
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+
+    // 这一步拿的是 storage 里现成的 request，不该再去拉一遍历史。
+    expect(researchApi.getConditionResearchHistory).not.toHaveBeenCalled()
+    expect((wrapper.get('[data-testid="condition-universe"]').element as HTMLSelectElement).value).toBe('sh')
+    expect((wrapper.get('[data-testid="condition-board-main"]').element as HTMLInputElement).checked).toBe(true)
+    expect((wrapper.get('[data-testid="condition-search-sides"]').element as HTMLSelectElement).value).toBe('sell')
+    expect((wrapper.get('[data-testid="condition-min-trades"]').element as HTMLInputElement).value).toBe('44')
+    expect((wrapper.get('[data-testid="condition-date-mode"]').element as HTMLSelectElement).value).toBe('custom')
+    expect((wrapper.get('[data-testid="condition-start"]').element as HTMLInputElement).value).toBe('2022-01-01')
+    expect(wrapper.get('[data-testid="condition-research-message"]').text()).toContain('已从候选库载入')
+    expect(wrapper.get('[data-testid="condition-research-message"]').text()).toContain('请确认后重新运行')
+    // key 必须立刻清掉：刷新页面时还原「还原」会把用户刚改过的东西覆盖回去。
+    expect(sessionStorage.getItem('indicator-lab.condition-research.restore')).toBeNull()
+  })
+
   it('can mine the sell side without setting a base sell rule', async () => {
     const wrapper = mount(ConditionResearchPage)
     await flushPromises()

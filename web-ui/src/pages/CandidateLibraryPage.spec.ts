@@ -2,7 +2,8 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import * as api from '../api/candidateLibrary'
-import { fetchMetadata } from '../api/formulaScreen'
+import * as researchApi from '../api/conditionResearch'
+import { fetchMetadata, FormulaScreenApiError } from '../api/formulaScreen'
 import type { CandidateLibraryItem, CandidatePublishPreview, FormulaScreenMetadata } from '../types'
 import CandidateLibraryPage from './CandidateLibraryPage.vue'
 
@@ -25,6 +26,13 @@ vi.mock('../api/formulaScreen', async () => {
     '../api/formulaScreen',
   )
   return { ...actual, fetchMetadata: vi.fn() }
+})
+
+vi.mock('../api/conditionResearch', async () => {
+  const actual = await vi.importActual<typeof import('../api/conditionResearch')>(
+    '../api/conditionResearch',
+  )
+  return { ...actual, getConditionResearchHistory: vi.fn() }
 })
 
 const metadata: FormulaScreenMetadata = {
@@ -244,5 +252,45 @@ describe('CandidateLibraryPage', () => {
     await flushPromises()
 
     expect(api.fetchCandidates).toHaveBeenLastCalledWith('adopted')
+  })
+
+  it('hands the source study request to the research page', async () => {
+    vi.mocked(api.fetchCandidates).mockResolvedValue([candidate()])
+    vi.mocked(researchApi.getConditionResearchHistory).mockResolvedValue({
+      history_id: 'study-1-aaaaaaaa',
+      request: { horizon: 3, holdout_ratio: 0.2 },
+    } as never)
+
+    const navigated: string[] = []
+    const original = window.location
+    Object.defineProperty(window, 'location', {
+      configurable: true,
+      value: { set href(value: string) { navigated.push(value) }, get href() { return '' } },
+    })
+    const wrapper = mount(CandidateLibraryPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="candidate-restore-c1"]').trigger('click')
+    await flushPromises()
+    Object.defineProperty(window, 'location', { configurable: true, value: original })
+
+    expect(researchApi.getConditionResearchHistory).toHaveBeenCalledWith('study-1-aaaaaaaa')
+    expect(navigated).toEqual(['/condition-research'])
+    // 走 storage 而不是 URL 参数：整份 request 有几百字节，塞进查询串既难看又有长度上限。
+    expect(JSON.parse(sessionStorage.getItem('indicator-lab.condition-research.restore') ?? '{}'))
+      .toEqual({ horizon: 3, holdout_ratio: 0.2 })
+  })
+
+  it('says so instead of doing nothing when the source study was evicted', async () => {
+    vi.mocked(api.fetchCandidates).mockResolvedValue([candidate()])
+    vi.mocked(researchApi.getConditionResearchHistory)
+      .mockRejectedValue(new FormulaScreenApiError('历史记录不存在', 404))
+
+    const wrapper = mount(CandidateLibraryPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="candidate-restore-c1"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="candidate-message"]').text()).toContain('已被淘汰')
+    expect(wrapper.get('[data-testid="candidate-message"]').text()).toContain('无法还原配置')
   })
 })
