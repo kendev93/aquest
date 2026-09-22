@@ -606,15 +606,20 @@ class DuckDbIndicatorCacheStore:
                 raise
         return removed
 
-    def stale_symbols(self, formula_ids: Iterable[str]) -> set[tuple[str, str]]:
+    def stale_symbols(self, formula_versions: Mapping[str, str]) -> set[tuple[str, str]]:
         """Instruments whose cached indicators are missing or out of date.
 
         增量预计算靠它缩小范围：行情更新往往只动一小部分标的，全市场重算会把
-        没变化的标的也重写一遍。判据是「该标的在当前数据版本号下是否每个公式
-        都有缓存」，版本号变化后旧行自然不再匹配。
+        没变化的标的也重写一遍。判据是「该标的在当前数据版本号下，每个公式的
+        当前口径版本是否都有缓存」。
+
+        必须同时比 `data_fingerprint` 和 `formula_version`——读取路径
+        （`read_indicator_cache`）就是两者都比。只比前者的话，bump
+        `cache_version` 而行情没变的那些标的会被判成「已缓存」，增量预计算
+        整批跳过，预热白跑（结果本身不受影响，首次请求仍会按需重算）。
         """
 
-        wanted = {str(formula_id) for formula_id in formula_ids}
+        wanted = {(str(fid), str(version)) for fid, version in formula_versions.items()}
         if not wanted:
             return set()
         revisions = self.data_revisions()
@@ -623,14 +628,17 @@ class DuckDbIndicatorCacheStore:
         try:
             with self._store._connect(read_only=True) as connection:
                 rows = connection.execute(
-                    "SELECT market, code, data_fingerprint, formula_id FROM indicator_cache"
+                    "SELECT market, code, data_fingerprint, formula_id, formula_version "
+                    "FROM indicator_cache"
                 ).fetchall()
         except duckdb.CatalogException:
             return set(revisions)
-        covered: dict[tuple[str, str], dict[str, set[str]]] = {}
-        for market, code, fingerprint, formula_id in rows:
+        covered: dict[tuple[str, str], dict[str, set[tuple[str, str]]]] = {}
+        for market, code, fingerprint, formula_id, formula_version in rows:
             key = (str(market).strip().upper(), str(code).strip())
-            covered.setdefault(key, {}).setdefault(str(fingerprint), set()).add(str(formula_id))
+            covered.setdefault(key, {}).setdefault(str(fingerprint), set()).add(
+                (str(formula_id), str(formula_version))
+            )
         stale: set[tuple[str, str]] = set()
         for key, revision in revisions.items():
             by_fingerprint = covered.get(key)

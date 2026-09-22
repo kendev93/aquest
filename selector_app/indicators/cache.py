@@ -486,14 +486,28 @@ class IndicatorCache:
     ) -> set[tuple[str, str]] | None:
         """Instruments whose cache is missing or outdated, or None if unknown.
 
-        返回 None 表示「无从判断」（没有持久化层或查询失败），调用方此时应当
-        按全量处理，不能把空集合当成「都已缓存」。
+        返回 None 表示「无从判断」（没有持久化层、公式未注册或查询失败），
+        调用方此时应当按全量处理，不能把空集合当成「都已缓存」。
+
+        判据要把公式的「当前口径版本」一起带上：只比数据版本号的话，改了指标
+        口径（bump `cache_version`）但行情未变的标的会被当成已缓存，增量预计算
+        整批跳过。
         """
 
         if self._store is None:
             return None
+        requested = tuple(dict.fromkeys(formula_ids))
+        if not requested:
+            return set()
         try:
-            return self._store.stale_indicator_symbols(tuple(formula_ids))
+            versions = {
+                formula_id: self._registry.formula(formula_id).cache_version
+                for formula_id in requested
+            }
+        except KeyError:
+            return None
+        try:
+            return self._store.stale_indicator_symbols(versions)
         except (AttributeError, RuntimeError, OSError):
             return None
 

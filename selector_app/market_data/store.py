@@ -609,9 +609,9 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
 
     def stale_indicator_symbols(
         self,
-        formula_ids: Iterable[str],
+        formula_versions: Mapping[str, str],
     ) -> set[tuple[str, str]]:
-        return self._indicator_cache.stale_symbols(formula_ids)
+        return self._indicator_cache.stale_symbols(formula_versions)
 
     def read_indicator_caches_batch(
         self,

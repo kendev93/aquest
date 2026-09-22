@@ -769,12 +769,43 @@ def test_sqlite_backend_reports_status_and_stale_symbols(tmp_path: Path) -> None
     assert status["bytes"] > 0
     assert status["latest_computed_at"]
 
-    assert store.stale_indicator_symbols(("indicator_three",)) == set()
-    assert store.stale_indicator_symbols(("technical",)) == {("SH", "600000")}
+    assert (
+        store.stale_indicator_symbols(
+            {"indicator_three": FORMULA_REGISTRY.formula("indicator_three").cache_version}
+        )
+        == set()
+    )
+    assert store.stale_indicator_symbols(
+        {"technical": FORMULA_REGISTRY.formula("technical").cache_version}
+    ) == {("SH", "600000")}
 
     removed = store.clear_indicator_caches()
     assert removed["builtin_entries"] >= 1
     assert store.indicator_cache_status()["total_entries"] == 0
+
+
+def test_stale_symbols_compare_formula_version_not_just_fingerprint(
+    tmp_path: Path,
+    backend: str,
+) -> None:
+    """改了指标口径（bump `cache_version`）而行情没变，标的必须仍算过期。
+
+    读取路径 `read_indicator_cache` 同时比 `formula_version` 和
+    `data_fingerprint`；过期判断只比后者的话，增量预计算会把这类标的一律跳过，
+    改完口径的预热白跑。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb", indicator_cache_backend=backend)
+    store.replace_local_bars("SH", "600000", "stock", _bars(80))
+    IndicatorCache(store).get_or_compute(
+        store.read_bars("SH", "600000"), ("indicator_three",), market="SH", code="600000"
+    )
+
+    current = FORMULA_REGISTRY.formula("indicator_three").cache_version
+    assert store.stale_indicator_symbols({"indicator_three": current}) == set()
+    assert store.stale_indicator_symbols({"indicator_three": f"{current}-next"}) == {
+        ("SH", "600000")
+    }
 
 
 def test_a_sqlite_outage_degrades_to_computing_instead_of_failing(
