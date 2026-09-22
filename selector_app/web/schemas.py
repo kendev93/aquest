@@ -13,6 +13,10 @@ from selector_app.backtest.models import BacktestConfig
 from selector_app.concurrency import MAX_WORKERS
 from selector_app.condition_research.mining import DEFAULT_DUPLICATE_CORRELATION
 from selector_app.condition_research.models import ConditionResearchConfig
+from selector_app.factor_attribution.models import (
+    MIN_GROUP_TRADES,
+    FactorAttributionConfig,
+)
 from selector_app.factor_test.models import (
     DEFAULT_ALPHA,
     DEFAULT_BLOCK_SIZE,
@@ -821,6 +825,36 @@ class FactorTestRequest(BaseModel):
             alpha=self.alpha,
             quantile_count=self.quantile_count,
             limit_stocks=self.limit_stocks,
+        )
+
+
+class FactorAttributionRequest(BaseModel):
+    """Explain one archived backtest: winners vs losers on the entry signal day.
+
+    The source is an existing history id, not a strategy to re-run: re-running
+    would mean a second opinion on what the strategy did, and this report exists
+    precisely to avoid relitigating that.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_history_id: str = Field(default="", max_length=64)
+    value_ids: list[str] | None = Field(default=None, max_length=64)
+    include_custom: bool = True
+    min_group_trades: int = Field(default=MIN_GROUP_TRADES, ge=2, le=10_000)
+    permutations: int = Field(default=DEFAULT_PERMUTATIONS, ge=0, le=5_000)
+    block_size: int = Field(default=DEFAULT_BLOCK_SIZE, ge=1, le=500)
+    alpha: float = Field(default=DEFAULT_ALPHA, gt=0, lt=1)
+
+    def to_config(self) -> FactorAttributionConfig:
+        return FactorAttributionConfig(
+            source_history_id=self.source_history_id,
+            value_ids=tuple(self.value_ids or ()),
+            include_custom=self.include_custom,
+            min_group_trades=self.min_group_trades,
+            permutations=self.permutations,
+            block_size_days=self.block_size,
+            alpha=self.alpha,
         )
 
 

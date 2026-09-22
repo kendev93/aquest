@@ -21,6 +21,7 @@ from selector_app.adapters.market_data_sync import MarketDataSync
 from selector_app.backtest.service import BacktestService
 from selector_app.candidate_library.service import CandidateLibraryService
 from selector_app.condition_research.service import ConditionResearchService
+from selector_app.factor_attribution.service import FactorAttributionService
 from selector_app.factor_test.service import FactorTestService
 from selector_app.history_compare.service import HistoryCompareService
 from selector_app.indicators.cache import IndicatorCache
@@ -92,6 +93,7 @@ def create_app(
     strategy_fitness_service: StrategyFitnessService | object | None = None,
     swing_research_service: SwingResearchService | object | None = None,
     factor_test_service: FactorTestService | object | None = None,
+    factor_attribution_service: FactorAttributionService | object | None = None,
     history_compare_service: HistoryCompareService | object | None = None,
     instrument_lab_service: InstrumentLabService | object | None = None,
     screen_preset_service: ScreenPresetService | object | None = None,
@@ -315,6 +317,10 @@ def create_app(
     app.state.factor_test_service = factor_test_service or FactorTestService(
         adapter=cast(BatchMarketDataAdapter, selected_adapter),
     )
+    app.state.factor_attribution_service = factor_attribution_service or FactorAttributionService(
+        adapter=cast(BatchMarketDataAdapter, selected_adapter),
+        store=selected_store,
+    )
     app.state.history_compare_service = history_compare_service or HistoryCompareService(
         selected_store,
     )
@@ -419,6 +425,7 @@ def create_app(
     from .routers.candidate_library import router as candidate_library_router
     from .routers.condition_research import router as condition_research_router
     from .routers.data_transfer import router as data_transfer_router
+    from .routers.factor_attribution import router as factor_attribution_router
     from .routers.factor_test import router as factor_test_router
     from .routers.history_compare import router as history_compare_router
     from .routers.instrument_lab import router as instrument_lab_router
@@ -439,6 +446,7 @@ def create_app(
     app.include_router(data_transfer_router, prefix="/api/v1")
     app.include_router(condition_research_router, prefix="/api/v1")
     app.include_router(factor_test_router, prefix="/api/v1")
+    app.include_router(factor_attribution_router, prefix="/api/v1")
     app.include_router(history_compare_router, prefix="/api/v1")
     app.include_router(instrument_lab_router, prefix="/api/v1")
     app.include_router(portfolio_backtest_router, prefix="/api/v1")

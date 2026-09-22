@@ -55,6 +55,7 @@ TYPE_LABELS: dict[str, str] = {
     "condition_research": "条件研究",
     "swing_research": "波段研究",
     "factor_test": "因子检验",
+    "factor_attribution": "因子归因",
 }
 
 # 统一指标行：行顺序即界面顺序。跨类型时这些行**不是同一个口径**，

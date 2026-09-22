@@ -33,6 +33,7 @@ BacktestHistoryType = Literal[
     "condition_research",
     "swing_research",
     "factor_test",
+    "factor_attribution",
 ]
 
 
