@@ -1,0 +1,87 @@
+"""Online market-data synchronization endpoints.
+
+按职责拆成了几个子模块，``app.py`` 仍然只从本包取 ``router``：
+
+- ``indicator_cache`` 指标缓存的查看与清空
+- ``precompute``    指标预热任务 + 写路径共用的预热步骤
+- ``status``        capabilities / store 两个只读描述接口
+- ``jobs``          行情任务的轮询与取消
+- ``sync``          在线同步、回填及兼容别名
+- ``maintenance``   删除已导入的行情
+- ``local_import``  本地 vipdoc 导入
+- ``local_data``    本地 vipdoc 的只读预览
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter
+
+from . import (
+    indicator_cache,
+    jobs,
+    local_data,
+    local_import,
+    maintenance,
+    precompute,
+    status,
+    sync,
+)
+from ._shared import LocalMarketDataServiceLike, MarketSyncService
+from .indicator_cache import clear_indicator_cache, indicator_cache_status
+from .jobs import (
+    active_market_data_jobs,
+    cancel_market_data_job,
+    market_data_job_status,
+)
+from .local_data import local_instruments, local_market_bars
+from .local_import import create_local_import_job, detect_local_vipdoc
+from .maintenance import delete_market_bars
+from .precompute import create_indicator_precompute_job
+from .status import market_data_capabilities, market_data_store_status
+from .sync import (
+    create_eastmoney_backfill_job,
+    create_online_sync_job,
+    create_sync_job,
+    sync_job_status,
+)
+
+router = APIRouter(prefix="/market-data")
+
+# 顺序沿用了拆分前的文件内顺序：/jobs/active 必须排在 /jobs/{job_id} 之前，
+# 否则 "active" 会被当成 job_id 命中后面那条路径。
+for _sub_router in (
+    indicator_cache.router,
+    status.router,
+    precompute.router,
+    jobs.router,
+    sync.router,
+    maintenance.router,
+    local_import.router,
+    local_data.router,
+):
+    router.include_router(_sub_router)
+
+del _sub_router
+
+__all__ = [
+    "LocalMarketDataServiceLike",
+    "MarketSyncService",
+    "active_market_data_jobs",
+    "cancel_market_data_job",
+    "clear_indicator_cache",
+    "create_eastmoney_backfill_job",
+    "create_indicator_precompute_job",
+    "create_local_import_job",
+    "create_online_sync_job",
+    "create_sync_job",
+    "delete_market_bars",
+    "detect_local_vipdoc",
+    "indicator_cache_status",
+    "local_instruments",
+    "local_market_bars",
+    "market_data_capabilities",
+    "market_data_job_status",
+    "market_data_store_status",
+    "router",
+    "sync_job_status",
+]
