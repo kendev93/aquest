@@ -7,6 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from selector_app.market_data.health import REPAIR_MAX_CODES, CheckKey
 from selector_app.market_data.models import InstrumentBoard, InstrumentType
 
 from ._shared import validate_instrument_scope
@@ -69,4 +70,32 @@ class MarketSyncRequest(BaseModel):
             raise ValueError("是否全量同步历史行情必须是布尔值")
         if not isinstance(self.precompute_only_changed, bool):
             raise ValueError("是否只补算变化标的必须是布尔值")
+        return self
+
+
+class HealthRepairRequest(BaseModel):
+    """Re-download every bar for the instruments flagged by the health check.
+
+    破坏性比删除更含蓄但同样不可逆：**先删掉这些标的的全部历史，再全量重下**。
+    在线源已经没有的标的（退市）删了就补不回来，所以和 ``BarDeleteRequest``
+    一样要求显式 ``confirm``，并且一次最多修 ``REPAIR_MAX_CODES`` 只。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: 留空 = 修所有可修复的检查项（见 health.CHECK_REPAIRABLE）。
+    checks: list[CheckKey] | None = Field(default=None, max_length=6)
+    #: 直接指定标的（六位代码）时跳过检查项扫描。
+    codes: list[str] | None = Field(default=None, max_length=REPAIR_MAX_CODES)
+    limit: int = Field(default=REPAIR_MAX_CODES, ge=1, le=REPAIR_MAX_CODES)
+    confirm: bool = False
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> HealthRepairRequest:
+        if not self.confirm:
+            raise ValueError(
+                "修复会先删除这些标的的全部历史行情再重新下载，请传 confirm=true 明确确认"
+            )
+        if self.codes is not None and any(not str(code).strip().isdigit() for code in self.codes):
+            raise ValueError("标的代码只能是数字")
         return self

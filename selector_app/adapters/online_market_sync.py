@@ -1010,8 +1010,11 @@ class OnlineMarketSync:
             selection = _selection_from_stored(stored, instrument_types=wanted)
         else:
             selection = self._selection_from_online_catalogs(config, wanted)
+        selection = _restrict_to_codes(selection, config.codes)
         selection = replace(selection, fingerprint=_fingerprint_targets(selection.targets))
-        if selection.fingerprint is not None:
+        # 只重下一部分标的时不要覆盖全量指纹：下次常规同步会误判"标的列表变了"，
+        # 从而白跑一次在线证券列表发现。
+        if selection.fingerprint is not None and not config.codes:
             self._store.set_meta("instrument_list_fingerprint", selection.fingerprint)
         names: dict[tuple[str, str], str | None] = {
             (market, code): name
@@ -1561,6 +1564,23 @@ def _online_supported_types(config: MarketSyncConfig) -> tuple[InstrumentType, .
         instrument_type
         for instrument_type, boards in _ONLINE_SUPPORTED_TYPES
         if _scope_can_include(config, instrument_type=instrument_type, boards=boards)
+    )
+
+
+def _restrict_to_codes(
+    selection: _TargetSelection,
+    codes: tuple[str, ...],
+) -> _TargetSelection:
+    """Keep only the requested codes, counting the rest as filtered out."""
+
+    if not codes:
+        return selection
+    wanted = set(codes)
+    kept = [target for target in selection.targets if target[1] in wanted]
+    return replace(
+        selection,
+        targets=kept,
+        filtered_instruments=selection.filtered_instruments + (len(selection.targets) - len(kept)),
     )
 
 

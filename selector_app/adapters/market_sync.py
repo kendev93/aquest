@@ -41,6 +41,9 @@ class MarketSyncConfig:
     sync_workers: int = 8
     provider: MarketDataProvider = "eastmoney"
     full_history: bool = False
+    # 只重下这几只（六位代码，不带市场前缀）。留空表示按 universe / boards / types 取全量。
+    # 健康检查的「一键修复」用它：先删掉问题标的的全部历史，再全量重下覆盖。
+    codes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.universe not in {"all", "sh", "sz"}:
@@ -59,6 +62,10 @@ class MarketSyncConfig:
             raise ValueError("行情名称刷新开关必须是布尔值")
         if isinstance(self.sync_workers, bool) or not 1 <= self.sync_workers <= MAX_WORKERS:
             raise ValueError(f"行情同步并发数必须在 1 到 {MAX_WORKERS} 之间")
+        normalized_codes = tuple(dict.fromkeys(item.strip() for item in self.codes if item.strip()))
+        if any(not item.isdigit() for item in normalized_codes):
+            raise ValueError("重下的标的代码只能是数字")
+        object.__setattr__(self, "codes", normalized_codes)
         scope = InstrumentScope.from_values(
             universe=self.universe,
             instrument_types=self.instrument_types,

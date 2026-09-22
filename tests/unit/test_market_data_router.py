@@ -29,6 +29,8 @@ EXPECTED_ROUTES = {
     "GET /api/v1/market-data/sync/jobs/{job_id}",
     "POST /api/v1/market-data/backfill",
     "POST /api/v1/market-data/bars/delete",
+    "POST /api/v1/market-data/health/check",
+    "POST /api/v1/market-data/health/repair",
     "POST /api/v1/market-data/indicator-cache/precompute",
     "POST /api/v1/market-data/jobs/{job_id}/cancel",
     "POST /api/v1/market-data/local-import",

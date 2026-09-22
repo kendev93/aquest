@@ -26,7 +26,7 @@ from .library import (
     ScreenPresetCreateRequest,
     ScreenPresetUpdateRequest,
 )
-from .market import BarDeleteRequest, MarketSyncRequest
+from .market import BarDeleteRequest, HealthRepairRequest, MarketSyncRequest
 from .portfolio import PortfolioBacktestRequest
 from .screening import (
     CustomFormulaParseRequest,
@@ -57,6 +57,7 @@ __all__ = [
     "FactorAttributionRequest",
     "FactorTestRequest",
     "FormulaScreenRequest",
+    "HealthRepairRequest",
     "HistoryCompareRequest",
     "InstrumentLabCheckRequest",
     "InstrumentLabCondition",

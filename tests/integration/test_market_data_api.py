@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import date
 from pathlib import Path
 
@@ -7,6 +8,7 @@ import numpy as np
 import pandas as pd
 from fastapi.testclient import TestClient
 
+from selector_app.adapters.market_sync import MarketSyncConfig, MarketSyncReport
 from selector_app.indicators.cache import IndicatorCache
 from selector_app.market_data.service import (
     LocalInstrument,
@@ -184,3 +186,123 @@ def test_local_import_endpoint_is_removed() -> None:
         )
 
     assert response.status_code == 404
+
+
+def _wait_for_market_job(client: TestClient, job_id: str) -> dict[str, object]:
+    deadline = time.monotonic() + 30.0
+    while time.monotonic() < deadline:
+        response = client.get(f"/api/v1/market-data/jobs/{job_id}")
+        assert response.status_code == 200
+        state = response.json()["data"]
+        if state["status"] in {"completed", "failed", "cancelled"}:
+            return state
+        time.sleep(0.05)
+    raise AssertionError(f"行情任务 {job_id} 没有结束")
+
+
+class FakeMarketSyncService:
+    """记录修复时的同步调用，用来钉住「先删后下」这个顺序。"""
+
+    def __init__(self, store: DuckDbMarketDataStore) -> None:
+        self._store = store
+        self.configs: list[MarketSyncConfig] = []
+        self.bars_when_called: list[int] = []
+
+    def sync(
+        self,
+        config: MarketSyncConfig,
+        progress_callback: object = None,
+        *,
+        detail_callback: object = None,
+        abort_check: object = None,
+    ) -> MarketSyncReport:
+        self.configs.append(config)
+        self.bars_when_called.append(self._store.status().bar_count)
+        codes = len(config.codes)
+        return MarketSyncReport(
+            total_candidates=codes,
+            processed=codes,
+            updated_files=codes,
+            unchanged_files=0,
+            written_bars=60,
+            errors=0,
+            failure_reasons={},
+        )
+
+
+def test_health_check_job_returns_the_scan(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars())
+    frame = _bars()
+    store.replace_local_bars("SZ", "000001", "stock", frame.drop(index=[10, 11, 12]))
+
+    with TestClient(create_app(market_data_store=store, auto_sync_enabled=False)) as client:
+        response = client.post("/api/v1/market-data/health/check")
+        assert response.status_code == 202
+        state = _wait_for_market_job(client, response.json()["data"]["job_id"])
+
+    assert state["status"] == "completed"
+    result = state["result"]
+    assert result["instrument_count"] == 2
+    gap = next(item for item in result["checks"] if item["key"] == "gap")
+    assert gap["severity"] == "error"
+    assert gap["occurrences"] == 3
+
+
+def test_health_repair_requires_confirmation() -> None:
+    """修复会先删掉全部历史，没有 confirm 的请求必须被挡下。"""
+
+    with TestClient(create_app(auto_sync_enabled=False)) as client:
+        response = client.post(
+            "/api/v1/market-data/health/repair",
+            json={"checks": ["gap"]},
+        )
+
+    assert response.status_code == 422
+
+
+def test_health_repair_deletes_before_redownloading(tmp_path: Path) -> None:
+    """顺序不能反：不先删，在线行写不进本地行的位置，全量同步也覆盖不到中间那段。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars())
+    store.replace_local_bars("SZ", "000001", "stock", _bars().drop(index=[10, 11, 12]))
+    service = FakeMarketSyncService(store)
+    app = create_app(market_data_store=store, market_sync=service, auto_sync_enabled=False)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/market-data/health/repair",
+            json={"checks": ["gap"], "confirm": True},
+        )
+        assert response.status_code == 202
+        state = _wait_for_market_job(client, response.json()["data"]["job_id"])
+
+    assert state["status"] == "completed"
+    result = state["result"]
+    assert result["requested_codes"] == 1
+    assert result["deleted_bars"] == 77
+    assert result["written_bars"] == 60
+    # 假的同步什么都没写回来，所以这只票必须被点名——真实场景下就是"在线已无数据"。
+    assert result["empty_after_repair"] == ["000001"]
+    assert service.configs[0].codes == ("000001",)
+    assert service.configs[0].full_history is True
+    # 调用同步时 000001 的历史已经被删掉了，只剩 600000 的 80 根。
+    assert service.bars_when_called == [80]
+
+
+def test_health_repair_without_candidates_does_not_call_the_provider(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars())
+    service = FakeMarketSyncService(store)
+    with TestClient(
+        create_app(market_data_store=store, market_sync=service, auto_sync_enabled=False)
+    ) as client:
+        response = client.post(
+            "/api/v1/market-data/health/repair",
+            json={"checks": ["gap"], "confirm": True},
+        )
+        state = _wait_for_market_job(client, response.json()["data"]["job_id"])
+
+    assert state["status"] == "completed"
+    assert state["result"]["requested_codes"] == 0
+    assert service.configs == []

@@ -8,6 +8,7 @@
 - ``jobs``          行情任务的轮询与取消
 - ``sync``          在线同步、回填及兼容别名
 - ``maintenance``   删除已导入的行情
+- ``health``        行情体检报告与一键修复
 - ``local_import``  本地 vipdoc 导入
 - ``local_data``    本地 vipdoc 的只读预览
 """
@@ -17,6 +18,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from . import (
+    health,
     indicator_cache,
     jobs,
     local_data,
@@ -27,6 +29,7 @@ from . import (
     sync,
 )
 from ._shared import LocalMarketDataServiceLike, MarketSyncService
+from .health import create_health_check_job, create_health_repair_job
 from .indicator_cache import clear_indicator_cache, indicator_cache_status
 from .jobs import (
     active_market_data_jobs,
@@ -56,6 +59,7 @@ for _sub_router in (
     jobs.router,
     sync.router,
     maintenance.router,
+    health.router,
     local_import.router,
     local_data.router,
 ):
@@ -70,6 +74,8 @@ __all__ = [
     "cancel_market_data_job",
     "clear_indicator_cache",
     "create_eastmoney_backfill_job",
+    "create_health_check_job",
+    "create_health_repair_job",
     "create_indicator_precompute_job",
     "create_local_import_job",
     "create_online_sync_job",

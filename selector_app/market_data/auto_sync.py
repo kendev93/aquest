@@ -36,6 +36,10 @@ from selector_app.screening.jobs import (
 logger = logging.getLogger(__name__)
 
 AUTO_SYNC_DESCRIPTION = "自动行情同步"
+#: 健康检查与修复也走行情任务通道：它们读写同一个库，且都能跑十几秒以上，
+#: 必须能被 ``/market-data/jobs/{job_id}`` 查到、能被取消、能被「已有行情任务」闸门挡住。
+HEALTH_CHECK_DESCRIPTION = "行情健康检查"
+HEALTH_REPAIR_DESCRIPTION = "行情修复"
 MARKET_SYNC_EXCLUSIVE_GROUP = "market_data_sync"
 MARKET_SYNC_JOB_DESCRIPTIONS = frozenset(
     {
@@ -45,6 +49,8 @@ MARKET_SYNC_JOB_DESCRIPTIONS = frozenset(
         "全市场行情同步",
         "历史全量回填",
         AUTO_SYNC_DESCRIPTION,
+        HEALTH_CHECK_DESCRIPTION,
+        HEALTH_REPAIR_DESCRIPTION,
     }
 )
 ACTIVE_DATA_JOB_DESCRIPTIONS = frozenset(
@@ -286,6 +292,8 @@ def _supports_abort_check(method: object) -> bool:
 
 __all__ = [
     "AUTO_SYNC_DESCRIPTION",
+    "HEALTH_CHECK_DESCRIPTION",
+    "HEALTH_REPAIR_DESCRIPTION",
     "MARKET_SYNC_JOB_DESCRIPTIONS",
     "MARKET_SYNC_EXCLUSIVE_GROUP",
     "DEFAULT_AUTO_SYNC_INTERVAL_SECONDS",
