@@ -653,6 +653,51 @@ class DuckDbBarsStore:
         with self._store.read_session() as connection:
             return self._store._frame_from_query(connection.execute(query, parameters).df())
 
+    def read_close_matrix(
+        self,
+        instruments: Iterable[InstrumentRef | StockRef] | None = None,
+        *,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> pd.DataFrame:
+        """Read only close prices, shaped for basket-level curves.
+
+        一篮子的等权曲线只用得到 close。全市场对照要读 5000+ 只票，把
+        open/high/low/volume 一起拖出来会让传输量翻好几倍，而这些列一个都用不上，
+        所以单独开一个口子。
+        """
+
+        conditions = ["bars.bar_status = 'completed'"]
+        parameters: list[object] = []
+        requested = None if instruments is None else list(instruments)
+        symbols = requested or []
+        if requested is not None and not symbols:
+            return self._store._frame_from_query(pd.DataFrame())
+        if start_date is not None:
+            conditions.append("bars.trade_date >= ?")
+            parameters.append(start_date)
+        if end_date is not None:
+            conditions.append("bars.trade_date <= ?")
+            parameters.append(end_date)
+        join_clause = ""
+        if symbols:
+            symbol_frame = pd.DataFrame(
+                [{"market": item.market, "code": item.code} for item in symbols]
+            ).drop_duplicates()
+            join_clause = (
+                " INNER JOIN _requested_symbols AS requested"
+                " ON bars.market = requested.market AND bars.code = requested.code"
+            )
+        query = (
+            "SELECT bars.market, bars.code, bars.trade_date, bars.close "
+            f"FROM daily_bars AS bars{join_clause} WHERE {' AND '.join(conditions)} "
+            "ORDER BY bars.trade_date"
+        )
+        with self._store._connect(read_only=True) as connection:
+            if symbols:
+                connection.register("_requested_symbols", symbol_frame)
+            return self._store._frame_from_query(connection.execute(query, parameters).df())
+
     def has_provisional_bars(self, market: str, code: str) -> bool:
         """Return whether a symbol still needs its intraday bar finalized."""
 

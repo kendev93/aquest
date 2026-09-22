@@ -603,6 +603,20 @@ class _DuckDbStoreBase:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS stock_groups (
+                    group_id VARCHAR PRIMARY KEY,
+                    name VARCHAR NOT NULL,
+                    note VARCHAR NOT NULL DEFAULT '',
+                    source VARCHAR NOT NULL DEFAULT 'manual',
+                    source_history_id VARCHAR,
+                    created_at TIMESTAMP NOT NULL,
+                    updated_at TIMESTAMP NOT NULL,
+                    items_json VARCHAR NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
                 INSERT INTO data_meta (key, value, updated_at)
                 VALUES ('schema_version', ?, ?)
                 ON CONFLICT (key) DO UPDATE SET

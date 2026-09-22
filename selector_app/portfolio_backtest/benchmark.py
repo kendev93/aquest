@@ -104,7 +104,7 @@ def equal_weight_buy_hold(
         instrument_count=count,
         dates=tuple(int(value) for value in grid),
         totals=tuple(float(value) for value in totals),
-        performance=_benchmark_performance(totals),
+        performance=curve_performance(totals),
     )
 
 
@@ -138,7 +138,13 @@ def _price_ratio(context: _StockSeries, grid: np.ndarray) -> np.ndarray | None:
     return np.asarray(series[indices], dtype=float) / first
 
 
-def _benchmark_performance(totals: np.ndarray) -> Mapping[str, float | None]:
+def curve_performance(totals: np.ndarray) -> Mapping[str, float | None]:
+    """绩效口径的唯一出处。
+
+    股票组的观察曲线走的也是等权买入持有，必须和这里的数字能直接对上——两边各
+    算一套就会出现「同一只票在两页上最大回撤不一样」，而这种差异没人会去查。
+    """
+
     frame = pd.DataFrame({"total": np.asarray(totals, dtype=float)})
     metrics = PerformanceAnalyzer(frame, _EMPTY_TRADES).compute()
     return {key: _finite_number(metrics.get(key)) for key in _BENCHMARK_METRIC_KEYS}
@@ -149,4 +155,4 @@ def _finite_number(value: object) -> float | None:
     return number if np.isfinite(number) else None
 
 
-__all__ = ["BENCHMARK_LABEL", "BenchmarkCurve", "equal_weight_buy_hold"]
+__all__ = ["BENCHMARK_LABEL", "BenchmarkCurve", "curve_performance", "equal_weight_buy_hold"]

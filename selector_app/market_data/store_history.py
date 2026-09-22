@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence, Sized
 from datetime import date, datetime, timedelta, timezone
 from typing import cast
 
@@ -33,6 +33,7 @@ ASSET_TABLES: tuple[str, ...] = (
     "strategy_discovery_replay_history",
     "screen_presets",
     "candidate_library",
+    "stock_groups",
 )
 SAVED_STRATEGY_TABLE = "saved_strategies"
 STRATEGY_TRACKING_TABLE = "strategy_tracking"
@@ -73,6 +74,18 @@ _PRESET_COLUMNS = "preset_id, name, note, created_at, updated_at, payload_json"
 _CANDIDATE_COLUMNS = (
     "candidate_id, source, source_history_id, source_candidate_id, side, label, "
     "condition_json, evidence_json, status, note, published_strategy_id, created_at, updated_at"
+)
+STOCK_GROUP_TABLE = "stock_groups"
+STOCK_GROUP_NAME_MAX_LENGTH = 60
+STOCK_GROUP_NOTE_MAX_LENGTH = 300
+#: 一组最多放多少只。和组合回测 codes 的上限（200）取同一个数：组最终就是要拿去
+#: 观察表现的，超过这个数后面那步会直接被拒，不如在存的时候就拦住。
+STOCK_GROUP_MAX_ITEMS = 200
+#: 来源。手动勾的和从选股结果整批存的用同一个结构，来源只用于展示「这组是怎么来的」。
+STOCK_GROUP_SOURCE_MANUAL = "manual"
+STOCK_GROUP_SOURCE_SCREEN = "screen"
+_STOCK_GROUP_COLUMNS = (
+    "group_id, name, note, source, source_history_id, created_at, updated_at, items_json"
 )
 
 
@@ -436,6 +449,44 @@ def _decode_candidate_row(row: tuple[object, ...]) -> dict[str, object]:
         "published_strategy_id": None if published is None else str(published),
         "created_at": str(row[11]),
         "updated_at": str(row[12]),
+    }
+
+
+def _decode_stock_group_row(row: tuple[object, ...]) -> dict[str, object]:
+    """Decode one ``stock_groups`` row into an API-ready dict."""
+
+    try:
+        items = json.loads(str(row[7]))
+    except json.JSONDecodeError as exc:
+        raise MarketDataStoreError("分组内容损坏") from exc
+    if not isinstance(items, list):
+        raise MarketDataStoreError("分组内容无效")
+    source_history = row[4]
+    return {
+        "group_id": str(row[0]),
+        "name": str(row[1]),
+        "note": str(row[2]),
+        "source": str(row[3]),
+        "source_history_id": None if source_history is None else str(source_history),
+        "created_at": str(row[5]),
+        "updated_at": str(row[6]),
+        "items": items,
+    }
+
+
+def _stock_group_record(record: Mapping[str, object]) -> dict[str, object]:
+    """Render an in-memory group record (datetimes) into its API shape."""
+
+    items = cast(Sequence[Mapping[str, object]], record["items"])
+    return {
+        "group_id": str(record["group_id"]),
+        "name": str(record["name"]),
+        "note": str(record["note"]),
+        "source": str(record["source"]),
+        "source_history_id": record.get("source_history_id"),
+        "created_at": str(record["created_at"]),
+        "updated_at": str(record["updated_at"]),
+        "items": [dict(item) for item in items],
     }
 
 
@@ -1908,6 +1959,215 @@ class DuckDbHistoryStore:
         with _WRITE_LOCK, self._store._connect() as connection:
             deleted = connection.execute(
                 f"DELETE FROM {SCREEN_PRESET_TABLE} WHERE preset_id = ? RETURNING preset_id",
+                [normalized_id],
+            ).fetchone()
+        return deleted is not None
+
+    def stock_group_name_taken(self, name: str, *, exclude_group_id: str = "") -> bool:
+        """Whether a group name is already used by another group."""
+
+        normalized = name.strip()
+        if not normalized:
+            return False
+        with self._store._connect(read_only=True) as connection:
+            row = connection.execute(
+                f"SELECT 1 FROM {STOCK_GROUP_TABLE} WHERE name = ? AND group_id <> ? LIMIT 1",
+                [normalized, exclude_group_id.strip()],
+            ).fetchone()
+        return row is not None
+
+    def save_stock_group(
+        self,
+        group_id: str,
+        *,
+        name: str,
+        items: Sequence[Mapping[str, object]],
+        note: str = "",
+        source: str = STOCK_GROUP_SOURCE_MANUAL,
+        source_history_id: str | None = None,
+        created_at: datetime | str | None = None,
+    ) -> dict[str, object]:
+        """Persist one named basket of instruments.
+
+        成员整份存 JSON 而不是拆一张子表：一组的量级是几十只，读写都是整取整存，
+        拆表只会多一次 join 且没法保证顺序。顺序有意义——用户勾选的先后就是他想
+        看到的样子，不能让 SQL 的返回顺序去决定。
+        """
+
+        self._store._require_writer()
+        normalized_id = group_id.strip()
+        if not normalized_id:
+            raise ValueError("分组 ID 不能为空")
+        normalized_name = name.strip()
+        if not normalized_name:
+            raise ValueError("分组名称不能为空")
+        if len(normalized_name) > STOCK_GROUP_NAME_MAX_LENGTH:
+            raise ValueError(f"分组名称不能超过 {STOCK_GROUP_NAME_MAX_LENGTH} 个字符")
+        normalized_note = note.strip()
+        if len(normalized_note) > STOCK_GROUP_NOTE_MAX_LENGTH:
+            raise ValueError(f"分组备注不能超过 {STOCK_GROUP_NOTE_MAX_LENGTH} 个字符")
+        normalized_items = [dict(item) for item in items]
+        if not normalized_items:
+            raise ValueError("分组至少要包含一只标的")
+        if len(normalized_items) > STOCK_GROUP_MAX_ITEMS:
+            raise ValueError(f"一组最多只能放 {STOCK_GROUP_MAX_ITEMS} 只标的")
+        if self.stock_group_name_taken(normalized_name, exclude_group_id=normalized_id):
+            raise ValueError(f"已存在同名分组: {normalized_name}")
+        created = _normalize_timestamp(created_at, _now())
+        record = {
+            "group_id": normalized_id,
+            "name": normalized_name,
+            "note": normalized_note,
+            "source": source,
+            "source_history_id": source_history_id,
+            "created_at": created,
+            "updated_at": created,
+            "items": normalized_items,
+        }
+        with _WRITE_LOCK, self._store._connect() as connection:
+            connection.execute("BEGIN")
+            try:
+                connection.execute(
+                    f"""
+                    INSERT INTO {STOCK_GROUP_TABLE} (
+                        group_id, name, note, source, source_history_id,
+                        created_at, updated_at, items_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (group_id) DO UPDATE SET
+                        name = excluded.name,
+                        note = excluded.note,
+                        updated_at = excluded.updated_at,
+                        items_json = excluded.items_json
+                    """,
+                    [
+                        normalized_id,
+                        normalized_name,
+                        normalized_note,
+                        source,
+                        source_history_id,
+                        created,
+                        created,
+                        json.dumps(normalized_items, ensure_ascii=False, separators=(",", ":")),
+                    ],
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        return _stock_group_record(record)
+
+    def list_stock_groups(self) -> list[dict[str, object]]:
+        """Return every group, most recently updated first, without members."""
+
+        with self._store._connect(read_only=True) as connection:
+            rows = connection.execute(
+                f"""
+                SELECT {_STOCK_GROUP_COLUMNS}
+                FROM {STOCK_GROUP_TABLE}
+                ORDER BY updated_at DESC, group_id DESC
+                """
+            ).fetchall()
+        records: list[dict[str, object]] = []
+        for row in rows:
+            decoded = _decode_stock_group_row(row)
+            decoded["item_count"] = len(cast(Sized, decoded["items"]))
+            decoded.pop("items", None)
+            records.append(decoded)
+        return records
+
+    def read_stock_group(self, group_id: str) -> dict[str, object] | None:
+        """Read one group including its members."""
+
+        with self._store._connect(read_only=True) as connection:
+            row = connection.execute(
+                f"SELECT {_STOCK_GROUP_COLUMNS} FROM {STOCK_GROUP_TABLE} WHERE group_id = ?",
+                [str(group_id).strip()],
+            ).fetchone()
+        if row is None:
+            return None
+        return _decode_stock_group_row(row)
+
+    def update_stock_group(
+        self,
+        group_id: str,
+        *,
+        name: str | None = None,
+        note: str | None = None,
+        items: Sequence[Mapping[str, object]] | None = None,
+    ) -> dict[str, object] | None:
+        """Rename, re-note or replace the members of one group.
+
+        改名不改 created_at：这组是什么时候建的属于它自己的历史，不该被最后一次
+        编辑抹掉。成员是整份替换，不提供「增量加一只」——增量会让「是谁加的、什么
+        时候加的」变成一笔糊涂账，而成员来源本来就该在保存时一次性确定。
+        """
+
+        self._store._require_writer()
+        normalized_id = group_id.strip()
+        if not normalized_id:
+            return None
+        if name is None and note is None and items is None:
+            return self.read_stock_group(normalized_id)
+        normalized_name = name.strip() if isinstance(name, str) else None
+        if normalized_name is not None:
+            if not normalized_name:
+                raise ValueError("分组名称不能为空")
+            if len(normalized_name) > STOCK_GROUP_NAME_MAX_LENGTH:
+                raise ValueError(f"分组名称不能超过 {STOCK_GROUP_NAME_MAX_LENGTH} 个字符")
+            if self.stock_group_name_taken(normalized_name, exclude_group_id=normalized_id):
+                raise ValueError(f"已存在同名分组: {normalized_name}")
+        normalized_note = note.strip() if isinstance(note, str) else None
+        if normalized_note is not None and len(normalized_note) > STOCK_GROUP_NOTE_MAX_LENGTH:
+            raise ValueError(f"分组备注不能超过 {STOCK_GROUP_NOTE_MAX_LENGTH} 个字符")
+        normalized_items: list[dict[str, object]] | None = None
+        if items is not None:
+            normalized_items = [dict(item) for item in items]
+            if not normalized_items:
+                raise ValueError("分组至少要包含一只标的")
+            if len(normalized_items) > STOCK_GROUP_MAX_ITEMS:
+                raise ValueError(f"一组最多只能放 {STOCK_GROUP_MAX_ITEMS} 只标的")
+        assignments: list[str] = []
+        parameters: list[object] = []
+        if normalized_name is not None:
+            assignments.append("name = ?")
+            parameters.append(normalized_name)
+        if normalized_note is not None:
+            assignments.append("note = ?")
+            parameters.append(normalized_note)
+        if normalized_items is not None:
+            assignments.append("items_json = ?")
+            parameters.append(
+                json.dumps(normalized_items, ensure_ascii=False, separators=(",", ":"))
+            )
+        assignments.append("updated_at = ?")
+        parameters.append(_now())
+        parameters.append(normalized_id)
+        with _WRITE_LOCK, self._store._connect() as connection:
+            connection.execute("BEGIN")
+            try:
+                updated = connection.execute(
+                    f"UPDATE {STOCK_GROUP_TABLE} SET {', '.join(assignments)} "
+                    "WHERE group_id = ? RETURNING group_id",
+                    parameters,
+                ).fetchone()
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        if updated is None:
+            return None
+        return self.read_stock_group(normalized_id)
+
+    def delete_stock_group(self, group_id: str) -> bool:
+        """Delete one group."""
+
+        self._store._require_writer()
+        normalized_id = group_id.strip()
+        if not normalized_id:
+            return False
+        with _WRITE_LOCK, self._store._connect() as connection:
+            deleted = connection.execute(
+                f"DELETE FROM {STOCK_GROUP_TABLE} WHERE group_id = ? RETURNING group_id",
                 [normalized_id],
             ).fetchone()
         return deleted is not None

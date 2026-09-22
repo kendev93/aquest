@@ -24,7 +24,10 @@ from .store_base import (
     default_database_path,
 )
 from .store_health import DuckDbHealthStore, build_report
-from .store_history import DuckDbHistoryStore
+from .store_history import (
+    STOCK_GROUP_SOURCE_MANUAL,
+    DuckDbHistoryStore,
+)
 from .store_indicator_cache import DuckDbIndicatorCacheStore
 from .store_indicator_cache_sqlite import SqliteIndicatorCacheStore
 
@@ -205,6 +208,19 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
             end_date=end_date,
             warmup_bars=warmup_bars,
             include_provisional=include_provisional,
+        )
+
+    def read_close_matrix(
+        self,
+        instruments: Iterable[InstrumentRef | StockRef] | None = None,
+        *,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> pd.DataFrame:
+        return self._bars.read_close_matrix(
+            instruments,
+            start_date=start_date,
+            end_date=end_date,
         )
 
     def count_many_bars(
@@ -476,6 +492,49 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
 
     def delete_screen_preset(self, preset_id: str) -> bool:
         return self._history.delete_screen_preset(preset_id)
+
+    def stock_group_name_taken(self, name: str, *, exclude_group_id: str = "") -> bool:
+        return self._history.stock_group_name_taken(name, exclude_group_id=exclude_group_id)
+
+    def save_stock_group(
+        self,
+        group_id: str,
+        *,
+        name: str,
+        items: Sequence[Mapping[str, object]],
+        note: str = "",
+        source: str = STOCK_GROUP_SOURCE_MANUAL,
+        source_history_id: str | None = None,
+        created_at: datetime | str | None = None,
+    ) -> dict[str, object]:
+        return self._history.save_stock_group(
+            group_id,
+            name=name,
+            items=items,
+            note=note,
+            source=source,
+            source_history_id=source_history_id,
+            created_at=created_at,
+        )
+
+    def list_stock_groups(self) -> list[dict[str, object]]:
+        return self._history.list_stock_groups()
+
+    def read_stock_group(self, group_id: str) -> dict[str, object] | None:
+        return self._history.read_stock_group(group_id)
+
+    def update_stock_group(
+        self,
+        group_id: str,
+        *,
+        name: str | None = None,
+        note: str | None = None,
+        items: Sequence[Mapping[str, object]] | None = None,
+    ) -> dict[str, object] | None:
+        return self._history.update_stock_group(group_id, name=name, note=note, items=items)
+
+    def delete_stock_group(self, group_id: str) -> bool:
+        return self._history.delete_stock_group(group_id)
 
     def find_candidate_by_source(
         self,
