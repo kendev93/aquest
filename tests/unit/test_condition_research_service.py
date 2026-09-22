@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import date
+from dataclasses import replace
+from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -888,3 +889,205 @@ def test_holdout_selection_breaks_a_full_tie_deterministically() -> None:
 
     assert _select_holdout_candidates([second, first], 1) == {"buy-1"}
     assert _select_holdout_candidates([first, second], 1) == {"buy-1"}
+
+
+# --------------------------------------------------------------------------
+# 累计试验次数校正（候选池 #20）
+# --------------------------------------------------------------------------
+
+
+def _significant_candidate(pvalue: float) -> MinedCondition:
+    return MinedCondition(
+        condition=ScreenCondition(left_value="technical.ma5", operator="gte", right_constant=1.0),
+        support_count=30,
+        support_ratio=0.5,
+        instrument_count=5,
+        outcome_rate=0.8,
+        baseline_rate=0.5,
+        lift=1.6,
+        lift_threshold=1.2,
+        permutation_pvalue=pvalue,
+        significant=pvalue <= 0.05,
+    )
+
+
+def test_mining_dict_keeps_raw_pvalue_but_judges_on_the_adjusted_one() -> None:
+    """判定用校正后的 p，原始 p 必须留下——否则用户看不出被校正了多少。"""
+
+    from selector_app.condition_research.service import _mining_dict
+
+    candidate = _significant_candidate(0.04)
+
+    single = _mining_dict(candidate, trial_count=1, quantile=0.95)
+    assert single["permutation_pvalue"] == pytest.approx(0.04)
+    # 只跑过一轮：校正恒等，判定不变。
+    assert single["adjusted_pvalue"] == pytest.approx(0.04)
+    assert single["significant"] is True
+
+    tenth = _mining_dict(candidate, trial_count=10, quantile=0.95)
+    assert tenth["permutation_pvalue"] == pytest.approx(0.04)
+    assert tenth["adjusted_pvalue"] == pytest.approx(1 - 0.96**10)
+    # 第十轮才挖出来的 0.04 已经不值钱了。
+    assert tenth["significant"] is False
+
+
+def test_mining_dict_leaves_unadjusted_when_no_permutation_ran() -> None:
+    """没做置换检验时三个字段必须一起是 None，不能凭空编一个"已校正"。"""
+
+    from selector_app.condition_research.service import _mining_dict
+
+    candidate = _significant_candidate(0.04)
+    candidate = replace(candidate, permutation_pvalue=None, significant=None)
+
+    payload = _mining_dict(candidate, trial_count=5, quantile=0.95)
+
+    assert payload["permutation_pvalue"] is None
+    assert payload["adjusted_pvalue"] is None
+    assert payload["significant"] is None
+
+
+class FakeTrialStore:
+    """只实现台账用到的两个方法，其余一概不碰真数据库。"""
+
+    def __init__(self, rows: list[dict[str, object]] | None = None) -> None:
+        self.rows = list(rows or [])
+        self.saved: list[dict[str, object]] = []
+        self.boom = False
+
+    def save_research_trial(
+        self,
+        history_id: str,
+        *,
+        data_fingerprint: str,
+        start_date: str,
+        end_date: str,
+        tested_conditions: int,
+        created_at: object = None,
+    ) -> None:
+        if self.boom:
+            raise RuntimeError("台账不可用")
+        row = {
+            "history_id": history_id,
+            "created_at": datetime(2026, 9, 22, 10, 0, 0),
+            "data_fingerprint": data_fingerprint,
+            "start_date": start_date,
+            "end_date": end_date,
+            "tested_conditions": tested_conditions,
+        }
+        self.saved.append(row)
+        self.rows.append(row)
+
+    def list_research_trials(self) -> list[dict[str, object]]:
+        if self.boom:
+            raise RuntimeError("台账不可用")
+        return list(self.rows)
+
+
+def test_run_records_the_study_and_reports_trial_context() -> None:
+    """跑完一次研究，台账要落一条，报告要带上累计上下文。"""
+
+    store = FakeTrialStore()
+    service = ConditionResearchService(
+        adapter=FakeResearchAdapter(),
+        backtest_service=FakePreparedBacktests(),  # type: ignore[arg-type]
+        store=store,  # type: ignore[arg-type]
+    )
+
+    result = service.run(_rolling_config())
+
+    assert len(store.saved) == 1
+    assert store.saved[0]["start_date"] == "2020-01-01"
+    assert store.saved[0]["end_date"] == "2024-12-31"
+    # 台账里的条件数必须来自挖掘真实枚举的候选池，不是拍一个数。
+    assert store.saved[0]["tested_conditions"] > 0
+
+    trials = result["trials"]
+    assert trials["trial_count"] == 1
+    assert trials["study_count"] == 1
+    # 只有一轮时不该宣称"已校正"。
+    assert trials["adjusted"] is False
+    assert trials["repeated_studies"] == 0
+
+
+def test_repeated_studies_on_one_window_stay_one_round() -> None:
+    """同区间重跑不增加轮数——这是整个记账设计的立足点。
+
+    实测：本地库 9 次研究区间全是 2021-09-11~2026-09-11，统计上是 1 轮。
+    若按次数记账会得到 9 轮，把 p=0.01 也误判成不显著。
+    """
+
+    store = FakeTrialStore(
+        rows=[
+            {
+                "history_id": "old-1",
+                "created_at": datetime(2026, 9, 21, 10, 0, 0),
+                "data_fingerprint": "fp",
+                "start_date": "2020-01-01",
+                "end_date": "2024-12-31",
+                "tested_conditions": 900,
+            }
+        ]
+    )
+    service = ConditionResearchService(
+        adapter=FakeResearchAdapter(),
+        backtest_service=FakePreparedBacktests(),  # type: ignore[arg-type]
+        store=store,  # type: ignore[arg-type]
+    )
+
+    result = service.run(_rolling_config())
+
+    trials = result["trials"]
+    assert trials["study_count"] == 2
+    # 区间完全重合 → 仍是 1 轮，判定不被抬高。
+    assert trials["trial_count"] == 1
+    assert trials["adjusted"] is False
+    # 但"同一段数据挖了两次"必须说出口。
+    assert trials["repeated_studies"] == 1
+
+
+def test_a_disjoint_earlier_window_raises_the_trial_count() -> None:
+    """换一段完全不同的数据再挖，才算第二轮，判定要跟着变严。"""
+
+    store = FakeTrialStore(
+        rows=[
+            {
+                "history_id": "old-1",
+                "created_at": datetime(2026, 9, 21, 10, 0, 0),
+                "data_fingerprint": "fp",
+                "start_date": "2010-01-01",
+                "end_date": "2014-12-31",
+                "tested_conditions": 900,
+            }
+        ]
+    )
+    service = ConditionResearchService(
+        adapter=FakeResearchAdapter(),
+        backtest_service=FakePreparedBacktests(),  # type: ignore[arg-type]
+        store=store,  # type: ignore[arg-type]
+    )
+
+    result = service.run(_rolling_config())
+
+    trials = result["trials"]
+    assert trials["trial_count"] == 2
+    assert trials["adjusted"] is True
+    assert trials["repeated_studies"] == 0
+
+
+def test_ledger_failure_never_fails_the_study() -> None:
+    """台账是审计信息，写不进去只警告，不能让研究失败。"""
+
+    store = FakeTrialStore()
+    store.boom = True
+    service = ConditionResearchService(
+        adapter=FakeResearchAdapter(),
+        backtest_service=FakePreparedBacktests(),  # type: ignore[arg-type]
+        store=store,  # type: ignore[arg-type]
+    )
+
+    result = service.run(_rolling_config())
+
+    # 研究照常出结果，且退化为"只跑了一轮"（不校正），不会假装校正过。
+    assert result["candidates"]
+    assert result["trials"]["trial_count"] == 1
+    assert result["trials"]["adjusted"] is False

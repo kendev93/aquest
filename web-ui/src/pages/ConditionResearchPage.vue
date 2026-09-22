@@ -159,7 +159,7 @@ function topNTitle(candidate: ConditionResearchCandidate): string {
 }
 
 function significanceTitle(candidate: ConditionResearchCandidate): string {
-  return formatSignificanceTitle(candidate, form.significancePermutations)
+  return formatSignificanceTitle(candidate, form.significancePermutations, report.value?.trials)
 }
 
 function validationTrades(candidate: ConditionResearchCandidate): string {
@@ -872,6 +872,33 @@ const duplicateSummary = computed(() => {
   )
 })
 
+/**
+ * 累计试验记账（候选池 #20）。
+ *
+ * 两件事要说清楚，第二件比第一件更重要：
+ * ① 判定有没有因为「跑过很多轮」而被抬高；
+ * ② 同一段数据被反复挖过几次 —— 这不改变 p 值，但它是过拟合的直接信号。
+ */
+const trialSummary = computed(() => {
+  const trials = report.value?.trials
+  if (!trials) return ''
+  const parts = [
+    `本次共评估 ${trials.tested_conditions} 个条件，是第 ${trials.trial_count} 轮独立研究（按数据区间算，不是按次数）。`,
+  ]
+  if (trials.adjusted) {
+    parts.push(
+      `判定已按 ${trials.trial_count} 轮校正：同样的 p 值，撞出来的机会是 ${trials.trial_count} 倍。`,
+    )
+  }
+  if (trials.repeated_studies > 0) {
+    parts.push(
+      `注意：这 ${trials.study_count} 次研究里有 ${trials.repeated_studies} 次是在同一段数据上重复挖的`
+        + '——重复挖不会增加撞好运的机会，所以不计入轮数，但它说明你在反复榨同一段行情。',
+    )
+  }
+  return parts.join('')
+})
+
 function apiMessage(error: unknown): string {
   return error instanceof FormulaScreenApiError
     ? error.message
@@ -1346,6 +1373,7 @@ onMounted(async () => {
               </p>
               <p v-if="significanceSummary" class="scope-helper" data-testid="condition-research-significance-summary">{{ significanceSummary }}</p>
               <p v-if="duplicateSummary" class="scope-helper" data-testid="condition-duplicate-summary">{{ duplicateSummary }}</p>
+              <p v-if="trialSummary" class="scope-helper" data-testid="condition-trial-summary">{{ trialSummary }}</p>
               <div class="table-wrap">
                 <table>
                   <caption class="sr-only">买卖条件候选验证结果</caption>

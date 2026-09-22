@@ -13,6 +13,7 @@ import type {
   ConditionResearchDuplicate,
   ConditionResearchReport,
   ConditionResearchSensitivityPoint,
+  ConditionResearchTrials,
   InstrumentBoard,
   ScreenCondition,
   ValueDefinition,
@@ -180,6 +181,7 @@ export function topNTitle(
 export function significanceTitle(
   candidate: ConditionResearchCandidate,
   permutations: number,
+  trials?: ConditionResearchTrials,
 ): string {
   const threshold = candidate.mining.lift_threshold
   if (threshold === null || threshold === undefined) {
@@ -189,12 +191,23 @@ export function significanceTitle(
   const p = pvalue === null || pvalue === undefined ? '—' : pvalue.toFixed(3)
   // 门槛是「随机重挖里最好成绩」分布的 95 分位，不是那批随机重挖的最好成绩
   // 本身 —— 后者要更极端一些，早期文案把它说成「纯运气最好的一次」是错的。
-  return (
+  let text =
     `把交易结果随机打乱重新挖掘 ${permutations} 次，` +
     `其中 95% 的随机重挖里「表现最好的那个条件」lift 都超不过 ${threshold.toFixed(3)}。` +
-    `这个候选的 lift 是 ${candidate.mining.lift.toFixed(3)}，随机重挖里有 p=${p} 的比例达到或超过它。` +
-    'p 大于 0.05 就判为疑似噪声 —— 徽标和这里的 p 值是同一个判断，不会互相矛盾。'
-  )
+    `这个候选的 lift 是 ${candidate.mining.lift.toFixed(3)}，随机重挖里有 p=${p} 的比例达到或超过它。`
+  // 上面那个 p 只回答「本次候选池里运气能推多高」。再往上还有一层：你在几段
+  // 不同的数据上做过研究，最后记住的是那几轮里最好的一个。跑得越多，同一个 p
+  // 越不值钱，这一层只能靠记账来补。
+  const adjusted = candidate.mining.adjusted_pvalue
+  if (trials?.adjusted && adjusted !== null && adjusted !== undefined) {
+    text +=
+      `你在 ${trials.trial_count} 段不同的数据上做过研究，同样的 p 撞出来的机会是 ${trials.trial_count} 倍，` +
+      `校正后 p=${adjusted.toFixed(3)}（${adjusted > 0.05 ? '判为疑似噪声' : '仍判显著'}）。` +
+      '徽标用的是校正后的 p。'
+  } else {
+    text += 'p 大于 0.05 就判为疑似噪声 —— 徽标和这里的 p 值是同一个判断，不会互相矛盾。'
+  }
+  return text
 }
 
 export function significanceLabel(candidate: ConditionResearchCandidate): string {

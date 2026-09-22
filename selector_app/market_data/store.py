@@ -321,6 +321,31 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
             duration_seconds=duration_seconds,
         )
 
+    def save_research_trial(
+        self,
+        history_id: str,
+        *,
+        data_fingerprint: str,
+        start_date: str,
+        end_date: str,
+        tested_conditions: int,
+        created_at: datetime | str | None = None,
+    ) -> None:
+        self._history.save_research_trial(
+            history_id,
+            data_fingerprint=data_fingerprint,
+            start_date=start_date,
+            end_date=end_date,
+            tested_conditions=tested_conditions,
+            created_at=created_at,
+        )
+
+    def list_research_trials(self) -> list[dict[str, object]]:
+        return self._history.list_research_trials()
+
+    def reset_research_trials(self) -> int:
+        return self._history.reset_research_trials()
+
     def list_backtest_history(self, backtest_type: str) -> list[dict[str, object]]:
         return self._history.list_backtest_history(backtest_type)
 

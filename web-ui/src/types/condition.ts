@@ -85,7 +85,14 @@ export interface ConditionResearchMiningMetrics {
   lift_threshold?: number | null
   /** 随机重挖中达到该候选 lift 的比例，越小越可信。 */
   permutation_pvalue?: number | null
-  /** lift 是否超过噪声门槛。null = 没做检验，不判断。 */
+  /**
+   * 累计试验校正后的 p：你在 K 轮不同的数据上挖过，同样的 p 就没那么值钱了。
+   * 只跑过一轮时与 permutation_pvalue 相等。null = 没做检验或没记账。
+   */
+  adjusted_pvalue?: number | null
+  /** 参与校正的独立轮数（不同数据段），1 = 未校正。 */
+  trial_count?: number
+  /** lift 是否超过噪声门槛（按校正后的 p 判定）。null = 没做检验，不判断。 */
   significant?: boolean | null
   /**
    * 被这条候选合并掉的同义条件：同一个发现的不同写法（多为阈值差一点）。
@@ -274,6 +281,28 @@ export interface ConditionResearchRanking {
 }
 
 
+/**
+ * 累计试验记账（候选池 #20）。
+ *
+ * 单次研究里的显著性已经由置换检验覆盖了：它把标签打乱、给同一个候选池重新
+ * 打分，看纯运气能把最好的那个 lift 推到多高。没被覆盖的是「你跑了 K 轮，最后
+ * 记住的是 K 轮里最好的那个」。这个缺口只能靠记账来补。
+ */
+export interface ConditionResearchTrials {
+  /** 独立数据段轮数：日期区间重叠过半算同一轮。p 值校正用这个。 */
+  trial_count: number
+  /** 台账里一共记录了多少次研究。 */
+  study_count: number
+  /** 本次实际评分过的条件数（买卖两侧合计）。 */
+  tested_conditions: number
+  /** 累计评分过的条件数（同一轮里重复挖掘只算一次）。 */
+  cumulative_conditions: number
+  /** 判定是否真的被校正过（trial_count > 1）。 */
+  adjusted: boolean
+  /** 研究次数多出轮数的部分 = 有一段数据被反复挖过。 */
+  repeated_studies: number
+}
+
 export interface ConditionResearchReport {
   universe: 'all' | 'sh' | 'sz'
   start_date: string
@@ -281,6 +310,8 @@ export interface ConditionResearchReport {
   data_fingerprint?: string | null
   search_sides: ConditionResearchSide
   feature_count: number
+  /** 累计试验记账。缺了就当作只跑过一轮（不校正），不报错。 */
+  trials?: ConditionResearchTrials
   min_trades?: number
   min_instruments?: number
   /** 同义条件合并门槛（命中向量相关性）。 */

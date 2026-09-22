@@ -1389,4 +1389,67 @@ describe('ConditionResearchPage', () => {
       },
     }
   }
+  it('reports how many independent trial rounds the result has survived', async () => {
+    const withTrials = {
+      ...result,
+      trials: {
+        trial_count: 2,
+        study_count: 5,
+        tested_conditions: 2400,
+        cumulative_conditions: 3800,
+        adjusted: true,
+        repeated_studies: 3,
+      },
+    } as unknown as ConditionResearchReport
+    vi.mocked(researchApi.getConditionResearchResults).mockResolvedValue(withTrials)
+
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+
+    const summary = wrapper.get('[data-testid="condition-trial-summary"]').text()
+    expect(summary).toContain('2400 个条件')
+    expect(summary).toContain('第 2 轮')
+    expect(summary).toContain('已按 2 轮校正')
+    // 同一段数据被反复挖是最直接的过拟合信号，必须说出口而不是藏起来。
+    expect(summary).toContain('3 次是在同一段数据上重复挖')
+  })
+
+  it('shows the adjusted p-value next to the raw one after several rounds', async () => {
+    const adjustedRun = {
+      ...result,
+      trials: {
+        trial_count: 10,
+        study_count: 10,
+        tested_conditions: 2400,
+        cumulative_conditions: 24000,
+        adjusted: true,
+        repeated_studies: 0,
+      },
+      candidates: [{
+        ...result.candidates[0],
+        mining: {
+          ...result.candidates[0].mining,
+          lift_threshold: 1.13,
+          permutation_pvalue: 0.04,
+          adjusted_pvalue: 0.335,
+          significant: false,
+        },
+      }],
+    } as unknown as ConditionResearchReport
+    vi.mocked(researchApi.getConditionResearchResults).mockResolvedValue(adjustedRun)
+
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+
+    // 第十轮才挖出来的 0.04 已经不显著了，徽标要用校正后的判定。
+    expect(wrapper.get('[data-testid="significance-buy-1"]').text()).toBe('疑似噪声')
+    const title = wrapper.get('[data-testid="significance-buy-1"]').attributes('title') ?? ''
+    // 原始 p 要留着，用户才看得出被校正了多少。
+    expect(title).toContain('p=0.040')
+    expect(title).toContain('校正后 p=0.335')
+  })
 })

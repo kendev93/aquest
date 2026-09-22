@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, replace
 
 import numpy as np
@@ -396,6 +396,10 @@ def mine_binary_conditions(
     significance_quantile: float = 0.95,
     permutation_seed: int | None = None,
     duplicate_correlation: float = DEFAULT_DUPLICATE_CORRELATION,
+    # 出参：本次**实际评分过**的条件数（= 送入置换零分布的 mask 池大小）。
+    # 用出参而不是改返回值，是因为 18 处既有测试把返回值直接当候选元组用，
+    # 改返回类型会连带改一大片与本次无关的东西。
+    stats: MutableMapping[str, int] | None = None,
 ) -> tuple[MinedCondition, ...]:
     """Find readable thresholds whose matching samples are enriched for an outcome.
 
@@ -457,6 +461,8 @@ def mine_binary_conditions(
     if len(target) != len(groups):
         raise ValueError("样本数量不一致")
     if len(target) == 0 or features.empty:
+        if stats is not None:
+            stats["tested_conditions"] = 0
         return ()
 
     valid_symbols = pd.notna(symbols) & pd.notna(groups)
@@ -701,6 +707,11 @@ def mine_binary_conditions(
         merged.append([])
         if len(selected) == limit:
             break
+    if stats is not None:
+        # 计数口径：null_pool 是"结构可用"的 mask 全集（赢家和输家都算），
+        # 不是最终返回的 limit 条候选。抬高噪声门槛要的是前者——输家也在
+        # 参与"谁最幸运"的竞争，把它们排除会让零分布偏小、门槛偏松。
+        stats["tested_conditions"] = len(null_pool)
     return tuple(
         replace(candidate, duplicates=tuple(items)) for candidate, items in zip(selected, merged)
     )

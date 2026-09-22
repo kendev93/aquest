@@ -509,3 +509,96 @@ def test_delete_bars_honours_the_date_window(tmp_path: Path) -> None:
         "2024-01-02",
         "2024-01-09",
     ]
+
+
+# --------------------------------------------------------------------------
+# 试验台账（候选池 #20：跨运行取最好的那一次，需要记账才能校正）
+# --------------------------------------------------------------------------
+
+
+def test_research_trial_ledger_round_trip(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+
+    assert store.list_research_trials() == []
+
+    store.save_research_trial(
+        "trial-1",
+        data_fingerprint="abc123",
+        start_date="2020-01-01",
+        end_date="2024-12-31",
+        tested_conditions=900,
+    )
+    rows = store.list_research_trials()
+
+    assert len(rows) == 1
+    assert rows[0]["history_id"] == "trial-1"
+    assert rows[0]["data_fingerprint"] == "abc123"
+    assert rows[0]["start_date"] == "2020-01-01"
+    assert rows[0]["end_date"] == "2024-12-31"
+    assert rows[0]["tested_conditions"] == 900
+    # 时间要能读回来做排序，不能是个字符串。
+    assert isinstance(rows[0]["created_at"], datetime)
+
+
+def test_research_trial_same_id_overwrites(tmp_path: Path) -> None:
+    """同一条历史重跑只更新，不累加成两条——否则轮数会被自己抬高。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    for count in (900, 1200):
+        store.save_research_trial(
+            "trial-1",
+            data_fingerprint="abc123",
+            start_date="2020-01-01",
+            end_date="2024-12-31",
+            tested_conditions=count,
+        )
+
+    rows = store.list_research_trials()
+    assert len(rows) == 1
+    assert rows[0]["tested_conditions"] == 1200
+
+
+def test_research_trial_rejects_bad_input(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+
+    with pytest.raises(ValueError, match="研究历史 ID 不能为空"):
+        store.save_research_trial(
+            "  ",
+            data_fingerprint="fp",
+            start_date="2020-01-01",
+            end_date="2024-12-31",
+            tested_conditions=10,
+        )
+    with pytest.raises(ValueError, match="开始日期不能晚于结束日期"):
+        store.save_research_trial(
+            "trial-1",
+            data_fingerprint="fp",
+            start_date="2024-12-31",
+            end_date="2020-01-01",
+            tested_conditions=10,
+        )
+    with pytest.raises(ValueError, match="检验条件数不能为负数"):
+        store.save_research_trial(
+            "trial-1",
+            data_fingerprint="fp",
+            start_date="2020-01-01",
+            end_date="2024-12-31",
+            tested_conditions=-1,
+        )
+
+
+def test_research_trial_reset_returns_removed_count(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    for index in range(3):
+        store.save_research_trial(
+            f"trial-{index}",
+            data_fingerprint="fp",
+            start_date="2020-01-01",
+            end_date="2024-12-31",
+            tested_conditions=100,
+        )
+
+    assert store.reset_research_trials() == 3
+    assert store.list_research_trials() == []
+    # 再清一次是 0 而不是报错：重置按钮可能被连点。
+    assert store.reset_research_trials() == 0

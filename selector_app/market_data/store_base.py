@@ -471,6 +471,18 @@ class _DuckDbStoreBase:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS condition_research_trials (
+                    history_id VARCHAR PRIMARY KEY,
+                    created_at TIMESTAMP NOT NULL,
+                    data_fingerprint VARCHAR NOT NULL,
+                    start_date VARCHAR NOT NULL,
+                    end_date VARCHAR NOT NULL,
+                    tested_conditions BIGINT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS strategy_discovery_replay_history (
                     replay_id VARCHAR PRIMARY KEY,
                     experiment_id VARCHAR NOT NULL,

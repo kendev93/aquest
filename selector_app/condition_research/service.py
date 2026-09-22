@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
+import uuid
 from collections import Counter
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, MutableMapping, Sequence
 from concurrent.futures import as_completed
 from concurrent.futures.process import BrokenProcessPool
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Protocol, TypeVar, cast
 
@@ -72,6 +74,12 @@ from .time_split import (
     split_calendar_range,
     split_windows,
 )
+from .trial_ledger import (
+    TrialRecord,
+    cumulative_tested_conditions,
+    effective_trial_count,
+    sidak_adjust,
+)
 from .windows import (
     build_baseline_window_payload,
     build_consistency,
@@ -80,6 +88,8 @@ from .windows import (
 
 ProgressCallback = Callable[[int, int], None]
 CancelCheck = Callable[[], bool]
+
+logger = logging.getLogger(__name__)
 
 
 class _KeyedOutcome(Protocol):
@@ -451,12 +461,19 @@ class ConditionResearchService:
         # candidate under the slot limit the portfolio will actually face.
         ranking = self._ranking_assessment(config, buy_samples, feature_ids)
         ranking_value, rank_order = _resolved_ranking(config, ranking)
+        trial_stats: dict[str, int] = {}
         mined = self._mine_candidates(
             config,
             buy_samples,
             sell_samples,
             ranking_value=ranking_value,
             rank_order=rank_order,
+            stats=trial_stats,
+        )
+        trial_context = self._record_trial(
+            config,
+            fingerprints=fingerprints,
+            tested_conditions=trial_stats.get("tested_conditions", 0),
         )
         sample_totals = _sample_totals(buy_samples, sell_samples)
         baseline_train = summarize_backtests(train_reports)
@@ -567,7 +584,11 @@ class ConditionResearchService:
                 validation_candidates[candidate_id],
                 baseline_reports=validation_baseline,
             )
-            mining_payload = _mining_dict(candidate)
+            mining_payload = _mining_dict(
+                candidate,
+                trial_count=cast(int, trial_context["trial_count"]),
+                quantile=config.significance_quantile,
+            )
             # 参数敏感性在挖掘样本（寻优期）上重算邻域，所以每个候选都能算，
             # 不需要等它进留出期。口径与 mining_payload 同源，可逐个数字核对。
             sensitivity_payload = sensitivity_dict(
@@ -719,12 +740,66 @@ class ConditionResearchService:
             },
             "candidates": results,
             "ranking": ranking,
+            # 累计试验记账：跑过多少轮独立数据、本次挖了多少条件、判定有没有被校正。
+            "trials": trial_context,
             "algorithm": {
                 "mining": "contrastive_threshold_and_pairwise_rules",
                 "search": "single_condition_then_full_stock_replay",
                 "holdout_candidates_per_side": config.holdout_candidates,
             },
         }
+
+    def _record_trial(
+        self,
+        config: ConditionResearchConfig,
+        *,
+        fingerprints: Mapping[str, str],
+        tested_conditions: int,
+    ) -> dict[str, object]:
+        """Log this study in the trial ledger and summarise the running total.
+
+        Returns the context the report carries so the UI can say how many
+        independent rounds a result has survived. Two guards matter:
+
+        * no store (unit tests inject a fake adapter) -> do not touch a real
+          database just to keep a ledger;
+        * nothing was actually mined -> do not log a round, or a failed study
+          would inflate everyone else's threshold.
+
+        A ledger write failure only warns: the ledger is audit information and
+        must never be the reason a research run fails.
+        """
+
+        if self._store is None or tested_conditions <= 0:
+            return _trial_context(tested_conditions=tested_conditions, trials=1, studies=0)
+        try:
+            self._store.save_research_trial(
+                uuid.uuid4().hex,
+                data_fingerprint=_combined_fingerprint(fingerprints) or "",
+                start_date=config.start_date.isoformat(),
+                end_date=config.end_date.isoformat(),
+                tested_conditions=tested_conditions,
+            )
+            records = [
+                TrialRecord(
+                    history_id=str(row["history_id"]),
+                    created_at=cast(datetime, row["created_at"]),
+                    data_fingerprint=str(row["data_fingerprint"]),
+                    start_date=date.fromisoformat(str(row["start_date"])),
+                    end_date=date.fromisoformat(str(row["end_date"])),
+                    tested_conditions=int(str(row["tested_conditions"])),
+                )
+                for row in self._store.list_research_trials()
+            ]
+        except Exception:
+            logger.warning("试验台账读写失败，本次研究不计入累计试验次数", exc_info=True)
+            return _trial_context(tested_conditions=tested_conditions, trials=1, studies=0)
+        return _trial_context(
+            tested_conditions=tested_conditions,
+            trials=effective_trial_count(records),
+            studies=len(records),
+            cumulative=cumulative_tested_conditions(records),
+        )
 
     def _rolling_windows(
         self,
@@ -979,6 +1054,7 @@ class ConditionResearchService:
         *,
         ranking_value: str | None,
         rank_order: str,
+        stats: MutableMapping[str, int] | None = None,
     ) -> list[tuple[str, str, MinedCondition]]:
         # Slots are competed for on entry only, so the top-N diagnostic is
         # meaningful for buy candidates and meaningless for sell triggers.
@@ -988,6 +1064,7 @@ class ConditionResearchService:
             else None
         )
         results: list[tuple[str, str, MinedCondition]] = []
+        side_stats: dict[str, int] = {}
         if config.search_sides in {"buy", "both"}:
             results.extend(
                 (f"buy-{index + 1}", "buy", candidate)
@@ -1002,10 +1079,12 @@ class ConditionResearchService:
                         permutations=config.significance_permutations,
                         significance_quantile=config.significance_quantile,
                         duplicate_correlation=config.duplicate_correlation,
+                        stats=side_stats,
                     )
                 )
             )
         if config.search_sides in {"sell", "both"}:
+            sell_stats: dict[str, int] = {}
             results.extend(
                 (f"sell-{index + 1}", "sell", candidate)
                 for index, candidate in enumerate(
@@ -1018,9 +1097,16 @@ class ConditionResearchService:
                         permutations=config.significance_permutations,
                         significance_quantile=config.significance_quantile,
                         duplicate_correlation=config.duplicate_correlation,
+                        stats=sell_stats,
                     )
                 )
             )
+            side_stats["tested_conditions"] = side_stats.get(
+                "tested_conditions", 0
+            ) + sell_stats.get("tested_conditions", 0)
+        if stats is not None:
+            # 两侧分别挖，各自枚举一遍候选池，所以累计试验数要把两侧加起来。
+            stats["tested_conditions"] = side_stats.get("tested_conditions", 0)
         return results
 
     @staticmethod
@@ -1186,6 +1272,7 @@ def _mine_sample_sets(
     permutations: int = 0,
     significance_quantile: float = 0.95,
     duplicate_correlation: float = DEFAULT_DUPLICATE_CORRELATION,
+    stats: MutableMapping[str, int] | None = None,
 ) -> tuple[MinedCondition, ...]:
     usable = [sample for sample in samples if len(sample)]
     if not usable:
@@ -1203,6 +1290,7 @@ def _mine_sample_sets(
         permutations=permutations,
         significance_quantile=significance_quantile,
         duplicate_correlation=duplicate_correlation,
+        stats=stats,
     )
 
 
@@ -1306,7 +1394,48 @@ def _condition_dict(condition: ScreenCondition) -> dict[str, object]:
     }
 
 
-def _mining_dict(candidate: MinedCondition) -> dict[str, object]:
+def _trial_context(
+    *,
+    tested_conditions: int,
+    trials: int,
+    studies: int,
+    cumulative: int | None = None,
+) -> dict[str, object]:
+    """The ledger summary a report carries.
+
+    ``trials`` is independent data-window rounds and drives the correction;
+    ``studies`` is how many studies the ledger holds. The gap between them is
+    itself the finding: nine studies over one window are one round, and that
+    says more about over-mining than any p-value does.
+    """
+
+    return {
+        "trial_count": trials,
+        "study_count": studies,
+        "tested_conditions": tested_conditions,
+        "cumulative_conditions": cumulative if cumulative is not None else tested_conditions,
+        # 只有真的跑过多轮独立数据才动过判定，单次研究不该显示"已校正"。
+        "adjusted": trials > 1,
+        # 研究次数多于轮数 = 有一段数据被反复挖过。
+        "repeated_studies": max(0, studies - trials),
+    }
+
+
+def _mining_dict(
+    candidate: MinedCondition,
+    *,
+    trial_count: int = 1,
+    quantile: float = 0.95,
+) -> dict[str, object]:
+    raw_pvalue = candidate.permutation_pvalue
+    adjusted_pvalue = sidak_adjust(raw_pvalue, trial_count) if raw_pvalue is not None else None
+    # 判定只用校正后的 p：跑过 K 轮数据还拿这个 p，撞运气的机会是 K 倍。
+    # 原始 p 一并保留，用户能看到校正了多少。
+    significant = (
+        adjusted_pvalue is not None and adjusted_pvalue <= (1.0 - quantile)
+        if adjusted_pvalue is not None
+        else candidate.significant
+    )
     return {
         "support_count": candidate.support_count,
         "support_ratio": candidate.support_ratio,
@@ -1321,8 +1450,12 @@ def _mining_dict(candidate: MinedCondition) -> dict[str, object]:
         "top_n_filtered_days": candidate.top_n_filtered_days,
         # 置换检验结果。三个字段同时为 None 表示这次没做检验，界面就不显示显著性列。
         "lift_threshold": candidate.lift_threshold,
-        "permutation_pvalue": candidate.permutation_pvalue,
-        "significant": candidate.significant,
+        # 原始 p：本次候选池里纯运气撞出这么好的概率。
+        "permutation_pvalue": raw_pvalue,
+        # 累计试验校正后的 p（跑过 K 轮独立数据时才与原始值不同）。
+        "adjusted_pvalue": adjusted_pvalue,
+        "trial_count": trial_count,
+        "significant": significant,
         # 被这条候选合并掉的同义条件。列出来而不是静默删掉，用户才能判断门槛合不合适。
         "duplicates": [
             {

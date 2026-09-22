@@ -1267,6 +1267,128 @@ class DuckDbHistoryStore:
                 connection.execute("ROLLBACK")
                 raise
 
+    def save_research_trial(
+        self,
+        history_id: str,
+        *,
+        data_fingerprint: str,
+        start_date: str,
+        end_date: str,
+        tested_conditions: int,
+        created_at: datetime | str | None = None,
+    ) -> None:
+        """Record one completed condition-research study in the trial ledger.
+
+        The ledger is what makes "you have now run this study N times" auditable.
+        It stores just enough to decide whether two studies are the *same* trial
+        (their data window) plus how many conditions they searched, so the
+        caller can compute an independent-round count.
+        """
+
+        self._store._require_writer()
+        normalized_id = history_id.strip()
+        if not normalized_id:
+            raise ValueError("研究历史 ID 不能为空")
+        if not start_date or not end_date:
+            raise ValueError("研究区间不能为空")
+        if start_date > end_date:
+            raise ValueError("研究开始日期不能晚于结束日期")
+        try:
+            count = int(tested_conditions)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("检验条件数必须是整数") from exc
+        if count < 0:
+            raise ValueError("检验条件数不能为负数")
+        created = _normalize_timestamp(created_at, _now())
+        with _WRITE_LOCK, self._store._connect() as connection:
+            connection.execute("BEGIN")
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO condition_research_trials (
+                        history_id, created_at, data_fingerprint,
+                        start_date, end_date, tested_conditions
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (history_id) DO UPDATE SET
+                        created_at = excluded.created_at,
+                        data_fingerprint = excluded.data_fingerprint,
+                        start_date = excluded.start_date,
+                        end_date = excluded.end_date,
+                        tested_conditions = excluded.tested_conditions
+                    """,
+                    [
+                        normalized_id,
+                        created,
+                        str(data_fingerprint),
+                        str(start_date),
+                        str(end_date),
+                        count,
+                    ],
+                )
+                # 与 backtest_history 同步截断：历史记录被淘汰的研究不该继续
+                # 留在台账里贡献轮数，否则"删掉重来"反而会抬高别人的门槛。
+                stale = connection.execute(
+                    """
+                    SELECT history_id FROM condition_research_trials
+                    ORDER BY created_at DESC, history_id DESC
+                    LIMIT 100000 OFFSET ?
+                    """,
+                    [BACKTEST_HISTORY_LIMIT],
+                ).fetchall()
+                if stale:
+                    connection.executemany(
+                        "DELETE FROM condition_research_trials WHERE history_id = ?", stale
+                    )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+
+    def list_research_trials(self) -> list[dict[str, object]]:
+        """Return every recorded trial, oldest first."""
+
+        with self._store._connect(read_only=True) as connection:
+            rows = connection.execute(
+                """
+                SELECT history_id, created_at, data_fingerprint,
+                       start_date, end_date, tested_conditions
+                FROM condition_research_trials
+                ORDER BY created_at ASC, history_id ASC
+                """
+            ).fetchall()
+        return [
+            {
+                "history_id": str(row[0]),
+                "created_at": row[1],
+                "data_fingerprint": str(row[2]),
+                "start_date": str(row[3]),
+                "end_date": str(row[4]),
+                "tested_conditions": int(row[5]),
+            }
+            for row in rows
+        ]
+
+    def reset_research_trials(self) -> int:
+        """Clear the ledger — the only way to start counting from zero.
+
+        Returns how many entries were dropped so the caller can report it.
+        """
+
+        self._store._require_writer()
+        with _WRITE_LOCK, self._store._connect() as connection:
+            connection.execute("BEGIN")
+            try:
+                total = connection.execute(
+                    "SELECT COUNT(*) FROM condition_research_trials"
+                ).fetchone()
+                removed = int(total[0]) if total else 0
+                connection.execute("DELETE FROM condition_research_trials")
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        return removed
+
     def list_backtest_history(self, backtest_type: str) -> list[dict[str, object]]:
         """Return recent summaries for one kind of backtest."""
 
