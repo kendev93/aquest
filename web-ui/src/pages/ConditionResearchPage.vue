@@ -16,17 +16,17 @@ import { fetchActiveJobs } from '../api/jobs'
 import DateRangeSelector from '../components/DateRangeSelector.vue'
 import RuleGroupEditor from '../components/RuleGroupEditor.vue'
 import TermHint from '../components/TermHint.vue'
+import ConditionHistoryPanel from '../components/ConditionHistoryPanel.vue'
+import ConditionRollingTable from '../components/ConditionRollingTable.vue'
+import ConditionSensitivityTable from '../components/ConditionSensitivityTable.vue'
+import ConditionStockDetail from '../components/ConditionStockDetail.vue'
 import type {
   BacktestExecution,
   ConditionResearchCandidate,
-  ConditionResearchDuplicate,
   ConditionResearchJobState,
   ConditionResearchPayload,
   ConditionResearchRanking,
   ConditionResearchReport,
-  ConditionResearchSensitivity,
-  ConditionResearchSensitivityPoint,
-  ConditionResearchStockResult,
   CustomFormulaMetadata,
   DateRangeMode,
   DateRangeSelection,
@@ -39,32 +39,31 @@ import type {
   ValueDefinition,
 } from '../types'
 import { importCandidates } from '../api/candidateLibrary'
-import { parseStoredRuleGroup, valueOptionLabel } from '../utils/formulaScreen'
+import { parseStoredRuleGroup } from '../utils/formulaScreen'
 import { importSummaryText } from '../utils/candidateLibrary'
 import { consumeSwingPlan } from '../utils/swingHandoff'
-import { formatChinaTimestamp } from '../utils/time'
+import {
+  RANKING_CONFIDENCE_LABELS,
+  STOCK_BOARD_OPTIONS,
+  conditionHitRate as formatConditionHitRate,
+  constraintText,
+  duplicateTitle as formatDuplicateTitle,
+  formatConditionText,
+  formatNumber,
+  formatPercent,
+  hitRateTitle,
+  mergedDuplicates,
+  phaseCount,
+  significanceLabel,
+  significanceTitle as formatSignificanceTitle,
+  topNTitle as formatTopNTitle,
+  topNWinRate,
+  validationTrades as formatValidationTrades,
+} from '../utils/conditionResearch'
+import type { ResearchHistorySummary } from '../utils/conditionResearch'
 
 function emptyRule(): RuleGroupPayload {
   return { signals: [], conditions: [], required_conditions: [], combine_mode: 'all', minimum_matches: null }
-}
-
-interface ResearchHistorySummary {
-  history_id: string
-  created_at: string
-  finished_at?: string
-  duration_seconds?: number
-  summary?: Record<string, unknown>
-}
-
-const OPERATOR_LABELS: Record<string, string> = {
-  gt: '>',
-  gte: '≥',
-  lt: '<',
-  lte: '≤',
-  eq: '=',
-  neq: '≠',
-  cross_up: '上穿',
-  cross_down: '下穿',
 }
 
 const metadata = ref<FormulaScreenMetadata | null>(null)
@@ -116,7 +115,6 @@ const selectedStockView = ref('baseline:full')
 // 历史列表：后端已按完成时间由近到远排好，这里只管切片分页。
 const activeHistoryId = ref('')
 const historyPage = ref(1)
-const historyPageSize = 10
 // 结果里勾选的候选条件，直接追加进基础规则后再跑一次研究。
 const selectedCandidateIds = ref<string[]>([])
 // 排序规则：研究不建组合，但结论要落到组合回测的「候选池 + 有限槽位」模型上。
@@ -133,11 +131,6 @@ const holdToEnd = ref(false)
 const alwaysInMarket = ref(false)
 // 正在把历史记录回填进表单：此时不要让它触发的 watch 改写费用或板块。
 const restoring = ref(false)
-const stockFilter = ref('')
-const stockSort = ref<'win_rate' | 'payoff_ratio' | 'total_return' | 'sharpe' | 'code'>('win_rate')
-const stockPage = ref(1)
-const stockPageSize = 50
-
 const availableValues = computed<ValueDefinition[]>(() => (
   mode.value === 'custom'
     ? customMetadata.value?.values ?? []
@@ -147,6 +140,32 @@ const availableValues = computed<ValueDefinition[]>(() => (
 const rankableValues = computed<ValueDefinition[]>(() => (
   availableValues.value.filter((value) => value.rankable === true)
 ))
+// 展示口径的实现在 utils/conditionResearch.ts（纯函数），这里只补上页面上下文：
+// 候选名要看当前可选输出，命中率和门槛类要看当前报告、检验次数看表单。
+function conditionText(candidate: ConditionResearchCandidate): string {
+  return formatConditionText(availableValues.value, candidate)
+}
+
+function duplicateTitle(candidate: ConditionResearchCandidate): string {
+  return formatDuplicateTitle(availableValues.value, candidate)
+}
+
+function conditionHitRate(candidate: ConditionResearchCandidate): string {
+  return formatConditionHitRate(report.value, candidate)
+}
+
+function topNTitle(candidate: ConditionResearchCandidate): string {
+  return formatTopNTitle(report.value, candidate)
+}
+
+function significanceTitle(candidate: ConditionResearchCandidate): string {
+  return formatSignificanceTitle(candidate, form.significancePermutations)
+}
+
+function validationTrades(candidate: ConditionResearchCandidate): string {
+  return formatValidationTrades(report.value, candidate)
+}
+
 const rankingReport = computed<ConditionResearchRanking | null>(() => (
   report.value?.ranking ?? null
 ))
@@ -174,12 +193,6 @@ const slotHint = computed<string | null>(() => {
   }
   return `日均命中 ${hits} 只、槽位 ${slots} 个：条件和排序共同决定结果，两边都值得调。`
 })
-const RANKING_CONFIDENCE_LABELS: Record<string, string> = {
-  high: '证据充分',
-  medium: '可用，建议先复验',
-  low: '证据不足',
-  none: '暂无法判断',
-}
 const rankingConfidenceLabel = computed(() => (
   RANKING_CONFIDENCE_LABELS[rankingRecommendation.value?.confidence ?? 'none'] ?? '暂无法判断'
 ))
@@ -200,86 +213,10 @@ const dateRange = computed<DateRangeSelection>({
     form.endDate = value.endDate
   },
 })
-const STOCK_BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
-  { key: 'main', label: '主板' },
-  { key: 'star', label: '科创板' },
-  { key: 'chinext', label: '创业板' },
-]
 const scopeNoun = computed(() => '股票')
 const scopeHelper = computed(() => (
   '每只股票独立运行同一套规则，不设置跨股票资金分配或持仓数量上限。'
 ))
-const selectedStockRows = computed(() => {
-  if (!report.value) return []
-  const [ruleId, period] = selectedStockView.value.split(':')
-  if (ruleId === 'baseline') {
-    return period === 'holdout'
-      ? report.value.baseline.holdout?.stocks ?? []
-      : report.value.baseline.full_period?.stocks ?? []
-  }
-  const candidate = report.value.candidates.find((item) => item.candidate_id === ruleId)
-  if (!candidate) return []
-  return period === 'holdout'
-    ? candidate.holdout?.stocks ?? []
-    : candidate.full_period?.stocks ?? []
-})
-const stockViewOptions = computed(() => {
-  const options = [
-    { value: 'baseline:full', label: '基础规则 · 全区间' },
-    { value: 'baseline:holdout', label: '基础规则 · 最终留出' },
-  ]
-  for (const candidate of report.value?.candidates ?? []) {
-    if (candidate.full_period) {
-      options.push({
-        value: candidate.candidate_id + ':full',
-        label: (candidate.side === 'buy' ? '买入过滤' : '卖出触发')
-          + ' · 全区间 · ' + conditionText(candidate),
-      })
-    }
-    if (candidate.holdout) {
-      options.push({
-        value: candidate.candidate_id + ':holdout',
-        label: (candidate.side === 'buy' ? '买入过滤' : '卖出触发')
-          + ' · 最终留出 · ' + conditionText(candidate),
-      })
-    }
-  }
-  return options
-})
-const stockPeriodLabel = computed(() => (
-  selectedStockView.value.endsWith(':holdout') ? '最终留出期' : '完整研究区间'
-))
-const filteredStockRows = computed(() => {
-  const query = stockFilter.value.trim().toLowerCase()
-  const matching = selectedStockRows.value.filter((stock) => (
-    !query
-    || stock.market.toLowerCase().includes(query)
-    || stock.code.toLowerCase().includes(query)
-    || (stock.name ?? '').toLowerCase().includes(query)
-  ))
-  return matching.sort((left, right) => {
-    if (stockSort.value === 'code') {
-      return (left.market + left.code).localeCompare(right.market + right.code)
-    }
-    const leftValue = left[stockSort.value]
-    const rightValue = right[stockSort.value]
-    return (rightValue ?? Number.NEGATIVE_INFINITY) - (leftValue ?? Number.NEGATIVE_INFINITY)
-  })
-})
-const stockPageCount = computed(() => Math.max(1, Math.ceil(filteredStockRows.value.length / stockPageSize)))
-const selectedPageRows = computed(() => (
-  filteredStockRows.value.slice((stockPage.value - 1) * stockPageSize, stockPage.value * stockPageSize)
-))
-
-watch([selectedStockView, stockFilter, stockSort], () => {
-  stockPage.value = 1
-})
-
-// 新报告（或历史记录）到达时必须回到第一页：沿用旧页码会出现
-// 「第 3 / 1 页 + 空表体」，既不显示数据也不命中空态提示。
-watch(() => report.value, () => {
-  stockPage.value = 1
-})
 
 // A bare `> 0` / `< 0` pair is only meaningful for an output that crosses zero.
 // Most catalog outputs are one-sided (indicator_one.wash is 0 or positive), and
@@ -899,203 +836,6 @@ async function removeHistory(historyId: string): Promise<void> {
   }
 }
 
-const historyPageCount = computed(() => Math.max(1, Math.ceil(history.value.length / historyPageSize)))
-const historyPageRows = computed(() => history.value.slice(
-  (historyPage.value - 1) * historyPageSize,
-  historyPage.value * historyPageSize,
-))
-// 删到只剩一页时把页码收回来，否则会停在一个空白页上。
-watch([historyPageCount], () => {
-  if (historyPage.value > historyPageCount.value) historyPage.value = historyPageCount.value
-})
-
-function summaryNumber(item: ResearchHistorySummary, key: string): number | null {
-  const value = item.summary?.[key]
-  return typeof value === 'number' && Number.isFinite(value) ? value : null
-}
-
-function summaryText(item: ResearchHistorySummary, key: string): string {
-  const value = item.summary?.[key]
-  return typeof value === 'string' && value ? value : ''
-}
-
-/** 摘要里的条件只有 id，还原成和结果表一致的中文写法。 */
-function summaryConditionText(item: ResearchHistorySummary): string {
-  const raw = item.summary?.top_condition
-  if (!raw || typeof raw !== 'object') return '—'
-  const condition = raw as Record<string, unknown>
-  const operator = OPERATOR_LABELS[String(condition.operator ?? '')] ?? String(condition.operator ?? '')
-  const leftId = String(condition.left_value ?? '')
-  const left = availableValues.value.find((value) => value.id === leftId)
-  const leftLabel = left ? valueOptionLabel(left) : leftId.replace('technical.', '')
-  const rightId = typeof condition.right_value === 'string' ? condition.right_value : ''
-  const right = rightId ? availableValues.value.find((value) => value.id === rightId) : null
-  const constant = typeof condition.right_constant === 'number' ? condition.right_constant : null
-  return `${leftLabel} ${operator} ${right ? valueOptionLabel(right) : formatNumber(constant, 3)}`
-}
-
-function historyRangeText(item: ResearchHistorySummary): string {
-  const start = summaryText(item, 'start_date')
-  const end = summaryText(item, 'end_date')
-  if (!start && !end) return '区间未知'
-  return `${start || '起点'} → ${end || '最新'}`
-}
-
-function historyUniverseText(item: ResearchHistorySummary): string {
-  const universe = summaryText(item, 'universe')
-  if (universe === 'sh') return '仅上海'
-  if (universe === 'sz') return '仅深圳'
-  if (universe === 'all') return '沪深全部'
-  return '范围未知'
-}
-
-function historySideText(item: ResearchHistorySummary): string {
-  const side = summaryText(item, 'search_sides')
-  if (side === 'buy') return '只搜买入'
-  if (side === 'sell') return '只搜卖出'
-  if (side === 'both') return '买卖两侧'
-  return '方向未知'
-}
-
-function historyDurationText(item: ResearchHistorySummary): string {
-  const seconds = item.duration_seconds
-  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) return ''
-  if (seconds < 60) return `耗时 ${Math.round(seconds)} 秒`
-  return `耗时 ${Math.round(seconds / 60)} 分钟`
-}
-
-// 历史记录的 created_at 存的是朴素 UTC 时间，直接渲染会比北京时间慢 8 小时，
-// 让人误以为刚跑完的研究没保存。
-function formatHistoryDate(value: string): string {
-  return formatChinaTimestamp(value)
-}
-
-function formatPercent(value: number | null | undefined): string {
-  return value === null || value === undefined ? '—' : (value * 100).toFixed(2) + '%'
-}
-
-function formatNumber(value: number | null | undefined, digits = 2): string {
-  return value === null || value === undefined ? '—' : value.toFixed(digits)
-}
-
-function winRateDelta(stock: ConditionResearchStockResult): string {
-  if (stock.win_rate === null || stock.baseline_win_rate === undefined || stock.baseline_win_rate === null) {
-    return '—'
-  }
-  const delta = (stock.win_rate - stock.baseline_win_rate) * 100
-  return (delta > 0 ? '+' : '') + delta.toFixed(2) + ' pp'
-}
-
-function screenConditionText(condition: ScreenCondition): string {
-  const operator = OPERATOR_LABELS[condition.operator] ?? condition.operator
-  const leftValue = availableValues.value.find((value) => value.id === condition.left_value)
-  const rightValue = condition.right_value
-    ? availableValues.value.find((value) => value.id === condition.right_value)
-    : null
-  const leftLabel = leftValue ? valueOptionLabel(leftValue) : condition.left_value
-  const rightLabel = rightValue
-    ? valueOptionLabel(rightValue)
-    : formatNumber(condition.right_constant, 3)
-  return leftLabel + ' ' + operator + ' ' + rightLabel
-}
-
-function conditionText(candidate: ConditionResearchCandidate): string {
-  return screenConditionText(candidate.condition)
-}
-
-/** 被这条候选合并掉的同义条件：同一个发现的不同写法，多数只是阈值差一点。 */
-function mergedDuplicates(candidate: ConditionResearchCandidate): ConditionResearchDuplicate[] {
-  return candidate.mining.duplicates ?? []
-}
-
-function duplicateTitle(candidate: ConditionResearchCandidate): string {
-  const items = mergedDuplicates(candidate)
-  if (!items.length) return ''
-  return (
-    '判定为同一个发现而合并掉的条件（相关性 / 训练 lift / 样本数）：\n'
-    + items
-      .map(
-        (item) =>
-          `· ${screenConditionText(item.condition)} — ρ=${item.correlation.toFixed(3)}`
-          + `，lift=${item.lift.toFixed(3)}，样本 ${item.support_count}`,
-      )
-      .join('\n')
-  )
-}
-
-// 买卖两侧的样本口径不同：买样本 = 每次入场 1 条，卖样本 = 持仓期内每个
-// 提前离场决策点 1 条（同一笔交易可贡献多条）。因此卖出候选不能拿成交笔数
-// 当分母，否则命中率会被高估甚至超过 100%。
-function hitRateDenominator(candidate: ConditionResearchCandidate): number {
-  const side = candidate.side === 'sell' ? 'sell' : 'buy'
-  const sampleCount = report.value?.sample_totals?.[side]?.count
-  if (typeof sampleCount === 'number' && sampleCount > 0) return sampleCount
-  // 兼容没有 sample_totals 的历史结果。
-  return report.value?.baseline.train.pooled_trades.closed_trades ?? 0
-}
-
-function conditionHitRate(candidate: ConditionResearchCandidate): string {
-  const denominator = hitRateDenominator(candidate)
-  if (!denominator) return '—'
-  return ((candidate.mining.support_count / denominator) * 100).toFixed(3) + '%'
-}
-
-function hitRateTitle(candidate: ConditionResearchCandidate): string {
-  return candidate.side === 'sell'
-    ? '该条件在持仓期提前离场决策点上的命中比例（全市场合并）'
-    : '该条件在基础规则入场日上的命中比例（全市场合并）'
-}
-
-/** 前 N 名口径胜率：只统计每个信号日排序后真会成交的那批样本。 */
-function topNWinRate(candidate: ConditionResearchCandidate): string {
-  const rate = candidate.mining.top_n_outcome_rate
-  return rate === null || rate === undefined ? '—' : formatPercent(rate)
-}
-
-function topNTitle(candidate: ConditionResearchCandidate): string {
-  const slots = report.value?.ranking?.top_n
-  const days = candidate.mining.top_n_filtered_days ?? 0
-  if (candidate.mining.top_n_outcome_rate === null || candidate.mining.top_n_outcome_rate === undefined) {
-    // 卖出候选本就不参与该诊断（槽位竞争只发生在入场，卖出是触发式的），
-    // 不能统一说成「没解析出排序指标」—— 上方卡片明明给了推荐。
-    if (candidate.side === 'sell') {
-      return '槽位竞争只发生在入场，卖出是触发式的，没有「先卖谁」这回事，因此卖出候选不做前 N 名诊断。'
-    }
-    return '这次研究没有解析出排序指标，无法按前 N 名口径评估。'
-  }
-  if (days === 0) {
-    return `没有任何一天的命中数超过槽位数（${slots ?? '—'} 个），排序没起作用，这一列等于全池胜率。`
-  }
-  return (
-    `有 ${days} 个交易日的命中数超过槽位数（${slots ?? '—'} 个），` +
-    '这一列只统计这些日子里排序靠前、真正会成交的样本。'
-  )
-}
-
-/** 噪声门槛：随机打乱标签重挖若干次，看纯运气能把「最好的那个条件」推到多高的 lift。 */
-function significanceTitle(candidate: ConditionResearchCandidate): string {
-  const threshold = candidate.mining.lift_threshold
-  if (threshold === null || threshold === undefined) {
-    return '这次研究没有做置换检验，无法判断这个提升是不是运气。'
-  }
-  const pvalue = candidate.mining.permutation_pvalue
-  const p = pvalue === null || pvalue === undefined ? '—' : pvalue.toFixed(3)
-  // 门槛是「随机重挖里最好成绩」分布的 95 分位，不是那批随机重挖的最好成绩
-  // 本身 —— 后者要更极端一些，早期文案把它说成「纯运气最好的一次」是错的。
-  return (
-    `把交易结果随机打乱重新挖掘 ${form.significancePermutations} 次，` +
-    `其中 95% 的随机重挖里「表现最好的那个条件」lift 都超不过 ${threshold.toFixed(3)}。` +
-    `这个候选的 lift 是 ${candidate.mining.lift.toFixed(3)}，随机重挖里有 p=${p} 的比例达到或超过它。` +
-    'p 大于 0.05 就判为疑似噪声 —— 徽标和这里的 p 值是同一个判断，不会互相矛盾。'
-  )
-}
-
-function significanceLabel(candidate: ConditionResearchCandidate): string {
-  if (candidate.mining.significant === true) return '显著'
-  if (candidate.mining.significant === false) return '疑似噪声'
-  return ''
-}
-
 /** 有门槛数据时给一句总结，避免用户看到五个候选全是「疑似噪声」却不知道意味着什么。 */
 const significanceSummary = computed(() => {
   const candidates = report.value?.candidates ?? []
@@ -1118,12 +858,6 @@ const significanceSummary = computed(() => {
   )
 })
 
-function validationTrades(candidate: ConditionResearchCandidate): string {
-  const trades = candidate.validation.pooled_trades.closed_trades
-  const threshold = report.value?.min_trades
-  return threshold ? trades + ' / ' + threshold : String(trades)
-}
-
 /**
  * 合并了多少条同义条件。合并不等于"少给几条"——空出来的名额由更靠后的、
  * 不同义的条件顶上，所以这里要说明清楚，别让用户以为名额被砍了。
@@ -1137,94 +871,6 @@ const duplicateSummary = computed(() => {
     + '多数只是阈值差一点）。空出的名额由更靠后、不同义的条件顶上，明细见每行条件名后的「已合并」。'
   )
 })
-
-const rollingCandidates = computed(() =>
-  (report.value?.candidates ?? []).filter(
-    (candidate) => (candidate.windows ?? []).length > 0 && candidate.consistency,
-  ),
-)
-
-const rollingBaselineWindows = computed(() => report.value?.baseline.windows ?? [])
-
-function rollingWindowBaseline(index: number): number | null {
-  return rollingBaselineWindows.value.find((item) => item.index === index)?.win_rate ?? null
-}
-
-function rollingNote(candidate: ConditionResearchCandidate): string {
-  const consistency = candidate.consistency
-  if (!consistency) return ''
-  const parts = [
-    `${consistency.better_than_baseline}/${consistency.evaluated} 个窗口优于基线`,
-  ]
-  if (consistency.skipped > 0) {
-    parts.push(`${consistency.skipped} 个窗口成交数不足，未计入`)
-  }
-  return parts.join('；')
-}
-
-/**
- * 参数敏感性：把每个候选的阈值往松、往紧各挪两档重新计分。
- * 只挑出真的算出了邻域的候选——交叉条件之类没有可挪的标量参数，后端给 null。
- */
-interface SensitivityRow {
-  candidate: ConditionResearchCandidate
-  sensitivity: ConditionResearchSensitivity
-}
-
-const sensitivityRows = computed<SensitivityRow[]>(() => {
-  const rows = (report.value?.candidates ?? []).map((candidate) => ({
-    candidate,
-    sensitivity: candidate.sensitivity,
-  }))
-  return rows.filter(
-    (row): row is SensitivityRow => row.sensitivity != null,
-  )
-})
-
-/** 保持率的颜色：优势打反是红（危险），保持得多是深绿，未计入的是灰。 */
-function retentionClass(point: ConditionResearchSensitivityPoint): string {
-  if (point.insufficient || point.degenerate) return 'sens-excluded'
-  if (point.retention === null) return 'sens-excluded'
-  if (point.retention < 0) return 'sens-flipped'
-  if (point.retention >= 0.8) return 'sens-good'
-  if (point.retention >= 0.5) return 'sens-mid'
-  return 'sens-weak'
-}
-
-function retentionText(value: number | null | undefined): string {
-  return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(2) : '—'
-}
-
-function sensitivityTitle(point: ConditionResearchSensitivityPoint): string {
-  const direction =
-    point.offset < 0 ? '更宽松' : point.offset > 0 ? '更严格' : '基点'
-  const parts = [
-    `分位偏移 ${(point.offset * 100).toFixed(0)}%（${direction}）`,
-    `阈值 ${point.threshold.toFixed(4)}`,
-    `命中样本 ${point.support_count}`,
-  ]
-  if (point.lift !== null) {
-    parts.push(`胜率 ${formatPercent(point.outcome_rate)} / 基线 ${formatPercent(point.baseline_rate)}`)
-    parts.push(`lift ${point.lift.toFixed(3)}`)
-  }
-  if (point.retention !== null) {
-    parts.push(`保持率 ${point.retention.toFixed(2)}`)
-  }
-  if (point.degenerate) parts.push('阈值退化到恒真，不计入统计')
-  if (point.insufficient) parts.push('命中样本不足，不计入统计')
-  return parts.join(' · ')
-}
-
-function constraintText(candidate: ConditionResearchCandidate): string {
-  if (candidate.passed_constraints) return '通过验证'
-  const failures = candidate.constraint_failures ?? []
-  return failures.length ? failures.join(' · ') : '未入围'
-}
-
-function phaseCount(state: ConditionResearchJobState | null, key: 'phase_current' | 'phase_total'): number {
-  const value = state?.metadata?.[key]
-  return typeof value === 'number' && Number.isFinite(value) ? value : 0
-}
 
 function apiMessage(error: unknown): string {
   return error instanceof FormulaScreenApiError
@@ -1767,182 +1413,13 @@ onMounted(async () => {
                 </table>
               </div>
             </div>
-            <section v-if="sensitivityRows.length" class="condition-sensitivity">
-              <div class="section-heading">
-                <div>
-                  <span class="section-kicker">PARAMETER SENSITIVITY</span>
-                  <h3>参数敏感性<TermHint term="sensitivity" /></h3>
-                </div>
-              </div>
-              <p class="helper">
-                把每个候选的阈值往松、往紧各挪两档（分位 ±5% / ±10%）重新计分，看优势还在不在：
-                <strong>保持率</strong> 1.00 是一点没掉，0.50 是掉了一半，负数表示优势打反了。
-                邻域都在是台地，只有基这一个点好用是悬崖——后者是过拟合最典型的形状。
-              </p>
-              <p class="scope-helper">
-                邻域是在挖掘样本（寻优期）上重算的，回答的是「这个切点是不是噪声尖峰」，
-                <strong>不代表样本外表现</strong>；样本外由验证期、留出期和滚动复验负责。
-              </p>
-              <div class="table-wrap">
-                <table>
-                  <caption class="sr-only">参数敏感性邻域</caption>
-                  <thead>
-                    <tr>
-                      <th>候选</th>
-                      <th>更宽松 −10%</th>
-                      <th>−5%</th>
-                      <th>基点<TermHint term="sensitivityRetention" /></th>
-                      <th>+5%</th>
-                      <th>更严格 +10%</th>
-                      <th>仍有提升</th>
-                      <th>中位保持率</th>
-                      <th>最差保持率</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr
-                      v-for="row in sensitivityRows"
-                      :key="row.candidate.candidate_id"
-                      :data-testid="'condition-sensitivity-' + row.candidate.candidate_id"
-                    >
-                      <td class="condition-rule">{{ conditionText(row.candidate) }}</td>
-                      <td
-                        v-for="point in row.sensitivity.points"
-                        :key="point.offset"
-                        class="sensitivity-cell"
-                        :class="retentionClass(point)"
-                        :title="sensitivityTitle(point)"
-                        :data-testid="'sensitivity-point-' + row.candidate.candidate_id + '-' + point.offset"
-                      >
-                        <template v-if="point.insufficient || point.degenerate">
-                          <span class="muted-code">{{ point.degenerate ? '恒真' : '样本不足' }}</span>
-                        </template>
-                        <template v-else>{{ retentionText(point.retention) }}</template>
-                      </td>
-                      <td :data-testid="'sensitivity-stable-' + row.candidate.candidate_id">
-                        {{ row.sensitivity.stable_offsets }}/{{ row.sensitivity.evaluated_offsets }}
-                        <span v-if="row.sensitivity.skipped > 0" class="muted-code">（{{ row.sensitivity.skipped }} 档未计入）</span>
-                      </td>
-                      <td>{{ retentionText(row.sensitivity.median_retention) }}</td>
-                      <td>{{ retentionText(row.sensitivity.worst_retention) }}</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </section>
-            <div v-if="report?.rolling?.enabled" class="condition-rolling">
-              <div class="section-heading">
-                <div>
-                  <span class="section-kicker">ROLLING RE-VALIDATION</span>
-                  <h3>滚动复验<TermHint term="rollingConsistency" /></h3>
-                </div>
-              </div>
-              <p class="helper">
-                同一批候选在留出期的 {{ report.rolling.used }} 个连续窗口上各回放一次。
-                表里只列事实——几个窗口跑赢了同一窗口的基线规则，以及各窗的原始胜率。
-              </p>
-              <p v-if="report.rolling.note" class="scope-helper" data-testid="condition-rolling-note">{{ report.rolling.note }}</p>
-              <div class="table-wrap">
-                <table>
-                  <caption class="sr-only">滚动复验逐窗结果</caption>
-                  <thead>
-                    <tr>
-                      <th>候选</th>
-                      <th>优于基线</th>
-                      <th>中位胜率</th>
-                      <th>最差窗口</th>
-                      <th
-                        v-for="window in rollingBaselineWindows"
-                        :key="window.index"
-                        :title="'窗口 ' + window.index + '：' + window.start_date + ' 至 ' + window.end_date + '，基线胜率 ' + formatPercent(window.win_rate)"
-                      >窗口 {{ window.index }}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr
-                      v-for="candidate in rollingCandidates"
-                      :key="candidate.candidate_id"
-                      :data-testid="'condition-rolling-' + candidate.candidate_id"
-                    >
-                      <td class="condition-rule">{{ conditionText(candidate) }}</td>
-                      <td :data-testid="'rolling-consistency-' + candidate.candidate_id">
-                        {{ candidate.consistency?.better_than_baseline }}/{{ candidate.consistency?.evaluated }}
-                        <span v-if="(candidate.consistency?.skipped ?? 0) > 0" class="muted-code">（{{ candidate.consistency?.skipped }} 窗样本不足）</span>
-                      </td>
-                      <td>{{ formatPercent(candidate.consistency?.median_win_rate) }}</td>
-                      <td>{{ formatPercent(candidate.consistency?.worst_win_rate) }}</td>
-                      <td
-                        v-for="window in candidate.windows ?? []"
-                        :key="window.index"
-                        :class="{ positive: window.improved_win_rate === true, negative: window.improved_win_rate === false }"
-                        :title="rollingNote(candidate)"
-                      >
-                        <template v-if="window.insufficient_sample">
-                          <span class="muted-code" title="该窗口成交笔数不足，不判优劣">样本不足</span>
-                        </template>
-                        <template v-else>
-                          {{ formatPercent(window.win_rate) }}
-                          <small class="muted-code">基线 {{ formatPercent(window.baseline_win_rate ?? rollingWindowBaseline(window.index)) }}</small>
-                        </template>
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </div>
-            <section class="condition-stock-details">
-              <div class="section-heading">
-                <div><span class="section-kicker">PER-STOCK DETAIL</span><h3>{{ stockPeriodLabel }}个股表现</h3></div>
-                <div class="condition-stock-controls">
-                  <div class="condition-stock-view">
-                    <label for="condition-stock-view">规则与区间</label>
-                    <select id="condition-stock-view" v-model="selectedStockView" data-testid="condition-stock-view">
-                      <option v-for="option in stockViewOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
-                    </select>
-                  </div>
-                  <div class="condition-stock-view">
-                    <label for="condition-stock-filter">筛选股票</label>
-                    <input id="condition-stock-filter" v-model="stockFilter" data-testid="condition-stock-filter" type="search" placeholder="代码或名称">
-                  </div>
-                  <div class="condition-stock-view">
-                    <label for="condition-stock-sort">排序方式</label>
-                    <select id="condition-stock-sort" v-model="stockSort" data-testid="condition-stock-sort">
-                      <option value="win_rate">胜率从高到低</option>
-                      <option value="payoff_ratio">盈亏比从高到低</option>
-                      <option value="total_return">收益从高到低</option>
-                      <option value="sharpe">Sharpe 从高到低</option>
-                      <option value="code">市场和代码</option>
-                    </select>
-                  </div>
-                </div>
-              </div>
-              <div v-if="!selectedStockRows.length" class="inline-empty">
-                {{ selectedStockView.startsWith('baseline') ? '基础规则没有可展示的逐股票结果。' : '此候选未进入对应区间复验列表。' }}
-              </div>
-              <template v-else>
-                <div class="condition-stock-pagination">
-                  <span>筛选出 {{ filteredStockRows.length }} / {{ selectedStockRows.length }} 只股票 · 第 {{ stockPage }} / {{ stockPageCount }} 页</span>
-                  <div>
-                    <button class="secondary-button" type="button" :disabled="stockPage <= 1" @click="stockPage -= 1">上一页</button>
-                    <button class="secondary-button" type="button" :disabled="stockPage >= stockPageCount" @click="stockPage += 1">下一页</button>
-                  </div>
-                </div>
-                <div class="table-wrap">
-                  <table>
-                    <thead><tr><th>市场</th><th>代码</th><th>名称</th><th>交易数</th><th>胜率</th><th>较基础规则</th><th>盈亏比</th><th>收益</th><th>Sharpe</th><th>回撤</th></tr></thead>
-                    <tbody>
-                      <tr v-for="stock in selectedPageRows" :key="stock.market + stock.code">
-                        <td>{{ stock.market }}</td><td>{{ stock.code }}</td><td>{{ stock.name || '—' }}</td>
-                        <td>{{ stock.closed_trades }}</td><td>{{ formatPercent(stock.win_rate) }}</td>
-                        <td>{{ winRateDelta(stock) }}</td>
-                        <td>{{ formatNumber(stock.payoff_ratio) }}</td><td>{{ formatPercent(stock.total_return) }}</td>
-                        <td>{{ formatNumber(stock.sharpe) }}</td><td>{{ formatPercent(stock.max_drawdown) }}</td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-              </template>
-            </section>
+            <ConditionSensitivityTable :candidates="report.candidates" :values="availableValues" />
+            <ConditionRollingTable :report="report" :values="availableValues" />
+            <ConditionStockDetail
+              :report="report"
+              :values="availableValues"
+              v-model:view="selectedStockView"
+            />
           </template>
         </section>
       </div>
@@ -1953,60 +1430,16 @@ onMounted(async () => {
         <small>本阶段已处理 {{ phaseCount(job, 'phase_current') }} / {{ phaseCount(job, 'phase_total') }} 只股票</small>
       </div>
 
-      <section class="panel condition-history" data-testid="condition-research-history">
-        <div class="panel-heading">
-          <div><span class="section-kicker">SAVED RESEARCH</span><h2>历史研究</h2></div>
-          <div class="history-head-actions">
-            <span v-if="historyLoading" class="history-status">读取中…</span>
-            <button class="secondary-button" type="button" :disabled="historyLoading" data-testid="condition-history-refresh" @click="loadHistory">刷新</button>
-          </div>
-        </div>
-        <p class="helper">每次研究跑完会自动保存，只留最近 20 次。加载会一并还原当时的标的范围、买卖规则、日期区间和交易费用，方便在此基础上继续调整。</p>
-        <div v-if="!history.length" class="inline-empty">暂无历史研究记录。</div>
-        <template v-else>
-          <ul class="history-list">
-            <li
-              v-for="item in historyPageRows"
-              :key="item.history_id"
-              class="history-card"
-              :class="{ 'history-card-active': activeHistoryId === item.history_id }"
-              :data-testid="`condition-history-item-${item.history_id}`"
-            >
-              <div class="history-card-head">
-                <strong>{{ formatHistoryDate(item.created_at) }}</strong>
-                <span v-if="activeHistoryId === item.history_id" class="history-badge">当前</span>
-                <span v-if="historyDurationText(item)" class="history-duration">{{ historyDurationText(item) }}</span>
-              </div>
-              <div class="history-row">
-                <span class="history-chip">{{ historyRangeText(item) }}</span>
-                <span class="history-chip">{{ historyUniverseText(item) }}</span>
-                <span class="history-chip">{{ historySideText(item) }}</span>
-                <span v-if="summaryNumber(item, 'processed') !== null" class="history-chip">跑了 {{ summaryNumber(item, 'processed') }} 只</span>
-              </div>
-              <div class="history-row">
-                <span class="history-metric">候选 <strong>{{ summaryNumber(item, 'candidate_count') ?? 0 }}</strong> 条</span>
-                <span class="history-metric">合格 <strong>{{ summaryNumber(item, 'qualified_count') ?? 0 }}</strong> 条</span>
-                <span class="history-metric">最强 <strong class="history-condition">{{ summaryConditionText(item) }}</strong></span>
-                <span v-if="summaryNumber(item, 'top_lift') !== null" class="history-metric">提升 <strong>{{ formatNumber(summaryNumber(item, 'top_lift'), 2) }}</strong></span>
-                <span v-if="summaryNumber(item, 'top_outcome_rate') !== null" class="history-metric">命中后胜率 <strong>{{ formatPercent(summaryNumber(item, 'top_outcome_rate')) }}</strong></span>
-                <span v-if="summaryNumber(item, 'top_baseline_rate') !== null" class="history-metric">基线 <strong>{{ formatPercent(summaryNumber(item, 'top_baseline_rate')) }}</strong></span>
-                <span v-if="summaryNumber(item, 'top_instrument_count') !== null" class="history-metric">覆盖 <strong>{{ summaryNumber(item, 'top_instrument_count') }}</strong> 只</span>
-              </div>
-              <div class="history-card-actions">
-                <button class="table-link" type="button" :disabled="historyLoading" :data-testid="`condition-history-load-${item.history_id}`" @click="loadHistoryDetail(item.history_id)">加载</button>
-                <button class="table-link danger-link" type="button" :disabled="historyLoading" :data-testid="`condition-history-remove-${item.history_id}`" @click="removeHistory(item.history_id)">删除</button>
-              </div>
-            </li>
-          </ul>
-          <div v-if="historyPageCount > 1" class="history-pagination" data-testid="condition-history-pagination">
-            <span>共 {{ history.length }} 条 · 第 {{ historyPage }} / {{ historyPageCount }} 页</span>
-            <div>
-              <button class="secondary-button" type="button" :disabled="historyPage <= 1" data-testid="condition-history-prev" @click="historyPage -= 1">上一页</button>
-              <button class="secondary-button" type="button" :disabled="historyPage >= historyPageCount" data-testid="condition-history-next" @click="historyPage += 1">下一页</button>
-            </div>
-          </div>
-        </template>
-      </section>
+      <ConditionHistoryPanel
+        v-model:page="historyPage"
+        :history="history"
+        :loading="historyLoading"
+        :active-id="activeHistoryId"
+        :values="availableValues"
+        @refresh="loadHistory"
+        @load="loadHistoryDetail"
+        @remove="removeHistory"
+      />
     </main>
   </div>
 </template>
@@ -2065,7 +1498,7 @@ onMounted(async () => {
   line-height: 1.5;
 }
 
-.condition-rule {
+:deep(.condition-rule) {
   min-width: 180px;
   font-family: var(--font-mono, monospace);
   font-size: 0.85rem;
@@ -2099,35 +1532,35 @@ onMounted(async () => {
   margin-top: 1.4rem;
 }
 
-.sensitivity-cell {
+:deep(.sensitivity-cell) {
   min-width: 84px;
   text-align: center;
   font-variant-numeric: tabular-nums;
   cursor: help;
 }
 
-.sensitivity-cell.sens-good {
+:deep(.sensitivity-cell.sens-good) {
   background: rgba(34, 197, 94, 0.26);
   color: #d1fae5;
 }
 
-.sensitivity-cell.sens-mid {
+:deep(.sensitivity-cell.sens-mid) {
   background: rgba(34, 197, 94, 0.13);
   color: #bbf7d0;
 }
 
-.sensitivity-cell.sens-weak {
+:deep(.sensitivity-cell.sens-weak) {
   background: rgba(148, 163, 184, 0.16);
   color: var(--text-muted, #94a3b8);
 }
 
 /* 优势打反：邻域比基线还差，是最需要看见的一格。 */
-.sensitivity-cell.sens-flipped {
+:deep(.sensitivity-cell.sens-flipped) {
   background: rgba(248, 113, 113, 0.2);
   color: #fecaca;
 }
 
-.sensitivity-cell.sens-excluded {
+:deep(.sensitivity-cell.sens-excluded) {
   color: var(--text-subtle, #64748b);
 }
 
@@ -2135,7 +1568,7 @@ onMounted(async () => {
   margin-top: 1.4rem;
 }
 
-.condition-stock-pagination {
+:deep(.condition-stock-pagination) {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2144,18 +1577,18 @@ onMounted(async () => {
   font-size: 0.82rem;
 }
 
-.condition-stock-pagination > div {
+:deep(.condition-stock-pagination > div) {
   display: flex;
   gap: 0.5rem;
 }
 
-.condition-stock-controls {
+:deep(.condition-stock-controls) {
   display: grid;
   gap: 0.65rem;
   grid-template-columns: repeat(3, minmax(150px, 1fr));
 }
 
-.condition-stock-view {
+:deep(.condition-stock-view) {
   display: grid;
   gap: 0.35rem;
   min-width: 0;
