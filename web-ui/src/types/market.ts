@@ -220,3 +220,59 @@ export interface LocalMarketChart {
   candles: MarketCandle[]
   formula_panels?: MarketFormulaPanel[]
 }
+
+
+/** 一项健康检查的汇总：有多少标的命中、一共多少次、以及可以点开核对的示例。 */
+export interface MarketHealthCheck {
+  key: string
+  label: string
+  description: string
+  severity: 'ok' | 'warn' | 'error'
+  affected_instruments: number
+  occurrences: number
+  repairable: boolean
+  examples: MarketHealthExample[]
+}
+
+
+export interface MarketHealthExample {
+  market: string
+  code: string
+  name: string | null
+  trade_date: string | null
+  detail: string
+}
+
+
+/** 体检报告。所有下游结论都建立在「行情没洞」上，这份报告就是把那个前提显式化。 */
+export interface MarketDataHealthReport {
+  generated_at: string
+  instrument_count: number
+  bar_count: number
+  calendar_days: number
+  data_start: string | null
+  data_end: string | null
+  duration_seconds: number
+  checks: MarketHealthCheck[]
+}
+
+
+/** 修复结果。修复是「先删后下」，所以必须把删了没补回来的标的点出来。 */
+export interface MarketHealthRepairOutcome {
+  checked_keys?: string[]
+  requested_codes?: number
+  truncated?: boolean
+  deleted_bars?: number
+  written_bars?: number
+  errors?: number
+  failure_reasons?: Record<string, number>
+  empty_after_repair?: string[]
+  message?: string
+}
+
+
+export interface MarketHealthJobState extends Omit<MarketSyncJobState, 'result'> {
+  result:
+    | (MarketSyncResult & Partial<MarketDataHealthReport> & MarketHealthRepairOutcome)
+    | null
+}

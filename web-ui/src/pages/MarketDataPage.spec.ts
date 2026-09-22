@@ -19,6 +19,8 @@ vi.mock('../api/marketData', async () => {
     createOnlineSync: vi.fn(),
     createLocalImport: vi.fn(),
     deleteMarketBars: vi.fn(),
+    createHealthCheck: vi.fn(),
+    createHealthRepair: vi.fn(),
     detectLocalVipdoc: vi.fn(),
     getMarketDataJob: vi.fn(),
   }
@@ -662,4 +664,133 @@ describe('MarketDataPage', () => {
 
     expect(wrapper.get('[data-testid="market-candlestick-chart"]').text()).not.toContain('RSI')
   })
+
+  it('runs the read-only health check and lists the flagged instruments', async () => {
+    vi.mocked(marketApi.createHealthCheck).mockResolvedValue({ job_id: 'health-1', status: 'queued' })
+    vi.mocked(marketApi.getMarketDataJob).mockResolvedValue(healthJobState(healthReport()))
+    const wrapper = mount(MarketDataPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="market-health-check"]').trigger('click')
+    await flushPromises()
+
+    expect(marketApi.createHealthCheck).toHaveBeenCalled()
+    expect(wrapper.get('[data-testid="market-health-table"]').text()).toContain('行情缺口')
+    expect(wrapper.get('[data-testid="market-health-row-gap"]').text()).toContain('异常')
+    expect(wrapper.get('[data-testid="market-health-row-gap"]').text()).toContain('缺 3 个交易日')
+    expect(wrapper.get('[data-testid="market-health-row-gap"]').text()).toContain('000001')
+    // 干净的一项必须显示正常，否则用户没法分辨"没查"和"查了没问题"。
+    expect(wrapper.get('[data-testid="market-health-row-ohlc"]').text()).toContain('正常')
+  })
+
+  it('repairs only the flagged check after an explicit confirmation', async () => {
+    vi.mocked(marketApi.createHealthCheck).mockResolvedValue({ job_id: 'health-1', status: 'queued' })
+    vi.mocked(marketApi.getMarketDataJob).mockResolvedValue(healthJobState(healthReport()))
+    vi.mocked(marketApi.createHealthRepair).mockResolvedValue({ job_id: 'repair-1', status: 'queued' })
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const wrapper = mount(MarketDataPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="market-health-check"]').trigger('click')
+    await flushPromises()
+    vi.mocked(marketApi.getMarketDataJob).mockResolvedValue(
+      healthJobState({
+        requested_codes: 1,
+        deleted_bars: 77,
+        written_bars: 60,
+        errors: 0,
+        empty_after_repair: ['000001'],
+      }),
+    )
+    await wrapper.get('[data-testid="market-health-fix-gap"]').trigger('click')
+    await flushPromises()
+
+    expect(confirmSpy).toHaveBeenCalled()
+    expect(marketApi.createHealthRepair).toHaveBeenCalledWith({ checks: ['gap'], confirm: true })
+    const result = wrapper.get('[data-testid="market-health-repair-result"]').text()
+    expect(result).toContain('删除 77 根')
+    expect(result).toContain('重写 60 根')
+    // 删了没补回来的标的必须点名，否则"修复"会静默变成删库。
+    expect(wrapper.get('[data-testid="market-health-empty-codes"]').text()).toContain('000001')
+    confirmSpy.mockRestore()
+  })
+
+  it('does not call the repair endpoint when the user cancels the confirmation', async () => {
+    vi.mocked(marketApi.createHealthCheck).mockResolvedValue({ job_id: 'health-1', status: 'queued' })
+    vi.mocked(marketApi.getMarketDataJob).mockResolvedValue(healthJobState(healthReport()))
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const wrapper = mount(MarketDataPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="market-health-check"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid="market-health-repair"]').trigger('click')
+    await flushPromises()
+
+    expect(marketApi.createHealthRepair).not.toHaveBeenCalled()
+    confirmSpy.mockRestore()
+  })
+
+  it('keeps the health panel empty until a check has run', async () => {
+    const wrapper = mount(MarketDataPage)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="market-health-empty"]').text()).toContain('还没有检查结果')
+    expect(wrapper.find('[data-testid="market-health-table"]').exists()).toBe(false)
+  })
 })
+
+function healthReport(): Record<string, unknown> {
+  return {
+    generated_at: '2024-03-01T00:00:00',
+    instrument_count: 2,
+    bar_count: 157,
+    calendar_days: 60,
+    data_start: '2024-01-01',
+    data_end: '2024-02-29',
+    duration_seconds: 9.8,
+    checks: [
+      {
+        key: 'gap',
+        label: '行情缺口',
+        description: '标的在自己首末日期之间本该有日线却没有的交易日。',
+        severity: 'error',
+        affected_instruments: 1,
+        occurrences: 3,
+        repairable: true,
+        examples: [
+          {
+            market: 'SZ',
+            code: '000001',
+            name: '平安银行',
+            trade_date: '2024-01-10',
+            detail: '共缺 3 个交易日，分 2 段（最早缺失 2024-01-10）',
+          },
+        ],
+      },
+      {
+        key: 'ohlc',
+        label: '价格结构错误',
+        description: '最高价低于最低价或价格不为正数。',
+        severity: 'ok',
+        affected_instruments: 0,
+        occurrences: 0,
+        repairable: true,
+        examples: [],
+      },
+    ],
+  }
+}
+
+function healthJobState(result: Record<string, unknown>) {
+  return {
+    job_id: 'health-1',
+    status: 'completed' as const,
+    progress: 1,
+    total_candidates: 1,
+    total_scanned: 1,
+    errors: 0,
+    error: null,
+    result,
+  }
+}

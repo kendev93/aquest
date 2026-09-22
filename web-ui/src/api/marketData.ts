@@ -202,4 +202,32 @@ export async function deleteMarketBars(payload: {
   return response.data
 }
 
+/**
+ * 提交一次行情体检。600 万行的库实测约 10 秒，所以走任务而不是同步返回。
+ */
+export async function createHealthCheck(): Promise<{ job_id: string; status: string }> {
+  const response = await request<{ data: { job_id: string; status: string } }>(
+    `${API_BASE}/health/check`,
+    { method: 'POST' },
+  )
+  return response.data
+}
+
+/**
+ * 一键修复：删掉命中标的的全部历史再全量重下。
+ * 在线源已经没有的标的会变成空数据，所以必须显式 confirm。
+ */
+export async function createHealthRepair(payload: {
+  checks?: string[]
+  codes?: string[]
+  limit?: number
+  confirm: boolean
+}): Promise<{ job_id: string; status: string }> {
+  const response = await request<{ data: { job_id: string; status: string } }>(
+    `${API_BASE}/health/repair`,
+    { method: 'POST', body: JSON.stringify(payload) },
+  )
+  return response.data
+}
+
 export type MarketDataImportResult = MarketSyncResult

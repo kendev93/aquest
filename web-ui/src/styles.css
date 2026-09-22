@@ -758,3 +758,9 @@ tbody tr:hover td { background: rgba(22, 34, 58, 0.45); }
 .publish-warning { color: #fbbf24; }
 .publish-notes { margin: 8px 0 0; padding-left: 18px; color: var(--muted); font-size: 11px; line-height: 1.7; }
 @media (max-width: 900px) { .candidate-evidence { grid-template-columns: 1fr 1fr; } }
+
+.market-health-panel .market-sync-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.market-health-panel .health-evidence { min-width: 260px; }
+.health-evidence-line { display: block; color: var(--muted); font-size: 9px; line-height: 1.5; }
+.market-health-panel .store-meta { color: var(--muted); font-size: 10px; }
+@media (max-width: 900px) { .market-health-panel .market-sync-actions { grid-template-columns: 1fr; } }

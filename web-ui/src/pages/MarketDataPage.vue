@@ -5,6 +5,8 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { FormulaScreenApiError } from '../api/formulaScreen'
 import {
   cancelMarketDataJob,
+  createHealthCheck,
+  createHealthRepair,
   createLocalImport,
   createOnlineBackfill,
   createOnlineSync,
@@ -26,6 +28,9 @@ import type {
   LocalMarketScope,
   LocalVipdocCandidate,
   MarketChartPeriod,
+  MarketDataHealthReport,
+  MarketHealthJobState,
+  MarketHealthRepairOutcome,
   MarketSyncJobState,
 } from '../types'
 import MarketCandlestickChart from '../components/MarketCandlestickChart.vue'
@@ -566,6 +571,119 @@ function isLocalImportResult(result: Record<string, unknown> | null | undefined)
   return result.source === 'local' || typeof result.discovered_files === 'number'
 }
 
+const healthReport = ref<MarketDataHealthReport | null>(null)
+const healthChecking = ref(false)
+const healthRepairing = ref(false)
+const healthRepaired = ref<MarketHealthRepairOutcome | null>(null)
+const healthJob = ref<MarketHealthJobState | null>(null)
+const healthMessage = ref('')
+/** 有问题的检查项才能送去重下；零成交重下多半还是同一份数据，不给按钮。 */
+const REPAIRABLE_SEVERITIES = new Set(['error', 'warn'])
+
+const healthIssues = computed(() =>
+  (healthReport.value?.checks ?? []).filter(
+    (check) => check.affected_instruments > 0 && check.repairable,
+  ),
+)
+
+const healthSummary = computed(() => {
+  const checks = healthReport.value?.checks ?? []
+  const bad = checks.filter((check) => check.severity !== 'ok')
+  if (!checks.length) return null
+  return {
+    total: checks.length,
+    bad: bad.length,
+    instruments: healthReport.value?.instrument_count ?? 0,
+    days: healthReport.value?.calendar_days ?? 0,
+  }
+})
+
+function severityText(severity: string): string {
+  if (severity === 'error') return '异常'
+  if (severity === 'warn') return '提示'
+  return '正常'
+}
+
+function beginHealthJob(jobId: string, status: string): void {
+  healthJob.value = {
+    job_id: jobId,
+    status: status as MarketHealthJobState['status'],
+    progress: 0,
+    total_candidates: 0,
+    total_scanned: 0,
+    errors: 0,
+    error: null,
+    result: null,
+  }
+}
+
+async function waitForHealthJob(jobId: string): Promise<void> {
+  for (;;) {
+    const state = (await getMarketDataJob(jobId)) as unknown as MarketHealthJobState
+    healthJob.value = state
+    if (state.status === 'completed') return
+    if (state.status === 'cancelled') {
+      healthMessage.value = '行情任务已取消。'
+      return
+    }
+    if (state.status === 'failed') {
+      throw new FormulaScreenApiError(state.error ?? '行情任务失败。', 500)
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, MARKET_JOB_POLL_INTERVAL_MS))
+  }
+}
+
+async function runHealthCheck(): Promise<void> {
+  healthChecking.value = true
+  healthMessage.value = ''
+  healthRepaired.value = null
+  try {
+    const job = await createHealthCheck()
+    beginHealthJob(job.job_id, job.status)
+    await waitForHealthJob(job.job_id)
+    const result = healthJob.value?.result
+    healthReport.value = result?.checks
+      ? (result as unknown as MarketDataHealthReport)
+      : null
+    if (!healthReport.value) healthMessage.value = '体检没有返回报告，请重试。'
+  } catch (error) {
+    healthMessage.value = apiMessage(error)
+  } finally {
+    healthChecking.value = false
+  }
+}
+
+async function repairHealth(checks: string[]): Promise<void> {
+  if (!checks.length) return
+  if (
+    !window.confirm(
+      '将删除命中检查项的标的的全部历史行情，再重新下载覆盖。在线源已无数据的标的（如退市）删了就补不回来，会在结果里单独列出。确定继续？',
+    )
+  ) {
+    return
+  }
+  healthRepairing.value = true
+  healthMessage.value = ''
+  try {
+    const job = await createHealthRepair({ checks, confirm: true })
+    beginHealthJob(job.job_id, job.status)
+    await waitForHealthJob(job.job_id)
+    healthRepaired.value = healthJob.value?.result ?? null
+    await loadStoreStatus()
+    await loadInstruments()
+    // 修复完原来的报告已经过期：重下之后问题可能还在（在线源同样缺那段）。
+    healthReport.value = null
+  } catch (error) {
+    healthMessage.value = apiMessage(error)
+  } finally {
+    healthRepairing.value = false
+  }
+}
+
+function repairAllHealth(): void {
+  void repairHealth(healthIssues.value.map((check) => check.key))
+}
+
 const localImportSummary = computed(() => {
   const result = marketJob.value?.result as Record<string, unknown> | undefined
   if (!isLocalImportResult(result)) return null
@@ -815,9 +933,73 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
         </div>
       </section>
 
+      <section class="panel market-health-panel" data-testid="market-health-panel">
+        <div class="panel-heading">
+          <div><span class="section-kicker">01 / HEALTH CHECK</span><h2>行情健康检查</h2></div>
+          <span class="required-hint">{{ healthChecking ? '检查中…' : healthSummary ? `${healthSummary.bad} / ${healthSummary.total} 项有问题` : '只读体检' }}</span>
+        </div>
+        <div class="market-sync-actions">
+          <button class="primary-button" data-testid="market-health-check" type="button" :disabled="healthChecking || healthRepairing" @click="runHealthCheck">{{ healthChecking ? '检查中…' : '开始检查' }}</button>
+          <button class="secondary-button" data-testid="market-health-repair" type="button" :disabled="healthChecking || healthRepairing || !healthIssues.length" @click="repairAllHealth">{{ healthRepairing ? '修复中…' : healthIssues.length ? `一键修复 ${healthIssues.length} 项` : '一键修复' }}</button>
+        </div>
+        <small class="scope-helper">检查项：行情缺口、连续缺失段、价格结构错误、异常跳变、零成交日、数据陈旧。只出报告不改数据；「一键修复」是删掉命中标的的全部历史再全量重下覆盖。</small>
+
+        <div v-if="healthSummary" class="store-status-grid" data-testid="market-health-summary">
+          <span>标的 {{ healthSummary.instruments }}</span>
+          <span>交易日 {{ healthSummary.days }}</span>
+          <span>耗时 {{ (healthReport?.duration_seconds ?? 0).toFixed(1) }} 秒</span>
+        </div>
+
+        <div v-if="healthChecking || (healthJob && (healthJob.status === 'queued' || healthJob.status === 'running'))" class="sync-progress" data-testid="market-health-progress">
+          <div class="sync-progress-heading"><span>{{ healthRepairing ? '正在重新下载…' : '正在扫描行情库…' }}</span><div class="sync-progress-actions"><button class="text-button" data-testid="market-health-cancel" type="button" :disabled="healthJob?.cancel_requested" @click="cancelActiveMarketJob(healthJob?.job_id ?? '')">{{ healthJob?.cancel_requested ? '取消中…' : '取消任务' }}</button><strong>{{ Math.round((healthJob?.progress ?? 0) * 100) }}%</strong></div></div>
+          <div class="progress-track sync-progress-track"><span :style="{ width: `${Math.round((healthJob?.progress ?? 0) * 100)}%` }"></span></div>
+        </div>
+
+        <div v-if="healthRepaired" class="store-meta" data-testid="market-health-repair-result">
+          <span>删除 {{ healthRepaired.deleted_bars ?? 0 }} 根</span>
+          <span>重写 {{ healthRepaired.written_bars ?? 0 }} 根</span>
+          <span :class="{ negative: (healthRepaired.errors ?? 0) > 0 }">失败 {{ healthRepaired.errors ?? 0 }}</span>
+          <span v-if="healthRepaired.truncated">本次只修了前 {{ healthRepaired.requested_codes ?? 0 }} 只，还有更多未修</span>
+          <span v-if="healthRepaired.message">{{ healthRepaired.message }}</span>
+          <span v-if="healthRepaired.empty_after_repair?.length" class="negative" data-testid="market-health-empty-codes">重下后仍无数据 {{ healthRepaired.empty_after_repair.join('、') }}</span>
+        </div>
+
+        <div v-if="!healthReport" class="inline-empty" data-testid="market-health-empty">{{ healthChecking ? '正在扫描行情库，全库约 600 万行时需要十秒左右…' : '还没有检查结果，点「开始检查」跑一次只读体检。' }}</div>
+        <div v-else class="table-wrap">
+          <table data-testid="market-health-table">
+            <caption class="sr-only">行情健康检查结果</caption>
+            <thead>
+              <tr>
+                <th>检查项</th>
+                <th>状态</th>
+                <th>影响标的</th>
+                <th>次数</th>
+                <th>证据示例</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="check in healthReport.checks" :key="check.key" :data-testid="`market-health-row-${check.key}`">
+                <td>{{ check.label }}<TermHint v-if="check.key === 'gap'" term="dataGap" /><TermHint v-else-if="check.key === 'price_jump'" term="priceJump" /><TermHint v-else-if="check.key === 'stale'" term="staleBars" /></td>
+                <td :class="{ negative: check.severity === 'error', positive: check.severity === 'ok' }">{{ severityText(check.severity) }}</td>
+                <td>{{ check.affected_instruments }}</td>
+                <td>{{ check.occurrences }}</td>
+                <td class="health-evidence">
+                  <span v-if="!check.examples.length">—</span>
+                  <span v-for="example in check.examples.slice(0, 2)" :key="`${example.market}-${example.code}-${example.trade_date}`" class="health-evidence-line">{{ example.code }}<template v-if="example.name"> {{ example.name }}</template> · {{ example.detail }}</span>
+                </td>
+                <td><button v-if="check.repairable && check.affected_instruments > 0" class="text-button" :data-testid="`market-health-fix-${check.key}`" type="button" :disabled="healthRepairing" @click="repairHealth([check.key])">修复</button><span v-else>—</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <small v-if="healthReport && !healthIssues.length" class="scope-helper" data-testid="market-health-clean">六项检查都没有命中，行情库当前看不出洞。</small>
+        <small v-if="healthMessage" class="scope-warning" data-testid="market-health-message">{{ healthMessage }}</small>
+      </section>
+
       <div class="market-data-grid">
         <section class="panel local-instruments-panel" data-testid="local-instruments">
-          <div class="panel-heading"><div><span class="section-kicker">01 / INSTRUMENTS</span><h2>本地品种</h2></div><span class="required-hint">{{ listMeta?.total ?? 0 }} 个标的</span></div>
+          <div class="panel-heading"><div><span class="section-kicker">02 / INSTRUMENTS</span><h2>本地品种</h2></div><span class="required-hint">{{ listMeta?.total ?? 0 }} 个标的</span></div>
           <form class="market-filter-form" @submit.prevent="form.page = 1; loadInstruments()">
             <div class="compact-fields">
               <div><label for="market-scope">市场</label><select id="market-scope" v-model="form.market" data-testid="market-scope"><option value="all">沪深全部品种</option><option value="SH">仅上海</option><option value="SZ">仅深圳</option></select></div>
@@ -838,7 +1020,7 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
         </section>
 
         <section class="panel market-chart-panel" data-testid="market-chart-panel">
-          <div class="panel-heading"><div><span class="section-kicker">02 / CHART</span><h2>{{ selectedTitle }}</h2></div><span v-if="chart" class="required-hint">{{ chart.data_start }} → {{ chart.data_end }}</span></div>
+          <div class="panel-heading"><div><span class="section-kicker">03 / CHART</span><h2>{{ selectedTitle }}</h2></div><span v-if="chart" class="required-hint">{{ chart.data_start }} → {{ chart.data_end }}</span></div>
           <template v-if="selected">
             <div class="chart-toolbar">
               <div class="period-switch" role="group" aria-label="K线周期"><button v-for="item in [{ key: 'daily', label: '日线' }, { key: 'monthly', label: '月线' }, { key: 'yearly', label: '年线' }]" :key="item.key" :class="{ active: period === item.key }" :data-testid="`chart-period-${item.key}`" type="button" @click="setPeriod(item.key as MarketChartPeriod)">{{ item.label }}</button></div>
