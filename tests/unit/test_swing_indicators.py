@@ -286,7 +286,9 @@ def test_anticipation_labels_leave_the_tail_unknown() -> None:
 
 
 def test_short_legs_are_excluded_from_labels() -> None:
-    closes = _path([0.02] * 10 + [-0.02] * 10)
+    # 四段行情（涨跌涨跌）。不能用两段：第一段起点不是转折点、不打标，两段序列里
+    # 就一个合法标签都没有，这条测试会退化成「什么都没验证」。
+    closes = _path([0.02] * 10 + [-0.02] * 10 + [0.02] * 10 + [-0.02] * 10)
     frame = _frame(closes)
     segments = split_swings(frame, reversal_multiple=1.0)
 
@@ -295,6 +297,50 @@ def test_short_legs_are_excluded_from_labels() -> None:
 
     assert strict["up_leg_start"].sum() == 0
     assert loose["up_leg_start"].sum() >= 1
+
+
+def test_first_leg_start_is_not_a_pivot() -> None:
+    """序列的第一根 bar 不是转折点，不能当「波段最低点」用。
+
+    ``split_swings`` 从 ``seg_start = 0`` 起步，第一段没有更早的行情来确认那是
+    个底——它只是数据窗口的边界。把它算进去，等于往「最低点」里掺一个随手取的
+    坐标，它不含任何关于转折的信息。
+    """
+
+    closes = _path([0.02] * 10 + [-0.02] * 10)
+    frame = _frame(closes)
+    segments = split_swings(frame, reversal_multiple=1.0)
+
+    labels = bar_labels(frame, segments, min_bars=0)
+
+    # 这段序列只有第一段完成了反转确认，跳过它就没有标签剩下。
+    assert segments and segments[0].start_index == 0
+    assert labels["up_leg_start"].sum() == 0
+
+
+def test_attribution_labels_sit_on_the_previous_extreme() -> None:
+    """归因标签打在**前一波的极值点**上，不是随便哪根 bar。
+
+    ZigZag 的相邻两段共用转折点：一段在极值 bar 收尾，下一段就从那里起算。所以
+    「上涨段起点」正是前一波下跌的最低点，「下跌段起点」正是前一波上涨的最高点
+    ——这也是为什么这两个标签研究的是顶和底，尽管名字叫「段起点」。
+    """
+
+    closes = _path([0.02] * 10 + [-0.02] * 10 + [0.02] * 10 + [-0.02] * 10)
+    frame = _frame(closes)
+    segments = split_swings(frame, reversal_multiple=1.0)
+
+    labels = bar_labels(frame, segments, min_bars=0)
+
+    up_starts = set(np.nonzero(labels["up_leg_start"])[0].tolist())
+    down_starts = set(np.nonzero(labels["down_leg_start"])[0].tolist())
+    up_ends = {seg.end_index for seg in segments if seg.direction == "up"}
+    down_ends = {seg.end_index for seg in segments if seg.direction == "down"}
+
+    assert up_starts, "至少要有一个上涨段起点"
+    assert down_starts, "至少要有一个下跌段起点"
+    assert up_starts <= down_ends
+    assert down_starts <= up_ends
 
 
 def _random_walk(rng: np.random.Generator, length: int) -> list[float]:

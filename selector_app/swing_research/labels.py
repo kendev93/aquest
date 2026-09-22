@@ -3,10 +3,15 @@
 The same segmentation supports two different questions, and they need
 different labels:
 
-* **Attribution** - is *today* the first bar of a leg that went on to travel
-  far? The features are legitimate (they are today's indicators) but the label
-  is only knowable in hindsight: nothing on a start bar announces that it is
-  the bottom. This answers "what does a launch pad look like".
+* **Attribution** - is *today* the pivot a leg started from? Adjacent legs
+  share their pivot: a leg closes at its extreme bar and the next one starts
+  there, so the bar this marks is the *extreme of the previous leg* -
+  ``up_leg_start`` sits on the lowest low of the preceding down leg and
+  ``down_leg_start`` on the highest high of the preceding up leg. Despite the
+  name, attribution studies describe what tops and bottoms look like. The
+  features are legitimate (they are today's indicators) but the label is only
+  knowable in hindsight: nothing on a pivot bar announces that it is the
+  bottom. This answers "what does a launch pad look like".
 
 * **Anticipation** - does a leg *start running* within the next ``horizon``
   bars? The onset bar is the first day price travelled the reversal threshold
@@ -42,9 +47,12 @@ ALL_LABELS: tuple[LabelKind, ...] = (
     "down_onset_ahead",
 )
 
+#: 名字里带「最高/最低点」而不是「段起点」：段起点听起来像研究一段行情怎么开始，
+#: 而它实际打在**前一波的极值点**上（相邻两段共用那个转折点）。叫「段起点」时没人
+#: 看得出这是在研究顶和底。
 LABEL_DISPLAY_NAMES: dict[str, str] = {
-    "up_leg_start": "大涨段起点（归因）",
-    "down_leg_start": "大跌段起点（归因）",
+    "up_leg_start": "波段最低点（事后归因）",
+    "down_leg_start": "波段最高点（事后归因）",
     "up_onset_ahead": "近期将启动上涨",
     "down_onset_ahead": "近期将启动下跌",
 }
@@ -112,7 +120,8 @@ def bar_labels(
 
     Legs shorter than ``min_bars`` never contribute: the study asked for moves
     of a certain size, and a two-bar blip is not one of them even though the
-    segmenter happily reports it.
+    segmenter happily reports it. Neither does the very first leg - see the
+    comment in the loop.
     """
 
     count = len(frame)
@@ -121,8 +130,14 @@ def bar_labels(
     up_onset = np.zeros(count, dtype=float)
     down_onset = np.zeros(count, dtype=float)
 
-    for segment in segments:
+    for position, segment in enumerate(segments):
         if segment.pending or segment.duration < min_bars:
+            continue
+        # 第一段不参与打标：split_swings 从 seg_start=0 起步，所以第一段的起点恒为
+        # 数据窗口的第一根 bar，不是由反转确认出来的极值点。其余每一段的起点都等于
+        # 前一段的终点，也就是真正的转折点。留着第一段会让「最低点」这个口径里混进
+        # 一个随手取的坐标——它不含任何关于转折的信息。
+        if position == 0:
             continue
         if segment.direction == "up":
             if 0 <= segment.start_index < count:
