@@ -219,6 +219,26 @@ def _permutation_max_lifts(
     Each run reports the *maximum* lift, matching the selection pressure the
     real search applies - this is the max-T null distribution, not the null
     distribution of a single fixed rule.
+
+    **Why this shuffles cells, not trading days.** 波段研究和因子检验按交易日块
+    搬动标签，这里不这么做，是有原因的，不是漏改：
+
+    1. 这里的样本已经被 trade group（股票 + 信号日）归约成一笔交易一个单位，
+       同一天的样本数每天都不相等。按日期块搬动要求「源日期的样本集合」和
+       「目标日期的样本集合」一一对应，长度不等时只能循环填充或有放回抽样，
+       那引入的近似误差和要修的偏差是同一个量级。
+    2. 实测过代价。用真实 A 股日线（主板 200 只、2021-2025、持有 5 日，见
+       ``scripts/perm_caliber_regression.py``）：日度胜率的相邻日自相关高达
+       0.78，名义样本 24 万实际只有 1212 个独立交易日 —— 结构上确实该按块搬。
+       但两种口径的 95% 噪声门槛只差 **1.5%**（逐单元格 1.044 / 按日期块
+       1.059），而且是**按日期块更严**。条件池从 70 放大到 266 个，差异稳定在
+       1.5%，不随多重检验规模放大。
+
+    合成数据上曾经得到过相反的结论（逐单元格更保守 2.5%），原因是合成数据的
+    日间相关是拍出来的。**判断置换粒度时不要用合成数据下结论。**
+
+    结论：影响 1.5% 且方向偏保守，为了它换成无法干净实现的近似置换不划算。
+    这里保持逐单元格，代价是门槛比理论上严一点点的口径略松 1.5%。
     """
 
     rng = np.random.default_rng(_PERMUTATION_SEED if seed is None else seed)
