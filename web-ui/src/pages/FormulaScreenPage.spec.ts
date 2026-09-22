@@ -8,6 +8,20 @@ import * as api from '../api/formulaScreen'
 import * as marketApi from '../api/marketData'
 import * as jobsApi from '../api/jobs'
 import * as presetApi from '../api/screenPresets'
+import * as groupApi from '../api/stockGroups'
+
+vi.mock('../api/stockGroups', async () => {
+  const actual = await vi.importActual<typeof import('../api/stockGroups')>('../api/stockGroups')
+  return {
+    ...actual,
+    fetchStockGroups: vi.fn(),
+    createStockGroup: vi.fn(),
+    getStockGroup: vi.fn(),
+    fetchStockGroupPerformance: vi.fn(),
+    removeStockGroupMembers: vi.fn(),
+    deleteStockGroup: vi.fn(),
+  }
+})
 
 vi.mock('../api/screenPresets', async () => {
   const actual = await vi.importActual<typeof import('../api/screenPresets')>('../api/screenPresets')
@@ -107,6 +121,7 @@ describe('FormulaScreenPage', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     localStorage.clear()
+    sessionStorage.clear()
     vi.mocked(api.fetchMetadata).mockResolvedValue(metadata)
     vi.mocked(api.parseFormula).mockResolvedValue({
       parameters: [{ name: 'N', default: 5, minimum: 1, maximum: 10000, step: 1 }],
@@ -160,6 +175,7 @@ describe('FormulaScreenPage', () => {
       created_at: '2026-09-21T10:00:00', updated_at: '2026-09-21T10:00:00',
       payload: presetPayload,
     })
+    vi.mocked(groupApi.fetchStockGroups).mockResolvedValue([])
   })
 
   it('recovers and resumes a running screening task after the page is refreshed', async () => {
@@ -654,5 +670,119 @@ describe('FormulaScreenPage', () => {
     await wrapper.get('[data-testid="sync-market-data"]').trigger('click')
     await flushPromises()
     expect(wrapper.get('[data-testid="screen-message"]').text()).toContain('行情同步失败，请检查网络')
+  })
+
+  it('picks up a condition-research handoff and clears it so a refresh cannot reapply it', async () => {
+    sessionStorage.setItem(
+      'indicator-lab.condition-research.to-screen',
+      JSON.stringify({
+        signals: ['indicator_three.accumulation_zone'],
+        conditions: [],
+        required_conditions: [],
+        combine_mode: 'all',
+        minimum_matches: null,
+        universe: 'sh',
+        boards: ['main'],
+        instrument_types: ['stock'],
+      }),
+    )
+
+    const wrapper = mount(FormulaScreenPage)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="screen-message"]').text())
+      .toContain('已带入买卖条件研究的买入条件')
+    // 卖出条件没跟过来这件事必须讲，不能让人以为整套规则都搬过来了。
+    expect(wrapper.get('[data-testid="screen-message"]').text())
+      .toContain('卖出条件没有带过来')
+    expect(wrapper.get('[data-testid="signal-indicator_three.accumulation_zone"]').element).toBeTruthy()
+    expect(sessionStorage.getItem('indicator-lab.condition-research.to-screen')).toBeNull()
+  })
+
+  it('keeps picked results as a group and reports how that group did afterwards', async () => {
+    const wrapper = mount(FormulaScreenPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="screen-config"]').trigger('submit')
+    await flushPromises()
+
+    // 没勾选时「保存勾选的」必须是禁用的，否则会存出一组空的东西。
+    expect(wrapper.get('[data-testid="save-picked-group"]').attributes('disabled')).toBeDefined()
+
+    await wrapper.get('[data-testid="result-pick-SH-600000"]').setValue(true)
+    await wrapper.get('[data-testid="group-name"]').setValue('9月候选')
+    vi.mocked(groupApi.createStockGroup).mockResolvedValue({
+      group_id: 'group-1', name: '9月候选', note: '', source: 'screen', source_label: '选股结果',
+      source_history_id: null, created_at: '2026-09-22T10:00:00', updated_at: '2026-09-22T10:00:00',
+      item_count: 1, items: [{ market: 'SH', code: '600000', name: '浦发银行' }],
+    })
+    vi.mocked(groupApi.fetchStockGroups).mockResolvedValue([{
+      group_id: 'group-1', name: '9月候选', note: '', source: 'screen', source_label: '选股结果',
+      source_history_id: null, created_at: '2026-09-22T10:00:00', updated_at: '2026-09-22T10:00:00',
+      item_count: 1,
+    }])
+    await wrapper.get('[data-testid="save-picked-group"]').trigger('click')
+    await flushPromises()
+
+    expect(groupApi.createStockGroup).toHaveBeenCalledWith(expect.objectContaining({
+      name: '9月候选',
+      items: [{ market: 'SH', code: '600000', name: '浦发银行' }],
+      source: 'screen',
+    }))
+    expect(wrapper.get('[data-testid="group-item-group-1"]')).toBeTruthy()
+
+    // 组保存完立刻看表现：本组 +25%、全市场 -5%、超额 +30 个百分点。
+    vi.mocked(groupApi.getStockGroup).mockResolvedValue({
+      group_id: 'group-1', name: '9月候选', note: '', source: 'screen', source_label: '选股结果',
+      source_history_id: null, created_at: '2026-09-22T10:00:00', updated_at: '2026-09-22T10:00:00',
+      item_count: 2,
+      items: [
+        { market: 'SH', code: '600000', name: '浦发银行' },
+        { market: 'SZ', code: '000001', name: '平安银行' },
+      ],
+    })
+    vi.mocked(groupApi.fetchStockGroupPerformance).mockResolvedValue({
+      group_id: 'group-1',
+      start_date: '2026-09-01',
+      end_date: '2026-09-22',
+      trading_days: 15,
+      group_curve: {
+        label: '本组等权买入持有', instrument_count: 1, dates: [20260901, 20260922],
+        totals: [1, 1.25], performance: { total_return: 0.25 },
+      },
+      market_curve: {
+        label: '全市场等权买入持有', instrument_count: 5300, dates: [20260901, 20260922],
+        totals: [1, 0.95], performance: { total_return: -0.05 },
+      },
+      excess_return: 0.3,
+      spread: {
+        counted: 2, advanced: 1, declined: 1, median_return: 0.1,
+        best: { market: 'SH', code: '600000', name: '浦发银行', return: 0.25 },
+        worst: { market: 'SZ', code: '000001', name: '平安银行', return: -0.05 },
+      },
+      excluded: [{ market: 'SZ', code: '000002', name: '万科A' }],
+      truncated: false,
+      notes: ['1 只标的在起点当天没有收盘价（新股或停牌），未计入曲线'],
+    })
+    await wrapper.get('[data-testid="group-pick-group-1"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="group-return"]').text()).toBe('+25.00%')
+    expect(wrapper.get('[data-testid="market-return"]').text()).toBe('-5.00%')
+    expect(wrapper.get('[data-testid="excess-return"]').text()).toContain('30.00 个百分点')
+    // 未计入的标的必须点名，否则「这一组算了几只」说不清。
+    expect(wrapper.get('[data-testid="group-performance"]').text()).toContain('000002')
+    expect(wrapper.get('[data-testid="group-performance"]').text()).toContain('没有收盘价')
+    expect(wrapper.find('[data-testid="group-chart"]').exists()).toBe(true)
+  })
+
+  it('keeps both save buttons disabled until there is something to save', async () => {
+    const wrapper = mount(FormulaScreenPage)
+    await flushPromises()
+
+    // 没结果时整批保存是禁用的，没勾选时保存勾选也是禁用的——存出一组空的东西
+    // 没有任何意义，按钮直接不给点比点了再报错更清楚。
+    expect(wrapper.get('[data-testid="save-all-group"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-testid="save-picked-group"]').attributes('disabled')).toBeDefined()
+    expect(groupApi.createStockGroup).not.toHaveBeenCalled()
   })
 })

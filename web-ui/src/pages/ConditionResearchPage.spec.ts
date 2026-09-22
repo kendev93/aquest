@@ -1250,6 +1250,38 @@ describe('ConditionResearchPage', () => {
     sessionStorage.clear()
   })
 
+  it('bridges only the buy side into the screening page', async () => {
+    sessionStorage.clear()
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="condition-apply-to-screen"]').trigger('click')
+
+    const stored = JSON.parse(
+      sessionStorage.getItem('indicator-lab.condition-research.to-screen') ?? '{}',
+    )
+    // 选股是「某一天是否满足」的一次性扫描，没有卖出这一说，所以只带买入侧。
+    expect(stored.conditions.length).toBeGreaterThan(0)
+    expect(stored).not.toHaveProperty('sell_rule')
+    expect(stored.universe).toBe('all')
+    sessionStorage.clear()
+  })
+
+  it('cannot bridge a buy rule that does not exist', async () => {
+    sessionStorage.clear()
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-research-config"]').trigger('submit')
+    await flushPromises()
+    await wrapper.get('[data-testid="condition-always-in-market"]').setValue(true)
+
+    const button = wrapper.get('[data-testid="condition-apply-to-screen"]')
+    expect(button.attributes('disabled')).toBeDefined()
+    sessionStorage.clear()
+  })
+
   it('explains that sell candidates are not scored in the top-N column', async () => {
     const wrapper = mount(ConditionResearchPage)
     await flushPromises()

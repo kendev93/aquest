@@ -125,6 +125,8 @@ const rankingTopN = ref(5)
 const RESEARCH_APPLY_KEY = 'indicator-lab.condition-research.apply'
 // 候选库 → 条件研究页：「载入复测」把来源研究的整份输入搬过来还原表单。
 const RESTORE_KEY = 'indicator-lab.condition-research.restore'
+// 条件研究页 → 公式选股页：只搬买入侧的条件（选股是一次性扫描，没有卖出这一说）。
+const RESEARCH_TO_SCREEN_KEY = 'indicator-lab.condition-research.to-screen'
 // 「持有到期末」：不设基础卖出条件，让研究以「一直持有」为基准去搜索卖点。
 const holdToEnd = ref(false)
 // 「持续满仓」：持有到期末的对偶。不设基础买入条件，让研究以「天天买」为基准去搜索买点。
@@ -458,6 +460,27 @@ function applyToPortfolio(): void {
     formula_parameters: mode.value === 'custom' ? { ...form.formulaParameters } : {},
   }))
   if (import.meta.env.MODE !== 'test') window.location.assign('/portfolio-backtest')
+}
+
+/** 把买入规则搬到公式选股：一次性的「今天谁满足条件」扫描。 */
+function applyToFormulaScreen(): void {
+  const rule = alwaysInMarket.value ? null : form.buyRule
+  sessionStorage.setItem(RESEARCH_TO_SCREEN_KEY, JSON.stringify({
+    signals: rule?.signals ?? [],
+    conditions: rule?.conditions ?? [],
+    // 强制条件在选股里没有对应概念（选股只有「条件」一种），带过去让目标页决定
+    // 怎么合并并说明，不带的话用户会以为它跟着一起过去了。
+    required_conditions: rule?.required_conditions ?? [],
+    combine_mode: rule?.combine_mode ?? 'all',
+    minimum_matches: rule?.minimum_matches ?? null,
+    universe: form.universe,
+    boards: [...form.boards],
+    instrument_types: [form.instrumentType],
+    mode: mode.value === 'custom' ? 'custom' : 'preset',
+    formula_text: mode.value === 'custom' ? form.formulaText.trim() : null,
+    formula_parameters: mode.value === 'custom' ? { ...form.formulaParameters } : {},
+  }))
+  if (import.meta.env.MODE !== 'test') window.location.assign('/indicator-lab')
 }
 
 async function submit(): Promise<void> {
@@ -1332,6 +1355,20 @@ onMounted(async () => {
                 @click="applyToPortfolio"
               >用这套规则去跑组合回测</button>
               <small>会把买卖规则、排序规则（没指定就用推荐值）和槽位数一起带到组合回测页。</small>
+            </div>
+            <div class="condition-bridge-actions">
+              <button
+                class="secondary-button"
+                data-testid="condition-apply-to-screen"
+                type="button"
+                :disabled="alwaysInMarket"
+                @click="applyToFormulaScreen"
+              >用这套条件去选股</button>
+              <small>
+                把买入侧的条件带到公式选股，扫一遍「今天谁满足条件」。
+                <template v-if="alwaysInMarket">持续满仓没有买入条件可带，请先取消持续满仓。</template>
+                <template v-else>注意两件事不一样：这里评的是「什么时候进、什么时候出」，选股只回答「某一天是否满足」，不带卖出条件。</template>
+              </small>
             </div>
             <div v-if="loading && job" class="progress-track condition-progress" aria-label="条件研究进度">
               <span :style="{ width: Math.round(job.progress * 100) + '%' }"></span>

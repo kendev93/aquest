@@ -168,6 +168,110 @@ export function presetToFormState(
   }
 }
 
+export interface ResearchHandoffResult {
+  state: ScreenFormState
+  /** 搬过来时丢掉或改掉的东西。必须讲，否则「已带入」读起来像是原样还原。 */
+  notes: string[]
+}
+
+const COMBINE_LABELS: Record<CombineMode, string> = {
+  all: '全部满足',
+  any: '任一满足',
+  at_least: '至少若干条',
+}
+
+/**
+ * 买卖条件研究的买入规则 → 选股表单。
+ *
+ * 两边规则结构同构（信号 / 指标条件 / 组合方式 / 最少命中数），但语义不同：研究
+ * 评的是「什么时候进、什么时候出」，选股只回答「某一天是否满足」。所以只搬买入
+ * 侧，并且把差异讲出来——不做任何猜测。
+ */
+export function researchToFormState(
+  payload: unknown,
+  available: PresetAvailability,
+): ResearchHandoffResult {
+  const record = (payload && typeof payload === 'object' ? payload : {}) as Record<string, unknown>
+  const mode: FormulaMode = MODES.has(record.mode as FormulaMode)
+    ? (record.mode as FormulaMode)
+    : 'preset'
+  const combineMode: CombineMode = COMBINE_MODES.has(record.combine_mode as CombineMode)
+    ? (record.combine_mode as CombineMode)
+    : 'all'
+  const universe: Universe = UNIVERSES.has(record.universe as Universe)
+    ? (record.universe as Universe)
+    : 'all'
+
+  const knownSignals = new Set(available.signalIds)
+  const knownValues = new Set(available.valueIds)
+  const signals = stringList(record.signals)
+  const selectedSignals = knownSignals.size > 0
+    ? signals.filter((signal) => knownSignals.has(signal))
+    : signals
+  const staleSignals = knownSignals.size > 0
+    ? signals.length - selectedSignals.length
+    : 0
+
+  const baseConditions = parseConditions(record.conditions)
+  const requiredConditions = parseConditions(record.required_conditions)
+  const conditions = [...baseConditions, ...requiredConditions]
+  const canCheckValues = knownValues.size > 0
+  const staleConditions = canCheckValues
+    ? conditions.filter(
+        (condition) =>
+          !knownValues.has(condition.left_value)
+          || (condition.right_value !== null && !knownValues.has(condition.right_value)),
+      ).length
+    : 0
+
+  // 没有信号可用时只能走指标条件模式：空着进去扫描会直接报「至少选一个信号」。
+  const ruleMode: RuleMode = selectedSignals.length > 0 ? 'signals' : 'conditions'
+  const rawMinimum = record.minimum_matches
+  const parsedMinimum =
+    typeof rawMinimum === 'number' && Number.isFinite(rawMinimum) ? Math.round(rawMinimum) : null
+  let minimumMatches: number | null = combineMode === 'at_least' ? parsedMinimum : null
+  if (minimumMatches !== null) {
+    const ceiling = ruleMode === 'signals' ? selectedSignals.length : conditions.length
+    if (ceiling > 0) minimumMatches = Math.min(Math.max(minimumMatches, 1), ceiling)
+  }
+
+  const notes: string[] = []
+  if (requiredConditions.length > 0) {
+    notes.push(
+      combineMode === 'all'
+        ? `${requiredConditions.length} 条「必须满足」的条件已并入普通条件——在「全部满足」下两者等价。`
+        : `${requiredConditions.length} 条「必须满足」的条件已并入普通条件，但组合方式是「${COMBINE_LABELS[combineMode]}」：研究里它们无条件生效，这里变成参与计数，请核对后再扫描。`,
+    )
+  }
+  if (staleSignals > 0) notes.push(`${staleSignals} 个信号当前不可用，已移除。`)
+  if (staleConditions > 0) notes.push(`${staleConditions} 条条件引用了当前不存在的指标，请核对。`)
+  notes.push('卖出条件没有带过来：选股只回答「某一天是否满足」，不涉及什么时候卖。')
+
+  return {
+    state: {
+      mode,
+      ruleMode,
+      selectedSignals,
+      conditions: conditions.length > 0 ? conditions : [],
+      combineMode,
+      minimumMatches,
+      universe,
+      universeFile: '',
+      instrumentTypes: stringList(record.instrument_types).filter(
+        (item): item is InstrumentType => INSTRUMENT_TYPES.has(item as InstrumentType),
+      ),
+      boards: stringList(record.boards).filter((item): item is InstrumentBoard =>
+        BOARDS.has(item as InstrumentBoard),
+      ),
+      workers: 8,
+      period: 'daily',
+      formulaText: typeof record.formula_text === 'string' ? record.formula_text : '',
+      formulaParameters: numberMap(record.formula_parameters),
+    },
+    notes,
+  }
+}
+
 /** 加载后的提示。有失效项必须先说失效，否则「已加载」读起来像是原样还原。 */
 export function presetLoadMessage(name: string, result: PresetLoadResult): string {
   const parts = [`已载入方案「${name}」，结果需要重新扫描。`]

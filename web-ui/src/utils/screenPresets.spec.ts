@@ -5,6 +5,7 @@ import {
   conditionSetToPayload,
   presetLoadMessage,
   presetToFormState,
+  researchToFormState,
 } from './screenPresets'
 import type { SavedConditionSet, ScreenFormState, ScreenPresetPayload } from '../types'
 
@@ -168,5 +169,74 @@ describe('screenPresets', () => {
     expect(payload.instrument_types).toEqual([])
     expect(payload.boards).toEqual([])
     expect(payload.selected_signals).toEqual(['indicator_three.prepare_rally'])
+  })
+
+  it('maps a research buy rule onto the screening form', () => {
+    const result = researchToFormState(
+      {
+        signals: ['indicator_three.prepare_rally'],
+        conditions: [],
+        combine_mode: 'all',
+        minimum_matches: null,
+        universe: 'sh',
+        boards: ['main'],
+        instrument_types: ['stock'],
+      },
+      available,
+    )
+
+    expect(result.state.ruleMode).toBe('signals')
+    expect(result.state.selectedSignals).toEqual(['indicator_three.prepare_rally'])
+    expect(result.state.universe).toBe('sh')
+    expect(result.state.boards).toEqual(['main'])
+  })
+
+  it('merges required conditions and says so when the combine mode changes their meaning', () => {
+    const required = {
+      left_value: 'indicator_three.var1',
+      operator: 'lt',
+      right_value: null,
+      right_constant: 3,
+    }
+    const loose = researchToFormState(
+      { signals: [], conditions: [], required_conditions: [required], combine_mode: 'any' },
+      available,
+    )
+    const strict = researchToFormState(
+      { signals: [], conditions: [], required_conditions: [required], combine_mode: 'all' },
+      available,
+    )
+
+    // 没有信号时可走的只有指标条件模式，否则扫描会直接报「至少选一个信号」。
+    expect(loose.state.ruleMode).toBe('conditions')
+    expect(loose.state.conditions).toHaveLength(1)
+    // 「任一满足」下强制条件被并入计数，语义变了，必须讲出来。
+    expect(loose.notes.join()).toContain('参与计数')
+    expect(strict.notes.join()).toContain('等价')
+    expect(loose.notes.join()).toContain('卖出条件没有带过来')
+  })
+
+  it('drops signals the metadata no longer offers', () => {
+    const result = researchToFormState(
+      { signals: ['indicator_three.prepare_rally', 'gone.signal'], combine_mode: 'all' },
+      available,
+    )
+
+    expect(result.state.selectedSignals).toEqual(['indicator_three.prepare_rally'])
+    expect(result.notes.join()).toContain('已移除')
+  })
+
+  it('clamps the minimum match count to what is actually selected', () => {
+    const result = researchToFormState(
+      {
+        signals: ['indicator_three.prepare_rally'],
+        combine_mode: 'at_least',
+        minimum_matches: 9,
+      },
+      available,
+    )
+
+    // 只选中一个信号却要求「至少命中 9 条」，扫出来必然是空的，而且看不出为什么。
+    expect(result.state.minimumMatches).toBe(1)
   })
 })

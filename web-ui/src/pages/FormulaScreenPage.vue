@@ -5,13 +5,15 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { fetchLocalChart } from '../api/marketData'
 import { fetchActiveJobs } from '../api/jobs'
 import MarketCandlestickChart from '../components/MarketCandlestickChart.vue'
+import TermHint from '../components/TermHint.vue'
 import { createJob, createSyncJob, fetchMetadata, fetchScreenHistory, FormulaScreenApiError, getJob, getResults, getScreenHistory, getSyncJob, parseFormula } from '../api/formulaScreen'
-import type { ConditionOperator, CustomFormulaMetadata, FormulaScreenMetadata, InstrumentBoard, InstrumentType, JobState, LocalMarketChart, MarketSyncJobState, ResultsMeta, SavedConditionSet, ScreenCondition, ScreenFormState, ScreenHistorySummary, ScreenPresetSummary, ScreenResult, RuleMode, ValueDefinition } from '../types'
+import type { BasketCurve, CombineMode, ConditionOperator, CustomFormulaMetadata, FormulaScreenMetadata, InstrumentBoard, InstrumentType, JobState, LocalMarketChart, MarketSyncJobState, ResultsMeta, SavedConditionSet, ScreenCondition, ScreenFormState, ScreenHistorySummary, ScreenPresetSummary, ScreenResult, StockGroup, StockGroupMember, StockGroupPerformance, StockGroupSummary, RuleMode, Universe, ValueDefinition } from '../types'
 import {
   buildPresetPayload,
   conditionSetToPayload,
   presetLoadMessage,
   presetToFormState,
+  researchToFormState,
 } from '../utils/screenPresets'
 import {
   createScreenPreset,
@@ -21,6 +23,15 @@ import {
   updateScreenPreset,
 } from '../api/screenPresets'
 import { buildScanPayload, DEFAULT_PRESET_SIGNALS, filterKnownSignals, loadSavedConditionSets, loadSavedForm, resultsToCsv, saveForm, signalDisplayName, validateScreenForm, valueOptionLabel } from '../utils/formulaScreen'
+import { buildChartGeometry, formatChartValue } from '../utils/chart'
+import {
+  createStockGroup,
+  deleteStockGroup,
+  fetchStockGroupPerformance,
+  fetchStockGroups,
+  getStockGroup,
+  removeStockGroupMembers,
+} from '../api/stockGroups'
 import { formatChinaTimestamp } from '../utils/time'
 
 const INSTRUMENT_TYPE_OPTIONS: { key: InstrumentType; label: string }[] = [
@@ -721,6 +732,222 @@ function exportCsv(): void {
   download('formula-screen-results.csv', resultsToCsv(results.value), 'text/csv;charset=utf-8')
 }
 
+/**
+ * 条件研究搬过来的只有买入侧：选股是「某一天谁满足条件」的一次性扫描，没有
+ * 「什么时候卖」这一说，所以卖出规则不带过来——带了也是摆着不用，反而让人以为
+ * 它被算进去了。
+ */
+interface ResearchToScreenPayload {
+  signals?: string[]
+  conditions?: ScreenCondition[]
+  required_conditions?: ScreenCondition[]
+  combine_mode?: CombineMode
+  minimum_matches?: number | null
+  universe?: Universe
+  boards?: InstrumentBoard[]
+  instrument_types?: InstrumentType[]
+  mode?: 'preset' | 'custom'
+  formula_text?: string | null
+  formula_parameters?: Record<string, number>
+}
+
+const RESEARCH_TO_SCREEN_KEY = 'indicator-lab.condition-research.to-screen'
+
+async function applyResearchToScreen(): Promise<void> {
+  const raw = sessionStorage.getItem(RESEARCH_TO_SCREEN_KEY)
+  if (!raw) return
+  const notes: string[] = []
+  try {
+    const payload = JSON.parse(raw) as unknown
+    const result = researchToFormState(payload, {
+      signalIds: presetSignals.value.map((signal) => signal.id),
+      valueIds: availableValues.value.map((value) => value.id),
+    })
+    const state = result.state
+    form.mode = state.mode
+    form.ruleMode = state.ruleMode
+    form.selectedSignals = state.selectedSignals
+    form.conditions = state.conditions.length > 0 ? state.conditions : [emptyCondition()]
+    form.combineMode = state.combineMode
+    form.minimumMatches = state.minimumMatches
+    form.universe = state.universe
+    form.boards = state.boards
+    form.instrumentTypes = state.instrumentTypes
+    form.formulaText = state.formulaText
+    form.formulaParameters = state.formulaParameters
+    customMetadata.value = null
+    parsedFormulaText.value = ''
+    errors.value = {}
+    normalizeConditionsToAvailableValues()
+    if (form.mode === 'custom' && form.formulaText.trim()) await parseCustomFormula()
+    notes.push(...result.notes)
+  } catch {
+    notes.push('带过来的条件没能还原，已保留原有设置。')
+  } finally {
+    // 读完立即删：刷新时不该再被套用一次，否则用户改完表单一刷新就被覆盖回去。
+    sessionStorage.removeItem(RESEARCH_TO_SCREEN_KEY)
+  }
+  message.value = notes.length
+    ? `已带入买卖条件研究的买入条件。${notes.join('；')}`
+    : '已带入买卖条件研究的买入条件，确认后直接扫描即可。'
+}
+
+/* ---------------- 股票组：把扫出来的票留下来观察 ---------------- */
+
+const stockGroups = ref<StockGroupSummary[]>([])
+const selectedGroupId = ref('')
+const groupName = ref('')
+const groupBusy = ref(false)
+const groupPerformance = ref<StockGroupPerformance | null>(null)
+const selectedGroup = ref<StockGroup | null>(null)
+const groupPerfLoading = ref(false)
+const groupError = ref('')
+// 结果行的勾选。用 Set 而不是数组：一次扫描可能选出几百只，includes 是线性的。
+const selectedResultKeys = reactive(new Set<string>())
+
+const selectedResultCount = computed(() => (
+  results.value.filter((item) => selectedResultKeys.has(resultKey(item))).length
+))
+
+/** 两条曲线共用同一纵轴：各画各的会让「跑赢了多少」看起来比实际多。 */
+const groupChart = computed(() => {
+  const payload = groupPerformance.value
+  if (!payload?.group_curve || !payload.market_curve) return null
+  const toPoints = (curve: BasketCurve) => curve.totals.map((total, index) => ({
+    x: index,
+    y: (total - 1) * 100,
+  }))
+  return buildChartGeometry(
+    [toPoints(payload.group_curve), toPoints(payload.market_curve)],
+    { includeZero: true, height: 200 },
+  )
+})
+
+function toggleResultPick(result: ScreenResult, checked: boolean): void {
+  const key = resultKey(result)
+  if (checked) selectedResultKeys.add(key)
+  else selectedResultKeys.delete(key)
+}
+
+async function refreshStockGroups(): Promise<void> {
+  try {
+    stockGroups.value = await fetchStockGroups()
+  } catch {
+    // 列表拉不到不影响扫描，只在面板里留空。
+  }
+}
+
+async function saveResultsAsGroup(useAll: boolean): Promise<void> {
+  const picked = useAll
+    ? results.value
+    : results.value.filter((item) => selectedResultKeys.has(resultKey(item)))
+  if (picked.length === 0) {
+    groupError.value = useAll ? '还没有扫描结果可以保存。' : '请先勾选要保存的标的。'
+    return
+  }
+  groupBusy.value = true
+  groupError.value = ''
+  try {
+    const created = await createStockGroup({
+      name: groupName.value.trim() || defaultGroupName(),
+      items: picked.map((item) => ({
+        market: item.market,
+        code: item.code,
+        name: item.name ?? null,
+      })),
+      source: 'screen',
+    })
+    groupName.value = ''
+    selectedResultKeys.clear()
+    await refreshStockGroups()
+    selectedGroupId.value = created.group_id
+    await loadGroupPerformance(created.group_id)
+  } catch (error) {
+    groupError.value = apiMessage(error, '保存失败')
+  } finally {
+    groupBusy.value = false
+  }
+}
+
+function defaultGroupName(): string {
+  const stamp = new Date().toISOString().slice(0, 10)
+  return `${stamp} 选股结果`
+}
+
+async function loadGroupPerformance(groupId: string): Promise<void> {
+  selectedGroupId.value = groupId
+  groupPerformance.value = null
+  selectedGroup.value = null
+  groupError.value = ''
+  if (!groupId) return
+  groupPerfLoading.value = true
+  try {
+    // 表现和成员分两次取：成员随时可编辑，而表现要扫全市场（几秒），不该被一次
+    // 编辑来回拖着重算。
+    const [performance, detail] = await Promise.all([
+      fetchStockGroupPerformance(groupId),
+      getStockGroup(groupId),
+    ])
+    groupPerformance.value = performance
+    selectedGroup.value = detail
+  } catch (error) {
+    groupError.value = apiMessage(error, '表现读取失败')
+  } finally {
+    groupPerfLoading.value = false
+  }
+}
+
+async function removeGroupMember(member: StockGroupMember): Promise<void> {
+  const groupId = selectedGroupId.value
+  if (!groupId) return
+  groupBusy.value = true
+  try {
+    await removeStockGroupMembers(groupId, [{ market: member.market, code: member.code }])
+    await refreshStockGroups()
+    await loadGroupPerformance(groupId)
+  } catch (error) {
+    groupError.value = apiMessage(error, '移除失败')
+  } finally {
+    groupBusy.value = false
+  }
+}
+
+async function deleteGroup(group: StockGroupSummary): Promise<void> {
+  if (!window.confirm(`删除分组「${group.name}」？它包含的 ${group.item_count} 只标的会一起丢掉。`)) {
+    return
+  }
+  groupBusy.value = true
+  try {
+    await deleteStockGroup(group.group_id)
+    if (selectedGroupId.value === group.group_id) {
+      selectedGroupId.value = ''
+      groupPerformance.value = null
+      selectedGroup.value = null
+    }
+    await refreshStockGroups()
+  } catch (error) {
+    groupError.value = apiMessage(error, '删除失败')
+  } finally {
+    groupBusy.value = false
+  }
+}
+
+/** 涨红跌绿（A 股习惯）。零附近不着色——0.00% 标成红色会让人以为赚了。 */
+function toneClass(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value) || value === 0) return ''
+  return value > 0 ? 'tone-up' : 'tone-down'
+}
+
+function formatPercent(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return '—'
+  return `${value >= 0 ? '+' : ''}${(value * 100).toFixed(2)}%`
+}
+
+function formatPoints(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return '—'
+  return `${value >= 0 ? '+' : ''}${(value * 100).toFixed(2)} 个百分点`
+}
+
 onMounted(async () => {
   try {
     metadata.value = await fetchMetadata()
@@ -745,6 +972,10 @@ onMounted(async () => {
     await refreshScreenHistory()
     await resumeActiveScreenJob()
     await refreshScreenPresets()
+    // 条件研究的桥接放在最后：它可能解析自定义公式并改写信号，而前面几步要把
+    // 元数据先加载完才能判断哪些信号还存在。
+    await refreshStockGroups()
+    await applyResearchToScreen()
   } catch (error) {
     message.value = apiMessage(error, '公式元数据加载失败，请检查后端服务和网络后重试')
   }
@@ -1049,10 +1280,20 @@ watch(() => form.formulaText, (value) => {
           <div v-else class="table-wrap">
             <table data-testid="results-table">
               <caption class="sr-only">公式选股结果</caption>
-              <thead><tr><th>市场</th><th>代码</th><th>中文名</th><th>信号日期</th><th>最新收盘</th><th>命中条件</th><th>指标值</th></tr></thead>
+              <thead><tr><th class="pick-column">存组</th><th>市场</th><th>代码</th><th>中文名</th><th>信号日期</th><th>最新收盘</th><th>命中条件</th><th>指标值</th></tr></thead>
               <tbody>
                 <template v-for="result in results" :key="`${result.market}-${result.code}`">
-                <tr class="screen-result-row" :class="{ expanded: expandedResultKey === resultKey(result) }" role="button" tabindex="0" :aria-expanded="expandedResultKey === resultKey(result)" @click="toggleResultDetails(result)" @keydown.enter.prevent="toggleResultDetails(result)">
+                <tr class="screen-result-row" :class="{ expanded: expandedResultKey === resultKey(result), picked: selectedResultKeys.has(resultKey(result)) }" role="button" tabindex="0" :aria-expanded="expandedResultKey === resultKey(result)" @click="toggleResultDetails(result)" @keydown.enter.prevent="toggleResultDetails(result)">
+                  <td class="pick-column">
+                    <input
+                      type="checkbox"
+                      :checked="selectedResultKeys.has(resultKey(result))"
+                      :data-testid="`result-pick-${result.market}-${result.code}`"
+                      :aria-label="`把 ${result.code} 加入待保存的分组`"
+                      @click.stop
+                      @change="toggleResultPick(result, ($event.target as HTMLInputElement).checked)"
+                    >
+                  </td>
                   <td><span class="market-pill" :class="result.market.toLowerCase()">{{ result.market }}</span></td>
                   <td><strong class="code">{{ result.code }}</strong><small v-if="result.instrument_type" class="muted-code">{{ result.instrument_type }}</small></td>
                   <td class="instrument-name">{{ result.name || '未同步名称' }}</td>
@@ -1062,7 +1303,7 @@ watch(() => form.formulaText, (value) => {
                   <td><div class="value-list"><span v-for="(value, name) in result.indicator_values" :key="name"><b>{{ resultValueLabel(name) }}</b> {{ value === null ? '—' : value.toFixed(2) }}</span></div></td>
                 </tr>
                 <tr v-if="expandedResultKey === resultKey(result)" :key="`${result.market}-${result.code}-detail`" class="screen-result-detail-row">
-                  <td colspan="7">
+                  <td colspan="8">
                     <div class="screen-result-detail" :data-testid="`result-detail-${result.market}-${result.code}`">
                       <div class="screen-result-detail-heading"><div><strong>{{ result.name || `${result.market} ${result.code}` }}</strong><small>点击结果行收起 · 本地日线行情</small></div><span>{{ result.signal_date }}</span></div>
                       <div v-if="resultChartLoading === resultKey(result)" class="chart-loading">正在读取 K 线…</div>
@@ -1088,6 +1329,185 @@ watch(() => form.formulaText, (value) => {
           </div>
           <div v-if="resultMeta && resultMeta.errors > 0" class="failure-summary" data-testid="failure-summary">
             <strong>失败摘要</strong><span v-for="(count, reason) in resultMeta.failure_reasons" :key="reason">{{ reason }} · {{ count }}</span>
+          </div>
+        </section>
+
+        <section class="stock-groups-panel panel" data-testid="stock-groups-panel">
+          <div class="panel-heading">
+            <div>
+              <span class="section-kicker">KEEP &amp; WATCH</span>
+              <h2>股票组</h2>
+            </div>
+            <span class="required-hint">{{ stockGroups.length }} 组</span>
+          </div>
+          <p class="helper">
+            把扫出来的票留成一组，之后能回来看它们从入组那天算起涨了多少、有没有跑赢全市场。
+            组只是观察，不模拟买卖。
+          </p>
+
+          <div class="group-save-row">
+            <input
+              v-model="groupName"
+              class="group-name-input"
+              type="text"
+              maxlength="60"
+              placeholder="组名（留空用默认名）"
+              data-testid="group-name"
+            >
+            <button
+              class="primary-button"
+              type="button"
+              data-testid="save-picked-group"
+              :disabled="groupBusy || selectedResultCount === 0"
+              @click="saveResultsAsGroup(false)"
+            >保存勾选的 {{ selectedResultCount }} 只</button>
+            <button
+              class="secondary-button"
+              type="button"
+              data-testid="save-all-group"
+              :disabled="groupBusy || results.length === 0"
+              @click="saveResultsAsGroup(true)"
+            >整批保存（{{ results.length }} 只）</button>
+          </div>
+
+          <p v-if="groupError" class="inline-empty" data-testid="group-error">{{ groupError }}</p>
+
+          <ul v-if="stockGroups.length" class="group-list" data-testid="group-list">
+            <li v-for="group in stockGroups" :key="group.group_id" :data-testid="`group-item-${group.group_id}`">
+              <button
+                type="button"
+                class="group-pick"
+                :class="{ active: selectedGroupId === group.group_id }"
+                :data-testid="`group-pick-${group.group_id}`"
+                @click="loadGroupPerformance(group.group_id)"
+              >
+                <strong>{{ group.name }}</strong>
+                <small>{{ group.item_count }} 只 · {{ group.source_label }}</small>
+              </button>
+              <button
+                type="button"
+                class="text-button"
+                :data-testid="`group-delete-${group.group_id}`"
+                :disabled="groupBusy"
+                @click="deleteGroup(group)"
+              >删除</button>
+            </li>
+          </ul>
+          <p v-else class="group-empty" data-testid="group-empty">还没有分组。勾选结果行或直接整批保存，就能留一组下来观察。</p>
+
+          <div v-if="groupPerfLoading" class="chart-loading" data-testid="group-loading">正在读取这一组的表现…</div>
+          <div v-else-if="groupPerformance" data-testid="group-performance">
+            <div class="group-stat-row">
+              <div class="group-stat">
+                <small>本组</small>
+                <strong :class="toneClass(groupPerformance.group_curve?.performance.total_return ?? null)" data-testid="group-return">
+                  {{ formatPercent(groupPerformance.group_curve?.performance.total_return ?? null) }}
+                </strong>
+                <span v-if="groupPerformance.group_curve" class="group-stat-note">
+                  {{ groupPerformance.group_curve.instrument_count }} 只计入
+                </span>
+              </div>
+              <div class="group-stat">
+                <small>全市场同期</small>
+                <strong :class="toneClass(groupPerformance.market_curve?.performance.total_return ?? null)" data-testid="market-return">
+                  {{ formatPercent(groupPerformance.market_curve?.performance.total_return ?? null) }}
+                </strong>
+                <span v-if="groupPerformance.market_curve" class="group-stat-note">
+                  {{ groupPerformance.market_curve.instrument_count }} 只计入
+                </span>
+              </div>
+              <div class="group-stat">
+                <small>超额<TermHint term="excessReturn" /></small>
+                <strong :class="toneClass(groupPerformance.excess_return)" data-testid="excess-return">
+                  {{ formatPoints(groupPerformance.excess_return) }}
+                </strong>
+                <span class="group-stat-note">差值，不是倍数</span>
+              </div>
+              <div class="group-stat">
+                <small>观察区间</small>
+                <strong>{{ groupPerformance.start_date ?? '—' }} ~ {{ groupPerformance.end_date ?? '—' }}</strong>
+                <span class="group-stat-note">{{ groupPerformance.trading_days }} 个交易日</span>
+              </div>
+            </div>
+
+            <p v-for="note in groupPerformance.notes" :key="note" class="group-note">{{ note }}</p>
+
+            <svg
+              v-if="groupChart"
+              class="group-chart"
+              :viewBox="`0 0 ${groupChart.width} ${groupChart.height}`"
+              role="img"
+              aria-label="本组与全市场的累计涨跌幅曲线"
+              data-testid="group-chart"
+            >
+              <line
+                v-if="groupChart.zeroY !== null"
+                :x1="groupChart.ticks.length ? 46 : 46"
+                :x2="groupChart.width - 12"
+                :y1="groupChart.zeroY"
+                :y2="groupChart.zeroY"
+                class="group-chart-zero"
+              />
+              <polyline
+                v-for="(line, index) in groupChart.lines"
+                :key="index"
+                :points="line"
+                :class="index === 0 ? 'group-chart-own' : 'group-chart-market'"
+              />
+              <text
+                v-for="tick in groupChart.ticks"
+                :key="tick.y"
+                x="4"
+                :y="tick.y + 3"
+                class="group-chart-tick"
+              >{{ formatChartValue(tick.value, 1) }}%</text>
+            </svg>
+            <div class="group-legend">
+              <span class="group-legend-own">本组等权买入持有</span>
+              <span class="group-legend-market">全市场等权买入持有</span>
+            </div>
+
+            <div v-if="groupPerformance.spread" class="group-spread">
+              组内分布：{{ groupPerformance.spread.counted }} 只计入，
+              涨 {{ groupPerformance.spread.advanced }} 只 / 跌 {{ groupPerformance.spread.declined }} 只，
+              中位数 {{ formatPercent(groupPerformance.spread.median_return) }}。
+              <template v-if="groupPerformance.spread.best">
+                最好 {{ groupPerformance.spread.best.code }}（{{ formatPercent(groupPerformance.spread.best.return) }}），
+                最差 {{ groupPerformance.spread.worst?.code }}（{{ formatPercent(groupPerformance.spread.worst?.return) }}）。
+              </template>
+            </div>
+
+            <div v-if="groupPerformance.excluded.length" class="group-excluded">
+              <strong>未计入 {{ groupPerformance.excluded.length }} 只</strong>
+              <span v-for="item in groupPerformance.excluded" :key="`${item.market}-${item.code}`">
+                {{ item.code }}<template v-if="item.name"> · {{ item.name }}</template>
+              </span>
+            </div>
+
+            <details v-if="selectedGroup" class="group-members">
+              <summary>组内标的（{{ selectedGroup.items.length }} 只）</summary>
+              <div class="table-wrap">
+                <table data-testid="group-members-table">
+                  <thead><tr><th>市场</th><th>代码</th><th>中文名</th><th></th></tr></thead>
+                  <tbody>
+                    <tr v-for="member in selectedGroup.items" :key="`${member.market}-${member.code}`">
+                      <td>{{ member.market }}</td>
+                      <td><strong class="code">{{ member.code }}</strong></td>
+                      <td>{{ member.name || '—' }}</td>
+                      <td>
+                        <button
+                          class="text-button"
+                          type="button"
+                          :data-testid="`group-member-remove-${member.code}`"
+                          :disabled="groupBusy"
+                          @click="removeGroupMember(member)"
+                        >移出</button>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </details>
           </div>
         </section>
       </div>
