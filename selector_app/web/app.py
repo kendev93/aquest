@@ -4,18 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
-import os
-import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import cast
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.exceptions import RequestValidationError
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
 from selector_app.adapters.market_data_sync import MarketDataSync
 from selector_app.backtest.service import BacktestService
@@ -32,10 +26,7 @@ from selector_app.market_data.adapter import (
     DuckDbMarketDataAdapter,
     MarketDataAdapter,
 )
-from selector_app.market_data.auto_sync import (
-    DEFAULT_AUTO_SYNC_INTERVAL_SECONDS,
-    AutomaticMarketSyncScheduler,
-)
+from selector_app.market_data.auto_sync import AutomaticMarketSyncScheduler
 from selector_app.market_data.maintenance import (
     DatabaseMaintenanceScheduler,
     DatabaseMaintenanceService,
@@ -44,10 +35,7 @@ from selector_app.market_data.maintenance import (
 from selector_app.market_data.service import LocalMarketDataService
 from selector_app.market_data.staging import cleanup_stale_staging, staging_directory
 from selector_app.market_data.store import DuckDbMarketDataStore
-from selector_app.portfolio_backtest.auto_tracking import (
-    DEFAULT_TRACKING_INTERVAL_SECONDS,
-    StrategyTrackingScheduler,
-)
+from selector_app.portfolio_backtest.auto_tracking import StrategyTrackingScheduler
 from selector_app.portfolio_backtest.service import PortfolioBacktestService
 from selector_app.screen_presets.service import ScreenPresetService
 from selector_app.screening.engine import ScreenEngine
@@ -61,15 +49,21 @@ from selector_app.strategy_discovery.job_backend import (
     InProcessStrategyJobBackend,
     StrategyJobBackend,
 )
-from selector_app.strategy_discovery.job_store import (
-    default_strategy_job_root,
-)
+from selector_app.strategy_discovery.job_store import default_strategy_job_root
 from selector_app.strategy_discovery.resources import resolve_discovery_workers
 from selector_app.strategy_discovery.service import StrategyDiscoveryService
 from selector_app.strategy_fitness.service import StrategyFitnessService
 from selector_app.swing_research.service import SwingResearchService
 
-from .routers.formula_screen import router as formula_screen_router
+from .app_errors import install_error_handlers
+from .app_routes import install_meta_endpoints, install_routers
+from .app_settings import (
+    _resolve_auto_sync_enabled,
+    _resolve_auto_sync_interval,
+    _resolve_strategy_tracking_enabled,
+    _resolve_strategy_tracking_interval,
+    _resolve_strategy_worker_token,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -359,202 +353,10 @@ def create_app(
         allow_headers=["Content-Type"],
     )
 
-    @app.exception_handler(RequestValidationError)
-    async def request_validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
-        messages = [error.get("msg", "请求参数无效") for error in exc.errors()]
-        return JSONResponse(
-            status_code=422,
-            content={
-                "error": {
-                    "code": "validation_error",
-                    "message": "；".join(messages),
-                }
-            },
-        )
-
-    @app.exception_handler(HTTPException)
-    async def http_error(_: Request, exc: HTTPException) -> JSONResponse:
-        code_by_status = {
-            404: "not_found",
-            409: "conflict",
-            422: "validation_error",
-            503: "service_unavailable",
-        }
-        message = exc.detail if isinstance(exc.detail, str) else "请求失败"
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={
-                "error": {
-                    "code": code_by_status.get(exc.status_code, "request_error"),
-                    "message": message,
-                }
-            },
-        )
-
-    @app.exception_handler(Exception)
-    async def unexpected_error(_: Request, exc: Exception) -> JSONResponse:
-        logger.exception("未处理的 API 异常", exc_info=exc)
-        return JSONResponse(
-            status_code=500,
-            content={"error": {"code": "internal_error", "message": "服务器内部错误，请稍后重试"}},
-        )
-
-    @app.get("/healthz", include_in_schema=False)
-    async def healthz() -> dict[str, str]:
-        return {"status": "ok"}
-
-    @app.get("/api/v1/authorization/status", include_in_schema=False, response_model=None)
-    async def authorization_status() -> dict[str, object]:
-        """Report that this installation does not gate features behind membership.
-
-        The previous machine-bound ETFQuest licensing was removed together with
-        the shared market-data integration.  Account-based sign-in is planned,
-        so the endpoint stays in place and keeps its shape for existing clients.
-        """
-
-        return {
-            "data": {
-                "required": False,
-                "available": True,
-                "can_access_core": True,
-                "access_state": "unrestricted",
-                "message": "本机版不校验会员",
-            }
-        }
-
-    from .routers.candidate_library import router as candidate_library_router
-    from .routers.condition_research import router as condition_research_router
-    from .routers.data_transfer import router as data_transfer_router
-    from .routers.factor_attribution import router as factor_attribution_router
-    from .routers.factor_test import router as factor_test_router
-    from .routers.history_compare import router as history_compare_router
-    from .routers.instrument_lab import router as instrument_lab_router
-    from .routers.jobs import router as jobs_router
-    from .routers.market_data import router as market_data_router
-    from .routers.portfolio_backtest import router as portfolio_backtest_router
-    from .routers.screen_presets import router as screen_presets_router
-    from .routers.strategies import router as strategies_router
-    from .routers.strategy_discovery import router as strategy_discovery_router
-    from .routers.strategy_fitness import router as strategy_fitness_router
-    from .routers.strategy_worker import router as strategy_worker_router
-    from .routers.swing_research import router as swing_research_router
-
-    app.include_router(candidate_library_router, prefix="/api/v1")
-    app.include_router(formula_screen_router, prefix="/api/v1")
-    app.include_router(jobs_router, prefix="/api/v1")
-    app.include_router(market_data_router, prefix="/api/v1")
-    app.include_router(data_transfer_router, prefix="/api/v1")
-    app.include_router(condition_research_router, prefix="/api/v1")
-    app.include_router(factor_test_router, prefix="/api/v1")
-    app.include_router(factor_attribution_router, prefix="/api/v1")
-    app.include_router(history_compare_router, prefix="/api/v1")
-    app.include_router(instrument_lab_router, prefix="/api/v1")
-    app.include_router(portfolio_backtest_router, prefix="/api/v1")
-    app.include_router(screen_presets_router, prefix="/api/v1")
-    app.include_router(strategy_discovery_router, prefix="/api/v1")
-    app.include_router(strategy_fitness_router, prefix="/api/v1")
-    app.include_router(strategies_router, prefix="/api/v1")
-    app.include_router(swing_research_router, prefix="/api/v1")
-    app.include_router(strategy_worker_router)
+    install_error_handlers(app)
+    install_meta_endpoints(app)
+    install_routers(app)
     return app
-
-
-def _resolve_strategy_worker_token(value: str | None) -> str | None:
-    if value is not None:
-        return value.strip() or None
-    token_path = str(os.getenv("SELECTOR_STRATEGY_WORKER_TOKEN_FILE") or "").strip()
-    if not token_path:
-        return None
-    path = Path(token_path).expanduser()
-    try:
-        token = path.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        return _generate_strategy_worker_token(path)
-    except OSError:
-        logger.exception("策略 worker token 文件不可读")
-        return None
-    return token or None
-
-
-def _generate_strategy_worker_token(path: Path) -> str | None:
-    """Create the worker token on first boot of a self-hosted installation.
-
-    Generation stays opt-in: a deployment that mounts a token from elsewhere
-    should fail loudly when the file is missing rather than silently start with
-    a different secret than its worker.
-    """
-
-    if str(os.getenv("SELECTOR_STRATEGY_WORKER_TOKEN_AUTOGENERATE") or "").strip().lower() not in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }:
-        logger.warning("策略 worker token 文件不存在: %s", path)
-        return None
-    if not path.parent.is_dir():
-        logger.warning("策略 worker token 目录不存在，无法生成: %s", path.parent)
-        return None
-    token = secrets.token_hex(32)
-    try:
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(token)
-    except OSError:
-        logger.exception("策略 worker token 生成失败: %s", path)
-        return None
-    logger.info("已生成策略 worker token: %s", path)
-    return token
-
-
-def _resolve_strategy_tracking_enabled(value: bool | None) -> bool:
-    if value is not None:
-        if not isinstance(value, bool):
-            raise ValueError("策略追踪开关必须是布尔值")
-        return value
-    raw = os.getenv("SELECTOR_STRATEGY_TRACKING_ENABLED")
-    if raw is None:
-        return True
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _resolve_strategy_tracking_interval(value: float | None) -> float:
-    if value is None:
-        raw = os.getenv("SELECTOR_STRATEGY_TRACKING_CHECK_INTERVAL_SECONDS")
-        if raw is None:
-            return float(DEFAULT_TRACKING_INTERVAL_SECONDS)
-        try:
-            value = float(raw)
-        except ValueError as exc:
-            raise ValueError("策略追踪检查间隔必须是数字") from exc
-    if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
-        raise ValueError("策略追踪检查间隔必须大于 0")
-    return float(value)
-
-
-def _resolve_auto_sync_enabled(value: bool | None) -> bool:
-    if value is not None:
-        if not isinstance(value, bool):
-            raise ValueError("自动行情同步开关必须是布尔值")
-        return value
-    raw = os.getenv("SELECTOR_AUTO_SYNC_ENABLED")
-    if raw is None:
-        return True
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _resolve_auto_sync_interval(value: float | None) -> float:
-    if value is None:
-        raw = os.getenv("SELECTOR_AUTO_SYNC_CHECK_INTERVAL_SECONDS")
-        if raw is None:
-            return float(DEFAULT_AUTO_SYNC_INTERVAL_SECONDS)
-        try:
-            value = float(raw)
-        except ValueError as exc:
-            raise ValueError("自动行情同步检查间隔必须是数字") from exc
-    if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
-        raise ValueError("自动行情同步检查间隔必须大于 0")
-    return float(value)
 
 
 app = create_app()
