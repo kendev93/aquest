@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 
+import { getConditionResearchHistory } from '../api/conditionResearch'
 import {
   deleteCandidate,
   fetchCandidates,
@@ -32,6 +33,9 @@ import {
   studyScaleText,
 } from '../utils/candidateLibrary'
 
+/** 候选库的「载入复测」：把来源研究的整份输入搬到条件研究页。走 storage 不走 URL 参数。 */
+const RESTORE_KEY = 'indicator-lab.condition-research.restore'
+
 const FILTERS: { key: '' | CandidateStatus; label: string }[] = [
   { key: '', label: '全部' },
   { key: 'pending', label: '待定' },
@@ -55,6 +59,7 @@ const rankingValue = ref('')
 const stopLossPct = ref<number | null>(null)
 const publishing = ref(false)
 const publishResult = ref('')
+const restoringId = ref('')
 
 const rankableValues = computed(() => (
   metadata.value?.indicators.flatMap((indicator) => indicator.values ?? [])
@@ -88,6 +93,30 @@ async function applyFilter(key: '' | CandidateStatus): Promise<void> {
   expandedId.value = ''
   preview.value = null
   await load()
+}
+
+/**
+ * 把候选带回它来源的那次研究：取出当时的完整输入，交给条件研究页还原表单。
+ *
+ * 失败必须说清是哪一种——历史只留最近若干条，来源研究被淘汰是很常见的，而"点了没反应"
+ * 会让人以为功能坏了。这种情况明确提示，绝不静默。
+ */
+async function restoreResearch(item: CandidateLibraryItem): Promise<void> {
+  restoringId.value = item.candidate_id
+  try {
+    const record = await getConditionResearchHistory(item.source_history_id)
+    sessionStorage.setItem(RESTORE_KEY, JSON.stringify(record.request))
+    window.location.href = '/condition-research'
+  } catch (error) {
+    const gone = error instanceof FormulaScreenApiError && error.status === 404
+    showMessage(
+      gone
+        ? `来源研究 ${item.source_history_id.slice(0, 8)} 的历史记录已被淘汰，无法还原配置。`
+        : `还原失败：${apiMessage(error)}`,
+      true,
+    )
+    restoringId.value = ''
+  }
 }
 
 async function changeStatus(item: CandidateLibraryItem, status: CandidateStatus): Promise<void> {
@@ -308,6 +337,13 @@ onMounted(async () => {
                 :data-testid="'candidate-action-' + action + '-' + item.candidate_id"
                 @click="changeStatus(item, action)"
               >{{ action === 'adopted' ? (item.status === 'published' ? '撤回发布' : '采纳') : action === 'rejected' ? '否决' : '恢复为待定' }}</button>
+              <button
+                class="secondary-button"
+                type="button"
+                :disabled="restoringId === item.candidate_id"
+                :data-testid="'candidate-restore-' + item.candidate_id"
+                @click="restoreResearch(item)"
+              >{{ restoringId === item.candidate_id ? '正在载入…' : '载入复测' }}</button>
               <button
                 class="secondary-button"
                 type="button"

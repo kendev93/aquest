@@ -124,6 +124,8 @@ const rankingOrder = ref<RankOrder>('desc')
 const rankingTopN = ref(5)
 // 条件研究页 → 组合回测页的桥接，走独立的键，避免和策略实验室的回填互相覆盖。
 const RESEARCH_APPLY_KEY = 'indicator-lab.condition-research.apply'
+// 候选库 → 条件研究页：「载入复测」把来源研究的整份输入搬过来还原表单。
+const RESTORE_KEY = 'indicator-lab.condition-research.restore'
 // 「持有到期末」：不设基础卖出条件，让研究以「一直持有」为基准去搜索卖点。
 const holdToEnd = ref(false)
 // 「持续满仓」：持有到期末的对偶。不设基础买入条件，让研究以「天天买」为基准去搜索买点。
@@ -840,6 +842,25 @@ async function applyStoredRequest(raw: unknown): Promise<void> {
   }
 }
 
+/**
+ * 候选库「载入复测」的接收端。
+ *
+ * 拿到的是来源研究那次请求的完整输入，所以用 `applyStoredRequest`（和历史「加载」同一条路）。
+ * 做完立刻清除 key —— 刷新页面不该再还原一次，否则用户手动改过的东西会被悄悄覆盖。
+ */
+async function restoreFromCandidateLibrary(): Promise<void> {
+  const stored = sessionStorage.getItem(RESTORE_KEY)
+  if (!stored) return
+  try {
+    await applyStoredRequest(JSON.parse(stored) as unknown)
+    message.value = '已从候选库载入来源研究的配置，请确认后重新运行。'
+  } catch {
+    message.value = '候选库传来的研究配置无法解析，已忽略。'
+  } finally {
+    sessionStorage.removeItem(RESTORE_KEY)
+  }
+}
+
 async function loadHistoryDetail(historyId: string): Promise<void> {
   if (!historyId) return
   try {
@@ -1238,6 +1259,8 @@ onMounted(async () => {
   try {
     metadata.value = await fetchMetadata()
     resetRules()
+    // 候选库「载入复测」先走：它还原的是一次完整研究的配置，要压在波段计划之上。
+    await restoreFromCandidateLibrary()
     applySwingPlan()
     await loadHistory()
     await resumeActiveJob()
