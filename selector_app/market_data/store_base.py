@@ -617,6 +617,23 @@ class _DuckDbStoreBase:
                 )
                 """
             )
+            # 研究方案：买卖条件研究页整套可复现的输入。和 screen_presets 是同一件事
+            # 的两个页面，分开建表而不是加 kind 列——DuckDB 的 ALTER TABLE ADD COLUMN
+            # 不支持 NOT NULL/DEFAULT，加列要裸列 + UPDATE 回填，而两张表要迁移的
+            # 旧数据都是"空"，为此改一次老库不值得。
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS research_presets (
+                    preset_id VARCHAR PRIMARY KEY,
+                    name VARCHAR NOT NULL,
+                    note VARCHAR NOT NULL DEFAULT '',
+                    created_at TIMESTAMP NOT NULL,
+                    updated_at TIMESTAMP NOT NULL,
+                    payload_json VARCHAR NOT NULL,
+                    UNIQUE (name)
+                )
+                """
+            )
             # 候选库：条件研究挖出来的候选条件，带证据快照与采纳状态。和
             # backtest_history 的区别是——历史记"跑过什么"（满了自动淘汰），候选记
             # "我当时认不认可这条"（只有显式删才消失）。evidence_json 存的是入库

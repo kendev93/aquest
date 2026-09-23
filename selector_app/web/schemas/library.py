@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .condition import ConditionResearchRequest
+
 
 class ScreenPresetCreateRequest(BaseModel):
     """One named screening configuration.
@@ -42,6 +44,47 @@ class ScreenPresetUpdateRequest(BaseModel):
             raise ValueError("至少要修改名称、备注或内容之一")
         if self.name is not None and not self.name.strip():
             raise ValueError("方案名称不能为空")
+        return self
+
+
+class ResearchPresetCreateRequest(BaseModel):
+    """One named buy/sell condition research configuration.
+
+    ``payload`` 的形状就是跑研究时发的那个请求本身——历史记录里存的 request 也是
+    它。这里刻意用同一个模型校验：方案能被存下来，就一定能被原样提交去跑，不会
+    出现「存得进去但跑不起来」。校验失败一律 422，不做裁剪——研究配置里
+    position_mode / fixed_size、排序指标与公式输出这些是互相咬合的，悄悄改一个
+    会把整套规则的语义改掉。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=60)
+    note: str = Field(default="", max_length=200)
+    payload: ConditionResearchRequest
+
+    @model_validator(mode="after")
+    def validate_name(self) -> ResearchPresetCreateRequest:
+        if not self.name.strip():
+            raise ValueError("研究方案名称不能为空")
+        return self
+
+
+class ResearchPresetUpdateRequest(BaseModel):
+    """Rename, re-note, or overwrite a research preset's payload."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=60)
+    note: str | None = Field(default=None, max_length=200)
+    payload: ConditionResearchRequest | None = None
+
+    @model_validator(mode="after")
+    def validate_payload(self) -> ResearchPresetUpdateRequest:
+        if self.name is None and self.note is None and self.payload is None:
+            raise ValueError("至少要修改名称、备注或内容之一")
+        if self.name is not None and not self.name.strip():
+            raise ValueError("研究方案名称不能为空")
         return self
 
 

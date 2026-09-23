@@ -37,6 +37,7 @@ from selector_app.market_data.staging import cleanup_stale_staging, staging_dire
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.portfolio_backtest.auto_tracking import StrategyTrackingScheduler
 from selector_app.portfolio_backtest.service import PortfolioBacktestService
+from selector_app.research_presets.service import ResearchPresetService
 from selector_app.screen_presets.service import ScreenPresetService
 from selector_app.screening.engine import ScreenEngine
 from selector_app.screening.jobs import (
@@ -92,6 +93,7 @@ def create_app(
     history_compare_service: HistoryCompareService | object | None = None,
     instrument_lab_service: InstrumentLabService | object | None = None,
     screen_preset_service: ScreenPresetService | object | None = None,
+    research_preset_service: ResearchPresetService | object | None = None,
     candidate_library_service: CandidateLibraryService | object | None = None,
     stock_group_service: StockGroupService | object | None = None,
     local_market_data_service: LocalMarketDataService | object | None = None,
@@ -328,6 +330,9 @@ def create_app(
         ),
     )
     app.state.screen_preset_service = screen_preset_service or ScreenPresetService(
+        selected_store,
+    )
+    app.state.research_preset_service = research_preset_service or ResearchPresetService(
         selected_store,
     )
     app.state.candidate_library_service = candidate_library_service or CandidateLibraryService(

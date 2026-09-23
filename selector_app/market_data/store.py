@@ -498,6 +498,47 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
     def delete_screen_preset(self, preset_id: str) -> bool:
         return self._history.delete_screen_preset(preset_id)
 
+    def research_preset_name_taken(self, name: str, *, exclude_preset_id: str = "") -> bool:
+        return self._history.research_preset_name_taken(name, exclude_preset_id=exclude_preset_id)
+
+    def save_research_preset(
+        self,
+        preset_id: str,
+        *,
+        name: str,
+        payload: Mapping[str, object],
+        note: str = "",
+        created_at: datetime | str | None = None,
+    ) -> dict[str, object]:
+        return self._history.save_research_preset(
+            preset_id,
+            name=name,
+            payload=payload,
+            note=note,
+            created_at=created_at,
+        )
+
+    def list_research_presets(self) -> list[dict[str, object]]:
+        return self._history.list_research_presets()
+
+    def read_research_preset(self, preset_id: str) -> dict[str, object] | None:
+        return self._history.read_research_preset(preset_id)
+
+    def update_research_preset(
+        self,
+        preset_id: str,
+        *,
+        name: str | None = None,
+        note: str | None = None,
+        payload: Mapping[str, object] | None = None,
+    ) -> dict[str, object] | None:
+        return self._history.update_research_preset(
+            preset_id, name=name, note=note, payload=payload
+        )
+
+    def delete_research_preset(self, preset_id: str) -> bool:
+        return self._history.delete_research_preset(preset_id)
+
     def stock_group_name_taken(self, name: str, *, exclude_group_id: str = "") -> bool:
         return self._history.stock_group_name_taken(name, exclude_group_id=exclude_group_id)
 
