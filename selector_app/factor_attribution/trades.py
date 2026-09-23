@@ -78,6 +78,8 @@ class TradeSample:
     trips: tuple[RoundTrip, ...]
     open_positions: int = 0
     orphan_sells: int = 0
+    #: Trades the archived result flagged as unfillable. No engine sets the flag
+    #: today; the count is kept so older records still report what they dropped.
     rejected: int = 0
     unparsable: int = 0
 

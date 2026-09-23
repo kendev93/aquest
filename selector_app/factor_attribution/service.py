@@ -295,7 +295,11 @@ def _notes(sample: TradeSample, missing_stocks: Sequence[str]) -> list[str]:
     if sample.orphan_sells:
         notes.append(f"{sample.orphan_sells} 笔卖出找不到对应的买入，已丢弃")
     if sample.rejected:
-        notes.append(f"{sample.rejected} 笔被拒单（资金不足或涨停等）未计入")
+        # Only counts trades the archived result already flagged as unfillable.
+        # Do not guess a reason here: no engine in the codebase decides on limit
+        # up/down, and insufficient cash does not reject either - the buy size is
+        # reduced until it fits, and a size of zero records no trade at all.
+        notes.append(f"{sample.rejected} 笔委托被标为未成交，未计入")
     if missing_stocks:
         notes.append(
             f"{len(missing_stocks)} 只标的的行情读不到，它们的成交未计入："
