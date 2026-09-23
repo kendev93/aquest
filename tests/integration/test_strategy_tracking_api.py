@@ -48,6 +48,22 @@ def _save_strategy(client: TestClient) -> str:
     return str(response.json()["data"]["strategy_id"])
 
 
+def test_the_list_keeps_trades_out_but_the_detail_brings_them(tmp_path: Path) -> None:
+    """明细几百笔起步，列表接口带上它会被策略数放大；只在展开时单独取。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    with TestClient(create_app(market_data_store=store)) as client:
+        strategy_id = _save_strategy(client)
+
+        listed = client.get("/api/v1/strategies/tracking").json()["data"]
+        detail = client.get(f"/api/v1/strategies/tracking/{strategy_id}").json()["data"]
+
+        assert listed[0]["trades"] is None
+        assert "next_plan" in listed[0]
+        # 详情里两段都在，哪怕现在一笔成交都没有——结构要对，不能缺字段。
+        assert {"before", "after", "limit"} <= set(detail["trades"])
+
+
 def test_rerun_is_rejected_while_the_strategy_is_offline(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     with TestClient(create_app(market_data_store=store)) as client:

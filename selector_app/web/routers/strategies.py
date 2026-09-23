@@ -177,6 +177,10 @@ def list_strategy_tracking(request: Request) -> dict[str, object]:
         rows: list[dict[str, object]] = []
         for record in _store(request).list_strategies():
             snapshot = service.snapshot(str(record["strategy_id"])).to_dict()
+            # 成交明细几百笔起步，乘上策略数会把列表接口撑大；它只在展开某一个
+            # 策略时才需要，走 /tracking/{id} 单独取。明日计划很小且列表页就要
+            # 用（一眼看到今天哪些策略要调仓），所以留着。
+            snapshot["trades"] = None
             snapshot["name"] = record["name"]
             snapshot["note"] = record["note"]
             rows.append(snapshot)

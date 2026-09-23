@@ -29,6 +29,10 @@ import pandas as pd
 
 from selector_app.backtest.performance import PerformanceAnalyzer
 from selector_app.market_data.store import DuckDbMarketDataStore
+from selector_app.market_data.store_history import (
+    TRACKING_PHASE_POST,
+    TRACKING_PHASE_PRE,
+)
 from selector_app.portfolio_backtest.models import (
     PortfolioBacktestConfig,
     PortfolioBacktestReport,
@@ -45,6 +49,10 @@ logger = logging.getLogger(__name__)
 #: 管的是两件事：后者回答「够不够谈显著」，答案经常是「还要好几年」，那不是错误
 #: 而是进度。样本少于这个数时连偏度峰度都估不出来，MinTRL 一律不给。
 MIN_OBSERVATION_BARS = 20
+
+#: 分段成交明细一次最多返回多少笔。一年几百笔成交是常态，全量塞进接口里既慢
+#: 又没人看；超出就如实给出总数和"还有 N 笔"，不装作这就是全部。
+MAX_TRADES_PER_SEGMENT = 200
 
 _PERFORMANCE_KEYS = (
     "total_return",
@@ -140,6 +148,12 @@ class TrackingSnapshot:
     decay: Mapping[str, float | None]
     benchmark_performance: Mapping[str, float | None] | None
     excess_annual_return: float | None
+    #: 分段成交明细。``before`` 是上线前（研究段）的成交，``after`` 是上线后
+    #: 真正样本外发生的成交——后者才是"它上线之后到底干了什么"的证据，所以
+    #: 页面上把它放在前面、默认展开。
+    trades: Mapping[str, object]
+    #: 下一交易日计划。下线后是 None：过期的单子挂在页面上比没有更糟。
+    next_plan: Mapping[str, object] | None
     #: 观察段够不够长到可以谈"衰减"。前端必须据此标注，不能装作是结论。
     observation_is_short: bool
     #: 最小跟踪记录长度（MinTRL）：按观察段目前的表现，还要多少个交易日才能在
@@ -162,6 +176,8 @@ class TrackingSnapshot:
                 dict(self.benchmark_performance) if self.benchmark_performance else None
             ),
             "excess_annual_return": self.excess_annual_return,
+            "trades": dict(self.trades),
+            "next_plan": dict(self.next_plan) if self.next_plan is not None else None,
             "observation_is_short": self.observation_is_short,
             "min_track_record_length": self.min_track_record_length,
         }
@@ -397,6 +413,70 @@ def _segment(
     )
 
 
+def _trade_rows(
+    report: Mapping[str, object],
+    *,
+    launched_at: int,
+) -> list[dict[str, object]]:
+    """把成交记录摊平成待落库的行，并按上线日判定归属哪一段。
+
+    判据和净值曲线完全一致：成交日 >= 上线日算上线后。两边口径必须对齐，否则
+    同一笔交易在两张表上会落在不同的段里，"上线后赚了多少"就没法自圆其说。
+    """
+
+    trades = report.get("trades")
+    if not isinstance(trades, (list, tuple)):
+        return []
+    rows: list[dict[str, object]] = []
+    for trade in trades:
+        if not isinstance(trade, Mapping):
+            continue
+        try:
+            trade_date = _date_key(trade.get("date"))
+        except (TypeError, ValueError):
+            continue
+        rows.append(
+            {
+                "trade_date": trade_date,
+                "phase": (TRACKING_PHASE_POST if trade_date >= launched_at else TRACKING_PHASE_PRE),
+                "direction": str(trade.get("direction") or ""),
+                "market": str(trade.get("market") or ""),
+                "code": str(trade.get("code") or ""),
+                "name": str(trade.get("name") or ""),
+                "size": _finite_or_none(trade.get("size")) or 0.0,
+                "price": _finite_or_none(trade.get("price")) or 0.0,
+                "pnl": _finite_or_none(trade.get("pnl")) or 0.0,
+                "reason": str(trade.get("reason") or ""),
+            }
+        )
+    return rows
+
+
+def _split_trades(
+    rows: Sequence[Mapping[str, object]],
+) -> dict[str, object]:
+    """按段切开，每段只留最近若干笔并如实给出总数。
+
+    倒序（最近在前）：明细是给"它最近做了什么"看的，不是给"从头复盘"看的——
+    真要复盘去看导出。
+    """
+
+    def pack(phase: str) -> dict[str, object]:
+        picked = [row for row in rows if row.get("phase") == phase]
+        newest_first = list(reversed(picked))
+        return {
+            "rows": [dict(row) for row in newest_first[:MAX_TRADES_PER_SEGMENT]],
+            "total": len(newest_first),
+            "truncated": len(newest_first) > MAX_TRADES_PER_SEGMENT,
+        }
+
+    return {
+        "before": pack(TRACKING_PHASE_PRE),
+        "after": pack(TRACKING_PHASE_POST),
+        "limit": MAX_TRADES_PER_SEGMENT,
+    }
+
+
 def _report_payload(result: PortfolioBacktestReport | Mapping[str, object]) -> Mapping[str, object]:
     if isinstance(result, PortfolioBacktestReport):
         return result.to_dict()
@@ -431,8 +511,9 @@ class StrategyTrackingService:
         record = self._read(strategy_id)
         launched_at = _date_key(self._request(record)["end_date"])
         report = self._run(self._request(record), _date_text(launched_at))
-        research, _ = build_segments(report, launched_at=launched_at)
-        observations = build_observations(report, launched_at=launched_at)
+        report_payload = _report_payload(report)
+        research, _ = build_segments(report_payload, launched_at=launched_at)
+        observations = build_observations(report_payload, launched_at=launched_at)
         # 研究段的绩效就此钉死。后面任何一次重算都不会动它——动了就不是样本外了。
         summary = self._research_summary(record, research)
         started = self._store.start_strategy_tracking(
@@ -440,8 +521,10 @@ class StrategyTrackingService:
             launched_at=launched_at,
             seed_points=[row.to_dict() for row in observations[:1]],  # 上线日：接力点，两段共用
         )
-        if started is not None and summary is not None:
-            self._store.update_strategy_summary(strategy_id, summary)
+        if started is not None:
+            self._write_details(strategy_id, report_payload=report_payload, launched_at=launched_at)
+            if summary is not None:
+                self._store.update_strategy_summary(strategy_id, summary)
         return self.snapshot(strategy_id)
 
     def stop(self, strategy_id: str) -> TrackingSnapshot:
@@ -475,12 +558,14 @@ class StrategyTrackingService:
             self._store.finish_strategy_tracking(strategy_id, error=str(exc)[:500])
             return self.snapshot(strategy_id)
 
-        observations = build_observations(report, launched_at=launched_at)
-        research, observation = build_segments(report, launched_at=launched_at)
+        report_payload = _report_payload(report)
+        observations = build_observations(report_payload, launched_at=launched_at)
+        research, observation = build_segments(report_payload, launched_at=launched_at)
         if not observations:
             return self._failed(strategy_id, "重算结果里没有上线日之后的交易日")
         try:
             self._store.save_tracking_points(strategy_id, [row.to_dict() for row in observations])
+            self._write_details(strategy_id, report_payload=report_payload, launched_at=launched_at)
             summary = self._research_summary(record, research)
             if summary is not None and research is not None:
                 self._store.update_strategy_summary(strategy_id, summary)
@@ -517,6 +602,7 @@ class StrategyTrackingService:
         research = _research_from_summary(record.get("summary"))
         observation = self._observation_segment(observations)
         benchmark = self._benchmark_performance(observations)
+        stored_trades = self._store.list_tracking_trades(strategy_id) if launched_at else []
         return TrackingSnapshot(
             strategy_id=str(strategy_id),
             tracking_status=str(record.get("tracking_status") or "off"),
@@ -526,6 +612,8 @@ class StrategyTrackingService:
             observations=observations,
             research=research,
             observation=observation,
+            trades=_split_trades(stored_trades),
+            next_plan=self._store.read_tracking_plan(strategy_id),
             decay=_decay(research, observation),
             benchmark_performance=benchmark,
             excess_annual_return=_excess(observation, benchmark),
@@ -535,6 +623,26 @@ class StrategyTrackingService:
         )
 
     # ------------------------------------------------------------------
+
+    def _write_details(
+        self,
+        strategy_id: str,
+        *,
+        report_payload: Mapping[str, object],
+        launched_at: int,
+    ) -> None:
+        """把这次重算得到的成交明细和明日计划一起落库。
+
+        明细和净值是同一次模拟的产物，所以这里和 ``save_tracking_points`` 一样
+        走全量覆盖：不合并、不追加。
+        """
+
+        self._store.save_tracking_trades(
+            strategy_id, _trade_rows(report_payload, launched_at=launched_at)
+        )
+        plan = report_payload.get("next_plan")
+        if isinstance(plan, Mapping) and plan:
+            self._store.save_tracking_plan(strategy_id, plan)
 
     def _read(self, strategy_id: str) -> Mapping[str, object]:
         record = self._store.read_strategy(strategy_id)

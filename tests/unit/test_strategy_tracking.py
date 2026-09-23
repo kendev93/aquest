@@ -74,6 +74,7 @@ def _report(
     dates: tuple[int, ...] = _DATES,
     benchmark_totals: tuple[float, ...] | None = None,
     trades: tuple[dict[str, Any], ...] = (),
+    next_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Shape one portfolio report the way the service sees it."""
 
@@ -98,6 +99,7 @@ def _report(
             else None
         ),
         "trades": [dict(trade) for trade in trades],
+        "next_plan": dict(next_plan) if next_plan is not None else {},
     }
 
 
@@ -440,6 +442,140 @@ def test_stop_keeps_what_was_observed(tmp_path) -> None:
     assert len(snapshot.observations) == 5
     # 研究段绩效还在——它是历史事实，停不停都一样。
     assert snapshot.research is not None
+
+
+def _traded_report() -> dict[str, Any]:
+    return _report(
+        tuple(100000.0 + index * 1000 for index in range(10)),
+        trades=(
+            {
+                "date": "2026-02-03",
+                "market": "SH",
+                "code": "600000",
+                "name": "甲",
+                "direction": "BUY",
+                "size": 100.0,
+                "price": 10.0,
+                "pnl": 0.0,
+                "reason": "买入条件",
+            },
+            {
+                "date": "2026-03-04",
+                "market": "SZ",
+                "code": "000001",
+                "name": "乙",
+                "direction": "SELL",
+                "size": 200.0,
+                "price": 12.0,
+                "pnl": 150.0,
+                "reason": "卖出条件",
+            },
+            {
+                "date": "2026-03-05",
+                "market": "SH",
+                "code": "600002",
+                "name": "丙",
+                "direction": "BUY",
+                "size": 300.0,
+                "price": 8.0,
+                "pnl": 0.0,
+                "reason": "买入条件",
+            },
+        ),
+        next_plan={
+            "as_of": "2026-03-06",
+            "cash": 5000.0,
+            "rebalance_due": True,
+            "holdings": [],
+            "sells": [],
+            "buys": [{"code": "600000", "estimated_size": 400.0}],
+            "notes": ["买入股数是按今日收盘价与可用现金估算的"],
+        },
+    )
+
+
+def test_snapshot_splits_trades_around_the_launch_day(tmp_path) -> None:
+    """上线前 / 后的成交必须分开：后者才是"上线之后真的干了什么"。"""
+
+    runner = _FakeRunner(_traded_report())
+    service = _service(tmp_path, runner)
+    _save(service._store)  # noqa: SLF001
+    service.launch("strategy-1")
+
+    snapshot = service.refresh("strategy-1")
+    trades = snapshot.trades
+
+    # 判据和净值曲线一致：成交日 >= 上线日算上线后。
+    assert [row["code"] for row in trades["before"]["rows"]] == ["600000"]
+    # 倒序：最近的一笔在最前面。
+    assert [row["code"] for row in trades["after"]["rows"]] == ["600002", "000001"]
+    assert trades["after"]["total"] == 2
+    assert trades["after"]["truncated"] is False
+    assert trades["after"]["rows"][0]["pnl"] == 0.0
+    assert trades["after"]["rows"][1]["pnl"] == 150.0
+
+
+def test_snapshot_reports_the_next_session_plan(tmp_path) -> None:
+    runner = _FakeRunner(_traded_report())
+    service = _service(tmp_path, runner)
+    _save(service._store)  # noqa: SLF001
+    service.launch("strategy-1")
+    service.refresh("strategy-1")
+
+    plan = service.snapshot("strategy-1").next_plan
+
+    assert plan is not None
+    assert plan["as_of"] == "2026-03-06"
+    assert plan["buys"][0]["estimated_size"] == 400.0
+
+
+def test_an_offline_strategy_has_no_pending_plan(tmp_path) -> None:
+    """过期的单子挂在页面上比没有更糟——下线就必须清掉。"""
+
+    runner = _FakeRunner(_traded_report())
+    service = _service(tmp_path, runner)
+    _save(service._store)  # noqa: SLF001
+    service.launch("strategy-1")
+    service.refresh("strategy-1")
+
+    snapshot = service.stop("strategy-1")
+
+    assert snapshot.next_plan is None
+    # 成交明细是已经发生的事实，下线不该抹掉。
+    assert snapshot.trades["after"]["total"] == 2
+
+
+def test_trade_sections_report_when_they_are_cut_off(tmp_path, monkeypatch) -> None:
+    """一年几百笔成交是常态。截断了必须说出来，不能让人以为看到的就是全部。"""
+
+    monkeypatch.setattr(tracking_module, "MAX_TRADES_PER_SEGMENT", 2)
+    many = tuple(
+        {
+            "date": f"2026-03-0{day}",
+            "market": "SH",
+            "code": f"60000{day}",
+            "name": "丁",
+            "direction": "BUY",
+            "size": 100.0,
+            "price": 10.0,
+            "pnl": 0.0,
+            "reason": "买入条件",
+        }
+        for day in (3, 4, 5)
+    )
+    runner = _FakeRunner(
+        _report(tuple(100000.0 + index * 1000 for index in range(10)), trades=many)
+    )
+    service = _service(tmp_path, runner)
+    _save(service._store)  # noqa: SLF001
+    service.launch("strategy-1")
+
+    section = service.refresh("strategy-1").trades["after"]
+
+    assert len(section["rows"]) == 2
+    assert section["total"] == 3
+    assert section["truncated"] is True
+    assert section["rows"][0]["code"] == "600005"
 
 
 class _OnlineStore:
