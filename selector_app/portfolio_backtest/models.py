@@ -289,6 +289,10 @@ class PortfolioBacktestReport:
     #: 或者池里没有一只标的在窗口首日就有价格。没有基准时报告照常出，只是
     #: "跑赢了没有"这件事没人回答。
     benchmark: Mapping[str, object] | None = None
+    #: 下一交易日待执行计划（最后一棒收盘时排定的 pending 单 + 当前持仓）。
+    #: 数量一律按最后一根 K 线的收盘价**估算**——明日开盘价今天不存在。没有
+    #: 追踪需求时是空字典，报告其余部分照常。
+    next_plan: Mapping[str, PortfolioJsonValue] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "performance", MappingProxyType(dict(self.performance)))
@@ -323,4 +327,5 @@ class PortfolioBacktestReport:
             "missing_codes": list(self.missing_codes),
             "filtered_codes": list(self.filtered_codes),
             "benchmark": dict(self.benchmark) if self.benchmark is not None else None,
+            "next_plan": dict(self.next_plan),
         }

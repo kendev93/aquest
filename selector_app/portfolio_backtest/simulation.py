@@ -234,6 +234,16 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
             "states": states,
             "trades": trades,
             "ranking_events": ranking_events,
+            "next_plan": self._next_plan(
+                as_of=int(dates[-1]),
+                positions=positions,
+                pending_sells=pending_sells,
+                pending_buys=pending_buys,
+                by_symbol=by_symbol,
+                last_prices=last_prices,
+                cash=cash,
+                config=config,
+            ),
             "checkpoint": SimulationCheckpoint(
                 last_date=int(dates[-1]),
                 cash=float(cash),
@@ -275,6 +285,163 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
         if len(dates) < len(checkpoint.processed_dates):
             raise ValueError("模拟检查点超出当前回测日期范围")
         return bisect_right(dates, checkpoint.last_date)
+
+    def _next_plan(
+        self,
+        *,
+        as_of: int,
+        positions: Mapping[str, _Position],
+        pending_sells: Mapping[str, _PendingSell],
+        pending_buys: Sequence[_PendingBuy],
+        by_symbol: Mapping[str, _StockSeries],
+        last_prices: Mapping[str, float],
+        cash: float,
+        config: PortfolioBacktestConfig,
+    ) -> dict[str, PortfolioJsonValue]:
+        """最后一根 K 线收盘时排定、下一交易日要执行的单。
+
+        引擎本来就是「T 日收盘判定、T+1 开盘撮合」，lag 恒为一根 K（见
+        :meth:`_execution_price`），所以循环结束时还挂在 ``pending`` 里的单，正好
+        就是明天的动作——不需要再算一遍，也不存在别的口径。
+
+        但有两件事今天不可能知道：明天的开盘价，和明天会不会触发止损 / 止盈。
+        所以数量一律按**今日收盘价**估算，字段名一律带 ``estimated_`` 前缀：谁都
+        不许把它当成实际成交，界面上也不能省掉"估算"两个字。
+        """
+
+        holdings: list[PortfolioJsonValue] = []
+        for symbol, position in positions.items():
+            price = float(last_prices.get(symbol, position.entry_price))
+            holdings.append(
+                {
+                    "market": position.market,
+                    "code": position.code,
+                    "name": position.name or "",
+                    "size": float(position.size),
+                    "reference_price": price,
+                    "market_value": float(position.size) * price,
+                    "entry_price": float(position.entry_price),
+                    "entry_date": _date_text(position.entry_date),
+                    "unrealized_pnl_pct": (
+                        (price - float(position.entry_price)) / float(position.entry_price)
+                        if position.entry_price > 0
+                        else 0.0
+                    ),
+                }
+            )
+
+        sells: list[PortfolioJsonValue] = []
+        proceeds = 0.0
+        for symbol, sell_order in pending_sells.items():
+            held = positions.get(symbol)
+            if held is None:
+                continue
+            price = float(last_prices.get(symbol, held.entry_price))
+            profile = profile_from_config(
+                held.instrument_type,
+                commission=config.commission,
+                min_commission=config.min_commission,
+                stamp_tax=config.stamp_tax,
+            )
+            size = float(held.size)
+            gross = size * price
+            commission = max(gross * profile.commission, profile.min_commission)
+            stamp_tax = gross * profile.stamp_tax
+            net = gross - commission - stamp_tax - size * config.slippage
+            proceeds += net
+            sells.append(
+                {
+                    "market": held.market,
+                    "code": held.code,
+                    "name": held.name or "",
+                    "size": size,
+                    "reference_price": price,
+                    "estimated_proceeds": net,
+                    "reason": sell_order.reason or "卖出条件",
+                    "signal_date": _date_text(sell_order.signal_date),
+                }
+            )
+
+        rebalance_due = self._rebalance_due(as_of, config.rebalance_frequency)
+        # 最后一天在 :meth:`_should_refresh` 里恒为 True（否则回测收尾那天选不出
+        # 票），于是月 / 周频策略在最后一棒也会攒出一批买入候选。那批单不是"明天
+        # 该做的"，只是引擎收尾的副产品——这里必须掐掉，否则每天都会给一份假计划。
+        buys: list[PortfolioJsonValue] = []
+        if rebalance_due:
+            available = cash + proceeds
+            for order in pending_buys:
+                context = by_symbol.get(order.symbol)
+                if context is None:
+                    continue
+                price = float(last_prices.get(order.symbol, 0.0))
+                if price <= 0:
+                    continue
+                profile = profile_from_config(
+                    context.instrument_type,
+                    commission=config.commission,
+                    min_commission=config.min_commission,
+                    stamp_tax=config.stamp_tax,
+                )
+                shares = self._planned_shares(order, price, profile, config)
+                shares = self._affordable_shares(shares, price, available, profile, config.slippage)
+                if shares <= 0:
+                    continue
+                gross = shares * price
+                cost = gross + max(gross * profile.commission, profile.min_commission)
+                available -= cost + shares * config.slippage
+                buys.append(
+                    {
+                        "market": context.market,
+                        "code": context.code,
+                        "name": context.name or "",
+                        "estimated_size": float(shares),
+                        "reference_price": price,
+                        "estimated_cost": cost,
+                        "signal_date": _date_text(order.signal_date),
+                    }
+                )
+
+        notes: list[str] = []
+        if not rebalance_due:
+            label = {"weekly": "每周", "monthly": "每月"}.get(
+                config.rebalance_frequency, config.rebalance_frequency
+            )
+            notes.append(f"这个策略是{label}调仓，最近一个交易日不是调仓日，所以明天没有买入计划。")
+        if sells:
+            notes.append("卖出数量是持仓实际股数；回款按今日收盘价估，实际以明日开盘价成交。")
+        if buys:
+            notes.append("买入股数是按今日收盘价与可用现金估算的，明天开盘价变了就会变。")
+        if not sells and not buys:
+            notes.append("明日无需操作：持仓不动，也没有新的买入标的。")
+
+        return {
+            "as_of": _date_text(as_of),
+            "cash": float(cash),
+            "estimated_cash_after_sells": float(cash) + proceeds,
+            "rebalance_due": rebalance_due,
+            "holdings": holdings,
+            "sells": sells,
+            "buys": buys,
+            "notes": notes,
+        }
+
+    @staticmethod
+    def _rebalance_due(as_of: int, frequency: str) -> bool:
+        """最近一个交易日的**次日**是不是调仓日。
+
+        回测里 :meth:`_should_refresh` 比较的是当前交易日与下一个交易日；放到"明天"
+        这件事上，下一个交易日还不存在，只能用自然日推一天近似。周末 / 月末时这个
+        近似和真实日历一致；月中把节假日的最后一天当成月末会偏一天，但方向是"少给
+        一份计划"，不会凭空造单。
+        """
+
+        if frequency == "daily":
+            return True
+        current = pd.Timestamp(_date_text(as_of))
+        following = current + pd.Timedelta(1, unit="D")
+        if frequency == "weekly":
+            return int(current.isocalendar().week) != int(following.isocalendar().week)
+        return (current.year, current.month) != (following.year, following.month)
 
     def _execute_sells(
         self,

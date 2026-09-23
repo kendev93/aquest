@@ -129,6 +129,7 @@ class PortfolioReportMixin(_PortfolioServiceState):
             missing_codes=resolved.missing if resolved is not None else (),
             filtered_codes=resolved.filtered if resolved is not None else (),
             benchmark=_benchmark_block(benchmark_contexts, dates, config),
+            next_plan=_next_plan_block(simulation),
         )
 
     @staticmethod
@@ -164,6 +165,17 @@ class PortfolioReportMixin(_PortfolioServiceState):
             missing_codes=resolved.missing if resolved is not None else (),
             filtered_codes=resolved.filtered if resolved is not None else (),
         )
+
+
+def _next_plan_block(
+    simulation: Mapping[str, object],
+) -> dict[str, PortfolioJsonValue]:
+    """把模拟收尾时排定的明日计划透传出来。没有就给空，不算错误。"""
+
+    plan = simulation.get("next_plan")
+    if not isinstance(plan, Mapping):
+        return {}
+    return {str(key): value for key, value in plan.items()}
 
 
 def _benchmark_block(

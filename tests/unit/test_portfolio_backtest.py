@@ -659,3 +659,58 @@ def test_fixed_position_mode_buys_a_constant_share_count() -> None:
 def test_fixed_position_mode_requires_a_positive_size() -> None:
     with pytest.raises(ValueError, match="固定股数模式必须设置大于 0 的买入股数"):
         config(position_mode="fixed", fixed_size=None)
+
+
+def _planning_report(**overrides: object):
+    return PortfolioBacktestService(adapter=FakeAdapter()).run(
+        config(
+            formula_text="BUY:C>0; RANK:C; LEVEL:C;",
+            ranking_value="custom.rank",
+            sell_value="custom.level",
+            sell_value_operator="gte",
+            sell_value_threshold=14.0,
+            stop_loss_pct=None,
+            initial_cash=100_000.0,
+            max_positions=3,
+            **overrides,
+        )
+    )
+
+
+def test_next_plan_lists_the_orders_pending_for_the_next_session() -> None:
+    """引擎是 T 日收盘判定、T+1 开盘撮合，所以收尾时还挂着的单就是明天的动作。"""
+
+    plan = dict(_planning_report().next_plan)
+
+    assert plan["as_of"] == "2024-01-06"
+    assert plan["rebalance_due"] is True
+    # 卖出量是持仓的实际股数，不是估算——它今天就已经确定了。
+    sells = plan["sells"]
+    assert sells and sells[0]["code"] == "600001"
+    assert sells[0]["size"] == 2700.0
+    assert sells[0]["signal_date"] == "2024-01-06"
+    # 买入只有估算值：明天的开盘价今天还不存在，字段必须带 estimated_ 前缀，
+    # 免得有人把它当实际成交。
+    buys = plan["buys"]
+    assert buys and buys[0]["code"] == "600000"
+    assert buys[0]["estimated_size"] > 0
+    assert buys[0]["estimated_cost"] > 0
+    assert any("估算" in str(note) for note in plan["notes"])
+    # 卖出回款要算进可用现金，否则会低估明天买得起多少。
+    assert plan["estimated_cash_after_sells"] > plan["cash"]
+
+
+def test_next_plan_withholds_buys_when_the_last_bar_is_not_a_rebalance_day() -> None:
+    """月 / 周频策略在回测最后一棒也会选出候选（收尾的副产品），不能当成明日计划。
+
+    ``_should_refresh`` 让最后一天恒为调仓日——否则回测收尾那天选不出票。这个
+    副作用对回测无害（那些单没机会成交），但直接展示就等于每天给一份假计划。
+    """
+
+    plan = dict(_planning_report(rebalance_frequency="monthly").next_plan)
+
+    assert plan["rebalance_due"] is False
+    assert plan["buys"] == []
+    assert any("不是调仓日" in str(note) for note in plan["notes"])
+    # 卖出不受调仓频率影响：触发了就该卖。
+    assert plan["sells"] or plan["holdings"]
