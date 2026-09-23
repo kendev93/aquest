@@ -31,13 +31,19 @@ from .models import (
     InstrumentType,
 )
 
+# 13 → 17 是三次「加表」顺手带上去的，那几次没有要迁移的旧数据（新表本来就是空
+# 的，DDL 每次启动都会跑）。代价是每个老库升级前先整库备份一遍（4.6GB），一次性
+# 成本，可接受。**不要再把它调回去**：已经升级的库版本号更高，调回去会让它们一律
+# 报「schema 版本过高」直接起不来。往后加表就只写 CREATE TABLE IF NOT EXISTS，
+# 别动这个数（新表顺手加进 ASSET_TABLES，否则导出导入会漏）。
 SCHEMA_VERSION = 17
 SCREEN_HISTORY_LIMIT = 10
 STRATEGY_DISCOVERY_HISTORY_LIMIT = 20
 # 每种类型最多保留这么多条，超出的最旧记录会被删掉。
 # ⚠️ 这条限制有个容易被忽略的连带影响：想统计「这个库累计跑过多少次研究」时不能数
 # 这张表——数出来最多就是这个数。跨运行的试验次数校正（候选池 #20）要的是累计值，
-# 必须另建持久化计数，别在这里取巧。
+# 单独记在 condition_research_trials（save_research_trial），它**不跟着这里截断**：
+# 历史记录被淘汰不会撤销用户当时看过最好结果这件事，K 少算会让校正不足。
 BACKTEST_HISTORY_LIMIT = 20
 # 从 BacktestHistoryType 派生，而不是再抄一份字面量：抄一份就会漏更新。
 _BACKTEST_HISTORY_TYPES = set(get_args(BacktestHistoryType))

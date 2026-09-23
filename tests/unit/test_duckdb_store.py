@@ -11,7 +11,7 @@ import pytest
 
 from selector_app.market_data.models import InstrumentRef
 from selector_app.market_data.store import DuckDbMarketDataStore, default_data_dir
-from selector_app.market_data.store_base import _WRITE_LOCK
+from selector_app.market_data.store_base import _WRITE_LOCK, BACKTEST_HISTORY_LIMIT
 
 
 def _bars(*rows: tuple[str, str, str, float, str]) -> pd.DataFrame:
@@ -538,6 +538,27 @@ def test_research_trial_ledger_round_trip(tmp_path: Path) -> None:
     assert rows[0]["tested_conditions"] == 900
     # 时间要能读回来做排序，不能是个字符串。
     assert isinstance(rows[0]["created_at"], datetime)
+
+
+def test_research_trial_ledger_is_not_capped_by_history_limit(tmp_path: Path) -> None:
+    """台账是累计计数：历史记录被淘汰不该把轮数一起抹掉。
+
+    删掉一条历史不会撤销「用户当时看过它给的最好结果」，选择偏差还在。跟着
+    backtest_history 截到 20 条会让 K 少算，Šidák 校正就不足——正好是把 #20 想
+    防的东西又放回去。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    for index in range(BACKTEST_HISTORY_LIMIT + 5):
+        store.save_research_trial(
+            f"trial-{index}",
+            data_fingerprint=f"fp-{index}",
+            start_date="2020-01-01",
+            end_date="2024-12-31",
+            tested_conditions=100,
+        )
+
+    assert len(store.list_research_trials()) == BACKTEST_HISTORY_LIMIT + 5
 
 
 def test_research_trial_same_id_overwrites(tmp_path: Path) -> None:

@@ -70,6 +70,7 @@ def test_asset_tables_never_include_market_or_cache_data() -> None:
         "candidate_library",
         "stock_groups",
         "stock_group_criteria",
+        "condition_research_trials",
     }
 
 

@@ -35,6 +35,8 @@ ASSET_TABLES: tuple[str, ...] = (
     "candidate_library",
     "stock_groups",
     "stock_group_criteria",
+    # 试验台账跟着走：它是累计计数，导出导入丢一次就等于把跨运行的校正清零。
+    "condition_research_trials",
 )
 SAVED_STRATEGY_TABLE = "saved_strategies"
 STRATEGY_TRACKING_TABLE = "strategy_tracking"
@@ -1383,20 +1385,11 @@ class DuckDbHistoryStore:
                         count,
                     ],
                 )
-                # 与 backtest_history 同步截断：历史记录被淘汰的研究不该继续
-                # 留在台账里贡献轮数，否则"删掉重来"反而会抬高别人的门槛。
-                stale = connection.execute(
-                    """
-                    SELECT history_id FROM condition_research_trials
-                    ORDER BY created_at DESC, history_id DESC
-                    LIMIT 100000 OFFSET ?
-                    """,
-                    [BACKTEST_HISTORY_LIMIT],
-                ).fetchall()
-                if stale:
-                    connection.executemany(
-                        "DELETE FROM condition_research_trials WHERE history_id = ?", stale
-                    )
+                # 这里**不截断**。台账要的是累计值：一轮研究就算后来被历史淘汰了，
+                # 用户当时看过它给的最好结果这件事不会跟着消失，"取 K 轮里最好的"
+                # 那次选择偏差也就还在。跟着 backtest_history 一起截到 20 条会让 K
+                # 少算、Šidák 校正不足，正好是把 #20 要防的东西又放回去。想从零开始
+                # 只能显式重置（reset_research_trials）。
                 connection.execute("COMMIT")
             except Exception:
                 connection.execute("ROLLBACK")
