@@ -1806,8 +1806,10 @@ onMounted(async () => {
 }
 
 @media (max-width: 640px) {
+  /* .condition-stock-controls 是子组件内部节点，父组件的 scoped 样式只能够到
+     子组件根节点，必须走 :deep() —— 上面那条同名的 :deep 规则就是这么写的。 */
   .condition-fields-top,
-  .condition-stock-controls {
+  :deep(.condition-stock-controls) {
     grid-template-columns: 1fr;
   }
 }
