@@ -366,3 +366,18 @@ export interface ConditionResearchReport {
   diagnostic?: string
   algorithm: Record<string, string | number>
 }
+
+
+export interface ResearchPresetSummary {
+  preset_id: string
+  name: string
+  note: string
+  created_at: string
+  updated_at: string
+}
+
+
+/** 研究方案存的内容就是那一次研究真正跑的请求本身，不含任何结果。 */
+export interface ResearchPreset extends ResearchPresetSummary {
+  payload: ConditionResearchPayload
+}

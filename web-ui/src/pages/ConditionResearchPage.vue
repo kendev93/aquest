@@ -11,6 +11,13 @@ import {
   getConditionResearchHistory,
   getConditionResearchResults,
 } from '../api/conditionResearch'
+import {
+  createResearchPreset,
+  deleteResearchPreset,
+  fetchResearchPresets,
+  getResearchPreset,
+  updateResearchPreset,
+} from '../api/researchPresets'
 import { FormulaScreenApiError, fetchMetadata, parseFormula } from '../api/formulaScreen'
 import { fetchActiveJobs } from '../api/jobs'
 import DateRangeSelector from '../components/DateRangeSelector.vue'
@@ -34,6 +41,7 @@ import type {
   InstrumentBoard,
   InstrumentType,
   RankOrder,
+  ResearchPresetSummary,
   RuleGroupPayload,
   ScreenCondition,
   ValueDefinition,
@@ -54,8 +62,10 @@ import {
   hitRateTitle,
   mergedDuplicates,
   phaseCount,
+  presetLoadMessage,
   significanceLabel,
   significanceTitle as formatSignificanceTitle,
+  stalePresetReferences,
   topNTitle as formatTopNTitle,
   topNWinRate,
   validationTrades as formatValidationTrades,
@@ -111,6 +121,18 @@ const job = ref<ConditionResearchJobState | null>(null)
 const report = ref<ConditionResearchReport | null>(null)
 const history = ref<ResearchHistorySummary[]>([])
 const historyLoading = ref(false)
+const researchPresets = ref<ResearchPresetSummary[]>([])
+const selectedPresetId = ref('')
+const presetName = ref('')
+const presetBusy = ref(false)
+// 判断方案里的条件是否失效要看当前元数据里到底有哪些输出/信号。元数据还没到
+// 的时候一律不判——那时没有依据，宁可什么都不说。
+const presetAvailability = computed(() => ({
+  valueIds: availableValues.value.map((value) => value.id),
+  signalIds: (metadata.value?.indicators ?? []).flatMap(
+    (indicator) => (indicator.signals ?? []).map((signal) => signal.id),
+  ),
+}))
 const selectedStockView = ref('baseline:full')
 // 历史列表：后端已按完成时间由近到远排好，这里只管切片分页。
 const activeHistoryId = ref('')
@@ -483,10 +505,10 @@ function applyToFormulaScreen(): void {
   if (import.meta.env.MODE !== 'test') window.location.assign('/indicator-lab')
 }
 
-async function submit(): Promise<void> {
+async function submit(): Promise<boolean> {
   errors.value = validate()
   message.value = ''
-  if (Object.values(errors.value).some(Boolean)) return
+  if (Object.values(errors.value).some(Boolean)) return false
   loading.value = true
   report.value = null
   try {
@@ -503,8 +525,10 @@ async function submit(): Promise<void> {
       result: null,
     }
     await pollJob(created.job_id)
+    return true
   } catch (error) {
     message.value = apiMessage(error)
+    return false
   } finally {
     loading.value = false
   }
@@ -803,6 +827,126 @@ async function applyStoredRequest(raw: unknown): Promise<void> {
   }
 }
 
+async function refreshResearchPresets(): Promise<void> {
+  try {
+    researchPresets.value = await fetchResearchPresets()
+  } catch {
+    // 列表拉不到不影响研究，只在方案区留空即可。
+  }
+}
+
+/** 加载结果。stale 是「引用了当前不存在的指标 / 信号」的项数，必须往上传。 */
+interface PresetLoadOutcome {
+  name: string
+  stale: number
+}
+
+async function loadSelectedPreset(): Promise<PresetLoadOutcome | null> {
+  const presetId = selectedPresetId.value
+  if (!presetId) return null
+  presetBusy.value = true
+  try {
+    const preset = await getResearchPreset(presetId)
+    // 失效项要在还原之前算：还原后规则已被替换，就再也看不出原来引用了什么。
+    const stale = stalePresetReferences(preset.payload, presetAvailability.value)
+    await applyStoredRequest(preset.payload)
+    presetName.value = preset.name
+    message.value = presetLoadMessage(preset.name, stale)
+    return { name: preset.name, stale }
+  } catch (error) {
+    message.value = apiMessage(error)
+    return null
+  } finally {
+    presetBusy.value = false
+  }
+}
+
+/** 一键研究：载入方案后立刻跑，省掉「加载 → 滚到底部点开始」两步。 */
+async function quickResearch(): Promise<void> {
+  const loaded = await loadSelectedPreset()
+  if (!loaded) return
+  const ran = await submit()
+  if (loaded.stale > 0) {
+    // 失效引用比「研究完成」重要：条件已经被悄悄换过，不能只报喜。
+    message.value = `已按方案「${loaded.name}」运行，但有 ${loaded.stale} 项引用了当前不存在的指标或信号、已被替换，请先核对条件。`
+  } else if (!ran) {
+    message.value = `已载入方案「${loaded.name}」，但当前配置没能通过校验，请修正后再运行。`
+  }
+}
+
+async function savePresetAsNew(): Promise<void> {
+  const name = presetName.value.trim()
+  if (!name) {
+    message.value = '请先填写研究方案名称。'
+    return
+  }
+  presetBusy.value = true
+  try {
+    const created = await createResearchPreset({ name, payload: buildPayload() })
+    await refreshResearchPresets()
+    selectedPresetId.value = created.preset_id
+    presetName.value = created.name
+    message.value = `已保存研究方案「${created.name}」。`
+  } catch (error) {
+    message.value = apiMessage(error)
+  } finally {
+    presetBusy.value = false
+  }
+}
+
+async function overwritePreset(): Promise<void> {
+  const presetId = selectedPresetId.value
+  if (!presetId) return
+  presetBusy.value = true
+  try {
+    const updated = await updateResearchPreset(presetId, { payload: buildPayload() })
+    await refreshResearchPresets()
+    message.value = `已用当前设置覆盖研究方案「${updated.name}」。`
+  } catch (error) {
+    message.value = apiMessage(error)
+  } finally {
+    presetBusy.value = false
+  }
+}
+
+async function renamePreset(): Promise<void> {
+  const presetId = selectedPresetId.value
+  const name = presetName.value.trim()
+  if (!presetId) return
+  if (!name) {
+    message.value = '请先填写新的研究方案名称。'
+    return
+  }
+  presetBusy.value = true
+  try {
+    const updated = await updateResearchPreset(presetId, { name })
+    await refreshResearchPresets()
+    presetName.value = updated.name
+    message.value = `研究方案已重命名为「${updated.name}」。`
+  } catch (error) {
+    message.value = apiMessage(error)
+  } finally {
+    presetBusy.value = false
+  }
+}
+
+async function deleteSelectedPreset(): Promise<void> {
+  const presetId = selectedPresetId.value
+  if (!presetId) return
+  presetBusy.value = true
+  try {
+    await deleteResearchPreset(presetId)
+    selectedPresetId.value = ''
+    presetName.value = ''
+    await refreshResearchPresets()
+    message.value = '已删除研究方案。'
+  } catch (error) {
+    message.value = apiMessage(error)
+  } finally {
+    presetBusy.value = false
+  }
+}
+
 /**
  * 候选库「载入复测」的接收端。
  *
@@ -959,6 +1103,7 @@ onMounted(async () => {
     // 候选库「载入复测」先走：它还原的是一次完整研究的配置，要压在波段计划之上。
     await restoreFromCandidateLibrary()
     applySwingPlan()
+    await refreshResearchPresets()
     await loadHistory()
     await resumeActiveJob()
   } catch (error) {
@@ -1023,6 +1168,29 @@ onMounted(async () => {
             <button type="button" :class="{ active: mode === 'preset' }" data-testid="condition-mode-preset" role="tab" :aria-selected="mode === 'preset'" @click="setMode('preset')">预置指标</button>
             <button type="button" :class="{ active: mode === 'custom' }" data-testid="condition-mode-custom" role="tab" :aria-selected="mode === 'custom'" @click="setMode('custom')">自定义公式</button>
           </div>
+
+          <fieldset class="form-section preset-section" data-testid="research-preset">
+            <legend>研究方案 <span class="legend-count">{{ researchPresets.length }} 个</span></legend>
+            <div class="preset-toolbar">
+              <select v-model="selectedPresetId" data-testid="research-preset-select" aria-label="已保存研究方案">
+                <option value="">选择已保存方案</option>
+                <option v-for="preset in researchPresets" :key="preset.preset_id" :value="preset.preset_id">{{ preset.name }}</option>
+              </select>
+              <button class="secondary-button" type="button" data-testid="run-research-preset" :disabled="!selectedPresetId || presetBusy || loading" @click="quickResearch">
+                <span v-if="loading" class="spinner" aria-hidden="true"></span>
+                一键研究
+              </button>
+              <button class="text-button" type="button" data-testid="load-research-preset" :disabled="!selectedPresetId || presetBusy" @click="loadSelectedPreset">只加载设置</button>
+              <button class="text-button" type="button" data-testid="delete-research-preset" :disabled="!selectedPresetId || presetBusy" @click="deleteSelectedPreset">删除</button>
+            </div>
+            <div class="preset-save-row">
+              <input v-model="presetName" data-testid="research-preset-name" type="text" maxlength="60" placeholder="方案名称，例如：主板低位进场 + 持有到期末">
+              <button class="secondary-button" type="button" data-testid="save-research-preset" :disabled="presetBusy" @click="savePresetAsNew">保存为新方案</button>
+              <button class="secondary-button" type="button" data-testid="overwrite-research-preset" :disabled="!selectedPresetId || presetBusy" @click="overwritePreset">覆盖当前</button>
+              <button class="secondary-button" type="button" data-testid="rename-research-preset" :disabled="!selectedPresetId || presetBusy" @click="renamePreset">重命名</button>
+            </div>
+            <p class="helper">方案存的是<b>整套研究设置</b>（买卖基础条件 / 标的范围 / 区间 / 搜索与验证参数 / 费用），存在服务端数据库里，换浏览器也在。「一键研究」= 载入这套设置并立刻开始；「只加载设置」只还原表单，不运行。</p>
+          </fieldset>
 
           <fieldset v-if="mode === 'custom'" class="form-section custom-formula-section">
             <legend>通达信公式</legend>

@@ -8,6 +8,7 @@ import * as researchApi from '../api/conditionResearch'
 import * as candidateApi from '../api/candidateLibrary'
 import * as formulaApi from '../api/formulaScreen'
 import * as jobsApi from '../api/jobs'
+import * as presetApi from '../api/researchPresets'
 import { SWING_PLAN_STORAGE_KEY } from '../utils/swingHandoff'
 
 vi.mock('../api/formulaScreen', async () => {
@@ -32,6 +33,20 @@ vi.mock('../api/conditionResearch', async () => {
 vi.mock('../api/jobs', async () => {
   const actual = await vi.importActual<typeof import('../api/jobs')>('../api/jobs')
   return { ...actual, fetchActiveJobs: vi.fn() }
+})
+
+vi.mock('../api/researchPresets', async () => {
+  const actual = await vi.importActual<typeof import('../api/researchPresets')>(
+    '../api/researchPresets',
+  )
+  return {
+    ...actual,
+    fetchResearchPresets: vi.fn(),
+    getResearchPreset: vi.fn(),
+    createResearchPreset: vi.fn(),
+    updateResearchPreset: vi.fn(),
+    deleteResearchPreset: vi.fn(),
+  }
 })
 
 vi.mock('../api/candidateLibrary', async () => {
@@ -200,6 +215,7 @@ describe('ConditionResearchPage', () => {
     vi.mocked(researchApi.getConditionResearchResults).mockResolvedValue(result)
     vi.mocked(researchApi.fetchConditionResearchHistory).mockResolvedValue([])
     vi.mocked(jobsApi.fetchActiveJobs).mockResolvedValue([])
+    vi.mocked(presetApi.fetchResearchPresets).mockResolvedValue([])
   })
 
   it('submits fixed buy/sell rules and renders validation and holdout candidates', async () => {
@@ -1483,5 +1499,143 @@ describe('ConditionResearchPage', () => {
     // 原始 p 要留着，用户才看得出被校正了多少。
     expect(title).toContain('p=0.040')
     expect(title).toContain('校正后 p=0.335')
+  })
+
+  it('keeps the research preset panel in the first screen', async () => {
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="research-preset"]').exists()).toBe(true)
+  })
+
+  it('saves the whole configuration as a named research preset', async () => {
+    vi.mocked(presetApi.createResearchPreset).mockResolvedValue({
+      preset_id: 'preset-1',
+      name: '主板低位进场',
+      note: '',
+      created_at: '2026-09-23T00:00:00Z',
+      updated_at: '2026-09-23T00:00:00Z',
+      payload: {} as never,
+    })
+    vi.mocked(presetApi.fetchResearchPresets).mockResolvedValue([{
+      preset_id: 'preset-1',
+      name: '主板低位进场',
+      note: '',
+      created_at: '2026-09-23T00:00:00Z',
+      updated_at: '2026-09-23T00:00:00Z',
+    }])
+
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    // 勾上「持有到期末」：卖出侧留空是这套方案的一部分，必须原样存下来。
+    await wrapper.get('[data-testid="condition-hold-to-end"]').setValue(true)
+    await wrapper.get('[data-testid="research-preset-name"]').setValue('主板低位进场')
+    await wrapper.get('[data-testid="save-research-preset"]').trigger('click')
+    await flushPromises()
+
+    expect(presetApi.createResearchPreset).toHaveBeenCalledWith(
+      expect.objectContaining({ name: '主板低位进场' }),
+    )
+    // 存的是整套输入，卖出侧留空（持有到期末）也要原样存下来。
+    const saved = vi.mocked(presetApi.createResearchPreset).mock.calls[0][0]
+    expect(saved.payload.sell_rule).toBeNull()
+    expect(wrapper.get('[data-testid="condition-research-message"]').text())
+      .toContain('已保存研究方案')
+  })
+
+  it('runs the selected preset immediately and reports the load first', async () => {
+    vi.mocked(presetApi.fetchResearchPresets).mockResolvedValue([{
+      preset_id: 'preset-1',
+      name: '只做深圳',
+      note: '',
+      created_at: '2026-09-23T00:00:00Z',
+      updated_at: '2026-09-23T00:00:00Z',
+    }])
+    vi.mocked(presetApi.getResearchPreset).mockResolvedValue({
+      preset_id: 'preset-1',
+      name: '只做深圳',
+      note: '',
+      created_at: '2026-09-23T00:00:00Z',
+      updated_at: '2026-09-23T00:00:00Z',
+      payload: {
+        universe: 'sz',
+        instrument_types: ['stock'],
+        buy_rule: {
+          signals: ['indicator.buy'],
+          conditions: [{
+            left_value: 'indicator.score',
+            operator: 'gt',
+            right_value: null,
+            right_constant: 0.5,
+          }],
+          required_conditions: [],
+          combine_mode: 'all',
+          minimum_matches: null,
+        },
+        sell_rule: null,
+        date_mode: 'custom',
+        start_date: '2020-01-01',
+        end_date: '2024-12-31',
+      },
+    })
+
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="research-preset-select"]').setValue('preset-1')
+    await flushPromises()
+    await wrapper.get('[data-testid="run-research-preset"]').trigger('click')
+    await flushPromises()
+
+    expect(presetApi.getResearchPreset).toHaveBeenCalledWith('preset-1')
+    expect(researchApi.createConditionResearch).toHaveBeenCalledWith(
+      expect.objectContaining({ universe: 'sz', start_date: '2020-01-01' }),
+    )
+  })
+
+  it('says so when a preset references values that no longer exist', async () => {
+    vi.mocked(presetApi.fetchResearchPresets).mockResolvedValue([{
+      preset_id: 'preset-1',
+      name: '引用已失效',
+      note: '',
+      created_at: '2026-09-23T00:00:00Z',
+      updated_at: '2026-09-23T00:00:00Z',
+    }])
+    vi.mocked(presetApi.getResearchPreset).mockResolvedValue({
+      preset_id: 'preset-1',
+      name: '引用已失效',
+      note: '',
+      created_at: '2026-09-23T00:00:00Z',
+      updated_at: '2026-09-23T00:00:00Z',
+      payload: {
+        universe: 'all',
+        buy_rule: {
+          signals: [],
+          conditions: [{
+            left_value: 'indicator.gone',
+            operator: 'gt',
+            right_value: null,
+            right_constant: 1,
+          }],
+          required_conditions: [],
+          combine_mode: 'all',
+          minimum_matches: null,
+        },
+        sell_rule: null,
+        date_mode: 'custom',
+        start_date: '2020-01-01',
+        end_date: '2024-12-31',
+      },
+    })
+
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="research-preset-select"]').setValue('preset-1')
+    await flushPromises()
+    await wrapper.get('[data-testid="load-research-preset"]').trigger('click')
+    await flushPromises()
+
+    // 失效引用会被静默换成别的指标，不讲出来用户会以为加载的还是原来那套条件。
+    expect(wrapper.get('[data-testid="condition-research-message"]').text())
+      .toContain('1 项引用了当前不存在的指标')
   })
 })

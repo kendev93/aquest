@@ -11,6 +11,7 @@ import { formatChinaTimestamp } from './time'
 import type {
   ConditionResearchCandidate,
   ConditionResearchDuplicate,
+  ConditionResearchPayload,
   ConditionResearchReport,
   ConditionResearchSensitivityPoint,
   ConditionResearchTrials,
@@ -354,4 +355,79 @@ export function phaseCount(
 ): number {
   const value = state?.metadata?.[key]
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+/** 判断方案里的引用是否失效所需的上下文：当前元数据里真正存在的 id。 */
+export interface ResearchPresetAvailability {
+  valueIds: string[]
+  signalIds: string[]
+}
+
+function ruleGroups(payload: Record<string, unknown>): Record<string, unknown>[] {
+  const groups: Record<string, unknown>[] = []
+  for (const key of ['buy_rule', 'sell_rule']) {
+    const rule = payload[key]
+    if (rule && typeof rule === 'object') groups.push(rule as Record<string, unknown>)
+  }
+  return groups
+}
+
+function conditionList(rule: Record<string, unknown>): ScreenCondition[] {
+  const items: ScreenCondition[] = []
+  for (const key of ['conditions', 'required_conditions']) {
+    const value = rule[key]
+    if (!Array.isArray(value)) continue
+    for (const item of value) {
+      if (item && typeof item === 'object') items.push(item as ScreenCondition)
+    }
+  }
+  return items
+}
+
+/**
+ * 方案里「引用了当前不存在的指标 / 信号」的项数。
+ *
+ * 加载方案时这些引用会被静默换成可用的指标，不讲出来用户会以为加载的还是原来
+ * 那套条件。元数据还没加载完时一律返回 0 —— 那时根本没有判断依据，宁可什么都不
+ * 说，也不要把整套条件报成失效。
+ */
+export function stalePresetReferences(
+  payload: unknown,
+  available: ResearchPresetAvailability,
+): number {
+  if (!payload || typeof payload !== 'object') return 0
+  const record = payload as Record<string, unknown>
+  const knownValues = new Set(available.valueIds)
+  const knownSignals = new Set(available.signalIds)
+  let stale = 0
+  for (const rule of ruleGroups(record)) {
+    const signals = Array.isArray(rule.signals) ? rule.signals : []
+    if (knownSignals.size > 0) {
+      stale += signals.filter(
+        (item) => typeof item === 'string' && !knownSignals.has(item),
+      ).length
+    }
+    if (knownValues.size === 0) continue
+    for (const condition of conditionList(rule)) {
+      const left = typeof condition.left_value === 'string' ? condition.left_value : ''
+      const right = typeof condition.right_value === 'string' ? condition.right_value : null
+      const broken = (left !== '' && !knownValues.has(left))
+        || (right !== null && right !== '' && !knownValues.has(right))
+      if (broken) stale += 1
+    }
+  }
+  return stale
+}
+
+/** 加载方案后的提示。有失效项必须先说失效，否则「已载入」读起来像是原样还原。 */
+export function presetLoadMessage(name: string, stale: number): string {
+  if (stale > 0) {
+    return `已载入研究方案「${name}」，但有 ${stale} 项引用了当前不存在的指标或信号、已被替换，请先核对条件再运行。`
+  }
+  return `已载入研究方案「${name}」，请确认后重新运行。`
+}
+
+/** 这套配置能不能存成方案：方案里不能带结果，只带输入。 */
+export function buildPresetPayload(payload: ConditionResearchPayload): ConditionResearchPayload {
+  return JSON.parse(JSON.stringify(payload)) as ConditionResearchPayload
 }
