@@ -415,6 +415,39 @@ describe('FormulaScreenPage', () => {
     expect(api.createJob).not.toHaveBeenCalled()
   })
 
+  it('runs a saved preset straight away with one click', async () => {
+    vi.mocked(presetApi.fetchScreenPresets).mockResolvedValue([
+      { preset_id: 'preset-1', name: '主板低位', note: '', created_at: '2026-09-21T10:00:00', updated_at: '2026-09-21T10:00:00' },
+    ])
+    vi.mocked(presetApi.getScreenPreset).mockResolvedValue({
+      preset_id: 'preset-1', name: '主板低位', note: '',
+      created_at: '2026-09-21T10:00:00', updated_at: '2026-09-21T10:00:00',
+      payload: presetPayload,
+    })
+
+    const wrapper = mount(FormulaScreenPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="preset-select"]').setValue('preset-1')
+    await wrapper.get('[data-testid="scan-preset"]').trigger('click')
+    await flushPromises()
+
+    // 一键选股 = 载入方案 + 立刻扫描，不用再滚到页面底部点「开始扫描」。
+    expect(presetApi.getScreenPreset).toHaveBeenCalledWith('preset-1')
+    expect(api.createJob).toHaveBeenCalledTimes(1)
+    expect(wrapper.get('[data-testid="screen-message"]').text()).toContain('已按方案「主板低位」扫描完成')
+  })
+
+  it('shows the preset bar on the first screen without opening advanced settings', async () => {
+    const wrapper = mount(FormulaScreenPage)
+    await flushPromises()
+
+    // 方案区曾经排在「选择信号」之后，用户根本滚不到那儿就以为没有这功能。
+    expect(wrapper.find('[data-testid="advanced-settings"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="screen-preset"]')).toBeTruthy()
+    expect(wrapper.get('[data-testid="scan-preset"]')).toBeTruthy()
+  })
+
   it('renames and deletes a preset', async () => {
     vi.mocked(presetApi.fetchScreenPresets).mockResolvedValue([
       { preset_id: 'preset-1', name: '甲', note: '', created_at: '2026-09-21T10:00:00', updated_at: '2026-09-21T10:00:00' },

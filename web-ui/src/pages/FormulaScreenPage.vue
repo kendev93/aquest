@@ -424,9 +424,15 @@ async function refreshScreenPresets(): Promise<void> {
   }
 }
 
-async function loadSelectedPreset(): Promise<void> {
+/** 加载结果。stale 是「引用了当前不存在的指标 / 信号」的项数，必须往上传。 */
+interface PresetLoadOutcome {
+  name: string
+  stale: number
+}
+
+async function loadSelectedPreset(): Promise<PresetLoadOutcome | null> {
   const presetId = selectedPresetId.value
-  if (!presetId) return
+  if (!presetId) return null
   presetBusy.value = true
   try {
     const preset = await getScreenPreset(presetId)
@@ -456,10 +462,25 @@ async function loadSelectedPreset(): Promise<void> {
     else normalizeConditionsToAvailableValues()
     presetName.value = preset.name
     message.value = presetLoadMessage(preset.name, result)
+    return { name: preset.name, stale: result.staleConditions + result.staleSignals }
   } catch (error) {
     message.value = apiMessage(error, '方案加载失败')
+    return null
   } finally {
     presetBusy.value = false
+  }
+}
+
+/** 一键选股：加载方案后立刻扫描，省掉「加载 → 滚到底部点扫描」两步。 */
+async function quickScreen(): Promise<void> {
+  const loaded = await loadSelectedPreset()
+  if (!loaded) return
+  const scanned = await submit()
+  if (loaded.stale > 0) {
+    // 失效引用比「扫描完成」重要：结果里的条件已经被悄悄换过，不能只报喜。
+    message.value = `已按方案「${loaded.name}」扫描，但有 ${loaded.stale} 项引用了当前不存在的指标或信号、已被替换，请先核对条件。`
+  } else if (scanned) {
+    message.value = `已按方案「${loaded.name}」扫描完成。`
   }
 }
 
@@ -682,10 +703,10 @@ async function syncMarketData(): Promise<void> {
   }
 }
 
-async function submit(): Promise<void> {
+async function submit(): Promise<boolean> {
   errors.value = validateScreenForm(form, customMetadata.value)
   message.value = ''
-  if (Object.values(errors.value).some(Boolean)) return
+  if (Object.values(errors.value).some(Boolean)) return false
 
   loading.value = true
   results.value = []
@@ -714,9 +735,11 @@ async function submit(): Promise<void> {
         ? '扫描任务执行失败，请检查后端服务、数据目录和配置后重试'
         : '扫描任务提交失败，请检查后端服务、数据目录和配置后重试',
     )
+    return false
   } finally {
     loading.value = false
   }
+  return true
 }
 
 function download(filename: string, content: string, type: string): void {
@@ -1162,6 +1185,34 @@ watch(() => form.formulaText, (value) => {
             <button type="button" :class="{ active: form.ruleMode === 'conditions' }" data-testid="rule-mode-conditions" role="tab" :aria-selected="form.ruleMode === 'conditions'" @click="setRuleMode('conditions')">指标条件</button>
           </div>
 
+          <fieldset class="form-section preset-section" data-testid="screen-preset">
+            <legend>筛选方案 <span class="legend-count">{{ screenPresets.length }} 个</span></legend>
+            <div class="preset-toolbar">
+              <select v-model="selectedPresetId" data-testid="preset-select" aria-label="已保存筛选方案">
+                <option value="">选择已保存方案</option>
+                <option v-for="preset in screenPresets" :key="preset.preset_id" :value="preset.preset_id">{{ preset.name }}</option>
+              </select>
+              <button class="secondary-button" type="button" data-testid="scan-preset" :disabled="!selectedPresetId || presetBusy || loading || !canSubmit" @click="quickScreen">
+                <span v-if="loading" class="spinner" aria-hidden="true"></span>
+                一键选股
+              </button>
+              <button class="text-button" type="button" data-testid="load-preset" :disabled="!selectedPresetId || presetBusy" @click="loadSelectedPreset">只加载设置</button>
+              <button class="text-button" type="button" data-testid="delete-preset" :disabled="!selectedPresetId || presetBusy" @click="deleteSelectedPreset">删除</button>
+            </div>
+            <div class="preset-save-row">
+              <input v-model="presetName" data-testid="preset-name" type="text" maxlength="60" placeholder="方案名称，例如：主板主力进场">
+              <button class="secondary-button" type="button" data-testid="save-preset" :disabled="presetBusy" @click="savePresetAsNew">保存为新方案</button>
+              <button class="secondary-button" type="button" data-testid="overwrite-preset" :disabled="!selectedPresetId || presetBusy" @click="overwritePreset">覆盖当前</button>
+              <button class="secondary-button" type="button" data-testid="rename-preset" :disabled="!selectedPresetId || presetBusy" @click="renamePreset">重命名</button>
+            </div>
+            <p v-if="errors.presetName" class="field-error" data-testid="preset-name-error">{{ errors.presetName }}</p>
+            <p class="helper">方案存的是<b>整套设置</b>（信号 / 条件 / 市场范围 / 板块 / 并发），存在服务端数据库里，换浏览器也在。「一键选股」= 载入这套设置并立刻扫描；「只加载设置」只还原表单，不扫描。</p>
+            <p v-if="legacyConditionSets.length" class="preset-import-row" data-testid="preset-import">
+              还有 {{ legacyConditionSets.length }} 个保存在浏览器本地的旧「指标组合」（只存条件、清缓存会丢）。
+              <button class="text-button" type="button" data-testid="import-legacy-sets" :disabled="presetBusy" @click="importLegacyConditionSets">导入为筛选方案</button>
+            </p>
+          </fieldset>
+
           <fieldset v-if="form.mode === 'custom'" class="form-section custom-formula-section">
             <legend>粘贴通达信公式</legend>
             <textarea v-model="form.formulaText" data-testid="custom-formula" rows="8" spellcheck="false" placeholder="例如：N:=5; SIGNAL:CROSS(C,REF(C,N));"></textarea>
@@ -1226,30 +1277,6 @@ watch(() => form.formulaText, (value) => {
               <div><label for="period">周期</label><select id="period" v-model="form.period" data-testid="period"><option value="daily">日线</option></select></div>
             </fieldset>
           </div>
-
-          <fieldset class="form-section preset-section" data-testid="screen-preset">
-            <legend>筛选方案 <span class="legend-count">{{ screenPresets.length }} 个</span></legend>
-            <div class="preset-toolbar">
-              <select v-model="selectedPresetId" data-testid="preset-select" aria-label="已保存筛选方案">
-                <option value="">选择已保存方案</option>
-                <option v-for="preset in screenPresets" :key="preset.preset_id" :value="preset.preset_id">{{ preset.name }}</option>
-              </select>
-              <button class="text-button" type="button" data-testid="load-preset" :disabled="!selectedPresetId || presetBusy" @click="loadSelectedPreset">加载</button>
-              <button class="text-button" type="button" data-testid="delete-preset" :disabled="!selectedPresetId || presetBusy" @click="deleteSelectedPreset">删除</button>
-            </div>
-            <div class="preset-save-row">
-              <input v-model="presetName" data-testid="preset-name" type="text" maxlength="60" placeholder="方案名称，例如：主板主力进场">
-              <button class="secondary-button" type="button" data-testid="save-preset" :disabled="presetBusy" @click="savePresetAsNew">保存为新方案</button>
-              <button class="secondary-button" type="button" data-testid="overwrite-preset" :disabled="!selectedPresetId || presetBusy" @click="overwritePreset">覆盖当前</button>
-              <button class="secondary-button" type="button" data-testid="rename-preset" :disabled="!selectedPresetId || presetBusy" @click="renamePreset">重命名</button>
-            </div>
-            <p v-if="errors.presetName" class="field-error" data-testid="preset-name-error">{{ errors.presetName }}</p>
-            <p class="helper">方案存的是<b>整套设置</b>（信号 / 条件 / 市场范围 / 板块 / 并发），存在服务端数据库里，换浏览器也在。加载只还原设置，不会自动重新扫描。</p>
-            <p v-if="legacyConditionSets.length" class="preset-import-row" data-testid="preset-import">
-              还有 {{ legacyConditionSets.length }} 个保存在浏览器本地的旧「指标组合」（只存条件、清缓存会丢）。
-              <button class="text-button" type="button" data-testid="import-legacy-sets" :disabled="presetBusy" @click="importLegacyConditionSets">导入为筛选方案</button>
-            </p>
-          </fieldset>
 
           <fieldset v-if="form.ruleMode === 'signals'" class="form-section signal-section">
             <legend>选择信号 <span class="legend-count">{{ form.selectedSignals.length }} selected</span></legend>
