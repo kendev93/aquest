@@ -34,6 +34,8 @@ SECTION_ORDER = (
     "instrument-lab",
     "history-compare",
     "market-data",
+    # 手册页自己是索引，放最后：先读功能，再读「这些说明是从哪来的」。
+    "user-manual",
 )
 
 # 每个 Section 顶部的「这一段归哪一类」，帮第一次读的人建立地图。
@@ -51,6 +53,7 @@ SECTION_GROUP = {
     "instrument-lab": "沉淀与复用",
     "history-compare": "沉淀与复用",
     "market-data": "数据",
+    "user-manual": "附录",
 }
 
 HEADINGS = (
