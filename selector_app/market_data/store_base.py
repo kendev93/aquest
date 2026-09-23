@@ -565,7 +565,42 @@ class _DuckDbStoreBase:
                 )
                 """
             )
-            # 筛选方案：公式选股页整套可复现的输入。和 screen_history 的区别是——
+            # 追踪成交明细：上面那张表只留净值，成交记录原本根本不落库——于是
+            # 「上线之后到底做了哪些交易」这个问题只能重跑回测才答得上来，而
+            # 重跑一次要几十秒。每次重算全量覆盖（删除后重写），所以和净值一样
+            # 幂等。phase 在写入时按上线日判定并固化下来，读的时候就不用再拿
+            # launched_at 比一次。
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS strategy_tracking_trades (
+                    strategy_id VARCHAR NOT NULL,
+                    seq INTEGER NOT NULL,
+                    trade_date INTEGER NOT NULL,
+                    phase VARCHAR NOT NULL,
+                    direction VARCHAR NOT NULL,
+                    market VARCHAR NOT NULL,
+                    code VARCHAR NOT NULL,
+                    name VARCHAR NOT NULL DEFAULT '',
+                    size DOUBLE NOT NULL,
+                    price DOUBLE NOT NULL,
+                    pnl DOUBLE NOT NULL DEFAULT 0,
+                    reason VARCHAR NOT NULL DEFAULT '',
+                    PRIMARY KEY (strategy_id, seq)
+                )
+                """
+            )
+            # 下一交易日计划：只留每个策略的最新一份，upsert 覆盖。它是"截至最近
+            # 一个交易日收盘的估算"，隔天就作废，没有保留历史版本的价值。
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS strategy_tracking_plan (
+                    strategy_id VARCHAR PRIMARY KEY,
+                    as_of INTEGER NOT NULL,
+                    payload_json VARCHAR NOT NULL,
+                    updated_at TIMESTAMP NOT NULL
+                )
+                """
+            )
             # 历史记"跑过什么"（满了自动淘汰），方案记"还想再跑一遍"（只有显式删
             # 才消失）。payload_json 只存输入，绝不存扫描结果：结果依赖当时行情，
             # 存下来下次加载的人会以为它还成立。

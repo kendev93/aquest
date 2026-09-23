@@ -351,3 +351,96 @@ def test_tracking_table_is_part_of_user_assets() -> None:
     """观察到的东西是我攒下来的证据，它和策略本身一样丢不起。"""
 
     assert "strategy_tracking" in ASSET_TABLES
+    assert "strategy_tracking_trades" in ASSET_TABLES
+    assert "strategy_tracking_plan" in ASSET_TABLES
+
+
+def _trade(trade_date: int, code: str, **rest: object) -> dict[str, object]:
+    return {
+        "trade_date": trade_date,
+        "phase": "post",
+        "direction": "BUY",
+        "market": "SH",
+        "code": code,
+        "name": f"测试{code}",
+        "size": 100.0,
+        "price": 10.0,
+        "pnl": 0.0,
+        "reason": "买入条件",
+        **rest,
+    }
+
+
+def test_tracking_trades_survive_a_round_trip_in_order(tmp_path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    _save(store)
+    store.save_tracking_trades(
+        "strategy-1",
+        [
+            _trade(20260820, "600000", phase="pre"),
+            _trade(20260905, "600001", direction="SELL", pnl=120.5, reason="卖出条件"),
+        ],
+    )
+
+    rows = store.list_tracking_trades("strategy-1")
+
+    assert [(row["trade_date"], row["code"], row["phase"]) for row in rows] == [
+        (20260820, "600000", "pre"),
+        (20260905, "600001", "post"),
+    ]
+    assert rows[1]["direction"] == "SELL"
+    assert rows[1]["pnl"] == 120.5
+    assert rows[1]["reason"] == "卖出条件"
+
+
+def test_tracking_trades_are_replaced_not_appended(tmp_path) -> None:
+    """重算是全量重跑：上一次跑出来的成交不能留在库里当孤儿行。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    _save(store)
+    store.save_tracking_trades(
+        "strategy-1", [_trade(20260820, "600000"), _trade(20260821, "600002")]
+    )
+    store.save_tracking_trades("strategy-1", [_trade(20260822, "600001")])
+
+    assert [row["code"] for row in store.list_tracking_trades("strategy-1")] == ["600001"]
+
+
+def test_deleting_a_strategy_removes_its_trades_and_plan(tmp_path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    _save(store)
+    store.save_tracking_trades("strategy-1", [_trade(20260905, "600000")])
+    store.save_tracking_plan("strategy-1", {"as_of": "2026-09-05", "buys": []})
+
+    assert store.delete_strategy("strategy-1") is True
+    assert store.list_tracking_trades("strategy-1") == []
+    assert store.read_tracking_plan("strategy-1") is None
+
+
+def test_the_next_plan_keeps_only_the_newest_version(tmp_path) -> None:
+    """计划隔天就作废，留历史版本只会让人照着上周的单子下单。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    _save(store)
+    store.save_tracking_plan("strategy-1", {"as_of": "2026-09-05", "buys": []})
+    store.save_tracking_plan("strategy-1", {"as_of": "2026-09-08", "buys": [{"code": "600000"}]})
+
+    plan = store.read_tracking_plan("strategy-1")
+
+    assert plan is not None
+    assert plan["as_of"] == "2026-09-08"
+    assert plan["buys"] == [{"code": "600000"}]
+
+
+def test_going_offline_drops_the_pending_plan(tmp_path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    _save(store)
+    store.start_strategy_tracking("strategy-1", launched_at=20260901)
+    store.save_tracking_trades("strategy-1", [_trade(20260905, "600000")])
+    store.save_tracking_plan("strategy-1", {"as_of": "2026-09-05", "buys": []})
+
+    store.stop_strategy_tracking("strategy-1")
+
+    # 观察段和成交明细是攒下来的证据，下线不该动它们；过期的计划要清掉。
+    assert store.read_tracking_plan("strategy-1") is None
+    assert len(store.list_tracking_trades("strategy-1")) == 1

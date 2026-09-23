@@ -676,6 +676,26 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
     ) -> list[dict[str, object]]:
         return self._history.list_tracking_points(strategy_id, since=since)
 
+    def save_tracking_trades(
+        self,
+        strategy_id: str,
+        rows: Iterable[Mapping[str, object]],
+    ) -> int:
+        return self._history.save_tracking_trades(strategy_id, rows)
+
+    def list_tracking_trades(self, strategy_id: str) -> list[dict[str, object]]:
+        return self._history.list_tracking_trades(strategy_id)
+
+    def save_tracking_plan(
+        self,
+        strategy_id: str,
+        payload: Mapping[str, object],
+    ) -> None:
+        self._history.save_tracking_plan(strategy_id, payload)
+
+    def read_tracking_plan(self, strategy_id: str) -> dict[str, object] | None:
+        return self._history.read_tracking_plan(strategy_id)
+
     def list_tracked_strategies(self) -> list[dict[str, object]]:
         return self._history.list_tracked_strategies()
 

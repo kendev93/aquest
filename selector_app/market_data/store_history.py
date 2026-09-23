@@ -29,6 +29,8 @@ ASSET_TABLES: tuple[str, ...] = (
     "screen_history",
     "saved_strategies",
     "strategy_tracking",
+    "strategy_tracking_trades",
+    "strategy_tracking_plan",
     "strategy_discovery_history",
     "strategy_discovery_replay_history",
     "screen_presets",
@@ -40,6 +42,12 @@ ASSET_TABLES: tuple[str, ...] = (
 )
 SAVED_STRATEGY_TABLE = "saved_strategies"
 STRATEGY_TRACKING_TABLE = "strategy_tracking"
+STRATEGY_TRACKING_TRADES_TABLE = "strategy_tracking_trades"
+STRATEGY_TRACKING_PLAN_TABLE = "strategy_tracking_plan"
+#: 成交明细归属哪一段。上线日（含）之后成交的算上线后——和净值曲线的分段口径
+#: 一致，两边都用"成交日 >= 上线日"判定，否则同一笔交易在两张表上会落在不同段。
+TRACKING_PHASE_PRE = "pre"
+TRACKING_PHASE_POST = "post"
 STRATEGY_NAME_MAX_LENGTH = 60
 STRATEGY_NOTE_MAX_LENGTH = 500
 SCREEN_PRESET_TABLE = "screen_presets"
@@ -1769,6 +1777,14 @@ class DuckDbHistoryStore:
                         f"DELETE FROM {STRATEGY_TRACKING_TABLE} WHERE strategy_id = ?",
                         [normalized_id],
                     )
+                    connection.execute(
+                        f"DELETE FROM {STRATEGY_TRACKING_TRADES_TABLE} WHERE strategy_id = ?",
+                        [normalized_id],
+                    )
+                    connection.execute(
+                        f"DELETE FROM {STRATEGY_TRACKING_PLAN_TABLE} WHERE strategy_id = ?",
+                        [normalized_id],
+                    )
                 connection.execute("COMMIT")
             except Exception:
                 connection.execute("ROLLBACK")
@@ -2621,6 +2637,13 @@ class DuckDbHistoryStore:
                     STRATEGY_TRACKING_OFF,
                 ],
             ).fetchone()
+            if updated is not None:
+                # 下线之后「明天打算买卖什么」就没有意义了，留着会变成一张还
+                # 挂在页面上的过期单子。观察段和成交明细照旧保留。
+                connection.execute(
+                    f"DELETE FROM {STRATEGY_TRACKING_PLAN_TABLE} WHERE strategy_id = ?",
+                    [normalized_id],
+                )
         if updated is None:
             return None
         return self.read_strategy(normalized_id)
@@ -2686,6 +2709,144 @@ class DuckDbHistoryStore:
             }
             for row in rows
         ]
+
+    def save_tracking_trades(
+        self,
+        strategy_id: str,
+        rows: Iterable[Mapping[str, object]],
+    ) -> int:
+        """全量覆盖一个策略的成交明细。
+
+        不增量合并：明细和净值一样出自同一次模拟，重跑一遍就是新的完整答案，
+        增量合并只会留下上次跑出来的孤儿行（比如行情补齐后消失的那笔成交）。
+        """
+
+        self._store._require_writer()
+        normalized_id = strategy_id.strip()
+        if not normalized_id:
+            return 0
+        prepared = list(rows)
+        with _WRITE_LOCK, self._store._connect() as connection:
+            connection.execute("BEGIN")
+            try:
+                connection.execute(
+                    f"DELETE FROM {STRATEGY_TRACKING_TRADES_TABLE} WHERE strategy_id = ?",
+                    [normalized_id],
+                )
+                if prepared:
+                    connection.executemany(
+                        f"""
+                        INSERT INTO {STRATEGY_TRACKING_TRADES_TABLE} (
+                            strategy_id, seq, trade_date, phase, direction,
+                            market, code, name, size, price, pnl, reason
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        [
+                            [
+                                normalized_id,
+                                int(index),
+                                int(cast(int, row["trade_date"])),
+                                str(row["phase"]),
+                                str(row["direction"]),
+                                str(row["market"]),
+                                str(row["code"]),
+                                str(row.get("name") or ""),
+                                float(cast(float, row["size"])),
+                                float(cast(float, row["price"])),
+                                float(cast(float, row.get("pnl") or 0.0)),
+                                str(row.get("reason") or ""),
+                            ]
+                            for index, row in enumerate(prepared)
+                        ],
+                    )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        return len(prepared)
+
+    def list_tracking_trades(
+        self,
+        strategy_id: str,
+    ) -> list[dict[str, object]]:
+        """Read the trades of one strategy in the order they happened."""
+
+        normalized_id = strategy_id.strip()
+        if not normalized_id:
+            return []
+        with self._store._connect(read_only=True) as connection:
+            rows = connection.execute(
+                "SELECT trade_date, phase, direction, market, code, name, size, price, "
+                f"pnl, reason FROM {STRATEGY_TRACKING_TRADES_TABLE} "
+                "WHERE strategy_id = ? ORDER BY seq",
+                [normalized_id],
+            ).fetchall()
+        return [
+            {
+                "trade_date": int(row[0]),
+                "phase": str(row[1]),
+                "direction": str(row[2]),
+                "market": str(row[3]),
+                "code": str(row[4]),
+                "name": str(row[5]),
+                "size": float(row[6]),
+                "price": float(row[7]),
+                "pnl": float(row[8]),
+                "reason": str(row[9]),
+            }
+            for row in rows
+        ]
+
+    def save_tracking_plan(
+        self,
+        strategy_id: str,
+        payload: Mapping[str, object],
+    ) -> None:
+        """Upsert the next-session plan of one strategy.
+
+        只留最新一份：它是"截至最近一个交易日收盘的估算"，隔天就作废，留历史
+        版本只会让人误以为还能照着上周的单去下单。
+        """
+
+        self._store._require_writer()
+        normalized_id = strategy_id.strip()
+        if not normalized_id:
+            return
+        encoded = json.dumps(dict(payload), ensure_ascii=False, separators=(",", ":"))
+        raw_as_of = str(payload.get("as_of") or "").replace("-", "").strip()
+        try:
+            as_of = _tracking_date(raw_as_of)
+        except ValueError:
+            # 计划基准日缺了或写坏了：宁可存 0 也不要让整个重算失败——明细和
+            # 净值已经写进去了，为这一个展示字段回滚不值得。
+            as_of = 0
+        with _WRITE_LOCK, self._store._connect() as connection:
+            connection.execute(
+                f"""
+                INSERT INTO {STRATEGY_TRACKING_PLAN_TABLE} (
+                    strategy_id, as_of, payload_json, updated_at
+                ) VALUES (?, ?, ?, ?)
+                ON CONFLICT (strategy_id) DO UPDATE SET
+                    as_of = excluded.as_of,
+                    payload_json = excluded.payload_json,
+                    updated_at = excluded.updated_at
+                """,
+                [normalized_id, as_of, encoded, _now()],
+            )
+
+    def read_tracking_plan(self, strategy_id: str) -> dict[str, object] | None:
+        normalized_id = strategy_id.strip()
+        if not normalized_id:
+            return None
+        with self._store._connect(read_only=True) as connection:
+            row = connection.execute(
+                f"SELECT payload_json FROM {STRATEGY_TRACKING_PLAN_TABLE} WHERE strategy_id = ?",
+                [normalized_id],
+            ).fetchone()
+        if row is None:
+            return None
+        decoded = json.loads(str(row[0]))
+        return decoded if isinstance(decoded, dict) else None
 
     def list_tracked_strategies(self) -> list[dict[str, object]]:
         """Return every strategy that is currently online."""
