@@ -223,6 +223,11 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
             end_date=end_date,
         )
 
+    def latest_trade_date(self) -> date | None:
+        """最新一根已完成日线的日期，库里没有任何 bar 时给 ``None``。"""
+
+        return self._bars.latest_trade_date()
+
     def count_many_bars(
         self,
         instruments: Iterable[InstrumentRef | StockRef] | None = None,

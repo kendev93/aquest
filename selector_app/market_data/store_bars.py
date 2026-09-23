@@ -698,6 +698,25 @@ class DuckDbBarsStore:
                 connection.register("_requested_symbols", symbol_frame)
             return self._store._frame_from_query(connection.execute(query, parameters).df())
 
+    def latest_trade_date(self) -> date | None:
+        """最新一根已完成日线的日期；库里没有任何 bar 时给 ``None``。
+
+        行情是手动同步的，所以「最新交易日」几乎从不等于今天。任何要按"从某天到
+        现在"取窗口的调用方都得先问它，否则会把一个空的区间当成"库里没数据"，
+        再把原因错怪到标的上。
+        """
+
+        with self._store._connect(read_only=True) as connection:
+            row = connection.execute(
+                "SELECT MAX(trade_date) FROM daily_bars WHERE bar_status = 'completed'"
+            ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        value = row[0]
+        if isinstance(value, date):
+            return value
+        return date.fromisoformat(str(value)[:10])
+
     def has_provisional_bars(self, market: str, code: str) -> bool:
         """Return whether a symbol still needs its intraday bar finalized."""
 

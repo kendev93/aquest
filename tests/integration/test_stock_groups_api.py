@@ -58,9 +58,7 @@ def _store(tmp_path: Path) -> DuckDbMarketDataStore:
 
 def test_crud_round_trip(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    with TestClient(
-        create_app(market_data_store=store, auto_sync_enabled=False)
-    ) as client:
+    with TestClient(create_app(market_data_store=store, auto_sync_enabled=False)) as client:
         created = client.post(
             "/api/v1/stock-groups",
             json={
@@ -88,9 +86,7 @@ def test_crud_round_trip(tmp_path: Path) -> None:
         assert read.status_code == 200
         assert read.json()["data"]["items"][0]["code"] == "600001"
 
-        renamed = client.patch(
-            f"/api/v1/stock-groups/{group_id}", json={"name": "改过的名字"}
-        )
+        renamed = client.patch(f"/api/v1/stock-groups/{group_id}", json={"name": "改过的名字"})
         assert renamed.status_code == 200
         assert renamed.json()["data"]["name"] == "改过的名字"
 
@@ -109,9 +105,7 @@ def test_crud_round_trip(tmp_path: Path) -> None:
 
 def test_duplicate_members_are_collapsed(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    with TestClient(
-        create_app(market_data_store=store, auto_sync_enabled=False)
-    ) as client:
+    with TestClient(create_app(market_data_store=store, auto_sync_enabled=False)) as client:
         response = client.post(
             "/api/v1/stock-groups",
             json={
@@ -129,9 +123,7 @@ def test_duplicate_members_are_collapsed(tmp_path: Path) -> None:
 
 def test_create_rejects_an_empty_group(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    with TestClient(
-        create_app(market_data_store=store, auto_sync_enabled=False)
-    ) as client:
+    with TestClient(create_app(market_data_store=store, auto_sync_enabled=False)) as client:
         response = client.post("/api/v1/stock-groups", json={"name": "空组", "items": []})
 
     assert response.status_code == 422
@@ -152,9 +144,7 @@ def test_performance_compares_the_group_with_the_whole_market(tmp_path: Path) ->
         created_at=datetime.combine(START, datetime.min.time()),
     )
 
-    with TestClient(
-        create_app(market_data_store=store, auto_sync_enabled=False)
-    ) as client:
+    with TestClient(create_app(market_data_store=store, auto_sync_enabled=False)) as client:
         response = client.get("/api/v1/stock-groups/g1/performance")
 
     assert response.status_code == 200
@@ -185,9 +175,7 @@ def test_criteria_snapshot_survives_the_group(tmp_path: Path) -> None:
     """筛选条件存的是快照，不是回指历史——历史只留 20 条，组还在它就该还在。"""
 
     store = _store(tmp_path)
-    with TestClient(
-        create_app(market_data_store=store, auto_sync_enabled=False)
-    ) as client:
+    with TestClient(create_app(market_data_store=store, auto_sync_enabled=False)) as client:
         created = client.post(
             "/api/v1/stock-groups",
             json={
@@ -227,9 +215,7 @@ def test_criteria_without_a_summary_is_rejected(tmp_path: Path) -> None:
     """给了 criteria 却没摘要必须报错：那会让折叠态空一栏，看着像忘了存。"""
 
     store = _store(tmp_path)
-    with TestClient(
-        create_app(market_data_store=store, auto_sync_enabled=False)
-    ) as client:
+    with TestClient(create_app(market_data_store=store, auto_sync_enabled=False)) as client:
         response = client.post(
             "/api/v1/stock-groups",
             json={
@@ -259,9 +245,7 @@ def test_summary_uses_one_window_for_every_group(tmp_path: Path) -> None:
         created_at=datetime.combine(START, datetime.min.time()),
     )
 
-    with TestClient(
-        create_app(market_data_store=store, auto_sync_enabled=False)
-    ) as client:
+    with TestClient(create_app(market_data_store=store, auto_sync_enabled=False)) as client:
         response = client.get("/api/v1/stock-groups/summary", params={"windows": "3,5"})
 
     assert response.status_code == 200
@@ -294,9 +278,7 @@ def test_summary_marks_a_window_short_of_data(tmp_path: Path) -> None:
         created_at=datetime.combine(START, datetime.min.time()),
     )
 
-    with TestClient(
-        create_app(market_data_store=store, auto_sync_enabled=False)
-    ) as client:
+    with TestClient(create_app(market_data_store=store, auto_sync_enabled=False)) as client:
         response = client.get("/api/v1/stock-groups/summary", params={"windows": "60"})
 
     assert response.status_code == 200
@@ -308,9 +290,7 @@ def test_summary_marks_a_window_short_of_data(tmp_path: Path) -> None:
 
 def test_summary_without_groups_is_empty(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    with TestClient(
-        create_app(market_data_store=store, auto_sync_enabled=False)
-    ) as client:
+    with TestClient(create_app(market_data_store=store, auto_sync_enabled=False)) as client:
         response = client.get("/api/v1/stock-groups/summary")
 
     assert response.status_code == 200
@@ -320,9 +300,7 @@ def test_summary_without_groups_is_empty(tmp_path: Path) -> None:
 
 def test_performance_of_a_missing_group_is_404(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    with TestClient(
-        create_app(market_data_store=store, auto_sync_enabled=False)
-    ) as client:
+    with TestClient(create_app(market_data_store=store, auto_sync_enabled=False)) as client:
         assert client.get("/api/v1/stock-groups/nope/performance").status_code == 404
 
 
@@ -335,12 +313,58 @@ def test_performance_without_market_data_says_so(tmp_path: Path) -> None:
         created_at=datetime.combine(START, datetime.min.time()),
     )
 
-    with TestClient(
-        create_app(market_data_store=store, auto_sync_enabled=False)
-    ) as client:
+    with TestClient(create_app(market_data_store=store, auto_sync_enabled=False)) as client:
         response = client.get("/api/v1/stock-groups/g1/performance")
 
     assert response.status_code == 200
     payload = response.json()["data"]
     assert payload["group_curve"] is None
     assert any("没有行情" in note for note in payload["notes"])
+
+
+def test_a_group_saved_after_the_last_bar_is_not_blamed_on_its_members(tmp_path: Path) -> None:
+    """行情停在几天前时今天存组，不能把这些标的说成"起点没有收盘价"。
+
+    行情是手动同步的，最新交易日几乎从不等于今天。窗口如果一律收到 ``today``，
+    入组晚于最新行情时区间为空，而空区间被当成"这段时间里库里没有行情"、成员
+    全被塞进 excluded——它们其实都有价，只是入组之后还没同步过。第一次用就会
+    撞上，而且提示指错了方向，会让人以为数据丢了。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "stale.duckdb")
+    latest = TODAY - timedelta(days=3)
+    start = latest - timedelta(days=9)
+    # 整段行情停在 3 天前，而不是像 _seed 那样铺到今天。
+    store.replace_local_bars(
+        "SH",
+        "600001",
+        "stock",
+        pd.DataFrame(
+            {
+                "date": pd.date_range(start, periods=10, freq="D"),
+                "open": np.linspace(10, 20, 10),
+                "high": np.linspace(10, 20, 10),
+                "low": np.linspace(10, 20, 10),
+                "close": np.linspace(10, 20, 10),
+                "volume": np.full(10, 1000.0),
+                "amount": np.linspace(10, 20, 10) * 1000.0,
+                "bar_status": "completed",
+            }
+        ),
+    )
+    store.save_stock_group(
+        "g-stale",
+        name="今天存的组",
+        items=[{"market": "SH", "code": "600001"}],
+        created_at=datetime.combine(TODAY, datetime.min.time()),
+    )
+
+    with TestClient(create_app(market_data_store=store, auto_sync_enabled=False)) as client:
+        response = client.get("/api/v1/stock-groups/g-stale/performance")
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    # 关键在于归因：不是成员没价，是入组之后还没同步过。
+    assert payload["excluded"] == []
+    assert any("入组时间" in note and "最新行情" in note for note in payload["notes"])
+    assert not any("没有收盘价" in note for note in payload["notes"])

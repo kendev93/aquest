@@ -235,6 +235,30 @@ class StockGroupService:
                 f"入组时间早于 {MAX_LOOKBACK_DAYS // 365} 年前，观察窗口已截断到最近 "
                 f"{MAX_LOOKBACK_DAYS // 365} 年"
             )
+        # 行情是手动同步的，最新交易日几乎从不等于今天。窗口终点必须落在库里真实
+        # 有的那一天：用 today 收尾会让"入组之后"这段时间里根本不存在的日期也进
+        # 区间，而入组晚于最新行情时整个区间为空——那不是"库里没有行情"，更不是
+        # "这些标的在起点没有收盘价"，只是入组之后还没同步过。
+        latest = self._store.latest_trade_date()
+        end = latest or date.today()
+        if created is not None and latest is not None and created > latest:
+            return GroupPerformance(
+                group_id=str(record["group_id"]),
+                start_date=_format_day(start),
+                end_date=_format_day(latest),
+                trading_days=0,
+                group_curve=None,
+                market_curve=None,
+                excess_return=None,
+                spread=None,
+                excluded=(),
+                truncated=truncated,
+                notes=(
+                    *notes,
+                    f"入组时间是 {_format_day(created)}，库里最新行情只到 "
+                    f"{_format_day(latest)}——入组之后还没有新的交易日可观察，先同步行情再看。",
+                ),
+            )
         refs = [
             InstrumentRef(
                 market=cast(MarketCode, member.market),
@@ -243,9 +267,7 @@ class StockGroupService:
             )
             for member in members
         ]
-        market_prices = pivot_closes(
-            self._store.read_close_matrix(start_date=start, end_date=date.today())
-        )
+        market_prices = pivot_closes(self._store.read_close_matrix(start_date=start, end_date=end))
         if market_prices.empty:
             return GroupPerformance(
                 group_id=str(record["group_id"]),
@@ -261,7 +283,7 @@ class StockGroupService:
                 notes=(*notes, "这段时间里库里没有行情，无法计算表现"),
             )
         group_prices = pivot_closes(
-            self._store.read_close_matrix(refs, start_date=start, end_date=date.today())
+            self._store.read_close_matrix(refs, start_date=start, end_date=end)
         ).reindex(market_prices.index)
         group_curve = equal_weight_curve(group_prices, GROUP_CURVE_LABEL)
         market_curve = equal_weight_curve(market_prices, MARKET_CURVE_LABEL)
@@ -406,8 +428,17 @@ def _as_date(value: object) -> date | None:
 
 
 def _format_day(day: object) -> str | None:
-    """YYYYMMDD 整数 → YYYY-MM-DD，前端两种格式都用得到，统一给带横杠的。"""
+    """统一成 YYYY-MM-DD。
 
+    入参有两种来源：行情矩阵的索引是 YYYYMMDD 整数，窗口计算出来的起止却是
+    ``date``。只认前者会让后者一律变成 ``None``——页面上就少一段日期，看不出
+    观察的是哪一段，所以两种都得认。
+    """
+
+    if isinstance(day, datetime):
+        return day.date().isoformat()
+    if isinstance(day, date):
+        return day.isoformat()
     text = str(day).strip()
     if not text.isdigit():
         return None

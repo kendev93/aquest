@@ -602,3 +602,28 @@ def test_research_trial_reset_returns_removed_count(tmp_path: Path) -> None:
     assert store.list_research_trials() == []
     # 再清一次是 0 而不是报错：重置按钮可能被连点。
     assert store.reset_research_trials() == 0
+
+
+def test_latest_trade_date_reports_the_newest_completed_bar(tmp_path: Path) -> None:
+    """行情是手动同步的，最新交易日几乎从不等于今天。
+
+    任何按"从某天到现在"取窗口的调用方都得先问它：窗口终点一律取 ``today`` 的话，
+    入组晚于最新行情时整个区间为空，而空区间会被误读成"库里没有行情"，再把原因
+    错怪到标的上（说它们在起点没有收盘价）。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    # 空库要给 None，不能给今天——否则调用方会以为库里已经有数据了。
+    assert store.latest_trade_date() is None
+
+    store.upsert_local_bars(
+        _bars(
+            ("SH", "600000", "2024-01-02", 10.0, "local"),
+            ("SH", "600000", "2024-01-05", 11.0, "local"),
+        )
+    )
+    assert store.latest_trade_date() == date(2024, 1, 5)
+
+    # 后写的一天更早，不该把最大值拉回去。
+    store.upsert_local_bars(_bars(("SH", "600000", "2024-01-03", 9.0, "local")))
+    assert store.latest_trade_date() == date(2024, 1, 5)
