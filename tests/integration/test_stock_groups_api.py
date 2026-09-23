@@ -37,6 +37,24 @@ def _bars(closes: list[float], *, start_index: int = 0) -> pd.DataFrame:
     )
 
 
+def _bars_from(start: date, closes: list[float]) -> pd.DataFrame:
+    """close 序列，从 ``start`` 开始按自然日排（测试里一个自然日就是一个交易日）。"""
+
+    values = np.asarray(closes, dtype=float)
+    return pd.DataFrame(
+        {
+            "date": pd.date_range(start, periods=len(values), freq="D"),
+            "open": values,
+            "high": values,
+            "low": values,
+            "close": values,
+            "volume": np.full(len(values), 1000.0),
+            "amount": values * 1000.0,
+            "bar_status": "completed",
+        }
+    )
+
+
 def _seed(store: DuckDbMarketDataStore) -> None:
     # A: 10 -> 20，+100%
     store.replace_local_bars("SH", "600001", "stock", _bars(list(np.linspace(10, 20, DAYS))))
@@ -169,6 +187,36 @@ def test_performance_compares_the_group_with_the_whole_market(tmp_path: Path) ->
     spread = payload["spread"]
     assert spread["counted"] == 2 and spread["advanced"] == 1 and spread["declined"] == 1
     assert spread["best"]["code"] == "600001"
+
+
+def test_performance_names_members_that_stopped_having_prices(tmp_path: Path) -> None:
+    """摘牌的票不能悄悄冻在曲线里：要点名，但也不替用户把它按末次价卖掉。"""
+
+    days = 30
+    start = TODAY - timedelta(days=days - 1)
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    # A 全程有价。
+    store.replace_local_bars("SH", "600001", "stock", _bars_from(start, [10.0] * days))
+    # B 只有前 5 天有价，之后 25 个交易日没有价 —— 摘牌的特征。
+    store.replace_local_bars("SH", "600002", "stock", _bars_from(start, [10.0] * 5))
+    store.save_stock_group(
+        "g1",
+        name="探针组",
+        items=[
+            {"market": "SH", "code": "600001", "name": "A"},
+            {"market": "SH", "code": "600002", "name": "B"},
+        ],
+        created_at=datetime.combine(start, datetime.min.time()),
+    )
+
+    with TestClient(create_app(market_data_store=store, auto_sync_enabled=False)) as client:
+        payload = client.get("/api/v1/stock-groups/g1/performance").json()["data"]
+
+    assert [item["code"] for item in payload["stalled"]] == ["600002"]
+    assert payload["stalled"][0]["missing_days"] == 25
+    assert any("不再有价" in note for note in payload["notes"])
+    # 曲线照旧把它算在里面（沿用末次收盘价），没有当成「已经卖掉」。
+    assert payload["group_curve"]["instrument_count"] == 2
 
 
 def test_criteria_snapshot_survives_the_group(tmp_path: Path) -> None:

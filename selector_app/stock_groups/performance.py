@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from datetime import date, datetime
 from typing import Final
 
 import numpy as np
@@ -27,6 +28,7 @@ from selector_app.portfolio_backtest.benchmark import curve_performance
 
 from .models import (
     MIN_TRADING_DAYS,
+    PERMANENT_GAP_DAYS,
     BasketCurve,
     GroupMember,
     MemberSpread,
@@ -120,6 +122,48 @@ def member_spread(
     )
 
 
+def stalled_members(
+    prices: pd.DataFrame,
+    members: Sequence[GroupMember],
+) -> tuple[dict[str, object], ...]:
+    """末次有价之后连续缺失 ``PERMANENT_GAP_DAYS`` 个交易日以上的标的。
+
+    曲线**不因此改数**：摘牌的票按末次收盘价挂着是「那笔钱还在里面、且变现不了」
+    的诚实写法，改写成「按末次价卖出、份额转给剩下的票」等于替用户做了一笔他没
+    做的交易——这和「起点无价就出局」是同一条原则的镜像（不假设没发生的成交）。
+    自由度只在披露：让「这组里有 2 只是已经没有价的」这件事看得见，要不要把它们
+    移出组由用户决定。
+
+    只判末段：中间的长空档是停牌，价格确实没动，沿用前收盘价是对的。
+    """
+
+    if prices.empty:
+        return ()
+    has_price = np.asarray(prices.notna().to_numpy(dtype=bool))
+    total_rows = has_price.shape[0]
+    names = {f"{member.market}:{member.code}": member.name for member in members}
+    found: list[dict[str, object]] = []
+    for column, key in enumerate(prices.columns):
+        rows = np.flatnonzero(has_price[:, column])
+        if rows.size == 0:
+            # 整段都没有价：那是「起点无价」，归 excluded 管，不是这里的事。
+            continue
+        missing = total_rows - 1 - int(rows[-1])
+        if missing < PERMANENT_GAP_DAYS:
+            continue
+        market, _, code = str(key).partition(":")
+        found.append(
+            {
+                "market": market,
+                "code": code,
+                "name": names.get(str(key)),
+                "last_date": format_day(prices.index[int(rows[-1])]),
+                "missing_days": missing,
+            }
+        )
+    return tuple(found)
+
+
 def excess_return(
     group_curve: BasketCurve | None,
     market_curve: BasketCurve | None,
@@ -137,6 +181,25 @@ def excess_return(
     if group_total is None or market_total is None:
         return None
     return _finite(float(group_total) - float(market_total))
+
+
+def format_day(day: object) -> str | None:
+    """统一成 ``YYYY-MM-DD``。
+
+    入参有两种来源：行情矩阵的索引是 YYYYMMDD 整数，窗口计算出来的起止却是
+    ``date``。只认前者会让后者一律变成 ``None``——页面上就少一段日期，看不出观察
+    的是哪一段，所以两种都得认。
+    """
+
+    if isinstance(day, datetime):
+        return day.date().isoformat()
+    if isinstance(day, date):
+        return day.isoformat()
+    text = str(day).strip()
+    if not text.isdigit():
+        return None
+    padded = text.zfill(8)
+    return f"{padded[:4]}-{padded[4:6]}-{padded[6:8]}"
 
 
 def _extreme(key: str, names: Mapping[str, str | None], value: float) -> dict[str, object]:
@@ -165,7 +228,9 @@ def _as_day_numbers(values: pd.Series) -> pd.Series:
 __all__ = [
     "equal_weight_curve",
     "excess_return",
+    "format_day",
     "member_spread",
     "pivot_closes",
     "price_ratios",
+    "stalled_members",
 ]

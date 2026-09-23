@@ -17,6 +17,7 @@ from selector_app.stock_groups.performance import (
     member_spread,
     pivot_closes,
     price_ratios,
+    stalled_members,
 )
 
 
@@ -106,6 +107,55 @@ def test_excess_return_is_none_without_both_curves() -> None:
     prices = _frame({"SH:600001": [10.0, 11.0]}, (20260101, 20260102))
 
     assert excess_return(equal_weight_curve(prices, "组"), None) is None
+
+
+def test_stalled_members_names_symbols_that_stop_having_prices() -> None:
+    """末段连续缺 20 个交易日以上 = 不再有价（摘牌）；中间的停牌不算。"""
+
+    days = tuple(20260101 + offset for offset in range(30))
+    prices = _frame(
+        {
+            # 第 5 天之后就再没有价：末段缺 25 个交易日 —— 摘牌的特征。
+            "SH:600001": [10.0] * 5 + [np.nan] * 25,
+            # 中间停牌 10 天又复牌：那段时间价格确实没动，不是消失。
+            "SH:600002": [10.0] * 5 + [np.nan] * 10 + [11.0] * 15,
+        },
+        days,
+    )
+    members = normalize_members(
+        [
+            {"market": "SH", "code": "600001", "name": "A"},
+            {"market": "SH", "code": "600002", "name": "B"},
+        ]
+    )
+
+    stalled = stalled_members(prices, members)
+
+    assert [item["code"] for item in stalled] == ["600001"]
+    assert stalled[0]["name"] == "A"
+    assert stalled[0]["last_date"] == "2026-01-05"
+    assert stalled[0]["missing_days"] == 25
+
+    # 曲线**不改数**：摘牌的票继续按末次收盘价挂着，那是「钱还在里面、变现不了」
+    # 的写法；改写成「按末次价卖出」等于替用户做了一笔他没做的交易。
+    curve = equal_weight_curve(prices, "组")
+    assert curve is not None
+    assert curve.instrument_count == 2
+    assert curve.totals[-1] == pytest.approx(1.05)
+
+
+def test_stalled_threshold_is_twenty_trading_days() -> None:
+    """20 ≈ 一个自然月：退市整理期（15 个交易日）之后的空白必然被判出来。"""
+
+    days = tuple(20260101 + offset for offset in range(30))
+
+    def _symbol(valid_rows: int) -> dict[str, list[float]]:
+        return {"SH:600001": [10.0] * valid_rows + [np.nan] * (len(days) - valid_rows)}
+
+    # 末段只缺 19 个交易日：还按停牌处理。
+    assert stalled_members(_frame(_symbol(11), days), ()) == ()
+    # 缺满 20 个交易日就判定不再有价。
+    assert [item["code"] for item in stalled_members(_frame(_symbol(10), days), ())] == ["600001"]
 
 
 def test_member_spread_reports_the_distribution() -> None:

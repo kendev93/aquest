@@ -37,8 +37,10 @@ from .models import (
 from .performance import (
     equal_weight_curve,
     excess_return,
+    format_day,
     member_spread,
     pivot_closes,
+    stalled_members,
 )
 from .summary import (
     WINDOW_LABELS,
@@ -204,7 +206,7 @@ class StockGroupService:
         if market_prices.empty:
             return _summary_payload(chosen, (), None)
         summaries = summarize_groups(market_prices, groups, chosen)
-        return _summary_payload(chosen, summaries, _format_day(market_prices.index[-1]))
+        return _summary_payload(chosen, summaries, format_day(market_prices.index[-1]))
 
     def performance(self, group_id: str) -> GroupPerformance | None:
         """What this group did from the day it was saved until the latest bar."""
@@ -225,6 +227,7 @@ class StockGroupService:
                 excess_return=None,
                 spread=None,
                 excluded=(),
+                stalled=(),
                 truncated=False,
                 notes=("这一组里没有有效标的",),
             )
@@ -244,19 +247,20 @@ class StockGroupService:
         if created is not None and latest is not None and created > latest:
             return GroupPerformance(
                 group_id=str(record["group_id"]),
-                start_date=_format_day(start),
-                end_date=_format_day(latest),
+                start_date=format_day(start),
+                end_date=format_day(latest),
                 trading_days=0,
                 group_curve=None,
                 market_curve=None,
                 excess_return=None,
                 spread=None,
                 excluded=(),
+                stalled=(),
                 truncated=truncated,
                 notes=(
                     *notes,
-                    f"入组时间是 {_format_day(created)}，库里最新行情只到 "
-                    f"{_format_day(latest)}——入组之后还没有新的交易日可观察，先同步行情再看。",
+                    f"入组时间是 {format_day(created)}，库里最新行情只到 "
+                    f"{format_day(latest)}——入组之后还没有新的交易日可观察，先同步行情再看。",
                 ),
             )
         refs = [
@@ -271,7 +275,7 @@ class StockGroupService:
         if market_prices.empty:
             return GroupPerformance(
                 group_id=str(record["group_id"]),
-                start_date=_format_day(start),
+                start_date=format_day(start),
                 end_date=None,
                 trading_days=0,
                 group_curve=None,
@@ -279,6 +283,7 @@ class StockGroupService:
                 excess_return=None,
                 spread=None,
                 excluded=tuple(member.to_dict() for member in members),
+                stalled=(),
                 truncated=truncated,
                 notes=(*notes, "这段时间里库里没有行情，无法计算表现"),
             )
@@ -292,18 +297,28 @@ class StockGroupService:
             notes.append(f"{len(excluded)} 只标的在起点当天没有收盘价（新股或停牌），未计入曲线")
         if group_curve is None and not excluded:
             notes.append("组内标的在起点都没有收盘价，无法计算表现")
+        stalled = stalled_members(group_prices, members)
+        if stalled:
+            # 不替用户把这笔卖掉：摘牌的票按末次收盘价挂着，是「钱还在里面、变现
+            # 不了」的写法。这里只说清楚有几只、从哪天起没了价。
+            earliest = min(str(item["last_date"]) for item in stalled)
+            notes.append(
+                f"{len(stalled)} 只标的自 {earliest} 起不再有价（摘牌或长期停牌）："
+                "曲线中这部分沿用末次收盘价，没有按那个价卖出"
+            )
         if len(market_prices.index) < MIN_TRADING_DAYS:
             notes.append("入组至今不足两个交易日，暂时看不出涨跌")
         return GroupPerformance(
             group_id=str(record["group_id"]),
-            start_date=_format_day(market_prices.index[0]),
-            end_date=_format_day(market_prices.index[-1]),
+            start_date=format_day(market_prices.index[0]),
+            end_date=format_day(market_prices.index[-1]),
             trading_days=int(len(market_prices.index)),
             group_curve=group_curve,
             market_curve=market_curve,
             excess_return=excess_return(group_curve, market_curve),
             spread=member_spread(group_prices, members),
             excluded=excluded,
+            stalled=stalled,
             truncated=truncated,
             notes=tuple(notes),
         )
@@ -425,25 +440,6 @@ def _as_date(value: object) -> date | None:
         except ValueError:
             return None
     return None
-
-
-def _format_day(day: object) -> str | None:
-    """统一成 YYYY-MM-DD。
-
-    入参有两种来源：行情矩阵的索引是 YYYYMMDD 整数，窗口计算出来的起止却是
-    ``date``。只认前者会让后者一律变成 ``None``——页面上就少一段日期，看不出
-    观察的是哪一段，所以两种都得认。
-    """
-
-    if isinstance(day, datetime):
-        return day.date().isoformat()
-    if isinstance(day, date):
-        return day.isoformat()
-    text = str(day).strip()
-    if not text.isdigit():
-        return None
-    padded = text.zfill(8)
-    return f"{padded[:4]}-{padded[4:6]}-{padded[6:8]}"
 
 
 __all__ = ["StockGroupService"]

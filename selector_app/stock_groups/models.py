@@ -35,6 +35,17 @@ SOURCE_LABELS: Final[dict[str, str]] = {
 MAX_LOOKBACK_DAYS: Final = 365 * 5
 #: 曲线至少要两个交易日才有「涨跌」可言。
 MIN_TRADING_DAYS: Final = 2
+#: 末次有价之后连续缺这么多交易日，就判定这只票**不再有价**（摘牌，或长期停牌不归）。
+#:
+#: 为什么是 20 个交易日（≈ 一个自然月）：
+#: * A 股退市整理期是 15 个交易日，摘牌之后行情里就再也没有它了——这段空白必然
+#:   超过 20 个交易日，一定会被判出来。
+#: * 反向要防的是误判：重大资产重组停牌制度上限 10 个交易日，其他停牌也很少超过
+#:   一个月。20 留了一倍缓冲，正常停牌不会被当成消失。
+#: * 数**交易日**不是自然日：行情表里压根没有停牌日的行，数自然日会把假期算进去。
+#: * 只看**末段**不看中间：中间的长空档（停牌几个月又复牌）价格确实没动，沿用前
+#:   收盘价是对的；只有末段的空档才说明它不再回来。
+PERMANENT_GAP_DAYS: Final = 20
 
 GROUP_CURVE_LABEL: Final = "本组等权买入持有"
 MARKET_CURVE_LABEL: Final = "全市场等权买入持有"
@@ -143,6 +154,10 @@ class GroupPerformance:
     #: 入组首日没有收盘价、因此没进曲线的标的。不能静默丢掉——「这一组算了多少只」
     #: 是判断结论可信度的一部分。
     excluded: tuple[dict[str, object], ...]
+    #: 中途不再有价的标的（摘牌、或长期停牌不归）。曲线仍然沿用末次收盘价：
+    #: 摘牌后进老三板那个价变现不了，改写成「按末次价卖出」等于替用户做了一笔他
+    #: 没做的交易。所以这里只点名、不改数，让它可见。
+    stalled: tuple[dict[str, object], ...]
     truncated: bool
     notes: tuple[str, ...]
 
@@ -157,6 +172,7 @@ class GroupPerformance:
             "excess_return": self.excess_return,
             "spread": self.spread.to_dict() if self.spread else None,
             "excluded": [dict(item) for item in self.excluded],
+            "stalled": [dict(item) for item in self.stalled],
             "truncated": self.truncated,
             "notes": list(self.notes),
         }
@@ -170,6 +186,7 @@ __all__ = [
     "MIN_TRADING_DAYS",
     "NAME_MAX_LENGTH",
     "NOTE_MAX_LENGTH",
+    "PERMANENT_GAP_DAYS",
     "SOURCE_LABELS",
     "SOURCE_MANUAL",
     "SOURCE_SCREEN",

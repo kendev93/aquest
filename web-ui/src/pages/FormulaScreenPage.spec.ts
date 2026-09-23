@@ -768,6 +768,7 @@ describe('FormulaScreenPage', () => {
         worst: { market: 'SZ', code: '000001', name: '平安银行', return: -0.05 },
       },
       excluded: [{ market: 'SZ', code: '000002', name: '万科A' }],
+      stalled: [],
       truncated: false,
       notes: ['1 只标的在起点当天没有收盘价（新股或停牌），未计入曲线'],
     })

@@ -84,6 +84,20 @@ export interface MemberSpread {
   worst: { market: string; code: string; name: string | null; return: number | null } | null
 }
 
+/**
+ * 中途不再有价的标的：摘牌或长期停牌不归。
+ * 曲线仍沿用末次收盘价（不假设按那个价卖掉），这里只是把它点出来。
+ */
+export interface StockGroupStalled {
+  market: string
+  code: string
+  name: string | null
+  /** 最后一次有收盘价的日期。 */
+  last_date: string | null
+  /** 之后连续缺失的交易日数。 */
+  missing_days: number
+}
+
 export interface StockGroupPerformance {
   group_id: string
   start_date: string | null
@@ -96,6 +110,8 @@ export interface StockGroupPerformance {
   spread: MemberSpread | null
   /** 入组首日没有收盘价、因此没进曲线的标的。 */
   excluded: StockGroupMember[]
+  /** 中途不再有价、但仍按末次收盘价挂在曲线里的标的。 */
+  stalled: StockGroupStalled[]
   truncated: boolean
   notes: string[]
 }
