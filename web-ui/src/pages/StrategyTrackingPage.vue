@@ -5,6 +5,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import TermHint from '../components/TermHint.vue'
 import {
   fetchStrategyTracking,
+  getStrategyTracking,
   getTrackingJob,
   launchStrategyTracking,
   rerunStrategyTracking,
@@ -14,6 +15,7 @@ import type {
   SavedStrategyPerformance,
   StrategyTrackingPoint,
   StrategyTrackingSnapshot,
+  TrackingTradeRow,
 } from '../types'
 
 type PerformanceKey = keyof SavedStrategyPerformance
@@ -24,6 +26,10 @@ const message = ref('')
 const messageIsError = ref(false)
 const busyId = ref('')
 const expandedId = ref('')
+// 成交明细只在展开时单独取（列表接口不带它），取过就留在本地，切走回来不重取。
+const details = ref<Record<string, StrategyTrackingSnapshot>>({})
+const detailLoadingId = ref('')
+const detailError = ref('')
 let pollTimer: ReturnType<typeof setTimeout> | null = null
 
 const online = computed(() =>
@@ -67,11 +73,35 @@ async function load(): Promise<void> {
   loading.value = true
   try {
     snapshots.value = await fetchStrategyTracking()
+    // 重跑之后明细会变，缓存必须一起作废，否则展开看到的是上一次的结果。
+    details.value = {}
   } catch (error) {
     showMessage(error instanceof Error ? error.message : '策略追踪加载失败。', true)
   } finally {
     loading.value = false
   }
+}
+
+async function loadDetail(strategyId: string): Promise<void> {
+  detailLoadingId.value = strategyId
+  detailError.value = ''
+  try {
+    details.value[strategyId] = await getStrategyTracking(strategyId)
+  } catch (error) {
+    detailError.value = error instanceof Error ? error.message : '交易明细读取失败。'
+  } finally {
+    detailLoadingId.value = ''
+  }
+}
+
+function toggle(strategyId: string): void {
+  const next = expandedId.value === strategyId ? '' : strategyId
+  expandedId.value = next
+  if (next && !details.value[next]) void loadDetail(next)
+}
+
+function tradesOf(strategyId: string) {
+  return details.value[strategyId]?.trades ?? null
 }
 
 /** 重跑要重算全历史，是分钟级任务，所以提交完只能轮询。 */
@@ -137,8 +167,32 @@ async function stop(strategyId: string): Promise<void> {
   }
 }
 
-function toggle(strategyId: string): void {
-  expandedId.value = expandedId.value === strategyId ? '' : strategyId
+/** 列表行上的一句话：明天有没有要动的手。 */
+function planBadge(item: StrategyTrackingSnapshot): string {
+  const plan = item.next_plan
+  if (!plan) return ''
+  const sells = plan.sells.length
+  const buys = plan.buys.length
+  if (sells === 0 && buys === 0) return '明日无需操作'
+  return `明日：卖 ${sells} / 买 ${buys}`
+}
+
+function tradeRows(item: StrategyTrackingSnapshot, phase: 'pre' | 'post'): TrackingTradeRow[] {
+  const trades = tradesOf(item.strategy_id)
+  if (!trades) return []
+  return phase === 'post' ? trades.after.rows : trades.before.rows
+}
+
+function tradeTotal(item: StrategyTrackingSnapshot, phase: 'pre' | 'post'): number {
+  const trades = tradesOf(item.strategy_id)
+  if (!trades) return 0
+  return phase === 'post' ? trades.after.total : trades.before.total
+}
+
+function tradeTruncated(item: StrategyTrackingSnapshot, phase: 'pre' | 'post'): boolean {
+  const trades = tradesOf(item.strategy_id)
+  if (!trades) return false
+  return phase === 'post' ? trades.after.truncated : trades.before.truncated
 }
 
 onMounted(load)
@@ -290,6 +344,7 @@ function chartFor(item: StrategyTrackingSnapshot) {
                     {{ item.name || item.strategy_id }}
                   </button>
                   <span v-if="item.last_error" class="error-pill" :data-testid="`tracking-error-${item.strategy_id}`">上次失败</span>
+                  <span v-if="planBadge(item)" class="plan-pill" :data-testid="`tracking-plan-badge-${item.strategy_id}`">{{ planBadge(item) }}</span>
                 </td>
                 <td>
                   <span class="status-pill" :class="item.tracking_status === 'active' ? 'live' : 'idle'" :data-testid="`tracking-status-${item.strategy_id}`">
@@ -351,6 +406,65 @@ function chartFor(item: StrategyTrackingSnapshot) {
         <p v-else-if="minTrlNote(item)" class="sample-warning" data-testid="tracking-mintrl-note">
           {{ minTrlNote(item) }}<TermHint term="minTrackRecordLength" />
         </p>
+
+        <section v-if="item.next_plan" class="plan-card" :data-testid="`tracking-plan-${item.strategy_id}`">
+          <div class="section-heading">
+            <div><span class="section-kicker">NEXT SESSION</span><h4>下一交易日计划</h4></div>
+            <span class="muted-code">基于 {{ item.next_plan.as_of }} 收盘</span>
+          </div>
+
+          <p v-if="item.next_plan.holdings.length" class="plan-holdings">
+            当前持仓：
+            <span v-for="holding in item.next_plan.holdings" :key="holding.code">
+              {{ holding.code }}<template v-if="holding.name"> {{ holding.name }}</template>
+              × {{ formatMoney(holding.size) }}
+            </span>
+          </p>
+          <p v-else class="plan-holdings">当前空仓。</p>
+
+          <div class="plan-grid">
+            <div class="plan-column">
+              <h5>卖出 {{ item.next_plan.sells.length }} 只</h5>
+              <p v-if="!item.next_plan.sells.length" class="plan-empty">明日没有要卖的。</p>
+              <div v-else class="table-wrap">
+                <table :data-testid="`tracking-plan-sells-${item.strategy_id}`">
+                  <thead><tr><th>代码</th><th>名称</th><th>股数</th><th>参考价</th><th>原因</th></tr></thead>
+                  <tbody>
+                    <tr v-for="order in item.next_plan.sells" :key="order.code">
+                      <td><strong class="code">{{ order.code }}</strong></td>
+                      <td>{{ order.name || '—' }}</td>
+                      <td>{{ formatMoney(order.size) }}</td>
+                      <td>{{ formatMoney(order.reference_price) }}</td>
+                      <td>{{ order.reason || '—' }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div class="plan-column">
+              <h5>买入 {{ item.next_plan.buys.length }} 只</h5>
+              <p v-if="!item.next_plan.buys.length" class="plan-empty">
+                {{ item.next_plan.rebalance_due ? '明日没有要买的。' : '不是调仓日，不产生买入计划。' }}
+              </p>
+              <div v-else class="table-wrap">
+                <table :data-testid="`tracking-plan-buys-${item.strategy_id}`">
+                  <thead><tr><th>代码</th><th>名称</th><th>估算股数</th><th>参考价</th><th>估算金额</th></tr></thead>
+                  <tbody>
+                    <tr v-for="order in item.next_plan.buys" :key="order.code">
+                      <td><strong class="code">{{ order.code }}</strong></td>
+                      <td>{{ order.name || '—' }}</td>
+                      <td>{{ formatMoney(order.estimated_size) }}</td>
+                      <td>{{ formatMoney(order.reference_price) }}</td>
+                      <td>{{ formatMoney(order.estimated_cost) }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          <p v-for="note in item.next_plan.notes" :key="note" class="plan-note">{{ note }}</p>
+        </section>
 
         <div class="segment-grid">
           <div class="segment-card">
@@ -420,6 +534,63 @@ function chartFor(item: StrategyTrackingSnapshot) {
               </tbody>
             </table>
           </div>
+        </section>
+
+        <section class="data-section" :data-testid="`tracking-trades-${item.strategy_id}`">
+          <div class="section-heading">
+            <div><span class="section-kicker">TRADES</span><h4>成交明细</h4></div>
+            <span v-if="detailLoadingId === item.strategy_id" data-testid="trades-loading">读取中…</span>
+          </div>
+          <p v-if="detailError" class="field-error" data-testid="trades-error">{{ detailError }}</p>
+
+          <details open :data-testid="`trades-after-${item.strategy_id}`">
+            <summary>上线后 · {{ tradeTotal(item, 'post') }} 笔</summary>
+            <p v-if="!tradeRows(item, 'post').length" class="plan-empty">上线后还没有成交。</p>
+            <template v-else>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>日期</th><th>方向</th><th>代码</th><th>名称</th><th>股数</th><th>价格</th><th>盈亏</th><th>原因</th></tr></thead>
+                  <tbody>
+                    <tr v-for="(row, index) in tradeRows(item, 'post')" :key="`${row.trade_date}-${row.code}-${index}`">
+                      <td class="muted-code">{{ formatDate(row.trade_date) }}</td>
+                      <td :class="row.direction === 'SELL' ? 'negative' : 'positive'">{{ row.direction === 'SELL' ? '卖出' : '买入' }}</td>
+                      <td><strong class="code">{{ row.code }}</strong></td>
+                      <td>{{ row.name || '—' }}</td>
+                      <td>{{ formatMoney(row.size) }}</td>
+                      <td>{{ formatMoney(row.price) }}</td>
+                      <td :class="{ positive: row.pnl > 0, negative: row.pnl < 0 }">{{ formatMoney(row.pnl) }}</td>
+                      <td>{{ row.reason || '—' }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <p v-if="tradeTruncated(item, 'post')" class="plan-note">
+                只显示最近 {{ tradesOf(item.strategy_id)?.limit }} 笔，共 {{ tradeTotal(item, 'post') }} 笔。
+              </p>
+            </template>
+          </details>
+
+          <details :data-testid="`trades-before-${item.strategy_id}`">
+            <summary>上线前 · {{ tradeTotal(item, 'pre') }} 笔</summary>
+            <p v-if="!tradeRows(item, 'pre').length" class="plan-empty">上线前没有成交。</p>
+            <div v-else class="table-wrap">
+              <table>
+                <thead><tr><th>日期</th><th>方向</th><th>代码</th><th>名称</th><th>股数</th><th>价格</th><th>盈亏</th><th>原因</th></tr></thead>
+                <tbody>
+                  <tr v-for="(row, index) in tradeRows(item, 'pre')" :key="`${row.trade_date}-${row.code}-${index}`">
+                    <td class="muted-code">{{ formatDate(row.trade_date) }}</td>
+                    <td :class="row.direction === 'SELL' ? 'negative' : 'positive'">{{ row.direction === 'SELL' ? '卖出' : '买入' }}</td>
+                    <td><strong class="code">{{ row.code }}</strong></td>
+                    <td>{{ row.name || '—' }}</td>
+                    <td>{{ formatMoney(row.size) }}</td>
+                    <td>{{ formatMoney(row.price) }}</td>
+                    <td :class="{ positive: row.pnl > 0, negative: row.pnl < 0 }">{{ formatMoney(row.pnl) }}</td>
+                    <td>{{ row.reason || '—' }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </details>
         </section>
       </section>
     </main>

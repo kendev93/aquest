@@ -273,6 +273,84 @@ export interface StrategyTrackingSegment {
 }
 
 
+/** 一笔成交。pnl 只在卖出时有意义（买入侧是 0）。 */
+export interface TrackingTradeRow {
+  trade_date: number
+  phase: 'pre' | 'post'
+  direction: 'BUY' | 'SELL' | string
+  market: string
+  code: string
+  name: string
+  size: number
+  price: number
+  pnl: number
+  reason: string
+}
+
+
+/** 一段的成交明细。rows 是倒序（最近在前），total 是真实笔数。 */
+export interface TrackingTradeSection {
+  rows: TrackingTradeRow[]
+  total: number
+  truncated: boolean
+}
+
+
+/** 分上线前后的成交明细。列表接口不带它（见路由注释），展开时才单独取。 */
+export interface TrackingTrades {
+  before: TrackingTradeSection
+  after: TrackingTradeSection
+  limit: number
+}
+
+
+/** 下一交易日计划里的一笔。买入侧只有估算值——明日开盘价今天不存在。 */
+export interface TrackingPlanOrder {
+  market?: string
+  code: string
+  name?: string
+  /** 卖出：持仓实际股数。 */
+  size?: number
+  /** 买入：按今日收盘价估算的股数。 */
+  estimated_size?: number
+  reference_price?: number
+  estimated_proceeds?: number
+  estimated_cost?: number
+  reason?: string
+  signal_date?: string
+}
+
+
+export interface TrackingHolding {
+  market: string
+  code: string
+  name: string
+  size: number
+  reference_price: number
+  market_value: number
+  entry_price: number
+  entry_date: string
+  unrealized_pnl_pct: number
+}
+
+
+/**
+ * 下一交易日计划：截至最近一个交易日收盘时排定的待执行单。
+ * 数量一律按今日收盘价估算，notes 里必须写清这一点。
+ */
+export interface TrackingNextPlan {
+  as_of: string
+  cash: number
+  estimated_cash_after_sells: number
+  /** 月 / 周频策略在不是调仓日时为 false，此时 buys 是空的。 */
+  rebalance_due: boolean
+  holdings: TrackingHolding[]
+  sells: TrackingPlanOrder[]
+  buys: TrackingPlanOrder[]
+  notes: string[]
+}
+
+
 /**
  * 一次追踪的全貌。
  * `decay` 是观察段 / 研究段，`excess_annual_return` 是观察段相对同期基准的年化差——
@@ -300,4 +378,8 @@ export interface StrategyTrackingSnapshot {
    * null 表示算不出来（观察段太短、零波动、或平均收益不为正），不是"不需要"。
    */
   min_track_record_length: number | null
+  /** 列表接口为 null（几百笔 × 策略数会撑大响应），展开时走详情接口拿。 */
+  trades: TrackingTrades | null
+  /** 下一交易日计划。下线后是 null——过期的单子挂在页面上比没有更糟。 */
+  next_plan: TrackingNextPlan | null
 }

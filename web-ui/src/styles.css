@@ -651,6 +651,45 @@ tbody tr:hover td { background: rgba(22, 34, 58, 0.45); }
 .benchmark-inline { margin-top: 10px; color: var(--muted); font-size: 11px; }
 .tracking-detail .equity-chart { height: 200px; }
 
+/* 下一交易日计划：估算值必须一眼能认出来，不能和"实际成交"混在一起。 */
+.plan-pill {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.plan-card {
+  margin-bottom: 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 12px;
+  background: var(--surface-raised);
+}
+.plan-card h4 { margin: 5px 0 4px; font-size: 14px; letter-spacing: -0.02em; }
+.plan-holdings { margin: 0 0 10px; color: var(--muted); font-size: 11px; line-height: 1.7; }
+.plan-holdings span { margin-right: 10px; white-space: nowrap; }
+.plan-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+@media (max-width: 900px) { .plan-grid { grid-template-columns: 1fr; } }
+.plan-column h5 { margin: 0 0 8px; font-size: 12px; letter-spacing: -0.01em; }
+.plan-empty { margin: 0; color: var(--muted); font-size: 11px; }
+.plan-note { margin: 8px 0 0; color: var(--muted); font-size: 11px; line-height: 1.65; }
+.tracking-detail details { margin-top: 12px; }
+.tracking-detail details summary {
+  cursor: pointer;
+  padding: 6px 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+.tracking-detail details .table-wrap { margin-top: 8px; }
+
 /* 历史对比：选择表 + 叠绘图 + 并排指标。 */
 .compare-heading-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .compare-heading-actions .primary-button, .compare-heading-actions .secondary-button { width: auto; min-height: 30px; margin-top: 0; padding: 0 12px; }

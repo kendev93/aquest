@@ -1,7 +1,7 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { StrategyTrackingSnapshot } from '../types'
+import type { StrategyTrackingSnapshot, TrackingTrades } from '../types'
 import StrategyTrackingPage from './StrategyTrackingPage.vue'
 
 import * as strategiesApi from '../api/savedStrategies'
@@ -12,6 +12,7 @@ vi.mock('../api/savedStrategies', async () => {
   return {
     ...actual,
     fetchStrategyTracking: vi.fn(),
+    getStrategyTracking: vi.fn(),
     getTrackingJob: vi.fn(),
     launchStrategyTracking: vi.fn(),
     rerunStrategyTracking: vi.fn(),
@@ -59,6 +60,8 @@ const online: StrategyTrackingSnapshot = {
   excess_annual_return: 0.03,
   observation_is_short: true,
   min_track_record_length: null,
+  trades: null,
+  next_plan: null,
 }
 
 const offline: StrategyTrackingSnapshot = {
@@ -80,9 +83,11 @@ const offline: StrategyTrackingSnapshot = {
 describe('StrategyTrackingPage', () => {
   beforeEach(() => {
     vi.mocked(strategiesApi.fetchStrategyTracking).mockReset()
+    vi.mocked(strategiesApi.getStrategyTracking).mockReset()
     vi.mocked(strategiesApi.getTrackingJob).mockReset()
     vi.mocked(strategiesApi.launchStrategyTracking).mockReset()
     vi.mocked(strategiesApi.stopStrategyTracking).mockReset()
+    vi.mocked(strategiesApi.rerunStrategyTracking).mockReset()
   })
 
   it('renders one row per strategy with its decay ratio', async () => {
@@ -246,5 +251,151 @@ describe('StrategyTrackingPage', () => {
     await flushPromises()
 
     expect(wrapper.get('[data-testid="tracking-empty"]').text()).toContain('组合回测')
+  })
+
+  describe('下一交易日计划与成交明细', () => {
+    const plan = {
+      as_of: '2026-09-10',
+      cash: 5000,
+      estimated_cash_after_sells: 20000,
+      rebalance_due: true,
+      holdings: [
+        {
+          market: 'SH',
+          code: '600001',
+          name: '甲',
+          size: 1000,
+          reference_price: 15,
+          market_value: 15000,
+          entry_price: 14,
+          entry_date: '2026-09-02',
+          unrealized_pnl_pct: 0.0714,
+        },
+      ],
+      sells: [
+        {
+          market: 'SH',
+          code: '600001',
+          name: '甲',
+          size: 1000,
+          reference_price: 15,
+          estimated_proceeds: 14950,
+          reason: '卖出条件',
+          signal_date: '2026-09-10',
+        },
+      ],
+      buys: [
+        {
+          market: 'SZ',
+          code: '000002',
+          name: '乙',
+          estimated_size: 1300,
+          reference_price: 11,
+          estimated_cost: 14320,
+          signal_date: '2026-09-10',
+        },
+      ],
+      notes: ['买入股数是按今日收盘价与可用现金估算的，明天开盘价变了就会变。'],
+    }
+
+    const trades: TrackingTrades = {
+      before: {
+        rows: [
+          {
+            trade_date: 20260820,
+            phase: 'pre',
+            direction: 'BUY',
+            market: 'SH',
+            code: '600009',
+            name: '旧',
+            size: 500,
+            price: 9,
+            pnl: 0,
+            reason: '买入条件',
+          },
+        ],
+        total: 1,
+        truncated: false,
+      },
+      after: {
+        rows: [
+          {
+            trade_date: 20260905,
+            phase: 'post',
+            direction: 'SELL',
+            market: 'SH',
+            code: '600001',
+            name: '甲',
+            size: 300,
+            price: 16,
+            pnl: 600,
+            reason: '卖出条件',
+          },
+        ],
+        total: 1,
+        truncated: false,
+      },
+      limit: 200,
+    }
+
+    it('fetches trades only after a strategy is expanded', async () => {
+      vi.mocked(strategiesApi.fetchStrategyTracking).mockResolvedValue([online])
+      vi.mocked(strategiesApi.getStrategyTracking).mockResolvedValue({ ...online, trades })
+
+      const wrapper = mount(StrategyTrackingPage)
+      await flushPromises()
+      // 列表接口不带明细（几百笔 × 策略数会撑大响应），所以展开前不该请求。
+      expect(strategiesApi.getStrategyTracking).not.toHaveBeenCalled()
+
+      await wrapper.get('[data-testid="tracking-toggle-strategy-1"]').trigger('click')
+      await flushPromises()
+
+      expect(strategiesApi.getStrategyTracking).toHaveBeenCalledWith('strategy-1')
+      // 上线后默认展开、上线前折叠：样本外的那一段才是重点。
+      expect(wrapper.get('[data-testid="trades-after-strategy-1"]').attributes('open')).toBeDefined()
+      expect(
+        wrapper.get('[data-testid="trades-before-strategy-1"]').attributes('open'),
+      ).toBeUndefined()
+      expect(wrapper.get('[data-testid="trades-after-strategy-1"]').text()).toContain('600001')
+      expect(wrapper.get('[data-testid="trades-before-strategy-1"]').text()).toContain('600009')
+    })
+
+    it('tells the user what the next session is going to trade', async () => {
+      vi.mocked(strategiesApi.fetchStrategyTracking).mockResolvedValue([
+        { ...online, next_plan: plan },
+      ])
+
+      const wrapper = mount(StrategyTrackingPage)
+      await flushPromises()
+
+      expect(wrapper.get('[data-testid="tracking-plan-badge-strategy-1"]').text()).toBe(
+        '明日：卖 1 / 买 1',
+      )
+      await wrapper.get('[data-testid="tracking-toggle-strategy-1"]').trigger('click')
+      await flushPromises()
+
+      const card = wrapper.get('[data-testid="tracking-plan-strategy-1"]')
+      expect(card.text()).toContain('2026-09-10')
+      expect(wrapper.get('[data-testid="tracking-plan-sells-strategy-1"]').text()).toContain('600001')
+      expect(wrapper.get('[data-testid="tracking-plan-buys-strategy-1"]').text()).toContain('000002')
+      // 估算必须写出来：明天的开盘价今天不存在。
+      expect(card.text()).toContain('估算')
+    })
+
+    it('says plainly when there is nothing to do tomorrow', async () => {
+      vi.mocked(strategiesApi.fetchStrategyTracking).mockResolvedValue([
+        {
+          ...online,
+          next_plan: { ...plan, sells: [], buys: [], notes: ['明日无需操作：持仓不动。'] },
+        },
+      ])
+
+      const wrapper = mount(StrategyTrackingPage)
+      await flushPromises()
+
+      expect(wrapper.get('[data-testid="tracking-plan-badge-strategy-1"]').text()).toBe(
+        '明日无需操作',
+      )
+    })
   })
 })
