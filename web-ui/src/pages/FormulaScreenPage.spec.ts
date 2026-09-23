@@ -15,6 +15,7 @@ vi.mock('../api/stockGroups', async () => {
   return {
     ...actual,
     fetchStockGroups: vi.fn(),
+    fetchStockGroupsSummary: vi.fn(),
     createStockGroup: vi.fn(),
     getStockGroup: vi.fn(),
     fetchStockGroupPerformance: vi.fn(),
@@ -185,6 +186,12 @@ describe('FormulaScreenPage', () => {
       payload: presetPayload,
     })
     vi.mocked(groupApi.fetchStockGroups).mockResolvedValue([])
+    vi.mocked(groupApi.fetchStockGroupsSummary).mockResolvedValue({
+      as_of: '2026-09-22',
+      windows: [20, 60],
+      labels: { '20': '近 1 月', '60': '近 3 月' },
+      groups: [],
+    })
   })
 
   it('recovers and resumes a running screening task after the page is refreshed', async () => {
@@ -730,22 +737,7 @@ describe('FormulaScreenPage', () => {
       source_history_id: null, created_at: '2026-09-22T10:00:00', updated_at: '2026-09-22T10:00:00',
       item_count: 1, criteria: CRITERIA,
     }])
-    await wrapper.get('[data-testid="save-picked-group"]').trigger('click')
-    await flushPromises()
-
-    expect(groupApi.createStockGroup).toHaveBeenCalledWith(expect.objectContaining({
-      name: '9月候选',
-      items: [{ market: 'SH', code: '600000', name: '浦发银行' }],
-      source: 'screen',
-    }))
-    // 筛选条件必须跟着组一起存：扫描历史只留 20 条，等历史被淘汰时只剩这句人话
-    // 能回答「这批票是按什么选出来的」。
-    const saved = vi.mocked(groupApi.createStockGroup).mock.calls[0][0]
-    expect(saved.criteria?.summary).toContain('信号：')
-    expect(saved.criteria?.payload).toBeTruthy()
-    expect(wrapper.get('[data-testid="group-item-group-1"]')).toBeTruthy()
-
-    // 组保存完立刻看表现：本组 +25%、全市场 -5%、超额 +30 个百分点。
+    // 组保存完会自动展开并读表现，所以这两个 mock 要在点保存之前就备好。
     vi.mocked(groupApi.getStockGroup).mockResolvedValue({
       group_id: 'group-1', name: '9月候选', note: '', source: 'screen', source_label: '选股结果',
       source_history_id: null, created_at: '2026-09-22T10:00:00', updated_at: '2026-09-22T10:00:00',
@@ -755,6 +747,7 @@ describe('FormulaScreenPage', () => {
         { market: 'SZ', code: '000001', name: '平安银行' },
       ],
     })
+    // 本组 +25%、全市场 -5%、超额 +30 个百分点。
     vi.mocked(groupApi.fetchStockGroupPerformance).mockResolvedValue({
       group_id: 'group-1',
       start_date: '2026-09-01',
@@ -778,9 +771,22 @@ describe('FormulaScreenPage', () => {
       truncated: false,
       notes: ['1 只标的在起点当天没有收盘价（新股或停牌），未计入曲线'],
     })
-    await wrapper.get('[data-testid="group-pick-group-1"]').trigger('click')
+    await wrapper.get('[data-testid="save-picked-group"]').trigger('click')
     await flushPromises()
 
+    expect(groupApi.createStockGroup).toHaveBeenCalledWith(expect.objectContaining({
+      name: '9月候选',
+      items: [{ market: 'SH', code: '600000', name: '浦发银行' }],
+      source: 'screen',
+    }))
+    // 筛选条件必须跟着组一起存：扫描历史只留 20 条，等历史被淘汰时只剩这句人话
+    // 能回答「这批票是按什么选出来的」。
+    const saved = vi.mocked(groupApi.createStockGroup).mock.calls[0][0]
+    expect(saved.criteria?.summary).toContain('信号：')
+    expect(saved.criteria?.payload).toBeTruthy()
+    expect(wrapper.get('[data-testid="group-item-group-1"]')).toBeTruthy()
+
+    // 保存完这一组已经是展开的（再点一次是收起），表现应当已经读到了。
     expect(wrapper.get('[data-testid="group-return"]').text()).toBe('+25.00%')
     expect(wrapper.get('[data-testid="market-return"]').text()).toBe('-5.00%')
     expect(wrapper.get('[data-testid="excess-return"]').text()).toContain('30.00 个百分点')
@@ -829,6 +835,67 @@ describe('FormulaScreenPage', () => {
 
     expect(groupApi.renameStockGroup).not.toHaveBeenCalled()
     prompt.mockRestore()
+  })
+
+  it('shows the folded row without paying for the since-entry maths', async () => {
+    vi.mocked(groupApi.fetchStockGroups).mockResolvedValue([{
+      group_id: 'group-1', name: '9月候选', note: '', source: 'screen', source_label: '选股结果',
+      source_history_id: null, created_at: '2026-09-22T02:00:00Z', updated_at: '2026-09-22T02:00:00Z',
+      item_count: 3, criteria: CRITERIA,
+    }])
+    vi.mocked(groupApi.fetchStockGroupsSummary).mockResolvedValue({
+      as_of: '2026-09-22',
+      windows: [20, 60],
+      labels: { '20': '近 1 月', '60': '近 3 月' },
+      groups: [{
+        group_id: 'group-1',
+        windows: [
+          {
+            window: 20, trading_days: 20, group_return: 0.0321, market_return: 0.02,
+            excess_return: 0.0121, counted: 3, complete: true,
+          },
+          {
+            window: 60, trading_days: 41, group_return: -0.05, market_return: -0.03,
+            excess_return: -0.02, counted: 3, complete: false,
+          },
+        ],
+      }],
+    })
+    const wrapper = mount(FormulaScreenPage)
+    await flushPromises()
+
+    const item = wrapper.get('[data-testid="group-item-group-1"]')
+    // 入组日期按东八区显示：后端存的是 UTC，直接截前 10 位会差一天。
+    expect(item.text()).toContain('入组 2026-09-22')
+    expect(item.text()).toContain('筛选条件：')
+    expect(item.text()).toContain('近 1 月')
+    expect(item.text()).toContain('+3.21%')
+    // 窗口没填满必须说清实际只有几天，不能让人当成 60 天的收益看。
+    expect(item.text()).toContain('仅 41 个交易日')
+
+    // 折叠态的代价到此为止：「入组至今」要扫全市场，不展开就不该被触发。
+    expect(groupApi.fetchStockGroupPerformance).not.toHaveBeenCalled()
+    await wrapper.get('[data-testid="group-pick-group-1"]').trigger('click')
+    await flushPromises()
+    expect(groupApi.fetchStockGroupPerformance).toHaveBeenCalledWith('group-1')
+  })
+
+  it('folds the list to 20 rows until all groups are asked for', async () => {
+    vi.mocked(groupApi.fetchStockGroups).mockResolvedValue(
+      Array.from({ length: 25 }, (_, index) => ({
+        group_id: `g-${index}`, name: `组${index}`, note: '', source: 'screen',
+        source_label: '选股结果', source_history_id: null,
+        created_at: '2026-09-22T02:00:00Z', updated_at: '2026-09-22T02:00:00Z',
+        item_count: 2, criteria: null,
+      })),
+    )
+    const wrapper = mount(FormulaScreenPage)
+    await flushPromises()
+
+    expect(wrapper.findAll('[data-testid^="group-item-"]').length).toBe(20)
+    await wrapper.get('[data-testid="group-toggle-all"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('[data-testid^="group-item-"]').length).toBe(25)
   })
 
   it('keeps both save buttons disabled until there is something to save', async () => {

@@ -7,7 +7,7 @@ import { fetchActiveJobs } from '../api/jobs'
 import MarketCandlestickChart from '../components/MarketCandlestickChart.vue'
 import TermHint from '../components/TermHint.vue'
 import { createJob, createSyncJob, fetchMetadata, fetchScreenHistory, FormulaScreenApiError, getJob, getResults, getScreenHistory, getSyncJob, parseFormula } from '../api/formulaScreen'
-import type { BasketCurve, CombineMode, ConditionOperator, CustomFormulaMetadata, FormulaScreenMetadata, InstrumentBoard, InstrumentType, JobState, LocalMarketChart, MarketSyncJobState, ResultsMeta, SavedConditionSet, ScreenCondition, ScreenFormState, ScreenHistorySummary, ScreenPresetSummary, ScreenResult, StockGroup, StockGroupMember, StockGroupPerformance, StockGroupSummary, RuleMode, Universe, ValueDefinition } from '../types'
+import type { BasketCurve, CombineMode, ConditionOperator, CustomFormulaMetadata, FormulaScreenMetadata, InstrumentBoard, InstrumentType, JobState, LocalMarketChart, MarketSyncJobState, ResultsMeta, SavedConditionSet, ScreenCondition, ScreenFormState, ScreenHistorySummary, ScreenPresetSummary, ScreenResult, StockGroup, StockGroupMember, StockGroupPerformance, StockGroupsSummary, StockGroupSummary, RuleMode, Universe, ValueDefinition } from '../types'
 import {
   buildPresetPayload,
   conditionSetToPayload,
@@ -802,20 +802,68 @@ const stockGroups = ref<StockGroupSummary[]>([])
 const selectedGroupId = ref('')
 const groupName = ref('')
 const groupBusy = ref(false)
-const groupPerformance = ref<StockGroupPerformance | null>(null)
-const selectedGroup = ref<StockGroup | null>(null)
-const groupPerfLoading = ref(false)
 const groupError = ref('')
+// 展开态的「入组至今」按组缓存：算一次要扫一遍全市场，切走再点回来不该重算。
+const groupDetails = ref<Record<string, StockGroupPerformance>>({})
+const groupMembers = ref<Record<string, StockGroup>>({})
+const expandedGroupIds = reactive(new Set<string>())
+const loadingGroupId = ref('')
+// 折叠态的「近 N 个交易日」：所有组共用同一窗口，一次请求全部拿回。
+const groupSummary = ref<StockGroupsSummary | null>(null)
+const showAllGroups = ref(false)
 // 结果行的勾选。用 Set 而不是数组：一次扫描可能选出几百只，includes 是线性的。
 const selectedResultKeys = reactive(new Set<string>())
+
+/** 组数不限，但列表默认只铺最近 20 条，剩下的要显式点开——否则面板会被顶下去。 */
+const VISIBLE_GROUP_LIMIT = 20
+
+const visibleGroups = computed(() => (
+  showAllGroups.value ? stockGroups.value : stockGroups.value.slice(0, VISIBLE_GROUP_LIMIT)
+))
 
 const selectedResultCount = computed(() => (
   results.value.filter((item) => selectedResultKeys.has(resultKey(item))).length
 ))
 
+interface FoldedStat {
+  label: string
+  value: number | null
+  excess: number | null
+  trading_days: number
+  complete: boolean
+}
+
+/** 折叠态那一行的「近 1 月 / 近 3 月」。窗口标签由后端下发，两边不各写一份。 */
+function foldedStats(group: StockGroupSummary): FoldedStat[] {
+  const entry = groupSummary.value?.groups.find((item) => item.group_id === group.group_id)
+  if (!entry) return []
+  return entry.windows.map((item) => ({
+    label: groupSummary.value?.labels[String(item.window)] ?? `近 ${item.window} 个交易日`,
+    value: item.group_return,
+    excess: item.excess_return,
+    trading_days: item.trading_days,
+    complete: item.complete,
+  }))
+}
+
+function detailOf(group: StockGroupSummary): StockGroupPerformance | null {
+  return groupDetails.value[group.group_id] ?? null
+}
+
+/** 详情可能是 null，模板里没法用 v-if 顺便拿到非空引用——用单元素数组起个名字。 */
+function detailList(group: StockGroupSummary): StockGroupPerformance[] {
+  const detail = detailOf(group)
+  return detail ? [detail] : []
+}
+
+function memberList(group: StockGroupSummary): StockGroup[] {
+  const members = groupMembers.value[group.group_id]
+  return members ? [members] : []
+}
+
 /** 两条曲线共用同一纵轴：各画各的会让「跑赢了多少」看起来比实际多。 */
-const groupChart = computed(() => {
-  const payload = groupPerformance.value
+function chartOf(group: StockGroupSummary) {
+  const payload = detailOf(group)
   if (!payload?.group_curve || !payload.market_curve) return null
   const toPoints = (curve: BasketCurve) => curve.totals.map((total, index) => ({
     x: index,
@@ -825,7 +873,17 @@ const groupChart = computed(() => {
     [toPoints(payload.group_curve), toPoints(payload.market_curve)],
     { includeZero: true, height: 200 },
   )
-})
+}
+
+/** 同上：给「这一组的两条曲线」起个模板里能直接用的名字。 */
+function chartList(group: StockGroupSummary) {
+  const chart = chartOf(group)
+  return chart ? [chart] : []
+}
+/** 入组日期是这组唯一的锚点，按东八区显示——后端存的是 UTC。 */
+function groupDay(createdAt: string): string {
+  return formatChinaTimestamp(createdAt).slice(0, 10)
+}
 
 function toggleResultPick(result: ScreenResult, checked: boolean): void {
   const key = resultKey(result)
@@ -838,6 +896,15 @@ async function refreshStockGroups(): Promise<void> {
     stockGroups.value = await fetchStockGroups()
   } catch {
     // 列表拉不到不影响扫描，只在面板里留空。
+  }
+}
+
+async function refreshGroupSummaries(): Promise<void> {
+  try {
+    groupSummary.value = await fetchStockGroupsSummary()
+  } catch {
+    // 折叠态的阶段收益读不到就空着，组名/只数这些静态信息照样能看。
+    groupSummary.value = null
   }
 }
 
@@ -869,8 +936,9 @@ async function saveResultsAsGroup(useAll: boolean): Promise<void> {
     })
     groupName.value = ''
     selectedResultKeys.clear()
-    await refreshStockGroups()
+    await Promise.all([refreshStockGroups(), refreshGroupSummaries()])
     selectedGroupId.value = created.group_id
+    expandedGroupIds.add(created.group_id)
     await loadGroupPerformance(created.group_id)
   } catch (error) {
     groupError.value = apiMessage(error, '保存失败')
@@ -884,13 +952,30 @@ function defaultGroupName(): string {
   return `${stamp} 选股结果`
 }
 
+/**
+ * 展开才去算「入组至今」。
+ *
+ * 这一份每组都要单独扫一遍全市场（几秒），而折叠态要的那两个数已经在
+ * ``groupSummary`` 里了——先铺开信息、按需再算重活，是这页唯一能扛住「存很多组」
+ * 的做法。
+ */
+async function toggleGroup(group: StockGroupSummary): Promise<void> {
+  const groupId = group.group_id
+  if (expandedGroupIds.has(groupId)) {
+    expandedGroupIds.delete(groupId)
+    return
+  }
+  expandedGroupIds.add(groupId)
+  selectedGroupId.value = groupId
+  if (groupDetails.value[groupId]) return
+  await loadGroupPerformance(groupId)
+}
+
 async function loadGroupPerformance(groupId: string): Promise<void> {
   selectedGroupId.value = groupId
-  groupPerformance.value = null
-  selectedGroup.value = null
   groupError.value = ''
   if (!groupId) return
-  groupPerfLoading.value = true
+  loadingGroupId.value = groupId
   try {
     // 表现和成员分两次取：成员随时可编辑，而表现要扫全市场（几秒），不该被一次
     // 编辑来回拖着重算。
@@ -898,12 +983,12 @@ async function loadGroupPerformance(groupId: string): Promise<void> {
       fetchStockGroupPerformance(groupId),
       getStockGroup(groupId),
     ])
-    groupPerformance.value = performance
-    selectedGroup.value = detail
+    groupDetails.value = { ...groupDetails.value, [groupId]: performance }
+    groupMembers.value = { ...groupMembers.value, [groupId]: detail }
   } catch (error) {
     groupError.value = apiMessage(error, '表现读取失败')
   } finally {
-    groupPerfLoading.value = false
+    loadingGroupId.value = ''
   }
 }
 
@@ -914,9 +999,8 @@ async function renameGroup(group: StockGroupSummary): Promise<void> {
   try {
     await renameStockGroup(group.group_id, next)
     await refreshStockGroups()
-    if (selectedGroupId.value === group.group_id && selectedGroup.value) {
-      selectedGroup.value = { ...selectedGroup.value, name: next }
-    }
+    const cached = groupMembers.value[group.group_id]
+    if (cached) groupMembers.value[group.group_id] = { ...cached, name: next }
   } catch (error) {
     groupError.value = apiMessage(error, '改名失败')
   } finally {
@@ -924,9 +1008,8 @@ async function renameGroup(group: StockGroupSummary): Promise<void> {
   }
 }
 
-async function removeGroupMember(member: StockGroupMember): Promise<void> {
-  const groupId = selectedGroupId.value
-  if (!groupId) return
+async function removeGroupMember(group: StockGroupSummary, member: StockGroupMember): Promise<void> {
+  const groupId = group.group_id
   groupBusy.value = true
   try {
     await removeStockGroupMembers(groupId, [{ market: member.market, code: member.code }])
@@ -946,11 +1029,11 @@ async function deleteGroup(group: StockGroupSummary): Promise<void> {
   groupBusy.value = true
   try {
     await deleteStockGroup(group.group_id)
-    if (selectedGroupId.value === group.group_id) {
-      selectedGroupId.value = ''
-      groupPerformance.value = null
-      selectedGroup.value = null
-    }
+    expandedGroupIds.delete(group.group_id)
+    if (selectedGroupId.value === group.group_id) selectedGroupId.value = ''
+    const details = { ...groupDetails.value }
+    delete details[group.group_id]
+    groupDetails.value = details
     await refreshStockGroups()
   } catch (error) {
     groupError.value = apiMessage(error, '删除失败')
@@ -1001,7 +1084,9 @@ onMounted(async () => {
     await refreshScreenPresets()
     // 条件研究的桥接放在最后：它可能解析自定义公式并改写信号，而前面几步要把
     // 元数据先加载完才能判断哪些信号还存在。
-    await refreshStockGroups()
+    // 组列表（轻量）和折叠态的阶段收益（一次请求算完全部组）同时发：折叠态要
+    // 显示的东西这才齐，而两者都不会去算「入组至今」那份重活。
+    await Promise.all([refreshStockGroups(), refreshGroupSummaries()])
     await applyResearchToScreen()
   } catch (error) {
     message.value = apiMessage(error, '公式元数据加载失败，请检查后端服务和网络后重试')
@@ -1399,149 +1484,203 @@ watch(() => form.formulaText, (value) => {
 
           <p v-if="groupError" class="inline-empty" data-testid="group-error">{{ groupError }}</p>
 
-          <ul v-if="stockGroups.length" class="group-list" data-testid="group-list">
-            <li v-for="group in stockGroups" :key="group.group_id" :data-testid="`group-item-${group.group_id}`">
-              <button
-                type="button"
-                class="group-pick"
-                :class="{ active: selectedGroupId === group.group_id }"
-                :data-testid="`group-pick-${group.group_id}`"
-                @click="loadGroupPerformance(group.group_id)"
-              >
-                <strong>{{ group.name }}</strong>
-                <small>{{ group.item_count }} 只 · {{ group.source_label }}</small>
-              </button>
-              <button
-                type="button"
-                class="text-button"
-                :data-testid="`group-rename-${group.group_id}`"
-                :disabled="groupBusy"
-                @click="renameGroup(group)"
-              >改名</button>
-              <button
-                type="button"
-                class="text-button"
-                :data-testid="`group-delete-${group.group_id}`"
-                :disabled="groupBusy"
-                @click="deleteGroup(group)"
-              >删除</button>
+          <ul v-if="visibleGroups.length" class="group-list" data-testid="group-list">
+            <li
+              v-for="group in visibleGroups"
+              :key="group.group_id"
+              class="group-card"
+              :class="{ expanded: expandedGroupIds.has(group.group_id) }"
+              :data-testid="`group-item-${group.group_id}`"
+            >
+              <div class="group-head">
+                <button
+                  type="button"
+                  class="group-pick"
+                  :class="{ active: expandedGroupIds.has(group.group_id) }"
+                  :data-testid="`group-pick-${group.group_id}`"
+                  @click="toggleGroup(group)"
+                >
+                  <span class="group-title">
+                    <strong>{{ group.name }}</strong>
+                    <small>
+                      {{ group.item_count }} 只 · 入组 {{ groupDay(group.created_at) }}
+                      · {{ group.source_label }}
+                    </small>
+                  </span>
+                  <span v-if="foldedStats(group).length" class="group-fold-stats">
+                    <span v-for="stat in foldedStats(group)" :key="stat.label" class="group-fold-stat">
+                      <em>{{ stat.label }}</em>
+                      <b :class="toneClass(stat.value)">{{ formatPercent(stat.value) }}</b>
+                      <i :class="toneClass(stat.excess)">{{ formatPoints(stat.excess) }}</i>
+                      <small v-if="!stat.complete">仅 {{ stat.trading_days }} 个交易日</small>
+                    </span>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  class="text-button"
+                  :data-testid="`group-rename-${group.group_id}`"
+                  :disabled="groupBusy"
+                  @click="renameGroup(group)"
+                >改名</button>
+                <button
+                  type="button"
+                  class="text-button"
+                  :data-testid="`group-delete-${group.group_id}`"
+                  :disabled="groupBusy"
+                  @click="deleteGroup(group)"
+                >删除</button>
+              </div>
+
+              <p
+                v-if="group.criteria"
+                class="group-criteria"
+                :data-testid="`group-criteria-${group.group_id}`"
+              >筛选条件：{{ group.criteria.summary }}</p>
+
+              <div v-if="expandedGroupIds.has(group.group_id)" class="group-detail">
+                <div v-if="loadingGroupId === group.group_id" class="chart-loading" data-testid="group-loading">
+                  正在读取这一组的表现…
+                </div>
+                <!-- v-for 只是给「这一组的详情」起个名字：详情可能是 null，模板里
+                     没法用 v-if 顺便拿到非空变量的引用。 -->
+                <template v-for="detail in detailList(group)" :key="`detail-${group.group_id}`">
+                  <div data-testid="group-performance">
+                    <p class="group-note">
+                      下面是<strong>入组至今</strong>的口径（每组起点不同，组之间不可比）；
+                      上面折叠行里的「近 1 月 / 近 3 月」是所有组同一窗口，那个才可以横向比。
+                    </p>
+                    <div class="group-stat-row">
+                      <div class="group-stat">
+                        <small>本组</small>
+                        <strong :class="toneClass(detail.group_curve?.performance.total_return ?? null)" data-testid="group-return">
+                          {{ formatPercent(detail.group_curve?.performance.total_return ?? null) }}
+                        </strong>
+                        <span v-if="detail.group_curve" class="group-stat-note">
+                          {{ detail.group_curve.instrument_count }} 只计入
+                        </span>
+                      </div>
+                      <div class="group-stat">
+                        <small>全市场同期</small>
+                        <strong :class="toneClass(detail.market_curve?.performance.total_return ?? null)" data-testid="market-return">
+                          {{ formatPercent(detail.market_curve?.performance.total_return ?? null) }}
+                        </strong>
+                        <span v-if="detail.market_curve" class="group-stat-note">
+                          {{ detail.market_curve.instrument_count }} 只计入
+                        </span>
+                      </div>
+                      <div class="group-stat">
+                        <small>超额<TermHint term="excessReturn" /></small>
+                        <strong :class="toneClass(detail.excess_return)" data-testid="excess-return">
+                          {{ formatPoints(detail.excess_return) }}
+                        </strong>
+                        <span class="group-stat-note">差值，不是倍数</span>
+                      </div>
+                      <div class="group-stat">
+                        <small>观察区间</small>
+                        <strong>{{ detail.start_date ?? '—' }} ~ {{ detail.end_date ?? '—' }}</strong>
+                        <span class="group-stat-note">{{ detail.trading_days }} 个交易日</span>
+                      </div>
+                    </div>
+
+                    <p v-for="note in detail.notes" :key="note" class="group-note">{{ note }}</p>
+
+                    <template v-for="chart in chartList(group)" :key="`chart-${group.group_id}`">
+                      <svg
+                        class="group-chart"
+                        :viewBox="`0 0 ${chart.width} ${chart.height}`"
+                        role="img"
+                        aria-label="本组与全市场的累计涨跌幅曲线"
+                        data-testid="group-chart"
+                      >
+                        <line
+                          v-if="chart.zeroY !== null"
+                          :x1="chart.ticks.length ? 46 : 46"
+                          :x2="chart.width - 12"
+                          :y1="chart.zeroY"
+                          :y2="chart.zeroY"
+                          class="group-chart-zero"
+                        />
+                        <polyline
+                          v-for="(line, index) in chart.lines"
+                          :key="index"
+                          :points="line"
+                          :class="index === 0 ? 'group-chart-own' : 'group-chart-market'"
+                        />
+                        <text
+                          v-for="tick in chart.ticks"
+                          :key="tick.y"
+                          x="4"
+                          :y="tick.y + 3"
+                          class="group-chart-tick"
+                        >{{ formatChartValue(tick.value, 1) }}%</text>
+                      </svg>
+                    </template>
+                    <div class="group-legend">
+                      <span class="group-legend-own">本组等权买入持有</span>
+                      <span class="group-legend-market">全市场等权买入持有</span>
+                    </div>
+
+                    <div v-if="detail.spread" class="group-spread">
+                      组内分布：{{ detail.spread.counted }} 只计入，
+                      涨 {{ detail.spread.advanced }} 只 / 跌 {{ detail.spread.declined }} 只，
+                      中位数 {{ formatPercent(detail.spread.median_return) }}。
+                      <template v-if="detail.spread.best">
+                        最好 {{ detail.spread.best.code }}（{{ formatPercent(detail.spread.best.return) }}），
+                        最差 {{ detail.spread.worst?.code }}（{{ formatPercent(detail.spread.worst?.return) }}）。
+                      </template>
+                    </div>
+
+                    <div v-if="detail.excluded.length" class="group-excluded">
+                      <strong>未计入 {{ detail.excluded.length }} 只</strong>
+                      <span v-for="item in detail.excluded" :key="`${item.market}-${item.code}`">
+                        {{ item.code }}<template v-if="item.name"> · {{ item.name }}</template>
+                      </span>
+                    </div>
+                  </div>
+                </template>
+
+                <details
+                  v-for="members in memberList(group)"
+                  :key="`members-${group.group_id}`"
+                  class="group-members"
+                >
+                  <summary>组内标的（{{ members.items.length }} 只）</summary>
+                  <div class="table-wrap">
+                    <table data-testid="group-members-table">
+                      <thead><tr><th>市场</th><th>代码</th><th>中文名</th><th></th></tr></thead>
+                      <tbody>
+                        <tr v-for="member in members.items" :key="`${member.market}-${member.code}`">
+                          <td>{{ member.market }}</td>
+                          <td><strong class="code">{{ member.code }}</strong></td>
+                          <td>{{ member.name || '—' }}</td>
+                          <td>
+                            <button
+                              class="text-button"
+                              type="button"
+                              :data-testid="`group-member-remove-${member.code}`"
+                              :disabled="groupBusy"
+                              @click="removeGroupMember(group, member)"
+                            >移出</button>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </details>
+              </div>
             </li>
           </ul>
           <p v-else class="group-empty" data-testid="group-empty">还没有分组。勾选结果行或直接整批保存，就能留一组下来观察。</p>
 
-          <div v-if="groupPerfLoading" class="chart-loading" data-testid="group-loading">正在读取这一组的表现…</div>
-          <div v-else-if="groupPerformance" data-testid="group-performance">
-            <div class="group-stat-row">
-              <div class="group-stat">
-                <small>本组</small>
-                <strong :class="toneClass(groupPerformance.group_curve?.performance.total_return ?? null)" data-testid="group-return">
-                  {{ formatPercent(groupPerformance.group_curve?.performance.total_return ?? null) }}
-                </strong>
-                <span v-if="groupPerformance.group_curve" class="group-stat-note">
-                  {{ groupPerformance.group_curve.instrument_count }} 只计入
-                </span>
-              </div>
-              <div class="group-stat">
-                <small>全市场同期</small>
-                <strong :class="toneClass(groupPerformance.market_curve?.performance.total_return ?? null)" data-testid="market-return">
-                  {{ formatPercent(groupPerformance.market_curve?.performance.total_return ?? null) }}
-                </strong>
-                <span v-if="groupPerformance.market_curve" class="group-stat-note">
-                  {{ groupPerformance.market_curve.instrument_count }} 只计入
-                </span>
-              </div>
-              <div class="group-stat">
-                <small>超额<TermHint term="excessReturn" /></small>
-                <strong :class="toneClass(groupPerformance.excess_return)" data-testid="excess-return">
-                  {{ formatPoints(groupPerformance.excess_return) }}
-                </strong>
-                <span class="group-stat-note">差值，不是倍数</span>
-              </div>
-              <div class="group-stat">
-                <small>观察区间</small>
-                <strong>{{ groupPerformance.start_date ?? '—' }} ~ {{ groupPerformance.end_date ?? '—' }}</strong>
-                <span class="group-stat-note">{{ groupPerformance.trading_days }} 个交易日</span>
-              </div>
-            </div>
-
-            <p v-for="note in groupPerformance.notes" :key="note" class="group-note">{{ note }}</p>
-
-            <svg
-              v-if="groupChart"
-              class="group-chart"
-              :viewBox="`0 0 ${groupChart.width} ${groupChart.height}`"
-              role="img"
-              aria-label="本组与全市场的累计涨跌幅曲线"
-              data-testid="group-chart"
-            >
-              <line
-                v-if="groupChart.zeroY !== null"
-                :x1="groupChart.ticks.length ? 46 : 46"
-                :x2="groupChart.width - 12"
-                :y1="groupChart.zeroY"
-                :y2="groupChart.zeroY"
-                class="group-chart-zero"
-              />
-              <polyline
-                v-for="(line, index) in groupChart.lines"
-                :key="index"
-                :points="line"
-                :class="index === 0 ? 'group-chart-own' : 'group-chart-market'"
-              />
-              <text
-                v-for="tick in groupChart.ticks"
-                :key="tick.y"
-                x="4"
-                :y="tick.y + 3"
-                class="group-chart-tick"
-              >{{ formatChartValue(tick.value, 1) }}%</text>
-            </svg>
-            <div class="group-legend">
-              <span class="group-legend-own">本组等权买入持有</span>
-              <span class="group-legend-market">全市场等权买入持有</span>
-            </div>
-
-            <div v-if="groupPerformance.spread" class="group-spread">
-              组内分布：{{ groupPerformance.spread.counted }} 只计入，
-              涨 {{ groupPerformance.spread.advanced }} 只 / 跌 {{ groupPerformance.spread.declined }} 只，
-              中位数 {{ formatPercent(groupPerformance.spread.median_return) }}。
-              <template v-if="groupPerformance.spread.best">
-                最好 {{ groupPerformance.spread.best.code }}（{{ formatPercent(groupPerformance.spread.best.return) }}），
-                最差 {{ groupPerformance.spread.worst?.code }}（{{ formatPercent(groupPerformance.spread.worst?.return) }}）。
-              </template>
-            </div>
-
-            <div v-if="groupPerformance.excluded.length" class="group-excluded">
-              <strong>未计入 {{ groupPerformance.excluded.length }} 只</strong>
-              <span v-for="item in groupPerformance.excluded" :key="`${item.market}-${item.code}`">
-                {{ item.code }}<template v-if="item.name"> · {{ item.name }}</template>
-              </span>
-            </div>
-
-            <details v-if="selectedGroup" class="group-members">
-              <summary>组内标的（{{ selectedGroup.items.length }} 只）</summary>
-              <div class="table-wrap">
-                <table data-testid="group-members-table">
-                  <thead><tr><th>市场</th><th>代码</th><th>中文名</th><th></th></tr></thead>
-                  <tbody>
-                    <tr v-for="member in selectedGroup.items" :key="`${member.market}-${member.code}`">
-                      <td>{{ member.market }}</td>
-                      <td><strong class="code">{{ member.code }}</strong></td>
-                      <td>{{ member.name || '—' }}</td>
-                      <td>
-                        <button
-                          class="text-button"
-                          type="button"
-                          :data-testid="`group-member-remove-${member.code}`"
-                          :disabled="groupBusy"
-                          @click="removeGroupMember(member)"
-                        >移出</button>
-                      </td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-            </details>
+          <div v-if="stockGroups.length > VISIBLE_GROUP_LIMIT" class="group-more">
+            <button
+              class="text-button"
+              type="button"
+              data-testid="group-toggle-all"
+              @click="showAllGroups = !showAllGroups"
+            >{{ showAllGroups ? `只看最近 ${VISIBLE_GROUP_LIMIT} 组` : `显示全部 ${stockGroups.length} 组` }}</button>
+            <span class="group-stat-note">折叠着也能改组名、看筛选条件</span>
           </div>
         </section>
       </div>
