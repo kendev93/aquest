@@ -26,6 +26,7 @@ from selector_app.instrument_lab.conditions import (
     significant_conditions,
 )
 from selector_app.instrument_lab.models import (
+    DEFAULT_ALPHA,
     DEFAULT_HORIZON,
     LOW_SAMPLE_NOTE,
     MAX_VALUE_IDS,
@@ -221,6 +222,62 @@ def test_check_finds_alignment_and_reports_difference() -> None:
     assert item.p_value is not None and item.p_value <= 0.05
     assert item.significant is True
     assert item.hit_dates
+
+
+def test_noise_does_not_come_out_significant_twice_as_often_as_alpha() -> None:
+    """纯噪声下的误报率必须接近 alpha，而不是它的两倍。
+
+    与因子归因那条同源：置换计数若"先看观测值符号、再只数同向更极端的置换"，
+    p 就恒等于双侧的一半。这里没有可事先声明的方向（一个条件既可能对应跑赢也
+    可能对应跑输），所以只能双侧计数。
+    """
+
+    alpha = DEFAULT_ALPHA
+    length = 400
+    rng = np.random.default_rng(20260923)
+    condition = ScreenCondition(left_value="technical.rsi14", operator="gte", right_constant=0.5)
+
+    flagged = 0
+    trials = 0
+    for trial in range(200):
+        # 几何随机游走：收益之间没有可预测结构。
+        steps = rng.normal(0.0, 0.015, size=length)
+        close = 100.0 * np.exp(np.cumsum(steps))
+        frame = pd.DataFrame(
+            {
+                "date": pd.date_range("2022-01-01", periods=length, freq="D"),
+                "open": close,
+                "high": close * 1.005,
+                "low": close * 0.995,
+                "close": close,
+                "volume": np.full(length, 100_000.0),
+                "amount": close * 100_000.0,
+            }
+        )
+        # 命中标记与价格独立，但成块出现——贴近真实条件的行为。
+        flag = np.zeros(length)
+        for start in rng.integers(0, length - 5, size=20):
+            flag[start : start + 5] = 1.0
+        if flag.sum() < 20:
+            continue
+
+        report = check_conditions(
+            _prepared({"rsi14": flag}, frame=frame),
+            [_input(condition)],
+            horizon=DEFAULT_HORIZON,
+            permutations=120,
+            seed=trial,
+        )
+        item = report.items[0]
+        if item.p_value is None or item.note is not None:
+            continue
+        trials += 1
+        if item.p_value <= alpha:
+            flagged += 1
+
+    assert trials >= 150, trials
+    rate = flagged / trials
+    assert rate < 0.09, f"误报率 {rate:.3f} 偏离 alpha={alpha} 太远，检查置换是否只数了一侧"
 
 
 def test_check_reports_no_hit_without_a_difference() -> None:

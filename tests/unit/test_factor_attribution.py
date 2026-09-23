@@ -163,6 +163,41 @@ def test_a_value_that_separates_the_groups_is_flagged() -> None:
     assert factor.p_value is not None and factor.p_value <= 0.01
 
 
+def test_noise_does_not_come_out_significant_twice_as_often_as_alpha() -> None:
+    """纯噪声下的误报率必须接近 alpha，不能接近它的两倍。
+
+    这条盯的是 p 值的**量级**，不是"强样本 p 小、弱样本 p 大"那种单调性——
+    单调性单侧双侧都满足，抓不到这里要防的东西。若把计数写成"先看一眼观测值
+    是正是负，再只数同向且更极端的置换"，p 就恒等于双侧的一半，alpha=0.05 的
+    检验实测误报率会到 9% 上下，而"显著"这个判定是页面唯一的可信度来源。
+
+    240 轮 × alpha=0.05 的标准差约 1.4 个百分点，所以上限取 8.5%：既能让正确
+    的双侧实现稳定通过（实测 4%），又能让单侧实现稳定落网（实测 9%）。
+    """
+
+    trades = 200
+    alpha = 0.05
+    rng = np.random.default_rng(20260923)
+    orders = block_permutations(trades, block_size=10, count=120, seed=7)
+
+    flagged = 0
+    trials = 0
+    for _ in range(240):
+        # 指标取值与输赢完全独立，零假设成立。
+        values = rng.normal(0.0, 1.0, size=trades)
+        wins = rng.random(trades) < 0.5
+        factor = _factor(list(values), list(wins), orders=orders, min_group_trades=20)
+        if factor.p_value is None or factor.note is not None:
+            continue
+        trials += 1
+        if factor.p_value <= alpha:
+            flagged += 1
+
+    assert trials >= 200, trials
+    rate = flagged / trials
+    assert rate < 0.085, f"误报率 {rate:.3f} 偏离 alpha={alpha} 太远，检查置换是否只数了一侧"
+
+
 def test_a_group_too_small_is_described_but_never_judged() -> None:
     rng = np.random.default_rng(5)
     values = list(rng.normal(size=25))
