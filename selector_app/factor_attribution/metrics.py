@@ -159,12 +159,16 @@ def _permutation_p(
     observed: float,
     total: int,
 ) -> float:
-    """One-tailed block-permutation p-value for the observed difference.
+    """Block-permutation p-value for the observed difference, counted two-sided.
 
     ``orders`` permute the whole sample, so each one is projected onto this
     indicator's usable positions before it is applied. Dropping a few positions
     shortens some blocks but keeps them contiguous, which is the property the
     test relies on.
+
+    计数必须双侧（数绝对值更极端的置换），不能"先看观测值符号再决定数哪一侧"。
+    后者会把 p 压成双侧的一半：alpha=0.05 的检验实测误报率约 9%，而归因本来就是
+    在没有预期方向的前提下问"赢输两组差在哪"，没有可事先注册的单侧方向。
     """
 
     member = np.zeros(total, dtype=bool)
@@ -184,7 +188,7 @@ def _permutation_p(
             continue
         usable += 1
         statistic = float(win_values.mean()) - float(loss_values.mean())
-        if (observed >= 0 and statistic >= observed) or (observed < 0 and statistic <= observed):
+        if abs(statistic) >= abs(observed):
             reached += 1
     if usable == 0:
         return 1.0

@@ -22,15 +22,30 @@ import {
   getScreenPreset,
   updateScreenPreset,
 } from '../api/screenPresets'
-import { buildScanPayload, DEFAULT_PRESET_SIGNALS, filterKnownSignals, loadSavedConditionSets, loadSavedForm, resultsToCsv, saveForm, signalDisplayName, validateScreenForm, valueOptionLabel } from '../utils/formulaScreen'
+import {
+  buildScanPayload,
+  CONDITION_OPERATORS_UI,
+  DEFAULT_PRESET_SIGNALS,
+  describeScreenForm,
+  filterKnownSignals,
+  loadSavedConditionSets,
+  loadSavedForm,
+  resultsToCsv,
+  saveForm,
+  signalDisplayName,
+  validateScreenForm,
+  valueOptionLabel,
+} from '../utils/formulaScreen'
 import { buildChartGeometry, formatChartValue } from '../utils/chart'
 import {
   createStockGroup,
   deleteStockGroup,
   fetchStockGroupPerformance,
   fetchStockGroups,
+  fetchStockGroupsSummary,
   getStockGroup,
   removeStockGroupMembers,
+  renameStockGroup,
 } from '../api/stockGroups'
 import { formatChinaTimestamp } from '../utils/time'
 
@@ -42,17 +57,6 @@ const BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
   { key: 'main', label: '主板' },
   { key: 'star', label: '科创板' },
   { key: 'chinext', label: '创业板' },
-]
-
-const CONDITION_OPERATOR_OPTIONS: { value: ConditionOperator; label: string }[] = [
-  { value: 'gt', label: '大于' },
-  { value: 'gte', label: '大于等于' },
-  { value: 'lt', label: '小于' },
-  { value: 'lte', label: '小于等于' },
-  { value: 'eq', label: '等于' },
-  { value: 'neq', label: '不等于' },
-  { value: 'cross_up', label: '上穿' },
-  { value: 'cross_down', label: '下穿' },
 ]
 
 function emptyCondition(leftValue = 'indicator_three.var1'): ScreenCondition {
@@ -137,7 +141,7 @@ const valueGroups = computed<{ label: string; values: ValueDefinition[] }[]>(() 
 const availableValues = computed(() => valueGroups.value.flatMap((group) => group.values))
 const conditionOperators = computed(() => metadata.value?.condition_operators?.length
   ? metadata.value.condition_operators
-  : CONDITION_OPERATOR_OPTIONS)
+  : CONDITION_OPERATORS_UI)
 const canSubmit = computed(() => (
   !loading.value
   && !syncLoading.value
@@ -856,6 +860,12 @@ async function saveResultsAsGroup(useAll: boolean): Promise<void> {
         name: item.name ?? null,
       })),
       source: 'screen',
+      // 存快照而不是记 history_id：回测/扫描历史每种类型只留最近 20 条，等组还在、
+      // 历史已被淘汰时，只有组里这句人话还能回答「这批票是按什么选出来的」。
+      criteria: {
+        summary: describeScreenForm(form, availableValues.value, metadata.value, customMetadata.value),
+        payload: buildScanPayload(form) as unknown as Record<string, unknown>,
+      },
     })
     groupName.value = ''
     selectedResultKeys.clear()
@@ -894,6 +904,23 @@ async function loadGroupPerformance(groupId: string): Promise<void> {
     groupError.value = apiMessage(error, '表现读取失败')
   } finally {
     groupPerfLoading.value = false
+  }
+}
+
+async function renameGroup(group: StockGroupSummary): Promise<void> {
+  const next = window.prompt('新的分组名称', group.name)?.trim()
+  if (!next || next === group.name) return
+  groupBusy.value = true
+  try {
+    await renameStockGroup(group.group_id, next)
+    await refreshStockGroups()
+    if (selectedGroupId.value === group.group_id && selectedGroup.value) {
+      selectedGroup.value = { ...selectedGroup.value, name: next }
+    }
+  } catch (error) {
+    groupError.value = apiMessage(error, '改名失败')
+  } finally {
+    groupBusy.value = false
   }
 }
 
@@ -1384,6 +1411,13 @@ watch(() => form.formulaText, (value) => {
                 <strong>{{ group.name }}</strong>
                 <small>{{ group.item_count }} 只 · {{ group.source_label }}</small>
               </button>
+              <button
+                type="button"
+                class="text-button"
+                :data-testid="`group-rename-${group.group_id}`"
+                :disabled="groupBusy"
+                @click="renameGroup(group)"
+              >改名</button>
               <button
                 type="button"
                 class="text-button"

@@ -1,8 +1,10 @@
 import { FormulaScreenApiError } from './formulaScreen'
 import type {
   StockGroup,
+  StockGroupCriteria,
   StockGroupMember,
   StockGroupPerformance,
+  StockGroupsSummary,
   StockGroupSummary,
 } from '../types'
 
@@ -39,6 +41,7 @@ export async function createStockGroup(payload: {
   items: StockGroupMember[]
   source?: 'manual' | 'screen'
   source_history_id?: string | null
+  criteria?: { summary: string; payload: Record<string, unknown> | null } | null
 }): Promise<StockGroup> {
   const response = await request<{ data: StockGroup }>(API_BASE, {
     method: 'POST',
@@ -61,6 +64,18 @@ export async function renameStockGroup(groupId: string, name: string): Promise<S
   )
   return response.data
 }
+
+/** 折叠态的阶段收益。一次拿回所有组——不是每组一个请求。 */
+export async function fetchStockGroupsSummary(
+  windows?: number[],
+): Promise<StockGroupsSummary> {
+  const query = windows && windows.length ? `?windows=${windows.join(',')}` : ''
+  const response = await request<{ data: StockGroupsSummary }>(`${API_BASE}/summary${query}`)
+  return response.data
+}
+
+/** 存组时的筛选条件快照。给 null 表示「这组本来就没有筛选条件」。 */
+export type StockGroupCriteriaInput = Pick<StockGroupCriteria, 'summary' | 'payload'>
 
 export async function removeStockGroupMembers(
   groupId: string,

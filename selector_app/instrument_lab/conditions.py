@@ -310,14 +310,17 @@ def check_conditions(
         difference = hit_mean - base_mean
         p_value: float | None = None
         if orders:
-            observed = difference
+            # 双侧：数「绝对值比观测更极端」的置换，而不是「与观测同向且更极端」。
+            # 后者会先看一眼观测值是正是负，再决定数哪一侧——方向是**事后挑的**，
+            # 于是 p 恒等于双侧的一半，alpha=0.05 的检验实测误报率约 10%。
+            # 事前注册的单侧需要事先声明方向并放弃另一侧；这里没有可声明的方向
+            # （条件既可能对应跑赢也可能对应跑输），所以只能双侧。
+            observed = abs(difference)
             reached = 0
             for order in orders:
                 permuted = base_forward[order]
                 statistic = float(np.mean(permuted[hit_flags])) - base_mean
-                if (observed >= 0 and statistic >= observed) or (
-                    observed < 0 and statistic <= observed
-                ):
+                if abs(statistic) >= observed:
                     reached += 1
             p_value = (1 + reached) / (1 + len(orders))
         note: str | None = None

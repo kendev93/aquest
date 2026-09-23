@@ -418,6 +418,90 @@ export function resultsToCsv(results: ScreenResult[]): string {
   return [header.map(escape).join(','), ...rows].join('\n')
 }
 
+const CONDITION_OPERATOR_OPTIONS: { value: ConditionOperator; label: string }[] = [
+  { value: 'gt', label: '大于' },
+  { value: 'gte', label: '大于等于' },
+  { value: 'lt', label: '小于' },
+  { value: 'lte', label: '小于等于' },
+  { value: 'eq', label: '等于' },
+  { value: 'neq', label: '不等于' },
+  { value: 'cross_up', label: '上穿' },
+  { value: 'cross_down', label: '下穿' },
+]
+
+/** 下拉框和「人话摘要」共用一份：两边各写一遍的话，改了这边忘那边是迟早的事。 */
+export const CONDITION_OPERATORS_UI = CONDITION_OPERATOR_OPTIONS
+
+export function conditionOperatorLabel(operator: ConditionOperator): string {
+  return CONDITION_OPERATOR_OPTIONS.find((item) => item.value === operator)?.label ?? operator
+}
+
+const UNIVERSE_LABELS: Record<string, string> = {
+  all: '全部 A 股',
+  custom: '自定义范围',
+}
+
+const BOARD_LABELS: Record<string, string> = {
+  main: '主板',
+  star: '科创板',
+  chinext: '创业板',
+}
+
+/**
+ * 一句话说清「这批票是按什么条件选出来的」，存进股票组的快照里。
+ *
+ * 存的是这句话而不是回指扫描历史：历史每种类型只留最近 20 条，等组还在、历史
+ * 已被淘汰时，「这组是怎么选出来的」就只能靠存档在组里的这句话回答。
+ */
+export function describeScreenForm(
+  form: ScreenFormState,
+  values: ValueDefinition[],
+  metadata: FormulaScreenMetadata | null = null,
+  customMetadata: CustomFormulaMetadata | null = null,
+  maxLength = 200,
+): string {
+  const parts: string[] = []
+  if (form.mode === 'custom') {
+    const formula = form.formulaText.trim().replace(/\s+/g, ' ')
+    const parameters = Object.entries(form.formulaParameters)
+      .map(([key, value]) => `${key}=${value}`)
+      .join('、')
+    parts.push(formula ? `自定义公式：${formula}` : '自定义公式：（未填写）')
+    if (parameters) parts.push(`参数 ${parameters}`)
+  } else if (form.ruleMode === 'conditions') {
+    const lines = form.conditions.map((condition) => describeCondition(condition, values))
+    parts.push(`条件：${lines.join('；') || '（未设置）'}`)
+    parts.push(combineModeLabel(form.combineMode))
+  } else {
+    const names = form.selectedSignals.map((signal) => signalDisplayName(signal, metadata, customMetadata))
+    parts.push(`信号：${names.join('、') || '（未选）'}`)
+    if (form.selectedSignals.length > 1) {
+      parts.push(
+        form.combineMode === 'at_least'
+          ? `至少满足 ${form.minimumMatches} 个`
+          : combineModeLabel(form.combineMode),
+      )
+    }
+  }
+  const scope: string[] = [UNIVERSE_LABELS[form.universe] ?? form.universe]
+  if (form.boards.length) {
+    scope.push(form.boards.map((board) => BOARD_LABELS[board] ?? board).join('/'))
+  }
+  parts.push(`范围 ${scope.join(' · ')}`)
+  const text = parts.join('，')
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text
+}
+
+function describeCondition(condition: ScreenCondition, values: ValueDefinition[]): string {
+  const label = (valueId: string | null): string => (
+    values.find((item) => item.id === valueId)?.display_name ?? valueId ?? ''
+  )
+  const right = condition.right_value
+    ? label(condition.right_value)
+    : String(condition.right_constant ?? '')
+  return `${label(condition.left_value)} ${conditionOperatorLabel(condition.operator)} ${right}`
+}
+
 export function combineModeLabel(mode: CombineMode): string {
   return { all: '全部满足 AND', any: '任一满足 OR', at_least: '至少满足 N 个' }[mode]
 }

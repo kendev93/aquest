@@ -19,9 +19,18 @@ vi.mock('../api/stockGroups', async () => {
     getStockGroup: vi.fn(),
     fetchStockGroupPerformance: vi.fn(),
     removeStockGroupMembers: vi.fn(),
+    renameStockGroup: vi.fn(),
     deleteStockGroup: vi.fn(),
   }
 })
+
+const CRITERIA = {
+  group_id: 'group-1',
+  summary: '信号：建仓启动、底部区域，至少满足 2 个，范围 全部 A 股',
+  payload: { selected_signals: ['indicator_three.prepare_rally'] },
+  created_at: '2026-09-22T10:00:00',
+  updated_at: '2026-09-22T10:00:00',
+}
 
 vi.mock('../api/screenPresets', async () => {
   const actual = await vi.importActual<typeof import('../api/screenPresets')>('../api/screenPresets')
@@ -714,11 +723,12 @@ describe('FormulaScreenPage', () => {
       group_id: 'group-1', name: '9月候选', note: '', source: 'screen', source_label: '选股结果',
       source_history_id: null, created_at: '2026-09-22T10:00:00', updated_at: '2026-09-22T10:00:00',
       item_count: 1, items: [{ market: 'SH', code: '600000', name: '浦发银行' }],
+      criteria: CRITERIA,
     })
     vi.mocked(groupApi.fetchStockGroups).mockResolvedValue([{
       group_id: 'group-1', name: '9月候选', note: '', source: 'screen', source_label: '选股结果',
       source_history_id: null, created_at: '2026-09-22T10:00:00', updated_at: '2026-09-22T10:00:00',
-      item_count: 1,
+      item_count: 1, criteria: CRITERIA,
     }])
     await wrapper.get('[data-testid="save-picked-group"]').trigger('click')
     await flushPromises()
@@ -728,13 +738,18 @@ describe('FormulaScreenPage', () => {
       items: [{ market: 'SH', code: '600000', name: '浦发银行' }],
       source: 'screen',
     }))
+    // 筛选条件必须跟着组一起存：扫描历史只留 20 条，等历史被淘汰时只剩这句人话
+    // 能回答「这批票是按什么选出来的」。
+    const saved = vi.mocked(groupApi.createStockGroup).mock.calls[0][0]
+    expect(saved.criteria?.summary).toContain('信号：')
+    expect(saved.criteria?.payload).toBeTruthy()
     expect(wrapper.get('[data-testid="group-item-group-1"]')).toBeTruthy()
 
     // 组保存完立刻看表现：本组 +25%、全市场 -5%、超额 +30 个百分点。
     vi.mocked(groupApi.getStockGroup).mockResolvedValue({
       group_id: 'group-1', name: '9月候选', note: '', source: 'screen', source_label: '选股结果',
       source_history_id: null, created_at: '2026-09-22T10:00:00', updated_at: '2026-09-22T10:00:00',
-      item_count: 2,
+      item_count: 2, criteria: CRITERIA,
       items: [
         { market: 'SH', code: '600000', name: '浦发银行' },
         { market: 'SZ', code: '000001', name: '平安银行' },
@@ -773,6 +788,47 @@ describe('FormulaScreenPage', () => {
     expect(wrapper.get('[data-testid="group-performance"]').text()).toContain('000002')
     expect(wrapper.get('[data-testid="group-performance"]').text()).toContain('没有收盘价')
     expect(wrapper.find('[data-testid="group-chart"]').exists()).toBe(true)
+  })
+
+  it('renames a group in place', async () => {
+    vi.mocked(groupApi.fetchStockGroups).mockResolvedValue([{
+      group_id: 'group-1', name: '旧名字', note: '', source: 'screen', source_label: '选股结果',
+      source_history_id: null, created_at: '2026-09-22T10:00:00', updated_at: '2026-09-22T10:00:00',
+      item_count: 3, criteria: CRITERIA,
+    }])
+    vi.mocked(groupApi.renameStockGroup).mockResolvedValue({
+      group_id: 'group-1', name: '新名字', note: '', source: 'screen', source_label: '选股结果',
+      source_history_id: null, created_at: '2026-09-22T10:00:00', updated_at: '2026-09-22T10:00:00',
+      item_count: 3, items: [], criteria: CRITERIA,
+    })
+    const wrapper = mount(FormulaScreenPage)
+    await flushPromises()
+
+    const prompt = vi.spyOn(window, 'prompt').mockReturnValue('新名字')
+    await wrapper.get('[data-testid="group-rename-group-1"]').trigger('click')
+    await flushPromises()
+
+    expect(groupApi.renameStockGroup).toHaveBeenCalledWith('group-1', '新名字')
+    // 改名后要重新拉一次列表，否则界面上还是旧名字。
+    expect(groupApi.fetchStockGroups).toHaveBeenCalledTimes(2)
+    prompt.mockRestore()
+  })
+
+  it('does not call rename when the prompt is dismissed', async () => {
+    vi.mocked(groupApi.fetchStockGroups).mockResolvedValue([{
+      group_id: 'group-1', name: '旧名字', note: '', source: 'screen', source_label: '选股结果',
+      source_history_id: null, created_at: '2026-09-22T10:00:00', updated_at: '2026-09-22T10:00:00',
+      item_count: 3, criteria: CRITERIA,
+    }])
+    const wrapper = mount(FormulaScreenPage)
+    await flushPromises()
+
+    const prompt = vi.spyOn(window, 'prompt').mockReturnValue(null)
+    await wrapper.get('[data-testid="group-rename-group-1"]').trigger('click')
+    await flushPromises()
+
+    expect(groupApi.renameStockGroup).not.toHaveBeenCalled()
+    prompt.mockRestore()
   })
 
   it('keeps both save buttons disabled until there is something to save', async () => {
