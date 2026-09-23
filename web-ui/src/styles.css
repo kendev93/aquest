@@ -888,3 +888,74 @@ tbody tr:hover td { background: rgba(22, 34, 58, 0.45); }
 .pick-column { width: 46px; text-align: center; }
 .screen-result-row.picked { background: var(--surface-raised); }
 @media (max-width: 900px) { .group-stat-row { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* 使用手册页：左目录 + 右正文。目录是 sticky 的，翻长文时不用滚回去。 */
+.manual-layout { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 30px; align-items: start; }
+.manual-sidebar { position: sticky; top: 92px; display: flex; flex-direction: column; gap: 10px; }
+.manual-search { display: flex; align-items: center; gap: 6px; }
+.manual-search input {
+  flex: 1;
+  min-width: 0;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: 12px;
+}
+.manual-search input:focus { border-color: var(--accent); outline: none; }
+.manual-count { margin: 0; color: var(--subtle); font-size: 11px; }
+.manual-toc { display: flex; flex-direction: column; gap: 1px; max-height: calc(100vh - 250px); overflow-y: auto; }
+.manual-toc-link {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 9px;
+  border-left: 2px solid transparent;
+  border-radius: 0 4px 4px 0;
+  color: var(--muted);
+  font-size: 12.5px;
+  text-decoration: none;
+}
+.manual-toc-link:hover { border-left-color: var(--accent); background: var(--surface-hover); color: var(--text); }
+.manual-toc-hits { color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
+.manual-content { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
+/* 顶栏 sticky 70px，锚点跳转要让开它，否则标题被压在栏下面。 */
+.manual-article {
+  scroll-margin-top: 92px;
+  padding: 20px 24px 22px;
+  border: 1px solid var(--border);
+  border-top: 2px solid var(--accent);
+  background: rgba(11, 18, 35, 0.9);
+}
+.manual-section-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+.manual-section-head h2 { margin: 0; font-size: 17px; letter-spacing: -0.03em; }
+.manual-open { color: var(--accent); font-size: 11px; text-decoration: none; white-space: nowrap; }
+.manual-open:hover { text-decoration: underline; }
+.manual-summary { margin: 9px 0 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.manual-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px 30px; margin-top: 16px; }
+.manual-block { min-width: 0; }
+.manual-block.caliber {
+  margin-top: 16px;
+  padding: 13px 15px;
+  border-left: 2px solid var(--warning);
+  background: rgba(245, 158, 11, 0.07);
+}
+.manual-label { margin: 0 0 6px; color: var(--text); font-size: 12px; font-weight: 700; }
+.manual-block.limits .manual-label { color: var(--warning); }
+.manual-list { margin: 0; padding-left: 17px; color: var(--muted); font-size: 12.5px; line-height: 1.65; }
+.manual-list.ordered { padding-left: 19px; }
+.manual-next { margin: 14px 0 0; color: var(--subtle); font-size: 12px; }
+.manual-next-link { margin-right: 14px; color: var(--accent); text-decoration: none; }
+.manual-next-link:hover { text-decoration: underline; }
+.manual-empty { margin: 0; padding: 26px 0; color: var(--subtle); font-size: 13px; text-align: center; }
+/* 浏览器默认的 mark 是黄底黑字，在深色底上刺眼，改成与强调色同系。 */
+mark { background: rgba(56, 189, 248, 0.26); color: inherit; border-radius: 2px; }
+@media (max-width: 900px) {
+  .manual-layout { grid-template-columns: minmax(0, 1fr); }
+  .manual-sidebar { position: static; }
+  .manual-toc { max-height: none; }
+  .manual-grid { grid-template-columns: minmax(0, 1fr); }
+}

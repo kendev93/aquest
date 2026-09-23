@@ -1093,6 +1093,7 @@ watch(() => form.formulaText, (value) => {
         <a class="nav-link" href="/instrument-lab">标的检验台</a>
         <a class="nav-link" href="/candidate-library">候选库</a>
         <a class="nav-link" href="/factor-attribution">因子归因</a>
+        <a class="nav-link" href="/user-manual">使用手册</a>
       </nav>
       <div class="topbar-status"><span class="status-dot" aria-hidden="true"></span> 本地数据模式</div>
     </header>

@@ -14,6 +14,7 @@ import StrategyDiscoveryPage from './pages/StrategyDiscoveryPage.vue'
 import StrategyFitnessPage from './pages/StrategyFitnessPage.vue'
 import StrategyTrackingPage from './pages/StrategyTrackingPage.vue'
 import SwingResearchPage from './pages/SwingResearchPage.vue'
+import UserManualPage from './pages/UserManualPage.vue'
 
 const currentPath = ref(typeof window !== 'undefined' ? window.location.pathname : '/indicator-lab')
 
@@ -33,6 +34,7 @@ const routeComponent = computed(() => {
   if (pathname.startsWith('/history-compare')) return HistoryComparePage
   if (pathname.startsWith('/instrument-lab')) return InstrumentLabPage
   if (pathname.startsWith('/candidate-library')) return CandidateLibraryPage
+  if (pathname.startsWith('/user-manual')) return UserManualPage
   return FormulaScreenPage
 })
 
