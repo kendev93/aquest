@@ -181,6 +181,143 @@ def test_performance_compares_the_group_with_the_whole_market(tmp_path: Path) ->
     assert spread["best"]["code"] == "600001"
 
 
+def test_criteria_snapshot_survives_the_group(tmp_path: Path) -> None:
+    """筛选条件存的是快照，不是回指历史——历史只留 20 条，组还在它就该还在。"""
+
+    store = _store(tmp_path)
+    with TestClient(
+        create_app(market_data_store=store, auto_sync_enabled=False)
+    ) as client:
+        created = client.post(
+            "/api/v1/stock-groups",
+            json={
+                "name": "带条件的组",
+                "items": [{"market": "SH", "code": "600001"}],
+                "source": "screen",
+                "criteria": {
+                    "summary": "MACD 金叉 + 收盘价 > MA20",
+                    "payload": {"mode": "preset", "signals": ["macd_cross"]},
+                },
+            },
+        )
+        assert created.status_code == 201
+        group_id = created.json()["data"]["group_id"]
+        assert created.json()["data"]["criteria"]["summary"] == "MACD 金叉 + 收盘价 > MA20"
+
+        # 列表也要带：折叠态要显示「这组是怎么选出来的」。
+        listed = client.get("/api/v1/stock-groups")
+        assert listed.json()["data"][0]["criteria"]["payload"]["signals"] == ["macd_cross"]
+
+        # 手建的组没有筛选条件，是 null 而不是空对象——两者在 UI 上含义不同。
+        manual = client.post(
+            "/api/v1/stock-groups",
+            json={"name": "手建组", "items": [{"market": "SH", "code": "600002"}]},
+        )
+        assert manual.status_code == 201
+        manual_id = manual.json()["data"]["group_id"]
+        assert manual.json()["data"]["criteria"] is None
+
+        # 删组要连快照一起删，否则备份里会留一条谁也读不到的孤儿记录。
+        assert client.delete(f"/api/v1/stock-groups/{group_id}").status_code == 200
+        assert client.get(f"/api/v1/stock-groups/{manual_id}").status_code == 200
+        assert client.get(f"/api/v1/stock-groups/{manual_id}").json()["data"]["criteria"] is None
+
+
+def test_criteria_without_a_summary_is_rejected(tmp_path: Path) -> None:
+    """给了 criteria 却没摘要必须报错：那会让折叠态空一栏，看着像忘了存。"""
+
+    store = _store(tmp_path)
+    with TestClient(
+        create_app(market_data_store=store, auto_sync_enabled=False)
+    ) as client:
+        response = client.post(
+            "/api/v1/stock-groups",
+            json={
+                "name": "缺摘要",
+                "items": [{"market": "SH", "code": "600001"}],
+                "criteria": {"payload": {"mode": "preset"}},
+            },
+        )
+
+    assert response.status_code == 422
+
+
+def test_summary_uses_one_window_for_every_group(tmp_path: Path) -> None:
+    """折叠态的『近 N 个交易日』对所有组同一个窗口，所以组之间可以直接比。"""
+
+    store = _store(tmp_path)
+    store.save_stock_group(
+        "g1",
+        name="全涨组",
+        items=[{"market": "SH", "code": "600001"}],
+        created_at=datetime.combine(START, datetime.min.time()),
+    )
+    store.save_stock_group(
+        "g2",
+        name="全跌组",
+        items=[{"market": "SH", "code": "600002"}],
+        created_at=datetime.combine(START, datetime.min.time()),
+    )
+
+    with TestClient(
+        create_app(market_data_store=store, auto_sync_enabled=False)
+    ) as client:
+        response = client.get("/api/v1/stock-groups/summary", params={"windows": "3,5"})
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    assert payload["windows"] == [3, 5]
+    assert payload["labels"]["3"] == "近 3 个交易日"
+    # 10 个交易日的数据，要 3 日和 5 日窗口都拿得到。
+    assert payload["as_of"] == TODAY.isoformat()
+
+    by_group = {item["group_id"]: item["windows"] for item in payload["groups"]}
+    assert set(by_group) == {"g1", "g2"}
+    # 两个组共用同一份行情、同一个窗口：g1 涨、g2 跌，方向相反且都与全市场不同。
+    rising = by_group["g1"][0]
+    falling = by_group["g2"][0]
+    assert rising["trading_days"] == 3
+    assert rising["group_return"] > 0
+    assert falling["group_return"] < 0
+    assert rising["excess_return"] > falling["excess_return"]
+    assert rising["counted"] == 1 and rising["complete"] is True
+
+
+def test_summary_marks_a_window_short_of_data(tmp_path: Path) -> None:
+    """窗口比库里的行情还长时，数字照给但必须标出实际只有几天。"""
+
+    store = _store(tmp_path)
+    store.save_stock_group(
+        "g1",
+        name="探针组",
+        items=[{"market": "SH", "code": "600001"}],
+        created_at=datetime.combine(START, datetime.min.time()),
+    )
+
+    with TestClient(
+        create_app(market_data_store=store, auto_sync_enabled=False)
+    ) as client:
+        response = client.get("/api/v1/stock-groups/summary", params={"windows": "60"})
+
+    assert response.status_code == 200
+    window = response.json()["data"]["groups"][0]["windows"][0]
+    # 库里只有 10 天，60 日窗口凑不满：不能假装它是 60 天的收益。
+    assert window["trading_days"] == DAYS
+    assert window["complete"] is False
+
+
+def test_summary_without_groups_is_empty(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    with TestClient(
+        create_app(market_data_store=store, auto_sync_enabled=False)
+    ) as client:
+        response = client.get("/api/v1/stock-groups/summary")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["groups"] == []
+    assert response.json()["data"]["windows"] == [20, 60]
+
+
 def test_performance_of_a_missing_group_is_404(tmp_path: Path) -> None:
     store = _store(tmp_path)
     with TestClient(

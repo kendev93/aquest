@@ -520,6 +520,26 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
     def list_stock_groups(self) -> list[dict[str, object]]:
         return self._history.list_stock_groups()
 
+    def list_stock_groups_with_items(self) -> list[dict[str, object]]:
+        return self._history.list_stock_groups_with_items()
+
+    def save_stock_group_criteria(
+        self,
+        group_id: str,
+        *,
+        criteria: Mapping[str, object],
+        created_at: datetime | str | None = None,
+    ) -> dict[str, object]:
+        return self._history.save_stock_group_criteria(
+            group_id, criteria=criteria, created_at=created_at
+        )
+
+    def read_stock_group_criteria(
+        self,
+        group_ids: Sequence[str],
+    ) -> dict[str, dict[str, object]]:
+        return self._history.read_stock_group_criteria(group_ids)
+
     def read_stock_group(self, group_id: str) -> dict[str, object] | None:
         return self._history.read_stock_group(group_id)
 

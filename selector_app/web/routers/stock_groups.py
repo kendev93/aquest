@@ -45,12 +45,32 @@ def create_stock_group(payload: StockGroupCreateRequest, request: Request) -> di
             note=payload.note,
             source=payload.source,
             source_history_id=payload.source_history_id,
+            criteria=payload.criteria,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except (MarketDataStoreError, OSError) as exc:
         raise HTTPException(status_code=503, detail="股票组暂不可用") from exc
     return {"data": record}
+
+
+@router.get("/summary")
+def summarize_stock_groups(request: Request, windows: str = "") -> dict[str, object]:
+    """折叠态要的「近 N 个交易日」收益，一次算完所有组。
+
+    和 ``/{id}/performance`` 的区别是**窗口对所有组相同**，所以组之间可以直接比，
+    也所以能共用一份行情一次算完。展开态才需要按各组入组日单独算。
+    """
+
+    try:
+        parsed = [int(part) for part in windows.split(",") if part.strip()]
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="窗口必须是逗号分隔的整数") from exc
+    try:
+        result = _service(request).summarize(parsed)
+    except (MarketDataStoreError, OSError) as exc:
+        raise HTTPException(status_code=503, detail="股票组暂不可用") from exc
+    return {"data": result}
 
 
 @router.get("/{group_id}")
@@ -71,6 +91,7 @@ def update_stock_group(
             name=payload.name,
             note=payload.note,
             items=None if payload.items is None else [item.model_dump() for item in payload.items],
+            criteria=payload.criteria,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

@@ -615,6 +615,20 @@ class _DuckDbStoreBase:
                 )
                 """
             )
+            # 组的筛选条件快照。单独一张表而不是给 stock_groups 加列：加列要么 bump
+            # SCHEMA_VERSION（老库会先整库备份一遍 4.6GB），要么在迁移里补，而这张
+            # 表要迁移的旧数据是「空」——没有快照的组就是不显示这一栏。而且快照是
+            # 稀疏的（手建的组没有），独立表天然适合。
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS stock_group_criteria (
+                    group_id VARCHAR PRIMARY KEY,
+                    criteria_json VARCHAR NOT NULL,
+                    created_at TIMESTAMP NOT NULL,
+                    updated_at TIMESTAMP NOT NULL
+                )
+                """
+            )
             connection.execute(
                 """
                 INSERT INTO data_meta (key, value, updated_at)

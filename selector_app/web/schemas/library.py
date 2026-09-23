@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -133,6 +133,9 @@ class StockGroupCreateRequest(BaseModel):
     items: list[StockGroupMemberRequest] = Field(min_length=1, max_length=200)
     source: Literal["manual", "screen"] = "manual"
     source_history_id: str | None = Field(default=None, max_length=128)
+    #: 筛选条件快照。结构是前端定的（一句人话摘要 + 可复现的输入），后端只做
+    #: 「是不是对象」这一层校验，不解释里面的字段——解释权在产生它的那一页。
+    criteria: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def validate_name(self) -> StockGroupCreateRequest:
@@ -149,11 +152,12 @@ class StockGroupUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=60)
     note: str | None = Field(default=None, max_length=300)
     items: list[StockGroupMemberRequest] | None = Field(default=None, min_length=1, max_length=200)
+    criteria: dict[str, Any] | None = None
 
     @model_validator(mode="after")
     def validate_payload(self) -> StockGroupUpdateRequest:
-        if self.name is None and self.note is None and self.items is None:
-            raise ValueError("至少要修改名称、备注或成员之一")
+        if self.name is None and self.note is None and self.items is None and self.criteria is None:
+            raise ValueError("至少要修改名称、备注、成员或筛选条件之一")
         if self.name is not None and not self.name.strip():
             raise ValueError("分组名称不能为空")
         return self

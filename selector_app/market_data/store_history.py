@@ -34,6 +34,7 @@ ASSET_TABLES: tuple[str, ...] = (
     "screen_presets",
     "candidate_library",
     "stock_groups",
+    "stock_group_criteria",
 )
 SAVED_STRATEGY_TABLE = "saved_strategies"
 STRATEGY_TRACKING_TABLE = "strategy_tracking"
@@ -76,8 +77,13 @@ _CANDIDATE_COLUMNS = (
     "condition_json, evidence_json, status, note, published_strategy_id, created_at, updated_at"
 )
 STOCK_GROUP_TABLE = "stock_groups"
+STOCK_GROUP_CRITERIA_TABLE = "stock_group_criteria"
 STOCK_GROUP_NAME_MAX_LENGTH = 60
 STOCK_GROUP_NOTE_MAX_LENGTH = 300
+#: 筛选条件快照里那句人话摘要的上限。摘要是给人一眼看的，写长了折叠态放不下。
+STOCK_GROUP_CRITERIA_SUMMARY_MAX_LENGTH = 300
+#: 快照 payload 序列化后的上限。只存输入（公式/信号/参数），不存扫描结果。
+STOCK_GROUP_CRITERIA_PAYLOAD_MAX_LENGTH = 20000
 #: 一组最多放多少只。和组合回测 codes 的上限（200）取同一个数：组最终就是要拿去
 #: 观察表现的，超过这个数后面那步会直接被拒，不如在存的时候就拦住。
 STOCK_GROUP_MAX_ITEMS = 200
@@ -87,6 +93,7 @@ STOCK_GROUP_SOURCE_SCREEN = "screen"
 _STOCK_GROUP_COLUMNS = (
     "group_id, name, note, source, source_history_id, created_at, updated_at, items_json"
 )
+_STOCK_GROUP_CRITERIA_COLUMNS = "group_id, criteria_json, created_at, updated_at"
 
 
 def _require_asset_table(table: str) -> str:
@@ -2059,6 +2066,18 @@ class DuckDbHistoryStore:
     def list_stock_groups(self) -> list[dict[str, object]]:
         """Return every group, most recently updated first, without members."""
 
+        return self._list_stock_groups(with_items=False)
+
+    def list_stock_groups_with_items(self) -> list[dict[str, object]]:
+        """Same list, members included - for maths that needs every group at once.
+
+        批量阶段收益要一次拿到所有组的成员；逐个 read 会让「算一次全部组」变成
+        N+1 次查询，组数不限的情况下迟早咬人。
+        """
+
+        return self._list_stock_groups(with_items=True)
+
+    def _list_stock_groups(self, *, with_items: bool) -> list[dict[str, object]]:
         with self._store._connect(read_only=True) as connection:
             rows = connection.execute(
                 f"""
@@ -2071,7 +2090,8 @@ class DuckDbHistoryStore:
         for row in rows:
             decoded = _decode_stock_group_row(row)
             decoded["item_count"] = len(cast(Sized, decoded["items"]))
-            decoded.pop("items", None)
+            if not with_items:
+                decoded.pop("items", None)
             records.append(decoded)
         return records
 
@@ -2159,7 +2179,123 @@ class DuckDbHistoryStore:
         return self.read_stock_group(normalized_id)
 
     def delete_stock_group(self, group_id: str) -> bool:
-        """Delete one group."""
+        """Delete one group, together with its criteria snapshot.
+
+        快照跟组走：组没了还留着一条孤儿快照，导出的备份里就会多出一行谁也读不
+        到的记录。两个删除放在同一个事务里，避免出现「组删了快照还在」。
+        """
+
+        self._store._require_writer()
+        normalized_id = group_id.strip()
+        if not normalized_id:
+            return False
+        with _WRITE_LOCK, self._store._connect() as connection:
+            connection.execute("BEGIN")
+            try:
+                deleted = connection.execute(
+                    f"DELETE FROM {STOCK_GROUP_TABLE} WHERE group_id = ? RETURNING group_id",
+                    [normalized_id],
+                ).fetchone()
+                if deleted is not None:
+                    connection.execute(
+                        f"DELETE FROM {STOCK_GROUP_CRITERIA_TABLE} WHERE group_id = ?",
+                        [normalized_id],
+                    )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        return deleted is not None
+
+    def save_stock_group_criteria(
+        self,
+        group_id: str,
+        *,
+        criteria: Mapping[str, object],
+        created_at: datetime | str | None = None,
+    ) -> dict[str, object]:
+        """Store what the group was selected by, as a snapshot.
+
+        存快照而不是回指选股历史：历史每种类型只留最近 20 条，等组还在、历史已经
+        被淘汰时，「这组是怎么选出来的」就永远读不出来了。
+        """
+
+        self._store._require_writer()
+        normalized_id = group_id.strip()
+        if not normalized_id:
+            raise ValueError("分组 ID 不能为空")
+        summary = criteria.get("summary")
+        if not isinstance(summary, str) or not summary.strip():
+            raise ValueError("筛选条件摘要不能为空")
+        if len(summary.strip()) > STOCK_GROUP_CRITERIA_SUMMARY_MAX_LENGTH:
+            raise ValueError(
+                f"筛选条件摘要不能超过 {STOCK_GROUP_CRITERIA_SUMMARY_MAX_LENGTH} 个字符"
+            )
+        payload = criteria.get("payload")
+        if payload is not None and not isinstance(payload, Mapping):
+            raise ValueError("筛选条件快照必须是对象")
+        encoded = json.dumps(
+            {"summary": summary.strip(), "payload": dict(payload) if payload else None},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        if len(encoded) > STOCK_GROUP_CRITERIA_PAYLOAD_MAX_LENGTH:
+            raise ValueError("筛选条件快照过大，请精简后再保存")
+        stamp = _normalize_timestamp(created_at, _now())
+        with _WRITE_LOCK, self._store._connect() as connection:
+            connection.execute("BEGIN")
+            try:
+                connection.execute(
+                    f"""
+                    INSERT INTO {STOCK_GROUP_CRITERIA_TABLE} (
+                        group_id, criteria_json, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?)
+                    ON CONFLICT (group_id) DO UPDATE SET
+                        criteria_json = excluded.criteria_json,
+                        updated_at = excluded.updated_at
+                    """,
+                    [normalized_id, encoded, stamp, stamp],
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        return {"group_id": normalized_id, **json.loads(encoded)}
+
+    def read_stock_group_criteria(
+        self,
+        group_ids: Sequence[str],
+    ) -> dict[str, dict[str, object]]:
+        """Criteria for many groups at once - never one query per group."""
+
+        wanted = {str(group_id).strip() for group_id in group_ids if str(group_id).strip()}
+        if not wanted:
+            return {}
+        placeholders = ", ".join("?" for _ in wanted)
+        with self._store._connect(read_only=True) as connection:
+            rows = connection.execute(
+                f"SELECT {_STOCK_GROUP_CRITERIA_COLUMNS} FROM {STOCK_GROUP_CRITERIA_TABLE} "
+                f"WHERE group_id IN ({placeholders})",
+                list(wanted),
+            ).fetchall()
+        decoded: dict[str, dict[str, object]] = {}
+        for row in rows:
+            try:
+                payload = json.loads(str(row[1]))
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(payload, Mapping):
+                continue
+            decoded[str(row[0])] = {
+                "group_id": str(row[0]),
+                **dict(payload),
+                "created_at": str(row[2]),
+                "updated_at": str(row[3]),
+            }
+        return decoded
+
+    def delete_stock_group_criteria(self, group_id: str) -> bool:
+        """Drop the criteria snapshot of one group."""
 
         self._store._require_writer()
         normalized_id = group_id.strip()
@@ -2167,7 +2303,7 @@ class DuckDbHistoryStore:
             return False
         with _WRITE_LOCK, self._store._connect() as connection:
             deleted = connection.execute(
-                f"DELETE FROM {STOCK_GROUP_TABLE} WHERE group_id = ? RETURNING group_id",
+                f"DELETE FROM {STOCK_GROUP_CRITERIA_TABLE} WHERE group_id = ? RETURNING group_id",
                 [normalized_id],
             ).fetchone()
         return deleted is not None

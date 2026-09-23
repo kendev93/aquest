@@ -40,6 +40,12 @@ from .performance import (
     member_spread,
     pivot_closes,
 )
+from .summary import (
+    WINDOW_LABELS,
+    GroupSummary,
+    normalize_windows,
+    summarize_groups,
+)
 
 
 class StockGroupService:
@@ -54,11 +60,13 @@ class StockGroupService:
 
     def list_groups(self) -> list[dict[str, object]]:
         records = self._store.list_stock_groups()
-        return [_decorate(record) for record in records]
+        return _attach_criteria(self._store, [_decorate(record) for record in records])
 
     def read_group(self, group_id: str) -> dict[str, object] | None:
         record = self._store.read_stock_group(group_id)
-        return None if record is None else _decorate(record)
+        if record is None:
+            return None
+        return _attach_criteria(self._store, [_decorate(record)])[0]
 
     # ------------------------------------------------------------------
     # 写入
@@ -72,6 +80,7 @@ class StockGroupService:
         note: str = "",
         source: str = SOURCE_MANUAL,
         source_history_id: str | None = None,
+        criteria: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         """Save a new basket. Raises ``ValueError`` for anything the user can fix."""
 
@@ -88,6 +97,7 @@ class StockGroupService:
             raise ValueError("分组至少要包含一只有效标的")
         if len(members) > MAX_ITEMS:
             raise ValueError(f"一组最多只能放 {MAX_ITEMS} 只标的")
+        checked_criteria = _checked_criteria(criteria)
         record = self._store.save_stock_group(
             uuid.uuid4().hex,
             name=normalized_name,
@@ -96,7 +106,11 @@ class StockGroupService:
             source=source,
             source_history_id=source_history_id,
         )
-        return _decorate(record)
+        if checked_criteria is not None:
+            self._store.save_stock_group_criteria(
+                str(record["group_id"]), criteria=checked_criteria
+            )
+        return self.read_group(str(record["group_id"])) or _decorate(record)
 
     def update_group(
         self,
@@ -105,6 +119,7 @@ class StockGroupService:
         name: str | None = None,
         note: str | None = None,
         items: Sequence[Mapping[str, object]] | None = None,
+        criteria: Mapping[str, object] | None = None,
     ) -> dict[str, object] | None:
         normalized_name = name.strip() if isinstance(name, str) else None
         if normalized_name is not None:
@@ -123,13 +138,18 @@ class StockGroupService:
             if len(members) > MAX_ITEMS:
                 raise ValueError(f"一组最多只能放 {MAX_ITEMS} 只标的")
             normalized_items = [member.to_dict() for member in members]
+        checked_criteria = _checked_criteria(criteria)
         record = self._store.update_stock_group(
             group_id,
             name=normalized_name,
             note=normalized_note,
             items=normalized_items,
         )
-        return None if record is None else _decorate(record)
+        if record is None:
+            return None
+        if checked_criteria is not None:
+            self._store.save_stock_group_criteria(group_id, criteria=checked_criteria)
+        return self.read_group(str(record["group_id"])) or _decorate(record)
 
     def remove_members(
         self,
@@ -159,6 +179,32 @@ class StockGroupService:
     # ------------------------------------------------------------------
     # 观察
     # ------------------------------------------------------------------
+
+    def summarize(self, windows: Sequence[int] | None = None) -> dict[str, object]:
+        """Folded-row numbers for every group, in one pass over one price matrix.
+
+        这里刻意不复用 ``performance``：那边每组起点不同，得各组各扫一遍全市场；
+        折叠态要的是"最近这段时间谁涨谁跌"，同一个窗口下所有组共享一份行情，一
+        次读、N 次切片就够了。代价是这两组数字**不同源**，UI 必须标清楚。
+        """
+
+        chosen = normalize_windows(windows)
+        records = self._store.list_stock_groups_with_items()
+        groups: dict[str, tuple[GroupMember, ...]] = {
+            str(record.get("group_id")): normalize_members(_items_of(record)) for record in records
+        }
+        if not groups:
+            return _summary_payload(chosen, (), None)
+        span = max(chosen)
+        # 交易日 → 自然日的换算宁可多读几天：少读了窗口就不满，多读只是多切几行。
+        start = date.today() - timedelta(days=span * 7 // 5 + 30)
+        market_prices = pivot_closes(
+            self._store.read_close_matrix(start_date=start, end_date=date.today())
+        )
+        if market_prices.empty:
+            return _summary_payload(chosen, (), None)
+        summaries = summarize_groups(market_prices, groups, chosen)
+        return _summary_payload(chosen, summaries, _format_day(market_prices.index[-1]))
 
     def performance(self, group_id: str) -> GroupPerformance | None:
         """What this group did from the day it was saved until the latest bar."""
@@ -239,6 +285,60 @@ class StockGroupService:
             truncated=truncated,
             notes=tuple(notes),
         )
+
+
+def _summary_payload(
+    windows: Sequence[int],
+    summaries: Sequence[GroupSummary],
+    as_of: str | None,
+) -> dict[str, object]:
+    return {
+        "as_of": as_of,
+        "windows": list(windows),
+        "labels": {
+            str(window): WINDOW_LABELS.get(window, f"近 {window} 个交易日") for window in windows
+        },
+        "groups": [item.to_dict() for item in summaries],
+    }
+
+
+def _checked_criteria(criteria: Mapping[str, object] | None) -> Mapping[str, object] | None:
+    """Validate the criteria snapshot, or return ``None`` when there is none.
+
+    没有快照是合法的（手建的组就没有），但**给了却缺摘要**不是——那会让折叠态
+    空着一栏，看上去像「忘了存」而不是「这组本来就没有筛选条件」。
+    """
+
+    if criteria is None:
+        return None
+    if not isinstance(criteria, Mapping):
+        raise ValueError("筛选条件快照必须是对象")
+    if not criteria:
+        return None
+    summary = criteria.get("summary")
+    if not isinstance(summary, str) or not summary.strip():
+        raise ValueError("筛选条件摘要不能为空")
+    return criteria
+
+
+def _attach_criteria(store: Any, records: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Hang each group's criteria snapshot on the record, in one query.
+
+    折叠态要显示「这组是怎么选出来的」，所以列表也得带。但一次查全部而不是每组
+    一次查询——组的数量不限，N+1 迟早会在几十个组的时候咬人。
+    """
+
+    if not records:
+        return records
+    if not hasattr(store, "read_stock_group_criteria"):
+        # 存储层还没这张表（老库刚升级、或测试里的替身），没有快照就当没有筛选条件。
+        for record in records:
+            record["criteria"] = None
+        return records
+    found = store.read_stock_group_criteria([str(record.get("group_id")) for record in records])
+    for record in records:
+        record["criteria"] = found.get(str(record.get("group_id")))
+    return records
 
 
 def _items_of(record: Mapping[str, object]) -> list[Mapping[str, object]]:
