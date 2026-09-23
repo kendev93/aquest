@@ -6,6 +6,7 @@ import pytest
 
 from selector_app.condition_research.mining import (
     _bits,
+    _jaccard,
     _phi_correlation,
     build_top_n_context,
     equivalent_condition_signatures,
@@ -646,6 +647,106 @@ def test_phi_correlation_is_restricted_to_samples_both_can_evaluate() -> None:
         other_valid_bits=_bits(first_half),
     )
     assert value == pytest.approx(0.612, abs=1e-3)
+
+
+def test_phi_never_exceeds_the_square_root_of_the_jaccard() -> None:
+    """预筛靠的就是这条上界：φ ≤ √j。
+
+    随机列联表扫一遍，别让这个界只在我手写的例子上成立。上界取 √j 而不是
+    2j/(1+j)：后者是「两个集合大小必须相等」时才有的形状，比真值严，会把嵌套
+    的同义条件剪掉。
+    """
+
+    rng = np.random.default_rng(20240918)
+    for _ in range(2000):
+        both, only_left, only_right, neither = (int(value) for value in rng.integers(0, 30, 4))
+        total = both + only_left + only_right + neither
+        if total == 0:
+            continue
+        left = np.arange(both + only_left)
+        right = np.concatenate(
+            [np.arange(both), np.arange(both + only_left, both + only_left + only_right)]
+        )
+        valid = np.ones(total, dtype=bool)
+        value = _phi_correlation(
+            left,
+            right,
+            valid=valid,
+            other_valid=valid,
+            valid_bits=_bits(valid),
+            other_valid_bits=_bits(valid),
+        )
+        overlap = _jaccard(left, right, valid=valid, other_valid=valid)
+        if value is None:
+            continue
+        assert value <= np.sqrt(overlap) + 1e-9
+
+
+def test_nested_conditions_survive_the_jaccard_prefilter() -> None:
+    """嵌套（更严的阈值完全落在宽松阈值里）是同义条件最常见的形状。
+
+    它的 Jaccard 只有 0.4，而 φ 是 0.61 —— 旧上界 t/(2−t)=0.4286 会把它剪掉，
+    漏掉一次合并；改成 t²=0.36 才剪得对。
+    """
+
+    valid = np.ones(1000, dtype=bool)
+    bits = _bits(valid)
+    wide = np.arange(100)
+    strict = np.arange(40)
+
+    overlap = _jaccard(strict, wide, valid=valid, other_valid=valid)
+    assert overlap == pytest.approx(0.4)
+    assert overlap >= 0.6**2
+
+    value = _phi_correlation(
+        strict, wide, valid=valid, other_valid=valid, valid_bits=bits, other_valid_bits=bits
+    )
+    assert value is not None and value >= 0.6
+
+
+def test_strict_and_loose_thresholds_of_one_finding_are_merged() -> None:
+    """同一条发现的两个激进度（94% 分位 ⊂ 85% 分位）必须被合并掉。
+
+    它们的 Jaccard 恰好 0.4、φ 约 0.60：刚好够 0.6 的门槛，却低于旧上界
+    t/(2−t)=0.4286。用旧上界这一对会被剪掉、当成两条独立发现（candidates 有两条、
+    duplicates 为空）——同义合并漏一次，候选列表就多一条重复。
+    """
+
+    size = 1000
+    features = pd.DataFrame({"technical.f0": np.arange(size, dtype=float)})
+    outcomes = pd.Series(np.arange(size) >= 900)
+    symbols = pd.Series([f"SH60000{index % 5}" for index in range(size)])
+
+    candidates = mine_binary_conditions(
+        features,
+        outcomes,
+        symbols,
+        quantiles=(0.85, 0.94),
+        min_support=20,
+        min_instruments=3,
+        limit=5,
+    )
+
+    # 更严的那条（f0 >= 939）排在最前，宽松的那条被它吸收。
+    assert [round(item.condition.right_constant) for item in candidates] == [939]
+    assert len(candidates[0].duplicates) == 1
+    assert candidates[0].duplicates[0].correlation == pytest.approx(0.601, abs=5e-3)
+
+
+def test_jaccard_is_taken_on_samples_both_can_evaluate() -> None:
+    """两条条件的可评估样本不同：Jaccard 只能在交集上取，否则上界失效。
+
+    B 只能评估前 50 行，A 的命中有一半落在 B 评估不了的区间里。把那些行算进并
+    集，Jaccard 会从 0.5 被稀释到 0.25，直接跌破 t² —— 明明是同义的一对被剪掉。
+    """
+
+    everything = np.ones(100, dtype=bool)
+    first_half = np.zeros(100, dtype=bool)
+    first_half[:50] = True
+    wide = np.concatenate([np.arange(40), np.arange(60, 100)])
+    strict = np.arange(20)
+
+    assert _jaccard(wide, strict, valid=everything, other_valid=first_half) == pytest.approx(0.5)
 
 
 def test_phi_correlation_is_none_when_it_cannot_be_computed() -> None:

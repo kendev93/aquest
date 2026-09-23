@@ -121,22 +121,40 @@ def _comparable_scale(left: np.ndarray, right: np.ndarray) -> bool:
     return max(left_spread, right_spread) / min(left_spread, right_spread) <= _MAX_SCALE_RATIO
 
 
-def _jaccard(left: np.ndarray, right: np.ndarray) -> float:
+def _jaccard(
+    left: np.ndarray,
+    right: np.ndarray,
+    *,
+    valid: np.ndarray,
+    other_valid: np.ndarray,
+) -> float:
     """Overlap of two match sets, measured as ``intersection / union``.
 
-    Both arguments are sorted arrays of sample positions. This is the same ratio
-    the earlier boolean-mask version computed on the rows where either matched,
-    and it is the cheap pre-filter in front of ``_phi_correlation``: a Jaccard of
-    ``j`` caps the correlation at roughly ``2j / (1 + j)``, so a pair below
-    ``t / (2 - t)`` can never reach a threshold of ``t`` and is skipped before
-    any of the expensive counting happens.
+    Both arguments are sorted arrays of sample positions. This is the cheap
+    pre-filter in front of ``_phi_correlation``: a Jaccard of ``j`` caps the phi
+    coefficient at ``sqrt(j)``, so a pair below ``t ** 2`` can never reach a
+    threshold of ``t`` and is skipped before any of the expensive counting
+    happens.
+
+    **The ratio must be taken on the samples both conditions can evaluate**, not
+    on the whole sample space. Two conditions rarely share a valid space - a
+    250-day moving average simply has no value in its first 250 rows - and rows
+    one of them cannot evaluate are not in the phi table at all. Counting them in
+    the union dilutes ``j`` below its true value and the bound stops holding: a
+    pair that is perfectly nested on the shared rows can look barely overlapping
+    overall and get skipped, which is exactly a duplicate that should have been
+    merged.
     """
 
-    union = np.union1d(left, right)
-    if union.size == 0:
+    both = int(np.intersect1d(left, right).size)
+    if both == 0:
         return 0.0
-    intersection = np.intersect1d(left, right)
-    return float(intersection.size / union.size)
+    only_left = int(other_valid[left].sum()) - both
+    only_right = int(valid[right].sum()) - both
+    union = both + only_left + only_right
+    if union <= 0:
+        return 0.0
+    return both / union
 
 
 def _bits(mask: np.ndarray) -> int:
@@ -647,7 +665,15 @@ def mine_binary_conditions(
     )
     # A Jaccard below this cannot reach ``duplicate_correlation`` no matter how
     # the rest of the table falls out, so those pairs never pay for a count.
-    prefilter = min(duplicate_correlation / (2.0 - duplicate_correlation), _DUPLICATE_AGREEMENT)
+    #
+    # The bound is ``sqrt(j)``, not ``2j / (1 + j)``: given a Jaccard of ``j``,
+    # phi is maximised by pushing the "neither matched" cell to infinity and
+    # letting one match set sit entirely inside the other, which lands on
+    # ``sqrt(j)``. The symmetric ``2j / (1 + j)`` is only what you get when the
+    # two sets are forced to be the same size - using it here is stricter than
+    # the truth and silently skips nested pairs, which are the most common shape
+    # a stricter threshold of the same indicator takes.
+    prefilter = min(duplicate_correlation**2, _DUPLICATE_AGREEMENT)
     selected: list[MinedCondition] = []
     kept_matches: list[np.ndarray] = []
     kept_valid: list[np.ndarray] = []
@@ -662,7 +688,7 @@ def mine_binary_conditions(
         duplicate_of: int | None = None
         correlation = 0.0
         for index, kept in enumerate(kept_matches):
-            overlap = _jaccard(matched, kept)
+            overlap = _jaccard(matched, kept, valid=valid_mask, other_valid=kept_valid[index])
             if overlap < prefilter:
                 continue
             value = _phi_correlation(
