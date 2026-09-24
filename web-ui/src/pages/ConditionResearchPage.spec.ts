@@ -1638,4 +1638,85 @@ describe('ConditionResearchPage', () => {
     expect(wrapper.get('[data-testid="condition-research-message"]').text())
       .toContain('1 项引用了当前不存在的指标')
   })
+
+  it('does not call a custom formula preset stale just because preset metadata lacks its outputs', async () => {
+    vi.mocked(presetApi.fetchResearchPresets).mockResolvedValue([{
+      preset_id: 'preset-1', name: '自定义公式方案', note: '',
+      created_at: '2026-09-23T00:00:00Z', updated_at: '2026-09-23T00:00:00Z',
+    }])
+    vi.mocked(presetApi.getResearchPreset).mockResolvedValue({
+      preset_id: 'preset-1', name: '自定义公式方案', note: '',
+      created_at: '2026-09-23T00:00:00Z', updated_at: '2026-09-23T00:00:00Z',
+      payload: {
+        universe: 'all',
+        // 研究请求里没有 mode 字段：带不带公式由 formula_text 决定。
+        formula_text: '强度:C/MA(C,20);',
+        buy_rule: {
+          signals: ['custom.buy'],
+          conditions: [{ left_value: 'custom.score', operator: 'gt', right_value: null, right_constant: 1 }],
+          required_conditions: [],
+          combine_mode: 'all',
+          minimum_matches: null,
+        },
+        sell_rule: null,
+        date_mode: 'custom',
+        start_date: '2020-01-01',
+        end_date: '2024-12-31',
+      },
+    })
+    vi.mocked(formulaApi.parseFormula).mockResolvedValue({
+      parameters: [],
+      signals: [{ id: 'custom.buy', display_name: '买入', description: '自定义买入' }],
+      values: [{ id: 'custom.score', display_name: '强度', description: '自定义数值', bidirectional: true }],
+      minimum_bars: 20,
+      warnings: [],
+    })
+
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="research-preset-select"]').setValue('preset-1')
+    await flushPromises()
+    await wrapper.get('[data-testid="load-research-preset"]').trigger('click')
+    await flushPromises()
+
+    // 自定义公式的输出不在预置元数据里，但它是解析出来的、确实存在。按解析前
+    // 的那份清单去判，这个方案的每一项都会被误报成「已被替换」。
+    expect(wrapper.get('[data-testid="condition-research-message"]').text())
+      .toBe('已载入研究方案「自定义公式方案」，请确认后重新运行。')
+  })
+
+  it('keeps the backend reason when one-click research is rejected', async () => {
+    vi.mocked(presetApi.fetchResearchPresets).mockResolvedValue([{
+      preset_id: 'preset-1', name: '只做深圳', note: '',
+      created_at: '2026-09-23T00:00:00Z', updated_at: '2026-09-23T00:00:00Z',
+    }])
+    vi.mocked(presetApi.getResearchPreset).mockResolvedValue({
+      preset_id: 'preset-1', name: '只做深圳', note: '',
+      created_at: '2026-09-23T00:00:00Z', updated_at: '2026-09-23T00:00:00Z',
+      payload: {
+        universe: 'sz',
+        buy_rule: { signals: [], conditions: [], required_conditions: [], combine_mode: 'all', minimum_matches: null },
+        sell_rule: null,
+        date_mode: 'custom',
+        start_date: '2020-01-01',
+        end_date: '2024-12-31',
+      },
+    })
+    vi.mocked(researchApi.createConditionResearch).mockRejectedValueOnce(
+      new formulaApi.FormulaScreenApiError('研究服务正忙，请稍后再试', 503),
+    )
+
+    const wrapper = mount(ConditionResearchPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="research-preset-select"]').setValue('preset-1')
+    await flushPromises()
+    await wrapper.get('[data-testid="run-research-preset"]').trigger('click')
+    await flushPromises()
+
+    // 「没能通过校验」是本地校验的说法，后端拒绝的原因不能由它盖掉。
+    expect(wrapper.get('[data-testid="condition-research-message"]').text())
+      .toContain('研究服务正忙，请稍后再试')
+    expect(wrapper.get('[data-testid="condition-research-message"]').text())
+      .not.toContain('没能通过校验')
+  })
 })

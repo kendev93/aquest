@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import PageGuide from '../components/PageGuide.vue'
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 
 import {
   cancelConditionResearch,
@@ -129,9 +129,14 @@ const presetBusy = ref(false)
 // 的时候一律不判——那时没有依据，宁可什么都不说。
 const presetAvailability = computed(() => ({
   valueIds: availableValues.value.map((value) => value.id),
-  signalIds: (metadata.value?.indicators ?? []).flatMap(
-    (indicator) => (indicator.signals ?? []).map((signal) => signal.id),
-  ),
+  // 自定义公式的买卖输出只存在于 customMetadata，预置元数据里没有。只按预置
+  // 元数据判失效的话，一个自定义方案的每个信号都会被报成「引用了不存在的
+  // 信号」——它明明在，只是还没解析出来。
+  signalIds: mode.value === 'custom'
+    ? (customMetadata.value?.signals ?? []).map((signal) => signal.id)
+    : (metadata.value?.indicators ?? []).flatMap(
+      (indicator) => (indicator.signals ?? []).map((signal) => signal.id),
+    ),
 }))
 const selectedStockView = ref('baseline:full')
 // 历史列表：后端已按完成时间由近到远排好，这里只管切片分页。
@@ -847,10 +852,21 @@ async function loadSelectedPreset(): Promise<PresetLoadOutcome | null> {
   presetBusy.value = true
   try {
     const preset = await getResearchPreset(presetId)
-    // 失效项要在还原之前算：还原后规则已被替换，就再也看不出原来引用了什么。
-    const stale = stalePresetReferences(preset.payload, presetAvailability.value)
     await applyStoredRequest(preset.payload)
     presetName.value = preset.name
+    // 数的是 payload 这份原始记录，不是表单：还原时 signals 会被丢掉（研究页
+    // 的条件不用信号），数表单一项都数不出来。
+    //
+    // 放在还原之后而不是之前：自定义公式要解析完才知道它到底产出哪些输出/信
+    // 号，在还原前数的话，一个自定义方案的每一项都会被误判成失效——那时手上
+    // 的依据还是上一份（预置）元数据。
+    const stale = stalePresetReferences(preset.payload, presetAvailability.value)
+    if (customParseError.value) {
+      // 公式没解析出来时上面的失效计数是空的（没有可对照的清单），不能据此
+      // 报「已载入」。
+      message.value = `已载入研究方案「${preset.name}」，但自定义公式没能解析：${customParseError.value}`
+      return { name: preset.name, stale: 0 }
+    }
     message.value = presetLoadMessage(preset.name, stale)
     return { name: preset.name, stale }
   } catch (error) {
@@ -870,7 +886,11 @@ async function quickResearch(): Promise<void> {
     // 失效引用比「研究完成」重要：条件已经被悄悄换过，不能只报喜。
     message.value = `已按方案「${loaded.name}」运行，但有 ${loaded.stale} 项引用了当前不存在的指标或信号、已被替换，请先核对条件。`
   } else if (!ran) {
-    message.value = `已载入方案「${loaded.name}」，但当前配置没能通过校验，请修正后再运行。`
+    // submit 失败时自己会写 message（后端拒绝的原因就在里面）。只有它什么都没
+    // 说——也就是本地校验没过——才补这句，否则会把真正的原因盖掉。
+    if (!message.value) {
+      message.value = `已载入方案「${loaded.name}」，但当前配置没能通过校验，请修正后再运行。`
+    }
   }
 }
 
