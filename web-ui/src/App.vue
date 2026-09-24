@@ -75,8 +75,8 @@ onUnmounted(() => window.removeEventListener('popstate', handlePopState))
     点了一次导航而清空。代价是页面实例不会重新创建，onMounted 里的初始化不会重跑
     ——需要「每次进页面都刷新」的东西不能只写在 onMounted 里。
 
-    注意导航链接是每个页面各自手写的（13 条），加新页面时 13 个页面都要同步补一项，
-    这里的 switch 也要加一个分支。有测试盯着这件事。
+    注意导航链接是每个页面各自手写的（每个页面一份，加新页面时全部页面都要同步补
+    一项），这里的 switch 也要加一个分支。`src/data/pageGuides.spec.ts` 盯着这件事。
   -->
   <div class="app-shell" @click.capture="handleNavigation">
     <KeepAlive>

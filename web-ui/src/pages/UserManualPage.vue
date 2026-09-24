@@ -48,7 +48,7 @@ const countText = computed(() => {
           <p class="eyebrow">USER MANUAL</p>
           <h1>使用手册</h1>
           <p class="intro-copy">
-            13 个页面各自能回答什么、不能回答什么，以及每个数字背后的口径，都在这里。
+            每个页面各自能回答什么、不能回答什么，以及每个数字背后的口径，都在这里。
             <strong>左边是目录，上面可以搜。</strong>
           </p>
         </div>
