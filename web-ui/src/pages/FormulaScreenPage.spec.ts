@@ -914,6 +914,72 @@ describe('FormulaScreenPage', () => {
     expect(groupApi.fetchStockGroupPerformance).toHaveBeenCalledWith('group-1')
   })
 
+  it('refreshes the folded window numbers after a member is removed', async () => {
+    const groupRow = {
+      group_id: 'group-1', name: '9月候选', note: '', source: 'screen', source_label: '选股结果',
+      source_history_id: null, created_at: '2026-09-22T02:00:00Z', updated_at: '2026-09-22T02:00:00Z',
+      item_count: 2, criteria: CRITERIA,
+    }
+    vi.mocked(groupApi.fetchStockGroups).mockResolvedValue([groupRow])
+    vi.mocked(groupApi.fetchStockGroupsSummary).mockResolvedValue({
+      as_of: '2026-09-22',
+      windows: [20],
+      labels: { '20': '近 1 月' },
+      groups: [{
+        group_id: 'group-1',
+        windows: [
+          { window: 20, trading_days: 20, group_return: 0.0321, market_return: 0.02, excess_return: 0.0121, counted: 2, complete: true },
+        ],
+      }],
+    })
+    vi.mocked(groupApi.getStockGroup).mockResolvedValue({
+      ...groupRow,
+      items: [
+        { market: 'SH', code: '600000', name: '浦发银行' },
+        { market: 'SZ', code: '000001', name: '平安银行' },
+      ],
+    })
+    vi.mocked(groupApi.fetchStockGroupPerformance).mockResolvedValue({
+      group_id: 'group-1', start_date: '2026-09-01', end_date: '2026-09-22', trading_days: 15,
+      group_curve: { label: '本组', instrument_count: 2, dates: [20260901, 20260922], totals: [1, 1.0321], performance: { total_return: 0.0321 } },
+      market_curve: { label: '全市场', instrument_count: 5300, dates: [20260901, 20260922], totals: [1, 1.02], performance: { total_return: 0.02 } },
+      excess_return: 0.0121,
+      spread: { counted: 2, advanced: 1, declined: 1, median_return: 0.01, best: null, worst: null },
+      excluded: [], stalled: [], truncated: false, notes: [],
+    })
+    vi.mocked(groupApi.removeStockGroupMembers).mockResolvedValue({
+      ...groupRow,
+      item_count: 1,
+      items: [{ market: 'SZ', code: '000001', name: '平安银行' }],
+    })
+    const wrapper = mount(FormulaScreenPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="group-pick-group-1"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="group-item-group-1"]').text()).toContain('+3.21%')
+
+    // 移出之后：列表（只数）和折叠行的窗口收益（groupSummary）都要重取，
+    // 只刷列表的话这一行还挂着「包括被移走那只」算出来的老数字。
+    vi.mocked(groupApi.fetchStockGroups).mockResolvedValue([{ ...groupRow, item_count: 1 }])
+    vi.mocked(groupApi.fetchStockGroupsSummary).mockResolvedValue({
+      as_of: '2026-09-22',
+      windows: [20],
+      labels: { '20': '近 1 月' },
+      groups: [{
+        group_id: 'group-1',
+        windows: [
+          { window: 20, trading_days: 20, group_return: -0.012, market_return: 0.02, excess_return: -0.032, counted: 1, complete: true },
+        ],
+      }],
+    })
+    await wrapper.get('[data-testid="group-member-remove-600000"]').trigger('click')
+    await flushPromises()
+
+    expect(groupApi.removeStockGroupMembers).toHaveBeenCalledWith('group-1', [{ market: 'SH', code: '600000' }])
+    expect(groupApi.fetchStockGroupsSummary).toHaveBeenCalledTimes(2)
+    expect(wrapper.get('[data-testid="group-item-group-1"]').text()).toContain('-1.20%')
+  })
+
   it('folds the list to 20 rows until all groups are asked for', async () => {
     vi.mocked(groupApi.fetchStockGroups).mockResolvedValue(
       Array.from({ length: 25 }, (_, index) => ({

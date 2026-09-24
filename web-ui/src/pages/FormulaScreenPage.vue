@@ -1036,7 +1036,9 @@ async function removeGroupMember(group: StockGroupSummary, member: StockGroupMem
   groupBusy.value = true
   try {
     await removeStockGroupMembers(groupId, [{ market: member.market, code: member.code }])
-    await refreshStockGroups()
+    // 折叠态那两个窗口收益来自 groupSummary，不是 stockGroups——只刷列表的话，
+    // 移出之后这一行还是按「包括被移走那只」算出来的老数字。
+    await Promise.all([refreshStockGroups(), refreshGroupSummaries()])
     await loadGroupPerformance(groupId)
   } catch (error) {
     groupError.value = apiMessage(error, '移除失败')
