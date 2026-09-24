@@ -191,11 +191,18 @@ def build_check(
     *,
     example_limit: int = DEFAULT_EXAMPLE_LIMIT,
     affected_instruments: int | None = None,
+    occurrences: int | None = None,
 ) -> HealthCheck:
-    """把存储层扫出来的行汇总成一项检查结果。"""
+    """把存储层扫出来的行汇总成一项检查结果。
+
+    ``affected_instruments`` 与 ``occurrences`` 要给存储层扫出来的**真值**：``rows``
+    是截到示例上限的那几行（默认 20），拿它求和得到的是「前 20 行的次数」，一个数
+    看着像总数、其实是截断值。存储层已经把两个总数算出来了，这里只是接住。
+    """
 
     ordered = sorted(rows, key=lambda row: (-row.sort_value, row.symbol))
     affected = len(rows) if affected_instruments is None else affected_instruments
+    total = sum(row.occurrences for row in rows) if occurrences is None else occurrences
     severity = "ok" if affected == 0 else CHECK_SEVERITY[key]
     return HealthCheck(
         key=key,
@@ -203,7 +210,7 @@ def build_check(
         description=CHECK_DESCRIPTIONS[key],
         severity=severity,
         affected_instruments=affected,
-        occurrences=sum(row.occurrences for row in rows),
+        occurrences=total,
         repairable=CHECK_REPAIRABLE[key],
         examples=tuple(
             HealthExample(

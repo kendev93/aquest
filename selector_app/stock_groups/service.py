@@ -198,11 +198,14 @@ class StockGroupService:
         if not groups:
             return _summary_payload(chosen, (), None)
         span = max(chosen)
+        # 窗口终点必须落在库里真实有的那一天，和 performance 同一个判据。行情是手动
+        # 同步的，最新交易日几乎从不等于今天；用 today 收尾时"近 20 个交易日"会变成
+        # 一段行情还没同步到的区间，窗口先是悄悄不满、再旧一点就整块消失——而
+        # complete=False 只在"读到了但不够长"时才给，读不到的时候什么都没有。
+        end = self._store.latest_trade_date() or date.today()
         # 交易日 → 自然日的换算宁可多读几天：少读了窗口就不满，多读只是多切几行。
-        start = date.today() - timedelta(days=span * 7 // 5 + 30)
-        market_prices = pivot_closes(
-            self._store.read_close_matrix(start_date=start, end_date=date.today())
-        )
+        start = end - timedelta(days=span * 7 // 5 + 30)
+        market_prices = pivot_closes(self._store.read_close_matrix(start_date=start, end_date=end))
         if market_prices.empty:
             return _summary_payload(chosen, (), None)
         summaries = summarize_groups(market_prices, groups, chosen)

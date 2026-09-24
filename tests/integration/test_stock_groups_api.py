@@ -336,6 +336,38 @@ def test_summary_marks_a_window_short_of_data(tmp_path: Path) -> None:
     assert window["complete"] is False
 
 
+def test_summary_ends_at_the_last_bar_not_at_today(tmp_path: Path) -> None:
+    """行情是手动同步的，最新交易日几乎从不等于今天。
+
+    曾经用 today 收尾：同步落后一两个月时「近 20 个交易日」读的是一段还没有行情的
+    区间，窗口先是悄悄变短，再旧一点整个矩阵为空——而 complete=False 只在"读到了
+    但不够长"时才给，读不到时什么都不剩，现象是折叠行干脆不显示数字。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    stale_end = TODAY - timedelta(days=200)
+    store.replace_local_bars(
+        "SH", "600001", "stock", _bars_from(stale_end - timedelta(days=9), list(range(10, 20)))
+    )
+    store.save_stock_group(
+        "g1",
+        name="陈旧行情组",
+        items=[{"market": "SH", "code": "600001"}],
+        created_at=datetime.combine(stale_end, datetime.min.time()),
+    )
+
+    with TestClient(create_app(market_data_store=store, auto_sync_enabled=False)) as client:
+        response = client.get("/api/v1/stock-groups/summary", params={"windows": "5"})
+
+    assert response.status_code == 200
+    payload = response.json()["data"]
+    # 终点落在库里真实有的那一天，不是今天。
+    assert payload["as_of"] == stale_end.isoformat()
+    windows = payload["groups"][0]["windows"]
+    assert windows and windows[0]["trading_days"] == 5
+    assert windows[0]["complete"] is True
+
+
 def test_summary_without_groups_is_empty(tmp_path: Path) -> None:
     store = _store(tmp_path)
     with TestClient(create_app(market_data_store=store, auto_sync_enabled=False)) as client:

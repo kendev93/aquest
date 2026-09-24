@@ -90,6 +90,29 @@ def test_missing_days_are_reported_as_gap(tmp_path: Path) -> None:
     assert gap.examples[0].code == "000001"
 
 
+def test_occurrence_counts_are_not_capped_by_the_example_limit(tmp_path: Path) -> None:
+    """「次数」是全库总数，不能是前 20 条示例之和。
+
+    存储层已经把总数算出来了，曾经汇总时却丢掉它、改成拿示例行求和——示例默认只
+    有 20 条，于是 25 只票各缺一天会显示 20。这个数看着像总数，用户拿它判断要不要
+    重下数据，少报的恰恰是最该修的那一批。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    # 25 只票，各缺一个不同的交易日；其余票当天仍有 bar，所以那天仍是交易日。
+    for offset in range(25):
+        code = f"{600000 + offset}"
+        store.replace_local_bars(
+            "SH", code, "stock", bars(drop={f"2024-01-{2 + offset:02d}"}), name=code
+        )
+
+    gap = check_by_key(store)["gap"]
+    assert gap.affected_instruments == 25
+    assert gap.occurrences == 25
+    # 示例该截断还是要截断，不然这一项本身就大到打不开。
+    assert len(gap.examples) == 20
+
+
 def test_long_missing_run_is_flagged_separately(tmp_path: Path) -> None:
     """连续缺 8 天：既算缺口，也要单独标成「连续缺失段」（可能是长期停牌）。"""
 
