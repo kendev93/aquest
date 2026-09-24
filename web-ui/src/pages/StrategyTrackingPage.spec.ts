@@ -397,5 +397,64 @@ describe('StrategyTrackingPage', () => {
         '明日无需操作',
       )
     })
+
+    it('re-fetches the trades of an expanded row after a rerun finishes', async () => {
+      // 重算完成后 load() 会把明细缓存整个作废；若只清空而不把当前展开的那一行补回来，
+      // 展开着的行会突然显示「上线后还没有成交」，像是重跑把成交记录弄丢了。
+      const refreshedTrades: TrackingTrades = {
+        before: { rows: [], total: 0, truncated: false },
+        after: {
+          rows: [
+            {
+              trade_date: 20260908,
+              phase: 'post',
+              direction: 'BUY',
+              market: 'SH',
+              code: '600008',
+              name: '新',
+              size: 200,
+              price: 12,
+              pnl: 0,
+              reason: '买入条件',
+            },
+          ],
+          total: 1,
+          truncated: false,
+        },
+        limit: 200,
+      }
+      vi.mocked(strategiesApi.fetchStrategyTracking).mockResolvedValue([online])
+      vi.mocked(strategiesApi.getStrategyTracking)
+        .mockResolvedValueOnce({ ...online, trades })
+        .mockResolvedValueOnce({ ...online, trades: refreshedTrades })
+      vi.mocked(strategiesApi.rerunStrategyTracking).mockResolvedValue({
+        job_id: 'job-2',
+        status: 'queued',
+      })
+      vi.mocked(strategiesApi.getTrackingJob).mockResolvedValue({
+        job_id: 'job-2',
+        status: 'completed',
+        progress: 1,
+        total_candidates: 1,
+        total_scanned: 1,
+        errors: 0,
+        error: null,
+        result: online,
+      } as never)
+
+      const wrapper = mount(StrategyTrackingPage)
+      await flushPromises()
+      await wrapper.get('[data-testid="tracking-toggle-strategy-1"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('[data-testid="trades-after-strategy-1"]').text()).toContain('600001')
+
+      await wrapper.get('[data-testid="tracking-rerun-strategy-1"]').trigger('click')
+      await flushPromises()
+
+      expect(strategiesApi.rerunStrategyTracking).toHaveBeenCalledWith('strategy-1')
+      // 第一次是展开时拉取，第二次是重算完成后的缓存作废补拉。
+      expect(strategiesApi.getStrategyTracking).toHaveBeenCalledTimes(2)
+      expect(wrapper.get('[data-testid="trades-after-strategy-1"]').text()).toContain('600008')
+    })
   })
 })

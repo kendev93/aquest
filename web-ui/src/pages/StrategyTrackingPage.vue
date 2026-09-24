@@ -75,6 +75,9 @@ async function load(): Promise<void> {
     snapshots.value = await fetchStrategyTracking()
     // 重跑之后明细会变，缓存必须一起作废，否则展开看到的是上一次的结果。
     details.value = {}
+    // 作废之后要立刻把当前展开的那一行补回来：它本来就开着，空缓存会让它显示
+    // 「0 笔」，看起来像是重跑把成交记录弄丢了，而实际上只是没人再去取。
+    if (expandedId.value) await loadDetail(expandedId.value)
   } catch (error) {
     showMessage(error instanceof Error ? error.message : '策略追踪加载失败。', true)
   } finally {
