@@ -33,7 +33,11 @@ catalog = [
 ]
 dev = [
   "mypy>=1.9,<2",
-  "httpx>=0.27,<1",
+  # starlette ≥ 1.6 的 TestClient 首选 httpx2，找不到才回退 httpx 并为此发一条
+  # StarletteDeprecationWarning。httpx2 是独立发布（带自己的 httpcore2），不会
+  # 顶替 httpx，装上即可消除该警告。生产运行时不用 TestClient，因此不进
+  # requirements.lock、不影响容器镜像。
+  "httpx2>=2.13,<3",
   "pytest>=8,<10",
   "pytest-cov>=5,<8",
   "ruff>=0.4,<1",
@@ -54,6 +58,13 @@ pythonpath = ["."]
 # is reused across runs and test scratch files pile up in the repository.
 # Requires a POSIX temp root; override with --basetemp=<dir> if needed.
 addopts = "--tb=short --basetemp=/tmp/indicator-lab-pytest"
+# 只过滤上游自己的弃用：starlette 1.6.0 的 testclient 在模块级类型别名里仍引用
+# anyio 4.15 已弃用的 anyio.abc.BlockingPortal，导入即触发，改不了。留下它会让
+# warnings summary 常驻一行噪声，真正属于本项目的警告就不显眼了——所以精确匹配
+# 到该模块，不写成宽泛的 ignore。starlette 修好后删掉这一条。
+filterwarnings = [
+  "ignore:.*anyio\\.abc\\.BlockingPortal alias is deprecated.*:DeprecationWarning:starlette.testclient",
+]
 
 [tool.coverage.run]
 source = ["selector_app"]
