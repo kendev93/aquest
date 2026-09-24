@@ -20,8 +20,10 @@ from selector_app.market_data.models import StockRef
 from selector_app.swing_research.labels import bar_labels, segment_onset
 from selector_app.swing_research.models import SwingIndicatorConfig
 from selector_app.swing_research.scoring import (
+    DEFAULT_BLOCK_SIZE,
     benjamini_hochberg,
     block_permutations,
+    effective_block_size,
     score_indicator,
     tie_average_rank,
 )
@@ -239,15 +241,96 @@ def test_threshold_hint_survives_a_sparse_cross_section() -> None:
 
 
 def test_block_permutations_keep_days_inside_a_block_together() -> None:
-    permutations = block_permutations(10, block_size=5, count=4, seed=3)
+    permutations = block_permutations(25, block_size=5, count=4, seed=3)
 
     assert len(permutations) == 4
     for permutation in permutations:
-        assert sorted(permutation.tolist()) == list(range(10))
-        # Each half must appear as a contiguous run, in its original order.
+        assert sorted(permutation.tolist()) == list(range(25))
+        # Each fifth must appear as a contiguous run, in its original order.
         text = ",".join(str(item) for item in permutation)
-        assert "0,1,2,3,4" in text
-        assert "5,6,7,8,9" in text
+        for start in range(0, 25, 5):
+            run = ",".join(str(item) for item in range(start, start + 5))
+            assert run in text
+
+
+def test_block_permutations_never_fall_below_the_resolution_floor() -> None:
+    """块数太少时检验根本没有功效，宁可把块切短。
+
+    k 个块只有 k! 种排法，p 值的下界约 1/k!：2 块是 0.5、3 块是 0.17，都压不到
+    alpha 下面。曾经只在「只剩一个块」时才切，于是 60 天 / 块长 20（3 块）的强信号
+    实测 p=0.21——信号已强到 IC=0.79，页面却读成「无法排除偶然」。这不是保守，
+    是哑了，而它和「没证据」长得一模一样。
+    """
+
+    # 60 天、块长 20 只够 3 块 → 切到 12（5 块）。
+    assert effective_block_size(60, 20) == 12
+    assert effective_block_size(80, 45) == 16
+    # 块本来就够多时不要动它。
+    assert effective_block_size(200, 10) == 10
+    assert effective_block_size(250, DEFAULT_BLOCK_SIZE) == DEFAULT_BLOCK_SIZE
+    # 切短之后每一块内部仍然连续：块长不能掉到 1，否则又变回逐日打乱。
+    assert effective_block_size(30, 20) == 6
+
+
+def test_a_short_series_can_still_call_an_overwhelming_signal() -> None:
+    """60 天的研究窗口配默认块长 20 只有 3 块——修复前这里 p≈0.21。"""
+
+    rng = np.random.default_rng(20260924)
+    stocks, days = 60, 60
+    values = rng.normal(0, 1, size=(stocks, days))
+    # 标签几乎完全由指标决定，这是能造出来的最强信号。
+    latent = 3.0 * values + 0.1 * rng.normal(0, 1, size=(stocks, days))
+    labels = (latent > np.quantile(latent, 0.7, axis=0)).astype(float)
+
+    score = score_indicator(
+        values,
+        labels,
+        value_id="strong",
+        display_name="strong",
+        label="l",
+        min_cross_section=20,
+        block_size=DEFAULT_BLOCK_SIZE,
+        permutations=200,
+    )
+
+    assert score.ic_mean > 0.5
+    assert score.pvalue is not None and score.pvalue <= 0.05
+
+
+def test_shortening_blocks_does_not_inflate_the_false_positive_rate() -> None:
+    """切短块换来功效，代价可能是误报率——必须确认它仍贴着 alpha。
+
+    只看「纯噪声不显著」抓不到这个：块数不足时检验恒不显著，噪声当然也全过。
+    要看的是**比例**。
+    """
+
+    rng = np.random.default_rng(20260924)
+    stocks, days = 60, 60
+    flagged = 0
+    trials = 0
+    for _ in range(120):
+        values = rng.normal(0, 1, size=(stocks, days))
+        labels = rng.normal(0, 1, size=(stocks, days))
+        score = score_indicator(
+            values,
+            labels,
+            value_id="noise",
+            display_name="noise",
+            label="l",
+            min_cross_section=20,
+            block_size=DEFAULT_BLOCK_SIZE,
+            permutations=200,
+            seed=int(rng.integers(1, 1 << 30)),
+        )
+        if score.pvalue is None:
+            continue
+        trials += 1
+        if score.pvalue <= 0.05:
+            flagged += 1
+
+    rate = flagged / trials
+    # 120 轮 × p=0.05 的标准差约 2 个百分点，上限取 10% 留两倍余量。
+    assert rate < 0.10, f"误报率 {rate:.3f} 偏离 alpha=0.05 太远"
 
 
 def test_benjamini_hochberg_is_monotone_and_capped() -> None:

@@ -17,7 +17,7 @@ from selector_app.market_data.adapter import BatchMarketDataAdapter
 from selector_app.market_data.models import StockRef
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.strategy_discovery.catalog import default_indicator_catalog
-from selector_app.swing_research.scoring import block_permutations
+from selector_app.swing_research.scoring import block_permutations, effective_block_size
 from selector_app.swing_research.values import custom_value_ids, display_name_for
 
 from .metrics import apply_fdr, evaluate_factor
@@ -234,9 +234,10 @@ def _permutation_orders(
     if permutations <= 0 or signal_days < MIN_SIGNAL_DAYS or total < 2:
         return [], None
     block_trades = max(1, math.ceil(block_size_days * total / max(1, span_days)))
-    # Keep at least four blocks whatever the arithmetic above produced.
-    if total // block_trades < 4:
-        block_trades = max(1, total // 4)
+    # 块数下限由 block_permutations 统一把关（块太少时它自己把块切短）。这里把切完
+    # 之后的块长取回来再报出去——两处各定一个门槛迟早会长出两个不同的数，而报给
+    # 用户的必须是真正用上的那个。
+    block_trades = effective_block_size(total, block_trades)
     orders = block_permutations(
         total, block_size=block_trades, count=permutations, seed=DEFAULT_SEED
     )

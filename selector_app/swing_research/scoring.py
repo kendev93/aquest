@@ -35,6 +35,11 @@ MIN_CROSS_SECTION = 20
 MIN_IC_DAYS = 60
 DEFAULT_BLOCK_SIZE = 20
 DEFAULT_PERMUTATIONS = 200
+# 块置换能给出的最小 p 值约等于 1/k!（k 是块数，另加 (1+m)/(1+count) 里那个 1）。
+# k=2 时下界是 0.5，k=3 是 0.17——信号再强也压不到 alpha 下面，检验等于没有功效，
+# 而页面会把它读成「无法排除偶然」。k=5 的下界约 0.01，才留得出余量。
+# 所以样本不够长时宁可把块切短（仍保持连续），也不给一个注定不显著的 p 值。
+MIN_PERMUTATION_BLOCKS = 5
 DEFAULT_TOP_QUANTILE = 0.2
 WEAK_IC = 0.02
 STRONG_IC = 0.05
@@ -131,6 +136,22 @@ def _centered(ranks: np.ndarray, mask: np.ndarray, counts: np.ndarray) -> np.nda
     return np.where(mask, ranks - means, 0.0)
 
 
+def effective_block_size(day_count: int, block_size: int) -> int:
+    """块置换真正会用的块长。
+
+    样本不够长时把块切短，好让块数达到 :data:`MIN_PERMUTATION_BLOCKS`。单独抽出来
+    是因为调用方（因子归因要把它报给用户）和 :func:`block_permutations` 必须用同一个
+    数——各算一遍迟早会长出两个结果。
+    """
+
+    size = max(1, int(block_size))
+    if day_count <= 0:
+        return size
+    if day_count // size < MIN_PERMUTATION_BLOCKS:
+        return max(1, day_count // MIN_PERMUTATION_BLOCKS)
+    return size
+
+
 def block_permutations(
     day_count: int,
     *,
@@ -148,11 +169,7 @@ def block_permutations(
 
     if day_count <= 0 or count <= 0:
         return []
-    size = max(1, int(block_size))
-    # One block cannot be shuffled, so a short series would silently produce
-    # the identity permutation and "confirm" whatever it was given.
-    if day_count // size < 2:
-        size = max(1, day_count // 2)
+    size = effective_block_size(day_count, block_size)
     blocks = [np.arange(start, min(start + size, day_count)) for start in range(0, day_count, size)]
     rng = np.random.default_rng(seed)
     permutations: list[np.ndarray] = []
@@ -457,6 +474,7 @@ __all__ = [
     "annotate_significance",
     "benjamini_hochberg",
     "block_permutations",
+    "effective_block_size",
     "score_indicator",
     "tie_average_rank",
 ]
