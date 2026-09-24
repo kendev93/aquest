@@ -714,3 +714,58 @@ def test_next_plan_withholds_buys_when_the_last_bar_is_not_a_rebalance_day() -> 
     assert any("不是调仓日" in str(note) for note in plan["notes"])
     # 卖出不受调仓频率影响：触发了就该卖。
     assert plan["sells"] or plan["holdings"]
+
+
+def test_next_plan_prices_a_candidate_the_strategy_never_held() -> None:
+    """买入候选按定义不在持仓里，估算价必须自己取末棒收盘。
+
+    曾经从 ``last_prices`` 取价，而它只在遍历持仓时更新——从没买过的标的恒为 0，
+    整笔单被 ``price <= 0`` 静默丢掉：候选明明上榜，计划里却空空如也。
+    """
+
+    # 600003 前五天最便宜（排名低、没被选中），最后一天暴涨到榜首，全程从未持有。
+    adapter = FakeAdapter()
+    adapter.frames["600003"] = stock_frame([1, 1, 1, 1, 1, 100])
+    report = PortfolioBacktestService(adapter=adapter).run(
+        config(
+            formula_text="BUY:C>0; RANK:C; LEVEL:C;",
+            ranking_value="custom.rank",
+            sell_value="custom.level",
+            sell_value_operator="gte",
+            sell_value_threshold=14.0,
+            stop_loss_pct=None,
+            initial_cash=100_000.0,
+            max_positions=1,
+        )
+    )
+    plan = dict(report.next_plan)
+
+    codes = {str(item["code"]) for item in plan["buys"]}
+    assert "600003" in codes
+    assert "600003" not in {str(h["code"]) for h in plan["holdings"]}
+    buy = next(item for item in plan["buys"] if str(item["code"]) == "600003")
+    assert float(buy["estimated_size"]) > 0
+    assert float(buy["estimated_cost"]) > 0
+
+
+def test_rebalance_due_compares_with_the_next_workday_not_the_next_calendar_day() -> None:
+    """外推「下一个工作日」再比，否则周频永远拿不到计划、月频漏掉月末撞周末的月份。
+
+    拿自然日 +1 比的话，周频只在 as_of 是周日时才判跨周，而 A 股没有周日交易；
+    月频则会在月末落在周末时漏判（最后一根 bar 的次日仍在本月）。
+    """
+
+    due = PortfolioBacktestService(adapter=FakeAdapter())._rebalance_due
+
+    # 2026-09-21 周一 … 2026-09-28 周一：只有周五（次日跨到下周）该给计划。
+    assert due(20260921, "weekly") is False
+    assert due(20260924, "weekly") is False
+    assert due(20260925, "weekly") is True
+    assert due(20260928, "weekly") is False
+    # 2026-05-30 周六、31 周日：最后一个交易日是 29 日周五，真实次日已跨月。
+    assert due(20260529, "monthly") is True
+    # 月中的日子不该被判成调仓日。
+    assert due(20260515, "monthly") is False
+    assert due(20240106, "monthly") is False
+    # daily 每天都调仓。
+    assert due(20260515, "daily") is True

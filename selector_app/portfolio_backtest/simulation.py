@@ -373,7 +373,14 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
                 context = by_symbol.get(order.symbol)
                 if context is None:
                     continue
-                price = float(last_prices.get(order.symbol, 0.0))
+                # 买入候选按定义不在持仓里，而 last_prices 只在遍历持仓时更新
+                # （也从不清掉旧条目），所以这里必须自己去取末棒收盘：否则从没买过
+                # 的标的恒为 0、整笔单从计划里静默消失，买过又卖的则拿到过期价。
+                index = context.date_to_index.get(as_of)
+                price = float(context.closes[index]) if index is not None else 0.0
+                if price <= 0:
+                    # 末棒没有收盘价（停牌）：退回最近一次见过的价，再没有就不给。
+                    price = float(last_prices.get(order.symbol, 0.0))
                 if price <= 0:
                     continue
                 profile = profile_from_config(
@@ -426,21 +433,41 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
         }
 
     @staticmethod
+    def _next_workday(as_of: int) -> int:
+        """``as_of`` 之后第一个工作日（周一至周五）的 YYYYMMDD。
+
+        明天的交易日今天还不存在，只能外推。这里**只认周末，不认法定节假日**：
+        长假前最后一个交易日会被推到假期结束后第一个工作日，于是可能"多给一份
+        计划"。方向选宁可多给也不少给——少给的代价是用户错过真正的调仓日，而周频
+        策略一周只有一次机会。
+        """
+
+        following = pd.Timestamp(_date_text(as_of)) + pd.Timedelta(1, unit="D")
+        while following.dayofweek >= 5:  # 5=周六 6=周日
+            following = following + pd.Timedelta(1, unit="D")
+        return int(following.strftime("%Y%m%d"))
+
+    @staticmethod
     def _rebalance_due(as_of: int, frequency: str) -> bool:
         """最近一个交易日的**次日**是不是调仓日。
 
-        回测里 :meth:`_should_refresh` 比较的是当前交易日与下一个交易日；放到"明天"
-        这件事上，下一个交易日还不存在，只能用自然日推一天近似。周末 / 月末时这个
-        近似和真实日历一致；月中把节假日的最后一天当成月末会偏一天，但方向是"少给
-        一份计划"，不会凭空造单。
+        回测里 :meth:`_should_refresh` 比的是当前交易日与**下一个交易日**；放到"明天"
+        这件事上，下一个交易日还没有发生，所以要外推一个工作日再比。
+
+        ⚠️ 不能直接拿 ``as_of + 1 天`` 比：那样周频只在 as_of 是周日时才判跨周，
+        而 A 股没有周日交易——结果是周频策略永远拿不到买入计划。月频同理会漏掉
+        "月末最后一个交易日不是自然月末"的月份（月末撞周末时，最后一根 bar 的次日
+        仍在本月，但真实下一个交易日已经跨月）。
         """
 
         if frequency == "daily":
             return True
         current = pd.Timestamp(_date_text(as_of))
-        following = current + pd.Timedelta(1, unit="D")
+        following = pd.Timestamp(_date_text(PortfolioSimulationMixin._next_workday(as_of)))
         if frequency == "weekly":
-            return int(current.isocalendar().week) != int(following.isocalendar().week)
+            # 比 weekday 而不是 ISO 周号：跨年那一周 ISO 的 year 会变，比
+            # (year, week) 会把同一周判成两周。dayofweek 周一=0，绕回周一即跨周。
+            return bool(following.dayofweek <= current.dayofweek)
         return (current.year, current.month) != (following.year, following.month)
 
     def _execute_sells(
