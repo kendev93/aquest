@@ -387,4 +387,46 @@ describe('StrategyFitnessPage', () => {
     expect(wrapper.get('[data-testid="fitness-message"]').text()).toContain('已还原历史策略适配性评估')
     expect(wrapper.get('[data-testid="fitness-message"]').text()).toContain('请确认后重新运行')
   })
+
+  it('restores a custom formula together with the parameters that were tuned that time', async () => {
+    vi.mocked(fitnessApi.fetchStrategyFitnessHistory).mockResolvedValue([{
+      history_id: 'fitness-history-2', backtest_type: 'strategy_fitness', created_at: '2024-01-07T08:00:00Z',
+      started_at: '2024-01-07T08:00:00Z', finished_at: '2024-01-07T08:01:00Z',
+      duration_seconds: 60, summary: {},
+    }])
+    // 参数故意偏离公式默认值（默认 5，当时调成 17）。还原时若把参数表放在解析之后回填，
+    // 就会被 parseCustomFormula 重建的默认值盖掉，重跑得到和当时不同的结果。
+    vi.mocked(fitnessApi.getStrategyFitnessHistory).mockResolvedValue({
+      history_id: 'fitness-history-2', backtest_type: 'strategy_fitness', created_at: '2024-01-07T08:00:00Z',
+      started_at: '2024-01-07T08:00:00Z', finished_at: '2024-01-07T08:01:00Z',
+      duration_seconds: 60, summary: {}, result: report,
+      request: {
+        mode: 'custom',
+        formula_text: 'N:=5; 买入:C>0; 卖出:C<0; 排序:C;',
+        formula_parameters: { N: 17 },
+        ranking_value: 'custom.rank',
+        buy_rule: { signals: [], conditions: [], combine_mode: 'all', minimum_matches: null },
+        sell_rule: { signals: [], conditions: [], combine_mode: 'all', minimum_matches: null },
+      },
+    })
+    vi.mocked(formulaApi.parseFormula).mockResolvedValue({
+      parameters: [{ name: 'N', default: 5, minimum: 1, maximum: 100, step: 1 }],
+      signals: [{ id: 'custom.buy', display_name: '买入', description: '买入' }, { id: 'custom.sell', display_name: '卖出', description: '卖出' }],
+      values: [
+        { id: 'custom.rank', display_name: '排序', description: '排序' },
+        { id: 'custom.buy', display_name: '买入值', description: '买入数值' },
+        { id: 'custom.sell', display_name: '卖出值', description: '卖出数值' },
+      ],
+      minimum_bars: 6, warnings: [],
+    })
+
+    const wrapper = mount(StrategyFitnessPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="fitness-history-load-fitness-history-2"]').trigger('click')
+    await flushPromises()
+
+    expect((wrapper.get('[data-testid="fitness-formula"]').element as HTMLTextAreaElement).value).toContain('N:=5')
+    expect((wrapper.get('[data-testid="fitness-param-N"]').element as HTMLInputElement).value).toBe('17')
+    expect((wrapper.get('[data-testid="fitness-ranking-value"]').element as HTMLSelectElement).value).toBe('custom.rank')
+  })
 })

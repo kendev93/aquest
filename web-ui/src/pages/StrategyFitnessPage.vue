@@ -427,6 +427,19 @@ async function applyStoredRequest(raw: unknown): Promise<void> {
   form.boards = stringList(request.boards)
     .filter((item): item is InstrumentBoard => BOARD_OPTIONS.some((option) => option.key === item))
 
+  // 参数必须在解析之前回填：parseCustomFormula 会用「已有值 ?? 默认值」重建参数表，
+  // 之后再赋值就已经被覆盖成默认值了。漏掉这一步的表现是历史"加载成功"、参数却悄悄
+  // 回到公式默认值，重跑得到和当时不同的结果。
+  const storedParameters = request.formula_parameters
+  form.formulaParameters =
+    storedParameters && typeof storedParameters === 'object'
+      ? Object.fromEntries(
+          Object.entries(storedParameters as Record<string, unknown>)
+            .map(([key, value]) => [key, finiteNumber(value, NaN)])
+            .filter((entry): entry is [string, number] => Number.isFinite(entry[1])),
+        )
+      : {}
+
   const formulaText = typeof request.formula_text === 'string' ? request.formula_text.trim() : ''
   if (formulaText) {
     form.mode = 'custom'
