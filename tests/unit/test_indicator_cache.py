@@ -512,7 +512,12 @@ def test_precompute_stitches_yearly_segments_into_full_history(
             if warmup_bars and not sub.empty:
                 position = frame.index.get_loc(sub.index[0])
                 head = frame.iloc[max(0, position - warmup_bars) : position]
-                sub = pd.concat([head, sub])
+                # 窗口从第一根 K 线开始时 head 是空的。pandas 拼接含空块时会先给
+                # 空块推断一个 timedelta64 泛型 dtype 再取 NaT，numpy 2.5 起对此
+                # 发弃用警告、并预告未来会直接抛错；空块本来就不贡献行，跳过它
+                # 结果与原先一致（dtype 也不会被空块带偏）。
+                if not head.empty:
+                    sub = pd.concat([head, sub])
             return sub.reset_index(drop=True)
 
         def read_stock(self, _ref):
