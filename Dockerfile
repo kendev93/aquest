@@ -11,7 +11,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.lock ./requirements.lock
-RUN python -m pip install --upgrade --no-cache-dir -r requirements.lock
+RUN python -m pip install --no-cache-dir --require-hashes -r requirements.lock
 
 COPY README.md LICENSE THIRD_PARTY_NOTICES.md ./
 COPY selector_app ./selector_app

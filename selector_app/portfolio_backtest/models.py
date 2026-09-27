@@ -23,6 +23,13 @@ SellValueOperator = Literal["gte", "lte"]
 CompareOperator = Literal["gt", "gte", "lt", "lte"]
 PositionMode = Literal["full", "fixed"]
 PortfolioJsonValue = object
+PORTFOLIO_BACKTEST_PRICE_BASIS: Literal["raw"] = "raw"
+PORTFOLIO_BACKTEST_LIMITATIONS = (
+    "行情使用未复权原始日线；除权除息未校准，现金分红未计入收益。",
+    "仅模拟单一做多组合和固定持仓槽位，不模拟实盘下单、融资融券或多策略资金隔离。",
+    "成交按日线价格及配置的费用、滑点模拟；不模拟涨跌停撮合、停牌成交限制或成交量冲击。",
+    "这是历史模拟，不代表未来收益，也不是投资建议。",
+)
 
 
 @dataclass(frozen=True)
@@ -293,11 +300,14 @@ class PortfolioBacktestReport:
     #: 数量一律按最后一根 K 线的收盘价**估算**——明日开盘价今天不存在。没有
     #: 追踪需求时是空字典，报告其余部分照常。
     next_plan: Mapping[str, PortfolioJsonValue] = field(default_factory=dict)
+    price_basis: Literal["raw"] = PORTFOLIO_BACKTEST_PRICE_BASIS
+    limitations: tuple[str, ...] = PORTFOLIO_BACKTEST_LIMITATIONS
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "performance", MappingProxyType(dict(self.performance)))
         object.__setattr__(self, "failure_reasons", MappingProxyType(dict(self.failure_reasons)))
         object.__setattr__(self, "risk_controls", MappingProxyType(dict(self.risk_controls)))
+        object.__setattr__(self, "limitations", tuple(self.limitations))
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -328,4 +338,6 @@ class PortfolioBacktestReport:
             "filtered_codes": list(self.filtered_codes),
             "benchmark": dict(self.benchmark) if self.benchmark is not None else None,
             "next_plan": dict(self.next_plan),
+            "price_basis": self.price_basis,
+            "limitations": list(self.limitations),
         }

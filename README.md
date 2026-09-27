@@ -72,7 +72,6 @@ python3 scripts/generate_user_manual.py   # 重新生成 docs/user-manual.md
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate              # Windows: .venv\\Scripts\\activate
-python -m pip install --upgrade -r requirements.lock
 python -m pip install -e ".[dev,catalog]"
 ```
 
@@ -136,7 +135,8 @@ sh scripts/start.sh --protected
 也可以在宿主机生成 standalone bundle：
 
 ```bash
-python3 -m pip install -r requirements.lock -r requirements-build.txt
+python3 -m pip install --require-hashes -r requirements.lock
+python3 -m pip install -r requirements-build.txt
 python3 scripts/build_nuitka.py --jobs 4
 ```
 
@@ -273,7 +273,7 @@ N:=20;
 强度:C/MA(C,N);
 ```
 
-该版本是长仓、单一组合、固定槽位的历史模拟，不包含实盘下单、融资融券、涨跌停撮合、分红复权校准或多策略资金隔离。组合回测成功结果会按上述历史策略保存规则落入本地 DuckDB。
+该版本使用未复权原始日线，现金分红未计入收益；它是长仓、单一组合、固定槽位的历史模拟，不包含实盘下单、融资融券、涨跌停撮合或多策略资金隔离。结果页和 JSON 导出会附上价格口径与模型限制。组合回测成功结果会按上述历史策略保存规则落入本地 DuckDB。
 
 ### 基准对照
 
@@ -300,7 +300,7 @@ N:=20;
 
 排行榜支持“一键回测当前榜单前十”：只复核当前正在查看的夏普榜或收益榜，使用实验原始开始日期和任务启动时本地最新已完成行情日。每个候选只执行一次全区间组合回测，再从连续资金曲线派生整体、今年以来、最近一年、最近两年和自然年度收益、回撤、Sharpe 与交易数；结果同时保存完整成交记录、资金曲线、耗时和行情指纹，行情更新会明确标记。复核结果不会反向改写验证期排行榜，同一实验和榜单默认只保留最近一次。
 
-正式 Docker 镜像在构建时通过 `requirements.lock` 安装项目运行依赖；在线行情客户端使用 Python 标准库发起请求，不需要额外财经客户端包。`requirements.lock` 现在是最低版本依赖清单，使用 `>=` 而不是精确锁定；正式镜像缺少必需依赖时会明确提示重新构建，不会静默改变行情源或寻优算法。
+正式 Docker 镜像和 CI 使用 `requirements.lock` 安装精确版本及 SHA-256 校验的 Python 3.12 运行依赖。直接依赖的兼容范围维护在 `requirements.in`；在 Python 3.12 环境安装 `pip-tools` 后，用 `python -m piptools compile --generate-hashes --strip-extras --resolver=backtracking --output-file=requirements.lock requirements.in` 更新锁。普通编译沿用现有版本；要升级全部依赖时显式加 `--upgrade`。本地开发环境直接安装 `.[dev,catalog]`，以适配当前 Python 环境。Tencent 和 East Money 日线接口通过标准库 HTTP 客户端访问，Baostock 作为证券目录与交易日历依赖固定在运行锁中。
 
 可以用固定合成数据运行搜索引擎基准矩阵，不会读取或修改本地行情：
 
@@ -411,7 +411,6 @@ sh scripts/install_hooks.sh
 首次运行前请完成 Python 和前端依赖安装，并安装 Playwright 浏览器：
 
 ```bash
-python -m pip install --upgrade -r requirements.lock
 python -m pip install -e ".[dev,catalog]"
 cd web-ui
 npm ci

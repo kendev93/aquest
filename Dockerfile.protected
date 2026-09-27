@@ -14,7 +14,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.lock requirements-build.txt pyproject.toml README.md LICENSE THIRD_PARTY_NOTICES.md ./
-RUN python -m pip install --no-cache-dir -r requirements.lock -r requirements-build.txt
+RUN python -m pip install --no-cache-dir --require-hashes -r requirements.lock \
+    && python -m pip install --no-cache-dir -r requirements-build.txt
 
 COPY selector_app ./selector_app
 COPY scripts/build_nuitka.py scripts/nuitka_entrypoint.py scripts/verify_nuitka_bundle.py ./scripts/

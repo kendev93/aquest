@@ -55,6 +55,12 @@ const DISCOVERY_APPLY_KEY = 'indicator-lab.strategy-discovery.apply'
 const DISCOVERY_APPLY_META_KEY = 'indicator-lab.strategy-discovery.apply-meta'
 // 条件研究页的桥接，键独立于策略实验室，两者不会互相覆盖。
 const RESEARCH_APPLY_KEY = 'indicator-lab.condition-research.apply'
+const PORTFOLIO_BACKTEST_LIMITATIONS = [
+  '行情使用未复权原始日线；除权除息未校准，现金分红未计入收益。',
+  '仅模拟单一做多组合和固定持仓槽位，不模拟实盘下单、融资融券或多策略资金隔离。',
+  '成交按日线价格及配置的费用、滑点模拟；不模拟涨跌停撮合、停牌成交限制或成交量冲击。',
+  '这是历史模拟，不代表未来收益，也不是投资建议。',
+]
 
 interface AppliedDiscoveryCandidate {
   candidate_hash: string
@@ -183,6 +189,10 @@ const customParseError = ref('')
 const showAdvanced = ref(false)
 const job = ref<PortfolioBacktestJobState | null>(null)
 const result = ref<PortfolioBacktestResult | null>(null)
+const resultPriceBasis = computed(() => result.value?.price_basis ?? 'raw')
+const resultLimitations = computed(() => (
+  result.value?.limitations?.length ? result.value.limitations : PORTFOLIO_BACKTEST_LIMITATIONS
+))
 const history = ref<BacktestHistorySummary[]>([])
 const historyLoading = ref(false)
 const appliedDiscoveryCandidate = ref<AppliedDiscoveryCandidate | null>(null)
@@ -1015,7 +1025,12 @@ function benchmarkValue(key: string): number | null {
 
 function downloadResult(): void {
   if (!result.value) return
-  const url = URL.createObjectURL(new Blob([JSON.stringify(result.value, null, 2)], { type: 'application/json' }))
+  const exportPayload = {
+    ...result.value,
+    price_basis: resultPriceBasis.value,
+    limitations: resultLimitations.value,
+  }
+  const url = URL.createObjectURL(new Blob([JSON.stringify(exportPayload, null, 2)], { type: 'application/json' }))
   const link = document.createElement('a')
   link.href = url
   link.download = 'portfolio-backtest.json'
@@ -1296,6 +1311,11 @@ watch(() => form.formulaText, (value) => {
           <div v-if="!result" class="empty-state" data-testid="portfolio-empty"><div class="empty-icon" aria-hidden="true">/</div><h3>{{ loading ? '正在运行动态组合回测…' : '还没有组合结果' }}</h3><p>{{ loading ? '正在逐股计算公式并模拟槽位补位，完成后显示净值与候选排名。' : '配置买入条件、排序指标和卖出条件后开始回测。' }}</p></div>
           <template v-else>
             <div class="backtest-summary"><span class="result-badge">{{ result.universe === 'all' ? '沪深全部品种' : result.universe.toUpperCase() }}</span><span>{{ result.start_date }} → {{ result.end_date }}</span><span>{{ result.bars }} 个交易日</span><span>{{ result.processed }} / {{ result.total_candidates }} 个标的已处理</span><span>槽位 {{ result.max_positions }}</span><span>排序：{{ valueName(result.ranking_value) }} · {{ result.rank_order === 'desc' ? '高到低' : '低到高' }}</span><span v-if="result.fitness_rank_weight" class="result-badge">适配性权重 {{ Math.round(result.fitness_rank_weight * 100) }}%</span></div>
+            <aside class="portfolio-assumptions" data-testid="portfolio-assumptions" aria-label="回测口径与限制">
+              <strong>回测口径与限制</strong>
+              <span>价格口径：{{ resultPriceBasis === 'raw' ? '未复权原始日线（raw）' : resultPriceBasis }}</span>
+              <ul><li v-for="limitation in resultLimitations" :key="limitation">{{ limitation }}</li></ul>
+            </aside>
             <div v-if="replayComparison" class="replay-comparison" data-testid="portfolio-replay-comparison"><strong>候选复核 {{ replayComparison.candidateHash.slice(0, 12) }}</strong><span>成交记录：{{ replayComparison.tradeRecords }}</span><span>绩效摘要：{{ replayComparison.performance }}</span><span>数据指纹：{{ replayComparison.dataFingerprint }}</span></div>
             <div class="metrics-strip portfolio-metrics">
               <div><span>总收益</span><strong :class="{ positive: (performanceValue('total_return') ?? 0) >= 0, negative: (performanceValue('total_return') ?? 0) < 0 }" data-testid="portfolio-total-return">{{ formatPercent(performanceValue('total_return')) }}</strong></div>

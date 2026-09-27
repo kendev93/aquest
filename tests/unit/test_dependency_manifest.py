@@ -3,19 +3,21 @@ from __future__ import annotations
 from pathlib import Path
 
 
-def test_runtime_manifest_uses_lower_bounds_without_removed_online_dependency() -> None:
+def test_runtime_lock_is_exact_and_excludes_removed_online_dependency() -> None:
     manifest = Path(__file__).parents[2] / "requirements.lock"
-    requirements = [
+    lines = [
         line.strip()
         for line in manifest.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
+        if line.strip()
+        and not line.lstrip().startswith(("#", "--hash="))
     ]
+    requirements = [line.rstrip("\\").split(";", maxsplit=1)[0].strip() for line in lines]
 
     assert requirements
-    assert all("==" not in line for line in requirements)
+    assert all("==" in line for line in requirements)
+    assert "--hash=sha256:" in manifest.read_text(encoding="utf-8")
     assert all("akshare" not in line.lower() for line in requirements)
     assert all("eastmoney" not in line.lower() for line in requirements)
-    assert all(">=" in line for line in requirements)
 
 
 def test_multipart_is_declared_because_the_import_endpoint_uploads_a_file() -> None:

@@ -5,7 +5,9 @@
 应用是单机、单用户的本地行情分析工具。行情只保存在项目自己的 DuckDB（`market.duckdb`）里，由本项目内置的在线 provider 同步；项目既不读取也不写入任何外部行情软件的数据库，行情 schema 完全由本项目拥有。
 
 ```text
-East Money 在线数据源 ──在线同步──► MarketDataSync + OnlineMarketSync
+Baostock（目录首选）／East Money（目录兜底） ─────┐
+                                                 ├─在线同步─► MarketDataSync + OnlineMarketSync
+Tencent（日线首选）／East Money（日线兜底） ─────┘
                                              │
                                              │ 有界 spawn 进程写分片
                                              ▼
@@ -26,14 +28,14 @@ East Money 在线数据源 ──在线同步──► MarketDataSync + OnlineMa
 
 - `market_data/` 定义项目自己的行情模型、DuckDB 存储与仓库、行情适配器、在线同步的分片暂存与合并、自动同步调度、数据库维护和用户资产导入导出；它不写入任何外部数据库，也不存在跨进程同步锁。
 - `indicators/` 保存可重建的版本化指标缓存；缓存不是行情事实源。
-- `adapters/` 通过 provider 路由接入项目自有在线客户端；East Money 是唯一在线 provider（HTTP 接口，免费且不需要 key），覆盖 A 股主板/科创板/创业板股票。系统只研究 A 股：基金（含 ETF）、指数、债券和 B 股既不在线同步也不本地导入（B 股流动性枯竭，回测的成交假设在它身上不成立）。
+- `adapters/` 通过 provider 路由接入在线行情源：Baostock 优先提供证券目录和交易日历，失败时回退 East Money；常规日线同步优先 Tencent，失败时回退 East Money。East Money 使用内置 HTTP 客户端，不需要密钥；Baostock 作为目录依赖安装。系统只研究 A 股：基金（含 ETF）、指数、债券和 B 股既不在线同步也不本地导入（B 股流动性枯竭，回测的成交假设在它身上不成立）。
 - `formulas/` 是无副作用的数组计算层。公式函数由 `formulas/tdx_math.py` 自己实现，输入输出均为项目内部的 NumPy/Pandas 数据。
 - `screening/` 负责条件合并、批量读取、单标的容错、进度和导出，不处理网络或文件格式。
 - `backtest/` 负责单标的交易模拟和绩效计算；`portfolio_backtest/` 负责动态候选、固定槽位和补位；`strategy_fitness/` 复用这些交易语义完成时间切分评估。
 - `web/` 负责 Pydantic 校验、任务提交/轮询、任务互斥分组和安全错误响应。正式 Docker 运行时，策略发现、二次优化和榜单复核由独立 `strategy-worker` 执行；worker 使用容器内认证 API 上报领取、进度、取消和结果，backend 是 DuckDB 的唯一写入者。worker 对 Indicator Lab 数据库只读，计算期指标缓存留在内存，普通任务继续使用进程内 runner。
-- `web-ui/` 负责行情状态展示、同步范围表单、进度和图表；同步入口是一键在线同步和 East Money 全量补齐，应用不提供本地行情文件导入。
+- `web-ui/` 负责行情状态展示、同步范围表单、进度和图表；除在线同步和 East Money 全量补齐外，也提供显式的通达信 `vipdoc` 本地日线导入。
 
-在线行情客户端是项目内置实现，不引入财经数据客户端依赖；业务层只依赖项目自己的 provider 接口和规范化 DataFrame。East Money 是唯一在线 provider。项目保留自己的 `.day` 读取器和兼容适配模块（本地文件导入用），但默认装配不使用它们，应用启动时也不会扫描或导入本地通达信文件。
+行情适配器对业务层提供项目内的 provider 接口和规范化 DataFrame。证券目录和交易日历优先使用 Baostock、回退到 East Money；常规日线优先使用 Tencent、回退到 East Money；全量历史补齐接口固定使用 East Money。项目自有 `.day` 读取器由本地导入服务显式调用，Docker 可通过 `docker-compose.tdx.yml` 只读挂载 `vipdoc`。应用启动时不会扫描或自动导入本地文件。
 
 ## DuckDB 数据层
 
@@ -68,7 +70,7 @@ schema 版本变化或维护备份时，初始化逻辑会先生成带时间戳�
 
 ## 行情来源与写入边界
 
-本机 `market.duckdb` 是行情的唯一事实源：只由本项目写入，也不与任何外部软件共享。应用不扫描、不解析、不导入本地通达信 `.day` 文件；项目自有的 `.day` 读取器和兼容适配模块仅为兼容保留，默认装配不启用它们。
+本机 `market.duckdb` 是行情的唯一事实源：只由本项目写入，也不与任何外部软件共享。用户可通过行情数据页显式导入本地通达信 `.day` 文件；应用启动时不会扫描或自动导入。数据库 schema 和写入仍由本项目管理。
 
 在线同步的网络 worker 只把规范化结果写进数据目录下的 `.sync-staging/<run_id>/` 分片数据库，主进程在 worker 全部结束后按标的事务合并进主库，合并按 `(market, code, trade_date, price_basis)` 幂等去重。同一时刻只允许一个行情同步任务在跑，由任务执行器的互斥分组保证，不再需要跨进程锁文件。
 
@@ -82,9 +84,9 @@ schema 版本变化或维护备份时，初始化逻辑会先生成带时间戳�
 
 ## 在线同步
 
-在线同步 provider 是 East Money：它用内置 HTTP 客户端拉取证券列表和日线，免费且不需要密钥，覆盖 A 股主板/科创板/创业板股票，单只股票的日线请求失败时切换腾讯日线接口。范围校验不通过时在发起请求前直接报错，而不是静默跳过。同步前先查询本机库的已有覆盖，完整区间跳过，中间缺口只覆盖所选区间，首尾缺失只请求缺失范围。
+常规在线同步的证券目录优先来自 Baostock，失败时回退到 East Money；日线优先来自 Tencent，失败时回退到 East Money。East Money 客户端使用内置 HTTP 请求，不需要密钥；全量历史补齐路由固定使用 East Money。范围校验不通过时在发起请求前直接报错，而不是静默跳过。同步前先查询本机库的已有覆盖，完整区间跳过，中间缺口只覆盖所选区间，首尾缺失只请求缺失范围。
 
-证券列表在服务端按板块收窄（`fs=m:0 t:6,m:0 t:80,m:1 t:2,m:1 t:23`），避免拉取全市场再丢弃大半；East Money 会把每页硬截成 100 条，所以翻页以响应里的 `total` 为准，不能把"返回行数少于请求页大小"当作最后一页。接口限流时会返回 HTTP 200 + `rc != 0`（或直接断开连接），这两种情况都会被转成 `OnlineProviderError` 并按目录专用退避重试，不会伪装成"证券列表为空"的成功同步。
+East Money 证券目录在服务端按板块收窄（`fs=m:0 t:6,m:0 t:80,m:1 t:2,m:1 t:23`），避免拉取全市场再丢弃大半；接口会把每页硬截成 100 条，所以翻页以响应里的 `total` 为准，不能把"返回行数少于请求页大小"当作最后一页。接口限流时会返回 HTTP 200 + `rc != 0`（或直接断开连接），这两种情况都会被转成 `OnlineProviderError` 并按目录专用退避重试，不会伪装成"证券列表为空"的成功同步。
 
 在线同步不写回 `.day`，也不修改任何外部文件。provider 使用有界的 `spawn` 进程池，每个 worker 把结果写进自己独立的分片 DuckDB（`market_data/staging.py`，最多 8 个 worker，分片位于数据目录的 `.sync-staging/`），全部结束后由单一主库写者按标的事务合并；活动任务可通过 `/jobs/active` 查询并通过 `/jobs/{job_id}/cancel` 协作取消。`/api/v1/market-data/capabilities` 会报告当前执行模式、worker 数和分片目录。
 

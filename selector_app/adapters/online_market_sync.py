@@ -1114,7 +1114,8 @@ class OnlineMarketSync:
         logger.warning(
             "证券目录源 baostock 不可用%s，已退回东方财富目录接口；"
             "该接口目前处于封禁状态，本次同步可能拿不到新标的。"
-            "安装目录依赖后重试：pip install -r requirements.lock（baostock 已并入锁文件，"
+            "安装目录依赖后重试：python -m pip install --require-hashes -r requirements.lock"
+            "（baostock 已并入锁文件，"
             "不要再跑 pip install -e '.[catalog]'——它会触发 PEP 517 构建隔离，"
             "在没有外网的环境里必然失败）",
             reason,

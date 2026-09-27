@@ -286,6 +286,10 @@ tbody tr:hover td { background: rgba(22, 34, 58, 0.45); }
 .direction.sell { border-color: rgba(248, 113, 113, 0.45); color: var(--danger); }
 .inline-empty { padding: 18px; border: 1px dashed var(--border); color: var(--subtle); font-size: 11px; text-align: center; }
 .diagnostic { margin: 15px 0 0; padding: 10px 12px; border-left: 2px solid var(--warning); background: rgba(245, 158, 11, 0.08); color: #fcd34d; font-size: 11px; line-height: 1.5; }
+.portfolio-assumptions { margin-top: 14px; padding: 12px 14px; border: 1px solid rgba(245, 158, 11, 0.35); border-left: 3px solid var(--warning); border-radius: 6px; background: rgba(245, 158, 11, 0.07); color: var(--muted); font-size: 11px; line-height: 1.6; }
+.portfolio-assumptions strong { display: block; margin-bottom: 3px; color: var(--text); font-size: 12px; }
+.portfolio-assumptions > span { color: var(--warning); font-weight: 700; }
+.portfolio-assumptions ul { display: grid; gap: 2px; margin: 5px 0 0; padding-left: 18px; }
 .export-backtest { width: auto; margin-top: 0; }
 .portfolio-grid { grid-template-columns: minmax(350px, 430px) minmax(0, 1fr); }
 .portfolio-fields-top { margin-top: 13px; }
