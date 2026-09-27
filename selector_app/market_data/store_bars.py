@@ -69,6 +69,7 @@ class DuckDbBarsStore:
                     FROM _instrument_names AS names
                     WHERE instruments.market = names.market
                       AND instruments.code = names.code
+                      AND instruments.name IS DISTINCT FROM names.name
                     """,
                     [_now()],
                 )
@@ -123,7 +124,15 @@ class DuckDbBarsStore:
                         instrument_type = excluded.instrument_type,
                         board = excluded.board,
                         source_state = 'active',
-                        updated_at = excluded.updated_at
+                        updated_at = CASE
+                            WHEN instruments.name IS DISTINCT FROM
+                                     COALESCE(excluded.name, instruments.name)
+                              OR instruments.instrument_type IS DISTINCT FROM excluded.instrument_type
+                              OR instruments.board IS DISTINCT FROM excluded.board
+                              OR instruments.source_state IS DISTINCT FROM 'active'
+                            THEN excluded.updated_at
+                            ELSE instruments.updated_at
+                        END
                     """,
                     [_now()],
                 )

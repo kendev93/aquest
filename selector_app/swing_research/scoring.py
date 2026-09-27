@@ -76,7 +76,9 @@ class IndicatorScore:
             "display_name": self.display_name,
             "label": self.label,
             "order": self.order,
-            "ic_mean": self.ic_mean,
+            # JSON has no NaN/Infinity values. Empty samples keep NaN internally
+            # for ranking/diagnostics, but the wire format must use null.
+            "ic_mean": float(self.ic_mean) if np.isfinite(self.ic_mean) else None,
             "icir": self.icir,
             "ic_days": self.ic_days,
             "ic_threshold": self.ic_threshold,
@@ -299,7 +301,9 @@ def score_indicator(
             if magnitude >= observed:
                 exceed += 1
         if shuffled:
-            pvalue = (1 + exceed) / (1 + permutations)
+            # Invalid date pairings are skipped above. Use the number that
+            # actually formed a null statistic, or the p-value is biased low.
+            pvalue = (1 + exceed) / (1 + len(shuffled))
             threshold = float(np.quantile(np.asarray(shuffled), 0.95))
 
     order: ScoreOrder = "high" if ic_mean >= 0 else "low"

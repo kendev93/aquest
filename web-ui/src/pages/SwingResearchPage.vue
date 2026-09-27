@@ -834,7 +834,7 @@ async function copyPlan(): Promise<void> {
                       <span v-else class="swing-tag muted">归因</span>
                     </td>
                     <td>{{ score.order === 'high' ? '越大越相关' : '越小越相关' }}</td>
-                    <td :class="{ positive: score.significant && score.ic_mean > 0 }">{{ formatNumber(score.ic_mean, 3) }}</td>
+                    <td :class="{ positive: score.significant && score.ic_mean !== null && score.ic_mean > 0 }">{{ formatNumber(score.ic_mean, 3) }}</td>
                     <td>{{ formatNumber(score.icir, 2) }}</td>
                     <td>{{ formatNumber(score.pvalue, 3) }}</td>
                     <td>{{ formatNumber(score.qvalue, 3) }}</td>

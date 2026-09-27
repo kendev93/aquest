@@ -621,6 +621,80 @@ def _write_tracking_points(
     return len(rows)
 
 
+def _write_tracking_trades(
+    connection: duckdb.DuckDBPyConnection,
+    strategy_id: str,
+    rows: Sequence[Mapping[str, object]],
+) -> int:
+    """Replace one strategy's trades inside an open transaction."""
+
+    connection.execute(
+        f"DELETE FROM {STRATEGY_TRACKING_TRADES_TABLE} WHERE strategy_id = ?",
+        [strategy_id],
+    )
+    if rows:
+        connection.executemany(
+            f"""
+            INSERT INTO {STRATEGY_TRACKING_TRADES_TABLE} (
+                strategy_id, seq, trade_date, phase, direction,
+                market, code, name, size, price, pnl, reason
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                [
+                    strategy_id,
+                    int(index),
+                    int(cast(int, row["trade_date"])),
+                    str(row["phase"]),
+                    str(row["direction"]),
+                    str(row["market"]),
+                    str(row["code"]),
+                    str(row.get("name") or ""),
+                    float(cast(float, row["size"])),
+                    float(cast(float, row["price"])),
+                    float(cast(float, row.get("pnl") or 0.0)),
+                    str(row.get("reason") or ""),
+                ]
+                for index, row in enumerate(rows)
+            ],
+        )
+    return len(rows)
+
+
+def _write_tracking_plan(
+    connection: duckdb.DuckDBPyConnection,
+    strategy_id: str,
+    payload: Mapping[str, object] | None,
+) -> None:
+    """Replace or clear a strategy's next-session plan inside a transaction."""
+
+    if payload is None:
+        connection.execute(
+            f"DELETE FROM {STRATEGY_TRACKING_PLAN_TABLE} WHERE strategy_id = ?",
+            [strategy_id],
+        )
+        return
+    encoded = json.dumps(dict(payload), ensure_ascii=False, separators=(",", ":"))
+    raw_as_of = str(payload.get("as_of") or "").replace("-", "").strip()
+    try:
+        as_of = _tracking_date(raw_as_of)
+    except ValueError:
+        # 缺少基准日不应让已经生成的观察曲线和成交记录一起回滚。
+        as_of = 0
+    connection.execute(
+        f"""
+        INSERT INTO {STRATEGY_TRACKING_PLAN_TABLE} (
+            strategy_id, as_of, payload_json, updated_at
+        ) VALUES (?, ?, ?, ?)
+        ON CONFLICT (strategy_id) DO UPDATE SET
+            as_of = excluded.as_of,
+            payload_json = excluded.payload_json,
+            updated_at = excluded.updated_at
+        """,
+        [strategy_id, as_of, encoded, _now()],
+    )
+
+
 def _instrument_name_map(connection: duckdb.DuckDBPyConnection) -> dict[tuple[str, str], str]:
     rows = connection.execute(
         "SELECT market, code, name FROM instruments WHERE name IS NOT NULL"
@@ -2792,10 +2866,11 @@ class DuckDbHistoryStore:
                 assignments.append("last_tracked_date = ?")
                 parameters.append(int(last_tracked_date))
         parameters.append(normalized_id)
+        parameters.append(STRATEGY_TRACKING_ACTIVE)
         with _WRITE_LOCK, self._store._connect() as connection:
             updated = connection.execute(
                 f"UPDATE {SAVED_STRATEGY_TABLE} SET {', '.join(assignments)} "
-                "WHERE strategy_id = ? RETURNING strategy_id",
+                "WHERE strategy_id = ? AND tracking_status = ? RETURNING strategy_id",
                 parameters,
             ).fetchone()
         if updated is None:
@@ -2865,6 +2940,82 @@ class DuckDbHistoryStore:
                 raise
         return written
 
+    def save_strategy_tracking_snapshot(
+        self,
+        strategy_id: str,
+        *,
+        points: Iterable[Mapping[str, object]],
+        trades: Iterable[Mapping[str, object]],
+        plan: Mapping[str, object] | None,
+        last_tracked_date: int,
+        summary: Mapping[str, object] | None = None,
+    ) -> bool:
+        """Commit one complete refresh only while the strategy is still online.
+
+        The active check and all writes share one transaction and the same lock
+        as ``stop_strategy_tracking``. A stop therefore either happens before
+        this snapshot (and prevents it) or after it (and clears its plan).
+        Missing plans are deleted so an older order cannot survive a no-candidate
+        result.
+        """
+
+        self._store._require_writer()
+        normalized_id = strategy_id.strip()
+        if not normalized_id:
+            return False
+        prepared_points = list(points)
+        prepared_trades = list(trades)
+        normalized_date = _tracking_date(last_tracked_date)
+        with _WRITE_LOCK, self._store._connect() as connection:
+            connection.execute("BEGIN")
+            try:
+                row = connection.execute(
+                    f"SELECT tracking_status FROM {SAVED_STRATEGY_TABLE} "
+                    "WHERE strategy_id = ?",
+                    [normalized_id],
+                ).fetchone()
+                if row is None or str(row[0]) != STRATEGY_TRACKING_ACTIVE:
+                    connection.execute("ROLLBACK")
+                    return False
+
+                _write_tracking_points(connection, normalized_id, prepared_points)
+                _write_tracking_trades(connection, normalized_id, prepared_trades)
+                _write_tracking_plan(connection, normalized_id, plan)
+                if summary is None:
+                    updated = connection.execute(
+                        f"""
+                        UPDATE {SAVED_STRATEGY_TABLE} SET
+                            last_tracked_date = ?, last_error = '', updated_at = ?
+                        WHERE strategy_id = ? AND tracking_status = ?
+                        RETURNING strategy_id
+                        """,
+                        [normalized_date, _now(), normalized_id, STRATEGY_TRACKING_ACTIVE],
+                    ).fetchone()
+                else:
+                    updated = connection.execute(
+                        f"""
+                        UPDATE {SAVED_STRATEGY_TABLE} SET
+                            summary_json = ?, last_tracked_date = ?,
+                            last_error = '', updated_at = ?
+                        WHERE strategy_id = ? AND tracking_status = ?
+                        RETURNING strategy_id
+                        """,
+                        [
+                            json.dumps(dict(summary), ensure_ascii=False, separators=(",", ":")),
+                            normalized_date,
+                            _now(),
+                            normalized_id,
+                            STRATEGY_TRACKING_ACTIVE,
+                        ],
+                    ).fetchone()
+                if updated is None:
+                    raise RuntimeError("策略追踪状态已变化，未保存本次重算")
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        return True
+
     def list_tracking_points(
         self,
         strategy_id: str,
@@ -2918,36 +3069,7 @@ class DuckDbHistoryStore:
         with _WRITE_LOCK, self._store._connect() as connection:
             connection.execute("BEGIN")
             try:
-                connection.execute(
-                    f"DELETE FROM {STRATEGY_TRACKING_TRADES_TABLE} WHERE strategy_id = ?",
-                    [normalized_id],
-                )
-                if prepared:
-                    connection.executemany(
-                        f"""
-                        INSERT INTO {STRATEGY_TRACKING_TRADES_TABLE} (
-                            strategy_id, seq, trade_date, phase, direction,
-                            market, code, name, size, price, pnl, reason
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        [
-                            [
-                                normalized_id,
-                                int(index),
-                                int(cast(int, row["trade_date"])),
-                                str(row["phase"]),
-                                str(row["direction"]),
-                                str(row["market"]),
-                                str(row["code"]),
-                                str(row.get("name") or ""),
-                                float(cast(float, row["size"])),
-                                float(cast(float, row["price"])),
-                                float(cast(float, row.get("pnl") or 0.0)),
-                                str(row.get("reason") or ""),
-                            ]
-                            for index, row in enumerate(prepared)
-                        ],
-                    )
+                _write_tracking_trades(connection, normalized_id, prepared)
                 connection.execute("COMMIT")
             except Exception:
                 connection.execute("ROLLBACK")
@@ -3001,27 +3123,8 @@ class DuckDbHistoryStore:
         normalized_id = strategy_id.strip()
         if not normalized_id:
             return
-        encoded = json.dumps(dict(payload), ensure_ascii=False, separators=(",", ":"))
-        raw_as_of = str(payload.get("as_of") or "").replace("-", "").strip()
-        try:
-            as_of = _tracking_date(raw_as_of)
-        except ValueError:
-            # 计划基准日缺了或写坏了：宁可存 0 也不要让整个重算失败——明细和
-            # 净值已经写进去了，为这一个展示字段回滚不值得。
-            as_of = 0
         with _WRITE_LOCK, self._store._connect() as connection:
-            connection.execute(
-                f"""
-                INSERT INTO {STRATEGY_TRACKING_PLAN_TABLE} (
-                    strategy_id, as_of, payload_json, updated_at
-                ) VALUES (?, ?, ?, ?)
-                ON CONFLICT (strategy_id) DO UPDATE SET
-                    as_of = excluded.as_of,
-                    payload_json = excluded.payload_json,
-                    updated_at = excluded.updated_at
-                """,
-                [normalized_id, as_of, encoded, _now()],
-            )
+            _write_tracking_plan(connection, normalized_id, payload)
 
     def read_tracking_plan(self, strategy_id: str) -> dict[str, object] | None:
         normalized_id = strategy_id.strip()

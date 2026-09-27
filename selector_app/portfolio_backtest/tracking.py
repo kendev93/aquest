@@ -32,6 +32,7 @@ from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.market_data.store_history import (
     TRACKING_PHASE_POST,
     TRACKING_PHASE_PRE,
+    STRATEGY_TRACKING_ACTIVE,
 )
 from selector_app.portfolio_backtest.models import (
     PortfolioBacktestConfig,
@@ -522,9 +523,19 @@ class StrategyTrackingService:
             seed_points=[row.to_dict() for row in observations[:1]],  # 上线日：接力点，两段共用
         )
         if started is not None:
-            self._write_details(strategy_id, report_payload=report_payload, launched_at=launched_at)
-            if summary is not None:
-                self._store.update_strategy_summary(strategy_id, summary)
+            plan = report_payload.get("next_plan")
+            saved = self._store.save_tracking_points(
+                strategy_id,
+                points=[row.to_dict() for row in observations[:1]],
+                trades=_trade_rows(report_payload, launched_at=launched_at),
+                plan=plan if isinstance(plan, Mapping) and plan else None,
+                last_tracked_date=(
+                    observations[-1].trade_date if observations else launched_at
+                ),
+                summary=summary,
+            )
+            if saved == 0:
+                return self.snapshot(strategy_id)
         return self.snapshot(strategy_id)
 
     def stop(self, strategy_id: str) -> TrackingSnapshot:
@@ -541,6 +552,8 @@ class StrategyTrackingService:
         """
 
         record = self._read(strategy_id)
+        if record.get("tracking_status") != STRATEGY_TRACKING_ACTIVE:
+            raise ValueError("策略尚未上线")
         launched_at = _read_launched_at(record)
         if launched_at is None:
             raise ValueError("策略尚未上线")
@@ -564,20 +577,24 @@ class StrategyTrackingService:
         if not observations:
             return self._failed(strategy_id, "重算结果里没有上线日之后的交易日")
         try:
-            self._store.save_tracking_points(strategy_id, [row.to_dict() for row in observations])
-            self._write_details(strategy_id, report_payload=report_payload, launched_at=launched_at)
             summary = self._research_summary(record, research)
-            if summary is not None and research is not None:
-                self._store.update_strategy_summary(strategy_id, summary)
+            plan = report_payload.get("next_plan")
+            saved = self._store.save_tracking_points(
+                strategy_id,
+                points=[row.to_dict() for row in observations],
+                trades=_trade_rows(report_payload, launched_at=launched_at),
+                plan=plan if isinstance(plan, Mapping) and plan else None,
+                last_tracked_date=observations[-1].trade_date,
+                summary=summary if research is not None else None,
+            )
+            if saved == 0:
+                return self.snapshot(strategy_id)
         except Exception as exc:  # noqa: BLE001 - 写失败必须在库里留痕再上抛
             # 只上抛的话库里 `last_error` 仍是空的、`last_tracked_date` 停在旧值，
             # 界面上是「一切正常、只是没更新」——日志里的原因没人会去看。
             logger.exception("策略追踪写入失败: %s", strategy_id)
             self._store.finish_strategy_tracking(strategy_id, error=str(exc)[:500])
             raise
-        self._store.finish_strategy_tracking(
-            strategy_id, last_tracked_date=observations[-1].trade_date
-        )
         return self.snapshot(strategy_id)
 
     def snapshot(self, strategy_id: str) -> TrackingSnapshot:
@@ -623,26 +640,6 @@ class StrategyTrackingService:
         )
 
     # ------------------------------------------------------------------
-
-    def _write_details(
-        self,
-        strategy_id: str,
-        *,
-        report_payload: Mapping[str, object],
-        launched_at: int,
-    ) -> None:
-        """把这次重算得到的成交明细和明日计划一起落库。
-
-        明细和净值是同一次模拟的产物，所以这里和 ``save_tracking_points`` 一样
-        走全量覆盖：不合并、不追加。
-        """
-
-        self._store.save_tracking_trades(
-            strategy_id, _trade_rows(report_payload, launched_at=launched_at)
-        )
-        plan = report_payload.get("next_plan")
-        if isinstance(plan, Mapping) and plan:
-            self._store.save_tracking_plan(strategy_id, plan)
 
     def _read(self, strategy_id: str) -> Mapping[str, object]:
         record = self._store.read_strategy(strategy_id)

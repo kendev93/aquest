@@ -31,7 +31,7 @@ export interface FactorEvidence {
   display_name: string
   /** high = 买指标值最高的一组；low = 买最低的一组。由信息系数的符号决定。 */
   order: 'high' | 'low'
-  ic_mean: number
+  ic_mean: number | null
   icir: number | null
   ic_days: number
   ic_positive_rate: number | null

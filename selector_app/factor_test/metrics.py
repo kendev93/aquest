@@ -119,7 +119,9 @@ class FactorEvidence:
             "value_id": self.value_id,
             "display_name": self.display_name,
             "order": self.order,
-            "ic_mean": self.ic_mean,
+            # JSON has no NaN/Infinity values. Empty samples keep NaN internally
+            # for sorting, but the wire format must use null.
+            "ic_mean": float(self.ic_mean) if np.isfinite(self.ic_mean) else None,
             "icir": self.icir,
             "ic_days": self.ic_days,
             "ic_positive_rate": self.ic_positive_rate,
@@ -223,7 +225,9 @@ def _permutation_test(
             exceed += 1
     if not magnitudes:
         return None, None
-    pvalue = (1 + exceed) / (1 + permutations)
+    # Invalid calendar pairings are omitted from magnitudes; don't count them
+    # as non-extreme observations in the Monte Carlo denominator.
+    pvalue = (1 + exceed) / (1 + len(magnitudes))
     threshold = float(np.quantile(np.asarray(magnitudes), 0.95))
     return pvalue, threshold
 

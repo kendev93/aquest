@@ -62,7 +62,7 @@ export interface SwingScore {
   label: SwingLabel
   /** high = 指标值大时伴随该标签；low 反之。 */
   order: 'high' | 'low'
-  ic_mean: number
+  ic_mean: number | null
   icir: number | null
   ic_days: number
   /** 置换检验给出的噪声门槛：信息系数要超过它才算数。 */

@@ -706,8 +706,51 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
         self,
         strategy_id: str,
         points: Iterable[Mapping[str, object]],
+        *,
+        trades: Iterable[Mapping[str, object]] | None = None,
+        plan: Mapping[str, object] | None = None,
+        last_tracked_date: int | None = None,
+        summary: Mapping[str, object] | None = None,
     ) -> int:
+        """Save points alone, or atomically save a complete active refresh.
+
+        ``last_tracked_date`` opts into the coordinated snapshot path. Its
+        return value is then 1 for committed and 0 when the strategy was stopped
+        or deleted; the legacy points-only form continues to return row count.
+        """
+
+        if last_tracked_date is not None:
+            saved = self._history.save_strategy_tracking_snapshot(
+                strategy_id,
+                points=points,
+                trades=trades or (),
+                plan=plan,
+                last_tracked_date=last_tracked_date,
+                summary=summary,
+            )
+            return int(saved)
+        if trades is not None or plan is not None or summary is not None:
+            raise ValueError("保存追踪明细时必须提供 last_tracked_date")
         return self._history.save_tracking_points(strategy_id, points)
+
+    def save_strategy_tracking_snapshot(
+        self,
+        strategy_id: str,
+        *,
+        points: Iterable[Mapping[str, object]],
+        trades: Iterable[Mapping[str, object]],
+        plan: Mapping[str, object] | None,
+        last_tracked_date: int,
+        summary: Mapping[str, object] | None = None,
+    ) -> bool:
+        return self._history.save_strategy_tracking_snapshot(
+            strategy_id,
+            points=points,
+            trades=trades,
+            plan=plan,
+            last_tracked_date=last_tracked_date,
+            summary=summary,
+        )
 
     def list_tracking_points(
         self,
