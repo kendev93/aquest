@@ -14,7 +14,7 @@ import pkgutil
 
 from selector_app.web import routers
 from selector_app.web.app import create_app
-from selector_app.web.routers.market_data import router as market_data_router
+from selector_app.web.routers.market_data import _SUBROUTERS
 
 EXPECTED_ROUTES = {
     "DELETE /api/v1/market-data/indicator-cache",
@@ -56,7 +56,7 @@ def test_every_market_data_submodule_is_mounted() -> None:
     submodules = _submodule_routers()
     assert submodules, "包里没找到任何子路由模块，拆分结构可能已经变了"
 
-    mounted = {id(entry.original_router) for entry in market_data_router.routes}
+    mounted = {id(sub_router) for sub_router in _SUBROUTERS}
     missing = sorted(name for name, sub in submodules.items() if id(sub) not in mounted)
     assert not missing, f"这些子模块的路由没挂到 market-data 上: {missing}"
 

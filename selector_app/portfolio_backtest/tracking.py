@@ -529,7 +529,10 @@ class StrategyTrackingService:
                 points=[row.to_dict() for row in observations[:1]],
                 trades=_trade_rows(report_payload, launched_at=launched_at),
                 plan=plan if isinstance(plan, Mapping) and plan else None,
-                last_tracked_date=(observations[-1].trade_date if observations else launched_at),
+                # Launch seeds only the hand-over row above. Later rows belong
+                # to refresh, so don't advance the cursor past observations we
+                # haven't committed yet.
+                last_tracked_date=launched_at,
                 summary=summary,
             )
             if saved == 0:

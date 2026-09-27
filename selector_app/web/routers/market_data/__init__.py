@@ -51,8 +51,9 @@ from .sync import (
 router = APIRouter(prefix="/market-data")
 
 # 顺序沿用了拆分前的文件内顺序：/jobs/active 必须排在 /jobs/{job_id} 之前，
-# 否则 "active" 会被当成 job_id 命中后面那条路径。
-for _sub_router in (
+# 否则 "active" 会被当成 job_id 命中后面那条路径。保留显式清单供注册守卫测试，
+# 不依赖 FastAPI 的内部 APIRoute 元数据来追溯子路由来源。
+_SUBROUTERS = (
     indicator_cache.router,
     status.router,
     precompute.router,
@@ -62,7 +63,8 @@ for _sub_router in (
     health.router,
     local_import.router,
     local_data.router,
-):
+)
+for _sub_router in _SUBROUTERS:
     router.include_router(_sub_router)
 
 del _sub_router

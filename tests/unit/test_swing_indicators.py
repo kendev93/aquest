@@ -463,7 +463,11 @@ def test_indicator_study_returns_one_score_per_pair() -> None:
         "down_onset_ahead",
     }
     for item in scores:
-        assert isinstance(item["ic_mean"], float)
+        assert item["ic_mean"] is None or isinstance(item["ic_mean"], float)
+        if item["ic_mean"] is None:
+            assert item["ic_days"] == 0
+            assert item["pvalue"] is None
+            assert item["significant"] is False
         assert item["qvalue"] is None or 0.0 <= item["qvalue"] <= 1.0
 
 
