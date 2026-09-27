@@ -127,7 +127,8 @@ class DuckDbBarsStore:
                         updated_at = CASE
                             WHEN instruments.name IS DISTINCT FROM
                                      COALESCE(excluded.name, instruments.name)
-                              OR instruments.instrument_type IS DISTINCT FROM excluded.instrument_type
+                              OR instruments.instrument_type IS DISTINCT FROM
+                                     excluded.instrument_type
                               OR instruments.board IS DISTINCT FROM excluded.board
                               OR instruments.source_state IS DISTINCT FROM 'active'
                             THEN excluded.updated_at

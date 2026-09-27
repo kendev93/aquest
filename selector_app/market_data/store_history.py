@@ -2970,8 +2970,7 @@ class DuckDbHistoryStore:
             connection.execute("BEGIN")
             try:
                 row = connection.execute(
-                    f"SELECT tracking_status FROM {SAVED_STRATEGY_TABLE} "
-                    "WHERE strategy_id = ?",
+                    f"SELECT tracking_status FROM {SAVED_STRATEGY_TABLE} WHERE strategy_id = ?",
                     [normalized_id],
                 ).fetchone()
                 if row is None or str(row[0]) != STRATEGY_TRACKING_ACTIVE:

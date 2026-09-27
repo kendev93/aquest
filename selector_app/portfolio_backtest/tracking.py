@@ -30,9 +30,9 @@ import pandas as pd
 from selector_app.backtest.performance import PerformanceAnalyzer
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.market_data.store_history import (
+    STRATEGY_TRACKING_ACTIVE,
     TRACKING_PHASE_POST,
     TRACKING_PHASE_PRE,
-    STRATEGY_TRACKING_ACTIVE,
 )
 from selector_app.portfolio_backtest.models import (
     PortfolioBacktestConfig,
@@ -529,9 +529,7 @@ class StrategyTrackingService:
                 points=[row.to_dict() for row in observations[:1]],
                 trades=_trade_rows(report_payload, launched_at=launched_at),
                 plan=plan if isinstance(plan, Mapping) and plan else None,
-                last_tracked_date=(
-                    observations[-1].trade_date if observations else launched_at
-                ),
+                last_tracked_date=(observations[-1].trade_date if observations else launched_at),
                 summary=summary,
             )
             if saved == 0:
