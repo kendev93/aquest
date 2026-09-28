@@ -17,6 +17,7 @@ vi.mock('../api/marketData', async () => {
     fetchActiveMarketDataJobs: vi.fn(),
     createOnlineBackfill: vi.fn(),
     createOnlineSync: vi.fn(),
+    createOnlineRefresh: vi.fn(),
     createLocalImport: vi.fn(),
     deleteMarketBars: vi.fn(),
     createHealthCheck: vi.fn(),
@@ -195,6 +196,50 @@ describe('MarketDataPage', () => {
       instrument_types: ['stock'],
       boards: ['main'],
     })
+  })
+
+  it('refreshes the selected scope from scratch after an explicit confirmation', async () => {
+    vi.mocked(marketApi.createOnlineRefresh).mockResolvedValue({ job_id: 'refresh-1', status: 'queued' })
+    vi.mocked(marketApi.getMarketDataJob).mockResolvedValue({
+      job_id: 'refresh-1', status: 'completed', progress: 1, total_candidates: 2,
+      total_scanned: 2, errors: 0, error: null, result: {
+        source: 'online', written_bars: 1200, deleted_bars: 1180,
+        refreshed_instruments: 2, empty_after_refresh: ['000001'],
+      },
+    })
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const wrapper = mount(MarketDataPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="market-sync-board-main"]').setValue(true)
+    await wrapper.get('[data-testid="market-online-refresh"]').trigger('click')
+    await flushPromises()
+
+    // 范围和另外两个按钮保持一致，另外必须带 confirm：这个入口会先删后下。
+    expect(marketApi.createOnlineRefresh).toHaveBeenCalledWith({
+      universe: 'all',
+      instrument_types: ['stock'],
+      boards: ['main'],
+      confirm: true,
+    })
+    const message = wrapper.get('[data-testid="market-data-message"]').text()
+    expect(message).toContain('删除 1180 根')
+    expect(message).toContain('重写 1200 根')
+    // 删了没补回来的标的要点名，否则"重刷"会静默变成删数据。
+    expect(message).toContain('000001')
+    confirmSpy.mockRestore()
+  })
+
+  it('does not refresh anything when the confirmation is dismissed', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const wrapper = mount(MarketDataPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="market-online-refresh"]').trigger('click')
+    await flushPromises()
+
+    expect(marketApi.createOnlineRefresh).not.toHaveBeenCalled()
+    confirmSpy.mockRestore()
   })
 
   it('shows the current synchronized instrument and date range', async () => {

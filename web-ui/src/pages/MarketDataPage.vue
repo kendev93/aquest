@@ -9,6 +9,7 @@ import {
   createHealthRepair,
   createLocalImport,
   createOnlineBackfill,
+  createOnlineRefresh,
   createOnlineSync,
   deleteMarketBars,
   detectLocalVipdoc,
@@ -494,6 +495,42 @@ async function backfillOnlineData(): Promise<void> {
   }
 }
 
+async function refreshOnlineData(): Promise<void> {
+  if (
+    !window.confirm(
+      '将删除所选范围内标的的全部历史日线，再整段重新下载（本地导入的行也会一起删掉）。在线源已经没有数据的标的（如退市）删了就补不回来，会在结果里单独列出。确定继续？',
+    )
+  ) {
+    return
+  }
+  syncLoading.value = true
+  syncLabel.value = '正在全量重刷…'
+  message.value = ''
+  try {
+    const job = await createOnlineRefresh({
+      universe: form.syncUniverse,
+      ...syncScopePayload(),
+      confirm: true,
+    })
+    beginJob(job.job_id, job.status)
+    await waitForJob(job.job_id)
+    await loadStoreStatus()
+    await loadInstruments()
+    const result = marketJob.value?.result
+    if (result) {
+      const empty = result.empty_after_refresh ?? []
+      message.value = empty.length
+        ? `重刷完成：删除 ${result.deleted_bars ?? 0} 根、重写 ${result.written_bars ?? 0} 根；${empty.length} 只标的重下后仍无数据：${empty.join('、')}`
+        : `重刷完成：删除 ${result.deleted_bars ?? 0} 根、重写 ${result.written_bars ?? 0} 根。`
+    }
+  } catch (error) {
+    message.value = apiMessage(error)
+  } finally {
+    syncLoading.value = false
+    syncLabel.value = ''
+  }
+}
+
 async function detectVipdocPath(fillWhenEmpty: boolean): Promise<void> {
   form.vipdocDetecting = true
   form.vipdocDetectNote = ''
@@ -880,11 +917,12 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
             <div><label for="market-sync-universe">同步市场</label><select id="market-sync-universe" v-model="form.syncUniverse" data-testid="market-sync-universe"><option value="all">沪深全部</option><option value="sh">仅上海</option><option value="sz">仅深圳</option></select></div>
             <div class="scope-options"><span>证券类型</span><label v-for="option in INSTRUMENT_TYPE_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-sync-type-${option.key}`" :checked="form.syncInstrumentTypes.includes(option.key)" @change="toggleInstrumentType(option.key)">{{ option.label }}</label></div>
             <div class="scope-options"><span>板块</span><label v-for="option in BOARD_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-sync-board-${option.key}`" :checked="form.syncBoards.includes(option.key)" @change="toggleBoard(option.key)">{{ option.label }}</label></div>
-            <small class="scope-helper">板块未勾选表示不限制；类型和板块同时选择时取交集。全量补齐按钮只请求缺失历史区间。</small>
+            <small class="scope-helper">板块未勾选表示不限制；类型和板块同时选择时取交集。全量补齐只请求缺失的历史区间；强制全量重刷先删除所选范围内标的的全部日线（含本地导入）再整段重下，能覆盖已经写歪的中间段，耗时最久。</small>
           </div>
           <div class="market-sync-actions">
             <button class="primary-button" data-testid="market-sync-online" type="button" :disabled="syncLoading" @click="syncOnlineData">一键同步行情</button>
             <button class="secondary-button" data-testid="market-online-backfill" type="button" :disabled="syncLoading" @click="backfillOnlineData">{{ syncLoading ? '回填进行中…' : '全量补齐' }}</button>
+            <button class="secondary-button" data-testid="market-online-refresh" type="button" :disabled="syncLoading" @click="refreshOnlineData">{{ syncLoading ? '重刷进行中…' : '强制全量重刷' }}</button>
           </div>
           <div class="local-import-row">
             <div class="local-import-field">

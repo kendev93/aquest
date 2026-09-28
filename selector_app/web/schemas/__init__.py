@@ -32,7 +32,12 @@ from .library import (
     StockGroupRemoveMembersRequest,
     StockGroupUpdateRequest,
 )
-from .market import BarDeleteRequest, HealthRepairRequest, MarketSyncRequest
+from .market import (
+    BarDeleteRequest,
+    HealthRepairRequest,
+    MarketRefreshRequest,
+    MarketSyncRequest,
+)
 from .portfolio import PortfolioBacktestRequest
 from .screening import (
     CustomFormulaParseRequest,
@@ -71,6 +76,7 @@ __all__ = [
     "InstrumentLabValuesRequest",
     "JobCreatedResponse",
     "LocalImportRequest",
+    "MarketRefreshRequest",
     "MarketSyncRequest",
     "PortfolioBacktestRequest",
     "ResearchPresetCreateRequest",

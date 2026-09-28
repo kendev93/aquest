@@ -6,7 +6,7 @@
 - ``precompute``    指标预热任务 + 写路径共用的预热步骤
 - ``status``        capabilities / store 两个只读描述接口
 - ``jobs``          行情任务的轮询与取消
-- ``sync``          在线同步、回填及兼容别名
+- ``sync``          在线同步、回填、强制全量重刷及兼容别名
 - ``maintenance``   删除已导入的行情
 - ``health``        行情体检报告与一键修复
 - ``local_import``  本地 vipdoc 导入
@@ -43,6 +43,7 @@ from .precompute import create_indicator_precompute_job
 from .status import market_data_capabilities, market_data_store_status
 from .sync import (
     create_eastmoney_backfill_job,
+    create_full_refresh_job,
     create_online_sync_job,
     create_sync_job,
     sync_job_status,
@@ -76,6 +77,7 @@ __all__ = [
     "cancel_market_data_job",
     "clear_indicator_cache",
     "create_eastmoney_backfill_job",
+    "create_full_refresh_job",
     "create_health_check_job",
     "create_health_repair_job",
     "create_indicator_precompute_job",

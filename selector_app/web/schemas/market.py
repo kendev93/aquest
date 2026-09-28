@@ -73,6 +73,32 @@ class MarketSyncRequest(BaseModel):
         return self
 
 
+class MarketRefreshRequest(MarketSyncRequest):
+    """Re-download every bar of the selected scope from scratch.
+
+    常规同步只补最新一段，全量补齐只补已有区间**之外**的缺口，两者都覆盖不到
+    中间已经写歪的那段。这个入口把范围内标的的日线先删干净再整段重下——和
+    ``HealthRepairRequest`` 同级别的破坏性，所以同样要求显式 ``confirm``。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    confirm: bool = False
+
+    @model_validator(mode="after")
+    def validate_confirmation(self) -> MarketRefreshRequest:
+        if not self.confirm:
+            raise ValueError(
+                "全量重刷会先删除所选范围内的全部日线再重新下载，请传 confirm=true 明确确认"
+            )
+        return self
+
+    def as_sync_request(self) -> MarketSyncRequest:
+        """Rebuild the plain sync payload: 重刷永远是全历史。"""
+
+        return MarketSyncRequest(**{**self.model_dump(exclude={"confirm"}), "full_history": True})
+
+
 class HealthRepairRequest(BaseModel):
     """Re-download every bar for the instruments flagged by the health check.
 

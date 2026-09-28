@@ -203,6 +203,23 @@ export async function deleteMarketBars(payload: {
 }
 
 /**
+ * 强制全量重刷：先删掉所选范围内的全部日线，再整段重新下载。
+ * 常规同步只补最新一段，补齐只补首尾缺口——中间写歪的那段只有这个入口能覆盖。
+ */
+export async function createOnlineRefresh(payload: {
+  universe?: 'all' | 'sh' | 'sz'
+  instrument_types?: InstrumentType[]
+  boards?: InstrumentBoard[]
+  confirm: boolean
+}): Promise<{ job_id: string; status: string }> {
+  const response = await request<{ data: { job_id: string; status: string } }>(
+    `${API_BASE}/refresh`,
+    { method: 'POST', body: JSON.stringify(payload) },
+  )
+  return response.data
+}
+
+/**
  * 提交一次行情体检。600 万行的库实测约 10 秒，所以走任务而不是同步返回。
  */
 export async function createHealthCheck(): Promise<{ job_id: string; status: string }> {

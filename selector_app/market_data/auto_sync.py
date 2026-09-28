@@ -40,6 +40,8 @@ AUTO_SYNC_DESCRIPTION = "自动行情同步"
 #: 必须能被 ``/market-data/jobs/{job_id}`` 查到、能被取消、能被「已有行情任务」闸门挡住。
 HEALTH_CHECK_DESCRIPTION = "行情健康检查"
 HEALTH_REPAIR_DESCRIPTION = "行情修复"
+#: 先删后下的整段重刷：和修复共用闸门，但范围是用户选的市场/板块而不是问题标的。
+FULL_REFRESH_DESCRIPTION = "行情全量重刷"
 MARKET_SYNC_EXCLUSIVE_GROUP = "market_data_sync"
 MARKET_SYNC_JOB_DESCRIPTIONS = frozenset(
     {
@@ -48,6 +50,7 @@ MARKET_SYNC_JOB_DESCRIPTIONS = frozenset(
         "行情同步",
         "全市场行情同步",
         "历史全量回填",
+        FULL_REFRESH_DESCRIPTION,
         AUTO_SYNC_DESCRIPTION,
         HEALTH_CHECK_DESCRIPTION,
         HEALTH_REPAIR_DESCRIPTION,
@@ -294,6 +297,7 @@ __all__ = [
     "AUTO_SYNC_DESCRIPTION",
     "HEALTH_CHECK_DESCRIPTION",
     "HEALTH_REPAIR_DESCRIPTION",
+    "FULL_REFRESH_DESCRIPTION",
     "MARKET_SYNC_JOB_DESCRIPTIONS",
     "MARKET_SYNC_EXCLUSIVE_GROUP",
     "DEFAULT_AUTO_SYNC_INTERVAL_SECONDS",
