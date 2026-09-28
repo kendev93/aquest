@@ -183,6 +183,34 @@ def test_refresh_keeps_instruments_outside_the_selected_market(tmp_path: Path) -
         assert list(store.read_bars("SH", "600000")["close"]) == [20.0, 21.0]
 
 
+def test_refresh_recovers_when_a_previous_run_deleted_without_recovering(
+    tmp_path: Path,
+) -> None:
+    """上一次重刷把数据删了却没补回来时，这次必须仍能整段重下。
+
+    旧版本只删 ``daily_bars``、不动 ``instruments`` 的覆盖区间，于是库里是这样：
+    列表上还写着"6398 根"，K 线却是空的（``last_close`` 直接是 None）。重刷在
+    这种库上删除会命中 0 行，所以"删了才重算覆盖"不够——覆盖必须无条件归零。
+    """
+
+    with _client(tmp_path, {"600000": [20.0, 21.0]}) as (client, service):
+        store = client.app.state.market_data_store
+        store.replace_local_bars("SH", "600000", "stock", _frame("SH", "600000", [10.0, 11.0]))
+        # 绕过 delete_bars 直接清行，复现旧版本留下的"有覆盖、没数据"状态。
+        with store._bars._store._connect() as connection:  # noqa: SLF001 - 复现历史状态
+            connection.execute("DELETE FROM daily_bars")
+
+        created = client.post(
+            "/api/v1/market-data/refresh",
+            json={"universe": "all", "confirm": True},
+        )
+        state = _wait(client, created.json()["data"]["job_id"])
+
+        assert state["result"]["deleted_bars"] == 0
+        assert service.coverage_at_sync[("SH", "600000")] == (None, None)
+        assert list(store.read_bars("SH", "600000")["close"]) == [20.0, 21.0]
+
+
 def test_refresh_names_instruments_that_stayed_empty(tmp_path: Path) -> None:
     """删了却没下回来的标的必须被点名，否则用户只看到总数少了、不知道少了谁。"""
 

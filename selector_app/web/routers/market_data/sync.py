@@ -229,6 +229,10 @@ def _reset_scope(
         return (), 0
     # source 必填两种各删一次：不传会变成"清空整表"，那不是这个按钮的意图。
     deleted = sum(store.delete_bars(codes=list(codes), source=source) for source in _BAR_SOURCES)
+    # 删除可能一行都没命中——上一次重刷删了却没补回来时库里就是空的——而那种
+    # 情况下 delete_bars 不会重算覆盖，留着旧区间会让这次重下又只补首尾两段，
+    # 等于什么都没下。重刷的语义就是"这些标的的覆盖先归零，再从零整段下"。
+    store.reset_instrument_coverage([(ref.market, ref.code) for ref in refs])
     # 删掉的行可能正躺在指标缓存里，版本号副本不清掉下一次查询还会命中它。
     _invalidate_indicator_cache(request)
     return codes, deleted

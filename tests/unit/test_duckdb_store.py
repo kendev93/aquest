@@ -539,6 +539,32 @@ def test_delete_bars_realigns_instrument_coverage(tmp_path: Path) -> None:
     assert coverage["000001"].bar_count == 1
 
 
+def test_reset_instrument_coverage_zeroes_stale_metadata(tmp_path: Path) -> None:
+    """删除一行都没命中时也要能重置覆盖：上一次重刷删了没补回来就是这种状态。
+
+    此时 ``delete_bars`` 不会触发重算（没删到行），留着旧区间会让这次重下只补
+    首尾两段——而首尾两段对一只早已上市的票都是空的，等于什么都没下。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.upsert_online_bars(
+        _bars(
+            ("SH", "600000", "2024-01-02", 10.0, "online"),
+            ("SZ", "000001", "2024-01-02", 5.0, "online"),
+        )
+    )
+
+    assert store.reset_instrument_coverage([("SH", "600000")]) == 1
+
+    coverage = {ref.code: ref for ref in store.list_instruments(include_missing=True)}
+    assert (coverage["600000"].first_date, coverage["600000"].last_date) == (None, None)
+    assert coverage["600000"].bar_count == 0
+    # 没点名的标的不能被顺手清掉。
+    assert coverage["000001"].first_date == date(2024, 1, 2)
+    # 已经清过一次就没有可清的了。
+    assert store.reset_instrument_coverage([("SH", "600000")]) == 0
+
+
 def test_delete_bars_recomputes_coverage_from_remaining_rows(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     store.upsert_local_bars(

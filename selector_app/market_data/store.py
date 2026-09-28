@@ -159,6 +159,9 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
             end_date=end_date,
         )
 
+    def reset_instrument_coverage(self, refs: Sequence[tuple[str, str]]) -> int:
+        return self._bars.reset_instrument_coverage(refs)
+
     def upsert_online_bars(
         self,
         frame: pd.DataFrame,

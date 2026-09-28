@@ -364,6 +364,62 @@ class DuckDbBarsStore:
                 raise
         return removed
 
+    def reset_instrument_coverage(self, refs: Sequence[tuple[str, str]]) -> int:
+        """Zero the coverage columns of the given instruments, returning how many moved.
+
+        先删后下的入口用得上：删除可能一行都没命中（上一次重刷删了没补回来，
+        或者标的本来就是空的），此时 ``delete_bars`` 不会重算覆盖，留着旧区间
+        会让这次重下又只补首尾两段——而那两段对一只早已上市的票都是空的。
+        """
+
+        self._store._require_writer()
+        symbols = pd.DataFrame(
+            [
+                {"market": market.strip().upper(), "code": code.strip()}
+                for market, code in refs
+                if market.strip() and code.strip()
+            ]
+        ).drop_duplicates()
+        if symbols.empty:
+            return 0
+        with _WRITE_LOCK, self._store._connect() as connection:
+            connection.execute("BEGIN")
+            try:
+                connection.register("_coverage_reset", symbols)
+                try:
+                    row = connection.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM instruments AS instruments
+                        INNER JOIN _coverage_reset AS reset
+                            ON instruments.market = reset.market
+                           AND instruments.code = reset.code
+                        WHERE instruments.bar_count > 0
+                           OR instruments.first_date IS NOT NULL
+                           OR instruments.last_date IS NOT NULL
+                        """
+                    ).fetchone()
+                    affected = int(row[0] if row else 0)
+                    if affected:
+                        connection.execute(
+                            """
+                            UPDATE instruments SET
+                                first_date = NULL, last_date = NULL,
+                                bar_count = 0, updated_at = ?
+                            FROM _coverage_reset AS reset
+                            WHERE instruments.market = reset.market
+                              AND instruments.code = reset.code
+                            """,
+                            [_now()],
+                        )
+                finally:
+                    connection.unregister("_coverage_reset")
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        return affected
+
     def upsert_online_bars(
         self,
         frame: pd.DataFrame,
