@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 def test_runtime_lock_is_exact_and_excludes_removed_online_dependency() -> None:
-    manifest = Path(__file__).parents[2] / "requirements.lock"
+    manifest = Path(__file__).parents[2] / "requirements.txt"
     lines = [
         line.strip()
         for line in manifest.read_text(encoding="utf-8").splitlines()
@@ -28,7 +28,7 @@ def test_multipart_is_declared_because_the_import_endpoint_uploads_a_file() -> N
     """
 
     root = Path(__file__).parents[2]
-    manifest = (root / "requirements.lock").read_text(encoding="utf-8").lower()
+    manifest = (root / "requirements.txt").read_text(encoding="utf-8").lower()
     project = (root / "pyproject.toml").read_text(encoding="utf-8").lower()
 
     assert "python-multipart" in manifest
@@ -47,5 +47,5 @@ def test_every_fastapi_file_upload_route_has_its_dependency_declared() -> None:
 
     if not users:
         return
-    manifest = (root / "requirements.lock").read_text(encoding="utf-8").lower()
+    manifest = (root / "requirements.txt").read_text(encoding="utf-8").lower()
     assert "python-multipart" in manifest, f"以下文件需要 python-multipart: {users}"

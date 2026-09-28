@@ -135,7 +135,7 @@ sh scripts/start.sh --protected
 也可以在宿主机生成 standalone bundle：
 
 ```bash
-python3 -m pip install --require-hashes -r requirements.lock
+python3 -m pip install --require-hashes -r requirements.txt
 python3 -m pip install -r requirements-build.txt
 python3 scripts/build_nuitka.py --jobs 4
 ```
@@ -300,7 +300,7 @@ N:=20;
 
 排行榜支持“一键回测当前榜单前十”：只复核当前正在查看的夏普榜或收益榜，使用实验原始开始日期和任务启动时本地最新已完成行情日。每个候选只执行一次全区间组合回测，再从连续资金曲线派生整体、今年以来、最近一年、最近两年和自然年度收益、回撤、Sharpe 与交易数；结果同时保存完整成交记录、资金曲线、耗时和行情指纹，行情更新会明确标记。复核结果不会反向改写验证期排行榜，同一实验和榜单默认只保留最近一次。
 
-正式 Docker 镜像和 CI 使用 `requirements.lock` 安装精确版本及 SHA-256 校验的 Python 3.12 运行依赖。直接依赖的兼容范围维护在 `requirements.in`；在 Python 3.12 环境安装 `pip-tools` 后，用 `python -m piptools compile --generate-hashes --strip-extras --resolver=backtracking --output-file=requirements.lock requirements.in` 更新锁。普通编译沿用现有版本；要升级全部依赖时显式加 `--upgrade`。本地开发环境直接安装 `.[dev,catalog]`，以适配当前 Python 环境。Tencent 和 East Money 日线接口通过标准库 HTTP 客户端访问，Baostock 作为证券目录与交易日历依赖固定在运行锁中。
+正式 Docker 镜像和 CI 使用 `requirements.txt` 安装精确版本及 SHA-256 校验的 Python 3.12 运行依赖。直接依赖的兼容范围维护在 `requirements.in`；在 Python 3.12 环境安装 `pip-tools` 后，用 `python -m piptools compile --generate-hashes --strip-extras --resolver=backtracking --output-file=requirements.txt requirements.in` 更新锁。Dependabot 每周检查并为 Python、前端 npm、Docker 基础镜像和 GitHub Actions 提交版本升级 PR。普通编译沿用现有版本；要升级全部依赖时显式加 `--upgrade`。本地开发环境直接安装 `.[dev,catalog]`，以适配当前 Python 环境。Tencent 和 East Money 日线接口通过标准库 HTTP 客户端访问，Baostock 作为证券目录与交易日历依赖固定在运行锁中。
 
 可以用固定合成数据运行搜索引擎基准矩阵，不会读取或修改本地行情：
 

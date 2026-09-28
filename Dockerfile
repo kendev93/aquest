@@ -10,8 +10,8 @@ RUN apt-get update \
     && apt-get install --no-install-recommends -y libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.lock ./requirements.lock
-RUN python -m pip install --no-cache-dir --require-hashes -r requirements.lock
+COPY requirements.txt ./requirements.txt
+RUN python -m pip install --no-cache-dir --require-hashes -r requirements.txt
 
 COPY README.md LICENSE THIRD_PARTY_NOTICES.md ./
 COPY selector_app ./selector_app
@@ -22,7 +22,7 @@ COPY selector_app ./selector_app
 # 所以这里不走 `pip install '.[catalog]'`：那会触发 PEP 517 构建隔离，每次构建都要额外
 # 联网拉 hatchling，代理一关就 SSL EOF 失败，而装出来的东西我们根本用不上。
 # catalog extra 里唯一的包 baostock（全市场标的发现通道，见
-# docs/datasource-survey-2026-09-20.md）已并入 requirements.lock，跟着上面那层一起装。
+# docs/datasource-survey-2026-09-20.md）已并入 requirements.txt，跟着上面那层一起装。
 #
 # 副作用：源码变化不再让 pip 重装，构建只剩「拉 baostock 等 wheel」这一处联网点。
 RUN python -m pip check \

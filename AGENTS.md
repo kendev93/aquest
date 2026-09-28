@@ -6,7 +6,7 @@
 
 ## Build, Run, and Verify
 
-Use Python 3.10–3.13 and Node 20+. For local development, install dependencies with `python -m pip install -e ".[dev,catalog]"`. The release lock targets Python 3.12; Docker and CI install it with `python -m pip install --require-hashes -r requirements.lock`. Maintain direct runtime constraints in `requirements.in` and regenerate the lock under Python 3.12 with pip-tools. Run the API with `uvicorn selector_app.web.app:app --reload --host 127.0.0.1 --port 8123` (or `indicator-lab --reload`). Start the UI with `cd web-ui && npm ci && npm run dev`.
+Use Python 3.10–3.13 and Node 20+. For local development, install dependencies with `python -m pip install -e ".[dev,catalog]"`. The release lock targets Python 3.12; Docker and CI install it with `python -m pip install --require-hashes -r requirements.txt`. Maintain direct runtime constraints in `requirements.in` and regenerate the lock under Python 3.12 with pip-tools. Run the API with `uvicorn selector_app.web.app:app --reload --host 127.0.0.1 --port 8123` (or `indicator-lab --reload`). Start the UI with `cd web-ui && npm ci && npm run dev`.
 
 Use `sh scripts/verify_ci.sh python` for pytest with coverage, Ruff, and mypy; use `frontend` for Vitest, type checking, build, and Playwright E2E; use `docker` for Compose and image checks. `sh scripts/verify_ci.sh` runs the full CI set. These commands require dependencies to be installed first.
 

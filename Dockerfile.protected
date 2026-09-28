@@ -13,8 +13,8 @@ RUN apt-get update \
     && apt-get install --no-install-recommends -y build-essential patchelf \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.lock requirements-build.txt pyproject.toml README.md LICENSE THIRD_PARTY_NOTICES.md ./
-RUN python -m pip install --no-cache-dir --require-hashes -r requirements.lock \
+COPY requirements.txt requirements-build.txt pyproject.toml README.md LICENSE THIRD_PARTY_NOTICES.md ./
+RUN python -m pip install --no-cache-dir --require-hashes -r requirements.txt \
     && python -m pip install --no-cache-dir -r requirements-build.txt
 
 COPY selector_app ./selector_app

@@ -14,13 +14,13 @@ from selector_app.condition_research.models import ConditionResearchConfig
 from selector_app.condition_research.samples import MiningSamples
 from selector_app.condition_research.service import (
     ConditionResearchService,
-    _backtest_config,
     _compact_report,
     _daily_hits,
     _resolved_ranking,
     _select_holdout_candidates,
     candidate_constraint_failures,
 )
+from selector_app.condition_research.worker_tasks import _backtest_config
 from selector_app.market_data.models import StockRef
 from selector_app.screening.jobs import TaskUserError
 from selector_app.screening.models import ScreenCondition

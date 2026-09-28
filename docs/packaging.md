@@ -32,13 +32,13 @@ Dockerfile.protected
 项目根目录执行：
 
 ~~~bash
-python3 -m pip install --require-hashes -r requirements.lock
+python3 -m pip install --require-hashes -r requirements.txt
 python3 -m pip install -r requirements-build.txt
 ~~~
 
 requirements-build.txt 固定 Nuitka、ordered-set 和 zstandard 的构建版本。保护版 Docker 会把这些依赖留在 builder 阶段，不复制到最终运行镜像。
 
-运行依赖由 Python 3.12 下 `requirements.in` 编译成 `requirements.lock`，包含精确版本和 SHA-256；Docker 与 CI 使用 `pip install --require-hashes -r requirements.lock`。修改直接依赖范围后，使用开发环境中的 pip-tools 运行 `python -m piptools compile --generate-hashes --strip-extras --resolver=backtracking --output-file=requirements.lock requirements.in` 并提交两个文件。
+运行依赖由 Python 3.12 下 `requirements.in` 编译成 `requirements.txt`，包含精确版本和 SHA-256；Docker 与 CI 使用 `pip install --require-hashes -r requirements.txt`。修改直接依赖范围后，使用开发环境中的 pip-tools 运行 `python -m piptools compile --generate-hashes --strip-extras --resolver=backtracking --output-file=requirements.txt requirements.in` 并提交两个文件。Dependabot 每周为 pip-tools、npm、Docker 基础镜像和 GitHub Actions 检查升级并创建 PR。
 
 通用构建脚本为：
 
@@ -153,7 +153,7 @@ py -3.12 -m venv .venv-pack
 .\.venv-pack\Scripts\Activate.ps1
 
 python -m pip install --upgrade pip
-python -m pip install --require-hashes -r requirements.lock
+python -m pip install --require-hashes -r requirements.txt
 python -m pip install -r requirements-build.txt
 ~~~
 
@@ -214,7 +214,7 @@ python3 -m venv .venv-pack
 source .venv-pack/bin/activate
 
 python -m pip install --upgrade pip
-python -m pip install --require-hashes -r requirements.lock
+python -m pip install --require-hashes -r requirements.txt
 python -m pip install -r requirements-build.txt
 brew install libomp
 
@@ -232,7 +232,7 @@ python scripts/build_nuitka.py --output-dir dist/protected-macos-arm64 --clean
 arch -x86_64 python3 -m venv .venv-pack-x86_64
 source .venv-pack-x86_64/bin/activate
 
-arch -x86_64 python -m pip install --require-hashes -r requirements.lock
+arch -x86_64 python -m pip install --require-hashes -r requirements.txt
 arch -x86_64 python -m pip install -r requirements-build.txt
 arch -x86_64 python scripts/build_nuitka.py --output-dir dist/protected-macos-x86_64 --clean
 ~~~
@@ -294,7 +294,7 @@ npm run build
 ## 发布检查清单
 
 - [ ] 使用目标平台和目标架构构建；
-- [ ] requirements.lock 和 requirements-build.txt 版本已确认；
+- [ ] requirements.txt 和 requirements-build.txt 版本已确认；
 - [ ] 运行 sh scripts/verify_ci.sh python；
 - [ ] 运行 sh scripts/verify_ci.sh protected 或对应平台的 bundle 检查；
 - [ ] 产物内没有 .py、.pyc、.pyo 或项目源码目录；

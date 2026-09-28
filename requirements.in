@@ -1,5 +1,5 @@
 # Runtime dependency constraints for the Python 3.12 release lock.
-# Compile requirements.lock in Python 3.12 with pip-tools; Docker and CI install
+# Compile requirements.txt in Python 3.12 with pip-tools; Docker and CI install
 # the generated exact pins and hashes from that file.
 alembic>=1.18.4
 # baostock 来自 pyproject 的 catalog extra：东财 clist 目录接口被封后它是唯一稳定的
