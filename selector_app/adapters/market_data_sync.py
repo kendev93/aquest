@@ -567,6 +567,8 @@ def _drain_stage_events(
             continue
         kind = event.get("kind")
         if kind == "started":
+            # 这条事件只说明"轮到谁了"：上一只标的的 range_start/range_end 还留在
+            # metadata 里，不清掉 UI 就会把上一只票的区间挂到当前标的名下。
             _report_stage_detail(
                 detail_callback,
                 {
@@ -580,6 +582,10 @@ def _drain_stage_events(
                     },
                     "provider": event.get("provider"),
                     "range_label": event.get("range_label"),
+                    "range_start": None,
+                    "range_end": None,
+                    "bar_count": None,
+                    "retry": None,
                 },
             )
             continue
@@ -588,7 +594,12 @@ def _drain_stage_events(
         downloaded += 1
         detail = event.get("detail")
         if isinstance(detail, Mapping):
-            _report_stage_detail(detail_callback, dict(detail))
+            # 子进程只知道自己的标的，父进程才是唯一知道总数的人：把真实计数并进
+            # 上报，否则 UI 永远停在阶段开始时写下的 0 / 总数。
+            _report_stage_detail(
+                detail_callback,
+                {**dict(detail), "downloaded_targets": downloaded},
+            )
         if progress_callback is not None:
             progress_callback(downloaded, total)
 

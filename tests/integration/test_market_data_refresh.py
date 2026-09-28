@@ -68,6 +68,9 @@ class _FakeSyncService:
         self._store = store
         self._redownload = redownload
         self.configs: list[MarketSyncConfig] = []
+        #: 真通道在 sync 内部读 instruments 的覆盖区间决定"还缺哪一段"，这里照样
+        #: 在 sync 被调用的那一刻把库里的区间记下来，供测试断言。
+        self.coverage_at_sync: dict[tuple[str, str], tuple[object, object]] = {}
 
     def sync(
         self,
@@ -78,6 +81,10 @@ class _FakeSyncService:
         abort_check: object = None,
     ) -> dict[str, object]:
         self.configs.append(config)
+        self.coverage_at_sync = {
+            (ref.market, ref.code): (ref.first_date, ref.last_date)
+            for ref in self._store.list_instruments(include_missing=True)
+        }
         written = 0
         for market, code in (("SH", "600000"), ("SZ", "000001")):
             closes = self._redownload.get(code)
@@ -151,6 +158,10 @@ def test_refresh_deletes_stored_bars_before_redownloading(tmp_path: Path) -> Non
         assert list(bars["source"]) == ["online", "online"]
         # 重刷永远按全历史拉，不然删掉的那段补不回来。
         assert service.configs and service.configs[0].full_history is True
+        # 光删 daily_bars 不够：在线同步靠 instruments 的 first_date/last_date 判断
+        # "这段是不是已经有了"。留着旧区间，它就会只补首尾两段，被删掉的中间段
+        # 永远回不来。
+        assert service.coverage_at_sync[("SH", "600000")] == (None, None)
 
 
 def test_refresh_keeps_instruments_outside_the_selected_market(tmp_path: Path) -> None:

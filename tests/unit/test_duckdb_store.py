@@ -511,6 +511,59 @@ def test_delete_bars_honours_the_date_window(tmp_path: Path) -> None:
     ]
 
 
+def test_delete_bars_realigns_instrument_coverage(tmp_path: Path) -> None:
+    """删除要同步覆盖元数据：库以为自己还有那段历史时，先删后下只补首尾两段。
+
+    在线同步靠 ``instruments.first_date/last_date`` 判断"哪些区间已经有了"，所以
+    删掉 daily_bars 却留着旧区间，等于让重下跳过中间那一段，而那段已经删没了。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.upsert_online_bars(
+        _bars(
+            ("SH", "600000", "2024-01-02", 10.0, "online"),
+            ("SH", "600000", "2024-01-05", 11.0, "online"),
+            ("SZ", "000001", "2024-01-05", 5.0, "online"),
+        )
+    )
+
+    assert store.delete_bars(source="online", codes=["600000"]) == 2
+
+    coverage = {ref.code: ref for ref in store.list_instruments(include_missing=True)}
+    assert coverage["600000"].first_date is None
+    assert coverage["600000"].last_date is None
+    assert coverage["600000"].bar_count == 0
+    # 没被删的标的保持原样：重算只该反映真实剩余的行。
+    assert coverage["000001"].first_date == date(2024, 1, 5)
+    assert coverage["000001"].last_date == date(2024, 1, 5)
+    assert coverage["000001"].bar_count == 1
+
+
+def test_delete_bars_recomputes_coverage_from_remaining_rows(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.upsert_local_bars(
+        _bars(
+            ("SH", "600000", "2024-01-02", 10.0, "local"),
+            ("SH", "600000", "2024-01-05", 11.0, "local"),
+            ("SH", "600000", "2024-01-09", 12.0, "local"),
+        )
+    )
+
+    removed = store.delete_bars(
+        source="local",
+        start_date=date(2024, 1, 3),
+        end_date=date(2024, 1, 6),
+    )
+
+    assert removed == 1
+    ref = next(ref for ref in store.list_instruments() if ref.code == "600000")
+    assert (ref.first_date, ref.last_date, ref.bar_count) == (
+        date(2024, 1, 2),
+        date(2024, 1, 9),
+        2,
+    )
+
+
 # --------------------------------------------------------------------------
 # 试验台账（候选池 #20：跨运行取最好的那一次，需要记账才能校正）
 # --------------------------------------------------------------------------

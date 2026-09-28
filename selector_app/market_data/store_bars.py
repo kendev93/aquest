@@ -355,6 +355,9 @@ class DuckDbBarsStore:
                 removed = int(row[0] if row else 0)
                 if removed:
                     connection.execute(f"DELETE FROM daily_bars{where}", parameters)
+                    # 覆盖元数据不跟着删就会变成"数据没了但库以为自己还有"，
+                    # 于是先删后下只补首尾两段，中间那段静默消失。
+                    self._store._refresh_instrument_coverage(connection)
                 connection.execute("COMMIT")
             except Exception:
                 connection.execute("ROLLBACK")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import queue
 from concurrent.futures import Future, ProcessPoolExecutor
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -298,3 +299,54 @@ def test_market_data_sync_merges_staged_worker_results(monkeypatch, tmp_path: Pa
     assert report.written_bars == 2
     assert store.status().bar_count == 2
     assert not any(staging_directory(store.database_path).glob("*/worker-*.duckdb"))
+
+
+def test_drain_stage_events_publishes_the_running_download_count() -> None:
+    """分片下载只有父进程知道总数：不把计数并进 detail，UI 就永远停在 0 / 总数。
+
+    子进程上报的是"我这只票下完了"，它不知道总共下完了多少只——于是进度条在涨、
+    "已下载 N / 总数"却一直是 0，看上去像卡死。
+    """
+
+    class _Queue:
+        def __init__(self, events: list[dict[str, object]]) -> None:
+            self._events = events
+
+        def get_nowait(self) -> dict[str, object]:
+            if not self._events:
+                raise queue.Empty
+            return self._events.pop(0)
+
+    details: list[dict[str, object]] = []
+    progress: list[tuple[int, int]] = []
+    pending = _Queue(
+        [
+            {
+                "kind": "started",
+                "worker_id": 0,
+                "market": "SH",
+                "code": "600000",
+                "name": "浦发银行",
+            },
+            {"kind": "finished", "detail": {"range_start": "2024-01-02"}},
+            {"kind": "finished", "detail": {"range_start": "2024-01-03"}},
+        ]
+    )
+
+    downloaded = market_data_sync_module._drain_stage_events(
+        pending,
+        downloaded=0,
+        total=2,
+        progress_callback=lambda current, total: progress.append((current, total)),
+        detail_callback=lambda detail: details.append(dict(detail)),
+    )
+
+    assert downloaded == 2
+    assert progress == [(1, 2), (2, 2)]
+    assert details[1]["downloaded_targets"] == 1
+    assert details[2]["downloaded_targets"] == 2
+    # started 只说明"轮到谁了"：上一只票的区间必须清掉，否则 UI 会把别人的区间
+    # 挂在当前标的名下（标题是这只、区间是上一只）。
+    assert details[0]["range_start"] is None
+    assert details[0]["range_end"] is None
+    assert details[0]["bar_count"] is None

@@ -1032,6 +1032,48 @@ class _DuckDbStoreBase:
             ],
         )
 
+    def _refresh_instrument_coverage(
+        self,
+        connection: duckdb.DuckDBPyConnection,
+    ) -> None:
+        """Realign ``instruments`` coverage with the rows actually left in ``daily_bars``.
+
+        ``delete_bars`` 只动 ``daily_bars``，但同步靠 ``instruments.first_date /
+        last_date`` 判断"哪些区间已经有了"：留着旧区间，先删后下就只会补首尾两段，
+        中间那段再也回不来（在线行写不回被删掉的日期）。所以删除之后必须按剩余行
+        重算一次，删空的标的显式清零。
+        """
+
+        now = _now()
+        connection.execute(
+            """
+            UPDATE instruments SET
+                first_date = agg.first_date,
+                last_date = agg.last_date,
+                bar_count = agg.bar_count,
+                updated_at = ?
+            FROM (
+                SELECT market, code, MIN(trade_date) AS first_date,
+                       MAX(trade_date) AS last_date, COUNT(*) AS bar_count
+                FROM daily_bars
+                GROUP BY market, code
+            ) AS agg
+            WHERE instruments.market = agg.market AND instruments.code = agg.code
+            """,
+            [now],
+        )
+        connection.execute(
+            """
+            UPDATE instruments SET
+                first_date = NULL, last_date = NULL, bar_count = 0, updated_at = ?
+            WHERE NOT EXISTS (
+                SELECT 1 FROM daily_bars AS bars
+                WHERE bars.market = instruments.market AND bars.code = instruments.code
+            )
+            """,
+            [now],
+        )
+
     def status(self) -> DataStoreStatus:
         # Every writer in this process holds the same lock for the complete
         # DuckDB transaction.  Taking it before opening a read-only connection
