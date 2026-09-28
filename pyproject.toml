@@ -32,7 +32,7 @@ catalog = [
   "baostock>=0.8,<1",
 ]
 dev = [
-  "mypy>=1.9,<2",
+  "mypy>=1.9,<3",
   # starlette ≥ 1.6 的 TestClient 首选 httpx2，找不到才回退 httpx 并为此发一条
   # StarletteDeprecationWarning。httpx2 是独立发布（带自己的 httpcore2），不会
   # 顶替 httpx，装上即可消除该警告。生产运行时不用 TestClient，因此不进
