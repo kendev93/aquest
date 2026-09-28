@@ -8,8 +8,7 @@ def test_runtime_lock_is_exact_and_excludes_removed_online_dependency() -> None:
     lines = [
         line.strip()
         for line in manifest.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-        and not line.lstrip().startswith(("#", "--hash="))
+        if line.strip() and not line.lstrip().startswith(("#", "--hash="))
     ]
     requirements = [line.rstrip("\\").split(";", maxsplit=1)[0].strip() for line in lines]
 
