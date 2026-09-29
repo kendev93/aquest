@@ -21,6 +21,7 @@ import {
 } from '../api/savedStrategies'
 import BacktestHistoryPanel from '../components/BacktestHistoryPanel.vue'
 import DateRangeSelector from '../components/DateRangeSelector.vue'
+import PortfolioPnlAnalysis from '../components/PortfolioPnlAnalysis.vue'
 import RuleGroupEditor from '../components/RuleGroupEditor.vue'
 import TermHint from '../components/TermHint.vue'
 import type {
@@ -187,6 +188,7 @@ const loading = ref(false)
 const customParseLoading = ref(false)
 const customParseError = ref('')
 const showAdvanced = ref(false)
+const showPnlAnalysis = ref(false)
 const job = ref<PortfolioBacktestJobState | null>(null)
 const result = ref<PortfolioBacktestResult | null>(null)
 const resultPriceBasis = computed(() => result.value?.price_basis ?? 'raw')
@@ -1302,7 +1304,7 @@ watch(() => form.formulaText, (value) => {
         </form>
 
         <section class="results-panel panel" data-testid="portfolio-results" aria-live="polite">
-          <div class="panel-heading results-heading"><div><span class="section-kicker">02 / RESULTS</span><h2>组合结果</h2></div><button v-if="result" class="secondary-button export-backtest" type="button" data-testid="export-portfolio-backtest" @click="downloadResult">导出 JSON</button></div>
+          <div class="panel-heading results-heading"><div><span class="section-kicker">02 / RESULTS</span><h2>组合结果</h2></div><div class="results-actions"><button v-if="result" class="secondary-button" type="button" data-testid="portfolio-pnl-analysis-toggle" :aria-expanded="showPnlAnalysis" aria-controls="portfolio-pnl-analysis-panel" @click="showPnlAnalysis = !showPnlAnalysis">{{ showPnlAnalysis ? '收起盈亏分析' : '盈亏分析' }}</button><button v-if="result" class="secondary-button export-backtest" type="button" data-testid="export-portfolio-backtest" @click="downloadResult">导出 JSON</button></div></div>
           <div v-if="result" class="strategy-save-bar" data-testid="strategy-save-bar">
             <input v-model="newStrategyName" class="strategy-name-input" data-testid="strategy-name-input" maxlength="60" placeholder="给这套配置起个名字" aria-label="策略名称" @keyup.enter="saveCurrentStrategy">
             <button class="primary-button" type="button" data-testid="strategy-save" :disabled="strategySaving" @click="saveCurrentStrategy">{{ strategySaving ? '保存中…' : '保存为策略' }}</button>
@@ -1325,6 +1327,9 @@ watch(() => form.formulaText, (value) => {
               <div><span>成交笔数</span><strong>{{ formatNumber(performanceValue('total_trades'), 0) }}</strong></div>
               <div><span>胜率</span><strong>{{ formatPercent(performanceValue('win_rate')) }}</strong></div>
               <div><span>期末资产</span><strong>{{ formatMoney(performanceValue('end_value')) }}</strong></div>
+            </div>
+            <div id="portfolio-pnl-analysis-panel" v-if="showPnlAnalysis">
+              <PortfolioPnlAnalysis :result="result" testid="portfolio-pnl-analysis" />
             </div>
             <div class="progress-track portfolio-progress" aria-label="组合数据处理进度"><span :style="{ width: `${Math.round((job?.progress ?? 1) * 100)}%` }"></span></div>
 

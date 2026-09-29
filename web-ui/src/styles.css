@@ -291,6 +291,17 @@ tbody tr:hover td { background: rgba(22, 34, 58, 0.45); }
 .portfolio-assumptions > span { color: var(--warning); font-weight: 700; }
 .portfolio-assumptions ul { display: grid; gap: 2px; margin: 5px 0 0; padding-left: 18px; }
 .export-backtest { width: auto; margin-top: 0; }
+.results-actions { display: flex; align-items: center; gap: 8px; }
+.results-actions .secondary-button { width: auto; min-height: 32px; margin-top: 0; }
+/* 盈亏分析面板：组合结果页里点「盈亏分析」展开，数据全部在前端现算。 */
+.pnl-analysis { display: grid; gap: 14px; margin: 14px 0; }
+.pnl-analysis h4 { margin: 0 0 8px; color: var(--text); font-size: 12px; }
+.pnl-metrics { grid-template-columns: repeat(4, 1fr); }
+.pnl-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+.pnl-block { display: grid; align-content: start; gap: 8px; }
+.pnl-block .table-wrap table { min-width: 440px; }
+.pnl-note { margin: 0; padding: 9px 11px; border: 1px solid rgba(245, 158, 11, 0.35); border-radius: 5px; background: rgba(245, 158, 11, 0.07); color: var(--warning); font-size: 11px; line-height: 1.6; }
+.pnl-footnote { margin: 0; color: var(--subtle); font-size: 10px; line-height: 1.7; }
 .portfolio-grid { grid-template-columns: minmax(350px, 430px) minmax(0, 1fr); }
 .portfolio-fields-top { margin-top: 13px; }
 .portfolio-inline-field { margin-top: 13px; }
@@ -488,6 +499,7 @@ tbody tr:hover td { background: rgba(22, 34, 58, 0.45); }
   .rule-row > :last-child { grid-column: 1 / -1; }
   .results-heading { align-items: flex-start; flex-direction: column; }
   .metrics-strip { grid-template-columns: repeat(2, 1fr); }
+  .pnl-grid { grid-template-columns: 1fr; }
   .empty-state { min-height: 250px; }
 }
 

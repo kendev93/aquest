@@ -185,6 +185,26 @@ describe('PortfolioBacktestPage', () => {
     expect(wrapper.get('[data-testid="portfolio-benchmark-chart"]').attributes('points')).toBeTruthy()
   })
 
+  it('opens the pnl breakdown panel on demand and folds it again', async () => {
+    const wrapper = mount(PortfolioBacktestPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')
+    await flushPromises()
+
+    // 分析是按需展开的：默认不占结果页的空间。
+    expect(wrapper.find('[data-testid="portfolio-pnl-analysis"]').exists()).toBe(false)
+    await wrapper.get('[data-testid="portfolio-pnl-analysis-toggle"]').trigger('click')
+    const panel = wrapper.get('[data-testid="portfolio-pnl-analysis"]')
+    expect(panel.get('[data-testid="portfolio-pnl-analysis-trips"]').text()).toBe('1')
+    expect(panel.get('[data-testid="portfolio-pnl-analysis-by-holding"]').text()).toContain('≤10 日')
+    expect(panel.get('[data-testid="portfolio-pnl-analysis-unrealized"]').text()).toContain('浦发银行')
+    // 这次回测没设止损，面板要把它点出来。
+    expect(panel.get('[data-testid="portfolio-pnl-analysis-no-stop-loss"]').text()).toContain('止损')
+
+    await wrapper.get('[data-testid="portfolio-pnl-analysis-toggle"]').trigger('click')
+    expect(wrapper.find('[data-testid="portfolio-pnl-analysis"]').exists()).toBe(false)
+  })
+
   it('hides the benchmark block when the backtest cannot produce one', async () => {
     vi.mocked(portfolioApi.getPortfolioBacktestResults).mockResolvedValue({ ...result, benchmark: null })
     const wrapper = mount(PortfolioBacktestPage)
