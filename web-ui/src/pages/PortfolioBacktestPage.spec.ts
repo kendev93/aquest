@@ -134,8 +134,8 @@ const result: PortfolioBacktestResult = {
 
 const riskCandidate: StrategyDiscoveryCandidate = {
   candidate_hash: 'risk-candidate-1',
-  complexity: 4,
-  human_readable_rules: '止损8%；移动止损 ATR×2；止盈20%；移动止盈5%',
+  complexity: 3,
+  human_readable_rules: '止损8%；止盈20%；移动止盈5%',
   config: {
     universe: 'all',
     start_date: '2024-01-01',
@@ -157,10 +157,6 @@ const riskCandidate: StrategyDiscoveryCandidate = {
     take_profit_pct: 0.2,
     take_profit_atr_multiplier: null,
     take_profit_cooldown_days: 0,
-    moving_stop_loss_mode: 'atr',
-    moving_stop_loss_pct: null,
-    moving_stop_loss_atr_multiplier: 2,
-    moving_stop_loss_cooldown_days: 3,
     trailing_stop_mode: 'pct',
     trailing_stop_pct: 0.05,
     trailing_stop_atr_multiplier: null,
@@ -629,10 +625,6 @@ describe('PortfolioBacktestPage', () => {
       stop_loss_pct: null,
       stop_loss_atr_multiplier: 2,
       stop_loss_cooldown_days: 3,
-      moving_stop_loss_mode: 'atr',
-      moving_stop_loss_pct: null,
-      moving_stop_loss_atr_multiplier: 2,
-      moving_stop_loss_cooldown_days: 3,
       take_profit_mode: 'pct',
       take_profit_pct: 0.2,
       take_profit_atr_multiplier: null,
@@ -666,9 +658,6 @@ describe('PortfolioBacktestPage', () => {
     expect((wrapper.get('[data-testid="portfolio-stop-loss-mode"]').element as HTMLSelectElement).value).toBe('atr')
     expect((wrapper.get('[data-testid="portfolio-stop-loss-atr"]').element as HTMLInputElement).value).toBe('2')
     expect((wrapper.get('[data-testid="portfolio-stop-loss-cooldown"]').element as HTMLInputElement).value).toBe('3')
-    expect((wrapper.get('[data-testid="portfolio-moving-stop-loss-enabled"]').element as HTMLInputElement).checked).toBe(true)
-    expect((wrapper.get('[data-testid="portfolio-moving-stop-loss-mode"]').element as HTMLSelectElement).value).toBe('atr')
-    expect((wrapper.get('[data-testid="portfolio-moving-stop-loss-atr"]').element as HTMLInputElement).value).toBe('2')
 
     await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')
     await flushPromises()
@@ -682,8 +671,6 @@ describe('PortfolioBacktestPage', () => {
       stop_loss_pct: null,
       stop_loss_atr_multiplier: 2,
       stop_loss_cooldown_days: 3,
-      moving_stop_loss_atr_multiplier: 2,
-      moving_stop_loss_cooldown_days: 3,
       take_profit_pct: 0.2,
       take_profit_cooldown_days: 5,
     }))
@@ -805,8 +792,6 @@ describe('PortfolioBacktestPage', () => {
     await wrapper.get('[data-testid="portfolio-max-positions"]').setValue(8)
     await wrapper.get('[data-testid="portfolio-ranking-value"]').setValue('indicator_three.var1')
     await wrapper.get('[data-testid="portfolio-stop-loss-cooldown"]').setValue(2)
-    await wrapper.get('[data-testid="portfolio-moving-stop-loss-enabled"]').setValue(true)
-    await wrapper.get('[data-testid="portfolio-moving-stop-loss-cooldown"]').setValue(1)
     await wrapper.get('[data-testid="portfolio-take-profit-enabled"]').setValue(true)
     await wrapper.get('[data-testid="portfolio-take-profit-cooldown"]').setValue(3)
     await wrapper.get('[data-testid="portfolio-trailing-stop-enabled"]').setValue(true)
@@ -818,8 +803,6 @@ describe('PortfolioBacktestPage', () => {
       max_positions: 8,
       ranking_value: 'indicator_three.var1',
       stop_loss_cooldown_days: 2,
-      moving_stop_loss_pct: 0.05,
-      moving_stop_loss_cooldown_days: 1,
       take_profit_cooldown_days: 3,
       trailing_stop_cooldown_days: 4,
     }))
@@ -830,8 +813,6 @@ describe('PortfolioBacktestPage', () => {
     await flushPromises()
 
     await wrapper.get('[data-testid="portfolio-stop-loss-mode"]').setValue('atr')
-    await wrapper.get('[data-testid="portfolio-moving-stop-loss-enabled"]').setValue(true)
-    await wrapper.get('[data-testid="portfolio-moving-stop-loss-mode"]').setValue('atr')
     await wrapper.get('[data-testid="portfolio-take-profit-enabled"]').setValue(true)
     await wrapper.get('[data-testid="portfolio-take-profit-mode"]').setValue('atr')
     await wrapper.get('[data-testid="portfolio-trailing-stop-enabled"]').setValue(true)
@@ -841,7 +822,6 @@ describe('PortfolioBacktestPage', () => {
 
     expect(portfolioApi.createPortfolioBacktest).toHaveBeenCalledWith(expect.objectContaining({
       stop_loss_mode: 'atr',
-      moving_stop_loss_mode: 'atr',
       take_profit_mode: 'atr',
       trailing_stop_mode: 'atr',
     }))
@@ -856,8 +836,6 @@ describe('PortfolioBacktestPage', () => {
 
     expect(strategyDiscoveryApi.createPortfolioRiskOptimization).toHaveBeenCalledWith(expect.objectContaining({
       max_trials: 2000,
-      moving_stop_loss_mode: 'pct',
-      moving_stop_loss_pct: null,
       stop_loss_pct: 0.08,
       buy_rule: expect.objectContaining({ conditions: [expect.objectContaining({ left_value: 'indicator_three.var1' })] }),
       ranking_value: 'indicator_three.varo7',
@@ -871,8 +849,6 @@ describe('PortfolioBacktestPage', () => {
     expect((wrapper.get('[data-testid="portfolio-date-mode"]').element as HTMLSelectElement).value).toBe('custom')
     expect((wrapper.get('[data-testid="portfolio-start"]').element as HTMLInputElement).value).toBe('2024-03-01')
     expect((wrapper.get('[data-testid="portfolio-end"]').element as HTMLInputElement).value).toBe('2024-03-31')
-    expect((wrapper.get('[data-testid="portfolio-moving-stop-loss-enabled"]').element as HTMLInputElement).checked).toBe(true)
-    expect((wrapper.get('[data-testid="portfolio-moving-stop-loss-mode"]').element as HTMLSelectElement).value).toBe('atr')
 
     await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')
     await flushPromises()
@@ -881,9 +857,6 @@ describe('PortfolioBacktestPage', () => {
       date_mode: 'custom',
       start_date: '2024-03-01',
       end_date: '2024-03-31',
-      moving_stop_loss_mode: 'atr',
-      moving_stop_loss_atr_multiplier: 2,
-      moving_stop_loss_cooldown_days: 3,
       trailing_stop_pct: 0.05,
       stop_loss_pct: 0.08,
       take_profit_pct: 0.2,

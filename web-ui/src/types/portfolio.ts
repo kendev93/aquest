@@ -31,10 +31,6 @@ export interface PortfolioBacktestPayload {
   stop_loss_mode?: 'pct' | 'atr'
   stop_loss_atr_multiplier?: number | null
   stop_loss_cooldown_days?: number
-  moving_stop_loss_pct?: number | null
-  moving_stop_loss_mode?: 'pct' | 'atr'
-  moving_stop_loss_atr_multiplier?: number | null
-  moving_stop_loss_cooldown_days?: number
   trailing_stop_pct?: number | null
   trailing_stop_mode?: 'pct' | 'atr'
   trailing_stop_atr_multiplier?: number | null
@@ -105,7 +101,7 @@ export interface PortfolioTrade {
   reason: string
   instrument_type?: InstrumentType
   board?: InstrumentBoard
-  risk_trigger?: 'take_profit' | 'stop_loss' | 'moving_stop_loss' | 'trailing_stop' | null
+  risk_trigger?: 'take_profit' | 'stop_loss' | 'trailing_stop' | null
   cooldown_days?: number
   rejected: boolean
 }

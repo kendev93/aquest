@@ -834,7 +834,7 @@ onMounted(async () => {
             <legend>搜索强度</legend>
             <select v-model="form.searchLevel" data-testid="strategy-discovery-search-level"><option value="low">低 · 1000 组</option><option value="medium">中 · 2000 组</option><option value="high">高 · 3000 组</option></select>
             <p class="helper">固定搜索范围：3 组公式指标的用户可选输出 + MA5/10/20/60、RSI14、MACD、SIGNAL、Histogram；Z 等恒定输出不参与寻优。</p>
-            <p class="helper">排序指标、买卖条件、止盈止损、移动止损、移动止盈和冷却天数均自动搜索。佣金默认万分之一，最低 0.1 元。</p>
+            <p class="helper">排序指标、买卖条件、止盈止损、移动止盈和冷却天数均自动搜索。佣金默认万分之一，最低 0.1 元。</p>
             <p class="helper">夏普目标和收益目标分别保留各自的验证候选，验证后独立排序；两个榜单可以包含不同策略。</p>
           </fieldset>
           <div v-if="capabilities" class="discovery-capability-note" data-testid="strategy-discovery-capabilities">指标 {{ capabilities.indicator_count }} 个 · 信号 {{ capabilities.signal_count }} 个 · Optuna {{ capabilities.optuna_available ? '可用' : '不可用' }} · LightGBM {{ capabilities.lightgbm_available ? '可用' : '不可用' }} · 回测 {{ capabilities.evaluation_workers ?? 2 }} 进程<span v-if="capabilities.enabled === false" class="negative"> · 请重新构建 Docker 镜像安装策略寻优依赖</span></div>

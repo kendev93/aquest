@@ -87,7 +87,6 @@ function riskTriggerLabel(value: string | null | undefined): string {
   return {
     stop_loss: '止损',
     take_profit: '止盈',
-    moving_stop_loss: '移动止损',
     trailing_stop: '移动止盈',
   }[value ?? ''] ?? '—'
 }

@@ -142,38 +142,6 @@ def test_portfolio_request_supports_atr_and_trailing_risk_controls() -> None:
     assert config.trailing_stop_pct == 0.05
 
 
-def test_portfolio_request_supports_independent_moving_stop_loss() -> None:
-    request = PortfolioBacktestRequest.model_validate(
-        {
-            "ranking_value": "technical.ma5",
-            "buy_rule": {"conditions": [condition("technical.ma5", "gt", right_constant=10)]},
-            "moving_stop_loss_mode": "atr",
-            "moving_stop_loss_atr_multiplier": 2,
-            "moving_stop_loss_cooldown_days": 4,
-        }
-    )
-
-    config = request.to_config()
-    assert config.moving_stop_loss_mode == "atr"
-    assert config.moving_stop_loss_atr_multiplier == 2
-    assert config.moving_stop_loss_cooldown_days == 4
-
-
-def test_old_portfolio_request_defaults_moving_stop_loss_to_disabled() -> None:
-    request = PortfolioBacktestRequest.model_validate(
-        {
-            "ranking_value": "technical.ma5",
-            "buy_rule": {"conditions": [condition("technical.ma5", "gt", right_constant=10)]},
-            "stop_loss_pct": 0.08,
-        }
-    )
-
-    config = request.to_config()
-    assert config.moving_stop_loss_pct is None
-    assert config.moving_stop_loss_atr_multiplier is None
-    assert config.moving_stop_loss_cooldown_days == 0
-
-
 def test_risk_optimization_request_keeps_base_strategy_and_splits_dates() -> None:
     request = PortfolioRiskOptimizationRequest.model_validate(
         {

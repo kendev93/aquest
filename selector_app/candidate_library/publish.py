@@ -76,8 +76,6 @@ _RISK_FIELDS: tuple[str, ...] = (
     "stop_loss_atr_multiplier",
     "take_profit_pct",
     "take_profit_atr_multiplier",
-    "moving_stop_loss_pct",
-    "moving_stop_loss_atr_multiplier",
     "trailing_stop_pct",
     "trailing_stop_atr_multiplier",
 )

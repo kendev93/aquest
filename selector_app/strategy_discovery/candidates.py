@@ -193,11 +193,10 @@ def _build_random_risk_candidate(
     base_config = dict(request.base_config)
     risk = {
         prefix: _risk_values(rng)
-        for prefix in ("stop_loss", "take_profit", "moving_stop_loss", "trailing_stop")
+        for prefix in ("stop_loss", "take_profit", "trailing_stop")
     }
     stop_mode, stop_pct, stop_atr, stop_cooldown = risk["stop_loss"]
     take_mode, take_pct, take_atr, take_cooldown = risk["take_profit"]
-    moving_mode, moving_pct, moving_atr, moving_cooldown = risk["moving_stop_loss"]
     trailing_mode, trailing_pct, trailing_atr, trailing_cooldown = risk["trailing_stop"]
     rank_order = str(base_config.get("rank_order") or "desc")
     if rank_order not in {"asc", "desc"}:
@@ -209,7 +208,6 @@ def _build_random_risk_candidate(
     for prefix, label in (
         ("stop_loss", "止损"),
         ("take_profit", "止盈"),
-        ("moving_stop_loss", "移动止损"),
         ("trailing_stop", "移动止盈"),
     ):
         mode, percentage, atr_multiplier, cooldown = risk[prefix]
@@ -235,10 +233,6 @@ def _build_random_risk_candidate(
         stop_loss_pct=stop_pct,
         stop_loss_atr_multiplier=stop_atr,
         stop_loss_cooldown_days=stop_cooldown,
-        moving_stop_loss_mode=moving_mode,
-        moving_stop_loss_pct=moving_pct,
-        moving_stop_loss_atr_multiplier=moving_atr,
-        moving_stop_loss_cooldown_days=moving_cooldown,
         trailing_stop_mode=trailing_mode,
         trailing_stop_pct=trailing_pct,
         trailing_stop_atr_multiplier=trailing_atr,
@@ -282,7 +276,7 @@ def build_random_candidate(
         frequency_value if frequency_value in {"daily", "weekly", "monthly"} else "daily",
     )
     risk: dict[str, tuple[RiskMode, float | None, float | None, int]] = {}
-    for prefix in ("take_profit", "stop_loss", "moving_stop_loss", "trailing_stop"):
+    for prefix in ("take_profit", "stop_loss", "trailing_stop"):
         risk[prefix] = _risk_values(generator)
     buy_rule = _rule(
         request,
@@ -300,7 +294,6 @@ def build_random_candidate(
     )
     take_profit_mode, take_profit_pct, take_profit_atr, take_profit_cooldown = risk["take_profit"]
     stop_loss_mode, stop_loss_pct, stop_loss_atr, stop_loss_cooldown = risk["stop_loss"]
-    moving_mode, moving_pct, moving_atr, moving_cooldown = risk["moving_stop_loss"]
     trailing_mode, trailing_pct, trailing_atr, trailing_cooldown = risk["trailing_stop"]
     rank_order_value = str(_choice(generator, ("asc", "desc"), "desc"))
     rank_order = cast(
@@ -322,10 +315,6 @@ def build_random_candidate(
         stop_loss_pct=stop_loss_pct,
         stop_loss_atr_multiplier=stop_loss_atr,
         stop_loss_cooldown_days=stop_loss_cooldown,
-        moving_stop_loss_mode=moving_mode,
-        moving_stop_loss_pct=moving_pct,
-        moving_stop_loss_atr_multiplier=moving_atr,
-        moving_stop_loss_cooldown_days=moving_cooldown,
         trailing_stop_mode=trailing_mode,
         trailing_stop_pct=trailing_pct,
         trailing_stop_atr_multiplier=trailing_atr,
@@ -341,7 +330,7 @@ def build_random_candidate(
             + len(sell_rule.required_conditions)
             + sum(
                 1
-                for prefix in ("take_profit", "stop_loss", "moving_stop_loss", "trailing_stop")
+                for prefix in ("take_profit", "stop_loss", "trailing_stop")
                 if risk[prefix][1] is not None or risk[prefix][2] is not None
             )
         ),

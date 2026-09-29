@@ -117,11 +117,6 @@ interface PortfolioFormState {
   stopLossPct: number
   stopLossAtrMultiplier: number
   stopLossCooldownDays: number
-  movingStopLossEnabled: boolean
-  movingStopLossMode: 'pct' | 'atr'
-  movingStopLossPct: number
-  movingStopLossAtrMultiplier: number
-  movingStopLossCooldownDays: number
   takeProfitEnabled: boolean
   takeProfitMode: 'pct' | 'atr'
   takeProfitPct: number
@@ -173,11 +168,6 @@ const form = reactive<PortfolioFormState>({
   stopLossPct: 8,
   stopLossAtrMultiplier: 2,
   stopLossCooldownDays: 0,
-  movingStopLossEnabled: false,
-  movingStopLossMode: 'pct',
-  movingStopLossPct: 5,
-  movingStopLossAtrMultiplier: 2,
-  movingStopLossCooldownDays: 0,
   takeProfitEnabled: false,
   takeProfitMode: 'pct',
   takeProfitPct: 20,
@@ -485,7 +475,7 @@ function validate(): Record<string, string> {
   if (!Number.isFinite(form.maxPositions) || !Number.isInteger(form.maxPositions) || form.maxPositions < 1 || form.maxPositions > 100) {
     next.maxPositions = '持仓槽位必须是 1 到 100 的整数。'
   }
-  if (!sellRule.signals.length && !sellRule.conditions.length && !sellRule.required_conditions?.length && !form.stopLossEnabled && !form.movingStopLossEnabled && !form.takeProfitEnabled && !form.trailingStopEnabled) {
+  if (!sellRule.signals.length && !sellRule.conditions.length && !sellRule.required_conditions?.length && !form.stopLossEnabled && !form.takeProfitEnabled && !form.trailingStopEnabled) {
     next.sellRules = '至少配置一个卖出规则。'
   }
   const riskFields: Array<{
@@ -500,7 +490,6 @@ function validate(): Record<string, string> {
     label: string
   }> = [
     { enabled: form.stopLossEnabled, mode: form.stopLossMode, pct: form.stopLossPct, atr: form.stopLossAtrMultiplier, cooldown: form.stopLossCooldownDays, pctKey: 'stopLossPct', atrKey: 'stopLossAtrMultiplier', cooldownKey: 'stopLossCooldownDays', label: '止损' },
-    { enabled: form.movingStopLossEnabled, mode: form.movingStopLossMode, pct: form.movingStopLossPct, atr: form.movingStopLossAtrMultiplier, cooldown: form.movingStopLossCooldownDays, pctKey: 'movingStopLossPct', atrKey: 'movingStopLossAtrMultiplier', cooldownKey: 'movingStopLossCooldownDays', label: '移动止损' },
     { enabled: form.takeProfitEnabled, mode: form.takeProfitMode, pct: form.takeProfitPct, atr: form.takeProfitAtrMultiplier, cooldown: form.takeProfitCooldownDays, pctKey: 'takeProfitPct', atrKey: 'takeProfitAtrMultiplier', cooldownKey: 'takeProfitCooldownDays', label: '止盈' },
     { enabled: form.trailingStopEnabled, mode: form.trailingStopMode, pct: form.trailingStopPct, atr: form.trailingStopAtrMultiplier, cooldown: form.trailingStopCooldownDays, pctKey: 'trailingStopPct', atrKey: 'trailingStopAtrMultiplier', cooldownKey: 'trailingStopCooldownDays', label: '移动止盈' },
   ]
@@ -543,10 +532,6 @@ function buildPayload(): PortfolioBacktestPayload {
     stop_loss_pct: form.stopLossEnabled && form.stopLossMode === 'pct' ? form.stopLossPct / 100 : null,
     stop_loss_atr_multiplier: form.stopLossEnabled && form.stopLossMode === 'atr' ? form.stopLossAtrMultiplier : null,
     stop_loss_cooldown_days: form.stopLossEnabled ? form.stopLossCooldownDays : 0,
-    moving_stop_loss_mode: form.movingStopLossEnabled ? form.movingStopLossMode : 'pct',
-    moving_stop_loss_pct: form.movingStopLossEnabled && form.movingStopLossMode === 'pct' ? form.movingStopLossPct / 100 : null,
-    moving_stop_loss_atr_multiplier: form.movingStopLossEnabled && form.movingStopLossMode === 'atr' ? form.movingStopLossAtrMultiplier : null,
-    moving_stop_loss_cooldown_days: form.movingStopLossEnabled ? form.movingStopLossCooldownDays : 0,
     take_profit_mode: form.takeProfitEnabled ? form.takeProfitMode : 'pct',
     take_profit_pct: form.takeProfitEnabled && form.takeProfitMode === 'pct' ? form.takeProfitPct / 100 : null,
     take_profit_atr_multiplier: form.takeProfitEnabled && form.takeProfitMode === 'atr' ? form.takeProfitAtrMultiplier : null,
@@ -583,7 +568,6 @@ function buildPayload(): PortfolioBacktestPayload {
 const RISK_PARAMETER_KEYS = new Set([
   'stop_loss_mode', 'stop_loss_pct', 'stop_loss_atr_multiplier', 'stop_loss_cooldown_days',
   'take_profit_mode', 'take_profit_pct', 'take_profit_atr_multiplier', 'take_profit_cooldown_days',
-  'moving_stop_loss_mode', 'moving_stop_loss_pct', 'moving_stop_loss_atr_multiplier', 'moving_stop_loss_cooldown_days',
   'trailing_stop_mode', 'trailing_stop_pct', 'trailing_stop_atr_multiplier', 'trailing_stop_cooldown_days',
 ])
 
@@ -651,7 +635,7 @@ function applyStoredCandidate(raw: unknown): void {
   if (buyRule) form.buyRule = buyRule
   if (sellRule) form.sellRule = sellRule
 
-  const applyRisk = (prefix: 'stop_loss' | 'take_profit' | 'moving_stop_loss' | 'trailing_stop', enabledKey: 'stopLossEnabled' | 'takeProfitEnabled' | 'movingStopLossEnabled' | 'trailingStopEnabled', modeKey: 'stopLossMode' | 'takeProfitMode' | 'movingStopLossMode' | 'trailingStopMode', pctKey: 'stopLossPct' | 'takeProfitPct' | 'movingStopLossPct' | 'trailingStopPct', atrKey: 'stopLossAtrMultiplier' | 'takeProfitAtrMultiplier' | 'movingStopLossAtrMultiplier' | 'trailingStopAtrMultiplier', cooldownKey: 'stopLossCooldownDays' | 'takeProfitCooldownDays' | 'movingStopLossCooldownDays' | 'trailingStopCooldownDays'): void => {
+  const applyRisk = (prefix: 'stop_loss' | 'take_profit' | 'trailing_stop', enabledKey: 'stopLossEnabled' | 'takeProfitEnabled' | 'trailingStopEnabled', modeKey: 'stopLossMode' | 'takeProfitMode' | 'trailingStopMode', pctKey: 'stopLossPct' | 'takeProfitPct' | 'trailingStopPct', atrKey: 'stopLossAtrMultiplier' | 'takeProfitAtrMultiplier' | 'trailingStopAtrMultiplier', cooldownKey: 'stopLossCooldownDays' | 'takeProfitCooldownDays' | 'trailingStopCooldownDays'): void => {
     const pct = finiteNumber(config[`${prefix}_pct`], NaN)
     const atr = finiteNumber(config[`${prefix}_atr_multiplier`], NaN)
     const mode = enumValue(config[`${prefix}_mode`], ['pct', 'atr'] as const, Number.isFinite(atr) ? 'atr' : 'pct')
@@ -662,7 +646,6 @@ function applyStoredCandidate(raw: unknown): void {
     form[enabledKey] = Number.isFinite(pct) || Number.isFinite(atr)
   }
   applyRisk('stop_loss', 'stopLossEnabled', 'stopLossMode', 'stopLossPct', 'stopLossAtrMultiplier', 'stopLossCooldownDays')
-  applyRisk('moving_stop_loss', 'movingStopLossEnabled', 'movingStopLossMode', 'movingStopLossPct', 'movingStopLossAtrMultiplier', 'movingStopLossCooldownDays')
   applyRisk('take_profit', 'takeProfitEnabled', 'takeProfitMode', 'takeProfitPct', 'takeProfitAtrMultiplier', 'takeProfitCooldownDays')
   applyRisk('trailing_stop', 'trailingStopEnabled', 'trailingStopMode', 'trailingStopPct', 'trailingStopAtrMultiplier', 'trailingStopCooldownDays')
   form.atrPeriod = 14
@@ -1469,13 +1452,6 @@ watch(() => form.formulaText, (value) => {
               <span>{{ form.stopLossMode === 'pct' ? '%' : '倍' }}</span>
               <label class="cooldown-field">冷却 <input v-model.number="form.stopLossCooldownDays" data-testid="portfolio-stop-loss-cooldown" type="number" min="0" max="10000" step="1" :disabled="!form.stopLossEnabled"> <span>交易日</span></label>
             </div>
-            <div class="risk-control" data-testid="portfolio-moving-stop-loss-control">
-              <label class="risk-toggle"><input v-model="form.movingStopLossEnabled" data-testid="portfolio-moving-stop-loss-enabled" type="checkbox"><span>移动止损</span></label>
-              <select v-model="form.movingStopLossMode" data-testid="portfolio-moving-stop-loss-mode" :disabled="!form.movingStopLossEnabled"><option value="pct">百分比</option><option value="atr">ATR ×</option></select>
-              <input v-if="form.movingStopLossMode === 'pct'" v-model.number="form.movingStopLossPct" data-testid="portfolio-moving-stop-loss" type="number" min="0.01" max="100" step="0.5" aria-label="移动止损百分比" :disabled="!form.movingStopLossEnabled"><input v-else v-model.number="form.movingStopLossAtrMultiplier" data-testid="portfolio-moving-stop-loss-atr" type="number" min="0.01" max="100" step="0.1" aria-label="移动止损 ATR 倍数" :disabled="!form.movingStopLossEnabled">
-              <span>{{ form.movingStopLossMode === 'pct' ? '%' : '倍' }}</span>
-              <label class="cooldown-field">冷却 <input v-model.number="form.movingStopLossCooldownDays" data-testid="portfolio-moving-stop-loss-cooldown" type="number" min="0" max="10000" step="1" :disabled="!form.movingStopLossEnabled"> <span>交易日</span></label>
-            </div>
             <div class="risk-control" data-testid="portfolio-take-profit-control">
               <label class="risk-toggle"><input v-model="form.takeProfitEnabled" data-testid="portfolio-take-profit-enabled" type="checkbox"><span>止盈</span></label>
               <select v-model="form.takeProfitMode" data-testid="portfolio-take-profit-mode" :disabled="!form.takeProfitEnabled"><option value="pct">百分比</option><option value="atr">ATR ×</option></select>
@@ -1492,7 +1468,6 @@ watch(() => form.formulaText, (value) => {
             </div>
             <p v-if="errors.sellRules" class="field-error">{{ errors.sellRules }}</p>
             <p v-if="errors.stopLossPct || errors.stopLossAtrMultiplier || errors.stopLossCooldownDays" class="field-error">{{ errors.stopLossPct || errors.stopLossAtrMultiplier || errors.stopLossCooldownDays }}</p>
-            <p v-if="errors.movingStopLossPct || errors.movingStopLossAtrMultiplier || errors.movingStopLossCooldownDays" class="field-error">{{ errors.movingStopLossPct || errors.movingStopLossAtrMultiplier || errors.movingStopLossCooldownDays }}</p>
             <p v-if="errors.takeProfitPct || errors.takeProfitAtrMultiplier || errors.takeProfitCooldownDays" class="field-error">{{ errors.takeProfitPct || errors.takeProfitAtrMultiplier || errors.takeProfitCooldownDays }}</p>
             <p v-if="errors.trailingStopPct || errors.trailingStopAtrMultiplier || errors.trailingStopCooldownDays" class="field-error">{{ errors.trailingStopPct || errors.trailingStopAtrMultiplier || errors.trailingStopCooldownDays }}</p>
             <p class="helper">指标规则在收盘确认，默认下一根 K 线执行；风险控制按当日最高/最低价触发，ATR 周期固定为 {{ form.atrPeriod }}，各类冷却独立计算。</p>

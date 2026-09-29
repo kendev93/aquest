@@ -127,7 +127,6 @@ def test_risk_only_candidates_preserve_every_nonrisk_portfolio_setting() -> None
         "execution": "next_close",
         "stop_loss_pct": 0.08,
         "take_profit_pct": 0.2,
-        "moving_stop_loss_pct": None,
         "trailing_stop_pct": 0.1,
     }
     risk_keys = {
@@ -139,10 +138,6 @@ def test_risk_only_candidates_preserve_every_nonrisk_portfolio_setting() -> None
         "take_profit_mode",
         "take_profit_atr_multiplier",
         "take_profit_cooldown_days",
-        "moving_stop_loss_pct",
-        "moving_stop_loss_mode",
-        "moving_stop_loss_atr_multiplier",
-        "moving_stop_loss_cooldown_days",
         "trailing_stop_pct",
         "trailing_stop_mode",
         "trailing_stop_atr_multiplier",
@@ -166,7 +161,7 @@ def test_risk_only_candidates_preserve_every_nonrisk_portfolio_setting() -> None
         for key, value in base_config.items():
             if key not in risk_keys and key != "date_mode":
                 assert candidate_config[key] == value
-        for prefix in ("stop_loss", "take_profit", "moving_stop_loss", "trailing_stop"):
+        for prefix in ("stop_loss", "take_profit", "trailing_stop"):
             mode = candidate_config[f"{prefix}_mode"]
             percentage = candidate_config.get(f"{prefix}_pct")
             multiplier = candidate_config.get(f"{prefix}_atr_multiplier")

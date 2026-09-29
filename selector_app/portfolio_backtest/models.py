@@ -60,10 +60,6 @@ class PortfolioBacktestConfig:
     stop_loss_mode: Literal["pct", "atr"] = "pct"
     stop_loss_atr_multiplier: float | None = None
     stop_loss_cooldown_days: int = 0
-    moving_stop_loss_pct: float | None = None
-    moving_stop_loss_mode: Literal["pct", "atr"] = "pct"
-    moving_stop_loss_atr_multiplier: float | None = None
-    moving_stop_loss_cooldown_days: int = 0
     trailing_stop_pct: float | None = None
     trailing_stop_mode: Literal["pct", "atr"] = "pct"
     trailing_stop_atr_multiplier: float | None = None
@@ -162,14 +158,13 @@ class PortfolioBacktestConfig:
         for name, optional_value in {
             "stop_loss_pct": self.stop_loss_pct,
             "take_profit_pct": self.take_profit_pct,
-            "moving_stop_loss_pct": self.moving_stop_loss_pct,
             "trailing_stop_pct": self.trailing_stop_pct,
         }.items():
             if optional_value is not None and (
                 not math.isfinite(optional_value) or optional_value <= 0
             ):
                 raise ValueError(f"{name} 必须是大于 0 的有限数字")
-        for prefix in ("take_profit", "stop_loss", "moving_stop_loss", "trailing_stop"):
+        for prefix in ("take_profit", "stop_loss", "trailing_stop"):
             mode = getattr(self, f"{prefix}_mode")
             if mode not in {"pct", "atr"}:
                 raise ValueError(f"{prefix}_mode 必须是 pct 或 atr")
@@ -248,8 +243,6 @@ class PortfolioBacktestConfig:
             for value in (
                 self.stop_loss_pct,
                 self.stop_loss_atr_multiplier,
-                self.moving_stop_loss_pct,
-                self.moving_stop_loss_atr_multiplier,
                 self.take_profit_pct,
                 self.take_profit_atr_multiplier,
                 self.trailing_stop_pct,

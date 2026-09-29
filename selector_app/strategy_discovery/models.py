@@ -209,10 +209,6 @@ class StrategyCandidate:
     stop_loss_pct: float | None = None
     stop_loss_atr_multiplier: float | None = None
     stop_loss_cooldown_days: int = 0
-    moving_stop_loss_mode: RiskMode = "pct"
-    moving_stop_loss_pct: float | None = None
-    moving_stop_loss_atr_multiplier: float | None = None
-    moving_stop_loss_cooldown_days: int = 0
     trailing_stop_mode: RiskMode = "pct"
     trailing_stop_pct: float | None = None
     trailing_stop_atr_multiplier: float | None = None
@@ -264,10 +260,6 @@ class StrategyCandidate:
                     "stop_loss_pct": self.stop_loss_pct,
                     "stop_loss_atr_multiplier": self.stop_loss_atr_multiplier,
                     "stop_loss_cooldown_days": self.stop_loss_cooldown_days,
-                    "moving_stop_loss_mode": self.moving_stop_loss_mode,
-                    "moving_stop_loss_pct": self.moving_stop_loss_pct,
-                    "moving_stop_loss_atr_multiplier": self.moving_stop_loss_atr_multiplier,
-                    "moving_stop_loss_cooldown_days": self.moving_stop_loss_cooldown_days,
                     "trailing_stop_mode": self.trailing_stop_mode,
                     "trailing_stop_pct": self.trailing_stop_pct,
                     "trailing_stop_atr_multiplier": self.trailing_stop_atr_multiplier,
@@ -296,10 +288,6 @@ class StrategyCandidate:
                 "stop_loss_pct": self.stop_loss_pct,
                 "stop_loss_atr_multiplier": self.stop_loss_atr_multiplier,
                 "stop_loss_cooldown_days": self.stop_loss_cooldown_days,
-                "moving_stop_loss_mode": self.moving_stop_loss_mode,
-                "moving_stop_loss_pct": self.moving_stop_loss_pct,
-                "moving_stop_loss_atr_multiplier": self.moving_stop_loss_atr_multiplier,
-                "moving_stop_loss_cooldown_days": self.moving_stop_loss_cooldown_days,
                 "trailing_stop_mode": self.trailing_stop_mode,
                 "trailing_stop_pct": self.trailing_stop_pct,
                 "trailing_stop_atr_multiplier": self.trailing_stop_atr_multiplier,
@@ -441,13 +429,6 @@ def _human_readable(candidate: StrategyCandidate) -> str:
                 candidate.stop_loss_pct,
                 candidate.stop_loss_atr_multiplier,
                 candidate.stop_loss_cooldown_days,
-            ),
-            risk_text(
-                "移动止损",
-                candidate.moving_stop_loss_mode,
-                candidate.moving_stop_loss_pct,
-                candidate.moving_stop_loss_atr_multiplier,
-                candidate.moving_stop_loss_cooldown_days,
             ),
             risk_text(
                 "止盈",

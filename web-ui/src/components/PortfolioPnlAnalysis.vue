@@ -238,7 +238,7 @@ function ratio(value: number | null | undefined): string {
             </table>
           </div>
           <p v-if="analysis.noStopLoss" class="pnl-note" :data-testid="`${testid}-no-stop-loss`">
-            没有启用止损/移动止损：亏损段只能等卖出条件触发，深度由行情决定。
+            没有启用止损/移动止盈：亏损段只能等卖出条件触发，深度由行情决定。
           </p>
         </div>
       </div>

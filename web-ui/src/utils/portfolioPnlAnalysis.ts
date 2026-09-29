@@ -109,7 +109,7 @@ export interface PnlAnalysis {
   drawdowns: PnlDrawdownEpisode[]
   unrealized: { rows: PnlUnrealizedRow[]; total: number }
   riskControls: PnlRiskControl[]
-  /** 既没有止损也没有移动止损：亏损深度只能由卖出条件决定。 */
+  /** 既没有固定止损也没有移动止盈：亏损深度只能由卖出条件决定。 */
   noStopLoss: boolean
 }
 
@@ -337,7 +337,6 @@ function describeRiskControl(risk: Record<string, number | string | null> | unde
   const labels: Record<string, string> = {
     take_profit: '止盈',
     stop_loss: '止损',
-    moving_stop_loss: '移动止损',
     trailing_stop: '移动止盈',
   }
   const pct = Number(risk?.[`${prefix}_pct`] ?? 0)
@@ -394,7 +393,7 @@ export function analyzePortfolioPnl(result: PortfolioBacktestResult | null): Pnl
 
   const episodes = result ? drawdownEpisodes(result.equity_curve ?? []) : []
   const risk = result?.risk_controls
-  const riskControls = ['take_profit', 'stop_loss', 'moving_stop_loss', 'trailing_stop'].map((prefix) =>
+  const riskControls = ['take_profit', 'stop_loss', 'trailing_stop'].map((prefix) =>
     describeRiskControl(risk, prefix),
   )
   const lastHoldings = result?.states?.at(-1)?.holdings ?? []
@@ -427,6 +426,6 @@ export function analyzePortfolioPnl(result: PortfolioBacktestResult | null): Pnl
     riskControls,
     noStopLoss:
       !riskControls.find((item) => item.label === '止损')?.enabled &&
-      !riskControls.find((item) => item.label === '移动止损')?.enabled,
+      !riskControls.find((item) => item.label === '移动止盈')?.enabled,
   }
 }

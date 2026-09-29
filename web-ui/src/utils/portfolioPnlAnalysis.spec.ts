@@ -119,10 +119,9 @@ describe('analyzePortfolioPnl', () => {
       '20.0%（固定比例）',
       '未启用',
       '未启用',
-      '未启用',
     ])
     expect(analysis.riskControls.map((item) => item.label)).toEqual([
-      '止盈', '止损', '移动止损', '移动止盈',
+      '止盈', '止损', '移动止盈',
     ])
     expect(analysis.noStopLoss).toBe(true)
   })

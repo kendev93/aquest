@@ -111,8 +111,8 @@ test('user can optimize exit risk, apply a validation candidate, and replay it n
   }
   const riskCandidate = {
     candidate_hash: 'e2e-candidate',
-    complexity: 4,
-    human_readable_rules: '止损8%；移动止损 ATR×2；止盈20%；移动止盈5%',
+    complexity: 3,
+    human_readable_rules: '止损8%；止盈20%；移动止盈5%',
     config: {
       universe: 'all',
       selected_signals: [],
@@ -132,10 +132,6 @@ test('user can optimize exit risk, apply a validation candidate, and replay it n
       take_profit_mode: 'pct',
       take_profit_pct: 0.2,
       take_profit_cooldown_days: 0,
-      moving_stop_loss_mode: 'atr',
-      moving_stop_loss_pct: null,
-      moving_stop_loss_atr_multiplier: 2,
-      moving_stop_loss_cooldown_days: 3,
       trailing_stop_mode: 'pct',
       trailing_stop_pct: 0.05,
       trailing_stop_cooldown_days: 0,
@@ -191,7 +187,7 @@ test('user can optimize exit risk, apply a validation candidate, and replay it n
   await page.getByTestId('portfolio-risk-search-level').selectOption('2000')
   await page.getByTestId('start-portfolio-risk-optimization').click()
   await expect(page.getByTestId('portfolio-risk-optimization-results')).toContainText('22.00%')
-  expect(optimizationPayload).toMatchObject({ max_trials: 2000, moving_stop_loss_pct: null })
+  expect(optimizationPayload).toMatchObject({ max_trials: 2000 })
 
   await page.getByTestId('portfolio-risk-apply-e2e-candidate').click()
   await expect(page.getByTestId('portfolio-date-mode')).toHaveValue('custom')
@@ -203,8 +199,5 @@ test('user can optimize exit risk, apply a validation candidate, and replay it n
     date_mode: 'custom',
     start_date: '2024-03-01',
     end_date: '2024-03-31',
-    moving_stop_loss_mode: 'atr',
-    moving_stop_loss_atr_multiplier: 2,
-    moving_stop_loss_cooldown_days: 3,
   })
 })

@@ -56,10 +56,6 @@ class PortfolioBacktestRequest(BaseModel):
     stop_loss_mode: Literal["pct", "atr"] = "pct"
     stop_loss_atr_multiplier: float | None = Field(default=None, gt=0, le=100)
     stop_loss_cooldown_days: int = Field(default=0, ge=0, le=10_000)
-    moving_stop_loss_pct: float | None = Field(default=None, gt=0, le=10)
-    moving_stop_loss_mode: Literal["pct", "atr"] = "pct"
-    moving_stop_loss_atr_multiplier: float | None = Field(default=None, gt=0, le=100)
-    moving_stop_loss_cooldown_days: int = Field(default=0, ge=0, le=10_000)
     trailing_stop_pct: float | None = Field(default=None, gt=0, le=10)
     trailing_stop_mode: Literal["pct", "atr"] = "pct"
     trailing_stop_atr_multiplier: float | None = Field(default=None, gt=0, le=100)
@@ -154,7 +150,7 @@ class PortfolioBacktestRequest(BaseModel):
         if self.start_date is not None and self.end_date is not None:
             if self.start_date > self.end_date:
                 raise ValueError("回测开始日期不能晚于结束日期")
-        for prefix in ("take_profit", "stop_loss", "moving_stop_loss", "trailing_stop"):
+        for prefix in ("take_profit", "stop_loss", "trailing_stop"):
             mode = getattr(self, f"{prefix}_mode")
             multiplier = getattr(self, f"{prefix}_atr_multiplier")
             percentage = getattr(self, f"{prefix}_pct")
@@ -181,8 +177,6 @@ class PortfolioBacktestRequest(BaseModel):
             for value in (
                 self.stop_loss_pct,
                 self.stop_loss_atr_multiplier,
-                self.moving_stop_loss_pct,
-                self.moving_stop_loss_atr_multiplier,
                 self.take_profit_pct,
                 self.take_profit_atr_multiplier,
                 self.trailing_stop_pct,
@@ -226,10 +220,6 @@ class PortfolioBacktestRequest(BaseModel):
             stop_loss_mode=self.stop_loss_mode,
             stop_loss_atr_multiplier=self.stop_loss_atr_multiplier,
             stop_loss_cooldown_days=self.stop_loss_cooldown_days,
-            moving_stop_loss_pct=self.moving_stop_loss_pct,
-            moving_stop_loss_mode=self.moving_stop_loss_mode,
-            moving_stop_loss_atr_multiplier=self.moving_stop_loss_atr_multiplier,
-            moving_stop_loss_cooldown_days=self.moving_stop_loss_cooldown_days,
             trailing_stop_pct=self.trailing_stop_pct,
             trailing_stop_mode=self.trailing_stop_mode,
             trailing_stop_atr_multiplier=self.trailing_stop_atr_multiplier,
