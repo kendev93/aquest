@@ -564,6 +564,24 @@ describe('PortfolioBacktestPage', () => {
     expect(wrapper.text()).toContain('历史组合回测已删除')
   })
 
+  it('excludes ST symbols by default and honours the toggle', async () => {
+    const wrapper = mount(PortfolioBacktestPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(portfolioApi.createPortfolioBacktest).toHaveBeenCalledWith(expect.objectContaining({
+      exclude_st: true,
+    }))
+
+    await wrapper.get('[data-testid="portfolio-exclude-st"]').setValue(false)
+    await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')
+    await flushPromises()
+
+    const lastCall = vi.mocked(portfolioApi.createPortfolioBacktest).mock.calls.at(-1)
+    expect(lastCall?.[0].exclude_st).toBe(false)
+  })
+
   it('submits a fixed share count and validates its range', async () => {
     const wrapper = mount(PortfolioBacktestPage)
     await flushPromises()

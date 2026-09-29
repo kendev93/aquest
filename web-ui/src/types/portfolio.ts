@@ -60,6 +60,8 @@ export interface PortfolioBacktestPayload {
   fitness_max_drawdown?: number
   position_mode?: BacktestPositionMode
   fixed_size?: number | null
+  /** 排除 ST / *ST / 退市标的（按当前股票名称判定）。 */
+  exclude_st?: boolean
 }
 
 
@@ -193,6 +195,10 @@ export interface PortfolioBacktestResult {
   missing_codes?: string[]
   /** 指定标的中被板块/类型范围过滤掉的代码。 */
   filtered_codes?: string[]
+  /** 开启排除后被当作 ST / *ST / 退市剔除的代码。 */
+  excluded_st_codes?: string[]
+  /** 开启排除后被剔除的标的数量（全市场回测时不逐个展示代码也能看出过滤生效）。 */
+  excluded_st_count?: number
   /** 基准对照（标的池等权买入持有）。窗口太短或池内无可用标的时为 null。 */
   benchmark?: PortfolioBenchmark | null
   /** 价格口径。当前组合回测使用未复权原始日线。 */

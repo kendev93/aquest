@@ -90,6 +90,10 @@ class PortfolioBacktestConfig:
     codes: tuple[str, ...] | None = None
     position_mode: PositionMode = "full"
     fixed_size: int | None = None
+    #: 打开后把 ST / *ST / 退市标的挡在候选池外。判定只能按**当前名称**做
+    #: （行情库没有历史名称快照），对回测来说偏严格：会把"当时还没戴帽、
+    #: 后来才变 ST"的股票一起排除。默认关闭，保持历史结果可比。
+    exclude_st: bool = False
 
     def __post_init__(self) -> None:
         if self.universe not in {"all", "sh", "sz", "custom", "codes"}:
@@ -102,6 +106,8 @@ class PortfolioBacktestConfig:
             raise ValueError("不支持的建仓方式")
         if self.position_mode == "fixed" and (self.fixed_size is None or self.fixed_size <= 0):
             raise ValueError("固定股数模式必须设置大于 0 的买入股数")
+        if not isinstance(self.exclude_st, bool):
+            raise ValueError("排除 ST/退市标的开关必须是布尔值")
         scope = InstrumentScope.from_values(
             universe=self.universe,
             instrument_types=self.instrument_types,
@@ -299,6 +305,11 @@ class PortfolioBacktestReport:
     missing_codes: tuple[str, ...] = ()
     #: 指定标的中被板块/类型过滤掉的代码。
     filtered_codes: tuple[str, ...] = ()
+    #: 打开了 exclude_st 时被当作 ST / *ST / 退市剔除掉的标的数。全市场回测里
+    #: 逐只列名字会让报告膨胀，所以只给数量——用户点名的标的（codes 模式）
+    #: 会同时出现在 filtered_codes 里，方便看出"它为什么没被买"。
+    excluded_st_codes: tuple[str, ...] = ()
+    excluded_st_count: int = 0
     #: 基准对照（标的池等权买入持有）。算不出来时是 None——比如窗口只有一天，
     #: 或者池里没有一只标的在窗口首日就有价格。没有基准时报告照常出，只是
     #: "跑赢了没有"这件事没人回答。
@@ -343,6 +354,8 @@ class PortfolioBacktestReport:
             "risk_controls": dict(self.risk_controls),
             "missing_codes": list(self.missing_codes),
             "filtered_codes": list(self.filtered_codes),
+            "excluded_st_codes": list(self.excluded_st_codes),
+            "excluded_st_count": self.excluded_st_count,
             "benchmark": dict(self.benchmark) if self.benchmark is not None else None,
             "next_plan": dict(self.next_plan),
             "price_basis": self.price_basis,

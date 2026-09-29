@@ -128,6 +128,8 @@ class PortfolioReportMixin(_PortfolioServiceState):
             risk_controls=_risk_controls(config),
             missing_codes=resolved.missing if resolved is not None else (),
             filtered_codes=resolved.filtered if resolved is not None else (),
+            excluded_st_codes=resolved.excluded_st if resolved is not None else (),
+            excluded_st_count=len(resolved.excluded_st) if resolved is not None else 0,
             benchmark=_benchmark_block(benchmark_contexts, dates, config),
             next_plan=_next_plan_block(simulation),
         )
@@ -164,6 +166,8 @@ class PortfolioReportMixin(_PortfolioServiceState):
             risk_controls=_risk_controls(config),
             missing_codes=resolved.missing if resolved is not None else (),
             filtered_codes=resolved.filtered if resolved is not None else (),
+            excluded_st_codes=resolved.excluded_st if resolved is not None else (),
+            excluded_st_count=len(resolved.excluded_st) if resolved is not None else 0,
         )
 
 

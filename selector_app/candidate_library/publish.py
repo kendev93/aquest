@@ -47,6 +47,7 @@ _PORTABLE_FIELDS: tuple[str, ...] = (
     "execution",
     "position_mode",
     "fixed_size",
+    "exclude_st",
     "buy_rule",
     "sell_rule",
     "ranking_value",

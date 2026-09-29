@@ -146,6 +146,7 @@ interface PortfolioFormState {
   fitnessMaxDrawdown: number
   positionMode: BacktestPositionMode
   fixedSize: number
+  excludeSt: boolean
 }
 
 const metadata = ref<FormulaScreenMetadata | null>(null)
@@ -201,6 +202,7 @@ const form = reactive<PortfolioFormState>({
   fitnessMaxDrawdown: 30,
   positionMode: 'full',
   fixedSize: 1000,
+  excludeSt: true,
 })
 const errors = ref<Record<string, string>>({})
 const message = ref('')
@@ -259,6 +261,7 @@ const recentTrades = computed(() => (result.value?.trades ?? []).slice(-100).rev
 const droppedCodes = computed(() => [
   ...(result.value?.missing_codes ?? []).map(code => ({ code, reason: '行情库里没有' })),
   ...(result.value?.filtered_codes ?? []).map(code => ({ code, reason: '被板块或类型范围排除' })),
+  ...(result.value?.excluded_st_codes ?? []).map(code => ({ code, reason: 'ST/退市已排除' })),
 ])
 // 基准对照：同一批股票各买一点然后不动。没有它，年化 20% 在牛市里可能只是没跑赢。
 const benchmark = computed(() => result.value?.benchmark ?? null)
@@ -573,6 +576,7 @@ function buildPayload(): PortfolioBacktestPayload {
     fitness_max_drawdown: form.fitnessMaxDrawdown / 100,
     position_mode: form.positionMode,
     fixed_size: form.positionMode === 'fixed' ? form.fixedSize : null,
+    exclude_st: form.excludeSt,
   }
 }
 
@@ -628,6 +632,7 @@ function applyStoredCandidate(raw: unknown): void {
   form.codesText = Array.isArray(config.codes) ? config.codes.filter((item): item is string => typeof item === 'string').join('\n') : ''
   form.positionMode = enumValue(config.position_mode, ['full', 'fixed'] as const, form.positionMode)
   form.fixedSize = Math.round(finiteNumber(config.fixed_size, form.fixedSize))
+  form.excludeSt = typeof config.exclude_st === 'boolean' ? config.exclude_st : true
   form.instrumentTypes = Array.isArray(config.instrument_types)
     ? config.instrument_types.filter((item): item is InstrumentType => INSTRUMENT_TYPE_OPTIONS.some((option) => option.key === item))
     : []
@@ -702,6 +707,7 @@ async function applyStoredResearch(raw: unknown, notice?: string): Promise<void>
   if (Array.isArray(config.codes)) {
     form.codesText = config.codes.filter((item): item is string => typeof item === 'string').join('\n')
   }
+  form.excludeSt = typeof config.exclude_st === 'boolean' ? config.exclude_st : true
   form.instrumentTypes = Array.isArray(config.instrument_types)
     ? config.instrument_types.filter((item): item is InstrumentType => INSTRUMENT_TYPE_OPTIONS.some((option) => option.key === item))
     : form.instrumentTypes
@@ -1398,7 +1404,8 @@ watch(() => form.formulaText, (value) => {
             <div class="scope-config inline-scope-config" data-testid="portfolio-scope">
               <div class="scope-options"><span>证券类型</span><label v-for="option in INSTRUMENT_TYPE_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`portfolio-scope-type-${option.key}`" :checked="form.instrumentTypes.includes(option.key)" @change="toggleInstrumentType(option.key)">{{ option.label }}</label></div>
               <div class="scope-options"><span>板块</span><label v-for="option in BOARD_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`portfolio-scope-board-${option.key}`" :checked="form.boards.includes(option.key)" @change="toggleBoard(option.key)">{{ option.label }}</label></div>
-              <small class="scope-helper">未勾选表示全部；类型和板块同时选择时取交集。</small>
+              <div class="scope-options"><span>风险标的</span><label><input type="checkbox" data-testid="portfolio-exclude-st" v-model="form.excludeSt">排除 ST / *ST / 退市</label></div>
+              <small class="scope-helper">未勾选表示全部；类型和板块同时选择时取交集。排除 ST 按当前股票名称判定——行情库没有历史名称快照，回测里会把“后来才戴帽”的股票一并排除，样本比实盘更保守。</small>
             </div>
             <p v-if="errors.maxPositions" class="field-error">{{ errors.maxPositions }}</p>
           </fieldset>

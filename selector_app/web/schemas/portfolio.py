@@ -86,6 +86,8 @@ class PortfolioBacktestRequest(BaseModel):
     fitness_max_drawdown: float = Field(default=0.3, ge=0, le=1)
     position_mode: Literal["full", "fixed"] = "full"
     fixed_size: int | None = Field(default=None, ge=100, le=100_000_000)
+    #: 排除 ST / *ST / 退市标的（按当前名称判定，历史回测下偏严格）。
+    exclude_st: bool = False
 
     @model_validator(mode="after")
     def validate_portfolio_backtest(self) -> PortfolioBacktestRequest:
@@ -253,4 +255,5 @@ class PortfolioBacktestRequest(BaseModel):
             fitness_max_drawdown=self.fitness_max_drawdown,
             position_mode=self.position_mode,
             fixed_size=self.fixed_size,
+            exclude_st=self.exclude_st,
         )

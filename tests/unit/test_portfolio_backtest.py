@@ -116,6 +116,40 @@ class StaggeredAdapter:
         return self.frames[ref.code].copy(deep=True)
 
 
+class StAdapter:
+    """候选池里混一只戴帽股：``600002`` 是 ``*ST``，``600000`` 正常。"""
+
+    def __init__(self) -> None:
+        self.frames = {
+            "600000": stock_frame([10, 11, 12, 13, 14, 15]),
+            "600002": stock_frame([5, 6, 7, 8, 9, 10]),
+        }
+        self.names = {"600000": "浦发银行", "600002": "*ST测试"}
+
+    def _refs(self, vipdoc_path: str, codes: list[str]) -> list[StockRef]:
+        return [
+            StockRef(
+                market="SH",
+                code=code,
+                name=self.names[code],
+                path=Path(vipdoc_path) / f"sh{code}.day",
+            )
+            for code in codes
+        ]
+
+    def list_stock_refs(self, vipdoc_path, universe, universe_file=None):
+        return self._refs(vipdoc_path, list(self.frames))
+
+    def stock_ref(self, vipdoc_path, market, code):
+        normalized = code.strip()
+        if normalized not in self.frames or market != "SH":
+            raise ValueError(f"找不到已导入的行情: {market} {normalized}")
+        return self._refs(vipdoc_path, [normalized])[0]
+
+    def read_stock(self, ref: StockRef) -> pd.DataFrame:
+        return self.frames[ref.code].copy(deep=True)
+
+
 class SpyIndicatorCache:
     def __init__(self) -> None:
         self.calls: list[tuple[int, tuple[str, ...]]] = []
@@ -626,6 +660,39 @@ def test_codes_universe_reports_codes_dropped_by_the_scope() -> None:
 
     assert report.filtered_codes == ("SH600000",)
     assert report.missing_codes == ()
+
+
+def test_exclude_st_leaves_the_pool_untouched_when_disabled() -> None:
+    """开关默认关闭，老配置的回测结果不能悄悄变样。"""
+
+    report = PortfolioBacktestService(adapter=StAdapter()).run(config(max_positions=2))
+
+    assert report.total_candidates == 2
+    assert report.excluded_st_count == 0
+    assert report.excluded_st_codes == ()
+
+
+def test_exclude_st_drops_risk_warning_symbols_from_the_pool() -> None:
+    report = PortfolioBacktestService(adapter=StAdapter()).run(
+        config(max_positions=2, exclude_st=True)
+    )
+
+    assert report.total_candidates == 1
+    assert report.excluded_st_count == 1
+    assert report.excluded_st_codes == ("SH600002",)
+    assert {trade["code"] for trade in report.trades} == {"600000"}
+
+
+def test_exclude_st_reports_the_dropped_codes_in_the_codes_universe() -> None:
+    """点名指定的标的被剔除时必须说出来，不能只在候选数里少一只。"""
+
+    report = PortfolioBacktestService(adapter=StAdapter()).run(
+        config(universe="codes", codes=("600000", "600002"), max_positions=1, exclude_st=True)
+    )
+
+    assert report.total_candidates == 1
+    assert report.excluded_st_codes == ("SH600002",)
+    assert report.filtered_codes == ()
 
 
 def test_unknown_codes_raise_a_readable_error() -> None:

@@ -22,6 +22,7 @@ from selector_app.indicators.cache import frame_fingerprint
 from selector_app.market_data.adapter import parse_universe_code
 from selector_app.market_data.day_format import classify_board, classify_instrument
 from selector_app.market_data.models import InstrumentBoard, InstrumentType, MarketCode, StockRef
+from selector_app.market_data.risk_warning import is_risk_warning_symbol
 from selector_app.market_data.scope import InstrumentScope
 from selector_app.screening.engine import evaluate_rule_group
 from selector_app.screening.rules import RuleGroup
@@ -45,13 +46,15 @@ _WARMUP_BARS = max(
 
 
 class _ResolvedRefs(NamedTuple):
-    """解析出来的标的，外加没能进入回测的两类代码。"""
+    """解析出来的标的，外加没能进入回测的三类代码。"""
 
     refs: list[StockRef]
     #: 行情库里找不到的代码。
     missing: tuple[str, ...] = ()
     #: 找到了但被板块/类型范围过滤掉的代码。
     filtered: tuple[str, ...] = ()
+    #: 打开了 exclude_st 后被当作 ST / *ST / 退市剔除的代码。
+    excluded_st: tuple[str, ...] = ()
 
 
 class SortedDateIndex(Mapping[int, int]):
@@ -278,7 +281,17 @@ class PortfolioContextMixin(_PortfolioServiceState):
     def _list_refs(self, config: PortfolioBacktestConfig) -> _ResolvedRefs:
         if config.universe == "codes":
             return self._list_refs_by_codes(config)
-        return _ResolvedRefs(refs=self._list_universe_refs(config))
+        refs = self._list_universe_refs(config)
+        if not config.exclude_st:
+            return _ResolvedRefs(refs=refs)
+        kept: list[StockRef] = []
+        excluded: list[str] = []
+        for ref in refs:
+            if is_risk_warning_symbol(ref):
+                excluded.append(f"{ref.market}{ref.code}")
+            else:
+                kept.append(ref)
+        return _ResolvedRefs(refs=kept, excluded_st=tuple(excluded))
 
     def _list_universe_refs(self, config: PortfolioBacktestConfig) -> list[StockRef]:
         if not config.instrument_types and not config.boards:
@@ -355,7 +368,11 @@ class PortfolioContextMixin(_PortfolioServiceState):
         )
         kept: list[StockRef] = []
         filtered: list[str] = []
+        excluded: list[str] = []
         for ref in refs:
+            if config.exclude_st and is_risk_warning_symbol(ref):
+                excluded.append(f"{ref.market}{ref.code}")
+                continue
             if scope.matches(
                 ref.market,
                 str(
@@ -371,6 +388,7 @@ class PortfolioContextMixin(_PortfolioServiceState):
             refs=kept,
             missing=tuple(missing),
             filtered=tuple(filtered),
+            excluded_st=tuple(excluded),
         )
 
     def _calculate_results(
