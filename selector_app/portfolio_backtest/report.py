@@ -23,6 +23,82 @@ from .state import _PortfolioServiceState
 class PortfolioReportMixin(_PortfolioServiceState):
     """Turn simulation rows into the public immutable portfolio report."""
 
+    @staticmethod
+    def _build_search_summary(
+        config: PortfolioBacktestConfig,
+        simulation: Mapping[str, object],
+        data_fingerprint: str,
+    ) -> dict[str, object]:
+        """Calculate only the metrics consumed by candidate search.
+
+        Candidate evaluations do not need the public report's full equity,
+        holdings, benchmark, and diagnostic tables. Keep the canonical
+        PerformanceAnalyzer formulas while constructing only its minimal input
+        columns; the normal backtest still uses ``_build_report`` unchanged.
+        """
+
+        equity = cast(list[dict[str, PortfolioJsonValue]], simulation["equity"])
+        trades = cast(list[dict[str, PortfolioJsonValue]], simulation["trades"])
+        equity_frame = pd.DataFrame(
+            {"total": [float(cast(float, row["total"])) for row in equity]}
+        )
+        trade_frame = pd.DataFrame(
+            [
+                {
+                    "direction": trade.get("direction"),
+                    "pnl": trade.get("pnl"),
+                    "cost_basis": trade.get("cost_basis"),
+                    "rejected": trade.get("rejected", False),
+                }
+                for trade in trades
+            ],
+            columns=["direction", "pnl", "cost_basis", "rejected"],
+        )
+        raw_performance = PerformanceAnalyzer(equity_frame, trade_frame).compute()
+        performance: dict[str, float | None] = {
+            key: _finite_number(raw_performance.get(key, 0.0))
+            for key in (
+                "total_return",
+                "annual_return",
+                "sharpe",
+                "max_drawdown",
+                "total_trades",
+                "win_rate",
+                "volatility",
+            )
+        }
+        turnover = _portfolio_turnover(trades, config.initial_cash)
+        return {
+            "performance": performance,
+            "data_fingerprint": data_fingerprint,
+            "turnover": turnover,
+            "trades": trades,
+            "diagnostic": simulation.get("diagnostic"),
+        }
+
+    @staticmethod
+    def _search_summary_from_report(report: PortfolioBacktestReport) -> dict[str, object]:
+        """Project an empty edge-case report onto the candidate-search contract."""
+
+        return {
+            "performance": {
+                key: report.performance.get(key)
+                for key in (
+                    "total_return",
+                    "annual_return",
+                    "sharpe",
+                    "max_drawdown",
+                    "total_trades",
+                    "win_rate",
+                    "volatility",
+                )
+            },
+            "data_fingerprint": report.data_fingerprint,
+            "turnover": report.performance.get("turnover", 0.0),
+            "trades": report.trades,
+            "diagnostic": report.diagnostic,
+        }
+
     def _build_report(
         self,
         config: PortfolioBacktestConfig,

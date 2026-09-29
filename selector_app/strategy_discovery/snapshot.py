@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import json
+import shutil
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -11,7 +13,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, mkdtemp
 from typing import Any, cast
 
 import numpy as np
@@ -103,6 +105,50 @@ class SnapshotWindow:
 
     start: date
     end: date
+
+
+class DiscoverySnapshotCache:
+    """One-entry, worker-lifetime cache for immutable discovery snapshots."""
+
+    def __init__(self, root: str | Path) -> None:
+        self.root = Path(root)
+        self.root.mkdir(parents=True, exist_ok=True)
+        self._key: str | None = None
+        self._path: Path | None = None
+
+    def get_or_build(
+        self,
+        key: str,
+        builder: Callable[[Path], None],
+    ) -> tuple[Path, bool]:
+        current = self._path
+        if (
+            key == self._key
+            and current is not None
+            and (current / "manifest.json").is_file()
+        ):
+            return current, True
+
+        # The strategy worker claims jobs serially and waits for its candidate
+        # pool to shut down before the next job, so its previous snapshot is no
+        # longer mapped when this single cache entry is replaced.
+        self.invalidate()
+        path = Path(mkdtemp(prefix="snapshot-", dir=self.root))
+        try:
+            builder(path)
+        except BaseException:
+            shutil.rmtree(path, ignore_errors=True)
+            raise
+        self._key = key
+        self._path = path
+        return path, False
+
+    def invalidate(self) -> None:
+        path = self._path
+        self._path = None
+        self._key = None
+        if path is not None:
+            shutil.rmtree(path, ignore_errors=True)
 
 
 class DiscoverySnapshot:
@@ -472,6 +518,79 @@ class DiscoverySnapshot:
         return results
 
 
+def _discovery_snapshot_cache_key(
+    store: DuckDbMarketDataStore,
+    request: DiscoveryRequest,
+    adapter: BatchMarketDataAdapter,
+) -> str:
+    base = request.base_config
+    instrument_types = _string_tuple(base.get("instrument_types"))
+    boards = _string_tuple(base.get("boards"))
+    universe = str(base.get("universe") or "all")
+    universe_file = str(base["universe_file"]) if base.get("universe_file") else None
+    refs = adapter.list_stock_refs(
+        str(base.get("vipdoc_path") or ""),
+        universe,
+        universe_file,
+        instrument_types=cast(tuple[InstrumentType, ...] | None, instrument_types),
+        boards=cast(tuple[InstrumentBoard, ...] | None, boards),
+    )
+    revisions = store.data_revisions((ref.market, ref.code) for ref in refs)
+    window = snapshot_window(request)
+    catalog = default_indicator_catalog()
+    payload = {
+        "snapshot_version": _SNAPSHOT_VERSION,
+        "window": (window.start.isoformat(), window.end.isoformat()),
+        "warmup_bars": _snapshot_warmup_bars(),
+        "scope": {
+            "universe": universe,
+            "universe_file": universe_file,
+            "instrument_types": instrument_types,
+            "boards": boards,
+            "codes": base.get("codes"),
+            "exclude_st": base.get("exclude_st", False),
+            "formula_text": base.get("formula_text"),
+            "formula_parameters": base.get("formula_parameters", {}),
+        },
+        "symbols": [
+            (
+                ref.market,
+                ref.code,
+                ref.instrument_type,
+                ref.board,
+                revisions.get((str(ref.market).upper(), str(ref.code).strip())),
+            )
+            for ref in sorted(refs, key=lambda item: (item.market, item.code))
+        ],
+        "required_buy_conditions": [
+            _condition_to_dict(condition) for condition in request.required_buy_conditions
+        ],
+        "required_sell_conditions": [
+            _condition_to_dict(condition) for condition in request.required_sell_conditions
+        ],
+        "value_ids": list(catalog.value_ids),
+        "signal_ids": list(catalog.signal_ids),
+        "formula_versions": [
+            (
+                formula_id,
+                FORMULA_REGISTRY.formula(formula_id).cache_version,
+                FORMULA_REGISTRY.formula(formula_id).minimum_bars,
+                FORMULA_REGISTRY.formula(formula_id).recommended_bars,
+            )
+            for formula_id in FORMULA_REGISTRY.all_formula_ids()
+        ],
+        "atr_period": 14,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 @contextmanager
 def build_discovery_snapshot(
     store: DuckDbMarketDataStore,
@@ -481,20 +600,51 @@ def build_discovery_snapshot(
     progress_callback: Callable[[int, int], None] | None = None,
     abort_check: Callable[[], bool] | None = None,
     persist_indicator_cache: bool = True,
+    cache: DiscoverySnapshotCache | None = None,
 ) -> Iterator[DiscoverySnapshot]:
     """Materialize one run snapshot and keep it alive for all workers."""
 
-    with TemporaryDirectory(prefix="indicator-lab-discovery-") as temporary_root:
-        root = Path(temporary_root)
+    selected_adapter = cast(
+        BatchMarketDataAdapter,
+        adapter
+        or DuckDbMarketDataAdapter(DuckDbMarketDataStore(store.database_path, read_only=True)),
+    )
+
+    def build(root: Path) -> None:
         _write_snapshot(
             root,
             store,
             request,
-            adapter=adapter,
+            adapter=selected_adapter,
             progress_callback=progress_callback,
             abort_check=abort_check,
             persist_indicator_cache=persist_indicator_cache,
-        )
+    )
+
+    if cache is not None:
+        if abort_check is not None and abort_check():
+            raise RuntimeError("策略实验已取消")
+        cache_key = _discovery_snapshot_cache_key(store, request, selected_adapter)
+        root, cache_hit = cache.get_or_build(cache_key, build)
+        try:
+            snapshot = DiscoverySnapshot(root)
+        except (OSError, ValueError, KeyError, EOFError):
+            if not cache_hit:
+                raise
+            cache.invalidate()
+            root, _ = cache.get_or_build(cache_key, build)
+            snapshot = DiscoverySnapshot(root)
+            cache_hit = False
+        snapshot.build_metadata["snapshot_cache_hit"] = cache_hit
+        try:
+            yield snapshot
+        finally:
+            snapshot.close()
+        return
+
+    with TemporaryDirectory(prefix="indicator-lab-discovery-") as temporary_root:
+        root = Path(temporary_root)
+        build(root)
         snapshot = DiscoverySnapshot(root)
         try:
             yield snapshot

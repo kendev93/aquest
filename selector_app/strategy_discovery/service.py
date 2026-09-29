@@ -49,7 +49,7 @@ from .resources import (
     validate_discovery_workers,
 )
 from .search import BatchEvaluator, HybridSearchEngine
-from .snapshot import DiscoverySnapshot, build_discovery_snapshot
+from .snapshot import DiscoverySnapshot, DiscoverySnapshotCache, build_discovery_snapshot
 
 ProgressCallback = Callable[[int, int, str, Mapping[str, object]], None]
 DISCOVERY_EVALUATION_WORKERS = resolve_discovery_workers()
@@ -125,6 +125,7 @@ class StrategyDiscoveryService:
         discovery_snapshot: DiscoverySnapshot | None = None,
         evaluation_workers: int | None = None,
         persist_indicator_cache: bool = True,
+        discovery_snapshot_cache: DiscoverySnapshotCache | None = None,
     ) -> None:
         selected_store = store or DuckDbMarketDataStore()
         selected_market_adapter = market_data_adapter or getattr(
@@ -140,6 +141,7 @@ class StrategyDiscoveryService:
         self._store = selected_store
         self._discovery_snapshot = discovery_snapshot
         self._persist_indicator_cache = persist_indicator_cache
+        self._discovery_snapshot_cache = discovery_snapshot_cache
         self._evaluation_workers = validate_discovery_workers(
             resolve_discovery_workers() if evaluation_workers is None else evaluation_workers
         )
@@ -271,6 +273,7 @@ class StrategyDiscoveryService:
                 progress_callback=report_snapshot_progress,
                 abort_check=abort_check,
                 persist_indicator_cache=self._persist_indicator_cache,
+                cache=self._discovery_snapshot_cache,
             ) as snapshot:
                 snapshot_build_seconds = max(0.0, time.monotonic() - snapshot_started)
                 snapshot_metadata = dict(snapshot.build_metadata)
@@ -290,6 +293,9 @@ class StrategyDiscoveryService:
                             "throughput_per_second": 0.0,
                             "estimated_seconds_remaining": None,
                             "snapshot_build_seconds": snapshot_build_seconds,
+                            "snapshot_cache_hit": snapshot_metadata.get(
+                                "snapshot_cache_hit", False
+                            ),
                         },
                     )
                 with self._evaluation_executor(str(snapshot.root)) as evaluation_executor:
@@ -754,11 +760,10 @@ class StrategyDiscoveryService:
                     captured_checkpoint = value
 
                 try:
-                    report = self._portfolio_service.run_prepared_contexts(
+                    report = self._portfolio_service.run_prepared_metrics(
                         config,
                         contexts,
                         total_candidates=self._discovery_snapshot.total_candidates,
-                        include_details=False,
                         checkpoint=checkpoint_value,
                         precompute_ranked_candidates=reuse_candidate_contexts,
                         checkpoint_callback=(
@@ -770,11 +775,10 @@ class StrategyDiscoveryService:
                         raise
                     checkpoint_fallback = True
                     captured_checkpoint = None
-                    report = self._portfolio_service.run_prepared_contexts(
+                    report = self._portfolio_service.run_prepared_metrics(
                         config,
                         contexts,
                         total_candidates=self._discovery_snapshot.total_candidates,
-                        include_details=False,
                         checkpoint=None,
                         precompute_ranked_candidates=reuse_candidate_contexts,
                         checkpoint_callback=(
@@ -819,11 +823,20 @@ class StrategyDiscoveryService:
         metrics["turnover"] = (
             _turnover(report, config.initial_cash)
             if isinstance(report, PortfolioBacktestReport)
-            else 0.0
+            else _number(report.get("turnover"))
         )
-        if isinstance(report, PortfolioBacktestReport):
-            metrics["trade_fingerprint"] = _trade_fingerprint(report.trades)
-            metrics["preflight_skipped"] = report.diagnostic == "预检无可交易候选"
+        trades = (
+            report.trades
+            if isinstance(report, PortfolioBacktestReport)
+            else report.get("trades")
+        )
+        diagnostic = (
+            report.diagnostic
+            if isinstance(report, PortfolioBacktestReport)
+            else report.get("diagnostic")
+        )
+        metrics["trade_fingerprint"] = _trade_fingerprint(trades)
+        metrics["preflight_skipped"] = diagnostic == "预检无可交易候选"
         if captured_checkpoint is not None:
             metrics["_simulation_checkpoint"] = captured_checkpoint.to_dict()
         if checkpoint_resume_attempted:

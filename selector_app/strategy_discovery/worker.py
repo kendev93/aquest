@@ -7,6 +7,7 @@ import signal
 import time
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
+from tempfile import TemporaryDirectory
 from threading import Event
 from typing import Literal, Protocol, cast
 
@@ -21,6 +22,7 @@ from .replay import ReplayLeaderboard
 from .replay_service import ReplayProgressCallback
 from .resources import resolve_discovery_workers
 from .service import ProgressCallback, StrategyDiscoveryService
+from .snapshot import DiscoverySnapshotCache
 from .worker_api_client import HttpStrategyJobClient
 
 logger = logging.getLogger(__name__)
@@ -319,22 +321,26 @@ def main() -> None:
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     with HttpStrategyJobClient.from_env() as job_client:
-        worker = StrategyDiscoveryWorker(
-            job_client,
-            StrategyDiscoveryService(
-                store=store,
-                market_data_adapter=market_adapter,
-                evaluation_workers=resolve_discovery_workers(),
-                persist_indicator_cache=False,
-            ),
-            service_factory=lambda worker_count: StrategyDiscoveryService(
-                store=store,
-                market_data_adapter=DuckDbMarketDataAdapter(store),
-                evaluation_workers=worker_count,
-                persist_indicator_cache=False,
-            ),
-        )
-        worker.run_forever(stop_event=stop_event)
+        with TemporaryDirectory(prefix="indicator-lab-worker-snapshots-") as cache_root:
+            snapshot_cache = DiscoverySnapshotCache(cache_root)
+            worker = StrategyDiscoveryWorker(
+                job_client,
+                StrategyDiscoveryService(
+                    store=store,
+                    market_data_adapter=market_adapter,
+                    evaluation_workers=resolve_discovery_workers(),
+                    persist_indicator_cache=False,
+                    discovery_snapshot_cache=snapshot_cache,
+                ),
+                service_factory=lambda worker_count: StrategyDiscoveryService(
+                    store=store,
+                    market_data_adapter=DuckDbMarketDataAdapter(store),
+                    evaluation_workers=worker_count,
+                    persist_indicator_cache=False,
+                    discovery_snapshot_cache=snapshot_cache,
+                ),
+            )
+            worker.run_forever(stop_event=stop_event)
 
 
 if __name__ == "__main__":

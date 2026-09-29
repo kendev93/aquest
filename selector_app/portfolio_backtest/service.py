@@ -169,6 +169,58 @@ class PortfolioBacktestService(
         checkpoint_callback: Callable[[SimulationCheckpoint], None] | None = None,
         precompute_ranked_candidates: bool = False,
     ) -> PortfolioBacktestReport:
+        return cast(
+            PortfolioBacktestReport,
+            self._run_prepared_contexts(
+                config,
+                contexts,
+                total_candidates=total_candidates,
+                include_details=include_details,
+                checkpoint=checkpoint,
+                checkpoint_callback=checkpoint_callback,
+                precompute_ranked_candidates=precompute_ranked_candidates,
+                metrics_only=False,
+            ),
+        )
+
+    def run_prepared_metrics(
+        self,
+        config: PortfolioBacktestConfig,
+        contexts: Sequence[_StockSeries],
+        *,
+        total_candidates: int | None = None,
+        checkpoint: SimulationCheckpoint | None = None,
+        checkpoint_callback: Callable[[SimulationCheckpoint], None] | None = None,
+        precompute_ranked_candidates: bool = False,
+    ) -> dict[str, object]:
+        """Run an optimizer candidate and return only metrics and replay identity."""
+
+        return cast(
+            dict[str, object],
+            self._run_prepared_contexts(
+                config,
+                contexts,
+                total_candidates=total_candidates,
+                include_details=False,
+                checkpoint=checkpoint,
+                checkpoint_callback=checkpoint_callback,
+                precompute_ranked_candidates=precompute_ranked_candidates,
+                metrics_only=True,
+            ),
+        )
+
+    def _run_prepared_contexts(
+        self,
+        config: PortfolioBacktestConfig,
+        contexts: Sequence[_StockSeries],
+        *,
+        total_candidates: int | None = None,
+        include_details: bool = True,
+        checkpoint: SimulationCheckpoint | None = None,
+        checkpoint_callback: Callable[[SimulationCheckpoint], None] | None = None,
+        precompute_ranked_candidates: bool = False,
+        metrics_only: bool,
+    ) -> PortfolioBacktestReport | dict[str, object]:
         """Run the simulator on candidate-specific contexts prepared upstream.
 
         Strategy discovery uses a read-only shared market snapshot to avoid
@@ -188,21 +240,25 @@ class PortfolioBacktestService(
         prepared = list(contexts)
         candidate_total = max(len(prepared), total_candidates or len(prepared))
         if not prepared:
-            return self._empty_report(
+            report = self._empty_report(
                 config,
                 candidate_total,
                 {"共享行情快照没有可用标的": candidate_total},
             )
+            return self._search_summary_from_report(report) if metrics_only else report
         dates = self._global_dates(prepared)
         if not dates:
-            return self._empty_report(
+            report = self._empty_report(
                 config,
                 candidate_total,
                 {"共享行情快照没有可用日期": candidate_total},
             )
+            return self._search_summary_from_report(report) if metrics_only else report
         data_fingerprint = _portfolio_fingerprint(prepared)
         if not self._has_preflight_candidates(prepared, config):
             simulation = self._no_trade_simulation(dates, config, include_details=include_details)
+            if metrics_only:
+                return self._build_search_summary(config, simulation, data_fingerprint)
             return self._build_report(
                 config,
                 dates,
@@ -253,6 +309,8 @@ class PortfolioBacktestService(
             restored_checkpoint, SimulationCheckpoint
         ):
             checkpoint_callback(restored_checkpoint)
+        if metrics_only:
+            return self._build_search_summary(config, simulation, data_fingerprint)
         return self._build_report(
             config,
             dates,
