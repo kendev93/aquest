@@ -98,7 +98,7 @@ class FileStrategyJobBackend:
         operation: JobOperation,
         payload: Mapping[str, object],
     ) -> DiscoveryResourceEstimate:
-        if operation == "discovery":
+        if operation in {"discovery", "risk_optimization"}:
             raw_request = payload.get("request")
             if not isinstance(raw_request, Mapping):
                 raise ValueError("策略实验请求内容无效")
@@ -430,17 +430,20 @@ def _dispatch(
     progress_callback: ProgressCallback,
     abort_check: Callable[[], bool],
 ) -> dict[str, object]:
-    if operation == "discovery":
+    if operation in {"discovery", "risk_optimization"}:
         raw_request = payload.get("request")
         if not isinstance(raw_request, Mapping):
             raise ValueError("策略实验请求内容无效")
-        return dict(
+        result = dict(
             service.run(
                 discovery_request_from_dict(raw_request),
                 progress_callback=progress_callback,
                 abort_check=abort_check,
             )
         )
+        if operation == "risk_optimization":
+            result["mode"] = "risk_optimization"
+        return result
     if operation == "refinement":
         experiment = _mapping(payload.get("experiment"), "父实验")
         parent_hash = _required_string(payload.get("parent_candidate_hash"), "父候选 hash")
@@ -493,6 +496,11 @@ def decorate_result(
         raw_duration = normalized.get("duration_seconds")
         if not isinstance(raw_duration, (int, float)):
             normalized["duration_seconds"] = _duration_seconds(started, finished)
+    elif operation == "risk_optimization":
+        normalized["risk_optimization_id"] = job_id
+        raw_duration = normalized.get("duration_seconds")
+        if not isinstance(raw_duration, (int, float)):
+            normalized["duration_seconds"] = _duration_seconds(started, finished)
     else:
         normalized["replay_id"] = job_id
         raw_duration = normalized.get("duration_seconds")
@@ -504,7 +512,7 @@ def decorate_result(
 def completion_state(operation: JobOperation, result: Mapping[str, object]) -> dict[str, object]:
     """Build the public job metadata emitted when an operation completes."""
 
-    if operation in {"discovery", "refinement"}:
+    if operation in {"discovery", "risk_optimization", "refinement"}:
         search_metadata = result.get("search_metadata")
         search = search_metadata if isinstance(search_metadata, Mapping) else {}
         metadata: dict[str, object] = {
@@ -553,6 +561,11 @@ def _persist_result(
             started_at=str(result.get("started_at") or ""),
             finished_at=str(result.get("finished_at") or ""),
         )
+        return
+    if operation == "risk_optimization":
+        # The worker job row itself retains the full request/result JSON.  Risk
+        # optimization runs are not strategy-discovery histories and therefore
+        # must not appear in that separate history table.
         return
     store.save_strategy_discovery_replay_history(
         job_id,

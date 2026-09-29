@@ -62,19 +62,49 @@ def _risk_trigger(
             config.stop_loss_cooldown_days,
         )
 
-    trailing_level = _risk_level(
-        position.highest_price,
-        config.trailing_stop_mode,
-        config.trailing_stop_pct,
-        config.trailing_stop_atr_multiplier,
-        atr,
-        direction="down",
-    )
-    if trailing_level is not None and low <= trailing_level:
-        return (
+    moving_levels = (
+        (
+            "moving_stop_loss",
+            _risk_level(
+                position.highest_price,
+                config.moving_stop_loss_mode,
+                config.moving_stop_loss_pct,
+                config.moving_stop_loss_atr_multiplier,
+                atr,
+                direction="down",
+            ),
+            config.moving_stop_loss_cooldown_days,
+            0,
+        ),
+        (
             "trailing_stop",
-            _risk_fill_price(open_price, trailing_level, direction="down"),
+            _risk_level(
+                position.highest_price,
+                config.trailing_stop_mode,
+                config.trailing_stop_pct,
+                config.trailing_stop_atr_multiplier,
+                atr,
+                direction="down",
+            ),
             config.trailing_stop_cooldown_days,
+            1,
+        ),
+    )
+    triggered_moving_levels = [
+        (trigger, level, cooldown, tie_breaker)
+        for trigger, level, cooldown, tie_breaker in moving_levels
+        if level is not None and low <= level
+    ]
+    if triggered_moving_levels:
+        trigger, level, cooldown, _tie_breaker = max(
+            triggered_moving_levels,
+            key=lambda item: (float(item[1]), -item[3]),
+        )
+        assert level is not None
+        return (
+            trigger,
+            _risk_fill_price(open_price, level, direction="down"),
+            cooldown,
         )
 
     take_level = _risk_level(
@@ -124,6 +154,7 @@ def _risk_trigger_label(trigger: str) -> str:
     return {
         "stop_loss": "止损",
         "take_profit": "止盈",
+        "moving_stop_loss": "移动止损",
         "trailing_stop": "移动止盈",
     }.get(trigger, "风险卖出")
 
@@ -138,6 +169,10 @@ def _risk_controls(config: PortfolioBacktestConfig) -> dict[str, object]:
         "stop_loss_pct": config.stop_loss_pct,
         "stop_loss_atr_multiplier": config.stop_loss_atr_multiplier,
         "stop_loss_cooldown_days": config.stop_loss_cooldown_days,
+        "moving_stop_loss_mode": config.moving_stop_loss_mode,
+        "moving_stop_loss_pct": config.moving_stop_loss_pct,
+        "moving_stop_loss_atr_multiplier": config.moving_stop_loss_atr_multiplier,
+        "moving_stop_loss_cooldown_days": config.moving_stop_loss_cooldown_days,
         "trailing_stop_mode": config.trailing_stop_mode,
         "trailing_stop_pct": config.trailing_stop_pct,
         "trailing_stop_atr_multiplier": config.trailing_stop_atr_multiplier,

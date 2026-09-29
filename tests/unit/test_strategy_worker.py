@@ -73,6 +73,29 @@ def test_worker_claims_discovery_and_persists_progress_and_result(tmp_path) -> N
     assert result["results_by_sharpe"] == []
 
 
+def test_worker_dispatches_and_completes_risk_optimization_operation(tmp_path) -> None:
+    service = FakeDiscoveryService()
+    store, worker = _worker(tmp_path, service)
+    store.create(
+        "risk-job",
+        operation="risk_optimization",
+        payload={
+            "request": {
+                "base_config": {"ranking_value": "technical.ma5"},
+                "splits": {},
+                "max_trials": 1,
+                "candidate_mode": "risk_only",
+            }
+        },
+        description="组合风险寻优",
+    )
+
+    assert worker.run_once() == "risk-job"
+    assert service.calls == ["discovery"]
+    assert store.read_state("risk-job")["status"] == "completed"
+    assert store.read_result("risk-job")["mode"] == "risk_optimization"
+
+
 def test_worker_dispatches_refinement_and_replay_operations(tmp_path) -> None:
     service = FakeDiscoveryService()
     store, worker = _worker(tmp_path, service)

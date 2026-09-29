@@ -78,6 +78,97 @@ def test_service_runs_candidates_through_portfolio_backtest_and_returns_metadata
     assert len(portfolio.calls) >= 6
 
 
+def test_risk_only_service_searches_exit_controls_and_preserves_fixed_strategy() -> None:
+    portfolio = FakePortfolioService()
+    base_config = {
+        "vipdoc_path": "/tmp/vipdoc",
+        "universe": "all",
+        "start_date": "2024-01-01",
+        "end_date": "2024-12-31",
+        "selected_signals": [],
+        "combine_mode": "all",
+        "minimum_matches": None,
+        "buy_rule": {
+            "signals": [],
+            "conditions": [{"left_value": "technical.ma5", "operator": "gt", "right_constant": 10}],
+            "required_conditions": [],
+            "combine_mode": "all",
+            "minimum_matches": None,
+        },
+        "sell_rule": {
+            "signals": [],
+            "conditions": [
+                {"left_value": "technical.rsi14", "operator": "gte", "right_constant": 70}
+            ],
+            "required_conditions": [],
+            "combine_mode": "all",
+            "minimum_matches": None,
+        },
+        "ranking_value": "technical.ma5",
+        "rank_order": "asc",
+        "max_positions": 3,
+        "rebalance_frequency": "weekly",
+        "initial_cash": 100_000.0,
+        "commission": 0.0002,
+        "min_commission": 0.2,
+        "stamp_tax": 0.001,
+        "slippage": 0.01,
+        "execution": "next_close",
+        "atr_period": 14,
+    }
+    risk_request = DiscoveryRequest(
+        base_config=base_config,
+        splits={
+            "search": {"start_date": "2024-01-01", "end_date": "2024-07-01"},
+            "validation": {"start_date": "2024-07-02", "end_date": "2024-10-01"},
+            "holdout": {"start_date": "2024-10-02", "end_date": "2024-12-31"},
+        },
+        candidate_mode="risk_only",
+        max_trials=6,
+        validation_candidates=6,
+        holdout_candidates=20,
+        min_trades=1,
+        max_drawdown=None,
+        max_complexity=4,
+        multifidelity_enabled=False,
+        seed=17,
+    )
+
+    result = StrategyDiscoveryService(portfolio_service=portfolio).run(risk_request)
+
+    assert result["mode"] == "risk_optimization"
+    assert len(str(result["configuration_fingerprint"])) == 64
+    candidates = result["results_by_sharpe"]
+    assert candidates
+    for candidate in candidates:
+        assert candidate["metrics"]["train"]["annual_return"] == 0.1
+        assert candidate["metrics"]["validation"]["annual_return"] == 0.1
+        assert candidate["metrics"]["holdout"].get("annual_return") == 0.1, {
+            "metrics": candidate["metrics"],
+            "validation_metadata": result["validation_metadata"],
+        }
+        config = candidate["config"]
+        for key in (
+            "buy_rule",
+            "sell_rule",
+            "ranking_value",
+            "rank_order",
+            "max_positions",
+            "rebalance_frequency",
+            "initial_cash",
+            "commission",
+            "min_commission",
+            "stamp_tax",
+            "slippage",
+            "execution",
+            "atr_period",
+        ):
+            assert config[key] == base_config[key]
+        assert config["start_date"] == "2024-07-02"
+        assert config["end_date"] == "2024-10-01"
+    assert all(call.ranking_value == "technical.ma5" for call in portfolio.calls)
+
+
 def test_service_capabilities_describe_the_unified_indicator_catalog() -> None:
     capabilities = StrategyDiscoveryService(portfolio_service=FakePortfolioService()).capabilities()
 

@@ -13,6 +13,7 @@ from selector_app.screening.rules import RuleGroup
 
 DiscoverySplit = Literal["search", "coarse", "medium", "full", "validation", "holdout"]
 RiskMode = Literal["pct", "atr"]
+CandidateMode = Literal["strategy", "risk_only"]
 
 
 def _condition_to_dict(condition: ScreenCondition) -> dict[str, object]:
@@ -94,6 +95,7 @@ class DiscoveryRequest:
     multifidelity_enabled: bool = True
     convergence_enabled: bool = False
     seed: int = 0
+    candidate_mode: CandidateMode = "strategy"
 
     def __post_init__(self) -> None:
         if not isinstance(self.base_config, Mapping):
@@ -155,6 +157,8 @@ class DiscoveryRequest:
             raise ValueError("策略复杂度必须在 0 到 50 之间")
         if not isinstance(self.convergence_enabled, bool):
             raise ValueError("提前收敛开关必须是布尔值")
+        if self.candidate_mode not in {"strategy", "risk_only"}:
+            raise ValueError("候选寻优模式无效")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -183,6 +187,7 @@ class DiscoveryRequest:
             "multifidelity_enabled": self.multifidelity_enabled,
             "convergence_enabled": self.convergence_enabled,
             "seed": self.seed,
+            "candidate_mode": self.candidate_mode,
         }
 
 
@@ -204,6 +209,10 @@ class StrategyCandidate:
     stop_loss_pct: float | None = None
     stop_loss_atr_multiplier: float | None = None
     stop_loss_cooldown_days: int = 0
+    moving_stop_loss_mode: RiskMode = "pct"
+    moving_stop_loss_pct: float | None = None
+    moving_stop_loss_atr_multiplier: float | None = None
+    moving_stop_loss_cooldown_days: int = 0
     trailing_stop_mode: RiskMode = "pct"
     trailing_stop_pct: float | None = None
     trailing_stop_atr_multiplier: float | None = None
@@ -214,6 +223,7 @@ class StrategyCandidate:
     candidate_hash: str = ""
     metrics: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     human_readable_rules: str = ""
+    preserve_base_config: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "buy_rule", _normalize_rule(self.buy_rule))
@@ -243,6 +253,29 @@ class StrategyCandidate:
         # date preset.  Keep that metadata in the experiment request, but do
         # not pass it to the strict portfolio-backtest schema.
         config = {key: value for key, value in self.base_config.items() if key != "date_mode"}
+        if self.preserve_base_config:
+            config.update(
+                {
+                    "take_profit_mode": self.take_profit_mode,
+                    "take_profit_pct": self.take_profit_pct,
+                    "take_profit_atr_multiplier": self.take_profit_atr_multiplier,
+                    "take_profit_cooldown_days": self.take_profit_cooldown_days,
+                    "stop_loss_mode": self.stop_loss_mode,
+                    "stop_loss_pct": self.stop_loss_pct,
+                    "stop_loss_atr_multiplier": self.stop_loss_atr_multiplier,
+                    "stop_loss_cooldown_days": self.stop_loss_cooldown_days,
+                    "moving_stop_loss_mode": self.moving_stop_loss_mode,
+                    "moving_stop_loss_pct": self.moving_stop_loss_pct,
+                    "moving_stop_loss_atr_multiplier": self.moving_stop_loss_atr_multiplier,
+                    "moving_stop_loss_cooldown_days": self.moving_stop_loss_cooldown_days,
+                    "trailing_stop_mode": self.trailing_stop_mode,
+                    "trailing_stop_pct": self.trailing_stop_pct,
+                    "trailing_stop_atr_multiplier": self.trailing_stop_atr_multiplier,
+                    "trailing_stop_cooldown_days": self.trailing_stop_cooldown_days,
+                    "atr_period": self.atr_period,
+                }
+            )
+            return config
         config.update(
             {
                 "selected_signals": [],
@@ -263,6 +296,10 @@ class StrategyCandidate:
                 "stop_loss_pct": self.stop_loss_pct,
                 "stop_loss_atr_multiplier": self.stop_loss_atr_multiplier,
                 "stop_loss_cooldown_days": self.stop_loss_cooldown_days,
+                "moving_stop_loss_mode": self.moving_stop_loss_mode,
+                "moving_stop_loss_pct": self.moving_stop_loss_pct,
+                "moving_stop_loss_atr_multiplier": self.moving_stop_loss_atr_multiplier,
+                "moving_stop_loss_cooldown_days": self.moving_stop_loss_cooldown_days,
                 "trailing_stop_mode": self.trailing_stop_mode,
                 "trailing_stop_pct": self.trailing_stop_pct,
                 "trailing_stop_atr_multiplier": self.trailing_stop_atr_multiplier,
@@ -404,6 +441,13 @@ def _human_readable(candidate: StrategyCandidate) -> str:
                 candidate.stop_loss_pct,
                 candidate.stop_loss_atr_multiplier,
                 candidate.stop_loss_cooldown_days,
+            ),
+            risk_text(
+                "移动止损",
+                candidate.moving_stop_loss_mode,
+                candidate.moving_stop_loss_pct,
+                candidate.moving_stop_loss_atr_multiplier,
+                candidate.moving_stop_loss_cooldown_days,
             ),
             risk_text(
                 "止盈",

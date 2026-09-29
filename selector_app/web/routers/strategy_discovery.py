@@ -19,7 +19,9 @@ from selector_app.strategy_discovery.resources import (
 )
 from selector_app.strategy_discovery.service import StrategyDiscoveryService
 
+from ..date_ranges import resolve_date_range
 from ..schemas import (
+    PortfolioRiskOptimizationRequest,
     StrategyDiscoveryRequest,
     StrategyRefinementRequest,
     StrategyReplayRequest,
@@ -102,7 +104,11 @@ def _resource_metadata(estimate: DiscoveryResourceEstimate | None) -> dict[str, 
 
 def _state_or_404(job_id: str, request: Request) -> dict[str, object]:
     state = _backend(request).get(job_id)
-    if state is None or state.get("description") not in {"策略实验室", "策略二次优化"}:
+    if state is None or state.get("description") not in {
+        "策略实验室",
+        "策略二次优化",
+        "组合风险寻优",
+    }:
         raise HTTPException(status_code=404, detail="策略实验任务不存在或已过期")
     return state
 
@@ -175,6 +181,72 @@ def create_strategy_discovery(
             "discovery",
             {"request": discovery_request.to_dict()},
             description="策略实验室",
+            worker_count=(
+                resource_estimate.selected_workers
+                if isinstance(resource_estimate, DiscoveryResourceEstimate)
+                else None
+            ),
+            metadata=_resource_metadata(
+                resource_estimate
+                if isinstance(resource_estimate, DiscoveryResourceEstimate)
+                else None
+            ),
+        )
+    except (RuntimeError, OSError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail="任务执行器暂不可用") from exc
+    return JSONResponse(
+        status_code=status.HTTP_202_ACCEPTED,
+        content={"data": {"job_id": job_id, "status": "queued"}},
+    )
+
+
+@router.post("/risk-optimizations", status_code=status.HTTP_202_ACCEPTED)
+def create_portfolio_risk_optimization(
+    payload: PortfolioRiskOptimizationRequest,
+    request: Request,
+) -> JSONResponse:
+    try:
+        if payload.universe == "custom" and payload.universe_file:
+            if not Path(payload.universe_file).expanduser().is_file():
+                raise ValueError(f"自定义股票列表文件不存在: {payload.universe_file}")
+        if payload.start_date is None and payload.end_date is None:
+            store_status = _store(request).status()
+            default_start, default_end = resolve_date_range(
+                mode=payload.date_mode,
+                requested_start=None,
+                requested_end=None,
+                available_start=store_status.data_start,
+                available_end=store_status.data_end,
+            )
+            discovery_request = payload.to_discovery_request(
+                default_start=default_start,
+                default_end=default_end,
+            )
+        else:
+            discovery_request = payload.to_discovery_request()
+    except ValueError as exc:
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            content={"error": {"code": "validation_error", "message": str(exc)}},
+        )
+    except (MarketDataStoreError, OSError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="本地行情数据暂不可用，请检查 DuckDB 后重试",
+        ) from exc
+
+    resource_estimate = _preflight_job(
+        request,
+        "risk_optimization",
+        {"request": discovery_request.to_dict()},
+    )
+    if isinstance(resource_estimate, JSONResponse):
+        return resource_estimate
+    try:
+        job_id = _backend(request).submit(
+            "risk_optimization",
+            {"request": discovery_request.to_dict()},
+            description="组合风险寻优",
             worker_count=(
                 resource_estimate.selected_workers
                 if isinstance(resource_estimate, DiscoveryResourceEstimate)

@@ -293,7 +293,7 @@ class StrategyDiscoveryService:
                         },
                     )
                 with self._evaluation_executor(str(snapshot.root)) as evaluation_executor:
-                    return self._run_impl(
+                    result = self._run_impl(
                         request,
                         progress_callback=progress_callback,
                         abort_check=abort_check,
@@ -305,18 +305,32 @@ class StrategyDiscoveryService:
                         result_metadata=result_metadata,
                         expected_data_fingerprint=expected_data_fingerprint,
                     )
-        with self._evaluation_executor() as evaluation_executor:
-            return self._run_impl(
-                request,
-                progress_callback=progress_callback,
-                abort_check=abort_check,
-                evaluation_executor=evaluation_executor,
-                started=started,
-                snapshot_metadata=snapshot_metadata,
-                candidate_builder=candidate_builder,
-                result_metadata=result_metadata,
-                expected_data_fingerprint=expected_data_fingerprint,
-            )
+        else:
+            with self._evaluation_executor() as evaluation_executor:
+                result = self._run_impl(
+                    request,
+                    progress_callback=progress_callback,
+                    abort_check=abort_check,
+                    evaluation_executor=evaluation_executor,
+                    started=started,
+                    snapshot_metadata=snapshot_metadata,
+                    candidate_builder=candidate_builder,
+                    result_metadata=result_metadata,
+                    expected_data_fingerprint=expected_data_fingerprint,
+                )
+        if request.candidate_mode == "risk_only":
+            result["mode"] = "risk_optimization"
+            result["configuration_fingerprint"] = hashlib.sha256(
+                json.dumps(
+                    dict(request.base_config),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode("utf-8")
+            ).hexdigest()
+            _expose_training_metrics(result)
+        return result
 
     def refine(
         self,
@@ -812,6 +826,31 @@ def _string_tuple(value: object) -> tuple[str, ...] | None:
         return None
     result = tuple(str(item).strip() for item in value if str(item).strip())
     return result or None
+
+
+def _expose_training_metrics(result: dict[str, object]) -> None:
+    """Publish each risk candidate's highest-fidelity search metrics as train."""
+
+    for board_key in ("results_by_sharpe", "results_by_return"):
+        raw_candidates = result.get(board_key)
+        if not isinstance(raw_candidates, list):
+            continue
+        for candidate in raw_candidates:
+            if not isinstance(candidate, dict):
+                continue
+            raw_metrics = candidate.get("metrics")
+            if not isinstance(raw_metrics, dict):
+                continue
+            training = next(
+                (
+                    raw_metrics[key]
+                    for key in ("full", "medium", "search")
+                    if isinstance(raw_metrics.get(key), Mapping)
+                ),
+                None,
+            )
+            if isinstance(training, Mapping):
+                raw_metrics["train"] = dict(training)
 
 
 def _progress_plan(request: DiscoveryRequest) -> tuple[tuple[str, ...], dict[str, int], int]:

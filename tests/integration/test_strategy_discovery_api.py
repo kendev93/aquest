@@ -136,6 +136,55 @@ def test_strategy_discovery_api_starts_reports_and_reads_history(tmp_path) -> No
     assert history.json()["data"][0]["finished_at"]
 
 
+def test_portfolio_risk_optimization_uses_async_worker_and_fixed_three_way_split(tmp_path) -> None:
+    service = CapturingDiscoveryService()
+    with TestClient(
+        create_app(
+            strategy_discovery_service=service,
+            market_data_store=DuckDbMarketDataStore(tmp_path / "market.duckdb"),
+        )
+    ) as client:
+        response = client.post(
+            "/api/v1/strategy-discovery/risk-optimizations",
+            json={
+                "universe": "all",
+                "start_date": "2024-01-01",
+                "end_date": "2024-06-30",
+                "buy_rule": {
+                    "conditions": [
+                        {"left_value": "technical.ma5", "operator": "gt", "right_constant": 10}
+                    ]
+                },
+                "sell_rule": {
+                    "conditions": [
+                        {"left_value": "technical.rsi14", "operator": "gte", "right_constant": 70}
+                    ]
+                },
+                "ranking_value": "technical.ma5",
+                "rank_order": "asc",
+                "max_positions": 3,
+                "max_trials": 1000,
+            },
+        )
+        assert response.status_code == 202
+        job_id = response.json()["data"]["job_id"]
+        state = _wait(client, job_id)
+        results = client.get(f"/api/v1/strategy-discovery/{job_id}/results")
+
+    assert state["status"] == "completed"
+    assert state["description"] == "组合风险寻优"
+    assert results.status_code == 200
+    assert results.json()["data"]["mode"] == "risk_optimization"
+    assert results.json()["data"]["risk_optimization_id"] == job_id
+    assert len(service.requests) == 1
+    request = service.requests[0]
+    assert request.candidate_mode == "risk_only"
+    assert request.base_config["ranking_value"] == "technical.ma5"
+    assert request.base_config["rank_order"] == "asc"
+    assert request.splits["search"]["end_date"] < request.splits["validation"]["start_date"]
+    assert request.splits["validation"]["end_date"] < request.splits["holdout"]["start_date"]
+
+
 def test_create_app_uses_duckdb_backend_for_production_service(tmp_path) -> None:
     app = create_app(
         market_data_store=DuckDbMarketDataStore(tmp_path / "market.duckdb"),
@@ -545,4 +594,57 @@ def test_strategy_discovery_api_can_cancel_a_running_job(tmp_path) -> None:
 
     assert cancelled.status_code == 200
     assert cancelled.json()["data"]["cancel_requested"] is True
+    assert state["status"] == "cancelled"
+
+
+def test_portfolio_risk_optimization_api_can_cancel_a_running_job(tmp_path) -> None:
+    service = BlockingDiscoveryService()
+    service.started.clear()
+    runner = ScreenJobRunner(max_workers=1)
+    try:
+        with TestClient(
+            create_app(
+                runner=runner,
+                strategy_discovery_service=service,
+                market_data_store=DuckDbMarketDataStore(tmp_path / "risk-market.duckdb"),
+            )
+        ) as client:
+            response = client.post(
+                "/api/v1/strategy-discovery/risk-optimizations",
+                json={
+                    "start_date": "2024-01-01",
+                    "end_date": "2024-12-31",
+                    "buy_rule": {
+                        "conditions": [
+                            {
+                                "left_value": "technical.ma5",
+                                "operator": "gt",
+                                "right_constant": 10,
+                            }
+                        ]
+                    },
+                    "sell_rule": {
+                        "conditions": [
+                            {
+                                "left_value": "technical.rsi14",
+                                "operator": "gte",
+                                "right_constant": 70,
+                            }
+                        ]
+                    },
+                    "ranking_value": "technical.ma5",
+                    "max_trials": 1000,
+                },
+            )
+            job_id = response.json()["data"]["job_id"]
+            assert service.started.wait(timeout=1)
+            cancelled = client.post(f"/api/v1/strategy-discovery/{job_id}/cancel")
+            state = _wait(client, job_id)
+    finally:
+        runner.shutdown()
+
+    assert response.status_code == 202
+    assert cancelled.status_code == 200
+    assert cancelled.json()["data"]["cancel_requested"] is True
+    assert state["description"] == "组合风险寻优"
     assert state["status"] == "cancelled"

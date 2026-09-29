@@ -37,6 +37,12 @@ export interface StrategyDiscoveryPayload {
 }
 
 
+export interface PortfolioRiskOptimizationPayload extends PortfolioBacktestPayload {
+  max_trials: 1000 | 2000 | 3000
+  seed?: number | null
+}
+
+
 export interface StrategyDiscoveryRefinementPayload {
   parent_history_id: string
   parent_candidate_hash: string
@@ -75,7 +81,8 @@ export interface StrategyDiscoveryCandidate {
 
 export interface StrategyDiscoveryResult {
   history_id?: string
-  mode?: 'global' | 'refinement'
+  risk_optimization_id?: string
+  mode?: 'global' | 'refinement' | 'risk_optimization'
   request: Record<string, unknown>
   results_by_sharpe: StrategyDiscoveryCandidate[]
   results_by_return: StrategyDiscoveryCandidate[]
@@ -84,6 +91,7 @@ export interface StrategyDiscoveryResult {
   algorithm_metadata?: Record<string, unknown>
   stage_durations_seconds?: Record<string, number>
   data_fingerprint?: string
+  configuration_fingerprint?: string
   duration_seconds?: number
   started_at?: string
   finished_at?: string

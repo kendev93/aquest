@@ -4,6 +4,7 @@ import {
   cancelStrategyDiscovery,
   cancelStrategyReplay,
   createStrategyDiscovery,
+  createPortfolioRiskOptimization,
   createStrategyReplay,
   deleteStrategyDiscoveryHistory,
   fetchStrategyDiscoveryCapabilities,
@@ -46,6 +47,33 @@ describe('strategy discovery API', () => {
       ['/api/v1/strategy-discovery/discovery-1/cancel', 'POST'],
       ['/api/v1/strategy-discovery/history/discovery-1', 'DELETE'],
     ])
+  })
+
+  it('starts a portfolio risk optimization through the asynchronous strategy worker', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ data: { job_id: 'risk-job-1', status: 'queued' } }), { status: 202 }),
+    )
+
+    await expect(createPortfolioRiskOptimization({
+      universe: 'all',
+      selected_signals: [],
+      combine_mode: 'all',
+      minimum_matches: null,
+      ranking_value: 'technical.ma5',
+      max_positions: 3,
+      buy_rule: { signals: ['custom.buy'], conditions: [], combine_mode: 'any', minimum_matches: null },
+      moving_stop_loss_mode: 'atr',
+      moving_stop_loss_atr_multiplier: 2,
+      moving_stop_loss_cooldown_days: 3,
+      max_trials: 2000,
+    })).resolves.toEqual({ job_id: 'risk-job-1', status: 'queued' })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/strategy-discovery/risk-optimizations',
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.stringContaining('"moving_stop_loss_atr_multiplier":2'),
+      }),
+    )
   })
 
   it('surfaces API error messages', async () => {

@@ -220,18 +220,21 @@ class StrategyDiscoveryWorker:
                 metadata=details,
             )
 
-        if operation == "discovery":
+        if operation in {"discovery", "risk_optimization"}:
             raw_request = payload.get("request")
             if not isinstance(raw_request, Mapping):
                 raise ValueError("策略实验请求内容无效")
             discovery_request = discovery_request_from_dict(raw_request)
-            return dict(
+            result = dict(
                 selected_service.run(
                     discovery_request,
                     progress_callback=progress_callback,
                     abort_check=abort_check,
                 )
             )
+            if operation == "risk_optimization":
+                result["mode"] = "risk_optimization"
+            return result
         if operation == "refinement":
             experiment = _mapping(payload.get("experiment"), "父实验")
             parent_hash = _required_string(payload.get("parent_candidate_hash"), "父候选 hash")

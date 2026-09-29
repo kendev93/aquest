@@ -7,6 +7,9 @@ import type {
   PortfolioBacktestResult,
   SavedStrategyDetail,
   SavedStrategySummary,
+  StrategyDiscoveryCandidate,
+  StrategyDiscoveryJobState,
+  StrategyDiscoveryResult,
 } from '../types'
 import PortfolioBacktestPage from './PortfolioBacktestPage.vue'
 
@@ -14,6 +17,7 @@ import * as portfolioApi from '../api/portfolioBacktest'
 import * as formulaApi from '../api/formulaScreen'
 import * as jobsApi from '../api/jobs'
 import * as strategiesApi from '../api/savedStrategies'
+import * as strategyDiscoveryApi from '../api/strategyDiscovery'
 import { FormulaScreenApiError } from '../api/formulaScreen'
 
 vi.mock('../api/formulaScreen', async () => {
@@ -48,6 +52,17 @@ vi.mock('../api/savedStrategies', async () => {
     createStrategy: vi.fn(),
     updateStrategy: vi.fn(),
     deleteStrategy: vi.fn(),
+  }
+})
+
+vi.mock('../api/strategyDiscovery', async () => {
+  const actual = await vi.importActual<typeof import('../api/strategyDiscovery')>('../api/strategyDiscovery')
+  return {
+    ...actual,
+    cancelStrategyDiscovery: vi.fn(),
+    createPortfolioRiskOptimization: vi.fn(),
+    getStrategyDiscovery: vi.fn(),
+    getStrategyDiscoveryResults: vi.fn(),
   }
 })
 
@@ -117,8 +132,79 @@ const result: PortfolioBacktestResult = {
   },
 }
 
+const riskCandidate: StrategyDiscoveryCandidate = {
+  candidate_hash: 'risk-candidate-1',
+  complexity: 4,
+  human_readable_rules: '止损8%；移动止损 ATR×2；止盈20%；移动止盈5%',
+  config: {
+    universe: 'all',
+    start_date: '2024-01-01',
+    end_date: '2024-03-31',
+    selected_signals: [],
+    combine_mode: 'all',
+    minimum_matches: null,
+    buy_rule: { signals: [], conditions: [{ left_value: 'indicator_three.var1', operator: 'gt', right_constant: 10 }], combine_mode: 'all', minimum_matches: null },
+    sell_rule: { signals: [], conditions: [{ left_value: 'indicator_three.var1', operator: 'lt', right_constant: 50 }], combine_mode: 'all', minimum_matches: null },
+    ranking_value: 'indicator_three.varo7',
+    rank_order: 'desc',
+    max_positions: 5,
+    rebalance_frequency: 'daily',
+    stop_loss_mode: 'pct',
+    stop_loss_pct: 0.08,
+    stop_loss_atr_multiplier: null,
+    stop_loss_cooldown_days: 0,
+    take_profit_mode: 'pct',
+    take_profit_pct: 0.2,
+    take_profit_atr_multiplier: null,
+    take_profit_cooldown_days: 0,
+    moving_stop_loss_mode: 'atr',
+    moving_stop_loss_pct: null,
+    moving_stop_loss_atr_multiplier: 2,
+    moving_stop_loss_cooldown_days: 3,
+    trailing_stop_mode: 'pct',
+    trailing_stop_pct: 0.05,
+    trailing_stop_atr_multiplier: null,
+    trailing_stop_cooldown_days: 0,
+    atr_period: 14,
+    initial_cash: 1_000_000,
+    commission: 0.0001,
+    min_commission: 0.1,
+    stamp_tax: 0.001,
+    slippage: 0,
+    execution: 'next_open',
+    position_mode: 'full',
+    fixed_size: null,
+  },
+  metrics: {
+    train: { annual_return: 0.15, sharpe: 1.1, max_drawdown: 0.12 },
+    validation: {
+      total_return: 0.12, annual_return: 0.22, sharpe: 1.6, max_drawdown: 0.03,
+      total_trades: 4, win_rate: 0.5, turnover: 1.2,
+    },
+    holdout: { annual_return: 0.1, sharpe: 0.9, max_drawdown: 0.05, constraints_passed: true },
+  },
+}
+
+const riskOptimizationResult: StrategyDiscoveryResult = {
+  mode: 'risk_optimization',
+  request: {
+    splits: {
+      search: { start_date: '2024-01-01', end_date: '2024-02-29' },
+      validation: { start_date: '2024-03-01', end_date: '2024-03-31' },
+      holdout: { start_date: '2024-04-01', end_date: '2024-04-30' },
+    },
+  },
+  results_by_sharpe: [riskCandidate],
+  results_by_return: [riskCandidate],
+  search_metadata: {},
+  validation_metadata: {},
+  data_fingerprint: 'portfolio-fingerprint',
+  configuration_fingerprint: 'risk-base-fingerprint',
+}
+
 describe('PortfolioBacktestPage', () => {
   beforeEach(() => {
+    vi.unstubAllGlobals()
     vi.clearAllMocks()
     sessionStorage.clear()
     vi.mocked(formulaApi.fetchMetadata).mockResolvedValue(metadata)
@@ -132,6 +218,15 @@ describe('PortfolioBacktestPage', () => {
     vi.mocked(jobsApi.fetchActiveJobs).mockResolvedValue([])
     vi.mocked(strategiesApi.fetchStrategies).mockResolvedValue([])
     vi.mocked(strategiesApi.deleteStrategy).mockResolvedValue({ deleted: true })
+    vi.mocked(strategyDiscoveryApi.createPortfolioRiskOptimization).mockResolvedValue({ job_id: 'risk-opt-1', status: 'queued' })
+    vi.mocked(strategyDiscoveryApi.getStrategyDiscovery).mockResolvedValue({
+      job_id: 'risk-opt-1', status: 'completed', progress: 1, total_candidates: 1000,
+      total_scanned: 1000, errors: 0, skipped: 0, error: null, result: null,
+    } as StrategyDiscoveryJobState)
+    vi.mocked(strategyDiscoveryApi.getStrategyDiscoveryResults).mockResolvedValue(riskOptimizationResult)
+    vi.mocked(strategyDiscoveryApi.cancelStrategyDiscovery).mockResolvedValue({
+      job_id: 'risk-opt-1', status: 'cancelling', cancel_requested: true,
+    })
   })
 
   const savedStrategy: SavedStrategySummary = {
@@ -516,6 +611,10 @@ describe('PortfolioBacktestPage', () => {
       stop_loss_pct: null,
       stop_loss_atr_multiplier: 2,
       stop_loss_cooldown_days: 3,
+      moving_stop_loss_mode: 'atr',
+      moving_stop_loss_pct: null,
+      moving_stop_loss_atr_multiplier: 2,
+      moving_stop_loss_cooldown_days: 3,
       take_profit_mode: 'pct',
       take_profit_pct: 0.2,
       take_profit_atr_multiplier: null,
@@ -549,6 +648,9 @@ describe('PortfolioBacktestPage', () => {
     expect((wrapper.get('[data-testid="portfolio-stop-loss-mode"]').element as HTMLSelectElement).value).toBe('atr')
     expect((wrapper.get('[data-testid="portfolio-stop-loss-atr"]').element as HTMLInputElement).value).toBe('2')
     expect((wrapper.get('[data-testid="portfolio-stop-loss-cooldown"]').element as HTMLInputElement).value).toBe('3')
+    expect((wrapper.get('[data-testid="portfolio-moving-stop-loss-enabled"]').element as HTMLInputElement).checked).toBe(true)
+    expect((wrapper.get('[data-testid="portfolio-moving-stop-loss-mode"]').element as HTMLSelectElement).value).toBe('atr')
+    expect((wrapper.get('[data-testid="portfolio-moving-stop-loss-atr"]').element as HTMLInputElement).value).toBe('2')
 
     await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')
     await flushPromises()
@@ -562,6 +664,8 @@ describe('PortfolioBacktestPage', () => {
       stop_loss_pct: null,
       stop_loss_atr_multiplier: 2,
       stop_loss_cooldown_days: 3,
+      moving_stop_loss_atr_multiplier: 2,
+      moving_stop_loss_cooldown_days: 3,
       take_profit_pct: 0.2,
       take_profit_cooldown_days: 5,
     }))
@@ -683,6 +787,8 @@ describe('PortfolioBacktestPage', () => {
     await wrapper.get('[data-testid="portfolio-max-positions"]').setValue(8)
     await wrapper.get('[data-testid="portfolio-ranking-value"]').setValue('indicator_three.var1')
     await wrapper.get('[data-testid="portfolio-stop-loss-cooldown"]').setValue(2)
+    await wrapper.get('[data-testid="portfolio-moving-stop-loss-enabled"]').setValue(true)
+    await wrapper.get('[data-testid="portfolio-moving-stop-loss-cooldown"]').setValue(1)
     await wrapper.get('[data-testid="portfolio-take-profit-enabled"]').setValue(true)
     await wrapper.get('[data-testid="portfolio-take-profit-cooldown"]').setValue(3)
     await wrapper.get('[data-testid="portfolio-trailing-stop-enabled"]').setValue(true)
@@ -694,6 +800,8 @@ describe('PortfolioBacktestPage', () => {
       max_positions: 8,
       ranking_value: 'indicator_three.var1',
       stop_loss_cooldown_days: 2,
+      moving_stop_loss_pct: 0.05,
+      moving_stop_loss_cooldown_days: 1,
       take_profit_cooldown_days: 3,
       trailing_stop_cooldown_days: 4,
     }))
@@ -704,6 +812,8 @@ describe('PortfolioBacktestPage', () => {
     await flushPromises()
 
     await wrapper.get('[data-testid="portfolio-stop-loss-mode"]').setValue('atr')
+    await wrapper.get('[data-testid="portfolio-moving-stop-loss-enabled"]').setValue(true)
+    await wrapper.get('[data-testid="portfolio-moving-stop-loss-mode"]').setValue('atr')
     await wrapper.get('[data-testid="portfolio-take-profit-enabled"]').setValue(true)
     await wrapper.get('[data-testid="portfolio-take-profit-mode"]').setValue('atr')
     await wrapper.get('[data-testid="portfolio-trailing-stop-enabled"]').setValue(true)
@@ -713,9 +823,68 @@ describe('PortfolioBacktestPage', () => {
 
     expect(portfolioApi.createPortfolioBacktest).toHaveBeenCalledWith(expect.objectContaining({
       stop_loss_mode: 'atr',
+      moving_stop_loss_mode: 'atr',
       take_profit_mode: 'atr',
       trailing_stop_mode: 'atr',
     }))
+  })
+
+  it('optimizes exit risk, applies a validation candidate and verifies ordinary replay', async () => {
+    const wrapper = mount(PortfolioBacktestPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="portfolio-risk-search-level"]').setValue(2000)
+    await wrapper.get('[data-testid="start-portfolio-risk-optimization"]').trigger('click')
+    await flushPromises()
+
+    expect(strategyDiscoveryApi.createPortfolioRiskOptimization).toHaveBeenCalledWith(expect.objectContaining({
+      max_trials: 2000,
+      moving_stop_loss_mode: 'pct',
+      moving_stop_loss_pct: null,
+      stop_loss_pct: 0.08,
+      buy_rule: expect.objectContaining({ conditions: [expect.objectContaining({ left_value: 'indicator_three.var1' })] }),
+      ranking_value: 'indicator_three.varo7',
+    }))
+    expect(strategyDiscoveryApi.getStrategyDiscovery).toHaveBeenCalledWith('risk-opt-1')
+    expect(wrapper.get('[data-testid="portfolio-risk-optimization-results"]').text()).toContain('退出风控候选')
+    expect(wrapper.get('[data-testid="portfolio-risk-candidates"]').text()).toContain('15.00%')
+    expect(wrapper.get('[data-testid="portfolio-risk-candidates"]').text()).toContain('22.00%')
+
+    await wrapper.get('[data-testid="portfolio-risk-apply-risk-candidate-1"]').trigger('click')
+    expect((wrapper.get('[data-testid="portfolio-date-mode"]').element as HTMLSelectElement).value).toBe('custom')
+    expect((wrapper.get('[data-testid="portfolio-start"]').element as HTMLInputElement).value).toBe('2024-03-01')
+    expect((wrapper.get('[data-testid="portfolio-end"]').element as HTMLInputElement).value).toBe('2024-03-31')
+    expect((wrapper.get('[data-testid="portfolio-moving-stop-loss-enabled"]').element as HTMLInputElement).checked).toBe(true)
+    expect((wrapper.get('[data-testid="portfolio-moving-stop-loss-mode"]').element as HTMLSelectElement).value).toBe('atr')
+
+    await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(portfolioApi.createPortfolioBacktest).toHaveBeenCalledWith(expect.objectContaining({
+      date_mode: 'custom',
+      start_date: '2024-03-01',
+      end_date: '2024-03-31',
+      moving_stop_loss_mode: 'atr',
+      moving_stop_loss_atr_multiplier: 2,
+      moving_stop_loss_cooldown_days: 3,
+      trailing_stop_pct: 0.05,
+      stop_loss_pct: 0.08,
+      take_profit_pct: 0.2,
+    }))
+    const replay = wrapper.find('[data-testid="portfolio-replay-comparison"]')
+    expect(replay.exists(), wrapper.get('[data-testid="portfolio-message"]').text()).toBe(true)
+    expect(replay.text()).toContain('绩效摘要：一致')
+    expect(replay.text()).toContain('数据指纹：一致')
+  })
+
+  it('blocks candidate application after fixed strategy settings change', async () => {
+    const wrapper = mount(PortfolioBacktestPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="start-portfolio-risk-optimization"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid="portfolio-ranking-value"]').setValue('indicator_three.var1')
+
+    expect(wrapper.get('[data-testid="portfolio-risk-optimization-stale"]').text()).toContain('请重新寻优')
+    expect((wrapper.get('[data-testid="portfolio-risk-apply-risk-candidate-1"]').element as HTMLButtonElement).disabled).toBe(true)
   })
 
   it('edits a custom formula parameter before submitting', async () => {

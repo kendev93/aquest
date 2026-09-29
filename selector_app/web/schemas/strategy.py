@@ -195,6 +195,73 @@ class StrategyDiscoveryRequest(BaseModel):
         )
 
 
+class PortfolioRiskOptimizationRequest(PortfolioBacktestRequest):
+    """Portfolio settings held fixed while the exit-risk controls are searched."""
+
+    max_trials: Literal[1_000, 2_000, 3_000] = 1_000
+    seed: int | None = Field(default=None, ge=0, le=2**32 - 1)
+
+    def to_discovery_request(
+        self,
+        *,
+        default_start: date | str | None = None,
+        default_end: date | str | None = None,
+    ) -> DiscoveryRequest:
+        resolved_start = self.start_date or coerce_date(default_start)
+        resolved_end = self.end_date or coerce_date(default_end)
+        if resolved_start is None or resolved_end is None:
+            raise ValueError("本地 DuckDB 没有已完成日线，请先在“本地行情”页面导入日线数据")
+        if resolved_start > resolved_end:
+            raise ValueError("风险寻优开始日期不能晚于结束日期")
+        total_days = (resolved_end - resolved_start).days + 1
+        if total_days < 3:
+            raise ValueError("风险寻优时间范围至少需要 3 天，以生成训练、验证和留出区间")
+
+        train_days = max(1, int(total_days * 0.6))
+        validation_days = max(1, int(total_days * 0.2))
+        train_end = resolved_start + timedelta(days=train_days - 1)
+        validation_start = train_end + timedelta(days=1)
+        validation_end = validation_start + timedelta(days=validation_days - 1)
+        holdout_start = validation_end + timedelta(days=1)
+
+        base_config = self.model_dump(mode="json")
+        base_config.pop("max_trials", None)
+        base_config.pop("seed", None)
+        base_config["date_mode"] = "custom"
+        base_config["start_date"] = resolved_start.isoformat()
+        base_config["end_date"] = resolved_end.isoformat()
+        catalog = default_indicator_catalog()
+        seed = self.seed if self.seed is not None else secrets.randbits(32)
+        return DiscoveryRequest(
+            base_config=base_config,
+            splits={
+                "search": {
+                    "start_date": resolved_start.isoformat(),
+                    "end_date": train_end.isoformat(),
+                },
+                "validation": {
+                    "start_date": validation_start.isoformat(),
+                    "end_date": validation_end.isoformat(),
+                },
+                "holdout": {
+                    "start_date": holdout_start.isoformat(),
+                    "end_date": resolved_end.isoformat(),
+                },
+            },
+            indicator_ids=tuple(catalog.rankable_ids),
+            signal_ids=tuple(catalog.signal_ids),
+            max_trials=self.max_trials,
+            validation_candidates=50,
+            holdout_candidates=20,
+            min_trades=5,
+            max_drawdown=0.3,
+            max_complexity=4,
+            multifidelity_enabled=True,
+            seed=seed,
+            candidate_mode="risk_only",
+        )
+
+
 class StrategyReplayRequest(BaseModel):
     """Request to replay the current top-ten leaderboard on full local history."""
 

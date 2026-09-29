@@ -5,6 +5,7 @@ import type {
   StrategyDiscoveryPayload,
   StrategyDiscoveryRefinementPayload,
   StrategyDiscoveryResult,
+  PortfolioRiskOptimizationPayload,
   StrategyReplayHistoryRecord,
   StrategyReplayJobState,
   StrategyReplayResult,
@@ -70,6 +71,20 @@ export async function createStrategyDiscovery(payload: StrategyDiscoveryPayload)
     method: 'POST',
     body: JSON.stringify(payload),
   })
+  return response.data
+}
+
+
+export async function createPortfolioRiskOptimization(
+  payload: PortfolioRiskOptimizationPayload,
+): Promise<{ job_id: string; status: string }> {
+  const response = await request<{ data: { job_id: string; status: string } }>(
+    `${API_BASE}/risk-optimizations`,
+    {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    },
+  )
   return response.data
 }
 

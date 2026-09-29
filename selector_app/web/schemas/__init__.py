@@ -48,6 +48,7 @@ from .screening import (
     ScreenConditionRequest,
 )
 from .strategy import (
+    PortfolioRiskOptimizationRequest,
     SavedStrategyCreateRequest,
     SavedStrategyUpdateRequest,
     StrategyDiscoveryRequest,
@@ -79,6 +80,7 @@ __all__ = [
     "MarketRefreshRequest",
     "MarketSyncRequest",
     "PortfolioBacktestRequest",
+    "PortfolioRiskOptimizationRequest",
     "ResearchPresetCreateRequest",
     "ResearchPresetUpdateRequest",
     "RuleGroupRequest",

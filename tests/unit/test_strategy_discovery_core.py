@@ -100,6 +100,87 @@ def test_candidate_config_excludes_strategy_only_metadata() -> None:
     PortfolioBacktestRequest.model_validate(payload)
 
 
+def test_risk_only_candidates_preserve_every_nonrisk_portfolio_setting() -> None:
+    base_config: dict[str, object] = {
+        "date_mode": "custom",
+        "start_date": "2024-01-01",
+        "end_date": "2024-12-31",
+        "vipdoc_path": "/tmp/vipdoc",
+        "universe": "all",
+        "selected_signals": [],
+        "combine_mode": "all",
+        "minimum_matches": None,
+        "buy_rule": {
+            "signals": [],
+            "conditions": [{"left_value": "technical.ma5", "operator": "gt", "right_constant": 10}],
+            "required_conditions": [],
+            "combine_mode": "all",
+            "minimum_matches": None,
+        },
+        "sell_rule": None,
+        "ranking_value": "technical.rsi14",
+        "rank_order": "asc",
+        "max_positions": 3,
+        "rebalance_frequency": "weekly",
+        "initial_cash": 200_000.0,
+        "commission": 0.0002,
+        "execution": "next_close",
+        "stop_loss_pct": 0.08,
+        "take_profit_pct": 0.2,
+        "moving_stop_loss_pct": None,
+        "trailing_stop_pct": 0.1,
+    }
+    risk_keys = {
+        "stop_loss_pct",
+        "stop_loss_mode",
+        "stop_loss_atr_multiplier",
+        "stop_loss_cooldown_days",
+        "take_profit_pct",
+        "take_profit_mode",
+        "take_profit_atr_multiplier",
+        "take_profit_cooldown_days",
+        "moving_stop_loss_pct",
+        "moving_stop_loss_mode",
+        "moving_stop_loss_atr_multiplier",
+        "moving_stop_loss_cooldown_days",
+        "trailing_stop_pct",
+        "trailing_stop_mode",
+        "trailing_stop_atr_multiplier",
+        "trailing_stop_cooldown_days",
+        "atr_period",
+    }
+    request = DiscoveryRequest(
+        base_config=base_config,
+        splits={
+            "search": {"start_date": "2024-01-01", "end_date": "2024-07-01"},
+            "validation": {"start_date": "2024-07-02", "end_date": "2024-10-01"},
+            "holdout": {"start_date": "2024-10-02", "end_date": "2024-12-31"},
+        },
+        candidate_mode="risk_only",
+        max_trials=20,
+    )
+
+    for seed in range(30):
+        candidate = build_random_candidate(request, random.Random(seed))
+        candidate_config = candidate.to_config()
+        for key, value in base_config.items():
+            if key not in risk_keys and key != "date_mode":
+                assert candidate_config[key] == value
+        for prefix in ("stop_loss", "take_profit", "moving_stop_loss", "trailing_stop"):
+            mode = candidate_config[f"{prefix}_mode"]
+            percentage = candidate_config.get(f"{prefix}_pct")
+            multiplier = candidate_config.get(f"{prefix}_atr_multiplier")
+            cooldown = candidate_config[f"{prefix}_cooldown_days"]
+            assert mode in {"pct", "atr"}
+            assert cooldown in {0, 3, 5, 10}
+            if mode == "pct":
+                assert percentage in {None, 0.05, 0.08, 0.12, 0.2}
+                assert multiplier is None
+            else:
+                assert percentage is None
+                assert multiplier in {1.0, 2.0, 3.0}
+
+
 def test_candidate_generator_includes_required_conditions_and_limits_auto_items() -> None:
     required_buy = ScreenCondition(
         left_value="technical.ma5",

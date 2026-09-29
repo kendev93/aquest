@@ -96,3 +96,115 @@ test('user can restrict a portfolio backtest to explicitly named symbols', async
     fixed_size: 1000,
   })
 })
+
+test('user can optimize exit risk, apply a validation candidate, and replay it normally', async ({ page }) => {
+  let optimizationPayload: Record<string, unknown> | null = null
+  let backtestPayload: Record<string, unknown> | null = null
+  const validationMetrics = {
+    total_return: 0.12,
+    annual_return: 0.22,
+    sharpe: 1.6,
+    max_drawdown: 0.03,
+    total_trades: 4,
+    win_rate: 0.5,
+    turnover: 1.2,
+  }
+  const riskCandidate = {
+    candidate_hash: 'e2e-candidate',
+    complexity: 4,
+    human_readable_rules: '止损8%；移动止损 ATR×2；止盈20%；移动止盈5%',
+    config: {
+      universe: 'all',
+      selected_signals: [],
+      combine_mode: 'all',
+      minimum_matches: null,
+      buy_rule: { signals: [], conditions: [{ left_value: 'indicator_three.var1', operator: 'gt', right_constant: 10 }], combine_mode: 'all', minimum_matches: null },
+      sell_rule: { signals: [], conditions: [{ left_value: 'indicator_three.var1', operator: 'lt', right_constant: 50 }], combine_mode: 'all', minimum_matches: null },
+      ranking_value: 'indicator_three.varo7',
+      rank_order: 'desc',
+      max_positions: 5,
+      rebalance_frequency: 'daily',
+      start_date: '2024-03-01',
+      end_date: '2024-03-31',
+      stop_loss_mode: 'pct',
+      stop_loss_pct: 0.08,
+      stop_loss_cooldown_days: 0,
+      take_profit_mode: 'pct',
+      take_profit_pct: 0.2,
+      take_profit_cooldown_days: 0,
+      moving_stop_loss_mode: 'atr',
+      moving_stop_loss_pct: null,
+      moving_stop_loss_atr_multiplier: 2,
+      moving_stop_loss_cooldown_days: 3,
+      trailing_stop_mode: 'pct',
+      trailing_stop_pct: 0.05,
+      trailing_stop_cooldown_days: 0,
+      atr_period: 14,
+      initial_cash: 1_000_000,
+      commission: 0.0001,
+      min_commission: 0.1,
+      stamp_tax: 0.001,
+      slippage: 0,
+      execution: 'next_open',
+      position_mode: 'full',
+      fixed_size: null,
+    },
+    metrics: {
+      train: { annual_return: 0.15, sharpe: 1.1, max_drawdown: 0.12 },
+      validation: validationMetrics,
+      holdout: { annual_return: 0.1, sharpe: 0.9, max_drawdown: 0.05, constraints_passed: true },
+    },
+  }
+
+  await page.route(/\/api\/v1\/formula-screen\/metadata$/, (route) => route.fulfill({ json: { data: metadata } }))
+  await page.route(/\/api\/v1\/strategy-discovery\/risk-optimizations$/, async (route) => {
+    optimizationPayload = route.request().postDataJSON() as Record<string, unknown>
+    await route.fulfill({ status: 202, json: { data: { job_id: 'risk-job', status: 'queued' } } })
+  })
+  await page.route(/\/api\/v1\/strategy-discovery\/risk-job$/, (route) => route.fulfill({ json: {
+    data: { job_id: 'risk-job', description: '组合风险寻优', status: 'completed', progress: 1, total_candidates: 1000, total_scanned: 1000, errors: 0, skipped: 0, error: null, result: null },
+  } }))
+  await page.route(/\/api\/v1\/strategy-discovery\/risk-job\/results$/, (route) => route.fulfill({ json: { data: {
+    mode: 'risk_optimization',
+    data_fingerprint: 'portfolio-fingerprint',
+    configuration_fingerprint: 'risk-config-fingerprint',
+    request: { splits: {
+      search: { start_date: '2024-01-01', end_date: '2024-02-29' },
+      validation: { start_date: '2024-03-01', end_date: '2024-03-31' },
+      holdout: { start_date: '2024-04-01', end_date: '2024-04-30' },
+    } },
+    results_by_sharpe: [riskCandidate],
+    results_by_return: [riskCandidate],
+    search_metadata: {},
+    validation_metadata: {},
+  } } }))
+  await page.route(/\/api\/v1\/portfolio-backtests$/, async (route) => {
+    backtestPayload = route.request().postDataJSON() as Record<string, unknown>
+    await route.fulfill({ status: 202, json: { data: { job_id: 'portfolio-risk-replay', status: 'queued' } } })
+  })
+  await page.route(/\/api\/v1\/portfolio-backtests\/portfolio-risk-replay$/, (route) => route.fulfill({ json: {
+    data: { job_id: 'portfolio-risk-replay', status: 'completed', progress: 1, total_candidates: 3, total_scanned: 3, errors: 0, error: null, result: null },
+  } }))
+  await page.route(/\/api\/v1\/portfolio-backtests\/portfolio-risk-replay\/results$/, (route) => route.fulfill({ json: { data: { ...result, data_fingerprint: 'portfolio-fingerprint' } } }))
+
+  await page.goto('/portfolio-backtest')
+  await page.getByTestId('portfolio-risk-search-level').selectOption('2000')
+  await page.getByTestId('start-portfolio-risk-optimization').click()
+  await expect(page.getByTestId('portfolio-risk-optimization-results')).toContainText('22.00%')
+  expect(optimizationPayload).toMatchObject({ max_trials: 2000, moving_stop_loss_pct: null })
+
+  await page.getByTestId('portfolio-risk-apply-e2e-candidate').click()
+  await expect(page.getByTestId('portfolio-date-mode')).toHaveValue('custom')
+  await expect(page.getByTestId('portfolio-start')).toHaveValue('2024-03-01')
+  await page.getByTestId('start-portfolio-backtest').click()
+  await expect(page.getByTestId('portfolio-replay-comparison')).toContainText('绩效摘要：一致')
+  await expect(page.getByTestId('portfolio-replay-comparison')).toContainText('数据指纹：一致')
+  expect(backtestPayload).toMatchObject({
+    date_mode: 'custom',
+    start_date: '2024-03-01',
+    end_date: '2024-03-31',
+    moving_stop_loss_mode: 'atr',
+    moving_stop_loss_atr_multiplier: 2,
+    moving_stop_loss_cooldown_days: 3,
+  })
+})

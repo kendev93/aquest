@@ -10,6 +10,12 @@ import {
   getPortfolioBacktestHistory,
   getPortfolioBacktestResults,
 } from '../api/portfolioBacktest'
+import {
+  cancelStrategyDiscovery,
+  createPortfolioRiskOptimization,
+  getStrategyDiscovery,
+  getStrategyDiscoveryResults,
+} from '../api/strategyDiscovery'
 import { FormulaScreenApiError, fetchMetadata, parseFormula } from '../api/formulaScreen'
 import { fetchActiveJobs } from '../api/jobs'
 import {
@@ -37,12 +43,16 @@ import type {
   PortfolioBacktestJobState,
   PortfolioBacktestPayload,
   PortfolioBacktestResult,
+  PortfolioRiskOptimizationPayload,
   PortfolioTrade,
   PortfolioRebalanceFrequency,
   PortfolioUniverse,
   RuleGroupPayload,
   SavedStrategySummary,
   SignalDefinition,
+  StrategyDiscoveryCandidate,
+  StrategyDiscoveryJobState,
+  StrategyDiscoveryResult,
   ValueDefinition,
 } from '../types'
 import {
@@ -107,6 +117,11 @@ interface PortfolioFormState {
   stopLossPct: number
   stopLossAtrMultiplier: number
   stopLossCooldownDays: number
+  movingStopLossEnabled: boolean
+  movingStopLossMode: 'pct' | 'atr'
+  movingStopLossPct: number
+  movingStopLossAtrMultiplier: number
+  movingStopLossCooldownDays: number
   takeProfitEnabled: boolean
   takeProfitMode: 'pct' | 'atr'
   takeProfitPct: number
@@ -157,6 +172,11 @@ const form = reactive<PortfolioFormState>({
   stopLossPct: 8,
   stopLossAtrMultiplier: 2,
   stopLossCooldownDays: 0,
+  movingStopLossEnabled: false,
+  movingStopLossMode: 'pct',
+  movingStopLossPct: 5,
+  movingStopLossAtrMultiplier: 2,
+  movingStopLossCooldownDays: 0,
   takeProfitEnabled: false,
   takeProfitMode: 'pct',
   takeProfitPct: 20,
@@ -191,6 +211,12 @@ const showAdvanced = ref(false)
 const showPnlAnalysis = ref(false)
 const job = ref<PortfolioBacktestJobState | null>(null)
 const result = ref<PortfolioBacktestResult | null>(null)
+const riskOptimizationLoading = ref(false)
+const riskOptimizationJob = ref<StrategyDiscoveryJobState | null>(null)
+const riskOptimizationResult = ref<StrategyDiscoveryResult | null>(null)
+const riskOptimizationBoard = ref<'sharpe' | 'return'>('sharpe')
+const riskOptimizationMaxTrials = ref<1000 | 2000 | 3000>(1000)
+const riskOptimizationBaseFingerprint = ref<string | null>(null)
 const resultPriceBasis = computed(() => result.value?.price_basis ?? 'raw')
 const resultLimitations = computed(() => (
   result.value?.limitations?.length ? result.value.limitations : PORTFOLIO_BACKTEST_LIMITATIONS
@@ -199,6 +225,15 @@ const history = ref<BacktestHistorySummary[]>([])
 const historyLoading = ref(false)
 const appliedDiscoveryCandidate = ref<AppliedDiscoveryCandidate | null>(null)
 const replayComparison = ref<ReplayComparison | null>(null)
+const riskOptimizationStale = computed(() => (
+  riskOptimizationBaseFingerprint.value !== null
+  && riskOptimizationBaseFingerprint.value !== portfolioBaseFingerprint(buildPayload())
+))
+const riskOptimizationCandidates = computed(() => (
+  riskOptimizationBoard.value === 'sharpe'
+    ? riskOptimizationResult.value?.results_by_sharpe ?? []
+    : riskOptimizationResult.value?.results_by_return ?? []
+))
 
 const presetSignals = computed<SignalDefinition[]>(() => (
   metadata.value?.indicators.flatMap((indicator) => indicator.signals) ?? []
@@ -288,6 +323,7 @@ const chartSummary = computed(() => {
 })
 const canSubmit = computed(() => (
   !loading.value
+  && !riskOptimizationLoading.value
   && !customParseLoading.value
   && metadata.value !== null
   && (form.mode !== 'custom' || customMetadata.value !== null)
@@ -446,7 +482,7 @@ function validate(): Record<string, string> {
   if (!Number.isFinite(form.maxPositions) || !Number.isInteger(form.maxPositions) || form.maxPositions < 1 || form.maxPositions > 100) {
     next.maxPositions = '持仓槽位必须是 1 到 100 的整数。'
   }
-  if (!sellRule.signals.length && !sellRule.conditions.length && !sellRule.required_conditions?.length && !form.stopLossEnabled && !form.takeProfitEnabled && !form.trailingStopEnabled) {
+  if (!sellRule.signals.length && !sellRule.conditions.length && !sellRule.required_conditions?.length && !form.stopLossEnabled && !form.movingStopLossEnabled && !form.takeProfitEnabled && !form.trailingStopEnabled) {
     next.sellRules = '至少配置一个卖出规则。'
   }
   const riskFields: Array<{
@@ -461,6 +497,7 @@ function validate(): Record<string, string> {
     label: string
   }> = [
     { enabled: form.stopLossEnabled, mode: form.stopLossMode, pct: form.stopLossPct, atr: form.stopLossAtrMultiplier, cooldown: form.stopLossCooldownDays, pctKey: 'stopLossPct', atrKey: 'stopLossAtrMultiplier', cooldownKey: 'stopLossCooldownDays', label: '止损' },
+    { enabled: form.movingStopLossEnabled, mode: form.movingStopLossMode, pct: form.movingStopLossPct, atr: form.movingStopLossAtrMultiplier, cooldown: form.movingStopLossCooldownDays, pctKey: 'movingStopLossPct', atrKey: 'movingStopLossAtrMultiplier', cooldownKey: 'movingStopLossCooldownDays', label: '移动止损' },
     { enabled: form.takeProfitEnabled, mode: form.takeProfitMode, pct: form.takeProfitPct, atr: form.takeProfitAtrMultiplier, cooldown: form.takeProfitCooldownDays, pctKey: 'takeProfitPct', atrKey: 'takeProfitAtrMultiplier', cooldownKey: 'takeProfitCooldownDays', label: '止盈' },
     { enabled: form.trailingStopEnabled, mode: form.trailingStopMode, pct: form.trailingStopPct, atr: form.trailingStopAtrMultiplier, cooldown: form.trailingStopCooldownDays, pctKey: 'trailingStopPct', atrKey: 'trailingStopAtrMultiplier', cooldownKey: 'trailingStopCooldownDays', label: '移动止盈' },
   ]
@@ -503,6 +540,10 @@ function buildPayload(): PortfolioBacktestPayload {
     stop_loss_pct: form.stopLossEnabled && form.stopLossMode === 'pct' ? form.stopLossPct / 100 : null,
     stop_loss_atr_multiplier: form.stopLossEnabled && form.stopLossMode === 'atr' ? form.stopLossAtrMultiplier : null,
     stop_loss_cooldown_days: form.stopLossEnabled ? form.stopLossCooldownDays : 0,
+    moving_stop_loss_mode: form.movingStopLossEnabled ? form.movingStopLossMode : 'pct',
+    moving_stop_loss_pct: form.movingStopLossEnabled && form.movingStopLossMode === 'pct' ? form.movingStopLossPct / 100 : null,
+    moving_stop_loss_atr_multiplier: form.movingStopLossEnabled && form.movingStopLossMode === 'atr' ? form.movingStopLossAtrMultiplier : null,
+    moving_stop_loss_cooldown_days: form.movingStopLossEnabled ? form.movingStopLossCooldownDays : 0,
     take_profit_mode: form.takeProfitEnabled ? form.takeProfitMode : 'pct',
     take_profit_pct: form.takeProfitEnabled && form.takeProfitMode === 'pct' ? form.takeProfitPct / 100 : null,
     take_profit_atr_multiplier: form.takeProfitEnabled && form.takeProfitMode === 'atr' ? form.takeProfitAtrMultiplier : null,
@@ -533,6 +574,35 @@ function buildPayload(): PortfolioBacktestPayload {
     position_mode: form.positionMode,
     fixed_size: form.positionMode === 'fixed' ? form.fixedSize : null,
   }
+}
+
+const RISK_PARAMETER_KEYS = new Set([
+  'stop_loss_mode', 'stop_loss_pct', 'stop_loss_atr_multiplier', 'stop_loss_cooldown_days',
+  'take_profit_mode', 'take_profit_pct', 'take_profit_atr_multiplier', 'take_profit_cooldown_days',
+  'moving_stop_loss_mode', 'moving_stop_loss_pct', 'moving_stop_loss_atr_multiplier', 'moving_stop_loss_cooldown_days',
+  'trailing_stop_mode', 'trailing_stop_pct', 'trailing_stop_atr_multiplier', 'trailing_stop_cooldown_days',
+])
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+    return `{${entries.map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`).join(',')}}`
+  }
+  return JSON.stringify(value) ?? 'null'
+}
+
+function portfolioBaseFingerprint(payload: PortfolioBacktestPayload): string {
+  const fixed = Object.fromEntries(
+    Object.entries(payload).filter(([key]) => (
+      !RISK_PARAMETER_KEYS.has(key)
+      && key !== 'date_mode'
+      && key !== 'start_date'
+      && key !== 'end_date'
+    )),
+  )
+  return stableStringify(fixed)
 }
 
 function apiMessage(error: unknown): string {
@@ -576,7 +646,7 @@ function applyStoredCandidate(raw: unknown): void {
   if (buyRule) form.buyRule = buyRule
   if (sellRule) form.sellRule = sellRule
 
-  const applyRisk = (prefix: 'stop_loss' | 'take_profit' | 'trailing_stop', enabledKey: 'stopLossEnabled' | 'takeProfitEnabled' | 'trailingStopEnabled', modeKey: 'stopLossMode' | 'takeProfitMode' | 'trailingStopMode', pctKey: 'stopLossPct' | 'takeProfitPct' | 'trailingStopPct', atrKey: 'stopLossAtrMultiplier' | 'takeProfitAtrMultiplier' | 'trailingStopAtrMultiplier', cooldownKey: 'stopLossCooldownDays' | 'takeProfitCooldownDays' | 'trailingStopCooldownDays'): void => {
+  const applyRisk = (prefix: 'stop_loss' | 'take_profit' | 'moving_stop_loss' | 'trailing_stop', enabledKey: 'stopLossEnabled' | 'takeProfitEnabled' | 'movingStopLossEnabled' | 'trailingStopEnabled', modeKey: 'stopLossMode' | 'takeProfitMode' | 'movingStopLossMode' | 'trailingStopMode', pctKey: 'stopLossPct' | 'takeProfitPct' | 'movingStopLossPct' | 'trailingStopPct', atrKey: 'stopLossAtrMultiplier' | 'takeProfitAtrMultiplier' | 'movingStopLossAtrMultiplier' | 'trailingStopAtrMultiplier', cooldownKey: 'stopLossCooldownDays' | 'takeProfitCooldownDays' | 'movingStopLossCooldownDays' | 'trailingStopCooldownDays'): void => {
     const pct = finiteNumber(config[`${prefix}_pct`], NaN)
     const atr = finiteNumber(config[`${prefix}_atr_multiplier`], NaN)
     const mode = enumValue(config[`${prefix}_mode`], ['pct', 'atr'] as const, Number.isFinite(atr) ? 'atr' : 'pct')
@@ -587,6 +657,7 @@ function applyStoredCandidate(raw: unknown): void {
     form[enabledKey] = Number.isFinite(pct) || Number.isFinite(atr)
   }
   applyRisk('stop_loss', 'stopLossEnabled', 'stopLossMode', 'stopLossPct', 'stopLossAtrMultiplier', 'stopLossCooldownDays')
+  applyRisk('moving_stop_loss', 'movingStopLossEnabled', 'movingStopLossMode', 'movingStopLossPct', 'movingStopLossAtrMultiplier', 'movingStopLossCooldownDays')
   applyRisk('take_profit', 'takeProfitEnabled', 'takeProfitMode', 'takeProfitPct', 'takeProfitAtrMultiplier', 'takeProfitCooldownDays')
   applyRisk('trailing_stop', 'trailingStopEnabled', 'trailingStopMode', 'trailingStopPct', 'trailingStopAtrMultiplier', 'trailingStopCooldownDays')
   form.atrPeriod = 14
@@ -726,7 +797,12 @@ async function compareAppliedCandidate(backtest: PortfolioBacktestResult): Promi
     return typeof expectedValue === 'number' && typeof actualValue === 'number'
       && Math.abs(expectedValue - actualValue) <= 1e-9
   })
-  const actualTradeFingerprint = await tradeFingerprint(backtest.trades)
+  let actualTradeFingerprint: string | null = null
+  try {
+    actualTradeFingerprint = await tradeFingerprint(backtest.trades)
+  } catch {
+    // Keep the performance and data checks visible when Web Crypto is unavailable.
+  }
   replayComparison.value = {
     candidateHash: applied.candidate_hash,
     tradeRecords: applied.validation_metrics?.trade_fingerprint && actualTradeFingerprint
@@ -782,6 +858,126 @@ async function pollPortfolioBacktest(jobId: string): Promise<void> {
     }
     await new Promise((resolve) => window.setTimeout(resolve, 220))
   }
+}
+
+function riskMetric(
+  candidate: StrategyDiscoveryCandidate,
+  split: string,
+  key: string,
+): number | null {
+  const value = candidate.metrics[split]?.[key]
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function riskOptimizationPhaseLabel(state: StrategyDiscoveryJobState | null): string {
+  const phase = state?.phase ?? ''
+  const labels: Record<string, string> = {
+    preparing_snapshot: '准备行情快照',
+    snapshot_ready: '开始训练段寻优',
+    searching: '训练段寻优',
+    refining_medium: '训练段复核',
+    refining_full: '训练段精筛',
+    validation: '验证段筛选与排序',
+    holdout: '留出段复核',
+    completed: '风险参数寻优完成',
+    failed: '风险参数寻优失败',
+    cancelled: '风险参数寻优已取消',
+  }
+  return labels[phase] ?? '风险参数寻优进行中'
+}
+
+async function startRiskOptimization(): Promise<void> {
+  errors.value = validate()
+  message.value = ''
+  if (Object.values(errors.value).some(Boolean)) return
+  const basePayload = buildPayload()
+  riskOptimizationBaseFingerprint.value = portfolioBaseFingerprint(basePayload)
+  riskOptimizationResult.value = null
+  riskOptimizationJob.value = null
+  riskOptimizationLoading.value = true
+  try {
+    const payload: PortfolioRiskOptimizationPayload = {
+      ...basePayload,
+      max_trials: riskOptimizationMaxTrials.value,
+    }
+    const created = await createPortfolioRiskOptimization(payload)
+    riskOptimizationJob.value = {
+      job_id: created.job_id,
+      status: 'queued',
+      progress: 0,
+      total_candidates: 0,
+      total_scanned: 0,
+      errors: 0,
+      skipped: 0,
+      error: null,
+      result: null,
+    }
+    await pollRiskOptimization(created.job_id)
+  } catch (error) {
+    message.value = apiMessage(error)
+  } finally {
+    riskOptimizationLoading.value = false
+  }
+}
+
+async function pollRiskOptimization(jobId: string): Promise<void> {
+  for (;;) {
+    const state = await getStrategyDiscovery(jobId)
+    riskOptimizationJob.value = state
+    if (state.status === 'completed') {
+      riskOptimizationResult.value = await getStrategyDiscoveryResults(jobId)
+      riskOptimizationBoard.value = 'sharpe'
+      message.value = '风险参数寻优完成：请按验证榜查看候选，并用留出段结果做独立复核。'
+      return
+    }
+    if (state.status === 'failed' || state.status === 'cancelled') {
+      message.value = state.error ?? (state.status === 'cancelled' ? '风险参数寻优已取消。' : '风险参数寻优失败。')
+      return
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 250))
+  }
+}
+
+async function cancelRiskOptimization(): Promise<void> {
+  const active = riskOptimizationJob.value
+  if (!active) return
+  try {
+    await cancelStrategyDiscovery(active.job_id)
+    message.value = '已请求取消风险参数寻优，正在等待任务停止。'
+  } catch (error) {
+    message.value = apiMessage(error)
+  }
+}
+
+function applyRiskOptimizationCandidate(candidate: StrategyDiscoveryCandidate): void {
+  if (!riskOptimizationResult.value) return
+  if (riskOptimizationStale.value) {
+    message.value = '买卖规则、排序或回测设置已变化，请基于当前配置重新寻优。'
+    return
+  }
+  applyStoredCandidate(candidate.config)
+  const request = riskOptimizationResult.value.request
+  const splits = request.splits
+  const validation = splits && typeof splits === 'object'
+    ? (splits as Record<string, unknown>).validation
+    : null
+  if (validation && typeof validation === 'object') {
+    const dates = validation as Record<string, unknown>
+    if (typeof dates.start_date === 'string' && typeof dates.end_date === 'string') {
+      form.dateMode = 'custom'
+      form.startDate = dates.start_date
+      form.endDate = dates.end_date
+    }
+  }
+  appliedDiscoveryCandidate.value = {
+    candidate_hash: candidate.candidate_hash,
+    data_fingerprint: typeof riskOptimizationResult.value.data_fingerprint === 'string'
+      ? riskOptimizationResult.value.data_fingerprint
+      : null,
+    validation_metrics: candidate.metrics.validation ?? null,
+  }
+  replayComparison.value = null
+  message.value = '已应用候选风险参数并切换到验证段；运行普通组合回测以核对交易和绩效复现。'
 }
 
 async function resumeActivePortfolioBacktest(): Promise<void> {
@@ -1266,6 +1462,13 @@ watch(() => form.formulaText, (value) => {
               <span>{{ form.stopLossMode === 'pct' ? '%' : '倍' }}</span>
               <label class="cooldown-field">冷却 <input v-model.number="form.stopLossCooldownDays" data-testid="portfolio-stop-loss-cooldown" type="number" min="0" max="10000" step="1" :disabled="!form.stopLossEnabled"> <span>交易日</span></label>
             </div>
+            <div class="risk-control" data-testid="portfolio-moving-stop-loss-control">
+              <label class="risk-toggle"><input v-model="form.movingStopLossEnabled" data-testid="portfolio-moving-stop-loss-enabled" type="checkbox"><span>移动止损</span></label>
+              <select v-model="form.movingStopLossMode" data-testid="portfolio-moving-stop-loss-mode" :disabled="!form.movingStopLossEnabled"><option value="pct">百分比</option><option value="atr">ATR ×</option></select>
+              <input v-if="form.movingStopLossMode === 'pct'" v-model.number="form.movingStopLossPct" data-testid="portfolio-moving-stop-loss" type="number" min="0.01" max="100" step="0.5" aria-label="移动止损百分比" :disabled="!form.movingStopLossEnabled"><input v-else v-model.number="form.movingStopLossAtrMultiplier" data-testid="portfolio-moving-stop-loss-atr" type="number" min="0.01" max="100" step="0.1" aria-label="移动止损 ATR 倍数" :disabled="!form.movingStopLossEnabled">
+              <span>{{ form.movingStopLossMode === 'pct' ? '%' : '倍' }}</span>
+              <label class="cooldown-field">冷却 <input v-model.number="form.movingStopLossCooldownDays" data-testid="portfolio-moving-stop-loss-cooldown" type="number" min="0" max="10000" step="1" :disabled="!form.movingStopLossEnabled"> <span>交易日</span></label>
+            </div>
             <div class="risk-control" data-testid="portfolio-take-profit-control">
               <label class="risk-toggle"><input v-model="form.takeProfitEnabled" data-testid="portfolio-take-profit-enabled" type="checkbox"><span>止盈</span></label>
               <select v-model="form.takeProfitMode" data-testid="portfolio-take-profit-mode" :disabled="!form.takeProfitEnabled"><option value="pct">百分比</option><option value="atr">ATR ×</option></select>
@@ -1282,6 +1485,7 @@ watch(() => form.formulaText, (value) => {
             </div>
             <p v-if="errors.sellRules" class="field-error">{{ errors.sellRules }}</p>
             <p v-if="errors.stopLossPct || errors.stopLossAtrMultiplier || errors.stopLossCooldownDays" class="field-error">{{ errors.stopLossPct || errors.stopLossAtrMultiplier || errors.stopLossCooldownDays }}</p>
+            <p v-if="errors.movingStopLossPct || errors.movingStopLossAtrMultiplier || errors.movingStopLossCooldownDays" class="field-error">{{ errors.movingStopLossPct || errors.movingStopLossAtrMultiplier || errors.movingStopLossCooldownDays }}</p>
             <p v-if="errors.takeProfitPct || errors.takeProfitAtrMultiplier || errors.takeProfitCooldownDays" class="field-error">{{ errors.takeProfitPct || errors.takeProfitAtrMultiplier || errors.takeProfitCooldownDays }}</p>
             <p v-if="errors.trailingStopPct || errors.trailingStopAtrMultiplier || errors.trailingStopCooldownDays" class="field-error">{{ errors.trailingStopPct || errors.trailingStopAtrMultiplier || errors.trailingStopCooldownDays }}</p>
             <p class="helper">指标规则在收盘确认，默认下一根 K 线执行；风险控制按当日最高/最低价触发，ATR 周期固定为 {{ form.atrPeriod }}，各类冷却独立计算。</p>
@@ -1299,7 +1503,17 @@ watch(() => form.formulaText, (value) => {
             <fieldset class="form-section compact-fields"><div><label for="portfolio-stamp-tax">印花税率</label><input id="portfolio-stamp-tax" v-model.number="form.stampTax" data-testid="portfolio-stamp-tax" type="number" min="0" max="0.1" step="0.0001"></div><div><label for="portfolio-slippage">每股滑点（元）</label><input id="portfolio-slippage" v-model.number="form.slippage" data-testid="portfolio-slippage" type="number" min="0" step="0.001"></div></fieldset>
           </div>
 
-          <div class="action-stack"><button class="primary-button" data-testid="start-portfolio-backtest" type="button" :disabled="!canSubmit" @click="submit"><span v-if="loading" class="spinner" aria-hidden="true"></span>{{ loading ? '组合回测中…' : '开始组合回测' }}</button></div>
+          <div class="action-stack">
+            <button class="primary-button" data-testid="start-portfolio-backtest" type="button" :disabled="!canSubmit" @click="submit"><span v-if="loading" class="spinner" aria-hidden="true"></span>{{ loading ? '组合回测中…' : '开始组合回测' }}</button>
+            <label class="portfolio-inline-field" for="portfolio-risk-search-level"><span>风险寻优强度</span><select id="portfolio-risk-search-level" v-model.number="riskOptimizationMaxTrials" data-testid="portfolio-risk-search-level"><option :value="1000">低 · 1000 组</option><option :value="2000">中 · 2000 组</option><option :value="3000">高 · 3000 组</option></select></label>
+            <button class="secondary-button" data-testid="start-portfolio-risk-optimization" type="button" :disabled="!canSubmit" @click="startRiskOptimization"><span v-if="riskOptimizationLoading" class="spinner" aria-hidden="true"></span>{{ riskOptimizationLoading ? '寻优中…' : '寻优退出风控' }}</button>
+          </div>
+          <div v-if="riskOptimizationLoading && riskOptimizationJob" class="task-progress task-progress-panel" data-testid="portfolio-risk-optimization-progress">
+            <div class="task-progress-heading"><span>{{ riskOptimizationPhaseLabel(riskOptimizationJob) }}</span><strong>{{ Math.round((riskOptimizationJob.progress ?? 0) * 100) }}%</strong></div>
+            <div class="progress-track"><span :style="{ width: `${Math.round((riskOptimizationJob.progress ?? 0) * 100)}%` }"></span></div>
+            <small>已评估 {{ riskOptimizationJob.total_scanned }} / {{ riskOptimizationJob.total_candidates || riskOptimizationMaxTrials }} 组</small>
+            <button class="text-button" data-testid="cancel-portfolio-risk-optimization" type="button" @click="cancelRiskOptimization">取消寻优</button>
+          </div>
           <p class="privacy-note">计算在本机完成；结果基于本地日线，不代表未来收益。</p>
         </form>
 
@@ -1310,8 +1524,27 @@ watch(() => form.formulaText, (value) => {
             <button class="primary-button" type="button" data-testid="strategy-save" :disabled="strategySaving" @click="saveCurrentStrategy">{{ strategySaving ? '保存中…' : '保存为策略' }}</button>
             <small>存的是当前表单配置 + 这次结果的绩效快照；下次可在「策略库」一键载回。</small>
           </div>
-          <div v-if="!result" class="empty-state" data-testid="portfolio-empty"><div class="empty-icon" aria-hidden="true">/</div><h3>{{ loading ? '正在运行动态组合回测…' : '还没有组合结果' }}</h3><p>{{ loading ? '正在逐股计算公式并模拟槽位补位，完成后显示净值与候选排名。' : '配置买入条件、排序指标和卖出条件后开始回测。' }}</p></div>
-          <template v-else>
+          <section v-if="riskOptimizationResult" class="data-section risk-optimization-results" data-testid="portfolio-risk-optimization-results">
+            <div class="section-heading"><div><span class="section-kicker">RISK OPTIMIZATION</span><h3>退出风控候选</h3></div><span>验证段排序 · 留出段独立复核</span></div>
+            <p class="helper">训练段搜索；验证段至少 5 笔交易且最大回撤不超过 30% 才进入榜单。应用候选会切换到对应验证日期。</p>
+            <div v-if="riskOptimizationStale" class="notice error" data-testid="portfolio-risk-optimization-stale">买卖规则、排序或回测设置已变化。请重新寻优后再应用候选。</div>
+            <div class="formula-mode-tabs" role="tablist" aria-label="退出风控候选榜单">
+              <button type="button" data-testid="portfolio-risk-sharpe-board" role="tab" :aria-selected="riskOptimizationBoard === 'sharpe'" :class="{ active: riskOptimizationBoard === 'sharpe' }" @click="riskOptimizationBoard = 'sharpe'">夏普榜前 10</button>
+              <button type="button" data-testid="portfolio-risk-return-board" role="tab" :aria-selected="riskOptimizationBoard === 'return'" :class="{ active: riskOptimizationBoard === 'return' }" @click="riskOptimizationBoard = 'return'">收益榜前 10</button>
+            </div>
+            <div v-if="!riskOptimizationCandidates.length" class="inline-empty">没有候选通过验证段门槛；可扩大日期范围后重试。</div>
+            <div v-else class="table-wrap"><table data-testid="portfolio-risk-candidates"><caption class="sr-only">退出风控寻优候选</caption><thead><tr><th># / 参数</th><th>训练<br>年化 / 夏普</th><th>验证<br>年化 / 夏普 / 回撤</th><th>留出<br>年化 / 夏普 / 回撤</th><th>操作</th></tr></thead><tbody>
+              <tr v-for="(candidate, index) in riskOptimizationCandidates" :key="candidate.candidate_hash" :data-testid="`portfolio-risk-candidate-${candidate.candidate_hash}`">
+                <td><strong>{{ index + 1 }}</strong><small>{{ candidate.human_readable_rules }}</small></td>
+                <td>{{ formatPercent(riskMetric(candidate, 'train', 'annual_return')) }} / {{ formatNumber(riskMetric(candidate, 'train', 'sharpe')) }}</td>
+                <td>{{ formatPercent(riskMetric(candidate, 'validation', 'annual_return')) }} / {{ formatNumber(riskMetric(candidate, 'validation', 'sharpe')) }} / {{ formatPercent(riskMetric(candidate, 'validation', 'max_drawdown')) }}</td>
+                <td>{{ formatPercent(riskMetric(candidate, 'holdout', 'annual_return')) }} / {{ formatNumber(riskMetric(candidate, 'holdout', 'sharpe')) }} / {{ formatPercent(riskMetric(candidate, 'holdout', 'max_drawdown')) }}</td>
+                <td><button class="secondary-button" :data-testid="`portfolio-risk-apply-${candidate.candidate_hash}`" type="button" :disabled="riskOptimizationStale" @click="applyRiskOptimizationCandidate(candidate)">应用</button></td>
+              </tr>
+            </tbody></table></div>
+          </section>
+          <div v-if="!result && !riskOptimizationResult" class="empty-state" data-testid="portfolio-empty"><div class="empty-icon" aria-hidden="true">/</div><h3>{{ loading ? '正在运行动态组合回测…' : '还没有组合结果' }}</h3><p>{{ loading ? '正在逐股计算公式并模拟槽位补位，完成后显示净值与候选排名。' : '配置买入条件、排序指标和卖出条件后开始回测。' }}</p></div>
+          <template v-if="result">
             <div class="backtest-summary"><span class="result-badge">{{ result.universe === 'all' ? '沪深全部品种' : result.universe.toUpperCase() }}</span><span>{{ result.start_date }} → {{ result.end_date }}</span><span>{{ result.bars }} 个交易日</span><span>{{ result.processed }} / {{ result.total_candidates }} 个标的已处理</span><span>槽位 {{ result.max_positions }}</span><span>排序：{{ valueName(result.ranking_value) }} · {{ result.rank_order === 'desc' ? '高到低' : '低到高' }}</span><span v-if="result.fitness_rank_weight" class="result-badge">适配性权重 {{ Math.round(result.fitness_rank_weight * 100) }}%</span></div>
             <aside class="portfolio-assumptions" data-testid="portfolio-assumptions" aria-label="回测口径与限制">
               <strong>回测口径与限制</strong>

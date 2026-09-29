@@ -11,7 +11,7 @@ from selector_app.screening.models import ScreenCondition
 from selector_app.screening.rules import RuleGroup
 
 from .candidates import _as_float, _as_int, _choice, _condition
-from .models import DiscoveryRequest, RiskMode, StrategyCandidate
+from .models import CandidateMode, DiscoveryRequest, RiskMode, StrategyCandidate
 
 RefinementRadius = Literal["medium"]
 
@@ -68,6 +68,10 @@ def discovery_request_from_dict(value: Mapping[str, object]) -> DiscoveryRequest
         max_complexity=_as_int(value.get("max_complexity"), 12),
         multifidelity_enabled=bool(value.get("multifidelity_enabled", True)),
         seed=_as_int(value.get("seed"), 0),
+        candidate_mode=cast(
+            CandidateMode,
+            str(value.get("candidate_mode") or "strategy"),
+        ),
     )
 
 
@@ -164,6 +168,17 @@ def candidate_from_payload(
         stop_loss_pct=_optional_float(candidate_config.get("stop_loss_pct")),
         stop_loss_atr_multiplier=_optional_float(candidate_config.get("stop_loss_atr_multiplier")),
         stop_loss_cooldown_days=_as_int(candidate_config.get("stop_loss_cooldown_days"), 0),
+        moving_stop_loss_mode=cast(
+            RiskMode,
+            str(candidate_config.get("moving_stop_loss_mode") or "pct"),
+        ),
+        moving_stop_loss_pct=_optional_float(candidate_config.get("moving_stop_loss_pct")),
+        moving_stop_loss_atr_multiplier=_optional_float(
+            candidate_config.get("moving_stop_loss_atr_multiplier")
+        ),
+        moving_stop_loss_cooldown_days=_as_int(
+            candidate_config.get("moving_stop_loss_cooldown_days"), 0
+        ),
         trailing_stop_mode=cast(RiskMode, str(candidate_config.get("trailing_stop_mode") or "pct")),
         trailing_stop_pct=_optional_float(candidate_config.get("trailing_stop_pct")),
         trailing_stop_atr_multiplier=_optional_float(
@@ -361,6 +376,13 @@ def build_refined_candidate(
             parent.stop_loss_cooldown_days,
             generator,
         ),
+        "moving_stop_loss": _local_risk(
+            parent.moving_stop_loss_mode,
+            parent.moving_stop_loss_pct,
+            parent.moving_stop_loss_atr_multiplier,
+            parent.moving_stop_loss_cooldown_days,
+            generator,
+        ),
         "trailing_stop": _local_risk(
             parent.trailing_stop_mode,
             parent.trailing_stop_pct,
@@ -373,6 +395,7 @@ def build_refined_candidate(
         "take_profit"
     ]
     stop_loss_mode, stop_loss_pct, stop_loss_atr, stop_loss_cooldown = risk_values["stop_loss"]
+    moving_mode, moving_pct, moving_atr, moving_cooldown = risk_values["moving_stop_loss"]
     trailing_mode, trailing_pct, trailing_atr, trailing_cooldown = risk_values["trailing_stop"]
     indicators = tuple(request.indicator_ids)
     ranking_value = str(
@@ -393,6 +416,10 @@ def build_refined_candidate(
         stop_loss_pct=stop_loss_pct,
         stop_loss_atr_multiplier=stop_loss_atr,
         stop_loss_cooldown_days=stop_loss_cooldown,
+        moving_stop_loss_mode=moving_mode,
+        moving_stop_loss_pct=moving_pct,
+        moving_stop_loss_atr_multiplier=moving_atr,
+        moving_stop_loss_cooldown_days=moving_cooldown,
         trailing_stop_mode=trailing_mode,
         trailing_stop_pct=trailing_pct,
         trailing_stop_atr_multiplier=trailing_atr,

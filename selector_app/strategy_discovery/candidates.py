@@ -176,16 +176,90 @@ def _rule(
 
 def _risk_values(rng: object) -> tuple[RiskMode, float | None, float | None, int]:
     mode: RiskMode = "atr" if _choice(rng, ("pct", "atr"), "pct") == "atr" else "pct"
-    cooldown = _as_int(_choice(rng, _RISK_COOLDOWNS, 0), 0)
     if mode == "atr":
+        cooldown = _as_int(_choice(rng, _RISK_COOLDOWNS, 0), 0)
         return mode, None, _as_float(_choice(rng, (1.0, 2.0, 3.0), 1.0), 1.0), cooldown
-    return mode, _optional_float(_choice(rng, (None, 0.05, 0.08, 0.12, 0.2), None)), None, cooldown
+    percentage = _optional_float(_choice(rng, (None, 0.05, 0.08, 0.12, 0.2), None))
+    if percentage is None:
+        return mode, None, None, 0
+    cooldown = _as_int(_choice(rng, _RISK_COOLDOWNS, 0), 0)
+    return mode, percentage, None, cooldown
+
+
+def _build_random_risk_candidate(
+    request: DiscoveryRequest,
+    rng: object,
+) -> StrategyCandidate:
+    base_config = dict(request.base_config)
+    risk = {
+        prefix: _risk_values(rng)
+        for prefix in ("stop_loss", "take_profit", "moving_stop_loss", "trailing_stop")
+    }
+    stop_mode, stop_pct, stop_atr, stop_cooldown = risk["stop_loss"]
+    take_mode, take_pct, take_atr, take_cooldown = risk["take_profit"]
+    moving_mode, moving_pct, moving_atr, moving_cooldown = risk["moving_stop_loss"]
+    trailing_mode, trailing_pct, trailing_atr, trailing_cooldown = risk["trailing_stop"]
+    rank_order = str(base_config.get("rank_order") or "desc")
+    if rank_order not in {"asc", "desc"}:
+        rank_order = "desc"
+    frequency = str(base_config.get("rebalance_frequency") or "daily")
+    if frequency not in {"daily", "weekly", "monthly"}:
+        frequency = "daily"
+    risk_summary = []
+    for prefix, label in (
+        ("stop_loss", "止损"),
+        ("take_profit", "止盈"),
+        ("moving_stop_loss", "移动止损"),
+        ("trailing_stop", "移动止盈"),
+    ):
+        mode, percentage, atr_multiplier, cooldown = risk[prefix]
+        if percentage is None and atr_multiplier is None:
+            risk_summary.append(f"{label}关闭")
+        else:
+            setting = f"{percentage:.0%}" if percentage is not None else f"ATR×{atr_multiplier:g}"
+            risk_summary.append(f"{label}{setting}/冷却{cooldown}日")
+    return StrategyCandidate(
+        # Risk-only candidates carry no generated rules.  ``preserve_base_config``
+        # ensures the exact serialized buy/sell rules and ranking survive replay.
+        buy_rule=RuleGroup(signals=("risk_optimization.fixed_buy_placeholder",)),
+        sell_rule=RuleGroup(signals=("risk_optimization.fixed_sell_placeholder",)),
+        ranking_value=str(base_config.get("ranking_value") or ""),
+        rank_order=cast(_RankOrder, rank_order),
+        max_positions=max(1, _as_int(base_config.get("max_positions"), 5)),
+        rebalance_frequency=cast(_RebalanceFrequency, frequency),
+        take_profit_mode=take_mode,
+        take_profit_pct=take_pct,
+        take_profit_atr_multiplier=take_atr,
+        take_profit_cooldown_days=take_cooldown,
+        stop_loss_mode=stop_mode,
+        stop_loss_pct=stop_pct,
+        stop_loss_atr_multiplier=stop_atr,
+        stop_loss_cooldown_days=stop_cooldown,
+        moving_stop_loss_mode=moving_mode,
+        moving_stop_loss_pct=moving_pct,
+        moving_stop_loss_atr_multiplier=moving_atr,
+        moving_stop_loss_cooldown_days=moving_cooldown,
+        trailing_stop_mode=trailing_mode,
+        trailing_stop_pct=trailing_pct,
+        trailing_stop_atr_multiplier=trailing_atr,
+        trailing_stop_cooldown_days=trailing_cooldown,
+        atr_period=_as_int(base_config.get("atr_period"), 14),
+        base_config=base_config,
+        complexity=sum(
+            percentage is not None or atr_multiplier is not None
+            for _, percentage, atr_multiplier, _ in risk.values()
+        ),
+        human_readable_rules="固定买卖规则与排序；" + "、".join(risk_summary),
+        preserve_base_config=True,
+    )
 
 
 def build_random_candidate(
     request: DiscoveryRequest, rng: object | None = None
 ) -> StrategyCandidate:
     generator = rng or random.Random()
+    if request.candidate_mode == "risk_only":
+        return _build_random_risk_candidate(request, generator)
     catalog = default_indicator_catalog()
     indicators = tuple(
         catalog.canonical_id(value_id)
@@ -208,7 +282,7 @@ def build_random_candidate(
         frequency_value if frequency_value in {"daily", "weekly", "monthly"} else "daily",
     )
     risk: dict[str, tuple[RiskMode, float | None, float | None, int]] = {}
-    for prefix in ("take_profit", "stop_loss", "trailing_stop"):
+    for prefix in ("take_profit", "stop_loss", "moving_stop_loss", "trailing_stop"):
         risk[prefix] = _risk_values(generator)
     buy_rule = _rule(
         request,
@@ -226,6 +300,7 @@ def build_random_candidate(
     )
     take_profit_mode, take_profit_pct, take_profit_atr, take_profit_cooldown = risk["take_profit"]
     stop_loss_mode, stop_loss_pct, stop_loss_atr, stop_loss_cooldown = risk["stop_loss"]
+    moving_mode, moving_pct, moving_atr, moving_cooldown = risk["moving_stop_loss"]
     trailing_mode, trailing_pct, trailing_atr, trailing_cooldown = risk["trailing_stop"]
     rank_order_value = str(_choice(generator, ("asc", "desc"), "desc"))
     rank_order = cast(
@@ -247,6 +322,10 @@ def build_random_candidate(
         stop_loss_pct=stop_loss_pct,
         stop_loss_atr_multiplier=stop_loss_atr,
         stop_loss_cooldown_days=stop_loss_cooldown,
+        moving_stop_loss_mode=moving_mode,
+        moving_stop_loss_pct=moving_pct,
+        moving_stop_loss_atr_multiplier=moving_atr,
+        moving_stop_loss_cooldown_days=moving_cooldown,
         trailing_stop_mode=trailing_mode,
         trailing_stop_pct=trailing_pct,
         trailing_stop_atr_multiplier=trailing_atr,
@@ -262,7 +341,7 @@ def build_random_candidate(
             + len(sell_rule.required_conditions)
             + sum(
                 1
-                for prefix in ("take_profit", "stop_loss", "trailing_stop")
+                for prefix in ("take_profit", "stop_loss", "moving_stop_loss", "trailing_stop")
                 if risk[prefix][1] is not None or risk[prefix][2] is not None
             )
         ),
