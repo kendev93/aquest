@@ -827,3 +827,105 @@ def test_duplicate_correlation_must_stay_in_a_meaningful_range() -> None:
                 limit=5,
                 duplicate_correlation=value,
             )
+
+
+def _cross_frames() -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
+    """两样本上穿、两样本下穿、四样本一直在一侧，用来看穿越条件挖不挖得出来。"""
+
+    features = pd.DataFrame(
+        {
+            "technical.ma5": [11.0, 11.0, 10.0, 10.0, 12.0, 12.0, 9.0, 9.0],
+            "technical.ma20": [10.0, 10.0, 11.0, 11.0, 10.0, 10.0, 10.0, 10.0],
+        }
+    )
+    previous = pd.DataFrame(
+        {
+            "technical.ma5": [9.0, 9.0, 12.0, 12.0, 13.0, 13.0, 8.0, 8.0],
+            "technical.ma20": [10.0, 10.0, 11.0, 11.0, 10.0, 10.0, 10.0, 10.0],
+        }
+    )
+    # 上穿两条全盈利，下穿两条全亏，另外四条一直站在同一侧（两盈两亏）——
+    # 这样即使把上穿样本整条排除，剩下的窗口里仍有盈有亏，基准还算得出来。
+    outcomes = pd.Series([True, True, False, False, True, True, False, False])
+    symbols = pd.Series(["SH600000", "SZ000001"] * 4)
+    return features, previous, outcomes, symbols
+
+
+def test_mines_cross_conditions_when_previous_day_features_are_available() -> None:
+    """「MA5 上穿 MA20」这类时点条件：命中 2 条，两条都盈利。
+
+    只给大小比较的话，同样的命中里混着两条一直站在上面的样本，胜率被拉到 1/2。
+    """
+
+    features, previous, outcomes, symbols = _cross_frames()
+
+    candidates = mine_binary_conditions(
+        features,
+        outcomes,
+        symbols,
+        quantiles=(0.5,),
+        min_support=2,
+        min_instruments=2,
+        limit=20,
+        previous_features=previous,
+    )
+
+    cross_up = next(
+        candidate
+        for candidate in candidates
+        if candidate.condition.operator == "cross_up"
+        and candidate.condition.left_value == "technical.ma5"
+    )
+    assert cross_up.condition.right_value == "technical.ma20"
+    assert cross_up.outcome_rate == pytest.approx(1.0)
+    assert cross_up.support_count == 2
+    assert cross_up.instrument_count == 2
+    assert cross_up.baseline_rate == pytest.approx(0.5)
+    assert cross_up.lift == pytest.approx(2.0)
+
+
+def test_cross_conditions_are_skipped_without_previous_day_features() -> None:
+    """没有昨天的值就绝不猜：宁可少一类候选，也不能拿错位的行编造穿越。"""
+
+    features, _previous, outcomes, symbols = _cross_frames()
+
+    candidates = mine_binary_conditions(
+        features,
+        outcomes,
+        symbols,
+        quantiles=(0.5,),
+        min_support=2,
+        min_instruments=2,
+        limit=20,
+    )
+
+    assert not any(candidate.condition.operator.startswith("cross") for candidate in candidates)
+
+
+def test_cross_conditions_ignore_samples_without_a_previous_day() -> None:
+    """上穿样本的前一天取不到时整条退出：挖不出来就是挖不出来，不能蒙一个。
+
+    窗口里还有盈有亏（基准算得出来），所以「没有候选」只能是因为那两条样本
+    被排除了，不是因为基准退化成 0 被跳过。
+    """
+
+    features, previous, outcomes, symbols = _cross_frames()
+    previous.loc[[0, 1], "technical.ma5"] = float("nan")
+
+    candidates = mine_binary_conditions(
+        features,
+        outcomes,
+        symbols,
+        quantiles=(0.5,),
+        min_support=2,
+        min_instruments=2,
+        limit=20,
+        previous_features=previous,
+    )
+
+    assert candidates  # 窗口本身仍然可用，缺的只是那两条样本
+    assert not any(
+        candidate.condition.operator == "cross_up"
+        and candidate.condition.left_value == "technical.ma5"
+        for candidate in candidates
+    )

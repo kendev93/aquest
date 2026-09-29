@@ -8,6 +8,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from typing import cast
 
+import numpy as np
+
 from selector_app.concurrency import MAX_WORKERS
 from selector_app.formulas.custom import ParsedFormula, parse_formula
 from selector_app.formulas.registry import FORMULA_REGISTRY, FormulaRegistry
@@ -48,6 +50,9 @@ class PortfolioBacktestService(
         self._adapter = adapter or DuckDbMarketDataAdapter(DuckDbMarketDataStore())
         self._registry = registry or FORMULA_REGISTRY
         self._indicator_cache = indicator_cache
+        self._risk_ranked_context_source: Sequence[_StockSeries] | None = None
+        self._risk_ranked_context_key: tuple[str, str] | None = None
+        self._risk_ranked_candidate_index: dict[int, np.ndarray] | None = None
 
     def run(
         self,
@@ -162,6 +167,7 @@ class PortfolioBacktestService(
         include_details: bool = True,
         checkpoint: SimulationCheckpoint | None = None,
         checkpoint_callback: Callable[[SimulationCheckpoint], None] | None = None,
+        precompute_ranked_candidates: bool = False,
     ) -> PortfolioBacktestReport:
         """Run the simulator on candidate-specific contexts prepared upstream.
 
@@ -205,6 +211,32 @@ class PortfolioBacktestService(
                 None,
                 prepared,
             )
+        ranked_candidate_index: dict[int, np.ndarray] | None = None
+        if (
+            precompute_ranked_candidates
+            and not include_details
+            and config.fitness_rank_weight == 0
+        ):
+            context_key = (config.ranking_value, config.rank_order)
+            if (
+                contexts is self._risk_ranked_context_source
+                and context_key == self._risk_ranked_context_key
+                and self._risk_ranked_candidate_index is not None
+            ):
+                ranked_candidate_index = self._risk_ranked_candidate_index
+            else:
+                self._risk_ranked_context_source = contexts
+                self._risk_ranked_context_key = context_key
+                self._risk_ranked_candidate_index = self._build_ranked_candidate_index(
+                    prepared,
+                    dates,
+                    config,
+                )
+                ranked_candidate_index = self._risk_ranked_candidate_index
+        else:
+            self._risk_ranked_context_source = None
+            self._risk_ranked_context_key = None
+            self._risk_ranked_candidate_index = None
         fitness_filter = self._build_fitness_filter(prepared, config)
         simulation = self._simulate(
             prepared,
@@ -214,6 +246,7 @@ class PortfolioBacktestService(
             include_details=include_details,
             checkpoint=checkpoint,
             data_fingerprint=data_fingerprint,
+            ranked_candidate_index=ranked_candidate_index,
         )
         restored_checkpoint = simulation.get("checkpoint")
         if checkpoint_callback is not None and isinstance(

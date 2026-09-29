@@ -167,6 +167,9 @@ class DiscoverySnapshot:
         self._base_series_cache: OrderedDict[str, _SnapshotBaseSeries] = OrderedDict()
         self._date_index_cache: OrderedDict[tuple[str, int, int], Mapping[int, int]] = OrderedDict()
         self._base_context_cache_hits = 0
+        self._candidate_context_cache_key: str | None = None
+        self._candidate_context_cache: list[_StockSeries] | None = None
+        self._candidate_context_cache_hits = 0
 
     @property
     def context_cache_metrics(self) -> dict[str, int]:
@@ -176,6 +179,7 @@ class DiscoverySnapshot:
             "date_index_cache_entries": len(self._date_index_cache),
             "base_context_cache_limit": self._max_cached_symbols,
             "date_index_cache_limit": self._max_cached_date_indexes,
+            "candidate_context_cache_hits": self._candidate_context_cache_hits,
         }
 
     def close(self) -> None:
@@ -183,6 +187,8 @@ class DiscoverySnapshot:
 
         self._base_series_cache.clear()
         self._date_index_cache.clear()
+        self._candidate_context_cache = None
+        self._candidate_context_cache_key = None
         for name in (
             "_dates",
             "_bars",
@@ -200,13 +206,31 @@ class DiscoverySnapshot:
     def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
         self.close()
 
-    def contexts_for_config(self, config: PortfolioBacktestConfig) -> list[_StockSeries]:
+    def contexts_for_config(
+        self,
+        config: PortfolioBacktestConfig,
+        *,
+        reuse_candidate_contexts: bool = False,
+    ) -> list[_StockSeries]:
         """Build cheap candidate-specific contexts from the shared arrays."""
 
         if config.formula_text:
             raise ValueError("共享行情快照不支持自定义公式")
         if config.buy_rule is None:
             raise ValueError("买入规则不能为空")
+
+        cache_key = _context_config_cache_key(config) if reuse_candidate_contexts else None
+        if cache_key is not None:
+            if cache_key == self._candidate_context_cache_key:
+                cached = self._candidate_context_cache
+                if cached is not None:
+                    self._candidate_context_cache_hits += 1
+                    return cached
+            # Keep one window per worker. Coarse, medium, and full fidelities
+            # use different date windows, so retaining all three can multiply
+            # the per-process context memory without helping later stages.
+            self._candidate_context_cache_key = None
+            self._candidate_context_cache = None
 
         value_ids = _value_ids(config)
         signal_ids = _rule_signal_ids(config.buy_rule, config.sell_rule)
@@ -280,6 +304,9 @@ class DiscoverySnapshot:
                     data_fingerprint=item.data_fingerprint,
                 )
             )
+        if cache_key is not None:
+            self._candidate_context_cache_key = cache_key
+            self._candidate_context_cache = contexts
         return contexts
 
     def _base_series(self, item: _SnapshotSymbol) -> _SnapshotBaseSeries:
@@ -848,6 +875,32 @@ def _value_ids(config: PortfolioBacktestConfig) -> tuple[str, ...]:
             if condition.right_value is not None:
                 values.append(condition.right_value)
     return tuple(dict.fromkeys(values))
+
+
+def _context_config_cache_key(config: PortfolioBacktestConfig) -> str:
+    def rule_payload(rule: RuleGroup | None) -> dict[str, object] | None:
+        if rule is None:
+            return None
+        return {
+            "signals": list(rule.signals),
+            "conditions": [_condition_to_dict(item) for item in rule.conditions],
+            "combine_mode": rule.combine_mode,
+            "minimum_matches": rule.minimum_matches,
+            "required_conditions": [
+                _condition_to_dict(item) for item in rule.required_conditions
+            ],
+        }
+
+    payload = {
+        "start_date": config.start_date.isoformat() if config.start_date else None,
+        "end_date": config.end_date.isoformat() if config.end_date else None,
+        "atr_period": config.atr_period,
+        "value_ids": list(_value_ids(config)),
+        "signal_ids": list(_rule_signal_ids(config.buy_rule, config.sell_rule)),
+        "buy_rule": rule_payload(config.buy_rule),
+        "sell_rule": rule_payload(config.sell_rule),
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _rule_signal_ids(*rules: RuleGroup | None) -> tuple[str, ...]:

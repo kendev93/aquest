@@ -26,6 +26,10 @@ class MiningSamples:
     # 对应的收益率，用于排序推荐的横截面相关度；买入样本是整笔交易收益率，
     # 卖出样本是「按该决策点卖出」的收益率，与基准同一口径（都除以成本）。
     returns: pd.Series
+    # 每个决策点**前一个交易日**的同一批特征值（行与 features 一一对齐，取不到就整行 NaN）。
+    # 样本本身是横着摆的决策点快照，相邻两行之间没有先后关系，所以「上穿/下穿」这类
+    # 需要前一状态的比较只能靠它来算；没有它，挖掘就只能出大小比较。
+    previous_features: pd.DataFrame | None = None
 
     def __len__(self) -> int:
         return len(self.outcomes)
@@ -46,7 +50,9 @@ def build_buy_trade_samples(
     """
 
     feature_rows = feature_rows_by_date(feature_values) if feature_rows is None else feature_rows
+    previous_dates = previous_date_by_date(feature_values)
     rows: list[dict[str, object]] = []
+    previous_rows: list[dict[str, object] | None] = []
     outcomes: list[bool] = []
     instruments: list[str] = []
     groups: list[str] = []
@@ -71,6 +77,7 @@ def build_buy_trade_samples(
         feature_row = feature_rows.get(signal_date)
         if pnl is not None and feature_row is not None:
             rows.append(feature_row)
+            previous_rows.append(_previous_row(feature_rows, previous_dates, signal_date))
             outcomes.append(pnl > 0)
             instruments.append(f"{market}{code}")
             groups.append(_trade_group(market, code, pending_entry))
@@ -78,7 +85,9 @@ def build_buy_trade_samples(
             returns.append(_number(trade.get("return")) or 0.0)
         pending_entry = None
 
-    return _samples(feature_values, rows, outcomes, instruments, groups, dates, returns)
+    return _samples(
+        feature_values, rows, outcomes, instruments, groups, dates, returns, previous_rows
+    )
 
 
 def build_early_exit_samples(
@@ -97,6 +106,7 @@ def build_early_exit_samples(
     if max_decision_points_per_trade < 1:
         raise ValueError("每笔交易的卖出决策样本上限必须大于 0")
     feature_rows = feature_rows_by_date(feature_values) if feature_rows is None else feature_rows
+    previous_dates = previous_date_by_date(feature_values)
     prepared_bars = bars.copy(deep=False)
     prepared_bars["date"] = pd.to_datetime(prepared_bars["date"], errors="coerce")
     date_to_index = {
@@ -112,6 +122,7 @@ def build_early_exit_samples(
     )
 
     rows: list[dict[str, object]] = []
+    previous_rows: list[dict[str, object] | None] = []
     outcomes: list[bool] = []
     instruments: list[str] = []
     groups: list[str] = []
@@ -177,6 +188,7 @@ def build_early_exit_samples(
                 slippage = size * config.slippage
                 early_exit_pnl = size * price - commission - stamp_tax - slippage - cost_basis
                 rows.append(feature_row)
+                previous_rows.append(_previous_row(feature_rows, previous_dates, decision_date))
                 outcomes.append(early_exit_pnl > base_pnl + 1e-9)
                 instruments.append(f"{market}{code}")
                 groups.append(group)
@@ -184,7 +196,9 @@ def build_early_exit_samples(
                 returns.append(early_exit_pnl / cost_basis)
         pending_entry = None
 
-    return _samples(feature_values, rows, outcomes, instruments, groups, dates, returns)
+    return _samples(
+        feature_values, rows, outcomes, instruments, groups, dates, returns, previous_rows
+    )
 
 
 def feature_rows_by_date(feature_values: pd.DataFrame) -> dict[str, dict[str, object]]:
@@ -204,6 +218,35 @@ def feature_rows_by_date(feature_values: pd.DataFrame) -> dict[str, dict[str, ob
     return indexed
 
 
+def previous_date_by_date(feature_values: pd.DataFrame) -> dict[str, str]:
+    """每个特征日期的**上一个交易日**（按特征表本身的行序）。
+
+    样本是横着摆的决策点快照，相邻两行之间没有先后关系，所以「上一天是哪天」
+    只能回特征表里查。这里按行序取前一行，而不是按自然日减一：停牌、周末、
+    假期都不是交易日，减一会得到一条根本不存在的行情。
+    """
+
+    if "date" not in feature_values.columns:
+        raise ValueError("指标样本缺少日期列")
+    ordered: list[str] = []
+    for value in feature_values["date"]:
+        text = _date_text(value)
+        if text is not None:
+            ordered.append(text)
+    return {date_text: ordered[index - 1] for index, date_text in enumerate(ordered) if index > 0}
+
+
+def _previous_row(
+    feature_rows: Mapping[str, dict[str, object]],
+    previous_dates: Mapping[str, str],
+    date_text: str,
+) -> dict[str, object] | None:
+    previous_date = previous_dates.get(date_text)
+    if previous_date is None:
+        return None
+    return feature_rows.get(previous_date)
+
+
 def _samples(
     feature_values: pd.DataFrame,
     rows: list[dict[str, object]],
@@ -212,8 +255,18 @@ def _samples(
     groups: list[str],
     dates: list[str],
     returns: list[float],
+    previous_rows: list[dict[str, object] | None] | None = None,
 ) -> MiningSamples:
     feature_columns = [column for column in feature_values.columns if column != "date"]
+    previous_frame: pd.DataFrame | None = None
+    if previous_rows is not None:
+        if len(previous_rows) != len(rows):
+            raise ValueError("前一日特征的行数必须与样本一致")
+        filled = [
+            row if row is not None else {column: float("nan") for column in feature_columns}
+            for row in previous_rows
+        ]
+        previous_frame = pd.DataFrame(filled, columns=feature_columns)
     return MiningSamples(
         features=pd.DataFrame(rows, columns=feature_columns),
         outcomes=pd.Series(outcomes, dtype=bool),
@@ -221,6 +274,7 @@ def _samples(
         groups=pd.Series(groups, dtype=str),
         dates=pd.Series(dates, dtype=str),
         returns=pd.Series(returns, dtype=float),
+        previous_features=previous_frame,
     )
 
 

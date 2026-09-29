@@ -414,6 +414,10 @@ def mine_binary_conditions(
     significance_quantile: float = 0.95,
     permutation_seed: int | None = None,
     duplicate_correlation: float = DEFAULT_DUPLICATE_CORRELATION,
+    # 每个决策点**前一个交易日**的特征（行与 features 对齐，取不到就是 NaN）。
+    # 给了它，值值对比才会额外生成「上穿/下穿」候选——穿越要靠前后两根比，
+    # 而样本本身是横着摆的快照，相邻两行之间没有先后关系。不给就只挖大小比较。
+    previous_features: pd.DataFrame | None = None,
     # 出参：本次**实际评分过**的条件数（= 送入置换零分布的 mask 池大小）。
     # 用出参而不是改返回值，是因为 18 处既有测试把返回值直接当候选元组用，
     # 改返回类型会连带改一大片与本次无关的东西。
@@ -494,6 +498,17 @@ def mine_binary_conditions(
         for feature_id in feature_ids
     }
     finite = {feature_id: np.isfinite(values) for feature_id, values in arrays.items()}
+    # 前一日特征：只在行列都对得上时才用来生成穿越候选，缺列或长度不符就整段跳过，
+    # 而不是拿错位的行去编造「昨天的值」。
+    previous_arrays: dict[str, np.ndarray] = {}
+    if previous_features is not None and len(previous_features) == len(target):
+        previous_arrays = {
+            feature_id: pd.to_numeric(previous_features[feature_id], errors="coerce").to_numpy(
+                dtype=float
+            )
+            for feature_id in feature_ids
+            if feature_id in previous_features.columns
+        }
     comparable = {
         feature_id: _has_two_distinct(arrays[feature_id], finite[feature_id])
         for feature_id in feature_ids
@@ -634,6 +649,58 @@ def mine_binary_conditions(
                     sample_positions=positions,
                 )
                 record(candidate, valid)
+
+            # 同一对指标再看「昨天在下面、今天翻上去」这类时点。穿越要用前一交易日
+            # 的值，样本窗口因此比大小比较更小——第一根 K 线永远没有昨天可比。
+            if left_id in previous_arrays and right_id in previous_arrays:
+                previous_left_all = previous_arrays[left_id]
+                previous_right_all = previous_arrays[right_id]
+                cross_valid = (
+                    valid & np.isfinite(previous_left_all) & np.isfinite(previous_right_all)
+                )
+                if int(cross_valid.sum()) >= min_support:
+                    previous_left = previous_left_all[cross_valid]
+                    previous_right = previous_right_all[cross_valid]
+                    crossed_left = left_values[cross_valid]
+                    crossed_right = right_values[cross_valid]
+                    cross_groups = group_codes[cross_valid]
+                    cross_target = target_float[cross_valid]
+                    cross_baseline = _grouped_outcome_rate(cross_target, cross_groups)
+                    if 0.0 < cross_baseline < 1.0:
+                        for operator, condition_mask in (
+                            (
+                                "cross_up",
+                                (previous_left <= previous_right)
+                                & (crossed_left > crossed_right),
+                            ),
+                            (
+                                "cross_down",
+                                (previous_left >= previous_right)
+                                & (crossed_left < crossed_right),
+                            ),
+                        ):
+                            condition = ScreenCondition(
+                                left_value=left_id,
+                                operator=operator,
+                                right_value=right_id,
+                            )
+                            key = _condition_key(condition)
+                            if key in seen_rules or condition_signature(condition) in excluded:
+                                continue
+                            seen_rules.add(key)
+                            candidate = _candidate_for_mask(
+                                condition,
+                                condition_mask,
+                                cross_target,
+                                instrument_codes[cross_valid],
+                                cross_groups,
+                                min_support=min_support,
+                                min_instruments=min_instruments,
+                                baseline_rate=cross_baseline,
+                                top_n_context=top_n_context,
+                                sample_positions=np.flatnonzero(cross_valid),
+                            )
+                            record(candidate, cross_valid)
 
     ranked = sorted(
         candidates,

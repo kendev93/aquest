@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import math
 from datetime import date
 
 import pandas as pd
+import pytest
 
 from selector_app.backtest.models import BacktestConfig
 from selector_app.condition_research.samples import (
@@ -224,3 +226,27 @@ def test_prebuilt_feature_index_matches_the_internal_lookup() -> None:
     assert sell_reused.outcomes.equals(sell_built.outcomes)
     assert sell_reused.instruments.equals(sell_built.instruments)
     assert sell_reused.groups.equals(sell_built.groups)
+
+
+def test_buy_samples_carry_the_previous_trading_day_features() -> None:
+    """穿越条件要前后两根比，样本自己没有先后关系，所以必须随样本带上昨天的值。"""
+
+    trades = [
+        {"direction": "BUY", "signal_date": "2024-01-01", "date": "2024-01-02"},
+        {"direction": "SELL", "signal_date": "2024-01-03", "date": "2024-01-04", "pnl": 20.0},
+        {"direction": "BUY", "signal_date": "2024-01-04", "date": "2024-01-05"},
+        {"direction": "SELL", "signal_date": "2024-01-05", "date": "2024-01-06", "pnl": -5.0},
+    ]
+
+    samples = build_buy_trade_samples(
+        trades,
+        feature_frame(),
+        market="SH",
+        code="600000",
+    )
+
+    assert samples.previous_features is not None
+    previous = samples.previous_features["custom.strength"].tolist()
+    # 第一段行情的第一天没有「上一个交易日」，不能拿自然日减一天去编一个。
+    assert math.isnan(previous[0])
+    assert previous[1] == pytest.approx(0.3)

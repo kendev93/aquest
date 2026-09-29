@@ -15,6 +15,7 @@ from .candidates import build_random_candidate
 from .models import DiscoveryRequest, StrategyCandidate
 
 BatchEvaluator = Callable[[Sequence[StrategyCandidate], str], Sequence[Mapping[str, object]]]
+CheckpointRetentionCallback = Callable[[Sequence[StrategyCandidate]], None]
 
 
 def _metric(metrics: Mapping[str, object], key: str, default: float = float("-inf")) -> float:
@@ -234,6 +235,7 @@ class HybridSearchEngine:
         evaluator: Callable[[StrategyCandidate, str], Mapping[str, object]],
         batch_evaluator: BatchEvaluator | None = None,
         fidelity_evaluator: Callable[[StrategyCandidate, str], Mapping[str, object]] | None = None,
+        checkpoint_retention_callback: CheckpointRetentionCallback | None = None,
         batch_size: int = 1,
         evaluation_workers: int = 1,
         evaluation_mode: str | None = None,
@@ -559,6 +561,8 @@ class HybridSearchEngine:
         if fidelity_evaluator is not None and request.multifidelity_enabled and observed:
             medium_limit = max(1, min(len(observed), math.ceil(len(observed) * 0.35)))
             medium_source = _rank_candidates(observed, "search")[:medium_limit]
+            if checkpoint_retention_callback is not None:
+                checkpoint_retention_callback(medium_source)
             medium_observed: list[StrategyCandidate] = []
             medium_started = time.perf_counter()
             for offset in range(0, len(medium_source), resolved_batch_size):
@@ -588,6 +592,8 @@ class HybridSearchEngine:
             full_limit = max(1, min(len(full_source), math.ceil(len(observed) * 0.15)))
             full_stage = "medium" if medium_observed else "search"
             full_candidates = _rank_candidates(full_source, full_stage)[:full_limit]
+            if checkpoint_retention_callback is not None:
+                checkpoint_retention_callback(full_candidates)
             full_observed: list[StrategyCandidate] = []
             full_started = time.perf_counter()
             for offset in range(0, len(full_candidates), resolved_batch_size):

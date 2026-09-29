@@ -123,6 +123,11 @@ def _mine_sample_sets(
     usable = [sample for sample in samples if len(sample)]
     if not usable:
         return ()
+    # 前一日特征要么每份样本都有，要么一份都没有：混着拼会让穿越候选只覆盖一部分
+    # 标的，命中率看着好看，实际是样本被悄悄换过了。
+    previous_frames = [
+        sample.previous_features for sample in usable if sample.previous_features is not None
+    ]
     return mine_binary_conditions(
         pd.concat([sample.features for sample in usable], ignore_index=True),
         pd.concat([sample.outcomes for sample in usable], ignore_index=True),
@@ -136,6 +141,11 @@ def _mine_sample_sets(
         permutations=permutations,
         significance_quantile=significance_quantile,
         duplicate_correlation=duplicate_correlation,
+        previous_features=(
+            pd.concat(previous_frames, ignore_index=True)
+            if len(previous_frames) == len(usable)
+            else None
+        ),
         stats=stats,
     )
 

@@ -558,6 +558,12 @@ class StrategyDiscoveryService:
             observe_metrics(metrics, "search")
             return metrics
 
+        def retain_candidate_checkpoints(candidates: Sequence[StrategyCandidate]) -> None:
+            retained_hashes = {candidate.candidate_hash for candidate in candidates}
+            for candidate_hash in tuple(fidelity_checkpoints):
+                if candidate_hash not in retained_hashes:
+                    fidelity_checkpoints.pop(candidate_hash, None)
+
         batch_evaluator: BatchEvaluator | None = None
         if evaluation_executor is not None:
             database_path = str(self._store.database_path)
@@ -591,11 +597,6 @@ class StrategyDiscoveryService:
                 for candidate, item in zip(candidates, metrics, strict=True):
                     sanitized_metrics.append(_prepare_fidelity_metrics(candidate, item))
                 metrics = sanitized_metrics
-                if stage == "medium":
-                    promoted_hashes = {candidate.candidate_hash for candidate in candidates}
-                    for candidate_hash in tuple(fidelity_checkpoints):
-                        if candidate_hash not in promoted_hashes:
-                            fidelity_checkpoints.pop(candidate_hash, None)
                 observed_stage = "search" if fidelity is not None else stage
                 for item in metrics:
                     _validate_expected_fingerprint(item, expected_data_fingerprint)
@@ -613,6 +614,9 @@ class StrategyDiscoveryService:
             evaluator=evaluate,
             batch_evaluator=batch_evaluator,
             fidelity_evaluator=evaluate_fidelity if request.multifidelity_enabled else None,
+            checkpoint_retention_callback=(
+                retain_candidate_checkpoints if request.multifidelity_enabled else None
+            ),
             batch_size=self._evaluation_workers if batch_evaluator is not None else 1,
             evaluation_workers=(self._evaluation_workers if batch_evaluator is not None else 1),
             evaluation_mode="process_pool" if batch_evaluator is not None else "serial",
@@ -624,6 +628,9 @@ class StrategyDiscoveryService:
             progress_callback=report_progress,
             abort_check=abort_check,
         )
+        # High-fidelity checkpoints are only needed while search promotes
+        # candidates. Validation and holdout evaluate from their own date ranges.
+        fidelity_checkpoints.clear()
         if not search_result.results_by_sharpe and not search_result.results_by_return:
             raise ValueError("没有找到满足约束的策略候选")
 
@@ -736,7 +743,11 @@ class StrategyDiscoveryService:
             if self._discovery_snapshot is not None and isinstance(
                 self._portfolio_service, PortfolioBacktestService
             ):
-                contexts = self._discovery_snapshot.contexts_for_config(config)
+                reuse_candidate_contexts = request.candidate_mode == "risk_only"
+                contexts = self._discovery_snapshot.contexts_for_config(
+                    config,
+                    reuse_candidate_contexts=reuse_candidate_contexts,
+                )
 
                 def capture_checkpoint(value: SimulationCheckpoint) -> None:
                     nonlocal captured_checkpoint
@@ -749,6 +760,7 @@ class StrategyDiscoveryService:
                         total_candidates=self._discovery_snapshot.total_candidates,
                         include_details=False,
                         checkpoint=checkpoint_value,
+                        precompute_ranked_candidates=reuse_candidate_contexts,
                         checkpoint_callback=(
                             capture_checkpoint if fidelity in {"coarse", "medium", "full"} else None
                         ),
@@ -764,6 +776,7 @@ class StrategyDiscoveryService:
                         total_candidates=self._discovery_snapshot.total_candidates,
                         include_details=False,
                         checkpoint=None,
+                        precompute_ranked_candidates=reuse_candidate_contexts,
                         checkpoint_callback=(
                             capture_checkpoint if fidelity in {"coarse", "medium", "full"} else None
                         ),
