@@ -71,6 +71,13 @@ class StrategyJobBackend(Protocol):
         descriptions: Iterable[str] | None = None,
     ) -> list[dict[str, object]]: ...
 
+    def risk_optimization_history(
+        self,
+        *,
+        limit: int,
+        offset: int,
+    ) -> dict[str, object]: ...
+
 
 class FileStrategyJobBackend:
     """Compatibility backend for legacy tests using file-backed job state."""
@@ -219,6 +226,17 @@ class FileStrategyJobBackend:
         except (OSError, ValueError):
             logger.exception("策略活动任务状态读取失败")
             return []
+
+    def risk_optimization_history(
+        self,
+        *,
+        limit: int,
+        offset: int,
+    ) -> dict[str, object]:
+        history_reader = getattr(self._job_store, "list_risk_optimization_history", None)
+        if not callable(history_reader):
+            return {"items": [], "total": 0, "limit": limit, "offset": offset}
+        return cast(dict[str, object], history_reader(limit=limit, offset=offset))
 
     def _reconcile_completed(self, job_id: str, state: Mapping[str, object]) -> None:
         if state.get("status") != "completed":
@@ -389,6 +407,15 @@ class InProcessStrategyJobBackend:
         descriptions: Iterable[str] | None = None,
     ) -> list[dict[str, object]]:
         return self._runner.active_snapshots(descriptions)
+
+    def risk_optimization_history(
+        self,
+        *,
+        limit: int,
+        offset: int,
+    ) -> dict[str, object]:
+        # This compatibility backend keeps results in memory and has no durable history.
+        return {"items": [], "total": 0, "limit": limit, "offset": offset}
 
 
 class StrategyDiscoveryServiceLike(Protocol):

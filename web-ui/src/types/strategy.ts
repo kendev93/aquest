@@ -108,6 +108,30 @@ export interface StrategyDiscoveryResult {
 }
 
 
+export interface RiskOptimizationHistorySummary {
+  job_id: string
+  status: 'completed'
+  started_at: string | null
+  finished_at: string | null
+  duration_seconds: number | null
+  start_date: string | null
+  end_date: string | null
+  requested_trials: number | null
+  evaluated_trials: number | null
+  candidate_count: number
+  validation_best_sharpe: number | null
+  validation_best_annual_return: number | null
+}
+
+
+export interface RiskOptimizationHistoryPage {
+  items: RiskOptimizationHistorySummary[]
+  total: number
+  limit: number
+  offset: number
+}
+
+
 export type StrategyDiscoveryLeaderboard = 'sharpe' | 'return'
 
 

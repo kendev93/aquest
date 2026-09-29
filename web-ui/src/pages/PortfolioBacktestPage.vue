@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import PageGuide from '../components/PageGuide.vue'
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 
 import {
   createPortfolioBacktest,
@@ -13,6 +13,8 @@ import {
 import {
   cancelStrategyDiscovery,
   createPortfolioRiskOptimization,
+  fetchRiskOptimizationHistory,
+  getRiskOptimizationHistory,
   getStrategyDiscovery,
   getStrategyDiscoveryResults,
 } from '../api/strategyDiscovery'
@@ -47,6 +49,7 @@ import type {
   PortfolioTrade,
   PortfolioRebalanceFrequency,
   PortfolioUniverse,
+  RiskOptimizationHistorySummary,
   RuleGroupPayload,
   SavedStrategySummary,
   SignalDefinition,
@@ -61,6 +64,7 @@ import {
   signalDisplayName,
   valueOptionLabel,
 } from '../utils/formulaScreen'
+import { formatChinaTimestamp } from '../utils/time'
 
 const DISCOVERY_APPLY_KEY = 'indicator-lab.strategy-discovery.apply'
 const DISCOVERY_APPLY_META_KEY = 'indicator-lab.strategy-discovery.apply-meta'
@@ -209,6 +213,12 @@ const riskOptimizationResult = ref<StrategyDiscoveryResult | null>(null)
 const riskOptimizationBoard = ref<'sharpe' | 'return'>('sharpe')
 const riskOptimizationMaxTrials = ref<1000 | 2000 | 3000>(1000)
 const riskOptimizationBaseFingerprint = ref<string | null>(null)
+const riskOptimizationHistory = ref<RiskOptimizationHistorySummary[]>([])
+const riskOptimizationHistoryTotal = ref(0)
+const riskOptimizationHistoryLoading = ref(false)
+const riskOptimizationHistoryLoadingId = ref<string | null>(null)
+const riskOptimizationHistoryError = ref('')
+const riskOptimizationResultsSection = ref<HTMLElement | null>(null)
 const resultPriceBasis = computed(() => result.value?.price_basis ?? 'raw')
 const resultLimitations = computed(() => (
   result.value?.limitations?.length ? result.value.limitations : PORTFOLIO_BACKTEST_LIMITATIONS
@@ -919,6 +929,7 @@ async function pollRiskOptimization(jobId: string): Promise<void> {
       riskOptimizationResult.value = await getStrategyDiscoveryResults(jobId)
       riskOptimizationBoard.value = 'sharpe'
       message.value = '风险参数寻优完成：请按验证榜查看候选，并用留出段结果做独立复核。'
+      await loadRiskOptimizationHistory()
       return
     }
     if (state.status === 'failed' || state.status === 'cancelled') {
@@ -927,6 +938,66 @@ async function pollRiskOptimization(jobId: string): Promise<void> {
     }
     await new Promise((resolve) => window.setTimeout(resolve, 250))
   }
+}
+
+async function loadRiskOptimizationHistory(append = false): Promise<void> {
+  if (riskOptimizationHistoryLoading.value) return
+  riskOptimizationHistoryLoading.value = true
+  riskOptimizationHistoryError.value = ''
+  try {
+    const offset = append ? riskOptimizationHistory.value.length : 0
+    const page = await fetchRiskOptimizationHistory(20, offset)
+    riskOptimizationHistory.value = append
+      ? [...riskOptimizationHistory.value, ...page.items]
+      : page.items
+    riskOptimizationHistoryTotal.value = page.total
+  } catch (error) {
+    riskOptimizationHistoryError.value = apiMessage(error)
+  } finally {
+    riskOptimizationHistoryLoading.value = false
+  }
+}
+
+async function loadRiskOptimizationHistoryDetail(jobId: string): Promise<void> {
+  riskOptimizationHistoryLoadingId.value = jobId
+  try {
+    const savedResult = await getRiskOptimizationHistory(jobId)
+    const savedRequest = savedResult.request
+    const baseConfig = savedRequest && typeof savedRequest === 'object'
+      ? (savedRequest as Record<string, unknown>).base_config
+      : null
+    if (!baseConfig || typeof baseConfig !== 'object') {
+      throw new FormulaScreenApiError('这条历史记录缺少寻优时的基础配置，无法恢复候选。', 422)
+    }
+    await applyHistoryRequest(
+      baseConfig,
+      `已恢复风险寻优 ${jobId} 的配置和候选，可继续查看或应用。`,
+    )
+    riskOptimizationResult.value = savedResult
+    riskOptimizationBoard.value = 'sharpe'
+    riskOptimizationBaseFingerprint.value = portfolioBaseFingerprint(buildPayload())
+    riskOptimizationJob.value = null
+    appliedDiscoveryCandidate.value = null
+    replayComparison.value = null
+    await nextTick()
+    riskOptimizationResultsSection.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  } catch (error) {
+    message.value = apiMessage(error)
+  } finally {
+    riskOptimizationHistoryLoadingId.value = null
+  }
+}
+
+function formatRiskOptimizationDuration(value: number | null): string {
+  if (value === null || !Number.isFinite(value) || value < 0) return '—'
+  if (value < 60) return `${value.toFixed(1)} 秒`
+  const totalSeconds = Math.round(value)
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  if (minutes < 60) return seconds ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分钟`
+  const hours = Math.floor(minutes / 60)
+  const remainingMinutes = minutes % 60
+  return remainingMinutes ? `${hours} 小时 ${remainingMinutes} 分钟` : `${hours} 小时`
 }
 
 async function cancelRiskOptimization(): Promise<void> {
@@ -1264,6 +1335,7 @@ onMounted(async () => {
       }
     }
     await loadHistory()
+    await loadRiskOptimizationHistory()
     await loadStrategies()
     await resumeActivePortfolioBacktest()
   } catch (error) {
@@ -1515,7 +1587,7 @@ watch(() => form.formulaText, (value) => {
             <button class="primary-button" type="button" data-testid="strategy-save" :disabled="strategySaving" @click="saveCurrentStrategy">{{ strategySaving ? '保存中…' : '保存为策略' }}</button>
             <small>存的是当前表单配置 + 这次结果的绩效快照；下次可在「策略库」一键载回。</small>
           </div>
-          <section v-if="riskOptimizationResult" class="data-section risk-optimization-results" data-testid="portfolio-risk-optimization-results">
+          <section v-if="riskOptimizationResult" ref="riskOptimizationResultsSection" class="data-section risk-optimization-results" data-testid="portfolio-risk-optimization-results">
             <div class="section-heading"><div><span class="section-kicker">RISK OPTIMIZATION</span><h3>退出风控候选</h3></div><span>验证段排序 · 留出段独立复核</span></div>
             <p class="helper">训练段搜索；验证段至少 5 笔交易且最大回撤不超过 30% 才进入榜单。应用候选会切换到对应验证日期。</p>
             <div v-if="riskOptimizationStale" class="notice error" data-testid="portfolio-risk-optimization-stale">买卖规则、排序或回测设置已变化。请重新寻优后再应用候选。</div>
@@ -1576,6 +1648,36 @@ watch(() => form.formulaText, (value) => {
       </div>
       <div v-if="loading && job" class="task-progress task-progress-panel" data-testid="portfolio-progress"><div class="task-progress-heading"><span>组合回测任务进度</span><strong>{{ Math.round(job.progress * 100) }}%</strong></div><div class="progress-track"><span :style="{ width: `${Math.round(job.progress * 100)}%` }"></span></div><small>已处理 {{ job.total_scanned }} / {{ job.total_candidates || 1 }}</small></div>
 
+      <section class="panel risk-optimization-history" data-testid="portfolio-risk-optimization-history">
+        <div class="section-heading">
+          <div><span class="section-kicker">RISK SEARCH HISTORY</span><h2>退出风控寻优历史</h2></div>
+          <button class="secondary-button" type="button" data-testid="portfolio-risk-history-refresh" :disabled="riskOptimizationHistoryLoading" @click="loadRiskOptimizationHistory()">{{ riskOptimizationHistoryLoading ? '读取中…' : '刷新' }}</button>
+        </div>
+        <p class="helper">已完成的寻优结果会保存在本地数据库中。载入后可恢复寻优配置、查看三段表现，并继续应用候选。</p>
+        <p v-if="riskOptimizationHistoryError" class="notice error" data-testid="portfolio-risk-history-error">{{ riskOptimizationHistoryError }}</p>
+        <div v-if="!riskOptimizationHistory.length && riskOptimizationHistoryLoading" class="inline-empty">正在读取历史寻优结果…</div>
+        <div v-else-if="!riskOptimizationHistory.length" class="inline-empty" data-testid="portfolio-risk-history-empty">暂无已完成的退出风控寻优。</div>
+        <div v-else class="table-wrap">
+          <table data-testid="portfolio-risk-history-table">
+            <caption class="sr-only">退出风控寻优历史</caption>
+            <thead><tr><th>完成时间</th><th>数据区间</th><th>已评估 / 计划</th><th>验证候选</th><th>验证榜最佳表现</th><th>耗时</th><th>操作</th></tr></thead>
+            <tbody>
+              <tr v-for="item in riskOptimizationHistory" :key="item.job_id" :data-testid="`portfolio-risk-history-${item.job_id}`">
+                <td class="muted-code">{{ formatChinaTimestamp(item.finished_at) }}</td>
+                <td class="muted-code">{{ item.start_date ?? '—' }} → {{ item.end_date ?? '—' }}</td>
+                <td>{{ item.evaluated_trials ?? '—' }} / {{ item.requested_trials ?? '—' }}</td>
+                <td>{{ item.candidate_count }}</td>
+                <td>夏普 {{ formatNumber(item.validation_best_sharpe) }}<small class="muted-code"> · 年化 {{ formatPercent(item.validation_best_annual_return) }}</small></td>
+                <td>{{ formatRiskOptimizationDuration(item.duration_seconds) }}</td>
+                <td><button class="table-link" type="button" :data-testid="`portfolio-risk-history-load-${item.job_id}`" :disabled="riskOptimizationHistoryLoadingId !== null" @click="loadRiskOptimizationHistoryDetail(item.job_id)">{{ riskOptimizationHistoryLoadingId === item.job_id ? '载入中…' : '载入候选' }}</button></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-if="riskOptimizationHistory.length < riskOptimizationHistoryTotal" class="history-load-more">
+          <button class="secondary-button" type="button" data-testid="portfolio-risk-history-load-more" :disabled="riskOptimizationHistoryLoading" @click="loadRiskOptimizationHistory(true)">{{ riskOptimizationHistoryLoading ? '读取中…' : `加载更早记录（${riskOptimizationHistory.length} / ${riskOptimizationHistoryTotal}）` }}</button>
+        </div>
+      </section>
       <BacktestHistoryPanel
         :items="history"
         :loading="historyLoading"

@@ -6,6 +6,7 @@ import json
 import time
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
@@ -175,6 +176,55 @@ class DuckDbStrategyJobStore:
                 "SELECT result_json FROM strategy_jobs WHERE job_id = ?", [job_id]
             ).fetchone()
         return _load_object(row[0]) if row and row[0] is not None else None
+
+    def list_risk_optimization_history(
+        self,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict[str, object]:
+        """List completed risk searches while leaving their full results in job rows."""
+
+        if isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise ValueError("风险寻优历史每页数量必须在 1 到 100 之间")
+        if isinstance(offset, bool) or offset < 0:
+            raise ValueError("风险寻优历史偏移量不能小于 0")
+        with self._connection() as connection:
+            total_row = connection.execute(
+                """
+                SELECT COUNT(*) FROM strategy_jobs
+                WHERE operation = 'risk_optimization'
+                  AND status = 'completed'
+                  AND result_json IS NOT NULL
+                """
+            ).fetchone()
+            rows = connection.execute(
+                """
+                SELECT job_id, request_json, state_json, result_json
+                FROM strategy_jobs
+                WHERE operation = 'risk_optimization'
+                  AND status = 'completed'
+                  AND result_json IS NOT NULL
+                ORDER BY created_at DESC, job_id DESC
+                LIMIT ? OFFSET ?
+                """,
+                [limit, offset],
+            ).fetchall()
+        items = [
+            _risk_optimization_history_summary(
+                str(row[0]),
+                _load_object(row[1]),
+                _load_object(row[2]),
+                _load_object(row[3]),
+            )
+            for row in rows
+        ]
+        return {
+            "items": items,
+            "total": int(total_row[0]) if total_row else 0,
+            "limit": limit,
+            "offset": offset,
+        }
 
     def claim_next(self, worker_id: str | None = None) -> str | None:
         selected_worker = _validate_worker_id(worker_id or "local-worker")
@@ -588,6 +638,100 @@ def _load_object(raw: object) -> dict[str, object]:
     if not isinstance(value, Mapping):
         raise ValueError("DuckDB 策略任务 JSON 格式无效")
     return {str(key): cast(object, item) for key, item in value.items()}
+
+
+def _risk_optimization_history_summary(
+    job_id: str,
+    request_envelope: Mapping[str, object],
+    state: Mapping[str, object],
+    result: Mapping[str, object],
+) -> dict[str, object]:
+    payload = _mapping_or_empty(request_envelope.get("payload"))
+    discovery_request = _mapping_or_empty(payload.get("request"))
+    result_request = _mapping_or_empty(result.get("request"))
+    base_config = _mapping_or_empty(
+        result_request.get("base_config") or discovery_request.get("base_config")
+    )
+    search_metadata = _mapping_or_empty(result.get("search_metadata"))
+    state_metadata = _mapping_or_empty(state.get("metadata"))
+    sharpe_rows = _sequence_of_mappings(result.get("results_by_sharpe"))
+    return_rows = _sequence_of_mappings(result.get("results_by_return"))
+    duration = _optional_float(result.get("duration_seconds"))
+    if duration is None:
+        duration = _duration_between(state.get("created_at"), state.get("finished_at"))
+    return {
+        "job_id": job_id,
+        "status": "completed",
+        "started_at": _iso_timestamp(result.get("started_at") or state.get("created_at")),
+        "finished_at": _iso_timestamp(result.get("finished_at") or state.get("finished_at")),
+        "duration_seconds": duration,
+        "start_date": base_config.get("start_date"),
+        "end_date": base_config.get("end_date"),
+        "requested_trials": _optional_int(
+            search_metadata.get("requested_trials")
+            or state_metadata.get("requested_trials")
+            or discovery_request.get("max_trials")
+        ),
+        "evaluated_trials": _optional_int(
+            search_metadata.get("evaluated_trials")
+            or state_metadata.get("evaluated_trials")
+        ),
+        "candidate_count": max(len(sharpe_rows), len(return_rows)),
+        "validation_best_sharpe": _candidate_metric(sharpe_rows, "sharpe"),
+        "validation_best_annual_return": _candidate_metric(return_rows, "annual_return"),
+    }
+
+
+def _mapping_or_empty(value: object) -> Mapping[str, object]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _sequence_of_mappings(value: object) -> list[Mapping[str, object]]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [item for item in value if isinstance(item, Mapping)]
+
+
+def _candidate_metric(candidates: list[Mapping[str, object]], metric: str) -> float | None:
+    if not candidates:
+        return None
+    metrics = _mapping_or_empty(candidates[0].get("metrics"))
+    validation = _mapping_or_empty(metrics.get("validation"))
+    return _optional_float(validation.get(metric))
+
+
+def _optional_float(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed == parsed and abs(parsed) != float("inf") else None
+
+
+def _optional_int(value: object) -> int | None:
+    parsed = _optional_float(value)
+    return int(parsed) if parsed is not None else None
+
+
+def _duration_between(start: object, end: object) -> float | None:
+    start_value = _optional_float(start)
+    end_value = _optional_float(end)
+    if start_value is None or end_value is None or end_value < start_value:
+        return None
+    return end_value - start_value
+
+
+def _iso_timestamp(value: object) -> str | None:
+    if isinstance(value, str):
+        return value
+    timestamp = _optional_float(value)
+    if timestamp is None:
+        return None
+    return datetime.fromtimestamp(timestamp, timezone.utc).isoformat(timespec="seconds").replace(
+        "+00:00", "Z"
+    )
 
 
 def _number(value: object, fallback: float) -> float:

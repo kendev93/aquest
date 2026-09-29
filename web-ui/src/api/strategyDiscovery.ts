@@ -6,6 +6,7 @@ import type {
   StrategyDiscoveryRefinementPayload,
   StrategyDiscoveryResult,
   PortfolioRiskOptimizationPayload,
+  RiskOptimizationHistoryPage,
   StrategyReplayHistoryRecord,
   StrategyReplayJobState,
   StrategyReplayResult,
@@ -84,6 +85,24 @@ export async function createPortfolioRiskOptimization(
       method: 'POST',
       body: JSON.stringify(payload),
     },
+  )
+  return response.data
+}
+
+export async function fetchRiskOptimizationHistory(
+  limit = 20,
+  offset = 0,
+): Promise<RiskOptimizationHistoryPage> {
+  const query = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+  const response = await request<{ data: RiskOptimizationHistoryPage }>(
+    `${API_BASE}/risk-optimizations/history?${query.toString()}`,
+  )
+  return response.data
+}
+
+export async function getRiskOptimizationHistory(jobId: string): Promise<StrategyDiscoveryResult> {
+  const response = await request<{ data: StrategyDiscoveryResult }>(
+    `${API_BASE}/risk-optimizations/history/${encodeURIComponent(jobId)}`,
   )
   return response.data
 }

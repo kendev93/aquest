@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Literal, Protocol, cast
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 
 from selector_app.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
@@ -336,6 +336,33 @@ def cancel_strategy_discovery(job_id: str, request: Request) -> dict[str, object
             }
         }
     return {"data": {"job_id": job_id, "status": "cancelling", "cancel_requested": True}}
+
+
+@router.get("/risk-optimizations/history")
+def portfolio_risk_optimization_history(
+    request: Request,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, object]:
+    try:
+        return {
+            "data": _backend(request).risk_optimization_history(limit=limit, offset=offset)
+        }
+    except (MarketDataStoreError, OSError, RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail="退出风控寻优历史暂不可用") from exc
+
+
+@router.get("/risk-optimizations/history/{job_id}")
+def portfolio_risk_optimization_history_detail(job_id: str, request: Request) -> dict[str, object]:
+    state = _backend(request).get(job_id)
+    if state is None or state.get("description") != "组合风险寻优":
+        raise HTTPException(status_code=404, detail="退出风控寻优历史不存在")
+    if state.get("status") != "completed":
+        raise HTTPException(status_code=409, detail="退出风控寻优尚未完成")
+    result = _backend(request).result(job_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="退出风控寻优结果不存在")
+    return {"data": result}
 
 
 @router.get("/history")
