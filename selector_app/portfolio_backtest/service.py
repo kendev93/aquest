@@ -216,11 +216,7 @@ class PortfolioBacktestService(
                 prepared,
             )
         ranked_candidate_index: dict[int, np.ndarray] | None = None
-        if (
-            precompute_ranked_candidates
-            and not include_details
-            and config.fitness_rank_weight == 0
-        ):
+        if precompute_ranked_candidates and not include_details and config.fitness_rank_weight == 0:
             context_key = (config.ranking_value, config.rank_order)
             if (
                 contexts is self._risk_ranked_context_source

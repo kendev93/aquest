@@ -24,8 +24,7 @@ class NamedSymbol(Protocol):
     """任何带 ``name`` 的标的引用（:class:`StockRef`、行情库行对象等）。"""
 
     @property
-    def name(self) -> str | None:
-        ...
+    def name(self) -> str | None: ...
 
 
 def is_risk_warning_name(name: str | None) -> bool:

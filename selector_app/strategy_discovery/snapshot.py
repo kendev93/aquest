@@ -886,9 +886,7 @@ def _context_config_cache_key(config: PortfolioBacktestConfig) -> str:
             "conditions": [_condition_to_dict(item) for item in rule.conditions],
             "combine_mode": rule.combine_mode,
             "minimum_matches": rule.minimum_matches,
-            "required_conditions": [
-                _condition_to_dict(item) for item in rule.required_conditions
-            ],
+            "required_conditions": [_condition_to_dict(item) for item in rule.required_conditions],
         }
 
     payload = {

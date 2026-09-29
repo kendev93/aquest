@@ -191,10 +191,7 @@ def _build_random_risk_candidate(
     rng: object,
 ) -> StrategyCandidate:
     base_config = dict(request.base_config)
-    risk = {
-        prefix: _risk_values(rng)
-        for prefix in ("stop_loss", "take_profit", "trailing_stop")
-    }
+    risk = {prefix: _risk_values(rng) for prefix in ("stop_loss", "take_profit", "trailing_stop")}
     stop_mode, stop_pct, stop_atr, stop_cooldown = risk["stop_loss"]
     take_mode, take_pct, take_atr, take_cooldown = risk["take_profit"]
     trailing_mode, trailing_pct, trailing_atr, trailing_cooldown = risk["trailing_stop"]

@@ -670,13 +670,11 @@ def mine_binary_conditions(
                         for operator, condition_mask in (
                             (
                                 "cross_up",
-                                (previous_left <= previous_right)
-                                & (crossed_left > crossed_right),
+                                (previous_left <= previous_right) & (crossed_left > crossed_right),
                             ),
                             (
                                 "cross_down",
-                                (previous_left >= previous_right)
-                                & (crossed_left < crossed_right),
+                                (previous_left >= previous_right) & (crossed_left < crossed_right),
                             ),
                         ):
                             condition = ScreenCondition(
