@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Protocol, cast
 
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
+from selector_app.market_data.auto_sync import MARKET_SYNC_JOB_DESCRIPTIONS
 from selector_app.market_data.models import DataStoreStatus
 from selector_app.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
 from selector_app.portfolio_backtest.models import (
@@ -53,6 +54,20 @@ def _store(request: Request) -> DuckDbMarketDataStore:
     return cast(DuckDbMarketDataStore, request.app.state.market_data_store)
 
 
+def _market_data_merge_in_progress(request: Request) -> bool:
+    for job in _runner(request).active_snapshots(MARKET_SYNC_JOB_DESCRIPTIONS):
+        metadata = job.get("metadata")
+        details = metadata if isinstance(metadata, Mapping) else {}
+        phase = str(details.get("phase") or job.get("phase") or "").lower()
+        current_status = str(details.get("current_status") or "").lower()
+        if phase in {"merging", "cleanup", "completed"} or current_status in {
+            "merging",
+            "completed",
+        }:
+            return True
+    return False
+
+
 def _resolve_payload_dates(
     payload: PortfolioBacktestRequest,
     status_snapshot: DataStoreStatus,
@@ -81,6 +96,11 @@ def create_portfolio_backtest(
     payload: PortfolioBacktestRequest,
     request: Request,
 ) -> JSONResponse:
+    if _market_data_merge_in_progress(request):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="行情同步正在写入本地数据库，请等待同步完成后再运行组合回测。",
+        )
     try:
         if payload.universe == "custom" and payload.universe_file:
             if not Path(payload.universe_file).expanduser().is_file():
@@ -96,6 +116,10 @@ def create_portfolio_backtest(
                 result = _service(request).run(config, progress)
             except ValueError as exc:
                 raise TaskUserError(str(exc)) from exc
+            except MarketDataStoreError as exc:
+                raise TaskUserError(
+                    "行情数据库正在被同步写入，请等待行情同步完成后重新运行组合回测。"
+                ) from exc
             result_payload = (
                 result.to_dict() if isinstance(result, PortfolioBacktestReport) else dict(result)
             )

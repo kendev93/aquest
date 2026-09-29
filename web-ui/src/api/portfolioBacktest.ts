@@ -11,6 +11,7 @@ const API_BASE = '/api/v1/portfolio-backtests'
 
 interface ApiErrorPayload {
   error?: { message?: string }
+  detail?: string
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -21,7 +22,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const payload = (await response.json()) as T & ApiErrorPayload
   if (!response.ok) {
     throw new FormulaScreenApiError(
-      payload.error?.message ?? '请求失败，请检查组合回测配置后重试。',
+      payload.error?.message ?? payload.detail ?? '请求失败，请检查组合回测配置后重试。',
       response.status,
     )
   }
