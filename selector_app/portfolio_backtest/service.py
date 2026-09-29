@@ -181,6 +181,10 @@ class PortfolioBacktestService(
         if config.formula_text:
             raise ValueError("共享行情快照不支持自定义公式")
         self._validate_outputs(config, None)
+        if contexts is not self._risk_ranked_context_source:
+            self._risk_ranked_context_source = None
+            self._risk_ranked_context_key = None
+            self._risk_ranked_candidate_index = None
         prepared = list(contexts)
         candidate_total = max(len(prepared), total_candidates or len(prepared))
         if not prepared:

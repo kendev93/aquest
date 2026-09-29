@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import heapq
 from bisect import bisect_right
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import replace
 
 import numpy as np
@@ -24,6 +24,39 @@ from .state import _PortfolioServiceState
 
 class PortfolioSimulationMixin(_PortfolioServiceState):
     """Execute deterministic portfolio state transitions and order fills."""
+
+    @staticmethod
+    def _build_ranked_candidate_index(
+        contexts: Sequence[_StockSeries],
+        dates: Sequence[int],
+        config: PortfolioBacktestConfig,
+    ) -> dict[int, np.ndarray]:
+        """Cache the static buy/rank order for risk-only candidate simulations."""
+
+        ranked_by_date: dict[int, np.ndarray] = {}
+        for current_date in dates:
+            rows: list[tuple[float, str, int]] = []
+            for context_index, context in enumerate(contexts):
+                index = context.date_to_index.get(current_date)
+                if index is None or not bool(context.buy_mask[index]):
+                    continue
+                ranking_values = context.values.get(config.ranking_value)
+                if ranking_values is None:
+                    continue
+                score = float(ranking_values[index])
+                if not np.isfinite(score):
+                    continue
+                priority = -score if config.rank_order == "desc" else score
+                rows.append((priority, context.symbol, context_index))
+            if not rows:
+                continue
+            rows.sort()
+            ranked_by_date[int(current_date)] = np.fromiter(
+                (context_index for _priority, _symbol, context_index in rows),
+                dtype=np.int32,
+                count=len(rows),
+            )
+        return ranked_by_date
 
     @staticmethod
     def _no_trade_simulation(
@@ -90,6 +123,7 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
         include_details: bool = True,
         checkpoint: SimulationCheckpoint | None = None,
         data_fingerprint: str = "",
+        ranked_candidate_index: Mapping[int, np.ndarray] | None = None,
     ) -> dict[str, object]:
         by_symbol = {context.symbol: context for context in contexts}
         start_index = 0
@@ -224,6 +258,12 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
                     cooldown_until,
                     date_index,
                     include_event=include_details,
+                    ranked_contexts=(contexts if ranked_candidate_index is not None else None),
+                    ranked_context_indexes=(
+                        ranked_candidate_index.get(int(current_date), ())
+                        if ranked_candidate_index is not None
+                        else None
+                    ),
                 )
                 if include_details:
                     ranking_events.append(event)
@@ -783,26 +823,52 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
         date_index: int,
         *,
         include_event: bool = True,
+        ranked_contexts: Sequence[_StockSeries] | None = None,
+        ranked_context_indexes: Iterable[int] | None = None,
     ) -> tuple[list[_PendingBuy], dict[str, PortfolioJsonValue]]:
         excluded = set(positions) | set(pending_sells)
+        slots = max(0, config.max_positions - len(positions) + len(pending_sells))
         entries: list[tuple[float, _StockSeries, RollingFitnessDecision | None]] = []
-        for context in by_symbol.values():
-            if context.symbol in excluded:
-                continue
-            if date_index < cooldown_until.get(context.symbol, -1):
-                continue
-            index = context.date_to_index.get(current_date)
-            if index is None:
-                continue
-            if not bool(context.buy_mask[index]):
-                continue
-            score = float(context.values[config.ranking_value][index])
-            if not np.isfinite(score):
-                continue
-            decision = (
-                fitness_filter.decide(context.symbol, current_date) if fitness_filter else None
-            )
-            entries.append((score, context, decision))
+        if (
+            ranked_context_indexes is not None
+            and ranked_contexts is not None
+            and fitness_filter is None
+            and not include_event
+        ):
+            if slots > 0:
+                for context_index in ranked_context_indexes:
+                    context = ranked_contexts[int(context_index)]
+                    if context.symbol in excluded:
+                        continue
+                    if date_index < cooldown_until.get(context.symbol, -1):
+                        continue
+                    index = context.date_to_index.get(current_date)
+                    if index is None or not bool(context.buy_mask[index]):
+                        continue
+                    score = float(context.values[config.ranking_value][index])
+                    if not np.isfinite(score):
+                        continue
+                    entries.append((score, context, None))
+                    if len(entries) >= slots:
+                        break
+        else:
+            for context in by_symbol.values():
+                if context.symbol in excluded:
+                    continue
+                if date_index < cooldown_until.get(context.symbol, -1):
+                    continue
+                index = context.date_to_index.get(current_date)
+                if index is None:
+                    continue
+                if not bool(context.buy_mask[index]):
+                    continue
+                score = float(context.values[config.ranking_value][index])
+                if not np.isfinite(score):
+                    continue
+                decision = (
+                    fitness_filter.decide(context.symbol, current_date) if fitness_filter else None
+                )
+                entries.append((score, context, decision))
         weighted = (
             self._weighted_scores(entries, config)
             if fitness_filter is not None and config.fitness_rank_weight > 0
@@ -817,7 +883,6 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
             else:
                 sort_values.append(-raw)
         candidates = [(sort_values[position], entry[1]) for position, entry in enumerate(entries)]
-        slots = max(0, config.max_positions - len(positions) + len(pending_sells))
         selected = heapq.nsmallest(slots, candidates, key=_candidate_sort_key)
         slot_budget = total_value / config.max_positions if config.max_positions else cash
         pending = [
