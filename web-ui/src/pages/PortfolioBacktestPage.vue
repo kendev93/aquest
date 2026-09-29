@@ -213,6 +213,7 @@ const riskOptimizationResult = ref<StrategyDiscoveryResult | null>(null)
 const riskOptimizationBoard = ref<'sharpe' | 'return'>('sharpe')
 const riskOptimizationMaxTrials = ref<1000 | 2000 | 3000>(1000)
 const riskOptimizationBaseFingerprint = ref<string | null>(null)
+const riskOptimizationRestoreRequired = ref(false)
 const riskOptimizationHistory = ref<RiskOptimizationHistorySummary[]>([])
 const riskOptimizationHistoryTotal = ref(0)
 const riskOptimizationHistoryLoading = ref(false)
@@ -228,8 +229,9 @@ const historyLoading = ref(false)
 const appliedDiscoveryCandidate = ref<AppliedDiscoveryCandidate | null>(null)
 const replayComparison = ref<ReplayComparison | null>(null)
 const riskOptimizationStale = computed(() => (
-  riskOptimizationBaseFingerprint.value !== null
-  && riskOptimizationBaseFingerprint.value !== portfolioBaseFingerprint(buildPayload())
+  riskOptimizationRestoreRequired.value
+  || (riskOptimizationBaseFingerprint.value !== null
+    && riskOptimizationBaseFingerprint.value !== portfolioBaseFingerprint(buildPayload()))
 ))
 const riskOptimizationCandidates = computed(() => (
   riskOptimizationBoard.value === 'sharpe'
@@ -893,6 +895,7 @@ async function startRiskOptimization(): Promise<void> {
   if (Object.values(errors.value).some(Boolean)) return
   const basePayload = buildPayload()
   riskOptimizationBaseFingerprint.value = portfolioBaseFingerprint(basePayload)
+  riskOptimizationRestoreRequired.value = false
   riskOptimizationResult.value = null
   riskOptimizationJob.value = null
   riskOptimizationLoading.value = true
@@ -922,8 +925,26 @@ async function startRiskOptimization(): Promise<void> {
 }
 
 async function pollRiskOptimization(jobId: string): Promise<void> {
+  let consecutiveStatusFailures = 0
+  const retryDelays = [250, 500, 1_000, 2_000, 3_000]
   for (;;) {
-    const state = await getStrategyDiscovery(jobId)
+    let state: StrategyDiscoveryJobState
+    try {
+      state = await getStrategyDiscovery(jobId)
+      if (consecutiveStatusFailures > 0) {
+        consecutiveStatusFailures = 0
+        message.value = ''
+      }
+    } catch (error) {
+      const transientStatus = error instanceof FormulaScreenApiError
+        && [0, 500, 502, 503, 504].includes(error.status)
+      if (!transientStatus || consecutiveStatusFailures >= retryDelays.length) throw error
+      const delay = retryDelays[consecutiveStatusFailures] ?? 3_000
+      consecutiveStatusFailures += 1
+      message.value = `寻优仍在后台运行，进度读取暂时失败，${Math.ceil(delay / 1000)} 秒后重试（${consecutiveStatusFailures}/${retryDelays.length}）。`
+      await new Promise((resolve) => window.setTimeout(resolve, delay))
+      continue
+    }
     riskOptimizationJob.value = state
     if (state.status === 'completed') {
       riskOptimizationResult.value = await getStrategyDiscoveryResults(jobId)
@@ -937,6 +958,28 @@ async function pollRiskOptimization(jobId: string): Promise<void> {
       return
     }
     await new Promise((resolve) => window.setTimeout(resolve, 250))
+  }
+}
+
+async function resumeActiveRiskOptimization(): Promise<void> {
+  try {
+    const active = (await fetchActiveJobs()).find(
+      (item) => item.description === '组合风险寻优',
+    )
+    if (!active) return
+    riskOptimizationJob.value = active as unknown as StrategyDiscoveryJobState
+    riskOptimizationBaseFingerprint.value = null
+    riskOptimizationRestoreRequired.value = true
+    riskOptimizationLoading.value = true
+    void pollRiskOptimization(active.job_id)
+      .catch((error: unknown) => {
+        message.value = apiMessage(error)
+      })
+      .finally(() => {
+        riskOptimizationLoading.value = false
+      })
+  } catch (error) {
+    message.value = apiMessage(error)
   }
 }
 
@@ -976,6 +1019,7 @@ async function loadRiskOptimizationHistoryDetail(jobId: string): Promise<void> {
     riskOptimizationResult.value = savedResult
     riskOptimizationBoard.value = 'sharpe'
     riskOptimizationBaseFingerprint.value = portfolioBaseFingerprint(buildPayload())
+    riskOptimizationRestoreRequired.value = false
     riskOptimizationJob.value = null
     appliedDiscoveryCandidate.value = null
     replayComparison.value = null
@@ -1337,7 +1381,10 @@ onMounted(async () => {
     await loadHistory()
     await loadRiskOptimizationHistory()
     await loadStrategies()
-    await resumeActivePortfolioBacktest()
+    await Promise.all([
+      resumeActivePortfolioBacktest(),
+      resumeActiveRiskOptimization(),
+    ])
   } catch (error) {
     message.value = apiMessage(error)
   }
@@ -1590,7 +1637,8 @@ watch(() => form.formulaText, (value) => {
           <section v-if="riskOptimizationResult" ref="riskOptimizationResultsSection" class="data-section risk-optimization-results" data-testid="portfolio-risk-optimization-results">
             <div class="section-heading"><div><span class="section-kicker">RISK OPTIMIZATION</span><h3>退出风控候选</h3></div><span>验证段排序 · 留出段独立复核</span></div>
             <p class="helper">训练段搜索；验证段至少 5 笔交易且最大回撤不超过 30% 才进入榜单。应用候选会切换到对应验证日期。</p>
-            <div v-if="riskOptimizationStale" class="notice error" data-testid="portfolio-risk-optimization-stale">买卖规则、排序或回测设置已变化。请重新寻优后再应用候选。</div>
+            <div v-if="riskOptimizationRestoreRequired" class="notice error" data-testid="portfolio-risk-optimization-restore-required">已接回后台寻优，但当前表单不是寻优时的配置。请从历史列表载入此任务后再应用候选。</div>
+            <div v-else-if="riskOptimizationStale" class="notice error" data-testid="portfolio-risk-optimization-stale">买卖规则、排序或回测设置已变化。请重新寻优后再应用候选。</div>
             <div class="formula-mode-tabs" role="tablist" aria-label="退出风控候选榜单">
               <button type="button" data-testid="portfolio-risk-sharpe-board" role="tab" :aria-selected="riskOptimizationBoard === 'sharpe'" :class="{ active: riskOptimizationBoard === 'sharpe' }" @click="riskOptimizationBoard = 'sharpe'">夏普榜前 10</button>
               <button type="button" data-testid="portfolio-risk-return-board" role="tab" :aria-selected="riskOptimizationBoard === 'return'" :class="{ active: riskOptimizationBoard === 'return' }" @click="riskOptimizationBoard = 'return'">收益榜前 10</button>
