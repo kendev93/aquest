@@ -8,7 +8,7 @@ import time
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from tempfile import TemporaryDirectory
-from threading import Event
+from threading import Event, Thread
 from typing import Literal, Protocol, cast
 
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
@@ -28,6 +28,7 @@ from .worker_api_client import HttpStrategyJobClient
 logger = logging.getLogger(__name__)
 DEFAULT_WORKER_POLL_INTERVAL_SECONDS = 0.5
 DEFAULT_STALE_AFTER_SECONDS = 120.0
+DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 15.0
 
 
 class StrategyDiscoveryServiceLike(Protocol):
@@ -103,6 +104,10 @@ class StrategyDiscoveryWorker:
         self._service_factory = service_factory
         self._poll_interval_seconds = poll_interval_seconds
         self._stale_after_seconds = stale_after_seconds
+        self._heartbeat_interval_seconds = min(
+            DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+            stale_after_seconds / 3,
+        )
 
     def run_once(self) -> str | None:
         self._job_store.recover_stale_running(stale_after_seconds=self._stale_after_seconds)
@@ -133,7 +138,7 @@ class StrategyDiscoveryWorker:
                 if self._service_factory is not None
                 else self._service
             )
-            result = self._dispatch(job_id, request, service=service)
+            result = self._dispatch_with_heartbeat(job_id, request, service=service)
             normalized = decorate_result(
                 job_id,
                 operation,
@@ -159,6 +164,38 @@ class StrategyDiscoveryWorker:
                     error_code=_error_code(exc),
                 )
         return job_id
+
+    def _dispatch_with_heartbeat(
+        self,
+        job_id: str,
+        request: Mapping[str, object],
+        *,
+        service: StrategyDiscoveryServiceLike,
+    ) -> dict[str, object]:
+        """Keep the backend lease alive while a candidate batch blocks progress callbacks."""
+
+        stop_event = Event()
+        heartbeat_thread = Thread(
+            target=self._heartbeat_loop,
+            args=(job_id, stop_event),
+            name=f"strategy-heartbeat-{job_id[:8]}",
+            daemon=True,
+        )
+        heartbeat_thread.start()
+        try:
+            return self._dispatch(job_id, request, service=service)
+        finally:
+            stop_event.set()
+            heartbeat_thread.join()
+
+    def _heartbeat_loop(self, job_id: str, stop_event: Event) -> None:
+        while not stop_event.wait(self._heartbeat_interval_seconds):
+            try:
+                # The HTTP client implements this as a lightweight heartbeat plus
+                # cancellation check. It runs independently of long process-pool batches.
+                self._job_store.is_cancel_requested(job_id)
+            except Exception as exc:  # noqa: BLE001 - progress callbacks also renew the lease
+                logger.warning("策略 worker 定时心跳失败（任务 %s）: %s", job_id, exc)
 
     def run_forever(self, *, stop_event: Event | None = None) -> None:
         """Poll for work, surviving failures in the polling path itself.
