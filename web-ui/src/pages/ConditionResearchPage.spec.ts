@@ -1,5 +1,6 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { defineComponent } from 'vue'
 
 import type { ConditionResearchReport, FormulaScreenMetadata } from '../types'
 import ConditionResearchPage from './ConditionResearchPage.vue'
@@ -1348,6 +1349,48 @@ describe('ConditionResearchPage', () => {
       ranking_value: 'indicator.score',
       rank_order: 'asc',
     }))
+  })
+
+  it('takes over the plan again when the page is re-entered from the cache', async () => {
+    // 站内导航是软跳转 + KeepAlive：第二次进来时页面没重建，onMounted 不跑。
+    // 波段研究的交接只挂在 onMounted 上的话，表现就是「要刷新才看得到」。
+    vi.mocked(researchApi.fetchConditionResearchHistory).mockResolvedValue([])
+    vi.mocked(jobsApi.fetchActiveJobs).mockResolvedValue([])
+
+    const host = mount(
+      defineComponent({
+        components: { ConditionResearchPage },
+        data: () => ({ shown: true }),
+        template: '<KeepAlive><ConditionResearchPage v-if="shown" /></KeepAlive>',
+      }),
+    )
+    await flushPromises()
+    expect(host.text()).not.toContain('已带入波段研究的结论')
+
+    sessionStorage.setItem(SWING_PLAN_STORAGE_KEY, JSON.stringify({
+      buy_rule: {
+        signals: [],
+        conditions: [{
+          left_value: 'indicator.score',
+          operator: 'lte',
+          right_value: null,
+          right_constant: -0.273902,
+        }],
+        required_conditions: [],
+        combine_mode: 'all',
+        minimum_matches: null,
+      },
+      sell_rule: null,
+      ranking: { value: 'indicator.score', order: 'asc', display_name: '强度' },
+    }))
+    // 切走再切回来：组件实例还是缓存里那个，只有 onActivated 会触发。
+    ;(host.vm as unknown as { shown: boolean }).shown = false
+    await flushPromises()
+    ;(host.vm as unknown as { shown: boolean }).shown = true
+    await flushPromises()
+
+    expect(host.text()).toContain('已带入波段研究的结论')
+    expect(sessionStorage.getItem(SWING_PLAN_STORAGE_KEY)).toBeNull()
   })
 
   it('lists a saved study with its parameters and headline numbers', async () => {

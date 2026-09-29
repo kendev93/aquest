@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import PageGuide from '../components/PageGuide.vue'
-import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onActivated, onMounted, reactive, ref } from 'vue'
 
 import {
   cancelConditionResearch,
@@ -1116,19 +1116,43 @@ function applySwingPlan(): void {
     '排序建议同样以本页按实际收益率的评估为准。'
 }
 
+/**
+ * 进入页面时要跑的一次性交接，候选库「载入复测」先走：它还原的是一次完整研究的
+ * 配置，要压在波段计划之上。
+ *
+ * App.vue 用 KeepAlive 缓存页面实例，站内链接又是软导航：从别处跳过来时页面不会
+ * 重建，onMounted 不跑，只有 onActivated 会触发。交接放在任何一边都会漏一半，
+ * 所以两处都要接得住。
+ */
+async function consumeHandoffs(): Promise<void> {
+  await restoreFromCandidateLibrary()
+  applySwingPlan()
+}
+
+// KeepAlive 下 activated 与 mounted 同批次触发，届时元数据还没到、表单还没准备好，
+// 首次挂载交给 onMounted 自己跑。
+let booted = false
+
 onMounted(async () => {
   try {
     metadata.value = await fetchMetadata()
     resetRules()
-    // 候选库「载入复测」先走：它还原的是一次完整研究的配置，要压在波段计划之上。
-    await restoreFromCandidateLibrary()
-    applySwingPlan()
+    await consumeHandoffs()
     await refreshResearchPresets()
     await loadHistory()
     await resumeActiveJob()
   } catch (error) {
     message.value = apiMessage(error)
+  } finally {
+    booted = true
   }
+})
+
+onActivated(() => {
+  if (!booted) return
+  consumeHandoffs().catch((error: unknown) => {
+    message.value = apiMessage(error)
+  })
 })
 </script>
 
