@@ -15,6 +15,8 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 _CANCEL_POLL_SECONDS = 0.5
+_RETRYABLE_WORKER_STATUSES = frozenset({500, 502, 503, 504})
+_WORKER_RETRY_DELAYS_SECONDS = (0.1, 0.25, 0.5)
 JsonRequester = Callable[
     [str, Mapping[str, object], Mapping[str, str], float], Mapping[str, object]
 ]
@@ -203,21 +205,36 @@ class HttpStrategyJobClient:
             self._last_cancel_check = time.monotonic()
 
     def _post(self, path: str, payload: Mapping[str, object]) -> dict[str, object]:
-        try:
-            decoded = self._requester(
-                f"{self._base_url}{path}",
-                payload,
-                {
-                    "Authorization": f"Bearer {self._token}",
-                    "Content-Type": "application/json",
-                },
-                self._timeout_seconds,
-            )
-        except (HTTPError, URLError, TimeoutError, OSError, ValueError) as exc:
-            raise RuntimeError("策略 worker API 请求失败") from exc
-        if not isinstance(decoded, Mapping):
-            raise RuntimeError("策略 worker API 响应格式无效")
-        return {str(key): value for key, value in decoded.items()}
+        retryable_update = path.endswith("/heartbeat") or path.endswith("/progress")
+        for attempt in range(len(_WORKER_RETRY_DELAYS_SECONDS) + 1):
+            try:
+                decoded = self._requester(
+                    f"{self._base_url}{path}",
+                    payload,
+                    {
+                        "Authorization": f"Bearer {self._token}",
+                        "Content-Type": "application/json",
+                    },
+                    self._timeout_seconds,
+                )
+            except HTTPError as exc:
+                if (
+                    retryable_update
+                    and exc.code in _RETRYABLE_WORKER_STATUSES
+                    and attempt < len(_WORKER_RETRY_DELAYS_SECONDS)
+                ):
+                    time.sleep(_WORKER_RETRY_DELAYS_SECONDS[attempt])
+                    continue
+                raise RuntimeError("策略 worker API 请求失败") from exc
+            except (URLError, TimeoutError, OSError, ValueError) as exc:
+                if retryable_update and attempt < len(_WORKER_RETRY_DELAYS_SECONDS):
+                    time.sleep(_WORKER_RETRY_DELAYS_SECONDS[attempt])
+                    continue
+                raise RuntimeError("策略 worker API 请求失败") from exc
+            if not isinstance(decoded, Mapping):
+                raise RuntimeError("策略 worker API 响应格式无效")
+            return {str(key): value for key, value in decoded.items()}
+        raise RuntimeError("策略 worker API 请求失败")
 
     def _clear_job(self) -> None:
         self._job_id = None

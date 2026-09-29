@@ -13,9 +13,9 @@ import type {
 } from '../types'
 
 const API_BASE = '/api/v1/strategy-discovery'
-const MAX_GET_ATTEMPTS = 3
-const RETRYABLE_GATEWAY_STATUSES = new Set([502, 503, 504])
-const GET_RETRY_DELAYS_MS = [50, 100]
+const MAX_GET_ATTEMPTS = 5
+const RETRYABLE_GATEWAY_STATUSES = new Set([500, 502, 503, 504])
+const GET_RETRY_DELAYS_MS = [100, 250, 500, 1000]
 
 interface ErrorPayload {
   error?: { message?: string }

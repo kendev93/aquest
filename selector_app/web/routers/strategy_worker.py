@@ -8,6 +8,7 @@ from typing import cast
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from selector_app.market_data.store import MarketDataStoreError
 from selector_app.strategy_discovery.duckdb_job_store import DuckDbStrategyJobStore
 from selector_app.strategy_discovery.job_store import DEFAULT_STALE_AFTER_SECONDS
 
@@ -78,6 +79,13 @@ def _conflict(exc: ValueError) -> HTTPException:
     return HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
 
 
+def _store_unavailable() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="策略任务存储暂时被占用，请稍后重试",
+    )
+
+
 @router.post("/jobs/claim", dependencies=[Depends(require_worker_token)])
 def claim_job(payload: WorkerIdentity, request: Request) -> dict[str, object]:
     store = _store(request)
@@ -87,6 +95,8 @@ def claim_job(payload: WorkerIdentity, request: Request) -> dict[str, object]:
         if job_id is None:
             return {"job": None}
         return {"job": store.read_claimed_job(job_id, payload.worker_id)}
+    except (MarketDataStoreError, OSError) as exc:
+        raise _store_unavailable() from exc
     except ValueError as exc:
         raise _conflict(exc) from exc
 
@@ -99,6 +109,8 @@ def heartbeat_job(
 ) -> dict[str, object]:
     try:
         state = _store(request).heartbeat(job_id, payload.worker_id)
+    except (MarketDataStoreError, OSError) as exc:
+        raise _store_unavailable() from exc
     except ValueError as exc:
         raise _conflict(exc) from exc
     return {"data": {"state": state, "cancel_requested": state["cancel_requested"]}}
@@ -113,6 +125,8 @@ def update_job_progress(
     updates = payload.model_dump(exclude={"worker_id"}, exclude_unset=True, exclude_none=True)
     try:
         state = _store(request).update_from_worker(job_id, payload.worker_id, updates)
+    except (MarketDataStoreError, OSError) as exc:
+        raise _store_unavailable() from exc
     except ValueError as exc:
         raise _conflict(exc) from exc
     return {"data": {"state": state, "cancel_requested": state["cancel_requested"]}}
@@ -130,6 +144,8 @@ def complete_job(
             payload.worker_id,
             payload.result,
         )
+    except (MarketDataStoreError, OSError) as exc:
+        raise _store_unavailable() from exc
     except ValueError as exc:
         raise _conflict(exc) from exc
     return {"data": {"state": state, "cancel_requested": state["cancel_requested"]}}
@@ -148,6 +164,8 @@ def fail_job(
             payload.error,
             payload.error_code,
         )
+    except (MarketDataStoreError, OSError) as exc:
+        raise _store_unavailable() from exc
     except ValueError as exc:
         raise _conflict(exc) from exc
     return {"data": {"state": state, "cancel_requested": state["cancel_requested"]}}
@@ -161,6 +179,8 @@ def cancel_job(
 ) -> dict[str, object]:
     try:
         state = _store(request).cancel_from_worker(job_id, payload.worker_id)
+    except (MarketDataStoreError, OSError) as exc:
+        raise _store_unavailable() from exc
     except ValueError as exc:
         raise _conflict(exc) from exc
     return {"data": {"state": state, "cancel_requested": state["cancel_requested"]}}

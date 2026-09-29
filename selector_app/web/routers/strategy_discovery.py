@@ -103,7 +103,10 @@ def _resource_metadata(estimate: DiscoveryResourceEstimate | None) -> dict[str, 
 
 
 def _state_or_404(job_id: str, request: Request) -> dict[str, object]:
-    state = _backend(request).get(job_id)
+    try:
+        state = _backend(request).get(job_id)
+    except (MarketDataStoreError, OSError) as exc:
+        raise HTTPException(status_code=503, detail="策略任务状态暂时不可用，请稍后重试") from exc
     if state is None or state.get("description") not in {
         "策略实验室",
         "策略二次优化",
@@ -359,7 +362,10 @@ def portfolio_risk_optimization_history_detail(job_id: str, request: Request) ->
         raise HTTPException(status_code=404, detail="退出风控寻优历史不存在")
     if state.get("status") != "completed":
         raise HTTPException(status_code=409, detail="退出风控寻优尚未完成")
-    result = _backend(request).result(job_id)
+    try:
+        result = _backend(request).result(job_id)
+    except (MarketDataStoreError, OSError) as exc:
+        raise HTTPException(status_code=503, detail="策略实验结果暂时不可用，请稍后重试") from exc
     if result is None:
         raise HTTPException(status_code=404, detail="退出风控寻优结果不存在")
     return {"data": result}
