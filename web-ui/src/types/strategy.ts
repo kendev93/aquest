@@ -65,6 +65,7 @@ export interface StrategyDiscoveryJobState {
   result: StrategyDiscoveryResult | null
   phase?: string | null
   metadata?: Record<string, unknown>
+  cancel_requested?: boolean
 }
 
 

@@ -860,6 +860,8 @@ function riskMetric(
 
 function riskOptimizationPhaseLabel(state: StrategyDiscoveryJobState | null): string {
   const phase = state?.phase ?? ''
+  if (state?.status === 'cancelled' || phase === 'cancelled') return '风险参数寻优已取消'
+  if (state?.cancel_requested || phase === 'cancelling') return '正在取消，等待当前计算批次结束'
   const labels: Record<string, string> = {
     preparing_snapshot: '准备行情快照',
     snapshot_ready: '开始训练段寻优',
@@ -929,9 +931,16 @@ async function pollRiskOptimization(jobId: string): Promise<void> {
 
 async function cancelRiskOptimization(): Promise<void> {
   const active = riskOptimizationJob.value
-  if (!active) return
+  if (!active || active.cancel_requested) return
   try {
-    await cancelStrategyDiscovery(active.job_id)
+    const response = await cancelStrategyDiscovery(active.job_id)
+    if (response.cancel_requested) {
+      riskOptimizationJob.value = {
+        ...active,
+        cancel_requested: true,
+        phase: 'cancelling',
+      }
+    }
     message.value = '已请求取消风险参数寻优，正在等待任务停止。'
   } catch (error) {
     message.value = apiMessage(error)
@@ -1494,7 +1503,7 @@ watch(() => form.formulaText, (value) => {
             <div class="task-progress-heading"><span>{{ riskOptimizationPhaseLabel(riskOptimizationJob) }}</span><strong>{{ Math.round((riskOptimizationJob.progress ?? 0) * 100) }}%</strong></div>
             <div class="progress-track"><span :style="{ width: `${Math.round((riskOptimizationJob.progress ?? 0) * 100)}%` }"></span></div>
             <small>已评估 {{ riskOptimizationJob.total_scanned }} / {{ riskOptimizationJob.total_candidates || riskOptimizationMaxTrials }} 组</small>
-            <button class="text-button" data-testid="cancel-portfolio-risk-optimization" type="button" @click="cancelRiskOptimization">取消寻优</button>
+            <button class="text-button" data-testid="cancel-portfolio-risk-optimization" type="button" :disabled="riskOptimizationJob.cancel_requested" @click="cancelRiskOptimization">{{ riskOptimizationJob.cancel_requested ? '正在取消…' : '取消寻优' }}</button>
           </div>
           <p class="privacy-note">计算在本机完成；结果基于本地日线，不代表未来收益。</p>
         </form>

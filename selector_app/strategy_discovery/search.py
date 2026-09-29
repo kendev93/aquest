@@ -531,6 +531,7 @@ class HybridSearchEngine:
                     min_trades=_fidelity_min_trades(request, "coarse")
                     if fidelity_evaluator is not None and request.multifidelity_enabled
                     else None,
+                    enforce_max_drawdown=request.candidate_mode != "risk_only",
                 ):
                     observed.append(candidate)
                 improved = False
@@ -583,6 +584,7 @@ class HybridSearchEngine:
                         metrics,
                         request,
                         min_trades=_fidelity_min_trades(request, "medium"),
+                        enforce_max_drawdown=request.candidate_mode != "risk_only",
                     ):
                         medium_observed.append(enriched)
                     if progress_callback is not None:
@@ -610,7 +612,11 @@ class HybridSearchEngine:
                     zip(chunk, metrics_batch, strict=True), start=offset + 1
                 ):
                     enriched = candidate.with_metrics("full", metrics)
-                    if _passes_constraints(metrics, request):
+                    if _passes_constraints(
+                        metrics,
+                        request,
+                        enforce_max_drawdown=request.candidate_mode != "risk_only",
+                    ):
                         full_observed.append(enriched)
                     if progress_callback is not None:
                         progress_callback(index, len(full_candidates), "refining_full")
@@ -747,6 +753,7 @@ def _passes_constraints(
     request: DiscoveryRequest,
     *,
     min_trades: int | None = None,
+    enforce_max_drawdown: bool = True,
 ) -> bool:
     if metrics.get("error"):
         return False
@@ -761,7 +768,7 @@ def _passes_constraints(
         trades = 0
     if trades < (request.min_trades if min_trades is None else min_trades):
         return False
-    if request.max_drawdown is not None:
+    if enforce_max_drawdown and request.max_drawdown is not None:
         drawdown = abs(_metric(metrics, "max_drawdown", float("inf")))
         if not math.isfinite(drawdown) or drawdown > request.max_drawdown:
             return False
