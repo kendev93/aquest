@@ -43,6 +43,21 @@ from .indicator_two import (
 from .indicator_two import (
     calculate_indicator_two,
 )
+from .main_force_absorption import (
+    DISPLAY_NAME as ABSORPTION_DISPLAY_NAME,
+)
+from .main_force_absorption import (
+    MINIMUM_BARS as ABSORPTION_MINIMUM_BARS,
+)
+from .main_force_absorption import (
+    RECOMMENDED_BARS as ABSORPTION_RECOMMENDED_BARS,
+)
+from .main_force_absorption import (
+    VALUE_NAMES as ABSORPTION_VALUE_NAMES,
+)
+from .main_force_absorption import (
+    calculate_main_force_absorption,
+)
 from .price import (
     DISPLAY_NAME as PRICE_DISPLAY_NAME,
 )
@@ -139,6 +154,11 @@ _VALUE_DISPLAY_NAMES: dict[str, dict[str, str]] = {
         "main_force_raise": "主力拉高",
         "distribution": "出货",
         "z": "Z",
+    },
+    "main_force_absorption": {
+        "score_33": "主力吸筹-33日强度",
+        "entry_33": "主力吸筹-进场",
+        "washout_33": "主力吸筹-洗盘",
     },
     "indicator_two": {
         "short_cost": "短期成本线",
@@ -381,6 +401,30 @@ FORMULA_REGISTRY = FormulaRegistry(
                 "var3",
                 "z",
             ),
+        ),
+        FormulaDefinition(
+            id="main_force_absorption",
+            display_name=ABSORPTION_DISPLAY_NAME,
+            minimum_bars=ABSORPTION_MINIMUM_BARS,
+            recommended_bars=ABSORPTION_RECOMMENDED_BARS,
+            calculate=calculate_main_force_absorption,
+            signals=(
+                SignalDefinition(
+                    "main_force_absorption.entry",
+                    "主力吸筹-进场",
+                    "VAR5 上升时输出 VAR5，否则为 0",
+                    "main_force_absorption",
+                ),
+                SignalDefinition(
+                    "main_force_absorption.washout",
+                    "主力吸筹-洗盘",
+                    "VAR5 下降时输出 VAR5，否则为 0",
+                    "main_force_absorption",
+                ),
+            ),
+            value_names=ABSORPTION_VALUE_NAMES,
+            screen_value_names=ABSORPTION_VALUE_NAMES,
+            cache_version="1",
         ),
         FormulaDefinition(
             id="indicator_two",

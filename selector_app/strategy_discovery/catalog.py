@@ -9,6 +9,14 @@ from functools import lru_cache
 from selector_app.formulas.registry import FORMULA_REGISTRY, FormulaRegistry
 
 _CONSTANT_VALUE_IDS = frozenset({"indicator_one.z", "indicator_two.warning_line"})
+_SPARSE_EVENT_VALUE_IDS = frozenset(
+    {
+        # Rising/falling event lines are useful condition operands, but are
+        # mostly zero and should not be offered as cross-sectional rank factors.
+        "main_force_absorption.entry_33",
+        "main_force_absorption.washout_33",
+    }
+)
 # Raw prices are valid condition operands (close 上穿 MA20) but never ranking
 # features: an absolute price is not comparable across stocks, so mining a
 # cross-stock threshold on it would be meaningless.
@@ -36,7 +44,9 @@ _PRICE_SCALE_VALUE_IDS = frozenset(
         "technical.macd_histogram",
     }
 )
-_NON_RANKABLE_VALUE_IDS = _CONSTANT_VALUE_IDS | _PRICE_VALUE_IDS | _PRICE_SCALE_VALUE_IDS
+_NON_RANKABLE_VALUE_IDS = (
+    _CONSTANT_VALUE_IDS | _SPARSE_EVENT_VALUE_IDS | _PRICE_VALUE_IDS | _PRICE_SCALE_VALUE_IDS
+)
 
 
 @dataclass(frozen=True)

@@ -18,6 +18,7 @@ from .models import FactorTestConfig
 from .panel import build_panel, check_panel_budget, estimate_panel_bytes, scan_calendar
 
 ProgressCallback = Callable[[int, int], None] | None
+_FACTOR_FORMULA_IDS = ("technical", "main_force_absorption")
 
 #: Shown verbatim in the UI. A factor test measures whether a value ranks
 #: stocks, not whether the ranking can be traded, and a reader who misses that
@@ -122,7 +123,7 @@ class FactorTestService:
 
 
 def _resolve_value_ids(config: FactorTestConfig) -> tuple[str, ...]:
-    """Rankable technical outputs plus the allow-listed custom ones.
+    """Rankable technical/measurement outputs plus the allow-listed custom ones.
 
     The custom formulas (主力清洗 / 庄家顶底 / 准备拉升) are trading formulas
     rather than measurement libraries, so only their continuous, dimensionless
@@ -133,8 +134,11 @@ def _resolve_value_ids(config: FactorTestConfig) -> tuple[str, ...]:
     """
 
     catalog = default_indicator_catalog()
-    technical = FORMULA_REGISTRY.formula("technical")
-    available = {value_id for value_id in catalog.rankable_ids if value_id.startswith("technical.")}
+    available = {
+        value_id
+        for value_id in catalog.rankable_ids
+        if value_id.partition(".")[0] in _FACTOR_FORMULA_IDS
+    }
     if config.include_custom:
         available.update(custom_value_ids())
     if config.value_ids:
@@ -143,12 +147,15 @@ def _resolve_value_ids(config: FactorTestConfig) -> tuple[str, ...]:
         if unknown:
             raise ValueError(
                 f"以下指标不能用于因子检验: {', '.join(unknown)}；"
-                "只支持 technical 公式中可排序的无量纲指标，"
+                "只支持技术指标、主力吸筹指标中可排序的无量纲输出，"
                 "以及三个自定义公式里已核实的连续输出"
             )
         return tuple(item for item in requested if item in available)
     ordered = tuple(
-        f"technical.{name}" for name in technical.value_names if f"technical.{name}" in available
+        f"{formula_id}.{name}"
+        for formula_id in _FACTOR_FORMULA_IDS
+        for name in FORMULA_REGISTRY.formula(formula_id).value_names
+        if f"{formula_id}.{name}" in available
     )
     if config.include_custom:
         ordered += tuple(item for item in custom_value_ids() if item in available)

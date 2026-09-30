@@ -404,6 +404,7 @@ def calculate_technical_indicators(frame: pd.DataFrame) -> FormulaResult:
     values["gap_pct"] = (
         safe_divide(open_.to_numpy(), close.shift(1).to_numpy()) - 1
     ) * 100
+
     return build_formula_result(
         formula_id=FORMULA_ID,
         display_name=DISPLAY_NAME,
