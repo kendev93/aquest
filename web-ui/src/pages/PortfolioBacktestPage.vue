@@ -3,6 +3,7 @@ import PageGuide from '../components/PageGuide.vue'
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 
 import {
+  cancelPortfolioBacktest,
   createPortfolioBacktest,
   deletePortfolioBacktestHistory,
   fetchPortfolioBacktestHistory,
@@ -213,6 +214,7 @@ const riskOptimizationResult = ref<StrategyDiscoveryResult | null>(null)
 const riskOptimizationBoard = ref<'sharpe' | 'return'>('sharpe')
 const riskOptimizationMaxTrials = ref<1000 | 2000 | 3000>(1000)
 const riskOptimizationBaseFingerprint = ref<string | null>(null)
+const riskOptimizationBaseFingerprintWithoutSt = ref<string | null>(null)
 const riskOptimizationRestoreRequired = ref(false)
 const riskOptimizationHistory = ref<RiskOptimizationHistorySummary[]>([])
 const riskOptimizationHistoryTotal = ref(0)
@@ -232,6 +234,11 @@ const riskOptimizationStale = computed(() => (
   riskOptimizationRestoreRequired.value
   || (riskOptimizationBaseFingerprint.value !== null
     && riskOptimizationBaseFingerprint.value !== portfolioBaseFingerprint(buildPayload()))
+))
+const riskOptimizationApplicationBlocked = computed(() => (
+  riskOptimizationRestoreRequired.value
+  || (riskOptimizationBaseFingerprintWithoutSt.value !== null
+    && riskOptimizationBaseFingerprintWithoutSt.value !== portfolioBaseFingerprint(buildPayload(), true))
 ))
 const riskOptimizationCandidates = computed(() => (
   riskOptimizationBoard.value === 'sharpe'
@@ -593,13 +600,17 @@ function stableStringify(value: unknown): string {
   return JSON.stringify(value) ?? 'null'
 }
 
-function portfolioBaseFingerprint(payload: PortfolioBacktestPayload): string {
+function portfolioBaseFingerprint(
+  payload: PortfolioBacktestPayload,
+  ignoreExcludeSt = false,
+): string {
   const fixed = Object.fromEntries(
     Object.entries(payload).filter(([key]) => (
       !RISK_PARAMETER_KEYS.has(key)
       && key !== 'date_mode'
       && key !== 'start_date'
       && key !== 'end_date'
+      && !(ignoreExcludeSt && key === 'exclude_st')
     )),
   )
   return stableStringify(fixed)
@@ -857,7 +868,33 @@ async function pollPortfolioBacktest(jobId: string): Promise<void> {
       message.value = state.error ?? '组合回测任务失败，请检查配置和服务状态后重试。'
       return
     }
+    if (state.status === 'cancelled') {
+      message.value = state.error ?? '组合回测已取消。'
+      return
+    }
     await new Promise((resolve) => window.setTimeout(resolve, 220))
+  }
+}
+
+async function cancelRunningPortfolioBacktest(): Promise<void> {
+  const active = job.value
+  if (
+    !active
+    || active.cancel_requested
+    || !['queued', 'running'].includes(active.status)
+  ) return
+  try {
+    const response = await cancelPortfolioBacktest(active.job_id)
+    if (response.cancel_requested) {
+      job.value = { ...active, cancel_requested: true }
+      message.value = '已请求取消组合回测，正在等待当前计算批次结束。'
+    } else if (response.status === 'completed') {
+      message.value = '组合回测已完成。'
+    } else if (response.status === 'cancelled') {
+      message.value = '组合回测已取消。'
+    }
+  } catch (error) {
+    message.value = apiMessage(error)
   }
 }
 
@@ -895,6 +932,7 @@ async function startRiskOptimization(): Promise<void> {
   if (Object.values(errors.value).some(Boolean)) return
   const basePayload = buildPayload()
   riskOptimizationBaseFingerprint.value = portfolioBaseFingerprint(basePayload)
+  riskOptimizationBaseFingerprintWithoutSt.value = portfolioBaseFingerprint(basePayload, true)
   riskOptimizationRestoreRequired.value = false
   riskOptimizationResult.value = null
   riskOptimizationJob.value = null
@@ -969,6 +1007,7 @@ async function resumeActiveRiskOptimization(): Promise<void> {
     if (!active) return
     riskOptimizationJob.value = active as unknown as StrategyDiscoveryJobState
     riskOptimizationBaseFingerprint.value = null
+    riskOptimizationBaseFingerprintWithoutSt.value = null
     riskOptimizationRestoreRequired.value = true
     riskOptimizationLoading.value = true
     void pollRiskOptimization(active.job_id)
@@ -1019,6 +1058,7 @@ async function loadRiskOptimizationHistoryDetail(jobId: string): Promise<void> {
     riskOptimizationResult.value = savedResult
     riskOptimizationBoard.value = 'sharpe'
     riskOptimizationBaseFingerprint.value = portfolioBaseFingerprint(buildPayload())
+    riskOptimizationBaseFingerprintWithoutSt.value = portfolioBaseFingerprint(buildPayload(), true)
     riskOptimizationRestoreRequired.value = false
     riskOptimizationJob.value = null
     appliedDiscoveryCandidate.value = null
@@ -1064,33 +1104,47 @@ async function cancelRiskOptimization(): Promise<void> {
 
 function applyRiskOptimizationCandidate(candidate: StrategyDiscoveryCandidate): void {
   if (!riskOptimizationResult.value) return
-  if (riskOptimizationStale.value) {
-    message.value = '买卖规则、排序或回测设置已变化，请基于当前配置重新寻优。'
+  if (riskOptimizationApplicationBlocked.value) {
+    message.value = riskOptimizationRestoreRequired.value
+      ? '请先从历史列表载入寻优时的基础配置，再应用候选。'
+      : '买卖规则、排序或其他基础设置已变化，当前不能应用该候选。'
     return
   }
-  applyStoredCandidate(candidate.config)
+  const currentDateMode = form.dateMode
+  const currentStartDate = form.startDate
+  const currentEndDate = form.endDate
+  const currentExcludeSt = form.excludeSt
+  const currentAtrPeriod = form.atrPeriod
   const request = riskOptimizationResult.value.request
   const splits = request.splits
   const validation = splits && typeof splits === 'object'
     ? (splits as Record<string, unknown>).validation
     : null
-  if (validation && typeof validation === 'object') {
-    const dates = validation as Record<string, unknown>
-    if (typeof dates.start_date === 'string' && typeof dates.end_date === 'string') {
-      form.dateMode = 'custom'
-      form.startDate = dates.start_date
-      form.endDate = dates.end_date
-    }
-  }
-  appliedDiscoveryCandidate.value = {
-    candidate_hash: candidate.candidate_hash,
-    data_fingerprint: typeof riskOptimizationResult.value.data_fingerprint === 'string'
-      ? riskOptimizationResult.value.data_fingerprint
-      : null,
-    validation_metrics: candidate.metrics.validation ?? null,
-  }
+  const validationDates = validation && typeof validation === 'object'
+    ? validation as Record<string, unknown>
+    : null
+  const matchesValidationRange = currentStartDate === validationDates?.start_date
+    && currentEndDate === validationDates?.end_date
+
+  applyStoredCandidate(candidate.config)
+  form.dateMode = currentDateMode
+  form.startDate = currentStartDate
+  form.endDate = currentEndDate
+  form.excludeSt = currentExcludeSt
+  form.atrPeriod = currentAtrPeriod
+  appliedDiscoveryCandidate.value = matchesValidationRange
+    ? {
+        candidate_hash: candidate.candidate_hash,
+        data_fingerprint: typeof riskOptimizationResult.value.data_fingerprint === 'string'
+          ? riskOptimizationResult.value.data_fingerprint
+          : null,
+        validation_metrics: candidate.metrics.validation ?? null,
+      }
+    : null
   replayComparison.value = null
-  message.value = '已应用候选风险参数并切换到验证段；运行普通组合回测以核对交易和绩效复现。'
+  message.value = matchesValidationRange
+    ? '已应用候选风险参数并保留当前验证区间；运行普通组合回测以核对榜单复现。'
+    : `已应用候选风险参数并保留当前区间 ${currentStartDate || '默认起始日'} 至 ${currentEndDate || '默认结束日'}；运行普通组合回测查看该区间表现。`
 }
 
 async function resumeActivePortfolioBacktest(): Promise<void> {
@@ -1636,7 +1690,7 @@ watch(() => form.formulaText, (value) => {
           </div>
           <section v-if="riskOptimizationResult" ref="riskOptimizationResultsSection" class="data-section risk-optimization-results" data-testid="portfolio-risk-optimization-results">
             <div class="section-heading"><div><span class="section-kicker">RISK OPTIMIZATION</span><h3>退出风控候选</h3></div><span>验证段排序 · 留出段独立复核</span></div>
-            <p class="helper">训练段搜索；验证段至少 5 笔交易且最大回撤不超过 30% 才进入榜单。应用候选会切换到对应验证日期。</p>
+            <p class="helper">训练段搜索；验证段至少 5 笔交易且最大回撤不超过 30% 才进入榜单。应用候选保留当前日期区间，榜单指标仍按验证段计算。</p>
             <div v-if="riskOptimizationRestoreRequired" class="notice error" data-testid="portfolio-risk-optimization-restore-required">已接回后台寻优，但当前表单不是寻优时的配置。请从历史列表载入此任务后再应用候选。</div>
             <div v-else-if="riskOptimizationStale" class="notice error" data-testid="portfolio-risk-optimization-stale">买卖规则、排序或回测设置已变化。请重新寻优后再应用候选。</div>
             <div class="formula-mode-tabs" role="tablist" aria-label="退出风控候选榜单">
@@ -1650,7 +1704,7 @@ watch(() => form.formulaText, (value) => {
                 <td>{{ formatPercent(riskMetric(candidate, 'train', 'annual_return')) }} / {{ formatNumber(riskMetric(candidate, 'train', 'sharpe')) }}</td>
                 <td>{{ formatPercent(riskMetric(candidate, 'validation', 'annual_return')) }} / {{ formatNumber(riskMetric(candidate, 'validation', 'sharpe')) }} / {{ formatPercent(riskMetric(candidate, 'validation', 'max_drawdown')) }}</td>
                 <td>{{ formatPercent(riskMetric(candidate, 'holdout', 'annual_return')) }} / {{ formatNumber(riskMetric(candidate, 'holdout', 'sharpe')) }} / {{ formatPercent(riskMetric(candidate, 'holdout', 'max_drawdown')) }}</td>
-                <td><button class="secondary-button" :data-testid="`portfolio-risk-apply-${candidate.candidate_hash}`" type="button" :disabled="riskOptimizationStale" @click="applyRiskOptimizationCandidate(candidate)">应用</button></td>
+                <td><button class="secondary-button" :data-testid="`portfolio-risk-apply-${candidate.candidate_hash}`" type="button" :disabled="riskOptimizationApplicationBlocked" @click="applyRiskOptimizationCandidate(candidate)">应用</button></td>
               </tr>
             </tbody></table></div>
           </section>
@@ -1694,7 +1748,7 @@ watch(() => form.formulaText, (value) => {
           </template>
         </section>
       </div>
-      <div v-if="loading && job" class="task-progress task-progress-panel" data-testid="portfolio-progress"><div class="task-progress-heading"><span>组合回测任务进度</span><strong>{{ Math.round(job.progress * 100) }}%</strong></div><div class="progress-track"><span :style="{ width: `${Math.round(job.progress * 100)}%` }"></span></div><small>已处理 {{ job.total_scanned }} / {{ job.total_candidates || 1 }}</small></div>
+      <div v-if="loading && job" class="task-progress task-progress-panel" data-testid="portfolio-progress"><div class="task-progress-heading"><span>{{ job.cancel_requested ? '正在取消，等待当前计算批次结束' : '组合回测任务进度' }}</span><strong>{{ Math.round(job.progress * 100) }}%</strong></div><div class="progress-track"><span :style="{ width: `${Math.round(job.progress * 100)}%` }"></span></div><small>已处理 {{ job.total_scanned }} / {{ job.total_candidates || 1 }}</small><button class="text-button" type="button" data-testid="cancel-portfolio-backtest" :disabled="job.cancel_requested || !['queued', 'running'].includes(job.status)" @click="cancelRunningPortfolioBacktest">{{ job.cancel_requested ? '正在取消…' : '取消回测' }}</button></div>
 
       <section class="panel risk-optimization-history" data-testid="portfolio-risk-optimization-history">
         <div class="section-heading">

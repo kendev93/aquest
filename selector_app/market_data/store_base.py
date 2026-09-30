@@ -995,6 +995,7 @@ class _DuckDbStoreBase:
         source_path: str | None = None,
         source_state: str = "active",
         provider: str | None = None,
+        force_updated_at: bool = True,
     ) -> None:
         connection.execute(
             """
@@ -1015,7 +1016,23 @@ class _DuckDbStoreBase:
                 bar_count = excluded.bar_count,
                 source_state = excluded.source_state,
                 last_provider = COALESCE(excluded.last_provider, instruments.last_provider),
-                updated_at = excluded.updated_at
+                updated_at = CASE
+                    WHEN ?
+                      OR instruments.name IS DISTINCT FROM
+                             COALESCE(excluded.name, instruments.name)
+                      OR instruments.instrument_type IS DISTINCT FROM excluded.instrument_type
+                      OR instruments.board IS DISTINCT FROM excluded.board
+                      OR (excluded.source_path IS NOT NULL AND
+                          instruments.source_path IS DISTINCT FROM excluded.source_path)
+                      OR instruments.first_date IS DISTINCT FROM excluded.first_date
+                      OR instruments.last_date IS DISTINCT FROM excluded.last_date
+                      OR instruments.bar_count IS DISTINCT FROM excluded.bar_count
+                      OR instruments.source_state IS DISTINCT FROM excluded.source_state
+                      OR (excluded.last_provider IS NOT NULL AND
+                          instruments.last_provider IS DISTINCT FROM excluded.last_provider)
+                    THEN excluded.updated_at
+                    ELSE instruments.updated_at
+                END
             """,
             [
                 market,
@@ -1029,6 +1046,7 @@ class _DuckDbStoreBase:
                 _now(),
                 market,
                 code,
+                force_updated_at,
             ],
         )
 

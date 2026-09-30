@@ -42,6 +42,15 @@ export async function getPortfolioBacktest(jobId: string): Promise<PortfolioBack
   return response.data
 }
 
+export async function cancelPortfolioBacktest(
+  jobId: string,
+): Promise<{ job_id: string; status: string; cancel_requested: boolean }> {
+  const response = await request<{
+    data: { job_id: string; status: string; cancel_requested: boolean }
+  }>(`${API_BASE}/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' })
+  return response.data
+}
+
 export async function getPortfolioBacktestResults(jobId: string): Promise<PortfolioBacktestResult> {
   const response = await request<{ data: PortfolioBacktestResult }>(`${API_BASE}/${encodeURIComponent(jobId)}/results`)
   return response.data

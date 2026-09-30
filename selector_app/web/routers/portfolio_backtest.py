@@ -21,7 +21,12 @@ from selector_app.portfolio_backtest.service import (
     PortfolioBacktestProgressCallback,
     PortfolioBacktestService,
 )
-from selector_app.screening.jobs import JobState, ScreenJobRunner, TaskUserError
+from selector_app.screening.jobs import (
+    JobState,
+    ScreenJobRunner,
+    TaskCancelledError,
+    TaskUserError,
+)
 
 from ..backtest_history import save_completed_backtest_history, utc_now
 from ..date_ranges import resolve_date_range
@@ -112,8 +117,19 @@ def create_portfolio_backtest(
 
         def run_backtest(progress: Callable[[int, int], None]) -> dict[str, object]:
             started_at = utc_now()
+
+            def check_cancelled() -> None:
+                if _runner(request).is_cancel_requested(job_id):
+                    raise TaskCancelledError("组合回测已取消")
+
+            def report_progress(current: int, total: int) -> None:
+                check_cancelled()
+                progress(current, total)
+
             try:
-                result = _service(request).run(config, progress)
+                check_cancelled()
+                result = _service(request).run(config, report_progress)
+                check_cancelled()
             except ValueError as exc:
                 raise TaskUserError(str(exc)) from exc
             except MarketDataStoreError as exc:
@@ -149,6 +165,21 @@ def create_portfolio_backtest(
         status_code=status.HTTP_202_ACCEPTED,
         content={"data": {"job_id": job_id, "status": "queued"}},
     )
+
+
+@router.post("/{job_id}/cancel")
+def cancel_portfolio_backtest(job_id: str, request: Request) -> dict[str, object]:
+    _state_or_404(job_id, request)
+    if not _runner(request).request_cancel(job_id):
+        state = _runner(request).get(job_id)
+        return {
+            "data": {
+                "job_id": job_id,
+                "status": state.status if state is not None else "unknown",
+                "cancel_requested": False,
+            }
+        }
+    return {"data": {"job_id": job_id, "status": "cancelling", "cancel_requested": True}}
 
 
 @router.get("/history")

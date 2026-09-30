@@ -63,13 +63,14 @@ export interface PortfolioBacktestPayload {
 
 export interface PortfolioBacktestJobState {
   job_id: string
-  status: 'queued' | 'running' | 'completed' | 'failed'
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
   progress: number
   total_candidates: number
   total_scanned: number
   errors: number
   error: string | null
   result: PortfolioBacktestResult | null
+  cancel_requested?: boolean
 }
 
 
