@@ -12,6 +12,7 @@ build/
 .nuitka-cache/
 .workbuddy/
 .venv/
+.trae/
 
 web-ui/node_modules/
 web-ui/dist/

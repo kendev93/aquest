@@ -38,7 +38,7 @@ def _request(store: object, adapter: object | None) -> SimpleNamespace:
 
 def test_resolve_market_status_prefers_the_adapter(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
-    adapter_status = _status(str(tmp_path / "etfquest.db"), date(1990, 12, 19), date(2026, 9, 11))
+    adapter_status = _status(str(tmp_path / "adapter.db"), date(1990, 12, 19), date(2026, 9, 11))
 
     resolved = resolve_market_status(_request(store, _Adapter(adapter_status)))
 

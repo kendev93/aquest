@@ -20,7 +20,7 @@ def install_meta_endpoints(app: FastAPI) -> None:
     async def authorization_status() -> dict[str, object]:
         """Report that this installation does not gate features behind membership.
 
-        The previous machine-bound ETFQuest licensing was removed together with
+        The previous machine-bound licensing was removed together with
         the shared market-data integration.  Account-based sign-in is planned,
         so the endpoint stays in place and keeps its shape for existing clients.
         """

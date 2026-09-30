@@ -252,10 +252,10 @@ def test_condition_research_api_rejects_a_run_over_the_memory_budget(tmp_path: P
 
 
 class _SharedSourceAdapter:
-    """Stand-in for the ETFQuest adapter that reports its own data bounds."""
+    """Stand-in adapter that reports its own data bounds."""
 
     def __init__(self, root: Path, start: date, end: date) -> None:
-        self.database_path = root / "etfquest_market_data.db"
+        self.database_path = root / "shared_market_data.db"
         self._start = start
         self._end = end
 

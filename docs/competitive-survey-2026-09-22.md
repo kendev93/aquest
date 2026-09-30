@@ -1,6 +1,6 @@
 # 第二轮竞品调研（2026-09-22）
 
-> 第一轮（TSP + ETFQuest）的可借鉴部分已挖完，结论见 `docs/archive/competitive-reference-tsp-2026-09-20.md`
+> 第一轮（TSP + 参照产品）的可借鉴部分已挖完，结论见 `docs/archive/competitive-reference-tsp-2026-09-20.md`
 > 与 `docs/feature-backlog.md` §7。本文只记**新对象**与**新结论**，不重复。
 >
 > 核对方式：GitHub REST API 拉一手数据 + 官网文档 + 代码核对。仓库名搜不到的（如公众号提到的

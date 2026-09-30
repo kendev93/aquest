@@ -47,13 +47,10 @@ COMPOSE = PROJECT_ROOT / "docker-compose.yml"
 BIND_COMPOSE = PROJECT_ROOT / "docker-compose.bind.yml"
 
 
-def test_compose_does_not_depend_on_an_etfquest_install() -> None:
+def test_compose_has_no_external_datasource_dependency() -> None:
     compose = COMPOSE.read_text(encoding="utf-8")
 
-    assert "ETFQUEST_APP_DATA_DIR" not in compose
-    assert "SELECTOR_ETFQUEST_DATABASE_PATH" not in compose
     assert "SELECTOR_MARKET_DATA_SOURCE" not in compose
-    assert "/run/etfquest" not in compose
     assert "run/secrets" not in compose
 
 

@@ -73,7 +73,8 @@ _CCI_SCALE = 0.015
 _VR_PERIOD = 24
 _OBV_PERIOD = 20
 # Window of the log-price regression that feeds R², the annualised trend and
-# the trend-quality score. ETFQuest uses the same 24 for all three.
+# the trend-quality score. The reference implementation uses the same 24 for
+# all three.
 _TREND_PERIOD = 24
 # Window of the realised volatility used as the trend-quality denominator.
 _VOLATILITY_PERIOD = 60
@@ -83,7 +84,7 @@ _ANNUALISATION = 252.0
 _ANNUAL_TREND_FLOOR = -3.0
 _ANNUAL_TREND_CEILING = 2.398  # log(11)
 _RSRS_PERIOD = 18
-# ETFQuest standardises the RSRS beta over 600 bars (~2.4 years). A-share
+# The original RSRS standardises the beta over 600 bars (~2.4 years). A-share
 # backtests usually cover 2-3 years, where 600 would leave most of the range
 # undefined, so the standardisation window is one trading year instead.
 _RSRS_ZSCORE_PERIOD = 250
@@ -123,9 +124,9 @@ def _rolling_regression(values: np.ndarray, window: int) -> tuple[np.ndarray, np
 
     Returns ``(slope, r_squared)``. The regressor is a fixed arithmetic
     sequence, so the closed-form solution ``cov(x, y) / var(x)`` needs only
-    windowed sums and the whole thing stays in NumPy; ETFQuest computes it
-    with ``rolling().apply``, which calls back into Python once per bar and is
-    too slow for precomputing the full universe.
+    windowed sums and the whole thing stays in NumPy; the reference
+    implementation computes it with ``rolling().apply``, which calls back into
+    Python once per bar and is too slow for precomputing the full universe.
     """
 
     source = np.asarray(values, dtype=float)
@@ -231,7 +232,7 @@ def calculate_technical_indicators(frame: pd.DataFrame) -> FormulaResult:
         * 100
     )
 
-    # KDJ (9, 3, 3), ported from ETFQuest ``core/indicators.py::kdj``. RSV is
+    # KDJ (9, 3, 3), ported from the reference implementation's ``kdj``. RSV is
     # already a 0-100 position inside the 9-bar range, so K/D inherit that
     # scale and stay comparable across stocks. J = 3K - 2D is not bounded but
     # is a pure function of the same two series, so it is dimensionless too.
@@ -272,9 +273,9 @@ def calculate_technical_indicators(frame: pd.DataFrame) -> FormulaResult:
     values["boll_bandwidth"] = safe_divide(boll_width, boll_middle.to_numpy()) * 100
 
     # Williams %R (14). Mirrored relative to the usual -100..0 convention:
-    # ETFQuest returns (Hn - C) / (Hn - Ln) * 100, so 0 = at the window high
-    # and 100 = at the window low. Kept as-is to stay comparable with the
-    # upstream project.
+    # The reference implementation returns (Hn - C) / (Hn - Ln) * 100, so
+    # 0 = at the window high and 100 = at the window low. Kept as-is to stay
+    # comparable with it.
     wr_low = low.rolling(_WR_PERIOD, min_periods=_WR_PERIOD).min()
     wr_high = high.rolling(_WR_PERIOD, min_periods=_WR_PERIOD).max()
     values["wr14"] = (
@@ -314,8 +315,8 @@ def calculate_technical_indicators(frame: pd.DataFrame) -> FormulaResult:
     )
 
     # Raw OBV is a *cumulative* volume total, so its level tracks the size of
-    # the float and ETFQuest lists it as non-comparable across symbols for
-    # exactly that reason. What is comparable is the share of the window's
+    # the float and the reference implementation lists it as non-comparable
+    # across symbols for exactly that reason. What is comparable is the share of the window's
     # volume that flowed in on up days: (Σ sign·volume) / Σ volume lands in
     # [-100, 100] no matter how big the stock is. It is also just the 20-day
     # OBV increment, so it keeps the "energy" reading OBV is used for.
@@ -349,7 +350,7 @@ def calculate_technical_indicators(frame: pd.DataFrame) -> FormulaResult:
     annual_trend = annualised * trend_r2
     values["annual_trend24"] = np.where(np.isfinite(annual_trend), annual_trend, np.nan)
 
-    # ETFQuest's trend_quality_momentum: 24-day return × R² / annualised
+    # The reference trend_quality_momentum: 24-day return × R² / annualised
     # 60-day volatility. Same ingredients, but risk-adjusted, so a volatile
     # stock has to trend that much harder to score well.
     # fill_method=None：缺口/停牌不应被前向填充后当成真实涨跌，这与自定义公式里

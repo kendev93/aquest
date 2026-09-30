@@ -79,7 +79,7 @@ def _init_discovery_worker(
 def _evaluate_candidate_process(
     job: tuple[object, ...],
 ) -> Mapping[str, object]:
-    # 旧版本在 database_path 之后还带一个 ETFQuest 行情库路径。那一整套共享
+    # 旧版本在 database_path 之后还带一个外部共享行情库路径。那一整套共享
     # 行情集成已经移除，这里容忍历史元组形状并丢掉多余的字段。
     if len(job) == 7:
         job = (*job[:5], job[6])

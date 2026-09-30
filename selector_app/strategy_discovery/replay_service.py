@@ -61,7 +61,7 @@ def _init_replay_worker(
 def _evaluate_replay_candidate_process(
     job: tuple[object, ...],
 ) -> Mapping[str, object]:
-    # 旧版本在 snapshot_path 之后还带一个 ETFQuest 行情库路径。共享行情集成
+    # 旧版本在 snapshot_path 之后还带一个外部共享行情库路径。共享行情集成
     # 已移除，这里容忍历史元组形状并丢掉多余的字段。
     if len(job) == 5:
         job = (*job[:3], job[4])
