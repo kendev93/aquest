@@ -16,6 +16,7 @@ from selector_app.condition_research.reporting import (
     _resolved_ranking,
     _select_holdout_candidates,
     candidate_constraint_failures,
+    candidate_performance_warnings,
 )
 from selector_app.condition_research.samples import MiningSamples
 from selector_app.condition_research.service import (
@@ -105,8 +106,8 @@ def test_candidate_without_baseline_win_rate_is_not_claimed_as_improved() -> Non
     assert "基础规则样本不足，无法比较胜率" in failures
 
 
-def test_candidate_fails_when_total_return_falls_behind_the_baseline() -> None:
-    """每笔都更好，但过滤掉太多交易让资金闲着 —— 整体是变差的。"""
+def test_total_return_drop_is_a_warning_not_a_validation_failure() -> None:
+    """逐股总收益差于基线需要提示，但应留给留出期和组合回测复核。"""
 
     baseline = {
         "pooled_trades": {
@@ -136,7 +137,8 @@ def test_candidate_fails_when_total_return_falls_behind_the_baseline() -> None:
         min_instruments=5,
     )
 
-    assert "总收益低于基础规则" in failures
+    assert failures == ()
+    assert candidate_performance_warnings(candidate, baseline) == ("逐股中位总收益低于基础规则",)
     # 逐笔指标确实都更好了，不该再报那些，否则看不出真正的问题在哪
     assert "胜率未高于基础规则" not in failures
     assert "盈亏比低于基础规则" not in failures

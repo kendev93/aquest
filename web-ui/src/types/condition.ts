@@ -211,6 +211,10 @@ export interface ConditionResearchCandidate {
   validation: ConditionResearchSummary
   passed_constraints: boolean
   constraint_failures: string[]
+  /** 逐股收益、夏普、年化收益低于基础规则时提示，但不阻断留出复验。 */
+  performance_warnings?: string[]
+  /** 通过验证门槛的同侧候选按验证胜率、逐股中位夏普和年化收益计算的综合名次分。 */
+  validation_objective_score?: number | null
   full_period: ConditionResearchSummary | null
   holdout: ConditionResearchSummary | null
   windows?: ConditionResearchWindow[]

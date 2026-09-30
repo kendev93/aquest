@@ -31,6 +31,7 @@ import {
 import BacktestHistoryPanel from '../components/BacktestHistoryPanel.vue'
 import DateRangeSelector from '../components/DateRangeSelector.vue'
 import PortfolioPnlAnalysis from '../components/PortfolioPnlAnalysis.vue'
+import RiskOptimizationHistoryDetail from '../components/RiskOptimizationHistoryDetail.vue'
 import RuleGroupEditor from '../components/RuleGroupEditor.vue'
 import TermHint from '../components/TermHint.vue'
 import type {
@@ -222,6 +223,10 @@ const riskOptimizationHistoryTotal = ref(0)
 const riskOptimizationHistoryLoading = ref(false)
 const riskOptimizationHistoryLoadingId = ref<string | null>(null)
 const riskOptimizationHistoryError = ref('')
+const riskOptimizationHistoryDetail = ref<StrategyDiscoveryResult | null>(null)
+const riskOptimizationHistoryDetailId = ref<string | null>(null)
+const riskOptimizationHistoryDetailLoadingId = ref<string | null>(null)
+const riskOptimizationHistoryDetailError = ref('')
 const riskOptimizationResultsSection = ref<HTMLElement | null>(null)
 const resultPriceBasis = computed(() => result.value?.price_basis ?? 'raw')
 const resultLimitations = computed(() => (
@@ -246,7 +251,6 @@ const riskOptimizationCandidates = computed(() => (
     ? riskOptimizationResult.value?.results_by_sharpe ?? []
     : riskOptimizationResult.value?.results_by_return ?? []
 ))
-
 const presetSignals = computed<SignalDefinition[]>(() => (
   metadata.value?.indicators.flatMap((indicator) => indicator.signals) ?? []
 ))
@@ -908,6 +912,22 @@ function riskMetric(
   return typeof value === 'number' && Number.isFinite(value) ? value : null
 }
 
+function riskMetricRatio(
+  candidate: StrategyDiscoveryCandidate,
+  split: string,
+  key: 'payoff_ratio' | 'profit_factor',
+): string {
+  const value = riskMetric(candidate, split, key)
+  if (key === 'profit_factor' && value !== null && value >= 999) return '无亏损'
+  if (key === 'payoff_ratio' && value === null) {
+    const trades = riskMetric(candidate, split, 'total_trades') ?? 0
+    const losses = riskMetric(candidate, split, 'lose_trades')
+    return trades > 0 && losses === 0 ? '无亏损' : '—'
+  }
+  if ((riskMetric(candidate, split, 'total_trades') ?? 0) === 0) return '—'
+  return formatNumber(value)
+}
+
 function riskOptimizationPhaseLabel(state: StrategyDiscoveryJobState | null): string {
   const phase = state?.phase ?? ''
   if (state?.status === 'cancelled' || phase === 'cancelled') return '风险参数寻优已取消'
@@ -1040,6 +1060,33 @@ async function loadRiskOptimizationHistory(append = false): Promise<void> {
   } finally {
     riskOptimizationHistoryLoading.value = false
   }
+}
+
+async function toggleRiskOptimizationHistoryDetail(jobId: string): Promise<void> {
+  if (riskOptimizationHistoryDetailId.value === jobId) {
+    riskOptimizationHistoryDetailId.value = null
+    riskOptimizationHistoryDetail.value = null
+    riskOptimizationHistoryDetailError.value = ''
+    return
+  }
+  riskOptimizationHistoryDetailLoadingId.value = jobId
+  riskOptimizationHistoryDetailError.value = ''
+  riskOptimizationHistoryDetailId.value = null
+  riskOptimizationHistoryDetail.value = null
+  try {
+    riskOptimizationHistoryDetail.value = await getRiskOptimizationHistory(jobId)
+    riskOptimizationHistoryDetailId.value = jobId
+  } catch (error) {
+    riskOptimizationHistoryDetailError.value = apiMessage(error)
+  } finally {
+    riskOptimizationHistoryDetailLoadingId.value = null
+  }
+}
+
+function closeRiskOptimizationHistoryDetail(): void {
+  riskOptimizationHistoryDetailId.value = null
+  riskOptimizationHistoryDetail.value = null
+  riskOptimizationHistoryDetailError.value = ''
 }
 
 async function loadRiskOptimizationHistoryDetail(jobId: string): Promise<void> {
@@ -1387,6 +1434,23 @@ function performanceValue(key: string): number | null {
   return result.value?.performance[key] ?? null
 }
 
+function formatPortfolioRatio(key: 'payoff_ratio' | 'profit_factor'): string {
+  const value = performanceValue(key)
+  if ((performanceValue('total_trades') ?? 0) === 0) return '—'
+  if (value !== null) return value >= 999 ? '无亏损' : value.toFixed(2)
+  const trades = performanceValue('total_trades') ?? 0
+  const losses = performanceValue('lose_trades')
+  const wins = performanceValue('win_trades')
+  return key === 'payoff_ratio' && trades > 0 && losses === 0 && wins !== null
+    ? '无亏损'
+    : '—'
+}
+
+function formatTurnoverMultiple(key: 'buy_turnover' | 'sell_turnover' | 'turnover'): string {
+  const value = performanceValue(key)
+  return value === null ? '—' : `${value.toFixed(2)}×`
+}
+
 function benchmarkValue(key: string): number | null {
   return benchmark.value?.performance[key] ?? null
 }
@@ -1701,12 +1765,12 @@ watch(() => form.formulaText, (value) => {
               <button type="button" data-testid="portfolio-risk-return-board" role="tab" :aria-selected="riskOptimizationBoard === 'return'" :class="{ active: riskOptimizationBoard === 'return' }" @click="riskOptimizationBoard = 'return'">收益榜前 10</button>
             </div>
             <div v-if="!riskOptimizationCandidates.length" class="inline-empty">没有候选通过验证段门槛；可扩大日期范围后重试。</div>
-            <div v-else class="table-wrap"><table data-testid="portfolio-risk-candidates"><caption class="sr-only">退出风控寻优候选</caption><thead><tr><th># / 参数</th><th>训练<br>年化 / 夏普</th><th>验证<br>年化 / 夏普 / 回撤</th><th>留出<br>年化 / 夏普 / 回撤</th><th>操作</th></tr></thead><tbody>
+            <div v-else class="table-wrap"><table data-testid="portfolio-risk-candidates"><caption class="sr-only">退出风控寻优候选</caption><thead><tr><th># / 参数</th><th>训练<br>年化 / 夏普</th><th>验证<br>收益 / Sharpe / 回撤</th><th>留出<br>收益 / Sharpe / 回撤</th><th>操作</th></tr></thead><tbody>
               <tr v-for="(candidate, index) in riskOptimizationCandidates" :key="candidate.candidate_hash" :data-testid="`portfolio-risk-candidate-${candidate.candidate_hash}`">
                 <td><strong>{{ index + 1 }}</strong><small>{{ candidate.human_readable_rules }}</small></td>
                 <td>{{ formatPercent(riskMetric(candidate, 'train', 'annual_return')) }} / {{ formatNumber(riskMetric(candidate, 'train', 'sharpe')) }}</td>
-                <td>{{ formatPercent(riskMetric(candidate, 'validation', 'annual_return')) }} / {{ formatNumber(riskMetric(candidate, 'validation', 'sharpe')) }} / {{ formatPercent(riskMetric(candidate, 'validation', 'max_drawdown')) }}</td>
-                <td>{{ formatPercent(riskMetric(candidate, 'holdout', 'annual_return')) }} / {{ formatNumber(riskMetric(candidate, 'holdout', 'sharpe')) }} / {{ formatPercent(riskMetric(candidate, 'holdout', 'max_drawdown')) }}</td>
+                <td>{{ formatPercent(riskMetric(candidate, 'validation', 'annual_return')) }} / {{ formatNumber(riskMetric(candidate, 'validation', 'sharpe')) }} / {{ formatPercent(riskMetric(candidate, 'validation', 'max_drawdown')) }}<small>胜率 {{ formatPercent(riskMetric(candidate, 'validation', 'win_rate')) }} · 盈亏比 {{ riskMetricRatio(candidate, 'validation', 'payoff_ratio') }} · 盈利因子 {{ riskMetricRatio(candidate, 'validation', 'profit_factor') }}</small><small>平仓 {{ formatNumber(riskMetric(candidate, 'validation', 'total_trades'), 0) }} · 买/卖单 {{ formatNumber(riskMetric(candidate, 'validation', 'executed_buy_orders'), 0) }} / {{ formatNumber(riskMetric(candidate, 'validation', 'executed_sell_orders'), 0) }}</small></td>
+                <td>{{ formatPercent(riskMetric(candidate, 'holdout', 'annual_return')) }} / {{ formatNumber(riskMetric(candidate, 'holdout', 'sharpe')) }} / {{ formatPercent(riskMetric(candidate, 'holdout', 'max_drawdown')) }}<small>胜率 {{ formatPercent(riskMetric(candidate, 'holdout', 'win_rate')) }} · 盈亏比 {{ riskMetricRatio(candidate, 'holdout', 'payoff_ratio') }} · 盈利因子 {{ riskMetricRatio(candidate, 'holdout', 'profit_factor') }}</small><small>平仓 {{ formatNumber(riskMetric(candidate, 'holdout', 'total_trades'), 0) }} · 买/卖单 {{ formatNumber(riskMetric(candidate, 'holdout', 'executed_buy_orders'), 0) }} / {{ formatNumber(riskMetric(candidate, 'holdout', 'executed_sell_orders'), 0) }}</small></td>
                 <td><button class="secondary-button" :data-testid="`portfolio-risk-apply-${candidate.candidate_hash}`" type="button" :disabled="riskOptimizationApplicationBlocked" @click="applyRiskOptimizationCandidate(candidate)">应用</button></td>
               </tr>
             </tbody></table></div>
@@ -1733,6 +1797,26 @@ watch(() => form.formulaText, (value) => {
               <div><span>胜率</span><strong>{{ formatPercent(performanceValue('win_rate')) }}</strong></div>
               <div><span>期末资产</span><strong>{{ formatMoney(performanceValue('end_value')) }}</strong></div>
             </div>
+            <details class="portfolio-trade-breakdown" data-testid="portfolio-trade-breakdown">
+              <summary>买卖与交易质量指标</summary>
+              <div class="portfolio-trade-breakdown-grid">
+                <div><span>盈亏比</span><strong>{{ formatPortfolioRatio('payoff_ratio') }}</strong></div>
+                <div><span>盈利因子</span><strong>{{ formatPortfolioRatio('profit_factor') }}</strong></div>
+                <div><span>Sortino / Calmar</span><strong>{{ formatNumber(performanceValue('sortino')) }} / {{ formatNumber(performanceValue('calmar')) }}</strong></div>
+                <div><span>年化波动率</span><strong>{{ formatPercent(performanceValue('volatility')) }}</strong></div>
+                <div><span>最大回撤持续</span><strong>{{ formatNumber(performanceValue('max_dd_duration'), 0) }} 个交易日</strong></div>
+                <div><span>盈利 / 非盈利笔</span><strong>{{ formatNumber(performanceValue('win_trades'), 0) }} / {{ formatNumber(performanceValue('lose_trades'), 0) }}</strong></div>
+                <div><span>平均盈利 / 亏损</span><strong>{{ formatPercent(performanceValue('avg_win')) }} / {{ formatPercent(performanceValue('avg_loss') === null ? null : Math.abs(performanceValue('avg_loss') ?? 0)) }}</strong></div>
+                <div><span>最大单笔盈利 / 亏损</span><strong>{{ formatPercent(performanceValue('max_win')) }} / {{ formatPercent(performanceValue('max_loss') === null ? null : Math.abs(performanceValue('max_loss') ?? 0)) }}</strong></div>
+                <div><span>平均持仓天数</span><strong>{{ formatNumber(performanceValue('avg_holding_days'), 1) }}</strong></div>
+                <div><span>买入 / 卖出成交单</span><strong>{{ formatNumber(performanceValue('executed_buy_orders'), 0) }} / {{ formatNumber(performanceValue('executed_sell_orders'), 0) }}</strong></div>
+                <div><span>买入 / 卖出换手</span><strong>{{ formatTurnoverMultiple('buy_turnover') }} / {{ formatTurnoverMultiple('sell_turnover') }}</strong></div>
+                <div><span>总换手</span><strong>{{ formatTurnoverMultiple('turnover') }}</strong></div>
+                <div><span>买入 / 卖出成本</span><strong>{{ formatMoney(performanceValue('buy_transaction_costs')) }} / {{ formatMoney(performanceValue('sell_transaction_costs')) }}</strong></div>
+                <div><span>拒绝买单 / 卖单</span><strong>{{ formatNumber(performanceValue('rejected_buy_orders'), 0) }} / {{ formatNumber(performanceValue('rejected_sell_orders'), 0) }}</strong></div>
+              </div>
+              <p>盈亏比按卖出记录的平均盈利幅度 ÷ 平均亏损幅度计算；盈利因子按盈利总额 ÷ 亏损总额计算。买入是入场腿，已实现胜率与盈亏比按卖出记录统计，盈亏 ≤ 0 计为非盈利。买卖换手按各方向成交额 ÷ 初始资金计算，买卖成本包含佣金、印花税和滑点。</p>
+            </details>
             <div id="portfolio-pnl-analysis-panel" v-if="showPnlAnalysis">
               <PortfolioPnlAnalysis :result="result" testid="portfolio-pnl-analysis" />
             </div>
@@ -1778,11 +1862,17 @@ watch(() => form.formulaText, (value) => {
                 <td>{{ item.candidate_count }}</td>
                 <td>夏普 {{ formatNumber(item.validation_best_sharpe) }}<small class="muted-code"> · 年化 {{ formatPercent(item.validation_best_annual_return) }}</small></td>
                 <td>{{ formatRiskOptimizationDuration(item.duration_seconds) }}</td>
-                <td><button class="table-link" type="button" :data-testid="`portfolio-risk-history-load-${item.job_id}`" :disabled="riskOptimizationHistoryLoadingId !== null" @click="loadRiskOptimizationHistoryDetail(item.job_id)">{{ riskOptimizationHistoryLoadingId === item.job_id ? '载入中…' : '载入候选' }}</button></td>
+                <td><div class="risk-optimization-history-actions"><button class="table-link" type="button" :data-testid="`portfolio-risk-history-detail-${item.job_id}`" :disabled="riskOptimizationHistoryDetailLoadingId !== null" @click="toggleRiskOptimizationHistoryDetail(item.job_id)">{{ riskOptimizationHistoryDetailLoadingId === item.job_id ? '读取详情…' : riskOptimizationHistoryDetailId === item.job_id ? '收起详情' : '详情' }}</button><button class="table-link" type="button" :data-testid="`portfolio-risk-history-load-${item.job_id}`" :disabled="riskOptimizationHistoryLoadingId !== null" @click="loadRiskOptimizationHistoryDetail(item.job_id)">{{ riskOptimizationHistoryLoadingId === item.job_id ? '载入中…' : '载入候选' }}</button></div></td>
               </tr>
             </tbody>
           </table>
         </div>
+        <p v-if="riskOptimizationHistoryDetailError" class="notice error" data-testid="portfolio-risk-history-detail-error">{{ riskOptimizationHistoryDetailError }}</p>
+        <RiskOptimizationHistoryDetail
+          v-if="riskOptimizationHistoryDetailId && riskOptimizationHistoryDetail"
+          :result="riskOptimizationHistoryDetail"
+          @close="closeRiskOptimizationHistoryDetail"
+        />
         <div v-if="riskOptimizationHistory.length < riskOptimizationHistoryTotal" class="history-load-more">
           <button class="secondary-button" type="button" data-testid="portfolio-risk-history-load-more" :disabled="riskOptimizationHistoryLoading" @click="loadRiskOptimizationHistory(true)">{{ riskOptimizationHistoryLoading ? '读取中…' : `加载更早记录（${riskOptimizationHistory.length} / ${riskOptimizationHistoryTotal}）` }}</button>
         </div>

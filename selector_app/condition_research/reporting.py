@@ -89,17 +89,98 @@ def candidate_constraint_failures(
             candidate_metric is None or candidate_metric + 1e-12 < baseline_metric
         ):
             failures.append(label)
-    # A buy filter removes trades, and capital sitting in cash earns nothing.
-    # Win rate and payoff both describe the trades that *did* happen, so a
-    # filter that skips most of them can look better on every per-trade metric
-    # while leaving the study worse off overall.
-    candidate_total = _number(_per_stock(candidate_summary).get("median_total_return"))
-    baseline_total = _number(_per_stock(baseline_summary).get("median_total_return"))
-    if baseline_total is not None and (
-        candidate_total is None or candidate_total + 1e-12 < baseline_total
-    ):
-        failures.append("总收益低于基础规则")
     return tuple(failures)
+
+
+def candidate_performance_warnings(
+    candidate_summary: Mapping[str, object],
+    baseline_summary: Mapping[str, object],
+) -> tuple[str, ...]:
+    """Return advisory per-stock metrics that should not block holdout evaluation."""
+
+    candidate = _per_stock(candidate_summary)
+    baseline = _per_stock(baseline_summary)
+    warnings: list[str] = []
+    for key, label in (
+        ("median_total_return", "逐股中位总收益低于基础规则"),
+        ("median_sharpe", "逐股中位夏普低于基础规则"),
+        ("median_annual_return", "逐股中位年化收益低于基础规则"),
+    ):
+        candidate_metric = _number(candidate.get(key))
+        baseline_metric = _number(baseline.get(key))
+        if (
+            candidate_metric is not None
+            and baseline_metric is not None
+            and candidate_metric + 1e-12 < baseline_metric
+        ):
+            warnings.append(label)
+    return tuple(warnings)
+
+
+def assign_validation_objective_scores(
+    results: Sequence[MutableMapping[str, object]],
+) -> None:
+    """Score passing candidates by equal-weight validation metric percentiles.
+
+    Percentile ranks keep win rate, per-stock median Sharpe, and per-stock
+    median annual return on comparable scales. The score is only a shortlist
+    ordering aid; all final conclusions still come from the untouched holdout.
+    """
+
+    by_side: dict[str, list[MutableMapping[str, object]]] = {}
+    for result in results:
+        result["validation_objective_score"] = None
+        if result.get("passed_constraints") is True:
+            by_side.setdefault(str(result.get("side") or ""), []).append(result)
+
+    for candidates in by_side.values():
+        component_scores: dict[int, list[float]] = {
+            id(candidate): [] for candidate in candidates
+        }
+        for metric in ("win_rate", "median_sharpe", "median_annual_return"):
+            ranked = sorted(
+                candidates,
+                key=lambda item: (
+                    _candidate_validation_metric(item, metric) is None,
+                    -(
+                        _candidate_validation_metric(item, metric)
+                        if _candidate_validation_metric(item, metric) is not None
+                        else 0.0
+                    ),
+                    str(item.get("candidate_id") or ""),
+                ),
+            )
+            index = 0
+            while index < len(ranked):
+                value = _candidate_validation_metric(ranked[index], metric)
+                end = index + 1
+                while end < len(ranked):
+                    next_value = _candidate_validation_metric(ranked[end], metric)
+                    if next_value != value:
+                        break
+                    end += 1
+                average_rank = (index + end - 1) / 2
+                percentile = (
+                    1.0
+                    if len(ranked) == 1
+                    else 1.0 - average_rank / (len(ranked) - 1)
+                )
+                for candidate in ranked[index:end]:
+                    component_scores[id(candidate)].append(percentile)
+                index = end
+
+        for candidate in candidates:
+            scores = component_scores[id(candidate)]
+            candidate["validation_objective_score"] = round(math.fsum(scores) / len(scores), 6)
+
+
+def _candidate_validation_metric(result: Mapping[str, object], metric: str) -> float | None:
+    validation = result.get("validation")
+    if not isinstance(validation, Mapping):
+        return None
+    if metric == "win_rate":
+        return _number(_pooled(validation).get("win_rate"))
+    return _number(_per_stock(validation).get(metric))
 
 
 def _per_stock(summary: Mapping[str, object]) -> Mapping[str, object]:
@@ -451,7 +532,7 @@ def _summary_number(result: Mapping[str, object], key: str) -> float:
     validation = result.get("validation")
     if not isinstance(validation, Mapping):
         return float("-inf")
-    if key == "improved_stock_ratio":
+    if key in {"improved_stock_ratio", "median_sharpe", "median_annual_return"}:
         per_stock = validation.get("per_stock")
         value = per_stock.get(key) if isinstance(per_stock, Mapping) else None
     else:
@@ -460,20 +541,25 @@ def _summary_number(result: Mapping[str, object], key: str) -> float:
     return number if number is not None else float("-inf")
 
 
-def _candidate_evidence_key(result: Mapping[str, object]) -> tuple[float, float, float, str]:
-    """候选排序键：只用样本外证据，并列时用稳定键定格。
+def _candidate_evidence_key(
+    result: Mapping[str, object],
+) -> tuple[float, float, float, float, float, float, str]:
+    """候选排序键：先用验证综合名次分，再用样本外证据稳定排序。
 
-    前两项取自验证段，也就是寻优段之外。第三项是验证段的成交笔数——同样是
-    样本外，它表达的只是「这条证据有多厚」，不是「这个条件有多强」，所以垫在
-    胜率与改善比例后面。
+    综合分平衡验证胜率、逐股中位夏普和逐股中位年化收益。后续字段用于综合分
+    并列时定序，成交笔数只表达证据厚度。
 
     特意不用 mining 的 lift：它是寻优段算出来的，拿它决定「先看哪条候选、送
     哪条去留出期复验」等于按过拟合程度挑人。挖掘输出本身是 lift 降序，末尾不
     放一个显式稳定键的话，并列顺序会顺着输入把 lift 又漏回来。
     """
 
+    objective_score = _number(result.get("validation_objective_score"))
     return (
+        -(objective_score if objective_score is not None else float("-inf")),
         -_summary_number(result, "win_rate"),
+        -_summary_number(result, "median_sharpe"),
+        -_summary_number(result, "median_annual_return"),
         -_summary_number(result, "improved_stock_ratio"),
         -_summary_number(result, "closed_trades"),
         str(result.get("candidate_id") or ""),

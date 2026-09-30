@@ -1404,14 +1404,14 @@ onActivated(() => {
             <p class="helper">把最终留出期再切成几段，逐个回放同一批候选，看这条条件在不同时间段是否都成立。窗口太短会自动减少，并在结果里说明。</p>
             <p v-if="errors.significancePermutations" class="field-error">{{ errors.significancePermutations }}</p>
             <div class="compact-fields condition-fields-top">
-              <div><label>主目标</label><p class="field-static">跨股票交易胜率提升</p></div>
+              <div><label>主目标</label><p class="field-static">提高胜率、夏普和收益</p></div>
             </div>
             <p v-if="errors.holdoutCandidates" class="field-error">{{ errors.holdoutCandidates }}</p>
             <p v-if="errors.minInstruments" class="field-error">{{ errors.minInstruments }}</p>
             <p v-if="errors.candidateLimit" class="field-error">{{ errors.candidateLimit }}</p>
             <p v-if="errors.duplicateCorrelation" class="field-error">{{ errors.duplicateCorrelation }}</p>
             <p class="helper">两条候选的命中向量相关性达到门槛就算同一个发现，只留排序最好的那条，其余列在它下面。0.6 会合并同一指标相邻分位的阈值；调到 1 等于基本不合并。</p>
-            <p class="helper">主目标是提高跨股票合并交易胜率；候选还需保持盈亏比和平均单笔净收益，并通过最终留出期复验。</p>
+            <p class="helper">候选需通过噪声、样本、胜率、盈亏比和平均单笔收益门槛；逐股总收益低于基础规则时只提示，不再单独淘汰。通过候选按验证胜率、逐股中位夏普和年化收益排序。</p>
           </fieldset>
 
           <fieldset class="form-section">
@@ -1511,6 +1511,7 @@ onActivated(() => {
               <div><span>全区间交易数</span><strong>{{ report.baseline.full_period?.pooled_trades.closed_trades ?? '—' }}</strong></div>
               <div><span>基础全区间盈亏比</span><strong>{{ formatNumber(report.baseline.full_period?.pooled_trades.payoff_ratio) }}</strong></div>
               <div><span>跳过 / 错误</span><strong>{{ report.skipped }} / {{ report.errors }}</strong></div>
+              <div><span>基础验证逐股中位夏普 / 年化 / 总收益</span><strong>{{ formatNumber(report.baseline.validation?.per_stock.median_sharpe) }} / {{ formatPercent(report.baseline.validation?.per_stock.median_annual_return) }} / {{ formatPercent(report.baseline.validation?.per_stock.median_total_return) }}</strong></div>
             </div>
             <div v-if="rankingReport" class="ranking-advice" data-testid="condition-ranking-advice">
               <div class="ranking-advice-head">
@@ -1624,10 +1625,11 @@ onActivated(() => {
               <p v-if="significanceSummary" class="scope-helper" data-testid="condition-research-significance-summary">{{ significanceSummary }}</p>
               <p v-if="duplicateSummary" class="scope-helper" data-testid="condition-duplicate-summary">{{ duplicateSummary }}</p>
               <p v-if="trialSummary" class="scope-helper" data-testid="condition-trial-summary">{{ trialSummary }}</p>
+              <p class="scope-helper" data-testid="condition-validation-objective-help">通过验证门槛的候选按验证胜率、逐股中位夏普和逐股中位年化收益的综合名次进入留出复验。这里的夏普和收益是逐股统计，不等同于有限槽位组合回测的整体绩效；应用后仍需回到组合回测核对。</p>
               <div class="table-wrap">
                 <table>
                   <caption class="sr-only">买卖条件候选验证结果</caption>
-                  <thead><tr><th>选择</th><th>方向</th><th>新增条件</th><th>样本 / 股票</th><th>训练 lift</th><th>前 N 名胜率<TermHint term="topNWinRate" /></th><th title="买入按基础规则入场日计，卖出按持仓期提前离场决策点计（全市场合并，分母见结果字段 sample_totals）">条件命中率</th><th title="验证期合并成交笔数 / 你设置的最少交易样本">验证成交 / 门槛</th><th>验证胜率</th><th>全区间胜率</th><th>股票胜率提升率</th><th>盈亏比</th><th>留出胜率</th><th>状态</th></tr></thead>
+                  <thead><tr><th>选择</th><th>方向</th><th>新增条件</th><th>样本 / 股票</th><th>训练 lift</th><th>前 N 名胜率<TermHint term="topNWinRate" /></th><th title="买入按基础规则入场日计，卖出按持仓期提前离场决策点计（全市场合并，分母见结果字段 sample_totals）">条件命中率</th><th title="验证期合并成交笔数 / 你设置的最少交易样本">验证成交 / 门槛</th><th>验证胜率</th><th>全区间胜率</th><th title="逐股胜率改善比例，以及各股验证期夏普、年化收益和总收益的中位数">逐股提升率 / 夏普 / 年化 / 总收益</th><th>盈亏比</th><th>留出胜率</th><th>状态</th></tr></thead>
                   <tbody>
                     <tr
                       v-for="candidate in report.candidates"
@@ -1647,6 +1649,7 @@ onActivated(() => {
                       <td class="condition-side">{{ candidate.side === 'buy' ? '买入过滤' : '卖出触发' }}</td>
                       <td class="condition-rule">
                         {{ conditionText(candidate) }}
+                        <small v-if="candidate.validation_objective_score !== null && candidate.validation_objective_score !== undefined" :title="'按验证胜率、逐股中位夏普和逐股中位年化收益综合排序；0 到 1 表示同侧候选中的相对名次'">验证综合名次分 {{ formatNumber(candidate.validation_objective_score, 3) }}</small>
                         <span
                           v-if="mergedDuplicates(candidate).length"
                           class="condition-merged"
@@ -1672,11 +1675,15 @@ onActivated(() => {
                       <td>{{ validationTrades(candidate) }}</td>
                       <td>{{ formatPercent(candidate.validation.pooled_trades.win_rate) }}</td>
                       <td>{{ formatPercent(candidate.full_period?.pooled_trades.win_rate) }}</td>
-                      <td>{{ formatPercent(candidate.validation.per_stock.improved_stock_ratio) }}</td>
+                      <td>
+                        {{ formatPercent(candidate.validation.per_stock.improved_stock_ratio) }}
+                        <small class="condition-objective-metrics">{{ formatNumber(candidate.validation.per_stock.median_sharpe) }} / {{ formatPercent(candidate.validation.per_stock.median_annual_return) }} / {{ formatPercent(candidate.validation.per_stock.median_total_return) }}</small>
+                      </td>
                       <td>{{ formatNumber(candidate.validation.pooled_trades.payoff_ratio) }}</td>
                       <td>{{ formatPercent(candidate.holdout?.pooled_trades.win_rate) }}</td>
                       <td class="condition-status">
                         <span :class="candidate.passed_constraints ? 'positive' : 'muted-code'">{{ constraintText(candidate) }}</span>
+                        <small v-if="candidate.performance_warnings?.length" class="condition-performance-warning">提示：{{ candidate.performance_warnings.join('；') }}</small>
                         <button
                           v-if="candidate.full_period"
                           class="text-button"
@@ -1684,6 +1691,7 @@ onActivated(() => {
                           type="button"
                           @click="selectedStockView = candidate.candidate_id + ':full'"
                         >个股</button>
+                        <span v-else-if="candidate.passed_constraints" class="muted-code">验证通过，未入留出名额</span>
                         <span v-else class="muted-code">未进留出期</span>
                       </td>
                     </tr>
@@ -1804,6 +1812,22 @@ onActivated(() => {
 
 .condition-status {
   min-width: 240px;
+}
+
+.condition-objective-metrics,
+.condition-performance-warning {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: 0.75rem;
+}
+
+.condition-objective-metrics {
+  color: var(--subtle);
+}
+
+.condition-performance-warning {
+  color: var(--warning, #f59e0b);
+  line-height: 1.4;
 }
 
 .condition-sensitivity {

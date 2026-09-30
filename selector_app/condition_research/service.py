@@ -54,7 +54,9 @@ from .reporting import (
     _top_n_context,
     _trial_context,
     _without_stock_rows,
+    assign_validation_objective_scores,
     candidate_constraint_failures,
+    candidate_performance_warnings,
 )
 from .resources import (
     ResearchResourceBudgetError,
@@ -377,6 +379,10 @@ class ConditionResearchService:
                 min_instruments=config.min_instruments,
                 significant=raw_significant if isinstance(raw_significant, bool) else None,
             )
+            performance_warnings = candidate_performance_warnings(
+                summary,
+                validation_baseline_summary,
+            )
             results.append(
                 {
                     "candidate_id": candidate_id,
@@ -388,12 +394,15 @@ class ConditionResearchService:
                     "validation": _without_stock_rows(summary),
                     "passed_constraints": not reasons,
                     "constraint_failures": list(reasons),
+                    "performance_warnings": list(performance_warnings),
+                    "validation_objective_score": None,
                     "full_period": None,
                     "holdout": None,
                     "windows": [],
                     "consistency": None,
                 }
             )
+        assign_validation_objective_scores(results)
         results.sort(
             key=lambda item: (
                 not bool(item.get("passed_constraints")),

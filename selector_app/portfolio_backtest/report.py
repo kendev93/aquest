@@ -45,14 +45,37 @@ class PortfolioReportMixin(_PortfolioServiceState):
         trade_frame = pd.DataFrame(
             [
                 {
+                    "datetime": (
+                        _date_int(str(trade["date"])) if trade.get("date") else None
+                    ),
+                    "market": trade.get("market"),
+                    "code": trade.get("code"),
                     "direction": trade.get("direction"),
+                    "size": trade.get("size"),
+                    "price": trade.get("price"),
+                    "commission": trade.get("commission"),
+                    "stamp_tax": trade.get("stamp_tax"),
+                    "slippage": trade.get("slippage"),
                     "pnl": trade.get("pnl"),
                     "cost_basis": trade.get("cost_basis"),
                     "rejected": trade.get("rejected", False),
                 }
                 for trade in trades
             ],
-            columns=["direction", "pnl", "cost_basis", "rejected"],
+            columns=[
+                "datetime",
+                "market",
+                "code",
+                "direction",
+                "size",
+                "price",
+                "commission",
+                "stamp_tax",
+                "slippage",
+                "pnl",
+                "cost_basis",
+                "rejected",
+            ],
         )
         raw_performance = PerformanceAnalyzer(equity_frame, trade_frame).compute()
         performance: dict[str, float | None] = {
@@ -61,13 +84,28 @@ class PortfolioReportMixin(_PortfolioServiceState):
                 "total_return",
                 "annual_return",
                 "sharpe",
+                "sortino",
+                "calmar",
                 "max_drawdown",
+                "max_dd_duration",
                 "total_trades",
                 "win_rate",
+                "win_trades",
+                "lose_trades",
+                "rejected_trades",
+                "profit_factor",
+                "avg_win",
+                "avg_loss",
+                "max_win",
+                "max_loss",
+                "avg_holding_days",
                 "volatility",
             )
         }
+        performance["payoff_ratio"] = _payoff_ratio(performance)
+        performance.update(_trade_activity_metrics(trades, config.initial_cash))
         turnover = _portfolio_turnover(trades, config.initial_cash)
+        performance["turnover"] = turnover
         return {
             "performance": performance,
             "data_fingerprint": data_fingerprint,
@@ -87,10 +125,32 @@ class PortfolioReportMixin(_PortfolioServiceState):
                     "total_return",
                     "annual_return",
                     "sharpe",
+                    "sortino",
+                    "calmar",
                     "max_drawdown",
+                    "max_dd_duration",
                     "total_trades",
                     "win_rate",
+                    "win_trades",
+                    "lose_trades",
+                    "rejected_trades",
+                    "profit_factor",
+                    "payoff_ratio",
+                    "avg_win",
+                    "avg_loss",
+                    "max_win",
+                    "max_loss",
+                    "avg_holding_days",
                     "volatility",
+                    "turnover",
+                    "executed_buy_orders",
+                    "executed_sell_orders",
+                    "rejected_buy_orders",
+                    "rejected_sell_orders",
+                    "buy_turnover",
+                    "sell_turnover",
+                    "buy_transaction_costs",
+                    "sell_transaction_costs",
                 )
             },
             "data_fingerprint": report.data_fingerprint,
@@ -121,6 +181,8 @@ class PortfolioReportMixin(_PortfolioServiceState):
             [
                 {
                     "datetime": _date_int(cast(str, trade["date"])),
+                    "market": trade.get("market"),
+                    "code": trade.get("code"),
                     "direction": trade["direction"],
                     "size": trade["size"],
                     "price": trade["price"],
@@ -135,6 +197,8 @@ class PortfolioReportMixin(_PortfolioServiceState):
             ],
             columns=[
                 "datetime",
+                "market",
+                "code",
                 "direction",
                 "size",
                 "price",
@@ -162,8 +226,10 @@ class PortfolioReportMixin(_PortfolioServiceState):
             performance = {
                 name: _finite_number(value) for name, value in analyzer.compute().items()
             }
+            performance["payoff_ratio"] = _payoff_ratio(performance)
             performance["avg_holding_days"] = _average_holding_days(trades)
             performance["turnover"] = _portfolio_turnover(trades, config.initial_cash)
+            performance.update(_trade_activity_metrics(trades, config.initial_cash))
             simulation_diagnostic = simulation.get("diagnostic")
             diagnostic = (
                 str(simulation_diagnostic)
@@ -292,6 +358,71 @@ def _portfolio_turnover(
         for trade in trades
     )
     return total_notional / initial_cash
+
+
+def _payoff_ratio(performance: Mapping[str, float | None]) -> float | None:
+    """Average winning return divided by the absolute average losing return."""
+
+    average_win = performance.get("avg_win")
+    average_loss = performance.get("avg_loss")
+    if (
+        average_win is None
+        or average_loss is None
+        or not np.isfinite(average_win)
+        or not np.isfinite(average_loss)
+        or average_loss >= 0
+    ):
+        return None
+    return average_win / abs(average_loss)
+
+
+def _trade_activity_metrics(
+    trades: Sequence[Mapping[str, PortfolioJsonValue]],
+    initial_cash: float,
+) -> dict[str, float]:
+    """Expose executed order counts, side turnover, and explicit trading costs."""
+
+    result = {
+        "executed_buy_orders": 0.0,
+        "executed_sell_orders": 0.0,
+        "rejected_buy_orders": 0.0,
+        "rejected_sell_orders": 0.0,
+        "buy_turnover": 0.0,
+        "sell_turnover": 0.0,
+        "buy_transaction_costs": 0.0,
+        "sell_transaction_costs": 0.0,
+    }
+    notionals = {"BUY": 0.0, "SELL": 0.0}
+    for trade in trades:
+        direction = trade.get("direction")
+        if direction not in {"BUY", "SELL"}:
+            continue
+        side = "buy" if direction == "BUY" else "sell"
+        rejected = bool(trade.get("rejected", False))
+        if rejected:
+            result[f"rejected_{side}_orders"] += 1.0
+            continue
+        result[f"executed_{side}_orders"] += 1.0
+        size = _safe_float(trade.get("size"))
+        price = _safe_float(trade.get("price"))
+        notionals[cast(str, direction)] += size * price
+        result[f"{side}_transaction_costs"] += sum(
+            _safe_float(trade.get(key)) for key in ("commission", "stamp_tax", "slippage")
+        )
+    if initial_cash > 0:
+        result["buy_turnover"] = notionals["BUY"] / initial_cash
+        result["sell_turnover"] = notionals["SELL"] / initial_cash
+    return result
+
+
+def _safe_float(value: object) -> float:
+    if isinstance(value, bool):
+        return 0.0
+    try:
+        number = float(cast(float, value))
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return number if np.isfinite(number) else 0.0
 
 
 def _date_int(value: str) -> int:
