@@ -11,6 +11,14 @@ import pandas as pd
 
 from .store_base import _WRITE_LOCK, _DuckDbStoreBase, _now, _timestamp_text
 
+_CHUNK_FINGERPRINT_MARKER = "|chunk:"
+
+
+def _fingerprint_matches_revision(fingerprint: str, revision: str) -> bool:
+    return fingerprint == revision or fingerprint.startswith(
+        f"{revision}{_CHUNK_FINGERPRINT_MARKER}"
+    )
+
 
 class DuckDbIndicatorCacheStore:
     """Read and write versioned derived indicator generations."""
@@ -101,7 +109,11 @@ class DuckDbIndicatorCacheStore:
                       AND price_basis = ?
                       AND formula_id = ?
                       AND formula_version = ?
-                      AND data_fingerprint = ?
+                      AND (
+                          data_fingerprint = ?
+                          OR substr(data_fingerprint, 1, length(? || '|chunk:'))
+                             = ? || '|chunk:'
+                      )
                     ORDER BY bar_offset
                     """,
                     [
@@ -111,6 +123,8 @@ class DuckDbIndicatorCacheStore:
                         price_basis,
                         formula_id,
                         formula_version,
+                        data_fingerprint,
+                        data_fingerprint,
                         data_fingerprint,
                     ],
                 ).fetchall()
@@ -166,6 +180,8 @@ class DuckDbIndicatorCacheStore:
             timeframe,
             price_basis,
             data_fingerprint,
+            data_fingerprint,
+            data_fingerprint,
         ]
         for formula_id, formula_version in formula_versions.items():
             predicates.append("(formula_id = ? AND formula_version = ?)")
@@ -178,7 +194,12 @@ class DuckDbIndicatorCacheStore:
             "data_fingerprint, bar_offset, data_start, data_end, data_length, values_blob, "
             "signals_blob, computed_at FROM indicator_cache "
             "WHERE market = ? AND code = ? AND timeframe = ? AND price_basis = ? "
-            "AND data_fingerprint = ? AND (" + " OR ".join(predicates) + ")" + window + " "
+            "AND (data_fingerprint = ? OR substr(data_fingerprint, 1, "
+            "length(? || '|chunk:')) = ? || '|chunk:') AND ("
+            + " OR ".join(predicates)
+            + ")"
+            + window
+            + " "
             "ORDER BY formula_id, bar_offset"
         )
         try:
@@ -246,7 +267,14 @@ class DuckDbIndicatorCacheStore:
                          AND cache.price_basis = keys.price_basis
                          AND cache.formula_id = keys.formula_id
                          AND cache.formula_version = keys.formula_version
-                         AND cache.data_fingerprint = keys.data_fingerprint
+                         AND (
+                             cache.data_fingerprint = keys.data_fingerprint
+                             OR substr(
+                                 cache.data_fingerprint,
+                                 1,
+                                 length(keys.data_fingerprint || '|chunk:')
+                             ) = keys.data_fingerprint || '|chunk:'
+                         )
                         ORDER BY cache.market, cache.code, cache.formula_id, cache.bar_offset
                         """
                     ).fetchall()
@@ -271,6 +299,61 @@ class DuckDbIndicatorCacheStore:
             "computed_at",
         ]
         return [dict(zip(columns, row, strict=True)) for row in rows]
+
+    def indicator_cache_chunk_index(
+        self,
+        keys: Iterable[Mapping[str, str]],
+    ) -> list[dict[str, object]]:
+        """Read cache chunk metadata without loading the indicator blobs."""
+
+        pending = list(keys)
+        if not pending:
+            return []
+        lookup_frame = pd.DataFrame(
+            pending,
+            columns=["market", "code", "timeframe", "price_basis", "formula_id", "formula_version"],
+        ).drop_duplicates()
+        try:
+            with self._store._connect(read_only=True) as connection:
+                connection.register("_indicator_cache_index_keys", lookup_frame)
+                try:
+                    rows = connection.execute(
+                        """
+                        SELECT cache.market, cache.code, cache.timeframe,
+                               cache.price_basis, cache.formula_id,
+                               cache.formula_version, cache.data_fingerprint,
+                               cache.bar_offset, cache.data_start, cache.data_end,
+                               cache.data_length
+                        FROM indicator_cache AS cache
+                        INNER JOIN _indicator_cache_index_keys AS keys
+                          ON cache.market = keys.market
+                         AND cache.code = keys.code
+                         AND cache.timeframe = keys.timeframe
+                         AND cache.price_basis = keys.price_basis
+                         AND cache.formula_id = keys.formula_id
+                         AND cache.formula_version = keys.formula_version
+                        ORDER BY cache.market, cache.code, cache.formula_id,
+                                 cache.bar_offset, cache.computed_at DESC
+                        """
+                    ).fetchall()
+                finally:
+                    connection.unregister("_indicator_cache_index_keys")
+        except duckdb.CatalogException:
+            return []
+        names = (
+            "market",
+            "code",
+            "timeframe",
+            "price_basis",
+            "formula_id",
+            "formula_version",
+            "data_fingerprint",
+            "bar_offset",
+            "data_start",
+            "data_end",
+            "data_length",
+        )
+        return [dict(zip(names, row, strict=True)) for row in rows]
 
     def read_custom_indicator_cache(
         self,
@@ -380,7 +463,12 @@ class DuckDbIndicatorCacheStore:
             ]
         )
 
-    def write_indicator_caches(self, entries: Iterable[Mapping[str, object]]) -> None:
+    def write_indicator_caches(
+        self,
+        entries: Iterable[Mapping[str, object]],
+        *,
+        preserve_other_chunks: bool = False,
+    ) -> None:
         """Atomically replace several formula cache generations in one transaction."""
 
         pending = list(entries)
@@ -391,16 +479,29 @@ class DuckDbIndicatorCacheStore:
         # 同一个公式的多个分块共用一次清理：先按公式身份去重删除过期版本，
         # 再逐块写入，避免每一块都重复扫一遍表。
         stale: dict[tuple[str, str, str, str, str], tuple[str, str]] = {}
+        stale_chunks: dict[tuple[str, str, str, str, str, object], tuple[str, str]] = {}
+        legacy_revisions: dict[tuple[str, str, str, str, str], str] = {}
         for entry in pending:
-            stale[
-                (
-                    str(entry["market"]).strip().upper(),
-                    str(entry["code"]).strip(),
-                    str(entry["timeframe"]),
-                    str(entry["price_basis"]),
-                    str(entry["formula_id"]),
+            identity = (
+                str(entry["market"]).strip().upper(),
+                str(entry["code"]).strip(),
+                str(entry["timeframe"]),
+                str(entry["price_basis"]),
+                str(entry["formula_id"]),
+            )
+            version_and_fingerprint = (
+                str(entry["formula_version"]),
+                str(entry["data_fingerprint"]),
+            )
+            if preserve_other_chunks:
+                stale_chunks[(*identity, entry.get("data_start"))] = version_and_fingerprint
+                revision, marker, _digest = str(entry["data_fingerprint"]).partition(
+                    _CHUNK_FINGERPRINT_MARKER
                 )
-            ] = (str(entry["formula_version"]), str(entry["data_fingerprint"]))
+                if marker:
+                    legacy_revisions[identity] = revision
+            else:
+                stale[identity] = version_and_fingerprint
         with _WRITE_LOCK, self._store._connect() as connection:
             connection.execute("BEGIN")
             try:
@@ -433,6 +534,56 @@ class DuckDbIndicatorCacheStore:
                             data_fingerprint,
                         ],
                     )
+                if preserve_other_chunks:
+                    for (
+                        market,
+                        code,
+                        timeframe,
+                        price_basis,
+                        formula_id,
+                    ), revision in legacy_revisions.items():
+                        # A previous whole-series cache with this same current
+                        # revision overlaps the annual offsets but has no chunk
+                        # source hash. Retire it before publishing annual rows.
+                        connection.execute(
+                            """
+                            DELETE FROM indicator_cache
+                            WHERE market = ? AND code = ? AND timeframe = ?
+                              AND price_basis = ? AND formula_id = ?
+                              AND data_fingerprint = ?
+                            """,
+                            [market, code, timeframe, price_basis, formula_id, revision],
+                        )
+                    for (
+                        market,
+                        code,
+                        timeframe,
+                        price_basis,
+                        formula_id,
+                        data_start,
+                    ), (formula_version, data_fingerprint) in stale_chunks.items():
+                        connection.execute(
+                            """
+                            DELETE FROM indicator_cache
+                            WHERE market = ? AND code = ? AND timeframe = ?
+                              AND price_basis = ? AND formula_id = ?
+                              AND data_start >= date_trunc('year', CAST(? AS DATE))
+                              AND data_start < date_trunc('year', CAST(? AS DATE))
+                                                + INTERVAL '1 year'
+                              AND (formula_version <> ? OR data_fingerprint <> ?)
+                            """,
+                            [
+                                market,
+                                code,
+                                timeframe,
+                                price_basis,
+                                formula_id,
+                                data_start,
+                                data_start,
+                                formula_version,
+                                data_fingerprint,
+                            ],
+                        )
                 for entry in pending:
                     connection.execute(
                         """
@@ -468,6 +619,75 @@ class DuckDbIndicatorCacheStore:
                             entry["signals_blob"],
                             _now(),
                         ],
+                    )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+
+    def retag_indicator_cache_chunks(
+        self,
+        entries: Iterable[Mapping[str, object]],
+    ) -> None:
+        """Refresh chunk revision metadata without rewriting cached value blobs."""
+
+        pending = list(entries)
+        if not pending:
+            return
+        self._store._require_writer()
+        with _WRITE_LOCK, self._store._connect() as connection:
+            connection.execute("BEGIN")
+            try:
+                for entry in pending:
+                    identity = [
+                        str(entry["market"]).strip().upper(),
+                        str(entry["code"]).strip(),
+                        str(entry["timeframe"]),
+                        str(entry["price_basis"]),
+                        str(entry["formula_id"]),
+                        str(entry["formula_version"]),
+                    ]
+                    old_fingerprint = str(entry["old_data_fingerprint"])
+                    old_offset = int(cast(int, entry["old_bar_offset"]))
+                    new_fingerprint = str(entry["data_fingerprint"])
+                    new_offset = int(cast(int, entry["bar_offset"]))
+                    data_start = entry.get("data_start")
+                    if old_fingerprint == new_fingerprint and old_offset == new_offset:
+                        continue
+                    target = connection.execute(
+                        """
+                        SELECT 1 FROM indicator_cache
+                        WHERE market = ? AND code = ? AND timeframe = ?
+                          AND price_basis = ? AND formula_id = ?
+                          AND formula_version = ? AND data_fingerprint = ?
+                          AND bar_offset = ?
+                        LIMIT 1
+                        """,
+                        [*identity, new_fingerprint, new_offset],
+                    ).fetchone()
+                    old_key = [*identity, old_fingerprint, old_offset]
+                    if target is not None:
+                        connection.execute(
+                            """
+                            DELETE FROM indicator_cache
+                            WHERE market = ? AND code = ? AND timeframe = ?
+                              AND price_basis = ? AND formula_id = ?
+                              AND formula_version = ? AND data_fingerprint = ?
+                              AND bar_offset = ? AND data_start IS NOT DISTINCT FROM ?
+                            """,
+                            [*old_key, data_start],
+                        )
+                        continue
+                    connection.execute(
+                        """
+                        UPDATE indicator_cache
+                        SET data_fingerprint = ?, bar_offset = ?
+                        WHERE market = ? AND code = ? AND timeframe = ?
+                          AND price_basis = ? AND formula_id = ?
+                          AND formula_version = ? AND data_fingerprint = ?
+                          AND bar_offset = ? AND data_start IS NOT DISTINCT FROM ?
+                        """,
+                        [new_fingerprint, new_offset, *old_key, data_start],
                     )
                 connection.execute("COMMIT")
             except Exception:
@@ -609,14 +829,9 @@ class DuckDbIndicatorCacheStore:
     def stale_symbols(self, formula_versions: Mapping[str, str]) -> set[tuple[str, str]]:
         """Instruments whose cached indicators are missing or out of date.
 
-        增量预计算靠它缩小范围：行情更新往往只动一小部分标的，全市场重算会把
-        没变化的标的也重写一遍。判据是「该标的在当前数据版本号下，每个公式的
-        当前口径版本是否都有缓存」。
-
-        必须同时比 `data_fingerprint` 和 `formula_version`——读取路径
-        （`read_indicator_cache`）就是两者都比。只比前者的话，bump
-        `cache_version` 而行情没变的那些标的会被判成「已缓存」，增量预计算
-        整批跳过，预热白跑（结果本身不受影响，首次请求仍会按需重算）。
+        增量预计算按标的缩小范围：每个公式的当前版本都必须有一条从偏移 0 开始
+        连续覆盖的缓存序列，并包含当前行情版本下的年度块。年度块指纹还会校验实际
+        输入行情，因此同一标的的其他年度可以保留旧指纹并在预计算时直接复用。
         """
 
         wanted = {(str(fid), str(version)) for fid, version in formula_versions.items()}
@@ -628,24 +843,48 @@ class DuckDbIndicatorCacheStore:
         try:
             with self._store._connect(read_only=True) as connection:
                 rows = connection.execute(
-                    "SELECT market, code, data_fingerprint, formula_id, formula_version "
+                    "SELECT market, code, data_fingerprint, formula_id, formula_version, "
+                    "bar_offset, data_length "
                     "FROM indicator_cache"
                 ).fetchall()
         except duckdb.CatalogException:
             return set(revisions)
-        covered: dict[tuple[str, str], dict[str, set[tuple[str, str]]]] = {}
-        for market, code, fingerprint, formula_id, formula_version in rows:
+        covered: dict[tuple[str, str], dict[tuple[str, str], set[tuple[int, int]]]] = {}
+        for market, code, fingerprint, formula_id, formula_version, offset, length in rows:
             key = (str(market).strip().upper(), str(code).strip())
-            covered.setdefault(key, {}).setdefault(str(fingerprint), set()).add(
-                (str(formula_id), str(formula_version))
-            )
+            revision = revisions.get(key)
+            if revision is None or not _fingerprint_matches_revision(str(fingerprint), revision):
+                continue
+            pair = (str(formula_id), str(formula_version))
+            if pair not in wanted:
+                continue
+            try:
+                chunk = (int(cast(int, offset)), int(cast(int, length)))
+            except (TypeError, ValueError):
+                continue
+            if chunk[0] >= 0 and chunk[1] > 0:
+                covered.setdefault(key, {}).setdefault(pair, set()).add(chunk)
         stale: set[tuple[str, str]] = set()
         for key, revision in revisions.items():
-            by_fingerprint = covered.get(key)
-            if not by_fingerprint:
-                stale.add(key)
-                continue
-            if wanted - by_fingerprint.get(revision, set()):
+            complete = True
+            for formula_id, formula_version in wanted:
+                chunks = covered.get(key, {}).get((formula_id, formula_version))
+                if not chunks:
+                    complete = False
+                    break
+                ordered = sorted(chunks)
+                if ordered[0][0] != 0:
+                    complete = False
+                    break
+                cursor = 0
+                for offset, length in ordered:
+                    if offset != cursor:
+                        complete = False
+                        break
+                    cursor += length
+                if not complete:
+                    break
+            if not complete:
                 stale.add(key)
         return stale
 

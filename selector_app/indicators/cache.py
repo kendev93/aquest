@@ -33,6 +33,11 @@ _FINGERPRINT_COLUMNS = ("date", "open", "high", "low", "close", "volume", "amoun
 _OPTIONAL_FINGERPRINT_COLUMNS = ("bar_status", "price_basis")
 _MAX_CACHE_BLOB_BYTES = 64 * 1024 * 1024
 _CUSTOM_ENGINE_VERSION = "1"
+# Keep this aligned with the precompute window: each annual result depends on
+# the year's bars plus the preceding warm-up rows used to initialize rolling
+# and recursive indicators.
+INDICATOR_CACHE_WARMUP_BARS = 268
+_CHUNK_FINGERPRINT_MARKER = "|chunk:"
 # 落库用 float32：价格只有两位小数、指标值不需要 float64 的 17 位有效数字，
 # 实测缓存体积直接减半。读回来仍转成 float64，下游无感。
 _VALUE_DTYPE = np.float32
@@ -145,6 +150,26 @@ def frame_fingerprint(frame: pd.DataFrame) -> str:
     hashed = pd.util.hash_pandas_object(canonical, index=False)
     digest.update(hashed.to_numpy(dtype=np.uint64, copy=False).tobytes())
     return digest.hexdigest()
+
+
+def chunk_data_fingerprint(
+    revision: str,
+    input_frame: pd.DataFrame,
+    *,
+    source_hash: str | None = None,
+) -> str:
+    """Bind an annual cache chunk to both the instrument revision and its inputs."""
+
+    digest = source_hash if source_hash is not None else frame_fingerprint(input_frame)
+    return f"{revision}{_CHUNK_FINGERPRINT_MARKER}{digest}"
+
+
+def chunk_source_hash(data_fingerprint: object) -> str | None:
+    """Return the source-frame hash embedded in an incremental chunk key."""
+
+    value = str(data_fingerprint)
+    _revision, separator, digest = value.partition(_CHUNK_FINGERPRINT_MARKER)
+    return digest if separator and digest else None
 
 
 def _price_basis(frame: pd.DataFrame) -> str:
@@ -368,6 +393,75 @@ class IndicatorCache:
             return
         with self._lock:
             self._revisions.update(fetched)
+
+    def refresh_revisions(self, refs: Iterable[tuple[str, str]]) -> None:
+        """Force-refresh revisions after a source-data write."""
+
+        if self._store is None:
+            return
+        normalized = [
+            (str(market).strip().upper(), str(code).strip()) for market, code in refs
+        ]
+        try:
+            fetched = self._store.data_revisions(normalized)
+        except (AttributeError, RuntimeError, OSError):
+            return
+        with self._lock:
+            self._revisions.update(fetched)
+
+    def revision_for(self, market: str, code: str, frame: pd.DataFrame) -> str:
+        return self._revision(market, code, frame)
+
+    def cached_chunk_index(
+        self,
+        refs: Iterable[tuple[str, str]],
+        formula_ids: Iterable[str],
+        *,
+        timeframe: str = _TIMEFRAME,
+        price_basis: str = _DEFAULT_PRICE_BASIS,
+    ) -> dict[tuple[str, str, str], list[dict[str, object]]]:
+        """Read lightweight annual-cache metadata for the requested formulas."""
+
+        if self._store is None:
+            return {}
+        definitions = {
+            formula_id: self._registry.formula(formula_id) for formula_id in formula_ids
+        }
+        keys = [
+            {
+                "market": str(market).strip().upper(),
+                "code": str(code).strip(),
+                "timeframe": timeframe,
+                "price_basis": price_basis,
+                "formula_id": formula_id,
+                "formula_version": definition.cache_version,
+            }
+            for market, code in refs
+            for formula_id, definition in definitions.items()
+        ]
+        if not keys:
+            return {}
+        try:
+            rows = self._store.indicator_cache_chunk_index(keys)
+        except (AttributeError, RuntimeError, OSError, sqlite3.Error):
+            return {}
+        grouped: dict[tuple[str, str, str], list[dict[str, object]]] = {}
+        for row in rows:
+            key = (
+                str(row["market"]).strip().upper(),
+                str(row["code"]).strip(),
+                str(row["formula_id"]),
+            )
+            grouped.setdefault(key, []).append(row)
+        return grouped
+
+    def retag_cached_chunks(self, entries: Iterable[Mapping[str, object]]) -> None:
+        if self._store is None:
+            return
+        try:
+            self._store.retag_indicator_cache_chunks(entries)
+        except (AttributeError, RuntimeError, OSError, sqlite3.Error):
+            return
 
     def _revision(self, market: str, code: str, frame: pd.DataFrame) -> str:
         """Resolve the revision identifying one instrument's bar series."""
@@ -730,6 +824,8 @@ class IndicatorCache:
         *,
         timeframe: str = _TIMEFRAME,
         chunks_by_key: Mapping[tuple[str, str], tuple[Chunk, ...]] | None = None,
+        data_fingerprint_overrides: Mapping[tuple[str, str], str] | None = None,
+        preserve_other_chunks: bool = False,
     ) -> None:
         """Persist many already-computed results in one database write.
 
@@ -746,7 +842,9 @@ class IndicatorCache:
             frame = frames.get((market, code))
             if frame is None or not results:
                 continue
-            revision = self._revision(str(market), str(code), frame)
+            revision = (data_fingerprint_overrides or {}).get((market, code))
+            if revision is None:
+                revision = self._revision(str(market), str(code), frame)
             price_basis = _price_basis(frame)
             start, end = _date_bounds(frame)
             chunks = (chunks_by_key or {}).get((market, code)) or _chunk_plan(frame)
@@ -771,7 +869,7 @@ class IndicatorCache:
                         chunks,
                     )
                 )
-        self._persistent_put_many(pending)
+        self._persistent_put_many(pending, preserve_other_chunks=preserve_other_chunks)
 
     def metrics(self) -> dict[str, int | float]:
         """Return lightweight counters for benchmark and operational checks."""
@@ -970,6 +1068,8 @@ class IndicatorCache:
         entries: Sequence[
             tuple[_CacheKey, FormulaResult, date | None, date | None, tuple[Chunk, ...]]
         ],
+        *,
+        preserve_other_chunks: bool = False,
     ) -> None:
         if self._store is None or not entries:
             return
@@ -1022,7 +1122,9 @@ class IndicatorCache:
                 return
             started = time.perf_counter()
             try:
-                self._store.write_indicator_caches(pending)
+                self._store.write_indicator_caches(
+                    pending, preserve_other_chunks=preserve_other_chunks
+                )
             finally:
                 self._record_phase("_persistent_write_time_ms", started)
         except (RuntimeError, sqlite3.Error):

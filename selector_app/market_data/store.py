@@ -860,6 +860,12 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
     ) -> list[dict[str, object]]:
         return self._indicator_cache.read_indicator_caches_batch(keys)
 
+    def indicator_cache_chunk_index(
+        self,
+        keys: Iterable[Mapping[str, str]],
+    ) -> list[dict[str, object]]:
+        return self._indicator_cache.indicator_cache_chunk_index(keys)
+
     def data_revisions(
         self,
         refs: Iterable[tuple[str, str]] | None = None,
@@ -925,8 +931,21 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
             bar_offset=bar_offset,
         )
 
-    def write_indicator_caches(self, entries: Iterable[Mapping[str, object]]) -> None:
-        self._indicator_cache.write_indicator_caches(entries)
+    def write_indicator_caches(
+        self,
+        entries: Iterable[Mapping[str, object]],
+        *,
+        preserve_other_chunks: bool = False,
+    ) -> None:
+        self._indicator_cache.write_indicator_caches(
+            entries, preserve_other_chunks=preserve_other_chunks
+        )
+
+    def retag_indicator_cache_chunks(
+        self,
+        entries: Iterable[Mapping[str, object]],
+    ) -> None:
+        self._indicator_cache.retag_indicator_cache_chunks(entries)
 
     def write_custom_indicator_cache(
         self,

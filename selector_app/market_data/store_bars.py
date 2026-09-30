@@ -510,6 +510,43 @@ class DuckDbBarsStore:
                 ).fetchone()
                 eligible_count = int(eligible_row[0] if eligible_row else 0)
                 existing_online_count = int(existing_online_row[0] if existing_online_row else 0)
+                changed_key_rows = connection.execute(
+                    """
+                    SELECT DISTINCT incoming.market, incoming.code
+                    FROM _incoming_online_bars AS incoming
+                    LEFT JOIN daily_bars AS existing
+                      ON existing.market = incoming.market
+                     AND existing.code = incoming.code
+                     AND existing.trade_date = incoming.trade_date
+                     AND existing.price_basis = incoming.price_basis
+                     AND existing.source = 'online'
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM daily_bars AS local
+                        WHERE local.market = incoming.market
+                          AND local.code = incoming.code
+                          AND local.trade_date = incoming.trade_date
+                          AND local.price_basis = incoming.price_basis
+                          AND local.source = 'local'
+                    )
+                      AND (
+                          existing.market IS NULL
+                          OR existing.instrument_type IS DISTINCT FROM incoming.instrument_type
+                          OR existing.board IS DISTINCT FROM incoming.board
+                          OR existing.open IS DISTINCT FROM incoming.open
+                          OR existing.high IS DISTINCT FROM incoming.high
+                          OR existing.low IS DISTINCT FROM incoming.low
+                          OR existing.close IS DISTINCT FROM incoming.close
+                          OR existing.volume IS DISTINCT FROM incoming.volume
+                          OR existing.amount IS DISTINCT FROM incoming.amount
+                          OR existing.provider IS DISTINCT FROM incoming.provider
+                          OR existing.bar_status IS DISTINCT FROM incoming.bar_status
+                      )
+                    """
+                ).fetchall()
+                changed_keys = {
+                    (str(market).strip().upper(), str(code).strip())
+                    for market, code in changed_key_rows
+                }
                 connection.execute(
                     """
                     DELETE FROM daily_bars AS existing
@@ -549,6 +586,8 @@ class DuckDbBarsStore:
                         board,
                         name=names_by_key.get((str(market).upper(), str(code))),
                         provider=provider,
+                        force_updated_at=(str(market).strip().upper(), str(code).strip())
+                        in changed_keys,
                     )
                 connection.unregister("_incoming_online_bars")
                 connection.execute("COMMIT")
