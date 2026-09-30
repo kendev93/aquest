@@ -1,5 +1,6 @@
 """Pure formula calculations used by the screening engine."""
 
+from .breakout_signal import calculate_breakout_signal
 from .indicator_one import calculate_indicator_one
 from .indicator_three import calculate_indicator_three
 from .indicator_two import calculate_indicator_two
@@ -9,6 +10,7 @@ from .technical import calculate_technical_indicators
 
 __all__ = [
     "FORMULA_REGISTRY",
+    "calculate_breakout_signal",
     "calculate_indicator_one",
     "calculate_indicator_two",
     "calculate_indicator_three",

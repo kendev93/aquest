@@ -18,7 +18,7 @@ from .models import FactorTestConfig
 from .panel import build_panel, check_panel_budget, estimate_panel_bytes, scan_calendar
 
 ProgressCallback = Callable[[int, int], None] | None
-_FACTOR_FORMULA_IDS = ("technical", "main_force_absorption")
+_FACTOR_FORMULA_IDS = ("technical", "main_force_absorption", "breakout_signal")
 
 #: Shown verbatim in the UI. A factor test measures whether a value ranks
 #: stocks, not whether the ranking can be traded, and a reader who misses that
@@ -147,7 +147,7 @@ def _resolve_value_ids(config: FactorTestConfig) -> tuple[str, ...]:
         if unknown:
             raise ValueError(
                 f"以下指标不能用于因子检验: {', '.join(unknown)}；"
-                "只支持技术指标、主力吸筹指标中可排序的无量纲输出，"
+                "只支持技术、主力吸筹、突破信号公式中可排序的无量纲输出，"
                 "以及三个自定义公式里已核实的连续输出"
             )
         return tuple(item for item in requested if item in available)

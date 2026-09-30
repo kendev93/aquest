@@ -15,6 +15,8 @@ _SPARSE_EVENT_VALUE_IDS = frozenset(
         # mostly zero and should not be offered as cross-sectional rank factors.
         "main_force_absorption.entry_33",
         "main_force_absorption.washout_33",
+        "breakout_signal.breakthrough",
+        "breakout_signal.breakdown",
     }
 )
 # Raw prices are valid condition operands (close 上穿 MA20) but never ranking

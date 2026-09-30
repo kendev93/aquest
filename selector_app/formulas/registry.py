@@ -7,6 +7,21 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from .breakout_signal import (
+    DISPLAY_NAME as BREAKOUT_DISPLAY_NAME,
+)
+from .breakout_signal import (
+    MINIMUM_BARS as BREAKOUT_MINIMUM_BARS,
+)
+from .breakout_signal import (
+    RECOMMENDED_BARS as BREAKOUT_RECOMMENDED_BARS,
+)
+from .breakout_signal import (
+    VALUE_NAMES as BREAKOUT_VALUE_NAMES,
+)
+from .breakout_signal import (
+    calculate_breakout_signal,
+)
 from .indicator_one import (
     DISPLAY_NAME as ONE_DISPLAY_NAME,
 )
@@ -159,6 +174,13 @@ _VALUE_DISPLAY_NAMES: dict[str, dict[str, str]] = {
         "score_33": "主力吸筹-33日强度",
         "entry_33": "主力吸筹-进场",
         "washout_33": "主力吸筹-洗盘",
+    },
+    "breakout_signal": {
+        "resistance_19_21": "突破信号-阻力线",
+        "operation_19_5": "突破信号-操作线",
+        "spread": "突破信号-红绿柱",
+        "breakthrough": "突破信号-突破",
+        "breakdown": "突破信号-破位",
     },
     "indicator_two": {
         "short_cost": "短期成本线",
@@ -424,6 +446,30 @@ FORMULA_REGISTRY = FormulaRegistry(
             ),
             value_names=ABSORPTION_VALUE_NAMES,
             screen_value_names=ABSORPTION_VALUE_NAMES,
+            cache_version="1",
+        ),
+        FormulaDefinition(
+            id="breakout_signal",
+            display_name=BREAKOUT_DISPLAY_NAME,
+            minimum_bars=BREAKOUT_MINIMUM_BARS,
+            recommended_bars=BREAKOUT_RECOMMENDED_BARS,
+            calculate=calculate_breakout_signal,
+            signals=(
+                SignalDefinition(
+                    "breakout_signal.breakthrough",
+                    "突破信号-突破",
+                    "操作线由下向上穿越阻力线，且阻力线低于 0.1",
+                    "breakout_signal",
+                ),
+                SignalDefinition(
+                    "breakout_signal.breakdown",
+                    "突破信号-破位",
+                    "阻力线由下向上穿越操作线，且阻力线高于 0.25",
+                    "breakout_signal",
+                ),
+            ),
+            value_names=BREAKOUT_VALUE_NAMES,
+            screen_value_names=BREAKOUT_VALUE_NAMES,
             cache_version="1",
         ),
         FormulaDefinition(
