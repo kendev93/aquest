@@ -20,9 +20,10 @@ SIGNAL_NAMES: tuple[str, ...] = ()
 #
 # They come in three families: volatility/position (atr_pct … cci14), volume
 # pressure (vr24, obv_flow20) and trend quality (r2_24, annual_trend24,
-# trend_quality, rsrs_*). The last family is deliberately regression-based:
-# oscillator readings say where a stock sits, trend quality says how cleanly
-# it has been moving, which transfers far better to a cross-sectional ranking.
+# trend_quality, rsrs_*). New entries add longer momentum/regime windows,
+# amount-based activity, volatility expansion, and opening-gap risk. The
+# regression family is deliberately separate: oscillator readings say where
+# a stock sits, trend quality says how cleanly it has been moving.
 VALUE_NAMES = (
     "ma5",
     "ma10",
@@ -51,6 +52,13 @@ VALUE_NAMES = (
     "trend_quality",
     "rsrs_slope",
     "rsrs_zscore",
+    "return60",
+    "return120",
+    "bias60",
+    "bias120",
+    "amount_ratio20",
+    "volatility_ratio20_60",
+    "gap_pct",
 )
 
 _KDJ_PERIOD = 9
@@ -160,9 +168,11 @@ def _rolling_standard_score(values: pd.Series, window: int) -> pd.Series:
 
 def calculate_technical_indicators(frame: pd.DataFrame) -> FormulaResult:
     close = pd.Series(numeric_column(frame, "close"), index=frame.index)
+    open_ = pd.Series(numeric_column(frame, "open"), index=frame.index)
     high = pd.Series(numeric_column(frame, "high"), index=frame.index)
     low = pd.Series(numeric_column(frame, "low"), index=frame.index)
     volume = pd.Series(numeric_column(frame, "volume"), index=frame.index)
+    amount = pd.Series(numeric_column(frame, "amount"), index=frame.index)
     close_values = close.to_numpy()
     values: dict[str, object] = {
         f"ma{window}": close.rolling(window, min_periods=window).mean().to_numpy()
@@ -364,6 +374,36 @@ def calculate_technical_indicators(frame: pd.DataFrame) -> FormulaResult:
     )
     values["rsrs_slope"] = beta.to_numpy()
     values["rsrs_zscore"] = _rolling_standard_score(beta, _RSRS_ZSCORE_PERIOD).to_numpy()
+
+    # Longer momentum and trend location complement the existing 20-day views.
+    # Keep them as percentages so thresholds remain comparable across symbols.
+    values["return60"] = (safe_divide(close_values, close.shift(60).to_numpy()) - 1) * 100
+    values["return120"] = (safe_divide(close_values, close.shift(120).to_numpy()) - 1) * 100
+    ma60 = values["ma60"]
+    ma120 = close.rolling(120, min_periods=120).mean().to_numpy()
+    values["bias60"] = safe_divide(close_values - ma60, ma60) * 100
+    values["bias120"] = safe_divide(close_values - ma120, ma120) * 100
+
+    # Amount ratio normalises traded money for each symbol. As with
+    # volume_ratio5, the reference average excludes today's amount.
+    average_amount20 = amount.shift(1).rolling(20, min_periods=20).mean()
+    values["amount_ratio20"] = safe_divide(
+        amount.to_numpy(), average_amount20.to_numpy()
+    )
+
+    # A rising ratio signals volatility expansion; a falling ratio signals
+    # contraction. The common annualisation factor cancels in this ratio.
+    daily_returns = close.pct_change(fill_method=None)
+    volatility20 = daily_returns.rolling(20, min_periods=20).std()
+    volatility60 = daily_returns.rolling(60, min_periods=60).std()
+    values["volatility_ratio20_60"] = safe_divide(
+        volatility20.to_numpy(), volatility60.to_numpy()
+    )
+
+    # Opening gaps are relevant to next-open execution and are price-scale free.
+    values["gap_pct"] = (
+        safe_divide(open_.to_numpy(), close.shift(1).to_numpy()) - 1
+    ) * 100
     return build_formula_result(
         formula_id=FORMULA_ID,
         display_name=DISPLAY_NAME,

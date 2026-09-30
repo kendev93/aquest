@@ -85,11 +85,10 @@ FormulaCalculator = Callable[[pd.DataFrame], FormulaResult]
 # is ``0`` or a non-negative value and never went below zero in 22,886 bars,
 # so the old page default ``indicator_one.wash < 0`` could never be satisfied.
 #
-# The two zero-centred percentages below are two-sided by construction rather
-# than by measurement: BIAS is negative whenever the close sits under its MA
-# and the N-bar return is negative whenever the close is below its own value N
-# bars ago. Both signs occur in any real sample, so a bare ``> 0`` / ``< 0``
-# pair is reachable on both sides.
+# BIAS and N-bar returns are two-sided by construction: BIAS is negative when
+# the close sits under its MA and return is negative when price falls from its
+# own value N bars ago. The overnight gap likewise has both positive and
+# negative readings, so a bare ``> 0`` / ``< 0`` pair is reachable on both sides.
 #
 # CCI joins on the same construction argument: it is (TP - MA(TP)) scaled by a
 # positive constant, so it is positive whenever the typical price trades above
@@ -106,6 +105,11 @@ BIDIRECTIONAL_VALUE_IDS = frozenset(
         "technical.macd_histogram",
         "technical.bias20",
         "technical.return20",
+        "technical.return60",
+        "technical.return120",
+        "technical.bias60",
+        "technical.bias120",
+        "technical.gap_pct",
         "technical.cci14",
         "technical.obv_flow20",
         "technical.annual_trend24",
@@ -205,6 +209,13 @@ _VALUE_DISPLAY_NAMES: dict[str, dict[str, str]] = {
         "trend_quality": "趋势质量动量",
         "rsrs_slope": "RSRS斜率",
         "rsrs_zscore": "RSRS标准分",
+        "return60": "60日涨幅",
+        "return120": "120日涨幅",
+        "bias60": "乖离率60",
+        "bias120": "乖离率120",
+        "amount_ratio20": "成交额比20日",
+        "volatility_ratio20_60": "波动率比20/60",
+        "gap_pct": "隔夜跳空%",
     },
     "price": {
         "open": "开盘价",
@@ -493,10 +504,9 @@ FORMULA_REGISTRY = FormulaRegistry(
             signals=(),
             value_names=TECHNICAL_VALUE_NAMES,
             screen_value_names=TECHNICAL_VALUE_NAMES,
-            # v3: VR / OBV flow / trend-quality family / RSRS joined the output
-            # set. Cached rows written by an older version would come back
-            # without those keys, so the version bump is what retires them.
-            cache_version="3",
+            # v4 adds longer-horizon returns/bias, amount ratio, volatility
+            # regime and opening-gap outputs. Retire cached rows that lack them.
+            cache_version="4",
         ),
         FormulaDefinition(
             id="price",

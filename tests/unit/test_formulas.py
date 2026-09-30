@@ -250,6 +250,11 @@ def test_only_zero_centred_outputs_are_marked_bidirectional() -> None:
         # 围绕 0 的百分比，两侧由构造保证而非实测。
         "technical.bias20",
         "technical.return20",
+        "technical.bias60",
+        "technical.bias120",
+        "technical.return60",
+        "technical.return120",
+        "technical.gap_pct",
         "technical.cci14",
         # 趋势质量族：净流向可正可负，年化趋势/趋势质量继承斜率与收益的符号，
         # RSRS 标准分按构造零均值。
@@ -265,6 +270,8 @@ def test_only_zero_centred_outputs_are_marked_bidirectional() -> None:
     for one_sided in (
         "technical.atr_pct",
         "technical.volume_ratio5",
+        "technical.amount_ratio20",
+        "technical.volatility_ratio20_60",
         "technical.position20",
         "technical.boll_bandwidth",
         # WR 与 KDJ 的 K/D 都是 0~100 的有界量，没有负侧。
@@ -490,6 +497,13 @@ def test_dimensionless_outputs_are_usable_as_cross_stock_ranking_features() -> N
         "volume_ratio5",
         "bias20",
         "return20",
+        "bias60",
+        "bias120",
+        "return60",
+        "return120",
+        "amount_ratio20",
+        "volatility_ratio20_60",
+        "gap_pct",
         "position20",
         "kdj_k",
         "kdj_d",
