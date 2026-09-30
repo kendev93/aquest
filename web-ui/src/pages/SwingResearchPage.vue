@@ -735,12 +735,11 @@ async function copyPlan(): Promise<void> {
           <legend>自定义指标</legend>
           <label class="scope-option">
             <input v-model="study.includeCustom" data-testid="swing-study-include-custom" type="checkbox">
-            把主力清洗 / 庄家顶底 / 准备拉升一起研究
+            把主力清洗 / 庄家顶底 / 准备拉升 / 主力吸筹 / 突破信号一起研究
           </label>
           <p class="helper">
-            这三个公式里只有连续、无量纲的那几个输出能用（比如准备拉升的建仓强度、庄家顶底的三条线）。
-            像「准备拉升」「压住庄家」这种只有 0 和 80 两种取值的开关、以及恒等于 0 的 Z、还有直接就是股价的 LLV／成本线，
-            横截面排不出名次，算出来的相关性没有意义，所以不放进来。
+            旧公式只纳入经过筛选的输出；主力吸筹和突破信号也已加入。新指标里的进场、洗盘、突破、破位是事件线，
+            可能大多数股票当天都是 0，导致横截面样本偏少或并列过多。请结合每项结果的有效样本数判断，不要只看相关性。
           </p>
         </fieldset>
 

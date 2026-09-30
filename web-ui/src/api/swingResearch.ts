@@ -177,7 +177,7 @@ export interface SwingStudyPayload {
   atr_window?: number
   horizon?: number
   labels?: string[]
-  /** 是否把三个自定义公式（主力清洗 / 庄家顶底 / 准备拉升）的连续输出一起研究。 */
+  /** 是否研究白名单自定义指标，包括主力清洗、庄家顶底、准备拉升、主力吸筹和突破信号。 */
   include_custom?: boolean
   min_cross_section?: number
   permutations?: number

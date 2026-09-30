@@ -339,11 +339,10 @@ class SwingResearchService:
     def _resolve_value_ids(self, config: SwingIndicatorConfig) -> tuple[str, ...]:
         """Rankable technical outputs plus the allow-listed custom ones.
 
-        The custom formulas (主力清洗 / 庄家顶底 / 准备拉升) are trading formulas
-        rather than measurement libraries, so only their continuous,
-        dimensionless outputs are offered - see :mod:`.values` for the
-        measurement that picked them. Everything else about them is either a
-        constant, a two-valued pulse, or the price itself.
+        The older custom formulas are allow-listed by prior cross-section
+        measurements. 主力吸筹 and 突破信号 are also allow-listed for the requested
+        exploration; their pulse outputs can be sparse, which is reported by the
+        resulting sample counts.
         """
 
         catalog: IndicatorCatalog = default_indicator_catalog()
@@ -360,7 +359,7 @@ class SwingResearchService:
                 raise ValueError(
                     f"以下指标不能用于波段研究: {', '.join(unknown)}；"
                     "只支持 technical 公式中可排序的无量纲指标，"
-                    "以及三个自定义公式里已核实的连续输出"
+                    "以及自定义指标白名单中的输出"
                 )
             return tuple(item for item in requested if item in available)
         ordered = tuple(

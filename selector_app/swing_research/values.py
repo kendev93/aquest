@@ -1,10 +1,10 @@
-"""Which custom-formula outputs the swing study is allowed to score.
+"""Which additional formula outputs the swing study is allowed to score.
 
-The three TDX formulas (主力清洗 / 庄家顶底 / 准备拉升) are trading formulas,
-not measurement libraries: most of their named outputs are either the formula's
-own plumbing or an on/off signal. Scoring them as if they were market factors
-is how a study ends up reporting nonsense, so the study takes an explicit
-allow-list instead of "everything the formula happens to expose".
+The swing study takes an explicit allow-list instead of scoring every output a
+formula exposes. The three older trading formulas (主力清洗 / 庄家顶底 / 准备拉升)
+have a measured set of continuous, cross-stock comparable outputs. The newer
+主力吸筹 and 突破信号 formulas are included for exploration; their event lines are
+zero-heavy and may not form a large enough daily cross-section for a conclusion.
 
 Measured on 160 stocks x 722 trading days (2023-09 ~ 2026-09), one
 cross-section per day. Three failure modes showed up, and each has a number:
@@ -21,9 +21,8 @@ cross-section per day. Three failure modes showed up, and each has a number:
   correlates 0.99 with the rank of the closing price. Scoring those does not
   find a factor, it re-discovers that some stocks cost more than others.
 
-What survives is the *continuous, dimensionless* part of each formula - the
-stochastic position, the smoothed pressure, the saturation - which is exactly
-what the technical family already trades in.
+The list keeps the older measured outputs and the explicitly requested newer
+indicators. The technical family remains the default measurement library.
 """
 
 from __future__ import annotations
@@ -31,9 +30,9 @@ from __future__ import annotations
 from selector_app.formulas.registry import FORMULA_REGISTRY
 from selector_app.strategy_discovery.catalog import IndicatorCatalog
 
-#: Continuous, dimensionless outputs of the three custom formulas, each measured
-#: to be rankable: daily mode share <= 0.7, unique-value ratio >= 2%, and
-#: |rank correlation with the closing price| <= 0.8.
+#: Explicitly selected outputs from the older formulas plus the newly requested
+#: absorption/breakout indicators. The new event streams are exploratory and
+#: have not passed the older cross-sectional tie-rate measurements.
 CUSTOM_VALUE_IDS: tuple[str, ...] = (
     # 主力清洗
     "indicator_one.main_force_entry",
@@ -50,11 +49,19 @@ CUSTOM_VALUE_IDS: tuple[str, ...] = (
     "indicator_three.var1",
     "indicator_three.varo7",
     "indicator_three.stochastic_base",
+    # 主力吸筹（新增公式；事件线可能很稀疏）
+    "main_force_absorption.score_33",
+    "main_force_absorption.entry_33",
+    "main_force_absorption.washout_33",
+    # 突破信号（新增公式；突破/破位为事件线）
+    "breakout_signal.resistance_19_21",
+    "breakout_signal.operation_19_5",
+    "breakout_signal.spread",
+    "breakout_signal.breakthrough",
+    "breakout_signal.breakdown",
 )
 
-#: Cross-section-friendly outputs keep the formula's own display name; the rest
-#: are internal levers and are shown as "公式名 · 输出名" so their origin is
-#: obvious in a table full of technical indicators.
+#: Keep the formula source visible in the mixed swing-study results table.
 CUSTOM_DISPLAY_NAMES: dict[str, str] = {
     "indicator_one.main_force_entry": "主力清洗 · 主力进场",
     "indicator_one.wash": "主力清洗 · 洗盘",
@@ -68,6 +75,14 @@ CUSTOM_DISPLAY_NAMES: dict[str, str] = {
     "indicator_three.var1": "准备拉升 · VAR1",
     "indicator_three.varo7": "准备拉升 · 建仓强度",
     "indicator_three.stochastic_base": "准备拉升 · 随机强度",
+    "main_force_absorption.score_33": "主力吸筹 · 33日强度",
+    "main_force_absorption.entry_33": "主力吸筹 · 进场",
+    "main_force_absorption.washout_33": "主力吸筹 · 洗盘",
+    "breakout_signal.resistance_19_21": "突破信号 · 阻力线",
+    "breakout_signal.operation_19_5": "突破信号 · 操作线",
+    "breakout_signal.spread": "突破信号 · 红绿柱",
+    "breakout_signal.breakthrough": "突破信号 · 突破",
+    "breakout_signal.breakdown": "突破信号 · 破位",
 }
 
 
@@ -82,7 +97,7 @@ def display_name_for(value_id: str, catalog: IndicatorCatalog) -> str:
 
     Custom outputs win over the catalog: the catalog names them for the formula
     screen, where the formula is already known from context, and a study table
-    mixes all four formulas in one column.
+    mixes several formulas in one column.
     """
 
     custom = CUSTOM_DISPLAY_NAMES.get(value_id)

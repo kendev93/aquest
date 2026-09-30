@@ -89,7 +89,7 @@ class SwingIndicatorRequest(BaseModel):
     horizon: int = Field(default=10, ge=1, le=250)
     labels: list[SwingLabel] | None = Field(default=None, max_length=4)
     value_ids: list[str] | None = Field(default=None, max_length=64)
-    #: Study the continuous outputs of 主力清洗 / 庄家顶底 / 准备拉升 alongside
+    #: Study allow-listed custom outputs, including 主力吸筹 and 突破信号, alongside
     #: the technical family.
     include_custom: bool = True
     min_cross_section: int = Field(default=20, ge=2, le=10_000)

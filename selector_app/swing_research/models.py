@@ -123,9 +123,9 @@ class SwingIndicatorConfig:
     horizon: int = DEFAULT_HORIZON
     labels: tuple[LabelKind, ...] = ALL_LABELS
     value_ids: tuple[str, ...] = ()
-    #: Study the continuous outputs of the three custom TDX formulas alongside
-    #: the technical ones. On by default: measured on the same labels, they
-    #: scored higher than most of the technical family.
+    #: Study allow-listed custom and newly added indicator outputs alongside
+    #: the technical ones. Some event lines are sparse and may have few usable
+    #: cross-sections in the result.
     include_custom: bool = True
     min_cross_section: int = MIN_CROSS_SECTION
     permutations: int = DEFAULT_PERMUTATIONS
