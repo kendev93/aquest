@@ -122,11 +122,7 @@ class DiscoverySnapshotCache:
         builder: Callable[[Path], None],
     ) -> tuple[Path, bool]:
         current = self._path
-        if (
-            key == self._key
-            and current is not None
-            and (current / "manifest.json").is_file()
-        ):
+        if key == self._key and current is not None and (current / "manifest.json").is_file():
             return current, True
 
         # The strategy worker claims jobs serially and waits for its candidate
@@ -619,7 +615,7 @@ def build_discovery_snapshot(
             progress_callback=progress_callback,
             abort_check=abort_check,
             persist_indicator_cache=persist_indicator_cache,
-    )
+        )
 
     if cache is not None:
         if abort_check is not None and abort_check():

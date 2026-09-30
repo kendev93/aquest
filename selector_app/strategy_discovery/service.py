@@ -847,9 +847,7 @@ class StrategyDiscoveryService:
             else _number(report.get("turnover"))
         )
         trades = (
-            report.trades
-            if isinstance(report, PortfolioBacktestReport)
-            else report.get("trades")
+            report.trades if isinstance(report, PortfolioBacktestReport) else report.get("trades")
         )
         diagnostic = (
             report.diagnostic

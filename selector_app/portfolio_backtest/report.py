@@ -39,15 +39,11 @@ class PortfolioReportMixin(_PortfolioServiceState):
 
         equity = cast(list[dict[str, PortfolioJsonValue]], simulation["equity"])
         trades = cast(list[dict[str, PortfolioJsonValue]], simulation["trades"])
-        equity_frame = pd.DataFrame(
-            {"total": [float(cast(float, row["total"])) for row in equity]}
-        )
+        equity_frame = pd.DataFrame({"total": [float(cast(float, row["total"])) for row in equity]})
         trade_frame = pd.DataFrame(
             [
                 {
-                    "datetime": (
-                        _date_int(str(trade["date"])) if trade.get("date") else None
-                    ),
+                    "datetime": (_date_int(str(trade["date"])) if trade.get("date") else None),
                     "market": trade.get("market"),
                     "code": trade.get("code"),
                     "direction": trade.get("direction"),

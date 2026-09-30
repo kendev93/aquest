@@ -673,8 +673,7 @@ def _risk_optimization_history_summary(
             or discovery_request.get("max_trials")
         ),
         "evaluated_trials": _optional_int(
-            search_metadata.get("evaluated_trials")
-            or state_metadata.get("evaluated_trials")
+            search_metadata.get("evaluated_trials") or state_metadata.get("evaluated_trials")
         ),
         "candidate_count": max(len(sharpe_rows), len(return_rows)),
         "validation_best_sharpe": _candidate_metric(sharpe_rows, "sharpe"),
@@ -729,8 +728,10 @@ def _iso_timestamp(value: object) -> str | None:
     timestamp = _optional_float(value)
     if timestamp is None:
         return None
-    return datetime.fromtimestamp(timestamp, timezone.utc).isoformat(timespec="seconds").replace(
-        "+00:00", "Z"
+    return (
+        datetime.fromtimestamp(timestamp, timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
     )
 
 

@@ -388,23 +388,17 @@ def calculate_technical_indicators(frame: pd.DataFrame) -> FormulaResult:
     # Amount ratio normalises traded money for each symbol. As with
     # volume_ratio5, the reference average excludes today's amount.
     average_amount20 = amount.shift(1).rolling(20, min_periods=20).mean()
-    values["amount_ratio20"] = safe_divide(
-        amount.to_numpy(), average_amount20.to_numpy()
-    )
+    values["amount_ratio20"] = safe_divide(amount.to_numpy(), average_amount20.to_numpy())
 
     # A rising ratio signals volatility expansion; a falling ratio signals
     # contraction. The common annualisation factor cancels in this ratio.
     daily_returns = close.pct_change(fill_method=None)
     volatility20 = daily_returns.rolling(20, min_periods=20).std()
     volatility60 = daily_returns.rolling(60, min_periods=60).std()
-    values["volatility_ratio20_60"] = safe_divide(
-        volatility20.to_numpy(), volatility60.to_numpy()
-    )
+    values["volatility_ratio20_60"] = safe_divide(volatility20.to_numpy(), volatility60.to_numpy())
 
     # Opening gaps are relevant to next-open execution and are price-scale free.
-    values["gap_pct"] = (
-        safe_divide(open_.to_numpy(), close.shift(1).to_numpy()) - 1
-    ) * 100
+    values["gap_pct"] = (safe_divide(open_.to_numpy(), close.shift(1).to_numpy()) - 1) * 100
 
     return build_formula_result(
         formula_id=FORMULA_ID,

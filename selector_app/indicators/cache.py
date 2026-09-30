@@ -399,9 +399,7 @@ class IndicatorCache:
 
         if self._store is None:
             return
-        normalized = [
-            (str(market).strip().upper(), str(code).strip()) for market, code in refs
-        ]
+        normalized = [(str(market).strip().upper(), str(code).strip()) for market, code in refs]
         try:
             fetched = self._store.data_revisions(normalized)
         except (AttributeError, RuntimeError, OSError):
@@ -424,9 +422,7 @@ class IndicatorCache:
 
         if self._store is None:
             return {}
-        definitions = {
-            formula_id: self._registry.formula(formula_id) for formula_id in formula_ids
-        }
+        definitions = {formula_id: self._registry.formula(formula_id) for formula_id in formula_ids}
         keys = [
             {
                 "market": str(market).strip().upper(),

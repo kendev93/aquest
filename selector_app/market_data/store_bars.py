@@ -735,9 +735,7 @@ class DuckDbBarsStore:
                             cast(InstrumentType, str(instrument_type)),
                             cast(InstrumentBoard, str(board)),
                             provider=str(provider),
-                            force_updated_at=(
-                                str(market).strip().upper(), str(code).strip()
-                            )
+                            force_updated_at=(str(market).strip().upper(), str(code).strip())
                             in changed_keys,
                         )
                     connection.execute("COMMIT")

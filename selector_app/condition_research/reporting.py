@@ -134,9 +134,7 @@ def assign_validation_objective_scores(
             by_side.setdefault(str(result.get("side") or ""), []).append(result)
 
     for candidates in by_side.values():
-        component_scores: dict[int, list[float]] = {
-            id(candidate): [] for candidate in candidates
-        }
+        component_scores: dict[int, list[float]] = {id(candidate): [] for candidate in candidates}
         for metric in ("win_rate", "median_sharpe", "median_annual_return"):
             ranked = sorted(
                 candidates,
@@ -160,11 +158,7 @@ def assign_validation_objective_scores(
                         break
                     end += 1
                 average_rank = (index + end - 1) / 2
-                percentile = (
-                    1.0
-                    if len(ranked) == 1
-                    else 1.0 - average_rank / (len(ranked) - 1)
-                )
+                percentile = 1.0 if len(ranked) == 1 else 1.0 - average_rank / (len(ranked) - 1)
                 for candidate in ranked[index:end]:
                     component_scores[id(candidate)].append(percentile)
                 index = end

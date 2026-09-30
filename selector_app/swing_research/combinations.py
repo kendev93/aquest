@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import date
 
 import numpy as np
 import pandas as pd
@@ -65,9 +64,7 @@ def split_trading_days(
         "validation": _window_metadata(
             dates, train_cut, validation_stop, validation_cut - validation_stop
         ),
-        "holdout": _window_metadata(
-            dates, validation_cut, holdout_stop, day_count - holdout_stop
-        ),
+        "holdout": _window_metadata(dates, validation_cut, holdout_stop, day_count - holdout_stop),
     }
 
 

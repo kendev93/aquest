@@ -348,9 +348,7 @@ def portfolio_risk_optimization_history(
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, object]:
     try:
-        return {
-            "data": _backend(request).risk_optimization_history(limit=limit, offset=offset)
-        }
+        return {"data": _backend(request).risk_optimization_history(limit=limit, offset=offset)}
     except (MarketDataStoreError, OSError, RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=503, detail="退出风控寻优历史暂不可用") from exc
 

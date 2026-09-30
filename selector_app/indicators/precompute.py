@@ -163,9 +163,7 @@ class IndicatorPrecomputeService:
 
         for offset in range(0, len(refs), _PRECOMPUTE_CHUNK_SIZE):
             batch = refs[offset : offset + _PRECOMPUTE_CHUNK_SIZE]
-            batch_keys = {
-                (str(ref.market).strip().upper(), str(ref.code).strip()) for ref in batch
-            }
+            batch_keys = {(str(ref.market).strip().upper(), str(ref.code).strip()) for ref in batch}
             cached_index = self._cache.cached_chunk_index(batch_keys, formula_ids)
             offsets_by_key: dict[tuple[str, str], int] = dict.fromkeys(batch_keys, 0)
             failed_keys: set[tuple[str, str]] = set()
