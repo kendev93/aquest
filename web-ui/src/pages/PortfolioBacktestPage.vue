@@ -211,6 +211,7 @@ const result = ref<PortfolioBacktestResult | null>(null)
 const riskOptimizationLoading = ref(false)
 const riskOptimizationJob = ref<StrategyDiscoveryJobState | null>(null)
 const riskOptimizationResult = ref<StrategyDiscoveryResult | null>(null)
+const riskOptimizationResultsVisible = ref(true)
 const riskOptimizationBoard = ref<'sharpe' | 'return'>('sharpe')
 const riskOptimizationMaxTrials = ref<1000 | 2000 | 3000>(1000)
 const riskOptimizationBaseFingerprint = ref<string | null>(null)
@@ -986,6 +987,7 @@ async function pollRiskOptimization(jobId: string): Promise<void> {
     riskOptimizationJob.value = state
     if (state.status === 'completed') {
       riskOptimizationResult.value = await getStrategyDiscoveryResults(jobId)
+      riskOptimizationResultsVisible.value = true
       riskOptimizationBoard.value = 'sharpe'
       message.value = '风险参数寻优完成：请按验证榜查看候选，并用留出段结果做独立复核。'
       await loadRiskOptimizationHistory()
@@ -1056,6 +1058,7 @@ async function loadRiskOptimizationHistoryDetail(jobId: string): Promise<void> {
       `已恢复风险寻优 ${jobId} 的配置和候选，可继续查看或应用。`,
     )
     riskOptimizationResult.value = savedResult
+    riskOptimizationResultsVisible.value = true
     riskOptimizationBoard.value = 'sharpe'
     riskOptimizationBaseFingerprint.value = portfolioBaseFingerprint(buildPayload())
     riskOptimizationBaseFingerprintWithoutSt.value = portfolioBaseFingerprint(buildPayload(), true)
@@ -1688,8 +1691,8 @@ watch(() => form.formulaText, (value) => {
             <button class="primary-button" type="button" data-testid="strategy-save" :disabled="strategySaving" @click="saveCurrentStrategy">{{ strategySaving ? '保存中…' : '保存为策略' }}</button>
             <small>存的是当前表单配置 + 这次结果的绩效快照；下次可在「策略库」一键载回。</small>
           </div>
-          <section v-if="riskOptimizationResult" ref="riskOptimizationResultsSection" class="data-section risk-optimization-results" data-testid="portfolio-risk-optimization-results">
-            <div class="section-heading"><div><span class="section-kicker">RISK OPTIMIZATION</span><h3>退出风控候选</h3></div><span>验证段排序 · 留出段独立复核</span></div>
+          <section v-if="riskOptimizationResult" v-show="riskOptimizationResultsVisible" id="portfolio-risk-optimization-results-panel" ref="riskOptimizationResultsSection" class="data-section risk-optimization-results" data-testid="portfolio-risk-optimization-results">
+            <div class="section-heading"><div><span class="section-kicker">RISK OPTIMIZATION</span><h3>退出风控候选</h3></div><div class="risk-optimization-heading-actions"><span>验证段排序 · 留出段独立复核</span><button class="text-button" data-testid="portfolio-risk-hide-candidates" type="button" :aria-expanded="riskOptimizationResultsVisible" aria-controls="portfolio-risk-optimization-results-panel" @click="riskOptimizationResultsVisible = false">隐藏候选</button></div></div>
             <p class="helper">训练段搜索；验证段至少 5 笔交易且最大回撤不超过 30% 才进入榜单。应用候选保留当前日期区间，榜单指标仍按验证段计算。</p>
             <div v-if="riskOptimizationRestoreRequired" class="notice error" data-testid="portfolio-risk-optimization-restore-required">已接回后台寻优，但当前表单不是寻优时的配置。请从历史列表载入此任务后再应用候选。</div>
             <div v-else-if="riskOptimizationStale" class="notice error" data-testid="portfolio-risk-optimization-stale">买卖规则、排序或回测设置已变化。请重新寻优后再应用候选。</div>
@@ -1708,6 +1711,10 @@ watch(() => form.formulaText, (value) => {
               </tr>
             </tbody></table></div>
           </section>
+          <div v-if="riskOptimizationResult && !riskOptimizationResultsVisible" class="risk-optimization-collapsed" data-testid="portfolio-risk-optimization-collapsed">
+            <span>退出风控候选已载入</span>
+            <button class="text-button" data-testid="portfolio-risk-show-candidates" type="button" :aria-expanded="riskOptimizationResultsVisible" aria-controls="portfolio-risk-optimization-results-panel" @click="riskOptimizationResultsVisible = true">显示候选</button>
+          </div>
           <div v-if="!result && !riskOptimizationResult" class="empty-state" data-testid="portfolio-empty"><div class="empty-icon" aria-hidden="true">/</div><h3>{{ loading ? '正在运行动态组合回测…' : '还没有组合结果' }}</h3><p>{{ loading ? '正在逐股计算公式并模拟槽位补位，完成后显示净值与候选排名。' : '配置买入条件、排序指标和卖出条件后开始回测。' }}</p></div>
           <template v-if="result">
             <div class="backtest-summary"><span class="result-badge">{{ result.universe === 'all' ? '沪深全部品种' : result.universe.toUpperCase() }}</span><span>{{ result.start_date }} → {{ result.end_date }}</span><span>{{ result.bars }} 个交易日</span><span>{{ result.processed }} / {{ result.total_candidates }} 个标的已处理</span><span>槽位 {{ result.max_positions }}</span><span>排序：{{ valueName(result.ranking_value) }} · {{ result.rank_order === 'desc' ? '高到低' : '低到高' }}</span><span v-if="result.fitness_rank_weight" class="result-badge">适配性权重 {{ Math.round(result.fitness_rank_weight * 100) }}%</span></div>

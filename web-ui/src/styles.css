@@ -281,6 +281,8 @@ tbody tr:hover td { background: rgba(22, 34, 58, 0.45); }
 .chart-summary { margin: 6px 0 0; color: var(--subtle); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10px; }
 .data-section { margin-top: 20px; }
 .section-heading { margin-bottom: 10px; color: var(--subtle); font-size: 10px; }
+.risk-optimization-heading-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.risk-optimization-collapsed { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 20px; padding: 8px 0; color: var(--subtle); font-size: 10px; }
 .direction { display: inline-flex; min-width: 36px; justify-content: center; padding: 4px 6px; border: 1px solid var(--border-strong); border-radius: 3px; font-size: 10px; font-weight: 700; }
 .direction.buy { border-color: rgba(34, 197, 94, 0.45); color: var(--accent); }
 .direction.sell { border-color: rgba(248, 113, 113, 0.45); color: var(--danger); }
