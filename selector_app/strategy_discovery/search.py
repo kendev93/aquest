@@ -282,13 +282,17 @@ class HybridSearchEngine:
         rng = random.Random(resolved_seed)
         observed: list[StrategyCandidate] = []
         seen: set[str] = set()
+        risk_only_sampling = request.candidate_mode == "risk_only"
         allow_fallback = _fallback_enabled()
-        if not allow_fallback:
+        if not allow_fallback and not risk_only_sampling:
             _assert_ml_dependencies()
-        surrogate = _LightGBMSurrogate(strict=not allow_fallback)
+        surrogate = _LightGBMSurrogate(strict=not allow_fallback and not risk_only_sampling)
         optuna_module: Any = None
         studies: dict[str, Any] = {}
-        if allow_fallback:
+        if risk_only_sampling:
+            surrogate.status = "disabled"
+            surrogate.reason = "风险参数空间有限，使用固定种子的随机候选采样"
+        elif allow_fallback:
             surrogate.status = "fallback"
             surrogate.reason = "显式启用本地确定性回退"
         else:
@@ -653,12 +657,17 @@ class HybridSearchEngine:
             )
         )
         metadata = {
-            "algorithm": "optuna_tpe_lightgbm_surrogate"
-            if optuna_module is not None
-            else "seeded_random_fallback",
+            "algorithm": (
+                "risk_only_seeded_random"
+                if risk_only_sampling
+                else "optuna_tpe_lightgbm_surrogate"
+                if optuna_module is not None
+                else "seeded_random_fallback"
+            ),
             "algorithm_version": "1",
             "seed": resolved_seed,
             "fallback_enabled": allow_fallback,
+            "risk_only_sampling": risk_only_sampling,
             "evaluation_workers": resolved_evaluation_workers,
             "evaluation_batch_size": resolved_batch_size,
             "evaluation_mode": evaluation_mode
