@@ -97,7 +97,7 @@ test('user can restrict a portfolio backtest to explicitly named symbols', async
   })
 })
 
-test('user can optimize exit risk, apply a validation candidate, and replay it normally', async ({ page }) => {
+test('user can apply exit risk without replacing the current history range', async ({ page }) => {
   let optimizationPayload: Record<string, unknown> | null = null
   let backtestPayload: Record<string, unknown> | null = null
   const validationMetrics = {
@@ -190,14 +190,16 @@ test('user can optimize exit risk, apply a validation candidate, and replay it n
   expect(optimizationPayload).toMatchObject({ max_trials: 2000 })
 
   await page.getByTestId('portfolio-risk-apply-e2e-candidate').click()
-  await expect(page.getByTestId('portfolio-date-mode')).toHaveValue('custom')
-  await expect(page.getByTestId('portfolio-start')).toHaveValue('2024-03-01')
+  await expect(page.getByTestId('portfolio-date-mode')).toHaveValue('recent5')
+  await expect(page.getByTestId('portfolio-start')).toHaveCount(0)
+  await expect(page.getByTestId('portfolio-end')).toHaveCount(0)
+  await expect(page.getByTestId('portfolio-message')).toContainText('保留当前区间')
   await page.getByTestId('start-portfolio-backtest').click()
-  await expect(page.getByTestId('portfolio-replay-comparison')).toContainText('绩效摘要：一致')
-  await expect(page.getByTestId('portfolio-replay-comparison')).toContainText('数据指纹：一致')
+  await expect(page.getByTestId('portfolio-message')).toContainText('组合回测完成')
+  await expect(page.getByTestId('portfolio-replay-comparison')).toHaveCount(0)
   expect(backtestPayload).toMatchObject({
-    date_mode: 'custom',
-    start_date: '2024-03-01',
-    end_date: '2024-03-31',
+    date_mode: 'recent5',
+    start_date: null,
+    end_date: null,
   })
 })
