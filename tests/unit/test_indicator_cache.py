@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+import warnings
 from dataclasses import replace
 from datetime import date, datetime
 from pathlib import Path
@@ -526,9 +527,11 @@ def test_precompute_stitches_yearly_segments_into_full_history(
 
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb", indicator_cache_backend=backend)
     store.replace_local_bars("SH", "600000", "stock", frame)
-    report = IndicatorPrecomputeService(WindowAdapter(), IndicatorCache(store)).run(
-        vipdoc_path=str(tmp_path), years=4, warmup_bars=268
-    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        report = IndicatorPrecomputeService(WindowAdapter(), IndicatorCache(store)).run(
+            vipdoc_path=str(tmp_path), years=4, warmup_bars=268
+        )
     assert report.processed == 1
     assert report.errors == 0
 

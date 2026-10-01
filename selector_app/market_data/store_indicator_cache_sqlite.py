@@ -713,7 +713,7 @@ class SqliteIndicatorCacheStore:
                                 timeframe,
                                 price_basis,
                                 formula_id,
-                                data_start,
+                                _date_text(data_start),
                                 formula_version,
                                 data_fingerprint,
                             ],
@@ -794,7 +794,7 @@ class SqliteIndicatorCacheStore:
                               AND formula_version = ? AND data_fingerprint = ?
                               AND bar_offset = ? AND data_start IS ?
                             """,
-                            [*old_key, data_start],
+                            [*old_key, _date_text(data_start)],
                         )
                         continue
                     connection.execute(
@@ -806,7 +806,7 @@ class SqliteIndicatorCacheStore:
                           AND formula_version = ? AND data_fingerprint = ?
                           AND bar_offset = ? AND data_start IS ?
                         """,
-                        [new_fingerprint, new_offset, *old_key, data_start],
+                        [new_fingerprint, new_offset, *old_key, _date_text(data_start)],
                     )
                 connection.commit()
             except Exception:
