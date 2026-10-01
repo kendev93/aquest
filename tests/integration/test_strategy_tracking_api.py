@@ -59,9 +59,99 @@ def test_the_list_keeps_trades_out_but_the_detail_brings_them(tmp_path: Path) ->
         detail = client.get(f"/api/v1/strategies/tracking/{strategy_id}").json()["data"]
 
         assert listed[0]["trades"] is None
+        assert listed[0]["current_state"] is None
+        assert listed[0]["today_candidates"] is None
         assert "next_plan" in listed[0]
         # 详情里两段都在，哪怕现在一笔成交都没有——结构要对，不能缺字段。
         assert {"before", "after", "limit"} <= set(detail["trades"])
+        assert "current_state" in detail
+        assert "today_candidates" in detail
+
+
+def test_tracking_trade_endpoint_filters_and_pages_actual_fills(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    with TestClient(create_app(market_data_store=store)) as client:
+        strategy_id = _save_strategy(client)
+        store.save_tracking_trades(
+            strategy_id,
+            [
+                {
+                    "trade_date": 20260901,
+                    "signal_date": 20260831,
+                    "phase": "pre",
+                    "direction": "BUY",
+                    "market": "SH",
+                    "code": "600000",
+                    "name": "甲",
+                    "size": 100,
+                    "price": 10,
+                    "reason": "排名入选",
+                },
+                {
+                    "trade_date": 20260902,
+                    "signal_date": 20260901,
+                    "phase": "post",
+                    "direction": "SELL",
+                    "market": "SH",
+                    "code": "600001",
+                    "name": "乙",
+                    "size": 100,
+                    "price": 11,
+                    "commission": 1.1,
+                    "stamp_tax": 2.0,
+                    "slippage": 0.5,
+                    "cost_basis": 900.0,
+                    "pnl": 196.4,
+                    "reason": "卖出指标",
+                },
+                {
+                    "trade_date": 20260903,
+                    "signal_date": 20260902,
+                    "phase": "post",
+                    "direction": "BUY",
+                    "market": "SH",
+                    "code": "600002",
+                    "name": "丙",
+                    "size": 100,
+                    "price": 12,
+                    "reason": "排名入选",
+                },
+            ],
+        )
+
+        response = client.get(
+            f"/api/v1/strategies/tracking/{strategy_id}/trades",
+            params={"phase": "post", "date_from": "2026-09-02", "limit": 1},
+        )
+        data = response.json()["data"]
+
+        assert response.status_code == 200
+        assert data["total"] == 2
+        assert [row["code"] for row in data["rows"]] == ["600002"]
+        next_page = client.get(
+            f"/api/v1/strategies/tracking/{strategy_id}/trades",
+            params={"phase": "post", "date_from": "2026-09-02", "limit": 1, "offset": 1},
+        ).json()["data"]
+        trade = next_page["rows"][0]
+        assert trade["code"] == "600001"
+        assert trade["signal_date"] == 20260901
+        assert trade["commission"] == 1.1
+        assert trade["stamp_tax"] == 2.0
+        assert trade["slippage"] == 0.5
+        assert trade["cost_basis"] == 900.0
+        assert (
+            client.get(
+                f"/api/v1/strategies/tracking/{strategy_id}/trades", params={"limit": 201}
+            ).status_code
+            == 422
+        )
+        assert (
+            client.get(
+                f"/api/v1/strategies/tracking/{strategy_id}/trades",
+                params={"date_from": "2026-09-10", "date_to": "2026-09-01"},
+            ).status_code
+            == 422
+        )
 
 
 def test_rerun_is_rejected_while_the_strategy_is_offline(tmp_path: Path) -> None:
@@ -107,6 +197,7 @@ def test_unknown_strategy_still_answers_404(tmp_path: Path) -> None:
     with TestClient(create_app(market_data_store=store)) as client:
         assert client.post("/api/v1/strategies/tracking/nope/rerun").status_code == 404
         assert client.post("/api/v1/strategies/tracking/nope/launch").status_code == 404
+        assert client.get("/api/v1/strategies/tracking/nope/trades").status_code == 404
 
 
 def _strategy_online(client: TestClient, store: DuckDbMarketDataStore) -> str:

@@ -124,6 +124,7 @@ class StrategyHistoryMixin:
         for row in rows:
             payload = _decode_strategy_row(row)
             payload.pop("request", None)
+            payload.pop("tracking_state", None)
             records.append(payload)
         return records
 

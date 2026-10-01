@@ -5,6 +5,7 @@ import type {
   SavedStrategySummary,
   StrategyTrackingJobState,
   StrategyTrackingSnapshot,
+  TrackingTradePage,
 } from '../types'
 
 const API_BASE = '/api/v1/strategies'
@@ -91,6 +92,29 @@ export async function getStrategyTracking(
 ): Promise<StrategyTrackingSnapshot> {
   const response = await request<{ data: StrategyTrackingSnapshot }>(
     `${API_BASE}/tracking/${encodeURIComponent(strategyId)}`,
+  )
+  return response.data
+}
+
+export async function getStrategyTrackingTrades(
+  strategyId: string,
+  filters: {
+    phase?: 'pre' | 'post' | ''
+    date_from?: string
+    date_to?: string
+    limit?: number
+    offset?: number
+  } = {},
+): Promise<TrackingTradePage> {
+  const query = new URLSearchParams({
+    limit: String(filters.limit ?? 50),
+    offset: String(filters.offset ?? 0),
+  })
+  if (filters.phase) query.set('phase', filters.phase)
+  if (filters.date_from) query.set('date_from', filters.date_from)
+  if (filters.date_to) query.set('date_to', filters.date_to)
+  const response = await request<{ data: TrackingTradePage }>(
+    `${API_BASE}/tracking/${encodeURIComponent(strategyId)}/trades?${query.toString()}`,
   )
   return response.data
 }

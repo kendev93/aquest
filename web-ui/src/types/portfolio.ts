@@ -287,6 +287,7 @@ export interface StrategyTrackingSegment {
 /** 一笔成交。pnl 只在卖出时有意义（买入侧是 0）。 */
 export interface TrackingTradeRow {
   trade_date: number
+  signal_date: number | null
   phase: 'pre' | 'post'
   direction: 'BUY' | 'SELL' | string
   market: string
@@ -296,6 +297,41 @@ export interface TrackingTradeRow {
   price: number
   pnl: number
   reason: string
+  commission: number | null
+  stamp_tax: number | null
+  slippage: number | null
+  cost_basis: number | null
+}
+
+export interface TrackingTradePage {
+  rows: TrackingTradeRow[]
+  total: number
+  limit: number
+  offset: number
+}
+
+export interface TrackingSignalReading {
+  id: string
+  matched: boolean
+}
+
+export interface TrackingConditionReading {
+  left_value: string
+  right_value: string | null
+  operator: string
+  current_left_value: number | null
+  current_right_value: number | null
+  threshold: number | null
+  previous_left_value?: number | null
+  previous_right_value?: number | null
+  required: boolean
+  matched: boolean
+}
+
+export interface TrackingRuleReading {
+  matched: boolean
+  signals: TrackingSignalReading[]
+  conditions: TrackingConditionReading[]
 }
 
 
@@ -342,6 +378,57 @@ export interface TrackingHolding {
   entry_price: number
   entry_date: string
   unrealized_pnl_pct: number
+}
+
+export interface TrackingCurrentHolding {
+  market: string
+  code: string
+  name: string
+  size: number
+  entry_price: number
+  entry_date: string
+  close: number
+  latest_price: number
+  market_value: number
+  unrealized_pnl: number
+  unrealized_pnl_pct: number
+  position_weight: number
+  indicator_as_of?: string | null
+  sell_signal: TrackingRuleReading
+}
+
+export interface TrackingCurrentState {
+  as_of: string
+  available: boolean
+  equity: number
+  total_asset: number
+  cash: number
+  position_value: number
+  positions_count: number
+  holdings: TrackingCurrentHolding[]
+}
+
+export interface TrackingCandidate {
+  rank: number
+  market: string
+  code: string
+  name: string
+  score: number
+  rank_score: number
+  ranking_value: string
+  already_held: boolean
+  buy_signal: { matched: boolean; signals: TrackingSignalReading[] }
+  buy_conditions: TrackingConditionReading[]
+  fitness_score?: number
+  fitness_trades?: number
+  fitness_note?: string
+}
+
+export interface TrackingTodayCandidates {
+  as_of: string | null
+  ranking_value: string
+  total: number
+  rows: TrackingCandidate[]
 }
 
 
@@ -393,4 +480,8 @@ export interface StrategyTrackingSnapshot {
   trades: TrackingTrades | null
   /** 下一交易日计划。下线后是 null——过期的单子挂在页面上比没有更糟。 */
   next_plan: TrackingNextPlan | null
+  /** 最近一次成功重算保存的账户快照；旧版本可能没有。 */
+  current_state: TrackingCurrentState | null
+  /** 每个最新行情日的信息型候选，和下一交易日计划分开。 */
+  today_candidates: TrackingTodayCandidates | null
 }

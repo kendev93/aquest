@@ -36,7 +36,7 @@ from .models import (
 # 成本，可接受。**不要再把它调回去**：已经升级的库版本号更高，调回去会让它们一律
 # 报「schema 版本过高」直接起不来。往后加表就只写 CREATE TABLE IF NOT EXISTS，
 # 别动这个数（新表顺手加进 ASSET_TABLES，否则导出导入会漏）。
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 SCREEN_HISTORY_LIMIT = 10
 STRATEGY_DISCOVERY_HISTORY_LIMIT = 20
 # 每种类型最多保留这么多条，超出的最旧记录会被删掉。
@@ -542,6 +542,7 @@ class _DuckDbStoreBase:
                     launched_at DATE,
                     last_tracked_date INTEGER,
                     last_error VARCHAR NOT NULL DEFAULT '',
+                    tracking_state_json VARCHAR,
                     UNIQUE (name)
                 )
                 """
@@ -585,6 +586,11 @@ class _DuckDbStoreBase:
                     price DOUBLE NOT NULL,
                     pnl DOUBLE NOT NULL DEFAULT 0,
                     reason VARCHAR NOT NULL DEFAULT '',
+                    signal_date INTEGER,
+                    commission DOUBLE,
+                    stamp_tax DOUBLE,
+                    slippage DOUBLE,
+                    cost_basis DOUBLE,
                     PRIMARY KEY (strategy_id, seq)
                 )
                 """
@@ -859,6 +865,33 @@ class _DuckDbStoreBase:
             connection.execute(
                 "UPDATE saved_strategies SET last_error = '' WHERE last_error IS NULL"
             )
+        if version < 18:
+            if "saved_strategies" in tables:
+                columns = {
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_schema = 'main' AND table_name = 'saved_strategies'"
+                    ).fetchall()
+                }
+                if "tracking_state_json" not in columns:
+                    connection.execute(
+                        "ALTER TABLE saved_strategies ADD COLUMN tracking_state_json VARCHAR"
+                    )
+            if "strategy_tracking_trades" in tables:
+                columns = {
+                    str(row[0])
+                    for row in connection.execute(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_schema = 'main' AND table_name = 'strategy_tracking_trades'"
+                    ).fetchall()
+                }
+                for column in ("signal_date", "commission", "stamp_tax", "slippage", "cost_basis"):
+                    if column not in columns:
+                        sql_type = "INTEGER" if column == "signal_date" else "DOUBLE"
+                        connection.execute(
+                            f"ALTER TABLE strategy_tracking_trades ADD COLUMN {column} {sql_type}"
+                        )
 
     def _schema_version_on_disk(self) -> int | None:
         if not self.database_path.exists():

@@ -106,6 +106,59 @@ def test_round_trip_moves_assets_and_leaves_market_data_behind(tmp_path: Path) -
     assert source.read_bars("SH", "600000").shape[0] == 2
 
 
+def test_round_trip_keeps_tracking_snapshots_and_trade_costs(tmp_path: Path) -> None:
+    source = DuckDbMarketDataStore(tmp_path / "src.duckdb")
+    source.save_strategy(
+        "tracked-1", name="追踪策略", request={"end_date": "2026-09-01"}, summary={}
+    )
+    source.start_strategy_tracking("tracked-1", launched_at=20260901)
+    current_state = {"as_of": "2026-09-02", "total_asset": 1200.0, "holdings": []}
+    candidates = {"as_of": "2026-09-02", "total": 0, "rows": []}
+    source.save_strategy_tracking_snapshot(
+        "tracked-1",
+        points=[{"trade_date": 20260902, "equity": 1200, "cash": 1200, "positions_count": 0}],
+        trades=[
+            {
+                "trade_date": 20260902,
+                "signal_date": 20260901,
+                "phase": "post",
+                "direction": "SELL",
+                "market": "SH",
+                "code": "600000",
+                "name": "浦发银行",
+                "size": 100,
+                "price": 12,
+                "commission": 1.2,
+                "stamp_tax": 12,
+                "slippage": 0.5,
+                "cost_basis": 1000,
+                "pnl": 186.3,
+                "reason": "卖出条件",
+            }
+        ],
+        plan=None,
+        last_tracked_date=20260902,
+        tracking_state={"current_state": current_state, "today_candidates": candidates},
+    )
+    archive = export_user_assets(source, tmp_path / "backup.zip").path
+
+    target = DuckDbMarketDataStore(tmp_path / "dst.duckdb")
+    import_user_assets(target, archive)
+
+    strategy = target.read_strategy("tracked-1")
+    trade = target.page_tracking_trades("tracked-1")["rows"][0]
+    assert strategy is not None
+    assert strategy["tracking_state"] == {
+        "current_state": current_state,
+        "today_candidates": candidates,
+    }
+    assert trade["signal_date"] == 20260901
+    assert trade["commission"] == 1.2
+    assert trade["stamp_tax"] == 12
+    assert trade["slippage"] == 0.5
+    assert trade["cost_basis"] == 1000
+
+
 def test_importing_the_same_archive_twice_changes_nothing(tmp_path: Path) -> None:
     source = DuckDbMarketDataStore(tmp_path / "src.duckdb")
     _seed(source, "alpha")

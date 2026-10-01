@@ -54,6 +54,7 @@ class StrategyTrackingHistoryMixin(StrategyHistoryMixin):
                         launched_at = ?,
                         last_tracked_date = ?,
                         last_error = '',
+                        tracking_state_json = NULL,
                         updated_at = ?
                     WHERE strategy_id = ? RETURNING strategy_id
                     """,
@@ -186,6 +187,7 @@ class StrategyTrackingHistoryMixin(StrategyHistoryMixin):
         plan: Mapping[str, object] | None,
         last_tracked_date: int,
         summary: Mapping[str, object] | None = None,
+        tracking_state: Mapping[str, object] | None = None,
     ) -> bool:
         """Commit one complete refresh only while the strategy is still online.
 
@@ -217,33 +219,80 @@ class StrategyTrackingHistoryMixin(StrategyHistoryMixin):
                 _write_tracking_points(connection, normalized_id, prepared_points)
                 _write_tracking_trades(connection, normalized_id, prepared_trades)
                 _write_tracking_plan(connection, normalized_id, plan)
+                state_parameter = (
+                    json.dumps(dict(tracking_state), ensure_ascii=False, separators=(",", ":"))
+                    if tracking_state is not None
+                    else None
+                )
+                summary_parameter = (
+                    json.dumps(dict(summary), ensure_ascii=False, separators=(",", ":"))
+                    if summary is not None
+                    else None
+                )
                 if summary is None:
-                    updated = connection.execute(
-                        f"""
-                        UPDATE {SAVED_STRATEGY_TABLE} SET
-                            last_tracked_date = ?, last_error = '', updated_at = ?
-                        WHERE strategy_id = ? AND tracking_status = ?
-                        RETURNING strategy_id
-                        """,
-                        [normalized_date, _now(), normalized_id, STRATEGY_TRACKING_ACTIVE],
-                    ).fetchone()
+                    if state_parameter is None:
+                        updated = connection.execute(
+                            f"""
+                            UPDATE {SAVED_STRATEGY_TABLE} SET
+                                last_tracked_date = ?, last_error = '', updated_at = ?
+                            WHERE strategy_id = ? AND tracking_status = ?
+                            RETURNING strategy_id
+                            """,
+                            [normalized_date, _now(), normalized_id, STRATEGY_TRACKING_ACTIVE],
+                        ).fetchone()
+                    else:
+                        updated = connection.execute(
+                            f"""
+                            UPDATE {SAVED_STRATEGY_TABLE} SET
+                                tracking_state_json = ?, last_tracked_date = ?,
+                                last_error = '', updated_at = ?
+                            WHERE strategy_id = ? AND tracking_status = ?
+                            RETURNING strategy_id
+                            """,
+                            [
+                                state_parameter,
+                                normalized_date,
+                                _now(),
+                                normalized_id,
+                                STRATEGY_TRACKING_ACTIVE,
+                            ],
+                        ).fetchone()
                 else:
-                    updated = connection.execute(
-                        f"""
-                        UPDATE {SAVED_STRATEGY_TABLE} SET
-                            summary_json = ?, last_tracked_date = ?,
-                            last_error = '', updated_at = ?
-                        WHERE strategy_id = ? AND tracking_status = ?
-                        RETURNING strategy_id
-                        """,
-                        [
-                            json.dumps(dict(summary), ensure_ascii=False, separators=(",", ":")),
-                            normalized_date,
-                            _now(),
-                            normalized_id,
-                            STRATEGY_TRACKING_ACTIVE,
-                        ],
-                    ).fetchone()
+                    if state_parameter is None:
+                        updated = connection.execute(
+                            f"""
+                            UPDATE {SAVED_STRATEGY_TABLE} SET
+                                summary_json = ?, last_tracked_date = ?,
+                                last_error = '', updated_at = ?
+                            WHERE strategy_id = ? AND tracking_status = ?
+                            RETURNING strategy_id
+                            """,
+                            [
+                                summary_parameter,
+                                normalized_date,
+                                _now(),
+                                normalized_id,
+                                STRATEGY_TRACKING_ACTIVE,
+                            ],
+                        ).fetchone()
+                    else:
+                        updated = connection.execute(
+                            f"""
+                            UPDATE {SAVED_STRATEGY_TABLE} SET
+                                summary_json = ?, tracking_state_json = ?, last_tracked_date = ?,
+                                last_error = '', updated_at = ?
+                            WHERE strategy_id = ? AND tracking_status = ?
+                            RETURNING strategy_id
+                            """,
+                            [
+                                summary_parameter,
+                                state_parameter,
+                                normalized_date,
+                                _now(),
+                                normalized_id,
+                                STRATEGY_TRACKING_ACTIVE,
+                            ],
+                        ).fetchone()
                 if updated is None:
                     raise RuntimeError("策略追踪状态已变化，未保存本次重算")
                 connection.execute("COMMIT")
@@ -324,7 +373,8 @@ class StrategyTrackingHistoryMixin(StrategyHistoryMixin):
         with self._store._connect(read_only=True) as connection:
             rows = connection.execute(
                 "SELECT trade_date, phase, direction, market, code, name, size, price, "
-                f"pnl, reason FROM {STRATEGY_TRACKING_TRADES_TABLE} "
+                f"pnl, reason, signal_date, commission, stamp_tax, slippage, cost_basis "
+                f"FROM {STRATEGY_TRACKING_TRADES_TABLE} "
                 "WHERE strategy_id = ? ORDER BY seq",
                 [normalized_id],
             ).fetchall()
@@ -340,9 +390,82 @@ class StrategyTrackingHistoryMixin(StrategyHistoryMixin):
                 "price": float(row[7]),
                 "pnl": float(row[8]),
                 "reason": str(row[9]),
+                "signal_date": None if row[10] is None else int(row[10]),
+                "commission": None if row[11] is None else float(row[11]),
+                "stamp_tax": None if row[12] is None else float(row[12]),
+                "slippage": None if row[13] is None else float(row[13]),
+                "cost_basis": None if row[14] is None else float(row[14]),
             }
             for row in rows
         ]
+
+    def page_tracking_trades(
+        self,
+        strategy_id: str,
+        *,
+        phase: str | None = None,
+        date_from: int | None = None,
+        date_to: int | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, object]:
+        """Return a bounded, newest-first page of actual fills and its total."""
+
+        normalized_id = strategy_id.strip()
+        if not normalized_id:
+            return {"rows": [], "total": 0, "limit": limit, "offset": offset}
+        if not 1 <= limit <= 200 or offset < 0:
+            raise ValueError("成交分页参数超出范围")
+        if phase not in {None, "pre", "post"}:
+            raise ValueError("成交阶段无效")
+        if date_from is not None and date_to is not None and date_from > date_to:
+            raise ValueError("成交日期范围无效")
+        conditions = ["strategy_id = ?"]
+        parameters: list[object] = [normalized_id]
+        if phase is not None:
+            conditions.append("phase = ?")
+            parameters.append(phase)
+        if date_from is not None:
+            conditions.append("trade_date >= ?")
+            parameters.append(int(date_from))
+        if date_to is not None:
+            conditions.append("trade_date <= ?")
+            parameters.append(int(date_to))
+        where = " AND ".join(conditions)
+        with self._store._connect(read_only=True) as connection:
+            count_row = connection.execute(
+                f"SELECT COUNT(*) FROM {STRATEGY_TRACKING_TRADES_TABLE} WHERE {where}",
+                parameters,
+            ).fetchone()
+            total = int(count_row[0]) if count_row is not None else 0
+            rows = connection.execute(
+                "SELECT trade_date, phase, direction, market, code, name, size, price, "
+                f"pnl, reason, signal_date, commission, stamp_tax, slippage, cost_basis "
+                f"FROM {STRATEGY_TRACKING_TRADES_TABLE} WHERE {where} "
+                "ORDER BY trade_date DESC, seq DESC LIMIT ? OFFSET ?",
+                [*parameters, limit, offset],
+            ).fetchall()
+        packed = [
+            {
+                "trade_date": int(row[0]),
+                "phase": str(row[1]),
+                "direction": str(row[2]),
+                "market": str(row[3]),
+                "code": str(row[4]),
+                "name": str(row[5]),
+                "size": float(row[6]),
+                "price": float(row[7]),
+                "pnl": float(row[8]),
+                "reason": str(row[9]),
+                "signal_date": None if row[10] is None else int(row[10]),
+                "commission": None if row[11] is None else float(row[11]),
+                "stamp_tax": None if row[12] is None else float(row[12]),
+                "slippage": None if row[13] is None else float(row[13]),
+                "cost_basis": None if row[14] is None else float(row[14]),
+            }
+            for row in rows
+        ]
+        return {"rows": packed, "total": total, "limit": limit, "offset": offset}
 
     def save_tracking_plan(
         self,
@@ -393,5 +516,6 @@ class StrategyTrackingHistoryMixin(StrategyHistoryMixin):
         for row in rows:
             payload = _decode_strategy_row(row)
             payload.pop("request", None)
+            payload.pop("tracking_state", None)
             records.append(payload)
         return records

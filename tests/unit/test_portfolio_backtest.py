@@ -218,6 +218,138 @@ def test_portfolio_fills_a_vacated_slot_by_rank_after_stop_loss() -> None:
     json.dumps(report.to_dict(), ensure_ascii=False)
 
 
+def test_daily_candidate_scan_is_independent_of_rebalance_day_and_reports_cross_values() -> None:
+    report = PortfolioBacktestService(adapter=FakeAdapter()).run(
+        config(
+            formula_text="BUY:C>0; RANK:C;",
+            selected_signals=(),
+            ranking_value="custom.rank",
+            rebalance_frequency="monthly",
+            buy_rule=RuleGroup(
+                signals=("custom.buy",),
+                conditions=(
+                    ScreenCondition(
+                        left_value="custom.rank",
+                        operator="cross_up",
+                        right_constant=14.0,
+                    ),
+                ),
+            ),
+            sell_rule=RuleGroup(
+                conditions=(
+                    ScreenCondition(
+                        left_value="custom.rank",
+                        operator="cross_down",
+                        right_constant=0.0,
+                    ),
+                ),
+            ),
+            stop_loss_pct=None,
+        )
+    )
+
+    scan = report.today_candidates
+
+    assert scan["as_of"] == "2024-01-06"
+    assert scan["total"] == 1
+    assert [candidate["code"] for candidate in scan["rows"]] == ["600000"]
+    candidate = scan["rows"][0]
+    assert candidate["rank"] == 1
+    assert candidate["score"] == 15.0
+    assert candidate["buy_signal"]["matched"] is True
+    condition = candidate["buy_conditions"][0]
+    assert condition["operator"] == "cross_up"
+    assert condition["previous_left_value"] == 14.0
+    assert condition["current_left_value"] == 15.0
+    assert condition["matched"] is True
+    assert report.next_plan["rebalance_due"] is False
+    assert report.next_plan["buys"] == []
+
+
+def test_candidate_scan_limits_rows_but_keeps_the_full_match_count() -> None:
+    dates = np.asarray([20240101, 20240102], dtype=np.int64)
+    contexts = [
+        _StockSeries(
+            market="SH",
+            code=f"{index:06d}",
+            instrument_type="stock",
+            board="main",
+            dates=dates,
+            opens=np.asarray([10.0, 10.0]),
+            highs=np.asarray([10.0, 10.0]),
+            lows=np.asarray([10.0, 10.0]),
+            closes=np.asarray([10.0, 10.0]),
+            atrs=np.asarray([np.nan, np.nan]),
+            buy_mask=np.asarray([True, True]),
+            sell_mask=np.asarray([False, False]),
+            signals={"indicator_one.main_force_entry": np.asarray([True, True])},
+            values={"indicator_one.var3": np.asarray([float(index), float(index)])},
+            date_to_index={20240101: 0, 20240102: 1},
+            data_fingerprint=f"fingerprint-{index}",
+        )
+        for index in range(25)
+    ]
+
+    report = PortfolioBacktestService().run_prepared_contexts(
+        config(
+            formula_text=None,
+            selected_signals=("indicator_one.main_force_entry",),
+            sell_rule=RuleGroup(
+                conditions=(
+                    ScreenCondition(
+                        left_value="indicator_one.var3", operator="gt", right_constant=100.0
+                    ),
+                )
+            ),
+            ranking_value="indicator_one.var3",
+            start_date=date(2024, 1, 1),
+            end_date=date(2024, 1, 2),
+            initial_cash=100_000.0,
+        ),
+        contexts,
+    )
+
+    scan = report.today_candidates
+    assert scan["total"] == 25
+    assert len(scan["rows"]) == 20
+    assert [candidate["rank"] for candidate in scan["rows"]] == list(range(1, 21))
+    assert scan["rows"][0]["code"] == "000024"
+    assert scan["rows"][-1]["code"] == "000005"
+
+
+def test_current_state_shows_sell_indicator_values_for_a_held_position() -> None:
+    report = PortfolioBacktestService(adapter=FakeAdapter()).run(
+        config(
+            universe="codes",
+            codes=("SH600001",),
+            max_positions=1,
+            sell_rule=RuleGroup(
+                conditions=(
+                    ScreenCondition(
+                        left_value="custom.rank",
+                        operator="eq",
+                        right_constant=15.0,
+                    ),
+                ),
+            ),
+            stop_loss_pct=None,
+        )
+    )
+
+    state = report.current_state
+    assert state is not None
+    assert state["positions_count"] == 1
+    holding = state["holdings"][0]
+    assert holding["code"] == "600001"
+    assert holding["latest_price"] == 15.0
+    assert holding["entry_date"] == "2024-01-02"
+    assert holding["market_value"] == holding["size"] * 15.0
+    assert holding["sell_signal"]["matched"] is True
+    condition = holding["sell_signal"]["conditions"][0]
+    assert condition["current_left_value"] == 15.0
+    assert condition["threshold"] == 15.0
+
+
 def test_portfolio_uses_all_local_dates_when_date_window_is_blank() -> None:
     report = PortfolioBacktestService(adapter=FakeAdapter()).run(
         config(start_date=None, end_date=None)
@@ -281,12 +413,24 @@ def test_prepared_backtest_skips_simulation_when_no_candidate_can_be_bought(monk
             end_date=date(2024, 1, 3),
         ),
         [context],
-        include_details=False,
+        include_details=True,
     )
 
     assert report.performance["total_return"] == 0.0
     assert report.trades == ()
     assert report.diagnostic == "预检无可交易候选"
+    assert report.current_state == {
+        "as_of": "2024-01-03",
+        "available": True,
+        "equity": 10_000.0,
+        "total_asset": 10_000.0,
+        "cash": 10_000.0,
+        "position_value": 0.0,
+        "positions_count": 0,
+        "holdings": [],
+    }
+    assert report.today_candidates["total"] == 0
+    assert report.today_candidates["rows"] == []
 
 
 def test_simulation_checkpoint_continuation_matches_full_run() -> None:

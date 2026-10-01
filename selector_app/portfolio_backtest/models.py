@@ -311,6 +311,10 @@ class PortfolioBacktestReport:
     #: 数量一律按最后一根 K 线的收盘价**估算**——明日开盘价今天不存在。没有
     #: 追踪需求时是空字典，报告其余部分照常。
     next_plan: Mapping[str, PortfolioJsonValue] = field(default_factory=dict)
+    #: 最近行情日的候选指标扫描，与模拟执行产生的 next_plan 严格分离。
+    today_candidates: Mapping[str, PortfolioJsonValue] = field(default_factory=dict)
+    #: 最近行情日账户快照，持仓含卖出指标读数。
+    current_state: Mapping[str, PortfolioJsonValue] | None = None
     price_basis: Literal["raw"] = PORTFOLIO_BACKTEST_PRICE_BASIS
     limitations: tuple[str, ...] = PORTFOLIO_BACKTEST_LIMITATIONS
 
@@ -351,6 +355,8 @@ class PortfolioBacktestReport:
             "excluded_st_count": self.excluded_st_count,
             "benchmark": dict(self.benchmark) if self.benchmark is not None else None,
             "next_plan": dict(self.next_plan),
+            "today_candidates": dict(self.today_candidates),
+            "current_state": dict(self.current_state) if self.current_state is not None else None,
             "price_basis": self.price_basis,
             "limitations": list(self.limitations),
         }

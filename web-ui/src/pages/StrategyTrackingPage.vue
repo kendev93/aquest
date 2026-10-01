@@ -6,6 +6,7 @@ import TermHint from '../components/TermHint.vue'
 import {
   fetchStrategyTracking,
   getStrategyTracking,
+  getStrategyTrackingTrades,
   getTrackingJob,
   launchStrategyTracking,
   rerunStrategyTracking,
@@ -15,7 +16,11 @@ import type {
   SavedStrategyPerformance,
   StrategyTrackingPoint,
   StrategyTrackingSnapshot,
+  TrackingConditionReading,
+  TrackingCurrentState,
   TrackingTradeRow,
+  TrackingTradePage,
+  TrackingTodayCandidates,
 } from '../types'
 
 type PerformanceKey = keyof SavedStrategyPerformance
@@ -28,8 +33,17 @@ const busyId = ref('')
 const expandedId = ref('')
 // 成交明细只在展开时单独取（列表接口不带它），取过就留在本地，切走回来不重取。
 const details = ref<Record<string, StrategyTrackingSnapshot>>({})
+const tradePages = ref<Record<string, TrackingTradePage>>({})
+const tradeFilters = ref<Record<string, {
+  phase: 'all' | 'pre' | 'post'
+  dateFrom: string
+  dateTo: string
+  offset: number
+}>>({})
 const detailLoadingId = ref('')
 const detailError = ref('')
+const tradeLoadingId = ref('')
+const tradeError = ref('')
 let pollTimer: ReturnType<typeof setTimeout> | null = null
 
 const online = computed(() =>
@@ -75,9 +89,13 @@ async function load(): Promise<void> {
     snapshots.value = await fetchStrategyTracking()
     // 重跑之后明细会变，缓存必须一起作废，否则展开看到的是上一次的结果。
     details.value = {}
+    tradePages.value = {}
     // 作废之后要立刻把当前展开的那一行补回来：它本来就开着，空缓存会让它显示
     // 「0 笔」，看起来像是重跑把成交记录弄丢了，而实际上只是没人再去取。
-    if (expandedId.value) await loadDetail(expandedId.value)
+    if (expandedId.value) {
+      tradeFilterFor(expandedId.value).offset = 0
+      await loadDetail(expandedId.value)
+    }
   } catch (error) {
     showMessage(error instanceof Error ? error.message : '策略追踪加载失败。', true)
   } finally {
@@ -90,6 +108,7 @@ async function loadDetail(strategyId: string): Promise<void> {
   detailError.value = ''
   try {
     details.value[strategyId] = await getStrategyTracking(strategyId)
+    await loadTrades(strategyId)
   } catch (error) {
     detailError.value = error instanceof Error ? error.message : '交易明细读取失败。'
   } finally {
@@ -104,7 +123,89 @@ function toggle(strategyId: string): void {
 }
 
 function tradesOf(strategyId: string) {
-  return details.value[strategyId]?.trades ?? null
+  return tradePages.value[strategyId] ?? null
+}
+
+function currentStateFor(item: StrategyTrackingSnapshot): TrackingCurrentState | null {
+  return details.value[item.strategy_id]?.current_state ?? item.current_state ?? null
+}
+
+function candidatesFor(item: StrategyTrackingSnapshot): TrackingTodayCandidates | null {
+  return details.value[item.strategy_id]?.today_candidates ?? item.today_candidates ?? null
+}
+
+function tradeFilterFor(strategyId: string) {
+  if (!tradeFilters.value[strategyId]) {
+    tradeFilters.value[strategyId] = { phase: 'all', dateFrom: '', dateTo: '', offset: 0 }
+  }
+  return tradeFilters.value[strategyId]
+}
+
+async function loadTrades(strategyId: string, resetOffset = false): Promise<void> {
+  const filters = tradeFilterFor(strategyId)
+  if (resetOffset) filters.offset = 0
+  tradeLoadingId.value = strategyId
+  tradeError.value = ''
+  try {
+    tradePages.value[strategyId] = await getStrategyTrackingTrades(strategyId, {
+      phase: filters.phase === 'all' ? '' : filters.phase,
+      date_from: filters.dateFrom,
+      date_to: filters.dateTo,
+      limit: 50,
+      offset: filters.offset,
+    })
+  } catch (error) {
+    tradeError.value = error instanceof Error ? error.message : '成交明细读取失败。'
+  } finally {
+    tradeLoadingId.value = ''
+  }
+}
+
+function applyTradeFilters(strategyId: string): void {
+  void loadTrades(strategyId, true)
+}
+
+function changeTradePage(strategyId: string, direction: -1 | 1): void {
+  const page = tradesOf(strategyId)
+  if (!page) return
+  const nextOffset = page.offset + direction * page.limit
+  if (nextOffset < 0 || nextOffset >= page.total) return
+  tradeFilterFor(strategyId).offset = nextOffset
+  void loadTrades(strategyId)
+}
+
+function tradeRange(page: TrackingTradePage | null): string {
+  if (!page || page.total === 0) return '0 笔'
+  return `${page.offset + 1}–${Math.min(page.offset + page.rows.length, page.total)} / ${page.total} 笔`
+}
+
+function recordedCost(value: number | null): string {
+  return value === null ? '未记录' : formatPreciseMoney(value)
+}
+
+function operatorLabel(operator: string): string {
+  return ({
+    gt: '>', gte: '≥', lt: '<', lte: '≤', eq: '=', neq: '≠',
+    cross_up: '上穿', cross_down: '下穿',
+  } as Record<string, string>)[operator] ?? operator
+}
+
+function conditionLabel(condition: TrackingConditionReading): string {
+  const right = condition.right_value || formatNumber(condition.threshold)
+  return `${condition.left_value} ${operatorLabel(condition.operator)} ${right}`
+}
+
+function conditionValues(condition: TrackingConditionReading): string {
+  const current = `${formatNumber(condition.current_left_value)}${condition.right_value ? ` / ${formatNumber(condition.current_right_value)}` : ''}`
+  if (condition.operator !== 'cross_up' && condition.operator !== 'cross_down') return current
+  const previous = `${formatNumber(condition.previous_left_value)}${condition.right_value ? ` / ${formatNumber(condition.previous_right_value)}` : ''}`
+  return `${previous} → ${current}`
+}
+
+function signalSummary(signals: Array<{ id: string; matched: boolean }>): string {
+  return signals.length
+    ? signals.map((signal) => `${signal.id}：${signal.matched ? '满足' : '未满足'}`).join('；')
+    : '未配置独立信号'
 }
 
 /** 重跑要重算全历史，是分钟级任务，所以提交完只能轮询。 */
@@ -180,22 +281,12 @@ function planBadge(item: StrategyTrackingSnapshot): string {
   return `明日：卖 ${sells} / 买 ${buys}`
 }
 
-function tradeRows(item: StrategyTrackingSnapshot, phase: 'pre' | 'post'): TrackingTradeRow[] {
-  const trades = tradesOf(item.strategy_id)
-  if (!trades) return []
-  return phase === 'post' ? trades.after.rows : trades.before.rows
+function tradeRows(strategyId: string): TrackingTradeRow[] {
+  return tradesOf(strategyId)?.rows ?? []
 }
 
-function tradeTotal(item: StrategyTrackingSnapshot, phase: 'pre' | 'post'): number {
-  const trades = tradesOf(item.strategy_id)
-  if (!trades) return 0
-  return phase === 'post' ? trades.after.total : trades.before.total
-}
-
-function tradeTruncated(item: StrategyTrackingSnapshot, phase: 'pre' | 'post'): boolean {
-  const trades = tradesOf(item.strategy_id)
-  if (!trades) return false
-  return phase === 'post' ? trades.after.truncated : trades.before.truncated
+function tradeTotal(strategyId: string): number {
+  return tradesOf(strategyId)?.total ?? 0
 }
 
 onMounted(load)
@@ -226,6 +317,11 @@ function formatNumber(value: number | null | undefined, digits = 2): string {
 function formatMoney(value: number | null | undefined): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return '—'
   return value.toLocaleString('zh-CN', { maximumFractionDigits: 0 })
+}
+
+function formatPreciseMoney(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return '—'
+  return value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
 /** 观察段天数。上线日的空仓初始资金行是基点，不算收益观察日。 */
@@ -399,10 +495,14 @@ function chartFor(item: StrategyTrackingSnapshot) {
       >
         <div class="panel-heading">
           <div><span class="section-kicker">DETAIL</span><h3>{{ item.name || item.strategy_id }}</h3></div>
-          <span class="muted-code" :data-testid="`tracking-updated-${item.strategy_id}`">算到 {{ formatDate(item.last_tracked_date) }}</span>
+          <span class="muted-code" :data-testid="`tracking-updated-${item.strategy_id}`">
+            <template v-if="detailLoadingId === item.strategy_id">详情读取中 · </template>
+            算到 {{ formatDate(item.last_tracked_date) }}
+          </span>
         </div>
 
         <p v-if="item.last_error" class="notice error" :data-testid="`tracking-error-detail-${item.strategy_id}`">{{ item.last_error }}</p>
+        <p v-if="detailError" class="field-error" data-testid="tracking-detail-error">{{ detailError }}</p>
 
         <p v-if="item.observation_is_short" class="sample-warning" data-testid="tracking-short-warning">
           观察段还不到 20 个交易日，此时的年化和衰减比基本是噪声，先当参考，别当结论。
@@ -411,20 +511,105 @@ function chartFor(item: StrategyTrackingSnapshot) {
           {{ minTrlNote(item) }}<TermHint term="minTrackRecordLength" />
         </p>
 
+        <section class="data-section tracking-state" :data-testid="`tracking-current-state-${item.strategy_id}`">
+          <div class="section-heading">
+            <div><span class="section-kicker">CURRENT STATE</span><h4>当前账户与持仓</h4></div>
+            <span v-if="currentStateFor(item)?.as_of" class="muted-code">截至 {{ currentStateFor(item)?.as_of }}</span>
+          </div>
+          <template v-if="currentStateFor(item)">
+            <div class="tracking-account-strip">
+              <div><span>总资产</span><strong>{{ formatMoney(currentStateFor(item)?.total_asset) }}</strong></div>
+              <div><span>现金</span><strong>{{ formatMoney(currentStateFor(item)?.cash) }}</strong></div>
+              <div><span>持仓市值</span><strong>{{ formatMoney(currentStateFor(item)?.position_value) }}</strong></div>
+              <div><span>持仓数</span><strong>{{ currentStateFor(item)?.positions_count }}</strong></div>
+            </div>
+            <p v-if="!currentStateFor(item)?.holdings.length" class="plan-empty">截至该日为空仓。</p>
+            <div v-else class="table-wrap">
+              <table :data-testid="`tracking-holdings-${item.strategy_id}`">
+                <thead><tr><th>标的</th><th>数量</th><th>建仓日期</th><th>成本价</th><th>最新价</th><th>市值</th><th>浮动盈亏</th><th>仓位占比</th><th>卖出指标</th></tr></thead>
+                <tbody>
+                  <tr v-for="holding in currentStateFor(item)?.holdings ?? []" :key="`${holding.market}${holding.code}`">
+                    <td><strong class="code">{{ holding.code }}</strong><small class="holding-name">{{ holding.name || '—' }}</small></td>
+                    <td>{{ formatMoney(holding.size) }}</td>
+                    <td class="muted-code">{{ holding.entry_date }}</td>
+                    <td>{{ formatPreciseMoney(holding.entry_price) }}</td>
+                    <td>{{ formatPreciseMoney(holding.latest_price) }}</td>
+                    <td>{{ formatMoney(holding.market_value) }}</td>
+                    <td :class="{ positive: holding.unrealized_pnl > 0, negative: holding.unrealized_pnl < 0 }">
+                      {{ formatPreciseMoney(holding.unrealized_pnl) }} <small>({{ formatPercent(holding.unrealized_pnl_pct) }})</small>
+                    </td>
+                    <td>{{ formatPercent(holding.position_weight) }}</td>
+                    <td>
+                      <span :class="holding.sell_signal.matched ? 'negative' : 'muted'">{{ holding.sell_signal.matched ? '满足' : '未满足' }}</span>
+                      <small v-if="holding.indicator_as_of" class="holding-name">指标截至 {{ holding.indicator_as_of }}</small>
+                      <details v-if="holding.sell_signal.signals.length || holding.sell_signal.conditions.length" class="indicator-detail">
+                        <summary>查看指标值</summary>
+                        <p v-if="holding.sell_signal.signals.length" class="signal-readout">{{ signalSummary(holding.sell_signal.signals) }}</p>
+                        <table v-if="holding.sell_signal.conditions.length" class="compact-table">
+                          <thead><tr><th>条件</th><th>前值 → 当前值</th><th>阈值 / 右值</th><th>结果</th></tr></thead>
+                          <tbody><tr v-for="(condition, index) in holding.sell_signal.conditions" :key="index">
+                            <td>{{ conditionLabel(condition) }}</td><td>{{ conditionValues(condition) }}</td>
+                            <td>{{ condition.right_value ? formatNumber(condition.current_right_value) : formatNumber(condition.threshold) }}</td>
+                            <td>{{ condition.matched ? '满足' : '未满足' }}</td>
+                          </tr></tbody>
+                        </table>
+                      </details>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p class="plan-note">浮动盈亏按最近收盘价估算，不含未来卖出费用。</p>
+          </template>
+          <p v-else-if="item.launched_at !== null" class="plan-empty" data-testid="tracking-state-not-saved">历史版本未保存持仓快照。</p>
+          <p v-else class="plan-empty">策略上线后会在首次成功计算时保存账户快照。</p>
+        </section>
+
+        <section class="data-section candidate-section" :data-testid="`tracking-candidates-${item.strategy_id}`">
+          <div class="section-heading">
+            <div><span class="section-kicker">TODAY CANDIDATES</span><h4>当日候选</h4></div>
+            <span v-if="candidatesFor(item)?.as_of" class="muted-code">{{ candidatesFor(item)?.as_of }} · 命中 {{ candidatesFor(item)?.total }} 只</span>
+          </div>
+          <p class="plan-note">候选扫描每天按策略排名展示买入条件命中的标的，只用于观察指标当前值；实际待执行订单以「下一交易日计划」为准。</p>
+          <p v-if="!candidatesFor(item) && item.launched_at !== null" class="plan-empty">历史版本未保存当日候选快照。</p>
+          <p v-else-if="candidatesFor(item)?.total === 0" class="plan-empty">该日没有满足买入条件的候选。</p>
+          <div v-else-if="candidatesFor(item)?.rows.length" class="table-wrap">
+            <table>
+              <thead><tr><th>排名</th><th>标的</th><th>排名指标值</th><th>排序分</th><th>买入信号</th><th>买入条件当前值</th></tr></thead>
+              <tbody>
+                <tr v-for="candidate in candidatesFor(item)?.rows" :key="`${candidate.market}${candidate.code}`">
+                  <td>{{ candidate.rank }}</td>
+                  <td><strong class="code">{{ candidate.code }}</strong><small class="holding-name">{{ candidate.name || '—' }}<template v-if="candidate.already_held"> · 已持有</template></small></td>
+                  <td>{{ formatNumber(candidate.score) }}</td>
+                  <td>{{ formatNumber(candidate.rank_score) }}</td>
+                  <td><span :class="candidate.buy_signal.matched ? 'positive' : 'muted'">{{ candidate.buy_signal.matched ? '匹配' : '不匹配' }}</span><small class="signal-readout">{{ signalSummary(candidate.buy_signal.signals) }}</small></td>
+                  <td>
+                    <span v-if="!candidate.buy_conditions.length" class="muted">无数值条件</span>
+                    <details v-else class="indicator-detail">
+                      <summary>{{ candidate.buy_conditions.filter((condition) => condition.matched).length }} / {{ candidate.buy_conditions.length }} 条满足</summary>
+                      <table class="compact-table">
+                        <thead><tr><th>条件</th><th>前值 → 当前值</th><th>阈值 / 右值</th><th>结果</th></tr></thead>
+                        <tbody><tr v-for="(condition, index) in candidate.buy_conditions" :key="index">
+                          <td>{{ conditionLabel(condition) }}</td><td>{{ conditionValues(condition) }}</td>
+                          <td>{{ condition.right_value ? formatNumber(condition.current_right_value) : formatNumber(condition.threshold) }}</td>
+                          <td>{{ condition.matched ? '满足' : '未满足' }}</td>
+                        </tr></tbody>
+                      </table>
+                    </details>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
         <section v-if="item.next_plan" class="plan-card" :data-testid="`tracking-plan-${item.strategy_id}`">
           <div class="section-heading">
             <div><span class="section-kicker">NEXT SESSION</span><h4>下一交易日计划</h4></div>
             <span class="muted-code">基于 {{ item.next_plan.as_of }} 收盘</span>
           </div>
 
-          <p v-if="item.next_plan.holdings.length" class="plan-holdings">
-            当前持仓：
-            <span v-for="holding in item.next_plan.holdings" :key="holding.code">
-              {{ holding.code }}<template v-if="holding.name"> {{ holding.name }}</template>
-              × {{ formatMoney(holding.size) }}
-            </span>
-          </p>
-          <p v-else class="plan-holdings">当前空仓。</p>
+          <p class="plan-note">这是下一交易日待执行计划，和上方当日候选扫描、当前持仓快照分开。</p>
 
           <div class="plan-grid">
             <div class="plan-column">
@@ -438,7 +623,7 @@ function chartFor(item: StrategyTrackingSnapshot) {
                       <td><strong class="code">{{ order.code }}</strong></td>
                       <td>{{ order.name || '—' }}</td>
                       <td>{{ formatMoney(order.size) }}</td>
-                      <td>{{ formatMoney(order.reference_price) }}</td>
+                      <td>{{ formatPreciseMoney(order.reference_price) }}</td>
                       <td>{{ order.reason || '—' }}</td>
                     </tr>
                   </tbody>
@@ -458,8 +643,8 @@ function chartFor(item: StrategyTrackingSnapshot) {
                       <td><strong class="code">{{ order.code }}</strong></td>
                       <td>{{ order.name || '—' }}</td>
                       <td>{{ formatMoney(order.estimated_size) }}</td>
-                      <td>{{ formatMoney(order.reference_price) }}</td>
-                      <td>{{ formatMoney(order.estimated_cost) }}</td>
+                      <td>{{ formatPreciseMoney(order.reference_price) }}</td>
+                      <td>{{ formatPreciseMoney(order.estimated_cost) }}</td>
                     </tr>
                   </tbody>
                 </table>
@@ -543,58 +728,52 @@ function chartFor(item: StrategyTrackingSnapshot) {
         <section class="data-section" :data-testid="`tracking-trades-${item.strategy_id}`">
           <div class="section-heading">
             <div><span class="section-kicker">TRADES</span><h4>成交明细</h4></div>
-            <span v-if="detailLoadingId === item.strategy_id" data-testid="trades-loading">读取中…</span>
+            <span v-if="tradeLoadingId === item.strategy_id" data-testid="trades-loading">读取中…</span>
           </div>
-          <p v-if="detailError" class="field-error" data-testid="trades-error">{{ detailError }}</p>
-
-          <details open :data-testid="`trades-after-${item.strategy_id}`">
-            <summary>上线后 · {{ tradeTotal(item, 'post') }} 笔</summary>
-            <p v-if="!tradeRows(item, 'post').length" class="plan-empty">上线后还没有成交。</p>
-            <template v-else>
-              <div class="table-wrap">
-                <table>
-                  <thead><tr><th>日期</th><th>方向</th><th>代码</th><th>名称</th><th>股数</th><th>价格</th><th>盈亏</th><th>原因</th></tr></thead>
-                  <tbody>
-                    <tr v-for="(row, index) in tradeRows(item, 'post')" :key="`${row.trade_date}-${row.code}-${index}`">
-                      <td class="muted-code">{{ formatDate(row.trade_date) }}</td>
-                      <td :class="row.direction === 'SELL' ? 'negative' : 'positive'">{{ row.direction === 'SELL' ? '卖出' : '买入' }}</td>
-                      <td><strong class="code">{{ row.code }}</strong></td>
-                      <td>{{ row.name || '—' }}</td>
-                      <td>{{ formatMoney(row.size) }}</td>
-                      <td>{{ formatMoney(row.price) }}</td>
-                      <td :class="{ positive: row.pnl > 0, negative: row.pnl < 0 }">{{ formatMoney(row.pnl) }}</td>
-                      <td>{{ row.reason || '—' }}</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
-              <p v-if="tradeTruncated(item, 'post')" class="plan-note">
-                只显示最近 {{ tradesOf(item.strategy_id)?.limit }} 笔，共 {{ tradeTotal(item, 'post') }} 笔。
-              </p>
-            </template>
-          </details>
-
-          <details :data-testid="`trades-before-${item.strategy_id}`">
-            <summary>上线前 · {{ tradeTotal(item, 'pre') }} 笔</summary>
-            <p v-if="!tradeRows(item, 'pre').length" class="plan-empty">上线前没有成交。</p>
-            <div v-else class="table-wrap">
-              <table>
-                <thead><tr><th>日期</th><th>方向</th><th>代码</th><th>名称</th><th>股数</th><th>价格</th><th>盈亏</th><th>原因</th></tr></thead>
-                <tbody>
-                  <tr v-for="(row, index) in tradeRows(item, 'pre')" :key="`${row.trade_date}-${row.code}-${index}`">
-                    <td class="muted-code">{{ formatDate(row.trade_date) }}</td>
-                    <td :class="row.direction === 'SELL' ? 'negative' : 'positive'">{{ row.direction === 'SELL' ? '卖出' : '买入' }}</td>
-                    <td><strong class="code">{{ row.code }}</strong></td>
-                    <td>{{ row.name || '—' }}</td>
-                    <td>{{ formatMoney(row.size) }}</td>
-                    <td>{{ formatMoney(row.price) }}</td>
-                    <td :class="{ positive: row.pnl > 0, negative: row.pnl < 0 }">{{ formatMoney(row.pnl) }}</td>
-                    <td>{{ row.reason || '—' }}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </details>
+          <p v-if="tradeError" class="field-error" data-testid="trades-error">{{ tradeError }}</p>
+          <div class="trade-filters">
+            <label>阶段
+              <select v-model="tradeFilterFor(item.strategy_id).phase" @change="applyTradeFilters(item.strategy_id)">
+                <option value="all">全部</option><option value="post">上线后</option><option value="pre">上线前</option>
+              </select>
+            </label>
+            <label>成交日起
+              <input v-model="tradeFilterFor(item.strategy_id).dateFrom" type="date" @change="applyTradeFilters(item.strategy_id)">
+            </label>
+            <label>成交日止
+              <input v-model="tradeFilterFor(item.strategy_id).dateTo" type="date" @change="applyTradeFilters(item.strategy_id)">
+            </label>
+            <span class="muted-code">{{ tradeRange(tradesOf(item.strategy_id)) }}</span>
+          </div>
+          <p v-if="!tradeRows(item.strategy_id).length && !tradeLoadingId" class="plan-empty">
+            {{ tradeTotal(item.strategy_id) === 0 ? '筛选范围内没有实际成交。' : '正在读取成交记录。' }}
+          </p>
+          <div v-else-if="tradeRows(item.strategy_id).length" class="table-wrap">
+            <table>
+              <thead><tr><th>成交日</th><th>信号日</th><th>方向</th><th>标的</th><th>数量</th><th>成交价</th><th>手续费</th><th>印花税</th><th>滑点</th><th>成本价</th><th>已实现盈亏</th><th>原因</th></tr></thead>
+              <tbody>
+                <tr v-for="(row, index) in tradeRows(item.strategy_id)" :key="`${row.trade_date}-${row.code}-${index}`">
+                  <td class="muted-code">{{ formatDate(row.trade_date) }}</td>
+                  <td class="muted-code">{{ row.signal_date === null ? '未记录' : formatDate(row.signal_date) }}</td>
+                  <td :class="row.direction === 'SELL' ? 'negative' : 'positive'">{{ row.direction === 'SELL' ? '卖出' : '买入' }}</td>
+                  <td><strong class="code">{{ row.code }}</strong><small class="holding-name">{{ row.name || '—' }}</small></td>
+                  <td>{{ formatMoney(row.size) }}</td>
+                  <td>{{ formatPreciseMoney(row.price) }}</td>
+                  <td>{{ recordedCost(row.commission) }}</td>
+                  <td>{{ recordedCost(row.stamp_tax) }}</td>
+                  <td>{{ recordedCost(row.slippage) }}</td>
+                  <td>{{ row.direction === 'SELL' ? recordedCost(row.cost_basis) : '—' }}</td>
+                  <td :class="{ positive: row.direction === 'SELL' && row.pnl > 0, negative: row.direction === 'SELL' && row.pnl < 0 }">{{ row.direction === 'SELL' ? formatPreciseMoney(row.pnl) : '—' }}</td>
+                  <td>{{ row.reason || '—' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div v-if="tradesOf(item.strategy_id)?.total" class="trade-pagination">
+            <button class="secondary-button" type="button" :disabled="tradeLoadingId === item.strategy_id || (tradesOf(item.strategy_id)?.offset ?? 0) === 0" @click="changeTradePage(item.strategy_id, -1)">上一页</button>
+            <span>{{ tradeRange(tradesOf(item.strategy_id)) }} · 每页 {{ tradesOf(item.strategy_id)?.limit }} 笔</span>
+            <button class="secondary-button" type="button" :disabled="tradeLoadingId === item.strategy_id || (tradesOf(item.strategy_id)?.offset ?? 0) + (tradesOf(item.strategy_id)?.rows.length ?? 0) >= tradeTotal(item.strategy_id)" @click="changeTradePage(item.strategy_id, 1)">下一页</button>
+          </div>
         </section>
       </section>
     </main>

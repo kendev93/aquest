@@ -98,6 +98,59 @@ def test_migration_is_idempotent(tmp_path) -> None:
     assert record["launched_at"] == "2026-09-10"
 
 
+def test_migrating_v17_adds_tracking_snapshot_and_trade_detail_columns(tmp_path) -> None:
+    path = tmp_path / "market.duckdb"
+    with duckdb.connect(str(path)) as connection:
+        connection.execute(
+            "CREATE TABLE data_meta (key VARCHAR PRIMARY KEY, value VARCHAR NOT NULL, "
+            "updated_at TIMESTAMP NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO data_meta VALUES ('schema_version', '17', CURRENT_TIMESTAMP)"
+        )
+        connection.execute(
+            "CREATE TABLE saved_strategies ("
+            "strategy_id VARCHAR PRIMARY KEY, name VARCHAR NOT NULL, note VARCHAR NOT NULL, "
+            "source_history_id VARCHAR, created_at TIMESTAMP NOT NULL, "
+            "updated_at TIMESTAMP NOT NULL, "
+            "request_json VARCHAR NOT NULL, summary_json VARCHAR NOT NULL, "
+            "tracking_status VARCHAR, launched_at DATE, last_tracked_date INTEGER, "
+            "last_error VARCHAR)"
+        )
+        connection.execute(
+            "INSERT INTO saved_strategies VALUES "
+            "('old-1', '旧策略', '', NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, '{}', '{}', "
+            "'off', NULL, NULL, '')"
+        )
+        connection.execute(
+            "CREATE TABLE strategy_tracking_trades ("
+            "strategy_id VARCHAR NOT NULL, seq INTEGER NOT NULL, trade_date INTEGER NOT NULL, "
+            "phase VARCHAR NOT NULL, direction VARCHAR NOT NULL, market VARCHAR NOT NULL, "
+            "code VARCHAR NOT NULL, name VARCHAR NOT NULL, size DOUBLE NOT NULL, "
+            "price DOUBLE NOT NULL, "
+            "pnl DOUBLE NOT NULL, reason VARCHAR NOT NULL, PRIMARY KEY (strategy_id, seq))"
+        )
+        connection.execute(
+            "INSERT INTO strategy_tracking_trades VALUES "
+            "('old-1', 0, 20260901, 'post', 'SELL', 'SH', '600000', '旧成交', "
+            "100, 12, 50, '卖出条件')"
+        )
+
+    store = DuckDbMarketDataStore(path)
+
+    strategy = store.read_strategy("old-1")
+    assert strategy is not None
+    assert strategy["tracking_state"] is None
+    trade = store.list_tracking_trades("old-1")[0]
+    assert trade["trade_date"] == 20260901
+    assert trade["commission"] is None
+    assert trade["stamp_tax"] is None
+    assert trade["slippage"] is None
+    assert trade["cost_basis"] is None
+    assert trade["signal_date"] is None
+    assert store.status().schema_version == SCHEMA_VERSION
+
+
 @pytest.mark.parametrize("version", [13, 14])
 def test_older_databases_all_migrate_to_the_current_version(tmp_path, version: int) -> None:
     path = tmp_path / "market.duckdb"

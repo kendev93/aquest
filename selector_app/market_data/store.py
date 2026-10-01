@@ -714,6 +714,7 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
         plan: Mapping[str, object] | None = None,
         last_tracked_date: int | None = None,
         summary: Mapping[str, object] | None = None,
+        tracking_state: Mapping[str, object] | None = None,
     ) -> int:
         """Save points alone, or atomically save a complete active refresh.
 
@@ -730,9 +731,15 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
                 plan=plan,
                 last_tracked_date=last_tracked_date,
                 summary=summary,
+                tracking_state=tracking_state,
             )
             return int(saved)
-        if trades is not None or plan is not None or summary is not None:
+        if (
+            trades is not None
+            or plan is not None
+            or summary is not None
+            or tracking_state is not None
+        ):
             raise ValueError("保存追踪明细时必须提供 last_tracked_date")
         return self._history.save_tracking_points(strategy_id, points)
 
@@ -745,6 +752,7 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
         plan: Mapping[str, object] | None,
         last_tracked_date: int,
         summary: Mapping[str, object] | None = None,
+        tracking_state: Mapping[str, object] | None = None,
     ) -> bool:
         return self._history.save_strategy_tracking_snapshot(
             strategy_id,
@@ -753,6 +761,7 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
             plan=plan,
             last_tracked_date=last_tracked_date,
             summary=summary,
+            tracking_state=tracking_state,
         )
 
     def list_tracking_points(
@@ -772,6 +781,25 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
 
     def list_tracking_trades(self, strategy_id: str) -> list[dict[str, object]]:
         return self._history.list_tracking_trades(strategy_id)
+
+    def page_tracking_trades(
+        self,
+        strategy_id: str,
+        *,
+        phase: str | None = None,
+        date_from: int | None = None,
+        date_to: int | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, object]:
+        return self._history.page_tracking_trades(
+            strategy_id,
+            phase=phase,
+            date_from=date_from,
+            date_to=date_to,
+            limit=limit,
+            offset=offset,
+        )
 
     def save_tracking_plan(
         self,

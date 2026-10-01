@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
-from typing import cast
+from datetime import date
+from typing import Literal, cast
 
-from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 
 from selector_app.market_data.auto_sync import ACTIVE_DATA_JOB_DESCRIPTIONS
@@ -181,6 +182,8 @@ def list_strategy_tracking(request: Request) -> dict[str, object]:
             # 策略时才需要，走 /tracking/{id} 单独取。明日计划很小且列表页就要
             # 用（一眼看到今天哪些策略要调仓），所以留着。
             snapshot["trades"] = None
+            snapshot["current_state"] = None
+            snapshot["today_candidates"] = None
             snapshot["name"] = record["name"]
             snapshot["note"] = record["note"]
             rows.append(snapshot)
@@ -211,6 +214,40 @@ def read_strategy_tracking(strategy_id: str, request: Request) -> dict[str, obje
     except (MarketDataStoreError, OSError) as exc:
         raise HTTPException(status_code=503, detail="策略追踪暂不可用") from exc
     return {"data": snapshot.to_dict()}
+
+
+@router.get("/tracking/{strategy_id}/trades")
+def page_strategy_tracking_trades(
+    strategy_id: str,
+    request: Request,
+    phase: Literal["pre", "post"] | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, object]:
+    """Page through actual fills with optional segment and date filters."""
+
+    if date_from is not None and date_to is not None and date_from > date_to:
+        raise HTTPException(status_code=422, detail="成交日期范围无效")
+    try:
+        if _store(request).read_strategy(strategy_id) is None:
+            raise HTTPException(status_code=404, detail="策略不存在")
+        page = _store(request).page_tracking_trades(
+            strategy_id,
+            phase=phase,
+            date_from=(int(date_from.strftime("%Y%m%d")) if date_from else None),
+            date_to=(int(date_to.strftime("%Y%m%d")) if date_to else None),
+            limit=limit,
+            offset=offset,
+        )
+    except HTTPException:
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (MarketDataStoreError, OSError) as exc:
+        raise HTTPException(status_code=503, detail="策略追踪暂不可用") from exc
+    return {"data": page}
 
 
 @router.post("/tracking/{strategy_id}/launch")

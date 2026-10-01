@@ -1,7 +1,7 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { StrategyTrackingSnapshot, TrackingTrades } from '../types'
+import type { StrategyTrackingSnapshot, TrackingTradePage } from '../types'
 import StrategyTrackingPage from './StrategyTrackingPage.vue'
 
 import * as strategiesApi from '../api/savedStrategies'
@@ -13,6 +13,7 @@ vi.mock('../api/savedStrategies', async () => {
     ...actual,
     fetchStrategyTracking: vi.fn(),
     getStrategyTracking: vi.fn(),
+    getStrategyTrackingTrades: vi.fn(),
     getTrackingJob: vi.fn(),
     launchStrategyTracking: vi.fn(),
     rerunStrategyTracking: vi.fn(),
@@ -62,6 +63,8 @@ const online: StrategyTrackingSnapshot = {
   min_track_record_length: null,
   trades: null,
   next_plan: null,
+  current_state: null,
+  today_candidates: null,
 }
 
 const offline: StrategyTrackingSnapshot = {
@@ -84,6 +87,10 @@ describe('StrategyTrackingPage', () => {
   beforeEach(() => {
     vi.mocked(strategiesApi.fetchStrategyTracking).mockReset()
     vi.mocked(strategiesApi.getStrategyTracking).mockReset()
+    vi.mocked(strategiesApi.getStrategyTrackingTrades).mockReset()
+    vi.mocked(strategiesApi.getStrategyTrackingTrades).mockResolvedValue({
+      rows: [], total: 0, limit: 50, offset: 0,
+    })
     vi.mocked(strategiesApi.getTrackingJob).mockReset()
     vi.mocked(strategiesApi.launchStrategyTracking).mockReset()
     vi.mocked(strategiesApi.stopStrategyTracking).mockReset()
@@ -298,49 +305,199 @@ describe('StrategyTrackingPage', () => {
       notes: ['买入股数是按今日收盘价与可用现金估算的，明天开盘价变了就会变。'],
     }
 
-    const trades: TrackingTrades = {
-      before: {
-        rows: [
-          {
-            trade_date: 20260820,
-            phase: 'pre',
-            direction: 'BUY',
-            market: 'SH',
-            code: '600009',
-            name: '旧',
-            size: 500,
-            price: 9,
-            pnl: 0,
-            reason: '买入条件',
-          },
-        ],
-        total: 1,
-        truncated: false,
-      },
-      after: {
-        rows: [
-          {
-            trade_date: 20260905,
-            phase: 'post',
-            direction: 'SELL',
-            market: 'SH',
-            code: '600001',
-            name: '甲',
-            size: 300,
-            price: 16,
-            pnl: 600,
-            reason: '卖出条件',
-          },
-        ],
-        total: 1,
-        truncated: false,
-      },
-      limit: 200,
+    const trades: TrackingTradePage = {
+      rows: [
+        {
+          trade_date: 20260905,
+          signal_date: 20260904,
+          phase: 'post',
+          direction: 'SELL',
+          market: 'SH',
+          code: '600001',
+          name: '甲',
+          size: 300,
+          price: 16,
+          commission: 1.6,
+          stamp_tax: 4.8,
+          slippage: 0.5,
+          cost_basis: 4200,
+          pnl: 600,
+          reason: '卖出条件',
+        },
+        {
+          trade_date: 20260820,
+          signal_date: null,
+          phase: 'pre',
+          direction: 'BUY',
+          market: 'SH',
+          code: '600009',
+          name: '旧',
+          size: 500,
+          price: 9,
+          commission: null,
+          stamp_tax: null,
+          slippage: null,
+          cost_basis: null,
+          pnl: 0,
+          reason: '买入条件',
+        },
+      ],
+      total: 2,
+      limit: 50,
+      offset: 0,
     }
+
+    it('shows a dated holdings snapshot and a separate informational candidate scan', async () => {
+      const detail: StrategyTrackingSnapshot = {
+        ...online,
+        current_state: {
+          as_of: '2026-09-10',
+          available: true,
+          equity: 125000,
+          total_asset: 125000,
+          cash: 25000,
+          position_value: 100000,
+          positions_count: 1,
+          holdings: [
+            {
+              market: 'SH', code: '600100', name: '持仓甲', size: 1000,
+              entry_price: 90, entry_date: '2026-09-02', close: 100, latest_price: 100,
+              market_value: 100000, unrealized_pnl: 10000, unrealized_pnl_pct: 0.1111,
+              position_weight: 0.8,
+              sell_signal: {
+                matched: false,
+                signals: [{ id: 'indicator_one.distribution', matched: false }],
+                conditions: [{
+                  left_value: 'technical.rsi14', right_value: null, operator: 'cross_down',
+                  current_left_value: 35, current_right_value: 30, threshold: 30,
+                  previous_left_value: 40, previous_right_value: 30,
+                  required: false, matched: false,
+                }],
+              },
+            },
+          ],
+        },
+        today_candidates: {
+          as_of: '2026-09-10', ranking_value: 'indicator_one.wash', total: 21,
+          rows: [{
+            rank: 1, market: 'SZ', code: '000101', name: '候选乙', score: 88, rank_score: 88,
+            ranking_value: 'indicator_one.wash', already_held: false,
+            buy_signal: { matched: true, signals: [{ id: 'indicator_one.main_force_entry', matched: true }] },
+            buy_conditions: [{
+              left_value: 'technical.rsi14', right_value: null, operator: 'cross_up',
+              current_left_value: 31, current_right_value: 30, threshold: 30,
+              previous_left_value: 28, previous_right_value: 30,
+              required: false, matched: true,
+            }],
+          }],
+        },
+        next_plan: plan,
+      }
+      vi.mocked(strategiesApi.fetchStrategyTracking).mockResolvedValue([{ ...online, next_plan: plan }])
+      vi.mocked(strategiesApi.getStrategyTracking).mockResolvedValue(detail)
+      vi.mocked(strategiesApi.getStrategyTrackingTrades).mockResolvedValue({ rows: [], total: 0, limit: 50, offset: 0 })
+
+      const wrapper = mount(StrategyTrackingPage)
+      await flushPromises()
+      await wrapper.get('[data-testid="tracking-toggle-strategy-1"]').trigger('click')
+      await flushPromises()
+
+      const state = wrapper.get('[data-testid="tracking-current-state-strategy-1"]')
+      const candidates = wrapper.get('[data-testid="tracking-candidates-strategy-1"]')
+      expect(state.text()).toContain('截至 2026-09-10')
+      expect(state.text()).toContain('125,000')
+      expect(state.text()).toContain('600100')
+      expect(state.text()).toContain('前值 → 当前值')
+      expect(state.text()).toContain('40.00 → 35.00')
+      expect(candidates.text()).toContain('命中 21 只')
+      expect(candidates.text()).toContain('000101')
+      expect(candidates.text()).toContain('28.00 → 31.00')
+      expect(wrapper.get('[data-testid="tracking-plan-strategy-1"]').text()).toContain('下一交易日待执行计划')
+    })
+
+    it('shows a historical-version note when an old stopped strategy has no saved state', async () => {
+      const oldStopped: StrategyTrackingSnapshot = {
+        ...offline,
+        launched_at: 20260901,
+        last_tracked_date: 20260910,
+      }
+      vi.mocked(strategiesApi.fetchStrategyTracking).mockResolvedValue([oldStopped])
+      vi.mocked(strategiesApi.getStrategyTracking).mockResolvedValue(oldStopped)
+
+      const wrapper = mount(StrategyTrackingPage)
+      await flushPromises()
+      await wrapper.get('[data-testid="tracking-toggle-strategy-2"]').trigger('click')
+      await flushPromises()
+
+      expect(wrapper.get('[data-testid="tracking-state-not-saved"]').text()).toContain('历史版本未保存')
+    })
+
+    it('pages through the full trade ledger', async () => {
+      const firstRow = {
+        trade_date: 20260910, signal_date: 20260909, phase: 'post' as const,
+        direction: 'SELL', market: 'SH', code: '600001', name: '甲', size: 100,
+        price: 12, commission: 1, stamp_tax: 2, slippage: 0.5,
+        cost_basis: 1000, pnl: 196.5, reason: '卖出指标',
+      }
+      const firstPage: TrackingTradePage = {
+        rows: Array.from({ length: 50 }, (_, index) => ({ ...firstRow, code: `600${String(index).padStart(3, '0')}` })),
+        total: 51, limit: 50, offset: 0,
+      }
+      const lastPage: TrackingTradePage = {
+        rows: [{ ...firstRow, code: '600051' }], total: 51, limit: 50, offset: 50,
+      }
+      vi.mocked(strategiesApi.fetchStrategyTracking).mockResolvedValue([online])
+      vi.mocked(strategiesApi.getStrategyTracking).mockResolvedValue(online)
+      vi.mocked(strategiesApi.getStrategyTrackingTrades)
+        .mockResolvedValueOnce(firstPage)
+        .mockResolvedValueOnce(lastPage)
+
+      const wrapper = mount(StrategyTrackingPage)
+      await flushPromises()
+      await wrapper.get('[data-testid="tracking-toggle-strategy-1"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('[data-testid="tracking-trades-strategy-1"]').text()).toContain('600000')
+
+      await wrapper.get('.trade-pagination button:last-child').trigger('click')
+      await flushPromises()
+
+      expect(strategiesApi.getStrategyTrackingTrades).toHaveBeenLastCalledWith('strategy-1', {
+        phase: '', date_from: '', date_to: '', limit: 50, offset: 50,
+      })
+      expect(wrapper.get('[data-testid="tracking-trades-strategy-1"]').text()).toContain('600051')
+    })
+
+    it('applies phase and date filters and resets to the first page', async () => {
+      vi.mocked(strategiesApi.fetchStrategyTracking).mockResolvedValue([online])
+      vi.mocked(strategiesApi.getStrategyTracking).mockResolvedValue(online)
+      vi.mocked(strategiesApi.getStrategyTrackingTrades).mockResolvedValue({
+        rows: [], total: 0, limit: 50, offset: 0,
+      })
+
+      const wrapper = mount(StrategyTrackingPage)
+      await flushPromises()
+      await wrapper.get('[data-testid="tracking-toggle-strategy-1"]').trigger('click')
+      await flushPromises()
+      await wrapper.get('[data-testid="tracking-trades-strategy-1"] select').setValue('pre')
+      await flushPromises()
+
+      expect(strategiesApi.getStrategyTrackingTrades).toHaveBeenLastCalledWith('strategy-1', {
+        phase: 'pre', date_from: '', date_to: '', limit: 50, offset: 0,
+      })
+      const dateInputs = wrapper.findAll('[data-testid="tracking-trades-strategy-1"] input[type="date"]')
+      await dateInputs[0].setValue('2026-09-01')
+      await dateInputs[1].setValue('2026-09-10')
+      await flushPromises()
+
+      expect(strategiesApi.getStrategyTrackingTrades).toHaveBeenLastCalledWith('strategy-1', {
+        phase: 'pre', date_from: '2026-09-01', date_to: '2026-09-10', limit: 50, offset: 0,
+      })
+    })
 
     it('fetches trades only after a strategy is expanded', async () => {
       vi.mocked(strategiesApi.fetchStrategyTracking).mockResolvedValue([online])
-      vi.mocked(strategiesApi.getStrategyTracking).mockResolvedValue({ ...online, trades })
+      vi.mocked(strategiesApi.getStrategyTracking).mockResolvedValue(online)
+      vi.mocked(strategiesApi.getStrategyTrackingTrades).mockResolvedValue(trades)
 
       const wrapper = mount(StrategyTrackingPage)
       await flushPromises()
@@ -351,13 +508,16 @@ describe('StrategyTrackingPage', () => {
       await flushPromises()
 
       expect(strategiesApi.getStrategyTracking).toHaveBeenCalledWith('strategy-1')
-      // 上线后默认展开、上线前折叠：样本外的那一段才是重点。
-      expect(wrapper.get('[data-testid="trades-after-strategy-1"]').attributes('open')).toBeDefined()
-      expect(
-        wrapper.get('[data-testid="trades-before-strategy-1"]').attributes('open'),
-      ).toBeUndefined()
-      expect(wrapper.get('[data-testid="trades-after-strategy-1"]').text()).toContain('600001')
-      expect(wrapper.get('[data-testid="trades-before-strategy-1"]').text()).toContain('600009')
+      expect(strategiesApi.getStrategyTrackingTrades).toHaveBeenCalledWith('strategy-1', {
+        phase: '', date_from: '', date_to: '', limit: 50, offset: 0,
+      })
+      const table = wrapper.get('[data-testid="tracking-trades-strategy-1"]')
+      expect(table.text()).toContain('600001')
+      expect(table.text()).toContain('600009')
+      expect(table.text()).toContain('已实现盈亏')
+      expect(table.text()).toContain('手续费')
+      expect(table.text()).toContain('1.60')
+      expect(table.text()).toContain('未记录')
     })
 
     it('tells the user what the next session is going to trade', async () => {
@@ -401,32 +561,37 @@ describe('StrategyTrackingPage', () => {
     it('re-fetches the trades of an expanded row after a rerun finishes', async () => {
       // 重算完成后 load() 会把明细缓存整个作废；若只清空而不把当前展开的那一行补回来，
       // 展开着的行会突然显示「上线后还没有成交」，像是重跑把成交记录弄丢了。
-      const refreshedTrades: TrackingTrades = {
-        before: { rows: [], total: 0, truncated: false },
-        after: {
-          rows: [
-            {
-              trade_date: 20260908,
-              phase: 'post',
-              direction: 'BUY',
-              market: 'SH',
-              code: '600008',
-              name: '新',
-              size: 200,
-              price: 12,
-              pnl: 0,
-              reason: '买入条件',
-            },
-          ],
-          total: 1,
-          truncated: false,
-        },
-        limit: 200,
+      const refreshedTrades: TrackingTradePage = {
+        rows: [
+          {
+            trade_date: 20260908,
+            signal_date: 20260907,
+            phase: 'post',
+            direction: 'BUY',
+            market: 'SH',
+            code: '600008',
+            name: '新',
+            size: 200,
+            price: 12,
+            commission: 0.24,
+            stamp_tax: 0,
+            slippage: 0,
+            cost_basis: 0,
+            pnl: 0,
+            reason: '买入条件',
+          },
+        ],
+        total: 1,
+        limit: 50,
+        offset: 0,
       }
       vi.mocked(strategiesApi.fetchStrategyTracking).mockResolvedValue([online])
       vi.mocked(strategiesApi.getStrategyTracking)
-        .mockResolvedValueOnce({ ...online, trades })
-        .mockResolvedValueOnce({ ...online, trades: refreshedTrades })
+        .mockResolvedValueOnce(online)
+        .mockResolvedValueOnce(online)
+      vi.mocked(strategiesApi.getStrategyTrackingTrades)
+        .mockResolvedValueOnce(trades)
+        .mockResolvedValueOnce(refreshedTrades)
       vi.mocked(strategiesApi.rerunStrategyTracking).mockResolvedValue({
         job_id: 'job-2',
         status: 'queued',
@@ -446,7 +611,7 @@ describe('StrategyTrackingPage', () => {
       await flushPromises()
       await wrapper.get('[data-testid="tracking-toggle-strategy-1"]').trigger('click')
       await flushPromises()
-      expect(wrapper.get('[data-testid="trades-after-strategy-1"]').text()).toContain('600001')
+      expect(wrapper.get('[data-testid="tracking-trades-strategy-1"]').text()).toContain('600001')
 
       await wrapper.get('[data-testid="tracking-rerun-strategy-1"]').trigger('click')
       await flushPromises()
@@ -454,7 +619,8 @@ describe('StrategyTrackingPage', () => {
       expect(strategiesApi.rerunStrategyTracking).toHaveBeenCalledWith('strategy-1')
       // 第一次是展开时拉取，第二次是重算完成后的缓存作废补拉。
       expect(strategiesApi.getStrategyTracking).toHaveBeenCalledTimes(2)
-      expect(wrapper.get('[data-testid="trades-after-strategy-1"]').text()).toContain('600008')
+      expect(strategiesApi.getStrategyTrackingTrades).toHaveBeenCalledTimes(2)
+      expect(wrapper.get('[data-testid="tracking-trades-strategy-1"]').text()).toContain('600008')
     })
   })
 })

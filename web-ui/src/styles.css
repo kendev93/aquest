@@ -678,6 +678,65 @@ tbody tr:hover td { background: rgba(22, 34, 58, 0.45); }
 .segment-card .metrics-strip { margin-top: 12px; margin-bottom: 0; grid-template-columns: repeat(2, 1fr); }
 .benchmark-inline { margin-top: 10px; color: var(--muted); font-size: 11px; }
 .tracking-detail .equity-chart { height: 200px; }
+.tracking-state,
+.candidate-section { margin-top: 18px; }
+.tracking-account-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 10px;
+  margin: 0 0 12px;
+}
+.tracking-account-strip > div {
+  display: grid;
+  gap: 5px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--surface-raised);
+}
+.tracking-account-strip span { color: var(--muted); font-size: 10px; }
+.tracking-account-strip strong { font-size: 15px; font-variant-numeric: tabular-nums; }
+.holding-name,
+.signal-readout { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; }
+.indicator-detail { min-width: 150px; }
+.indicator-detail summary { white-space: nowrap; }
+.compact-table { min-width: 420px; font-size: 10px; }
+.compact-table th,
+.compact-table td { padding: 5px 7px; }
+.trade-filters {
+  display: flex;
+  align-items: end;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 0 0 10px;
+}
+.trade-filters label { display: grid; gap: 4px; color: var(--muted); font-size: 10px; }
+.trade-filters select,
+.trade-filters input {
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+}
+.trade-filters .muted-code { margin-left: auto; padding-bottom: 6px; }
+.trade-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 10px;
+  color: var(--muted);
+  font-size: 10px;
+}
+.trade-pagination .secondary-button { width: auto; min-height: 28px; margin: 0; padding: 0 10px; }
+.trade-pagination .secondary-button:disabled { cursor: not-allowed; opacity: 0.45; }
+@media (max-width: 680px) {
+  .tracking-account-strip { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+  .trade-filters .muted-code { width: 100%; margin-left: 0; }
+}
 
 /* 下一交易日计划：估算值必须一眼能认出来，不能和"实际成交"混在一起。 */
 .plan-pill {

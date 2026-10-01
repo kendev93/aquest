@@ -76,7 +76,8 @@ _STRATEGY_TRACKING_STATUSES = frozenset({STRATEGY_TRACKING_OFF, STRATEGY_TRACKIN
 #: 这个字段就没用了——重算所需的全部信息就是 request_json 本身。
 _STRATEGY_COLUMNS = (
     "strategy_id, name, note, source_history_id, created_at, updated_at, "
-    "request_json, summary_json, tracking_status, launched_at, last_tracked_date, last_error"
+    "request_json, summary_json, tracking_status, launched_at, last_tracked_date, last_error, "
+    "tracking_state_json"
 )
 _PRESET_COLUMNS = "preset_id, name, note, created_at, updated_at, payload_json"
 _CANDIDATE_COLUMNS = (
@@ -393,6 +394,15 @@ def _tracking_fields(row: tuple[object, ...]) -> dict[str, object]:
         "last_tracked_date": None if row[10] is None else _tracking_date(row[10]),
         "last_error": str(row[11] or ""),
     }
+    raw_state = row[12] if len(row) > 12 else None
+    if raw_state is None:
+        tracking["tracking_state"] = None
+    else:
+        try:
+            state = json.loads(str(raw_state))
+        except json.JSONDecodeError as exc:
+            raise MarketDataStoreError("策略追踪快照损坏") from exc
+        tracking["tracking_state"] = state if isinstance(state, dict) else None
     return tracking
 
 
@@ -534,6 +544,11 @@ def _strategy_record(payload: Mapping[str, object]) -> dict[str, object]:
         "launched_at": payload.get("launched_at"),
         "last_tracked_date": payload.get("last_tracked_date"),
         "last_error": str(payload.get("last_error") or ""),
+        "tracking_state": (
+            dict(cast(Mapping[str, object], payload["tracking_state"]))
+            if isinstance(payload.get("tracking_state"), Mapping)
+            else None
+        ),
     }
 
 
@@ -551,6 +566,13 @@ def _tracking_date(value: object) -> int:
     except ValueError as exc:
         raise ValueError(f"追踪交易日期无效: {converted}") from exc
     return converted
+
+
+def _optional_tracking_date(value: object) -> int | None:
+    if value is None or value == "":
+        return None
+    normalized = str(value).strip().replace("-", "")
+    return _tracking_date(normalized)
 
 
 def _trade_date_to_iso(trade_date: int) -> date:
@@ -632,8 +654,9 @@ def _write_tracking_trades(
             f"""
             INSERT INTO {STRATEGY_TRACKING_TRADES_TABLE} (
                 strategy_id, seq, trade_date, phase, direction,
-                market, code, name, size, price, pnl, reason
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                market, code, name, size, price, pnl, reason, signal_date,
+                commission, stamp_tax, slippage, cost_basis
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 [
@@ -649,6 +672,11 @@ def _write_tracking_trades(
                     float(cast(float, row["price"])),
                     float(cast(float, row.get("pnl") or 0.0)),
                     str(row.get("reason") or ""),
+                    _optional_tracking_date(row.get("signal_date")),
+                    _finite_or_none(row.get("commission")),
+                    _finite_or_none(row.get("stamp_tax")),
+                    _finite_or_none(row.get("slippage")),
+                    _finite_or_none(row.get("cost_basis")),
                 ]
                 for index, row in enumerate(rows)
             ],

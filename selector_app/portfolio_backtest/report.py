@@ -270,6 +270,18 @@ class PortfolioReportMixin(_PortfolioServiceState):
             excluded_st_count=len(resolved.excluded_st) if resolved is not None else 0,
             benchmark=_benchmark_block(benchmark_contexts, dates, config),
             next_plan=_next_plan_block(simulation),
+            today_candidates=cast(
+                Mapping[str, PortfolioJsonValue],
+                simulation.get(
+                    "today_candidates",
+                    {"as_of": _date_text(dates[-1]) if dates else None, "total": 0, "rows": []},
+                ),
+            ),
+            current_state=(
+                cast(Mapping[str, PortfolioJsonValue], simulation["current_state"])
+                if isinstance(simulation.get("current_state"), Mapping)
+                else None
+            ),
         )
 
     @staticmethod
@@ -306,6 +318,12 @@ class PortfolioReportMixin(_PortfolioServiceState):
             filtered_codes=resolved.filtered if resolved is not None else (),
             excluded_st_codes=resolved.excluded_st if resolved is not None else (),
             excluded_st_count=len(resolved.excluded_st) if resolved is not None else 0,
+            today_candidates={
+                "as_of": config.end_date.isoformat() if config.end_date else None,
+                "ranking_value": config.ranking_value,
+                "total": 0,
+                "rows": [],
+            },
         )
 
 
@@ -401,7 +419,7 @@ def _trade_activity_metrics(
         result[f"executed_{side}_orders"] += 1.0
         size = _safe_float(trade.get("size"))
         price = _safe_float(trade.get("price"))
-        notionals[cast(str, direction)] += size * price
+        notionals[direction] += size * price
         result[f"{side}_transaction_costs"] += sum(
             _safe_float(trade.get(key)) for key in ("commission", "stamp_tax", "slippage")
         )

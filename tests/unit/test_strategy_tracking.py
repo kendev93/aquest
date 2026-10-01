@@ -76,6 +76,8 @@ def _report(
     benchmark_totals: tuple[float, ...] | None = None,
     trades: tuple[dict[str, Any], ...] = (),
     next_plan: dict[str, Any] | None = None,
+    current_state: dict[str, Any] | None = None,
+    today_candidates: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Shape one portfolio report the way the service sees it."""
 
@@ -101,6 +103,8 @@ def _report(
         ),
         "trades": [dict(trade) for trade in trades],
         "next_plan": dict(next_plan) if next_plan is not None else {},
+        "current_state": dict(current_state) if current_state is not None else None,
+        "today_candidates": dict(today_candidates) if today_candidates is not None else None,
     }
 
 
@@ -598,6 +602,41 @@ def test_stop_keeps_what_was_observed(tmp_path) -> None:
     assert snapshot.research is not None
 
 
+def test_stop_keeps_the_last_successful_account_and_candidate_snapshots(tmp_path) -> None:
+    current_state = {
+        "as_of": "2026-03-06",
+        "available": True,
+        "equity": 100_500.0,
+        "cash": 40_500.0,
+        "position_value": 60_000.0,
+        "positions_count": 1,
+        "holdings": [{"market": "SH", "code": "600000", "size": 100.0}],
+    }
+    candidates = {
+        "as_of": "2026-03-06",
+        "ranking_value": "indicator_one.wash",
+        "total": 1,
+        "rows": [{"rank": 1, "code": "600001", "score": 88.0}],
+    }
+    runner = _FakeRunner(
+        _report(
+            tuple(100000.0 + index * 1000 for index in range(10)),
+            current_state=current_state,
+            today_candidates=candidates,
+        )
+    )
+    service = _service(tmp_path, runner, available_until="2026-03-06")
+    _save(service._store)  # noqa: SLF001
+
+    launched = service.launch("strategy-1")
+    stopped = service.stop("strategy-1")
+
+    assert launched.current_state == current_state
+    assert stopped.tracking_status == "off"
+    assert stopped.current_state == current_state
+    assert stopped.today_candidates == candidates
+
+
 def _traded_report() -> dict[str, Any]:
     return _report(
         tuple(100000.0 + index * 1000 for index in range(10)),
@@ -612,6 +651,11 @@ def _traded_report() -> dict[str, Any]:
                 "price": 10.0,
                 "pnl": 0.0,
                 "reason": "买入条件",
+                "signal_date": "2026-02-02",
+                "commission": 1.0,
+                "stamp_tax": 0.0,
+                "slippage": 2.0,
+                "cost_basis": 1003.0,
             },
             {
                 "date": "2026-03-04",
@@ -623,6 +667,11 @@ def _traded_report() -> dict[str, Any]:
                 "price": 12.0,
                 "pnl": 150.0,
                 "reason": "卖出条件",
+                "signal_date": "2026-03-03",
+                "commission": 2.4,
+                "stamp_tax": 2.4,
+                "slippage": 1.0,
+                "cost_basis": 2200.0,
             },
             {
                 "date": "2026-03-05",
@@ -669,6 +718,11 @@ def test_snapshot_splits_trades_around_the_launch_day(tmp_path) -> None:
     assert trades["after"]["truncated"] is False
     assert trades["after"]["rows"][0]["pnl"] == 0.0
     assert trades["after"]["rows"][1]["pnl"] == 150.0
+    assert trades["after"]["rows"][1]["signal_date"] == 20260303
+    assert trades["after"]["rows"][1]["commission"] == 2.4
+    assert trades["after"]["rows"][1]["stamp_tax"] == 2.4
+    assert trades["after"]["rows"][1]["slippage"] == 1.0
+    assert trades["after"]["rows"][1]["cost_basis"] == 2200.0
 
 
 def test_snapshot_reports_the_next_session_plan(tmp_path) -> None:

@@ -162,6 +162,10 @@ class TrackingSnapshot:
     #: 95% 下说"它显著为正"。``None`` 是算不出来（观察段太短、零波动、或者平均
     #: 收益不为正），不是"不需要"。它通常远大于观察段长度——那不是错误，是进度。
     min_track_record_length: float | None
+    #: 最近一次成功重算时的账户与持仓指标快照。旧追踪没有快照时为 None。
+    current_state: Mapping[str, object] | None
+    #: 最近行情日的信息型候选扫描，与 next_plan 分开保存。
+    today_candidates: Mapping[str, object] | None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -182,6 +186,10 @@ class TrackingSnapshot:
             "next_plan": dict(self.next_plan) if self.next_plan is not None else None,
             "observation_is_short": self.observation_is_short,
             "min_track_record_length": self.min_track_record_length,
+            "current_state": dict(self.current_state) if self.current_state is not None else None,
+            "today_candidates": (
+                dict(self.today_candidates) if self.today_candidates is not None else None
+            ),
         }
 
 
@@ -446,6 +454,11 @@ def _trade_rows(
                 "size": _finite_or_none(trade.get("size")) or 0.0,
                 "price": _finite_or_none(trade.get("price")) or 0.0,
                 "pnl": _finite_or_none(trade.get("pnl")) or 0.0,
+                "signal_date": trade.get("signal_date"),
+                "commission": _finite_or_none(trade.get("commission")),
+                "stamp_tax": _finite_or_none(trade.get("stamp_tax")),
+                "slippage": _finite_or_none(trade.get("slippage")),
+                "cost_basis": _finite_or_none(trade.get("cost_basis")),
                 "reason": str(trade.get("reason") or ""),
             }
         )
@@ -507,6 +520,23 @@ def _report_payload(result: PortfolioBacktestReport | Mapping[str, object]) -> M
     if isinstance(result, PortfolioBacktestReport):
         return result.to_dict()
     return dict(result)
+
+
+def _tracking_state(report: Mapping[str, object]) -> dict[str, object]:
+    """Persist the two latest detail blocks without duplicating the full report."""
+
+    current = report.get("current_state")
+    candidates = report.get("today_candidates")
+    return {
+        "current_state": dict(current) if isinstance(current, Mapping) else None,
+        "today_candidates": dict(candidates) if isinstance(candidates, Mapping) else None,
+    }
+
+
+def _stored_tracking_state(record: Mapping[str, object], key: str) -> Mapping[str, object] | None:
+    state = record.get("tracking_state")
+    value = state.get(key) if isinstance(state, Mapping) else None
+    return value if isinstance(value, Mapping) else None
 
 
 class StrategyTrackingService:
@@ -592,6 +622,7 @@ class StrategyTrackingService:
                 plan=plan if isinstance(plan, Mapping) and plan else None,
                 last_tracked_date=launched_at,
                 summary=summary_payload,
+                tracking_state=_tracking_state(tracking_report),
             )
             if saved == 0:
                 return self.snapshot(strategy_id)
@@ -662,6 +693,7 @@ class StrategyTrackingService:
                 plan=plan if isinstance(plan, Mapping) and plan else None,
                 last_tracked_date=observations[-1].trade_date,
                 summary=summary if research is not None else None,
+                tracking_state=_tracking_state(report_payload),
             )
             if saved == 0:
                 return self.snapshot(strategy_id)
@@ -723,6 +755,8 @@ class StrategyTrackingService:
             # 上线日是账户初始资金基点，不是收益观察日，所以阈值要 +1。
             observation_is_short=len(observations) < MIN_OBSERVATION_BARS + 1,
             min_track_record_length=_min_track_record_length(observations),
+            current_state=_stored_tracking_state(record, "current_state"),
+            today_candidates=_stored_tracking_state(record, "today_candidates"),
         )
 
     # ------------------------------------------------------------------

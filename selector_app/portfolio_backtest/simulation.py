@@ -6,11 +6,14 @@ import heapq
 from bisect import bisect_right
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import replace
+from typing import cast
 
 import numpy as np
 import pandas as pd
 
 from selector_app.backtest.profiles import TradeProfile, profile_from_config
+from selector_app.screening.models import ScreenCondition
+from selector_app.screening.rules import RuleGroup
 from selector_app.strategy_fitness.rolling import RollingFitnessDecision, RollingFitnessFilter
 
 from .checkpoint import SimulationCheckpoint
@@ -104,12 +107,34 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
                         "candidates": [],
                     }
                 )
+        last_state = states[-1] if states else None
+        current_state = (
+            {
+                "as_of": last_state["date"],
+                "available": True,
+                "equity": float(config.initial_cash),
+                "total_asset": float(config.initial_cash),
+                "cash": float(config.initial_cash),
+                "position_value": 0.0,
+                "positions_count": 0,
+                "holdings": [],
+            }
+            if last_state is not None
+            else None
+        )
         return {
             "cash": float(config.initial_cash),
             "equity": equity,
             "states": states,
             "trades": [],
             "ranking_events": ranking_events,
+            "current_state": current_state,
+            "today_candidates": {
+                "as_of": _date_text(date_list[-1]) if date_list else None,
+                "ranking_value": config.ranking_value,
+                "total": 0,
+                "rows": [],
+            },
             "diagnostic": "预检无可交易候选",
         }
 
@@ -268,12 +293,31 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
                 if include_details:
                     ranking_events.append(event)
 
+        current_state = (
+            self._current_state_with_diagnostics(states[-1], by_symbol, config)
+            if include_details and states
+            else None
+        )
+        today_candidates = (
+            self._today_candidate_scan(
+                contexts,
+                int(dates[-1]),
+                config,
+                fitness_filter,
+                positions,
+            )
+            if include_details and dates
+            else {"as_of": None, "ranking_value": config.ranking_value, "total": 0, "rows": []}
+        )
+
         return {
             "cash": cash,
             "equity": equity,
             "states": states,
             "trades": trades,
             "ranking_events": ranking_events,
+            "current_state": current_state,
+            "today_candidates": today_candidates,
             "next_plan": self._next_plan(
                 as_of=int(dates[-1]),
                 positions=positions,
@@ -302,6 +346,262 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
                 include_details=include_details,
                 data_fingerprint=data_fingerprint,
             ),
+        }
+
+    @staticmethod
+    def _value_at(context: _StockSeries, value_id: str, index: int) -> float | None:
+        values = context.values.get(value_id)
+        if values is None or index < 0 or index >= len(values):
+            return None
+        value = float(values[index])
+        return value if np.isfinite(value) else None
+
+    @classmethod
+    def _condition_diagnostic(
+        cls,
+        condition: ScreenCondition,
+        context: _StockSeries,
+        index: int,
+        *,
+        required: bool,
+    ) -> dict[str, object]:
+        left = cls._value_at(context, condition.left_value, index)
+        if condition.right_value is not None:
+            right = cls._value_at(context, condition.right_value, index)
+        else:
+            assert condition.right_constant is not None
+            right = float(condition.right_constant)
+        previous_left = (
+            cls._value_at(context, condition.left_value, index - 1) if index > 0 else None
+        )
+        if condition.right_value is not None:
+            previous_right = (
+                cls._value_at(context, condition.right_value, index - 1) if index > 0 else None
+            )
+        elif index > 0:
+            assert condition.right_constant is not None
+            previous_right = float(condition.right_constant)
+        else:
+            previous_right = None
+        matched = False
+        if left is not None and right is not None:
+            if condition.operator == "gt":
+                matched = left > right
+            elif condition.operator == "gte":
+                matched = left >= right
+            elif condition.operator == "lt":
+                matched = left < right
+            elif condition.operator == "lte":
+                matched = left <= right
+            elif condition.operator == "eq":
+                matched = bool(np.isclose(left, right, rtol=1e-9, atol=1e-12))
+            elif condition.operator == "neq":
+                matched = not bool(np.isclose(left, right, rtol=1e-9, atol=1e-12))
+            elif condition.operator == "cross_up":
+                matched = (
+                    previous_left is not None
+                    and previous_right is not None
+                    and previous_left <= previous_right
+                    and left > right
+                )
+            elif condition.operator == "cross_down":
+                matched = (
+                    previous_left is not None
+                    and previous_right is not None
+                    and previous_left >= previous_right
+                    and left < right
+                )
+        row: dict[str, object] = {
+            "left_value": condition.left_value,
+            "right_value": condition.right_value,
+            "operator": condition.operator,
+            "current_left_value": left,
+            "current_right_value": right,
+            "threshold": right,
+            "required": required,
+            "matched": matched,
+        }
+        if condition.operator in {"cross_up", "cross_down"}:
+            row["previous_left_value"] = previous_left
+            row["previous_right_value"] = previous_right
+        return row
+
+    @classmethod
+    def _rule_diagnostic(
+        cls,
+        rule: RuleGroup | None,
+        context: _StockSeries,
+        index: int,
+        *,
+        matched: bool,
+    ) -> dict[str, object]:
+        if rule is None:
+            return {"matched": False, "signals": [], "conditions": []}
+        signals = [
+            {
+                "id": signal_id,
+                "matched": bool(
+                    (values := context.signals.get(signal_id)) is not None
+                    and index >= 0
+                    and index < len(values)
+                    and values[index]
+                ),
+            }
+            for signal_id in rule.signals
+        ]
+        conditions = [
+            cls._condition_diagnostic(condition, context, index, required=True)
+            for condition in rule.required_conditions
+        ]
+        conditions.extend(
+            cls._condition_diagnostic(condition, context, index, required=False)
+            for condition in rule.conditions
+        )
+        return {"matched": matched, "signals": signals, "conditions": conditions}
+
+    @classmethod
+    def _today_candidate_scan(
+        cls,
+        contexts: Sequence[_StockSeries],
+        as_of: int,
+        config: PortfolioBacktestConfig,
+        fitness_filter: RollingFitnessFilter | None,
+        positions: Mapping[str, _Position],
+    ) -> dict[str, object]:
+        entries: list[tuple[float, _StockSeries, RollingFitnessDecision | None, int]] = []
+        for context in contexts:
+            index = context.date_to_index.get(as_of)
+            if index is None or not bool(context.buy_mask[index]):
+                continue
+            ranking_values = context.values.get(config.ranking_value)
+            if ranking_values is None:
+                continue
+            score = float(ranking_values[index])
+            if not np.isfinite(score):
+                continue
+            decision = fitness_filter.decide(context.symbol, as_of) if fitness_filter else None
+            entries.append((score, context, decision, index))
+
+        score_entries = [(score, context, decision) for score, context, decision, _ in entries]
+        weighted = (
+            cls._weighted_scores(score_entries, config)
+            if fitness_filter is not None and config.fitness_rank_weight > 0
+            else None
+        )
+        rank_values = [
+            weighted[offset]
+            if weighted is not None
+            else score
+            if config.rank_order == "desc"
+            else -score
+            for offset, (score, _context, _decision, _index) in enumerate(entries)
+        ]
+        display_rank_scores = (
+            weighted
+            if weighted is not None
+            else [score for score, _context, _decision, _index in entries]
+        )
+        ranked = sorted(
+            zip(entries, rank_values, display_rank_scores, strict=True),
+            key=lambda item: (-item[1], item[0][1].symbol),
+        )
+        rows: list[dict[str, object]] = []
+        for rank, ((score, context, decision, index), _sort_score, rank_score) in enumerate(
+            ranked, start=1
+        ):
+            buy = cls._rule_diagnostic(
+                config.buy_rule,
+                context,
+                index,
+                matched=bool(context.buy_mask[index]),
+            )
+            row: dict[str, object] = {
+                "rank": rank,
+                "market": context.market,
+                "code": context.code,
+                "name": context.name,
+                "score": score,
+                "rank_score": rank_score,
+                "ranking_value": config.ranking_value,
+                "already_held": context.symbol in positions,
+                "buy_signal": {"matched": buy["matched"], "signals": buy["signals"]},
+                "buy_conditions": buy["conditions"],
+            }
+            if decision is not None:
+                row["fitness_score"] = decision.score
+                row["fitness_trades"] = decision.trades
+                row["fitness_note"] = decision.note
+            if rank <= 20:
+                rows.append(row)
+        return {
+            "as_of": _date_text(as_of),
+            "ranking_value": config.ranking_value,
+            "total": len(entries),
+            "rows": rows,
+        }
+
+    @classmethod
+    def _current_state_with_diagnostics(
+        cls,
+        state: Mapping[str, PortfolioJsonValue],
+        by_symbol: Mapping[str, _StockSeries],
+        config: PortfolioBacktestConfig,
+    ) -> dict[str, object]:
+        as_of = int(str(state.get("date") or "").replace("-", ""))
+        total = float(cast(float, state.get("total", 0.0)))
+        position_value = float(cast(float, state.get("position_value", 0.0)))
+        holdings: list[dict[str, object]] = []
+        raw_holdings = state.get("holdings")
+        if isinstance(raw_holdings, (list, tuple)):
+            for raw in raw_holdings:
+                if not isinstance(raw, Mapping):
+                    continue
+                row = dict(raw)
+                symbol = f"{row.get('market', '')}{row.get('code', '')}"
+                context = by_symbol.get(symbol)
+                if context is not None:
+                    index = context.date_to_index.get(as_of)
+                    if index is None:
+                        index = bisect_right(context.dates, as_of) - 1
+                    indicator_as_of = _date_text(int(context.dates[index])) if index >= 0 else None
+                    row["sell_signal"] = cls._rule_diagnostic(
+                        config.sell_rule,
+                        context,
+                        index if index is not None else -1,
+                        matched=(
+                            bool(context.sell_mask[index])
+                            if index is not None and index >= 0
+                            else False
+                        ),
+                    )
+                    row["indicator_as_of"] = indicator_as_of
+                else:
+                    row["sell_signal"] = {"matched": False, "signals": [], "conditions": []}
+                    row["indicator_as_of"] = None
+                price = float(cast(float, row.get("close", row.get("entry_price", 0.0))))
+                size = float(cast(float, row.get("size", 0.0)))
+                market_value = size * price
+                entry_price = float(cast(float, row.get("entry_price", 0.0)))
+                row.update(
+                    {
+                        "latest_price": price,
+                        "market_value": market_value,
+                        "unrealized_pnl_pct": (
+                            price / entry_price - 1.0 if entry_price > 0 else 0.0
+                        ),
+                        "position_weight": market_value / total if total > 0 else 0.0,
+                    }
+                )
+                holdings.append(row)
+        return {
+            "as_of": state.get("date"),
+            "available": True,
+            "equity": total,
+            "total_asset": total,
+            "cash": float(cast(float, state.get("cash", 0.0))),
+            "position_value": position_value,
+            "positions_count": int(cast(int, state.get("positions_count", len(holdings)))),
+            "holdings": holdings,
         }
 
     @staticmethod
@@ -1002,11 +1302,12 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
             {
                 "market": position.market,
                 "code": position.code,
-                "name": position.name,
+                "name": position.name or "",
                 "instrument_type": position.instrument_type,
                 "board": position.board,
                 "size": float(position.size),
                 "entry_price": float(position.entry_price),
+                "entry_date": _date_text(position.entry_date),
                 "close": float(last_prices.get(symbol, position.entry_price)),
                 "unrealized_pnl": float(
                     (last_prices.get(symbol, position.entry_price) - position.entry_price)

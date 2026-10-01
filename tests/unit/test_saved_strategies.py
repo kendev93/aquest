@@ -60,6 +60,7 @@ def test_strategy_round_trip_keeps_the_replayable_request(tmp_path) -> None:
     assert record["summary"]["performance"]["annual_return"] == 0.21
     # 列表不带 request：列表页一次读全部策略，带着它等于把整份配置反复反序列化。
     assert "request" not in store.list_strategies()[0]
+    assert "tracking_state" not in store.list_strategies()[0]
 
 
 def test_saving_twice_updates_instead_of_duplicating(tmp_path) -> None:
@@ -393,6 +394,49 @@ def test_tracking_trades_survive_a_round_trip_in_order(tmp_path) -> None:
     assert rows[1]["reason"] == "卖出条件"
 
 
+def test_tracking_trade_pages_filter_and_sort_with_fee_details(tmp_path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    _save(store)
+    store.save_tracking_trades(
+        "strategy-1",
+        [
+            _trade(20260901, "600000", phase="pre", signal_date=20260831),
+            _trade(
+                20260902,
+                "600001",
+                phase="post",
+                direction="SELL",
+                signal_date=20260901,
+                commission=1.2,
+                stamp_tax=3.0,
+                slippage=0.5,
+                cost_basis=1000.0,
+                pnl=25.0,
+            ),
+            _trade(20260903, "600002", phase="post", signal_date=20260902),
+        ],
+    )
+
+    page = store.page_tracking_trades(
+        "strategy-1", phase="post", date_from=20260902, limit=1, offset=0
+    )
+
+    assert page["total"] == 2
+    assert page["limit"] == 1
+    assert page["offset"] == 0
+    assert [row["code"] for row in page["rows"]] == ["600002"]
+    assert page["rows"][0]["commission"] is None
+    next_page = store.page_tracking_trades(
+        "strategy-1", phase="post", date_from=20260902, limit=1, offset=1
+    )
+    assert next_page["rows"][0]["code"] == "600001"
+    assert next_page["rows"][0]["signal_date"] == 20260901
+    assert next_page["rows"][0]["commission"] == 1.2
+    assert next_page["rows"][0]["stamp_tax"] == 3.0
+    assert next_page["rows"][0]["slippage"] == 0.5
+    assert next_page["rows"][0]["cost_basis"] == 1000.0
+
+
 def test_tracking_trades_are_replaced_not_appended(tmp_path) -> None:
     """重算是全量重跑：上一次跑出来的成交不能留在库里当孤儿行。"""
 
@@ -444,3 +488,35 @@ def test_going_offline_drops_the_pending_plan(tmp_path) -> None:
     # 观察段和成交明细是攒下来的证据，下线不该动它们；过期的计划要清掉。
     assert store.read_tracking_plan("strategy-1") is None
     assert len(store.list_tracking_trades("strategy-1")) == 1
+
+
+def test_stopping_keeps_the_latest_tracking_state_snapshot(tmp_path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    _save(store)
+    store.start_strategy_tracking("strategy-1", launched_at=20260901)
+    state = {
+        "as_of": "2026-09-02",
+        "equity": 1250.0,
+        "cash": 250.0,
+        "position_value": 1000.0,
+        "positions_count": 1,
+        "holdings": [{"code": "600000", "size": 100.0}],
+    }
+    store.save_tracking_points(
+        "strategy-1",
+        [_point(20260902, 1.25)],
+        plan={"as_of": "2026-09-02", "buys": []},
+        last_tracked_date=20260902,
+        tracking_state={
+            "current_state": state,
+            "today_candidates": {"as_of": "2026-09-02", "total": 0, "rows": []},
+        },
+    )
+
+    store.stop_strategy_tracking("strategy-1")
+
+    record = store.read_strategy("strategy-1")
+    assert record is not None
+    assert record["tracking_state"]["current_state"] == state
+    assert record["tracking_state"]["today_candidates"]["total"] == 0
+    assert store.read_tracking_plan("strategy-1") is None
