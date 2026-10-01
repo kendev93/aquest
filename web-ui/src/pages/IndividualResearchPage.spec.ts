@@ -183,6 +183,16 @@ describe('IndividualResearchPage', () => {
     expect(page.text()).toContain('风险高')
   })
 
+  it('accepts both the default initial capital and round-number edits', async () => {
+    const page = mountPage()
+    await flushPromises()
+    const input = page.get('[data-testid="individual-cash"]')
+
+    expect((input.element as HTMLInputElement).checkValidity()).toBe(true)
+    await input.setValue('100000')
+    expect((input.element as HTMLInputElement).checkValidity()).toBe(true)
+  })
+
   it('saves the selected single-security candidate without launching tracking', async () => {
     vi.mocked(individualApi.createIndividualResearch).mockResolvedValue({ job_id: 'job-1', status: 'queued' })
     vi.mocked(individualApi.getIndividualResearchJob).mockResolvedValue({
