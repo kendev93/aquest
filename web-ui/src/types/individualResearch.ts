@@ -46,6 +46,15 @@ export interface IndividualResearchFullBacktest {
   bars: number
   closed_trades?: number
   performance: Record<string, number | null>
+  benchmark?: {
+    label: string
+    instrument_count: number
+    total_return: number | null
+    annual_return: number | null
+    max_drawdown: number | null
+  } | null
+  benchmark_return?: number | null
+  excess_return?: number | null
   equity_curve: Record<string, unknown>[]
   trades: Record<string, unknown>[]
   data_fingerprint?: string | null

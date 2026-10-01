@@ -373,6 +373,12 @@ function formatNumber(value: number | null | undefined, digits = 2): string {
   return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '—'
 }
 
+function formatSignedPercent(value: number | null | undefined): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
+  const sign = value > 0 ? '+' : ''
+  return `${sign}${(value * 100).toFixed(2)}%`
+}
+
 function ruleText(candidate: IndividualResearchCandidate, side: 'buy' | 'sell'): string {
   const storedRule = candidate.condition_rules?.[side]
   const nestedRule = storedRule?.rule
@@ -509,7 +515,9 @@ function fullBacktestText(candidate: IndividualResearchCandidate): string {
   if (full.error) return `回测失败：${full.error}`
   const metrics = full.performance
   return [
-    `收益 ${formatPercent(metrics.total_return)}`,
+    `策略收益 ${formatPercent(metrics.total_return)}`,
+    `持有基准 ${full.benchmark ? formatSignedPercent(full.benchmark_return) : '不可用'}`,
+    `超额收益 ${formatSignedPercent(full.excess_return)}`,
     `年化 ${formatPercent(metrics.annual_return)}`,
     `夏普 ${formatNumber(metrics.sharpe, 3)}`,
     `回撤 ${formatPercent(metrics.max_drawdown)}`,

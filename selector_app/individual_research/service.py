@@ -654,6 +654,33 @@ class IndividualStockResearchService:
         end_date: date,
     ) -> dict[str, object]:
         report = self._backtest_candidate_report(raw_config, start_date, end_date)
+        benchmark_source = report.benchmark
+        benchmark_metrics_source = (
+            benchmark_source.get("performance") if benchmark_source is not None else None
+        )
+        benchmark_metrics = (
+            dict(benchmark_metrics_source)
+            if isinstance(benchmark_metrics_source, Mapping)
+            else {}
+        )
+        benchmark_return = _number(benchmark_metrics.get("total_return"))
+        strategy_return = _number(report.performance.get("total_return"))
+        excess_return = (
+            strategy_return - benchmark_return
+            if strategy_return is not None and benchmark_return is not None
+            else None
+        )
+        benchmark = (
+            {
+                "label": str(benchmark_source.get("label") or "个股买入持有"),
+                "instrument_count": _integer(benchmark_source.get("instrument_count")),
+                "total_return": benchmark_return,
+                "annual_return": _number(benchmark_metrics.get("annual_return")),
+                "max_drawdown": _number(benchmark_metrics.get("max_drawdown")),
+            }
+            if benchmark_source is not None
+            else None
+        )
         return {
             "start_date": report.start_date,
             "end_date": report.end_date,
@@ -664,6 +691,9 @@ class IndividualStockResearchService:
                 if trade.get("direction") == "SELL" and not bool(trade.get("rejected", False))
             ),
             "performance": dict(report.performance),
+            "benchmark": benchmark,
+            "benchmark_return": benchmark_return,
+            "excess_return": excess_return,
             "equity_curve": [dict(point) for point in report.equity_curve],
             "trades": [dict(trade) for trade in report.trades],
             "data_fingerprint": report.data_fingerprint,

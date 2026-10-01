@@ -102,6 +102,9 @@ const fullBacktest = {
     bars: 1250,
     closed_trades: 1,
     performance: { total_return: 0.25, annual_return: 0.05, sharpe: 0.9, max_drawdown: -0.12, win_rate: 0.6, payoff_ratio: 1.5, closed_trades: 8 },
+    benchmark: { label: '标的池等权买入持有', instrument_count: 1, total_return: 0.12, annual_return: 0.03, max_drawdown: -0.2 },
+    benchmark_return: 0.12,
+    excess_return: 0.13,
     equity_curve: [{ date: '2021-01-01', equity: 1_000_000 }, { date: '2025-12-31', equity: 1_250_000 }],
     trades: [{ date: '2021-02-10', direction: 'SELL', size: 100, price: 12.5, pnl: 1250, reason: '止盈', risk_trigger: 'take_profit' }],
     data_fingerprint: 'data-1',
@@ -205,6 +208,8 @@ describe('IndividualResearchPage', () => {
     expect(page.text()).toContain('样本较充分')
     expect(page.text()).toContain('风险高')
     expect(page.text()).toContain('全区间回测')
+    expect(page.text()).toContain('持有基准 +12.00%')
+    expect(page.text()).toContain('超额收益 +13.00%')
     await page.get('[data-testid="individual-full-details-sharpe-0"]').trigger('click')
     expect(page.get('[data-testid="individual-full-backtest-sharpe-0"]').text()).toContain('止盈')
   })

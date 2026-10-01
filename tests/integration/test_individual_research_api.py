@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 from fastapi.testclient import TestClient
 
 from selector_app.backtest.service import BacktestService
@@ -341,6 +342,11 @@ def test_single_stock_job_runs_all_stages_and_saves_three_split_candidates(tmp_p
     assert full_backtest["bars"] == len(dates)
     assert full_backtest["equity_curve"]
     assert full_backtest["trades"]
+    assert full_backtest["benchmark"]["instrument_count"] == 1
+    assert full_backtest["benchmark_return"] == full_backtest["benchmark"]["total_return"]
+    assert full_backtest["excess_return"] == pytest.approx(
+        full_backtest["performance"]["total_return"] - full_backtest["benchmark_return"]
+    )
     assert saved.json()["data"]["result"]["full_backtests"][full_backtest_id]["trades"]
     assert history.json()["data"][0]["history_id"] == job_id
     assert saved.json()["data"]["backtest_type"] == "individual_research"

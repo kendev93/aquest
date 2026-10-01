@@ -9,6 +9,12 @@ function formatPercent(value: number | null | undefined): string {
     : '—'
 }
 
+function formatSignedPercent(value: number | null | undefined): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
+  const sign = value > 0 ? '+' : ''
+  return `${sign}${(value * 100).toFixed(2)}%`
+}
+
 function formatNumber(value: number | null | undefined, digits = 2): string {
   return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '—'
 }
@@ -52,13 +58,16 @@ function closedTrades(): number {
     <p v-if="props.backtest.error" class="field-error">{{ props.backtest.error }}</p>
     <template v-else>
       <div class="individual-full-metrics">
-        <span>收益 {{ formatPercent(props.backtest.performance.total_return) }}</span>
+        <span>策略收益 {{ formatPercent(props.backtest.performance.total_return) }}</span>
+        <span>持有基准 {{ props.backtest.benchmark ? formatSignedPercent(props.backtest.benchmark_return) : '不可用' }}</span>
+        <span>超额收益 {{ formatSignedPercent(props.backtest.excess_return) }}</span>
         <span>年化 {{ formatPercent(props.backtest.performance.annual_return) }}</span>
         <span>夏普 {{ formatNumber(props.backtest.performance.sharpe, 3) }}</span>
         <span>回撤 {{ formatPercent(props.backtest.performance.max_drawdown) }}</span>
         <span>胜率 {{ formatPercent(props.backtest.performance.win_rate) }}</span>
         <span>盈亏比 {{ formatNumber(props.backtest.performance.payoff_ratio, 2) }}</span>
       </div>
+      <small class="individual-benchmark-note">基准按区间首日收盘买入并持有至末日收盘，不计交易费用；超额收益是策略收益减基准涨幅。</small>
       <svg v-if="chartPoints()" viewBox="0 0 800 240" role="img" aria-label="完整区间权益曲线">
         <polyline :points="chartPoints()" fill="none" stroke="var(--accent)" stroke-width="3" />
       </svg>
@@ -85,6 +94,7 @@ function closedTrades(): number {
 .individual-full-detail > p { margin: 0; color: var(--muted); }
 .individual-full-detail svg { width: min(100%, 800px); height: auto; min-height: 180px; border: 1px solid var(--border); background: var(--surface); }
 .individual-full-metrics { display: flex; flex-wrap: wrap; gap: 8px 16px; color: var(--muted); }
+.individual-benchmark-note { color: var(--subtle); }
 .individual-trades { max-height: 340px; }
 .individual-trades table { min-width: 800px; }
 </style>

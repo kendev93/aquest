@@ -164,6 +164,8 @@ class FixtureIndividualResearchService(IndividualStockResearchService):
             "end_date": end_date.isoformat(),
             "bars": 800,
             "performance": {"total_return": 0.25, "sharpe": 0.9},
+            "benchmark_return": 0.1,
+            "excess_return": 0.15,
             "equity_curve": [{"date": start_date.isoformat(), "equity": 1_000_000.0}],
             "trades": [{"entry_date": start_date.isoformat(), "exit_date": end_date.isoformat()}],
             "data_fingerprint": "data-fingerprint",
@@ -207,6 +209,8 @@ def test_individual_pipeline_optimizes_validation_top_rule_and_only_marks_holdou
     assert result["results_by_sharpe"][0]["condition_rules"]["buy"]["conditions"]
     full_backtest_id = result["results_by_sharpe"][0]["full_backtest_id"]
     assert result["full_backtests"][full_backtest_id]["performance"]["sharpe"] == 0.9
+    assert result["full_backtests"][full_backtest_id]["benchmark_return"] == 0.1
+    assert result["full_backtests"][full_backtest_id]["excess_return"] == 0.15
     assert result["full_backtests"][full_backtest_id]["trades"]
     assert len(service.full_backtest_calls) == 2
     assert len(result["full_backtests"]) == 2
