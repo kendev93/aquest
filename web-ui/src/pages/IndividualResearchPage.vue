@@ -65,6 +65,7 @@ const form = reactive({
 })
 const searchText = ref('')
 const instrumentOptions = ref<LocalInstrument[]>([])
+const selectedInstrumentRange = ref<Pick<LocalInstrument, 'bars' | 'data_start' | 'data_end'> | null>(null)
 const instrumentLoading = ref(false)
 const instrumentError = ref('')
 const selectedValues = ref<Set<string>>(new Set())
@@ -173,6 +174,11 @@ function selectInstrument(item: LocalInstrument): void {
   form.market = item.market
   form.code = item.code
   form.name = item.name ?? ''
+  selectedInstrumentRange.value = {
+    bars: item.bars,
+    data_start: item.data_start,
+    data_end: item.data_end,
+  }
   searchText.value = `${item.market} ${item.code}${item.name ? ` · ${item.name}` : ''}`
   instrumentOptions.value = []
   errors.value = { ...errors.value, code: '' }
@@ -303,6 +309,7 @@ async function loadHistoryDetail(historyId: string): Promise<void> {
   try {
     const record = await getIndividualResearchHistory(historyId)
     result.value = { ...record.result, history_id: historyId }
+    selectedInstrumentRange.value = null
     job.value = null
     const request = record.request
     if (request.market === 'SH' || request.market === 'SZ') form.market = request.market
@@ -591,11 +598,15 @@ onMounted(async () => {
             <p v-if="form.code" class="scope-helper">当前：{{ form.market }} {{ form.code }}<template v-if="form.name"> · {{ form.name }}</template></p>
           </fieldset>
 
-          <fieldset class="form-section">
-            <legend>历史区间</legend>
-            <DateRangeSelector v-model="dateRange" prefix="individual" testid="individual-date-range" default-mode="full" helper="默认使用所选股票全部本地行情；按交易日切成训练 / 验证 / 留出 60/20/20，并清除前视窗口边界。" />
-            <p v-if="errors.startDate" class="field-error">{{ errors.startDate }}</p><p v-if="errors.endDate" class="field-error">{{ errors.endDate }}</p>
-          </fieldset>
+          <DateRangeSelector v-model="dateRange" prefix="individual" testid="individual-date-range" default-mode="full" helper="默认使用所选股票全部本地行情；按交易日切成训练 / 验证 / 留出 60/20/20，并清除前视窗口边界。" />
+          <p v-if="selectedInstrumentRange" class="scope-helper" data-testid="individual-stock-date-range">
+            本地行情覆盖：{{ selectedInstrumentRange.data_start ?? '未知' }} → {{ selectedInstrumentRange.data_end ?? '未知' }} · {{ selectedInstrumentRange.bars }} 根日线
+          </p>
+          <p v-else-if="result" class="scope-helper" data-testid="individual-stock-date-range">
+            本次研究区间：{{ result.start_date }} → {{ result.end_date }} · {{ result.date_range.days }} 个交易日
+          </p>
+          <p v-else class="scope-helper" data-testid="individual-stock-date-range">选择股票后会显示该股票本地行情的起止日期和日线数量。</p>
+          <p v-if="errors.startDate" class="field-error">{{ errors.startDate }}</p><p v-if="errors.endDate" class="field-error">{{ errors.endDate }}</p>
 
           <fieldset class="form-section">
             <legend>波段定义</legend>

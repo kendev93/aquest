@@ -143,11 +143,11 @@ function mountPage() {
       stubs: {
         PageGuide: true,
         DateRangeSelector: {
-          props: ['modelValue', 'prefix', 'testid', 'helper'],
-          template: `<div>
+          props: ['modelValue', 'prefix', 'testid', 'helper', 'defaultMode'],
+          template: `<fieldset><legend>历史区间</legend>
             <button type="button" data-testid="date-range-custom-invalid" @click="$emit('update:modelValue', { mode: 'custom', startDate: '', endDate: '' })" />
             <button type="button" data-testid="date-range-custom-inverted" @click="$emit('update:modelValue', { mode: 'custom', startDate: '2025-01-01', endDate: '2024-01-01' })" />
-          </div>`,
+          </fieldset>`,
         },
       },
     },
@@ -182,6 +182,10 @@ describe('IndividualResearchPage', () => {
     const page = mountPage()
     await flushPromises()
     await chooseStock(page)
+    expect(page.findAll('legend').filter((legend) => legend.text() === '历史区间')).toHaveLength(1)
+    expect(page.get('[data-testid="individual-stock-date-range"]').text()).toContain(
+      '本地行情覆盖：2020-01-01 → 2025-12-31 · 2000 根日线',
+    )
     await page.get('[data-testid="individual-research-form"]').trigger('submit')
     await flushPromises()
 
