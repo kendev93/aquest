@@ -10,10 +10,12 @@ const props = withDefaults(defineProps<{
   title?: string
   helper?: string
   fieldSuffix?: string
+  defaultMode?: DateRangeMode
 }>(), {
   title: '历史区间',
   helper: '默认使用本地最新已完成日线向前 5 年；选择全历史或自定义日期可覆盖。',
   fieldSuffix: '',
+  defaultMode: 'recent5',
 })
 
 const emit = defineEmits<{
@@ -49,8 +51,8 @@ function updateDate(field: 'startDate' | 'endDate', value: string): void {
           :data-testid="modeId"
           @change="updateMode(($event.target as HTMLSelectElement).value as DateRangeMode)"
         >
-          <option value="recent5">最近 5 年（默认）</option>
-          <option value="full">全历史</option>
+          <option value="recent5">最近 5 年<template v-if="defaultMode === 'recent5'">（默认）</template></option>
+          <option value="full">全历史<template v-if="defaultMode === 'full'">（默认）</template></option>
           <option value="custom">自定义日期</option>
         </select>
       </div>

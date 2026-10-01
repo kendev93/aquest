@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 
 import PageGuide from '../components/PageGuide.vue'
 import DateRangeSelector from '../components/DateRangeSelector.vue'
+import IndividualResearchBacktestDetail from '../components/IndividualResearchBacktestDetail.vue'
 import { fetchMetadata, FormulaScreenApiError } from '../api/formulaScreen'
 import {
   cancelIndividualResearch,
@@ -19,6 +20,7 @@ import type {
   DateRangeSelection,
   FormulaScreenMetadata,
   IndividualResearchCandidate,
+  IndividualResearchFullBacktest,
   IndividualResearchHistorySummary,
   IndividualResearchJobState,
   IndividualResearchPayload,
@@ -41,7 +43,7 @@ const form = reactive({
   market: 'SH' as 'SH' | 'SZ',
   code: '',
   name: '',
-  dateMode: 'recent5' as DateRangeSelection['mode'],
+  dateMode: 'full' as DateRangeSelection['mode'],
   startDate: '',
   endDate: '',
   reversalMultiple: 3,
@@ -75,6 +77,7 @@ const historyLoading = ref(false)
 const historyBusyId = ref('')
 const savedCandidateIds = ref<Set<string>>(new Set())
 const savingCandidateId = ref('')
+const expandedFullBacktestKey = ref('')
 const message = ref('')
 const messageIsError = ref(false)
 const errors = ref<Record<string, string>>({})
@@ -310,8 +313,8 @@ async function loadHistoryDetail(historyId: string): Promise<void> {
     if (request.date_mode === 'custom' || request.date_mode === 'full' || request.date_mode === 'recent5') {
       form.dateMode = request.date_mode
     }
-    if (typeof request.start_date === 'string') form.startDate = request.start_date
-    if (typeof request.end_date === 'string') form.endDate = request.end_date
+    form.startDate = typeof request.start_date === 'string' ? request.start_date : ''
+    form.endDate = typeof request.end_date === 'string' ? request.end_date : ''
     if (typeof request.reversal_multiple === 'number') form.reversalMultiple = request.reversal_multiple
     if (typeof request.atr_window === 'number') form.atrWindow = request.atr_window
     if (typeof request.min_bars === 'number') form.minBars = request.min_bars
@@ -480,6 +483,35 @@ function splitMetricsText(candidate: IndividualResearchCandidate, split: 'train'
   ].join(' · ')
 }
 
+function fullBacktestKey(board: 'sharpe' | 'return', candidate: IndividualResearchCandidate): string {
+  return `${board}:${candidate.candidate_hash}`
+}
+
+function toggleFullBacktest(key: string): void {
+  expandedFullBacktestKey.value = expandedFullBacktestKey.value === key ? '' : key
+}
+
+function candidateFullBacktest(candidate: IndividualResearchCandidate): IndividualResearchFullBacktest | null {
+  const candidateId = candidate.full_backtest_id ?? candidate.candidate_hash
+  return result.value?.full_backtests?.[candidateId] ?? null
+}
+
+function fullBacktestText(candidate: IndividualResearchCandidate): string {
+  const full = candidateFullBacktest(candidate)
+  if (!full) return '完整区间回测明细不可用'
+  if (full.error) return `回测失败：${full.error}`
+  const metrics = full.performance
+  return [
+    `收益 ${formatPercent(metrics.total_return)}`,
+    `年化 ${formatPercent(metrics.annual_return)}`,
+    `夏普 ${formatNumber(metrics.sharpe, 3)}`,
+    `回撤 ${formatPercent(metrics.max_drawdown)}`,
+    `胜率 ${formatPercent(metrics.win_rate)}`,
+    `盈亏比 ${formatNumber(metrics.payoff_ratio, 2)}`,
+    `${full.closed_trades ?? full.trades.length} 笔交易`,
+  ].join(' · ')
+}
+
 function formatTime(value: string): string {
   return value ? value.replace('T', ' ').slice(0, 16) : '—'
 }
@@ -533,7 +565,7 @@ onMounted(async () => {
     <main class="content-shell">
       <section class="page-intro">
         <div><span class="section-kicker">SINGLE SECURITY RESEARCH</span><h1>个股研究</h1>
-          <p>围绕一只股票识别波段启动特征，挖掘买卖条件，再为验证段候选优化止盈止损。</p>
+          <p>默认研究所选股票的全部本地历史；系统挖掘买卖条件、优化退出风控，并自动回测最终候选供你比较。</p>
         </div>
       </section>
       <PageGuide page-key="individual-research" />
@@ -561,7 +593,7 @@ onMounted(async () => {
 
           <fieldset class="form-section">
             <legend>历史区间</legend>
-            <DateRangeSelector v-model="dateRange" prefix="individual" testid="individual-date-range" helper="按交易日时间顺序切成训练 / 验证 / 留出 60/20/20，并清除前视窗口边界。" />
+            <DateRangeSelector v-model="dateRange" prefix="individual" testid="individual-date-range" default-mode="full" helper="默认使用所选股票全部本地行情；按交易日切成训练 / 验证 / 留出 60/20/20，并清除前视窗口边界。" />
             <p v-if="errors.startDate" class="field-error">{{ errors.startDate }}</p><p v-if="errors.endDate" class="field-error">{{ errors.endDate }}</p>
           </fieldset>
 
@@ -649,28 +681,32 @@ onMounted(async () => {
             </div>
 
             <section class="individual-leaderboard" data-testid="individual-sharpe-board">
-              <div class="section-heading"><h3>验证段夏普榜</h3><span class="required-hint">留出段只复核</span></div>
+              <div class="section-heading"><h3>验证段夏普榜</h3><span class="required-hint">验证段排序 · 留出段只复核 · 全区间明细供对比</span></div>
               <div v-if="!sharpeCandidates.length" class="inline-empty">暂无可计算候选。</div>
-              <div v-else class="table-wrap"><table><thead><tr><th>买入规则</th><th>卖出规则</th><th>退出风控</th><th>训练段</th><th>验证段</th><th>留出段</th><th>样本 / 风险</th><th>策略追踪</th></tr></thead><tbody>
+              <div v-else class="table-wrap"><table><thead><tr><th>买入规则</th><th>卖出规则</th><th>退出风控</th><th>训练段</th><th>验证段</th><th>留出段</th><th>全区间回测</th><th>样本 / 风险</th><th>策略追踪</th></tr></thead><tbody>
                 <tr v-for="(candidate, index) in sharpeCandidates" :key="candidate.candidate_hash" :data-testid="`individual-sharpe-${index}`">
                   <td>{{ ruleText(candidate, 'buy') }}</td><td>{{ ruleText(candidate, 'sell') }}</td><td>{{ riskControlsNote(candidate) }}</td>
                   <td class="individual-split-metrics">{{ splitMetricsText(candidate, 'train') }}</td><td class="individual-split-metrics">{{ splitMetricsText(candidate, 'validation') }}</td><td class="individual-split-metrics">{{ splitMetricsText(candidate, 'holdout') }}</td>
+                  <td class="individual-split-metrics"><span>{{ fullBacktestText(candidate) }}</span><button v-if="candidateFullBacktest(candidate) && !candidateFullBacktest(candidate)?.error" class="table-link" type="button" :data-testid="`individual-full-details-sharpe-${index}`" @click="toggleFullBacktest(fullBacktestKey('sharpe', candidate))">{{ expandedFullBacktestKey === fullBacktestKey('sharpe', candidate) ? '收起交易明细' : '查看交易明细' }}</button></td>
                   <td><span v-for="badge in candidate.quality?.badges ?? []" :key="badge" class="individual-badge" :class="{ danger: badge === '风险高', warning: badge === '样本不足' }">{{ badge }}</span></td>
                   <td><button class="secondary-button" type="button" :data-testid="`individual-save-sharpe-${index}`" :disabled="savingCandidateId === candidate.candidate_hash || savedCandidateIds.has(candidate.candidate_hash)" @click="saveCandidate(candidate)">{{ savedCandidateIds.has(candidate.candidate_hash) ? '已保存' : savingCandidateId === candidate.candidate_hash ? '保存中…' : '保存并手动追踪' }}</button></td>
                 </tr>
+                <template v-for="(candidate, index) in sharpeCandidates" :key="`full-${candidate.candidate_hash}`"><tr v-if="expandedFullBacktestKey === fullBacktestKey('sharpe', candidate)" :data-testid="`individual-full-backtest-sharpe-${index}`"><td colspan="9"><IndividualResearchBacktestDetail :backtest="candidateFullBacktest(candidate)" /></td></tr></template>
               </tbody></table></div>
             </section>
 
             <section class="individual-leaderboard" data-testid="individual-return-board">
-              <div class="section-heading"><h3>验证段年化收益榜</h3><span class="required-hint">双榜候选去重</span></div>
+              <div class="section-heading"><h3>验证段年化收益榜</h3><span class="required-hint">验证段排序 · 双榜候选去重</span></div>
               <div v-if="!returnCandidates.length" class="inline-empty">暂无可计算候选。</div>
-              <div v-else class="table-wrap"><table><thead><tr><th>买入规则</th><th>卖出规则</th><th>退出风控</th><th>训练段</th><th>验证段</th><th>留出段</th><th>样本 / 风险</th><th>策略追踪</th></tr></thead><tbody>
+              <div v-else class="table-wrap"><table><thead><tr><th>买入规则</th><th>卖出规则</th><th>退出风控</th><th>训练段</th><th>验证段</th><th>留出段</th><th>全区间回测</th><th>样本 / 风险</th><th>策略追踪</th></tr></thead><tbody>
                 <tr v-for="(candidate, index) in returnCandidates" :key="candidate.candidate_hash" :data-testid="`individual-return-${index}`">
                   <td>{{ ruleText(candidate, 'buy') }}</td><td>{{ ruleText(candidate, 'sell') }}</td><td>{{ riskControlsNote(candidate) }}</td>
                   <td class="individual-split-metrics">{{ splitMetricsText(candidate, 'train') }}</td><td class="individual-split-metrics">{{ splitMetricsText(candidate, 'validation') }}</td><td class="individual-split-metrics">{{ splitMetricsText(candidate, 'holdout') }}</td>
+                  <td class="individual-split-metrics"><span>{{ fullBacktestText(candidate) }}</span><button v-if="candidateFullBacktest(candidate) && !candidateFullBacktest(candidate)?.error" class="table-link" type="button" :data-testid="`individual-full-details-return-${index}`" @click="toggleFullBacktest(fullBacktestKey('return', candidate))">{{ expandedFullBacktestKey === fullBacktestKey('return', candidate) ? '收起交易明细' : '查看交易明细' }}</button></td>
                   <td><span v-for="badge in candidate.quality?.badges ?? []" :key="badge" class="individual-badge" :class="{ danger: badge === '风险高', warning: badge === '样本不足' }">{{ badge }}</span></td>
                   <td><button class="secondary-button" type="button" :data-testid="`individual-save-return-${index}`" :disabled="savingCandidateId === candidate.candidate_hash || savedCandidateIds.has(candidate.candidate_hash)" @click="saveCandidate(candidate)">{{ savedCandidateIds.has(candidate.candidate_hash) ? '已保存' : savingCandidateId === candidate.candidate_hash ? '保存中…' : '保存并手动追踪' }}</button></td>
                 </tr>
+                <template v-for="(candidate, index) in returnCandidates" :key="`full-${candidate.candidate_hash}`"><tr v-if="expandedFullBacktestKey === fullBacktestKey('return', candidate)" :data-testid="`individual-full-backtest-return-${index}`"><td colspan="9"><IndividualResearchBacktestDetail :backtest="candidateFullBacktest(candidate)" /></td></tr></template>
               </tbody></table></div>
             </section>
             <p class="scope-helper">保存后会写入现有策略库；到策略追踪页检查策略名称与股票代码，再手动上线。未选中的候选不会自动加入追踪。</p>
@@ -709,7 +745,7 @@ onMounted(async () => {
 .individual-split-card small { color: var(--subtle); }
 .individual-leaderboard { margin-top: 18px; }
 .individual-leaderboard .table-wrap { max-height: 560px; }
-.individual-leaderboard table { min-width: 1500px; }
+.individual-leaderboard table { min-width: 1700px; }
 .individual-split-metrics { max-width: 300px; color: var(--muted); font-size: 10px; line-height: 1.6; }
 .individual-badge { display: inline-block; margin: 2px; padding: 3px 5px; border: 1px solid rgba(34, 197, 94, 0.35); border-radius: 4px; color: var(--accent); font-size: 10px; white-space: nowrap; }
 .individual-badge.warning { border-color: rgba(245, 158, 11, 0.4); color: var(--warning); }

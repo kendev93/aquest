@@ -66,6 +66,7 @@ const candidate = {
   candidate_hash: 'candidate-1',
   candidate_id: 'rules-1',
   condition_candidate_id: 'rules-1',
+  full_backtest_id: 'candidate-1',
   human_readable_rules: 'RSI 14 ≤ 35 / RSI 14 ≥ 65',
   condition_rules: { buy: { signals: [], conditions: [{ left_value: 'technical.rsi14', operator: 'lte', right_constant: 35 }] }, sell: { signals: [], conditions: [{ left_value: 'technical.rsi14', operator: 'gte', right_constant: 65 }] } },
   config: {
@@ -95,6 +96,17 @@ const candidate = {
   data_fingerprint: 'data-1',
 } as unknown as IndividualResearchResult['results_by_sharpe'][number]
 
+const fullBacktest = {
+    start_date: '2021-01-01',
+    end_date: '2025-12-31',
+    bars: 1250,
+    closed_trades: 1,
+    performance: { total_return: 0.25, annual_return: 0.05, sharpe: 0.9, max_drawdown: -0.12, win_rate: 0.6, payoff_ratio: 1.5, closed_trades: 8 },
+    equity_curve: [{ date: '2021-01-01', equity: 1_000_000 }, { date: '2025-12-31', equity: 1_250_000 }],
+    trades: [{ date: '2021-02-10', direction: 'SELL', size: 100, price: 12.5, pnl: 1250, reason: '止盈', risk_trigger: 'take_profit' }],
+    data_fingerprint: 'data-1',
+}
+
 const result: IndividualResearchResult = {
   history_id: 'research-1',
   market: 'SH',
@@ -115,6 +127,7 @@ const result: IndividualResearchResult = {
   rule_candidates: { results_by_sharpe: [], results_by_return: [], evaluated_pairs: 1 },
   results_by_sharpe: [candidate],
   results_by_return: [candidate],
+  full_backtests: { 'candidate-1': fullBacktest },
   candidate_count: 1,
   risk_rule_sets: ['rules-1'],
   risk_trials_per_rule_set: 1000,
@@ -175,6 +188,7 @@ describe('IndividualResearchPage', () => {
     expect(individualApi.createIndividualResearch).toHaveBeenCalledWith(expect.objectContaining({
       market: 'SH',
       code: '600000',
+      date_mode: 'full',
       horizon: 10,
       risk_trials: 1000,
       candidate_limit: 10,
@@ -186,6 +200,9 @@ describe('IndividualResearchPage', () => {
     expect(page.text()).toContain('MA 5')
     expect(page.text()).toContain('样本较充分')
     expect(page.text()).toContain('风险高')
+    expect(page.text()).toContain('全区间回测')
+    await page.get('[data-testid="individual-full-details-sharpe-0"]').trigger('click')
+    expect(page.get('[data-testid="individual-full-backtest-sharpe-0"]').text()).toContain('止盈')
   })
 
   it('accepts both the default initial capital and round-number edits', async () => {

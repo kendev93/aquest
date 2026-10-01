@@ -115,6 +115,35 @@ def test_individual_research_job_persists_history_and_resolves_dates(tmp_path: P
     assert service.config.code == "600000"
 
 
+def test_full_history_range_uses_the_selected_stocks_own_bar_dates(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    selected_bars = _bars()
+    store.replace_local_bars("SH", "600000", "stock", selected_bars)
+    other_bars = _bars()
+    other_bars["date"] = pd.date_range("2018-01-01", periods=len(other_bars), freq="D")
+    store.replace_local_bars("SZ", "000001", "stock", other_bars)
+    service = FakeIndividualResearchService()
+    app = create_app(
+        market_data_store=store,
+        individual_research_service=service,
+        auto_sync_enabled=False,
+    )
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/v1/individual-research",
+            json={"market": "SH", "code": "600000", "value_ids": ["technical.rsi14"]},
+        )
+        assert created.status_code == 202, created.text
+        state = _wait_for_job(client, created.json()["data"]["job_id"])
+        detail = client.get(f"/api/v1/individual-research/history/{state['job_id']}")
+
+    assert state["status"] == "completed", state
+    assert service.config.start_date == selected_bars["date"].iloc[0].date()
+    assert service.config.end_date == selected_bars["date"].iloc[-1].date()
+    assert detail.json()["data"]["request"]["date_mode"] == "full"
+
+
 def test_individual_research_job_can_be_cancelled(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     store.replace_local_bars("SH", "600000", "stock", _bars())
@@ -307,6 +336,12 @@ def test_single_stock_job_runs_all_stages_and_saves_three_split_candidates(tmp_p
     assert result["results_by_sharpe"][0]["config"]["ranking_value"] is None
     assert result["results_by_sharpe"][0]["config"]["codes"] == ["SH:600000"]
     assert result["results_by_sharpe"][0]["metrics"]["holdout"]["closed_trades"] > 0
+    full_backtest_id = result["results_by_sharpe"][0]["full_backtest_id"]
+    full_backtest = result["full_backtests"][full_backtest_id]
+    assert full_backtest["bars"] == len(dates)
+    assert full_backtest["equity_curve"]
+    assert full_backtest["trades"]
+    assert saved.json()["data"]["result"]["full_backtests"][full_backtest_id]["trades"]
     assert history.json()["data"][0]["history_id"] == job_id
     assert saved.json()["data"]["backtest_type"] == "individual_research"
     assert exit_optimizer.requests

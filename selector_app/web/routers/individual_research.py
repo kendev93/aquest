@@ -54,28 +54,30 @@ def create_individual_research(
     request: Request,
 ) -> JSONResponse:
     try:
+        ref = request.app.state.market_data_adapter.stock_ref("", payload.market, payload.code)
+        if getattr(ref, "instrument_type", "stock") != "stock":
+            raise ValueError("个股研究只支持 A 股股票")
         store_status = resolve_market_status(request)
+        available_start = ref.first_date
+        available_end = ref.last_date
+        if available_start is None or available_end is None:
+            available_start = store_status.data_start
+            available_end = store_status.data_end
         start_date, end_date = resolve_date_range(
             mode=payload.date_mode,
             requested_start=payload.start_date,
             requested_end=payload.end_date,
-            available_start=store_status.data_start,
-            available_end=store_status.data_end,
+            available_start=available_start,
+            available_end=available_end,
         )
         if start_date is None or end_date is None:
             raise ValueError("本地行情没有可用于研究的日期")
-        ref = request.app.state.market_data_adapter.stock_ref("", payload.market, payload.code)
-        if getattr(ref, "instrument_type", "stock") != "stock":
-            raise ValueError("个股研究只支持 A 股股票")
-        resolved_payload = payload.model_copy(
-            update={"date_mode": "custom", "start_date": start_date, "end_date": end_date}
-        )
-        config = resolved_payload.to_config(
+        config = payload.to_config(
             start_date=start_date,
             end_date=end_date,
             name=ref.name or "",
         )
-        request_snapshot = cast(dict[str, object], resolved_payload.model_dump(mode="json"))
+        request_snapshot = cast(dict[str, object], payload.model_dump(mode="json"))
         job_id = uuid.uuid4().hex
 
         def run_task(progress: ProgressReporter) -> dict[str, object]:

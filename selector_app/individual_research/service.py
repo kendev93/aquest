@@ -257,10 +257,50 @@ class IndividualStockResearchService:
             )
             self._report(
                 progress_callback,
-                88 + int(11 * index / max(1, total_holdout)),
+                78 + int(10 * index / max(1, total_holdout)),
                 "留出段复核",
                 f"已复核 {index} / {total_holdout} 组最终候选",
             )
+
+        full_backtest_fingerprints: set[str] = set()
+        full_backtests: dict[str, dict[str, object]] = {}
+        total_full_backtests = len(final_holdout)
+        for index, candidate in enumerate(final_holdout, start=1):
+            self._check_cancelled(abort_check)
+            candidate_config = candidate.get("config")
+            if not isinstance(candidate_config, Mapping):
+                continue
+            try:
+                full_backtest = self._backtest_candidate_detail(
+                    candidate_config,
+                    config.start_date,
+                    config.end_date,
+                )
+            except (TypeError, ValueError, RuntimeError) as exc:
+                full_backtest = {
+                    "start_date": config.start_date.isoformat(),
+                    "end_date": config.end_date.isoformat(),
+                    "bars": 0,
+                    "performance": {},
+                    "equity_curve": [],
+                    "trades": [],
+                    "error": str(exc),
+                }
+            fingerprint = full_backtest.get("data_fingerprint")
+            if isinstance(fingerprint, str) and fingerprint:
+                full_backtest_fingerprints.add(fingerprint)
+            candidate_key = str(candidate.get("candidate_hash") or candidate.get("candidate_id"))
+            candidate["full_backtest_id"] = candidate_key
+            full_backtests[candidate_key] = full_backtest
+            self._report(
+                progress_callback,
+                88 + int(11 * index / max(1, total_full_backtests)),
+                "完整区间回测",
+                f"已回测 {index} / {total_full_backtests} 组最终候选",
+            )
+
+        if len(full_backtest_fingerprints) > 1:
+            raise ValueError("最终候选完整区间回测期间本地行情发生变化，请重新运行个股研究")
 
         def final_board(entries: Sequence[dict[str, object]]) -> list[dict[str, object]]:
             return [
@@ -273,7 +313,7 @@ class IndividualStockResearchService:
 
         data_fingerprint = _fingerprint_many(
             prepared.data_fingerprint,
-            sorted(risk_data_fingerprints),
+            sorted(risk_data_fingerprints | full_backtest_fingerprints),
         )
         final_result: dict[str, object] = {
             "market": config.market,
@@ -298,6 +338,7 @@ class IndividualStockResearchService:
             },
             "results_by_sharpe": final_board(ranked_sharpe),
             "results_by_return": final_board(ranked_return),
+            "full_backtests": full_backtests,
             "candidate_count": len(unique_risk_candidates),
             "risk_errors": [
                 str(item["error"]) for item in risk_candidates if isinstance(item.get("error"), str)
@@ -604,6 +645,36 @@ class IndividualStockResearchService:
         start_date: date,
         end_date: date,
     ) -> dict[str, object]:
+        return _report_metrics(self._backtest_candidate_report(raw_config, start_date, end_date))
+
+    def _backtest_candidate_detail(
+        self,
+        raw_config: Mapping[str, object],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, object]:
+        report = self._backtest_candidate_report(raw_config, start_date, end_date)
+        return {
+            "start_date": report.start_date,
+            "end_date": report.end_date,
+            "bars": report.bars,
+            "closed_trades": sum(
+                1
+                for trade in report.trades
+                if trade.get("direction") == "SELL" and not bool(trade.get("rejected", False))
+            ),
+            "performance": dict(report.performance),
+            "equity_curve": [dict(point) for point in report.equity_curve],
+            "trades": [dict(trade) for trade in report.trades],
+            "data_fingerprint": report.data_fingerprint,
+        }
+
+    def _backtest_candidate_report(
+        self,
+        raw_config: Mapping[str, object],
+        start_date: date,
+        end_date: date,
+    ) -> PortfolioBacktestReport:
         payload = dict(raw_config)
         payload["date_mode"] = "custom"
         payload["start_date"] = start_date.isoformat()
@@ -615,8 +686,7 @@ class IndividualStockResearchService:
         market_code = config.codes[0]
         market, code = market_code.split(":", 1) if ":" in market_code else ("SH", market_code)
         ref = self._adapter.stock_ref(config.vipdoc_path, cast(MarketCode, market), code)
-        report = self._portfolio_service.run_stock(ref, config)
-        return _report_metrics(report)
+        return self._portfolio_service.run_stock(ref, config)
 
     @staticmethod
     def _risk_progress(
@@ -632,7 +702,7 @@ class IndividualStockResearchService:
             current: int, total: int, stage: str, _details: Mapping[str, object] | None = None
         ) -> None:
             fraction = min(1.0, max(0.0, current / total if total else 1.0))
-            percent = 45 + int(42 * ((pair_index - 1 + fraction) / max(pair_count, 1)))
+            percent = 45 + int(33 * ((pair_index - 1 + fraction) / max(pair_count, 1)))
             IndividualStockResearchService._report(
                 progress_callback,
                 percent,

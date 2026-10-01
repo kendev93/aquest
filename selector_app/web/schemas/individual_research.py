@@ -24,7 +24,7 @@ class IndividualResearchRequest(BaseModel):
 
     market: Literal["SH", "SZ"]
     code: str = Field(min_length=6, max_length=6)
-    date_mode: DateRangeMode = "recent5"
+    date_mode: DateRangeMode = "full"
     start_date: date | None = None
     end_date: date | None = None
     reversal_multiple: float = Field(default=3.0, gt=0, le=20)

@@ -71,6 +71,7 @@ def test_individual_research_defaults_to_ten_condition_candidates() -> None:
     config = request.to_config(start_date=date(2021, 1, 1), end_date=date(2025, 12, 31))
 
     assert request.candidate_limit == 10
+    assert request.date_mode == "full"
     assert config.candidate_limit == 10
     assert "technical.ma5" in config.value_ids
 

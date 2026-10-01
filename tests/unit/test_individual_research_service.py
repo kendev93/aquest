@@ -65,13 +65,19 @@ class FakeRiskService:
             "metrics": metrics,
             "data_fingerprint": "data-fingerprint",
         }
+        sharpe_candidate = {**candidate, "candidate_hash": f"{candidate['candidate_hash']}-sharpe"}
+        return_candidate = {**candidate, "candidate_hash": f"{candidate['candidate_hash']}-return"}
         return {
-            "results_by_sharpe": [candidate],
-            "results_by_return": [candidate],
+            "results_by_sharpe": [sharpe_candidate],
+            "results_by_return": [return_candidate],
         }
 
 
 class FixtureIndividualResearchService(IndividualStockResearchService):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.full_backtest_calls = []
+
     def _prepare(self, _config, _ref):
         return SimpleNamespace(data_fingerprint="prepared-fingerprint")
 
@@ -151,6 +157,18 @@ class FixtureIndividualResearchService(IndividualStockResearchService):
             "data_fingerprint": "data-fingerprint",
         }
 
+    def _backtest_candidate_detail(self, _raw_config, start_date, end_date):
+        self.full_backtest_calls.append((start_date, end_date))
+        return {
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "bars": 800,
+            "performance": {"total_return": 0.25, "sharpe": 0.9},
+            "equity_curve": [{"date": start_date.isoformat(), "equity": 1_000_000.0}],
+            "trades": [{"entry_date": start_date.isoformat(), "exit_date": end_date.isoformat()}],
+            "data_fingerprint": "data-fingerprint",
+        }
+
 
 def _config() -> IndividualResearchConfig:
     return IndividualResearchConfig(
@@ -187,6 +205,11 @@ def test_individual_pipeline_optimizes_validation_top_rule_and_only_marks_holdou
     assert result["results_by_sharpe"][0]["metrics"]["holdout"]["closed_trades"] == 3
     assert result["results_by_sharpe"][0]["quality"]["badges"] == ["样本较充分", "风险高"]
     assert result["results_by_sharpe"][0]["condition_rules"]["buy"]["conditions"]
+    full_backtest_id = result["results_by_sharpe"][0]["full_backtest_id"]
+    assert result["full_backtests"][full_backtest_id]["performance"]["sharpe"] == 0.9
+    assert result["full_backtests"][full_backtest_id]["trades"]
+    assert len(service.full_backtest_calls) == 2
+    assert len(result["full_backtests"]) == 2
 
 
 def test_training_mining_creates_and_or_rules_from_two_indicators() -> None:

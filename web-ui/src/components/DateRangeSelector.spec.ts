@@ -52,4 +52,18 @@ describe('DateRangeSelector', () => {
       endDate: '',
     })
   })
+
+  it('labels full history as the default when configured for individual research', () => {
+    const wrapper = mount(DateRangeSelector, {
+      props: {
+        modelValue: { mode: 'full', startDate: '', endDate: '' },
+        prefix: 'individual',
+        testid: 'individual-date-range',
+        defaultMode: 'full',
+      },
+    })
+
+    expect(wrapper.get('option[value="full"]').text()).toBe('全历史（默认）')
+    expect(wrapper.get('option[value="recent5"]').text()).toBe('最近 5 年')
+  })
 })

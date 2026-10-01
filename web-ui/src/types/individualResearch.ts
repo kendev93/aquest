@@ -40,6 +40,18 @@ export interface IndividualResearchMetrics {
   error?: string
 }
 
+export interface IndividualResearchFullBacktest {
+  start_date: string
+  end_date: string
+  bars: number
+  closed_trades?: number
+  performance: Record<string, number | null>
+  equity_curve: Record<string, unknown>[]
+  trades: Record<string, unknown>[]
+  data_fingerprint?: string | null
+  error?: string
+}
+
 export interface IndividualResearchCandidate {
   candidate_hash: string
   candidate_id: string
@@ -52,6 +64,7 @@ export interface IndividualResearchCandidate {
     validation?: IndividualResearchMetrics | null
     holdout?: IndividualResearchMetrics | null
   }
+  full_backtest_id?: string | null
   quality?: {
     badges: string[]
     sample_adequate: boolean
@@ -95,6 +108,7 @@ export interface IndividualResearchResult {
   }
   results_by_sharpe: IndividualResearchCandidate[]
   results_by_return: IndividualResearchCandidate[]
+  full_backtests?: Record<string, IndividualResearchFullBacktest>
   candidate_count: number
   risk_rule_sets?: string[]
   risk_trials_per_rule_set: number
