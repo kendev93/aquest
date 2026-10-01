@@ -202,6 +202,8 @@ input:focus, select:focus { border-color: var(--accent); }
 .metrics-strip strong small { margin-left: 3px; color: var(--subtle); font-size: 10px; font-weight: 400; }
 .metrics-strip .positive { color: var(--accent); }
 .screen-history { margin-bottom: 14px; padding: 10px; border: 1px solid var(--border); background: rgba(8, 15, 32, 0.55); }
+.screen-transfer-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 8px 0; }
+.screen-transfer-actions .secondary-button { margin-top: 0; }
 .screen-history-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; color: var(--subtle); font-size: 10px; }
 .screen-history-heading div { display: flex; align-items: baseline; gap: 8px; }
 .screen-history-heading strong { color: var(--text); font-size: 11px; }

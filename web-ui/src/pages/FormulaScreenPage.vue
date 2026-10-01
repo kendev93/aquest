@@ -48,6 +48,7 @@ import {
   renameStockGroup,
 } from '../api/stockGroups'
 import { formatChinaTimestamp } from '../utils/time'
+import { savePortfolioBacktestHandoff } from '../utils/portfolioBacktestHandoff'
 
 const INSTRUMENT_TYPE_OPTIONS: { key: InstrumentType; label: string }[] = [
   { key: 'stock', label: '股票' },
@@ -889,6 +890,7 @@ const groupError = ref('')
 // 展开态的「入组至今」按组缓存：算一次要扫一遍全市场，切走再点回来不该重算。
 const groupDetails = ref<Record<string, StockGroupPerformance>>({})
 const groupMembers = ref<Record<string, StockGroup>>({})
+const handoffGroupId = ref('')
 const expandedGroupIds = reactive(new Set<string>())
 const loadingGroupId = ref('')
 // 折叠态的「近 N 个交易日」：所有组共用同一窗口，一次请求全部拿回。
@@ -1027,6 +1029,94 @@ async function saveResultsAsGroup(useAll: boolean): Promise<void> {
     groupError.value = apiMessage(error, '保存失败')
   } finally {
     groupBusy.value = false
+  }
+}
+
+function validFormulaParameters(value: unknown): Record<string, number> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  return Object.fromEntries(
+    Object.entries(value).filter((entry): entry is [string, number] => (
+      typeof entry[1] === 'number' && Number.isFinite(entry[1])
+    )),
+  )
+}
+
+function handoffStockPool(
+  codes: string[],
+  sourceLabel: string,
+  input: Record<string, unknown> = {},
+  signalDate: number | null = null,
+): void {
+  const normalizedCodes = [...new Set(codes.map((code) => code.trim()).filter(Boolean))]
+  if (!normalizedCodes.length) {
+    message.value = '这组没有可回测的标的。'
+    return
+  }
+
+  const formulaText = typeof input.formula_text === 'string'
+    ? input.formula_text.trim()
+    : ''
+  const rankingValue = typeof input.ranking_value === 'string' && input.ranking_value.trim()
+    ? input.ranking_value.trim()
+    : null
+  const handoff = savePortfolioBacktestHandoff({
+    kind: 'stock-pool',
+    source: 'formula-screen',
+    source_label: sourceLabel,
+    codes: normalizedCodes,
+    ranking_value: rankingValue,
+    rank_order: input.rank_order === 'asc' ? 'asc' : 'desc',
+    mode: formulaText ? 'custom' : 'preset',
+    formula_text: formulaText || null,
+    formula_parameters: validFormulaParameters(input.formula_parameters),
+    signal_date: signalDate,
+  })
+  if (!handoff) {
+    message.value = '浏览器暂时无法保存这次跨页配置，请检查隐私模式或存储权限。'
+    return
+  }
+  if (import.meta.env.MODE !== 'test') window.location.assign('/portfolio-backtest')
+}
+
+function handoffScreenResults(useSelected: boolean): void {
+  const picked = useSelected
+    ? results.value.filter((item) => selectedResultKeys.has(resultKey(item)))
+    : results.value
+  const label = useSelected ? `公式选股勾选结果（${picked.length} 只）` : `公式选股整批结果（${picked.length} 只）`
+  const scanConfig: Record<string, unknown> = {
+    ranking_value: resultMeta.value?.ranking_value ?? null,
+    rank_order: resultMeta.value?.rank_order ?? displayedRankingOrder.value,
+  }
+  if (form.mode === 'custom' && form.formulaText.trim() === parsedFormulaText.value) {
+    scanConfig.formula_text = form.formulaText.trim()
+    scanConfig.formula_parameters = { ...form.formulaParameters }
+  }
+  const signalDates = [...new Set(picked.map((item) => item.signal_date))]
+  handoffStockPool(
+    picked.map((item) => `${item.market.toUpperCase()}:${item.code}`),
+    label,
+    scanConfig,
+    signalDates.length === 1 ? signalDates[0] : null,
+  )
+}
+
+async function handoffStockGroup(group: StockGroupSummary): Promise<void> {
+  if (handoffGroupId.value) return
+  handoffGroupId.value = group.group_id
+  groupError.value = ''
+  try {
+    const detail = groupMembers.value[group.group_id] ?? await getStockGroup(group.group_id)
+    groupMembers.value = { ...groupMembers.value, [group.group_id]: detail }
+    const criteria = group.criteria?.payload ?? {}
+    handoffStockPool(
+      detail.items.map((item) => `${item.market.toUpperCase()}:${item.code}`),
+      `股票组「${group.name}」`,
+      criteria,
+    )
+  } catch (error) {
+    groupError.value = apiMessage(error, '读取股票组失败')
+  } finally {
+    handoffGroupId.value = ''
   }
 }
 
@@ -1500,6 +1590,24 @@ watch(() => form.formulaText, (value) => {
           <p v-if="displayedRankingValue" class="helper" data-testid="screen-results-order">
             结果按 {{ resultValueLabel(displayedRankingValue) }} {{ displayedRankingOrder === 'asc' ? '从低到高' : '从高到低' }} 排列。
           </p>
+          <div v-if="results.length" class="screen-transfer-actions" data-testid="screen-backtest-actions">
+            <button
+              class="secondary-button"
+              type="button"
+              data-testid="screen-selected-to-backtest"
+              :disabled="selectedResultCount === 0"
+              @click="handoffScreenResults(true)"
+            >把勾选的 {{ selectedResultCount }} 只带入组合回测</button>
+            <button
+              class="secondary-button"
+              type="button"
+              data-testid="screen-all-to-backtest"
+              @click="handoffScreenResults(false)"
+            >把全部 {{ results.length }} 只带入组合回测</button>
+          </div>
+          <p v-if="results.length" class="helper">
+            带入的是这次选股的固定代码清单，回测区间内都会作为候选范围；它不会重建历史上每天的选股名单。
+          </p>
 
           <div v-if="results.length === 0" class="empty-state" data-testid="empty-results">
             <div class="empty-icon" aria-hidden="true">/</div>
@@ -1634,6 +1742,13 @@ watch(() => form.formulaText, (value) => {
                     </span>
                   </span>
                 </button>
+                <button
+                  type="button"
+                  class="text-button"
+                  :data-testid="`group-backtest-${group.group_id}`"
+                  :disabled="handoffGroupId !== ''"
+                  @click="handoffStockGroup(group)"
+                >{{ handoffGroupId === group.group_id ? '载入中…' : '带入组合回测' }}</button>
                 <button
                   type="button"
                   class="text-button"

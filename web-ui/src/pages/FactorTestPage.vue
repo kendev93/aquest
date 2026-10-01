@@ -12,6 +12,7 @@ import {
 } from '../api/factorTest'
 import { FormulaScreenApiError, fetchMetadata } from '../api/formulaScreen'
 import { fetchActiveJobs } from '../api/jobs'
+import { savePortfolioBacktestHandoff } from '../utils/portfolioBacktestHandoff'
 import BacktestHistoryPanel from '../components/BacktestHistoryPanel.vue'
 import DateRangeSelector from '../components/DateRangeSelector.vue'
 import TermHint from '../components/TermHint.vue'
@@ -294,6 +295,25 @@ function formatNumber(value: number | null | undefined, digits = 3): string {
 
 function orderText(order: FactorEvidence['order']): string {
   return order === 'high' ? '买最高一组' : '买最低一组'
+}
+
+function handoffSelectedFactor(): void {
+  const factor = selectedFactor.value
+  if (!factor) return
+  const order = factor.order === 'high' ? 'desc' : 'asc'
+  const evidence = `因子检验建议${orderText(factor.order)}；IC ${formatNumber(factor.ic_mean)}，校正后 q 值 ${formatNumber(factor.qvalue)}`
+  if (!savePortfolioBacktestHandoff({
+    kind: 'ranking',
+    source: 'factor-test',
+    source_label: '因子检验结论',
+    value_id: factor.value_id,
+    rank_order: order,
+    evidence,
+  })) {
+    message.value = '浏览器暂时无法保存跨页配置，请检查隐私模式或存储权限。'
+    return
+  }
+  if (import.meta.env.MODE !== 'test') window.location.assign('/portfolio-backtest')
 }
 
 function monotonicText(factor: FactorEvidence): string {
@@ -625,6 +645,12 @@ onMounted(async () => {
                 <div><dt>噪声门槛<TermHint term="noiseFloor" /></dt><dd>{{ formatNumber(selectedFactor.ic_threshold) }}</dd></div>
                 <div><dt>有效交易日</dt><dd>{{ selectedFactor.ic_days }}</dd></div>
               </dl>
+              <div class="factor-handoff-actions">
+                <button class="secondary-button" type="button" data-testid="factor-to-portfolio" @click="handoffSelectedFactor">
+                  把该指标与方向带入组合回测排序
+                </button>
+                <p class="helper">只带入排序指标和升降方向；回测标的、日期、买卖规则与风控保持原设置。因子检验结果是候选依据，应用后请自行复核回测表现。</p>
+              </div>
             </div>
           </template>
         </section>
@@ -659,6 +685,9 @@ onMounted(async () => {
   flex-wrap: wrap;
   margin-bottom: 0.5rem;
 }
+
+.factor-handoff-actions { margin-top: 12px; }
+.factor-handoff-actions .helper { margin: 6px 0 0; }
 
 .factor-inline-check {
   display: inline-flex;

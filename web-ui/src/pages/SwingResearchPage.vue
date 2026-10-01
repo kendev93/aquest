@@ -26,6 +26,7 @@ import type {
   SwingStudyResult,
 } from '../types'
 import { saveSwingPlan } from '../utils/swingHandoff'
+import { savePortfolioBacktestHandoff } from '../utils/portfolioBacktestHandoff'
 import { formatChinaTimestamp } from '../utils/time'
 
 /** 第一步表单的存档形状。存的是表单本身而不是请求体，回填时才能直接赋值。 */
@@ -506,6 +507,25 @@ function handoffToResearch(): void {
   })
 }
 
+function handoffToPortfolio(): void {
+  const current = plan.value
+  if (!current) return
+  const saved = savePortfolioBacktestHandoff({
+    kind: 'rules',
+    source: 'swing-research',
+    source_label: '波段研究结论',
+    buy_rule: current.buy_rule,
+    sell_rule: current.sell_rule,
+    ranking_value: current.ranking?.value ?? null,
+    rank_order: current.ranking?.order === 'asc' ? 'asc' : 'desc',
+  })
+  if (!saved) {
+    message.value = '浏览器暂时无法保存跨页配置，请检查隐私模式或存储权限。'
+    return
+  }
+  if (import.meta.env.MODE !== 'test') window.location.assign('/portfolio-backtest')
+}
+
 async function copyPlan(): Promise<void> {
   const current = plan.value
   if (!current) return
@@ -851,10 +871,11 @@ async function copyPlan(): Promise<void> {
             </div>
             <p v-if="plan.reason" class="helper">{{ plan.reason }}</p>
             <p v-else class="helper">
-              阈值取自横截面分位的中位数，会随行情强弱漂移。下面的按钮只是把它作为「起点」带去买卖条件研究，让那边在自己的三段数据上重新搜索。
+              阈值取自横截面分位的中位数，会随行情强弱漂移。可以带去买卖条件研究继续搜索，也可以直接带入组合回测查看效果。
             </p>
             <div class="swing-plan-actions">
               <a class="secondary-button swing-handoff" href="/condition-research" data-testid="swing-plan-handoff" @click="handoffToResearch">把结论带去买卖条件研究</a>
+              <button class="secondary-button" type="button" data-testid="swing-plan-to-portfolio" @click="handoffToPortfolio">直接带入组合回测</button>
               <button class="text-button" type="button" data-testid="swing-plan-copy" @click="copyPlan">{{ copied ? '已复制' : '复制规则 JSON' }}</button>
             </div>
           </section>
@@ -1205,9 +1226,12 @@ async function copyPlan(): Promise<void> {
 .swing-plan-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 10px;
   margin-top: 10px;
 }
+
+.swing-plan-actions .secondary-button { margin-top: 0; }
 
 .swing-handoff {
   display: inline-flex;

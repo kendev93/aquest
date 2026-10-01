@@ -13,6 +13,7 @@ import {
 } from '../api/factorAttribution'
 import { FormulaScreenApiError, fetchMetadata } from '../api/formulaScreen'
 import { fetchActiveJobs } from '../api/jobs'
+import { savePortfolioBacktestHandoff } from '../utils/portfolioBacktestHandoff'
 import BacktestHistoryPanel from '../components/BacktestHistoryPanel.vue'
 import TermHint from '../components/TermHint.vue'
 import type {
@@ -254,6 +255,32 @@ function verdictText(factor: AttributionFactor): string {
   return factor.note ?? '未判断'
 }
 
+function canApplyAttributionFactor(factor: AttributionFactor): boolean {
+  return typeof factor.difference === 'number'
+    && Number.isFinite(factor.difference)
+    && factor.difference !== 0
+    && rankableValues.value.some((value) => value.id === factor.value_id)
+}
+
+function handoffAttributionFactor(factor: AttributionFactor): void {
+  const difference = factor.difference
+  if (!canApplyAttributionFactor(factor) || typeof difference !== 'number') return
+  const order = difference > 0 ? 'desc' : 'asc'
+  const evidence = `胜组均值减败组均值为 ${formatNumber(difference)}，${verdictText(factor)}；方向仅表示本次样本中的关联`
+  if (!savePortfolioBacktestHandoff({
+    kind: 'ranking',
+    source: 'factor-attribution',
+    source_label: '因子归因结论',
+    value_id: factor.value_id,
+    rank_order: order,
+    evidence,
+  })) {
+    message.value = '浏览器暂时无法保存跨页配置，请检查隐私模式或存储权限。'
+    return
+  }
+  if (import.meta.env.MODE !== 'test') window.location.assign('/portfolio-backtest')
+}
+
 function downloadResult(): void {
   if (!report.value) return
   const url = URL.createObjectURL(
@@ -443,6 +470,7 @@ onMounted(async () => {
                     <th class="attribution-nowrap">p 值</th>
                     <th class="attribution-nowrap">校正后 p</th>
                     <th class="attribution-nowrap">结论</th>
+                    <th class="attribution-nowrap">操作</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -460,6 +488,16 @@ onMounted(async () => {
                     <td>{{ formatNumber(factor.p_value) }}</td>
                     <td>{{ formatNumber(factor.adjusted_p_value) }}</td>
                     <td class="attribution-note">{{ verdictText(factor) }}</td>
+                    <td>
+                      <button
+                        class="table-link"
+                        type="button"
+                        :data-testid="`attribution-to-portfolio-${factor.value_id}`"
+                        :disabled="!canApplyAttributionFactor(factor)"
+                        :title="canApplyAttributionFactor(factor) ? '按胜组与败组均值差推断排序方向' : '该指标没有可用方向或不可用于跨标的排序'"
+                        @click="handoffAttributionFactor(factor)"
+                      >带入排序</button>
+                    </td>
                   </tr>
                 </tbody>
               </table>

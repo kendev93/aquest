@@ -22,6 +22,10 @@ import {
 import { FormulaScreenApiError, fetchMetadata, parseFormula } from '../api/formulaScreen'
 import { fetchActiveJobs } from '../api/jobs'
 import {
+  consumePortfolioBacktestHandoff,
+  type PortfolioBacktestHandoff,
+} from '../utils/portfolioBacktestHandoff'
+import {
   createStrategy,
   deleteStrategy,
   fetchStrategies,
@@ -762,6 +766,96 @@ async function applyStoredResearch(raw: unknown, notice?: string): Promise<void>
   message.value = notice ?? (missing.length
     ? `已载入研究的规则与排序建议；研究未设${missing.join('、')}条件，该侧已保留当前默认，请确认后再回测。`
     : '已载入买卖条件研究的规则与排序建议，请确认后开始组合回测。')
+}
+
+function applyHandoffRanking(valueId: string | null, order: 'asc' | 'desc'): string | null {
+  if (!valueId) return null
+  const available = availableValues.value.find((value) => value.id === valueId && value.rankable)
+  if (!available) return `排序指标 ${valueId} 在当前组合回测模式下不可用，已保留原排序。`
+  form.rankingValue = valueId
+  form.rankOrder = order
+  return `排序已设为${available.display_name} · ${order === 'asc' ? '从小到大' : '从大到小'}`
+}
+
+function screenSignalDateText(signalDate: number | null): string {
+  if (!signalDate || !Number.isInteger(signalDate)) return ''
+  const date = String(signalDate).padStart(8, '0')
+  return date.length === 8 ? `${date.slice(0, 4)}-${date.slice(4, 6)}-${date.slice(6, 8)}` : ''
+}
+
+async function applyStockPoolHandoff(handoff: Extract<PortfolioBacktestHandoff, { kind: 'stock-pool' }>): Promise<void> {
+  const codes = [...new Set(handoff.codes.map((code) => code.trim()).filter(Boolean))]
+  if (!codes.length) return
+
+  let formulaNotice = ''
+  const formulaText = handoff.formula_text?.trim() ?? ''
+  const previousRankingValue = form.rankingValue
+  const previousRankOrder = form.rankOrder
+  if (formulaText && (form.mode !== 'custom' || form.formulaText.trim() !== formulaText)) {
+    const previousBuyRule = form.buyRule
+    const previousSellRule = form.sellRule
+    form.mode = 'custom'
+    form.formulaText = formulaText
+    form.formulaParameters = { ...handoff.formula_parameters }
+    await parseCustomFormula()
+    form.buyRule = previousBuyRule
+    form.sellRule = previousSellRule
+    if (!customMetadata.value) formulaNotice = '自定义公式未能解析，请检查公式后再使用该排序指标。'
+  }
+
+  form.universe = 'codes'
+  form.codesText = codes.join('\n')
+  const rankingNotice = applyHandoffRanking(handoff.ranking_value, handoff.rank_order)
+  if (
+    !handoff.ranking_value
+    || !availableValues.value.some((value) => value.id === handoff.ranking_value && value.rankable)
+  ) {
+    form.rankingValue = previousRankingValue
+    form.rankOrder = previousRankOrder
+  }
+  errors.value = { ...errors.value }
+  delete errors.value.rankingValue
+  const dateText = screenSignalDateText(handoff.signal_date)
+  const details = [
+    `${handoff.source_label}已作为 ${codes.length} 只标的的固定候选池带入`,
+    rankingNotice,
+    dateText ? `选股信号日期 ${dateText}` : '',
+    formulaNotice,
+  ].filter(Boolean)
+  message.value = `${details.join('；')}。当前买卖规则、持仓数、回测区间和退出风控保持本页设置。固定代码池不会重建历史逐日选股结果；回测起始日早于选股日期时，请注意未来信息偏差。`
+}
+
+async function applyPortfolioBacktestHandoff(handoff: PortfolioBacktestHandoff): Promise<void> {
+  if (handoff.kind === 'stock-pool') {
+    await applyStockPoolHandoff(handoff)
+    return
+  }
+
+  if (handoff.kind === 'rules') {
+    const applied: string[] = []
+    const unchanged: string[] = []
+    const buyRule = parseStoredRuleGroup(handoff.buy_rule)
+    const sellRule = parseStoredRuleGroup(handoff.sell_rule)
+    if (buyRule) {
+      form.buyRule = buyRule
+      applied.push('买入规则')
+    } else unchanged.push('波段研究没有买入结论，当前买入规则保留')
+    if (sellRule) {
+      form.sellRule = sellRule
+      applied.push('卖出规则')
+    } else unchanged.push('波段研究没有卖出结论，当前卖出规则保留')
+    const rankingNotice = applyHandoffRanking(handoff.ranking_value, handoff.rank_order)
+    if (rankingNotice) applied.push(rankingNotice)
+    errors.value = {}
+    const unchangedNotice = unchanged.length ? `${unchanged.join('；')}。` : ''
+    message.value = `${handoff.source_label}已带入${applied.length ? `：${applied.join('、')}` : '，没有可应用的规则或排序'}。${unchangedNotice}回测区间、标的范围、持仓数、风控和交易成本保持本页设置，请确认后运行。`
+    return
+  }
+
+  const rankingNotice = applyHandoffRanking(handoff.value_id, handoff.rank_order)
+  message.value = rankingNotice
+    ? `${handoff.source_label}：${rankingNotice}。${handoff.evidence}；只修改排序，其他回测设置保持不变，请确认后运行。`
+    : `${handoff.source_label}的指标 ${handoff.value_id} 当前不可作为组合排序，已保留原排序。${handoff.evidence}`
 }
 
 function readAppliedDiscoveryMeta(raw: unknown): AppliedDiscoveryCandidate | null {
@@ -1554,6 +1648,8 @@ onMounted(async () => {
         sessionStorage.removeItem(RESEARCH_APPLY_KEY)
       }
     }
+    const portfolioHandoff = consumePortfolioBacktestHandoff()
+    if (portfolioHandoff) await applyPortfolioBacktestHandoff(portfolioHandoff)
     await loadHistory()
     await loadRiskOptimizationHistory()
     await loadStrategies()
