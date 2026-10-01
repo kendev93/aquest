@@ -809,6 +809,7 @@ interface ResearchToScreenPayload {
   combine_mode?: CombineMode
   minimum_matches?: number | null
   universe?: Universe
+  universe_file?: string | null
   boards?: InstrumentBoard[]
   instrument_types?: InstrumentType[]
   mode?: 'preset' | 'custom'
@@ -816,6 +817,7 @@ interface ResearchToScreenPayload {
   formula_parameters?: Record<string, number>
   ranking_value?: string | null
   rank_order?: 'asc' | 'desc'
+  source_label?: '买卖条件研究' | '组合回测'
 }
 
 const RESEARCH_TO_SCREEN_KEY = 'indicator-lab.condition-research.to-screen'
@@ -824,8 +826,10 @@ async function applyResearchToScreen(): Promise<void> {
   const raw = sessionStorage.getItem(RESEARCH_TO_SCREEN_KEY)
   if (!raw) return
   const notes: string[] = []
+  let sourceLabel: '买卖条件研究' | '组合回测' = '买卖条件研究'
   try {
-    const payload = JSON.parse(raw) as unknown
+    const payload = JSON.parse(raw) as ResearchToScreenPayload
+    if (payload.source_label === '组合回测') sourceLabel = '组合回测'
     const result = researchToFormState(payload, {
       signalIds: presetSignals.value.map((signal) => signal.id),
       valueIds: availableValues.value.map((value) => value.id),
@@ -839,6 +843,7 @@ async function applyResearchToScreen(): Promise<void> {
     form.combineMode = state.combineMode
     form.minimumMatches = state.minimumMatches
     form.universe = state.universe
+    form.universeFile = state.universeFile
     form.boards = state.boards
     form.instrumentTypes = state.instrumentTypes
     form.formulaText = state.formulaText
@@ -860,6 +865,9 @@ async function applyResearchToScreen(): Promise<void> {
       notes.push(`排序：${rankingName} · ${form.rankingOrder === 'asc' ? '从小到大' : '从大到小'}`)
     }
     notes.push(...result.notes)
+    if (sourceLabel === '组合回测') {
+      notes.push('卖出条件、止盈止损、持仓槽位和 ST 过滤不会用于公式选股；这里只带入买入筛选与排序。')
+    }
   } catch {
     notes.push('带过来的条件没能还原，已保留原有设置。')
   } finally {
@@ -867,8 +875,8 @@ async function applyResearchToScreen(): Promise<void> {
     sessionStorage.removeItem(RESEARCH_TO_SCREEN_KEY)
   }
   message.value = notes.length
-    ? `已带入买卖条件研究的买入条件。${notes.join('；')}`
-    : '已带入买卖条件研究的买入条件，确认后直接扫描即可。'
+    ? `已带入${sourceLabel}的买入条件。${notes.join('；')}`
+    : `已带入${sourceLabel}的买入条件，确认后直接扫描即可。`
 }
 
 /* ---------------- 股票组：把扫出来的票留下来观察 ---------------- */

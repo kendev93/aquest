@@ -273,7 +273,7 @@ export function researchToFormState(
       combineMode,
       minimumMatches,
       universe,
-      universeFile: '',
+      universeFile: typeof record.universe_file === 'string' ? record.universe_file : '',
       instrumentTypes: stringList(record.instrument_types).filter(
         (item): item is InstrumentType => INSTRUMENT_TYPES.has(item as InstrumentType),
       ),

@@ -72,6 +72,7 @@ const DISCOVERY_APPLY_KEY = 'indicator-lab.strategy-discovery.apply'
 const DISCOVERY_APPLY_META_KEY = 'indicator-lab.strategy-discovery.apply-meta'
 // 条件研究页的桥接，键独立于策略实验室，两者不会互相覆盖。
 const RESEARCH_APPLY_KEY = 'indicator-lab.condition-research.apply'
+const FORMULA_SCREEN_HANDOFF_KEY = 'indicator-lab.condition-research.to-screen'
 const PORTFOLIO_BACKTEST_LIMITATIONS = [
   '行情使用未复权原始日线；除权除息未校准，现金分红未计入收益。',
   '仅模拟单一做多组合和固定持仓槽位，不模拟实盘下单、融资融券或多策略资金隔离。',
@@ -830,6 +831,60 @@ async function compareAppliedCandidate(backtest: PortfolioBacktestResult): Promi
       ? applied.data_fingerprint === backtest.data_fingerprint ? '一致' : '不一致'
       : '未提供',
   }
+}
+
+function applyBuyRuleToFormulaScreen(): void {
+  const rule = form.buyRule
+  const requiredConditions = rule.required_conditions ?? []
+  const hasSignals = rule.signals.length > 0
+  const hasConditions = rule.conditions.length > 0 || requiredConditions.length > 0
+  if (!hasSignals && !hasConditions) {
+    message.value = '当前组合配置没有买入筛选条件可带入公式选股。'
+    return
+  }
+  if (form.universe === 'codes') {
+    message.value = '公式选股暂不支持带入组合回测的指定代码列表；请先改用市场范围或自定义列表文件。'
+    return
+  }
+  if (hasSignals && hasConditions) {
+    message.value = '当前买入规则同时包含快捷信号和指标条件，公式选股暂时不能原样表达；请简化为其中一种后再带入。'
+    return
+  }
+  if (requiredConditions.length > 0 && rule.combine_mode !== 'all') {
+    message.value = '含有“必须满足”条件的买入规则只有在“全部满足”模式下才能原样带入公式选股。'
+    return
+  }
+  if (form.universe === 'custom' && !form.universeFile.trim()) {
+    message.value = '自定义股票列表文件为空，无法带入公式选股。'
+    return
+  }
+  if (form.mode === 'custom' && !customMetadata.value) {
+    message.value = '请先解析自定义公式，再带入公式选股。'
+    return
+  }
+  if (!availableValues.value.some((value) => value.id === form.rankingValue && value.rankable)) {
+    message.value = '当前排序指标不是可跨标的比较的 rankable 输出，不能带入公式选股。'
+    return
+  }
+
+  sessionStorage.setItem(FORMULA_SCREEN_HANDOFF_KEY, JSON.stringify({
+    source_label: '组合回测',
+    signals: [...rule.signals],
+    conditions: [...rule.conditions],
+    required_conditions: [...requiredConditions],
+    combine_mode: rule.combine_mode,
+    minimum_matches: rule.minimum_matches,
+    universe: form.universe,
+    universe_file: form.universe === 'custom' ? form.universeFile.trim() : null,
+    boards: [...form.boards],
+    instrument_types: [...form.instrumentTypes],
+    mode: form.mode,
+    formula_text: form.mode === 'custom' ? form.formulaText.trim() : null,
+    formula_parameters: form.mode === 'custom' ? { ...form.formulaParameters } : {},
+    ranking_value: form.rankingValue,
+    rank_order: form.rankOrder,
+  }))
+  if (import.meta.env.MODE !== 'test') window.location.assign('/indicator-lab')
 }
 
 async function submit(): Promise<void> {
@@ -1736,6 +1791,8 @@ watch(() => form.formulaText, (value) => {
 
           <div class="action-stack">
             <button class="primary-button" data-testid="start-portfolio-backtest" type="button" :disabled="!canSubmit" @click="submit"><span v-if="loading" class="spinner" aria-hidden="true"></span>{{ loading ? '组合回测中…' : '开始组合回测' }}</button>
+            <button class="secondary-button" data-testid="portfolio-apply-to-formula-screen" type="button" :disabled="loading || customParseLoading" @click="applyBuyRuleToFormulaScreen">把买入条件与排序带到公式选股</button>
+            <p class="helper">只带入买入侧条件、标的范围和排序；卖出/风控、槽位数量和 ST 排除不属于一次性公式选股。</p>
             <label class="portfolio-inline-field" for="portfolio-risk-search-level"><span>风险寻优强度</span><select id="portfolio-risk-search-level" v-model.number="riskOptimizationMaxTrials" data-testid="portfolio-risk-search-level"><option :value="1000">低 · 1000 组</option><option :value="2000">中 · 2000 组</option><option :value="3000">高 · 3000 组</option></select></label>
             <button class="secondary-button" data-testid="start-portfolio-risk-optimization" type="button" :disabled="!canSubmit" @click="startRiskOptimization"><span v-if="riskOptimizationLoading" class="spinner" aria-hidden="true"></span>{{ riskOptimizationLoading ? '寻优中…' : '寻优退出风控' }}</button>
           </div>
