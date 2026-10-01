@@ -88,6 +88,16 @@ def test_lists_local_instruments_with_pagination_and_summary() -> None:
     assert page.items[0].last_close == pytest.approx(41.0)
 
 
+def test_lists_local_instruments_by_chinese_name() -> None:
+    service = LocalMarketDataService(FakeMarketDataAdapter())
+
+    page = service.list_instruments("/data/vipdoc", keyword="浦发")
+
+    assert page.total == 1
+    assert page.items[0].code == "600000"
+    assert page.items[0].name == "浦发银行"
+
+
 def test_lists_data_bearing_instruments_first_from_persisted_summary() -> None:
     empty = StockRef(
         "SH",

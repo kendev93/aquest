@@ -142,14 +142,15 @@ class LocalMarketDataService:
 
         universe = "all" if market == "all" else market.lower()
         refs = self._adapter.list_stock_refs(vipdoc_path, universe)
-        query = keyword.strip().upper()
+        query = keyword.strip().casefold()
         filtered = [
             ref
             for ref in sorted(refs, key=_instrument_sort_key)
             if not query
-            or query in ref.code
-            or query in ref.market
-            or query in getattr(ref, "instrument_type", "")
+            or query in ref.code.casefold()
+            or query in ref.market.casefold()
+            or query in str(getattr(ref, "instrument_type", "")).casefold()
+            or query in str(getattr(ref, "name", "") or "").casefold()
         ]
         total = len(filtered)
         start = (page - 1) * page_size

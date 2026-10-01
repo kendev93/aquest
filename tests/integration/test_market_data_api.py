@@ -138,6 +138,23 @@ def test_local_market_bars_rejects_invalid_code() -> None:
     assert response.status_code == 422
 
 
+def test_local_instrument_endpoint_searches_chinese_stock_names(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars(40, base=10.0), name="浦发银行")
+    app = create_app(market_data_store=store, auto_sync_enabled=False)
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/v1/market-data/local/instruments",
+            params={"keyword": "浦发"},
+        )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["meta"]["total"] == 1
+    assert response.json()["data"][0]["code"] == "600000"
+    assert response.json()["data"][0]["name"] == "浦发银行"
+
+
 def test_bar_delete_endpoint_rejects_an_unconfirmed_request() -> None:
     """删除日线不可撤销，没有 confirm 的请求必须被挡下。"""
 

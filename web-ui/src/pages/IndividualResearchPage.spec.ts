@@ -283,9 +283,14 @@ describe('IndividualResearchPage', () => {
     await pickerActions[0].findAll('button')[0].trigger('click')
     await pickerActions[1].findAll('button')[1].trigger('click')
     await pickerActions[1].findAll('button')[0].trigger('click')
-    await page.get('[data-testid="individual-stock-search"]').setValue('浦发')
-    await page.get('[data-testid="individual-stock-search-button"]').trigger('click')
-    await flushPromises()
+    vi.useFakeTimers()
+    try {
+      await page.get('[data-testid="individual-stock-search"]').setValue('浦发')
+      await vi.advanceTimersByTimeAsync(250)
+      await flushPromises()
+    } finally {
+      vi.useRealTimers()
+    }
 
     expect(marketApi.fetchLocalInstruments).toHaveBeenLastCalledWith({ keyword: '浦发', page_size: 20 })
     expect(page.findAll('.individual-instrument-option')).toHaveLength(1)
