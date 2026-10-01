@@ -177,6 +177,8 @@ def _typed_history_summary(
         return _condition_research_summary(result)
     if backtest_type == "swing_research":
         return _swing_research_summary(result)
+    if backtest_type == "individual_research":
+        return _individual_research_summary(result)
     return {}
 
 
@@ -291,6 +293,32 @@ def _swing_research_summary(result: Mapping[str, object]) -> dict[str, object]:
         tradeable = _finite_or_none(plan.get("tradeable_count"))
         if tradeable is not None:
             summary["tradeable_count"] = tradeable
+    return summary
+
+
+def _individual_research_summary(result: Mapping[str, object]) -> dict[str, object]:
+    summary: dict[str, object] = {
+        key: result[key]
+        for key in ("market", "code", "name", "start_date", "end_date", "candidate_count")
+        if key in result
+    }
+    range_value = result.get("date_range")
+    if isinstance(range_value, Mapping):
+        summary["date_range"] = dict(range_value)
+    for board_key, label in (("results_by_sharpe", "sharpe"), ("results_by_return", "return")):
+        rows = result.get(board_key)
+        if not isinstance(rows, (list, tuple)) or not rows:
+            continue
+        first = rows[0]
+        if not isinstance(first, Mapping):
+            continue
+        metrics = first.get("metrics")
+        validation = metrics.get("validation") if isinstance(metrics, Mapping) else None
+        if isinstance(validation, Mapping):
+            for key in ("sharpe", "annual_return", "win_rate", "payoff_ratio", "max_drawdown"):
+                value = _finite_or_none(validation.get(key))
+                if value is not None:
+                    summary[f"top_{label}_{key}"] = value
     return summary
 
 

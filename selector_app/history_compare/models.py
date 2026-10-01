@@ -54,6 +54,7 @@ TYPE_LABELS: dict[str, str] = {
     "strategy_fitness": "策略适配性",
     "condition_research": "条件研究",
     "swing_research": "波段研究",
+    "individual_research": "个股研究",
     "factor_test": "因子检验",
     "factor_attribution": "因子归因",
 }

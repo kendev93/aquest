@@ -1686,6 +1686,7 @@ watch(() => form.formulaText, (value) => {
                 <a class="nav-link active" href="/portfolio-backtest" aria-current="page">组合回测</a>
         <a class="nav-link" href="/strategy-lab">策略实验室</a>
         <a class="nav-link" href="/condition-research">买卖条件研究</a>
+        <a class="nav-link" href="/individual-research">个股研究</a>
         <a class="nav-link" href="/strategy-fitness">策略适配性</a>
         <a class="nav-link" href="/market-data">本地行情</a>
         <a class="nav-link" href="/swing-research">波段研究</a>
@@ -1934,7 +1935,7 @@ watch(() => form.formulaText, (value) => {
           </div>
           <div v-if="!result && !riskOptimizationResult" class="empty-state" data-testid="portfolio-empty"><div class="empty-icon" aria-hidden="true">/</div><h3>{{ loading ? '正在运行动态组合回测…' : '还没有组合结果' }}</h3><p>{{ loading ? '正在逐股计算公式并模拟槽位补位，完成后显示净值与候选排名。' : '配置买入条件、排序指标和卖出条件后开始回测。' }}</p></div>
           <template v-if="result">
-            <div class="backtest-summary"><span class="result-badge">{{ result.universe === 'all' ? '沪深全部品种' : result.universe.toUpperCase() }}</span><span>{{ result.start_date }} → {{ result.end_date }}</span><span>{{ result.bars }} 个交易日</span><span>{{ result.processed }} / {{ result.total_candidates }} 个标的已处理</span><span>槽位 {{ result.max_positions }}</span><span>排序：{{ valueName(result.ranking_value) }} · {{ result.rank_order === 'desc' ? '高到低' : '低到高' }}</span><span v-if="result.fitness_rank_weight" class="result-badge">适配性权重 {{ Math.round(result.fitness_rank_weight * 100) }}%</span></div>
+            <div class="backtest-summary"><span class="result-badge">{{ result.single_security_mode ? '单股策略' : result.universe === 'all' ? '沪深全部品种' : result.universe.toUpperCase() }}</span><span>{{ result.start_date }} → {{ result.end_date }}</span><span>{{ result.bars }} 个交易日</span><span>{{ result.processed }} / {{ result.total_candidates }} 个标的已处理</span><span>槽位 {{ result.max_positions }}</span><span v-if="result.ranking_value">排序：{{ valueName(result.ranking_value) }} · {{ result.rank_order === 'desc' ? '高到低' : '低到高' }}</span><span v-if="result.fitness_rank_weight" class="result-badge">适配性权重 {{ Math.round(result.fitness_rank_weight * 100) }}%</span></div>
             <aside class="portfolio-assumptions" data-testid="portfolio-assumptions" aria-label="回测口径与限制">
               <strong>回测口径与限制</strong>
               <span>价格口径：{{ resultPriceBasis === 'raw' ? '未复权原始日线（raw）' : resultPriceBasis }}</span>

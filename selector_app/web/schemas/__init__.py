@@ -12,6 +12,7 @@ from ._shared import (
 from .backtest import BacktestRequest
 from .condition import ConditionResearchRequest
 from .factor import FactorAttributionRequest, FactorTestRequest
+from .individual_research import IndividualResearchRequest
 from .instrument import (
     InstrumentLabCheckRequest,
     InstrumentLabCondition,
@@ -75,6 +76,7 @@ __all__ = [
     "InstrumentLabCondition",
     "InstrumentLabInstrument",
     "InstrumentLabValuesRequest",
+    "IndividualResearchRequest",
     "JobCreatedResponse",
     "LocalImportRequest",
     "MarketRefreshRequest",

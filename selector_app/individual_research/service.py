@@ -1,0 +1,1080 @@
+"""Single-security swing labels, condition mining, and staged exit optimization."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+from collections.abc import Callable, Mapping, Sequence
+from datetime import date
+from typing import cast
+
+import numpy as np
+import pandas as pd
+
+from selector_app.backtest.models import BacktestConfig
+from selector_app.backtest.service import BacktestService, PreparedBacktest
+from selector_app.condition_research.mining import MinedCondition, mine_binary_conditions
+from selector_app.condition_research.models import rule_to_dict
+from selector_app.market_data.adapter import MarketDataAdapter
+from selector_app.market_data.models import MarketCode, StockRef
+from selector_app.portfolio_backtest.models import (
+    SINGLE_SECURITY_RANKING_VALUE,
+    PortfolioBacktestConfig,
+    PortfolioBacktestReport,
+)
+from selector_app.portfolio_backtest.service import PortfolioBacktestService
+from selector_app.screening.jobs import TaskCancelledError
+from selector_app.screening.models import ScreenCondition
+from selector_app.screening.rules import RuleGroup
+from selector_app.strategy_discovery.models import DiscoveryRequest
+from selector_app.strategy_discovery.service import StrategyDiscoveryService
+from selector_app.swing_research.combinations import split_trading_days
+from selector_app.swing_research.labels import bar_labels
+from selector_app.swing_research.segments import SwingSegment, split_swings
+from selector_app.web.schemas import PortfolioBacktestRequest
+
+from .metrics import candidate_quality
+from .models import IndividualResearchConfig
+
+ProgressCallback = Callable[[int, int], None]
+AbortCheck = Callable[[], bool]
+
+
+class IndividualStockResearchService:
+    """Run all stages for one symbol, keeping the final holdout untouched."""
+
+    def __init__(
+        self,
+        *,
+        adapter: MarketDataAdapter,
+        backtest_service: BacktestService,
+        portfolio_service: PortfolioBacktestService,
+        strategy_service: StrategyDiscoveryService,
+    ) -> None:
+        self._adapter = adapter
+        self._backtest_service = backtest_service
+        self._portfolio_service = portfolio_service
+        self._strategy_service = strategy_service
+
+    def run(
+        self,
+        config: IndividualResearchConfig,
+        progress_callback: ProgressCallback | None = None,
+        abort_check: AbortCheck | None = None,
+    ) -> dict[str, object]:
+        ref = self._adapter.stock_ref("", config.market, config.code)
+        if getattr(ref, "instrument_type", "stock") != "stock":
+            raise ValueError("个股研究只支持股票行情")
+        self._check_cancelled(abort_check)
+        self._report(progress_callback, 2, "准备行情", "读取单股日线和指标")
+
+        prepared = self._prepare(config, ref)
+        dates, features, labels, signal_values, segments = self._research_window(prepared, config)
+        split_slices, split_metadata = split_trading_days(dates, config.horizon)
+        split_metadata["method"] = "按交易日顺序固定切分 60/20/20，并在预测窗口边界清除前视样本"
+        split_metadata["holdout_policy"] = "留出段只复核最终风险候选，不参与条件或风险参数排序"
+        windows = _split_windows(dates, split_slices)
+        if any(window is None for window in windows.values()):
+            raise ValueError("当前日期范围不足以进行训练、验证、留出三段研究；请扩大历史区间")
+
+        segmentation = _segmentation_summary(segments, config)
+        self._report(progress_callback, 10, "识别波段", "生成上涨/下跌启动标签")
+        self._check_cancelled(abort_check)
+
+        candidates_by_side = self._mine_conditions(
+            config,
+            features,
+            labels,
+            signal_values,
+            split_slices["train"],
+        )
+        buy_candidates = candidates_by_side["buy"]
+        sell_candidates = candidates_by_side["sell"]
+        self._report(progress_callback, 20, "发现买卖条件", "训练段候选已生成")
+        if not buy_candidates or not sell_candidates:
+            return self._empty_result(
+                config,
+                ref,
+                prepared.data_fingerprint,
+                segmentation,
+                split_metadata,
+                _public_conditions(candidates_by_side),
+                "训练段没有足够的上涨/下跌样本，无法组成完整买卖规则；扩大日期区间或更换搜索指标后重试。",
+                trading_days=len(dates),
+            )
+
+        pairs = _rule_pairs(buy_candidates, sell_candidates)
+        train_window = cast(dict[str, date], windows["train"])
+        validation_window = cast(dict[str, date], windows["validation"])
+        rule_candidates: list[dict[str, object]] = []
+        total_pairs = len(pairs)
+        for index, (pair_id, buy, sell) in enumerate(pairs, start=1):
+            self._check_cancelled(abort_check)
+            buy_rule = buy["rule"]
+            sell_rule = sell["rule"]
+            assert isinstance(buy_rule, RuleGroup)
+            assert isinstance(sell_rule, RuleGroup)
+            train_metrics = self._backtest_metrics(
+                config,
+                ref,
+                buy_rule,
+                sell_rule,
+                train_window["start"],
+                train_window["end"],
+            )
+            validation_metrics = self._backtest_metrics(
+                config,
+                ref,
+                buy_rule,
+                sell_rule,
+                validation_window["start"],
+                validation_window["end"],
+            )
+            rule_candidates.append(
+                {
+                    "candidate_id": pair_id,
+                    "buy": _public_rule_candidate(buy),
+                    "sell": _public_rule_candidate(sell),
+                    "buy_rule": rule_to_dict(buy_rule),
+                    "sell_rule": rule_to_dict(sell_rule),
+                    "train": train_metrics,
+                    "validation": validation_metrics,
+                }
+            )
+            self._report(
+                progress_callback,
+                20 + int(25 * index / max(1, total_pairs)),
+                "验证买卖条件",
+                f"已验证 {index} / {total_pairs} 组规则",
+            )
+
+        rule_by_sharpe = _rank_candidates(rule_candidates, "sharpe")
+        rule_by_return = _rank_candidates(rule_candidates, "annual_return")
+        selected_rule_pairs = _unique_candidates(
+            [*rule_by_sharpe[:3], *rule_by_return[:3]], key="candidate_id"
+        )
+        if not selected_rule_pairs:
+            return self._empty_result(
+                config,
+                ref,
+                prepared.data_fingerprint,
+                segmentation,
+                split_metadata,
+                _public_conditions(candidates_by_side),
+                "买卖规则候选没有可计算的验证绩效。",
+                trading_days=len(dates),
+                rule_candidates=rule_candidates,
+            )
+
+        risk_candidates: list[dict[str, object]] = []
+        risk_data_fingerprints: set[str] = set()
+        for pair_index, pair in enumerate(selected_rule_pairs, start=1):
+            self._check_cancelled(abort_check)
+            pair_id = str(pair["candidate_id"])
+            buy_rule = _parse_rule(pair.get("buy_rule"))
+            sell_rule = _parse_rule(pair.get("sell_rule"))
+            if buy_rule is None or sell_rule is None:
+                continue
+            request_payload = self._risk_base_payload(config, buy_rule, sell_rule)
+            discovery_request = self._risk_discovery_request(
+                request_payload,
+                config,
+                windows,
+                seed=_stable_seed(config, pair_id),
+            )
+            try:
+                result = self._strategy_service.run(
+                    discovery_request,
+                    progress_callback=self._risk_progress(
+                        progress_callback,
+                        pair_index,
+                        len(selected_rule_pairs),
+                        pair_id,
+                    ),
+                    abort_check=abort_check,
+                )
+            except (RuntimeError, ValueError) as exc:
+                if abort_check is not None and abort_check():
+                    raise TaskCancelledError("个股研究已取消") from exc
+                risk_candidates.append(
+                    {
+                        "candidate_id": pair_id,
+                        "condition_candidate_id": pair_id,
+                        "error": str(exc),
+                        "config": request_payload,
+                        "metrics": {},
+                    }
+                )
+                continue
+            risk_fingerprint = result.get("data_fingerprint")
+            if isinstance(risk_fingerprint, str) and risk_fingerprint:
+                risk_data_fingerprints.add(risk_fingerprint)
+            for board in ("results_by_sharpe", "results_by_return"):
+                for raw_candidate in _mapping_sequence(result.get(board)):
+                    risk_candidates.append(_individual_risk_candidate(raw_candidate, pair))
+
+        if len(risk_data_fingerprints) > 1:
+            raise ValueError("本地行情在不同买卖规则寻优之间发生变化，请重新运行个股研究")
+
+        unique_risk_candidates = _unique_candidates(risk_candidates, key="candidate_hash")
+        ranked_sharpe = _rank_candidates(unique_risk_candidates, "sharpe")[:10]
+        ranked_return = _rank_candidates(unique_risk_candidates, "annual_return")[:10]
+        final_holdout = _unique_candidates([*ranked_sharpe, *ranked_return], key="candidate_hash")
+        holdout_window = cast(dict[str, date], windows["holdout"])
+        final_by_hash: dict[str, dict[str, object]] = {}
+        total_holdout = len(final_holdout)
+        for index, candidate in enumerate(final_holdout, start=1):
+            self._check_cancelled(abort_check)
+            candidate_config = candidate.get("config")
+            if not isinstance(candidate_config, Mapping):
+                continue
+            try:
+                holdout_metrics = self._backtest_candidate_metrics(
+                    candidate_config,
+                    holdout_window["start"],
+                    holdout_window["end"],
+                )
+            except (TypeError, ValueError) as exc:
+                holdout_metrics = {"error": str(exc), "closed_trades": 0}
+            raw_metrics = candidate.get("metrics")
+            metrics = dict(raw_metrics) if isinstance(raw_metrics, Mapping) else {}
+            metrics["holdout"] = holdout_metrics
+            candidate["metrics"] = metrics
+            validation = metrics.get("validation")
+            final_validation_metrics = validation if isinstance(validation, Mapping) else {}
+            candidate["quality"] = dict(
+                candidate_quality(
+                    _trade_count(final_validation_metrics),
+                    _trade_count(holdout_metrics),
+                    _number(final_validation_metrics.get("max_drawdown")),
+                )
+            )
+            final_by_hash[str(candidate.get("candidate_hash") or candidate.get("candidate_id"))] = (
+                candidate
+            )
+            self._report(
+                progress_callback,
+                88 + int(11 * index / max(1, total_holdout)),
+                "留出段复核",
+                f"已复核 {index} / {total_holdout} 组最终候选",
+            )
+
+        def final_board(entries: Sequence[dict[str, object]]) -> list[dict[str, object]]:
+            return [
+                final_by_hash.get(
+                    str(item.get("candidate_hash") or item.get("candidate_id")),
+                    item,
+                )
+                for item in entries
+            ]
+
+        data_fingerprint = _fingerprint_many(
+            prepared.data_fingerprint,
+            sorted(risk_data_fingerprints),
+        )
+        final_result: dict[str, object] = {
+            "market": config.market,
+            "code": config.code,
+            "name": ref.name or config.name,
+            "start_date": config.start_date.isoformat(),
+            "end_date": config.end_date.isoformat(),
+            "date_range": {
+                "start": config.start_date.isoformat(),
+                "end": config.end_date.isoformat(),
+                "days": len(dates),
+            },
+            "single_security_mode": True,
+            "segmentation": segmentation,
+            "split_metadata": split_metadata,
+            "condition_candidates": _public_conditions(candidates_by_side),
+            "rule_candidates": {
+                "results_by_sharpe": rule_by_sharpe[:10],
+                "results_by_return": rule_by_return[:10],
+                "evaluated_pairs": len(rule_candidates),
+            },
+            "results_by_sharpe": final_board(ranked_sharpe),
+            "results_by_return": final_board(ranked_return),
+            "candidate_count": len(unique_risk_candidates),
+            "risk_errors": [
+                str(item["error"]) for item in risk_candidates if isinstance(item.get("error"), str)
+            ],
+            "risk_rule_sets": [str(item["candidate_id"]) for item in selected_rule_pairs],
+            "risk_trials_per_rule_set": config.risk_trials,
+            "searched_value_ids": list(config.value_ids),
+            "searched_signal_ids": list(config.signal_ids),
+            "data_fingerprint": data_fingerprint,
+            "configuration_fingerprint": _configuration_fingerprint(config),
+            "limitations": [
+                "个股条件依据单只股票的历史时间序列挖掘，不代表可泛化到其他股票。",
+                "留出表现只复核最终候选，仍是历史模拟结果。",
+            ],
+        }
+        if not unique_risk_candidates:
+            failures = final_result["risk_errors"]
+            detail = str(failures[0]) if isinstance(failures, list) and failures else ""
+            final_result["reason"] = (
+                f"没有可计算的退出风控候选：{detail}"
+                if detail
+                else "没有可计算的退出风控候选；可扩大历史区间或放宽指标范围。"
+            )
+        self._report(progress_callback, 100, "完成", "个股研究完成")
+        return final_result
+
+    def _prepare(self, config: IndividualResearchConfig, ref: StockRef) -> PreparedBacktest:
+        signals_rule = (
+            RuleGroup(signals=config.signal_ids, combine_mode="any") if config.signal_ids else None
+        )
+        backtest_config = BacktestConfig(
+            market=config.market,
+            code=config.code,
+            vipdoc_path="",
+            buy_rule=signals_rule,
+            always_in_market=True,
+            close_at_end=True,
+            start_date=config.start_date,
+            end_date=config.end_date,
+            initial_cash=config.initial_cash,
+            commission=config.commission,
+            min_commission=config.min_commission,
+            stamp_tax=config.stamp_tax,
+            slippage=config.slippage,
+            execution=config.execution,
+            position_mode=config.position_mode,
+            fixed_size=config.fixed_size,
+            instrument_type="stock",
+            board=ref.board,
+        )
+        return self._backtest_service.prepare_for_ref(
+            backtest_config,
+            ref,
+            feature_ids=config.value_ids,
+        )
+
+    def _research_window(
+        self,
+        prepared: PreparedBacktest,
+        config: IndividualResearchConfig,
+    ) -> tuple[
+        np.ndarray,
+        pd.DataFrame,
+        dict[str, np.ndarray],
+        dict[str, np.ndarray],
+        list[SwingSegment],
+    ]:
+        frame = prepared.frame
+        frame_dates = pd.to_datetime(frame["date"], errors="coerce").dt.date
+        start_rows = np.flatnonzero((frame_dates >= config.start_date).to_numpy())
+        end_rows = np.flatnonzero((frame_dates <= config.end_date).to_numpy())
+        if not start_rows.size or not end_rows.size:
+            raise ValueError("所选股票在研究区间内没有日线数据")
+        window_start = int(start_rows[0])
+        window_end = int(end_rows[-1]) + 1
+        if window_start >= window_end:
+            raise ValueError("所选股票在研究区间内没有连续可用日线")
+        warm_start = max(0, window_start - config.atr_window * 3 - 10)
+        calculation_frame = frame.iloc[warm_start:window_end].reset_index(drop=True)
+        segments = split_swings(
+            calculation_frame,
+            reversal_multiple=config.reversal_multiple,
+            atr_window=config.atr_window,
+            include_pending=False,
+        )
+        labels_all = bar_labels(
+            calculation_frame,
+            segments,
+            min_bars=config.min_bars,
+            horizon=config.horizon,
+        )
+        offset = window_start - warm_start
+        length = window_end - window_start
+        labels = {
+            label: np.asarray(values[offset : offset + length], dtype=float)
+            for label, values in labels_all.items()
+        }
+        features = prepared.feature_values.iloc[window_start:window_end].reset_index(drop=True)
+        features = features[
+            ["date", *[value for value in config.value_ids if value in features.columns]]
+        ]
+        if len(features) != length:
+            raise ValueError("指标数据与行情日期无法对齐，请重试")
+        signal_values: dict[str, np.ndarray] = {}
+        for signal_id in config.signal_ids:
+            formula_id, _, signal_name = signal_id.partition(".")
+            formula_result = prepared.formula_results.get(formula_id)
+            values = formula_result.signals.get(signal_name) if formula_result is not None else None
+            if values is None:
+                continue
+            signal_values[signal_id] = np.asarray(values, dtype=bool)[window_start:window_end]
+        dates = pd.to_datetime(features["date"], errors="coerce").to_numpy()
+        return dates, features.drop(columns=["date"]), labels, signal_values, segments
+
+    def _mine_conditions(
+        self,
+        config: IndividualResearchConfig,
+        features: pd.DataFrame,
+        labels: Mapping[str, np.ndarray],
+        signals: Mapping[str, np.ndarray],
+        train_slice: slice,
+    ) -> dict[str, list[dict[str, object]]]:
+        result: dict[str, list[dict[str, object]]] = {"buy": [], "sell": []}
+        for side, label_id in (("buy", "up_onset_ahead"), ("sell", "down_onset_ahead")):
+            outcomes = labels[label_id][train_slice]
+            side_features = features.iloc[train_slice].reset_index(drop=True)
+            valid = np.isfinite(outcomes)
+            if int(valid.sum()) < 5:
+                continue
+            x = side_features.loc[valid].reset_index(drop=True)
+            y = outcomes[valid] > 0.5
+            row_indices = np.flatnonzero(valid)
+            groups = (row_indices // max(1, config.horizon)).astype(str)
+            previous = side_features.shift(1).iloc[valid].reset_index(drop=True)
+            mined = mine_binary_conditions(
+                x,
+                y,
+                [config.symbol] * len(y),
+                sample_groups=groups,
+                min_support=5,
+                min_instruments=1,
+                limit=config.candidate_limit * 4,
+                permutations=0,
+                duplicate_correlation=0.9,
+                previous_features=previous,
+            )
+            candidates = [
+                _condition_candidate(side, index, item) for index, item in enumerate(mined, start=1)
+            ]
+            baseline_rate = float(np.mean(y)) if len(y) else 0.0
+            for signal_id, signal_values in signals.items():
+                signal_train = np.asarray(signal_values[train_slice], dtype=bool)[valid]
+                support = int(signal_train.sum())
+                if support < 5 or support == len(y) or baseline_rate <= 0 or baseline_rate >= 1:
+                    continue
+                outcome_rate = float(np.mean(y[signal_train]))
+                if outcome_rate <= baseline_rate:
+                    continue
+                rule = RuleGroup(signals=(signal_id,), combine_mode="all")
+                candidates.append(
+                    {
+                        "candidate_id": f"{side}-signal-{signal_id}",
+                        "side": side,
+                        "kind": "signal",
+                        "display": signal_id,
+                        "support_count": support,
+                        "outcome_rate": outcome_rate,
+                        "baseline_rate": baseline_rate,
+                        "lift": outcome_rate / baseline_rate,
+                        "rule": rule,
+                    }
+                )
+            candidates.sort(
+                key=lambda item: (
+                    -float(cast(float, item["lift"])),
+                    -int(cast(int, item["support_count"])),
+                    str(item["display"]),
+                )
+            )
+            seen: set[str] = set()
+            for candidate in candidates:
+                signature = _rule_signature(cast(RuleGroup, candidate["rule"]))
+                if signature in seen:
+                    continue
+                seen.add(signature)
+                result[side].append(candidate)
+                if len(result[side]) >= config.candidate_limit:
+                    break
+        return result
+
+    def _backtest_metrics(
+        self,
+        config: IndividualResearchConfig,
+        ref: StockRef,
+        buy_rule: RuleGroup,
+        sell_rule: RuleGroup,
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, object]:
+        report = self._portfolio_service.run_stock(
+            ref,
+            _portfolio_config(config, buy_rule, sell_rule, start_date, end_date),
+        )
+        return _report_metrics(report)
+
+    def _risk_base_payload(
+        self,
+        config: IndividualResearchConfig,
+        buy_rule: RuleGroup,
+        sell_rule: RuleGroup,
+    ) -> dict[str, object]:
+        payload = {
+            "vipdoc_path": "",
+            "universe": "codes",
+            "codes": [f"{config.market}:{config.code}"],
+            "instrument_types": ["stock"],
+            "boards": [],
+            "selected_signals": [],
+            "combine_mode": "all",
+            "minimum_matches": None,
+            "buy_rule": rule_to_dict(buy_rule),
+            "ranking_value": None,
+            "single_security_mode": True,
+            "rank_order": "desc",
+            "max_positions": 1,
+            "rebalance_frequency": "daily",
+            "formula_text": None,
+            "formula_parameters": {},
+            "sell_signal": None,
+            "stop_loss_pct": None,
+            "take_profit_pct": None,
+            "take_profit_mode": "pct",
+            "take_profit_atr_multiplier": None,
+            "take_profit_cooldown_days": 0,
+            "stop_loss_mode": "pct",
+            "stop_loss_atr_multiplier": None,
+            "stop_loss_cooldown_days": 0,
+            "trailing_stop_pct": None,
+            "trailing_stop_mode": "pct",
+            "trailing_stop_atr_multiplier": None,
+            "trailing_stop_cooldown_days": 0,
+            "atr_period": 14,
+            "sell_value": None,
+            "sell_value_operator": None,
+            "sell_value_threshold": None,
+            "compare_left_value": None,
+            "compare_operator": None,
+            "compare_right_value": None,
+            "sell_rule": rule_to_dict(sell_rule),
+            "date_mode": "custom",
+            "start_date": config.start_date.isoformat(),
+            "end_date": config.end_date.isoformat(),
+            "initial_cash": config.initial_cash,
+            "commission": config.commission,
+            "min_commission": config.min_commission,
+            "stamp_tax": config.stamp_tax,
+            "slippage": config.slippage,
+            "execution": config.execution,
+            "fitness_rank_weight": 0.0,
+            "fitness_min_trades": 5,
+            "fitness_max_drawdown": 0.3,
+            "position_mode": config.position_mode,
+            "fixed_size": config.fixed_size,
+            "exclude_st": False,
+        }
+        return cast(
+            dict[str, object],
+            PortfolioBacktestRequest.model_validate(payload).model_dump(mode="json"),
+        )
+
+    def _risk_discovery_request(
+        self,
+        base_config: Mapping[str, object],
+        config: IndividualResearchConfig,
+        windows: Mapping[str, Mapping[str, date] | None],
+        *,
+        seed: int,
+    ) -> DiscoveryRequest:
+        split_payload: dict[str, dict[str, str]] = {}
+        for phase in ("search", "validation", "holdout"):
+            window = windows.get("train" if phase == "search" else phase)
+            if window is None:
+                raise ValueError(f"{phase} 区间没有足够的交易日")
+            split_payload[phase] = {
+                "start_date": window["start"].isoformat(),
+                "end_date": window["end"].isoformat(),
+            }
+        return DiscoveryRequest(
+            base_config=dict(base_config),
+            splits=split_payload,
+            max_trials=config.risk_trials,
+            timeout_seconds=7_200,
+            validation_candidates=50,
+            holdout_candidates=0,
+            min_trades=0,
+            max_drawdown=None,
+            max_complexity=3,
+            multifidelity_enabled=True,
+            seed=seed,
+            candidate_mode="risk_only",
+        )
+
+    def _backtest_candidate_metrics(
+        self,
+        raw_config: Mapping[str, object],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, object]:
+        payload = dict(raw_config)
+        payload["date_mode"] = "custom"
+        payload["start_date"] = start_date.isoformat()
+        payload["end_date"] = end_date.isoformat()
+        request = PortfolioBacktestRequest.model_validate(payload)
+        config = request.to_config()
+        if not config.codes or len(config.codes) != 1:
+            raise ValueError("候选策略没有绑定到唯一股票")
+        market_code = config.codes[0]
+        market, code = market_code.split(":", 1) if ":" in market_code else ("SH", market_code)
+        ref = self._adapter.stock_ref(config.vipdoc_path, cast(MarketCode, market), code)
+        report = self._portfolio_service.run_stock(ref, config)
+        return _report_metrics(report)
+
+    @staticmethod
+    def _risk_progress(
+        progress_callback: ProgressCallback | None,
+        pair_index: int,
+        pair_count: int,
+        pair_id: str,
+    ) -> Callable[..., None] | None:
+        if progress_callback is None:
+            return None
+
+        def report(
+            current: int, total: int, stage: str, _details: Mapping[str, object] | None = None
+        ) -> None:
+            fraction = min(1.0, max(0.0, current / total if total else 1.0))
+            percent = 45 + int(42 * ((pair_index - 1 + fraction) / max(pair_count, 1)))
+            IndividualStockResearchService._report(
+                progress_callback,
+                percent,
+                "止盈止损寻优",
+                f"规则 {pair_index}/{pair_count} · {pair_id[:8]} · {stage}",
+            )
+
+        return report
+
+    @staticmethod
+    def _report(
+        progress_callback: ProgressCallback | None,
+        percent: int,
+        phase: str,
+        message: str,
+    ) -> None:
+        if progress_callback is None:
+            return
+        from selector_app.screening.jobs import report_progress_detail
+
+        bounded = min(100, max(0, percent))
+        report_progress_detail(
+            progress_callback,
+            {"phase": phase, "phase_label": message, "overall_progress": bounded / 100.0},
+        )
+        progress_callback(bounded, 100)
+
+    @staticmethod
+    def _check_cancelled(abort_check: AbortCheck | None) -> None:
+        if abort_check is not None and abort_check():
+            raise TaskCancelledError("个股研究已取消")
+
+    @staticmethod
+    def _empty_result(
+        config: IndividualResearchConfig,
+        ref: StockRef,
+        data_fingerprint: str,
+        segmentation: Mapping[str, object],
+        split_metadata: Mapping[str, object],
+        condition_candidates: Mapping[str, object],
+        reason: str,
+        *,
+        trading_days: int,
+        rule_candidates: Sequence[Mapping[str, object]] = (),
+    ) -> dict[str, object]:
+        return {
+            "market": config.market,
+            "code": config.code,
+            "name": ref.name or config.name,
+            "start_date": config.start_date.isoformat(),
+            "end_date": config.end_date.isoformat(),
+            "date_range": {
+                "start": config.start_date.isoformat(),
+                "end": config.end_date.isoformat(),
+                "days": trading_days,
+            },
+            "single_security_mode": True,
+            "segmentation": dict(segmentation),
+            "split_metadata": dict(split_metadata),
+            "condition_candidates": dict(condition_candidates),
+            "rule_candidates": {
+                "results_by_sharpe": [],
+                "results_by_return": list(rule_candidates),
+            },
+            "results_by_sharpe": [],
+            "results_by_return": [],
+            "candidate_count": 0,
+            "risk_trials_per_rule_set": config.risk_trials,
+            "data_fingerprint": data_fingerprint,
+            "configuration_fingerprint": _configuration_fingerprint(config),
+            "reason": reason,
+        }
+
+
+def _condition_candidate(side: str, index: int, candidate: MinedCondition) -> dict[str, object]:
+    condition = candidate.condition
+    rule = RuleGroup(conditions=(condition,), combine_mode="all")
+    display = _condition_text(condition)
+    return {
+        "candidate_id": f"{side}-condition-{index}-{_short_hash(display)}",
+        "side": side,
+        "kind": "condition",
+        "display": display,
+        "support_count": candidate.support_count,
+        "outcome_rate": candidate.outcome_rate,
+        "baseline_rate": candidate.baseline_rate,
+        "lift": candidate.lift,
+        "rule": rule,
+    }
+
+
+def _public_conditions(
+    candidates: Mapping[str, Sequence[dict[str, object]]],
+) -> dict[str, list[dict[str, object]]]:
+    return {
+        side: [_public_rule_candidate(candidate) for candidate in items]
+        for side, items in candidates.items()
+    }
+
+
+def _condition_text(condition: ScreenCondition) -> str:
+    symbols = {
+        "gt": ">",
+        "gte": "≥",
+        "lt": "<",
+        "lte": "≤",
+        "cross_up": "上穿",
+        "cross_down": "下穿",
+        "eq": "=",
+        "neq": "≠",
+    }
+    right = condition.right_value if condition.right_value is not None else condition.right_constant
+    return f"{condition.left_value} {symbols.get(condition.operator, condition.operator)} {right}"
+
+
+def _public_rule_candidate(candidate: Mapping[str, object]) -> dict[str, object]:
+    rule = candidate.get("rule")
+    return {key: value for key, value in candidate.items() if key != "rule"} | {
+        "rule": rule_to_dict(rule) if isinstance(rule, RuleGroup) else None
+    }
+
+
+def _individual_risk_candidate(
+    candidate: Mapping[str, object],
+    rule_pair: Mapping[str, object],
+) -> dict[str, object]:
+    raw_metrics = candidate.get("metrics")
+    metrics = dict(raw_metrics) if isinstance(raw_metrics, Mapping) else {}
+    metrics["holdout"] = None
+    config = candidate.get("config")
+    candidate_hash = str(candidate.get("candidate_hash") or "")
+    if not candidate_hash and isinstance(config, Mapping):
+        candidate_hash = _short_hash(
+            json.dumps(config, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        )
+    validation = metrics.get("validation")
+    training = metrics.get("train")
+    data_fingerprint = candidate.get("data_fingerprint")
+    if not isinstance(data_fingerprint, str):
+        data_fingerprint = (
+            validation.get("data_fingerprint") if isinstance(validation, Mapping) else None
+        )
+    if not isinstance(data_fingerprint, str):
+        data_fingerprint = (
+            training.get("data_fingerprint") if isinstance(training, Mapping) else None
+        )
+    return {
+        "candidate_hash": candidate_hash,
+        "candidate_id": f"{rule_pair.get('candidate_id')}:{candidate_hash[:12]}",
+        "condition_candidate_id": rule_pair.get("candidate_id"),
+        "human_readable_rules": candidate.get("human_readable_rules"),
+        "condition_rules": {
+            "buy": rule_pair.get("buy"),
+            "sell": rule_pair.get("sell"),
+        },
+        "config": dict(config) if isinstance(config, Mapping) else {},
+        "train": metrics.get("train"),
+        "validation": metrics.get("validation"),
+        "metrics": metrics,
+        "data_fingerprint": data_fingerprint,
+    }
+
+
+def _rule_signature(rule: RuleGroup) -> str:
+    return json.dumps(rule_to_dict(rule), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _parse_rule(value: object) -> RuleGroup | None:
+    if not isinstance(value, Mapping):
+        return None
+    signals = tuple(str(item) for item in value.get("signals", ()) if isinstance(item, str))
+    conditions: list[ScreenCondition] = []
+    for item in (
+        value.get("conditions", ()) if isinstance(value.get("conditions"), (list, tuple)) else ()
+    ):
+        if not isinstance(item, Mapping):
+            continue
+        operator = str(item.get("operator") or "")
+        left_value = str(item.get("left_value") or "")
+        if not left_value or operator not in {
+            "gt",
+            "gte",
+            "lt",
+            "lte",
+            "eq",
+            "neq",
+            "cross_up",
+            "cross_down",
+        }:
+            continue
+        right_value = item.get("right_value")
+        right_constant = item.get("right_constant")
+        conditions.append(
+            ScreenCondition(
+                left_value=left_value,
+                operator=operator,
+                right_value=str(right_value) if right_value is not None else None,
+                right_constant=float(right_constant)
+                if isinstance(right_constant, (int, float))
+                else None,
+            )
+        )
+    if not signals and not conditions:
+        return None
+    return RuleGroup(
+        signals=signals,
+        conditions=tuple(conditions),
+        combine_mode="any" if value.get("combine_mode") == "any" else "all",
+    )
+
+
+def _rule_pairs(
+    buy_candidates: Sequence[dict[str, object]],
+    sell_candidates: Sequence[dict[str, object]],
+) -> list[tuple[str, dict[str, object], dict[str, object]]]:
+    pairs: list[tuple[str, dict[str, object], dict[str, object]]] = []
+    seen: set[str] = set()
+    for buy in buy_candidates:
+        buy_rule = buy.get("rule")
+        if not isinstance(buy_rule, RuleGroup):
+            continue
+        for sell in sell_candidates:
+            sell_rule = sell.get("rule")
+            if not isinstance(sell_rule, RuleGroup):
+                continue
+            signature = f"{_rule_signature(buy_rule)}|{_rule_signature(sell_rule)}"
+            if signature in seen:
+                continue
+            seen.add(signature)
+            pairs.append((f"rules-{_short_hash(signature)}", buy, sell))
+    return pairs
+
+
+def _portfolio_config(
+    config: IndividualResearchConfig,
+    buy_rule: RuleGroup,
+    sell_rule: RuleGroup,
+    start_date: date,
+    end_date: date,
+) -> PortfolioBacktestConfig:
+    return PortfolioBacktestConfig(
+        vipdoc_path="",
+        universe="codes",
+        codes=(f"{config.market}:{config.code}",),
+        selected_signals=(),
+        combine_mode="all",
+        minimum_matches=None,
+        ranking_value=SINGLE_SECURITY_RANKING_VALUE,
+        max_positions=1,
+        instrument_types=("stock",),
+        boards=(),
+        single_security_mode=True,
+        buy_rule=buy_rule,
+        sell_rule=sell_rule,
+        start_date=start_date,
+        end_date=end_date,
+        initial_cash=config.initial_cash,
+        commission=config.commission,
+        min_commission=config.min_commission,
+        stamp_tax=config.stamp_tax,
+        slippage=config.slippage,
+        execution=config.execution,
+        position_mode=config.position_mode,
+        fixed_size=config.fixed_size,
+        atr_period=14,
+    )
+
+
+def _report_metrics(report: PortfolioBacktestReport) -> dict[str, object]:
+    performance = dict(report.performance)
+    closed_trades = sum(
+        1
+        for trade in report.trades
+        if trade.get("direction") == "SELL" and not bool(trade.get("rejected", False))
+    )
+    return {
+        "total_return": _number(performance.get("total_return")),
+        "annual_return": _number(performance.get("annual_return")),
+        "sharpe": _number(performance.get("sharpe")),
+        "max_drawdown": _number(performance.get("max_drawdown")),
+        "win_rate": _number(performance.get("win_rate")),
+        "payoff_ratio": _number(performance.get("payoff_ratio")),
+        "profit_factor": _number(performance.get("profit_factor")),
+        "total_trades": _integer(performance.get("total_trades"), closed_trades),
+        "closed_trades": closed_trades,
+        "data_fingerprint": report.data_fingerprint,
+    }
+
+
+def _rank_candidates(
+    candidates: Sequence[dict[str, object]],
+    primary: str,
+) -> list[dict[str, object]]:
+    secondary = "annual_return" if primary == "sharpe" else "sharpe"
+
+    def validation_metrics(item: Mapping[str, object]) -> Mapping[str, object]:
+        direct = _mapping(item.get("validation"))
+        if direct:
+            return direct
+        return _mapping(_mapping(item.get("metrics")).get("validation"))
+
+    def sort_key(item: dict[str, object]) -> tuple[bool, float, bool, float, str]:
+        metrics = validation_metrics(item)
+        primary_value = _number(metrics.get(primary))
+        secondary_value = _number(metrics.get(secondary))
+        return (
+            primary_value is None,
+            -(primary_value if primary_value is not None else 0.0),
+            secondary_value is None,
+            -(secondary_value if secondary_value is not None else 0.0),
+            str(item.get("candidate_id") or item.get("candidate_hash") or ""),
+        )
+
+    return sorted(candidates, key=sort_key)
+
+
+def _unique_candidates(
+    candidates: Sequence[dict[str, object]],
+    *,
+    key: str,
+) -> list[dict[str, object]]:
+    result: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for item in candidates:
+        value = str(item.get(key) or "")
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        result.append(item)
+    return result
+
+
+def _split_windows(
+    dates: np.ndarray,
+    slices: Mapping[str, slice],
+) -> dict[str, dict[str, date] | None]:
+    result: dict[str, dict[str, date] | None] = {}
+    for phase in ("train", "validation", "holdout"):
+        current = slices[phase]
+        start = current.start or 0
+        stop = current.stop if current.stop is not None else len(dates)
+        if stop <= start:
+            result[phase] = None
+            continue
+        result[phase] = {
+            "start": pd.Timestamp(dates[start]).date(),
+            "end": pd.Timestamp(dates[stop - 1]).date(),
+        }
+    return result
+
+
+def _segmentation_summary(
+    segments: Sequence[object], config: IndividualResearchConfig
+) -> dict[str, object]:
+    completed = [
+        segment
+        for segment in segments
+        if not bool(getattr(segment, "pending", False))
+        and int(getattr(segment, "duration", 0)) >= config.min_bars
+    ]
+    ups = [segment for segment in completed if getattr(segment, "direction", None) == "up"]
+    downs = [segment for segment in completed if getattr(segment, "direction", None) == "down"]
+    return {
+        "reversal_multiple": config.reversal_multiple,
+        "atr_window": config.atr_window,
+        "min_bars": config.min_bars,
+        "up_segments": len(ups),
+        "down_segments": len(downs),
+        "completed_segments": len(completed),
+        "median_up_amplitude": _median([float(getattr(item, "amplitude", 0.0)) for item in ups]),
+        "median_down_amplitude": _median(
+            [abs(float(getattr(item, "amplitude", 0.0))) for item in downs]
+        ),
+        "median_duration": _median([float(getattr(item, "duration", 0)) for item in completed]),
+    }
+
+
+def _number(value: object) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    result = float(value)
+    return result if math.isfinite(result) else None
+
+
+def _integer(value: object, fallback: int = 0) -> int:
+    number = _number(value)
+    return int(number) if number is not None else fallback
+
+
+def _trade_count(metrics: Mapping[str, object]) -> int:
+    closed = metrics.get("closed_trades")
+    if isinstance(closed, (int, float)) and not isinstance(closed, bool):
+        return max(0, int(closed))
+    return max(0, _integer(metrics.get("total_trades")))
+
+
+def _mapping(value: object) -> Mapping[str, object]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _mapping_sequence(value: object) -> list[Mapping[str, object]]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [item for item in value if isinstance(item, Mapping)]
+
+
+def _median(values: Sequence[float]) -> float | None:
+    return float(np.median(values)) if values else None
+
+
+def _short_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+
+
+def _stable_seed(config: IndividualResearchConfig, pair_id: str) -> int:
+    text = f"{config.market}:{config.code}:{config.start_date}:{config.end_date}:{pair_id}"
+    return int(hashlib.sha256(text.encode("utf-8")).hexdigest()[:8], 16)
+
+
+def _fingerprint_many(base: str, others: Sequence[str]) -> str:
+    return hashlib.sha256("|".join([base, *sorted(others)]).encode("utf-8")).hexdigest()
+
+
+def _configuration_fingerprint(config: IndividualResearchConfig) -> str:
+    payload = {
+        "market": config.market,
+        "code": config.code,
+        "start_date": config.start_date.isoformat(),
+        "end_date": config.end_date.isoformat(),
+        "value_ids": list(config.value_ids),
+        "signal_ids": list(config.signal_ids),
+        "reversal_multiple": config.reversal_multiple,
+        "atr_window": config.atr_window,
+        "min_bars": config.min_bars,
+        "horizon": config.horizon,
+        "candidate_limit": config.candidate_limit,
+        "risk_trials": config.risk_trials,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()
+
+
+__all__ = ["IndividualStockResearchService"]

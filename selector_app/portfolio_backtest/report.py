@@ -250,8 +250,8 @@ class PortfolioReportMixin(_PortfolioServiceState):
             start_date=_date_text(dates[0]),
             end_date=_date_text(dates[-1]),
             max_positions=config.max_positions,
-            ranking_value=config.ranking_value,
-            rank_order=config.rank_order,
+            ranking_value=None if config.single_security_mode else config.ranking_value,
+            rank_order=None if config.single_security_mode else config.rank_order,
             fitness_rank_weight=config.fitness_rank_weight,
             fitness_min_trades=config.fitness_min_trades,
             fitness_max_drawdown=config.fitness_max_drawdown,
@@ -282,6 +282,7 @@ class PortfolioReportMixin(_PortfolioServiceState):
                 if isinstance(simulation.get("current_state"), Mapping)
                 else None
             ),
+            single_security_mode=config.single_security_mode,
         )
 
     @staticmethod
@@ -301,8 +302,8 @@ class PortfolioReportMixin(_PortfolioServiceState):
             start_date=config.start_date.isoformat() if config.start_date else "",
             end_date=config.end_date.isoformat() if config.end_date else "",
             max_positions=config.max_positions,
-            ranking_value=config.ranking_value,
-            rank_order=config.rank_order,
+            ranking_value=None if config.single_security_mode else config.ranking_value,
+            rank_order=None if config.single_security_mode else config.rank_order,
             fitness_rank_weight=config.fitness_rank_weight,
             fitness_min_trades=config.fitness_min_trades,
             fitness_max_drawdown=config.fitness_max_drawdown,
@@ -320,10 +321,11 @@ class PortfolioReportMixin(_PortfolioServiceState):
             excluded_st_count=len(resolved.excluded_st) if resolved is not None else 0,
             today_candidates={
                 "as_of": config.end_date.isoformat() if config.end_date else None,
-                "ranking_value": config.ranking_value,
+                "ranking_value": None if config.single_security_mode else config.ranking_value,
                 "total": 0,
                 "rows": [],
             },
+            single_security_mode=config.single_security_mode,
         )
 
 

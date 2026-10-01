@@ -7,6 +7,7 @@ import type { RuleGroupPayload } from './screen'
 
 export interface PortfolioBacktestPayload {
   universe: PortfolioUniverse
+  single_security_mode?: boolean
   date_mode?: DateRangeMode
   universe_file?: string | null
   codes?: string[] | null
@@ -16,7 +17,7 @@ export interface PortfolioBacktestPayload {
   combine_mode: CombineMode
   minimum_matches: number | null
   buy_rule?: RuleGroupPayload | null
-  ranking_value: string
+  ranking_value: string | null
   rank_order?: PortfolioRankOrder
   max_positions: number
   rebalance_frequency?: PortfolioRebalanceFrequency
@@ -164,7 +165,8 @@ export interface PortfolioBenchmark {
 
 
 export interface PortfolioBacktestResult {
-  universe: Universe
+  universe: PortfolioUniverse
+  single_security_mode?: boolean
   total_candidates: number
   processed: number
   skipped: number
@@ -173,8 +175,8 @@ export interface PortfolioBacktestResult {
   start_date: string
   end_date: string
   max_positions: number
-  ranking_value: string
-  rank_order: PortfolioRankOrder
+  ranking_value: string | null
+  rank_order: PortfolioRankOrder | null
   fitness_rank_weight?: number
   fitness_min_trades?: number
   fitness_max_drawdown?: number

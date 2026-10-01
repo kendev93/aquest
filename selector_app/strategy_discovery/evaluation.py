@@ -208,12 +208,16 @@ def run_validation_pipeline(
 
     valid_by_sharpe = sharpe_leaderboard
     valid_by_return = return_leaderboard
-    holdout_candidates = _unique(
-        [
-            *valid_by_sharpe[: max(1, (request.holdout_candidates + 1) // 2)],
-            *valid_by_return[: max(1, request.holdout_candidates // 2)],
-        ]
-    )[: request.holdout_candidates]
+    holdout_candidates = (
+        _unique(
+            [
+                *valid_by_sharpe[: max(1, (request.holdout_candidates + 1) // 2)],
+                *valid_by_return[: max(1, request.holdout_candidates // 2)],
+            ]
+        )[: request.holdout_candidates]
+        if request.holdout_candidates > 0
+        else []
+    )
     holdout_by_hash: dict[str, Mapping[str, object]] = {}
     holdout_started = time.perf_counter()
     for offset in range(0, len(holdout_candidates), max(1, batch_size)):
@@ -240,7 +244,14 @@ def run_validation_pipeline(
     def finalize(items: Sequence[StrategyCandidate]) -> tuple[StrategyCandidate, ...]:
         result: list[StrategyCandidate] = []
         for candidate in items[:10]:
-            metrics = holdout_by_hash.get(candidate.candidate_hash, {"error": "未执行最终留出"})
+            metrics = holdout_by_hash.get(
+                candidate.candidate_hash,
+                {
+                    "error": "留出由外层统一复核"
+                    if request.holdout_candidates == 0
+                    else "未执行最终留出"
+                },
+            )
             result.append(candidate.with_metrics("holdout", metrics))
         return tuple(result)
 

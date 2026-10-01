@@ -16,6 +16,7 @@ from selector_app.screening.models import ScreenCondition
 from selector_app.screening.rules import RuleGroup
 
 PortfolioUniverse = Literal["all", "sh", "sz", "custom", "codes"]
+SINGLE_SECURITY_RANKING_VALUE = "__single_security__"
 RankOrder = Literal["asc", "desc"]
 RebalanceFrequency = Literal["daily", "weekly", "monthly"]
 ExecutionMode = Literal["next_open", "next_close"]
@@ -84,6 +85,7 @@ class PortfolioBacktestConfig:
     fitness_min_trades: int = 5
     fitness_max_drawdown: float = 0.3
     codes: tuple[str, ...] | None = None
+    single_security_mode: bool = False
     position_mode: PositionMode = "full"
     fixed_size: int | None = None
     #: 打开后把 ST / *ST / 退市标的挡在候选池外。判定只能按**当前名称**做
@@ -126,7 +128,14 @@ class PortfolioBacktestConfig:
                 raise ValueError("minimum_matches 必须在选股条件数量范围内")
         elif not explicit_buy_rule and self.minimum_matches is not None:
             raise ValueError("all/any 模式不应设置 minimum_matches")
-        if not self.ranking_value.strip():
+        if self.single_security_mode:
+            if self.universe != "codes" or self.codes is None or len(self.codes) != 1:
+                raise ValueError("单股模式只能指定一只股票")
+            if self.ranking_value.strip() not in {"", SINGLE_SECURITY_RANKING_VALUE}:
+                raise ValueError("单股模式不使用排序指标")
+            object.__setattr__(self, "ranking_value", SINGLE_SECURITY_RANKING_VALUE)
+            object.__setattr__(self, "max_positions", 1)
+        elif not self.ranking_value.strip():
             raise ValueError("排序指标不能为空")
         if not 1 <= self.max_positions <= 100:
             raise ValueError("持仓槽位数量必须在 1 到 100 之间")
@@ -279,8 +288,8 @@ class PortfolioBacktestReport:
     start_date: str
     end_date: str
     max_positions: int
-    ranking_value: str
-    rank_order: str
+    ranking_value: str | None
+    rank_order: str | None
     fitness_rank_weight: float
     fitness_min_trades: int
     fitness_max_drawdown: float
@@ -317,6 +326,7 @@ class PortfolioBacktestReport:
     current_state: Mapping[str, PortfolioJsonValue] | None = None
     price_basis: Literal["raw"] = PORTFOLIO_BACKTEST_PRICE_BASIS
     limitations: tuple[str, ...] = PORTFOLIO_BACKTEST_LIMITATIONS
+    single_security_mode: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "performance", MappingProxyType(dict(self.performance)))
@@ -335,8 +345,9 @@ class PortfolioBacktestReport:
             "start_date": self.start_date,
             "end_date": self.end_date,
             "max_positions": self.max_positions,
-            "ranking_value": self.ranking_value,
-            "rank_order": self.rank_order,
+            "ranking_value": None if self.single_security_mode else self.ranking_value,
+            "rank_order": None if self.single_security_mode else self.rank_order,
+            **({"single_security_mode": True} if self.single_security_mode else {}),
             "fitness_rank_weight": self.fitness_rank_weight,
             "fitness_min_trades": self.fitness_min_trades,
             "fitness_max_drawdown": self.fitness_max_drawdown,
@@ -344,7 +355,9 @@ class PortfolioBacktestReport:
             "equity_curve": [dict(row) for row in self.equity_curve],
             "trades": [dict(row) for row in self.trades],
             "states": [dict(row) for row in self.states],
-            "ranking_events": [dict(row) for row in self.ranking_events],
+            "ranking_events": []
+            if self.single_security_mode
+            else [dict(row) for row in self.ranking_events],
             "failure_reasons": dict(self.failure_reasons),
             "diagnostic": self.diagnostic,
             "data_fingerprint": self.data_fingerprint,
@@ -355,7 +368,15 @@ class PortfolioBacktestReport:
             "excluded_st_count": self.excluded_st_count,
             "benchmark": dict(self.benchmark) if self.benchmark is not None else None,
             "next_plan": dict(self.next_plan),
-            "today_candidates": dict(self.today_candidates),
+            "today_candidates": (
+                {
+                    "as_of": self.today_candidates.get("as_of"),
+                    "total": 0,
+                    "rows": [],
+                }
+                if self.single_security_mode
+                else dict(self.today_candidates)
+            ),
             "current_state": dict(self.current_state) if self.current_state is not None else None,
             "price_basis": self.price_basis,
             "limitations": list(self.limitations),

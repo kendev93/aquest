@@ -8,6 +8,7 @@ import random
 from collections.abc import Mapping, Sequence
 from typing import Literal, cast
 
+from selector_app.portfolio_backtest.models import SINGLE_SECURITY_RANKING_VALUE
 from selector_app.screening.models import ScreenCondition
 from selector_app.screening.rules import RuleGroup
 
@@ -218,7 +219,11 @@ def _build_random_risk_candidate(
         # ensures the exact serialized buy/sell rules and ranking survive replay.
         buy_rule=RuleGroup(signals=("risk_optimization.fixed_buy_placeholder",)),
         sell_rule=RuleGroup(signals=("risk_optimization.fixed_sell_placeholder",)),
-        ranking_value=str(base_config.get("ranking_value") or ""),
+        ranking_value=(
+            SINGLE_SECURITY_RANKING_VALUE
+            if base_config.get("single_security_mode") is True
+            else str(base_config.get("ranking_value") or "")
+        ),
         rank_order=cast(_RankOrder, rank_order),
         max_positions=max(1, _as_int(base_config.get("max_positions"), 5)),
         rebalance_frequency=cast(_RebalanceFrequency, frequency),
@@ -240,7 +245,14 @@ def _build_random_risk_candidate(
             percentage is not None or atr_multiplier is not None
             for _, percentage, atr_multiplier, _ in risk.values()
         ),
-        human_readable_rules="固定买卖规则与排序；" + "、".join(risk_summary),
+        human_readable_rules=(
+            (
+                "单股买卖规则；"
+                if base_config.get("single_security_mode") is True
+                else "固定买卖规则与排序；"
+            )
+            + "、".join(risk_summary)
+        ),
         preserve_base_config=True,
     )
 

@@ -147,7 +147,5 @@ class ScanReport:
             "skip_reasons": dict(self.skip_reasons),
         }
         if self.ranking_value is not None:
-            summary.update(
-                {"ranking_value": self.ranking_value, "rank_order": self.rank_order}
-            )
+            summary.update({"ranking_value": self.ranking_value, "rank_order": self.rank_order})
         return summary

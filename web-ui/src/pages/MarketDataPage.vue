@@ -876,6 +876,7 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
                 <a class="nav-link" href="/portfolio-backtest">组合回测</a>
         <a class="nav-link" href="/strategy-lab">策略实验室</a>
         <a class="nav-link" href="/condition-research">买卖条件研究</a>
+        <a class="nav-link" href="/individual-research">个股研究</a>
         <a class="nav-link" href="/strategy-fitness">策略适配性</a>
         <a class="nav-link active" href="/market-data" aria-current="page">本地行情</a>
         <a class="nav-link" href="/swing-research">波段研究</a>

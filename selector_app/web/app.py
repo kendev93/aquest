@@ -20,6 +20,7 @@ from selector_app.factor_test.service import FactorTestService
 from selector_app.history_compare.service import HistoryCompareService
 from selector_app.indicators.cache import IndicatorCache
 from selector_app.indicators.precompute import IndicatorPrecomputeService
+from selector_app.individual_research.service import IndividualStockResearchService
 from selector_app.instrument_lab.service import InstrumentLabService
 from selector_app.market_data.adapter import (
     BatchMarketDataAdapter,
@@ -87,6 +88,7 @@ def create_app(
     strategy_discovery_service: StrategyDiscoveryService | object | None = None,
     strategy_job_backend: StrategyJobBackend | object | None = None,
     strategy_fitness_service: StrategyFitnessService | object | None = None,
+    individual_research_service: IndividualStockResearchService | object | None = None,
     swing_research_service: SwingResearchService | object | None = None,
     factor_test_service: FactorTestService | object | None = None,
     factor_attribution_service: FactorAttributionService | object | None = None,
@@ -191,6 +193,17 @@ def create_app(
             portfolio_service=selected_portfolio_service,
             store=selected_store,
             market_data_adapter=selected_adapter,
+        ),
+    )
+    selected_individual_research_service = cast(
+        IndividualStockResearchService,
+        individual_research_service
+        if individual_research_service is not None
+        else IndividualStockResearchService(
+            adapter=selected_adapter,
+            backtest_service=selected_backtest_service,
+            portfolio_service=selected_portfolio_service,
+            strategy_service=selected_discovery_service,
         ),
     )
     selected_strategy_backend = cast(
@@ -302,6 +315,7 @@ def create_app(
     app.state.condition_research_service = selected_condition_research_service
     app.state.portfolio_backtest_service = selected_portfolio_service
     app.state.strategy_discovery_service = selected_discovery_service
+    app.state.individual_research_service = selected_individual_research_service
     app.state.strategy_job_backend = selected_strategy_backend
     app.state.strategy_job_store = selected_strategy_job_store
     app.state.strategy_worker_token = _resolve_strategy_worker_token(strategy_worker_token)
@@ -343,6 +357,7 @@ def create_app(
     )
     app.state.market_data_store = selected_store
     app.state.market_data_adapter = selected_adapter
+    app.state.backtest_service = selected_backtest_service
     app.state.indicator_cache = selected_indicator_cache
     app.state.indicator_precompute_service = selected_precompute_service
     app.state.local_market_data_service = local_market_data_service or LocalMarketDataService(

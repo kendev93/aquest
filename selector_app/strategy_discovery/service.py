@@ -49,7 +49,12 @@ from .resources import (
     validate_discovery_workers,
 )
 from .search import BatchEvaluator, HybridSearchEngine
-from .snapshot import DiscoverySnapshot, DiscoverySnapshotCache, build_discovery_snapshot
+from .snapshot import (
+    DiscoverySnapshot,
+    DiscoverySnapshotCache,
+    _request_refs,
+    build_discovery_snapshot,
+)
 
 ProgressCallback = Callable[[int, int, str, Mapping[str, object]], None]
 DISCOVERY_EVALUATION_WORKERS = resolve_discovery_workers()
@@ -443,10 +448,11 @@ class StrategyDiscoveryService:
             tuple[InstrumentBoard, ...] | None,
             _string_tuple(base.get("boards")),
         )
-        refs = self._market_data_adapter.list_stock_refs(
-            str(base.get("vipdoc_path") or ""),
-            universe,
-            universe_file,
+        refs = _request_refs(
+            self._market_data_adapter,
+            base,
+            universe=universe,
+            universe_file=universe_file,
             instrument_types=instrument_types,
             boards=boards,
         )

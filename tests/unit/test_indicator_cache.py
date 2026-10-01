@@ -324,7 +324,8 @@ def test_precompute_service_materializes_all_builtin_formulas(tmp_path: Path, ba
 
     assert report.total_candidates == 1
     assert report.processed == 1
-    assert report.computed == 5
+    formula_count = len(FORMULA_REGISTRY.all_formula_ids())
+    assert report.computed == formula_count
     assert report.errors == 0
 
     cold_cache = IndicatorCache(store)
@@ -334,7 +335,7 @@ def test_precompute_service_materializes_all_builtin_formulas(tmp_path: Path, ba
         market="SH",
         code="600000",
     )
-    assert cold_cache.metrics()["persistent_hits"] == 5
+    assert cold_cache.metrics()["persistent_hits"] == formula_count
     assert cold_cache.metrics()["computed"] == 0
 
 
@@ -524,6 +525,7 @@ def test_precompute_stitches_yearly_segments_into_full_history(
             return frame
 
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb", indicator_cache_backend=backend)
+    store.replace_local_bars("SH", "600000", "stock", frame)
     report = IndicatorPrecomputeService(WindowAdapter(), IndicatorCache(store)).run(
         vipdoc_path=str(tmp_path), years=4, warmup_bars=268
     )
@@ -622,7 +624,7 @@ def test_cache_can_preload_persistent_rows_for_multiple_symbols(
         ids,
     )
 
-    assert reader.metrics()["persistent_hits"] == 10
+    assert reader.metrics()["persistent_hits"] == len(ids) * 2
 
 
 def test_backtest_report_records_the_input_data_fingerprint() -> None:

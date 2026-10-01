@@ -44,6 +44,7 @@ def install_routers(app: FastAPI) -> None:
     from .routers.factor_test import router as factor_test_router
     from .routers.formula_screen import router as formula_screen_router
     from .routers.history_compare import router as history_compare_router
+    from .routers.individual_research import router as individual_research_router
     from .routers.instrument_lab import router as instrument_lab_router
     from .routers.jobs import router as jobs_router
     from .routers.market_data import router as market_data_router
@@ -67,6 +68,7 @@ def install_routers(app: FastAPI) -> None:
     app.include_router(factor_attribution_router, prefix="/api/v1")
     app.include_router(history_compare_router, prefix="/api/v1")
     app.include_router(instrument_lab_router, prefix="/api/v1")
+    app.include_router(individual_research_router, prefix="/api/v1")
     app.include_router(portfolio_backtest_router, prefix="/api/v1")
     app.include_router(research_presets_router, prefix="/api/v1")
     app.include_router(screen_presets_router, prefix="/api/v1")

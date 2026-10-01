@@ -136,17 +136,18 @@ def assign_validation_objective_scores(
     for candidates in by_side.values():
         component_scores: dict[int, list[float]] = {id(candidate): [] for candidate in candidates}
         for metric in ("win_rate", "median_sharpe", "median_annual_return"):
+
+            def sort_key(item: MutableMapping[str, object]) -> tuple[bool, float, str]:
+                value = _candidate_validation_metric(item, metric)
+                return (
+                    value is None,
+                    -(value if value is not None else 0.0),
+                    str(item.get("candidate_id") or ""),
+                )
+
             ranked = sorted(
                 candidates,
-                key=lambda item: (
-                    _candidate_validation_metric(item, metric) is None,
-                    -(
-                        _candidate_validation_metric(item, metric)
-                        if _candidate_validation_metric(item, metric) is not None
-                        else 0.0
-                    ),
-                    str(item.get("candidate_id") or ""),
-                ),
+                key=sort_key,
             )
             index = 0
             while index < len(ranked):

@@ -8,6 +8,7 @@ import FactorTestPage from './pages/FactorTestPage.vue'
 import FormulaScreenPage from './pages/FormulaScreenPage.vue'
 import HistoryComparePage from './pages/HistoryComparePage.vue'
 import InstrumentLabPage from './pages/InstrumentLabPage.vue'
+import IndividualResearchPage from './pages/IndividualResearchPage.vue'
 import MarketDataPage from './pages/MarketDataPage.vue'
 import PortfolioBacktestPage from './pages/PortfolioBacktestPage.vue'
 import StrategyDiscoveryPage from './pages/StrategyDiscoveryPage.vue'
@@ -33,6 +34,7 @@ const routeComponent = computed(() => {
   if (pathname.startsWith('/factor-attribution')) return FactorAttributionPage
   if (pathname.startsWith('/history-compare')) return HistoryComparePage
   if (pathname.startsWith('/instrument-lab')) return InstrumentLabPage
+  if (pathname.startsWith('/individual-research')) return IndividualResearchPage
   if (pathname.startsWith('/candidate-library')) return CandidateLibraryPage
   if (pathname.startsWith('/user-manual')) return UserManualPage
   return FormulaScreenPage

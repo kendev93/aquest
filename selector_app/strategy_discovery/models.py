@@ -145,8 +145,8 @@ class DiscoveryRequest:
             raise ValueError("搜索超时时间必须在 1 到 86400 秒之间")
         if not 1 <= self.validation_candidates <= 200:
             raise ValueError("验证候选数量必须在 1 到 200 之间")
-        if not 1 <= self.holdout_candidates <= 50:
-            raise ValueError("最终留出候选数量必须在 1 到 50 之间")
+        if not 0 <= self.holdout_candidates <= 50:
+            raise ValueError("最终留出候选数量必须在 0 到 50 之间")
         if not 0 <= self.min_trades <= 10_000:
             raise ValueError("最少交易数必须在 0 到 10000 之间")
         if self.max_drawdown is not None and not 0 <= self.max_drawdown <= 1:

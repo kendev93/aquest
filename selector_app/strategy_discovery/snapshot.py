@@ -26,12 +26,16 @@ from selector_app.market_data.adapter import (
     BatchMarketDataAdapter,
     DuckDbMarketDataAdapter,
     MarketDataAdapter,
+    parse_universe_code,
 )
 from selector_app.market_data.day_format import classify_board
 from selector_app.market_data.models import InstrumentBoard, InstrumentType, MarketCode, StockRef
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.portfolio_backtest.context import SortedDateIndex
-from selector_app.portfolio_backtest.models import PortfolioBacktestConfig
+from selector_app.portfolio_backtest.models import (
+    SINGLE_SECURITY_RANKING_VALUE,
+    PortfolioBacktestConfig,
+)
 from selector_app.portfolio_backtest.service import (
     PortfolioBacktestService,
     _atr_series,
@@ -317,6 +321,11 @@ class DiscoverySnapshot:
             )
             window_dates = np.asarray(dates[left:right])
             context_values = {value_id: base.values[value_id][left:right] for value_id in value_ids}
+            if config.single_security_mode:
+                context_values[SINGLE_SECURITY_RANKING_VALUE] = np.zeros(
+                    right - left,
+                    dtype=float,
+                )
             context_signals = {
                 signal_id: base.signals[signal_id][left:right] for signal_id in signal_ids
             }
@@ -524,10 +533,11 @@ def _discovery_snapshot_cache_key(
     boards = _string_tuple(base.get("boards"))
     universe = str(base.get("universe") or "all")
     universe_file = str(base["universe_file"]) if base.get("universe_file") else None
-    refs = adapter.list_stock_refs(
-        str(base.get("vipdoc_path") or ""),
-        universe,
-        universe_file,
+    refs = _request_refs(
+        adapter,
+        base,
+        universe=universe,
+        universe_file=universe_file,
         instrument_types=cast(tuple[InstrumentType, ...] | None, instrument_types),
         boards=cast(tuple[InstrumentBoard, ...] | None, boards),
     )
@@ -668,10 +678,11 @@ def _write_snapshot(
         adapter
         or DuckDbMarketDataAdapter(DuckDbMarketDataStore(store.database_path, read_only=True)),
     )
-    refs = selected_adapter.list_stock_refs(
-        str(base.get("vipdoc_path") or ""),
-        str(base.get("universe") or "all"),
-        str(base["universe_file"]) if base.get("universe_file") else None,
+    refs = _request_refs(
+        selected_adapter,
+        base,
+        universe=str(base.get("universe") or "all"),
+        universe_file=str(base["universe_file"]) if base.get("universe_file") else None,
         instrument_types=cast(tuple[InstrumentType, ...] | None, instrument_types),
         boards=cast(tuple[InstrumentBoard, ...] | None, boards),
     )
@@ -1012,7 +1023,7 @@ def _evaluate_required_mask(
 
 
 def _value_ids(config: PortfolioBacktestConfig) -> tuple[str, ...]:
-    values = [config.ranking_value]
+    values = [] if config.single_security_mode else [config.ranking_value]
     for rule in (config.buy_rule, config.sell_rule):
         if rule is None:
             continue
@@ -1021,6 +1032,48 @@ def _value_ids(config: PortfolioBacktestConfig) -> tuple[str, ...]:
             if condition.right_value is not None:
                 values.append(condition.right_value)
     return tuple(dict.fromkeys(values))
+
+
+def _request_refs(
+    adapter: MarketDataAdapter,
+    base: Mapping[str, object],
+    *,
+    universe: str,
+    universe_file: str | None,
+    instrument_types: tuple[InstrumentType, ...] | None,
+    boards: tuple[InstrumentBoard, ...] | None,
+) -> list[StockRef]:
+    vipdoc_path = str(base.get("vipdoc_path") or "")
+    if universe != "codes":
+        return adapter.list_stock_refs(
+            vipdoc_path,
+            universe,
+            universe_file,
+            instrument_types=instrument_types,
+            boards=boards,
+        )
+
+    raw_codes = base.get("codes")
+    if not isinstance(raw_codes, (list, tuple)):
+        raise ValueError("指定标的范围必须填写代码")
+    refs: list[StockRef] = []
+    seen: set[tuple[str, str]] = set()
+    for raw in raw_codes:
+        parsed = parse_universe_code(str(raw))
+        if parsed is None:
+            continue
+        market, code = parsed
+        key = (market, code)
+        if key in seen:
+            continue
+        seen.add(key)
+        ref = adapter.stock_ref(vipdoc_path, market, code)
+        if instrument_types and ref.instrument_type not in instrument_types:
+            continue
+        if boards and ref.board not in boards:
+            continue
+        refs.append(ref)
+    return refs
 
 
 def _context_config_cache_key(config: PortfolioBacktestConfig) -> str:

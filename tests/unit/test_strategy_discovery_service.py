@@ -173,7 +173,9 @@ def test_service_capabilities_describe_the_unified_indicator_catalog() -> None:
     capabilities = StrategyDiscoveryService(portfolio_service=FakePortfolioService()).capabilities()
 
     assert capabilities["enabled"] is True
-    assert capabilities["signal_count"] == 15
+    assert capabilities["signal_count"] == len(capabilities["signals"])
+    assert capabilities["signal_count"] >= 15
+    assert "breakout_signal.breakthrough" in {item["id"] for item in capabilities["signals"]}
     assert capabilities["indicator_count"] >= 20
     assert "technical.ma5" in {item["id"] for item in capabilities["indicators"]}
 

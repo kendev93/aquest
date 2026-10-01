@@ -292,6 +292,7 @@ def extract_metrics(
         "strategy_fitness": _fitness_metrics,
         "condition_research": _condition_metrics,
         "swing_research": _swing_metrics,
+        "individual_research": _individual_research_metrics,
         "factor_test": _factor_metrics,
     }
     handler = handlers.get(backtest_type)
@@ -407,6 +408,27 @@ def _single_stock_metrics(
                 source=metric.source,
                 note="单股回测没有基准对照",
             )
+    return values, notes, native
+
+
+def _individual_research_metrics(
+    result: Mapping[str, object],
+) -> tuple[dict[str, float | None], dict[str, str], list[CompareMetric]]:
+    """Compare the best validation candidate while keeping its source explicit."""
+
+    candidates = _rows(result.get("results_by_sharpe"))
+    metrics = _mapping(candidates[0].get("metrics")) if candidates else {}
+    validation = _mapping(metrics.get("validation"))
+    proxy = {
+        "code": result.get("code"),
+        "name": result.get("name"),
+        "bars": _mapping(result.get("date_range")).get("days"),
+        "performance": dict(validation),
+    }
+    values, notes, native = _single_stock_metrics(proxy)
+    notes = dict(notes)
+    notes["_source"] = "个股研究 · 夏普榜验证段最佳候选"
+    notes[METRIC_SIGNIFICANT_COUNT] = "个股研究不做横截面显著性检验"
     return values, notes, native
 
 
@@ -744,6 +766,12 @@ def _subtitle(backtest_type: str, result: Mapping[str, object]) -> str:
         if name and code:
             return f"{name}（{code}）"
         return name or code or "单只标的"
+    if backtest_type == "individual_research":
+        name = _text(result.get("name"))
+        code = _text(result.get("code"))
+        candidate_count = _number(result.get("candidate_count")) or 0
+        symbol = f"{name}（{code}）" if name and code else name or code or "单只股票"
+        return f"{symbol} · {int(candidate_count)} 个候选"
     if backtest_type == "strategy_fitness":
         results = _rows(result.get("results"))
         passed = sum(1 for item in results if item.get("passed") is True)

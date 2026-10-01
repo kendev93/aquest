@@ -827,7 +827,7 @@ describe('PortfolioBacktestPage', () => {
     }))
   })
 
-  it('optimizes exit risk, applies a validation candidate and verifies ordinary replay', async () => {
+  it('applies exit risk without replacing the current date range with the validation range', async () => {
     const wrapper = mount(PortfolioBacktestPage)
     await flushPromises()
     await wrapper.get('[data-testid="portfolio-risk-search-level"]').setValue(2000)
@@ -846,25 +846,23 @@ describe('PortfolioBacktestPage', () => {
     expect(wrapper.get('[data-testid="portfolio-risk-candidates"]').text()).toContain('22.00%')
 
     await wrapper.get('[data-testid="portfolio-risk-apply-risk-candidate-1"]').trigger('click')
-    expect((wrapper.get('[data-testid="portfolio-date-mode"]').element as HTMLSelectElement).value).toBe('custom')
-    expect((wrapper.get('[data-testid="portfolio-start"]').element as HTMLInputElement).value).toBe('2024-03-01')
-    expect((wrapper.get('[data-testid="portfolio-end"]').element as HTMLInputElement).value).toBe('2024-03-31')
+    expect((wrapper.get('[data-testid="portfolio-date-mode"]').element as HTMLSelectElement).value).toBe('recent5')
+    expect(wrapper.find('[data-testid="portfolio-start"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="portfolio-end"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="portfolio-message"]').text()).toContain('保留当前区间')
 
     await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')
     await flushPromises()
 
     expect(portfolioApi.createPortfolioBacktest).toHaveBeenCalledWith(expect.objectContaining({
-      date_mode: 'custom',
-      start_date: '2024-03-01',
-      end_date: '2024-03-31',
+      date_mode: 'recent5',
+      start_date: null,
+      end_date: null,
       trailing_stop_pct: 0.05,
       stop_loss_pct: 0.08,
       take_profit_pct: 0.2,
     }))
-    const replay = wrapper.find('[data-testid="portfolio-replay-comparison"]')
-    expect(replay.exists(), wrapper.get('[data-testid="portfolio-message"]').text()).toBe(true)
-    expect(replay.text()).toContain('绩效摘要：一致')
-    expect(replay.text()).toContain('数据指纹：一致')
+    expect(wrapper.find('[data-testid="portfolio-replay-comparison"]').exists()).toBe(false)
   })
 
   it('blocks candidate application after fixed strategy settings change', async () => {

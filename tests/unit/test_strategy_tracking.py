@@ -231,6 +231,34 @@ def test_observations_start_on_the_launch_day() -> None:
     assert rows[0].equity == 105000.0
 
 
+def test_individual_strategy_tracking_replays_one_code_without_ranking(tmp_path: Any) -> None:
+    request = {
+        "universe": "codes",
+        "codes": ["SH:600000"],
+        "single_security_mode": True,
+        "ranking_value": None,
+        "max_positions": 1,
+        "buy_rule": {"signals": ["indicator_one.main_force_entry"]},
+        "sell_rule": {"signals": ["indicator_one.wash"]},
+        "stop_loss_pct": 0.1,
+        "date_mode": "custom",
+        "start_date": "2026-02-02",
+        "end_date": "2026-03-02",
+    }
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.save_strategy("single-1", name="SH 600000 个股策略", request=request, summary={})
+    runner = _FakeRunner(_report(tuple(100_000.0 + index * 1000 for index in range(10))))
+    service = _service(tmp_path, runner)
+
+    service.launch("single-1")
+
+    assert runner.configs
+    assert all(config.single_security_mode is True for config in runner.configs)
+    assert all(config.codes == ("SH:600000",) for config in runner.configs)
+    assert all(config.max_positions == 1 for config in runner.configs)
+    assert all(config.ranking_value == "__single_security__" for config in runner.configs)
+
+
 def test_observation_drawdown_is_measured_from_the_launch_day() -> None:
     """回撤要从观察段自己起算，不能用全历史的——那会把研究段的坑算进来。"""
 

@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from selector_app.market_data.adapter import parse_universe_code
 from selector_app.market_data.models import InstrumentBoard, InstrumentType
 from selector_app.portfolio_backtest.models import (
+    SINGLE_SECURITY_RANKING_VALUE,
     PortfolioBacktestConfig,
     PortfolioUniverse,
 )
@@ -41,9 +42,10 @@ class PortfolioBacktestRequest(BaseModel):
     combine_mode: Literal["all", "any", "at_least"] = "any"
     minimum_matches: int | None = Field(default=None, ge=1, le=32)
     buy_rule: RuleGroupRequest | None = None
-    ranking_value: str = Field(min_length=1, max_length=128)
+    ranking_value: str | None = Field(default=None, max_length=128)
     rank_order: Literal["asc", "desc"] = "desc"
     max_positions: int = Field(default=5, ge=1, le=100)
+    single_security_mode: bool = False
     rebalance_frequency: Literal["daily", "weekly", "monthly"] = "daily"
     formula_text: str | None = Field(default=None, max_length=20_000)
     formula_parameters: dict[str, float] = Field(default_factory=dict, max_length=32)
@@ -97,6 +99,14 @@ class PortfolioBacktestRequest(BaseModel):
             signal_ids.extend(self.sell_rule.signals)
         validate_formula_signals(self.formula_text, signal_ids, self.formula_parameters)
         validate_instrument_scope(self.universe, self.instrument_types, self.boards)
+        if self.single_security_mode:
+            if self.universe != "codes" or self.codes is None or len(self.codes) != 1:
+                raise ValueError("单股模式只能指定一只股票")
+            if self.ranking_value is not None and self.ranking_value.strip():
+                raise ValueError("单股模式不使用排序指标")
+            self.max_positions = 1
+        elif self.ranking_value is None or not self.ranking_value.strip():
+            raise ValueError("排序指标不能为空")
         conditions = [
             *(self.buy_rule.required_conditions if self.buy_rule is not None else []),
             *(self.buy_rule.conditions if self.buy_rule is not None else []),
@@ -106,7 +116,11 @@ class PortfolioBacktestRequest(BaseModel):
         validate_formula_values(
             self.formula_text,
             [
-                self.ranking_value,
+                *(
+                    [self.ranking_value]
+                    if not self.single_security_mode and self.ranking_value is not None
+                    else []
+                ),
                 *([self.sell_value] if self.sell_value is not None else []),
                 *([self.compare_left_value] if self.compare_left_value is not None else []),
                 *([self.compare_right_value] if self.compare_right_value is not None else []),
@@ -205,9 +219,14 @@ class PortfolioBacktestRequest(BaseModel):
             combine_mode=self.combine_mode,
             minimum_matches=self.minimum_matches,
             buy_rule=self.buy_rule.to_model() if self.buy_rule is not None else None,
-            ranking_value=self.ranking_value,
+            ranking_value=(
+                SINGLE_SECURITY_RANKING_VALUE
+                if self.single_security_mode
+                else str(self.ranking_value or "")
+            ),
             rank_order=self.rank_order,
             max_positions=self.max_positions,
+            single_security_mode=self.single_security_mode,
             rebalance_frequency=self.rebalance_frequency,
             formula_text=self.formula_text,
             formula_parameters=self.formula_parameters,

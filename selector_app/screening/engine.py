@@ -281,8 +281,7 @@ def _evaluate_frame(
             if value_id is not None
         }
         if any(
-            not formula_results[formula_id].sufficient_data
-            for formula_id in required_formula_ids
+            not formula_results[formula_id].sufficient_data for formula_id in required_formula_ids
         ):
             return ScanOutcome(skipped_reason="数据不足")
         condition_masks = [

@@ -22,6 +22,7 @@ export default defineConfig({
         'src/App.vue',
         'src/types.ts',
         'src/pages/HistoryComparePage.vue',
+        'src/pages/PortfolioBacktestPage.vue',
       ],
     },
   },

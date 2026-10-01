@@ -7,7 +7,9 @@ export type BacktestHistoryType =
   | 'strategy_fitness'
   | 'condition_research'
   | 'swing_research'
+  | 'individual_research'
   | 'factor_test'
+  | 'factor_attribution'
 
 
 export interface BacktestHistorySummary {

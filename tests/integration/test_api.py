@@ -10,6 +10,7 @@ import pandas as pd
 from fastapi.testclient import TestClient
 
 from selector_app.adapters.online_market_sync import OnlineProviderUnavailable
+from selector_app.formulas.registry import FORMULA_REGISTRY
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.portfolio_backtest.models import PortfolioBacktestConfig
 from selector_app.screening.jobs import TaskCancelledError
@@ -159,12 +160,13 @@ def test_indicator_cache_status_and_manual_precompute_job(tmp_path: Path) -> Non
     assert initial.json()["data"]["persistent"]["total_entries"] == 0
     assert state["status"] == "completed"
     assert state["description"] == "指标预计算"
-    assert state["result"]["computed"] == 5
+    formula_count = len(FORMULA_REGISTRY.all_formula_ids())
+    assert state["result"]["computed"] == formula_count
     assert warmed.status_code == 200
     # 预计算按年分段直接计算后落库，不走查询路径，因此 lookups 保持为 0。
     assert warmed.json()["data"]["lookups"] == 0
     assert warmed.json()["data"]["p95_ms"] >= warmed.json()["data"]["p50_ms"] >= 0
-    assert warmed.json()["data"]["persistent"]["total_entries"] == 5
+    assert warmed.json()["data"]["persistent"]["total_entries"] == formula_count
 
 
 def test_invalid_signal_is_rejected_without_stack_trace(tmp_path: Path) -> None:

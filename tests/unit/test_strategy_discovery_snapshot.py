@@ -279,6 +279,103 @@ def test_snapshot_replay_matches_ordinary_portfolio_backtest(tmp_path: Path) -> 
     assert snapshot_metadata["snapshot_bytes"] > 0
 
 
+def test_single_security_snapshot_needs_no_ranking_and_matches_direct_run(tmp_path: Path) -> None:
+    dates = pd.date_range("2024-01-01", periods=120, freq="D")
+    close = 10.0 + np.linspace(0.0, 2.0, len(dates)) + np.sin(np.arange(len(dates)) / 3.0)
+    store_path = tmp_path / "market.duckdb"
+    store = DuckDbMarketDataStore(store_path)
+    store.replace_local_bars(
+        "SH",
+        "600000",
+        "stock",
+        pd.DataFrame(
+            {
+                "date": dates,
+                "open": close - 0.1,
+                "high": close + 0.4,
+                "low": close - 0.4,
+                "close": close,
+                "volume": np.full(len(dates), 100_000.0),
+                "amount": close * 100_000.0,
+                "bar_status": "completed",
+            }
+        ),
+    )
+    payload = {
+        "universe": "codes",
+        "codes": ["SH:600000"],
+        "single_security_mode": True,
+        "ranking_value": None,
+        "selected_signals": [],
+        "combine_mode": "all",
+        "minimum_matches": None,
+        "buy_rule": {
+            "signals": [],
+            "conditions": [
+                {
+                    "left_value": "technical.rsi14",
+                    "operator": "lte",
+                    "right_value": None,
+                    "right_constant": 60.0,
+                }
+            ],
+            "combine_mode": "all",
+            "minimum_matches": None,
+        },
+        "sell_rule": {
+            "signals": [],
+            "conditions": [
+                {
+                    "left_value": "technical.rsi14",
+                    "operator": "gte",
+                    "right_value": None,
+                    "right_constant": 60.0,
+                }
+            ],
+            "combine_mode": "all",
+            "minimum_matches": None,
+        },
+        "max_positions": 1,
+        "start_date": "2024-01-01",
+        "end_date": "2024-04-29",
+        "date_mode": "custom",
+    }
+    base = PortfolioBacktestRequest.model_validate(payload).model_dump(mode="json")
+    experiment = DiscoveryRequest(
+        base_config=base,
+        splits={
+            "search": {"start_date": "2024-01-01", "end_date": "2024-02-15"},
+            "validation": {"start_date": "2024-02-16", "end_date": "2024-03-15"},
+            "holdout": {"start_date": "2024-03-16", "end_date": "2024-04-29"},
+        },
+        candidate_mode="risk_only",
+        max_trials=1,
+        min_trades=0,
+        max_drawdown=None,
+        multifidelity_enabled=False,
+    )
+    config = PortfolioBacktestRequest.model_validate(payload).to_config()
+    portfolio = PortfolioBacktestService(adapter=DuckDbMarketDataAdapter(store))
+
+    ordinary = portfolio.run(config)
+    with build_discovery_snapshot(store, experiment) as snapshot:
+        contexts = snapshot.contexts_for_config(config, reuse_candidate_contexts=True)
+        prepared = portfolio.run_prepared_contexts(
+            config,
+            contexts,
+            total_candidates=snapshot.total_candidates,
+            include_details=False,
+        )
+
+    assert len(contexts) == 1
+    assert config.single_security_mode is True
+    assert config.ranking_value in contexts[0].values
+    assert np.all(contexts[0].values[config.ranking_value] == 0)
+    assert prepared.performance == ordinary.performance
+    assert prepared.trades == ordinary.trades
+    assert prepared.single_security_mode is True
+
+
 def test_snapshot_reuses_persistent_indicator_cache_on_repeated_builds(tmp_path: Path) -> None:
     dates = pd.date_range("2024-01-01", periods=80, freq="D")
     close = np.linspace(10.0, 14.0, len(dates))

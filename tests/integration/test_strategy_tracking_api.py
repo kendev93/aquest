@@ -68,6 +68,49 @@ def test_the_list_keeps_trades_out_but_the_detail_brings_them(tmp_path: Path) ->
         assert "today_candidates" in detail
 
 
+def test_saved_individual_strategy_preserves_its_one_code_no_rank_request(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    request = {
+        "universe": "codes",
+        "codes": ["SH:600000"],
+        "single_security_mode": True,
+        "ranking_value": None,
+        "selected_signals": [],
+        "combine_mode": "all",
+        "minimum_matches": None,
+        "buy_rule": {
+            "signals": ["indicator_one.main_force_entry"],
+            "conditions": [],
+            "combine_mode": "all",
+        },
+        "sell_rule": {
+            "signals": ["indicator_one.wash"],
+            "conditions": [],
+            "combine_mode": "all",
+        },
+        "stop_loss_pct": 0.1,
+        "max_positions": 1,
+        "date_mode": "custom",
+        "start_date": "2026-02-02",
+        "end_date": "2026-03-02",
+    }
+    with TestClient(create_app(market_data_store=store)) as client:
+        created = client.post(
+            "/api/v1/strategies",
+            json={"name": "SH 600000 个股策略", "request": request, "summary": {}},
+        )
+        assert created.status_code == 201, created.text
+        strategy_id = created.json()["data"]["strategy_id"]
+        detail = client.get(f"/api/v1/strategies/{strategy_id}")
+
+    assert detail.status_code == 200
+    saved_request = detail.json()["data"]["request"]
+    assert saved_request["single_security_mode"] is True
+    assert saved_request["codes"] == ["SH:600000"]
+    assert saved_request["ranking_value"] is None
+    assert saved_request["max_positions"] == 1
+
+
 def test_tracking_trade_endpoint_filters_and_pages_actual_fills(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     with TestClient(create_app(market_data_store=store)) as client:

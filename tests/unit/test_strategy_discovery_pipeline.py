@@ -167,3 +167,24 @@ def test_validation_pipeline_deduplicates_each_top_ten_by_its_own_metric() -> No
         ),
         reverse=True,
     )
+
+
+def test_validation_pipeline_can_defer_holdout_until_global_shortlist_is_known() -> None:
+    request = replace(_request(), holdout_candidates=0)
+    candidates = [build_random_candidate(request, __import__("random").Random(5))]
+    search = SearchResult(
+        results_by_sharpe=tuple(candidates),
+        results_by_return=tuple(candidates),
+        search_metadata={"evaluated_trials": 1},
+    )
+    evaluated_splits: list[str] = []
+
+    def evaluate(_candidate, split: str):
+        evaluated_splits.append(split)
+        return {"annual_return": 0.1, "sharpe": 0.5, "total_trades": 10, "max_drawdown": 0.1}
+
+    result = run_validation_pipeline(search, request, evaluate)
+
+    assert "validation" in evaluated_splits
+    assert "holdout" not in evaluated_splits
+    assert result.validation_metadata["holdout_candidate_count"] == 0

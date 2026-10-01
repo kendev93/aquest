@@ -84,9 +84,11 @@ describe('strategy discovery API', () => {
       .mockResolvedValueOnce(new Response('<html>bad gateway</html>', { status: 502 }))
       .mockResolvedValueOnce(new Response('<html>bad gateway</html>', { status: 502 }))
       .mockResolvedValueOnce(new Response('<html>bad gateway</html>', { status: 502 }))
+      .mockResolvedValueOnce(new Response('<html>bad gateway</html>', { status: 502 }))
+      .mockResolvedValueOnce(new Response('<html>bad gateway</html>', { status: 502 }))
 
     await expect(fetchStrategyDiscoveryHistory()).rejects.toThrow('HTTP 502')
-    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(fetchMock).toHaveBeenCalledTimes(5)
 
     fetchMock.mockReset()
     fetchMock.mockResolvedValueOnce(new Response('<html>bad gateway</html>', { status: 502 }))

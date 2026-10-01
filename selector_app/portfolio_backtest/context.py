@@ -27,7 +27,7 @@ from selector_app.market_data.scope import InstrumentScope
 from selector_app.screening.engine import evaluate_rule_group
 from selector_app.screening.rules import RuleGroup
 
-from .models import PortfolioBacktestConfig
+from .models import SINGLE_SECURITY_RANKING_VALUE, PortfolioBacktestConfig
 from .risk import _atr_series
 from .state import PortfolioMarketDataAdapter, _PortfolioServiceState
 
@@ -135,7 +135,7 @@ class PortfolioContextMixin(_PortfolioServiceState):
 
     @staticmethod
     def _value_ids(config: PortfolioBacktestConfig) -> list[str]:
-        values = [config.ranking_value]
+        values = [] if config.single_security_mode else [config.ranking_value]
         for rule in (config.buy_rule, config.sell_rule):
             if rule is None:
                 continue
@@ -212,6 +212,8 @@ class PortfolioContextMixin(_PortfolioServiceState):
             value_id: self._value_array(results, value_id, parsed is not None)[indices].copy()
             for value_id in self._value_ids(config)
         }
+        if config.single_security_mode:
+            value_arrays[SINGLE_SECURITY_RANKING_VALUE] = np.zeros(len(indices), dtype=float)
         if config.buy_rule is None:
             raise ValueError("买入规则不能为空")
         buy_mask = evaluate_rule_group(

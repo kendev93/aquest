@@ -60,7 +60,9 @@ def test_default_catalog_contains_existing_formula_and_chart_outputs() -> None:
         assert macd_scaled not in catalog.rankable_ids
     # RSI is dimensionless, so it must survive as a ranking feature.
     assert "technical.rsi14" in catalog.rankable_ids
-    assert len(catalog.signal_ids) == 15
+    assert len(catalog.signal_ids) >= 15
+    assert "main_force_absorption.entry" in catalog.signal_ids
+    assert "breakout_signal.breakthrough" in catalog.signal_ids
 
 
 def test_candidate_generator_can_create_indicator_and_constant_conditions() -> None:

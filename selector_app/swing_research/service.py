@@ -256,9 +256,7 @@ class SwingResearchService:
         unordered_component_pairs = PAIR_COMPONENT_LIMIT * (PAIR_COMPONENT_LIMIT - 1) // 2
         max_pairs_per_label = unordered_component_pairs * len(PAIR_OPERATION_NAMES)
         max_pair_scores = len(tradeable_labels) * max_pairs_per_label
-        max_holdout_scores = (
-            len(tradeable_labels) * HOLDOUT_FINALIST_LIMIT_PER_LABEL * 2
-        )
+        max_holdout_scores = len(tradeable_labels) * HOLDOUT_FINALIST_LIMIT_PER_LABEL * 2
         permutation_score_weight = max(
             1.0, _SCORE_PAIR_WEIGHT * (1 + resolved.permutations) * ref_total
         )
@@ -315,9 +313,7 @@ class SwingResearchService:
             label_cells = len(resolved.labels) * len(rows) * calendar.size
             required = (panel_cells + label_cells) * cell
             pair_scratch_cells = (
-                (PAIR_COMPONENT_LIMIT + 24) * len(rows) * calendar.size
-                if tradeable_labels
-                else 0
+                (PAIR_COMPONENT_LIMIT + 24) * len(rows) * calendar.size if tradeable_labels else 0
             )
             _check_panel_budget(required, memory_extra_bytes=pair_scratch_cells * cell)
             panel = np.memmap(path, dtype=PANEL_DTYPE, mode="w+", shape=shape)
@@ -371,9 +367,7 @@ class SwingResearchService:
                         permutation_score_weight, "正在逐日横截面打分"
                     ),
                 )
-                validation_scores = annotate_significance(
-                    validation_scores, alpha=resolved.alpha
-                )
+                validation_scores = annotate_significance(validation_scores, alpha=resolved.alpha)
 
                 combination_scores, combination_counts, pair_holdout_scores = (
                     self._score_combinations(
@@ -424,9 +418,7 @@ class SwingResearchService:
                                 alpha=resolved.alpha,
                             )
                         )
-                        score_progress(
-                            permutation_score_weight, "正在留出段复核单指标候选"
-                        )
+                        score_progress(permutation_score_weight, "正在留出段复核单指标候选")
             finally:
                 del panel
 
@@ -436,9 +428,7 @@ class SwingResearchService:
         significant_count = sum(1 for item in ordered if item.significant)
         all_holdout_scores = single_holdout_scores + pair_holdout_scores
         annotated_holdout = annotate_significance(all_holdout_scores, alpha=resolved.alpha)
-        holdout_by_key = {
-            (item.value_id, item.label): item for item in annotated_holdout
-        }
+        holdout_by_key = {(item.value_id, item.label): item for item in annotated_holdout}
         comparison_candidates = _build_comparison_board(
             tradeable_labels,
             single_finalists_by_label,
@@ -486,15 +476,11 @@ class SwingResearchService:
                 "comparison_candidates": comparison_candidates,
                 "comparison_summary": {
                     "finalists_per_type_per_label": HOLDOUT_FINALIST_LIMIT_PER_LABEL,
-                    "ranking_basis": (
-                        "训练到验证方向一致优先，其次按验证段 |IC| 与 ICIR 排序"
-                    ),
+                    "ranking_basis": ("训练到验证方向一致优先，其次按验证段 |IC| 与 ICIR 排序"),
                     "validation_q_policy": (
                         "组合全量验证池未做置换检验；单指标验证 q 仅展示，不用于混合排序"
                     ),
-                    "holdout_q_policy": (
-                        "对入围单指标与组合统一做多重检验校正，仅用于复核"
-                    ),
+                    "holdout_q_policy": ("对入围单指标与组合统一做多重检验校正，仅用于复核"),
                     "holdout_usage": "不参与候选筛选或排序",
                 },
                 "combination_scores": combination_scores,
@@ -504,8 +490,7 @@ class SwingResearchService:
                     "candidate_counts": combination_counts,
                     "operations": dict(PAIR_OPERATION_NAMES),
                     "ranking_basis": (
-                        "训练段选组件，训练/验证方向一致优先，"
-                        "再按验证段 |IC| 与 ICIR 排序"
+                        "训练段选组件，训练/验证方向一致优先，再按验证段 |IC| 与 ICIR 排序"
                     ),
                     "holdout_usage": "仅展示验证段前列候选的独立表现，不改变候选排序",
                     "value_scale": "每个交易日先转为横截面分位；分位差、分位比及分位上/下穿",
@@ -693,9 +678,7 @@ class SwingResearchService:
 
         catalog = default_indicator_catalog()
         value_index = {value_id: index for index, value_id in enumerate(value_ids)}
-        label_index: dict[str, int] = {
-            label: index for index, label in enumerate(config.labels)
-        }
+        label_index: dict[str, int] = {label: index for index, label in enumerate(config.labels)}
         candidates: list[dict[str, object]] = []
         holdout_scores: list[IndicatorScore] = []
         counts: dict[str, object] = {}
@@ -934,9 +917,7 @@ def _study_reason(scores: list[IndicatorScore], significant: int) -> str | None:
     )
 
 
-def _metric_number(
-    metric: Mapping[str, object], key: str, *, default: float = 0.0
-) -> float:
+def _metric_number(metric: Mapping[str, object], key: str, *, default: float = 0.0) -> float:
     value = metric.get(key)
     if isinstance(value, (int, float)) and np.isfinite(value):
         return float(value)
