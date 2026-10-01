@@ -31,6 +31,7 @@ import type {
   ValueDefinition,
 } from '../types'
 import type { SignalDefinition } from '../types'
+import { buildIndicatorNameMap, indicatorDisplayName } from '../utils/indicatorNames'
 
 const BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
   { key: 'main', label: '主板' },
@@ -91,6 +92,7 @@ const searchableValues = computed<ValueDefinition[]>(() => (
 const availableSignals = computed<SignalDefinition[]>(() => (
   metadata.value?.indicators.flatMap((indicator) => indicator.signals ?? []) ?? []
 ))
+const indicatorNames = computed(() => buildIndicatorNameMap(metadata.value))
 const dateRange = computed<DateRangeSelection>({
   get: () => ({ mode: form.dateMode, startDate: form.startDate, endDate: form.endDate }),
   set: (value) => {
@@ -379,6 +381,10 @@ function formatSignedPercent(value: number | null | undefined): string {
   return `${sign}${(value * 100).toFixed(2)}%`
 }
 
+function indicatorName(id: string): string {
+  return indicatorDisplayName(indicatorNames.value, id)
+}
+
 function ruleText(candidate: IndividualResearchCandidate, side: 'buy' | 'sell'): string {
   const storedRule = candidate.condition_rules?.[side]
   const nestedRule = storedRule?.rule
@@ -394,7 +400,11 @@ function ruleText(candidate: IndividualResearchCandidate, side: 'buy' | 'sell'):
     : null
   const rule = storedDirectRule ?? legacyNestedRule ?? fallbackRule
   if (!rule) return '—'
-  const signals = Array.isArray(rule.signals) ? rule.signals.filter((item): item is string => typeof item === 'string') : []
+  const signals = Array.isArray(rule.signals)
+    ? rule.signals
+      .filter((item): item is string => typeof item === 'string')
+      .map(indicatorName)
+    : []
   const conditions = Array.isArray(rule.conditions) ? rule.conditions : []
   const operatorSymbols: Record<string, string> = {
     gt: '>',
@@ -412,7 +422,12 @@ function ruleText(candidate: IndividualResearchCandidate, side: 'buy' | 'sell'):
       if (!item || typeof item !== 'object') return []
       const condition = item as Record<string, unknown>
       const operator = String(condition.operator ?? '')
-      return [`${String(condition.left_value ?? '')} ${operatorSymbols[operator] ?? operator} ${String(condition.right_constant ?? condition.right_value ?? '')}`]
+      const left = String(condition.left_value ?? '')
+      const rawRight = condition.right_value
+      const right = typeof rawRight === 'string'
+        ? indicatorName(rawRight)
+        : String(condition.right_constant ?? '')
+      return [`${indicatorName(left)} ${operatorSymbols[operator] ?? operator} ${right}`]
     }),
   ]
   const separator = rule.combine_mode === 'any' ? ' 或 ' : ' 且 '

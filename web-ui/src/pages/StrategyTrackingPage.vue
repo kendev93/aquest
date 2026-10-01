@@ -3,6 +3,7 @@ import PageGuide from '../components/PageGuide.vue'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 
 import TermHint from '../components/TermHint.vue'
+import { fetchMetadata } from '../api/formulaScreen'
 import {
   fetchStrategyTracking,
   getStrategyTracking,
@@ -21,11 +22,15 @@ import type {
   TrackingTradeRow,
   TrackingTradePage,
   TrackingTodayCandidates,
+  FormulaScreenMetadata,
 } from '../types'
+import { buildIndicatorNameMap, indicatorDisplayName } from '../utils/indicatorNames'
 
 type PerformanceKey = keyof SavedStrategyPerformance
 
 const snapshots = ref<StrategyTrackingSnapshot[]>([])
+const metadata = ref<FormulaScreenMetadata | null>(null)
+const indicatorNames = computed(() => buildIndicatorNameMap(metadata.value))
 const loading = ref(false)
 const message = ref('')
 const messageIsError = ref(false)
@@ -191,8 +196,11 @@ function operatorLabel(operator: string): string {
 }
 
 function conditionLabel(condition: TrackingConditionReading): string {
-  const right = condition.right_value || formatNumber(condition.threshold)
-  return `${condition.left_value} ${operatorLabel(condition.operator)} ${right}`
+  const left = indicatorDisplayName(indicatorNames.value, condition.left_value)
+  const right = condition.right_value
+    ? indicatorDisplayName(indicatorNames.value, condition.right_value)
+    : formatNumber(condition.threshold)
+  return `${left} ${operatorLabel(condition.operator)} ${right}`
 }
 
 function conditionValues(condition: TrackingConditionReading): string {
@@ -204,7 +212,7 @@ function conditionValues(condition: TrackingConditionReading): string {
 
 function signalSummary(signals: Array<{ id: string; matched: boolean }>): string {
   return signals.length
-    ? signals.map((signal) => `${signal.id}：${signal.matched ? '满足' : '未满足'}`).join('；')
+    ? signals.map((signal) => `${indicatorDisplayName(indicatorNames.value, signal.id)}：${signal.matched ? '满足' : '未满足'}`).join('；')
     : '未配置独立信号'
 }
 
@@ -289,7 +297,12 @@ function tradeTotal(strategyId: string): number {
   return tradesOf(strategyId)?.total ?? 0
 }
 
-onMounted(load)
+onMounted(() => {
+  void load()
+  void fetchMetadata()
+    .then((value) => { metadata.value = value })
+    .catch(() => undefined)
+})
 onUnmounted(() => {
   if (pollTimer !== null) clearTimeout(pollTimer)
 })

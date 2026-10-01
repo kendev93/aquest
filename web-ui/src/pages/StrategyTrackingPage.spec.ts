@@ -1,10 +1,16 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { StrategyTrackingSnapshot, TrackingTradePage } from '../types'
+import type { FormulaScreenMetadata, StrategyTrackingSnapshot, TrackingTradePage } from '../types'
 import StrategyTrackingPage from './StrategyTrackingPage.vue'
 
 import * as strategiesApi from '../api/savedStrategies'
+import * as formulaApi from '../api/formulaScreen'
+
+vi.mock('../api/formulaScreen', async () => {
+  const actual = await vi.importActual<typeof import('../api/formulaScreen')>('../api/formulaScreen')
+  return { ...actual, fetchMetadata: vi.fn() }
+})
 
 vi.mock('../api/savedStrategies', async () => {
   const actual =
@@ -83,8 +89,38 @@ const offline: StrategyTrackingSnapshot = {
   observation_is_short: true,
 }
 
+const indicatorMetadata: FormulaScreenMetadata = {
+  indicators: [
+    {
+      id: 'technical',
+      display_name: '技术指标',
+      minimum_bars: 1,
+      recommended_bars: 1,
+      signals: [],
+      values: [{ id: 'technical.rsi14', display_name: 'RSI 14', description: '相对强弱指标' }],
+    },
+    {
+      id: 'indicator_one',
+      display_name: '主力清洗',
+      minimum_bars: 1,
+      recommended_bars: 1,
+      signals: [
+        { id: 'indicator_one.distribution', display_name: '出货', description: 'VAR51 上升' },
+        { id: 'indicator_one.main_force_entry', display_name: '主力进场', description: 'VAR5 上升' },
+      ],
+      values: [],
+    },
+  ],
+  combine_modes: [],
+  supported_markets: [],
+  supported_universe: [],
+  periods: [],
+  data_directory_help: '',
+}
+
 describe('StrategyTrackingPage', () => {
   beforeEach(() => {
+    vi.mocked(formulaApi.fetchMetadata).mockReset().mockResolvedValue(indicatorMetadata)
     vi.mocked(strategiesApi.fetchStrategyTracking).mockReset()
     vi.mocked(strategiesApi.getStrategyTracking).mockReset()
     vi.mocked(strategiesApi.getStrategyTrackingTrades).mockReset()
@@ -409,8 +445,11 @@ describe('StrategyTrackingPage', () => {
       expect(state.text()).toContain('600100')
       expect(state.text()).toContain('前值 → 当前值')
       expect(state.text()).toContain('40.00 → 35.00')
+      expect(state.text()).toContain('RSI 14 下穿')
+      expect(state.text()).toContain('出货：未满足')
       expect(candidates.text()).toContain('命中 21 只')
       expect(candidates.text()).toContain('000101')
+      expect(candidates.text()).toContain('主力进场：满足')
       expect(candidates.text()).toContain('28.00 → 31.00')
       expect(wrapper.get('[data-testid="tracking-plan-strategy-1"]').text()).toContain('下一交易日待执行计划')
     })

@@ -201,7 +201,8 @@ describe('SwingResearchPage', () => {
     await flushPromises()
 
     expect(wrapper.get('[data-testid="swing-study-result"]').text()).toContain('1 / 1')
-    expect(wrapper.get('[data-testid="swing-plan-buy"]').text()).toContain('annual_trend24 ≤ -0.2739')
+    expect(wrapper.get('[data-testid="swing-plan-buy"]').text()).toContain('年化趋势斜率 ≤ -0.2739')
+    expect(wrapper.get('[data-testid="swing-plan-buy"]').text()).not.toContain('annual_trend24')
     expect(wrapper.get('[data-testid="swing-plan-ranking"]').text()).toContain('从小到大')
     expect(wrapper.get('[data-testid="swing-score-row"]').text()).toContain('通过检验')
 

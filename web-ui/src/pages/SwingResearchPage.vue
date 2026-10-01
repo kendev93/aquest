@@ -483,12 +483,15 @@ function operatorText(operator: string | null | undefined): string {
   return operator === 'gte' ? '≥' : '≤'
 }
 
-/** 技术面指标用短名，自定义指标用中文名（id 太长也看不懂）。 */
+/** 使用指标库中文名，避免把技术指标 ID 暴露给用户。 */
 function conditionText(template: SwingConditionTemplate): string {
-  const id = template.value_id.startsWith('technical.')
-    ? template.value_id.slice('technical.'.length)
-    : template.display_name
-  return `${id} ${operatorText(template.operator)} ${formatNumber(template.threshold, 4)}`
+  return `${template.display_name} ${operatorText(template.operator)} ${formatNumber(template.threshold, 4)}`
+}
+
+function indicatorName(valueId: string): string {
+  return plan.value?.templates.find((template) => template.value_id === valueId)?.display_name
+    ?? studyResult.value?.scores.find((score) => score.value_id === valueId)?.display_name
+    ?? valueId
 }
 
 function handoffToResearch(): void {
@@ -847,7 +850,7 @@ async function copyPlan(): Promise<void> {
               <div class="swing-plan-card">
                 <span class="swing-plan-title">买入条件</span>
                 <p v-if="plan.buy_rule && plan.buy_rule.conditions.length" class="swing-plan-rule" data-testid="swing-plan-buy">
-                  {{ plan.buy_rule.conditions[0].left_value.replace('technical.', '') }}
+                  {{ indicatorName(plan.buy_rule.conditions[0].left_value) }}
                   {{ operatorText(plan.buy_rule.conditions[0].operator) }}
                   {{ formatNumber(plan.buy_rule.conditions[0].right_constant, 4) }}
                 </p>
@@ -856,7 +859,7 @@ async function copyPlan(): Promise<void> {
               <div class="swing-plan-card">
                 <span class="swing-plan-title">卖出条件</span>
                 <p v-if="plan.sell_rule && plan.sell_rule.conditions.length" class="swing-plan-rule" data-testid="swing-plan-sell">
-                  {{ plan.sell_rule.conditions[0].left_value.replace('technical.', '') }}
+                  {{ indicatorName(plan.sell_rule.conditions[0].left_value) }}
                   {{ operatorText(plan.sell_rule.conditions[0].operator) }}
                   {{ formatNumber(plan.sell_rule.conditions[0].right_constant, 4) }}
                 </p>
@@ -964,7 +967,7 @@ async function copyPlan(): Promise<void> {
                 </thead>
                 <tbody>
                   <tr v-for="score in studyResult.scores" :key="`${score.value_id}-${score.label}`" data-testid="swing-score-row">
-                    <td><strong>{{ score.display_name }}</strong><br><small class="muted-code">{{ score.value_id }}</small></td>
+                    <td><strong :title="score.value_id">{{ score.display_name }}</strong></td>
                     <td>{{ labelName(score.label) }}</td>
                     <td>
                       <span v-if="isTradeable(score.label)" class="swing-tag">可交易</span>

@@ -52,7 +52,33 @@ const metadata: FormulaScreenMetadata = {
     values: [
       { id: 'technical.rsi14', display_name: 'RSI 14', description: 'RSI 指标', rankable: true },
       { id: 'technical.ma5', display_name: 'MA 5', description: '5 日均线', rankable: false },
+      { id: 'technical.macd', display_name: 'MACD', description: 'MACD 指标', rankable: true },
+      { id: 'technical.amount_ratio20', display_name: '成交额比20日', description: '当日成交额与20日均额的比值', rankable: true },
     ],
+  }, {
+    id: 'indicator_one',
+    display_name: '主力清洗',
+    minimum_bars: 33,
+    recommended_bars: 120,
+    signals: [
+      { id: 'indicator_one.main_force_entry', display_name: '主力进场', description: 'VAR5 上升' },
+      { id: 'indicator_one.distribution', display_name: '出货', description: 'VAR51 上升' },
+    ],
+    values: [],
+  }, {
+    id: 'indicator_two',
+    display_name: '庄家顶底',
+    minimum_bars: 34,
+    recommended_bars: 120,
+    signals: [{ id: 'indicator_two.end', display_name: '终', description: '短期线大于 90' }],
+    values: [],
+  }, {
+    id: 'indicator_three',
+    display_name: '准备拉升',
+    minimum_bars: 34,
+    recommended_bars: 120,
+    signals: [{ id: 'indicator_three.end_zone', display_name: '终', description: 'VAR1 > 90' }],
+    values: [],
   }],
   combine_modes: [{ value: 'all', label: '全部满足' }, { value: 'any', label: '任一满足' }, { value: 'at_least', label: '至少满足' }],
   supported_markets: ['SH', 'SZ'],
@@ -199,7 +225,7 @@ describe('IndividualResearchPage', () => {
       horizon: 10,
       risk_trials: 1000,
       candidate_limit: 10,
-      value_ids: ['technical.rsi14', 'technical.ma5'],
+      value_ids: ['technical.rsi14', 'technical.ma5', 'technical.macd', 'technical.amount_ratio20'],
     }))
     expect(page.text()).toContain('SH 600000 个股研究')
     expect(page.text()).toContain('验证段')
@@ -282,6 +308,55 @@ describe('IndividualResearchPage', () => {
 
     expect(page.get('[data-testid="individual-sharpe-0"]').text()).toContain('且')
     expect(page.get('[data-testid="individual-return-0"]').text()).toContain('或')
+  })
+
+  it('shows localized indicator and signal names in discovered buy and sell rules', async () => {
+    vi.mocked(individualApi.createIndividualResearch).mockResolvedValue({ job_id: 'job-localized', status: 'queued' })
+    const localizedCandidate = {
+      ...candidate,
+      condition_rules: {
+        buy: {
+          signals: [
+            'indicator_one.main_force_entry',
+            'indicator_one.distribution',
+            'indicator_two.end',
+            'indicator_three.end_zone',
+          ],
+          conditions: [],
+          combine_mode: 'all',
+        },
+        sell: {
+          signals: [],
+          conditions: [{
+            left_value: 'technical.macd',
+            operator: 'cross_up',
+            right_value: 'technical.amount_ratio20',
+          }],
+          combine_mode: 'all',
+        },
+      },
+    }
+    const localizedResult: IndividualResearchResult = {
+      ...result,
+      results_by_sharpe: [localizedCandidate],
+      results_by_return: [localizedCandidate],
+    }
+    vi.mocked(individualApi.getIndividualResearchJob).mockResolvedValue({
+      job_id: 'job-localized', status: 'completed', progress: 1, total_candidates: 1, total_scanned: 1,
+      errors: 0, skipped: 0, error: null, result: localizedResult, description: '个股研究',
+      phase: 'completed', metadata: {}, cancel_requested: false,
+    })
+
+    const page = mountPage()
+    await flushPromises()
+    await chooseStock(page)
+    await page.get('[data-testid="individual-research-form"]').trigger('submit')
+    await flushPromises()
+
+    expect(page.get('[data-testid="individual-sharpe-0"]').text()).toContain('主力进场 且 出货')
+    expect(page.get('[data-testid="individual-sharpe-0"]').text()).toContain('庄家顶底 · 终（短期线大于 90）')
+    expect(page.get('[data-testid="individual-sharpe-0"]').text()).toContain('准备拉升 · 终（VAR1 > 90）')
+    expect(page.get('[data-testid="individual-sharpe-0"]').text()).toContain('MACD 上穿 成交额比20日')
   })
 
   it('saves the selected single-security candidate without launching tracking', async () => {
