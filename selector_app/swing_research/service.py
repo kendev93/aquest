@@ -253,8 +253,8 @@ class SwingResearchService:
         tradeable_labels = tuple(label for label in resolved.labels if label in TRADEABLE_LABELS)
         validation_score_count = len(value_ids) * len(resolved.labels)
         training_scores = len(value_ids) * len(resolved.labels)
-        component_pairs = PAIR_COMPONENT_LIMIT * (PAIR_COMPONENT_LIMIT - 1)
-        max_pairs_per_label = component_pairs + (component_pairs // 2) * 3
+        unordered_component_pairs = PAIR_COMPONENT_LIMIT * (PAIR_COMPONENT_LIMIT - 1) // 2
+        max_pairs_per_label = unordered_component_pairs * len(PAIR_OPERATION_NAMES)
         max_pair_scores = len(tradeable_labels) * max_pairs_per_label
         max_holdout_scores = (
             len(tradeable_labels) * HOLDOUT_FINALIST_LIMIT_PER_LABEL * 2
@@ -303,6 +303,7 @@ class SwingResearchService:
             return empty
 
         _clear_stale_panels()
+        single_finalists_by_label: dict[str, list[IndicatorScore]] = {}
         with TemporaryDirectory(prefix=PANEL_DIR_PREFIX) as directory:
             path = os.path.join(directory, "panel.dat")
             shape = (len(value_ids), len(rows), calendar.size)
@@ -396,11 +397,15 @@ class SwingResearchService:
                 value_index = {value_id: index for index, value_id in enumerate(value_ids)}
                 label_index = {label: index for index, label in enumerate(resolved.labels)}
                 for label in tradeable_labels:
-                    finalists = _rank_validation_scores(
-                        score
-                        for score in validation_scores
-                        if score.label == label and score.ic_days > 0
+                    finalists = _rank_single_comparison_candidates(
+                        (
+                            score
+                            for score in validation_scores
+                            if score.label == label and score.ic_days > 0
+                        ),
+                        train_metrics,
                     )[:HOLDOUT_FINALIST_LIMIT_PER_LABEL]
+                    single_finalists_by_label[label] = finalists
                     for score in finalists:
                         index = value_index[score.value_id]
                         single_holdout_scores.append(
@@ -434,6 +439,13 @@ class SwingResearchService:
         holdout_by_key = {
             (item.value_id, item.label): item for item in annotated_holdout
         }
+        comparison_candidates = _build_comparison_board(
+            tradeable_labels,
+            single_finalists_by_label,
+            combination_scores,
+            train_metrics,
+            holdout_by_key,
+        )
 
         score_payloads: list[dict[str, object]] = []
         for score in ordered:
@@ -447,6 +459,7 @@ class SwingResearchService:
                     "validation": _score_metrics(score),
                     "holdout": _score_metrics(holdout) if holdout is not None else None,
                     "holdout_evaluated": holdout is not None,
+                    "training_validation_direction_stable": _directions_match(train, score),
                     "direction_stable": _direction_stable(train, score, holdout),
                 }
             )
@@ -470,15 +483,33 @@ class SwingResearchService:
                 },
                 "split_metadata": split_metadata,
                 "scores": score_payloads,
+                "comparison_candidates": comparison_candidates,
+                "comparison_summary": {
+                    "finalists_per_type_per_label": HOLDOUT_FINALIST_LIMIT_PER_LABEL,
+                    "ranking_basis": (
+                        "训练到验证方向一致优先，其次按验证段 |IC| 与 ICIR 排序"
+                    ),
+                    "validation_q_policy": (
+                        "组合全量验证池未做置换检验；单指标验证 q 仅展示，不用于混合排序"
+                    ),
+                    "holdout_q_policy": (
+                        "对入围单指标与组合统一做多重检验校正，仅用于复核"
+                    ),
+                    "holdout_usage": "不参与候选筛选或排序",
+                },
                 "combination_scores": combination_scores,
                 "combination_summary": {
                     "component_limit_per_label": PAIR_COMPONENT_LIMIT,
                     "finalists_per_label": HOLDOUT_FINALIST_LIMIT_PER_LABEL,
                     "candidate_counts": combination_counts,
                     "operations": dict(PAIR_OPERATION_NAMES),
-                    "ranking_basis": "训练段选组件，验证段按 |IC| 与稳定性排序",
+                    "ranking_basis": (
+                        "训练段选组件，训练/验证方向一致优先，"
+                        "再按验证段 |IC| 与 ICIR 排序"
+                    ),
                     "holdout_usage": "仅展示验证段前列候选的独立表现，不改变候选排序",
                     "value_scale": "每个交易日先转为横截面分位；分位差、分位比及分位上/下穿",
+                    "inverse_ratio_deduplicated": True,
                     "direct_rule_support": False,
                 },
                 "significant_count": significant_count,
@@ -722,6 +753,13 @@ class SwingResearchService:
                     label_values[:, validation_dates],
                     min_cross_section=config.min_cross_section,
                 )
+                if (
+                    operation == "rank_ratio"
+                    and _metric_number(validation_metric, "signed_ic_mean") < 0
+                ):
+                    left_id, right_id = right_id, left_id
+                    train_metric = _reverse_fast_metric_direction(train_metric)
+                    validation_metric = _reverse_fast_metric_direction(validation_metric)
                 candidate_id = f"pair:{operation}:{left_id}:{right_id}"
                 left_name = display_name_for(left_id, catalog)
                 right_name = display_name_for(right_id, catalog)
@@ -754,11 +792,8 @@ class SwingResearchService:
 
             for left_position, left_id in enumerate(selected_ids):
                 for right_id in selected_ids[left_position + 1 :]:
-                    for operation in ("rank_gap", "cross_up", "cross_down"):
+                    for operation in ("rank_gap", "rank_ratio", "cross_up", "cross_down"):
                         add_candidate(left_id, right_id, operation)
-                for right_id in selected_ids:
-                    if right_id != left_id:
-                        add_candidate(left_id, right_id, "rank_ratio")
 
             label_candidates.sort(
                 key=lambda item: (
@@ -926,7 +961,120 @@ def _rank_validation_scores(scores: Iterable[IndicatorScore]) -> list[IndicatorS
     )
 
 
+def _rank_single_comparison_candidates(
+    scores: Iterable[IndicatorScore],
+    train_metrics: Mapping[tuple[str, str], dict[str, object]],
+) -> list[IndicatorScore]:
+    """Choose holdout finalists with the same rule used by the mixed board."""
+
+    return sorted(
+        scores,
+        key=lambda score: _comparison_rank_key(
+            train_metrics.get((score.value_id, score.label)), score
+        ),
+    )
+
+
+def _comparison_rank_key(train: object, validation: object) -> tuple[bool, float, float]:
+    validation_key = _fast_metric_rank_key(validation)
+    return (not _directions_match(train, validation), *validation_key)
+
+
+def _build_comparison_board(
+    tradeable_labels: tuple[str, ...],
+    single_finalists_by_label: Mapping[str, list[IndicatorScore]],
+    combination_scores: list[dict[str, object]],
+    train_metrics: Mapping[tuple[str, str], dict[str, object]],
+    holdout_by_key: Mapping[tuple[str, str], IndicatorScore],
+) -> list[dict[str, object]]:
+    """Build same-label single/pair rankings using validation only."""
+
+    board: list[dict[str, object]] = []
+    for label in tradeable_labels:
+        candidates: list[dict[str, object]] = []
+        for score in single_finalists_by_label.get(label, []):
+            train = train_metrics.get((score.value_id, label))
+            holdout = holdout_by_key.get((score.value_id, label))
+            candidates.append(
+                {
+                    "candidate_id": f"single:{score.value_id}",
+                    "candidate_type": "single",
+                    "display_name": score.display_name,
+                    "expression": score.display_name,
+                    "value_ids": [score.value_id],
+                    "label": label,
+                    "train": train,
+                    "validation": _score_metrics(score),
+                    "validation_q": score.qvalue,
+                    "holdout": _score_metrics(holdout),
+                    "holdout_q": holdout.qvalue if holdout is not None else None,
+                    "training_validation_direction_stable": _directions_match(train, score),
+                    "direction_stable": _direction_stable(train, score, holdout),
+                }
+            )
+
+        for combination in combination_scores:
+            if combination.get("label") != label:
+                continue
+            candidate_id = str(combination["candidate_id"])
+            holdout = holdout_by_key.get((candidate_id, label))
+            candidates.append(
+                {
+                    "candidate_id": candidate_id,
+                    "candidate_type": "pair",
+                    "display_name": str(combination["expression"]),
+                    "expression": str(combination["expression"]),
+                    "value_ids": [
+                        str(combination["left_value_id"]),
+                        str(combination["right_value_id"]),
+                    ],
+                    "label": label,
+                    "train": combination["train"],
+                    "validation": combination["validation"],
+                    "validation_q": None,
+                    "holdout": _score_metrics(holdout),
+                    "holdout_q": holdout.qvalue if holdout is not None else None,
+                    "training_validation_direction_stable": bool(
+                        combination["training_validation_direction_stable"]
+                    ),
+                    "direction_stable": _direction_stable(
+                        combination["train"], combination["validation"], holdout
+                    ),
+                }
+            )
+
+        candidates.sort(
+            key=lambda item: (
+                not bool(item["training_validation_direction_stable"]),
+                *_fast_metric_rank_key(item["validation"]),
+            )
+        )
+        for rank, candidate in enumerate(candidates, start=1):
+            candidate["comparison_rank"] = rank
+            board.append(candidate)
+    return board
+
+
+def _reverse_fast_metric_direction(metric: Mapping[str, object]) -> dict[str, object]:
+    """Flip the sign of a rank metric for the reciprocal ratio orientation."""
+
+    reversed_metric = dict(metric)
+    signed = metric.get("signed_ic_mean")
+    if isinstance(signed, (int, float)) and np.isfinite(signed):
+        reversed_metric["signed_ic_mean"] = -float(signed)
+    order = metric.get("order")
+    if order == "high":
+        reversed_metric["order"] = "low"
+    elif order == "low":
+        reversed_metric["order"] = "high"
+    return reversed_metric
+
+
 def _fast_metric_rank_key(metric: object) -> tuple[float, float]:
+    if isinstance(metric, IndicatorScore):
+        ic = metric.ic_mean if np.isfinite(metric.ic_mean) else float("nan")
+        icir = metric.icir if metric.icir is not None else 0.0
+        return (-ic if np.isfinite(ic) else float("inf"), -abs(icir))
     if not isinstance(metric, Mapping):
         return (float("inf"), float("inf"))
     return (
@@ -1082,6 +1230,8 @@ def _empty_study_payload(
         "date_range": {"start": None, "end": None, "days": 0},
         "split_metadata": None,
         "scores": [],
+        "comparison_candidates": [],
+        "comparison_summary": None,
         "combination_scores": [],
         "combination_summary": None,
         "significant_count": 0,

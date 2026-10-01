@@ -11,8 +11,8 @@ from .scoring import tie_average_rank
 
 TRAIN_RATIO = 0.6
 VALIDATION_RATIO = 0.2
-PAIR_COMPONENT_LIMIT = 8
-HOLDOUT_FINALIST_LIMIT_PER_LABEL = 5
+PAIR_COMPONENT_LIMIT = 12
+HOLDOUT_FINALIST_LIMIT_PER_LABEL = 10
 PAIR_OPERATIONS = ("rank_gap", "rank_ratio", "cross_up", "cross_down")
 PAIR_OPERATION_NAMES: Mapping[str, str] = {
     "rank_gap": "分位差",

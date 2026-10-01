@@ -11,7 +11,6 @@ from selector_app.market_data.models import InstrumentBoard, InstrumentType
 from .labels import ALL_LABELS, DEFAULT_HORIZON, LabelKind
 from .scoring import (
     DEFAULT_BLOCK_SIZE,
-    DEFAULT_PERMUTATIONS,
     MIN_CROSS_SECTION,
 )
 from .segments import ATR_WINDOW, DEFAULT_MIN_BARS, DEFAULT_REVERSAL_MULTIPLE
@@ -20,6 +19,8 @@ from .segments import ATR_WINDOW, DEFAULT_MIN_BARS, DEFAULT_REVERSAL_MULTIPLE
 #: the 3-ATR default: a leg that only survives at 2 ATR is usually noise, one
 #: that only shows up at 4 ATR is rare enough to be hard to study.
 REFERENCE_MULTIPLES: tuple[float, ...] = (2.0, 3.0, 4.0)
+DEFAULT_STOCK_LIMIT = 5_000
+DEFAULT_STUDY_PERMUTATIONS = 500
 
 
 @dataclass(frozen=True)
@@ -42,7 +43,7 @@ class SwingOverviewConfig:
     atr_window: int = ATR_WINDOW
     include_pending: bool = False
     batch_size: int = 400
-    limit_stocks: int | None = None
+    limit_stocks: int | None = DEFAULT_STOCK_LIMIT
 
     def normalized(self) -> SwingOverviewConfig:
         """Validate and de-duplicate, keeping the caller's ordering."""
@@ -128,11 +129,11 @@ class SwingIndicatorConfig:
     #: cross-sections in the result.
     include_custom: bool = True
     min_cross_section: int = MIN_CROSS_SECTION
-    permutations: int = DEFAULT_PERMUTATIONS
+    permutations: int = DEFAULT_STUDY_PERMUTATIONS
     block_size: int = DEFAULT_BLOCK_SIZE
     alpha: float = 0.05
     batch_size: int = 200
-    limit_stocks: int | None = None
+    limit_stocks: int | None = DEFAULT_STOCK_LIMIT
 
     def normalized(self) -> SwingIndicatorConfig:
         if self.reversal_multiple <= 0:
@@ -184,6 +185,8 @@ class SwingIndicatorConfig:
 
 
 __all__ = [
+    "DEFAULT_STOCK_LIMIT",
+    "DEFAULT_STUDY_PERMUTATIONS",
     "MAX_PANEL_BYTES",
     "REFERENCE_MULTIPLES",
     "SwingIndicatorConfig",

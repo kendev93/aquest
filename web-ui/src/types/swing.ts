@@ -115,6 +115,7 @@ export interface SwingScore {
   validation?: SwingSplitMetrics | null
   holdout?: SwingSplitMetrics | null
   holdout_evaluated?: boolean
+  training_validation_direction_stable?: boolean
   direction_stable?: boolean | null
 }
 
@@ -151,6 +152,34 @@ export interface SwingCombinationSummary {
   holdout_usage: string
   value_scale: string
   direct_rule_support: boolean
+  inverse_ratio_deduplicated?: boolean
+}
+
+
+export interface SwingComparisonCandidate {
+  candidate_id: string
+  candidate_type: 'single' | 'pair'
+  display_name: string
+  expression: string
+  value_ids: string[]
+  label: SwingLabel
+  comparison_rank: number
+  train: SwingSplitMetrics | null
+  validation: SwingSplitMetrics
+  validation_q: number | null
+  holdout: SwingSplitMetrics | null
+  holdout_q: number | null
+  training_validation_direction_stable: boolean
+  direction_stable: boolean | null
+}
+
+
+export interface SwingComparisonSummary {
+  finalists_per_type_per_label: number
+  ranking_basis: string
+  validation_q_policy: string
+  holdout_q_policy: string
+  holdout_usage: string
 }
 
 
@@ -205,6 +234,8 @@ export interface SwingStudyResult {
   date_range: { start: string | null; end: string | null; days: number }
   split_metadata?: SwingSplitMetadata | null
   scores: SwingScore[]
+  comparison_candidates?: SwingComparisonCandidate[]
+  comparison_summary?: SwingComparisonSummary | null
   combination_scores?: SwingCombinationCandidate[]
   combination_summary?: SwingCombinationSummary | null
   significant_count: number

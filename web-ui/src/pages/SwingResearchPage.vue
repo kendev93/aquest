@@ -16,6 +16,7 @@ import TermHint from '../components/TermHint.vue'
 import type {
   BacktestHistorySummary,
   SwingCombinationCandidate,
+  SwingComparisonCandidate,
   SwingConditionTemplate,
   SwingLabel,
   SwingOverviewResult,
@@ -78,7 +79,7 @@ const overview = reactive({
   multiplesText: '2, 3, 4',
   minBars: 5,
   atrWindow: 14,
-  limitStocks: 1000,
+  limitStocks: 5000,
 })
 
 const study = reactive({
@@ -97,11 +98,11 @@ const study = reactive({
     'up_leg_start',
     'down_leg_start',
   ] as SwingLabel[],
-  permutations: 200,
+  permutations: 500,
   blockSize: 20,
   alpha: 0.05,
   minCrossSection: 20,
-  limitStocks: 1000,
+  limitStocks: 5000,
   includeCustom: true,
 })
 
@@ -455,6 +456,9 @@ function barWidth(count: number, buckets: { count: number }[]): string {
 
 const plan = computed(() => studyResult.value?.condition_plan ?? null)
 const splitMetadata = computed(() => studyResult.value?.split_metadata ?? null)
+const comparisonCandidates = computed<SwingComparisonCandidate[]>(
+  () => studyResult.value?.comparison_candidates ?? [],
+)
 const combinationScores = computed(() => studyResult.value?.combination_scores ?? [])
 const splitWindows = computed(() => {
   const split = splitMetadata.value
@@ -574,9 +578,9 @@ async function copyPlan(): Promise<void> {
       <section class="panel swing-panel" data-testid="swing-overview-panel">
         <div class="panel-heading">
           <div><span class="section-kicker">01 / SEGMENTATION</span><h2>第一步 · 波段切分校准</h2></div>
-          <span class="required-hint">先在少量样本上定阈值</span>
+          <span class="required-hint">默认 5000 只，可按需缩小</span>
         </div>
-        <p class="helper">回撤多少个 <TermHint term="swingThreshold" />算换方向，决定了后面切出多少段。先用 1000 只左右跑一遍，看每个阈值下的段数与振幅，再决定第二步用哪个。日期默认回看 5 年；清空开始日期会用到库里 1998 年以来的全部数据，耗时会成倍增长。</p>
+        <p class="helper">回撤多少个 <TermHint term="swingThreshold" />算换方向，决定了后面切出多少段。默认用 5000 只；如果只想快速校准，可以先把样本降到 1000 左右。日期默认回看 5 年；清空开始日期会用到库里 1998 年以来的全部数据，耗时会成倍增长。</p>
 
         <div class="compact-fields swing-fields">
           <div>
@@ -693,7 +697,7 @@ async function copyPlan(): Promise<void> {
           <div><span class="section-kicker">02 / INDICATOR STUDY</span><h2>第二步 · 指标与波段的关系</h2></div>
           <span class="required-hint">同步计算，样本越大越慢</span>
         </div>
-        <p class="helper">逐日把所有股票按指标排名，再看它们的<TermHint term="ic" />，并用<TermHint term="blockPermutation" />给出<TermHint term="noiseFloor" />。结果会按训练、验证和留出三段计算，并在训练段筛出少量指标组成双指标候选；候选数量会增加计算时间，全市场样本也请留意内存预算。</p>
+        <p class="helper">逐日把所有股票按指标排名，再看它们的<TermHint term="ic" />，并用<TermHint term="blockPermutation" />给出<TermHint term="noiseFloor" />。默认 5000 只、500 次置换；训练段每个标签筛选 12 个组件，扩展双指标候选并对每类前 10 名做留出复核。计算量会明显增加，若面板内存预算不够，可减少样本或缩短区间。</p>
 
         <div class="compact-fields swing-fields">
           <div>
@@ -855,34 +859,60 @@ async function copyPlan(): Promise<void> {
             </div>
           </section>
 
-          <div v-if="studyResult.combination_summary" class="data-section" data-testid="swing-combination-results">
-            <div class="section-heading"><h3>双指标组合（按验证段排序）</h3><span class="required-hint">训练选组件 · 验证选候选 · 留出只复核</span></div>
-            <p class="helper">组合只针对可交易的“近期将启动上涨 / 下跌”标签。先把每个指标转换为当日横截面分位，再计算分位差、加稳定项的分位比、分位上穿或下穿。留出 q 值对入围单指标与组合统一做多重检验校正，只用于独立复核，不改变验证段排序。组合目前用于研究比较，尚不能直接带入买卖条件研究。</p>
-            <div v-if="!combinationScores.length" class="inline-empty">未选择可交易标签，或训练段没有筛出至少两个有 60 个有效 IC 交易日的组件，或验证段没有足够有效样本形成候选。</div>
+          <div v-if="studyResult.comparison_summary" class="data-section" data-testid="swing-comparison-results">
+            <div class="section-heading"><h3>单 / 双指标候选统一排行</h3><span class="required-hint">同标签 · 同验证指标 · 留出只复核</span></div>
+            <p class="helper">{{ studyResult.comparison_summary.ranking_basis }}。{{ studyResult.comparison_summary.holdout_usage }}。组合全量候选未做验证段置换检验，因此单指标验证 q 只展示、不参与混合排序；留出 q 对两类入围候选统一校正。分位比的倒数方向已合并，避免重复占名次。组合使用当日横截面分位，目前不能直接带入买卖条件研究。</p>
+            <div v-if="!comparisonCandidates.length" class="inline-empty">当前没有达到最少有效 IC 交易日门槛的可交易候选。</div>
             <div v-else class="table-wrap">
               <table>
                 <thead>
                   <tr>
-                    <th>验证排名</th>
+                    <th>同标签排名</th>
                     <th>波段标签</th>
-                    <th>组合</th>
+                    <th>类型</th>
+                    <th>候选</th>
                     <th>训练 IC / 天数</th>
                     <th>验证 IC / 天数</th>
+                    <th>验证方向</th>
+                    <th>验证 q</th>
                     <th>留出 IC / 天数</th>
                     <th>留出 q</th>
-                    <th>方向稳定性</th>
+                    <th>训练→验证</th>
+                    <th>三段方向</th>
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="candidate in combinationScores" :key="candidate.candidate_id" data-testid="swing-combination-row">
-                    <td>{{ candidate.validation_rank }}</td>
+                  <tr v-for="candidate in comparisonCandidates" :key="`${candidate.candidate_id}-${candidate.label}`" data-testid="swing-comparison-row">
+                    <td>{{ candidate.comparison_rank }}</td>
                     <td>{{ labelName(candidate.label) }}</td>
-                    <td><strong>{{ combinationDisplay(candidate) }}</strong><br><small class="muted-code">{{ candidate.left_value_id }} · {{ candidate.right_value_id }}</small></td>
+                    <td><span class="swing-tag" :class="{ muted: candidate.candidate_type === 'single' }">{{ candidate.candidate_type === 'single' ? '单指标' : '双指标' }}</span></td>
+                    <td><strong>{{ candidate.expression }}</strong><br><small class="muted-code">{{ candidate.value_ids.join(' · ') }}</small></td>
                     <td>{{ splitIc(candidate.train) }}</td>
                     <td>{{ splitIc(candidate.validation) }}</td>
+                    <td>{{ candidate.validation.order === 'high' ? '值高相关' : candidate.validation.order === 'low' ? '值低相关' : '—' }}</td>
+                    <td>{{ formatNumber(candidate.validation_q, 3) }}</td>
                     <td>{{ splitIc(candidate.holdout) }}</td>
-                    <td>{{ formatNumber(candidate.holdout?.qvalue, 3) }}</td>
+                    <td>{{ formatNumber(candidate.holdout_q, 3) }}</td>
+                    <td :class="{ positive: candidate.training_validation_direction_stable, negative: !candidate.training_validation_direction_stable }">{{ candidate.training_validation_direction_stable ? '一致' : '变化' }}</td>
                     <td :class="{ positive: candidate.direction_stable, negative: candidate.direction_stable === false }">{{ stabilityText(candidate.direction_stable) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div v-else-if="studyResult.combination_summary" class="data-section" data-testid="swing-combination-results">
+            <div class="section-heading"><h3>双指标组合（旧历史记录）</h3><span class="required-hint">训练选组件 · 验证选候选 · 留出只复核</span></div>
+            <div v-if="!combinationScores.length" class="inline-empty">这条历史记录没有可显示的双指标候选。</div>
+            <div v-else class="table-wrap">
+              <table>
+                <thead><tr><th>验证排名</th><th>波段标签</th><th>组合</th><th>训练 IC / 天数</th><th>验证 IC / 天数</th><th>留出 IC / 天数</th><th>留出 q</th></tr></thead>
+                <tbody>
+                  <tr v-for="candidate in combinationScores" :key="candidate.candidate_id">
+                    <td>{{ candidate.validation_rank }}</td><td>{{ labelName(candidate.label) }}</td>
+                    <td><strong>{{ combinationDisplay(candidate) }}</strong></td>
+                    <td>{{ splitIc(candidate.train) }}</td><td>{{ splitIc(candidate.validation) }}</td>
+                    <td>{{ splitIc(candidate.holdout) }}</td><td>{{ formatNumber(candidate.holdout?.qvalue, 3) }}</td>
                   </tr>
                 </tbody>
               </table>

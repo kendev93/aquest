@@ -9,7 +9,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from selector_app.market_data.models import InstrumentBoard, InstrumentType
 from selector_app.swing_research.labels import ALL_LABELS as ALL_SWING_LABELS
-from selector_app.swing_research.models import SwingIndicatorConfig, SwingOverviewConfig
+from selector_app.swing_research.models import (
+    DEFAULT_STOCK_LIMIT,
+    DEFAULT_STUDY_PERMUTATIONS,
+    SwingIndicatorConfig,
+    SwingOverviewConfig,
+)
 
 
 class SwingOverviewRequest(BaseModel):
@@ -37,7 +42,7 @@ class SwingOverviewRequest(BaseModel):
     min_bars: int = Field(default=5, ge=0, le=1_000)
     atr_window: int = Field(default=14, ge=1, le=1_000)
     include_pending: bool = False
-    limit_stocks: int | None = Field(default=None, ge=1, le=100_000)
+    limit_stocks: int | None = Field(default=DEFAULT_STOCK_LIMIT, ge=1, le=100_000)
 
     def to_config(self) -> SwingOverviewConfig:
         return SwingOverviewConfig(
@@ -93,10 +98,10 @@ class SwingIndicatorRequest(BaseModel):
     #: the technical family.
     include_custom: bool = True
     min_cross_section: int = Field(default=20, ge=2, le=10_000)
-    permutations: int = Field(default=200, ge=0, le=5_000)
+    permutations: int = Field(default=DEFAULT_STUDY_PERMUTATIONS, ge=0, le=5_000)
     block_size: int = Field(default=20, ge=1, le=500)
     alpha: float = Field(default=0.05, gt=0, lt=1)
-    limit_stocks: int | None = Field(default=None, ge=1, le=100_000)
+    limit_stocks: int | None = Field(default=DEFAULT_STOCK_LIMIT, ge=1, le=100_000)
     #: 存档用，不参与计算。研究分两步跑，第一步（切分校准）的表单与结果
     #: 只存在于浏览器里；不带过来，历史记录就只能还原第二步，加载后第一步
     #: 的表格会是空的。后端原样存进 request_json，不做校验。
