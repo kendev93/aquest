@@ -487,6 +487,19 @@ describe('PortfolioBacktestPage', () => {
     expect(wrapper.get('[data-testid="portfolio-message"]').text()).toContain('服务器拒绝任务')
   })
 
+  it('keeps the successful backtest message if refreshing history fails', async () => {
+    vi.mocked(portfolioApi.fetchPortfolioBacktestHistory)
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new Error('历史服务暂不可用'))
+    const wrapper = mount(PortfolioBacktestPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="portfolio-message"]').text()).toContain('组合回测完成')
+    expect(wrapper.get('[data-testid="portfolio-history-error"]').text()).toContain('历史服务暂不可用')
+  })
+
   it('shows validation when no buy signal is selected', async () => {
     const wrapper = mount(PortfolioBacktestPage)
     await flushPromises()

@@ -239,6 +239,7 @@ const resultLimitations = computed(() => (
 ))
 const history = ref<BacktestHistorySummary[]>([])
 const historyLoading = ref(false)
+const historyError = ref('')
 const appliedDiscoveryCandidate = ref<AppliedDiscoveryCandidate | null>(null)
 const replayComparison = ref<ReplayComparison | null>(null)
 const riskOptimizationStale = computed(() => (
@@ -1362,10 +1363,11 @@ async function resumeActivePortfolioBacktest(): Promise<void> {
 
 async function loadHistory(): Promise<void> {
   historyLoading.value = true
+  historyError.value = ''
   try {
     history.value = await fetchPortfolioBacktestHistory()
   } catch (error) {
-    message.value = apiMessage(error)
+    historyError.value = error instanceof Error ? error.message : '历史组合回测读取失败。'
   } finally {
     historyLoading.value = false
   }
@@ -2031,6 +2033,7 @@ watch(() => form.formulaText, (value) => {
           <button class="secondary-button" type="button" data-testid="portfolio-risk-history-load-more" :disabled="riskOptimizationHistoryLoading" @click="loadRiskOptimizationHistory(true)">{{ riskOptimizationHistoryLoading ? '读取中…' : `加载更早记录（${riskOptimizationHistory.length} / ${riskOptimizationHistoryTotal}）` }}</button>
         </div>
       </section>
+      <p v-if="historyError" class="notice error" data-testid="portfolio-history-error">{{ historyError }}</p>
       <BacktestHistoryPanel
         :items="history"
         :loading="historyLoading"

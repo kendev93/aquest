@@ -182,6 +182,7 @@ test('user can apply exit risk without replacing the current history range', asy
     data: { job_id: 'portfolio-risk-replay', status: 'completed', progress: 1, total_candidates: 3, total_scanned: 3, errors: 0, error: null, result: null },
   } }))
   await page.route(/\/api\/v1\/portfolio-backtests\/portfolio-risk-replay\/results$/, (route) => route.fulfill({ json: { data: { ...result, data_fingerprint: 'portfolio-fingerprint' } } }))
+  await page.route(/\/api\/v1\/portfolio-backtests\/history$/, (route) => route.fulfill({ json: { data: [] } }))
 
   await page.goto('/portfolio-backtest')
   await page.getByTestId('portfolio-risk-search-level').selectOption('2000')
