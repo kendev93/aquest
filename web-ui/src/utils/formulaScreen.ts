@@ -98,6 +98,10 @@ export function loadSavedForm(): Partial<ScreenFormState> {
     }
     if (parsed.period === 'daily') safe.period = parsed.period
     if (typeof parsed.formulaText === 'string') safe.formulaText = parsed.formulaText
+    if (typeof parsed.rankingValue === 'string') safe.rankingValue = parsed.rankingValue
+    if (parsed.rankingOrder === 'asc' || parsed.rankingOrder === 'desc') {
+      safe.rankingOrder = parsed.rankingOrder
+    }
     if (Array.isArray(parsed.conditions)) safe.conditions = parseConditions(parsed.conditions)
     if (parsed.formulaParameters && typeof parsed.formulaParameters === 'object') {
       const parameters = Object.fromEntries(
@@ -279,6 +283,12 @@ export function buildScanPayload(form: ScreenFormState): ScanPayload {
     period: form.period,
     formula_text: form.mode === 'custom' ? form.formulaText.trim() || null : null,
     formula_parameters: form.mode === 'custom' ? { ...form.formulaParameters } : {},
+    ...(form.rankingValue?.trim()
+      ? {
+          ranking_value: form.rankingValue.trim(),
+          rank_order: form.rankingOrder === 'asc' ? 'asc' as const : 'desc' as const,
+        }
+      : {}),
     ...(form.ruleMode === 'conditions'
       ? { conditions: form.conditions.map(cloneCondition) }
       : {}),
@@ -488,6 +498,11 @@ export function describeScreenForm(
     scope.push(form.boards.map((board) => BOARD_LABELS[board] ?? board).join('/'))
   }
   parts.push(`范围 ${scope.join(' · ')}`)
+  if (form.rankingValue?.trim()) {
+    const rankingName = values.find((value) => value.id === form.rankingValue)?.display_name
+      ?? form.rankingValue
+    parts.push(`排序 ${rankingName} · ${form.rankingOrder === 'asc' ? '从小到大' : '从大到小'}`)
+  }
   const text = parts.join('，')
   return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text
 }

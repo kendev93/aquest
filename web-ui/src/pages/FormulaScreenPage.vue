@@ -86,6 +86,8 @@ const form = reactive<ScreenFormState>({
   period: savedForm.period ?? 'daily',
   formulaText: savedForm.formulaText ?? '',
   formulaParameters: savedForm.formulaParameters ?? {},
+  rankingValue: savedForm.rankingValue ?? '',
+  rankingOrder: savedForm.rankingOrder ?? 'desc',
 })
 const errors = ref<Record<string, string>>({})
 const message = ref('')
@@ -139,6 +141,21 @@ const valueGroups = computed<{ label: string; values: ValueDefinition[] }[]>(() 
     .filter((group) => group.values.length > 0)
 })
 const availableValues = computed(() => valueGroups.value.flatMap((group) => group.values))
+const rankableValueGroups = computed(() => valueGroups.value
+  .map((group) => ({
+    label: group.label,
+    values: group.values.filter((value) => value.rankable === true),
+  }))
+  .filter((group) => group.values.length > 0))
+const rankableValues = computed(() => rankableValueGroups.value.flatMap((group) => group.values))
+const displayedRankingValue = computed(() => (
+  resultMeta.value
+    ? resultMeta.value.ranking_value ?? ''
+    : form.rankingValue ?? ''
+))
+const displayedRankingOrder = computed(() => (
+  resultMeta.value?.rank_order ?? (form.rankingOrder === 'asc' ? 'asc' : 'desc')
+))
 const conditionOperators = computed(() => metadata.value?.condition_operators?.length
   ? metadata.value.condition_operators
   : CONDITION_OPERATORS_UI)
@@ -172,6 +189,15 @@ function normalizeConditionsToAvailableValues(): void {
   })
 }
 
+function normalizeRankingToAvailableValues(): boolean {
+  if (!form.rankingValue) return false
+  if (form.mode === 'preset' && !metadata.value) return false
+  if (form.mode === 'custom' && customMetadata.value === null) return false
+  if (rankableValues.value.some((value) => value.id === form.rankingValue)) return false
+  form.rankingValue = ''
+  return true
+}
+
 function setMode(mode: ScreenFormState['mode']): void {
   if (form.mode === mode) return
   form.mode = mode
@@ -182,6 +208,7 @@ function setMode(mode: ScreenFormState['mode']): void {
   message.value = ''
   customParseError.value = ''
   normalizeConditionsToAvailableValues()
+  normalizeRankingToAvailableValues()
 }
 
 function setRuleMode(ruleMode: RuleMode): void {
@@ -337,6 +364,10 @@ function formatHistoryDate(value: string): string {
 function applyResultPayload(nextResults: ScreenResult[], nextMeta: ResultsMeta): void {
   results.value = nextResults
   resultMeta.value = nextMeta
+  if (nextMeta.ranking_value !== undefined) {
+    form.rankingValue = nextMeta.ranking_value ?? ''
+    form.rankingOrder = nextMeta.rank_order === 'asc' ? 'asc' : 'desc'
+  }
   expandedResultKey.value = null
   for (const result of nextResults) {
     const key = resultKey(result)
@@ -455,13 +486,19 @@ async function loadSelectedPreset(): Promise<PresetLoadOutcome | null> {
     form.period = state.period
     form.formulaText = state.formulaText
     form.formulaParameters = { ...state.formulaParameters }
+    form.rankingValue = state.rankingValue ?? ''
+    form.rankingOrder = state.rankingOrder ?? 'desc'
+    const requestedRankingValue = form.rankingValue
     customMetadata.value = null
     parsedFormulaText.value = ''
     errors.value = {}
     if (form.mode === 'custom' && form.formulaText.trim()) await parseCustomFormula()
     else normalizeConditionsToAvailableValues()
+    normalizeRankingToAvailableValues()
+    const rankingUnavailable = Boolean(requestedRankingValue && !form.rankingValue)
     presetName.value = preset.name
     message.value = presetLoadMessage(preset.name, result)
+      + (rankingUnavailable ? ' 排序指标已不可用，已清除。' : '')
     return { name: preset.name, stale: result.staleConditions + result.staleSignals }
   } catch (error) {
     message.value = apiMessage(error, '方案加载失败')
@@ -608,6 +645,7 @@ async function parseCustomFormula(): Promise<void> {
     )
     form.selectedSignals = parsed.signals.map((signal) => signal.id)
     normalizeConditionsToAvailableValues()
+    normalizeRankingToAvailableValues()
     const conditionCount = form.ruleMode === 'conditions'
       ? form.conditions.length
       : parsed.signals.length
@@ -776,6 +814,8 @@ interface ResearchToScreenPayload {
   mode?: 'preset' | 'custom'
   formula_text?: string | null
   formula_parameters?: Record<string, number>
+  ranking_value?: string | null
+  rank_order?: 'asc' | 'desc'
 }
 
 const RESEARCH_TO_SCREEN_KEY = 'indicator-lab.condition-research.to-screen'
@@ -791,6 +831,7 @@ async function applyResearchToScreen(): Promise<void> {
       valueIds: availableValues.value.map((value) => value.id),
     })
     const state = result.state
+    const requestedRankingValue = state.rankingValue ?? ''
     form.mode = state.mode
     form.ruleMode = state.ruleMode
     form.selectedSignals = state.selectedSignals
@@ -802,11 +843,22 @@ async function applyResearchToScreen(): Promise<void> {
     form.instrumentTypes = state.instrumentTypes
     form.formulaText = state.formulaText
     form.formulaParameters = state.formulaParameters
+    form.rankingValue = state.rankingValue ?? ''
+    form.rankingOrder = state.rankingOrder ?? 'desc'
     customMetadata.value = null
     parsedFormulaText.value = ''
     errors.value = {}
     normalizeConditionsToAvailableValues()
     if (form.mode === 'custom' && form.formulaText.trim()) await parseCustomFormula()
+    normalizeRankingToAvailableValues()
+    if (requestedRankingValue && !form.rankingValue) {
+      notes.push(`排序指标 ${requestedRankingValue} 当前不可用于跨标的排序，已清除。`)
+    } else if (form.rankingValue) {
+      const rankingName = rankableValues.value.find(
+        (value) => value.id === form.rankingValue,
+      )?.display_name ?? form.rankingValue
+      notes.push(`排序：${rankingName} · ${form.rankingOrder === 'asc' ? '从小到大' : '从大到小'}`)
+    }
     notes.push(...result.notes)
   } catch {
     notes.push('带过来的条件没能还原，已保留原有设置。')
@@ -1104,6 +1156,7 @@ onMounted(async () => {
     if (form.mode === 'custom' && form.formulaText.trim()) {
       await parseCustomFormula()
     }
+    normalizeRankingToAvailableValues()
     await refreshScreenHistory()
     await resumeActiveScreenJob()
     await refreshScreenPresets()
@@ -1368,6 +1421,29 @@ watch(() => form.formulaText, (value) => {
 
           </fieldset>
 
+          <fieldset class="form-section screen-ranking" data-testid="screen-ranking">
+            <legend>结果排序（可选）</legend>
+            <div class="compact-fields">
+              <div>
+                <label for="screen-ranking-value">排序指标</label>
+                <select id="screen-ranking-value" v-model="form.rankingValue" data-testid="screen-ranking-value">
+                  <option value="">不排序（保持扫描顺序）</option>
+                  <optgroup v-for="group in rankableValueGroups" :key="group.label" :label="group.label">
+                    <option v-for="value in group.values" :key="value.id" :value="value.id">{{ value.display_name }}</option>
+                  </optgroup>
+                </select>
+              </div>
+              <div>
+                <label for="screen-ranking-order">排序方向</label>
+                <select id="screen-ranking-order" v-model="form.rankingOrder" data-testid="screen-ranking-order" :disabled="!form.rankingValue">
+                  <option value="desc">从高到低</option>
+                  <option value="asc">从低到高</option>
+                </select>
+              </div>
+            </div>
+            <p class="helper">排序只改变命中结果的先后顺序，不改变筛选条件；按每只股票最新可用日线的指标值排列。设置对下一次扫描生效，历史记录会保留当次顺序；买卖条件研究带过来的排序建议也可直接使用。</p>
+          </fieldset>
+
           <div class="action-stack">
             <button class="primary-button" data-testid="start-scan" type="submit" :disabled="!canSubmit">
               <span v-if="loading" class="spinner" aria-hidden="true"></span>
@@ -1413,6 +1489,9 @@ watch(() => form.formulaText, (value) => {
             <div><span>worker</span><strong>{{ job?.worker_count ?? form.workers }}</strong></div>
           </div>
           <div class="progress-track" aria-label="扫描进度"><span :style="{ width: `${progressPercent}%` }"></span></div>
+          <p v-if="displayedRankingValue" class="helper" data-testid="screen-results-order">
+            结果按 {{ resultValueLabel(displayedRankingValue) }} {{ displayedRankingOrder === 'asc' ? '从低到高' : '从高到低' }} 排列。
+          </p>
 
           <div v-if="results.length === 0" class="empty-state" data-testid="empty-results">
             <div class="empty-icon" aria-hidden="true">/</div>
@@ -1420,11 +1499,11 @@ watch(() => form.formulaText, (value) => {
             <p>{{ loading ? '完成后会在这里显示命中的股票与指标值。' : '在左侧选择信号并开始一次扫描。' }}</p>
           </div>
           <div v-else class="table-wrap">
-            <table data-testid="results-table">
-              <caption class="sr-only">公式选股结果</caption>
-              <thead><tr><th class="pick-column">存组</th><th>市场</th><th>代码</th><th>中文名</th><th>信号日期</th><th>最新收盘</th><th>命中条件</th><th>指标值</th></tr></thead>
+              <table data-testid="results-table">
+                <caption class="sr-only">公式选股结果</caption>
+              <thead><tr><th class="pick-column">存组</th><th v-if="displayedRankingValue">排名</th><th>市场</th><th>代码</th><th>中文名</th><th>信号日期</th><th>最新收盘</th><th>命中条件</th><th>指标值</th></tr></thead>
               <tbody>
-                <template v-for="result in results" :key="`${result.market}-${result.code}`">
+                <template v-for="(result, resultIndex) in results" :key="`${result.market}-${result.code}`">
                 <tr class="screen-result-row" :class="{ expanded: expandedResultKey === resultKey(result), picked: selectedResultKeys.has(resultKey(result)) }" role="button" tabindex="0" :aria-expanded="expandedResultKey === resultKey(result)" @click="toggleResultDetails(result)" @keydown.enter.prevent="toggleResultDetails(result)">
                   <td class="pick-column">
                     <input
@@ -1436,6 +1515,7 @@ watch(() => form.formulaText, (value) => {
                       @change="toggleResultPick(result, ($event.target as HTMLInputElement).checked)"
                     >
                   </td>
+                  <td v-if="displayedRankingValue" class="muted-code">{{ resultIndex + 1 }}</td>
                   <td><span class="market-pill" :class="result.market.toLowerCase()">{{ result.market }}</span></td>
                   <td><strong class="code">{{ result.code }}</strong><small v-if="result.instrument_type" class="muted-code">{{ result.instrument_type }}</small></td>
                   <td class="instrument-name">{{ result.name || '未同步名称' }}</td>
@@ -1445,7 +1525,7 @@ watch(() => form.formulaText, (value) => {
                   <td><div class="value-list"><span v-for="(value, name) in result.indicator_values" :key="name"><b>{{ resultValueLabel(name) }}</b> {{ value === null ? '—' : value.toFixed(2) }}</span></div></td>
                 </tr>
                 <tr v-if="expandedResultKey === resultKey(result)" :key="`${result.market}-${result.code}-detail`" class="screen-result-detail-row">
-                  <td colspan="8">
+                  <td :colspan="displayedRankingValue ? 9 : 8">
                     <div class="screen-result-detail" :data-testid="`result-detail-${result.market}-${result.code}`">
                       <div class="screen-result-detail-heading"><div><strong>{{ result.name || `${result.market} ${result.code}` }}</strong><small>点击结果行收起 · 本地日线行情</small></div><span>{{ result.signal_date }}</span></div>
                       <div v-if="resultChartLoading === resultKey(result)" class="chart-loading">正在读取 K 线…</div>

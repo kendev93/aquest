@@ -13,6 +13,7 @@ from selector_app.screening.models import ScanConfig, ScreenCondition
 from selector_app.screening.rules import RuleGroup
 
 from ._shared import (
+    _rankable_research_values,
     validate_formula_conditions,
     validate_formula_signals,
     validate_instrument_scope,
@@ -118,6 +119,8 @@ class FormulaScreenRequest(BaseModel):
     period: Literal["daily"] = "daily"
     formula_text: str | None = Field(default=None, max_length=20_000)
     formula_parameters: dict[str, float] = Field(default_factory=dict, max_length=32)
+    ranking_value: str | None = Field(default=None, min_length=1, max_length=128)
+    rank_order: Literal["asc", "desc"] = "desc"
 
     @model_validator(mode="after")
     def validate_selection(self) -> FormulaScreenRequest:
@@ -130,6 +133,13 @@ class FormulaScreenRequest(BaseModel):
             self.selected_signals,
             self.formula_parameters,
         )
+        if self.ranking_value is not None:
+            ranking_value = self.ranking_value.strip()
+            if not ranking_value:
+                raise ValueError("排序指标不能为空")
+            if ranking_value not in _rankable_research_values(self.formula_text):
+                raise ValueError("排序指标必须是可跨标的比较的 rankable 输出")
+            object.__setattr__(self, "ranking_value", ranking_value)
         condition_models = [condition.to_model() for condition in self.conditions]
         if condition_models:
             validate_formula_conditions(self.formula_text, condition_models)
@@ -172,6 +182,8 @@ class FormulaScreenRequest(BaseModel):
             formula_text=self.formula_text,
             formula_parameters=self.formula_parameters,
             conditions=tuple(condition.to_model() for condition in self.conditions),
+            ranking_value=self.ranking_value,
+            rank_order=self.rank_order,
         )
 
 

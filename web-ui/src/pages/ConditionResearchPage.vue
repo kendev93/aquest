@@ -506,6 +506,12 @@ function applyToFormulaScreen(): void {
     mode: mode.value === 'custom' ? 'custom' : 'preset',
     formula_text: mode.value === 'custom' ? form.formulaText.trim() : null,
     formula_parameters: mode.value === 'custom' ? { ...form.formulaParameters } : {},
+    ...(effectiveRankingValue.value
+      ? {
+          ranking_value: effectiveRankingValue.value,
+          rank_order: effectiveRankOrder.value,
+        }
+      : {}),
   }))
   if (import.meta.env.MODE !== 'test') window.location.assign('/indicator-lab')
 }

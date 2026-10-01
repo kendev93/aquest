@@ -55,6 +55,8 @@ export interface ScreenFormState {
   period: 'daily'
   formulaText: string
   formulaParameters: Record<string, number>
+  rankingValue?: string
+  rankingOrder?: 'asc' | 'desc'
 }
 
 
@@ -105,6 +107,8 @@ export interface ScreenPresetPayload {
   period: 'daily'
   formula_text: string
   formula_parameters: Record<string, number>
+  ranking_value?: string | null
+  rank_order?: 'asc' | 'desc'
 }
 
 
@@ -135,6 +139,8 @@ export interface ScanPayload {
   period: 'daily'
   formula_text: string | null
   formula_parameters: Record<string, number>
+  ranking_value?: string | null
+  rank_order?: 'asc' | 'desc'
   instrument_types?: InstrumentType[]
   boards?: InstrumentBoard[]
 }
@@ -162,6 +168,8 @@ export interface ResultsMeta {
   skipped: number
   failure_reasons: Record<string, number>
   skip_reasons: Record<string, number>
+  ranking_value?: string | null
+  rank_order?: 'asc' | 'desc'
 }
 
 

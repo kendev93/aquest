@@ -14,6 +14,7 @@ from selector_app.market_data.scope import InstrumentScope
 
 CombineMode = Literal["all", "any", "at_least"]
 Universe = Literal["all", "sh", "sz", "custom"]
+RankOrder = Literal["asc", "desc"]
 ConditionOperator = Literal["gt", "gte", "lt", "lte", "eq", "neq", "cross_up", "cross_down"]
 _CONDITION_OPERATORS = frozenset({"gt", "gte", "lt", "lte", "eq", "neq", "cross_up", "cross_down"})
 
@@ -62,10 +63,18 @@ class ScanConfig:
     formula_text: str | None = None
     formula_parameters: Mapping[str, float] = field(default_factory=dict)
     conditions: tuple[ScreenCondition, ...] = ()
+    ranking_value: str | None = None
+    rank_order: RankOrder = "desc"
 
     def __post_init__(self) -> None:
         if isinstance(self.workers, bool) or not 1 <= self.workers <= MAX_WORKERS:
             raise ValueError(f"扫描并发数必须在 1 到 {MAX_WORKERS} 之间")
+        if self.rank_order not in {"asc", "desc"}:
+            raise ValueError("排序方向必须是 asc 或 desc")
+        if self.ranking_value is not None and not self.ranking_value.strip():
+            raise ValueError("排序指标不能为空")
+        if self.ranking_value is not None:
+            object.__setattr__(self, "ranking_value", self.ranking_value.strip())
         scope = InstrumentScope.from_values(
             universe=str(self.universe),
             instrument_types=self.instrument_types,
@@ -120,13 +129,15 @@ class ScanReport:
     results: tuple[ScreenMatch, ...]
     failure_reasons: Mapping[str, int]
     skip_reasons: Mapping[str, int]
+    ranking_value: str | None = None
+    rank_order: RankOrder = "desc"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "failure_reasons", MappingProxyType(dict(self.failure_reasons)))
         object.__setattr__(self, "skip_reasons", MappingProxyType(dict(self.skip_reasons)))
 
     def summary_dict(self) -> dict[str, object]:
-        return {
+        summary: dict[str, object] = {
             "total_candidates": self.total_candidates,
             "total_scanned": self.total_scanned,
             "total_signals": self.total_signals,
@@ -135,3 +146,8 @@ class ScanReport:
             "failure_reasons": dict(self.failure_reasons),
             "skip_reasons": dict(self.skip_reasons),
         }
+        if self.ranking_value is not None:
+            summary.update(
+                {"ranking_value": self.ranking_value, "rank_order": self.rank_order}
+            )
+        return summary

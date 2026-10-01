@@ -93,6 +93,12 @@ export function buildPresetPayload(form: ScreenFormState): ScreenPresetPayload {
     period: 'daily',
     formula_text: form.formulaText,
     formula_parameters: { ...form.formulaParameters },
+    ...(form.rankingValue?.trim()
+      ? {
+          ranking_value: form.rankingValue.trim(),
+          rank_order: form.rankingOrder === 'asc' ? 'asc' as const : 'desc' as const,
+        }
+      : {}),
   }
 }
 
@@ -162,6 +168,12 @@ export function presetToFormState(
       period: 'daily',
       formulaText: typeof record.formula_text === 'string' ? record.formula_text : '',
       formulaParameters: numberMap(record.formula_parameters),
+      ...(typeof record.ranking_value === 'string'
+        ? { rankingValue: record.ranking_value }
+        : {}),
+      ...(record.rank_order === 'asc' || record.rank_order === 'desc'
+        ? { rankingOrder: record.rank_order }
+        : {}),
     },
     staleConditions,
     staleSignals,
@@ -204,6 +216,11 @@ export function researchToFormState(
 
   const knownSignals = new Set(available.signalIds)
   const knownValues = new Set(available.valueIds)
+  const requestedRankingValue = typeof record.ranking_value === 'string'
+    ? record.ranking_value.trim()
+    : ''
+  const rankingValue = requestedRankingValue
+  const rankingOrder = record.rank_order === 'asc' ? 'asc' : 'desc'
   const signals = stringList(record.signals)
   const selectedSignals = knownSignals.size > 0
     ? signals.filter((signal) => knownSignals.has(signal))
@@ -267,6 +284,10 @@ export function researchToFormState(
       period: 'daily',
       formulaText: typeof record.formula_text === 'string' ? record.formula_text : '',
       formulaParameters: numberMap(record.formula_parameters),
+      ...(requestedRankingValue ? { rankingValue } : {}),
+      ...(record.rank_order === 'asc' || record.rank_order === 'desc'
+        ? { rankingOrder }
+        : {}),
     },
     notes,
   }

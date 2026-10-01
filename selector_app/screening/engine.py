@@ -197,6 +197,9 @@ def _condition_formula_results(
         for value_id in (condition.left_value, condition.right_value)
         if value_id is not None
     )
+    if config.ranking_value is not None:
+        value_ids += (config.ranking_value,)
+    value_ids = tuple(dict.fromkeys(value_ids))
     definitions = registry.formulas_for_values(value_ids)
     if indicator_cache is not None:
         return indicator_cache.get_or_compute(
@@ -213,6 +216,14 @@ def _condition_formula_results(
 def _date_to_int(value: object) -> int:
     timestamp = pd.Timestamp(value)
     return int(timestamp.strftime("%Y%m%d"))
+
+
+def _ranking_sort_key(value: float | None, order: str) -> tuple[int, float]:
+    """Sort finite rank values first, retaining scan order for ties and nulls."""
+
+    if value is None or not np.isfinite(value):
+        return (1, 0.0)
+    return (0, float(value) if order == "asc" else -float(value))
 
 
 def _visible_indicator_values(
@@ -263,7 +274,16 @@ def _evaluate_frame(
             code=ref.code,
             indicator_cache=indicator_cache,
         )
-        if any(not result.sufficient_data for result in formula_results.values()):
+        required_formula_ids = {
+            value_id.partition(".")[0]
+            for condition in config.conditions
+            for value_id in (condition.left_value, condition.right_value)
+            if value_id is not None
+        }
+        if any(
+            not formula_results[formula_id].sufficient_data
+            for formula_id in required_formula_ids
+        ):
             return ScanOutcome(skipped_reason="数据不足")
         condition_masks = [
             _condition_mask(condition, formula_results) for condition in config.conditions
@@ -305,7 +325,18 @@ def _evaluate_frame(
         formula_results = {"custom": formula_result}
         matched_bools = [signal_id in matched_ids for signal_id in config.selected_signals]
     else:
-        definitions = registry.formulas_for_signals(config.selected_signals)
+        definitions_by_id = {
+            definition.id: definition
+            for definition in registry.formulas_for_signals(config.selected_signals)
+        }
+        if config.ranking_value is not None:
+            definitions_by_id.update(
+                {
+                    definition.id: definition
+                    for definition in registry.formulas_for_values((config.ranking_value,))
+                }
+            )
+        definitions = tuple(definitions_by_id.values())
         results = (
             indicator_cache.get_or_compute(
                 frame,
@@ -319,7 +350,10 @@ def _evaluate_frame(
                 for definition in definitions
             }
         )
-        if any(not result.sufficient_data for result in results.values()):
+        signal_formula_ids = {
+            registry.signal(signal_id).formula_id for signal_id in config.selected_signals
+        }
+        if any(not results[formula_id].sufficient_data for formula_id in signal_formula_ids):
             return ScanOutcome(skipped_reason="数据不足")
         matched_ids = tuple(
             signal_id
@@ -334,6 +368,8 @@ def _evaluate_frame(
         return ScanOutcome()
 
     indicator_values = _visible_indicator_values(formula_results, registry)
+    if config.ranking_value is not None:
+        indicator_values.setdefault(config.ranking_value, None)
     last_close = float(frame["close"].iloc[-1])
     return ScanOutcome(
         result=ScreenMatch(
@@ -374,11 +410,32 @@ class ScreenEngine:
         if not refs:
             if progress_callback is not None:
                 progress_callback(0, 0, ScanOutcome())
-            return ScanReport(0, 0, 0, 0, 0, (), {}, {})
+            return ScanReport(
+                0,
+                0,
+                0,
+                0,
+                0,
+                (),
+                {},
+                {},
+                ranking_value=config.ranking_value,
+                rank_order=config.rank_order,
+            )
 
         frames = self._batch_frames(refs)
         outcomes = self._scan_refs(refs, config, progress_callback, parsed_formula, frames)
         results = tuple(outcome.result for outcome in outcomes if outcome.result is not None)
+        ranking_value = config.ranking_value
+        if ranking_value is not None:
+            results = tuple(
+                sorted(
+                    results,
+                    key=lambda result: _ranking_sort_key(
+                        result.indicator_values.get(ranking_value), config.rank_order
+                    ),
+                )
+            )
         failures = Counter(
             outcome.error_reason for outcome in outcomes if outcome.error_reason is not None
         )
@@ -394,6 +451,8 @@ class ScreenEngine:
             results=results,
             failure_reasons=dict(failures),
             skip_reasons=dict(skips),
+            ranking_value=config.ranking_value,
+            rank_order=config.rank_order,
         )
 
     def _scan_refs(
