@@ -205,25 +205,36 @@ describe('IndividualResearchPage', () => {
       candidate_hash: 'combo-and',
       condition_rules: {
         buy: {
-          signals: [], combine_mode: 'all', conditions: [
-            { left_value: 'technical.rsi14', operator: 'lte', right_constant: 35 },
-            { left_value: 'technical.return20', operator: 'gte', right_constant: 0 },
-          ],
+          candidate_id: 'buy-combo',
+          rule: {
+            signals: [], combine_mode: 'all', conditions: [
+              { left_value: 'technical.rsi14', operator: 'lte', right_constant: 35 },
+              { left_value: 'technical.return20', operator: 'gte', right_constant: 0 },
+            ],
+          },
         },
-        sell: candidate.condition_rules!.sell,
+        sell: {
+          candidate_id: 'sell-combo',
+          rule: candidate.condition_rules!.sell,
+        },
       },
+    }
+    const configFallbackRule: NonNullable<
+      IndividualResearchResult['results_by_sharpe'][number]['config']['buy_rule']
+    > = {
+      signals: [], combine_mode: 'any', minimum_matches: null, conditions: [
+        { left_value: 'technical.rsi14', operator: 'lte', right_constant: 35, right_value: null },
+        { left_value: 'technical.return20', operator: 'gte', right_constant: 0, right_value: null },
+      ],
     }
     const sellCombo = {
       ...candidate,
       candidate_hash: 'combo-or',
-      condition_rules: {
-        buy: {
-          signals: [], combine_mode: 'any', conditions: [
-            { left_value: 'technical.rsi14', operator: 'lte', right_constant: 35 },
-            { left_value: 'technical.return20', operator: 'gte', right_constant: 0 },
-          ],
-        },
-        sell: candidate.condition_rules!.sell,
+      condition_rules: undefined,
+      config: {
+        ...candidate.config,
+        buy_rule: configFallbackRule,
+        sell_rule: configFallbackRule,
       },
     }
     const comboResult: IndividualResearchResult = {

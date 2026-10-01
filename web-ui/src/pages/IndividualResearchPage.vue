@@ -364,16 +364,39 @@ function formatNumber(value: number | null | undefined, digits = 2): string {
 }
 
 function ruleText(candidate: IndividualResearchCandidate, side: 'buy' | 'sell'): string {
-  const rule = candidate.condition_rules?.[side]
+  const storedRule = candidate.condition_rules?.[side]
+  const nestedRule = storedRule?.rule
+  const storedDirectRule = storedRule && (
+    Array.isArray(storedRule.signals) || Array.isArray(storedRule.conditions)
+  ) ? storedRule : null
+  const legacyNestedRule = nestedRule && typeof nestedRule === 'object'
+    ? nestedRule as Record<string, unknown>
+    : null
+  const configRule = side === 'buy' ? candidate.config.buy_rule : candidate.config.sell_rule
+  const fallbackRule = configRule && typeof configRule === 'object'
+    ? configRule as unknown as Record<string, unknown>
+    : null
+  const rule = storedDirectRule ?? legacyNestedRule ?? fallbackRule
   if (!rule) return '—'
   const signals = Array.isArray(rule.signals) ? rule.signals.filter((item): item is string => typeof item === 'string') : []
   const conditions = Array.isArray(rule.conditions) ? rule.conditions : []
+  const operatorSymbols: Record<string, string> = {
+    gt: '>',
+    gte: '≥',
+    lt: '<',
+    lte: '≤',
+    eq: '=',
+    neq: '≠',
+    cross_up: '上穿',
+    cross_down: '下穿',
+  }
   const parts = [
     ...signals,
     ...conditions.flatMap((item) => {
       if (!item || typeof item !== 'object') return []
       const condition = item as Record<string, unknown>
-      return [`${String(condition.left_value ?? '')} ${String(condition.operator ?? '')} ${String(condition.right_constant ?? condition.right_value ?? '')}`]
+      const operator = String(condition.operator ?? '')
+      return [`${String(condition.left_value ?? '')} ${operatorSymbols[operator] ?? operator} ${String(condition.right_constant ?? condition.right_value ?? '')}`]
     }),
   ]
   const separator = rule.combine_mode === 'any' ? ' 或 ' : ' 且 '
