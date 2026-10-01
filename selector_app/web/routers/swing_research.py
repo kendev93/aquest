@@ -2,8 +2,9 @@
 
 Two steps, deliberately kept apart. ``/overview`` cuts the market and reports
 distributions so a threshold can be picked with data rather than taste;
-``/indicator-study`` then scores every dimensionless technical output against
-the labels that segmentation implies.
+``/indicator-study`` then scores individual indicators and a bounded set of
+two-indicator features against those labels on chronological train, validation
+and holdout splits.
 
 Each step has a synchronous endpoint and a ``/stream`` twin. The twin is what
 the UI uses: a full-market study is tens of seconds to minutes of work, and a

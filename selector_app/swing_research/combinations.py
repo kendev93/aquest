@@ -12,7 +12,7 @@ from .scoring import tie_average_rank
 TRAIN_RATIO = 0.6
 VALIDATION_RATIO = 0.2
 PAIR_COMPONENT_LIMIT = 8
-PAIR_HOLDOUT_LIMIT_PER_LABEL = 5
+HOLDOUT_FINALIST_LIMIT_PER_LABEL = 5
 PAIR_OPERATIONS = ("rank_gap", "rank_ratio", "cross_up", "cross_down")
 PAIR_OPERATION_NAMES: Mapping[str, str] = {
     "rank_gap": "分位差",
@@ -92,7 +92,7 @@ def percentile_rank_panel(values: np.ndarray) -> np.ndarray:
     counts = mask.sum(axis=0).astype(float)
     ranks = tie_average_rank(matrix, mask)
     denominator = counts[None, :] + 1.0
-    return np.asarray(np.where(mask, ranks / denominator, np.nan), dtype=np.float32)
+    return np.asarray(np.where(mask, (ranks + 1.0) / denominator, np.nan), dtype=np.float32)
 
 
 def combine_rank_panels(
@@ -171,7 +171,7 @@ def fast_rank_ic(
     return {
         "ic_mean": abs(signed_mean),
         "signed_ic_mean": signed_mean,
-        "icir": signed_mean / deviation if deviation > 1e-12 else None,
+        "icir": abs(signed_mean / deviation) if deviation > 1e-12 else None,
         "ic_days": int(finite.sum()),
         "order": "high" if signed_mean >= 0 else "low",
     }
@@ -189,7 +189,7 @@ def _empty_rank_ic() -> dict[str, object]:
 
 __all__ = [
     "PAIR_COMPONENT_LIMIT",
-    "PAIR_HOLDOUT_LIMIT_PER_LABEL",
+    "HOLDOUT_FINALIST_LIMIT_PER_LABEL",
     "PAIR_OPERATIONS",
     "PAIR_OPERATION_NAMES",
     "TRAIN_RATIO",

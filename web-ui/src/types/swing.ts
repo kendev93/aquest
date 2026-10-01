@@ -56,6 +56,44 @@ export interface SwingLabelOption {
 }
 
 
+export interface SwingSplitWindow {
+  start: string | null
+  end: string | null
+  days: number
+  purged_days: number
+}
+
+
+export interface SwingSplitMetadata {
+  train_ratio: number
+  validation_ratio: number
+  holdout_ratio: number
+  purge_trading_days: number
+  method: string
+  holdout_policy: string
+  attribution_note: string
+  train: SwingSplitWindow
+  validation: SwingSplitWindow
+  holdout: SwingSplitWindow
+}
+
+
+export interface SwingSplitMetrics {
+  ic_mean: number | null
+  signed_ic_mean: number | null
+  icir: number | null
+  ic_days: number
+  order: 'high' | 'low' | null
+  pvalue?: number | null
+  qvalue?: number | null
+  significant?: boolean
+  ic_threshold?: number | null
+  top_lift?: number | null
+  threshold_hint?: number | null
+  note?: string | null
+}
+
+
 export interface SwingScore {
   value_id: string
   display_name: string
@@ -73,6 +111,46 @@ export interface SwingScore {
   qvalue: number | null
   significant: boolean
   note: string | null
+  train?: SwingSplitMetrics | null
+  validation?: SwingSplitMetrics | null
+  holdout?: SwingSplitMetrics | null
+  holdout_evaluated?: boolean
+  direction_stable?: boolean | null
+}
+
+
+export interface SwingCombinationCandidate {
+  candidate_id: string
+  left_value_id: string
+  left_display_name: string
+  right_value_id: string
+  right_display_name: string
+  operation: 'rank_gap' | 'rank_ratio' | 'cross_up' | 'cross_down'
+  operation_display_name: string
+  expression: string
+  label: SwingLabel
+  validation_rank: number
+  train: SwingSplitMetrics
+  validation: SwingSplitMetrics
+  holdout: SwingSplitMetrics | null
+  direction_stable: boolean | null
+}
+
+
+export interface SwingCombinationSummary {
+  component_limit_per_label: number
+  finalists_per_label: number
+  candidate_counts: Record<string, {
+    selected_components: string[]
+    generated: number
+    validation_eligible: number
+    holdout_evaluated: number
+  }>
+  operations: Record<string, string>
+  ranking_basis: string
+  holdout_usage: string
+  value_scale: string
+  direct_rule_support: boolean
 }
 
 
@@ -125,7 +203,10 @@ export interface SwingStudyResult {
   value_count: number
   labels: SwingLabelOption[]
   date_range: { start: string | null; end: string | null; days: number }
+  split_metadata?: SwingSplitMetadata | null
   scores: SwingScore[]
+  combination_scores?: SwingCombinationCandidate[]
+  combination_summary?: SwingCombinationSummary | null
   significant_count: number
   reason: string | null
   condition_plan: SwingConditionPlan | null

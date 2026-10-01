@@ -15,10 +15,13 @@ import {
 import TermHint from '../components/TermHint.vue'
 import type {
   BacktestHistorySummary,
+  SwingCombinationCandidate,
   SwingConditionTemplate,
   SwingLabel,
   SwingOverviewResult,
   SwingScenario,
+  SwingSplitMetrics,
+  SwingSplitWindow,
   SwingStudyResult,
 } from '../types'
 import { saveSwingPlan } from '../utils/swingHandoff'
@@ -417,6 +420,29 @@ function rangeText(start: string | null, end: string | null): string {
   return `${start ?? '起点'} → ${end ?? '最新'}`
 }
 
+function splitRangeText(window: SwingSplitWindow): string {
+  if (!window.start || !window.end) return '样本不足'
+  return `${window.start} → ${window.end} · ${window.days} 个交易日`
+}
+
+function splitIc(metrics: SwingSplitMetrics | null | undefined): string {
+  if (!metrics) return '—'
+  return `${formatNumber(metrics.ic_mean, 3)} / ${metrics.ic_days} 日`
+}
+
+function stabilityText(
+  stable: boolean | null | undefined,
+  evaluated = true,
+): string {
+  if (!evaluated) return '未复核'
+  if (stable === null || stable === undefined) return '无法判定'
+  return stable ? '方向一致' : '方向变化'
+}
+
+function combinationDisplay(candidate: SwingCombinationCandidate): string {
+  return `${candidate.expression} · ${candidate.operation_display_name}`
+}
+
 function scenarioLabel(scenario: SwingScenario): string {
   return `${formatNumber(scenario.reversal_multiple, 1)} 倍`
 }
@@ -428,6 +454,17 @@ function barWidth(count: number, buckets: { count: number }[]): string {
 }
 
 const plan = computed(() => studyResult.value?.condition_plan ?? null)
+const splitMetadata = computed(() => studyResult.value?.split_metadata ?? null)
+const combinationScores = computed(() => studyResult.value?.combination_scores ?? [])
+const splitWindows = computed(() => {
+  const split = splitMetadata.value
+  if (!split) return []
+  return [
+    { key: 'train', title: '训练段', window: split.train },
+    { key: 'validation', title: '验证段', window: split.validation },
+    { key: 'holdout', title: '留出段', window: split.holdout },
+  ]
+})
 
 const noiseFloor = computed<number | null>(() => {
   const scores = studyResult.value?.scores ?? []
@@ -656,7 +693,7 @@ async function copyPlan(): Promise<void> {
           <div><span class="section-kicker">02 / INDICATOR STUDY</span><h2>第二步 · 指标与波段的关系</h2></div>
           <span class="required-hint">同步计算，样本越大越慢</span>
         </div>
-        <p class="helper">逐日把所有股票按指标排名，再看它们的<TermHint term="ic" />，并用<TermHint term="blockPermutation" />给出<TermHint term="noiseFloor" />。默认 1000 只 × 近 5 年需要一到三分钟，期间页面会一直等着；全市场 5000 只以上会内存溢出。5 年这个长度是实测出来的拐点：再拉长噪声门槛只会从 0.017 降到 0.014，但耗时翻倍。</p>
+        <p class="helper">逐日把所有股票按指标排名，再看它们的<TermHint term="ic" />，并用<TermHint term="blockPermutation" />给出<TermHint term="noiseFloor" />。结果会按训练、验证和留出三段计算，并在训练段筛出少量指标组成双指标候选；候选数量会增加计算时间，全市场样本也请留意内存预算。</p>
 
         <div class="compact-fields swing-fields">
           <div>
@@ -760,10 +797,22 @@ async function copyPlan(): Promise<void> {
             <div><span>命中标的</span><strong>{{ studyResult.scanned_stocks }}<small> / {{ studyResult.stock_count }}</small></strong></div>
             <div><span>交易日</span><strong>{{ studyResult.date_range.days }}</strong></div>
             <div><span>覆盖区间</span><strong>{{ rangeText(studyResult.date_range.start, studyResult.date_range.end) }}</strong></div>
-            <div><span>显著结论</span><strong :class="{ positive: studyResult.significant_count > 0 }">{{ studyResult.significant_count }}<small> / {{ studyResult.scores.length }}</small></strong></div>
+            <div><span>验证段显著结论</span><strong :class="{ positive: studyResult.significant_count > 0 }">{{ studyResult.significant_count }}<small> / {{ studyResult.scores.length }}</small></strong></div>
             <div><span>噪声门槛（IC）</span><strong>{{ formatNumber(noiseFloor, 3) }}</strong></div>
             <div><span>可交易条数</span><strong>{{ plan?.tradeable_count ?? 0 }}</strong></div>
           </div>
+
+          <section v-if="splitMetadata" class="swing-splits" data-testid="swing-study-splits">
+            <div class="section-heading"><h3>训练 / 验证 / 留出</h3><span class="required-hint">按交易日 60 / 20 / 20</span></div>
+            <div class="swing-split-grid">
+              <div v-for="item in splitWindows" :key="item.key" class="swing-split-card">
+                <strong>{{ item.title }}</strong>
+                <span>{{ splitRangeText(item.window) }}</span>
+                <small>边界剔除 {{ item.window.purged_days }} 个交易日</small>
+              </div>
+            </div>
+            <p class="helper">{{ splitMetadata.method }}。{{ splitMetadata.holdout_policy }}。{{ splitMetadata.attribution_note }}。</p>
+          </section>
 
           <div v-if="studyResult.reason" class="diagnostic" data-testid="swing-study-reason">{{ studyResult.reason }}</div>
 
@@ -806,6 +855,40 @@ async function copyPlan(): Promise<void> {
             </div>
           </section>
 
+          <div v-if="studyResult.combination_summary" class="data-section" data-testid="swing-combination-results">
+            <div class="section-heading"><h3>双指标组合（按验证段排序）</h3><span class="required-hint">训练选组件 · 验证选候选 · 留出只复核</span></div>
+            <p class="helper">组合只针对可交易的“近期将启动上涨 / 下跌”标签。先把每个指标转换为当日横截面分位，再计算分位差、加稳定项的分位比、分位上穿或下穿。留出 q 值对入围单指标与组合统一做多重检验校正，只用于独立复核，不改变验证段排序。组合目前用于研究比较，尚不能直接带入买卖条件研究。</p>
+            <div v-if="!combinationScores.length" class="inline-empty">未选择可交易标签，或训练段没有筛出至少两个有 60 个有效 IC 交易日的组件，或验证段没有足够有效样本形成候选。</div>
+            <div v-else class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>验证排名</th>
+                    <th>波段标签</th>
+                    <th>组合</th>
+                    <th>训练 IC / 天数</th>
+                    <th>验证 IC / 天数</th>
+                    <th>留出 IC / 天数</th>
+                    <th>留出 q</th>
+                    <th>方向稳定性</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="candidate in combinationScores" :key="candidate.candidate_id" data-testid="swing-combination-row">
+                    <td>{{ candidate.validation_rank }}</td>
+                    <td>{{ labelName(candidate.label) }}</td>
+                    <td><strong>{{ combinationDisplay(candidate) }}</strong><br><small class="muted-code">{{ candidate.left_value_id }} · {{ candidate.right_value_id }}</small></td>
+                    <td>{{ splitIc(candidate.train) }}</td>
+                    <td>{{ splitIc(candidate.validation) }}</td>
+                    <td>{{ splitIc(candidate.holdout) }}</td>
+                    <td>{{ formatNumber(candidate.holdout?.qvalue, 3) }}</td>
+                    <td :class="{ positive: candidate.direction_stable, negative: candidate.direction_stable === false }">{{ stabilityText(candidate.direction_stable) }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
           <div class="data-section">
             <div class="section-heading"><h3>指标打分（按显著性与信息系数排序）</h3><span class="required-hint">q 值 < 显著性水平 才算数</span></div>
             <div class="table-wrap">
@@ -816,11 +899,14 @@ async function copyPlan(): Promise<void> {
                     <th>波段标签</th>
                     <th>可交易</th>
                     <th>方向</th>
-                    <th>平均信息系数<TermHint term="icMean" /></th>
+                    <th>验证段 IC<TermHint term="icMean" /></th>
+                    <th>训练段 IC</th>
+                    <th>留出 IC</th>
                     <th>信息比率<TermHint term="icir" /></th>
-                    <th>p 值</th>
-                    <th>q 值<TermHint term="falseDiscovery" /></th>
+                    <th>验证 p 值</th>
+                    <th>验证 q 值<TermHint term="falseDiscovery" /></th>
                     <th>阈值提示<TermHint term="thresholdHint" /></th>
+                    <th>方向稳定性</th>
                     <th>结论</th>
                   </tr>
                 </thead>
@@ -834,10 +920,13 @@ async function copyPlan(): Promise<void> {
                     </td>
                     <td>{{ score.order === 'high' ? '越大越相关' : '越小越相关' }}</td>
                     <td :class="{ positive: score.significant && score.ic_mean !== null && score.ic_mean > 0 }">{{ formatNumber(score.ic_mean, 3) }}</td>
+                    <td>{{ formatNumber(score.train?.ic_mean, 3) }}</td>
+                    <td>{{ formatNumber(score.holdout?.ic_mean, 3) }}</td>
                     <td>{{ formatNumber(score.icir, 2) }}</td>
                     <td>{{ formatNumber(score.pvalue, 3) }}</td>
                     <td>{{ formatNumber(score.qvalue, 3) }}</td>
                     <td>{{ formatNumber(score.threshold_hint, 4) }}</td>
+                    <td :class="{ positive: score.direction_stable, negative: score.direction_stable === false }">{{ stabilityText(score.direction_stable, score.holdout_evaluated) }}</td>
                     <td :class="{ positive: score.significant, negative: !score.significant }">
                       {{ score.significant ? '通过检验' : '未通过检验' }}
                     </td>
@@ -987,6 +1076,35 @@ async function copyPlan(): Promise<void> {
 
 .swing-result {
   margin-top: 18px;
+}
+
+.swing-splits {
+  margin-top: 16px;
+}
+
+.swing-split-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.swing-split-card {
+  display: grid;
+  gap: 5px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  background: rgba(8, 15, 32, 0.55);
+  font-size: 11px;
+}
+
+.swing-split-card strong {
+  color: var(--accent);
+}
+
+.swing-split-card span,
+.swing-split-card small {
+  color: var(--muted);
 }
 
 .swing-progress {

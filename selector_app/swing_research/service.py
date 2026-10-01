@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import shutil
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from tempfile import TemporaryDirectory, gettempdir
 
@@ -24,35 +24,46 @@ from selector_app.market_data.adapter import BatchMarketDataAdapter
 from selector_app.market_data.models import StockRef
 from selector_app.strategy_discovery.catalog import IndicatorCatalog, default_indicator_catalog
 
-from .conditions import build_condition_plan
+from .combinations import (
+    HOLDOUT_FINALIST_LIMIT_PER_LABEL,
+    PAIR_COMPONENT_LIMIT,
+    PAIR_OPERATION_NAMES,
+    combine_rank_panels,
+    fast_rank_ic,
+    percentile_rank_panel,
+    split_trading_days,
+)
+from .conditions import TRADEABLE_LABELS, build_condition_plan
 from .labels import LABEL_DISPLAY_NAMES, bar_labels
 from .models import MAX_PANEL_BYTES, SwingIndicatorConfig, SwingOverviewConfig
 from .overview import SwingAccumulator
-from .scoring import DEFAULT_SEED, IndicatorScore, annotate_significance, score_indicator
+from .scoring import (
+    DEFAULT_SEED,
+    MIN_IC_DAYS,
+    IndicatorScore,
+    annotate_significance,
+    score_indicator,
+)
 from .segments import atr_percent, split_swings
 from .values import custom_value_ids, display_name_for, formula_groups
 
 ProgressCallback = Callable[[int, int], None] | None
 #: ``indicator_study`` reports ``(current, total, stage)``. The stage is what
-#: the UI prints; the two numbers are steps of one shared unit so a single bar
-#: can span "read the calendar", "fill the panel" and "score every day" without
-#: jumping backwards. Two passes over the stocks plus one step per
-#: indicator/label pair is the honest unit - the scoring pass is easily half the
-#: wall clock once permutations are involved, and a bar that stops at the panel
-#: would sit at 100% for that long.
+#: the UI prints; the numbers span calendar read, panel fill, split scoring,
+#: pair evaluation and the final untouched holdout pass.
 StudyProgressCallback = Callable[[int, int, str], None] | None
-#: One step per indicator/label pair while scoring.
-ScoreProgressCallback = Callable[[int], None] | None
+#: Weighted work units reported while scoring.
+ScoreProgressCallback = Callable[[float, str], None] | None
 #: A calendar-scan step reads one stock's bars; a panel-fill step re-reads them
 #: with warm-up, computes every indicator and cuts the swings. Measured on a
 #: 1,000-stock / five-year run: 12.7s against 2.1s for the same number of steps.
 _PANEL_FILL_WEIGHT = 6.0
-#: Cost of one indicator/label pair, in scan-steps, per pass over the
-#: cross-section and per stock in it. Scoring is where the permutations live,
-#: so it scales with both. Also measured: 40 pairs over 1,000 stocks with 200
-#: permutations took 20.9s - more than half the run - while a bar built from
-#: step counts alone would have given it 2% of the width and sat there.
+#: Approximate cost of one permutation-tested indicator/label score, in scan
+#: steps per stock. Fast rank-only training and pair ranking receive a smaller
+#: weight because they do not build the date-by-date permutation matrix.
 _SCORE_PAIR_WEIGHT = 0.00125
+_FAST_SCORE_WEIGHT = 0.00015
+_STABLE_DIRECTION_MIN_IC = 0.01
 PANEL_DTYPE = np.float32
 PANEL_DIR_PREFIX = "swing-panel-"
 #: How much free RAM a panel must leave for itself. The memmap's page cache, the
@@ -96,7 +107,7 @@ def _available_memory_bytes() -> int | None:
     return None
 
 
-def _check_panel_budget(required: int) -> None:
+def _check_panel_budget(required: int, *, memory_extra_bytes: int = 0) -> None:
     """Refuse a run that cannot fit, naming the wall it hit.
 
     Three different walls, and they need different advice.
@@ -108,10 +119,9 @@ def _check_panel_budget(required: int) -> None:
     front.
 
     RAM is the one that bites. The panel is a memmap, but the kernel caches it,
-    the labels are a resident array, and scoring copies each slice into float64,
-    so peak memory runs well above the file size: a 6 GB panel on an 8 GB
-    container got the backend killed about five minutes in. Refusing before the
-    run beats taking the whole process down with it.
+    the labels are resident, and scoring copies slices and a bounded set of
+    percentile-rank panels into memory. Refusing before the run beats taking the
+    whole process down with it.
     """
 
     gib = 1024**3
@@ -127,9 +137,12 @@ def _check_panel_budget(required: int) -> None:
     if memory_ceiling == 0:
         available = _available_memory_bytes()
         memory_ceiling = available // PANEL_MEMORY_SAFETY if available is not None else 0
-    if memory_ceiling > 0 and required > memory_ceiling:
+    projected_panel_equivalent = required + memory_extra_bytes // PANEL_MEMORY_SAFETY
+    if memory_ceiling > 0 and projected_panel_equivalent > memory_ceiling:
         raise ValueError(
-            f"面板需要 {required / gib:.1f} GB，但当前可用内存 "
+            f"面板和双指标打分暂存预计需要 "
+            f"{(required * PANEL_MEMORY_SAFETY + memory_extra_bytes) / gib:.1f} GB，"
+            "但当前可用内存 "
             f"{memory_ceiling * PANEL_MEMORY_SAFETY / gib:.1f} GB 不足以安全容纳，"
             "运行中很可能把后端拖垮；请减少股票数或缩短区间"
             "（确要强行运行可设置 SWING_PANEL_MAX_MEMORY_BYTES）"
@@ -225,7 +238,7 @@ class SwingResearchService:
         config: SwingIndicatorConfig,
         progress_callback: StudyProgressCallback = None,
     ) -> dict[str, object]:
-        """Score every indicator against every requested swing label."""
+        """Score indicators and bounded pair features on chronological splits."""
 
         def report(current: int, total: int, stage: str) -> None:
             if progress_callback is not None:
@@ -234,17 +247,33 @@ class SwingResearchService:
         resolved = config.normalized()
         value_ids = self._resolve_value_ids(resolved)
         refs = self._list_refs(resolved)
-        # Progress is budgeted by measured cost, not by step count: the three
-        # passes have wildly different per-step prices, and a bar that charges
-        # them equally reaches 98% two thirds of the way through the wait.
         ref_total = len(refs)
         scan_units = float(ref_total)
         fill_units = scan_units * _PANEL_FILL_WEIGHT
-        score_steps = max(len(value_ids) * len(resolved.labels), 1)
-        score_units = score_steps * max(
+        tradeable_labels = tuple(label for label in resolved.labels if label in TRADEABLE_LABELS)
+        validation_score_count = len(value_ids) * len(resolved.labels)
+        training_scores = len(value_ids) * len(resolved.labels)
+        component_pairs = PAIR_COMPONENT_LIMIT * (PAIR_COMPONENT_LIMIT - 1)
+        max_pairs_per_label = component_pairs + (component_pairs // 2) * 3
+        max_pair_scores = len(tradeable_labels) * max_pairs_per_label
+        max_holdout_scores = (
+            len(tradeable_labels) * HOLDOUT_FINALIST_LIMIT_PER_LABEL * 2
+        )
+        permutation_score_weight = max(
             1.0, _SCORE_PAIR_WEIGHT * (1 + resolved.permutations) * ref_total
         )
+        fast_score_weight = max(0.1, _FAST_SCORE_WEIGHT * ref_total)
+        pair_score_weight = fast_score_weight * 2
+        score_units = max(
+            validation_score_count * permutation_score_weight
+            + max_holdout_scores * permutation_score_weight
+            + training_scores * fast_score_weight
+            + len(tradeable_labels) * PAIR_COMPONENT_LIMIT * fast_score_weight
+            + max_pair_scores * pair_score_weight,
+            1.0,
+        )
         total_steps = max(int(round(scan_units + fill_units + score_units)), 1)
+        score_done = 0.0
 
         def panel_progress(current: int, _total: int) -> None:
             if current <= ref_total:
@@ -255,9 +284,11 @@ class SwingResearchService:
                 stage = "正在计算指标与切分波段"
             report(int(round(done)), total_steps, stage)
 
-        def score_progress(done: int) -> None:
-            earned = scan_units + fill_units + (done / score_steps) * score_units
-            report(int(round(earned)), total_steps, "正在逐日横截面打分")
+        def score_progress(units: float, stage: str) -> None:
+            nonlocal score_done
+            score_done = min(score_done + units, score_units)
+            earned = scan_units + fill_units + score_done
+            report(int(round(earned)), total_steps, stage)
 
         empty = _empty_study_payload(resolved, value_ids, stock_count=len(refs))
         if not refs or not value_ids:
@@ -279,9 +310,15 @@ class SwingResearchService:
             # The panel is a memmap, but the labels sit in RAM beside it, so a
             # budget that only counted the file would understate what the run
             # actually asks the machine for.
-            cells = int(np.prod(shape)) + len(resolved.labels) * len(rows) * calendar.size
-            required = cells * cell
-            _check_panel_budget(required)
+            panel_cells = int(np.prod(shape))
+            label_cells = len(resolved.labels) * len(rows) * calendar.size
+            required = (panel_cells + label_cells) * cell
+            pair_scratch_cells = (
+                (PAIR_COMPONENT_LIMIT + 24) * len(rows) * calendar.size
+                if tradeable_labels
+                else 0
+            )
+            _check_panel_budget(required, memory_extra_bytes=pair_scratch_cells * cell)
             panel = np.memmap(path, dtype=PANEL_DTYPE, mode="w+", shape=shape)
             panel[:] = np.nan
             labels = np.full(
@@ -300,23 +337,128 @@ class SwingResearchService:
                     labels,
                     panel_progress,
                 )
-                scores = self._score_panel(panel, labels, resolved, value_ids, score_progress)
+                if filled == 0:
+                    empty["reason"] = "没有股票能同时在区间内提供指标与波段标签"
+                    report(total_steps, total_steps, "没有可用的样本")
+                    return empty
+
+                split_slices, split_metadata = split_trading_days(calendar, resolved.horizon)
+                split_metadata["method"] = "按交易日顺序固定切分 60/20/20，并在边界清除前视窗口"
+                split_metadata["holdout_policy"] = "只复核验证段选出的候选，不参与筛选或排序"
+                split_metadata["attribution_note"] = (
+                    "波段高低点标签仅作事后归因；只有近期将启动上涨/下跌标签可交易"
+                )
+                train_slice = split_slices["train"]
+                validation_slice = split_slices["validation"]
+                holdout_slice = split_slices["holdout"]
+
+                train_metrics = self._rank_panel(
+                    panel,
+                    labels,
+                    resolved,
+                    value_ids,
+                    train_slice,
+                    lambda: score_progress(fast_score_weight, "正在计算训练段指标"),
+                )
+                validation_scores = self._score_panel(
+                    panel,
+                    labels,
+                    resolved,
+                    value_ids,
+                    validation_slice,
+                    lambda _done, _stage: score_progress(
+                        permutation_score_weight, "正在逐日横截面打分"
+                    ),
+                )
+                validation_scores = annotate_significance(
+                    validation_scores, alpha=resolved.alpha
+                )
+
+                combination_scores, combination_counts, pair_holdout_scores = (
+                    self._score_combinations(
+                        panel,
+                        labels,
+                        resolved,
+                        value_ids,
+                        train_metrics,
+                        train_slice,
+                        validation_slice,
+                        holdout_slice,
+                        tradeable_labels,
+                        fast_score_weight,
+                        pair_score_weight,
+                        permutation_score_weight,
+                        score_progress,
+                    )
+                )
+
+                single_holdout_scores: list[IndicatorScore] = []
+                value_index = {value_id: index for index, value_id in enumerate(value_ids)}
+                label_index = {label: index for index, label in enumerate(resolved.labels)}
+                for label in tradeable_labels:
+                    finalists = _rank_validation_scores(
+                        score
+                        for score in validation_scores
+                        if score.label == label and score.ic_days > 0
+                    )[:HOLDOUT_FINALIST_LIMIT_PER_LABEL]
+                    for score in finalists:
+                        index = value_index[score.value_id]
+                        single_holdout_scores.append(
+                            score_indicator(
+                                np.asarray(panel[index][:, holdout_slice], dtype=float),
+                                np.asarray(
+                                    labels[label_index[label]][:, holdout_slice], dtype=float
+                                ),
+                                value_id=score.value_id,
+                                display_name=score.display_name,
+                                label=label,
+                                min_cross_section=resolved.min_cross_section,
+                                block_size=resolved.block_size,
+                                permutations=resolved.permutations,
+                                seed=DEFAULT_SEED,
+                                alpha=resolved.alpha,
+                            )
+                        )
+                        score_progress(
+                            permutation_score_weight, "正在留出段复核单指标候选"
+                        )
             finally:
                 del panel
 
-        if filled == 0:
-            empty["reason"] = "没有股票能同时在区间内提供指标与波段标签"
-            report(total_steps, total_steps, "没有可用的样本")
-            return empty
-
         report(total_steps, total_steps, "正在整理结论")
 
-        scores = annotate_significance(scores, alpha=resolved.alpha)
-        ordered = sorted(
-            scores,
-            key=lambda item: (not item.significant, -item.ic_mean, -(item.icir or 0.0)),
-        )
+        ordered = _rank_validation_scores(validation_scores)
         significant_count = sum(1 for item in ordered if item.significant)
+        all_holdout_scores = single_holdout_scores + pair_holdout_scores
+        annotated_holdout = annotate_significance(all_holdout_scores, alpha=resolved.alpha)
+        holdout_by_key = {
+            (item.value_id, item.label): item for item in annotated_holdout
+        }
+
+        score_payloads: list[dict[str, object]] = []
+        for score in ordered:
+            key = (score.value_id, score.label)
+            train = train_metrics.get(key)
+            holdout = holdout_by_key.get(key)
+            item = score.to_dict()
+            item.update(
+                {
+                    "train": train,
+                    "validation": _score_metrics(score),
+                    "holdout": _score_metrics(holdout) if holdout is not None else None,
+                    "holdout_evaluated": holdout is not None,
+                    "direction_stable": _direction_stable(train, score, holdout),
+                }
+            )
+            score_payloads.append(item)
+
+        for candidate in combination_scores:
+            holdout = holdout_by_key.get((str(candidate["candidate_id"]), str(candidate["label"])))
+            candidate["holdout"] = _score_metrics(holdout) if holdout is not None else None
+            candidate["direction_stable"] = _direction_stable(
+                candidate.get("train"), candidate.get("validation"), holdout
+            )
+
         payload = _empty_study_payload(resolved, value_ids, stock_count=len(refs))
         payload.update(
             {
@@ -326,7 +468,19 @@ class SwingResearchService:
                     "end": str(calendar[-1].astype("datetime64[D]")),
                     "days": int(calendar.size),
                 },
-                "scores": [item.to_dict() for item in ordered],
+                "split_metadata": split_metadata,
+                "scores": score_payloads,
+                "combination_scores": combination_scores,
+                "combination_summary": {
+                    "component_limit_per_label": PAIR_COMPONENT_LIMIT,
+                    "finalists_per_label": HOLDOUT_FINALIST_LIMIT_PER_LABEL,
+                    "candidate_counts": combination_counts,
+                    "operations": dict(PAIR_OPERATION_NAMES),
+                    "ranking_basis": "训练段选组件，验证段按 |IC| 与稳定性排序",
+                    "holdout_usage": "仅展示验证段前列候选的独立表现，不改变候选排序",
+                    "value_scale": "每个交易日先转为横截面分位；分位差、分位比及分位上/下穿",
+                    "direct_rule_support": False,
+                },
                 "significant_count": significant_count,
                 "reason": _study_reason(ordered, significant_count),
                 # Ready-to-paste rules: the study's findings expressed in the
@@ -465,24 +619,201 @@ class SwingResearchService:
                 progress_callback(total + min(offset + len(batch), total), total * 2)
         return filled
 
+    def _rank_panel(
+        self,
+        panel: np.memmap,
+        labels: np.ndarray,
+        config: SwingIndicatorConfig,
+        value_ids: tuple[str, ...],
+        dates: slice,
+        on_score: Callable[[], None],
+    ) -> dict[tuple[str, str], dict[str, object]]:
+        """Measure all singles quickly for component selection and split display."""
+
+        results: dict[tuple[str, str], dict[str, object]] = {}
+        for value_index, value_id in enumerate(value_ids):
+            values = np.asarray(panel[value_index][:, dates], dtype=float)
+            for label_index, label in enumerate(config.labels):
+                results[(value_id, label)] = fast_rank_ic(
+                    values,
+                    np.asarray(labels[label_index][:, dates], dtype=float),
+                    min_cross_section=config.min_cross_section,
+                )
+                on_score()
+        return results
+
+    def _score_combinations(
+        self,
+        panel: np.memmap,
+        labels: np.ndarray,
+        config: SwingIndicatorConfig,
+        value_ids: tuple[str, ...],
+        train_metrics: dict[tuple[str, str], dict[str, object]],
+        train_dates: slice,
+        validation_dates: slice,
+        holdout_dates: slice,
+        tradeable_labels: tuple[str, ...],
+        fast_score_weight: float,
+        pair_score_weight: float,
+        permutation_score_weight: float,
+        on_score: ScoreProgressCallback,
+    ) -> tuple[list[dict[str, object]], dict[str, object], list[IndicatorScore]]:
+        """Search a bounded pair pool; validation ranks, holdout only evaluates."""
+
+        catalog = default_indicator_catalog()
+        value_index = {value_id: index for index, value_id in enumerate(value_ids)}
+        label_index: dict[str, int] = {
+            label: index for index, label in enumerate(config.labels)
+        }
+        candidates: list[dict[str, object]] = []
+        holdout_scores: list[IndicatorScore] = []
+        counts: dict[str, object] = {}
+
+        for label in tradeable_labels:
+            components = [
+                (value_id, metric)
+                for value_id in value_ids
+                if (metric := train_metrics.get((value_id, label))) is not None
+                and _metric_number(metric, "ic_days") >= MIN_IC_DAYS
+                and _has_finite_metric(metric, "ic_mean")
+            ]
+            components.sort(
+                key=lambda item: (
+                    -_metric_number(item[1], "ic_mean"),
+                    -abs(_metric_number(item[1], "icir")),
+                )
+            )
+            selected = components[:PAIR_COMPONENT_LIMIT]
+            selected_ids = [value_id for value_id, _ in selected]
+            label_counts: dict[str, object] = {
+                "selected_components": selected_ids,
+                "generated": 0,
+                "validation_eligible": 0,
+                "holdout_evaluated": 0,
+            }
+            counts[label] = label_counts
+            if len(selected_ids) < 2:
+                continue
+
+            # Rank-normalise just the bounded training-selected pool. Keeping
+            # these float32 panels avoids materialising every possible pair.
+            ranks: dict[str, np.ndarray] = {}
+            for value_id in selected_ids:
+                ranks[value_id] = percentile_rank_panel(
+                    np.asarray(panel[value_index[value_id]], dtype=float)
+                )
+                if on_score is not None:
+                    on_score(fast_score_weight, "正在归一化训练组件")
+            label_values = np.asarray(labels[label_index[label]], dtype=float)
+            label_candidates: list[dict[str, object]] = []
+            generated_count = 0
+            eligible_count = 0
+
+            def add_candidate(left_id: str, right_id: str, operation: str) -> None:
+                nonlocal generated_count, eligible_count
+                feature = combine_rank_panels(ranks[left_id], ranks[right_id], operation)
+                train_metric = fast_rank_ic(
+                    feature[:, train_dates],
+                    label_values[:, train_dates],
+                    min_cross_section=config.min_cross_section,
+                )
+                validation_metric = fast_rank_ic(
+                    feature[:, validation_dates],
+                    label_values[:, validation_dates],
+                    min_cross_section=config.min_cross_section,
+                )
+                candidate_id = f"pair:{operation}:{left_id}:{right_id}"
+                left_name = display_name_for(left_id, catalog)
+                right_name = display_name_for(right_id, catalog)
+                expression = _pair_expression(left_name, right_name, operation)
+                if _metric_number(validation_metric, "ic_days") >= MIN_IC_DAYS:
+                    eligible_count += 1
+                    label_candidates.append(
+                        {
+                            "candidate_id": candidate_id,
+                            "left_value_id": left_id,
+                            "left_display_name": left_name,
+                            "right_value_id": right_id,
+                            "right_display_name": right_name,
+                            "operation": operation,
+                            "operation_display_name": PAIR_OPERATION_NAMES[operation],
+                            "expression": expression,
+                            "label": label,
+                            "train": train_metric,
+                            "validation": validation_metric,
+                            "training_validation_direction_stable": _directions_match(
+                                train_metric, validation_metric
+                            ),
+                            "holdout": None,
+                            "direction_stable": None,
+                        }
+                    )
+                generated_count += 1
+                if on_score is not None:
+                    on_score(pair_score_weight, "正在验证段筛选双指标组合")
+
+            for left_position, left_id in enumerate(selected_ids):
+                for right_id in selected_ids[left_position + 1 :]:
+                    for operation in ("rank_gap", "cross_up", "cross_down"):
+                        add_candidate(left_id, right_id, operation)
+                for right_id in selected_ids:
+                    if right_id != left_id:
+                        add_candidate(left_id, right_id, "rank_ratio")
+
+            label_candidates.sort(
+                key=lambda item: (
+                    not bool(item["training_validation_direction_stable"]),
+                    *_fast_metric_rank_key(item["validation"]),
+                )
+            )
+            label_counts["generated"] = generated_count
+            label_counts["validation_eligible"] = eligible_count
+            finalists = label_candidates[:HOLDOUT_FINALIST_LIMIT_PER_LABEL]
+            for rank, candidate in enumerate(finalists, start=1):
+                candidate["validation_rank"] = rank
+                left_id = str(candidate["left_value_id"])
+                right_id = str(candidate["right_value_id"])
+                operation = str(candidate["operation"])
+                feature = combine_rank_panels(ranks[left_id], ranks[right_id], operation)
+                score = score_indicator(
+                    np.asarray(feature[:, holdout_dates], dtype=float),
+                    np.asarray(label_values[:, holdout_dates], dtype=float),
+                    value_id=str(candidate["candidate_id"]),
+                    display_name=str(candidate["expression"]),
+                    label=label,
+                    min_cross_section=config.min_cross_section,
+                    block_size=config.block_size,
+                    permutations=config.permutations,
+                    seed=DEFAULT_SEED,
+                    alpha=config.alpha,
+                )
+                holdout_scores.append(score)
+                label_counts["holdout_evaluated"] = len(finalists)
+                if on_score is not None:
+                    on_score(permutation_score_weight, "正在留出段复核双指标候选")
+                candidates.append(candidate)
+
+        return candidates, counts, holdout_scores
+
     def _score_panel(
         self,
         panel: np.memmap,
         labels: np.ndarray,
         config: SwingIndicatorConfig,
         value_ids: tuple[str, ...],
+        dates: slice,
         progress_callback: ScoreProgressCallback = None,
     ) -> list[IndicatorScore]:
         catalog = default_indicator_catalog()
         scores: list[IndicatorScore] = []
         done = 0
         for value_index, value_id in enumerate(value_ids):
-            matrix = np.asarray(panel[value_index], dtype=float)
+            matrix = np.asarray(panel[value_index][:, dates], dtype=float)
             for label_index, label in enumerate(config.labels):
                 scores.append(
                     score_indicator(
                         matrix,
-                        np.asarray(labels[label_index], dtype=float),
+                        np.asarray(labels[label_index][:, dates], dtype=float),
                         value_id=value_id,
                         display_name=display_name_for(value_id, catalog),
                         label=label,
@@ -495,7 +826,7 @@ class SwingResearchService:
                 )
                 done += 1
                 if progress_callback is not None:
-                    progress_callback(done)
+                    progress_callback(float(done), "正在验证段逐日打分")
         return scores
 
     def _list_refs(self, config: SwingOverviewConfig | SwingIndicatorConfig) -> list[StockRef]:
@@ -566,6 +897,104 @@ def _study_reason(scores: list[IndicatorScore], significant: int) -> str | None:
         "很可能只是同一类信号（超跌反弹或动量延续）的不同写法；"
         "请以信息系数最高、信息比率最稳的一两个为准，不要叠加使用"
     )
+
+
+def _metric_number(
+    metric: Mapping[str, object], key: str, *, default: float = 0.0
+) -> float:
+    value = metric.get(key)
+    if isinstance(value, (int, float)) and np.isfinite(value):
+        return float(value)
+    return default
+
+
+def _has_finite_metric(metric: Mapping[str, object], key: str) -> bool:
+    value = metric.get(key)
+    return isinstance(value, (int, float)) and bool(np.isfinite(value))
+
+
+def _rank_validation_scores(scores: Iterable[IndicatorScore]) -> list[IndicatorScore]:
+    """Order singles using only the validation split."""
+
+    return sorted(
+        scores,
+        key=lambda item: (
+            not item.significant,
+            -item.ic_mean if np.isfinite(item.ic_mean) else float("inf"),
+            -abs(item.icir) if item.icir is not None else 0.0,
+        ),
+    )
+
+
+def _fast_metric_rank_key(metric: object) -> tuple[float, float]:
+    if not isinstance(metric, Mapping):
+        return (float("inf"), float("inf"))
+    return (
+        -_metric_number(metric, "ic_mean", default=float("inf")),
+        -abs(_metric_number(metric, "icir")),
+    )
+
+
+def _signed_direction(metric: object) -> int | None:
+    if isinstance(metric, IndicatorScore):
+        if not np.isfinite(metric.ic_mean) or metric.ic_mean < _STABLE_DIRECTION_MIN_IC:
+            return None
+        return 1 if metric.order == "high" else -1
+    if not isinstance(metric, Mapping):
+        return None
+    signed_ic = _metric_number(metric, "signed_ic_mean", default=float("nan"))
+    if not np.isfinite(signed_ic) or abs(signed_ic) < _STABLE_DIRECTION_MIN_IC:
+        return None
+    return 1 if signed_ic > 0 else -1
+
+
+def _directions_match(first: object, second: object) -> bool:
+    first_direction = _signed_direction(first)
+    second_direction = _signed_direction(second)
+    return first_direction is not None and first_direction == second_direction
+
+
+def _score_metrics(score: IndicatorScore | None) -> dict[str, object] | None:
+    if score is None:
+        return None
+    sign = 1.0 if score.order == "high" else -1.0
+    return {
+        "ic_mean": score.ic_mean if np.isfinite(score.ic_mean) else None,
+        "signed_ic_mean": sign * score.ic_mean if np.isfinite(score.ic_mean) else None,
+        "icir": score.icir,
+        "ic_days": score.ic_days,
+        "order": score.order,
+        "pvalue": score.pvalue,
+        "qvalue": score.qvalue,
+        "significant": score.significant,
+        "ic_threshold": score.ic_threshold,
+        "top_lift": score.top_lift,
+        "threshold_hint": score.threshold_hint,
+        "note": score.note,
+    }
+
+
+def _direction_stable(
+    train: object,
+    validation: object,
+    holdout: IndicatorScore | None,
+) -> bool | None:
+    train_direction = _signed_direction(train)
+    validation_direction = _signed_direction(validation)
+    holdout_direction = _signed_direction(holdout)
+    if None in (train_direction, validation_direction, holdout_direction):
+        return None
+    directions = [train_direction, validation_direction, holdout_direction]
+    return len(set(directions)) == 1
+
+
+def _pair_expression(left: str, right: str, operation: str) -> str:
+    if operation == "rank_gap":
+        return f"{left} 分位 − {right} 分位"
+    if operation == "rank_ratio":
+        return f"({left} 分位 + 0.02) ÷ ({right} 分位 + 0.02)"
+    crossing = "上穿" if operation == "cross_up" else "下穿"
+    return f"{left} 分位 {crossing} {right} 分位"
 
 
 def _write_stock(
@@ -651,7 +1080,10 @@ def _empty_study_payload(
             {"id": label, "display_name": LABEL_DISPLAY_NAMES[label]} for label in config.labels
         ],
         "date_range": {"start": None, "end": None, "days": 0},
+        "split_metadata": None,
         "scores": [],
+        "combination_scores": [],
+        "combination_summary": None,
         "significant_count": 0,
         "reason": None,
     }
