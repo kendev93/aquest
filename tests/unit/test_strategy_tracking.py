@@ -1,8 +1,8 @@
 """策略追踪：重算、幂等、失败不动日期。
 
-这里测的是三条最容易被写错、写错了又最难发现的口径：
+这里测的是最容易被写错、写错了又最难发现的口径：
 
-1. 观察段从上线日那一行开始（两段共用接力点）。
+1. 新追踪在上线日以原始资金和空仓建立初始点，既有追踪维持旧口径。
 2. 同一天重算几次结果都一样；漏了几天能一次补齐。
 3. **失败只停���旧日期**——静默改成"今天"会让用户以为数据已经更新了，
    而实际那几天什么都没算。
@@ -39,6 +39,7 @@ _REQUEST: dict[str, object] = {
     "date_mode": "custom",
     "start_date": "2026-02-02",
     "end_date": "2026-03-02",
+    "initial_cash": 100_000.0,
 }
 
 # 十个交易日，上线日落在第 6 个。
@@ -109,10 +110,85 @@ class _FakeRunner:
     def __init__(self, report: dict[str, Any]) -> None:
         self.report = report
         self.replayed: list[Any] = []
+        self.configs: list[Any] = []
 
     def run(self, config: Any, progress_callback: Any = None) -> dict[str, Any]:
         del progress_callback
         self.replayed.append(config.end_date)
+        self.configs.append(config)
+        start = int(config.start_date.strftime("%Y%m%d"))
+        end = int(config.end_date.strftime("%Y%m%d"))
+        if start <= int(_REQUEST["start_date"].replace("-", "")):
+            result = {
+                **self.report,
+                "equity_curve": [
+                    row
+                    for row in self.report.get("equity_curve", [])
+                    if start <= int(str(row["date"]).replace("-", "")) <= end
+                ],
+                "trades": [
+                    trade
+                    for trade in self.report.get("trades", [])
+                    if start <= int(str(trade["date"]).replace("-", "")) <= end
+                ],
+            }
+            benchmark = self.report.get("benchmark")
+            if isinstance(benchmark, dict):
+                selected = [
+                    (date, total)
+                    for date, total in zip(
+                        benchmark.get("dates", []), benchmark.get("totals", []), strict=True
+                    )
+                    if start <= int(date) <= end
+                ]
+                result["benchmark"] = {
+                    "dates": [date for date, _ in selected],
+                    "totals": [total for _, total in selected],
+                }
+            return result
+        if config.start_date > datetime.date.fromisoformat(_REQUEST["start_date"]):
+            rows = [
+                row
+                for row in self.report.get("equity_curve", [])
+                if start <= int(str(row["date"]).replace("-", "")) <= end
+            ]
+            if not rows:
+                return {**self.report, "equity_curve": [], "trades": []}
+            initial = float(config.initial_cash)
+            baseline = float(rows[0]["total"])
+            equity_curve = []
+            for index, row in enumerate(rows):
+                total = initial + float(row["total"]) - baseline
+                cash = initial if index == 0 else float(row["cash"])
+                equity_curve.append(
+                    {
+                        **row,
+                        "cash": cash,
+                        "position_value": total - cash,
+                        "total": total,
+                        "positions_count": 0 if index == 0 else int(row["positions_count"]),
+                    }
+                )
+            trades = [
+                trade
+                for trade in self.report.get("trades", [])
+                if start <= int(str(trade["date"]).replace("-", "")) <= end
+            ]
+            result = {**self.report, "equity_curve": equity_curve, "trades": trades}
+            benchmark = self.report.get("benchmark")
+            if isinstance(benchmark, dict):
+                selected = [
+                    (date, total)
+                    for date, total in zip(
+                        benchmark.get("dates", []), benchmark.get("totals", []), strict=True
+                    )
+                    if start <= int(date) <= end
+                ]
+                result["benchmark"] = {
+                    "dates": [date for date, _ in selected],
+                    "totals": [total for _, total in selected],
+                }
+            return result
         return self.report
 
 
@@ -125,13 +201,14 @@ def _service(
     tmp_path: Any,
     runner: _FakeRunner,
     *,
-    available_until: str | None = "2026-03-06",
+    available_until: Any = "2026-03-02",
 ) -> StrategyTrackingService:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    latest_date = available_until if callable(available_until) else lambda: available_until
     return StrategyTrackingService(
         store=store,
         runner=runner,
-        available_until=lambda: available_until,
+        available_until=latest_date,
     )
 
 
@@ -140,7 +217,7 @@ def _save(store: DuckDbMarketDataStore) -> None:
 
 
 def test_observations_start_on_the_launch_day() -> None:
-    """上线日属于两段：研究段的终点、观察段的起点。留着它曲线才接得上。"""
+    """The generic full-report slicer includes the launch-day observation row."""
 
     report = _report(tuple(100000.0 + index * 1000 for index in range(10)))
 
@@ -166,7 +243,7 @@ def test_observation_drawdown_is_measured_from_the_launch_day() -> None:
 
 
 def test_benchmark_is_normalised_to_the_launch_day() -> None:
-    """报告里的基准从研究段起点买入持有；除以上线日的值就等于"那天起买入"。"""
+    """Dividing by its launch-day value gives the same benchmark from launch."""
 
     report = _report(
         tuple(100000.0 for _ in range(10)),
@@ -264,11 +341,76 @@ def test_launch_pins_the_research_performance(tmp_path) -> None:
     assert [row.trade_date for row in snapshot.observations] == [_LAUNCH_DAY]
 
 
+def test_launch_starts_a_flat_tracking_account_on_the_latest_market_day(tmp_path) -> None:
+    runner = _FakeRunner(_report(tuple(100000.0 + index * 1000 for index in range(10))))
+    service = _service(tmp_path, runner, available_until="2026-03-06")
+    _save(service._store)  # noqa: SLF001
+
+    snapshot = service.launch("strategy-1")
+
+    assert snapshot.launched_at == 20260306
+    assert snapshot.research is not None
+    assert snapshot.research.end_date == "2026-03-02"
+    assert len(snapshot.observations) == 1
+    launch_point = snapshot.observations[0]
+    assert launch_point.trade_date == 20260306
+    assert launch_point.equity == 100_000.0
+    assert launch_point.cash == 100_000.0
+    assert launch_point.positions_count == 0
+    assert runner.configs[0].start_date == datetime.date(2026, 2, 2)
+    assert runner.configs[0].end_date == datetime.date(2026, 3, 2)
+    assert runner.configs[1].start_date == datetime.date(2026, 3, 6)
+    assert runner.configs[1].end_date == datetime.date(2026, 3, 6)
+
+
+def test_refresh_replays_only_from_the_flat_launch_account(tmp_path) -> None:
+    dates = (*_DATES, 20260309, 20260310)
+    runner = _FakeRunner(
+        _report(tuple(100000.0 + index * 1000 for index in range(len(dates))), dates=dates)
+    )
+    latest = ["2026-03-06"]
+    service = _service(tmp_path, runner, available_until=lambda: latest[0])
+    _save(service._store)  # noqa: SLF001
+
+    launched = service.launch("strategy-1")
+    latest[0] = "2026-03-10"
+    refreshed = service.refresh("strategy-1")
+
+    assert launched.research is not None
+    assert launched.research.end_date == "2026-03-02"
+    assert [row.trade_date for row in refreshed.observations] == [
+        20260306,
+        20260309,
+        20260310,
+    ]
+    assert refreshed.observations[0].equity == 100_000.0
+    assert refreshed.observations[0].cash == 100_000.0
+    assert refreshed.observations[0].positions_count == 0
+    assert runner.configs[-1].start_date == datetime.date(2026, 3, 6)
+    assert runner.configs[-1].end_date == datetime.date(2026, 3, 10)
+
+
+def test_refresh_preserves_the_replay_mode_of_an_existing_tracking_record(tmp_path) -> None:
+    runner = _FakeRunner(_report(tuple(100000.0 + index * 1000 for index in range(10))))
+    service = _service(tmp_path, runner, available_until="2026-03-06")
+    store = service._store  # noqa: SLF001
+    _save(store)
+    store.start_strategy_tracking("strategy-1", launched_at=_LAUNCH_DAY)
+
+    snapshot = service.refresh("strategy-1")
+
+    assert runner.configs[-1].start_date == datetime.date(2026, 2, 2)
+    assert snapshot.observations[0].equity == 105_000.0
+    assert snapshot.observations[0].positions_count == 3
+
+
 def test_refresh_appends_every_day_since_launch(tmp_path) -> None:
     runner = _FakeRunner(_report(tuple(100000.0 + index * 1000 for index in range(10))))
-    service = _service(tmp_path, runner)
+    latest = ["2026-03-02"]
+    service = _service(tmp_path, runner, available_until=lambda: latest[0])
     _save(service._store)  # noqa: SLF001
     service.launch("strategy-1")
+    latest[0] = "2026-03-06"
 
     snapshot = service.refresh("strategy-1")
 
@@ -283,9 +425,11 @@ def test_refresh_is_idempotent(tmp_path) -> None:
     """同一天跑几次都一样。这是调度的前提——重复触发不能越跑越多。"""
 
     runner = _FakeRunner(_report(tuple(100000.0 + index * 1000 for index in range(10))))
-    service = _service(tmp_path, runner)
+    latest = ["2026-03-02"]
+    service = _service(tmp_path, runner, available_until=lambda: latest[0])
     _save(service._store)  # noqa: SLF001
     service.launch("strategy-1")
+    latest[0] = "2026-03-06"
 
     service.refresh("strategy-1")
     first = service.snapshot("strategy-1").to_dict()
@@ -299,9 +443,11 @@ def test_refresh_backfills_days_the_machine_missed(tmp_path) -> None:
     """关机漏了几天，开机跑一次就补齐——因为每次都是从头跑到最新。"""
 
     runner = _FakeRunner(_report(tuple(100000.0 + index * 1000 for index in range(10))))
-    service = _service(tmp_path, runner)
+    latest = ["2026-03-02"]
+    service = _service(tmp_path, runner, available_until=lambda: latest[0])
     _save(service._store)  # noqa: SLF001
     service.launch("strategy-1")  # 只写到上线日
+    latest[0] = "2026-03-06"
 
     snapshot = service.refresh("strategy-1")
 
@@ -329,15 +475,17 @@ def test_failed_refresh_keeps_the_old_date(tmp_path) -> None:
 
     # 先正常推进到 03-06，再把 runner 弄坏，验证日期既不被回退也不被改新。
     healthy = _FakeRunner(_report(tuple(100000.0 + index * 1000 for index in range(10))))
-    service = _service(tmp_path, healthy)
+    latest = ["2026-03-02"]
+    service = _service(tmp_path, healthy, available_until=lambda: latest[0])
     _save(service._store)  # noqa: SLF001
     service.launch("strategy-1")
+    latest[0] = "2026-03-06"
     service.refresh("strategy-1")
     assert service.snapshot("strategy-1").last_tracked_date == 20260306
 
     broken = _FakeRunner(_report((), dates=()))
     broken.run = _explode  # type: ignore[method-assign]
-    service = _service(tmp_path, broken)
+    service = _service(tmp_path, broken, available_until="2026-03-10")
 
     snapshot = service.refresh("strategy-1")
 
@@ -349,10 +497,12 @@ def test_failed_write_keeps_the_date_and_records_the_error(tmp_path) -> None:
     """写盘失败也必须留下痕迹：只上抛的话库里还是「正常、只是没更新」。"""
 
     runner = _FakeRunner(_report(tuple(100000.0 + index * 1000 for index in range(10))))
-    service = _service(tmp_path, runner)
+    latest = ["2026-03-02"]
+    service = _service(tmp_path, runner, available_until=lambda: latest[0])
     store = service._store  # noqa: SLF001
     _save(store)
     service.launch("strategy-1")
+    latest[0] = "2026-03-06"
 
     def explode(*_args: Any, **_kwargs: Any) -> int:
         raise OSError("磁盘写满了")
@@ -395,10 +545,11 @@ def test_min_track_record_length_is_reported_for_long_windows(tmp_path) -> None:
     step = np.array([0.01 if index % 2 == 0 else -0.009 for index in range(len(dates))])
     totals = tuple(float(value) for value in 100000.0 * np.cumprod(1.0 + step))
     runner = _FakeRunner(_report(totals, dates=dates))
+    latest = [f"{str(launch_day)[:4]}-{str(launch_day)[4:6]}-{str(launch_day)[6:]}"]
     service = _service(
         tmp_path,
         runner,
-        available_until=f"{str(dates[-1])[:4]}-{str(dates[-1])[4:6]}-{str(dates[-1])[6:]}",
+        available_until=lambda: latest[0],
     )
     service._store.save_strategy(  # noqa: SLF001
         "strategy-1",
@@ -412,6 +563,7 @@ def test_min_track_record_length_is_reported_for_long_windows(tmp_path) -> None:
     )
     # launch 只种下上线日一行，观察段要靠 refresh 补齐——这也是真实用法。
     service.launch("strategy-1")
+    latest[0] = f"{str(dates[-1])[:4]}-{str(dates[-1])[4:6]}-{str(dates[-1])[6:]}"
     snapshot = service.refresh("strategy-1")
 
     assert snapshot.observation_is_short is False
@@ -431,9 +583,11 @@ def test_refresh_requires_an_online_strategy(tmp_path) -> None:
 
 def test_stop_keeps_what_was_observed(tmp_path) -> None:
     runner = _FakeRunner(_report(tuple(100000.0 + index * 1000 for index in range(10))))
-    service = _service(tmp_path, runner)
+    latest = ["2026-03-02"]
+    service = _service(tmp_path, runner, available_until=lambda: latest[0])
     _save(service._store)  # noqa: SLF001
     service.launch("strategy-1")
+    latest[0] = "2026-03-06"
     service.refresh("strategy-1")
 
     snapshot = service.stop("strategy-1")
@@ -498,9 +652,11 @@ def test_snapshot_splits_trades_around_the_launch_day(tmp_path) -> None:
     """上线前 / 后的成交必须分开：后者才是"上线之后真的干了什么"。"""
 
     runner = _FakeRunner(_traded_report())
-    service = _service(tmp_path, runner)
+    latest = ["2026-03-02"]
+    service = _service(tmp_path, runner, available_until=lambda: latest[0])
     _save(service._store)  # noqa: SLF001
     service.launch("strategy-1")
+    latest[0] = "2026-03-06"
 
     snapshot = service.refresh("strategy-1")
     trades = snapshot.trades
@@ -517,9 +673,11 @@ def test_snapshot_splits_trades_around_the_launch_day(tmp_path) -> None:
 
 def test_snapshot_reports_the_next_session_plan(tmp_path) -> None:
     runner = _FakeRunner(_traded_report())
-    service = _service(tmp_path, runner)
+    latest = ["2026-03-02"]
+    service = _service(tmp_path, runner, available_until=lambda: latest[0])
     _save(service._store)  # noqa: SLF001
     service.launch("strategy-1")
+    latest[0] = "2026-03-06"
     service.refresh("strategy-1")
 
     plan = service.snapshot("strategy-1").next_plan
@@ -533,9 +691,11 @@ def test_an_offline_strategy_has_no_pending_plan(tmp_path) -> None:
     """过期的单子挂在页面上比没有更糟——下线就必须清掉。"""
 
     runner = _FakeRunner(_traded_report())
-    service = _service(tmp_path, runner)
+    latest = ["2026-03-02"]
+    service = _service(tmp_path, runner, available_until=lambda: latest[0])
     _save(service._store)  # noqa: SLF001
     service.launch("strategy-1")
+    latest[0] = "2026-03-06"
     service.refresh("strategy-1")
 
     snapshot = service.stop("strategy-1")
@@ -566,9 +726,11 @@ def test_trade_sections_report_when_they_are_cut_off(tmp_path, monkeypatch) -> N
     runner = _FakeRunner(
         _report(tuple(100000.0 + index * 1000 for index in range(10)), trades=many)
     )
-    service = _service(tmp_path, runner)
+    latest = ["2026-03-02"]
+    service = _service(tmp_path, runner, available_until=lambda: latest[0])
     _save(service._store)  # noqa: SLF001
     service.launch("strategy-1")
+    latest[0] = "2026-03-06"
 
     section = service.refresh("strategy-1").trades["after"]
 

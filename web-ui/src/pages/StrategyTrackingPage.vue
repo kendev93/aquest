@@ -53,7 +53,7 @@ const TRADING_DAYS_PER_YEAR = 252
 function minTrlNote(item: StrategyTrackingSnapshot): string {
   const needed = item.min_track_record_length
   if (needed === null) return ''
-  // 上线日那一行是接力点，不算观察日。
+  // 上线日记录空仓初始资金，是基点，不算收益观察日。
   const have = Math.max(0, item.observations.length - 1)
   const target = Math.ceil(needed)
   if (target <= have) return ''
@@ -228,7 +228,7 @@ function formatMoney(value: number | null | undefined): string {
   return value.toLocaleString('zh-CN', { maximumFractionDigits: 0 })
 }
 
-/** 观察段天数。上线日那一行是接力点，不算观察日。 */
+/** 观察段天数。上线日的空仓初始资金行是基点，不算收益观察日。 */
 function observationDays(item: StrategyTrackingSnapshot): number {
   return Math.max(0, item.observations.length - 1)
 }
@@ -511,7 +511,7 @@ function chartFor(item: StrategyTrackingSnapshot) {
             <polyline v-if="chartFor(item)?.benchmark" :points="chartFor(item)?.benchmark" fill="none" stroke="var(--muted)" stroke-width="2" stroke-dasharray="6 4" stroke-linecap="round" stroke-linejoin="round" />
             <polyline :points="chartFor(item)?.strategy" fill="none" stroke="var(--accent)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
           </svg>
-          <p class="chart-summary">两条线都从上线日的资产出发，基准是同一批标的等权买入不动。</p>
+          <p class="chart-summary">策略以初始资金、空仓起步；基准按上线日归一化为同等资产，之后按同一批标的等权买入不动。</p>
         </section>
         <p v-else class="library-empty">观察段还没有足够的数据可以画曲线。</p>
 

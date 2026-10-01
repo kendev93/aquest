@@ -9,11 +9,9 @@
 1. **衰减比** = 观察段指标 / 研究段指标。
 2. **观察段相对基准** = 观察段策略收益 − 同期标的池等权买入持有。
 
-关于重算方式：**这里是全量重跑，不是增量。** 引擎其实带了
-``SimulationCheckpoint`` 续跑，但它的 ``data_fingerprint`` 是行情帧的哈希，
-每天收盘后行情都会变，指纹必然对不上（``docs/strategy-tracking-plan.md``
-§2.1 有完整论证）。全量重跑换来的是——观察段与研究段出自**同一次模拟**，
-不存在两段拼不上的可能，这正是"衰减比可复核"所要求的。
+追踪账户在上线日以策略原设初始资金、空仓开始。上线前的历史回测只冻结为研究参考，
+不把历史仓位和盈亏带入观察段。每日更新仍是全量重跑：保留上线前的指标预热行情，
+但模拟交易只从上线日开始，确保每日补跑与当日重算一致。
 """
 
 from __future__ import annotations
@@ -68,6 +66,9 @@ _PERFORMANCE_KEYS = (
 #: 算衰减比的指标。回撤是"越小越好"，比值会反过来误导（0.5 倍回撤看起来像
 #: 变差其实是变好），所以不进这个列表，页面上单独给绝对值。
 _DECAY_KEYS = ("annual_return", "sharpe")
+_TRACKING_RESEARCH_KEY = "tracking_research"
+_TRACKING_ACCOUNT_MODE_KEY = "account_mode"
+_FLAT_TRACKING_ACCOUNT_MODE = "flat_from_launch"
 
 _EMPTY_TRADES = pd.DataFrame(
     columns=[
@@ -246,11 +247,7 @@ def _equity_rows(
 
 
 def _benchmark_ratio(report: Mapping[str, object], launched_at: int) -> dict[int, float]:
-    """基准按上线日归一化。
-
-    报告里的基准从研究段起点买入持有；持有期间没有任何交易，所以把它在上线
-    日之后的这一段**除以上线日的值**，就等于"从上线日起买入持有"。
-    """
+    """把基准归一到上线日，得到从该日开始的同期买入持有曲线。"""
 
     benchmark = report.get("benchmark")
     if not isinstance(benchmark, Mapping):
@@ -352,11 +349,7 @@ def build_observations(
     *,
     launched_at: int,
 ) -> tuple[TrackedObservation, ...]:
-    """Cut one full report down to its post-launch rows.
-
-    上线日那一行**属于两段**：它是研究段的终点，也是观察段的起点。留着它曲线
-    才接得上，衰减比也才有统一的零点。
-    """
+    """Cut a report down to its launch-day seed and subsequent observations."""
 
     rows = [row for row in _equity_rows(report) if row[0] >= launched_at]
     if not rows:
@@ -388,7 +381,7 @@ def build_segments(
     *,
     launched_at: int,
 ) -> tuple[TrackedSegment | None, TrackedSegment | None]:
-    """Split one report into the pre-launch and post-launch windows."""
+    """Split one report at the launch date; the date row belongs to both windows."""
 
     before = [row for row in _equity_rows(report) if row[0] <= launched_at]
     after = [row for row in _equity_rows(report) if row[0] >= launched_at]
@@ -418,11 +411,13 @@ def _trade_rows(
     report: Mapping[str, object],
     *,
     launched_at: int,
+    include_launch_day: bool = True,
+    force_phase: str | None = None,
 ) -> list[dict[str, object]]:
     """把成交记录摊平成待落库的行，并按上线日判定归属哪一段。
 
-    判据和净值曲线完全一致：成交日 >= 上线日算上线后。两边口径必须对齐，否则
-    同一笔交易在两张表上会落在不同的段里，"上线后赚了多少"就没法自圆其说。
+    默认沿用旧追踪口径（成交日 >= 上线日）。从空仓上线的新追踪在上线日收盘建点，
+    所以当日成交不能算成上线后的交易；研究回放的历史成交则可强制归入研究段。
     """
 
     trades = report.get("trades")
@@ -436,10 +431,14 @@ def _trade_rows(
             trade_date = _date_key(trade.get("date"))
         except (TypeError, ValueError):
             continue
+        is_after_launch = (
+            trade_date >= launched_at if include_launch_day else trade_date > launched_at
+        )
+        phase = force_phase or (TRACKING_PHASE_POST if is_after_launch else TRACKING_PHASE_PRE)
         rows.append(
             {
                 "trade_date": trade_date,
-                "phase": (TRACKING_PHASE_POST if trade_date >= launched_at else TRACKING_PHASE_PRE),
+                "phase": phase,
                 "direction": str(trade.get("direction") or ""),
                 "market": str(trade.get("market") or ""),
                 "code": str(trade.get("code") or ""),
@@ -451,6 +450,32 @@ def _trade_rows(
             }
         )
     return rows
+
+
+def _uses_flat_tracking_account(record: Mapping[str, object]) -> bool:
+    summary = record.get("summary")
+    research = summary.get(_TRACKING_RESEARCH_KEY) if isinstance(summary, Mapping) else None
+    return (
+        isinstance(research, Mapping)
+        and research.get(_TRACKING_ACCOUNT_MODE_KEY) == _FLAT_TRACKING_ACCOUNT_MODE
+    )
+
+
+def _classify_trades_from_launch(
+    rows: Sequence[Mapping[str, object]], launched_at: int
+) -> list[dict[str, object]]:
+    """Reclassify retained trade rows when a flat tracking session is restarted."""
+
+    classified: list[dict[str, object]] = []
+    for row in rows:
+        item = dict(row)
+        try:
+            trade_date = _date_key(item.get("trade_date"))
+        except (TypeError, ValueError):
+            continue
+        item["phase"] = TRACKING_PHASE_POST if trade_date > launched_at else TRACKING_PHASE_PRE
+        classified.append(item)
+    return classified
 
 
 def _split_trades(
@@ -487,10 +512,9 @@ def _report_payload(result: PortfolioBacktestReport | Mapping[str, object]) -> M
 class StrategyTrackingService:
     """Put strategies online and replay them against newer market data.
 
-    两个入口对应同一个重跑：``launch`` 用策略固化的 end_date 跑（得到研究段），
-    ``refresh`` 用库里最新交易日跑（同一份配置、同一段历史，只是多跑了几天）。
-    因为都是全量跑，观察段和研究段永远出自**同一次模拟**，不会出现"两端用不同
-    口径拼起来"的情况。
+    ``launch`` 用策略固化的历史区间冻结研究参考，再从最新行情日以初始资金、空仓
+    启动观察账户。新模式下，``refresh`` 每次从上线日全量重跑；上线前行情只用于
+    指标预热。没有新模式标记的既有追踪继续使用旧口径，避免静默改写已有观察记录。
     """
 
     def __init__(
@@ -507,33 +531,67 @@ class StrategyTrackingService:
         self._available_until = available_until or (lambda: self._store.status().data_end)
 
     def launch(self, strategy_id: str) -> TrackingSnapshot:
-        """Go online: replay the frozen window once and pin it as the yardstick."""
+        """Freeze the saved backtest as reference and start a flat account today."""
 
         record = self._read(strategy_id)
-        launched_at = _date_key(self._request(record)["end_date"])
-        report = self._run(self._request(record), _date_text(launched_at))
-        report_payload = _report_payload(report)
-        research, _ = build_segments(report_payload, launched_at=launched_at)
-        observations = build_observations(report_payload, launched_at=launched_at)
-        # 研究段的绩效就此钉死。后面任何一次重算都不会动它——动了就不是样本外了。
+        request = self._request(record)
+        latest_raw = self._available_until()
+        if not latest_raw:
+            raise ValueError("行情库里没有可用于启动策略追踪的交易日")
+        launched_at = _date_key(latest_raw)
+        research_end = _date_key(request["end_date"])
+        if launched_at < research_end:
+            raise ValueError("最新行情早于策略回测结束日，请先同步行情再启动追踪")
+
+        # 历史回测只作为研究参考，按保存时固化的区间重放并冻结。
+        research_report = _report_payload(self._run(request, _date_text(research_end)))
+        research, _ = build_segments(research_report, launched_at=research_end)
         summary = self._research_summary(record, research)
+        summary_payload: dict[str, object] = {}
+        if summary is not None:
+            summary_payload = dict(summary)
+        else:
+            existing_summary = record.get("summary")
+            if isinstance(existing_summary, Mapping):
+                summary_payload = dict(existing_summary)
+        research_payload = summary_payload.get(_TRACKING_RESEARCH_KEY)
+        research_payload = dict(research_payload) if isinstance(research_payload, Mapping) else {}
+        research_payload[_TRACKING_ACCOUNT_MODE_KEY] = _FLAT_TRACKING_ACCOUNT_MODE
+        summary_payload[_TRACKING_RESEARCH_KEY] = research_payload
+
+        # start_date 会触发回测引擎读取预热 K 线，但模拟器只在上线日建立账户，
+        # 初始状态自然是 initial_cash + 空仓。
+        tracking_request = self._tracking_request(request, launched_at)
+        tracking_report = _report_payload(self._run(tracking_request, _date_text(launched_at)))
+        observations = build_observations(tracking_report, launched_at=launched_at)
+        if not observations or observations[0].trade_date != launched_at:
+            raise ValueError("上线日没有可用于启动追踪的行情")
+
         started = self._store.start_strategy_tracking(
             strategy_id,
             launched_at=launched_at,
-            seed_points=[row.to_dict() for row in observations[:1]],  # 上线日：接力点，两段共用
+            seed_points=[row.to_dict() for row in observations[:1]],  # 空仓账户的上线日初始点
         )
         if started is not None:
-            plan = report_payload.get("next_plan")
+            plan = tracking_report.get("next_plan")
             saved = self._store.save_tracking_points(
                 strategy_id,
                 points=[row.to_dict() for row in observations[:1]],
-                trades=_trade_rows(report_payload, launched_at=launched_at),
+                trades=[
+                    *_trade_rows(
+                        research_report,
+                        launched_at=launched_at,
+                        force_phase=TRACKING_PHASE_PRE,
+                    ),
+                    *_trade_rows(
+                        tracking_report,
+                        launched_at=launched_at,
+                        include_launch_day=False,
+                    ),
+                ],
                 plan=plan if isinstance(plan, Mapping) and plan else None,
-                # Launch seeds only the hand-over row above. Later rows belong
-                # to refresh, so don't advance the cursor past observations we
-                # haven't committed yet.
                 last_tracked_date=launched_at,
-                summary=summary,
+                summary=summary_payload,
             )
             if saved == 0:
                 return self.snapshot(strategy_id)
@@ -566,7 +624,11 @@ class StrategyTrackingService:
             # 上线日之后还没有新的交易日。这不是失败，也不需要重跑。
             return self.snapshot(strategy_id)
         try:
-            report = self._run(self._request(record), _date_text(latest))
+            flat_account = _uses_flat_tracking_account(record)
+            request = self._request(record)
+            if flat_account:
+                request = self._tracking_request(request, launched_at)
+            report = self._run(request, _date_text(latest))
         except Exception as exc:  # noqa: BLE001 - 追踪失败不能把整个后台带走
             logger.exception("策略追踪重算失败: %s", strategy_id)
             self._store.finish_strategy_tracking(strategy_id, error=str(exc)[:500])
@@ -578,12 +640,25 @@ class StrategyTrackingService:
         if not observations:
             return self._failed(strategy_id, "重算结果里没有上线日之后的交易日")
         try:
-            summary = self._research_summary(record, research)
+            summary = None if flat_account else self._research_summary(record, research)
             plan = report_payload.get("next_plan")
+            trade_rows = _trade_rows(
+                report_payload,
+                launched_at=launched_at,
+                include_launch_day=not flat_account,
+            )
+            if flat_account:
+                prior_trades = _classify_trades_from_launch(
+                    self._store.list_tracking_trades(strategy_id), launched_at
+                )
+                trade_rows = [
+                    *(row for row in prior_trades if row.get("phase") == TRACKING_PHASE_PRE),
+                    *trade_rows,
+                ]
             saved = self._store.save_tracking_points(
                 strategy_id,
                 points=[row.to_dict() for row in observations],
-                trades=_trade_rows(report_payload, launched_at=launched_at),
+                trades=trade_rows,
                 plan=plan if isinstance(plan, Mapping) and plan else None,
                 last_tracked_date=observations[-1].trade_date,
                 summary=summary if research is not None else None,
@@ -603,7 +678,15 @@ class StrategyTrackingService:
 
         record = self._read(strategy_id)
         launched_at = _read_launched_at(record)
-        rows = self._store.list_tracking_points(strategy_id) if launched_at else []
+        flat_account = _uses_flat_tracking_account(record)
+        rows = (
+            self._store.list_tracking_points(
+                strategy_id,
+                since=launched_at if flat_account else None,
+            )
+            if launched_at
+            else []
+        )
         observations = tuple(
             TrackedObservation(
                 trade_date=int(_number(row["trade_date"])),
@@ -621,6 +704,8 @@ class StrategyTrackingService:
         observation = self._observation_segment(observations)
         benchmark = self._benchmark_performance(observations)
         stored_trades = self._store.list_tracking_trades(strategy_id) if launched_at else []
+        if launched_at and flat_account:
+            stored_trades = _classify_trades_from_launch(stored_trades, launched_at)
         return TrackingSnapshot(
             strategy_id=str(strategy_id),
             tracking_status=str(record.get("tracking_status") or "off"),
@@ -635,7 +720,7 @@ class StrategyTrackingService:
             decay=_decay(research, observation),
             benchmark_performance=benchmark,
             excess_annual_return=_excess(observation, benchmark),
-            # 上线日那一行是接力点，不是观察日，所以阈值要 +1。
+            # 上线日是账户初始资金基点，不是收益观察日，所以阈值要 +1。
             observation_is_short=len(observations) < MIN_OBSERVATION_BARS + 1,
             min_track_record_length=_min_track_record_length(observations),
         )
@@ -656,6 +741,12 @@ class StrategyTrackingService:
         request = record.get("request")
         return request if isinstance(request, Mapping) else {}
 
+    @staticmethod
+    def _tracking_request(request: Mapping[str, object], launched_at: int) -> Mapping[str, object]:
+        payload = dict(request)
+        payload["start_date"] = _date_text(launched_at)
+        return payload
+
     def _run(self, request: Mapping[str, object], end_date: str) -> Mapping[str, object]:
         payload = dict(request)
         payload["date_mode"] = "custom"
@@ -674,7 +765,7 @@ class StrategyTrackingService:
             return None
         existing = record.get("summary")
         summary = dict(existing) if isinstance(existing, Mapping) else {}
-        summary["tracking_research"] = research.to_dict()
+        summary[_TRACKING_RESEARCH_KEY] = research.to_dict()
         return summary
 
     def _failed(self, strategy_id: str, message: str) -> TrackingSnapshot:
@@ -745,7 +836,7 @@ def _research_from_summary(summary: object) -> TrackedSegment | None:
 
     if not isinstance(summary, Mapping):
         return None
-    payload = summary.get("tracking_research")
+    payload = summary.get(_TRACKING_RESEARCH_KEY)
     if not isinstance(payload, Mapping):
         return None
     performance = payload.get("performance")

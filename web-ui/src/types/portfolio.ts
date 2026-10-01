@@ -264,7 +264,7 @@ export interface StrategyTrackingJobState {
 }
 
 
-/** 追踪里的一个交易日。上线日那一行是接力点，研究段和观察段共用它。 */
+/** 追踪里的一个交易日。上线日那一行记录新观察账户的初始资金和空仓状态。 */
 export interface StrategyTrackingPoint {
   trade_date: number
   equity: number

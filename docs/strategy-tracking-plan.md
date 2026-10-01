@@ -47,20 +47,18 @@ elif checkpoint.data_fingerprint != data_fingerprint:
 
 **结论：续跑路线被指纹校验挡死，除非改引擎本身。**
 
-### 2.2 选全量重跑的理由
+### 2.2 追踪账户的起点
 
-每天用「研究段起点 → 今天」完整跑一次，再从报告里按上线日截断。四条理由：
+策略追踪分开记录两件事：
 
-1. **结论更可信**（这条比性能重要）。观察段和研究段出自**同一次模拟**，不存在两段拼不上的可能。我们要卖的就是"这个衰减比是可复核的"，为此多花点 CPU 完全值得。
-2. **实现最简单**：不需要新序列化格式，不需要假的占位行，`service.run(config)` 一行就是全部。
-3. **幂等与补跑天然成立**：同一份 `end_date` 跑几次结果一样；机器关机漏了几天，开机后跑一次就把整段补齐了——不需要任何额外逻辑。
-4. **成本可接受**：本地部署、每天一次、跑在后台。参考实测（5218 只 × 近 1 年 ≈ 165 秒 / 4GB），5 年区间约十分钟级，串行跑几个策略是几十分钟，用户完全不感知。
+1. **研究参考**：按保存策略时固化的日期区间重放，冻结其绩效摘要。它只用于和上线后的表现对照。
+2. **观察账户**：用户开始追踪时，以行情库最新可用交易日为上线日，用策略原设初始资金和空仓状态起跑。上线前的 K 线只用于计算均线等指标的预热值，不参与账户交易或盈亏。
 
-**如果将来策略多到跑不动**，正确的优化方向是给 `simulation._portrait` 级别的入口加一个「初始状态 + 起跑日期」参数（绕开指纹校验），而不是回头折腾 checkpoint。届时改动集中在本模块的一个函数里。
+每日重算沿用同一观察账户起点，从上线日重新模拟到最新交易日。因此漏跑的日期可以补齐，同一天重复重算也不会把历史研究收益带入观察账户。研究区间和观察区间可以不连续：用户保存策略后过一段时间才上线时，中间日期既不并入研究绩效，也不算作上线观察。
 
-### 2.3 由此带来的一处简化
+### 2.3 全量重算
 
-上线时跑一次全量得到研究段报告，此后每天重跑也是全量——**两者是同一个操作**，只是 `end_date` 不同。代码里只有一个 `rerun()`，没有"上线专用路径"。
+追踪重算不使用跨行情版本的 `SimulationCheckpoint`。行情帧每天变化，指纹校验会拒绝旧检查点；每次从上线日重新模拟既保持确定性，也保证空仓初态一致。指标上下文仍读取上线日前的预热 K 线，但模拟器只收到上线日及之后的交易日期。
 
 ---
 
@@ -71,9 +69,8 @@ elif checkpoint.data_fingerprint != data_fingerprint:
 | 列 | 类型 | 说明 |
 | :--- | :--- | :--- |
 | `tracking_status` | VARCHAR DEFAULT 'off' | `off` / `active` |
-| `launched_at` | DATE | 上线日 = 保存时固化的 `end_date` |
+| `launched_at` | DATE | 用户开始追踪时，行情库最新可用的交易日 |
 | `last_tracked_date` | INTEGER | YYYYMMDD，最后成功重算的交易日 |
-| `launch_state_json` | VARCHAR | 上线日末的模拟状态快照（方案 B） |
 | `last_error` | VARCHAR DEFAULT '' | 失败原因，失败时**停在旧日期**，绝不静默写"成功" |
 
 迁移用现有的 `_migrate_schema` + `ALTER TABLE ADD COLUMN`（已有 `board`、`provider` 等先例）。
@@ -109,20 +106,21 @@ CREATE TABLE IF NOT EXISTS strategy_tracking (
 ```
 run_tracking(strategy_id, *, store, service) -> TrackingResult
   1. 读策略 → 校验 tracking_status == active
-  2. request_json → PortfolioBacktestConfig，end_date 改成库中最新交易日
-  3. 准备 contexts（照常，靠 IndicatorCache 摊掉指标计算）
-  4. 构造上线日 checkpoint（launch_state_json）
-  5. run_prepared_contexts(config, contexts, checkpoint=ckpt)
-  6. 取观察段 equity 曲线 → upsert 进 strategy_tracking
+  2. 研究参考按策略保存的固化区间回放；绩效摘要只冻结一次
+  3. 上线日取当前行情库最新可用交易日
+  4. request_json 的 start_date 改为上线日，end_date 改为最新交易日
+  5. 准备含上线日前预热 K 线的 contexts；模拟器从上线日以 initial_cash 和空仓运行
+  6. 取上线日起的观察曲线 → upsert 进 strategy_tracking
   7. 更新 last_tracked_date，清空 last_error
 ```
 
 失败路径：捕获异常 → 写 `last_error` → **保留旧的 `last_tracked_date`** → 返回失败。第二天继续尝试补跑。
 
 **上线流程**（用户点"开始追踪"）：
-1. 用固化的 `end_date` 跑一次**全量**回测（这就是研究段报告，直接存进 `summary_json`，作为衰减比的分母）
-2. 从报告取出上线日末状态 → `launch_state_json`
-3. `tracking_status = active`，`launched_at = end_date`
+1. 用固化的研究区间回测并冻结研究段摘要，作为衰减比的分母
+2. 取最新可用行情日作为 `launched_at`
+3. 以该日为模拟起点，使用策略原设初始资金和空仓状态建立追踪账户
+4. `tracking_status = active`，记录上线日的初始净值、现金和持仓数（初始为 0）
 
 ---
 
