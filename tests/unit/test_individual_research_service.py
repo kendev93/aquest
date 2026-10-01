@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -11,6 +12,7 @@ from selector_app.individual_research.models import IndividualResearchConfig
 from selector_app.individual_research.service import (
     IndividualStockResearchService,
     _rank_candidates,
+    _select_rule_pairs,
 )
 from selector_app.market_data.models import StockRef
 from selector_app.screening.models import ScreenCondition
@@ -184,6 +186,70 @@ def test_individual_pipeline_optimizes_validation_top_rule_and_only_marks_holdou
     assert result["results_by_sharpe"][0]["metrics"]["validation"]["sharpe"] == 0.8
     assert result["results_by_sharpe"][0]["metrics"]["holdout"]["closed_trades"] == 3
     assert result["results_by_sharpe"][0]["quality"]["badges"] == ["样本较充分", "风险高"]
+    assert result["results_by_sharpe"][0]["condition_rules"]["buy"]["conditions"]
+
+
+def test_training_mining_creates_and_or_rules_from_two_indicators() -> None:
+    patterns = np.asarray([(0.0, 0.0), (0.0, 1.0), (1.0, 0.0), (1.0, 1.0)] * 20)
+    features = pd.DataFrame(
+        {
+            "technical.rsi14": np.repeat(patterns[:, 0], 10),
+            "technical.return20": np.repeat(patterns[:, 1], 10),
+        }
+    )
+    up_labels = np.repeat((patterns[:, 0] * patterns[:, 1]).astype(float), 10)
+    labels = {
+        "up_onset_ahead": up_labels,
+        "down_onset_ahead": 1.0 - up_labels,
+    }
+    service = IndividualStockResearchService(
+        adapter=FakeAdapter(),
+        backtest_service=object(),
+        portfolio_service=object(),
+        strategy_service=FakeRiskService(),
+    )
+
+    candidates = service._mine_conditions(
+        _config(),
+        features,
+        labels,
+        {},
+        slice(0, len(up_labels)),
+    )
+
+    buy_combinations = [item for item in candidates["buy"] if item.get("kind") == "condition_combo"]
+    assert {cast(RuleGroup, item["rule"]).combine_mode for item in buy_combinations} == {
+        "all",
+        "any",
+    }
+    combined_buy_rule = cast(RuleGroup, buy_combinations[0]["rule"])
+    for candidate in buy_combinations:
+        rule = cast(RuleGroup, candidate["rule"])
+        assert len(rule.conditions) == 2
+        assert {condition.left_value for condition in rule.conditions} == {
+            "technical.rsi14",
+            "technical.return20",
+        }
+    sell_rule = cast(RuleGroup, candidates["sell"][0]["rule"])
+    risk_base = service._risk_base_payload(_config(), combined_buy_rule, sell_rule)
+    assert len(risk_base["buy_rule"]["conditions"]) == 2
+
+
+def test_validation_rule_shortlist_keeps_five_candidates_per_board() -> None:
+    candidates = [
+        {
+            "candidate_id": f"rules-{index}",
+            "validation": {"sharpe": float(index), "annual_return": float(9 - index)},
+        }
+        for index in range(10)
+    ]
+
+    shortlisted = _select_rule_pairs(candidates)
+
+    assert len(shortlisted) == 10
+    assert {item["candidate_id"] for item in shortlisted} == {
+        *(f"rules-{index}" for index in range(10))
+    }
 
 
 def test_risk_candidates_are_ranked_by_nested_validation_metrics() -> None:

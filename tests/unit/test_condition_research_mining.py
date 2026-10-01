@@ -76,6 +76,30 @@ def test_mines_scale_free_comparisons_between_indicators() -> None:
     )
 
 
+def test_single_security_mode_can_mine_price_scaled_values() -> None:
+    features = pd.DataFrame({"technical.ma5": np.arange(1.0, 9.0)})
+    winners = pd.Series([False, False, False, False, True, True, True, True])
+    symbols = pd.Series(["SH600000"] * 8)
+    query = {
+        "quantiles": (0.5,),
+        "min_support": 3,
+        "min_instruments": 1,
+        "limit": 10,
+    }
+
+    cross_sectional = mine_binary_conditions(features, winners, symbols, **query)
+    single_security = mine_binary_conditions(
+        features,
+        winners,
+        symbols,
+        allow_price_scale_features=True,
+        **query,
+    )
+
+    assert cross_sectional == ()
+    assert any(item.condition.left_value == "technical.ma5" for item in single_security)
+
+
 def test_mining_respects_minimum_trade_support_and_stock_coverage() -> None:
     features = pd.DataFrame({"indicator_one.strength": np.arange(1.0, 9.0)})
     winners = pd.Series([False, False, False, False, True, True, True, True])

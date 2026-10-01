@@ -418,6 +418,9 @@ def mine_binary_conditions(
     # 给了它，值值对比才会额外生成「上穿/下穿」候选——穿越要靠前后两根比，
     # 而样本本身是横着摆的快照，相邻两行之间没有先后关系。不给就只挖大小比较。
     previous_features: pd.DataFrame | None = None,
+    # 横截面研究不能用绝对价格尺度筛全市场阈值；单证券时间序列研究没有
+    # 跨标的价格不可比问题，因此可以显式打开这些数值指标的训练段阈值搜索。
+    allow_price_scale_features: bool = False,
     # 出参：本次**实际评分过**的条件数（= 送入置换零分布的 mask 池大小）。
     # 用出参而不是改返回值，是因为 18 处既有测试把返回值直接当候选元组用，
     # 改返回类型会连带改一大片与本次无关的东西。
@@ -549,7 +552,7 @@ def mine_binary_conditions(
             candidates.append((candidate, matched_global, token))
 
     for feature_id in feature_ids:
-        if feature_id in _PRICE_SCALE_FEATURES:
+        if feature_id in _PRICE_SCALE_FEATURES and not allow_price_scale_features:
             continue
         values = arrays[feature_id]
         valid = finite[feature_id] & valid_symbols

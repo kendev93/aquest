@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 
 from selector_app.individual_research.metrics import candidate_quality
-from selector_app.web.schemas import PortfolioBacktestRequest
+from selector_app.web.schemas import IndividualResearchRequest, PortfolioBacktestRequest
 
 
 def _single_security_request(**overrides: object) -> dict[str, object]:
@@ -61,6 +63,28 @@ def test_regular_portfolio_still_requires_a_ranking_value() -> None:
 
     with pytest.raises(ValueError, match="排序指标不能为空"):
         PortfolioBacktestRequest.model_validate(payload)
+
+
+def test_individual_research_defaults_to_ten_condition_candidates() -> None:
+    request = IndividualResearchRequest(market="SH", code="600000")
+
+    config = request.to_config(start_date=date(2021, 1, 1), end_date=date(2025, 12, 31))
+
+    assert request.candidate_limit == 10
+    assert config.candidate_limit == 10
+    assert "technical.ma5" in config.value_ids
+
+
+def test_individual_research_accepts_non_rankable_numeric_indicators() -> None:
+    request = IndividualResearchRequest(
+        market="SH",
+        code="600000",
+        value_ids=["technical.ma5"],
+    )
+
+    config = request.to_config(start_date=date(2021, 1, 1), end_date=date(2025, 12, 31))
+
+    assert config.value_ids == ("technical.ma5",)
 
 
 @pytest.mark.parametrize(

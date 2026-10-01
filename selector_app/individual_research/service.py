@@ -7,6 +7,7 @@ import json
 import math
 from collections.abc import Callable, Mapping, Sequence
 from datetime import date
+from itertools import combinations
 from typing import cast
 
 import numpy as np
@@ -39,6 +40,9 @@ from .models import IndividualResearchConfig
 
 ProgressCallback = Callable[[int, int], None]
 AbortCheck = Callable[[], bool]
+RULE_SHORTLIST_PER_BOARD = 5
+MAX_COMBINATION_COMPONENTS = 24
+MAX_CANDIDATES_PER_COMPONENT = 3
 
 
 class IndividualStockResearchService:
@@ -151,9 +155,7 @@ class IndividualStockResearchService:
 
         rule_by_sharpe = _rank_candidates(rule_candidates, "sharpe")
         rule_by_return = _rank_candidates(rule_candidates, "annual_return")
-        selected_rule_pairs = _unique_candidates(
-            [*rule_by_sharpe[:3], *rule_by_return[:3]], key="candidate_id"
-        )
+        selected_rule_pairs = _select_rule_pairs(rule_candidates)
         if not selected_rule_pairs:
             return self._empty_result(
                 config,
@@ -292,6 +294,7 @@ class IndividualStockResearchService:
                 "results_by_sharpe": rule_by_sharpe[:10],
                 "results_by_return": rule_by_return[:10],
                 "evaluated_pairs": len(rule_candidates),
+                "shortlist_per_board": RULE_SHORTLIST_PER_BOARD,
             },
             "results_by_sharpe": final_board(ranked_sharpe),
             "results_by_return": final_board(ranked_return),
@@ -440,10 +443,12 @@ class IndividualStockResearchService:
                 permutations=0,
                 duplicate_correlation=0.9,
                 previous_features=previous,
+                allow_price_scale_features=True,
             )
             candidates = [
                 _condition_candidate(side, index, item) for index, item in enumerate(mined, start=1)
             ]
+            candidate_masks = [_condition_mask(item.condition, x, previous) for item in mined]
             baseline_rate = float(np.mean(y)) if len(y) else 0.0
             for signal_id, signal_values in signals.items():
                 signal_train = np.asarray(signal_values[train_slice], dtype=bool)[valid]
@@ -467,22 +472,18 @@ class IndividualStockResearchService:
                         "rule": rule,
                     }
                 )
-            candidates.sort(
-                key=lambda item: (
-                    -float(cast(float, item["lift"])),
-                    -int(cast(int, item["support_count"])),
-                    str(item["display"]),
+                candidate_masks.append(signal_train)
+            candidates.extend(
+                _combine_condition_candidates(
+                    side,
+                    candidates,
+                    candidate_masks,
+                    y,
+                    groups,
+                    candidate_limit=config.candidate_limit,
                 )
             )
-            seen: set[str] = set()
-            for candidate in candidates:
-                signature = _rule_signature(cast(RuleGroup, candidate["rule"]))
-                if signature in seen:
-                    continue
-                seen.add(signature)
-                result[side].append(candidate)
-                if len(result[side]) >= config.candidate_limit:
-                    break
+            result[side] = _select_condition_candidates(candidates, config.candidate_limit)
         return result
 
     def _backtest_metrics(
@@ -723,6 +724,229 @@ def _condition_candidate(side: str, index: int, candidate: MinedCondition) -> di
     }
 
 
+def _condition_mask(
+    condition: ScreenCondition,
+    features: pd.DataFrame,
+    previous_features: pd.DataFrame,
+) -> np.ndarray:
+    """Evaluate one mined condition on the same training rows it was scored on."""
+
+    size = len(features)
+    if condition.left_value not in features.columns:
+        return np.zeros(size, dtype=bool)
+    left = pd.to_numeric(features[condition.left_value], errors="coerce").to_numpy(dtype=float)
+    valid = np.isfinite(left)
+    if condition.right_value is not None:
+        if condition.right_value not in features.columns:
+            return np.zeros(size, dtype=bool)
+        right = pd.to_numeric(features[condition.right_value], errors="coerce").to_numpy(
+            dtype=float
+        )
+        valid &= np.isfinite(right)
+    elif condition.right_constant is not None:
+        right = np.full(size, condition.right_constant, dtype=float)
+    else:
+        return np.zeros(size, dtype=bool)
+
+    if condition.operator in {"cross_up", "cross_down"}:
+        if condition.left_value not in previous_features.columns:
+            return np.zeros(size, dtype=bool)
+        previous_left = pd.to_numeric(
+            previous_features[condition.left_value], errors="coerce"
+        ).to_numpy(dtype=float)
+        if condition.right_value is not None:
+            if condition.right_value not in previous_features.columns:
+                return np.zeros(size, dtype=bool)
+            previous_right = pd.to_numeric(
+                previous_features[condition.right_value], errors="coerce"
+            ).to_numpy(dtype=float)
+        else:
+            previous_right = right
+        valid &= np.isfinite(previous_left) & np.isfinite(previous_right)
+        crossed = (
+            (previous_left <= previous_right) & (left > right)
+            if condition.operator == "cross_up"
+            else (previous_left >= previous_right) & (left < right)
+        )
+        return np.asarray(crossed & valid, dtype=bool)
+
+    operators = {
+        "gt": np.greater,
+        "gte": np.greater_equal,
+        "lt": np.less,
+        "lte": np.less_equal,
+        "eq": np.equal,
+        "neq": np.not_equal,
+    }
+    comparison = operators.get(str(condition.operator))
+    if comparison is None:
+        return np.zeros(size, dtype=bool)
+    return np.asarray(comparison(left, right) & valid, dtype=bool)
+
+
+def _single_component_id(candidate: Mapping[str, object]) -> str | None:
+    rule = candidate.get("rule")
+    if not isinstance(rule, RuleGroup) or rule.required_conditions:
+        return None
+    if len(rule.signals) + len(rule.conditions) != 1:
+        return None
+    if rule.signals:
+        return f"signal:{rule.signals[0]}"
+    condition = rule.conditions[0]
+    if condition.right_value is not None or condition.right_constant is None:
+        return None
+    return f"value:{condition.left_value}"
+
+
+def _combine_condition_candidates(
+    side: str,
+    candidates: Sequence[dict[str, object]],
+    masks: Sequence[np.ndarray],
+    outcomes: np.ndarray,
+    groups: np.ndarray,
+    *,
+    candidate_limit: int,
+) -> list[dict[str, object]]:
+    """Mine bounded two-component AND/OR rules from training-only candidates."""
+
+    if len(candidates) != len(masks) or not candidates:
+        return []
+    group_codes = pd.factorize(groups, sort=False)[0]
+    group_sizes = np.bincount(group_codes)
+    nonempty_groups = group_sizes > 0
+    if not nonempty_groups.any():
+        return []
+    group_outcomes = np.bincount(group_codes, weights=outcomes.astype(float))
+    baseline_rate = float(np.mean(group_outcomes[nonempty_groups] / group_sizes[nonempty_groups]))
+    if not 0.0 < baseline_rate < 1.0:
+        return []
+
+    component_limit = min(MAX_COMBINATION_COMPONENTS, max(2, candidate_limit * 2))
+    ranked_components = sorted(
+        zip(candidates, masks, strict=True),
+        key=lambda pair: (
+            -(_number(pair[0].get("lift")) or 0.0),
+            -_integer(pair[0].get("support_count")),
+            str(pair[0].get("display") or ""),
+        ),
+    )
+    components: list[tuple[dict[str, object], np.ndarray, str]] = []
+    per_component_count: dict[str, int] = {}
+    for candidate, mask in ranked_components:
+        component_id = _single_component_id(candidate)
+        if component_id is None:
+            continue
+        if per_component_count.get(component_id, 0) >= MAX_CANDIDATES_PER_COMPONENT:
+            continue
+        components.append((candidate, np.asarray(mask, dtype=bool), component_id))
+        per_component_count[component_id] = per_component_count.get(component_id, 0) + 1
+        if len(components) >= component_limit:
+            break
+
+    combined: list[dict[str, object]] = []
+    seen_signatures: set[str] = set()
+    for (left, left_mask, left_component), (right, right_mask, right_component) in combinations(
+        components, 2
+    ):
+        if left_component == right_component:
+            continue
+        left_rule = left.get("rule")
+        right_rule = right.get("rule")
+        if not isinstance(left_rule, RuleGroup) or not isinstance(right_rule, RuleGroup):
+            continue
+        for combine_mode in ("all", "any"):
+            matched_mask = (
+                left_mask & right_mask if combine_mode == "all" else left_mask | right_mask
+            )
+            if not matched_mask.any():
+                continue
+            matching_rows = np.flatnonzero(matched_mask)
+            _, first_positions = np.unique(group_codes[matching_rows], return_index=True)
+            matched_rows = np.sort(matching_rows[first_positions])
+            support_count = int(matched_rows.size)
+            if support_count < 5 or support_count >= int(nonempty_groups.sum()):
+                continue
+            outcome_rate = float(np.mean(outcomes[matched_rows]))
+            if outcome_rate <= baseline_rate:
+                continue
+            rule = RuleGroup(
+                signals=tuple(dict.fromkeys((*left_rule.signals, *right_rule.signals))),
+                conditions=(*left_rule.conditions, *right_rule.conditions),
+                combine_mode=combine_mode,
+            )
+            signature = _rule_signature(rule)
+            if signature in seen_signatures:
+                continue
+            seen_signatures.add(signature)
+            separator = " 且 " if combine_mode == "all" else " 或 "
+            display = f"{left.get('display', '')}{separator}{right.get('display', '')}"
+            combined.append(
+                {
+                    "candidate_id": f"{side}-combo-{_short_hash(signature)}",
+                    "side": side,
+                    "kind": "condition_combo",
+                    "display": display,
+                    "support_count": support_count,
+                    "outcome_rate": outcome_rate,
+                    "baseline_rate": baseline_rate,
+                    "lift": outcome_rate / baseline_rate,
+                    "rule": rule,
+                }
+            )
+    return combined
+
+
+def _select_condition_candidates(
+    candidates: Sequence[dict[str, object]],
+    limit: int,
+) -> list[dict[str, object]]:
+    """Keep both atomic and two-component rules in the train-ranked pool."""
+
+    ranked = sorted(
+        candidates,
+        key=lambda item: (
+            -(_number(item.get("lift")) or 0.0),
+            -_integer(item.get("support_count")),
+            str(item.get("display") or ""),
+        ),
+    )
+    unique: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for candidate in ranked:
+        rule = candidate.get("rule")
+        if not isinstance(rule, RuleGroup):
+            continue
+        signature = _rule_signature(rule)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        unique.append(candidate)
+
+    atomic_slots = (limit + 1) // 2
+    combo_slots = limit // 2
+    selected = [
+        *[item for item in unique if item.get("kind") != "condition_combo"][:atomic_slots],
+        *[item for item in unique if item.get("kind") == "condition_combo"][:combo_slots],
+    ]
+    selected_signatures = {_rule_signature(cast(RuleGroup, item["rule"])) for item in selected}
+    for item in unique:
+        signature = _rule_signature(cast(RuleGroup, item["rule"]))
+        if signature in selected_signatures:
+            continue
+        selected.append(item)
+        selected_signatures.add(signature)
+        if len(selected) >= limit:
+            break
+    return sorted(
+        selected,
+        key=lambda item: (
+            -(_number(item.get("lift")) or 0.0),
+            -_integer(item.get("support_count")),
+            str(item.get("display") or ""),
+        ),
+    )
+
+
 def _public_conditions(
     candidates: Mapping[str, Sequence[dict[str, object]]],
 ) -> dict[str, list[dict[str, object]]]:
@@ -784,8 +1008,8 @@ def _individual_risk_candidate(
         "condition_candidate_id": rule_pair.get("candidate_id"),
         "human_readable_rules": candidate.get("human_readable_rules"),
         "condition_rules": {
-            "buy": rule_pair.get("buy"),
-            "sell": rule_pair.get("sell"),
+            "buy": rule_pair.get("buy_rule"),
+            "sell": rule_pair.get("sell_rule"),
         },
         "config": dict(config) if isinstance(config, Mapping) else {},
         "train": metrics.get("train"),
@@ -946,6 +1170,20 @@ def _rank_candidates(
         )
 
     return sorted(candidates, key=sort_key)
+
+
+def _select_rule_pairs(
+    candidates: Sequence[dict[str, object]],
+) -> list[dict[str, object]]:
+    sharpe_board = _rank_candidates(candidates, "sharpe")
+    return_board = _rank_candidates(candidates, "annual_return")
+    return _unique_candidates(
+        [
+            *sharpe_board[:RULE_SHORTLIST_PER_BOARD],
+            *return_board[:RULE_SHORTLIST_PER_BOARD],
+        ],
+        key="candidate_id",
+    )
 
 
 def _unique_candidates(

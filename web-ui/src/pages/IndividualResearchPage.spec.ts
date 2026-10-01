@@ -49,7 +49,10 @@ const metadata: FormulaScreenMetadata = {
     minimum_bars: 20,
     recommended_bars: 60,
     signals: [{ id: 'technical.rsi_oversold', display_name: 'RSI 超卖', description: 'RSI 低于阈值' }],
-    values: [{ id: 'technical.rsi14', display_name: 'RSI 14', description: 'RSI 指标', rankable: true }],
+    values: [
+      { id: 'technical.rsi14', display_name: 'RSI 14', description: 'RSI 指标', rankable: true },
+      { id: 'technical.ma5', display_name: 'MA 5', description: '5 日均线', rankable: false },
+    ],
   }],
   combine_modes: [{ value: 'all', label: '全部满足' }, { value: 'any', label: '任一满足' }, { value: 'at_least', label: '至少满足' }],
   supported_markets: ['SH', 'SZ'],
@@ -174,11 +177,13 @@ describe('IndividualResearchPage', () => {
       code: '600000',
       horizon: 10,
       risk_trials: 1000,
-      value_ids: ['technical.rsi14'],
+      candidate_limit: 10,
+      value_ids: ['technical.rsi14', 'technical.ma5'],
     }))
     expect(page.text()).toContain('SH 600000 个股研究')
     expect(page.text()).toContain('验证段')
     expect(page.text()).toContain('留出段')
+    expect(page.text()).toContain('MA 5')
     expect(page.text()).toContain('样本较充分')
     expect(page.text()).toContain('风险高')
   })
@@ -191,6 +196,55 @@ describe('IndividualResearchPage', () => {
     expect((input.element as HTMLInputElement).checkValidity()).toBe(true)
     await input.setValue('100000')
     expect((input.element as HTMLInputElement).checkValidity()).toBe(true)
+  })
+
+  it('renders the logical operator for two-indicator buy and sell rules', async () => {
+    vi.mocked(individualApi.createIndividualResearch).mockResolvedValue({ job_id: 'job-combo', status: 'queued' })
+    const buyCombo = {
+      ...candidate,
+      candidate_hash: 'combo-and',
+      condition_rules: {
+        buy: {
+          signals: [], combine_mode: 'all', conditions: [
+            { left_value: 'technical.rsi14', operator: 'lte', right_constant: 35 },
+            { left_value: 'technical.return20', operator: 'gte', right_constant: 0 },
+          ],
+        },
+        sell: candidate.condition_rules!.sell,
+      },
+    }
+    const sellCombo = {
+      ...candidate,
+      candidate_hash: 'combo-or',
+      condition_rules: {
+        buy: {
+          signals: [], combine_mode: 'any', conditions: [
+            { left_value: 'technical.rsi14', operator: 'lte', right_constant: 35 },
+            { left_value: 'technical.return20', operator: 'gte', right_constant: 0 },
+          ],
+        },
+        sell: candidate.condition_rules!.sell,
+      },
+    }
+    const comboResult: IndividualResearchResult = {
+      ...result,
+      results_by_sharpe: [buyCombo],
+      results_by_return: [sellCombo],
+    }
+    vi.mocked(individualApi.getIndividualResearchJob).mockResolvedValue({
+      job_id: 'job-combo', status: 'completed', progress: 1, total_candidates: 1, total_scanned: 1,
+      errors: 0, skipped: 0, error: null, result: comboResult, description: '个股研究',
+      phase: 'completed', metadata: {}, cancel_requested: false,
+    })
+
+    const page = mountPage()
+    await flushPromises()
+    await chooseStock(page)
+    await page.get('[data-testid="individual-research-form"]').trigger('submit')
+    await flushPromises()
+
+    expect(page.get('[data-testid="individual-sharpe-0"]').text()).toContain('且')
+    expect(page.get('[data-testid="individual-return-0"]').text()).toContain('或')
   })
 
   it('saves the selected single-security candidate without launching tracking', async () => {

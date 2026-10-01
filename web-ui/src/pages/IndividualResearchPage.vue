@@ -50,7 +50,7 @@ const form = reactive({
   horizon: 10,
   valueIds: [] as string[],
   signalIds: [] as string[],
-  candidateLimit: 5,
+  candidateLimit: 10,
   riskTrials: 1000 as 1000 | 2000 | 3000,
   initialCash: 1_000_000,
   commission: 0.0001,
@@ -80,9 +80,9 @@ const messageIsError = ref(false)
 const errors = ref<Record<string, string>>({})
 let instrumentSearchTimer: ReturnType<typeof setTimeout> | null = null
 
-const rankableValues = computed<ValueDefinition[]>(() => (
+const searchableValues = computed<ValueDefinition[]>(() => (
   metadata.value?.indicators.flatMap((indicator) => indicator.values ?? [])
-    .filter((value) => value.rankable === true) ?? []
+    ?? []
 ))
 const availableSignals = computed<SignalDefinition[]>(() => (
   metadata.value?.indicators.flatMap((indicator) => indicator.signals ?? []) ?? []
@@ -130,7 +130,7 @@ function toggleSignal(signalId: string): void {
 }
 
 function setAllValues(): void {
-  selectedValues.value = new Set(rankableValues.value.map((value) => value.id))
+  selectedValues.value = new Set(searchableValues.value.map((value) => value.id))
 }
 
 function clearValues(): void {
@@ -376,7 +376,8 @@ function ruleText(candidate: IndividualResearchCandidate, side: 'buy' | 'sell'):
       return [`${String(condition.left_value ?? '')} ${String(condition.operator ?? '')} ${String(condition.right_constant ?? condition.right_value ?? '')}`]
     }),
   ]
-  return parts.join(' / ') || '—'
+  const separator = rule.combine_mode === 'any' ? ' 或 ' : ' 且 '
+  return parts.join(parts.length > 1 ? separator : ' / ') || '—'
 }
 
 function riskControlsNote(candidate: IndividualResearchCandidate): string {
@@ -554,12 +555,12 @@ onMounted(async () => {
           <fieldset class="form-section">
             <legend>指标与信号</legend>
             <div class="individual-picker-actions">
-              <span>指标 {{ selectedValues.size }} / {{ rankableValues.length }}</span>
+              <span>指标 {{ selectedValues.size }} / {{ searchableValues.length }}</span>
               <button type="button" class="table-link" @click="setAllValues">全选指标</button>
               <button type="button" class="table-link" @click="clearValues">清空指标</button>
             </div>
             <div class="individual-picker-list" data-testid="individual-value-picker">
-              <label v-for="value in rankableValues" :key="value.id" class="individual-picker-item">
+              <label v-for="value in searchableValues" :key="value.id" class="individual-picker-item">
                 <input type="checkbox" :checked="selectedValues.has(value.id)" @change="toggleValue(value.id)">
                 <span>{{ value.display_name }}</span>
               </label>
@@ -582,13 +583,13 @@ onMounted(async () => {
             <legend>计算与仓位</legend>
             <div class="compact-fields">
               <div><label for="individual-risk-trials">退出风控寻优强度</label><select id="individual-risk-trials" v-model.number="form.riskTrials" data-testid="individual-risk-trials"><option :value="1000">低 · 1000 组</option><option :value="2000">中 · 2000 组</option><option :value="3000">高 · 3000 组</option></select></div>
-              <div><label for="individual-candidate-limit">每侧条件候选上限</label><input id="individual-candidate-limit" v-model.number="form.candidateLimit" data-testid="individual-candidate-limit" type="number" min="1" max="10" step="1"></div>
+              <div><label for="individual-candidate-limit">每侧候选规则上限</label><input id="individual-candidate-limit" v-model.number="form.candidateLimit" data-testid="individual-candidate-limit" type="number" min="1" max="10" step="1"></div>
               <div><label for="individual-cash">初始资金</label><input id="individual-cash" v-model.number="form.initialCash" data-testid="individual-cash" type="number" min="1" step="1"></div>
               <div><label for="individual-execution">成交方式</label><select id="individual-execution" v-model="form.execution" data-testid="individual-execution"><option value="next_open">下一根开盘</option><option value="next_close">下一根收盘</option></select></div>
               <div><label for="individual-position-mode">仓位方式</label><select id="individual-position-mode" v-model="form.positionMode" data-testid="individual-position-mode"><option value="full">按可用资金</option><option value="fixed">固定股数</option></select></div>
               <div v-if="form.positionMode === 'fixed'"><label for="individual-fixed-size">固定股数</label><input id="individual-fixed-size" v-model.number="form.fixedSize" data-testid="individual-fixed-size" type="number" min="100" step="100"><p v-if="errors.fixedSize" class="field-error">{{ errors.fixedSize }}</p></div>
             </div>
-            <p class="helper">双榜按验证段夏普与年化收益排序；低样本候选仍展示并标注。最大回撤超过 30% 标为高风险，不从榜单剔除。</p>
+            <p class="helper">单股条件可用指标库全部数值指标，包括不用于跨股票排序的价格尺度指标。训练段搜索单指标条件与双指标 AND / OR 组合；每侧最多 10 条、最多验证 100 组买卖组合，双榜各前五组进入退出风控寻优。</p>
           </fieldset>
 
           <div class="action-stack">

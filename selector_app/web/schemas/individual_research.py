@@ -33,7 +33,7 @@ class IndividualResearchRequest(BaseModel):
     horizon: int = Field(default=10, ge=1, le=250)
     value_ids: list[str] | None = Field(default=None, max_length=256)
     signal_ids: list[str] | None = Field(default=None, max_length=256)
-    candidate_limit: int = Field(default=5, ge=1, le=10)
+    candidate_limit: int = Field(default=10, ge=1, le=10)
     risk_trials: Literal[1_000, 2_000, 3_000] = 1_000
     initial_cash: float = Field(default=1_000_000.0, gt=0, le=1_000_000_000_000)
     commission: float = Field(default=0.0001, ge=0, le=0.1)
@@ -59,11 +59,9 @@ class IndividualResearchRequest(BaseModel):
         if self.value_ids is not None:
             if not self.value_ids:
                 raise ValueError("至少选择一个可搜索指标")
-            unknown = [
-                value_id for value_id in self.value_ids if value_id not in catalog.rankable_ids
-            ]
+            unknown = [value_id for value_id in self.value_ids if value_id not in catalog.value_ids]
             if unknown:
-                raise ValueError(f"指标不可用于个股研究: {', '.join(unknown)}")
+                raise ValueError(f"指标不可用于个股条件搜索: {', '.join(unknown)}")
             if len(set(self.value_ids)) != len(self.value_ids):
                 raise ValueError("指标不能重复选择")
         if self.signal_ids is not None:
@@ -91,7 +89,7 @@ class IndividualResearchRequest(BaseModel):
             name=name,
             start_date=start_date,
             end_date=end_date,
-            value_ids=tuple(self.value_ids or catalog.rankable_ids),
+            value_ids=tuple(self.value_ids or catalog.value_ids),
             signal_ids=tuple(
                 self.signal_ids if self.signal_ids is not None else catalog.signal_ids
             ),
