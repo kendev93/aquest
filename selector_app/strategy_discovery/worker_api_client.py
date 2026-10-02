@@ -171,9 +171,7 @@ class HttpStrategyJobClient:
             with self._lock:
                 self._cancel_check_in_flight = False
                 if job_id == self._job_id:
-                    self._next_cancel_check_at = (
-                        time.monotonic() + _CANCEL_FAILURE_BACKOFF_SECONDS
-                    )
+                    self._next_cancel_check_at = time.monotonic() + _CANCEL_FAILURE_BACKOFF_SECONDS
                     cancel_requested = self._cancel_requested
                 else:
                     cancel_requested = False

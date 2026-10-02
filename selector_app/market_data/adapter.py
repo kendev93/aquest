@@ -149,11 +149,7 @@ class DuckDbMarketDataAdapter:
         key = (ref.market, ref.code)
         cached_key = getattr(self._stock_read_cache, "key", None)
         cached_frame = getattr(self._stock_read_cache, "frame", None)
-        if (
-            self._cache_stock_reads
-            and cached_key == key
-            and isinstance(cached_frame, pd.DataFrame)
-        ):
+        if self._cache_stock_reads and cached_key == key and isinstance(cached_frame, pd.DataFrame):
             return cached_frame.copy(deep=True)
 
         frame = self._store.read_bars(ref.market, ref.code)
