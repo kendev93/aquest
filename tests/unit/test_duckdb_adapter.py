@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from datetime import date
 from pathlib import Path
+from threading import Barrier, Lock
 
 import pandas as pd
+import pytest
 
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
 from selector_app.market_data.store import DuckDbMarketDataStore
@@ -40,6 +44,87 @@ def test_duckdb_adapter_lists_and_reads_instruments_without_vipdoc(tmp_path: Pat
     assert ref.path == Path("/unused")
     assert ref.instrument_type == "stock"
     assert list(adapter.read_stock(ref)["close"]) == [10.5, 11.5]
+
+
+def test_worker_adapter_reuses_one_immutable_stock_snapshot_per_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "cached-market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _frame())
+    original_read = store.read_bars
+    original_many_read = store.read_many_bars
+    read_count = 0
+
+    def read_bars(market: str, code: str) -> pd.DataFrame:
+        nonlocal read_count
+        read_count += 1
+        return original_read(market, code)
+
+    def read_many_bars(*args, **kwargs) -> pd.DataFrame:
+        nonlocal read_count
+        read_count += 1
+        return original_many_read(*args, **kwargs)
+
+    monkeypatch.setattr(store, "read_bars", read_bars)
+    monkeypatch.setattr(store, "read_many_bars", read_many_bars)
+    adapter = DuckDbMarketDataAdapter(store, cache_stock_reads=True)
+    ref = adapter.stock_ref("", "SH", "600000")
+
+    first = adapter.read_stock(ref)
+    first.loc[0, "close"] = -1
+    second = adapter.read_stock(ref)
+
+    assert read_count == 1
+    assert second.loc[0, "close"] == 10.5
+
+    window = adapter.read_many_stocks(
+        [ref],
+        start_date=date(2024, 1, 3),
+        end_date=date(2024, 1, 3),
+        warmup_bars=1,
+    )
+    assert window["date"].dt.strftime("%Y-%m-%d").tolist() == [
+        "2024-01-02",
+        "2024-01-03",
+    ]
+    assert read_count == 1
+
+    adapter.clear_thread_stock_cache()
+    adapter.read_stock(ref)
+    assert read_count == 2
+
+
+def test_worker_stock_snapshots_are_thread_local_and_concurrent_reads_succeed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "thread-local-market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _frame())
+    original_read = store.read_bars
+    read_count = 0
+    count_lock = Lock()
+
+    def read_bars(market: str, code: str) -> pd.DataFrame:
+        nonlocal read_count
+        with count_lock:
+            read_count += 1
+        return original_read(market, code)
+
+    monkeypatch.setattr(store, "read_bars", read_bars)
+    adapter = DuckDbMarketDataAdapter(store, cache_stock_reads=True)
+    ref = adapter.stock_ref("", "SH", "600000")
+    barrier = Barrier(2, timeout=3)
+
+    def read_twice() -> tuple[pd.DataFrame, pd.DataFrame]:
+        first = adapter.read_stock(ref)
+        barrier.wait()
+        second = adapter.read_stock(ref)
+        return first, second
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        frames = list(executor.map(lambda _index: read_twice(), range(2)))
+
+    assert read_count == 2
+    assert all(first.equals(second) for first, second in frames)
 
 
 def _register_without_bars(store: DuckDbMarketDataStore, market: str, code: str) -> None:

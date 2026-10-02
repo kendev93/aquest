@@ -68,7 +68,7 @@ _BAR_COLUMNS = [
 ]
 _FRAME_COLUMNS = ["date", "open", "high", "low", "close", "volume", "amount", "bar_status"]
 _WRITE_LOCK = RLock()
-_CONNECT_RETRY_DELAYS = (0.05, 0.1, 0.25, 0.5, 1.0)
+_CONNECT_RETRY_DELAYS = (0.1, 0.25, 0.5, 1.0, 2.0)
 # 本系统只研究股票；基金、债券、指数都不入库。
 _INSTRUMENT_TYPES = {"stock"}
 # DuckDB 默认按**宿主机**内存给自己配额，看不到容器的 cgroup 上限。批量写指标

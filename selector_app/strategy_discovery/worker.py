@@ -29,7 +29,7 @@ from .replay import ReplayLeaderboard
 from .replay_service import ReplayProgressCallback
 from .service import ProgressCallback, StrategyDiscoveryService
 from .snapshot import DiscoverySnapshotCache
-from .worker_api_client import HttpStrategyJobClient
+from .worker_api_client import HttpStrategyJobClient, TransientWorkerApiError
 
 logger = logging.getLogger(__name__)
 DEFAULT_WORKER_POLL_INTERVAL_SECONDS = 0.5
@@ -242,12 +242,15 @@ class StrategyDiscoveryWorker:
         def abort_check() -> bool:
             return self._job_store.is_cancel_requested(job_id)
 
+        last_progress_warning_at = 0.0
+
         def progress_callback(
             current: int,
             total: int,
             phase: str,
             metadata: Mapping[str, object] | None = None,
         ) -> None:
+            nonlocal last_progress_warning_at
             details = dict(metadata or {})
             raw_progress = details.get("overall_progress")
             progress = (
@@ -257,15 +260,24 @@ class StrategyDiscoveryWorker:
                 if total > 0
                 else 1.0
             )
-            self._job_store.update(
-                job_id,
-                phase=phase,
-                progress=progress,
-                total_candidates=total,
-                total_scanned=current,
-                heartbeat_at=time.time(),
-                metadata=details,
-            )
+            try:
+                self._job_store.update(
+                    job_id,
+                    phase=phase,
+                    progress=progress,
+                    total_candidates=total,
+                    total_scanned=current,
+                    heartbeat_at=time.time(),
+                    metadata=details,
+                )
+            except TransientWorkerApiError as exc:
+                now = time.monotonic()
+                if now - last_progress_warning_at >= 30.0:
+                    logger.warning(
+                        "策略 worker 进度暂时无法上报，计算继续并在下一次进度更新时重试: %s",
+                        exc,
+                    )
+                    last_progress_warning_at = now
 
         if operation in {"discovery", "risk_optimization"}:
             raw_request = payload.get("request")
@@ -370,7 +382,7 @@ def _error_code(exc: Exception) -> str:
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     store = DuckDbMarketDataStore(read_only=True)
-    market_adapter = DuckDbMarketDataAdapter(store)
+    market_adapter = DuckDbMarketDataAdapter(store, cache_stock_reads=True)
     stop_event = Event()
 
     def stop(_signum: int, _frame: object) -> None:
@@ -408,7 +420,7 @@ def main() -> None:
                 )
                 per_thread_strategy_service = StrategyDiscoveryService(
                     store=store,
-                    market_data_adapter=DuckDbMarketDataAdapter(store),
+                    market_data_adapter=market_adapter,
                     evaluation_workers=1,
                     persist_indicator_cache=False,
                     discovery_snapshot_cache=per_thread_snapshots,

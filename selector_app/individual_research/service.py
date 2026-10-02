@@ -84,10 +84,14 @@ class IndividualStockResearchService:
                 "method", "按共同市场日历固定切分 60/20/20，并在预测窗口边界清除前视样本"
             )
             split_metadata["holdout_policy"] = "留出段只复核最终风险候选，不参与条件或风险参数排序"
-            windows = {
-                phase: {"start": bounds[0], "end": bounds[1]}
-                for phase, bounds in config.split_windows.items()
-                if phase in {"train", "validation", "holdout"}
+            windows = _split_windows(dates, split_slices)
+            split_metadata["observed_windows"] = {
+                phase: {
+                    "start_date": bounds["start"].isoformat(),
+                    "end_date": bounds["end"].isoformat(),
+                }
+                for phase, bounds in windows.items()
+                if bounds is not None
             }
         else:
             split_slices, split_metadata = split_trading_days(dates, config.horizon)

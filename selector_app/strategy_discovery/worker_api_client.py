@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import socket
@@ -14,9 +15,12 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-_CANCEL_POLL_SECONDS = 0.5
+_CANCEL_POLL_SECONDS = 1.5
+_CANCEL_FAILURE_BACKOFF_SECONDS = 3.0
+_CANCEL_REQUEST_TIMEOUT_SECONDS = 3.0
 _RETRYABLE_WORKER_STATUSES = frozenset({500, 502, 503, 504})
-_WORKER_RETRY_DELAYS_SECONDS = (0.1, 0.25, 0.5)
+_WORKER_RETRY_DELAYS_SECONDS = (0.1, 0.25, 0.5, 1.0)
+logger = logging.getLogger(__name__)
 JsonRequester = Callable[
     [str, Mapping[str, object], Mapping[str, str], float], Mapping[str, object]
 ]
@@ -25,6 +29,10 @@ JsonRequester = Callable[
 class _NoRedirectHandler(HTTPRedirectHandler):
     def redirect_request(self, *_args: object, **_kwargs: object) -> None:
         return None
+
+
+class TransientWorkerApiError(RuntimeError):
+    """A retryable worker API failure that the running task may ride through."""
 
 
 class HttpStrategyJobClient:
@@ -63,7 +71,9 @@ class HttpStrategyJobClient:
         self._state: dict[str, object] | None = None
         self._result: dict[str, object] | None = None
         self._cancel_requested = False
-        self._last_cancel_check = 0.0
+        self._next_cancel_check_at = 0.0
+        self._cancel_check_in_flight = False
+        self._last_cancel_warning_at = 0.0
 
     @classmethod
     def from_env(cls) -> HttpStrategyJobClient:
@@ -117,7 +127,8 @@ class HttpStrategyJobClient:
             self._state = dict(state)
             self._result = None
             self._cancel_requested = bool(state.get("cancel_requested"))
-            self._last_cancel_check = time.monotonic()
+            self._next_cancel_check_at = time.monotonic() + _CANCEL_POLL_SECONDS
+            self._cancel_check_in_flight = False
         return job_id
 
     def read_request(self, job_id: str) -> dict[str, object] | None:
@@ -142,18 +153,55 @@ class HttpStrategyJobClient:
         with self._lock:
             if job_id != self._job_id:
                 return False
-            if time.monotonic() - self._last_cancel_check < _CANCEL_POLL_SECONDS:
+            now = time.monotonic()
+            if self._cancel_check_in_flight or now < self._next_cancel_check_at:
                 return self._cancel_requested
+            self._cancel_check_in_flight = True
+            self._next_cancel_check_at = now + _CANCEL_POLL_SECONDS
+
+        try:
             response = self._post(
                 f"/internal/strategy-worker/jobs/{job_id}/heartbeat",
                 {"worker_id": self.worker_id},
+                timeout_seconds=min(self._timeout_seconds, _CANCEL_REQUEST_TIMEOUT_SECONDS),
+                max_attempts=2,
             )
             data = _mapping(response.get("data"), "心跳")
-            state = data.get("state")
-            if isinstance(state, Mapping):
-                self._state = dict(state)
-            self._cancel_requested = data.get("cancel_requested") is True
-            self._last_cancel_check = time.monotonic()
+        except TransientWorkerApiError as exc:
+            with self._lock:
+                self._cancel_check_in_flight = False
+                if job_id == self._job_id:
+                    self._next_cancel_check_at = (
+                        time.monotonic() + _CANCEL_FAILURE_BACKOFF_SECONDS
+                    )
+                    cancel_requested = self._cancel_requested
+                else:
+                    cancel_requested = False
+                should_log = time.monotonic() - self._last_cancel_warning_at >= 30.0
+                if should_log:
+                    self._last_cancel_warning_at = time.monotonic()
+            if should_log:
+                logger.warning(
+                    "策略 worker 暂时无法读取取消状态，沿用最近状态并继续重试: %s",
+                    exc,
+                )
+            return cancel_requested
+        except Exception:
+            with self._lock:
+                self._cancel_check_in_flight = False
+                self._next_cancel_check_at = time.monotonic() + _CANCEL_POLL_SECONDS
+            raise
+
+        state = data.get("state")
+        with self._lock:
+            self._cancel_check_in_flight = False
+            if job_id == self._job_id:
+                if isinstance(state, Mapping):
+                    self._state = dict(state)
+                self._cancel_requested = (
+                    self._cancel_requested or data.get("cancel_requested") is True
+                )
+                self._next_cancel_check_at = time.monotonic() + _CANCEL_POLL_SECONDS
             return self._cancel_requested
 
     def update(
@@ -180,7 +228,13 @@ class HttpStrategyJobClient:
             payload = {"worker_id": self.worker_id, **body}
         else:
             raise ValueError("策略 worker 状态更新无效")
-        response = self._post(f"/internal/strategy-worker/jobs/{job_id}/{endpoint}", payload)
+        progress_update = endpoint == "progress"
+        response = self._post(
+            f"/internal/strategy-worker/jobs/{job_id}/{endpoint}",
+            payload,
+            timeout_seconds=min(self._timeout_seconds, 2.5) if progress_update else None,
+            max_attempts=2 if progress_update else None,
+        )
         data = _mapping(response.get("data"), "状态更新")
         self._store_server_state(job_id, data)
 
@@ -198,6 +252,7 @@ class HttpStrategyJobClient:
         self._post(
             f"/internal/strategy-worker/jobs/{job_id}/pool-entry",
             {"worker_id": self.worker_id, "entry": dict(entry)},
+            timeout_seconds=min(self._timeout_seconds, 5.0),
         )
 
     def _store_server_state(self, job_id: str, data: Mapping[str, object]) -> None:
@@ -208,15 +263,29 @@ class HttpStrategyJobClient:
             if isinstance(state, Mapping):
                 self._state = dict(state)
             self._cancel_requested = data.get("cancel_requested") is True
-            self._last_cancel_check = time.monotonic()
+            self._next_cancel_check_at = time.monotonic() + _CANCEL_POLL_SECONDS
 
-    def _post(self, path: str, payload: Mapping[str, object]) -> dict[str, object]:
+    def _post(
+        self,
+        path: str,
+        payload: Mapping[str, object],
+        *,
+        timeout_seconds: float | None = None,
+        max_attempts: int | None = None,
+    ) -> dict[str, object]:
         retryable_update = (
             path.endswith("/heartbeat")
             or path.endswith("/progress")
             or path.endswith("/pool-entry")
         )
-        for attempt in range(len(_WORKER_RETRY_DELAYS_SECONDS) + 1):
+        attempt_limit = max_attempts or len(_WORKER_RETRY_DELAYS_SECONDS) + 1
+        if attempt_limit < 1:
+            raise ValueError("策略 worker API 请求次数必须大于 0")
+        selected_timeout = timeout_seconds or self._timeout_seconds
+        for attempt in range(attempt_limit):
+            retry_delay = _WORKER_RETRY_DELAYS_SECONDS[
+                min(attempt, len(_WORKER_RETRY_DELAYS_SECONDS) - 1)
+            ]
             try:
                 decoded = self._requester(
                     f"{self._base_url}{path}",
@@ -225,26 +294,28 @@ class HttpStrategyJobClient:
                         "Authorization": f"Bearer {self._token}",
                         "Content-Type": "application/json",
                     },
-                    self._timeout_seconds,
+                    selected_timeout,
                 )
             except HTTPError as exc:
-                if (
-                    retryable_update
-                    and exc.code in _RETRYABLE_WORKER_STATUSES
-                    and attempt < len(_WORKER_RETRY_DELAYS_SECONDS)
-                ):
-                    time.sleep(_WORKER_RETRY_DELAYS_SECONDS[attempt])
-                    continue
+                if retryable_update and exc.code in _RETRYABLE_WORKER_STATUSES:
+                    if attempt + 1 < attempt_limit:
+                        time.sleep(retry_delay)
+                        continue
+                    raise TransientWorkerApiError(
+                        f"策略 worker API 暂时失败（HTTP {exc.code}）"
+                    ) from exc
                 raise RuntimeError("策略 worker API 请求失败") from exc
             except (URLError, TimeoutError, OSError, ValueError) as exc:
-                if retryable_update and attempt < len(_WORKER_RETRY_DELAYS_SECONDS):
-                    time.sleep(_WORKER_RETRY_DELAYS_SECONDS[attempt])
-                    continue
+                if retryable_update:
+                    if attempt + 1 < attempt_limit:
+                        time.sleep(retry_delay)
+                        continue
+                    raise TransientWorkerApiError("策略 worker API 响应超时或暂不可用") from exc
                 raise RuntimeError("策略 worker API 请求失败") from exc
             if not isinstance(decoded, Mapping):
                 raise RuntimeError("策略 worker API 响应格式无效")
             return {str(key): value for key, value in decoded.items()}
-        raise RuntimeError("策略 worker API 请求失败")
+        raise TransientWorkerApiError("策略 worker API 暂时不可用")
 
     def _clear_job(self) -> None:
         self._job_id = None
@@ -252,7 +323,8 @@ class HttpStrategyJobClient:
         self._state = None
         self._result = None
         self._cancel_requested = False
-        self._last_cancel_check = 0.0
+        self._next_cancel_check_at = 0.0
+        self._cancel_check_in_flight = False
 
 
 def _request_json(
@@ -288,4 +360,4 @@ def _validate_worker_id(value: str) -> str:
     return selected
 
 
-__all__ = ["HttpStrategyJobClient"]
+__all__ = ["HttpStrategyJobClient", "TransientWorkerApiError"]

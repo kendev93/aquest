@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -214,6 +215,30 @@ def test_individual_pipeline_optimizes_validation_top_rule_and_only_marks_holdou
     assert result["full_backtests"][full_backtest_id]["trades"]
     assert len(service.full_backtest_calls) == 2
     assert len(result["full_backtests"]) == 2
+
+
+def test_common_split_windows_start_at_the_symbol_first_observed_day() -> None:
+    risk = FakeRiskService()
+    service = FixtureIndividualResearchService(
+        adapter=FakeAdapter(),
+        backtest_service=object(),
+        portfolio_service=object(),
+        strategy_service=risk,
+    )
+    config = replace(
+        _config(),
+        split_windows={
+            "train": (date(1990, 12, 19), date(2021, 1, 1)),
+            "validation": (date(2021, 2, 1), date(2022, 1, 1)),
+            "holdout": (date(2022, 2, 1), date(2023, 1, 1)),
+        },
+        common_split_metadata={"method": "shared 60/20/20"},
+    )
+
+    result = service.run(config)
+
+    assert risk.requests[0].splits["search"]["start_date"] == "2020-01-01"
+    assert result["split_metadata"]["observed_windows"]["train"]["start_date"] == "2020-01-01"
 
 
 def test_training_mining_creates_and_or_rules_from_two_indicators() -> None:

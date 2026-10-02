@@ -24,6 +24,12 @@ import type {
 } from '../types'
 
 const OBJECTIVE_STORAGE_KEY = 'indicator-lab.strategy-pool.objective'
+interface ActivePoolTickerProgress {
+  symbol: string
+  progress: number
+  phaseLabel: string
+}
+
 const objective = ref<StrategyPoolObjective | null>(null)
 const entries = ref<StrategyPoolEntry[]>([])
 const history = ref<StrategyPoolJobSummary[]>([])
@@ -70,6 +76,56 @@ const phaseLabel = computed(() => {
 const currentSymbol = computed(() => {
   const value = activeJob.value?.metadata?.current_symbol
   return typeof value === 'string' ? value : ''
+})
+const activeTickerProgress = computed<ActivePoolTickerProgress[]>(() => {
+  if (activeIntent.value !== 'full') return []
+  const metadata = activeJob.value?.metadata ?? {}
+  const raw = metadata.active_symbols
+  if (Array.isArray(raw)) {
+    const active = raw.flatMap((item): ActivePoolTickerProgress[] => {
+      if (!item || typeof item !== 'object') return []
+      const progressItem = item as Record<string, unknown>
+      if (typeof progressItem.symbol !== 'string') return []
+      const progress = typeof progressItem.progress === 'number'
+        ? Math.max(0, Math.min(1, progressItem.progress))
+        : 0
+      return [{
+        symbol: progressItem.symbol,
+        progress,
+        phaseLabel: typeof progressItem.phase_label === 'string' ? progressItem.phase_label : '研究中',
+      }]
+    })
+    if (active.length) return active
+  }
+  const symbol = metadata.current_symbol ?? metadata.symbol
+  const fraction = metadata.ticker_progress
+  if (typeof symbol === 'string' && typeof fraction === 'number') {
+    return [{
+      symbol,
+      progress: Math.max(0, Math.min(1, fraction)),
+      phaseLabel: typeof metadata.phase_label === 'string' ? metadata.phase_label : '研究中',
+    }]
+  }
+  return []
+})
+const progressCountText = computed(() => {
+  if (activeIntent.value !== 'full') return ''
+  const metadata = activeJob.value?.metadata ?? {}
+  const total = typeof metadata.total_symbols === 'number'
+    ? metadata.total_symbols
+    : activeJob.value?.total_candidates
+  if (typeof total !== 'number') return ''
+  const completed = typeof metadata.completed_symbols === 'number' ? metadata.completed_symbols : 0
+  const skipped = typeof metadata.skipped_symbols === 'number' ? metadata.skipped_symbols : 0
+  const failed = typeof metadata.failed_symbols === 'number' ? metadata.failed_symbols : 0
+  const processed = typeof metadata.finished_symbols === 'number'
+    ? metadata.finished_symbols
+    : completed + failed
+  const successful = Math.max(0, completed - skipped)
+  const active = typeof metadata.current_parallelism === 'number'
+    ? metadata.current_parallelism
+    : activeTickerProgress.value.length
+  return `已处理 ${processed} / ${total} 只（完成 ${successful} · 进行中 ${active} · 跳过 ${skipped} · 失败 ${failed}）`
 })
 const parallelismText = computed(() => {
   const metadata = activeJob.value?.metadata ?? {}
@@ -630,6 +686,13 @@ onUnmounted(() => {
           <div v-if="isBusy" class="pool-progress" data-testid="pool-job-progress">
             <div class="progress-heading"><strong>{{ activeIntent === 'signals' ? '正在扫描当天信号' : activeIntent === 'portfolio' ? '正在回测组合留出段' : activeIntent === 'single' ? '正在重跑单只股票' : '全市场研究进行中' }}</strong><strong>{{ progressPercent }}%</strong></div>
             <div class="progress-track"><span :style="{ width: `${progressPercent}%` }"></span></div>
+            <p v-if="progressCountText" class="progress-count" data-testid="pool-progress-count">{{ progressCountText }}</p>
+            <div v-if="activeTickerProgress.length" class="active-ticker-progress" data-testid="pool-active-ticker-progress" role="list" aria-label="正在研究的标的进度">
+              <div v-for="item in activeTickerProgress" :key="item.symbol" class="active-ticker-progress-row" :data-testid="`pool-active-symbol-${item.symbol}`" role="listitem">
+                <div class="active-ticker-progress-heading"><strong>{{ item.symbol }}</strong><span>{{ item.phaseLabel }} · {{ Math.round(item.progress * 100) }}%</span></div>
+                <div class="active-ticker-progress-track" role="progressbar" :aria-label="`${item.symbol}研究进度`" :aria-valuenow="Math.round(item.progress * 100)" aria-valuemin="0" aria-valuemax="100"><span :style="{ width: `${Math.round(item.progress * 100)}%` }"></span></div>
+              </div>
+            </div>
             <div class="progress-detail"><span>{{ phaseLabel }}</span><span v-if="currentSymbol">当前：{{ currentSymbol }}</span><span v-if="parallelismText" data-testid="pool-parallelism">{{ parallelismText }}</span><button class="text-button danger-text" data-testid="pool-cancel-job" @click="cancelCurrentJob">取消任务</button></div>
           </div>
           <p class="pool-scale-note">全量重选会逐只保存检查点，并按 CPU 负载、可用内存和股票历史长度自动调节并发；重新运行时会跳过行情和配置指纹未变化的股票。3000 组会让每只股票的退出风控计算更充分，实际耗时取决于本地标的数和历史长度。</p>
@@ -778,6 +841,14 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .pool-progress { margin-top: 22px; padding: 16px; border: 1px solid #293c58; }
 .progress-track { height: 8px; overflow: hidden; margin: 12px 0; background: #17243a; }
 .progress-track span { display: block; height: 100%; background: #18c467; transition: width .2s ease; }
+.progress-count { margin: 0 0 12px; color: #acbbd0; font-size: .88rem; }
+.active-ticker-progress { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px; margin-bottom: 12px; }
+.active-ticker-progress-row { display: grid; gap: 7px; padding: 9px 10px; border: 1px solid #25364f; background: #101a2d; }
+.active-ticker-progress-heading { display: flex; justify-content: space-between; gap: 10px; color: #aab9ce; font-size: .8rem; }
+.active-ticker-progress-heading strong { color: #eef4fc; }
+.active-ticker-progress-heading span { text-align: right; }
+.active-ticker-progress-track { height: 5px; overflow: hidden; background: #17243a; }
+.active-ticker-progress-track span { display: block; height: 100%; background: #18c467; transition: width .25s ease; }
 .progress-detail { color: #91a1b8; font-size: .9rem; }
 .pool-scale-note, .empty-copy, .holdout-card small { color: #8798b1; font-size: .9rem; line-height: 1.6; }
 .pool-scale-note { margin: 16px 0 0; }

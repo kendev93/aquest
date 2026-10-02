@@ -9,7 +9,12 @@ from selector_app.strategy_pool.selection import (
     slices_for_common_windows,
     summarize_objective_winners,
 )
-from selector_app.strategy_pool.service import _portfolio_strategies
+from selector_app.strategy_pool.service import (
+    MARKET_POOL_ALGORITHM_VERSION,
+    MarketStrategyPoolService,
+    _fingerprint,
+    _portfolio_strategies,
+)
 
 
 def test_common_calendar_windows_use_shared_dates_and_purge_each_label_boundary() -> None:
@@ -68,6 +73,20 @@ def test_shared_split_windows_project_onto_later_listing_without_local_resplitti
     assert listing_dates[slices["train"]][-1] == calendar[54]
     assert listing_dates[slices["validation"]][0] == calendar[60]
     assert listing_dates[slices["holdout"]][0] == calendar[80]
+
+
+def test_stock_window_algorithm_version_invalidates_old_no_strategy_checkpoints() -> None:
+    market_fingerprint = "bars-v1"
+    previous_config = _fingerprint({"algorithm_version": "market-pool-v1"})
+    updated_config = _fingerprint({"algorithm_version": MARKET_POOL_ALGORITHM_VERSION})
+
+    assert MARKET_POOL_ALGORITHM_VERSION == "market-pool-v2"
+    assert updated_config != previous_config
+    assert not MarketStrategyPoolService._can_reuse(
+        (market_fingerprint, previous_config, "no_strategy"),
+        market_fingerprint,
+        updated_config,
+    )
 
 
 def test_portfolio_strategy_selection_uses_objective_ties_drawdown_then_symbol() -> None:

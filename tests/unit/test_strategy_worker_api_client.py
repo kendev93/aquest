@@ -4,7 +4,7 @@ import json
 import time
 from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from threading import Thread
+from threading import Event, Thread
 from urllib.parse import urlsplit
 
 import pytest
@@ -57,7 +57,7 @@ def test_http_strategy_job_client_claims_updates_cancels_and_completes(tmp_path)
         assert client.read_request("job-1")["operation"] == "discovery"
         assert client.read_state("job-1")["status"] == "running"
         client.update("job-1", phase="searching", progress=0.5)
-        time.sleep(0.51)
+        time.sleep(1.51)
         assert client.is_cancel_requested("job-1") is True
         client.write_result("job-1", {"history_id": "job-1"})
         assert client.read_state("job-1")["status"] == "completed"
@@ -157,3 +157,115 @@ def test_default_worker_transport_posts_authenticated_json(tmp_path) -> None:
     assert received[0]["authorization"] == "Bearer secret-token"
     assert urlsplit(received[0]["path"]).path == "/internal/strategy-worker/jobs/claim"
     assert json.loads(received[0]["body"]) == {"worker_id": "worker-a"}
+
+
+def test_cancel_poll_uses_cached_state_after_transient_api_timeouts(tmp_path) -> None:
+    token_file = tmp_path / "worker.token"
+    token_file.write_text("secret-token", encoding="utf-8")
+    job = {
+        "job_id": "job-1",
+        "request": {"job_id": "job-1", "operation": "discovery", "payload": {}},
+        "state": {"job_id": "job-1", "status": "running", "metadata": {}},
+    }
+    heartbeat_attempts = 0
+    should_fail = False
+
+    def handler(
+        url: str,
+        _payload: Mapping[str, object],
+        _headers: Mapping[str, str],
+        _timeout: float,
+    ) -> Mapping[str, object]:
+        nonlocal heartbeat_attempts
+        path = urlsplit(url).path
+        if path.endswith("/claim"):
+            return {"job": job}
+        if path.endswith("/heartbeat"):
+            heartbeat_attempts += 1
+            if should_fail:
+                raise TimeoutError("backend response timed out")
+            return {"data": {"state": job["state"], "cancel_requested": True}}
+        raise AssertionError(f"unexpected URL: {url}")
+
+    with HttpStrategyJobClient(
+        "http://backend:8123",
+        token_file,
+        "worker-a",
+        requester=handler,
+    ) as client:
+        assert client.claim_next() == "job-1"
+        client._next_cancel_check_at = 0
+        assert client.is_cancel_requested("job-1") is True
+
+        should_fail = True
+        client._next_cancel_check_at = 0
+        assert client.is_cancel_requested("job-1") is True
+        attempts_after_failure = heartbeat_attempts
+        assert attempts_after_failure > 1
+
+        # An outage should be throttled instead of triggering another retry storm.
+        assert client.is_cancel_requested("job-1") is True
+        assert heartbeat_attempts == attempts_after_failure
+
+
+def test_cancel_poll_does_not_hold_client_lock_during_network_io(tmp_path) -> None:
+    token_file = tmp_path / "worker.token"
+    token_file.write_text("secret-token", encoding="utf-8")
+    job = {
+        "job_id": "job-1",
+        "request": {"job_id": "job-1", "operation": "discovery", "payload": {}},
+        "state": {"job_id": "job-1", "status": "running", "metadata": {}},
+    }
+    request_started = Event()
+    release_request = Event()
+    state_updated = Event()
+    request_results: list[bool] = []
+
+    def handler(
+        url: str,
+        _payload: Mapping[str, object],
+        _headers: Mapping[str, str],
+        _timeout: float,
+    ) -> Mapping[str, object]:
+        path = urlsplit(url).path
+        if path.endswith("/claim"):
+            return {"job": job}
+        if path.endswith("/heartbeat"):
+            request_started.set()
+            if not release_request.wait(timeout=3):
+                raise TimeoutError("test request release timed out")
+            return {"data": {"state": job["state"], "cancel_requested": False}}
+        raise AssertionError(f"unexpected URL: {url}")
+
+    with HttpStrategyJobClient(
+        "http://backend:8123",
+        token_file,
+        "worker-a",
+        requester=handler,
+    ) as client:
+        assert client.claim_next() == "job-1"
+        client._next_cancel_check_at = 0
+        poller = Thread(
+            target=lambda: request_results.append(client.is_cancel_requested("job-1")),
+            daemon=True,
+        )
+        poller.start()
+        assert request_started.wait(timeout=1)
+
+        def update_state() -> None:
+            client._store_server_state("job-1", {"cancel_requested": True})
+            state_updated.set()
+
+        updater = Thread(
+            target=update_state,
+            daemon=True,
+        )
+        updater.start()
+        try:
+            assert state_updated.wait(timeout=0.2)
+        finally:
+            release_request.set()
+            poller.join(timeout=2)
+            updater.join(timeout=2)
+
+    assert request_results == [True]

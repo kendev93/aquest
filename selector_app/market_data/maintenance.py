@@ -761,7 +761,7 @@ class DatabaseMaintenanceService:
 
 
 class DatabaseMaintenanceScheduler:
-    """Periodically check maintenance only while the local job runner is idle."""
+    """Check database maintenance only when local and remote jobs are idle."""
 
     def __init__(
         self,
@@ -769,17 +769,21 @@ class DatabaseMaintenanceScheduler:
         runner: MaintenanceJobRunner,
         *,
         interval_seconds: float = 15 * 60,
+        additional_busy_check: Callable[[], bool] | None = None,
     ) -> None:
         if interval_seconds <= 0:
             raise ValueError("数据库整理检查间隔必须大于 0")
         self._service = service
         self._runner = runner
         self._interval_seconds = float(interval_seconds)
+        self._additional_busy_check = additional_busy_check
 
     async def check_once(self) -> MaintenanceResult | None:
         """Check in a worker thread so a large rewrite never blocks the event loop."""
 
-        if self._runner.has_active_jobs():
+        if self._runner.has_active_jobs() or (
+            self._additional_busy_check is not None and self._additional_busy_check()
+        ):
             return None
         return await asyncio.to_thread(self._service.run_if_needed)
 

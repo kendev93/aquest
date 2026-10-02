@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -44,6 +45,9 @@ from .store import DuckDbStrategyPoolStore
 PoolObjective = Literal["annual_return", "sharpe"]
 PoolProgressCallback = Callable[[int, int, str, Mapping[str, object] | None], None]
 PoolEntryWriter = Callable[[Mapping[str, object]], None]
+MARKET_POOL_ALGORITHM_VERSION = "market-pool-v2"
+POOL_PROGRESS_EMIT_INTERVAL_SECONDS = 1.5
+logger = logging.getLogger(__name__)
 
 
 class _TickerProgress:
@@ -123,6 +127,7 @@ class _PoolProgressCoordinator:
         self._skipped = 0
         self._failed = 0
         self._fractions: dict[int, float] = {}
+        self._active_symbols: dict[int, dict[str, object]] = {}
         self._last_emit_at = 0.0
         self._lock = Lock()
 
@@ -154,8 +159,14 @@ class _PoolProgressCoordinator:
     ) -> None:
         with self._lock:
             self._fractions[index] = fraction
+            self._active_symbols[index] = {
+                "symbol": symbol,
+                "progress": fraction,
+                "phase": phase,
+                "phase_label": phase_label,
+            }
             now = time.monotonic()
-            if now - self._last_emit_at < 0.5:
+            if now - self._last_emit_at < POOL_PROGRESS_EMIT_INTERVAL_SECONDS:
                 return
             fractional_work = min(
                 self._total_symbols,
@@ -171,8 +182,13 @@ class _PoolProgressCoordinator:
                     "completed_symbols": self._completed,
                     "failed_symbols": self._failed,
                     "skipped_symbols": self._skipped,
+                    "finished_symbols": self._finished,
                     "total_symbols": self._total_symbols,
                     "current_parallelism": len(self._fractions),
+                    "active_symbols": [
+                        dict(progress)
+                        for _, progress in sorted(self._active_symbols.items())
+                    ],
                     "maximum_parallelism": self._maximum_workers,
                     "memory_worker_limit": self._memory_worker_limit,
                     "available_memory_mb": self._available_memory_mb,
@@ -194,6 +210,7 @@ class _PoolProgressCoordinator:
     ) -> None:
         with self._lock:
             self._fractions.pop(index, None)
+            self._active_symbols.pop(index, None)
             self._finished += 1
             if failed:
                 self._failed += 1
@@ -211,7 +228,12 @@ class _PoolProgressCoordinator:
                     "total_symbols": self._total_symbols,
                     "skipped_symbols": self._skipped,
                     "failed_symbols": self._failed,
+                    "finished_symbols": self._finished,
                     "current_parallelism": len(self._fractions),
+                    "active_symbols": [
+                        dict(progress)
+                        for _, progress in sorted(self._active_symbols.items())
+                    ],
                     "maximum_parallelism": self._maximum_workers,
                     "memory_worker_limit": self._memory_worker_limit,
                     "available_memory_mb": self._available_memory_mb,
@@ -281,6 +303,9 @@ class MarketStrategyPoolService:
         progress: _TickerProgress,
         abort_check: Callable[[], bool] | None,
     ) -> tuple[dict[str, object], dict[str, object] | None]:
+        clear_stock_cache = getattr(self._adapter, "clear_thread_stock_cache", None)
+        if callable(clear_stock_cache):
+            clear_stock_cache()
         result = self._individual_service_for_thread().run(config, progress, abort_check)
         result_market_fingerprint = result.get("market_fingerprint")
         if not isinstance(result_market_fingerprint, str) or not result_market_fingerprint:
@@ -469,6 +494,11 @@ class MarketStrategyPoolService:
                     except Exception as exc:  # noqa: BLE001 - isolate stock failures
                         failed += 1
                         message = str(exc).strip()[:500] or type(exc).__name__
+                        if exc.__cause__ is not None:
+                            cause = str(exc.__cause__).strip()
+                            if cause and cause not in message:
+                                message = f"{message}；底层错误：{cause}"[:500]
+                        logger.exception("全市场策略池单只股票研究失败: %s", symbol)
                         errors.append({"symbol": symbol, "error": message})
                         if entry_writer is not None:
                             entry_writer(
@@ -541,7 +571,7 @@ class MarketStrategyPoolService:
             formula_id: FORMULA_REGISTRY.formula(formula_id).cache_version
             for formula_id in sorted(formula_ids)
         }
-        settings["algorithm_version"] = "market-pool-v1"
+        settings["algorithm_version"] = MARKET_POOL_ALGORITHM_VERSION
         config_fingerprint = _fingerprint(settings)
         prior_entries = self._prior_entries() if mode == "full" else {}
         started = date.today()

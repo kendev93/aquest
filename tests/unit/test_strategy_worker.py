@@ -4,6 +4,7 @@ from collections.abc import Mapping
 
 from selector_app.strategy_discovery.job_store import StrategyJobStore
 from selector_app.strategy_discovery.worker import StrategyDiscoveryWorker
+from selector_app.strategy_discovery.worker_api_client import TransientWorkerApiError
 
 
 class FakeDiscoveryService:
@@ -163,6 +164,31 @@ def test_worker_survives_a_transient_claim_failure(tmp_path) -> None:
 
     assert attempts["count"] >= 2
     assert service.calls == ["discovery"]
+    assert store.read_state("job-1")["status"] == "completed"
+
+
+def test_worker_continues_when_a_transient_progress_update_fails(tmp_path) -> None:
+    class ProgressFlakyStore(StrategyJobStore):
+        failed_once = False
+
+        def update(self, job_id, fields=None, **updates):
+            if "progress" in updates and not self.failed_once:
+                self.failed_once = True
+                raise TransientWorkerApiError("temporary progress API timeout")
+            super().update(job_id, fields, **updates)
+
+    service = FakeDiscoveryService()
+    store = ProgressFlakyStore(tmp_path / "jobs")
+    worker = StrategyDiscoveryWorker(store, service)
+    store.create(
+        "job-1",
+        operation="discovery",
+        payload={"request": {"base_config": {}, "splits": {}, "max_trials": 1}},
+        description="策略实验室",
+    )
+
+    assert worker.run_once() == "job-1"
+    assert store.failed_once is True
     assert store.read_state("job-1")["status"] == "completed"
 
 

@@ -170,12 +170,18 @@ def test_maintenance_scheduler_skips_active_jobs_and_runs_when_idle() -> None:
         service,  # type: ignore[arg-type]
         Runner(active=True),  # type: ignore[arg-type]
     )
+    remote_job_scheduler = DatabaseMaintenanceScheduler(
+        service,  # type: ignore[arg-type]
+        Runner(active=False),  # type: ignore[arg-type]
+        additional_busy_check=lambda: True,
+    )
     idle_scheduler = DatabaseMaintenanceScheduler(
         service,  # type: ignore[arg-type]
         Runner(active=False),  # type: ignore[arg-type]
     )
 
     assert asyncio.run(active_scheduler.check_once()) is None
+    assert asyncio.run(remote_job_scheduler.check_once()) is None
     result = asyncio.run(idle_scheduler.check_once())
     assert result is not None
     assert service.calls == 1

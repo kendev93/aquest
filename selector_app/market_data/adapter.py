@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from datetime import date
 from pathlib import Path
+from threading import local
 from typing import Protocol
 
 import pandas as pd
@@ -79,8 +80,10 @@ class BatchMarketDataAdapter(MarketDataAdapter, Protocol):
 class DuckDbMarketDataAdapter:
     """Expose the repository shape expected by existing domain services."""
 
-    def __init__(self, store: DuckDbMarketDataStore) -> None:
+    def __init__(self, store: DuckDbMarketDataStore, *, cache_stock_reads: bool = False) -> None:
         self._store = store
+        self._cache_stock_reads = cache_stock_reads
+        self._stock_read_cache = local()
 
     @property
     def database_path(self) -> Path:
@@ -143,7 +146,29 @@ class DuckDbMarketDataAdapter:
         ]
 
     def read_stock(self, ref: StockRef) -> pd.DataFrame:
-        return self._store.read_bars(ref.market, ref.code)
+        key = (ref.market, ref.code)
+        cached_key = getattr(self._stock_read_cache, "key", None)
+        cached_frame = getattr(self._stock_read_cache, "frame", None)
+        if (
+            self._cache_stock_reads
+            and cached_key == key
+            and isinstance(cached_frame, pd.DataFrame)
+        ):
+            return cached_frame.copy(deep=True)
+
+        frame = self._store.read_bars(ref.market, ref.code)
+        if self._cache_stock_reads:
+            # Keep one immutable full-history frame per calling thread. Research
+            # stages reuse it, while different tickers never share mutable frames.
+            self._stock_read_cache.key = key
+            self._stock_read_cache.frame = frame.copy(deep=True)
+        return frame
+
+    def clear_thread_stock_cache(self) -> None:
+        """Forget the prior ticker snapshot before starting another research run."""
+
+        self._stock_read_cache.key = None
+        self._stock_read_cache.frame = None
 
     def read_many_stocks(
         self,
@@ -153,6 +178,27 @@ class DuckDbMarketDataAdapter:
         end_date: date | None = None,
         warmup_bars: int = 0,
     ) -> pd.DataFrame:
+        if isinstance(warmup_bars, bool) or warmup_bars < 0:
+            raise ValueError("行情预热 K 线数量必须是非负整数")
+        if warmup_bars > 0 and start_date is None:
+            raise ValueError("行情预热 K 线需要设置开始日期")
+        if self._cache_stock_reads:
+            unique_refs = {(ref.market, ref.code): ref for ref in refs}
+            if len(unique_refs) == 1:
+                ref = next(iter(unique_refs.values()))
+                frame = self.read_stock(ref)
+                dates = pd.to_datetime(frame["date"], errors="coerce")
+                window_mask = dates.notna()
+                if start_date is not None:
+                    window_mask &= dates >= pd.Timestamp(start_date)
+                if end_date is not None:
+                    window_mask &= dates <= pd.Timestamp(end_date)
+                window = frame.loc[window_mask].copy()
+                if warmup_bars > 0:
+                    assert start_date is not None
+                    prior = frame.loc[dates < pd.Timestamp(start_date)].tail(warmup_bars)
+                    window = pd.concat((prior, window), ignore_index=True)
+                return window.reset_index(drop=True)
         return self._store.read_many_bars(
             refs,
             start_date=start_date,

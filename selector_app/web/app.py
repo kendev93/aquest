@@ -226,6 +226,9 @@ def create_app(
         ),
     )
 
+    def has_active_strategy_jobs() -> bool:
+        return bool(selected_strategy_backend.active_snapshots())
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.auto_sync_job_id = None
@@ -244,10 +247,16 @@ def create_app(
             )
         try:
             cleanup_stale_staging(staging_directory(selected_store.database_path))
-            maintenance_result = selected_maintenance_service.run_if_needed()
-            app.state.database_maintenance_result = maintenance_result.to_dict()
-            if maintenance_result.status == "failed":
-                logger.warning("启动时 DuckDB 整理未完成: %s", maintenance_result.error)
+            if selected_runner.has_active_jobs() or has_active_strategy_jobs():
+                app.state.database_maintenance_result = {
+                    "status": "skipped",
+                    "reason": "active_jobs",
+                }
+            else:
+                maintenance_result = selected_maintenance_service.run_if_needed()
+                app.state.database_maintenance_result = maintenance_result.to_dict()
+                if maintenance_result.status == "failed":
+                    logger.warning("启动时 DuckDB 整理未完成: %s", maintenance_result.error)
         except Exception:  # noqa: BLE001 - maintenance failure must not block the app
             logger.exception("启动时 DuckDB 整理检查失败")
             app.state.database_maintenance_result = {
@@ -258,6 +267,7 @@ def create_app(
             maintenance_scheduler = DatabaseMaintenanceScheduler(
                 selected_maintenance_service,
                 selected_runner,
+                additional_busy_check=has_active_strategy_jobs,
             )
             maintenance_task = asyncio.create_task(maintenance_scheduler.run())
         if selected_auto_sync_enabled:
