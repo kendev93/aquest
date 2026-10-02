@@ -912,6 +912,8 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
         <div class="store-meta" data-testid="market-store-meta">
           <span>数据库 {{ storeStatus?.database_path ?? '—' }}</span>
           <span>最近在线更新 {{ storeStatus?.last_online_sync_at ?? '—' }}</span>
+          <span>最近交易日历 {{ storeStatus?.market_calendar_latest_date ?? '—' }} · {{ storeStatus?.market_calendar_source ?? '未获取' }}</span>
+          <span v-if="storeStatus?.last_auto_sync_check_date">自动同步核对 {{ storeStatus.last_auto_sync_check_date }} · 截至交易日 {{ storeStatus.last_auto_sync_check_session ?? '—' }}</span>
           <span v-if="lastFullSyncText" data-testid="last-full-market-sync">{{ lastFullSyncText }}</span>
         </div>
         <div class="market-sync-form">

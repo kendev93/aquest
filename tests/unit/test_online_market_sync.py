@@ -13,6 +13,7 @@ from selector_app.adapters.baostock_catalog import BaostockCatalogError
 from selector_app.adapters.market_data_sync import MarketDataSync
 from selector_app.adapters.market_sync import MarketDataCancelledError, MarketSyncConfig
 from selector_app.adapters.online_market_sync import (
+    OnlineMarketClient,
     OnlineMarketSync,
     _ExistingBars,
     _requested_ranges,
@@ -233,6 +234,95 @@ def test_eastmoney_unscoped_request_stays_stock_only(tmp_path: Path) -> None:
 
     assert report.target_source == "eastmoney_stock_list"
     assert {ref.code for ref in store.list_instruments()} == {"000001", "600000", "688001"}
+
+
+def test_online_client_reads_sse_daily_sessions_for_the_calendar() -> None:
+    calls: list[tuple[str, dict[str, object], float]] = []
+
+    def transport(url, params, timeout):
+        calls.append((url, dict(params), timeout))
+        return {
+            "data": {
+                "klines": [
+                    "2026-09-29,1,1,1,1,0,0",
+                    "2026-09-30,1,1,1,1,0,0",
+                    "2026-10-09,1,1,1,1,0,0",
+                ]
+            }
+        }
+
+    client = OnlineMarketClient(transport=transport)
+
+    dates = client.fetch_trading_calendar(
+        date(2026, 9, 1),
+        date(2026, 10, 9),
+        timeout=4.0,
+    )
+
+    assert dates == (date(2026, 9, 29), date(2026, 9, 30), date(2026, 10, 9))
+    assert calls[0][1]["secid"] == "1.000001"
+    assert calls[0][1]["klt"] == "101"
+
+
+def test_market_data_sync_forwards_the_calendar_probe_to_its_online_provider(
+    tmp_path: Path,
+) -> None:
+    expected = (date(2026, 9, 30), date(2026, 10, 9))
+
+    class CalendarClient:
+        def fetch_trading_calendar(self, start_date, end_date, *, timeout):
+            assert start_date <= date(2026, 9, 30)
+            assert end_date == date(2026, 10, 9)
+            assert timeout == 7.0
+            return expected
+
+    store = DuckDbMarketDataStore(tmp_path / "calendar.duckdb")
+    provider = OnlineMarketSync(
+        store=store,
+        module_factory=CalendarClient,
+    )
+    service = MarketDataSync(store=store, eastmoney_sync=provider)
+
+    assert (
+        service.fetch_trading_calendar(
+            date(2026, 6, 1),
+            date(2026, 10, 9),
+            timeout=7.0,
+        )
+        == expected
+    )
+
+
+def test_stage_plan_caps_incremental_ranges_at_the_selected_session(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "bounded-sync.duckdb")
+    store.replace_local_bars(
+        "SH",
+        "600000",
+        "stock",
+        pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2026-09-08"]),
+                "open": [10.0],
+                "high": [10.2],
+                "low": [9.8],
+                "close": [10.1],
+                "volume": [1000.0],
+                "amount": [10100.0],
+                "bar_status": ["completed"],
+            }
+        ),
+    )
+    service = OnlineMarketSync(
+        store=store,
+        module_factory=FakeOnline,
+        clock=lambda: _NOW,
+    )
+
+    plan = service.prepare_stage_plan(
+        _config(prefer_store_targets=True, end_date=date(2026, 9, 10))
+    )
+
+    assert plan.targets[0].requested_ranges[-1][1] == date(2026, 9, 10)
 
 
 def test_eastmoney_sync_uses_full_history_for_new_instruments_and_writes_provider(

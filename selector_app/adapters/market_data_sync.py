@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import replace
-from datetime import datetime
+from datetime import date, datetime
 from inspect import Parameter, signature
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -48,7 +48,12 @@ from .market_sync import (
     MarketSyncReport,
     ProgressCallback,
 )
-from .online_market_sync import OnlineMarketSync, OnlineModuleFactory, OnlineProviderError
+from .online_market_sync import (
+    OnlineMarketSync,
+    OnlineModuleFactory,
+    OnlineProviderError,
+    OnlineProviderUnavailable,
+)
 
 _EASTMONEY_STOCK_BOARDS = frozenset({"main", "star", "chinext"})
 # 本系统只研究股票。基金（含 ETF）与指数既不在同步范围内也不进候选池：ETF 跟踪
@@ -91,6 +96,18 @@ class MarketDataSync:
             module_factory=eastmoney_module_factory,
         )
         self._store = selected_store
+
+    def fetch_trading_calendar(
+        self,
+        start_date: date,
+        end_date: date,
+        *,
+        timeout: float = 10.0,
+    ) -> tuple[date, ...]:
+        fetcher = getattr(self._eastmoney_sync, "fetch_trading_calendar", None)
+        if not callable(fetcher):
+            raise OnlineProviderUnavailable("当前行情源不支持交易日历读取")
+        return tuple(fetcher(start_date, end_date, timeout=timeout))
 
     def discover_instruments(
         self,

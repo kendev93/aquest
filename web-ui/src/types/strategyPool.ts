@@ -76,6 +76,21 @@ export interface StrategyPoolSignal extends StrategyPoolMetrics {
   error?: string | null
 }
 
+export interface StrategyPoolHolding {
+  market: 'SH' | 'SZ'
+  code: string
+  name?: string | null
+  size?: number | null
+  entry_date?: string | null
+  entry_price?: number | null
+  latest_price?: number | null
+  close?: number | null
+  market_value?: number | null
+  unrealized_pnl?: number | null
+  unrealized_pnl_pct?: number | null
+  position_weight?: number | null
+}
+
 export interface StrategyPoolJobResult {
   mode?: StrategyPoolMode
   objective?: StrategyPoolObjective
@@ -103,7 +118,7 @@ export interface StrategyPoolJobResult {
   model_portfolio?: {
     available?: boolean
     current_state?: Record<string, unknown> | null
-    holdings?: Array<Record<string, unknown>>
+    holdings?: StrategyPoolHolding[]
     risk_exit_signals?: Array<Record<string, unknown>>
     reason?: string
     data_fingerprint?: string
@@ -128,6 +143,7 @@ export interface StrategyPoolJobSummary {
   job_id: string
   status: string
   mode: StrategyPoolMode
+  objective?: StrategyPoolObjective | null
   market?: string | null
   code?: string | null
   created_at?: number | string

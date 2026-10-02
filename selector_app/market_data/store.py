@@ -231,6 +231,17 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
 
         return self._bars.latest_trade_date()
 
+    def save_market_trading_calendar(
+        self,
+        trade_dates: Iterable[date],
+        *,
+        source: str,
+    ) -> int:
+        return self._bars.save_market_trading_calendar(trade_dates, source=source)
+
+    def latest_market_trading_date(self, on_or_before: date) -> date | None:
+        return self._bars.latest_market_trading_date(on_or_before)
+
     def count_many_bars(
         self,
         instruments: Iterable[InstrumentRef | StockRef] | None = None,

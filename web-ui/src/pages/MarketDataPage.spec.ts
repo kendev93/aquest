@@ -94,6 +94,58 @@ describe('MarketDataPage', () => {
     expect(wrapper.get('[data-testid="market-chart-panel"]').text()).toContain('MA5')
   })
 
+  it('shows the stored trading calendar and the latest automatic session check', async () => {
+    vi.mocked(marketApi.fetchStoreStatus).mockResolvedValueOnce({
+      database_path: '/data/market/market.duckdb',
+      schema_version: 18,
+      instrument_count: 2,
+      bar_count: 580,
+      data_start: '2020-01-01',
+      data_end: '2026-09-30',
+      last_online_sync_at: '2026-10-02T00:16:41+08:00',
+      market_calendar_latest_date: '2026-09-30',
+      market_calendar_source: 'eastmoney_sse_composite',
+      last_auto_sync_check_date: '2026-10-02',
+      last_auto_sync_check_session: '2026-09-30',
+    })
+
+    const wrapper = mount(MarketDataPage)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="market-store-meta"]').text()).toContain(
+      '最近交易日历 2026-09-30 · eastmoney_sse_composite',
+    )
+    expect(wrapper.get('[data-testid="market-store-meta"]').text()).toContain(
+      '自动同步核对 2026-10-02 · 截至交易日 2026-09-30',
+    )
+  })
+
+  it('shows the persisted trading-calendar session used by automatic sync', async () => {
+    vi.mocked(marketApi.fetchStoreStatus).mockResolvedValueOnce({
+      database_path: '/data/market/market.duckdb',
+      schema_version: 1,
+      instrument_count: 2,
+      bar_count: 580,
+      data_start: '2020-01-01',
+      data_end: '2026-09-30',
+      last_online_sync_at: '2026-10-02T00:16:41+08:00',
+      market_calendar_latest_date: '2026-09-30',
+      market_calendar_source: 'eastmoney_sse_composite',
+      last_auto_sync_check_date: '2026-10-02',
+      last_auto_sync_check_session: '2026-09-30',
+    })
+
+    const wrapper = mount(MarketDataPage)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="market-store-meta"]').text()).toContain(
+      '最近交易日历 2026-09-30 · eastmoney_sse_composite',
+    )
+    expect(wrapper.get('[data-testid="market-store-meta"]').text()).toContain(
+      '自动同步核对 2026-10-02 · 截至交易日 2026-09-30',
+    )
+  })
+
   it('selects a data-bearing instrument when the first catalog item has no bars', async () => {
     vi.mocked(marketApi.fetchLocalInstruments).mockResolvedValueOnce({
       items: [

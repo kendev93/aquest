@@ -104,6 +104,39 @@ def test_single_rerun_queues_behind_signal_scan_but_not_another_single(tmp_path)
     assert len(active_jobs.json()["data"]) == 2
 
 
+def test_strategy_pool_job_history_includes_signal_objective_for_result_restore(tmp_path) -> None:
+    app = create_app(
+        market_data_store=_store(tmp_path),
+        strategy_worker_token=TOKEN,
+        auto_sync_enabled=False,
+    )
+    app.state.strategy_pool_store.set_manual_override(
+        "SH",
+        "600000",
+        "annual_return",
+        {
+            "candidate_id": "history-signal-candidate",
+            "buy_rule": {"signals": ["technical.macd"]},
+            "sell_rule": {"signals": ["technical.rsi14"]},
+            "config": {},
+        },
+    )
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/v1/strategy-pool/jobs",
+            json={"mode": "signals", "objective": "annual_return"},
+        )
+        assert created.status_code == 202, created.json()
+        job_id = created.json()["data"]["job_id"]
+        history = client.get("/api/v1/strategy-pool/jobs")
+
+    assert created.status_code == 202
+    summary = next(item for item in history.json()["data"]["items"] if item["job_id"] == job_id)
+    assert summary["mode"] == "signals"
+    assert summary["objective"] == "annual_return"
+
+
 def test_single_rerun_remains_blocked_during_full_market_research(tmp_path) -> None:
     app = create_app(
         market_data_store=_store(tmp_path),
@@ -166,9 +199,7 @@ def test_pool_manual_overrides_are_separate_by_objective_and_list_active_source(
 
     assert annual_response.status_code == 200
     assert sharpe_response.status_code == 200
-    assert (
-        annual_response.json()["data"]["benchmark"]["full_period"]["total_return"] == 0.2
-    )
+    assert annual_response.json()["data"]["benchmark"]["full_period"]["total_return"] == 0.2
     assert (
         annual_list.json()["data"]["items"][0]["active_candidate"]["candidate_id"]
         == "annual-manual"
@@ -308,3 +339,63 @@ def test_signal_scan_evaluates_active_rules_on_latest_completed_bar(tmp_path) ->
     assert result["model_portfolio"]["available"] is True
     assert result["model_portfolio"]["holdings"] == []
     assert result["model_portfolio"]["risk_exit_signals"][0]["risk_trigger"] == "stop_loss"
+
+
+def test_signal_status_stays_flat_when_simulated_portfolio_holds_the_symbol(tmp_path) -> None:
+    market_store = _store(tmp_path)
+    pool = DuckDbStrategyPoolStore(market_store)
+    pool.initialize()
+    pool.set_manual_override(
+        "SH",
+        "600000",
+        "annual_return",
+        {
+            "candidate_id": "flat-signal-held-candidate",
+            "buy_rule": {
+                "signals": [],
+                "conditions": [
+                    {"left_value": "price.close", "operator": "lt", "right_constant": 0}
+                ],
+                "required_conditions": [],
+                "combine_mode": "all",
+            },
+            "sell_rule": {
+                "signals": [],
+                "conditions": [
+                    {"left_value": "price.close", "operator": "lt", "right_constant": 0}
+                ],
+                "required_conditions": [],
+                "combine_mode": "all",
+            },
+            "metrics": {"validation": {"annual_return": 0.2}},
+            "config": {},
+        },
+    )
+    adapter = DuckDbMarketDataAdapter(market_store)
+    service = MarketStrategyPoolService(
+        store=market_store,
+        adapter=adapter,
+        individual_service=object(),
+        backtest_service=BacktestService(adapter=adapter),
+        pool_store=pool,
+        portfolio_service=PortfolioBacktestService(adapter=adapter),
+    )
+
+    def simulated_snapshot(*_args, **_kwargs):
+        return {
+            "available": True,
+            "current_state": {"holdings": [{"market": "SH", "code": "600000", "name": "浦发银行"}]},
+            "risk_exit_signals": [],
+        }
+
+    service._current_portfolio_snapshot = simulated_snapshot
+
+    result = service.run(
+        {"mode": "signals", "objective": "annual_return"},
+        job_id="flat-signal-held-job",
+    )
+
+    assert result["states"][0]["status"] == "flat"
+    assert result["model_portfolio"]["holdings"] == [
+        {"market": "SH", "code": "600000", "name": "浦发银行"}
+    ]

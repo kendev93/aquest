@@ -86,6 +86,7 @@ const buySignal: StrategyPoolSignal = {
 
 describe('StrategyPoolPage', () => {
   beforeEach(() => {
+    vi.resetAllMocks()
     window.localStorage.clear()
     vi.mocked(api.fetchStrategyPoolEntries).mockResolvedValue([entry('600000', 0.24), entry('600001', 0.12)])
     vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValue([])
@@ -131,6 +132,111 @@ describe('StrategyPoolPage', () => {
 
     await wrapper.get('thead button').trigger('click')
     expect(wrapper.findAll('tbody tr')[0]?.text()).toContain('600000')
+  })
+
+  it('searches the status table by code and Chinese stock name', async () => {
+    window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    const search = wrapper.get('[data-testid="pool-entry-search"]')
+    await search.setValue('600001')
+    expect(wrapper.findAll('tbody tr[data-testid^="pool-row-"]')).toHaveLength(1)
+    expect(wrapper.find('[data-testid="pool-row-600001"]')?.exists()).toBe(true)
+
+    await search.setValue('测试600000')
+    expect(wrapper.findAll('tbody tr[data-testid^="pool-row-"]')).toHaveLength(1)
+    expect(wrapper.find('[data-testid="pool-row-600000"]')?.exists()).toBe(true)
+
+    await search.setValue('不存在的股票')
+    expect(wrapper.findAll('tbody tr[data-testid^="pool-row-"]')).toHaveLength(0)
+    expect(wrapper.get('[data-testid="pool-entry-empty"]').text()).toContain('没有符合代码或名称的标的')
+  })
+
+  it('shows simulated current holdings in a separate panel from daily signal status', async () => {
+    window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({
+      job_id: 'signal-1',
+      status: 'completed',
+      result: {
+        mode: 'signals',
+        objective: 'annual_return',
+        as_of_date: '2026-10-01',
+        buy_signals: [],
+        sell_signals: [],
+        states: [{ ...buySignal, status: 'flat' }],
+        model_portfolio: {
+          available: true,
+          holdings: [{
+            market: 'SH',
+            code: '600000',
+            name: '浦发银行',
+            size: 100,
+            entry_price: 10,
+            latest_price: 11,
+            unrealized_pnl: 100,
+          }],
+          risk_exit_signals: [],
+        },
+      },
+    })
+
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('今日持仓中 1')
+    expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('SH600000 · 浦发银行')
+    expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('空仓')
+  })
+
+  it('restores the latest matching signal result while a portfolio backtest is active', async () => {
+    vi.useFakeTimers()
+    window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValueOnce([
+      { job_id: 'portfolio-running', status: 'running', mode: 'portfolio' },
+      {
+        job_id: 'signals-complete',
+        status: 'completed',
+        mode: 'signals',
+        objective: 'annual_return',
+      },
+    ])
+    vi.mocked(api.getStrategyPoolJob)
+      .mockResolvedValueOnce({
+        job_id: 'signals-complete',
+        status: 'completed',
+        result: {
+          mode: 'signals',
+          objective: 'annual_return',
+          as_of_date: '2026-10-01',
+          buy_signals: [],
+          sell_signals: [],
+          states: [{ ...buySignal, status: 'flat' }],
+          model_portfolio: {
+            available: true,
+            holdings: [{ market: 'SH', code: '600000', name: '浦发银行', size: 100 }],
+            risk_exit_signals: [],
+          },
+        },
+      })
+      .mockResolvedValueOnce({
+        job_id: 'portfolio-running',
+        status: 'running',
+        progress: 0.4,
+      })
+
+    const wrapper = mount(StrategyPoolPage)
+    try {
+      await flushPromises()
+
+      expect(api.getStrategyPoolJob).toHaveBeenNthCalledWith(1, 'signals-complete')
+      expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('空仓')
+      expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('浦发银行')
+      expect(wrapper.get('[data-testid="pool-job-progress"]').text()).toContain('正在回测组合留出段')
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
   })
 
   it('paginates the market status table instead of mounting every symbol at once', async () => {

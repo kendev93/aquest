@@ -116,6 +116,11 @@ class DataStoreStatus:
     last_online_sync_at: str | None = None
     last_online_provider: str | None = None
     last_online_provider_version: str | None = None
+    market_calendar_latest_date: str | None = None
+    market_calendar_source: str | None = None
+    market_calendar_updated_at: str | None = None
+    last_auto_sync_check_date: str | None = None
+    last_auto_sync_check_session: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -128,4 +133,9 @@ class DataStoreStatus:
             "last_online_sync_at": self.last_online_sync_at,
             "last_online_provider": self.last_online_provider,
             "last_online_provider_version": self.last_online_provider_version,
+            "market_calendar_latest_date": self.market_calendar_latest_date,
+            "market_calendar_source": self.market_calendar_source,
+            "market_calendar_updated_at": self.market_calendar_updated_at,
+            "last_auto_sync_check_date": self.last_auto_sync_check_date,
+            "last_auto_sync_check_session": self.last_auto_sync_check_session,
         }

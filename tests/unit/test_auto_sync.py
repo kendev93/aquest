@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -20,6 +20,201 @@ def test_auto_sync_treats_invalid_metadata_as_due() -> None:
     today = datetime(2026, 9, 1, 9, 0, tzinfo=SHANGHAI)
 
     assert auto_sync_due("not-a-timestamp", now=today) is True
+
+
+def test_auto_sync_skips_holiday_after_calendar_check_and_persists_the_check_date() -> None:
+    today = datetime(2026, 10, 2, 19, 0, tzinfo=SHANGHAI)
+
+    class Store:
+        def __init__(self) -> None:
+            self.metadata: dict[str, str] = {}
+
+        def status(self):
+            return SimpleNamespace(
+                instrument_count=1,
+                bar_count=100,
+                data_end="2026-09-30",
+                last_online_sync_at="2026-09-30T18:31:00+08:00",
+            )
+
+        def get_meta(self, key):
+            return self.metadata.get(key)
+
+        def set_meta(self, key, value):
+            self.metadata[key] = value
+
+        def save_market_trading_calendar(self, trade_dates, *, source):
+            self.saved_calendar = (tuple(trade_dates), source)
+
+    class Runner:
+        def __init__(self) -> None:
+            self.submitted = []
+
+        def has_active_jobs(self, descriptions):
+            del descriptions
+            return False
+
+        def submit_callable(self, *args, **kwargs):
+            self.submitted.append((args, kwargs))
+
+    class Sync:
+        def __init__(self) -> None:
+            self.calendar_calls = 0
+
+        def fetch_trading_calendar(self, start_date, end_date, *, timeout):
+            del start_date, end_date, timeout
+            self.calendar_calls += 1
+            return (date(2026, 9, 29), date(2026, 9, 30))
+
+    store = Store()
+    runner = Runner()
+    sync = Sync()
+    scheduler = AutomaticMarketSyncScheduler(
+        store=store,
+        runner=runner,
+        market_sync=sync,
+        precomputer=object(),
+        clock=lambda: today,
+    )
+
+    assert scheduler.submit_if_due() is None
+    assert store.metadata["last_auto_sync_check_date"] == "2026-10-02"
+    assert store.metadata["last_auto_sync_check_session"] == "2026-09-30"
+    assert store.saved_calendar[0][-1] == date(2026, 9, 30)
+    assert runner.submitted == []
+
+    restarted = AutomaticMarketSyncScheduler(
+        store=store,
+        runner=runner,
+        market_sync=sync,
+        precomputer=object(),
+        clock=lambda: today,
+    )
+    assert restarted.submit_if_due() is None
+    assert sync.calendar_calls == 1
+
+
+def test_auto_sync_uses_latest_exchange_session_as_provider_end_date() -> None:
+    now = [datetime(2026, 10, 9, 10, 0, tzinfo=SHANGHAI)]
+
+    class Store:
+        def status(self):
+            return SimpleNamespace(
+                instrument_count=1,
+                bar_count=PRECOMPUTE_MAX_BARS + 1,
+                data_end="2026-09-30",
+                last_online_sync_at="2026-10-02T00:16:41+08:00",
+            )
+
+        def get_meta(self, key):
+            del key
+            return None
+
+        def save_market_trading_calendar(self, trade_dates, *, source):
+            del trade_dates, source
+
+    class Runner:
+        def __init__(self) -> None:
+            self.target = None
+
+        def has_active_jobs(self, descriptions):
+            del descriptions
+            return False
+
+        def submit_callable(self, target, **kwargs):
+            del kwargs
+            self.target = target
+
+        def is_cancel_requested(self, job_id):
+            del job_id
+            return False
+
+    class Sync:
+        def __init__(self) -> None:
+            self.configs = []
+            self.calendar_calls = 0
+
+        def fetch_trading_calendar(self, start_date, end_date, *, timeout):
+            del start_date, end_date, timeout
+            self.calendar_calls += 1
+            return (date(2026, 9, 30), date(2026, 10, 9))
+
+        def sync(self, config, progress_callback=None, *, detail_callback=None, abort_check=None):
+            del progress_callback, detail_callback, abort_check
+            self.configs.append(config)
+            return {"written_bars": 1, "errors": 0}
+
+    runner = Runner()
+    sync = Sync()
+    scheduler = AutomaticMarketSyncScheduler(
+        store=Store(),
+        runner=runner,
+        market_sync=sync,
+        precomputer=object(),
+        clock=lambda: now[0],
+    )
+
+    assert scheduler.submit_if_due() is None
+    assert sync.calendar_calls == 0
+    now[0] = datetime(2026, 10, 9, 19, 0, tzinfo=SHANGHAI)
+    assert scheduler.submit_if_due() is not None
+    assert runner.target is not None
+    runner.target(lambda _current, _total: None)
+    assert sync.configs[0].end_date == date(2026, 10, 9)
+
+
+def test_auto_sync_falls_back_to_natural_date_when_calendar_is_unavailable() -> None:
+    now = datetime(2026, 10, 9, 19, 0, tzinfo=SHANGHAI)
+
+    class Store:
+        def status(self):
+            return SimpleNamespace(
+                instrument_count=1,
+                bar_count=100,
+                data_end="2026-09-30",
+                last_online_sync_at="2026-10-08T18:31:00+08:00",
+            )
+
+    class Runner:
+        def __init__(self) -> None:
+            self.target = None
+
+        def has_active_jobs(self, descriptions):
+            del descriptions
+            return False
+
+        def submit_callable(self, target, **kwargs):
+            del kwargs
+            self.target = target
+
+        def is_cancel_requested(self, job_id):
+            del job_id
+            return False
+
+    class Sync:
+        def fetch_trading_calendar(self, start_date, end_date, *, timeout):
+            del start_date, end_date, timeout
+            raise TimeoutError("calendar provider unavailable")
+
+        def sync(self, config, progress_callback=None, *, detail_callback=None, abort_check=None):
+            del progress_callback, detail_callback, abort_check
+            self.config = config
+            return {"written_bars": 1, "errors": 0}
+
+    runner = Runner()
+    sync = Sync()
+    scheduler = AutomaticMarketSyncScheduler(
+        store=Store(),
+        runner=runner,
+        market_sync=sync,
+        precomputer=SimpleNamespace(run=lambda **_kwargs: SimpleNamespace(to_dict=lambda: {})),
+        clock=lambda: now,
+    )
+
+    assert scheduler.submit_if_due() is not None
+    assert runner.target is not None
+    runner.target(lambda _current, _total: None)
+    assert sync.config.end_date == now.date()
 
 
 def test_auto_sync_does_not_use_day_files_as_an_online_sync_source(tmp_path) -> None:

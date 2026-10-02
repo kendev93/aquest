@@ -196,8 +196,7 @@ class _PoolProgressCoordinator:
                     "total_symbols": self._total_symbols,
                     "current_parallelism": len(self._fractions),
                     "active_symbols": [
-                        dict(progress)
-                        for _, progress in sorted(self._active_symbols.items())
+                        dict(progress) for _, progress in sorted(self._active_symbols.items())
                     ],
                     "maximum_parallelism": self._maximum_workers,
                     "memory_worker_limit": self._memory_worker_limit,
@@ -241,8 +240,7 @@ class _PoolProgressCoordinator:
                     "finished_symbols": self._finished,
                     "current_parallelism": len(self._fractions),
                     "active_symbols": [
-                        dict(progress)
-                        for _, progress in sorted(self._active_symbols.items())
+                        dict(progress) for _, progress in sorted(self._active_symbols.items())
                     ],
                     "maximum_parallelism": self._maximum_workers,
                     "memory_worker_limit": self._memory_worker_limit,
@@ -454,9 +452,7 @@ class MarketStrategyPoolService:
                                             benchmark,
                                         )
                             except Exception:  # noqa: BLE001 - benchmark backfill must not fail strategy reuse
-                                logger.exception(
-                                    "全市场策略池基准回填失败: %s", symbol
-                                )
+                                logger.exception("全市场策略池基准回填失败: %s", symbol)
                         skipped += 1
                         completed += 1
                         coordinator.finish(index, symbol, "复用已完成标的", skipped=True)
@@ -1040,18 +1036,6 @@ class MarketStrategyPoolService:
                 }
         current_state = _mapping(model_portfolio.get("current_state"))
         current_holdings = current_state.get("holdings")
-        held_symbols = (
-            {
-                f"{item.get('market', '')}{item.get('code', '')}"
-                for item in current_holdings
-                if isinstance(item, Mapping)
-            }
-            if isinstance(current_holdings, (list, tuple))
-            else set()
-        )
-        for item in states:
-            if item.get("status") == "flat" and item.get("symbol") in held_symbols:
-                item["status"] = "held"
         risk_exit_signals = model_portfolio.get("risk_exit_signals")
         model_portfolio["holdings"] = (
             list(current_holdings) if isinstance(current_holdings, (list, tuple)) else []
@@ -1451,9 +1435,7 @@ def _signal_sort_key(row: Mapping[str, object], objective: str) -> tuple[float, 
 
 
 def _status_order(state: str) -> int:
-    return {"buy": 0, "buy_sell": 0, "sell": 1, "held": 2, "flat": 3, "no_strategy": 4}.get(
-        state, 5
-    )
+    return {"buy": 0, "buy_sell": 0, "sell": 1, "flat": 2, "no_strategy": 3}.get(state, 4)
 
 
 def _mapping(value: object) -> Mapping[str, object]:

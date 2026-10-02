@@ -6,7 +6,7 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Callable
-from datetime import datetime
+from datetime import date, datetime, time, timedelta
 from inspect import Parameter, signature
 from pathlib import Path
 from typing import Protocol
@@ -65,6 +65,9 @@ ACTIVE_DATA_JOB_DESCRIPTIONS = frozenset(
 # Compatibility alias for embedders that used the narrower first-release name.
 ACTIVE_SYNC_DESCRIPTIONS = ACTIVE_DATA_JOB_DESCRIPTIONS
 DEFAULT_AUTO_SYNC_INTERVAL_SECONDS = 15 * 60
+AUTO_SYNC_AFTER_CLOSE = time(18, 30)
+TRADING_CALENDAR_LOOKBACK_DAYS = 120
+TRADING_CALENDAR_PROVIDER = "eastmoney_sse_composite"
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 
@@ -134,7 +137,7 @@ class AutomaticMarketSyncScheduler:
         self._active_job_id: str | None = None
 
     def submit_if_due(self) -> str | None:
-        """Submit one refresh if the store is populated and today's refresh is missing."""
+        """Submit one session-bounded refresh when the latest market session is missing."""
 
         if not self._enabled:
             return None
@@ -146,14 +149,63 @@ class AutomaticMarketSyncScheduler:
         status = self._store.status()
         if status.instrument_count == 0:
             return None
-        if not auto_sync_due(status.last_online_sync_at, now=self._clock()):
+        now = _as_shanghai(self._clock())
+        today = now.date()
+        if not auto_sync_due(status.last_online_sync_at, now=now):
             return None
+
+        get_meta = getattr(self._store, "get_meta", None)
+        last_check_date = get_meta("last_auto_sync_check_date") if callable(get_meta) else None
+        if last_check_date == today.isoformat():
+            return None
+
+        end_date: date | None = None
+        fetch_calendar = getattr(self._market_sync, "fetch_trading_calendar", None)
+        if callable(fetch_calendar):
+            # Daily bars are complete only after the market close and provider publication.
+            # Before then, wait locally instead of asking every stock for an unfinished date.
+            if now.time() < AUTO_SYNC_AFTER_CLOSE:
+                return None
+            try:
+                calendar_dates = tuple(
+                    sorted(
+                        {
+                            item
+                            for item in fetch_calendar(
+                                today - timedelta(days=TRADING_CALENDAR_LOOKBACK_DAYS),
+                                today,
+                                timeout=10.0,
+                            )
+                            if isinstance(item, date) and item <= today
+                        }
+                    )
+                )
+                if not calendar_dates:
+                    raise ValueError("上证综指没有返回有效交易日")
+                save_calendar = getattr(self._store, "save_market_trading_calendar", None)
+                if not callable(save_calendar):
+                    raise RuntimeError("行情库不支持保存交易日历")
+                save_calendar(calendar_dates, source=TRADING_CALENDAR_PROVIDER)
+                end_date = calendar_dates[-1]
+                local_data_end = _parse_date(status.data_end)
+                if local_data_end is not None and end_date <= local_data_end:
+                    self._store.set_meta("last_auto_sync_check_date", today.isoformat())
+                    self._store.set_meta("last_auto_sync_check_session", end_date.isoformat())
+                    logger.info(
+                        "自动行情同步跳过：本地行情已覆盖最近交易日 %s（核对日 %s）",
+                        end_date,
+                        today,
+                    )
+                    return None
+            except Exception:  # noqa: BLE001 - calendar failure must not suppress a real sync
+                logger.exception("读取交易日历失败，自动同步回退到自然日范围")
+                end_date = today
 
         job_id = uuid.uuid4().hex
         self._active_job_id = job_id
         try:
             self._runner.submit_callable(
-                self._run_sync,
+                lambda progress: self._run_sync(progress, end_date=end_date),
                 description=AUTO_SYNC_DESCRIPTION,
                 job_id=job_id,
                 exclusive_group=MARKET_SYNC_EXCLUSIVE_GROUP,
@@ -169,7 +221,7 @@ class AutomaticMarketSyncScheduler:
 
         while True:
             try:
-                job_id = self.submit_if_due()
+                job_id = await asyncio.to_thread(self.submit_if_due)
                 if job_id is not None and on_job_submitted is not None:
                     on_job_submitted(job_id)
             except Exception:  # noqa: BLE001 - scheduler must not kill the web app
@@ -193,7 +245,12 @@ class AutomaticMarketSyncScheduler:
         self._active_job_id = None
         return False
 
-    def _run_sync(self, progress: ProgressReporter) -> dict[str, object]:
+    def _run_sync(
+        self,
+        progress: ProgressReporter,
+        *,
+        end_date: date | None = None,
+    ) -> dict[str, object]:
         job_id = self._active_job_id or ""
 
         def abort_check() -> bool:
@@ -206,6 +263,7 @@ class AutomaticMarketSyncScheduler:
                     universe="all",
                     provider="eastmoney",
                     bars=800,
+                    end_date=end_date,
                     prefer_store_targets=False,
                     refresh_names=False,
                 ),
@@ -261,6 +319,19 @@ def _as_shanghai(value: datetime) -> datetime:
     return value.astimezone(_SHANGHAI_TZ)
 
 
+def _parse_date(value: object) -> date | None:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value[:10])
+        except ValueError:
+            return None
+    return None
+
+
 def _call_market_sync(
     service: MarketSyncService,
     config: MarketSyncConfig,
@@ -301,6 +372,9 @@ __all__ = [
     "MARKET_SYNC_JOB_DESCRIPTIONS",
     "MARKET_SYNC_EXCLUSIVE_GROUP",
     "DEFAULT_AUTO_SYNC_INTERVAL_SECONDS",
+    "AUTO_SYNC_AFTER_CLOSE",
+    "TRADING_CALENDAR_LOOKBACK_DAYS",
+    "TRADING_CALENDAR_PROVIDER",
     "AutomaticMarketSyncScheduler",
     "auto_sync_due",
 ]

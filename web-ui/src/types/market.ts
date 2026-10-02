@@ -128,6 +128,11 @@ export interface DataStoreStatus {
   last_online_sync_at: string | null
   last_online_provider?: string | null
   last_online_provider_version?: string | null
+  market_calendar_latest_date?: string | null
+  market_calendar_source?: string | null
+  market_calendar_updated_at?: string | null
+  last_auto_sync_check_date?: string | null
+  last_auto_sync_check_session?: string | null
   auto_sync_job_id?: string | null
   auto_sync_enabled?: boolean
   auto_sync_interval_seconds?: number | null

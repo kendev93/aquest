@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
+from datetime import date
 from typing import Literal
 from zoneinfo import ZoneInfo
 
@@ -44,6 +45,8 @@ class MarketSyncConfig:
     # 只重下这几只（六位代码，不带市场前缀）。留空表示按 universe / boards / types 取全量。
     # 健康检查的「一键修复」用它：先删掉问题标的的全部历史，再全量重下覆盖。
     codes: tuple[str, ...] = ()
+    # 自动同步用最近已确认的交易日封顶；手动同步默认仍允许请求到当前日期。
+    end_date: date | None = None
 
     def __post_init__(self) -> None:
         if self.universe not in {"all", "sh", "sz"}:
@@ -52,6 +55,8 @@ class MarketSyncConfig:
             raise ValueError(f"行情数据源无效: {self.provider}")
         if not isinstance(self.full_history, bool):
             raise ValueError("是否全量同步历史行情必须是布尔值")
+        if self.end_date is not None and not isinstance(self.end_date, date):
+            raise ValueError("行情同步结束日期无效")
         if not 1 <= self.bars <= 800:
             raise ValueError("每只股票同步的 K 线数量必须在 1 到 800 之间")
         if self.timeout <= 0:

@@ -727,3 +727,30 @@ def test_latest_trade_date_reports_the_newest_completed_bar(tmp_path: Path) -> N
     # 后写的一天更早，不该把最大值拉回去。
     store.upsert_local_bars(_bars(("SH", "600000", "2024-01-03", 9.0, "local")))
     assert store.latest_trade_date() == date(2024, 1, 5)
+
+
+def test_market_trading_calendar_persists_sessions_and_exposes_sync_check_state(
+    tmp_path: Path,
+) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    sessions = [date(2026, 9, 29), date(2026, 9, 30), date(2026, 10, 9)]
+
+    assert (
+        store.save_market_trading_calendar(
+            sessions,
+            source="eastmoney_sse_composite",
+        )
+        == 3
+    )
+    assert store.latest_market_trading_date(date(2026, 10, 2)) == date(2026, 9, 30)
+    assert store.latest_market_trading_date(date(2026, 10, 9)) == date(2026, 10, 9)
+
+    store.set_meta("last_auto_sync_check_date", "2026-10-02")
+    store.set_meta("last_auto_sync_check_session", "2026-09-30")
+    status = store.status()
+
+    assert status.market_calendar_latest_date == "2026-10-09"
+    assert status.market_calendar_source == "eastmoney_sse_composite"
+    assert status.market_calendar_updated_at is not None
+    assert status.last_auto_sync_check_date == "2026-10-02"
+    assert status.last_auto_sync_check_session == "2026-09-30"

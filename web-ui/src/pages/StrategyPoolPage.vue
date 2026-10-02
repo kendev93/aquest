@@ -16,6 +16,7 @@ import type {
   StrategyPoolCandidate,
   StrategyPoolBenchmark,
   StrategyPoolEntry,
+  StrategyPoolHolding,
   StrategyPoolJobResult,
   StrategyPoolJobState,
   StrategyPoolJobSummary,
@@ -53,6 +54,7 @@ const successMessage = ref('')
 const riskTrials = ref<1_000 | 2_000 | 3_000>(3_000)
 const market = ref<'SH' | 'SZ'>('SH')
 const code = ref('')
+const searchQuery = ref('')
 const sortColumn = ref<
   'status' | 'annual_return' | 'sharpe' | 'win_rate' | 'payoff_ratio' | 'max_drawdown' | 'validation_excess'
 >('status')
@@ -156,10 +158,21 @@ const parallelismText = computed(() => {
 const buySignals = computed(() => signalResult.value?.buy_signals ?? [])
 const ruleSellSignals = computed(() => signalResult.value?.sell_signals ?? [])
 const riskSellSignals = computed(() => signalResult.value?.model_portfolio?.risk_exit_signals ?? [])
+const currentHoldings = computed<StrategyPoolHolding[]>(
+  () => signalResult.value?.model_portfolio?.holdings ?? [],
+)
 const signalAsOf = computed(() => signalResult.value?.as_of_date ?? '')
 
+const filteredEntries = computed(() => {
+  const query = searchQuery.value.trim().toLocaleLowerCase()
+  if (!query) return entries.value
+  return entries.value.filter((entry) =>
+    `${entry.market}${entry.code} ${entry.code} ${entry.name ?? ''}`.toLocaleLowerCase().includes(query),
+  )
+})
+
 const sortedEntries = computed(() => {
-  const rows = [...entries.value]
+  const rows = [...filteredEntries.value]
   const metric = sortColumn.value
   if (metric === 'status') {
     return rows.sort((a, b) => {
@@ -208,7 +221,10 @@ async function refreshPage(refreshSignals: boolean): Promise<void> {
     entries.value = nextEntries
     page.value = Math.min(page.value, Math.max(1, Math.ceil(nextEntries.length / pageSize.value)))
     history.value = nextHistory
-    await restoreHoldoutSummary(nextHistory)
+    await Promise.all([
+      restoreHoldoutSummary(nextHistory),
+      restoreLatestSignalResult(nextHistory),
+    ])
     if (refreshSignals && nextEntries.some((item) => item.active_candidate)) {
       await startSignalScan()
     }
@@ -231,6 +247,30 @@ async function restoreHoldoutSummary(jobs: StrategyPoolJobSummary[]): Promise<vo
     }
   } catch {
     // A compact history row remains useful if an old result was already pruned.
+  }
+}
+
+async function restoreLatestSignalResult(jobs: StrategyPoolJobSummary[]): Promise<void> {
+  const matchingJobs = jobs.filter((job) =>
+    job.mode === 'signals'
+    && job.status === 'completed'
+    && (!job.objective || job.objective === objective.value),
+  )
+  for (const job of matchingJobs) {
+    try {
+      const state = await getStrategyPoolJob(job.job_id)
+      const result = state.result
+      if (
+        state.status === 'completed'
+        && result?.mode === 'signals'
+        && result.objective === objective.value
+      ) {
+        signalResult.value = result
+        return
+      }
+    } catch {
+      // Older task results may have been pruned; continue to the next matching snapshot.
+    }
   }
 }
 
@@ -291,7 +331,6 @@ function rerunEntryTitle(entry: StrategyPoolEntry): string {
 
 async function startSignalScan(): Promise<void> {
   if (!objective.value || isBusy.value) return
-  signalResult.value = null
   await startTask({ mode: 'signals', objective: objective.value }, 'signals')
 }
 
@@ -580,11 +619,12 @@ function changePageSize(value: string): void {
 
 function entryStatus(entry: StrategyPoolEntry): string {
   const row = signalResult.value?.states?.find((item) => item.symbol === symbol(entry))
+  if (row?.status === 'held') return 'flat'
   return row?.status ?? (entry.active_candidate ? 'flat' : 'no_strategy')
 }
 
 function statusOrder(value: string): number {
-  return { buy: 0, buy_sell: 0, sell: 1, held: 2, flat: 3, no_strategy: 4 }[value] ?? 5
+  return { buy: 0, buy_sell: 0, sell: 1, flat: 2, no_strategy: 3 }[value] ?? 4
 }
 
 function metricValue(
@@ -827,6 +867,18 @@ onUnmounted(() => {
             </div>
             <p v-else class="empty-copy">{{ signalResult ? '当前没有卖出条件或持仓风控退出信号。' : '信号扫描会同时检查卖出规则，并复核模拟组合持仓的风控退出。' }}</p>
           </article>
+          <article class="signal-panel panel-card" data-testid="pool-current-holdings">
+            <div class="section-heading"><div><p class="eyebrow">CURRENT HOLDINGS</p><h2>今日持仓中 <span>{{ currentHoldings.length }}</span></h2></div><small>{{ objectiveLabel(objective) }}目标模拟组合 · {{ signalAsOf || '信号扫描后显示日期' }} · 最多 5 个槽位</small></div>
+            <div v-if="currentHoldings.length" class="signal-list">
+              <div v-for="holding in currentHoldings" :key="`${holding.market}${holding.code}`" class="signal-row holding-row">
+                <strong>{{ holding.market }}{{ holding.code }} · {{ holding.name || '—' }}</strong>
+                <span>持仓 {{ formatNumber(holding.size, 0) }} · 成本 {{ formatNumber(holding.entry_price) }} · 最新 {{ formatNumber(holding.latest_price ?? holding.close) }} · 浮盈 {{ formatNumber(holding.unrealized_pnl) }}（{{ formatPercent(holding.unrealized_pnl_pct) }}）</span>
+              </div>
+            </div>
+            <p v-else-if="!signalResult" class="empty-copy">信号扫描完成后显示当前策略组合持仓。</p>
+            <p v-else-if="signalResult.model_portfolio?.available === false" class="empty-copy">{{ signalResult.model_portfolio.reason || '当前无法计算模拟组合持仓。' }}</p>
+            <p v-else class="empty-copy">当前模拟组合没有持仓。</p>
+          </article>
         </section>
 
         <section class="pool-summary panel-card">
@@ -853,6 +905,12 @@ onUnmounted(() => {
         <section class="pool-table-section panel-card">
           <div class="section-heading"><div><p class="eyebrow">DAILY STATUS</p><h2>全市场标的状态 <span>{{ entries.length.toLocaleString() }}</span></h2></div><span>{{ loading ? '正在读取策略池…' : `按${objectiveLabel(objective)}策略决策` }}</span></div>
           <p class="pool-scale-note">全段基准显示个股买入持有涨跌；验证和留出分别用同区间基准计算总收益超额。旧记录的基准会在下次全市场重选时补算。</p>
+          <div class="pool-search-row">
+            <label class="pool-search">搜索标的
+              <input v-model="searchQuery" type="search" placeholder="输入证券代码或中文名称" data-testid="pool-entry-search" @input="page = 1">
+            </label>
+            <small>匹配 {{ filteredEntries.length.toLocaleString() }} / {{ entries.length.toLocaleString() }} 只</small>
+          </div>
           <div class="table-scroll">
             <table class="pool-table">
               <thead><tr>
@@ -885,7 +943,7 @@ onUnmounted(() => {
                   <td><span v-if="entry.active_candidate?.quality?.badges?.length" class="badge-row"><i v-for="badge in entry.active_candidate.quality.badges" :key="badge">{{ badge }}</i></span><span v-else-if="entry.status === 'no_strategy'">无可计算的策略绩效</span><span v-else-if="entry.last_error" class="danger-text">{{ entry.last_error }}</span><span v-else>—</span><small v-if="entry.active_candidate?.metrics">交易数：验证 {{ entry.active_candidate.metrics.validation?.closed_trades ?? '—' }} · 留出 {{ entry.active_candidate.metrics.holdout?.closed_trades ?? '—' }} 笔</small><small v-if="entry.active_source === 'manual'">手工覆盖 · {{ objectiveLabel(objective) }}</small></td>
                   <td><button class="text-button" @click="openEditor(entry)">编辑</button><button :data-testid="`pool-rerun-entry-${entry.code}`" class="text-button" :disabled="rerunEntryDisabled()" :title="rerunEntryTitle(entry)" @click="void rerunEntry(entry)">{{ queuedSingleSymbol === symbol(entry) ? '排队中' : '重跑' }}</button></td>
                 </tr>
-                <tr v-if="!entries.length"><td colspan="10" class="empty-copy">{{ loading ? '读取中…' : '策略池为空，开始全市场研究后会逐只写入候选。' }}</td></tr>
+                <tr v-if="!filteredEntries.length"><td colspan="10" class="empty-copy" data-testid="pool-entry-empty">{{ searchQuery.trim() && entries.length ? '没有符合代码或名称的标的。' : loading ? '读取中…' : '策略池为空，开始全市场研究后会逐只写入候选。' }}</td></tr>
               </tbody>
             </table>
           </div>
@@ -973,7 +1031,11 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .progress-detail { color: #91a1b8; font-size: .9rem; }
 .pool-scale-note, .empty-copy, .holdout-card small { color: #8798b1; font-size: .9rem; line-height: 1.6; }
 .pool-scale-note { margin: 16px 0 0; }
+.pool-search-row { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 12px; margin: 16px 0 12px; color: #8798b1; font-size: .88rem; }
+.pool-search { display: grid; width: min(420px, 100%); gap: 7px; color: #9baac0; }
+.pool-search input { min-height: 42px; border: 1px solid #354b69; border-radius: 7px; padding: 9px 11px; background: #111c30; color: #edf2fb; font: inherit; }
 .signal-grid, .holdout-grid, .candidate-apply-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.signal-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .section-heading { margin-bottom: 16px; }
 .section-heading h2 span { color: #18c467; }
 .signal-panel { min-height: 180px; }
@@ -982,6 +1044,7 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .signal-row, .history-row { display: grid; gap: 5px; padding: 10px 12px; border-left: 3px solid #18c467; background: #111c30; }
 .signal-row span, .history-row span, .history-row small { color: #9aaac0; font-size: .88rem; }
 .risk-signal { border-left-color: #ff6a69; }
+.holding-row { border-left-color: #6380a5; }
 .holdout-card, .candidate-apply-grid article { padding: 16px; border: 1px solid #263850; background: #101a2d; }
 .holdout-title { margin-bottom: 14px; }
 .metric-strip { display: flex; flex-wrap: wrap; gap: 14px; margin: 12px 0; }

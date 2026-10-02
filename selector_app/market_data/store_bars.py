@@ -865,6 +865,51 @@ class DuckDbBarsStore:
             return value
         return date.fromisoformat(str(value)[:10])
 
+    def save_market_trading_calendar(
+        self,
+        trade_dates: Iterable[date],
+        *,
+        source: str,
+    ) -> int:
+        """Persist a rolling snapshot of observed mainland market sessions."""
+
+        self._store._require_writer()
+        dates = tuple(sorted({item for item in trade_dates if isinstance(item, date)}))
+        normalized_source = source.strip()
+        if not dates:
+            return 0
+        if not normalized_source:
+            raise ValueError("交易日历来源不能为空")
+        now = _now()
+        rows = [(item, normalized_source, now) for item in dates]
+        with _WRITE_LOCK, self._store._connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO market_trading_calendar (trade_date, source, fetched_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT (trade_date) DO UPDATE SET
+                    source = excluded.source,
+                    fetched_at = excluded.fetched_at
+                """,
+                rows,
+            )
+            connection.execute(
+                "DELETE FROM market_trading_calendar WHERE trade_date < ?",
+                [dates[0]],
+            )
+        return len(dates)
+
+    def latest_market_trading_date(self, on_or_before: date) -> date | None:
+        with self._store._connect(read_only=True) as connection:
+            row = connection.execute(
+                "SELECT MAX(trade_date) FROM market_trading_calendar WHERE trade_date <= ?",
+                [on_or_before],
+            ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        value = row[0]
+        return value if isinstance(value, date) else date.fromisoformat(str(value)[:10])
+
     def has_provisional_bars(self, market: str, code: str) -> bool:
         """Return whether a symbol still needs its intraday bar finalized."""
 

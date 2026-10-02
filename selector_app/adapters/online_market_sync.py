@@ -429,6 +429,49 @@ class OnlineMarketClient:
             columns=["代码", "名称"],
         )
 
+    def fetch_trading_calendar(
+        self,
+        start_date: date,
+        end_date: date,
+        *,
+        timeout: float,
+    ) -> tuple[date, ...]:
+        """Read observed mainland sessions from the SSE Composite daily series."""
+
+        if start_date > end_date:
+            raise ValueError("交易日历开始日期不能晚于结束日期")
+        payload = self._request(
+            _EASTMONEY_HISTORY_URL,
+            {
+                "fields1": "f1,f2,f3,f4,f5,f6",
+                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
+                "ut": _EASTMONEY_HISTORY_UT,
+                "klt": "101",
+                "fqt": "0",
+                "secid": "1.000001",
+                "beg": start_date.strftime("%Y%m%d"),
+                "end": end_date.strftime("%Y%m%d"),
+                "lmt": "1000",
+            },
+            timeout,
+        )
+        data = _mapping_value(payload.get("data"))
+        raw_klines = data.get("klines")
+        if not isinstance(raw_klines, (list, tuple)):
+            raise OnlineDataError("East Money 指数日线响应缺少交易日列表")
+        dates: set[date] = set()
+        for raw in raw_klines:
+            if not isinstance(raw, str):
+                continue
+            parsed = pd.to_datetime(raw.split(",", 1)[0], errors="coerce")
+            if pd.notna(parsed):
+                trading_date = parsed.date()
+                if start_date <= trading_date <= end_date:
+                    dates.add(trading_date)
+        if not dates:
+            raise OnlineDataError("East Money 指数日线未返回有效交易日")
+        return tuple(sorted(dates))
+
     def fetch_daily_history(
         self,
         symbol: str,
@@ -675,10 +718,32 @@ class OnlineMarketSync:
 
         return self._module_factory is _default_module
 
+    def fetch_trading_calendar(
+        self,
+        start_date: date,
+        end_date: date,
+        *,
+        timeout: float,
+    ) -> tuple[date, ...]:
+        """Fetch recent observed sessions from the provider's broad-market index."""
+
+        module = self._module_factory()
+        fetcher = getattr(module, "fetch_trading_calendar", None)
+        if not callable(fetcher):
+            raise OnlineProviderUnavailable("当前行情源不支持交易日历读取")
+        values = fetcher(start_date, end_date, timeout=timeout)
+        dates = {
+            value for value in values if isinstance(value, date) and start_date <= value <= end_date
+        }
+        if not dates:
+            raise OnlineDataError("行情源没有返回有效交易日历")
+        return tuple(sorted(dates))
+
     def prepare_stage_plan(self, config: MarketSyncConfig) -> ProviderStagePlan:
         """Refresh the universe and build an immutable download plan in the parent."""
 
         as_of = self._clock()
+        requested_end = _sync_end_date(config, _as_shanghai(as_of).date())
         selection, new_instruments, existing_instruments = self._prepare_targets(config)
         existing_by_key = self._latest_existing_bars(selection.targets)
         stage_targets: list[StageTarget] = []
@@ -692,9 +757,7 @@ class OnlineMarketSync:
                     instrument_type=instrument_type,
                     board=board,
                     name=name,
-                    requested_ranges=tuple(
-                        _requested_ranges(snapshot, config, _as_shanghai(as_of).date())
-                    ),
+                    requested_ranges=tuple(_requested_ranges(snapshot, config, requested_end)),
                     existing_first_date=snapshot.first_date,
                     existing_last_date=snapshot.last_date,
                     existing_bar_count=snapshot.bar_count,
@@ -1335,7 +1398,11 @@ class OnlineMarketSync:
         ranges = list(
             requested_ranges
             if requested_ranges is not None
-            else _requested_ranges(existing, config, _as_shanghai(self._clock()).date())
+            else _requested_ranges(
+                existing,
+                config,
+                _sync_end_date(config, _as_shanghai(self._clock()).date()),
+            )
         )
         if not ranges:
             return _FetchedTarget(pd.DataFrame(), 0, "already_complete")
@@ -1503,6 +1570,12 @@ def _requested_ranges(
     if existing.last_date < end_date:
         ranges.append((existing.last_date + timedelta(days=1), end_date))
     return ranges
+
+
+def _sync_end_date(config: MarketSyncConfig, as_of: date) -> date:
+    """Honor an automatic session bound without allowing requests into the future."""
+
+    return min(as_of, config.end_date) if config.end_date is not None else as_of
 
 
 def _clip_to_range(frame: pd.DataFrame, start_date: date, end_date: date) -> pd.DataFrame:

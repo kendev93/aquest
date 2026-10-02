@@ -261,6 +261,7 @@ class DuckDbStrategyJobStore:
                     "job_id": str(job_id),
                     "status": state.get("status"),
                     "mode": payload.get("mode", "full"),
+                    "objective": payload.get("objective"),
                     "market": payload.get("market"),
                     "code": payload.get("code"),
                     "created_at": state.get("created_at"),

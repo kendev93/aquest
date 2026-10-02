@@ -314,6 +314,17 @@ class _DuckDbStoreBase:
                 )
                 """
             )
+            # 公共市场会话快照：由宽基指数的已完成日线生成，可重取，但需要跨重启
+            # 保留最近会话与同步核对点，避免休市日反复扫描全市场证券。
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS market_trading_calendar (
+                    trade_date DATE PRIMARY KEY,
+                    source VARCHAR NOT NULL,
+                    fetched_at TIMESTAMP NOT NULL
+                )
+                """
+            )
             self._migrate_schema(connection, existing_version or 0)
             connection.execute(
                 """
@@ -1173,6 +1184,20 @@ class _DuckDbStoreBase:
             online_provider_version = connection.execute(
                 "SELECT value FROM data_meta WHERE key = 'last_online_provider_version'"
             ).fetchone()
+            calendar_row = connection.execute(
+                """
+                SELECT trade_date, source, fetched_at
+                FROM market_trading_calendar
+                ORDER BY trade_date DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            auto_calendar_check = connection.execute(
+                "SELECT value FROM data_meta WHERE key = 'last_auto_sync_check_date'"
+            ).fetchone()
+            auto_calendar_session = connection.execute(
+                "SELECT value FROM data_meta WHERE key = 'last_auto_sync_check_session'"
+            ).fetchone()
         return DataStoreStatus(
             database_path=str(self.database_path),
             schema_version=SCHEMA_VERSION,
@@ -1184,6 +1209,19 @@ class _DuckDbStoreBase:
             last_online_provider=str(online_provider[0]) if online_provider else None,
             last_online_provider_version=(
                 str(online_provider_version[0]) if online_provider_version else None
+            ),
+            market_calendar_latest_date=(
+                _date_text(calendar_row[0]) if calendar_row is not None else None
+            ),
+            market_calendar_source=str(calendar_row[1]) if calendar_row is not None else None,
+            market_calendar_updated_at=(
+                _timestamp_text(calendar_row[2]) if calendar_row is not None else None
+            ),
+            last_auto_sync_check_date=(
+                str(auto_calendar_check[0]) if auto_calendar_check else None
+            ),
+            last_auto_sync_check_session=(
+                str(auto_calendar_session[0]) if auto_calendar_session else None
             ),
         )
 
