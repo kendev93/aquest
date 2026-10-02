@@ -33,6 +33,10 @@ vi.mock('./pages/StrategyFitnessPage.vue', () => ({
   default: { name: 'StrategyFitnessPage', template: '<main>策略适配性</main>' },
 }))
 
+vi.mock('./pages/StrategyPoolPage.vue', () => ({
+  default: { name: 'StrategyPoolPage', template: '<main>全市场策略池</main>' },
+}))
+
 vi.mock('./pages/SwingResearchPage.vue', () => ({
   default: { name: 'SwingResearchPage', template: '<main>波段研究</main>' },
 }))
@@ -79,5 +83,14 @@ describe('App navigation', () => {
     await flushPromises()
 
     expect(wrapper.text()).toContain('波段研究')
+  })
+
+  it('opens the full-market strategy pool on its own route', async () => {
+    const wrapper = mount(App)
+    window.history.pushState({}, '', '/strategy-pool')
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('全市场策略池')
   })
 })

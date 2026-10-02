@@ -226,6 +226,59 @@ class DuckDbStrategyJobStore:
             "offset": offset,
         }
 
+    def list_market_strategy_pool_history(
+        self,
+        *,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict[str, object]:
+        if isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise ValueError("策略池任务历史每页数量必须在 1 到 100 之间")
+        if isinstance(offset, bool) or offset < 0:
+            raise ValueError("策略池任务历史偏移量不能小于 0")
+        with self._connection() as connection:
+            total_row = connection.execute(
+                "SELECT COUNT(*) FROM strategy_jobs WHERE operation = 'market_strategy_pool'"
+            ).fetchone()
+            rows = connection.execute(
+                """
+                SELECT job_id, request_json, state_json
+                FROM strategy_jobs WHERE operation = 'market_strategy_pool'
+                ORDER BY created_at DESC, job_id DESC LIMIT ? OFFSET ?
+                """,
+                [limit, offset],
+            ).fetchall()
+        items: list[dict[str, object]] = []
+        for job_id, raw_request, raw_state in rows:
+            request = _load_object(raw_request)
+            state = _load_object(raw_state)
+            envelope = request.get("payload")
+            payload = envelope if isinstance(envelope, Mapping) else {}
+            metadata = state.get("metadata")
+            progress = metadata if isinstance(metadata, Mapping) else {}
+            items.append(
+                {
+                    "job_id": str(job_id),
+                    "status": state.get("status"),
+                    "mode": payload.get("mode", "full"),
+                    "market": payload.get("market"),
+                    "code": payload.get("code"),
+                    "created_at": state.get("created_at"),
+                    "finished_at": state.get("finished_at"),
+                    "completed_symbols": progress.get("completed_symbols", 0),
+                    "skipped_symbols": progress.get("skipped_symbols", 0),
+                    "failed_symbols": progress.get("failed_symbols", 0),
+                    "total_symbols": progress.get("total_symbols", 0),
+                    "error": state.get("error"),
+                }
+            )
+        return {
+            "items": items,
+            "total": int(total_row[0]) if total_row else 0,
+            "limit": limit,
+            "offset": offset,
+        }
+
     def claim_next(self, worker_id: str | None = None) -> str | None:
         selected_worker = _validate_worker_id(worker_id or "local-worker")
         self.recover_stale_running(stale_after_seconds=DEFAULT_STALE_AFTER_SECONDS)

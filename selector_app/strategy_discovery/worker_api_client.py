@@ -194,6 +194,12 @@ class HttpStrategyJobClient:
         with self._lock:
             self._result = dict(result)
 
+    def write_pool_entry(self, job_id: str, entry: Mapping[str, object]) -> None:
+        self._post(
+            f"/internal/strategy-worker/jobs/{job_id}/pool-entry",
+            {"worker_id": self.worker_id, "entry": dict(entry)},
+        )
+
     def _store_server_state(self, job_id: str, data: Mapping[str, object]) -> None:
         state = data.get("state")
         with self._lock:
@@ -205,7 +211,11 @@ class HttpStrategyJobClient:
             self._last_cancel_check = time.monotonic()
 
     def _post(self, path: str, payload: Mapping[str, object]) -> dict[str, object]:
-        retryable_update = path.endswith("/heartbeat") or path.endswith("/progress")
+        retryable_update = (
+            path.endswith("/heartbeat")
+            or path.endswith("/progress")
+            or path.endswith("/pool-entry")
+        )
         for attempt in range(len(_WORKER_RETRY_DELAYS_SECONDS) + 1):
             try:
                 decoded = self._requester(

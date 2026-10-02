@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import secrets
+from collections.abc import Mapping
 from typing import cast
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -11,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from selector_app.market_data.store import MarketDataStoreError
 from selector_app.strategy_discovery.duckdb_job_store import DuckDbStrategyJobStore
 from selector_app.strategy_discovery.job_store import DEFAULT_STALE_AFTER_SECONDS
+from selector_app.strategy_pool.store import DuckDbStrategyPoolStore
 
 router = APIRouter(
     prefix="/internal/strategy-worker",
@@ -53,6 +55,10 @@ class WorkerFailure(WorkerIdentity):
     error_code: str = Field(min_length=1, max_length=80)
 
 
+class WorkerPoolCheckpoint(WorkerIdentity):
+    entry: dict[str, object]
+
+
 def require_worker_token(request: Request) -> None:
     expected = str(getattr(request.app.state, "strategy_worker_token", "") or "")
     if not expected:
@@ -73,6 +79,10 @@ def require_worker_token(request: Request) -> None:
 
 def _store(request: Request) -> DuckDbStrategyJobStore:
     return cast(DuckDbStrategyJobStore, request.app.state.strategy_job_store)
+
+
+def _pool_store(request: Request) -> DuckDbStrategyPoolStore:
+    return cast(DuckDbStrategyPoolStore, request.app.state.strategy_pool_store)
 
 
 def _conflict(exc: ValueError) -> HTTPException:
@@ -114,6 +124,26 @@ def heartbeat_job(
     except ValueError as exc:
         raise _conflict(exc) from exc
     return {"data": {"state": state, "cancel_requested": state["cancel_requested"]}}
+
+
+@router.post("/jobs/{job_id}/pool-entry", dependencies=[Depends(require_worker_token)])
+def persist_pool_entry(
+    job_id: str,
+    payload: WorkerPoolCheckpoint,
+    request: Request,
+) -> dict[str, object]:
+    try:
+        claimed = _store(request).read_claimed_job(job_id, payload.worker_id)
+        operation = claimed.get("request")
+        envelope = operation if isinstance(operation, Mapping) else {}
+        if envelope.get("operation") != "market_strategy_pool":
+            raise ValueError("当前任务不是全市场策略池任务")
+        _pool_store(request).persist_worker_entry(payload.entry, source_job_id=job_id)
+    except (MarketDataStoreError, OSError) as exc:
+        raise _store_unavailable() from exc
+    except ValueError as exc:
+        raise _conflict(exc) from exc
+    return {"data": {"saved": True}}
 
 
 @router.post("/jobs/{job_id}/progress", dependencies=[Depends(require_worker_token)])

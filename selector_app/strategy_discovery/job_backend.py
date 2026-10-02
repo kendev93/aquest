@@ -104,7 +104,7 @@ class FileStrategyJobBackend:
         self,
         operation: JobOperation,
         payload: Mapping[str, object],
-    ) -> DiscoveryResourceEstimate:
+    ) -> DiscoveryResourceEstimate | None:
         if operation in {"discovery", "risk_optimization"}:
             raw_request = payload.get("request")
             if not isinstance(raw_request, Mapping):
@@ -126,6 +126,11 @@ class FileStrategyJobBackend:
                 self._store,
                 self._market_data_adapter,
             )
+        elif operation == "market_strategy_pool":
+            # The pool is processed one security at a time in the worker. A
+            # whole-universe row-count estimate would reject valid long runs
+            # before the incremental checkpointing path can help.
+            return None
         else:
             raise ValueError("策略任务类型无效")
         return self._preflight_request(request)
@@ -501,6 +506,8 @@ def _dispatch(
                 abort_check=abort_check,
             )
         )
+    if operation == "market_strategy_pool":
+        raise ValueError("全市场策略池任务只能由策略 worker 执行")
     raise ValueError("策略任务类型无效")
 
 
@@ -525,6 +532,11 @@ def decorate_result(
             normalized["duration_seconds"] = _duration_seconds(started, finished)
     elif operation == "risk_optimization":
         normalized["risk_optimization_id"] = job_id
+        raw_duration = normalized.get("duration_seconds")
+        if not isinstance(raw_duration, (int, float)):
+            normalized["duration_seconds"] = _duration_seconds(started, finished)
+    elif operation == "market_strategy_pool":
+        normalized["strategy_pool_job_id"] = job_id
         raw_duration = normalized.get("duration_seconds")
         if not isinstance(raw_duration, (int, float)):
             normalized["duration_seconds"] = _duration_seconds(started, finished)
@@ -557,6 +569,24 @@ def completion_state(operation: JobOperation, result: Mapping[str, object]) -> d
             "metadata": metadata,
             "total_candidates": _nonnegative_int(search.get("requested_trials")),
             "total_scanned": _nonnegative_int(search.get("evaluated_trials")),
+        }
+    if operation == "market_strategy_pool":
+        completed = _nonnegative_int(result.get("completed_symbols"))
+        failed = _nonnegative_int(result.get("failed_symbols"))
+        total = _nonnegative_int(result.get("total_symbols"))
+        return {
+            "metadata": {
+                "overall_progress": 1.0,
+                "completed_symbols": completed,
+                "skipped_symbols": _nonnegative_int(result.get("skipped_symbols")),
+                "failed_symbols": failed,
+                "total_symbols": total,
+                "finished_at": result.get("finished_at"),
+                "duration_seconds": result.get("duration_seconds", 0.0),
+            },
+            "errors": failed,
+            "total_candidates": total,
+            "total_scanned": completed + failed,
         }
     diagnostics = result.get("diagnostics")
     raw_candidate_count = result.get("candidate_count")
@@ -593,6 +623,9 @@ def _persist_result(
         # The worker job row itself retains the full request/result JSON.  Risk
         # optimization runs are not strategy-discovery histories and therefore
         # must not appear in that separate history table.
+        return
+    if operation == "market_strategy_pool":
+        # Per-symbol records are already persisted as worker checkpoints.
         return
     store.save_strategy_discovery_replay_history(
         job_id,

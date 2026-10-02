@@ -706,6 +706,93 @@ def test_portfolio_uses_composable_buy_and_sell_rule_groups() -> None:
     assert any(trade["direction"] == "SELL" for trade in report.trades)
 
 
+def test_portfolio_resolves_per_symbol_rules_risk_controls_and_priority() -> None:
+    buy_up = RuleGroup(
+        conditions=(ScreenCondition(left_value="custom.rank", operator="gt", right_constant=12),)
+    )
+    sell_up = RuleGroup(
+        conditions=(ScreenCondition(left_value="custom.rank", operator="gt", right_constant=14),)
+    )
+    buy_down = RuleGroup(
+        conditions=(ScreenCondition(left_value="custom.rank", operator="gte", right_constant=19),)
+    )
+    sell_down = RuleGroup(
+        conditions=(ScreenCondition(left_value="custom.rank", operator="lt", right_constant=17),)
+    )
+
+    report = PortfolioBacktestService(adapter=FakeAdapter()).run(
+        config(
+            selected_signals=(),
+            buy_rule=None,
+            sell_rule=None,
+            stop_loss_pct=None,
+            max_positions=2,
+            symbol_strategies={
+                "SH600000": {"buy_rule": buy_up, "sell_rule": sell_up},
+                "SH600001": {
+                    "buy_rule": buy_down,
+                    "sell_rule": sell_down,
+                    "stop_loss_pct": 0.05,
+                },
+            },
+            symbol_priority_scores={"SH600000": 2.0, "SH600001": 1.0},
+        )
+    )
+
+    bought = {str(trade["code"]) for trade in report.trades if trade["direction"] == "BUY"}
+    assert bought == {"600000", "600001"}
+    assert any(
+        trade.get("risk_trigger") == "stop_loss" and trade["code"] == "600001"
+        for trade in report.trades
+    )
+
+
+def test_available_slot_uses_validation_priority_instead_of_cross_sectional_indicator() -> None:
+    dates = np.asarray([20240101], dtype=np.int64)
+    contexts = {
+        f"SH{code}": _StockSeries(
+            market="SH",
+            code=code,
+            instrument_type="stock",
+            board="main",
+            dates=dates,
+            opens=np.asarray([10.0]),
+            highs=np.asarray([10.5]),
+            lows=np.asarray([9.5]),
+            closes=np.asarray([10.0]),
+            atrs=np.asarray([np.nan]),
+            buy_mask=np.asarray([True]),
+            sell_mask=np.asarray([False]),
+            signals={},
+            values={"custom.rank": np.asarray([cross_sectional_rank])},
+            date_to_index={20240101: 0},
+            data_fingerprint=code,
+            priority_score=priority,
+        )
+        for code, cross_sectional_rank, priority in (
+            ("600000", 1.0, 2.0),
+            ("600001", 99.0, 1.0),
+        )
+    }
+
+    pending, _event = PortfolioBacktestService(adapter=FakeAdapter())._select_candidates(
+        20240101,
+        positions={},
+        pending_sells={},
+        by_symbol=contexts,
+        last_prices={},
+        cash=10_000.0,
+        total_value=10_000.0,
+        config=config(max_positions=1),
+        fitness_filter=None,
+        cooldown_until={},
+        date_index=0,
+        include_event=False,
+    )
+
+    assert [item.symbol for item in pending] == ["SH600000"]
+
+
 def test_portfolio_preloads_indicator_cache_in_bounded_chunks() -> None:
     cache = SpyIndicatorCache()
     service = PortfolioBacktestService(adapter=FakeAdapter(), indicator_cache=cache)

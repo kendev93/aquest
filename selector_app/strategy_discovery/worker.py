@@ -11,8 +11,14 @@ from tempfile import TemporaryDirectory
 from threading import Event, Thread
 from typing import Literal, Protocol, cast
 
+from selector_app.backtest.service import BacktestService
+from selector_app.indicators.cache import IndicatorCache
+from selector_app.individual_research.service import IndividualStockResearchService
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
 from selector_app.market_data.store import DuckDbMarketDataStore
+from selector_app.portfolio_backtest.service import PortfolioBacktestService
+from selector_app.strategy_pool.service import MarketStrategyPoolService
+from selector_app.strategy_pool.store import DuckDbStrategyPoolStore
 
 from .job_backend import completion_state, decorate_result
 from .job_store import is_job_operation
@@ -20,7 +26,6 @@ from .models import DiscoveryRequest
 from .refinement import discovery_request_from_dict
 from .replay import ReplayLeaderboard
 from .replay_service import ReplayProgressCallback
-from .resources import resolve_discovery_workers
 from .service import ProgressCallback, StrategyDiscoveryService
 from .snapshot import DiscoverySnapshotCache
 from .worker_api_client import HttpStrategyJobClient
@@ -92,6 +97,7 @@ class StrategyDiscoveryWorker:
         service: StrategyDiscoveryServiceLike,
         *,
         service_factory: Callable[[int | None], StrategyDiscoveryServiceLike] | None = None,
+        strategy_pool_service: MarketStrategyPoolService | None = None,
         poll_interval_seconds: float = DEFAULT_WORKER_POLL_INTERVAL_SECONDS,
         stale_after_seconds: float = DEFAULT_STALE_AFTER_SECONDS,
     ) -> None:
@@ -102,6 +108,7 @@ class StrategyDiscoveryWorker:
         self._job_store = job_store
         self._service = service
         self._service_factory = service_factory
+        self._strategy_pool_service = strategy_pool_service
         self._poll_interval_seconds = poll_interval_seconds
         self._stale_after_seconds = stale_after_seconds
         self._heartbeat_interval_seconds = min(
@@ -301,6 +308,19 @@ class StrategyDiscoveryWorker:
                     abort_check=abort_check,
                 )
             )
+        if operation == "market_strategy_pool":
+            if self._strategy_pool_service is None:
+                raise ValueError("全市场策略池服务未配置")
+            writer = getattr(self._job_store, "write_pool_entry", None)
+            if not callable(writer):
+                raise ValueError("策略 worker 不支持逐股保存策略池检查点")
+            return self._strategy_pool_service.run(
+                payload,
+                job_id=job_id,
+                progress_callback=progress_callback,
+                abort_check=abort_check,
+                entry_writer=lambda entry: writer(job_id, entry),
+            )
         raise ValueError("策略任务类型无效")
 
     def _mark_cancelled(self, job_id: str) -> None:
@@ -360,14 +380,42 @@ def main() -> None:
     with HttpStrategyJobClient.from_env() as job_client:
         with TemporaryDirectory(prefix="indicator-lab-worker-snapshots-") as cache_root:
             snapshot_cache = DiscoverySnapshotCache(cache_root)
+            strategy_service = StrategyDiscoveryService(
+                store=store,
+                market_data_adapter=market_adapter,
+                evaluation_workers=1,
+                persist_indicator_cache=False,
+                discovery_snapshot_cache=snapshot_cache,
+            )
+            cache_store = store if store.indicator_cache_backend == "sqlite" else None
+            # The read-only worker can share the companion SQLite cache safely.
+            # A DuckDB cache would require writes through this read-only handle,
+            # so fall back to in-memory calculation for that opt-in backend.
+            pool_indicator_cache = IndicatorCache(cache_store, max_memory_entries=4)
+            pool_backtest_service = BacktestService(
+                adapter=market_adapter,
+                indicator_cache=pool_indicator_cache,
+            )
+            pool_portfolio_service = PortfolioBacktestService(
+                adapter=market_adapter,
+                indicator_cache=pool_indicator_cache,
+            )
+            pool_individual_service = IndividualStockResearchService(
+                adapter=market_adapter,
+                backtest_service=pool_backtest_service,
+                portfolio_service=pool_portfolio_service,
+                strategy_service=strategy_service,
+            )
             worker = StrategyDiscoveryWorker(
                 job_client,
-                StrategyDiscoveryService(
+                strategy_service,
+                strategy_pool_service=MarketStrategyPoolService(
                     store=store,
-                    market_data_adapter=market_adapter,
-                    evaluation_workers=resolve_discovery_workers(),
-                    persist_indicator_cache=False,
-                    discovery_snapshot_cache=snapshot_cache,
+                    adapter=market_adapter,
+                    individual_service=pool_individual_service,
+                    backtest_service=pool_backtest_service,
+                    pool_store=DuckDbStrategyPoolStore(store),
+                    portfolio_service=pool_portfolio_service,
                 ),
                 service_factory=lambda worker_count: StrategyDiscoveryService(
                     store=store,

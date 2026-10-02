@@ -567,6 +567,7 @@ async function copyPlan(): Promise<void> {
         <a class="nav-link" href="/strategy-lab">策略实验室</a>
         <a class="nav-link" href="/condition-research">买卖条件研究</a>
         <a class="nav-link" href="/individual-research">个股研究</a>
+        <a class="nav-link" href="/strategy-pool">全市场策略池</a>
         <a class="nav-link" href="/strategy-fitness">策略适配性</a>
         <a class="nav-link" href="/market-data">本地行情</a>
         <a class="nav-link active" href="/swing-research" aria-current="page">波段研究</a>

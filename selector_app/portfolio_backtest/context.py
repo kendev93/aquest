@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from typing import NamedTuple, cast
 
@@ -101,6 +101,10 @@ class _StockSeries:
     values: Mapping[str, np.ndarray]
     date_to_index: Mapping[int, int]
     data_fingerprint: str
+    buy_rule: RuleGroup | None = None
+    sell_rule: RuleGroup | None = None
+    strategy_config: Mapping[str, object] = field(default_factory=dict)
+    priority_score: float | None = None
     name: str | None = None
 
     @property
@@ -116,7 +120,8 @@ class PortfolioContextMixin(_PortfolioServiceState):
         config: PortfolioBacktestConfig,
         parsed: ParsedFormula | None,
     ) -> None:
-        signal_ids = list(self._rule_signal_ids(config.buy_rule, config.sell_rule))
+        rules = self._all_rules(config)
+        signal_ids = list(self._rule_signal_ids(*rules))
         value_ids = self._value_ids(config)
         if parsed is not None:
             available_signals = {signal.id for signal in parsed.signals}
@@ -136,7 +141,16 @@ class PortfolioContextMixin(_PortfolioServiceState):
     @staticmethod
     def _value_ids(config: PortfolioBacktestConfig) -> list[str]:
         values = [] if config.single_security_mode else [config.ranking_value]
-        for rule in (config.buy_rule, config.sell_rule):
+        rules = [config.buy_rule, config.sell_rule]
+        rules.extend(
+            cast(RuleGroup | None, strategy.get("buy_rule"))
+            for strategy in config.symbol_strategies.values()
+        )
+        rules.extend(
+            cast(RuleGroup | None, strategy.get("sell_rule"))
+            for strategy in config.symbol_strategies.values()
+        )
+        for rule in rules:
             if rule is None:
                 continue
             for condition in (*rule.required_conditions, *rule.conditions):
@@ -154,10 +168,18 @@ class PortfolioContextMixin(_PortfolioServiceState):
     def _formula_ids_for_config(self, config: PortfolioBacktestConfig) -> tuple[str, ...]:
         formula_ids = {
             self._registry.signal(signal_id).formula_id
-            for signal_id in self._rule_signal_ids(config.buy_rule, config.sell_rule)
+            for signal_id in self._rule_signal_ids(*self._all_rules(config))
         }
         formula_ids.update(value_id.split(".", 1)[0] for value_id in self._value_ids(config))
         return tuple(sorted(formula_ids))
+
+    @staticmethod
+    def _all_rules(config: PortfolioBacktestConfig) -> tuple[RuleGroup | None, ...]:
+        rules: list[RuleGroup | None] = [config.buy_rule, config.sell_rule]
+        for strategy in config.symbol_strategies.values():
+            rules.append(cast(RuleGroup | None, strategy.get("buy_rule")))
+            rules.append(cast(RuleGroup | None, strategy.get("sell_rule")))
+        return tuple(rules)
 
     def _preload_indicator_cache(
         self,
@@ -204,9 +226,18 @@ class PortfolioContextMixin(_PortfolioServiceState):
         if len(indices) == 0:
             raise ValueError("日期范围内没有可用日线")
 
+        strategy = config.symbol_strategies.get(ref.market + ref.code)
+        if strategy is None:
+            strategy = config.symbol_strategies.get(f"{ref.market}:{ref.code}", {})
+        buy_rule = strategy.get("buy_rule") if isinstance(strategy, Mapping) else None
+        sell_rule = strategy.get("sell_rule") if isinstance(strategy, Mapping) else None
+        selected_buy_rule = buy_rule if isinstance(buy_rule, RuleGroup) else config.buy_rule
+        selected_sell_rule = sell_rule if isinstance(sell_rule, RuleGroup) else config.sell_rule
+        if selected_buy_rule is None:
+            raise ValueError(f"{ref.market}{ref.code} 没有买入规则")
         signal_arrays = {
             signal_id: self._signal_array(results, signal_id, parsed is not None)[indices].copy()
-            for signal_id in self._rule_signal_ids(config.buy_rule, config.sell_rule)
+            for signal_id in self._rule_signal_ids(*self._all_rules(config))
         }
         value_arrays = {
             value_id: self._value_array(results, value_id, parsed is not None)[indices].copy()
@@ -214,16 +245,14 @@ class PortfolioContextMixin(_PortfolioServiceState):
         }
         if config.single_security_mode:
             value_arrays[SINGLE_SECURITY_RANKING_VALUE] = np.zeros(len(indices), dtype=float)
-        if config.buy_rule is None:
-            raise ValueError("买入规则不能为空")
         buy_mask = evaluate_rule_group(
-            config.buy_rule, results, self._registry, custom=parsed is not None
+            selected_buy_rule, results, self._registry, custom=parsed is not None
         )[indices].copy()
         sell_mask = (
             evaluate_rule_group(
-                config.sell_rule, results, self._registry, custom=parsed is not None
+                selected_sell_rule, results, self._registry, custom=parsed is not None
             )[indices].copy()
-            if config.sell_rule is not None
+            if selected_sell_rule is not None
             else np.zeros(len(indices), dtype=bool)
         )
         window = frame.iloc[indices].reset_index(drop=True)
@@ -252,6 +281,14 @@ class PortfolioContextMixin(_PortfolioServiceState):
             values=value_arrays,
             date_to_index=SortedDateIndex(dates),
             data_fingerprint=data_fingerprint,
+            buy_rule=selected_buy_rule,
+            sell_rule=selected_sell_rule,
+            strategy_config=strategy if isinstance(strategy, Mapping) else {},
+            priority_score=(
+                float(config.symbol_priority_scores[ref.market + ref.code])
+                if ref.market + ref.code in config.symbol_priority_scores
+                else None
+            ),
         )
 
     def _supports_batch_frames(self) -> bool:

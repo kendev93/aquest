@@ -30,6 +30,7 @@ from selector_app.screening.models import ScreenCondition
 from selector_app.screening.rules import RuleGroup
 from selector_app.strategy_discovery.models import DiscoveryRequest
 from selector_app.strategy_discovery.service import StrategyDiscoveryService
+from selector_app.strategy_pool.selection import slices_for_common_windows
 from selector_app.swing_research.combinations import split_trading_days
 from selector_app.swing_research.labels import bar_labels
 from selector_app.swing_research.segments import SwingSegment, split_swings
@@ -75,10 +76,24 @@ class IndividualStockResearchService:
 
         prepared = self._prepare(config, ref)
         dates, features, labels, signal_values, segments = self._research_window(prepared, config)
-        split_slices, split_metadata = split_trading_days(dates, config.horizon)
-        split_metadata["method"] = "按交易日顺序固定切分 60/20/20，并在预测窗口边界清除前视样本"
-        split_metadata["holdout_policy"] = "留出段只复核最终风险候选，不参与条件或风险参数排序"
-        windows = _split_windows(dates, split_slices)
+        windows: dict[str, dict[str, date] | None]
+        if config.split_windows:
+            split_slices = slices_for_common_windows(dates, config.split_windows)
+            split_metadata = dict(config.common_split_metadata or {})
+            split_metadata.setdefault(
+                "method", "按共同市场日历固定切分 60/20/20，并在预测窗口边界清除前视样本"
+            )
+            split_metadata["holdout_policy"] = "留出段只复核最终风险候选，不参与条件或风险参数排序"
+            windows = {
+                phase: {"start": bounds[0], "end": bounds[1]}
+                for phase, bounds in config.split_windows.items()
+                if phase in {"train", "validation", "holdout"}
+            }
+        else:
+            split_slices, split_metadata = split_trading_days(dates, config.horizon)
+            split_metadata["method"] = "按交易日顺序固定切分 60/20/20，并在预测窗口边界清除前视样本"
+            split_metadata["holdout_policy"] = "留出段只复核最终风险候选，不参与条件或风险参数排序"
+            windows = _split_windows(dates, split_slices)
         if any(window is None for window in windows.values()):
             raise ValueError("当前日期范围不足以进行训练、验证、留出三段研究；请扩大历史区间")
 
@@ -348,6 +363,7 @@ class IndividualStockResearchService:
             "searched_value_ids": list(config.value_ids),
             "searched_signal_ids": list(config.signal_ids),
             "data_fingerprint": data_fingerprint,
+            "market_fingerprint": prepared.data_fingerprint,
             "configuration_fingerprint": _configuration_fingerprint(config),
             "limitations": [
                 "个股条件依据单只股票的历史时间序列挖掘，不代表可泛化到其他股票。",
@@ -659,9 +675,7 @@ class IndividualStockResearchService:
             benchmark_source.get("performance") if benchmark_source is not None else None
         )
         benchmark_metrics = (
-            dict(benchmark_metrics_source)
-            if isinstance(benchmark_metrics_source, Mapping)
-            else {}
+            dict(benchmark_metrics_source) if isinstance(benchmark_metrics_source, Mapping) else {}
         )
         benchmark_return = _number(benchmark_metrics.get("total_return"))
         strategy_return = _number(report.performance.get("total_return"))
@@ -802,6 +816,7 @@ class IndividualStockResearchService:
             "candidate_count": 0,
             "risk_trials_per_rule_set": config.risk_trials,
             "data_fingerprint": data_fingerprint,
+            "market_fingerprint": data_fingerprint,
             "configuration_fingerprint": _configuration_fingerprint(config),
             "reason": reason,
         }
@@ -1407,6 +1422,10 @@ def _configuration_fingerprint(config: IndividualResearchConfig) -> str:
         "horizon": config.horizon,
         "candidate_limit": config.candidate_limit,
         "risk_trials": config.risk_trials,
+        "split_windows": {
+            phase: [start.isoformat(), end.isoformat()]
+            for phase, (start, end) in (config.split_windows or {}).items()
+        },
     }
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(

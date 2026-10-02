@@ -522,6 +522,29 @@ class _DuckDbStoreBase:
                 )
                 """
             )
+            # 全市场策略池为每只证券保留两套目标候选和独立手工覆盖。候选在
+            # worker 中逐股完成后立即 upsert，任务取消或 worker 重启不会丢掉已完成标的。
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS strategy_pool_entries (
+                    market VARCHAR NOT NULL,
+                    code VARCHAR NOT NULL,
+                    name VARCHAR NOT NULL DEFAULT '',
+                    annual_candidate_json VARCHAR,
+                    sharpe_candidate_json VARCHAR,
+                    manual_annual_json VARCHAR,
+                    manual_sharpe_json VARCHAR,
+                    status VARCHAR NOT NULL DEFAULT 'pending',
+                    last_error VARCHAR NOT NULL DEFAULT '',
+                    data_fingerprint VARCHAR NOT NULL DEFAULT '',
+                    market_fingerprint VARCHAR NOT NULL DEFAULT '',
+                    config_fingerprint VARCHAR NOT NULL DEFAULT '',
+                    source_job_id VARCHAR NOT NULL DEFAULT '',
+                    updated_at TIMESTAMP NOT NULL,
+                    PRIMARY KEY (market, code)
+                )
+                """
+            )
             # 策略库：一套可重放的组合回测配置 + 保存时的绩效快照。它和
             # backtest_history 的区别是——历史记录"跑过什么"（满了自动淘汰），
             # 策略记录"还想再跑一遍"（只有用户显式删才消失）。request_json 里

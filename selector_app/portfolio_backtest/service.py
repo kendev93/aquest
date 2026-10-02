@@ -17,6 +17,7 @@ from selector_app.indicators.cache import IndicatorCache
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
 from selector_app.market_data.models import StockRef
 from selector_app.market_data.store import DuckDbMarketDataStore
+from selector_app.screening.jobs import TaskCancelledError
 from selector_app.strategy_fitness.rolling import RollingFitnessFilter, RollingFitnessHistory
 
 from .checkpoint import SimulationCheckpoint
@@ -58,6 +59,7 @@ class PortfolioBacktestService(
         self,
         config: PortfolioBacktestConfig,
         progress_callback: PortfolioBacktestProgressCallback | None = None,
+        abort_check: Callable[[], bool] | None = None,
     ) -> PortfolioBacktestReport:
         resolved = self._list_refs(config)
         refs = resolved.refs
@@ -81,6 +83,8 @@ class PortfolioBacktestService(
         )
         try:
             for offset in range(0, len(refs), _CONTEXT_PRELOAD_CHUNK_SIZE):
+                if abort_check is not None and abort_check():
+                    raise TaskCancelledError("组合回测已取消")
                 chunk = refs[offset : offset + _CONTEXT_PRELOAD_CHUNK_SIZE]
                 frames = self._batch_frames(chunk, config) if batched else None
                 self._preload_indicator_cache(
@@ -103,6 +107,8 @@ class PortfolioBacktestService(
 
                 if executor is None:
                     for current, ref in enumerate(chunk, start=offset + 1):
+                        if abort_check is not None and abort_check():
+                            raise TaskCancelledError("组合回测已取消")
                         try:
                             context = build(ref)
                         except Exception as exc:  # noqa: BLE001 - one bad stock must not abort a portfolio
@@ -118,6 +124,10 @@ class PortfolioBacktestService(
                 futures = {executor.submit(build, ref): ref for ref in chunk}
                 completed = offset
                 for future in as_completed(futures):
+                    if abort_check is not None and abort_check():
+                        for pending in futures:
+                            pending.cancel()
+                        raise TaskCancelledError("组合回测已取消")
                     ref = futures[future]
                     try:
                         context = future.result()
@@ -141,7 +151,13 @@ class PortfolioBacktestService(
             return self._empty_report(config, len(refs), failure_reasons, resolved)
 
         fitness_filter = self._build_fitness_filter(contexts, config)
-        simulation = self._simulate(contexts, dates, config, fitness_filter)
+        simulation = self._simulate(
+            contexts,
+            dates,
+            config,
+            fitness_filter,
+            abort_check=abort_check,
+        )
         report = self._build_report(
             config,
             dates,

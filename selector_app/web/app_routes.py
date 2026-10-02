@@ -55,6 +55,7 @@ def install_routers(app: FastAPI) -> None:
     from .routers.strategies import router as strategies_router
     from .routers.strategy_discovery import router as strategy_discovery_router
     from .routers.strategy_fitness import router as strategy_fitness_router
+    from .routers.strategy_pool import router as strategy_pool_router
     from .routers.strategy_worker import router as strategy_worker_router
     from .routers.swing_research import router as swing_research_router
 
@@ -74,6 +75,7 @@ def install_routers(app: FastAPI) -> None:
     app.include_router(screen_presets_router, prefix="/api/v1")
     app.include_router(stock_groups_router, prefix="/api/v1")
     app.include_router(strategy_discovery_router, prefix="/api/v1")
+    app.include_router(strategy_pool_router, prefix="/api/v1")
     app.include_router(strategy_fitness_router, prefix="/api/v1")
     app.include_router(strategies_router, prefix="/api/v1")
     app.include_router(swing_research_router, prefix="/api/v1")

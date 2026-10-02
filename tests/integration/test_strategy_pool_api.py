@@ -1,0 +1,221 @@
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+from fastapi.testclient import TestClient
+
+from selector_app.backtest.service import BacktestService
+from selector_app.market_data.adapter import DuckDbMarketDataAdapter
+from selector_app.market_data.store import DuckDbMarketDataStore
+from selector_app.portfolio_backtest.service import PortfolioBacktestService
+from selector_app.strategy_pool.service import MarketStrategyPoolService
+from selector_app.strategy_pool.store import DuckDbStrategyPoolStore
+from selector_app.web.app import create_app
+
+TOKEN = "pool-worker-test-token"
+
+
+def _store(tmp_path) -> DuckDbMarketDataStore:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    close = np.linspace(10.0, 15.0, 120)
+    bars = pd.DataFrame(
+        {
+            "date": pd.date_range("2025-01-01", periods=120, freq="D"),
+            "open": close,
+            "high": close + 0.2,
+            "low": close - 0.2,
+            "close": close,
+            "volume": 1_000.0,
+            "amount": close * 1_000,
+            "bar_status": "completed",
+        }
+    )
+    bars.loc[bars.index[-1], ["open", "high", "low", "close"]] = [10.0, 10.2, 9.5, 10.0]
+    store.replace_local_bars("SH", "600000", "stock", bars)
+    return store
+
+
+def test_pool_job_submission_single_rerun_history_and_cancel(tmp_path) -> None:
+    app = create_app(
+        market_data_store=_store(tmp_path),
+        strategy_worker_token=TOKEN,
+        auto_sync_enabled=False,
+    )
+
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/v1/strategy-pool/jobs",
+            json={"mode": "single", "market": "SH", "code": "600000"},
+        )
+        job_id = created.json()["data"]["job_id"]
+        detail = client.get(f"/api/v1/strategy-pool/jobs/{job_id}")
+        history = client.get("/api/v1/strategy-pool/jobs")
+        cancelled = client.post(f"/api/v1/strategy-pool/jobs/{job_id}/cancel")
+        missing = client.post(
+            "/api/v1/strategy-pool/jobs",
+            json={"mode": "single", "market": "SH", "code": "999999"},
+        )
+
+    assert created.status_code == 202
+    assert detail.status_code == 200
+    assert detail.json()["data"]["status"] == "queued"
+    assert history.json()["data"]["items"][0]["job_id"] == job_id
+    assert cancelled.json()["data"]["cancelled"] is True
+    assert missing.status_code == 422
+
+
+def test_pool_manual_overrides_are_separate_by_objective_and_list_active_source(tmp_path) -> None:
+    app = create_app(
+        market_data_store=_store(tmp_path),
+        auto_sync_enabled=False,
+    )
+    annual = {
+        "candidate_id": "annual-manual",
+        "buy_rule": {
+            "conditions": [
+                {"left_value": "technical.rsi14", "operator": "lt", "right_constant": 30}
+            ]
+        },
+        "sell_rule": {"signals": ["technical.macd"]},
+        "config": {"stop_loss_pct": 0.08},
+    }
+    sharpe = {
+        "candidate_id": "sharpe-manual",
+        "buy_rule": {"signals": ["technical.macd"]},
+        "sell_rule": {"signals": ["technical.rsi14"]},
+        "config": {"trailing_stop_pct": 0.1},
+    }
+
+    with TestClient(app) as client:
+        annual_response = client.post(
+            "/api/v1/strategy-pool/entries/SH/600000/overrides/annual_return",
+            json={"candidate": annual},
+        )
+        sharpe_response = client.post(
+            "/api/v1/strategy-pool/entries/SH/600000/overrides/sharpe",
+            json={"candidate": sharpe},
+        )
+        annual_list = client.get("/api/v1/strategy-pool/entries?objective=annual_return")
+        sharpe_list = client.get("/api/v1/strategy-pool/entries?objective=sharpe")
+
+    assert annual_response.status_code == 200
+    assert sharpe_response.status_code == 200
+    assert (
+        annual_list.json()["data"]["items"][0]["active_candidate"]["candidate_id"]
+        == "annual-manual"
+    )
+    assert annual_list.json()["data"]["items"][0]["active_source"] == "manual"
+    assert (
+        sharpe_list.json()["data"]["items"][0]["active_candidate"]["candidate_id"]
+        == "sharpe-manual"
+    )
+
+
+def test_worker_checkpoints_only_accept_claimed_pool_jobs(tmp_path) -> None:
+    app = create_app(
+        market_data_store=_store(tmp_path),
+        strategy_worker_token=TOKEN,
+        auto_sync_enabled=False,
+    )
+    job_id = app.state.strategy_job_backend.submit(
+        "market_strategy_pool",
+        {"mode": "full", "risk_trials": 3_000},
+        description="全市场策略池研究",
+        worker_count=1,
+    )
+    candidate = {
+        "candidate_id": "candidate-1",
+        "buy_rule": {"signals": ["technical.macd"]},
+        "sell_rule": {"signals": ["technical.rsi14"]},
+        "config": {"stop_loss_pct": 0.08},
+    }
+
+    with TestClient(app) as client:
+        client.post(
+            "/internal/strategy-worker/jobs/claim",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+            json={"worker_id": "worker-a"},
+        )
+        wrong_worker = client.post(
+            f"/internal/strategy-worker/jobs/{job_id}/pool-entry",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+            json={"worker_id": "worker-b", "entry": {}},
+        )
+        saved = client.post(
+            f"/internal/strategy-worker/jobs/{job_id}/pool-entry",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+            json={
+                "worker_id": "worker-a",
+                "entry": {
+                    "market": "SH",
+                    "code": "600000",
+                    "name": "浦发银行",
+                    "annual_candidate": candidate,
+                    "sharpe_candidate": None,
+                    "data_fingerprint": "result-fingerprint",
+                    "market_fingerprint": "bars-fingerprint",
+                    "config_fingerprint": "config-fingerprint",
+                },
+            },
+        )
+        entries = client.get("/api/v1/strategy-pool/entries")
+
+    assert wrong_worker.status_code == 409
+    assert saved.status_code == 200
+    assert (
+        entries.json()["data"]["items"][0]["automatic_candidates"]["annual_return"]["candidate_id"]
+        == "candidate-1"
+    )
+
+
+def test_signal_scan_evaluates_active_rules_on_latest_completed_bar(tmp_path) -> None:
+    market_store = _store(tmp_path)
+    pool = DuckDbStrategyPoolStore(market_store)
+    pool.initialize()
+    pool.set_manual_override(
+        "SH",
+        "600000",
+        "annual_return",
+        {
+            "candidate_id": "signal-candidate",
+            "buy_rule": {
+                "signals": [],
+                "conditions": [
+                    {"left_value": "price.close", "operator": "gt", "right_constant": 0}
+                ],
+                "required_conditions": [],
+                "combine_mode": "all",
+            },
+            "sell_rule": {
+                "signals": [],
+                "conditions": [
+                    {"left_value": "price.close", "operator": "lt", "right_constant": 0}
+                ],
+                "required_conditions": [],
+                "combine_mode": "all",
+            },
+            "metrics": {"validation": {"annual_return": 0.2, "sharpe": 1.0, "win_rate": 0.6}},
+            "config": {"stop_loss_pct": 0.05},
+        },
+    )
+    adapter = DuckDbMarketDataAdapter(market_store)
+    service = MarketStrategyPoolService(
+        store=market_store,
+        adapter=adapter,
+        individual_service=object(),  # signal mode does not invoke the research service
+        backtest_service=BacktestService(adapter=adapter),
+        pool_store=pool,
+        portfolio_service=PortfolioBacktestService(adapter=adapter),
+    )
+
+    result = service.run(
+        {"mode": "signals", "objective": "annual_return"},
+        job_id="signals-job",
+    )
+
+    assert result["buy_signals"][0]["code"] == "600000"
+    assert result["sell_signals"] == []
+    assert result["states"][0]["status"] == "buy"
+    assert result["model_portfolio"]["available"] is True
+    assert result["model_portfolio"]["holdings"] == []
+    assert result["model_portfolio"]["risk_exit_signals"][0]["risk_trigger"] == "stop_loss"

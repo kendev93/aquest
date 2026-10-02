@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import heapq
 from bisect import bisect_right
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import replace
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import pandas as pd
 
 from selector_app.backtest.profiles import TradeProfile, profile_from_config
+from selector_app.screening.jobs import TaskCancelledError
 from selector_app.screening.models import ScreenCondition
 from selector_app.screening.rules import RuleGroup
 from selector_app.strategy_fitness.rolling import RollingFitnessDecision, RollingFitnessFilter
@@ -23,6 +24,22 @@ from .report import _date_text
 from .risk import _risk_trigger, _risk_trigger_label
 from .simulation_models import _PendingBuy, _PendingSell, _Position
 from .state import _PortfolioServiceState
+
+_SYMBOL_RISK_FIELDS = (
+    "stop_loss_pct",
+    "stop_loss_mode",
+    "stop_loss_atr_multiplier",
+    "stop_loss_cooldown_days",
+    "take_profit_pct",
+    "take_profit_mode",
+    "take_profit_atr_multiplier",
+    "take_profit_cooldown_days",
+    "trailing_stop_pct",
+    "trailing_stop_mode",
+    "trailing_stop_atr_multiplier",
+    "trailing_stop_cooldown_days",
+    "atr_period",
+)
 
 
 class PortfolioSimulationMixin(_PortfolioServiceState):
@@ -149,6 +166,7 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
         checkpoint: SimulationCheckpoint | None = None,
         data_fingerprint: str = "",
         ranked_candidate_index: Mapping[int, np.ndarray] | None = None,
+        abort_check: Callable[[], bool] | None = None,
     ) -> dict[str, object]:
         by_symbol = {context.symbol: context for context in contexts}
         start_index = 0
@@ -195,6 +213,8 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
             ranking_events = [dict(record) for record in checkpoint.ranking_events]
 
         for date_index in range(start_index, len(dates)):
+            if date_index % 10 == 0 and abort_check is not None and abort_check():
+                raise TaskCancelledError("组合回测已取消")
             current_date = dates[date_index]
             cash = self._execute_sells(
                 current_date,
@@ -473,10 +493,9 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
             index = context.date_to_index.get(as_of)
             if index is None or not bool(context.buy_mask[index]):
                 continue
-            ranking_values = context.values.get(config.ranking_value)
-            if ranking_values is None:
+            score = cls._candidate_score(context, index, config)
+            if score is None:
                 continue
-            score = float(ranking_values[index])
             if not np.isfinite(score):
                 continue
             decision = fitness_filter.decide(context.symbol, as_of) if fitness_filter else None
@@ -510,7 +529,7 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
             ranked, start=1
         ):
             buy = cls._rule_diagnostic(
-                config.buy_rule,
+                context.buy_rule or config.buy_rule,
                 context,
                 index,
                 matched=bool(context.buy_mask[index]),
@@ -565,7 +584,7 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
                         index = bisect_right(context.dates, as_of) - 1
                     indicator_as_of = _date_text(int(context.dates[index])) if index >= 0 else None
                     row["sell_signal"] = cls._rule_diagnostic(
-                        config.sell_rule,
+                        context.sell_rule or config.sell_rule,
                         context,
                         index if index is not None else -1,
                         matched=(
@@ -898,7 +917,13 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
             index = context.date_to_index.get(current_date)
             if position is None or index is None:
                 continue
-            trigger = _risk_trigger(context, index, position, config)
+            risk_overrides: dict[str, Any] = {
+                key: context.strategy_config[key]
+                for key in _SYMBOL_RISK_FIELDS
+                if key in context.strategy_config
+            }
+            risk_config = replace(config, **risk_overrides)
+            trigger = _risk_trigger(context, index, position, risk_config)
             if trigger is None:
                 continue
             trigger_name, trigger_price, cooldown_days = trigger
@@ -1145,8 +1170,8 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
                     index = context.date_to_index.get(current_date)
                     if index is None or not bool(context.buy_mask[index]):
                         continue
-                    score = float(context.values[config.ranking_value][index])
-                    if not np.isfinite(score):
+                    score = self._candidate_score(context, index, config)
+                    if score is None or not np.isfinite(score):
                         continue
                     entries.append((score, context, None))
                     if len(entries) >= slots:
@@ -1162,8 +1187,8 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
                     continue
                 if not bool(context.buy_mask[index]):
                     continue
-                score = float(context.values[config.ranking_value][index])
-                if not np.isfinite(score):
+                score = self._candidate_score(context, index, config)
+                if score is None or not np.isfinite(score):
                     continue
                 decision = (
                     fitness_filter.decide(context.symbol, current_date) if fitness_filter else None
@@ -1239,6 +1264,20 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
             "ranking_value": config.ranking_value,
             "candidates": event_candidates,
         }
+
+    @staticmethod
+    def _candidate_score(
+        context: _StockSeries,
+        index: int,
+        config: PortfolioBacktestConfig,
+    ) -> float | None:
+        if context.priority_score is not None:
+            return context.priority_score
+        values = context.values.get(config.ranking_value)
+        if values is None:
+            return None
+        score = float(values[index])
+        return score if np.isfinite(score) else None
 
     @staticmethod
     def _weighted_scores(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from typing import Literal
@@ -32,6 +33,8 @@ class IndividualResearchConfig:
     execution: Literal["next_open", "next_close"] = "next_open"
     position_mode: Literal["full", "fixed"] = "full"
     fixed_size: int | None = None
+    split_windows: Mapping[str, tuple[date, date]] | None = None
+    common_split_metadata: Mapping[str, object] | None = None
 
     @property
     def symbol(self) -> str:

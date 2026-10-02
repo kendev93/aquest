@@ -13,6 +13,7 @@ import MarketDataPage from './pages/MarketDataPage.vue'
 import PortfolioBacktestPage from './pages/PortfolioBacktestPage.vue'
 import StrategyDiscoveryPage from './pages/StrategyDiscoveryPage.vue'
 import StrategyFitnessPage from './pages/StrategyFitnessPage.vue'
+import StrategyPoolPage from './pages/StrategyPoolPage.vue'
 import StrategyTrackingPage from './pages/StrategyTrackingPage.vue'
 import SwingResearchPage from './pages/SwingResearchPage.vue'
 import UserManualPage from './pages/UserManualPage.vue'
@@ -35,6 +36,7 @@ const routeComponent = computed(() => {
   if (pathname.startsWith('/history-compare')) return HistoryComparePage
   if (pathname.startsWith('/instrument-lab')) return InstrumentLabPage
   if (pathname.startsWith('/individual-research')) return IndividualResearchPage
+  if (pathname.startsWith('/strategy-pool')) return StrategyPoolPage
   if (pathname.startsWith('/candidate-library')) return CandidateLibraryPage
   if (pathname.startsWith('/user-manual')) return UserManualPage
   return FormulaScreenPage

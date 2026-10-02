@@ -86,6 +86,8 @@ class PortfolioBacktestConfig:
     fitness_max_drawdown: float = 0.3
     codes: tuple[str, ...] | None = None
     single_security_mode: bool = False
+    symbol_strategies: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    symbol_priority_scores: Mapping[str, float] = field(default_factory=dict)
     position_mode: PositionMode = "full"
     fixed_size: int | None = None
     #: 打开后把 ST / *ST / 退市标的挡在候选池外。判定只能按**当前名称**做
@@ -113,9 +115,22 @@ class PortfolioBacktestConfig:
         )
         object.__setattr__(self, "instrument_types", scope.instrument_types)
         object.__setattr__(self, "boards", scope.boards)
+        object.__setattr__(
+            self,
+            "symbol_strategies",
+            MappingProxyType(
+                {
+                    str(key): MappingProxyType(dict(value))
+                    for key, value in self.symbol_strategies.items()
+                }
+            ),
+        )
+        object.__setattr__(
+            self, "symbol_priority_scores", MappingProxyType(dict(self.symbol_priority_scores))
+        )
         explicit_buy_rule = self.buy_rule is not None
         explicit_sell_rule = self.sell_rule is not None
-        if not explicit_buy_rule and not self.selected_signals:
+        if not explicit_buy_rule and not self.selected_signals and not self.symbol_strategies:
             raise ValueError("至少需要一个选股条件")
         if len(set(self.selected_signals)) != len(self.selected_signals):
             raise ValueError("选股条件不能重复")
@@ -208,7 +223,7 @@ class PortfolioBacktestConfig:
             value is not None for value in comparison
         ):
             raise ValueError("指标比较卖出规则需要左右指标和比较方式")
-        if not explicit_buy_rule:
+        if not explicit_buy_rule and not self.symbol_strategies:
             object.__setattr__(
                 self,
                 "buy_rule",
@@ -258,7 +273,22 @@ class PortfolioBacktestConfig:
                 self.trailing_stop_atr_multiplier,
             )
         )
-        if self.sell_rule is None and not risk_enabled:
+        has_symbol_exits = any(
+            isinstance(strategy.get("sell_rule"), RuleGroup)
+            or any(
+                strategy.get(key) is not None
+                for key in (
+                    "stop_loss_pct",
+                    "stop_loss_atr_multiplier",
+                    "take_profit_pct",
+                    "take_profit_atr_multiplier",
+                    "trailing_stop_pct",
+                    "trailing_stop_atr_multiplier",
+                )
+            )
+            for strategy in self.symbol_strategies.values()
+        )
+        if self.sell_rule is None and not risk_enabled and not has_symbol_exits:
             raise ValueError("至少需要设置一个卖出规则")
         object.__setattr__(self, "ranking_value", self.ranking_value.strip())
         object.__setattr__(

@@ -56,6 +56,7 @@ from selector_app.strategy_discovery.job_store import default_strategy_job_root
 from selector_app.strategy_discovery.resources import resolve_discovery_workers
 from selector_app.strategy_discovery.service import StrategyDiscoveryService
 from selector_app.strategy_fitness.service import StrategyFitnessService
+from selector_app.strategy_pool.store import DuckDbStrategyPoolStore
 from selector_app.swing_research.service import SwingResearchService
 
 from .app_errors import install_error_handlers
@@ -116,6 +117,7 @@ def create_app(
         market_data_store if market_data_store is not None else DuckDbMarketDataStore(),
     )
     selected_strategy_job_store = DuckDbStrategyJobStore(selected_store)
+    selected_strategy_pool_store = DuckDbStrategyPoolStore(selected_store)
     selected_adapter = cast(
         MarketDataAdapter,
         market_data_adapter
@@ -231,6 +233,7 @@ def create_app(
         maintenance_task: asyncio.Task[None] | None = None
         tracking_task: asyncio.Task[None] | None = None
         selected_store.status()
+        selected_strategy_pool_store.initialize()
         imported_strategy_jobs = selected_strategy_job_store.initialize(
             default_strategy_job_root(selected_store.database_path)
         )
@@ -318,6 +321,7 @@ def create_app(
     app.state.individual_research_service = selected_individual_research_service
     app.state.strategy_job_backend = selected_strategy_backend
     app.state.strategy_job_store = selected_strategy_job_store
+    app.state.strategy_pool_store = selected_strategy_pool_store
     app.state.strategy_worker_token = _resolve_strategy_worker_token(strategy_worker_token)
     app.state.strategy_fitness_service = strategy_fitness_service or StrategyFitnessService(
         adapter=selected_adapter,
