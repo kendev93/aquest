@@ -188,6 +188,7 @@ def test_full_pool_research_runs_tickers_concurrently_when_memory_allows(
         "selector_app.strategy_pool.service.memory_status",
         lambda: MemoryStatus(total_bytes=8 * GiB, available_bytes=8 * GiB, source="test"),
     )
+    monkeypatch.setattr("selector_app.strategy_pool.service.get_cpu_load_average_1m", lambda: 0.0)
     saved: list[dict[str, object]] = []
     service = MarketStrategyPoolService(
         store=store,

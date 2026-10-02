@@ -14,6 +14,7 @@ from typing import Literal, cast
 
 from selector_app.backtest.models import BacktestConfig
 from selector_app.backtest.service import BacktestService
+from selector_app.concurrency import visible_cpu_count
 from selector_app.formulas.registry import FORMULA_REGISTRY
 from selector_app.indicators.cache import frame_fingerprint
 from selector_app.individual_research.models import IndividualResearchConfig
@@ -30,7 +31,9 @@ from selector_app.strategy_discovery.catalog import default_indicator_catalog
 from selector_app.web.schemas.screening import RuleGroupRequest
 
 from .resources import (
+    cpu_bounded_worker_count,
     estimate_ticker_working_set_bytes,
+    get_cpu_load_average_1m,
     memory_bounded_worker_count,
     memory_status,
     pool_worker_cap,
@@ -112,6 +115,9 @@ class _PoolProgressCoordinator:
         self._maximum_workers = maximum_workers
         self._memory_worker_limit = maximum_workers
         self._available_memory_mb: int | None = None
+        self._cpu_worker_limit = maximum_workers
+        self._cpu_load_average_1m: float | None = None
+        self._visible_cpus = maximum_workers
         self._completed = 0
         self._finished = 0
         self._skipped = 0
@@ -120,12 +126,23 @@ class _PoolProgressCoordinator:
         self._last_emit_at = 0.0
         self._lock = Lock()
 
-    def set_memory_budget(self, worker_limit: int, available_bytes: int | None) -> None:
+    def set_resource_budget(
+        self,
+        *,
+        memory_worker_limit: int,
+        available_bytes: int | None,
+        cpu_worker_limit: int,
+        cpu_load_average_1m: float | None,
+        visible_cpus: int,
+    ) -> None:
         with self._lock:
-            self._memory_worker_limit = worker_limit
+            self._memory_worker_limit = memory_worker_limit
             self._available_memory_mb = (
                 max(0, available_bytes // (1024**2)) if available_bytes is not None else None
             )
+            self._cpu_worker_limit = cpu_worker_limit
+            self._cpu_load_average_1m = cpu_load_average_1m
+            self._visible_cpus = visible_cpus
 
     def ticker_progress(
         self,
@@ -159,6 +176,9 @@ class _PoolProgressCoordinator:
                     "maximum_parallelism": self._maximum_workers,
                     "memory_worker_limit": self._memory_worker_limit,
                     "available_memory_mb": self._available_memory_mb,
+                    "cpu_worker_limit": self._cpu_worker_limit,
+                    "cpu_load_average_1m": self._cpu_load_average_1m,
+                    "visible_cpus": self._visible_cpus,
                 },
             )
             self._last_emit_at = now
@@ -195,6 +215,9 @@ class _PoolProgressCoordinator:
                     "maximum_parallelism": self._maximum_workers,
                     "memory_worker_limit": self._memory_worker_limit,
                     "available_memory_mb": self._available_memory_mb,
+                    "cpu_worker_limit": self._cpu_worker_limit,
+                    "cpu_load_average_1m": self._cpu_load_average_1m,
+                    "visible_cpus": self._visible_cpus,
                 },
             )
             self._last_emit_at = time.monotonic()
@@ -371,13 +394,28 @@ class MarketStrategyPoolService:
                         for candidate in lookahead
                     )
                     memory = memory_status()
-                    target_workers = memory_bounded_worker_count(
+                    memory_worker_limit = memory_bounded_worker_count(
                         status=memory,
                         estimated_worker_bytes=estimated_bytes,
                         maximum_workers=self._max_pool_workers,
                         active_workers=len(active),
                     )
-                    coordinator.set_memory_budget(target_workers, memory.available_bytes)
+                    visible_cpus = visible_cpu_count()
+                    cpu_load_average = get_cpu_load_average_1m()
+                    cpu_worker_limit = cpu_bounded_worker_count(
+                        load_average_1m=cpu_load_average,
+                        visible_cpus=visible_cpus,
+                        maximum_workers=self._max_pool_workers,
+                        active_workers=len(active),
+                    )
+                    target_workers = min(memory_worker_limit, cpu_worker_limit)
+                    coordinator.set_resource_budget(
+                        memory_worker_limit=memory_worker_limit,
+                        available_bytes=memory.available_bytes,
+                        cpu_worker_limit=cpu_worker_limit,
+                        cpu_load_average_1m=cpu_load_average,
+                        visible_cpus=visible_cpus,
+                    )
                     if len(active) >= target_workers:
                         break
 

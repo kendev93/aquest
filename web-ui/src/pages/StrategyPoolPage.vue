@@ -77,8 +77,17 @@ const parallelismText = computed(() => {
   const maximum = metadata.maximum_parallelism
   const memoryLimit = metadata.memory_worker_limit
   const availableMemory = metadata.available_memory_mb
+  const cpuLimit = metadata.cpu_worker_limit
+  const cpuLoad = metadata.cpu_load_average_1m
+  const visibleCpus = metadata.visible_cpus
+  const cpuDetails: string[] = []
+  if (typeof visibleCpus === 'number') cpuDetails.push(`${visibleCpus}核`)
+  if (typeof cpuLoad === 'number') cpuDetails.push(`系统1分钟负载 ${cpuLoad.toFixed(1)}`)
+  const cpuText = typeof cpuLimit === 'number'
+    ? `CPU允许 ${cpuLimit} 个标的并发${cpuDetails.length ? `（${cpuDetails.join('，')}）` : ''}`
+    : ''
   return typeof active === 'number' && typeof maximum === 'number'
-    ? `标的并行 ${active} / 内存动态上限 ${typeof memoryLimit === 'number' ? memoryLimit : maximum}${typeof availableMemory === 'number' ? `（可用约 ${availableMemory} MiB）` : ''}`
+    ? `标的并行 ${active} / 最大 ${maximum}${cpuText ? ` · ${cpuText}` : ''} · 内存动态上限 ${typeof memoryLimit === 'number' ? memoryLimit : maximum}${typeof availableMemory === 'number' ? `（可用约 ${availableMemory} MiB）` : ''}`
     : ''
 })
 const buySignals = computed(() => signalResult.value?.buy_signals ?? [])
@@ -623,7 +632,7 @@ onUnmounted(() => {
             <div class="progress-track"><span :style="{ width: `${progressPercent}%` }"></span></div>
             <div class="progress-detail"><span>{{ phaseLabel }}</span><span v-if="currentSymbol">当前：{{ currentSymbol }}</span><span v-if="parallelismText" data-testid="pool-parallelism">{{ parallelismText }}</span><button class="text-button danger-text" data-testid="pool-cancel-job" @click="cancelCurrentJob">取消任务</button></div>
           </div>
-          <p class="pool-scale-note">全量重选会逐只保存检查点，并按可用内存和股票历史长度自动调节并发；重新运行时会跳过行情和配置指纹未变化的股票。3000 组会让每只股票的退出风控计算更充分，实际耗时取决于本地标的数和历史长度。</p>
+          <p class="pool-scale-note">全量重选会逐只保存检查点，并按 CPU 负载、可用内存和股票历史长度自动调节并发；重新运行时会跳过行情和配置指纹未变化的股票。3000 组会让每只股票的退出风控计算更充分，实际耗时取决于本地标的数和历史长度。</p>
         </section>
 
         <p v-if="errorMessage" class="notice error-notice" role="alert">{{ errorMessage }}</p>

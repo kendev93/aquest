@@ -136,6 +136,35 @@ describe('StrategyPoolPage', () => {
     expect(wrapper.get('[data-testid="pool-pagination"]').text()).toContain('第 2 / 2 页')
   })
 
+  it('shows CPU pressure and its dynamic dispatch limit during a full scan', async () => {
+    window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValueOnce([
+      { job_id: 'full-1', status: 'running', mode: 'full' },
+    ])
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({
+      job_id: 'full-1',
+      status: 'running',
+      progress: 0.01,
+      metadata: {
+        current_parallelism: 4,
+        maximum_parallelism: 6,
+        memory_worker_limit: 6,
+        available_memory_mb: 9_000,
+        cpu_worker_limit: 5,
+        cpu_load_average_1m: 6.2,
+        visible_cpus: 8,
+      },
+    })
+
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="pool-parallelism"]').text()).toContain('标的并行 4 / 最大 6')
+    expect(wrapper.get('[data-testid="pool-parallelism"]').text()).toContain(
+      'CPU允许 5 个标的并发（8核，系统1分钟负载 6.2）',
+    )
+  })
+
   it('shows a transient polling warning without marking the running task failed', async () => {
     vi.useFakeTimers()
     vi.mocked(api.getStrategyPoolJob)
