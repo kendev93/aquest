@@ -80,15 +80,7 @@ export interface StrategyPoolHolding {
   market: 'SH' | 'SZ'
   code: string
   name?: string | null
-  size?: number | null
-  entry_date?: string | null
-  entry_price?: number | null
-  latest_price?: number | null
-  close?: number | null
-  market_value?: number | null
-  unrealized_pnl?: number | null
-  unrealized_pnl_pct?: number | null
-  position_weight?: number | null
+  status?: 'held' | string
 }
 
 export interface StrategyPoolStrategySnapshotItem {
@@ -125,6 +117,8 @@ export interface StrategyPoolJobResult {
   common_calendar?: Record<string, unknown>
   as_of_date?: string | null
   signal_target?: { market: 'SH' | 'SZ'; code: string } | null
+  holding_scope?: 'per_stock_strategy' | string
+  holding_snapshot_complete?: boolean
   market_snapshot?: StrategyPoolMarketSnapshot
   strategy_snapshot?: StrategyPoolStrategySnapshotItem[]
   buy_signals?: StrategyPoolSignal[]
@@ -132,9 +126,11 @@ export interface StrategyPoolJobResult {
   states?: StrategyPoolSignal[]
   model_portfolio?: {
     available?: boolean
+    holding_scope?: 'per_stock_strategy' | string
     current_state?: Record<string, unknown> | null
     holdings?: StrategyPoolHolding[]
     risk_exit_signals?: Array<Record<string, unknown>>
+    failed_batches?: number
     reason?: string
     data_fingerprint?: string
   }

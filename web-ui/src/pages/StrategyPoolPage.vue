@@ -165,8 +165,14 @@ const parallelismText = computed(() => {
 const buySignals = computed(() => signalResult.value?.buy_signals ?? [])
 const ruleSellSignals = computed(() => signalResult.value?.sell_signals ?? [])
 const riskSellSignals = computed(() => signalResult.value?.model_portfolio?.risk_exit_signals ?? [])
+const sellNextTradingDaySymbols = computed(() => new Set([
+  ...ruleSellSignals.value.map((item) => item.symbol),
+]))
 const currentHoldings = computed<StrategyPoolHolding[]>(
-  () => signalResult.value?.model_portfolio?.holdings ?? [],
+  () => signalResult.value?.holding_scope === 'per_stock_strategy'
+    && signalResult.value.holding_snapshot_complete === true
+    ? signalResult.value.model_portfolio?.holdings ?? []
+    : [],
 )
 const signalAsOf = computed(() => signalResult.value?.as_of_date ?? '')
 
@@ -321,12 +327,61 @@ function mergeSignalResult(
         const rightScore = right[primary] ?? Number.NEGATIVE_INFINITY
         return rightScore - leftScore || left.symbol.localeCompare(right.symbol)
       })
+  const mergePositions = (
+    before: StrategyPoolHolding[] | undefined,
+    after: StrategyPoolHolding[] | undefined,
+  ) => [
+    ...(before ?? []).filter((item) => `${item.market}${item.code}` !== targetSymbol),
+    ...(after ?? []),
+  ]
+  const mergeRiskExits = (
+    before: Array<Record<string, unknown>> | undefined,
+    after: Array<Record<string, unknown>> | undefined,
+  ) => [
+    ...(before ?? []).filter(
+      (item) => `${String(item.market ?? '')}${String(item.code ?? '')}` !== targetSymbol,
+    ),
+    ...(after ?? []),
+  ]
+  const previousPortfolio = previous.model_portfolio ?? {}
+  const updatedPortfolio = update.model_portfolio ?? {}
+  const canMergeCompleteHoldings = previous.holding_scope === 'per_stock_strategy'
+    && previous.holding_snapshot_complete === true
+    && updatedPortfolio.holding_scope === 'per_stock_strategy'
+  const targetReplayAvailable = updatedPortfolio.available !== false
+  const holdings = canMergeCompleteHoldings
+    ? targetReplayAvailable
+      ? mergePositions(previousPortfolio.holdings, updatedPortfolio.holdings)
+      : previousPortfolio.holdings ?? []
+    : updatedPortfolio.holding_scope === 'per_stock_strategy'
+      ? updatedPortfolio.holdings ?? []
+      : []
+  const riskExitSignals = mergeRiskExits(
+    canMergeCompleteHoldings && targetReplayAvailable ? previousPortfolio.risk_exit_signals : [],
+    targetReplayAvailable ? updatedPortfolio.risk_exit_signals : [],
+  )
+  const previousCurrentState = previousPortfolio.current_state ?? {}
+  const updatedCurrentState = updatedPortfolio.current_state ?? {}
   return {
     ...previous,
     ...update,
+    holding_scope: 'per_stock_strategy',
+    holding_snapshot_complete: canMergeCompleteHoldings,
     buy_signals: mergeRows(previous.buy_signals, update.buy_signals),
     sell_signals: mergeRows(previous.sell_signals, update.sell_signals),
     states: mergeRows(previous.states, update.states),
+    model_portfolio: {
+      ...previousPortfolio,
+      ...updatedPortfolio,
+      available: Boolean(previousPortfolio.available || updatedPortfolio.available),
+      holdings,
+      risk_exit_signals: riskExitSignals,
+      current_state: {
+        ...previousCurrentState,
+        ...updatedCurrentState,
+        holdings,
+      },
+    },
   }
 }
 
@@ -368,6 +423,14 @@ async function refreshSignalsIfStale(jobs: StrategyPoolJobSummary[]): Promise<vo
   if (!objective.value || isBusy.value || !entries.value.some((entry) => entry.active_candidate)) return
   const current = signalResult.value
   if (!current || current.objective !== objective.value) {
+    await startSignalScan()
+    return
+  }
+
+  if (
+    current.holding_scope !== 'per_stock_strategy'
+    || current.holding_snapshot_complete !== true
+  ) {
     await startSignalScan()
     return
   }
@@ -787,6 +850,12 @@ function entryStatus(entry: StrategyPoolEntry): string {
   return row?.status ?? (entry.active_candidate ? 'flat' : 'no_strategy')
 }
 
+function holdingStatus(holding: StrategyPoolHolding): string {
+  return sellNextTradingDaySymbols.value.has(`${holding.market}${holding.code}`)
+    ? '今日触发卖出 · 下一交易日卖出'
+    : '当前持仓中'
+}
+
 function statusOrder(value: string): number {
   return { buy: 0, buy_sell: 0, sell: 1, flat: 2, no_strategy: 3 }[value] ?? 4
 }
@@ -1027,31 +1096,34 @@ onUnmounted(() => {
           <article class="signal-panel panel-card" data-testid="pool-buy-signals">
             <div class="section-heading"><div><p class="eyebrow">BUY SIGNALS</p><h2>当天触发买入 <span>{{ buySignals.length }}</span></h2></div><small>{{ signalAsOf || '信号扫描后显示日期' }}</small></div>
             <div v-if="buySignals.length" class="signal-list">
-              <div v-for="item in buySignals" :key="item.symbol" class="signal-row"><strong>{{ item.symbol }} · {{ item.name }}</strong><span>年化 {{ formatPercent(item.annual_return) }} · 夏普 {{ formatNumber(item.sharpe) }} · 胜率 {{ formatPercent(item.win_rate) }}</span></div>
+              <div v-for="item in buySignals" :key="item.symbol" class="signal-row"><strong>{{ item.symbol }} · {{ item.name }}</strong><span>买入信号触发 · 下一交易日执行 · 年化 {{ formatPercent(item.annual_return) }} · 夏普 {{ formatNumber(item.sharpe) }}</span></div>
             </div>
             <p v-else class="empty-copy">{{ signalResult ? '当前没有股票触发买入规则。' : '选择目标后点击“刷新当天信号”，扫描最新完整行情日。' }}</p>
           </article>
           <article class="signal-panel panel-card" data-testid="pool-sell-signals">
             <div class="section-heading"><div><p class="eyebrow">SELL SIGNALS</p><h2>当天触发卖出 <span>{{ ruleSellSignals.length + riskSellSignals.length }}</span></h2></div><small>{{ signalAsOf || '卖出条件和持仓风控退出' }}</small></div>
             <div v-if="ruleSellSignals.length || riskSellSignals.length" class="signal-list">
-              <div v-for="item in ruleSellSignals" :key="`rule-${item.symbol}`" class="signal-row"><strong>{{ item.symbol }} · {{ item.name }}</strong><span>卖出规则触发 · 夏普 {{ formatNumber(item.sharpe) }} · 盈亏比 {{ formatNumber(item.payoff_ratio) }}</span></div>
-              <div v-for="item in riskSellSignals" :key="`risk-${item.market}-${item.code}-${item.date}`" class="signal-row risk-signal"><strong>{{ item.market }}{{ item.code }} · {{ item.name || '' }}</strong><span>持仓风控退出：{{ item.reason || item.risk_trigger || '风控规则' }}</span></div>
+              <div v-for="item in ruleSellSignals" :key="`rule-${item.symbol}`" class="signal-row"><strong>{{ item.symbol }} · {{ item.name }}</strong><span>卖出规则触发 · 下一交易日执行 · 夏普 {{ formatNumber(item.sharpe) }} · 盈亏比 {{ formatNumber(item.payoff_ratio) }}</span></div>
+              <div v-for="item in riskSellSignals" :key="`risk-${item.market}-${item.code}-${item.date}`" class="signal-row risk-signal"><strong>{{ item.market }}{{ item.code }} · {{ item.name || '' }}</strong><span>回测日内风控已触发：{{ item.reason || item.risk_trigger || '风控规则' }} · 按风控成交规则处理</span></div>
             </div>
-            <p v-else class="empty-copy">{{ signalResult ? '当前没有卖出条件或持仓风控退出信号。' : '信号扫描会同时检查卖出规则，并复核模拟组合持仓的风控退出。' }}</p>
+            <p v-else class="empty-copy">{{ signalResult ? '当前没有卖出条件或持仓风控退出信号。' : '信号扫描会同时检查卖出规则，并复核逐股策略的风控退出。' }}</p>
           </article>
           <article class="signal-panel panel-card" data-testid="pool-current-holdings">
-            <div class="section-heading"><div><p class="eyebrow">CURRENT HOLDINGS</p><h2>今日持仓中 <span>{{ currentHoldings.length }}</span></h2></div><small>{{ objectiveLabel(objective) }}目标模拟组合 · {{ signalAsOf || '信号扫描后显示日期' }} · 最多 5 个槽位</small></div>
+            <div class="section-heading"><div><p class="eyebrow">CURRENT HOLDINGS</p><h2>今日持仓中 <span>{{ currentHoldings.length }}</span></h2></div><small>{{ objectiveLabel(objective) }}目标逐股策略 · {{ signalAsOf || '信号扫描后显示日期' }}</small></div>
             <div v-if="currentHoldings.length" class="signal-list">
               <div v-for="holding in currentHoldings" :key="`${holding.market}${holding.code}`" class="signal-row holding-row">
                 <strong>{{ holding.market }}{{ holding.code }} · {{ holding.name || '—' }}</strong>
-                <span>持仓 {{ formatNumber(holding.size, 0) }} · 成本 {{ formatNumber(holding.entry_price) }} · 最新 {{ formatNumber(holding.latest_price ?? holding.close) }} · 浮盈 {{ formatNumber(holding.unrealized_pnl) }}（{{ formatPercent(holding.unrealized_pnl_pct) }}）</span>
+                <span>{{ holdingStatus(holding) }}</span>
               </div>
             </div>
-            <p v-else-if="!signalResult" class="empty-copy">信号扫描完成后显示当前策略组合持仓。</p>
-            <p v-else-if="signalResult.model_portfolio?.available === false" class="empty-copy">{{ signalResult.model_portfolio.reason || '当前无法计算模拟组合持仓。' }}</p>
-            <p v-else class="empty-copy">当前模拟组合没有持仓。</p>
+            <p v-else-if="!signalResult" class="empty-copy">信号扫描完成后显示各股对应策略的持仓状态。</p>
+            <p v-else-if="signalResult.model_portfolio?.available === false" class="empty-copy">{{ signalResult.model_portfolio.reason || '当前无法计算逐股策略持仓。' }}</p>
+            <p v-else-if="signalResult.holding_scope !== 'per_stock_strategy'" class="empty-copy">当前历史结果没有逐股持仓快照；请刷新当天信号后查看。</p>
+            <p v-else-if="signalResult.holding_snapshot_complete !== true" class="empty-copy">{{ signalResult.model_portfolio?.failed_batches ? `逐股持仓回放有 ${signalResult.model_portfolio.failed_batches} 个批次失败，当前结果不完整。${signalResult.model_portfolio.reason || ''}` : signalResult.signal_target ? '这是单股增量结果，尚未覆盖全市场；请刷新当天信号查看完整持仓。' : '当前历史结果没有完整的逐股持仓快照；请刷新当天信号后查看。' }}</p>
+            <p v-else class="empty-copy">当前没有仍处于持仓状态的标的。</p>
           </article>
         </section>
+        <p class="pool-scale-note">买入和卖出规则信号都在最新完整行情日收盘后判定，并于下一交易日执行。因此，今日触发卖出规则的标的当天仍列在持仓中，下一交易日卖出。止损、止盈按回测中的日线风控成交规则模拟。</p>
 
         <section class="pool-summary panel-card">
           <div class="section-heading"><div><p class="eyebrow">COMMON HOLDOUT</p><h2>组合留出段验证</h2></div><span>最多 5 个持仓 · 等权 · 已计入费用</span></div>

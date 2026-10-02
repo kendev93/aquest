@@ -51,6 +51,8 @@ PoolProgressCallback = Callable[[int, int, str, Mapping[str, object] | None], No
 PoolEntryWriter = Callable[[Mapping[str, object]], None]
 MARKET_POOL_ALGORITHM_VERSION = "market-pool-v2"
 POOL_PROGRESS_EMIT_INTERVAL_SECONDS = 1.5
+STRATEGY_HOLDING_BATCH_SIZE = 100
+STRATEGY_HOLDING_VIRTUAL_CASH = 1_000_000_000_000.0
 logger = logging.getLogger(__name__)
 
 
@@ -908,80 +910,154 @@ class MarketStrategyPoolService:
             "data_fingerprint": report.data_fingerprint,
         }
 
-    def _current_portfolio_snapshot(
+    def _current_strategy_snapshot(
         self,
-        objective: PoolObjective,
-        windows: Mapping[str, tuple[date, date]],
-        latest_date: date,
+        refs: Sequence[StockRef],
+        strategies: Mapping[str, Mapping[str, object]],
+        priorities: Mapping[str, float],
         *,
+        start_date: date,
+        latest_date: date,
         progress_callback: PoolProgressCallback | None,
         progress_index: int,
         progress_total: int,
         abort_check: Callable[[], bool] | None,
     ) -> dict[str, object]:
-        if self._portfolio_service is None or self._pool_store is None:
-            return {"available": False, "reason": "组合回测服务未配置"}
-        refs = self._list_refs(None)
-        strategies, priorities = _portfolio_strategies(
-            self._pool_store.list_entries(),
-            refs,
-            objective,
-        )
-        if not strategies:
-            return {"available": False, "reason": "没有可用策略"}
-        config = _pool_portfolio_config(
-            refs,
-            strategies,
-            priorities,
-            start_date=windows["holdout"][0],
-            end_date=latest_date,
-        )
-
-        def report_progress(current: int, total: int) -> None:
-            if abort_check is not None and abort_check():
-                raise TaskCancelledError("模拟组合状态更新已取消")
-            if progress_callback is None:
-                return
-            ratio = current / total if total else 1.0
-            progress_callback(
-                progress_index + (1 if ratio >= 1.0 else 0),
-                progress_total,
-                "更新模拟组合持仓",
-                {
-                    "overall_progress": (progress_index + ratio) / max(1, progress_total),
-                    "objective": objective,
-                    "completed_symbols": current,
-                    "total_symbols": total,
-                },
-            )
-
-        try:
-            report = self._portfolio_service.run(
-                config,
-                report_progress,
-                abort_check=abort_check,
-            )
-        except TaskCancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - retain buy/sell rule scan results
+        if self._portfolio_service is None:
+            return {"available": False, "reason": "逐股持仓回放服务未配置"}
+        selected_refs = [ref for ref in refs if f"{ref.market}{ref.code}" in strategies]
+        if not selected_refs:
+            if progress_callback is not None:
+                _report(
+                    progress_callback,
+                    progress_index + 1,
+                    progress_total,
+                    "没有可用的逐股持仓策略",
+                    "",
+                    0,
+                )
             return {
-                "available": False,
-                "reason": str(exc).strip()[:500] or "模拟组合状态计算失败",
+                "available": True,
+                "holding_scope": "per_stock_strategy",
+                "as_of_date": latest_date.isoformat(),
+                "current_state": {"as_of": latest_date.isoformat(), "holdings": []},
                 "holdings": [],
                 "risk_exit_signals": [],
             }
-        as_of = str((report.current_state or {}).get("as_of") or latest_date.isoformat())
-        risk_exits = [
-            dict(trade)
-            for trade in report.trades
-            if trade.get("date") == as_of and trade.get("risk_trigger") is not None
+
+        holdings: list[dict[str, object]] = []
+        risk_exits: list[dict[str, object]] = []
+        fingerprints: list[str] = []
+        failures: list[str] = []
+        batches = [
+            selected_refs[offset : offset + STRATEGY_HOLDING_BATCH_SIZE]
+            for offset in range(0, len(selected_refs), STRATEGY_HOLDING_BATCH_SIZE)
         ]
+        for batch_index, batch_refs in enumerate(batches):
+            if abort_check is not None and abort_check():
+                raise TaskCancelledError("逐股持仓状态回放已取消")
+            batch_strategies = {
+                f"{ref.market}{ref.code}": strategies[f"{ref.market}{ref.code}"]
+                for ref in batch_refs
+            }
+            batch_priorities = {symbol: priorities.get(symbol, 1.0) for symbol in batch_strategies}
+
+            def report_progress(current: int, total: int) -> None:
+                if abort_check is not None and abort_check():
+                    raise TaskCancelledError("逐股持仓状态回放已取消")
+                if progress_callback is None:
+                    return
+                ratio = current / total if total else 1.0
+                progress_callback(
+                    progress_index + batch_index + (1 if ratio >= 1.0 else 0),
+                    progress_total,
+                    "回放各股策略持仓",
+                    {
+                        "overall_progress": (progress_index + batch_index + ratio)
+                        / max(1, progress_total),
+                        "completed_symbols": min(
+                            len(selected_refs),
+                            batch_index * STRATEGY_HOLDING_BATCH_SIZE + current,
+                        ),
+                        "total_symbols": len(selected_refs),
+                        "current_parallelism": 1,
+                        "maximum_parallelism": 1,
+                    },
+                )
+
+            config = _pool_portfolio_config(
+                batch_refs,
+                batch_strategies,
+                batch_priorities,
+                start_date=start_date,
+                end_date=latest_date,
+                max_positions=len(batch_refs),
+                initial_cash=STRATEGY_HOLDING_VIRTUAL_CASH,
+            )
+            try:
+                report = self._portfolio_service.run(
+                    config,
+                    report_progress,
+                    abort_check=abort_check,
+                )
+            except TaskCancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - isolate one group of ticker failures
+                failures.append(str(exc).strip()[:200] or type(exc).__name__)
+                continue
+
+            fingerprints.append(report.data_fingerprint)
+            current_state = report.current_state or {}
+            batch_as_of = str(current_state.get("as_of") or latest_date.isoformat())
+            raw_holdings = current_state.get("holdings")
+            if isinstance(raw_holdings, (list, tuple)):
+                for item in raw_holdings:
+                    if not isinstance(item, Mapping):
+                        continue
+                    holdings.append(
+                        {
+                            "market": str(item.get("market") or ""),
+                            "code": str(item.get("code") or ""),
+                            "name": str(item.get("name") or ""),
+                            "status": "held",
+                        }
+                    )
+            risk_exits.extend(
+                dict(trade)
+                for trade in report.trades
+                if trade.get("date") == batch_as_of and trade.get("risk_trigger") is not None
+            )
+
+        if progress_callback is not None:
+            progress_callback(
+                progress_index + len(batches),
+                progress_total,
+                "完成逐股持仓回放",
+                {
+                    "overall_progress": min(
+                        1.0,
+                        (progress_index + len(batches)) / max(1, progress_total),
+                    ),
+                    "completed_symbols": len(selected_refs),
+                    "total_symbols": len(selected_refs),
+                },
+            )
+        data_fingerprint = hashlib.sha256(
+            "|".join(sorted(fingerprints)).encode("utf-8")
+        ).hexdigest()
         return {
-            "available": True,
-            "as_of_date": as_of,
-            "current_state": dict(report.current_state) if report.current_state else None,
+            "available": bool(fingerprints),
+            "as_of_date": latest_date.isoformat(),
+            "current_state": {
+                "as_of": latest_date.isoformat(),
+                "positions_count": len(holdings),
+                "holdings": holdings,
+            },
+            "holdings": holdings,
             "risk_exit_signals": risk_exits,
-            "data_fingerprint": report.data_fingerprint,
+            "data_fingerprint": data_fingerprint,
+            "failed_batches": len(failures),
+            "reason": "；".join(failures[:3]) if failures else None,
         }
 
     def _list_refs(self, single_symbol: tuple[str, str] | None) -> list[StockRef]:
@@ -1023,8 +1099,18 @@ class MarketStrategyPoolService:
         if self._backtest_service is None or self._pool_store is None:
             raise ValueError("策略池信号扫描服务未配置")
         refs = self._list_refs(single_symbol)
+        strategy_refs = refs
         raw_entries = self._pool_store.list_entries()
         entries = {(str(item.get("market")), str(item.get("code"))): item for item in raw_entries}
+        position_strategies, position_priorities = _portfolio_strategies(
+            raw_entries,
+            strategy_refs,
+            cast(PoolObjective, objective),
+            require_validation_metric=False,
+        )
+        position_refs = [
+            ref for ref in strategy_refs if f"{ref.market}{ref.code}" in position_strategies
+        ]
         strategy_snapshot = []
         for pool_entry in raw_entries:
             active = _active_candidate(pool_entry, objective)
@@ -1044,7 +1130,12 @@ class MarketStrategyPoolService:
         sell_signals: list[dict[str, object]] = []
         states: list[dict[str, object]] = []
         failed = 0
-        total_work = len(refs) + 1
+        position_batches = (
+            math.ceil(len(position_refs) / STRATEGY_HOLDING_BATCH_SIZE)
+            if self._portfolio_service is not None
+            else 0
+        )
+        total_work = len(refs) + max(1, position_batches)
         latest_date: date | None = None
         if market_status.data_end:
             try:
@@ -1110,9 +1201,10 @@ class MarketStrategyPoolService:
         sell_signals.sort(key=lambda row: _signal_sort_key(row, objective))
         model_portfolio: dict[str, object] = {
             "available": False,
+            "holding_scope": "per_stock_strategy",
             "holdings": [],
             "risk_exit_signals": [],
-            "reason": "没有足够历史数据或可用策略",
+            "reason": "没有可用于逐股回放的策略",
         }
         if (
             latest_date is not None
@@ -1120,12 +1212,17 @@ class MarketStrategyPoolService:
             and self._pool_store is not None
         ):
             try:
-                horizon = _positive_int(payload.get("horizon"), 10, "波段预测窗口")
-                windows = common_calendar_windows(self._common_calendar(), purge_days=horizon)
-                model_portfolio = self._current_portfolio_snapshot(
-                    cast(PoolObjective, objective),
-                    windows,
-                    latest_date,
+                start_date = (
+                    date.fromisoformat(market_status.data_start[:10])
+                    if market_status.data_start
+                    else latest_date
+                )
+                model_portfolio = self._current_strategy_snapshot(
+                    position_refs,
+                    position_strategies,
+                    position_priorities,
+                    start_date=start_date,
+                    latest_date=latest_date,
                     progress_callback=progress_callback,
                     progress_index=len(refs),
                     progress_total=total_work,
@@ -1134,6 +1231,7 @@ class MarketStrategyPoolService:
             except ValueError as exc:
                 model_portfolio = {
                     "available": False,
+                    "holding_scope": "per_stock_strategy",
                     "holdings": [],
                     "risk_exit_signals": [],
                     "reason": str(exc),
@@ -1143,10 +1241,21 @@ class MarketStrategyPoolService:
             except Exception as exc:  # noqa: BLE001 - direct rule signals are still useful
                 model_portfolio = {
                     "available": False,
+                    "holding_scope": "per_stock_strategy",
                     "holdings": [],
                     "risk_exit_signals": [],
                     "reason": str(exc).strip()[:500] or "模拟组合状态计算失败",
                 }
+        elif progress_callback is not None:
+            _report(
+                progress_callback,
+                len(refs) + 1,
+                total_work,
+                "逐股持仓回放服务不可用",
+                "",
+                0,
+            )
+        model_portfolio["holding_scope"] = "per_stock_strategy"
         current_state = _mapping(model_portfolio.get("current_state"))
         current_holdings = current_state.get("holdings")
         risk_exit_signals = model_portfolio.get("risk_exit_signals")
@@ -1165,6 +1274,12 @@ class MarketStrategyPoolService:
         return {
             "mode": "signals",
             "objective": objective,
+            "holding_scope": "per_stock_strategy",
+            "holding_snapshot_complete": (
+                single_symbol is None
+                and model_portfolio.get("available") is True
+                and not model_portfolio.get("failed_batches")
+            ),
             "as_of_date": latest_date.isoformat() if latest_date else None,
             "signal_target": (
                 {"market": single_symbol[0], "code": single_symbol[1]}
@@ -1661,6 +1776,8 @@ def _portfolio_strategies(
     entries: Sequence[Mapping[str, object]],
     refs: Sequence[StockRef],
     objective: PoolObjective,
+    *,
+    require_validation_metric: bool = True,
 ) -> tuple[dict[str, dict[str, object]], dict[str, float]]:
     risk_fields = (
         "stop_loss_pct",
@@ -1690,7 +1807,7 @@ def _portfolio_strategies(
             continue
         metrics = _mapping(_mapping(candidate.get("metrics")).get("validation"))
         primary = _finite_metric(metrics.get(objective))
-        if primary is None:
+        if primary is None and require_validation_metric:
             continue
         secondary_name = "sharpe" if objective == "annual_return" else "annual_return"
         secondary = _finite_metric(metrics.get(secondary_name))
@@ -1707,7 +1824,7 @@ def _portfolio_strategies(
         symbol = ref.market + ref.code
         ranked.append(
             (
-                -primary,
+                -(primary if primary is not None else 0.0),
                 -(secondary if secondary is not None else float("-inf")),
                 abs(drawdown) if drawdown is not None else float("inf"),
                 symbol,
@@ -1728,6 +1845,8 @@ def _pool_portfolio_config(
     *,
     start_date: date,
     end_date: date,
+    max_positions: int = 5,
+    initial_cash: float = 1_000_000.0,
 ) -> PortfolioBacktestConfig:
     return PortfolioBacktestConfig(
         vipdoc_path="",
@@ -1742,10 +1861,11 @@ def _pool_portfolio_config(
         minimum_matches=None,
         ranking_value="technical.rsi14",
         rank_order="desc",
-        max_positions=5,
+        max_positions=max_positions,
         rebalance_frequency="daily",
         start_date=start_date,
         end_date=end_date,
+        initial_cash=initial_cash,
         symbol_strategies=strategies,
         symbol_priority_scores=priorities,
     )

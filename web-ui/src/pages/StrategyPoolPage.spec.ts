@@ -118,11 +118,18 @@ describe('StrategyPoolPage', () => {
       result: {
         mode: 'signals',
         objective: 'annual_return',
+        holding_scope: 'per_stock_strategy',
+        holding_snapshot_complete: true,
         as_of_date: '2026-10-01',
         buy_signals: [buySignal],
         sell_signals: [],
         states: [buySignal],
-        model_portfolio: { available: true, holdings: [], risk_exit_signals: [] },
+        model_portfolio: {
+          available: true,
+          holding_scope: 'per_stock_strategy',
+          holdings: [],
+          risk_exit_signals: [],
+        },
       },
     })
     vi.mocked(api.saveStrategyPoolOverride).mockResolvedValue(entry('600000', 0.24))
@@ -182,20 +189,19 @@ describe('StrategyPoolPage', () => {
       result: {
         mode: 'signals',
         objective: 'annual_return',
+        holding_scope: 'per_stock_strategy',
+        holding_snapshot_complete: true,
         as_of_date: '2026-10-01',
         buy_signals: [],
-        sell_signals: [],
+        sell_signals: [{ ...buySignal, status: 'sell', signal_type: 'sell' }],
         states: [{ ...buySignal, status: 'flat' }],
         model_portfolio: {
           available: true,
+          holding_scope: 'per_stock_strategy',
           holdings: [{
             market: 'SH',
             code: '600000',
             name: '浦发银行',
-            size: 100,
-            entry_price: 10,
-            latest_price: 11,
-            unrealized_pnl: 100,
           }],
           risk_exit_signals: [],
         },
@@ -207,7 +213,45 @@ describe('StrategyPoolPage', () => {
 
     expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('今日持仓中 1')
     expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('SH600000 · 浦发银行')
+    expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('今日触发卖出 · 下一交易日卖出')
+    expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).not.toContain('成本')
+    expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).not.toContain('浮盈')
     expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('空仓')
+  })
+
+  it('replaces a legacy five-slot signal snapshot before showing per-stock holdings', async () => {
+    window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValue([{
+      job_id: 'legacy-signals',
+      mode: 'signals',
+      status: 'completed',
+      objective: 'annual_return',
+      created_at: '2026-10-01T10:00:00+08:00',
+    }])
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({
+      job_id: 'legacy-signals',
+      status: 'completed',
+      result: {
+        mode: 'signals',
+        objective: 'annual_return',
+        as_of_date: '2026-10-01',
+        buy_signals: [],
+        sell_signals: [],
+        states: [],
+        model_portfolio: {
+          available: true,
+          holdings: [{ market: 'SH', code: '600000', name: '旧版组合持仓' }],
+          risk_exit_signals: [],
+        },
+      },
+    })
+
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    expect(api.createStrategyPoolJob).toHaveBeenCalledWith({ mode: 'signals', objective: 'annual_return' })
+    expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).not.toContain('旧版组合持仓')
+    expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('当前没有仍处于持仓状态的标的')
   })
 
   it('restores the latest matching signal result while a portfolio backtest is active', async () => {
@@ -229,13 +273,16 @@ describe('StrategyPoolPage', () => {
         result: {
           mode: 'signals',
           objective: 'annual_return',
+          holding_scope: 'per_stock_strategy',
+          holding_snapshot_complete: true,
           as_of_date: '2026-10-01',
           buy_signals: [],
           sell_signals: [],
           states: [{ ...buySignal, status: 'flat' }],
           model_portfolio: {
             available: true,
-            holdings: [{ market: 'SH', code: '600000', name: '浦发银行', size: 100 }],
+            holding_scope: 'per_stock_strategy',
+            holdings: [{ market: 'SH', code: '600000', name: '浦发银行' }],
             risk_exit_signals: [],
           },
         },
@@ -277,6 +324,8 @@ describe('StrategyPoolPage', () => {
       result: {
         mode: 'signals',
         objective: 'annual_return',
+        holding_scope: 'per_stock_strategy',
+        holding_snapshot_complete: true,
         as_of_date: '2026-10-01',
         buy_signals: [buySignal],
         sell_signals: [],
@@ -290,7 +339,12 @@ describe('StrategyPoolPage', () => {
           { market: 'SH', code: '600000', candidate_id: 'candidate-600000' },
           { market: 'SH', code: '600001', candidate_id: 'candidate-600001' },
         ],
-        model_portfolio: { available: true, holdings: [], risk_exit_signals: [] },
+        model_portfolio: {
+          available: true,
+          holding_scope: 'per_stock_strategy',
+          holdings: [],
+          risk_exit_signals: [],
+        },
       },
     })
 
@@ -327,6 +381,8 @@ describe('StrategyPoolPage', () => {
       result: {
         mode: 'signals',
         objective: 'annual_return',
+        holding_scope: 'per_stock_strategy',
+        holding_snapshot_complete: true,
         as_of_date: '2026-10-01',
         buy_signals: [],
         sell_signals: [],
@@ -340,7 +396,12 @@ describe('StrategyPoolPage', () => {
           { market: 'SH', code: '600000', candidate_id: 'candidate-600000' },
           { market: 'SH', code: '600001', candidate_id: 'candidate-600001' },
         ],
-        model_portfolio: { available: true, holdings: [], risk_exit_signals: [] },
+        model_portfolio: {
+          available: true,
+          holding_scope: 'per_stock_strategy',
+          holdings: [],
+          risk_exit_signals: [],
+        },
       },
     })
 
@@ -368,6 +429,8 @@ describe('StrategyPoolPage', () => {
       result: {
         mode: 'signals',
         objective: 'annual_return',
+        holding_scope: 'per_stock_strategy',
+        holding_snapshot_complete: true,
         as_of_date: '2026-10-01',
         buy_signals: [],
         sell_signals: [],
@@ -381,7 +444,12 @@ describe('StrategyPoolPage', () => {
           { market: 'SH', code: '600000', candidate_id: 'candidate-600000' },
           { market: 'SH', code: '600001', candidate_id: 'candidate-600001' },
         ],
-        model_portfolio: { available: true, holdings: [], risk_exit_signals: [] },
+        model_portfolio: {
+          available: true,
+          holding_scope: 'per_stock_strategy',
+          holdings: [],
+          risk_exit_signals: [],
+        },
       },
     })
 
@@ -408,6 +476,8 @@ describe('StrategyPoolPage', () => {
       result: {
         mode: 'signals',
         objective: 'annual_return',
+        holding_scope: 'per_stock_strategy',
+        holding_snapshot_complete: true,
         as_of_date: '2026-10-01',
         buy_signals: [],
         sell_signals: [],
@@ -421,7 +491,12 @@ describe('StrategyPoolPage', () => {
           { market: 'SH', code: '600000', candidate_id: 'candidate-600000' },
           { market: 'SH', code: '600001', candidate_id: 'old-candidate-600001' },
         ],
-        model_portfolio: { available: true, holdings: [], risk_exit_signals: [] },
+        model_portfolio: {
+          available: true,
+          holding_scope: 'per_stock_strategy',
+          holdings: [],
+          risk_exit_signals: [],
+        },
       },
     })
 

@@ -344,9 +344,12 @@ def test_signal_scan_evaluates_active_rules_on_latest_completed_bar(tmp_path) ->
     assert result["sell_signals"] == []
     assert result["states"][0]["status"] == "buy"
     assert result["model_portfolio"]["available"] is True
+    assert result["model_portfolio"]["holding_scope"] == "per_stock_strategy"
     assert result["model_portfolio"]["holdings"] == []
     assert result["model_portfolio"]["risk_exit_signals"][0]["risk_trigger"] == "stop_loss"
     assert result["signal_target"] is None
+    assert result["holding_scope"] == "per_stock_strategy"
+    assert result["holding_snapshot_complete"] is True
     assert result["market_snapshot"]["data_end"] == "2025-04-30"
     assert result["strategy_snapshot"] == [
         {"market": "SH", "code": "600000", "candidate_id": "signal-candidate"}
@@ -400,7 +403,7 @@ def test_signal_status_stays_flat_when_simulated_portfolio_holds_the_symbol(tmp_
             "risk_exit_signals": [],
         }
 
-    service._current_portfolio_snapshot = simulated_snapshot
+    service._current_strategy_snapshot = simulated_snapshot
 
     result = service.run(
         {"mode": "signals", "objective": "annual_return", "market": "SH", "code": "600000"},
@@ -412,3 +415,54 @@ def test_signal_status_stays_flat_when_simulated_portfolio_holds_the_symbol(tmp_
     assert result["model_portfolio"]["holdings"] == [
         {"market": "SH", "code": "600000", "name": "浦发银行"}
     ]
+
+
+def test_signal_scan_reports_independent_current_holding(tmp_path) -> None:
+    market_store = _store(tmp_path)
+    pool = DuckDbStrategyPoolStore(market_store)
+    pool.initialize()
+    pool.set_manual_override(
+        "SH",
+        "600000",
+        "annual_return",
+        {
+            "candidate_id": "always-held-candidate",
+            "buy_rule": {
+                "signals": [],
+                "conditions": [
+                    {"left_value": "price.close", "operator": "gt", "right_constant": 0}
+                ],
+                "required_conditions": [],
+                "combine_mode": "all",
+            },
+            "sell_rule": {
+                "signals": [],
+                "conditions": [
+                    {"left_value": "price.close", "operator": "lt", "right_constant": 0}
+                ],
+                "required_conditions": [],
+                "combine_mode": "all",
+            },
+            "metrics": {"validation": {"annual_return": 0.2}},
+            "config": {},
+        },
+    )
+    adapter = DuckDbMarketDataAdapter(market_store)
+    service = MarketStrategyPoolService(
+        store=market_store,
+        adapter=adapter,
+        individual_service=object(),
+        backtest_service=BacktestService(adapter=adapter),
+        pool_store=pool,
+        portfolio_service=PortfolioBacktestService(adapter=adapter),
+    )
+
+    result = service.run(
+        {"mode": "signals", "objective": "annual_return"},
+        job_id="single-strategy-hold-job",
+    )
+
+    holding = result["model_portfolio"]["holdings"][0]
+    assert holding["market"] == "SH"
+    assert holding["code"] == "600000"
+    assert holding["status"] == "held"

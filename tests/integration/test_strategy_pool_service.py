@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 from threading import Barrier
 from types import SimpleNamespace
 
@@ -8,7 +9,9 @@ import numpy as np
 import pandas as pd
 
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
+from selector_app.market_data.models import StockRef
 from selector_app.market_data.store import DuckDbMarketDataStore
+from selector_app.screening.rules import RuleGroup
 from selector_app.strategy_pool.resources import GiB, MemoryStatus
 from selector_app.strategy_pool.service import MarketStrategyPoolService
 from selector_app.strategy_pool.store import DuckDbStrategyPoolStore
@@ -191,6 +194,78 @@ def test_no_strategy_entry_is_not_reused_on_full_reselection() -> None:
         "market-v1",
         "config-v1",
     )
+
+
+def test_current_strategy_snapshot_includes_holds_beyond_five_portfolio_slots(tmp_path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "strategy-holdings.duckdb")
+    adapter = DuckDbMarketDataAdapter(store)
+    pool_store = DuckDbStrategyPoolStore(store)
+    pool_store.initialize()
+    refs = [
+        StockRef(
+            market="SH",
+            code=f"60000{index}",
+            path=Path(),
+            name=f"标的{index}",
+        )
+        for index in range(6)
+    ]
+    strategy_ids = [f"{ref.market}{ref.code}" for ref in refs]
+    configs = []
+
+    class HoldingPortfolio:
+        def run(self, config, progress_callback=None, abort_check=None):
+            del progress_callback, abort_check
+            configs.append(config)
+            holdings = [
+                {
+                    "market": ref.market,
+                    "code": ref.code,
+                    "name": ref.name,
+                    "size": 100,
+                    "entry_price": 10,
+                }
+                for ref in refs
+                if f"{ref.market}:{ref.code}" in config.codes
+            ]
+            return SimpleNamespace(
+                current_state={"as_of": "2026-10-01", "holdings": holdings},
+                trades=(),
+                data_fingerprint="current-holdings",
+            )
+
+    service = MarketStrategyPoolService(
+        store=store,
+        adapter=adapter,
+        individual_service=FakeIndividualResearchService(),
+        pool_store=pool_store,
+        portfolio_service=HoldingPortfolio(),
+    )
+
+    snapshot = service._current_strategy_snapshot(
+        refs,
+        {
+            symbol: {
+                "candidate_id": symbol,
+                "buy_rule": RuleGroup(signals=("technical.macd",)),
+                "sell_rule": RuleGroup(signals=("technical.rsi14",)),
+            }
+            for symbol in strategy_ids
+        },
+        {symbol: 1.0 for symbol in strategy_ids},
+        start_date=date(2020, 1, 1),
+        latest_date=date(2026, 10, 1),
+        progress_callback=None,
+        progress_index=0,
+        progress_total=1,
+        abort_check=None,
+    )
+
+    assert len(snapshot["holdings"]) == 6
+    assert set(snapshot["holdings"][0]) == {"market", "code", "name", "status"}
+    assert snapshot["holdings"][0]["status"] == "held"
+    assert configs[0].max_positions == 6
+    assert len(configs[0].codes) == 6
 
 
 def test_full_reselection_runs_research_again_for_no_strategy_entries(tmp_path) -> None:
