@@ -194,7 +194,7 @@ describe('StrategyPoolPage', () => {
         as_of_date: '2026-10-01',
         buy_signals: [],
         sell_signals: [{ ...buySignal, status: 'sell', signal_type: 'sell' }],
-        states: [{ ...buySignal, status: 'flat' }],
+        states: [{ ...buySignal, status: 'sell' }],
         model_portfolio: {
           available: true,
           holding_scope: 'per_stock_strategy',
@@ -216,7 +216,9 @@ describe('StrategyPoolPage', () => {
     expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('今日触发卖出 · 下一交易日卖出')
     expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).not.toContain('成本')
     expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).not.toContain('浮盈')
-    expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('空仓')
+    expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('持仓中')
+    expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('触发卖出')
+    expect(wrapper.get('[data-testid="pool-row-600000"]').text()).not.toContain('空仓')
   })
 
   it('replaces a legacy five-slot signal snapshot before showing per-stock holdings', async () => {
@@ -298,7 +300,8 @@ describe('StrategyPoolPage', () => {
       await flushPromises()
 
       expect(api.getStrategyPoolJob).toHaveBeenNthCalledWith(1, 'signals-complete')
-      expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('空仓')
+      expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('持仓中')
+      expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('今日无买卖信号')
       expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('浦发银行')
       expect(wrapper.get('[data-testid="pool-job-progress"]').text()).toContain('正在回测组合留出段')
     } finally {
@@ -770,6 +773,6 @@ describe('StrategyPoolPage', () => {
       code: '600000',
     })
     expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('触发卖出')
-    expect(wrapper.get('[data-testid="pool-row-600001"]').text()).toContain('空仓')
+    expect(wrapper.get('[data-testid="pool-row-600001"]').text()).toContain('今日无买卖信号')
   })
 })

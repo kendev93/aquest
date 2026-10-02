@@ -174,6 +174,9 @@ const currentHoldings = computed<StrategyPoolHolding[]>(
     ? signalResult.value.model_portfolio?.holdings ?? []
     : [],
 )
+const heldSymbols = computed(() => new Set(
+  currentHoldings.value.map((holding) => `${holding.market}${holding.code}`),
+))
 const signalAsOf = computed(() => signalResult.value?.as_of_date ?? '')
 
 const filteredEntries = computed(() => {
@@ -860,6 +863,10 @@ function entryStatus(entry: StrategyPoolEntry): string {
   return row?.status ?? (entry.active_candidate ? 'flat' : 'no_strategy')
 }
 
+function entryIsHeld(entry: StrategyPoolEntry): boolean {
+  return heldSymbols.value.has(symbol(entry))
+}
+
 function holdingStatus(holding: StrategyPoolHolding): string {
   return sellNextTradingDaySymbols.value.has(`${holding.market}${holding.code}`)
     ? '今日触发卖出 · 下一交易日卖出'
@@ -917,7 +924,7 @@ function statusLabel(value: string): string {
     buy_sell: '买卖均触发',
     sell: '触发卖出',
     held: '持仓中',
-    flat: '空仓',
+    flat: '今日无买卖信号',
     no_strategy: '无可用策略',
     error: '扫描失败',
   }[value] ?? value
@@ -1168,7 +1175,7 @@ onUnmounted(() => {
           <div class="table-scroll">
             <table class="pool-table">
               <thead><tr>
-                <th>状态</th><th>证券</th>
+                <th>持仓 / 今日信号</th><th>证券</th>
                 <th><button @click="setSort('strategy_return')">策略收益（全区间）{{ sortColumn === 'strategy_return' ? ' ↓' : '' }}</button></th>
                 <th><button @click="setSort('annual_return')">策略收益（年化）{{ sortColumn === 'annual_return' ? ' ↓' : '' }}</button></th>
                 <th><button @click="setSort('sharpe')">夏普{{ sortColumn === 'sharpe' ? ' ↓' : '' }}</button></th>
@@ -1180,7 +1187,7 @@ onUnmounted(() => {
               </tr></thead>
               <tbody>
                 <tr v-for="entry in pageEntries" :key="symbol(entry)" :data-testid="`pool-row-${entry.code}`">
-                  <td><span class="status-chip" :class="`status-${entryStatus(entry)}`">{{ statusLabel(entryStatus(entry)) }}</span></td>
+                  <td><div class="status-stack"><span v-if="entryIsHeld(entry)" class="status-chip status-held">持仓中</span><span class="status-chip" :class="`status-${entryStatus(entry)}`">{{ statusLabel(entryStatus(entry)) }}</span></div></td>
                   <td><strong>{{ entry.market }} {{ entry.code }}</strong><small>{{ entry.name }}</small></td>
                   <td>{{ formatPercent(metricValue(entry, 'strategy_return', objective)) }}</td>
                   <td>{{ formatPercent(metricValue(entry, 'annual_return', objective)) }}</td>
@@ -1318,6 +1325,7 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .benchmark-summary { display: grid; min-width: 250px; gap: 4px; color: #a8b8cc; font-size: .78rem; line-height: 1.45; white-space: nowrap; }
 .benchmark-summary b { color: #eff4fc; }
 .status-chip { display: inline-block; padding: 4px 8px; border: 1px solid #42516a; border-radius: 999px; color: #a9b5c7; font-size: .78rem; white-space: nowrap; }
+.status-stack { display: flex; flex-wrap: wrap; gap: 5px; }
 .status-buy, .status-buy_sell { border-color: #128f4c; color: #25d475; }
 .status-sell, .status-error { border-color: #974d50; color: #ff7775; }
 .status-held { border-color: #8b7b3c; color: #e0c55b; }
