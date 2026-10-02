@@ -604,7 +604,17 @@ async function finishJob(
     if (intent === 'single') {
       pendingSingle.value = result?.single_candidate ?? null
       await refreshPage(false)
-      successMessage.value = '单股研究完成。候选尚未生效，选择“应用候选”后才会替换对应目标策略。'
+      if (pendingSingle.value?.saved_to_pool) {
+        if (objective.value) {
+          await startSignalScan({
+            market: pendingSingle.value.market,
+            code: pendingSingle.value.code,
+          })
+        }
+        successMessage.value = `${pendingSingle.value.market} ${pendingSingle.value.code} 重跑完成，年化和夏普自动候选已更新；已有手工覆盖仍优先生效。`
+      } else {
+        successMessage.value = '单股研究完成，结果尚未写入策略池；可从候选卡片保存为手工覆盖。'
+      }
     } else if (intent === 'signals') {
       const requestedObjective = activeSignalObjective
       const requestedTarget = activeSignalTarget
@@ -1207,13 +1217,13 @@ onUnmounted(() => {
         </section>
 
         <section v-if="pendingSingle" class="pending-candidates panel-card" data-testid="pool-single-candidates">
-          <div class="section-heading"><div><p class="eyebrow">SINGLE RERUN</p><h2>{{ pendingSingle.market }} {{ pendingSingle.code }} · 待应用候选</h2></div><span>逐股重跑不会自动替换现有策略</span></div>
+          <div class="section-heading"><div><p class="eyebrow">SINGLE RERUN</p><h2>{{ pendingSingle.market }} {{ pendingSingle.code }} · 重跑结果</h2></div><span>{{ pendingSingle.saved_to_pool ? '年化与夏普自动候选已保存；已有手工覆盖仍优先生效' : '历史候选尚未写入自动策略，可保存为手工覆盖' }}</span></div>
           <div class="candidate-apply-grid">
             <article v-for="target in (['annual_return', 'sharpe'] as const)" :key="target">
               <strong>{{ objectiveLabel(target) }}最佳</strong>
               <p v-if="pendingSingle[target === 'annual_return' ? 'annual_candidate' : 'sharpe_candidate']">验证年化 {{ formatPercent(pendingSingle[target === 'annual_return' ? 'annual_candidate' : 'sharpe_candidate']?.metrics?.validation?.annual_return) }} · 夏普 {{ formatNumber(pendingSingle[target === 'annual_return' ? 'annual_candidate' : 'sharpe_candidate']?.metrics?.validation?.sharpe) }}</p>
               <p v-else>没有可计算的候选。</p>
-              <button v-if="pendingSingle[target === 'annual_return' ? 'annual_candidate' : 'sharpe_candidate']" class="button-secondary" :disabled="saving" @click="applySingleCandidate(target)">应用到{{ objectiveLabel(target) }}策略</button>
+              <button v-if="!pendingSingle.saved_to_pool && pendingSingle[target === 'annual_return' ? 'annual_candidate' : 'sharpe_candidate']" class="button-secondary" :disabled="saving" @click="applySingleCandidate(target)">保存为{{ objectiveLabel(target) }}手工覆盖</button>
             </article>
           </div>
         </section>

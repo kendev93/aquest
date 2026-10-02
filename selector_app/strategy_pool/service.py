@@ -775,22 +775,37 @@ class MarketStrategyPoolService:
                     progress=ticker_progress,
                     abort_check=abort_check,
                 )
-                benchmark = _record.get("benchmark")
-                if isinstance(benchmark, Mapping):
-                    checkpoint = {
-                        "market": ref.market,
-                        "code": ref.code,
-                        "name": ref.name or "",
-                        "benchmark": benchmark,
-                        "benchmark_only": True,
-                    }
-                    try:
-                        if entry_writer is not None:
-                            entry_writer(checkpoint)
-                        elif self._pool_store is not None:
-                            self._pool_store.update_benchmark(ref.market, ref.code, benchmark)
-                    except Exception:  # noqa: BLE001 - benchmark is auxiliary to the selected candidate
-                        logger.exception("单股策略池基准保存失败: %s", symbol)
+                saved_to_pool = False
+                if entry_writer is not None:
+                    entry_writer(_record)
+                    saved_to_pool = True
+                elif self._pool_store is not None:
+                    annual_candidate = _record.get("annual_candidate")
+                    sharpe_candidate = _record.get("sharpe_candidate")
+                    benchmark = _record.get("benchmark")
+                    self._pool_store.upsert_automatic(
+                        market=ref.market,
+                        code=ref.code,
+                        name=ref.name or "",
+                        annual_candidate=(
+                            dict(annual_candidate)
+                            if isinstance(annual_candidate, Mapping)
+                            else None
+                        ),
+                        sharpe_candidate=(
+                            dict(sharpe_candidate)
+                            if isinstance(sharpe_candidate, Mapping)
+                            else None
+                        ),
+                        data_fingerprint=str(_record.get("data_fingerprint") or ""),
+                        market_fingerprint=str(_record.get("market_fingerprint") or ""),
+                        config_fingerprint=str(_record.get("config_fingerprint") or ""),
+                        source_job_id=job_id,
+                        benchmark=(dict(benchmark) if isinstance(benchmark, Mapping) else None),
+                    )
+                    saved_to_pool = True
+                if single_result is not None:
+                    single_result["saved_to_pool"] = saved_to_pool
                 completed = 1
                 _report(progress_callback, completed, total_work, "保存标的候选", symbol, 0)
             except TaskCancelledError:

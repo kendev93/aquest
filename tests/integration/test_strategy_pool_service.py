@@ -180,9 +180,18 @@ def test_full_pool_research_uses_common_windows_and_saves_each_symbol_incrementa
     single = service.run(
         {"mode": "single", "market": "SH", "code": "600000", "risk_trials": 1_000},
         job_id="single-rerun",
+        entry_writer=lambda item: pool_store.persist_worker_entry(
+            item,
+            source_job_id="single-rerun",
+        ),
     )
     assert single["single_candidate"]["benchmark"]["validation"]["total_return"] > 0
-    assert pool_store.get("SH", "600000")["benchmark"]["validation"]["total_return"] > 0
+    assert single["single_candidate"]["saved_to_pool"] is True
+    refreshed = pool_store.get("SH", "600000")
+    assert refreshed["benchmark"]["validation"]["total_return"] > 0
+    assert refreshed["source_job_id"] == "single-rerun"
+    assert refreshed["automatic_candidates"]["annual_return"]["candidate_id"] == "candidate-600000"
+    assert refreshed["manual_overrides"]["annual_return"]["candidate_id"] == "kept-manual"
 
 
 def test_no_strategy_entry_is_not_reused_on_full_reselection() -> None:

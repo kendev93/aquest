@@ -695,7 +695,7 @@ describe('StrategyPoolPage', () => {
     }
   })
 
-  it('shows a single rerun candidate as pending and applies it only after an explicit click', async () => {
+  it('shows single rerun candidates after automatic update and refreshes that symbol signal', async () => {
     window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
     vi.mocked(api.createStrategyPoolJob)
       .mockResolvedValueOnce({ job_id: 'signal-1', status: 'queued' })
@@ -732,6 +732,7 @@ describe('StrategyPoolPage', () => {
           single_candidate: {
             market: 'SH',
             code: '600000',
+            saved_to_pool: true,
             benchmark: { full_period: { total_return: 0.2 } },
             annual_candidate: baseCandidate,
             sharpe_candidate: null,
@@ -757,17 +758,11 @@ describe('StrategyPoolPage', () => {
     await wrapper.get('[data-testid="pool-rerun-single"]').trigger('click')
     await flushPromises()
 
-    expect(wrapper.get('[data-testid="pool-single-candidates"]').text()).toContain('待应用候选')
-    await wrapper.get('[data-testid="pool-single-candidates"] button').trigger('click')
+    expect(wrapper.get('[data-testid="pool-single-candidates"]').text()).toContain('年化与夏普自动候选已保存')
+    expect(wrapper.find('[data-testid="pool-single-candidates"] button').exists()).toBe(false)
     await flushPromises()
 
-    expect(api.saveStrategyPoolOverride).toHaveBeenCalledWith(
-      'SH',
-      '600000',
-      'annual_return',
-      baseCandidate,
-      { full_period: { total_return: 0.2 } },
-    )
+    expect(api.saveStrategyPoolOverride).not.toHaveBeenCalled()
     expect(api.createStrategyPoolJob).toHaveBeenNthCalledWith(3, {
       mode: 'signals',
       objective: 'annual_return',
