@@ -57,12 +57,14 @@ class _TickerProgress:
         index: int,
         total: int,
         symbol: str,
+        name: str = "",
         callback: PoolProgressCallback | None,
         coordinator: _PoolProgressCoordinator | None = None,
     ) -> None:
         self._index = index
         self._total = total
         self._symbol = symbol
+        self._name = name
         self._callback = callback
         self._coordinator = coordinator
         self._phase = "研究单只股票"
@@ -77,6 +79,7 @@ class _TickerProgress:
                 fraction,
                 self._phase,
                 self._phase_label,
+                name=self._name,
             )
             return
         overall = (self._index - 1 + fraction) / max(1, self._total)
@@ -156,11 +159,14 @@ class _PoolProgressCoordinator:
         fraction: float,
         phase: str,
         phase_label: str,
+        *,
+        name: str = "",
     ) -> None:
         with self._lock:
             self._fractions[index] = fraction
             self._active_symbols[index] = {
                 "symbol": symbol,
+                "name": name,
                 "progress": fraction,
                 "phase": phase,
                 "phase_label": phase_label,
@@ -458,6 +464,7 @@ class MarketStrategyPoolService:
                         index=index,
                         total=total_work,
                         symbol=symbol,
+                        name=ref.name or "",
                         callback=None,
                         coordinator=coordinator,
                     )
@@ -616,6 +623,7 @@ class MarketStrategyPoolService:
                 index=1,
                 total=total_work,
                 symbol=symbol,
+                name=ref.name or "",
                 callback=progress_callback,
             )
             try:

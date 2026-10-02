@@ -159,10 +159,10 @@ describe('StrategyPoolPage', () => {
         cpu_load_average_1m: 6.2,
         visible_cpus: 8,
         active_symbols: [
-          { symbol: 'SH:600000', progress: 0.37, phase_label: '规则 1/6 · 风控搜索' },
-          { symbol: 'SH:600004', progress: 0.62, phase_label: '规则 2/6 · 验证' },
+          { symbol: 'SH:600000', name: '浦发银行', progress: 0.37, phase_label: '规则 1/6 · 风控搜索' },
+          { symbol: 'SH:600004', name: '白云机场', progress: 0.62, phase_label: '规则 2/6 · 验证' },
           { symbol: 'SZ:000001', progress: 0.18, phase_label: '发现买卖条件' },
-          { symbol: 'SZ:000002', progress: 0.9, phase_label: '留出评估' },
+          { symbol: 'SZ:000002', name: '万科A', progress: 0.9, phase_label: '留出评估' },
         ],
       },
     })
@@ -178,6 +178,10 @@ describe('StrategyPoolPage', () => {
       '已处理 85 / 5223 只（完成 79 · 进行中 4 · 跳过 1 · 失败 5）',
     )
     expect(wrapper.findAll('[data-testid^="pool-active-symbol-"]')).toHaveLength(4)
+    expect(
+      wrapper.get('[data-testid="pool-active-symbol-SH:600000"]').text(),
+    ).toContain('SH:600000 · 浦发银行')
+    expect(wrapper.get('[data-testid="pool-active-symbol-SZ:000001"]').text()).toContain('SZ:000001')
     expect(wrapper.get('[data-testid="pool-active-symbol-SH:600000"]').text()).toContain('37%')
     expect(wrapper.get('[data-testid="pool-active-symbol-SH:600000"] [role="progressbar"]').attributes('aria-valuenow')).toBe('37')
   })

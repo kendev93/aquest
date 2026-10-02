@@ -26,6 +26,7 @@ import type {
 const OBJECTIVE_STORAGE_KEY = 'indicator-lab.strategy-pool.objective'
 interface ActivePoolTickerProgress {
   symbol: string
+  name: string
   progress: number
   phaseLabel: string
 }
@@ -91,6 +92,7 @@ const activeTickerProgress = computed<ActivePoolTickerProgress[]>(() => {
         : 0
       return [{
         symbol: progressItem.symbol,
+        name: typeof progressItem.name === 'string' ? progressItem.name : '',
         progress,
         phaseLabel: typeof progressItem.phase_label === 'string' ? progressItem.phase_label : '研究中',
       }]
@@ -102,6 +104,7 @@ const activeTickerProgress = computed<ActivePoolTickerProgress[]>(() => {
   if (typeof symbol === 'string' && typeof fraction === 'number') {
     return [{
       symbol,
+      name: '',
       progress: Math.max(0, Math.min(1, fraction)),
       phaseLabel: typeof metadata.phase_label === 'string' ? metadata.phase_label : '研究中',
     }]
@@ -689,8 +692,8 @@ onUnmounted(() => {
             <p v-if="progressCountText" class="progress-count" data-testid="pool-progress-count">{{ progressCountText }}</p>
             <div v-if="activeTickerProgress.length" class="active-ticker-progress" data-testid="pool-active-ticker-progress" role="list" aria-label="正在研究的标的进度">
               <div v-for="item in activeTickerProgress" :key="item.symbol" class="active-ticker-progress-row" :data-testid="`pool-active-symbol-${item.symbol}`" role="listitem">
-                <div class="active-ticker-progress-heading"><strong>{{ item.symbol }}</strong><span>{{ item.phaseLabel }} · {{ Math.round(item.progress * 100) }}%</span></div>
-                <div class="active-ticker-progress-track" role="progressbar" :aria-label="`${item.symbol}研究进度`" :aria-valuenow="Math.round(item.progress * 100)" aria-valuemin="0" aria-valuemax="100"><span :style="{ width: `${Math.round(item.progress * 100)}%` }"></span></div>
+                <div class="active-ticker-progress-heading"><strong>{{ item.symbol }}<template v-if="item.name"> · {{ item.name }}</template></strong><span>{{ item.phaseLabel }} · {{ Math.round(item.progress * 100) }}%</span></div>
+                <div class="active-ticker-progress-track" role="progressbar" :aria-label="`${item.symbol}${item.name ? ` ${item.name}` : ''}研究进度`" :aria-valuenow="Math.round(item.progress * 100)" aria-valuemin="0" aria-valuemax="100"><span :style="{ width: `${Math.round(item.progress * 100)}%` }"></span></div>
               </div>
             </div>
             <div class="progress-detail"><span>{{ phaseLabel }}</span><span v-if="currentSymbol">当前：{{ currentSymbol }}</span><span v-if="parallelismText" data-testid="pool-parallelism">{{ parallelismText }}</span><button class="text-button danger-text" data-testid="pool-cancel-job" @click="cancelCurrentJob">取消任务</button></div>

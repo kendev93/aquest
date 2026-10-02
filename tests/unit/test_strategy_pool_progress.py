@@ -16,17 +16,18 @@ def test_pool_progress_coalesces_updates_to_reduce_job_store_writes(monkeypatch)
     )
     monkeypatch.setattr("selector_app.strategy_pool.service.time.monotonic", lambda: timestamp)
 
-    coordinator.ticker_progress(1, "SH:600000", 0.2, "search", "first")
+    coordinator.ticker_progress(1, "SH:600000", 0.2, "search", "first", name="浦发银行")
     timestamp = 11.0
-    coordinator.ticker_progress(1, "SH:600000", 0.4, "search", "second")
+    coordinator.ticker_progress(1, "SH:600000", 0.4, "search", "second", name="浦发银行")
     timestamp = 11.6
-    coordinator.ticker_progress(1, "SH:600000", 0.6, "search", "third")
+    coordinator.ticker_progress(1, "SH:600000", 0.6, "search", "third", name="浦发银行")
 
     assert len(emitted) == 2
     assert emitted[-1][3]["phase_label"] == "third"
     assert emitted[-1][3]["active_symbols"] == [
         {
             "symbol": "SH:600000",
+            "name": "浦发银行",
             "progress": 0.6,
             "phase": "search",
             "phase_label": "third",
