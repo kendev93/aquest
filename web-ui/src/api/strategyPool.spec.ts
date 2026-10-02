@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
+  cancelStrategyPoolJob,
+  clearStrategyPoolOverride,
   createStrategyPoolJob,
   fetchStrategyPoolEntries,
+  fetchStrategyPoolJobs,
   getStrategyPoolJob,
   saveStrategyPoolOverride,
 } from './strategyPool'
@@ -60,5 +63,48 @@ describe('strategy pool API', () => {
     expect(job.result?.mode).toBe('single')
     expect(fetch.mock.calls[1]?.[0]).toBe('/api/v1/strategy-pool/entries/SH/600000/overrides/annual_return')
     expect(JSON.parse(String(fetch.mock.calls[1]?.[1]?.body))).toEqual({ candidate, benchmark })
+  })
+
+  it('lists durable pool job summaries', async () => {
+    const items = [{ job_id: 'job-1', mode: 'single', status: 'completed' }]
+    const fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: { items } }),
+    })
+    vi.stubGlobal('fetch', fetch)
+
+    const jobs = await fetchStrategyPoolJobs()
+
+    expect(fetch.mock.calls[0]?.[0]).toBe('/api/v1/strategy-pool/jobs')
+    expect(jobs).toEqual(items)
+  })
+
+  it('cancels a pool job by its encoded task id', async () => {
+    const fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: { cancelled: true } }),
+    })
+    vi.stubGlobal('fetch', fetch)
+
+    const result = await cancelStrategyPoolJob('job/1')
+
+    expect(fetch.mock.calls[0]?.[0]).toBe('/api/v1/strategy-pool/jobs/job%2F1/cancel')
+    expect(fetch.mock.calls[0]?.[1]?.method).toBe('POST')
+    expect(result.cancelled).toBe(true)
+  })
+
+  it('clears an override with DELETE', async () => {
+    const fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ data: {} }),
+    })
+    vi.stubGlobal('fetch', fetch)
+
+    await clearStrategyPoolOverride('SH', '600000', 'sharpe')
+
+    expect(fetch.mock.calls[0]?.[0]).toBe(
+      '/api/v1/strategy-pool/entries/SH/600000/overrides/sharpe',
+    )
+    expect(fetch.mock.calls[0]?.[1]?.method).toBe('DELETE')
   })
 })

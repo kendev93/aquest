@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 
 import PageGuide from '../components/PageGuide.vue'
+import { fetchStoreStatus } from '../api/marketData'
 import {
   cancelStrategyPoolJob,
   clearStrategyPoolOverride,
@@ -13,6 +14,7 @@ import {
 } from '../api/strategyPool'
 import { FormulaScreenApiError } from '../api/formulaScreen'
 import type {
+  DataStoreStatus,
   StrategyPoolCandidate,
   StrategyPoolBenchmark,
   StrategyPoolEntry,
@@ -20,9 +22,11 @@ import type {
   StrategyPoolJobResult,
   StrategyPoolJobState,
   StrategyPoolJobSummary,
+  StrategyPoolMarketSnapshot,
   StrategyPoolMode,
   StrategyPoolObjective,
   StrategyPoolSignal,
+  StrategyPoolStrategySnapshotItem,
 } from '../types'
 
 const OBJECTIVE_STORAGE_KEY = 'indicator-lab.strategy-pool.objective'
@@ -37,6 +41,8 @@ const objective = ref<StrategyPoolObjective | null>(null)
 const entries = ref<StrategyPoolEntry[]>([])
 const history = ref<StrategyPoolJobSummary[]>([])
 const signalResult = ref<StrategyPoolJobResult | null>(null)
+const marketStatus = ref<DataStoreStatus | null>(null)
+const signalSnapshotCreatedAt = ref<number | string | null>(null)
 const holdoutPortfolios = reactive<Record<StrategyPoolObjective, Record<string, unknown> | null>>({
   annual_return: null,
   sharpe: null,
@@ -56,7 +62,7 @@ const market = ref<'SH' | 'SZ'>('SH')
 const code = ref('')
 const searchQuery = ref('')
 const sortColumn = ref<
-  'status' | 'annual_return' | 'sharpe' | 'win_rate' | 'payoff_ratio' | 'max_drawdown' | 'validation_excess'
+  'status' | 'strategy_return' | 'annual_return' | 'sharpe' | 'win_rate' | 'payoff_ratio' | 'max_drawdown' | 'validation_excess'
 >('status')
 const page = ref(1)
 const pageSize = ref(50)
@@ -66,6 +72,7 @@ const manualDraft = reactive({ buyRule: '', sellRule: '', risk: '' })
 let pollTimer: number | null = null
 let activePollToken = 0
 let activeSignalObjective: StrategyPoolObjective | null = null
+let activeSignalTarget: { market: 'SH' | 'SZ'; code: string } | null = null
 
 const isBusy = computed(() => Boolean(activeJobId.value))
 const progress = computed(() => {
@@ -206,6 +213,7 @@ function selectObjective(value: StrategyPoolObjective): void {
   pollWarning.value = ''
   successMessage.value = ''
   signalResult.value = null
+  signalSnapshotCreatedAt.value = null
   void refreshPage(true)
 }
 
@@ -214,19 +222,21 @@ async function refreshPage(refreshSignals: boolean): Promise<void> {
   loading.value = true
   errorMessage.value = ''
   try {
-    const [nextEntries, nextHistory] = await Promise.all([
+    const [nextEntries, nextHistory, nextMarketStatus] = await Promise.all([
       fetchStrategyPoolEntries(objective.value),
       fetchStrategyPoolJobs(),
+      fetchStoreStatus().catch(() => null),
     ])
     entries.value = nextEntries
+    marketStatus.value = nextMarketStatus
     page.value = Math.min(page.value, Math.max(1, Math.ceil(nextEntries.length / pageSize.value)))
     history.value = nextHistory
     await Promise.all([
       restoreHoldoutSummary(nextHistory),
       restoreLatestSignalResult(nextHistory),
     ])
-    if (refreshSignals && nextEntries.some((item) => item.active_candidate)) {
-      await startSignalScan()
+    if (refreshSignals) {
+      await refreshSignalsIfStale(nextHistory)
     }
   } catch (error) {
     errorMessage.value = apiMessage(error)
@@ -251,27 +261,148 @@ async function restoreHoldoutSummary(jobs: StrategyPoolJobSummary[]): Promise<vo
 }
 
 async function restoreLatestSignalResult(jobs: StrategyPoolJobSummary[]): Promise<void> {
-  const matchingJobs = jobs.filter((job) =>
+  const signalJobs = jobs.filter((job) =>
     job.mode === 'signals'
     && job.status === 'completed'
     && (!job.objective || job.objective === objective.value),
   )
-  for (const job of matchingJobs) {
-    try {
-      const state = await getStrategyPoolJob(job.job_id)
-      const result = state.result
-      if (
-        state.status === 'completed'
-        && result?.mode === 'signals'
-        && result.objective === objective.value
-      ) {
-        signalResult.value = result
-        return
-      }
-    } catch {
-      // Older task results may have been pruned; continue to the next matching snapshot.
-    }
+  const baselineIndex = signalJobs.findIndex((job) => !job.market || !job.code)
+  if (baselineIndex < 0) return
+
+  const baseline = await readCompletedSignalResult(signalJobs[baselineIndex]!)
+  if (!baseline) return
+  let restored = baseline
+  let restoredAt = signalJobs[baselineIndex]?.created_at ?? null
+  const incrementalJobs = signalJobs
+    .slice(0, baselineIndex)
+    .filter((job) => job.market && job.code)
+    .reverse()
+  for (const job of incrementalJobs) {
+    const update = await readCompletedSignalResult(job)
+    if (!update) continue
+    restored = mergeSignalResult(restored, update, {
+      market: job.market as 'SH' | 'SZ',
+      code: job.code ?? '',
+    })
+    restoredAt = job.created_at ?? restoredAt
   }
+  signalResult.value = restored
+  signalSnapshotCreatedAt.value = restoredAt
+}
+
+async function readCompletedSignalResult(
+  job: StrategyPoolJobSummary,
+): Promise<StrategyPoolJobResult | null> {
+  try {
+    const state = await getStrategyPoolJob(job.job_id)
+    const result = state.result
+    return state.status === 'completed'
+      && result?.mode === 'signals'
+      && result.objective === objective.value
+      ? result
+      : null
+  } catch {
+    // Older task results may have been pruned.
+    return null
+  }
+}
+
+function mergeSignalResult(
+  previous: StrategyPoolJobResult,
+  update: StrategyPoolJobResult,
+  target: { market: 'SH' | 'SZ'; code: string },
+): StrategyPoolJobResult {
+  const targetSymbol = `${target.market}${target.code}`
+  const mergeRows = (before: StrategyPoolSignal[] | undefined, after: StrategyPoolSignal[] | undefined) =>
+    [...(before ?? []).filter((item) => item.symbol !== targetSymbol), ...(after ?? [])]
+      .sort((left, right) => {
+        const primary = objective.value ?? 'annual_return'
+        const leftScore = left[primary] ?? Number.NEGATIVE_INFINITY
+        const rightScore = right[primary] ?? Number.NEGATIVE_INFINITY
+        return rightScore - leftScore || left.symbol.localeCompare(right.symbol)
+      })
+  return {
+    ...previous,
+    ...update,
+    buy_signals: mergeRows(previous.buy_signals, update.buy_signals),
+    sell_signals: mergeRows(previous.sell_signals, update.sell_signals),
+    states: mergeRows(previous.states, update.states),
+  }
+}
+
+function currentStrategySnapshot(): StrategyPoolStrategySnapshotItem[] {
+  return entries.value.flatMap((entry) => {
+    const candidate = entry.active_candidate
+    if (!candidate) return []
+    return [{
+      market: entry.market,
+      code: entry.code,
+      candidate_id: candidate.candidate_id || candidate.candidate_hash || '',
+    }]
+  }).sort((left, right) => `${left.market}${left.code}`.localeCompare(`${right.market}${right.code}`))
+}
+
+function sameStrategySnapshot(
+  left: StrategyPoolStrategySnapshotItem[] | undefined,
+  right: StrategyPoolStrategySnapshotItem[],
+): boolean {
+  if (!left) return false
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
+function sameMarketSnapshot(snapshot: StrategyPoolMarketSnapshot): boolean {
+  const current = marketStatus.value
+  return Boolean(current)
+    && snapshot.data_end === current?.data_end
+    && snapshot.bar_count === current?.bar_count
+    && snapshot.last_online_sync_at === current?.last_online_sync_at
+}
+
+function timestampMillis(value: number | string | null | undefined): number {
+  if (typeof value === 'number') return value < 1_000_000_000_000 ? value * 1_000 : value
+  if (typeof value === 'string') return Date.parse(value) || 0
+  return 0
+}
+
+async function refreshSignalsIfStale(jobs: StrategyPoolJobSummary[]): Promise<void> {
+  if (!objective.value || isBusy.value || !entries.value.some((entry) => entry.active_candidate)) return
+  const current = signalResult.value
+  if (!current || current.objective !== objective.value) {
+    await startSignalScan()
+    return
+  }
+
+  const latestFull = jobs.find((job) => job.mode === 'full' && job.status === 'completed')
+  if (latestFull && timestampMillis(latestFull.created_at) > timestampMillis(signalSnapshotCreatedAt.value)) {
+    await startSignalScan()
+    return
+  }
+
+  if (!current.market_snapshot || !current.strategy_snapshot) {
+    await startSignalScan()
+    return
+  }
+  if (marketStatus.value && !sameMarketSnapshot(current.market_snapshot)) {
+    await startSignalScan()
+    return
+  }
+
+  const expectedStrategies = currentStrategySnapshot()
+  if (sameStrategySnapshot(current.strategy_snapshot, expectedStrategies)) return
+  const oldVersions = new Map(
+    current.strategy_snapshot.map((item) => [`${item.market}${item.code}`, item.candidate_id]),
+  )
+  const newVersions = new Map(
+    expectedStrategies.map((item) => [`${item.market}${item.code}`, item.candidate_id]),
+  )
+  const changedSymbols = new Set([...oldVersions.keys(), ...newVersions.keys()])
+  const changed = [...changedSymbols].filter((key) => oldVersions.get(key) !== newVersions.get(key))
+  if (changed.length !== 1) {
+    await startSignalScan()
+    return
+  }
+  const entry = entries.value.find((item) => symbol(item) === changed[0])
+  if (entry) await startSignalScan({ market: entry.market, code: entry.code })
 }
 
 async function startFullResearch(): Promise<void> {
@@ -329,9 +460,9 @@ function rerunEntryTitle(entry: StrategyPoolEntry): string {
   return `重跑 ${entry.market} ${entry.code}`
 }
 
-async function startSignalScan(): Promise<void> {
+async function startSignalScan(target?: { market: 'SH' | 'SZ'; code: string }): Promise<void> {
   if (!objective.value || isBusy.value) return
-  await startTask({ mode: 'signals', objective: objective.value }, 'signals')
+  await startTask({ mode: 'signals', objective: objective.value, ...target }, 'signals')
 }
 
 async function startPortfolioBacktest(target: StrategyPoolObjective): Promise<void> {
@@ -348,6 +479,9 @@ async function startTask(
   successMessage.value = ''
   try {
     activeSignalObjective = payload.mode === 'signals' ? payload.objective ?? null : null
+    activeSignalTarget = payload.mode === 'signals' && payload.market && payload.code
+      ? { market: payload.market, code: payload.code }
+      : null
     const created = await createStrategyPoolJob(payload)
     activeJobId.value = created.job_id
     activeIntent.value = intent
@@ -410,13 +544,19 @@ async function finishJob(
       successMessage.value = '单股研究完成。候选尚未生效，选择“应用候选”后才会替换对应目标策略。'
     } else if (intent === 'signals') {
       const requestedObjective = activeSignalObjective
+      const requestedTarget = activeSignalTarget
       activeSignalObjective = null
+      activeSignalTarget = null
       if (result?.objective === objective.value) {
-        signalResult.value = result
+        const previous = signalResult.value
+        signalResult.value = requestedTarget && previous?.objective === result.objective
+          ? mergeSignalResult(previous, result, requestedTarget)
+          : result
         page.value = 1
       }
       successMessage.value = `当天信号已按 ${objectiveLabel(objective.value)} 目标更新。`
       await loadHistory()
+      signalSnapshotCreatedAt.value = history.value.find((job) => job.job_id === state.job_id)?.created_at ?? null
       if (await activateQueuedSingleRerun()) return
       if (
         requestedObjective !== objective.value
@@ -428,7 +568,8 @@ async function finishJob(
     } else if (intent === 'portfolio' && result?.portfolio && objective.value) {
       holdoutPortfolios[objective.value] = result.portfolio
       successMessage.value = '组合留出段回测完成。'
-      await loadHistory()
+      await refreshPage(false)
+      await refreshSignalsIfStale(history.value)
     }
     return
   }
@@ -436,6 +577,10 @@ async function finishJob(
     successMessage.value = '任务已取消；已经完成的逐股策略检查点已保存。再次全量重选时会复用未变化的标的。'
   } else if (state.status === 'failed') {
     errorMessage.value = state.error || '策略池任务失败；已完成的逐股检查点仍可复用。'
+  }
+  if (intent === 'signals') {
+    activeSignalObjective = null
+    activeSignalTarget = null
   }
   await loadHistory()
   if (intent === 'signals') await activateQueuedSingleRerun()
@@ -483,7 +628,16 @@ async function restoreTaskResult(jobId: string): Promise<void> {
       return
     }
     if (result.mode === 'single') pendingSingle.value = result.single_candidate ?? null
-    if (result.mode === 'signals' && result.objective === objective.value) signalResult.value = result
+    if (result.mode === 'signals' && result.objective === objective.value) {
+      const summary = history.value.find((job) => job.job_id === jobId)
+      const target = summary?.market && summary.code
+        ? { market: summary.market as 'SH' | 'SZ', code: summary.code }
+        : null
+      signalResult.value = target && signalResult.value?.objective === result.objective
+        ? mergeSignalResult(signalResult.value, result, target)
+        : result
+      signalSnapshotCreatedAt.value = summary?.created_at ?? null
+    }
     if (result.mode === 'full' && result.holdout_portfolios) {
       holdoutPortfolios.annual_return = result.holdout_portfolios.annual_return ?? null
       holdoutPortfolios.sharpe = result.holdout_portfolios.sharpe ?? null
@@ -528,6 +682,9 @@ async function saveOverride(
     await saveStrategyPoolOverride(selectedMarket, selectedCode, target, candidate, benchmark)
     successMessage.value = `${selectedMarket} ${selectedCode} 的${objectiveLabel(target)}策略已保存为手工覆盖。`
     await refreshPage(false)
+    if (target === objective.value) {
+      await startSignalScan({ market: selectedMarket as 'SH' | 'SZ', code: selectedCode })
+    }
   } catch (error) {
     errorMessage.value = apiMessage(error)
   } finally {
@@ -542,6 +699,10 @@ async function saveManualEdit(): Promise<void> {
     const sellRule = parseObject(manualDraft.sellRule, '卖出规则')
     const risk = parseObject(manualDraft.risk, '退出风控')
     const config = { ...(activeEditorCandidate.value?.config ?? {}) }
+    const metrics = activeEditorCandidate.value?.metrics
+      ? { ...activeEditorCandidate.value.metrics }
+      : undefined
+    if (metrics) delete metrics.full_period
     for (const key of [
       'stop_loss_pct', 'stop_loss_mode', 'stop_loss_atr_multiplier', 'stop_loss_cooldown_days',
       'take_profit_pct', 'take_profit_mode', 'take_profit_atr_multiplier', 'take_profit_cooldown_days',
@@ -553,7 +714,7 @@ async function saveManualEdit(): Promise<void> {
       buy_rule: buyRule,
       sell_rule: sellRule,
       config: { ...config, ...risk, buy_rule: buyRule, sell_rule: sellRule },
-      metrics: activeEditorCandidate.value?.metrics,
+      metrics,
       quality: {
         badges: [
           ...(activeEditorCandidate.value?.quality?.badges ?? []),
@@ -577,6 +738,9 @@ async function resetManualOverride(): Promise<void> {
     await clearStrategyPoolOverride(editorEntry.value.market, editorEntry.value.code, editorObjective.value)
     successMessage.value = '已恢复该目标的自动候选。'
     await refreshPage(false)
+    if (editorObjective.value === objective.value) {
+      await startSignalScan({ market: editorEntry.value.market, code: editorEntry.value.code })
+    }
   } catch (error) {
     errorMessage.value = apiMessage(error)
   } finally {
@@ -629,7 +793,7 @@ function statusOrder(value: string): number {
 
 function metricValue(
   entry: StrategyPoolEntry,
-  key: 'annual_return' | 'sharpe' | 'win_rate' | 'payoff_ratio' | 'max_drawdown' | 'validation_excess',
+  key: 'strategy_return' | 'annual_return' | 'sharpe' | 'win_rate' | 'payoff_ratio' | 'max_drawdown' | 'validation_excess',
   target: StrategyPoolObjective | null,
 ): number {
   if (key === 'validation_excess') {
@@ -637,6 +801,10 @@ function metricValue(
   }
   const candidate = entry.active_candidate
     ?? (target ? entry.automatic_candidates[target] : null)
+  if (key === 'strategy_return') {
+    const value = candidate?.metrics?.full_period?.total_return
+    return typeof value === 'number' && Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY
+  }
   const value = candidate?.metrics?.validation?.[key]
   return typeof value === 'number' && Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY
 }
@@ -734,9 +902,13 @@ async function initialize(): Promise<void> {
     if (running) {
       activeJobId.value = running.job_id
       activeIntent.value = running.mode
+      activeSignalObjective = running.mode === 'signals' ? objective.value : null
+      activeSignalTarget = running.mode === 'signals' && running.market && running.code
+        ? { market: running.market as 'SH' | 'SZ', code: running.code }
+        : null
       void pollJob(running.job_id, running.mode)
     } else if (entries.value.some((entry) => entry.active_candidate)) {
-      await startSignalScan()
+      await refreshSignalsIfStale(history.value)
     }
   }
 }
@@ -822,7 +994,7 @@ onUnmounted(() => {
               </select>
             </label>
             <button class="button-primary" data-testid="pool-start-full" :disabled="isBusy" @click="startFullResearch">全市场重新选策</button>
-            <button class="button-secondary" data-testid="pool-refresh-signals" :disabled="isBusy || !entries.some((item) => item.active_candidate)" @click="startSignalScan">刷新当天信号</button>
+            <button class="button-secondary" data-testid="pool-refresh-signals" :disabled="isBusy || !entries.some((item) => item.active_candidate)" @click="startSignalScan()">刷新当天信号</button>
             <label class="ticker-input">市场
               <select v-model="market" :disabled="isBusy"><option value="SH">SH</option><option value="SZ">SZ</option></select>
             </label>
@@ -904,7 +1076,7 @@ onUnmounted(() => {
 
         <section class="pool-table-section panel-card">
           <div class="section-heading"><div><p class="eyebrow">DAILY STATUS</p><h2>全市场标的状态 <span>{{ entries.length.toLocaleString() }}</span></h2></div><span>{{ loading ? '正在读取策略池…' : `按${objectiveLabel(objective)}策略决策` }}</span></div>
-          <p class="pool-scale-note">全段基准显示个股买入持有涨跌；验证和留出分别用同区间基准计算总收益超额。旧记录的基准会在下次全市场重选时补算。</p>
+          <p class="pool-scale-note">策略收益是该策略在完整历史区间实际回放的累计收益；旧候选会在下次全市场重选时补算。全段基准显示个股买入持有涨跌；验证和留出分别用同区间基准计算总收益超额。</p>
           <div class="pool-search-row">
             <label class="pool-search">搜索标的
               <input v-model="searchQuery" type="search" placeholder="输入证券代码或中文名称" data-testid="pool-entry-search" @input="page = 1">
@@ -915,7 +1087,8 @@ onUnmounted(() => {
             <table class="pool-table">
               <thead><tr>
                 <th>状态</th><th>证券</th>
-                <th><button @click="setSort('annual_return')">年化收益{{ sortColumn === 'annual_return' ? ' ↓' : '' }}</button></th>
+                <th><button @click="setSort('strategy_return')">策略收益（全区间）{{ sortColumn === 'strategy_return' ? ' ↓' : '' }}</button></th>
+                <th><button @click="setSort('annual_return')">策略收益（年化）{{ sortColumn === 'annual_return' ? ' ↓' : '' }}</button></th>
                 <th><button @click="setSort('sharpe')">夏普{{ sortColumn === 'sharpe' ? ' ↓' : '' }}</button></th>
                 <th><button @click="setSort('win_rate')">胜率{{ sortColumn === 'win_rate' ? ' ↓' : '' }}</button></th>
                 <th><button @click="setSort('payoff_ratio')">盈亏比{{ sortColumn === 'payoff_ratio' ? ' ↓' : '' }}</button></th>
@@ -927,6 +1100,7 @@ onUnmounted(() => {
                 <tr v-for="entry in pageEntries" :key="symbol(entry)" :data-testid="`pool-row-${entry.code}`">
                   <td><span class="status-chip" :class="`status-${entryStatus(entry)}`">{{ statusLabel(entryStatus(entry)) }}</span></td>
                   <td><strong>{{ entry.market }} {{ entry.code }}</strong><small>{{ entry.name }}</small></td>
+                  <td>{{ formatPercent(metricValue(entry, 'strategy_return', objective)) }}</td>
                   <td>{{ formatPercent(metricValue(entry, 'annual_return', objective)) }}</td>
                   <td>{{ formatNumber(metricValue(entry, 'sharpe', objective)) }}</td>
                   <td>{{ formatPercent(metricValue(entry, 'win_rate', objective)) }}</td>
@@ -943,7 +1117,7 @@ onUnmounted(() => {
                   <td><span v-if="entry.active_candidate?.quality?.badges?.length" class="badge-row"><i v-for="badge in entry.active_candidate.quality.badges" :key="badge">{{ badge }}</i></span><span v-else-if="entry.status === 'no_strategy'">无可计算的策略绩效</span><span v-else-if="entry.last_error" class="danger-text">{{ entry.last_error }}</span><span v-else>—</span><small v-if="entry.active_candidate?.metrics">交易数：验证 {{ entry.active_candidate.metrics.validation?.closed_trades ?? '—' }} · 留出 {{ entry.active_candidate.metrics.holdout?.closed_trades ?? '—' }} 笔</small><small v-if="entry.active_source === 'manual'">手工覆盖 · {{ objectiveLabel(objective) }}</small></td>
                   <td><button class="text-button" @click="openEditor(entry)">编辑</button><button :data-testid="`pool-rerun-entry-${entry.code}`" class="text-button" :disabled="rerunEntryDisabled()" :title="rerunEntryTitle(entry)" @click="void rerunEntry(entry)">{{ queuedSingleSymbol === symbol(entry) ? '排队中' : '重跑' }}</button></td>
                 </tr>
-                <tr v-if="!filteredEntries.length"><td colspan="10" class="empty-copy" data-testid="pool-entry-empty">{{ searchQuery.trim() && entries.length ? '没有符合代码或名称的标的。' : loading ? '读取中…' : '策略池为空，开始全市场研究后会逐只写入候选。' }}</td></tr>
+                <tr v-if="!filteredEntries.length"><td colspan="11" class="empty-copy" data-testid="pool-entry-empty">{{ searchQuery.trim() && entries.length ? '没有符合代码或名称的标的。' : loading ? '读取中…' : '策略池为空，开始全市场研究后会逐只写入候选。' }}</td></tr>
               </tbody>
             </table>
           </div>

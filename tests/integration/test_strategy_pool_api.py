@@ -125,7 +125,12 @@ def test_strategy_pool_job_history_includes_signal_objective_for_result_restore(
     with TestClient(app) as client:
         created = client.post(
             "/api/v1/strategy-pool/jobs",
-            json={"mode": "signals", "objective": "annual_return"},
+            json={
+                "mode": "signals",
+                "objective": "annual_return",
+                "market": "SH",
+                "code": "600000",
+            },
         )
         assert created.status_code == 202, created.json()
         job_id = created.json()["data"]["job_id"]
@@ -135,6 +140,8 @@ def test_strategy_pool_job_history_includes_signal_objective_for_result_restore(
     summary = next(item for item in history.json()["data"]["items"] if item["job_id"] == job_id)
     assert summary["mode"] == "signals"
     assert summary["objective"] == "annual_return"
+    assert summary["market"] == "SH"
+    assert summary["code"] == "600000"
 
 
 def test_single_rerun_remains_blocked_during_full_market_research(tmp_path) -> None:
@@ -339,6 +346,11 @@ def test_signal_scan_evaluates_active_rules_on_latest_completed_bar(tmp_path) ->
     assert result["model_portfolio"]["available"] is True
     assert result["model_portfolio"]["holdings"] == []
     assert result["model_portfolio"]["risk_exit_signals"][0]["risk_trigger"] == "stop_loss"
+    assert result["signal_target"] is None
+    assert result["market_snapshot"]["data_end"] == "2025-04-30"
+    assert result["strategy_snapshot"] == [
+        {"market": "SH", "code": "600000", "candidate_id": "signal-candidate"}
+    ]
 
 
 def test_signal_status_stays_flat_when_simulated_portfolio_holds_the_symbol(tmp_path) -> None:
@@ -391,11 +403,12 @@ def test_signal_status_stays_flat_when_simulated_portfolio_holds_the_symbol(tmp_
     service._current_portfolio_snapshot = simulated_snapshot
 
     result = service.run(
-        {"mode": "signals", "objective": "annual_return"},
+        {"mode": "signals", "objective": "annual_return", "market": "SH", "code": "600000"},
         job_id="flat-signal-held-job",
     )
 
     assert result["states"][0]["status"] == "flat"
+    assert result["signal_target"] == {"market": "SH", "code": "600000"}
     assert result["model_portfolio"]["holdings"] == [
         {"market": "SH", "code": "600000", "name": "浦发银行"}
     ]

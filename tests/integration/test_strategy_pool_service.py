@@ -17,6 +17,7 @@ from selector_app.strategy_pool.store import DuckDbStrategyPoolStore
 class FakeIndividualResearchService:
     def __init__(self) -> None:
         self.configs = []
+        self.full_period_ranges = []
 
     def run(self, config, progress_callback=None, abort_check=None):
         self.configs.append(config)
@@ -43,6 +44,11 @@ class FakeIndividualResearchService:
             "results_by_return": [candidate],
             "results_by_sharpe": [candidate],
         }
+
+    def full_period_metrics(self, candidate, start_date, end_date):
+        del candidate
+        self.full_period_ranges.append((start_date, end_date))
+        return {"total_return": 0.31, "annual_return": 0.11}
 
 
 class FakePortfolioBacktestService:
@@ -130,6 +136,10 @@ def test_full_pool_research_uses_common_windows_and_saves_each_symbol_incrementa
     assert individual.configs[1].split_windows["train"][0] == date(2020, 1, 1)
     assert first["manual_overrides"]["annual_return"]["candidate_id"] == "kept-manual"
     assert first["automatic_candidates"]["annual_return"]["candidate_id"] == "candidate-600000"
+    assert (
+        first["automatic_candidates"]["annual_return"]["metrics"]["full_period"]["total_return"]
+        == 0.31
+    )
     assert first["automatic_candidates"]["sharpe"]["candidate_ref"] == "annual_return"
     assert first["benchmark"]["validation"]["total_return"] > 0
     assert first["benchmark"]["holdout"]["total_return"] > 0
@@ -172,6 +182,121 @@ def test_full_pool_research_uses_common_windows_and_saves_each_symbol_incrementa
     assert pool_store.get("SH", "600000")["benchmark"]["validation"]["total_return"] > 0
 
 
+def test_no_strategy_entry_is_not_reused_on_full_reselection() -> None:
+    prior = ("market-v1", "config-v1", "no_strategy", False)
+
+    assert not MarketStrategyPoolService._can_reuse(prior, "market-v1", "config-v1")
+    assert MarketStrategyPoolService._can_reuse(
+        ("market-v1", "config-v1", "ready", True),
+        "market-v1",
+        "config-v1",
+    )
+
+
+def test_full_reselection_runs_research_again_for_no_strategy_entries(tmp_path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "no-strategy.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars("2020-01-01", 60))
+    adapter = DuckDbMarketDataAdapter(store)
+    pool_store = DuckDbStrategyPoolStore(store)
+    pool_store.initialize()
+
+    class NoStrategyService:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def run(self, config, progress_callback=None, abort_check=None):
+            del config, progress_callback, abort_check
+            self.calls += 1
+            return {
+                "data_fingerprint": "same-bars",
+                "results_by_return": [],
+                "results_by_sharpe": [],
+            }
+
+    individual = NoStrategyService()
+    service = MarketStrategyPoolService(
+        store=store,
+        adapter=adapter,
+        individual_service=individual,
+        pool_store=pool_store,
+        portfolio_service=FakePortfolioBacktestService(),
+    )
+
+    def persist(entry):
+        pool_store.persist_worker_entry(entry, source_job_id=str(entry["source_job_id"]))
+
+    first = service.run(
+        {"mode": "full", "risk_trials": 1_000, "horizon": 5},
+        job_id="no-strategy-first",
+        entry_writer=persist,
+    )
+    second = service.run(
+        {"mode": "full", "risk_trials": 1_000, "horizon": 5},
+        job_id="no-strategy-second",
+        entry_writer=persist,
+    )
+
+    assert first["failed_symbols"] == second["failed_symbols"] == 0
+    assert second["skipped_symbols"] == 0
+    assert individual.calls == 2
+    assert pool_store.get("SH", "600000")["status"] == "no_strategy"
+
+
+def test_reselection_backfills_full_period_return_without_researching_cached_rules(
+    tmp_path,
+) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "return-backfill.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars("2020-01-01", 60))
+    adapter = DuckDbMarketDataAdapter(store)
+    pool_store = DuckDbStrategyPoolStore(store)
+    pool_store.initialize()
+    individual = FakeIndividualResearchService()
+    service = MarketStrategyPoolService(
+        store=store,
+        adapter=adapter,
+        individual_service=individual,
+        pool_store=pool_store,
+        portfolio_service=FakePortfolioBacktestService(),
+    )
+
+    service.run(
+        {"mode": "full", "risk_trials": 3_000, "horizon": 5},
+        job_id="initial-full-return",
+        entry_writer=lambda item: pool_store.persist_worker_entry(
+            item,
+            source_job_id="initial-full-return",
+        ),
+    )
+    entry = pool_store.get("SH", "600000")
+    annual = dict(entry["automatic_candidates"]["annual_return"])
+    annual_metrics = dict(annual["metrics"])
+    annual_metrics.pop("full_period")
+    annual["metrics"] = annual_metrics
+    pool_store.upsert_automatic(
+        market="SH",
+        code="600000",
+        name="浦发银行",
+        annual_candidate=annual,
+        sharpe_candidate=entry["automatic_candidates"]["sharpe"],
+        data_fingerprint=entry["data_fingerprint"],
+        market_fingerprint=entry["market_fingerprint"],
+        config_fingerprint=entry["config_fingerprint"],
+        source_job_id="legacy-without-full-return",
+        benchmark=entry["benchmark"],
+    )
+    backfilled: list[dict[str, object]] = []
+
+    result = service.run(
+        {"mode": "full", "risk_trials": 3_000, "horizon": 5},
+        job_id="backfill-full-return",
+        entry_writer=backfilled.append,
+    )
+
+    assert result["skipped_symbols"] == 1
+    assert len(individual.configs) == 1
+    assert backfilled[0]["annual_candidate"]["metrics"]["full_period"]["total_return"] == 0.31
+
+
 def test_full_pool_research_runs_tickers_concurrently_when_memory_allows(
     tmp_path,
     monkeypatch,
@@ -209,6 +334,7 @@ def test_full_pool_research_runs_tickers_concurrently_when_memory_allows(
         "selector_app.strategy_pool.service.memory_status",
         lambda: MemoryStatus(total_bytes=8 * GiB, available_bytes=8 * GiB, source="test"),
     )
+    monkeypatch.setattr("selector_app.strategy_pool.service.visible_cpu_count", lambda: 4)
     monkeypatch.setattr("selector_app.strategy_pool.service.get_cpu_load_average_1m", lambda: 0.0)
     saved: list[dict[str, object]] = []
     service = MarketStrategyPoolService(

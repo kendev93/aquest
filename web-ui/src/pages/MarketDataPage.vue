@@ -99,6 +99,7 @@ const MARKET_STATUS_POLL_INTERVAL_MS = 5000
 const ACTIVE_JOB_POLL_INTERVAL_MS = 1000
 let storeStatusPollTimer: number | null = null
 let activeJobPollTimer: number | null = null
+let marketDataPageUnmounted = false
 
 const selectedTitle = computed(() => (
   selected.value ? `${selected.value.market} ${selected.value.code}` : '请选择品种'
@@ -774,20 +775,24 @@ async function loadInstruments(): Promise<void> {
 }
 
 function scheduleStoreStatusPoll(): void {
+  if (marketDataPageUnmounted) return
   if (storeStatusPollTimer !== null) window.clearTimeout(storeStatusPollTimer)
   storeStatusPollTimer = window.setTimeout(async () => {
     storeStatusPollTimer = null
+    if (marketDataPageUnmounted) return
     if (!syncLoading.value) await loadStoreStatus()
-    scheduleStoreStatusPoll()
+    if (!marketDataPageUnmounted) scheduleStoreStatusPoll()
   }, MARKET_STATUS_POLL_INTERVAL_MS)
 }
 
 function scheduleActiveJobPoll(): void {
+  if (marketDataPageUnmounted) return
   if (activeJobPollTimer !== null) window.clearTimeout(activeJobPollTimer)
   activeJobPollTimer = window.setTimeout(async () => {
     activeJobPollTimer = null
+    if (marketDataPageUnmounted) return
     await loadActiveMarketJobs()
-    scheduleActiveJobPoll()
+    if (!marketDataPageUnmounted) scheduleActiveJobPoll()
   }, ACTIVE_JOB_POLL_INTERVAL_MS)
 }
 
@@ -847,6 +852,7 @@ function formatPrice(value: number | null): string {
 }
 
 onMounted(async () => {
+  marketDataPageUnmounted = false
   await loadActiveMarketJobs()
   await loadStoreStatus()
   if (!marketJob.value) await loadInstruments()
@@ -856,6 +862,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  marketDataPageUnmounted = true
   if (storeStatusPollTimer !== null) window.clearTimeout(storeStatusPollTimer)
   if (activeJobPollTimer !== null) window.clearTimeout(activeJobPollTimer)
   storeStatusPollTimer = null

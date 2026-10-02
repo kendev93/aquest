@@ -40,10 +40,10 @@ class PoolJobRequest(BaseModel):
             raise ValueError("信号扫描或组合回测必须选择年化收益或夏普目标")
         if self.mode not in {"signals", "portfolio"} and self.objective is not None:
             raise ValueError("年化/夏普目标只用于信号扫描或组合回测")
-        if self.mode in {"signals", "portfolio"} and (
-            self.market is not None or self.code is not None
-        ):
-            raise ValueError("全市场操作不应指定单只证券")
+        if self.mode == "signals" and (self.market is None) != (self.code is None):
+            raise ValueError("定向信号扫描必须同时提供市场和证券代码")
+        if self.mode == "portfolio" and (self.market is not None or self.code is not None):
+            raise ValueError("组合回测不应指定单只证券")
         return self
 
 

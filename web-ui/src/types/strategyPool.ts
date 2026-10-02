@@ -19,7 +19,7 @@ export interface StrategyPoolCandidate {
   buy_rule: Record<string, unknown>
   sell_rule: Record<string, unknown>
   config: Record<string, unknown>
-  metrics?: Partial<Record<'train' | 'validation' | 'holdout', StrategyPoolMetrics>>
+  metrics?: Partial<Record<'full_period' | 'train' | 'validation' | 'holdout', StrategyPoolMetrics>>
   quality?: { badges?: string[]; sample_adequate?: boolean; high_drawdown_risk?: boolean }
   replayable?: boolean
   candidate_ref?: StrategyPoolObjective
@@ -91,6 +91,18 @@ export interface StrategyPoolHolding {
   position_weight?: number | null
 }
 
+export interface StrategyPoolStrategySnapshotItem {
+  market: 'SH' | 'SZ'
+  code: string
+  candidate_id: string
+}
+
+export interface StrategyPoolMarketSnapshot {
+  data_end: string | null
+  bar_count: number
+  last_online_sync_at: string | null
+}
+
 export interface StrategyPoolJobResult {
   mode?: StrategyPoolMode
   objective?: StrategyPoolObjective
@@ -112,6 +124,9 @@ export interface StrategyPoolJobResult {
   portfolio?: Record<string, unknown>
   common_calendar?: Record<string, unknown>
   as_of_date?: string | null
+  signal_target?: { market: 'SH' | 'SZ'; code: string } | null
+  market_snapshot?: StrategyPoolMarketSnapshot
+  strategy_snapshot?: StrategyPoolStrategySnapshotItem[]
   buy_signals?: StrategyPoolSignal[]
   sell_signals?: StrategyPoolSignal[]
   states?: StrategyPoolSignal[]

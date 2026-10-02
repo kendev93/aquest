@@ -667,6 +667,19 @@ class IndividualStockResearchService:
     ) -> dict[str, object]:
         return _report_metrics(self._backtest_candidate_report(raw_config, start_date, end_date))
 
+    def full_period_metrics(
+        self,
+        candidate: Mapping[str, object],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, object]:
+        """Replay a selected candidate over the complete research interval."""
+
+        config = candidate.get("config")
+        if not isinstance(config, Mapping):
+            raise ValueError("策略候选缺少完整回测配置")
+        return self._backtest_candidate_metrics(config, start_date, end_date)
+
     def _backtest_candidate_detail(
         self,
         raw_config: Mapping[str, object],

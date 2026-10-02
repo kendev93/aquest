@@ -2,6 +2,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import * as api from '../api/strategyPool'
+import * as marketDataApi from '../api/marketData'
 import { FormulaScreenApiError } from '../api/formulaScreen'
 import type { StrategyPoolCandidate, StrategyPoolEntry, StrategyPoolSignal } from '../types'
 import StrategyPoolPage from './StrategyPoolPage.vue'
@@ -15,6 +16,8 @@ vi.mock('../api/strategyPool', () => ({
   getStrategyPoolJob: vi.fn(),
   saveStrategyPoolOverride: vi.fn(),
 }))
+
+vi.mock('../api/marketData', () => ({ fetchStoreStatus: vi.fn() }))
 
 const baseCandidate: StrategyPoolCandidate = {
   candidate_id: 'candidate-1',
@@ -36,6 +39,11 @@ const baseCandidate: StrategyPoolCandidate = {
       max_drawdown: -0.1,
       closed_trades: 4,
     },
+    full_period: {
+      total_return: 0.71,
+      annual_return: 0.19,
+      sharpe: 1.25,
+    },
   },
   quality: { badges: ['样本较充分'] },
 }
@@ -45,6 +53,10 @@ function entry(code: string, score: number): StrategyPoolEntry {
     ...baseCandidate,
     candidate_id: `candidate-${code}`,
     metrics: {
+      full_period: {
+        ...baseCandidate.metrics?.full_period,
+        total_return: score * 3,
+      },
       validation: {
         ...baseCandidate.metrics?.validation,
         annual_return: score,
@@ -90,6 +102,15 @@ describe('StrategyPoolPage', () => {
     window.localStorage.clear()
     vi.mocked(api.fetchStrategyPoolEntries).mockResolvedValue([entry('600000', 0.24), entry('600001', 0.12)])
     vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValue([])
+    vi.mocked(marketDataApi.fetchStoreStatus).mockResolvedValue({
+      database_path: 'market.duckdb',
+      schema_version: 1,
+      instrument_count: 2,
+      bar_count: 300,
+      data_start: '2025-01-01',
+      data_end: '2026-10-01',
+      last_online_sync_at: '2026-10-01T18:00:00+08:00',
+    })
     vi.mocked(api.createStrategyPoolJob).mockResolvedValue({ job_id: 'signal-1', status: 'queued' })
     vi.mocked(api.getStrategyPoolJob).mockResolvedValue({
       job_id: 'signal-1',
@@ -239,6 +260,182 @@ describe('StrategyPoolPage', () => {
     }
   })
 
+  it('does not rescan on page entry when data and selected strategies match the saved signal scan', async () => {
+    window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValueOnce([
+      {
+        job_id: 'signals-fresh',
+        status: 'completed',
+        mode: 'signals',
+        objective: 'annual_return',
+        created_at: 200,
+      },
+    ])
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({
+      job_id: 'signals-fresh',
+      status: 'completed',
+      result: {
+        mode: 'signals',
+        objective: 'annual_return',
+        as_of_date: '2026-10-01',
+        buy_signals: [buySignal],
+        sell_signals: [],
+        states: [buySignal],
+        market_snapshot: {
+          data_end: '2026-10-01',
+          bar_count: 300,
+          last_online_sync_at: '2026-10-01T18:00:00+08:00',
+        },
+        strategy_snapshot: [
+          { market: 'SH', code: '600000', candidate_id: 'candidate-600000' },
+          { market: 'SH', code: '600001', candidate_id: 'candidate-600001' },
+        ],
+        model_portfolio: { available: true, holdings: [], risk_exit_signals: [] },
+      },
+    })
+
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    expect(api.createStrategyPoolJob).not.toHaveBeenCalled()
+    expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('触发买入')
+  })
+
+  it('runs a full signal scan when the stored market snapshot is older than local行情', async () => {
+    window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
+    vi.mocked(marketDataApi.fetchStoreStatus).mockResolvedValueOnce({
+      database_path: 'market.duckdb',
+      schema_version: 1,
+      instrument_count: 2,
+      bar_count: 301,
+      data_start: '2025-01-01',
+      data_end: '2026-10-02',
+      last_online_sync_at: '2026-10-02T18:00:00+08:00',
+    })
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValueOnce([
+      {
+        job_id: 'signals-old',
+        status: 'completed',
+        mode: 'signals',
+        objective: 'annual_return',
+        created_at: 200,
+      },
+    ])
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({
+      job_id: 'signals-old',
+      status: 'completed',
+      result: {
+        mode: 'signals',
+        objective: 'annual_return',
+        as_of_date: '2026-10-01',
+        buy_signals: [],
+        sell_signals: [],
+        states: [],
+        market_snapshot: {
+          data_end: '2026-10-01',
+          bar_count: 300,
+          last_online_sync_at: '2026-10-01T18:00:00+08:00',
+        },
+        strategy_snapshot: [
+          { market: 'SH', code: '600000', candidate_id: 'candidate-600000' },
+          { market: 'SH', code: '600001', candidate_id: 'candidate-600001' },
+        ],
+        model_portfolio: { available: true, holdings: [], risk_exit_signals: [] },
+      },
+    })
+
+    mount(StrategyPoolPage)
+    await flushPromises()
+
+    expect(api.createStrategyPoolJob).toHaveBeenCalledWith({ mode: 'signals', objective: 'annual_return' })
+  })
+
+  it('runs a full signal scan when a full reselection finished after the saved scan', async () => {
+    window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValueOnce([
+      { job_id: 'full-newer', status: 'completed', mode: 'full', created_at: 300 },
+      {
+        job_id: 'signals-older',
+        status: 'completed',
+        mode: 'signals',
+        objective: 'annual_return',
+        created_at: 200,
+      },
+    ])
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({
+      job_id: 'signals-older',
+      status: 'completed',
+      result: {
+        mode: 'signals',
+        objective: 'annual_return',
+        as_of_date: '2026-10-01',
+        buy_signals: [],
+        sell_signals: [],
+        states: [],
+        market_snapshot: {
+          data_end: '2026-10-01',
+          bar_count: 300,
+          last_online_sync_at: '2026-10-01T18:00:00+08:00',
+        },
+        strategy_snapshot: [
+          { market: 'SH', code: '600000', candidate_id: 'candidate-600000' },
+          { market: 'SH', code: '600001', candidate_id: 'candidate-600001' },
+        ],
+        model_portfolio: { available: true, holdings: [], risk_exit_signals: [] },
+      },
+    })
+
+    mount(StrategyPoolPage)
+    await flushPromises()
+
+    expect(api.createStrategyPoolJob).toHaveBeenCalledWith({ mode: 'signals', objective: 'annual_return' })
+  })
+
+  it('rescans one changed strategy only for its symbol', async () => {
+    window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValueOnce([
+      {
+        job_id: 'signals-before-edit',
+        status: 'completed',
+        mode: 'signals',
+        objective: 'annual_return',
+        created_at: 200,
+      },
+    ])
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({
+      job_id: 'signals-before-edit',
+      status: 'completed',
+      result: {
+        mode: 'signals',
+        objective: 'annual_return',
+        as_of_date: '2026-10-01',
+        buy_signals: [],
+        sell_signals: [],
+        states: [],
+        market_snapshot: {
+          data_end: '2026-10-01',
+          bar_count: 300,
+          last_online_sync_at: '2026-10-01T18:00:00+08:00',
+        },
+        strategy_snapshot: [
+          { market: 'SH', code: '600000', candidate_id: 'candidate-600000' },
+          { market: 'SH', code: '600001', candidate_id: 'old-candidate-600001' },
+        ],
+        model_portfolio: { available: true, holdings: [], risk_exit_signals: [] },
+      },
+    })
+
+    mount(StrategyPoolPage)
+    await flushPromises()
+
+    expect(api.createStrategyPoolJob).toHaveBeenCalledWith({
+      mode: 'signals',
+      objective: 'annual_return',
+      market: 'SH',
+      code: '600001',
+    })
+  })
+
   it('paginates the market status table instead of mounting every symbol at once', async () => {
     window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
     vi.mocked(api.fetchStrategyPoolEntries).mockResolvedValue(
@@ -273,6 +470,8 @@ describe('StrategyPoolPage', () => {
         '留出基准 -5.00% · 策略超额 +13.00%',
       )
       expect(wrapper.get('thead').text()).toContain('最大回撤')
+      expect(wrapper.get('thead').text()).toContain('策略收益')
+      expect(row.text()).toContain('72.00%')
       expect(row.text()).toContain('-18.00%')
       expect(row.text()).toContain('验证 12 · 留出 4 笔')
     },
@@ -430,7 +629,25 @@ describe('StrategyPoolPage', () => {
       .mockResolvedValueOnce({
         job_id: 'signal-1',
         status: 'completed',
-        result: { mode: 'signals', objective: 'annual_return', buy_signals: [], sell_signals: [], states: [] },
+        result: {
+          mode: 'signals',
+          objective: 'annual_return',
+          buy_signals: [buySignal],
+          sell_signals: [],
+          states: [
+            { ...buySignal, status: 'buy' },
+            {
+              ...buySignal,
+              market: 'SH',
+              code: '600001',
+              name: '测试600001',
+              symbol: 'SH600001',
+              status: 'flat',
+              signal_type: '',
+            },
+          ],
+          model_portfolio: { available: true, holdings: [], risk_exit_signals: [] },
+        },
       })
       .mockResolvedValueOnce({
         job_id: 'single-1',
@@ -444,6 +661,19 @@ describe('StrategyPoolPage', () => {
             annual_candidate: baseCandidate,
             sharpe_candidate: null,
           },
+        },
+      })
+      .mockResolvedValueOnce({
+        job_id: 'signals-targeted',
+        status: 'completed',
+        result: {
+          mode: 'signals',
+          objective: 'annual_return',
+          signal_target: { market: 'SH', code: '600000' },
+          buy_signals: [],
+          sell_signals: [{ ...buySignal, status: 'sell', signal_type: 'sell' }],
+          states: [{ ...buySignal, status: 'sell', signal_type: 'sell' }],
+          model_portfolio: { available: true, holdings: [], risk_exit_signals: [] },
         },
       })
     const wrapper = mount(StrategyPoolPage)
@@ -463,5 +693,13 @@ describe('StrategyPoolPage', () => {
       baseCandidate,
       { full_period: { total_return: 0.2 } },
     )
+    expect(api.createStrategyPoolJob).toHaveBeenNthCalledWith(3, {
+      mode: 'signals',
+      objective: 'annual_return',
+      market: 'SH',
+      code: '600000',
+    })
+    expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('触发卖出')
+    expect(wrapper.get('[data-testid="pool-row-600001"]').text()).toContain('空仓')
   })
 })

@@ -1,5 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { FormulaScreenApiError } from '../api/formulaScreen'
 import type { LocalInstrument, LocalMarketChart } from '../types'
@@ -43,7 +43,16 @@ const chart: LocalMarketChart = {
 }
 
 describe('MarketDataPage', () => {
+  let mountedWrappers: ReturnType<typeof mount>[] = []
+
+  function mountPage() {
+    const wrapper = mount(MarketDataPage)
+    mountedWrappers.push(wrapper)
+    return wrapper
+  }
+
   beforeEach(() => {
+    mountedWrappers = []
     vi.clearAllMocks()
     vi.mocked(marketApi.fetchLocalInstruments).mockResolvedValue({
       items: instruments,
@@ -72,8 +81,13 @@ describe('MarketDataPage', () => {
     })
   })
 
+  afterEach(() => {
+    mountedWrappers.forEach((wrapper) => wrapper.unmount())
+    mountedWrappers = []
+  })
+
   it('lists local instruments and loads daily, monthly, and yearly charts', async () => {
-    const wrapper = mount(MarketDataPage)
+    const wrapper = mountPage()
     await flushPromises()
 
     expect(wrapper.get('[data-testid="local-instruments"]').text()).toContain('600000')
@@ -109,7 +123,7 @@ describe('MarketDataPage', () => {
       last_auto_sync_check_session: '2026-09-30',
     })
 
-    const wrapper = mount(MarketDataPage)
+    const wrapper = mountPage()
     await flushPromises()
 
     expect(wrapper.get('[data-testid="market-store-meta"]').text()).toContain(
@@ -135,7 +149,7 @@ describe('MarketDataPage', () => {
       last_auto_sync_check_session: '2026-09-30',
     })
 
-    const wrapper = mount(MarketDataPage)
+    const wrapper = mountPage()
     await flushPromises()
 
     expect(wrapper.get('[data-testid="market-store-meta"]').text()).toContain(
@@ -155,7 +169,7 @@ describe('MarketDataPage', () => {
       meta: { total: 2, page: 1, page_size: 50, pages: 1 },
     })
 
-    const wrapper = mount(MarketDataPage)
+    const wrapper = mountPage()
     await flushPromises()
 
     expect(marketApi.fetchLocalChart).toHaveBeenCalledWith(expect.objectContaining({ market: 'SH', code: '600000' }))
@@ -165,7 +179,7 @@ describe('MarketDataPage', () => {
 
   it('shows a user-facing error when the local directory cannot be read', async () => {
     vi.mocked(marketApi.fetchLocalInstruments).mockRejectedValueOnce(new FormulaScreenApiError('vipdoc 路径无效', 422))
-    const wrapper = mount(MarketDataPage)
+    const wrapper = mountPage()
     await flushPromises()
 
     expect(wrapper.get('[data-testid="market-data-message"]').text()).toContain('vipdoc 路径无效')
@@ -184,7 +198,7 @@ describe('MarketDataPage', () => {
         new_instruments: 3, existing_instruments: 1,
       },
     })
-    const wrapper = mount(MarketDataPage)
+    const wrapper = mountPage()
     await flushPromises()
 
     await wrapper.get('[data-testid="market-sync-online"]').trigger('click')
@@ -209,7 +223,7 @@ describe('MarketDataPage', () => {
       total_scanned: 0, errors: 0, error: null, result: { source: 'online', provider: 'eastmoney' },
       metadata: { provider: 'eastmoney', history_source: 'eastmoney' },
     })
-    const wrapper = mount(MarketDataPage)
+    const wrapper = mountPage()
     await flushPromises()
 
     // 行情源属于内部实现细节，界面不暴露：进度面板和仓储元信息里都不该出现
@@ -235,7 +249,7 @@ describe('MarketDataPage', () => {
       job_id: 'backfill-1', status: 'completed', progress: 1, total_candidates: 2,
       total_scanned: 2, errors: 0, error: null, result: { source: 'online', provider: 'eastmoney', written_bars: 1200 },
     })
-    const wrapper = mount(MarketDataPage)
+    const wrapper = mountPage()
     await flushPromises()
 
     await wrapper.get('[data-testid="market-sync-board-main"]').setValue(true)
@@ -260,7 +274,7 @@ describe('MarketDataPage', () => {
       },
     })
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
-    const wrapper = mount(MarketDataPage)
+    const wrapper = mountPage()
     await flushPromises()
 
     await wrapper.get('[data-testid="market-sync-board-main"]').setValue(true)
@@ -284,7 +298,7 @@ describe('MarketDataPage', () => {
 
   it('does not refresh anything when the confirmation is dismissed', async () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
-    const wrapper = mount(MarketDataPage)
+    const wrapper = mountPage()
     await flushPromises()
 
     await wrapper.get('[data-testid="market-online-refresh"]').trigger('click')
@@ -311,7 +325,7 @@ describe('MarketDataPage', () => {
         result: polls === 1 ? null : { source: 'online', updated_files: 1, written_bars: 800 },
       }
     })
-    const wrapper = mount(MarketDataPage)
+    const wrapper = mountPage()
     await flushPromises()
 
     await wrapper.get('[data-testid="market-sync-online"]').trigger('click')
@@ -354,7 +368,7 @@ describe('MarketDataPage', () => {
       cancel_requested: true,
       result: null,
     })
-    const wrapper = mount(MarketDataPage)
+    const wrapper = mountPage()
     await flushPromises()
 
     expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('42%')
@@ -388,7 +402,7 @@ describe('MarketDataPage', () => {
       result: null,
     }])
 
-    const wrapper = mount(MarketDataPage)
+    const wrapper = mountPage()
     await flushPromises()
 
     expect(wrapper.find('[data-testid="market-data-message"]').exists()).toBe(false)
@@ -418,7 +432,7 @@ describe('MarketDataPage', () => {
       result: null,
     }])
 
-    const wrapper = mount(MarketDataPage)
+    const wrapper = mountPage()
     await flushPromises()
 
     const progress = wrapper.get('[data-testid="market-data-progress"]')
@@ -451,7 +465,7 @@ describe('MarketDataPage', () => {
           result: polls === 1 ? null : { source: 'online', updated_files: 1, written_bars: 800 },
         }
       })
-      const wrapper = mount(MarketDataPage)
+      const wrapper = mountPage()
       await flushPromises()
 
       const click = wrapper.get('[data-testid="market-sync-online"]').trigger('click')
@@ -471,6 +485,7 @@ describe('MarketDataPage', () => {
 
   it('keeps polling a slow market-data job without a fixed attempt timeout', async () => {
     vi.useFakeTimers()
+    let cleanup: () => void = () => {}
     try {
       vi.mocked(marketApi.createOnlineSync).mockResolvedValue({ job_id: 'slow-1', status: 'queued' })
       let polls = 0
@@ -487,7 +502,8 @@ describe('MarketDataPage', () => {
           result: polls <= 601 ? null : { source: 'online', updated_files: 1703, written_bars: 1000 },
         }
       })
-      const wrapper = mount(MarketDataPage)
+      const wrapper = mountPage()
+      cleanup = () => wrapper.unmount()
       await flushPromises()
 
       await wrapper.get('[data-testid="market-sync-online"]').trigger('click')
@@ -499,6 +515,8 @@ describe('MarketDataPage', () => {
       expect(polls).toBeGreaterThan(600)
       expect(wrapper.get('[data-testid="market-data-progress"]').text()).not.toContain('行情同步超时')
     } finally {
+      cleanup()
+      vi.clearAllTimers()
       vi.useRealTimers()
     }
     // 600+ 次 fake timer 迭代在覆盖率插桩下会明显变慢，单独放宽超时。
@@ -546,7 +564,7 @@ describe('MarketDataPage', () => {
           result: polls === 1 ? null : { source: 'online', updated_files: 100, written_bars: 100 },
         }
       })
-      const wrapper = mount(MarketDataPage)
+      const wrapper = mountPage()
       await flushPromises()
 
       await vi.advanceTimersByTimeAsync(5000)
@@ -569,7 +587,7 @@ describe('MarketDataPage', () => {
       items: instruments,
       meta: { total: 4, page: 1, page_size: 2, pages: 2 },
     })
-    const wrapper = mount(MarketDataPage)
+    const wrapper = mountPage()
     await flushPromises()
 
     // 证券类型默认勾选「股票」；可以取消再勾回。
@@ -594,7 +612,7 @@ describe('MarketDataPage', () => {
   })
 
   it('auto-fills the vipdoc path from backend detection', async () => {
-    const wrapper = mount(MarketDataPage)
+    const wrapper = mountPage()
     await flushPromises()
 
     expect(marketApi.detectLocalVipdoc).toHaveBeenCalled()
@@ -608,7 +626,7 @@ describe('MarketDataPage', () => {
       default_path: '/data/vipdoc',
       mount_hint: '后端运行在容器里，需要先挂载。',
     })
-    const wrapper = mount(MarketDataPage)
+    const wrapper = mountPage()
     await flushPromises()
 
     expect(wrapper.get('[data-testid="market-local-import-note"]').text()).toContain('没有在容器里找到')
@@ -626,7 +644,7 @@ describe('MarketDataPage', () => {
         imported_instruments: 10, imported_bars: 5000, replaced_bars: 0, skipped_files: 0,
       },
     })
-    const wrapper = mount(MarketDataPage)
+    const wrapper = mountPage()
     await flushPromises()
 
     await wrapper.get('[data-testid="market-local-import"]').trigger('click')
@@ -651,7 +669,7 @@ describe('MarketDataPage', () => {
         failure_reasons: { day_file_truncated: 1 },
       },
     })
-    const wrapper = mount(MarketDataPage)
+    const wrapper = mountPage()
     await flushPromises()
 
     await wrapper.get('[data-testid="market-local-import"]').trigger('click')
@@ -667,7 +685,7 @@ describe('MarketDataPage', () => {
     // 本地行永久压过在线行，导错了必须能撤销，否则只能重建数据库。
     vi.mocked(marketApi.deleteMarketBars).mockResolvedValue({ deleted_bars: 4321, source: 'local' })
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
-    const wrapper = mount(MarketDataPage)
+    const wrapper = mountPage()
     await flushPromises()
 
     await wrapper.get('[data-testid="market-local-import-undo"]').trigger('click')
@@ -684,7 +702,7 @@ describe('MarketDataPage', () => {
 
   it('does not delete anything when the undo prompt is dismissed', async () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
-    const wrapper = mount(MarketDataPage)
+    const wrapper = mountPage()
     await flushPromises()
 
     await wrapper.get('[data-testid="market-local-import-undo"]').trigger('click')
@@ -695,7 +713,7 @@ describe('MarketDataPage', () => {
   })
 
   it('offers only A-share stocks and boards, with nothing greyed out', async () => {
-    const wrapper = mount(MarketDataPage)
+    const wrapper = mountPage()
     await flushPromises()
 
     // 只做 A 股：指数/ETF/债券/B股这些选项根本不再渲染，而不是置灰。
@@ -714,7 +732,7 @@ describe('MarketDataPage', () => {
       items: instruments,
       meta: { total: 4, page: 1, page_size: 2, pages: 2 },
     })
-    const wrapper = mount(MarketDataPage)
+    const wrapper = mountPage()
     await flushPromises()
 
     // 本地导入范围独立于在线同步范围。
@@ -739,7 +757,7 @@ describe('MarketDataPage', () => {
   })
 
   it('reloads a chart with an explicit date range and indicator switches', async () => {
-    const wrapper = mount(MarketDataPage)
+    const wrapper = mountPage()
     await flushPromises()
     await wrapper.get('[data-testid="instrument-SH-600000"]').trigger('click')
     await flushPromises()
@@ -765,7 +783,7 @@ describe('MarketDataPage', () => {
   it('runs the read-only health check and lists the flagged instruments', async () => {
     vi.mocked(marketApi.createHealthCheck).mockResolvedValue({ job_id: 'health-1', status: 'queued' })
     vi.mocked(marketApi.getMarketDataJob).mockResolvedValue(healthJobState(healthReport()))
-    const wrapper = mount(MarketDataPage)
+    const wrapper = mountPage()
     await flushPromises()
 
     await wrapper.get('[data-testid="market-health-check"]').trigger('click')
@@ -785,7 +803,7 @@ describe('MarketDataPage', () => {
     vi.mocked(marketApi.getMarketDataJob).mockResolvedValue(healthJobState(healthReport()))
     vi.mocked(marketApi.createHealthRepair).mockResolvedValue({ job_id: 'repair-1', status: 'queued' })
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
-    const wrapper = mount(MarketDataPage)
+    const wrapper = mountPage()
     await flushPromises()
 
     await wrapper.get('[data-testid="market-health-check"]').trigger('click')
@@ -816,7 +834,7 @@ describe('MarketDataPage', () => {
     vi.mocked(marketApi.createHealthCheck).mockResolvedValue({ job_id: 'health-1', status: 'queued' })
     vi.mocked(marketApi.getMarketDataJob).mockResolvedValue(healthJobState(healthReport()))
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
-    const wrapper = mount(MarketDataPage)
+    const wrapper = mountPage()
     await flushPromises()
 
     await wrapper.get('[data-testid="market-health-check"]').trigger('click')
@@ -829,7 +847,7 @@ describe('MarketDataPage', () => {
   })
 
   it('keeps the health panel empty until a check has run', async () => {
-    const wrapper = mount(MarketDataPage)
+    const wrapper = mountPage()
     await flushPromises()
 
     expect(wrapper.get('[data-testid="market-health-empty"]').text()).toContain('还没有检查结果')

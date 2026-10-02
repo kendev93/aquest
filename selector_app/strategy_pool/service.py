@@ -314,7 +314,8 @@ class MarketStrategyPoolService:
         clear_stock_cache = getattr(self._adapter, "clear_thread_stock_cache", None)
         if callable(clear_stock_cache):
             clear_stock_cache()
-        result = self._individual_service_for_thread().run(config, progress, abort_check)
+        individual_service = self._individual_service_for_thread()
+        result = individual_service.run(config, progress, abort_check)
         result_market_fingerprint = result.get("market_fingerprint")
         if not isinstance(result_market_fingerprint, str) or not result_market_fingerprint:
             result_market_fingerprint = previous_market_fingerprint or _market_fingerprint(
@@ -338,6 +339,31 @@ class MarketStrategyPoolService:
                 if annual_candidate is not None
                 else None,
             }
+        full_period_metrics = getattr(individual_service, "full_period_metrics", None)
+        if callable(full_period_metrics):
+            calculated: set[str] = set()
+            for candidate in (annual_candidate, sharpe_candidate):
+                if candidate is None or isinstance(candidate.get("candidate_ref"), str):
+                    continue
+                candidate_key = str(
+                    candidate.get("candidate_id")
+                    or candidate.get("candidate_hash")
+                    or id(candidate)
+                )
+                if candidate_key in calculated:
+                    continue
+                calculated.add(candidate_key)
+                try:
+                    full_metrics = full_period_metrics(
+                        candidate,
+                        config.start_date,
+                        config.end_date,
+                    )
+                except Exception:  # noqa: BLE001 - full-period display metrics do not discard a valid strategy
+                    logger.exception("全区间策略收益回测失败: %s", ref.symbol)
+                    continue
+                current_metrics = _mapping(candidate.get("metrics"))
+                candidate["metrics"] = {**current_metrics, "full_period": full_metrics}
         record: dict[str, object] = {
             "market": ref.market,
             "code": ref.code,
@@ -414,10 +440,70 @@ class MarketStrategyPoolService:
                     if (
                         prior is not None
                         and prior[1] == config_fingerprint
-                        and prior[2] in {"ready", "partial", "no_strategy"}
+                        and prior[2] in {"ready", "partial"}
                     ):
                         market_fingerprint = _market_fingerprint(self._adapter, ref)
                     if self._can_reuse(prior, market_fingerprint, config_fingerprint):
+                        reused_entry = (
+                            self._pool_store.get(ref.market, ref.code)
+                            if self._pool_store is not None
+                            else None
+                        )
+                        if reused_entry is not None and self._needs_full_period_backfill(
+                            reused_entry
+                        ):
+                            if active:
+                                break
+                            _report(
+                                progress_callback,
+                                completed,
+                                total_work,
+                                "补算全区间策略收益",
+                                symbol,
+                                skipped,
+                            )
+                            updated = self._backfill_full_period_metrics(
+                                ref,
+                                reused_entry,
+                                start_date=calendar[0],
+                                end_date=calendar[-1],
+                                source_job_id=job_id,
+                            )
+                            if updated is not None:
+                                if entry_writer is not None:
+                                    entry_writer(updated)
+                                elif self._pool_store is not None:
+                                    self._pool_store.upsert_automatic(
+                                        market=ref.market,
+                                        code=ref.code,
+                                        name=str(updated["name"]),
+                                        annual_candidate=cast(
+                                            dict[str, object] | None,
+                                            updated["annual_candidate"],
+                                        ),
+                                        sharpe_candidate=cast(
+                                            dict[str, object] | None,
+                                            updated["sharpe_candidate"],
+                                        ),
+                                        data_fingerprint=str(updated["data_fingerprint"]),
+                                        market_fingerprint=str(updated["market_fingerprint"]),
+                                        config_fingerprint=str(updated["config_fingerprint"]),
+                                        source_job_id=job_id,
+                                        benchmark=cast(
+                                            Mapping[str, object] | None,
+                                            updated.get("benchmark"),
+                                        ),
+                                    )
+                                skipped += 1
+                                completed += 1
+                                coordinator.finish(
+                                    index,
+                                    symbol,
+                                    "补算全区间策略收益",
+                                    skipped=True,
+                                )
+                                next_index += 1
+                                continue
                         if prior is not None and not prior[3] and self._pool_store is not None:
                             try:
                                 benchmark = _symbol_benchmark(
@@ -580,9 +666,15 @@ class MarketStrategyPoolService:
         if mode not in {"full", "single", "signals", "portfolio"}:
             raise ValueError("策略池任务范围无效")
         if mode == "signals":
+            signal_symbol = (
+                _symbol_from_payload(payload)
+                if payload.get("market") is not None or payload.get("code") is not None
+                else None
+            )
             return self._scan_signals(
                 payload,
                 job_id=job_id,
+                single_symbol=signal_symbol,
                 progress_callback=progress_callback,
                 abort_check=abort_check,
             )
@@ -921,6 +1013,7 @@ class MarketStrategyPoolService:
         payload: Mapping[str, object],
         *,
         job_id: str,
+        single_symbol: tuple[str, str] | None,
         progress_callback: PoolProgressCallback | None,
         abort_check: Callable[[], bool] | None,
     ) -> dict[str, object]:
@@ -929,15 +1022,35 @@ class MarketStrategyPoolService:
             raise ValueError("策略池目标必须是 annual_return 或 sharpe")
         if self._backtest_service is None or self._pool_store is None:
             raise ValueError("策略池信号扫描服务未配置")
-        refs = self._list_refs(None)
+        refs = self._list_refs(single_symbol)
         raw_entries = self._pool_store.list_entries()
         entries = {(str(item.get("market")), str(item.get("code"))): item for item in raw_entries}
+        strategy_snapshot = []
+        for pool_entry in raw_entries:
+            active = _active_candidate(pool_entry, objective)
+            if active is None:
+                continue
+            candidate_version = active.get("candidate_id") or active.get("candidate_hash")
+            strategy_snapshot.append(
+                {
+                    "market": str(pool_entry.get("market") or ""),
+                    "code": str(pool_entry.get("code") or ""),
+                    "candidate_id": str(candidate_version or ""),
+                }
+            )
+        strategy_snapshot.sort(key=lambda item: (item["market"], item["code"]))
+        market_status = self._store.status()
         buy_signals: list[dict[str, object]] = []
         sell_signals: list[dict[str, object]] = []
         states: list[dict[str, object]] = []
         failed = 0
         total_work = len(refs) + 1
         latest_date: date | None = None
+        if market_status.data_end:
+            try:
+                latest_date = date.fromisoformat(market_status.data_end[:10])
+            except ValueError:
+                latest_date = None
         for index, ref in enumerate(refs, start=1):
             if abort_check is not None and abort_check():
                 raise TaskCancelledError("策略池信号扫描已取消")
@@ -1053,6 +1166,17 @@ class MarketStrategyPoolService:
             "mode": "signals",
             "objective": objective,
             "as_of_date": latest_date.isoformat() if latest_date else None,
+            "signal_target": (
+                {"market": single_symbol[0], "code": single_symbol[1]}
+                if single_symbol is not None
+                else None
+            ),
+            "market_snapshot": {
+                "data_end": market_status.data_end,
+                "bar_count": market_status.bar_count,
+                "last_online_sync_at": market_status.last_online_sync_at,
+            },
+            "strategy_snapshot": strategy_snapshot,
             "buy_signals": buy_signals,
             "sell_signals": sell_signals,
             "states": states,
@@ -1106,8 +1230,92 @@ class MarketStrategyPoolService:
             and prior[0]
             and prior[0] == market_fingerprint
             and prior[1] == config_fingerprint
-            and prior[2] in {"ready", "partial", "no_strategy"}
+            and prior[2] in {"ready", "partial"}
         )
+
+    @staticmethod
+    def _needs_full_period_backfill(entry: Mapping[str, object]) -> bool:
+        automatic_value = entry.get("automatic_candidates")
+        automatic = automatic_value if isinstance(automatic_value, Mapping) else {}
+        for objective in ("annual_return", "sharpe"):
+            candidate = automatic.get(objective)
+            if (
+                not isinstance(candidate, Mapping)
+                or isinstance(candidate.get("candidate_ref"), str)
+                or candidate.get("replayable") is False
+            ):
+                continue
+            metrics = _mapping(candidate.get("metrics"))
+            full_period = _mapping(metrics.get("full_period"))
+            if _finite_metric(full_period.get("total_return")) is None:
+                return True
+        return False
+
+    def _backfill_full_period_metrics(
+        self,
+        ref: StockRef,
+        entry: Mapping[str, object],
+        *,
+        start_date: date,
+        end_date: date,
+        source_job_id: str,
+    ) -> dict[str, object] | None:
+        if self._pool_store is None:
+            return None
+        automatic_value = entry.get("automatic_candidates")
+        automatic_raw = automatic_value if isinstance(automatic_value, Mapping) else {}
+        automatic: dict[str, object] = dict(automatic_raw)
+        calculator = getattr(self._individual_service_for_thread(), "full_period_metrics", None)
+        if not callable(calculator):
+            return None
+        changed = False
+        seen: set[str] = set()
+        for objective in ("annual_return", "sharpe"):
+            candidate_value = automatic.get(objective)
+            if (
+                not isinstance(candidate_value, Mapping)
+                or isinstance(candidate_value.get("candidate_ref"), str)
+                or candidate_value.get("replayable") is False
+            ):
+                continue
+            candidate_id = str(
+                candidate_value.get("candidate_id")
+                or candidate_value.get("candidate_hash")
+                or objective
+            )
+            if candidate_id in seen:
+                continue
+            seen.add(candidate_id)
+            if not self._needs_full_period_backfill(
+                {"automatic_candidates": {objective: candidate_value}}
+            ):
+                continue
+            try:
+                full_metrics = calculator(candidate_value, start_date, end_date)
+            except Exception:  # noqa: BLE001 - display metric backfill must not discard cached winners
+                logger.exception("全区间策略收益补算失败: %s %s", ref.symbol, objective)
+                continue
+            if not isinstance(full_metrics, Mapping):
+                continue
+            updated = dict(candidate_value)
+            current_metrics = _mapping(updated.get("metrics"))
+            updated["metrics"] = {**current_metrics, "full_period": dict(full_metrics)}
+            automatic[objective] = updated
+            changed = True
+        if not changed:
+            return None
+        return {
+            "market": ref.market,
+            "code": ref.code,
+            "name": str(entry.get("name") or ref.name or ""),
+            "annual_candidate": automatic.get("annual_return"),
+            "sharpe_candidate": automatic.get("sharpe"),
+            "benchmark": entry.get("benchmark"),
+            "data_fingerprint": str(entry.get("data_fingerprint") or ""),
+            "market_fingerprint": str(entry.get("market_fingerprint") or ""),
+            "config_fingerprint": str(entry.get("config_fingerprint") or ""),
+            "source_job_id": source_job_id,
+        }
 
 
 def _individual_config(
