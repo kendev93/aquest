@@ -177,7 +177,13 @@ def create_strategy_pool_job(payload: PoolJobRequest, request: Request) -> dict[
         for item in backend.active_snapshots()
         if item.get("operation") == "market_strategy_pool"
     ]
-    if active:
+    active_metadata = active[0].get("metadata") if len(active) == 1 else None
+    can_queue_single_after_signal_scan = (
+        payload.mode == "single"
+        and isinstance(active_metadata, Mapping)
+        and active_metadata.get("mode") == "signals"
+    )
+    if active and not can_queue_single_after_signal_scan:
         raise HTTPException(status_code=409, detail="已有全市场策略池任务正在运行")
     job_payload = payload.model_dump(exclude_none=True)
     try:

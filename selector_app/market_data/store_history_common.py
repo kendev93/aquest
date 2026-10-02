@@ -320,6 +320,39 @@ def _individual_research_summary(result: Mapping[str, object]) -> dict[str, obje
                 value = _finite_or_none(validation.get(key))
                 if value is not None:
                     summary[f"top_{label}_{key}"] = value
+
+    full_backtests = result.get("full_backtests")
+    best_annual_return: float | None = None
+    best_backtest: Mapping[str, object] | None = None
+    best_performance: Mapping[str, object] | None = None
+    if isinstance(full_backtests, Mapping):
+        for backtest in full_backtests.values():
+            if not isinstance(backtest, Mapping):
+                continue
+            performance = backtest.get("performance")
+            if not isinstance(performance, Mapping):
+                continue
+            annual_return = _finite_or_none(performance.get("annual_return"))
+            if annual_return is None:
+                continue
+            if best_annual_return is None or annual_return > best_annual_return:
+                best_annual_return = annual_return
+                best_backtest = backtest
+                best_performance = performance
+    if (
+        best_annual_return is not None
+        and best_backtest is not None
+        and best_performance is not None
+    ):
+        summary["best_full_annual_return"] = best_annual_return
+        for summary_key, source, key in (
+            ("best_full_excess_return", best_backtest, "excess_return"),
+            ("best_full_sharpe", best_performance, "sharpe"),
+            ("best_full_max_drawdown", best_performance, "max_drawdown"),
+        ):
+            value = _finite_or_none(source.get(key))
+            if value is not None:
+                summary[summary_key] = value
     return summary
 
 

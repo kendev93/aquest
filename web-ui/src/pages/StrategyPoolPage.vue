@@ -43,6 +43,7 @@ const holdoutPortfolios = reactive<Record<StrategyPoolObjective, Record<string, 
 const activeJobId = ref('')
 const activeIntent = ref<StrategyPoolMode | ''>('')
 const activeJob = ref<StrategyPoolJobState | null>(null)
+const queuedSingleSymbol = ref('')
 const pendingSingle = ref<StrategyPoolJobResult['single_candidate'] | null>(null)
 const loading = ref(false)
 const saving = ref(false)
@@ -248,6 +249,46 @@ async function startSingleRerun(): Promise<void> {
   await startTask({ mode: 'single', market: market.value, code: code.value, risk_trials: riskTrials.value }, 'single')
 }
 
+async function rerunEntry(entry: StrategyPoolEntry): Promise<void> {
+  if (queuedSingleSymbol.value) return
+  if (!isBusy.value) {
+    market.value = entry.market
+    code.value = entry.code
+    await startSingleRerun()
+    return
+  }
+  if (activeIntent.value !== 'signals') return
+
+  errorMessage.value = ''
+  successMessage.value = ''
+  try {
+    await createStrategyPoolJob({
+      mode: 'single',
+      market: entry.market,
+      code: entry.code,
+      risk_trials: riskTrials.value,
+    })
+    queuedSingleSymbol.value = symbol(entry)
+    successMessage.value = `${entry.market} ${entry.code} 已排队，信号扫描完成后开始逐股重跑。`
+    await loadHistory()
+  } catch (error) {
+    errorMessage.value = apiMessage(error)
+  }
+}
+
+function rerunEntryDisabled(): boolean {
+  return Boolean(queuedSingleSymbol.value) || (isBusy.value && activeIntent.value !== 'signals')
+}
+
+function rerunEntryTitle(entry: StrategyPoolEntry): string {
+  if (queuedSingleSymbol.value) {
+    return queuedSingleSymbol.value === symbol(entry) ? '该标的已排队重跑' : '已有逐股重跑在排队中'
+  }
+  if (isBusy.value && activeIntent.value === 'signals') return '点击后排在当天信号扫描之后重跑'
+  if (isBusy.value) return '当前全市场研究或组合回测结束后可重跑'
+  return `重跑 ${entry.market} ${entry.code}`
+}
+
 async function startSignalScan(): Promise<void> {
   if (!objective.value || isBusy.value) return
   signalResult.value = null
@@ -286,8 +327,10 @@ async function pollJob(jobId: string, intent: StrategyPoolMode): Promise<void> {
       const state = await getStrategyPoolJob(jobId)
       pollWarning.value = ''
       activeJob.value = state
+      if (intent === 'single' && state.status === 'running') queuedSingleSymbol.value = ''
       if (['completed', 'failed', 'cancelled'].includes(state.status)) {
         const result = state.result ?? null
+        if (intent === 'single') queuedSingleSymbol.value = ''
         activeJobId.value = ''
         activeIntent.value = ''
         if (pollTimer !== null) window.clearTimeout(pollTimer)
@@ -335,6 +378,7 @@ async function finishJob(
       }
       successMessage.value = `当天信号已按 ${objectiveLabel(objective.value)} 目标更新。`
       await loadHistory()
+      if (await activateQueuedSingleRerun()) return
       if (
         requestedObjective !== objective.value
         && objective.value
@@ -355,6 +399,7 @@ async function finishJob(
     errorMessage.value = state.error || '策略池任务失败；已完成的逐股检查点仍可复用。'
   }
   await loadHistory()
+  if (intent === 'signals') await activateQueuedSingleRerun()
 }
 
 async function loadHistory(): Promise<void> {
@@ -363,6 +408,30 @@ async function loadHistory(): Promise<void> {
   } catch (error) {
     errorMessage.value = apiMessage(error)
   }
+}
+
+async function activateQueuedSingleRerun(): Promise<boolean> {
+  const queued = history.value.find(
+    (job) => job.mode === 'single' && ['queued', 'running'].includes(job.status),
+  )
+  if (!queued) {
+    queuedSingleSymbol.value = ''
+    return false
+  }
+  queuedSingleSymbol.value = queued.market && queued.code ? `${queued.market}${queued.code}` : ''
+  activeJobId.value = queued.job_id
+  activeIntent.value = 'single'
+  activeJob.value = {
+    job_id: queued.job_id,
+    status: queued.status,
+    progress: 0,
+    metadata: { phase_label: '排队等待策略 worker' },
+  }
+  successMessage.value = queuedSingleSymbol.value
+    ? `${queuedSingleSymbol.value} 已排队，前序任务完成后开始逐股重跑。`
+    : '逐股重跑已排队，前序任务完成后开始。'
+  void pollJob(queued.job_id, 'single')
+  return true
 }
 
 async function restoreTaskResult(jobId: string): Promise<void> {
@@ -616,7 +685,12 @@ async function initialize(): Promise<void> {
   if (stored === 'annual_return' || stored === 'sharpe') {
     objective.value = stored
     await refreshPage(false)
-    const running = history.value.find((item) => item.status === 'queued' || item.status === 'running')
+    const queuedSingle = history.value.find((item) => item.mode === 'single' && item.status === 'queued')
+    queuedSingleSymbol.value = queuedSingle?.market && queuedSingle.code
+      ? `${queuedSingle.market}${queuedSingle.code}`
+      : ''
+    const running = history.value.find((item) => item.status === 'running')
+      ?? history.value.find((item) => item.status === 'queued')
     if (running) {
       activeJobId.value = running.job_id
       activeIntent.value = running.mode
@@ -809,7 +883,7 @@ onUnmounted(() => {
                     <span v-else class="empty-copy">下次全市场重选时补算</span>
                   </td>
                   <td><span v-if="entry.active_candidate?.quality?.badges?.length" class="badge-row"><i v-for="badge in entry.active_candidate.quality.badges" :key="badge">{{ badge }}</i></span><span v-else-if="entry.status === 'no_strategy'">无可计算的策略绩效</span><span v-else-if="entry.last_error" class="danger-text">{{ entry.last_error }}</span><span v-else>—</span><small v-if="entry.active_candidate?.metrics">交易数：验证 {{ entry.active_candidate.metrics.validation?.closed_trades ?? '—' }} · 留出 {{ entry.active_candidate.metrics.holdout?.closed_trades ?? '—' }} 笔</small><small v-if="entry.active_source === 'manual'">手工覆盖 · {{ objectiveLabel(objective) }}</small></td>
-                  <td><button class="text-button" @click="openEditor(entry)">编辑</button><button class="text-button" :disabled="isBusy" @click="market = entry.market; code = entry.code; void startSingleRerun()">重跑</button></td>
+                  <td><button class="text-button" @click="openEditor(entry)">编辑</button><button :data-testid="`pool-rerun-entry-${entry.code}`" class="text-button" :disabled="rerunEntryDisabled()" :title="rerunEntryTitle(entry)" @click="void rerunEntry(entry)">{{ queuedSingleSymbol === symbol(entry) ? '排队中' : '重跑' }}</button></td>
                 </tr>
                 <tr v-if="!entries.length"><td colspan="10" class="empty-copy">{{ loading ? '读取中…' : '策略池为空，开始全市场研究后会逐只写入候选。' }}</td></tr>
               </tbody>

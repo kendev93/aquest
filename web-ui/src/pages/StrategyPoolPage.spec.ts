@@ -222,6 +222,69 @@ describe('StrategyPoolPage', () => {
     expect(wrapper.get('[data-testid="pool-active-symbol-SH:600000"] [role="progressbar"]').attributes('aria-valuenow')).toBe('37')
   })
 
+  it('queues a row rerun behind the active signal scan without replacing its progress', async () => {
+    vi.useFakeTimers()
+    window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolJobs)
+      .mockResolvedValueOnce([{ job_id: 'signal-running', status: 'running', mode: 'signals' }])
+      .mockResolvedValueOnce([
+        { job_id: 'single-queued', status: 'queued', mode: 'single', market: 'SH', code: '600000' },
+        { job_id: 'signal-running', status: 'running', mode: 'signals' },
+      ])
+      .mockResolvedValueOnce([
+        { job_id: 'single-queued', status: 'running', mode: 'single', market: 'SH', code: '600000' },
+      ])
+    vi.mocked(api.getStrategyPoolJob)
+      .mockResolvedValueOnce({
+        job_id: 'signal-running',
+        status: 'running',
+        progress: 0.25,
+        phase: '扫描信号',
+        metadata: { phase_label: '已扫描 1319 / 5224 只' },
+      })
+      .mockResolvedValueOnce({
+        job_id: 'signal-running',
+        status: 'completed',
+        result: {
+          mode: 'signals',
+          objective: 'annual_return',
+          buy_signals: [],
+          sell_signals: [],
+          states: [],
+        },
+      })
+      .mockResolvedValueOnce({ job_id: 'single-queued', status: 'running' })
+    vi.mocked(api.createStrategyPoolJob).mockResolvedValueOnce({
+      job_id: 'single-queued',
+      status: 'queued',
+    })
+
+    const wrapper = mount(StrategyPoolPage)
+    try {
+      await flushPromises()
+      const rerun = wrapper.get('[data-testid="pool-rerun-entry-600000"]')
+      expect((rerun.element as HTMLButtonElement).disabled).toBe(false)
+      await rerun.trigger('click')
+      await flushPromises()
+
+      expect(api.createStrategyPoolJob).toHaveBeenCalledWith({
+        mode: 'single',
+        market: 'SH',
+        code: '600000',
+        risk_trials: 3_000,
+      })
+      expect(wrapper.get('[data-testid="pool-job-progress"]').text()).toContain('正在扫描当天信号')
+      expect(wrapper.get('[data-testid="pool-rerun-entry-600000"]').text()).toContain('排队中')
+
+      await vi.advanceTimersByTimeAsync(1_500)
+      await flushPromises()
+      expect(wrapper.get('[data-testid="pool-job-progress"]').text()).toContain('正在重跑单只股票')
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
+  })
+
   it('shows a transient polling warning without marking the running task failed', async () => {
     vi.useFakeTimers()
     vi.mocked(api.getStrategyPoolJob)

@@ -375,6 +375,25 @@ function formatNumber(value: number | null | undefined, digits = 2): string {
   return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '—'
 }
 
+function historyMetric(item: IndividualResearchHistorySummary, key: string): number | null {
+  const value = item.summary[key]
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+function formatDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return '—'
+  if (seconds < 60) return `${seconds.toFixed(1)} 秒`
+  const totalSeconds = Math.round(seconds)
+  const minutes = Math.floor(totalSeconds / 60)
+  const remainingSeconds = totalSeconds % 60
+  if (minutes < 60) {
+    return remainingSeconds ? `${minutes} 分 ${remainingSeconds} 秒` : `${minutes} 分钟`
+  }
+  const hours = Math.floor(minutes / 60)
+  const remainingMinutes = minutes % 60
+  return remainingMinutes ? `${hours} 小时 ${remainingMinutes} 分钟` : `${hours} 小时`
+}
+
 function formatSignedPercent(value: number | null | undefined): string {
   if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
   const sign = value > 0 ? '+' : ''
@@ -752,8 +771,19 @@ onMounted(async () => {
       <section class="panel individual-history" data-testid="individual-history">
         <div class="panel-heading"><div><span class="section-kicker">HISTORY</span><h2>个股研究历史</h2></div><button class="secondary-button" type="button" :disabled="historyLoading" @click="loadHistory">{{ historyLoading ? '读取中…' : '刷新' }}</button></div>
         <div v-if="!history.length" class="inline-empty">暂无个股研究历史。</div>
-        <div v-else class="table-wrap"><table><thead><tr><th>股票</th><th>完成时间</th><th>区间</th><th>候选</th><th>操作</th></tr></thead><tbody>
-          <tr v-for="item in history" :key="item.history_id"><td>{{ item.summary.name || item.summary.code || '个股研究' }}<small class="muted-code">{{ item.summary.market }} {{ item.summary.code }}</small></td><td>{{ formatTime(item.finished_at) }}</td><td>{{ item.summary.start_date ?? '—' }} → {{ item.summary.end_date ?? '—' }}</td><td>{{ item.summary.candidate_count ?? 0 }}</td><td><button class="table-link" type="button" :disabled="historyBusyId !== ''" @click="loadHistoryDetail(item.history_id)">{{ historyBusyId === item.history_id ? '载入中…' : '载入' }}</button><button class="table-link danger-link" type="button" :disabled="historyBusyId !== ''" @click="deleteHistory(item.history_id)">删除</button></td></tr>
+        <div v-else class="table-wrap"><table><thead><tr><th>股票</th><th>完成时间</th><th>区间</th><th>研究时长</th><th>候选</th><th>最高全区间年化</th><th>对应超额收益</th><th>对应夏普</th><th>对应最大回撤</th><th>操作</th></tr></thead><tbody>
+          <tr v-for="item in history" :key="item.history_id">
+            <td>{{ item.summary.name || item.summary.code || '个股研究' }}<small class="muted-code">{{ item.summary.market }} {{ item.summary.code }}</small></td>
+            <td>{{ formatTime(item.finished_at) }}</td>
+            <td>{{ item.summary.start_date ?? '—' }} → {{ item.summary.end_date ?? '—' }}</td>
+            <td>{{ formatDuration(item.duration_seconds) }}</td>
+            <td>{{ historyMetric(item, 'candidate_count') ?? 0 }}</td>
+            <td>{{ formatPercent(historyMetric(item, 'best_full_annual_return')) }}</td>
+            <td :class="{ positive: (historyMetric(item, 'best_full_excess_return') ?? 0) > 0, negative: (historyMetric(item, 'best_full_excess_return') ?? 0) < 0 }">{{ formatSignedPercent(historyMetric(item, 'best_full_excess_return')) }}</td>
+            <td>{{ formatNumber(historyMetric(item, 'best_full_sharpe'), 3) }}</td>
+            <td class="negative">{{ formatPercent(historyMetric(item, 'best_full_max_drawdown')) }}</td>
+            <td><button class="table-link" type="button" :disabled="historyBusyId !== ''" @click="loadHistoryDetail(item.history_id)">{{ historyBusyId === item.history_id ? '载入中…' : '载入' }}</button><button class="table-link danger-link" type="button" :disabled="historyBusyId !== ''" @click="deleteHistory(item.history_id)">删除</button></td>
+          </tr>
         </tbody></table></div>
       </section>
     </main>
@@ -786,6 +816,7 @@ onMounted(async () => {
 .individual-badge.warning { border-color: rgba(245, 158, 11, 0.4); color: var(--warning); }
 .individual-badge.danger, .individual-risk-high { color: var(--danger); }
 .individual-history { margin-top: 20px; }
+.individual-history table { min-width: 1380px; }
 .individual-history small { display: block; margin-top: 3px; }
 @media (max-width: 900px) { .individual-split-grid { grid-template-columns: 1fr; } }
 </style>

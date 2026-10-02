@@ -64,6 +64,69 @@ def test_pool_job_submission_single_rerun_history_and_cancel(tmp_path) -> None:
     assert missing.status_code == 422
 
 
+def test_single_rerun_queues_behind_signal_scan_but_not_another_single(tmp_path) -> None:
+    app = create_app(
+        market_data_store=_store(tmp_path),
+        strategy_worker_token=TOKEN,
+        auto_sync_enabled=False,
+    )
+    app.state.strategy_pool_store.set_manual_override(
+        "SH",
+        "600000",
+        "annual_return",
+        {
+            "candidate_id": "existing",
+            "buy_rule": {"signals": ["technical.macd"]},
+            "sell_rule": {"signals": ["technical.rsi14"]},
+            "config": {},
+        },
+    )
+
+    with TestClient(app) as client:
+        signal_scan = client.post(
+            "/api/v1/strategy-pool/jobs",
+            json={"mode": "signals", "objective": "annual_return"},
+        )
+        queued_rerun = client.post(
+            "/api/v1/strategy-pool/jobs",
+            json={"mode": "single", "market": "SH", "code": "600000"},
+        )
+        duplicate_rerun = client.post(
+            "/api/v1/strategy-pool/jobs",
+            json={"mode": "single", "market": "SH", "code": "600000"},
+        )
+        active_jobs = client.get("/api/v1/jobs/active")
+
+    assert signal_scan.status_code == 202
+    assert queued_rerun.status_code == 202
+    assert queued_rerun.json()["data"]["status"] == "queued"
+    assert duplicate_rerun.status_code == 409
+    assert len(active_jobs.json()["data"]) == 2
+
+
+def test_single_rerun_remains_blocked_during_full_market_research(tmp_path) -> None:
+    app = create_app(
+        market_data_store=_store(tmp_path),
+        strategy_worker_token=TOKEN,
+        auto_sync_enabled=False,
+    )
+    app.state.strategy_job_backend.submit(
+        "market_strategy_pool",
+        {"mode": "full", "risk_trials": 3_000},
+        description="全市场策略池研究",
+        worker_count=1,
+        metadata={"mode": "full"},
+    )
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/strategy-pool/jobs",
+            json={"mode": "single", "market": "SH", "code": "600000"},
+        )
+
+    assert response.status_code == 409
+
+
 def test_pool_manual_overrides_are_separate_by_objective_and_list_active_source(tmp_path) -> None:
     app = create_app(
         market_data_store=_store(tmp_path),
