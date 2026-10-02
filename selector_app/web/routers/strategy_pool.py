@@ -91,10 +91,16 @@ def _entry_or_404(market: str, code: str, request: Request) -> dict[str, object]
 
 
 def _pool_job_state(job_id: str, request: Request) -> dict[str, object]:
-    envelope = _job_store(request).read_request(job_id)
-    if envelope is None or envelope.get("operation") != "market_strategy_pool":
-        raise HTTPException(status_code=404, detail="策略池任务不存在")
-    state = _job_backend(request).get(job_id)
+    try:
+        envelope = _job_store(request).read_request(job_id)
+        if envelope is None or envelope.get("operation") != "market_strategy_pool":
+            raise HTTPException(status_code=404, detail="策略池任务不存在")
+        state = _job_backend(request).get(job_id)
+    except (MarketDataStoreError, OSError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="策略池任务状态暂时无法读取，请稍后自动重试",
+        ) from exc
     if state is None:
         raise HTTPException(status_code=404, detail="策略池任务不存在")
     return state
@@ -205,14 +211,25 @@ def list_strategy_pool_jobs(
 @router.get("/jobs/{job_id}")
 def get_strategy_pool_job(job_id: str, request: Request) -> dict[str, object]:
     state = _pool_job_state(job_id, request)
-    result = _job_backend(request).result(job_id) if state.get("status") == "completed" else None
+    try:
+        result = (
+            _job_backend(request).result(job_id) if state.get("status") == "completed" else None
+        )
+    except (MarketDataStoreError, OSError) as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="策略池任务结果暂时无法读取，请稍后自动重试",
+        ) from exc
     return {"data": {**state, "result": result}}
 
 
 @router.post("/jobs/{job_id}/cancel")
 def cancel_strategy_pool_job(job_id: str, request: Request) -> dict[str, object]:
     _pool_job_state(job_id, request)
-    return {"data": {"cancelled": _job_backend(request).cancel(job_id)}}
+    try:
+        return {"data": {"cancelled": _job_backend(request).cancel(job_id)}}
+    except (MarketDataStoreError, OSError) as exc:
+        raise HTTPException(status_code=503, detail="策略池取消请求暂不可用") from exc
 
 
 @router.post("/entries/{market}/{code}/overrides/{objective}")

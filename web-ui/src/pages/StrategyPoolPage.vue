@@ -39,6 +39,7 @@ const pendingSingle = ref<StrategyPoolJobResult['single_candidate'] | null>(null
 const loading = ref(false)
 const saving = ref(false)
 const errorMessage = ref('')
+const pollWarning = ref('')
 const successMessage = ref('')
 const riskTrials = ref<1_000 | 2_000 | 3_000>(3_000)
 const market = ref<'SH' | 'SZ'>('SH')
@@ -107,6 +108,7 @@ function selectObjective(value: StrategyPoolObjective): void {
   objective.value = value
   window.localStorage.setItem(OBJECTIVE_STORAGE_KEY, value)
   errorMessage.value = ''
+  pollWarning.value = ''
   successMessage.value = ''
   signalResult.value = null
   void refreshPage(true)
@@ -181,6 +183,7 @@ async function startTask(
   intent: StrategyPoolMode,
 ): Promise<void> {
   errorMessage.value = ''
+  pollWarning.value = ''
   successMessage.value = ''
   try {
     activeSignalObjective = payload.mode === 'signals' ? payload.objective ?? null : null
@@ -200,6 +203,7 @@ async function pollJob(jobId: string, intent: StrategyPoolMode): Promise<void> {
     if (token !== activePollToken || activeJobId.value !== jobId) return
     try {
       const state = await getStrategyPoolJob(jobId)
+      pollWarning.value = ''
       activeJob.value = state
       if (['completed', 'failed', 'cancelled'].includes(state.status)) {
         const result = state.result ?? null
@@ -211,7 +215,7 @@ async function pollJob(jobId: string, intent: StrategyPoolMode): Promise<void> {
         return
       }
     } catch (error) {
-      errorMessage.value = apiMessage(error)
+      pollWarning.value = `任务仍在后台运行，状态读取暂时失败：${apiMessage(error)} 正在自动重试。`
     }
     pollTimer = window.setTimeout(() => void poll(), 1_500)
   }
@@ -614,6 +618,7 @@ onUnmounted(() => {
 
         <p v-if="errorMessage" class="notice error-notice" role="alert">{{ errorMessage }}</p>
         <p v-if="successMessage" class="notice success-notice" role="status">{{ successMessage }}</p>
+        <p v-if="pollWarning && isBusy" class="notice poll-warning" role="status" data-testid="pool-poll-warning">{{ pollWarning }}</p>
 
         <section class="signal-grid">
           <article class="signal-panel panel-card" data-testid="pool-buy-signals">
@@ -791,6 +796,7 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .notice { padding: 12px 15px; border: 1px solid #30435e; }
 .error-notice { border-color: #984b50; color: #ff9b99; }
 .success-notice { border-color: #14733f; color: #43d986; }
+.poll-warning { border-color: #816b32; color: #e6ca73; }
 .candidate-apply-grid { margin-top: 12px; }
 .history-row { grid-template-columns: minmax(150px, 1fr) 2fr auto; align-items: center; border-left-color: #536b89; }
 .editor-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 24px; background: rgba(2, 7, 15, .78); }

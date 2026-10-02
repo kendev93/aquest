@@ -2,6 +2,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import * as api from '../api/strategyPool'
+import { FormulaScreenApiError } from '../api/formulaScreen'
 import type { StrategyPoolCandidate, StrategyPoolEntry, StrategyPoolSignal } from '../types'
 import StrategyPoolPage from './StrategyPoolPage.vue'
 
@@ -133,6 +134,36 @@ describe('StrategyPoolPage', () => {
 
     expect(wrapper.findAll('tbody tr')).toHaveLength(10)
     expect(wrapper.get('[data-testid="pool-pagination"]').text()).toContain('第 2 / 2 页')
+  })
+
+  it('shows a transient polling warning without marking the running task failed', async () => {
+    vi.useFakeTimers()
+    vi.mocked(api.getStrategyPoolJob)
+      .mockRejectedValueOnce(new FormulaScreenApiError('DuckDB 暂时被占用', 503))
+      .mockResolvedValueOnce({
+        job_id: 'signal-1',
+        status: 'completed',
+        result: {
+          mode: 'signals',
+          objective: 'annual_return',
+          buy_signals: [],
+          sell_signals: [],
+          states: [],
+        },
+      })
+    const wrapper = mount(StrategyPoolPage)
+    try {
+      await wrapper.get('[data-testid="pool-select-annual"]').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('[data-testid="pool-poll-warning"]').text()).toContain('自动重试')
+      expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+
+      await vi.advanceTimersByTimeAsync(1_500)
+      await flushPromises()
+      expect(wrapper.find('[data-testid="pool-poll-warning"]').exists()).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('shows a single rerun candidate as pending and applies it only after an explicit click', async () => {

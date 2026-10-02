@@ -66,6 +66,28 @@ def test_duckdb_job_store_claim_is_exclusive_and_worker_owned(tmp_path) -> None:
     assert state["progress"] == 0.5
 
 
+def test_polling_job_metadata_uses_read_only_connections(tmp_path, monkeypatch) -> None:
+    market_store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store = DuckDbStrategyJobStore(market_store)
+    store.create(
+        "job-read", operation="market_strategy_pool", payload={"mode": "full"}, description="策略池"
+    )
+    calls: list[bool | None] = []
+    open_connection = market_store._connect
+
+    def track_connection(*, read_only=None):
+        calls.append(read_only)
+        return open_connection(read_only=read_only)
+
+    monkeypatch.setattr(market_store, "_connect", track_connection)
+
+    assert store.read_request("job-read") is not None
+    assert store.read_state("job-read") is not None
+    assert store.recover_stale_running(stale_after_seconds=120) == []
+
+    assert calls == [True, True, True]
+
+
 def test_duckdb_job_store_cancel_heartbeat_and_stale_recovery(tmp_path) -> None:
     store = _store(tmp_path)
     store.create("job-1", operation="discovery", payload={}, description="实验")

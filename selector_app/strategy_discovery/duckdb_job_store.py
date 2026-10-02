@@ -108,7 +108,7 @@ class DuckDbStrategyJobStore:
 
     def read_request(self, job_id: str) -> dict[str, object] | None:
         StrategyJobStore._validate_job_id(job_id)
-        with self._connection() as connection:
+        with self._read_connection() as connection:
             row = connection.execute(
                 "SELECT request_json FROM strategy_jobs WHERE job_id = ?", [job_id]
             ).fetchone()
@@ -116,7 +116,7 @@ class DuckDbStrategyJobStore:
 
     def read_state(self, job_id: str) -> dict[str, object] | None:
         StrategyJobStore._validate_job_id(job_id)
-        with self._connection() as connection:
+        with self._read_connection() as connection:
             row = connection.execute(
                 "SELECT state_json, cancel_requested FROM strategy_jobs WHERE job_id = ?",
                 [job_id],
@@ -132,7 +132,7 @@ class DuckDbStrategyJobStore:
     def list_snapshots(self) -> list[dict[str, object]]:
         """Return all job states for migration checks and operator diagnostics."""
 
-        with self._connection() as connection:
+        with self._read_connection() as connection:
             rows = connection.execute(
                 "SELECT operation, state_json, cancel_requested "
                 "FROM strategy_jobs ORDER BY created_at, job_id"
@@ -150,7 +150,7 @@ class DuckDbStrategyJobStore:
         descriptions: Iterable[str] | None = None,
     ) -> list[dict[str, object]]:
         allowed = frozenset(descriptions) if descriptions is not None else None
-        with self._connection() as connection:
+        with self._read_connection() as connection:
             rows = connection.execute(
                 """
                 SELECT operation, state_json, cancel_requested
@@ -171,7 +171,7 @@ class DuckDbStrategyJobStore:
 
     def read_result(self, job_id: str) -> dict[str, object] | None:
         StrategyJobStore._validate_job_id(job_id)
-        with self._connection() as connection:
+        with self._read_connection() as connection:
             row = connection.execute(
                 "SELECT result_json FROM strategy_jobs WHERE job_id = ?", [job_id]
             ).fetchone()
@@ -189,7 +189,7 @@ class DuckDbStrategyJobStore:
             raise ValueError("风险寻优历史每页数量必须在 1 到 100 之间")
         if isinstance(offset, bool) or offset < 0:
             raise ValueError("风险寻优历史偏移量不能小于 0")
-        with self._connection() as connection:
+        with self._read_connection() as connection:
             total_row = connection.execute(
                 """
                 SELECT COUNT(*) FROM strategy_jobs
@@ -236,7 +236,7 @@ class DuckDbStrategyJobStore:
             raise ValueError("策略池任务历史每页数量必须在 1 到 100 之间")
         if isinstance(offset, bool) or offset < 0:
             raise ValueError("策略池任务历史偏移量不能小于 0")
-        with self._connection() as connection:
+        with self._read_connection() as connection:
             total_row = connection.execute(
                 "SELECT COUNT(*) FROM strategy_jobs WHERE operation = 'market_strategy_pool'"
             ).fetchone()
@@ -312,7 +312,7 @@ class DuckDbStrategyJobStore:
     def read_claimed_job(self, job_id: str, worker_id: str) -> dict[str, object]:
         StrategyJobStore._validate_job_id(job_id)
         selected_worker = _validate_worker_id(worker_id)
-        with self._connection() as connection:
+        with self._read_connection() as connection:
             row = connection.execute(
                 """
                 SELECT request_json, state_json, cancel_requested, worker_id
@@ -382,7 +382,7 @@ class DuckDbStrategyJobStore:
 
     def is_cancel_requested(self, job_id: str) -> bool:
         StrategyJobStore._validate_job_id(job_id)
-        with self._connection() as connection:
+        with self._read_connection() as connection:
             row = connection.execute(
                 "SELECT cancel_requested FROM strategy_jobs WHERE job_id = ?", [job_id]
             ).fetchone()
@@ -432,6 +432,16 @@ class DuckDbStrategyJobStore:
         if stale_after_seconds <= 0:
             raise ValueError("策略任务 stale 时间必须大于 0")
         now = time.time()
+        with self._read_connection() as connection:
+            heartbeats = connection.execute(
+                "SELECT heartbeat_at FROM strategy_jobs WHERE status = 'running'"
+            ).fetchall()
+        if not any(
+            isinstance(row[0], (int, float)) and now - float(row[0]) > stale_after_seconds
+            for row in heartbeats
+        ):
+            return []
+
         recovered: list[str] = []
         with _WRITE_LOCK, self._transaction() as connection:
             rows = connection.execute(
@@ -654,6 +664,14 @@ class DuckDbStrategyJobStore:
     @contextmanager
     def _connection(self) -> Iterator[duckdb.DuckDBPyConnection]:
         connection = self._store._connect()
+        try:
+            yield connection
+        finally:
+            connection.close()
+
+    @contextmanager
+    def _read_connection(self) -> Iterator[duckdb.DuckDBPyConnection]:
+        connection = self._store._connect(read_only=True)
         try:
             yield connection
         finally:
