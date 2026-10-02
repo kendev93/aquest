@@ -14,6 +14,7 @@ import {
 import { FormulaScreenApiError } from '../api/formulaScreen'
 import type {
   StrategyPoolCandidate,
+  StrategyPoolBenchmark,
   StrategyPoolEntry,
   StrategyPoolJobResult,
   StrategyPoolJobState,
@@ -51,7 +52,9 @@ const successMessage = ref('')
 const riskTrials = ref<1_000 | 2_000 | 3_000>(3_000)
 const market = ref<'SH' | 'SZ'>('SH')
 const code = ref('')
-const sortColumn = ref<'status' | 'annual_return' | 'sharpe' | 'win_rate' | 'payoff_ratio'>('status')
+const sortColumn = ref<
+  'status' | 'annual_return' | 'sharpe' | 'win_rate' | 'payoff_ratio' | 'max_drawdown' | 'validation_excess'
+>('status')
 const page = ref(1)
 const pageSize = ref(50)
 const editorEntry = ref<StrategyPoolEntry | null>(null)
@@ -400,7 +403,7 @@ async function applySingleCandidate(target: StrategyPoolObjective): Promise<void
   const marketCode = pendingSingle.value
   const candidate = marketCode?.[target === 'annual_return' ? 'annual_candidate' : 'sharpe_candidate']
   if (!marketCode || !candidate) return
-  await saveOverride(marketCode.market, marketCode.code, target, candidate)
+  await saveOverride(marketCode.market, marketCode.code, target, candidate, marketCode.benchmark ?? undefined)
   pendingSingle.value = null
 }
 
@@ -409,11 +412,12 @@ async function saveOverride(
   selectedCode: string,
   target: StrategyPoolObjective,
   candidate: StrategyPoolCandidate,
+  benchmark?: StrategyPoolBenchmark,
 ): Promise<void> {
   saving.value = true
   errorMessage.value = ''
   try {
-    await saveStrategyPoolOverride(selectedMarket, selectedCode, target, candidate)
+    await saveStrategyPoolOverride(selectedMarket, selectedCode, target, candidate, benchmark)
     successMessage.value = `${selectedMarket} ${selectedCode} 的${objectiveLabel(target)}策略已保存为手工覆盖。`
     await refreshPage(false)
   } catch (error) {
@@ -516,13 +520,35 @@ function statusOrder(value: string): number {
 
 function metricValue(
   entry: StrategyPoolEntry,
-  key: 'annual_return' | 'sharpe' | 'win_rate' | 'payoff_ratio',
+  key: 'annual_return' | 'sharpe' | 'win_rate' | 'payoff_ratio' | 'max_drawdown' | 'validation_excess',
   target: StrategyPoolObjective | null,
 ): number {
+  if (key === 'validation_excess') {
+    return phaseExcess(entry, 'validation') ?? Number.NEGATIVE_INFINITY
+  }
   const candidate = entry.active_candidate
     ?? (target ? entry.automatic_candidates[target] : null)
   const value = candidate?.metrics?.validation?.[key]
   return typeof value === 'number' && Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY
+}
+
+function phaseExcess(
+  entry: StrategyPoolEntry,
+  phase: 'validation' | 'holdout',
+): number | null {
+  const candidate = entry.active_candidate
+    ?? (objective.value ? entry.automatic_candidates[objective.value] : null)
+  const strategyReturn = candidate?.metrics?.[phase]?.total_return
+  const benchmarkReturn = entry.benchmark?.[phase]?.total_return
+  return typeof strategyReturn === 'number' && Number.isFinite(strategyReturn)
+    && typeof benchmarkReturn === 'number' && Number.isFinite(benchmarkReturn)
+    ? strategyReturn - benchmarkReturn
+    : null
+}
+
+function benchmarkReturn(entry: StrategyPoolEntry, phase: 'full_period' | 'validation' | 'holdout'): number | null {
+  const value = entry.benchmark?.[phase]?.total_return
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
 }
 
 function symbol(item: Pick<StrategyPoolEntry, 'market' | 'code'>): string {
@@ -547,6 +573,12 @@ function objectiveLabel(value: StrategyPoolObjective | null): string {
 
 function formatPercent(value: unknown): string {
   return typeof value === 'number' && Number.isFinite(value) ? `${(value * 100).toFixed(2)}%` : '—'
+}
+
+function formatSignedPercent(value: unknown): string {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? `${value >= 0 ? '+' : ''}${(value * 100).toFixed(2)}%`
+    : '—'
 }
 
 function formatNumber(value: unknown, digits = 2): string {
@@ -746,6 +778,7 @@ onUnmounted(() => {
 
         <section class="pool-table-section panel-card">
           <div class="section-heading"><div><p class="eyebrow">DAILY STATUS</p><h2>全市场标的状态 <span>{{ entries.length.toLocaleString() }}</span></h2></div><span>{{ loading ? '正在读取策略池…' : `按${objectiveLabel(objective)}策略决策` }}</span></div>
+          <p class="pool-scale-note">全段基准显示个股买入持有涨跌；验证和留出分别用同区间基准计算总收益超额。旧记录的基准会在下次全市场重选时补算。</p>
           <div class="table-scroll">
             <table class="pool-table">
               <thead><tr>
@@ -754,6 +787,8 @@ onUnmounted(() => {
                 <th><button @click="setSort('sharpe')">夏普{{ sortColumn === 'sharpe' ? ' ↓' : '' }}</button></th>
                 <th><button @click="setSort('win_rate')">胜率{{ sortColumn === 'win_rate' ? ' ↓' : '' }}</button></th>
                 <th><button @click="setSort('payoff_ratio')">盈亏比{{ sortColumn === 'payoff_ratio' ? ' ↓' : '' }}</button></th>
+                <th><button @click="setSort('max_drawdown')">最大回撤{{ sortColumn === 'max_drawdown' ? ' ↓' : '' }}</button></th>
+                <th><button @click="setSort('validation_excess')">基准涨跌 / 超额收益{{ sortColumn === 'validation_excess' ? ' ↓' : '' }}</button></th>
                 <th>策略 / 风险标记</th><th>维护</th>
               </tr></thead>
               <tbody>
@@ -764,10 +799,19 @@ onUnmounted(() => {
                   <td>{{ formatNumber(metricValue(entry, 'sharpe', objective)) }}</td>
                   <td>{{ formatPercent(metricValue(entry, 'win_rate', objective)) }}</td>
                   <td>{{ formatNumber(metricValue(entry, 'payoff_ratio', objective)) }}</td>
-                  <td><span v-if="entry.active_candidate?.quality?.badges?.length" class="badge-row"><i v-for="badge in entry.active_candidate.quality.badges" :key="badge">{{ badge }}</i></span><span v-else-if="entry.status === 'no_strategy'">无可计算的策略绩效</span><span v-else-if="entry.last_error" class="danger-text">{{ entry.last_error }}</span><span v-else>—</span><small v-if="entry.active_source === 'manual'">手工覆盖 · {{ objectiveLabel(objective) }}</small></td>
+                  <td>{{ formatPercent(metricValue(entry, 'max_drawdown', objective)) }}</td>
+                  <td :data-testid="`pool-entry-benchmark-${entry.code}`">
+                    <div v-if="entry.benchmark" class="benchmark-summary">
+                      <div>全段基准 <b>{{ formatSignedPercent(benchmarkReturn(entry, 'full_period')) }}</b></div>
+                      <div>验证基准 {{ formatSignedPercent(benchmarkReturn(entry, 'validation')) }} · 策略超额 {{ formatSignedPercent(phaseExcess(entry, 'validation')) }}</div>
+                      <div>留出基准 {{ formatSignedPercent(benchmarkReturn(entry, 'holdout')) }} · 策略超额 {{ formatSignedPercent(phaseExcess(entry, 'holdout')) }}</div>
+                    </div>
+                    <span v-else class="empty-copy">下次全市场重选时补算</span>
+                  </td>
+                  <td><span v-if="entry.active_candidate?.quality?.badges?.length" class="badge-row"><i v-for="badge in entry.active_candidate.quality.badges" :key="badge">{{ badge }}</i></span><span v-else-if="entry.status === 'no_strategy'">无可计算的策略绩效</span><span v-else-if="entry.last_error" class="danger-text">{{ entry.last_error }}</span><span v-else>—</span><small v-if="entry.active_candidate?.metrics">交易数：验证 {{ entry.active_candidate.metrics.validation?.closed_trades ?? '—' }} · 留出 {{ entry.active_candidate.metrics.holdout?.closed_trades ?? '—' }} 笔</small><small v-if="entry.active_source === 'manual'">手工覆盖 · {{ objectiveLabel(objective) }}</small></td>
                   <td><button class="text-button" @click="openEditor(entry)">编辑</button><button class="text-button" :disabled="isBusy" @click="market = entry.market; code = entry.code; void startSingleRerun()">重跑</button></td>
                 </tr>
-                <tr v-if="!entries.length"><td colspan="8" class="empty-copy">{{ loading ? '读取中…' : '策略池为空，开始全市场研究后会逐只写入候选。' }}</td></tr>
+                <tr v-if="!entries.length"><td colspan="10" class="empty-copy">{{ loading ? '读取中…' : '策略池为空，开始全市场研究后会逐只写入候选。' }}</td></tr>
               </tbody>
             </table>
           </div>
@@ -878,6 +922,8 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .pool-table th { color: #8798b1; font-size: .88rem; white-space: nowrap; }
 .pool-table th button { border: 0; padding: 0; background: none; color: inherit; font: inherit; cursor: pointer; }
 .pool-table td small { display: block; margin-top: 5px; color: #899ab3; }
+.benchmark-summary { display: grid; min-width: 250px; gap: 4px; color: #a8b8cc; font-size: .78rem; line-height: 1.45; white-space: nowrap; }
+.benchmark-summary b { color: #eff4fc; }
 .status-chip { display: inline-block; padding: 4px 8px; border: 1px solid #42516a; border-radius: 999px; color: #a9b5c7; font-size: .78rem; white-space: nowrap; }
 .status-buy, .status-buy_sell { border-color: #128f4c; color: #25d475; }
 .status-sell, .status-error { border-color: #974d50; color: #ff7775; }

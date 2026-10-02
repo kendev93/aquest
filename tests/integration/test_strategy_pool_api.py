@@ -89,7 +89,10 @@ def test_pool_manual_overrides_are_separate_by_objective_and_list_active_source(
     with TestClient(app) as client:
         annual_response = client.post(
             "/api/v1/strategy-pool/entries/SH/600000/overrides/annual_return",
-            json={"candidate": annual},
+            json={
+                "candidate": annual,
+                "benchmark": {"full_period": {"total_return": 0.2}},
+            },
         )
         sharpe_response = client.post(
             "/api/v1/strategy-pool/entries/SH/600000/overrides/sharpe",
@@ -100,6 +103,9 @@ def test_pool_manual_overrides_are_separate_by_objective_and_list_active_source(
 
     assert annual_response.status_code == 200
     assert sharpe_response.status_code == 200
+    assert (
+        annual_response.json()["data"]["benchmark"]["full_period"]["total_return"] == 0.2
+    )
     assert (
         annual_list.json()["data"]["items"][0]["active_candidate"]["candidate_id"]
         == "annual-manual"
@@ -152,9 +158,27 @@ def test_worker_checkpoints_only_accept_claimed_pool_jobs(tmp_path) -> None:
                     "name": "浦发银行",
                     "annual_candidate": candidate,
                     "sharpe_candidate": None,
+                    "benchmark": {
+                        "full_period": {"total_return": 0.25},
+                        "validation": {"total_return": 0.1},
+                        "holdout": {"total_return": 0.05},
+                    },
                     "data_fingerprint": "result-fingerprint",
                     "market_fingerprint": "bars-fingerprint",
                     "config_fingerprint": "config-fingerprint",
+                },
+            },
+        )
+        benchmark_saved = client.post(
+            f"/internal/strategy-worker/jobs/{job_id}/pool-entry",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+            json={
+                "worker_id": "worker-a",
+                "entry": {
+                    "market": "SH",
+                    "code": "600000",
+                    "benchmark_only": True,
+                    "benchmark": {"validation": {"total_return": 0.3}},
                 },
             },
         )
@@ -162,10 +186,12 @@ def test_worker_checkpoints_only_accept_claimed_pool_jobs(tmp_path) -> None:
 
     assert wrong_worker.status_code == 409
     assert saved.status_code == 200
+    assert benchmark_saved.status_code == 200
     assert (
         entries.json()["data"]["items"][0]["automatic_candidates"]["annual_return"]["candidate_id"]
         == "candidate-1"
     )
+    assert entries.json()["data"]["items"][0]["benchmark"]["validation"]["total_return"] == 0.3
 
 
 def test_signal_scan_evaluates_active_rules_on_latest_completed_bar(tmp_path) -> None:

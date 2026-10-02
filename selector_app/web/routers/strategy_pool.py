@@ -51,6 +51,7 @@ class PoolCandidateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     candidate: dict[str, object]
+    benchmark: dict[str, object] | None = None
 
     @model_validator(mode="after")
     def validate_replayable(self) -> PoolCandidateRequest:
@@ -242,7 +243,13 @@ def update_strategy_pool_override(
 ) -> dict[str, object]:
     selected = _objective(objective)
     try:
-        _pool_store(request).set_manual_override(market.upper(), code, selected, payload.candidate)
+        _pool_store(request).set_manual_override(
+            market.upper(),
+            code,
+            selected,
+            payload.candidate,
+            benchmark=payload.benchmark,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"data": _entry_or_404(market.upper(), code, request)}

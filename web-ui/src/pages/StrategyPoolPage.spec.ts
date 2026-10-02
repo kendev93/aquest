@@ -24,11 +24,17 @@ const baseCandidate: StrategyPoolCandidate = {
   metrics: {
     validation: {
       annual_return: 0.24,
+      total_return: 0.24,
       sharpe: 1.35,
       win_rate: 0.62,
       payoff_ratio: 1.8,
       max_drawdown: -0.18,
       closed_trades: 12,
+    },
+    holdout: {
+      total_return: 0.08,
+      max_drawdown: -0.1,
+      closed_trades: 4,
     },
   },
   quality: { badges: ['样本较充分'] },
@@ -44,6 +50,7 @@ function entry(code: string, score: number): StrategyPoolEntry {
         annual_return: score,
         sharpe: score * 2,
       },
+      holdout: baseCandidate.metrics?.holdout,
     },
   }
   return {
@@ -55,6 +62,12 @@ function entry(code: string, score: number): StrategyPoolEntry {
     active_candidate: candidate,
     active_source: 'automatic',
     status: 'ready',
+    benchmark: {
+      label: '个股买入持有',
+      full_period: { total_return: 0.5, annual_return: 0.2, max_drawdown: -0.2, bars: 300 },
+      validation: { total_return: 0.1, annual_return: 0.08, max_drawdown: -0.12, bars: 60 },
+      holdout: { total_return: -0.05, annual_return: -0.18, max_drawdown: -0.2, bars: 60 },
+    },
   }
 }
 
@@ -135,6 +148,29 @@ describe('StrategyPoolPage', () => {
     expect(wrapper.findAll('tbody tr')).toHaveLength(10)
     expect(wrapper.get('[data-testid="pool-pagination"]').text()).toContain('第 2 / 2 页')
   })
+
+  it(
+    'compares each strategy with its stock buy-and-hold baseline and shows drawdown and sample size',
+    async () => {
+      window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
+      const wrapper = mount(StrategyPoolPage)
+      await flushPromises()
+
+      const row = wrapper.get('[data-testid="pool-row-600000"]')
+      expect(row.get('[data-testid="pool-entry-benchmark-600000"]').text()).toContain(
+        '全段基准 +50.00%',
+      )
+      expect(row.get('[data-testid="pool-entry-benchmark-600000"]').text()).toContain(
+        '验证基准 +10.00% · 策略超额 +14.00%',
+      )
+      expect(row.get('[data-testid="pool-entry-benchmark-600000"]').text()).toContain(
+        '留出基准 -5.00% · 策略超额 +13.00%',
+      )
+      expect(wrapper.get('thead').text()).toContain('最大回撤')
+      expect(row.text()).toContain('-18.00%')
+      expect(row.text()).toContain('验证 12 · 留出 4 笔')
+    },
+  )
 
   it('shows CPU pressure and its dynamic dispatch limit during a full scan', async () => {
     window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
@@ -235,6 +271,7 @@ describe('StrategyPoolPage', () => {
           single_candidate: {
             market: 'SH',
             code: '600000',
+            benchmark: { full_period: { total_return: 0.2 } },
             annual_candidate: baseCandidate,
             sharpe_candidate: null,
           },
@@ -250,6 +287,12 @@ describe('StrategyPoolPage', () => {
     await wrapper.get('[data-testid="pool-single-candidates"] button').trigger('click')
     await flushPromises()
 
-    expect(api.saveStrategyPoolOverride).toHaveBeenCalledWith('SH', '600000', 'annual_return', baseCandidate)
+    expect(api.saveStrategyPoolOverride).toHaveBeenCalledWith(
+      'SH',
+      '600000',
+      'annual_return',
+      baseCandidate,
+      { full_period: { total_return: 0.2 } },
+    )
   })
 })

@@ -5,6 +5,7 @@ import type {
   StrategyPoolJobSummary,
   StrategyPoolObjective,
   StrategyPoolCandidate,
+  StrategyPoolBenchmark,
   StrategyPoolMode,
 } from '../types'
 
@@ -82,10 +83,14 @@ export async function saveStrategyPoolOverride(
   code: string,
   objective: StrategyPoolObjective,
   candidate: StrategyPoolCandidate,
+  benchmark?: StrategyPoolBenchmark,
 ): Promise<StrategyPoolEntry> {
   const response = await request<{ data: StrategyPoolEntry }>(
     `${API_BASE}/entries/${market}/${code}/overrides/${objective}`,
-    { method: 'POST', body: JSON.stringify({ candidate }) },
+    {
+      method: 'POST',
+      body: JSON.stringify({ candidate, ...(benchmark ? { benchmark } : {}) }),
+    },
   )
   return response.data
 }

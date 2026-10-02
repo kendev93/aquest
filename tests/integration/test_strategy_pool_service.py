@@ -131,6 +131,8 @@ def test_full_pool_research_uses_common_windows_and_saves_each_symbol_incrementa
     assert first["manual_overrides"]["annual_return"]["candidate_id"] == "kept-manual"
     assert first["automatic_candidates"]["annual_return"]["candidate_id"] == "candidate-600000"
     assert first["automatic_candidates"]["sharpe"]["candidate_ref"] == "annual_return"
+    assert first["benchmark"]["validation"]["total_return"] > 0
+    assert first["benchmark"]["holdout"]["total_return"] > 0
     assert second["source_job_id"] == "batch-1"
     assert result["holdout_portfolios"]["annual_return"]["available"] is True
     assert result["holdout_portfolios"]["sharpe"]["available"] is True
@@ -141,6 +143,12 @@ def test_full_pool_research_uses_common_windows_and_saves_each_symbol_incrementa
     assert all(config.max_positions == 5 for config in portfolio.configs)
     assert all(len(config.symbol_strategies) == 2 for config in portfolio.configs)
 
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE strategy_pool_entries SET benchmark_json = NULL "
+            "WHERE market = 'SH' AND code = '600000'"
+        )
+
     resumed = service.run(
         {"mode": "full", "risk_trials": 3_000, "horizon": 5},
         job_id="batch-2",
@@ -149,6 +157,19 @@ def test_full_pool_research_uses_common_windows_and_saves_each_symbol_incrementa
 
     assert resumed["skipped_symbols"] == 2
     assert len(individual.configs) == 2
+    assert pool_store.get("SH", "600000")["benchmark"]["validation"]["total_return"] > 0
+
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE strategy_pool_entries SET benchmark_json = NULL "
+            "WHERE market = 'SH' AND code = '600000'"
+        )
+    single = service.run(
+        {"mode": "single", "market": "SH", "code": "600000", "risk_trials": 1_000},
+        job_id="single-rerun",
+    )
+    assert single["single_candidate"]["benchmark"]["validation"]["total_return"] > 0
+    assert pool_store.get("SH", "600000")["benchmark"]["validation"]["total_return"] > 0
 
 
 def test_full_pool_research_runs_tickers_concurrently_when_memory_allows(

@@ -25,6 +25,25 @@ export interface StrategyPoolCandidate {
   candidate_ref?: StrategyPoolObjective
 }
 
+export interface StrategyPoolBenchmarkPhase {
+  start_date?: string
+  end_date?: string
+  bars?: number
+  total_return?: number | null
+  annual_return?: number | null
+  sharpe?: number | null
+  max_drawdown?: number | null
+}
+
+export interface StrategyPoolBenchmark {
+  label?: string
+  method?: string
+  full_period?: StrategyPoolBenchmarkPhase | null
+  train?: StrategyPoolBenchmarkPhase | null
+  validation?: StrategyPoolBenchmarkPhase | null
+  holdout?: StrategyPoolBenchmarkPhase | null
+}
+
 export interface StrategyPoolEntry {
   market: 'SH' | 'SZ'
   code: string
@@ -40,6 +59,7 @@ export interface StrategyPoolEntry {
   config_fingerprint?: string
   source_job_id?: string
   updated_at?: string | null
+  benchmark?: StrategyPoolBenchmark | null
 }
 
 export interface StrategyPoolSignal extends StrategyPoolMetrics {
@@ -68,6 +88,7 @@ export interface StrategyPoolJobResult {
     market: 'SH' | 'SZ'
     code: string
     name?: string
+    benchmark?: StrategyPoolBenchmark | null
     annual_candidate?: StrategyPoolCandidate | null
     sharpe_candidate?: StrategyPoolCandidate | null
     split_metadata?: Record<string, unknown>

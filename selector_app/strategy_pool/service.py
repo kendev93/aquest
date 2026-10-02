@@ -13,6 +13,9 @@ from datetime import date
 from threading import Lock, local
 from typing import Literal, cast
 
+import numpy as np
+import pandas as pd
+
 from selector_app.backtest.models import BacktestConfig
 from selector_app.backtest.service import BacktestService
 from selector_app.concurrency import visible_cpu_count
@@ -23,6 +26,7 @@ from selector_app.individual_research.service import IndividualStockResearchServ
 from selector_app.market_data.adapter import BatchMarketDataAdapter
 from selector_app.market_data.models import StockRef
 from selector_app.market_data.store import DuckDbMarketDataStore
+from selector_app.portfolio_backtest.benchmark import curve_performance
 from selector_app.portfolio_backtest.models import PortfolioBacktestConfig
 from selector_app.portfolio_backtest.service import PortfolioBacktestService
 from selector_app.screening.engine import evaluate_rule_group
@@ -320,6 +324,12 @@ class MarketStrategyPoolService:
             )
         if previous_market_fingerprint and result_market_fingerprint != previous_market_fingerprint:
             raise ValueError("研究期间本地行情发生变化，请重新运行该股票")
+        benchmark = _symbol_benchmark(
+            self._adapter,
+            ref,
+            config,
+            _mapping(result.get("split_metadata")),
+        )
         winners = summarize_objective_winners(result)
         annual_candidate = winners["annual_return"]
         sharpe_candidate = winners["sharpe"]
@@ -336,6 +346,7 @@ class MarketStrategyPoolService:
             "name": ref.name or "",
             "annual_candidate": annual_candidate,
             "sharpe_candidate": sharpe_candidate,
+            "benchmark": benchmark,
             "data_fingerprint": str(result.get("data_fingerprint") or ""),
             "market_fingerprint": result_market_fingerprint,
             "config_fingerprint": config_fingerprint,
@@ -363,7 +374,7 @@ class MarketStrategyPoolService:
         value_ids: Sequence[str],
         signal_ids: Sequence[str],
         config_fingerprint: str,
-        prior_entries: Mapping[tuple[str, str], tuple[str, str, str]],
+        prior_entries: Mapping[tuple[str, str], tuple[str, str, str, bool]],
         job_id: str,
         total_work: int,
         progress_callback: PoolProgressCallback | None,
@@ -409,6 +420,43 @@ class MarketStrategyPoolService:
                     ):
                         market_fingerprint = _market_fingerprint(self._adapter, ref)
                     if self._can_reuse(prior, market_fingerprint, config_fingerprint):
+                        if prior is not None and not prior[3] and self._pool_store is not None:
+                            try:
+                                benchmark = _symbol_benchmark(
+                                    self._adapter,
+                                    ref,
+                                    _individual_config(
+                                        ref,
+                                        calendar[0],
+                                        calendar[-1],
+                                        windows,
+                                        split_metadata,
+                                        value_ids,
+                                        signal_ids,
+                                        settings,
+                                    ),
+                                    {},
+                                )
+                                if benchmark is not None:
+                                    checkpoint = {
+                                        "market": ref.market,
+                                        "code": ref.code,
+                                        "name": ref.name or "",
+                                        "benchmark": benchmark,
+                                        "benchmark_only": True,
+                                    }
+                                    if entry_writer is not None:
+                                        entry_writer(checkpoint)
+                                    else:
+                                        self._pool_store.update_benchmark(
+                                            ref.market,
+                                            ref.code,
+                                            benchmark,
+                                        )
+                            except Exception:  # noqa: BLE001 - benchmark backfill must not fail strategy reuse
+                                logger.exception(
+                                    "全市场策略池基准回填失败: %s", symbol
+                                )
                         skipped += 1
                         completed += 1
                         coordinator.finish(index, symbol, "复用已完成标的", skipped=True)
@@ -637,6 +685,22 @@ class MarketStrategyPoolService:
                     progress=ticker_progress,
                     abort_check=abort_check,
                 )
+                benchmark = _record.get("benchmark")
+                if isinstance(benchmark, Mapping):
+                    checkpoint = {
+                        "market": ref.market,
+                        "code": ref.code,
+                        "name": ref.name or "",
+                        "benchmark": benchmark,
+                        "benchmark_only": True,
+                    }
+                    try:
+                        if entry_writer is not None:
+                            entry_writer(checkpoint)
+                        elif self._pool_store is not None:
+                            self._pool_store.update_benchmark(ref.market, ref.code, benchmark)
+                    except Exception:  # noqa: BLE001 - benchmark is auxiliary to the selected candidate
+                        logger.exception("单股策略池基准保存失败: %s", symbol)
                 completed = 1
                 _report(progress_callback, completed, total_work, "保存标的候选", symbol, 0)
             except TaskCancelledError:
@@ -1028,22 +1092,28 @@ class MarketStrategyPoolService:
             ).fetchall()
         return [row[0] for row in rows if row and isinstance(row[0], date)]
 
-    def _prior_entries(self) -> dict[tuple[str, str], tuple[str, str, str]]:
+    def _prior_entries(self) -> dict[tuple[str, str], tuple[str, str, str, bool]]:
         with self._store.read_session() as connection:
             rows = connection.execute(
                 """
-                SELECT market, code, market_fingerprint, config_fingerprint, status
+                SELECT market, code, market_fingerprint, config_fingerprint, status,
+                       benchmark_json IS NOT NULL
                 FROM strategy_pool_entries
                 """
             ).fetchall()
         return {
-            (str(row[0]), str(row[1])): (str(row[2] or ""), str(row[3] or ""), str(row[4] or ""))
+            (str(row[0]), str(row[1])): (
+                str(row[2] or ""),
+                str(row[3] or ""),
+                str(row[4] or ""),
+                bool(row[5]),
+            )
             for row in rows
         }
 
     @staticmethod
     def _can_reuse(
-        prior: tuple[str, str, str] | None,
+        prior: tuple[str, str, str, bool] | None,
         market_fingerprint: str,
         config_fingerprint: str,
     ) -> bool:
@@ -1120,6 +1190,89 @@ def _research_settings(
 
 def _market_fingerprint(adapter: BatchMarketDataAdapter, ref: StockRef) -> str:
     return frame_fingerprint(adapter.read_stock(ref))
+
+
+def _symbol_benchmark(
+    adapter: BatchMarketDataAdapter,
+    ref: StockRef,
+    config: IndividualResearchConfig,
+    split_metadata: Mapping[str, object],
+) -> dict[str, object] | None:
+    """Summarize close-to-close buy-and-hold returns for the same research windows."""
+
+    try:
+        frame = adapter.read_stock(ref)
+        return _summarize_symbol_benchmark(frame, config, split_metadata)
+    except Exception:  # noqa: BLE001 - a missing benchmark must not discard a valid strategy
+        logger.debug("计算个股基准失败: %s", ref.symbol, exc_info=True)
+        return None
+
+
+def _summarize_symbol_benchmark(
+    frame: pd.DataFrame,
+    config: IndividualResearchConfig,
+    split_metadata: Mapping[str, object],
+) -> dict[str, object] | None:
+    if frame.empty or "date" not in frame or "close" not in frame:
+        return None
+
+    dates = pd.to_datetime(frame["date"], errors="coerce")
+    closes = pd.to_numeric(frame["close"], errors="coerce").to_numpy(dtype=float)
+    valid = dates.notna().to_numpy() & np.isfinite(closes) & (closes > 0)
+    if int(valid.sum()) < 2:
+        return None
+    bars = pd.DataFrame(
+        {
+            "date": dates[valid].dt.date.to_numpy(),
+            "close": closes[valid],
+        }
+    ).sort_values("date")
+
+    windows = dict(config.split_windows or {})
+    observed_windows = _mapping(split_metadata.get("observed_windows"))
+    for phase in ("train", "validation", "holdout"):
+        observed = _mapping(observed_windows.get(phase))
+        start = _parse_date(observed.get("start_date"))
+        end = _parse_date(observed.get("end_date"))
+        if start is not None and end is not None:
+            windows[phase] = (start, end)
+
+    periods: dict[str, tuple[date, date]] = {
+        "full_period": (config.start_date, config.end_date),
+        **windows,
+    }
+    benchmark: dict[str, object] = {
+        "label": "个股买入持有",
+        "method": "同区间首尾收盘价持有，未计交易费用",
+    }
+    for phase, (start, end) in periods.items():
+        selected = bars.loc[bars["date"].between(start, end)]
+        if len(selected) < 2:
+            benchmark[phase] = None
+            continue
+        prices = selected["close"].to_numpy(dtype=float)
+        performance = curve_performance(prices / prices[0] * config.initial_cash)
+        benchmark[phase] = {
+            "start_date": selected["date"].iloc[0].isoformat(),
+            "end_date": selected["date"].iloc[-1].isoformat(),
+            "bars": len(selected),
+            **{
+                key: performance.get(key)
+                for key in ("total_return", "annual_return", "sharpe", "max_drawdown")
+            },
+        }
+    return benchmark
+
+
+def _parse_date(value: object) -> date | None:
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value[:10])
+        except ValueError:
+            return None
+    return None
 
 
 def _same_candidate(

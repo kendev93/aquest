@@ -541,6 +541,7 @@ class _DuckDbStoreBase:
                     config_fingerprint VARCHAR NOT NULL DEFAULT '',
                     source_job_id VARCHAR NOT NULL DEFAULT '',
                     updated_at TIMESTAMP NOT NULL,
+                    benchmark_json VARCHAR,
                     PRIMARY KEY (market, code)
                 )
                 """

@@ -54,10 +54,11 @@ describe('strategy pool API', () => {
     vi.stubGlobal('fetch', fetch)
 
     const job = await getStrategyPoolJob('j1')
-    await saveStrategyPoolOverride('SH', '600000', 'annual_return', candidate)
+    const benchmark = { full_period: { total_return: 0.2 } }
+    await saveStrategyPoolOverride('SH', '600000', 'annual_return', candidate, benchmark)
 
     expect(job.result?.mode).toBe('single')
     expect(fetch.mock.calls[1]?.[0]).toBe('/api/v1/strategy-pool/entries/SH/600000/overrides/annual_return')
-    expect(JSON.parse(String(fetch.mock.calls[1]?.[1]?.body))).toEqual({ candidate })
+    expect(JSON.parse(String(fetch.mock.calls[1]?.[1]?.body))).toEqual({ candidate, benchmark })
   })
 })

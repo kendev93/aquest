@@ -23,9 +23,12 @@ class DuckDbStrategyPoolStore:
         self._store = store
 
     def initialize(self) -> None:
-        # Main database initialization owns the idempotent schema creation.
+        # Main database initialization creates the table; this additive DDL upgrades old pools.
         with self._connection() as connection:
             connection.execute("SELECT 1 FROM strategy_pool_entries LIMIT 0")
+            connection.execute(
+                "ALTER TABLE strategy_pool_entries ADD COLUMN IF NOT EXISTS benchmark_json VARCHAR"
+            )
 
     def get(self, market: str, code: str) -> dict[str, object] | None:
         with self._connection() as connection:
@@ -34,7 +37,7 @@ class DuckDbStrategyPoolStore:
                 SELECT market, code, name, annual_candidate_json, sharpe_candidate_json,
                        manual_annual_json, manual_sharpe_json, status, last_error,
                        data_fingerprint, market_fingerprint, config_fingerprint,
-                       source_job_id, updated_at
+                       source_job_id, updated_at, benchmark_json
                 FROM strategy_pool_entries WHERE market = ? AND code = ?
                 """,
                 [market, code],
@@ -48,7 +51,7 @@ class DuckDbStrategyPoolStore:
                 SELECT market, code, name, annual_candidate_json, sharpe_candidate_json,
                        manual_annual_json, manual_sharpe_json, status, last_error,
                        data_fingerprint, market_fingerprint, config_fingerprint,
-                       source_job_id, updated_at
+                       source_job_id, updated_at, benchmark_json
                 FROM strategy_pool_entries ORDER BY market, code
                 """
             ).fetchall()
@@ -66,6 +69,7 @@ class DuckDbStrategyPoolStore:
         config_fingerprint: str,
         source_job_id: str,
         market_fingerprint: str = "",
+        benchmark: Mapping[str, object] | None = None,
     ) -> None:
         _validate_symbol(market, code)
         candidates = [annual_candidate, sharpe_candidate]
@@ -83,8 +87,8 @@ class DuckDbStrategyPoolStore:
                 INSERT INTO strategy_pool_entries (
                     market, code, name, annual_candidate_json, sharpe_candidate_json,
                     status, last_error, data_fingerprint, market_fingerprint, config_fingerprint,
-                    source_job_id, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)
+                    source_job_id, updated_at, benchmark_json
+                ) VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (market, code) DO UPDATE SET
                     name = excluded.name,
                     annual_candidate_json = excluded.annual_candidate_json,
@@ -95,7 +99,8 @@ class DuckDbStrategyPoolStore:
                     market_fingerprint = excluded.market_fingerprint,
                     config_fingerprint = excluded.config_fingerprint,
                     source_job_id = excluded.source_job_id,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    benchmark_json = excluded.benchmark_json
                 """,
                 [
                     market,
@@ -109,6 +114,28 @@ class DuckDbStrategyPoolStore:
                     config_fingerprint,
                     source_job_id,
                     now,
+                    _dump_json(benchmark),
+                ],
+            )
+
+    def update_benchmark(
+        self,
+        market: str,
+        code: str,
+        benchmark: Mapping[str, object],
+    ) -> None:
+        """Backfill benchmark metrics without rewriting saved strategy choices."""
+
+        _validate_symbol(market, code)
+        with _WRITE_LOCK, self._transaction() as connection:
+            connection.execute(
+                "UPDATE strategy_pool_entries SET benchmark_json = ?, updated_at = ? "
+                "WHERE market = ? AND code = ?",
+                [
+                    _dump_json(benchmark),
+                    datetime.now(timezone.utc).replace(tzinfo=None),
+                    market,
+                    code,
                 ],
             )
 
@@ -138,8 +165,14 @@ class DuckDbStrategyPoolStore:
         if isinstance(error, str) and error:
             self.record_symbol_error(market, code, error, source_job_id=source_job_id)
             return
+        if entry.get("benchmark_only"):
+            benchmark = entry.get("benchmark")
+            if isinstance(benchmark, Mapping):
+                self.update_benchmark(market, code, benchmark)
+            return
         annual = entry.get("annual_candidate")
         sharpe = entry.get("sharpe_candidate")
+        benchmark = entry.get("benchmark")
         self.upsert_automatic(
             market=market,
             code=code,
@@ -150,6 +183,7 @@ class DuckDbStrategyPoolStore:
             market_fingerprint=str(entry.get("market_fingerprint") or ""),
             config_fingerprint=str(entry.get("config_fingerprint") or ""),
             source_job_id=source_job_id,
+            benchmark=benchmark if isinstance(benchmark, Mapping) else None,
         )
 
     def set_manual_override(
@@ -158,6 +192,7 @@ class DuckDbStrategyPoolStore:
         code: str,
         objective: Objective,
         candidate: Mapping[str, object],
+        benchmark: Mapping[str, object] | None = None,
     ) -> None:
         _validate_symbol(market, code)
         _validate_objective(objective)
@@ -167,12 +202,16 @@ class DuckDbStrategyPoolStore:
             connection.execute(
                 f"""
                 INSERT INTO strategy_pool_entries (
-                    market, code, name, {column}, status, updated_at
-                ) VALUES (?, ?, '', ?, 'partial', ?)
+                    market, code, name, {column}, benchmark_json, status, updated_at
+                ) VALUES (?, ?, '', ?, ?, 'partial', ?)
                 ON CONFLICT (market, code) DO UPDATE SET
-                    {column} = excluded.{column}, updated_at = excluded.updated_at
+                    {column} = excluded.{column},
+                    benchmark_json = COALESCE(
+                        excluded.benchmark_json, strategy_pool_entries.benchmark_json
+                    ),
+                    updated_at = excluded.updated_at
                 """,
-                [market, code, _dump_json(candidate), now],
+                [market, code, _dump_json(candidate), _dump_json(benchmark), now],
             )
 
     def clear_manual_override(self, market: str, code: str, objective: Objective) -> None:
@@ -245,6 +284,7 @@ def _row_to_entry(row: object) -> dict[str, object]:
         "config_fingerprint": row[11],
         "source_job_id": row[12],
         "updated_at": str(row[13]) if row[13] is not None else None,
+        "benchmark": _load_json(row[14]),
     }
 
 

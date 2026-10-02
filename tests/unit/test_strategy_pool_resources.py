@@ -49,12 +49,12 @@ def test_scheduler_pauses_new_work_under_memory_pressure_but_never_stalls_empty_
     ) == 1
 
 
-def test_pool_worker_cap_defaults_to_six_and_respects_cpu_affinity(
+def test_pool_worker_cap_defaults_to_four_and_respects_cpu_affinity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("SELECTOR_STRATEGY_POOL_MAX_WORKERS", raising=False)
     monkeypatch.setattr("selector_app.strategy_pool.resources.visible_cpu_count", lambda: 8)
-    assert pool_worker_cap() == 6
+    assert pool_worker_cap() == 4
 
     monkeypatch.setenv("SELECTOR_STRATEGY_POOL_MAX_WORKERS", "8")
     assert pool_worker_cap() == 8
