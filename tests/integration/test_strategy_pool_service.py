@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+from threading import Barrier
 from types import SimpleNamespace
 
 import numpy as np
@@ -8,6 +9,7 @@ import pandas as pd
 
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
 from selector_app.market_data.store import DuckDbMarketDataStore
+from selector_app.strategy_pool.resources import GiB, MemoryStatus
 from selector_app.strategy_pool.service import MarketStrategyPoolService
 from selector_app.strategy_pool.store import DuckDbStrategyPoolStore
 
@@ -147,3 +149,59 @@ def test_full_pool_research_uses_common_windows_and_saves_each_symbol_incrementa
 
     assert resumed["skipped_symbols"] == 2
     assert len(individual.configs) == 2
+
+
+def test_full_pool_research_runs_tickers_concurrently_when_memory_allows(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "parallel.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars("2020-01-01", 60))
+    store.replace_local_bars("SZ", "000001", "stock", _bars("2020-01-11", 50))
+    adapter = DuckDbMarketDataAdapter(store)
+    barrier = Barrier(2, timeout=5)
+
+    class ConcurrentFake:
+        def run(self, config, progress_callback=None, abort_check=None):
+            barrier.wait()
+            candidate = {
+                "candidate_id": config.code,
+                "candidate_hash": config.code,
+                "buy_rule": {"signals": ["technical.macd"]},
+                "sell_rule": {"signals": ["technical.rsi14"]},
+                "config": {},
+                "metrics": {
+                    "validation": {
+                        "annual_return": 0.1,
+                        "sharpe": 1.0,
+                        "max_drawdown": -0.1,
+                    }
+                },
+            }
+            return {
+                "market_fingerprint": f"bars-{config.code}",
+                "results_by_return": [candidate],
+                "results_by_sharpe": [candidate],
+            }
+
+    monkeypatch.setattr(
+        "selector_app.strategy_pool.service.memory_status",
+        lambda: MemoryStatus(total_bytes=8 * GiB, available_bytes=8 * GiB, source="test"),
+    )
+    saved: list[dict[str, object]] = []
+    service = MarketStrategyPoolService(
+        store=store,
+        adapter=adapter,
+        individual_service=ConcurrentFake(),
+        individual_service_factory=ConcurrentFake,
+        max_pool_workers=2,
+    )
+
+    result = service.run(
+        {"mode": "full", "risk_trials": 1_000, "horizon": 5},
+        job_id="parallel-job",
+        entry_writer=saved.append,
+    )
+
+    assert result["completed_symbols"] == 2
+    assert len(saved) == 2

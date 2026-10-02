@@ -7,8 +7,9 @@ import signal
 import time
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
+from pathlib import Path
 from tempfile import TemporaryDirectory
-from threading import Event, Thread
+from threading import Event, Thread, get_ident
 from typing import Literal, Protocol, cast
 
 from selector_app.backtest.service import BacktestService
@@ -400,12 +401,32 @@ def main() -> None:
                 adapter=market_adapter,
                 indicator_cache=pool_indicator_cache,
             )
-            pool_individual_service = IndividualStockResearchService(
-                adapter=market_adapter,
-                backtest_service=pool_backtest_service,
-                portfolio_service=pool_portfolio_service,
-                strategy_service=strategy_service,
-            )
+
+            def pool_individual_service_factory() -> IndividualStockResearchService:
+                per_thread_snapshots = DiscoverySnapshotCache(
+                    Path(cache_root) / f"pool-worker-{get_ident()}"
+                )
+                per_thread_strategy_service = StrategyDiscoveryService(
+                    store=store,
+                    market_data_adapter=DuckDbMarketDataAdapter(store),
+                    evaluation_workers=1,
+                    persist_indicator_cache=False,
+                    discovery_snapshot_cache=per_thread_snapshots,
+                )
+                return IndividualStockResearchService(
+                    adapter=market_adapter,
+                    backtest_service=BacktestService(
+                        adapter=market_adapter,
+                        indicator_cache=pool_indicator_cache,
+                    ),
+                    portfolio_service=PortfolioBacktestService(
+                        adapter=market_adapter,
+                        indicator_cache=pool_indicator_cache,
+                    ),
+                    strategy_service=per_thread_strategy_service,
+                )
+
+            pool_individual_service = pool_individual_service_factory()
             worker = StrategyDiscoveryWorker(
                 job_client,
                 strategy_service,
@@ -416,6 +437,7 @@ def main() -> None:
                     backtest_service=pool_backtest_service,
                     pool_store=DuckDbStrategyPoolStore(store),
                     portfolio_service=pool_portfolio_service,
+                    individual_service_factory=pool_individual_service_factory,
                 ),
                 service_factory=lambda worker_count: StrategyDiscoveryService(
                     store=store,

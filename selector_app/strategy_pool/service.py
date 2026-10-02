@@ -5,8 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import time
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import date
+from threading import Lock, local
 from typing import Literal, cast
 
 from selector_app.backtest.models import BacktestConfig
@@ -26,6 +29,12 @@ from selector_app.screening.rules import RuleGroup
 from selector_app.strategy_discovery.catalog import default_indicator_catalog
 from selector_app.web.schemas.screening import RuleGroupRequest
 
+from .resources import (
+    estimate_ticker_working_set_bytes,
+    memory_bounded_worker_count,
+    memory_status,
+    pool_worker_cap,
+)
 from .selection import common_calendar_windows, summarize_objective_winners
 from .store import DuckDbStrategyPoolStore
 
@@ -42,16 +51,27 @@ class _TickerProgress:
         total: int,
         symbol: str,
         callback: PoolProgressCallback | None,
+        coordinator: _PoolProgressCoordinator | None = None,
     ) -> None:
         self._index = index
         self._total = total
         self._symbol = symbol
         self._callback = callback
+        self._coordinator = coordinator
         self._phase = "研究单只股票"
         self._phase_label = "准备开始"
 
     def __call__(self, current: int, total: int) -> None:
         fraction = min(1.0, max(0.0, current / total if total else 1.0))
+        if self._coordinator is not None:
+            self._coordinator.ticker_progress(
+                self._index,
+                self._symbol,
+                fraction,
+                self._phase,
+                self._phase_label,
+            )
+            return
         overall = (self._index - 1 + fraction) / max(1, self._total)
         if self._callback is not None:
             self._callback(
@@ -75,8 +95,117 @@ class _TickerProgress:
             self._phase_label = label
 
 
+class _PoolProgressCoordinator:
+    """Serialize worker progress and aggregate independent ticker fractions."""
+
+    def __init__(
+        self,
+        *,
+        total_symbols: int,
+        total_work: int,
+        callback: PoolProgressCallback | None,
+        maximum_workers: int,
+    ) -> None:
+        self._total_symbols = total_symbols
+        self._total_work = total_work
+        self._callback = callback
+        self._maximum_workers = maximum_workers
+        self._memory_worker_limit = maximum_workers
+        self._available_memory_mb: int | None = None
+        self._completed = 0
+        self._finished = 0
+        self._skipped = 0
+        self._failed = 0
+        self._fractions: dict[int, float] = {}
+        self._last_emit_at = 0.0
+        self._lock = Lock()
+
+    def set_memory_budget(self, worker_limit: int, available_bytes: int | None) -> None:
+        with self._lock:
+            self._memory_worker_limit = worker_limit
+            self._available_memory_mb = (
+                max(0, available_bytes // (1024**2)) if available_bytes is not None else None
+            )
+
+    def ticker_progress(
+        self,
+        index: int,
+        symbol: str,
+        fraction: float,
+        phase: str,
+        phase_label: str,
+    ) -> None:
+        with self._lock:
+            self._fractions[index] = fraction
+            now = time.monotonic()
+            if now - self._last_emit_at < 0.5:
+                return
+            fractional_work = min(
+                self._total_symbols,
+                self._finished + sum(self._fractions.values()),
+            )
+            self._emit(
+                int(fractional_work),
+                phase,
+                {
+                    "overall_progress": fractional_work / max(1, self._total_work),
+                    "current_symbol": symbol,
+                    "phase_label": phase_label,
+                    "completed_symbols": self._completed,
+                    "failed_symbols": self._failed,
+                    "skipped_symbols": self._skipped,
+                    "total_symbols": self._total_symbols,
+                    "current_parallelism": len(self._fractions),
+                    "maximum_parallelism": self._maximum_workers,
+                    "memory_worker_limit": self._memory_worker_limit,
+                    "available_memory_mb": self._available_memory_mb,
+                },
+            )
+            self._last_emit_at = now
+
+    def finish(
+        self,
+        index: int,
+        symbol: str,
+        phase: str,
+        *,
+        skipped: bool = False,
+        failed: bool = False,
+    ) -> None:
+        with self._lock:
+            self._fractions.pop(index, None)
+            self._finished += 1
+            if failed:
+                self._failed += 1
+            else:
+                self._completed += 1
+                if skipped:
+                    self._skipped += 1
+            self._emit(
+                self._finished,
+                phase,
+                {
+                    "overall_progress": self._finished / max(1, self._total_work),
+                    "current_symbol": symbol,
+                    "completed_symbols": self._completed,
+                    "total_symbols": self._total_symbols,
+                    "skipped_symbols": self._skipped,
+                    "failed_symbols": self._failed,
+                    "current_parallelism": len(self._fractions),
+                    "maximum_parallelism": self._maximum_workers,
+                    "memory_worker_limit": self._memory_worker_limit,
+                    "available_memory_mb": self._available_memory_mb,
+                },
+            )
+            self._last_emit_at = time.monotonic()
+
+    def _emit(self, current: int, phase: str, metadata: Mapping[str, object]) -> None:
+        if self._callback is not None:
+            self._callback(current, self._total_work, phase, metadata)
+
+
 class MarketStrategyPoolService:
-    """Research local A shares sequentially and checkpoint each completed symbol."""
+    """Research local A shares with memory-bounded concurrency and checkpoints."""
 
     def __init__(
         self,
@@ -87,6 +216,8 @@ class MarketStrategyPoolService:
         backtest_service: BacktestService | None = None,
         pool_store: DuckDbStrategyPoolStore | None = None,
         portfolio_service: PortfolioBacktestService | None = None,
+        individual_service_factory: Callable[[], IndividualStockResearchService] | None = None,
+        max_pool_workers: int | None = None,
     ) -> None:
         self._store = store
         self._adapter = adapter
@@ -94,6 +225,228 @@ class MarketStrategyPoolService:
         self._backtest_service = backtest_service
         self._pool_store = pool_store
         self._portfolio_service = portfolio_service
+        self._individual_service_factory = individual_service_factory
+        self._research_local = local()
+        self._max_pool_workers = (
+            1
+            if individual_service_factory is None
+            else pool_worker_cap()
+            if max_pool_workers is None
+            else max_pool_workers
+        )
+        if not 1 <= self._max_pool_workers <= 8:
+            raise ValueError("全市场策略池最大并发数必须在 1 到 8 之间")
+
+    def _individual_service_for_thread(self) -> IndividualStockResearchService:
+        if self._individual_service_factory is None:
+            return self._individual_service
+        service = getattr(self._research_local, "service", None)
+        if service is None:
+            service = self._individual_service_factory()
+            self._research_local.service = service
+        return cast(IndividualStockResearchService, service)
+
+    def _research_symbol(
+        self,
+        ref: StockRef,
+        config: IndividualResearchConfig,
+        *,
+        job_id: str,
+        mode: Literal["full", "single"],
+        config_fingerprint: str,
+        previous_market_fingerprint: str,
+        progress: _TickerProgress,
+        abort_check: Callable[[], bool] | None,
+    ) -> tuple[dict[str, object], dict[str, object] | None]:
+        result = self._individual_service_for_thread().run(config, progress, abort_check)
+        result_market_fingerprint = result.get("market_fingerprint")
+        if not isinstance(result_market_fingerprint, str) or not result_market_fingerprint:
+            result_market_fingerprint = previous_market_fingerprint or _market_fingerprint(
+                self._adapter, ref
+            )
+        if previous_market_fingerprint and result_market_fingerprint != previous_market_fingerprint:
+            raise ValueError("研究期间本地行情发生变化，请重新运行该股票")
+        winners = summarize_objective_winners(result)
+        annual_candidate = winners["annual_return"]
+        sharpe_candidate = winners["sharpe"]
+        if mode == "full" and _same_candidate(annual_candidate, sharpe_candidate):
+            sharpe_candidate = {
+                "candidate_ref": "annual_return",
+                "candidate_id": annual_candidate.get("candidate_id")
+                if annual_candidate is not None
+                else None,
+            }
+        record: dict[str, object] = {
+            "market": ref.market,
+            "code": ref.code,
+            "name": ref.name or "",
+            "annual_candidate": annual_candidate,
+            "sharpe_candidate": sharpe_candidate,
+            "data_fingerprint": str(result.get("data_fingerprint") or ""),
+            "market_fingerprint": result_market_fingerprint,
+            "config_fingerprint": config_fingerprint,
+            "source_job_id": job_id,
+        }
+        single_result = None
+        if mode == "single":
+            single_result = {
+                **record,
+                "split_metadata": result.get("split_metadata"),
+                "date_range": result.get("date_range"),
+                "condition_candidates": result.get("condition_candidates"),
+                "risk_trials_per_rule_set": result.get("risk_trials_per_rule_set"),
+            }
+        return record, single_result
+
+    def _run_full_research(
+        self,
+        refs: list[StockRef],
+        *,
+        calendar: Sequence[date],
+        windows: Mapping[str, tuple[date, date]],
+        split_metadata: Mapping[str, object],
+        settings: Mapping[str, object],
+        value_ids: Sequence[str],
+        signal_ids: Sequence[str],
+        config_fingerprint: str,
+        prior_entries: Mapping[tuple[str, str], tuple[str, str, str]],
+        job_id: str,
+        total_work: int,
+        progress_callback: PoolProgressCallback | None,
+        abort_check: Callable[[], bool] | None,
+        entry_writer: PoolEntryWriter | None,
+    ) -> tuple[int, int, int, list[dict[str, str]]]:
+        total = len(refs)
+        coordinator = _PoolProgressCoordinator(
+            total_symbols=total,
+            total_work=total_work,
+            callback=progress_callback,
+            maximum_workers=self._max_pool_workers,
+        )
+        errors: list[dict[str, str]] = []
+        completed = 0
+        skipped = 0
+        failed = 0
+        next_index = 0
+        active: dict[
+            Future[tuple[dict[str, object], dict[str, object] | None]],
+            tuple[int, StockRef],
+        ] = {}
+        with ThreadPoolExecutor(
+            max_workers=self._max_pool_workers,
+            thread_name_prefix="strategy-pool-symbol",
+        ) as executor:
+            while next_index < total or active:
+                if abort_check is not None and abort_check():
+                    for future in active:
+                        future.cancel()
+                    raise TaskCancelledError("全市场策略池研究已取消")
+
+                while next_index < total:
+                    ref = refs[next_index]
+                    index = next_index + 1
+                    symbol = f"{ref.market}:{ref.code}"
+                    prior = prior_entries.get((ref.market, ref.code))
+                    market_fingerprint = ""
+                    if (
+                        prior is not None
+                        and prior[1] == config_fingerprint
+                        and prior[2] in {"ready", "partial", "no_strategy"}
+                    ):
+                        market_fingerprint = _market_fingerprint(self._adapter, ref)
+                    if self._can_reuse(prior, market_fingerprint, config_fingerprint):
+                        skipped += 1
+                        completed += 1
+                        coordinator.finish(index, symbol, "复用已完成标的", skipped=True)
+                        next_index += 1
+                        continue
+
+                    lookahead = refs[next_index : next_index + self._max_pool_workers]
+                    estimated_bytes = max(
+                        estimate_ticker_working_set_bytes(
+                            max(0, int(candidate.bar_count or len(calendar))),
+                            value_count=len(value_ids),
+                            signal_count=len(signal_ids),
+                        )
+                        for candidate in lookahead
+                    )
+                    memory = memory_status()
+                    target_workers = memory_bounded_worker_count(
+                        status=memory,
+                        estimated_worker_bytes=estimated_bytes,
+                        maximum_workers=self._max_pool_workers,
+                        active_workers=len(active),
+                    )
+                    coordinator.set_memory_budget(target_workers, memory.available_bytes)
+                    if len(active) >= target_workers:
+                        break
+
+                    config = _individual_config(
+                        ref,
+                        calendar[0],
+                        calendar[-1],
+                        windows,
+                        split_metadata,
+                        value_ids,
+                        signal_ids,
+                        settings,
+                    )
+                    ticker_progress = _TickerProgress(
+                        index=index,
+                        total=total_work,
+                        symbol=symbol,
+                        callback=None,
+                        coordinator=coordinator,
+                    )
+                    future = executor.submit(
+                        self._research_symbol,
+                        ref,
+                        config,
+                        job_id=job_id,
+                        mode="full",
+                        config_fingerprint=config_fingerprint,
+                        previous_market_fingerprint=market_fingerprint,
+                        progress=ticker_progress,
+                        abort_check=abort_check,
+                    )
+                    active[future] = (index, ref)
+                    next_index += 1
+
+                if not active:
+                    continue
+                finished, _pending = wait(
+                    active,
+                    timeout=0.5,
+                    return_when=FIRST_COMPLETED,
+                )
+                for future in finished:
+                    index, ref = active.pop(future)
+                    symbol = f"{ref.market}:{ref.code}"
+                    try:
+                        record, _single_result = future.result()
+                        if entry_writer is not None:
+                            entry_writer(record)
+                    except TaskCancelledError:
+                        raise
+                    except Exception as exc:  # noqa: BLE001 - isolate stock failures
+                        failed += 1
+                        message = str(exc).strip()[:500] or type(exc).__name__
+                        errors.append({"symbol": symbol, "error": message})
+                        if entry_writer is not None:
+                            entry_writer(
+                                {
+                                    "market": ref.market,
+                                    "code": ref.code,
+                                    "name": ref.name or "",
+                                    "error": message,
+                                    "source_job_id": job_id,
+                                }
+                            )
+                        coordinator.finish(index, symbol, "单只股票失败，继续", failed=True)
+                    else:
+                        completed += 1
+                        coordinator.finish(index, symbol, "保存标的策略")
+        return completed, skipped, failed, errors
 
     def run(
         self,
@@ -144,8 +497,7 @@ class MarketStrategyPoolService:
         settings["value_ids"] = list(catalog.value_ids)
         settings["signal_ids"] = list(catalog.signal_ids)
         formula_ids = {
-            value_id.split(".", 1)[0]
-            for value_id in (*catalog.value_ids, *catalog.signal_ids)
+            value_id.split(".", 1)[0] for value_id in (*catalog.value_ids, *catalog.signal_ids)
         }
         settings["formula_versions"] = {
             formula_id: FORMULA_REGISTRY.formula(formula_id).cache_version
@@ -155,37 +507,33 @@ class MarketStrategyPoolService:
         config_fingerprint = _fingerprint(settings)
         prior_entries = self._prior_entries() if mode == "full" else {}
         started = date.today()
+        single_result: dict[str, object] | None = None
         completed = 0
         skipped = 0
         failed = 0
         errors: list[dict[str, str]] = []
-        single_result: dict[str, object] | None = None
         total = len(refs)
         total_work = total + (2 if mode == "full" else 0)
-
-        for index, ref in enumerate(refs, start=1):
-            if abort_check is not None and abort_check():
-                raise TaskCancelledError("全市场策略池研究已取消")
+        if mode == "full":
+            completed, skipped, failed, errors = self._run_full_research(
+                refs,
+                calendar=calendar,
+                windows=windows,
+                split_metadata=metadata,
+                settings=settings,
+                value_ids=catalog.value_ids,
+                signal_ids=catalog.signal_ids,
+                config_fingerprint=config_fingerprint,
+                prior_entries=prior_entries,
+                job_id=job_id,
+                total_work=total_work,
+                progress_callback=progress_callback,
+                abort_check=abort_check,
+                entry_writer=entry_writer,
+            )
+        else:
+            ref = refs[0]
             symbol = f"{ref.market}:{ref.code}"
-            prior = prior_entries.get((ref.market, ref.code))
-            market_fingerprint = ""
-            if (
-                mode == "full"
-                and prior is not None
-                and prior[1] == config_fingerprint
-                and prior[2] in {"ready", "partial", "no_strategy"}
-            ):
-                market_fingerprint = _market_fingerprint(self._adapter, ref)
-            if mode == "full" and self._can_reuse(
-                prior,
-                market_fingerprint,
-                config_fingerprint,
-            ):
-                skipped += 1
-                completed += 1
-                _report(progress_callback, completed, total_work, "复用已完成标的", symbol, skipped)
-                continue
-
             config = _individual_config(
                 ref,
                 calendar[0],
@@ -197,86 +545,28 @@ class MarketStrategyPoolService:
                 settings,
             )
             ticker_progress = _TickerProgress(
-                index=index,
+                index=1,
                 total=total_work,
                 symbol=symbol,
                 callback=progress_callback,
             )
             try:
-                result = self._individual_service.run(
+                _record, single_result = self._research_symbol(
+                    ref,
                     config,
-                    ticker_progress,
-                    abort_check,
+                    job_id=job_id,
+                    mode="single",
+                    config_fingerprint=config_fingerprint,
+                    previous_market_fingerprint="",
+                    progress=ticker_progress,
+                    abort_check=abort_check,
                 )
-                result_market_fingerprint = result.get("market_fingerprint")
-                if not isinstance(result_market_fingerprint, str) or not result_market_fingerprint:
-                    result_market_fingerprint = market_fingerprint or _market_fingerprint(
-                        self._adapter, ref
-                    )
-                if market_fingerprint and result_market_fingerprint != market_fingerprint:
-                    raise ValueError("研究期间本地行情发生变化，请重新运行该股票")
-                market_fingerprint = result_market_fingerprint
-                winners = summarize_objective_winners(result)
-                annual_candidate = winners["annual_return"]
-                sharpe_candidate = winners["sharpe"]
-                if mode == "full" and _same_candidate(annual_candidate, sharpe_candidate):
-                    sharpe_candidate = {
-                        "candidate_ref": "annual_return",
-                        "candidate_id": annual_candidate.get("candidate_id")
-                        if annual_candidate is not None
-                        else None,
-                    }
-                record: dict[str, object] = {
-                    "market": ref.market,
-                    "code": ref.code,
-                    "name": ref.name or "",
-                    "annual_candidate": annual_candidate,
-                    "sharpe_candidate": sharpe_candidate,
-                    "data_fingerprint": str(result.get("data_fingerprint") or ""),
-                    "market_fingerprint": market_fingerprint,
-                    "config_fingerprint": config_fingerprint,
-                    "source_job_id": job_id,
-                }
-                if mode == "full":
-                    if entry_writer is not None:
-                        entry_writer(record)
-                    completed += 1
-                else:
-                    single_result = {
-                        **record,
-                        "split_metadata": result.get("split_metadata"),
-                        "date_range": result.get("date_range"),
-                        "condition_candidates": result.get("condition_candidates"),
-                        "risk_trials_per_rule_set": result.get("risk_trials_per_rule_set"),
-                    }
-                    completed += 1
-                _report(progress_callback, completed, total_work, "保存标的策略", symbol, skipped)
+                completed = 1
+                _report(progress_callback, completed, total_work, "保存标的候选", symbol, 0)
             except TaskCancelledError:
                 raise
-            except Exception as exc:  # noqa: BLE001 - keep other symbols moving
-                failed += 1
-                message = str(exc).strip()[:500] or type(exc).__name__
-                errors.append({"symbol": symbol, "error": message})
-                if mode == "full" and entry_writer is not None:
-                    entry_writer(
-                        {
-                            "market": ref.market,
-                            "code": ref.code,
-                            "name": ref.name or "",
-                            "error": message,
-                            "source_job_id": job_id,
-                        }
-                    )
-                if mode == "single":
-                    raise ValueError(f"{symbol} 个股研究失败：{message}") from exc
-                _report(
-                    progress_callback,
-                    completed + failed,
-                    total_work,
-                    "单只股票失败，继续",
-                    symbol,
-                    skipped,
-                )
+            except Exception as exc:  # noqa: BLE001 - expose a safe single-symbol failure
+                raise ValueError(f"{symbol} 个股研究失败：{str(exc)[:500]}") from exc
 
         holdout_portfolios: dict[str, object] = {}
         if mode == "full":

@@ -71,6 +71,16 @@ const currentSymbol = computed(() => {
   const value = activeJob.value?.metadata?.current_symbol
   return typeof value === 'string' ? value : ''
 })
+const parallelismText = computed(() => {
+  const metadata = activeJob.value?.metadata ?? {}
+  const active = metadata.current_parallelism
+  const maximum = metadata.maximum_parallelism
+  const memoryLimit = metadata.memory_worker_limit
+  const availableMemory = metadata.available_memory_mb
+  return typeof active === 'number' && typeof maximum === 'number'
+    ? `标的并行 ${active} / 内存动态上限 ${typeof memoryLimit === 'number' ? memoryLimit : maximum}${typeof availableMemory === 'number' ? `（可用约 ${availableMemory} MiB）` : ''}`
+    : ''
+})
 const buySignals = computed(() => signalResult.value?.buy_signals ?? [])
 const ruleSellSignals = computed(() => signalResult.value?.sell_signals ?? [])
 const riskSellSignals = computed(() => signalResult.value?.model_portfolio?.risk_exit_signals ?? [])
@@ -611,9 +621,9 @@ onUnmounted(() => {
           <div v-if="isBusy" class="pool-progress" data-testid="pool-job-progress">
             <div class="progress-heading"><strong>{{ activeIntent === 'signals' ? '正在扫描当天信号' : activeIntent === 'portfolio' ? '正在回测组合留出段' : activeIntent === 'single' ? '正在重跑单只股票' : '全市场研究进行中' }}</strong><strong>{{ progressPercent }}%</strong></div>
             <div class="progress-track"><span :style="{ width: `${progressPercent}%` }"></span></div>
-            <div class="progress-detail"><span>{{ phaseLabel }}</span><span v-if="currentSymbol">当前：{{ currentSymbol }}</span><button class="text-button danger-text" data-testid="pool-cancel-job" @click="cancelCurrentJob">取消任务</button></div>
+            <div class="progress-detail"><span>{{ phaseLabel }}</span><span v-if="currentSymbol">当前：{{ currentSymbol }}</span><span v-if="parallelismText" data-testid="pool-parallelism">{{ parallelismText }}</span><button class="text-button danger-text" data-testid="pool-cancel-job" @click="cancelCurrentJob">取消任务</button></div>
           </div>
-          <p class="pool-scale-note">全量重选默认逐只保存进度，重新运行时会跳过行情和配置指纹未变化的股票。3000 组会让每只股票的退出风控计算更充分，实际耗时取决于本地标的数和历史长度。</p>
+          <p class="pool-scale-note">全量重选会逐只保存检查点，并按可用内存和股票历史长度自动调节并发；重新运行时会跳过行情和配置指纹未变化的股票。3000 组会让每只股票的退出风控计算更充分，实际耗时取决于本地标的数和历史长度。</p>
         </section>
 
         <p v-if="errorMessage" class="notice error-notice" role="alert">{{ errorMessage }}</p>
