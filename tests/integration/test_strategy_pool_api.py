@@ -502,3 +502,31 @@ def test_signal_scan_reports_independent_current_holding(tmp_path) -> None:
     assert holding["market"] == "SH"
     assert holding["code"] == "600000"
     assert holding["status"] == "held"
+
+
+def test_rebuild_is_queued_without_clearing_the_pool_and_is_full_only(tmp_path) -> None:
+    app = create_app(
+        market_data_store=_store(tmp_path), strategy_worker_token=TOKEN, auto_sync_enabled=False
+    )
+    app.state.strategy_pool_store.set_manual_override(
+        "SH",
+        "600000",
+        "annual_return",
+        {"candidate_id": "old"},
+    )
+    with TestClient(app) as client:
+        invalid = client.post(
+            "/api/v1/strategy-pool/jobs",
+            json={
+                "mode": "single",
+                "market": "SH",
+                "code": "600000",
+                "rebuild": True,
+            },
+        )
+        assert invalid.status_code == 422
+        created = client.post("/api/v1/strategy-pool/jobs", json={"mode": "full", "rebuild": True})
+        assert created.status_code == 202
+        assert app.state.strategy_pool_store.get("SH", "600000") is not None
+        history = client.get("/api/v1/strategy-pool/jobs").json()["data"]["items"]
+        assert history[0]["rebuild"] is True

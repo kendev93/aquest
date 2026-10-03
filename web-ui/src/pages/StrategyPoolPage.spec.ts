@@ -984,4 +984,40 @@ describe('StrategyPoolPage', () => {
     expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('触发卖出')
     expect(wrapper.get('[data-testid="pool-row-600001"]').text()).toContain('今日无买卖信号')
   })
+
+  it('submits an explicit rebuild and clears the displayed old pool', async () => {
+    window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
+    const wrapper = mount(StrategyPoolPage)
+    try {
+      await flushPromises()
+      vi.mocked(api.getStrategyPoolJob).mockResolvedValue({
+        job_id: 'rebuild', status: 'running', progress: 0,
+      })
+      await wrapper.get('[data-testid="pool-start-full"]').trigger('click')
+      await flushPromises()
+      expect(api.createStrategyPoolJob).toHaveBeenLastCalledWith({
+        mode: 'full', rebuild: true, risk_trials: 3000,
+      })
+      expect(wrapper.find('[data-testid="pool-row-600000"]').exists()).toBe(false)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('does not restore signal snapshots from before the latest rebuild', async () => {
+    window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValue([
+      { job_id: 'rebuild', mode: 'full', rebuild: true, status: 'running', created_at: 200 },
+      { job_id: 'old-signal', mode: 'signals', objective: 'annual_return', status: 'completed', created_at: 100 },
+    ])
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValue({ job_id: 'rebuild', status: 'running' })
+    const wrapper = mount(StrategyPoolPage)
+    try {
+      await flushPromises()
+      expect(api.getStrategyPoolJob).not.toHaveBeenCalledWith('old-signal')
+      expect(api.createStrategyPoolJob).not.toHaveBeenCalled()
+    } finally {
+      wrapper.unmount()
+    }
+  })
 })

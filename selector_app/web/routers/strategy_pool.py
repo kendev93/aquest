@@ -24,6 +24,7 @@ class PoolJobRequest(BaseModel):
     market: Literal["SH", "SZ"] | None = None
     code: str | None = Field(default=None, pattern=r"^\d{6}$")
     objective: Literal["annual_return", "sharpe"] | None = None
+    rebuild: bool = False
     risk_trials: Literal[1_000, 2_000, 3_000] = 3_000
     reversal_multiple: float = Field(default=3.0, gt=0, le=20)
     atr_window: int = Field(default=14, ge=1, le=250)
@@ -32,6 +33,8 @@ class PoolJobRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_mode(self) -> PoolJobRequest:
+        if self.rebuild and self.mode != "full":
+            raise ValueError("只有全市场任务支持清空重建")
         if self.mode == "single" and (self.market is None or self.code is None):
             raise ValueError("单股重跑必须提供市场和 6 位证券代码")
         if self.mode == "full" and (self.market is not None or self.code is not None):

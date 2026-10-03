@@ -559,3 +559,56 @@ def test_full_pool_research_runs_tickers_concurrently_when_memory_allows(
 
     assert result["completed_symbols"] == 2
     assert len(saved) == 2
+
+
+def test_rebuild_discards_old_pool_and_researches_unchanged_symbols(tmp_path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars("2020-01-01", 60))
+    pool = DuckDbStrategyPoolStore(store)
+    individual = FakeIndividualResearchService()
+    service = MarketStrategyPoolService(
+        store=store,
+        adapter=DuckDbMarketDataAdapter(store),
+        individual_service=individual,
+        pool_store=pool,
+    )
+
+    def writer(entry):
+        pool.persist_worker_entry(entry, source_job_id="new")
+
+    service.run({"mode": "full"}, job_id="old", entry_writer=writer)
+    pool.set_manual_override("SH", "600000", "annual_return", {"candidate_id": "old-manual"})
+    pool.set_manual_override("SZ", "999999", "annual_return", {"candidate_id": "stale"})
+    checkpoints = []
+
+    def write(entry):
+        checkpoints.append(entry)
+        writer(entry)
+
+    result = service.run({"mode": "full", "rebuild": True}, job_id="new", entry_writer=write)
+    assert checkpoints[0] == {"reset": True}
+    assert len(individual.configs) == 2
+    assert result["skipped_symbols"] == 0
+    assert pool.get("SZ", "999999") is None
+    assert pool.get("SH", "600000")["manual_overrides"]["annual_return"] is None
+    assert store.list_instruments()
+
+
+def test_cancelled_rebuild_does_not_clear_existing_strategies(tmp_path) -> None:
+    import pytest
+
+    from selector_app.screening.jobs import TaskCancelledError
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars("2020-01-01", 60))
+    pool = DuckDbStrategyPoolStore(store)
+    pool.set_manual_override("SH", "600000", "annual_return", {"candidate_id": "old"})
+    service = MarketStrategyPoolService(
+        store=store,
+        adapter=DuckDbMarketDataAdapter(store),
+        individual_service=FakeIndividualResearchService(),
+        pool_store=pool,
+    )
+    with pytest.raises(TaskCancelledError):
+        service.run({"mode": "full", "rebuild": True}, job_id="cancelled", abort_check=lambda: True)
+    assert pool.get("SH", "600000") is not None

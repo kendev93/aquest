@@ -55,12 +55,12 @@ def test_scheduler_pauses_new_work_under_memory_pressure_but_never_stalls_empty_
     )
 
 
-def test_pool_worker_cap_defaults_to_two_and_respects_cpu_affinity(
+def test_pool_worker_cap_defaults_to_one_and_respects_cpu_affinity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("SELECTOR_STRATEGY_POOL_MAX_WORKERS", raising=False)
     monkeypatch.setattr("selector_app.strategy_pool.resources.visible_cpu_count", lambda: 8)
-    assert pool_worker_cap() == 2
+    assert pool_worker_cap() == 1
 
     monkeypatch.setenv("SELECTOR_STRATEGY_POOL_MAX_WORKERS", "8")
     assert pool_worker_cap() == 2
@@ -120,3 +120,16 @@ def test_cpu_load_reader_falls_back_when_platform_does_not_expose_load_average(
 
     monkeypatch.setattr("selector_app.strategy_pool.resources.os.getloadavg", unavailable)
     assert get_cpu_load_average_1m() is None
+
+
+def test_inner_evaluation_workers_share_the_configured_total_budget(monkeypatch) -> None:
+    from selector_app.strategy_pool.resources import pool_evaluation_worker_count
+
+    monkeypatch.setattr("selector_app.strategy_pool.resources.visible_cpu_count", lambda: 8)
+    monkeypatch.setenv("SELECTOR_DISCOVERY_WORKERS", "8")
+    monkeypatch.setenv("SELECTOR_STRATEGY_POOL_MAX_WORKERS", "1")
+    assert pool_evaluation_worker_count() == 8
+    monkeypatch.setenv("SELECTOR_STRATEGY_POOL_MAX_WORKERS", "2")
+    assert pool_evaluation_worker_count() == 4
+    monkeypatch.setenv("SELECTOR_DISCOVERY_WORKERS", "1")
+    assert pool_evaluation_worker_count() == 1

@@ -187,3 +187,30 @@ def test_worker_api_is_unavailable_when_no_token_is_configured(tmp_path) -> None
         )
 
     assert response.status_code == 503
+
+
+def test_pool_reset_requires_a_claimed_explicit_rebuild(tmp_path) -> None:
+    app = _app(tmp_path)
+    pool = app.state.strategy_pool_store
+    pool.set_manual_override("SH", "600000", "annual_return", {"candidate_id": "old"})
+    backend = app.state.strategy_job_backend
+    with TestClient(app) as client:
+        for rebuild in (False, True):
+            job_id = backend.submit(
+                "market_strategy_pool",
+                {"mode": "full", "rebuild": rebuild},
+                description="reset-test",
+            )
+            client.post(
+                "/internal/strategy-worker/jobs/claim",
+                headers=_headers(),
+                json={"worker_id": "worker-a"},
+            )
+            response = client.post(
+                f"/internal/strategy-worker/jobs/{job_id}/pool-entry",
+                headers=_headers(),
+                json={"worker_id": "worker-a", "entry": {"reset": True}},
+            )
+            assert response.status_code == (200 if rebuild else 409)
+            assert bool(pool.list_entries()) is not rebuild
+            backend.cancel(job_id)

@@ -8,12 +8,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from selector_app.concurrency import MAX_WORKERS, visible_cpu_count
+from selector_app.strategy_discovery.resources import resolve_discovery_workers
 
 MiB = 1024**2
 GiB = 1024**3
 MIN_MEMORY_HEADROOM_BYTES = 384 * MiB
 MEMORY_HEADROOM_RATIO = 0.20
-DEFAULT_POOL_WORKERS = 2
+DEFAULT_POOL_WORKERS = 1
 MAX_POOL_WORKERS = 2
 BASE_TICKER_WORKING_SET_BYTES = 256 * MiB
 CPU_HIGH_PRESSURE_RATIO = 0.90
@@ -72,6 +73,12 @@ def pool_worker_cap() -> int:
     if not 1 <= requested <= MAX_WORKERS:
         raise ValueError(f"全市场策略池最大 worker 数必须在 1 到 {MAX_WORKERS} 之间")
     return min(requested, MAX_POOL_WORKERS, visible_cpu_count())
+
+
+def pool_evaluation_worker_count() -> int:
+    """Share the discovery CPU budget across the configured concurrent symbols."""
+
+    return max(1, resolve_discovery_workers() // pool_worker_cap())
 
 
 def get_cpu_load_average_1m() -> float | None:

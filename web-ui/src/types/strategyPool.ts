@@ -159,6 +159,7 @@ export interface StrategyPoolJobState {
 }
 
 export interface StrategyPoolJobSummary {
+  rebuild?: boolean
   job_id: string
   status: string
   mode: StrategyPoolMode

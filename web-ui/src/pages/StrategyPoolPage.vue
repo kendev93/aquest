@@ -285,13 +285,22 @@ async function refreshPage(refreshSignals: boolean): Promise<void> {
 }
 
 async function restoreLatestSignalResult(jobs: StrategyPoolJobSummary[]): Promise<void> {
+  const rebuild = jobs.find((job) => job.mode === 'full' && job.rebuild)
+  const cutoff = rebuild ? timestampMillis(rebuild.created_at) : 0
   const signalJobs = jobs.filter((job) =>
-    job.mode === 'signals'
+    (!cutoff || timestampMillis(job.created_at) > cutoff)
+    && job.mode === 'signals'
     && job.status === 'completed'
     && (!job.objective || job.objective === objective.value),
   )
   const baselineIndex = signalJobs.findIndex((job) => !job.market || !job.code)
-  if (baselineIndex < 0) return
+  if (baselineIndex < 0) {
+    if (cutoff) {
+      signalResult.value = null
+      signalSnapshotCreatedAt.value = null
+    }
+    return
+  }
 
   const baseline = await readCompletedSignalResult(signalJobs[baselineIndex]!)
   if (!baseline) return
@@ -560,9 +569,9 @@ async function refreshSignalsIfStale(jobs: StrategyPoolJobSummary[]): Promise<vo
   if (entry) await refreshSignalsAutomatically(jobs, { market: entry.market, code: entry.code })
 }
 
-async function startFullResearch(): Promise<void> {
+async function startFullResearch(rebuild = true): Promise<void> {
   if (isBusy.value) return
-  await startTask({ mode: 'full', risk_trials: riskTrials.value }, 'full')
+  await startTask({ mode: 'full', rebuild, risk_trials: riskTrials.value }, 'full')
 }
 
 async function startSingleRerun(): Promise<void> {
@@ -621,7 +630,7 @@ async function startSignalScan(target?: { market: 'SH' | 'SZ'; code: string }): 
 }
 
 async function startTask(
-  payload: { mode: StrategyPoolMode; risk_trials?: 1_000 | 2_000 | 3_000; market?: 'SH' | 'SZ'; code?: string; objective?: StrategyPoolObjective },
+  payload: { mode: StrategyPoolMode; rebuild?: boolean; risk_trials?: 1_000 | 2_000 | 3_000; market?: 'SH' | 'SZ'; code?: string; objective?: StrategyPoolObjective },
   intent: StrategyPoolMode,
 ): Promise<void> {
   errorMessage.value = ''
@@ -633,6 +642,11 @@ async function startTask(
       ? { market: payload.market, code: payload.code }
       : null
     const created = await createStrategyPoolJob(payload)
+    if (payload.rebuild) {
+      entries.value = []
+      signalResult.value = null
+      signalSnapshotCreatedAt.value = null
+    }
     activeJobId.value = created.job_id
     activeIntent.value = intent
     activeJob.value = { job_id: created.job_id, status: created.status, progress: 0 }
@@ -1194,7 +1208,8 @@ onUnmounted(() => {
                 <option :value="3000">3000 组</option>
               </select>
             </label>
-            <button class="button-primary" data-testid="pool-start-full" :disabled="isBusy" @click="startFullResearch">全市场重新选策</button>
+            <button class="button-primary" data-testid="pool-start-full" :disabled="isBusy" @click="startFullResearch(true)">清空并重建全市场</button>
+            <button class="button-secondary" data-testid="pool-start-incremental" :disabled="isBusy" @click="startFullResearch(false)">增量更新策略池</button>
             <button class="button-secondary" data-testid="pool-refresh-signals" :disabled="isBusy || !entries.some((item) => item.active_candidate)" @click="startSignalScan()">刷新当天信号</button>
             <label class="ticker-input">市场
               <select v-model="market" :disabled="isBusy"><option value="SH">SH</option><option value="SZ">SZ</option></select>
@@ -1204,6 +1219,8 @@ onUnmounted(() => {
             </label>
             <button class="button-secondary" data-testid="pool-rerun-single" :disabled="isBusy" @click="startSingleRerun">逐股重跑</button>
           </div>
+
+          <p class="empty-copy">清空重建会删除当前自动策略、手动覆盖和失败记录，从头逐只研究；增量更新保留已有策略并复用未变化的结果。</p>
 
           <div v-if="isBusy" class="pool-progress" data-testid="pool-job-progress">
             <div class="progress-heading"><strong>{{ activeIntent === 'signals' ? '正在扫描当天信号' : activeIntent === 'portfolio' ? '组合回测任务进行中' : activeIntent === 'single' ? '正在重跑单只股票' : '全市场研究进行中' }}</strong><strong>{{ progressPercent }}%</strong></div>

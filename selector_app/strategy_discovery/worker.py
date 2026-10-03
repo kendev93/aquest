@@ -18,6 +18,7 @@ from selector_app.individual_research.service import IndividualStockResearchServ
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.portfolio_backtest.service import PortfolioBacktestService
+from selector_app.strategy_pool.resources import pool_evaluation_worker_count
 from selector_app.strategy_pool.service import MarketStrategyPoolService
 from selector_app.strategy_pool.store import DuckDbStrategyPoolStore
 
@@ -404,7 +405,7 @@ def main() -> None:
             # The read-only worker can share the companion SQLite cache safely.
             # A DuckDB cache would require writes through this read-only handle,
             # so fall back to in-memory calculation for that opt-in backend.
-            pool_indicator_cache = IndicatorCache(cache_store, max_memory_entries=4)
+            pool_indicator_cache = IndicatorCache(cache_store, max_memory_entries=64)
             pool_backtest_service = BacktestService(
                 adapter=market_adapter,
                 indicator_cache=pool_indicator_cache,
@@ -421,7 +422,7 @@ def main() -> None:
                 per_thread_strategy_service = StrategyDiscoveryService(
                     store=store,
                     market_data_adapter=market_adapter,
-                    evaluation_workers=1,
+                    evaluation_workers=pool_evaluation_worker_count(),
                     persist_indicator_cache=False,
                     discovery_snapshot_cache=per_thread_snapshots,
                 )

@@ -208,6 +208,10 @@ class DuckDbStrategyPoolStore:
             )
 
     def persist_worker_entry(self, entry: Mapping[str, object], *, source_job_id: str) -> None:
+        if entry.get("reset") is True:
+            with _WRITE_LOCK, self._transaction() as connection:
+                connection.execute("DELETE FROM strategy_pool_entries")
+            return
         market = str(entry.get("market") or "").upper()
         code = str(entry.get("code") or "")
         name = str(entry.get("name") or "")

@@ -783,7 +783,19 @@ class MarketStrategyPoolService:
         }
         settings["algorithm_version"] = MARKET_POOL_ALGORITHM_VERSION
         config_fingerprint = _fingerprint(settings)
-        prior_entries = self._prior_entries() if mode in {"full", "single"} else {}
+        rebuild = payload.get("rebuild") is True
+        if rebuild:
+            if mode != "full":
+                raise ValueError("只有全市场任务支持清空重建")
+            if abort_check is not None and abort_check():
+                raise TaskCancelledError("全市场策略池研究已取消")
+            if entry_writer is not None:
+                entry_writer({"reset": True})
+            elif self._pool_store is not None:
+                self._pool_store.persist_worker_entry({"reset": True}, source_job_id=job_id)
+            else:
+                raise ValueError("清空重建需要可写策略池")
+        prior_entries = self._prior_entries() if not rebuild and mode in {"full", "single"} else {}
         started = date.today()
         if mode == "single" and self._pool_store is not None:
             ref = refs[0]

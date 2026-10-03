@@ -138,6 +138,17 @@ def persist_pool_entry(
         envelope = operation if isinstance(operation, Mapping) else {}
         if envelope.get("operation") != "market_strategy_pool":
             raise ValueError("当前任务不是全市场策略池任务")
+        if payload.entry.get("reset") is True:
+            job_payload = envelope.get("payload")
+            if (
+                not isinstance(job_payload, Mapping)
+                or job_payload.get("mode") != "full"
+                or job_payload.get("rebuild") is not True
+            ):
+                raise ValueError("当前任务未授权清空重建策略池")
+            state = claimed.get("state")
+            if isinstance(state, Mapping) and state.get("cancel_requested"):
+                raise ValueError("已取消的任务不能清空策略池")
         _pool_store(request).persist_worker_entry(payload.entry, source_job_id=job_id)
     except (MarketDataStoreError, OSError) as exc:
         raise _store_unavailable() from exc

@@ -18,6 +18,7 @@ interface ApiErrorPayload {
 
 interface StrategyPoolJobRequest {
   mode: StrategyPoolMode
+  rebuild?: boolean
   risk_trials?: 1_000 | 2_000 | 3_000
   market?: 'SH' | 'SZ'
   code?: string
