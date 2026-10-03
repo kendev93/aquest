@@ -1642,9 +1642,7 @@ def _research_settings(
             "train_ratio": 0.6,
             "validation_ratio": 0.2,
             "holdout_ratio": 0.2,
-            "purge_trading_days": _positive_int(
-                payload.get("horizon"), 10, "波段预测窗口"
-            ),
+            "purge_trading_days": _positive_int(payload.get("horizon"), 10, "波段预测窗口"),
         },
     }
     return settings
