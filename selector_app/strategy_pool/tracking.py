@@ -57,7 +57,7 @@ def account_summary(
     # 快照持仓只有 unrealized_pnl 金额，补算展示用的百分比字段（详情页浮动收益与
     # 跟踪投影的持仓收益都依赖它）。注意必须拷贝注入，不能原地改 checkpoint。
     latest_holdings: list[dict[str, Any]] = []
-    for h in (states[-1].get("holdings", []) if states else []):
+    for h in states[-1].get("holdings", []) if states else []:
         row = dict(h)
         entry = row.get("entry_price")
         close = row.get("close")
