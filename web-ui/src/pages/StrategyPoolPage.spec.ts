@@ -744,12 +744,9 @@ describe('StrategyPoolPage', () => {
       expect(row.get('[data-testid="pool-entry-benchmark-600000"]').text()).toContain(
         '全段基准 +50.00%',
       )
-      expect(row.get('[data-testid="pool-entry-benchmark-600000"]').text()).toContain(
-        '验证基准 +10.00% · 策略超额 +14.00%',
-      )
-      expect(row.get('[data-testid="pool-entry-benchmark-600000"]').text()).toContain(
-        '留出基准 -5.00% · 策略超额 +13.00%',
-      )
+      expect(row.get('[data-testid="pool-entry-benchmark-600000"]').text()).not.toContain('验证基准')
+      expect(row.get('[data-testid="pool-entry-benchmark-600000"]').text()).not.toContain('留出基准')
+      expect(row.get('[data-testid="pool-entry-benchmark-600000"]').text()).not.toContain('策略超额')
       const headers = wrapper.findAll('thead th').map((header) => header.text())
       const benchmarkColumn = headers.findIndex((header) => header.includes('基准涨跌'))
       const strategyReturnColumn = headers.findIndex((header) => header.includes('策略收益（全区间）'))

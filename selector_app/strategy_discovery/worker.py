@@ -18,10 +18,14 @@ from selector_app.individual_research.service import IndividualStockResearchServ
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.portfolio_backtest.service import PortfolioBacktestService
-from selector_app.strategy_pool.resources import pool_evaluation_worker_count
+from selector_app.strategy_pool.resources import (
+    pool_evaluation_budget_capacity,
+    pool_evaluation_worker_count,
+)
 from selector_app.strategy_pool.service import MarketStrategyPoolService
 from selector_app.strategy_pool.store import DuckDbStrategyPoolStore
 
+from .evaluation_budget import EvaluationWorkerBudget
 from .job_backend import completion_state, decorate_result
 from .job_store import is_job_operation
 from .models import DiscoveryRequest
@@ -415,6 +419,8 @@ def main() -> None:
                 indicator_cache=pool_indicator_cache,
             )
 
+            pool_evaluation_budget = EvaluationWorkerBudget(pool_evaluation_budget_capacity())
+
             def pool_individual_service_factory() -> IndividualStockResearchService:
                 per_thread_snapshots = DiscoverySnapshotCache(
                     Path(cache_root) / f"pool-worker-{get_ident()}"
@@ -423,6 +429,7 @@ def main() -> None:
                     store=store,
                     market_data_adapter=market_adapter,
                     evaluation_workers=pool_evaluation_worker_count(),
+                    evaluation_worker_budget=pool_evaluation_budget,
                     persist_indicator_cache=False,
                     discovery_snapshot_cache=per_thread_snapshots,
                 )
@@ -437,6 +444,9 @@ def main() -> None:
                         indicator_cache=pool_indicator_cache,
                     ),
                     strategy_service=per_thread_strategy_service,
+                    validation_database_path=str(store.database_path),
+                    validation_workers=pool_evaluation_worker_count(),
+                    evaluation_worker_budget=pool_evaluation_budget,
                 )
 
             pool_individual_service = pool_individual_service_factory()
@@ -451,6 +461,7 @@ def main() -> None:
                     pool_store=DuckDbStrategyPoolStore(store),
                     portfolio_service=pool_portfolio_service,
                     individual_service_factory=pool_individual_service_factory,
+                    evaluation_worker_budget=pool_evaluation_budget,
                 ),
                 service_factory=lambda worker_count: StrategyDiscoveryService(
                     store=store,

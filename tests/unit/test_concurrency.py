@@ -35,3 +35,9 @@ def test_visible_cpu_count_is_at_least_one(monkeypatch) -> None:
     monkeypatch.setattr(os, "cpu_count", lambda: None)
 
     assert visible_cpu_count() == 1
+
+
+def test_visible_cpu_count_honors_quota_even_with_a_larger_affinity(monkeypatch) -> None:
+    monkeypatch.setattr(os, "sched_getaffinity", lambda _pid: set(range(32)), raising=False)
+    monkeypatch.setattr("selector_app.concurrency._cgroup_cpu_quota", lambda: 2)
+    assert visible_cpu_count() == 2

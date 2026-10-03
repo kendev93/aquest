@@ -154,6 +154,10 @@ def test_full_pool_research_splits_each_symbol_and_saves_each_symbol_incremental
     first = pool_store.get("SH", "600000")
     second = pool_store.get("SZ", "000001")
     assert result["completed_symbols"] == 2
+    assert [(config.start_date, config.end_date) for config in individual.configs] == [
+        (date(2020, 1, 1), date(2020, 2, 29)),
+        (date(2020, 1, 11), date(2020, 2, 29)),
+    ]
     assert all(config.split_windows is None for config in individual.configs)
     assert all(config.common_split_metadata is None for config in individual.configs)
     assert first["manual_overrides"]["annual_return"]["candidate_id"] == "kept-manual"
@@ -511,6 +515,7 @@ def test_full_pool_research_runs_tickers_concurrently_when_memory_allows(
     store.replace_local_bars("SZ", "000001", "stock", _bars("2020-01-11", 50))
     adapter = DuckDbMarketDataAdapter(store)
     barrier = Barrier(2, timeout=5)
+    monkeypatch.setattr("selector_app.strategy_pool.service.POOL_RAMP_INTERVAL_SECONDS", 0.0)
 
     class ConcurrentFake:
         def run(self, config, progress_callback=None, abort_check=None):
@@ -549,7 +554,7 @@ def test_full_pool_research_runs_tickers_concurrently_when_memory_allows(
         individual_service_factory=ConcurrentFake,
         max_pool_workers=8,
     )
-    assert service._max_pool_workers == 2
+    assert service._max_pool_workers == 8
 
     result = service.run(
         {"mode": "full", "risk_trials": 1_000, "horizon": 5},

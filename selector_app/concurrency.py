@@ -20,13 +20,14 @@ def visible_cpu_count() -> int:
     # ``os.sched_getaffinity`` 只在 Linux 存在（Windows/macOS 没有）。这里用 getattr
     # 而不是直接访问 + 行内忽略注释：直接访问时 mypy 在 macOS 需要忽略、在 Linux
     # （CI）又会因 strict 模式的 warn_unused_ignores 报"多余"，无法同时满足。
+    quota = _cgroup_cpu_quota()
     affinity = getattr(os, "sched_getaffinity", None)
     if affinity is not None:
         try:
-            return max(1, len(affinity(0)))
+            allowed = max(1, len(affinity(0)))
+            return min(allowed, quota) if quota is not None else allowed
         except OSError:  # pragma: no cover - 取决于容器/procfs 权限
             pass
-    quota = _cgroup_cpu_quota()
     if quota is not None:
         return quota
     return max(1, int(os.cpu_count() or 1))

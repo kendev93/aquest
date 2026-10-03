@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
+from contextlib import closing
 from datetime import date
 from itertools import combinations
 from typing import cast
@@ -28,6 +29,7 @@ from selector_app.portfolio_backtest.service import PortfolioBacktestService
 from selector_app.screening.jobs import TaskCancelledError
 from selector_app.screening.models import ScreenCondition
 from selector_app.screening.rules import RuleGroup
+from selector_app.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
 from selector_app.strategy_discovery.models import DiscoveryRequest
 from selector_app.strategy_discovery.service import StrategyDiscoveryService
 from selector_app.strategy_pool.selection import slices_for_common_windows
@@ -69,11 +71,17 @@ class IndividualStockResearchService:
         backtest_service: BacktestService,
         portfolio_service: PortfolioBacktestService,
         strategy_service: StrategyDiscoveryService,
+        validation_database_path: str | None = None,
+        validation_workers: int = 1,
+        evaluation_worker_budget: EvaluationWorkerBudget | None = None,
     ) -> None:
         self._adapter = adapter
         self._backtest_service = backtest_service
         self._portfolio_service = portfolio_service
         self._strategy_service = strategy_service
+        self._validation_database_path = validation_database_path
+        self._validation_workers = validation_workers
+        self._evaluation_worker_budget = evaluation_worker_budget
 
     def run(
         self,
@@ -145,45 +153,37 @@ class IndividualStockResearchService:
         validation_window = cast(dict[str, date], windows["validation"])
         rule_candidates: list[dict[str, object]] = []
         total_pairs = len(pairs)
-        for index, (pair_id, buy, sell) in enumerate(pairs, start=1):
-            self._check_cancelled(abort_check)
-            buy_rule = buy["rule"]
-            sell_rule = sell["rule"]
-            assert isinstance(buy_rule, RuleGroup)
-            assert isinstance(sell_rule, RuleGroup)
-            train_metrics = self._backtest_metrics(
-                config,
-                ref,
-                buy_rule,
-                sell_rule,
-                train_window["start"],
-                train_window["end"],
-            )
-            validation_metrics = self._backtest_metrics(
-                config,
-                ref,
-                buy_rule,
-                sell_rule,
-                validation_window["start"],
-                validation_window["end"],
-            )
-            rule_candidates.append(
-                {
-                    "candidate_id": pair_id,
-                    "buy": _public_rule_candidate(buy),
-                    "sell": _public_rule_candidate(sell),
-                    "buy_rule": rule_to_dict(buy_rule),
-                    "sell_rule": rule_to_dict(sell_rule),
-                    "train": train_metrics,
-                    "validation": validation_metrics,
-                }
-            )
-            self._report(
-                progress_callback,
-                20 + int(25 * index / max(1, total_pairs)),
-                "验证买卖条件",
-                f"已验证 {index} / {total_pairs} 组规则",
-            )
+        if self._evaluation_worker_budget is not None:
+            self._report(progress_callback, 20, "验证买卖条件", "候选已生成，等待可用计算资源")
+        pair_metrics = self._rule_pair_metrics(
+            config, ref, pairs, train_window, validation_window, abort_check
+        )
+        with closing(pair_metrics):
+            for index, ((pair_id, buy, sell), (train_metrics, validation_metrics)) in enumerate(
+                zip(pairs, pair_metrics, strict=True), start=1
+            ):
+                self._check_cancelled(abort_check)
+                buy_rule = buy["rule"]
+                sell_rule = sell["rule"]
+                assert isinstance(buy_rule, RuleGroup)
+                assert isinstance(sell_rule, RuleGroup)
+                rule_candidates.append(
+                    {
+                        "candidate_id": pair_id,
+                        "buy": _public_rule_candidate(buy),
+                        "sell": _public_rule_candidate(sell),
+                        "buy_rule": rule_to_dict(buy_rule),
+                        "sell_rule": rule_to_dict(sell_rule),
+                        "train": train_metrics,
+                        "validation": validation_metrics,
+                    }
+                )
+                self._report(
+                    progress_callback,
+                    20 + int(25 * index / max(1, total_pairs)),
+                    "验证买卖条件",
+                    f"已验证 {index} / {total_pairs} 组规则",
+                )
 
         rule_by_sharpe = _rank_candidates(rule_candidates, "sharpe")
         rule_by_return = _rank_candidates(rule_candidates, "annual_return")
@@ -559,6 +559,60 @@ class IndividualStockResearchService:
             )
             result[side] = _select_condition_candidates(candidates, config.candidate_limit)
         return result
+
+    def _rule_pair_metrics(
+        self,
+        config: IndividualResearchConfig,
+        ref: StockRef,
+        pairs: Sequence[tuple[str, dict[str, object], dict[str, object]]],
+        train: Mapping[str, date],
+        validation: Mapping[str, date],
+        abort_check: AbortCheck | None,
+    ) -> Generator[tuple[dict[str, object], dict[str, object]], None, None]:
+        if (
+            self._validation_database_path is not None
+            and self._evaluation_worker_budget is not None
+        ):
+            from .parallel_validation import RulePairJob, config_payload, evaluate_rule_pairs
+
+            def jobs() -> Iterator[RulePairJob]:
+                for _pair_id, buy, sell in pairs:
+                    buy_rule = cast(RuleGroup, buy["rule"])
+                    sell_rule = cast(RuleGroup, sell["rule"])
+                    yield (
+                        ref,
+                        config_payload(
+                            _portfolio_config(
+                                config, buy_rule, sell_rule, train["start"], train["end"]
+                            )
+                        ),
+                        config_payload(
+                            _portfolio_config(
+                                config, buy_rule, sell_rule, validation["start"], validation["end"]
+                            )
+                        ),
+                    )
+
+            yield from evaluate_rule_pairs(
+                self._validation_database_path,
+                jobs(),
+                budget=self._evaluation_worker_budget,
+                requested_workers=self._validation_workers,
+                abort_check=abort_check,
+            )
+            return
+        for _pair_id, buy, sell in pairs:
+            self._check_cancelled(abort_check)
+            buy_rule = cast(RuleGroup, buy["rule"])
+            sell_rule = cast(RuleGroup, sell["rule"])
+            yield (
+                self._backtest_metrics(
+                    config, ref, buy_rule, sell_rule, train["start"], train["end"]
+                ),
+                self._backtest_metrics(
+                    config, ref, buy_rule, sell_rule, validation["start"], validation["end"]
+                ),
+            )
 
     def _backtest_metrics(
         self,

@@ -13,7 +13,7 @@ import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from datetime import date, timedelta
 from typing import Protocol, cast
@@ -35,6 +35,7 @@ from selector_app.web.schemas import PortfolioBacktestRequest
 from .candidates import build_random_candidate
 from .catalog import default_indicator_catalog
 from .evaluation import run_validation_pipeline
+from .evaluation_budget import EvaluationWorkerBudget
 from .models import DiscoveryRequest, StrategyCandidate
 from .refinement import (
     RefinementRadius,
@@ -131,6 +132,7 @@ class StrategyDiscoveryService:
         evaluation_workers: int | None = None,
         persist_indicator_cache: bool = True,
         discovery_snapshot_cache: DiscoverySnapshotCache | None = None,
+        evaluation_worker_budget: EvaluationWorkerBudget | None = None,
     ) -> None:
         selected_store = store or DuckDbMarketDataStore()
         selected_market_adapter = market_data_adapter or getattr(
@@ -147,6 +149,7 @@ class StrategyDiscoveryService:
         self._discovery_snapshot = discovery_snapshot
         self._persist_indicator_cache = persist_indicator_cache
         self._discovery_snapshot_cache = discovery_snapshot_cache
+        self._evaluation_worker_budget = evaluation_worker_budget
         self._evaluation_workers = validate_discovery_workers(
             resolve_discovery_workers() if evaluation_workers is None else evaluation_workers
         )
@@ -291,7 +294,11 @@ class StrategyDiscoveryService:
                             "overall_progress": 0.0,
                             "phase_current": 1,
                             "phase_total": 1,
-                            "phase_label": "快照已准备，开始寻优",
+                            "phase_label": (
+                                "快照已准备，等待可用计算资源"
+                                if self._evaluation_worker_budget is not None
+                                else "快照已准备，开始寻优"
+                            ),
                             "estimated_total_evaluations": _progress_plan(request)[2],
                             "completed_work_units": 0.0,
                             "elapsed_seconds": max(0.0, time.monotonic() - started),
@@ -303,7 +310,9 @@ class StrategyDiscoveryService:
                             ),
                         },
                     )
-                with self._evaluation_executor(str(snapshot.root)) as evaluation_executor:
+                with self._evaluation_executor(
+                    str(snapshot.root), abort_check=abort_check
+                ) as evaluation_executor:
                     result = self._run_impl(
                         request,
                         progress_callback=progress_callback,
@@ -418,22 +427,33 @@ class StrategyDiscoveryService:
 
     @contextmanager
     def _evaluation_executor(
-        self, snapshot_path: str | None = None
+        self, snapshot_path: str | None = None, *, abort_check: Callable[[], bool] | None = None
     ) -> Iterator[ProcessPoolExecutor | None]:
         if not self._parallel_enabled:
             yield None
             return
-        database_path = str(self._store.database_path)
-        executor = ProcessPoolExecutor(
-            max_workers=self._evaluation_workers,
-            mp_context=multiprocessing.get_context("spawn"),
-            initializer=_init_discovery_worker,
-            initargs=(database_path, snapshot_path),
+        requested = self._evaluation_workers
+        lease = (
+            self._evaluation_worker_budget.lease(requested, abort_check)
+            if self._evaluation_worker_budget is not None
+            else nullcontext(requested)
         )
-        try:
-            yield executor
-        finally:
-            executor.shutdown(wait=True, cancel_futures=True)
+        with lease as workers:
+            self._evaluation_workers = workers
+            try:
+                database_path = str(self._store.database_path)
+                executor = ProcessPoolExecutor(
+                    max_workers=self._evaluation_workers,
+                    mp_context=multiprocessing.get_context("spawn"),
+                    initializer=_init_discovery_worker,
+                    initargs=(database_path, snapshot_path),
+                )
+                try:
+                    yield executor
+                finally:
+                    executor.shutdown(wait=True, cancel_futures=True)
+            finally:
+                self._evaluation_workers = requested
 
     def _assert_local_data(self, request: DiscoveryRequest) -> None:
         base = request.base_config

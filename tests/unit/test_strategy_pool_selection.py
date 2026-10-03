@@ -95,10 +95,10 @@ def test_shared_split_windows_project_onto_later_listing_without_local_resplitti
 
 def test_stock_window_algorithm_version_invalidates_old_no_strategy_checkpoints() -> None:
     market_fingerprint = "bars-v1"
-    previous_config = _fingerprint({"algorithm_version": "market-pool-v1"})
+    previous_config = _fingerprint({"algorithm_version": "market-pool-v3"})
     updated_config = _fingerprint({"algorithm_version": MARKET_POOL_ALGORITHM_VERSION})
 
-    assert MARKET_POOL_ALGORITHM_VERSION == "market-pool-v3"
+    assert MARKET_POOL_ALGORITHM_VERSION == "market-pool-v4"
     assert updated_config != previous_config
     assert not MarketStrategyPoolService._can_reuse(
         (market_fingerprint, previous_config, "no_strategy"),

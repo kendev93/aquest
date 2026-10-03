@@ -7,18 +7,19 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from selector_app.concurrency import MAX_WORKERS, visible_cpu_count
+from selector_app.concurrency import visible_cpu_count
 from selector_app.strategy_discovery.resources import resolve_discovery_workers
 
 MiB = 1024**2
 GiB = 1024**3
 MIN_MEMORY_HEADROOM_BYTES = 384 * MiB
 MEMORY_HEADROOM_RATIO = 0.20
-DEFAULT_POOL_WORKERS = 1
-MAX_POOL_WORKERS = 2
-BASE_TICKER_WORKING_SET_BYTES = 256 * MiB
-CPU_HIGH_PRESSURE_RATIO = 0.90
-CPU_ELEVATED_PRESSURE_RATIO = 0.75
+DEFAULT_POOL_WORKERS = "auto"
+POOL_RAMP_INTERVAL_SECONDS = 30.0
+BASE_TICKER_WORKING_SET_BYTES = 512 * MiB
+EVALUATION_WORKER_MEMORY_BYTES = 128 * MiB
+CPU_HIGH_PRESSURE_RATIO = 1.50
+CPU_ELEVATED_PRESSURE_RATIO = 1.25
 
 
 @dataclass(frozen=True)
@@ -63,22 +64,84 @@ def memory_status() -> MemoryStatus:
 
 
 def pool_worker_cap() -> int:
-    """Return a conservative CPU ceiling before applying the memory budget."""
+    """Derive the stock ceiling from visible CPUs, with an optional user override."""
 
-    raw = os.getenv("SELECTOR_STRATEGY_POOL_MAX_WORKERS", str(DEFAULT_POOL_WORKERS)).strip()
+    cpus = visible_cpu_count()
+    raw = os.getenv("SELECTOR_STRATEGY_POOL_MAX_WORKERS", DEFAULT_POOL_WORKERS).strip()
+    if raw.lower() in {"", "auto"}:
+        return cpus
     try:
         requested = int(raw)
     except ValueError as exc:
-        raise ValueError("全市场策略池最大 worker 数必须是整数") from exc
-    if not 1 <= requested <= MAX_WORKERS:
-        raise ValueError(f"全市场策略池最大 worker 数必须在 1 到 {MAX_WORKERS} 之间")
-    return min(requested, MAX_POOL_WORKERS, visible_cpu_count())
+        raise ValueError("全市场策略池并发上限必须是 auto 或正整数") from exc
+    if requested < 1:
+        raise ValueError("全市场策略池并发上限必须是 auto 或正整数")
+    return min(requested, cpus)
+
+
+def pool_evaluation_budget_capacity(in_use_workers: int = 0) -> int:
+    raw = os.getenv("SELECTOR_DISCOVERY_WORKERS", "auto").strip().lower()
+    cpu_budget = (
+        visible_cpu_count()
+        if raw in {"", "auto"}
+        else min(visible_cpu_count(), resolve_discovery_workers())
+    )
+    status = memory_status()
+    if status.available_bytes is None:
+        return 1
+    headroom = max(
+        MIN_MEMORY_HEADROOM_BYTES,
+        int((status.total_bytes or 0) * MEMORY_HEADROOM_RATIO),
+    )
+    # Reserve half of usable memory for parent stock research and snapshots.
+    process_memory = (
+        max(0, status.available_bytes - headroom + in_use_workers * EVALUATION_WORKER_MEMORY_BYTES)
+        // 2
+    )
+    return max(1, min(cpu_budget, process_memory // EVALUATION_WORKER_MEMORY_BYTES))
 
 
 def pool_evaluation_worker_count() -> int:
-    """Share the discovery CPU budget across the configured concurrent symbols."""
+    """Per-stock request; actual process counts are leased from a shared budget."""
 
-    return max(1, resolve_discovery_workers() // pool_worker_cap())
+    return resolve_discovery_workers()
+
+
+class PoolConcurrencyRamp:
+    """Grow one slot per observation interval; pressure resets the growth timer."""
+
+    def __init__(self, *, interval_seconds: float = POOL_RAMP_INTERVAL_SECONDS) -> None:
+        if interval_seconds < 0:
+            raise ValueError("并发观察间隔不能小于 0")
+        self.interval_seconds = interval_seconds
+        self._target = 1
+        self._next_growth: float | None = None
+        self._initial_available: int | None = None
+        self.observed_worker_bytes = 0
+
+    def observe_memory(
+        self, status: MemoryStatus, active_workers: int, shared_worker_bytes: int = 0
+    ) -> None:
+        if status.available_bytes is None:
+            return
+        if self._initial_available is None:
+            self._initial_available = status.available_bytes
+        if active_workers:
+            growth = max(0, self._initial_available - status.available_bytes - shared_worker_bytes)
+            self.observed_worker_bytes = max(self.observed_worker_bytes, growth // active_workers)
+
+    def target(self, *, resource_limit: int, active_workers: int, now: float) -> int:
+        limit = max(1, active_workers, resource_limit)
+        if self._next_growth is None:
+            self._next_growth = now + self.interval_seconds
+            return max(active_workers, self._target)
+        if resource_limit <= self._target:
+            self._target = min(self._target, limit)
+            self._next_growth = now + self.interval_seconds
+        elif now >= self._next_growth:
+            self._target = min(limit, self._target + 1)
+            self._next_growth = now + self.interval_seconds
+        return max(active_workers, self._target)
 
 
 def get_cpu_load_average_1m() -> float | None:
@@ -103,14 +166,13 @@ def cpu_bounded_worker_count(
 ) -> int:
     """Limit dispatches when system load is high, without interrupting active tickers.
 
-    One visible CPU is kept available for the OS and interactive work. Load average
-    is a pressure signal rather than a CPU percentage, so it only throttles dispatch
-    near saturation and never cancels already-running work.
+    Full CPU utilization is expected. Only sustained load materially above the
+    visible CPU count holds new dispatches; running stocks are never cancelled.
     """
 
     if visible_cpus < 1 or maximum_workers < 1 or active_workers < 0:
         raise ValueError("全市场策略池 CPU 并发估算参数无效")
-    cpu_ceiling = min(maximum_workers, max(1, visible_cpus - 1))
+    cpu_ceiling = min(maximum_workers, visible_cpus)
     if load_average_1m is None or not math.isfinite(load_average_1m):
         return max(active_workers, cpu_ceiling)
     if load_average_1m < 0:
@@ -146,6 +208,7 @@ def memory_bounded_worker_count(
     estimated_worker_bytes: int,
     maximum_workers: int,
     active_workers: int = 0,
+    reserved_bytes: int = 0,
 ) -> int:
     """Return a safe total active-worker target, preserving running work under pressure."""
 
@@ -156,7 +219,7 @@ def memory_bounded_worker_count(
     headroom = MIN_MEMORY_HEADROOM_BYTES
     if status.total_bytes is not None:
         headroom = max(headroom, int(status.total_bytes * MEMORY_HEADROOM_RATIO))
-    budget = max(0, status.available_bytes - headroom)
+    budget = max(0, status.available_bytes - headroom - reserved_bytes)
     additional_workers = budget // estimated_worker_bytes
     target = active_workers + int(additional_workers)
     if target <= active_workers:
@@ -207,6 +270,9 @@ def _read_meminfo() -> tuple[int, int] | None:
 
 __all__ = [
     "MemoryStatus",
+    "PoolConcurrencyRamp",
+    "pool_evaluation_budget_capacity",
+    "pool_evaluation_worker_count",
     "cpu_bounded_worker_count",
     "estimate_ticker_working_set_bytes",
     "get_cpu_load_average_1m",

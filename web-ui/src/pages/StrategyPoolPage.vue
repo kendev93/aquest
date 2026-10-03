@@ -60,7 +60,7 @@ const market = ref<'SH' | 'SZ'>('SH')
 const code = ref('')
 const searchQuery = ref('')
 const sortColumn = ref<
-  'status' | 'strategy_return' | 'annual_return' | 'sharpe' | 'win_rate' | 'payoff_ratio' | 'max_drawdown' | 'validation_excess'
+  'status' | 'strategy_return' | 'annual_return' | 'sharpe' | 'win_rate' | 'payoff_ratio' | 'max_drawdown' | 'benchmark_return'
 >('status')
 const page = ref(1)
 const pageSize = ref(50)
@@ -892,11 +892,11 @@ function statusOrder(value: string): number {
 
 function metricValue(
   entry: StrategyPoolEntry,
-  key: 'strategy_return' | 'annual_return' | 'sharpe' | 'win_rate' | 'payoff_ratio' | 'max_drawdown' | 'validation_excess',
+  key: 'strategy_return' | 'annual_return' | 'sharpe' | 'win_rate' | 'payoff_ratio' | 'max_drawdown' | 'benchmark_return',
   target: StrategyPoolObjective | null,
 ): number {
-  if (key === 'validation_excess') {
-    return phaseExcess(entry, 'validation') ?? Number.NEGATIVE_INFINITY
+  if (key === 'benchmark_return') {
+    return benchmarkReturn(entry) ?? Number.NEGATIVE_INFINITY
   }
   const candidate = entry.active_candidate
     ?? (target ? entry.automatic_candidates[target] : null)
@@ -917,22 +917,8 @@ function tradeCount(
     ?? null
 }
 
-function phaseExcess(
-  entry: StrategyPoolEntry,
-  phase: 'validation' | 'holdout',
-): number | null {
-  const candidate = entry.active_candidate
-    ?? (objective.value ? entry.automatic_candidates[objective.value] : null)
-  const strategyReturn = candidate?.metrics?.[phase]?.total_return
-  const benchmarkReturn = entry.benchmark?.[phase]?.total_return
-  return typeof strategyReturn === 'number' && Number.isFinite(strategyReturn)
-    && typeof benchmarkReturn === 'number' && Number.isFinite(benchmarkReturn)
-    ? strategyReturn - benchmarkReturn
-    : null
-}
-
-function benchmarkReturn(entry: StrategyPoolEntry, phase: 'full_period' | 'validation' | 'holdout'): number | null {
-  const value = entry.benchmark?.[phase]?.total_return
+function benchmarkReturn(entry: StrategyPoolEntry): number | null {
+  const value = entry.benchmark?.full_period?.total_return
   return typeof value === 'number' && Number.isFinite(value) ? value : null
 }
 
@@ -1209,7 +1195,7 @@ onUnmounted(() => {
             <table class="pool-table">
               <thead><tr>
                 <th>持仓 / 今日信号</th><th>证券</th>
-                <th><button @click="setSort('validation_excess')">基准涨跌 / 超额收益{{ sortColumn === 'validation_excess' ? ' ↓' : '' }}</button></th>
+                <th><button @click="setSort('benchmark_return')">基准涨跌{{ sortColumn === 'benchmark_return' ? ' ↓' : '' }}</button></th>
                 <th><button @click="setSort('strategy_return')">策略收益（全区间）{{ sortColumn === 'strategy_return' ? ' ↓' : '' }}</button></th>
                 <th><button @click="setSort('annual_return')">策略收益（年化）{{ sortColumn === 'annual_return' ? ' ↓' : '' }}</button></th>
                 <th><button @click="setSort('sharpe')">夏普{{ sortColumn === 'sharpe' ? ' ↓' : '' }}</button></th>
@@ -1224,9 +1210,7 @@ onUnmounted(() => {
                   <td><strong>{{ entry.market }} {{ entry.code }}</strong><small>{{ entry.name }}</small></td>
                   <td :data-testid="`pool-entry-benchmark-${entry.code}`">
                     <div v-if="entry.benchmark" class="benchmark-summary">
-                      <div>全段基准 <b>{{ formatSignedPercent(benchmarkReturn(entry, 'full_period')) }}</b></div>
-                      <div>验证基准 {{ formatSignedPercent(benchmarkReturn(entry, 'validation')) }} · 策略超额 {{ formatSignedPercent(phaseExcess(entry, 'validation')) }}</div>
-                      <div>留出基准 {{ formatSignedPercent(benchmarkReturn(entry, 'holdout')) }} · 策略超额 {{ formatSignedPercent(phaseExcess(entry, 'holdout')) }}</div>
+                      <div>全段基准 <b>{{ formatSignedPercent(benchmarkReturn(entry)) }}</b></div>
                     </div>
                     <span v-else class="empty-copy">下次全市场重选时补算</span>
                   </td>

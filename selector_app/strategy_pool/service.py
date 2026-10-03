@@ -9,6 +9,7 @@ import math
 import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from contextlib import nullcontext
 from datetime import date
 from threading import Lock, local
 from typing import Literal, cast
@@ -36,15 +37,20 @@ from selector_app.screening.engine import evaluate_rule_group
 from selector_app.screening.jobs import TaskCancelledError
 from selector_app.screening.rules import RuleGroup
 from selector_app.strategy_discovery.catalog import default_indicator_catalog
+from selector_app.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
 from selector_app.web.schemas.screening import RuleGroupRequest
 
 from .resources import (
-    MAX_POOL_WORKERS,
+    EVALUATION_WORKER_MEMORY_BYTES,
+    POOL_RAMP_INTERVAL_SECONDS,
+    PoolConcurrencyRamp,
     cpu_bounded_worker_count,
     estimate_ticker_working_set_bytes,
     get_cpu_load_average_1m,
     memory_bounded_worker_count,
     memory_status,
+    pool_evaluation_budget_capacity,
+    pool_evaluation_worker_count,
     pool_worker_cap,
 )
 from .selection import common_calendar_windows, summarize_objective_winners
@@ -53,7 +59,7 @@ from .store import DuckDbStrategyPoolStore
 PoolObjective = Literal["annual_return", "sharpe"]
 PoolProgressCallback = Callable[[int, int, str, Mapping[str, object] | None], None]
 PoolEntryWriter = Callable[[Mapping[str, object]], None]
-MARKET_POOL_ALGORITHM_VERSION = "market-pool-v3"
+MARKET_POOL_ALGORITHM_VERSION = "market-pool-v4"
 POOL_PROGRESS_EMIT_INTERVAL_SECONDS = 1.5
 STRATEGY_HOLDING_BATCH_SIZE = 100
 STRATEGY_HOLDING_VIRTUAL_CASH = 1_000_000_000_000.0
@@ -149,6 +155,8 @@ class _PoolProgressCoordinator:
         self._cpu_worker_limit = maximum_workers
         self._cpu_load_average_1m: float | None = None
         self._visible_cpus = maximum_workers
+        self._target_workers = 1
+        self._estimated_worker_bytes = 0
         self._completed = 0
         self._finished = 0
         self._skipped = 0
@@ -166,6 +174,8 @@ class _PoolProgressCoordinator:
         cpu_worker_limit: int,
         cpu_load_average_1m: float | None,
         visible_cpus: int,
+        target_workers: int = 1,
+        estimated_worker_bytes: int = 0,
     ) -> None:
         with self._lock:
             self._memory_worker_limit = memory_worker_limit
@@ -175,6 +185,8 @@ class _PoolProgressCoordinator:
             self._cpu_worker_limit = cpu_worker_limit
             self._cpu_load_average_1m = cpu_load_average_1m
             self._visible_cpus = visible_cpus
+            self._target_workers = target_workers
+            self._estimated_worker_bytes = estimated_worker_bytes
 
     def ticker_progress(
         self,
@@ -229,6 +241,9 @@ class _PoolProgressCoordinator:
                     "cpu_worker_limit": self._cpu_worker_limit,
                     "cpu_load_average_1m": self._cpu_load_average_1m,
                     "visible_cpus": self._visible_cpus,
+                    "target_parallelism": self._target_workers,
+                    "estimated_ticker_memory_mb": self._estimated_worker_bytes // (1024**2),
+                    "ramp_interval_seconds": POOL_RAMP_INTERVAL_SECONDS,
                 },
             )
             self._last_emit_at = now
@@ -273,6 +288,9 @@ class _PoolProgressCoordinator:
                     "cpu_worker_limit": self._cpu_worker_limit,
                     "cpu_load_average_1m": self._cpu_load_average_1m,
                     "visible_cpus": self._visible_cpus,
+                    "target_parallelism": self._target_workers,
+                    "estimated_ticker_memory_mb": self._estimated_worker_bytes // (1024**2),
+                    "ramp_interval_seconds": POOL_RAMP_INTERVAL_SECONDS,
                 },
             )
             self._last_emit_at = time.monotonic()
@@ -296,6 +314,7 @@ class MarketStrategyPoolService:
         portfolio_service: PortfolioBacktestService | None = None,
         individual_service_factory: Callable[[], IndividualStockResearchService] | None = None,
         max_pool_workers: int | None = None,
+        evaluation_worker_budget: EvaluationWorkerBudget | None = None,
     ) -> None:
         self._store = store
         self._adapter = adapter
@@ -305,6 +324,7 @@ class MarketStrategyPoolService:
         self._portfolio_service = portfolio_service
         self._individual_service_factory = individual_service_factory
         self._research_local = local()
+        self._evaluation_worker_budget = evaluation_worker_budget
         requested_pool_workers = (
             1
             if individual_service_factory is None
@@ -312,9 +332,9 @@ class MarketStrategyPoolService:
             if max_pool_workers is None
             else max_pool_workers
         )
-        self._max_pool_workers = min(MAX_POOL_WORKERS, requested_pool_workers)
+        self._max_pool_workers = requested_pool_workers
         if self._max_pool_workers < 1:
-            raise ValueError(f"全市场策略池最大并发数必须在 1 到 {MAX_POOL_WORKERS} 之间")
+            raise ValueError("全市场策略池最大并发数必须大于 0")
 
     def _individual_service_for_thread(self) -> IndividualStockResearchService:
         if self._individual_service_factory is None:
@@ -337,88 +357,99 @@ class MarketStrategyPoolService:
         progress: _TickerProgress,
         abort_check: Callable[[], bool] | None,
     ) -> tuple[dict[str, object], dict[str, object] | None]:
-        progress.start()
-        clear_stock_cache = getattr(self._adapter, "clear_thread_stock_cache", None)
-        if callable(clear_stock_cache):
-            clear_stock_cache()
-        individual_service = self._individual_service_for_thread()
-        result = individual_service.run(config, progress, abort_check)
-        result_market_fingerprint = result.get("market_fingerprint")
-        if not isinstance(result_market_fingerprint, str) or not result_market_fingerprint:
-            result_market_fingerprint = previous_market_fingerprint or _market_fingerprint(
-                self._adapter, ref
-            )
-        if previous_market_fingerprint and result_market_fingerprint != previous_market_fingerprint:
-            raise ValueError("研究期间本地行情发生变化，请重新运行该股票")
-        benchmark = _symbol_benchmark(
-            self._adapter,
-            ref,
-            config,
-            _mapping(result.get("split_metadata")),
+        registration = (
+            self._evaluation_worker_budget.stock()
+            if self._evaluation_worker_budget is not None
+            else nullcontext()
         )
-        winners = summarize_objective_winners(result)
-        annual_candidate = winners["annual_return"]
-        sharpe_candidate = winners["sharpe"]
-        split_metadata = result.get("split_metadata")
-        if isinstance(split_metadata, Mapping):
-            for candidate in (annual_candidate, sharpe_candidate):
-                if isinstance(candidate, dict):
-                    candidate["split_metadata"] = dict(split_metadata)
-        if mode == "full" and _same_candidate(annual_candidate, sharpe_candidate):
-            sharpe_candidate = {
-                "candidate_ref": "annual_return",
-                "candidate_id": annual_candidate.get("candidate_id")
-                if annual_candidate is not None
+        with registration:
+            progress.start()
+            clear_stock_cache = getattr(self._adapter, "clear_thread_stock_cache", None)
+            if callable(clear_stock_cache):
+                clear_stock_cache()
+            individual_service = self._individual_service_for_thread()
+            result = individual_service.run(config, progress, abort_check)
+            result_market_fingerprint = result.get("market_fingerprint")
+            if not isinstance(result_market_fingerprint, str) or not result_market_fingerprint:
+                result_market_fingerprint = previous_market_fingerprint or _market_fingerprint(
+                    self._adapter, ref
+                )
+            if (
+                previous_market_fingerprint
+                and result_market_fingerprint != previous_market_fingerprint
+            ):
+                raise ValueError("研究期间本地行情发生变化，请重新运行该股票")
+            benchmark = _symbol_benchmark(
+                self._adapter,
+                ref,
+                config,
+                _mapping(result.get("split_metadata")),
+            )
+            winners = summarize_objective_winners(result)
+            annual_candidate = winners["annual_return"]
+            sharpe_candidate = winners["sharpe"]
+            split_metadata = result.get("split_metadata")
+            if isinstance(split_metadata, Mapping):
+                for candidate in (annual_candidate, sharpe_candidate):
+                    if isinstance(candidate, dict):
+                        candidate["split_metadata"] = dict(split_metadata)
+            if mode == "full" and _same_candidate(annual_candidate, sharpe_candidate):
+                sharpe_candidate = {
+                    "candidate_ref": "annual_return",
+                    "candidate_id": annual_candidate.get("candidate_id")
+                    if annual_candidate is not None
+                    else None,
+                }
+            full_period_metrics = getattr(individual_service, "full_period_metrics", None)
+            if callable(full_period_metrics):
+                calculated: set[str] = set()
+                for candidate in (annual_candidate, sharpe_candidate):
+                    if candidate is None or isinstance(candidate.get("candidate_ref"), str):
+                        continue
+                    candidate_key = str(
+                        candidate.get("candidate_id")
+                        or candidate.get("candidate_hash")
+                        or id(candidate)
+                    )
+                    if candidate_key in calculated:
+                        continue
+                    calculated.add(candidate_key)
+                    try:
+                        full_metrics = full_period_metrics(
+                            candidate,
+                            config.start_date,
+                            config.end_date,
+                        )
+                    except Exception:  # noqa: BLE001 - full-period display metrics do not discard a valid strategy
+                        logger.exception("全区间策略收益回测失败: %s", ref.symbol)
+                        continue
+                    current_metrics = _mapping(candidate.get("metrics"))
+                    candidate["metrics"] = {**current_metrics, "full_period": full_metrics}
+            record: dict[str, object] = {
+                "market": ref.market,
+                "code": ref.code,
+                "name": ref.name or "",
+                "annual_candidate": annual_candidate,
+                "sharpe_candidate": sharpe_candidate,
+                "benchmark": benchmark,
+                "data_fingerprint": str(result.get("data_fingerprint") or ""),
+                "market_fingerprint": result_market_fingerprint,
+                "config_fingerprint": config_fingerprint,
+                "source_job_id": job_id,
+                "split_metadata": dict(split_metadata)
+                if isinstance(split_metadata, Mapping)
                 else None,
             }
-        full_period_metrics = getattr(individual_service, "full_period_metrics", None)
-        if callable(full_period_metrics):
-            calculated: set[str] = set()
-            for candidate in (annual_candidate, sharpe_candidate):
-                if candidate is None or isinstance(candidate.get("candidate_ref"), str):
-                    continue
-                candidate_key = str(
-                    candidate.get("candidate_id")
-                    or candidate.get("candidate_hash")
-                    or id(candidate)
-                )
-                if candidate_key in calculated:
-                    continue
-                calculated.add(candidate_key)
-                try:
-                    full_metrics = full_period_metrics(
-                        candidate,
-                        config.start_date,
-                        config.end_date,
-                    )
-                except Exception:  # noqa: BLE001 - full-period display metrics do not discard a valid strategy
-                    logger.exception("全区间策略收益回测失败: %s", ref.symbol)
-                    continue
-                current_metrics = _mapping(candidate.get("metrics"))
-                candidate["metrics"] = {**current_metrics, "full_period": full_metrics}
-        record: dict[str, object] = {
-            "market": ref.market,
-            "code": ref.code,
-            "name": ref.name or "",
-            "annual_candidate": annual_candidate,
-            "sharpe_candidate": sharpe_candidate,
-            "benchmark": benchmark,
-            "data_fingerprint": str(result.get("data_fingerprint") or ""),
-            "market_fingerprint": result_market_fingerprint,
-            "config_fingerprint": config_fingerprint,
-            "source_job_id": job_id,
-            "split_metadata": dict(split_metadata) if isinstance(split_metadata, Mapping) else None,
-        }
-        single_result = None
-        if mode == "single":
-            single_result = {
-                **record,
-                "split_metadata": result.get("split_metadata"),
-                "date_range": result.get("date_range"),
-                "condition_candidates": result.get("condition_candidates"),
-                "risk_trials_per_rule_set": result.get("risk_trials_per_rule_set"),
-            }
-        return record, single_result
+            single_result = None
+            if mode == "single":
+                single_result = {
+                    **record,
+                    "split_metadata": result.get("split_metadata"),
+                    "date_range": result.get("date_range"),
+                    "condition_candidates": result.get("condition_candidates"),
+                    "risk_trials_per_rule_set": result.get("risk_trials_per_rule_set"),
+                }
+            return record, single_result
 
     def _run_full_research(
         self,
@@ -448,6 +479,7 @@ class MarketStrategyPoolService:
         skipped = 0
         failed = 0
         next_index = 0
+        ramp = PoolConcurrencyRamp(interval_seconds=POOL_RAMP_INTERVAL_SECONDS)
         active: dict[
             Future[tuple[dict[str, object], dict[str, object] | None]],
             tuple[int, StockRef],
@@ -457,6 +489,12 @@ class MarketStrategyPoolService:
             thread_name_prefix="strategy-pool-symbol",
         ) as executor:
             while next_index < total or active:
+                if self._evaluation_worker_budget is not None:
+                    self._evaluation_worker_budget.set_capacity(
+                        pool_evaluation_budget_capacity(
+                            in_use_workers=self._evaluation_worker_budget.in_use_workers
+                        )
+                    )
                 if abort_check is not None and abort_check():
                     for future in active:
                         future.cancel()
@@ -594,9 +632,34 @@ class MarketStrategyPoolService:
                         for candidate in lookahead
                     )
                     memory = memory_status()
+                    ramp.observe_memory(
+                        memory,
+                        len(active),
+                        shared_worker_bytes=(
+                            self._evaluation_worker_budget.in_use_workers
+                            * EVALUATION_WORKER_MEMORY_BYTES
+                            if self._evaluation_worker_budget is not None
+                            else 0
+                        ),
+                    )
+                    estimated_bytes = max(estimated_bytes, ramp.observed_worker_bytes)
+                    reserved_bytes = (
+                        max(
+                            0,
+                            min(
+                                self._evaluation_worker_budget.capacity,
+                                (len(active) + 1) * pool_evaluation_worker_count(),
+                            )
+                            - self._evaluation_worker_budget.in_use_workers,
+                        )
+                        * EVALUATION_WORKER_MEMORY_BYTES
+                        if self._evaluation_worker_budget is not None
+                        else 0
+                    )
                     memory_worker_limit = memory_bounded_worker_count(
                         status=memory,
                         estimated_worker_bytes=estimated_bytes,
+                        reserved_bytes=reserved_bytes,
                         maximum_workers=self._max_pool_workers,
                         active_workers=len(active),
                     )
@@ -608,13 +671,19 @@ class MarketStrategyPoolService:
                         maximum_workers=self._max_pool_workers,
                         active_workers=len(active),
                     )
-                    target_workers = min(memory_worker_limit, cpu_worker_limit)
+                    target_workers = ramp.target(
+                        resource_limit=min(memory_worker_limit, cpu_worker_limit),
+                        active_workers=len(active),
+                        now=time.monotonic(),
+                    )
                     coordinator.set_resource_budget(
                         memory_worker_limit=memory_worker_limit,
                         available_bytes=memory.available_bytes,
                         cpu_worker_limit=cpu_worker_limit,
                         cpu_load_average_1m=cpu_load_average,
                         visible_cpus=visible_cpus,
+                        target_workers=target_workers,
+                        estimated_worker_bytes=estimated_bytes,
                     )
                     if len(active) >= target_workers:
                         break
@@ -1630,8 +1699,8 @@ def _individual_config(
         market=ref.market,
         code=ref.code,
         name=ref.name or "",
-        start_date=start_date,
-        end_date=end_date,
+        start_date=ref.first_date or start_date,
+        end_date=min(ref.last_date or end_date, end_date),
         value_ids=tuple(value_ids),
         signal_ids=tuple(signal_ids),
         reversal_multiple=cast(float, settings["reversal_multiple"]),
