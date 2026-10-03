@@ -1,16 +1,14 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import PageGuide from '../components/PageGuide.vue'
 import { fetchStoreStatus } from '../api/marketData'
 import {
   cancelStrategyPoolJob,
-  clearStrategyPoolOverride,
   createStrategyPoolJob,
   fetchStrategyPoolEntries,
   fetchStrategyPoolJobs,
   getStrategyPoolJob,
-  saveStrategyPoolOverride,
 } from '../api/strategyPool'
 import { FormulaScreenApiError } from '../api/formulaScreen'
 import type {
@@ -51,7 +49,6 @@ const activeJob = ref<StrategyPoolJobState | null>(null)
 const queuedSingleSymbol = ref('')
 const pendingSingle = ref<StrategyPoolJobResult['single_candidate'] | null>(null)
 const loading = ref(false)
-const saving = ref(false)
 const errorMessage = ref('')
 const pollWarning = ref('')
 const successMessage = ref('')
@@ -60,13 +57,10 @@ const market = ref<'SH' | 'SZ'>('SH')
 const code = ref('')
 const searchQuery = ref('')
 const sortColumn = ref<
-  'status' | 'strategy_return' | 'annual_return' | 'sharpe' | 'win_rate' | 'payoff_ratio' | 'max_drawdown' | 'benchmark_return'
+  'status' | 'strategy_return' | 'annual_return' | 'sharpe' | 'win_rate' | 'payoff_ratio' | 'max_drawdown' | 'benchmark_return' | 'created_return'
 >('status')
 const page = ref(1)
 const pageSize = ref(50)
-const editorEntry = ref<StrategyPoolEntry | null>(null)
-const editorObjective = ref<StrategyPoolObjective>('annual_return')
-const manualDraft = reactive({ buyRule: '', sellRule: '', risk: '' })
 const elapsedClock = ref(Date.now())
 let elapsedTimer: number | null = null
 let pollTimer: number | null = null
@@ -251,11 +245,7 @@ const pageEntries = computed(() => {
 const pageStart = computed(() => sortedEntries.value.length ? (page.value - 1) * pageSize.value + 1 : 0)
 const pageEnd = computed(() => Math.min(page.value * pageSize.value, sortedEntries.value.length))
 
-const activeEditorCandidate = computed(() => {
-  if (!editorEntry.value) return null
-  return editorEntry.value.manual_overrides[editorObjective.value]
-    ?? editorEntry.value.automatic_candidates[editorObjective.value]
-})
+
 
 function selectObjective(value: StrategyPoolObjective): void {
   objective.value = value
@@ -267,7 +257,7 @@ function selectObjective(value: StrategyPoolObjective): void {
   void refreshPage(true)
 }
 
-async function refreshPage(refreshSignals: boolean): Promise<void> {
+async function refreshPage(_refreshSignals: boolean): Promise<void> {
   if (!objective.value) return
   loading.value = true
   errorMessage.value = ''
@@ -282,9 +272,6 @@ async function refreshPage(refreshSignals: boolean): Promise<void> {
     page.value = Math.min(page.value, Math.max(1, Math.ceil(nextEntries.length / pageSize.value)))
     history.value = nextHistory
     await restoreLatestSignalResult(nextHistory)
-    if (refreshSignals) {
-      await ensureDailySignalScan(nextHistory)
-    }
   } catch (error) {
     errorMessage.value = apiMessage(error)
   } finally {
@@ -309,7 +296,7 @@ async function restoreLatestSignalResult(jobs: StrategyPoolJobSummary[]): Promis
     (!cutoff || timestampMillis(job.created_at) > cutoff)
     && job.mode === 'signals'
     && job.status === 'completed'
-    && (!job.objective || job.objective === objective.value),
+    && (!job.objective || job.objective === objective.value || job.dual_objectives),
   )
   const baselineIndex = signalJobs.findIndex((job) => !job.market || !job.code)
   if (baselineIndex < 0) {
@@ -342,7 +329,7 @@ async function readCompletedSignalResult(
 ): Promise<StrategyPoolJobResult | null> {
   try {
     const state = await getStrategyPoolJob(job.job_id)
-    const result = state.result
+    const result = state.result?.results_by_objective?.[objective.value ?? 'annual_return'] ?? state.result
     return state.status === 'completed'
       && result?.mode === 'signals'
       && result.objective === objective.value
@@ -453,16 +440,6 @@ function formatResearchElapsed(startedAt: number | null): string {
   const seconds = Math.max(0, Math.floor((elapsedClock.value - startedAt) / 1000))
   return [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60]
     .map((value) => String(value).padStart(2, '0')).join(':')
-}
-
-async function ensureDailySignalScan(jobs: StrategyPoolJobSummary[]): Promise<void> {
-  if (!objective.value || isBusy.value || !entries.value.some(activeReplayableCandidate)) return
-  const day = (value: number) => new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
-  }).format(new Date(value))
-  const today = day(Date.now())
-  if (jobs.some((job) => job.mode === 'signals' && day(timestampMillis(job.created_at)) === today)) return
-  await startSignalScan(undefined, true)
 }
 
 async function startFullResearch(rebuild = true): Promise<void> {
@@ -585,7 +562,7 @@ async function pollJob(jobId: string, intent: StrategyPoolMode): Promise<void> {
       }
       if (intent === 'single' && state.status === 'running') queuedSingleSymbol.value = ''
       if (['completed', 'failed', 'cancelled'].includes(state.status)) {
-        const result = state.result ?? null
+        const result = state.result?.results_by_objective?.[objective.value ?? 'annual_return'] ?? state.result ?? null
         if (intent === 'single') queuedSingleSymbol.value = ''
         activeJobId.value = ''
         activeIntent.value = ''
@@ -695,108 +672,9 @@ async function cancelCurrentJob(): Promise<void> {
   }
 }
 
-async function applySingleCandidate(target: StrategyPoolObjective): Promise<void> {
-  const marketCode = pendingSingle.value
-  const candidate = marketCode?.[target === 'annual_return' ? 'annual_candidate' : 'sharpe_candidate']
-  if (!marketCode || !candidate) return
-  await saveOverride(marketCode.market, marketCode.code, target, candidate, marketCode.benchmark ?? undefined)
-  pendingSingle.value = null
-}
-
-async function saveOverride(
-  selectedMarket: string,
-  selectedCode: string,
-  target: StrategyPoolObjective,
-  candidate: StrategyPoolCandidate,
-  benchmark?: StrategyPoolBenchmark,
-): Promise<void> {
-  saving.value = true
-  errorMessage.value = ''
-  try {
-    await saveStrategyPoolOverride(selectedMarket, selectedCode, target, candidate, benchmark)
-    successMessage.value = `${selectedMarket} ${selectedCode} 的${objectiveLabel(target)}策略已保存为手工覆盖。`
-    await refreshPage(false)
-  } catch (error) {
-    errorMessage.value = apiMessage(error)
-  } finally {
-    saving.value = false
-  }
-}
-
-async function saveManualEdit(): Promise<void> {
-  if (!editorEntry.value) return
-  try {
-    const buyRule = parseObject(manualDraft.buyRule, '买入规则')
-    const sellRule = parseObject(manualDraft.sellRule, '卖出规则')
-    const risk = parseObject(manualDraft.risk, '退出风控')
-    const config = { ...(activeEditorCandidate.value?.config ?? {}) }
-    const metrics = activeEditorCandidate.value?.metrics
-      ? { ...activeEditorCandidate.value.metrics }
-      : undefined
-    if (metrics) delete metrics.full_period
-    for (const key of [
-      'stop_loss_pct', 'stop_loss_mode', 'stop_loss_atr_multiplier', 'stop_loss_cooldown_days',
-      'take_profit_pct', 'take_profit_mode', 'take_profit_atr_multiplier', 'take_profit_cooldown_days',
-      'trailing_stop_pct', 'trailing_stop_mode', 'trailing_stop_atr_multiplier', 'trailing_stop_cooldown_days',
-    ]) delete config[key]
-    const candidate: StrategyPoolCandidate = {
-      candidate_id: `manual-${editorEntry.value.market}${editorEntry.value.code}-${Date.now()}`,
-      objective: editorObjective.value,
-      buy_rule: buyRule,
-      sell_rule: sellRule,
-      config: { ...config, ...risk, buy_rule: buyRule, sell_rule: sellRule },
-      metrics,
-      quality: {
-        badges: [
-          ...(activeEditorCandidate.value?.quality?.badges ?? []),
-          '手工编辑待验证',
-        ],
-        sample_adequate: activeEditorCandidate.value?.quality?.sample_adequate,
-        high_drawdown_risk: activeEditorCandidate.value?.quality?.high_drawdown_risk,
-      },
-      replayable: true,
-    }
-    await saveOverride(editorEntry.value.market, editorEntry.value.code, editorObjective.value, candidate)
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '手工策略 JSON 无效。'
-  }
-}
-
-async function resetManualOverride(): Promise<void> {
-  if (!editorEntry.value) return
-  saving.value = true
-  try {
-    await clearStrategyPoolOverride(editorEntry.value.market, editorEntry.value.code, editorObjective.value)
-    successMessage.value = '已恢复该目标的自动候选。'
-    await refreshPage(false)
-  } catch (error) {
-    errorMessage.value = apiMessage(error)
-  } finally {
-    saving.value = false
-  }
-}
-
-function openEditor(entry: StrategyPoolEntry): void {
-  editorEntry.value = entry
-  editorObjective.value = objective.value ?? 'annual_return'
-  populateDraft()
-}
-
-function populateDraft(): void {
-  const candidate = activeEditorCandidate.value
-  manualDraft.buyRule = JSON.stringify(candidate?.buy_rule ?? emptyRule(), null, 2)
-  manualDraft.sellRule = JSON.stringify(candidate?.sell_rule ?? emptyRule(), null, 2)
-  const config = candidate?.config ?? {}
-  const riskKeys = [
-    'stop_loss_pct', 'stop_loss_mode', 'stop_loss_atr_multiplier', 'stop_loss_cooldown_days',
-    'take_profit_pct', 'take_profit_mode', 'take_profit_atr_multiplier', 'take_profit_cooldown_days',
-    'trailing_stop_pct', 'trailing_stop_mode', 'trailing_stop_atr_multiplier', 'trailing_stop_cooldown_days',
-  ]
-  manualDraft.risk = JSON.stringify(
-    Object.fromEntries(riskKeys.filter((key) => key in config).map((key) => [key, config[key]])),
-    null,
-    2,
-  )
+function detailHref(entry: StrategyPoolEntry): string {
+  const list = new URLSearchParams({objective:objective.value ?? 'annual_return', search:searchQuery.value, sort:sortColumn.value, page:String(page.value), pageSize:String(pageSize.value)})
+  return `/strategy-pool/${entry.market}/${entry.code}?objective=${objective.value ?? 'annual_return'}&list=${encodeURIComponent(list.toString())}`
 }
 
 function setSort(column: typeof sortColumn.value): void {
@@ -892,9 +770,10 @@ function statusOrder(value: string): number {
 
 function metricValue(
   entry: StrategyPoolEntry,
-  key: 'strategy_return' | 'annual_return' | 'sharpe' | 'win_rate' | 'payoff_ratio' | 'max_drawdown' | 'benchmark_return',
+  key: 'strategy_return' | 'annual_return' | 'sharpe' | 'win_rate' | 'payoff_ratio' | 'max_drawdown' | 'benchmark_return' | 'created_return',
   target: StrategyPoolObjective | null,
 ): number {
+  if (key === 'created_return') return entry.created_return ?? Number.NEGATIVE_INFINITY
   if (key === 'benchmark_return') {
     return benchmarkReturn(entry) ?? Number.NEGATIVE_INFINITY
   }
@@ -972,20 +851,14 @@ function apiMessage(error: unknown): string {
       : '全市场策略池请求失败，请重试。'
 }
 
-function parseObject(raw: string, label: string): Record<string, unknown> {
-  const parsed = JSON.parse(raw) as unknown
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error(`${label}必须是 JSON 对象。`)
-  }
-  return parsed as Record<string, unknown>
-}
-
-function emptyRule(): Record<string, unknown> {
-  return { signals: [], conditions: [], required_conditions: [], combine_mode: 'all' }
-}
-
 async function initialize(): Promise<void> {
-  const stored = window.localStorage.getItem(OBJECTIVE_STORAGE_KEY)
+  const params = new URLSearchParams(window.location.search)
+  searchQuery.value = params.get('search') ?? ''
+  page.value = Math.max(1, Number(params.get('page') ?? 1))
+  pageSize.value = Number(params.get('pageSize') ?? 50)
+  const sort = params.get('sort')
+  if (['status','strategy_return','annual_return','sharpe','win_rate','payoff_ratio','max_drawdown','benchmark_return','created_return'].includes(sort ?? '')) sortColumn.value = sort as typeof sortColumn.value
+  const stored = params.get('objective') ?? window.localStorage.getItem(OBJECTIVE_STORAGE_KEY)
   if (stored === 'annual_return' || stored === 'sharpe') {
     objective.value = stored
     await refreshPage(false)
@@ -1002,8 +875,6 @@ async function initialize(): Promise<void> {
         ? { market: running.market as 'SH' | 'SZ', code: running.code }
         : null
       void pollJob(running.job_id, running.mode)
-    } else if (entries.value.some((entry) => entry.active_candidate)) {
-      await ensureDailySignalScan(history.value)
     }
   }
 }
@@ -1101,7 +972,7 @@ onUnmounted(() => {
             <button class="button-secondary" data-testid="pool-rerun-single" :disabled="isBusy" @click="startSingleRerun">逐股重跑</button>
           </div>
 
-          <p class="empty-copy">当天首次进入时自动扫描一次；再次进入、切换目标、行情或策略变化均不会重复扫描。需要更新时请点击“刷新当天信号”。</p>
+          <p class="empty-copy">后台在新收盘行情就绪后每日跟踪两套策略一次；打开页面只读取缓存。需要重算时请点击“刷新当天信号”。</p>
           <p class="empty-copy">清空重建会删除当前自动策略、手动覆盖和失败记录，从头逐只研究；增量更新保留已有策略并复用未变化的结果。</p>
 
           <div v-if="isBusy" class="pool-progress" data-testid="pool-job-progress">
@@ -1196,6 +1067,7 @@ onUnmounted(() => {
               <thead><tr>
                 <th>持仓 / 今日信号</th><th>证券</th>
                 <th><button @click="setSort('benchmark_return')">基准涨跌{{ sortColumn === 'benchmark_return' ? ' ↓' : '' }}</button></th>
+                <th><button @click="setSort('created_return')">创建至今收益{{ sortColumn === 'created_return' ? ' ↓' : '' }}</button></th>
                 <th><button @click="setSort('strategy_return')">策略收益（全区间）{{ sortColumn === 'strategy_return' ? ' ↓' : '' }}</button></th>
                 <th><button @click="setSort('annual_return')">策略收益（年化）{{ sortColumn === 'annual_return' ? ' ↓' : '' }}</button></th>
                 <th><button @click="setSort('sharpe')">夏普{{ sortColumn === 'sharpe' ? ' ↓' : '' }}</button></th>
@@ -1214,6 +1086,7 @@ onUnmounted(() => {
                     </div>
                     <span v-else class="empty-copy">下次全市场重选时补算</span>
                   </td>
+                  <td :data-testid="`pool-created-return-${entry.code}`">{{ typeof entry.created_return === 'number' ? formatPercent(entry.created_return) : entry.tracking_status === 'pending' ? '待初始化' : entry.tracking_status === 'failed' ? '更新失败' : '—' }}<small v-if="entry.tracking_status === 'failed'">同步失败，保留上次结果</small><small v-if="entry.tracking_as_of_date">截至 {{ entry.tracking_as_of_date }}</small></td>
                   <td>{{ formatPercent(metricValue(entry, 'strategy_return', objective)) }}</td>
                   <td>{{ formatPercent(metricValue(entry, 'annual_return', objective)) }}</td>
                   <td>{{ formatNumber(metricValue(entry, 'sharpe', objective)) }}</td>
@@ -1221,7 +1094,7 @@ onUnmounted(() => {
                   <td>{{ formatNumber(metricValue(entry, 'payoff_ratio', objective)) }}</td>
                   <td>{{ formatPercent(metricValue(entry, 'max_drawdown', objective)) }}</td>
                   <td><span v-if="entry.active_candidate?.quality?.badges?.length" class="badge-row"><i v-for="badge in entry.active_candidate.quality.badges" :key="badge">{{ badge }}</i></span><span v-else-if="entry.status === 'no_strategy'">无可计算的策略绩效</span><span v-else-if="entry.last_error" class="danger-text">{{ entry.last_error }}</span><span v-else>—</span><small v-if="entry.active_candidate?.metrics">交易数：验证 {{ formatNumber(tradeCount(entry.active_candidate, 'validation'), 0) }} · 留出 {{ formatNumber(tradeCount(entry.active_candidate, 'holdout'), 0) }} 笔</small><small v-if="entry.active_source === 'manual'">手工覆盖 · {{ objectiveLabel(objective) }}</small></td>
-                  <td><button class="text-button" @click="openEditor(entry)">编辑</button><button :data-testid="`pool-rerun-entry-${entry.code}`" class="text-button" :disabled="rerunEntryDisabled()" :title="rerunEntryTitle(entry)" @click="void rerunEntry(entry)">{{ queuedSingleSymbol === symbol(entry) ? '排队中' : '重跑' }}</button></td>
+                  <td><a class="text-button" :href="detailHref(entry)" :data-testid="`pool-detail-${entry.code}`">详情</a><button :data-testid="`pool-rerun-entry-${entry.code}`" class="text-button" :disabled="rerunEntryDisabled()" :title="rerunEntryTitle(entry)" @click="void rerunEntry(entry)">{{ queuedSingleSymbol === symbol(entry) ? '排队中' : '重跑' }}</button></td>
                 </tr>
                 <tr v-if="!filteredEntries.length"><td colspan="11" class="empty-copy" data-testid="pool-entry-empty">{{ searchQuery.trim() && entries.length ? '没有符合代码或名称的标的。' : loading ? '读取中…' : '策略池为空，开始全市场研究后会逐只写入候选。' }}</td></tr>
               </tbody>
@@ -1247,7 +1120,6 @@ onUnmounted(() => {
               <strong>{{ objectiveLabel(target) }}最佳</strong>
               <p v-if="pendingSingle[target === 'annual_return' ? 'annual_candidate' : 'sharpe_candidate']">验证年化 {{ formatPercent(pendingSingle[target === 'annual_return' ? 'annual_candidate' : 'sharpe_candidate']?.metrics?.validation?.annual_return) }} · 夏普 {{ formatNumber(pendingSingle[target === 'annual_return' ? 'annual_candidate' : 'sharpe_candidate']?.metrics?.validation?.sharpe) }}</p>
               <p v-else>没有可计算的候选。</p>
-              <button v-if="!pendingSingle.saved_to_pool && pendingSingle[target === 'annual_return' ? 'annual_candidate' : 'sharpe_candidate']" class="button-secondary" :disabled="saving" @click="applySingleCandidate(target)">保存为{{ objectiveLabel(target) }}手工覆盖</button>
             </article>
           </div>
         </section>
@@ -1260,20 +1132,7 @@ onUnmounted(() => {
           <p v-else class="empty-copy">完成或启动的任务会保存在本地历史中。取消任务后，再次全量重选会继续复用已完成标的。</p>
         </section>
 
-        <div v-if="editorEntry" class="editor-backdrop" role="presentation" @click.self="editorEntry = null">
-          <section class="pool-editor panel-card" role="dialog" aria-modal="true" aria-labelledby="pool-editor-title" data-testid="pool-manual-editor">
-            <div class="section-heading"><div><p class="eyebrow">MANUAL OVERRIDE</p><h2 id="pool-editor-title">编辑 {{ editorEntry.market }} {{ editorEntry.code }} · {{ editorEntry.name }}</h2></div><button class="text-button" @click="editorEntry = null">关闭</button></div>
-            <label>编辑目标
-              <select v-model="editorObjective" @change="populateDraft"><option value="annual_return">年化收益策略</option><option value="sharpe">夏普策略</option></select>
-            </label>
-            <div class="editor-fields">
-              <label>买入规则 JSON<textarea v-model="manualDraft.buyRule" rows="9" spellcheck="false" /></label>
-              <label>卖出规则 JSON<textarea v-model="manualDraft.sellRule" rows="9" spellcheck="false" /></label>
-              <label class="editor-risk">退出风控 JSON<textarea v-model="manualDraft.risk" rows="8" spellcheck="false" /></label>
-            </div>
-            <div class="editor-actions"><button class="button-primary" :disabled="saving" @click="saveManualEdit">保存为手工覆盖</button><button v-if="editorEntry.manual_overrides[editorObjective]" class="button-secondary" :disabled="saving" @click="resetManualOverride">恢复自动候选</button></div>
-          </section>
-        </div>
+
       </template>
     </main>
   </div>

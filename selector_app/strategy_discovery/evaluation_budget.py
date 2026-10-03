@@ -40,6 +40,19 @@ class EvaluationWorkerBudget:
             self._condition.notify_all()
 
     @contextmanager
+    def try_lease(self) -> Iterator[int]:
+        """Borrow one idle process without jumping ahead of queued research work."""
+        with self._condition:
+            granted = 1 if self._available > 0 and not self._waiting else 0
+            self._available -= granted
+        try:
+            yield granted
+        finally:
+            with self._condition:
+                self._available += granted
+                self._condition.notify_all()
+
+    @contextmanager
     def stock(self) -> Iterator[None]:
         with self._condition:
             self._stocks += 1

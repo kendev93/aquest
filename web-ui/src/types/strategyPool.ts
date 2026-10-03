@@ -45,6 +45,11 @@ export interface StrategyPoolBenchmark {
 }
 
 export interface StrategyPoolEntry {
+  created_at?: string | null
+  created_return?: number | null
+  tracking_status?: string
+  tracking_as_of_date?: string | null
+  tracking?: Record<string, unknown> | null
   market: 'SH' | 'SZ'
   code: string
   name: string
@@ -101,6 +106,7 @@ export interface StrategyPoolMarketSnapshot {
 }
 
 export interface StrategyPoolJobResult {
+  results_by_objective?: Partial<Record<StrategyPoolObjective, StrategyPoolJobResult>>
   mode?: StrategyPoolMode
   objective?: StrategyPoolObjective
   total_symbols?: number
@@ -159,6 +165,7 @@ export interface StrategyPoolJobState {
 }
 
 export interface StrategyPoolJobSummary {
+  dual_objectives?: boolean
   rebuild?: boolean
   job_id: string
   status: string

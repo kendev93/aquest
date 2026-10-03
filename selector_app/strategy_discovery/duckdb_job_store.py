@@ -233,7 +233,7 @@ class DuckDbStrategyJobStore:
             row = connection.execute(
                 """
                 SELECT job_id, state_json FROM strategy_jobs
-                WHERE operation = 'market_strategy_pool'
+                WHERE operation IN ('market_strategy_pool','market_strategy_pool_tracking')
                   AND json_extract_string(request_json, '$.payload.mode') = 'signals'
                   AND created_at >= ? AND created_at < ?
                 ORDER BY created_at DESC, job_id DESC LIMIT 1
@@ -256,12 +256,14 @@ class DuckDbStrategyJobStore:
             raise ValueError("策略池任务历史偏移量不能小于 0")
         with self._read_connection() as connection:
             total_row = connection.execute(
-                "SELECT COUNT(*) FROM strategy_jobs WHERE operation = 'market_strategy_pool'"
+                "SELECT COUNT(*) FROM strategy_jobs WHERE operation "
+                "IN ('market_strategy_pool','market_strategy_pool_tracking')"
             ).fetchone()
             rows = connection.execute(
                 """
                 SELECT job_id, request_json, state_json
-                FROM strategy_jobs WHERE operation = 'market_strategy_pool'
+                FROM strategy_jobs WHERE operation
+                IN ('market_strategy_pool','market_strategy_pool_tracking')
                 ORDER BY created_at DESC, job_id DESC LIMIT ? OFFSET ?
                 """,
                 [limit, offset],
@@ -280,6 +282,8 @@ class DuckDbStrategyJobStore:
                     "status": state.get("status"),
                     "mode": payload.get("mode", "full"),
                     "rebuild": payload.get("rebuild") is True,
+                    "dual_objectives": payload.get("mode") == "signals"
+                    and request.get("operation") == "market_strategy_pool_tracking",
                     "objective": payload.get("objective"),
                     "market": payload.get("market"),
                     "code": payload.get("code"),
@@ -299,19 +303,23 @@ class DuckDbStrategyJobStore:
             "offset": offset,
         }
 
-    def claim_next(self, worker_id: str | None = None) -> str | None:
+    def claim_next(
+        self, worker_id: str | None = None, operations: list[str] | None = None
+    ) -> str | None:
         selected_worker = _validate_worker_id(worker_id or "local-worker")
         self.recover_stale_running(stale_after_seconds=DEFAULT_STALE_AFTER_SECONDS)
         now = time.time()
         with _WRITE_LOCK, self._transaction() as connection:
+            operation_clause = (
+                (" AND operation IN (" + ",".join("?" for _ in operations) + ")")
+                if operations
+                else ""
+            )
             row = connection.execute(
-                """
-                SELECT job_id, state_json
-                FROM strategy_jobs
-                WHERE status = 'queued'
-                ORDER BY created_at, job_id
-                LIMIT 1
-                """
+                "SELECT job_id,state_json FROM strategy_jobs WHERE status='queued'"
+                + operation_clause
+                + " ORDER BY created_at,job_id LIMIT 1",
+                operations or [],
             ).fetchone()
             if row is None:
                 return None

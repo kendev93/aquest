@@ -46,6 +46,7 @@ class HttpStrategyJobClient:
         *,
         timeout_seconds: float = 10.0,
         requester: JsonRequester | None = None,
+        operations: list[str] | None = None,
     ) -> None:
         parsed_url = urlsplit(base_url.strip())
         if parsed_url.scheme not in {"http", "https"} or not parsed_url.hostname:
@@ -53,6 +54,7 @@ class HttpStrategyJobClient:
         if parsed_url.username or parsed_url.password or parsed_url.query or parsed_url.fragment:
             raise ValueError("策略 worker API 地址不能包含凭据")
         self.worker_id = _validate_worker_id(worker_id)
+        self.operations = operations
         token_path = Path(token_file).expanduser()
         try:
             self._token = token_path.read_text(encoding="utf-8").strip()
@@ -76,13 +78,15 @@ class HttpStrategyJobClient:
         self._last_cancel_warning_at = 0.0
 
     @classmethod
-    def from_env(cls) -> HttpStrategyJobClient:
+    def from_env(
+        cls, *, operations: list[str] | None = None, suffix: str = ""
+    ) -> HttpStrategyJobClient:
         base_url = os.getenv("SELECTOR_STRATEGY_WORKER_API_URL", "http://backend:8123")
         token_file = os.getenv("SELECTOR_STRATEGY_WORKER_TOKEN_FILE", "")
         if not token_file:
             raise ValueError("未配置策略 worker token 文件")
         worker_id = os.getenv("SELECTOR_STRATEGY_WORKER_ID") or socket.gethostname()
-        return cls(base_url, token_file, worker_id)
+        return cls(base_url, token_file, worker_id + suffix, operations=operations)
 
     def close(self) -> None:
         return None
@@ -103,7 +107,10 @@ class HttpStrategyJobClient:
     def claim_next(self) -> str | None:
         response = self._post(
             "/internal/strategy-worker/jobs/claim",
-            {"worker_id": self.worker_id},
+            {
+                "worker_id": self.worker_id,
+                **({"operations": self.operations} if self.operations else {}),
+            },
         )
         raw_job = response.get("job")
         if raw_job is None:
@@ -245,6 +252,13 @@ class HttpStrategyJobClient:
         self._store_server_state(job_id, data)
         with self._lock:
             self._result = dict(result)
+
+    def write_pool_tracking(self, job_id: str, snapshot: Mapping[str, object]) -> dict[str, object]:
+        response = self._post(
+            f"/internal/strategy-worker/jobs/{job_id}/pool-tracking",
+            {"worker_id": self.worker_id, "entry": dict(snapshot)},
+        )
+        return dict(_mapping(response.get("data"), "跟踪保存结果"))
 
     def write_pool_entry(self, job_id: str, entry: Mapping[str, object]) -> None:
         self._post(

@@ -66,17 +66,17 @@ test('daily signals are not repeated on reload or objective switch, and manual s
     await route.fulfill({ json: { data } })
   })
   await page.goto('/strategy-pool')
-  await expect.poll(() => requests.length).toBe(1)
-  expect(requests[0]).toEqual({ mode: 'signals', objective: 'annual_return', automatic: true })
+  await expect(page.getByTestId('pool-row-600000')).toBeVisible()
+  expect(requests).toHaveLength(0)
   await expect(page.getByTestId('pool-refresh-signals')).toBeEnabled()
   await page.reload()
   await expect(page.getByTestId('pool-row-600000')).toBeVisible()
   await page.getByTestId('pool-objective').selectOption('sharpe')
   await expect(page.getByTestId('pool-refresh-signals')).toBeEnabled()
-  expect(requests).toHaveLength(1)
+  expect(requests).toHaveLength(0)
   await page.getByTestId('pool-refresh-signals').click()
-  await expect.poll(() => requests.length).toBe(2)
-  expect(requests[1]).toEqual({ mode: 'signals', objective: 'sharpe' })
+  await expect.poll(() => requests.length).toBe(1)
+  expect(requests[0]).toEqual({ mode: 'signals', objective: 'sharpe' })
 })
 
 test('saved stock statuses appear during full research without starting a signal scan', async ({ page }) => {
@@ -154,4 +154,39 @@ test('per-stock research timers advance and survive page reload', async ({ page 
   await page.reload()
   await expect(timer).toContainText('耗时 00:01:')
   expect(await elapsed()).toBeGreaterThanOrEqual(beforeReload)
+})
+
+test('pool details are read-only and expose both rules, launch curve and paged trades', async ({ page }) => {
+  let posts = 0
+  const version = (id: string) => ({ version_id:id,created_at:'2026-09-02T06:00:00+00:00',
+    source:'automatic',is_current:true,status:'ready',summary:{},candidate:{candidate_id:id,
+      buy_rule:{conditions:[{left_value:'price.close',operator:'gt',right_constant:10}]},
+      sell_rule:{conditions:[{left_value:'price.close',operator:'lt',right_constant:9}]},config:{stop_loss_pct:.12}} })
+  await page.route('**/api/v1/**', async route => {
+    if (route.request().method()==='POST') posts++
+    const path = new URL(route.request().url()).pathname
+    let data: unknown = {}
+    if (path.endsWith('/detail')) data={name:'测试股',objectives:{annual_return:[version('a')],sharpe:[version('s')]}}
+    else if (path.endsWith('/curve')) data={summary:{created_return:.5,post_launch_return:.25,
+      inherited_position:true,baseline_date:'2026-09-01',as_of_date:'2026-09-03',holding:[],has_post_launch_data:true},
+      backtest:{start_date:'2026-09-01',end_date:'2026-09-03',bars:3,performance:{total_return:.5},
+        equity_curve:[{date:'2026-09-01',total:1000,return_pct:0,trade_directions:['BUY']},{date:'2026-09-03',total:1500,return_pct:.5}],trades:[]} }
+    else if (path.endsWith('/trades')) data={items:[{date:'2026-09-01',direction:'BUY',size:100,price:10}],total:101}
+    else if (path.includes('/metadata')) data={indicators:[]}
+    await route.fulfill({json:{data}})
+  })
+  await page.goto('/strategy-pool/SH/600000?objective=annual_return&list=page%3D2%26search%3D600000')
+  await expect(page.getByTestId('pool-detail-page')).toBeVisible()
+  await expect(page.getByRole('heading',{name:'交易规则'})).toBeVisible()
+  await expect(page.locator('.metrics b').filter({hasText:'50.00%'})).toBeVisible()
+  await expect(page.locator('svg')).toBeVisible()
+  await expect(page.getByText('上线 2026-09-02',{exact:true})).toBeVisible()
+  await expect(page.locator('svg line[stroke-dasharray]')).toHaveAttribute('x1','400')
+  await expect(page.locator('textarea')).toHaveCount(0)
+  await page.getByTestId('detail-sharpe').click()
+  await page.getByRole('button',{name:'下一页',exact:true}).click()
+  await expect(page.getByText('51–100 / 101 笔')).toBeVisible()
+  expect(posts).toBe(0)
+  await page.getByRole('link',{name:'← 返回全市场标的状态'}).click()
+  await expect(page).toHaveURL(/page=2.*search=600000/)
 })

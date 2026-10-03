@@ -1016,6 +1016,7 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
                 continue
             commission = max(shares * price * profile.commission, profile.min_commission)
             slippage = shares * config.slippage
+            equity_before_buy = cash
             cash -= shares * price + commission + slippage
             positions[pending.symbol] = _Position(
                 market=context.market,
@@ -1040,6 +1041,11 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
                     "instrument_type": context.instrument_type,
                     "board": context.board,
                     "direction": "BUY",
+                    **(
+                        {"equity_before": float(equity_before_buy)}
+                        if config.single_security_mode
+                        else {}
+                    ),
                     "size": float(shares),
                     "price": float(price),
                     "commission": float(commission),

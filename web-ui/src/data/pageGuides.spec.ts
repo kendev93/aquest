@@ -29,8 +29,7 @@ function pageKeysMentioned(): Map<string, string> {
 
 describe('pageGuides', () => {
   it('每个页面都挂了一份说明', () => {
-    const mentioned = pageKeysMentioned()
-    const missing = pageFiles().filter((file) => ![...mentioned.values()].includes(file))
+    const missing = pageFiles().filter((file) => !/<PageGuide\s+page-key="([^"]+)"/.test(readFileSync(pagesDir + '/' + file, 'utf-8')) )
     expect(missing).toEqual([])
   })
 

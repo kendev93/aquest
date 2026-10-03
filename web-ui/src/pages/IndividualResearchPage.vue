@@ -31,6 +31,7 @@ import type {
   ValueDefinition,
 } from '../types'
 import type { SignalDefinition } from '../types'
+import { formatTradingRule, formatRiskControls } from '../utils/strategyRules'
 import { buildIndicatorNameMap, indicatorDisplayName } from '../utils/indicatorNames'
 
 const BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
@@ -419,56 +420,11 @@ function ruleText(candidate: IndividualResearchCandidate, side: 'buy' | 'sell'):
     : null
   const rule = storedDirectRule ?? legacyNestedRule ?? fallbackRule
   if (!rule) return '—'
-  const signals = Array.isArray(rule.signals)
-    ? rule.signals
-      .filter((item): item is string => typeof item === 'string')
-      .map(indicatorName)
-    : []
-  const conditions = Array.isArray(rule.conditions) ? rule.conditions : []
-  const operatorSymbols: Record<string, string> = {
-    gt: '>',
-    gte: '≥',
-    lt: '<',
-    lte: '≤',
-    eq: '=',
-    neq: '≠',
-    cross_up: '上穿',
-    cross_down: '下穿',
-  }
-  const parts = [
-    ...signals,
-    ...conditions.flatMap((item) => {
-      if (!item || typeof item !== 'object') return []
-      const condition = item as Record<string, unknown>
-      const operator = String(condition.operator ?? '')
-      const left = String(condition.left_value ?? '')
-      const rawRight = condition.right_value
-      const right = typeof rawRight === 'string'
-        ? indicatorName(rawRight)
-        : String(condition.right_constant ?? '')
-      return [`${indicatorName(left)} ${operatorSymbols[operator] ?? operator} ${right}`]
-    }),
-  ]
-  const separator = rule.combine_mode === 'any' ? ' 或 ' : ' 且 '
-  return parts.join(parts.length > 1 ? separator : ' / ') || '—'
+  return formatTradingRule(rule, indicatorName)
 }
 
 function riskControlsNote(candidate: IndividualResearchCandidate): string {
-  const config = candidate.config as unknown as Record<string, unknown>
-  const parts = [
-    ['止损', 'stop_loss_pct', 'stop_loss_atr_multiplier', 'stop_loss_cooldown_days'],
-    ['止盈', 'take_profit_pct', 'take_profit_atr_multiplier', 'take_profit_cooldown_days'],
-    ['移动止盈', 'trailing_stop_pct', 'trailing_stop_atr_multiplier', 'trailing_stop_cooldown_days'],
-  ].flatMap(([label, pctKey, atrKey, cooldownKey]) => {
-    const pct = config[pctKey]
-    const atr = config[atrKey]
-    const cooldown = config[cooldownKey]
-    const cooldownText = typeof cooldown === 'number' && cooldown > 0 ? `/冷却${cooldown}日` : ''
-    if (typeof pct === 'number') return [`${label} ${(pct * 100).toFixed(0)}%${cooldownText}`]
-    if (typeof atr === 'number') return [`${label} ATR×${atr}${cooldownText}`]
-    return [`${label}关闭`]
-  })
-  return parts.join(' · ')
+  return formatRiskControls(candidate.config as unknown as Record<string, unknown>)
 }
 
 function candidateName(candidate: IndividualResearchCandidate): string {

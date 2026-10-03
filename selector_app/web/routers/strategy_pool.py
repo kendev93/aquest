@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime, time, timedelta
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
@@ -15,6 +15,8 @@ from selector_app.market_data.store_base import _WRITE_LOCK
 from selector_app.strategy_discovery.duckdb_job_store import DuckDbStrategyJobStore
 from selector_app.strategy_discovery.job_backend import StrategyJobBackend
 from selector_app.strategy_pool.store import DuckDbStrategyPoolStore, Objective
+from selector_app.strategy_pool.tracking_scheduler import TRACKING_OPERATION, latest_completed_day
+from selector_app.strategy_pool.tracking_store import PoolTrackingStore
 
 router = APIRouter(prefix="/strategy-pool", tags=["strategy-pool"])
 JOB_DESCRIPTION = "全市场策略池研究"
@@ -103,7 +105,10 @@ def _entry_or_404(market: str, code: str, request: Request) -> dict[str, object]
 def _pool_job_state(job_id: str, request: Request) -> dict[str, object]:
     try:
         envelope = _job_store(request).read_request(job_id)
-        if envelope is None or envelope.get("operation") != "market_strategy_pool":
+        if envelope is None or envelope.get("operation") not in {
+            "market_strategy_pool",
+            TRACKING_OPERATION,
+        }:
             raise HTTPException(status_code=404, detail="策略池任务不存在")
         state = _job_backend(request).get(job_id)
     except (MarketDataStoreError, OSError) as exc:
@@ -123,6 +128,8 @@ def list_strategy_pool_entries(
 ) -> dict[str, object]:
     selected = _objective(objective)
     items = _pool_store(request).list_entries()
+    tracks = PoolTrackingStore(_market_store(request)).current_versions()
+    track_index = {(v["market"], v["code"], v["objective"], v["source"]): v for v in tracks}
     for item in items:
         automatic = item.get("automatic_candidates")
         overrides = item.get("manual_overrides")
@@ -133,6 +140,13 @@ def list_strategy_pool_entries(
             active = automatic_map.get(active["candidate_ref"])
         item["active_candidate"] = active
         item["active_source"] = "manual" if override_map.get(selected) is not None else "automatic"
+        tracking = track_index.get((item["market"], item["code"], selected, item["active_source"]))
+        item["tracking"] = tracking
+        item["created_at"] = tracking["created_at"] if tracking else None
+        item["created_return"] = tracking["summary"].get("created_return") if tracking else None
+        item["tracking_status"] = tracking["status"] if tracking else "unavailable"
+        item["tracking_as_of_date"] = tracking["summary"].get("as_of_date") if tracking else None
+
     return {"data": {"objective": selected, "items": items}}
 
 
@@ -181,6 +195,33 @@ def create_strategy_pool_job(payload: PoolJobRequest, request: Request) -> dict[
             raise HTTPException(
                 status_code=422, detail="策略池还没有完成研究，暂时没有可扫描的策略"
             )
+    if payload.mode == "signals":
+        if payload.automatic:
+            return {"data": {"job_id": "", "status": "completed", "skipped": True}}
+        active_tracking = [
+            j for j in backend.active_snapshots() if j.get("operation") == TRACKING_OPERATION
+        ]
+        if active_tracking:
+            raise HTTPException(status_code=409, detail="已有策略池跟踪任务正在运行")
+        target_ids = None
+        if payload.market and payload.code:
+            target_ids = [
+                v["version_id"]
+                for v in PoolTrackingStore(_market_store(request)).current_versions()
+                if v["market"] == payload.market and v["code"] == payload.code
+            ]
+        job_id = backend.submit(
+            TRACKING_OPERATION,
+            {
+                **payload.model_dump(exclude_none=True),
+                "as_of_date": latest_completed_day(_market_store(request)),
+                "version_ids": target_ids,
+            },
+            description="策略池双目标跟踪",
+            worker_count=1,
+            metadata={"mode": "signals", "phase_label": "排队等待跟踪通道"},
+        )
+        return {"data": {"job_id": job_id, "status": "queued"}}
     # Serialize the durable daily check and submission, including simultaneous page entries.
     with _WRITE_LOCK:
         if payload.automatic:
@@ -297,3 +338,123 @@ def clear_strategy_pool_override(
 
 
 __all__ = ["router"]
+
+
+@router.get("/entries/{market}/{code}/detail")
+def pool_detail(market: str, code: str, request: Request) -> dict[str, object]:
+    item = _entry_or_404(market, code, request)
+    tracks = PoolTrackingStore(_market_store(request))
+    return {
+        "data": {
+            "market": market,
+            "code": code,
+            "name": item["name"],
+            "objectives": {
+                goal: tracks.versions(market, code, goal) for goal in ("annual_return", "sharpe")
+            },
+            "manual_overrides": item["manual_overrides"],
+        }
+    }
+
+
+def _owned_version(
+    market: str, code: str, version_id: str, request: Request
+) -> tuple[PoolTrackingStore, dict[str, Any]]:
+    tracks = PoolTrackingStore(_market_store(request))
+    versions = [
+        v for goal in ("annual_return", "sharpe") for v in tracks.versions(market, code, goal)
+    ]
+    version = next((v for v in versions if v["version_id"] == version_id), None)
+    if version is None:
+        raise HTTPException(status_code=404, detail="跟踪版本不存在")
+    return tracks, version
+
+
+@router.get("/entries/{market}/{code}/versions/{version_id}/curve")
+def pool_curve(
+    market: str,
+    code: str,
+    version_id: str,
+    request: Request,
+    scope: Literal["created", "full"] = "created",
+) -> dict[str, object]:
+    tracks, version = _owned_version(market, code, version_id, request)
+    snapshot = tracks.snapshot(version_id)
+    if not snapshot:
+        return {"data": {"version": version, "backtest": None}}
+    cp = snapshot["checkpoint"]
+    summary = snapshot["summary"]
+    start = summary["baseline_date"] if scope == "created" else ""
+    points = [p for p in cp["equity"] if p["date"] >= start]
+    baseline = (
+        summary["baseline_equity"]
+        if scope == "created"
+        else float(version["candidate"].get("config", {}).get("initial_cash", 1000000))
+    )
+    trades = [t for t in cp["trades"] if t["date"] >= start]
+    preserve = {0, len(points) - 1}
+    event_dates = {t["date"] for t in trades}
+    launch_day = (
+        datetime.fromisoformat(version["created_at"])
+        .astimezone(ZoneInfo("Asia/Shanghai"))
+        .date()
+        .isoformat()
+    )
+    launch_index = next((j for j, p in enumerate(points) if p["date"] >= launch_day), len(points))
+    for i, point in enumerate(points):
+        if point["date"] in event_dates or abs(i - launch_index) <= 1:
+            preserve.add(i)
+    step = max(1, len(points) // 240)
+    directions: dict[str, list[str]] = {}
+    for trade in trades:
+        directions.setdefault(trade["date"], []).append(trade["direction"])
+    sampled = [
+        dict(
+            p,
+            return_pct=float(p["total"]) / baseline - 1,
+            trade_directions=directions.get(p["date"], []),
+        )
+        for i, p in enumerate(points)
+        if i in preserve or i % step == 0
+    ]
+    return {
+        "data": {
+            "version": version,
+            "summary": summary,
+            "backtest": {
+                **snapshot["report"],
+                "equity_curve": sampled,
+                "closed_trades": sum(
+                    t["direction"] == "SELL" and not t.get("rejected") for t in trades
+                ),
+                "start_date": points[0]["date"] if points else snapshot["report"]["start_date"],
+                "trades": [],
+                "performance": {
+                    **snapshot["report"]["performance"],
+                    "total_return": summary["created_return"]
+                    if scope == "created"
+                    else snapshot["report"]["performance"].get("total_return"),
+                },
+                "launch_date": launch_day,
+                "baseline_date": summary["baseline_date"],
+            },
+        }
+    }
+
+
+@router.get("/entries/{market}/{code}/versions/{version_id}/trades")
+def pool_trades(
+    market: str,
+    code: str,
+    version_id: str,
+    request: Request,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=200),
+    scope: Literal["created", "full"] = "created",
+) -> dict[str, object]:
+    tracks, version = _owned_version(market, code, version_id, request)
+    snapshot = tracks.snapshot(version_id)
+    trades = snapshot["checkpoint"]["trades"] if snapshot else []
+    if snapshot and scope == "created":
+        trades = [t for t in trades if t["date"] >= snapshot["summary"]["baseline_date"]]
+    return {"data": {"items": trades[offset : offset + limit], "total": len(trades)}}

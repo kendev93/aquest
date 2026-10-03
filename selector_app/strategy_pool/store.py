@@ -13,6 +13,8 @@ import duckdb
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.market_data.store_base import _WRITE_LOCK
 
+from .tracking_store import PoolTrackingStore
+
 Objective = Literal["annual_return", "sharpe"]
 
 
@@ -117,6 +119,7 @@ class DuckDbStrategyPoolStore:
                     _dump_json(benchmark),
                 ],
             )
+            PoolTrackingStore.sync_entry(connection, market, code)
 
     def update_benchmark(
         self,
@@ -206,10 +209,12 @@ class DuckDbStrategyPoolStore:
                     config_fingerprint or "",
                 ],
             )
+            PoolTrackingStore.sync_entry(connection, market, code)
 
     def persist_worker_entry(self, entry: Mapping[str, object], *, source_job_id: str) -> None:
         if entry.get("reset") is True:
             with _WRITE_LOCK, self._transaction() as connection:
+                PoolTrackingStore.archive_all(connection)
                 connection.execute("DELETE FROM strategy_pool_entries")
             return
         market = str(entry.get("market") or "").upper()
@@ -289,6 +294,8 @@ class DuckDbStrategyPoolStore:
                 [market, code, _dump_json(candidate), _dump_json(benchmark), now],
             )
 
+            PoolTrackingStore.sync_entry(connection, market, code)
+
     def clear_manual_override(self, market: str, code: str, objective: Objective) -> None:
         _validate_symbol(market, code)
         _validate_objective(objective)
@@ -299,6 +306,7 @@ class DuckDbStrategyPoolStore:
                 "WHERE market = ? AND code = ?",
                 [datetime.now(timezone.utc).replace(tzinfo=None), market, code],
             )
+            PoolTrackingStore.sync_entry(connection, market, code)
 
     def active_candidate(
         self, market: str, code: str, objective: Objective

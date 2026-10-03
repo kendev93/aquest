@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import cast
@@ -57,6 +58,8 @@ from selector_app.strategy_discovery.resources import resolve_discovery_workers
 from selector_app.strategy_discovery.service import StrategyDiscoveryService
 from selector_app.strategy_fitness.service import StrategyFitnessService
 from selector_app.strategy_pool.store import DuckDbStrategyPoolStore
+from selector_app.strategy_pool.tracking_scheduler import PoolTrackingScheduler
+from selector_app.strategy_pool.tracking_store import PoolTrackingStore
 from selector_app.swing_research.service import SwingResearchService
 
 from .app_errors import install_error_handlers
@@ -109,6 +112,7 @@ def create_app(
     auto_sync_enabled: bool | None = None,
     auto_sync_interval_seconds: float | None = None,
     strategy_tracking_enabled: bool | None = None,
+    pool_tracking_enabled: bool | None = None,
     strategy_tracking_interval_seconds: float | None = None,
 ) -> FastAPI:
     owns_runner = runner is None
@@ -235,8 +239,10 @@ def create_app(
         auto_sync_task: asyncio.Task[None] | None = None
         maintenance_task: asyncio.Task[None] | None = None
         tracking_task: asyncio.Task[None] | None = None
+        pool_tracking_task: asyncio.Task[None] | None = None
         selected_store.status()
         selected_strategy_pool_store.initialize()
+        PoolTrackingStore(selected_store).bootstrap()
         imported_strategy_jobs = selected_strategy_job_store.initialize(
             default_strategy_job_root(selected_store.database_path)
         )
@@ -293,9 +299,26 @@ def create_app(
                     interval_seconds=selected_tracking_interval,
                 ).run()
             )
+        if pool_tracking_enabled is True or (
+            pool_tracking_enabled is None
+            and auto_sync_enabled is not False
+            and os.getenv("SELECTOR_POOL_TRACKING_ENABLED", "1").strip().lower()
+            not in {"0", "false", "off"}
+        ):
+            pool_tracking_task = asyncio.create_task(
+                PoolTrackingScheduler(
+                    selected_store, selected_strategy_backend, selected_runner
+                ).run()
+            )
         try:
             yield
         finally:
+            if pool_tracking_task is not None:
+                pool_tracking_task.cancel()
+                try:
+                    await pool_tracking_task
+                except asyncio.CancelledError:
+                    pass
             if maintenance_task is not None:
                 maintenance_task.cancel()
                 try:

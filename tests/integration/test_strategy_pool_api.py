@@ -532,56 +532,22 @@ def test_rebuild_is_queued_without_clearing_the_pool_and_is_full_only(tmp_path) 
         assert history[0]["rebuild"] is True
 
 
-def test_automatic_signals_are_once_per_shanghai_day_but_manual_scans_can_repeat(tmp_path) -> None:
-    store = _store(tmp_path)
-    app = create_app(market_data_store=store, strategy_worker_token=TOKEN, auto_sync_enabled=False)
+def test_page_automatic_requests_do_not_create_tracking_jobs(tmp_path) -> None:
+    app = create_app(
+        market_data_store=_store(tmp_path), strategy_worker_token=TOKEN, auto_sync_enabled=False
+    )
     app.state.strategy_pool_store.set_manual_override(
-        "SH",
-        "600000",
-        "annual_return",
-        {"candidate_id": "existing"},
+        "SH", "600000", "annual_return", {"candidate_id": "old"}
     )
     with TestClient(app) as client:
-        first = client.post(
-            "/api/v1/strategy-pool/jobs",
-            json={
-                "mode": "signals",
-                "objective": "annual_return",
-                "automatic": True,
-            },
-        )
-        assert first.status_code == 202
-        first_id = first.json()["data"]["job_id"]
-        app.state.strategy_job_backend.cancel(first_id)
-        app.state.strategy_job_store.update(first_id, status="cancelled")
-    # A new app instance (as after a container restart) must read the persisted attempt.
-    restarted = create_app(
-        market_data_store=store, strategy_worker_token=TOKEN, auto_sync_enabled=False
-    )
-    with TestClient(restarted) as client:
-        again = client.post(
-            "/api/v1/strategy-pool/jobs",
-            json={
-                "mode": "signals",
-                "objective": "sharpe",
-                "automatic": True,
-            },
-        )
-        assert again.status_code == 202
-        assert again.json()["data"] == {
-            "job_id": first_id,
-            "status": "cancelled",
-            "skipped": True,
-        }
-        manual = client.post(
-            "/api/v1/strategy-pool/jobs",
-            json={
-                "mode": "signals",
-                "objective": "annual_return",
-            },
-        )
-        assert manual.status_code == 202
-        assert manual.json()["data"]["job_id"] != first_id
+        for goal in ["annual_return", "sharpe"]:
+            result = client.post(
+                "/api/v1/strategy-pool/jobs",
+                json={"mode": "signals", "objective": goal, "automatic": True},
+            )
+            assert result.status_code == 202
+            assert result.json()["data"]["skipped"] is True
+        assert client.get("/api/v1/jobs/active").json()["data"] == []
 
 
 def test_automatic_flag_is_only_valid_for_full_signal_scans(tmp_path) -> None:
@@ -602,110 +568,25 @@ def test_automatic_flag_is_only_valid_for_full_signal_scans(tmp_path) -> None:
             assert client.post("/api/v1/strategy-pool/jobs", json=payload).status_code == 422
 
 
-def test_simultaneous_automatic_signal_requests_create_only_one_job(tmp_path) -> None:
-    from concurrent.futures import ThreadPoolExecutor
-
+def test_manual_signal_refresh_uses_independent_both_objective_channel(tmp_path) -> None:
     app = create_app(
         market_data_store=_store(tmp_path), strategy_worker_token=TOKEN, auto_sync_enabled=False
     )
     app.state.strategy_pool_store.set_manual_override(
-        "SH",
-        "600000",
-        "annual_return",
-        {"candidate_id": "existing"},
+        "SH", "600000", "annual_return", {"candidate_id": "old"}
     )
-    with TestClient(app) as client, ThreadPoolExecutor(max_workers=2) as executor:
-
-        def submit():
-            return client.post(
-                "/api/v1/strategy-pool/jobs",
-                json={
-                    "mode": "signals",
-                    "objective": "annual_return",
-                    "automatic": True,
-                },
-            )
-
-        responses = list(executor.map(lambda _: submit(), range(2)))
-    assert all(response.status_code == 202 for response in responses)
-    assert len({response.json()["data"]["job_id"] for response in responses}) == 1
-    assert sum(bool(response.json()["data"].get("skipped")) for response in responses) == 1
-
-
-def test_previous_day_signal_attempt_does_not_block_today(tmp_path) -> None:
-    import time
-
-    store = _store(tmp_path)
-    app = create_app(market_data_store=store, strategy_worker_token=TOKEN, auto_sync_enabled=False)
-    app.state.strategy_pool_store.set_manual_override(
-        "SH",
-        "600000",
-        "annual_return",
-        {"candidate_id": "existing"},
-    )
-    old = app.state.strategy_job_backend.submit(
+    app.state.strategy_job_backend.submit(
         "market_strategy_pool",
-        {"mode": "signals", "objective": "annual_return"},
-        description="old",
+        {"mode": "full"},
+        description="long research",
+        metadata={"mode": "full"},
     )
-    app.state.strategy_job_store.update(old, status="failed")
-    with store._connect() as connection:
-        connection.execute(
-            "UPDATE strategy_jobs SET created_at = ? WHERE job_id = ?", [time.time() - 86400, old]
-        )
     with TestClient(app) as client:
-        response = client.post(
-            "/api/v1/strategy-pool/jobs",
-            json={
-                "mode": "signals",
-                "objective": "annual_return",
-                "automatic": True,
-            },
+        result = client.post(
+            "/api/v1/strategy-pool/jobs", json={"mode": "signals", "objective": "sharpe"}
         )
-    assert response.status_code == 202
-    assert response.json()["data"]["job_id"] != old
-    assert not response.json()["data"].get("skipped")
-
-
-def test_daily_signal_guard_uses_shanghai_midnight(tmp_path, monkeypatch) -> None:
-    from datetime import datetime, timezone
-
-    class FixedDateTime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return datetime(2026, 10, 2, 16, 30, tzinfo=timezone.utc).astimezone(tz)
-
-    monkeypatch.setattr("selector_app.web.routers.strategy_pool.datetime", FixedDateTime)
-    for index, (hour, minute, skipped) in enumerate([(15, 59, False), (16, 0, True)]):
-        store = _store(tmp_path / str(index))
-        app = create_app(
-            market_data_store=store, strategy_worker_token=TOKEN, auto_sync_enabled=False
-        )
-        app.state.strategy_pool_store.set_manual_override(
-            "SH",
-            "600000",
-            "annual_return",
-            {"candidate_id": "existing"},
-        )
-        old = app.state.strategy_job_backend.submit(
-            "market_strategy_pool",
-            {"mode": "signals", "objective": "annual_return"},
-            description="boundary",
-        )
-        app.state.strategy_job_store.update(old, status="failed")
-        timestamp = datetime(2026, 10, 2, hour, minute, tzinfo=timezone.utc).timestamp()
-        with store._connect() as connection:
-            connection.execute(
-                "UPDATE strategy_jobs SET created_at = ? WHERE job_id = ?", [timestamp, old]
-            )
-        with TestClient(app) as client:
-            response = client.post(
-                "/api/v1/strategy-pool/jobs",
-                json={
-                    "mode": "signals",
-                    "objective": "annual_return",
-                    "automatic": True,
-                },
-            )
-        assert response.status_code == 202
-        assert bool(response.json()["data"].get("skipped")) is skipped
+        assert result.status_code == 202
+        job = app.state.strategy_job_store.read_request(result.json()["data"]["job_id"])
+        assert job["operation"] == "market_strategy_pool_tracking"
+        assert job["payload"]["objective"] == "sharpe"
+        assert len(client.get("/api/v1/jobs/active").json()["data"]) == 2

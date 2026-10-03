@@ -108,7 +108,7 @@ describe('StrategyPoolPage', () => {
     vi.resetAllMocks()
     window.localStorage.clear()
     vi.mocked(api.fetchStrategyPoolEntries).mockResolvedValue([entry('600000', 0.24), entry('600001', 0.12)])
-    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValue([])
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValue([{ job_id:'signal-1',mode:'signals',status:'completed',objective:'annual_return',dual_objectives:true,created_at:Date.now()/1000 }])
     vi.mocked(marketDataApi.fetchStoreStatus).mockResolvedValue({
       database_path: 'market.duckdb',
       schema_version: 1,
@@ -150,7 +150,7 @@ describe('StrategyPoolPage', () => {
     await flushPromises()
 
     expect(window.localStorage.getItem('indicator-lab.strategy-pool.objective')).toBe('annual_return')
-    expect(api.createStrategyPoolJob).toHaveBeenCalledWith({ mode: 'signals', objective: 'annual_return', automatic: true })
+    expect(api.createStrategyPoolJob).not.toHaveBeenCalled()
     expect(wrapper.get('[data-testid="pool-buy-signals"]').text()).toContain('SH600000')
     expect(wrapper.get('[data-testid="pool-sell-signals"]').text()).toContain('当前没有卖出条件')
   })
@@ -389,9 +389,9 @@ describe('StrategyPoolPage', () => {
     const wrapper = mount(StrategyPoolPage)
     await flushPromises()
 
-    expect(api.createStrategyPoolJob).toHaveBeenCalledWith({ mode: 'signals', objective: 'annual_return', automatic: true })
+    expect(api.createStrategyPoolJob).not.toHaveBeenCalled()
     expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).not.toContain('旧版组合持仓')
-    expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('当前没有仍处于持仓状态的标的')
+    expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('当前历史结果没有逐股持仓快照')
   })
 
   it('restores the latest matching signal result while a portfolio backtest is active', async () => {
@@ -870,6 +870,7 @@ describe('StrategyPoolPage', () => {
 
   it('shows a transient polling warning without marking the running task failed', async () => {
     vi.useFakeTimers()
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValue([])
     vi.mocked(api.getStrategyPoolJob)
       .mockRejectedValueOnce(new FormulaScreenApiError('DuckDB 暂时被占用', 503))
       .mockResolvedValueOnce({
@@ -887,6 +888,8 @@ describe('StrategyPoolPage', () => {
     try {
       await wrapper.get('[data-testid="pool-select-annual"]').trigger('click')
       await flushPromises()
+      await wrapper.get('[data-testid="pool-refresh-signals"]').trigger('click')
+      await flushPromises()
       expect(wrapper.get('[data-testid="pool-poll-warning"]').text()).toContain('自动重试')
       expect(wrapper.find('[role="alert"]').exists()).toBe(false)
 
@@ -901,7 +904,6 @@ describe('StrategyPoolPage', () => {
   it('shows saved single rerun candidates without launching another signal scan', async () => {
     window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
     vi.mocked(api.createStrategyPoolJob)
-      .mockResolvedValueOnce({ job_id: 'signal-1', status: 'queued' })
       .mockResolvedValueOnce({ job_id: 'single-1', status: 'queued' })
     vi.mocked(api.getStrategyPoolJob)
       .mockResolvedValueOnce({
@@ -967,9 +969,9 @@ describe('StrategyPoolPage', () => {
     await flushPromises()
 
     expect(api.saveStrategyPoolOverride).not.toHaveBeenCalled()
-    expect(api.createStrategyPoolJob).toHaveBeenCalledTimes(2)
-    expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('触发买入')
-    expect(wrapper.get('[data-testid="pool-row-600001"]').text()).toContain('今日无买卖信号')
+    expect(api.createStrategyPoolJob).toHaveBeenCalledTimes(1)
+    expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('触发卖出')
+    expect(wrapper.get('[data-testid="pool-row-600001"]').text()).toContain('策略可用 · 信号待刷新')
   })
 
   it('submits an explicit rebuild and clears the displayed old pool', async () => {
@@ -1058,10 +1060,8 @@ describe('StrategyPoolPage', () => {
     const wrapper = mount(StrategyPoolPage)
     try {
       await flushPromises()
-      expect(api.createStrategyPoolJob).toHaveBeenCalledExactlyOnceWith({
-        mode: 'signals', objective: 'annual_return', automatic: true,
-      })
-      expect(api.getStrategyPoolJob).not.toHaveBeenCalled()
+      expect(api.createStrategyPoolJob).not.toHaveBeenCalled()
+      expect(api.getStrategyPoolJob).toHaveBeenCalledWith('signal-1')
       expect(wrapper.find('[data-testid="pool-job-progress"]').exists()).toBe(false)
     } finally {
       wrapper.unmount()

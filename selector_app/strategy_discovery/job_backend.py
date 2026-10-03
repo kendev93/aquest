@@ -126,7 +126,7 @@ class FileStrategyJobBackend:
                 self._store,
                 self._market_data_adapter,
             )
-        elif operation == "market_strategy_pool":
+        elif operation in {"market_strategy_pool", "market_strategy_pool_tracking"}:
             # The pool is processed one security at a time in the worker. A
             # whole-universe row-count estimate would reject valid long runs
             # before the incremental checkpointing path can help.
@@ -506,7 +506,7 @@ def _dispatch(
                 abort_check=abort_check,
             )
         )
-    if operation == "market_strategy_pool":
+    if operation in {"market_strategy_pool", "market_strategy_pool_tracking"}:
         raise ValueError("全市场策略池任务只能由策略 worker 执行")
     raise ValueError("策略任务类型无效")
 
@@ -535,7 +535,7 @@ def decorate_result(
         raw_duration = normalized.get("duration_seconds")
         if not isinstance(raw_duration, (int, float)):
             normalized["duration_seconds"] = _duration_seconds(started, finished)
-    elif operation == "market_strategy_pool":
+    elif operation in {"market_strategy_pool", "market_strategy_pool_tracking"}:
         normalized["strategy_pool_job_id"] = job_id
         raw_duration = normalized.get("duration_seconds")
         if not isinstance(raw_duration, (int, float)):
@@ -570,7 +570,7 @@ def completion_state(operation: JobOperation, result: Mapping[str, object]) -> d
             "total_candidates": _nonnegative_int(search.get("requested_trials")),
             "total_scanned": _nonnegative_int(search.get("evaluated_trials")),
         }
-    if operation == "market_strategy_pool":
+    if operation in {"market_strategy_pool", "market_strategy_pool_tracking"}:
         completed = _nonnegative_int(result.get("completed_symbols"))
         failed = _nonnegative_int(result.get("failed_symbols"))
         total = _nonnegative_int(result.get("total_symbols"))
@@ -624,7 +624,7 @@ def _persist_result(
         # optimization runs are not strategy-discovery histories and therefore
         # must not appear in that separate history table.
         return
-    if operation == "market_strategy_pool":
+    if operation in {"market_strategy_pool", "market_strategy_pool_tracking"}:
         # Per-symbol records are already persisted as worker checkpoints.
         return
     store.save_strategy_discovery_replay_history(

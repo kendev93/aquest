@@ -17,12 +17,20 @@ JobOperation = Literal[
     "refinement",
     "replay",
     "market_strategy_pool",
+    "market_strategy_pool_tracking",
 ]
 JobStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 
 _JOB_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 _OPERATIONS = frozenset(
-    {"discovery", "risk_optimization", "refinement", "replay", "market_strategy_pool"}
+    {
+        "discovery",
+        "risk_optimization",
+        "refinement",
+        "replay",
+        "market_strategy_pool",
+        "market_strategy_pool_tracking",
+    }
 )
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 DEFAULT_STALE_AFTER_SECONDS = 120.0

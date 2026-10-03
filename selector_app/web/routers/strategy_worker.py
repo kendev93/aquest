@@ -11,8 +11,9 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from selector_app.market_data.store import MarketDataStoreError
 from selector_app.strategy_discovery.duckdb_job_store import DuckDbStrategyJobStore
-from selector_app.strategy_discovery.job_store import DEFAULT_STALE_AFTER_SECONDS
+from selector_app.strategy_discovery.job_store import DEFAULT_STALE_AFTER_SECONDS, JobOperation
 from selector_app.strategy_pool.store import DuckDbStrategyPoolStore
+from selector_app.strategy_pool.tracking_store import PoolTrackingStore
 
 router = APIRouter(
     prefix="/internal/strategy-worker",
@@ -33,6 +34,10 @@ class WorkerIdentity(BaseModel):
         if not selected:
             raise ValueError("策略 worker ID 无效")
         return selected
+
+
+class WorkerClaim(WorkerIdentity):
+    operations: list[JobOperation] | None = None
 
 
 class WorkerProgress(WorkerIdentity):
@@ -97,11 +102,13 @@ def _store_unavailable() -> HTTPException:
 
 
 @router.post("/jobs/claim", dependencies=[Depends(require_worker_token)])
-def claim_job(payload: WorkerIdentity, request: Request) -> dict[str, object]:
+def claim_job(payload: WorkerClaim, request: Request) -> dict[str, object]:
     store = _store(request)
     try:
         store.recover_stale_running(stale_after_seconds=DEFAULT_STALE_AFTER_SECONDS)
-        job_id = store.claim_next(payload.worker_id)
+        job_id = store.claim_next(
+            payload.worker_id, list(payload.operations) if payload.operations else None
+        )
         if job_id is None:
             return {"job": None}
         return {"job": store.read_claimed_job(job_id, payload.worker_id)}
@@ -155,6 +162,37 @@ def persist_pool_entry(
     except ValueError as exc:
         raise _conflict(exc) from exc
     return {"data": {"saved": True}}
+
+
+@router.post("/jobs/{job_id}/pool-tracking", dependencies=[Depends(require_worker_token)])
+def persist_pool_tracking(
+    job_id: str, payload: WorkerPoolCheckpoint, request: Request
+) -> dict[str, object]:
+    try:
+        claimed = _store(request).read_claimed_job(job_id, payload.worker_id)
+        envelope = claimed["request"]
+        if (
+            not isinstance(envelope, Mapping)
+            or envelope.get("operation") != "market_strategy_pool_tracking"
+        ):
+            raise ValueError("当前任务不是策略池跟踪任务")
+        tracks = PoolTrackingStore(request.app.state.market_data_store)
+        entry = payload.entry
+        if entry.get("error"):
+            tracks.record_error(str(entry["version_id"]), str(entry["error"]))
+            saved = False
+        else:
+            snapshot = entry.get("snapshot")
+            if not isinstance(snapshot, Mapping):
+                raise ValueError("跟踪快照必须是对象")
+            saved = tracks.save_snapshot(
+                str(entry["version_id"]), str(entry["signature"]), snapshot
+            )
+        return {"data": {"saved": saved}}
+    except (MarketDataStoreError, OSError) as exc:
+        raise _store_unavailable() from exc
+    except (ValueError, KeyError) as exc:
+        raise _conflict(ValueError(str(exc))) from exc
 
 
 @router.post("/jobs/{job_id}/progress", dependencies=[Depends(require_worker_token)])

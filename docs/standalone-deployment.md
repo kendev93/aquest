@@ -136,3 +136,12 @@ docker compose -f docker-compose.yml up -d
 | `SELECTOR_DISCOVERY_MEMORY_BUDGET_MB` | `auto` | 内存预算 |
 | `STRATEGY_WORKER_MEMORY_LIMIT` | 无 | 容器内存上限，如 `6g` |
 | `DATA_DIR` | 无 | 仅在叠加绑定挂载覆盖文件时需要 |
+
+
+### 策略池详情与跟踪升级
+
+本次升级新增 `pool_tracking_versions` 表，不改写 OHLC 行情，不改变原策略追踪的空仓上线方式。跟踪账户的曲线、成交和检查点压缩保存；详情分页读取，列表只返回摘要。
+
+已有策略在首次初始化时记录实际上线时间，不沿用历史 `updated_at`。普通重跑相同规则不重置版本；清空重建会归档旧跟踪轮次。承接创建前持仓时，创建至今收益从原买入执行前的账户净值计算，上线后收益单独展示。
+
+部署需同步更新后端、前端和策略 worker。新增跟踪消费通道与寻优共享计算预算；旧 worker 不支持新操作。后台自动跟踪默认开启，可用 `SELECTOR_POOL_TRACKING_ENABLED=0` 暂停自动提交，手动刷新仍可使用。迁移为新增表，升级前可按原有流程备份数据卷，无须自动复制整个行情库。

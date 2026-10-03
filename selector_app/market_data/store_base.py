@@ -557,6 +557,10 @@ class _DuckDbStoreBase:
                 )
                 """
             )
+            # Additive pool tracking storage; no OHLC rewrite or full database backup.
+            from selector_app.strategy_pool.tracking_store import DDL as pool_tracking_ddl
+
+            connection.execute(pool_tracking_ddl)
             # 策略库：一套可重放的组合回测配置 + 保存时的绩效快照。它和
             # backtest_history 的区别是——历史记录"跑过什么"（满了自动淘汰），
             # 策略记录"还想再跑一遍"（只有用户显式删才消失）。request_json 里

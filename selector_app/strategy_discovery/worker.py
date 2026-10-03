@@ -24,6 +24,7 @@ from selector_app.strategy_pool.resources import (
 )
 from selector_app.strategy_pool.service import MarketStrategyPoolService
 from selector_app.strategy_pool.store import DuckDbStrategyPoolStore
+from selector_app.strategy_pool.tracking_runner import PoolTrackingRunner
 
 from .evaluation_budget import EvaluationWorkerBudget
 from .job_backend import completion_state, decorate_result
@@ -104,6 +105,7 @@ class StrategyDiscoveryWorker:
         *,
         service_factory: Callable[[int | None], StrategyDiscoveryServiceLike] | None = None,
         strategy_pool_service: MarketStrategyPoolService | None = None,
+        pool_tracking_service: PoolTrackingRunner | None = None,
         poll_interval_seconds: float = DEFAULT_WORKER_POLL_INTERVAL_SECONDS,
         stale_after_seconds: float = DEFAULT_STALE_AFTER_SECONDS,
     ) -> None:
@@ -115,6 +117,7 @@ class StrategyDiscoveryWorker:
         self._service = service
         self._service_factory = service_factory
         self._strategy_pool_service = strategy_pool_service
+        self._pool_tracking_service = pool_tracking_service
         self._poll_interval_seconds = poll_interval_seconds
         self._stale_after_seconds = stale_after_seconds
         self._heartbeat_interval_seconds = min(
@@ -326,6 +329,19 @@ class StrategyDiscoveryWorker:
                     abort_check=abort_check,
                 )
             )
+        if operation == "market_strategy_pool_tracking":
+            if self._pool_tracking_service is None:
+                raise ValueError("策略池跟踪服务未配置")
+            writer = getattr(self._job_store, "write_pool_tracking", None)
+            if not callable(writer):
+                raise ValueError("策略 worker 不支持保存跟踪账户")
+            tracking_writer = writer
+            return self._pool_tracking_service.run(
+                payload,
+                progress=progress_callback,
+                abort_check=abort_check,
+                writer=lambda snapshot: tracking_writer(job_id, snapshot),
+            )
         if operation == "market_strategy_pool":
             if self._strategy_pool_service is None:
                 raise ValueError("全市场策略池服务未配置")
@@ -395,7 +411,15 @@ def main() -> None:
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
-    with HttpStrategyJobClient.from_env() as job_client:
+    with HttpStrategyJobClient.from_env(
+        operations=[
+            "discovery",
+            "risk_optimization",
+            "refinement",
+            "replay",
+            "market_strategy_pool",
+        ]
+    ) as job_client:
         with TemporaryDirectory(prefix="indicator-lab-worker-snapshots-") as cache_root:
             snapshot_cache = DiscoverySnapshotCache(cache_root)
             strategy_service = StrategyDiscoveryService(
@@ -471,7 +495,26 @@ def main() -> None:
                     discovery_snapshot_cache=snapshot_cache,
                 ),
             )
-            worker.run_forever(stop_event=stop_event)
+            with HttpStrategyJobClient.from_env(
+                operations=["market_strategy_pool_tracking"], suffix="-tracking"
+            ) as tracking_client:
+                tracker = StrategyDiscoveryWorker(
+                    tracking_client,
+                    strategy_service,
+                    pool_tracking_service=PoolTrackingRunner(store, pool_evaluation_budget),
+                )
+                thread = Thread(
+                    target=tracker.run_forever,
+                    kwargs={"stop_event": stop_event},
+                    name="pool-tracking-consumer",
+                    daemon=True,
+                )
+                thread.start()
+                try:
+                    worker.run_forever(stop_event=stop_event)
+                finally:
+                    stop_event.set()
+                    thread.join()
 
 
 if __name__ == "__main__":

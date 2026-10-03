@@ -14,6 +14,7 @@ import PortfolioBacktestPage from './pages/PortfolioBacktestPage.vue'
 import StrategyDiscoveryPage from './pages/StrategyDiscoveryPage.vue'
 import StrategyFitnessPage from './pages/StrategyFitnessPage.vue'
 import StrategyPoolPage from './pages/StrategyPoolPage.vue'
+import StrategyPoolDetailPage from './pages/StrategyPoolDetailPage.vue'
 import StrategyTrackingPage from './pages/StrategyTrackingPage.vue'
 import SwingResearchPage from './pages/SwingResearchPage.vue'
 import UserManualPage from './pages/UserManualPage.vue'
@@ -36,6 +37,7 @@ const routeComponent = computed(() => {
   if (pathname.startsWith('/history-compare')) return HistoryComparePage
   if (pathname.startsWith('/instrument-lab')) return InstrumentLabPage
   if (pathname.startsWith('/individual-research')) return IndividualResearchPage
+  if (/^\/strategy-pool\/(SH|SZ)\/\d{6}$/.test(pathname)) return StrategyPoolDetailPage
   if (pathname.startsWith('/strategy-pool')) return StrategyPoolPage
   if (pathname.startsWith('/candidate-library')) return CandidateLibraryPage
   if (pathname.startsWith('/user-manual')) return UserManualPage
@@ -84,7 +86,7 @@ onUnmounted(() => window.removeEventListener('popstate', handlePopState))
   -->
   <div class="app-shell" @click.capture="handleNavigation">
     <KeepAlive>
-      <component :is="routeComponent" />
+      <component :is="routeComponent" :key="routeComponent === StrategyPoolDetailPage ? currentPath : undefined" />
     </KeepAlive>
   </div>
 </template>
