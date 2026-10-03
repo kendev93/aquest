@@ -132,7 +132,7 @@ docker compose -f docker-compose.yml up -d
 | `SELECTOR_DB_BACKUP_RETENTION_DAYS` | `0` | 整库备份保留天数，0 表示不保留 |
 | `SELECTOR_AUTO_SYNC_ENABLED` | `1` | 启动后自动同步在线行情 |
 | `SELECTOR_DISCOVERY_WORKERS` | `auto` | 买卖规则验证与风险寻优共享进程总预算，自动模式按可见 CPU 和内存分配 |
-| `SELECTOR_STRATEGY_POOL_MAX_WORKERS` | `auto` | 从 1 只开始，每 30 秒最多增加 1 只，按内存及持续 CPU 压力调整；正整数可额外限制股票数 |
+| `SELECTOR_STRATEGY_POOL_MAX_WORKERS` | `2` | 默认最多同时研究 2 只，从 1 只开始，每 30 秒最多增加 1 只；共享评估进程仍按 CPU 和内存分配，设置 `auto` 可启用更多股票并发 |
 | `SELECTOR_DISCOVERY_MEMORY_BUDGET_MB` | `auto` | 内存预算 |
 | `STRATEGY_WORKER_MEMORY_LIMIT` | 无 | 容器内存上限，如 `6g` |
 | `DATA_DIR` | 无 | 仅在叠加绑定挂载覆盖文件时需要 |
