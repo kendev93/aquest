@@ -527,6 +527,7 @@ class MarketStrategyPoolService:
                             if self._pool_store is not None
                             else None
                         )
+                        metrics_backfilled = False
                         if reused_entry is not None and self._needs_full_period_backfill(
                             reused_entry
                         ):
@@ -572,16 +573,7 @@ class MarketStrategyPoolService:
                                             updated.get("benchmark"),
                                         ),
                                     )
-                                skipped += 1
-                                completed += 1
-                                coordinator.finish(
-                                    index,
-                                    symbol,
-                                    "补算全区间策略收益",
-                                    skipped=True,
-                                )
-                                next_index += 1
-                                continue
+                                metrics_backfilled = True
                         if (
                             prior is not None
                             and prior[2] != "insufficient_history"
@@ -627,7 +619,12 @@ class MarketStrategyPoolService:
                                 logger.exception("全市场策略池基准回填失败: %s", symbol)
                         skipped += 1
                         completed += 1
-                        coordinator.finish(index, symbol, "复用已完成标的", skipped=True)
+                        coordinator.finish(
+                            index,
+                            symbol,
+                            "补算全区间策略收益" if metrics_backfilled else "复用已完成标的",
+                            skipped=True,
+                        )
                         next_index += 1
                         continue
 
@@ -1629,6 +1626,9 @@ class MarketStrategyPoolService:
             metrics = _mapping(candidate.get("metrics"))
             full_period = _mapping(metrics.get("full_period"))
             if _finite_metric(full_period.get("total_return")) is None:
+                return True
+            # 平均持仓天数为新增指标：老候选缺失时同样触发快速回放补算
+            if _finite_metric(full_period.get("avg_holding_days")) is None:
                 return True
         return False
 
