@@ -43,6 +43,9 @@ const baseCandidate: StrategyPoolCandidate = {
       total_return: 0.71,
       annual_return: 0.19,
       sharpe: 1.25,
+      win_rate: 0.55,
+      payoff_ratio: 1.6,
+      max_drawdown: -0.22,
     },
   },
   quality: { badges: ['样本较充分'] },
@@ -749,11 +752,13 @@ describe('StrategyPoolPage', () => {
       expect(row.get('[data-testid="pool-entry-benchmark-600000"]').text()).not.toContain('策略超额')
       const headers = wrapper.findAll('thead th').map((header) => header.text())
       const benchmarkColumn = headers.findIndex((header) => header.includes('基准涨跌'))
-      const strategyReturnColumn = headers.findIndex((header) => header.includes('策略收益（全区间）'))
+      const strategyReturnColumn = headers.findIndex((header) => header.includes('策略收益'))
       expect(benchmarkColumn).toBeLessThan(strategyReturnColumn)
       expect(wrapper.get('thead').text()).toContain('最大回撤')
+      expect(wrapper.get('thead').text()).not.toContain('策略收益（年化）')
       expect(row.text()).toContain('72.00%')
-      expect(row.text()).toContain('-18.00%')
+      expect(row.text()).toContain('-22.00%')
+      expect(row.text()).not.toContain('-18.00%')
       expect(row.text()).toContain('验证 12 · 留出 4 笔')
     },
   )

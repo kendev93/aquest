@@ -783,11 +783,9 @@ function metricValue(
   }
   const candidate = entry.active_candidate
     ?? (target ? entry.automatic_candidates[target] : null)
-  if (key === 'strategy_return') {
-    const value = candidate?.metrics?.full_period?.total_return
-    return typeof value === 'number' && Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY
-  }
-  const value = candidate?.metrics?.validation?.[key]
+  // 表格展示统一用全区间实际回放口径；验证段指标只在策略选择时使用。
+  const metricKey = key === 'strategy_return' ? 'total_return' : key
+  const value = candidate?.metrics?.full_period?.[metricKey]
   return typeof value === 'number' && Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY
 }
 
@@ -1060,7 +1058,7 @@ onUnmounted(() => {
 
         <section class="pool-table-section panel-card">
           <div class="section-heading"><div><p class="eyebrow">DAILY STATUS</p><h2>全市场标的状态 <span>{{ entries.length.toLocaleString() }}</span></h2></div><span>{{ loading ? '正在读取策略池…' : `按${objectiveLabel(objective)}策略决策` }}</span></div>
-          <p class="pool-scale-note">策略收益是该策略在完整历史区间实际回放的累计收益；旧候选会在下次全市场重选时补算。全段基准显示个股买入持有涨跌；验证和留出分别用同区间基准计算总收益超额。</p>
+          <p class="pool-scale-note">收益、年化、夏普、胜率、盈亏比、最大回撤均为该策略在完整历史区间实际回放（全区间）的指标；旧候选会在下次全市场重选时补算。策略的选择与排序目标仍按验证段年化/夏普决策，避免用未来数据选策略。全段基准显示个股买入持有涨跌；验证和留出分别用同区间基准计算总收益超额。</p>
           <div class="pool-search-row">
             <label class="pool-search">搜索标的
               <input v-model="searchQuery" type="search" placeholder="输入证券代码或中文名称" data-testid="pool-entry-search" @input="page = 1">
@@ -1073,8 +1071,8 @@ onUnmounted(() => {
                 <th>持仓 / 今日信号</th><th>证券</th>
                 <th><button @click="setSort('benchmark_return')">基准涨跌{{ sortColumn === 'benchmark_return' ? ' ↓' : '' }}</button></th>
                 <th><button @click="setSort('created_return')">创建至今收益{{ sortColumn === 'created_return' ? ' ↓' : '' }}</button></th>
-                <th><button @click="setSort('strategy_return')">策略收益（全区间）{{ sortColumn === 'strategy_return' ? ' ↓' : '' }}</button></th>
-                <th><button @click="setSort('annual_return')">策略收益（年化）{{ sortColumn === 'annual_return' ? ' ↓' : '' }}</button></th>
+                <th><button @click="setSort('strategy_return')">策略收益{{ sortColumn === 'strategy_return' ? ' ↓' : '' }}</button></th>
+                <th><button @click="setSort('annual_return')">年化{{ sortColumn === 'annual_return' ? ' ↓' : '' }}</button></th>
                 <th><button @click="setSort('sharpe')">夏普{{ sortColumn === 'sharpe' ? ' ↓' : '' }}</button></th>
                 <th><button @click="setSort('win_rate')">胜率{{ sortColumn === 'win_rate' ? ' ↓' : '' }}</button></th>
                 <th><button @click="setSort('payoff_ratio')">盈亏比{{ sortColumn === 'payoff_ratio' ? ' ↓' : '' }}</button></th>
