@@ -15,7 +15,8 @@ const segments = window.location.pathname.split('/')
 const market = segments[2] ?? ''; const code = segments[3] ?? ''
 const query = new URLSearchParams(window.location.search)
 const objective = ref<StrategyPoolObjective>(query.get('objective') === 'sharpe' ? 'sharpe' : 'annual_return')
-const scope = ref<'created' | 'full'>(query.get('scope') === 'full' ? 'full' : 'created')
+// 查看区间固定默认“创建以来，含承接持仓”；不读 URL，避免切过全历史后一直停留在全历史
+const scope = ref<'created' | 'full'>('created')
 const detail = ref<{ name: string; objectives: Record<StrategyPoolObjective, Version[]> } | null>(null)
 const selectedId = ref('')
 const versions = computed(() => detail.value?.objectives[objective.value] ?? [])
@@ -47,7 +48,8 @@ async function selectGoal(goal: StrategyPoolObjective) {
 }
 async function loadVersion() {
   const params = new URLSearchParams(window.location.search)
-  params.set('objective',objective.value); params.set('version',selectedId.value); params.set('scope',scope.value)
+  params.delete('scope') // 清理旧版本残留的 scope 参数
+  params.set('objective',objective.value); params.set('version',selectedId.value)
   window.history.replaceState({},'',window.location.pathname+'?'+params.toString())
   const current = ++requestId
   backtest.value = null; summary.value = {}; error.value = ''
