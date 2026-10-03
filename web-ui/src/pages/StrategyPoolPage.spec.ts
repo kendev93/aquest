@@ -46,6 +46,7 @@ const baseCandidate: StrategyPoolCandidate = {
       win_rate: 0.55,
       payoff_ratio: 1.6,
       max_drawdown: -0.22,
+      avg_holding_days: 12.5,
     },
   },
   quality: { badges: ['样本较充分'] },
@@ -759,6 +760,7 @@ describe('StrategyPoolPage', () => {
       expect(row.text()).toContain('72.00%')
       expect(row.text()).toContain('-22.00%')
       expect(row.text()).not.toContain('-18.00%')
+      expect(row.text()).toContain('12.5 天')
       expect(row.text()).toContain('验证 12 · 留出 4 笔')
     },
   )

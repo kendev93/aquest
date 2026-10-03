@@ -1467,6 +1467,8 @@ def _report_metrics(report: PortfolioBacktestReport) -> dict[str, object]:
         "profit_factor": _number(performance.get("profit_factor")),
         "total_trades": _integer(performance.get("total_trades"), closed_trades),
         "closed_trades": closed_trades,
+        # 平均持仓天数（按买卖配对、股数加权），供全市场标的状态表格展示
+        "avg_holding_days": _number(performance.get("avg_holding_days")),
         "data_fingerprint": report.data_fingerprint,
     }
 

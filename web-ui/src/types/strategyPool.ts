@@ -8,6 +8,7 @@ export interface StrategyPoolMetrics {
   win_rate?: number | null
   payoff_ratio?: number | null
   max_drawdown?: number | null
+  avg_holding_days?: number | null
   closed_trades?: number | null
   total_trades?: number | null
 }

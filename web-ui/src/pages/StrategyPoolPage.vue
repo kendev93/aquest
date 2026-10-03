@@ -59,7 +59,7 @@ const market = ref<'SH' | 'SZ'>('SH')
 const code = ref('')
 const searchQuery = ref('')
 const sortColumn = ref<
-  'status' | 'strategy_return' | 'annual_return' | 'sharpe' | 'win_rate' | 'payoff_ratio' | 'max_drawdown' | 'benchmark_return' | 'created_return'
+  'status' | 'strategy_return' | 'annual_return' | 'sharpe' | 'win_rate' | 'payoff_ratio' | 'max_drawdown' | 'avg_holding_days' | 'benchmark_return' | 'created_return'
 >('status')
 const page = ref(1)
 const pageSize = ref(50)
@@ -774,7 +774,7 @@ function statusOrder(value: string): number {
 
 function metricValue(
   entry: StrategyPoolEntry,
-  key: 'strategy_return' | 'annual_return' | 'sharpe' | 'win_rate' | 'payoff_ratio' | 'max_drawdown' | 'benchmark_return' | 'created_return',
+  key: 'strategy_return' | 'annual_return' | 'sharpe' | 'win_rate' | 'payoff_ratio' | 'max_drawdown' | 'avg_holding_days' | 'benchmark_return' | 'created_return',
   target: StrategyPoolObjective | null,
 ): number {
   if (key === 'created_return') return entry.created_return ?? Number.NEGATIVE_INFINITY
@@ -839,6 +839,10 @@ function formatNumber(value: unknown, digits = 2): string {
   return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '—'
 }
 
+function formatHoldingDays(value: unknown): string {
+  return typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(1)} 天` : '—'
+}
+
 function formatTimestamp(value: unknown): string {
   if (typeof value !== 'number' && typeof value !== 'string') return '—'
   const date = typeof value === 'number' ? new Date(value * 1000) : new Date(value)
@@ -859,7 +863,7 @@ async function initialize(): Promise<void> {
   page.value = Math.max(1, Number(params.get('page') ?? 1))
   pageSize.value = Number(params.get('pageSize') ?? 50)
   const sort = params.get('sort')
-  if (['status','strategy_return','annual_return','sharpe','win_rate','payoff_ratio','max_drawdown','benchmark_return','created_return'].includes(sort ?? '')) sortColumn.value = sort as typeof sortColumn.value
+  if (['status','strategy_return','annual_return','sharpe','win_rate','payoff_ratio','max_drawdown','avg_holding_days','benchmark_return','created_return'].includes(sort ?? '')) sortColumn.value = sort as typeof sortColumn.value
   const stored = params.get('objective') ?? window.localStorage.getItem(OBJECTIVE_STORAGE_KEY)
   if (stored === 'annual_return' || stored === 'sharpe') {
     objective.value = stored
@@ -1058,7 +1062,7 @@ onUnmounted(() => {
 
         <section class="pool-table-section panel-card">
           <div class="section-heading"><div><p class="eyebrow">DAILY STATUS</p><h2>全市场标的状态 <span>{{ entries.length.toLocaleString() }}</span></h2></div><span>{{ loading ? '正在读取策略池…' : `按${objectiveLabel(objective)}策略决策` }}</span></div>
-          <p class="pool-scale-note">收益、年化、夏普、胜率、盈亏比、最大回撤均为该策略在完整历史区间实际回放（全区间）的指标；旧候选会在下次全市场重选时补算。策略的选择与排序目标仍按验证段年化/夏普决策，避免用未来数据选策略。全段基准显示个股买入持有涨跌；验证和留出分别用同区间基准计算总收益超额。</p>
+          <p class="pool-scale-note">收益、年化、夏普、胜率、盈亏比、最大回撤均为该策略在完整历史区间实际回放（全区间）的指标；平均持仓天数为全区间已平仓交易按股数加权的平均持有天数，用于估算买入后大致需要持有多久。旧候选会在下次全市场重选时补算。策略的选择与排序目标仍按验证段年化/夏普决策，避免用未来数据选策略。全段基准显示个股买入持有涨跌；验证和留出分别用同区间基准计算总收益超额。</p>
           <div class="pool-search-row">
             <label class="pool-search">搜索标的
               <input v-model="searchQuery" type="search" placeholder="输入证券代码或中文名称" data-testid="pool-entry-search" @input="page = 1">
@@ -1077,6 +1081,7 @@ onUnmounted(() => {
                 <th><button @click="setSort('win_rate')">胜率{{ sortColumn === 'win_rate' ? ' ↓' : '' }}</button></th>
                 <th><button @click="setSort('payoff_ratio')">盈亏比{{ sortColumn === 'payoff_ratio' ? ' ↓' : '' }}</button></th>
                 <th><button @click="setSort('max_drawdown')">最大回撤{{ sortColumn === 'max_drawdown' ? ' ↓' : '' }}</button></th>
+                <th><button @click="setSort('avg_holding_days')">平均持仓{{ sortColumn === 'avg_holding_days' ? ' ↓' : '' }}</button></th>
                 <th>策略 / 风险标记</th><th>维护</th>
               </tr></thead>
               <tbody>
@@ -1096,10 +1101,11 @@ onUnmounted(() => {
                   <td>{{ formatPercent(metricValue(entry, 'win_rate', objective)) }}</td>
                   <td>{{ formatNumber(metricValue(entry, 'payoff_ratio', objective)) }}</td>
                   <td>{{ formatPercent(metricValue(entry, 'max_drawdown', objective)) }}</td>
+                  <td :data-testid="`pool-holding-days-${entry.code}`">{{ formatHoldingDays(metricValue(entry, 'avg_holding_days', objective)) }}</td>
                   <td><span v-if="entry.active_candidate?.quality?.badges?.length" class="badge-row"><i v-for="badge in entry.active_candidate.quality.badges" :key="badge">{{ badge }}</i></span><span v-else-if="entry.status === 'no_strategy'">无可计算的策略绩效</span><span v-else-if="entry.last_error" class="danger-text">{{ entry.last_error }}</span><span v-else>—</span><small v-if="entry.active_candidate?.metrics">交易数：验证 {{ formatNumber(tradeCount(entry.active_candidate, 'validation'), 0) }} · 留出 {{ formatNumber(tradeCount(entry.active_candidate, 'holdout'), 0) }} 笔</small><small v-if="entry.active_source === 'manual'">手工覆盖 · {{ objectiveLabel(objective) }}</small></td>
                   <td><a class="text-button" :href="detailHref(entry)" :data-testid="`pool-detail-${entry.code}`">详情</a><button :data-testid="`pool-rerun-entry-${entry.code}`" class="text-button" :disabled="rerunEntryDisabled()" :title="rerunEntryTitle(entry)" @click="void rerunEntry(entry)">{{ queuedSingleSymbol === symbol(entry) ? '排队中' : '重跑' }}</button></td>
                 </tr>
-                <tr v-if="!filteredEntries.length"><td colspan="11" class="empty-copy" data-testid="pool-entry-empty">{{ searchQuery.trim() && entries.length ? '没有符合代码或名称的标的。' : loading ? '读取中…' : '策略池为空，开始全市场研究后会逐只写入候选。' }}</td></tr>
+                <tr v-if="!filteredEntries.length"><td colspan="12" class="empty-copy" data-testid="pool-entry-empty">{{ searchQuery.trim() && entries.length ? '没有符合代码或名称的标的。' : loading ? '读取中…' : '策略池为空，开始全市场研究后会逐只写入候选。' }}</td></tr>
               </tbody>
             </table>
           </div>
