@@ -14,7 +14,7 @@ MiB = 1024**2
 GiB = 1024**3
 MIN_MEMORY_HEADROOM_BYTES = 384 * MiB
 MEMORY_HEADROOM_RATIO = 0.20
-DEFAULT_POOL_WORKERS = "2"
+DEFAULT_POOL_WORKERS = "1"
 POOL_RAMP_INTERVAL_SECONDS = 30.0
 BASE_TICKER_WORKING_SET_BYTES = 512 * MiB
 EVALUATION_WORKER_MEMORY_BYTES = 128 * MiB
@@ -80,7 +80,7 @@ def pool_worker_cap() -> int:
 
 
 def pool_evaluation_budget_capacity(in_use_workers: int = 0) -> int:
-    raw = os.getenv("SELECTOR_DISCOVERY_WORKERS", "auto").strip().lower()
+    raw = os.getenv("SELECTOR_DISCOVERY_WORKERS", "1").strip().lower()
     cpu_budget = (
         visible_cpu_count()
         if raw in {"", "auto"}

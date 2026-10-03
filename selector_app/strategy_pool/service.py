@@ -87,6 +87,7 @@ class _TickerProgress:
         self._phase = "研究单只股票"
         self._phase_label = "准备开始"
         self._started_at: float | None = None
+        self._work_details: dict[str, object] = {}
 
     def start(self) -> None:
         """Start the ticker clock when its worker begins, rather than while queued."""
@@ -109,6 +110,7 @@ class _TickerProgress:
                 self._phase_label,
                 name=self._name,
                 started_at=self._started_at,
+                work_details=self._work_details,
             )
             return
         overall = (self._index - 1 + fraction) / max(1, self._total)
@@ -124,10 +126,13 @@ class _TickerProgress:
                     "ticker_started_at": self._started_at,
                     "ticker_name": self._name,
                     "phase_label": self._phase_label,
+                    "work_details": self._work_details,
                 },
             )
 
     def report_detail(self, details: Mapping[str, object]) -> None:
+        work = details.get("work_details")
+        self._work_details = dict(work) if isinstance(work, Mapping) else {}
         phase = details.get("phase")
         label = details.get("phase_label")
         if isinstance(phase, str):
@@ -199,6 +204,7 @@ class _PoolProgressCoordinator:
         *,
         name: str = "",
         started_at: float | None = None,
+        work_details: Mapping[str, object] | None = None,
     ) -> None:
         with self._lock:
             if started_at is None:
@@ -212,6 +218,7 @@ class _PoolProgressCoordinator:
                 "progress": fraction,
                 "phase": phase,
                 "phase_label": phase_label,
+                "work_details": dict(work_details or {}),
             }
             now = time.monotonic()
             if now - self._last_emit_at < POOL_PROGRESS_EMIT_INTERVAL_SECONDS:

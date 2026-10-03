@@ -131,7 +131,7 @@ test('per-stock research timers advance and survive page reload', async ({ page 
       data = { job_id: 'timed', status: 'running', metadata: {
         finished_symbols: 0,
         active_symbols: [
-          { symbol: 'SH:600000', name: '浦发银行', progress: 0.4, started_at: startedAt },
+          { symbol: 'SH:600000', name: '浦发银行', progress: 0.4, started_at: startedAt, work_details: { stage: '搜索止损、止盈和冷却参数', current: 1600, total: 3000, best_return: .15, best_sharpe: 1.2 } },
           { symbol: 'SH:600004', name: '白云机场', progress: 0.1, started_at: startedAt + 60 },
         ],
       } }
@@ -141,6 +141,8 @@ test('per-stock research timers advance and survive page reload', async ({ page 
     await route.fulfill({ json: { data } })
   })
   await page.goto('/strategy-pool')
+  await expect(page.getByTestId('research-work-details')).toContainText('1600 / 3000')
+  await expect(page.getByTestId('research-work-details')).toContainText('15.00%')
   const timer = page.getByTestId('pool-elapsed-SH:600000')
   await expect(timer).toContainText('耗时 00:01:')
   await expect(page.getByTestId('pool-elapsed-SH:600004')).toContainText('耗时 00:00:')

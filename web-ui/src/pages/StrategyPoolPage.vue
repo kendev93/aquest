@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ResearchWorkDetails from '../components/ResearchWorkDetails.vue'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import PageGuide from '../components/PageGuide.vue'
@@ -31,6 +32,7 @@ interface ActivePoolTickerProgress {
   symbol: string
   name: string
   progress: number
+  workDetails?: Record<string, unknown>
   phaseLabel: string
   startedAt: number | null
 }
@@ -110,6 +112,7 @@ const activeTickerProgress = computed<ActivePoolTickerProgress[]>(() => {
         progress,
         phaseLabel: typeof progressItem.phase_label === 'string' ? progressItem.phase_label : '研究中',
         startedAt: researchStartedAt(progressItem.started_at),
+        workDetails: progressItem.work_details as Record<string, unknown> | undefined,
       }]
     })
     if (active.length) return active
@@ -123,6 +126,7 @@ const activeTickerProgress = computed<ActivePoolTickerProgress[]>(() => {
       progress: Math.max(0, Math.min(1, fraction)),
       phaseLabel: typeof metadata.phase_label === 'string' ? metadata.phase_label : '研究中',
       startedAt: researchStartedAt(metadata.ticker_started_at),
+      workDetails: metadata.work_details as Record<string, unknown> | undefined,
     }]
   }
   return []
@@ -982,6 +986,7 @@ onUnmounted(() => {
             <div v-if="activeTickerProgress.length" class="active-ticker-progress" data-testid="pool-active-ticker-progress" role="list" aria-label="正在研究的标的进度">
               <div v-for="item in activeTickerProgress" :key="item.symbol" class="active-ticker-progress-row" :data-testid="`pool-active-symbol-${item.symbol}`" role="listitem">
                 <div class="active-ticker-progress-heading"><strong>{{ item.symbol }}<template v-if="item.name"> · {{ item.name }}</template></strong><span>{{ item.phaseLabel }} · {{ Math.round(item.progress * 100) }}%<span class="ticker-elapsed" :data-testid="`pool-elapsed-${item.symbol}`"> · 耗时 {{ formatResearchElapsed(item.startedAt) }}</span></span></div>
+                <ResearchWorkDetails :details="item.workDetails" />
                 <div class="active-ticker-progress-track" role="progressbar" :aria-label="`${item.symbol}${item.name ? ` ${item.name}` : ''}研究进度`" :aria-valuenow="Math.round(item.progress * 100)" aria-valuemin="0" aria-valuemax="100"><span :style="{ width: `${Math.round(item.progress * 100)}%` }"></span></div>
               </div>
             </div>

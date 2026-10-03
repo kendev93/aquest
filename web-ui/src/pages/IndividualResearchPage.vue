@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ResearchWorkDetails from '../components/ResearchWorkDetails.vue'
 import { computed, onMounted, reactive, ref } from 'vue'
 
 import PageGuide from '../components/PageGuide.vue'
@@ -668,6 +669,7 @@ onMounted(async () => {
           <div v-if="running && job" class="task-progress-panel" data-testid="individual-progress">
             <div class="task-progress-heading"><span>{{ job.metadata.phase_label ?? job.phase ?? '准备中' }}</span><strong>{{ Math.round(job.progress * 100) }}%</strong></div>
             <div class="progress-track"><span :style="{ width: `${Math.round(job.progress * 100)}%` }"></span></div>
+            <ResearchWorkDetails :details="job.metadata.work_details as Record<string, unknown> | undefined" />
             <small>{{ job.metadata.phase_label ?? '后台正在逐阶段计算买卖条件与退出风控' }}</small>
           </div>
           <div v-if="!result" class="empty-state" data-testid="individual-empty">

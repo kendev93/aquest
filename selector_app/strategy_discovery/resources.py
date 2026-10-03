@@ -52,7 +52,7 @@ class DiscoveryResourceBudgetError(ValueError):
 def resolve_discovery_workers() -> int:
     """Resolve the configured maximum worker count or an automatic CPU cap."""
 
-    raw = os.getenv("SELECTOR_DISCOVERY_WORKERS", AUTO_DISCOVERY_WORKERS).strip()
+    raw = os.getenv("SELECTOR_DISCOVERY_WORKERS", "1").strip()
     if raw.lower() in {"", AUTO_DISCOVERY_WORKERS}:
         return _auto_worker_count()
     try:

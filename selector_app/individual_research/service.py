@@ -128,7 +128,13 @@ class IndividualStockResearchService:
             raise InsufficientResearchHistoryError(prepared.data_fingerprint, split_metadata)
 
         segmentation = _segmentation_summary(segments, config)
-        self._report(progress_callback, 10, "识别波段", "生成上涨/下跌启动标签")
+        self._report(
+            progress_callback,
+            10,
+            "识别波段",
+            f"分析 {len(dates)} 个交易日：上涨波段 {segmentation.get('up_segments', 0)} 个，"
+            f"下跌波段 {segmentation.get('down_segments', 0)} 个；生成买卖启动标签",
+        )
         self._check_cancelled(abort_check)
 
         stage_durations["prepare_and_segment"] = time.perf_counter() - stage_started
@@ -144,7 +150,12 @@ class IndividualStockResearchService:
         stage_started = time.perf_counter()
         buy_candidates = candidates_by_side["buy"]
         sell_candidates = candidates_by_side["sell"]
-        self._report(progress_callback, 20, "发现买卖条件", "训练段候选已生成")
+        self._report(
+            progress_callback,
+            20,
+            "发现买卖条件",
+            f"买入候选 {len(buy_candidates)} 个，卖出候选 {len(sell_candidates)} 个",
+        )
         if not buy_candidates or not sell_candidates:
             return self._empty_result(
                 config,
@@ -191,7 +202,7 @@ class IndividualStockResearchService:
                     progress_callback,
                     20 + int(25 * index / max(1, total_pairs)),
                     "验证买卖条件",
-                    f"已验证 {index} / {total_pairs} 组规则",
+                    f"训练与验证回测：已验证 {index} / {total_pairs} 组买卖组合",
                 )
 
         rule_by_sharpe = _rank_candidates(rule_candidates, "sharpe")
@@ -237,6 +248,7 @@ class IndividualStockResearchService:
                         pair_index,
                         len(selected_rule_pairs),
                         pair_id,
+                        pair,
                     ),
                     abort_check=abort_check,
                 )
@@ -888,6 +900,7 @@ class IndividualStockResearchService:
         pair_index: int,
         pair_count: int,
         pair_id: str,
+        pair: Mapping[str, object] | None = None,
     ) -> Callable[..., None] | None:
         if progress_callback is None:
             return None
@@ -901,7 +914,16 @@ class IndividualStockResearchService:
                 if isinstance(overall, (int, float))
                 else (min(1.0, max(0.0, current / total if total else 1.0)))
             )
-            stage_label = "提前收敛，继续精筛" if stage == "converged" else stage
+            stage_label = {
+                "preparing_snapshot": "准备行情与指标快照",
+                "searching": "搜索止损、止盈和冷却参数",
+                "converged": "提前收敛，继续精筛",
+                "refining_medium": "中等精度复核候选",
+                "refining_full": "完整精度复核候选",
+                "validation": "验证区间回测",
+                "holdout": "留出区间复核",
+                "completed": "本组寻优完成",
+            }.get(stage, stage)
             count_label = "已尝试" if stage in {"searching", "converged"} else "阶段进度"
             percent = 45 + int(33 * ((pair_index - 1 + fraction) / max(pair_count, 1)))
             IndividualStockResearchService._report(
@@ -910,6 +932,18 @@ class IndividualStockResearchService:
                 "止盈止损寻优",
                 f"规则 {pair_index}/{pair_count} · {pair_id[:8]} · {stage_label}"
                 f" · {count_label} {current}/{total}",
+                work_details={
+                    "stage": stage_label,
+                    "current": current,
+                    "total": total,
+                    "rule_index": pair_index,
+                    "rule_count": pair_count,
+                    "buy_rule": pair.get("buy_rule") if pair else None,
+                    "sell_rule": pair.get("sell_rule") if pair else None,
+                    "elapsed_seconds": _details.get("elapsed_seconds") if _details else None,
+                    "best_sharpe": _details.get("best_sharpe") if _details else None,
+                    "best_return": _details.get("best_return") if _details else None,
+                },
             )
 
         return report
@@ -920,6 +954,8 @@ class IndividualStockResearchService:
         percent: int,
         phase: str,
         message: str,
+        *,
+        work_details: Mapping[str, object] | None = None,
     ) -> None:
         if progress_callback is None:
             return
@@ -928,7 +964,12 @@ class IndividualStockResearchService:
         bounded = min(100, max(0, percent))
         report_progress_detail(
             progress_callback,
-            {"phase": phase, "phase_label": message, "overall_progress": bounded / 100.0},
+            {
+                "phase": phase,
+                "phase_label": message,
+                "overall_progress": bounded / 100.0,
+                "work_details": dict(work_details) if work_details else {},
+            },
         )
         progress_callback(bounded, 100)
 
