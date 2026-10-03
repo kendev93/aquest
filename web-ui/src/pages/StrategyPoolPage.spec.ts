@@ -32,7 +32,7 @@ const baseCandidate: StrategyPoolCandidate = {
       win_rate: 0.62,
       payoff_ratio: 1.8,
       max_drawdown: -0.18,
-      closed_trades: 12,
+      total_trades: 12,
     },
     holdout: {
       total_return: 0.08,
@@ -313,6 +313,15 @@ describe('StrategyPoolPage', () => {
 
   it('does not rescan on page entry when data and selected strategies match the saved signal scan', async () => {
     window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
+    vi.mocked(marketDataApi.fetchStoreStatus).mockResolvedValueOnce({
+      database_path: 'market.duckdb',
+      schema_version: 1,
+      instrument_count: 2,
+      bar_count: 300,
+      data_start: '2025-01-01',
+      data_end: '2026-10-01',
+      last_online_sync_at: '2026-10-03T07:30:00+08:00',
+    })
     vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValueOnce([
       {
         job_id: 'signals-fresh',
@@ -357,6 +366,67 @@ describe('StrategyPoolPage', () => {
 
     expect(api.createStrategyPoolJob).not.toHaveBeenCalled()
     expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('触发买入')
+  })
+
+  it('does not automatically repeat a failed scan for unchanged data and strategies', async () => {
+    window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValueOnce([
+      {
+        job_id: 'signals-failed',
+        status: 'failed',
+        mode: 'signals',
+        objective: 'annual_return',
+        created_at: 1_790_984_425,
+        finished_at: 1_790_984_500,
+      },
+      {
+        job_id: 'full-cancelled',
+        status: 'cancelled',
+        mode: 'full',
+        created_at: 1_790_957_169,
+        finished_at: 1_790_984_378,
+      },
+      {
+        job_id: 'signals-before-research',
+        status: 'completed',
+        mode: 'signals',
+        objective: 'annual_return',
+        created_at: 1_790_955_030,
+      },
+    ])
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({
+      job_id: 'signals-before-research',
+      status: 'completed',
+      result: {
+        mode: 'signals',
+        objective: 'annual_return',
+        holding_scope: 'per_stock_strategy',
+        holding_snapshot_complete: true,
+        as_of_date: '2026-09-30',
+        buy_signals: [],
+        sell_signals: [],
+        states: [],
+        market_snapshot: {
+          data_end: '2026-10-01',
+          bar_count: 300,
+          last_online_sync_at: '2026-10-01T18:00:00+08:00',
+        },
+        strategy_snapshot: [],
+        model_portfolio: {
+          available: true,
+          holding_scope: 'per_stock_strategy',
+          holdings: [],
+          risk_exit_signals: [],
+        },
+      },
+    })
+
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    expect(api.createStrategyPoolJob).not.toHaveBeenCalled()
+    expect(wrapper.get('[role="alert"]').text()).toContain('已暂停自动重试')
+    expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('策略可用 · 信号待刷新')
   })
 
   it('runs a full signal scan when the stored market snapshot is older than local行情', async () => {
@@ -548,8 +618,11 @@ describe('StrategyPoolPage', () => {
       expect(row.get('[data-testid="pool-entry-benchmark-600000"]').text()).toContain(
         '留出基准 -5.00% · 策略超额 +13.00%',
       )
+      const headers = wrapper.findAll('thead th').map((header) => header.text())
+      const benchmarkColumn = headers.findIndex((header) => header.includes('基准涨跌'))
+      const strategyReturnColumn = headers.findIndex((header) => header.includes('策略收益（全区间）'))
+      expect(benchmarkColumn).toBeLessThan(strategyReturnColumn)
       expect(wrapper.get('thead').text()).toContain('最大回撤')
-      expect(wrapper.get('thead').text()).toContain('策略收益')
       expect(row.text()).toContain('72.00%')
       expect(row.text()).toContain('-18.00%')
       expect(row.text()).toContain('验证 12 · 留出 4 笔')

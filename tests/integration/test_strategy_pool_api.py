@@ -297,6 +297,24 @@ def test_worker_checkpoints_only_accept_claimed_pool_jobs(tmp_path) -> None:
 
 def test_signal_scan_evaluates_active_rules_on_latest_completed_bar(tmp_path) -> None:
     market_store = _store(tmp_path)
+    extra_close = np.linspace(20.0, 22.0, 120)
+    market_store.replace_local_bars(
+        "SH",
+        "600001",
+        "stock",
+        pd.DataFrame(
+            {
+                "date": pd.date_range("2025-01-01", periods=120, freq="D"),
+                "open": extra_close,
+                "high": extra_close + 0.2,
+                "low": extra_close - 0.2,
+                "close": extra_close,
+                "volume": 1_000.0,
+                "amount": extra_close * 1_000,
+                "bar_status": "completed",
+            }
+        ),
+    )
     pool = DuckDbStrategyPoolStore(market_store)
     pool.initialize()
     pool.set_manual_override(
@@ -350,6 +368,8 @@ def test_signal_scan_evaluates_active_rules_on_latest_completed_bar(tmp_path) ->
     assert result["signal_target"] is None
     assert result["holding_scope"] == "per_stock_strategy"
     assert result["holding_snapshot_complete"] is True
+    assert result["total_symbols"] == 1
+    assert [state["code"] for state in result["states"]] == ["600000"]
     assert result["market_snapshot"]["data_end"] == "2025-04-30"
     assert result["strategy_snapshot"] == [
         {"market": "SH", "code": "600000", "candidate_id": "signal-candidate"}

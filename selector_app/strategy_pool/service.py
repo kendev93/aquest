@@ -1116,28 +1116,27 @@ class MarketStrategyPoolService:
         if self._backtest_service is None or self._pool_store is None:
             raise ValueError("策略池信号扫描服务未配置")
         refs = self._list_refs(single_symbol)
-        strategy_refs = refs
         raw_entries = self._pool_store.list_entries()
         entries = {(str(item.get("market")), str(item.get("code"))): item for item in raw_entries}
         position_strategies, position_priorities = _portfolio_strategies(
             raw_entries,
-            strategy_refs,
+            refs,
             cast(PoolObjective, objective),
             require_validation_metric=False,
         )
         position_refs = [
-            ref for ref in strategy_refs if f"{ref.market}{ref.code}" in position_strategies
+            ref for ref in refs if f"{ref.market}{ref.code}" in position_strategies
         ]
         strategy_snapshot = []
-        for pool_entry in raw_entries:
-            active = _active_candidate(pool_entry, objective)
+        for ref in position_refs:
+            active = position_strategies.get(f"{ref.market}{ref.code}")
             if active is None:
                 continue
             candidate_version = active.get("candidate_id") or active.get("candidate_hash")
             strategy_snapshot.append(
                 {
-                    "market": str(pool_entry.get("market") or ""),
-                    "code": str(pool_entry.get("code") or ""),
+                    "market": ref.market,
+                    "code": ref.code,
                     "candidate_id": str(candidate_version or ""),
                 }
             )
@@ -1152,26 +1151,24 @@ class MarketStrategyPoolService:
             if self._portfolio_service is not None
             else 0
         )
-        total_work = len(refs) + max(1, position_batches)
+        total_work = len(position_refs) + max(1, position_batches)
         latest_date: date | None = None
         if market_status.data_end:
             try:
                 latest_date = date.fromisoformat(market_status.data_end[:10])
             except ValueError:
                 latest_date = None
-        for index, ref in enumerate(refs, start=1):
+        for index, ref in enumerate(position_refs, start=1):
             if abort_check is not None and abort_check():
                 raise TaskCancelledError("策略池信号扫描已取消")
             symbol = f"{ref.market}{ref.code}"
             entry = entries.get((ref.market, ref.code))
-            active = _active_candidate(entry, objective)
-            if active is None:
-                states.append(_signal_state(ref, "no_strategy", None, objective))
-                _report(progress_callback, index, total_work, "无可用策略", symbol, 0)
+            active_candidate = _active_candidate(entry, objective)
+            if active_candidate is None:
                 continue
             try:
-                buy_rule = _parse_rule(active.get("buy_rule"))
-                sell_rule = _parse_rule(active.get("sell_rule"))
+                buy_rule = _parse_rule(active_candidate.get("buy_rule"))
+                sell_rule = _parse_rule(active_candidate.get("sell_rule"))
                 if buy_rule is None or sell_rule is None:
                     raise ValueError("策略缺少买入或卖出规则")
                 union_rule = _union_rule(buy_rule, sell_rule)
@@ -1205,14 +1202,20 @@ class MarketStrategyPoolService:
                 )
                 as_of = str(prepared.frame.iloc[-1]["date"])[:10]
                 if buy:
-                    buy_signals.append(_signal_row(ref, active, objective, as_of, "buy"))
+                    buy_signals.append(
+                        _signal_row(ref, active_candidate, objective, as_of, "buy")
+                    )
                 if sell:
-                    sell_signals.append(_signal_row(ref, active, objective, as_of, "sell"))
+                    sell_signals.append(
+                        _signal_row(ref, active_candidate, objective, as_of, "sell")
+                    )
                 state = "buy_sell" if buy and sell else "buy" if buy else "sell" if sell else "flat"
-                states.append(_signal_state(ref, state, active, objective))
+                states.append(_signal_state(ref, state, active_candidate, objective))
             except Exception as exc:  # noqa: BLE001 - one unavailable formula cannot hide other signals
                 failed += 1
-                states.append(_signal_state(ref, "error", active, objective, str(exc)[:200]))
+                states.append(
+                    _signal_state(ref, "error", active_candidate, objective, str(exc)[:200])
+                )
             _report(progress_callback, index, total_work, "扫描当天买卖信号", symbol, 0)
         buy_signals.sort(key=lambda row: _signal_sort_key(row, objective))
         sell_signals.sort(key=lambda row: _signal_sort_key(row, objective))
@@ -1241,7 +1244,7 @@ class MarketStrategyPoolService:
                     start_date=start_date,
                     latest_date=latest_date,
                     progress_callback=progress_callback,
-                    progress_index=len(refs),
+                    progress_index=len(position_refs),
                     progress_total=total_work,
                     abort_check=abort_check,
                 )
@@ -1266,7 +1269,7 @@ class MarketStrategyPoolService:
         elif progress_callback is not None:
             _report(
                 progress_callback,
-                len(refs) + 1,
+                len(position_refs) + 1,
                 total_work,
                 "逐股持仓回放服务不可用",
                 "",
@@ -1313,9 +1316,9 @@ class MarketStrategyPoolService:
             "sell_signals": sell_signals,
             "states": states,
             "failed_symbols": failed,
-            "completed_symbols": len(refs) - failed,
+            "completed_symbols": len(position_refs) - failed,
             "skipped_symbols": 0,
-            "total_symbols": len(refs),
+            "total_symbols": len(position_refs),
             "model_portfolio": model_portfolio,
             "signal_job_id": job_id,
         }
