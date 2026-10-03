@@ -15,8 +15,8 @@ const segments = window.location.pathname.split('/')
 const market = segments[2] ?? ''; const code = segments[3] ?? ''
 const query = new URLSearchParams(window.location.search)
 const objective = ref<StrategyPoolObjective>(query.get('objective') === 'sharpe' ? 'sharpe' : 'annual_return')
-// 查看区间固定默认“创建以来，含承接持仓”；不读 URL，避免切过全历史后一直停留在全历史
-const scope = ref<'created' | 'full'>('created')
+// 查看区间固定默认“全历史”；不读 URL，保持每次打开行为一致
+const scope = ref<'created' | 'full'>('full')
 const detail = ref<{ name: string; objectives: Record<StrategyPoolObjective, Version[]> } | null>(null)
 const selectedId = ref('')
 const versions = computed(() => detail.value?.objectives[objective.value] ?? [])
