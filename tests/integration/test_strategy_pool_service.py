@@ -233,6 +233,7 @@ def test_current_strategy_snapshot_includes_holds_beyond_five_portfolio_slots(tm
                     "name": ref.name,
                     "size": 100,
                     "entry_price": 10,
+                    "unrealized_pnl_pct": 0.15,
                 }
                 for ref in refs
                 if f"{ref.market}:{ref.code}" in config.codes
@@ -271,8 +272,15 @@ def test_current_strategy_snapshot_includes_holds_beyond_five_portfolio_slots(tm
     )
 
     assert len(snapshot["holdings"]) == 6
-    assert set(snapshot["holdings"][0]) == {"market", "code", "name", "status"}
+    assert set(snapshot["holdings"][0]) == {
+        "market",
+        "code",
+        "name",
+        "status",
+        "holding_return_pct",
+    }
     assert snapshot["holdings"][0]["status"] == "held"
+    assert snapshot["holdings"][0]["holding_return_pct"] == 0.15
     assert configs[0].max_positions == 6
     assert len(configs[0].codes) == 6
 

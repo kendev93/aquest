@@ -1031,19 +1031,25 @@ class MarketStrategyPoolService:
                 for item in raw_holdings:
                     if not isinstance(item, Mapping):
                         continue
-                    holdings.append(
-                        {
-                            "market": str(item.get("market") or ""),
-                            "code": str(item.get("code") or ""),
-                            "name": str(item.get("name") or ""),
-                            "status": "held",
-                        }
-                    )
-            risk_exits.extend(
-                dict(trade)
-                for trade in report.trades
-                if trade.get("date") == batch_as_of and trade.get("risk_trigger") is not None
-            )
+                    holding: dict[str, object] = {
+                        "market": str(item.get("market") or ""),
+                        "code": str(item.get("code") or ""),
+                        "name": str(item.get("name") or ""),
+                        "status": "held",
+                    }
+                    holding_return = _finite_metric(item.get("unrealized_pnl_pct"))
+                    if holding_return is not None:
+                        holding["holding_return_pct"] = holding_return
+                    holdings.append(holding)
+            for trade in report.trades:
+                if trade.get("date") != batch_as_of or trade.get("risk_trigger") is None:
+                    continue
+                risk_exit = dict(trade)
+                pnl = _finite_metric(trade.get("pnl"))
+                cost_basis = _finite_metric(trade.get("cost_basis"))
+                if pnl is not None and cost_basis is not None and cost_basis > 0:
+                    risk_exit["trade_return_pct"] = pnl / cost_basis
+                risk_exits.append(risk_exit)
 
         if progress_callback is not None:
             progress_callback(
@@ -1731,7 +1737,10 @@ def _signal_row(
     as_of: str,
     signal_type: str,
 ) -> dict[str, object]:
-    metrics = _mapping(_mapping(candidate.get("metrics")).get("validation"))
+    candidate_metrics = _mapping(candidate.get("metrics"))
+    metrics = _mapping(candidate_metrics.get("validation"))
+    holdout_metrics = _mapping(candidate_metrics.get("holdout"))
+    full_period_metrics = _mapping(candidate_metrics.get("full_period"))
     return {
         "market": ref.market,
         "code": ref.code,
@@ -1740,13 +1749,27 @@ def _signal_row(
         "as_of_date": as_of,
         "signal_type": signal_type,
         "objective": objective,
+        "total_return": _finite_metric(metrics.get("total_return")),
         "annual_return": _finite_metric(metrics.get("annual_return")),
+        "full_period_return": _finite_metric(full_period_metrics.get("total_return")),
+        "holdout_return": _finite_metric(holdout_metrics.get("total_return")),
         "sharpe": _finite_metric(metrics.get("sharpe")),
         "win_rate": _finite_metric(metrics.get("win_rate")),
         "payoff_ratio": _finite_metric(metrics.get("payoff_ratio")),
+        "max_drawdown": _finite_metric(metrics.get("max_drawdown")),
+        "validation_trades": _candidate_trade_count(metrics),
+        "holdout_trades": _candidate_trade_count(holdout_metrics),
         "candidate_id": candidate.get("candidate_id"),
         "quality": candidate.get("quality"),
     }
+
+
+def _candidate_trade_count(metrics: Mapping[str, object]) -> float | None:
+    for key in ("closed_trades", "total_trades"):
+        count = _finite_metric(metrics.get(key))
+        if count is not None:
+            return count
+    return None
 
 
 def _signal_state(

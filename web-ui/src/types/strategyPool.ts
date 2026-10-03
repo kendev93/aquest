@@ -73,6 +73,10 @@ export interface StrategyPoolSignal extends StrategyPoolMetrics {
   objective?: StrategyPoolObjective
   candidate_id?: string
   quality?: StrategyPoolCandidate['quality']
+  full_period_return?: number | null
+  holdout_return?: number | null
+  validation_trades?: number | null
+  holdout_trades?: number | null
   error?: string | null
 }
 
@@ -81,6 +85,7 @@ export interface StrategyPoolHolding {
   code: string
   name?: string | null
   status?: 'held' | string
+  holding_return_pct?: number | null
 }
 
 export interface StrategyPoolStrategySnapshotItem {

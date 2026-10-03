@@ -91,10 +91,16 @@ const buySignal: StrategyPoolSignal = {
   status: 'buy',
   signal_type: 'buy',
   candidate_id: 'candidate-600000',
+  total_return: 0.24,
   annual_return: 0.24,
   sharpe: 1.35,
   win_rate: 0.62,
   payoff_ratio: 1.8,
+  max_drawdown: -0.18,
+  full_period_return: 0.71,
+  holdout_return: 0.08,
+  validation_trades: 12,
+  holdout_trades: 4,
 }
 
 describe('StrategyPoolPage', () => {
@@ -203,6 +209,7 @@ describe('StrategyPoolPage', () => {
             market: 'SH',
             code: '600000',
             name: '浦发银行',
+            holding_return_pct: 0.12,
           }],
           risk_exit_signals: [],
         },
@@ -215,11 +222,105 @@ describe('StrategyPoolPage', () => {
     expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('今日持仓中 1')
     expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('SH600000 · 浦发银行')
     expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('今日触发卖出 · 下一交易日卖出')
+    expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('持仓阶段收益 +12.00%')
+    expect(wrapper.get('[data-testid="pool-sell-signals"]').text()).toContain('验证收益 +24.00%')
+    expect(wrapper.get('[data-testid="pool-sell-signals"]').text()).toContain('全区间收益 +71.00%')
+    expect(wrapper.get('[data-testid="pool-sell-signals"]').text()).toContain('留出收益 +8.00%')
+    expect(wrapper.get('[data-testid="pool-sell-signals"]').text()).toContain('交易数 验证 12 · 留出 4')
     expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).not.toContain('成本')
     expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).not.toContain('浮盈')
     expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('持仓中')
     expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('触发卖出')
     expect(wrapper.get('[data-testid="pool-row-600000"]').text()).not.toContain('空仓')
+  })
+
+  it('paginates each daily signal and holding panel by ten rows', async () => {
+    window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
+    const signals = Array.from({ length: 12 }, (_value, index) => {
+      const code = String(600000 + index)
+      return {
+        ...buySignal,
+        code,
+        name: `测试${code}`,
+        symbol: `SH${code}`,
+        candidate_id: `candidate-${code}`,
+      }
+    })
+    const riskExits = Array.from({ length: 2 }, (_value, index) => ({
+      market: 'SH',
+      code: `61000${index}`,
+      name: `风控标的${index}`,
+      date: '2026-10-01',
+      risk_trigger: 'stop_loss',
+      reason: '止损',
+      trade_return_pct: -0.08,
+    }))
+    const holdings = Array.from({ length: 11 }, (_value, index) => {
+      const code = String(600000 + index)
+      return {
+        market: 'SH' as const,
+        code,
+        name: `持仓标的${index}`,
+        status: 'held',
+        holding_return_pct: index / 100,
+      }
+    })
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValueOnce([{
+      job_id: 'signals-paged',
+      status: 'completed',
+      mode: 'signals',
+      objective: 'annual_return',
+      created_at: 1790955030,
+    }])
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({
+      job_id: 'signals-paged',
+      status: 'completed',
+      result: {
+        mode: 'signals',
+        objective: 'annual_return',
+        holding_scope: 'per_stock_strategy',
+        holding_snapshot_complete: true,
+        as_of_date: '2026-10-01',
+        buy_signals: signals,
+        sell_signals: signals,
+        states: [
+          { ...buySignal, status: 'flat' },
+          { ...buySignal, code: '600001', symbol: 'SH600001', candidate_id: 'candidate-600001', status: 'flat' },
+        ],
+        market_snapshot: {
+          data_end: '2026-10-01',
+          bar_count: 300,
+          last_online_sync_at: '2026-10-01T18:00:00+08:00',
+        },
+        strategy_snapshot: [
+          { market: 'SH', code: '600000', candidate_id: 'candidate-600000' },
+          { market: 'SH', code: '600001', candidate_id: 'candidate-600001' },
+        ],
+        model_portfolio: {
+          available: true,
+          holding_scope: 'per_stock_strategy',
+          holdings,
+          risk_exit_signals: riskExits,
+        },
+      },
+    })
+
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    expect(wrapper.findAll('[data-testid="pool-buy-signals"] .signal-row')).toHaveLength(10)
+    expect(wrapper.findAll('[data-testid="pool-sell-signals"] .signal-row')).toHaveLength(10)
+    expect(wrapper.findAll('[data-testid="pool-current-holdings"] .signal-row')).toHaveLength(10)
+    expect(wrapper.get('[data-testid="pool-sell-signals"]').text()).toContain('全区间收益')
+
+    await wrapper.get('[data-testid="pool-buy-pagination"] button:last-child').trigger('click')
+    await wrapper.get('[data-testid="pool-sell-pagination"] button:last-child').trigger('click')
+    await wrapper.get('[data-testid="pool-holdings-pagination"] button:last-child').trigger('click')
+
+    expect(wrapper.findAll('[data-testid="pool-buy-signals"] .signal-row')).toHaveLength(2)
+    expect(wrapper.findAll('[data-testid="pool-sell-signals"] .signal-row')).toHaveLength(4)
+    expect(wrapper.findAll('[data-testid="pool-current-holdings"] .signal-row')).toHaveLength(1)
+    expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('持仓阶段收益 +10.00%')
   })
 
   it('replaces a legacy five-slot signal snapshot before showing per-stock holdings', async () => {

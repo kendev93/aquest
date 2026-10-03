@@ -339,7 +339,18 @@ def test_signal_scan_evaluates_active_rules_on_latest_completed_bar(tmp_path) ->
                 "required_conditions": [],
                 "combine_mode": "all",
             },
-            "metrics": {"validation": {"annual_return": 0.2, "sharpe": 1.0, "win_rate": 0.6}},
+            "metrics": {
+                "validation": {
+                    "total_return": 0.32,
+                    "annual_return": 0.2,
+                    "sharpe": 1.0,
+                    "win_rate": 0.6,
+                    "max_drawdown": -0.1,
+                    "total_trades": 4,
+                },
+                "holdout": {"total_return": -0.05, "total_trades": 2},
+                "full_period": {"total_return": 0.45},
+            },
             "config": {"stop_loss_pct": 0.05},
         },
     )
@@ -359,6 +370,11 @@ def test_signal_scan_evaluates_active_rules_on_latest_completed_bar(tmp_path) ->
     )
 
     assert result["buy_signals"][0]["code"] == "600000"
+    assert result["buy_signals"][0]["total_return"] == 0.32
+    assert result["buy_signals"][0]["full_period_return"] == 0.45
+    assert result["buy_signals"][0]["holdout_return"] == -0.05
+    assert result["buy_signals"][0]["validation_trades"] == 4
+    assert result["buy_signals"][0]["holdout_trades"] == 2
     assert result["sell_signals"] == []
     assert result["states"][0]["status"] == "buy"
     assert result["model_portfolio"]["available"] is True

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 
 import PageGuide from '../components/PageGuide.vue'
 import { fetchStoreStatus } from '../api/marketData'
@@ -30,12 +30,16 @@ import type {
 } from '../types'
 
 const OBJECTIVE_STORAGE_KEY = 'indicator-lab.strategy-pool.objective'
+const SIGNAL_PAGE_SIZE = 10
 interface ActivePoolTickerProgress {
   symbol: string
   name: string
   progress: number
   phaseLabel: string
 }
+type SellPanelItem =
+  | { kind: 'rule'; key: string; signal: StrategyPoolSignal }
+  | { kind: 'risk'; key: string; signal: Record<string, unknown> }
 
 const objective = ref<StrategyPoolObjective | null>(null)
 const entries = ref<StrategyPoolEntry[]>([])
@@ -174,10 +178,43 @@ const currentHoldings = computed<StrategyPoolHolding[]>(
     ? signalResult.value.model_portfolio?.holdings ?? []
     : [],
 )
+const sellPanelItems = computed<SellPanelItem[]>(() => [
+  ...ruleSellSignals.value.map((signal) => ({
+    kind: 'rule' as const,
+    key: `rule-${signal.symbol}`,
+    signal,
+  })),
+  ...riskSellSignals.value.map((signal, index) => ({
+    kind: 'risk' as const,
+    key: `risk-${String(signal.market ?? '')}-${String(signal.code ?? '')}-${String(signal.date ?? index)}`,
+    signal,
+  })),
+])
 const heldSymbols = computed(() => new Set(
   currentHoldings.value.map((holding) => `${holding.market}${holding.code}`),
 ))
+const currentHoldingReturns = computed(() => new Map(
+  currentHoldings.value.map((holding) => [
+    `${holding.market}${holding.code}`,
+    holding.holding_return_pct,
+  ]),
+))
 const signalAsOf = computed(() => signalResult.value?.as_of_date ?? '')
+const buyPage = ref(1)
+const sellPage = ref(1)
+const holdingsPage = ref(1)
+const visibleBuySignals = computed(() => pageItems(buySignals.value, buyPage.value))
+const visibleSellSignals = computed(() => pageItems(sellPanelItems.value, sellPage.value))
+const visibleCurrentHoldings = computed(() => pageItems(currentHoldings.value, holdingsPage.value))
+const buyPageCount = computed(() => pageCount(buySignals.value.length))
+const sellPageCount = computed(() => pageCount(sellPanelItems.value.length))
+const holdingsPageCount = computed(() => pageCount(currentHoldings.value.length))
+
+watch([buySignals, sellPanelItems, currentHoldings], () => {
+  buyPage.value = 1
+  sellPage.value = 1
+  holdingsPage.value = 1
+})
 
 const filteredEntries = computed(() => {
   const query = searchQuery.value.trim().toLocaleLowerCase()
@@ -946,10 +983,66 @@ function entryIsHeld(entry: StrategyPoolEntry): boolean {
   return heldSymbols.value.has(symbol(entry))
 }
 
+function pageCount(count: number): number {
+  return Math.max(1, Math.ceil(count / SIGNAL_PAGE_SIZE))
+}
+
+function pageItems<T>(items: T[], page: number): T[] {
+  const start = (page - 1) * SIGNAL_PAGE_SIZE
+  return items.slice(start, start + SIGNAL_PAGE_SIZE)
+}
+
 function holdingStatus(holding: StrategyPoolHolding): string {
-  return sellNextTradingDaySymbols.value.has(`${holding.market}${holding.code}`)
+  const tradeStatus = sellNextTradingDaySymbols.value.has(`${holding.market}${holding.code}`)
     ? '今日触发卖出 · 下一交易日卖出'
     : '当前持仓中'
+  const holdingReturn = typeof holding.holding_return_pct === 'number'
+    && Number.isFinite(holding.holding_return_pct)
+    ? `持仓阶段收益 ${formatSignedPercent(holding.holding_return_pct)}`
+    : ''
+  return holdingReturn ? `${holdingReturn} · ${tradeStatus}` : tradeStatus
+}
+
+function holdingReturnText(signal: StrategyPoolSignal): string {
+  const value = currentHoldingReturns.value.get(signal.symbol)
+  return typeof value === 'number' && Number.isFinite(value)
+    ? `当前持仓收益 ${formatSignedPercent(value)}`
+    : ''
+}
+
+function signalMetricsSummary(signal: StrategyPoolSignal): string {
+  const values: string[] = []
+  if (typeof signal.full_period_return === 'number') {
+    values.push(`全区间收益 ${formatSignedPercent(signal.full_period_return)}`)
+  }
+  if (typeof signal.total_return === 'number') {
+    values.push(`验证收益 ${formatSignedPercent(signal.total_return)}`)
+  }
+  if (typeof signal.holdout_return === 'number') {
+    values.push(`留出收益 ${formatSignedPercent(signal.holdout_return)}`)
+  }
+  if (typeof signal.annual_return === 'number') {
+    values.push(`验证年化 ${formatPercent(signal.annual_return)}`)
+  }
+  if (typeof signal.sharpe === 'number') values.push(`夏普 ${formatNumber(signal.sharpe)}`)
+  if (typeof signal.win_rate === 'number') values.push(`胜率 ${formatPercent(signal.win_rate)}`)
+  if (typeof signal.payoff_ratio === 'number') values.push(`盈亏比 ${formatNumber(signal.payoff_ratio)}`)
+  if (typeof signal.max_drawdown === 'number') {
+    values.push(`验证回撤 ${formatPercent(signal.max_drawdown)}`)
+  }
+  if (signal.validation_trades != null || signal.holdout_trades != null) {
+    values.push(
+      `交易数 验证 ${signal.validation_trades == null ? '—' : formatNumber(signal.validation_trades, 0)} · 留出 ${signal.holdout_trades == null ? '—' : formatNumber(signal.holdout_trades, 0)}`,
+    )
+  }
+  return values.join(' · ')
+}
+
+function riskExitReturnText(signal: Record<string, unknown>): string {
+  const value = signal.trade_return_pct
+  return typeof value === 'number' && Number.isFinite(value)
+    ? `本次持仓收益 ${formatSignedPercent(value)}`
+    : ''
 }
 
 function statusOrder(value: string): number {
@@ -1202,25 +1295,51 @@ onUnmounted(() => {
           <article class="signal-panel panel-card" data-testid="pool-buy-signals">
             <div class="section-heading"><div><p class="eyebrow">BUY SIGNALS</p><h2>当天触发买入 <span>{{ buySignals.length }}</span></h2></div><small>{{ signalAsOf || '信号扫描后显示日期' }}</small></div>
             <div v-if="buySignals.length" class="signal-list">
-              <div v-for="item in buySignals" :key="item.symbol" class="signal-row"><strong>{{ item.symbol }} · {{ item.name }}</strong><span>买入信号触发 · 下一交易日执行 · 年化 {{ formatPercent(item.annual_return) }} · 夏普 {{ formatNumber(item.sharpe) }}</span></div>
+              <div v-for="item in visibleBuySignals" :key="item.symbol" class="signal-row">
+                <strong>{{ item.symbol }} · {{ item.name }}</strong>
+                <span>买入信号触发 · 下一交易日执行<template v-if="holdingReturnText(item)"> · {{ holdingReturnText(item) }}</template><template v-if="signalMetricsSummary(item)"> · {{ signalMetricsSummary(item) }}</template></span>
+              </div>
+            </div>
+            <div v-if="buySignals.length > SIGNAL_PAGE_SIZE" class="signal-pagination" data-testid="pool-buy-pagination">
+              <button class="button-secondary" :disabled="buyPage <= 1" @click="buyPage -= 1">上一页</button>
+              <span>第 {{ buyPage }} / {{ buyPageCount }} 页 · 共 {{ buySignals.length }} 条</span>
+              <button class="button-secondary" :disabled="buyPage >= buyPageCount" @click="buyPage += 1">下一页</button>
             </div>
             <p v-else class="empty-copy">{{ signalResult ? '当前没有股票触发买入规则。' : '选择目标后点击“刷新当天信号”，扫描最新完整行情日。' }}</p>
           </article>
           <article class="signal-panel panel-card" data-testid="pool-sell-signals">
             <div class="section-heading"><div><p class="eyebrow">SELL SIGNALS</p><h2>当天触发卖出 <span>{{ ruleSellSignals.length + riskSellSignals.length }}</span></h2></div><small>{{ signalAsOf || '卖出条件和持仓风控退出' }}</small></div>
             <div v-if="ruleSellSignals.length || riskSellSignals.length" class="signal-list">
-              <div v-for="item in ruleSellSignals" :key="`rule-${item.symbol}`" class="signal-row"><strong>{{ item.symbol }} · {{ item.name }}</strong><span>卖出规则触发 · 下一交易日执行 · 夏普 {{ formatNumber(item.sharpe) }} · 盈亏比 {{ formatNumber(item.payoff_ratio) }}</span></div>
-              <div v-for="item in riskSellSignals" :key="`risk-${item.market}-${item.code}-${item.date}`" class="signal-row risk-signal"><strong>{{ item.market }}{{ item.code }} · {{ item.name || '' }}</strong><span>回测日内风控已触发：{{ item.reason || item.risk_trigger || '风控规则' }} · 按风控成交规则处理</span></div>
+              <template v-for="item in visibleSellSignals" :key="item.key">
+                <div v-if="item.kind === 'rule'" class="signal-row">
+                  <strong>{{ item.signal.symbol }} · {{ item.signal.name }}</strong>
+                  <span>卖出规则触发 · 下一交易日执行<template v-if="holdingReturnText(item.signal)"> · {{ holdingReturnText(item.signal) }}</template><template v-if="signalMetricsSummary(item.signal)"> · {{ signalMetricsSummary(item.signal) }}</template></span>
+                </div>
+                <div v-else class="signal-row risk-signal">
+                  <strong>{{ item.signal.market }}{{ item.signal.code }} · {{ item.signal.name || '' }}</strong>
+                  <span>回测日内风控已触发：{{ item.signal.reason || item.signal.risk_trigger || '风控规则' }} · 按风控成交规则处理<template v-if="riskExitReturnText(item.signal)"> · {{ riskExitReturnText(item.signal) }}</template></span>
+                </div>
+              </template>
+            </div>
+            <div v-if="ruleSellSignals.length + riskSellSignals.length > SIGNAL_PAGE_SIZE" class="signal-pagination" data-testid="pool-sell-pagination">
+              <button class="button-secondary" :disabled="sellPage <= 1" @click="sellPage -= 1">上一页</button>
+              <span>第 {{ sellPage }} / {{ sellPageCount }} 页 · 共 {{ sellPanelItems.length }} 条</span>
+              <button class="button-secondary" :disabled="sellPage >= sellPageCount" @click="sellPage += 1">下一页</button>
             </div>
             <p v-else class="empty-copy">{{ signalResult ? '当前没有卖出条件或持仓风控退出信号。' : '信号扫描会同时检查卖出规则，并复核逐股策略的风控退出。' }}</p>
           </article>
           <article class="signal-panel panel-card" data-testid="pool-current-holdings">
             <div class="section-heading"><div><p class="eyebrow">CURRENT HOLDINGS</p><h2>今日持仓中 <span>{{ currentHoldings.length }}</span></h2></div><small>{{ objectiveLabel(objective) }}目标逐股策略 · {{ signalAsOf || '信号扫描后显示日期' }}</small></div>
             <div v-if="currentHoldings.length" class="signal-list">
-              <div v-for="holding in currentHoldings" :key="`${holding.market}${holding.code}`" class="signal-row holding-row">
+              <div v-for="holding in visibleCurrentHoldings" :key="`${holding.market}${holding.code}`" class="signal-row holding-row">
                 <strong>{{ holding.market }}{{ holding.code }} · {{ holding.name || '—' }}</strong>
                 <span>{{ holdingStatus(holding) }}</span>
               </div>
+            </div>
+            <div v-if="currentHoldings.length > SIGNAL_PAGE_SIZE" class="signal-pagination" data-testid="pool-holdings-pagination">
+              <button class="button-secondary" :disabled="holdingsPage <= 1" @click="holdingsPage -= 1">上一页</button>
+              <span>第 {{ holdingsPage }} / {{ holdingsPageCount }} 页 · 共 {{ currentHoldings.length }} 条</span>
+              <button class="button-secondary" :disabled="holdingsPage >= holdingsPageCount" @click="holdingsPage += 1">下一页</button>
             </div>
             <p v-else-if="!signalResult" class="empty-copy">信号扫描完成后显示各股对应策略的持仓状态。</p>
             <p v-else-if="signalResult.model_portfolio?.available === false" class="empty-copy">{{ signalResult.model_portfolio.reason || '当前无法计算逐股策略持仓。' }}</p>
@@ -1393,6 +1512,8 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .signal-panel { min-height: 180px; }
 .signal-panel .section-heading small { color: #899ab3; white-space: nowrap; }
 .signal-list, .history-list { display: grid; gap: 8px; }
+.signal-pagination { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 12px; color: #91a1b8; font-size: .82rem; }
+.signal-pagination .button-secondary { padding: 6px 9px; font-size: .82rem; }
 .signal-row, .history-row { display: grid; gap: 5px; padding: 10px 12px; border-left: 3px solid #18c467; background: #111c30; }
 .signal-row span, .history-row span, .history-row small { color: #9aaac0; font-size: .88rem; }
 .risk-signal { border-left-color: #ff6a69; }
