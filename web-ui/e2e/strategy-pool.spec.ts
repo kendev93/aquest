@@ -78,3 +78,80 @@ test('daily signals are not repeated on reload or objective switch, and manual s
   await expect.poll(() => requests.length).toBe(2)
   expect(requests[1]).toEqual({ mode: 'signals', objective: 'sharpe' })
 })
+
+test('saved stock statuses appear during full research without starting a signal scan', async ({ page }) => {
+  let saved = 0
+  let submitted = 0
+  let listReads = 0
+  const stock = { market: 'SH', code: '600004', name: '白云机场', status: 'ready',
+    active_candidate: { candidate_id: 'c1', buy_rule: { signals: [] }, sell_rule: { signals: [] }, metrics: {} },
+    automatic_candidates: {}, manual_overrides: {},
+  }
+  await page.addInitScript(() => localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return'))
+  await page.route('**/api/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    let data: unknown = {}
+    if (route.request().method() === 'POST') submitted++
+    if (path.endsWith('/strategy-pool/jobs')) {
+      data = { items: [{ job_id: 'full-live', mode: 'full', status: 'running' }] }
+    } else if (path.endsWith('/strategy-pool/jobs/full-live')) {
+      data = { job_id: 'full-live', status: 'running', progress: saved / 3,
+        metadata: { finished_symbols: saved, total_symbols: 3 } }
+    } else if (path.endsWith('/strategy-pool/entries')) {
+      listReads++
+      const items: Array<Record<string, unknown>> = saved ? [stock] : []
+      if (saved > 1) items.push({ ...stock, code: '600006', name: '历史不足股',
+        status: 'insufficient_history', active_candidate: null })
+      data = { items }
+    }
+    await route.fulfill({ json: { data } })
+  })
+  await page.goto('/strategy-pool')
+  await expect(page.getByTestId('pool-job-progress')).toContainText('全市场研究进行中')
+  saved = 1
+  await expect(page.getByTestId('pool-row-600004')).toBeVisible()
+  await page.getByTestId('pool-entry-search').fill('600006')
+  saved = 2
+  await expect(page.getByTestId('pool-row-600006')).toContainText('历史样本不足')
+  await expect(page.getByTestId('pool-entry-search')).toHaveValue('600006')
+  await expect(page.getByTestId('pool-job-progress')).toContainText('全市场研究进行中')
+  expect(listReads).toBe(3)
+  expect(submitted).toBe(0)
+})
+
+test('per-stock research timers advance and survive page reload', async ({ page }) => {
+  const startedAt = Date.now() / 1000 - 65
+  await page.addInitScript(() => localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return'))
+  await page.route('**/api/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    let data: unknown = {}
+    if (path.endsWith('/strategy-pool/jobs')) {
+      data = { items: [{ job_id: 'timed', mode: 'full', status: 'running' }] }
+    } else if (path.endsWith('/strategy-pool/jobs/timed')) {
+      data = { job_id: 'timed', status: 'running', metadata: {
+        finished_symbols: 0,
+        active_symbols: [
+          { symbol: 'SH:600000', name: '浦发银行', progress: 0.4, started_at: startedAt },
+          { symbol: 'SH:600004', name: '白云机场', progress: 0.1, started_at: startedAt + 60 },
+        ],
+      } }
+    } else if (path.endsWith('/strategy-pool/entries')) {
+      data = { items: [] }
+    }
+    await route.fulfill({ json: { data } })
+  })
+  await page.goto('/strategy-pool')
+  const timer = page.getByTestId('pool-elapsed-SH:600000')
+  await expect(timer).toContainText('耗时 00:01:')
+  await expect(page.getByTestId('pool-elapsed-SH:600004')).toContainText('耗时 00:00:')
+  const initial = await timer.innerText()
+  await expect.poll(() => timer.innerText()).not.toBe(initial)
+  const elapsed = async () => {
+    const match = /([0-9]+):([0-9]+):([0-9]+)/.exec(await timer.innerText())!
+    return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3])
+  }
+  const beforeReload = await elapsed()
+  await page.reload()
+  await expect(timer).toContainText('耗时 00:01:')
+  expect(await elapsed()).toBeGreaterThanOrEqual(beforeReload)
+})

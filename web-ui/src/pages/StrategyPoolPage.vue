@@ -34,6 +34,7 @@ interface ActivePoolTickerProgress {
   name: string
   progress: number
   phaseLabel: string
+  startedAt: number | null
 }
 type SellPanelItem =
   | { kind: 'rule'; key: string; signal: StrategyPoolSignal }
@@ -66,11 +67,21 @@ const pageSize = ref(50)
 const editorEntry = ref<StrategyPoolEntry | null>(null)
 const editorObjective = ref<StrategyPoolObjective>('annual_return')
 const manualDraft = reactive({ buyRule: '', sellRule: '', risk: '' })
+const elapsedClock = ref(Date.now())
+let elapsedTimer: number | null = null
 let pollTimer: number | null = null
 let activePollToken = 0
 let activeSignalTarget: { market: 'SH' | 'SZ'; code: string } | null = null
 
 const isBusy = computed(() => Boolean(activeJobId.value))
+watch(() => isBusy.value && ['full', 'single'].includes(activeIntent.value), (running) => {
+  if (elapsedTimer !== null) window.clearInterval(elapsedTimer)
+  elapsedTimer = null
+  if (running) {
+    elapsedClock.value = Date.now()
+    elapsedTimer = window.setInterval(() => { elapsedClock.value = Date.now() }, 1000)
+  }
+})
 const progress = computed(() => {
   const metadata = activeJob.value?.metadata ?? {}
   const value = metadata.overall_progress
@@ -88,7 +99,7 @@ const currentSymbol = computed(() => {
   return typeof value === 'string' ? value : ''
 })
 const activeTickerProgress = computed<ActivePoolTickerProgress[]>(() => {
-  if (activeIntent.value !== 'full') return []
+  if (!['full', 'single'].includes(activeIntent.value)) return []
   const metadata = activeJob.value?.metadata ?? {}
   const raw = metadata.active_symbols
   if (Array.isArray(raw)) {
@@ -104,6 +115,7 @@ const activeTickerProgress = computed<ActivePoolTickerProgress[]>(() => {
         name: typeof progressItem.name === 'string' ? progressItem.name : '',
         progress,
         phaseLabel: typeof progressItem.phase_label === 'string' ? progressItem.phase_label : '研究中',
+        startedAt: researchStartedAt(progressItem.started_at),
       }]
     })
     if (active.length) return active
@@ -113,9 +125,10 @@ const activeTickerProgress = computed<ActivePoolTickerProgress[]>(() => {
   if (typeof symbol === 'string' && typeof fraction === 'number') {
     return [{
       symbol,
-      name: '',
+      name: typeof metadata.ticker_name === 'string' ? metadata.ticker_name : '',
       progress: Math.max(0, Math.min(1, fraction)),
       phaseLabel: typeof metadata.phase_label === 'string' ? metadata.phase_label : '研究中',
+      startedAt: researchStartedAt(metadata.ticker_started_at),
     }]
   }
   return []
@@ -279,6 +292,16 @@ async function refreshPage(refreshSignals: boolean): Promise<void> {
   }
 }
 
+async function refreshPoolEntries(canApply: () => boolean): Promise<boolean> {
+  const selectedObjective = objective.value
+  if (!selectedObjective) return false
+  const nextEntries = await fetchStrategyPoolEntries(selectedObjective)
+  if (!canApply() || objective.value !== selectedObjective) return false
+  entries.value = nextEntries
+  page.value = Math.min(page.value, Math.max(1, Math.ceil(nextEntries.length / pageSize.value)))
+  return true
+}
+
 async function restoreLatestSignalResult(jobs: StrategyPoolJobSummary[]): Promise<void> {
   const rebuild = jobs.find((job) => job.mode === 'full' && job.rebuild)
   const cutoff = rebuild ? timestampMillis(rebuild.created_at) : 0
@@ -419,6 +442,19 @@ function timestampMillis(value: number | string | null | undefined): number {
   return 0
 }
 
+function researchStartedAt(value: unknown): number | null {
+  if (typeof value !== 'number' && typeof value !== 'string') return null
+  const timestamp = timestampMillis(value)
+  return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : null
+}
+
+function formatResearchElapsed(startedAt: number | null): string {
+  if (startedAt === null) return '--:--:--'
+  const seconds = Math.max(0, Math.floor((elapsedClock.value - startedAt) / 1000))
+  return [Math.floor(seconds / 3600), Math.floor(seconds / 60) % 60, seconds % 60]
+    .map((value) => String(value).padStart(2, '0')).join(':')
+}
+
 async function ensureDailySignalScan(jobs: StrategyPoolJobSummary[]): Promise<void> {
   if (!objective.value || isBusy.value || !entries.value.some(activeReplayableCandidate)) return
   const day = (value: number) => new Intl.DateTimeFormat('en-CA', {
@@ -521,12 +557,32 @@ async function startTask(
 
 async function pollJob(jobId: string, intent: StrategyPoolMode): Promise<void> {
   const token = ++activePollToken
+  const canApply = () => token === activePollToken && activeJobId.value === jobId
+  let refreshedFinishedCount = 0
   const poll = async (): Promise<void> => {
-    if (token !== activePollToken || activeJobId.value !== jobId) return
+    if (!canApply()) return
+    let refreshingEntries = false
     try {
       const state = await getStrategyPoolJob(jobId)
+      if (!canApply()) return
       pollWarning.value = ''
       activeJob.value = state
+      if (intent === 'full' && state.status === 'running') {
+        const rawCount = state.metadata?.finished_symbols ?? state.total_scanned ?? 0
+        const finishedCount = typeof rawCount === 'number' && Number.isFinite(rawCount)
+          ? Math.max(0, Math.floor(rawCount))
+          : 0
+        if (finishedCount !== refreshedFinishedCount) {
+          refreshingEntries = true
+          if (await refreshPoolEntries(canApply)) refreshedFinishedCount = finishedCount
+          if (!canApply()) return
+        }
+      }
+      if (intent === 'full' && ['failed', 'cancelled'].includes(state.status)) {
+        refreshingEntries = true
+        await refreshPoolEntries(canApply)
+        if (!canApply()) return
+      }
       if (intent === 'single' && state.status === 'running') queuedSingleSymbol.value = ''
       if (['completed', 'failed', 'cancelled'].includes(state.status)) {
         const result = state.result ?? null
@@ -539,9 +595,11 @@ async function pollJob(jobId: string, intent: StrategyPoolMode): Promise<void> {
         return
       }
     } catch (error) {
-      pollWarning.value = `任务仍在后台运行，状态读取暂时失败：${apiMessage(error)} 正在自动重试。`
+      pollWarning.value = refreshingEntries
+        ? `标的状态刷新暂时失败：${apiMessage(error)} 下一轮轮询会自动重试。`
+        : `任务仍在后台运行，状态读取暂时失败：${apiMessage(error)} 正在自动重试。`
     }
-    pollTimer = window.setTimeout(() => void poll(), 1_500)
+    if (canApply()) pollTimer = window.setTimeout(() => void poll(), 1_500)
   }
   await poll()
 }
@@ -968,6 +1026,7 @@ onMounted(() => void initialize())
 onUnmounted(() => {
   activePollToken += 1
   if (pollTimer !== null) window.clearTimeout(pollTimer)
+  if (elapsedTimer !== null) window.clearInterval(elapsedTimer)
 })
 </script>
 
@@ -1065,7 +1124,7 @@ onUnmounted(() => {
             <p v-if="progressCountText" class="progress-count" data-testid="pool-progress-count">{{ progressCountText }}</p>
             <div v-if="activeTickerProgress.length" class="active-ticker-progress" data-testid="pool-active-ticker-progress" role="list" aria-label="正在研究的标的进度">
               <div v-for="item in activeTickerProgress" :key="item.symbol" class="active-ticker-progress-row" :data-testid="`pool-active-symbol-${item.symbol}`" role="listitem">
-                <div class="active-ticker-progress-heading"><strong>{{ item.symbol }}<template v-if="item.name"> · {{ item.name }}</template></strong><span>{{ item.phaseLabel }} · {{ Math.round(item.progress * 100) }}%</span></div>
+                <div class="active-ticker-progress-heading"><strong>{{ item.symbol }}<template v-if="item.name"> · {{ item.name }}</template></strong><span>{{ item.phaseLabel }} · {{ Math.round(item.progress * 100) }}%<span class="ticker-elapsed" :data-testid="`pool-elapsed-${item.symbol}`"> · 耗时 {{ formatResearchElapsed(item.startedAt) }}</span></span></div>
                 <div class="active-ticker-progress-track" role="progressbar" :aria-label="`${item.symbol}${item.name ? ` ${item.name}` : ''}研究进度`" :aria-valuenow="Math.round(item.progress * 100)" aria-valuemin="0" aria-valuemax="100"><span :style="{ width: `${Math.round(item.progress * 100)}%` }"></span></div>
               </div>
             </div>
@@ -1260,9 +1319,10 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .progress-count { margin: 0 0 12px; color: #acbbd0; font-size: .88rem; }
 .active-ticker-progress { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 8px; margin-bottom: 12px; }
 .active-ticker-progress-row { display: grid; gap: 7px; padding: 9px 10px; border: 1px solid #25364f; background: #101a2d; }
-.active-ticker-progress-heading { display: flex; justify-content: space-between; gap: 10px; color: #aab9ce; font-size: .8rem; }
+.active-ticker-progress-heading { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px; color: #aab9ce; font-size: .8rem; }
 .active-ticker-progress-heading strong { color: #eef4fc; }
 .active-ticker-progress-heading span { text-align: right; }
+.ticker-elapsed { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .active-ticker-progress-track { height: 5px; overflow: hidden; background: #17243a; }
 .active-ticker-progress-track span { display: block; height: 100%; background: #18c467; transition: width .25s ease; }
 .progress-detail { color: #91a1b8; font-size: .9rem; }

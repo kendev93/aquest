@@ -79,8 +79,19 @@ class _TickerProgress:
         self._coordinator = coordinator
         self._phase = "研究单只股票"
         self._phase_label = "准备开始"
+        self._started_at: float | None = None
+
+    def start(self) -> None:
+        """Start the ticker clock when its worker begins, rather than while queued."""
+
+        if self._started_at is not None:
+            return
+        self._started_at = time.time()
+        self(0, 100)
 
     def __call__(self, current: int, total: int) -> None:
+        if self._started_at is None:
+            self._started_at = time.time()
         fraction = min(1.0, max(0.0, current / total if total else 1.0))
         if self._coordinator is not None:
             self._coordinator.ticker_progress(
@@ -90,6 +101,7 @@ class _TickerProgress:
                 self._phase,
                 self._phase_label,
                 name=self._name,
+                started_at=self._started_at,
             )
             return
         overall = (self._index - 1 + fraction) / max(1, self._total)
@@ -102,6 +114,8 @@ class _TickerProgress:
                     "overall_progress": overall,
                     "symbol": self._symbol,
                     "ticker_progress": fraction,
+                    "ticker_started_at": self._started_at,
+                    "ticker_name": self._name,
                     "phase_label": self._phase_label,
                 },
             )
@@ -171,12 +185,17 @@ class _PoolProgressCoordinator:
         phase_label: str,
         *,
         name: str = "",
+        started_at: float | None = None,
     ) -> None:
         with self._lock:
+            if started_at is None:
+                previous = self._active_symbols.get(index, {})
+                started_at = cast(float, previous.get("started_at") or time.time())
             self._fractions[index] = fraction
             self._active_symbols[index] = {
                 "symbol": symbol,
                 "name": name,
+                "started_at": started_at,
                 "progress": fraction,
                 "phase": phase,
                 "phase_label": phase_label,
@@ -318,6 +337,7 @@ class MarketStrategyPoolService:
         progress: _TickerProgress,
         abort_check: Callable[[], bool] | None,
     ) -> tuple[dict[str, object], dict[str, object] | None]:
+        progress.start()
         clear_stock_cache = getattr(self._adapter, "clear_thread_stock_cache", None)
         if callable(clear_stock_cache):
             clear_stock_cache()

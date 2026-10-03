@@ -1071,4 +1071,151 @@ describe('StrategyPoolPage', () => {
     }
   })
 
+  it('refreshes saved stock rows during full research without rescanning signals or resetting search', async () => {
+    vi.useFakeTimers()
+    window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
+    let saved = 0
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValue([
+      { job_id: 'full-live', status: 'running', mode: 'full' },
+    ])
+    vi.mocked(api.getStrategyPoolJob).mockImplementation(async () => ({
+      job_id: 'full-live', status: 'running', progress: saved / 3,
+      metadata: { finished_symbols: saved },
+    }))
+    vi.mocked(api.fetchStrategyPoolEntries).mockImplementation(async () =>
+      saved ? [entry('600004', 0.3)] : [],
+    )
+    const wrapper = mount(StrategyPoolPage)
+    try {
+      await flushPromises()
+      expect(api.fetchStrategyPoolEntries).toHaveBeenCalledTimes(1)
+      await wrapper.get('[data-testid="pool-entry-search"]').setValue('600004')
+      saved = 1
+      await vi.advanceTimersByTimeAsync(1500)
+      await flushPromises()
+      expect(wrapper.find('[data-testid="pool-row-600004"]').exists()).toBe(true)
+      expect(api.fetchStrategyPoolEntries).toHaveBeenCalledTimes(2)
+      await vi.advanceTimersByTimeAsync(1500)
+      await flushPromises()
+      expect(api.fetchStrategyPoolEntries).toHaveBeenCalledTimes(2)
+      saved = 2
+      await vi.advanceTimersByTimeAsync(1500)
+      await flushPromises()
+      expect(api.fetchStrategyPoolEntries).toHaveBeenCalledTimes(3)
+      expect((wrapper.get('[data-testid="pool-entry-search"]').element as HTMLInputElement).value).toBe('600004')
+      expect(wrapper.get('[data-testid="pool-job-progress"]').text()).toContain('全市场研究进行中')
+      expect(api.createStrategyPoolJob).not.toHaveBeenCalled()
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
+  })
+
+  it('retries a transient live stock-list refresh failure while keeping full research running', async () => {
+    vi.useFakeTimers()
+    window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValue([
+      { job_id: 'full-live', status: 'running', mode: 'full' },
+    ])
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValue({
+      job_id: 'full-live', status: 'running', metadata: { finished_symbols: 1 },
+    })
+    vi.mocked(api.fetchStrategyPoolEntries)
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new Error('temporary database contention'))
+      .mockResolvedValue([entry('600004', 0.3)])
+    const wrapper = mount(StrategyPoolPage)
+    try {
+      await flushPromises()
+      expect(wrapper.get('[data-testid="pool-job-progress"]').text()).toContain('全市场研究进行中')
+      expect(wrapper.get('[data-testid="pool-poll-warning"]').text()).toContain('标的状态刷新暂时失败')
+      await vi.advanceTimersByTimeAsync(1500)
+      await flushPromises()
+      expect(wrapper.find('[data-testid="pool-row-600004"]').exists()).toBe(true)
+      expect(wrapper.find('[data-testid="pool-poll-warning"]').exists()).toBe(false)
+      expect(api.createStrategyPoolJob).not.toHaveBeenCalled()
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
+  })
+
+  it('refreshes the latest saved stock rows when full research is cancelled', async () => {
+    window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValue([
+      { job_id: 'full-live', status: 'running', mode: 'full' },
+    ])
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValue({ job_id: 'full-live', status: 'cancelled' })
+    vi.mocked(api.fetchStrategyPoolEntries).mockResolvedValueOnce([])
+      .mockResolvedValue([entry('600004', 0.3)])
+    const wrapper = mount(StrategyPoolPage)
+    try {
+      await flushPromises()
+      expect(wrapper.find('[data-testid="pool-row-600004"]').exists()).toBe(true)
+      expect(api.createStrategyPoolJob).not.toHaveBeenCalled()
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('shows independent stock timers that keep ticking across progress updates and page reload', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-10-03T05:00:00Z'))
+    window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
+    const now = Date.now() / 1000
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValue([
+      { job_id: 'full-timed', status: 'running', mode: 'full' },
+    ])
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValue({
+      job_id: 'full-timed', status: 'running', metadata: {
+        active_symbols: [
+          { symbol: 'SH:600000', name: '浦发银行', progress: 0.1, started_at: now - 65 },
+          { symbol: 'SH:600004', name: '白云机场', progress: 0.2, started_at: now - 5 },
+        ],
+      },
+    })
+    let wrapper = mount(StrategyPoolPage)
+    try {
+      await flushPromises()
+      expect(wrapper.get('[data-testid="pool-elapsed-SH:600000"]').text()).toContain('00:01:05')
+      expect(wrapper.get('[data-testid="pool-elapsed-SH:600004"]').text()).toContain('00:00:05')
+      await vi.advanceTimersByTimeAsync(3000)
+      await flushPromises()
+      expect(wrapper.get('[data-testid="pool-elapsed-SH:600000"]').text()).toContain('00:01:08')
+      wrapper.unmount()
+      wrapper = mount(StrategyPoolPage)
+      await flushPromises()
+      expect(wrapper.get('[data-testid="pool-elapsed-SH:600000"]').text()).toContain('00:01:08')
+      expect(api.createStrategyPoolJob).not.toHaveBeenCalled()
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
+  })
+
+  it('uses the server start time for a single-stock rerun timer', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-10-03T05:00:00Z'))
+    window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValue([
+      { job_id: 'single-timed', mode: 'single', status: 'running' },
+    ])
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValue({
+      job_id: 'single-timed', status: 'running', metadata: {
+        symbol: 'SH:600000', ticker_name: '浦发银行', ticker_progress: 0.4,
+        ticker_started_at: Date.now() / 1000 - 3605,
+      },
+    })
+    const wrapper = mount(StrategyPoolPage)
+    try {
+      await flushPromises()
+      expect(wrapper.get('[data-testid="pool-elapsed-SH:600000"]').text()).toContain('01:00:05')
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(wrapper.get('[data-testid="pool-elapsed-SH:600000"]').text()).toContain('01:00:06')
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
+  })
+
 })

@@ -15,6 +15,7 @@ def test_pool_progress_coalesces_updates_to_reduce_job_store_writes(monkeypatch)
         maximum_workers=4,
     )
     monkeypatch.setattr("selector_app.strategy_pool.service.time.monotonic", lambda: timestamp)
+    monkeypatch.setattr("selector_app.strategy_pool.service.time.time", lambda: 1_790_000_000.0)
 
     coordinator.ticker_progress(1, "SH:600000", 0.2, "search", "first", name="浦发银行")
     timestamp = 11.0
@@ -28,8 +29,52 @@ def test_pool_progress_coalesces_updates_to_reduce_job_store_writes(monkeypatch)
         {
             "symbol": "SH:600000",
             "name": "浦发银行",
+            "started_at": 1_790_000_000.0,
             "progress": 0.6,
             "phase": "search",
             "phase_label": "third",
         }
+    ]
+
+
+def test_ticker_start_time_is_preserved_across_research_phases(monkeypatch) -> None:
+    from selector_app.strategy_pool.service import _TickerProgress
+
+    now = 1_790_000_000.0
+    emitted = []
+    monkeypatch.setattr("selector_app.strategy_pool.service.time.time", lambda: now)
+    progress = _TickerProgress(
+        index=1,
+        total=1,
+        symbol="SH:600000",
+        name="浦发银行",
+        callback=lambda current, total, phase, metadata: emitted.append(metadata),
+    )
+    progress.start()
+    now += 65
+    progress.report_detail({"phase": "风控寻优", "phase_label": "规则 2/5"})
+    progress(60, 100)
+
+    assert emitted[0]["ticker_started_at"] == 1_790_000_000.0
+    assert emitted[-1]["ticker_started_at"] == 1_790_000_000.0
+    assert emitted[-1]["ticker_name"] == "浦发银行"
+    assert emitted[-1]["phase_label"] == "规则 2/5"
+
+
+def test_concurrent_stocks_report_independent_start_times(monkeypatch) -> None:
+    emitted = []
+    monotonic = 10.0
+    monkeypatch.setattr("selector_app.strategy_pool.service.time.monotonic", lambda: monotonic)
+    coordinator = _PoolProgressCoordinator(
+        total_symbols=2,
+        total_work=2,
+        maximum_workers=2,
+        callback=lambda current, total, phase, metadata: emitted.append(metadata),
+    )
+    coordinator.ticker_progress(1, "SH:600000", 0.1, "train", "first", started_at=1_790_000_000.0)
+    monotonic += 2
+    coordinator.ticker_progress(2, "SH:600004", 0.1, "train", "second", started_at=1_790_000_010.0)
+    assert [item["started_at"] for item in emitted[-1]["active_symbols"]] == [
+        1_790_000_000.0,
+        1_790_000_010.0,
     ]
