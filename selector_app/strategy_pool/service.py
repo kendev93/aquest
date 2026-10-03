@@ -36,6 +36,7 @@ from selector_app.strategy_discovery.catalog import default_indicator_catalog
 from selector_app.web.schemas.screening import RuleGroupRequest
 
 from .resources import (
+    MAX_POOL_WORKERS,
     cpu_bounded_worker_count,
     estimate_ticker_working_set_bytes,
     get_cpu_load_average_1m,
@@ -282,15 +283,16 @@ class MarketStrategyPoolService:
         self._portfolio_service = portfolio_service
         self._individual_service_factory = individual_service_factory
         self._research_local = local()
-        self._max_pool_workers = (
+        requested_pool_workers = (
             1
             if individual_service_factory is None
             else pool_worker_cap()
             if max_pool_workers is None
             else max_pool_workers
         )
-        if not 1 <= self._max_pool_workers <= 8:
-            raise ValueError("全市场策略池最大并发数必须在 1 到 8 之间")
+        self._max_pool_workers = min(MAX_POOL_WORKERS, requested_pool_workers)
+        if self._max_pool_workers < 1:
+            raise ValueError(f"全市场策略池最大并发数必须在 1 到 {MAX_POOL_WORKERS} 之间")
 
     def _individual_service_for_thread(self) -> IndividualStockResearchService:
         if self._individual_service_factory is None:

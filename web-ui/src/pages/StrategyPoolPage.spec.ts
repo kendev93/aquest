@@ -90,6 +90,7 @@ const buySignal: StrategyPoolSignal = {
   symbol: 'SH600000',
   status: 'buy',
   signal_type: 'buy',
+  candidate_id: 'candidate-600000',
   annual_return: 0.24,
   sharpe: 1.35,
   win_rate: 0.62,
@@ -280,7 +281,7 @@ describe('StrategyPoolPage', () => {
           as_of_date: '2026-10-01',
           buy_signals: [],
           sell_signals: [],
-          states: [{ ...buySignal, status: 'flat' }],
+          states: [{ ...buySignal, status: 'no_strategy', candidate_id: undefined }],
           model_portfolio: {
             available: true,
             holding_scope: 'per_stock_strategy',
@@ -301,7 +302,7 @@ describe('StrategyPoolPage', () => {
 
       expect(api.getStrategyPoolJob).toHaveBeenNthCalledWith(1, 'signals-complete')
       expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('持仓中')
-      expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('今日无买卖信号')
+      expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('策略可用 · 信号待刷新')
       expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('浦发银行')
       expect(wrapper.get('[data-testid="pool-job-progress"]').text()).toContain('正在回测组合留出段')
     } finally {
@@ -555,7 +556,7 @@ describe('StrategyPoolPage', () => {
     },
   )
 
-  it('shows CPU pressure and its dynamic dispatch limit during a full scan', async () => {
+  it('shows the two-worker cap and active ticker progress during a full scan', async () => {
     window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
     vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValueOnce([
       { job_id: 'full-1', status: 'running', mode: 'full' },
@@ -570,18 +571,16 @@ describe('StrategyPoolPage', () => {
         completed_symbols: 80,
         skipped_symbols: 1,
         failed_symbols: 5,
-        current_parallelism: 4,
-        maximum_parallelism: 6,
-        memory_worker_limit: 6,
+        current_parallelism: 2,
+        maximum_parallelism: 2,
+        memory_worker_limit: 2,
         available_memory_mb: 9_000,
-        cpu_worker_limit: 5,
-        cpu_load_average_1m: 6.2,
+        cpu_worker_limit: 2,
+        cpu_load_average_1m: 0.8,
         visible_cpus: 8,
         active_symbols: [
           { symbol: 'SH:600000', name: '浦发银行', progress: 0.37, phase_label: '规则 1/6 · 风控搜索' },
           { symbol: 'SH:600004', name: '白云机场', progress: 0.62, phase_label: '规则 2/6 · 验证' },
-          { symbol: 'SZ:000001', progress: 0.18, phase_label: '发现买卖条件' },
-          { symbol: 'SZ:000002', name: '万科A', progress: 0.9, phase_label: '留出评估' },
         ],
       },
     })
@@ -589,18 +588,17 @@ describe('StrategyPoolPage', () => {
     const wrapper = mount(StrategyPoolPage)
     await flushPromises()
 
-    expect(wrapper.get('[data-testid="pool-parallelism"]').text()).toContain('标的并行 4 / 最大 6')
+    expect(wrapper.get('[data-testid="pool-parallelism"]').text()).toContain('标的并行 2 / 最大 2')
     expect(wrapper.get('[data-testid="pool-parallelism"]').text()).toContain(
-      'CPU允许 5 个标的并发（8核，系统1分钟负载 6.2）',
+      'CPU允许 2 个标的并发（8核，系统1分钟负载 0.8）',
     )
     expect(wrapper.get('[data-testid="pool-progress-count"]').text()).toContain(
-      '已处理 85 / 5223 只（完成 79 · 进行中 4 · 跳过 1 · 失败 5）',
+      '已处理 85 / 5223 只（完成 79 · 进行中 2 · 跳过 1 · 失败 5）',
     )
-    expect(wrapper.findAll('[data-testid^="pool-active-symbol-"]')).toHaveLength(4)
+    expect(wrapper.findAll('[data-testid^="pool-active-symbol-"]')).toHaveLength(2)
     expect(
       wrapper.get('[data-testid="pool-active-symbol-SH:600000"]').text(),
     ).toContain('SH:600000 · 浦发银行')
-    expect(wrapper.get('[data-testid="pool-active-symbol-SZ:000001"]').text()).toContain('SZ:000001')
     expect(wrapper.get('[data-testid="pool-active-symbol-SH:600000"]').text()).toContain('37%')
     expect(wrapper.get('[data-testid="pool-active-symbol-SH:600000"] [role="progressbar"]').attributes('aria-valuenow')).toBe('37')
   })
@@ -720,6 +718,7 @@ describe('StrategyPoolPage', () => {
               code: '600001',
               name: '测试600001',
               symbol: 'SH600001',
+              candidate_id: 'candidate-600001',
               status: 'flat',
               signal_type: '',
             },

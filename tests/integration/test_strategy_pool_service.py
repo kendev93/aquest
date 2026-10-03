@@ -426,8 +426,9 @@ def test_full_pool_research_runs_tickers_concurrently_when_memory_allows(
         adapter=adapter,
         individual_service=ConcurrentFake(),
         individual_service_factory=ConcurrentFake,
-        max_pool_workers=2,
+        max_pool_workers=8,
     )
+    assert service._max_pool_workers == 2
 
     result = service.run(
         {"mode": "full", "risk_trials": 1_000, "horizon": 5},

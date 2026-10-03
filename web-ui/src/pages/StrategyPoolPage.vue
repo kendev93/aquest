@@ -859,8 +859,13 @@ function changePageSize(value: string): void {
 
 function entryStatus(entry: StrategyPoolEntry): string {
   const row = signalResult.value?.states?.find((item) => item.symbol === symbol(entry))
-  if (row?.status === 'held') return 'flat'
-  return row?.status ?? (entry.active_candidate ? 'flat' : 'no_strategy')
+  const candidate = entry.active_candidate
+  if (!candidate) return 'no_strategy'
+  if (!row || row.status === 'no_strategy' || row.candidate_id !== candidate.candidate_id) {
+    return 'signal_stale'
+  }
+  if (row.status === 'held') return 'flat'
+  return row.status ?? 'signal_stale'
 }
 
 function entryIsHeld(entry: StrategyPoolEntry): boolean {
@@ -874,7 +879,7 @@ function holdingStatus(holding: StrategyPoolHolding): string {
 }
 
 function statusOrder(value: string): number {
-  return { buy: 0, buy_sell: 0, sell: 1, flat: 2, no_strategy: 3 }[value] ?? 4
+  return { buy: 0, buy_sell: 0, sell: 1, flat: 2, signal_stale: 3, no_strategy: 4 }[value] ?? 5
 }
 
 function metricValue(
@@ -925,6 +930,7 @@ function statusLabel(value: string): string {
     sell: '触发卖出',
     held: '持仓中',
     flat: '今日无买卖信号',
+    signal_stale: '策略可用 · 信号待刷新',
     no_strategy: '无可用策略',
     error: '扫描失败',
   }[value] ?? value
