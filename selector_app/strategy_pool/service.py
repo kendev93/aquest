@@ -1130,9 +1130,7 @@ class MarketStrategyPoolService:
             cast(PoolObjective, objective),
             require_validation_metric=False,
         )
-        position_refs = [
-            ref for ref in refs if f"{ref.market}{ref.code}" in position_strategies
-        ]
+        position_refs = [ref for ref in refs if f"{ref.market}{ref.code}" in position_strategies]
         strategy_snapshot = []
         for ref in position_refs:
             active = position_strategies.get(f"{ref.market}{ref.code}")
@@ -1208,9 +1206,7 @@ class MarketStrategyPoolService:
                 )
                 as_of = str(prepared.frame.iloc[-1]["date"])[:10]
                 if buy:
-                    buy_signals.append(
-                        _signal_row(ref, active_candidate, objective, as_of, "buy")
-                    )
+                    buy_signals.append(_signal_row(ref, active_candidate, objective, as_of, "buy"))
                 if sell:
                     sell_signals.append(
                         _signal_row(ref, active_candidate, objective, as_of, "sell")
