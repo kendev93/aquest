@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 
+from selector_app.individual_research.service import InsufficientResearchHistoryError
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
 from selector_app.market_data.models import StockRef
 from selector_app.market_data.store import DuckDbMarketDataStore
@@ -26,6 +27,7 @@ class FakeIndividualResearchService:
         self.configs.append(config)
         if progress_callback is not None:
             progress_callback(100, 100)
+        stock_start = date(2020, 1, 11) if config.code == "000001" else date(2020, 1, 1)
         candidate = {
             "candidate_id": f"candidate-{config.code}",
             "candidate_hash": f"hash-{config.code}",
@@ -44,6 +46,23 @@ class FakeIndividualResearchService:
         }
         return {
             "data_fingerprint": f"result-{config.code}",
+            "split_metadata": {
+                "method": "按该股交易日顺序切分",
+                "observed_windows": {
+                    "train": {
+                        "start_date": stock_start.isoformat(),
+                        "end_date": date(2020, 1, 20).isoformat(),
+                    },
+                    "validation": {
+                        "start_date": date(2020, 1, 25).isoformat(),
+                        "end_date": date(2020, 2, 5).isoformat(),
+                    },
+                    "holdout": {
+                        "start_date": date(2020, 2, 10).isoformat(),
+                        "end_date": date(2020, 2, 20).isoformat(),
+                    },
+                },
+            },
             "results_by_return": [candidate],
             "results_by_sharpe": [candidate],
         }
@@ -89,7 +108,7 @@ def _bars(start: str, count: int) -> pd.DataFrame:
     )
 
 
-def test_full_pool_research_uses_common_windows_and_saves_each_symbol_incrementally(
+def test_full_pool_research_splits_each_symbol_and_saves_each_symbol_incrementally(
     tmp_path,
 ) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
@@ -135,8 +154,8 @@ def test_full_pool_research_uses_common_windows_and_saves_each_symbol_incrementa
     first = pool_store.get("SH", "600000")
     second = pool_store.get("SZ", "000001")
     assert result["completed_symbols"] == 2
-    assert individual.configs[0].split_windows == individual.configs[1].split_windows
-    assert individual.configs[1].split_windows["train"][0] == date(2020, 1, 1)
+    assert all(config.split_windows is None for config in individual.configs)
+    assert all(config.common_split_metadata is None for config in individual.configs)
     assert first["manual_overrides"]["annual_return"]["candidate_id"] == "kept-manual"
     assert first["automatic_candidates"]["annual_return"]["candidate_id"] == "candidate-600000"
     assert (
@@ -144,17 +163,15 @@ def test_full_pool_research_uses_common_windows_and_saves_each_symbol_incrementa
         == 0.31
     )
     assert first["automatic_candidates"]["sharpe"]["candidate_ref"] == "annual_return"
+    split_metadata = first["automatic_candidates"]["annual_return"]["split_metadata"]
+    assert split_metadata["observed_windows"]["train"]["start_date"] == "2020-01-01"
+    second_split = second["automatic_candidates"]["annual_return"]["split_metadata"]
+    assert second_split["observed_windows"]["train"]["start_date"] == "2020-01-11"
     assert first["benchmark"]["validation"]["total_return"] > 0
     assert first["benchmark"]["holdout"]["total_return"] > 0
     assert second["source_job_id"] == "batch-1"
-    assert result["holdout_portfolios"]["annual_return"]["available"] is True
-    assert result["holdout_portfolios"]["sharpe"]["available"] is True
-    assert [config.start_date for config in portfolio.configs] == [
-        individual.configs[0].split_windows["holdout"][0],
-        individual.configs[0].split_windows["holdout"][0],
-    ]
-    assert all(config.max_positions == 5 for config in portfolio.configs)
-    assert all(len(config.symbol_strategies) == 2 for config in portfolio.configs)
+    assert "holdout_portfolios" not in result
+    assert portfolio.configs == []
 
     with store._connect() as connection:
         connection.execute(
@@ -187,6 +204,7 @@ def test_full_pool_research_uses_common_windows_and_saves_each_symbol_incrementa
     )
     assert single["single_candidate"]["benchmark"]["validation"]["total_return"] > 0
     assert single["single_candidate"]["saved_to_pool"] is True
+    assert individual.configs[-1].split_windows is None
     refreshed = pool_store.get("SH", "600000")
     assert refreshed["benchmark"]["validation"]["total_return"] > 0
     assert refreshed["source_job_id"] == "single-rerun"
@@ -203,6 +221,101 @@ def test_no_strategy_entry_is_not_reused_on_full_reselection() -> None:
         "market-v1",
         "config-v1",
     )
+
+
+def test_insufficient_history_checkpoint_is_reused_only_for_unchanged_inputs() -> None:
+    prior = ("market-v1", "config-v1", "insufficient_history", False)
+
+    assert MarketStrategyPoolService._can_reuse(prior, "market-v1", "config-v1")
+    assert not MarketStrategyPoolService._can_reuse(prior, "market-v2", "config-v1")
+    assert not MarketStrategyPoolService._can_reuse(prior, "market-v1", "config-v2")
+    assert not MarketStrategyPoolService._can_reuse(
+        ("market-v1", "config-v1", "failed", False),
+        "market-v1",
+        "config-v1",
+    )
+
+
+def test_full_research_caches_insufficient_history_until_market_data_changes(tmp_path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "insufficient-history.duckdb")
+    bars = _bars("2021-01-01", 40)
+    store.replace_local_bars("SH", "600000", "stock", bars)
+    adapter = DuckDbMarketDataAdapter(store)
+    pool_store = DuckDbStrategyPoolStore(store)
+    pool_store.initialize()
+
+    class InsufficientIndividualResearchService:
+        calls = 0
+
+        def run(self, _config, _progress_callback=None, _abort_check=None):
+            self.calls += 1
+            raise InsufficientResearchHistoryError(f"data-{self.calls}", {})
+
+    individual = InsufficientIndividualResearchService()
+    service = MarketStrategyPoolService(
+        store=store,
+        adapter=adapter,
+        individual_service=individual,
+        pool_store=pool_store,
+    )
+
+    def writer(item):
+        pool_store.persist_worker_entry(
+            item,
+            source_job_id=str(item.get("source_job_id") or "job"),
+        )
+
+    first = service.run(
+        {"mode": "full", "risk_trials": 1_000},
+        job_id="first",
+        entry_writer=writer,
+    )
+    second = service.run(
+        {"mode": "full", "risk_trials": 1_000},
+        job_id="second",
+        entry_writer=writer,
+    )
+
+    item = pool_store.get("SH", "600000")
+    assert individual.calls == 1
+    assert first["failed_symbols"] == 0
+    assert first["skipped_symbols"] == 1
+    assert second["skipped_symbols"] == 1
+    assert item["status"] == "insufficient_history"
+    assert item["data_fingerprint"] == "data-1"
+
+    single_cached = service.run(
+        {"mode": "single", "market": "SH", "code": "600000", "risk_trials": 1_000},
+        job_id="single-cached",
+        entry_writer=writer,
+    )
+    assert single_cached["single_candidate"]["status"] == "insufficient_history"
+    assert single_cached["skipped_symbols"] == 1
+    assert individual.calls == 1
+
+    bars.loc[0, "close"] += 0.1
+    bars.loc[0, "open"] += 0.1
+    bars.loc[0, "high"] += 0.1
+    bars.loc[0, "low"] += 0.1
+    store.replace_local_bars("SH", "600000", "stock", bars)
+    single = service.run(
+        {"mode": "single", "market": "SH", "code": "600000", "risk_trials": 1_000},
+        job_id="single-insufficient",
+        entry_writer=writer,
+    )
+    assert single["single_candidate"]["status"] == "insufficient_history"
+    assert single["single_candidate"]["saved_to_pool"] is True
+    assert single["skipped_symbols"] == 1
+    assert pool_store.get("SH", "600000")["status"] == "insufficient_history"
+    assert individual.calls == 2
+
+    third = service.run(
+        {"mode": "full", "risk_trials": 1_000},
+        job_id="third",
+        entry_writer=writer,
+    )
+    assert third["skipped_symbols"] == 1
+    assert individual.calls == 2
 
 
 def test_current_strategy_snapshot_includes_holds_beyond_five_portfolio_slots(tmp_path) -> None:

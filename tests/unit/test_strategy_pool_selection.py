@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date, timedelta
 from pathlib import Path
 
+import pandas as pd
+
 from selector_app.market_data.models import StockRef
 from selector_app.strategy_pool.selection import (
     common_calendar_windows,
@@ -15,6 +17,7 @@ from selector_app.strategy_pool.service import (
     _fingerprint,
     _portfolio_strategies,
 )
+from selector_app.swing_research.combinations import split_trading_days
 
 
 def test_common_calendar_windows_use_shared_dates_and_purge_each_label_boundary() -> None:
@@ -25,6 +28,21 @@ def test_common_calendar_windows_use_shared_dates_and_purge_each_label_boundary(
     assert windows["train"] == (dates[0], dates[54])
     assert windows["validation"] == (dates[60], dates[74])
     assert windows["holdout"] == (dates[80], dates[94])
+
+
+def test_per_stock_calendar_split_supports_stocks_listed_in_2021() -> None:
+    dates = pd.date_range("2021-01-04", periods=1_300, freq="B").to_numpy()
+
+    slices, metadata = split_trading_days(dates, horizon=10)
+
+    assert slices["train"].stop > slices["train"].start
+    assert slices["validation"].stop > slices["validation"].start
+    assert slices["holdout"].stop > slices["holdout"].start
+    assert metadata["train"]["end"] < metadata["validation"]["start"]
+    assert metadata["validation"]["end"] < metadata["holdout"]["start"]
+    assert metadata["train"]["purged_days"] == 10
+    assert metadata["validation"]["purged_days"] == 10
+    assert metadata["holdout"]["purged_days"] == 10
 
 
 def test_objective_winners_rank_only_validation_metrics_and_keep_risk_warnings() -> None:
@@ -80,7 +98,7 @@ def test_stock_window_algorithm_version_invalidates_old_no_strategy_checkpoints(
     previous_config = _fingerprint({"algorithm_version": "market-pool-v1"})
     updated_config = _fingerprint({"algorithm_version": MARKET_POOL_ALGORITHM_VERSION})
 
-    assert MARKET_POOL_ALGORITHM_VERSION == "market-pool-v2"
+    assert MARKET_POOL_ALGORITHM_VERSION == "market-pool-v3"
     assert updated_config != previous_config
     assert not MarketStrategyPoolService._can_reuse(
         (market_fingerprint, previous_config, "no_strategy"),

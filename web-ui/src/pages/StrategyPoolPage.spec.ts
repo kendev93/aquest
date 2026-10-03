@@ -188,6 +188,42 @@ describe('StrategyPoolPage', () => {
     expect(wrapper.get('[data-testid="pool-entry-empty"]').text()).toContain('没有符合代码或名称的标的')
   })
 
+  it('labels cached stocks with insufficient history instead of no strategy', async () => {
+    window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
+    const insufficient: StrategyPoolEntry = {
+      ...entry('600000', 0.24),
+      automatic_candidates: { annual_return: null, sharpe: null },
+      active_candidate: null,
+      status: 'insufficient_history',
+      last_error: '历史样本不足：无法切出训练、验证、留出三段',
+    }
+    vi.mocked(api.fetchStrategyPoolEntries).mockResolvedValue([insufficient])
+
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('历史样本不足')
+  })
+
+  it('shows at most ten task history rows without manual result loading or pooled holdout UI', async () => {
+    window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValue(Array.from({ length: 12 }, (_, index) => ({
+      job_id: `job-${index}`,
+      status: 'completed',
+      mode: 'single',
+      market: 'SH',
+      code: `6000${String(index).padStart(2, '0')}`,
+      created_at: index,
+    })))
+
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    expect(wrapper.findAll('.history-row')).toHaveLength(10)
+    expect(wrapper.text()).not.toContain('组合留出段验证')
+    expect(wrapper.text()).not.toContain('载入结果')
+  })
+
   it('shows simulated current holdings in a separate panel from daily signal status', async () => {
     window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
     vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({
@@ -405,7 +441,7 @@ describe('StrategyPoolPage', () => {
       expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('持仓中')
       expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('策略可用 · 信号待刷新')
       expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('浦发银行')
-      expect(wrapper.get('[data-testid="pool-job-progress"]').text()).toContain('正在回测组合留出段')
+      expect(wrapper.get('[data-testid="pool-job-progress"]').text()).toContain('组合回测任务进行中')
     } finally {
       wrapper.unmount()
       vi.useRealTimers()

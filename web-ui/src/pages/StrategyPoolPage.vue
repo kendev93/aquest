@@ -47,10 +47,6 @@ const history = ref<StrategyPoolJobSummary[]>([])
 const signalResult = ref<StrategyPoolJobResult | null>(null)
 const marketStatus = ref<DataStoreStatus | null>(null)
 const signalSnapshotCreatedAt = ref<number | string | null>(null)
-const holdoutPortfolios = reactive<Record<StrategyPoolObjective, Record<string, unknown> | null>>({
-  annual_return: null,
-  sharpe: null,
-})
 const activeJobId = ref('')
 const activeIntent = ref<StrategyPoolMode | ''>('')
 const activeJob = ref<StrategyPoolJobState | null>(null)
@@ -277,10 +273,7 @@ async function refreshPage(refreshSignals: boolean): Promise<void> {
     marketStatus.value = nextMarketStatus
     page.value = Math.min(page.value, Math.max(1, Math.ceil(nextEntries.length / pageSize.value)))
     history.value = nextHistory
-    await Promise.all([
-      restoreHoldoutSummary(nextHistory),
-      restoreLatestSignalResult(nextHistory),
-    ])
+    await restoreLatestSignalResult(nextHistory)
     if (refreshSignals) {
       await refreshSignalsIfStale(nextHistory)
     }
@@ -288,21 +281,6 @@ async function refreshPage(refreshSignals: boolean): Promise<void> {
     errorMessage.value = apiMessage(error)
   } finally {
     loading.value = false
-  }
-}
-
-async function restoreHoldoutSummary(jobs: StrategyPoolJobSummary[]): Promise<void> {
-  const latestFull = jobs.find((job) => job.mode === 'full' && job.status === 'completed')
-  if (!latestFull) return
-  try {
-    const state = await getStrategyPoolJob(latestFull.job_id)
-    const summaries = state.result?.holdout_portfolios
-    if (summaries) {
-      holdoutPortfolios.annual_return = summaries.annual_return ?? null
-      holdoutPortfolios.sharpe = summaries.sharpe ?? null
-    }
-  } catch {
-    // A compact history row remains useful if an old result was already pruned.
   }
 }
 
@@ -642,11 +620,6 @@ async function startSignalScan(target?: { market: 'SH' | 'SZ'; code: string }): 
   await startTask({ mode: 'signals', objective: objective.value, ...target }, 'signals')
 }
 
-async function startPortfolioBacktest(target: StrategyPoolObjective): Promise<void> {
-  if (isBusy.value) return
-  await startTask({ mode: 'portfolio', objective: target }, 'portfolio')
-}
-
 async function startTask(
   payload: { mode: StrategyPoolMode; risk_trials?: 1_000 | 2_000 | 3_000; market?: 'SH' | 'SZ'; code?: string; objective?: StrategyPoolObjective },
   intent: StrategyPoolMode,
@@ -703,22 +676,19 @@ async function finishJob(
 ): Promise<void> {
   if (state.status === 'completed') {
     if (intent === 'full') {
-      const summaries = result?.holdout_portfolios
-      if (summaries) {
-        holdoutPortfolios.annual_return = summaries.annual_return ?? null
-        holdoutPortfolios.sharpe = summaries.sharpe ?? null
-      }
       await refreshPage(false)
       if (objective.value && entries.value.some((item) => item.active_candidate)) {
         await startSignalScan()
       }
-      successMessage.value = '策略池重选和双目标留出组合验证已完成。'
+      successMessage.value = '全市场策略重选已完成；每只股票的留出段表现仅用于复核。'
       return
     }
     if (intent === 'single') {
       pendingSingle.value = result?.single_candidate ?? null
       await refreshPage(false)
-      if (pendingSingle.value?.saved_to_pool) {
+      if (pendingSingle.value?.status === 'insufficient_history') {
+        successMessage.value = `${pendingSingle.value.market} ${pendingSingle.value.code} 历史样本不足，已记录；数据或研究配置变化后可再次重跑。`
+      } else if (pendingSingle.value?.saved_to_pool) {
         if (objective.value) {
           await startSignalScan({
             market: pendingSingle.value.market,
@@ -752,11 +722,6 @@ async function finishJob(
       ) {
         await startSignalScan()
       }
-    } else if (intent === 'portfolio' && result?.portfolio && objective.value) {
-      holdoutPortfolios[objective.value] = result.portfolio
-      successMessage.value = '组合留出段回测完成。'
-      await refreshPage(false)
-      await refreshSignalsIfStale(history.value)
     }
     return
   }
@@ -803,39 +768,6 @@ async function activateQueuedSingleRerun(): Promise<boolean> {
     : '逐股重跑已排队，前序任务完成后开始。'
   void pollJob(queued.job_id, 'single')
   return true
-}
-
-async function restoreTaskResult(jobId: string): Promise<void> {
-  errorMessage.value = ''
-  try {
-    const state = await getStrategyPoolJob(jobId)
-    const result = state.result
-    if (!result) {
-      successMessage.value = '任务还没有可恢复的结果。'
-      return
-    }
-    if (result.mode === 'single') pendingSingle.value = result.single_candidate ?? null
-    if (result.mode === 'signals' && result.objective === objective.value) {
-      const summary = history.value.find((job) => job.job_id === jobId)
-      const target = summary?.market && summary.code
-        ? { market: summary.market as 'SH' | 'SZ', code: summary.code }
-        : null
-      signalResult.value = target && signalResult.value?.objective === result.objective
-        ? mergeSignalResult(signalResult.value, result, target)
-        : result
-      signalSnapshotCreatedAt.value = summary?.created_at ?? null
-    }
-    if (result.mode === 'full' && result.holdout_portfolios) {
-      holdoutPortfolios.annual_return = result.holdout_portfolios.annual_return ?? null
-      holdoutPortfolios.sharpe = result.holdout_portfolios.sharpe ?? null
-    }
-    if (result.mode === 'portfolio' && result.objective && result.portfolio) {
-      holdoutPortfolios[result.objective] = result.portfolio
-    }
-    successMessage.value = '已从本地任务历史恢复结果。'
-  } catch (error) {
-    errorMessage.value = apiMessage(error)
-  }
 }
 
 async function cancelCurrentJob(): Promise<void> {
@@ -971,7 +903,7 @@ function changePageSize(value: string): void {
 function entryStatus(entry: StrategyPoolEntry): string {
   const row = signalResult.value?.states?.find((item) => item.symbol === symbol(entry))
   const candidate = activeReplayableCandidate(entry)
-  if (!candidate) return 'no_strategy'
+  if (!candidate) return entry.status === 'insufficient_history' ? 'insufficient_history' : 'no_strategy'
   if (!row || row.status === 'no_strategy' || row.candidate_id !== candidate.candidate_id) {
     return 'signal_stale'
   }
@@ -1108,6 +1040,7 @@ function statusLabel(value: string): string {
     flat: '今日无买卖信号',
     signal_stale: '策略可用 · 信号待刷新',
     no_strategy: '无可用策略',
+    insufficient_history: '历史样本不足',
     error: '扫描失败',
   }[value] ?? value
 }
@@ -1218,7 +1151,7 @@ onUnmounted(() => {
         <div>
           <p class="eyebrow">MARKET / STRATEGY POOL</p>
           <h1>全市场策略池</h1>
-          <p class="intro-copy">每只股票分别维护年化收益与夏普最高的策略，查看当天信号，并用逐股规则验证组合留出表现。</p>
+          <p class="intro-copy">每只股票分别维护年化收益与夏普最高的策略，查看当天信号和逐股策略的分段表现。</p>
         </div>
         <div v-if="objective" class="intro-note">
           <span class="note-label">当前决策目标</span>
@@ -1273,7 +1206,7 @@ onUnmounted(() => {
           </div>
 
           <div v-if="isBusy" class="pool-progress" data-testid="pool-job-progress">
-            <div class="progress-heading"><strong>{{ activeIntent === 'signals' ? '正在扫描当天信号' : activeIntent === 'portfolio' ? '正在回测组合留出段' : activeIntent === 'single' ? '正在重跑单只股票' : '全市场研究进行中' }}</strong><strong>{{ progressPercent }}%</strong></div>
+            <div class="progress-heading"><strong>{{ activeIntent === 'signals' ? '正在扫描当天信号' : activeIntent === 'portfolio' ? '组合回测任务进行中' : activeIntent === 'single' ? '正在重跑单只股票' : '全市场研究进行中' }}</strong><strong>{{ progressPercent }}%</strong></div>
             <div class="progress-track"><span :style="{ width: `${progressPercent}%` }"></span></div>
             <p v-if="progressCountText" class="progress-count" data-testid="pool-progress-count">{{ progressCountText }}</p>
             <div v-if="activeTickerProgress.length" class="active-ticker-progress" data-testid="pool-active-ticker-progress" role="list" aria-label="正在研究的标的进度">
@@ -1350,27 +1283,6 @@ onUnmounted(() => {
         </section>
         <p class="pool-scale-note">买入和卖出规则信号都在最新完整行情日收盘后判定，并于下一交易日执行。因此，今日触发卖出规则的标的当天仍列在持仓中，下一交易日卖出。止损、止盈按回测中的日线风控成交规则模拟。</p>
 
-        <section class="pool-summary panel-card">
-          <div class="section-heading"><div><p class="eyebrow">COMMON HOLDOUT</p><h2>组合留出段验证</h2></div><span>最多 5 个持仓 · 等权 · 已计入费用</span></div>
-          <div class="holdout-grid">
-            <article v-for="target in (['annual_return', 'sharpe'] as const)" :key="target" class="holdout-card">
-              <div class="holdout-title"><strong>{{ objectiveLabel(target) }}策略</strong><button class="text-button" :disabled="isBusy || !entries.some((item) => item.active_candidate)" @click="startPortfolioBacktest(target)">重新回测</button></div>
-              <template v-if="holdoutPortfolios[target]?.performance && typeof holdoutPortfolios[target]?.performance === 'object'">
-                <div class="metric-strip">
-                  <span>收益 <b>{{ formatPercent((holdoutPortfolios[target]?.performance as Record<string, unknown>).total_return) }}</b></span>
-                  <span>年化 <b>{{ formatPercent((holdoutPortfolios[target]?.performance as Record<string, unknown>).annual_return) }}</b></span>
-                  <span>夏普 <b>{{ formatNumber((holdoutPortfolios[target]?.performance as Record<string, unknown>).sharpe) }}</b></span>
-                  <span>回撤 <b>{{ formatPercent((holdoutPortfolios[target]?.performance as Record<string, unknown>).max_drawdown) }}</b></span>
-                  <span>交易 <b>{{ holdoutPortfolios[target]?.closed_trades ?? '—' }}</b></span>
-                </div>
-                <small>{{ holdoutPortfolios[target]?.start_date }} 至 {{ holdoutPortfolios[target]?.end_date }} · {{ holdoutPortfolios[target]?.strategy_count }} 套逐股策略</small>
-              </template>
-              <p v-else class="empty-copy">全量研究完成后自动计算；也可单独重新回测这个目标。</p>
-            </article>
-          </div>
-          <p class="pool-scale-note">买入信号超过空仓槽位时按当前目标的验证段表现优先买入；平仓后补入下一位，不会因为出现新信号而强制卖出已有持仓。</p>
-        </section>
-
         <section class="pool-table-section panel-card">
           <div class="section-heading"><div><p class="eyebrow">DAILY STATUS</p><h2>全市场标的状态 <span>{{ entries.length.toLocaleString() }}</span></h2></div><span>{{ loading ? '正在读取策略池…' : `按${objectiveLabel(objective)}策略决策` }}</span></div>
           <p class="pool-scale-note">策略收益是该策略在完整历史区间实际回放的累计收益；旧候选会在下次全市场重选时补算。全段基准显示个股买入持有涨跌；验证和留出分别用同区间基准计算总收益超额。</p>
@@ -1432,7 +1344,7 @@ onUnmounted(() => {
         </section>
 
         <section v-if="pendingSingle" class="pending-candidates panel-card" data-testid="pool-single-candidates">
-          <div class="section-heading"><div><p class="eyebrow">SINGLE RERUN</p><h2>{{ pendingSingle.market }} {{ pendingSingle.code }} · 重跑结果</h2></div><span>{{ pendingSingle.saved_to_pool ? '年化与夏普自动候选已保存；已有手工覆盖仍优先生效' : '历史候选尚未写入自动策略，可保存为手工覆盖' }}</span></div>
+          <div class="section-heading"><div><p class="eyebrow">SINGLE RERUN</p><h2>{{ pendingSingle.market }} {{ pendingSingle.code }} · 重跑结果</h2></div><span>{{ pendingSingle.status === 'insufficient_history' ? pendingSingle.error : pendingSingle.saved_to_pool ? '年化与夏普自动候选已保存；已有手工覆盖仍优先生效' : '历史候选尚未写入自动策略，可保存为手工覆盖' }}</span></div>
           <div class="candidate-apply-grid">
             <article v-for="target in (['annual_return', 'sharpe'] as const)" :key="target">
               <strong>{{ objectiveLabel(target) }}最佳</strong>
@@ -1446,7 +1358,7 @@ onUnmounted(() => {
         <section class="pool-history panel-card">
           <div class="section-heading"><div><p class="eyebrow">TASK HISTORY</p><h2>策略池任务记录</h2></div><button class="text-button" @click="loadHistory">刷新</button></div>
           <div v-if="history.length" class="history-list">
-            <div v-for="job in history" :key="job.job_id" class="history-row"><strong>{{ job.mode === 'full' ? '全市场重选' : job.mode === 'single' ? `${job.market} ${job.code} 单股重跑` : job.mode === 'signals' ? '当天信号扫描' : `${job.mode} 组合回测` }}</strong><span>{{ job.status }} · {{ job.completed_symbols ?? 0 }}/{{ job.total_symbols ?? '—' }} 只完成 · 跳过 {{ job.skipped_symbols ?? 0 }} · 失败 {{ job.failed_symbols ?? 0 }}</span><small>{{ formatTimestamp(job.created_at) }}</small><button class="text-button" :disabled="job.status === 'queued' || job.status === 'running'" @click="restoreTaskResult(job.job_id)">载入结果</button></div>
+            <div v-for="job in history.slice(0, 10)" :key="job.job_id" class="history-row"><strong>{{ job.mode === 'full' ? '全市场重选' : job.mode === 'single' ? `${job.market} ${job.code} 单股重跑` : job.mode === 'signals' ? '当天信号扫描' : `${job.mode} 组合回测` }}</strong><span>{{ job.status }} · {{ job.completed_symbols ?? 0 }}/{{ job.total_symbols ?? '—' }} 只完成 · 跳过 {{ job.skipped_symbols ?? 0 }} · 失败 {{ job.failed_symbols ?? 0 }}</span><small>{{ formatTimestamp(job.created_at) }}</small></div>
           </div>
           <p v-else class="empty-copy">完成或启动的任务会保存在本地历史中。取消任务后，再次全量重选会继续复用已完成标的。</p>
         </section>
@@ -1483,7 +1395,7 @@ onUnmounted(() => {
 .button-primary { background: #18c467; border-color: #18c467; color: #07170e; }
 .button-secondary { background: #131f34; color: #e9f0fa; }
 button:disabled { opacity: .48; cursor: not-allowed; }
-.toolbar-heading, .section-heading, .progress-heading, .progress-detail, .holdout-title { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+.toolbar-heading, .section-heading, .progress-heading, .progress-detail { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
 .toolbar-heading { margin-bottom: 18px; }
 .objective-switch, .pool-actions label, .pool-editor label { display: grid; gap: 7px; color: #9baac0; font-size: .9rem; }
 .pool-actions select, .pool-actions input, .objective-switch select, .pool-editor select, .pool-editor textarea { min-height: 42px; border: 1px solid #354b69; border-radius: 7px; padding: 9px 11px; background: #111c30; color: #edf2fb; font: inherit; }
@@ -1500,12 +1412,12 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .active-ticker-progress-track { height: 5px; overflow: hidden; background: #17243a; }
 .active-ticker-progress-track span { display: block; height: 100%; background: #18c467; transition: width .25s ease; }
 .progress-detail { color: #91a1b8; font-size: .9rem; }
-.pool-scale-note, .empty-copy, .holdout-card small { color: #8798b1; font-size: .9rem; line-height: 1.6; }
+.pool-scale-note, .empty-copy { color: #8798b1; font-size: .9rem; line-height: 1.6; }
 .pool-scale-note { margin: 16px 0 0; }
 .pool-search-row { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 12px; margin: 16px 0 12px; color: #8798b1; font-size: .88rem; }
 .pool-search { display: grid; width: min(420px, 100%); gap: 7px; color: #9baac0; }
 .pool-search input { min-height: 42px; border: 1px solid #354b69; border-radius: 7px; padding: 9px 11px; background: #111c30; color: #edf2fb; font: inherit; }
-.signal-grid, .holdout-grid, .candidate-apply-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.signal-grid, .candidate-apply-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .signal-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .section-heading { margin-bottom: 16px; }
 .section-heading h2 span { color: #18c467; }
@@ -1518,11 +1430,7 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .signal-row span, .history-row span, .history-row small { color: #9aaac0; font-size: .88rem; }
 .risk-signal { border-left-color: #ff6a69; }
 .holding-row { border-left-color: #6380a5; }
-.holdout-card, .candidate-apply-grid article { padding: 16px; border: 1px solid #263850; background: #101a2d; }
-.holdout-title { margin-bottom: 14px; }
-.metric-strip { display: flex; flex-wrap: wrap; gap: 14px; margin: 12px 0; }
-.metric-strip span { display: grid; gap: 3px; color: #98a7bd; font-size: .82rem; }
-.metric-strip b { color: #eff4fc; font-size: 1rem; }
+.candidate-apply-grid article { padding: 16px; border: 1px solid #263850; background: #101a2d; }
 .table-scroll { overflow: auto; }
 .pool-pagination { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 10px; margin-top: 14px; color: #91a1b8; font-size: .88rem; }
 .pool-pagination label { display: flex; align-items: center; gap: 7px; }
@@ -1556,9 +1464,9 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .editor-fields textarea { width: 100%; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .82rem; }
 .editor-risk { grid-column: 1 / -1; }
 @media (max-width: 760px) {
-  .signal-grid, .holdout-grid, .candidate-apply-grid, .editor-fields { grid-template-columns: 1fr; }
+  .signal-grid, .candidate-apply-grid, .editor-fields { grid-template-columns: 1fr; }
   .editor-risk { grid-column: auto; }
-  .pool-toolbar, .pool-summary, .pool-table-section, .pool-history { padding: 15px; }
+  .pool-toolbar, .pool-table-section, .pool-history { padding: 15px; }
   .history-row { grid-template-columns: 1fr; }
   .progress-detail { flex-wrap: wrap; }
 }

@@ -121,3 +121,81 @@ def test_pool_store_marks_no_strategy_without_erasing_existing_manual_choice(tmp
     assert item["status"] == "failed"
     assert item["manual_overrides"]["sharpe"]["candidate_id"] == "manual-s"
     assert pool.active_candidate("SZ", "000001", "sharpe")["candidate_id"] == "manual-s"
+
+
+def test_insufficient_history_clears_stale_automatic_candidates_and_keeps_fingerprints(
+    tmp_path,
+) -> None:
+    market_store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    pool = DuckDbStrategyPoolStore(market_store)
+    pool.initialize()
+    pool.upsert_automatic(
+        market="SH",
+        code="600000",
+        name="浦发银行",
+        annual_candidate={"candidate_id": "stale-annual"},
+        sharpe_candidate={"candidate_id": "stale-sharpe"},
+        data_fingerprint="old-data",
+        market_fingerprint="old-market",
+        config_fingerprint="old-config",
+        source_job_id="old-job",
+    )
+    pool.set_manual_override("SH", "600000", "annual_return", {"candidate_id": "manual"})
+
+    pool.persist_worker_entry(
+        {
+            "market": "SH",
+            "code": "600000",
+            "error": "历史样本不足：无法切出三段",
+            "status": "insufficient_history",
+            "data_fingerprint": "new-data",
+            "market_fingerprint": "new-market",
+            "config_fingerprint": "new-config",
+        },
+        source_job_id="new-job",
+    )
+
+    item = pool.get("SH", "600000")
+    assert item is not None
+    assert item["status"] == "insufficient_history"
+    assert item["last_error"] == "历史样本不足：无法切出三段"
+    assert item["data_fingerprint"] == "new-data"
+    assert item["market_fingerprint"] == "new-market"
+    assert item["config_fingerprint"] == "new-config"
+    assert item["automatic_candidates"] == {"annual_return": None, "sharpe": None}
+    assert item["manual_overrides"]["annual_return"]["candidate_id"] == "manual"
+
+
+def test_failure_under_new_config_invalidates_stale_automatic_candidates(tmp_path) -> None:
+    market_store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    pool = DuckDbStrategyPoolStore(market_store)
+    pool.initialize()
+    pool.upsert_automatic(
+        market="SZ",
+        code="000001",
+        name="平安银行",
+        annual_candidate={"candidate_id": "stale-annual"},
+        sharpe_candidate={"candidate_id": "stale-sharpe"},
+        data_fingerprint="old-data",
+        market_fingerprint="old-market",
+        config_fingerprint="old-config",
+        source_job_id="old-job",
+    )
+    pool.set_manual_override("SZ", "000001", "sharpe", {"candidate_id": "manual"})
+
+    pool.persist_worker_entry(
+        {
+            "market": "SZ",
+            "code": "000001",
+            "error": "临时行情读取失败",
+            "config_fingerprint": "new-config",
+        },
+        source_job_id="new-job",
+    )
+
+    item = pool.get("SZ", "000001")
+    assert item is not None
+    assert item["status"] == "failed"
+    assert item["automatic_candidates"] == {"annual_return": None, "sharpe": None}
+    assert item["manual_overrides"]["sharpe"]["candidate_id"] == "manual"
+    assert item["config_fingerprint"] == "new-config"

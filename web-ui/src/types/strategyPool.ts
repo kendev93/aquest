@@ -116,6 +116,8 @@ export interface StrategyPoolJobResult {
     annual_candidate?: StrategyPoolCandidate | null
     sharpe_candidate?: StrategyPoolCandidate | null
     split_metadata?: Record<string, unknown>
+    status?: string
+    error?: string
     saved_to_pool?: boolean
   } | null
   holdout_portfolios?: Record<StrategyPoolObjective, Record<string, unknown>>

@@ -140,21 +140,71 @@ class DuckDbStrategyPoolStore:
             )
 
     def record_symbol_error(
-        self, market: str, code: str, error: str, *, source_job_id: str
+        self,
+        market: str,
+        code: str,
+        error: str,
+        *,
+        source_job_id: str,
+        status: str = "failed",
+        data_fingerprint: str | None = None,
+        market_fingerprint: str | None = None,
+        config_fingerprint: str | None = None,
     ) -> None:
         _validate_symbol(market, code)
+        if status not in {"failed", "insufficient_history"}:
+            raise ValueError("策略池标的错误状态无效")
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         with _WRITE_LOCK, self._transaction() as connection:
             connection.execute(
                 """
                 INSERT INTO strategy_pool_entries (
                     market, code, name, status, last_error, source_job_id, updated_at
-                ) VALUES (?, ?, '', 'failed', ?, ?, ?)
+                    , data_fingerprint, market_fingerprint, config_fingerprint
+                ) VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (market, code) DO UPDATE SET
-                    status = 'failed', last_error = excluded.last_error,
-                    source_job_id = excluded.source_job_id, updated_at = excluded.updated_at
+                    status = excluded.status, last_error = excluded.last_error,
+                    source_job_id = excluded.source_job_id, updated_at = excluded.updated_at,
+                    data_fingerprint = COALESCE(
+                        NULLIF(excluded.data_fingerprint, ''),
+                        strategy_pool_entries.data_fingerprint
+                    ),
+                    market_fingerprint = COALESCE(
+                        NULLIF(excluded.market_fingerprint, ''),
+                        strategy_pool_entries.market_fingerprint
+                    ),
+                    config_fingerprint = COALESCE(
+                        NULLIF(excluded.config_fingerprint, ''),
+                        strategy_pool_entries.config_fingerprint
+                    ),
+                    annual_candidate_json = CASE
+                        WHEN excluded.status = 'insufficient_history'
+                          OR (
+                              excluded.config_fingerprint <> ''
+                              AND excluded.config_fingerprint
+                                  <> strategy_pool_entries.config_fingerprint
+                          )
+                        THEN NULL ELSE strategy_pool_entries.annual_candidate_json END,
+                    sharpe_candidate_json = CASE
+                        WHEN excluded.status = 'insufficient_history'
+                          OR (
+                              excluded.config_fingerprint <> ''
+                              AND excluded.config_fingerprint
+                                  <> strategy_pool_entries.config_fingerprint
+                          )
+                        THEN NULL ELSE strategy_pool_entries.sharpe_candidate_json END
                 """,
-                [market, code, error[:500], source_job_id, now],
+                [
+                    market,
+                    code,
+                    status,
+                    error[:500],
+                    source_job_id,
+                    now,
+                    data_fingerprint or "",
+                    market_fingerprint or "",
+                    config_fingerprint or "",
+                ],
             )
 
     def persist_worker_entry(self, entry: Mapping[str, object], *, source_job_id: str) -> None:
@@ -163,7 +213,28 @@ class DuckDbStrategyPoolStore:
         name = str(entry.get("name") or "")
         error = entry.get("error")
         if isinstance(error, str) and error:
-            self.record_symbol_error(market, code, error, source_job_id=source_job_id)
+            self.record_symbol_error(
+                market,
+                code,
+                error,
+                source_job_id=source_job_id,
+                status=str(entry.get("status") or "failed"),
+                data_fingerprint=(
+                    str(entry["data_fingerprint"])
+                    if entry.get("data_fingerprint") is not None
+                    else None
+                ),
+                market_fingerprint=(
+                    str(entry["market_fingerprint"])
+                    if entry.get("market_fingerprint") is not None
+                    else None
+                ),
+                config_fingerprint=(
+                    str(entry["config_fingerprint"])
+                    if entry.get("config_fingerprint") is not None
+                    else None
+                ),
+            )
             return
         if entry.get("benchmark_only"):
             benchmark = entry.get("benchmark")

@@ -46,6 +46,19 @@ MAX_COMBINATION_COMPONENTS = 24
 MAX_CANDIDATES_PER_COMPONENT = 3
 
 
+class InsufficientResearchHistoryError(ValueError):
+    """A deterministic split failure tied to the exact prepared market data."""
+
+    def __init__(
+        self,
+        data_fingerprint: str,
+        split_metadata: Mapping[str, object],
+    ) -> None:
+        super().__init__("当前历史区间无法切出训练、验证、留出三段；请扩大历史区间")
+        self.data_fingerprint = data_fingerprint
+        self.split_metadata = dict(split_metadata)
+
+
 class IndividualStockResearchService:
     """Run all stages for one symbol, keeping the final holdout untouched."""
 
@@ -99,7 +112,7 @@ class IndividualStockResearchService:
             split_metadata["holdout_policy"] = "留出段只复核最终风险候选，不参与条件或风险参数排序"
             windows = _split_windows(dates, split_slices)
         if any(window is None for window in windows.values()):
-            raise ValueError("当前日期范围不足以进行训练、验证、留出三段研究；请扩大历史区间")
+            raise InsufficientResearchHistoryError(prepared.data_fingerprint, split_metadata)
 
         segmentation = _segmentation_summary(segments, config)
         self._report(progress_callback, 10, "识别波段", "生成上涨/下跌启动标签")

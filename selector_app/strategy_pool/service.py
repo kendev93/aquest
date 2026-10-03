@@ -22,7 +22,10 @@ from selector_app.concurrency import visible_cpu_count
 from selector_app.formulas.registry import FORMULA_REGISTRY
 from selector_app.indicators.cache import frame_fingerprint
 from selector_app.individual_research.models import IndividualResearchConfig
-from selector_app.individual_research.service import IndividualStockResearchService
+from selector_app.individual_research.service import (
+    IndividualStockResearchService,
+    InsufficientResearchHistoryError,
+)
 from selector_app.market_data.adapter import BatchMarketDataAdapter
 from selector_app.market_data.models import StockRef
 from selector_app.market_data.store import DuckDbMarketDataStore
@@ -50,7 +53,7 @@ from .store import DuckDbStrategyPoolStore
 PoolObjective = Literal["annual_return", "sharpe"]
 PoolProgressCallback = Callable[[int, int, str, Mapping[str, object] | None], None]
 PoolEntryWriter = Callable[[Mapping[str, object]], None]
-MARKET_POOL_ALGORITHM_VERSION = "market-pool-v2"
+MARKET_POOL_ALGORITHM_VERSION = "market-pool-v3"
 POOL_PROGRESS_EMIT_INTERVAL_SECONDS = 1.5
 STRATEGY_HOLDING_BATCH_SIZE = 100
 STRATEGY_HOLDING_VIRTUAL_CASH = 1_000_000_000_000.0
@@ -336,6 +339,11 @@ class MarketStrategyPoolService:
         winners = summarize_objective_winners(result)
         annual_candidate = winners["annual_return"]
         sharpe_candidate = winners["sharpe"]
+        split_metadata = result.get("split_metadata")
+        if isinstance(split_metadata, Mapping):
+            for candidate in (annual_candidate, sharpe_candidate):
+                if isinstance(candidate, dict):
+                    candidate["split_metadata"] = dict(split_metadata)
         if mode == "full" and _same_candidate(annual_candidate, sharpe_candidate):
             sharpe_candidate = {
                 "candidate_ref": "annual_return",
@@ -379,6 +387,7 @@ class MarketStrategyPoolService:
             "market_fingerprint": result_market_fingerprint,
             "config_fingerprint": config_fingerprint,
             "source_job_id": job_id,
+            "split_metadata": dict(split_metadata) if isinstance(split_metadata, Mapping) else None,
         }
         single_result = None
         if mode == "single":
@@ -396,8 +405,6 @@ class MarketStrategyPoolService:
         refs: list[StockRef],
         *,
         calendar: Sequence[date],
-        windows: Mapping[str, tuple[date, date]],
-        split_metadata: Mapping[str, object],
         settings: Mapping[str, object],
         value_ids: Sequence[str],
         signal_ids: Sequence[str],
@@ -444,7 +451,7 @@ class MarketStrategyPoolService:
                     if (
                         prior is not None
                         and prior[1] == config_fingerprint
-                        and prior[2] in {"ready", "partial"}
+                        and prior[2] in {"ready", "partial", "insufficient_history"}
                     ):
                         market_fingerprint = _market_fingerprint(self._adapter, ref)
                     if self._can_reuse(prior, market_fingerprint, config_fingerprint):
@@ -508,8 +515,18 @@ class MarketStrategyPoolService:
                                 )
                                 next_index += 1
                                 continue
-                        if prior is not None and not prior[3] and self._pool_store is not None:
+                        if (
+                            prior is not None
+                            and prior[2] != "insufficient_history"
+                            and not prior[3]
+                            and self._pool_store is not None
+                            and reused_entry is not None
+                        ):
                             try:
+                                automatic = _mapping(reused_entry.get("automatic_candidates"))
+                                reference_candidate = _mapping(
+                                    automatic.get("annual_return") or automatic.get("sharpe")
+                                )
                                 benchmark = _symbol_benchmark(
                                     self._adapter,
                                     ref,
@@ -517,13 +534,11 @@ class MarketStrategyPoolService:
                                         ref,
                                         calendar[0],
                                         calendar[-1],
-                                        windows,
-                                        split_metadata,
                                         value_ids,
                                         signal_ids,
                                         settings,
                                     ),
-                                    {},
+                                    _mapping(reference_candidate.get("split_metadata")),
                                 )
                                 if benchmark is not None:
                                     checkpoint = {
@@ -588,8 +603,6 @@ class MarketStrategyPoolService:
                         ref,
                         calendar[0],
                         calendar[-1],
-                        windows,
-                        split_metadata,
                         value_ids,
                         signal_ids,
                         settings,
@@ -632,6 +645,55 @@ class MarketStrategyPoolService:
                             entry_writer(record)
                     except TaskCancelledError:
                         raise
+                    except InsufficientResearchHistoryError as exc:
+                        try:
+                            market_fingerprint = _market_fingerprint(self._adapter, ref)
+                        except Exception:  # noqa: BLE001 - do not cache without a stable fingerprint
+                            logger.exception("读取历史样本不足标的指纹失败: %s", symbol)
+                            market_fingerprint = ""
+                        if market_fingerprint:
+                            message = f"历史样本不足：{exc}"
+                            checkpoint = {
+                                "market": ref.market,
+                                "code": ref.code,
+                                "name": ref.name or "",
+                                "error": message,
+                                "status": "insufficient_history",
+                                "data_fingerprint": exc.data_fingerprint,
+                                "market_fingerprint": market_fingerprint,
+                                "config_fingerprint": config_fingerprint,
+                                "source_job_id": job_id,
+                            }
+                            if entry_writer is not None:
+                                entry_writer(checkpoint)
+                            elif self._pool_store is not None:
+                                self._pool_store.persist_worker_entry(
+                                    checkpoint,
+                                    source_job_id=job_id,
+                                )
+                            skipped += 1
+                            completed += 1
+                            coordinator.finish(index, symbol, "历史样本不足，已记录", skipped=True)
+                        else:
+                            failed += 1
+                            errors.append({"symbol": symbol, "error": str(exc)[:500]})
+                            checkpoint = {
+                                "market": ref.market,
+                                "code": ref.code,
+                                "name": ref.name or "",
+                                "error": str(exc)[:500],
+                                "config_fingerprint": config_fingerprint,
+                                "source_job_id": job_id,
+                            }
+                            if entry_writer is not None:
+                                entry_writer(checkpoint)
+                            elif self._pool_store is not None:
+                                self._pool_store.persist_worker_entry(
+                                    checkpoint,
+                                    source_job_id=job_id,
+                                )
+                            coordinator.finish(index, symbol, "读取行情指纹失败", failed=True)
+                        continue
                     except Exception as exc:  # noqa: BLE001 - isolate stock failures
                         failed += 1
                         message = str(exc).strip()[:500] or type(exc).__name__
@@ -648,6 +710,7 @@ class MarketStrategyPoolService:
                                     "code": ref.code,
                                     "name": ref.name or "",
                                     "error": message,
+                                    "config_fingerprint": config_fingerprint,
                                     "source_job_id": job_id,
                                 }
                             )
@@ -691,9 +754,9 @@ class MarketStrategyPoolService:
         if not calendar:
             raise ValueError("本地行情没有已完成的 A 股日线")
         horizon = _positive_int(payload.get("horizon"), 10, "波段预测窗口")
-        windows = common_calendar_windows(calendar, purge_days=horizon)
-        metadata = _calendar_metadata(calendar, windows, horizon)
         if mode == "portfolio":
+            windows = common_calendar_windows(calendar, purge_days=horizon)
+            metadata = _calendar_metadata(calendar, windows, horizon)
             objective = str(payload.get("objective") or "")
             if objective not in {"annual_return", "sharpe"}:
                 raise ValueError("组合回测必须选择年化收益或夏普目标")
@@ -708,7 +771,7 @@ class MarketStrategyPoolService:
             )
             return {"mode": "portfolio", "common_calendar": metadata, "portfolio": summary}
         catalog = default_indicator_catalog()
-        settings = _research_settings(payload, windows, risk_trials)
+        settings = _research_settings(payload, risk_trials)
         settings["value_ids"] = list(catalog.value_ids)
         settings["signal_ids"] = list(catalog.signal_ids)
         formula_ids = {
@@ -720,21 +783,70 @@ class MarketStrategyPoolService:
         }
         settings["algorithm_version"] = MARKET_POOL_ALGORITHM_VERSION
         config_fingerprint = _fingerprint(settings)
-        prior_entries = self._prior_entries() if mode == "full" else {}
+        prior_entries = self._prior_entries() if mode in {"full", "single"} else {}
         started = date.today()
+        if mode == "single" and self._pool_store is not None:
+            ref = refs[0]
+            prior = prior_entries.get((ref.market, ref.code))
+            if (
+                prior is not None
+                and prior[1] == config_fingerprint
+                and prior[2] == "insufficient_history"
+            ):
+                try:
+                    market_fingerprint = _market_fingerprint(self._adapter, ref)
+                except Exception:  # noqa: BLE001 - fingerprint errors should allow a fresh attempt
+                    logger.exception("读取单股历史样本不足指纹失败: %s", ref.symbol)
+                else:
+                    if self._can_reuse(prior, market_fingerprint, config_fingerprint):
+                        saved_entry = self._pool_store.get(ref.market, ref.code) or {}
+                        _report(
+                            progress_callback,
+                            1,
+                            1,
+                            "复用历史样本不足记录",
+                            ref.symbol,
+                            1,
+                        )
+                        return {
+                            "mode": "single",
+                            "total_symbols": 1,
+                            "completed_symbols": 1,
+                            "skipped_symbols": 1,
+                            "failed_symbols": 0,
+                            "errors": [],
+                            "split_policy": {
+                                "method": "按每只股票自身的已完成交易日顺序切分训练、验证、留出",
+                                "train_ratio": 0.6,
+                                "validation_ratio": 0.2,
+                                "holdout_ratio": 0.2,
+                                "purge_trading_days": horizon,
+                            },
+                            "single_candidate": {
+                                "market": ref.market,
+                                "code": ref.code,
+                                "name": ref.name or "",
+                                "status": "insufficient_history",
+                                "error": saved_entry.get("last_error")
+                                or "历史样本不足：当前数据和研究配置未变化",
+                                "annual_candidate": None,
+                                "sharpe_candidate": None,
+                                "saved_to_pool": True,
+                            },
+                            "risk_trials_per_rule_set": risk_trials,
+                            "started_date": started.isoformat(),
+                        }
         single_result: dict[str, object] | None = None
         completed = 0
         skipped = 0
         failed = 0
         errors: list[dict[str, str]] = []
         total = len(refs)
-        total_work = total + (2 if mode == "full" else 0)
+        total_work = total
         if mode == "full":
             completed, skipped, failed, errors = self._run_full_research(
                 refs,
                 calendar=calendar,
-                windows=windows,
-                split_metadata=metadata,
                 settings=settings,
                 value_ids=catalog.value_ids,
                 signal_ids=catalog.signal_ids,
@@ -753,8 +865,6 @@ class MarketStrategyPoolService:
                 ref,
                 calendar[0],
                 calendar[-1],
-                windows,
-                metadata,
                 catalog.value_ids,
                 catalog.signal_ids,
                 settings,
@@ -812,32 +922,48 @@ class MarketStrategyPoolService:
                 _report(progress_callback, completed, total_work, "保存标的候选", symbol, 0)
             except TaskCancelledError:
                 raise
+            except InsufficientResearchHistoryError as exc:
+                try:
+                    market_fingerprint = _market_fingerprint(self._adapter, ref)
+                except Exception as fingerprint_error:  # noqa: BLE001 - missing fingerprint retries
+                    message = f"{symbol} 研究样本不足，且无法记录行情指纹"
+                    raise ValueError(message) from fingerprint_error
+                message = f"历史样本不足：{exc}"
+                checkpoint = {
+                    "market": ref.market,
+                    "code": ref.code,
+                    "name": ref.name or "",
+                    "error": message,
+                    "status": "insufficient_history",
+                    "data_fingerprint": exc.data_fingerprint,
+                    "market_fingerprint": market_fingerprint,
+                    "config_fingerprint": config_fingerprint,
+                    "source_job_id": job_id,
+                }
+                if entry_writer is not None:
+                    entry_writer(checkpoint)
+                    saved_to_pool = True
+                elif self._pool_store is not None:
+                    self._pool_store.persist_worker_entry(checkpoint, source_job_id=job_id)
+                    saved_to_pool = True
+                else:
+                    saved_to_pool = False
+                single_result = {
+                    "market": ref.market,
+                    "code": ref.code,
+                    "name": ref.name or "",
+                    "status": "insufficient_history",
+                    "error": message,
+                    "split_metadata": exc.split_metadata,
+                    "annual_candidate": None,
+                    "sharpe_candidate": None,
+                    "saved_to_pool": saved_to_pool,
+                }
+                skipped = 1
+                completed = 1
+                _report(progress_callback, completed, total_work, "历史样本不足", symbol, skipped)
             except Exception as exc:  # noqa: BLE001 - expose a safe single-symbol failure
                 raise ValueError(f"{symbol} 个股研究失败：{str(exc)[:500]}") from exc
-
-        holdout_portfolios: dict[str, object] = {}
-        if mode == "full":
-            objectives: tuple[PoolObjective, ...] = ("annual_return", "sharpe")
-            for offset, objective in enumerate(objectives, start=1):
-                if abort_check is not None and abort_check():
-                    raise TaskCancelledError("全市场策略池研究已取消")
-                holdout_portfolios[objective] = self._portfolio_summary(
-                    objective,
-                    windows,
-                    calendar[-1],
-                    progress_callback=progress_callback,
-                    progress_index=total + offset - 1,
-                    progress_total=total_work,
-                    abort_check=abort_check,
-                )
-                _report(
-                    progress_callback,
-                    total + offset,
-                    total_work,
-                    "完成组合留出段验证",
-                    objective,
-                    skipped,
-                )
 
         return {
             "mode": mode,
@@ -846,9 +972,14 @@ class MarketStrategyPoolService:
             "skipped_symbols": skipped,
             "failed_symbols": failed,
             "errors": errors[:200],
-            "common_calendar": metadata,
+            "split_policy": {
+                "method": "按每只股票自身的已完成交易日顺序切分训练、验证、留出",
+                "train_ratio": 0.6,
+                "validation_ratio": 0.2,
+                "holdout_ratio": 0.2,
+                "purge_trading_days": horizon,
+            },
             "single_candidate": single_result,
-            "holdout_portfolios": holdout_portfolios,
             "risk_trials_per_rule_set": risk_trials,
             "started_date": started.isoformat(),
         }
@@ -1367,7 +1498,7 @@ class MarketStrategyPoolService:
             and prior[0]
             and prior[0] == market_fingerprint
             and prior[1] == config_fingerprint
-            and prior[2] in {"ready", "partial"}
+            and prior[2] in {"ready", "partial", "insufficient_history"}
         )
 
     @staticmethod
@@ -1459,8 +1590,6 @@ def _individual_config(
     ref: StockRef,
     start_date: date,
     end_date: date,
-    windows: Mapping[str, tuple[date, date]],
-    metadata: Mapping[str, object],
     value_ids: Sequence[str],
     signal_ids: Sequence[str],
     settings: Mapping[str, object],
@@ -1486,14 +1615,13 @@ def _individual_config(
         slippage=cast(float, settings["slippage"]),
         execution=cast(Literal["next_open", "next_close"], settings["execution"]),
         position_mode="full",
-        split_windows=windows,
-        common_split_metadata=metadata,
+        split_windows=None,
+        common_split_metadata=None,
     )
 
 
 def _research_settings(
     payload: Mapping[str, object],
-    windows: Mapping[str, tuple[date, date]],
     risk_trials: int,
 ) -> dict[str, object]:
     settings = {
@@ -1509,9 +1637,14 @@ def _research_settings(
         "stamp_tax": 0.001,
         "slippage": 0.0,
         "execution": "next_open",
-        "split_windows": {
-            phase: [bounds[0].isoformat(), bounds[1].isoformat()]
-            for phase, bounds in windows.items()
+        "split_policy": {
+            "method": "per_stock_trading_days",
+            "train_ratio": 0.6,
+            "validation_ratio": 0.2,
+            "holdout_ratio": 0.2,
+            "purge_trading_days": _positive_int(
+                payload.get("horizon"), 10, "波段预测窗口"
+            ),
         },
     }
     return settings
