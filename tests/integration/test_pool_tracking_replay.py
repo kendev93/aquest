@@ -266,6 +266,9 @@ def test_tracking_runner_deduplicates_goals_and_uses_shared_budget(tmp_path):
     assert result["completed_symbols"] == 2
     assert result["failed_symbols"] == 0
     assert len(result["results_by_objective"]["annual_return"]["states"]) == 1
+    # 跟踪路径的持仓需带前端读取的 holding_return_pct（与信号扫描路径口径一致）
+    holdings = result["results_by_objective"]["annual_return"]["model_portfolio"]["holdings"]
+    assert holdings and isinstance(holdings[0].get("holding_return_pct"), float)
     assert budget.available_workers == 2
     assert (
         len(

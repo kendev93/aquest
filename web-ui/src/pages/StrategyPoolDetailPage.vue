@@ -118,7 +118,7 @@ onMounted(async () => {
       <div class="metrics"><span>{{ selected.is_current ? '创建至今收益' : '截至停用收益' }} <b>{{ percent(summary.created_return) }}</b></span><span>上线后收益 <b>{{ percent(summary.post_launch_return) }}</b></span></div>
       <p v-if="summary.inherited_position">含跨创建日持仓，收益统计起点为原买入日 {{ summary.baseline_date }}；不包含更早已完成交易的收益。</p>
       <p v-if="summary.as_of_date && summary.has_post_launch_data === false">尚无创建后的新行情。</p>
-      <div v-if="holdings.length"><p v-for="(holding, index) in holdings" :key="index">持仓 {{ holding.size }} 股 · 买入日期 {{ holding.entry_date }} · 买入价 {{ holding.entry_price }} · 当前价 {{ holding.last_price ?? holding.current_price ?? '—' }} · 浮动收益 {{ percent(holding.unrealized_pnl_pct) }}</p></div>
+      <div v-if="holdings.length"><p v-for="(holding, index) in holdings" :key="index">持仓 {{ holding.size }} 股 · 买入日期 {{ holding.entry_date }} · 买入价 {{ holding.entry_price }} · 当前价 {{ holding.close ?? '—' }} · 浮动收益 {{ percent(holding.unrealized_pnl_pct) }}</p></div>
       <p v-else-if="summary.as_of_date">当前空仓</p>
       <p v-if="summary.recomputed_at">行情校正后于 {{ summary.recomputed_at }} 重算，创建时间保持不变。</p>
     </section>

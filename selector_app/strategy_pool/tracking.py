@@ -54,6 +54,16 @@ def account_summary(
     current = float(equity[-1]["total"])
     if baseline <= 0 or launch_equity <= 0:
         raise ValueError("跟踪收益基准无效")
+    # 快照持仓只有 unrealized_pnl 金额，补算展示用的百分比字段（详情页浮动收益与
+    # 跟踪投影的持仓收益都依赖它）。注意必须拷贝注入，不能原地改 checkpoint。
+    latest_holdings: list[dict[str, Any]] = []
+    for h in (states[-1].get("holdings", []) if states else []):
+        row = dict(h)
+        entry = row.get("entry_price")
+        close = row.get("close")
+        if isinstance(entry, (int, float)) and entry > 0 and isinstance(close, (int, float)):
+            row["unrealized_pnl_pct"] = close / entry - 1.0
+        latest_holdings.append(row)
     return dict(
         created_return=current / baseline - 1,
         post_launch_return=current / launch_equity - 1,
@@ -63,7 +73,7 @@ def account_summary(
         inherited_position=inherited,
         as_of_date=equity[-1]["date"],
         equity=current,
-        holding=(states[-1].get("holdings", []) if states else []),
+        holding=latest_holdings,
         has_post_launch_data=equity[-1]["date"] > boundary,
     )
 

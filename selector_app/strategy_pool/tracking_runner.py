@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import multiprocessing
 import time
 from collections.abc import Callable, Mapping
@@ -170,9 +171,14 @@ class PoolTrackingRunner:
                 result["buy_signals"].append({**row, "signal_type": "buy"})
             if sell:
                 result["sell_signals"].append({**row, "signal_type": "sell"})
-            result["model_portfolio"]["holdings"].extend(
-                {**h, "status": "held"} for h in summary["holding"]
-            )
+            for h in summary["holding"]:
+                holding = {**h, "status": "held"}
+                # account_summary 已补算 unrealized_pnl_pct，这里映射为前端读取的
+                # holding_return_pct（与信号扫描路径 service._scan_signals 口径一致）
+                pnl = h.get("unrealized_pnl_pct")
+                if isinstance(pnl, (int, float)) and math.isfinite(pnl):
+                    holding["holding_return_pct"] = float(pnl)
+                result["model_portfolio"]["holdings"].append(holding)
             if fresh:
                 result["model_portfolio"]["risk_exit_signals"].extend(
                     t
