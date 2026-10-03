@@ -98,7 +98,7 @@ def test_stock_window_algorithm_version_invalidates_old_no_strategy_checkpoints(
     previous_config = _fingerprint({"algorithm_version": "market-pool-v3"})
     updated_config = _fingerprint({"algorithm_version": MARKET_POOL_ALGORITHM_VERSION})
 
-    assert MARKET_POOL_ALGORITHM_VERSION == "market-pool-v4"
+    assert MARKET_POOL_ALGORITHM_VERSION == "market-pool-v5"
     assert updated_config != previous_config
     assert not MarketStrategyPoolService._can_reuse(
         (market_fingerprint, previous_config, "no_strategy"),

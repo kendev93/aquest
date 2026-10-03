@@ -23,6 +23,7 @@ from selector_app.concurrency import visible_cpu_count
 from selector_app.formulas.registry import FORMULA_REGISTRY
 from selector_app.indicators.cache import frame_fingerprint
 from selector_app.individual_research.models import IndividualResearchConfig
+from selector_app.individual_research.search_policy import CANDIDATE_LIMIT
 from selector_app.individual_research.service import (
     IndividualStockResearchService,
     InsufficientResearchHistoryError,
@@ -59,7 +60,7 @@ from .store import DuckDbStrategyPoolStore
 PoolObjective = Literal["annual_return", "sharpe"]
 PoolProgressCallback = Callable[[int, int, str, Mapping[str, object] | None], None]
 PoolEntryWriter = Callable[[Mapping[str, object]], None]
-MARKET_POOL_ALGORITHM_VERSION = "market-pool-v4"
+MARKET_POOL_ALGORITHM_VERSION = "market-pool-v5"
 POOL_PROGRESS_EMIT_INTERVAL_SECONDS = 1.5
 STRATEGY_HOLDING_BATCH_SIZE = 100
 STRATEGY_HOLDING_VIRTUAL_CASH = 1_000_000_000_000.0
@@ -448,6 +449,7 @@ class MarketStrategyPoolService:
                     "date_range": result.get("date_range"),
                     "condition_candidates": result.get("condition_candidates"),
                     "risk_trials_per_rule_set": result.get("risk_trials_per_rule_set"),
+                    "risk_search_runs": result.get("risk_search_runs"),
                 }
             return record, single_result
 
@@ -870,6 +872,9 @@ class MarketStrategyPoolService:
             formula_id: FORMULA_REGISTRY.formula(formula_id).cache_version
             for formula_id in sorted(formula_ids)
         }
+        from selector_app.individual_research.search_policy import search_policy_settings
+
+        settings["search_policy"] = search_policy_settings()
         settings["algorithm_version"] = MARKET_POOL_ALGORITHM_VERSION
         config_fingerprint = _fingerprint(settings)
         rebuild = payload.get("rebuild") is True
@@ -1730,7 +1735,7 @@ def _research_settings(
         "atr_window": _positive_int(payload.get("atr_window"), 14, "ATR 周期"),
         "min_bars": _positive_int(payload.get("min_bars"), 5, "最短波段交易日"),
         "horizon": _positive_int(payload.get("horizon"), 10, "波段预测窗口"),
-        "candidate_limit": 10,
+        "candidate_limit": CANDIDATE_LIMIT,
         "risk_trials": risk_trials,
         "initial_cash": 1_000_000.0,
         "commission": 0.0001,

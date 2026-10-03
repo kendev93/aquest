@@ -11,6 +11,15 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from selector_app.individual_research.search_policy import (
+    CONVERGENCE_MIN_TRIALS,
+    CONVERGENCE_PATIENCE,
+    FULL_LIMIT,
+    IMPROVEMENT_ABSOLUTE,
+    IMPROVEMENT_RELATIVE,
+    MEDIUM_LIMIT,
+)
+
 from .candidates import build_random_candidate
 from .models import DiscoveryRequest, StrategyCandidate
 
@@ -259,9 +268,14 @@ class HybridSearchEngine:
             )
         if not isinstance(convergence_enabled, bool):
             raise ValueError("提前收敛开关必须是布尔值")
+        adaptive = request.research_search_policy == "adaptive-v1"
         resolved_convergence_min_trials = (
             _resolve_convergence_parameter(
-                convergence_min_trials,
+                convergence_min_trials
+                if convergence_min_trials is not None
+                else CONVERGENCE_MIN_TRIALS
+                if adaptive
+                else None,
                 trial_limit,
                 default_ratio=0.25,
                 default_floor=200,
@@ -271,7 +285,11 @@ class HybridSearchEngine:
         )
         resolved_convergence_patience = (
             _resolve_convergence_parameter(
-                convergence_patience,
+                convergence_patience
+                if convergence_patience is not None
+                else CONVERGENCE_PATIENCE
+                if adaptive
+                else None,
                 trial_limit,
                 default_ratio=0.2,
                 default_floor=100,
@@ -529,19 +547,31 @@ class HybridSearchEngine:
                         trial,
                         _metric(raw_metrics, objective, -1e9),
                     )
-                if _passes_constraints(
+                passes_constraints = _passes_constraints(
                     raw_metrics,
                     request,
                     min_trades=_fidelity_min_trades(request, "coarse")
                     if fidelity_evaluator is not None and request.multifidelity_enabled
                     else None,
                     enforce_max_drawdown=request.candidate_mode != "risk_only",
-                ):
+                )
+                if passes_constraints:
                     observed.append(candidate)
                 improved = False
+                eligible = not adaptive or passes_constraints
                 for metric_name in best_scores:
                     score = _metric(raw_metrics, metric_name)
-                    if score > best_scores[metric_name] + 1e-9:
+                    baseline = best_scores[metric_name]
+                    threshold = (
+                        max(IMPROVEMENT_ABSOLUTE, abs(baseline) * IMPROVEMENT_RELATIVE)
+                        if adaptive
+                        else 1e-9
+                    )
+                    if (
+                        eligible
+                        and math.isfinite(score)
+                        and (not math.isfinite(baseline) or score > baseline + threshold)
+                    ):
                         best_scores[metric_name] = score
                         improved = True
                 if improved:
@@ -551,10 +581,13 @@ class HybridSearchEngine:
             if (
                 resolved_convergence_min_trials is not None
                 and resolved_convergence_patience is not None
+                and (not adaptive or bool(observed))
                 and evaluated >= resolved_convergence_min_trials
                 and evaluated - last_improvement >= resolved_convergence_patience
             ):
                 stop_reason = "converged"
+                if progress_callback is not None:
+                    progress_callback(evaluated, trial_limit, "converged")
                 break
         stage_durations["search"] = time.perf_counter() - search_started
         if fidelity_evaluator is not None and request.multifidelity_enabled:
@@ -565,7 +598,13 @@ class HybridSearchEngine:
         final_observed = observed
         if fidelity_evaluator is not None and request.multifidelity_enabled and observed:
             medium_limit = max(1, min(len(observed), math.ceil(len(observed) * 0.35)))
-            medium_source = _rank_candidates(observed, "search")[:medium_limit]
+            if adaptive:
+                medium_limit = min(medium_limit, MEDIUM_LIMIT)
+            medium_source = (
+                _balanced_candidates(observed, "search", medium_limit)
+                if adaptive
+                else _rank_candidates(observed, "search")[:medium_limit]
+            )
             if checkpoint_retention_callback is not None:
                 checkpoint_retention_callback(medium_source)
             medium_observed: list[StrategyCandidate] = []
@@ -597,7 +636,13 @@ class HybridSearchEngine:
             full_source = medium_observed or medium_source
             full_limit = max(1, min(len(full_source), math.ceil(len(observed) * 0.15)))
             full_stage = "medium" if medium_observed else "search"
-            full_candidates = _rank_candidates(full_source, full_stage)[:full_limit]
+            if adaptive:
+                full_limit = min(full_limit, FULL_LIMIT)
+            full_candidates = (
+                _balanced_candidates(full_source, full_stage, full_limit)
+                if adaptive
+                else _rank_candidates(full_source, full_stage)[:full_limit]
+            )
             if checkpoint_retention_callback is not None:
                 checkpoint_retention_callback(full_candidates)
             full_observed: list[StrategyCandidate] = []
@@ -672,6 +717,7 @@ class HybridSearchEngine:
             "evaluation_batch_size": resolved_batch_size,
             "evaluation_mode": evaluation_mode
             or ("batch" if batch_evaluator is not None else "serial"),
+            "research_search_policy": request.research_search_policy,
             "max_trials": trial_limit,
             "attempts": attempts,
             "attempt_limit": attempt_limit,
@@ -821,3 +867,30 @@ def _rank_candidates(
         ),
         reverse=True,
     )
+
+
+def _balanced_candidates(
+    candidates: Sequence[StrategyCandidate], stage: str, limit: int
+) -> list[StrategyCandidate]:
+    """Alternate objective boards, retaining deterministic unique identities."""
+    boards = [
+        sorted(
+            candidates,
+            key=lambda c: (
+                -_metric(c.metrics.get(stage, {}), objective),
+                -_metric(c.metrics.get(stage, {}), secondary),
+                c.candidate_hash,
+            ),
+        )
+        for objective, secondary in (("annual_return", "sharpe"), ("sharpe", "annual_return"))
+    ]
+    selected: list[StrategyCandidate] = []
+    seen: set[str] = set()
+    for pair in zip(*boards, strict=True):
+        for candidate in pair:
+            if candidate.candidate_hash not in seen:
+                seen.add(candidate.candidate_hash)
+                selected.append(candidate)
+                if len(selected) >= limit:
+                    return selected
+    return selected

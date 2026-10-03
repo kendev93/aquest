@@ -9,6 +9,8 @@ from typing import Literal
 
 from selector_app.market_data.models import MarketCode
 
+from .search_policy import CANDIDATE_LIMIT
+
 
 @dataclass(frozen=True)
 class IndividualResearchConfig:
@@ -23,7 +25,8 @@ class IndividualResearchConfig:
     atr_window: int = 14
     min_bars: int = 5
     horizon: int = 10
-    candidate_limit: int = 10
+    search_policy: Literal["legacy", "adaptive-v1"] = "adaptive-v1"
+    candidate_limit: int = CANDIDATE_LIMIT
     risk_trials: Literal[1000, 2000, 3000] = 1000
     initial_cash: float = 1_000_000.0
     commission: float = 0.0001

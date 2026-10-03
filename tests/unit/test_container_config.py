@@ -42,8 +42,7 @@ def test_compose_defines_an_isolated_strategy_worker() -> None:
     assert "SELECTOR_DISCOVERY_WORKERS=auto" in env_example
     assert "SELECTOR_DISCOVERY_MEMORY_BUDGET_MB=auto" in env_example
     assert (
-        'SELECTOR_STRATEGY_POOL_MAX_WORKERS: "${SELECTOR_STRATEGY_POOL_MAX_WORKERS:-2}"'
-        in compose
+        'SELECTOR_STRATEGY_POOL_MAX_WORKERS: "${SELECTOR_STRATEGY_POOL_MAX_WORKERS:-2}"' in compose
     )
     assert "SELECTOR_STRATEGY_POOL_MAX_WORKERS=2" in env_example
 

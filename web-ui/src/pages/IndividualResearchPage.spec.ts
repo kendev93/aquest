@@ -159,6 +159,7 @@ const result: IndividualResearchResult = {
   full_backtests: { 'candidate-1': fullBacktest },
   candidate_count: 1,
   risk_rule_sets: ['rules-1'],
+  risk_search_runs: [{ rule_id: 'rules-1', search_metadata: { evaluated_trials: 1504, max_trials: 3000, stop_reason: 'converged', fidelity_evaluations: { medium: 120, full: 40 } } }],
   risk_trials_per_rule_set: 1000,
   searched_value_ids: ['technical.rsi14'],
   searched_signal_ids: [],
@@ -224,7 +225,7 @@ describe('IndividualResearchPage', () => {
       date_mode: 'full',
       horizon: 10,
       risk_trials: 1000,
-      candidate_limit: 10,
+      candidate_limit: 15,
       value_ids: ['technical.rsi14', 'technical.ma5', 'technical.macd', 'technical.amount_ratio20'],
     }))
     expect(page.text()).toContain('SH 600000 个股研究')
@@ -234,6 +235,8 @@ describe('IndividualResearchPage', () => {
     expect(page.text()).toContain('样本较充分')
     expect(page.text()).toContain('风险高')
     expect(page.text()).toContain('全区间回测')
+    expect(page.get('[data-testid="individual-search-budget"]').text()).toContain('提前收敛')
+    expect(page.get('[data-testid="individual-search-budget"]').text()).toContain('1504')
     expect(page.text()).toContain('持有基准 +12.00%')
     expect(page.text()).toContain('超额收益 +13.00%')
     await page.get('[data-testid="individual-full-details-sharpe-0"]').trigger('click')

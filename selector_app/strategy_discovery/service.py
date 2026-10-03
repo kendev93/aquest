@@ -19,6 +19,7 @@ from datetime import date, timedelta
 from typing import Protocol, cast
 
 from selector_app.indicators.cache import IndicatorCache
+from selector_app.individual_research.search_policy import FULL_LIMIT, MEDIUM_LIMIT
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter, MarketDataAdapter
 from selector_app.market_data.models import InstrumentBoard, InstrumentType
 from selector_app.market_data.store import DuckDbMarketDataStore
@@ -937,6 +938,9 @@ def _progress_plan(request: DiscoveryRequest) -> tuple[tuple[str, ...], dict[str
     if request.multifidelity_enabled:
         units["refining_medium"] = max(1, math.ceil(request.max_trials * 0.35))
         units["refining_full"] = max(1, math.ceil(request.max_trials * 0.15))
+        if request.research_search_policy == "adaptive-v1":
+            units["refining_medium"] = min(units["refining_medium"], MEDIUM_LIMIT)
+            units["refining_full"] = min(units["refining_full"], FULL_LIMIT)
         stages = ["search", "refining_medium", "refining_full", "validation", "holdout"]
     return tuple(stages), units, sum(units.values())
 

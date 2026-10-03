@@ -9,6 +9,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from selector_app.individual_research.models import IndividualResearchConfig
+from selector_app.individual_research.search_policy import CANDIDATE_LIMIT
 from selector_app.market_data.day_format import classify_instrument
 from selector_app.strategy_discovery.catalog import default_indicator_catalog
 
@@ -33,7 +34,8 @@ class IndividualResearchRequest(BaseModel):
     horizon: int = Field(default=10, ge=1, le=250)
     value_ids: list[str] | None = Field(default=None, max_length=256)
     signal_ids: list[str] | None = Field(default=None, max_length=256)
-    candidate_limit: int = Field(default=10, ge=1, le=10)
+    search_policy: Literal["legacy", "adaptive-v1"] = "adaptive-v1"
+    candidate_limit: int = Field(default=CANDIDATE_LIMIT, ge=1, le=CANDIDATE_LIMIT)
     risk_trials: Literal[1_000, 2_000, 3_000] = 1_000
     initial_cash: float = Field(default=1_000_000.0, gt=0, le=1_000_000_000_000)
     commission: float = Field(default=0.0001, ge=0, le=0.1)
@@ -97,6 +99,7 @@ class IndividualResearchRequest(BaseModel):
             atr_window=self.atr_window,
             min_bars=self.min_bars,
             horizon=self.horizon,
+            search_policy=self.search_policy,
             candidate_limit=self.candidate_limit,
             risk_trials=self.risk_trials,
             initial_cash=self.initial_cash,

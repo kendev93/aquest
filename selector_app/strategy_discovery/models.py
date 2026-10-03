@@ -94,6 +94,7 @@ class DiscoveryRequest:
     max_complexity: int = 12
     multifidelity_enabled: bool = True
     convergence_enabled: bool = False
+    research_search_policy: Literal["legacy", "adaptive-v1"] = "legacy"
     seed: int = 0
     candidate_mode: CandidateMode = "strategy"
 
@@ -155,6 +156,8 @@ class DiscoveryRequest:
             raise ValueError("最大换手率不能小于 0")
         if not 0 <= self.max_complexity <= 50:
             raise ValueError("策略复杂度必须在 0 到 50 之间")
+        if self.research_search_policy not in {"legacy", "adaptive-v1"}:
+            raise ValueError("研究搜索策略无效")
         if not isinstance(self.convergence_enabled, bool):
             raise ValueError("提前收敛开关必须是布尔值")
         if self.candidate_mode not in {"strategy", "risk_only"}:
@@ -186,6 +189,7 @@ class DiscoveryRequest:
             "max_complexity": self.max_complexity,
             "multifidelity_enabled": self.multifidelity_enabled,
             "convergence_enabled": self.convergence_enabled,
+            "research_search_policy": self.research_search_policy,
             "seed": self.seed,
             "candidate_mode": self.candidate_mode,
         }

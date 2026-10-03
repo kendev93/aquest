@@ -65,14 +65,14 @@ def test_regular_portfolio_still_requires_a_ranking_value() -> None:
         PortfolioBacktestRequest.model_validate(payload)
 
 
-def test_individual_research_defaults_to_ten_condition_candidates() -> None:
+def test_individual_research_defaults_to_fifteen_condition_candidates() -> None:
     request = IndividualResearchRequest(market="SH", code="600000")
 
     config = request.to_config(start_date=date(2021, 1, 1), end_date=date(2025, 12, 31))
 
-    assert request.candidate_limit == 10
+    assert request.candidate_limit == 15
     assert request.date_mode == "full"
-    assert config.candidate_limit == 10
+    assert config.candidate_limit == 15
     assert "technical.ma5" in config.value_ids
 
 

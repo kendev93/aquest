@@ -120,6 +120,7 @@ export interface IndividualResearchResult {
   full_backtests?: Record<string, IndividualResearchFullBacktest>
   candidate_count: number
   risk_rule_sets?: string[]
+  risk_search_runs?: { rule_id: string; search_metadata: { evaluated_trials?: number; max_trials?: number; stop_reason?: string; fidelity_evaluations?: Record<string, number> }; stage_durations_seconds?: Record<string, number> }[]
   risk_trials_per_rule_set: number
   searched_value_ids: string[]
   searched_signal_ids: string[]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import time
 from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from contextlib import closing
 from datetime import date
@@ -40,6 +41,7 @@ from selector_app.web.schemas import PortfolioBacktestRequest
 
 from .metrics import candidate_quality
 from .models import IndividualResearchConfig
+from .search_policy import SEARCH_POLICY_ID, search_policy_settings
 
 ProgressCallback = Callable[[int, int], None]
 AbortCheck = Callable[[], bool]
@@ -89,6 +91,9 @@ class IndividualStockResearchService:
         progress_callback: ProgressCallback | None = None,
         abort_check: AbortCheck | None = None,
     ) -> dict[str, object]:
+        run_started = time.perf_counter()
+        stage_started = run_started
+        stage_durations: dict[str, float] = {}
         ref = self._adapter.stock_ref("", config.market, config.code)
         if getattr(ref, "instrument_type", "stock") != "stock":
             raise ValueError("个股研究只支持股票行情")
@@ -126,6 +131,8 @@ class IndividualStockResearchService:
         self._report(progress_callback, 10, "识别波段", "生成上涨/下跌启动标签")
         self._check_cancelled(abort_check)
 
+        stage_durations["prepare_and_segment"] = time.perf_counter() - stage_started
+        stage_started = time.perf_counter()
         candidates_by_side = self._mine_conditions(
             config,
             features,
@@ -133,6 +140,8 @@ class IndividualStockResearchService:
             signal_values,
             split_slices["train"],
         )
+        stage_durations["mine_conditions"] = time.perf_counter() - stage_started
+        stage_started = time.perf_counter()
         buy_candidates = candidates_by_side["buy"]
         sell_candidates = candidates_by_side["sell"]
         self._report(progress_callback, 20, "发现买卖条件", "训练段候选已生成")
@@ -201,7 +210,10 @@ class IndividualStockResearchService:
                 rule_candidates=rule_candidates,
             )
 
+        stage_durations["rule_pair_validation"] = time.perf_counter() - stage_started
+        stage_started = time.perf_counter()
         risk_candidates: list[dict[str, object]] = []
+        risk_search_runs: list[dict[str, object]] = []
         risk_data_fingerprints: set[str] = set()
         for pair_index, pair in enumerate(selected_rule_pairs, start=1):
             self._check_cancelled(abort_check)
@@ -231,6 +243,16 @@ class IndividualStockResearchService:
             except (RuntimeError, ValueError) as exc:
                 if abort_check is not None and abort_check():
                     raise TaskCancelledError("个股研究已取消") from exc
+                risk_search_runs.append(
+                    {
+                        "rule_id": pair_id,
+                        "search_metadata": {
+                            "max_trials": config.risk_trials,
+                            "stop_reason": "failed",
+                        },
+                        "error": str(exc),
+                    }
+                )
                 risk_candidates.append(
                     {
                         "candidate_id": pair_id,
@@ -241,13 +263,24 @@ class IndividualStockResearchService:
                     }
                 )
                 continue
+            risk_search_runs.append(
+                {
+                    "rule_id": pair_id,
+                    "search_metadata": result.get("search_metadata", {}),
+                    "stage_durations_seconds": result.get("stage_durations_seconds", {}),
+                }
+            )
             risk_fingerprint = result.get("data_fingerprint")
             if isinstance(risk_fingerprint, str) and risk_fingerprint:
                 risk_data_fingerprints.add(risk_fingerprint)
             for board in ("results_by_sharpe", "results_by_return"):
                 for raw_candidate in _mapping_sequence(result.get(board)):
-                    risk_candidates.append(_individual_risk_candidate(raw_candidate, pair))
+                    enriched = _individual_risk_candidate(raw_candidate, pair)
+                    enriched["research_search"] = risk_search_runs[-1]
+                    risk_candidates.append(enriched)
 
+        stage_durations["risk_search"] = time.perf_counter() - stage_started
+        stage_started = time.perf_counter()
         if len(risk_data_fingerprints) > 1:
             raise ValueError("本地行情在不同买卖规则寻优之间发生变化，请重新运行个股研究")
 
@@ -367,6 +400,7 @@ class IndividualStockResearchService:
                 "results_by_return": rule_by_return[:10],
                 "evaluated_pairs": len(rule_candidates),
                 "shortlist_per_board": RULE_SHORTLIST_PER_BOARD,
+                "selected_rule_count": len(selected_rule_pairs),
             },
             "results_by_sharpe": final_board(ranked_sharpe),
             "results_by_return": final_board(ranked_return),
@@ -375,6 +409,16 @@ class IndividualStockResearchService:
             "risk_errors": [
                 str(item["error"]) for item in risk_candidates if isinstance(item.get("error"), str)
             ],
+            "stage_durations_seconds": {
+                **stage_durations,
+                "final_replays": time.perf_counter() - stage_started,
+                "total": time.perf_counter() - run_started,
+            },
+            "risk_search_runs": risk_search_runs,
+            "search_policy": search_policy_settings()
+            if config.search_policy == SEARCH_POLICY_ID
+            else {"id": "legacy"},
+            "condition_counts": {side: len(items) for side, items in candidates_by_side.items()},
             "risk_rule_sets": [str(item["candidate_id"]) for item in selected_rule_pairs],
             "risk_trials_per_rule_set": config.risk_trials,
             "searched_value_ids": list(config.value_ids),
@@ -557,7 +601,27 @@ class IndividualStockResearchService:
                     candidate_limit=config.candidate_limit,
                 )
             )
-            result[side] = _select_condition_candidates(candidates, config.candidate_limit)
+            trigger_masks: dict[str, np.ndarray] = {}
+            for candidate in candidates:
+                rule = cast(RuleGroup, candidate["rule"])
+                parts = [
+                    np.asarray(signals[signal][train_slice], dtype=bool)[valid]
+                    for signal in rule.signals
+                ]
+                parts.extend(
+                    _condition_mask(condition, x, previous) for condition in rule.conditions
+                )
+                if parts:
+                    trigger_masks[_rule_signature(rule)] = (
+                        np.logical_and.reduce(parts)
+                        if rule.combine_mode == "all"
+                        else np.logical_or.reduce(parts)
+                    )
+            result[side] = _select_condition_candidates(
+                candidates,
+                config.candidate_limit,
+                trigger_masks=trigger_masks if config.search_policy == SEARCH_POLICY_ID else None,
+            )
         return result
 
     def _rule_pair_metrics(
@@ -722,6 +786,8 @@ class IndividualStockResearchService:
             max_drawdown=None,
             max_complexity=3,
             multifidelity_enabled=True,
+            convergence_enabled=config.search_policy == SEARCH_POLICY_ID,
+            research_search_policy=config.search_policy,
             seed=seed,
             candidate_mode="risk_only",
         )
@@ -829,13 +895,21 @@ class IndividualStockResearchService:
         def report(
             current: int, total: int, stage: str, _details: Mapping[str, object] | None = None
         ) -> None:
-            fraction = min(1.0, max(0.0, current / total if total else 1.0))
+            overall = _details.get("overall_progress") if _details is not None else None
+            fraction = (
+                min(1.0, max(0.0, float(overall)))
+                if isinstance(overall, (int, float))
+                else (min(1.0, max(0.0, current / total if total else 1.0)))
+            )
+            stage_label = "提前收敛，继续精筛" if stage == "converged" else stage
+            count_label = "已尝试" if stage in {"searching", "converged"} else "阶段进度"
             percent = 45 + int(33 * ((pair_index - 1 + fraction) / max(pair_count, 1)))
             IndividualStockResearchService._report(
                 progress_callback,
                 percent,
                 "止盈止损寻优",
-                f"规则 {pair_index}/{pair_count} · {pair_id[:8]} · {stage}",
+                f"规则 {pair_index}/{pair_count} · {pair_id[:8]} · {stage_label}"
+                f" · {count_label} {current}/{total}",
             )
 
         return report
@@ -1098,6 +1172,8 @@ def _combine_condition_candidates(
 def _select_condition_candidates(
     candidates: Sequence[dict[str, object]],
     limit: int,
+    *,
+    trigger_masks: Mapping[str, np.ndarray] | None = None,
 ) -> list[dict[str, object]]:
     """Keep both atomic and two-component rules in the train-ranked pool."""
 
@@ -1118,6 +1194,14 @@ def _select_condition_candidates(
         signature = _rule_signature(rule)
         if signature in seen:
             continue
+        mask = trigger_masks.get(signature) if trigger_masks is not None else None
+        if mask is not None and any(
+            _similar_triggers(mask, trigger_masks[_rule_signature(cast(RuleGroup, prior["rule"]))])
+            for prior in unique
+            if trigger_masks is not None
+            and _rule_signature(cast(RuleGroup, prior["rule"])) in trigger_masks
+        ):
+            continue
         seen.add(signature)
         unique.append(candidate)
 
@@ -1129,6 +1213,8 @@ def _select_condition_candidates(
     ]
     selected_signatures = {_rule_signature(cast(RuleGroup, item["rule"])) for item in selected}
     for item in unique:
+        if len(selected) >= limit:
+            break
         signature = _rule_signature(cast(RuleGroup, item["rule"]))
         if signature in selected_signatures:
             continue
@@ -1505,6 +1591,9 @@ def _configuration_fingerprint(config: IndividualResearchConfig) -> str:
         "min_bars": config.min_bars,
         "horizon": config.horizon,
         "candidate_limit": config.candidate_limit,
+        "search_policy": search_policy_settings()
+        if config.search_policy == SEARCH_POLICY_ID
+        else {"id": "legacy"},
         "risk_trials": config.risk_trials,
         "split_windows": {
             phase: [start.isoformat(), end.isoformat()]
@@ -1519,3 +1608,11 @@ def _configuration_fingerprint(config: IndividualResearchConfig) -> str:
 
 
 __all__ = ["IndividualStockResearchService"]
+
+
+def _similar_triggers(left: np.ndarray, right: np.ndarray) -> bool:
+    if np.array_equal(left, right):
+        return True
+    if left.size < 2 or np.all(left == left[0]) or np.all(right == right[0]):
+        return False
+    return bool(abs(float(np.corrcoef(left.astype(float), right.astype(float))[0, 1])) >= 0.9)

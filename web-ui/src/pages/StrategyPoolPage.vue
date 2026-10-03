@@ -953,7 +953,7 @@ onUnmounted(() => {
             </label>
           </div>
           <div class="pool-actions">
-            <label>每套规则风控寻优
+            <label>每组规则最多尝试次数
               <select v-model.number="riskTrials" :disabled="isBusy" data-testid="pool-risk-trials">
                 <option :value="1000">1000 组</option>
                 <option :value="2000">2000 组</option>

@@ -54,7 +54,7 @@ const form = reactive({
   horizon: 10,
   valueIds: [] as string[],
   signalIds: [] as string[],
-  candidateLimit: 10,
+  candidateLimit: 15,
   riskTrials: 1000 as 1000 | 2000 | 3000,
   initialCash: 1_000_000,
   commission: 0.0001,
@@ -647,14 +647,14 @@ onMounted(async () => {
           <fieldset class="form-section">
             <legend>计算与仓位</legend>
             <div class="compact-fields">
-              <div><label for="individual-risk-trials">退出风控寻优强度</label><select id="individual-risk-trials" v-model.number="form.riskTrials" data-testid="individual-risk-trials"><option :value="1000">低 · 1000 组</option><option :value="2000">中 · 2000 组</option><option :value="3000">高 · 3000 组</option></select></div>
-              <div><label for="individual-candidate-limit">每侧候选规则上限</label><input id="individual-candidate-limit" v-model.number="form.candidateLimit" data-testid="individual-candidate-limit" type="number" min="1" max="10" step="1"></div>
+              <div><label for="individual-risk-trials">每组规则最多尝试次数</label><select id="individual-risk-trials" v-model.number="form.riskTrials" data-testid="individual-risk-trials"><option :value="1000">低 · 1000 组</option><option :value="2000">中 · 2000 组</option><option :value="3000">高 · 3000 组</option></select></div>
+              <div><label for="individual-candidate-limit">每侧候选规则上限</label><input id="individual-candidate-limit" v-model.number="form.candidateLimit" data-testid="individual-candidate-limit" type="number" min="1" max="15" step="1"></div>
               <div><label for="individual-cash">初始资金</label><input id="individual-cash" v-model.number="form.initialCash" data-testid="individual-cash" type="number" min="1" step="1"></div>
               <div><label for="individual-execution">成交方式</label><select id="individual-execution" v-model="form.execution" data-testid="individual-execution"><option value="next_open">下一根开盘</option><option value="next_close">下一根收盘</option></select></div>
               <div><label for="individual-position-mode">仓位方式</label><select id="individual-position-mode" v-model="form.positionMode" data-testid="individual-position-mode"><option value="full">按可用资金</option><option value="fixed">固定股数</option></select></div>
               <div v-if="form.positionMode === 'fixed'"><label for="individual-fixed-size">固定股数</label><input id="individual-fixed-size" v-model.number="form.fixedSize" data-testid="individual-fixed-size" type="number" min="100" step="100"><p v-if="errors.fixedSize" class="field-error">{{ errors.fixedSize }}</p></div>
             </div>
-            <p class="helper">单股条件可用指标库全部数值指标，包括不用于跨股票排序的价格尺度指标。训练段搜索单指标条件与双指标 AND / OR 组合；每侧最多 10 条、最多验证 100 组买卖组合，双榜各前五组进入退出风控寻优。</p>
+            <p class="helper">单股条件可用指标库全部数值指标，包括不用于跨股票排序的价格尺度指标。训练段搜索单指标条件与双指标 AND / OR 组合；每侧最多 15 条、最多验证 225 组买卖组合，双榜各前五组进入退出风控寻优。</p>
           </fieldset>
 
           <div class="action-stack">
@@ -690,6 +690,16 @@ onMounted(async () => {
               </div>
             </div>
 
+            <section v-if="result.risk_search_runs?.length" data-testid="individual-search-budget">
+              <h3>风控寻优统计</h3>
+              <p v-for="run in result.risk_search_runs" :key="run.rule_id">
+                {{ run.rule_id }} · 已尝试 {{ run.search_metadata.evaluated_trials ?? '—' }} /
+                上限 {{ run.search_metadata.max_trials ?? result.risk_trials_per_rule_set }} ·
+                {{ run.search_metadata.stop_reason === 'converged' ? '提前收敛' : run.search_metadata.stop_reason === 'completed' ? '达到预算上限' : run.search_metadata.stop_reason ?? '—' }}
+                · 中等精度 {{ run.search_metadata.fidelity_evaluations?.medium ?? '—' }}
+                · 完整精度 {{ run.search_metadata.fidelity_evaluations?.full ?? '—' }}
+              </p>
+            </section>
             <section class="individual-leaderboard" data-testid="individual-sharpe-board">
               <div class="section-heading"><h3>验证段夏普榜</h3><span class="required-hint">验证段排序 · 留出段只复核 · 全区间明细供对比</span></div>
               <div v-if="!sharpeCandidates.length" class="inline-empty">暂无可计算候选。</div>
