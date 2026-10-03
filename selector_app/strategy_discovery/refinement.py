@@ -62,7 +62,7 @@ def discovery_request_from_dict(value: Mapping[str, object]) -> DiscoveryRequest
         timeout_seconds=_as_int(value.get("timeout_seconds"), 7200),
         validation_candidates=_as_int(value.get("validation_candidates"), 50),
         holdout_candidates=_as_int(value.get("holdout_candidates"), 20),
-        min_trades=_as_int(value.get("min_trades"), 5),
+        min_trades=_as_int(value.get("min_trades"), 20),
         max_drawdown=_optional_float(value.get("max_drawdown")),
         max_turnover=_optional_float(value.get("max_turnover")),
         max_complexity=_as_int(value.get("max_complexity"), 12),

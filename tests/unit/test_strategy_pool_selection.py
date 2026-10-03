@@ -66,6 +66,36 @@ def test_objective_winners_rank_only_validation_metrics_and_keep_risk_warnings()
     assert winners["sharpe"]["quality"]["badges"] == ["样本不足", "风险高"]
 
 
+def test_objective_winners_prefer_adequate_sample_over_a_thin_high_score() -> None:
+    board = [
+        # 一两笔交易就能把年化 / 夏普顶到天上，但那不是可以拿去实盘的证据。
+        _candidate("thin", annual_return=0.9, sharpe=9.9, validation_trades=4, holdout_trades=2),
+        _candidate("solid", annual_return=0.3, sharpe=1.2, validation_trades=12, holdout_trades=6),
+    ]
+    result = {"data_fingerprint": "bars-v1", "results_by_sharpe": board, "results_by_return": board}
+
+    winners = summarize_objective_winners(result)
+
+    assert winners["sharpe"]["candidate_id"] == "solid"
+    assert winners["annual_return"]["candidate_id"] == "solid"
+    assert winners["sharpe"]["quality"]["sample_adequate"] is True
+
+
+def test_objective_winners_fall_back_when_no_candidate_has_an_adequate_sample() -> None:
+    board = [
+        _candidate("low", annual_return=0.1, sharpe=0.5, validation_trades=1, holdout_trades=1),
+        _candidate("high", annual_return=0.4, sharpe=1.4, validation_trades=2, holdout_trades=1),
+    ]
+    result = {"data_fingerprint": "bars-v1", "results_by_sharpe": board, "results_by_return": []}
+
+    winners = summarize_objective_winners(result)
+
+    # 样本稀薄的市场不该因此得到一个空池子，但标记必须保留给使用者看。
+    assert winners["sharpe"]["candidate_id"] == "high"
+    assert winners["sharpe"]["quality"]["badges"] == ["样本不足"]
+    assert winners["annual_return"] is None
+
+
 def test_objective_without_finite_validation_metric_has_no_strategy() -> None:
     result = {
         "results_by_sharpe": [
@@ -131,7 +161,9 @@ def _candidate(
     *,
     annual_return: float | None,
     sharpe: float,
-    holdout_sharpe: float,
+    holdout_sharpe: float = 1.0,
+    validation_trades: int = 2,
+    holdout_trades: int = 1,
 ) -> dict[str, object]:
     return {
         "candidate_id": candidate_id,
@@ -146,9 +178,9 @@ def _candidate(
                 "win_rate": 0.6,
                 "payoff_ratio": 1.8,
                 "max_drawdown": -0.35 if candidate_id == "a" else -0.1,
-                "closed_trades": 2,
+                "closed_trades": validation_trades,
             },
-            "holdout": {"sharpe": holdout_sharpe, "closed_trades": 1},
+            "holdout": {"sharpe": holdout_sharpe, "closed_trades": holdout_trades},
         },
     }
 

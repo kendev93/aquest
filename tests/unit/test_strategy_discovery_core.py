@@ -342,6 +342,8 @@ def test_hybrid_search_returns_separate_sharpe_and_return_boards() -> None:
         indicator_ids=("ma5",),
         signal_ids=(),
         max_conditions_per_side=0,
+        # 这里验证的是两个榜各自按什么排序，不是样本门槛，所以显式关掉它。
+        min_trades=0,
     )
     seen: list[str] = []
 

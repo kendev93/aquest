@@ -69,7 +69,13 @@ def slices_for_common_windows(
 def summarize_objective_winners(
     result: Mapping[str, object],
 ) -> dict[str, ObjectiveCandidate | None]:
-    """Select each objective from validation metrics only and retain compact replay data."""
+    """Select each objective from validation metrics only and retain compact replay data.
+
+    样本不够的候选很容易靠一两笔交易把年化 / 夏普顶到榜首：持有两年不动的一笔
+    交易就足以让「平均持仓 700 天」的策略看起来比交易了几十笔的还好。所以只要
+    榜上存在样本足够的候选，胜者就只在它们之间产生；全部候选都样本不足时才退回
+    按分数选，免得样本稀薄的市场直接得到一个空池子。
+    """
 
     boards = {
         "annual_return": result.get("results_by_return"),
@@ -78,25 +84,51 @@ def summarize_objective_winners(
     winners: dict[str, ObjectiveCandidate | None] = {}
     for objective, raw_candidates in boards.items():
         candidates = _mapping_sequence(raw_candidates)
-        winner: Mapping[str, object] | None = None
-        winning_score: float | None = None
-        for candidate in candidates:
-            metrics = _mapping(candidate.get("metrics"))
-            validation = _mapping(metrics.get("validation")) or _mapping(
-                candidate.get("validation")
-            )
-            score = _finite_number(validation.get(objective))
-            if score is None:
-                continue
-            if winning_score is None or score > winning_score:
-                winner = candidate
-                winning_score = score
+        winner = _best_candidate(candidates, objective, require_adequate_sample=True)
+        if winner is None:
+            winner = _best_candidate(candidates, objective, require_adequate_sample=False)
         winners[objective] = (
             _compact_candidate(winner, objective, result.get("data_fingerprint"))
             if winner is not None
             else None
         )
     return winners
+
+
+def _best_candidate(
+    candidates: Sequence[Mapping[str, object]],
+    objective: str,
+    *,
+    require_adequate_sample: bool,
+) -> Mapping[str, object] | None:
+    """Pick the highest validation score, optionally skipping thin samples."""
+
+    winner: Mapping[str, object] | None = None
+    winning_score: float | None = None
+    for candidate in candidates:
+        metrics = _mapping(candidate.get("metrics"))
+        validation = _mapping(metrics.get("validation")) or _mapping(candidate.get("validation"))
+        score = _finite_number(validation.get(objective))
+        if score is None:
+            continue
+        if require_adequate_sample and not _sample_adequate(candidate, metrics, validation):
+            continue
+        if winning_score is None or score > winning_score:
+            winner = candidate
+            winning_score = score
+    return winner
+
+
+def _sample_adequate(
+    candidate: Mapping[str, object],
+    metrics: Mapping[str, object],
+    validation: Mapping[str, object],
+) -> bool:
+    """Whether the candidate cleared the sample thresholds used for its badges."""
+
+    holdout = _mapping(metrics.get("holdout"))
+    quality = _mapping(candidate.get("quality")) or _quality(validation, holdout, candidate)
+    return bool(quality.get("sample_adequate"))
 
 
 def _compact_candidate(

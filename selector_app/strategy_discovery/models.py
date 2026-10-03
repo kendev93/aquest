@@ -88,7 +88,10 @@ class DiscoveryRequest:
     timeout_seconds: int = 7_200
     validation_candidates: int = 50
     holdout_candidates: int = 20
-    min_trades: int = 5
+    # 与条件研究的 ``min_trades`` 对齐：都是全市场 / 多槽位口径，一个候选在验证
+    # 段做出几十笔交易是常态，5 笔太松——那种样本上的夏普、胜率、平均持仓天数
+    # 全是噪音，却最容易因为一两笔极端交易顶到榜首。
+    min_trades: int = 20
     max_drawdown: float | None = 0.3
     max_turnover: float | None = None
     max_complexity: int = 12

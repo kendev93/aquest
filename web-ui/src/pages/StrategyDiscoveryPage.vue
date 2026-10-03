@@ -182,7 +182,7 @@ function buildPayload(): StrategyDiscoveryPayload {
     timeout_seconds: 7200,
     validation_candidates: 50,
     holdout_candidates: 20,
-    min_trades: 5,
+    min_trades: 20,
     max_drawdown: 0.3,
     max_complexity: 12,
     multifidelity_enabled: true,

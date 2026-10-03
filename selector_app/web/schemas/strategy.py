@@ -58,7 +58,7 @@ class StrategyDiscoveryRequest(BaseModel):
     timeout_seconds: int = Field(default=7_200, ge=1, le=86_400)
     validation_candidates: int = Field(default=50, ge=1, le=200)
     holdout_candidates: int = Field(default=20, ge=1, le=50)
-    min_trades: int = Field(default=5, ge=0, le=10_000)
+    min_trades: int = Field(default=20, ge=0, le=10_000)
     max_drawdown: float | None = Field(default=0.3, ge=0, le=1)
     max_turnover: float | None = Field(default=None, ge=0)
     max_complexity: int = Field(default=12, ge=0, le=50)
