@@ -52,6 +52,9 @@ export interface IndividualResearchFullBacktest {
     total_return: number | null
     annual_return: number | null
     max_drawdown: number | null
+    // 买入持有净值序列（BenchmarkCurve）：int YYYYMMDD 日期与绝对净值，随跟踪快照 report 返回
+    dates?: unknown[]
+    totals?: unknown[]
   } | null
   benchmark_return?: number | null
   excess_return?: number | null
