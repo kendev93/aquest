@@ -150,7 +150,7 @@ describe('StrategyPoolPage', () => {
     await flushPromises()
 
     expect(window.localStorage.getItem('indicator-lab.strategy-pool.objective')).toBe('annual_return')
-    expect(api.createStrategyPoolJob).toHaveBeenCalledWith({ mode: 'signals', objective: 'annual_return' })
+    expect(api.createStrategyPoolJob).toHaveBeenCalledWith({ mode: 'signals', objective: 'annual_return', automatic: true })
     expect(wrapper.get('[data-testid="pool-buy-signals"]').text()).toContain('SH600000')
     expect(wrapper.get('[data-testid="pool-sell-signals"]').text()).toContain('当前没有卖出条件')
   })
@@ -306,7 +306,7 @@ describe('StrategyPoolPage', () => {
       status: 'completed',
       mode: 'signals',
       objective: 'annual_return',
-      created_at: 1790955030,
+      created_at: Date.now() / 1000,
     }])
     vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({
       job_id: 'signals-paged',
@@ -389,7 +389,7 @@ describe('StrategyPoolPage', () => {
     const wrapper = mount(StrategyPoolPage)
     await flushPromises()
 
-    expect(api.createStrategyPoolJob).toHaveBeenCalledWith({ mode: 'signals', objective: 'annual_return' })
+    expect(api.createStrategyPoolJob).toHaveBeenCalledWith({ mode: 'signals', objective: 'annual_return', automatic: true })
     expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).not.toContain('旧版组合持仓')
     expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('当前没有仍处于持仓状态的标的')
   })
@@ -465,7 +465,7 @@ describe('StrategyPoolPage', () => {
         status: 'completed',
         mode: 'signals',
         objective: 'annual_return',
-        created_at: 200,
+        created_at: Date.now() / 1000,
       },
     ])
     vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({
@@ -513,14 +513,14 @@ describe('StrategyPoolPage', () => {
         status: 'failed',
         mode: 'signals',
         objective: 'annual_return',
-        created_at: 1_790_984_425,
+        created_at: Date.now() / 1000,
         finished_at: 1_790_984_500,
       },
       {
         job_id: 'full-cancelled',
         status: 'cancelled',
         mode: 'full',
-        created_at: 1_790_957_169,
+        created_at: Date.now() / 1000,
         finished_at: 1_790_984_378,
       },
       {
@@ -528,7 +528,7 @@ describe('StrategyPoolPage', () => {
         status: 'completed',
         mode: 'signals',
         objective: 'annual_return',
-        created_at: 1_790_955_030,
+        created_at: Date.now() / 1000,
       },
     ])
     vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({
@@ -562,11 +562,11 @@ describe('StrategyPoolPage', () => {
     await flushPromises()
 
     expect(api.createStrategyPoolJob).not.toHaveBeenCalled()
-    expect(wrapper.get('[role="alert"]').text()).toContain('已暂停自动重试')
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
     expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('策略可用 · 信号待刷新')
   })
 
-  it('runs a full signal scan when the stored market snapshot is older than local行情', async () => {
+  it('does not repeat the same-day scan when local market data changes', async () => {
     window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
     vi.mocked(marketDataApi.fetchStoreStatus).mockResolvedValueOnce({
       database_path: 'market.duckdb',
@@ -583,7 +583,7 @@ describe('StrategyPoolPage', () => {
         status: 'completed',
         mode: 'signals',
         objective: 'annual_return',
-        created_at: 200,
+        created_at: Date.now() / 1000,
       },
     ])
     vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({
@@ -619,19 +619,19 @@ describe('StrategyPoolPage', () => {
     mount(StrategyPoolPage)
     await flushPromises()
 
-    expect(api.createStrategyPoolJob).toHaveBeenCalledWith({ mode: 'signals', objective: 'annual_return' })
+    expect(api.createStrategyPoolJob).not.toHaveBeenCalled()
   })
 
-  it('runs a full signal scan when a full reselection finished after the saved scan', async () => {
+  it('does not repeat the same-day scan after full reselection', async () => {
     window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
     vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValueOnce([
-      { job_id: 'full-newer', status: 'completed', mode: 'full', created_at: 300 },
+      { job_id: 'full-newer', status: 'completed', mode: 'full', created_at: Date.now() / 1000 },
       {
         job_id: 'signals-older',
         status: 'completed',
         mode: 'signals',
         objective: 'annual_return',
-        created_at: 200,
+        created_at: Date.now() / 1000,
       },
     ])
     vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({
@@ -667,10 +667,10 @@ describe('StrategyPoolPage', () => {
     mount(StrategyPoolPage)
     await flushPromises()
 
-    expect(api.createStrategyPoolJob).toHaveBeenCalledWith({ mode: 'signals', objective: 'annual_return' })
+    expect(api.createStrategyPoolJob).not.toHaveBeenCalled()
   })
 
-  it('rescans one changed strategy only for its symbol', async () => {
+  it('does not repeat the same-day scan when one strategy changes', async () => {
     window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
     vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValueOnce([
       {
@@ -678,7 +678,7 @@ describe('StrategyPoolPage', () => {
         status: 'completed',
         mode: 'signals',
         objective: 'annual_return',
-        created_at: 200,
+        created_at: Date.now() / 1000,
       },
     ])
     vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({
@@ -714,12 +714,7 @@ describe('StrategyPoolPage', () => {
     mount(StrategyPoolPage)
     await flushPromises()
 
-    expect(api.createStrategyPoolJob).toHaveBeenCalledWith({
-      mode: 'signals',
-      objective: 'annual_return',
-      market: 'SH',
-      code: '600001',
-    })
+    expect(api.createStrategyPoolJob).not.toHaveBeenCalled()
   })
 
   it('paginates the market status table instead of mounting every symbol at once', async () => {
@@ -906,7 +901,7 @@ describe('StrategyPoolPage', () => {
     }
   })
 
-  it('shows single rerun candidates after automatic update and refreshes that symbol signal', async () => {
+  it('shows saved single rerun candidates without launching another signal scan', async () => {
     window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
     vi.mocked(api.createStrategyPoolJob)
       .mockResolvedValueOnce({ job_id: 'signal-1', status: 'queued' })
@@ -975,13 +970,8 @@ describe('StrategyPoolPage', () => {
     await flushPromises()
 
     expect(api.saveStrategyPoolOverride).not.toHaveBeenCalled()
-    expect(api.createStrategyPoolJob).toHaveBeenNthCalledWith(3, {
-      mode: 'signals',
-      objective: 'annual_return',
-      market: 'SH',
-      code: '600000',
-    })
-    expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('触发卖出')
+    expect(api.createStrategyPoolJob).toHaveBeenCalledTimes(2)
+    expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('触发买入')
     expect(wrapper.get('[data-testid="pool-row-600001"]').text()).toContain('今日无买卖信号')
   })
 
@@ -1020,4 +1010,65 @@ describe('StrategyPoolPage', () => {
       wrapper.unmount()
     }
   })
+  it('restores a same-day scan on reentry and permits an explicit manual scan after switching objectives', async () => {
+    window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValue([{
+      job_id: 'today', mode: 'signals', objective: 'annual_return',
+      status: 'completed', created_at: Date.now() / 1000,
+    }])
+    let wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+    expect(api.createStrategyPoolJob).not.toHaveBeenCalled()
+    wrapper.unmount()
+    wrapper = mount(StrategyPoolPage)
+    try {
+      await flushPromises()
+      await wrapper.get('[data-testid="pool-objective"]').setValue('sharpe')
+      await flushPromises()
+      expect(api.createStrategyPoolJob).not.toHaveBeenCalled()
+      await wrapper.get('[data-testid="pool-refresh-signals"]').trigger('click')
+      await flushPromises()
+      expect(api.createStrategyPoolJob).toHaveBeenCalledExactlyOnceWith({
+        mode: 'signals', objective: 'sharpe',
+      })
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('does not append a signal scan when full research completes', async () => {
+    window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValue([{
+      job_id: 'research', mode: 'full', status: 'running',
+    }])
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValue({
+      job_id: 'research', status: 'completed', result: { mode: 'full' },
+    })
+    const wrapper = mount(StrategyPoolPage)
+    try {
+      await flushPromises()
+      expect(api.createStrategyPoolJob).not.toHaveBeenCalled()
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('does not poll or show scanning when the server says today was already attempted', async () => {
+    window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.createStrategyPoolJob).mockResolvedValue({
+      job_id: 'already-scanned', status: 'completed', skipped: true,
+    })
+    const wrapper = mount(StrategyPoolPage)
+    try {
+      await flushPromises()
+      expect(api.createStrategyPoolJob).toHaveBeenCalledExactlyOnceWith({
+        mode: 'signals', objective: 'annual_return', automatic: true,
+      })
+      expect(api.getStrategyPoolJob).not.toHaveBeenCalled()
+      expect(wrapper.find('[data-testid="pool-job-progress"]').exists()).toBe(false)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
 })

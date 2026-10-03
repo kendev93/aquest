@@ -18,6 +18,7 @@ interface ApiErrorPayload {
 
 interface StrategyPoolJobRequest {
   mode: StrategyPoolMode
+  automatic?: boolean
   rebuild?: boolean
   risk_trials?: 1_000 | 2_000 | 3_000
   market?: 'SH' | 'SZ'
@@ -51,8 +52,8 @@ export async function fetchStrategyPoolEntries(
 
 export async function createStrategyPoolJob(
   payload: StrategyPoolJobRequest,
-): Promise<{ job_id: string; status: string }> {
-  const response = await request<{ data: { job_id: string; status: string } }>(`${API_BASE}/jobs`, {
+): Promise<{ job_id: string; status: string; skipped?: boolean }> {
+  const response = await request<{ data: { job_id: string; status: string; skipped?: boolean } }>(`${API_BASE}/jobs`, {
     method: 'POST',
     body: JSON.stringify(payload),
   })

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime, time, timedelta
 from typing import Literal, cast
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from selector_app.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
+from selector_app.market_data.store_base import _WRITE_LOCK
 from selector_app.strategy_discovery.duckdb_job_store import DuckDbStrategyJobStore
 from selector_app.strategy_discovery.job_backend import StrategyJobBackend
 from selector_app.strategy_pool.store import DuckDbStrategyPoolStore, Objective
@@ -24,6 +27,7 @@ class PoolJobRequest(BaseModel):
     market: Literal["SH", "SZ"] | None = None
     code: str | None = Field(default=None, pattern=r"^\d{6}$")
     objective: Literal["annual_return", "sharpe"] | None = None
+    automatic: bool = False
     rebuild: bool = False
     risk_trials: Literal[1_000, 2_000, 3_000] = 3_000
     reversal_multiple: float = Field(default=3.0, gt=0, le=20)
@@ -33,6 +37,8 @@ class PoolJobRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_mode(self) -> PoolJobRequest:
+        if self.automatic and (self.mode != "signals" or self.market or self.code):
+            raise ValueError("每日自动扫描只支持全市场当天信号")
         if self.rebuild and self.mode != "full":
             raise ValueError("只有全市场任务支持清空重建")
         if self.mode == "single" and (self.market is None or self.code is None):
@@ -175,31 +181,44 @@ def create_strategy_pool_job(payload: PoolJobRequest, request: Request) -> dict[
             raise HTTPException(
                 status_code=422, detail="策略池还没有完成研究，暂时没有可扫描的策略"
             )
-    active = [
-        item
-        for item in backend.active_snapshots()
-        if item.get("operation") == "market_strategy_pool"
-    ]
-    active_metadata = active[0].get("metadata") if len(active) == 1 else None
-    can_queue_single_after_signal_scan = (
-        payload.mode == "single"
-        and isinstance(active_metadata, Mapping)
-        and active_metadata.get("mode") == "signals"
-    )
-    if active and not can_queue_single_after_signal_scan:
-        raise HTTPException(status_code=409, detail="已有全市场策略池任务正在运行")
-    job_payload = payload.model_dump(exclude_none=True)
-    try:
-        job_id = backend.submit(
-            "market_strategy_pool",
-            job_payload,
-            description=JOB_DESCRIPTION,
-            worker_count=1,
-            metadata={"mode": payload.mode, "phase_label": "排队等待策略 worker"},
+    # Serialize the durable daily check and submission, including simultaneous page entries.
+    with _WRITE_LOCK:
+        if payload.automatic:
+            current = datetime.now(ZoneInfo("Asia/Shanghai"))
+            start = datetime.combine(current.date(), time.min, tzinfo=current.tzinfo)
+            try:
+                existing = _job_store(request).latest_pool_signal_attempt(
+                    start.timestamp(), (start + timedelta(days=1)).timestamp()
+                )
+            except (MarketDataStoreError, OSError) as exc:
+                raise HTTPException(status_code=503, detail="每日扫描记录暂时无法读取") from exc
+            if existing is not None:
+                return {"data": {**existing, "skipped": True}}
+        active = [
+            item
+            for item in backend.active_snapshots()
+            if item.get("operation") == "market_strategy_pool"
+        ]
+        active_metadata = active[0].get("metadata") if len(active) == 1 else None
+        can_queue_single_after_signal_scan = (
+            payload.mode == "single"
+            and isinstance(active_metadata, Mapping)
+            and active_metadata.get("mode") == "signals"
         )
-    except (MarketDataStoreError, OSError, RuntimeError) as exc:
-        raise HTTPException(status_code=503, detail="策略池任务暂时无法提交") from exc
-    return {"data": {"job_id": job_id, "status": "queued"}}
+        if active and not can_queue_single_after_signal_scan:
+            raise HTTPException(status_code=409, detail="已有全市场策略池任务正在运行")
+        job_payload = payload.model_dump(exclude_none=True)
+        try:
+            job_id = backend.submit(
+                "market_strategy_pool",
+                job_payload,
+                description=JOB_DESCRIPTION,
+                worker_count=1,
+                metadata={"mode": payload.mode, "phase_label": "排队等待策略 worker"},
+            )
+        except (MarketDataStoreError, OSError, RuntimeError) as exc:
+            raise HTTPException(status_code=503, detail="策略池任务暂时无法提交") from exc
+        return {"data": {"job_id": job_id, "status": "queued"}}
 
 
 @router.get("/jobs")

@@ -226,6 +226,24 @@ class DuckDbStrategyJobStore:
             "offset": offset,
         }
 
+    def latest_pool_signal_attempt(self, start: float, end: float) -> dict[str, object] | None:
+        """Read any persisted signal attempt in a Shanghai calendar day, regardless of status."""
+
+        with self._read_connection() as connection:
+            row = connection.execute(
+                """
+                SELECT job_id, state_json FROM strategy_jobs
+                WHERE operation = 'market_strategy_pool'
+                  AND json_extract_string(request_json, '$.payload.mode') = 'signals'
+                  AND created_at >= ? AND created_at < ?
+                ORDER BY created_at DESC, job_id DESC LIMIT 1
+                """,
+                [start, end],
+            ).fetchone()
+        if row is None:
+            return None
+        return {"job_id": str(row[0]), "status": _load_object(row[1]).get("status")}
+
     def list_market_strategy_pool_history(
         self,
         *,
