@@ -32,7 +32,7 @@ class PoolJobRequest(BaseModel):
     automatic: bool = False
     rebuild: bool = False
     risk_trials: Literal[1_000, 2_000, 3_000] = 3_000
-    reversal_multiple: float = Field(default=3.0, gt=0, le=20)
+    reversal_multiple: float = Field(default=2.0, gt=0, le=20)
     atr_window: int = Field(default=14, ge=1, le=250)
     min_bars: int = Field(default=5, ge=1, le=1_000)
     horizon: int = Field(default=10, ge=1, le=250)

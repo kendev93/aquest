@@ -1738,7 +1738,7 @@ def _research_settings(
     risk_trials: int,
 ) -> dict[str, object]:
     settings = {
-        "reversal_multiple": _positive_float(payload.get("reversal_multiple"), 3.0, "反转阈值"),
+        "reversal_multiple": _positive_float(payload.get("reversal_multiple"), 2.0, "反转阈值"),
         "atr_window": _positive_int(payload.get("atr_window"), 14, "ATR 周期"),
         "min_bars": _positive_int(payload.get("min_bars"), 5, "最短波段交易日"),
         "horizon": _positive_int(payload.get("horizon"), 10, "波段预测窗口"),

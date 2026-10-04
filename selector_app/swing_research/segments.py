@@ -37,7 +37,7 @@ import pandas as pd
 from selector_app.formulas.common import safe_divide
 
 ATR_WINDOW = 14
-DEFAULT_REVERSAL_MULTIPLE = 3.0
+DEFAULT_REVERSAL_MULTIPLE = 2.0
 DEFAULT_MIN_BARS = 5
 
 SwingDirection = Literal["up", "down"]

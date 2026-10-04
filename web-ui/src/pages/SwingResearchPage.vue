@@ -87,7 +87,7 @@ const study = reactive({
   universe: 'all' as 'all' | 'sh' | 'sz',
   startDate: defaultStartDate(),
   endDate: '',
-  reversalMultiple: 3,
+  reversalMultiple: 2,
   minBars: 5,
   atrWindow: 14,
   horizon: 10,

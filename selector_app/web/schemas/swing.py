@@ -88,7 +88,7 @@ class SwingIndicatorRequest(BaseModel):
     boards: list[InstrumentBoard] | None = Field(default=None, max_length=7)
     start_date: date | None = None
     end_date: date | None = None
-    reversal_multiple: float = Field(default=3.0, gt=0, le=20)
+    reversal_multiple: float = Field(default=2.0, gt=0, le=20)
     min_bars: int = Field(default=5, ge=0, le=1_000)
     atr_window: int = Field(default=14, ge=1, le=1_000)
     horizon: int = Field(default=10, ge=1, le=250)

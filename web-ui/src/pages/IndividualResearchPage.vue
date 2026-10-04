@@ -49,7 +49,7 @@ const form = reactive({
   dateMode: 'full' as DateRangeSelection['mode'],
   startDate: '',
   endDate: '',
-  reversalMultiple: 3,
+  reversalMultiple: 2,
   atrWindow: 14,
   minBars: 5,
   horizon: 10,

@@ -21,7 +21,7 @@ class IndividualResearchConfig:
     end_date: date
     value_ids: tuple[str, ...]
     signal_ids: tuple[str, ...]
-    reversal_multiple: float = 3.0
+    reversal_multiple: float = 2.0
     atr_window: int = 14
     min_bars: int = 5
     horizon: int = 10
