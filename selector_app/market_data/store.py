@@ -227,7 +227,7 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
 
     def read_corporate_actions_batch(
         self,
-        instruments: Iterable[InstrumentRef | StockRef],
+        instruments: Iterable[InstrumentRef | StockRef | tuple[str, str]],
     ) -> pd.DataFrame:
         return self._bars.read_corporate_actions_batch(instruments)
 

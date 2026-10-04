@@ -563,7 +563,9 @@ class ScreenEngine:
         计算。适配器没有这个能力时（测试用的 FakeAdapter 之类）退化为 raw 口径。
         """
 
-        cache = getattr(self, "_corporate_action_cache", None)
+        cache: dict[tuple[str, str], tuple[CorporateAction, ...]] | None = getattr(
+            self, "_corporate_action_cache", None
+        )
         if cache is None:
             cache = {}
             self._corporate_action_cache = cache

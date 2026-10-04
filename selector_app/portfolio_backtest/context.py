@@ -346,7 +346,9 @@ class PortfolioContextMixin(_PortfolioServiceState):
         累积进缓存，避免同一标的被重复查。
         """
 
-        cache = getattr(self, "_corporate_action_cache", None)
+        cache: dict[tuple[str, str], tuple[CorporateAction, ...]] | None = getattr(
+            self, "_corporate_action_cache", None
+        )
         if cache is None:
             cache = {}
             self._corporate_action_cache = cache

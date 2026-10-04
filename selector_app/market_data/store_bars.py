@@ -1034,7 +1034,7 @@ class DuckDbBarsStore:
 
     def read_corporate_actions_batch(
         self,
-        instruments: Iterable[InstrumentRef | StockRef],
+        instruments: Iterable[InstrumentRef | StockRef | tuple[str, str]],
     ) -> pd.DataFrame:
         """一次取回整批标的的事件，供全市场预加载使用。
 

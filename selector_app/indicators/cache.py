@@ -362,7 +362,7 @@ class IndicatorCache:
             _CacheKey | _CustomCacheKey, tuple[FormulaResult, date | None]
         ] = OrderedDict()
         self._max_memory_entries = max_memory_entries
-        self._revisions: dict[tuple[str, str, str], str] = {}
+        self._revisions: dict[tuple[str, str], str] = {}
         self._lock = RLock()
         self._hits = 0
         self._misses = 0
@@ -474,24 +474,29 @@ class IndicatorCache:
         """
 
         adjust_version = frame_adjust_version(frame)
-        key = (market.strip().upper(), code.strip(), adjust_version)
+        # 缓存里只存"标的级"版本号，事件版本后缀在返回时才拼上。这样批量预热
+        # （warm_revisions / refresh_revisions 拿到的是同一份标的级版本号）能直接
+        # 命中，不会被每种 adjust_version 切成互不相干的条目。
+        key = (market.strip().upper(), code.strip())
         with self._lock:
             cached = self._revisions.get(key)
+        revision: str | None
         if cached is not None:
-            return cached
-        revision: str | None = None
-        if self._store is not None and key[0] and key[1]:
-            try:
-                revision = self._store.data_revision(key[0], key[1])
-            except (AttributeError, RuntimeError, OSError):
-                revision = None
-        if not revision:
-            # 拿不到版本号时退化为帧指纹：缓存退回"同一窗口才命中"，结果仍然正确。
-            return frame_fingerprint(frame)
+            revision = cached
+        else:
+            revision = None
+            if self._store is not None and key[0] and key[1]:
+                try:
+                    revision = self._store.data_revision(key[0], key[1])
+                except (AttributeError, RuntimeError, OSError):
+                    revision = None
+            if not revision:
+                # 拿不到版本号时退化为帧指纹：缓存退回"同一窗口才命中"，结果仍然正确。
+                return frame_fingerprint(frame)
+            with self._lock:
+                self._revisions[key] = revision
         if adjust_version:
             revision = f"{revision}~adj:{adjust_version}"
-        with self._lock:
-            self._revisions[key] = revision
         return revision
 
     def get_or_compute_custom(
