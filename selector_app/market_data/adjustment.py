@@ -239,7 +239,9 @@ def apply_adjustment(frame: Any, factors: np.ndarray, *, version: str = "") -> A
     return frame.assign(**scaled)
 
 
-def mark_adjusted(frame: Any, actions: Sequence[CorporateAction], *, date_column: str = "date") -> Any:
+def mark_adjusted(
+    frame: Any, actions: Sequence[CorporateAction], *, date_column: str = "date"
+) -> Any:
     """复权并打上事件版本标记；没有事件时原样返回。
 
     指标计算入口统一走这里，"复权了没有"和"复权依据是什么"变成 frame 自带的

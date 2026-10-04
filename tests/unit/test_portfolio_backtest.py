@@ -199,7 +199,9 @@ def test_indicators_use_adjusted_prices_while_fills_use_raw() -> None:
 
     dates = pd.date_range("2024-01-02", periods=60, freq="B")
     # 除权前 41 天收在 11.x，除权后收在 12.6~13.2：真实价全程低于 16。
-    close = np.where(np.arange(60) < 41, 11.0 + np.arange(60) % 9 * 0.1, 12.6 + np.arange(60) % 7 * 0.1)
+    close = np.where(
+        np.arange(60) < 41, 11.0 + np.arange(60) % 9 * 0.1, 12.6 + np.arange(60) % 7 * 0.1
+    )
     frame = pd.DataFrame(
         {
             "date": dates,
@@ -230,7 +232,14 @@ def test_indicators_use_adjusted_prices_while_fills_use_raw() -> None:
 
     class ExDividendAdapter(FakeAdapter):
         def list_stock_refs(self, vipdoc_path, universe, universe_file=None):
-            return [StockRef(market="SH", code="600000", name="测试600000", path=Path(vipdoc_path) / "sh600000.day")]
+            return [
+                StockRef(
+                    market="SH",
+                    code="600000",
+                    name="测试600000",
+                    path=Path(vipdoc_path) / "sh600000.day",
+                )
+            ]
 
         def read_stock(self, ref: StockRef) -> pd.DataFrame:
             return frame.copy(deep=True)
@@ -263,7 +272,9 @@ def test_indicators_stay_below_threshold_without_corporate_actions() -> None:
     """对照：同一段行情没有事件时，指标就是 raw 口径，一笔都不该做。"""
 
     dates = pd.date_range("2024-01-02", periods=60, freq="B")
-    close = np.where(np.arange(60) < 41, 11.0 + np.arange(60) % 9 * 0.1, 12.6 + np.arange(60) % 7 * 0.1)
+    close = np.where(
+        np.arange(60) < 41, 11.0 + np.arange(60) % 9 * 0.1, 12.6 + np.arange(60) % 7 * 0.1
+    )
     frame = pd.DataFrame(
         {
             "date": dates,
@@ -278,7 +289,14 @@ def test_indicators_stay_below_threshold_without_corporate_actions() -> None:
 
     class PlainAdapter(FakeAdapter):
         def list_stock_refs(self, vipdoc_path, universe, universe_file=None):
-            return [StockRef(market="SH", code="600000", name="测试600000", path=Path(vipdoc_path) / "sh600000.day")]
+            return [
+                StockRef(
+                    market="SH",
+                    code="600000",
+                    name="测试600000",
+                    path=Path(vipdoc_path) / "sh600000.day",
+                )
+            ]
 
         def read_stock(self, ref: StockRef) -> pd.DataFrame:
             return frame.copy(deep=True)

@@ -25,8 +25,8 @@ from selector_app.formulas.custom import (
 )
 from selector_app.formulas.registry import FORMULA_REGISTRY, FormulaDefinition, FormulaRegistry
 from selector_app.formulas.types import FormulaResult
-from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.market_data.adjustment import frame_adjust_version
+from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.market_data.store_base import DEFAULT_PRICE_BASIS
 
 _TIMEFRAME = "daily"

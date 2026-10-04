@@ -769,9 +769,7 @@ def _write_snapshot(
         # 成交价直接加减运算）。事件跟着这一批行情一次拉回来：逐标的查会在全市场
         # 5000+ 只的规模下变成 5000 次查询。
         action_loader = getattr(selected_adapter, "load_corporate_actions", None)
-        actions_by_key = (
-            dict(action_loader(frames_batch.keys())) if callable(action_loader) else {}
-        )
+        actions_by_key = dict(action_loader(frames_batch.keys())) if callable(action_loader) else {}
         metric_frames = {
             key: mark_adjusted(frame, actions_by_key.get(key, ()))
             for key, frame in frames_batch.items()

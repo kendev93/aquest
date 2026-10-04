@@ -31,7 +31,6 @@ from selector_app.market_data.models import (
     MarketCode,
 )
 from selector_app.market_data.scope import InstrumentScope
-from selector_app.market_data.store_base import HISTORY_START
 from selector_app.market_data.staging import (
     ProviderStagePlan,
     StageTarget,
@@ -41,6 +40,7 @@ from selector_app.market_data.staging import (
     serialize_latest_rows,
 )
 from selector_app.market_data.store import DuckDbMarketDataStore
+from selector_app.market_data.store_base import HISTORY_START
 
 from .baostock_catalog import BaostockCatalogError, fetch_all_securities
 from .market_sync import (

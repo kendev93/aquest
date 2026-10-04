@@ -99,9 +99,7 @@ def test_stale_hfq_rows_are_invisible_to_reads_and_coverage(tmp_path: Path) -> N
     store.replace_local_bars("SH", "600000", "stock", _bars(), price_basis="hfq")
 
     assert store.read_bars("SH", "600000").empty
-    ref = next(
-        ref for ref in store.list_instruments(include_missing=True) if ref.code == "600000"
-    )
+    ref = next(ref for ref in store.list_instruments(include_missing=True) if ref.code == "600000")
     assert (ref.first_date, ref.last_date, ref.bar_count) == (None, None, 0)
 
     # 在线补上 raw 后，读取与覆盖区间都只反映 raw 行；hfq 行留在库里，
@@ -114,9 +112,7 @@ def test_stale_hfq_rows_are_invisible_to_reads_and_coverage(tmp_path: Path) -> N
     )
     frame = store.read_bars("SH", "600000")
     assert frame["source"].tolist() == ["online", "online"]
-    ref = next(
-        ref for ref in store.list_instruments(include_missing=True) if ref.code == "600000"
-    )
+    ref = next(ref for ref in store.list_instruments(include_missing=True) if ref.code == "600000")
     assert (ref.first_date, ref.last_date, ref.bar_count) == (
         date(2024, 1, 2),
         date(2024, 1, 3),
@@ -129,7 +125,10 @@ def test_stale_hfq_rows_are_invisible_to_reads_and_coverage(tmp_path: Path) -> N
 def test_batch_query_returns_sorted_instrument_groups(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     store.replace_local_bars(
-        "SH", "600001", "stock", _bars(("SH", "600001", "2024-01-02", 8.0, "local")),
+        "SH",
+        "600001",
+        "stock",
+        _bars(("SH", "600001", "2024-01-02", 8.0, "local")),
         price_basis="raw",
     )
     store.replace_local_bars("SH", "600000", "stock", _bars(), price_basis="raw")
@@ -766,9 +765,7 @@ def test_latest_trade_date_reports_the_newest_completed_bar(tmp_path: Path) -> N
     assert store.latest_trade_date() == date(2024, 1, 5)
 
     # 后写的一天更早，不该把最大值拉回去。
-    store.upsert_local_bars(
-        _bars(("SH", "600000", "2024-01-03", 9.0, "local")), price_basis="raw"
-    )
+    store.upsert_local_bars(_bars(("SH", "600000", "2024-01-03", 9.0, "local")), price_basis="raw")
     assert store.latest_trade_date() == date(2024, 1, 5)
 
 

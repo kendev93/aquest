@@ -30,10 +30,8 @@ from datetime import date
 import pandas as pd
 
 from selector_app.adapters.online_market_sync import _default_module
-from selector_app.market_data.adjustment import CorporateAction
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.market_data.store_base import default_database_path
-from selector_app.market_data.store_bars import corporate_actions_from_frame
 
 DEFAULT_BATCH_SIZE = 200
 

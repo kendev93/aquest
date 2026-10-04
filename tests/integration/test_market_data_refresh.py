@@ -138,7 +138,10 @@ def test_refresh_deletes_stored_bars_before_redownloading(tmp_path: Path) -> Non
     with _client(tmp_path, {"600000": [20.0, 21.0]}) as (client, service):
         store = client.app.state.market_data_store
         store.replace_local_bars(
-            "SH", "600000", "stock", _frame("SH", "600000", [10.0, 11.0, 12.0]),
+            "SH",
+            "600000",
+            "stock",
+            _frame("SH", "600000", [10.0, 11.0, 12.0]),
             price_basis="raw",
         )
         store.upsert_online_bars(_frame("SZ", "000001", [30.0, 31.0]))

@@ -18,8 +18,8 @@ import pandas as pd
 from selector_app.adapters.online_market_sync import _default_module
 from selector_app.market_data.adjustment import CorporateAction, build_factor_series, mark_adjusted
 from selector_app.market_data.store import DuckDbMarketDataStore
-from selector_app.market_data.store_base import default_database_path
 from selector_app.market_data.store_bars import corporate_actions_from_frame
+from selector_app.market_data.store_base import default_database_path
 
 #: 浦发银行 600000 在库里 raw 序列上单日跌幅超过 15% 的日子，全部是送转/派息造成的
 #: 除权跳空，不是真实暴跌。用它们当回归样本最直接。
@@ -60,7 +60,9 @@ def main(argv: list[str] | None = None) -> int:
     if frame.empty:
         print(f"{args.code} 没有本地行情，无法验证", file=sys.stderr)
         return 1
-    print(f"{market}{args.code} 本地 raw 行情 {len(frame)} 根：{frame['date'].min().date()} → {frame['date'].max().date()}")
+    first_day = frame["date"].min().date()
+    last_day = frame["date"].max().date()
+    print(f"{market}{args.code} 本地 raw 行情 {len(frame)} 根：{first_day} → {last_day}")
 
     closes = frame.assign(ts=frame["date"]).set_index("ts")["close"].sort_index()
     module = _default_module()

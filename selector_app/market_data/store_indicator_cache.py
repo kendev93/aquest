@@ -61,9 +61,7 @@ class DuckDbIndicatorCacheStore:
             key = (str(market).strip().upper(), str(code).strip())
             if wanted is not None and key not in wanted:
                 continue
-            revisions[key] = _revision_text(
-                bar_count, last_date, updated_at, digests.get(key, "")
-            )
+            revisions[key] = _revision_text(bar_count, last_date, updated_at, digests.get(key, ""))
         return revisions
 
     def data_revision(self, market: str, code: str) -> str | None:

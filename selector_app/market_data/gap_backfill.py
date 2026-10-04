@@ -29,9 +29,10 @@ VWAP（额/量）      1.751%          5.663%         44.5%
 from __future__ import annotations
 
 import bisect
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any, Iterable, Mapping, Protocol, Sequence, cast
+from typing import Protocol, cast
 
 import pandas as pd
 
