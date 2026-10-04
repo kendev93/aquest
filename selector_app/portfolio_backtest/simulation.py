@@ -288,6 +288,7 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
                 pending_sells,
                 by_symbol,
                 config,
+                date_index,
             )
             if self._should_refresh(date_index, dates, config.rebalance_frequency) or new_exit:
                 pending_buys, event = self._select_candidates(
@@ -1112,6 +1113,7 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
         pending_sells: dict[str, _PendingSell],
         by_symbol: Mapping[str, _StockSeries],
         config: PortfolioBacktestConfig,
+        date_index: int,
     ) -> bool:
         scheduled = False
         for symbol, position in positions.items():
@@ -1125,7 +1127,33 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
             if reasons:
                 pending_sells[symbol] = _PendingSell(current_date, "、".join(reasons))
                 scheduled = True
+                continue
+            if config.max_hold_days and self._held_enough_bars(
+                context, position, date_index, config.max_hold_days
+            ):
+                pending_sells[symbol] = _PendingSell(current_date, "持有到期")
+                scheduled = True
         return scheduled
+
+    def _held_enough_bars(
+        self,
+        context: _StockSeries,
+        position: _Position,
+        date_index: int,
+        max_hold_days: int,
+    ) -> bool:
+        """按**交易日**计数：用行情序列自身的 bar 索引，不受停牌和长假影响。
+
+        今天收盘时结算"已持有几个交易日"（买入日和今天都算进去），达到上限就登记
+        卖出、由次日开盘成交。这样实际持仓正好等于 max_hold_days 个交易日 ——
+        直接用索引差判断会多拿一天，因为卖出只能发生在下一个开盘。
+        """
+
+        entry_index = context.date_to_index.get(position.entry_date)
+        if entry_index is None:
+            return False
+        held_bars = date_index - entry_index + 1
+        return held_bars >= max_hold_days
 
     def _sell_reasons(
         self,

@@ -208,6 +208,8 @@ function formatTurnover(
               <div><span>平均盈利 / 亏损</span><strong>{{ formatPercent(metric(candidate, period.key, 'avg_win')) }} / {{ formatAverageLoss(candidate, period.key) }}</strong></div>
               <div><span>最大单笔盈利 / 亏损</span><strong>{{ formatPercent(metric(candidate, period.key, 'max_win')) }} / {{ formatPercent(metric(candidate, period.key, 'max_loss') === null ? null : Math.abs(metric(candidate, period.key, 'max_loss') ?? 0)) }}</strong></div>
               <div><span>平均持仓天数</span><strong>{{ formatNumber(metric(candidate, period.key, 'avg_holding_days'), 1) }}</strong></div>
+              <div><span>持仓天数 盈利 / 亏损</span><strong>{{ formatNumber(metric(candidate, period.key, 'win_holding_days'), 1) }} / {{ formatNumber(metric(candidate, period.key, 'loss_holding_days'), 1) }}</strong></div>
+              <div><span>最长单笔持仓</span><strong>{{ formatNumber(metric(candidate, period.key, 'max_holding_days'), 1) }}</strong></div>
               <div><span>买入 / 卖出成交单</span><strong>{{ formatNumber(metric(candidate, period.key, 'executed_buy_orders'), 0) }} / {{ formatNumber(metric(candidate, period.key, 'executed_sell_orders'), 0) }}</strong></div>
               <div><span>买入 / 卖出换手</span><strong>{{ formatTurnover(candidate, period.key, 'buy_turnover') }} / {{ formatTurnover(candidate, period.key, 'sell_turnover') }}</strong></div>
               <div><span>总换手</span><strong>{{ formatTurnover(candidate, period.key, 'turnover') }}</strong></div>

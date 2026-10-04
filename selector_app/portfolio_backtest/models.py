@@ -65,6 +65,12 @@ class PortfolioBacktestConfig:
     trailing_stop_mode: Literal["pct", "atr"] = "pct"
     trailing_stop_atr_multiplier: float | None = None
     trailing_stop_cooldown_days: int = 0
+    #: 最长持有**交易日**数：满 N 个交易日后按 next_open 卖出，与规则卖出同一出口。
+    #: None 表示不限制。止盈截断的是涨幅，这个截断的是时间 —— 它对盈利和亏损的
+    #: 持仓一视同仁，所以能同时把套牢票赶出槽位，这是单向止损做不到的。
+    #: 单位是交易日（与 cooldown_days 同口径）；报告里的 avg_holding_days 是自然日
+    #: 口径，两者数值不可直接比较。
+    max_hold_days: int | None = None
     atr_period: int = 14
     sell_value: str | None = None
     sell_value_operator: SellValueOperator | None = None
@@ -108,6 +114,12 @@ class PortfolioBacktestConfig:
             raise ValueError("固定股数模式必须设置大于 0 的买入股数")
         if not isinstance(self.exclude_st, bool):
             raise ValueError("排除 ST/退市标的开关必须是布尔值")
+        if self.max_hold_days is not None and (
+            isinstance(self.max_hold_days, bool)
+            or not isinstance(self.max_hold_days, int)
+            or self.max_hold_days < 1
+        ):
+            raise ValueError("最长持有天数必须是大于 0 的整数")
         scope = InstrumentScope.from_values(
             universe=self.universe,
             instrument_types=self.instrument_types,
@@ -288,7 +300,13 @@ class PortfolioBacktestConfig:
             )
             for strategy in self.symbol_strategies.values()
         )
-        if self.sell_rule is None and not risk_enabled and not has_symbol_exits:
+        # ``max_hold_days`` 同样是出口：满 N 个交易日必卖，所以只设它也合法。
+        if (
+            self.sell_rule is None
+            and not risk_enabled
+            and not has_symbol_exits
+            and self.max_hold_days is None
+        ):
             raise ValueError("至少需要设置一个卖出规则")
         object.__setattr__(self, "ranking_value", self.ranking_value.strip())
         object.__setattr__(

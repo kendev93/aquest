@@ -223,7 +223,7 @@ class PortfolioReportMixin(_PortfolioServiceState):
                 name: _finite_number(value) for name, value in analyzer.compute().items()
             }
             performance["payoff_ratio"] = _payoff_ratio(performance)
-            performance["avg_holding_days"] = _average_holding_days(trades)
+            performance.update(_holding_day_stats(trades))
             performance["turnover"] = _portfolio_turnover(trades, config.initial_cash)
             performance.update(_trade_activity_metrics(trades, config.initial_cash))
             simulation_diagnostic = simulation.get("diagnostic")
@@ -450,12 +450,25 @@ def _finite_number(value: object) -> float | None:
     return number if np.isfinite(number) else None
 
 
-def _average_holding_days(trades: list[dict[str, PortfolioJsonValue]]) -> float:
-    """Pair buys and sells with FIFO queues kept separately for each stock."""
+def _holding_day_stats(trades: list[dict[str, PortfolioJsonValue]]) -> dict[str, float]:
+    """Pair buys and sells with FIFO queues kept separately for each stock.
+
+    天数按**自然日**计算（卖出日减买入日），不是交易日。
+
+    均值的诊断价值有限：一笔拿几百天的仓位就能把均值拉高一大截，看不出长仓
+    到底是"赢家在跑"还是"亏损票被套住"。这两种情形的处理方向完全相反 ——
+    前者不该动，后者该收紧左侧出口。所以同时给出按盈亏拆分的结果和最长单笔，
+    用来定位长仓集中在哪一侧。
+    """
 
     buy_queues: dict[str, deque[tuple[date, float]]] = {}
     total_days = 0.0
     total_size = 0.0
+    win_days = 0.0
+    win_size = 0.0
+    loss_days = 0.0
+    loss_size = 0.0
+    longest = 0.0
     for trade in trades:
         if bool(trade.get("rejected", False)):
             continue
@@ -476,19 +489,35 @@ def _average_holding_days(trades: list[dict[str, PortfolioJsonValue]]) -> float:
             continue
         if trade.get("direction") != "SELL":
             continue
+        trade_pnl = float(cast(float, trade.get("pnl", 0.0)) or 0.0)
         remaining = size
         while remaining > 0 and queue:
             buy_date, buy_size = queue[0]
             consumed = min(remaining, buy_size)
-            total_days += max((trade_date - buy_date).days, 0) * consumed
+            days = max((trade_date - buy_date).days, 0)
+            # 一笔卖出可能吃掉多笔买入，按吃掉的数量把整笔 pnl 摊到每一段持仓上。
+            shared_pnl = trade_pnl * (consumed / size) if size else 0.0
+            total_days += days * consumed
             total_size += consumed
+            longest = max(longest, days)
+            if shared_pnl > 0:
+                win_days += days * consumed
+                win_size += consumed
+            elif shared_pnl < 0:
+                loss_days += days * consumed
+                loss_size += consumed
             remaining -= consumed
             buy_size -= consumed
             if buy_size <= 0:
                 queue.popleft()
             else:
                 queue[0] = (buy_date, buy_size)
-    return total_days / total_size if total_size else 0.0
+    return {
+        "avg_holding_days": total_days / total_size if total_size else 0.0,
+        "win_holding_days": win_days / win_size if win_size else 0.0,
+        "loss_holding_days": loss_days / loss_size if loss_size else 0.0,
+        "max_holding_days": longest,
+    }
 
 
 __all__ = ["PortfolioReportMixin"]

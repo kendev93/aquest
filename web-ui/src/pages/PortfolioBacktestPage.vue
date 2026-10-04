@@ -138,6 +138,8 @@ interface PortfolioFormState {
   trailingStopPct: number
   trailingStopAtrMultiplier: number
   trailingStopCooldownDays: number
+  maxHoldDaysEnabled: boolean
+  maxHoldDays: number
   atrPeriod: number
   dateMode: DateRangeMode
   startDate: string
@@ -189,6 +191,8 @@ const form = reactive<PortfolioFormState>({
   trailingStopPct: 5,
   trailingStopAtrMultiplier: 2,
   trailingStopCooldownDays: 0,
+  maxHoldDaysEnabled: false,
+  maxHoldDays: 60,
   atrPeriod: 14,
   dateMode: 'recent5',
   startDate: '',
@@ -505,7 +509,7 @@ function validate(): Record<string, string> {
   if (!Number.isFinite(form.maxPositions) || !Number.isInteger(form.maxPositions) || form.maxPositions < 1 || form.maxPositions > 100) {
     next.maxPositions = '持仓槽位必须是 1 到 100 的整数。'
   }
-  if (!sellRule.signals.length && !sellRule.conditions.length && !sellRule.required_conditions?.length && !form.stopLossEnabled && !form.takeProfitEnabled && !form.trailingStopEnabled) {
+  if (!sellRule.signals.length && !sellRule.conditions.length && !sellRule.required_conditions?.length && !form.stopLossEnabled && !form.takeProfitEnabled && !form.trailingStopEnabled && !form.maxHoldDaysEnabled) {
     next.sellRules = '至少配置一个卖出规则。'
   }
   const riskFields: Array<{
@@ -570,6 +574,7 @@ function buildPayload(): PortfolioBacktestPayload {
     trailing_stop_pct: form.trailingStopEnabled && form.trailingStopMode === 'pct' ? form.trailingStopPct / 100 : null,
     trailing_stop_atr_multiplier: form.trailingStopEnabled && form.trailingStopMode === 'atr' ? form.trailingStopAtrMultiplier : null,
     trailing_stop_cooldown_days: form.trailingStopEnabled ? form.trailingStopCooldownDays : 0,
+    max_hold_days: form.maxHoldDaysEnabled ? form.maxHoldDays : null,
     atr_period: form.atrPeriod,
     sell_value: null,
     sell_value_operator: null,
@@ -599,6 +604,7 @@ const RISK_PARAMETER_KEYS = new Set([
   'stop_loss_mode', 'stop_loss_pct', 'stop_loss_atr_multiplier', 'stop_loss_cooldown_days',
   'take_profit_mode', 'take_profit_pct', 'take_profit_atr_multiplier', 'take_profit_cooldown_days',
   'trailing_stop_mode', 'trailing_stop_pct', 'trailing_stop_atr_multiplier', 'trailing_stop_cooldown_days',
+  'max_hold_days',
 ])
 
 function stableStringify(value: unknown): string {
@@ -683,6 +689,9 @@ function applyStoredCandidate(raw: unknown): void {
   applyRisk('take_profit', 'takeProfitEnabled', 'takeProfitMode', 'takeProfitPct', 'takeProfitAtrMultiplier', 'takeProfitCooldownDays')
   applyRisk('trailing_stop', 'trailingStopEnabled', 'trailingStopMode', 'trailingStopPct', 'trailingStopAtrMultiplier', 'trailingStopCooldownDays')
   form.atrPeriod = 14
+  const maxHoldDays = finiteNumber(config.max_hold_days, NaN)
+  form.maxHoldDaysEnabled = Number.isFinite(maxHoldDays) && maxHoldDays >= 1
+  if (form.maxHoldDaysEnabled) form.maxHoldDays = Math.round(maxHoldDays)
   form.initialCash = finiteNumber(config.initial_cash, form.initialCash)
   form.commission = finiteNumber(config.commission, form.commission)
   form.minCommission = finiteNumber(config.min_commission, form.minCommission)
@@ -1870,6 +1879,11 @@ watch(() => form.formulaText, (value) => {
               <span>{{ form.trailingStopMode === 'pct' ? '%' : '倍' }}</span>
               <label class="cooldown-field">冷却 <input v-model.number="form.trailingStopCooldownDays" data-testid="portfolio-trailing-stop-cooldown" type="number" min="0" max="10000" step="1" :disabled="!form.trailingStopEnabled"> <span>交易日</span></label>
             </div>
+            <div class="risk-control" data-testid="portfolio-max-hold-days-control">
+              <label class="risk-toggle"><input v-model="form.maxHoldDaysEnabled" data-testid="portfolio-max-hold-days-enabled" type="checkbox"><span>最长持有</span></label>
+              <input v-model.number="form.maxHoldDays" data-testid="portfolio-max-hold-days" type="number" min="1" max="10000" step="1" aria-label="最长持有交易日数" :disabled="!form.maxHoldDaysEnabled"> <span>交易日</span>
+            </div>
+            <p class="helper">满 N 个交易日后按次日开盘卖出。它截断的是时间而不是涨幅，对盈利和亏损的持仓一视同仁，所以也能把套牢票赶出槽位。</p>
             <p v-if="errors.sellRules" class="field-error">{{ errors.sellRules }}</p>
             <p v-if="errors.stopLossPct || errors.stopLossAtrMultiplier || errors.stopLossCooldownDays" class="field-error">{{ errors.stopLossPct || errors.stopLossAtrMultiplier || errors.stopLossCooldownDays }}</p>
             <p v-if="errors.takeProfitPct || errors.takeProfitAtrMultiplier || errors.takeProfitCooldownDays" class="field-error">{{ errors.takeProfitPct || errors.takeProfitAtrMultiplier || errors.takeProfitCooldownDays }}</p>
@@ -1966,6 +1980,8 @@ watch(() => form.formulaText, (value) => {
                 <div><span>平均盈利 / 亏损</span><strong>{{ formatPercent(performanceValue('avg_win')) }} / {{ formatPercent(performanceValue('avg_loss') === null ? null : Math.abs(performanceValue('avg_loss') ?? 0)) }}</strong></div>
                 <div><span>最大单笔盈利 / 亏损</span><strong>{{ formatPercent(performanceValue('max_win')) }} / {{ formatPercent(performanceValue('max_loss') === null ? null : Math.abs(performanceValue('max_loss') ?? 0)) }}</strong></div>
                 <div><span>平均持仓天数</span><strong>{{ formatNumber(performanceValue('avg_holding_days'), 1) }}</strong></div>
+                <div><span>持仓天数 盈利 / 亏损</span><strong>{{ formatNumber(performanceValue('win_holding_days'), 1) }} / {{ formatNumber(performanceValue('loss_holding_days'), 1) }}</strong></div>
+                <div><span>最长单笔持仓</span><strong>{{ formatNumber(performanceValue('max_holding_days'), 1) }}</strong></div>
                 <div><span>买入 / 卖出成交单</span><strong>{{ formatNumber(performanceValue('executed_buy_orders'), 0) }} / {{ formatNumber(performanceValue('executed_sell_orders'), 0) }}</strong></div>
                 <div><span>买入 / 卖出换手</span><strong>{{ formatTurnoverMultiple('buy_turnover') }} / {{ formatTurnoverMultiple('sell_turnover') }}</strong></div>
                 <div><span>总换手</span><strong>{{ formatTurnoverMultiple('turnover') }}</strong></div>

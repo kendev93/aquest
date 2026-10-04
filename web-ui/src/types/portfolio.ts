@@ -36,6 +36,7 @@ export interface PortfolioBacktestPayload {
   trailing_stop_mode?: 'pct' | 'atr'
   trailing_stop_atr_multiplier?: number | null
   trailing_stop_cooldown_days?: number
+  max_hold_days?: number | null
   atr_period?: number
   sell_value?: string | null
   sell_value_operator?: PortfolioSellValueOperator | null

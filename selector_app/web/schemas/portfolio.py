@@ -62,6 +62,9 @@ class PortfolioBacktestRequest(BaseModel):
     trailing_stop_mode: Literal["pct", "atr"] = "pct"
     trailing_stop_atr_multiplier: float | None = Field(default=None, gt=0, le=100)
     trailing_stop_cooldown_days: int = Field(default=0, ge=0, le=10_000)
+    #: 最长持有交易日数。满 N 个交易日后按 next_open 卖出，与规则卖出同一出口。
+    #: 止盈截断的是涨幅，这个截断的是时间，对盈利和亏损的持仓一视同仁。
+    max_hold_days: int | None = Field(default=None, ge=1, le=10_000)
     atr_period: int = Field(default=14, ge=1, le=1_000)
     sell_value: str | None = Field(default=None, max_length=128)
     sell_value_operator: Literal["gte", "lte"] | None = None
@@ -243,6 +246,7 @@ class PortfolioBacktestRequest(BaseModel):
             trailing_stop_mode=self.trailing_stop_mode,
             trailing_stop_atr_multiplier=self.trailing_stop_atr_multiplier,
             trailing_stop_cooldown_days=self.trailing_stop_cooldown_days,
+            max_hold_days=self.max_hold_days,
             atr_period=self.atr_period,
             sell_value=self.sell_value,
             sell_value_operator=self.sell_value_operator,

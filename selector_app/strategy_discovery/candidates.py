@@ -18,6 +18,9 @@ from .models import DiscoveryRequest, RiskMode, StrategyCandidate
 _OPERATORS = ("gt", "gte", "lt", "lte", "eq", "neq", "cross_up", "cross_down")
 _DEFAULT_CONSTANTS = (-1.0, 0.0, 10.0, 30.0, 50.0, 70.0, 90.0)
 _RISK_COOLDOWNS = (0, 3, 5, 10)
+#: 最长持有交易日数的搜索网格。``None`` = 不限制，留着和时间止损做对照，
+#: 否则看不出"限时"本身到底贡献了多少。单位是交易日，与冷却期同口径。
+_MAX_HOLD_DAYS: tuple[object, ...] = (None, 20, 40, 60, 120)
 _RebalanceFrequency = Literal["daily", "weekly", "monthly"]
 _RankOrder = Literal["asc", "desc"]
 
@@ -187,6 +190,14 @@ def _risk_values(rng: object) -> tuple[RiskMode, float | None, float | None, int
     return mode, percentage, None, cooldown
 
 
+def _max_hold_days(rng: object) -> int | None:
+    value = _choice(rng, _MAX_HOLD_DAYS, None)
+    if value is None:
+        return None
+    days = _as_int(value, 0)
+    return days if days > 0 else None
+
+
 def _build_random_risk_candidate(
     request: DiscoveryRequest,
     rng: object,
@@ -202,6 +213,8 @@ def _build_random_risk_candidate(
     frequency = str(base_config.get("rebalance_frequency") or "daily")
     if frequency not in {"daily", "weekly", "monthly"}:
         frequency = "daily"
+    max_hold = _max_hold_days(rng)
+    base_config["max_hold_days"] = max_hold
     risk_summary = []
     for prefix, label in (
         ("stop_loss", "止损"),
@@ -214,6 +227,7 @@ def _build_random_risk_candidate(
         else:
             setting = f"{percentage:.0%}" if percentage is not None else f"ATR×{atr_multiplier:g}"
             risk_summary.append(f"{label}{setting}/冷却{cooldown}日")
+    risk_summary.append("不限持有期" if max_hold is None else f"最长持有{max_hold}交易日")
     return StrategyCandidate(
         # Risk-only candidates carry no generated rules.  ``preserve_base_config``
         # ensures the exact serialized buy/sell rules and ranking survive replay.
@@ -304,6 +318,7 @@ def build_random_candidate(
     take_profit_mode, take_profit_pct, take_profit_atr, take_profit_cooldown = risk["take_profit"]
     stop_loss_mode, stop_loss_pct, stop_loss_atr, stop_loss_cooldown = risk["stop_loss"]
     trailing_mode, trailing_pct, trailing_atr, trailing_cooldown = risk["trailing_stop"]
+    base_config["max_hold_days"] = _max_hold_days(generator)
     rank_order_value = str(_choice(generator, ("asc", "desc"), "desc"))
     rank_order = cast(
         _RankOrder,
