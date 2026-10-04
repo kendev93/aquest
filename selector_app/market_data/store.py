@@ -234,6 +234,12 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
     def corporate_actions_version(self) -> str:
         return self._bars.corporate_actions_version()
 
+    def read_price_gap_candidates(self) -> pd.DataFrame:
+        return self._bars.read_price_gap_candidates()
+
+    def read_trading_dates(self) -> list[date]:
+        return self._bars.read_trading_dates()
+
     def list_provisional_symbols(self) -> set[tuple[str, str]]:
         return self._bars.list_provisional_symbols()
 

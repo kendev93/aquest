@@ -1101,6 +1101,78 @@ class DuckDbBarsStore:
         digest = row[0] if row else None
         return str(digest) if digest else ""
 
+    def read_trading_dates(self) -> list[date]:
+        """返回库中实际出现过的交易日，升序。
+
+        刻意不读 ``market_trading_calendar``：那张表需要单独回填，库里可能
+        还没数据，而它是空的时候 :meth:`latest_market_trading_date` 会一直
+        返回 ``None``。行情自身的日期并集等价于交易日历 —— 单只股票停牌
+        不影响其他股票，那天仍是交易日。
+        """
+
+        with self._store.read_session() as connection:
+            frame = connection.execute(
+                "SELECT DISTINCT trade_date FROM daily_bars ORDER BY trade_date"
+            ).df()
+        # ``.dt.date`` 而不是逐个 isinstance：pandas 的 Timestamp 是 datetime.date
+        # 的子类，isinstance 会放它过去，调用方拿到的就是一列 Timestamp。它们和
+        # 纯 date 混进 bisect 会抛 TypeError，所以在这里强制降级成 date。
+        return list(frame["trade_date"].dt.date)
+
+    def read_price_gap_candidates(self) -> pd.DataFrame:
+        """找出"跌幅超出板块跌停幅度、但事件表无记录"的 bar。
+
+        这是复权事件漏记的检测入口。判据是市场自身的硬约束：主板跌停就是
+        -10.00%、创业板与科创板 -20%，所以跌幅超过该幅度（留 0.5% 缓冲）就不
+        可能是市场波动，只能发生过股本变化。未知 ``board`` 一律按 -20.5%
+        处理 —— 宁可漏检（那只是没修好）不可误判（那会往事件表写进错因子）。
+
+        **只做"是除权"这一半判断，且不含停牌过滤。** 跌幅是否可信取决于
+        前后两根 bar 是否紧邻交易日：跨越停牌的复牌跌幅不受涨跌幅约束，
+        那类跳空必须排除，交给调用方按交易日历判定。
+
+        ``ROW_NUMBER() <= 5`` 排掉的是**新股**：创业板与科创板新股上市前 5 个
+        交易日不设涨跌幅限制，期间出现 -50% 很正常。688615 在 2024-10-09
+        上市第 5 日从 350 跌到 175.11，若当成 10 转 10 的除权就会写进一条
+        因子 1.25 的错事件，留下的跳空还有 -37%。用序号而不是日期判断，是因为
+        新股期停牌极少，按 bar 序号更贴合"第几个交易日"的监管口径。
+        """
+
+        with self._store.read_session() as connection:
+            return self._store._frame_from_query(
+                connection.execute(
+                    """
+                    WITH bars AS (
+                        SELECT market, code, board, trade_date, open, close,
+                            LAG(trade_date) OVER (
+                                PARTITION BY market, code ORDER BY trade_date
+                            ) AS prev_date,
+                            LAG(close) OVER (
+                                PARTITION BY market, code ORDER BY trade_date
+                            ) AS prev_close,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY market, code ORDER BY trade_date
+                            ) AS rn
+                        FROM daily_bars
+                        WHERE price_basis = 'raw' AND bar_status = 'completed'
+                    )
+                    SELECT b.market, b.code, b.board, b.trade_date, b.prev_date,
+                           b.prev_close, b.open, b.close
+                    FROM bars b
+                    LEFT JOIN corporate_actions a
+                        ON a.market = b.market AND a.code = b.code
+                        AND a.ex_date = b.trade_date
+                    WHERE b.rn > 5
+                        AND b.prev_close > 0
+                        AND b.open > 0
+                        AND a.ex_date IS NULL
+                        AND b.close / b.prev_close - 1
+                            < CASE b.board WHEN 'main' THEN -0.105 ELSE -0.205 END
+                    ORDER BY b.market, b.code, b.trade_date
+                    """
+                ).df()
+            )
+
     def latest_market_trading_date(self, on_or_before: date) -> date | None:
         with self._store._connect(read_only=True) as connection:
             row = connection.execute(
