@@ -139,7 +139,7 @@ def test_refresh_deletes_stored_bars_before_redownloading(tmp_path: Path) -> Non
         store = client.app.state.market_data_store
         store.replace_local_bars(
             "SH", "600000", "stock", _frame("SH", "600000", [10.0, 11.0, 12.0]),
-            price_basis="hfq",
+            price_basis="raw",
         )
         store.upsert_online_bars(_frame("SZ", "000001", [30.0, 31.0]))
 
@@ -171,7 +171,7 @@ def test_refresh_keeps_instruments_outside_the_selected_market(tmp_path: Path) -
     with _client(tmp_path, {"600000": [20.0, 21.0]}) as (client, _service):
         store = client.app.state.market_data_store
         store.replace_local_bars(
-            "SH", "600000", "stock", _frame("SH", "600000", [10.0, 11.0]), price_basis="hfq"
+            "SH", "600000", "stock", _frame("SH", "600000", [10.0, 11.0]), price_basis="raw"
         )
         store.upsert_online_bars(_frame("SZ", "000001", [30.0, 31.0]))
 
@@ -199,7 +199,7 @@ def test_refresh_recovers_when_a_previous_run_deleted_without_recovering(
     with _client(tmp_path, {"600000": [20.0, 21.0]}) as (client, service):
         store = client.app.state.market_data_store
         store.replace_local_bars(
-            "SH", "600000", "stock", _frame("SH", "600000", [10.0, 11.0]), price_basis="hfq"
+            "SH", "600000", "stock", _frame("SH", "600000", [10.0, 11.0]), price_basis="raw"
         )
         # 绕过 delete_bars 直接清行，复现旧版本留下的"有覆盖、没数据"状态。
         with store._bars._store._connect() as connection:  # noqa: SLF001 - 复现历史状态
@@ -222,7 +222,7 @@ def test_refresh_names_instruments_that_stayed_empty(tmp_path: Path) -> None:
     with _client(tmp_path, {}) as (client, _service):
         store = client.app.state.market_data_store
         store.replace_local_bars(
-            "SH", "600000", "stock", _frame("SH", "600000", [10.0, 11.0]), price_basis="hfq"
+            "SH", "600000", "stock", _frame("SH", "600000", [10.0, 11.0]), price_basis="raw"
         )
 
         created = client.post(
@@ -242,7 +242,7 @@ def test_refresh_requires_explicit_confirmation(tmp_path: Path) -> None:
     with _client(tmp_path, {"600000": [20.0]}) as (client, _service):
         store = client.app.state.market_data_store
         store.replace_local_bars(
-            "SH", "600000", "stock", _frame("SH", "600000", [10.0, 11.0]), price_basis="hfq"
+            "SH", "600000", "stock", _frame("SH", "600000", [10.0, 11.0]), price_basis="raw"
         )
 
         response = client.post("/api/v1/market-data/refresh", json={"universe": "all"})

@@ -10,6 +10,7 @@ import pandas as pd
 import pytest
 
 from selector_app.adapters.local_day_adapter import StockRef
+from selector_app.market_data.adjustment import CorporateAction, compute_factor_ratio
 from selector_app.portfolio_backtest.context import SortedDateIndex
 from selector_app.portfolio_backtest.models import PortfolioBacktestConfig
 from selector_app.portfolio_backtest.service import (
@@ -182,6 +183,119 @@ def config(**overrides: object) -> PortfolioBacktestConfig:
     }
     values.update(overrides)
     return PortfolioBacktestConfig(**values)
+
+
+def test_indicators_use_adjusted_prices_while_fills_use_raw() -> None:
+    """除权校正只作用于指标口径，成交价必须是真实价。
+
+    构造一段行情：除权前后真实收盘价都低于 16，只有按除权校正后的价格才跨过
+    阈值。于是
+
+    * 指标若用 raw，买入条件永不成立，回测一笔都不做；
+    * 指标用复权价，除权后第一天就产生信号；
+    * 而成交价必须仍然是 raw 开盘价 —— 用复权价算股数的话，100 万能买到的手数
+      完全是另一个数，涨跌停与整手也全都不再对应现实。
+    """
+
+    dates = pd.date_range("2024-01-02", periods=60, freq="B")
+    # 除权前 41 天收在 11.x，除权后收在 12.6~13.2：真实价全程低于 16。
+    close = np.where(np.arange(60) < 41, 11.0 + np.arange(60) % 9 * 0.1, 12.6 + np.arange(60) % 7 * 0.1)
+    frame = pd.DataFrame(
+        {
+            "date": dates,
+            "open": close - 0.07,
+            "high": close + 0.03,
+            "low": close - 0.11,
+            "close": close,
+            "volume": np.full(60, 100_000.0),
+            "amount": close * 100_000.0,
+        }
+    )
+    ex_index = 40
+    actions = (
+        CorporateAction(
+            market="SH",
+            code="600000",
+            ex_date=dates[ex_index].date(),
+            share_ratio=0.3,
+            cash_per_share=0.2,
+            factor_ratio=compute_factor_ratio(
+                prev_close=float(close[ex_index - 1]),
+                share_ratio=0.3,
+                cash_per_share=0.2,
+            ),
+            action_type="mixed",
+        ),
+    )
+
+    class ExDividendAdapter(FakeAdapter):
+        def list_stock_refs(self, vipdoc_path, universe, universe_file=None):
+            return [StockRef(market="SH", code="600000", name="测试600000", path=Path(vipdoc_path) / "sh600000.day")]
+
+        def read_stock(self, ref: StockRef) -> pd.DataFrame:
+            return frame.copy(deep=True)
+
+        def read_corporate_actions(self, ref: StockRef):
+            return actions
+
+    settings = config(
+        formula_text="BUY:C>16; RANK:C;",
+        max_positions=1,
+        initial_cash=100_000.0,
+        start_date=dates[0].date(),
+        end_date=dates[-1].date(),
+        stop_loss_pct=None,
+        # 出口只用来满足"至少一个卖出规则"的校验，10 倍止盈在这段行情里不会触发。
+        take_profit_pct=10.0,
+    )
+
+    report = PortfolioBacktestService(adapter=ExDividendAdapter()).run(settings)
+
+    assert [trade["direction"] for trade in report.trades] == ["BUY"]
+    # 复权后除权次日（index 41）的收盘 = 12.6 x 1.317 > 16 产生信号，
+    # next_open 成交落在再下一根 bar。
+    assert report.trades[0]["date"] == dates[ex_index + 2].strftime("%Y-%m-%d")
+    # 成交价是 raw 开盘价，不是复权价。
+    assert report.trades[0]["price"] == pytest.approx(float(frame["open"].iloc[ex_index + 2]))
+
+
+def test_indicators_stay_below_threshold_without_corporate_actions() -> None:
+    """对照：同一段行情没有事件时，指标就是 raw 口径，一笔都不该做。"""
+
+    dates = pd.date_range("2024-01-02", periods=60, freq="B")
+    close = np.where(np.arange(60) < 41, 11.0 + np.arange(60) % 9 * 0.1, 12.6 + np.arange(60) % 7 * 0.1)
+    frame = pd.DataFrame(
+        {
+            "date": dates,
+            "open": close - 0.07,
+            "high": close + 0.03,
+            "low": close - 0.11,
+            "close": close,
+            "volume": np.full(60, 100_000.0),
+            "amount": close * 100_000.0,
+        }
+    )
+
+    class PlainAdapter(FakeAdapter):
+        def list_stock_refs(self, vipdoc_path, universe, universe_file=None):
+            return [StockRef(market="SH", code="600000", name="测试600000", path=Path(vipdoc_path) / "sh600000.day")]
+
+        def read_stock(self, ref: StockRef) -> pd.DataFrame:
+            return frame.copy(deep=True)
+
+    report = PortfolioBacktestService(adapter=PlainAdapter()).run(
+        config(
+            formula_text="BUY:C>16; RANK:C;",
+            max_positions=1,
+            initial_cash=100_000.0,
+            start_date=dates[0].date(),
+            end_date=dates[-1].date(),
+            stop_loss_pct=None,
+            take_profit_pct=10.0,
+        )
+    )
+
+    assert not report.trades
 
 
 def test_portfolio_fills_a_vacated_slot_by_rank_after_stop_loss() -> None:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from typing import NamedTuple, cast
@@ -20,6 +20,7 @@ from selector_app.formulas.registry import FORMULA_REGISTRY
 from selector_app.formulas.types import FormulaResult
 from selector_app.indicators.cache import frame_fingerprint
 from selector_app.market_data.adapter import parse_universe_code
+from selector_app.market_data.adjustment import CorporateAction, mark_adjusted
 from selector_app.market_data.day_format import classify_board, classify_instrument
 from selector_app.market_data.models import InstrumentBoard, InstrumentType, MarketCode, StockRef
 from selector_app.market_data.risk_warning import is_risk_warning_symbol
@@ -211,9 +212,21 @@ class PortfolioContextMixin(_PortfolioServiceState):
         frame = self._prepare_frame(frame if frame is not None else self._adapter.read_stock(ref))
         if frame.empty:
             raise ValueError("数据为空")
-        data_fingerprint = frame_fingerprint(frame)
+        # 同一份行情在这里分成两个口径，各司其职：
+        #
+        # * ``metric_frame`` —— 指标、选股条件、排序值。除权日的 raw 跳空是价格
+        #   序列里的一个假断崖（浦发银行 2017-05-25 一天 -24%），留着它算出来的
+        #   ATR、动量、均线全是假的。
+        # * ``frame`` —— 成交价、整手取整、ATR。ATR 的单位是"元"，会和成交价直接
+        #   加减运算（``risk._risk_level``），一旦用复权价算，所有 ATR 止损/止盈
+        #   的阈值会完全错乱；除权当天开盘大幅低开是真实市场现象，ATR 反映它是
+        #   合理的。成交价更不能碰复权价：后复权价会随分红累积无限变大，股数和
+        #   整手全都不再对应现实。
+        actions = self._corporate_actions(ref)
+        metric_frame = mark_adjusted(frame, actions) if actions else frame
+        data_fingerprint = frame_fingerprint(metric_frame)
         results = self._calculate_results(
-            frame,
+            metric_frame,
             config,
             parsed,
             market=ref.market,
@@ -315,7 +328,33 @@ class PortfolioContextMixin(_PortfolioServiceState):
             return frames
         for key, group in combined.groupby(["market", "code"], sort=False):
             frames[(str(key[0]), str(key[1]))] = group.reset_index(drop=True)
+        # 事件跟着行情一起批量取。逐标的查会在全市场 5000+ 只的规模下变成 5000 次
+        # 查询；指标复权要用它们，成交与 ATR 仍然走 raw。
+        self._preload_corporate_actions(frames.keys())
         return frames
+
+    def _preload_corporate_actions(self, keys: Iterable[tuple[str, str]]) -> None:
+        loader = getattr(self._adapter, "load_corporate_actions", None)
+        if not callable(loader):
+            return
+        self._corporate_action_cache = dict(loader(keys))
+
+    def _corporate_actions(self, ref: StockRef) -> tuple[CorporateAction, ...]:
+        """该标的的分红送转事件；适配器不支持时退化成"无事件"。
+
+        非批量适配器（测试里的 FakeAdapter 之类）走不到 preload，这里按需单查并
+        累积进缓存，避免同一标的被重复查。
+        """
+
+        cache = getattr(self, "_corporate_action_cache", None)
+        if cache is None:
+            cache = {}
+            self._corporate_action_cache = cache
+        key = (ref.market, ref.code)
+        if key not in cache:
+            reader = getattr(self._adapter, "read_corporate_actions", None)
+            cache[key] = tuple(reader(ref)) if callable(reader) else ()
+        return cache[key]
 
     def _list_refs(self, config: PortfolioBacktestConfig) -> _ResolvedRefs:
         if config.universe == "codes":

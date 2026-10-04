@@ -50,7 +50,8 @@ def _online_frame(market: str, code: str, days: list[str]) -> pd.DataFrame:
 
 
 def _bars(store: DuckDbMarketDataStore, market: str, code: str) -> pd.DataFrame:
-    # vipdoc 导入落的是不复权 raw 行（读取默认只认 hfq），维护视角显式按 raw 读。
+    # vipdoc 导入落的是不复权 raw 行，与研究默认口径一致；显式写出来是为了让
+    # "这个 helper 只关心本地导入结果"这件事在阅读时一眼可见。
     return store.read_bars(market, code, price_basis="raw")
 
 
@@ -75,11 +76,12 @@ def test_import_writes_day_file_bars(tmp_path: Path) -> None:
     assert store.status().instrument_count == 1
 
 
-def test_import_coexists_with_online_rows_for_the_same_date(tmp_path: Path) -> None:
-    """本地导入与在线行口径不同（raw vs hfq），同日共存、互不覆盖。
+def test_import_replaces_same_day_online_rows_and_keeps_the_rest(tmp_path: Path) -> None:
+    """vipdoc 导入与在线行情同口径（都是 raw），同一天以本地行为准。
 
-    唯一键含 price_basis：vipdoc 导入不会动在线后复权行；研究读取只看 hfq，
-    本地导入的不复权数据因此不会混进研究与回测。
+    口径统一成 raw 之后这才是真实场景：唯一键是
+    ``(market, code, trade_date, price_basis)``，同口径的同一天就是同一行，本地导入
+    必须能替换在线行；本地没覆盖到的那天仍然保留在线数据，不能整段覆盖掉。
     """
 
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
@@ -99,16 +101,12 @@ def test_import_coexists_with_online_rows_for_the_same_date(tmp_path: Path) -> N
     report = LocalDayImportService(store, max_workers=1).import_vipdoc(vipdoc)
 
     assert report["imported_bars"] == 2
-    assert report["replaced_bars"] == 0
-    # 维护视角按 raw 读：两行本地行都进来了。
-    raw_bars = store.read_bars("SH", "600000", price_basis="raw")
-    assert len(raw_bars) == 2
-    assert (raw_bars["source"] == "local").all()
-    assert raw_bars.iloc[0]["close"] == pytest.approx(8.25)
-    # 研究视角（默认读取）仍然只有在线 hfq 行，一天不少。
-    hfq_bars = store.read_bars("SH", "600000")
-    assert len(hfq_bars) == 3
-    assert (hfq_bars["source"] == "online").all()
+    assert report["replaced_bars"] == 2
+    # 研究视角（默认读取）就是 raw：同一天已换成本地行，没覆盖的那天仍是原来的在线行。
+    bars = store.read_bars("SH", "600000")
+    assert len(bars) == 3
+    assert bars["source"].tolist() == ["local", "local", "online"]
+    assert bars.iloc[0]["close"] == pytest.approx(8.25)
 
 
 def test_import_respects_type_and_board_scope(tmp_path: Path) -> None:

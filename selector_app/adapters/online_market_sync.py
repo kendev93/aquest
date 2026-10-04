@@ -58,7 +58,12 @@ logger = logging.getLogger(__name__)
 
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 _MARKET_CLOSE = (15, 5)
-_FULL_HISTORY_START = date(1990, 1, 1)
+#: 全量下载的起点。1990 年只有 4 只股票、2000 年才 863 只、2005 年才 1170 只 ——
+#: 那段"历史"里的全市场根本不是全市场，用它选股得到的是一个几十只标的的子集，
+#: 规则毫无泛化性可言；而且 90 年代到现在的涨跌幅限制、流通市值、退市规则换过好几轮，
+#: 那个区间寻优出来的参数搬到现在基本失效。2015 年起覆盖 2577 只、当前 5223 只，
+#: 才是能代表当下 A 股的样本。
+_FULL_HISTORY_START = date(2015, 1, 1)
 _INCREMENTAL_OVERLAP_DAYS = 10
 _MAX_RETRIES = 3
 _RETRY_BASE_SECONDS = 0.25
@@ -633,7 +638,7 @@ class OnlineMarketClient:
         *,
         timeout: float,
     ) -> pd.DataFrame:
-        """Fetch backward-adjusted (hfq) daily bars from East Money."""
+        """Fetch unadjusted (raw) daily bars from East Money."""
 
         normalized_symbol = _clean_code(symbol)
         if normalized_symbol is None:
@@ -647,9 +652,13 @@ class OnlineMarketClient:
                 "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f116",
                 "ut": _EASTMONEY_HISTORY_UT,
                 "klt": "101",
-                # fqt=2 为后复权：后复权价随历史分红累计漂移但相邻日收益率连续，
-                # 是研究口径的正确选择（前复权历史值会随每次除权重算，无法长期对齐）。
-                "fqt": "2",
+                # fqt=0 取不复权价。复权价不能当数据源：后复权因子从上市首日累乘，
+                # 每发生一次分红除权，全部历史 bar 都会跟着变；前复权是反方向漂移，
+                # 同样无法与本项目的 10 天增量回补共存 —— 历史段会停留在"当年下载时
+                # 的基准"，和近期段拼出两个不同基准，累计收益直接算错（用户先前用
+                # 前复权时浦发银行整段显示负收益就是这个机制）。
+                # 除权跳空由 market_data.adjustment 在计算期按分红送转事件消除。
+                "fqt": "0",
                 "secid": f"{market_code}.{normalized_symbol}",
                 "beg": start_date,
                 "end": end_date,
@@ -708,7 +717,7 @@ class OnlineMarketClient:
         *,
         timeout: float,
     ) -> pd.DataFrame:
-        """Fetch backward-adjusted (hfq) daily bars from Tencent's year-bounded endpoint."""
+        """Fetch unadjusted (raw) daily bars from Tencent's year-bounded endpoint."""
 
         start = _parse_compact_date(start_date)
         end = _parse_compact_date(end_date)
@@ -718,17 +727,19 @@ class OnlineMarketClient:
             payload = self._request(
                 _TENCENT_HISTORY_URL,
                 {
-                    "_var": f"kline_hfqday{year}",
-                    # param 第 6 段为复权类型：hfq=后复权（留空=不复权）。
-                    "param": f"{symbol},day,{year}-01-01,{year + 1}-12-31,640,hfq",
+                    "_var": f"kline_day{year}",
+                    # param 第 6 段是复权类型，留空即不复权。复权价不能当数据源：
+                    # 它把历次除权累积进价格，每发生一次分红除权全部历史 bar 都会变，
+                    # 和本项目的增量回补机制根本不兼容（详见 fetch_daily_history）。
+                    "param": f"{symbol},day,{year}-01-01,{year + 1}-12-31,640,",
                     "r": "0.8205512681390605",
                 },
                 timeout,
             )
             data = _mapping_value(payload.get("data"))
             symbol_data = _mapping_value(data.get(symbol))
-            # 腾讯响应的数据 key 跟随复权类型：hfq 返回 hfqday。
-            raw_rows = symbol_data.get("hfqday")
+            # 腾讯响应的数据 key 跟随复权类型：留空（不复权）返回 day，hfq 返回 hfqday。
+            raw_rows = symbol_data.get("day")
             if not isinstance(raw_rows, (list, tuple)):
                 continue
             rows = [row for row in raw_rows if isinstance(row, (list, tuple)) and len(row) >= 9]
@@ -1048,7 +1059,7 @@ class OnlineMarketSync:
                 "tencent",
             ],
             "fallback_policy": "East Money → Tencent",
-            "adjustments": ["hfq"],
+            "adjustments": ["raw"],
             "history": "full_or_incremental",
         }
 

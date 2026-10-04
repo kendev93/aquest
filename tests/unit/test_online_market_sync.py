@@ -349,7 +349,9 @@ def test_eastmoney_sync_uses_full_history_for_new_instruments_and_writes_provide
     )
     assert store.status().last_online_provider == "eastmoney"
     assert module.history_requests
-    assert all(request["start_date"] == "19900101" for request in module.history_requests)
+    # 全量起点是 2015-01-01：1990 年只有 4 只股票、2005 年才 1170 只，那段
+    # "历史"里的全市场根本不是全市场，用它选股毫无泛化性可言。
+    assert all(request["start_date"] == "20150101" for request in module.history_requests)
     assert all(request["end_date"] == "20260912" for request in module.history_requests)
     assert all(request["timeout"] == 30.0 for request in module.history_requests)
 
@@ -685,7 +687,7 @@ def test_eastmoney_full_history_fetches_only_missing_ranges_for_existing_rows(
     assert {
         (request["start_date"], request["end_date"]) for request in module.history_requests
     } == {
-        ("19900101", "20260907"),
+        ("20150101", "20260907"),
         ("20260911", "20260912"),
     }
     assert report.written_bars == 2

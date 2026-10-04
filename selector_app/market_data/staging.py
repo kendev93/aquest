@@ -16,6 +16,7 @@ import duckdb
 import pandas as pd
 
 from .models import MarketDataProvider
+from .store_base import DEFAULT_PRICE_BASIS
 
 STAGE_DIRECTORY_NAME = ".sync-staging"
 STAGE_WORKERS = 8
@@ -436,8 +437,10 @@ def _stage_frame(target: StageTarget, frame: pd.DataFrame) -> pd.DataFrame:
     incoming["board"] = target.board
     incoming["source"] = "online"
     incoming["provider"] = target.provider
-    # 行情统一为后复权口径：由数据下载源直接提供后复权日线，本地不做复权换算。
-    incoming["price_basis"] = "hfq"
+    # 行情统一为不复权口径：库里只存已经发生过的事实。复权在**计算期**由
+    # market_data.adjustment 按分红送转事件派生，绝不在这里、也不在库里落任何
+    # 复权后的价格 —— 落了就等于把"结果"存下来，事件一更新那份数据就静默过期。
+    incoming["price_basis"] = DEFAULT_PRICE_BASIS
     incoming["imported_at"] = datetime.now(timezone.utc).replace(tzinfo=None)
     incoming["name"] = target.name
     return incoming.loc[:, list(_STAGE_COLUMNS)].drop_duplicates(

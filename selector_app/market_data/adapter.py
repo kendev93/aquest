@@ -3,18 +3,32 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from datetime import date
 from pathlib import Path
 from threading import local
-from typing import Protocol
+from typing import NamedTuple, Protocol
 
 import pandas as pd
 
+from .adjustment import CorporateAction
 from .models import InstrumentBoard, InstrumentType, MarketCode, StockRef
 from .store import DuckDbMarketDataStore
+from .store_bars import corporate_actions_from_frame
 
 _CODE_PATTERN = re.compile(r"^\d{6}$")
 _MARKET_PATTERN = re.compile(r"^(SH|SZ)[:\s-]?([0-9]{6})$", re.IGNORECASE)
+
+
+class _SymbolKey(NamedTuple):
+    """只有 market / code 的轻量标识。
+
+    ``StockRef`` 要求 ``path``，而批量读事件根本不关心文件路径；造一个只带身份
+    的键，避免为了查个事件去拼一个假的 Path。
+    """
+
+    market: str
+    code: str
 
 
 def parse_universe_code(raw: str) -> tuple[MarketCode, str] | None:
@@ -144,6 +158,31 @@ class DuckDbMarketDataAdapter:
             )
             if (ref.bar_count or 0) > 0
         ]
+
+    def read_corporate_actions(self, ref: StockRef) -> tuple[CorporateAction, ...]:
+        """单标的的分红送转事件，指标复权时用。"""
+
+        frame = self._store.read_corporate_actions(ref.market, ref.code)
+        return tuple(corporate_actions_from_frame(frame))
+
+    def load_corporate_actions(
+        self,
+        keys: Iterable[tuple[str, str]],
+    ) -> dict[tuple[str, str], tuple[CorporateAction, ...]]:
+        """一次取回整批标的的事件，``keys`` 是 ``(market, code)`` 序列。
+
+        全市场 5000+ 只的规模下逐标的查事件表会变成 5000 次查询。事件表很小
+        （五千只 × 平均三十个事件 ≈ 15 万行），一次拉回来在内存里分组更划算。
+        没有事件的标的不会出现在结果里，调用方按缺省"无事件"处理即可。
+        """
+
+        frame = self._store.read_corporate_actions_batch(
+            _SymbolKey(market, code) for market, code in keys
+        )
+        grouped: dict[tuple[str, str], list[CorporateAction]] = {}
+        for action in corporate_actions_from_frame(frame):
+            grouped.setdefault((action.market, action.code), []).append(action)
+        return {key: tuple(value) for key, value in grouped.items()}
 
     def read_stock(self, ref: StockRef) -> pd.DataFrame:
         key = (ref.market, ref.code)

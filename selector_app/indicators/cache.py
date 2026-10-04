@@ -26,11 +26,13 @@ from selector_app.formulas.custom import (
 from selector_app.formulas.registry import FORMULA_REGISTRY, FormulaDefinition, FormulaRegistry
 from selector_app.formulas.types import FormulaResult
 from selector_app.market_data.store import DuckDbMarketDataStore
+from selector_app.market_data.adjustment import frame_adjust_version
 from selector_app.market_data.store_base import DEFAULT_PRICE_BASIS
 
 _TIMEFRAME = "daily"
-# 行情口径的全局默认（hfq）。仅当传入 frame 没有 price_basis 列时兜底；
-# 正常读取路径的 frame 自带该列，按实际口径缓存。
+# 行情口径的全局默认（见 ``store_base.DEFAULT_PRICE_BASIS``，当前是 raw 不复权）。
+# 仅当传入 frame 没有 price_basis 列时兜底；正常读取路径的 frame 自带该列，按实际
+# 口径缓存。复权事件版本另由 adjust_version 列参与 key，两者互不替代。
 _DEFAULT_PRICE_BASIS = DEFAULT_PRICE_BASIS
 _FINGERPRINT_COLUMNS = ("date", "open", "high", "low", "close", "volume", "amount")
 _OPTIONAL_FINGERPRINT_COLUMNS = ("bar_status", "price_basis")
@@ -360,7 +362,7 @@ class IndicatorCache:
             _CacheKey | _CustomCacheKey, tuple[FormulaResult, date | None]
         ] = OrderedDict()
         self._max_memory_entries = max_memory_entries
-        self._revisions: dict[tuple[str, str], str] = {}
+        self._revisions: dict[tuple[str, str, str], str] = {}
         self._lock = RLock()
         self._hits = 0
         self._misses = 0
@@ -463,9 +465,16 @@ class IndicatorCache:
             return
 
     def _revision(self, market: str, code: str, frame: pd.DataFrame) -> str:
-        """Resolve the revision identifying one instrument's bar series."""
+        """Resolve the revision identifying one instrument's bar series.
 
-        key = (market.strip().upper(), code.strip())
+        含 ``adjust_version`` 的 frame 拿到的修订号会带上事件版本后缀。行情本身的
+        标的级版本号对"事件补录 / 修正"完全无感 —— 一行 bar 都没变，但复权后的指标
+        序列会变。不区分的话，复权口径和 raw 口径的指标会共用同一个缓存 key 互相
+        覆盖，而且两边算出来的都是合法指标值，错缓存不会以任何形式暴露。
+        """
+
+        adjust_version = frame_adjust_version(frame)
+        key = (market.strip().upper(), code.strip(), adjust_version)
         with self._lock:
             cached = self._revisions.get(key)
         if cached is not None:
@@ -479,6 +488,8 @@ class IndicatorCache:
         if not revision:
             # 拿不到版本号时退化为帧指纹：缓存退回"同一窗口才命中"，结果仍然正确。
             return frame_fingerprint(frame)
+        if adjust_version:
+            revision = f"{revision}~adj:{adjust_version}"
         with self._lock:
             self._revisions[key] = revision
         return revision

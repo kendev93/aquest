@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import date
@@ -27,6 +27,7 @@ from selector_app.indicators.cache import (
     frame_fingerprint,
     merge_results,
 )
+from selector_app.market_data.adjustment import CorporateAction, mark_adjusted
 from selector_app.market_data.models import InstrumentBoard, InstrumentType, StockRef
 from selector_app.market_data.store_base import DEFAULT_PRICE_BASIS
 
@@ -110,6 +111,7 @@ class IndicatorPrecomputeService:
         self._adapter = adapter
         self._cache = cache
         self._registry = registry or FORMULA_REGISTRY
+        self._action_cache: dict[tuple[str, str], tuple[CorporateAction, ...]] = {}
 
     def run(
         self,
@@ -360,7 +362,26 @@ class IndicatorPrecomputeService:
         ]
 
     def _read_one(self, ref: StockRef) -> pd.DataFrame:
-        return _prepare_frame(self._adapter.read_stock(ref))
+        return _prepare_frame(
+            self._adapter.read_stock(ref),
+            actions=self._corporate_actions(ref),
+        )
+
+    def _corporate_actions(self, ref: StockRef) -> tuple[CorporateAction, ...]:
+        """取该标的的分红送转事件，按实例缓存一轮。
+
+        预算是逐标的走的，不缓存的话全市场就是 5000 次查询；事件表极小（每股平均
+        三十个事件），缓存住整轮 run 的量完全可以接受。适配器没有这个能力时
+        （测试用的 FakeAdapter）退化成"无事件"，指标退化为不复权口径。
+        """
+
+        reader = getattr(self._adapter, "read_corporate_actions", None)
+        if not callable(reader):
+            return ()
+        key = (ref.market, ref.code)
+        if key not in self._action_cache:
+            self._action_cache[key] = tuple(reader(ref))
+        return self._action_cache[key]
 
     def _compute_year(
         self,
@@ -555,7 +576,11 @@ def _merge_segments(segments: list[FormulaResult]) -> FormulaResult:
     return merge_results(segments)
 
 
-def _prepare_frame(frame: pd.DataFrame) -> pd.DataFrame:
+def _prepare_frame(
+    frame: pd.DataFrame,
+    *,
+    actions: Sequence[CorporateAction] = (),
+) -> pd.DataFrame:
     prepared = frame.copy(deep=True)
     if prepared.empty:
         return prepared
@@ -563,4 +588,10 @@ def _prepare_frame(frame: pd.DataFrame) -> pd.DataFrame:
     prepared["date"] = pd.to_datetime(prepared["date"], errors="coerce")
     if prepared["date"].isna().any():
         raise ValueError("行情数据包含无效日期")
-    return prepared.sort_values("date", kind="stable").reset_index(drop=True)
+    prepared = prepared.sort_values("date", kind="stable").reset_index(drop=True)
+    if actions:
+        # 指标必须算在除权校正后的价格上。raw 序列在除权日留着真实跳空（那是市场
+        # 事实），但拿它算 ATR、动量、均线都是假的 —— 浦发银行 2017-05-25 一天
+        # 跳空 24%，指标会把它当成暴跌。成交量与成交额是事实量，不参与复权。
+        prepared = mark_adjusted(prepared, actions)
+    return prepared

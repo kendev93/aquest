@@ -78,7 +78,7 @@ const DISCOVERY_APPLY_META_KEY = 'indicator-lab.strategy-discovery.apply-meta'
 const RESEARCH_APPLY_KEY = 'indicator-lab.condition-research.apply'
 const FORMULA_SCREEN_HANDOFF_KEY = 'indicator-lab.condition-research.to-screen'
 const PORTFOLIO_BACKTEST_LIMITATIONS = [
-  '行情使用后复权日线（hfq）：除权除息已校准，现金分红计入持有收益。',
+  '成交、持仓与整手按真实不复权价模拟；指标按分红送转事件校正后的价格计算，除权跳空只影响指标口径、不影响成交价。',
   '仅模拟单一做多组合和固定持仓槽位，不模拟实盘下单、融资融券或多策略资金隔离。',
   '成交按日线价格及配置的费用、滑点模拟；不模拟涨跌停撮合、停牌成交限制或成交量冲击。',
   '这是历史模拟，不代表未来收益，也不是投资建议。',
@@ -1955,7 +1955,7 @@ watch(() => form.formulaText, (value) => {
             <div class="backtest-summary"><span class="result-badge">{{ result.single_security_mode ? '单股策略' : result.universe === 'all' ? '沪深全部品种' : result.universe.toUpperCase() }}</span><span>{{ result.start_date }} → {{ result.end_date }}</span><span>{{ result.bars }} 个交易日</span><span>{{ result.processed }} / {{ result.total_candidates }} 个标的已处理</span><span>槽位 {{ result.max_positions }}</span><span v-if="result.ranking_value">排序：{{ valueName(result.ranking_value) }} · {{ result.rank_order === 'desc' ? '高到低' : '低到高' }}</span><span v-if="result.fitness_rank_weight" class="result-badge">适配性权重 {{ Math.round(result.fitness_rank_weight * 100) }}%</span></div>
             <aside class="portfolio-assumptions" data-testid="portfolio-assumptions" aria-label="回测口径与限制">
               <strong>回测口径与限制</strong>
-              <span>价格口径：{{ resultPriceBasis === 'hfq' ? '后复权日线（hfq）' : resultPriceBasis === 'raw' ? '未复权原始日线（raw，旧记录）' : resultPriceBasis }}</span>
+              <span>价格口径：成交与持仓用{{ resultPriceBasis === 'raw' ? '未复权真实价（raw）' : resultPriceBasis === 'hfq' ? '后复权日线（hfq，旧记录）' : resultPriceBasis }}，指标按分红送转事件校正</span>
               <ul><li v-for="limitation in resultLimitations" :key="limitation">{{ limitation }}</li></ul>
             </aside>
             <div v-if="replayComparison" class="replay-comparison" data-testid="portfolio-replay-comparison"><strong>候选复核 {{ replayComparison.candidateHash.slice(0, 12) }}</strong><span>成交记录：{{ replayComparison.tradeRecords }}</span><span>绩效摘要：{{ replayComparison.performance }}</span><span>数据指纹：{{ replayComparison.dataFingerprint }}</span></div>

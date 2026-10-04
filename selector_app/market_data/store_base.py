@@ -48,10 +48,17 @@ BACKTEST_HISTORY_LIMIT = 20
 # 从 BacktestHistoryType 派生，而不是再抄一份字面量：抄一份就会漏更新。
 _BACKTEST_HISTORY_TYPES = set(get_args(BacktestHistoryType))
 _APP_DATA_DIR_NAME = ".indicator-lab"
-#: 行情统一口径：后复权（hfq）。写入路径全部落 hfq（见 staging/store 的写死点），
-#: 读取路径默认只认这个口径——残留的旧 raw 数据不会被读到，避免同一标的同一天
-#: 两种口径的 K 线混进指标与回测。
-DEFAULT_PRICE_BASIS = "hfq"
+#: 行情统一口径：**不复权（raw）**。
+#:
+#: 库里只存已经发生过的事实。前复权和后复权都会把"历次除权的累积影响"写进价格，
+#: 于是每发生一次分红除权，全部历史 bar 的数值都会跟着变 —— 明年重新下载同一区间
+#: 得到的数字和今天不同，回测结果无法长期对齐。raw 永不变化，因此能和增量同步
+#: （只回补 ``_INCREMENTAL_OVERLAP_DAYS`` 天）根本共存：五年后历史段仍是当年那份，
+#: 不会和近期段拼出两个不同基准。
+#:
+#: 除权日的价格跳空由 ``market_data.adjustment`` 在**计算期**消除，绝不落盘：指标
+#: 计算用事件表派生出的复权价，成交、股数、整手、涨跌停与实时对齐一律用真实价。
+DEFAULT_PRICE_BASIS = "raw"
 _BAR_COLUMNS = [
     "market",
     "code",
@@ -1053,11 +1060,9 @@ class _DuckDbStoreBase:
                 "amount": normalized["amount"].astype(float),
                 "source": source,
                 "provider": provider or ("local" if source == "local" else "tdx"),
-                # 口径默认统一为 hfq（在线下载已带后复权；本地写入接口的默认值
-                # 也落 hfq，测试/工具播种的数据因此可被默认读取路径看到）。唯一
-                # 显式落 raw 的是本地 vipdoc 导入——local_import 传
-                # price_basis="raw"，因为 .day 文件是不复权的。读取路径默认只认
-                # hfq，raw 行不会混进研究；确有后复权本地文件时可显式传 price_basis。
+                # 口径默认统一为 raw（不复权）。在线下载与本地 vipdoc 导入现在同
+                # 口径，所以测试/工具播种的数据也能被默认读取路径看到；确有其它口
+                # 径的本地文件时可显式传 price_basis。复权不在这里做，也不落盘。
                 "price_basis": price_basis or DEFAULT_PRICE_BASIS,
                 "bar_status": normalized["bar_status"].astype(str),
                 "imported_at": imported_at,
@@ -1170,8 +1175,8 @@ class _DuckDbStoreBase:
         中间那段再也回不来（在线行写不回被删掉的日期）。所以删除之后必须按剩余行
         重算一次，删空的标的显式清零。
 
-        覆盖区间只统计 ``DEFAULT_PRICE_BASIS``（hfq）行：残留的旧 raw 行不能让
-        同步误以为"数据还在"而跳过重下。
+        覆盖区间只统计 ``DEFAULT_PRICE_BASIS`` 行：其它口径的残留行不能让同步误以为
+        "数据还在"而跳过重下。
         """
 
         now = _now()

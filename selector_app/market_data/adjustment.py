@@ -23,14 +23,22 @@ import numpy as np
 
 __all__ = [
     "ADJUSTED_PRICE_COLUMNS",
+    "ADJUST_VERSION_COLUMN",
     "AdjustmentMismatch",
     "CorporateAction",
     "apply_adjustment",
     "build_factor_series",
     "compute_factor_ratio",
     "events_version",
+    "frame_adjust_version",
+    "mark_adjusted",
     "verify_against_provider",
 ]
+
+
+#: 复权事件版本标记列。它和 ``price_basis`` 是两回事：``price_basis`` 说"这批价格
+#: 是什么口径"，``adjust_version`` 说"这批价格按哪一版事件做过除权校正"。
+ADJUST_VERSION_COLUMN = "adjust_version"
 
 
 #: 复权只作用于价格。``volume`` / ``amount`` 是**事实量** —— 分红送转不改变
@@ -207,8 +215,14 @@ def build_factor_series(dates: object, actions: Sequence[CorporateAction]) -> np
     return factors
 
 
-def apply_adjustment(frame: Any, factors: np.ndarray) -> Any:
+def apply_adjustment(frame: Any, factors: np.ndarray, *, version: str = "") -> Any:
     """返回复权后的 frame：只缩放 OHLC，``volume`` / ``amount`` 原样保留。
+
+    ``version`` 是事件表的内容哈希，会作为 ``adjust_version`` 列一起写进 frame。
+    这一列不是装饰：指标缓存的修订号优先取行情的标的级版本号，而事件补录或修正
+    **一行行情都不会变**，行情版本号对此完全无感。少了这一列，复权口径和 raw 口径
+    的指标会共用同一个缓存 key 互相覆盖 —— 而且因为两边算出来的都是"合法"的
+    指标值，错缓存不会以任何形式暴露出来。
 
     刻意不落盘、也不缓存复权价格 —— 缓存一份复权价就等于把"结果"存了下来，
     事件表一更新那份缓存就成了脏数据，而且没有任何东西能察觉。
@@ -220,7 +234,40 @@ def apply_adjustment(frame: Any, factors: np.ndarray) -> Any:
     if not columns or len(frame) == 0:
         return frame.copy(deep=False)
     scaled = {name: frame[name].to_numpy(dtype=float) * factors for name in columns}
+    if version:
+        scaled["adjust_version"] = version
     return frame.assign(**scaled)
+
+
+def mark_adjusted(frame: Any, actions: Sequence[CorporateAction], *, date_column: str = "date") -> Any:
+    """复权并打上事件版本标记；没有事件时原样返回。
+
+    指标计算入口统一走这里，"复权了没有"和"复权依据是什么"变成 frame 自带的
+    信息，缓存层不需要知道复权这回事。
+    """
+
+    if not actions or frame.empty:
+        return frame
+    return apply_adjustment(
+        frame,
+        build_factor_series(frame[date_column], actions),
+        version=events_version(actions),
+    )
+
+
+def frame_adjust_version(frame: Any) -> str:
+    """读出 frame 上的事件版本标记；没有标记返回空串。
+
+    同一序列混用多个版本说明调用方把两套口径混进了同一个缓存条目 —— 那必然是错的，
+    直接拒绝而不是挑一个。
+    """
+
+    if "adjust_version" not in frame.columns:
+        return ""
+    values = tuple(frame["adjust_version"].dropna().astype(str).unique())
+    if len(values) > 1:
+        raise ValueError("同一行情序列不能混用多个复权版本")
+    return values[0] if values else ""
 
 
 def verify_against_provider(

@@ -28,6 +28,7 @@ from selector_app.market_data.adapter import (
     MarketDataAdapter,
     parse_universe_code,
 )
+from selector_app.market_data.adjustment import mark_adjusted
 from selector_app.market_data.day_format import classify_board
 from selector_app.market_data.models import InstrumentBoard, InstrumentType, MarketCode, StockRef
 from selector_app.market_data.store import DuckDbMarketDataStore
@@ -546,6 +547,9 @@ def _discovery_snapshot_cache_key(
     catalog = default_indicator_catalog()
     payload = {
         "snapshot_version": _SNAPSHOT_VERSION,
+        # 事件补录或修正不会动任何一根 bar，但复权后的指标序列会变，所以快照缓存
+        # 必须跟着事件表的内容走，否则事件表更新后策略实验仍在用旧的 raw 指标。
+        "corporate_actions_version": store.corporate_actions_version(),
         "window": (window.start.isoformat(), window.end.isoformat()),
         "warmup_bars": _snapshot_warmup_bars(),
         "scope": {
@@ -761,7 +765,18 @@ def _write_snapshot(
             for key, group in combined.groupby(["market", "code"], sort=False)
         ]
         frames_batch = dict(prepared_batch)
-        memory_cache.preload(frames_batch, formula_ids)
+        # 指标按除权校正后的价格算，成交价与 ATR 仍用 raw（ATR 的单位是"元"，会和
+        # 成交价直接加减运算）。事件跟着这一批行情一次拉回来：逐标的查会在全市场
+        # 5000+ 只的规模下变成 5000 次查询。
+        action_loader = getattr(selected_adapter, "load_corporate_actions", None)
+        actions_by_key = (
+            dict(action_loader(frames_batch.keys())) if callable(action_loader) else {}
+        )
+        metric_frames = {
+            key: mark_adjusted(frame, actions_by_key.get(key, ()))
+            for key, frame in frames_batch.items()
+        }
+        memory_cache.preload(metric_frames, formula_ids)
         computed_before = int(memory_cache.metrics()["computed"])
         results_batch: dict[tuple[str, str], Mapping[str, FormulaResult]] = {}
         for (market, code), prepared in prepared_batch:
@@ -778,7 +793,7 @@ def _write_snapshot(
             length = len(positions)
             end = cursor + length
             result_by_formula = memory_cache.get_or_compute(
-                prepared,
+                metric_frames[(market, code)],
                 formula_ids,
                 market=market,
                 code=code,

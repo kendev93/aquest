@@ -45,7 +45,7 @@ def _store(tmp_path: Path) -> DuckDbMarketDataStore:
     closes = [10.0 * (1.01**index) for index in range(31)]
     closes += [peak * (0.99**index) for index in range(1, 20)]
     store.replace_local_bars(
-        "SH", "600000", "stock", _bars("SH", "600000", closes), price_basis="hfq"
+        "SH", "600000", "stock", _bars("SH", "600000", closes), price_basis="raw"
     )
     return store
 
@@ -61,7 +61,7 @@ def _wide_store(tmp_path: Path) -> DuckDbMarketDataStore:
         for _ in range(79):
             closes.append(closes[-1] * (1 + float(rng.normal(0.001, 0.02))))
         store.replace_local_bars(
-            "SH", code, "stock", _bars("SH", code, closes), price_basis="hfq"
+            "SH", code, "stock", _bars("SH", code, closes), price_basis="raw"
         )
     return store
 

@@ -185,8 +185,9 @@ class LocalDayImportService:
             combined = pd.concat(pending_frames, ignore_index=True)
             batch = list(batch_counts)
             try:
-                # vipdoc .day 文件是不复权原始价：唯一显式落 raw 的导入路径。
-                # 研究读取只认 hfq，所以本地导入不参与研究与回测（见 MarketDataPage 说明）。
+                # vipdoc .day 文件是不复权原始价，与在线同步同口径，所以同一天会
+                # 直接覆盖在线行（唯一键含 price_basis，只有口径相同才冲突）。研究
+                # 读取也只认 raw，本地导入的数据照常参与研究与回测。
                 written, replaced = self._store.upsert_local_bars(combined, price_basis="raw")
             except (ValueError, TypeError, OSError) as exc:
                 # One bad batch must not sink the whole run. Earlier batches are

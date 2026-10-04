@@ -169,7 +169,7 @@ def test_formula_version_and_corrupt_payload_are_cache_misses(tmp_path: Path, ba
         market="SH",
         code="600000",
         timeframe="daily",
-        price_basis="hfq",
+        price_basis="raw",
         formula_id="indicator_three",
         formula_version="2",
         data_fingerprint=fingerprint,
@@ -741,7 +741,7 @@ def test_sqlite_rows_carry_real_dates_not_iso_strings(tmp_path: Path) -> None:
     """
 
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
-    store.replace_local_bars("SH", "600000", "stock", _bars(80), price_basis="hfq")
+    store.replace_local_bars("SH", "600000", "stock", _bars(80), price_basis="raw")
     IndicatorCache(store).get_or_compute(
         store.read_bars("SH", "600000"), ("indicator_three",), market="SH", code="600000"
     )
@@ -754,7 +754,7 @@ def test_sqlite_rows_carry_real_dates_not_iso_strings(tmp_path: Path) -> None:
         market="SH",
         code="600000",
         timeframe="daily",
-        price_basis="hfq",
+        price_basis="raw",
         formula_id="indicator_three",
         formula_version=FORMULA_REGISTRY.formula("indicator_three").cache_version,
         data_fingerprint=store.data_revision("SH", "600000") or "",
@@ -769,7 +769,7 @@ def test_sqlite_backend_reports_status_and_stale_symbols(tmp_path: Path) -> None
     """运维用到的 status / stale_symbols 在 SQLite 后端上同样成立。"""
 
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
-    store.replace_local_bars("SH", "600000", "stock", _bars(80), price_basis="hfq")
+    store.replace_local_bars("SH", "600000", "stock", _bars(80), price_basis="raw")
     IndicatorCache(store).get_or_compute(
         store.read_bars("SH", "600000"), ("indicator_three",), market="SH", code="600000"
     )
@@ -806,7 +806,7 @@ def test_stale_symbols_compare_formula_version_not_just_fingerprint(
     """
 
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb", indicator_cache_backend=backend)
-    store.replace_local_bars("SH", "600000", "stock", _bars(80), price_basis="hfq")
+    store.replace_local_bars("SH", "600000", "stock", _bars(80), price_basis="raw")
     IndicatorCache(store).get_or_compute(
         store.read_bars("SH", "600000"), ("indicator_three",), market="SH", code="600000"
     )

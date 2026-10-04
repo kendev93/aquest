@@ -819,7 +819,7 @@ class DuckDbBarsStore:
         include_provisional: bool = False,
         price_basis: str | None = DEFAULT_PRICE_BASIS,
     ) -> pd.DataFrame:
-        """读取单标日线，默认只返回统一口径（hfq）的 K 线。
+        """读取单标日线，默认只返回统一口径（raw 不复权）的 K 线。
 
         ``price_basis=None`` 表示不过滤（维护工具需要看到全部口径时用）。
         """
@@ -1030,7 +1030,7 @@ class DuckDbBarsStore:
             f"FROM corporate_actions WHERE {' AND '.join(conditions)} ORDER BY ex_date"
         )
         with self._store.read_session() as connection:
-            return self._store._frame_from_query(connection.execute(query, parameters).df())
+            return self._corporate_actions_frame(connection.execute(query, parameters).df())
 
     def read_corporate_actions_batch(
         self,
@@ -1048,7 +1048,7 @@ class DuckDbBarsStore:
         )
         if not pairs:
             return self._store._frame_from_query(pd.DataFrame())
-        conditions = ", ".join(["(market = ? AND code = ?)"] * len(pairs))
+        conditions = " OR ".join(["(market = ? AND code = ?)"] * len(pairs))
         parameters: list[object] = [value for pair in pairs for value in pair]
         query = (
             "SELECT market, code, ex_date, share_ratio, cash_per_share, factor_ratio, "
@@ -1056,7 +1056,22 @@ class DuckDbBarsStore:
             f"FROM corporate_actions WHERE {conditions} ORDER BY market, code, ex_date"
         )
         with self._store.read_session() as connection:
-            return self._store._frame_from_query(connection.execute(query, parameters).df())
+            return self._corporate_actions_frame(connection.execute(query, parameters).df())
+
+    @staticmethod
+    def _corporate_actions_frame(frame: pd.DataFrame) -> pd.DataFrame:
+        """规范化事件表查询结果。
+
+        刻意不走 ``_frame_from_query``：那个函数是行情专用的，会把 ``trade_date``
+        改名成 ``date``。事件表的日期列叫 ``ex_date``，语义是除权除息日而不是
+        成交日，套用那套改名只会让调用方拿错列。
+        """
+
+        if frame.empty:
+            return frame
+        normalized = frame.copy()
+        normalized["ex_date"] = pd.to_datetime(normalized["ex_date"])
+        return normalized
 
     def corporate_actions_version(self) -> str:
         """全库事件表内容哈希，指标缓存靠它判断"事件有没有变过"。

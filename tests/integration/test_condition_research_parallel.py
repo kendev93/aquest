@@ -63,10 +63,10 @@ def test_parallel_workers_reproduce_in_process_results(tmp_path: Path) -> None:
     store_path = tmp_path / "market.duckdb"
     writer = DuckDbMarketDataStore(store_path)
     writer.replace_local_bars(
-        "SH", "600000", "stock", _bars("SH", "600000", 0.0), price_basis="hfq"
+        "SH", "600000", "stock", _bars("SH", "600000", 0.0), price_basis="raw"
     )
     writer.replace_local_bars(
-        "SZ", "000001", "stock", _bars("SZ", "000001", 3.0), price_basis="hfq"
+        "SZ", "000001", "stock", _bars("SZ", "000001", 3.0), price_basis="raw"
     )
 
     in_process = ConditionResearchService(store=_store(store_path), workers=1).run(_config())
@@ -83,10 +83,10 @@ def test_parallel_workers_report_progress_for_every_stock(tmp_path: Path) -> Non
     store_path = tmp_path / "market.duckdb"
     writer = DuckDbMarketDataStore(store_path)
     writer.replace_local_bars(
-        "SH", "600000", "stock", _bars("SH", "600000", 0.0), price_basis="hfq"
+        "SH", "600000", "stock", _bars("SH", "600000", 0.0), price_basis="raw"
     )
     writer.replace_local_bars(
-        "SZ", "000001", "stock", _bars("SZ", "000001", 3.0), price_basis="hfq"
+        "SZ", "000001", "stock", _bars("SZ", "000001", 3.0), price_basis="raw"
     )
     seen: list[tuple[int, int]] = []
 
@@ -128,7 +128,7 @@ def test_service_refuses_to_start_when_memory_budget_is_too_small(tmp_path: Path
     store_path = tmp_path / "market.duckdb"
     writer = DuckDbMarketDataStore(store_path)
     writer.replace_local_bars(
-        "SH", "600000", "stock", _bars("SH", "600000", 0.0), price_basis="hfq"
+        "SH", "600000", "stock", _bars("SH", "600000", 0.0), price_basis="raw"
     )
 
     service = ConditionResearchService(
