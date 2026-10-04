@@ -33,7 +33,7 @@ def _bars(*rows: tuple[str, str, str, float, str]) -> pd.DataFrame:
                 "volume": 1000.0,
                 "amount": close * 1000,
                 "source": source,
-                "price_basis": "raw",
+                "price_basis": "hfq",
                 "bar_status": "completed",
             }
             for market, code, day, close, source in values
@@ -52,7 +52,7 @@ def test_default_data_dir_uses_indicator_lab_directory(
 
 def test_store_initializes_schema_and_reads_one_symbol(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
-    store.replace_local_bars("SH", "600000", "stock", _bars())
+    store.replace_local_bars("SH", "600000", "stock", _bars(), price_basis="hfq")
 
     frame = store.read_bars("SH", "600000", start_date=date(2024, 1, 1))
 
@@ -64,7 +64,7 @@ def test_store_excludes_provisional_bars_by_default(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     frame = _bars()
     frame.loc[1, "bar_status"] = "provisional"
-    store.replace_local_bars("SH", "600000", "stock", frame)
+    store.replace_local_bars("SH", "600000", "stock", frame, price_basis="hfq")
 
     completed = store.read_bars("SH", "600000")
     all_bars = store.read_bars("SH", "600000", include_provisional=True)
@@ -75,7 +75,7 @@ def test_store_excludes_provisional_bars_by_default(tmp_path: Path) -> None:
 
 def test_online_rows_fill_missing_dates_but_never_replace_local(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
-    store.replace_local_bars("SH", "600000", "stock", _bars())
+    store.replace_local_bars("SH", "600000", "stock", _bars(), price_basis="hfq")
     online = _bars(
         ("SH", "600000", "2024-01-03", 99.0, "online"),
         ("SH", "600000", "2024-01-04", 12.0, "online"),
@@ -88,12 +88,52 @@ def test_online_rows_fill_missing_dates_but_never_replace_local(tmp_path: Path) 
     assert list(frame["source"]) == ["local", "local", "online"]
 
 
+def test_stale_raw_rows_are_invisible_to_reads_and_coverage(tmp_path: Path) -> None:
+    """旧 raw 数据不能伪装成有效行情。
+
+    读取默认只认 hfq：本地 vipdoc 导入落的不复权行（显式 price_basis="raw"，
+    与 local_import 同参）既不会混进研究，也不会让覆盖区间误报"数据还在"——
+    否则全量补齐会跳过这些标的，用户重下之后它们依然是空的。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars(), price_basis="raw")
+
+    assert store.read_bars("SH", "600000").empty
+    ref = next(
+        ref for ref in store.list_instruments(include_missing=True) if ref.code == "600000"
+    )
+    assert (ref.first_date, ref.last_date, ref.bar_count) == (None, None, 0)
+
+    # 在线补上 hfq 后，读取与覆盖区间都只反映 hfq 行；raw 行留在库里，
+    # 仅供维护视角显式读取。
+    store.upsert_online_bars(
+        _bars(
+            ("SH", "600000", "2024-01-02", 10.0, "online"),
+            ("SH", "600000", "2024-01-03", 11.0, "online"),
+        )
+    )
+    frame = store.read_bars("SH", "600000")
+    assert frame["source"].tolist() == ["online", "online"]
+    ref = next(
+        ref for ref in store.list_instruments(include_missing=True) if ref.code == "600000"
+    )
+    assert (ref.first_date, ref.last_date, ref.bar_count) == (
+        date(2024, 1, 2),
+        date(2024, 1, 3),
+        2,
+    )
+    assert len(store.read_bars("SH", "600000", price_basis="raw")) == 2
+    assert len(store.read_bars("SH", "600000", price_basis=None)) == 4
+
+
 def test_batch_query_returns_sorted_instrument_groups(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     store.replace_local_bars(
-        "SH", "600001", "stock", _bars(("SH", "600001", "2024-01-02", 8.0, "local"))
+        "SH", "600001", "stock", _bars(("SH", "600001", "2024-01-02", 8.0, "local")),
+        price_basis="hfq",
     )
-    store.replace_local_bars("SH", "600000", "stock", _bars())
+    store.replace_local_bars("SH", "600000", "stock", _bars(), price_basis="hfq")
 
     frame = store.read_many_bars(
         [InstrumentRef("SH", "600000", "stock"), InstrumentRef("SH", "600001", "stock")]
@@ -108,7 +148,7 @@ def test_batch_query_returns_sorted_instrument_groups(tmp_path: Path) -> None:
 
 def test_batch_query_with_empty_selection_returns_empty_frame(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
-    store.replace_local_bars("SH", "600000", "stock", _bars())
+    store.replace_local_bars("SH", "600000", "stock", _bars(), price_basis="hfq")
 
     assert store.read_many_bars([]).empty
 
@@ -122,7 +162,7 @@ def test_batch_query_can_include_bounded_warmup_bars_before_window(tmp_path: Pat
         ("SH", "600000", "2024-01-04", 13.0, "local"),
         ("SH", "600000", "2024-01-05", 14.0, "local"),
     )
-    store.replace_local_bars("SH", "600000", "stock", rows)
+    store.replace_local_bars("SH", "600000", "stock", rows, price_basis="hfq")
 
     frame = store.read_many_bars(
         [InstrumentRef("SH", "600000", "stock")],
@@ -141,7 +181,7 @@ def test_batch_query_can_include_bounded_warmup_bars_before_window(tmp_path: Pat
 
 def test_store_status_reports_counts_and_range(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
-    store.replace_local_bars("SH", "600000", "stock", _bars())
+    store.replace_local_bars("SH", "600000", "stock", _bars(), price_basis="hfq")
 
     status = store.status()
 
@@ -154,7 +194,7 @@ def test_store_status_reports_counts_and_range(tmp_path: Path) -> None:
 
 def test_store_status_waits_for_an_in_process_writer(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
-    store.replace_local_bars("SH", "600000", "stock", _bars())
+    store.replace_local_bars("SH", "600000", "stock", _bars(), price_basis="hfq")
     writer_started = Event()
     release_writer = Event()
     reader_finished = Event()
@@ -188,7 +228,7 @@ def test_store_status_waits_for_an_in_process_writer(tmp_path: Path) -> None:
 
 def test_store_persists_instrument_name_metadata(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
-    store.replace_local_bars("SH", "600000", "stock", _bars())
+    store.replace_local_bars("SH", "600000", "stock", _bars(), price_basis="hfq")
 
     assert store.update_instrument_names({("SH", "600000"): "浦发银行"}) == 1
 
@@ -199,7 +239,7 @@ def test_store_persists_instrument_name_metadata(tmp_path: Path) -> None:
 def test_read_only_store_can_query_but_cannot_write(tmp_path: Path) -> None:
     database = tmp_path / "market.duckdb"
     store = DuckDbMarketDataStore(database)
-    store.replace_local_bars("SH", "600000", "stock", _bars())
+    store.replace_local_bars("SH", "600000", "stock", _bars(), price_basis="hfq")
     read_only = DuckDbMarketDataStore(database, read_only=True)
 
     assert len(read_only.read_bars("SH", "600000")) == 2
@@ -210,7 +250,7 @@ def test_read_only_store_can_query_but_cannot_write(tmp_path: Path) -> None:
 def test_store_retries_transient_duckdb_lock(tmp_path: Path, monkeypatch) -> None:
     database = tmp_path / "market.duckdb"
     store = DuckDbMarketDataStore(database)
-    store.replace_local_bars("SH", "600000", "stock", _bars())
+    store.replace_local_bars("SH", "600000", "stock", _bars(), price_basis="hfq")
     original_connect = duckdb.connect
     attempts = 0
 
@@ -230,7 +270,7 @@ def test_store_retries_transient_duckdb_lock(tmp_path: Path, monkeypatch) -> Non
 def test_backup_database_creates_recoverable_copy(tmp_path: Path) -> None:
     database = tmp_path / "market.duckdb"
     store = DuckDbMarketDataStore(database)
-    store.replace_local_bars("SH", "600000", "stock", _bars())
+    store.replace_local_bars("SH", "600000", "stock", _bars(), price_basis="hfq")
 
     backup = store.backup_database()
 
@@ -241,7 +281,7 @@ def test_backup_database_creates_recoverable_copy(tmp_path: Path) -> None:
 def test_backup_database_retains_only_the_latest_copy(tmp_path: Path) -> None:
     database = tmp_path / "market.duckdb"
     store = DuckDbMarketDataStore(database)
-    store.replace_local_bars("SH", "600000", "stock", _bars())
+    store.replace_local_bars("SH", "600000", "stock", _bars(), price_basis="hfq")
 
     first = store.backup_database()
     second = store.backup_database()
@@ -355,7 +395,7 @@ def test_schema_upgrade_backfills_provider_for_legacy_online_rows(tmp_path: Path
                 1000.0,
                 10000.0,
                 "online",
-                "raw",
+                "hfq",
                 "completed",
                 datetime.now(),
             ],
@@ -417,7 +457,7 @@ def test_pooled_read_session_reuses_one_connection_per_thread(tmp_path: Path) ->
     """回归：开启复用时同一线程必须复用同一条只读连接（每次建连约 9.5 ms）。"""
 
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
-    store.replace_local_bars("SH", "600000", "stock", _bars())
+    store.replace_local_bars("SH", "600000", "stock", _bars(), price_basis="hfq")
     pooled = DuckDbMarketDataStore(
         tmp_path / "market.duckdb", read_only=True, pool_read_connections=True
     )
@@ -431,7 +471,7 @@ def test_pooled_read_session_reuses_one_connection_per_thread(tmp_path: Path) ->
 
 def test_unpooled_read_session_opens_a_fresh_connection(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
-    store.replace_local_bars("SH", "600000", "stock", _bars())
+    store.replace_local_bars("SH", "600000", "stock", _bars(), price_basis="hfq")
     plain = DuckDbMarketDataStore(tmp_path / "market.duckdb", read_only=True)
 
     with plain.read_session() as first:
@@ -445,7 +485,7 @@ def test_pooled_read_session_is_per_thread(tmp_path: Path) -> None:
     """不同线程各自持有连接，避免跨线程共用 DuckDB 连接。"""
 
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
-    store.replace_local_bars("SH", "600000", "stock", _bars())
+    store.replace_local_bars("SH", "600000", "stock", _bars(), price_basis="hfq")
     pooled = DuckDbMarketDataStore(
         tmp_path / "market.duckdb", read_only=True, pool_read_connections=True
     )
@@ -469,7 +509,8 @@ def test_pooled_read_session_is_per_thread(tmp_path: Path) -> None:
 def test_delete_bars_drops_only_the_requested_source(tmp_path: Path) -> None:
     """撤销一次本地导入：只删 local 行，在线同步写下的行必须留下。
 
-    本地行永久压过在线行，没有这个入口，一次导错的 .day 只能靠重建数据库来收拾。
+    本地写入是"同 key 删 + 插"，被覆盖掉的在线行不会自己回来，所以回退之后
+    这一段要重新在线同步补齐 —— 这是回退入口的语义，不是"恢复覆盖前的数据"。
     """
 
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
@@ -482,8 +523,6 @@ def test_delete_bars_drops_only_the_requested_source(tmp_path: Path) -> None:
     store.upsert_local_bars(_bars(("SH", "600000", "2024-01-02", 10.0, "local")))
 
     assert store.delete_bars(source="local") == 1
-    # 本地写入是"同 key 删 + 插"，被覆盖掉的在线行不会自己回来，所以回退之后
-    # 这一段要重新在线同步补齐 —— 这是回退入口的语义，不是"恢复覆盖前的数据"。
     assert store.read_bars("SH", "600000").empty
     assert store.read_bars("SZ", "000001")["source"].tolist() == ["online"]
 
@@ -495,7 +534,8 @@ def test_delete_bars_honours_the_date_window(tmp_path: Path) -> None:
             ("SH", "600000", "2024-01-02", 10.0, "local"),
             ("SH", "600000", "2024-01-05", 11.0, "local"),
             ("SH", "600000", "2024-01-09", 12.0, "local"),
-        )
+        ),
+        price_basis="hfq",
     )
 
     removed = store.delete_bars(
@@ -572,7 +612,8 @@ def test_delete_bars_recomputes_coverage_from_remaining_rows(tmp_path: Path) -> 
             ("SH", "600000", "2024-01-02", 10.0, "local"),
             ("SH", "600000", "2024-01-05", 11.0, "local"),
             ("SH", "600000", "2024-01-09", 12.0, "local"),
-        )
+        ),
+        price_basis="hfq",
     )
 
     removed = store.delete_bars(
@@ -720,12 +761,15 @@ def test_latest_trade_date_reports_the_newest_completed_bar(tmp_path: Path) -> N
         _bars(
             ("SH", "600000", "2024-01-02", 10.0, "local"),
             ("SH", "600000", "2024-01-05", 11.0, "local"),
-        )
+        ),
+        price_basis="hfq",
     )
     assert store.latest_trade_date() == date(2024, 1, 5)
 
     # 后写的一天更早，不该把最大值拉回去。
-    store.upsert_local_bars(_bars(("SH", "600000", "2024-01-03", 9.0, "local")))
+    store.upsert_local_bars(
+        _bars(("SH", "600000", "2024-01-03", 9.0, "local")), price_basis="hfq"
+    )
     assert store.latest_trade_date() == date(2024, 1, 5)
 
 

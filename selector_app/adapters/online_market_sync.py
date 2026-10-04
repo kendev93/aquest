@@ -480,7 +480,7 @@ class OnlineMarketClient:
         *,
         timeout: float,
     ) -> pd.DataFrame:
-        """Fetch unadjusted daily bars from East Money."""
+        """Fetch backward-adjusted (hfq) daily bars from East Money."""
 
         normalized_symbol = _clean_code(symbol)
         if normalized_symbol is None:
@@ -494,7 +494,9 @@ class OnlineMarketClient:
                 "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f116",
                 "ut": _EASTMONEY_HISTORY_UT,
                 "klt": "101",
-                "fqt": "0",
+                # fqt=2 为后复权：后复权价随历史分红累计漂移但相邻日收益率连续，
+                # 是研究口径的正确选择（前复权历史值会随每次除权重算，无法长期对齐）。
+                "fqt": "2",
                 "secid": f"{market_code}.{normalized_symbol}",
                 "beg": start_date,
                 "end": end_date,
@@ -553,7 +555,7 @@ class OnlineMarketClient:
         *,
         timeout: float,
     ) -> pd.DataFrame:
-        """Fetch raw daily bars from Tencent's year-bounded JSONP endpoint."""
+        """Fetch backward-adjusted (hfq) daily bars from Tencent's year-bounded endpoint."""
 
         start = _parse_compact_date(start_date)
         end = _parse_compact_date(end_date)
@@ -563,15 +565,17 @@ class OnlineMarketClient:
             payload = self._request(
                 _TENCENT_HISTORY_URL,
                 {
-                    "_var": f"kline_day{year}",
-                    "param": f"{symbol},day,{year}-01-01,{year + 1}-12-31,640,",
+                    "_var": f"kline_hfqday{year}",
+                    # param 第 6 段为复权类型：hfq=后复权（留空=不复权）。
+                    "param": f"{symbol},day,{year}-01-01,{year + 1}-12-31,640,hfq",
                     "r": "0.8205512681390605",
                 },
                 timeout,
             )
             data = _mapping_value(payload.get("data"))
             symbol_data = _mapping_value(data.get(symbol))
-            raw_rows = symbol_data.get("day")
+            # 腾讯响应的数据 key 跟随复权类型：hfq 返回 hfqday。
+            raw_rows = symbol_data.get("hfqday")
             if not isinstance(raw_rows, (list, tuple)):
                 continue
             rows = [row for row in raw_rows if isinstance(row, (list, tuple)) and len(row) >= 9]
@@ -891,7 +895,7 @@ class OnlineMarketSync:
                 "tencent",
             ],
             "fallback_policy": "East Money → Tencent",
-            "adjustments": ["raw"],
+            "adjustments": ["hfq"],
             "history": "full_or_incremental",
         }
 

@@ -436,7 +436,8 @@ def _stage_frame(target: StageTarget, frame: pd.DataFrame) -> pd.DataFrame:
     incoming["board"] = target.board
     incoming["source"] = "online"
     incoming["provider"] = target.provider
-    incoming["price_basis"] = "raw"
+    # 行情统一为后复权口径：由数据下载源直接提供后复权日线，本地不做复权换算。
+    incoming["price_basis"] = "hfq"
     incoming["imported_at"] = datetime.now(timezone.utc).replace(tzinfo=None)
     incoming["name"] = target.name
     return incoming.loc[:, list(_STAGE_COLUMNS)].drop_duplicates(

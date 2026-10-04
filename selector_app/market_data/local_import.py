@@ -185,7 +185,9 @@ class LocalDayImportService:
             combined = pd.concat(pending_frames, ignore_index=True)
             batch = list(batch_counts)
             try:
-                written, replaced = self._store.upsert_local_bars(combined)
+                # vipdoc .day 文件是不复权原始价：唯一显式落 raw 的导入路径。
+                # 研究读取只认 hfq，所以本地导入不参与研究与回测（见 MarketDataPage 说明）。
+                written, replaced = self._store.upsert_local_bars(combined, price_basis="raw")
             except (ValueError, TypeError, OSError) as exc:
                 # One bad batch must not sink the whole run. Earlier batches are
                 # already committed, so the honest thing is to report this batch

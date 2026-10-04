@@ -50,7 +50,8 @@ def _online_frame(market: str, code: str, days: list[str]) -> pd.DataFrame:
 
 
 def _bars(store: DuckDbMarketDataStore, market: str, code: str) -> pd.DataFrame:
-    return store.read_bars(market, code)
+    # vipdoc 导入落的是不复权 raw 行（读取默认只认 hfq），维护视角显式按 raw 读。
+    return store.read_bars(market, code, price_basis="raw")
 
 
 def test_import_writes_day_file_bars(tmp_path: Path) -> None:
@@ -74,7 +75,13 @@ def test_import_writes_day_file_bars(tmp_path: Path) -> None:
     assert store.status().instrument_count == 1
 
 
-def test_import_overwrites_online_rows_on_the_same_date(tmp_path: Path) -> None:
+def test_import_coexists_with_online_rows_for_the_same_date(tmp_path: Path) -> None:
+    """本地导入与在线行口径不同（raw vs hfq），同日共存、互不覆盖。
+
+    唯一键含 price_basis：vipdoc 导入不会动在线后复权行；研究读取只看 hfq，
+    本地导入的不复权数据因此不会混进研究与回测。
+    """
+
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     store.upsert_online_bars(
         _online_frame("SH", "600000", ["2026-09-16", "2026-09-17", "2026-09-18"]),
@@ -92,15 +99,16 @@ def test_import_overwrites_online_rows_on_the_same_date(tmp_path: Path) -> None:
     report = LocalDayImportService(store, max_workers=1).import_vipdoc(vipdoc)
 
     assert report["imported_bars"] == 2
-    assert report["replaced_bars"] == 2
-    bars = _bars(store, "SH", "600000")
-    assert len(bars) == 3
-    covered = bars[bars["date"].dt.strftime("%Y-%m-%d").isin(["2026-09-16", "2026-09-17"])]
-    assert (covered["source"] == "local").all()
-    assert covered.iloc[0]["close"] == pytest.approx(8.25)
-    # The date the day file does not carry keeps its online row.
-    untouched = bars[bars["date"].dt.strftime("%Y-%m-%d") == "2026-09-18"]
-    assert untouched.iloc[0]["source"] == "online"
+    assert report["replaced_bars"] == 0
+    # 维护视角按 raw 读：两行本地行都进来了。
+    raw_bars = store.read_bars("SH", "600000", price_basis="raw")
+    assert len(raw_bars) == 2
+    assert (raw_bars["source"] == "local").all()
+    assert raw_bars.iloc[0]["close"] == pytest.approx(8.25)
+    # 研究视角（默认读取）仍然只有在线 hfq 行，一天不少。
+    hfq_bars = store.read_bars("SH", "600000")
+    assert len(hfq_bars) == 3
+    assert (hfq_bars["source"] == "online").all()
 
 
 def test_import_respects_type_and_board_scope(tmp_path: Path) -> None:

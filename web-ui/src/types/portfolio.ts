@@ -201,7 +201,7 @@ export interface PortfolioBacktestResult {
   excluded_st_count?: number
   /** 基准对照（标的池等权买入持有）。窗口太短或池内无可用标的时为 null。 */
   benchmark?: PortfolioBenchmark | null
-  /** 价格口径。当前组合回测使用未复权原始日线。 */
+  /** 价格口径。当前组合回测使用后复权日线（hfq）；旧历史记录可能仍是 raw。 */
   price_basis?: string
   /** 回测结果的固定模型边界；老历史记录可能没有该字段。 */
   limitations?: string[]

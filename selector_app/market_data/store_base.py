@@ -48,6 +48,10 @@ BACKTEST_HISTORY_LIMIT = 20
 # 从 BacktestHistoryType 派生，而不是再抄一份字面量：抄一份就会漏更新。
 _BACKTEST_HISTORY_TYPES = set(get_args(BacktestHistoryType))
 _APP_DATA_DIR_NAME = ".indicator-lab"
+#: 行情统一口径：后复权（hfq）。写入路径全部落 hfq（见 staging/store 的写死点），
+#: 读取路径默认只认这个口径——残留的旧 raw 数据不会被读到，避免同一标的同一天
+#: 两种口径的 K 线混进指标与回测。
+DEFAULT_PRICE_BASIS = "hfq"
 _BAR_COLUMNS = [
     "market",
     "code",
@@ -976,6 +980,7 @@ class _DuckDbStoreBase:
         board: InstrumentBoard | None = None,
         source: str,
         provider: str | None = None,
+        price_basis: str | None = None,
     ) -> pd.DataFrame:
         normalized_market = market.strip().upper()
         normalized_code = code.strip()
@@ -1022,7 +1027,12 @@ class _DuckDbStoreBase:
                 "amount": normalized["amount"].astype(float),
                 "source": source,
                 "provider": provider or ("local" if source == "local" else "tdx"),
-                "price_basis": "raw",
+                # 口径默认统一为 hfq（在线下载已带后复权；本地写入接口的默认值
+                # 也落 hfq，测试/工具播种的数据因此可被默认读取路径看到）。唯一
+                # 显式落 raw 的是本地 vipdoc 导入——local_import 传
+                # price_basis="raw"，因为 .day 文件是不复权的。读取路径默认只认
+                # hfq，raw 行不会混进研究；确有后复权本地文件时可显式传 price_basis。
+                "price_basis": price_basis or DEFAULT_PRICE_BASIS,
                 "bar_status": normalized["bar_status"].astype(str),
                 "imported_at": imported_at,
             }
@@ -1077,7 +1087,7 @@ class _DuckDbStoreBase:
             )
             SELECT ?, ?, ?, ?, ?, ?, MIN(trade_date), MAX(trade_date), COUNT(*), ?, ?, ?
             FROM daily_bars
-            WHERE market = ? AND code = ?
+            WHERE market = ? AND code = ? AND price_basis = ?
             ON CONFLICT (market, code) DO UPDATE SET
                 name = COALESCE(excluded.name, instruments.name),
                 instrument_type = excluded.instrument_type,
@@ -1118,6 +1128,7 @@ class _DuckDbStoreBase:
                 _now(),
                 market,
                 code,
+                DEFAULT_PRICE_BASIS,
                 force_updated_at,
             ],
         )
@@ -1132,6 +1143,9 @@ class _DuckDbStoreBase:
         last_date`` 判断"哪些区间已经有了"：留着旧区间，先删后下就只会补首尾两段，
         中间那段再也回不来（在线行写不回被删掉的日期）。所以删除之后必须按剩余行
         重算一次，删空的标的显式清零。
+
+        覆盖区间只统计 ``DEFAULT_PRICE_BASIS``（hfq）行：残留的旧 raw 行不能让
+        同步误以为"数据还在"而跳过重下。
         """
 
         now = _now()
@@ -1141,16 +1155,17 @@ class _DuckDbStoreBase:
                 first_date = agg.first_date,
                 last_date = agg.last_date,
                 bar_count = agg.bar_count,
-                updated_at = ?
+                updated_at = $1
             FROM (
                 SELECT market, code, MIN(trade_date) AS first_date,
                        MAX(trade_date) AS last_date, COUNT(*) AS bar_count
                 FROM daily_bars
+                WHERE price_basis = $2
                 GROUP BY market, code
             ) AS agg
             WHERE instruments.market = agg.market AND instruments.code = agg.code
             """,
-            [now],
+            [now, DEFAULT_PRICE_BASIS],
         )
         connection.execute(
             """

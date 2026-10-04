@@ -15,6 +15,7 @@ from .staging import StageMergeReport
 from .store_bars import DuckDbBarsStore
 from .store_base import (
     BACKTEST_HISTORY_LIMIT,
+    DEFAULT_PRICE_BASIS,
     SCHEMA_VERSION,
     SCREEN_HISTORY_LIMIT,
     STRATEGY_DISCOVERY_HISTORY_LIMIT,
@@ -128,6 +129,7 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
         name: str | None = None,
         source_path: str | None = None,
         board: InstrumentBoard | None = None,
+        price_basis: str | None = None,
     ) -> int:
         return self._bars.replace_local_bars(
             market,
@@ -137,10 +139,13 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
             name=name,
             source_path=source_path,
             board=board,
+            price_basis=price_basis,
         )
 
-    def upsert_local_bars(self, frame: pd.DataFrame) -> tuple[int, int]:
-        return self._bars.upsert_local_bars(frame)
+    def upsert_local_bars(
+        self, frame: pd.DataFrame, *, price_basis: str | None = None
+    ) -> tuple[int, int]:
+        return self._bars.upsert_local_bars(frame, price_basis=price_basis)
 
     def delete_bars(
         self,
@@ -181,6 +186,7 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
         start_date: date | None = None,
         end_date: date | None = None,
         include_provisional: bool = False,
+        price_basis: str | None = DEFAULT_PRICE_BASIS,
     ) -> pd.DataFrame:
         return self._bars.read_bars(
             market,
@@ -188,6 +194,7 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
             start_date=start_date,
             end_date=end_date,
             include_provisional=include_provisional,
+            price_basis=price_basis,
         )
 
     def has_provisional_bars(self, market: str, code: str) -> bool:

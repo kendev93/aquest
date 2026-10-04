@@ -16,6 +16,7 @@ from .store_base import (
     _BAR_COLUMNS,
     _FRAME_COLUMNS,
     _WRITE_LOCK,
+    DEFAULT_PRICE_BASIS,
     _append_filter,
     _clean_name,
     _DuckDbStoreBase,
@@ -155,8 +156,13 @@ class DuckDbBarsStore:
         name: str | None = None,
         source_path: str | None = None,
         board: InstrumentBoard | None = None,
+        price_basis: str | None = None,
     ) -> int:
-        """Replace one instrument atomically; local data wins over online data."""
+        """Replace one instrument atomically; local data wins over online data.
+
+        ``price_basis`` 缺省按 source 推断为 raw（本地 vipdoc 是不复权的）；
+        确有后复权本地文件时显式传 ``"hfq"``，否则默认读取路径看不到它。
+        """
 
         self._store._require_writer()
         market = market.strip().upper()
@@ -171,6 +177,7 @@ class DuckDbBarsStore:
             instrument_type=instrument_type,
             board=resolved_board,
             source="local",
+            price_basis=price_basis,
         )
         with _WRITE_LOCK, self._store._connect() as connection:
             connection.execute("BEGIN")
@@ -202,7 +209,9 @@ class DuckDbBarsStore:
                 raise
         return len(incoming)
 
-    def upsert_local_bars(self, frame: pd.DataFrame) -> tuple[int, int]:
+    def upsert_local_bars(
+        self, frame: pd.DataFrame, *, price_basis: str | None = None
+    ) -> tuple[int, int]:
         """Write local rows, overwriting any row on the same date.
 
         Local data wins over online data: every incoming ``(market, code,
@@ -210,6 +219,8 @@ class DuckDbBarsStore:
         regardless of whether the previous row came from an online sync or an
         earlier local import. Dates absent from ``frame`` are left untouched so
         a partial import cannot silently drop history.
+
+        ``price_basis`` 缺省按 source 推断为 raw；后复权本地文件显式传 ``"hfq"``。
 
         Returns ``(written_rows, replaced_rows)``.
         """
@@ -243,6 +254,7 @@ class DuckDbBarsStore:
                     instrument_type=cast(InstrumentType, str(instrument_type)),
                     board=cast(InstrumentBoard, str(board)),
                     source="local",
+                    price_basis=price_basis,
                 )
             )
         if not normalized_parts:
@@ -780,11 +792,20 @@ class DuckDbBarsStore:
         start_date: date | None = None,
         end_date: date | None = None,
         include_provisional: bool = False,
+        price_basis: str | None = DEFAULT_PRICE_BASIS,
     ) -> pd.DataFrame:
+        """读取单标日线，默认只返回统一口径（hfq）的 K 线。
+
+        ``price_basis=None`` 表示不过滤（维护工具需要看到全部口径时用）。
+        """
+
         market = market.strip().upper()
         code = code.strip()
         conditions = ["market = ?", "code = ?"]
         parameters: list[object] = [market, code]
+        if price_basis is not None:
+            conditions.append("price_basis = ?")
+            parameters.append(price_basis)
         if start_date is not None:
             conditions.append("trade_date >= ?")
             parameters.append(start_date)
@@ -815,8 +836,8 @@ class DuckDbBarsStore:
         所以单独开一个口子。
         """
 
-        conditions = ["bars.bar_status = 'completed'"]
-        parameters: list[object] = []
+        conditions = ["bars.bar_status = 'completed'", "bars.price_basis = ?"]
+        parameters: list[object] = [DEFAULT_PRICE_BASIS]
         requested = None if instruments is None else list(instruments)
         symbols = requested or []
         if requested is not None and not symbols:
@@ -857,6 +878,8 @@ class DuckDbBarsStore:
         with self._store._connect(read_only=True) as connection:
             row = connection.execute(
                 "SELECT MAX(trade_date) FROM daily_bars WHERE bar_status = 'completed'"
+                " AND price_basis = ?",
+                [DEFAULT_PRICE_BASIS],
             ).fetchone()
         if row is None or row[0] is None:
             return None
@@ -943,8 +966,9 @@ class DuckDbBarsStore:
             raise ValueError("行情预热 K 线数量必须是非负整数")
         if warmup_bars > 0 and start_date is None:
             raise ValueError("行情预热 K 线需要设置开始日期")
-        conditions: list[str] = []
-        parameters: list[object] = []
+        # 统一口径：只读 hfq，防止残留的旧 raw 数据混进全市场研究。
+        conditions: list[str] = ["bars.price_basis = ?"]
+        parameters: list[object] = [DEFAULT_PRICE_BASIS]
         requested = None if instruments is None else list(instruments)
         symbols = requested or []
         if requested is not None and not symbols:
@@ -988,7 +1012,7 @@ class DuckDbBarsStore:
                     window_query = (
                         f"SELECT {selected_columns} FROM daily_bars AS bars{join_clause}{where}"
                     )
-                    prior_conditions = ["bars.trade_date < ?"]
+                    prior_conditions = ["bars.price_basis = ?", "bars.trade_date < ?"]
                     if not include_provisional:
                         prior_conditions.append("bars.bar_status = 'completed'")
                     prior_where = " WHERE " + " AND ".join(prior_conditions)
@@ -1003,7 +1027,7 @@ class DuckDbBarsStore:
                         f"SELECT {output_columns} FROM prior_rows WHERE warmup_rank <= ?"
                         ") AS selected ORDER BY selected.market, selected.code, selected.trade_date"
                     )
-                    prior_parameters = [start_date, warmup_bars]
+                    prior_parameters = [DEFAULT_PRICE_BASIS, start_date, warmup_bars]
                     result = connection.execute(
                         query,
                         [*parameters, *prior_parameters],

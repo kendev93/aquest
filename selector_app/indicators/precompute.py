@@ -28,6 +28,7 @@ from selector_app.indicators.cache import (
     merge_results,
 )
 from selector_app.market_data.models import InstrumentBoard, InstrumentType, StockRef
+from selector_app.market_data.store_base import DEFAULT_PRICE_BASIS
 
 logger = logging.getLogger(__name__)
 
@@ -495,11 +496,11 @@ def _cache_int(value: object) -> int:
 
 def _frame_price_basis(frame: pd.DataFrame) -> str:
     if "price_basis" not in frame.columns:
-        return "raw"
+        return DEFAULT_PRICE_BASIS
     values = tuple(frame["price_basis"].dropna().astype(str).unique())
     if len(values) > 1:
         raise ValueError("同一行情序列不能混用多个价格口径")
-    return values[0] if values else "raw"
+    return values[0] if values else DEFAULT_PRICE_BASIS
 
 
 def _year_windows(years: int, end_year: int | None = None) -> list[tuple[date, date]]:

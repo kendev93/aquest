@@ -24,9 +24,9 @@ SellValueOperator = Literal["gte", "lte"]
 CompareOperator = Literal["gt", "gte", "lt", "lte"]
 PositionMode = Literal["full", "fixed"]
 PortfolioJsonValue = object
-PORTFOLIO_BACKTEST_PRICE_BASIS: Literal["raw"] = "raw"
+PORTFOLIO_BACKTEST_PRICE_BASIS: Literal["hfq"] = "hfq"
 PORTFOLIO_BACKTEST_LIMITATIONS = (
-    "行情使用未复权原始日线；除权除息未校准，现金分红未计入收益。",
+    "行情使用后复权日线（hfq）：除权除息已校准，现金分红计入持有收益。",
     "仅模拟单一做多组合和固定持仓槽位，不模拟实盘下单、融资融券或多策略资金隔离。",
     "成交按日线价格及配置的费用、滑点模拟；不模拟涨跌停撮合、停牌成交限制或成交量冲击。",
     "这是历史模拟，不代表未来收益，也不是投资建议。",
@@ -372,7 +372,7 @@ class PortfolioBacktestReport:
     today_candidates: Mapping[str, PortfolioJsonValue] = field(default_factory=dict)
     #: 最近行情日账户快照，持仓含卖出指标读数。
     current_state: Mapping[str, PortfolioJsonValue] | None = None
-    price_basis: Literal["raw"] = PORTFOLIO_BACKTEST_PRICE_BASIS
+    price_basis: Literal["hfq"] = PORTFOLIO_BACKTEST_PRICE_BASIS
     limitations: tuple[str, ...] = PORTFOLIO_BACKTEST_LIMITATIONS
     single_security_mode: bool = False
 

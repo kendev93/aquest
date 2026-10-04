@@ -100,7 +100,8 @@ def test_fetch_daily_history_maps_eastmoney_kline_rows() -> None:
     assert frame["成交额"].tolist() == [10500.0, 12200.0]
     assert transport.calls[0][1]["secid"] == "1.600000"
     assert transport.calls[0][1]["klt"] == "101"
-    assert transport.calls[0][1]["fqt"] == "0"
+    # fqt=2：后复权。除权除息失真问题靠它解决，别再调回去。
+    assert transport.calls[0][1]["fqt"] == "2"
 
 
 @pytest.mark.parametrize(
@@ -130,7 +131,7 @@ def test_fetch_tencent_daily_history_decodes_jsonp_and_normalizes_units() -> Non
     # 原始成交量 100000 手、成交额 10500 万元 ⇒ 均价 10.5 = close，量纲自洽。
     transport = FakeTransport(
         [
-            'kline_day2026={"code":0,"data":{"sh600000":{"day":['
+            'kline_hfqday2026={"code":0,"data":{"sh600000":{"hfqday":['
             '["2026-09-10","10.0","10.5","10.6","9.9","100000.00",{},'
             '"1.20","10500.00","0.00","0.00"]'
             "]}}}"
@@ -148,7 +149,7 @@ def test_fetch_tencent_daily_history_decodes_jsonp_and_normalizes_units() -> Non
     assert frame["date"].tolist() == [pd.Timestamp("2026-09-10").date()]
     assert frame["volume"].tolist() == [100000.0]
     assert frame["amount"].tolist() == [105000000.0]
-    assert transport.calls[0][1]["param"] == "sh600000,day,2026-01-01,2027-12-31,640,"
+    assert transport.calls[0][1]["param"] == "sh600000,day,2026-01-01,2027-12-31,640,hfq"
 
 
 @pytest.mark.parametrize(
@@ -179,9 +180,9 @@ def test_fetch_tencent_daily_history_scales_units_per_board(
     symbol = f"{market.lower()}{code}"
     transport = FakeTransport(
         [
-            'kline_day2026={"code":0,"data":{"'
+            'kline_hfqday2026={"code":0,"data":{"'
             f"{symbol}"
-            '":{"day":['
+            '":{"hfqday":['
             '["2026-09-10","10.0","10.5","10.6","9.9","100000.00",{},'
             '"1.20","10500.00","0.00","0.00"]'
             "]}}}"

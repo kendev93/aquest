@@ -26,9 +26,12 @@ from selector_app.formulas.custom import (
 from selector_app.formulas.registry import FORMULA_REGISTRY, FormulaDefinition, FormulaRegistry
 from selector_app.formulas.types import FormulaResult
 from selector_app.market_data.store import DuckDbMarketDataStore
+from selector_app.market_data.store_base import DEFAULT_PRICE_BASIS
 
 _TIMEFRAME = "daily"
-_DEFAULT_PRICE_BASIS = "raw"
+# 行情口径的全局默认（hfq）。仅当传入 frame 没有 price_basis 列时兜底；
+# 正常读取路径的 frame 自带该列，按实际口径缓存。
+_DEFAULT_PRICE_BASIS = DEFAULT_PRICE_BASIS
 _FINGERPRINT_COLUMNS = ("date", "open", "high", "low", "close", "volume", "amount")
 _OPTIONAL_FINGERPRINT_COLUMNS = ("bar_status", "price_basis")
 _MAX_CACHE_BLOB_BYTES = 64 * 1024 * 1024

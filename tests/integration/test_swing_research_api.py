@@ -31,7 +31,7 @@ def _bars(market: str, code: str, closes: list[float]) -> pd.DataFrame:
                 "volume": 1_000.0,
                 "amount": close * 1_000,
                 "source": "local",
-                "price_basis": "raw",
+                "price_basis": "hfq",
                 "bar_status": "completed",
             }
             for day, close in zip(dates, closes, strict=True)
@@ -44,7 +44,9 @@ def _store(tmp_path: Path) -> DuckDbMarketDataStore:
     peak = 10.0 * (1.01**30)
     closes = [10.0 * (1.01**index) for index in range(31)]
     closes += [peak * (0.99**index) for index in range(1, 20)]
-    store.replace_local_bars("SH", "600000", "stock", _bars("SH", "600000", closes))
+    store.replace_local_bars(
+        "SH", "600000", "stock", _bars("SH", "600000", closes), price_basis="hfq"
+    )
     return store
 
 
@@ -58,7 +60,9 @@ def _wide_store(tmp_path: Path) -> DuckDbMarketDataStore:
         closes = [10.0]
         for _ in range(79):
             closes.append(closes[-1] * (1 + float(rng.normal(0.001, 0.02))))
-        store.replace_local_bars("SH", code, "stock", _bars("SH", code, closes))
+        store.replace_local_bars(
+            "SH", code, "stock", _bars("SH", code, closes), price_basis="hfq"
+        )
     return store
 
 
