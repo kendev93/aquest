@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from .adjustment import CorporateAction
 from .health import DEFAULT_EXAMPLE_LIMIT, HealthReport
 from .models import InstrumentBoard, InstrumentRef, InstrumentType, StockRef
 from .staging import StageMergeReport
@@ -199,6 +200,39 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
 
     def has_provisional_bars(self, market: str, code: str) -> bool:
         return self._bars.has_provisional_bars(market, code)
+
+    def upsert_corporate_actions(
+        self,
+        actions: Sequence[CorporateAction],
+        *,
+        source: str = "online",
+        provider: str = "eastmoney",
+    ) -> int:
+        return self._bars.upsert_corporate_actions(actions, source=source, provider=provider)
+
+    def read_corporate_actions(
+        self,
+        market: str,
+        code: str,
+        *,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> pd.DataFrame:
+        return self._bars.read_corporate_actions(
+            market,
+            code,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+    def read_corporate_actions_batch(
+        self,
+        instruments: Iterable[InstrumentRef | StockRef],
+    ) -> pd.DataFrame:
+        return self._bars.read_corporate_actions_batch(instruments)
+
+    def corporate_actions_version(self) -> str:
+        return self._bars.corporate_actions_version()
 
     def list_provisional_symbols(self) -> set[tuple[str, str]]:
         return self._bars.list_provisional_symbols()

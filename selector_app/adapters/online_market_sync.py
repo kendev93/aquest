@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
+from selector_app.market_data.adjustment import CorporateAction, compute_factor_ratio
 from selector_app.market_data.day_format import classify_board, classify_instrument
 from selector_app.market_data.models import (
     InstrumentBoard,
@@ -84,6 +85,7 @@ _EASTMONEY_CATALOG_HOSTS = (
     "88.push2.eastmoney.com",
 )
 _EASTMONEY_HISTORY_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+_EASTMONEY_SHAREBONUS_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
 _TENCENT_HISTORY_URL = "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/newfqkline/get"
 _EASTMONEY_PAGE_SIZE = 5_000
 # What the server actually returns per page when ``pz`` asks for more.
@@ -110,6 +112,11 @@ _EMPTY_COLUMNS = [
 # ``_STOCK_BOARDS`` (main/star/chinext) server-side; B shares and the Beijing
 # exchange - which this project's SH/SZ market model does not cover - stay out.
 _EASTMONEY_STOCK_FILTER = "m:0 t:6,m:0 t:80,m:1 t:2,m:1 t:23"
+
+#: 分红送配明细单页上限。每只股票的历史事件数在 30 条上下（浦发 26 条），
+#: 单页 100 条足够覆盖绝大多数标的，个别超出的靠翻页补齐。
+_EASTMONEY_SHAREBONUS_PAGE_SIZE = 100
+_EASTMONEY_SHAREBONUS_MAX_PAGES = 20
 
 
 class OnlineProviderError(RuntimeError):
@@ -150,6 +157,15 @@ class OnlineModule(Protocol):
         *,
         timeout: float,
     ) -> pd.DataFrame: ...
+
+    def fetch_corporate_actions(
+        self,
+        market: MarketCode,
+        code: str,
+        *,
+        prev_close_for: Callable[[date], float | None],
+        timeout: float,
+    ) -> tuple[list[CorporateAction], list[date]]: ...
 
 
 OnlineModuleFactory = Callable[[], OnlineModule]
@@ -328,6 +344,65 @@ def _mapping_rows(value: object) -> list[Mapping[str, object]]:
     return []
 
 
+def _number(value: object, default: float = 0.0) -> float:
+    """宽松取数：eastmoney 的比例字段常是 ``null`` 或字符串。"""
+
+    if value is None or isinstance(value, bool):
+        return default
+    try:
+        parsed = float(cast(float, value))
+    except (TypeError, ValueError):
+        return default
+    return parsed if np.isfinite(parsed) else default
+
+
+def _parse_sharebonus_rows(
+    rows: Sequence[Mapping[str, object]],
+) -> list[tuple[date, float, float, str]]:
+    """从分红送配响应里解出 ``(除权日, 每股股本扩张倍数, 每股派息, 类型)``。
+
+    字段口径实测自 eastmoney ``RPT_SHAREBONUS_DET``（用 600000 逐条比对过 6 个
+    历史除权跳空日，全部吻合）：
+
+    - ``BONUS_RATIO`` 是**每 10 股**送股数，10 送 3 记 3
+    - ``IT_RATIO`` 是**每 10 股**转增数，10 转 5 记 5
+    - ``PRETAX_BONUS_RMB`` 是**每 10 股**税前派息（元），10 派 4.2 元记 4.2
+
+    这里统一折算成每股口径。
+
+    只保留 ``ASSIGN_PROGRESS`` 含"实施"的记录：预案、股东大会通过但未实施的都
+    可能被撤回或调整，写进事件表就是一条错数据 —— 而错因子会静默污染全部历史
+    指标，比缺一条事件危险得多。
+
+    这个接口**不含配股与回购注销**（响应里没有配股价字段）。2015 年之后配股极少，
+    残留影响有限，但校验工具要能报出来。
+    """
+
+    parsed: list[tuple[date, float, float, str]] = []
+    for item in rows:
+        if "实施" not in str(item.get("ASSIGN_PROGRESS") or ""):
+            continue
+        raw_date = str(item.get("EX_DIVIDEND_DATE") or "").strip()
+        if len(raw_date) < 10:
+            continue
+        try:
+            ex_date = date.fromisoformat(raw_date[:10])
+        except ValueError:
+            continue
+        share_ratio = (_number(item.get("BONUS_RATIO")) + _number(item.get("IT_RATIO"))) / 10.0
+        cash_per_share = _number(item.get("PRETAX_BONUS_RMB")) / 10.0
+        if share_ratio <= 0 and cash_per_share <= 0:
+            continue
+        if share_ratio > 0 and cash_per_share > 0:
+            action_type = "mixed"
+        elif share_ratio > 0:
+            action_type = "bonus"
+        else:
+            action_type = "dividend"
+        parsed.append((ex_date, share_ratio, cash_per_share, action_type))
+    return parsed
+
+
 def _nonnegative_int(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, (int, float, str, bytes, bytearray)):
         return 0
@@ -471,6 +546,84 @@ class OnlineMarketClient:
         if not dates:
             raise OnlineDataError("East Money 指数日线未返回有效交易日")
         return tuple(sorted(dates))
+
+    def fetch_corporate_actions(
+        self,
+        market: MarketCode,
+        code: str,
+        *,
+        prev_close_for: Callable[[date], float | None],
+        timeout: float,
+    ) -> tuple[list[CorporateAction], list[date]]:
+        """拉取分红送转明细，并用**本地**前收盘价算好每条事件的因子增量。
+
+        ``prev_close_for`` 必须由调用方从本地行情提供：因子是用除权前收盘价算的，
+        拿 provider 的价格当基准等于把复权锚在另一个数据源上，raw 与复权就再也
+        对不上。
+
+        返回 ``(可写入事件, 算不出因子被丢弃的除权日)``。第二条不是可以忽略的
+        细节 —— 丢掉一条事件会在那个除权日留下一处价格跳空，污染该指标，调用方
+        必须能看见并报出来，不能静默丢掉。
+        """
+
+        normalized_symbol = _clean_code(code)
+        if normalized_symbol is None:
+            raise OnlineDataError(f"股票代码无效: {code}")
+        rows: list[Mapping[str, object]] = []
+        page = 1
+        pages = 1
+        while page <= pages and page <= _EASTMONEY_SHAREBONUS_MAX_PAGES:
+            payload = self._request(
+                _EASTMONEY_SHAREBONUS_URL,
+                {
+                    "reportName": "RPT_SHAREBONUS_DET",
+                    "columns": "ALL",
+                    "filter": f'(SECURITY_CODE="{normalized_symbol}")',
+                    "pageNumber": page,
+                    "pageSize": _EASTMONEY_SHAREBONUS_PAGE_SIZE,
+                    "sortColumns": "EX_DIVIDEND_DATE",
+                    "sortTypes": -1,
+                    "source": "WEB",
+                    "client": "WEB",
+                },
+                timeout,
+            )
+            result = _mapping_value(_mapping_value(payload.get("result")))
+            page_rows = _mapping_rows(result.get("data"))
+            if not page_rows:
+                break
+            rows.extend(page_rows)
+            pages = int(_number(result.get("pages"), 1.0)) or 1
+            page += 1
+
+        actions: list[CorporateAction] = []
+        skipped: list[date] = []
+        for ex_date, share_ratio, cash_per_share, action_type in _parse_sharebonus_rows(rows):
+            prev_close = prev_close_for(ex_date)
+            if prev_close is None or prev_close <= 0:
+                skipped.append(ex_date)
+                continue
+            try:
+                factor_ratio = compute_factor_ratio(
+                    prev_close=prev_close,
+                    share_ratio=share_ratio,
+                    cash_per_share=cash_per_share,
+                )
+            except ValueError:
+                skipped.append(ex_date)
+                continue
+            actions.append(
+                CorporateAction(
+                    market=str(market),
+                    code=normalized_symbol,
+                    ex_date=ex_date,
+                    share_ratio=share_ratio,
+                    cash_per_share=cash_per_share,
+                    factor_ratio=factor_ratio,
+                    action_type=action_type,
+                )
+            )
+        return actions, skipped
 
     def fetch_daily_history(
         self,

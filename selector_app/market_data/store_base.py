@@ -329,6 +329,32 @@ class _DuckDbStoreBase:
                 )
                 """
             )
+            # 除权除息事件：复权因子的唯一来源。刻意不落盘任何复权后的价格 ——
+            # 价格一旦被写成"结果"就会随每次除权重算，历史不可复现。这里只存事件
+            # 与由事件算出的单次因子增量，因子按时间顺序累乘即可得到任意区间的
+            # 连续价格序列，且因子只依赖事件日之前发生的事件，历史值永不变。
+            #
+            # ``factor_ratio`` 是 NOT NULL：算不出这条事件的因子就不该写进来。
+            # 宁可缺一条事件（校验工具会报出来，表现为某个除权日仍有跳空），
+            # 也不能写一条错因子去静默污染全部历史指标。
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS corporate_actions (
+                    market VARCHAR NOT NULL,
+                    code VARCHAR NOT NULL,
+                    ex_date DATE NOT NULL,
+                    share_ratio DOUBLE NOT NULL DEFAULT 0,
+                    cash_per_share DOUBLE NOT NULL DEFAULT 0,
+                    factor_ratio DOUBLE NOT NULL,
+                    prev_close DOUBLE,
+                    action_type VARCHAR NOT NULL,
+                    source VARCHAR NOT NULL,
+                    provider VARCHAR NOT NULL DEFAULT 'eastmoney',
+                    imported_at TIMESTAMP NOT NULL,
+                    PRIMARY KEY (market, code, ex_date)
+                )
+                """
+            )
             self._migrate_schema(connection, existing_version or 0)
             connection.execute(
                 """

@@ -9,6 +9,7 @@ from typing import cast
 
 import pandas as pd
 
+from .adjustment import CorporateAction
 from .day_format import classify_board
 from .models import InstrumentBoard, InstrumentRef, InstrumentType, MarketCode, StockRef
 from .staging import StageMergeReport
@@ -22,6 +23,30 @@ from .store_base import (
     _DuckDbStoreBase,
     _now,
 )
+
+
+def corporate_actions_from_frame(frame: pd.DataFrame) -> list[CorporateAction]:
+    """把事件表查询结果转成 :class:`CorporateAction` 列表。
+
+    放在 store 层是因为"行 ↔ 领域对象"的转换是这一层的职责：调用方（回测上下文、
+    指标预计算、校验工具）都只该面对领域对象，不该自己拼 dataclass。
+    """
+
+    if frame.empty:
+        return []
+    dates = pd.to_datetime(frame["ex_date"]).dt.date
+    return [
+        CorporateAction(
+            market=str(row.market),
+            code=str(row.code),
+            ex_date=ex_date,
+            share_ratio=float(row.share_ratio),
+            cash_per_share=float(row.cash_per_share),
+            factor_ratio=float(row.factor_ratio),
+            action_type=str(row.action_type),
+        )
+        for ex_date, row in zip(dates, frame.itertuples(index=False))
+    ]
 
 
 def _sql_path_literal(path: Path) -> str:
@@ -921,6 +946,140 @@ class DuckDbBarsStore:
                 [dates[0]],
             )
         return len(dates)
+
+    def upsert_corporate_actions(
+        self,
+        actions: Sequence[CorporateAction],
+        *,
+        source: str = "online",
+        provider: str = "eastmoney",
+    ) -> int:
+        """写入分红送转事件，按 ``(market, code, ex_date)`` 覆盖。
+
+        写入本身就是一道校验：``factor_ratio`` 在 :class:`CorporateAction` 构造时
+        就已验证为正有限数，算不出因子的事件根本进不来 —— 这是刻意的，宁可缺
+        一条事件（校验工具会报出来，表现为某个除权日仍有跳空），也不能写一条错
+        因子去静默污染全部历史指标。
+        """
+
+        self._store._require_writer()
+        normalized_source = source.strip()
+        normalized_provider = provider.strip()
+        if not normalized_source or not normalized_provider:
+            raise ValueError("事件来源与 provider 不能为空")
+        now = _now()
+        rows = [
+            (
+                action.market.strip().upper(),
+                action.code.strip(),
+                action.ex_date,
+                float(action.share_ratio),
+                float(action.cash_per_share),
+                float(action.factor_ratio),
+                action.action_type.strip() or "dividend",
+                normalized_source,
+                normalized_provider,
+                now,
+            )
+            for action in actions
+        ]
+        if not rows:
+            return 0
+        with _WRITE_LOCK, self._store._connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO corporate_actions (
+                    market, code, ex_date, share_ratio, cash_per_share,
+                    factor_ratio, action_type, source, provider, imported_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (market, code, ex_date) DO UPDATE SET
+                    share_ratio = excluded.share_ratio,
+                    cash_per_share = excluded.cash_per_share,
+                    factor_ratio = excluded.factor_ratio,
+                    action_type = excluded.action_type,
+                    source = excluded.source,
+                    provider = excluded.provider,
+                    imported_at = excluded.imported_at
+                """,
+                rows,
+            )
+        return len(rows)
+
+    def read_corporate_actions(
+        self,
+        market: str,
+        code: str,
+        *,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> pd.DataFrame:
+        """读取单标的事件，按除权日升序。"""
+
+        conditions = ["market = ?", "code = ?"]
+        parameters: list[object] = [market.strip().upper(), code.strip()]
+        if start_date is not None:
+            conditions.append("ex_date >= ?")
+            parameters.append(start_date)
+        if end_date is not None:
+            conditions.append("ex_date <= ?")
+            parameters.append(end_date)
+        query = (
+            "SELECT market, code, ex_date, share_ratio, cash_per_share, factor_ratio, "
+            "action_type, source, provider, imported_at "
+            f"FROM corporate_actions WHERE {' AND '.join(conditions)} ORDER BY ex_date"
+        )
+        with self._store.read_session() as connection:
+            return self._store._frame_from_query(connection.execute(query, parameters).df())
+
+    def read_corporate_actions_batch(
+        self,
+        instruments: Iterable[InstrumentRef | StockRef],
+    ) -> pd.DataFrame:
+        """一次取回整批标的的事件，供全市场预加载使用。
+
+        逐标的查事件表会在全市场 5000+ 只的规模下变成 5000 次查询。事件表本身很小
+        （五千只 × 平均三十个事件 ≈ 15 万行），按 ``(market, code)`` 组合条件一次
+        拉回来更划算，也避免把 N+1 带进回测的预热路径。
+        """
+
+        pairs = sorted(
+            {(item.market.strip().upper(), item.code.strip()) for item in instruments}
+        )
+        if not pairs:
+            return self._store._frame_from_query(pd.DataFrame())
+        conditions = ", ".join(["(market = ? AND code = ?)"] * len(pairs))
+        parameters: list[object] = [value for pair in pairs for value in pair]
+        query = (
+            "SELECT market, code, ex_date, share_ratio, cash_per_share, factor_ratio, "
+            "action_type, source, provider, imported_at "
+            f"FROM corporate_actions WHERE {conditions} ORDER BY market, code, ex_date"
+        )
+        with self._store.read_session() as connection:
+            return self._store._frame_from_query(connection.execute(query, parameters).df())
+
+    def corporate_actions_version(self) -> str:
+        """全库事件表内容哈希，指标缓存靠它判断"事件有没有变过"。
+
+        用内容聚合哈希而不是 ``COUNT`` / ``MAX(imported_at)``：后者在事件被改写
+        成相同时间戳时会漏判，而哈希直接反映内容。事件全空时返回空串 —— 调用方
+        把它当成"没有事件"处理即可，不必特殊分支。
+        """
+
+        with self._store.read_session() as connection:
+            row = connection.execute(
+                """
+                SELECT md5(string_agg(
+                    market || '|' || code || '|' || CAST(ex_date AS VARCHAR) || '|' ||
+                    CAST(share_ratio AS VARCHAR) || '|' || CAST(cash_per_share AS VARCHAR)
+                    || '|' || CAST(factor_ratio AS VARCHAR),
+                    '\n' ORDER BY market, code, ex_date
+                )) AS digest
+                FROM corporate_actions
+                """
+            ).fetchone()
+        digest = row[0] if row else None
+        return str(digest) if digest else ""
 
     def latest_market_trading_date(self, on_or_before: date) -> date | None:
         with self._store._connect(read_only=True) as connection:
