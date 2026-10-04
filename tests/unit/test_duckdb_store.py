@@ -797,3 +797,55 @@ def test_market_trading_calendar_persists_sessions_and_exposes_sync_check_state(
     assert status.market_calendar_updated_at is not None
     assert status.last_auto_sync_check_date == "2026-10-02"
     assert status.last_auto_sync_check_session == "2026-09-30"
+
+
+def test_trading_calendar_can_be_rebuilt_from_bars(tmp_path: Path) -> None:
+    """日历表空着的时候，``latest_market_trading_date`` 一直返回 ``None``。
+
+    而且不报错。自动同步写日历的整段逻辑被"收盘后才执行"和"上游提供
+    ``fetch_trading_calendar``"两个前提卡着，任何一环不满足就静默跳过，表就一直
+    空着 —— 只有真正去查那个方法时才会发现拿到的是空值。从行情反推是等价的修复。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.upsert_local_bars(
+        _bars(
+            ("SH", "600000", "2024-01-02", 10.0, "local"),
+            ("SH", "600000", "2024-01-03", 11.0, "local"),
+            ("SH", "600000", "2024-01-04", 12.0, "local"),
+        ),
+        price_basis="raw",
+    )
+
+    assert store.latest_market_trading_date(date(2024, 1, 3)) is None
+
+    assert store.rebuild_trading_calendar_from_bars() == 3
+    assert store.latest_market_trading_date(date(2024, 1, 3)) == date(2024, 1, 3)
+    # 查询区间内没有交易日时，向前取最近的那一天
+    assert store.latest_market_trading_date(date(2024, 1, 10)) == date(2024, 1, 4)
+    # 来源要如实标成从 bar 反推，不能冒充交易所口径
+    assert store.status().market_calendar_source == "derived_from_bars"
+
+
+def test_rebuild_keeps_provider_sessions_beyond_last_bar(tmp_path: Path) -> None:
+    """重建不能冲掉自动同步写入的、比最后一根 bar 更晚的交易日。
+
+    收盘后行情还没补上时，provider 日历会先记下当天；这时重建若按 bar 的范围
+    收窄，日历就会回退一天，"今天是不是交易日"反而答错。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.upsert_local_bars(
+        _bars(
+            ("SH", "600000", "2024-01-02", 10.0, "local"),
+            ("SH", "600000", "2024-01-03", 11.0, "local"),
+        ),
+        price_basis="raw",
+    )
+    store.save_market_trading_calendar(
+        [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 5)],
+        source="eastmoney_sse_composite",
+    )
+
+    assert store.rebuild_trading_calendar_from_bars() == 2
+    assert store.latest_market_trading_date(date(2024, 1, 10)) == date(2024, 1, 5)

@@ -240,6 +240,9 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
     def read_trading_dates(self) -> list[date]:
         return self._bars.read_trading_dates()
 
+    def rebuild_trading_calendar_from_bars(self) -> int:
+        return self._bars.rebuild_trading_calendar_from_bars()
+
     def list_provisional_symbols(self) -> set[tuple[str, str]]:
         return self._bars.list_provisional_symbols()
 

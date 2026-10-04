@@ -81,3 +81,30 @@ def backfill_corporate_actions(
     if report.written:
         _invalidate_indicator_cache(request)
     return {"data": report.to_dict()}
+
+
+@router.post("/calendar/rebuild", response_model=None)
+def rebuild_trading_calendar(
+    request: Request,
+) -> dict[str, object] | JSONResponse:
+    """用行情自身的日期并集重建交易日历表。
+
+    日历表正常由自动同步从上证综指写入，但那整段逻辑被"收盘后执行"和
+    "上游提供 fetch_trading_calendar"两个前提卡着，任一不满足就静默跳过。
+    表空掉时 :meth:`latest_market_trading_date` 一直返回 ``None`` 且不报错，
+    所以这里给一个显式入口，清库重下之后也能重建。
+    """
+
+    try:
+        written = _store(request).rebuild_trading_calendar_from_bars()
+    except (MarketDataStoreError, duckdb.Error, OSError, RuntimeError) as exc:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "error": {
+                    "code": "trading_calendar_rebuild_error",
+                    "message": _storage_error_message(exc),
+                }
+            },
+        )
+    return {"data": {"trading_days": written, "source": "derived_from_bars"}}

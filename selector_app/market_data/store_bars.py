@@ -1119,6 +1119,27 @@ class DuckDbBarsStore:
         # 纯 date 混进 bisect 会抛 TypeError，所以在这里强制降级成 date。
         return list(frame["trade_date"].dt.date)
 
+    def rebuild_trading_calendar_from_bars(self) -> int:
+        """用行情自身的日期并集重建交易日历表，返回写入天数。
+
+        这张表正常由 ``auto_sync`` 从上证综指日线写入，但它被卡在两个前提上：
+        收盘后才执行（``AUTO_SYNC_AFTER_CLOSE``），且依赖上游 adapter 提供
+        ``fetch_trading_calendar``。任何一环不满足就整段静默跳过 —— 表会一直是
+        空的，而 :meth:`latest_market_trading_date` 会一直返回 ``None``，没有
+        任何报错指向它。
+
+        从 bar 反推是等价的：日线本来就只在交易日生成，全市场没有任何一天是
+        "所有股票都停牌"的，所以日期并集就是实际交易日历。``source`` 标成
+        ``derived_from_bars`` 而不是冒充 provider，审计时能看出这不是交易所口径。
+
+        只删除早于最早 bar 的记录，所以 provider 写入的、更靠近今天的日历不受影响。
+        """
+
+        dates = self.read_trading_dates()
+        if not dates:
+            return 0
+        return self.save_market_trading_calendar(dates, source="derived_from_bars")
+
     def read_price_gap_candidates(self) -> pd.DataFrame:
         """找出"跌幅超出板块跌停幅度、但事件表无记录"的 bar。
 
