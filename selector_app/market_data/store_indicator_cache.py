@@ -53,6 +53,7 @@ class DuckDbIndicatorCacheStore:
                     FROM instruments
                     """
                 ).fetchall()
+                digests = _corporate_action_digests(connection)
         except duckdb.CatalogException:
             return {}
         revisions: dict[tuple[str, str], str] = {}
@@ -60,7 +61,9 @@ class DuckDbIndicatorCacheStore:
             key = (str(market).strip().upper(), str(code).strip())
             if wanted is not None and key not in wanted:
                 continue
-            revisions[key] = _revision_text(bar_count, last_date, updated_at)
+            revisions[key] = _revision_text(
+                bar_count, last_date, updated_at, digests.get(key, "")
+            )
         return revisions
 
     def data_revision(self, market: str, code: str) -> str | None:
@@ -70,17 +73,29 @@ class DuckDbIndicatorCacheStore:
             with self._store._connect(read_only=True) as connection:
                 row = connection.execute(
                     """
-                    SELECT bar_count, last_date, updated_at
-                    FROM instruments
-                    WHERE market = ? AND code = ?
+                    SELECT i.bar_count, i.last_date, i.updated_at,
+                           COALESCE((
+                               SELECT md5(string_agg(
+                                   CAST(a.ex_date AS VARCHAR) || '|' ||
+                                   CAST(a.share_ratio AS VARCHAR) || '|' ||
+                                   CAST(a.cash_per_share AS VARCHAR) || '|' ||
+                                   CAST(a.factor_ratio AS VARCHAR),
+                                   '\n' ORDER BY a.ex_date
+                               ))
+                               FROM corporate_actions AS a
+                               WHERE a.market = i.market AND a.code = i.code
+                           ), '') AS action_digest
+                    FROM instruments AS i
+                    WHERE i.market = ? AND i.code = ?
                     """,
                     [str(market).strip().upper(), str(code).strip()],
                 ).fetchone()
         except duckdb.CatalogException:
+            # 旧库里还没有 corporate_actions 表；返回 None 让调用方退化为帧指纹。
             return None
         if row is None:
             return None
-        return _revision_text(row[0], row[1], row[2])
+        return _revision_text(row[0], row[1], row[2], row[3])
 
     def read_indicator_cache(
         self,
@@ -944,11 +959,48 @@ class DuckDbIndicatorCacheStore:
         }
 
 
-def _revision_text(bar_count: object, last_date: object, updated_at: object) -> str:
-    """Render one instrument's data revision as a stable comparable string."""
+def _revision_text(
+    bar_count: object,
+    last_date: object,
+    updated_at: object,
+    action_digest: object = "",
+) -> str:
+    """Render one instrument's data revision as a stable comparable string.
+
+    ``action_digest`` 是该标的分红送转事件表的内容哈希。行情（raw）本身在事件
+    补录或修正时一行都不会变，所以只靠 bar_count / last_date / updated_at 判断，
+    指标缓存会被判定为仍然有效 —— 而实际上按除权校正后的价格算出来的指标已经
+    完全不同了。把事件版本并进来，事件一变，缓存自动失效。
+    """
 
     try:
         count = int(cast(int, bar_count))
     except (TypeError, ValueError):
         count = 0
-    return f"{count}|{last_date}|{updated_at}"
+    return f"{count}|{last_date}|{updated_at}|{action_digest or ''}"
+
+
+def _corporate_action_digests(connection: object) -> dict[tuple[str, str], str]:
+    """每只标的的事件表内容哈希；表不存在时返回空（旧库不该在这里崩）。"""
+
+    try:
+        rows = connection.execute(  # type: ignore[attr-defined]
+            """
+            SELECT market, code, md5(string_agg(
+                CAST(ex_date AS VARCHAR) || '|' ||
+                CAST(share_ratio AS VARCHAR) || '|' ||
+                CAST(cash_per_share AS VARCHAR) || '|' ||
+                CAST(factor_ratio AS VARCHAR),
+                '\n' ORDER BY ex_date
+            )) AS action_digest
+            FROM corporate_actions
+            GROUP BY market, code
+            """
+        ).fetchall()
+    except duckdb.CatalogException:
+        return {}
+    return {
+        (str(market).strip().upper(), str(code).strip()): str(digest)
+        for market, code, digest in rows
+        if digest
+    }

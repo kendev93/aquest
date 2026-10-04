@@ -5,6 +5,8 @@ from __future__ import annotations
 from datetime import date
 from typing import Literal
 
+from selector_app.market_data.store_base import HISTORY_START
+
 DateRangeMode = Literal["recent5", "full", "custom"]
 DEFAULT_LOOKBACK_YEARS = 5
 
@@ -63,7 +65,14 @@ def resolve_date_range(
     if resolved_start > resolved_end:
         raise ValueError("本地行情日期范围无效")
     if mode == "full":
-        return resolved_start, resolved_end
+        # "全历史"是"库里全部"，不是"从 1990 年起"。1990-2014 那段候选池小到不能
+        # 代表市场（1990 年全市场只有 4 只股票），摆出来只会让人误选；真删干净了
+        # 这个 max 就是空操作，万一将来又有路径把旧数据灌回来（通达信本地导入
+        # 干过一次），它至少保证选不到那段样本。
+        start = max(resolved_start, HISTORY_START)
+        if start > resolved_end:
+            raise ValueError("本地行情全部早于保留起点，没有可用样本")
+        return start, resolved_end
 
     target_start = _subtract_calendar_years(resolved_end, DEFAULT_LOOKBACK_YEARS)
     return max(target_start, resolved_start), resolved_end

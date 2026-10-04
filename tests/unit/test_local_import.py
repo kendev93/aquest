@@ -109,6 +109,42 @@ def test_import_replaces_same_day_online_rows_and_keeps_the_rest(tmp_path: Path)
     assert bars.iloc[0]["close"] == pytest.approx(8.25)
 
 
+def test_import_drops_bars_before_the_retained_history_start(tmp_path: Path) -> None:
+    """通达信 .day 是全历史，导入必须截到保留起点，否则下载那条限制形同虚设。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    vipdoc = tmp_path / "vipdoc"
+    _write_day_file(
+        vipdoc / "sh" / "lday" / "sh600000.day",
+        [
+            (20140115, 800, 810, 790, 805, 1.0e8, 1_000_000),
+            (20150105, 900, 910, 890, 905, 1.0e8, 1_000_000),
+            (20150106, 905, 915, 895, 910, 1.0e8, 1_000_000),
+        ],
+    )
+
+    report = LocalDayImportService(store, max_workers=1).import_vipdoc(vipdoc)
+
+    assert report["imported_bars"] == 2
+    frame = store.read_bars("SH", "600000")
+    assert len(frame) == 2
+    assert frame["date"].min() >= pd.Timestamp("2015-01-01")
+
+
+def test_import_skips_files_that_are_entirely_before_the_cutoff(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    vipdoc = tmp_path / "vipdoc"
+    _write_day_file(
+        vipdoc / "sh" / "lday" / "sh600000.day",
+        [(20140115, 800, 810, 790, 805, 1.0e8, 1_000_000)],
+    )
+
+    report = LocalDayImportService(store, max_workers=1).import_vipdoc(vipdoc)
+
+    assert report["imported_bars"] == 0
+    assert store.read_bars("SH", "600000").empty
+
+
 def test_import_respects_type_and_board_scope(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     vipdoc = tmp_path / "vipdoc"

@@ -470,6 +470,13 @@ class IndicatorPrecomputeService:
             )
             if not selected.empty:
                 yearly[(str(key[0]), str(key[1]))] = selected
+        # 批量路径不走 _read_one，指标复权必须在这里单独做。事件一次批量取，避免
+        # 全市场 5000+ 只的规模下变成逐标的查询。
+        loader = getattr(self._adapter, "load_corporate_actions", None)
+        if callable(loader):
+            actions = loader(yearly.keys())
+            for key, frame in yearly.items():
+                yearly[key] = mark_adjusted(frame, actions.get(key, ()))
         return yearly
 
 

@@ -24,6 +24,7 @@ from .day_format import DAY_RECORD_SIZE, classify_board, classify_instrument, di
 from .local_adapter import LocalDayMarketDataAdapter
 from .models import MarketCode, StockRef
 from .scope import InstrumentScope
+from .store_base import HISTORY_START
 
 LocalImportProgress = Callable[[int, int], None]
 LocalImportDetail = Callable[[dict[str, object]], None]
@@ -216,6 +217,16 @@ class LocalDayImportService:
             frame["code"] = ref.code
             frame["instrument_type"] = ref.instrument_type
             frame["board"] = ref.board
+            # 通达信 .day 存的是全历史（1990 起），而研究样本从 2015 起。不在这里
+            # 截断的话，本地导入会把在线下载那条起点限制整个绕过去，"全历史"预设
+            # 于是又能选到 1990-2014 那段不能代表市场的样本。
+            if not frame.empty:
+                stamps = pd.to_datetime(frame["date"], errors="coerce")
+                frame = frame[stamps >= pd.Timestamp(HISTORY_START)].reset_index(drop=True)
+            if frame.empty:
+                # 整份文件都在保留起点之前：不是"照原样导入"，是这份文件没有可用的行。
+                report["skipped_files"] = int(report["skipped_files"]) + 1
+                return
             pending_frames.append(frame)
             pending_refs.append(ref)
             batch_counts.append((ref, len(frame)))

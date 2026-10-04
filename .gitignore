@@ -11,6 +11,7 @@ dist/
 build/
 .nuitka-cache/
 .workbuddy/
+.codebuddy/
 .venv/
 .trae/
 

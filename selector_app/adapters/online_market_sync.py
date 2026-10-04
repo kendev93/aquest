@@ -31,6 +31,7 @@ from selector_app.market_data.models import (
     MarketCode,
 )
 from selector_app.market_data.scope import InstrumentScope
+from selector_app.market_data.store_base import HISTORY_START
 from selector_app.market_data.staging import (
     ProviderStagePlan,
     StageTarget,
@@ -58,12 +59,9 @@ logger = logging.getLogger(__name__)
 
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 _MARKET_CLOSE = (15, 5)
-#: 全量下载的起点。1990 年只有 4 只股票、2000 年才 863 只、2005 年才 1170 只 ——
-#: 那段"历史"里的全市场根本不是全市场，用它选股得到的是一个几十只标的的子集，
-#: 规则毫无泛化性可言；而且 90 年代到现在的涨跌幅限制、流通市值、退市规则换过好几轮，
-#: 那个区间寻优出来的参数搬到现在基本失效。2015 年起覆盖 2577 只、当前 5223 只，
-#: 才是能代表当下 A 股的样本。
-_FULL_HISTORY_START = date(2015, 1, 1)
+#: 全量下载的起点。与本地导入、"全历史"预设共用同一个值，免得三处各写一个
+#: 字面量后不知不觉跑偏（``local_import`` 曾经就是这样把 1990-2014 灌回来的）。
+_FULL_HISTORY_START = HISTORY_START
 _INCREMENTAL_OVERLAP_DAYS = 10
 _MAX_RETRIES = 3
 _RETRY_BASE_SECONDS = 0.25
