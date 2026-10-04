@@ -22,6 +22,7 @@ import pandas as pd
 
 from selector_app.formulas.registry import FORMULA_REGISTRY
 from selector_app.market_data.adapter import BatchMarketDataAdapter
+from selector_app.market_data.adjustment import mark_adjusted
 from selector_app.market_data.models import StockRef
 from selector_app.swing_research.values import formula_groups
 
@@ -67,6 +68,7 @@ def collect_signal_values(
     seen: set[str] = set()
 
     total = len(refs)
+    loader = getattr(adapter, "load_corporate_actions", None)
     for offset in range(0, total, batch_size):
         batch = list(refs[offset : offset + batch_size])
         frame = adapter.read_many_stocks(
@@ -75,6 +77,16 @@ def collect_signal_values(
             end_date=end_date,
             warmup_bars=warmup,
         )
+        # 因子归因是事后分析，没有成交环节，指标整段按除权校正后的价格算即可。
+        # 事件跟着这一批行情一次取，避免逐标的查询。
+        actions_lookup: dict[str, tuple[object, ...]] = {}
+        if callable(loader):
+            actions_lookup = {
+                f"{market}{code}": actions
+                for (market, code), actions in loader(
+                    [(str(item.market), str(item.code)) for item in batch]
+                ).items()
+            }
         if not frame.empty:
             keys = frame["market"].astype(str) + frame["code"].astype(str)
             for key, group in frame.groupby(keys, sort=False):
@@ -83,7 +95,15 @@ def collect_signal_values(
                 if not indices:
                     continue
                 seen.add(stock_key)
-                _write_stock(group, trips, indices, groups, len(value_ids), values, holding_days)
+                _write_stock(
+                    mark_adjusted(group, actions_lookup.get(stock_key, ())),
+                    trips,
+                    indices,
+                    groups,
+                    len(value_ids),
+                    values,
+                    holding_days,
+                )
         if progress is not None:
             progress(min(offset + len(batch), total), total)
 

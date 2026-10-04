@@ -22,6 +22,7 @@ from selector_app.formulas.registry import FORMULA_REGISTRY, FormulaRegistry
 from selector_app.formulas.types import FormulaResult
 from selector_app.indicators.cache import IndicatorCache
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter, MarketDataAdapter
+from selector_app.market_data.adjustment import CorporateAction, mark_adjusted
 from selector_app.market_data.day_format import classify_board, classify_instrument
 from selector_app.market_data.models import StockRef
 from selector_app.market_data.store import DuckDbMarketDataStore
@@ -546,7 +547,31 @@ class ScreenEngine:
             return frames
         for key, group in combined.groupby(["market", "code"], sort=False):
             frames[(str(key[0]), str(key[1]))] = group.reset_index(drop=True)
+        # 批量路径不走 _scan_one，指标复权要在这里单独做。事件一次批量取，避免
+        # 全市场规模下变成逐标的查询。
+        loader = getattr(self._adapter, "load_corporate_actions", None)
+        if callable(loader):
+            actions = loader(frames.keys())
+            for key, frame in frames.items():
+                frames[key] = mark_adjusted(frame, actions.get(key, ()))
         return frames
+
+    def _corporate_actions(self, ref: StockRef) -> tuple[CorporateAction, ...]:
+        """该标的的分红送转事件；适配器不支持时退化成"无事件"。
+
+        选股只做指标判断、没有成交环节，所以这里整段行情都可以按除权校正后的价格
+        计算。适配器没有这个能力时（测试用的 FakeAdapter 之类）退化为 raw 口径。
+        """
+
+        cache = getattr(self, "_corporate_action_cache", None)
+        if cache is None:
+            cache = {}
+            self._corporate_action_cache = cache
+        key = (str(ref.market).upper(), ref.code.strip())
+        if key not in cache:
+            reader = getattr(self._adapter, "read_corporate_actions", None)
+            cache[key] = tuple(reader(ref)) if callable(reader) else ()
+        return cache[key]
 
     def _scan_one(
         self,
@@ -555,7 +580,7 @@ class ScreenEngine:
         parsed_formula: ParsedFormula | None = None,
     ) -> ScanOutcome:
         try:
-            frame = self._adapter.read_stock(ref)
+            frame = mark_adjusted(self._adapter.read_stock(ref), self._corporate_actions(ref))
             return _evaluate_frame(
                 ref,
                 frame,

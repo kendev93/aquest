@@ -1044,7 +1044,12 @@ class DuckDbBarsStore:
         """
 
         pairs = sorted(
-            {(item.market.strip().upper(), item.code.strip()) for item in instruments}
+            {
+                (item[0].strip().upper(), item[1].strip())
+                if isinstance(item, tuple)
+                else (item.market.strip().upper(), item.code.strip())
+                for item in instruments
+            }
         )
         if not pairs:
             return self._store._frame_from_query(pd.DataFrame())

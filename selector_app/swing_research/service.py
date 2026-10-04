@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import shutil
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from tempfile import TemporaryDirectory, gettempdir
 
@@ -21,6 +21,7 @@ import pandas as pd
 
 from selector_app.formulas.registry import FORMULA_REGISTRY
 from selector_app.market_data.adapter import BatchMarketDataAdapter
+from selector_app.market_data.adjustment import CorporateAction, mark_adjusted
 from selector_app.market_data.models import StockRef
 from selector_app.strategy_discovery.catalog import IndicatorCatalog, default_indicator_catalog
 
@@ -612,6 +613,16 @@ class SwingResearchService:
                 end_date=config.end_date,
                 warmup_bars=warmup,
             )
+            # 事件跟着这一批行情一次取，避免逐标的查询。
+            actions_lookup: dict[str, tuple[CorporateAction, ...]] = {}
+            loader = getattr(self._adapter, "load_corporate_actions", None)
+            if callable(loader):
+                actions_lookup = {
+                    f"{market}{code}": actions
+                    for (market, code), actions in loader(
+                        [(str(item.market), str(item.code)) for item in batch]
+                    ).items()
+                }
             if not frame.empty:
                 keys = frame["market"].astype(str) + frame["code"].astype(str)
                 for key, group in frame.groupby(keys, sort=True):
@@ -629,6 +640,7 @@ class SwingResearchService:
                         panel,
                         labels,
                         row,
+                        actions_lookup.get(str(key), ()),
                     ):
                         filled += 1
             if progress_callback is not None:
@@ -1137,6 +1149,7 @@ def _write_stock(
     panel: np.memmap,
     labels: np.ndarray,
     row: int,
+    actions: Sequence[CorporateAction] = (),
 ) -> bool:
     """Write one stock's indicator rows and swing labels into the panel.
 
@@ -1160,9 +1173,13 @@ def _write_stock(
     if kept.size == 0:
         return False
 
+    # 指标按除权校正后的价格算：除权日的 raw 跳空是价格序列里的假断崖，拿它算
+    # 动量类指标会把那天当成暴跌或暴涨。波段切分（``split_swings``）仍然用 raw ——
+    # 它的 ATR 阈值要和同一份价格序列同单位，混用会让波段边界整体偏移。
+    metric_group = mark_adjusted(group, actions) if actions else group
     values = np.full((len(group), column_count), np.nan, dtype=float)
     for formula_id, items in groups.items():
-        result = FORMULA_REGISTRY.formula(formula_id).calculate(group)
+        result = FORMULA_REGISTRY.formula(formula_id).calculate(metric_group)
         for index, name in items:
             array = np.asarray(result.values.get(name), dtype=float)
             if array.shape == (len(group),):

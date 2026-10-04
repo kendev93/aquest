@@ -22,6 +22,7 @@ from selector_app.formulas.registry import FORMULA_REGISTRY, FormulaRegistry
 from selector_app.formulas.types import FormulaResult
 from selector_app.indicators.cache import IndicatorCache, frame_fingerprint
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
+from selector_app.market_data.adjustment import CorporateAction, mark_adjusted
 from selector_app.market_data.models import MarketCode, StockRef
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.screening.engine import evaluate_rule_group
@@ -103,9 +104,13 @@ class BacktestService:
         frame = self._prepare_frame(self._adapter.read_stock(ref))
         if frame.empty:
             raise ValueError(f"{ref.market} {ref.code} 没有可用日线数据")
-        data_fingerprint = frame_fingerprint(frame)
+        # 指标按除权校正后的价格算，成交价保持真实价：除权日的 raw 跳空是价格序列里
+        # 的假断崖，留着它算出来的指标是假的；而成交价一旦用复权价，股数与整手就不再
+        # 对应现实。数据指纹跟指标口径走，这样事件补录后缓存会自动失效。
+        metric_frame = self._metric_frame(ref, frame)
+        data_fingerprint = frame_fingerprint(metric_frame)
         parsed_formula, formula_results = self._calculate_formula_results(
-            frame,
+            metric_frame,
             config,
             market=ref.market,
             code=ref.code,
@@ -343,6 +348,14 @@ class BacktestService:
                 if value_id is not None
             )
         )
+
+    def _metric_frame(self, ref: StockRef, frame: pd.DataFrame) -> pd.DataFrame:
+        """指标口径的行情：按分红送转事件校正后的价格，并带上事件版本标记。"""
+
+        reader = getattr(self._adapter, "read_corporate_actions", None)
+        if not callable(reader):
+            return frame
+        return mark_adjusted(frame, tuple(reader(ref)))
 
     @staticmethod
     def _prepare_frame(frame: pd.DataFrame) -> pd.DataFrame:
