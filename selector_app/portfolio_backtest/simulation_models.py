@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from selector_app.market_data.models import InstrumentBoard, InstrumentType
 
@@ -20,6 +20,7 @@ class _Position:
     buy_commission: float
     buy_slippage: float
     name: str | None = None
+    applied_corporate_actions: set[str] = field(default_factory=set)
 
     @property
     def symbol(self) -> str:

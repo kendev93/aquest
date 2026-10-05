@@ -8,7 +8,7 @@ from datetime import date
 
 import numpy as np
 
-from selector_app.individual_research.metrics import candidate_quality
+from selector_app.individual_research.metrics import MIN_VALIDATION_TRADES, candidate_quality
 
 ObjectiveCandidate = dict[str, object]
 
@@ -111,7 +111,7 @@ def _best_candidate(
         score = _finite_number(validation.get(objective))
         if score is None:
             continue
-        if require_adequate_sample and not _sample_adequate(candidate, metrics, validation):
+        if require_adequate_sample and not _sample_adequate(validation):
             continue
         if winning_score is None or score > winning_score:
             winner = candidate
@@ -120,15 +120,11 @@ def _best_candidate(
 
 
 def _sample_adequate(
-    candidate: Mapping[str, object],
-    metrics: Mapping[str, object],
     validation: Mapping[str, object],
 ) -> bool:
-    """Whether the candidate cleared the sample thresholds used for its badges."""
+    """Use validation sample size for eligibility; holdout remains descriptive only."""
 
-    holdout = _mapping(metrics.get("holdout"))
-    quality = _mapping(candidate.get("quality")) or _quality(validation, holdout, candidate)
-    return bool(quality.get("sample_adequate"))
+    return _trade_count(validation) >= MIN_VALIDATION_TRADES
 
 
 def _compact_candidate(

@@ -201,7 +201,11 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
                 include_details=include_details,
             )
             positions = {
-                symbol: replace(position) for symbol, position in checkpoint.positions.items()
+                symbol: replace(
+                    position,
+                    applied_corporate_actions=set(position.applied_corporate_actions),
+                )
+                for symbol, position in checkpoint.positions.items()
             }
             known_symbols = set(by_symbol)
             if any(symbol not in known_symbols for symbol in positions):
@@ -227,8 +231,8 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
             if date_index % 10 == 0 and abort_check is not None and abort_check():
                 raise TaskCancelledError("组合回测已取消")
             current_date = dates[date_index]
-            # 除权除息必须赶在当天成交之前处理：成交用 raw 价，ex_date 起报价已经是
-            # 除权后的价格，股数和成本价不同步的话市值会在这一天永久蒸发一段。
+            # 除权除息必须赶在当天成交之前处理。若 ex-date 停牌，则在该标的下一根
+            # 实际 bar 调整，避免用旧收盘价给已拆股的仓位估值。
             cash = self._apply_corporate_actions(
                 current_date,
                 positions,
@@ -308,7 +312,6 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
                 pending_sells,
                 by_symbol,
                 config,
-                date_index,
             )
             if self._should_refresh(date_index, dates, config.rebalance_frequency) or new_exit:
                 pending_buys, event = self._select_candidates(
@@ -1133,7 +1136,6 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
         pending_sells: dict[str, _PendingSell],
         by_symbol: Mapping[str, _StockSeries],
         config: PortfolioBacktestConfig,
-        date_index: int,
     ) -> bool:
         scheduled = False
         for symbol, position in positions.items():
@@ -1149,7 +1151,7 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
                 scheduled = True
                 continue
             if config.max_hold_days and self._held_enough_bars(
-                context, position, date_index, config.max_hold_days
+                context, position, index, config.max_hold_days
             ):
                 pending_sells[symbol] = _PendingSell(current_date, "持有到期")
                 scheduled = True
@@ -1159,7 +1161,7 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
         self,
         context: _StockSeries,
         position: _Position,
-        date_index: int,
+        current_index: int,
         max_hold_days: int,
     ) -> bool:
         """按**交易日**计数：用行情序列自身的 bar 索引，不受停牌和长假影响。
@@ -1172,7 +1174,7 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
         entry_index = context.date_to_index.get(position.entry_date)
         if entry_index is None:
             return False
-        held_bars = date_index - entry_index + 1
+        held_bars = current_index - entry_index + 1
         return held_bars >= max_hold_days
 
     def _sell_reasons(
@@ -1415,9 +1417,9 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
         cash: float,
         cache: dict[str, tuple[CorporateAction, ...]],
     ) -> float:
-        """把当天的分红送转落到持仓上，返回调整后的可用资金。
+        """把当天或此前到期的分红送转落到当前有 bar 的持仓上。
 
-        成交价是 raw（不复权）价，所以除权日当天起报价已经按
+        成交价是 raw（不复权）价，所以除权日或其后的首根实际 bar 起报价已经按
         ``(前收盘 - 每股派息) / (1 + 每股送转)`` 掉下来了。以前股数与成本价都不动，
         于是 10 送 10 之后市值直接腰斩且再也回不来，现金分红也从没入过账——跨越
         6~7 月分红高峰的多年回测，净值系统性偏低，看起来像是策略不行。
@@ -1430,15 +1432,27 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
         for symbol, position in positions.items():
             if position.size <= 0:
                 continue
+            context = by_symbol.get(symbol)
+            if context is None or current_date not in context.date_to_index:
+                # A halted stock keeps its prior mark until its next real quote. Apply due
+                # actions on that bar, before orders can execute against the new price scale.
+                continue
             actions = cache.get(symbol)
             if actions is None:
-                actions = ()
-                context = by_symbol.get(symbol)
-                if context is not None:
-                    actions = self._corporate_actions_for_symbol(context)
+                actions = self._corporate_actions_for_symbol(context)
                 cache[symbol] = actions
-            for action in actions:
-                if action.is_neutral or _action_date_int(action.ex_date) != current_date:
+            for action in sorted(actions, key=lambda item: _action_date_int(item.ex_date)):
+                action_date = _action_date_int(action.ex_date)
+                action_key = (
+                    f"{action_date}:{action.share_ratio:.17g}:{action.cash_per_share:.17g}:"
+                    f"{action.factor_ratio:.17g}:{action.action_type}"
+                )
+                if (
+                    action.is_neutral
+                    or action_date <= position.entry_date
+                    or action_date > current_date
+                    or action_key in position.applied_corporate_actions
+                ):
                     continue
                 ratio = 1.0 + float(action.share_ratio)
                 if ratio <= 0:
@@ -1449,6 +1463,7 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
                 position.highest_price = (
                     position.highest_price - float(action.cash_per_share)
                 ) / ratio
+                position.applied_corporate_actions.add(action_key)
         return cash
 
     @staticmethod

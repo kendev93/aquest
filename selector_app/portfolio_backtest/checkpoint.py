@@ -65,7 +65,7 @@ class SimulationCheckpoint:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "version": 1,
+            "version": 2,
             "last_date": self.last_date,
             "cash": self.cash,
             "positions": {
@@ -103,7 +103,7 @@ class SimulationCheckpoint:
     def from_dict(cls, payload: Mapping[str, object]) -> SimulationCheckpoint:
         """Restore a checkpoint and reject malformed or unsafe state."""
 
-        if payload.get("version") != 1:
+        if payload.get("version") != 2:
             raise ValueError("模拟检查点版本不受支持")
         positions_payload = _checkpoint_mapping(payload.get("positions"), "positions")
         pending_sells_payload = _checkpoint_mapping(payload.get("pending_sells"), "pending_sells")
@@ -222,6 +222,7 @@ def _position_to_dict(position: _Position) -> dict[str, object]:
         "buy_commission": position.buy_commission,
         "buy_slippage": position.buy_slippage,
         "name": position.name,
+        "applied_corporate_actions": sorted(position.applied_corporate_actions),
     }
 
 
@@ -244,6 +245,11 @@ def _position_from_dict(symbol: str, payload: object) -> _Position:
     )
     if size <= 0 or entry_price <= 0 or highest_price <= 0:
         raise ValueError(f"模拟检查点持仓数值无效: {symbol}")
+    raw_actions = values.get("applied_corporate_actions")
+    if not isinstance(raw_actions, list) or any(
+        not isinstance(value, str) for value in raw_actions
+    ):
+        raise ValueError(f"模拟检查点字段 positions[{symbol}].applied_corporate_actions 无效")
     return _Position(
         market=market,
         code=code,
@@ -260,6 +266,7 @@ def _position_from_dict(symbol: str, payload: object) -> _Position:
             values.get("buy_slippage"), f"positions[{symbol}].buy_slippage"
         ),
         name=(None if values.get("name") is None else str(values.get("name"))),
+        applied_corporate_actions=set(raw_actions),
     )
 
 

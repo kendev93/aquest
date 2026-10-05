@@ -101,6 +101,7 @@ def replay_account(
     version: Mapping[str, Any],
     previous: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    service._refresh_corporate_action_cache()
     candidate = version["candidate"]
     raw = service._adapter.read_stock(ref)
     if "bar_status" in raw:

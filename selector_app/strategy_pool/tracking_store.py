@@ -17,7 +17,10 @@ from selector_app.formulas.registry import FORMULA_REGISTRY
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.market_data.store_base import _WRITE_LOCK
 
-ENGINE_VERSION = "pool-account-v1"
+# Strategy signatures describe trading intent and remain stable across replay fixes. Snapshot
+# engines version the serialized simulation semantics independently so old checkpoints rebuild.
+SIGNATURE_ENGINE_VERSION = "pool-account-v1"
+ENGINE_VERSION = "pool-account-v2"
 OBJECTIVES = ("annual_return", "sharpe")
 DDL = """CREATE TABLE IF NOT EXISTS pool_tracking_versions (
  version_id VARCHAR PRIMARY KEY, market VARCHAR NOT NULL, code VARCHAR NOT NULL,
@@ -36,6 +39,14 @@ def dumps(value: Any) -> str:
 
 
 def signature(candidate: Mapping[str, Any]) -> str:
+    return _signature(candidate, include_max_hold_days=True)
+
+
+def _legacy_signature(candidate: Mapping[str, Any]) -> str:
+    return _signature(candidate, include_max_hold_days=False)
+
+
+def _signature(candidate: Mapping[str, Any], *, include_max_hold_days: bool) -> str:
     config = dict(candidate.get("config") or {})
     defaults: dict[str, Any] = dict(
         initial_cash=1000000,
@@ -60,6 +71,8 @@ def signature(candidate: Mapping[str, Any]) -> str:
         take_profit_mode="pct",
         trailing_stop_mode="pct",
     )
+    if include_max_hold_days and config.get("max_hold_days") is not None:
+        defaults["max_hold_days"] = config["max_hold_days"]
     for label in ("stop_loss", "take_profit", "trailing_stop"):
         defaults[label + "_atr_multiplier"] = None
         defaults[label + "_cooldown_days"] = 0
@@ -103,7 +116,9 @@ def signature(candidate: Mapping[str, Any]) -> str:
         return value
 
     encoded = dumps(
-        normalize(dict(config=defaults, rules=rules, formulas=versions, engine=ENGINE_VERSION))
+        normalize(
+            dict(config=defaults, rules=rules, formulas=versions, engine=SIGNATURE_ENGINE_VERSION)
+        )
     ).encode()
     return hashlib.sha256(encoded).hexdigest()
 
@@ -132,7 +147,7 @@ class PoolTrackingStore:
                 automatic = candidates[0 if automatic["candidate_ref"] == "annual_return" else 1]
             for source, candidate in [("automatic", automatic), ("manual", candidates[index + 2])]:
                 old = connection.execute(
-                    """SELECT version_id, signature FROM pool_tracking_versions
+                    """SELECT version_id, signature, candidate_json FROM pool_tracking_versions
                     WHERE market=? AND code=? AND objective=? AND source=? AND is_current""",
                     [market, code, objective, source],
                 ).fetchone()
@@ -143,6 +158,22 @@ class PoolTrackingStore:
                         [dumps(candidate), old[0]],
                     )
                     continue
+                if old and candidate:
+                    old_candidate = json.loads(old[2])
+                    # Upgrade only the legacy signature salt/whitelist in place when both the
+                    # old and new candidate encode the same current trading rules. This keeps
+                    # created_at and launch_data_date stable; the v2 replay engine rebuilds any
+                    # incompatible saved checkpoint on its next run.
+                    if (
+                        old[1] == _legacy_signature(old_candidate)
+                        and signature(old_candidate) == fingerprint
+                    ):
+                        connection.execute(
+                            "UPDATE pool_tracking_versions SET signature=?,candidate_json=? "
+                            "WHERE version_id=?",
+                            [fingerprint, dumps(candidate), old[0]],
+                        )
+                        continue
                 if old:
                     connection.execute(
                         "UPDATE pool_tracking_versions SET is_current=FALSE, "

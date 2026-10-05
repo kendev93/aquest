@@ -195,7 +195,12 @@ class PoolTrackingRunner:
 
         if selected_ids is not None:
             for v in versions:
-                if v["version_id"] not in selected_ids and v["summary"]:
+                if (
+                    v["version_id"] not in selected_ids
+                    and v["summary"]
+                    and applied.get((v["market"], v["code"], v["objective"]), {}).get("version_id")
+                    == v["version_id"]
+                ):
                     project(v, v["summary"])
         ramp = PoolConcurrencyRamp()
         maximum = pool_worker_cap()
