@@ -1,8 +1,15 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { BacktestHistorySummary, FactorAttributionReport, FormulaScreenMetadata } from '../types'
+import type {
+  BacktestHistoryRecord,
+  BacktestHistorySummary,
+  FactorAttributionReport,
+  FormulaScreenMetadata,
+} from '../types'
 import FactorAttributionPage from './FactorAttributionPage.vue'
+
+import { PORTFOLIO_BACKTEST_HANDOFF_KEY } from '../utils/portfolioBacktestHandoff'
 
 import * as attributionApi from '../api/factorAttribution'
 import * as formulaApi from '../api/formulaScreen'
@@ -246,5 +253,173 @@ describe('FactorAttributionPage', () => {
     const active = wrapper.get('a[href="/factor-attribution"]')
     expect(active.classes()).toContain('active')
     expect(active.attributes('aria-current')).toBe('page')
+  })
+
+  it('lets the operator drop, re-add and bulk-pick the factors under test', async () => {
+    const wrapper = mount(FactorAttributionPage)
+    await flushPromises()
+    const rsi = wrapper.get('[data-testid="attribution-value-technical.rsi14"]')
+    const bias = wrapper.get('[data-testid="attribution-value-technical.bias20"]')
+    // 挂载时默认全选技术指标里可排名的那些（ma20 rankable=false，根本不进这个列表）。
+    expect((rsi.element as HTMLInputElement).checked).toBe(true)
+    expect((bias.element as HTMLInputElement).checked).toBe(true)
+
+    await rsi.trigger('change')
+    expect((rsi.element as HTMLInputElement).checked).toBe(false)
+    await wrapper.get('[data-testid="attribution-clear-values"]').trigger('click')
+    expect((bias.element as HTMLInputElement).checked).toBe(false)
+    await rsi.trigger('change')
+    expect((rsi.element as HTMLInputElement).checked).toBe(true)
+    await wrapper.get('[data-testid="attribution-select-technical"]').trigger('click')
+    expect((bias.element as HTMLInputElement).checked).toBe(true)
+  })
+
+  it('names every out-of-range parameter instead of silently clamping', async () => {
+    const wrapper = mount(FactorAttributionPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="attribution-source"]').setValue('hist-abcdef')
+    await wrapper.get('[data-testid="attribution-min-group"]').setValue('1')
+    await wrapper.get('[data-testid="attribution-permutations"]').setValue('99999')
+    await wrapper.get('[data-testid="attribution-block"]').setValue('0')
+    await wrapper.get('[data-testid="attribution-alpha"]').setValue('1')
+    await wrapper.get('[data-testid="attribution-config"]').trigger('submit')
+    await flushPromises()
+
+    const text = wrapper.text()
+    expect(text).toContain('每组最少成交笔数至少为 2')
+    expect(text).toContain('0 到 5000')
+    expect(text).toContain('显著性水平必须介于 0 与 1 之间')
+    expect(text).toContain('置换块长度至少为 1')
+    expect(attributionApi.createFactorAttribution).not.toHaveBeenCalled()
+  })
+
+  it('replays a stored run into the form and can delete it', async () => {
+    vi.mocked(attributionApi.fetchFactorAttributionHistory).mockResolvedValue([
+      {
+        history_id: 'hist-old',
+        backtest_type: 'portfolio',
+        created_at: '2024-05-01T01:00:00+00:00',
+        started_at: '2024-05-01T01:00:00+00:00',
+        finished_at: '2024-05-01T02:00:00+00:00',
+        duration_seconds: 3600,
+        summary: {
+          start_date: '2024-01-02',
+          end_date: '2024-04-30',
+          performance: { total_return: 0.12, sharpe: 1.1 },
+        },
+      } as unknown as BacktestHistorySummary,
+    ])
+    vi.mocked(attributionApi.getFactorAttributionHistory).mockResolvedValue({
+      history_id: 'hist-old',
+      request: {
+        source_history_id: 'hist-old',
+        // 非字符串项是脏数据，不该被搬进表单。
+        value_ids: ['technical.bias20', 42],
+        include_custom: true,
+        min_group_trades: 3,
+        permutations: 100,
+        block_size: 10,
+        alpha: 0.1,
+      },
+      result: report,
+    } as unknown as BacktestHistoryRecord<FactorAttributionReport>)
+    vi.mocked(attributionApi.deleteFactorAttributionHistory).mockResolvedValue({ deleted: true })
+
+    const wrapper = mount(FactorAttributionPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="attribution-history-load-hist-old"]').trigger('click')
+    await flushPromises()
+
+    // 还原的是"当时那份输入"，所以提示要求重新运行，而不是假装报告已更新。
+    expect(wrapper.get('[data-testid="attribution-message"]').text()).toContain(
+      '已还原历史因子归因 hist-old',
+    )
+    expect((wrapper.get('[data-testid="attribution-value-technical.bias20"]').element as HTMLInputElement)
+      .checked).toBe(true)
+    expect((wrapper.get('[data-testid="attribution-include-custom"]').element as HTMLInputElement)
+      .checked).toBe(true)
+    expect((wrapper.get('[data-testid="attribution-alpha"]').element as HTMLInputElement).value)
+      .toBe('0.1')
+
+    await wrapper.get('[data-testid="attribution-history-remove-hist-old"]').trigger('click')
+    await flushPromises()
+    expect(attributionApi.deleteFactorAttributionHistory).toHaveBeenCalledWith('hist-old')
+    expect(wrapper.get('[data-testid="attribution-message"]').text()).toContain('历史因子归因已删除')
+  })
+
+  it('hands a rankable factor to the portfolio page with the sample verdict attached', async () => {
+    sessionStorage.clear()
+    const wrapper = mount(FactorAttributionPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="attribution-source"]').setValue('hist-abcdef')
+    await wrapper.get('[data-testid="attribution-config"]').trigger('submit')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="attribution-to-portfolio-technical.rsi14"]').trigger('click')
+
+    const raw = sessionStorage.getItem(PORTFOLIO_BACKTEST_HANDOFF_KEY)
+    expect(raw).not.toBeNull()
+    expect(JSON.parse(raw as string)).toMatchObject({
+      kind: 'ranking',
+      source: 'factor-attribution',
+      value_id: 'technical.rsi14',
+      // 胜组均值高于败组 -> 按降序取用。
+      rank_order: 'desc',
+    })
+    expect(JSON.parse(raw as string).evidence).toContain('通过校正')
+  })
+
+  it('picks up an attribution job left running by an earlier session', async () => {
+    vi.mocked(jobsApi.fetchActiveJobs).mockResolvedValue([
+      {
+        job_id: 'job-9',
+        description: '因子归因',
+        status: 'running',
+        progress: 0.4,
+      } as unknown as Awaited<ReturnType<typeof jobsApi.fetchActiveJobs>>[number],
+    ])
+    vi.mocked(attributionApi.getFactorAttribution).mockResolvedValue({
+      job_id: 'job-9',
+      status: 'completed',
+      progress: 1,
+      error: null,
+      result: null,
+    })
+
+    const wrapper = mount(FactorAttributionPage)
+    await flushPromises()
+
+    expect(attributionApi.getFactorAttribution).toHaveBeenCalledWith('job-9')
+    expect(wrapper.get('[data-testid="attribution-trades"]').text()).toBe('96')
+  })
+
+  it('says so when the running-job lookup itself fails', async () => {
+    vi.mocked(jobsApi.fetchActiveJobs).mockRejectedValue(new Error('boom'))
+
+    const wrapper = mount(FactorAttributionPage)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="attribution-message"]').text()).toContain('因子归因失败')
+  })
+
+  it('exports the finished report as a JSON file', async () => {
+    const createObjectURL = vi.fn().mockReturnValue('blob:report')
+    const revokeObjectURL = vi.fn()
+    vi.stubGlobal('URL', { createObjectURL, revokeObjectURL })
+    try {
+      const wrapper = mount(FactorAttributionPage)
+      await flushPromises()
+      await wrapper.get('[data-testid="attribution-source"]').setValue('hist-abcdef')
+      await wrapper.get('[data-testid="attribution-config"]').trigger('submit')
+      await flushPromises()
+
+      await wrapper.get('[data-testid="export-attribution"]').trigger('click')
+      expect(createObjectURL).toHaveBeenCalledTimes(1)
+      // 报告本体进了 Blob，URL 在下一个宏任务里 revoke 掉，不留着占内存。
+      await new Promise((resolve) => { window.setTimeout(resolve, 1) })
+      expect(revokeObjectURL).toHaveBeenCalledWith('blob:report')
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })
