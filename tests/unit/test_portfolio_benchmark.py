@@ -28,6 +28,7 @@ def _series(
     *,
     dates: list[int] | None = None,
     market: str = "SH",
+    adjusted_closes: list[float] | None = None,
 ) -> _StockSeries:
     own_dates = dates if dates is not None else _DATES
     return _StockSeries(
@@ -47,6 +48,9 @@ def _series(
         values={},
         date_to_index={int(value): index for index, value in enumerate(own_dates)},
         data_fingerprint="fingerprint",
+        adjusted_closes=(
+            None if adjusted_closes is None else np.asarray(adjusted_closes, dtype=float)
+        ),
     )
 
 
@@ -69,6 +73,25 @@ def test_equal_weight_averages_normalised_prices() -> None:
     assert curve.totals[1] == pytest.approx(1_050_000.0)  # (1.1 + 1.0) / 2
     assert curve.totals[2] == pytest.approx(850_000.0)  # (1.2 + 0.5) / 2
     assert curve.performance["total_return"] == pytest.approx(-0.15)
+
+
+def test_benchmark_credits_cash_dividends() -> None:
+    """基准必须把现金分红算进去。
+
+    这只票不复权看是 10 → 8（-20%），但中间每股派息 1 元，持有者手上多出 1 元现金，
+    真实收益只有 -10%。用不复权价当基准，基准被系统性低估，而所有策略相对它的
+    "超额"都虚高——跑输的策略看起来在跑赢。
+    """
+
+    curve = equal_weight_buy_hold(
+        [_series("600000", [10.0, 9.0, 8.0], adjusted_closes=[10.0, 10.0, 9.0])],
+        _DATES,
+        1_000_000.0,
+    )
+
+    assert curve is not None
+    assert curve.totals == pytest.approx([1_000_000.0, 1_000_000.0, 900_000.0])
+    assert curve.performance["total_return"] == pytest.approx(-0.1)
 
 
 def test_single_instrument_matches_its_own_price_change() -> None:

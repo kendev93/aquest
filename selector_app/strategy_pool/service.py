@@ -29,6 +29,7 @@ from selector_app.individual_research.service import (
     InsufficientResearchHistoryError,
 )
 from selector_app.market_data.adapter import BatchMarketDataAdapter
+from selector_app.market_data.adjustment import CorporateAction, mark_adjusted
 from selector_app.market_data.models import StockRef
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.portfolio_backtest.benchmark import curve_performance
@@ -1580,12 +1581,15 @@ class MarketStrategyPoolService:
 
     def _prior_entries(self) -> dict[tuple[str, str], tuple[str, str, str, bool]]:
         with self._store.read_session() as connection:
+            # 「已有基准」的要求版本也得对得上：口径改过之后（例如从不复权换成
+            # 分红再投资），老行必须重新补算，否则页面上会一直是改口径前的数字。
             rows = connection.execute(
                 """
                 SELECT market, code, market_fingerprint, config_fingerprint, status,
-                       benchmark_json IS NOT NULL
+                       benchmark_json IS NOT NULL AND benchmark_json LIKE ?
                 FROM strategy_pool_entries
-                """
+                """,
+                [_BENCHMARK_VERSION_LIKE],
             ).fetchall()
         return {
             (str(row[0]), str(row[1])): (
@@ -1765,16 +1769,54 @@ def _market_fingerprint(adapter: BatchMarketDataAdapter, ref: StockRef) -> str:
     return frame_fingerprint(adapter.read_stock(ref))
 
 
+#: 个股基准的口径版本。改动一字就意味着存量 ``benchmark_json`` 全部作废：
+#: 早期版本用不复权收盘价算买入持有，漏掉全部分红，基准被系统性低估。版本号写进
+#: 存下来的 benchmark 里，:meth:`MarketStrategyPoolService._prior_entries` 只把版本
+#: 对得上的行算作"已有基准"，其余的在下次全市场重选时补算——不然旧的错数字会一直
+#: 躺在那儿，改了代码页面上却看不出变化。
+BENCHMARK_CALIBER_VERSION = "buy-hold-dividend-adjusted-1"
+
+#: SQL 里判断 benchmark 是否属于当前口径的 LIKE 片段。``strategy_pool/store.py``
+#: 的 ``_dump_json`` 用紧凑分隔符落盘，键名格式固定，靠字符串匹配可以避免把整个
+#: JSON 列读回来（每张表几千行）。
+_BENCHMARK_VERSION_LIKE = f'%"caliber_version":"{BENCHMARK_CALIBER_VERSION}"%'
+
+
+def _symbol_corporate_actions(
+    adapter: BatchMarketDataAdapter,
+    ref: StockRef,
+) -> tuple[CorporateAction, ...]:
+    """该标的的分红送转事件；适配器不支持时返回空，退化成不复权口径。
+
+    取不到事件就用不复权价：基准算不出来只是少一个参考数，不该把策略研究整个拖垮。
+    ``getattr`` 探测是因为 ``BatchMarketDataAdapter`` 协议没声明这个方法——生产注入
+    的 ``DuckDbMarketDataAdapter`` 有，测试替身没有。
+    """
+
+    reader = getattr(adapter, "read_corporate_actions", None)
+    if not callable(reader):
+        return ()
+    return tuple(reader(ref))
+
+
 def _symbol_benchmark(
     adapter: BatchMarketDataAdapter,
     ref: StockRef,
     config: IndividualResearchConfig,
     split_metadata: Mapping[str, object],
 ) -> dict[str, object] | None:
-    """Summarize close-to-close buy-and-hold returns for the same research windows."""
+    """Summarize close-to-close buy-and-hold returns for the same research windows.
+
+    价格先按分红送转事件校正：基准回答的是"一直拿着会怎样"，而持有者会收到现金
+    分红。不复权口径会把这部分收益全部漏掉——浦发银行 2015~2026 名义 -41%，按
+    持有者现金流算实际 +31%，用它当基准，跑输的策略会显示成跑赢。
+    """
 
     try:
         frame = adapter.read_stock(ref)
+        actions = _symbol_corporate_actions(adapter, ref)
+        if actions:
+            frame = mark_adjusted(frame, actions)
         return _summarize_symbol_benchmark(frame, config, split_metadata)
     except Exception:  # noqa: BLE001 - a missing benchmark must not discard a valid strategy
         logger.debug("计算个股基准失败: %s", ref.symbol, exc_info=True)
@@ -1816,7 +1858,8 @@ def _summarize_symbol_benchmark(
     }
     benchmark: dict[str, object] = {
         "label": "个股买入持有",
-        "method": "同区间首尾收盘价持有，未计交易费用",
+        "method": "同区间首尾收盘价持有，价格按分红送转校正（分红再投资口径），未计交易费用",
+        "caliber_version": BENCHMARK_CALIBER_VERSION,
     }
     for phase, (start, end) in periods.items():
         selected = bars.loc[bars["date"].between(start, end)]

@@ -14,7 +14,7 @@
 
 ## 修复进度（同日跟进）
 
-验证（第二轮结束后）：`pytest --cov=selector_app` **1410 passed**、覆盖率 84.71%；`mypy selector_app` Success（237 文件）；`ruff check` / `ruff format --check` 通过。
+验证（第三轮结束后）：`pytest --cov=selector_app` **1418 passed**、覆盖率 84.73%；`mypy selector_app` Success（237 文件）；`ruff check` / `ruff format --check` 通过。
 
 ### 已修复
 
@@ -46,6 +46,48 @@ P0-2（`_has_new_data` 快照行数）、P0-4（显著门槛加 `ic_days`）、P
 - **P1-18 滑点单位保持元/股，只写明单位**。`web/schemas/portfolio.py` 的 `slippage`
   加了 `description="滑点，单位：元/股（按成交股数计）"` 并就地注释它与同一行
   `commission`（成交金额比率）不同基数。数值语义未动。
+
+### 第三轮：买入持有基准漏算分红（实测发现，非审查项）
+
+起因是用户截图问策略池三只票的「全段基准」准不准。实测（Docker volume
+`indicator-lab_indicator-lab-data`，容器 `indicator-lab-backend-1`，
+库 `/data/market/market.duckdb`，行情 2015-01-05 ~ 2026-09-30、5224 只标的）：
+
+| 标的 | 页面显示的"全段基准" | raw 买入持有 | 复权后买入持有 |
+|---|---|---|---|
+| 东风股份 600006 | -8.17% | -8.17% | -0.13% |
+| 白云机场 600004 | -33.39% | -33.39% | +13.40% |
+| 浦发银行 600000 | -41.01% | -41.01% | +31.15% |
+
+三个页面数字与 raw 口径**逐位吻合**，确认是漏复权：**每一次现金分红都被吞掉了**。
+不是数据问题——事件表 54145 条、覆盖 5124/5224 标的（98%）、近五年每年 3000~4600 条，
+`mark_adjusted` 完全可用，四处基准只是没去用它。
+
+修复（基准一律走分红再投资口径，模拟侧一行未动）：
+
+- `portfolio_backtest/context.py`：`_StockSeries` 新增 `adjusted_closes`，
+  取自已存在的 `metric_frame`。context 里本来就为指标算好了复权序列，基准只是没取。
+- `portfolio_backtest/benchmark.py`：`_price_ratio` 改用 `adjusted_closes`（缺则退回
+  `closes`）；模块头写明"模拟用不复权价、基准用复权价"是两个刻意不同的口径。
+  这一处同时修掉个股研究详情（`individual_research` 的 benchmark 来自
+  `report.benchmark` → `_portfolio_benchmark` → `equal_weight_buy_hold`）。
+- `strategy_discovery/snapshot.py`：快照数组加第 6 行 `adjusted_close`（写入端已有
+  现成的 `metric_frames`，只是搬一行），`_SNAPSHOT_VERSION` 1 → 2 让旧快照重建；
+  `_SnapshotBaseSeries` 读取时对旧形状兜底。策略发现页此前同样漏分红。
+- `strategy_pool/service.py`：`_symbol_benchmark` 先 `mark_adjusted` 再算买入持有，
+   `method` 标注"分红再投资口径"。新增 `BENCHMARK_CALIBER_VERSION` 写进落库的
+   benchmark，`_prior_entries` 只把版本对得上的行算作"已有基准"——否则存量行因
+   `benchmark_json IS NOT NULL` 的复用条件永远不会被重算，**改了代码页面上看不出变化**。
+- `stock_groups/performance.py` + `service.py`：新增 `adjust_closes_for_dividends`，
+  三处 `pivot_closes` 入口统一改成 `_adjusted_close_matrix`（长表阶段按标的批量复权），
+  概览页与组内表现页一起覆盖，保持与组合回测基准同口径。事件批量查询按 500 只分块，
+  取不到就退化成不复权而不是报错。
+
+存证：`test_benchmark_credits_cash_dividends`、
+`test_portfolio_benchmark_credits_cash_dividends`（端到端跑真实 service）、
+`test_symbol_benchmark_credits_cash_dividends` 三条都做过反向验证——把修复换成
+`if False` / 改回 `context.closes` 之后，端到端那条报 `Max relative difference: 0.125`、
+策略池那条拿到 `-0.025`，正是页面上漏掉派息的那个数。
 
 ### 未修（需口径确认或跨模块协调）
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -1287,3 +1288,79 @@ def test_rebalance_due_compares_with_the_next_workday_not_the_next_calendar_day(
     assert due(20240106, "monthly") is False
     # daily 每天都调仓。
     assert due(20260515, "daily") is True
+
+
+def test_portfolio_benchmark_credits_cash_dividends() -> None:
+    """组合基准必须是分红再投资口径：现金分红不能凭空蒸发。
+
+    这段行情除权后价格稳定在 19.5：raw 看是 20 → 19.5（-2.5%），可持有者手上多出
+    0.5 元现金，真实收益是 0%。基准若用不复权价，-2.5% 这个数会被当成"这类股票的
+    自然损耗"，策略只要不那么亏就算跑赢——超额收益系统性虚高。
+    """
+
+    before, cash_per_share = 20.0, 0.5
+    after = before - cash_per_share
+    ex_index = 30
+    dates = pd.date_range("2024-01-02", periods=50, freq="B")
+    close = np.where(np.arange(50) < ex_index, before, after)
+    frame = pd.DataFrame(
+        {
+            "date": dates,
+            "open": close,
+            "high": close + 0.02,
+            "low": close - 0.02,
+            "close": close,
+            "volume": np.full(50, 100_000.0),
+            "amount": close * 100_000.0,
+        }
+    )
+    actions = (
+        CorporateAction(
+            market="SH",
+            code="600000",
+            ex_date=dates[ex_index].date(),
+            share_ratio=0.0,
+            cash_per_share=cash_per_share,
+            factor_ratio=compute_factor_ratio(
+                prev_close=before,
+                share_ratio=0.0,
+                cash_per_share=cash_per_share,
+            ),
+            action_type="dividend",
+        ),
+    )
+
+    class DividendAdapter(FakeAdapter):
+        def list_stock_refs(self, vipdoc_path, universe, universe_file=None):
+            return [
+                StockRef(
+                    market="SH",
+                    code="600000",
+                    name="测试600000",
+                    path=Path(vipdoc_path) / "sh600000.day",
+                )
+            ]
+
+        def read_stock(self, ref: StockRef) -> pd.DataFrame:
+            return frame.copy(deep=True)
+
+        def read_corporate_actions(self, ref: StockRef):
+            return actions
+
+    settings = config(
+        formula_text="BUY:C>19; RANK:C;",
+        max_positions=1,
+        initial_cash=100_000.0,
+        start_date=dates[0].date(),
+        end_date=dates[-1].date(),
+        stop_loss_pct=None,
+        # 只为满足"至少一个卖出规则"的校验，这段行情里不会触发。
+        take_profit_pct=10.0,
+    )
+
+    report = PortfolioBacktestService(adapter=DividendAdapter()).run(settings)
+
+    assert report.benchmark is not None
+    performance = cast("Mapping[str, object]", report.benchmark["performance"])
+    # 不复权口径会是 (19.5 / 20) - 1 = -2.5%。
+    assert float(cast("float", performance["total_return"])) == pytest.approx(0.0, abs=1e-9)

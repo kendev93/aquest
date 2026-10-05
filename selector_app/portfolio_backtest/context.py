@@ -107,6 +107,18 @@ class _StockSeries:
     strategy_config: Mapping[str, object] = field(default_factory=dict)
     priority_score: float | None = None
     name: str | None = None
+    #: 复权后的收盘价，长度与 :attr:`closes` 相同，仅供买入持有基准使用。
+    #:
+    #: 为什么单列一个字段而不是就地改 :attr:`closes`：``closes`` 是成交价、整手
+    #: 取整和 ATR 的输入，必须保持不复权（见 :meth:`_build_context` 里两口径的
+    #: 分工说明）。而基准回答的是"这批股票一直拿着会怎样"——持有者会收到分红，
+    #: 漏掉它们会让基准被系统性低估：浦发银行 2015~2026 这 11 年有 26 次派息，
+    #: 不复权口径是 -41.01%，按持有者现金流算是 +31.15%。用这个数当基准，跑输
+    #: 的策略会显示成跑赢。
+    #:
+    #: 缺省 None 是给不传该字段的构造点留退路，调用方一律用
+    #: :attr:`closes` 兜底，基准不会因为拿不到复权价就算不出来。
+    adjusted_closes: np.ndarray | None = None
 
     @property
     def symbol(self) -> str:
@@ -269,6 +281,10 @@ class PortfolioContextMixin(_PortfolioServiceState):
             else np.zeros(len(indices), dtype=bool)
         )
         window = frame.iloc[indices].reset_index(drop=True)
+        # 基准用的收盘价取自 metric_frame（已按除权事件校正），切成同一段窗口，
+        # 与成交用的 ``closes`` 逐根对齐。没有事件的标的 metric_frame 就是 frame，
+        # 此处自然退化成不复权，不需要分支。
+        metric_closes = metric_frame["close"].to_numpy(dtype=float)[indices].copy()
         dates = np.asarray(
             [int(pd.Timestamp(value).strftime("%Y%m%d")) for value in window["date"]],
             dtype=np.int64,
@@ -302,6 +318,7 @@ class PortfolioContextMixin(_PortfolioServiceState):
                 if ref.market + ref.code in config.symbol_priority_scores
                 else None
             ),
+            adjusted_closes=metric_closes,
         )
 
     def _supports_batch_frames(self) -> bool:

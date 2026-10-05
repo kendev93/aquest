@@ -18,7 +18,9 @@ from typing import Any, cast
 
 import pandas as pd
 
+from selector_app.market_data.adjustment import CorporateAction
 from selector_app.market_data.models import InstrumentRef, MarketCode
+from selector_app.market_data.store_bars import corporate_actions_from_frame
 
 from .models import (
     GROUP_CURVE_LABEL,
@@ -35,6 +37,7 @@ from .models import (
     normalize_members,
 )
 from .performance import (
+    adjust_closes_for_dividends,
     equal_weight_curve,
     excess_return,
     format_day,
@@ -48,6 +51,51 @@ from .summary import (
     normalize_windows,
     summarize_groups,
 )
+
+#: 批量查事件时一次带多少只标的。全市场约 5000 只，一次性拼成 OR 条件会让 SQL
+#: 又长又慢，拆开走反而更快，单批失败也不会拖垮整批。
+_ACTION_BATCH_SIZE = 500
+
+
+def _actions_by_key(
+    store: Any,
+    frame: pd.DataFrame,
+) -> dict[str, tuple[CorporateAction, ...]]:
+    """按 ``市场:代码`` 取出这批标的的除权事件，供 ``adjust_closes_for_dividends`` 用。
+
+    取不到就返回空字典，调用方退化成不复权——少一个校正不该让整个观察页打不开。
+    """
+
+    if frame.empty or "market" not in frame.columns or "code" not in frame.columns:
+        return {}
+    unique = frame[["market", "code"]].drop_duplicates()
+    refs = [
+        InstrumentRef(
+            market=cast(MarketCode, str(row.market)),
+            code=str(row.code),
+            instrument_type="stock",
+        )
+        for row in unique.itertuples(index=False)
+    ]
+    grouped: dict[str, list[CorporateAction]] = {}
+    try:
+        for offset in range(0, len(refs), _ACTION_BATCH_SIZE):
+            batch = store.read_corporate_actions_batch(refs[offset : offset + _ACTION_BATCH_SIZE])
+            for action in corporate_actions_from_frame(batch):
+                grouped.setdefault(f"{action.market}:{action.code}", []).append(action)
+    except Exception:  # noqa: BLE001 - 事件取不到要退化而不是中断整个观察
+        return {}
+    return {key: tuple(value) for key, value in grouped.items()}
+
+
+def _adjusted_close_matrix(store: Any, frame: pd.DataFrame) -> pd.DataFrame:
+    """读取的长表 → 复权 → 透视成日期 x 标的宽表。
+
+    股票组所有曲线都从这里进口径，保证「股票组概览」「组内表现」与组合回测的
+    基准三者数字一致。
+    """
+
+    return pivot_closes(adjust_closes_for_dividends(frame, _actions_by_key(store, frame)))
 
 
 class StockGroupService:
@@ -205,7 +253,9 @@ class StockGroupService:
         end = self._store.latest_trade_date() or date.today()
         # 交易日 → 自然日的换算宁可多读几天：少读了窗口就不满，多读只是多切几行。
         start = end - timedelta(days=span * 7 // 5 + 30)
-        market_prices = pivot_closes(self._store.read_close_matrix(start_date=start, end_date=end))
+        market_prices = _adjusted_close_matrix(
+            self._store, self._store.read_close_matrix(start_date=start, end_date=end)
+        )
         if market_prices.empty:
             return _summary_payload(chosen, (), None)
         summaries = summarize_groups(market_prices, groups, chosen)
@@ -274,7 +324,9 @@ class StockGroupService:
             )
             for member in members
         ]
-        market_prices = pivot_closes(self._store.read_close_matrix(start_date=start, end_date=end))
+        market_prices = _adjusted_close_matrix(
+            self._store, self._store.read_close_matrix(start_date=start, end_date=end)
+        )
         if market_prices.empty:
             return GroupPerformance(
                 group_id=str(record["group_id"]),
@@ -290,8 +342,8 @@ class StockGroupService:
                 truncated=truncated,
                 notes=(*notes, "这段时间里库里没有行情，无法计算表现"),
             )
-        group_prices = pivot_closes(
-            self._store.read_close_matrix(refs, start_date=start, end_date=end)
+        group_prices = _adjusted_close_matrix(
+            self._store, self._store.read_close_matrix(refs, start_date=start, end_date=end)
         ).reindex(market_prices.index)
         group_curve = equal_weight_curve(group_prices, GROUP_CURVE_LABEL)
         market_curve = equal_weight_curve(market_prices, MARKET_CURVE_LABEL)

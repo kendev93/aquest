@@ -7,6 +7,10 @@
 - 不计佣金、印花税、滑点，也不考虑整手与现金拖累：基准是**研究标尺**，
   不是可交易策略。给它加摩擦只会让比较两边口径不一致。
 - 窗口首日没有价格的标的直接排除（新股、停牌），之后缺失的交易日沿用前收盘价。
+- **价格用分红送转校正后的序列**（分红再投资口径的总回报）：持有者会收到现金
+  分红，用不复权价会把这部分收益全部漏掉，基准被系统性低估，"跑赢基准"就成了
+  虚言。基准也因此与模拟侧刻意保持不同口径——模拟撮合、整手、ATR 一律用不复权
+  价，那是另一件事，两边各答各的问题。
 
 为什么不用沪深300：库里已经没有指数数据（本系统只研究股票），而且"跑赢一个
 自己挑的指数"很容易变成幸存者偏差式的自我安慰——真正该回答的问题是「这套
@@ -109,12 +113,20 @@ def equal_weight_buy_hold(
 
 
 def _price_ratio(context: _StockSeries, grid: np.ndarray) -> np.ndarray | None:
-    """把一只股票的价格按窗口交易日对齐，再归一化成"相对首日的倍数"。"""
+    """把一只股票的价格按窗口交易日对齐，再归一化成"相对首日的倍数"。
+
+    取 :attr:`_StockSeries.adjusted_closes`（分红送转校正后）而不是成交用的
+    ``closes``：基准要回答"一直拿着会怎样"，而持有者会拿到分红。用不复权价会让
+    基准漏掉全部分红，被系统性低估——策略相对它的"超额"因此虚高。这是刻意让
+    基准与模拟分走两个口径：**模拟成交必须用不复权价**（股数、整手、ATR 才成立），
+    **基准必须用复权价**（总回报才成立），两边各答各的问题。
+    """
 
     own_dates = np.asarray(context.dates, dtype=np.int64)
     if own_dates.size == 0:
         return None
-    closes = np.asarray(context.closes, dtype=float)
+    adjusted = context.adjusted_closes
+    closes = np.asarray(context.closes if adjusted is None else adjusted, dtype=float)
     positions = np.searchsorted(grid, own_dates)
     inside = positions < len(grid)
     if not bool(inside.any()):

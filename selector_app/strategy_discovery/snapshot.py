@@ -49,8 +49,14 @@ from selector_app.screening.rules import RuleGroup
 from .catalog import default_indicator_catalog
 from .models import DiscoveryRequest
 
-_BAR_ARRAY_NAMES = ("open", "high", "low", "close", "atr")
-_SNAPSHOT_VERSION = 1
+#: 快照行情数组的行名。``adjusted_close``（第 6 行，索引 5）是给**买入持有基准**
+#: 用的复权收盘价：持有者会收到分红，不复权 close 会把这部分收益全部漏掉，基准
+#: 会被系统性低估（浦发银行 2015~2026 名义 -41%，含分红实际 +31%）。成交、整手、
+#: ATR 仍然只认 raw 的 ``close``，两边各答各的问题。
+_BAR_ARRAY_NAMES = ("open", "high", "low", "close", "atr", "adjusted_close")
+#: 1 → 2：新增 ``adjusted_close`` 行。旧快照行数不对，版本号不匹配会让它们重建
+#: 而不是被误读成旧口径。
+_SNAPSHOT_VERSION = 2
 SNAPSHOT_SYMBOL_BATCH_SIZE = 64
 
 
@@ -98,6 +104,8 @@ class _SnapshotBaseSeries:
     formula_results: Mapping[str, _ArrayFormulaResult]
     date_to_index: Mapping[int, int]
     data_fingerprint: str
+    #: 复权收盘价（快照数组第 6 行），仅供买入持有基准；拿不到时退回 ``closes``。
+    adjusted_closes: np.ndarray | None = None
 
     @property
     def symbol(self) -> str:
@@ -348,6 +356,11 @@ class DiscoverySnapshot:
                     lows=base.lows[left:right],
                     closes=base.closes[left:right],
                     atrs=base.atrs[left:right],
+                    adjusted_closes=(
+                        base.adjusted_closes[left:right]
+                        if base.adjusted_closes is not None
+                        else None
+                    ),
                     buy_mask=np.asarray(buy_mask[left:right], dtype=bool),
                     sell_mask=np.asarray(sell_mask[left:right], dtype=bool),
                     signals=context_signals,
@@ -375,6 +388,11 @@ class DiscoverySnapshot:
         lows = np.asarray(self._bars[2, offset:limit], dtype=float)
         closes = np.asarray(self._bars[3, offset:limit], dtype=float)
         atrs = np.asarray(self._bars[4, offset:limit], dtype=float)
+        # 第 6 行是复权收盘价（_SNAPSHOT_VERSION 2 起才有）。旧快照会被版本号拦下，
+        # 这里的形状判断是给半旧的、已落盘但未被清理的文件兜底。
+        adjusted_closes: np.ndarray | None = None
+        if self._bars.shape[0] > 5:
+            adjusted_closes = np.asarray(self._bars[5, offset:limit], dtype=float)
         values = {
             value_id: np.asarray(
                 self._values[self._value_indexes[value_id], offset:limit], dtype=float
@@ -412,6 +430,7 @@ class DiscoverySnapshot:
             lows=lows,
             closes=closes,
             atrs=atrs,
+            adjusted_closes=adjusted_closes,
             buy_required=np.asarray(self._required_buy[offset:limit], dtype=bool),
             sell_required=np.asarray(self._required_sell[offset:limit], dtype=bool),
             signals=signals,
@@ -807,6 +826,11 @@ def _write_snapshot(
                     positions
                 ]
             bars[4, cursor:end] = _atr_series(prepared, 14)[positions]
+            # 基准口径：复权收盘价。metric_frames 已经在上面按事件校正过，
+            # 这里只是把同一段窗口搬进快照数组，避免基准再单独做一次复权。
+            bars[5, cursor:end] = metric_frames[(market, code)]["close"].to_numpy(
+                dtype=float, copy=False
+            )[positions]
             required_buy_mask = _evaluate_required_mask(
                 required_buy_rule, result_by_formula, len(prepared)
             )

@@ -9,6 +9,8 @@
 - **缺失日沿用前收盘价**：停牌期间价格没动，收益就是 0，不是跳过。
 - **不计摩擦**：这是观察标尺不是可交易策略，加佣金印花税只会让两条曲线的口径
   不一致。
+- **价格按分红送转校正**（分红再投资口径）：持有者会收到现金分红，用不复权收盘
+  价会把这部分收益全部抹掉，长期看基准被系统性低估，"跑赢基准"就失去意义。
 
 全市场对照用的是同一个函数、同一套规则，所以两边的数字可以直接相减。这条不是
 洁癖：两边各算一套的话，同一只票在「组合回测」和「股票组」两页上会给出不同的
@@ -24,6 +26,7 @@ from typing import Final
 import numpy as np
 import pandas as pd
 
+from selector_app.market_data.adjustment import CorporateAction, build_factor_series
 from selector_app.portfolio_backtest.benchmark import curve_performance
 
 from .models import (
@@ -35,6 +38,42 @@ from .models import (
 )
 
 _INITIAL_CASH: Final = 1.0
+
+
+def adjust_closes_for_dividends(
+    frame: pd.DataFrame,
+    actions_by_key: Mapping[str, Sequence[CorporateAction]],
+) -> pd.DataFrame:
+    """把长表里的 close 按各自标的的除权事件校正（返回新的 frame）。
+
+    为什么这里要复权：这一组曲线回答的是"这批票拿到现在是什么样"，而持有者会收到
+    现金分红。用不复权收盘价会把这部分收益全部抹掉，长期来看基准被系统性低估——
+    **必须与 ``portfolio_backtest/benchmark.py`` 同一口径**，否则同一批票在「组合
+    回测」和「股票组」两页上会给出不同的收益。
+
+    只改 close：等权曲线、成员离散度、停牌判定都基于收盘价，OHLC 在这里没人用。
+    没有事件的标的保持原值（``build_factor_series`` 返回全 1）。
+    """
+
+    if frame.empty or not actions_by_key:
+        return frame
+    date_column = "date" if "date" in frame.columns else "trade_date"
+    if date_column not in frame.columns or "close" not in frame.columns:
+        return frame
+    keys = frame["market"].astype(str).str.upper() + ":" + frame["code"].astype(str)
+    closes = pd.to_numeric(frame["close"], errors="coerce").to_numpy(dtype=float)
+    codes, uniques = pd.factorize(keys, sort=False)
+    adjusted = np.array(closes, dtype=float, copy=True)
+    dates = frame[date_column]
+    for index, key in enumerate(uniques):
+        actions = actions_by_key.get(str(key))
+        if not actions:
+            continue
+        mask = codes == index
+        adjusted[mask] = closes[mask] * build_factor_series(dates[mask], tuple(actions))
+    result = frame.copy()
+    result["close"] = adjusted
+    return result
 
 
 def pivot_closes(frame: pd.DataFrame) -> pd.DataFrame:

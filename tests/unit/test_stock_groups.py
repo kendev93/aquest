@@ -6,12 +6,16 @@
 
 from __future__ import annotations
 
+from datetime import date
+
 import numpy as np
 import pandas as pd
 import pytest
 
+from selector_app.market_data.adjustment import CorporateAction, compute_factor_ratio
 from selector_app.stock_groups.models import normalize_members
 from selector_app.stock_groups.performance import (
+    adjust_closes_for_dividends,
     equal_weight_curve,
     excess_return,
     member_spread,
@@ -197,3 +201,82 @@ def test_pivot_closes_builds_a_date_by_symbol_matrix() -> None:
     assert list(wide.index) == [20260101, 20260102]
     assert wide.loc[20260102, "SH:600001"] == pytest.approx(11.0)
     assert np.isnan(wide.loc[20260102, "SZ:000001"])
+
+
+def _dividend_action(market: str, code: str, ex_date: date) -> CorporateAction:
+    """10.0 元的股票每股派息 0.5 元的那次除权。"""
+
+    return CorporateAction(
+        market=market,
+        code=code,
+        ex_date=ex_date,
+        share_ratio=0.0,
+        cash_per_share=0.5,
+        factor_ratio=compute_factor_ratio(prev_close=10.0, share_ratio=0.0, cash_per_share=0.5),
+        action_type="dividend",
+    )
+
+
+def test_adjust_closes_restores_ex_dividend_drop() -> None:
+    """除权跳空要被抹平：10 → 9.5 是派息造成的，不是这股票跌了 5%。"""
+
+    frame = pd.DataFrame(
+        {
+            "market": ["SH"] * 4,
+            "code": ["600001"] * 4,
+            "date": pd.to_datetime(["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-04"]),
+            "close": [10.0, 10.0, 9.5, 9.5],
+        }
+    )
+
+    wide = pivot_closes(
+        adjust_closes_for_dividends(
+            frame, {"SH:600001": (_dividend_action("SH", "600001", date(2026, 1, 3)),)}
+        )
+    )
+
+    assert wide.loc[20260101, "SH:600001"] == pytest.approx(10.0)
+    assert wide.loc[20260103, "SH:600001"] == pytest.approx(10.0)
+    assert wide.loc[20260104, "SH:600001"] == pytest.approx(10.0)
+    # 不能就地改调用方的 frame：同一份行情后面还要按不复权口径用。
+    assert frame["close"].iloc[3] == pytest.approx(9.5)
+
+
+def test_adjust_closes_leaves_other_symbols_untouched() -> None:
+    """没有事件的标的保持原值，也不该被同批其它标的的因子带偏。"""
+
+    frame = pd.DataFrame(
+        {
+            "market": ["SH", "SH", "SZ", "SZ"],
+            "code": ["600001", "600001", "000001", "000001"],
+            "date": pd.to_datetime(["2026-01-02", "2026-01-03", "2026-01-02", "2026-01-03"]),
+            "close": [10.0, 9.5, 5.0, 5.0],
+        }
+    )
+
+    wide = pivot_closes(
+        adjust_closes_for_dividends(
+            frame, {"SH:600001": (_dividend_action("SH", "600001", date(2026, 1, 3)),)}
+        )
+    )
+
+    assert wide.loc[20260102, "SH:600001"] == pytest.approx(10.0)
+    assert wide.loc[20260103, "SH:600001"] == pytest.approx(10.0)
+    assert wide.loc[20260102, "SZ:000001"] == pytest.approx(5.0)
+    assert wide.loc[20260103, "SZ:000001"] == pytest.approx(5.0)
+
+
+def test_adjust_closes_without_actions_returns_original_values() -> None:
+    """取不到事件就退化成不复权：少一个校正不该让观察页打不开。"""
+
+    frame = pd.DataFrame(
+        {
+            "market": ["SH", "SH"],
+            "code": ["600001", "600001"],
+            "date": pd.to_datetime(["2026-01-02", "2026-01-03"]),
+            "close": [10.0, 9.5],
+        }
+    )
+
+    assert adjust_closes_for_dividends(frame, {})["close"].tolist() == [10.0, 9.5]
+    assert adjust_closes_for_dividends(frame, {"SZ:000001": ()})["close"].tolist() == [10.0, 9.5]
