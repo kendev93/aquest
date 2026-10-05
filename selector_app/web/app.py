@@ -179,16 +179,20 @@ def create_app(
             backtest_service=selected_backtest_service,
         ),
     )
+    # 回测用一份独立的缓存（内存上限更小），读缓存但不写缓存：缓存键是标的级数据
+    # 版本、存的是全历史，所以窗口请求能命中预计算出来的结果；写入留给预计算任务
+    # 单线程批量做——8 个线程抢同一把写锁实测比计算贵三个数量级。
+    #
+    # 但「独立」不等于可以不被失效：行情重写后它的版本号同样会陈旧，于是两份都要
+    # 登记进 ``app.state.indicator_caches``，由 _invalidate_indicator_cache 一起清。
+    selected_backtest_cache = IndicatorCache(selected_store, max_memory_entries=512)
     selected_portfolio_service = cast(
         PortfolioBacktestService,
         portfolio_backtest_service
         if portfolio_backtest_service is not None
         else PortfolioBacktestService(
             adapter=selected_adapter,
-            # 回测读缓存但不写缓存。缓存键现在是标的级数据版本、存的是全历史，
-            # 所以窗口请求能命中预计算出来的结果；写入则留给预计算任务单线程
-            # 批量做——8 个线程抢同一把写锁实测比计算贵三个数量级。
-            indicator_cache=IndicatorCache(selected_store, max_memory_entries=512),
+            indicator_cache=selected_backtest_cache,
         ),
     )
     selected_discovery_service = cast(
@@ -396,6 +400,8 @@ def create_app(
     app.state.market_data_adapter = selected_adapter
     app.state.backtest_service = selected_backtest_service
     app.state.indicator_cache = selected_indicator_cache
+    # 行情重写后要一起失效的全部缓存实例（组合回测那份是独立实例）。
+    app.state.indicator_caches = [selected_indicator_cache, selected_backtest_cache]
     app.state.indicator_precompute_service = selected_precompute_service
     app.state.local_market_data_service = local_market_data_service or LocalMarketDataService(
         adapter=selected_adapter,

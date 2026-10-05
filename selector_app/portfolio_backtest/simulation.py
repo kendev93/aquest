@@ -6,12 +6,16 @@ import heapq
 from bisect import bisect_right
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import replace
+from datetime import date
+from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
 import pandas as pd
 
 from selector_app.backtest.profiles import TradeProfile, profile_from_config
+from selector_app.market_data.adjustment import CorporateAction
+from selector_app.market_data.models import MarketCode, StockRef
 from selector_app.screening.jobs import TaskCancelledError
 from selector_app.screening.models import ScreenCondition
 from selector_app.screening.rules import RuleGroup
@@ -40,6 +44,12 @@ _SYMBOL_RISK_FIELDS = (
     "trailing_stop_cooldown_days",
     "atr_period",
 )
+
+
+def _action_date_int(value: date) -> int:
+    """``date`` -> ``YYYYMMDD``，与回测日期轴用的整数格式对齐。"""
+
+    return value.year * 10000 + value.month * 100 + value.day
 
 
 class PortfolioSimulationMixin(_PortfolioServiceState):
@@ -212,10 +222,20 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
             states = [dict(record) for record in checkpoint.states]
             ranking_events = [dict(record) for record in checkpoint.ranking_events]
 
+        actions_by_symbol: dict[str, tuple[CorporateAction, ...]] = {}
         for date_index in range(start_index, len(dates)):
             if date_index % 10 == 0 and abort_check is not None and abort_check():
                 raise TaskCancelledError("组合回测已取消")
             current_date = dates[date_index]
+            # 除权除息必须赶在当天成交之前处理：成交用 raw 价，ex_date 起报价已经是
+            # 除权后的价格，股数和成本价不同步的话市值会在这一天永久蒸发一段。
+            cash = self._apply_corporate_actions(
+                current_date,
+                positions,
+                by_symbol,
+                cash,
+                actions_by_symbol,
+            )
             cash = self._execute_sells(
                 current_date,
                 positions,
@@ -1349,6 +1369,87 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
         if frequency == "weekly":
             return int(current.isocalendar().week) != int(following.isocalendar().week)
         return (current.year, current.month) != (following.year, following.month)
+
+    def _corporate_actions_for_symbol(self, context: _StockSeries) -> tuple[CorporateAction, ...]:
+        """该标的的分红送转事件；适配器不支持时退化成「无事件」。
+
+        批量行情路径已经在 :meth:`_preload_corporate_actions` 里把整批标的的事件写进
+        缓存；非批量适配器（以及单股路径）在这里按需查一次并累积进同一份缓存，避免
+        同一标的被反复查。这里不复用 `_corporate_actions(ref)`，因为那是 context
+        mixin 的方法，跨 mixin 引用会让 mypy 看不见。
+        """
+
+        cache: dict[tuple[str, str], tuple[CorporateAction, ...]] | None = getattr(
+            self, "_corporate_action_cache", None
+        )
+        if cache is None:
+            cache = {}
+            self._corporate_action_cache = cache
+        key = (context.market, context.code)
+        cached = cache.get(key)
+        if cached is not None:
+            return cached
+        actions: tuple[CorporateAction, ...] = ()
+        reader = getattr(self._adapter, "read_corporate_actions", None)
+        if callable(reader):
+            actions = tuple(
+                reader(
+                    StockRef(
+                        market=cast("MarketCode", context.market),
+                        code=context.code,
+                        path=Path(),
+                        instrument_type=context.instrument_type,
+                        board=context.board,
+                        name=context.name,
+                    )
+                )
+            )
+        cache[key] = actions
+        return actions
+
+    def _apply_corporate_actions(
+        self,
+        current_date: int,
+        positions: Mapping[str, _Position],
+        by_symbol: Mapping[str, _StockSeries],
+        cash: float,
+        cache: dict[str, tuple[CorporateAction, ...]],
+    ) -> float:
+        """把当天的分红送转落到持仓上，返回调整后的可用资金。
+
+        成交价是 raw（不复权）价，所以除权日当天起报价已经按
+        ``(前收盘 - 每股派息) / (1 + 每股送转)`` 掉下来了。以前股数与成本价都不动，
+        于是 10 送 10 之后市值直接腰斩且再也回不来，现金分红也从没入过账——跨越
+        6~7 月分红高峰的多年回测，净值系统性偏低，看起来像是策略不行。
+
+        这里按持有者的真实现金流处理：先把每股派息按**调整前的股数**计入可用资金
+        （不计税：股息红利税取决于持股期限，回测不知道账户也没打算建模），再把股数
+        乘以 ``1 + share_ratio``，并把成本价与持仓期最高价换算到除权后的价格尺度。
+        """
+
+        for symbol, position in positions.items():
+            if position.size <= 0:
+                continue
+            actions = cache.get(symbol)
+            if actions is None:
+                actions = ()
+                context = by_symbol.get(symbol)
+                if context is not None:
+                    actions = self._corporate_actions_for_symbol(context)
+                cache[symbol] = actions
+            for action in actions:
+                if action.is_neutral or _action_date_int(action.ex_date) != current_date:
+                    continue
+                ratio = 1.0 + float(action.share_ratio)
+                if ratio <= 0:
+                    continue
+                cash += position.size * float(action.cash_per_share)
+                position.size *= ratio
+                position.entry_price = (position.entry_price - float(action.cash_per_share)) / ratio
+                position.highest_price = (
+                    position.highest_price - float(action.cash_per_share)
+                ) / ratio
+        return cash
 
     @staticmethod
     def _portfolio_value(

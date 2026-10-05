@@ -80,7 +80,11 @@ class PortfolioBacktestRequest(BaseModel):
     commission: float = Field(default=0.0001, ge=0, le=0.1)
     min_commission: float = Field(default=0.1, ge=0, le=100_000)
     stamp_tax: float = Field(default=0.001, ge=0, le=0.1)
-    slippage: float = Field(default=0.0, ge=0, le=1_000)
+    # 单位是**元/股**（不是成交金额的比率）：成本 = size * slippage，与同一行的
+    # commission（成交金额比率）不同基数，填 0.01 表示每股多付一分钱。
+    slippage: float = Field(
+        default=0.0, ge=0, le=1_000, description="滑点，单位：元/股（按成交股数计）"
+    )
     execution: Literal["next_open", "next_close"] = "next_open"
     fitness_rank_weight: float = Field(default=0.0, ge=0, le=1)
     fitness_min_trades: int = Field(default=5, ge=1, le=10_000)

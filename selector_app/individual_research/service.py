@@ -540,7 +540,16 @@ class IndividualStockResearchService:
                 continue
             signal_values[signal_id] = np.asarray(values, dtype=bool)[window_start:window_end]
         dates = pd.to_datetime(features["date"], errors="coerce").to_numpy()
-        return dates, features.drop(columns=["date"]), labels, signal_values, segments
+        # 波段是在带预热段的计算帧上切的，研究区间只从 window_start 起算（labels 已
+        # 按 offset 裁过）。不裁 segments 的话，预热期（约两个月）的完整波段会被计入
+        # up/down_segments 与中位数振幅 ⇒ 页面「分析 N 个交易日」和统计的样本不是同一
+        # 段，改一个纯指标参数（atr_window）也会连带改变分段结论。
+        in_window = [
+            segment
+            for segment in segments
+            if segment.start_index >= offset and segment.end_index < offset + length
+        ]
+        return dates, features.drop(columns=["date"]), labels, signal_values, in_window
 
     def _mine_conditions(
         self,

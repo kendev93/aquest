@@ -173,6 +173,13 @@ class PoolTrackingRunner:
                 result["sell_signals"].append({**row, "signal_type": "sell"})
             for h in summary["holding"]:
                 holding = {**h, "status": "held"}
+                # 没参与本批回放的版本，快照可能停在更早的交易日（停牌、数据延迟、
+                # 当日失败）。直接丢弃会让模型组合在增量作业里几乎变空，所以保留但
+                # 标出来：前端不该把「昨天已平仓」当成当日持仓。风险退出信号走的是
+                # 另一条路（下面 ``if fresh``），两处口径至此一致。
+                if not fresh:
+                    holding["status"] = "held_stale"
+                    holding["as_of_date"] = summary["as_of_date"]
                 # account_summary 已补算 unrealized_pnl_pct，这里映射为前端读取的
                 # holding_return_pct（与信号扫描路径 service._scan_signals 口径一致）
                 pnl = h.get("unrealized_pnl_pct")

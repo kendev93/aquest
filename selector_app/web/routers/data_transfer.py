@@ -88,11 +88,15 @@ def data_transfer_export(request: Request) -> FileResponse | JSONResponse:
 
 
 @router.post("/import", response_model=None)
-async def data_transfer_import(
+def data_transfer_import(
     request: Request,
     file: UploadFile = File(...),
 ) -> dict[str, object] | JSONResponse:
     """Merge an uploaded archive into this installation.
+
+    注意这里是 ``def`` 不是 ``async def``：解压 + 全量入库是同步重活，放在事件循环
+    上会让整站（任务轮询、取消、healthz）在导入期间全部排队。Starlette 只对同步
+    路由启线程池。
 
     Existing records are never overwritten or deleted; rows whose key already
     exists are reported as skipped, so re-importing is a no-op.
@@ -104,7 +108,7 @@ async def data_transfer_import(
     try:
         written = 0
         with staged.open("wb") as handle:
-            while chunk := await file.read(_CHUNK_BYTES):
+            while chunk := file.file.read(_CHUNK_BYTES):
                 written += len(chunk)
                 if written > _MAX_UPLOAD_BYTES:
                     return _error(
@@ -124,7 +128,7 @@ async def data_transfer_import(
         except (OSError, RuntimeError) as exc:
             return _error("data_import_failed", _message(exc), status.HTTP_503_SERVICE_UNAVAILABLE)
     finally:
-        await file.close()
+        file.file.close()
         shutil.rmtree(workspace, ignore_errors=True)
 
     return {"data": summary.to_dict()}

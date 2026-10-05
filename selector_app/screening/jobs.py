@@ -359,7 +359,9 @@ class ScreenJobRunner:
         while len(self._jobs) > self._max_results:
             evict_id: str | None = None
             for job_id, state in self._jobs.items():
-                if state.status in {"completed", "failed"}:
+                # 取消的任务永远停在 "cancelled"，不进可淘汰集合的话 _jobs 会单调
+                # 增长（每条还挂着 report / payload），反复「提交→取消」就是泄漏。
+                if state.status in {"completed", "failed", "cancelled"}:
                     evict_id = job_id
                     break
             if evict_id is None:

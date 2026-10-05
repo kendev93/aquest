@@ -4,6 +4,7 @@ import json
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -266,6 +267,93 @@ def test_indicators_use_adjusted_prices_while_fills_use_raw() -> None:
     assert report.trades[0]["date"] == dates[ex_index + 2].strftime("%Y-%m-%d")
     # 成交价是 raw 开盘价，不是复权价。
     assert report.trades[0]["price"] == pytest.approx(float(frame["open"].iloc[ex_index + 2]))
+
+
+def test_positions_are_adjusted_on_ex_dividend_day() -> None:
+    """跨除权日必须同步股数与成本价、现金分红要入账。
+
+    不调整的话：raw 价按 (20-0.2)/1.3 掉到 15.23，股数与成本价却还停在除权前，
+    市值当天凭空少掉 23%，而且现金分红永远到不了账——跨越 6~7 月分红高峰的多年
+    回测，净值会系统性偏低。
+    """
+
+    share_ratio, cash_per_share = 0.3, 0.2
+    before = 20.0
+    after = (before - cash_per_share) / (1.0 + share_ratio)
+    ex_index = 40
+    dates = pd.date_range("2024-01-02", periods=60, freq="B")
+    close = np.where(np.arange(60) < ex_index, before, after)
+    frame = pd.DataFrame(
+        {
+            "date": dates,
+            "open": close,
+            "high": close + 0.03,
+            "low": close - 0.03,
+            "close": close,
+            "volume": np.full(60, 100_000.0),
+            "amount": close * 100_000.0,
+        }
+    )
+    actions = (
+        CorporateAction(
+            market="SH",
+            code="600000",
+            ex_date=dates[ex_index].date(),
+            share_ratio=share_ratio,
+            cash_per_share=cash_per_share,
+            factor_ratio=compute_factor_ratio(
+                prev_close=before,
+                share_ratio=share_ratio,
+                cash_per_share=cash_per_share,
+            ),
+            action_type="mixed",
+        ),
+    )
+
+    class ExDividendAdapter(FakeAdapter):
+        def list_stock_refs(self, vipdoc_path, universe, universe_file=None):
+            return [
+                StockRef(
+                    market="SH",
+                    code="600000",
+                    name="测试600000",
+                    path=Path(vipdoc_path) / "sh600000.day",
+                )
+            ]
+
+        def read_stock(self, ref: StockRef) -> pd.DataFrame:
+            return frame.copy(deep=True)
+
+        def read_corporate_actions(self, ref: StockRef):
+            return actions
+
+    settings = config(
+        formula_text="BUY:C>19; RANK:C;",
+        max_positions=1,
+        initial_cash=100_000.0,
+        start_date=dates[0].date(),
+        end_date=dates[-1].date(),
+        stop_loss_pct=None,
+        # 只用来满足"至少一个卖出规则"的校验，这段行情里不会触发。
+        take_profit_pct=10.0,
+    )
+
+    report = PortfolioBacktestService(adapter=ExDividendAdapter()).run(settings)
+
+    # 全程只买不卖，方便只看除权日那一天的效应。
+    assert [trade["direction"] for trade in report.trades] == ["BUY"]
+    # 1) 总资产在除权日应当连续：市值 + 到账的现金红利 = 原有市值。
+    totals = [float(row["total"]) for row in report.equity_curve]
+    index = len(totals) - (len(dates) - ex_index)
+    assert totals[index] == pytest.approx(totals[index - 1], rel=1e-6)
+    # 2) 股数照 1+share_ratio 放大。
+    state = report.current_state
+    assert state is not None
+    holdings = list(cast("list[dict[str, object]]", state["holdings"]))
+    assert holdings
+    assert float(cast("float", holdings[0]["size"])) == pytest.approx(
+        float(cast("float", report.trades[0]["size"])) * (1.0 + share_ratio)
+    )
 
 
 def test_indicators_stay_below_threshold_without_corporate_actions() -> None:

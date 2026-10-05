@@ -165,8 +165,13 @@ def significant_conditions(
             key = condition_key(condition)
             lift = _number(mining.get("lift"))
             previous = best.get(key)
-            if previous is not None and (previous.lift or -np.inf) >= (lift or -np.inf):
-                continue
+            # 不能用 ``or``：lift == 0.0（没有超额）是合法值，会被当成 -inf，于是已有
+            # 0.0 的记录会压住后来的 -1.0（更差的条件反而顶掉了更好的）。
+            if previous is not None:
+                previous_score = previous.lift if previous.lift is not None else -np.inf
+                current_score = lift if lift is not None else -np.inf
+                if previous_score >= current_score:
+                    continue
             side = payload.get("side")
             best[key] = LibraryCondition(
                 key=key,
@@ -186,7 +191,10 @@ def significant_conditions(
                 created_at=_text(record.get("finished_at")),
                 scanned_stocks=_scanned_stocks(record),
             )
-    ordered = sorted(best.values(), key=lambda item: (item.lift is None, -(item.lift or 0.0)))
+    ordered = sorted(
+        best.values(),
+        key=lambda item: (item.lift is None, -(item.lift if item.lift is not None else 0.0)),
+    )
     return ordered[: max(1, limit)]
 
 
@@ -204,6 +212,9 @@ def _scanned_stocks(record: Mapping[str, object]) -> int | None:
     """
 
     summary = _mapping(record.get("summary"))
+    # 这里保持 ``or``：``scanned_stocks`` 为 0 在现有历史记录里表示「没统计到」，
+    # 不是「确实扫了 0 只」，测试也固定了回退行为（test_library_falls_back_to_
+    # processed_for_scan_size）。宁可显示估算规模，也不要把 0 当成答案。
     return _as_int(summary.get("scanned_stocks")) or _as_int(summary.get("processed"))
 
 

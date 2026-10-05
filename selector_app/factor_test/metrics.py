@@ -576,7 +576,11 @@ def annotate_significance(
     qvalues = benjamini_hochberg([item.pvalue for item in evidence])
     adjusted: list[FactorEvidence] = []
     for item, qvalue in zip(evidence, qvalues):
-        significant = qvalue is not None and qvalue <= alpha
+        # 有效交易日不足时 note 已经写明「结论不可靠」，这时 q 值再小也不能挂徽章：
+        # 置换次数越多，p 的下界越小（200 次时最小 p≈0.005），样本量越小越容易靠
+        # 运气穿过 BH 校正。归因侧（factor_attribution/metrics.py）一直有这道闸，
+        # 因子侧补上。
+        significant = qvalue is not None and qvalue <= alpha and item.ic_days >= MIN_IC_DAYS
         note = item.note
         if qvalue is not None:
             note = f"{note}，多重检验校正后 q={qvalue:.3f}"

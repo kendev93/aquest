@@ -42,6 +42,11 @@ def estimate_panel_bytes(stock_count: int, day_count: int, value_count: int) -> 
     return stock_count * day_count * (value_count * 4 + 8)
 
 
+#: 拿不到「可用内存」精确值时，按物理内存打的保守折扣。宁可估小也不估大：这道墙
+#: 的作用是「提前拒绝」，估大了等于没设。
+_TOTAL_MEMORY_FRACTION = 0.5
+
+
 def _available_memory_bytes() -> int | None:
     try:
         with open("/proc/meminfo", encoding="utf-8") as handle:
@@ -49,8 +54,19 @@ def _available_memory_bytes() -> int | None:
                 if line.startswith("MemAvailable:"):
                     return int(line.split()[1]) * 1024
     except (OSError, ValueError):
+        pass
+    # macOS / Windows 上没有 /proc/meminfo。以前这里直接返回 None ⇒ memory_ceiling
+    # 算成 0 ⇒ 可用内存那道墙形同虚设（见 check_panel_budget 里 ``if memory_ceiling
+    # > 0``），只剩 MAX_PANEL_BYTES 硬顶；而 scoring 会把 float32 面板复制成
+    # float64，峰值远超硬顶 ⇒ 本该「提前拒绝」的运行在 macOS 上直接被 OOM kill。
+    try:
+        pages = os.sysconf("SC_PHYS_PAGES")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+    except (ValueError, OSError, AttributeError):
         return None
-    return None
+    if pages <= 0 or page_size <= 0:
+        return None
+    return int(pages * page_size * _TOTAL_MEMORY_FRACTION)
 
 
 def check_panel_budget(required: int) -> None:

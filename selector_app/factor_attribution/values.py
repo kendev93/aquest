@@ -40,6 +40,17 @@ class SignalValues:
     missing_stocks: tuple[str, ...]
 
 
+def _symbol_key(market: str, code: str) -> str:
+    """标的键统一成小写。
+
+    归档成交的 ``market`` 与行情列的大小写并不总是一致（库里见过 ``sh`` 和 ``SH``
+    混用），键不归一会让某只票的全部成交静默拿不到值 —— 值保持 NaN、被下游
+    ``np.isfinite`` 过滤掉，样本无声缩小，还会被误报成「行情读不到」。
+    """
+
+    return f"{str(market).strip().lower()}{str(code).strip()}"
+
+
 def collect_signal_values(
     adapter: BatchMarketDataAdapter,
     refs: Sequence[StockRef],
@@ -58,10 +69,12 @@ def collect_signal_values(
     warmup = max(FORMULA_REGISTRY.formula(formula_id).recommended_bars for formula_id in groups)
     start_date = min(trip.signal_date for trip in trips)
     end_date = max(trip.exit_date for trip in trips)
-    needed = {trip.key for trip in trips}
+    # 归一化键只用于匹配；展示给用户的 missing_stocks 仍是成交里原本的写法。
+    needed = {_symbol_key(trip.market, trip.code) for trip in trips}
+    reported_keys = {_symbol_key(trip.market, trip.code): trip.key for trip in trips}
     by_key: dict[str, list[int]] = {}
     for index, trip in enumerate(trips):
-        by_key.setdefault(trip.key, []).append(index)
+        by_key.setdefault(_symbol_key(trip.market, trip.code), []).append(index)
 
     values = np.full((len(trips), len(value_ids)), np.nan, dtype=float)
     holding_days = np.zeros(len(trips), dtype=int)
@@ -82,13 +95,16 @@ def collect_signal_values(
         actions_lookup: dict[str, tuple[CorporateAction, ...]] = {}
         if callable(loader):
             actions_lookup = {
-                f"{market}{code}": actions
+                _symbol_key(market, code): actions
                 for (market, code), actions in loader(
                     [(str(item.market), str(item.code)) for item in batch]
                 ).items()
             }
         if not frame.empty:
-            keys = frame["market"].astype(str) + frame["code"].astype(str)
+            keys = (
+                frame["market"].astype(str).str.strip().str.lower()
+                + frame["code"].astype(str).str.strip()
+            )
             for key, group in frame.groupby(keys, sort=False):
                 stock_key = str(key)
                 indices = by_key.get(stock_key)
@@ -107,7 +123,7 @@ def collect_signal_values(
         if progress is not None:
             progress(min(offset + len(batch), total), total)
 
-    missing = tuple(sorted(needed - seen))
+    missing = tuple(sorted(reported_keys[key] for key in needed - seen))
     return SignalValues(values=values, holding_days=holding_days, missing_stocks=missing)
 
 

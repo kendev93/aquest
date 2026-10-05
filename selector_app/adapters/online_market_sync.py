@@ -1373,7 +1373,9 @@ class OnlineMarketSync:
                 instrument_types=tuple(sorted({target[2] for target in targets})) or None,
             )
         }
-        latest = self._store.read_latest_bars(refs, count=2, include_provisional=True)
+        latest = self._store.read_latest_bars(
+            refs, count=_EXISTING_SNAPSHOT_BARS, include_provisional=True
+        )
         latest_by_key = (
             {
                 (str(market), str(code)): group.reset_index(drop=True)
@@ -2095,6 +2097,15 @@ def _first_date(frame: pd.DataFrame) -> date | None:
         return None
     dates = pd.to_datetime(frame["date"], errors="coerce").dropna()
     return pd.Timestamp(dates.min()).date() if not dates.empty else None
+
+
+#: 用于「有无变化」比对的现有行情快照行数。
+#:
+#: 增量同步取回的是一段回补窗口（默认最近十来个自然日），而 ``_has_new_data`` 是
+#: 逐行比对的：只要帧里有一个日期不在快照里就判「有变化」。快照只取最后 2 根时，
+#: 窗口里靠前的日期必然不在其中 ⇒ 判定恒为真 ⇒ 每轮全库重写、报表里
+#: ``unchanged_files`` 恒为 0。快照要覆盖住回补窗口，留足余量。
+_EXISTING_SNAPSHOT_BARS = 40
 
 
 def _has_new_data(existing: pd.DataFrame, latest: pd.DataFrame) -> bool:

@@ -88,7 +88,13 @@ def _has_no_exit(base: Mapping[str, object]) -> bool:
     不设离场的回测等于只买不卖，净值曲线说明不了任何事。
     """
 
-    if base.get("sell_rule") is not None or base.get("sell_signal") is not None:
+    # 空字典也算「没有规则」：来源研究把卖出规则序列化成 ``{}`` 是发生过的，而
+    # 只判 ``is not None`` 会让这种策略跳过下面的 blocker，发布出一个永不平仓的
+    # 策略（回测只能靠 close_at_end 了结，净值和回撤都没意义）。
+    sell_rule = base.get("sell_rule")
+    if base.get("sell_signal") is not None:
+        return False
+    if isinstance(sell_rule, Mapping) and not _is_empty_rule(sell_rule):
         return False
     return not any(base.get(field) is not None for field in _RISK_FIELDS)
 

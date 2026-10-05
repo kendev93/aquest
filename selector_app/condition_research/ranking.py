@@ -254,12 +254,16 @@ def assess_ranking_values(
                 daily_ic[value_id].append(ic)
             ordered = pair.sort_values(value_id, ascending=False)
             ordered_returns = ordered["return"].to_numpy(dtype=float)
-            daily_lift_desc[value_id].append(
-                float(np.mean(ordered_returns[:top_n])) - float(np.mean(returns))
-            )
-            daily_lift_asc[value_id].append(
-                float(np.mean(ordered_returns[-top_n:])) - float(np.mean(returns))
-            )
+            # 当天合格标的数不超过槽位数时，[:top_n] 和 [-top_n:] 都退化成全样本，
+            # 两个方向的 lift 恰好为 0——那不是「没有超额」，是「这天没法算」。记
+            # 进去只会系统性拉低均值，所以跳过而不是记 0。
+            if len(pair) > top_n:
+                daily_lift_desc[value_id].append(
+                    float(np.mean(ordered_returns[:top_n])) - float(np.mean(returns))
+                )
+                daily_lift_asc[value_id].append(
+                    float(np.mean(ordered_returns[-top_n:])) - float(np.mean(returns))
+                )
             for index, mean in enumerate(_quantile_returns(ordered_returns)):
                 if mean is not None:
                     quantile_accumulator[value_id][index].append(mean)

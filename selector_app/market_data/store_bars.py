@@ -515,6 +515,13 @@ class DuckDbBarsStore:
         incoming = incoming.sort_values(
             ["market", "code", "trade_date"], kind="stable"
         ).reset_index(drop=True)
+        # 同一只票可能被拆进两个 (instrument_type, board) 分组各写一次，concat 之后就
+        # 出现重复键。daily_bars 上有 UNIQUE(market, code, trade_date, price_basis)，而
+        # DELETE ... USING 对重复的 incoming 行只删一次 ⇒ 撞约束整批回滚，同批几百只票
+        # 的在线数据一起丢。本地写路径（upsert_local_bars）本来就有这一步。
+        incoming = incoming.drop_duplicates(
+            subset=["market", "code", "trade_date", "price_basis"], keep="last"
+        ).reset_index(drop=True)
         with _WRITE_LOCK, self._store._connect() as connection:
             connection.execute("BEGIN")
             try:
@@ -593,6 +600,13 @@ class DuckDbBarsStore:
                       AND existing.trade_date = incoming.trade_date
                       AND existing.price_basis = incoming.price_basis
                       AND existing.source = 'online'
+                      -- 盘中重放（重试 / --as-of / 定时任务）不该把已收盘的行降级成
+                      -- provisional：所有读路径都只认 completed，覆盖之后这一天会对
+                      -- 选股、回测、画图整体消失。
+                      AND NOT (
+                        existing.bar_status = 'completed'
+                        AND incoming.bar_status = 'provisional'
+                      )
                     """
                 )
                 connection.execute(
@@ -607,6 +621,16 @@ class DuckDbBarsStore:
                           AND local.trade_date = incoming.trade_date
                           AND local.price_basis = incoming.price_basis
                           AND local.source = 'local'
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1 FROM daily_bars AS existing
+                        WHERE existing.market = incoming.market
+                          AND existing.code = incoming.code
+                          AND existing.trade_date = incoming.trade_date
+                          AND existing.price_basis = incoming.price_basis
+                          AND existing.source = 'online'
+                          AND existing.bar_status = 'completed'
+                          AND incoming.bar_status = 'provisional'
                     )
                     """
                 )
@@ -1331,11 +1355,13 @@ class DuckDbBarsStore:
             return 0
         if not symbols:
             raise ValueError("批量行情计数必须提供标的范围")
+        # 与 read_many_bars 同口径：只数默认价格基准的行。少了这一条，存过 hfq 历史的
+        # 标的会出现「计数 > 0、取出来是空帧」，上层「有数据才处理」的判断因此失真。
+        conditions: list[str] = ["bars.price_basis = ?"]
+        parameters: list[object] = [DEFAULT_PRICE_BASIS]
         symbol_frame = pd.DataFrame(
             [{"market": item.market, "code": item.code} for item in symbols]
         ).drop_duplicates()
-        conditions: list[str] = []
-        parameters: list[object] = []
         if start_date is not None:
             conditions.append("bars.trade_date >= ?")
             parameters.append(start_date)

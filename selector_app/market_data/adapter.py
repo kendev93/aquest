@@ -200,10 +200,14 @@ class DuckDbMarketDataAdapter:
         return frame
 
     def clear_thread_stock_cache(self) -> None:
-        """Forget the prior ticker snapshot before starting another research run."""
+        """Forget the prior ticker snapshot before starting another research run.
 
-        self._stock_read_cache.key = None
-        self._stock_read_cache.frame = None
+        换掉整个 ``local()``，而不是只清当前线程的槽。调用方想表达的是「这一轮研究
+        开始前清一下」，但槽是每个线程一份，只清当前线程对线程池里别的 worker 无效；
+        换了对象之后所有线程下次访问拿到的都是空槽。
+        """
+
+        self._stock_read_cache = local()
 
     def read_many_stocks(
         self,

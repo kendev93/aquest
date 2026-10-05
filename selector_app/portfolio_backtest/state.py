@@ -9,6 +9,7 @@ import pandas as pd
 
 from selector_app.formulas.registry import FormulaRegistry
 from selector_app.indicators.cache import IndicatorCache
+from selector_app.market_data.adjustment import CorporateAction
 from selector_app.market_data.models import (
     InstrumentBoard,
     InstrumentType,
@@ -38,3 +39,6 @@ class _PortfolioServiceState:
     _adapter: PortfolioMarketDataAdapter
     _registry: FormulaRegistry
     _indicator_cache: IndicatorCache | None
+    #: 公司行动缓存。每一轮 run 开头清空：补录分红事件后，长驻进程里旧缓存会让复权
+    #: 漏事件，且 ``adjust_version`` 跟着错，指标缓存 key 也失效不了。
+    _corporate_action_cache: dict[tuple[str, str], tuple[CorporateAction, ...]]

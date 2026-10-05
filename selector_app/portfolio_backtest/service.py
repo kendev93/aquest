@@ -65,6 +65,9 @@ class PortfolioBacktestService(
         refs = resolved.refs
         parsed = parse_formula(config.formula_text) if config.formula_text else None
         self._validate_outputs(config, parsed)
+        # 每一轮都重新查公司行动：补录分红/送转后，上一轮缓存下来的事件会让复权漏
+        # 事件，而且 adjust_version 跟着错 ⇒ 指标缓存 key 也失效不了。
+        self._corporate_action_cache = {}
 
         contexts: list[_StockSeries] = []
         failure_reasons: Counter[str] = Counter()

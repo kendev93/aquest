@@ -313,7 +313,12 @@ def run_signal_backtest(
             equity[-1]["position_value"] = 0.0
             equity[-1]["total"] = cash
 
-    equity_frame = pd.DataFrame({"total": totals}) if summary_only else pd.DataFrame(equity)
+    # 显式给列：日期窗口把行情过滤空时 equity 是 []，无列 DataFrame 会让下面取
+    # "total" 直接 KeyError。
+    if summary_only:
+        equity_frame = pd.DataFrame({"total": totals})
+    else:
+        equity_frame = pd.DataFrame(equity, columns=["date", "cash", "position_value", "total"])
     if not summary_only:
         peak = equity_frame["total"].cummax()
         equity_frame["drawdown"] = peak - equity_frame["total"]

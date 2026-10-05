@@ -170,6 +170,9 @@ def _train_task(ref: StockRef) -> TrainOutcome:
                 code=ref.code,
                 feature_rows=rows,
             )
+    # TaskUserError 故意不在这里兜：行情在研究期间发生变化时，继续跑下去会让各阶段
+    # 的数据口径不一致，设计上就是要整轮中止（test_service_aborts_if_market_data_
+    # changes_between_time_split_passes 固定的行为）。
     except (ValueError, OSError) as exc:
         return TrainOutcome(key=key, failure=_reason(exc))
     return TrainOutcome(
@@ -207,6 +210,9 @@ def _candidate_window_task(ref: StockRef) -> CandidateWindowOutcome:
             )
             for candidate_id, side, condition in payload.candidates
         }
+    # TaskUserError 故意不在这里兜：行情在研究期间发生变化时，继续跑下去会让各阶段
+    # 的数据口径不一致，设计上就是要整轮中止（test_service_aborts_if_market_data_
+    # changes_between_time_split_passes 固定的行为）。
     except (ValueError, OSError) as exc:
         return CandidateWindowOutcome(key=key, failure=_reason(exc))
     return CandidateWindowOutcome(
@@ -247,6 +253,9 @@ def _holdout_task(ref: StockRef) -> HoldoutOutcome:
             )
             for candidate_id, side, condition in payload.candidates
         }
+    # TaskUserError 故意不在这里兜：行情在研究期间发生变化时，继续跑下去会让各阶段
+    # 的数据口径不一致，设计上就是要整轮中止（test_service_aborts_if_market_data_
+    # changes_between_time_split_passes 固定的行为）。
     except (ValueError, OSError) as exc:
         return HoldoutOutcome(key=key, failure=_reason(exc))
     return HoldoutOutcome(

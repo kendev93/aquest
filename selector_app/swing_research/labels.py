@@ -72,12 +72,16 @@ def segment_onset(frame: pd.DataFrame, segment: SwingSegment) -> int | None:
     trailing leg of a series that simply ended.
     """
 
+    # 只在本段内找确认点。ZigZag 允许「推进幅度没到阈值、回撤已经到阈值」的腿，
+    # 不截断的话命中会落在后一段甚至无关的 bar 上——*onset_ahead 是唯一被标注为
+    # 「实时可交易」的口径，错标会直接产出错误的交易条件。
+    stop = segment.end_index + 1
     if segment.direction == "up":
         prices = np.asarray(frame["high"], dtype=float)
-        travel = (prices[segment.start_index :] - segment.start_price) / segment.start_price
+        travel = (prices[segment.start_index : stop] - segment.start_price) / segment.start_price
     else:
         prices = np.asarray(frame["low"], dtype=float)
-        travel = (segment.start_price - prices[segment.start_index :]) / segment.start_price
+        travel = (segment.start_price - prices[segment.start_index : stop]) / segment.start_price
     if not np.isfinite(segment.start_price) or segment.start_price <= 0:
         return None
     hits = np.nonzero(np.nan_to_num(travel, nan=-np.inf) >= segment.threshold)[0]

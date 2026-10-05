@@ -51,17 +51,21 @@ class PerformanceAnalyzer:
         annual_return = float((1 + total_return) ** (self.ANNUAL_DAYS / len(daily_returns)) - 1)
         drawdown, drawdown_pct = self._drawdown_arrays(total)
         max_drawdown = float(np.max(drawdown_pct))
-        max_dd_duration = self._max_drawdown_duration(total, drawdown)
+        # 回撤时长要描述的是「最大回撤那一段」，所以定位必须用与 max_drawdown
+        # 同一个口径（百分比），否则小资金深回撤 + 大资金浅回撤时，报出来的幅度
+        # 和时长不是同一次回撤。
+        max_dd_duration = self._max_drawdown_duration(total, drawdown_pct)
         rf_daily = self._risk_free_rate / self.ANNUAL_DAYS
         excess = daily_returns - rf_daily
         daily_std = float(np.std(daily_returns))
         sharpe = (
             float(np.mean(excess) / daily_std * np.sqrt(self.ANNUAL_DAYS)) if daily_std else 0.0
         )
-        negative = excess[excess < 0]
-        negative_std = float(np.std(negative)) if len(negative) else 0.0
-        if negative_std:
-            sortino = float(np.mean(excess) / negative_std * np.sqrt(self.ANNUAL_DAYS))
+        # 下行差按全样本取二阶矩。只对负收益子集求 std 会丢掉非负观测的计数权重，
+        # 分母被缩小 ⇒ Sortino 系统性虚高；样本里只有一笔负收益时 std 还是 0。
+        downside = float(np.sqrt(np.mean(np.minimum(excess, 0.0) ** 2)))
+        if downside:
+            sortino = float(np.mean(excess) / downside * np.sqrt(self.ANNUAL_DAYS))
         elif float(np.mean(excess)) > 0:
             sortino = 999.0
         else:
@@ -83,7 +87,9 @@ class PerformanceAnalyzer:
             else np.zeros(len(sell_trades))
         )
         wins = pnl > 0
-        losses = ~wins
+        # 保本单（费用与价差刚好抵消）既不是盈利也不是亏损，用 ``~wins`` 会把它们
+        # 算成亏损并把 0 塞进 loss_returns，压低胜率、拉平平均亏损。
+        losses = pnl < 0
         win_pnl = pnl[wins]
         loss_pnl = pnl[losses]
         profit_factor = (
@@ -141,10 +147,10 @@ class PerformanceAnalyzer:
         return drawdown, drawdown_pct
 
     @staticmethod
-    def _max_drawdown_duration(total: np.ndarray, drawdown: np.ndarray) -> int:
-        if not len(drawdown) or float(np.max(drawdown)) == 0:
+    def _max_drawdown_duration(total: np.ndarray, drawdown_pct: np.ndarray) -> int:
+        if not len(drawdown_pct) or float(np.max(drawdown_pct)) == 0:
             return 0
-        max_index = int(np.argmax(drawdown))
+        max_index = int(np.argmax(drawdown_pct))
         # 回撤区间必须从「谷底之前的历史最高点」起算。此前用「回扫遇到的第一个高于
         # 谷底的点」近似，单调下跌时会退化成 1 天（正确值应为整段下跌长度）。
         peak_index = int(np.argmax(total[: max_index + 1]))

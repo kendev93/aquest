@@ -127,10 +127,18 @@ def _invalidate_indicator_cache(request: Request) -> None:
     内存缓存只有几百条，重建的代价远小于算错，所以这里直接整片丢掉。
     """
 
-    cache = getattr(request.app.state, "indicator_cache", None)
-    if cache is None:
-        return
-    cast(IndicatorCache, cache).clear_memory()
+    # 进程里可能不止一份缓存（组合回测那份是独立实例），只清 app.state 那一份会
+    # 让回测继续命中上一版行情算出的指标，且不报错。
+    caches: list[IndicatorCache] = [
+        item
+        for item in getattr(request.app.state, "indicator_caches", None) or ()
+        if isinstance(item, IndicatorCache)
+    ]
+    primary = getattr(request.app.state, "indicator_cache", None)
+    if isinstance(primary, IndicatorCache) and not any(item is primary for item in caches):
+        caches.insert(0, primary)
+    for cache in caches:
+        cache.clear_memory()
 
 
 def _stored_end_year(status: DataStoreStatus) -> int | None:
