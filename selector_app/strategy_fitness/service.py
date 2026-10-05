@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from datetime import date
@@ -19,6 +19,7 @@ from selector_app.formulas.custom import ParsedFormula, parse_formula
 from selector_app.formulas.registry import FORMULA_REGISTRY, FormulaRegistry
 from selector_app.indicators.cache import IndicatorCache, frame_fingerprint
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
+from selector_app.market_data.adjustment import CorporateAction
 from selector_app.market_data.day_format import classify_board, classify_instrument
 from selector_app.market_data.models import (
     InstrumentBoard,
@@ -63,11 +64,23 @@ class _PhaseWindow:
 
 
 class _CachedAdapter:
-    """Expose already-read frames to the shared single-stock simulator."""
+    """Expose already-read frames to the shared single-stock simulator.
 
-    def __init__(self, refs: list[StockRef], frames: Mapping[str, pd.DataFrame]) -> None:
+    除了行情还要顺带转发分红送转事件：内层回测引擎是按 ``load_corporate_actions``
+    / ``read_corporate_actions`` 探测事件的，探测不到就静默退化成不复权——指标会把
+    除权日当成暴跌，基准也会漏掉全部分红。行情既然已经预先读到内存里，事件必须跟着
+    一起打包，否则"批量预取"这个优化会把复权一起优化掉。
+    """
+
+    def __init__(
+        self,
+        refs: list[StockRef],
+        frames: Mapping[str, pd.DataFrame],
+        actions: Mapping[tuple[str, str], tuple[CorporateAction, ...]] | None = None,
+    ) -> None:
         self._refs = tuple(refs)
         self._frames = frames
+        self._actions = dict(actions or {})
 
     def list_stock_refs(
         self,
@@ -88,6 +101,17 @@ class _CachedAdapter:
 
     def read_stock(self, ref: StockRef) -> pd.DataFrame:
         return self._frames[ref_key(ref)].copy(deep=True)
+
+    def read_corporate_actions(self, ref: StockRef) -> tuple[CorporateAction, ...]:
+        return self._actions.get((ref.market, ref.code), ())
+
+    def load_corporate_actions(
+        self,
+        keys: Iterable[tuple[str, str]],
+    ) -> dict[tuple[str, str], tuple[CorporateAction, ...]]:
+        """组合回测的批量预加载走这里，``keys`` 是 ``(market, code)`` 序列。"""
+
+        return {(market, code): self._actions.get((market, code), ()) for market, code in keys}
 
 
 class StrategyFitnessService:
@@ -124,7 +148,7 @@ class StrategyFitnessService:
         windows = _split_windows(evaluation_dates, config.train_ratio, config.validation_ratio)
         cached_refs = [ref for ref in refs if ref_key(ref) in frames]
         simulator = PortfolioBacktestService(
-            adapter=_CachedAdapter(cached_refs, frames),
+            adapter=_CachedAdapter(cached_refs, frames, self._corporate_actions(cached_refs)),
             registry=self._registry,
             indicator_cache=self._indicator_cache,
         )
@@ -198,6 +222,25 @@ class StrategyFitnessService:
                 reason = str(exc).strip()[:200] or type(exc).__name__
                 failures[reason] += 1
         return frames, failures
+
+    def _corporate_actions(
+        self, refs: list[StockRef]
+    ) -> dict[tuple[str, str], tuple[CorporateAction, ...]]:
+        """整批标的的分红送转事件，一次取回交给内层回测引擎。
+
+        适配性评估一次覆盖成百上千只标的，逐只查事件表会把这一步变成 IO 瓶颈，所以
+        优先走批量接口。适配器两者都不支持时返回空表，内层引擎退化成不复权——那是
+        本处修复之前的行为，测试里的 FakeAdapter 仍然走这条路。
+        """
+
+        keys = [(ref.market, ref.code) for ref in refs]
+        loader = getattr(self._adapter, "load_corporate_actions", None)
+        if callable(loader):
+            return dict(loader(keys))
+        reader = getattr(self._adapter, "read_corporate_actions", None)
+        if not callable(reader):
+            return {}
+        return {key: tuple(reader(ref)) for key, ref in zip(keys, refs, strict=True)}
 
     def _list_refs(self, config: StrategyFitnessConfig) -> list[StockRef]:
         strategy = config.strategy

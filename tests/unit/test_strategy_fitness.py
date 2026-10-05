@@ -7,11 +7,12 @@ import numpy as np
 import pandas as pd
 
 from selector_app.adapters.local_day_adapter import StockRef
+from selector_app.market_data.adjustment import CorporateAction, compute_factor_ratio
 from selector_app.portfolio_backtest.models import PortfolioBacktestConfig
 from selector_app.screening.models import ScreenCondition
 from selector_app.screening.rules import RuleGroup
 from selector_app.strategy_fitness.models import StrategyFitnessConfig
-from selector_app.strategy_fitness.service import StrategyFitnessService
+from selector_app.strategy_fitness.service import StrategyFitnessService, _CachedAdapter
 
 
 def stock_frame(close: list[float]) -> pd.DataFrame:
@@ -164,3 +165,50 @@ def test_strategy_fitness_reuses_composable_rule_groups() -> None:
 
     assert report.processed == 2
     assert all(result.train.total_trades >= 0 for result in report.results)
+
+
+def test_fitness_batch_preload_carries_corporate_actions() -> None:
+    """批量预取行情时，分红送转事件必须跟着一起交给内层回测引擎。
+
+    内层引擎按 ``load_corporate_actions`` 探测事件，探测不到就退回复权前口径：基准
+    漏掉全部分红、指标把除权日的跳空当成暴跌。预取行情很容易顺手把事件一起漏掉，
+    而且这种退化完全静默，只能靠这条链路上的断言守住。
+    """
+
+    class SpyingAdapter(FakeAdapter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.requested: list[tuple[str, str]] = []
+
+        def load_corporate_actions(self, keys):
+            pairs = list(keys)
+            self.requested.extend(pairs)
+            return {key: () for key in pairs}
+
+    adapter = SpyingAdapter()
+    StrategyFitnessService(adapter=adapter).run(config())
+
+    assert set(adapter.requested) == {("SH", "600000"), ("SH", "600001")}
+
+
+def test_fitness_cached_adapter_forwards_actions_to_simulator() -> None:
+    """``_CachedAdapter`` 拿到事件后要能原样转发给回测引擎的两个探测口。"""
+
+    ref = StockRef(
+        market="SH", code="600000", name="测试600000", path=Path("/tmp/vipdoc/sh600000.day")
+    )
+    action = CorporateAction(
+        market="SH",
+        code="600000",
+        ex_date=date(2024, 1, 4),
+        share_ratio=0.0,
+        cash_per_share=0.5,
+        factor_ratio=compute_factor_ratio(prev_close=20.0, share_ratio=0.0, cash_per_share=0.5),
+        action_type="dividend",
+    )
+    cached = _CachedAdapter(
+        [ref], {"SH600000": stock_frame([10, 11, 12])}, {("SH", "600000"): (action,)}
+    )
+
+    assert cached.read_corporate_actions(ref) == (action,)
+    assert cached.load_corporate_actions([("SH", "600000")]) == {("SH", "600000"): (action,)}
