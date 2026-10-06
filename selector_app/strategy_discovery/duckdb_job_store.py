@@ -279,9 +279,7 @@ class DuckDbStrategyJobStore:
                 rows.extend(active_rows)
                 history_limit = limit - len(active_rows)
             if history_limit > 0:
-                terminal_filter = (
-                    " AND status NOT IN ('queued', 'running')" if offset == 0 else ""
-                )
+                terminal_filter = " AND status NOT IN ('queued', 'running')" if offset == 0 else ""
                 rows.extend(
                     connection.execute(
                         """

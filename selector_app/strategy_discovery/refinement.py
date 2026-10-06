@@ -383,9 +383,7 @@ def build_refined_candidate(
     indicators = tuple(catalog.canonical_id(value) for value in request.indicator_ids)
     # 父代的排序值可能继承自一个有问题的历史候选（按股价排序），不能直接沿用，
     # 要和指标池一起过 rankable 这道筛。筛完为空时退回父代取值，避免候选退化。
-    rankable = catalog.rankable_among(
-        (catalog.canonical_id(parent.ranking_value), *indicators)
-    )
+    rankable = catalog.rankable_among((catalog.canonical_id(parent.ranking_value), *indicators))
     ranking_value = str(_choice(generator, rankable, parent.ranking_value))
     candidate = StrategyCandidate(
         buy_rule=buy_rule,
