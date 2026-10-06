@@ -66,13 +66,33 @@ def test_verified_append_replays_only_new_dates_and_matches_full_backtest(tmp_pa
     ref = adapter.stock_ref("", "SH", "600000")
     before = replay_account(service, ref, version)
     assert before["summary"]["created_return"] == pytest.approx(0.2)
-    legacy_engine = replay_account(
-        service,
-        ref,
-        version,
-        {**before, "engine": "pool-account-v1"},
-    )
+    legacy_checkpoint = {
+        **before["checkpoint"],
+        "version": 1,
+        "positions": {
+            symbol: {
+                key: value for key, value in position.items() if key != "applied_corporate_actions"
+            }
+            for symbol, position in before["checkpoint"]["positions"].items()
+        },
+    }
+    legacy_snapshot = {
+        **before,
+        "engine": "pool-account-v1",
+        "checkpoint": legacy_checkpoint,
+    }
+    legacy_engine = replay_account(service, ref, version, legacy_snapshot)
     assert legacy_engine["summary"]["mode"] == "rebuilt"
+    assert legacy_engine["summary"]["recomputed_at"]
+    for identity_key in (
+        "baseline_date",
+        "baseline_equity",
+        "launch_equity",
+        "as_of_date",
+        "created_return",
+        "post_launch_return",
+    ):
+        assert legacy_engine["summary"][identity_key] == before["summary"][identity_key]
     assert legacy_engine["checkpoint"] == before["checkpoint"]
     store.replace_local_bars("SH", "600000", "stock", bars(3))
     started = time.perf_counter()

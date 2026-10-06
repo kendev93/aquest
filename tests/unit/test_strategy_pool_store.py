@@ -281,3 +281,53 @@ def test_legacy_max_hold_signature_upgrades_in_place_and_changed_limit_reversion
     )
     assert current["version_id"] != original["version_id"]
     assert current["signature"] == signature(hold_60)
+
+    pool.upsert_automatic(
+        market="SH",
+        code="600001",
+        name="测试",
+        annual_candidate=hold_5,
+        sharpe_candidate=None,
+        data_fingerprint="bars",
+        config_fingerprint="config",
+        source_job_id="job-3",
+    )
+    legacy_five = next(
+        v for v in tracks.current_versions() if v["code"] == "600001" and v["source"] == "automatic"
+    )
+    legacy_five_created_at = "2025-03-02T03:04:05+00:00"
+    legacy_five_launch_date = "2025-03-01"
+    with market_store._connect() as connection:
+        connection.execute(
+            "UPDATE pool_tracking_versions SET signature=?,created_at=?,launch_data_date=? "
+            "WHERE version_id=?",
+            [
+                signature(legacy_candidate),
+                legacy_five_created_at,
+                legacy_five_launch_date,
+                legacy_five["version_id"],
+            ],
+        )
+
+    # A max-hold change arriving before any same-config signature upgrade must archive the old
+    # account. The legacy hash alone cannot make stored config=5 equivalent to incoming config=60.
+    pool.upsert_automatic(
+        market="SH",
+        code="600001",
+        name="测试",
+        annual_candidate=hold_60,
+        sharpe_candidate=None,
+        data_fingerprint="bars",
+        config_fingerprint="config",
+        source_job_id="job-4",
+    )
+    versions = tracks.versions("SH", "600001", "annual_return")
+    archived_five = next(v for v in versions if v["version_id"] == legacy_five["version_id"])
+    current_sixty = next(v for v in versions if v["is_current"])
+    assert archived_five["is_current"] is False
+    assert archived_five["stopped_at"] is not None
+    assert archived_five["created_at"] == legacy_five_created_at
+    assert archived_five["launch_data_date"] == legacy_five_launch_date
+    assert current_sixty["version_id"] != legacy_five["version_id"]
+    assert current_sixty["signature"] == signature(hold_60)
+    assert current_sixty["candidate"]["config"]["max_hold_days"] == 60
