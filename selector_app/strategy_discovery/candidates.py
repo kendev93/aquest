@@ -12,10 +12,15 @@ from selector_app.portfolio_backtest.models import SINGLE_SECURITY_RANKING_VALUE
 from selector_app.screening.models import ScreenCondition
 from selector_app.screening.rules import RuleGroup
 
-from .catalog import default_indicator_catalog
+from .catalog import _PRICE_SCALE_VALUE_IDS, IndicatorCatalog, default_indicator_catalog
 from .models import DiscoveryRequest, RiskMode, StrategyCandidate
 
-_OPERATORS = ("gt", "gte", "lt", "lte", "eq", "neq", "cross_up", "cross_down")
+#: 刻意不提供 ``neq``：参与挖掘的取值几乎都是连续量（RSI、MA、VARO 这类），
+#: ``指标 ≠ 30.0`` 在任何一天都近乎恒真，筛选力为零，却会抬高复杂度评分、稀释
+#: 真正起作用的那个条件。历史上它贡献了一批看着复杂、实际什么都不做的策略
+#: （``VAR1 ≠ 90.0 ALL MA10 ≠ 30.0 ALL MA5 ≤ 10.0``）。要表达"不在某个区间"，
+#: 用两条 ``lt`` / ``gt`` 更诚实，也更容易被看清。
+_OPERATORS = ("gt", "gte", "lt", "lte", "eq", "cross_up", "cross_down")
 _DEFAULT_CONSTANTS = (-1.0, 0.0, 10.0, 30.0, 50.0, 70.0, 90.0)
 _RISK_COOLDOWNS = (0, 3, 5, 10)
 #: 最长持有交易日数的搜索网格。``None`` = 不限制，留着和时间止损做对照，
@@ -116,9 +121,21 @@ def _condition(
 ) -> ScreenCondition:
     left = str(_choice(rng, indicators, indicators[0]))
     operator = str(_choice(rng, _OPERATORS, "gt"))
-    use_indicator = len(indicators) > 1 and bool(_choice(rng, (False, True), False))
+    right_options = [item for item in indicators if item != left]
+    # 价格量纲的输出不配常数右值：``MA60 < 90`` 在复权尺度下等价于按累计分红的
+    # 多少筛股，而且这个含义还随历史累积逐年漂移 —— 同一条策略在回测期的 2015 年
+    # 和 2026 年判断的根本不是同一把尺子。这类输出只允许和另一个指标比，于是自然
+    # 产出 ``C > MA20``、``MA5 > MA20`` 这类价格位置关系（上穿、多头排列），那才
+    # 是跨时间稳定的信号。真要表达"离均线多远"，用 bias20 / atr_pct 这些无量纲的
+    # 对应量，它们的阈值不随复权漂移。
+    if IndicatorCatalog.canonical_id(left) in _PRICE_SCALE_VALUE_IDS and right_options:
+        return ScreenCondition(
+            left_value=left,
+            operator=operator,
+            right_value=str(_choice(rng, right_options, indicators[0])),
+        )
+    use_indicator = bool(right_options) and bool(_choice(rng, (False, True), False))
     if use_indicator:
-        right_options = [item for item in indicators if item != left]
         return ScreenCondition(
             left_value=left,
             operator=operator,
@@ -324,10 +341,16 @@ def build_random_candidate(
         _RankOrder,
         rank_order_value if rank_order_value in {"asc", "desc"} else "desc",
     )
+    # 排序值只能取可排序的那些。请求自带的 indicator_ids 常常连货币计价的输出一起
+    # 送来，拿它们排序就等于按股价排序；指标也算在同一份复权序列上，高分红标的被
+    # 整体抬高几十倍后，排出来的先后其实比的是累计分红，与强弱无关。
+    # 极端情况下（请求里的指标全都不可排序）退回原集合，宁可少一道防线也不要让
+    # 候选构造失败。
+    rankable = catalog.rankable_among(indicators) or indicators
     candidate = StrategyCandidate(
         buy_rule=buy_rule,
         sell_rule=sell_rule,
-        ranking_value=str(_choice(generator, indicators, indicators[0])),
+        ranking_value=str(_choice(generator, rankable, rankable[0])),
         rank_order=rank_order,
         max_positions=max(1, min(100, max_positions)),
         rebalance_frequency=rebalance_frequency,

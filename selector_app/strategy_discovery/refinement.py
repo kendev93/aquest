@@ -11,6 +11,7 @@ from selector_app.screening.models import ScreenCondition
 from selector_app.screening.rules import RuleGroup
 
 from .candidates import _as_float, _as_int, _choice, _condition
+from .catalog import default_indicator_catalog
 from .models import CandidateMode, DiscoveryRequest, RiskMode, StrategyCandidate
 
 RefinementRadius = Literal["medium"]
@@ -378,10 +379,14 @@ def build_refined_candidate(
     ]
     stop_loss_mode, stop_loss_pct, stop_loss_atr, stop_loss_cooldown = risk_values["stop_loss"]
     trailing_mode, trailing_pct, trailing_atr, trailing_cooldown = risk_values["trailing_stop"]
-    indicators = tuple(request.indicator_ids)
-    ranking_value = str(
-        _choice(generator, (parent.ranking_value, *indicators), parent.ranking_value)
+    catalog = default_indicator_catalog()
+    indicators = tuple(catalog.canonical_id(value) for value in request.indicator_ids)
+    # 父代的排序值可能继承自一个有问题的历史候选（按股价排序），不能直接沿用，
+    # 要和指标池一起过 rankable 这道筛。筛完为空时退回父代取值，避免候选退化。
+    rankable = catalog.rankable_among(
+        (catalog.canonical_id(parent.ranking_value), *indicators)
     )
+    ranking_value = str(_choice(generator, rankable, parent.ranking_value))
     candidate = StrategyCandidate(
         buy_rule=buy_rule,
         sell_rule=sell_rule,

@@ -68,9 +68,11 @@ def test_default_catalog_contains_existing_formula_and_chart_outputs() -> None:
 def test_candidate_generator_can_create_indicator_and_constant_conditions() -> None:
     request = DiscoveryRequest(
         base_config={"max_positions": 3},
-        indicator_ids=("ma5", "ma20"),
+        # ma5 是价格量纲（只和指标比），rsi14 无量纲（可以配常数）。两条路径都得
+        # 能出条件，否则候选空间会被砍去一大半。
+        indicator_ids=("ma5", "rsi14"),
         signal_ids=(),
-        condition_constants={"ma5": (10.0, 20.0)},
+        condition_constants={"rsi14": (30.0, 70.0)},
         max_conditions_per_side=1,
     )
 
@@ -85,6 +87,87 @@ def test_candidate_generator_can_create_indicator_and_constant_conditions() -> N
     assert any(condition.right_value is not None for condition in conditions)
     assert any(condition.right_constant is not None for condition in conditions)
     assert all(candidate.max_positions == 3 for candidate in candidates)
+
+
+def test_price_scale_indicators_never_get_absolute_constants() -> None:
+    """价格量纲的输出不许配绝对常数阈值。
+
+    ``MA60 < 90`` 看着像一条普通条件，在复权尺度下实际是在按累计分红筛股，而且
+    这个含义还随历史累积逐年漂移 —— 同一条策略在回测期的 2015 年和 2026 年判断的
+    根本不是同一把尺子。这类输出只能和另一个指标比（自然产出 C > MA20、MA5 > MA20
+    这类价格位置关系）。
+    """
+
+    request = DiscoveryRequest(
+        base_config={"max_positions": 3},
+        indicator_ids=("ma5", "ma10", "ma20", "ma60", "macd", "macd_signal", "macd_histogram"),
+        signal_ids=(),
+        # 即使调用方明确摆出常数候选，也不该被采用。
+        condition_constants={"ma5": (10.0, 20.0), "ma60": (30.0, 90.0)},
+        max_conditions_per_side=3,
+    )
+
+    candidates = [build_random_candidate(request, random.Random(seed)) for seed in range(40)]
+    conditions = [
+        condition
+        for candidate in candidates
+        for rule in (candidate.buy_rule, candidate.sell_rule)
+        for condition in rule.conditions
+    ]
+
+    assert conditions
+    assert all(condition.right_constant is None for condition in conditions)
+    assert all(condition.right_value is not None for condition in conditions)
+
+
+def test_generated_conditions_avoid_always_true_neq() -> None:
+    """``neq`` 对连续取值几乎恒真，只会稀释真正起作用的那个条件。"""
+
+    request = DiscoveryRequest(
+        base_config={"max_positions": 3},
+        indicator_ids=("ma5", "ma20", "rsi14"),
+        signal_ids=(),
+        max_conditions_per_side=3,
+    )
+
+    candidates = [build_random_candidate(request, random.Random(seed)) for seed in range(40)]
+    operators = {
+        condition.operator
+        for candidate in candidates
+        for rule in (candidate.buy_rule, candidate.sell_rule)
+        for condition in rule.conditions
+    }
+
+    assert operators
+    assert "neq" not in operators
+
+
+def test_ranking_value_never_falls_on_price_scale_outputs() -> None:
+    """排序值只能取可排序的输出，否则等于按股价排序。
+
+    历史作业一次送进来 19 个指标，其中 7 个是货币计价的，全部得被拦住。
+    """
+
+    request = DiscoveryRequest(
+        base_config={"max_positions": 3},
+        indicator_ids=(
+            "technical.ma5",
+            "technical.ma20",
+            "technical.ma60",
+            "technical.macd",
+            "technical.macd_signal",
+            "price.close",
+            "technical.rsi14",
+        ),
+        signal_ids=(),
+        max_conditions_per_side=1,
+    )
+    catalog = default_indicator_catalog()
+    allowed = set(catalog.rankable_ids)
+
+    for seed in range(40):
+        candidate = build_random_candidate(request, random.Random(seed))
+        assert candidate.ranking_value in allowed
 
 
 def test_candidate_config_excludes_strategy_only_metadata() -> None:

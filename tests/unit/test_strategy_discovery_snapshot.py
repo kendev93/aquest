@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
@@ -16,6 +17,10 @@ from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.portfolio_backtest.service import PortfolioBacktestService
 from selector_app.screening.models import ScreenCondition
 from selector_app.screening.rules import RuleGroup
+from selector_app.strategy_discovery.catalog import (
+    _PRICE_SCALE_VALUE_IDS,
+    default_indicator_catalog,
+)
 from selector_app.strategy_discovery.models import DiscoveryRequest, StrategyCandidate
 from selector_app.strategy_discovery.snapshot import (
     SNAPSHOT_SYMBOL_BATCH_SIZE,
@@ -121,6 +126,48 @@ def test_snapshot_ref_batches_are_bounded() -> None:
 
     assert [len(batch) for batch in batches] == [SNAPSHOT_SYMBOL_BATCH_SIZE, 1]
     assert [ref.code for ref in batches[0] + batches[1]] == [f"{index:06d}" for index in range(65)]
+
+
+def test_snapshot_warms_price_scale_values_used_by_conditions(tmp_path: Path) -> None:
+    """快照要预热价格量纲的指标列，哪怕它们被排除在排序之外。
+
+    挖掘已经不允许在 MA/MACD 上挖绝对常数阈值，但它们依然是合法的条件操作数
+    （"close 上穿 MA20"），收紧之后这类相对条件反而成了主力形式。快照按
+    ``catalog.value_ids`` 预热、不读 ``request.indicator_ids``；万一有人为了省点
+    计算改成只预热可排序的那些，这些条件会静默取不到值——不是报错，是算不出信号。
+    """
+
+    dates = pd.date_range("2024-01-01", periods=100, freq="D")
+    close = np.linspace(10.0, 14.0, len(dates))
+    store_path = tmp_path / "market.duckdb"
+    store = DuckDbMarketDataStore(store_path)
+    store.replace_local_bars(
+        "SH",
+        "600000",
+        "stock",
+        pd.DataFrame(
+            {
+                "date": dates,
+                "open": close,
+                "high": close + 0.2,
+                "low": close - 0.2,
+                "close": close,
+                "volume": np.full(len(dates), 100_000.0),
+                "amount": close * 100_000.0,
+                "bar_status": "completed",
+            }
+        ),
+    )
+
+    with build_discovery_snapshot(store, _experiment(store_path)) as snapshot:
+        manifest = json.loads((snapshot.root / "manifest.json").read_text(encoding="utf-8"))
+        warmed = set(manifest["value_ids"])
+
+    catalog = default_indicator_catalog()
+    assert _PRICE_SCALE_VALUE_IDS <= warmed
+    assert warmed == set(catalog.value_ids)
+    # 反过来确认这些确实是不可排序的，否则这条断言就白设了。
+    assert not (set(_PRICE_SCALE_VALUE_IDS) & set(catalog.rankable_ids))
 
 
 def test_snapshot_window_uses_all_discovery_split_boundaries(tmp_path: Path) -> None:

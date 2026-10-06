@@ -385,6 +385,12 @@ def _replay_discovery_request(
     return DiscoveryRequest(
         base_config=base,
         splits={"search": {"start_date": start_date.isoformat(), "end_date": end_date.isoformat()}},
+        # 复核跑的是榜单里已经固化的条件，不重新采样候选，所以这里的
+        # ``indicator_ids`` 只是把 DiscoveryRequest 填完整——快照恒预热全部数值输出
+        # （snapshot 用的是 ``catalog.value_ids``，不读这个字段），候选里照旧可以
+        # 引用价格量纲的指标做条件，"close 上穿 MA20" 这类必须能算出值。
+        # 别顺手把它改成"原始请求的指标池"求保真：改了没有任何行为差异，只会误导
+        # 后来者以为它参与了复现。
         indicator_ids=tuple(catalog.rankable_ids),
         signal_ids=tuple(catalog.signal_ids),
         required_buy_conditions=_conditions(request_mapping.get("required_buy_conditions")),

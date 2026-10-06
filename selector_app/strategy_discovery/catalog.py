@@ -92,6 +92,19 @@ class IndicatorCatalog:
     def rankable_ids(self) -> tuple[str, ...]:
         return tuple(item.id for item in self.values if item.rankable)
 
+    def rankable_among(self, value_ids: Iterable[str]) -> tuple[str, ...]:
+        """从任意 id 序列里筛出允许做排序的那些。
+
+        挖掘请求带的 ``indicator_ids`` 常年把货币计价的输出一起送来（历史作业里
+        19 个指标有 7 个属于此类），直接拿去做 ``ranking_value`` 就等于按股价排序。
+        在复权口径下更糟：个股是按累计因子整体抬高的（浦发 13 倍、三一重工 40 倍），
+        排序实际上比的是"历史分红的多少"而不是贵贱。``rankable`` 这本账只有 catalog
+        有，不该让每个调用方各自再推一遍。
+        """
+
+        allowed = set(self.rankable_ids)
+        return tuple(item for item in value_ids if item in allowed)
+
     @property
     def signal_ids(self) -> tuple[str, ...]:
         return tuple(item.id for item in self.signals)
