@@ -872,7 +872,13 @@ async function initialize(): Promise<void> {
     queuedSingleSymbol.value = queuedSingle?.market && queuedSingle.code
       ? `${queuedSingle.market}${queuedSingle.code}`
       : ''
-    const running = history.value.find((item) => item.status === 'running')
+    // 信号轮询几分钟就有一次 running 窗口，全市场研究会连跑数小时。恢复
+    // 时优先接回长任务，否则页面一刷新就会被顺手的信号扫描抢走进度显示，
+    // 让人以为全市场研究停了。
+    const running = history.value.find(
+      (item) => ['full', 'single'].includes(item.mode) && item.status === 'running',
+    )
+      ?? history.value.find((item) => item.status === 'running')
       ?? history.value.find((item) => item.status === 'queued')
     if (running) {
       activeJobId.value = running.job_id

@@ -154,3 +154,40 @@ def test_duckdb_job_store_rejects_invalid_job_ids_and_legacy_json(tmp_path) -> N
     (bad_job / "state.json").write_text("{}", encoding="utf-8")
     with pytest.raises(ValueError, match="文件无效"):
         store.import_legacy_jobs(legacy_root)
+
+
+def test_market_pool_history_keeps_running_research_above_tracking_noise(tmp_path) -> None:
+    """跟踪轮询每十分钟写一条记录，不能把跑了几小时的研究挤出列表第一页。
+
+    前端靠这份列表恢复运行中任务的进度显示；列表按创建时间倒序截一页，
+    tracking 记录很快填满窗口，长任务就从列表里"消失"了——页面不再显示
+    进度，用户会以为研究停了。第一页必须先带上全部非终态任务，再补终态历史。
+    """
+
+    store = _store(tmp_path)
+    store.create(
+        "research-running",
+        operation="market_strategy_pool",
+        payload={"mode": "full"},
+        description="全市场策略池研究",
+    )
+    store.claim_next("pool-worker")
+    for index in range(25):
+        job_id = f"tracking-{index:02d}"
+        store.create(
+            job_id,
+            operation="market_strategy_pool_tracking",
+            payload={"mode": "signals"},
+            description="跟踪轮询",
+        )
+        store.claim_next("tracking-worker")
+        store.write_result_from_worker(job_id, "tracking-worker", {})
+
+    page = store.list_market_strategy_pool_history(limit=20)
+
+    statuses = {item["job_id"]: item["status"] for item in page["items"]}
+    assert statuses.get("research-running") == "running"
+    assert len(page["items"]) == 20
+    # 终态历史照常按时间倒序补位，不再被活跃任务挤占名额。
+    terminal = [item["job_id"] for item in page["items"] if item["status"] != "running"]
+    assert terminal == [f"tracking-{index:02d}" for index in range(24, 5, -1)]

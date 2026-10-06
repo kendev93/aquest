@@ -259,15 +259,43 @@ class DuckDbStrategyJobStore:
                 "SELECT COUNT(*) FROM strategy_jobs WHERE operation "
                 "IN ('market_strategy_pool','market_strategy_pool_tracking')"
             ).fetchone()
-            rows = connection.execute(
-                """
-                SELECT job_id, request_json, state_json
-                FROM strategy_jobs WHERE operation
-                IN ('market_strategy_pool','market_strategy_pool_tracking')
-                ORDER BY created_at DESC, job_id DESC LIMIT ? OFFSET ?
-                """,
-                [limit, offset],
-            ).fetchall()
+            # 跟踪轮询每十分钟就写一条记录，纯按时间倒序的第一页很快全是
+            # tracking 记录，跑了几小时的全市场研究会被挤出窗口。前端靠这份
+            # 列表恢复运行中任务的进度，找不到就整个进度面板都不渲染。所以
+            # 第一页先把非终态任务全部带上，剩余名额再按时间补终态历史。
+            rows: list[tuple[object, ...]] = []
+            history_limit = limit
+            if offset == 0:
+                active_rows = connection.execute(
+                    """
+                    SELECT job_id, request_json, state_json
+                    FROM strategy_jobs WHERE operation
+                    IN ('market_strategy_pool','market_strategy_pool_tracking')
+                    AND status IN ('queued', 'running')
+                    ORDER BY created_at DESC, job_id DESC LIMIT ?
+                    """,
+                    [limit],
+                ).fetchall()
+                rows.extend(active_rows)
+                history_limit = limit - len(active_rows)
+            if history_limit > 0:
+                terminal_filter = (
+                    " AND status NOT IN ('queued', 'running')" if offset == 0 else ""
+                )
+                rows.extend(
+                    connection.execute(
+                        """
+                        SELECT job_id, request_json, state_json
+                        FROM strategy_jobs WHERE operation
+                        IN ('market_strategy_pool','market_strategy_pool_tracking')
+                        """
+                        + terminal_filter
+                        + """
+                        ORDER BY created_at DESC, job_id DESC LIMIT ? OFFSET ?
+                        """,
+                        [history_limit, offset],
+                    ).fetchall()
+                )
         items: list[dict[str, object]] = []
         for job_id, raw_request, raw_state in rows:
             request = _load_object(raw_request)
