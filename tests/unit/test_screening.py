@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
 from selector_app.adapters.local_day_adapter import StockRef
-from selector_app.screening.engine import ScreenEngine, combine_matches
+from selector_app.screening.engine import ScanOutcome, ScreenEngine, combine_matches
 from selector_app.screening.models import ScanConfig
 
 
@@ -110,6 +111,51 @@ def test_engine_scans_multiple_stocks_and_keeps_user_facing_result_fields(tmp_pa
     }
     # 中间变量算得出来，但不是选股页能选的输出。
     assert "indicator_three.sma_inner" not in report.results[0].indicator_values
+
+
+def test_engine_stops_between_stocks_when_cancellation_is_requested(tmp_path: Path) -> None:
+    refs = [
+        StockRef(market="SH", code="600000", path=tmp_path / "sh600000.day"),
+        StockRef(market="SZ", code="000001", path=tmp_path / "sz000001.day"),
+    ]
+    cancelled = False
+
+    def progress(current: int, _total: int, _outcome: ScanOutcome) -> None:
+        nonlocal cancelled
+        if current == 1:
+            cancelled = True
+
+    report = ScreenEngine(FakeAdapter(refs, {ref.code: make_bars() for ref in refs})).scan(
+        config("indicator_three.accumulation_zone"),
+        progress_callback=progress,
+        abort_check=lambda: cancelled,
+    )
+
+    assert report.total_candidates == 2
+    assert report.total_scanned == 1
+
+
+def test_parallel_engine_drains_running_stocks_and_returns_completed_subset(tmp_path: Path) -> None:
+    refs = [
+        StockRef(market="SH", code=f"60000{index}", path=tmp_path / f"sh60000{index}.day")
+        for index in range(4)
+    ]
+    cancelled = False
+
+    def progress(current: int, _total: int, _outcome: ScanOutcome) -> None:
+        nonlocal cancelled
+        if current == 1:
+            cancelled = True
+
+    report = ScreenEngine(FakeAdapter(refs, {ref.code: make_bars() for ref in refs})).scan(
+        replace(config("indicator_three.accumulation_zone"), workers=2),
+        progress_callback=progress,
+        abort_check=lambda: cancelled,
+    )
+
+    assert report.total_candidates == 4
+    assert 1 <= report.total_scanned < 4
+    assert report.errors == 0
 
 
 def test_engine_continues_after_one_stock_failure_and_reports_reason(tmp_path: Path) -> None:

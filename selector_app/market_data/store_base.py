@@ -344,6 +344,18 @@ class _DuckDbStoreBase:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS market_trading_calendar_coverage (
+                    source VARCHAR NOT NULL,
+                    coverage_start DATE NOT NULL,
+                    coverage_end DATE NOT NULL,
+                    fetched_at TIMESTAMP NOT NULL,
+                    PRIMARY KEY (source, coverage_start, coverage_end),
+                    CHECK (coverage_start <= coverage_end)
+                )
+                """
+            )
             # 除权除息事件：复权因子的唯一来源。刻意不落盘任何复权后的价格 ——
             # 价格一旦被写成"结果"就会随每次除权重算，历史不可复现。这里只存事件
             # 与由事件算出的单次因子增量，因子按时间顺序累乘即可得到任意区间的

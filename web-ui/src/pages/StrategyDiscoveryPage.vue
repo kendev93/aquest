@@ -274,6 +274,12 @@ async function pollDiscoveryJob(jobId: string, kind: DiscoveryJobKind): Promise<
         selectedCandidate.value = null
         activeBoard.value = 'sharpe'
         message.value = `二次优化完成：夏普榜 ${result.value.results_by_sharpe.length} 组，收益榜 ${result.value.results_by_return.length} 组${result.value.refinement?.data_changed ? '（行情已更新，已按最新本地行情重新优化）' : ''}。`
+      } else if (result.value.partial === true) {
+        const count = result.value.partial_candidate_count ?? 0
+        const sample = result.value.partial_by_sharpe?.[0]
+        const fidelity = sample?.achieved_fidelity
+        const fidelityLabel = fidelity === 'medium' ? '中等' : fidelity === 'coarse' ? '粗筛' : fidelity === 'search' ? '搜索' : fidelity === 'full' ? '完整' : fidelity
+        message.value = `搜索超时：${count} 组候选尚未完成完整精度复核${fidelityLabel ? `，当前最高完成到${fidelityLabel}精度` : ''}。这些候选未通过完整约束，不会进入正式榜单或自动候选池。`
       } else {
         message.value = `策略实验完成：夏普榜 ${result.value.results_by_sharpe.length} 组，收益榜 ${result.value.results_by_return.length} 组。`
       }

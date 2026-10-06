@@ -53,7 +53,11 @@ INFERRED_PROVIDER = "derived_from_open"
 class _ActionStore(Protocol):
     def read_price_gap_candidates(self) -> pd.DataFrame: ...
 
-    def read_trading_dates(self) -> list[date]: ...
+    def read_authoritative_trading_dates(
+        self,
+        start_date: date,
+        end_date: date,
+    ) -> list[date]: ...
 
     def upsert_corporate_actions(
         self,
@@ -290,7 +294,17 @@ def backfill_inferred_actions(
     """
 
     candidates = store.read_price_gap_candidates()
-    calendar = store.read_trading_dates()
+    if candidates.empty:
+        return BackfillReport(0, 0, 0, (), ())
+    calendar_reader = getattr(store, "read_authoritative_trading_dates", None)
+    if not callable(calendar_reader):
+        raise ValueError(
+            "市场数据存储没有可验证的权威交易日历覆盖 API；"
+            "需要持久化 provider 请求的完整覆盖区间，并按来源读取覆盖期内交易日"
+        )
+    calendar_start = min(_as_date(item) for item in candidates["prev_date"])
+    calendar_end = max(_as_date(item) for item in candidates["date"])
+    calendar = calendar_reader(calendar_start, calendar_end)
     actions, skipped = infer_corporate_actions(candidates, calendar)
     detail: list[InferredGap] = []
     for item in candidates.itertuples(index=False):

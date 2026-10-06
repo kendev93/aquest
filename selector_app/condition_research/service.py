@@ -6,7 +6,7 @@ import logging
 import uuid
 from collections import Counter
 from collections.abc import Callable, Collection, Mapping, MutableMapping, Sequence
-from concurrent.futures import as_completed
+from concurrent.futures import FIRST_COMPLETED, wait
 from concurrent.futures.process import BrokenProcessPool
 from datetime import date, datetime
 from pathlib import Path
@@ -167,11 +167,18 @@ class ConditionResearchService:
         refs = self._list_stock_refs(config)
         if not refs:
             raise ValueError("所选市场没有可用于研究的本地股票行情")
+        read_trading_dates = getattr(self._store, "read_completed_trading_dates", None)
+        calendar_source = "completed_default_basis_bars"
+        if not callable(read_trading_dates):
+            read_trading_dates = getattr(self._store, "read_trading_dates", None)
+            calendar_source = "observed_bars" if callable(read_trading_dates) else "calendar_days"
+        trading_dates = read_trading_dates() if callable(read_trading_dates) else None
         splits = split_calendar_range(
             config.start_date,
             config.end_date,
             train_ratio=config.train_ratio,
             validation_ratio=config.validation_ratio,
+            trading_dates=trading_dates,
         )
         feature_ids = self._feature_ids(config)
         plan = self._plan_for(refs, config)
@@ -234,6 +241,7 @@ class ConditionResearchService:
         # candidate under the slot limit the portfolio will actually face.
         ranking = self._ranking_assessment(config, buy_samples, feature_ids)
         ranking_value, rank_order = _resolved_ranking(config, ranking)
+        self._raise_if_cancelled(cancel_check)
         trial_stats: dict[str, int] = {}
         mined = self._mine_candidates(
             config,
@@ -242,6 +250,7 @@ class ConditionResearchService:
             ranking_value=ranking_value,
             rank_order=rank_order,
             stats=trial_stats,
+            cancel_check=cancel_check,
         )
         trial_context = self._record_trial(
             config,
@@ -446,6 +455,7 @@ class ConditionResearchService:
             for candidate_id, report in holdout_outcome.full_period:
                 full_period_candidates[candidate_id].append(report)
 
+        baseline_holdout_summary = summarize_backtests(holdout_baseline)
         for result in results:
             candidate_id = cast(str, result["candidate_id"])
             if candidate_id in holdout_ids:
@@ -456,6 +466,20 @@ class ConditionResearchService:
                 result["holdout"] = summarize_backtests(
                     holdout_candidates[candidate_id],
                     baseline_reports=holdout_baseline,
+                )
+                result["holdout_evaluation"] = _holdout_evaluation(
+                    cast(Mapping[str, object], result["holdout"]),
+                    baseline_holdout_summary,
+                    trading_day_count=(
+                        sum(
+                            splits.holdout.start_date <= day <= splits.holdout.end_date
+                            for day in trading_dates
+                        )
+                        if trading_dates is not None
+                        else None
+                    ),
+                    min_trades=config.min_trades,
+                    min_instruments=config.min_instruments,
                 )
 
         baseline_windows: list[dict[str, object]] = []
@@ -500,6 +524,7 @@ class ConditionResearchService:
             "errors": sum(failures.values()),
             "failure_reasons": dict(failures),
             "splits": _splits_dict(splits),
+            "split_calendar_source": calendar_source,
             "baseline": {
                 "train": _without_stock_rows(baseline_train),
                 "validation": _without_stock_rows(validation_baseline_summary),
@@ -810,17 +835,31 @@ class ConditionResearchService:
                     plan, adapter_kind, database_path, payload
                 ) as executor:
                     futures = {executor.submit(task, ref): ref for ref in refs}
-                    for completed, future in enumerate(as_completed(futures), start=1):
-                        self._raise_if_cancelled(cancel_check)
-                        outcomes.append(future.result())
-                        self._progress(
-                            progress_callback,
-                            progress_offset + completed,
-                            work_total,
-                            phase_label,
-                            completed,
-                            len(refs),
+                    pending = set(futures)
+                    completed = 0
+                    while pending:
+                        if cancel_check is not None and cancel_check():
+                            for future in pending:
+                                future.cancel()
+                            self._raise_if_cancelled(cancel_check)
+                        done, pending = wait(
+                            pending,
+                            timeout=0.25,
+                            return_when=FIRST_COMPLETED,
                         )
+                        if not done:
+                            continue
+                        for future in done:
+                            outcomes.append(future.result())
+                            completed += 1
+                            self._progress(
+                                progress_callback,
+                                progress_offset + completed,
+                                work_total,
+                                phase_label,
+                                completed,
+                                len(refs),
+                            )
             except BrokenProcessPool as exc:
                 raise TaskUserError("买卖条件研究工作进程意外退出，请重试或减少并发数") from exc
         outcomes.sort(key=lambda outcome: order.get(outcome.key, len(order)))
@@ -835,6 +874,7 @@ class ConditionResearchService:
         ranking_value: str | None,
         rank_order: str,
         stats: MutableMapping[str, int] | None = None,
+        cancel_check: CancelCheck | None = None,
     ) -> list[tuple[str, str, MinedCondition]]:
         # Slots are competed for on entry only, so the top-N diagnostic is
         # meaningful for buy candidates and meaningless for sell triggers.
@@ -860,6 +900,7 @@ class ConditionResearchService:
                         significance_quantile=config.significance_quantile,
                         duplicate_correlation=config.duplicate_correlation,
                         stats=side_stats,
+                        abort_check=cancel_check,
                     )
                 )
             )
@@ -878,6 +919,7 @@ class ConditionResearchService:
                         significance_quantile=config.significance_quantile,
                         duplicate_correlation=config.duplicate_correlation,
                         stats=sell_stats,
+                        abort_check=cancel_check,
                     )
                 )
             )
@@ -965,6 +1007,54 @@ class ConditionResearchService:
                 "holdout_candidates_per_side": config.holdout_candidates,
             },
         }
+
+
+def _holdout_evaluation(
+    candidate_summary: Mapping[str, object],
+    baseline_summary: Mapping[str, object],
+    *,
+    trading_day_count: int | None,
+    min_trades: int,
+    min_instruments: int,
+) -> dict[str, object]:
+    failures = candidate_constraint_failures(
+        candidate_summary,
+        baseline_summary,
+        min_trades=min_trades,
+        min_instruments=min_instruments,
+    )
+    insufficient = [
+        reason
+        for reason in failures
+        if reason in {
+            "交易样本不足",
+            "覆盖股票不足",
+            "基础规则样本不足，无法比较胜率",
+        }
+    ]
+    base: dict[str, object] = {
+        "trading_days": trading_day_count,
+        "failures": list(failures),
+    }
+    if trading_day_count is None:
+        return {
+            **base,
+            "status": "unevaluable",
+            "reason": "实际交易日数据不可用，无法确认留出段覆盖情况",
+        }
+    if trading_day_count < 1:
+        return {**base, "status": "insufficient_samples", "reason": "留出段没有实际交易日"}
+    if insufficient:
+        return {
+            **base,
+            "status": "insufficient_samples",
+            "reason": "；".join(insufficient),
+        }
+    return {
+        **base,
+        "status": "evaluated",
+        "passed_constraints": not failures,
+    }
 
 
 _COMPACT_TRADE_KEYS = ("direction", "pnl", "cost_basis", "rejected")

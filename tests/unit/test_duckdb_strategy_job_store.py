@@ -112,6 +112,21 @@ def test_duckdb_job_store_cancel_heartbeat_and_stale_recovery(tmp_path) -> None:
     assert failed["error_code"] == "cancelled"
 
 
+def test_cancel_requested_before_atomic_completion_wins_and_discards_result(tmp_path) -> None:
+    store = _store(tmp_path)
+    store.create("job-final-race", operation="discovery", payload={}, description="实验")
+    assert store.claim_next("worker-a") == "job-final-race"
+    assert store.request_cancel("job-final-race") is True
+
+    state = store.write_result_from_worker(
+        "job-final-race", "worker-a", {"should_not_publish": True}
+    )
+
+    assert state["status"] == "cancelled"
+    assert state["cancel_requested"] is True
+    assert store.read_result("job-final-race") is None
+
+
 def test_duckdb_job_store_imports_all_legacy_states_idempotently(tmp_path) -> None:
     legacy = StrategyJobStore(tmp_path / "legacy-jobs")
     legacy.create("queued", operation="discovery", payload={"a": 1}, description="排队")

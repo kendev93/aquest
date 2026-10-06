@@ -179,6 +179,7 @@ const result = {
     constraint_failures: [],
     full_period: summary,
     holdout: summary,
+    holdout_evaluation: { status: 'evaluated', trading_days: 20, passed_constraints: true, failures: [] },
   }, {
     candidate_id: 'buy-2',
     side: 'buy',
@@ -189,6 +190,7 @@ const result = {
     constraint_failures: ['交易样本不足', '胜率未高于基础规则'],
     full_period: null,
     holdout: null,
+    holdout_evaluation: { status: 'insufficient_samples', trading_days: 0, reason: '留出段没有实际交易日', failures: ['交易样本不足'] },
   }, {
     candidate_id: 'sell-1',
     side: 'sell',
@@ -199,6 +201,7 @@ const result = {
     constraint_failures: [],
     full_period: summary,
     holdout: summary,
+    holdout_evaluation: { status: 'evaluated', trading_days: 20, passed_constraints: false, failures: ['胜率未高于基础规则'] },
   }],
   algorithm: { mining: 'contrastive_threshold_rules', search: 'single_condition_then_full_stock_replay' },
 } as unknown as ConditionResearchReport
@@ -255,11 +258,13 @@ describe('ConditionResearchPage', () => {
     expect(wrapper.get('[data-testid="condition-research-candidate-buy-1"]').text()).toContain('强度')
     expect(wrapper.get('[data-testid="condition-research-candidate-buy-1"]').text()).toContain('100.000%')
     expect(wrapper.get('[data-testid="condition-research-candidate-buy-1"]').text()).toContain('40 / 20')
+    expect(wrapper.get('[data-testid="holdout-evaluation-buy-1"]').text()).toContain('留出已复验：通过')
     const rejected = wrapper.get('[data-testid="condition-research-candidate-buy-2"]').text()
     expect(rejected).toContain('5.000%')
     expect(rejected).toContain('交易样本不足')
     expect(rejected).toContain('胜率未高于基础规则')
     expect(rejected).toContain('未进留出期')
+    expect(wrapper.get('[data-testid="holdout-evaluation-buy-2"]').text()).toContain('留出样本不足：留出段没有实际交易日')
     expect((wrapper.get('[data-testid="condition-stock-view"]').element as HTMLSelectElement).value).toBe('baseline:full')
     expect(wrapper.get('[data-testid="condition-research-results"]').text()).toContain('浦发银行')
     expect(wrapper.text()).toContain('留出期')

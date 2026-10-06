@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from inspect import Parameter, signature
 
 import duckdb
 from fastapi import APIRouter, HTTPException, Request, status
@@ -15,11 +16,12 @@ from fastapi.responses import JSONResponse
 from selector_app.indicators.precompute import (
     DEFAULT_PRECOMPUTE_YEARS,
     PRECOMPUTE_MAX_BARS,
+    PrecomputeCancelledError,
     should_defer_precompute,
 )
 from selector_app.market_data.models import InstrumentBoard, InstrumentType
 from selector_app.market_data.store import MarketDataStoreError
-from selector_app.screening.jobs import TaskUserError
+from selector_app.screening.jobs import TaskCancelledError, TaskUserError
 
 from ...schemas import MarketSyncRequest
 from ._shared import (
@@ -43,9 +45,12 @@ def _with_indicator_precompute(
     instrument_types: list[InstrumentType] | tuple[InstrumentType, ...] | None,
     boards: list[InstrumentBoard] | tuple[InstrumentBoard, ...] | None,
     progress_callback: Callable[[int, int], None] | None = None,
+    abort_check: Callable[[], bool] | None = None,
     only_changed: bool = False,
     years: int | None = None,
 ) -> dict[str, object]:
+    if abort_check is not None and abort_check():
+        raise TaskCancelledError("行情任务已取消")
     # 调用方刚写完行情：先把进程内的指标缓存和版本号丢掉，否则下面的预计算
     # 会带着旧版本号入库，把新算出来的结果又存成旧键。
     _invalidate_indicator_cache(request)
@@ -65,7 +70,8 @@ def _with_indicator_precompute(
                     ),
                 },
             }
-        precomputed = _precomputer(request).run(
+        precomputer = _precomputer(request)
+        run_arguments = dict(
             # The DuckDB adapter uses this only as a compatibility-shaped
             # source path on StockRef; it never scans or reads .day files.
             vipdoc_path=vipdoc_path or ".",
@@ -80,7 +86,18 @@ def _with_indicator_precompute(
             only_changed=only_changed,
             progress_callback=progress_callback,
         )
+        run_parameters = signature(precomputer.run).parameters.values()
+        if any(
+            parameter.name == "abort_check" or parameter.kind is Parameter.VAR_KEYWORD
+            for parameter in run_parameters
+        ):
+            run_arguments["abort_check"] = abort_check
+        precomputed = precomputer.run(**run_arguments)
+        if abort_check is not None and abort_check():
+            raise TaskCancelledError("行情任务已取消")
         return {**result, "indicator_precompute": precomputed.to_dict()}
+    except PrecomputeCancelledError as exc:
+        raise TaskCancelledError(str(exc)) from exc
     except (OSError, ValueError, MarketDataStoreError, duckdb.Error):
         # Indicator materialization is derived data. A source-data import or
         # sync remains successful if warming the optional cache is unavailable.
@@ -102,7 +119,14 @@ def create_indicator_precompute_job(
     payload: MarketSyncRequest,
     request: Request,
 ) -> JSONResponse:
+    job_id_holder = [""]
+
+    def abort_check() -> bool:
+        return bool(job_id_holder[0]) and _runner(request).is_cancel_requested(job_id_holder[0])
+
     def run_precompute(progress: Callable[[int, int], None]) -> dict[str, object]:
+        if abort_check():
+            raise TaskCancelledError("指标预计算已取消")
         try:
             store_status = _market_status(request)
             if should_defer_precompute(store_status.bar_count):
@@ -116,7 +140,8 @@ def create_indicator_precompute_job(
                         f"{PRECOMPUTE_MAX_BARS:,} 根，已改为按需计算"
                     ),
                 }
-            report = _precomputer(request).run(
+            precomputer = _precomputer(request)
+            run_arguments = dict(
                 # This task warms DuckDB-derived indicators and does not read
                 # This task warms derived indicators and never reads local files.
                 vipdoc_path=payload.vipdoc_path or ".",
@@ -128,12 +153,22 @@ def create_indicator_precompute_job(
                 only_changed=payload.precompute_only_changed,
                 progress_callback=progress,
             )
+            run_parameters = signature(precomputer.run).parameters.values()
+            if any(
+                parameter.name == "abort_check" or parameter.kind is Parameter.VAR_KEYWORD
+                for parameter in run_parameters
+            ):
+                run_arguments["abort_check"] = abort_check
+            report = precomputer.run(**run_arguments)
+        except PrecomputeCancelledError as exc:
+            raise TaskCancelledError(str(exc)) from exc
         except (OSError, ValueError, MarketDataStoreError, duckdb.Error) as exc:
             raise TaskUserError(_storage_error_message(exc)) from exc
         return report.to_dict()
 
     try:
         job_id = _runner(request).submit_callable(run_precompute, description="指标预计算")
+        job_id_holder[0] = job_id
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail="任务执行器暂不可用") from exc
     return JSONResponse(

@@ -34,6 +34,13 @@ from selector_app.market_data.store_base import DEFAULT_PRICE_BASIS
 logger = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[int, int], None]
+AbortCheck = Callable[[], bool]
+
+
+class PrecomputeCancelledError(RuntimeError):
+    """Raised when a derived indicator cache warmup is cancelled."""
+
+
 _PRECOMPUTE_CHUNK_SIZE = 32
 # 预计算按自然年分块：一次只把"一年 + 预热"的行情读进内存，算完留下当年那一段，
 # 各年段首尾相接后再落库。一次读全市场全历史会同时带来十几 GB 的峰值内存和
@@ -126,6 +133,7 @@ class IndicatorPrecomputeService:
         only_changed: bool = False,
         end_year: int | None = None,
         progress_callback: ProgressCallback | None = None,
+        abort_check: AbortCheck | None = None,
     ) -> IndicatorPrecomputeReport:
         if isinstance(years, bool) or not isinstance(years, int) or years < 1:
             raise ValueError("预计算年份范围必须是正整数")
@@ -165,6 +173,8 @@ class IndicatorPrecomputeService:
                 progress_callback(progress_count, len(refs))
 
         for offset in range(0, len(refs), _PRECOMPUTE_CHUNK_SIZE):
+            if abort_check is not None and abort_check():
+                raise PrecomputeCancelledError("指标预计算已取消")
             batch = refs[offset : offset + _PRECOMPUTE_CHUNK_SIZE]
             batch_keys = {(str(ref.market).strip().upper(), str(ref.code).strip()) for ref in batch}
             cached_index = self._cache.cached_chunk_index(batch_keys, formula_ids)
@@ -173,6 +183,8 @@ class IndicatorPrecomputeService:
             seen_keys: set[tuple[str, str]] = set()
             retags: list[dict[str, object]] = []
             for year_start, year_end in windows:
+                if abort_check is not None and abort_check():
+                    raise PrecomputeCancelledError("指标预计算已取消")
                 year_frames = self._batch_frames(
                     batch,
                     start_date=year_start,
@@ -211,6 +223,8 @@ class IndicatorPrecomputeService:
                     )
                     stale_formulas: list[str] = []
                     for formula_id in formula_ids:
+                        if abort_check is not None and abort_check():
+                            raise PrecomputeCancelledError("指标预计算已取消")
                         definition = self._registry.formula(formula_id)
                         candidates = cached_index.get((key[0], key[1], formula_id), ())
                         matched = next(
@@ -275,6 +289,7 @@ class IndicatorPrecomputeService:
                             year_start,
                             stale_formulas,
                             minimum_bars,
+                            abort_check,
                         ): (key, source_hash, current_fingerprint, bar_offset)
                         for key, (
                             frame,
@@ -284,7 +299,14 @@ class IndicatorPrecomputeService:
                             stale_formulas,
                         ) in work.items()
                     }
+                    cancellation_observed = False
                     for future in as_completed(futures):
+                        if abort_check is not None and abort_check() and not cancellation_observed:
+                            cancellation_observed = True
+                            for pending in futures:
+                                pending.cancel()
+                        if future.cancelled():
+                            continue
                         key, _source_hash, current_fingerprint, bar_offset = futures[future]
                         try:
                             outcome = future.result()
@@ -313,6 +335,8 @@ class IndicatorPrecomputeService:
                         )
                         fingerprints_by_key[key] = current_fingerprint
                         computed += len(year_results)
+                if abort_check is not None and abort_check():
+                    raise PrecomputeCancelledError("指标预计算已取消")
                 if write_results:
                     try:
                         self._cache.persist_results(
@@ -389,6 +413,7 @@ class IndicatorPrecomputeService:
         year_start: date,
         formula_ids: tuple[str, ...],
         minimum_bars: Mapping[str, int],
+        abort_check: AbortCheck | None = None,
     ) -> tuple[pd.DataFrame, dict[str, FormulaResult]] | None:
         """Compute one calendar year, keeping only that year's own bars.
 
@@ -412,6 +437,8 @@ class IndicatorPrecomputeService:
             return None
         results: dict[str, FormulaResult] = {}
         for formula_id in eligible:
+            if abort_check is not None and abort_check():
+                return None
             definition = self._registry.formula(formula_id)
             computed = definition.calculate(prepared.copy(deep=True))
             results[formula_id] = _tail(computed, year_bars)

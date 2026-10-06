@@ -220,6 +220,8 @@ class SearchResult:
     search_metadata: Mapping[str, object]
     shortlist_by_sharpe: tuple[StrategyCandidate, ...] = ()
     shortlist_by_return: tuple[StrategyCandidate, ...] = ()
+    partial_by_sharpe: tuple[StrategyCandidate, ...] = ()
+    partial_by_return: tuple[StrategyCandidate, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -227,6 +229,8 @@ class SearchResult:
             "results_by_return": [candidate.to_dict() for candidate in self.results_by_return],
             "shortlist_by_sharpe": [candidate.to_dict() for candidate in self.shortlist_by_sharpe],
             "shortlist_by_return": [candidate.to_dict() for candidate in self.shortlist_by_return],
+            "partial_by_sharpe": [candidate.to_dict() for candidate in self.partial_by_sharpe],
+            "partial_by_return": [candidate.to_dict() for candidate in self.partial_by_return],
             "search_metadata": dict(self.search_metadata),
         }
 
@@ -596,6 +600,7 @@ class HybridSearchEngine:
             stop_reason = "attempt_limit"
 
         final_observed = observed
+        partial_observed: list[StrategyCandidate] = []
         if fidelity_evaluator is not None and request.multifidelity_enabled and observed:
             medium_limit = max(1, min(len(observed), math.ceil(len(observed) * 0.35)))
             if adaptive:
@@ -646,6 +651,7 @@ class HybridSearchEngine:
             if checkpoint_retention_callback is not None:
                 checkpoint_retention_callback(full_candidates)
             full_observed: list[StrategyCandidate] = []
+            full_evaluated_count = 0
             full_started = time.perf_counter()
             for offset in range(0, len(full_candidates), resolved_batch_size):
                 chunk = full_candidates[offset : offset + resolved_batch_size]
@@ -657,6 +663,7 @@ class HybridSearchEngine:
                     break
                 metrics_batch = evaluate_stage_batch(chunk, "full")
                 fidelity_counts["full"] += len(chunk)
+                full_evaluated_count += len(chunk)
                 for index, (candidate, metrics) in enumerate(
                     zip(chunk, metrics_batch, strict=True), start=offset + 1
                 ):
@@ -671,6 +678,8 @@ class HybridSearchEngine:
                         progress_callback(index, len(full_candidates), "refining_full")
             stage_durations["full"] = time.perf_counter() - full_started
             final_observed = full_observed
+            if stop_reason == "timeout" and full_evaluated_count < len(full_candidates):
+                partial_observed = full_candidates[full_evaluated_count:]
 
         def ranking_metrics(candidate: StrategyCandidate) -> Mapping[str, object]:
             return (
@@ -696,6 +705,28 @@ class HybridSearchEngine:
                 key=lambda item: (
                     _metric(ranking_metrics(item), "annual_return"),
                     _metric(ranking_metrics(item), "sharpe"),
+                    -item.complexity,
+                ),
+                reverse=True,
+            )
+        )
+        partial_by_sharpe = tuple(
+            sorted(
+                partial_observed,
+                key=lambda item: (
+                    _metric(item.metrics.get("medium") or item.metrics.get("coarse") or item.metrics.get("search", {}), "sharpe"),
+                    _metric(item.metrics.get("medium") or item.metrics.get("coarse") or item.metrics.get("search", {}), "annual_return"),
+                    -item.complexity,
+                ),
+                reverse=True,
+            )
+        )
+        partial_by_return = tuple(
+            sorted(
+                partial_observed,
+                key=lambda item: (
+                    _metric(item.metrics.get("medium") or item.metrics.get("coarse") or item.metrics.get("search", {}), "annual_return"),
+                    _metric(item.metrics.get("medium") or item.metrics.get("coarse") or item.metrics.get("search", {}), "sharpe"),
                     -item.complexity,
                 ),
                 reverse=True,
@@ -747,6 +778,8 @@ class HybridSearchEngine:
             "promoted_to_medium": fidelity_counts["medium"],
             "promoted_to_full": fidelity_counts["full"],
             "final_valid_candidates": len(final_observed),
+            "partial_candidate_count": len(partial_observed),
+            "partial_candidates_qualified": False,
             "stage_durations_seconds": stage_durations,
             "coarse_seconds": stage_durations["coarse"],
             "candidate_generation_seconds": candidate_generation_seconds,
@@ -782,6 +815,8 @@ class HybridSearchEngine:
             search_metadata=metadata,
             shortlist_by_sharpe=by_sharpe[: max(10, validation_limit)],
             shortlist_by_return=by_return[: max(10, validation_limit)],
+            partial_by_sharpe=partial_by_sharpe[:10],
+            partial_by_return=partial_by_return[:10],
         )
 
 

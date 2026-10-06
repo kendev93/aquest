@@ -103,6 +103,7 @@ def create_local_import_job(payload: LocalImportRequest, request: Request) -> JS
             instrument_types=payload.instrument_types,
             boards=payload.boards,
             progress_callback=progress,
+            abort_check=abort_check,
             only_changed=True,
         )
 

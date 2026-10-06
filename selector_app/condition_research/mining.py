@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, MutableMapping, Sequence
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from dataclasses import dataclass, replace
 
 import numpy as np
 import pandas as pd
 
 from selector_app.screening.models import ScreenCondition
+from selector_app.screening.jobs import TaskCancelledError
 
 DEFAULT_QUANTILES = (0.2, 0.4, 0.6, 0.8)
 # Fixed shuffle seed: a permutation test must not make a study less
@@ -220,6 +221,7 @@ def _permutation_max_lifts(
     *,
     permutations: int,
     seed: int | None,
+    abort_check: Callable[[], bool] | None = None,
 ) -> list[float]:
     """Best lift each shuffled label set produces across the mask pool.
 
@@ -262,6 +264,8 @@ def _permutation_max_lifts(
     rng = np.random.default_rng(_PERMUTATION_SEED if seed is None else seed)
     results: list[float] = []
     for _ in range(permutations):
+        if abort_check is not None and abort_check():
+            raise TaskCancelledError("买卖条件研究任务已取消")
         shuffled = rng.permutation(target)
         baseline_rates = {
             key: _grouped_outcome_rate(shuffled[valid], groups)
@@ -269,6 +273,8 @@ def _permutation_max_lifts(
         }
         best = 0.0
         for matched, baseline_key in pool:
+            if abort_check is not None and abort_check():
+                raise TaskCancelledError("买卖条件研究任务已取消")
             baseline = baseline_rates[baseline_key]
             if not baseline > 0.0:
                 continue
@@ -425,6 +431,7 @@ def mine_binary_conditions(
     # 用出参而不是改返回值，是因为 18 处既有测试把返回值直接当候选元组用，
     # 改返回类型会连带改一大片与本次无关的东西。
     stats: MutableMapping[str, int] | None = None,
+    abort_check: Callable[[], bool] | None = None,
 ) -> tuple[MinedCondition, ...]:
     """Find readable thresholds whose matching samples are enriched for an outcome.
 
@@ -552,6 +559,8 @@ def mine_binary_conditions(
             candidates.append((candidate, matched_global, token))
 
     for feature_id in feature_ids:
+        if abort_check is not None and abort_check():
+            raise TaskCancelledError("买卖条件研究任务已取消")
         if feature_id in _PRICE_SCALE_FEATURES and not allow_price_scale_features:
             continue
         values = arrays[feature_id]
@@ -600,6 +609,8 @@ def mine_binary_conditions(
                 record(candidate, valid)
 
     for left_index, left_id in enumerate(feature_ids):
+        if abort_check is not None and abort_check():
+            raise TaskCancelledError("买卖条件研究任务已取消")
         if not comparable[left_id]:
             continue
         left_values = arrays[left_id]
@@ -722,6 +733,7 @@ def mine_binary_conditions(
             target_float,
             permutations=permutations,
             seed=permutation_seed,
+            abort_check=abort_check,
         )
         if permutations > 0 and null_pool
         else ()

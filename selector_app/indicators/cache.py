@@ -634,7 +634,7 @@ class IndicatorCache:
             return 0
         self.warm_revisions(frames.keys())
         definitions = {formula_id: self._registry.formula(formula_id) for formula_id in requested}
-        pending: list[tuple[_CacheKey, FormulaDefinition]] = []
+        pending: list[tuple[_CacheKey, FormulaDefinition, int | None]] = []
         for (market, code), frame in frames.items():
             revision = self._revision(str(market), str(code), frame)
             price_basis = _price_basis(frame)
@@ -649,7 +649,7 @@ class IndicatorCache:
                     data_revision=revision,
                 )
                 if self._memory_get(key) is None:
-                    pending.append((key, definitions[formula_id]))
+                    pending.append((key, definitions[formula_id], _revision_bar_count(revision)))
         if self._store is None or not pending:
             return 0
         try:
@@ -666,7 +666,7 @@ class IndicatorCache:
                             "formula_version": key.formula_version,
                             "data_fingerprint": key.data_revision,
                         }
-                        for key, _ in pending
+                        for key, _, _ in pending
                     ]
                 )
             finally:
@@ -688,7 +688,7 @@ class IndicatorCache:
                 [],
             ).append(row)
         loaded = 0
-        for key, definition in pending:
+        for key, definition, expected_length in pending:
             chunk_rows = grouped.get(
                 (
                     key.market,
@@ -701,10 +701,11 @@ class IndicatorCache:
                 )
             )
             last = chunk_rows[-1] if chunk_rows else None
-            # 预热要的是整条序列，不按窗口裁剪，所以这里没有总长度可校验；
-            # 块本身连续且末块日期存在即认为可用。
             result = self._decode_chunks(
-                chunk_rows or [], definition, _row_end(last) if last else None
+                chunk_rows or [],
+                definition,
+                _row_end(last) if last else None,
+                total_length=expected_length,
             )
             if result is None:
                 continue
@@ -793,7 +794,12 @@ class IndicatorCache:
         for formula_id, key in missing.items():
             rows = persistent_rows.get(formula_id) or []
             # 缓存存的是一段连续序列，只有当请求区间正好是它的后缀时才可切片复用。
-            decoded = self._decode_chunks(rows, definitions[formula_id], end)
+            decoded = self._decode_chunks(
+                rows,
+                definitions[formula_id],
+                end,
+                total_length=_revision_bar_count(revision),
+            )
             sliced = _tail_slice(decoded, target_length) if decoded is not None else None
             if sliced is not None and decoded is not None:
                 self._memory_put(key, decoded, end)
@@ -826,9 +832,12 @@ class IndicatorCache:
             # 只缓存完整序列：窗口结果按同一个键存进去会污染后续更长的请求。
             if full_history:
                 self._memory_put(key, result, end)
-            computed_entries.append((key, result, start, end, chunks))
+            if full_history:
+                computed_entries.append((key, result, start, end, chunks))
             results[formula_id] = result
-        if persist:
+        # persist_results() is the explicit chunk-write API used by precompute;
+        # ordinary requests may only persist a complete instrument history.
+        if persist and full_history:
             self._persistent_put_many(computed_entries)
         return results
 

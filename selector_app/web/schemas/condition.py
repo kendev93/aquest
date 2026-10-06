@@ -53,6 +53,8 @@ class ConditionResearchRequest(BaseModel):
     fixed_size: int | None = Field(default=None, ge=100, le=100_000_000)
     min_trades: int = Field(default=20, ge=1, le=100_000)
     min_instruments: int = Field(default=5, ge=1, le=10_000)
+    train_ratio: float = Field(default=0.6, gt=0, lt=1)
+    validation_ratio: float = Field(default=0.2, gt=0, lt=1)
     candidate_limit: int = Field(default=5, ge=1, le=10)
     # 同义条件合并门槛：命中向量相关性达到它就只留一条，其余列在被保留那条下面。
     # 1.0 ≈ 关闭。
@@ -74,6 +76,8 @@ class ConditionResearchRequest(BaseModel):
     @model_validator(mode="after")
     def validate_research(self) -> ConditionResearchRequest:
         validate_date_range_request(self.date_mode, self.start_date, self.end_date)
+        if self.train_ratio + self.validation_ratio >= 1.0:
+            raise ValueError("训练和验证比例之和必须小于 1")
         if self.instrument_types is not None:
             if any(item != "stock" for item in self.instrument_types):
                 raise ValueError("买卖条件研究只支持股票，ETF、指数与债券不参与候选池")
@@ -149,6 +153,8 @@ class ConditionResearchRequest(BaseModel):
             fixed_size=self.fixed_size,
             min_trades=self.min_trades,
             min_instruments=self.min_instruments,
+            train_ratio=self.train_ratio,
+            validation_ratio=self.validation_ratio,
             candidate_limit=self.candidate_limit,
             duplicate_correlation=self.duplicate_correlation,
             holdout_candidates=self.holdout_candidates,

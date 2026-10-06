@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, timedelta
+from collections.abc import Sequence
 
 
 @dataclass(frozen=True)
@@ -25,8 +26,9 @@ def split_calendar_range(
     *,
     train_ratio: float = 0.6,
     validation_ratio: float = 0.2,
+    trading_dates: Sequence[date] | None = None,
 ) -> ResearchSplits:
-    """Split an inclusive calendar range into ordered, non-overlapping windows."""
+    """Split a range by trading sessions when provided, otherwise calendar days."""
 
     if start_date > end_date:
         raise ValueError("研究开始日期不能晚于结束日期")
@@ -34,6 +36,25 @@ def split_calendar_range(
         raise ValueError("训练和验证比例必须在 0 和 1 之间")
     if train_ratio + validation_ratio >= 1.0:
         raise ValueError("训练和验证比例之和必须小于 1")
+
+    if trading_dates is not None:
+        sessions = sorted({day for day in trading_dates if start_date <= day <= end_date})
+        if len(sessions) < 3:
+            raise ValueError("研究日期范围至少需要 3 个实际交易日才能进行时间切分")
+        train_count = int(len(sessions) * train_ratio)
+        validation_count = int(len(sessions) * validation_ratio)
+        holdout_count = len(sessions) - train_count - validation_count
+        if min(train_count, validation_count, holdout_count) < 1:
+            raise ValueError("实际交易日不足，无法按指定比例保留训练、验证和留出样本")
+        train_end = sessions[train_count - 1]
+        validation_start = sessions[train_count]
+        validation_end = sessions[train_count + validation_count - 1]
+        holdout_start = sessions[train_count + validation_count]
+        return ResearchSplits(
+            train=DateWindow(sessions[0], train_end),
+            validation=DateWindow(validation_start, validation_end),
+            holdout=DateWindow(holdout_start, sessions[-1]),
+        )
 
     total_days = (end_date - start_date).days + 1
     train_days = int(total_days * train_ratio)

@@ -73,6 +73,25 @@ def test_store_excludes_provisional_bars_by_default(tmp_path: Path) -> None:
     assert len(all_bars) == 2
 
 
+def test_research_trading_dates_ignore_provisional_and_hfq_only_sessions(
+    tmp_path: Path,
+) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    raw = _bars()
+    raw.loc[1, "bar_status"] = "provisional"
+    store.replace_local_bars("SH", "600000", "stock", raw, price_basis="raw")
+    store.replace_local_bars(
+        "SH",
+        "600001",
+        "stock",
+        _bars(("SH", "600001", "2024-01-04", 12.0, "local")),
+        price_basis="hfq",
+    )
+
+    assert store.read_trading_dates() == [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
+    assert store.read_completed_trading_dates() == [date(2024, 1, 2)]
+
+
 def test_online_rows_fill_missing_dates_but_never_replace_local(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     store.replace_local_bars("SH", "600000", "stock", _bars(), price_basis="raw")
@@ -846,3 +865,125 @@ def test_rebuild_keeps_provider_sessions_beyond_last_bar(tmp_path: Path) -> None
 
     assert store.rebuild_trading_calendar_from_bars() == 2
     assert store.latest_market_trading_date(date(2024, 1, 10)) == date(2024, 1, 5)
+
+
+def test_provider_calendar_coverage_survives_rolling_refresh_and_derived_rebuild(
+    tmp_path: Path,
+) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "calendar-coverage.duckdb")
+    store.save_market_trading_calendar(
+        [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)],
+        source="eastmoney_sse_composite",
+        coverage_start=date(2024, 1, 2),
+        coverage_end=date(2024, 1, 4),
+    )
+    store.save_market_trading_calendar(
+        [date(2024, 1, 4), date(2024, 1, 5), date(2024, 1, 8)],
+        source="eastmoney_sse_composite",
+        coverage_start=date(2024, 1, 4),
+        coverage_end=date(2024, 1, 8),
+    )
+    store.upsert_local_bars(
+        _bars(
+            ("SH", "600000", "2024-01-02", 10.0, "local"),
+            ("SH", "600000", "2024-01-03", 11.0, "local"),
+        ),
+        price_basis="raw",
+    )
+
+    assert store.rebuild_trading_calendar_from_bars() == 2
+    assert store.read_authoritative_trading_dates(date(2024, 1, 2), date(2024, 1, 8)) == [
+        date(2024, 1, 2),
+        date(2024, 1, 3),
+        date(2024, 1, 4),
+        date(2024, 1, 5),
+        date(2024, 1, 8),
+    ]
+    assert store.status().market_calendar_source == "eastmoney_sse_composite"
+
+
+def test_provider_calendar_endpoints_do_not_prove_full_interval_coverage(
+    tmp_path: Path,
+) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "calendar-coverage-gap.duckdb")
+    store.save_market_trading_calendar(
+        [date(2024, 1, 2)],
+        source="eastmoney_sse_composite",
+        coverage_start=date(2024, 1, 2),
+        coverage_end=date(2024, 1, 3),
+    )
+    store.save_market_trading_calendar(
+        [date(2024, 1, 8)],
+        source="eastmoney_sse_composite",
+        coverage_start=date(2024, 1, 6),
+        coverage_end=date(2024, 1, 8),
+    )
+
+    with pytest.raises(ValueError, match="未覆盖完整日期范围"):
+        store.read_authoritative_trading_dates(date(2024, 1, 2), date(2024, 1, 8))
+
+
+def test_untrusted_calendar_sources_cannot_replace_authoritative_rows(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "calendar-source-priority.duckdb")
+    sessions = [date(2024, 1, 2), date(2024, 1, 3)]
+    store.save_market_trading_calendar(
+        sessions,
+        source="eastmoney_sse_composite",
+        coverage_start=date(2024, 1, 2),
+        coverage_end=date(2024, 1, 3),
+    )
+
+    store.save_market_trading_calendar(sessions, source="derived_from_bars")
+    store.save_market_trading_calendar(sessions, source="unknown_import")
+
+    assert store.read_authoritative_trading_dates(date(2024, 1, 2), date(2024, 1, 3)) == sessions
+    assert store.status().market_calendar_source == "eastmoney_sse_composite"
+
+
+def test_calendar_sessions_and_coverage_roll_back_together_on_write_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "calendar-atomic.duckdb")
+    original_connect = store._connect
+
+    class FailingConnection:
+        def __init__(self, connection) -> None:
+            self._connection = connection
+
+        def __enter__(self):
+            self._connection.__enter__()
+            return self
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return self._connection.__exit__(exc_type, exc_value, traceback)
+
+        def __getattr__(self, name):
+            return getattr(self._connection, name)
+
+        def execute(self, query, parameters=None):
+            if "INSERT INTO market_trading_calendar_coverage" in query:
+                raise RuntimeError("injected coverage insert failure")
+            if parameters is None:
+                return self._connection.execute(query)
+            return self._connection.execute(query, parameters)
+
+        def executemany(self, query, parameters):
+            return self._connection.executemany(query, parameters)
+
+    def failing_connect(*args, **kwargs):
+        return FailingConnection(original_connect(*args, **kwargs))
+
+    monkeypatch.setattr(store, "_connect", failing_connect)
+
+    with pytest.raises(RuntimeError, match="injected coverage insert failure"):
+        store.save_market_trading_calendar(
+            [date(2024, 1, 2), date(2024, 1, 3)],
+            source="eastmoney_sse_composite",
+            coverage_start=date(2024, 1, 2),
+            coverage_end=date(2024, 1, 3),
+        )
+
+    assert store.latest_market_trading_date(date(2024, 1, 3)) is None
+    with pytest.raises(ValueError, match="未覆盖完整日期范围"):
+        store.read_authoritative_trading_dates(date(2024, 1, 2), date(2024, 1, 3))

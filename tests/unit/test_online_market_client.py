@@ -105,6 +105,25 @@ def test_fetch_daily_history_maps_eastmoney_kline_rows() -> None:
     assert transport.calls[0][1]["fqt"] == "0"
 
 
+def test_eastmoney_empty_kline_list_is_an_explicit_valid_no_data_response() -> None:
+    transport = FakeTransport([{"data": {"klines": []}}])
+
+    frame = OnlineMarketClient(transport=transport).fetch_daily_history(
+        "600000", "20260910", "20260911", timeout=5.0
+    )
+
+    assert frame.empty
+    assert frame.attrs["selector_empty_response_status"] == "valid_no_data"
+
+
+@pytest.mark.parametrize("payload", [{}, {"data": None}, {"data": {}}, {"data": {"klines": None}}])
+def test_eastmoney_missing_empty_payload_shape_is_not_valid_no_data(payload: object) -> None:
+    with pytest.raises(OnlineDataError, match="data|klines"):
+        OnlineMarketClient(transport=FakeTransport([payload])).fetch_daily_history(
+            "600000", "20260910", "20260911", timeout=5.0
+        )
+
+
 @pytest.mark.parametrize(
     ("code", "expected_secid"),
     [
@@ -152,6 +171,33 @@ def test_fetch_tencent_daily_history_decodes_jsonp_and_normalizes_units() -> Non
     assert frame["amount"].tolist() == [105000000.0]
     # param 第 6 段留空 = 不复权，响应 key 随之是 day。
     assert transport.calls[0][1]["param"] == "sh600000,day,2026-01-01,2027-12-31,640,"
+
+
+def test_tencent_empty_day_list_is_an_explicit_valid_no_data_response() -> None:
+    transport = FakeTransport(['kline_day2026={"code":0,"data":{"sh600000":{"day":[]}}}'])
+
+    frame = OnlineMarketClient(transport=transport).fetch_tencent_daily_history(
+        "SH", "600000", "20260910", "20260911", timeout=5.0
+    )
+
+    assert frame.empty
+    assert frame.attrs["selector_empty_response_status"] == "valid_no_data"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        'kline_day2026={"code":0}',
+        'kline_day2026={"code":0,"data":null}',
+        'kline_day2026={"code":0,"data":{"sh600000":{}}}',
+        'kline_day2026={"code":0,"data":{"sh600000":{"day":null}}}',
+    ],
+)
+def test_tencent_missing_day_payload_shape_is_not_valid_no_data(payload: str) -> None:
+    with pytest.raises(OnlineDataError, match="data|数据对象|day"):
+        OnlineMarketClient(transport=FakeTransport([payload])).fetch_tencent_daily_history(
+            "SH", "600000", "20260910", "20260911", timeout=5.0
+        )
 
 
 @pytest.mark.parametrize(

@@ -463,6 +463,153 @@ def test_hybrid_search_returns_separate_sharpe_and_return_boards() -> None:
     )
 
 
+def test_multifidelity_timeout_keeps_unfinished_full_candidates_separate(monkeypatch) -> None:
+    request = DiscoveryRequest(
+        base_config={"max_positions": 1},
+        indicator_ids=("technical.ma5",),
+        signal_ids=(),
+        max_conditions_per_side=0,
+        max_trials=40,
+        timeout_seconds=1,
+        min_trades=0,
+        max_drawdown=None,
+    )
+    elapsed = False
+
+    def clock() -> float:
+        return 1.0 if elapsed else 0.0
+
+    monkeypatch.setattr("selector_app.strategy_discovery.search.time.monotonic", clock)
+
+    def evaluate(_candidate, stage: str):
+        nonlocal elapsed
+        if stage == "medium":
+            elapsed = True
+        return {"annual_return": 0.1, "sharpe": 1.0, "total_trades": 10, "max_drawdown": 0.1}
+
+    result = HybridSearchEngine().search(
+        request,
+        evaluator=lambda candidate, stage: evaluate(candidate, stage),
+        fidelity_evaluator=evaluate,
+        max_trials=40,
+        batch_size=1,
+        seed=29,
+    )
+
+    assert result.search_metadata["stop_reason"] == "timeout"
+    assert result.search_metadata["fidelity_evaluations"]["full"] == 0
+    assert result.search_metadata["partial_candidate_count"] > 0
+    assert not result.results_by_sharpe
+    assert all("full" not in candidate.metrics for candidate in result.partial_by_sharpe)
+
+
+def test_multifidelity_timeout_during_full_keeps_partial_separate_from_qualified_boards(
+    monkeypatch,
+) -> None:
+    request = DiscoveryRequest(
+        base_config={"max_positions": 1},
+        indicator_ids=("technical.ma5",),
+        signal_ids=(),
+        max_conditions_per_side=0,
+        max_trials=40,
+        timeout_seconds=1,
+        min_trades=0,
+        max_drawdown=None,
+    )
+    elapsed = False
+    monkeypatch.setattr(
+        "selector_app.strategy_discovery.search.time.monotonic",
+        lambda: 1.0 if elapsed else 0.0,
+    )
+
+    def evaluate(candidate, stage: str):
+        nonlocal elapsed
+        if stage == "full":
+            elapsed = True
+        return {"annual_return": 0.1, "sharpe": 1.0, "total_trades": 10, "max_drawdown": 0.1}
+
+    result = HybridSearchEngine().search(
+        request,
+        evaluator=lambda candidate, stage: evaluate(candidate, stage),
+        fidelity_evaluator=evaluate,
+        max_trials=40,
+        batch_size=1,
+        seed=33,
+    )
+
+    assert result.search_metadata["stop_reason"] == "timeout"
+    assert result.search_metadata["fidelity_evaluations"]["full"] == 1
+    assert result.results_by_sharpe
+    assert all("full" in candidate.metrics for candidate in result.results_by_sharpe)
+    assert result.partial_by_sharpe
+    assert all("full" not in candidate.metrics for candidate in result.partial_by_sharpe)
+
+
+def test_completed_full_constraint_failures_do_not_become_partial_successes() -> None:
+    request = DiscoveryRequest(
+        base_config={"max_positions": 1},
+        indicator_ids=("technical.ma5",),
+        signal_ids=(),
+        max_conditions_per_side=0,
+        max_trials=8,
+        min_trades=0,
+        max_drawdown=0.0,
+    )
+
+    result = HybridSearchEngine().search(
+        request,
+        evaluator=lambda _candidate, stage: {
+            "annual_return": 0.1,
+            "sharpe": 1.0,
+            "total_trades": 10,
+            "max_drawdown": 0.2 if stage == "full" else 0.0,
+        },
+        fidelity_evaluator=lambda _candidate, stage: {
+            "annual_return": 0.1,
+            "sharpe": 1.0,
+            "total_trades": 10,
+            "max_drawdown": 0.2 if stage == "full" else 0.0,
+        },
+        max_trials=8,
+        seed=31,
+    )
+
+    assert result.search_metadata["stop_reason"] == "completed"
+    assert not result.results_by_sharpe
+    assert not result.partial_by_sharpe
+
+
+def test_cancelled_search_is_never_promoted_to_partial_timeout_result() -> None:
+    request = DiscoveryRequest(
+        base_config={"max_positions": 1},
+        indicator_ids=("technical.ma5",),
+        signal_ids=(),
+        max_conditions_per_side=0,
+        max_trials=8,
+        min_trades=0,
+        max_drawdown=None,
+    )
+    cancelled = False
+
+    def evaluate(_candidate, _stage: str):
+        nonlocal cancelled
+        cancelled = True
+        return {"annual_return": 0.1, "sharpe": 1.0, "total_trades": 10, "max_drawdown": 0.1}
+
+    result = HybridSearchEngine().search(
+        request,
+        evaluator=evaluate,
+        fidelity_evaluator=evaluate,
+        max_trials=8,
+        abort_check=lambda: cancelled,
+        seed=37,
+    )
+
+    assert result.search_metadata["stop_reason"] == "cancelled"
+    assert result.search_metadata["partial_candidate_count"] == 0
+    assert not result.partial_by_sharpe
+
+
 def test_hybrid_search_can_stop_after_a_long_plateau() -> None:
     request = DiscoveryRequest(
         base_config={"max_positions": 1},

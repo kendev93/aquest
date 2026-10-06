@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
-from collections.abc import Mapping, MutableMapping, Sequence
+from collections.abc import Callable, Mapping, MutableMapping, Sequence
 
 import pandas as pd
 
@@ -195,6 +195,7 @@ def _mine_sample_sets(
     significance_quantile: float = 0.95,
     duplicate_correlation: float = DEFAULT_DUPLICATE_CORRELATION,
     stats: MutableMapping[str, int] | None = None,
+    abort_check: Callable[[], bool] | None = None,
 ) -> tuple[MinedCondition, ...]:
     usable = [sample for sample in samples if len(sample)]
     if not usable:
@@ -223,6 +224,7 @@ def _mine_sample_sets(
             else None
         ),
         stats=stats,
+        abort_check=abort_check,
     )
 
 

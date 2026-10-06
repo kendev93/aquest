@@ -21,12 +21,26 @@ from selector_app.condition_research.reporting import (
 from selector_app.condition_research.samples import MiningSamples
 from selector_app.condition_research.service import (
     ConditionResearchService,
+    _holdout_evaluation,
 )
 from selector_app.condition_research.worker_tasks import _backtest_config, _compact_report
 from selector_app.market_data.models import StockRef
 from selector_app.screening.jobs import TaskUserError
 from selector_app.screening.models import ScreenCondition
 from selector_app.screening.rules import RuleGroup
+
+
+def test_holdout_empty_or_unavailable_calendar_is_not_reported_as_success() -> None:
+    empty = _holdout_evaluation(
+        {}, {}, trading_day_count=0, min_trades=1, min_instruments=1
+    )
+    unavailable = _holdout_evaluation(
+        {}, {}, trading_day_count=None, min_trades=1, min_instruments=1
+    )
+
+    assert empty["status"] == "insufficient_samples"
+    assert empty["reason"] == "留出段没有实际交易日"
+    assert unavailable["status"] == "unevaluable"
 
 
 def test_candidate_must_lift_win_rate_and_preserve_trade_quality() -> None:

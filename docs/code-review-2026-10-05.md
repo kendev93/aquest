@@ -4,8 +4,8 @@
 
 - **范围**：`selector_app/` 全部 25 个包、约 71k 行 Python（`web/` 8.6k、`market_data/` 15.6k、`strategy_discovery/` 8.9k、`portfolio_backtest/` 5.1k、`condition_research/` 5.2k 等）。
 - **方式**：静态代码审查。11 个子代理分组通读（每组限读指定文件），产出候选缺陷；由主对话对其中 **12 条**逐条回读代码复核，其余按置信度与证据采纳。
-- **基准**：工作树 HEAD + 本次会话的未提交改动（`indicators/cache.py`、`factor_attribution/values.py`、`screening/engine.py`、`portfolio_backtest/context.py`、`market_data/store*.py` 的 mypy 修复）。
-- **上一份** `docs/code-review-2026-09-18.md` 的 H2（置换检验假阳性率）、H3（mining 内存暴涨）**仍存在**，本文不再展开；H1（成交量单位）、M5（目录翻页截断）经比对**已修复**。
+- **基准**：`main` HEAD `d61bd7e`（含 `822c1e0` 等前序修复）；以下 2026-10-06 跟进以该基线及当前工作树变更为准。
+- **上一份** `docs/code-review-2026-09-18.md` 的 H2/H3 不再沿用旧结论：当前 `condition_research/mining.py` 的置换候选池在标签置换前构造、显著性使用 `pvalue <= alpha`、默认置换数为 200；H3 的基线去重与 uint32 编码已有部分实现。旧版 8 倍耗时/内存测量不是当前实现证据，本次没有重测。H1（成交量单位）、M5（目录翻页截断）仍记录为已修复。
 - **局限**：全部为静态分析，未跑数据实测、未做交叉验证；标「中」置信度的条目建议在动手前先写一个复现用例。
 
 **分级**：P0 = 会产生错误数字/脏数据/安全问题；P1 = 可用性、健壮性、资源；P2 = 次要口径与代码质量。✅ = 本次已回读代码确认属实。
@@ -14,7 +14,17 @@
 
 ## 修复进度（同日跟进）
 
-验证（第三轮结束后）：`pytest --cov=selector_app` **1418 passed**、覆盖率 84.73%；`mypy selector_app` Success（237 文件）；`ruff check` / `ruff format --check` 通过。
+历史验证（第三轮结束后）：`pytest --cov=selector_app` 1418 passed、覆盖率 84.73%；这是 2026-10-05 的结果，不代表本次变更后的验证。
+
+### 2026-10-06 跟进状态
+
+本次补齐 7 个原审查项及请求体比例透传：P0-3 在线软空响应、P0-14 留出评估、P1-1~4 取消与终态竞态、P1-8 lifespan 收尾、P1-10 窗口缓存写入、P1-15 交易日历信任、P1-19 超时部分结果，以及 P1-21 的 `train_ratio` / `validation_ratio`。具体实现和新增回归见各条目与测试。日历覆盖采用有来源的持久化覆盖区间；旧库没有可信覆盖时回填会明确跳过，不会按行情 bar 推断或删除既有事件。
+
+P0-6 的「当前挂牌集合造成幸存者偏差」仍是待数据验证的假设：当前适配器/数据库读取路径没有直接证据证明 universe 会按当前上市状态过滤，因此本报告不把幸存者偏差列为已确认缺陷，也没有据此改 universe 或新增每日横截面披露。
+
+P1-9 跨任务族的全局重任务预算与 P1-7 失败状态码/API 错误体需要产品级契约：现有任务族有各自的 runner、资源预检、排斥组与前端错误处理。为避免改变并发行为或把兼容客户端的失败响应改成另一套语义，本次只完成边界盘点，未作全局串行化或状态码变更。它们仍待明确资源预算/任务所有权与可演进的错误响应契约。
+
+本次最终验证结果将在完成后的更新中填写；不沿用上一轮测试数。
 
 ### 已修复
 
@@ -89,12 +99,11 @@ P0-2（`_has_new_data` 快照行数）、P0-4（显著门槛加 `ic_days`）、P
 `if False` / 改回 `context.closes` 之后，端到端那条报 `Max relative difference: 0.125`、
 策略池那条拿到 `-0.025`，正是页面上漏掉派息的那个数。
 
-### 未修（需口径确认或跨模块协调）
+### 尚待明确或保留原行为
 
-- **P0-3 空响应记 errors / P0-6 幸存者偏差 / P0-14 holdout 闸门**：需要 UX 与数据配合（errors 语义、每日横截面数披露、blocked 标记）。
-- **P1-1 ~ P1-4 取消机制**：横跨 4 处、需要统一 abort 契约，建议单独立项。
-- **P1-7（500→409）**：需前端同步改错误处理。
-- **P1-8 / P1-9 / P1-10 / P1-15 / P1-19 / P1-20 / P1-21b / P2 各项**：尚未处理。
+- **P0-6 幸存者偏差**：证据不足，当前作为待验证假设，不计入已确认缺陷。
+- **P1-7 失败状态码与错误体**、**P1-9 跨任务族全局资源协调**：需要先明确 API 兼容策略和全局资源所有权/预算，再决定跨模块改动。
+- **P1-19 的快照构建 deadline 与 fidelity checkpoint 身份**、**P1-20**、**P1-21 的 worker 异常兜底部分**、以及其余 P2 观察：不属于本次已验证修复；仍需单独检查。
 
 ---
 
@@ -115,6 +124,7 @@ P0-2（`_has_new_data` 快照行数）、P0-4（显著门槛加 `ic_days`）、P
 - **置信度**：高。
 
 ### P0-3 上游空响应当成「无变化 / 已完成」，`errors=0`
+- **当前状态（2026-10-06）**：✅ 修复。缺失/null/格式错误的 provider payload 会触发 fallback 或可见失败，不会提交部分数据；显式有效空结果报告 `no_new_data` 且不宣称覆盖；完全没有待请求区间仍可报告 `already_complete`。已有行情在软失败时保留。见 `tests/unit/test_online_market_sync.py`。
 - **位置**：`online_market_sync.py:666-680`（东财缺 `klines` 返回空帧）、`:740-745`（腾讯缺 `day` 键 `continue`）、`:1685`（`if frame.empty: break` 不记错误）、`:1523-1525`（标成 `already_complete`）。
 - **后果**：停牌/退市标的、或两个源同时软失败（`{"rc":0,"data":null}` 正是同一文件里 `_request_catalog` 注释承认的限流签名）时，标的被静默跳过、`errors=0`；staging 路径下该 target 不进 `staged_bars`，merge 里彻底消失。
 - **修法**：`data` 缺失即抛 `OnlineDataError`；两个源都空时记一次 failure，且不允许标 `already_complete`。
@@ -132,10 +142,11 @@ P0-2（`_has_new_data` 快照行数）、P0-4（显著门槛加 `ic_days`）、P
 - **修法**：key 统一 `str(market).strip().lower() + str(code).strip()`，`needed / seen / 帧 key` 三处同源。
 - **置信度**：中（`_resolve_refs` 自己写了 `.lower()`，说明大小写混用在库里真实存在）。
 
-### P0-6 因子面板的 universe 只取「当前挂牌」标的 → 自带幸存者偏差
+### P0-6 因子面板 universe 的幸存者偏差假设（待数据验证）
+- **当前状态（2026-10-06）**：未确认。当前 adapter/database 路径没有证明其按当前上市状态过滤的证据；需要用历史成分/退市证券数据验证后才能判断，暂不改 universe 或声称已存在幸存者偏差。
 - **位置**：`factor_test/service.py:113-122`、`factor_test/panel.py:124-149`。
-- **后果**：先取当前仍在列表里的 refs，再回读历史窗口；退市/摘牌标的根本不进入任何一天的横截面。回测区间跨越过去年份时，尾部最差的样本天然缺席 ⇒ 多头收益与多空价差系统性偏高，而 `min_cross_section` 只看数量、看不出成分漂移。
-- **修法**：用「窗口内出现过 bar」而非「当前挂牌」构建 universe，并在结果里输出每日有效横截面数的中位数与最小值。
+- **待验证后果**：只有当 refs 被当前上市状态过滤时，退市证券才会从历史横截面缺席并可能抬高结果；现有代码审查没有证明这一前提，也没有真实成分数据对拍。
+- **待验证方案**：先用一组已退市证券和历史窗口核对 refs 与每日横截面；结果证明缺席后，再考虑用「窗口内出现过 bar」构建 universe 并披露每日有效横截面数。
 - **置信度**：中。
 
 ### P0-7 第二份 `IndicatorCache` 在行情重写后不失效，回测静默用旧指标 ✅
@@ -183,7 +194,8 @@ P0-2（`_has_new_data` 快照行数）、P0-4（显著门槛加 `ic_days`）、P
 - **修法**：`if not _is_empty_rule(as_mapping(base.get("sell_rule"))) or base.get("sell_signal") is not None: return False`。
 - **置信度**：中（同一文件内两个函数的 none/empty 判定口径不一致）。
 
-### P0-14 留出段没有「空段/样本不足」闸门，零成交也照出结论
+### P0-14 留出段没有「空段/样本不足」闸门，零成交也照出结论 ✅
+- **当前状态（2026-10-06）**：支持以库内实际成交日切分；候选 holdout 单独输出 `holdout_evaluation.status`、原因和约束结果，不覆盖验证段的 `passed_constraints` 或验证排名。缺实际日期日历、无成交或低于已有 `min_trades` / `min_instruments` 配置时明确标为不可评估/样本不足，不报复验成功。
 - **位置**：`condition_research/time_split.py:38-43`（只要求每段 ≥ 1 自然日，且按自然日而非交易日）、`service.py:452-459`（`summarize_backtests([])` 返回全 0/None）、`service.py:375-381`（约束校验只作用于 validation，从不重算 holdout）。
 - **后果**：holdout 落在假期或区间偏短时实际成交为 0，`passed_constraints` 也不会翻 False，候选带着 `holdout.closed_trades = 0` 的「复验结论」进入结果页。对照同文件滚动复验的 `MIN_WINDOW_DAYS = 30` 硬门槛，主三段反而最松。
 - **修法**：按交易日历切分并给每段设最小交易日；holdout 结果也过一遍 `candidate_constraint_failures`，不足时显式写 `holdout_blocked`。
@@ -200,10 +212,10 @@ P0-2（`_has_new_data` 快照行数）、P0-4（显著门槛加 `ic_days`）、P
 ## P1：可用性、健壮性、资源
 
 ### 取消机制四处漏电（建议合并成一件事修）
-- **P1-1** ✅ `screening/jobs.py:190-201`：`request_cancel()` 置位并返回 True，但 `submit()` 的 `_run` 全程没有一次 `is_cancel_requested` 检查，future 也被丢弃无法 `cancel()`。用户点了取消，扫描跑到结束并落 `completed`。
-- **P1-2** `web/routers/market_data/sync.py:167-180`、`local_import.py:98-107`、`precompute.py:68-93`：预计算阶段（`_with_indicator_precompute`）完全不接受 `abort_check`，这是全市场同步里最久的一段；收发尾不再复查 ⇒ UI 显示「取消成功」后又被轮询刷成「已完成」，且脏数据已写库不可回退。
-- **P1-3** `condition_research/parallel.py:170-173`：`executor.shutdown(wait=True, cancel_futures=True)` 无 timeout，阻塞到所有 in-flight 股票跑完；`_mine_candidates`（含 200 次置换检验）在 `_run_phase` 之外串行执行，没有任何取消点。
-- **P1-4** `strategy_discovery/worker.py:157-169`：收尾无条件 `update(job_id, {"status": "running", **completion})` + `write_result`，会把刚写入的 `cancelled` 覆盖回 `completed`。
+- **P1-1** ✅ `screening/jobs.py` / `screening/engine.py`：排队任务可在开跑前取消；扫描在标的边界协作停止，并排空在途线程；完成/异常与取消请求在同一锁下仲裁，取消请求先到则终态为 `cancelled`。
+- **P1-2** ✅ `indicators/precompute.py` 与 market-data 路由：同步、本地导入和指标预计算向计算 worker 传递取消检查，在公式/区间边界停止；已提交行情保留，取消不回滚数据，也不提前释放仍在工作的线程。
+- **P1-3** ✅ `condition_research/service.py` / `mining.py`：并行阶段定期检查取消、取消未启动 futures 并等待已运行任务收尾；串行候选枚举与标签置换循环有检查点。job 在工作排空前保持 `cancelling`。
+- **P1-4** ✅ `strategy_discovery/duckdb_job_store.py`：成功完成事务读取 cancel flag 并原子决定 `cancelled` 或 `completed`；取消获胜时不写入结果 payload。
 
 ### P1-5 导入路由是 `async def`，导入期间整站无响应 ✅
 - **位置**：`web/routers/data_transfer.py:91`（`async def data_transfer_import`）、`:119`（同步 `import_user_assets`，含解压 + 全量 DuckDB 写入）。
@@ -214,20 +226,22 @@ P0-2（`_has_new_data` 快照行数）、P0-4（显著门槛加 `ic_days`）、P
 - **位置**：`screening/jobs.py:356-367`（可淘汰集合只有 `completed`/`failed`）。
 - **后果**：① 反复「提交→取消」会让 `_jobs` 单调增长，每条还挂着 report/payload ⇒ 内存泄漏；② 第 101 个任务终止时 `pop` 掉最早一条已完成记录，用户晚几秒查 `/results` 得到 404（任务其实成功了）。
 
-### P1-7 任务失败一律返回 500，并把内部异常原文抛给客户端
+### P1-7 任务结果查询对失败状态返回 500（错误原文暴露范围需逐路由确认）
 - **位置**：`routers/strategy_discovery.py:470,521`、`factor_test.py:160`、`factor_attribution.py:154`、`strategy_fitness.py:170`、`formula_screen.py:166`、`condition_research.py:235`、`portfolio_backtest.py:228`（同一模板 8 处）；`state.error` 来自 `job_backend.py:376-385` 的 `TaskUserError(str(exc))`。
-- **后果**：行情冲突、用户配置非法、SQLite 锁都变成 500，前端/告警按 5xx 重试会把可重试的与不该重试的混在一起；部分分支把 DuckDB 异常原文（含路径/锁信息）直接回给浏览器。
+- **后果**：任务完成后发现 `failed` 的结果查询会返回 500；前端与告警无法区分用户错误、资源冲突与服务故障。当前已核实部分分支会把存储错误文案回给浏览器，但「所有内部错误原文暴露」未经证实，需逐路由验证。
 - **修法**：统一 409 + `error.code = "task_failed"`，真正的服务故障才 500，并对非 `TaskUserError` 文案脱敏。
 
-### P1-8 lifespan 收尾顺序：`runner.shutdown()` 排在四个 `await` 之后
+### P1-8 lifespan 收尾顺序：`runner.shutdown()` 排在四个 `await` 之后 ✅
+- **当前状态（2026-10-06）**：✅ `finally` 先取消并 gather 全部自有 scheduler tasks，异常以 `return_exceptions` 收集；无论收尾 task 是否异常，拥有的 runner 都会 shutdown。外部借用的 runner/store 所有权未改变。
 - **位置**：`web/app.py:313-341`（`finally` 里先 `await` 四个 task，最后才 `runner.shutdown()`，且只捕 `CancelledError`）。
 - **后果**：任一先抛出别的异常 ⇒ 线程池永不 shutdown，进程 hang 或留下仍在写库的 worker 线程；store 连接也没有显式释放。
 
 ### P1-9 缺全局并发闸门，跨任务族的重活会叠加跑满 executor
 - **位置**：`exclusive_group` 只存在于 `condition_research.py:166`、`individual_research.py:113`、`strategies.py:314`、`market_data/*`；缺于 `portfolio_backtest.py:154`、`factor_test.py`、`factor_attribution.py`、`strategy_fitness.py`、`swing_research.py`、`instrument_lab.py`。`concurrency.py:8` `MAX_WORKERS=8` 全站共享，而资源预检只对单任务做比较。
-- **后果**：一次组合回测 + 一个条件研究可同时占满各自内存峰值；叠加旧稿 H3 的 mining 峰值（200k×60 特征 ≈ 3.9GB）两个并发即可 OOM 掉 API 进程，所有进行中任务随之丢失。
+- **当前判断**：跨任务族确有多个独立 runner/资源预检，单项配置的预算不能证明并发组合安全。旧稿的 200k×60 / 3.9GB 估计来自旧 mining 实现，当前已加入基线去重与 uint32 编码，不能用该数值代表现状；本次没有重测并发峰值。
 
-### P1-10 窗口结果会被写进持久层指标缓存
+### P1-10 窗口结果会被写进持久层指标缓存 ✅
+- **当前状态（2026-10-06）**：✅ 常规 `get_or_compute` 仅在完整序列上写持久缓存；持久读取与 `preload()` 都按 revision 总长度拒绝旧窗口污染项。`persist_results` 的年度全局偏移分块写入保持原有语义。无需清空全局缓存。
 - **位置**：`indicators/cache.py:814-832`（内存层有 `full_history` 保护）对 `:1088-1131`（`_persistent_put_many` 没有该保护），`data_fingerprint` 用标的级版本号、不含窗口。
 - **后果**：任何以窗口 frame 调用 `get_or_compute`（默认 `persist=True`）都会落脏条目，随后同 `end`、更短 `start` 的请求会命中它，拿到「由另一个窗口预热」的序列 ⇒ 同一配置有/无缓存结果不同。
 - **备注**：现有两个调用方（`portfolio_backtest/context.py:499` 显式 `persist=False`、`backtest/service.py:319` 传全序列）恰好规避，属**尚未被触发**的缺口。
@@ -248,7 +262,8 @@ P0-2（`_has_new_data` 快照行数）、P0-4（显著门槛加 `ic_days`）、P
 - **位置**：`market_data/adapter.py:202-206`（清的是 `threading.local()` 的当前槽）；调用点 `strategy_pool/service.py:347-378,496-500`，而那里的 services 按线程长期缓存在 `_research_local`。
 - **后果**：跨标的不会互串（命中含 `(market, code)` 比较、返回 deep copy，**这点已确认不会串票**），但「开跑前清一下」的契约对非调用线程无效；其它线程里新建的、带 `cache_stock_reads=True` 的 adapter 会拿到上一轮行情快照且无人能失效。
 
-### P1-15 gap_backfill 用「由 bar 自身反推」的交易日历判停牌，会把复牌暴跌误补成除权
+### P1-15 gap_backfill 用「由 bar 自身反推」的交易日历判停牌，会把复牌暴跌误补成除权 ✅
+- **当前状态（2026-10-06）**：✅ 反推公司行动现在要求有来源且覆盖候选全区间的持久化交易日历覆盖记录，覆盖还必须包含 `prev_date`。rolling sync 不删旧日历，bar 派生 rebuild 不覆盖权威来源；sessions 与 coverage 同事务保存。无可靠覆盖时显式跳过/拒绝推断，不回退到 bars 日期、不删既有用户事件。
 - **位置**：`market_data/gap_backfill.py:190-210,238-266`（`_trading_days_between` 用的日历是 `daily_bars` 日期并集，非交易所口径）。
 - **后果**：某段时间全市场普遍缺 bar 时，两根 bar 中间的「交易日」在日历里也不存在 ⇒ `missed == 0` ⇒ 长期停牌后的复牌跌幅被当成除权，`share_ratio/factor_ratio` 写进 `corporate_actions`，静默污染该股全部历史指标（量与 RECORD 不可回收）。
 
@@ -265,12 +280,14 @@ P0-2（`_has_new_data` 快照行数）、P0-4（显著门槛加 `ic_days`）、P
 - **后果**：与同一行的佣金（`size * price * rate`）口径不一致；schema 只写了 `ge=0, le=1000`（`web/schemas/portfolio.py:83`），用户填 `0.001` 的意图几乎必然是「千分之一成交额」，实际只收到 0.001 元/股 ⇒ 成本被低估一个量级，参数寻优会把滑点当免费噪声。
 
 ### P1-19 strategy_discovery：中断时的半程结果处理
+- **当前状态（2026-10-06，部分修复）**：✅ 超时未完成 full 复核的候选单列在 `partial_by_sharpe` / `partial_by_return`，带 `achieved_fidelity` 且 `qualified=false`；不会进入正式榜单或自动候选池。超时页面显示未完成数量与精度状态。全量 full 已评估但违反约束的候选仍是失败，不会降精度兜底。快照构建 deadline 与 checkpoint 身份隔离仍未处理。
 - **位置**：`strategy_discovery/search.py:636-673`（full 循环中断后 `final_observed = []` ⇒ `service.py:667` 抛「没有找到满足约束的策略候选」，把 coarse/medium 阶段已通过的候选全部丢弃）、`search.py:333,474,617,655`（deadline 自快照构建**完成后**才起算，不覆盖可能数十分钟的快照构建；检查点只在批次之间）、`service.py:566-590`（fidelity checkpoint 仅按 `candidate_hash` 复用，无策略配置签名/日期区间/分段标识，行情在 coarse→medium 之间更新时会串味）、`resources.py:139-181`（每 evaluation 进程各自新建 store + cache + 回测服务的固定开销未计入预算）。
 
 ### P1-20 strategy_pool：多副本调度与写入串行性
 - **位置**：`strategy_pool/tracking_scheduler.py:33-94`（进程内 `_WRITE_LOCK` + SELECT→INSERT 之间无 DB 唯一约束；且它是唯一没挂在 `owns_runner` 门禁下的 scheduler，`web/app.py:302-312`）、`store.py:214-219`（reset 与其它写入没整体串行，晚到的 upsert 会把刚删空的条目写回并留下孤儿版本）、`tracking_store.py:238-263`（`save_snapshot` 的校验与 UPDATE 是两条独立 SQL，无事务包裹）。
 
 ### P1-21 condition_research：worker 异常兜底与参数透传
+- **当前状态（2026-10-06，比例透传已修）**：✅ 请求 schema 接受受约束的 `train_ratio` 与 `validation_ratio`，保持默认 0.6/0.2 并校验总和小于 1，`to_config()` 透传到已有 split 逻辑。worker 异常兜底部分未改，需单独核查后决定。
 - **位置**：`condition_research/worker_tasks.py:136-139,173,210,250`（三处 `except (ValueError, OSError)` 漏掉 `TaskUserError`，见 `screening/jobs.py:56`）⇒ 单只股票「行情在研究期间变化」会炸掉整轮研究、已跑的成百上千只结果全部丢弃；`web/schemas/condition.py:30,120-161` + `condition_research/models.py:75-76`（`train_ratio`/`validation_ratio` 在 config 里有定义、会写进历史，但请求体 `extra="forbid"` 且 `to_config()` 不透传 ⇒ 永久锁死在 0.6/0.2，与 P0-14 叠加后用户无法补救）。**后者置信度高**：全仓库仅 `web/schemas/condition.py` 与测试构造引用。`(ValueError, OSError)` 那条置信度中高。
 
 ### P1-22 其余记账类

@@ -1637,7 +1637,7 @@ onActivated(() => {
               <div class="table-wrap">
                 <table>
                   <caption class="sr-only">买卖条件候选验证结果</caption>
-                  <thead><tr><th>选择</th><th>方向</th><th>新增条件</th><th>样本 / 股票</th><th>训练 lift</th><th>前 N 名胜率<TermHint term="topNWinRate" /></th><th title="买入按基础规则入场日计，卖出按持仓期提前离场决策点计（全市场合并，分母见结果字段 sample_totals）">条件命中率</th><th title="验证期合并成交笔数 / 你设置的最少交易样本">验证成交 / 门槛</th><th>验证胜率</th><th>全区间胜率</th><th title="逐股胜率改善比例，以及各股验证期夏普、年化收益和总收益的中位数">逐股提升率 / 夏普 / 年化 / 总收益</th><th>盈亏比</th><th>留出胜率</th><th>状态</th></tr></thead>
+                  <thead><tr><th>选择</th><th>方向</th><th>新增条件</th><th>样本 / 股票</th><th>训练 lift</th><th>前 N 名胜率<TermHint term="topNWinRate" /></th><th title="买入按基础规则入场日计，卖出按持仓期提前离场决策点计（全市场合并，分母见结果字段 sample_totals）">条件命中率</th><th title="验证期合并成交笔数 / 你设置的最少交易样本">验证成交 / 门槛</th><th>验证胜率</th><th>全区间胜率</th><th title="逐股胜率改善比例，以及各股验证期夏普、年化收益和总收益的中位数">逐股提升率 / 夏普 / 年化 / 总收益</th><th>盈亏比</th><th>留出胜率 / 复验状态</th><th>状态</th></tr></thead>
                   <tbody>
                     <tr
                       v-for="candidate in report.candidates"
@@ -1688,7 +1688,28 @@ onActivated(() => {
                         <small class="condition-objective-metrics">{{ formatNumber(candidate.validation.per_stock.median_sharpe) }} / {{ formatPercent(candidate.validation.per_stock.median_annual_return) }} / {{ formatPercent(candidate.validation.per_stock.median_total_return) }}</small>
                       </td>
                       <td>{{ formatNumber(candidate.validation.pooled_trades.payoff_ratio) }}</td>
-                      <td>{{ formatPercent(candidate.holdout?.pooled_trades.win_rate) }}</td>
+                      <td>
+                        <span v-if="candidate.holdout_evaluation?.status === 'evaluated'">{{ formatPercent(candidate.holdout?.pooled_trades.win_rate) }}</span>
+                        <span v-else class="muted-code">—</span>
+                        <small
+                          v-if="candidate.holdout_evaluation?.status === 'evaluated'"
+                          :class="candidate.holdout_evaluation.passed_constraints ? 'positive' : 'muted-code'"
+                          :data-testid="'holdout-evaluation-' + candidate.candidate_id"
+                        >留出已复验：{{ candidate.holdout_evaluation.passed_constraints ? '通过' : '未通过' }}</small>
+                        <small
+                          v-else-if="candidate.holdout_evaluation?.status === 'insufficient_samples'"
+                          class="muted-code"
+                          :data-testid="'holdout-evaluation-' + candidate.candidate_id"
+                        >留出样本不足：{{ candidate.holdout_evaluation.reason }}</small>
+                        <small
+                          v-else-if="candidate.holdout_evaluation?.status === 'unevaluable'"
+                          class="muted-code"
+                          :data-testid="'holdout-evaluation-' + candidate.candidate_id"
+                        >留出无法评估：{{ candidate.holdout_evaluation.reason }}</small>
+                        <small v-else class="muted-code" :data-testid="'holdout-evaluation-' + candidate.candidate_id">
+                          {{ candidate.holdout ? '留出复验状态缺失' : '未入留出名额' }}
+                        </small>
+                      </td>
                       <td class="condition-status">
                         <span :class="candidate.passed_constraints ? 'positive' : 'muted-code'">{{ constraintText(candidate) }}</span>
                         <small v-if="candidate.performance_warnings?.length" class="condition-performance-warning">提示：{{ candidate.performance_warnings.join('；') }}</small>

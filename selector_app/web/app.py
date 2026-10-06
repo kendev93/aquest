@@ -75,6 +75,25 @@ from .app_settings import (
 logger = logging.getLogger(__name__)
 
 
+async def _cancel_background_tasks(tasks: list[asyncio.Task[None] | None]) -> None:
+    """Cancel and drain every lifespan task even if one already failed."""
+
+    active = [task for task in tasks if task is not None]
+    for task in active:
+        task.cancel()
+    if not active:
+        return
+    outcomes = await asyncio.gather(*active, return_exceptions=True)
+    for outcome in outcomes:
+        if isinstance(outcome, BaseException) and not isinstance(
+            outcome, asyncio.CancelledError
+        ):
+            logger.error(
+                "后台 lifespan 任务退出时发生异常",
+                exc_info=(type(outcome), outcome, outcome.__traceback__),
+            )
+
+
 def _resolve_market_data_adapter(store: DuckDbMarketDataStore) -> MarketDataAdapter:
     """Return the adapter over this installation's own market database."""
 
@@ -317,32 +336,13 @@ def create_app(
         try:
             yield
         finally:
-            if pool_tracking_task is not None:
-                pool_tracking_task.cancel()
-                try:
-                    await pool_tracking_task
-                except asyncio.CancelledError:
-                    pass
-            if maintenance_task is not None:
-                maintenance_task.cancel()
-                try:
-                    await maintenance_task
-                except asyncio.CancelledError:
-                    pass
-            if auto_sync_task is not None:
-                auto_sync_task.cancel()
-                try:
-                    await auto_sync_task
-                except asyncio.CancelledError:
-                    pass
-            if tracking_task is not None:
-                tracking_task.cancel()
-                try:
-                    await tracking_task
-                except asyncio.CancelledError:
-                    pass
-            if owns_runner:
-                selected_runner.shutdown()
+            try:
+                await _cancel_background_tasks(
+                    [pool_tracking_task, maintenance_task, auto_sync_task, tracking_task]
+                )
+            finally:
+                if owns_runner:
+                    selected_runner.shutdown()
 
     app = FastAPI(
         title="Indicator Lab",

@@ -110,6 +110,8 @@ _EMPTY_COLUMNS = [
     "amount",
     "bar_status",
 ]
+_EMPTY_RESPONSE_STATUS_ATTR = "selector_empty_response_status"
+_VALID_NO_DATA_STATUS = "valid_no_data"
 
 # SH main (t:2) + SH STAR (t:23) + SZ main (t:6) + SZ ChiNext (t:80).  Matches
 # ``_STOCK_BOARDS`` (main/star/chinext) server-side; B shares and the Beijing
@@ -337,6 +339,19 @@ def _should_fetch_next_page(total: int, fetched: int, page_rows: int, page_size:
 
 def _mapping_value(value: object) -> Mapping[str, object]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _valid_empty_frame(columns: Sequence[str]) -> pd.DataFrame:
+    """Build an empty frame only when the provider explicitly confirmed no rows."""
+
+    frame = pd.DataFrame(columns=list(columns))
+    frame.attrs[_EMPTY_RESPONSE_STATUS_ATTR] = _VALID_NO_DATA_STATUS
+    return frame
+
+
+def _is_valid_no_data(frame: pd.DataFrame) -> bool:
+    status = frame.attrs.get(_EMPTY_RESPONSE_STATUS_ATTR)
+    return isinstance(status, str) and status == _VALID_NO_DATA_STATUS
 
 
 def _mapping_rows(value: object) -> list[Mapping[str, object]]:
@@ -663,25 +678,30 @@ class OnlineMarketClient:
             },
             timeout,
         )
-        data = _mapping_value(payload.get("data"))
+        data = payload.get("data")
+        if not isinstance(data, Mapping):
+            raise OnlineDataError("East Money 日线响应缺少有效 data 对象")
         raw_klines = data.get("klines")
         if raw_klines is None:
-            return pd.DataFrame(
-                columns=[
-                    "日期",
-                    "开盘",
-                    "收盘",
-                    "最高",
-                    "最低",
-                    "成交量",
-                    "成交额",
-                    "换手率",
-                ]
-            )
+            raise OnlineDataError("East Money 日线响应缺少 klines")
         if not isinstance(raw_klines, (list, tuple)):
             raise OnlineDataError("East Money 日线响应缺少有效 klines 列表")
+        columns = [
+            "日期",
+            "开盘",
+            "收盘",
+            "最高",
+            "最低",
+            "成交量",
+            "成交额",
+            "换手率",
+        ]
+        if not raw_klines:
+            return _valid_empty_frame(columns)
+        if any(not isinstance(item, str) or not item.strip() for item in raw_klines):
+            raise OnlineDataError("East Money 日线响应包含格式无效的 kline")
         rows = [
-            str(item).split(",") for item in raw_klines if isinstance(item, str) and item.strip()
+            item.split(",") for item in raw_klines
         ]
         if any(len(row) < 11 for row in rows):
             raise OnlineDataError("East Money 日线响应字段数量不足")
@@ -704,7 +724,9 @@ class OnlineMarketClient:
         frame["日期"] = pd.to_datetime(frame["日期"], errors="coerce")
         for column in ("开盘", "收盘", "最高", "最低", "成交量", "成交额", "换手率"):
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
-        return frame[["日期", "开盘", "收盘", "最高", "最低", "成交量", "成交额", "换手率"]]
+        if frame["日期"].isna().any() or frame[columns[1:]].isna().any().any():
+            raise OnlineDataError("East Money 日线响应包含无效日期或数值")
+        return frame[columns]
 
     def fetch_tencent_daily_history(
         self,
@@ -734,13 +756,20 @@ class OnlineMarketClient:
                 },
                 timeout,
             )
-            data = _mapping_value(payload.get("data"))
-            symbol_data = _mapping_value(data.get(symbol))
+            data = payload.get("data")
+            if not isinstance(data, Mapping):
+                raise OnlineDataError("Tencent 日线响应缺少有效 data 对象")
+            symbol_value = data.get(symbol)
+            if not isinstance(symbol_value, Mapping):
+                raise OnlineDataError(f"Tencent 日线响应缺少 {symbol} 数据对象")
+            symbol_data = symbol_value
             # 腾讯响应的数据 key 跟随复权类型：留空（不复权）返回 day，hfq 返回 hfqday。
             raw_rows = symbol_data.get("day")
             if not isinstance(raw_rows, (list, tuple)):
-                continue
-            rows = [row for row in raw_rows if isinstance(row, (list, tuple)) and len(row) >= 9]
+                raise OnlineDataError(f"Tencent 日线响应缺少有效 {symbol}.day 列表")
+            if any(not isinstance(row, (list, tuple)) or len(row) < 9 for row in raw_rows):
+                raise OnlineDataError("Tencent 日线响应包含格式无效的 day 行")
+            rows = list(raw_rows)
             if not rows:
                 continue
             parts.append(
@@ -771,13 +800,17 @@ class OnlineMarketClient:
                 )
             )
         if not parts:
-            return pd.DataFrame(
-                columns=["date", "open", "close", "high", "low", "volume", "turnover", "amount"]
+            return _valid_empty_frame(
+                ["date", "open", "close", "high", "low", "volume", "turnover", "amount"]
             )
         frame = pd.concat(parts, ignore_index=True)
         dates = pd.to_datetime(frame["date"], errors="coerce")
         for column in ("open", "close", "high", "low", "volume", "turnover", "amount"):
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        if dates.isna().any() or frame[
+            ["open", "close", "high", "low", "volume", "turnover", "amount"]
+        ].isna().any().any():
+            raise OnlineDataError("Tencent 日线响应包含无效日期或数值")
         # 成交量以"手"入库（与通达信 .day 导入、东财 f56 的口径一致）。
         # 腾讯对科创板（688/689）直接给"股"，其余品种（含 ETF 和指数）给的就是
         # "手"，所以只有科创板需要换算，方向是股 → 手。成交额一律是万元、换手率
@@ -790,7 +823,10 @@ class OnlineMarketClient:
         frame["amount"] = frame["amount"] * 10_000
         frame["date"] = dates.dt.date
         frame = frame.loc[(dates.dt.date >= start) & (dates.dt.date <= end)]
-        return frame.reset_index(drop=True)
+        frame = frame.reset_index(drop=True)
+        if frame.empty:
+            frame.attrs[_EMPTY_RESPONSE_STATUS_ATTR] = _VALID_NO_DATA_STATUS
+        return frame
 
     def _request(
         self,
@@ -973,6 +1009,21 @@ class OnlineMarketSync:
             rate_gate=rate_gate,
         )
         if fetched.frame.empty:
+            if fetched.history_source == "no_new_data":
+                unchanged = _unchanged_result(
+                    existing,
+                    retries=fetched.retries,
+                    history_source="no_new_data",
+                )
+                return StageTargetResult(
+                    status="unchanged",
+                    frame=pd.DataFrame(),
+                    written_bars=0,
+                    range_start=unchanged.range_start,
+                    range_end=unchanged.range_end,
+                    retries=unchanged.retries,
+                    history_source=unchanged.history_source,
+                )
             if existing.latest.empty:
                 raise OnlineDataError(f"在线行情 {target.code} 没有可用日线")
             return StageTargetResult(
@@ -989,9 +1040,7 @@ class OnlineMarketSync:
                     else None
                 ),
                 retries=fetched.retries,
-                history_source=(
-                    "already_complete" if config.full_history else fetched.history_source
-                ),
+                history_source=fetched.history_source,
             )
         if (
             not config.full_history
@@ -1517,14 +1566,18 @@ class OnlineMarketSync:
             existing=existing,
         )
         if fetched.frame.empty:
+            if fetched.history_source == "no_new_data":
+                return _unchanged_result(
+                    existing,
+                    retries=fetched.retries,
+                    history_source="no_new_data",
+                )
             if existing.latest.empty:
                 raise OnlineDataError(f"在线行情 {code} 没有可用日线")
             return _unchanged_result(
                 existing,
                 retries=fetched.retries,
-                history_source=(
-                    "already_complete" if config.full_history else fetched.history_source
-                ),
+                history_source=fetched.history_source,
             )
         normalized = fetched.frame
         range_start, range_end = _frame_date_range(normalized)
@@ -1576,6 +1629,8 @@ class OnlineMarketSync:
             return _FetchedTarget(pd.DataFrame(), 0, "already_complete")
         normalized_parts: list[pd.DataFrame] = []
         history_sources: list[str] = []
+        empty_ranges: list[tuple[date, date]] = []
+        valid_empty_ranges: list[tuple[date, date]] = []
         retries = 0
         for start_date, requested_end in ranges:
             if abort_check is not None and abort_check():
@@ -1592,6 +1647,11 @@ class OnlineMarketSync:
             )
             retries += range_retries
             if frame.empty:
+                if _is_valid_no_data(frame):
+                    valid_empty_ranges.append((start_date, requested_end))
+                    history_sources.append("no_new_data")
+                else:
+                    empty_ranges.append((start_date, requested_end))
                 continue
             normalized = _normalize_online_frame(
                 frame,
@@ -1604,11 +1664,22 @@ class OnlineMarketSync:
             )
             normalized = _clip_to_range(normalized, start_date, requested_end)
             if normalized.empty:
+                empty_ranges.append((start_date, requested_end))
                 continue
             normalized_parts.append(normalized)
             history_sources.append(history_source)
         if not normalized_parts:
-            return _FetchedTarget(pd.DataFrame(), retries, "empty")
+            if valid_empty_ranges and not empty_ranges:
+                return _FetchedTarget(pd.DataFrame(), retries, "no_new_data")
+            raise OnlineDataError(f"在线行情 {code} 没有可用日线：所有请求范围均为空")
+        if empty_ranges:
+            labels = ", ".join(
+                f"{start.isoformat()}~{end.isoformat()}" for start, end in empty_ranges[:3]
+            )
+            raise OnlineDataError(
+                f"在线行情 {code} 有 {len(empty_ranges)} 个请求范围没有可用日线"
+                f"（{labels}）；未应用部分结果"
+            )
         normalized = (
             pd.concat(normalized_parts, ignore_index=True)
             .sort_values("date", kind="stable")
@@ -1664,6 +1735,7 @@ class OnlineMarketSync:
             ),
         )
         errors: list[str] = []
+        no_data_sources: list[str] = []
         available = False
         retries = 0
         for source_name, method_name, kwargs in source_requests:
@@ -1685,6 +1757,12 @@ class OnlineMarketSync:
                     if rate_gate is not None:
                         rate_gate.report(success=True, provider=source_name)
                     if frame.empty:
+                        if _is_valid_no_data(frame):
+                            no_data_sources.append(source_name)
+                        else:
+                            errors.append(
+                                f"{source_name}: 空日线响应没有明确的无数据标记"
+                            )
                         break
                     return frame, retries, source_name
                 except OnlineDataError as exc:
@@ -1709,6 +1787,8 @@ class OnlineMarketSync:
         if errors:
             detail = "; ".join(errors[-3:])
             raise OnlineProviderError(f"在线行情获取 {code} 日线失败: {detail}")
+        if no_data_sources:
+            return _valid_empty_frame(_EMPTY_COLUMNS), retries, "no_new_data"
         return pd.DataFrame(), retries, "empty"
 
 

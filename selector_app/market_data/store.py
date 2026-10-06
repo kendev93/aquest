@@ -240,6 +240,9 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
     def read_trading_dates(self) -> list[date]:
         return self._bars.read_trading_dates()
 
+    def read_completed_trading_dates(self) -> list[date]:
+        return self._bars.read_completed_trading_dates()
+
     def rebuild_trading_calendar_from_bars(self) -> int:
         return self._bars.rebuild_trading_calendar_from_bars()
 
@@ -286,8 +289,22 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
         trade_dates: Iterable[date],
         *,
         source: str,
+        coverage_start: date | None = None,
+        coverage_end: date | None = None,
     ) -> int:
-        return self._bars.save_market_trading_calendar(trade_dates, source=source)
+        return self._bars.save_market_trading_calendar(
+            trade_dates,
+            source=source,
+            coverage_start=coverage_start,
+            coverage_end=coverage_end,
+        )
+
+    def read_authoritative_trading_dates(
+        self,
+        start_date: date,
+        end_date: date,
+    ) -> list[date]:
+        return self._bars.read_authoritative_trading_dates(start_date, end_date)
 
     def latest_market_trading_date(self, on_or_before: date) -> date | None:
         return self._bars.latest_market_trading_date(on_or_before)

@@ -23,6 +23,7 @@ from selector_app.individual_research.search_policy import FULL_LIMIT, MEDIUM_LI
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter, MarketDataAdapter
 from selector_app.market_data.models import InstrumentBoard, InstrumentType
 from selector_app.market_data.store import DuckDbMarketDataStore
+from selector_app.screening.jobs import TaskCancelledError
 from selector_app.portfolio_backtest.models import (
     PortfolioBacktestConfig,
     PortfolioBacktestReport,
@@ -664,7 +665,63 @@ class StrategyDiscoveryService:
         # High-fidelity checkpoints are only needed while search promotes
         # candidates. Validation and holdout evaluate from their own date ranges.
         fidelity_checkpoints.clear()
+        if abort_check is not None and abort_check():
+            raise TaskCancelledError("策略实验已取消")
         if not search_result.results_by_sharpe and not search_result.results_by_return:
+            if (
+                search_result.search_metadata.get("stop_reason") == "timeout"
+                and search_result.partial_by_sharpe
+            ):
+                partial_by_sharpe = _partial_candidates(search_result.partial_by_sharpe)
+                partial_by_return = _partial_candidates(search_result.partial_by_return)
+                partial_search_metadata = dict(search_result.search_metadata)
+                partial_stage_durations = partial_search_metadata.get("stage_durations_seconds")
+                stage_durations = (
+                    dict(partial_stage_durations)
+                    if isinstance(partial_stage_durations, Mapping)
+                    else {}
+                )
+                stage_durations["snapshot"] = max(0.0, snapshot_build_seconds)
+                stage_durations["indicators"] = _number(
+                    (snapshot_metadata or {}).get("indicator_compute_seconds")
+                )
+                partial_algorithm = {
+                    "algorithm": partial_search_metadata.get("algorithm"),
+                    "algorithm_version": partial_search_metadata.get("algorithm_version", "1"),
+                    "fallback_enabled": partial_search_metadata.get("fallback_enabled", False),
+                    "surrogate_enabled": partial_search_metadata.get("surrogate_enabled", False),
+                    "surrogate_fit_count": partial_search_metadata.get("surrogate_fit_count", 0),
+                    "data_snapshot": "shared_memmap" if evaluation_executor is not None else "none",
+                    "snapshot_build_seconds": snapshot_build_seconds,
+                    "snapshot_metrics": dict(snapshot_metadata or {}),
+                    "checkpoint_metrics": dict(checkpoint_metrics),
+                    "seed": request.seed,
+                    "optuna_version": _package_version("optuna"),
+                    "lightgbm_version": _package_version("lightgbm"),
+                }
+                return {
+                    "request": request.to_dict(),
+                    "results_by_sharpe": [],
+                    "results_by_return": [],
+                    "partial": True,
+                    "status": "partial",
+                    "message": (
+                        "搜索在完整精度复核完成前超时；以下候选仅供参考，尚未通过完整约束，"
+                        "不会进入正式榜单或自动候选池。"
+                    ),
+                    "partial_candidate_count": len(search_result.partial_by_sharpe),
+                    "partial_by_sharpe": partial_by_sharpe,
+                    "partial_by_return": partial_by_return,
+                    "search_metadata": partial_search_metadata,
+                    "algorithm_metadata": partial_algorithm,
+                    "stage_durations_seconds": stage_durations,
+                    "data_fingerprint": fingerprint_holder[0],
+                    "duration_seconds": max(0.0, time.monotonic() - started),
+                    "validation_metadata": {
+                        "status": "not_run",
+                        "reason": "搜索候选尚未完成完整精度复核",
+                    },
+                }
             raise ValueError("没有找到满足约束的策略候选")
 
         def report_validation(current: int, total: int, stage: str) -> None:
@@ -699,6 +756,17 @@ class StrategyDiscoveryService:
             batch_size=self._evaluation_workers if batch_evaluator is not None else 1,
         )
         result = discovery.to_dict()
+        if search_result.search_metadata.get("stop_reason") == "timeout":
+            result.update(
+                partial=True,
+                status="partial",
+                message=(
+                    "搜索超时；正式榜单仅包含通过完整精度约束的候选，另有候选尚未完成完整精度复核。"
+                ),
+                partial_candidate_count=len(search_result.partial_by_sharpe),
+                partial_by_sharpe=_partial_candidates(search_result.partial_by_sharpe),
+                partial_by_return=_partial_candidates(search_result.partial_by_return),
+            )
         result["data_fingerprint"] = fingerprint_holder[0]
         search_metadata = result.get("search_metadata")
         validation_metadata = result.get("validation_metadata")
@@ -993,6 +1061,28 @@ def _progress_metadata(
         "throughput_per_second": throughput,
         "estimated_seconds_remaining": remaining,
     }
+
+
+def _partial_candidates(
+    candidates: Sequence[StrategyCandidate],
+) -> list[dict[str, object]]:
+    """Serialize timeout previews with their achieved fidelity and no qualification."""
+
+    result: list[dict[str, object]] = []
+    for candidate in candidates:
+        metrics = candidate.metrics
+        achieved = next(
+            (stage for stage in ("full", "medium", "coarse", "search") if stage in metrics),
+            "search",
+        )
+        result.append(
+            {
+                **candidate.to_dict(),
+                "achieved_fidelity": achieved,
+                "qualified": False,
+            }
+        )
+    return result
 
 
 def _fidelity_end(start_text: str, end_text: str, fidelity: str) -> str:

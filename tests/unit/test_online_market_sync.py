@@ -192,6 +192,55 @@ class BothSourcesOnline(FakeOnline):
         )
 
 
+class EmptyTencentOnline(BothSourcesOnline):
+    def fetch_tencent_daily_history(
+        self,
+        market: str,
+        code: str,
+        start_date: str,
+        end_date: str,
+        *,
+        timeout: float,
+    ) -> pd.DataFrame:
+        del market, code, start_date, end_date, timeout
+        return pd.DataFrame()
+
+
+class ValidEmptyHistoryOnline(FakeOnline):
+    @staticmethod
+    def _empty_history(columns: list[str]) -> pd.DataFrame:
+        frame = pd.DataFrame(columns=columns)
+        frame.attrs["selector_empty_response_status"] = "valid_no_data"
+        return frame
+
+    def fetch_tencent_daily_history(
+        self,
+        market: str,
+        code: str,
+        start_date: str,
+        end_date: str,
+        *,
+        timeout: float,
+    ) -> pd.DataFrame:
+        del market, code, start_date, end_date, timeout
+        return self._empty_history(
+            ["date", "open", "close", "high", "low", "volume", "turnover", "amount"]
+        )
+
+    def fetch_daily_history(
+        self,
+        symbol: str,
+        start_date: str,
+        end_date: str,
+        *,
+        timeout: float,
+    ) -> pd.DataFrame:
+        del symbol, start_date, end_date, timeout
+        return self._empty_history(
+            ["日期", "开盘", "收盘", "最高", "最低", "成交量", "成交额", "换手率"]
+        )
+
+
 def _config(**overrides: object) -> MarketSyncConfig:
     values: dict[str, object] = {
         "universe": "all",
@@ -796,6 +845,30 @@ def test_staged_tencent_request_uses_the_shared_rate_gate(tmp_path: Path) -> Non
     assert float(rate_state["next_allowed_eastmoney"]) == 0.0
 
 
+def test_empty_tencent_response_falls_back_to_eastmoney(tmp_path: Path) -> None:
+    module = EmptyTencentOnline()
+    service = OnlineMarketSync(
+        store=DuckDbMarketDataStore(tmp_path / "empty-tencent.duckdb"),
+        module_factory=lambda: module,
+        clock=lambda: _NOW,
+        sleep=lambda _seconds: None,
+    )
+
+    result = service._fetch_target(
+        module,
+        "SH",
+        "600000",
+        "stock",
+        "main",
+        "浦发银行",
+        _config(),
+        existing=_ExistingBars(pd.DataFrame()),
+    )
+
+    assert not result.frame.empty
+    assert result.history_source == "eastmoney"
+
+
 def test_eastmoney_provider_rejects_invalid_ohlc_rows(tmp_path: Path) -> None:
     class InvalidOnline(FakeOnline):
         def fetch_daily_history(
@@ -854,7 +927,99 @@ def test_eastmoney_empty_history_is_reported_as_a_symbol_error(tmp_path: Path) -
 
     assert report.errors == 3
     assert report.unchanged_files == 0
-    assert any("没有可用日线" in reason for reason in report.failure_reasons)
+    assert any("空日线响应没有明确的无数据标记" in reason for reason in report.failure_reasons)
+
+
+def test_empty_full_history_response_preserves_existing_bars_and_reports_failure(
+    tmp_path: Path,
+) -> None:
+    class EmptyHistoryOnline(FakeOnline):
+        def fetch_daily_history(
+            self,
+            symbol: str,
+            start_date: str,
+            end_date: str,
+            *,
+            timeout: float,
+        ) -> pd.DataFrame:
+            del symbol, start_date, end_date, timeout
+            return pd.DataFrame()
+
+    store = DuckDbMarketDataStore(tmp_path / "existing-empty.duckdb")
+    existing = _hist_frame().rename(
+        columns={
+            "日期": "date",
+            "开盘": "open",
+            "收盘": "close",
+            "最高": "high",
+            "最低": "low",
+            "成交量": "volume",
+            "成交额": "amount",
+        }
+    )
+    existing["market"] = "SH"
+    existing["code"] = "600000"
+    existing["instrument_type"] = "stock"
+    existing["board"] = "main"
+    existing["bar_status"] = "completed"
+    existing["name"] = "浦发银行"
+    store.upsert_local_bars(existing)
+    before = store.read_bars("SH", "600000")
+    service = OnlineMarketSync(
+        store=store,
+        module_factory=EmptyHistoryOnline,
+        clock=lambda: _NOW,
+        sleep=lambda _seconds: None,
+    )
+    service.discover_instruments(_config())
+
+    report = service.sync(_config(codes=("600000",), prefer_store_targets=True, full_history=True))
+
+    assert report.processed == 1
+    assert report.errors == 1
+    assert report.unchanged_files == 0
+    assert report.history_sources.get("already_complete", 0) == 0
+    pd.testing.assert_frame_equal(store.read_bars("SH", "600000"), before)
+
+
+def test_explicit_valid_empty_full_history_is_no_new_data_and_preserves_bars(
+    tmp_path: Path,
+) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "explicit-empty.duckdb")
+    existing = _hist_frame().rename(
+        columns={
+            "日期": "date",
+            "开盘": "open",
+            "收盘": "close",
+            "最高": "high",
+            "最低": "low",
+            "成交量": "volume",
+            "成交额": "amount",
+        }
+    )
+    existing["market"] = "SH"
+    existing["code"] = "600000"
+    existing["instrument_type"] = "stock"
+    existing["board"] = "main"
+    existing["bar_status"] = "completed"
+    existing["name"] = "浦发银行"
+    store.upsert_local_bars(existing)
+    before = store.read_bars("SH", "600000")
+    service = OnlineMarketSync(
+        store=store,
+        module_factory=ValidEmptyHistoryOnline,
+        clock=lambda: _NOW,
+        sleep=lambda _seconds: None,
+    )
+    service.discover_instruments(_config())
+
+    report = service.sync(_config(codes=("600000",), prefer_store_targets=True, full_history=True))
+
+    assert report.processed == 1
+    assert report.errors == 0
+    assert report.unchanged_files == 1
+    assert report.history_sources == {"no_new_data": 1}
+    pd.testing.assert_frame_equal(store.read_bars("SH", "600000"), before)
 
 
 def test_eastmoney_sync_can_be_cancelled_before_fetching_bars(tmp_path: Path) -> None:

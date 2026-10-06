@@ -649,21 +649,31 @@ class DuckDbStrategyJobStore:
             ):
                 raise ValueError("策略任务 worker 不匹配或任务已结束")
             state = _load_object(row[0])
+            cancel_requested = bool(row[2])
+            final_status = "cancelled" if cancel_requested else "completed"
             state.update(
-                status="completed",
-                phase="completed",
-                progress=1.0,
+                status=final_status,
+                phase=final_status,
+                cancel_requested=cancel_requested,
                 error=None,
                 error_code=None,
                 finished_at=state.get("finished_at") or now,
             )
+            if not cancel_requested:
+                state["progress"] = 1.0
             connection.execute(
                 """
                 UPDATE strategy_jobs
-                SET status = 'completed', state_json = ?, result_json = ?, updated_at = ?
+                SET status = ?, state_json = ?, result_json = ?, updated_at = ?
                 WHERE job_id = ?
                 """,
-                [_dump_json(state), _dump_json(result), now, job_id],
+                [
+                    final_status,
+                    _dump_json(state),
+                    None if cancel_requested else _dump_json(result),
+                    now,
+                    job_id,
+                ],
             )
         return self.read_state(job_id) if worker_id is not None else None
 

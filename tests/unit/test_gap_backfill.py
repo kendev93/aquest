@@ -29,6 +29,7 @@ from selector_app.market_data.gap_backfill import (
     MAX_INFERRED_FACTOR,
     SkippedGap,
     _trading_days_between,
+    backfill_inferred_actions,
     infer_corporate_actions,
 )
 
@@ -186,6 +187,28 @@ def test_incomplete_calendar_is_rejected() -> None:
     )
     with pytest.raises(ValueError, match="未覆盖"):
         infer_corporate_actions(gaps, [date(2024, 2, 5), date(2024, 2, 6)])
+
+
+def test_backfill_fails_closed_without_persisted_authoritative_coverage() -> None:
+    class LegacyStore:
+        def __init__(self) -> None:
+            self.writes = 0
+
+        def read_price_gap_candidates(self) -> pd.DataFrame:
+            return frame(candidate())
+
+        def read_trading_dates(self) -> list[date]:
+            return CALENDAR
+
+        def upsert_corporate_actions(self, actions, *, source, provider) -> int:
+            del actions, source, provider
+            self.writes += 1
+            return 1
+
+    store = LegacyStore()
+    with pytest.raises(ValueError, match="权威交易日历覆盖 API"):
+        backfill_inferred_actions(store)  # type: ignore[arg-type]
+    assert store.writes == 0
 
 
 def test_open_above_prev_close_is_skipped() -> None:

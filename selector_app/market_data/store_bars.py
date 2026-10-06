@@ -942,8 +942,15 @@ class DuckDbBarsStore:
         trade_dates: Iterable[date],
         *,
         source: str,
+        coverage_start: date | None = None,
+        coverage_end: date | None = None,
     ) -> int:
-        """Persist a rolling snapshot of observed mainland market sessions."""
+        """Persist observed sessions and, when supplied, their fetched coverage window.
+
+        Session rows are retained across rolling refreshes. ``derived_from_bars`` is
+        useful for display/scheduling, but it must not overwrite provider provenance.
+        Only the provider calendar fetch path may assert a covered date interval.
+        """
 
         self._store._require_writer()
         dates = tuple(sorted({item for item in trade_dates if isinstance(item, date)}))
@@ -952,24 +959,109 @@ class DuckDbBarsStore:
             return 0
         if not normalized_source:
             raise ValueError("交易日历来源不能为空")
+        if (coverage_start is None) != (coverage_end is None):
+            raise ValueError("交易日历覆盖范围必须同时提供开始和结束日期")
+        if coverage_start is not None and coverage_end is not None:
+            if normalized_source != "eastmoney_sse_composite":
+                raise ValueError("只有权威行情源可以声明交易日历覆盖范围")
+            if coverage_start > coverage_end:
+                raise ValueError("交易日历覆盖范围开始日期不能晚于结束日期")
+            if any(item < coverage_start or item > coverage_end for item in dates):
+                raise ValueError("交易日历日期超出声明的覆盖范围")
         now = _now()
         rows = [(item, normalized_source, now) for item in dates]
         with _WRITE_LOCK, self._store._connect() as connection:
-            connection.executemany(
-                """
-                INSERT INTO market_trading_calendar (trade_date, source, fetched_at)
-                VALUES (?, ?, ?)
-                ON CONFLICT (trade_date) DO UPDATE SET
-                    source = excluded.source,
-                    fetched_at = excluded.fetched_at
-                """,
-                rows,
-            )
-            connection.execute(
-                "DELETE FROM market_trading_calendar WHERE trade_date < ?",
-                [dates[0]],
-            )
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                connection.executemany(
+                    """
+                    INSERT INTO market_trading_calendar (trade_date, source, fetched_at)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT (trade_date) DO UPDATE SET
+                        source = CASE
+                            WHEN market_trading_calendar.source = 'eastmoney_sse_composite'
+                                 AND excluded.source <> 'eastmoney_sse_composite'
+                                THEN market_trading_calendar.source
+                            ELSE excluded.source
+                        END,
+                        fetched_at = CASE
+                            WHEN market_trading_calendar.source = 'eastmoney_sse_composite'
+                                 AND excluded.source <> 'eastmoney_sse_composite'
+                                THEN market_trading_calendar.fetched_at
+                            ELSE excluded.fetched_at
+                        END
+                    """,
+                    rows,
+                )
+                if coverage_start is not None and coverage_end is not None:
+                    connection.execute(
+                        """
+                        INSERT INTO market_trading_calendar_coverage
+                            (source, coverage_start, coverage_end, fetched_at)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT (source, coverage_start, coverage_end) DO UPDATE SET
+                            fetched_at = excluded.fetched_at
+                        """,
+                        [normalized_source, coverage_start, coverage_end, now],
+                    )
+                connection.execute("COMMIT")
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
         return len(dates)
+
+    def read_authoritative_trading_dates(
+        self,
+        start_date: date,
+        end_date: date,
+    ) -> list[date]:
+        """Read provider sessions only when persisted fetch windows cover the interval.
+
+        Individual session rows, including two rows at the interval endpoints, do not
+        establish complete coverage. Successful provider request windows are persisted
+        separately and their union must cover every calendar day in the requested range.
+        """
+
+        if start_date > end_date:
+            raise ValueError("权威交易日历开始日期不能晚于结束日期")
+        source = "eastmoney_sse_composite"
+        with self._store.read_session() as connection:
+            intervals = connection.execute(
+                """
+                SELECT coverage_start, coverage_end
+                FROM market_trading_calendar_coverage
+                WHERE source = ? AND coverage_start <= ? AND coverage_end >= ?
+                ORDER BY coverage_start, coverage_end
+                """,
+                [source, end_date, start_date],
+            ).fetchall()
+            cursor = start_date
+            for interval_start, interval_end in intervals:
+                first = interval_start if isinstance(interval_start, date) else date.fromisoformat(
+                    str(interval_start)[:10]
+                )
+                last = interval_end if isinstance(interval_end, date) else date.fromisoformat(
+                    str(interval_end)[:10]
+                )
+                if first > cursor:
+                    break
+                cursor = max(cursor, date.fromordinal(last.toordinal() + 1))
+                if cursor > end_date:
+                    break
+            if cursor <= end_date:
+                raise ValueError(
+                    f"权威交易日历未覆盖完整日期范围 {start_date} ~ {end_date}；"
+                    "仅有日期端点不能证明区间完整"
+                )
+            frame = connection.execute(
+                """
+                SELECT trade_date FROM market_trading_calendar
+                WHERE source = ? AND trade_date BETWEEN ? AND ?
+                ORDER BY trade_date
+                """,
+                [source, start_date, end_date],
+            ).df()
+        return list(frame["trade_date"].dt.date)
 
     def upsert_corporate_actions(
         self,
@@ -1141,6 +1233,26 @@ class DuckDbBarsStore:
         # ``.dt.date`` 而不是逐个 isinstance：pandas 的 Timestamp 是 datetime.date
         # 的子类，isinstance 会放它过去，调用方拿到的就是一列 Timestamp。它们和
         # 纯 date 混进 bisect 会抛 TypeError，所以在这里强制降级成 date。
+        return list(frame["trade_date"].dt.date)
+
+    def read_completed_trading_dates(self) -> list[date]:
+        """Return observed sessions from completed raw bars only.
+
+        Provisional bars and alternate adjusted price bases can add dates that
+        are unavailable to the default research/backtest view; they must not
+        shift a chronological research split.
+        """
+
+        with self._store.read_session() as connection:
+            frame = connection.execute(
+                """
+                SELECT DISTINCT trade_date
+                FROM daily_bars
+                WHERE bar_status = 'completed' AND price_basis = ?
+                ORDER BY trade_date
+                """,
+                [DEFAULT_PRICE_BASIS],
+            ).df()
         return list(frame["trade_date"].dt.date)
 
     def rebuild_trading_calendar_from_bars(self) -> int:

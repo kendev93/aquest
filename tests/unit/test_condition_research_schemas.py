@@ -30,6 +30,26 @@ def test_research_request_resolves_into_independent_stock_config() -> None:
     assert config.sell_rule.signals == ("indicator_three.end_zone",)
     assert config.min_trades == 20
     assert config.position_mode == "full"
+    assert config.train_ratio == 0.6
+    assert config.validation_ratio == 0.2
+
+
+def test_research_request_passes_validated_split_ratios_to_config() -> None:
+    body = payload()
+    body.update(train_ratio=0.5, validation_ratio=0.3)
+
+    config = ConditionResearchRequest.model_validate(body).to_config()
+
+    assert config.train_ratio == 0.5
+    assert config.validation_ratio == 0.3
+
+
+def test_research_request_rejects_split_ratios_without_a_holdout() -> None:
+    body = payload()
+    body.update(train_ratio=0.6, validation_ratio=0.4)
+
+    with pytest.raises(ValidationError, match="比例之和必须小于 1"):
+        ConditionResearchRequest.model_validate(body)
 
 
 def test_research_request_defaults_to_stock_only_instrument_types() -> None:

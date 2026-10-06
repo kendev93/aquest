@@ -20,6 +20,25 @@ def test_calendar_split_is_ordered_non_overlapping_and_covers_the_full_range() -
     assert splits.validation.end_date < splits.holdout.start_date
 
 
+def test_calendar_split_uses_actual_trading_days_when_available() -> None:
+    sessions = [date(2023, 12, day) for day in (25, 26, 27, 28, 29)] + [
+        date(2024, 1, day) for day in (2, 3, 4, 5, 8, 9)
+    ]
+
+    splits = split_calendar_range(
+        date(2023, 12, 25),
+        date(2024, 1, 9),
+        train_ratio=0.6,
+        validation_ratio=0.2,
+        trading_dates=sessions,
+    )
+
+    assert splits.train.end_date == date(2024, 1, 2)
+    assert splits.validation.start_date == date(2024, 1, 3)
+    assert splits.validation.end_date == date(2024, 1, 4)
+    assert splits.holdout.start_date == date(2024, 1, 5)
+
+
 def test_split_rejects_ranges_too_short_for_three_distinct_periods() -> None:
     try:
         split_calendar_range(date(2025, 1, 1), date(2025, 1, 2))

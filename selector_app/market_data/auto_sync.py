@@ -167,12 +167,13 @@ class AutomaticMarketSyncScheduler:
             if now.time() < AUTO_SYNC_AFTER_CLOSE:
                 return None
             try:
+                calendar_start = today - timedelta(days=TRADING_CALENDAR_LOOKBACK_DAYS)
                 calendar_dates = tuple(
                     sorted(
                         {
                             item
                             for item in fetch_calendar(
-                                today - timedelta(days=TRADING_CALENDAR_LOOKBACK_DAYS),
+                                calendar_start,
                                 today,
                                 timeout=10.0,
                             )
@@ -185,7 +186,12 @@ class AutomaticMarketSyncScheduler:
                 save_calendar = getattr(self._store, "save_market_trading_calendar", None)
                 if not callable(save_calendar):
                     raise RuntimeError("行情库不支持保存交易日历")
-                save_calendar(calendar_dates, source=TRADING_CALENDAR_PROVIDER)
+                save_calendar(
+                    calendar_dates,
+                    source=TRADING_CALENDAR_PROVIDER,
+                    coverage_start=calendar_start,
+                    coverage_end=today,
+                )
                 end_date = calendar_dates[-1]
                 local_data_end = _parse_date(status.data_end)
                 if local_data_end is not None and end_date <= local_data_end:

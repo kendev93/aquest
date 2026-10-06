@@ -153,6 +153,92 @@ def test_runner_cooperatively_cancels_a_generic_task() -> None:
         runner.shutdown()
 
 
+def test_cancel_wins_if_requested_before_generic_task_returns() -> None:
+    runner = ScreenJobRunner(max_workers=1)
+    started = Event()
+    release = Event()
+
+    def task(_progress):
+        started.set()
+        assert release.wait(timeout=1)
+        return {"should_not_publish": True}
+
+    try:
+        job_id = runner.submit_callable(task, description="完成竞态")
+        assert started.wait(timeout=1)
+        assert runner.request_cancel(job_id)
+        release.set()
+        for _ in range(100):
+            state = runner.get(job_id)
+            if state is not None and state.status == "cancelled":
+                break
+            time.sleep(0.005)
+        assert state is not None
+        assert state.status == "cancelled"
+        assert state.result_payload is None
+    finally:
+        release.set()
+        runner.shutdown()
+
+
+def test_cancel_wins_if_generic_task_fails_after_cancel_request() -> None:
+    runner = ScreenJobRunner(max_workers=1)
+    started = Event()
+    release = Event()
+
+    def task(_progress):
+        started.set()
+        assert release.wait(timeout=1)
+        raise RuntimeError("late task failure")
+
+    try:
+        job_id = runner.submit_callable(task, description="取消失败竞态")
+        assert started.wait(timeout=1)
+        assert runner.request_cancel(job_id)
+        release.set()
+        for _ in range(100):
+            state = runner.get(job_id)
+            if state is not None and state.status == "cancelled":
+                break
+            time.sleep(0.005)
+        assert state is not None
+        assert state.status == "cancelled"
+        assert state.error is None
+    finally:
+        release.set()
+        runner.shutdown()
+
+
+def test_queued_generic_cancellation_prevents_task_execution() -> None:
+    runner = ScreenJobRunner(max_workers=1)
+    started = Event()
+    release = Event()
+    queued_ran = Event()
+
+    def blocker(_progress):
+        started.set()
+        assert release.wait(timeout=1)
+        return {}
+
+    try:
+        first = runner.submit_callable(blocker, description="阻塞")
+        assert started.wait(timeout=1)
+        second = runner.submit_callable(lambda _progress: queued_ran.set() or {}, description="排队")
+        assert runner.request_cancel(second)
+        release.set()
+        wait_until_complete(runner, first)
+        for _ in range(100):
+            state = runner.get(second)
+            if state is not None and state.status == "cancelled":
+                break
+            time.sleep(0.005)
+        assert state is not None and state.status == "cancelled"
+        assert not queued_ran.is_set()
+    finally:
+        release.set()
+        runner.shutdown()
+
+
 def test_runner_lists_active_job_snapshots_by_description() -> None:
     runner = ScreenJobRunner(max_results=2)
     started = Event()

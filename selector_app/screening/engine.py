@@ -404,6 +404,8 @@ class ScreenEngine:
         self,
         config: ScanConfig,
         progress_callback: ProgressCallback | None = None,
+        *,
+        abort_check: Callable[[], bool] | None = None,
     ) -> ScanReport:
         parsed_formula = parse_formula(config.formula_text) if config.formula_text else None
         refs = self._list_refs(config)
@@ -424,7 +426,9 @@ class ScreenEngine:
             )
 
         frames = self._batch_frames(refs)
-        outcomes = self._scan_refs(refs, config, progress_callback, parsed_formula, frames)
+        outcomes = self._scan_refs(
+            refs, config, progress_callback, parsed_formula, frames, abort_check=abort_check
+        )
         results = tuple(outcome.result for outcome in outcomes if outcome.result is not None)
         ranking_value = config.ranking_value
         if ranking_value is not None:
@@ -462,8 +466,12 @@ class ScreenEngine:
         progress_callback: ProgressCallback | None,
         parsed_formula: ParsedFormula | None,
         frames: Mapping[tuple[str, str], pd.DataFrame] | None = None,
+        *,
+        abort_check: Callable[[], bool] | None = None,
     ) -> list[ScanOutcome]:
         def evaluate(ref: StockRef) -> ScanOutcome:
+            if abort_check is not None and abort_check():
+                return ScanOutcome(skipped_reason="扫描已取消")
             if frames is None:
                 return self._scan_one(ref, config, parsed_formula)
             frame = frames.get((ref.market, ref.code), pd.DataFrame())
@@ -479,6 +487,8 @@ class ScreenEngine:
         if config.workers <= 1:
             outcomes: list[ScanOutcome] = []
             for current, ref in enumerate(refs, start=1):
+                if abort_check is not None and abort_check():
+                    break
                 try:
                     outcome = evaluate(ref)
                 except Exception as exc:  # noqa: BLE001 - one bad stock must not abort scan
@@ -494,10 +504,15 @@ class ScreenEngine:
         # injected adapters usable in tests and embedding applications.
         executor_type = ThreadPoolExecutor
         outcomes_by_index: dict[int, ScanOutcome] = {}
-        with executor_type(max_workers=config.workers) as executor:
+        executor = executor_type(max_workers=config.workers)
+        try:
             futures = {executor.submit(evaluate, ref): index for index, ref in enumerate(refs)}
             completed = 0
             for future in as_completed(futures):
+                if abort_check is not None and abort_check():
+                    for pending in futures:
+                        pending.cancel()
+                    break
                 index = futures[future]
                 try:
                     outcome = future.result()
@@ -510,7 +525,11 @@ class ScreenEngine:
                 completed += 1
                 if progress_callback is not None:
                     progress_callback(completed, len(refs), outcome)
-        return [outcomes_by_index[index] for index in range(len(refs))]
+        finally:
+            # Running stock evaluations finish cooperatively at the next task
+            # boundary; queued stock work is cancelled and never starts.
+            executor.shutdown(wait=True, cancel_futures=True)
+        return [outcomes_by_index[index] for index in sorted(outcomes_by_index)]
 
     def _list_refs(self, config: ScanConfig) -> list[StockRef]:
         if not config.instrument_types and not config.boards:

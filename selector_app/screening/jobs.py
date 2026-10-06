@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from inspect import Parameter, signature
 import time
 import uuid
 from collections import OrderedDict
@@ -70,6 +71,8 @@ class ScanEngineLike(Protocol):
         self,
         config: ScanConfig,
         progress_callback: ProgressCallback | None = None,
+        *,
+        abort_check: Callable[[], bool] | None = None,
     ) -> ScanReport: ...
 
 
@@ -263,6 +266,12 @@ class ScreenJobRunner:
         if state is None:
             return
         with self._lock:
+            if state.cancel_requested:
+                state.status = "cancelled"
+                state.phase = "cancelled"
+                state.finished_at = time.time()
+                self._evict_if_needed_locked()
+                return
             state.status = "running"
             state.phase = "running"
 
@@ -292,26 +301,34 @@ class ScreenJobRunner:
             return
         except TaskUserError as exc:
             with self._lock:
-                state.status = "failed"
-                state.phase = "failed"
-                state.error = str(exc)
+                state.status = "cancelled" if state.cancel_requested else "failed"
+                state.phase = state.status
+                state.error = None if state.cancel_requested else str(exc)
                 state.finished_at = time.time()
                 self._evict_if_needed_locked()
             return
         except Exception:  # noqa: BLE001 - task errors are returned safely by API
             logger.exception("后台任务 %s 执行失败", job_id)
             with self._lock:
-                state.status = "failed"
-                state.phase = "failed"
-                state.error = "后台任务失败，请检查配置和服务状态后重试"
+                state.status = "cancelled" if state.cancel_requested else "failed"
+                state.phase = state.status
+                state.error = (
+                    None
+                    if state.cancel_requested
+                    else "后台任务失败，请检查配置和服务状态后重试"
+                )
                 state.finished_at = time.time()
                 self._evict_if_needed_locked()
             return
         with self._lock:
-            state.status = "completed"
-            state.phase = "completed"
-            state.progress = 1.0
-            state.result_payload = result
+            if state.cancel_requested:
+                state.status = "cancelled"
+                state.phase = "cancelled"
+            else:
+                state.status = "completed"
+                state.phase = "completed"
+                state.progress = 1.0
+                state.result_payload = result
             state.finished_at = time.time()
             self._evict_if_needed_locked()
 
@@ -320,6 +337,12 @@ class ScreenJobRunner:
         if state is None:
             return
         with self._lock:
+            if state.cancel_requested:
+                state.status = "cancelled"
+                state.phase = "cancelled"
+                state.finished_at = time.time()
+                self._evict_if_needed_locked()
+                return
             state.status = "running"
 
         def on_progress(current: int, total: int, outcome: ScanOutcome) -> None:
@@ -332,24 +355,48 @@ class ScreenJobRunner:
                 state.skipped += 1 if outcome.skipped_reason else 0
 
         try:
-            report = self._engine.scan(config, progress_callback=on_progress)
+            scan = self._engine.scan
+            scan_parameters = signature(scan).parameters.values()
+            if any(
+                parameter.name == "abort_check"
+                or parameter.kind is Parameter.VAR_KEYWORD
+                for parameter in scan_parameters
+            ):
+                report = scan(
+                    config,
+                    progress_callback=on_progress,
+                    abort_check=lambda: self.is_cancel_requested(job_id),
+                )
+            else:
+                # Keep embedded engines implementing the historical protocol
+                # usable; only the built-in engine can stop between stocks.
+                report = scan(config, progress_callback=on_progress)
         except Exception:  # noqa: BLE001 - API receives a safe task-level error
             logger.exception("公式选股任务 %s 执行失败", job_id)
             with self._lock:
-                state.status = "failed"
-                state.error = "扫描任务失败，请检查数据目录和选股配置后重试"
+                state.status = "cancelled" if state.cancel_requested else "failed"
+                state.phase = state.status
+                state.error = (
+                    None
+                    if state.cancel_requested
+                    else "扫描任务失败，请检查数据目录和选股配置后重试"
+                )
                 state.finished_at = time.time()
                 self._evict_if_needed_locked()
             return
         with self._lock:
-            state.status = "completed"
-            state.progress = 1.0
-            state.total_candidates = report.total_candidates
-            state.total_scanned = report.total_scanned
-            state.total_signals = report.total_signals
-            state.errors = report.errors
-            state.skipped = report.skipped
-            state.report = report
+            if state.cancel_requested:
+                state.status = "cancelled"
+                state.phase = "cancelled"
+            else:
+                state.status = "completed"
+                state.progress = 1.0
+                state.total_candidates = report.total_candidates
+                state.total_scanned = report.total_scanned
+                state.total_signals = report.total_signals
+                state.errors = report.errors
+                state.skipped = report.skipped
+                state.report = report
             state.finished_at = time.time()
             self._evict_if_needed_locked()
 

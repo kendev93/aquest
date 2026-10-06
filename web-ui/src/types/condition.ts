@@ -217,6 +217,13 @@ export interface ConditionResearchCandidate {
   validation_objective_score?: number | null
   full_period: ConditionResearchSummary | null
   holdout: ConditionResearchSummary | null
+  holdout_evaluation?: {
+    status: 'evaluated' | 'insufficient_samples' | 'unevaluable' | string
+    trading_days?: number | null
+    passed_constraints?: boolean
+    failures?: string[]
+    reason?: string
+  } | null
   windows?: ConditionResearchWindow[]
   consistency?: ConditionResearchConsistency | null
   /** 阈值邻域曲线。没有可挪的标量参数时（比如交叉条件）为 null。 */

@@ -80,6 +80,12 @@ export interface StrategyDiscoveryCandidate {
 }
 
 
+export interface StrategyDiscoveryPartialCandidate extends StrategyDiscoveryCandidate {
+  achieved_fidelity: 'search' | 'coarse' | 'medium' | 'full' | string
+  qualified: false
+}
+
+
 export interface StrategyDiscoveryResult {
   history_id?: string
   risk_optimization_id?: string
@@ -87,6 +93,12 @@ export interface StrategyDiscoveryResult {
   request: Record<string, unknown>
   results_by_sharpe: StrategyDiscoveryCandidate[]
   results_by_return: StrategyDiscoveryCandidate[]
+  partial?: boolean
+  status?: 'partial' | string
+  message?: string
+  partial_candidate_count?: number
+  partial_by_sharpe?: StrategyDiscoveryPartialCandidate[]
+  partial_by_return?: StrategyDiscoveryPartialCandidate[]
   search_metadata: Record<string, unknown>
   validation_metadata: Record<string, unknown>
   algorithm_metadata?: Record<string, unknown>

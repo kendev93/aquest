@@ -106,6 +106,30 @@ describe('StrategyDiscoveryPage', () => {
     expect(wrapper.get('[data-testid="strategy-discovery-sharpe-board"]').text()).toContain('夏普榜')
   })
 
+  it('labels unqualified timeout previews without adding them to result boards', async () => {
+    vi.mocked(api.getStrategyDiscoveryResults).mockResolvedValueOnce({
+      request: {},
+      results_by_sharpe: [],
+      results_by_return: [],
+      partial: true,
+      partial_candidate_count: 3,
+      partial_by_sharpe: [{
+        candidate_hash: 'partial-1', complexity: 2, human_readable_rules: 'preview',
+        config: {}, metrics: {}, achieved_fidelity: 'medium', qualified: false,
+      }],
+      search_metadata: {},
+      validation_metadata: { status: 'not_run' },
+    })
+    const wrapper = mount(StrategyDiscoveryPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="strategy-discovery-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="strategy-discovery-message"]').text()).toContain('3 组候选')
+    expect(wrapper.get('[data-testid="strategy-discovery-message"]').text()).toContain('中等精度')
+    expect(wrapper.get('[data-testid="strategy-discovery-results"]').text()).not.toContain('preview')
+  })
+
   it('stores a candidate configuration before applying it to portfolio backtest', async () => {
     const wrapper = mount(StrategyDiscoveryPage)
     await flushPromises()

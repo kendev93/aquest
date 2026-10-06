@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
@@ -43,8 +43,17 @@ def test_auto_sync_skips_holiday_after_calendar_check_and_persists_the_check_dat
         def set_meta(self, key, value):
             self.metadata[key] = value
 
-        def save_market_trading_calendar(self, trade_dates, *, source):
-            self.saved_calendar = (tuple(trade_dates), source)
+        def save_market_trading_calendar(
+            self,
+            trade_dates,
+            *,
+            source,
+            coverage_start=None,
+            coverage_end=None,
+        ):
+            self.saved_calendar = (
+                tuple(trade_dates), source, coverage_start, coverage_end
+            )
 
     class Runner:
         def __init__(self) -> None:
@@ -81,6 +90,9 @@ def test_auto_sync_skips_holiday_after_calendar_check_and_persists_the_check_dat
     assert store.metadata["last_auto_sync_check_date"] == "2026-10-02"
     assert store.metadata["last_auto_sync_check_session"] == "2026-09-30"
     assert store.saved_calendar[0][-1] == date(2026, 9, 30)
+    assert store.saved_calendar[1] == "eastmoney_sse_composite"
+    assert store.saved_calendar[2] == today.date() - timedelta(days=120)
+    assert store.saved_calendar[3] == today.date()
     assert runner.submitted == []
 
     restarted = AutomaticMarketSyncScheduler(
@@ -110,8 +122,16 @@ def test_auto_sync_uses_latest_exchange_session_as_provider_end_date() -> None:
             del key
             return None
 
-        def save_market_trading_calendar(self, trade_dates, *, source):
+        def save_market_trading_calendar(
+            self,
+            trade_dates,
+            *,
+            source,
+            coverage_start=None,
+            coverage_end=None,
+        ):
             del trade_dates, source
+            del coverage_start, coverage_end
 
     class Runner:
         def __init__(self) -> None:

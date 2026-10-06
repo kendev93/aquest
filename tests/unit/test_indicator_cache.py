@@ -18,7 +18,11 @@ from selector_app.backtest.service import BacktestService
 from selector_app.formulas.custom import evaluate_custom_formula, parse_formula
 from selector_app.formulas.registry import FORMULA_REGISTRY, FormulaRegistry
 from selector_app.indicators.cache import IndicatorCache, frame_fingerprint
-from selector_app.indicators.precompute import IndicatorPrecomputeService, _year_windows
+from selector_app.indicators.precompute import (
+    IndicatorPrecomputeService,
+    PrecomputeCancelledError,
+    _year_windows,
+)
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
 from selector_app.market_data.store import (
     DuckDbMarketDataStore,
@@ -340,6 +344,37 @@ def test_precompute_service_materializes_all_builtin_formulas(tmp_path: Path, ba
     assert cold_cache.metrics()["computed"] == 0
 
 
+def test_precompute_cancellation_during_compute_drains_workers_without_persisting(
+    tmp_path: Path,
+    backend: str,
+) -> None:
+    from threading import Event
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb", indicator_cache_backend=backend)
+    for code in ("600000", "600001", "600002"):
+        store.replace_local_bars("SH", code, "stock", _bars(120))
+    cancelled = Event()
+    definition = FORMULA_REGISTRY.formula("indicator_three")
+    original = definition.calculate
+
+    def calculate(frame: pd.DataFrame):
+        computed = original(frame)
+        cancelled.set()
+        return computed
+
+    registry = FormulaRegistry((replace(definition, calculate=calculate),))
+    service = IndicatorPrecomputeService(
+        adapter=DuckDbMarketDataAdapter(store),
+        cache=IndicatorCache(store, registry=registry),
+        registry=registry,
+    )
+
+    with pytest.raises(PrecomputeCancelledError, match="已取消"):
+        service.run(vipdoc_path=str(tmp_path), abort_check=cancelled.is_set)
+
+    assert _cache_row(store, "SELECT COUNT(*) FROM indicator_cache")[0] == 0
+
+
 def test_cache_persists_one_chunk_per_calendar_year(tmp_path: Path, backend: str) -> None:
     """缓存按自然年分块，块之间首尾相接且覆盖整个序列。"""
 
@@ -382,6 +417,111 @@ def test_window_request_reuses_cache_without_recomputing(tmp_path: Path, backend
 
     assert calls["indicator_three"] == 1
     assert result.data_length == 60
+
+
+def test_partial_request_does_not_persist_or_poison_complete_history(
+    tmp_path: Path, backend: str
+) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb", indicator_cache_backend=backend)
+    store.replace_local_bars("SH", "600000", "stock", _bars(800))
+    full = store.read_bars("SH", "600000")
+    partial = full.iloc[-60:].reset_index(drop=True)
+    calls: dict[str, int] = {}
+    cache = IndicatorCache(store, registry=_counting_registry(calls))
+
+    cache.get_or_compute(partial, ("indicator_three",), market="SH", code="600000")
+    assert _cache_rows(store, "SELECT bar_offset, data_length FROM indicator_cache") == []
+
+    cache.get_or_compute(full, ("indicator_three",), market="SH", code="600000")
+    assert calls["indicator_three"] == 2
+    rows = _cache_rows(
+        store, "SELECT bar_offset, data_length FROM indicator_cache ORDER BY bar_offset"
+    )
+    assert sum(int(length) for _, length in rows) == len(full)  # type: ignore[call-overload]
+
+
+def test_partial_poisoned_persistent_entry_is_rejected(tmp_path: Path, backend: str) -> None:
+    """Older window writes sharing the full revision are treated as cache misses."""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb", indicator_cache_backend=backend)
+    store.replace_local_bars("SH", "600000", "stock", _bars(800))
+    full = store.read_bars("SH", "600000")
+    partial = full.iloc[-60:].reset_index(drop=True)
+    calls: dict[str, int] = {}
+    registry = _counting_registry(calls)
+    cache = IndicatorCache(store, registry=registry)
+    poisoned = cache.get_or_compute(
+        partial, ("indicator_three",), market="SH", code="600000", persist=False
+    )["indicator_three"]
+    cache.persist_results(
+        {("SH", "600000"): partial},
+        {("SH", "600000"): {"indicator_three": poisoned}},
+        data_fingerprint_overrides={("SH", "600000"): cache.revision_for("SH", "600000", full)},
+    )
+
+    cache.get_or_compute(full, ("indicator_three",), market="SH", code="600000")
+    assert calls["indicator_three"] == 2
+    assert sum(
+        int(length)
+        for _, length in _cache_rows(
+            store, "SELECT bar_offset, data_length FROM indicator_cache ORDER BY bar_offset"
+        )
+    ) == len(full)  # type: ignore[call-overload]
+
+
+def test_preload_rejects_poisoned_window_and_accepts_complete_year_chunks(
+    tmp_path: Path, backend: str
+) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb", indicator_cache_backend=backend)
+    store.replace_local_bars("SH", "600000", "stock", _bars(800))
+    full = store.read_bars("SH", "600000")
+    formula_ids = ("indicator_three",)
+    calls: dict[str, int] = {}
+    registry = _counting_registry(calls)
+    seed_cache = IndicatorCache(store, registry=registry)
+
+    # Recreate a legacy window row keyed with the full instrument revision.
+    poisoned_window = full.iloc[-60:].reset_index(drop=True)
+    poisoned = seed_cache.get_or_compute(
+        poisoned_window,
+        formula_ids,
+        market="SH",
+        code="600000",
+        persist=False,
+    )
+    seed_cache.persist_results(
+        {("SH", "600000"): poisoned_window},
+        {("SH", "600000"): poisoned},
+        data_fingerprint_overrides={
+            ("SH", "600000"): seed_cache.revision_for("SH", "600000", full)
+        },
+    )
+    reader = IndicatorCache(store, registry=registry)
+    assert reader.preload({("SH", "600000"): full}, formula_ids) == 0
+    reader.get_or_compute(
+        full.iloc[-10:].reset_index(drop=True),
+        formula_ids,
+        market="SH",
+        code="600000",
+    )
+    assert calls["indicator_three"] == 2
+
+    # A correctly complete annual chunk set still preloads and serves tail windows.
+    store2 = DuckDbMarketDataStore(
+        tmp_path / "complete.duckdb", indicator_cache_backend=backend
+    )
+    store2.replace_local_bars("SH", "600000", "stock", full)
+    complete_writer = IndicatorCache(store2, registry=registry)
+    complete_writer.get_or_compute(full, formula_ids, market="SH", code="600000")
+    complete_reader = IndicatorCache(store2, registry=registry)
+    assert complete_reader.preload({("SH", "600000"): full}, formula_ids) == 1
+    complete_reader.get_or_compute(
+        full.iloc[-10:].reset_index(drop=True),
+        formula_ids,
+        market="SH",
+        code="600000",
+    )
+    assert complete_reader.metrics()["computed"] == 0
 
 
 def test_values_blob_is_persisted_as_float32(tmp_path: Path, backend: str) -> None:
