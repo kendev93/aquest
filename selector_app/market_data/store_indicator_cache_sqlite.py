@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
+import weakref
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import date, datetime
 from pathlib import Path
@@ -132,6 +133,25 @@ _SCHEMA = (
 )
 
 
+def _close_cached_connection(connection: sqlite3.Connection) -> None:
+    """Close an idle per-thread connection when its owner is collected."""
+
+    try:
+        connection.close()
+    except sqlite3.Error:  # pragma: no cover - defensive finalizer path
+        logger.debug("SQLite 指标缓存连接关闭失败", exc_info=True)
+
+
+class _SqliteConnectionOwner:
+    """Keep a cached connection alive only as long as its thread-local owner."""
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self.connection = connection
+        # The callback closes over only the connection, not this owner. weakref.finalize
+        # therefore runs when thread exit or store-cycle collection removes the local value.
+        self._finalizer = weakref.finalize(self, _close_cached_connection, connection)
+
+
 def _date_text(value: object) -> str | None:
     """Normalize a caller-supplied date into the ISO text SQLite stores."""
 
@@ -237,25 +257,41 @@ class SqliteIndicatorCacheStore:
         if self._store.read_only and not self._path.exists():
             # 只读探测不该把空文件落在盘上；``_query`` 会把这个错当“没缓存”。
             raise sqlite3.OperationalError("indicator cache file is absent")
-        connection = cast(sqlite3.Connection | None, getattr(self._local, "connection", None))
-        if connection is None:
+        owner = cast(
+            _SqliteConnectionOwner | None,
+            getattr(self._local, "owner", None),
+        )
+        if owner is None:
             self._ensure_schema()
             # isolation_level=None 关掉 sqlite3 的隐式 BEGIN：写路径自己发
             # BEGIN IMMEDIATE，否则两条 BEGIN 会撞成
             # "cannot start a transaction within a transaction"。
-            connection = sqlite3.connect(str(self._path), timeout=30.0, isolation_level=None)
-            connection.execute("PRAGMA busy_timeout=30000")
+            # Connection access stays thread-local. Disable sqlite's thread check only so
+            # weakref.finalize can close an idle connection if GC collects the store/local
+            # cycle on a different thread; an active operation retains the store and owner.
+            connection = sqlite3.connect(
+                str(self._path),
+                timeout=30.0,
+                isolation_level=None,
+                check_same_thread=False,
+            )
             try:
+                connection.execute("PRAGMA busy_timeout=30000")
                 # WAL lets the read paths run while a precompute batch is
                 # writing.  It needs shared memory on the volume, which not
                 # every mount provides — falling back to the rollback journal
                 # costs concurrency, not correctness.
-                connection.execute("PRAGMA journal_mode=WAL")
-                connection.execute("PRAGMA synchronous=NORMAL")
-            except sqlite3.OperationalError:  # pragma: no cover - depends on mount
-                logger.debug("SQLite WAL 不可用，退回默认日志模式", exc_info=True)
-            self._local.connection = connection
-        return connection
+                try:
+                    connection.execute("PRAGMA journal_mode=WAL")
+                    connection.execute("PRAGMA synchronous=NORMAL")
+                except sqlite3.OperationalError:  # pragma: no cover - depends on mount
+                    logger.debug("SQLite WAL 不可用，退回默认日志模式", exc_info=True)
+                owner = _SqliteConnectionOwner(connection)
+                self._local.owner = owner
+            except BaseException:
+                _close_cached_connection(connection)
+                raise
+        return owner.connection
 
     def _query(
         self,

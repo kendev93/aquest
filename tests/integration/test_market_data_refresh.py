@@ -24,13 +24,14 @@ _JOB_TIMEOUT_SECONDS = 20.0
 
 
 def _frame(market: str, code: str, closes: list[float]) -> pd.DataFrame:
+    dates = pd.date_range("2024-01-02", periods=len(closes), freq="D")
     return pd.DataFrame(
         [
             {
                 "market": market,
                 "code": code,
                 "instrument_type": "stock",
-                "date": pd.Timestamp("2024-01-02") + pd.Timedelta(days=index),
+                "date": dates[index],
                 "open": close - 0.5,
                 "high": close + 0.5,
                 "low": close - 1.0,
