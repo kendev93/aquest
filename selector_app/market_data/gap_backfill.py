@@ -24,13 +24,21 @@ VWAP（额/量）      1.751%          5.663%         44.5%
 **跨停牌的跳空一律不推断。** 复牌后的累计跌幅不受涨跌幅约束，把 600733
 "停牌 238 天后 -82%" 当成除权会写出荒谬的因子。这类跳空既不推断、也不改数据，
 只在报告里列出——它们本来就该保留复牌跌幅，复权不该动它们。
+
+但这留下一个口子：真除权**恰好发生在停牌期间**时，两边都不管，漏记就永久
+留在库里（实测 270 个跨停牌跳空里有 48 个是真除权，见 2026-10-07 用 baostock
+因子核对的结果）。所以这里另开一条通道：跨停牌的候选可以交给**外部权威因子**
+去判定"这天到底除没除权"（见 :func:`backfill_inferred_actions` 的
+``verify_halted_with``）。判定为真才补，且**用外部给的因子**，不用开盘价反推
+—— 后者在复牌日有约 4.8% 的系统性偏差（开盘价不等于理论除权价），是推断
+口径消不掉的，既然要补就补准的。
 """
 
 from __future__ import annotations
 
 import bisect
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from typing import Protocol, cast
 
@@ -48,6 +56,13 @@ MAX_INFERRED_FACTOR = 20.0
 INFERRED_ACTION_TYPE = "inferred"
 INFERRED_SOURCE = "inferred_from_open"
 INFERRED_PROVIDER = "derived_from_open"
+
+#: 经外部权威因子**确认**后补录的事件标记。与上面的"开盘价推断"分开标记：这类
+#: 事件的因子不是估的，是外部源给的，精度高一个量级（实测 0.02% 对约 4.8%），
+#: 审计时应当区别对待。
+BAOSTOCK_ACTION_TYPE = "verified"
+BAOSTOCK_SOURCE = "verified_from_baostock"
+BAOSTOCK_PROVIDER = "baostock"
 
 
 class _ActionStore(Protocol):
@@ -133,6 +148,31 @@ class InferredGap:
 
 
 @dataclass(frozen=True)
+class VerifiedGap:
+    """一条经外部权威因子**确认**除权、并按该因子补录的事件。
+
+    与 :class:`InferredGap` 的区别是关键性的：这里的 ``factor_ratio`` 不是从
+    价格估出来的，而是外部因子源给出的实测值，所以没有"用了哪个价格"这回事，
+    只保留审计要的"补了多少、当时行情跌了多少"。
+    """
+
+    market: str
+    code: str
+    ex_date: date
+    factor_ratio: float
+    drop_pct: float
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "market": self.market,
+            "code": self.code,
+            "ex_date": self.ex_date.isoformat(),
+            "factor_ratio": self.factor_ratio,
+            "drop_pct": self.drop_pct,
+        }
+
+
+@dataclass(frozen=True)
 class BackfillReport:
     """一次补全的结果。"""
 
@@ -141,6 +181,7 @@ class BackfillReport:
     written: int
     inferred_detail: tuple[InferredGap, ...]
     skipped: tuple[SkippedGap, ...]
+    verified_detail: tuple[VerifiedGap, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         skipped_by_reason: dict[str, int] = {}
@@ -154,6 +195,8 @@ class BackfillReport:
             "skipped": len(self.skipped),
             "skipped_by_reason": skipped_by_reason,
             "skipped_detail": [item.to_dict() for item in self.skipped],
+            "verified": len(self.verified_detail),
+            "verified_detail": [item.to_dict() for item in self.verified_detail],
         }
 
 
@@ -283,14 +326,93 @@ def infer_corporate_actions(
     return actions, skipped
 
 
+#: 权威因子查询的签名：给一批 ``(market, code, date)``，返回其中**确实除权**的
+#: 那几条的因子。做成可调用而不是硬编码某个源，是为了让本模块不依赖网络，也让
+#: "用谁当权威"由调用方决定、并且可测。
+VerifyFactors = Callable[
+    [Sequence[tuple[str, str, date]]],
+    Mapping[tuple[str, str, date], float],
+]
+
+
+def _verify_halted(
+    skipped: Sequence[SkippedGap],
+    verifier: VerifyFactors,
+) -> tuple[list[SkippedGap], list[CorporateAction], list[VerifiedGap]]:
+    """把跨停牌的候选交给权威因子判定，只补"确实除权"的那些。
+
+    返回 ``(仍然跳过的, 确认可补的事件, 审计明细)``。
+
+    判定为"没除权"的会被划出候选，但**仍然留在跳过清单里**，只是把原因补成
+    "权威因子确认无除权"。这样报告能区分"压根没校验过"和"校验过、确实不是
+    除权" —— 后者是预期结果，不该让人反复去查。
+    """
+
+    requests = [
+        (item.market, item.code, item.trade_date)
+        for item in skipped
+        if item.reason == SkippedGap.REASON_HALTED
+    ]
+    if not requests:
+        return list(skipped), [], []
+    answers = verifier(requests)
+    still: list[SkippedGap] = []
+    actions: list[CorporateAction] = []
+    gaps: list[VerifiedGap] = []
+    for item in skipped:
+        if item.reason != SkippedGap.REASON_HALTED:
+            still.append(item)
+            continue
+        factor = answers.get((item.market, item.code, item.trade_date))
+        if factor is None:
+            still.append(replace(item, detail=f"{item.detail}；权威因子确认当日无除权"))
+            continue
+        if not (1.0 < factor <= MAX_INFERRED_FACTOR):
+            still.append(
+                replace(item, detail=f"{item.detail}；权威因子 {factor:.4f} 越界未采用")
+            )
+            continue
+        actions.append(
+            CorporateAction(
+                market=item.market,
+                code=item.code,
+                ex_date=item.trade_date,
+                share_ratio=factor - 1.0,
+                cash_per_share=0.0,
+                factor_ratio=factor,
+                action_type=BAOSTOCK_ACTION_TYPE,
+            )
+        )
+        gaps.append(
+            VerifiedGap(
+                market=item.market,
+                code=item.code,
+                ex_date=item.trade_date,
+                factor_ratio=factor,
+                drop_pct=item.drop_pct,
+            )
+        )
+    return still, actions, gaps
+
+
 def backfill_inferred_actions(
     store: _ActionStore,
     *,
     write: bool = True,
+    verify_halted_with: VerifyFactors | None = None,
 ) -> BackfillReport:
     """扫描全市场并补齐缺失的除权事件。
 
     ``write=False`` 只做体检、不落库，用来先看看能补出多少、哪些补不了。
+
+    ``verify_halted_with`` 是给跨停牌候选的**权威判定通道**。默认 ``None``：
+    跨停牌跳空一律跳过，行为与过去一致（宁可漏，也不能把复牌后的累计跌幅当成
+    除权）。给了之后，跨停牌的候选会先交给它判定"这天到底除没除权"，只有返回
+    因子的才补录，且**用返回的因子**而不是开盘价反推 —— 复牌日开盘价系统性偏离
+    理论除权价约 4.8%，那是换成任何推断口径都消不掉的。
+
+    它抛出的异常会向上传播：判定失败时写出半份结果（推断的写了、该补的没补）
+    比不走这条通道更糟，调用方应当整体重试或明确降级。
     """
 
     candidates = store.read_price_gap_candidates()
@@ -306,6 +428,10 @@ def backfill_inferred_actions(
     calendar_end = max(_as_date(item) for item in candidates["date"])
     calendar = calendar_reader(calendar_start, calendar_end)
     actions, skipped = infer_corporate_actions(candidates, calendar)
+    verified: list[VerifiedGap] = []
+    verified_actions: list[CorporateAction] = []
+    if verify_halted_with is not None:
+        skipped, verified_actions, verified = _verify_halted(skipped, verify_halted_with)
     detail: list[InferredGap] = []
     for item in candidates.itertuples(index=False):
         trade_date = _as_date(item.date)
@@ -327,26 +453,34 @@ def backfill_inferred_actions(
                     factor_ratio=prev_close / open_price,
                 )
             )
-    symbols = {(item.market, item.code) for item in actions}
-    written = (
-        store.upsert_corporate_actions(
+    symbols = {(item.market, item.code) for item in [*actions, *verified_actions]}
+    written = 0
+    if write and actions:
+        written += store.upsert_corporate_actions(
             actions,
             source=INFERRED_SOURCE,
             provider=INFERRED_PROVIDER,
         )
-        if write and actions
-        else 0
-    )
+    if write and verified_actions:
+        written += store.upsert_corporate_actions(
+            verified_actions,
+            source=BAOSTOCK_SOURCE,
+            provider=BAOSTOCK_PROVIDER,
+        )
     return BackfillReport(
         inferred=len(actions),
         inferred_symbols=len(symbols),
         written=written,
         inferred_detail=tuple(detail),
         skipped=tuple(skipped),
+        verified_detail=tuple(verified),
     )
 
 
 __all__ = [
+    "BAOSTOCK_ACTION_TYPE",
+    "BAOSTOCK_PROVIDER",
+    "BAOSTOCK_SOURCE",
     "BackfillReport",
     "INFERRED_ACTION_TYPE",
     "INFERRED_PROVIDER",
@@ -354,6 +488,8 @@ __all__ = [
     "MAX_INFERRED_FACTOR",
     "InferredGap",
     "SkippedGap",
+    "VerifiedGap",
+    "VerifyFactors",
     "backfill_inferred_actions",
     "infer_corporate_actions",
 ]

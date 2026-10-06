@@ -12,6 +12,10 @@ import duckdb
 from fastapi import APIRouter, Request, status
 from fastapi.responses import JSONResponse
 
+from selector_app.market_data.baostock_adjust import (
+    BaostockAdjustUnavailable,
+    fetch_adjust_factors,
+)
 from selector_app.market_data.gap_backfill import backfill_inferred_actions
 from selector_app.market_data.store import MarketDataStoreError
 
@@ -56,6 +60,7 @@ def delete_market_bars(
 def backfill_corporate_actions(
     request: Request,
     write: bool = False,
+    verify: bool = False,
 ) -> dict[str, object] | JSONResponse:
     """从行情自身的除权跳空反推，补齐分红送配接口漏记的事件。
 
@@ -63,11 +68,34 @@ def backfill_corporate_actions(
     开盘价反推），所以先看清"能补出多少、哪些补不了"再决定要不要写。真正落库时
     返回的明细里会标出每条用了哪个前收盘价和开盘价，事后可逐条核对。
 
+    ``verify`` 默认 **false**：跨停牌的跳空一律不推断（复牌后的累计跌幅不是除权，
+    把"停牌 238 天后 -82%"当成除权会写出荒谬的因子）。置 **true** 会把这批候选
+    交给 baostock 的复权因子逐个判定"这天到底除没除权"，只有确认除权的才补，且
+    **用 baostock 的因子**而不是开盘价反推 —— 复牌日开盘价系统性偏离理论除权价
+    约 4.8%，那是开盘价口径在这里补不准的部分。它需要网络、且是可选依赖，不可用
+    时返回 503 并说明未改动数据，而不是带着缺口静默继续。
+
     补齐后会触发指标缓存失效 —— 事件表内容哈希变了，因子序列全变，旧缓存必须重算。
     """
 
     try:
-        report = backfill_inferred_actions(_store(request), write=write)
+        report = backfill_inferred_actions(
+            _store(request),
+            write=write,
+            verify_halted_with=fetch_adjust_factors if verify else None,
+        )
+    except BaostockAdjustUnavailable as exc:
+        # 必须排在下面的 RuntimeError 之前：它是 RuntimeError 的子类，落下去就
+        # 会被当成普通的存储故障，看不出是"权威源没查成"。
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "error": {
+                    "code": "corporate_action_verify_unavailable",
+                    "message": f"权威因子校验不可用，本次未改动任何数据：{exc}",
+                }
+            },
+        )
     except (MarketDataStoreError, ValueError, duckdb.Error, OSError, RuntimeError) as exc:
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

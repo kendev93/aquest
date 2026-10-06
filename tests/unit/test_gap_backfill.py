@@ -19,16 +19,20 @@ A 股春节休市 7~9 天，周五收盘到节后首日间隔 9~10 个自然日�
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date
 
 import pandas as pd
 import pytest
 
-from selector_app.market_data.adjustment import compute_factor_ratio
+from selector_app.market_data.adjustment import CorporateAction, compute_factor_ratio
 from selector_app.market_data.gap_backfill import (
+    BAOSTOCK_PROVIDER,
+    BAOSTOCK_SOURCE,
     MAX_INFERRED_FACTOR,
     SkippedGap,
     _trading_days_between,
+    _verify_halted,
     backfill_inferred_actions,
     infer_corporate_actions,
 )
@@ -200,7 +204,13 @@ def test_backfill_fails_closed_without_persisted_authoritative_coverage() -> Non
         def read_trading_dates(self) -> list[date]:
             return CALENDAR
 
-        def upsert_corporate_actions(self, actions, *, source, provider) -> int:
+        def upsert_corporate_actions(
+            self,
+            actions: Sequence[CorporateAction],
+            *,
+            source: str,
+            provider: str,
+        ) -> int:
             del actions, source, provider
             self.writes += 1
             return 1
@@ -259,3 +269,163 @@ def test_skipped_reason_is_stable_category() -> None:
 
     assert {item.reason for item in skipped} == {SkippedGap.REASON_HALTED}
     assert len({item.detail for item in skipped}) == 2  # 细节各自不同
+
+
+def halted_gap() -> pd.DataFrame:
+    """跨停牌的跳空（晨光股份 2015 年真实样本）。
+
+    这正是"推断不敢碰、东财又漏记"因而永久留在库里的那一类：自然月的间隔看着
+    像除权，但中间隔着交易日，跌停幅度判据不成立。
+    """
+
+    return frame(
+        candidate(
+            prev_date=date(2015, 6, 12),
+            trade_date=date(2015, 9, 14),
+            prev_close=137.49,
+            open_price=41.25,
+            close=41.25,
+        )
+    )
+
+
+class RecordingStore:
+    """最小的 ``_ActionStore``：只记录写进去的批次与来源标记。"""
+
+    def __init__(self, gaps: pd.DataFrame) -> None:
+        self._gaps = gaps
+        self.writes: list[tuple[tuple[str, str], tuple[CorporateAction, ...]]] = []
+
+    def read_price_gap_candidates(self) -> pd.DataFrame:
+        return self._gaps
+
+    def read_authoritative_trading_dates(
+        self,
+        start_date: date,
+        end_date: date,
+    ) -> list[date]:
+        return CALENDAR
+
+    def upsert_corporate_actions(
+        self,
+        actions: Sequence[CorporateAction],
+        *,
+        source: str = "online",
+        provider: str = "eastmoney",
+    ) -> int:
+        self.writes.append(((source, provider), tuple(actions)))
+        return len(actions)
+
+
+def test_verified_halted_gap_uses_authoritative_factor_not_open_price() -> None:
+    """跨停牌跳空一旦被权威因子确认，就必须用**权威因子**，不能用开盘价反推。
+
+    开盘价在这个场景里系统性偏低约 4.8%：复牌日的开盘价不等于理论除权价（实测
+    002713 除权日一字高开 5%，``prev_close / open`` 因此只算出 1.287 而实际是
+    1.351）。这是推断口径消不掉的市场现象，不是算错。所以既然要补就补准的 ——
+    否则"补上了"反而把那 4.8% 固化进因子序列，比不补更难发现。
+    """
+
+    _, skipped = infer_corporate_actions(halted_gap(), CALENDAR)
+    key = ("SH", "600000", date(2015, 9, 14))
+
+    still, verified, detail = _verify_halted(skipped, lambda _: {key: 3.5})
+
+    assert not still
+    assert len(verified) == 1
+    assert verified[0].factor_ratio == pytest.approx(3.5)
+    # 开盘价口径会给出 137.49/41.25 ≈ 3.333 —— 断言不同，确认没走那条路。
+    assert verified[0].factor_ratio != pytest.approx(137.49 / 41.25)
+    assert verified[0].action_type == "verified"
+    assert detail[0].drop_pct == pytest.approx((41.25 / 137.49 - 1) * 100)
+
+
+def test_halted_gap_without_event_stays_skipped_but_is_marked() -> None:
+    """权威因子说"这天没除权"，就保持跳过，并把结论写进 detail。
+
+    要能区分"压根没校验过"和"校验过、确实不是除权"：后者是预期结果（实测 270
+    个跨停牌跳空里 222 个属于这种），留个标记才不会让人反复去查同一批。
+    """
+
+    _, skipped = infer_corporate_actions(halted_gap(), CALENDAR)
+
+    still, verified, _ = _verify_halted(skipped, lambda _: {})
+
+    assert not verified
+    assert len(still) == 1
+    assert still[0].reason == SkippedGap.REASON_HALTED
+    assert "权威因子确认当日无除权" in still[0].detail
+
+
+def test_out_of_range_authoritative_factor_is_rejected() -> None:
+    """权威不等于免检：因子越过上限照样挡掉。
+
+    权威源给的也可能因为我们的日期对错了而离谱。宁可留一个未复权的跳空，也不
+    写一条会静默污染全部历史指标的错因子。
+    """
+
+    _, skipped = infer_corporate_actions(halted_gap(), CALENDAR)
+    key = ("SH", "600000", date(2015, 9, 14))
+
+    still, verified, _ = _verify_halted(skipped, lambda _: {key: MAX_INFERRED_FACTOR * 2})
+
+    assert not verified
+    assert len(still) == 1
+    assert "越界" in still[0].detail
+
+
+def test_verified_factor_round_trips_through_formula() -> None:
+    """与推断事件同理：存进去的字段必须能原样重算出同一个因子。
+
+    这条自洽校验是将来发现数据被改坏的手段，新增的补录通道不能绕过它。
+    """
+
+    _, skipped = infer_corporate_actions(halted_gap(), CALENDAR)
+    key = ("SH", "600000", date(2015, 9, 14))
+
+    _, verified, _ = _verify_halted(skipped, lambda _: {key: 3.5})
+
+    recomputed = compute_factor_ratio(
+        prev_close=137.49,
+        share_ratio=verified[0].share_ratio,
+        cash_per_share=verified[0].cash_per_share,
+    )
+    assert recomputed == pytest.approx(3.5)
+
+
+def test_backfill_without_verifier_keeps_halted_gaps_untouched() -> None:
+    """不给校验通道时，行为必须与过去完全一致。
+
+    默认不接任何外部源：这条通道要网络、是可选依赖，不能因为多了它就让每次
+    补全都变成一次外部调用。
+    """
+
+    store = RecordingStore(halted_gap())
+
+    report = backfill_inferred_actions(store, write=True)
+
+    assert report.inferred == 0
+    assert not report.verified_detail
+    assert len(report.skipped) == 1
+    assert not store.writes
+
+
+def test_verified_actions_are_written_with_their_own_provenance() -> None:
+    """权威补录的事件必须带独立来源标记，和"开盘价推断"区分开。
+
+    两者精度差一个量级（实测 0.02% 对约 4.8%），审计时要能一眼看出哪条是估的、
+    哪条是外部源给的。
+    """
+
+    store = RecordingStore(halted_gap())
+    key = ("SH", "600000", date(2015, 9, 14))
+
+    report = backfill_inferred_actions(
+        store, write=True, verify_halted_with=lambda _: {key: 3.5}
+    )
+
+    assert len(report.verified_detail) == 1
+    assert report.written == 1
+    (source, provider), actions = store.writes[-1]
+    assert (source, provider) == (BAOSTOCK_SOURCE, BAOSTOCK_PROVIDER)
+    assert actions[0].factor_ratio == pytest.approx(3.5)
