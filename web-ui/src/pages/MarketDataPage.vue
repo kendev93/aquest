@@ -1030,7 +1030,7 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
             </thead>
             <tbody>
               <tr v-for="check in healthReport.checks" :key="check.key" :data-testid="`market-health-row-${check.key}`">
-                <td>{{ check.label }}<TermHint v-if="check.key === 'gap'" term="dataGap" /><TermHint v-else-if="check.key === 'price_jump'" term="priceJump" /><TermHint v-else-if="check.key === 'stale'" term="staleBars" /></td>
+                <td>{{ check.label }}<TermHint v-if="check.key === 'gap'" term="dataGap" /><TermHint v-else-if="check.key === 'price_jump'" term="priceJump" /><TermHint v-else-if="check.key === 'stale'" term="staleBars" /><TermHint v-else-if="check.key === 'missing_action'" term="missingAction" /></td>
                 <td :class="{ negative: check.severity === 'error', positive: check.severity === 'ok' }">{{ severityText(check.severity) }}</td>
                 <td>{{ check.affected_instruments }}</td>
                 <td>{{ check.occurrences }}</td>

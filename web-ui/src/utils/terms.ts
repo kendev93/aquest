@@ -371,6 +371,17 @@ export const TERMS: Record<string, TermDefinition> = {
       '前复权数据里除权除息不应该留下跳变，出现多半是复权断点，' +
       '会让"某天暴涨"变成一条假的信号。',
   },
+  missingAction: {
+    name: '除权漏记嫌疑',
+    english: 'Unexplained limit-down drop（suspected missing corporate action）',
+    intro:
+      '跌幅超出所在板块跌停幅度、但分红送配事件表里查不到对应记录的交易日。' +
+      '正常除权日在取样时就被排除了，所以剩下的是没有事件解释的超跌停跳空，' +
+      '多半指向事件漏记——它让该标的整整一段历史的复权价失真，而不只是当天那一条。' +
+      '注意其中相当一部分是长期停牌后的真实补跌，靠价格本身区分不出来，' +
+      '要拿外部权威复权因子比对才定得了论；所以这一项给的是候选，不是结论，' +
+      '也不支持一键重下修复——重下拿回的还是同一份行情，缺的是事件本身。',
+  },
   staleBars: {
     name: '数据陈旧',
     english: 'Stale instrument',

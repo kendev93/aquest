@@ -21,7 +21,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-CheckKey = Literal["gap", "long_gap", "ohlc", "price_jump", "zero_volume", "stale"]
+CheckKey = Literal[
+    "gap", "long_gap", "ohlc", "price_jump", "zero_volume", "stale", "missing_action"
+]
 
 CHECK_KEYS: tuple[CheckKey, ...] = (
     "gap",
@@ -30,11 +32,19 @@ CHECK_KEYS: tuple[CheckKey, ...] = (
     "price_jump",
     "zero_volume",
     "stale",
+    "missing_action",
 )
 
 #: 有问题的检查项在报告里的严重级别：``gap`` / ``ohlc`` / ``price_jump`` 是数据确实
 #: 错了，``long_gap`` / ``zero_volume`` / ``stale`` 可能是停牌、退市这类正常情况，
 #: 所以只提示不判错。affected 为 0 时一律回落成 ``ok``。
+#:
+#: ``missing_action`` 是唯一一个「明知是真问题、却只能给 warn」的项。理由在第 56 行
+#: 那个描述里，但这里必须先讲清楚，否则会被当成漏配严重级别给"修正"成 error：
+#: 它检出的候选里绝大部分是**跨越停牌**的跳空，而复牌后的累计跌幅本就不受涨跌幅
+#: 约束，光看价格分不出"真除权"和"真暴跌"。误判的代价是不对称的 —— 当成 warn，
+#: 它长期挂着提醒你去查；当成 error，它会永久红灯，红灯一旦常态化就没人看了，
+#: 那反而把「能发现」这件事本身弄丢了。
 CHECK_SEVERITY: dict[CheckKey, Literal["error", "warn"]] = {
     "gap": "error",
     "long_gap": "warn",
@@ -42,6 +52,7 @@ CHECK_SEVERITY: dict[CheckKey, Literal["error", "warn"]] = {
     "price_jump": "error",
     "zero_volume": "warn",
     "stale": "warn",
+    "missing_action": "warn",
 }
 
 CHECK_LABELS: dict[CheckKey, str] = {
@@ -51,6 +62,7 @@ CHECK_LABELS: dict[CheckKey, str] = {
     "price_jump": "异常跳变",
     "zero_volume": "零成交日",
     "stale": "数据陈旧",
+    "missing_action": "除权漏记嫌疑",
 }
 
 CHECK_DESCRIPTIONS: dict[CheckKey, str] = {
@@ -66,10 +78,23 @@ CHECK_DESCRIPTIONS: dict[CheckKey, str] = {
     "但如果一只票长期零成交而价格还在动，那更像是数据问题。",
     "stale": "最后一条日线落后全市场最新交易日 STALE_TRADING_DAYS 个交易日以上。"
     "可能是退市，也可能是这只票从某次同步之后就再没被更新过。",
+    "missing_action": "跌幅超出所在板块跌停幅度、但分红送配事件表里查不到对应记录的交易日。"
+    "正常除权日在取样时就已被排除，所以剩下的是**没有事件解释**的超跌停跳空，"
+    "指向的是事件漏记 —— 它不像缺口那样只影响缺口附近，而是让该标的整整一段"
+    "历史的复权价失真。常见成因是上游数据源对这只标的静默停更：它不报错，"
+    "只是不再给新数据。要确认其中哪些是真除权，得拿外部权威复权因子去比对"
+    "（见 corporate-actions/backfill 的 verify 通道）；要不要照它补，留给人在看了"
+    "明细之后决定 —— 这一项给出的是**候选**，不是结论。",
 }
 
 #: 能否通过「删掉重下」修复。``stale`` 里已退市的标的重下也拿不到数据，但仍然值得一试；
 #: ``zero_volume`` 重下多半还是同一份数据，所以不给一键修复，只提示。
+#:
+#: ``missing_action`` 必须是 **False**，而且这条不是"重下也没用所以算了"那种弱理由：
+#: 一键修复的动作是把该标的的 bar **删掉再重下**，而漏记缺的是**事件表里的那条记录**，
+#: 不是 bar。重下拿回的还是同一份行情，会白白删掉一批数据、跑一大轮网络请求，
+#: 最后这一项原样不动 —— 报表上看不出任何变化，但风险实打实发生了。把它排除在
+#: 一键修复之外，是防止有人只看「有可以修的问题」就把整批标的删一轮。
 CHECK_REPAIRABLE: dict[CheckKey, bool] = {
     "gap": True,
     "long_gap": True,
@@ -77,6 +102,7 @@ CHECK_REPAIRABLE: dict[CheckKey, bool] = {
     "price_jump": True,
     "zero_volume": False,
     "stale": True,
+    "missing_action": False,
 }
 
 #: 各板块的涨跌停幅度。判异常跳变时统一加 ``JUMP_TOLERANCE`` 的容差，避免把四舍五入

@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import date
+from datetime import date, datetime
 
 from .health import (
     CALENDAR_COVERAGE_RATIO,
@@ -436,6 +436,91 @@ class DuckDbHealthStore:
         )
         return summary[0], summary[1], issues
 
+    def _instrument_names(
+        self, symbols: Sequence[tuple[str, str]]
+    ) -> dict[tuple[str, str], str | None]:
+        """按 ``(market, code)`` 批量取证券简称，供示例展示用。
+
+        只查这批候选而不是全表：候选通常是几十到几百个，而 instruments 有几千行，
+        而且每次体检都全量拉一遍名字是纯粹的浪费。
+        """
+
+        if not symbols:
+            return {}
+        placeholders = ", ".join("(?, ?)" for _ in symbols)
+        params: list[object] = []
+        for market, code in symbols:
+            params.extend((market, code))
+        with self._store.read_session() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT market, code, name FROM instruments
+                WHERE (market, code) IN ({placeholders})
+                """,
+                params,
+            ).fetchall()
+        return {(str(row[0]), str(row[1])): _as_text(row[2]) for row in rows}
+
+    def missing_action(
+        self, *, example_limit: int
+    ) -> tuple[int, int, tuple[HealthIssueRow, ...]]:
+        """超跌停、但事件表给不出解释的跳空 —— 除权漏记的候选。
+
+        判据复用 :meth:`read_price_gap_candidates`，这里既不重判也不重写 SQL：那才是
+        检测入口，再写一份就会漂移，漂移的下场是**体检报「无」而补全能扫出几百个**，
+        比完全不体检更糟 —— 体检的用处是让人相信它说「安全」的时候真安全。
+
+        排序刻意**按日期倒序而不是按跌幅**：这一项的用途是让人一眼看出「最近有没有
+        新增」。按跌幅排会把最新的一条压在几百条历史候选底下，那就失去了它存在的
+        意义 —— 历史候选本就是常态，新的那条才是要管的。
+        """
+
+        reader = getattr(self._store, "read_price_gap_candidates", None)
+        if not callable(reader):
+            # 没有检测入口的存储实现（例如只装配了基础层的替身）按「没有」处理，
+            # 而不是在这一项上永久报错。
+            return 0, 0, ()
+        frame = reader()
+        if frame.empty:
+            return 0, 0, ()
+        # ``_frame_from_query`` 会把日期列转成 pandas Timestamp，而 Timestamp 是
+        # datetime 的子类 —— ``isinstance(x, date)`` 为真，于是 ``date.isoformat()``
+        # 会把报告里的每个日期写成 2024-01-21T00:00:00。先统一落成 ``datetime.date``。
+        frame = frame.assign(
+            date=[item.date() if isinstance(item, datetime) else item for item in frame["date"]]
+        )
+        candidates = list(frame.itertuples(index=False))
+        # 名字要一次批量取完。放在行循环里会变成「每行一条 SQL」，候选有几百条时
+        # 就是几百次往返，而它们明明可以在一次查询里全部拿到。
+        symbols = sorted({(str(row.market), str(row.code)) for row in candidates})
+        names = self._instrument_names(symbols)
+        rows = tuple(
+            HealthIssueRow(
+                market=str(row.market),
+                code=str(row.code),
+                name=names.get((str(row.market), str(row.code))),
+                # 列名是 ``date`` 而不是 ``trade_date``：查询出来的帧统一被
+                # ``_frame_from_query`` 重命名过（同时把日期转成 datetime）。
+                # 这一条必须跟着 ``gap_backfill`` 的写法走，不能照 SQL 里的别名硬猜。
+                trade_date=_as_date(row.date),
+                detail=(
+                    f"前收 {_as_float(row.prev_close):.2f} → 收盘 {_as_float(row.close):.2f}"
+                    f"（跌 {(_as_float(row.close) / _as_float(row.prev_close) - 1.0) * 100:.1f}%，"
+                    f"事件表当日无记录）"
+                ),
+                occurrences=1,
+                sort_value=float(row.date.toordinal())
+                if isinstance(row.date, date)
+                else 0.0,
+            )
+            for row in candidates
+        )
+        affected = len({(row.market, row.code) for row in rows})
+        # 检出后还要再排一次：真正的「全部 row」要用于上面的 affected / occurrences
+        # 计数，示例交给下游按同样顺序截断，两处口径才一致。
+        ordered = sorted(rows, key=lambda item: (-item.sort_value, item.symbol))
+        return affected, len(rows), tuple(ordered[: max(example_limit, 0)])
+
     def zero_volume(self, *, example_limit: int) -> tuple[int, int, tuple[HealthIssueRow, ...]]:
         summary = self._summary(_ZERO_VOLUME_SUMMARY_SQL, [])
         with self._store._connect() as connection:
@@ -602,6 +687,9 @@ def build_report(
     jump_affected, jump_occurrences, jump_rows = store.price_jump(
         main_limit=MAIN_JUMP_LIMIT, growth_limit=GROWTH_JUMP_LIMIT, example_limit=example_limit
     )
+    action_affected, action_occurrences, action_rows = store.missing_action(
+        example_limit=example_limit
+    )
     zero_affected, zero_occurrences, zero_rows = store.zero_volume(example_limit=example_limit)
     stale_affected, stale_occurrences, stale_rows = store.stale(
         min_days=STALE_TRADING_DAYS, example_limit=example_limit
@@ -656,6 +744,13 @@ def build_report(
                 example_limit=example_limit,
                 affected_instruments=stale_affected,
                 occurrences=stale_occurrences,
+            ),
+            build_check(
+                "missing_action",
+                action_rows,
+                example_limit=example_limit,
+                affected_instruments=action_affected,
+                occurrences=action_occurrences,
             ),
         ),
     )

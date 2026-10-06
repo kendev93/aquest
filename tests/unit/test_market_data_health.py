@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -14,6 +15,7 @@ import pytest
 
 from selector_app.adapters.market_sync import MarketSyncConfig
 from selector_app.adapters.online_market_sync import _restrict_to_codes, _TargetSelection
+from selector_app.market_data.adjustment import CorporateAction
 from selector_app.market_data.health import CHECK_KEYS, normalize_keys
 from selector_app.market_data.store import DuckDbMarketDataStore
 
@@ -55,7 +57,7 @@ def check_by_key(store: DuckDbMarketDataStore) -> dict[str, object]:
 
 
 def test_clean_store_reports_everything_ok(tmp_path: Path) -> None:
-    """三只票、同样的日期、没有异常 → 六项检查必须全部 ok。"""
+    """三只票、同样的日期、没有异常 → 七项检查必须全部 ok。"""
 
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     for market, code in (("SH", "600000"), ("SZ", "000001"), ("SZ", "300750")):
@@ -69,6 +71,7 @@ def test_clean_store_reports_everything_ok(tmp_path: Path) -> None:
         "price_jump": "ok",
         "zero_volume": "ok",
         "stale": "ok",
+        "missing_action": "ok",
     }
 
 
@@ -158,6 +161,97 @@ def test_zero_volume_and_stale_are_warned(tmp_path: Path) -> None:
     assert checks["zero_volume"].affected_instruments == 1
     assert checks["stale"].affected_instruments == 1
     assert "落后全市场" in checks["stale"].examples[0].detail
+
+
+def crashed(frame: pd.DataFrame, index: int, *, ratio: float = 0.5) -> pd.DataFrame:
+    """把第 ``index`` 天砸成远超跌停的暴跌，同时保持 OHLC 自洽。
+
+    ``ratio`` 默认腰斩：主板跌停只有 -10%，腰斩不可能是市场波动。
+    """
+
+    previous = float(frame.loc[frame.index[index - 1], "close"])
+    frame.loc[frame.index[index], "open"] = previous * ratio
+    frame.loc[frame.index[index], "close"] = previous * ratio
+    frame.loc[frame.index[index], "high"] = previous * (ratio + 0.01)
+    frame.loc[frame.index[index], "low"] = previous * (ratio - 0.01)
+    return frame
+
+
+def test_missing_action_reports_unexplained_limit_down(tmp_path: Path) -> None:
+    """跌到跌停板以下却查不到事件 → 必须被点名，且**不可**一键重下修复。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", bars(), name="基准")
+    store.replace_local_bars(
+        "SH", "600666", "stock", crashed(bars(), 20), name="疑似漏记"
+    )
+
+    item = check_by_key(store)["missing_action"]
+    assert item.severity == "warn"
+    assert item.affected_instruments == 1
+    assert item.occurrences == 1
+    # 重下只是拿回同一份 bar，缺的是事件本身；让它可修会诱导人删掉一批数据。
+    assert item.repairable is False
+    assert item.examples[0].market == "SH"
+    assert item.examples[0].code == "600666"
+    assert item.examples[0].name == "疑似漏记"
+    assert item.examples[0].trade_date == "2024-01-21"
+    assert "事件表当日无记录" in item.examples[0].detail
+
+
+def test_recorded_corporate_action_is_not_reported(tmp_path: Path) -> None:
+    """同一天补上事件记录后就必须消失。
+
+    这条是这一项能不能用下去的关键：正常除权日本来就该大跌，如果连它们都报，
+    这一项会长期挂在几百条上，跟永远红灯没区别 —— 而永久红灯等于没人看。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", bars(), name="基准")
+    store.replace_local_bars(
+        "SH", "600666", "stock", crashed(bars(), 20), name="腰斩"
+    )
+    assert check_by_key(store)["missing_action"].occurrences == 1
+
+    store.upsert_corporate_actions(
+        [
+            CorporateAction(
+                market="SH",
+                code="600666",
+                ex_date=date(2024, 1, 21),
+                share_ratio=1.0,
+                cash_per_share=0.0,
+                factor_ratio=2.0,
+                action_type="split",
+            )
+        ],
+        source="test",
+        provider="test",
+    )
+
+    item = check_by_key(store)["missing_action"]
+    assert item.occurrences == 0
+    assert item.affected_instruments == 0
+    assert item.severity == "ok"
+
+
+def test_missing_action_examples_are_newest_first(tmp_path: Path) -> None:
+    """示例按日期倒序：历史候选是常态，要第一时间看见的是**新冒出来的那条**。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", bars(), name="基准")
+    frame = bars()
+    crashed(frame, 10)
+    crashed(frame, 30)
+    store.replace_local_bars("SH", "600666", "stock", frame, name="两次腰斩")
+
+    item = check_by_key(store)["missing_action"]
+    assert item.occurrences == 2
+    assert item.affected_instruments == 1
+    assert [example.trade_date for example in item.examples] == [
+        "2024-01-31",
+        "2024-01-11",
+    ]
 
 
 def test_codes_for_collects_every_flagged_instrument(tmp_path: Path) -> None:
