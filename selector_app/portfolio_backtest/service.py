@@ -61,14 +61,11 @@ class PortfolioBacktestService(
         progress_callback: PortfolioBacktestProgressCallback | None = None,
         abort_check: Callable[[], bool] | None = None,
     ) -> PortfolioBacktestReport:
+        self._refresh_corporate_action_cache()
         resolved = self._list_refs(config)
         refs = resolved.refs
         parsed = parse_formula(config.formula_text) if config.formula_text else None
         self._validate_outputs(config, parsed)
-        # 每一轮都重新查公司行动：补录分红/送转后，上一轮缓存下来的事件会让复权漏
-        # 事件，而且 adjust_version 跟着错 ⇒ 指标缓存 key 也失效不了。
-        self._corporate_action_cache = {}
-
         contexts: list[_StockSeries] = []
         failure_reasons: Counter[str] = Counter()
         # 一次只装一批。曾经是整批读进来再慢慢算：全市场 5000 只 × 全历史常驻在内存里
@@ -249,6 +246,8 @@ class PortfolioBacktestService(
         truth.
         """
 
+        self._refresh_corporate_action_cache()
+        self._preload_corporate_actions((context.market, context.code) for context in contexts)
         if config.formula_text:
             raise ValueError("共享行情快照不支持自定义公式")
         self._validate_outputs(config, None)
@@ -351,6 +350,7 @@ class PortfolioBacktestService(
     ) -> PortfolioBacktestReport:
         """Run the same execution rules for one stock reference."""
 
+        self._refresh_corporate_action_cache()
         parsed = parsed_formula
         if parsed is None and config.formula_text:
             parsed = parse_formula(config.formula_text)

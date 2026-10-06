@@ -357,6 +357,388 @@ def test_positions_are_adjusted_on_ex_dividend_day() -> None:
     )
 
 
+def test_run_stock_refreshes_corporate_actions_between_top_level_runs() -> None:
+    dates = pd.date_range("2024-01-01", periods=5, freq="D")
+    frame = pd.DataFrame(
+        {
+            "date": dates,
+            "open": [20.0, 20.0, 10.0, 10.0, 10.0],
+            "high": [20.0] * 2 + [10.0] * 3,
+            "low": [20.0] * 2 + [10.0] * 3,
+            "close": [20.0] * 2 + [10.0] * 3,
+            "volume": np.full(5, 100_000.0),
+            "amount": [2_000_000.0] * 2 + [1_000_000.0] * 3,
+        }
+    )
+
+    class MutableActionAdapter(FakeAdapter):
+        actions: tuple[CorporateAction, ...] = ()
+
+        def list_stock_refs(self, vipdoc_path, universe, universe_file=None):
+            return [self.stock_ref(vipdoc_path, "SH", "600000")]
+
+        def read_stock(self, ref: StockRef) -> pd.DataFrame:
+            return frame.copy(deep=True)
+
+        def read_corporate_actions(self, ref: StockRef):
+            return self.actions
+
+    adapter = MutableActionAdapter()
+    service = PortfolioBacktestService(adapter=adapter)
+    ref = adapter.stock_ref("/tmp/vipdoc", "SH", "600000")
+    settings = config(
+        formula_text="BUY:C>0; RANK:C;",
+        max_positions=1,
+        initial_cash=100_000.0,
+        start_date=dates[0].date(),
+        end_date=dates[-1].date(),
+        stop_loss_pct=None,
+        take_profit_pct=10.0,
+    )
+
+    before = service.run_stock(ref, settings)
+    adapter.actions = (
+        CorporateAction(
+            market="SH",
+            code="600000",
+            ex_date=dates[2].date(),
+            share_ratio=1.0,
+            cash_per_share=0.0,
+            factor_ratio=compute_factor_ratio(
+                prev_close=20.0,
+                share_ratio=1.0,
+                cash_per_share=0.0,
+            ),
+            action_type="stock_dividend",
+        ),
+    )
+
+    refreshed = service.run_stock(ref, settings)
+    fresh_service = PortfolioBacktestService(adapter=adapter).run_stock(ref, settings)
+
+    assert float(before.equity_curve[-1]["total"]) == pytest.approx(50_000.0)
+    assert float(refreshed.equity_curve[-1]["total"]) == pytest.approx(100_000.0)
+    assert before.data_fingerprint != refreshed.data_fingerprint
+    assert refreshed.equity_curve == fresh_service.equity_curve
+
+
+def test_prepared_context_action_preload_caches_missing_events_as_empty() -> None:
+    class BatchActionAdapter:
+        batch_calls = 0
+        single_calls = 0
+
+        def load_corporate_actions(self, keys):
+            self.batch_calls += 1
+            return {}
+
+        def read_corporate_actions(self, ref: StockRef):
+            self.single_calls += 1
+            return ()
+
+    adapter = BatchActionAdapter()
+    service = PortfolioBacktestService(adapter=adapter)
+    service._refresh_corporate_action_cache()
+    service._preload_corporate_actions([("SH", "600000"), ("SH", "600001")])
+
+    assert (
+        service._corporate_actions(
+            StockRef(market="SH", code="600000", path=Path("/tmp/600000.day"))
+        )
+        == ()
+    )
+    assert adapter.batch_calls == 1
+    assert adapter.single_calls == 0
+
+
+@pytest.mark.parametrize("prefix_length", [2, 3, 4])
+def test_halted_stock_applies_due_actions_on_its_next_bar_and_resumes_idempotently(
+    prefix_length: int,
+) -> None:
+    global_dates = np.asarray([20240101, 20240102, 20240103, 20240104, 20240105], dtype=np.int64)
+    stock_dates = np.asarray([20240101, 20240102, 20240104, 20240105], dtype=np.int64)
+    context = _StockSeries(
+        market="SH",
+        code="600000",
+        instrument_type="stock",
+        board="main",
+        dates=stock_dates,
+        opens=np.asarray([20.0, 20.0, 5.0, 5.0]),
+        highs=np.asarray([20.0, 20.0, 5.0, 5.0]),
+        lows=np.asarray([20.0, 20.0, 5.0, 5.0]),
+        closes=np.asarray([20.0, 20.0, 5.0, 5.0]),
+        atrs=np.full(4, np.nan),
+        buy_mask=np.asarray([True, False, False, False]),
+        sell_mask=np.asarray([False, False, False, False]),
+        signals={},
+        values={"custom.rank": np.asarray([1.0, 1.0, 1.0, 1.0])},
+        date_to_index={int(value): index for index, value in enumerate(stock_dates)},
+        data_fingerprint="halted-action-context",
+    )
+    companion_dates = global_dates
+    companion = _StockSeries(
+        market="SH",
+        code="600001",
+        instrument_type="stock",
+        board="main",
+        dates=companion_dates,
+        opens=np.full(5, 10.0),
+        highs=np.full(5, 10.0),
+        lows=np.full(5, 10.0),
+        closes=np.full(5, 10.0),
+        atrs=np.full(5, np.nan),
+        buy_mask=np.zeros(5, dtype=bool),
+        sell_mask=np.zeros(5, dtype=bool),
+        signals={},
+        values={"custom.rank": np.ones(5)},
+        date_to_index={int(value): index for index, value in enumerate(companion_dates)},
+        data_fingerprint="companion-context",
+    )
+    actions = (
+        CorporateAction(
+            market="SH",
+            code="600000",
+            ex_date=date(2024, 1, 3),
+            share_ratio=1.0,
+            cash_per_share=0.0,
+            factor_ratio=2.0,
+            action_type="stock_dividend",
+        ),
+        CorporateAction(
+            market="SH",
+            code="600000",
+            ex_date=date(2024, 1, 4),
+            share_ratio=1.0,
+            cash_per_share=0.0,
+            factor_ratio=2.0,
+            action_type="stock_dividend",
+        ),
+    )
+
+    class ActionReader:
+        def read_corporate_actions(self, ref: StockRef):
+            return actions if ref.code == "600000" else ()
+
+    service = PortfolioBacktestService(adapter=ActionReader())
+    settings = config(
+        formula_text=None,
+        selected_signals=(),
+        buy_rule=RuleGroup(
+            conditions=(
+                ScreenCondition(left_value="price.close", operator="gt", right_constant=0.0),
+            ),
+        ),
+        sell_rule=RuleGroup(
+            conditions=(
+                ScreenCondition(left_value="price.close", operator="lt", right_constant=0.0),
+            ),
+        ),
+        stop_loss_pct=None,
+        take_profit_pct=10.0,
+        initial_cash=100_000.0,
+        max_positions=1,
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 1, 5),
+    )
+    full = service._simulate(
+        [context, companion],
+        global_dates.tolist(),
+        settings,
+        data_fingerprint="halted-action-context",
+    )
+    prefix = service._simulate(
+        [context, companion],
+        global_dates[:prefix_length].tolist(),
+        settings,
+        data_fingerprint="halted-action-context",
+    )
+    prefix_checkpoint = prefix["checkpoint"]
+    assert isinstance(prefix_checkpoint, SimulationCheckpoint)
+    if prefix_length == 3:
+        assert prefix["equity"][-1]["total"] == pytest.approx(100_000.0)
+        assert not prefix_checkpoint.positions["SH600000"].applied_corporate_actions
+    restored = SimulationCheckpoint.from_dict(prefix_checkpoint.to_dict())
+    resumed = service._simulate(
+        [context, companion],
+        global_dates.tolist(),
+        settings,
+        checkpoint=restored,
+        data_fingerprint="halted-action-context",
+    )
+
+    equity = full["equity"]
+    assert [row["total"] for row in equity] == pytest.approx([100_000.0] * len(global_dates))
+    assert resumed["equity"] == full["equity"]
+    assert resumed["trades"] == full["trades"]
+    assert resumed["states"] == full["states"]
+    final_position = full["checkpoint"].positions["SH600000"]
+    assert final_position.size == pytest.approx(20_000.0)
+    assert len(final_position.applied_corporate_actions) == 2
+
+
+@pytest.mark.parametrize(
+    ("max_hold_days", "expected_sell_date"),
+    [(1, "2024-01-07"), (2, "2024-01-09")],
+)
+def test_max_hold_days_counts_only_the_held_stock_bars(
+    max_hold_days: int,
+    expected_sell_date: str,
+) -> None:
+    global_dates = np.asarray(
+        [
+            20240101,
+            20240102,
+            20240103,
+            20240104,
+            20240105,
+            20240106,
+            20240107,
+            20240108,
+            20240109,
+            20240110,
+            20240111,
+            20240112,
+        ],
+        dtype=np.int64,
+    )
+    target_dates = np.asarray([20240103, 20240104, 20240107, 20240109, 20240112], dtype=np.int64)
+
+    def context(
+        code: str,
+        dates: np.ndarray,
+        prices: np.ndarray,
+        buy_mask: np.ndarray,
+    ) -> _StockSeries:
+        return _StockSeries(
+            market="SH",
+            code=code,
+            instrument_type="stock",
+            board="main",
+            dates=dates,
+            opens=prices.copy(),
+            highs=prices.copy(),
+            lows=prices.copy(),
+            closes=prices.copy(),
+            atrs=np.full(len(dates), np.nan),
+            buy_mask=buy_mask,
+            sell_mask=np.zeros(len(dates), dtype=bool),
+            signals={},
+            values={"price.close": prices},
+            date_to_index={int(value): index for index, value in enumerate(dates)},
+            data_fingerprint=f"{code}-bars",
+        )
+
+    target = context(
+        "600000",
+        target_dates,
+        np.full(len(target_dates), 20.0),
+        np.asarray([True, False, False, False, False]),
+    )
+    companion = context(
+        "600001",
+        global_dates,
+        np.full(len(global_dates), 10.0),
+        np.zeros(len(global_dates), dtype=bool),
+    )
+    settings = config(
+        formula_text=None,
+        selected_signals=(),
+        buy_rule=RuleGroup(
+            conditions=(
+                ScreenCondition(left_value="price.close", operator="gt", right_constant=0.0),
+            ),
+        ),
+        sell_rule=RuleGroup(
+            conditions=(
+                ScreenCondition(left_value="price.close", operator="lt", right_constant=0.0),
+            ),
+        ),
+        initial_cash=100_000.0,
+        commission=0.0,
+        min_commission=0.0,
+        stamp_tax=0.0,
+        slippage=0.0,
+        max_positions=1,
+        max_hold_days=max_hold_days,
+        ranking_value="price.close",
+        stop_loss_pct=None,
+        take_profit_pct=10.0,
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 1, 12),
+    )
+
+    report = PortfolioBacktestService().run_prepared_contexts(settings, [target, companion])
+    trades = list(report.trades)
+
+    assert [trade["direction"] for trade in trades] == ["BUY", "SELL"]
+    assert trades[0]["date"] == "2024-01-04"
+    assert trades[1]["date"] == expected_sell_date
+    assert trades[1]["reason"] == "持有到期"
+
+
+def test_corporate_actions_before_entry_and_simulation_start_are_ignored() -> None:
+    dates = np.asarray([20240102, 20240103, 20240104], dtype=np.int64)
+    context = _StockSeries(
+        market="SH",
+        code="600000",
+        instrument_type="stock",
+        board="main",
+        dates=dates,
+        opens=np.full(3, 10.0),
+        highs=np.full(3, 10.0),
+        lows=np.full(3, 10.0),
+        closes=np.full(3, 10.0),
+        atrs=np.full(3, np.nan),
+        buy_mask=np.asarray([True, False, False]),
+        sell_mask=np.zeros(3, dtype=bool),
+        signals={},
+        values={"price.close": np.full(3, 10.0)},
+        date_to_index={int(value): index for index, value in enumerate(dates)},
+        data_fingerprint="pre-entry-action-context",
+    )
+    action = CorporateAction(
+        market="SH",
+        code="600000",
+        ex_date=date(2024, 1, 1),
+        share_ratio=1.0,
+        cash_per_share=0.0,
+        factor_ratio=2.0,
+        action_type="stock_dividend",
+    )
+
+    class ActionReader:
+        def read_corporate_actions(self, ref: StockRef):
+            return (action,)
+
+    service = PortfolioBacktestService(adapter=ActionReader())
+    settings = config(
+        formula_text=None,
+        selected_signals=(),
+        buy_rule=RuleGroup(
+            conditions=(
+                ScreenCondition(left_value="price.close", operator="gt", right_constant=0.0),
+            ),
+        ),
+        sell_rule=RuleGroup(
+            conditions=(
+                ScreenCondition(left_value="price.close", operator="lt", right_constant=0.0),
+            ),
+        ),
+        initial_cash=100_000.0,
+        max_positions=1,
+        ranking_value="price.close",
+        stop_loss_pct=None,
+        take_profit_pct=10.0,
+        start_date=date(2024, 1, 2),
+        end_date=date(2024, 1, 4),
+    )
+
+    result = service._simulate([context], dates.tolist(), settings)
+
+    assert [row["total"] for row in result["equity"]] == pytest.approx([100_000.0] * 3)
+    assert result["checkpoint"].positions["SH600000"].entry_date == 20240103
+    assert not result["checkpoint"].positions["SH600000"].applied_corporate_actions
+
+
 def test_indicators_stay_below_threshold_without_corporate_actions() -> None:
     """对照：同一段行情没有事件时，指标就是 raw 口径，一笔都不该做。"""
 

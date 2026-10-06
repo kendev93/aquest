@@ -4,6 +4,8 @@ import pandas as pd
 import pytest
 
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter
+from selector_app.market_data.adjustment import CorporateAction, compute_factor_ratio
+from selector_app.market_data.models import StockRef
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.portfolio_backtest.service import PortfolioBacktestService
 from selector_app.strategy_pool.store import DuckDbStrategyPoolStore
@@ -64,6 +66,34 @@ def test_verified_append_replays_only_new_dates_and_matches_full_backtest(tmp_pa
     ref = adapter.stock_ref("", "SH", "600000")
     before = replay_account(service, ref, version)
     assert before["summary"]["created_return"] == pytest.approx(0.2)
+    legacy_checkpoint = {
+        **before["checkpoint"],
+        "version": 1,
+        "positions": {
+            symbol: {
+                key: value for key, value in position.items() if key != "applied_corporate_actions"
+            }
+            for symbol, position in before["checkpoint"]["positions"].items()
+        },
+    }
+    legacy_snapshot = {
+        **before,
+        "engine": "pool-account-v1",
+        "checkpoint": legacy_checkpoint,
+    }
+    legacy_engine = replay_account(service, ref, version, legacy_snapshot)
+    assert legacy_engine["summary"]["mode"] == "rebuilt"
+    assert legacy_engine["summary"]["recomputed_at"]
+    for identity_key in (
+        "baseline_date",
+        "baseline_equity",
+        "launch_equity",
+        "as_of_date",
+        "created_return",
+        "post_launch_return",
+    ):
+        assert legacy_engine["summary"][identity_key] == before["summary"][identity_key]
+    assert legacy_engine["checkpoint"] == before["checkpoint"]
     store.replace_local_bars("SH", "600000", "stock", bars(3))
     started = time.perf_counter()
     resumed = replay_account(service, ref, version, before)
@@ -80,6 +110,73 @@ def test_verified_append_replays_only_new_dates_and_matches_full_backtest(tmp_pa
     rebuilt = replay_account(service, ref, version, resumed)
     assert rebuilt["summary"]["mode"] == "rebuilt"
     assert rebuilt["summary"]["recomputed_at"]
+
+
+def test_replay_account_refreshes_actions_between_runs_on_a_reused_service(tmp_path):
+    dates = pd.date_range("2026-09-01", periods=5, freq="D")
+    frame = pd.DataFrame(
+        dict(
+            date=dates,
+            open=[20.0, 20.0, 10.0, 10.0, 10.0],
+            close=[20.0, 20.0, 10.0, 10.0, 10.0],
+            high=[20.0, 20.0, 10.0, 10.0, 10.0],
+            low=[20.0, 20.0, 10.0, 10.0, 10.0],
+            volume=[1000.0] * 5,
+            amount=[20_000.0, 20_000.0, 10_000.0, 10_000.0, 10_000.0],
+            bar_status=["completed"] * 5,
+        )
+    )
+
+    class MutableActionAdapter:
+        actions: tuple[CorporateAction, ...] = ()
+
+        def read_stock(self, ref: StockRef) -> pd.DataFrame:
+            return frame.copy(deep=True)
+
+        def read_corporate_actions(self, ref: StockRef):
+            return self.actions
+
+    adapter = MutableActionAdapter()
+    ref = StockRef(
+        market="SH",
+        code="600000",
+        path=tmp_path / "sh600000.day",
+        instrument_type="stock",
+        board="main",
+    )
+    service = PortfolioBacktestService(adapter=adapter)
+    selected = candidate()
+    selected["config"].update(initial_cash=1_000_000, stop_loss_pct=None)
+    version = dict(
+        candidate=selected,
+        signature=signature(selected),
+        launch_data_date="2026-09-01",
+        created_at="2026-09-01T16:00:00+00:00",
+    )
+
+    before = replay_account(service, ref, version)
+    adapter.actions = (
+        CorporateAction(
+            market="SH",
+            code="600000",
+            ex_date=dates[2].date(),
+            share_ratio=1.0,
+            cash_per_share=0.0,
+            factor_ratio=compute_factor_ratio(
+                prev_close=20.0,
+                share_ratio=1.0,
+                cash_per_share=0.0,
+            ),
+            action_type="stock_dividend",
+        ),
+    )
+
+    refreshed = replay_account(service, ref, version)
+    fresh = replay_account(PortfolioBacktestService(adapter=adapter), ref, version)
+
+    assert before["summary"]["equity"] == pytest.approx(500_000.0)
+    assert refreshed["summary"]["equity"] == pytest.approx(1_000_000.0)
+    assert refreshed["checkpoint"] == fresh["checkpoint"]
 
 
 def test_snapshot_commit_rejects_archived_versions_and_keeps_last_good_on_failure(tmp_path):
@@ -279,6 +376,157 @@ def test_tracking_runner_deduplicates_goals_and_uses_shared_budget(tmp_path):
         )
         == 1
     )
+
+
+def test_partial_tracking_projects_only_applied_versions_for_both_objectives(tmp_path):
+    from selector_app.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
+    from selector_app.strategy_pool.tracking_runner import PoolTrackingRunner
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", bars(3))
+    pool = DuckDbStrategyPoolStore(store)
+    automatic = candidate()
+    manual = candidate()
+    manual["candidate_id"] = "manual"
+    pool.upsert_automatic(
+        market="SH",
+        code="600000",
+        name="test",
+        annual_candidate=automatic,
+        sharpe_candidate=automatic,
+        data_fingerprint="a",
+        config_fingerprint="b",
+        source_job_id="job",
+    )
+    pool.set_manual_override("SH", "600000", "annual_return", manual)
+    tracks = PoolTrackingStore(store)
+    versions = tracks.current_versions()
+    manual_annual = next(
+        v for v in versions if v["objective"] == "annual_return" and v["source"] == "manual"
+    )
+    automatic_annual = next(
+        v for v in versions if v["objective"] == "annual_return" and v["source"] == "automatic"
+    )
+    automatic_sharpe = next(
+        v for v in versions if v["objective"] == "sharpe" and v["source"] == "automatic"
+    )
+
+    def save_existing(v, label: str) -> None:
+        snapshot = {
+            "summary": {
+                "as_of_date": "2026-09-03",
+                "holding": [
+                    {
+                        "market": "SH",
+                        "code": "600000",
+                        "symbol": "SH600000",
+                        "entry_date": "2026-09-02",
+                        "entry_price": 12.0,
+                        "close": 12.0,
+                        "label": label,
+                    }
+                ],
+                "signal_buy": False,
+                "signal_sell": False,
+                "risk_exits": [],
+            },
+            "checkpoint": {},
+        }
+        assert tracks.save_snapshot(v["version_id"], v["signature"], snapshot)
+
+    save_existing(automatic_annual, "stale automatic annual")
+    save_existing(automatic_sharpe, "automatic sharpe")
+    save_existing(manual_annual, "manual annual")
+
+    def write(item):
+        if item.get("error"):
+            raise AssertionError(item["error"])
+        return {
+            "saved": tracks.save_snapshot(item["version_id"], item["signature"], item["snapshot"])
+        }
+
+    result = PoolTrackingRunner(store, EvaluationWorkerBudget(2)).run(
+        {
+            "objective": "annual_return",
+            "as_of_date": "2026-09-03",
+            "version_ids": [manual_annual["version_id"]],
+        },
+        progress=lambda *args: None,
+        abort_check=lambda: False,
+        writer=write,
+    )
+    by_objective = result["results_by_objective"]
+    annual = by_objective["annual_return"]
+    sharpe = by_objective["sharpe"]
+
+    assert result["completed_symbols"] == 1
+    assert result["failed_symbols"] == 0
+    assert len(annual["states"]) == 1
+    assert annual["states"][0]["tracking_version_id"] == manual_annual["version_id"]
+    assert len(annual["model_portfolio"]["holdings"]) == 1
+    assert annual["model_portfolio"]["holdings"][0]["code"] == "600000"
+    assert len(sharpe["states"]) == 1
+    assert sharpe["states"][0]["tracking_version_id"] == automatic_sharpe["version_id"]
+    assert len(sharpe["model_portfolio"]["holdings"]) == 1
+    assert sharpe["model_portfolio"]["holdings"][0]["label"] == "automatic sharpe"
+
+    skipped = PoolTrackingRunner(store, EvaluationWorkerBudget(2)).run(
+        {
+            "objective": "annual_return",
+            "as_of_date": "2026-09-03",
+            "version_ids": [manual_annual["version_id"]],
+        },
+        progress=lambda *args: None,
+        abort_check=lambda: False,
+        writer=lambda item: {"saved": False},
+    )
+    assert skipped["completed_symbols"] == 0
+    assert skipped["skipped_symbols"] == 1
+    assert skipped["failed_symbols"] == 0
+    assert skipped["results_by_objective"]["annual_return"]["states"] == []
+    assert len(skipped["results_by_objective"]["sharpe"]["states"]) == 1
+
+
+def test_tracking_runner_marks_failed_selected_version_incomplete(tmp_path):
+    from selector_app.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
+    from selector_app.strategy_pool.tracking_runner import PoolTrackingRunner
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    pool = DuckDbStrategyPoolStore(store)
+    pool.upsert_automatic(
+        market="SH",
+        code="600000",
+        name="test",
+        annual_candidate=candidate(),
+        sharpe_candidate=None,
+        data_fingerprint="a",
+        config_fingerprint="b",
+        source_job_id="job",
+    )
+    tracks = PoolTrackingStore(store)
+    selected = tracks.current_versions()[0]
+    written_errors = []
+
+    def write(item):
+        if item.get("error"):
+            written_errors.append(item)
+            return None
+        return {
+            "saved": tracks.save_snapshot(item["version_id"], item["signature"], item["snapshot"])
+        }
+
+    result = PoolTrackingRunner(store, EvaluationWorkerBudget(1)).run(
+        {"objective": "annual_return", "version_ids": [selected["version_id"]]},
+        progress=lambda *args: None,
+        abort_check=lambda: False,
+        writer=write,
+    )
+
+    assert result["completed_symbols"] == 0
+    assert result["failed_symbols"] == 1
+    assert result["results_by_objective"]["annual_return"]["holding_snapshot_complete"] is False
+    assert len(written_errors) == 1
+    assert written_errors[0]["version_id"] == selected["version_id"]
 
 
 @pytest.mark.parametrize("history_days", [120, 2000])

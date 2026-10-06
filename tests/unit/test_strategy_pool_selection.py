@@ -96,6 +96,26 @@ def test_objective_winners_fall_back_when_no_candidate_has_an_adequate_sample() 
     assert winners["annual_return"] is None
 
 
+def test_objective_eligibility_does_not_change_when_holdout_trade_count_changes() -> None:
+    board = [
+        _candidate("a", annual_return=0.5, sharpe=1.0, validation_trades=10, holdout_trades=2),
+        _candidate("b", annual_return=0.2, sharpe=1.0, validation_trades=10, holdout_trades=3),
+    ]
+    before = summarize_objective_winners({"results_by_return": board, "results_by_sharpe": []})[
+        "annual_return"
+    ]
+    board[0]["metrics"]["holdout"]["closed_trades"] = 3
+    after = summarize_objective_winners({"results_by_return": board, "results_by_sharpe": []})[
+        "annual_return"
+    ]
+
+    assert before["candidate_id"] == "a"
+    assert after["candidate_id"] == "a"
+    # Holdout remains visible in the descriptive badge even though it cannot alter eligibility.
+    assert before["quality"]["sample_adequate"] is False
+    assert after["quality"]["sample_adequate"] is True
+
+
 def test_objective_without_finite_validation_metric_has_no_strategy() -> None:
     result = {
         "results_by_sharpe": [

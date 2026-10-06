@@ -354,7 +354,18 @@ class PortfolioContextMixin(_PortfolioServiceState):
         loader = getattr(self._adapter, "load_corporate_actions", None)
         if not callable(loader):
             return
-        self._corporate_action_cache = dict(loader(keys))
+        key_list = list(keys)
+        cache = getattr(self, "_corporate_action_cache", None)
+        if cache is None:
+            cache = {}
+        loaded = loader(key_list)
+        cache.update({key: loaded.get(key, ()) for key in key_list})
+        self._corporate_action_cache = cache
+
+    def _refresh_corporate_action_cache(self) -> None:
+        """Start a top-level replay with fresh action rows and reuse them within that run."""
+
+        self._corporate_action_cache = {}
 
     def _corporate_actions(self, ref: StockRef) -> tuple[CorporateAction, ...]:
         """该标的的分红送转事件；适配器不支持时退化成"无事件"。
