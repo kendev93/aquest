@@ -18,7 +18,10 @@ class PerformanceAnalyzer:
         self,
         equity_curve: pd.DataFrame,
         trades: pd.DataFrame,
-        risk_free_rate: float = 0.03,
+        # rf=0：本项目夏普/索提诺只用于策略间自比较（寻优排序 + 策略池展示），
+        # 扣除无风险利率不提供额外信息，反而会制造"总收益为正、夏普为负"的
+        # 直觉矛盾（年化落在 0~rf 区间的策略）。需要严格超额口径时再显式传参。
+        risk_free_rate: float = 0.0,
     ) -> None:
         self._equity_curve = equity_curve
         self._trades = trades
