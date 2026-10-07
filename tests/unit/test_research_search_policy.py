@@ -11,7 +11,7 @@ def test_research_defaults_share_expanded_policy():
     )
     assert config.candidate_limit == 15
     assert _research_settings({}, 3000)["candidate_limit"] == 15
-    assert MARKET_POOL_ALGORITHM_VERSION == "market-pool-v5"
+    assert MARKET_POOL_ALGORITHM_VERSION == "market-pool-v6"
 
 
 def test_research_risk_search_enables_bounded_adaptive_policy():

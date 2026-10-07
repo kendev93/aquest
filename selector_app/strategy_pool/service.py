@@ -63,8 +63,10 @@ PoolObjective = Literal["annual_return", "sharpe"]
 PoolProgressCallback = Callable[[int, int, str, Mapping[str, object] | None], None]
 PoolEntryWriter = Callable[[Mapping[str, object]], None]
 # v6：选优加了两道硬门槛（样本不足直接出局、平均持仓超上限出局，见
-# strategy_pool.selection）。门槛会改变谁是胜者，v5 语义下选出的存量条目
-# 全部作废，下一次全市场重选时逐股重研究。
+# strategy_pool.selection）；增量复用判定不再看行情指纹，改为按"研究是否有
+# 结论"跳过（ready/partial/no_strategy 复用，insufficient_history/failed 重查）。
+# 门槛与复用语义都会改变存量条目的有效性，v5 语义下的条目在下一次全市场
+# 重选时逐股重研究。
 MARKET_POOL_ALGORITHM_VERSION = "market-pool-v6"
 POOL_PROGRESS_EMIT_INTERVAL_SECONDS = 1.5
 STRATEGY_HOLDING_BATCH_SIZE = 100
@@ -519,14 +521,7 @@ class MarketStrategyPoolService:
                     index = next_index + 1
                     symbol = f"{ref.market}:{ref.code}"
                     prior = prior_entries.get((ref.market, ref.code))
-                    market_fingerprint = ""
-                    if (
-                        prior is not None
-                        and prior[1] == config_fingerprint
-                        and prior[2] in {"ready", "partial", "insufficient_history"}
-                    ):
-                        market_fingerprint = _market_fingerprint(self._adapter, ref)
-                    if self._can_reuse(prior, market_fingerprint, config_fingerprint):
+                    if self._can_reuse(prior, config_fingerprint):
                         reused_entry = (
                             self._pool_store.get(ref.market, ref.code)
                             if self._pool_store is not None
@@ -715,6 +710,16 @@ class MarketStrategyPoolService:
                         callback=None,
                         coordinator=coordinator,
                     )
+                    # 研究开始前的行情指纹：只给**真正要研究**的股票算（跳过的
+                    # 复用股票一次行情都不读，这才是增量省下的开销）。它有两个
+                    # 用途——落在条目上标记"研究跑在什么数据上"，以及研究结束后
+                    # 再算一次对账：中途同步了新数据就作废这次研究，防止一份
+                    # 结果横跨两套行情。
+                    try:
+                        research_start_fingerprint = _market_fingerprint(self._adapter, ref)
+                    except Exception:  # noqa: BLE001 - 指纹算不出来就放弃中途对账，不挡研究
+                        logger.exception("读取研究前行情指纹失败: %s", symbol)
+                        research_start_fingerprint = ""
                     future = executor.submit(
                         self._research_symbol,
                         ref,
@@ -722,7 +727,7 @@ class MarketStrategyPoolService:
                         job_id=job_id,
                         mode="full",
                         config_fingerprint=config_fingerprint,
-                        previous_market_fingerprint=market_fingerprint,
+                        previous_market_fingerprint=research_start_fingerprint,
                         progress=ticker_progress,
                         abort_check=abort_check,
                     )
@@ -912,8 +917,12 @@ class MarketStrategyPoolService:
                     market_fingerprint = _market_fingerprint(self._adapter, ref)
                 except Exception:  # noqa: BLE001 - fingerprint errors should allow a fresh attempt
                     logger.exception("读取单股历史样本不足指纹失败: %s", ref.symbol)
+                    market_fingerprint = ""
                 else:
-                    if self._can_reuse(prior, market_fingerprint, config_fingerprint):
+                    # 显式单股重跑与全市场增量的语义不同：这只股票上次连研究都没法
+                    # 开始（历史不足），行情没变时重试注定以同样失败收场，跳过省
+                    # 一次必败寻优；数据长了的当天指纹就不同，自然落到重新研究。
+                    if market_fingerprint and market_fingerprint == prior[0]:
                         saved_entry = self._pool_store.get(ref.market, ref.code) or {}
                         _report(
                             progress_callback,
@@ -1608,15 +1617,28 @@ class MarketStrategyPoolService:
     @staticmethod
     def _can_reuse(
         prior: tuple[str, str, str, bool] | None,
-        market_fingerprint: str,
         config_fingerprint: str,
     ) -> bool:
+        """增量是否跳过这只股票：只看配置与研究是否有结论，刻意不看行情。
+
+        全市场逐股寻优要跑十几天、每天同步都会新增日线；行情指纹一变全部作废，
+        增量就永远等不到复用的那一天（实测：每天点增量都从第一只重新跑）。
+        策略选出之后的持续检验是**跟踪**（tracking）的职责——天天在重叠的数据
+        上重选胜者，恰恰是多重检验校正要惩罚的那种研究。
+
+        可复用的是研究**有了结论**的状态：ready / partial（选出策略）与
+        no_strategy（研究跑完、没有通过门槛的候选）。最后这个同样是一次结论：
+        薄样本的股票明天多半还是薄样本，每天重跑一小时寻优换不来新信息。要
+        重新打开它们：改配置（指纹变化）、单股重跑、或清空重建。
+
+        刻意**不可**复用的：insufficient_history（历史还没攒够，而数据每天都在
+        长，攒够当天就该补研究）与 failed（错误应当重试）。
+        """
+
         return bool(
             prior
-            and prior[0]
-            and prior[0] == market_fingerprint
             and prior[1] == config_fingerprint
-            and prior[2] in {"ready", "partial", "insufficient_history"}
+            and prior[2] in {"ready", "partial", "no_strategy"}
         )
 
     @staticmethod

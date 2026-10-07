@@ -236,9 +236,37 @@ def test_stock_window_algorithm_version_invalidates_old_no_strategy_checkpoints(
     assert updated_config != previous_config
     assert not MarketStrategyPoolService._can_reuse(
         (market_fingerprint, previous_config, "no_strategy"),
-        market_fingerprint,
         updated_config,
     )
+
+
+def test_incremental_reuse_survives_daily_market_data_changes() -> None:
+    """行情指纹不参与复用判定。
+
+    全市场逐股寻优要跑十几天，每天同步都会新增日线；若行情一变就作废，
+    增量永远等不到复用（实测每天点增量都从第一只重新跑）。
+    """
+
+    config = _fingerprint({"algorithm_version": MARKET_POOL_ALGORITHM_VERSION})
+    # 昨天的行情指纹 vs 今天同步后的：不同，但研究已有结论，照样跳过。
+    assert MarketStrategyPoolService._can_reuse(("bars-yesterday", config, "ready"), config)
+    assert MarketStrategyPoolService._can_reuse(("bars-yesterday", config, "partial"), config)
+    # no_strategy 同样是一次结论：薄样本的股票明天多半还是薄样本，
+    # 每天重跑一小时寻优换不来新信息。
+    assert MarketStrategyPoolService._can_reuse(("bars-yesterday", config, "no_strategy"), config)
+
+
+def test_incremental_re_researches_unconcluded_states() -> None:
+    """历史不足与失败不是结论：前者数据在长、后者错误应重试，每次增量都重查。"""
+
+    config = _fingerprint({"algorithm_version": MARKET_POOL_ALGORITHM_VERSION})
+    assert not MarketStrategyPoolService._can_reuse(
+        ("bars-v1", config, "insufficient_history"), config
+    )
+    assert not MarketStrategyPoolService._can_reuse(("bars-v1", config, "failed"), config)
+    assert not MarketStrategyPoolService._can_reuse(None, config)
+    # 配置一变，所有状态全部作废。
+    assert not MarketStrategyPoolService._can_reuse(("bars-v1", "other-config", "ready"), config)
 
 
 def test_portfolio_strategy_selection_uses_objective_ties_drawdown_then_symbol() -> None:
