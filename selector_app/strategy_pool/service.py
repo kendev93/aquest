@@ -38,8 +38,8 @@ from selector_app.portfolio_backtest.service import PortfolioBacktestService
 from selector_app.screening.engine import evaluate_rule_group
 from selector_app.screening.jobs import TaskCancelledError
 from selector_app.screening.rules import RuleGroup
-from selector_app.strategy_discovery.catalog import default_indicator_catalog
 from selector_app.strategy_discovery.candidates import DEFAULT_MAX_HOLD_DAYS
+from selector_app.strategy_discovery.catalog import default_indicator_catalog
 from selector_app.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
 from selector_app.web.schemas.screening import RuleGroupRequest
 
@@ -62,7 +62,10 @@ from .store import DuckDbStrategyPoolStore
 PoolObjective = Literal["annual_return", "sharpe"]
 PoolProgressCallback = Callable[[int, int, str, Mapping[str, object] | None], None]
 PoolEntryWriter = Callable[[Mapping[str, object]], None]
-MARKET_POOL_ALGORITHM_VERSION = "market-pool-v5"
+# v6：选优加了两道硬门槛（样本不足直接出局、平均持仓超上限出局，见
+# strategy_pool.selection）。门槛会改变谁是胜者，v5 语义下选出的存量条目
+# 全部作废，下一次全市场重选时逐股重研究。
+MARKET_POOL_ALGORITHM_VERSION = "market-pool-v6"
 POOL_PROGRESS_EMIT_INTERVAL_SECONDS = 1.5
 STRATEGY_HOLDING_BATCH_SIZE = 100
 STRATEGY_HOLDING_VIRTUAL_CASH = 1_000_000_000_000.0
