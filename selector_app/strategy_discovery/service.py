@@ -23,7 +23,6 @@ from selector_app.individual_research.search_policy import FULL_LIMIT, MEDIUM_LI
 from selector_app.market_data.adapter import DuckDbMarketDataAdapter, MarketDataAdapter
 from selector_app.market_data.models import InstrumentBoard, InstrumentType
 from selector_app.market_data.store import DuckDbMarketDataStore
-from selector_app.screening.jobs import TaskCancelledError
 from selector_app.portfolio_backtest.models import (
     PortfolioBacktestConfig,
     PortfolioBacktestReport,
@@ -32,6 +31,7 @@ from selector_app.portfolio_backtest.service import (
     PortfolioBacktestService,
     SimulationCheckpoint,
 )
+from selector_app.screening.jobs import TaskCancelledError
 from selector_app.web.schemas import PortfolioBacktestRequest
 
 from .candidates import build_random_candidate

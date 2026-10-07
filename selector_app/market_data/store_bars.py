@@ -1037,11 +1037,15 @@ class DuckDbBarsStore:
             ).fetchall()
             cursor = start_date
             for interval_start, interval_end in intervals:
-                first = interval_start if isinstance(interval_start, date) else date.fromisoformat(
-                    str(interval_start)[:10]
+                first = (
+                    interval_start
+                    if isinstance(interval_start, date)
+                    else date.fromisoformat(str(interval_start)[:10])
                 )
-                last = interval_end if isinstance(interval_end, date) else date.fromisoformat(
-                    str(interval_end)[:10]
+                last = (
+                    interval_end
+                    if isinstance(interval_end, date)
+                    else date.fromisoformat(str(interval_end)[:10])
                 )
                 if first > cursor:
                     break

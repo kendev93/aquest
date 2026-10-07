@@ -31,9 +31,7 @@ from selector_app.screening.rules import RuleGroup
 
 
 def test_holdout_empty_or_unavailable_calendar_is_not_reported_as_success() -> None:
-    empty = _holdout_evaluation(
-        {}, {}, trading_day_count=0, min_trades=1, min_instruments=1
-    )
+    empty = _holdout_evaluation({}, {}, trading_day_count=0, min_trades=1, min_instruments=1)
     unavailable = _holdout_evaluation(
         {}, {}, trading_day_count=None, min_trades=1, min_instruments=1
     )

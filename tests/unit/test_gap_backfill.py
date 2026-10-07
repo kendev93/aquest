@@ -340,11 +340,11 @@ def test_verified_halted_gap_uses_authoritative_factor_not_open_price() -> None:
     assert detail[0].drop_pct == pytest.approx((41.25 / 137.49 - 1) * 100)
 
 
-def test_halted_gap_without_event_stays_skipped_but_is_marked() -> None:
-    """权威因子说"这天没除权"，就保持跳过，并把结论写进 detail。
+def test_halted_gap_without_confirmed_factor_stays_skipped_without_claiming_no_event() -> None:
+    """缺少正向因子答案不能声称权威源已确认无除权。
 
-    要能区分"压根没校验过"和"校验过、确实不是除权"：后者是预期结果（实测 270
-    个跨停牌跳空里 222 个属于这种），留个标记才不会让人反复去查同一批。
+    baostock 查询异常与成功查询但当日无因子都不会返回正向答案；这两种情况都必须
+    留在 skipped 清单并明确标成无法确认，而不能把它们伪装成权威否定结论。
     """
 
     _, skipped = infer_corporate_actions(halted_gap(), CALENDAR)
@@ -354,7 +354,8 @@ def test_halted_gap_without_event_stays_skipped_but_is_marked() -> None:
     assert not verified
     assert len(still) == 1
     assert still[0].reason == SkippedGap.REASON_HALTED
-    assert "权威因子确认当日无除权" in still[0].detail
+    assert "未取得可确认因子，无法确认是否除权" in still[0].detail
+    assert "确认当日无除权" not in still[0].detail
 
 
 def test_out_of_range_authoritative_factor_is_rejected() -> None:
@@ -420,9 +421,7 @@ def test_verified_actions_are_written_with_their_own_provenance() -> None:
     store = RecordingStore(halted_gap())
     key = ("SH", "600000", date(2015, 9, 14))
 
-    report = backfill_inferred_actions(
-        store, write=True, verify_halted_with=lambda _: {key: 3.5}
-    )
+    report = backfill_inferred_actions(store, write=True, verify_halted_with=lambda _: {key: 3.5})
 
     assert len(report.verified_detail) == 1
     assert report.written == 1

@@ -182,9 +182,7 @@ def test_missing_action_reports_unexplained_limit_down(tmp_path: Path) -> None:
 
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     store.replace_local_bars("SH", "600000", "stock", bars(), name="基准")
-    store.replace_local_bars(
-        "SH", "600666", "stock", crashed(bars(), 20), name="疑似漏记"
-    )
+    store.replace_local_bars("SH", "600666", "stock", crashed(bars(), 20), name="疑似漏记")
 
     item = check_by_key(store)["missing_action"]
     assert item.severity == "warn"
@@ -211,9 +209,7 @@ def test_recorded_corporate_action_is_not_reported(tmp_path: Path) -> None:
     # 跳变必须砸在**最后一根** bar 上：单日暴跌之后必然跟着一根回到基准的
     # 补偿性大涨，那也是无事件解释的超限跳变、也会被抓 —— 到时候这里就是
     # 2 次而不是 1 次，断言会莫名失败。砸在末尾就没有次日了。
-    store.replace_local_bars(
-        "SH", "600666", "stock", crashed(bars(), 59), name="腰斩"
-    )
+    store.replace_local_bars("SH", "600666", "stock", crashed(bars(), 59), name="腰斩")
     checks = check_by_key(store)
     assert checks["missing_action"].occurrences == 1
     # 同一次腰斩在 price_jump 里也是超限跳变（主板 -50% 远超 11%）：事件一旦

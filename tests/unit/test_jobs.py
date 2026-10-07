@@ -223,7 +223,9 @@ def test_queued_generic_cancellation_prevents_task_execution() -> None:
     try:
         first = runner.submit_callable(blocker, description="阻塞")
         assert started.wait(timeout=1)
-        second = runner.submit_callable(lambda _progress: queued_ran.set() or {}, description="排队")
+        second = runner.submit_callable(
+            lambda _progress: queued_ran.set() or {}, description="排队"
+        )
         assert runner.request_cancel(second)
         release.set()
         wait_until_complete(runner, first)

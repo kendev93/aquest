@@ -33,7 +33,7 @@ KEY = ("SZ", "002713", date(2025, 12, 30))
 
 # 假 baostock：照真实库的脾气来 —— login/logout 往 stdout 打印，
 # query_adjust_factor 交回两行因子（末行日期命中目标日，比值即当次因子）。
-_FAKE_BAOSTOCK = '''
+_FAKE_BAOSTOCK = """
 def login():
     print("login success!")
     return type("R", (), {"error_code": "0"})()
@@ -62,7 +62,7 @@ def query_adjust_factor(symbol, start, end):
             return self.cur
 
     return RS()
-'''
+"""
 
 
 def test_child_output_is_bare_json(tmp_path: Path) -> None:

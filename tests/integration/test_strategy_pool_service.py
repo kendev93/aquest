@@ -216,31 +216,46 @@ def test_full_pool_research_splits_each_symbol_and_saves_each_symbol_incremental
     assert refreshed["manual_overrides"]["annual_return"]["candidate_id"] == "kept-manual"
 
 
-def test_no_strategy_entry_is_not_reused_on_full_reselection() -> None:
+def test_no_strategy_entry_is_re_researched_even_for_unchanged_config() -> None:
+    """没选出策略 ≠ 结论：研究区间随数据增长而变，下次可能就选得出来。"""
+
     prior = ("market-v1", "config-v1", "no_strategy", False)
 
-    assert not MarketStrategyPoolService._can_reuse(prior, "market-v1", "config-v1")
+    assert not MarketStrategyPoolService._can_reuse(prior, "config-v1")
+    assert not MarketStrategyPoolService._can_reuse(prior, "config-v2")
+    # 行情指纹变了也不影响：可复用只看「上次是否选出了策略」。
     assert MarketStrategyPoolService._can_reuse(
-        ("market-v1", "config-v1", "ready", True),
-        "market-v1",
+        ("market-v2", "config-v1", "ready", True),
         "config-v1",
     )
 
 
-def test_insufficient_history_checkpoint_is_reused_only_for_unchanged_inputs() -> None:
+def test_only_selected_strategies_are_reused() -> None:
     prior = ("market-v1", "config-v1", "insufficient_history", False)
 
-    assert MarketStrategyPoolService._can_reuse(prior, "market-v1", "config-v1")
-    assert not MarketStrategyPoolService._can_reuse(prior, "market-v2", "config-v1")
-    assert not MarketStrategyPoolService._can_reuse(prior, "market-v1", "config-v2")
+    assert not MarketStrategyPoolService._can_reuse(prior, "config-v1")
+    assert not MarketStrategyPoolService._can_reuse(prior, "config-v2")
     assert not MarketStrategyPoolService._can_reuse(
         ("market-v1", "config-v1", "failed", False),
-        "market-v1",
+        "config-v1",
+    )
+    assert not MarketStrategyPoolService._can_reuse(
+        ("market-v1", "config-v1", "no_strategy", False),
+        "config-v1",
+    )
+    assert MarketStrategyPoolService._can_reuse(
+        ("market-v1", "config-v1", "ready", False),
+        "config-v1",
+    )
+    assert MarketStrategyPoolService._can_reuse(
+        ("market-v1", "config-v1", "partial", False),
         "config-v1",
     )
 
 
-def test_full_research_caches_insufficient_history_until_market_data_changes(tmp_path) -> None:
+def test_full_research_retries_insufficient_history_but_single_reuses_unchanged_inputs(
+    tmp_path,
+) -> None:
     store = DuckDbMarketDataStore(tmp_path / "insufficient-history.duckdb")
     bars = _bars("2021-01-01", 40)
     store.replace_local_bars("SH", "600000", "stock", bars)
@@ -281,12 +296,12 @@ def test_full_research_caches_insufficient_history_until_market_data_changes(tmp
     )
 
     item = pool_store.get("SH", "600000")
-    assert individual.calls == 1
+    assert individual.calls == 2
     assert first["failed_symbols"] == 0
     assert first["skipped_symbols"] == 1
     assert second["skipped_symbols"] == 1
     assert item["status"] == "insufficient_history"
-    assert item["data_fingerprint"] == "data-1"
+    assert item["data_fingerprint"] == "data-2"
 
     single_cached = service.run(
         {"mode": "single", "market": "SH", "code": "600000", "risk_trials": 1_000},
@@ -295,7 +310,7 @@ def test_full_research_caches_insufficient_history_until_market_data_changes(tmp
     )
     assert single_cached["single_candidate"]["status"] == "insufficient_history"
     assert single_cached["skipped_symbols"] == 1
-    assert individual.calls == 1
+    assert individual.calls == 2
 
     bars.loc[0, "close"] += 0.1
     bars.loc[0, "open"] += 0.1
@@ -311,7 +326,7 @@ def test_full_research_caches_insufficient_history_until_market_data_changes(tmp
     assert single["single_candidate"]["saved_to_pool"] is True
     assert single["skipped_symbols"] == 1
     assert pool_store.get("SH", "600000")["status"] == "insufficient_history"
-    assert individual.calls == 2
+    assert individual.calls == 3
 
     third = service.run(
         {"mode": "full", "risk_trials": 1_000},
@@ -319,7 +334,7 @@ def test_full_research_caches_insufficient_history_until_market_data_changes(tmp
         entry_writer=writer,
     )
     assert third["skipped_symbols"] == 1
-    assert individual.calls == 2
+    assert individual.calls == 4
 
 
 def test_current_strategy_snapshot_includes_holds_beyond_five_portfolio_slots(tmp_path) -> None:
@@ -402,7 +417,7 @@ def test_current_strategy_snapshot_includes_holds_beyond_five_portfolio_slots(tm
     assert len(configs[0].codes) == 6
 
 
-def test_full_reselection_runs_research_again_for_no_strategy_entries(tmp_path) -> None:
+def test_full_reselection_reruns_no_strategy_entries(tmp_path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "no-strategy.duckdb")
     store.replace_local_bars("SH", "600000", "stock", _bars("2020-01-01", 60))
     adapter = DuckDbMarketDataAdapter(store)
@@ -446,6 +461,8 @@ def test_full_reselection_runs_research_again_for_no_strategy_entries(tmp_path) 
     )
 
     assert first["failed_symbols"] == second["failed_symbols"] == 0
+    # 上次没选出策略 → 这次重查。数据没变也要重查：判定依据不是行情，
+    # 而是「没有策略」这个结论会随研究区间变长而失效。
     assert second["skipped_symbols"] == 0
     assert individual.calls == 2
     assert pool_store.get("SH", "600000")["status"] == "no_strategy"

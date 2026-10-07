@@ -4,9 +4,10 @@
 
 - **范围**：`selector_app/` 全部 25 个包、约 71k 行 Python（`web/` 8.6k、`market_data/` 15.6k、`strategy_discovery/` 8.9k、`portfolio_backtest/` 5.1k、`condition_research/` 5.2k 等）。
 - **方式**：静态代码审查。11 个子代理分组通读（每组限读指定文件），产出候选缺陷；由主对话对其中 **12 条**逐条回读代码复核，其余按置信度与证据采纳。
-- **基准**：`main` HEAD `d61bd7e`（含 `822c1e0` 等前序修复）；以下 2026-10-06 跟进以该基线及当前工作树变更为准。
+- **审查基准**：本轮跟进的初始基线为 `main` HEAD `d61bd7e`；跟进修复目前在 `feature/code-review-followup`，本次核对基于 HEAD `01a5670` 及当前工作树变更，包含 `8f6080e` 的审查修复及其后的用户提交。
+- **历史描述**：各条原始“位置/后果/修法”记录的是原审查时的证据，不代表当前代码；带“当前状态”的段落按本次分支和工作树解释，原行号只作为发现路径。
 - **上一份** `docs/code-review-2026-09-18.md` 的 H2/H3 不再沿用旧结论：当前 `condition_research/mining.py` 的置换候选池在标签置换前构造、显著性使用 `pvalue <= alpha`、默认置换数为 200；H3 的基线去重与 uint32 编码已有部分实现。旧版 8 倍耗时/内存测量不是当前实现证据，本次没有重测。H1（成交量单位）、M5（目录翻页截断）仍记录为已修复。
-- **局限**：全部为静态分析，未跑数据实测、未做交叉验证；标「中」置信度的条目建议在动手前先写一个复现用例。
+- **原始审查局限（2026-10-05）**：那一轮是静态审查，未跑数据实测或交叉验证；这不代表后续跟进没有执行测试。跟进验证见修复进度中的独立记录。
 
 **分级**：P0 = 会产生错误数字/脏数据/安全问题；P1 = 可用性、健壮性、资源；P2 = 次要口径与代码质量。✅ = 本次已回读代码确认属实。
 
@@ -24,7 +25,23 @@ P0-6 的「当前挂牌集合造成幸存者偏差」仍是待数据验证的假
 
 P1-9 跨任务族的全局重任务预算与 P1-7 失败状态码/API 错误体需要产品级契约：现有任务族有各自的 runner、资源预检、排斥组与前端错误处理。为避免改变并发行为或把兼容客户端的失败响应改成另一套语义，本次只完成边界盘点，未作全局串行化或状态码变更。它们仍待明确资源预算/任务所有权与可演进的错误响应契约。
 
-本次最终验证结果将在完成后的更新中填写；不沿用上一轮测试数。
+本次最终验证数据见 2026-10-08 记录；不沿用上一轮测试数。
+
+### 2026-10-07 分支基线与新增数据口径
+
+本次工作树包含后续产品提交，审查结论按当前代码解释：策略池寻优算法版本为 v6；单股候选的样本数与最长持仓硬门槛只依据训练/验证结果筛选，留出结果仍只作描述与复核；默认最长持仓为 20 个交易日。全市场增量复用只复用同配置下的 `ready` / `partial`；`no_strategy`、`insufficient_history` 与 `failed` 都会重查（单股模式仅对未变行情的 `insufficient_history` 短路复用）。老票研究区间从 `RESEARCH_START`（2016-01-01）开始，2015 年只作指标预热。不要把旧版算法、2015 年正式样本口径或旧的耗时测量当成当前行为。
+
+P1-15 现有两条补全口径必须分开写：相邻交易日的缺口可按开盘价**估算**因子；跨停牌缺口只有启用 `verify=true` 后，才用可选、子进程隔离的 Baostock 后复权因子做**正向确认**，默认不联网、不启用。因子能确认调整比例，不证明送股数与现金分红的实际分解；当前事件仍存 `share_ratio=factor-1, cash_per_share=0`。因此这条路径不能被表述为验证了真实派息或持仓现金流，若需要准确现金流还需权益分派明细源。`verify` 测试只用 stub，不做实时网络查询。没有返回因子的候选仍保持跳过，报告为「无法确认」，不冒称权威源确认无除权。
+
+P1-21a 的整轮取消/异常边界保留；策略池 `01a5670` 将“任务提交前 raw 行情指纹”守卫置空，因为它与单股研究内部复权指标指纹不在同一口径。结果保存研究自身的数据指纹，后续跟踪再检测变化。不要把它描述成研究期间仍有提交前/提交后的跨口径指纹对账。策略发现的快照构建时间仍不计入搜索 `timeout_seconds`；checkpoint 恢复代码会核对数据指纹、明细模式和日期前缀，原先“缺配置/区间身份”的担忧尚无反例证实。P1-19 修复了超时未完成候选的独立标记和展示。
+
+健康检查的新“疑似漏记除权/异常跳变”条目是线索，不是确认事件；只有上述验证/人工流程才能改变公司行动表。可选 Baostock 调用不可用时维护路由返回 503，且不写部分验证结果。数据库新增 `market_trading_calendar_coverage` 元数据表，schema 初始化时创建，不删旧公司行动；既有数据库升级后不会从日期行反推可信覆盖范围，因此旧历史区间在重新取得 provider 覆盖前会 fail-closed。备份/迁移需保留这张表，否则恢复后历史回填会再次因覆盖未知而拒绝运行。
+
+### 2026-10-08 最终验证
+
+- Python：`PATH="$PWD/.venv/bin:$PATH" sh scripts/verify_ci.sh python` 通过；1505 tests passed，84.97% coverage；Ruff format 376 个文件、Ruff 检查通过，mypy 238 个源文件通过。完整日志：`/tmp/indicator-lab-python-2026-10-08-final.log`。
+- 前端非浏览器部分：Vitest 556 tests passed；coverage 为 85.00% statements、77.64% branches、85.88% functions、87.74% lines；`vue-tsc --build` 和 Vite production build 通过。构建保留一个 bundle 超过 500 kB 的提示。日志：`/tmp/indicator-lab-frontend-2026-10-07.log`。
+- 浏览器页面验收：由用户执行。按最新测试边界，代理不再下载 Chromium、启动浏览器或运行页面 E2E；此前浏览器运行尝试不作为本轮交付的页面验收依据。本轮交付以以上非浏览器脚本检查为准。Docker 镜像构建与生产环境执行均未运行。
 
 ### 已修复
 
@@ -103,7 +120,7 @@ P0-2（`_has_new_data` 快照行数）、P0-4（显著门槛加 `ic_days`）、P
 
 - **P0-6 幸存者偏差**：证据不足，当前作为待验证假设，不计入已确认缺陷。
 - **P1-7 失败状态码与错误体**、**P1-9 跨任务族全局资源协调**：需要先明确 API 兼容策略和全局资源所有权/预算，再决定跨模块改动。
-- **P1-19 的快照构建 deadline 与 fidelity checkpoint 身份**、**P1-20**、**P1-21 的 worker 异常兜底部分**、以及其余 P2 观察：不属于本次已验证修复；仍需单独检查。
+- **P1-19 的快照构建 deadline**、**P1-20**、以及其余 P2 观察：不属于本次已验证修复；仍需单独检查。P1-21 的整轮取消/异常行为保留为既有契约，不列为当前缺陷。checkpoint 身份错配尚未证实，当前恢复路径有指纹/日期前缀校验。
 
 ---
 
@@ -195,7 +212,7 @@ P0-2（`_has_new_data` 快照行数）、P0-4（显著门槛加 `ic_days`）、P
 - **置信度**：中（同一文件内两个函数的 none/empty 判定口径不一致）。
 
 ### P0-14 留出段没有「空段/样本不足」闸门，零成交也照出结论 ✅
-- **当前状态（2026-10-06）**：支持以库内实际成交日切分；候选 holdout 单独输出 `holdout_evaluation.status`、原因和约束结果，不覆盖验证段的 `passed_constraints` 或验证排名。缺实际日期日历、无成交或低于已有 `min_trades` / `min_instruments` 配置时明确标为不可评估/样本不足，不报复验成功。
+- **当前状态（2026-10-07）**：服务优先用 completed/raw 行情的实际日期切分；候选 holdout 单独输出 `holdout_evaluation.status`、原因和约束结果，页面显示“通过/未通过/样本不足/无法评估”。候选入选与综合排序仍只看 validation，holdout 是描述性复验，不改 validation 的 `passed_constraints` 或排序。缺可用交易日、无成交或低于已有 `min_trades` / `min_instruments` 配置时明确标为不可评估/样本不足，不报复验成功。
 - **位置**：`condition_research/time_split.py:38-43`（只要求每段 ≥ 1 自然日，且按自然日而非交易日）、`service.py:452-459`（`summarize_backtests([])` 返回全 0/None）、`service.py:375-381`（约束校验只作用于 validation，从不重算 holdout）。
 - **后果**：holdout 落在假期或区间偏短时实际成交为 0，`passed_constraints` 也不会翻 False，候选带着 `holdout.closed_trades = 0` 的「复验结论」进入结果页。对照同文件滚动复验的 `MIN_WINDOW_DAYS = 30` 硬门槛，主三段反而最松。
 - **修法**：按交易日历切分并给每段设最小交易日；holdout 结果也过一遍 `candidate_constraint_failures`，不足时显式写 `holdout_blocked`。
@@ -263,8 +280,8 @@ P0-2（`_has_new_data` 快照行数）、P0-4（显著门槛加 `ic_days`）、P
 - **后果**：跨标的不会互串（命中含 `(market, code)` 比较、返回 deep copy，**这点已确认不会串票**），但「开跑前清一下」的契约对非调用线程无效；其它线程里新建的、带 `cache_stock_reads=True` 的 adapter 会拿到上一轮行情快照且无人能失效。
 
 ### P1-15 gap_backfill 用「由 bar 自身反推」的交易日历判停牌，会把复牌暴跌误补成除权 ✅
-- **当前状态（2026-10-06）**：✅ 反推公司行动现在要求有来源且覆盖候选全区间的持久化交易日历覆盖记录，覆盖还必须包含 `prev_date`。rolling sync 不删旧日历，bar 派生 rebuild 不覆盖权威来源；sessions 与 coverage 同事务保存。无可靠覆盖时显式跳过/拒绝推断，不回退到 bars 日期、不删既有用户事件。
-- **位置**：`market_data/gap_backfill.py:190-210,238-266`（`_trading_days_between` 用的日历是 `daily_bars` 日期并集，非交易所口径）。
+- **当前状态（2026-10-07）**：✅ `gap_backfill.py` 必须用可信覆盖完整跨越 `prev_date` 到候选日的持久化 provider 日历区间；rolling refresh 保留老 sessions，derived rebuild 与未知来源不能覆盖权威 provenance，sessions 与 coverage 同事务提交。相邻日仍是“开盘价估算”来源；跨停牌默认跳过，可选 `verify=true` 用 Baostock 因子正向确认，missing factor 只标无法确认。未覆盖时拒绝/跳过，不退回 bars 日期、不删已有事件。
+- **当前位置**：`market_data/gap_backfill.py:338-395` 验证跨停牌因子并标记来源，`:398-466` 编排读覆盖、分别写估算/验证事件；`market_data/store_bars.py:940-1085` 保存/读取带来源的覆盖区间；`market_data/baostock_adjust.py` 为可选的子进程查询实现。
 - **后果**：某段时间全市场普遍缺 bar 时，两根 bar 中间的「交易日」在日历里也不存在 ⇒ `missed == 0` ⇒ 长期停牌后的复牌跌幅被当成除权，`share_ratio/factor_ratio` 写进 `corporate_actions`，静默污染该股全部历史指标（量与 RECORD 不可回收）。
 
 ### P1-16 macOS / Windows 上面板内存护栏静默失效
@@ -280,14 +297,14 @@ P0-2（`_has_new_data` 快照行数）、P0-4（显著门槛加 `ic_days`）、P
 - **后果**：与同一行的佣金（`size * price * rate`）口径不一致；schema 只写了 `ge=0, le=1000`（`web/schemas/portfolio.py:83`），用户填 `0.001` 的意图几乎必然是「千分之一成交额」，实际只收到 0.001 元/股 ⇒ 成本被低估一个量级，参数寻优会把滑点当免费噪声。
 
 ### P1-19 strategy_discovery：中断时的半程结果处理
-- **当前状态（2026-10-06，部分修复）**：✅ 超时未完成 full 复核的候选单列在 `partial_by_sharpe` / `partial_by_return`，带 `achieved_fidelity` 且 `qualified=false`；不会进入正式榜单或自动候选池。超时页面显示未完成数量与精度状态。全量 full 已评估但违反约束的候选仍是失败，不会降精度兜底。快照构建 deadline 与 checkpoint 身份隔离仍未处理。
-- **位置**：`strategy_discovery/search.py:636-673`（full 循环中断后 `final_observed = []` ⇒ `service.py:667` 抛「没有找到满足约束的策略候选」，把 coarse/medium 阶段已通过的候选全部丢弃）、`search.py:333,474,617,655`（deadline 自快照构建**完成后**才起算，不覆盖可能数十分钟的快照构建；检查点只在批次之间）、`service.py:566-590`（fidelity checkpoint 仅按 `candidate_hash` 复用，无策略配置签名/日期区间/分段标识，行情在 coarse→medium 之间更新时会串味）、`resources.py:139-181`（每 evaluation 进程各自新建 store + cache + 回测服务的固定开销未计入预算）。
+- **当前状态（2026-10-07，部分修复）**：✅ 超时未完成 full 复核的候选单列在 `partial_by_sharpe` / `partial_by_return`，带 `achieved_fidelity` 且 `qualified=false`；不会进入正式榜单或自动候选池。结果保留请求、研究数据指纹、算法元数据与阶段耗时。超时页面显示未完成数量与精度状态。全量 full 已评估但违反约束的候选仍是失败，不会降精度兜底。快照构建不计入搜索 `timeout_seconds`；checkpoint 身份错配没有确认，回测恢复会校验数据指纹、明细模式和已处理日期前缀。
+- **当前位置**：超时部分候选在 `strategy_discovery/service.py:670-724,758-770` 组装；模拟器在 `portfolio_backtest/simulation.py:652-665` 检查 checkpoint 指纹、明细模式和日期前缀。旧静态审查关于“只有 candidate_hash、可能跨配置/区间串用”的担忧未经反例验证，不作为当前缺陷结论。快照构建时间预算仍待产品/作业预算口径决定。
 
 ### P1-20 strategy_pool：多副本调度与写入串行性
 - **位置**：`strategy_pool/tracking_scheduler.py:33-94`（进程内 `_WRITE_LOCK` + SELECT→INSERT 之间无 DB 唯一约束；且它是唯一没挂在 `owns_runner` 门禁下的 scheduler，`web/app.py:302-312`）、`store.py:214-219`（reset 与其它写入没整体串行，晚到的 upsert 会把刚删空的条目写回并留下孤儿版本）、`tracking_store.py:238-263`（`save_snapshot` 的校验与 UPDATE 是两条独立 SQL，无事务包裹）。
 
 ### P1-21 condition_research：worker 异常兜底与参数透传
-- **当前状态（2026-10-06，比例透传已修）**：✅ 请求 schema 接受受约束的 `train_ratio` 与 `validation_ratio`，保持默认 0.6/0.2 并校验总和小于 1，`to_config()` 透传到已有 split 逻辑。worker 异常兜底部分未改，需单独核查后决定。
+- **当前状态（2026-10-07）**：比例透传已修：请求 schema 保持 0.6/0.2 默认，校验每项在 0~1 且总和小于 1，并传至 split。worker 端不捕获市场变动异常以降级成单股失败，保留整轮中止的既有契约；不把旧报告中该行为再标作待修缺陷。
 - **位置**：`condition_research/worker_tasks.py:136-139,173,210,250`（三处 `except (ValueError, OSError)` 漏掉 `TaskUserError`，见 `screening/jobs.py:56`）⇒ 单只股票「行情在研究期间变化」会炸掉整轮研究、已跑的成百上千只结果全部丢弃；`web/schemas/condition.py:30,120-161` + `condition_research/models.py:75-76`（`train_ratio`/`validation_ratio` 在 config 里有定义、会写进历史，但请求体 `extra="forbid"` 且 `to_config()` 不透传 ⇒ 永久锁死在 0.6/0.2，与 P0-14 叠加后用户无法补救）。**后者置信度高**：全仓库仅 `web/schemas/condition.py` 与测试构造引用。`(ValueError, OSError)` 那条置信度中高。
 
 ### P1-22 其余记账类
@@ -325,13 +342,10 @@ P0-2（`_has_new_data` 快照行数）、P0-4（显著门槛加 `ic_days`）、P
 
 ---
 
-## 建议修复顺序
+## 当前后续工作
 
-1. **先止血数据正确性**：P0-1（除权调整持仓）、P0-2（`_has_new_data`）、P0-7（回测侧缓存失效）——这三条会静默产出错误数字且用户无从察觉。
-2. **再修统计口径**：P0-4、P0-8、P0-12、P0-14、P0-15——改的是「结论怎么来的」，每条都应配一个对拍回归。
-3. **然后统一取消/任务语义**：P1-1 ~ P1-4、P1-6、P1-7 是一次性重构（引入统一的 abort 契约与失败状态码）。
-4. **最后处理健壮性与并发**：P1-11 ~ P1-13、P1-16、P1-20、P1-21。
+原审查提出的修复顺序是 2026-10-05 的建议，不能当成当前未修列表。已在基线提交或本轮完成的项目见上文当前状态；目前需要产品/架构决策的主要是 P1-7（任务失败 HTTP 状态码/错误体）、P1-9（跨任务族重任务资源预算）、P1-20（多副本调度/写入串行性）和 P1-19 的快照构建是否纳入搜索超时预算。P0-6 幸存者偏差仍待历史退市证券数据证明。
 
 ## 附注
 
-本次审查未跑数据实测、未执行任何改动；上文「后果」均为静态推导。动手前建议对每条 P0 先补一个能复现当前错误行为的测试，再改——尤其是 P0-1 与 P0-8，它们的正确值依赖口径约定，改完必须同步更新 `docs/` 中的相应说明。
+原始 2026-10-05 静态审查没有运行测试，也没有改文件；那一轮的「后果」是静态推导。2026-10-08 跟进已执行上面的 Python/前端单测和静态门禁；浏览器页面验收留待用户执行。历史回测口径数据仅按各自条目所列当时证据表述，不能把旧统计或旧行号视为当前重新测量结果。

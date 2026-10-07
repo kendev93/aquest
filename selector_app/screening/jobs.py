@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import logging
-from inspect import Parameter, signature
 import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from inspect import Parameter, signature
 from threading import Lock
 from typing import Literal, Protocol, cast
 
@@ -313,9 +313,7 @@ class ScreenJobRunner:
                 state.status = "cancelled" if state.cancel_requested else "failed"
                 state.phase = state.status
                 state.error = (
-                    None
-                    if state.cancel_requested
-                    else "后台任务失败，请检查配置和服务状态后重试"
+                    None if state.cancel_requested else "后台任务失败，请检查配置和服务状态后重试"
                 )
                 state.finished_at = time.time()
                 self._evict_if_needed_locked()
@@ -358,8 +356,7 @@ class ScreenJobRunner:
             scan = self._engine.scan
             scan_parameters = signature(scan).parameters.values()
             if any(
-                parameter.name == "abort_check"
-                or parameter.kind is Parameter.VAR_KEYWORD
+                parameter.name == "abort_check" or parameter.kind is Parameter.VAR_KEYWORD
                 for parameter in scan_parameters
             ):
                 report = scan(

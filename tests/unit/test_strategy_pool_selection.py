@@ -248,21 +248,27 @@ def test_incremental_reuse_survives_daily_market_data_changes() -> None:
     """
 
     config = _fingerprint({"algorithm_version": MARKET_POOL_ALGORITHM_VERSION})
-    # 昨天的行情指纹 vs 今天同步后的：不同，但研究已有结论，照样跳过。
+    # 昨天的行情指纹 vs 今天同步后的：不同，但只要上次选出了策略，照样跳过。
     assert MarketStrategyPoolService._can_reuse(("bars-yesterday", config, "ready"), config)
     assert MarketStrategyPoolService._can_reuse(("bars-yesterday", config, "partial"), config)
-    # no_strategy 同样是一次结论：薄样本的股票明天多半还是薄样本，
-    # 每天重跑一小时寻优换不来新信息。
-    assert MarketStrategyPoolService._can_reuse(("bars-yesterday", config, "no_strategy"), config)
 
 
-def test_incremental_re_researches_unconcluded_states() -> None:
-    """历史不足与失败不是结论：前者数据在长、后者错误应重试，每次增量都重查。"""
+def test_incremental_re_researches_symbols_without_a_strategy() -> None:
+    """没有策略的股票每次增量都重查——这是增量本来就该干的事。
+
+    研究区间按可用交易日数量比例切 60/20/20，数据每往前长一天，三段就整体
+    前移并变长。所以「这只票没有通过门槛的策略」是**依赖当时历史长度**的
+    结论：验证段样本不足被判 no_strategy 的股票，往后验证段变长就可能攒够
+    笔数。把它复用（跳过）等于永久冻结，那批股票再没有翻身的机会。
+    """
 
     config = _fingerprint({"algorithm_version": MARKET_POOL_ALGORITHM_VERSION})
+    # 行情没变也照样重查：判定依据不是行情，而是上次没选出策略。
+    assert not MarketStrategyPoolService._can_reuse(("bars-v1", config, "no_strategy"), config)
     assert not MarketStrategyPoolService._can_reuse(
         ("bars-v1", config, "insufficient_history"), config
     )
+    # failed 重查的理由不同：错误应当重试，而不是把一次故障当成结论存下来。
     assert not MarketStrategyPoolService._can_reuse(("bars-v1", config, "failed"), config)
     assert not MarketStrategyPoolService._can_reuse(None, config)
     # 配置一变，所有状态全部作废。

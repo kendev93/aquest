@@ -700,9 +700,7 @@ class OnlineMarketClient:
             return _valid_empty_frame(columns)
         if any(not isinstance(item, str) or not item.strip() for item in raw_klines):
             raise OnlineDataError("East Money 日线响应包含格式无效的 kline")
-        rows = [
-            item.split(",") for item in raw_klines
-        ]
+        rows = [item.split(",") for item in raw_klines]
         if any(len(row) < 11 for row in rows):
             raise OnlineDataError("East Money 日线响应字段数量不足")
         frame = pd.DataFrame(
@@ -807,9 +805,13 @@ class OnlineMarketClient:
         dates = pd.to_datetime(frame["date"], errors="coerce")
         for column in ("open", "close", "high", "low", "volume", "turnover", "amount"):
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
-        if dates.isna().any() or frame[
-            ["open", "close", "high", "low", "volume", "turnover", "amount"]
-        ].isna().any().any():
+        if (
+            dates.isna().any()
+            or frame[["open", "close", "high", "low", "volume", "turnover", "amount"]]
+            .isna()
+            .any()
+            .any()
+        ):
             raise OnlineDataError("Tencent 日线响应包含无效日期或数值")
         # 成交量以"手"入库（与通达信 .day 导入、东财 f56 的口径一致）。
         # 腾讯对科创板（688/689）直接给"股"，其余品种（含 ETF 和指数）给的就是
@@ -1760,9 +1762,7 @@ class OnlineMarketSync:
                         if _is_valid_no_data(frame):
                             no_data_sources.append(source_name)
                         else:
-                            errors.append(
-                                f"{source_name}: 空日线响应没有明确的无数据标记"
-                            )
+                            errors.append(f"{source_name}: 空日线响应没有明确的无数据标记")
                         break
                     return frame, retries, source_name
                 except OnlineDataError as exc:

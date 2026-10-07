@@ -476,9 +476,7 @@ class DuckDbHealthStore:
             ).fetchall()
         return {(str(row[0]), str(row[1])): _as_text(row[2]) for row in rows}
 
-    def missing_action(
-        self, *, example_limit: int
-    ) -> tuple[int, int, tuple[HealthIssueRow, ...]]:
+    def missing_action(self, *, example_limit: int) -> tuple[int, int, tuple[HealthIssueRow, ...]]:
         """超跌停、但事件表给不出解释的跳空 —— 除权漏记的候选。
 
         判据复用 :meth:`read_price_gap_candidates`，这里既不重判也不重写 SQL：那才是
@@ -524,9 +522,7 @@ class DuckDbHealthStore:
                     f"事件表当日无记录）"
                 ),
                 occurrences=1,
-                sort_value=float(row.date.toordinal())
-                if isinstance(row.date, date)
-                else 0.0,
+                sort_value=float(row.date.toordinal()) if isinstance(row.date, date) else 0.0,
             )
             for row in candidates
         )

@@ -1026,7 +1026,8 @@ def _holdout_evaluation(
     insufficient = [
         reason
         for reason in failures
-        if reason in {
+        if reason
+        in {
             "交易样本不足",
             "覆盖股票不足",
             "基础规则样本不足，无法比较胜率",

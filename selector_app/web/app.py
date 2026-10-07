@@ -85,9 +85,7 @@ async def _cancel_background_tasks(tasks: list[asyncio.Task[None] | None]) -> No
         return
     outcomes = await asyncio.gather(*active, return_exceptions=True)
     for outcome in outcomes:
-        if isinstance(outcome, BaseException) and not isinstance(
-            outcome, asyncio.CancelledError
-        ):
+        if isinstance(outcome, BaseException) and not isinstance(outcome, asyncio.CancelledError):
             logger.error(
                 "后台 lifespan 任务退出时发生异常",
                 exc_info=(type(outcome), outcome, outcome.__traceback__),

@@ -36,6 +36,13 @@ from ._shared import (
 router = APIRouter(tags=["market-data"])
 
 
+def _supports_abort_check(method: Callable[..., object]) -> bool:
+    return any(
+        parameter.name == "abort_check" or parameter.kind is Parameter.VAR_KEYWORD
+        for parameter in signature(method).parameters.values()
+    )
+
+
 def _with_indicator_precompute(
     request: Request,
     result: dict[str, object],
@@ -71,28 +78,29 @@ def _with_indicator_precompute(
                 },
             }
         precomputer = _precomputer(request)
-        run_arguments = dict(
-            # The DuckDB adapter uses this only as a compatibility-shaped
-            # source path on StockRef; it never scans or reads .day files.
-            vipdoc_path=vipdoc_path or ".",
-            universe=universe,
-            instrument_types=tuple(instrument_types or ()),
-            boards=tuple(boards or ()),
-            years=years if years is not None else DEFAULT_PRECOMPUTE_YEARS,
-            # 区间终点锚在行情的最后一天：数据停在 2024 年时，"最近五年"应当是
-            # 2020..2024，而不是按系统年份算出来的 2022..2026。
-            end_year=_stored_end_year(store_status),
-            # 行情更新通常只动一部分标的，只重算缓存缺失/过期的那些。
-            only_changed=only_changed,
-            progress_callback=progress_callback,
-        )
-        run_parameters = signature(precomputer.run).parameters.values()
-        if any(
-            parameter.name == "abort_check" or parameter.kind is Parameter.VAR_KEYWORD
-            for parameter in run_parameters
-        ):
-            run_arguments["abort_check"] = abort_check
-        precomputed = precomputer.run(**run_arguments)
+        if _supports_abort_check(precomputer.run):
+            precomputed = precomputer.run(
+                vipdoc_path=vipdoc_path or ".",
+                universe=universe,
+                instrument_types=tuple(instrument_types or ()),
+                boards=tuple(boards or ()),
+                years=years if years is not None else DEFAULT_PRECOMPUTE_YEARS,
+                only_changed=only_changed,
+                end_year=_stored_end_year(store_status),
+                progress_callback=progress_callback,
+                abort_check=abort_check,
+            )
+        else:
+            precomputed = precomputer.run(
+                vipdoc_path=vipdoc_path or ".",
+                universe=universe,
+                instrument_types=tuple(instrument_types or ()),
+                boards=tuple(boards or ()),
+                years=years if years is not None else DEFAULT_PRECOMPUTE_YEARS,
+                only_changed=only_changed,
+                end_year=_stored_end_year(store_status),
+                progress_callback=progress_callback,
+            )
         if abort_check is not None and abort_check():
             raise TaskCancelledError("行情任务已取消")
         return {**result, "indicator_precompute": precomputed.to_dict()}
@@ -141,25 +149,29 @@ def create_indicator_precompute_job(
                     ),
                 }
             precomputer = _precomputer(request)
-            run_arguments = dict(
-                # This task warms DuckDB-derived indicators and does not read
-                # This task warms derived indicators and never reads local files.
-                vipdoc_path=payload.vipdoc_path or ".",
-                universe=payload.universe,
-                instrument_types=tuple(payload.instrument_types or ()),
-                boards=tuple(payload.boards or ()),
-                years=payload.precompute_years or DEFAULT_PRECOMPUTE_YEARS,
-                end_year=_stored_end_year(store_status),
-                only_changed=payload.precompute_only_changed,
-                progress_callback=progress,
-            )
-            run_parameters = signature(precomputer.run).parameters.values()
-            if any(
-                parameter.name == "abort_check" or parameter.kind is Parameter.VAR_KEYWORD
-                for parameter in run_parameters
-            ):
-                run_arguments["abort_check"] = abort_check
-            report = precomputer.run(**run_arguments)
+            if _supports_abort_check(precomputer.run):
+                report = precomputer.run(
+                    vipdoc_path=payload.vipdoc_path or ".",
+                    universe=payload.universe,
+                    instrument_types=tuple(payload.instrument_types or ()),
+                    boards=tuple(payload.boards or ()),
+                    years=payload.precompute_years or DEFAULT_PRECOMPUTE_YEARS,
+                    end_year=_stored_end_year(store_status),
+                    only_changed=payload.precompute_only_changed,
+                    progress_callback=progress,
+                    abort_check=abort_check,
+                )
+            else:
+                report = precomputer.run(
+                    vipdoc_path=payload.vipdoc_path or ".",
+                    universe=payload.universe,
+                    instrument_types=tuple(payload.instrument_types or ()),
+                    boards=tuple(payload.boards or ()),
+                    years=payload.precompute_years or DEFAULT_PRECOMPUTE_YEARS,
+                    end_year=_stored_end_year(store_status),
+                    only_changed=payload.precompute_only_changed,
+                    progress_callback=progress,
+                )
         except PrecomputeCancelledError as exc:
             raise TaskCancelledError(str(exc)) from exc
         except (OSError, ValueError, MarketDataStoreError, duckdb.Error) as exc:

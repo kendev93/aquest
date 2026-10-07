@@ -64,8 +64,10 @@ PoolObjective = Literal["annual_return", "sharpe"]
 PoolProgressCallback = Callable[[int, int, str, Mapping[str, object] | None], None]
 PoolEntryWriter = Callable[[Mapping[str, object]], None]
 # v6：选优加了两道硬门槛（样本不足直接出局、平均持仓超上限出局，见
-# strategy_pool.selection）；增量复用判定不再看行情指纹，改为按"研究是否有
-# 结论"跳过（ready/partial/no_strategy 复用，insufficient_history/failed 重查）；
+# strategy_pool.selection）；增量复用判定不再看行情指纹，改为按"上次是否选出
+# 策略"跳过——只有 ready/partial 复用，no_strategy 与 insufficient_history/
+# failed 每次增量重查（理由见 _can_reuse：研究区间按可用交易日比例切，
+# 「没有策略」这个结论会随数据增长而失效）；
 # 研究窗口起点从 2015-01-05 裁到 RESEARCH_START（2016-01-01），2015 全年只作
 # 指标预热。门槛、复用语义与研究窗口都会改变存量条目的有效性，v5 语义下的
 # 条目在下一次全市场重选时逐股重研究。
@@ -1623,27 +1625,30 @@ class MarketStrategyPoolService:
         prior: tuple[str, str, str, bool] | None,
         config_fingerprint: str,
     ) -> bool:
-        """增量是否跳过这只股票：只看配置与研究是否有结论，刻意不看行情。
+        """增量是否跳过这只股票：只看配置与上次研究**是否选出了策略**。
 
         全市场逐股寻优要跑十几天、每天同步都会新增日线；行情指纹一变全部作废，
         增量就永远等不到复用的那一天（实测：每天点增量都从第一只重新跑）。
-        策略选出之后的持续检验是**跟踪**（tracking）的职责——天天在重叠的数据
-        上重选胜者，恰恰是多重检验校正要惩罚的那种研究。
+        所以行情指纹刻意不参与判定。
 
-        可复用的是研究**有了结论**的状态：ready / partial（选出策略）与
-        no_strategy（研究跑完、没有通过门槛的候选）。最后这个同样是一次结论：
-        薄样本的股票明天多半还是薄样本，每天重跑一小时寻优换不来新信息。要
-        重新打开它们：改配置（指纹变化）、单股重跑、或清空重建。
+        判据是「有策略」还是「没策略」，而不是笼统的「有没有研究过」——因为研究
+        区间是**按可用交易日数量比例切** 60/20/20 的（``split_trading_days``）：
+        数据每往前长一天，训练/验证/留出三段就整体前移并变长，验证段的交易笔数
+        随之改变。于是两类结论的稳定性是不对称的：
 
-        刻意**不可**复用的：insufficient_history（历史还没攒够，而数据每天都在
-        长，攒够当天就该补研究）与 failed（错误应当重试）。
+        - **「有」不因数据增长而失效**：策略已经选出，往后由跟踪（tracking）逐日
+          检验。天天在重叠的数据上重选胜者，恰恰是多重检验校正要惩罚的那种研究。
+        - **「没有」依赖当时的历史长度**：验证段样本不足才被判 ``no_strategy`` 的
+          股票，一年后验证段变长就可能攒够笔数——把它冻结住，等于让这批股票永远
+          没有翻身的机会。``insufficient_history`` 同理，且更明显：数据攒够当天
+          就该补研究。
+
+        所以可复用的只有 ready / partial；no_strategy、insufficient_history、
+        failed 与从未研究过的，每次增量都重查。``failed`` 重查的理由不同——错误
+        应当重试，而不是把一次故障当成结论存下来。
         """
 
-        return bool(
-            prior
-            and prior[1] == config_fingerprint
-            and prior[2] in {"ready", "partial", "no_strategy"}
-        )
+        return bool(prior and prior[1] == config_fingerprint and prior[2] in {"ready", "partial"})
 
     @staticmethod
     def _needs_full_period_backfill(entry: Mapping[str, object]) -> bool:

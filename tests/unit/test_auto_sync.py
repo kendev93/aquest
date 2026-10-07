@@ -51,9 +51,7 @@ def test_auto_sync_skips_holiday_after_calendar_check_and_persists_the_check_dat
             coverage_start=None,
             coverage_end=None,
         ):
-            self.saved_calendar = (
-                tuple(trade_dates), source, coverage_start, coverage_end
-            )
+            self.saved_calendar = (tuple(trade_dates), source, coverage_start, coverage_end)
 
     class Runner:
         def __init__(self) -> None:

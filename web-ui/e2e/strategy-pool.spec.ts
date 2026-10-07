@@ -27,7 +27,9 @@ for (const rebuild of [true, false]) {
     await page.goto('/strategy-pool')
     await expect(page.getByTestId('pool-row-600000')).toBeVisible()
     await page.getByTestId(rebuild ? 'pool-start-full' : 'pool-start-incremental').click()
-    await expect.poll(() => submitted).toEqual({ mode: 'full', rebuild, risk_trials: 3000 })
+    await expect.poll(() => submitted).toEqual({
+      mode: 'full', rebuild, risk_trials: 3000, max_hold_days: 20,
+    })
     await expect(page.getByTestId('pool-job-progress')).toBeVisible()
     if (rebuild) await expect(page.getByTestId('pool-row-600000')).toHaveCount(0)
     else await expect(page.getByTestId('pool-row-600000')).toBeVisible()

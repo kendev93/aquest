@@ -138,13 +138,9 @@ def _run_child(requests: Sequence[tuple[str, str, str]], timeout: float) -> str:
         )
     except subprocess.TimeoutExpired as exc:
         # 子进程已被 kill，这里只负责把「卡死」翻译成可重试的错误。
-        raise BaostockAdjustUnavailable(
-            f"baostock 因子查询超过 {timeout:g} 秒无响应"
-        ) from exc
+        raise BaostockAdjustUnavailable(f"baostock 因子查询超过 {timeout:g} 秒无响应") from exc
     except OSError as exc:  # pragma: no cover - 解释器缺失属于环境故障
-        raise BaostockAdjustUnavailable(
-            f"baostock 因子查询子进程无法启动: {exc}"
-        ) from exc
+        raise BaostockAdjustUnavailable(f"baostock 因子查询子进程无法启动: {exc}") from exc
     if completed.returncode != 0:
         detail = completed.stderr.strip() or f"退出码 {completed.returncode}"
         raise BaostockAdjustUnavailable(f"baostock 因子查询失败: {detail}")

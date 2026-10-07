@@ -714,8 +714,18 @@ class HybridSearchEngine:
             sorted(
                 partial_observed,
                 key=lambda item: (
-                    _metric(item.metrics.get("medium") or item.metrics.get("coarse") or item.metrics.get("search", {}), "sharpe"),
-                    _metric(item.metrics.get("medium") or item.metrics.get("coarse") or item.metrics.get("search", {}), "annual_return"),
+                    _metric(
+                        item.metrics.get("medium")
+                        or item.metrics.get("coarse")
+                        or item.metrics.get("search", {}),
+                        "sharpe",
+                    ),
+                    _metric(
+                        item.metrics.get("medium")
+                        or item.metrics.get("coarse")
+                        or item.metrics.get("search", {}),
+                        "annual_return",
+                    ),
                     -item.complexity,
                 ),
                 reverse=True,
@@ -725,8 +735,18 @@ class HybridSearchEngine:
             sorted(
                 partial_observed,
                 key=lambda item: (
-                    _metric(item.metrics.get("medium") or item.metrics.get("coarse") or item.metrics.get("search", {}), "annual_return"),
-                    _metric(item.metrics.get("medium") or item.metrics.get("coarse") or item.metrics.get("search", {}), "sharpe"),
+                    _metric(
+                        item.metrics.get("medium")
+                        or item.metrics.get("coarse")
+                        or item.metrics.get("search", {}),
+                        "annual_return",
+                    ),
+                    _metric(
+                        item.metrics.get("medium")
+                        or item.metrics.get("coarse")
+                        or item.metrics.get("search", {}),
+                        "sharpe",
+                    ),
                     -item.complexity,
                 ),
                 reverse=True,

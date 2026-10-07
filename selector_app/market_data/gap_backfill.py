@@ -343,9 +343,9 @@ def _verify_halted(
 
     返回 ``(仍然跳过的, 确认可补的事件, 审计明细)``。
 
-    判定为"没除权"的会被划出候选，但**仍然留在跳过清单里**，只是把原因补成
-    "权威因子确认无除权"。这样报告能区分"压根没校验过"和"校验过、确实不是
-    除权" —— 后者是预期结果，不该让人反复去查。
+    没有返回因子的候选仍留在跳过清单里。这个正向查询接口只返回确认除权的因子，
+    因此缺项可能是没有除权，也可能是该标的查询没有结果；报告不能把缺项说成已确认
+    无除权。
     """
 
     requests = [
@@ -365,12 +365,10 @@ def _verify_halted(
             continue
         factor = answers.get((item.market, item.code, item.trade_date))
         if factor is None:
-            still.append(replace(item, detail=f"{item.detail}；权威因子确认当日无除权"))
+            still.append(replace(item, detail=f"{item.detail}；未取得可确认因子，无法确认是否除权"))
             continue
         if not (1.0 < factor <= MAX_INFERRED_FACTOR):
-            still.append(
-                replace(item, detail=f"{item.detail}；权威因子 {factor:.4f} 越界未采用")
-            )
+            still.append(replace(item, detail=f"{item.detail}；权威因子 {factor:.4f} 越界未采用"))
             continue
         actions.append(
             CorporateAction(

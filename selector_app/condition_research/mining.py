@@ -9,8 +9,8 @@ from dataclasses import dataclass, replace
 import numpy as np
 import pandas as pd
 
-from selector_app.screening.models import ScreenCondition
 from selector_app.screening.jobs import TaskCancelledError
+from selector_app.screening.models import ScreenCondition
 
 DEFAULT_QUANTILES = (0.2, 0.4, 0.6, 0.8)
 # Fixed shuffle seed: a permutation test must not make a study less

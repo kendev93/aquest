@@ -507,9 +507,7 @@ def test_preload_rejects_poisoned_window_and_accepts_complete_year_chunks(
     assert calls["indicator_three"] == 2
 
     # A correctly complete annual chunk set still preloads and serves tail windows.
-    store2 = DuckDbMarketDataStore(
-        tmp_path / "complete.duckdb", indicator_cache_backend=backend
-    )
+    store2 = DuckDbMarketDataStore(tmp_path / "complete.duckdb", indicator_cache_backend=backend)
     store2.replace_local_bars("SH", "600000", "stock", full)
     complete_writer = IndicatorCache(store2, registry=registry)
     complete_writer.get_or_compute(full, formula_ids, market="SH", code="600000")
