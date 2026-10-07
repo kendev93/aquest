@@ -712,16 +712,13 @@ class MarketStrategyPoolService:
                         callback=None,
                         coordinator=coordinator,
                     )
-                    # 研究开始前的行情指纹：只给**真正要研究**的股票算（跳过的
-                    # 复用股票一次行情都不读，这才是增量省下的开销）。它有两个
-                    # 用途——落在条目上标记"研究跑在什么数据上"，以及研究结束后
-                    # 再算一次对账：中途同步了新数据就作废这次研究，防止一份
-                    # 结果横跨两套行情。
-                    try:
-                        research_start_fingerprint = _market_fingerprint(self._adapter, ref)
-                    except Exception:  # noqa: BLE001 - 指纹算不出来就放弃中途对账，不挡研究
-                        logger.exception("读取研究前行情指纹失败: %s", symbol)
-                        research_start_fingerprint = ""
+                    # previous_market_fingerprint 刻意传空：守卫要求"提交时的指纹"
+                    # 与"研究加载的指纹"同口径，而研究内部的指纹是**复权指标口径**
+                    # （backtest/service._metric_frame，随事件补录自动失效），提交时
+                    # 复算原始价口径必然对不上——有分红送转历史的股票会全部误报
+                    # 「研究期间行情变化」（2026-10-07 实测）。研究加载的数据自身
+                    # 就是一份一致快照，指纹随结果落库即可；中途同步的影响由跟踪
+                    # 持续检验兜底。
                     future = executor.submit(
                         self._research_symbol,
                         ref,
@@ -729,7 +726,7 @@ class MarketStrategyPoolService:
                         job_id=job_id,
                         mode="full",
                         config_fingerprint=config_fingerprint,
-                        previous_market_fingerprint=research_start_fingerprint,
+                        previous_market_fingerprint="",
                         progress=ticker_progress,
                         abort_check=abort_check,
                     )
