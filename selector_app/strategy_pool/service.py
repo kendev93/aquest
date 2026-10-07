@@ -32,6 +32,7 @@ from selector_app.market_data.adapter import BatchMarketDataAdapter
 from selector_app.market_data.adjustment import CorporateAction, mark_adjusted
 from selector_app.market_data.models import StockRef
 from selector_app.market_data.store import DuckDbMarketDataStore
+from selector_app.market_data.store_base import RESEARCH_START
 from selector_app.portfolio_backtest.benchmark import curve_performance
 from selector_app.portfolio_backtest.models import PortfolioBacktestConfig
 from selector_app.portfolio_backtest.service import PortfolioBacktestService
@@ -64,9 +65,10 @@ PoolProgressCallback = Callable[[int, int, str, Mapping[str, object] | None], No
 PoolEntryWriter = Callable[[Mapping[str, object]], None]
 # v6：选优加了两道硬门槛（样本不足直接出局、平均持仓超上限出局，见
 # strategy_pool.selection）；增量复用判定不再看行情指纹，改为按"研究是否有
-# 结论"跳过（ready/partial/no_strategy 复用，insufficient_history/failed 重查）。
-# 门槛与复用语义都会改变存量条目的有效性，v5 语义下的条目在下一次全市场
-# 重选时逐股重研究。
+# 结论"跳过（ready/partial/no_strategy 复用，insufficient_history/failed 重查）；
+# 研究窗口起点从 2015-01-05 裁到 RESEARCH_START（2016-01-01），2015 全年只作
+# 指标预热。门槛、复用语义与研究窗口都会改变存量条目的有效性，v5 语义下的
+# 条目在下一次全市场重选时逐股重研究。
 MARKET_POOL_ALGORITHM_VERSION = "market-pool-v6"
 POOL_PROGRESS_EMIT_INTERVAL_SECONDS = 1.5
 STRATEGY_HOLDING_BATCH_SIZE = 100
@@ -858,6 +860,11 @@ class MarketStrategyPoolService:
         calendar = self._common_calendar()
         if not calendar:
             raise ValueError("本地行情没有已完成的 A 股日线")
+        # 2015 全年只作指标预热（引擎读取 start_date 之前的 warmup_bars 覆盖它），
+        # 研究与回测窗口从 RESEARCH_START 起跑；基准与全区间展示窗口随之对齐。
+        calendar = [day for day in calendar if day >= RESEARCH_START]
+        if not calendar:
+            raise ValueError("本地行情没有研究窗口内（2016 年起）的已完成日线")
         horizon = _positive_int(payload.get("horizon"), 10, "波段预测窗口")
         if mode == "portfolio":
             windows = common_calendar_windows(calendar, purge_days=horizon)
@@ -1741,7 +1748,11 @@ def _individual_config(
         market=ref.market,
         code=ref.code,
         name=ref.name or "",
-        start_date=ref.first_date or start_date,
+        # 研究起点取「股票自身数据起点」与「统一研究起点」的较晚者：2016 年后才
+        # 上市的票从上市起跑；老票被 RESEARCH_START 裁剪，2015 全年只作引擎的
+        # 指标预热。注意这里必须是两者取较晚，不能让 first_date 单方面优先——
+        # 那会把老票的研究窗口又拉回 2015，预热段就混进研究样本了。
+        start_date=max(ref.first_date, start_date) if ref.first_date else start_date,
         end_date=min(ref.last_date or end_date, end_date),
         value_ids=tuple(value_ids),
         signal_ids=tuple(signal_ids),

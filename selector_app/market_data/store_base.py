@@ -67,6 +67,16 @@ DEFAULT_PRICE_BASIS = "raw"
 #: 涨跌幅限制、流通市值、退市规则换过好几轮，那个区间寻优出的参数搬不到现在。
 #: 2015 年起覆盖 2577 只、当前 5223 只，才是能代表当下 A 股的样本。
 HISTORY_START = date(2015, 1, 1)
+
+#: 研究窗口的统一起点：回测、寻优、基准都从这里起跑。
+#:
+#: ``HISTORY_START`` 之后的第一年只作**预热**——公式指标的滚动窗口（MA250、
+#: 年线一类）需要一段历史才有值，从 2015-01-05 直接起跑的研究开头一年指标是
+#: 冷的，那些天产生的信号全是半成品。所以 2015 全年只喂给指标计算，不算研究
+#: 样本。引擎侧的配合机制是 ``portfolio_backtest.context`` 的 ``warmup_bars``
+#: （按公式推荐条数取最大，约 268 根，从 2016-01-01 向前正好覆盖 2015 全年）。
+#: 本常量从 ``HISTORY_START`` 派生：数据保留起点挪，研究起点跟着挪。
+RESEARCH_START = date(HISTORY_START.year + 1, HISTORY_START.month, HISTORY_START.day)
 _BAR_COLUMNS = [
     "market",
     "code",
