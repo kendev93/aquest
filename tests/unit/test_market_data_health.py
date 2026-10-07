@@ -208,17 +208,24 @@ def test_recorded_corporate_action_is_not_reported(tmp_path: Path) -> None:
 
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     store.replace_local_bars("SH", "600000", "stock", bars(), name="基准")
+    # 跳变必须砸在**最后一根** bar 上：单日暴跌之后必然跟着一根回到基准的
+    # 补偿性大涨，那也是无事件解释的超限跳变、也会被抓 —— 到时候这里就是
+    # 2 次而不是 1 次，断言会莫名失败。砸在末尾就没有次日了。
     store.replace_local_bars(
-        "SH", "600666", "stock", crashed(bars(), 20), name="腰斩"
+        "SH", "600666", "stock", crashed(bars(), 59), name="腰斩"
     )
-    assert check_by_key(store)["missing_action"].occurrences == 1
+    checks = check_by_key(store)
+    assert checks["missing_action"].occurrences == 1
+    # 同一次腰斩在 price_jump 里也是超限跳变（主板 -50% 远超 11%）：事件一旦
+    # 补上，两边必须同时闭嘴 —— 一条记录只该解释一次。
+    assert checks["price_jump"].occurrences == 1
 
     store.upsert_corporate_actions(
         [
             CorporateAction(
                 market="SH",
                 code="600666",
-                ex_date=date(2024, 1, 21),
+                ex_date=date(2024, 2, 29),
                 share_ratio=1.0,
                 cash_per_share=0.0,
                 factor_ratio=2.0,
@@ -233,6 +240,33 @@ def test_recorded_corporate_action_is_not_reported(tmp_path: Path) -> None:
     assert item.occurrences == 0
     assert item.affected_instruments == 0
     assert item.severity == "ok"
+    assert check_by_key(store)["price_jump"].occurrences == 0
+
+
+def test_price_jump_thresholds_follow_board_limits(tmp_path: Path) -> None:
+    """阈值必须跟着板块走：主板 11%、创业板 21%。
+
+    两条断言各钉死一半参数顺序：主板 +15% 在旧代码里会被漏掉（主板误配了
+    创业板的 21%），创业板 +19% 在旧代码里会被误报（创业板误配了主板的
+    11%）—— 真实库上 49,324 条误报里 46,594 条来自后者。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", bars(), name="基准")
+    # 同样砸在最后一根 bar：跳变日之后的补偿回落本身也是超限跳变，会多出
+    # 一条把「affected == 1」的断言打穿。
+    store.replace_local_bars(
+        "SH", "600666", "stock", crashed(bars(), 59, ratio=1.15), name="主板跳涨"
+    )
+    store.replace_local_bars(
+        "SZ", "300750", "stock", crashed(bars(), 59, ratio=1.19), name="创业涨停内", board="chinext"
+    )
+
+    item = check_by_key(store)["price_jump"]
+    assert item.affected_instruments == 1
+    assert item.occurrences == 1
+    assert (item.examples[0].market, item.examples[0].code) == ("SH", "600666")
+    assert "15.0%" in item.examples[0].detail
 
 
 def test_missing_action_examples_are_newest_first(tmp_path: Path) -> None:

@@ -205,13 +205,29 @@ LIMIT ?
 """
 )
 
-_JUMP_LIMIT_EXPR = """
-(CASE WHEN joined.board IN ('star', 'chinext') THEN ? ELSE ? END)
-"""
-
+#: 阈值把常量直接内插进 SQL，而不是走 ``?`` 参数。两个板块的阈值只差 0.1，参数
+#: 顺序一旦接反不报任何错，只会安静地扫出几万条假信号 —— 这不是假设：本文件
+#: 曾经让 THEN 位置收到主板阈值、ELSE 收到创业板的，创业板 ±20% 的正常涨跌停
+#: 全被判成异常（真实库上 49,324 条误报里 46,594 条来自这里）。内插常量让
+#: 「哪边用哪个数」只在这一处出现，这类 bug 从根上失去容身之处。
+#:
+#: 除权日在**原始价**上本来就会留下大缺口 —— 库里存的是不复权价，这是设计
+#: （见 ``online_market_sync`` 里 fqt=0 的注释：复权基准会漂移，不能当存储口径）。
+#: 所以当天能被分红送配事件表解释的跳变不算异常，与 ``missing_action`` 用同一把
+#: 尺子排除。剩下这些在市场规则下不可能出现，无论涨跌都按数据错误对待；长期
+#: 停牌复牌与退市期的特殊定价也会落进来，但那是真价格，要与「除权漏记嫌疑」
+#: 对照着看。
 _JUMP_WHERE = f"""
 WHERE joined.prev_close > 0
-  AND ABS(joined.close / joined.prev_close - 1.0) > {_JUMP_LIMIT_EXPR}
+  AND ABS(joined.close / joined.prev_close - 1.0)
+      > (CASE WHEN joined.board IN ('star', 'chinext')
+              THEN {GROWTH_JUMP_LIMIT} ELSE {MAIN_JUMP_LIMIT} END)
+  AND NOT EXISTS (
+      SELECT 1 FROM corporate_actions explained
+      WHERE explained.market = joined.market
+        AND explained.code = joined.code
+        AND explained.ex_date = joined.trade_date
+  )
 """
 
 _JUMP_SUMMARY_SQL = (
@@ -410,13 +426,12 @@ class DuckDbHealthStore:
         )
         return summary[0], summary[1], issues
 
-    def price_jump(
-        self, *, main_limit: float, growth_limit: float, example_limit: int
-    ) -> tuple[int, int, tuple[HealthIssueRow, ...]]:
-        params = [main_limit, growth_limit]
-        summary = self._summary(_JUMP_SUMMARY_SQL, params)
+    def price_jump(self, *, example_limit: int) -> tuple[int, int, tuple[HealthIssueRow, ...]]:
+        """无事件解释的超限跳变；判据与排除口径见 ``_JUMP_WHERE`` 的注释。"""
+
+        summary = self._summary(_JUMP_SUMMARY_SQL, [])
         with self._store._connect() as connection:
-            rows = connection.execute(_JUMP_EXAMPLES_SQL, [*params, example_limit]).fetchall()
+            rows = connection.execute(_JUMP_EXAMPLES_SQL, [example_limit]).fetchall()
         issues = tuple(
             HealthIssueRow(
                 market=str(row[0]),
@@ -609,7 +624,7 @@ class DuckDbHealthStore:
                     SELECT DISTINCT market, code FROM joined {_JUMP_WHERE}
                     ORDER BY market, code
                     """,
-                    [MAIN_JUMP_LIMIT, GROWTH_JUMP_LIMIT],
+                    [],
                 )
             )
         if "zero_volume" in keys:
@@ -684,9 +699,7 @@ def build_report(
         min_days=LONG_GAP_DAYS, example_limit=example_limit
     )
     ohlc_affected, ohlc_occurrences, ohlc_rows = store.ohlc(example_limit=example_limit)
-    jump_affected, jump_occurrences, jump_rows = store.price_jump(
-        main_limit=MAIN_JUMP_LIMIT, growth_limit=GROWTH_JUMP_LIMIT, example_limit=example_limit
-    )
+    jump_affected, jump_occurrences, jump_rows = store.price_jump(example_limit=example_limit)
     action_affected, action_occurrences, action_rows = store.missing_action(
         example_limit=example_limit
     )
