@@ -49,12 +49,40 @@ def test_objective_winners_rank_only_validation_metrics_and_keep_risk_warnings()
     result = {
         "data_fingerprint": "bars-v1",
         "results_by_sharpe": [
-            _candidate("a", annual_return=0.2, sharpe=1.5, holdout_sharpe=99),
-            _candidate("b", annual_return=0.5, sharpe=1.1, holdout_sharpe=0),
+            _candidate(
+                "a",
+                annual_return=0.2,
+                sharpe=1.5,
+                holdout_sharpe=99,
+                validation_trades=12,
+                holdout_trades=6,
+            ),
+            _candidate(
+                "b",
+                annual_return=0.5,
+                sharpe=1.1,
+                holdout_sharpe=0,
+                validation_trades=12,
+                holdout_trades=6,
+            ),
         ],
         "results_by_return": [
-            _candidate("b", annual_return=0.5, sharpe=1.1, holdout_sharpe=0),
-            _candidate("a", annual_return=0.2, sharpe=1.5, holdout_sharpe=99),
+            _candidate(
+                "b",
+                annual_return=0.5,
+                sharpe=1.1,
+                holdout_sharpe=0,
+                validation_trades=12,
+                holdout_trades=6,
+            ),
+            _candidate(
+                "a",
+                annual_return=0.2,
+                sharpe=1.5,
+                holdout_sharpe=99,
+                validation_trades=12,
+                holdout_trades=6,
+            ),
         ],
     }
 
@@ -63,7 +91,7 @@ def test_objective_winners_rank_only_validation_metrics_and_keep_risk_warnings()
     assert winners["annual_return"]["candidate_id"] == "b"
     assert winners["sharpe"]["candidate_id"] == "a"
     assert winners["sharpe"]["metrics"]["holdout"]["sharpe"] == 99
-    assert winners["sharpe"]["quality"]["badges"] == ["样本不足", "风险高"]
+    assert winners["sharpe"]["quality"]["badges"] == ["样本较充分", "风险高"]
 
 
 def test_objective_winners_prefer_adequate_sample_over_a_thin_high_score() -> None:
@@ -133,7 +161,13 @@ def test_objective_winners_do_not_reject_candidates_without_holding_metric() -> 
     assert winners["sharpe"]["candidate_id"] == "legacy"
 
 
-def test_objective_winners_fall_back_when_no_candidate_has_an_adequate_sample() -> None:
+def test_objective_winners_return_empty_when_every_candidate_is_thin() -> None:
+    """样本门槛没有退回：全都不足就出空。
+
+    薄样本上的分数是噪声——一两笔交易的胜率和夏普跟掷硬币没有区别，
+    把它选进池子等于给噪声背书。空槽位（该股暂无值得信的策略）才是诚实输出。
+    """
+
     board = [
         _candidate("low", annual_return=0.1, sharpe=0.5, validation_trades=1, holdout_trades=1),
         _candidate("high", annual_return=0.4, sharpe=1.4, validation_trades=2, holdout_trades=1),
@@ -142,9 +176,7 @@ def test_objective_winners_fall_back_when_no_candidate_has_an_adequate_sample() 
 
     winners = summarize_objective_winners(result)
 
-    # 样本稀薄的市场不该因此得到一个空池子，但标记必须保留给使用者看。
-    assert winners["sharpe"]["candidate_id"] == "high"
-    assert winners["sharpe"]["quality"]["badges"] == ["样本不足"]
+    assert winners["sharpe"] is None
     assert winners["annual_return"] is None
 
 

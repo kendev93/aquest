@@ -75,14 +75,15 @@ def summarize_objective_winners(
     """Select each objective from validation metrics only and retain compact replay data.
 
     样本不够的候选很容易靠一两笔交易把年化 / 夏普顶到榜首：持有两年不动的一笔
-    交易就足以让「平均持仓 700 天」的策略看起来比交易了几十笔的还好。所以只要
-    榜上存在样本足够的候选，胜者就只在它们之间产生；全部候选都样本不足时才退回
-    按分数选，免得样本稀薄的市场直接得到一个空池子。
+    交易就足以让「平均持仓 700 天」的策略看起来比交易了几十笔的还好。所以样本
+    门槛是**硬性**的：验证段交易笔数不足（单股口径 ``MIN_VALIDATION_TRADES``）
+    的候选直接出局，没有「全都不足就退回按分数选」的豁免——薄样本上的分数
+    本身就是噪声，退回等于把噪声选进池子。全部候选都不合格时，该目标就是空：
+    这只股票暂时没有值得信的策略，留空比塞一个噪声进去诚实。
 
-    ``max_hold_days``（交易日）是**硬门槛**，和样本门槛不同：它没有"全都不合格
-    就退回"的豁免——持仓过长正是这次要治的病，退回等于白设。候选验证段的
-    ``avg_holding_days`` 是自然日口径（回测绩效报告如此），要按年化常数折算成
-    交易日再比；个别候选缺这个指标时不误杀，只跳过这项检查。
+    ``max_hold_days``（交易日）同样是硬门槛：验证段平均持仓（``avg_holding_days``
+    是自然日口径，按年化常数 252/365 折算成交易日）超上限的候选出局。个别候选
+    缺这个指标时不误杀，只跳过这项检查。
     """
 
     boards = {
@@ -92,13 +93,7 @@ def summarize_objective_winners(
     winners: dict[str, ObjectiveCandidate | None] = {}
     for objective, raw_candidates in boards.items():
         candidates = _mapping_sequence(raw_candidates)
-        winner = _best_candidate(
-            candidates, objective, require_adequate_sample=True, max_hold_days=max_hold_days
-        )
-        if winner is None:
-            winner = _best_candidate(
-                candidates, objective, require_adequate_sample=False, max_hold_days=max_hold_days
-            )
+        winner = _best_candidate(candidates, objective, max_hold_days=max_hold_days)
         winners[objective] = (
             _compact_candidate(winner, objective, result.get("data_fingerprint"))
             if winner is not None
@@ -111,10 +106,9 @@ def _best_candidate(
     candidates: Sequence[Mapping[str, object]],
     objective: str,
     *,
-    require_adequate_sample: bool,
     max_hold_days: int | None,
 ) -> Mapping[str, object] | None:
-    """Pick the highest validation score, optionally skipping thin samples."""
+    """Pick the highest validation score among candidates that pass the hard gates."""
 
     winner: Mapping[str, object] | None = None
     winning_score: float | None = None
@@ -124,9 +118,9 @@ def _best_candidate(
         score = _finite_number(validation.get(objective))
         if score is None:
             continue
-        if _exceeds_hold_cap(validation, max_hold_days):
+        if not _sample_adequate(validation):
             continue
-        if require_adequate_sample and not _sample_adequate(validation):
+        if _exceeds_hold_cap(validation, max_hold_days):
             continue
         if winning_score is None or score > winning_score:
             winner = candidate
@@ -137,7 +131,7 @@ def _best_candidate(
 def _sample_adequate(
     validation: Mapping[str, object],
 ) -> bool:
-    """Use validation sample size for eligibility; holdout remains descriptive only."""
+    """Hard eligibility gate on validation trade count; holdout remains descriptive only."""
 
     return _trade_count(validation) >= MIN_VALIDATION_TRADES
 
