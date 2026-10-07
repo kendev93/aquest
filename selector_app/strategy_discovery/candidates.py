@@ -23,9 +23,13 @@ from .models import DiscoveryRequest, RiskMode, StrategyCandidate
 _OPERATORS = ("gt", "gte", "lt", "lte", "eq", "cross_up", "cross_down")
 _DEFAULT_CONSTANTS = (-1.0, 0.0, 10.0, 30.0, 50.0, 70.0, 90.0)
 _RISK_COOLDOWNS = (0, 3, 5, 10)
-#: 最长持有交易日数的搜索网格。``None`` = 不限制，留着和时间止损做对照，
-#: 否则看不出"限时"本身到底贡献了多少。单位是交易日，与冷却期同口径。
-_MAX_HOLD_DAYS: tuple[object, ...] = (None, 20, 40, 60, 120)
+#: 最长持有**交易日**数。这不是搜索维度，是策略池的准入政策：2026-10 排查发现
+#: 池内 42 个持仓里 13 个超过 100 天（最久 1072 天），根因就是这里曾按
+#: ``(None, 20, 40, 60, 120)`` 采样、五分之一的候选根本不带时间止损，而选优又
+#: 不看持仓天数——长期持有的策略照样进池。现在改为统一上限，默认 20 个交易日
+#: （约 30 个自然日），由页面参数下发；请求里显式传 ``None`` 仍表示不限制，
+#: 供对照实验用。选优侧的对应门槛见 ``strategy_pool.selection``。
+DEFAULT_MAX_HOLD_DAYS = 20
 _RebalanceFrequency = Literal["daily", "weekly", "monthly"]
 _RankOrder = Literal["asc", "desc"]
 
@@ -207,12 +211,20 @@ def _risk_values(rng: object) -> tuple[RiskMode, float | None, float | None, int
     return mode, percentage, None, cooldown
 
 
-def _max_hold_days(rng: object) -> int | None:
-    value = _choice(rng, _MAX_HOLD_DAYS, None)
-    if value is None:
+def _resolve_max_hold_days(base_config: Mapping[str, object]) -> int | None:
+    """从请求配置解析最长持仓天数（交易日）。
+
+    - 键**缺席**（老请求、未改造的调用方）→ 按默认 20 收口；
+    - 显式 ``None`` → 不限制，保留给对照实验；
+    - 显式正整数 → 原样采用；非法值（0/负数/非数字）退回默认，不抛异常——
+      这是政策参数，配置错了应该"回到安全默认"，而不是让整个研究跑不起来。
+    """
+
+    raw = base_config.get("max_hold_days", DEFAULT_MAX_HOLD_DAYS)
+    if raw is None:
         return None
-    days = _as_int(value, 0)
-    return days if days > 0 else None
+    days = _as_int(raw, 0)
+    return days if days > 0 else DEFAULT_MAX_HOLD_DAYS
 
 
 def _build_random_risk_candidate(
@@ -230,8 +242,7 @@ def _build_random_risk_candidate(
     frequency = str(base_config.get("rebalance_frequency") or "daily")
     if frequency not in {"daily", "weekly", "monthly"}:
         frequency = "daily"
-    max_hold = _max_hold_days(rng)
-    base_config["max_hold_days"] = max_hold
+    base_config["max_hold_days"] = _resolve_max_hold_days(base_config)
     risk_summary = []
     for prefix, label in (
         ("stop_loss", "止损"),
@@ -244,7 +255,10 @@ def _build_random_risk_candidate(
         else:
             setting = f"{percentage:.0%}" if percentage is not None else f"ATR×{atr_multiplier:g}"
             risk_summary.append(f"{label}{setting}/冷却{cooldown}日")
-    risk_summary.append("不限持有期" if max_hold is None else f"最长持有{max_hold}交易日")
+    resolved_max_hold = base_config.get("max_hold_days")
+    risk_summary.append(
+        "不限持有期" if resolved_max_hold is None else f"最长持有{resolved_max_hold}交易日"
+    )
     return StrategyCandidate(
         # Risk-only candidates carry no generated rules.  ``preserve_base_config``
         # ensures the exact serialized buy/sell rules and ranking survive replay.
@@ -335,7 +349,7 @@ def build_random_candidate(
     take_profit_mode, take_profit_pct, take_profit_atr, take_profit_cooldown = risk["take_profit"]
     stop_loss_mode, stop_loss_pct, stop_loss_atr, stop_loss_cooldown = risk["stop_loss"]
     trailing_mode, trailing_pct, trailing_atr, trailing_cooldown = risk["trailing_stop"]
-    base_config["max_hold_days"] = _max_hold_days(generator)
+    base_config["max_hold_days"] = _resolve_max_hold_days(base_config)
     rank_order_value = str(_choice(generator, ("asc", "desc"), "desc"))
     rank_order = cast(
         _RankOrder,

@@ -29,6 +29,7 @@ export interface StrategyDiscoveryPayload {
   validation_candidates?: number
   holdout_candidates?: number
   min_trades?: number
+  max_hold_days?: number | null
   max_drawdown?: number | null
   max_turnover?: number | null
   max_complexity?: number

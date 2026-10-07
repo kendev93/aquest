@@ -74,6 +74,8 @@ const form = reactive({
   maxPositions: 5,
   searchLevel: 'low',
   minTrades: 20,
+  // 最长持仓交易日数（20 ≈ 30 自然日），作为统一上限下发给每个候选。
+  maxHoldDays: 20,
 })
 const capabilities = ref<Record<string, unknown> | null>(null)
 const history = ref<Array<Record<string, unknown>>>([])
@@ -124,6 +126,9 @@ const canSubmit = computed(() => (
   && Number.isInteger(form.minTrades)
   && form.minTrades >= 0
   && form.minTrades <= 10_000
+  && Number.isInteger(form.maxHoldDays)
+  && form.maxHoldDays >= 1
+  && form.maxHoldDays <= 10_000
   && capabilities.value?.enabled !== false
 ))
 const dateRange = computed<DateRangeSelection>({
@@ -142,6 +147,9 @@ function validate(): Record<string, string> {
   }
   if (!Number.isInteger(form.minTrades) || form.minTrades < 0 || form.minTrades > 10_000) {
     next.minTrades = '最少交易数必须是 0 到 10000 的整数。'
+  }
+  if (!Number.isInteger(form.maxHoldDays) || form.maxHoldDays < 1 || form.maxHoldDays > 10_000) {
+    next.maxHoldDays = '最长持仓天数必须是 1 到 10000 的整数。'
   }
   if (form.universe === 'custom' && !form.universeFile.trim()) next.universeFile = '请输入自定义品种列表文件。'
   if (form.dateMode === 'custom') {
@@ -190,6 +198,7 @@ function buildPayload(): StrategyDiscoveryPayload {
     validation_candidates: 50,
     holdout_candidates: 20,
     min_trades: form.minTrades,
+    max_hold_days: form.maxHoldDays,
     max_drawdown: 0.3,
     max_complexity: 12,
     multifidelity_enabled: true,
@@ -711,6 +720,7 @@ function restoreHistoryRequest(raw: unknown): void {
   form.requiredSellRule = requiredRuleFromHistory(request.required_sell_conditions)
   if (typeof base.max_positions === 'number' && Number.isInteger(base.max_positions)) form.maxPositions = base.max_positions
   if (typeof request.min_trades === 'number' && Number.isInteger(request.min_trades) && request.min_trades >= 0 && request.min_trades <= 10_000) form.minTrades = request.min_trades
+  if (typeof request.max_hold_days === 'number' && Number.isInteger(request.max_hold_days) && request.max_hold_days >= 1 && request.max_hold_days <= 10_000) form.maxHoldDays = request.max_hold_days
 }
 
 function requiredRuleFromHistory(raw: unknown): RuleGroupPayload {
@@ -851,6 +861,8 @@ onMounted(async () => {
             <select v-model="form.searchLevel" data-testid="strategy-discovery-search-level"><option value="low">低 · 1000 组</option><option value="medium">中 · 2000 组</option><option value="high">高 · 3000 组</option></select>
             <div class="portfolio-inline-field"><label for="strategy-discovery-min-trades">最少交易数</label><input id="strategy-discovery-min-trades" v-model.number="form.minTrades" data-testid="strategy-discovery-min-trades" type="number" min="0" max="10000" step="1"></div>
             <p v-if="errors.minTrades" class="field-error">{{ errors.minTrades }}</p>
+            <div class="portfolio-inline-field"><label for="strategy-discovery-max-hold-days">最长持仓(交易日)</label><input id="strategy-discovery-max-hold-days" v-model.number="form.maxHoldDays" data-testid="strategy-discovery-max-hold-days" type="number" min="1" max="10000" step="1"></div>
+            <p v-if="errors.maxHoldDays" class="field-error">{{ errors.maxHoldDays }}</p>
             <p class="helper">候选在验证段至少要完成这么多笔成交才会进榜，0 表示不限制。调低会放进更多样本单薄、更容易过拟合的策略。</p>
             <p class="helper">固定搜索范围：3 组公式指标的用户可选输出 + MA5/10/20/60、RSI14、MACD、SIGNAL、Histogram；Z 等恒定输出不参与寻优。</p>
             <p class="helper">排序指标、买卖条件、止盈止损、移动止盈和冷却天数均自动搜索。佣金默认万分之一，最低 0.1 元。</p>

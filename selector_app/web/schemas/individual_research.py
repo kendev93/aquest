@@ -37,6 +37,8 @@ class IndividualResearchRequest(BaseModel):
     search_policy: Literal["legacy", "adaptive-v1"] = "adaptive-v1"
     candidate_limit: int = Field(default=CANDIDATE_LIMIT, ge=1, le=CANDIDATE_LIMIT)
     risk_trials: Literal[1_000, 2_000, 3_000] = 1_000
+    #: 最长持仓**交易日**数，作为统一上限传给每个候选（None = 不限制）。
+    max_hold_days: int | None = Field(default=20, ge=1, le=10_000)
     initial_cash: float = Field(default=1_000_000.0, gt=0, le=1_000_000_000_000)
     commission: float = Field(default=0.0001, ge=0, le=0.1)
     min_commission: float = Field(default=0.1, ge=0, le=100_000)
@@ -102,6 +104,7 @@ class IndividualResearchRequest(BaseModel):
             search_policy=self.search_policy,
             candidate_limit=self.candidate_limit,
             risk_trials=self.risk_trials,
+            max_hold_days=self.max_hold_days,
             initial_cash=self.initial_cash,
             commission=self.commission,
             min_commission=self.min_commission,

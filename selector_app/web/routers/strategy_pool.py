@@ -32,6 +32,8 @@ class PoolJobRequest(BaseModel):
     automatic: bool = False
     rebuild: bool = False
     risk_trials: Literal[1_000, 2_000, 3_000] = 3_000
+    #: 最长持仓**交易日**数，逐股研究时下发给每个候选（None = 不限制）。
+    max_hold_days: int | None = Field(default=20, ge=1, le=10_000)
     reversal_multiple: float = Field(default=2.0, gt=0, le=20)
     atr_window: int = Field(default=14, ge=1, le=250)
     min_bars: int = Field(default=5, ge=1, le=1_000)

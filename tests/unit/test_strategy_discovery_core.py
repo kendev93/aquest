@@ -827,3 +827,18 @@ def test_batch_evaluation_uses_eight_process_slots_and_preserves_result_order() 
     assert [item.candidate_hash for item in result.results_by_sharpe] == [
         item.candidate_hash for item in result.results_by_return
     ]
+
+
+def test_max_hold_days_resolves_as_policy_not_search_dimension() -> None:
+    """最长持仓天数是准入政策：缺席按默认 20 收口，显式 None 才是不限制。"""
+
+    resolve = candidates_module._resolve_max_hold_days
+    assert candidates_module.DEFAULT_MAX_HOLD_DAYS == 20
+
+    # 老请求不带这个键 → 也被新默认管住，这是本次修复的核心行为。
+    assert resolve({}) == 20
+    assert resolve({"max_hold_days": 60}) == 60
+    assert resolve({"max_hold_days": None}) is None
+    # 非法值退回安全默认，而不是让整个研究跑不起来。
+    assert resolve({"max_hold_days": 0}) == 20
+    assert resolve({"max_hold_days": "abc"}) == 20

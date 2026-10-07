@@ -59,6 +59,8 @@ class StrategyDiscoveryRequest(BaseModel):
     validation_candidates: int = Field(default=50, ge=1, le=200)
     holdout_candidates: int = Field(default=20, ge=1, le=50)
     min_trades: int = Field(default=20, ge=0, le=10_000)
+    #: 最长持仓**交易日**数，作为统一上限下发给每个候选（None = 不限制）。
+    max_hold_days: int | None = Field(default=20, ge=1, le=10_000)
     max_drawdown: float | None = Field(default=0.3, ge=0, le=1)
     max_turnover: float | None = Field(default=None, ge=0)
     max_complexity: int = Field(default=12, ge=0, le=50)
@@ -163,6 +165,7 @@ class StrategyDiscoveryRequest(BaseModel):
                 "stamp_tax": self.stamp_tax,
                 "slippage": self.slippage,
                 "execution": self.execution,
+                "max_hold_days": self.max_hold_days,
             },
             splits={
                 "search": {

@@ -55,6 +55,8 @@ const errorMessage = ref('')
 const pollWarning = ref('')
 const successMessage = ref('')
 const riskTrials = ref<1_000 | 2_000 | 3_000>(3_000)
+// 最长持仓交易日数（≈ 天数×7/5 的自然日）。20 交易日 ≈ 30 自然日。
+const maxHoldDays = ref<number>(20)
 const market = ref<'SH' | 'SZ'>('SH')
 const code = ref('')
 const searchQuery = ref('')
@@ -448,7 +450,7 @@ function formatResearchElapsed(startedAt: number | null): string {
 
 async function startFullResearch(rebuild = true): Promise<void> {
   if (isBusy.value) return
-  await startTask({ mode: 'full', rebuild, risk_trials: riskTrials.value }, 'full')
+  await startTask({ mode: 'full', rebuild, risk_trials: riskTrials.value, max_hold_days: maxHoldDays.value || null }, 'full')
 }
 
 async function startSingleRerun(): Promise<void> {
@@ -458,7 +460,7 @@ async function startSingleRerun(): Promise<void> {
     return
   }
   pendingSingle.value = null
-  await startTask({ mode: 'single', market: market.value, code: code.value, risk_trials: riskTrials.value }, 'single')
+  await startTask({ mode: 'single', market: market.value, code: code.value, risk_trials: riskTrials.value, max_hold_days: maxHoldDays.value || null }, 'single')
 }
 
 async function rerunEntry(entry: StrategyPoolEntry): Promise<void> {
@@ -479,6 +481,7 @@ async function rerunEntry(entry: StrategyPoolEntry): Promise<void> {
       market: entry.market,
       code: entry.code,
       risk_trials: riskTrials.value,
+      max_hold_days: maxHoldDays.value || null,
     })
     queuedSingleSymbol.value = symbol(entry)
     successMessage.value = `${entry.market} ${entry.code} 已排队，信号扫描完成后开始逐股重跑。`
@@ -507,7 +510,7 @@ async function startSignalScan(target?: { market: 'SH' | 'SZ'; code: string }, a
 }
 
 async function startTask(
-  payload: { mode: StrategyPoolMode; automatic?: boolean; rebuild?: boolean; risk_trials?: 1_000 | 2_000 | 3_000; market?: 'SH' | 'SZ'; code?: string; objective?: StrategyPoolObjective },
+  payload: { mode: StrategyPoolMode; automatic?: boolean; rebuild?: boolean; risk_trials?: 1_000 | 2_000 | 3_000; max_hold_days?: number | null; market?: 'SH' | 'SZ'; code?: string; objective?: StrategyPoolObjective },
   intent: StrategyPoolMode,
 ): Promise<void> {
   errorMessage.value = ''
@@ -971,6 +974,9 @@ onUnmounted(() => {
                 <option :value="2000">2000 组</option>
                 <option :value="3000">3000 组</option>
               </select>
+            </label>
+            <label class="ticker-input">最长持仓(交易日)
+              <input v-model.number="maxHoldDays" type="number" min="1" max="10000" :disabled="isBusy" data-testid="pool-max-hold-days">
             </label>
             <button class="button-primary" data-testid="pool-start-full" :disabled="isBusy" @click="startFullResearch(true)">清空并重建全市场</button>
             <button class="button-secondary" data-testid="pool-start-incremental" :disabled="isBusy" @click="startFullResearch(false)">增量更新策略池</button>

@@ -862,6 +862,7 @@ describe('StrategyPoolPage', () => {
         market: 'SH',
         code: '600000',
         risk_trials: 3_000,
+        max_hold_days: 20,
       })
       expect(wrapper.get('[data-testid="pool-job-progress"]').text()).toContain('正在扫描当天信号')
       expect(wrapper.get('[data-testid="pool-rerun-entry-600000"]').text()).toContain('排队中')
@@ -992,7 +993,7 @@ describe('StrategyPoolPage', () => {
       await wrapper.get('[data-testid="pool-start-full"]').trigger('click')
       await flushPromises()
       expect(api.createStrategyPoolJob).toHaveBeenLastCalledWith({
-        mode: 'full', rebuild: true, risk_trials: 3000,
+        mode: 'full', rebuild: true, risk_trials: 3000, max_hold_days: 20,
       })
       expect(wrapper.find('[data-testid="pool-row-600000"]').exists()).toBe(false)
     } finally {

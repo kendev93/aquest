@@ -57,6 +57,8 @@ const form = reactive({
   signalIds: [] as string[],
   candidateLimit: 15,
   riskTrials: 1000 as 1000 | 2000 | 3000,
+  // 最长持仓交易日数（20 ≈ 30 自然日），作为统一上限下发给每个候选。
+  maxHoldDays: 20,
   initialCash: 1_000_000,
   commission: 0.0001,
   minCommission: 0.1,
@@ -218,6 +220,7 @@ function buildPayload(): IndividualResearchPayload {
     signal_ids: [...selectedSignals.value],
     candidate_limit: form.candidateLimit,
     risk_trials: form.riskTrials,
+    max_hold_days: form.maxHoldDays,
     initial_cash: form.initialCash,
     commission: form.commission,
     min_commission: form.minCommission,
@@ -333,6 +336,7 @@ async function loadHistoryDetail(historyId: string): Promise<void> {
     if ([1000, 2000, 3000].includes(Number(request.risk_trials))) {
       form.riskTrials = Number(request.risk_trials) as 1000 | 2000 | 3000
     }
+    if (typeof request.max_hold_days === 'number' && Number.isInteger(request.max_hold_days) && request.max_hold_days >= 1 && request.max_hold_days <= 10_000) form.maxHoldDays = request.max_hold_days
     if (typeof request.candidate_limit === 'number') form.candidateLimit = request.candidate_limit
     if (typeof request.initial_cash === 'number') form.initialCash = request.initial_cash
     if (typeof request.commission === 'number') form.commission = request.commission
@@ -614,6 +618,7 @@ onMounted(async () => {
               <div><label for="individual-reversal">反转阈值（ATR 倍数）</label><input id="individual-reversal" v-model.number="form.reversalMultiple" data-testid="individual-reversal" type="number" min="0.1" max="20" step="0.1"></div>
               <div><label for="individual-atr">ATR 窗口</label><input id="individual-atr" v-model.number="form.atrWindow" data-testid="individual-atr" type="number" min="1" max="250" step="1"></div>
               <div><label for="individual-min-bars">最短波段（交易日）</label><input id="individual-min-bars" v-model.number="form.minBars" data-testid="individual-min-bars" type="number" min="0" max="1000" step="1"></div>
+              <div><label for="individual-max-hold-days">最长持仓（交易日）</label><input id="individual-max-hold-days" v-model.number="form.maxHoldDays" data-testid="individual-max-hold-days" type="number" min="1" max="10000" step="1"></div>
               <div><label for="individual-horizon">启动预测窗口（交易日）</label><input id="individual-horizon" v-model.number="form.horizon" data-testid="individual-horizon" type="number" min="1" max="250" step="1"></div>
             </div>
           </fieldset>

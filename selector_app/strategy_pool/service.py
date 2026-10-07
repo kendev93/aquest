@@ -39,6 +39,7 @@ from selector_app.screening.engine import evaluate_rule_group
 from selector_app.screening.jobs import TaskCancelledError
 from selector_app.screening.rules import RuleGroup
 from selector_app.strategy_discovery.catalog import default_indicator_catalog
+from selector_app.strategy_discovery.candidates import DEFAULT_MAX_HOLD_DAYS
 from selector_app.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
 from selector_app.web.schemas.screening import RuleGroupRequest
 
@@ -394,7 +395,7 @@ class MarketStrategyPoolService:
                 config,
                 _mapping(result.get("split_metadata")),
             )
-            winners = summarize_objective_winners(result)
+            winners = summarize_objective_winners(result, max_hold_days=config.max_hold_days)
             annual_candidate = winners["annual_return"]
             sharpe_candidate = winners["sharpe"]
             split_metadata = result.get("split_metadata")
@@ -1720,6 +1721,7 @@ def _individual_config(
         value_ids=tuple(value_ids),
         signal_ids=tuple(signal_ids),
         reversal_multiple=cast(float, settings["reversal_multiple"]),
+        max_hold_days=cast("int | None", settings["max_hold_days"]),
         atr_window=cast(int, settings["atr_window"]),
         min_bars=cast(int, settings["min_bars"]),
         horizon=cast(int, settings["horizon"]),
@@ -1741,7 +1743,14 @@ def _research_settings(
     payload: Mapping[str, object],
     risk_trials: int,
 ) -> dict[str, object]:
-    settings = {
+    # 显式 None = 不限制（对照实验用）；键缺席 = 按默认 20 个交易日收口。
+    raw_max_hold = payload.get("max_hold_days", DEFAULT_MAX_HOLD_DAYS)
+    settings: dict[str, object] = {
+        "max_hold_days": (
+            None
+            if raw_max_hold is None
+            else _positive_int(raw_max_hold, DEFAULT_MAX_HOLD_DAYS, "最长持仓交易日")
+        ),
         "reversal_multiple": _positive_float(payload.get("reversal_multiple"), 2.0, "反转阈值"),
         "atr_window": _positive_int(payload.get("atr_window"), 14, "ATR 周期"),
         "min_bars": _positive_int(payload.get("min_bars"), 5, "最短波段交易日"),

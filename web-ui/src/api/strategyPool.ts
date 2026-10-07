@@ -21,6 +21,7 @@ interface StrategyPoolJobRequest {
   automatic?: boolean
   rebuild?: boolean
   risk_trials?: 1_000 | 2_000 | 3_000
+  max_hold_days?: number | null
   market?: 'SH' | 'SZ'
   code?: string
   objective?: StrategyPoolObjective

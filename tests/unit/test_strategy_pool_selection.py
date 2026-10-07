@@ -81,6 +81,58 @@ def test_objective_winners_prefer_adequate_sample_over_a_thin_high_score() -> No
     assert winners["sharpe"]["quality"]["sample_adequate"] is True
 
 
+def test_objective_winners_exclude_candidates_holding_past_the_cap() -> None:
+    """平均持仓超上限的候选直接出局，分数再高也不行。
+
+    20 个交易日的上限按年化常数 252/365 折算 ≈ 27.6 个自然日：验证段平均
+    40 个自然日的候选超限，20 个自然日的在限内。
+    """
+
+    board = [
+        _candidate(
+            "long", annual_return=0.9, sharpe=9.9, validation_trades=12, avg_holding_days=40
+        ),
+        _candidate(
+            "short", annual_return=0.3, sharpe=1.2, validation_trades=12, avg_holding_days=20
+        ),
+    ]
+    result = {"data_fingerprint": "bars-v1", "results_by_sharpe": board, "results_by_return": board}
+
+    winners = summarize_objective_winners(result)
+
+    assert winners["sharpe"]["candidate_id"] == "short"
+    assert winners["annual_return"]["candidate_id"] == "short"
+
+
+def test_objective_winners_hold_cap_is_hard_and_can_be_disabled() -> None:
+    """门槛没有"全不合格就退回"的豁免：全超限就出空，否则长持仓策略照样进池。"""
+
+    board = [
+        _candidate(
+            "long", annual_return=0.9, sharpe=9.9, validation_trades=12, avg_holding_days=40
+        ),
+    ]
+    result = {"data_fingerprint": "bars-v1", "results_by_sharpe": board, "results_by_return": board}
+
+    relaxed = summarize_objective_winners(result, max_hold_days=None)
+    assert relaxed["sharpe"]["candidate_id"] == "long"
+
+    tightened = summarize_objective_winners(result, max_hold_days=10)
+    assert tightened["sharpe"] is None
+    assert tightened["annual_return"] is None
+
+
+def test_objective_winners_do_not_reject_candidates_without_holding_metric() -> None:
+    """门槛拦"明知持仓过长"，不拦"缺数据"：旧候选没有该指标时照常参选。"""
+
+    board = [_candidate("legacy", annual_return=0.5, sharpe=1.5, validation_trades=12)]
+    result = {"data_fingerprint": "bars-v1", "results_by_sharpe": board, "results_by_return": board}
+
+    winners = summarize_objective_winners(result)
+
+    assert winners["sharpe"]["candidate_id"] == "legacy"
+
+
 def test_objective_winners_fall_back_when_no_candidate_has_an_adequate_sample() -> None:
     board = [
         _candidate("low", annual_return=0.1, sharpe=0.5, validation_trades=1, holdout_trades=1),
@@ -184,6 +236,7 @@ def _candidate(
     holdout_sharpe: float = 1.0,
     validation_trades: int = 2,
     holdout_trades: int = 1,
+    avg_holding_days: float | None = None,
 ) -> dict[str, object]:
     return {
         "candidate_id": candidate_id,
@@ -199,6 +252,7 @@ def _candidate(
                 "payoff_ratio": 1.8,
                 "max_drawdown": -0.35 if candidate_id == "a" else -0.1,
                 "closed_trades": validation_trades,
+                "avg_holding_days": avg_holding_days,
             },
             "holdout": {"sharpe": holdout_sharpe, "closed_trades": holdout_trades},
         },

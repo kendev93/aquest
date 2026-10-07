@@ -16,6 +16,7 @@ export interface IndividualResearchPayload {
   signal_ids: string[] | null
   candidate_limit: number
   risk_trials: 1000 | 2000 | 3000
+  max_hold_days?: number | null
   initial_cash: number
   commission: number
   min_commission: number

@@ -750,6 +750,9 @@ class IndividualStockResearchService:
             "trailing_stop_mode": "pct",
             "trailing_stop_atr_multiplier": None,
             "trailing_stop_cooldown_days": 0,
+            # 最长持仓交易日数随页面参数下发；None 表示不限制。候选采样在
+            # strategy_discovery.candidates 里读这个键。
+            "max_hold_days": config.max_hold_days,
             "atr_period": 14,
             "sell_value": None,
             "sell_value_operator": None,

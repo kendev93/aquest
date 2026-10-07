@@ -9,6 +9,7 @@ from datetime import date
 import numpy as np
 
 from selector_app.individual_research.metrics import MIN_VALIDATION_TRADES, candidate_quality
+from selector_app.strategy_discovery.candidates import DEFAULT_MAX_HOLD_DAYS
 
 ObjectiveCandidate = dict[str, object]
 
@@ -68,6 +69,8 @@ def slices_for_common_windows(
 
 def summarize_objective_winners(
     result: Mapping[str, object],
+    *,
+    max_hold_days: int | None = DEFAULT_MAX_HOLD_DAYS,
 ) -> dict[str, ObjectiveCandidate | None]:
     """Select each objective from validation metrics only and retain compact replay data.
 
@@ -75,6 +78,11 @@ def summarize_objective_winners(
     交易就足以让「平均持仓 700 天」的策略看起来比交易了几十笔的还好。所以只要
     榜上存在样本足够的候选，胜者就只在它们之间产生；全部候选都样本不足时才退回
     按分数选，免得样本稀薄的市场直接得到一个空池子。
+
+    ``max_hold_days``（交易日）是**硬门槛**，和样本门槛不同：它没有"全都不合格
+    就退回"的豁免——持仓过长正是这次要治的病，退回等于白设。候选验证段的
+    ``avg_holding_days`` 是自然日口径（回测绩效报告如此），要按年化常数折算成
+    交易日再比；个别候选缺这个指标时不误杀，只跳过这项检查。
     """
 
     boards = {
@@ -84,9 +92,13 @@ def summarize_objective_winners(
     winners: dict[str, ObjectiveCandidate | None] = {}
     for objective, raw_candidates in boards.items():
         candidates = _mapping_sequence(raw_candidates)
-        winner = _best_candidate(candidates, objective, require_adequate_sample=True)
+        winner = _best_candidate(
+            candidates, objective, require_adequate_sample=True, max_hold_days=max_hold_days
+        )
         if winner is None:
-            winner = _best_candidate(candidates, objective, require_adequate_sample=False)
+            winner = _best_candidate(
+                candidates, objective, require_adequate_sample=False, max_hold_days=max_hold_days
+            )
         winners[objective] = (
             _compact_candidate(winner, objective, result.get("data_fingerprint"))
             if winner is not None
@@ -100,6 +112,7 @@ def _best_candidate(
     objective: str,
     *,
     require_adequate_sample: bool,
+    max_hold_days: int | None,
 ) -> Mapping[str, object] | None:
     """Pick the highest validation score, optionally skipping thin samples."""
 
@@ -110,6 +123,8 @@ def _best_candidate(
         validation = _mapping(metrics.get("validation")) or _mapping(candidate.get("validation"))
         score = _finite_number(validation.get(objective))
         if score is None:
+            continue
+        if _exceeds_hold_cap(validation, max_hold_days):
             continue
         if require_adequate_sample and not _sample_adequate(validation):
             continue
@@ -125,6 +140,24 @@ def _sample_adequate(
     """Use validation sample size for eligibility; holdout remains descriptive only."""
 
     return _trade_count(validation) >= MIN_VALIDATION_TRADES
+
+
+#: 与 ``backtest.performance.PerformanceAnalyzer.ANNUAL_DAYS`` 同源：年化用 252 个
+#: 交易日，"n 个交易日 ≈ n×365/252 个自然日"就由它决定。绩效报告的
+#: ``avg_holding_days`` 是自然日，准入上限是交易日，两边必须换算到同一把尺才能比。
+_NATURAL_TO_TRADING = 252 / 365
+
+
+def _exceeds_hold_cap(validation: Mapping[str, object], max_hold_days: int | None) -> bool:
+    """验证段平均持仓是否超出上限；``max_hold_days=None`` 表示不设限。"""
+
+    if max_hold_days is None:
+        return False
+    natural_days = _finite_number(validation.get("avg_holding_days"))
+    if natural_days is None:
+        # 指标缺失时不误杀：门槛拦的是"明知持仓过长"，不是"缺数据"。
+        return False
+    return natural_days * _NATURAL_TO_TRADING > max_hold_days
 
 
 def _compact_candidate(
