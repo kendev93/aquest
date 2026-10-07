@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import logging
 import re
@@ -206,6 +207,7 @@ class _SyncResult:
     range_end: str | None = None
     retries: int = 0
     history_source: str = "eastmoney"
+    bar_provider: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -316,6 +318,35 @@ def _catalog_url_candidates(url: str) -> list[str]:
     return [
         urlunsplit((split.scheme, host, split.path, split.query, split.fragment)) for host in hosts
     ]
+
+
+def _check_cancelled(abort_check: AbortCheck | None) -> None:
+    if abort_check is not None and abort_check():
+        raise MarketDataCancelledError("行情同步已取消")
+
+
+def _fetch_instruments(
+    module: object,
+    *,
+    timeout: float,
+    abort_check: AbortCheck | None,
+) -> pd.DataFrame:
+    """Pass cancellation only to compatible providers, without masking errors."""
+
+    fetch = getattr(module, "fetch_instruments")
+    if abort_check is not None:
+        try:
+            signature_parameters = inspect.signature(fetch).parameters
+        except (TypeError, ValueError):
+            supports_abort = False
+        else:
+            supports_abort = any(
+                parameter.name == "abort_check" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in signature_parameters.values()
+            )
+        if supports_abort:
+            return fetch(timeout=timeout, abort_check=abort_check)
+    return fetch(timeout=timeout)
 
 
 def _should_fetch_next_page(total: int, fetched: int, page_rows: int, page_size: int) -> bool:
@@ -463,13 +494,20 @@ class OnlineMarketClient:
         transport: HttpTransport | None = None,
         *,
         page_size: int = _EASTMONEY_PAGE_SIZE,
+        sleep: SleepFunction = time.sleep,
     ) -> None:
         if not 1 <= page_size <= _EASTMONEY_PAGE_SIZE:
             raise ValueError("在线证券列表分页大小必须在 1 到 5000 之间")
         self._transport = transport or _http_transport
         self._page_size = page_size
+        self._sleep = sleep
 
-    def fetch_instruments(self, *, timeout: float) -> pd.DataFrame:
+    def fetch_instruments(
+        self,
+        *,
+        timeout: float,
+        abort_check: AbortCheck | None = None,
+    ) -> pd.DataFrame:
         """Fetch the SH/SZ A-share list from the public quote list endpoint.
 
         The filter is narrowed server-side to the boards this project serves
@@ -484,6 +522,7 @@ class OnlineMarketClient:
         rows: list[Mapping[str, object]] = []
         total = 0
         while page <= _MAX_CATALOG_PAGES:
+            _check_cancelled(abort_check)
             payload = self._request_catalog(
                 _EASTMONEY_LIST_URL,
                 {
@@ -499,7 +538,9 @@ class OnlineMarketClient:
                     "fields": "f12,f14",
                 },
                 timeout,
+                abort_check=abort_check,
             )
+            _check_cancelled(abort_check)
             data = _mapping_value(payload.get("data"))
             page_rows = _mapping_rows(data.get("diff"))
             if not page_rows:
@@ -845,6 +886,8 @@ class OnlineMarketClient:
         url: str,
         params: Mapping[str, object],
         timeout: float,
+        *,
+        abort_check: AbortCheck | None = None,
     ) -> Mapping[str, object]:
         """Fetch one catalog page, retrying provider-side failures across hosts.
 
@@ -870,24 +913,37 @@ class OnlineMarketClient:
         last_error: OnlineProviderError | None = None
         attempt = 0
         while True:
+            _check_cancelled(abort_check)
             candidate = candidates[attempt % len(candidates)]
             try:
-                return self._request(candidate, params, timeout)
+                response = self._request(candidate, params, timeout)
+                _check_cancelled(abort_check)
+                return response
             except OnlineProviderError as exc:
                 last_error = exc
                 attempt += 1
                 if attempt >= _CATALOG_MAX_ATTEMPTS or time.monotonic() >= deadline:
                     break
-                self._sleep_catalog_retry(attempt)
+                self._sleep_catalog_retry(attempt, abort_check)
         assert last_error is not None
         raise last_error
 
-    def _sleep_catalog_retry(self, attempt: int) -> None:
+    def _sleep_catalog_retry(
+        self,
+        attempt: int,
+        abort_check: AbortCheck | None = None,
+    ) -> None:
         delay = min(
             _CATALOG_RETRY_BASE_SECONDS * (2 ** (attempt - 1)),
             _CATALOG_RETRY_MAX_SECONDS,
         )
-        time.sleep(delay)
+        remaining = delay
+        while remaining > 1e-9:
+            _check_cancelled(abort_check)
+            interval = min(0.1, remaining)
+            self._sleep(interval)
+            remaining -= interval
+        _check_cancelled(abort_check)
 
 
 def _default_module() -> OnlineModule:
@@ -943,12 +999,20 @@ class OnlineMarketSync:
             raise OnlineDataError("行情源没有返回有效交易日历")
         return tuple(sorted(dates))
 
-    def prepare_stage_plan(self, config: MarketSyncConfig) -> ProviderStagePlan:
+    def prepare_stage_plan(
+        self,
+        config: MarketSyncConfig,
+        *,
+        abort_check: AbortCheck | None = None,
+    ) -> ProviderStagePlan:
         """Refresh the universe and build an immutable download plan in the parent."""
 
+        _check_cancelled(abort_check)
         as_of = self._clock()
         requested_end = _sync_end_date(config, _as_shanghai(as_of).date())
-        selection, new_instruments, existing_instruments = self._prepare_targets(config)
+        selection, new_instruments, existing_instruments = self._prepare_targets(
+            config, abort_check=abort_check
+        )
         existing_by_key = self._latest_existing_bars(selection.targets)
         stage_targets: list[StageTarget] = []
         for market, code, instrument_type, board, name in selection.targets:
@@ -1160,7 +1224,9 @@ class OnlineMarketSync:
     ) -> MarketSyncReport:
         if abort_check is not None and abort_check():
             raise MarketDataCancelledError("行情同步已取消")
-        selection, new_instruments, existing_instruments = self._prepare_targets(config)
+        selection, new_instruments, existing_instruments = self._prepare_targets(
+            config, abort_check=abort_check
+        )
         if abort_check is not None and abort_check():
             raise MarketDataCancelledError("行情同步已取消")
         targets = selection.targets
@@ -1277,7 +1343,10 @@ class OnlineMarketSync:
     def _prepare_targets(
         self,
         config: MarketSyncConfig,
+        *,
+        abort_check: AbortCheck | None = None,
     ) -> tuple[_TargetSelection, int, int]:
+        _check_cancelled(abort_check)
         wanted = _online_supported_types(config)
         if not wanted:
             return _empty_selection("eastmoney_list"), 0, 0
@@ -1289,7 +1358,10 @@ class OnlineMarketSync:
             )
             selection = _selection_from_stored(stored, instrument_types=wanted)
         else:
-            selection = self._selection_from_online_catalogs(config, wanted)
+            selection = self._selection_from_online_catalogs(
+                config, wanted, abort_check=abort_check
+            )
+        _check_cancelled(abort_check)
         selection = _restrict_to_codes(selection, config.codes)
         selection = replace(selection, fingerprint=_fingerprint_targets(selection.targets))
         # 只重下一部分标的时不要覆盖全量指纹：下次常规同步会误判"标的列表变了"，
@@ -1320,6 +1392,8 @@ class OnlineMarketSync:
         self,
         config: MarketSyncConfig,
         wanted: tuple[InstrumentType, ...],
+        *,
+        abort_check: AbortCheck | None = None,
     ) -> _TargetSelection:
         """Build the download targets from the layered catalog sources.
 
@@ -1329,9 +1403,11 @@ class OnlineMarketSync:
         fallback.  See docs/datasource-survey-2026-09-20.md section VII.
         """
 
+        _check_cancelled(abort_check)
         module = self._module_factory()
         selections: list[_TargetSelection] = []
-        frame, provider = self._fetch_catalog_frame(config)
+        frame, provider = self._fetch_catalog_frame(config, abort_check=abort_check)
+        _check_cancelled(abort_check)
         if frame is not None:
             # baostock hands back every SH/SZ security at once, so one frame
             # serves every requested kind; the per-kind classifier drops the rest.
@@ -1350,7 +1426,7 @@ class OnlineMarketSync:
         if "stock" in wanted:
             selections.append(
                 _selection_from_online_list(
-                    module.fetch_instruments(timeout=config.timeout),
+                    _fetch_instruments(module, timeout=config.timeout, abort_check=abort_check),
                     config,
                     instrument_type="stock",
                 )
@@ -1360,6 +1436,8 @@ class OnlineMarketSync:
     def _fetch_catalog_frame(
         self,
         config: MarketSyncConfig,
+        *,
+        abort_check: AbortCheck | None = None,
     ) -> tuple[pd.DataFrame | None, str]:
         """Return the whole-universe catalog frame, or ``None`` to use East Money.
 
@@ -1369,12 +1447,15 @@ class OnlineMarketSync:
 
         if "baostock" not in self._catalog_sources:
             return None, "eastmoney"
+        _check_cancelled(abort_check)
         timeout = max(float(config.timeout), _BAOSTOCK_CATALOG_MIN_TIMEOUT)
         try:
             frame = fetch_all_securities(timeout=timeout)
         except (BaostockCatalogError, OnlineDataError) as exc:
+            _check_cancelled(abort_check)
             self._warn_catalog_unavailable(exc)
             return None, "eastmoney"
+        _check_cancelled(abort_check)
         if frame.empty:
             self._warn_catalog_unavailable(None)
             return None, "eastmoney"
@@ -1508,6 +1589,7 @@ class OnlineMarketSync:
                     )
                     | {
                         "provider": "eastmoney",
+                        "bar_provider": sync_result.bar_provider,
                         "history_source": sync_result.history_source,
                     },
                 )
@@ -1593,7 +1675,7 @@ class OnlineMarketSync:
                 retries=fetched.retries,
                 history_source=fetched.history_source,
             )
-        written, _updated = self._store.upsert_online_bars(normalized, provider="eastmoney")
+        written, _updated = self._store.upsert_online_bars(normalized)
         return _SyncResult(
             written_bars=written,
             bar_count=len(normalized),
@@ -1601,6 +1683,7 @@ class OnlineMarketSync:
             range_end=range_end,
             retries=fetched.retries,
             history_source=fetched.history_source,
+            bar_provider=_frame_provider(normalized),
         )
 
     def _fetch_target(
@@ -1663,6 +1746,7 @@ class OnlineMarketSync:
                 board=board,
                 name=name,
                 now=self._clock(),
+                provider=history_source,
             )
             normalized = _clip_to_range(normalized, start_date, requested_end)
             if normalized.empty:
@@ -2105,12 +2189,21 @@ def _normalize_online_frame(
     board: InstrumentBoard,
     name: str | None,
     now: datetime,
+    provider: str = "eastmoney",
 ) -> pd.DataFrame:
     if not isinstance(frame, pd.DataFrame):
         raise OnlineDataError("在线行情日线响应不是 DataFrame")
     if frame.empty:
         return pd.DataFrame(
-            columns=[*_EMPTY_COLUMNS, "market", "code", "name", "instrument_type", "board"]
+            columns=[
+                *_EMPTY_COLUMNS,
+                "market",
+                "code",
+                "name",
+                "instrument_type",
+                "board",
+                "provider",
+            ]
         )
     aliases = {
         "date": ("日期", "date"),
@@ -2162,6 +2255,7 @@ def _normalize_online_frame(
     normalized["name"] = name
     normalized["instrument_type"] = instrument_type
     normalized["board"] = board
+    normalized["provider"] = provider
     return normalized.reset_index(drop=True)
 
 
@@ -2203,10 +2297,31 @@ def _has_new_data(existing: pd.DataFrame, latest: pd.DataFrame) -> bool:
             return True
         if row.bar_status != previous.bar_status:
             return True
+        # Provider corrections are meaningful only when both rows have known
+        # provenance. Older rows without this column remain unknown rather than
+        # being guessed from the current provider preference.
+        current_provider = getattr(row, "provider", None)
+        previous_provider = getattr(previous, "provider", None)
+        if (
+            getattr(previous, "source", None) != "local"
+            and current_provider in {"tencent", "eastmoney"}
+            and previous_provider in {"tencent", "eastmoney"}
+            and current_provider != previous_provider
+        ):
+            return True
         for column in ("open", "high", "low", "close", "volume", "amount"):
             if float(getattr(row, column)) != float(getattr(previous, column)):
                 return True
     return False
+
+
+def _frame_provider(frame: pd.DataFrame) -> str:
+    if "provider" not in frame.columns:
+        return "unknown"
+    providers = list(dict.fromkeys(str(item) for item in frame["provider"].dropna()))
+    if not providers:
+        return "unknown"
+    return providers[0] if len(providers) == 1 else "mixed"
 
 
 def _frame_date_range(frame: pd.DataFrame) -> tuple[str | None, str | None]:

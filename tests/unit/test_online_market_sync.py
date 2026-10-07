@@ -16,6 +16,7 @@ from selector_app.adapters.online_market_sync import (
     OnlineMarketClient,
     OnlineMarketSync,
     _ExistingBars,
+    _has_new_data,
     _requested_ranges,
 )
 from selector_app.market_data.staging import (
@@ -439,6 +440,10 @@ def test_eastmoney_falls_back_to_tencent_daily_history(tmp_path: Path) -> None:
     assert report.errors == 0
     assert report.written_bars == 9
     assert report.history_sources == {"tencent": 3}
+    assert {str(value) for value in store.read_bars("SH", "600000")["provider"]} == {"tencent"}
+    assert (
+        next(ref for ref in store.list_instruments() if ref.code == "600000").provider == "tencent"
+    )
     assert all(
         f"{request['market'].lower()}{request['code']}" in {"sh600000", "sz000001", "sh688001"}
         for request in module.history_requests
@@ -665,9 +670,190 @@ def test_tencent_is_the_primary_daily_source_when_both_are_reachable(tmp_path: P
     assert report.errors == 0
     assert report.written_bars == 9
     assert report.history_sources == {"tencent": 3}
+    assert {str(value) for value in store.read_bars("SH", "600000")["provider"]} == {"tencent"}
     assert len(module.tencent_requests) == 3
     # 主源成功时东财应保持零请求：它现在只是容错路径。
     assert module.history_requests == []
+
+
+def test_tencent_refetch_corrects_old_provider_label_without_touching_local_rows(
+    tmp_path: Path,
+) -> None:
+    module = BothSourcesOnline()
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    history = OnlineMarketSync(
+        store=store,
+        module_factory=lambda: module,
+        clock=lambda: _NOW,
+        sleep=lambda _seconds: None,
+    )
+    old = _hist_frame().rename(
+        columns={
+            "日期": "date",
+            "开盘": "open",
+            "收盘": "close",
+            "最高": "high",
+            "最低": "low",
+            "成交量": "volume",
+            "成交额": "amount",
+        }
+    )
+    old["date"] = pd.to_datetime(old["date"])
+    old["market"] = "SH"
+    old["code"] = "600000"
+    old["instrument_type"] = "stock"
+    old["board"] = "main"
+    old["provider"] = "eastmoney"
+    old["bar_status"] = "completed"
+    store.upsert_online_bars(old, provider="eastmoney")
+    local_override = old.iloc[[0]].drop(columns=["provider"]).copy()
+    local_override["close"] = local_override["open"]
+    local_override["high"] = local_override["open"] + 0.1
+    local_override["low"] = local_override["open"] - 0.1
+    store.upsert_local_bars(local_override)
+    store.ensure_instruments(
+        [
+            online_market_sync_module.InstrumentRef(
+                market="SH", code="600000", instrument_type="stock", board="main"
+            ),
+            online_market_sync_module.InstrumentRef(
+                market="SH", code="688001", instrument_type="stock", board="star"
+            ),
+        ]
+    )
+
+    report = history.sync(_config(prefer_store_targets=True))
+
+    assert report.errors == 0
+    local = store.read_bars("SH", "600000")
+    online = local.loc[local["source"] == "online"]
+    assert set(online["provider"].astype(str)) == {"tencent"}
+    assert local.iloc[0]["source"] == "local"
+    assert local.iloc[0]["close"] == local.iloc[0]["open"]
+
+
+def test_local_rows_with_vendor_labels_do_not_trigger_provider_only_refetch() -> None:
+    existing = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2024-01-02"]),
+            "open": [10.0],
+            "high": [11.0],
+            "low": [9.0],
+            "close": [10.5],
+            "volume": [1000.0],
+            "amount": [10000.0],
+            "bar_status": ["completed"],
+            "source": ["local"],
+            "provider": ["eastmoney"],
+        }
+    )
+    fetched = existing.drop(columns=["source", "bar_status"]).assign(
+        provider="tencent", bar_status="completed"
+    )
+
+    assert _has_new_data(existing, fetched) is False
+
+
+def test_online_upsert_rejects_missing_provider_before_writing_any_rows(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    frame = _hist_frame().rename(
+        columns={
+            "日期": "date",
+            "开盘": "open",
+            "收盘": "close",
+            "最高": "high",
+            "最低": "low",
+            "成交量": "volume",
+            "成交额": "amount",
+        }
+    )
+    frame["market"] = "SH"
+    frame["code"] = "600000"
+    frame["instrument_type"] = "stock"
+    frame["board"] = "main"
+    frame["bar_status"] = "completed"
+    frame["provider"] = ["tencent", None, "eastmoney"]
+
+    with pytest.raises(ValueError, match="缺少来源字段"):
+        store.upsert_online_bars(frame)
+
+    assert store.status().bar_count == 0
+
+
+def test_catalog_cancellation_stops_before_requesting_the_next_page() -> None:
+    calls = 0
+    cancelled = threading.Event()
+
+    def transport(_url, _params, _timeout):
+        nonlocal calls
+        calls += 1
+        cancelled.set()
+        return {"data": {"diff": [{"f12": "600000", "f14": "浦发银行"}], "total": 2}}
+
+    client = OnlineMarketClient(transport=transport, page_size=1, sleep=lambda _seconds: None)
+
+    with pytest.raises(MarketDataCancelledError, match="取消"):
+        client.fetch_instruments(timeout=1.0, abort_check=cancelled.is_set)
+
+    assert calls == 1
+
+
+def test_staged_catalog_plan_checks_cancellation_before_catalog_fetch(tmp_path: Path) -> None:
+    module = RecordingOnline()
+    service = OnlineMarketSync(
+        store=DuckDbMarketDataStore(tmp_path / "market.duckdb"),
+        module_factory=lambda: module,
+        clock=lambda: _NOW,
+        catalog_sources=("eastmoney",),
+    )
+
+    with pytest.raises(MarketDataCancelledError, match="取消"):
+        service.prepare_stage_plan(_config(), abort_check=lambda: True)
+
+    assert module.catalog_requests == []
+
+
+def test_catalog_cancellation_interrupts_retry_backoff() -> None:
+    calls = 0
+    cancelled = threading.Event()
+    sleeps: list[float] = []
+
+    def transport(_url, _params, _timeout):
+        nonlocal calls
+        calls += 1
+        return {"rc": 1, "data": None}
+
+    def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        cancelled.set()
+
+    client = OnlineMarketClient(transport=transport, page_size=1, sleep=sleep)
+
+    with pytest.raises(MarketDataCancelledError, match="取消"):
+        client.fetch_instruments(timeout=1.0, abort_check=cancelled.is_set)
+
+    assert calls == 1
+    assert sleeps
+
+
+def test_catalog_retries_without_cancellation() -> None:
+    calls = 0
+    sleeps: list[float] = []
+
+    def transport(_url, _params, _timeout):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {"rc": 1, "data": None}
+        return {"data": {"diff": [{"f12": "600000", "f14": "浦发银行"}], "total": 1}}
+
+    client = OnlineMarketClient(transport=transport, page_size=1, sleep=sleeps.append)
+
+    frame = client.fetch_instruments(timeout=1.0)
+
+    assert calls == 2
+    assert len(sleeps) == 10
+    assert frame.iloc[0]["代码"] == "600000"
 
 
 def test_eastmoney_full_history_fetches_only_missing_ranges_for_existing_rows(
@@ -867,6 +1053,81 @@ def test_empty_tencent_response_falls_back_to_eastmoney(tmp_path: Path) -> None:
 
     assert not result.frame.empty
     assert result.history_source == "eastmoney"
+
+
+def test_fetch_target_keeps_provider_provenance_per_requested_range(tmp_path: Path) -> None:
+    class MixedRangeOnline(FakeOnline):
+        def fetch_tencent_daily_history(
+            self,
+            market: str,
+            code: str,
+            start_date: str,
+            end_date: str,
+            *,
+            timeout: float,
+        ) -> pd.DataFrame:
+            del market, code, end_date, timeout
+            if start_date == "20240103":
+                raise RuntimeError("Tencent temporarily unavailable")
+            return pd.DataFrame(
+                {
+                    "date": pd.to_datetime(["2024-01-02"]),
+                    "open": [10.0],
+                    "close": [10.5],
+                    "high": [11.0],
+                    "low": [9.5],
+                    "volume": [1000.0],
+                    "amount": [10000.0],
+                }
+            )
+
+        def fetch_daily_history(
+            self,
+            symbol: str,
+            start_date: str,
+            end_date: str,
+            *,
+            timeout: float,
+        ) -> pd.DataFrame:
+            del symbol, end_date, timeout
+            assert start_date == "20240103"
+            return pd.DataFrame(
+                {
+                    "日期": pd.to_datetime(["2024-01-03"]),
+                    "开盘": [11.0],
+                    "收盘": [11.5],
+                    "最高": [12.0],
+                    "最低": [10.5],
+                    "成交量": [1000.0],
+                    "成交额": [10000.0],
+                }
+            )
+
+    module = MixedRangeOnline()
+    service = OnlineMarketSync(
+        store=DuckDbMarketDataStore(tmp_path / "market.duckdb"),
+        module_factory=lambda: module,
+        clock=lambda: _NOW,
+        sleep=lambda _seconds: None,
+    )
+
+    result = service._fetch_target(
+        module,
+        "SH",
+        "600000",
+        "stock",
+        "main",
+        "浦发银行",
+        _config(),
+        existing=_ExistingBars(pd.DataFrame()),
+        requested_ranges=(
+            (date(2024, 1, 2), date(2024, 1, 2)),
+            (date(2024, 1, 3), date(2024, 1, 3)),
+        ),
+    )
+
+    assert result.history_source == "tencent+eastmoney"
+    assert list(result.frame["provider"]) == ["tencent", "eastmoney"]
 
 
 def test_eastmoney_provider_rejects_invalid_ohlc_rows(tmp_path: Path) -> None:

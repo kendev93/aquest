@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import multiprocessing
 import time
@@ -32,6 +33,7 @@ from .tracking import account_summary, replay_account
 from .tracking_store import OBJECTIVES, PoolTrackingStore
 
 _WORKER_SERVICE: PortfolioBacktestService | None = None
+logger = logging.getLogger(__name__)
 
 
 def _initialize(database_path: str) -> None:
@@ -70,7 +72,7 @@ class PoolTrackingRunner:
         writer: Callable[[dict[str, Any]], Any],
     ) -> dict[str, Any]:
         versions = self.tracks.current_versions()
-        total = len(versions)
+        pool_total = len(versions)
         results: dict[str, dict[str, Any]] = {
             goal: dict(
                 mode="signals",
@@ -103,9 +105,11 @@ class PoolTrackingRunner:
         )
         groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
         selected_ids = payload.get("version_ids")
-        for v in versions:
-            if selected_ids is not None and v["version_id"] not in selected_ids:
-                continue
+        selected_versions = [
+            v for v in versions if selected_ids is None or v["version_id"] in selected_ids
+        ]
+        total = len(selected_versions)
+        for v in selected_versions:
             key = (
                 v["market"],
                 v["code"],
@@ -116,6 +120,21 @@ class PoolTrackingRunner:
             groups.setdefault(key, []).append(v)
         work = iter(groups.values())
         completed = failed = skipped = 0
+        if not groups:
+            progress(
+                0,
+                total,
+                "跟踪各股策略",
+                dict(
+                    mode="signals",
+                    completed_symbols=0,
+                    failed_symbols=0,
+                    total_symbols=total,
+                    current_parallelism=0,
+                    maximum_parallelism=pool_worker_cap(),
+                    phase_label="增量跟踪各股账户",
+                ),
+            )
 
         def consume(v: dict[str, Any], snapshot: dict[str, Any]) -> None:
             nonlocal skipped
@@ -229,11 +248,10 @@ class PoolTrackingRunner:
                     context.close()
                     raise
 
-            first = new_slot(True)
-            assert first is not None
-            slots = [first]
+            first = new_slot(True) if groups else None
+            slots = [first] if first is not None else []
             pending: dict[Any, tuple[list[dict[str, Any]], ProcessPoolExecutor]] = {}
-            exhausted = False
+            exhausted = not bool(groups)
             while not exhausted or pending:
                 if abort_check():
                     for future in pending:
@@ -287,24 +305,53 @@ class PoolTrackingRunner:
                     group, _executor = pending.pop(future)
                     try:
                         snapshot = future.result()
-                        for v in group:
-                            consume(v, snapshot)
-                        completed += len(group)
                     except TaskCancelledError:
                         raise
                     except Exception as exc:
                         failed += len(group)
                         for v in group:
-                            writer(
-                                dict(
-                                    version_id=v["version_id"],
-                                    signature=v["signature"],
-                                    error=str(exc)[:500],
+                            try:
+                                writer(
+                                    dict(
+                                        version_id=v["version_id"],
+                                        signature=v["signature"],
+                                        error=str(exc)[:500],
+                                    )
                                 )
-                            )
+                            except Exception:
+                                logger.exception(
+                                    "无法记录策略追踪失败状态 version_id=%s",
+                                    v["version_id"],
+                                )
                             results[v["objective"]]["holding_snapshot_complete"] = False
+                    else:
+                        for v in group:
+                            skipped_before = skipped
+                            try:
+                                consume(v, snapshot)
+                            except TaskCancelledError:
+                                raise
+                            except Exception as exc:
+                                failed += 1
+                                try:
+                                    writer(
+                                        dict(
+                                            version_id=v["version_id"],
+                                            signature=v["signature"],
+                                            error=str(exc)[:500],
+                                        )
+                                    )
+                                except Exception:
+                                    logger.exception(
+                                        "无法记录策略追踪失败状态 version_id=%s",
+                                        v["version_id"],
+                                    )
+                                results[v["objective"]]["holding_snapshot_complete"] = False
+                            else:
+                                if skipped == skipped_before:
+                                    completed += 1
                 progress(
-                    completed + failed,
+                    completed + failed + skipped,
                     max(1, total),
                     "跟踪各股策略",
                     dict(
@@ -322,7 +369,8 @@ class PoolTrackingRunner:
             **results[goal],
             "results_by_objective": results,
             "total_symbols": total,
-            "completed_symbols": completed - skipped,
+            "pool_total_symbols": pool_total,
+            "completed_symbols": completed,
             "failed_symbols": failed,
             "skipped_symbols": skipped,
         }

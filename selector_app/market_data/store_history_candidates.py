@@ -10,11 +10,23 @@ from .store_base import _WRITE_LOCK, MarketDataStoreError, _DuckDbStoreBase, _no
 from .store_history_common import (
     _CANDIDATE_COLUMNS,
     _CANDIDATE_STATUSES,
+    _STRATEGY_COLUMNS,
     CANDIDATE_LIBRARY_TABLE,
     CANDIDATE_NOTE_MAX_LENGTH,
+    CANDIDATE_STATUS_ADOPTED,
+    CANDIDATE_STATUS_PUBLISHED,
+    SAVED_STRATEGY_TABLE,
+    STRATEGY_NAME_MAX_LENGTH,
+    STRATEGY_NOTE_MAX_LENGTH,
+    STRATEGY_TRACKING_OFF,
     _decode_candidate_row,
+    _decode_strategy_row,
     _normalize_timestamp,
 )
+
+
+class CandidatePublishConflict(MarketDataStoreError):
+    """Candidate changed or disappeared while its publish plan was prepared."""
 
 
 class CandidateHistoryMixin:
@@ -215,3 +227,107 @@ class CandidateHistoryMixin:
                 [normalized_id],
             ).fetchone()
         return deleted is not None
+
+    def publish_candidate_strategy(
+        self,
+        candidate_id: str,
+        *,
+        expected_updated_at: object,
+        strategy_id: str,
+        name: str,
+        note: str,
+        request: Mapping[str, object],
+        summary: Mapping[str, object],
+        source_history_id: str | None,
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        """Atomically publish a strategy and transition its adopted candidate.
+
+        The expected timestamp is a compare-and-swap token for the candidate used
+        to prepare the request. Both returned records are read before commit, so
+        a concurrent delete cannot turn a committed publish into a ``None`` result.
+        """
+
+        self._store._require_writer()
+        normalized_candidate = candidate_id.strip()
+        normalized_strategy = strategy_id.strip()
+        normalized_name = name.strip()
+        normalized_note = note.strip()
+        if not normalized_candidate or not normalized_strategy:
+            raise ValueError("候选 ID 和策略 ID 不能为空")
+        if not normalized_name:
+            raise ValueError("策略名称不能为空")
+        if len(normalized_name) > STRATEGY_NAME_MAX_LENGTH:
+            raise ValueError(f"策略名称不能超过 {STRATEGY_NAME_MAX_LENGTH} 个字符")
+        if len(normalized_note) > STRATEGY_NOTE_MAX_LENGTH:
+            raise ValueError(f"策略备注不能超过 {STRATEGY_NOTE_MAX_LENGTH} 个字符")
+        created = _normalize_timestamp(None, _now())
+        normalized_source = (source_history_id or "").strip() or None
+        encoded_request = json.dumps(dict(request), ensure_ascii=False, separators=(",", ":"))
+        encoded_summary = json.dumps(dict(summary), ensure_ascii=False, separators=(",", ":"))
+        with _WRITE_LOCK, self._store._connect() as connection:
+            connection.execute("BEGIN")
+            try:
+                name_taken = connection.execute(
+                    f"SELECT 1 FROM {SAVED_STRATEGY_TABLE} WHERE name = ? LIMIT 1",
+                    [normalized_name],
+                ).fetchone()
+                if name_taken is not None:
+                    raise ValueError(f"已存在同名策略: {normalized_name}")
+                candidate_row = connection.execute(
+                    f"SELECT {_CANDIDATE_COLUMNS} FROM {CANDIDATE_LIBRARY_TABLE} "
+                    "WHERE candidate_id = ? AND status = ? AND updated_at = CAST(? AS TIMESTAMP)",
+                    [normalized_candidate, CANDIDATE_STATUS_ADOPTED, expected_updated_at],
+                ).fetchone()
+                if candidate_row is None:
+                    raise CandidatePublishConflict("候选状态或内容已变化，请刷新后重新发布")
+                connection.execute(
+                    f"""
+                    INSERT INTO {SAVED_STRATEGY_TABLE} (
+                        strategy_id, name, note, source_history_id, created_at,
+                        updated_at, request_json, summary_json, tracking_status, launched_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)
+                    """,
+                    [
+                        normalized_strategy,
+                        normalized_name,
+                        normalized_note,
+                        normalized_source,
+                        created,
+                        created,
+                        encoded_request,
+                        encoded_summary,
+                        STRATEGY_TRACKING_OFF,
+                    ],
+                )
+                updated_row = connection.execute(
+                    f"""
+                    UPDATE {CANDIDATE_LIBRARY_TABLE}
+                    SET status = ?, published_strategy_id = ?, updated_at = ?
+                    WHERE candidate_id = ? AND status = ?
+                      AND updated_at = CAST(? AS TIMESTAMP)
+                    RETURNING {_CANDIDATE_COLUMNS}
+                    """,
+                    [
+                        CANDIDATE_STATUS_PUBLISHED,
+                        normalized_strategy,
+                        created,
+                        normalized_candidate,
+                        CANDIDATE_STATUS_ADOPTED,
+                        expected_updated_at,
+                    ],
+                ).fetchone()
+                if updated_row is None:
+                    raise CandidatePublishConflict("候选状态或内容已变化，请刷新后重新发布")
+                strategy_row = connection.execute(
+                    f"SELECT {_STRATEGY_COLUMNS} FROM {SAVED_STRATEGY_TABLE} WHERE strategy_id = ?",
+                    [normalized_strategy],
+                ).fetchone()
+                if strategy_row is None:  # pragma: no cover - inserted above in same transaction
+                    raise MarketDataStoreError("策略写入后无法读回")
+                candidate = _decode_candidate_row(updated_row)
+                strategy = _decode_strategy_row(strategy_row)
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        return candidate, strategy

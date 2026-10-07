@@ -4,7 +4,8 @@
 
 - **范围**：`selector_app/` 全部 25 个包、约 71k 行 Python（`web/` 8.6k、`market_data/` 15.6k、`strategy_discovery/` 8.9k、`portfolio_backtest/` 5.1k、`condition_research/` 5.2k 等）。
 - **方式**：静态代码审查。11 个子代理分组通读（每组限读指定文件），产出候选缺陷；由主对话对其中 **12 条**逐条回读代码复核，其余按置信度与证据采纳。
-- **审查基准**：本轮跟进的初始基线为 `main` HEAD `d61bd7e`；跟进修复目前在 `feature/code-review-followup`，本次核对基于 HEAD `01a5670` 及当前工作树变更，包含 `8f6080e` 的审查修复及其后的用户提交。
+- **历史审查基准**：2026-10-07 的说明记录当时工作树位于 `feature/code-review-followup` / HEAD `01a5670`；原始审查跟进起点记为 `main` HEAD `d61bd7e`。这些均为历史上下文，不代表当前分支。
+- **本轮修复基准**：本次 2026-10-08 修复位于 `codex/audit-consistency-followup`，从 `main` HEAD `7714e4c` 开始；只涉及本文标记的四项跟进，不重跑前端检查。
 - **历史描述**：各条原始“位置/后果/修法”记录的是原审查时的证据，不代表当前代码；带“当前状态”的段落按本次分支和工作树解释，原行号只作为发现路径。
 - **上一份** `docs/code-review-2026-09-18.md` 的 H2/H3 不再沿用旧结论：当前 `condition_research/mining.py` 的置换候选池在标签置换前构造、显著性使用 `pvalue <= alpha`、默认置换数为 200；H3 的基线去重与 uint32 编码已有部分实现。旧版 8 倍耗时/内存测量不是当前实现证据，本次没有重测。H1（成交量单位）、M5（目录翻页截断）仍记录为已修复。
 - **原始审查局限（2026-10-05）**：那一轮是静态审查，未跑数据实测或交叉验证；这不代表后续跟进没有执行测试。跟进验证见修复进度中的独立记录。
@@ -37,11 +38,11 @@ P1-21a 的整轮取消/异常边界保留；策略池 `01a5670` 将“任务提�
 
 健康检查的新“疑似漏记除权/异常跳变”条目是线索，不是确认事件；只有上述验证/人工流程才能改变公司行动表。可选 Baostock 调用不可用时维护路由返回 503，且不写部分验证结果。数据库新增 `market_trading_calendar_coverage` 元数据表，schema 初始化时创建，不删旧公司行动；既有数据库升级后不会从日期行反推可信覆盖范围，因此旧历史区间在重新取得 provider 覆盖前会 fail-closed。备份/迁移需保留这张表，否则恢复后历史回填会再次因覆盖未知而拒绝运行。
 
-### 2026-10-08 最终验证
+### 验证记录
 
-- Python：`PATH="$PWD/.venv/bin:$PATH" sh scripts/verify_ci.sh python` 通过；1505 tests passed，84.97% coverage；Ruff format 376 个文件、Ruff 检查通过，mypy 238 个源文件通过。完整日志：`/tmp/indicator-lab-python-2026-10-08-final.log`。
-- 前端非浏览器部分：Vitest 556 tests passed；coverage 为 85.00% statements、77.64% branches、85.88% functions、87.74% lines；`vue-tsc --build` 和 Vite production build 通过。构建保留一个 bundle 超过 500 kB 的提示。日志：`/tmp/indicator-lab-frontend-2026-10-07.log`。
-- 浏览器页面验收：由用户执行。按最新测试边界，代理不再下载 Chromium、启动浏览器或运行页面 E2E；此前浏览器运行尝试不作为本轮交付的页面验收依据。本轮交付以以上非浏览器脚本检查为准。Docker 镜像构建与生产环境执行均未运行。
+- **上一轮记录（非本轮重跑）**：Python 1,505 tests passed、84.97% coverage；前端 Vitest 556 tests passed，coverage 为 85.00% statements、77.64% branches、85.88% functions、87.74% lines，`vue-tsc --build` 与 Vite production build 通过，构建有一个 bundle 超过 500 kB 的提示。日志分别记为 `/tmp/indicator-lab-python-2026-10-08-final.log` 与 `/tmp/indicator-lab-frontend-2026-10-07.log`。
+- **本轮完整 Python 验证**：1,521 tests passed、85.00% total coverage，Ruff format 检查通过。首次静态门禁发现两处 import 排序问题及一个签名兼容 helper 类型错误；修正后，本轮目标回归 96 tests passed，Ruff format、Ruff 和 mypy 238 个源文件均通过。完整 pytest 日志：`/tmp/codex-audit-consistency-python-final.log`；修正后目标回归：`/tmp/codex-audit-consistency-targeted-final.log`；修正后静态门禁日志：`/tmp/codex-audit-consistency-static-final.log`。
+- **浏览器页面验收**：由用户执行，本轮没有重跑浏览器 E2E。Docker 镜像构建与生产环境执行均未运行。
 
 ### 已修复
 
@@ -309,7 +310,7 @@ P0-2（`_has_new_data` 快照行数）、P0-4（显著门槛加 `ic_days`）、P
 
 ### P1-22 其余记账类
 - `backtest/engine.py:140-149,316-318`：`prepared` 被过滤空后 `equity_frame` 无 `total` 列 ⇒ KeyError（当前唯一调用方不传日期窗口且有前置校验，故低危）。
-- `candidate_library/service.py:246-276`：先写 strategy 再更新 candidate，`update_candidate` 返回 `None` 未校验 ⇒ 可能留下孤儿策略 + 重复发布产生同名第二条（对比 `set_status:172-173` 显式检查 None）。
+- **当前状态（2026-10-08）**：✅ 候选与离线策略在同一 DuckDB 事务中写入；按候选 `updated_at` 做 compare-and-swap，只允许仍处于 adopted 且未变化的快照发布。任一步失败即回滚，事务内读回并返回两条记录。候选状态改变、并发重复发布与策略插入冲突均有回归覆盖。
 - `stock_groups/service.py:237-302`：成员变动后曲线仍从最初入组日起算，后加入的标的在全窗口被剔除，却被归因成「新股或停牌」；被删成员的收益从整段历史消失。
 - `instrument_lab/conditions.py:168,207`：`(previous.lift or -np.inf)` 与 `_as_int(...) or _as_int(...)` 的假值写法吞掉合法的 0 ⇒ 条件错序、把「0 只」显示成别的值。
 - `portfolio_backtest/context.py:336-359`：`_corporate_action_cache` 挂在 mixin 实例上，非 batch 路径永不刷新 ⇒ 长驻 web 进程里补录分红后仍返回旧 actions。
@@ -319,12 +320,12 @@ P0-2（`_has_new_data` 快照行数）、P0-4（显著门槛加 `ic_days`）、P
 ## P2：次要观察
 
 - `online_market_sync.py:724-776`：腾讯逐年拼接中间空洞无检测，且 `_requested_ranges:1713-1738` 只补首尾 ⇒ 中段空洞永久无法自愈。
-- `online_market_sync.py:1309-1330,831,852`：目录刷新完全不可取消（约 59 页 × 每页 45s 预算，最坏 ~44 分钟），且退避用 `time.sleep` 绕过注入的 `_sleep`；该阶段发生在 `_sync_staged` 创建 cancel_event 之前。
+- **当前状态（2026-10-08）**：✅ 目录分页、请求重试和退避均检查取消；目录退避使用注入的 sleep 并以短间隔等待，已排队的下一页/重试会停止。当前正在执行的网络请求仍会等待配置的请求超时后到达安全检查点。直接与 staged 规划均在目录工作前检查取消；兼容旧 provider 方法签名时通过签名检测决定是否传入取消回调。
 - `online_market_sync.py:1148-1154,1419,1444,1472`：`detail_callback` 跨 8 个 worker 线程调用且无锁（`progress_lock` 只包住自增）。
-- `online_market_sync.py:1539` 与 `prepare_stage_plan:920,934`：`provider` 恒写 `eastmoney`，即使数据来自腾讯（与旧稿 L14 重复，仍存在）。
+- **当前状态（2026-10-08）**：✅ 每个在线 bar 行保留实际日线源，跨范围混合来源不会折叠成单一 provider；direct upsert 与 staging merge 共用逐行来源，标的汇总来源在多源时记为 `mixed`。新同步/回补可修正重叠范围内的旧标签，即使价格未变；本地行仍优先。历史库中未重取到的旧标签不做猜测。证券目录来源和日线来源分别记录。
 - `factor_test/panel.py:190,234,264-282`：面板构建全程不 `sort_values("date")`（对照 `strategy_fitness/service.py:321` 显式排序），前向收益依赖「相邻行 = 相邻交易日」的前提未兜底；同处 `_forward_returns` 基准是 t 日收盘、与当日因子值同源，等价「信号与成交同刻完成」，但 `BOUNDARIES` 未声明。
 - `condition_research/ranking.py:314` 对 `:331`：`sample_days` 在两个层级上口径不同（有效 IC 天数 vs 通过横截面门槛的天数）。
-- `strategy_pool/tracking_runner.py:294-307`：进度分母是全池版本数、分子只统计本作业调度的 group ⇒ 增量作业时进度条到不了 100%。
+- **当前状态（2026-10-08）**：✅ 子集作业的分子、分母和完成摘要都按本次选中的逻辑版本计数；同一回放组共享计算但仍逐版本记账。全池规模另由 `pool_total_symbols` 提供，未选中版本的状态/持仓投影保持原逻辑。空选择不占用 worker；单版本写入失败不会把整个共用组都误记失败或让进度超过总数。
 - `strategy_pool/tracking.py:60-66`：浮动盈亏用 `close/entry - 1`，未计费用/滑点，与平仓口径不可比。
 
 ---
@@ -349,3 +350,11 @@ P0-2（`_has_new_data` 快照行数）、P0-4（显著门槛加 `ic_days`）、P
 ## 附注
 
 原始 2026-10-05 静态审查没有运行测试，也没有改文件；那一轮的「后果」是静态推导。2026-10-08 跟进已执行上面的 Python/前端单测和静态门禁；浏览器页面验收留待用户执行。历史回测口径数据仅按各自条目所列当时证据表述，不能把旧统计或旧行号视为当前重新测量结果。
+
+### 2026-10-08 本轮回归证据
+
+- 候选发布：真实 DuckDB 的原子成功、CAS 冲突、策略插入失败回滚、重复发布和准备期间候选状态变化均有单测；成功响应包含 published candidate 与离线 strategy。
+- 行情来源：Tencent 主源、East Money 回退、混合请求范围、direct upsert、staged merge、仅来源变化的重取和本地同日优先均有单测。检查只证明新拉取行的来源；旧数据未重新拉取时保留其原标签。
+- 目录取消：页间取消、退避期间取消、取消前不发目录请求与无取消时正常重试均以注入 transport/sleep 覆盖；没有真实网络请求或等待。
+- 追踪进度：部分选择、空选择、共用回放组中单项确认失败、跳过确认与预算归还均有集成回归；浏览器页面验收仍由用户执行。
+- 完整 Python 与后续定向/静态验证的实际结果见上方「验证记录」；未运行真实行情网络请求、浏览器验收或生产操作。

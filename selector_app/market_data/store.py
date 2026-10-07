@@ -522,6 +522,29 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
             created_at=created_at,
         )
 
+    def publish_candidate_strategy(
+        self,
+        candidate_id: str,
+        *,
+        expected_updated_at: object,
+        strategy_id: str,
+        name: str,
+        note: str,
+        request: Mapping[str, object],
+        summary: Mapping[str, object],
+        source_history_id: str | None,
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        return self._history.publish_candidate_strategy(
+            candidate_id,
+            expected_updated_at=expected_updated_at,
+            strategy_id=strategy_id,
+            name=name,
+            note=note,
+            request=request,
+            summary=summary,
+            source_history_id=source_history_id,
+        )
+
     def list_strategies(self) -> list[dict[str, object]]:
         return self._history.list_strategies()
 

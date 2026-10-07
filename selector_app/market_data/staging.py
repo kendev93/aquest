@@ -436,7 +436,11 @@ def _stage_frame(target: StageTarget, frame: pd.DataFrame) -> pd.DataFrame:
     incoming["instrument_type"] = target.instrument_type
     incoming["board"] = target.board
     incoming["source"] = "online"
-    incoming["provider"] = target.provider
+    # ``target.provider`` identifies the catalog used to build the target list;
+    # each fetched bar carries its actual history provider independently.
+    incoming["provider"] = (
+        frame["provider"].to_numpy(copy=True) if "provider" in frame.columns else target.provider
+    )
     # 行情统一为不复权口径：库里只存已经发生过的事实。复权在**计算期**由
     # market_data.adjustment 按分红送转事件派生，绝不在这里、也不在库里落任何
     # 复权后的价格 —— 落了就等于把"结果"存下来，事件一更新那份数据就静默过期。

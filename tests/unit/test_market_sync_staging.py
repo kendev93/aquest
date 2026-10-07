@@ -109,6 +109,30 @@ def test_stage_merge_preserves_local_rows_and_is_idempotent(tmp_path: Path) -> N
     assert list(bars["close"]) == [10.5, 11.5]
 
 
+def test_stage_merge_preserves_each_fetched_bar_provider(tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    stage_path = tmp_path / "worker-0.duckdb"
+    incoming = _staged_frame()
+    incoming["provider"] = ["tencent", "eastmoney"]
+
+    with StageWriter(stage_path) as writer:
+        writer.write_target(
+            _target(),
+            incoming,
+            status="updated",
+            range_start="2024-01-02",
+            range_end="2024-01-03",
+            retries=0,
+            history_source="tencent+eastmoney",
+        )
+
+    store.merge_online_stage(stage_path)
+    bars = store.read_bars("SH", "600000")
+
+    assert list(bars["provider"].astype(str)) == ["tencent", "eastmoney"]
+    assert next(ref for ref in store.list_instruments() if ref.code == "600000").provider == "mixed"
+
+
 def test_cleanup_stale_staging_removes_only_old_job_directories(tmp_path: Path) -> None:
     staging_root = tmp_path / ".sync-staging"
     old_job = staging_root / "old-job"

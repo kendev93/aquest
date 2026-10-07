@@ -445,13 +445,14 @@ def test_partial_tracking_projects_only_applied_versions_for_both_objectives(tmp
             "saved": tracks.save_snapshot(item["version_id"], item["signature"], item["snapshot"])
         }
 
+    progress_events = []
     result = PoolTrackingRunner(store, EvaluationWorkerBudget(2)).run(
         {
             "objective": "annual_return",
             "as_of_date": "2026-09-03",
             "version_ids": [manual_annual["version_id"]],
         },
-        progress=lambda *args: None,
+        progress=lambda *args: progress_events.append(args),
         abort_check=lambda: False,
         writer=write,
     )
@@ -461,6 +462,9 @@ def test_partial_tracking_projects_only_applied_versions_for_both_objectives(tmp
 
     assert result["completed_symbols"] == 1
     assert result["failed_symbols"] == 0
+    assert result["total_symbols"] == 1
+    assert result["pool_total_symbols"] == 3
+    assert progress_events[-1][0:2] == (1, 1)
     assert len(annual["states"]) == 1
     assert annual["states"][0]["tracking_version_id"] == manual_annual["version_id"]
     assert len(annual["model_portfolio"]["holdings"]) == 1
@@ -483,8 +487,95 @@ def test_partial_tracking_projects_only_applied_versions_for_both_objectives(tmp
     assert skipped["completed_symbols"] == 0
     assert skipped["skipped_symbols"] == 1
     assert skipped["failed_symbols"] == 0
+    assert skipped["total_symbols"] == 1
+    assert skipped["pool_total_symbols"] == 3
     assert skipped["results_by_objective"]["annual_return"]["states"] == []
     assert len(skipped["results_by_objective"]["sharpe"]["states"]) == 1
+
+
+def test_tracking_group_accounts_each_version_when_one_writer_call_fails(tmp_path, caplog):
+    from selector_app.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
+    from selector_app.strategy_pool.tracking_runner import PoolTrackingRunner
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", bars(3))
+    pool = DuckDbStrategyPoolStore(store)
+    item = candidate()
+    pool.upsert_automatic(
+        market="SH",
+        code="600000",
+        name="test",
+        annual_candidate=item,
+        sharpe_candidate=item,
+        data_fingerprint="a",
+        config_fingerprint="b",
+        source_job_id="job",
+    )
+    tracks = PoolTrackingStore(store)
+    versions = tracks.current_versions()
+    assert len(versions) == 2
+    progress_events = []
+    calls = []
+
+    def writer(value):
+        calls.append(value)
+        if value.get("error"):
+            raise OSError("failure-state acknowledgement unavailable")
+        if len([item for item in calls if "snapshot" in item]) == 2:
+            raise RuntimeError("second acknowledgement failed")
+        return {"saved": True}
+
+    budget = EvaluationWorkerBudget(1)
+    result = PoolTrackingRunner(store, budget).run(
+        {"version_ids": [version["version_id"] for version in versions]},
+        progress=lambda *args: progress_events.append(args),
+        abort_check=lambda: False,
+        writer=writer,
+    )
+
+    assert result["total_symbols"] == 2
+    assert result["pool_total_symbols"] == 2
+    assert result["completed_symbols"] == 1
+    assert result["failed_symbols"] == 1
+    assert result["skipped_symbols"] == 0
+    assert progress_events[-1][0:2] == (2, 2)
+    assert budget.available_workers == 1
+    assert "无法记录策略追踪失败状态" in caplog.text
+
+
+def test_tracking_empty_selection_does_not_lease_worker(tmp_path):
+    from selector_app.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
+    from selector_app.strategy_pool.tracking_runner import PoolTrackingRunner
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    pool = DuckDbStrategyPoolStore(store)
+    item = candidate()
+    pool.upsert_automatic(
+        market="SH",
+        code="600000",
+        name="test",
+        annual_candidate=item,
+        sharpe_candidate=item,
+        data_fingerprint="a",
+        config_fingerprint="b",
+        source_job_id="job",
+    )
+    budget = EvaluationWorkerBudget(1)
+    progress_events = []
+
+    result = PoolTrackingRunner(store, budget).run(
+        {"version_ids": []},
+        progress=lambda *args: progress_events.append(args),
+        abort_check=lambda: False,
+        writer=lambda _item: {"saved": True},
+    )
+
+    assert result["total_symbols"] == 0
+    assert result["pool_total_symbols"] == 2
+    assert result["completed_symbols"] == 0
+    assert result["failed_symbols"] == 0
+    assert budget.available_workers == 1
+    assert progress_events[-1][0:2] == (0, 0)
 
 
 def test_tracking_runner_marks_failed_selected_version_incomplete(tmp_path):

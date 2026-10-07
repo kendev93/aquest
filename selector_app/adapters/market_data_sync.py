@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import multiprocessing
 import queue
 import time
@@ -211,10 +212,24 @@ class MarketDataSync:
         detail_callback: DetailCallback | None,
         abort_check: AbortCheck | None,
     ) -> MarketSyncReport:
-        prepared = [
-            cast(ProviderStagePlan, getattr(service, "prepare_stage_plan")(provider_config))
-            for _provider, provider_config, service in plans
-        ]
+        prepared: list[ProviderStagePlan] = []
+        for _provider, provider_config, service in plans:
+            if abort_check is not None and abort_check():
+                raise MarketDataCancelledError("行情同步已取消")
+            prepare = getattr(service, "prepare_stage_plan")
+            parameters = inspect.signature(prepare).parameters.values()
+            accepts_abort = any(
+                parameter.name == "abort_check" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters
+            )
+            plan = (
+                prepare(provider_config, abort_check=abort_check)
+                if accepts_abort
+                else prepare(provider_config)
+            )
+            prepared.append(cast(ProviderStagePlan, plan))
+        if abort_check is not None and abort_check():
+            raise MarketDataCancelledError("行情同步已取消")
         total = sum(len(plan.targets) for plan in prepared)
         if progress_callback is not None:
             progress_callback(0, total)

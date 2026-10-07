@@ -36,6 +36,7 @@ from selector_app.market_data.store_history import (
     CANDIDATE_STATUS_PUBLISHED,
     STRATEGY_TRACKING_ACTIVE,
 )
+from selector_app.market_data.store_history_candidates import CandidatePublishConflict
 
 
 class CandidateLibraryError(ValueError):
@@ -256,20 +257,22 @@ class CandidateLibraryService:
         if plan.blocked:
             raise CandidateLibraryError("；".join(plan.blockers))
         request = plan.request
-        strategy: dict[str, object] = self._store.save_strategy(
-            uuid.uuid4().hex,
-            name=normalized_name,
-            note=str(note).strip()[:NOTE_MAX_LENGTH],
-            request=request,
-            summary=_publish_summary(request),
-            source_history_id=str(candidate["source_history_id"]) or None,
-        )
-        updated: dict[str, object] | None = self._store.update_candidate(
-            candidate_id,
-            status=STATUS_PUBLISHED,
-            published_strategy_id=str(strategy["strategy_id"]),
-            publish=True,
-        )
+        publish_operation = getattr(self._store, "publish_candidate_strategy", None)
+        if not callable(publish_operation):
+            raise CandidateLibraryError("当前存储不支持候选与策略的原子发布")
+        try:
+            updated, strategy = publish_operation(
+                candidate_id,
+                expected_updated_at=candidate.get("updated_at"),
+                strategy_id=uuid.uuid4().hex,
+                name=normalized_name,
+                note=str(note).strip()[:NOTE_MAX_LENGTH],
+                request=request,
+                summary=_publish_summary(request),
+                source_history_id=str(candidate["source_history_id"]) or None,
+            )
+        except CandidatePublishConflict as exc:
+            raise CandidateLibraryError(str(exc)) from exc
         return {
             "candidate": updated,
             "strategy": strategy,

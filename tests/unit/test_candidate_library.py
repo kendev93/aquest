@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 import duckdb
@@ -211,6 +212,44 @@ class FakeStore:
         }
         self.strategies[strategy_id] = record
         return dict(record)
+
+    def publish_candidate_strategy(
+        self,
+        candidate_id: str,
+        *,
+        expected_updated_at: object,
+        strategy_id: str,
+        name: str,
+        note: str,
+        request: dict[str, Any],
+        summary: dict[str, Any],
+        source_history_id: str | None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        candidate = self.candidates.get(candidate_id)
+        if (
+            candidate is None
+            or candidate.get("status") != STATUS_ADOPTED
+            or candidate.get("updated_at") != expected_updated_at
+        ):
+            from selector_app.market_data.store_history_candidates import CandidatePublishConflict
+
+            raise CandidatePublishConflict("候选状态或内容已变化，请刷新后重新发布")
+        strategy = self.save_strategy(
+            strategy_id,
+            name=name,
+            note=note,
+            request=request,
+            summary=summary,
+            source_history_id=source_history_id,
+        )
+        candidate = self.update_candidate(
+            candidate_id,
+            status=STATUS_PUBLISHED,
+            published_strategy_id=strategy_id,
+            publish=True,
+        )
+        assert candidate is not None
+        return candidate, strategy
 
     def read_strategy(self, strategy_id: str) -> dict[str, Any] | None:
         record = self.strategies.get(str(strategy_id).strip())
@@ -657,6 +696,133 @@ def test_duplicate_source_is_rejected_by_the_store(tmp_path) -> None:
 
     with pytest.raises(Exception):
         store.save_candidate("second", **arguments)
+
+
+def _real_adopted_candidate(store: DuckDbMarketDataStore, candidate_id: str = "candidate"):
+    store.save_backtest_history(
+        "study-1",
+        backtest_type="condition_research",
+        request=_RESEARCH_REQUEST,
+        result={"candidates": [_candidate()]},
+        started_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+        finished_at=datetime(2026, 9, 1, tzinfo=timezone.utc),
+    )
+    return store.save_candidate(
+        candidate_id,
+        source="condition_research",
+        source_history_id="study-1",
+        source_candidate_id="buy-1",
+        side="buy",
+        label="候选",
+        condition=_CONDITION,
+        evidence={},
+        status=STATUS_ADOPTED,
+    )
+
+
+def test_real_store_publish_is_atomic_and_returns_both_records(tmp_path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    _real_adopted_candidate(store)
+    service = CandidateLibraryService(store)
+
+    outcome = service.publish("candidate", name="atomic publish", overrides={"stop_loss_pct": 0.1})
+
+    assert outcome["candidate"] is not None
+    assert outcome["candidate"]["status"] == STATUS_PUBLISHED
+    assert outcome["candidate"]["published_strategy_id"] == outcome["strategy"]["strategy_id"]
+    assert outcome["strategy"]["tracking_status"] == "off"
+    assert outcome["strategy"]["launched_at"] is None
+
+
+def test_real_store_publish_conflict_does_not_leave_orphan_strategy(tmp_path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    candidate = _real_adopted_candidate(store)
+    expected_revision = candidate["updated_at"]
+    store.update_candidate("candidate", status=STATUS_REJECTED)
+
+    from selector_app.market_data.store_history_candidates import CandidatePublishConflict
+
+    with pytest.raises(CandidatePublishConflict):
+        store.publish_candidate_strategy(
+            "candidate",
+            expected_updated_at=expected_revision,
+            strategy_id="orphan",
+            name="must rollback",
+            note="",
+            request={},
+            summary={},
+            source_history_id="study-1",
+        )
+
+    assert store.read_strategy("orphan") is None
+    assert store.read_candidate("candidate")["status"] == STATUS_REJECTED
+
+
+def test_real_store_publish_insert_failure_rolls_back_candidate_transition(tmp_path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    candidate = _real_adopted_candidate(store)
+    store.save_strategy(
+        "duplicate-id",
+        name="existing",
+        request={},
+        summary={},
+    )
+
+    with pytest.raises(Exception):
+        store.publish_candidate_strategy(
+            "candidate",
+            expected_updated_at=candidate["updated_at"],
+            strategy_id="duplicate-id",
+            name="would-be-publish",
+            note="",
+            request={},
+            summary={},
+            source_history_id="study-1",
+        )
+
+    assert store.read_candidate("candidate")["status"] == STATUS_ADOPTED
+    assert [strategy["name"] for strategy in store.list_strategies()] == ["existing"]
+
+
+def test_real_store_duplicate_publish_is_rejected_by_revision_cas(tmp_path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    _real_adopted_candidate(store)
+    service = CandidateLibraryService(store)
+    first = service.publish("candidate", name="one", overrides={"stop_loss_pct": 0.1})
+
+    with pytest.raises(CandidateLibraryError, match="已经是.*已发布"):
+        service.publish("candidate", name="two", overrides={"stop_loss_pct": 0.1})
+
+    assert len(store.list_strategies()) == 1
+    assert (
+        store.read_candidate("candidate")["published_strategy_id"]
+        == first["strategy"]["strategy_id"]
+    )
+
+
+def test_publish_refuses_candidate_changed_after_plan_was_prepared() -> None:
+    class RacingStore(FakeStore):
+        race = False
+
+        def read_backtest_history(self, history_id: str) -> dict[str, Any] | None:
+            record = super().read_backtest_history(history_id)
+            if self.race:
+                self.race = False
+                candidate = next(iter(self.candidates.values()))
+                candidate["status"] = STATUS_PENDING
+                candidate["updated_at"] = "changed-during-plan"
+            return record
+
+    store = RacingStore([_history()])
+    service, candidate = _imported(store)
+    service.set_status(str(candidate["candidate_id"]), status=STATUS_ADOPTED)
+    store.race = True
+
+    with pytest.raises(CandidateLibraryError, match="已变化"):
+        _publish(service, str(candidate["candidate_id"]))
+
+    assert store.strategies == {}
+    assert store.read_candidate(str(candidate["candidate_id"]))["status"] == STATUS_PENDING
 
 
 def _condition_key(condition: dict[str, Any]) -> tuple[Any, ...]:

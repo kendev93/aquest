@@ -468,7 +468,7 @@ class DuckDbBarsStore:
         self._store._require_writer()
         # "tdx" stays accepted for compatibility with callers replaying rows that
         # were downloaded by the removed legacy provider.
-        if provider not in {"tdx", "eastmoney"}:
+        if provider not in {"tdx", "eastmoney", "tencent"}:
             raise ValueError(f"在线行情数据源无效: {provider}")
         if frame.empty:
             return (0, 0)
@@ -495,9 +495,19 @@ class DuckDbBarsStore:
         if incoming_frame[["market", "code", "instrument_type", "board"]].isna().any().any():
             raise ValueError("在线行情数据缺少标的身份字段")
         normalized_parts: list[pd.DataFrame] = []
-        for (market, code, instrument_type, board), group in incoming_frame.groupby(
-            ["market", "code", "instrument_type", "board"], sort=False
-        ):
+        group_columns = ["market", "code", "instrument_type", "board"]
+        if "provider" in incoming_frame.columns:
+            if incoming_frame["provider"].isna().any():
+                raise ValueError("在线行情数据缺少来源字段")
+            valid_providers = {"tdx", "eastmoney", "tencent"}
+            unknown = set(incoming_frame["provider"].dropna().astype(str)) - valid_providers
+            if unknown:
+                raise ValueError(f"在线行情数据源无效: {', '.join(sorted(unknown))}")
+            group_columns.append("provider")
+        for grouped in incoming_frame.groupby(group_columns, sort=False):
+            keys, group = grouped
+            market, code, instrument_type, board = keys[:4]
+            group_provider = str(keys[4]) if len(keys) == 5 else provider
             normalized_parts.append(
                 self._store._normalize_frame(
                     group,
@@ -506,7 +516,7 @@ class DuckDbBarsStore:
                     instrument_type=cast(InstrumentType, str(instrument_type)),
                     board=cast(InstrumentBoard, str(board)),
                     source="online",
-                    provider=provider,
+                    provider=group_provider,
                 )
             )
         if not normalized_parts:
@@ -634,11 +644,21 @@ class DuckDbBarsStore:
                     )
                     """
                 )
+                provenance_by_key: dict[tuple[str, str], set[str]] = {}
+                for row in incoming[["market", "code", "provider"]].itertuples(
+                    index=False, name=None
+                ):
+                    provenance_by_key.setdefault((str(row[0]), str(row[1])), set()).add(str(row[2]))
                 for market, code, instrument_type, board in (
                     incoming[["market", "code", "instrument_type", "board"]]
                     .drop_duplicates()
                     .itertuples(index=False, name=None)
                 ):
+                    key = (str(market).strip().upper(), str(code).strip())
+                    source_providers = provenance_by_key.get(key, {provider})
+                    instrument_provider = (
+                        next(iter(source_providers)) if len(source_providers) == 1 else "mixed"
+                    )
                     self._store._refresh_instrument(
                         connection,
                         market,
@@ -646,9 +666,8 @@ class DuckDbBarsStore:
                         instrument_type,
                         board,
                         name=names_by_key.get((str(market).upper(), str(code))),
-                        provider=provider,
-                        force_updated_at=(str(market).strip().upper(), str(code).strip())
-                        in changed_keys,
+                        provider=instrument_provider,
+                        force_updated_at=key in changed_keys,
                     )
                 connection.unregister("_incoming_online_bars")
                 connection.execute("COMMIT")
@@ -731,8 +750,11 @@ class DuckDbBarsStore:
                 }
                 keys = connection.execute(
                     """
-                    SELECT DISTINCT market, code, instrument_type, board, provider
+                    SELECT market, code, instrument_type, board,
+                           CASE WHEN COUNT(DISTINCT provider) > 1 THEN 'mixed'
+                                ELSE MIN(provider) END AS provider
                     FROM _staged_online
+                    GROUP BY market, code, instrument_type, board
                     ORDER BY market, code
                     """
                 ).fetchall()
