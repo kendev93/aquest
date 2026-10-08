@@ -388,6 +388,60 @@ def test_tracking_runner_deduplicates_goals_and_uses_shared_budget(tmp_path):
     )
 
 
+def test_tracking_sell_signal_requires_a_position(tmp_path):
+    """卖出信号只在「确实持仓」时展示；空仓中触发卖出是空操作。
+
+    买卖规则的时序要精确构造：买入 close > 0 恒真，首日触发、次日开盘成交；
+    卖出 close > 13 只在第三根为真——第二根为假保证卖出不会在第三根开盘
+    抢先平仓。于是 as_of 第三根：既持仓、又触发卖出 → 状态是「卖出信号」，
+    卖出面板收它、买入面板不收（持仓中的买入无事可做），且当天仍列持仓中
+    （卖出按次一交易日执行）。
+    """
+    from selector_app.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
+    from selector_app.strategy_pool.tracking_runner import PoolTrackingRunner
+
+    store = DuckDbMarketDataStore(tmp_path / "sell-gate.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", bars(3), name="浦发银行")
+    pool = DuckDbStrategyPoolStore(store)
+    both = candidate()
+    both["sell_rule"] = dict(
+        signals=[], conditions=[dict(left_value="price.close", operator="gt", right_constant=13)]
+    )
+    pool.upsert_automatic(
+        market="SH",
+        code="600000",
+        name="test",
+        annual_candidate=both,
+        sharpe_candidate={"candidate_ref": "annual_return"},
+        data_fingerprint="a",
+        config_fingerprint="b",
+        source_job_id="job",
+    )
+    tracks = PoolTrackingStore(store)
+
+    def write(item):
+        if item.get("error"):
+            raise AssertionError(item["error"])
+        return {
+            "saved": tracks.save_snapshot(item["version_id"], item["signature"], item["snapshot"])
+        }
+
+    result = PoolTrackingRunner(store, EvaluationWorkerBudget(2)).run(
+        {"objective": "annual_return", "as_of_date": "2026-09-03"},
+        progress=lambda *args: None,
+        abort_check=lambda: False,
+        writer=write,
+    )
+    annual = result["results_by_objective"]["annual_return"]
+    assert annual["states"][0]["status"] == "sell"
+    assert [row["symbol"] for row in annual["sell_signals"]] == ["SH600000"]
+    assert annual["buy_signals"] == []
+    # 卖出动作次日执行，当天仍列持仓中。
+    assert [
+        f"{h['market']}{h['code']}" for h in annual["model_portfolio"]["holdings"]
+    ] == ["SH600000"]
+
+
 def test_partial_tracking_projects_only_applied_versions_for_both_objectives(tmp_path):
     from selector_app.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
     from selector_app.strategy_pool.tracking_runner import PoolTrackingRunner
