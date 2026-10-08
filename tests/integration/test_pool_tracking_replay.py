@@ -365,11 +365,14 @@ def test_tracking_runner_deduplicates_goals_and_uses_shared_budget(tmp_path):
     annual = result["results_by_objective"]["annual_return"]
     assert len(annual["states"]) == 1
     # 信号行的中文名：买入/卖出行是用跟踪版本字典拼的（只有 market/code），
-    # 名字必须从行情库 instruments 表补——candidate() 的买入规则是 close > 0，
-    # 恒真，fresh 时 buy_signals 必有行，直接断言它。states 与 buy/sell 行出自
-    # 同一个 dict，覆盖 states 就覆盖了全部三处消费方。
+    # 名字必须从行情库 instruments 表补。states 与 buy/sell 行出自同一个 dict，
+    # 覆盖 states 就覆盖了全部三处消费方。
     assert annual["states"][0]["name"] == "浦发银行"
-    assert annual["buy_signals"][0]["name"] == "浦发银行"
+    # 持仓中的买入不是新信号：candidate() 的买入规则 close > 0 恒真，首日触发
+    # 后次日开盘已成交，as_of 当天既有持仓、规则又为真——必须显示「持仓中」，
+    # 且不再进入买入信号面板（无事可做）。这正是中信证券 2026-10-08 的问题。
+    assert annual["states"][0]["status"] == "held"
+    assert annual["buy_signals"] == []
     # 跟踪路径的持仓需带前端读取的 holding_return_pct（与信号扫描路径口径一致）
     holdings = annual["model_portfolio"]["holdings"]
     assert holdings and isinstance(holdings[0].get("holding_return_pct"), float)

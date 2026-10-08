@@ -215,13 +215,20 @@ class PoolTrackingRunner:
             )
             fresh = not payload.get("as_of_date") or payload["as_of_date"] == summary["as_of_date"]
             buy, sell = fresh and summary["signal_buy"], fresh and summary["signal_sell"]
-            row["status"] = (
-                "buy_sell" if buy and sell else "buy" if buy else "sell" if sell else row["status"]
-            )
+            is_holding = bool(summary["holding"])
+            # 信号只有「可执行」才有意义：持仓中的买入无事可做（已满仓），空仓中
+            # 的卖出无仓可卖。实例：中信证券 2026-09-30 触发买入，10-08 开盘成交；
+            # 规则当日仍为真——不看持仓就会把「持仓中」错显示成又一次「买入信号」
+            # （2026-10-08 用户报告）。持仓 + 卖出保留：那是下一交易日的真实退出
+            # 动作，页面说明（买入/卖出于次一交易日执行）也正是这么描述的。
+            if is_holding:
+                row["status"] = "sell" if sell else "held"
+            else:
+                row["status"] = "buy" if buy else "flat"
             result["states"].append(row)
-            if buy:
+            if buy and not is_holding:
                 result["buy_signals"].append({**row, "signal_type": "buy"})
-            if sell:
+            if sell and is_holding:
                 result["sell_signals"].append({**row, "signal_type": "sell"})
             for h in summary["holding"]:
                 holding = {**h, "status": "held"}
