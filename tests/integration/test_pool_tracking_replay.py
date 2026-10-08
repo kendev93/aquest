@@ -436,9 +436,9 @@ def test_tracking_both_rules_firing_show_in_both_panels(tmp_path):
     assert [row["symbol"] for row in annual["sell_signals"]] == ["SH600000"]
     assert [row["symbol"] for row in annual["buy_signals"]] == ["SH600000"]
     # 两个动作都按次一交易日执行，当天仍列持仓中。
-    assert [
-        f"{h['market']}{h['code']}" for h in annual["model_portfolio"]["holdings"]
-    ] == ["SH600000"]
+    assert [f"{h['market']}{h['code']}" for h in annual["model_portfolio"]["holdings"]] == [
+        "SH600000"
+    ]
 
 
 def test_partial_tracking_projects_only_applied_versions_for_both_objectives(tmp_path):

@@ -60,9 +60,7 @@ class InsufficientResearchHistoryError(ValueError):
         *,
         message: str | None = None,
     ) -> None:
-        super().__init__(
-            message or "当前历史区间无法切出训练、验证、留出三段；请扩大历史区间"
-        )
+        super().__init__(message or "当前历史区间无法切出训练、验证、留出三段；请扩大历史区间")
         self.data_fingerprint = data_fingerprint
         self.split_metadata = dict(split_metadata)
 

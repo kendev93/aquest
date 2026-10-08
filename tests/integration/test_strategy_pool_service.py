@@ -491,9 +491,7 @@ def test_full_reselection_skips_fresh_no_strategy_and_reruns_stale_ones(
     assert pool_store.get("SH", "600000")["status"] == "no_strategy"
 
     # 重查窗口归零（模拟时间流逝到下一个周期）：同一只票重新进入队列。
-    monkeypatch.setattr(
-        "selector_app.strategy_pool.service.NO_STRATEGY_RECHECK_DAYS", 0
-    )
+    monkeypatch.setattr("selector_app.strategy_pool.service.NO_STRATEGY_RECHECK_DAYS", 0)
     third = service.run(
         {"mode": "full", "risk_trials": 1_000, "horizon": 5},
         job_id="no-strategy-third",

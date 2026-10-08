@@ -541,9 +541,7 @@ class MarketStrategyPoolService:
                     if self._pool_store is not None
                     else None
                 )
-                if not prior[3] or (
-                    entry is not None and self._needs_full_period_backfill(entry)
-                ):
+                if not prior[3] or (entry is not None and self._needs_full_period_backfill(entry)):
                     pending.append(ref)
                     continue
             reused += 1
