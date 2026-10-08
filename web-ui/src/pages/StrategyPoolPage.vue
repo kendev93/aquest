@@ -1018,7 +1018,7 @@ onUnmounted(() => {
             <div class="section-heading"><div><p class="eyebrow">BUY SIGNALS</p><h2>当天触发买入 <span>{{ buySignals.length }}</span></h2></div><small>{{ signalAsOf || '信号扫描后显示日期' }}</small></div>
             <div v-if="buySignals.length" class="signal-list">
               <div v-for="item in visibleBuySignals" :key="item.symbol" class="signal-row">
-                <strong>{{ item.symbol }} · {{ item.name }}</strong>
+                <strong>{{ item.symbol }}<template v-if="item.name"> · {{ item.name }}</template></strong>
                 <span>买入信号触发 · 下一交易日执行<template v-if="holdingReturnText(item)"> · {{ holdingReturnText(item) }}</template><template v-if="signalMetricsSummary(item)"> · {{ signalMetricsSummary(item) }}</template></span>
               </div>
             </div>
@@ -1034,11 +1034,11 @@ onUnmounted(() => {
             <div v-if="ruleSellSignals.length || riskSellSignals.length" class="signal-list">
               <template v-for="item in visibleSellSignals" :key="item.key">
                 <div v-if="item.kind === 'rule'" class="signal-row">
-                  <strong>{{ item.signal.symbol }} · {{ item.signal.name }}</strong>
+                  <strong>{{ item.signal.symbol }}<template v-if="item.signal.name"> · {{ item.signal.name }}</template></strong>
                   <span>卖出规则触发 · 下一交易日执行<template v-if="holdingReturnText(item.signal)"> · {{ holdingReturnText(item.signal) }}</template><template v-if="signalMetricsSummary(item.signal)"> · {{ signalMetricsSummary(item.signal) }}</template></span>
                 </div>
                 <div v-else class="signal-row risk-signal">
-                  <strong>{{ item.signal.market }}{{ item.signal.code }} · {{ item.signal.name || '' }}</strong>
+                  <strong>{{ item.signal.market }}{{ item.signal.code }}<template v-if="item.signal.name"> · {{ item.signal.name }}</template></strong>
                   <span>回测日内风控已触发：{{ item.signal.reason || item.signal.risk_trigger || '风控规则' }} · 按风控成交规则处理<template v-if="riskExitReturnText(item.signal)"> · {{ riskExitReturnText(item.signal) }}</template></span>
                 </div>
               </template>

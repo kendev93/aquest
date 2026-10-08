@@ -58,10 +58,41 @@ def _replay(version: dict[str, Any], previous: dict[str, Any] | None) -> dict[st
 
 
 class PoolTrackingRunner:
-    def __init__(self, store: DuckDbMarketDataStore, budget: EvaluationWorkerBudget):
+    def __init__(
+        self,
+        store: DuckDbMarketDataStore,
+        budget: EvaluationWorkerBudget,
+    ):
         self.store = store
         self.tracks = PoolTrackingStore(store)
         self.budget = budget
+
+    def _instrument_names(self, versions: list[dict[str, Any]]) -> dict[tuple[str, str], str]:
+        """按跟踪版本批量取证券简称，供信号行展示。
+
+        买入/卖出信号行是用跟踪版本字典拼的——那里面只有 market/code，没有名字，
+        前端就只剩一个悬空的「·」分隔符（2026-10-08 用户报告）。名字的权威来源是
+        行情库的 instruments 表，一次批量查询拿全；持仓行不需要查，它的名字跟着
+        回放引擎的 checkpoint 走（引擎内部的 ref 自带名字），两条路各自都有名字
+        之后三张卡片才一致。
+        """
+
+        keys = {(str(v["market"]), str(v["code"])) for v in versions}
+        if not keys:
+            return {}
+        placeholders = ", ".join("(?, ?)" for _ in keys)
+        params: list[object] = []
+        for market, code in sorted(keys):
+            params.extend((market, code))
+        with self.store.read_session() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT market, code, name FROM instruments
+                WHERE (market, code) IN ({placeholders})
+                """,
+                params,
+            ).fetchall()
+        return {(str(row[0]), str(row[1])): str(row[2] or "") for row in rows}
 
     def run(
         self,
@@ -72,6 +103,7 @@ class PoolTrackingRunner:
         writer: Callable[[dict[str, Any]], Any],
     ) -> dict[str, Any]:
         versions = self.tracks.current_versions()
+        names = self._instrument_names(versions)
         pool_total = len(versions)
         results: dict[str, dict[str, Any]] = {
             goal: dict(
@@ -175,6 +207,7 @@ class PoolTrackingRunner:
                 market=v["market"],
                 code=v["code"],
                 symbol=f"{v['market']}{v['code']}",
+                name=names.get((v["market"], v["code"]), ""),
                 candidate_id=v["candidate"].get("candidate_id"),
                 tracking_version_id=v["version_id"],
                 as_of_date=summary["as_of_date"],

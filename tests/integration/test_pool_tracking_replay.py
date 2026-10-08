@@ -332,7 +332,7 @@ def test_tracking_runner_deduplicates_goals_and_uses_shared_budget(tmp_path):
     from selector_app.strategy_pool.tracking_runner import PoolTrackingRunner
 
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
-    store.replace_local_bars("SH", "600000", "stock", bars(3))
+    store.replace_local_bars("SH", "600000", "stock", bars(3), name="浦发银行")
     pool = DuckDbStrategyPoolStore(store)
     pool.upsert_automatic(
         market="SH",
@@ -362,9 +362,16 @@ def test_tracking_runner_deduplicates_goals_and_uses_shared_budget(tmp_path):
     )
     assert result["completed_symbols"] == 2
     assert result["failed_symbols"] == 0
-    assert len(result["results_by_objective"]["annual_return"]["states"]) == 1
+    annual = result["results_by_objective"]["annual_return"]
+    assert len(annual["states"]) == 1
+    # 信号行的中文名：买入/卖出行是用跟踪版本字典拼的（只有 market/code），
+    # 名字必须从行情库 instruments 表补——candidate() 的买入规则是 close > 0，
+    # 恒真，fresh 时 buy_signals 必有行，直接断言它。states 与 buy/sell 行出自
+    # 同一个 dict，覆盖 states 就覆盖了全部三处消费方。
+    assert annual["states"][0]["name"] == "浦发银行"
+    assert annual["buy_signals"][0]["name"] == "浦发银行"
     # 跟踪路径的持仓需带前端读取的 holding_return_pct（与信号扫描路径口径一致）
-    holdings = result["results_by_objective"]["annual_return"]["model_portfolio"]["holdings"]
+    holdings = annual["model_portfolio"]["holdings"]
     assert holdings and isinstance(holdings[0].get("holding_return_pct"), float)
     assert budget.available_workers == 2
     assert (
