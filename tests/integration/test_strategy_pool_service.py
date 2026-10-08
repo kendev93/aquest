@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from threading import Barrier
 from types import SimpleNamespace
@@ -216,40 +216,49 @@ def test_full_pool_research_splits_each_symbol_and_saves_each_symbol_incremental
     assert refreshed["manual_overrides"]["annual_return"]["candidate_id"] == "kept-manual"
 
 
-def test_no_strategy_entry_is_re_researched_even_for_unchanged_config() -> None:
-    """没选出策略 ≠ 结论：研究区间随数据增长而变，下次可能就选得出来。"""
+def test_no_strategy_entry_is_reused_until_recheck_window_elapses() -> None:
+    """「没有策略」窗口内复用、到期重查；配置一变立即作废。"""
 
-    prior = ("market-v1", "config-v1", "no_strategy", False)
+    now = datetime(2026, 10, 8, 12, 0, 0)
+    fresh = ("market-v1", "config-v1", "no_strategy", False, datetime(2026, 10, 8))
+    stale = ("market-v1", "config-v1", "no_strategy", False, datetime(2026, 8, 8))
 
-    assert not MarketStrategyPoolService._can_reuse(prior, "config-v1")
-    assert not MarketStrategyPoolService._can_reuse(prior, "config-v2")
-    # 行情指纹变了也不影响：可复用只看「上次是否选出了策略」。
+    assert MarketStrategyPoolService._can_reuse(fresh, "config-v1", now=now)
+    assert not MarketStrategyPoolService._can_reuse(stale, "config-v1", now=now)
+    assert not MarketStrategyPoolService._can_reuse(fresh, "config-v2", now=now)
+    # 行情指纹变了也不影响：复用只看「上次结论 + 结论的新鲜度」。
     assert MarketStrategyPoolService._can_reuse(
-        ("market-v2", "config-v1", "ready", True),
+        ("market-v2", "config-v1", "ready", True, now),
         "config-v1",
+        now=now,
     )
 
 
-def test_only_selected_strategies_are_reused() -> None:
-    prior = ("market-v1", "config-v1", "insufficient_history", False)
+def test_only_selected_strategies_and_fresh_no_strategy_are_reused() -> None:
+    now = datetime(2026, 10, 8, 12, 0, 0)
+    prior = ("market-v1", "config-v1", "insufficient_history", False, now)
 
-    assert not MarketStrategyPoolService._can_reuse(prior, "config-v1")
-    assert not MarketStrategyPoolService._can_reuse(prior, "config-v2")
+    assert not MarketStrategyPoolService._can_reuse(prior, "config-v1", now=now)
+    assert not MarketStrategyPoolService._can_reuse(prior, "config-v2", now=now)
     assert not MarketStrategyPoolService._can_reuse(
-        ("market-v1", "config-v1", "failed", False),
+        ("market-v1", "config-v1", "failed", False, now),
         "config-v1",
-    )
-    assert not MarketStrategyPoolService._can_reuse(
-        ("market-v1", "config-v1", "no_strategy", False),
-        "config-v1",
+        now=now,
     )
     assert MarketStrategyPoolService._can_reuse(
-        ("market-v1", "config-v1", "ready", False),
+        ("market-v1", "config-v1", "no_strategy", False, now),
         "config-v1",
+        now=now,
     )
     assert MarketStrategyPoolService._can_reuse(
-        ("market-v1", "config-v1", "partial", False),
+        ("market-v1", "config-v1", "ready", False, now),
         "config-v1",
+        now=now,
+    )
+    assert MarketStrategyPoolService._can_reuse(
+        ("market-v1", "config-v1", "partial", False, now),
+        "config-v1",
+        now=now,
     )
 
 
@@ -417,7 +426,9 @@ def test_current_strategy_snapshot_includes_holds_beyond_five_portfolio_slots(tm
     assert len(configs[0].codes) == 6
 
 
-def test_full_reselection_reruns_no_strategy_entries(tmp_path) -> None:
+def test_full_reselection_skips_fresh_no_strategy_and_reruns_stale_ones(
+    tmp_path, monkeypatch
+) -> None:
     store = DuckDbMarketDataStore(tmp_path / "no-strategy.duckdb")
     store.replace_local_bars("SH", "600000", "stock", _bars("2020-01-01", 60))
     adapter = DuckDbMarketDataAdapter(store)
@@ -461,9 +472,25 @@ def test_full_reselection_reruns_no_strategy_entries(tmp_path) -> None:
     )
 
     assert first["failed_symbols"] == second["failed_symbols"] == 0
-    # 上次没选出策略 → 这次重查。数据没变也要重查：判定依据不是行情，
-    # 而是「没有策略」这个结论会随研究区间变长而失效。
-    assert second["skipped_symbols"] == 0
+    # 刚跑完的 no_strategy 在重查窗口内：预过滤剔除，不计入任务总数，
+    # 页面不再显示「0 / 5224」式的假工作量，也不会从浦发银行重新跑起。
+    assert first["total_symbols"] == 1
+    assert second["total_symbols"] == 0
+    assert second["skipped_symbols"] == 1
+    assert individual.calls == 1
+    assert pool_store.get("SH", "600000")["status"] == "no_strategy"
+
+    # 重查窗口归零（模拟时间流逝到下一个周期）：同一只票重新进入队列。
+    monkeypatch.setattr(
+        "selector_app.strategy_pool.service.NO_STRATEGY_RECHECK_DAYS", 0
+    )
+    third = service.run(
+        {"mode": "full", "risk_trials": 1_000, "horizon": 5},
+        job_id="no-strategy-third",
+        entry_writer=persist,
+    )
+    assert third["total_symbols"] == 1
+    assert third["skipped_symbols"] == 0
     assert individual.calls == 2
     assert pool_store.get("SH", "600000")["status"] == "no_strategy"
 

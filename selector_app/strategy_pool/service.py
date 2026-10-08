@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import nullcontext
-from datetime import date
+from datetime import date, datetime, timezone
 from threading import Lock, local
 from typing import Literal, cast
 
@@ -64,14 +64,22 @@ PoolObjective = Literal["annual_return", "sharpe"]
 PoolProgressCallback = Callable[[int, int, str, Mapping[str, object] | None], None]
 PoolEntryWriter = Callable[[Mapping[str, object]], None]
 # v6：选优加了两道硬门槛（样本不足直接出局、平均持仓超上限出局，见
-# strategy_pool.selection）；增量复用判定不再看行情指纹，改为按"上次是否选出
-# 策略"跳过——只有 ready/partial 复用，no_strategy 与 insufficient_history/
-# failed 每次增量重查（理由见 _can_reuse：研究区间按可用交易日比例切，
-# 「没有策略」这个结论会随数据增长而失效）；
+# strategy_pool.selection）；增量复用判定不再看行情指纹（每天同步都会新增
+# 日线，指纹一变全部作废，增量永远等不到复用——2026-10-07 实测每天点增量都
+# 从第一只重新跑），改为按「上次结论是什么、多久之前下的」跳过：ready/partial
+# 直接复用，no_strategy 在 NO_STRATEGY_RECHECK_DAYS 天内复用、到期才重查一次，
+# insufficient_history/failed 每次重查（理由见 _can_reuse）；
 # 研究窗口起点从 2015-01-05 裁到 RESEARCH_START（2016-01-01），2015 全年只作
-# 指标预热。门槛、复用语义与研究窗口都会改变存量条目的有效性，v5 语义下的
-# 条目在下一次全市场重选时逐股重研究。
+# 指标预热。门槛与研究窗口都会改变存量条目的有效性，v5 语义下的条目在
+# 下一次全市场重选时逐股重研究。复用节奏不影响研究结论本身，不参与指纹。
 MARKET_POOL_ALGORITHM_VERSION = "market-pool-v6"
+
+#: 「没有策略」条目的重查节奏（自然日）。验证段按可用交易日比例切，「没有
+#: 策略」这个结论依赖当时的历史长度——数据攒够可能翻身；但一天新数据对样本量
+#: 的影响微乎其微，每天重查是纯浪费（2026-10-08 实测：一夜 57 只里 30 只
+#: no_strategy，用户每次点增量都看到它们从头再跑，全市场推算约 2700 只/天）。
+#: 30 天 ≈ 20 个交易日：到期重查一次，仍不足则刷新时间戳再等一个周期。
+NO_STRATEGY_RECHECK_DAYS = 30
 POOL_PROGRESS_EMIT_INTERVAL_SECONDS = 1.5
 STRATEGY_HOLDING_BATCH_SIZE = 100
 STRATEGY_HOLDING_VIRTUAL_CASH = 1_000_000_000_000.0
@@ -471,6 +479,46 @@ class MarketStrategyPoolService:
                 }
             return record, single_result
 
+    def _filter_reusable(
+        self,
+        refs: list[StockRef],
+        prior_entries: Mapping[tuple[str, str], tuple[str, str, str, bool, datetime | None]],
+        config_fingerprint: str,
+    ) -> tuple[list[StockRef], int]:
+        """把本次增量无需触碰的标的预先剔除，让任务总数只反映真实工作量。
+
+        之前复用判定发生在提交循环里，被跳过的标的仍计入 ``total_symbols``：
+        5224 只全市场里哪怕 5100 只可复用，页面也显示「0 / 5224」，用户无从
+        分辨增量是否在工作（2026-10-08 用户报告「已处理 0 / 5224 不对，已经有
+        策略的不应该在里面」）。预先剔除后，总数就是真正要研究或补算的标的数。
+
+        有欠账的条目不能纯跳过——缺全区间指标或基准缺失/口径过期的，补算本身
+        就是真实工作量，留在队列里由提交循环的复用分支处理（``skipped`` 计数
+        会在补算完成后才 +1，这是刻意的：补算期间任务确实没闲着）。
+        """
+
+        pending: list[StockRef] = []
+        reused = 0
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        for ref in refs:
+            prior = prior_entries.get((ref.market, ref.code))
+            if not self._can_reuse(prior, config_fingerprint, now=now):
+                pending.append(ref)
+                continue
+            if prior is not None and prior[2] in {"ready", "partial"}:
+                entry = (
+                    self._pool_store.get(ref.market, ref.code)
+                    if self._pool_store is not None
+                    else None
+                )
+                if not prior[3] or (
+                    entry is not None and self._needs_full_period_backfill(entry)
+                ):
+                    pending.append(ref)
+                    continue
+            reused += 1
+        return pending, reused
+
     def _run_full_research(
         self,
         refs: list[StockRef],
@@ -480,7 +528,7 @@ class MarketStrategyPoolService:
         value_ids: Sequence[str],
         signal_ids: Sequence[str],
         config_fingerprint: str,
-        prior_entries: Mapping[tuple[str, str], tuple[str, str, str, bool]],
+        prior_entries: Mapping[tuple[str, str], tuple[str, str, str, bool, datetime | None]],
         job_id: str,
         total_work: int,
         progress_callback: PoolProgressCallback | None,
@@ -974,6 +1022,9 @@ class MarketStrategyPoolService:
         total = len(refs)
         total_work = total
         if mode == "full":
+            refs, reused_count = self._filter_reusable(refs, prior_entries, config_fingerprint)
+            total = len(refs)
+            total_work = total
             completed, skipped, failed, errors = self._run_full_research(
                 refs,
                 calendar=calendar,
@@ -988,6 +1039,7 @@ class MarketStrategyPoolService:
                 abort_check=abort_check,
                 entry_writer=entry_writer,
             )
+            skipped += reused_count
         else:
             ref = refs[0]
             symbol = f"{ref.market}:{ref.code}"
@@ -1598,14 +1650,17 @@ class MarketStrategyPoolService:
             ).fetchall()
         return [row[0] for row in rows if row and isinstance(row[0], date)]
 
-    def _prior_entries(self) -> dict[tuple[str, str], tuple[str, str, str, bool]]:
+    def _prior_entries(
+        self,
+    ) -> dict[tuple[str, str], tuple[str, str, str, bool, datetime | None]]:
         with self._store.read_session() as connection:
             # 「已有基准」的要求版本也得对得上：口径改过之后（例如从不复权换成
             # 分红再投资），老行必须重新补算，否则页面上会一直是改口径前的数字。
             rows = connection.execute(
                 """
                 SELECT market, code, market_fingerprint, config_fingerprint, status,
-                       benchmark_json IS NOT NULL AND benchmark_json LIKE ?
+                       benchmark_json IS NOT NULL AND benchmark_json LIKE ?,
+                       updated_at
                 FROM strategy_pool_entries
                 """,
                 [_BENCHMARK_VERSION_LIKE],
@@ -1616,39 +1671,50 @@ class MarketStrategyPoolService:
                 str(row[3] or ""),
                 str(row[4] or ""),
                 bool(row[5]),
+                row[6],
             )
             for row in rows
         }
 
     @staticmethod
     def _can_reuse(
-        prior: tuple[str, str, str, bool] | None,
+        prior: tuple[str, str, str, bool, datetime | None] | None,
         config_fingerprint: str,
+        *,
+        now: datetime | None = None,
     ) -> bool:
-        """增量是否跳过这只股票：只看配置与上次研究**是否选出了策略**。
+        """增量是否跳过这只股票：只看配置、上次结论与结论的新鲜度。
 
         全市场逐股寻优要跑十几天、每天同步都会新增日线；行情指纹一变全部作废，
-        增量就永远等不到复用的那一天（实测：每天点增量都从第一只重新跑）。
-        所以行情指纹刻意不参与判定。
+        增量就永远等不到复用的那一天（实测：每天点增量都从第一只重新跑）。所以
+        行情指纹刻意不参与判定，改按「上次结论是什么、多久之前下的」：
 
-        判据是「有策略」还是「没策略」，而不是笼统的「有没有研究过」——因为研究
-        区间是**按可用交易日数量比例切** 60/20/20 的（``split_trading_days``）：
-        数据每往前长一天，训练/验证/留出三段就整体前移并变长，验证段的交易笔数
-        随之改变。于是两类结论的稳定性是不对称的：
-
-        - **「有」不因数据增长而失效**：策略已经选出，往后由跟踪（tracking）逐日
-          检验。天天在重叠的数据上重选胜者，恰恰是多重检验校正要惩罚的那种研究。
-        - **「没有」依赖当时的历史长度**：验证段样本不足才被判 ``no_strategy`` 的
-          股票，一年后验证段变长就可能攒够笔数——把它冻结住，等于让这批股票永远
-          没有翻身的机会。``insufficient_history`` 同理，且更明显：数据攒够当天
-          就该补研究。
-
-        所以可复用的只有 ready / partial；no_strategy、insufficient_history、
-        failed 与从未研究过的，每次增量都重查。``failed`` 重查的理由不同——错误
-        应当重试，而不是把一次故障当成结论存下来。
+        - **ready / partial（选出了策略）→ 复用**。策略不因数据增长而失效，往后
+          由跟踪（tracking）逐日检验；天天在重叠的数据上重选胜者，恰恰是多重
+          检验校正要惩罚的那种研究。
+        - **no_strategy（研究跑完、没有通过门槛的候选）→ 复用，但按
+          ``NO_STRATEGY_RECHECK_DAYS`` 的节奏到期重查**。「没有策略」依赖当时的
+          历史长度：验证段按可用交易日比例切（``split_trading_days``），数据增长
+          可能让样本攒够。但一天新数据对样本量的影响微乎其微，每天重查是纯浪费
+          （2026-10-08 实测：一夜 57 只里 30 只 no_strategy，用户每次点增量都
+          看到它们从头再跑）。到期重查一次，仍不足则刷新时间戳再等一个周期。
+        - **insufficient_history / failed → 每次重查**。前者数据在长、攒够当天
+          就该补研究；后者错误应当重试，不把一次故障当成结论存下来。
         """
 
-        return bool(prior and prior[1] == config_fingerprint and prior[2] in {"ready", "partial"})
+        if not prior or prior[1] != config_fingerprint:
+            return False
+        status = prior[2]
+        if status in {"ready", "partial"}:
+            return True
+        if status != "no_strategy":
+            return False
+        updated_at = prior[4]
+        if updated_at is None:
+            # 时间戳缺失按过期处理：重查一次是安全的，结论会被刷新进库。
+            return False
+        current = now or datetime.now(timezone.utc).replace(tzinfo=None)
+        return (current - updated_at).days < NO_STRATEGY_RECHECK_DAYS
 
     @staticmethod
     def _needs_full_period_backfill(entry: Mapping[str, object]) -> bool:

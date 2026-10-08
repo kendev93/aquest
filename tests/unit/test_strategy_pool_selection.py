@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -235,7 +235,7 @@ def test_stock_window_algorithm_version_invalidates_old_no_strategy_checkpoints(
     assert MARKET_POOL_ALGORITHM_VERSION == "market-pool-v6"
     assert updated_config != previous_config
     assert not MarketStrategyPoolService._can_reuse(
-        (market_fingerprint, previous_config, "no_strategy"),
+        (market_fingerprint, previous_config, "no_strategy", False, None),
         updated_config,
     )
 
@@ -248,31 +248,48 @@ def test_incremental_reuse_survives_daily_market_data_changes() -> None:
     """
 
     config = _fingerprint({"algorithm_version": MARKET_POOL_ALGORITHM_VERSION})
+    now = datetime(2026, 10, 8, 12, 0, 0)
     # 昨天的行情指纹 vs 今天同步后的：不同，但只要上次选出了策略，照样跳过。
-    assert MarketStrategyPoolService._can_reuse(("bars-yesterday", config, "ready"), config)
-    assert MarketStrategyPoolService._can_reuse(("bars-yesterday", config, "partial"), config)
+    assert MarketStrategyPoolService._can_reuse(
+        ("bars-yesterday", config, "ready", True, now), config, now=now
+    )
+    assert MarketStrategyPoolService._can_reuse(
+        ("bars-yesterday", config, "partial", False, now), config, now=now
+    )
 
 
-def test_incremental_re_researches_symbols_without_a_strategy() -> None:
-    """没有策略的股票每次增量都重查——这是增量本来就该干的事。
+def test_no_strategy_entries_are_reused_until_the_recheck_window_elapses() -> None:
+    """「没有策略」按节奏重查：窗口内跳过，到期才重查一次。
 
-    研究区间按可用交易日数量比例切 60/20/20，数据每往前长一天，三段就整体
-    前移并变长。所以「这只票没有通过门槛的策略」是**依赖当时历史长度**的
-    结论：验证段样本不足被判 no_strategy 的股票，往后验证段变长就可能攒够
-    笔数。把它复用（跳过）等于永久冻结，那批股票再没有翻身的机会。
+    验证段按可用交易日比例切，「没有策略」依赖当时的历史长度——数据攒够可能
+    翻身；但一天新数据对样本量影响微乎其微，每天重查是纯浪费（2026-10-08
+    实测：一夜 57 只里 30 只 no_strategy，用户每次点增量都看到它们从头再跑）。
+    窗口默认 30 天，重查后仍不足则刷新时间戳再等一个周期。
     """
 
     config = _fingerprint({"algorithm_version": MARKET_POOL_ALGORITHM_VERSION})
-    # 行情没变也照样重查：判定依据不是行情，而是上次没选出策略。
-    assert not MarketStrategyPoolService._can_reuse(("bars-v1", config, "no_strategy"), config)
+    now = datetime(2026, 10, 8, 12, 0, 0)
+    fresh = ("bars-v1", config, "no_strategy", False, datetime(2026, 10, 1))
+    stale = ("bars-v1", config, "no_strategy", False, datetime(2026, 8, 1))
+    assert MarketStrategyPoolService._can_reuse(fresh, config, now=now)
+    assert not MarketStrategyPoolService._can_reuse(stale, config, now=now)
+    # 时间戳缺失按过期处理：重查一次是安全的，结论会被刷新进库。
     assert not MarketStrategyPoolService._can_reuse(
-        ("bars-v1", config, "insufficient_history"), config
+        ("bars-v1", config, "no_strategy", False, None), config, now=now
+    )
+    # 未选出结论与失败的状态不设窗口：每次增量都重查。
+    assert not MarketStrategyPoolService._can_reuse(
+        ("bars-v1", config, "insufficient_history", False, now), config, now=now
     )
     # failed 重查的理由不同：错误应当重试，而不是把一次故障当成结论存下来。
-    assert not MarketStrategyPoolService._can_reuse(("bars-v1", config, "failed"), config)
-    assert not MarketStrategyPoolService._can_reuse(None, config)
+    assert not MarketStrategyPoolService._can_reuse(
+        ("bars-v1", config, "failed", False, now), config, now=now
+    )
+    assert not MarketStrategyPoolService._can_reuse(None, config, now=now)
     # 配置一变，所有状态全部作废。
-    assert not MarketStrategyPoolService._can_reuse(("bars-v1", "other-config", "ready"), config)
+    assert not MarketStrategyPoolService._can_reuse(
+        ("bars-v1", "other-config", "ready", True, now), config, now=now
+    )
 
 
 def test_portfolio_strategy_selection_uses_objective_ties_drawdown_then_symbol() -> None:
