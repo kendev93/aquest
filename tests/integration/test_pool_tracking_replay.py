@@ -368,11 +368,11 @@ def test_tracking_runner_deduplicates_goals_and_uses_shared_budget(tmp_path):
     # 名字必须从行情库 instruments 表补。states 与 buy/sell 行出自同一个 dict，
     # 覆盖 states 就覆盖了全部三处消费方。
     assert annual["states"][0]["name"] == "浦发银行"
-    # 持仓中的买入不是新信号：candidate() 的买入规则 close > 0 恒真，首日触发
-    # 后次日开盘已成交，as_of 当天既有持仓、规则又为真——必须显示「持仓中」，
-    # 且不再进入买入信号面板（无事可做）。这正是中信证券 2026-10-08 的问题。
-    assert annual["states"][0]["status"] == "held"
-    assert annual["buy_signals"] == []
+    # 信号面板是规则事实，与持仓互不覆盖：买入规则 close > 0 恒真，首日触发、
+    # 次日开盘成交——as_of 当天既持仓、规则又为真，状态仍是「触发买入」，
+    # 持仓事实由持仓面板与条目表的持仓中徽章表达（两者并排、不冲突）。
+    assert annual["states"][0]["status"] == "buy"
+    assert annual["buy_signals"][0]["name"] == "浦发银行"
     # 跟踪路径的持仓需带前端读取的 holding_return_pct（与信号扫描路径口径一致）
     holdings = annual["model_portfolio"]["holdings"]
     assert holdings and isinstance(holdings[0].get("holding_return_pct"), float)
@@ -388,14 +388,13 @@ def test_tracking_runner_deduplicates_goals_and_uses_shared_budget(tmp_path):
     )
 
 
-def test_tracking_sell_signal_requires_a_position(tmp_path):
-    """卖出信号只在「确实持仓」时展示；空仓中触发卖出是空操作。
+def test_tracking_both_rules_firing_show_in_both_panels(tmp_path):
+    """买卖规则同时为真 → 两个面板各自展示规则事实，状态为「买卖均触发」。
 
-    买卖规则的时序要精确构造：买入 close > 0 恒真，首日触发、次日开盘成交；
-    卖出 close > 13 只在第三根为真——第二根为假保证卖出不会在第三根开盘
-    抢先平仓。于是 as_of 第三根：既持仓、又触发卖出 → 状态是「卖出信号」，
-    卖出面板收它、买入面板不收（持仓中的买入无事可做），且当天仍列持仓中
-    （卖出按次一交易日执行）。
+    时序构造：买入 close > 0 恒真，首日触发、次日开盘成交；卖出 close > 13
+    只在第三根为真（第二根为假，保证卖出不会在第三根开盘抢先平仓）。于是
+    as_of 第三根：持仓中、买卖规则同时成立 → 状态「买卖均触发」，两个面板
+    都有它，且当天仍列持仓中（动作都按次一交易日执行）。
     """
     from selector_app.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
     from selector_app.strategy_pool.tracking_runner import PoolTrackingRunner
@@ -433,10 +432,10 @@ def test_tracking_sell_signal_requires_a_position(tmp_path):
         writer=write,
     )
     annual = result["results_by_objective"]["annual_return"]
-    assert annual["states"][0]["status"] == "sell"
+    assert annual["states"][0]["status"] == "buy_sell"
     assert [row["symbol"] for row in annual["sell_signals"]] == ["SH600000"]
-    assert annual["buy_signals"] == []
-    # 卖出动作次日执行，当天仍列持仓中。
+    assert [row["symbol"] for row in annual["buy_signals"]] == ["SH600000"]
+    # 两个动作都按次一交易日执行，当天仍列持仓中。
     assert [
         f"{h['market']}{h['code']}" for h in annual["model_portfolio"]["holdings"]
     ] == ["SH600000"]
