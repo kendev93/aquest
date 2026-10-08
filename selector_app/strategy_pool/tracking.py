@@ -189,6 +189,18 @@ def replay_account(
         for t in captured.trades
         if t["date"] == summary["as_of_date"] and t.get("risk_trigger")
     ]
+    # 「规则成立但当日注定不成交」的阻断原因。风控冷却期内，选股与执行两层都会跳过
+    # 该标的（simulation._select_candidates / _execute_buys），但 buy_mask 仍然是
+    # True，于是信号面板会把它显示成一条可执行买入——实际既没有挂单也不会建仓
+    # （2026-10-08 用户澄清：冷却期内不该触发买入信号）。已持仓的标的**不算**阻断：
+    # 那只是不加仓，规则事实依然有效，信号要照常显示。
+    last_index = len(captured.processed_dates) - 1
+    cooldown_until = int(captured.cooldown_until.get(context.symbol, -1))
+    summary["buy_blocked_reason"] = (
+        "cooldown"
+        if context.symbol not in captured.positions and cooldown_until > last_index
+        else None
+    )
     report = service._build_report(
         config, dates, 1, 1, 0, {}, simulation, fingerprint, None, [context]
     )

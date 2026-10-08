@@ -259,6 +259,35 @@ class PoolTrackingStore:
             result.append(item)
         return result
 
+    def buy_blockades(self, objective: str) -> dict[tuple[str, str], tuple[str, str]]:
+        """当前版本里「买入规则成立但注定不成交」的标的 -> (原因, 快照日期)。
+
+        只读 ``summary_json``，不解压 checkpoint blob——冷却结论已经由回放写进摘要，
+        这里拿它给不跑模拟的直连扫描路径用，避免为了一个布尔值解压整份快照。
+        手动策略优先于自动策略，与 ``tracking_runner`` 的 ``applied`` 取舍一致。
+        """
+
+        with self.store.read_session() as connection:
+            rows = connection.execute(
+                """SELECT market, code, source, summary_json FROM pool_tracking_versions
+                WHERE is_current AND objective=? AND summary_json IS NOT NULL""",
+                [objective],
+            ).fetchall()
+        result: dict[tuple[str, str], tuple[str, str]] = {}
+        for market, code, source, summary in rows:
+            try:
+                payload = json.loads(summary or "{}")
+            except (TypeError, ValueError):
+                continue
+            reason = payload.get("buy_blocked_reason")
+            if not reason:
+                continue
+            key = (str(market), str(code))
+            # 手动优先，且能覆盖已经放进去的自动结果（行序不保证）。
+            if source == "manual" or key not in result:
+                result[key] = (str(reason), str(payload.get("as_of_date") or ""))
+        return result
+
     def snapshot(self, version_id: str) -> dict[str, Any] | None:
         with self.store.read_session() as connection:
             row = connection.execute(

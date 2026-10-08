@@ -59,6 +59,7 @@ from .resources import (
 )
 from .selection import common_calendar_windows, summarize_objective_winners
 from .store import DuckDbStrategyPoolStore
+from .tracking_store import PoolTrackingStore
 
 PoolObjective = Literal["annual_return", "sharpe"]
 PoolProgressCallback = Callable[[int, int, str, Mapping[str, object] | None], None]
@@ -1487,6 +1488,10 @@ class MarketStrategyPoolService:
             )
         strategy_snapshot.sort(key=lambda item: (item["market"], item["code"]))
         market_status = self._store.status()
+        # 这条路径只按规则求值，不跑模拟，拿不到冷却期——所以直接读跟踪快照写下的
+        # 结论，让两条路径的买入口径一致（2026-10-08 用户澄清：冷却期内不触发买入
+        # 信号）。读不到就当没有阻断，行为退回改动前，不会因为查询失败把信号全吃掉。
+        blockades = PoolTrackingStore(self._store).buy_blockades(objective)
         buy_signals: list[dict[str, object]] = []
         sell_signals: list[dict[str, object]] = []
         states: list[dict[str, object]] = []
@@ -1546,6 +1551,11 @@ class MarketStrategyPoolService:
                     evaluate_rule_group(sell_rule, prepared.formula_results, FORMULA_REGISTRY)[-1]
                 )
                 as_of = str(prepared.frame.iloc[-1]["date"])[:10]
+                # 阻断结论跟着快照日期走：快照停在更早的交易日说明这只标的没参与最近的
+                # 回放，那份冷却状态不能用来否决今天的信号。
+                blockade = blockades.get((ref.market, ref.code))
+                blocked = blockade is not None and blockade[1] == as_of
+                buy = buy and not blocked
                 if buy:
                     buy_signals.append(_signal_row(ref, active_candidate, objective, as_of, "buy"))
                 if sell:

@@ -179,6 +179,69 @@ def test_replay_account_refreshes_actions_between_runs_on_a_reused_service(tmp_p
     assert refreshed["checkpoint"] == fresh["checkpoint"]
 
 
+def test_buy_rule_stays_true_but_is_reported_blocked_during_risk_cooldown(tmp_path):
+    """冷却期内买入规则仍成立，但执行层已否决——必须报出阻断原因。
+
+    回归：2026-10-08 中信证券（SH600030）止损后进入 3 日冷却，面板照旧显示买入
+    信号却没有挂单也没有持仓，看起来像"信号丢了"。
+    """
+
+    dates = pd.date_range("2026-09-01", periods=5, freq="D")
+    frame = pd.DataFrame(
+        dict(
+            date=dates,
+            open=[10.0, 10.0, 10.0, 10.0, 10.0],
+            close=[10.0, 10.0, 10.0, 7.0, 7.0],
+            high=[11.0, 11.0, 11.0, 11.0, 11.0],
+            low=[9.0, 9.0, 9.0, 7.0, 7.0],
+            volume=[1000.0] * 5,
+            amount=[10_000.0, 10_000.0, 10_000.0, 7_000.0, 7_000.0],
+            bar_status=["completed"] * 5,
+        )
+    )
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", frame)
+    adapter = DuckDbMarketDataAdapter(store)
+    service = PortfolioBacktestService(adapter=adapter)
+    value = candidate()
+    value["config"].update(initial_cash=1000, stop_loss_pct=0.2, stop_loss_cooldown_days=2)
+    version = dict(
+        candidate=value,
+        signature=signature(value),
+        launch_data_date="2026-09-01",
+        created_at="2026-09-01T16:00:00+00:00",
+    )
+    ref = adapter.stock_ref("", "SH", "600000")
+    result = replay_account(service, ref, version)
+    summary = result["summary"]
+    assert summary["signal_buy"] is True
+    assert summary["buy_blocked_reason"] == "cooldown"
+    assert summary["holding"] == []
+    assert result["checkpoint"]["pending_buys"] == []
+
+
+def test_held_position_keeps_its_buy_signal_unblocked(tmp_path):
+    """持仓中标的的买入信号不算阻断：那只是不加仓，规则事实仍然有效。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", bars(2))
+    adapter = DuckDbMarketDataAdapter(store)
+    service = PortfolioBacktestService(adapter=adapter)
+    value = candidate()
+    value["config"].update(initial_cash=1000, stop_loss_pct=None)
+    version = dict(
+        candidate=value,
+        signature=signature(value),
+        launch_data_date="2026-09-02",
+        created_at="2026-09-02T16:00:00+00:00",
+    )
+    ref = adapter.stock_ref("", "SH", "600000")
+    summary = replay_account(service, ref, version)["summary"]
+    assert summary["holding"]
+    assert summary["signal_buy"] is True
+    assert summary["buy_blocked_reason"] is None
+
+
 def test_snapshot_commit_rejects_archived_versions_and_keeps_last_good_on_failure(tmp_path):
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     pool = DuckDbStrategyPoolStore(store)

@@ -214,14 +214,20 @@ class PoolTrackingRunner:
                 status="held" if summary["holding"] else "flat",
             )
             fresh = not payload.get("as_of_date") or payload["as_of_date"] == summary["as_of_date"]
-            buy, sell = fresh and summary["signal_buy"], fresh and summary["signal_sell"]
-            # 信号面板展示的是**规则事实**：买入/卖出规则当日是否成立，与持仓状态
-            # 各自独立、互不覆盖——持仓中可以持续触发买入（规则仍在成立），空仓中
-            # 也可以触发卖出，这不与持仓冲突（2026-10-08 用户澄清；此前按持仓过滤
-            # 反而把「持仓中的买入信号」藏掉了）。持仓事实由另外两层表达：今日持仓
-            # 中面板、条目表的「持仓中」徽章（entryIsHeld，来自回放的日终持仓）；
-            # 买入面板的行自带「当前持仓收益」，持仓上下文在信号行内即可见。状态列
-            # 按规则事实取优先级，held/flat 只在没有规则触发时兜底。
+            # 买入信号有三层含义，这里取它们的交集：
+            # 1. ``fresh``——快照停在最新交易日，不是停牌/失败留下的旧状态；
+            # 2. ``signal_buy``——买入规则当日成立（规则事实）；
+            # 3. 没有 ``buy_blocked_reason``——执行层没有否决它。风控冷却期内的标的
+            #    规则可以成立，但选股与买入两层都会跳过，注定不成交，展示成买入信号
+            #    会误导（2026-10-08 用户澄清）。已持仓标的没有阻断原因，因此「持仓中
+            #    继续触发买入」照常显示。
+            buy = fresh and summary["signal_buy"] and not summary.get("buy_blocked_reason")
+            sell = fresh and summary["signal_sell"]
+            # 状态列同样只认可执行的买入：被冷却期挡掉的行退回 held/flat，不再标 buy。
+            # 持仓事实由另外两层表达：今日持仓中面板、条目表的「持仓中」徽章
+            # （entryIsHeld，来自回放的日终持仓）；买入面板的行自带「当前持仓收益」，
+            # 持仓上下文在信号行内即可见。状态列按规则事实取优先级，held/flat 只在
+            # 没有规则触发时兜底。
             row["status"] = (
                 "buy_sell" if buy and sell else "buy" if buy else "sell" if sell else row["status"]
             )

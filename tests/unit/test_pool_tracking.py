@@ -47,6 +47,41 @@ def test_versions_ignore_candidate_ids_metrics_and_dates_but_change_rules(tmp_pa
     assert len(tracks.versions("SH", "600000", "annual_return")) == 2
 
 
+def test_buy_blockades_report_only_blocked_symbols_for_the_queried_objective(tmp_path):
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    pool = DuckDbStrategyPoolStore(store)
+    pool.upsert_automatic(
+        market="SH",
+        code="600000",
+        name="test",
+        annual_candidate={
+            "candidate_id": "a",
+            "buy_rule": {"signals": ["technical.macd"]},
+            "sell_rule": {"signals": []},
+            "config": {"stop_loss_pct": 0.1},
+        },
+        sharpe_candidate=None,
+        data_fingerprint="x",
+        config_fingerprint="y",
+        source_job_id="job",
+    )
+    tracks = PoolTrackingStore(store)
+    version = tracks.current_versions()[0]
+    # 没有阻断原因的版本不该出现在结果里，否则会把正常买入信号一起吃掉。
+    clean = {"summary": {"as_of_date": "2026-10-08"}, "checkpoint": {}}
+    assert tracks.save_snapshot(version["version_id"], version["signature"], clean)
+    assert tracks.buy_blockades("annual_return") == {}
+    blocked = {
+        "summary": {"as_of_date": "2026-10-08", "buy_blocked_reason": "cooldown"},
+        "checkpoint": {},
+    }
+    assert tracks.save_snapshot(version["version_id"], version["signature"], blocked)
+    assert tracks.buy_blockades("annual_return") == {
+        ("SH", "600000"): ("cooldown", "2026-10-08")
+    }
+    assert tracks.buy_blockades("sharpe") == {}
+
+
 def test_inherited_trade_includes_full_gain_and_separate_post_launch_return():
     checkpoint = {
         "equity": [
