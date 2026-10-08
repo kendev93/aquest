@@ -1027,7 +1027,7 @@ onUnmounted(() => {
               <span>第 {{ buyPage }} / {{ buyPageCount }} 页 · 共 {{ buySignals.length }} 条</span>
               <button class="button-secondary" :disabled="buyPage >= buyPageCount" @click="buyPage += 1">下一页</button>
             </div>
-            <p v-else class="empty-copy">{{ signalResult ? '当前没有股票触发买入规则。' : '选择目标后点击“刷新当天信号”，扫描最新完整行情日。' }}</p>
+            <p v-if="!buySignals.length" class="empty-copy">{{ signalResult ? '当前没有股票触发买入规则。' : '选择目标后点击“刷新当天信号”，扫描最新完整行情日。' }}</p>
           </article>
           <article class="signal-panel panel-card" data-testid="pool-sell-signals">
             <div class="section-heading"><div><p class="eyebrow">SELL SIGNALS</p><h2>当天触发卖出 <span>{{ ruleSellSignals.length + riskSellSignals.length }}</span></h2></div><small>{{ signalAsOf || '卖出条件和持仓风控退出' }}</small></div>
@@ -1048,7 +1048,7 @@ onUnmounted(() => {
               <span>第 {{ sellPage }} / {{ sellPageCount }} 页 · 共 {{ sellPanelItems.length }} 条</span>
               <button class="button-secondary" :disabled="sellPage >= sellPageCount" @click="sellPage += 1">下一页</button>
             </div>
-            <p v-else class="empty-copy">{{ signalResult ? '当前没有卖出条件或持仓风控退出信号。' : '信号扫描会同时检查卖出规则，并复核逐股策略的风控退出。' }}</p>
+            <p v-if="!sellPanelItems.length" class="empty-copy">{{ signalResult ? '当前没有卖出条件或持仓风控退出信号。' : '信号扫描会同时检查卖出规则，并复核逐股策略的风控退出。' }}</p>
           </article>
           <article class="signal-panel panel-card" data-testid="pool-current-holdings">
             <div class="section-heading"><div><p class="eyebrow">CURRENT HOLDINGS</p><h2>今日持仓中 <span>{{ currentHoldings.length }}</span></h2></div><small>{{ objectiveLabel(objective) }}目标逐股策略 · {{ signalAsOf || '信号扫描后显示日期' }}</small></div>
@@ -1063,11 +1063,11 @@ onUnmounted(() => {
               <span>第 {{ holdingsPage }} / {{ holdingsPageCount }} 页 · 共 {{ currentHoldings.length }} 条</span>
               <button class="button-secondary" :disabled="holdingsPage >= holdingsPageCount" @click="holdingsPage += 1">下一页</button>
             </div>
-            <p v-else-if="!signalResult" class="empty-copy">信号扫描完成后显示各股对应策略的持仓状态。</p>
+            <p v-if="!signalResult" class="empty-copy">信号扫描完成后显示各股对应策略的持仓状态。</p>
             <p v-else-if="signalResult.model_portfolio?.available === false" class="empty-copy">{{ signalResult.model_portfolio.reason || '当前无法计算逐股策略持仓。' }}</p>
             <p v-else-if="signalResult.holding_scope !== 'per_stock_strategy'" class="empty-copy">当前历史结果没有逐股持仓快照；请刷新当天信号后查看。</p>
             <p v-else-if="signalResult.holding_snapshot_complete !== true" class="empty-copy">{{ signalResult.model_portfolio?.failed_batches ? `逐股持仓回放有 ${signalResult.model_portfolio.failed_batches} 个批次失败，当前结果不完整。${signalResult.model_portfolio.reason || ''}` : signalResult.signal_target ? '这是单股增量结果，尚未覆盖全市场；请刷新当天信号查看完整持仓。' : '当前历史结果没有完整的逐股持仓快照；请刷新当天信号后查看。' }}</p>
-            <p v-else class="empty-copy">当前没有仍处于持仓状态的标的。</p>
+            <p v-else-if="!currentHoldings.length" class="empty-copy">当前没有仍处于持仓状态的标的。</p>
           </article>
         </section>
         <p class="pool-scale-note">买入和卖出规则信号都在最新完整行情日收盘后判定，并于下一交易日执行。因此，今日触发卖出规则的标的当天仍列在持仓中，下一交易日卖出。止损、止盈按回测中的日线风控成交规则模拟。</p>
