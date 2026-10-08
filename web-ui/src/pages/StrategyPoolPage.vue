@@ -234,13 +234,13 @@ const sortedEntries = computed(() => {
   const metric = sortColumn.value
   if (metric === 'status') {
     return rows.sort((a, b) => {
-      const order = statusOrder(entryStatus(a)) - statusOrder(entryStatus(b))
+      const order = statusOrder(entryStatus(a), entryIsHeld(a)) - statusOrder(entryStatus(b), entryIsHeld(b))
       return order || metricValue(b, objective.value ?? 'annual_return', objective.value) - metricValue(a, objective.value ?? 'annual_return', objective.value) || symbol(a).localeCompare(symbol(b))
     })
   }
   return rows.sort((a, b) => {
     const byMetric = metricValue(b, metric, objective.value) - metricValue(a, metric, objective.value)
-    return byMetric || statusOrder(entryStatus(a)) - statusOrder(entryStatus(b)) || symbol(a).localeCompare(symbol(b))
+    return byMetric || statusOrder(entryStatus(a), entryIsHeld(a)) - statusOrder(entryStatus(b), entryIsHeld(b)) || symbol(a).localeCompare(symbol(b))
   })
 })
 const totalPages = computed(() => Math.max(1, Math.ceil(sortedEntries.value.length / pageSize.value)))
@@ -771,8 +771,15 @@ function riskExitReturnText(signal: Record<string, unknown>): string {
     : ''
 }
 
-function statusOrder(value: string): number {
-  return { buy: 0, buy_sell: 0, sell: 1, flat: 2, signal_stale: 3, no_strategy: 4 }[value] ?? 5
+// 默认排序档位：触发买入 → 触发卖出 → 持仓中 → 今日无买卖信号 → 待刷新 / 无策略 / 其他。
+// 持仓中不带买卖信号时状态为 flat，需要靠 held 与「今日无买卖信号」区分开。
+function statusOrder(value: string, held = false): number {
+  if (value === 'buy' || value === 'buy_sell') return 0
+  if (value === 'sell') return 1
+  // 有买卖信号的持仓标的归入买卖档；其余持仓标的统一排在「持仓中」。
+  if (held && value !== 'no_strategy' && value !== 'insufficient_history') return 2
+  if (value === 'flat') return 3
+  return { signal_stale: 4, no_strategy: 5 }[value] ?? 6
 }
 
 function metricValue(
