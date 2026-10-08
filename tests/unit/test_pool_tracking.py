@@ -76,9 +76,7 @@ def test_buy_blockades_report_only_blocked_symbols_for_the_queried_objective(tmp
         "checkpoint": {},
     }
     assert tracks.save_snapshot(version["version_id"], version["signature"], blocked)
-    assert tracks.buy_blockades("annual_return") == {
-        ("SH", "600000"): ("cooldown", "2026-10-08")
-    }
+    assert tracks.buy_blockades("annual_return") == {("SH", "600000"): ("cooldown", "2026-10-08")}
     assert tracks.buy_blockades("sharpe") == {}
 
 
