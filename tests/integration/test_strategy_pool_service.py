@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from threading import Barrier
 from types import SimpleNamespace
@@ -94,9 +94,14 @@ class FakePortfolioBacktestService:
 
 def _bars(start: str, count: int) -> pd.DataFrame:
     close = np.linspace(10.0, 16.0, count)
+    # 测试标的的历史跨度必须跨过研究准入门槛（上市满一年，见
+    # MIN_LISTING_HISTORY_DAYS）：条数少的夹具按更大的日距展开，保证
+    # 首根到末根 ≥ 370 天，否则所有短夹具都会被「上市未满一年」拦下，
+    # 测的就不再是它们本来要测的东西。
+    step = max(1, -(-370 // max(count - 1, 1)))
     return pd.DataFrame(
         {
-            "date": pd.date_range(start, periods=count, freq="D"),
+            "date": pd.date_range(start, periods=count, freq=f"{step}D"),
             "open": close,
             "high": close + 0.2,
             "low": close - 0.2,
@@ -154,9 +159,14 @@ def test_full_pool_research_splits_each_symbol_and_saves_each_symbol_incremental
     first = pool_store.get("SH", "600000")
     second = pool_store.get("SZ", "000001")
     assert result["completed_symbols"] == 2
+    # 研究窗口 = 标的自身数据的首末根（夹具的日距是自适应的，不硬编码日期）。
+    spans = {
+        f"{item.market}{item.code}": (item.first_date, item.last_date)
+        for item in store.list_instruments(instrument_types=("stock",))
+    }
     assert [(config.start_date, config.end_date) for config in individual.configs] == [
-        (date(2020, 1, 1), date(2020, 2, 29)),
-        (date(2020, 1, 11), date(2020, 2, 29)),
+        spans["SH600000"],
+        spans["SZ000001"],
     ]
     assert all(config.split_windows is None for config in individual.configs)
     assert all(config.common_split_metadata is None for config in individual.configs)
@@ -493,6 +503,80 @@ def test_full_reselection_skips_fresh_no_strategy_and_reruns_stale_ones(
     assert third["skipped_symbols"] == 0
     assert individual.calls == 2
     assert pool_store.get("SH", "600000")["status"] == "no_strategy"
+
+
+def test_full_research_defers_symbols_listed_less_than_a_year(tmp_path) -> None:
+    """上市不满一年的标的不研究：指标预热与分段样本都不足。
+
+    年线级指标在短历史上整段是 NaN，训练/验证段也覆盖不了一个完整的市场
+    周期——机械通过样本门槛选出的策略统计上不可信。落 insufficient_history
+    （每次增量重查），攒满一年后自动纳入，无需人工干预。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "young.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars("2020-01-01", 60))
+    # 新标的：60 根日线挤在最近两个月，首根到末根只有 59 天。
+    young_start = (datetime.now().date() - timedelta(days=120)).isoformat()
+    young_close = np.linspace(10.0, 12.0, 60)
+    store.replace_local_bars(
+        "SZ",
+        "000001",
+        "stock",
+        pd.DataFrame(
+            {
+                "date": pd.date_range(young_start, periods=60, freq="D"),
+                "open": young_close,
+                "high": young_close + 0.2,
+                "low": young_close - 0.2,
+                "close": young_close,
+                "volume": np.full(60, 5_000.0),
+                "amount": young_close * 5_000,
+                "bar_status": "completed",
+            }
+        ),
+    )
+    adapter = DuckDbMarketDataAdapter(store)
+    pool_store = DuckDbStrategyPoolStore(store)
+    pool_store.initialize()
+
+    class NoStrategyService:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def run(self, config, progress_callback=None, abort_check=None):
+            del progress_callback, abort_check
+            self.calls.append(f"{config.market}{config.code}")
+            return {
+                "data_fingerprint": "same-bars",
+                "results_by_return": [],
+                "results_by_sharpe": [],
+            }
+
+    individual = NoStrategyService()
+    service = MarketStrategyPoolService(
+        store=store,
+        adapter=adapter,
+        individual_service=individual,
+        pool_store=pool_store,
+        portfolio_service=FakePortfolioBacktestService(),
+    )
+
+    def persist(entry):
+        pool_store.persist_worker_entry(entry, source_job_id=str(entry["source_job_id"]))
+
+    result = service.run(
+        {"mode": "full", "risk_trials": 1_000, "horizon": 5},
+        job_id="young-symbol",
+        entry_writer=persist,
+    )
+
+    assert result["failed_symbols"] == 0
+    # 新股被挡在研究之外：只有老标的进了研究服务。
+    assert individual.calls == ["SH600000"]
+    assert pool_store.get("SH", "600000")["status"] == "no_strategy"
+    young = pool_store.get("SZ", "000001")
+    assert young["status"] == "insufficient_history"
+    assert "上市未满一年" in (young["last_error"] or "")
 
 
 def test_reselection_backfills_full_period_return_without_researching_cached_rules(

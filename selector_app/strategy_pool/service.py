@@ -80,6 +80,14 @@ MARKET_POOL_ALGORITHM_VERSION = "market-pool-v6"
 #: no_strategy，用户每次点增量都看到它们从头再跑，全市场推算约 2700 只/天）。
 #: 30 天 ≈ 20 个交易日：到期重查一次，仍不足则刷新时间戳再等一个周期。
 NO_STRATEGY_RECHECK_DAYS = 30
+
+#: 研究准入的最低上市历史（自然日，按「首根已入库日线 → 研究终点」的跨度计）。
+#: 不满一年的标的：年线级指标整段是 NaN，训练/验证/留出三段加起来覆盖不了
+#: 一个完整的市场周期，机械通过样本门槛选出的策略统计上不可信
+#: （2026-10-08 用户决策）。命中后按「历史样本不足」落库（insufficient_history，
+#: 每次增量重查），攒满一年后的增量研究自动纳入——无需人工干预。手动单股
+#: 研究不走此闸：那是显式指名的研究请求，用户自担其结论质量。
+MIN_LISTING_HISTORY_DAYS = 365
 POOL_PROGRESS_EMIT_INTERVAL_SECONDS = 1.5
 STRATEGY_HOLDING_BATCH_SIZE = 100
 STRATEGY_HOLDING_VIRTUAL_CASH = 1_000_000_000_000.0
@@ -391,6 +399,28 @@ class MarketStrategyPoolService:
         )
         with registration:
             progress.start()
+            if ref.first_date is not None and config.end_date is not None:
+                observed_days = (config.end_date - ref.first_date).days
+                if observed_days < MIN_LISTING_HISTORY_DAYS:
+                    # 上市未满一年：这不是「切不出三段」的机械失败，而是研究政策
+                    # 上的不接纳——年线级指标整段是 NaN，三段加起来也覆盖不了
+                    # 一个完整的市场周期。落 insufficient_history（每次增量都
+                    # 重查，代价只是一次日期比较），攒满一年后自动纳入。
+                    raise InsufficientResearchHistoryError(
+                        "",
+                        {
+                            "reason": "listing_history",
+                            "policy_days": MIN_LISTING_HISTORY_DAYS,
+                            "first_date": ref.first_date.isoformat(),
+                            "end_date": config.end_date.isoformat(),
+                            "observed_days": observed_days,
+                        },
+                        message=(
+                            f"上市未满一年（{ref.first_date.isoformat()} 起，观察期 "
+                            f"{observed_days} 天 < {MIN_LISTING_HISTORY_DAYS} 天）："
+                            "指标预热与分段样本都不足，满一年后的增量研究自动纳入"
+                        ),
+                    )
             clear_stock_cache = getattr(self._adapter, "clear_thread_stock_cache", None)
             if callable(clear_stock_cache):
                 clear_stock_cache()
