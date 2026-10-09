@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import cast
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 
 from selector_app.instrument_lab import InstrumentLabService
 from selector_app.market_data.store import MarketDataStoreError
@@ -46,7 +46,9 @@ def instrument_values(payload: InstrumentLabValuesRequest, request: Request) -> 
 
 
 @router.get("/conditions/library")
-def instrument_condition_library(request: Request, limit: int = 60) -> dict[str, object]:
+def instrument_condition_library(
+    request: Request, limit: int = Query(default=60, ge=1, le=500)
+) -> dict[str, object]:
     try:
         items = _service(request).condition_library(limit=limit)
     except (MarketDataStoreError, OSError) as exc:

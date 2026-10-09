@@ -28,6 +28,7 @@ from selector_app.formulas.types import FormulaResult
 from selector_app.market_data.adjustment import frame_adjust_version
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.market_data.store_base import DEFAULT_PRICE_BASIS
+from selector_app.market_data.store_indicator_cache import _ADJUST_VERSION_MARKER
 
 _TIMEFRAME = "daily"
 # 行情口径的全局默认（见 ``store_base.DEFAULT_PRICE_BASIS``，当前是 raw 不复权）。
@@ -496,7 +497,7 @@ class IndicatorCache:
             with self._lock:
                 self._revisions[key] = revision
         if adjust_version:
-            revision = f"{revision}~adj:{adjust_version}"
+            revision = f"{revision}{_ADJUST_VERSION_MARKER}{adjust_version}"
         return revision
 
     def get_or_compute_custom(

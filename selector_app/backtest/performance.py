@@ -113,6 +113,9 @@ class PerformanceAnalyzer:
         loss_returns = trade_returns[losses]
         win_returns = win_returns[np.isfinite(win_returns)]
         loss_returns = loss_returns[np.isfinite(loss_returns)]
+        # 分母同样要排除保本单：否则它们只进分母不进分子，胜率照样被压低，也和
+        # win_trades + lose_trades 对不上账。
+        decided_trades = int(wins.sum()) + int(losses.sum())
         rejected = int(trades["rejected"].astype(bool).sum()) if "rejected" in trades else 0
         metrics = {
             "total_return": total_return,
@@ -126,7 +129,7 @@ class PerformanceAnalyzer:
             "win_trades": float(wins.sum()),
             "lose_trades": float(losses.sum()),
             "rejected_trades": float(rejected),
-            "win_rate": float(wins.sum() / len(sell_trades)) if len(sell_trades) else 0.0,
+            "win_rate": float(wins.sum() / decided_trades) if decided_trades else 0.0,
             "profit_factor": profit_factor,
             "avg_win": float(np.mean(win_returns)) if len(win_returns) else 0.0,
             "avg_loss": float(np.mean(loss_returns)) if len(loss_returns) else 0.0,

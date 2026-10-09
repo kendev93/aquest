@@ -548,6 +548,18 @@ class DuckDbBarsStore:
                           AND local.price_basis = incoming.price_basis
                           AND local.source = 'local'
                     )
+                      -- 被 completed/provisional 保护跳过的行不会真正写入，不能计进
+                      -- written_bars，否则重放历史日线时报表虚高。
+                      AND NOT EXISTS (
+                        SELECT 1 FROM daily_bars AS existing
+                        WHERE existing.market = incoming.market
+                          AND existing.code = incoming.code
+                          AND existing.trade_date = incoming.trade_date
+                          AND existing.price_basis = incoming.price_basis
+                          AND existing.source = 'online'
+                          AND existing.bar_status = 'completed'
+                          AND incoming.bar_status = 'provisional'
+                    )
                     """
                 ).fetchone()
                 existing_online_row = connection.execute(
@@ -594,6 +606,15 @@ class DuckDbBarsStore:
                           OR existing.amount IS DISTINCT FROM incoming.amount
                           OR existing.provider IS DISTINCT FROM incoming.provider
                           OR existing.bar_status IS DISTINCT FROM incoming.bar_status
+                      )
+                      -- completed → provisional 是下面刻意拒绝写入的差异：行情一个字节
+                      -- 都没变，不该 bump updated_at（那会作废该标的的全部指标缓存）。
+                      AND (
+                          existing.market IS NULL
+                          OR NOT (
+                              existing.bar_status = 'completed'
+                              AND incoming.bar_status = 'provisional'
+                          )
                       )
                     """
                 ).fetchall()
@@ -742,6 +763,15 @@ class DuckDbBarsStore:
                           OR existing.provider IS DISTINCT FROM incoming.provider
                           OR existing.bar_status IS DISTINCT FROM incoming.bar_status
                       )
+                      -- completed → provisional 的差异正是下面刻意拒绝写入的那类；一行都
+                      -- 没变就不该 bump updated_at（它会作废该标的的全部指标缓存）。
+                      AND (
+                          existing.market IS NULL
+                          OR NOT (
+                              existing.bar_status = 'completed'
+                              AND incoming.bar_status = 'provisional'
+                          )
+                      )
                     """
                 ).fetchall()
                 changed_keys = {
@@ -771,6 +801,18 @@ class DuckDbBarsStore:
                           AND local.price_basis = incoming.price_basis
                           AND local.source = 'local'
                     )
+                      -- 被 completed/provisional 保护跳过的行不算真正写入。
+                      AND NOT EXISTS (
+                        SELECT 1
+                        FROM daily_bars AS existing
+                        WHERE existing.market = incoming.market
+                          AND existing.code = incoming.code
+                          AND existing.trade_date = incoming.trade_date
+                          AND existing.price_basis = incoming.price_basis
+                          AND existing.source = 'online'
+                          AND existing.bar_status = 'completed'
+                          AND incoming.bar_status = 'provisional'
+                      )
                     """
                 ).fetchone()
                 connection.execute("BEGIN")
@@ -784,6 +826,12 @@ class DuckDbBarsStore:
                           AND existing.trade_date = incoming.trade_date
                           AND existing.price_basis = incoming.price_basis
                           AND existing.source = 'online'
+                          -- 与 upsert_online_bars 同口径：盘中重放不该把已收盘的行降级
+                          -- 成 provisional，否则这一天会从所有默认读路径上整体消失。
+                          AND NOT (
+                            existing.bar_status = 'completed'
+                            AND incoming.bar_status = 'provisional'
+                          )
                         """
                     )
                     connection.execute(
@@ -807,6 +855,19 @@ class DuckDbBarsStore:
                               AND local.trade_date = incoming.trade_date
                               AND local.price_basis = incoming.price_basis
                               AND local.source = 'local'
+                        )
+                          -- 上面没删掉（completed/provisional 保护），这里就不能再插，
+                          -- 否则撞 (market, code, trade_date, price_basis) 唯一约束。
+                          AND NOT EXISTS (
+                            SELECT 1
+                            FROM daily_bars AS existing
+                            WHERE existing.market = incoming.market
+                              AND existing.code = incoming.code
+                              AND existing.trade_date = incoming.trade_date
+                              AND existing.price_basis = incoming.price_basis
+                              AND existing.source = 'online'
+                              AND existing.bar_status = 'completed'
+                              AND incoming.bar_status = 'provisional'
                         )
                         """
                     )
@@ -1128,24 +1189,32 @@ class DuckDbBarsStore:
         if not rows:
             return 0
         with _WRITE_LOCK, self._store._connect() as connection:
-            connection.executemany(
-                """
-                INSERT INTO corporate_actions (
-                    market, code, ex_date, share_ratio, cash_per_share,
-                    factor_ratio, action_type, source, provider, imported_at
+            # 事件表是 data_revisions() 的哈希输入：半途写入会留下一个既非旧也非新的
+            # 事件版本，指标缓存随后无法判定有效性。必须整批原子提交。
+            connection.execute("BEGIN")
+            try:
+                connection.executemany(
+                    """
+                    INSERT INTO corporate_actions (
+                        market, code, ex_date, share_ratio, cash_per_share,
+                        factor_ratio, action_type, source, provider, imported_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT (market, code, ex_date) DO UPDATE SET
+                        share_ratio = excluded.share_ratio,
+                        cash_per_share = excluded.cash_per_share,
+                        factor_ratio = excluded.factor_ratio,
+                        action_type = excluded.action_type,
+                        source = excluded.source,
+                        provider = excluded.provider,
+                        imported_at = excluded.imported_at
+                    """,
+                    rows,
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (market, code, ex_date) DO UPDATE SET
-                    share_ratio = excluded.share_ratio,
-                    cash_per_share = excluded.cash_per_share,
-                    factor_ratio = excluded.factor_ratio,
-                    action_type = excluded.action_type,
-                    source = excluded.source,
-                    provider = excluded.provider,
-                    imported_at = excluded.imported_at
-                """,
-                rows,
-            )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
         return len(rows)
 
     def read_corporate_actions(
@@ -1400,7 +1469,7 @@ class DuckDbBarsStore:
             raise ValueError("行情预热 K 线数量必须是非负整数")
         if warmup_bars > 0 and start_date is None:
             raise ValueError("行情预热 K 线需要设置开始日期")
-        # 统一口径：只读 hfq，防止残留的旧 raw 数据混进全市场研究。
+        # 统一口径：只取默认价格基准的 K 线，防止残留的其它口径数据混进全市场研究。
         conditions: list[str] = ["bars.price_basis = ?"]
         parameters: list[object] = [DEFAULT_PRICE_BASIS]
         requested = None if instruments is None else list(instruments)
@@ -1608,10 +1677,15 @@ class DuckDbBarsStore:
             conditions.append("instruments.source_state != 'missing'")
         _append_filter(conditions, parameters, "instruments.instrument_type", instrument_types)
         _append_filter(conditions, parameters, "instruments.board", boards)
+        # 与 read_bars / read_many_bars 同口径：只认默认价格基准且已收盘的行。少了这两
+        # 条，残留的其它口径或盘中 provisional 行会让列表里的 last_close 和真正取出来
+        # 的行情对不上。
         query = (
             "WITH latest AS ("
             "SELECT market, code, arg_max(close, trade_date) AS last_close "
-            "FROM daily_bars GROUP BY market, code) "
+            "FROM daily_bars "
+            "WHERE price_basis = ? AND bar_status = 'completed' "
+            "GROUP BY market, code) "
             "SELECT instruments.market, instruments.code, instruments.name, "
             "instruments.instrument_type, instruments.board, instruments.source_path, "
             "instruments.last_provider, instruments.bar_count, instruments.first_date, "
@@ -1622,7 +1696,8 @@ class DuckDbBarsStore:
             + " ORDER BY instruments.market, instruments.code"
         )
         with _WRITE_LOCK, self._store._connect(read_only=True) as connection:
-            rows = connection.execute(query, parameters).fetchall()
+            # CTE 里的占位符在整条 SQL 中出现得最早，绑定值必须排在最前面。
+            rows = connection.execute(query, [DEFAULT_PRICE_BASIS, *parameters]).fetchall()
         return [
             InstrumentRef(
                 market=cast(MarketCode, market_value),

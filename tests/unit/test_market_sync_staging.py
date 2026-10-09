@@ -109,6 +109,50 @@ def test_stage_merge_preserves_local_rows_and_is_idempotent(tmp_path: Path) -> N
     assert list(bars["close"]) == [10.5, 11.5]
 
 
+def test_stage_merge_does_not_downgrade_completed_bars_to_provisional(tmp_path: Path) -> None:
+    """盘中重放（重试 / --as-of / 定时任务）不能把已收盘的行写成 provisional。
+
+    所有读路径默认只认 completed，一旦被覆盖，这一天会从选股、回测、画图里
+    整体消失。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    first_stage = tmp_path / "worker-0.duckdb"
+    with StageWriter(first_stage) as writer:
+        writer.write_target(
+            _target(),
+            _staged_frame(),
+            status="updated",
+            range_start="2024-01-02",
+            range_end="2024-01-03",
+            retries=0,
+            history_source="eastmoney",
+        )
+    assert store.merge_online_stage(first_stage).merged_rows == 2
+
+    replay = _staged_frame()
+    replay["bar_status"] = ["provisional", "provisional"]
+    second_stage = tmp_path / "worker-1.duckdb"
+    with StageWriter(second_stage) as writer:
+        writer.write_target(
+            _target(),
+            replay,
+            status="updated",
+            range_start="2024-01-02",
+            range_end="2024-01-03",
+            retries=0,
+            history_source="eastmoney",
+        )
+
+    report = store.merge_online_stage(second_stage)
+    bars = store.read_bars("SH", "600000")
+
+    assert report.merged_rows == 0
+    assert len(bars) == 2
+    assert sorted(bars["bar_status"]) == ["completed", "completed"]
+    assert list(bars["close"]) == [10.5, 11.5]
+
+
 def test_stage_merge_preserves_each_fetched_bar_provider(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     stage_path = tmp_path / "worker-0.duckdb"

@@ -12,12 +12,25 @@ import pandas as pd
 from .store_base import _WRITE_LOCK, _DuckDbStoreBase, _now, _timestamp_text
 
 _CHUNK_FINGERPRINT_MARKER = "|chunk:"
+#: 复权事件版本后缀，插在标的级版本号与年度块指纹之间（见 ``indicators/cache.py``）。
+_ADJUST_VERSION_MARKER = "~adj:"
 
 
 def _fingerprint_matches_revision(fingerprint: str, revision: str) -> bool:
-    return fingerprint == revision or fingerprint.startswith(
-        f"{revision}{_CHUNK_FINGERPRINT_MARKER}"
-    )
+    """判断落库的指纹是否属于当前行情版本。
+
+    分块条目的形态是 ``<版本号>~adj:<事件版本>|chunk:<摘要>`` —— 事件版本后缀夹在
+    版本号和块摘要**之间**。直接拿 ``"<版本号>|chunk:"`` 做前缀比较会永远失败
+    （``data_revisions()`` 给的批次版本号不带该后缀），于是只要有除权事件，所有
+    标的都会被判成 stale，增量预计算退化为全量重算。比较前必须先把后缀剥掉。
+    """
+
+    if fingerprint == revision:
+        return True
+    base, separator, _digest = fingerprint.partition(_CHUNK_FINGERPRINT_MARKER)
+    if not separator:
+        return False
+    return base == revision or base.startswith(f"{revision}{_ADJUST_VERSION_MARKER}")
 
 
 class DuckDbIndicatorCacheStore:

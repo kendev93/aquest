@@ -777,8 +777,14 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
                 if shares <= 0:
                     continue
                 gross = shares * price
-                cost = gross + max(gross * profile.commission, profile.min_commission)
-                available -= cost + shares * config.slippage
+                # 实际从可用资金扣的是「货款 + 佣金 + 滑点」，估算成本必须同口径，
+                # 否则滑点非零时明日计划里的成本被系统性低估。
+                cost = (
+                    gross
+                    + max(gross * profile.commission, profile.min_commission)
+                    + shares * config.slippage
+                )
+                available -= cost
                 buys.append(
                     {
                         "market": context.market,

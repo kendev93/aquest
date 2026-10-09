@@ -28,7 +28,10 @@ from selector_app.market_data.store import (
     DuckDbMarketDataStore,
     resolve_indicator_cache_backend,
 )
-from selector_app.market_data.store_indicator_cache import DuckDbIndicatorCacheStore
+from selector_app.market_data.store_indicator_cache import (
+    DuckDbIndicatorCacheStore,
+    _fingerprint_matches_revision,
+)
 from selector_app.market_data.store_indicator_cache_sqlite import (
     SqliteIndicatorCacheStore,
     default_indicator_cache_path,
@@ -989,3 +992,23 @@ def test_a_sqlite_outage_degrades_to_computing_instead_of_failing(
         code="600000",
     )
     assert "custom" in custom
+
+
+def test_fingerprint_matches_revision_across_adjust_version_suffix() -> None:
+    """带复权事件版本的分块指纹必须仍算命中当前行情版本。
+
+    落库形态是 ``<版本号>~adj:<事件版本>|chunk:<摘要>``，而 ``data_revisions()``
+    给的批次版本号不带事件后缀。少了这层剥离，凡是有除权事件的标的都会被判成
+    stale，增量预计算静默退化成全量重算。
+    """
+
+    revision = "SH|600000|80|2024-01-02|2024-01-02T00:00:00"
+    chunked = f"{revision}~adj:abc123|chunk:deadbeef"
+
+    assert _fingerprint_matches_revision(chunked, revision)
+    assert _fingerprint_matches_revision(revision, revision)
+    assert _fingerprint_matches_revision(f"{revision}|chunk:deadbeef", revision)
+    # 版本号本身变了就不该命中。
+    assert not _fingerprint_matches_revision(chunked, f"{revision}~other")
+    # 没有块标记的指纹（帧指纹降级路径）不该被误判成命中。
+    assert not _fingerprint_matches_revision("unrelated-fingerprint", revision)

@@ -50,6 +50,11 @@ function formatNumber(value: number | null, digits = 2): string {
   return value === null ? '—' : value.toFixed(digits)
 }
 
+// 换手是「成交名义额 / 初始资金」的倍数，不是百分比，和组合回测页保持同一口径。
+function formatTurnover(value: number | null): string {
+  return value === null ? '—' : `${value.toFixed(2)}×`
+}
+
 function periodMetrics(candidate: StrategyReplayCandidate): StrategyPeriodMetrics | null {
   if (props.period === 'ytd' || props.period === 'one_year' || props.period === 'two_year') {
     return candidate.periods[props.period]
@@ -146,7 +151,7 @@ function selectCandidate(candidate: StrategyReplayCandidate): void {
             <td>{{ formatNumber(metricValue(candidate.overall_metrics, 'sharpe')) }}</td>
             <td>{{ formatNumber(metricValue(candidate.overall_metrics, 'total_trades'), 0) }}</td>
             <td>{{ formatPercent(metricValue(candidate.overall_metrics, 'win_rate')) }}</td>
-            <td>{{ formatPercent(metricValue(candidate.overall_metrics, 'turnover')) }}</td>
+            <td>{{ formatTurnover(metricValue(candidate.overall_metrics, 'turnover')) }}</td>
             <td :class="{ positive: (returnDelta(candidate) ?? 0) >= 0, negative: (returnDelta(candidate) ?? 0) < 0 }">{{ formatPercent(returnDelta(candidate)) }}</td>
           </tr>
         </tbody>
@@ -172,7 +177,7 @@ function selectCandidate(candidate: StrategyReplayCandidate): void {
     <div v-if="selectedCandidate" class="strategy-replay-detail" :data-testid="`strategy-replay-detail-${selectedCandidate.candidate_hash}`">
       <div class="section-heading"><div><span class="section-kicker">FULL REPLAY DETAIL</span><h3>{{ selectedCandidate.human_readable_rules || selectedCandidate.candidate_hash }}</h3></div><button class="secondary-button" type="button" @click="emit('select', '')">关闭</button></div>
       <p v-if="selectedCandidate.diagnostic" class="replay-warning">{{ selectedCandidate.diagnostic }}</p>
-      <div class="metrics-strip replay-detail-metrics"><div><span>全区间收益</span><strong>{{ formatPercent(metricValue(selectedCandidate.overall_metrics, 'total_return')) }}</strong></div><div><span>最大回撤</span><strong>{{ formatPercent(metricValue(selectedCandidate.overall_metrics, 'max_drawdown')) }}</strong></div><div><span>夏普</span><strong>{{ formatNumber(metricValue(selectedCandidate.overall_metrics, 'sharpe')) }}</strong></div><div><span>成交数</span><strong>{{ formatNumber(metricValue(selectedCandidate.overall_metrics, 'total_trades'), 0) }}</strong></div><div><span>胜率</span><strong>{{ formatPercent(metricValue(selectedCandidate.overall_metrics, 'win_rate')) }}</strong></div><div><span>换手率</span><strong>{{ formatPercent(metricValue(selectedCandidate.overall_metrics, 'turnover')) }}</strong></div></div>
+      <div class="metrics-strip replay-detail-metrics"><div><span>全区间收益</span><strong>{{ formatPercent(metricValue(selectedCandidate.overall_metrics, 'total_return')) }}</strong></div><div><span>最大回撤</span><strong>{{ formatPercent(metricValue(selectedCandidate.overall_metrics, 'max_drawdown')) }}</strong></div><div><span>夏普</span><strong>{{ formatNumber(metricValue(selectedCandidate.overall_metrics, 'sharpe')) }}</strong></div><div><span>成交数</span><strong>{{ formatNumber(metricValue(selectedCandidate.overall_metrics, 'total_trades'), 0) }}</strong></div><div><span>胜率</span><strong>{{ formatPercent(metricValue(selectedCandidate.overall_metrics, 'win_rate')) }}</strong></div><div><span>换手率</span><strong>{{ formatTurnover(metricValue(selectedCandidate.overall_metrics, 'turnover')) }}</strong></div></div>
       <button class="secondary-button replay-apply-button" type="button" :data-testid="`strategy-replay-apply-${selectedCandidate.candidate_hash}`" :disabled="!selectedCandidate.data_fingerprint" @click="emit('apply', selectedCandidate)">{{ selectedCandidate.data_fingerprint ? '应用到普通组合回测' : '复核失败，无法应用' }}</button>
       <pre>{{ JSON.stringify(selectedCandidate.config, null, 2) }}</pre>
       <section class="chart-card"><div class="chart-heading"><div><span class="section-kicker">EQUITY CURVE</span><h3>全区间资金曲线</h3></div></div><svg class="equity-chart" viewBox="0 0 800 240" role="img" aria-label="策略全区间资金曲线"><polyline :points="chartPoints(selectedCandidate)" fill="none" stroke="var(--accent)" stroke-linecap="round" stroke-linejoin="round" stroke-width="3"></polyline></svg></section>

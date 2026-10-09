@@ -31,6 +31,25 @@ from .store_indicator_cache import (
 
 logger = logging.getLogger(__name__)
 
+#: ``_connection`` 用这条哨兵消息表示「只读探测且缓存文件还不存在」；``_query``
+#: 认得它并当成"没缓存"，而不是真的失败。
+_ABSENT_FILE_MESSAGE = "indicator cache file is absent"
+
+
+def _is_missing_cache_error(exc: sqlite3.OperationalError) -> bool:
+    """区分「还没这套缓存」和「缓存读失败」。
+
+    前者（缺表 / 缺列 / 只读探测时文件尚未创建）等价于"没缓存"，上层按未命中处理
+    即可；后者必须抛出去——吞成"没缓存"会触发整批重算，且日志里什么都不留。
+    """
+
+    message = str(exc).lower()
+    return (
+        "no such table" in message
+        or "no such column" in message
+        or message == _ABSENT_FILE_MESSAGE
+    )
+
 _BUILTIN_COLUMNS = (
     "market",
     "code",
@@ -256,7 +275,7 @@ class SqliteIndicatorCacheStore:
 
         if self._store.read_only and not self._path.exists():
             # 只读探测不该把空文件落在盘上；``_query`` 会把这个错当“没缓存”。
-            raise sqlite3.OperationalError("indicator cache file is absent")
+            raise sqlite3.OperationalError(_ABSENT_FILE_MESSAGE)
         owner = cast(
             _SqliteConnectionOwner | None,
             getattr(self._local, "owner", None),
@@ -302,12 +321,19 @@ class SqliteIndicatorCacheStore:
 
         Mirrors the DuckDB backend, which swallows ``CatalogException``: a store
         opened before the derived tables existed must still serve source bars.
+
+        只有「缺表 / 缺列」能当成没缓存。``OperationalError`` 同样覆盖
+        ``database is locked``、``disk I/O error`` 这类瞬时故障——把它们也吞成 ``[]``
+        会让上层认为全部未缓存，表现为毫无征兆的整批重算。
         """
 
         try:
             return self._connection().execute(sql, parameters).fetchall()
-        except sqlite3.OperationalError:
-            return []
+        except sqlite3.OperationalError as exc:
+            if _is_missing_cache_error(exc):
+                return []
+            logger.warning("指标缓存 SQLite 查询失败：%s", exc)
+            raise
 
     def _query_one(
         self,
@@ -452,8 +478,8 @@ class SqliteIndicatorCacheStore:
                 continue
             seen.add(key)
             normalized.append(key)
-        connection = self._connection()
         try:
+            connection = self._connection()
             connection.execute(
                 "CREATE TEMP TABLE IF NOT EXISTS _indicator_cache_keys ("
                 "market TEXT, code TEXT, timeframe TEXT, price_basis TEXT, "
@@ -490,8 +516,10 @@ class SqliteIndicatorCacheStore:
                 ORDER BY cache.market, cache.code, cache.formula_id, cache.bar_offset
                 """
             ).fetchall()
-        except sqlite3.OperationalError:
-            return []
+        except sqlite3.OperationalError as exc:
+            if _is_missing_cache_error(exc):
+                return []
+            raise
         return [_builtin_row(row) for row in rows]
 
     def indicator_cache_chunk_index(
@@ -518,8 +546,8 @@ class SqliteIndicatorCacheStore:
             if key not in seen:
                 seen.add(key)
                 normalized.append(key)
-        connection = self._connection()
         try:
+            connection = self._connection()
             connection.execute(
                 "CREATE TEMP TABLE IF NOT EXISTS _indicator_cache_index_keys ("
                 "market TEXT, code TEXT, timeframe TEXT, price_basis TEXT, "
@@ -547,8 +575,10 @@ class SqliteIndicatorCacheStore:
                          cache.bar_offset, cache.computed_at DESC
                 """
             ).fetchall()
-        except sqlite3.OperationalError:
-            return []
+        except sqlite3.OperationalError as exc:
+            if _is_missing_cache_error(exc):
+                return []
+            raise
         names = (
             "market",
             "code",
