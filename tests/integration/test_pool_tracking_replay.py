@@ -7,6 +7,7 @@ from selector_app.market_data.adapter import DuckDbMarketDataAdapter
 from selector_app.market_data.adjustment import CorporateAction, compute_factor_ratio
 from selector_app.market_data.models import StockRef
 from selector_app.market_data.store import DuckDbMarketDataStore
+from selector_app.market_data.store_base import RESEARCH_START
 from selector_app.portfolio_backtest.service import PortfolioBacktestService
 from selector_app.strategy_pool.store import DuckDbStrategyPoolStore
 from selector_app.strategy_pool.tracking import replay_account
@@ -785,10 +786,65 @@ def test_initialization_and_daily_append_different_history_lengths(tmp_path, his
     start = time.perf_counter()
     delta = replay_account(service, ref, v, first)
     delta_time = time.perf_counter() - start
-    assert first["summary"]["processed_new_days"] == history_days
+    # 回放窗口从 RESEARCH_START 起跑：跨窗口的历史只统计窗口内根数；
+    # 整体早于研究窗口的历史（history_days=120）没有预热可用，保持原窗口。
+    window_bars = int((dates[:history_days] >= pd.Timestamp(RESEARCH_START)).sum())
+    assert first["summary"]["processed_new_days"] == (window_bars or history_days)
     assert delta["summary"]["processed_new_days"] == 5
     assert delta["checkpoint"] == replay_account(service, ref, v)["checkpoint"]
     print(f"history={history_days} init={init_time:.4f}s append5={delta_time:.4f}s")
+
+
+def test_replay_window_starts_at_research_start_with_prior_bars_as_warmup(tmp_path):
+    """详情页回放窗口与研究对象对齐：RESEARCH_START 起跑，之前只作指标预热。
+
+    回归：2026-10-09 详情页「全历史」曲线从本地首根日线起画且含 2015 年
+    「冷指标」交易，而研究侧明确把 2015 当预热段不算样本——同一段行情
+    两套口径矛盾。
+    """
+    import numpy as np
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    dates = pd.date_range("2015-01-05", periods=300, freq="B")  # 2015-01-05 → 2016-03 前后
+    close = 10.0 + np.arange(300) / 100
+    frame = pd.DataFrame(
+        dict(
+            date=dates,
+            open=close,
+            close=close,
+            high=close + 0.1,
+            low=close - 0.1,
+            volume=1000.0,
+            amount=close * 1000,
+            bar_status="completed",
+        )
+    )
+    store.replace_local_bars("SH", "600000", "stock", frame)
+    adapter = DuckDbMarketDataAdapter(store)
+    service = PortfolioBacktestService(adapter=adapter)
+    ref = adapter.stock_ref("", "SH", "600000")
+    value = candidate()
+    # 资金必须够买一手（100 股）：窗口首日 open ≈ 12.6，1000 元会被整手规则拒单。
+    value["config"].update(initial_cash=100_000, stop_loss_pct=None)
+    version = dict(
+        candidate=value,
+        signature=signature(value),
+        launch_data_date=dates[-1].date().isoformat(),
+        created_at="2026-10-09T16:00:00+00:00",
+    )
+    result = replay_account(service, ref, version)
+    window_start = next(day for day in dates if day.date() >= RESEARCH_START)
+    start_text = window_start.strftime("%Y-%m-%d")
+    equity_dates = [str(row["date"]) for row in result["checkpoint"]["equity"]]
+    # 曲线恰好从研究窗口首根日线开始，2015 段不进窗口；之后每根都在。
+    window_bars = [day for day in dates if day.date() >= RESEARCH_START]
+    assert equity_dates[0] == start_text
+    assert len(equity_dates) == len(window_bars)
+    assert all(day >= start_text for day in equity_dates)
+    # 2015 年没有任何交易；买入规则 close>0 恒真，窗口首日即触发、次日成交。
+    trade_dates = [str(row["date"]) for row in result["checkpoint"]["trades"]]
+    assert trade_dates
+    assert all(day >= start_text for day in trade_dates)
 
 
 def test_cancelled_initialization_is_not_requeued_on_unchanged_input(tmp_path):

@@ -13,6 +13,7 @@ import pandas as pd
 
 from selector_app.indicators.cache import frame_fingerprint
 from selector_app.market_data.models import StockRef
+from selector_app.market_data.store_base import RESEARCH_START
 from selector_app.portfolio_backtest.checkpoint import SimulationCheckpoint
 from selector_app.portfolio_backtest.context import _StockSeries
 from selector_app.portfolio_backtest.report import _portfolio_fingerprint
@@ -112,6 +113,14 @@ def replay_account(
         ].reset_index(drop=True)
     if raw.empty:
         raise ValueError("该标的没有已完成行情")
+    # 回放窗口与研究对象对齐（2026-10-09 用户确认）：从 RESEARCH_START（2016-01-01）
+    # 起跑，之前的行情经引擎 warmup_bars 只作指标预热，不再产生「冷指标」交易记录。
+    # 此前从本地首根日线起跑，2015 年的半成品信号被当成真实交易展示，与研究侧
+    # 「2015 只预热、不算样本」的口径矛盾。本地数据整体早于 RESEARCH_START 的
+    # 存量条目保持原窗口，避免回放窗口为空导致重建失败。
+    replay_dates = pd.to_datetime(raw["date"])
+    if replay_dates.iloc[-1].date() >= RESEARCH_START:
+        raw = raw.loc[replay_dates.dt.date >= RESEARCH_START].reset_index(drop=True)
     config_payload = dict(candidate.get("config") or {})
     config_payload.update(
         vipdoc_path="",
