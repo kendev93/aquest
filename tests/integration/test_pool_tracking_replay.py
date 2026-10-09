@@ -452,6 +452,95 @@ def test_tracking_runner_deduplicates_goals_and_uses_shared_budget(tmp_path):
     )
 
 
+def test_weak_strategy_signals_and_holdings_are_filtered_in_tracking_projection(tmp_path):
+    """弱策略（全区间样本不足 / 跑输基准）的信号与持仓行不进三个列表。
+
+    回归：2026-10-09 用户决策——买入 / 卖出 / 持仓三个面板只展示「值得按其
+    行动」的策略；跟踪投影与信号扫描两条路径口径必须一致（quality 模块）。
+    """
+    from selector_app.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
+    from selector_app.strategy_pool.tracking_runner import PoolTrackingRunner
+
+    store = DuckDbMarketDataStore(tmp_path / "weak-filter.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", bars(3), name="浦发银行")
+    store.replace_local_bars("SH", "600001", "stock", bars(3), name="强策略股")
+    pool = DuckDbStrategyPoolStore(store)
+
+    def candidate(candidate_id: str, closed_trades: int, total_return: float):
+        return {
+            "candidate_id": candidate_id,
+            "buy_rule": {
+                "signals": [],
+                "conditions": [dict(left_value="price.close", operator="gt", right_constant=0)],
+            },
+            "sell_rule": {
+                "signals": [],
+                "conditions": [dict(left_value="price.close", operator="lt", right_constant=0)],
+            },
+            "config": {
+                "initial_cash": 1_000_000,
+                "commission": 0,
+                "min_commission": 0,
+                "stamp_tax": 0,
+                "slippage": 0,
+                "execution": "next_open",
+                "stop_loss_pct": None,
+                "trailing_stop_pct": None,
+                "stop_loss_cooldown_days": 0,
+            },
+            "metrics": {
+                "full_period": {"closed_trades": closed_trades, "total_return": total_return}
+            },
+        }
+
+    pool.upsert_automatic(
+        market="SH",
+        code="600000",
+        name="浦发银行",
+        annual_candidate=candidate("weak", 5, 0.9),  # 全区间 5 笔：样本不足
+        sharpe_candidate=None,
+        data_fingerprint="a",
+        config_fingerprint="b",
+        source_job_id="job",
+        benchmark={"full_period": {"total_return": 0.5}},
+    )
+    pool.upsert_automatic(
+        market="SH",
+        code="600001",
+        name="强策略股",
+        annual_candidate=candidate("strong", 30, 0.8),  # 30 笔且跑赢基准
+        sharpe_candidate=None,
+        data_fingerprint="a",
+        config_fingerprint="b",
+        source_job_id="job",
+        benchmark={"full_period": {"total_return": 0.5}},
+    )
+    tracks = PoolTrackingStore(store)
+
+    def write(item):
+        if item.get("error"):
+            raise AssertionError(item["error"])
+        return {
+            "saved": tracks.save_snapshot(item["version_id"], item["signature"], item["snapshot"])
+        }
+
+    result = PoolTrackingRunner(store, EvaluationWorkerBudget(2)).run(
+        {"objective": "annual_return", "as_of_date": "2026-09-03"},
+        progress=lambda *args: None,
+        abort_check=lambda: False,
+        writer=write,
+    )
+    annual = result["results_by_objective"]["annual_return"]
+    by_symbol = {row["symbol"]: row for row in annual["states"]}
+    # 弱策略：买入信号隐藏、状态退回 held/flat，持仓行不出现
+    assert by_symbol["SH600000"]["status"] in {"flat", "held"}
+    assert all(row["symbol"] != "SH600000" for row in annual["buy_signals"])
+    assert all(h["code"] != "600000" for h in annual["model_portfolio"]["holdings"])
+    # 健康策略照常展示：买入信号 + 持仓行
+    assert [row["symbol"] for row in annual["buy_signals"]] == ["SH600001"]
+    assert [h["code"] for h in annual["model_portfolio"]["holdings"]] == ["600001"]
+
+
 def test_tracking_both_rules_firing_show_in_both_panels(tmp_path):
     """买卖规则同时为真 → 两个面板各自展示规则事实，状态为「买卖均触发」。
 

@@ -44,6 +44,12 @@ from selector_app.strategy_discovery.catalog import default_indicator_catalog
 from selector_app.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
 from selector_app.web.schemas.screening import RuleGroupRequest
 
+from .quality import (
+    WEAK_STRATEGY_RECHECK_DAYS,
+    benchmark_full_return,
+    strategy_is_weak,
+    weak_strategy_reasons,
+)
 from .resources import (
     EVALUATION_WORKER_MEMORY_BYTES,
     POOL_RAMP_INTERVAL_SECONDS,
@@ -69,7 +75,9 @@ PoolEntryWriter = Callable[[Mapping[str, object]], None]
 # 日线，指纹一变全部作废，增量永远等不到复用——2026-10-07 实测每天点增量都
 # 从第一只重新跑），改为按「上次结论是什么、多久之前下的」跳过：ready/partial
 # 直接复用，no_strategy 在 NO_STRATEGY_RECHECK_DAYS 天内复用、到期才重查一次，
-# insufficient_history/failed 每次重查（理由见 _can_reuse）；
+# insufficient_history/failed 每次重查（理由见 _can_reuse）；ready 但自动候选
+# 「样本不足 / 跑输基准」（quality 模块口径）的，超过 WEAK_STRATEGY_RECHECK_DAYS
+# 同样到期重查、重新寻优（2026-10-09 用户决策）；
 # 研究窗口起点从 2015-01-05 裁到 RESEARCH_START（2016-01-01），2015 全年只作
 # 指标预热。门槛与研究窗口都会改变存量条目的有效性，v5 语义下的条目在
 # 下一次全市场重选时逐股重研究。复用节奏不影响研究结论本身，不参与指纹。
@@ -602,12 +610,19 @@ class MarketStrategyPoolService:
                     index = next_index + 1
                     symbol = f"{ref.market}:{ref.code}"
                     prior = prior_entries.get((ref.market, ref.code))
-                    if self._can_reuse(prior, config_fingerprint):
-                        reused_entry = (
-                            self._pool_store.get(ref.market, ref.code)
-                            if self._pool_store is not None
-                            else None
-                        )
+                    reused_entry = (
+                        self._pool_store.get(ref.market, ref.code)
+                        if self._can_reuse(prior, config_fingerprint)
+                        and self._pool_store is not None
+                        else None
+                    )
+                    # 弱策略到期重查（2026-10-09 用户决策）：ready 条目如果自动候选
+                    # 样本不足或跑输基准，超过 30 天就在本次增量里重新寻优，与
+                    # no_strategy 的重查节奏同款。判定只看自动候选——手工覆盖是
+                    # 用户自己的决定，重新寻优不会替换它。
+                    if self._can_reuse(prior, config_fingerprint) and not self._weak_research_due(
+                        reused_entry, prior
+                    ):
                         metrics_backfilled = False
                         if reused_entry is not None and self._needs_full_period_backfill(
                             reused_entry
@@ -1555,7 +1570,16 @@ class MarketStrategyPoolService:
                 # 回放，那份冷却状态不能用来否决今天的信号。
                 blockade = blockades.get((ref.market, ref.code))
                 blocked = blockade is not None and blockade[1] == as_of
-                buy = buy and not blocked
+                # 质量过滤（2026-10-09 用户决策）：全区间平仓交易不足 20 笔或跑输
+                # 全段基准的策略，三个信号列表都不展示——规则事实照常评估，但
+                # 「不值得按其行动」的信号隐藏、状态退回 flat。判定与跟踪路径共用
+                # quality 模块，两处口径必须一致。
+                weak_reasons = weak_strategy_reasons(
+                    _mapping(active_candidate.get("metrics")),
+                    benchmark_full_return(_mapping(entry.get("benchmark") if entry else None)),
+                )
+                buy = buy and not blocked and not weak_reasons
+                sell = sell and not weak_reasons
                 if buy:
                     buy_signals.append(_signal_row(ref, active_candidate, objective, as_of, "buy"))
                 if sell:
@@ -1632,9 +1656,16 @@ class MarketStrategyPoolService:
         current_state = _mapping(model_portfolio.get("current_state"))
         current_holdings = current_state.get("holdings")
         risk_exit_signals = model_portfolio.get("risk_exit_signals")
-        model_portfolio["holdings"] = (
+        raw_holdings = (
             list(current_holdings) if isinstance(current_holdings, (list, tuple)) else []
         )
+        # 持仓行同样按策略质量过滤（2026-10-09 用户决策，三个列表口径一致）：
+        # 弱策略的持仓行隐藏。判定用该目标当前生效候选（与回放所用策略一致）。
+        model_portfolio["holdings"] = [
+            row
+            for row in raw_holdings
+            if not _holding_strategy_is_weak(row, entries, objective)
+        ]
         model_portfolio["risk_exit_signals"] = (
             list(risk_exit_signals) if isinstance(risk_exit_signals, (list, tuple)) else []
         )
@@ -1738,6 +1769,10 @@ class MarketStrategyPoolService:
           看到它们从头再跑）。到期重查一次，仍不足则刷新时间戳再等一个周期。
         - **insufficient_history / failed → 每次重查**。前者数据在长、攒够当天
           就该补研究；后者错误应当重试，不把一次故障当成结论存下来。
+
+        ``ready``/``partial`` 的复用还有一个例外（见 :meth:`_weak_research_due`）：
+        自动候选全区间样本不足或跑输基准的条目按 ``WEAK_STRATEGY_RECHECK_DAYS``
+        到期重新寻优。
         """
 
         if not prior or prior[1] != config_fingerprint:
@@ -1753,6 +1788,37 @@ class MarketStrategyPoolService:
             return False
         current = now or datetime.now(timezone.utc).replace(tzinfo=None)
         return (current - updated_at).days < NO_STRATEGY_RECHECK_DAYS
+
+    @staticmethod
+    def _weak_research_due(
+        entry: Mapping[str, object] | None,
+        prior: tuple[str, str, str, bool, datetime | None] | None,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """弱策略的 ready 条目是否到期重查（``WEAK_STRATEGY_RECHECK_DAYS`` 节奏）。
+
+        只看自动候选：手工覆盖是用户自己的决定，重新寻优不会替换它，按它排队
+        只会白跑。条目读不到（如 worker 模式）或时间戳缺失时不强制重查，保持
+        原复用行为。命中返回 True，调用方跳过复用、落入正常研究队列重新寻优。
+        """
+
+        if entry is None or prior is None or prior[4] is None:
+            return False
+        automatic = _mapping(entry.get("automatic_candidates"))
+        benchmark_return = benchmark_full_return(_mapping(entry.get("benchmark")))
+        weak = any(
+            strategy_is_weak(
+                _mapping(_mapping(automatic.get(objective)).get("metrics")),
+                benchmark_return,
+            )
+            for objective in ("annual_return", "sharpe")
+            if not _mapping(automatic.get(objective)).get("candidate_ref")
+        )
+        if not weak:
+            return False
+        current = now or datetime.now(timezone.utc).replace(tzinfo=None)
+        return (current - prior[4]).days >= WEAK_STRATEGY_RECHECK_DAYS
 
     @staticmethod
     def _needs_full_period_backfill(entry: Mapping[str, object]) -> bool:
@@ -2220,6 +2286,28 @@ def _signal_state(
     row.setdefault("name", ref.name or "")
     row.setdefault("symbol", f"{ref.market}{ref.code}")
     return row
+
+
+def _holding_strategy_is_weak(
+    holding: Mapping[str, object],
+    entries: Mapping[tuple[str, str], Mapping[str, object]],
+    objective: str,
+) -> bool:
+    """持仓行的策略质量过滤（2026-10-09 用户决策，三个信号列表口径一致）。
+
+    判定用该目标当前生效候选（与持仓回放所用策略一致，手工覆盖优先）；条目
+    缺失或候选无法判定时不隐藏——那是补算未覆盖的暂态，不该当作弱策略处理。
+    """
+
+    key = (str(holding.get("market") or ""), str(holding.get("code") or ""))
+    entry = entries.get(key)
+    candidate = _active_candidate(entry, objective)
+    if candidate is None:
+        return False
+    return strategy_is_weak(
+        _mapping(candidate.get("metrics")),
+        benchmark_full_return(_mapping(entry.get("benchmark")) if entry else None),
+    )
 
 
 def _signal_sort_key(row: Mapping[str, object], objective: str) -> tuple[float, float, str]:

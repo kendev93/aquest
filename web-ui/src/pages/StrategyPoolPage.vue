@@ -21,6 +21,7 @@ import type {
   StrategyPoolJobResult,
   StrategyPoolJobState,
   StrategyPoolJobSummary,
+  StrategyPoolMetrics,
   StrategyPoolMode,
   StrategyPoolObjective,
   StrategyPoolSignal,
@@ -764,6 +765,37 @@ function signalMetricsSummary(signal: StrategyPoolSignal): string {
   return values.join(' · ')
 }
 
+// 三个信号列表行内的策略质量指标（2026-10-09 用户需求）：全区间胜率 / 盈亏比 /
+// 平均持仓天数，与「全市场标的状态」表格口径一致。从条目表按代码查找——跟踪
+// 路径的信号行与持仓行本身不带指标，这样两条来源的行都能显示。
+const entryQualityMap = computed(() => {
+  const map = new Map<string, StrategyPoolMetrics>()
+  for (const entry of entries.value) {
+    const candidate =
+      entry.active_candidate ??
+      (objective.value ? entry.automatic_candidates?.[objective.value] : null)
+    const full = candidate?.metrics?.full_period
+    if (full) map.set(symbol(entry), full)
+  }
+  return map
+})
+
+function qualityText(key: string): string {
+  const full = entryQualityMap.value.get(key)
+  if (!full) return ''
+  const parts: string[] = []
+  if (typeof full.win_rate === 'number' && Number.isFinite(full.win_rate)) {
+    parts.push(`全区间胜率 ${formatPercent(full.win_rate)}`)
+  }
+  if (typeof full.payoff_ratio === 'number' && Number.isFinite(full.payoff_ratio)) {
+    parts.push(`全区间盈亏比 ${formatNumber(full.payoff_ratio)}`)
+  }
+  if (typeof full.avg_holding_days === 'number' && Number.isFinite(full.avg_holding_days)) {
+    parts.push(`平均持仓 ${formatHoldingDays(full.avg_holding_days)}`)
+  }
+  return parts.join(' · ')
+}
+
 function riskExitReturnText(signal: Record<string, unknown>): string {
   const value = signal.trade_return_pct
   return typeof value === 'number' && Number.isFinite(value)
@@ -1026,7 +1058,7 @@ onUnmounted(() => {
             <div v-if="buySignals.length" class="signal-list">
               <div v-for="item in visibleBuySignals" :key="item.symbol" class="signal-row">
                 <strong>{{ item.symbol }}<template v-if="item.name"> · {{ item.name }}</template></strong>
-                <span>买入信号触发 · 下一交易日执行<template v-if="holdingReturnText(item)"> · {{ holdingReturnText(item) }}</template><template v-if="signalMetricsSummary(item)"> · {{ signalMetricsSummary(item) }}</template></span>
+                <span>买入信号触发 · 下一交易日执行<template v-if="holdingReturnText(item)"> · {{ holdingReturnText(item) }}</template><template v-if="signalMetricsSummary(item)"> · {{ signalMetricsSummary(item) }}</template><template v-if="qualityText(item.symbol)"> · {{ qualityText(item.symbol) }}</template></span>
               </div>
             </div>
             <div v-if="buySignals.length > SIGNAL_PAGE_SIZE" class="signal-pagination" data-testid="pool-buy-pagination">
@@ -1042,7 +1074,7 @@ onUnmounted(() => {
               <template v-for="item in visibleSellSignals" :key="item.key">
                 <div v-if="item.kind === 'rule'" class="signal-row">
                   <strong>{{ item.signal.symbol }}<template v-if="item.signal.name"> · {{ item.signal.name }}</template></strong>
-                  <span>卖出规则触发 · 下一交易日执行<template v-if="holdingReturnText(item.signal)"> · {{ holdingReturnText(item.signal) }}</template><template v-if="signalMetricsSummary(item.signal)"> · {{ signalMetricsSummary(item.signal) }}</template></span>
+                  <span>卖出规则触发 · 下一交易日执行<template v-if="holdingReturnText(item.signal)"> · {{ holdingReturnText(item.signal) }}</template><template v-if="signalMetricsSummary(item.signal)"> · {{ signalMetricsSummary(item.signal) }}</template><template v-if="qualityText(item.signal.symbol)"> · {{ qualityText(item.signal.symbol) }}</template></span>
                 </div>
                 <div v-else class="signal-row risk-signal">
                   <strong>{{ item.signal.market }}{{ item.signal.code }}<template v-if="item.signal.name"> · {{ item.signal.name }}</template></strong>
@@ -1062,7 +1094,7 @@ onUnmounted(() => {
             <div v-if="currentHoldings.length" class="signal-list">
               <div v-for="holding in visibleCurrentHoldings" :key="`${holding.market}${holding.code}`" class="signal-row holding-row">
                 <strong>{{ holding.market }}{{ holding.code }} · {{ holding.name || '—' }}</strong>
-                <span>{{ holdingStatus(holding) }}</span>
+                <span>{{ holdingStatus(holding) }}<template v-if="qualityText(symbol(holding))"> · {{ qualityText(symbol(holding)) }}</template></span>
               </div>
             </div>
             <div v-if="currentHoldings.length > SIGNAL_PAGE_SIZE" class="signal-pagination" data-testid="pool-holdings-pagination">

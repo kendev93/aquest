@@ -272,6 +272,69 @@ def test_only_selected_strategies_and_fresh_no_strategy_are_reused() -> None:
     )
 
 
+def test_weak_ready_entry_is_researched_again_after_recheck_window() -> None:
+    """弱策略（样本不足 / 跑输基准）到期重查：节奏与 no_strategy 一致（2026-10-09）。
+
+    只看自动候选——手工覆盖是用户自己的决定，重新寻优不会替换它。
+    """
+
+    now = datetime(2026, 10, 9, 12, 0, 0)
+    stale = ("market-v1", "config-v1", "ready", True, datetime(2026, 8, 1))
+    recent = ("market-v1", "config-v1", "ready", True, datetime(2026, 10, 1))
+
+    def entry(closed_trades: float, total_return: float, benchmark: float = 0.5) -> dict:
+        return {
+            "automatic_candidates": {
+                "annual_return": {
+                    "metrics": {
+                        "full_period": {
+                            "closed_trades": closed_trades,
+                            "total_return": total_return,
+                        }
+                    }
+                },
+                "sharpe": {"candidate_ref": "annual_return"},
+            },
+            "benchmark": {"full_period": {"total_return": benchmark}},
+        }
+
+    weak = entry(5, 0.9)
+    loser = entry(50, 0.1)
+    strong = entry(50, 0.9)
+
+    assert MarketStrategyPoolService._weak_research_due(weak, stale, now=now)
+    assert MarketStrategyPoolService._weak_research_due(loser, stale, now=now)
+    assert not MarketStrategyPoolService._weak_research_due(strong, stale, now=now)
+    # 30 天内不重查；条目缺失 / 时间戳缺失不强制重查（保持原复用行为）
+    assert not MarketStrategyPoolService._weak_research_due(weak, recent, now=now)
+    assert not MarketStrategyPoolService._weak_research_due(None, stale, now=now)
+    assert not MarketStrategyPoolService._weak_research_due(
+        weak, ("market-v1", "config-v1", "ready", True, None), now=now
+    )
+    # 缺基准只判样本；candidate_ref 指向的目标缺失时无从判定
+    assert MarketStrategyPoolService._weak_research_due(
+        {
+            "automatic_candidates": {
+                "annual_return": {"metrics": {"full_period": {"closed_trades": 5}}}
+            },
+            "benchmark": None,
+        },
+        stale,
+        now=now,
+    )
+    assert not MarketStrategyPoolService._weak_research_due(
+        {
+            "automatic_candidates": {
+                "annual_return": None,
+                "sharpe": {"candidate_ref": "annual_return"},
+            },
+            "benchmark": {"full_period": {"total_return": 0.5}},
+        },
+        stale,
+        now=now,
+    )
+
+
 def test_full_research_retries_insufficient_history_but_single_reuses_unchanged_inputs(
     tmp_path,
 ) -> None:

@@ -159,6 +159,45 @@ describe('StrategyPoolPage', () => {
     expect(wrapper.get('[data-testid="pool-sell-signals"]').text()).toContain('当前没有卖出条件')
   })
 
+  it('shows full-period quality metrics on buy, sell and holding rows', async () => {
+    window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValue({
+      job_id: 'signal-1',
+      status: 'completed',
+      result: {
+        mode: 'signals',
+        objective: 'annual_return',
+        holding_scope: 'per_stock_strategy',
+        holding_snapshot_complete: true,
+        as_of_date: '2026-10-01',
+        buy_signals: [buySignal],
+        sell_signals: [{ ...buySignal, signal_type: 'sell', status: 'sell' }],
+        states: [buySignal],
+        model_portfolio: {
+          available: true,
+          holding_scope: 'per_stock_strategy',
+          holdings: [
+            {
+              market: 'SH',
+              code: '600000',
+              name: '测试600000',
+              status: 'held',
+              holding_return_pct: 0.05,
+            },
+          ],
+          risk_exit_signals: [],
+        },
+      },
+    })
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    // 质量指标统一取条目的全区间口径（与表格一致），跟踪来源的行也能显示
+    expect(wrapper.get('[data-testid="pool-buy-signals"]').text()).toContain('全区间胜率 55.00%')
+    expect(wrapper.get('[data-testid="pool-sell-signals"]').text()).toContain('全区间盈亏比 1.60')
+    expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('平均持仓 12.5 天')
+  })
+
   it('switches the saved objective and lets metric sorting change only the table view', async () => {
     window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
     const wrapper = mount(StrategyPoolPage)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import multiprocessing
@@ -21,6 +22,7 @@ from selector_app.portfolio_backtest.service import PortfolioBacktestService
 from selector_app.screening.jobs import TaskCancelledError
 from selector_app.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
 
+from .quality import benchmark_full_return, weak_strategy_reasons
 from .resources import (
     PoolConcurrencyRamp,
     cpu_bounded_worker_count,
@@ -94,6 +96,41 @@ class PoolTrackingRunner:
             ).fetchall()
         return {(str(row[0]), str(row[1])): str(row[2] or "") for row in rows}
 
+    def _benchmark_returns(
+        self, versions: list[dict[str, Any]]
+    ) -> dict[tuple[str, str], float | None]:
+        """按跟踪版本批量取条目的全区间基准收益，供弱策略判定使用。
+
+        跟踪版本自带候选指标（sync_entry 与条目保持同步），基准在条目级
+        benchmark_json 里——与信号扫描路径读的是同一份数据，口径一致。
+        """
+
+        keys = {(str(v["market"]), str(v["code"])) for v in versions}
+        if not keys:
+            return {}
+        placeholders = ", ".join("(?, ?)" for _ in keys)
+        params: list[object] = []
+        for market, code in sorted(keys):
+            params.extend((market, code))
+        with self.store.read_session() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT market, code, benchmark_json FROM strategy_pool_entries
+                WHERE (market, code) IN ({placeholders})
+                """,
+                params,
+            ).fetchall()
+        result: dict[tuple[str, str], float | None] = {}
+        for row in rows:
+            try:
+                benchmark = json.loads(row[2]) if row[2] else None
+            except (TypeError, ValueError):
+                benchmark = None
+            result[(str(row[0]), str(row[1]))] = benchmark_full_return(
+                benchmark if isinstance(benchmark, Mapping) else None
+            )
+        return result
+
     def run(
         self,
         payload: Mapping[str, Any],
@@ -104,6 +141,7 @@ class PoolTrackingRunner:
     ) -> dict[str, Any]:
         versions = self.tracks.current_versions()
         names = self._instrument_names(versions)
+        benchmarks = self._benchmark_returns(versions)
         pool_total = len(versions)
         results: dict[str, dict[str, Any]] = {
             goal: dict(
@@ -214,15 +252,28 @@ class PoolTrackingRunner:
                 status="held" if summary["holding"] else "flat",
             )
             fresh = not payload.get("as_of_date") or payload["as_of_date"] == summary["as_of_date"]
-            # 买入信号有三层含义，这里取它们的交集：
+            # 买入信号有四层含义，这里取它们的交集：
             # 1. ``fresh``——快照停在最新交易日，不是停牌/失败留下的旧状态；
             # 2. ``signal_buy``——买入规则当日成立（规则事实）；
             # 3. 没有 ``buy_blocked_reason``——执行层没有否决它。风控冷却期内的标的
             #    规则可以成立，但选股与买入两层都会跳过，注定不成交，展示成买入信号
             #    会误导（2026-10-08 用户澄清）。已持仓标的没有阻断原因，因此「持仓中
             #    继续触发买入」照常显示。
-            buy = fresh and summary["signal_buy"] and not summary.get("buy_blocked_reason")
-            sell = fresh and summary["signal_sell"]
+            # 4. 策略质量过关（2026-10-09 用户决策）——全区间样本不足或跑输基准的
+            #    策略，三个信号列表都不展示，状态退回 held/flat。判定用该版本自带
+            #    候选指标（sync_entry 与条目保持同步）+ 条目级基准，与信号扫描路径
+            #    （service._scan_signals）共用 quality 模块，口径必须一致。
+            weak_reasons = weak_strategy_reasons(
+                v["candidate"].get("metrics") if isinstance(v["candidate"], Mapping) else None,
+                benchmarks.get((str(v["market"]), str(v["code"]))),
+            )
+            buy = (
+                fresh
+                and summary["signal_buy"]
+                and not summary.get("buy_blocked_reason")
+                and not weak_reasons
+            )
+            sell = fresh and summary["signal_sell"] and not weak_reasons
             # 状态列同样只认可执行的买入：被冷却期挡掉的行退回 held/flat，不再标 buy。
             # 持仓事实由另外两层表达：今日持仓中面板、条目表的「持仓中」徽章
             # （entryIsHeld，来自回放的日终持仓）；买入面板的行自带「当前持仓收益」，
@@ -237,6 +288,9 @@ class PoolTrackingRunner:
             if sell:
                 result["sell_signals"].append({**row, "signal_type": "sell"})
             for h in summary["holding"]:
+                if weak_reasons:
+                    # 弱策略的持仓行同样隐藏（三个列表口径一致，2026-10-09 用户决策）。
+                    continue
                 holding = {**h, "status": "held"}
                 # 没参与本批回放的版本，快照可能停在更早的交易日（停牌、数据延迟、
                 # 当日失败）。直接丢弃会让模型组合在增量作业里几乎变空，所以保留但
