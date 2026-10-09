@@ -569,9 +569,7 @@ class MarketStrategyPoolService:
         signal_ids: Sequence[str],
         config_fingerprint: str,
         prior_entries: Mapping[tuple[str, str], tuple[str, str, str, bool, datetime | None]],
-        post_launch_summaries: (
-            Mapping[tuple[str, str, str], Mapping[str, object]] | None
-        ) = None,
+        post_launch_summaries: (Mapping[tuple[str, str, str], Mapping[str, object]] | None) = None,
         job_id: str,
         total_work: int,
         progress_callback: PoolProgressCallback | None,
@@ -1677,15 +1675,11 @@ class MarketStrategyPoolService:
         current_state = _mapping(model_portfolio.get("current_state"))
         current_holdings = current_state.get("holdings")
         risk_exit_signals = model_portfolio.get("risk_exit_signals")
-        raw_holdings = (
-            list(current_holdings) if isinstance(current_holdings, (list, tuple)) else []
-        )
+        raw_holdings = list(current_holdings) if isinstance(current_holdings, (list, tuple)) else []
         # 持仓行同样按策略质量过滤（2026-10-09 用户决策，三个列表口径一致）：
         # 弱策略的持仓行隐藏。判定用该目标当前生效候选（与回放所用策略一致）。
         model_portfolio["holdings"] = [
-            row
-            for row in raw_holdings
-            if not _holding_strategy_is_weak(row, entries, objective)
+            row for row in raw_holdings if not _holding_strategy_is_weak(row, entries, objective)
         ]
         model_portfolio["risk_exit_signals"] = (
             list(risk_exit_signals) if isinstance(risk_exit_signals, (list, tuple)) else []

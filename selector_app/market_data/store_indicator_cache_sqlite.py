@@ -45,10 +45,9 @@ def _is_missing_cache_error(exc: sqlite3.OperationalError) -> bool:
 
     message = str(exc).lower()
     return (
-        "no such table" in message
-        or "no such column" in message
-        or message == _ABSENT_FILE_MESSAGE
+        "no such table" in message or "no such column" in message or message == _ABSENT_FILE_MESSAGE
     )
+
 
 _BUILTIN_COLUMNS = (
     "market",

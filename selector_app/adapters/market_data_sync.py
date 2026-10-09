@@ -265,7 +265,11 @@ class MarketDataSync:
         ensure_staging_capacity(self._store.database_path)
         stage_root = new_staging_root(self._store.database_path, run_id)
         stage_paths: list[Path] = []
-        manager = multiprocessing.Manager()
+        # 分批入库的 worker 池用的是 ``spawn``，管理进程也必须同法启动：Linux 默认是
+        # ``fork``，会从这个已经跑着同步线程的进程里 fork 管理进程，Python 3.12 直接
+        # 报弃用，而且子进程继承到加锁状态的 DuckDB/线程状态时有死锁风险。
+        context = multiprocessing.get_context("spawn")
+        manager = context.Manager()
         rate_state, rate_lock = create_rate_state(manager)
         cancel_event = manager.Event()
         event_queue = manager.Queue()
@@ -309,7 +313,6 @@ class MarketDataSync:
                         "downloaded_targets": 0,
                     },
                 )
-                context = multiprocessing.get_context("spawn")
                 executor = ProcessPoolExecutor(
                     max_workers=worker_count,
                     mp_context=context,

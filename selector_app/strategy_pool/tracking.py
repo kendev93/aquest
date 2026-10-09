@@ -79,9 +79,7 @@ def account_summary(
         has_post_launch_data=equity[-1]["date"] > boundary,
         # 上线后的交易日数（按回放净值行数），供「上线后衰减」判定做窗口门槛
         # （2026-10-09 用户决策：上线满 60 个交易日才参与衰减判定）。
-        post_launch_days=sum(
-            1 for row in equity if str(row.get("date", "")) > str(boundary)
-        ),
+        post_launch_days=sum(1 for row in equity if str(row.get("date", "")) > str(boundary)),
     )
 
 
@@ -218,9 +216,7 @@ def replay_account(
         )
         last_close = close.dropna()
         if not prior_closes.empty and not last_close.empty and float(prior_closes.iloc[-1]) > 0:
-            post_launch_benchmark = (
-                float(last_close.iloc[-1]) / float(prior_closes.iloc[-1]) - 1.0
-            )
+            post_launch_benchmark = float(last_close.iloc[-1]) / float(prior_closes.iloc[-1]) - 1.0
     summary["post_launch_benchmark_return"] = post_launch_benchmark
     summary.update(
         processed_new_days=len(dates) - (len(checkpoint.processed_dates) if checkpoint else 0),

@@ -194,7 +194,7 @@ def test_cleanup_stale_staging_removes_only_old_job_directories(tmp_path: Path) 
 
 
 def test_stage_worker_entrypoint_runs_in_a_spawned_process(tmp_path: Path) -> None:
-    manager = multiprocessing.Manager()
+    manager = multiprocessing.get_context("spawn").Manager()
     rate_state, rate_lock = create_rate_state(manager)
     request = StageWorkerRequest(
         worker_id=0,
@@ -222,7 +222,7 @@ def test_stage_worker_entrypoint_runs_in_a_spawned_process(tmp_path: Path) -> No
 
 
 def test_process_rate_gate_backoffs_and_recovers_per_provider() -> None:
-    manager = multiprocessing.Manager()
+    manager = multiprocessing.get_context("spawn").Manager()
     try:
         rate_state, rate_lock = create_rate_state(manager)
         from selector_app.market_data.staging import ProcessRateGate
@@ -251,7 +251,7 @@ def test_process_rate_gate_tracks_the_tencent_source() -> None:
     整个进程池同步一起失败——而且崩溃前还会把请求误记到东财的桶里。
     """
 
-    manager = multiprocessing.Manager()
+    manager = multiprocessing.get_context("spawn").Manager()
     try:
         rate_state, rate_lock = create_rate_state(manager)
         gate = ProcessRateGate(rate_state, rate_lock)
@@ -276,7 +276,7 @@ def test_process_rate_gate_tracks_the_tencent_source() -> None:
 def test_process_rate_gate_backfills_a_provider_missing_from_the_state() -> None:
     """旧进程传来的状态可能缺某个 provider，不能让它直接 KeyError。"""
 
-    manager = multiprocessing.Manager()
+    manager = multiprocessing.get_context("spawn").Manager()
     try:
         rate_state = manager.dict({"next_allowed_eastmoney": 0.0})
         gate = ProcessRateGate(rate_state, manager.Lock())
