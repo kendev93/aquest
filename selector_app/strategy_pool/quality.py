@@ -21,6 +21,18 @@ WEAK_STRATEGY_MIN_TRADES = 20
 #: 弱策略的重新寻优节奏（自然日），从上次研究完成时间起算。
 WEAK_STRATEGY_RECHECK_DAYS = 30
 
+#: 上线后衰减判定（2026-10-09 用户决策）：跟踪回放的「上线后收益」对照同窗口
+#: 买入持有基准；上线不满该交易日数不判定——窗口太短噪声大，一波回调就会误杀。
+POST_LAUNCH_MIN_TRADING_DAYS = 60
+
+#: 上线后收益跑输同窗口基准超过该幅度即视为衰减（净费用口径对基准未计费用，
+#: 有轻微利于触发的偏置，阈值取 10% 吸收它）。
+POST_LAUNCH_MAX_UNDERPERFORMANCE = 0.10
+
+#: 保质期兜底：ready 结论超过该自然日数无论表现如何都重新寻优——市场风格漂移
+#: 不一定表现为跑输基准（策略与基准一起阴跌时超额可能接近 0）。
+STRATEGY_SHELF_LIFE_DAYS = 180
+
 REASON_INSUFFICIENT_SAMPLE = "insufficient_sample"
 REASON_UNDERPERFORMING = "underperforming"
 
@@ -77,3 +89,23 @@ def strategy_is_weak(
     """便捷判断：候选策略是否命中任一质量缺陷。"""
 
     return bool(weak_strategy_reasons(metrics, benchmark_return))
+
+
+def post_launch_degraded(summary: Mapping[str, object] | None) -> bool:
+    """上线后衰减：上线满窗口且上线后收益跑输同窗口基准超过阈值。
+
+    三个输入都来自跟踪回放摘要（``post_launch_days`` / ``post_launch_return`` /
+    ``post_launch_benchmark_return``，由 tracking.replay_account 写入）；任一
+    缺失（老快照尚未刷新）视为不衰减，与 ``buy_blocked_reason`` 的灰度方式一致。
+    """
+
+    if not isinstance(summary, Mapping):
+        return False
+    days = _finite(summary.get("post_launch_days"))
+    post = _finite(summary.get("post_launch_return"))
+    benchmark = _finite(summary.get("post_launch_benchmark_return"))
+    if days is None or post is None or benchmark is None:
+        return False
+    if days < POST_LAUNCH_MIN_TRADING_DAYS:
+        return False
+    return (post - benchmark) < -POST_LAUNCH_MAX_UNDERPERFORMANCE

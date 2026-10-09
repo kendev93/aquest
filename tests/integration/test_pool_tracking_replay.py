@@ -113,6 +113,36 @@ def test_verified_append_replays_only_new_dates_and_matches_full_backtest(tmp_pa
     assert rebuilt["summary"]["recomputed_at"]
 
 
+def test_summary_reports_post_launch_days_and_benchmark(tmp_path):
+    """回放摘要带上线后窗口字段，供「上线后衰减」判定（2026-10-09）。
+
+    上线日 09-02：上线后只有 09-03 一根 bar；基准 = 09-02 收盘到最新收盘。
+    没有上线时间的版本没有窗口，两字段为 0 / None。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "post-launch.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", bars(3))
+    adapter = DuckDbMarketDataAdapter(store)
+    service = PortfolioBacktestService(adapter=adapter)
+    ref = adapter.stock_ref("", "SH", "600000")
+    value = candidate()
+    value["config"].update(initial_cash=1_000_000, stop_loss_pct=None)
+    version = dict(
+        candidate=value,
+        signature=signature(value),
+        launch_data_date="2026-09-02",
+        created_at="2026-09-02T16:00:00+00:00",
+    )
+    summary = replay_account(service, ref, version)["summary"]
+    assert summary["post_launch_days"] == 1
+    assert summary["post_launch_benchmark_return"] == pytest.approx(0.25)
+
+    legacy = dict(version, launch_data_date=None)
+    legacy_summary = replay_account(service, ref, legacy)["summary"]
+    assert legacy_summary["post_launch_days"] == 0
+    assert legacy_summary["post_launch_benchmark_return"] is None
+
+
 def test_replay_account_refreshes_actions_between_runs_on_a_reused_service(tmp_path):
     dates = pd.date_range("2026-09-01", periods=5, freq="D")
     frame = pd.DataFrame(

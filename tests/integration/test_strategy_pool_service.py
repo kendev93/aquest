@@ -302,17 +302,17 @@ def test_weak_ready_entry_is_researched_again_after_recheck_window() -> None:
     loser = entry(50, 0.1)
     strong = entry(50, 0.9)
 
-    assert MarketStrategyPoolService._weak_research_due(weak, stale, now=now)
-    assert MarketStrategyPoolService._weak_research_due(loser, stale, now=now)
-    assert not MarketStrategyPoolService._weak_research_due(strong, stale, now=now)
+    assert MarketStrategyPoolService._research_recheck_due(weak, stale, now=now)
+    assert MarketStrategyPoolService._research_recheck_due(loser, stale, now=now)
+    assert not MarketStrategyPoolService._research_recheck_due(strong, stale, now=now)
     # 30 天内不重查；条目缺失 / 时间戳缺失不强制重查（保持原复用行为）
-    assert not MarketStrategyPoolService._weak_research_due(weak, recent, now=now)
-    assert not MarketStrategyPoolService._weak_research_due(None, stale, now=now)
-    assert not MarketStrategyPoolService._weak_research_due(
+    assert not MarketStrategyPoolService._research_recheck_due(weak, recent, now=now)
+    assert not MarketStrategyPoolService._research_recheck_due(None, stale, now=now)
+    assert not MarketStrategyPoolService._research_recheck_due(
         weak, ("market-v1", "config-v1", "ready", True, None), now=now
     )
     # 缺基准只判样本；candidate_ref 指向的目标缺失时无从判定
-    assert MarketStrategyPoolService._weak_research_due(
+    assert MarketStrategyPoolService._research_recheck_due(
         {
             "automatic_candidates": {
                 "annual_return": {"metrics": {"full_period": {"closed_trades": 5}}}
@@ -322,7 +322,7 @@ def test_weak_ready_entry_is_researched_again_after_recheck_window() -> None:
         stale,
         now=now,
     )
-    assert not MarketStrategyPoolService._weak_research_due(
+    assert not MarketStrategyPoolService._research_recheck_due(
         {
             "automatic_candidates": {
                 "annual_return": None,
@@ -331,6 +331,71 @@ def test_weak_ready_entry_is_researched_again_after_recheck_window() -> None:
             "benchmark": {"full_period": {"total_return": 0.5}},
         },
         stale,
+        now=now,
+    )
+
+
+def test_shelf_life_and_post_launch_degradation_trigger_re_research() -> None:
+    """保质期与上线后衰减也会触发重新寻优（2026-10-09 用户决策）。"""
+
+    now = datetime(2026, 10, 9, 12, 0, 0)
+    strong_entry = {
+        "automatic_candidates": {
+            "annual_return": {
+                "metrics": {"full_period": {"closed_trades": 50, "total_return": 0.9}}
+            }
+        },
+        "benchmark": {"full_period": {"total_return": 0.5}},
+    }
+
+    # 保质期：ready 结论超过 180 天无论表现如何都重算；没到期不触发
+    aged = ("market-v1", "config-v1", "ready", True, datetime(2026, 3, 1))
+    fresh = ("market-v1", "config-v1", "ready", True, datetime(2026, 8, 1))
+    assert MarketStrategyPoolService._research_recheck_due(strong_entry, aged, now=now)
+    assert not MarketStrategyPoolService._research_recheck_due(strong_entry, fresh, now=now)
+
+    # 上线后衰减：满 60 个交易日且上线后跑输同窗口基准 10% 以上；三个条件
+    # （窗口天数 / 收益 / 基准）任一缺失或未达标都不触发
+    degraded = {
+        "post_launch_days": 70,
+        "post_launch_return": -0.05,
+        "post_launch_benchmark_return": 0.15,
+    }
+    healthy = {
+        "post_launch_days": 70,
+        "post_launch_return": 0.2,
+        "post_launch_benchmark_return": 0.15,
+    }
+    too_short = {
+        "post_launch_days": 30,
+        "post_launch_return": -0.05,
+        "post_launch_benchmark_return": 0.15,
+    }
+    legacy_snapshot = {"post_launch_days": 70, "post_launch_return": -0.05}
+
+    assert MarketStrategyPoolService._research_recheck_due(
+        strong_entry,
+        fresh,
+        {"annual_return": degraded, "sharpe": {}},
+        now=now,
+    )
+    assert not MarketStrategyPoolService._research_recheck_due(
+        strong_entry,
+        fresh,
+        {"annual_return": healthy, "sharpe": {}},
+        now=now,
+    )
+    assert not MarketStrategyPoolService._research_recheck_due(
+        strong_entry,
+        fresh,
+        {"annual_return": too_short, "sharpe": {}},
+        now=now,
+    )
+    # 老快照没有上线后基准字段：衰减判定不生效，保持复用
+    assert not MarketStrategyPoolService._research_recheck_due(
+        strong_entry,
+        fresh,
+        {"annual_return": legacy_snapshot, "sharpe": {}},
         now=now,
     )
 

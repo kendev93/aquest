@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 
 from selector_app.indicators.cache import frame_fingerprint
+from selector_app.market_data.adjustment import mark_adjusted
 from selector_app.market_data.models import StockRef
 from selector_app.market_data.store_base import RESEARCH_START
 from selector_app.portfolio_backtest.checkpoint import SimulationCheckpoint
@@ -76,6 +77,11 @@ def account_summary(
         equity=current,
         holding=latest_holdings,
         has_post_launch_data=equity[-1]["date"] > boundary,
+        # 上线后的交易日数（按回放净值行数），供「上线后衰减」判定做窗口门槛
+        # （2026-10-09 用户决策：上线满 60 个交易日才参与衰减判定）。
+        post_launch_days=sum(
+            1 for row in equity if str(row.get("date", "")) > str(boundary)
+        ),
     )
 
 
@@ -182,6 +188,40 @@ def replay_account(
     packed = captured.to_dict()
     summary = account_summary(packed, version.get("launch_data_date"), config.initial_cash)
     summary["checkpoint_hash"] = hashlib.sha256(dumps(packed).encode()).hexdigest()
+    # 上线后窗口的对照基准：同区间买入持有（复权收盘价口径），与 post_launch_return
+    # 同一起点（上线日），供「上线后衰减」判定使用（2026-10-09 用户决策）。没有
+    # 上线时间的老版本没有窗口，两个结论都无从谈起，置空即可。只算基准、不动
+    # 回放用的 raw——prefix 校验指纹吃的是 raw，换复权价会让全部 checkpoint 失配。
+    boundary = version.get("launch_data_date") or summary["as_of_date"]
+    equity_rows = packed.get("equity")
+    equity_list: list[Mapping[str, Any]] = [
+        row
+        for row in (equity_rows if isinstance(equity_rows, list) else [])
+        if isinstance(row, Mapping)
+    ]
+    summary["post_launch_days"] = sum(
+        1 for row in equity_list if str(row.get("date", "")) > str(boundary)
+    )
+    post_launch_benchmark = None
+    if version.get("launch_data_date") is not None:
+        actions_reader = getattr(service._adapter, "read_corporate_actions", None)
+        actions = actions_reader(ref) if callable(actions_reader) else ()
+        adjusted = mark_adjusted(raw, actions if isinstance(actions, Sequence) else ())
+        close = pd.to_numeric(adjusted["close"], errors="coerce")
+        bar_dates = pd.to_datetime(adjusted["date"]).dt.date
+        try:
+            boundary_date = pd.Timestamp(str(version["launch_data_date"])).date()
+        except ValueError:
+            boundary_date = None
+        prior_closes = (
+            close[bar_dates <= boundary_date].dropna() if boundary_date else close.iloc[0:0]
+        )
+        last_close = close.dropna()
+        if not prior_closes.empty and not last_close.empty and float(prior_closes.iloc[-1]) > 0:
+            post_launch_benchmark = (
+                float(last_close.iloc[-1]) / float(prior_closes.iloc[-1]) - 1.0
+            )
+    summary["post_launch_benchmark_return"] = post_launch_benchmark
     summary.update(
         processed_new_days=len(dates) - (len(checkpoint.processed_dates) if checkpoint else 0),
         mode=mode,

@@ -288,6 +288,34 @@ class PoolTrackingStore:
                 result[key] = (str(reason), str(payload.get("as_of_date") or ""))
         return result
 
+    def applied_summaries(self) -> dict[tuple[str, str, str], dict[str, Any]]:
+        """当前生效版本（手工优先）的 summary_json，免解压读取。
+
+        与 :meth:`buy_blockades` 同款：只读 ``summary_json``、不解压 checkpoint
+        blob，给「上线后衰减」这类只需要摘要字段的判定用。返回
+        ``(market, code, objective) -> summary``。
+        """
+
+        with self.store.read_session() as connection:
+            rows = connection.execute(
+                """SELECT market, code, objective, source, summary_json
+                FROM pool_tracking_versions
+                WHERE is_current AND summary_json IS NOT NULL"""
+            ).fetchall()
+        result: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for market, code, objective, source, summary in rows:
+            try:
+                payload = json.loads(summary or "{}")
+            except (TypeError, ValueError):
+                continue
+            if not payload:
+                continue
+            key = (str(market), str(code), str(objective))
+            # 手动优先，且能覆盖已经放进去的自动结果（行序不保证）。
+            if source == "manual" or key not in result:
+                result[key] = payload
+        return result
+
     def snapshot(self, version_id: str) -> dict[str, Any] | None:
         with self.store.read_session() as connection:
             row = connection.execute(

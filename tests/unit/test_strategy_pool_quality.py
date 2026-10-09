@@ -7,6 +7,7 @@
 from selector_app.strategy_pool.quality import (
     WEAK_STRATEGY_MIN_TRADES,
     benchmark_full_return,
+    post_launch_degraded,
     strategy_is_weak,
     weak_strategy_reasons,
 )
@@ -56,3 +57,18 @@ def test_benchmark_full_return_follows_entry_shape() -> None:
     assert benchmark_full_return({"validation": {"total_return": 0.2}}) is None
     assert benchmark_full_return(None) is None
     assert benchmark_full_return("bad") is None
+
+
+def test_post_launch_degradation_requires_window_return_and_benchmark() -> None:
+    degraded = {
+        "post_launch_days": 70,
+        "post_launch_return": -0.05,
+        "post_launch_benchmark_return": 0.15,
+    }
+    assert post_launch_degraded(degraded)
+    # 没满窗口 / 跑赢基准 / 字段缺失（老快照）都不算衰减
+    assert not post_launch_degraded({**degraded, "post_launch_days": 59})
+    assert not post_launch_degraded({**degraded, "post_launch_return": 0.1})
+    assert not post_launch_degraded({**degraded, "post_launch_benchmark_return": -0.2})
+    assert not post_launch_degraded({"post_launch_days": 70, "post_launch_return": -0.05})
+    assert not post_launch_degraded(None)

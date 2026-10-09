@@ -45,8 +45,10 @@ from selector_app.strategy_discovery.evaluation_budget import EvaluationWorkerBu
 from selector_app.web.schemas.screening import RuleGroupRequest
 
 from .quality import (
+    STRATEGY_SHELF_LIFE_DAYS,
     WEAK_STRATEGY_RECHECK_DAYS,
     benchmark_full_return,
+    post_launch_degraded,
     strategy_is_weak,
     weak_strategy_reasons,
 )
@@ -75,9 +77,10 @@ PoolEntryWriter = Callable[[Mapping[str, object]], None]
 # 日线，指纹一变全部作废，增量永远等不到复用——2026-10-07 实测每天点增量都
 # 从第一只重新跑），改为按「上次结论是什么、多久之前下的」跳过：ready/partial
 # 直接复用，no_strategy 在 NO_STRATEGY_RECHECK_DAYS 天内复用、到期才重查一次，
-# insufficient_history/failed 每次重查（理由见 _can_reuse）；ready 但自动候选
-# 「样本不足 / 跑输基准」（quality 模块口径）的，超过 WEAK_STRATEGY_RECHECK_DAYS
-# 同样到期重查、重新寻优（2026-10-09 用户决策）；
+# insufficient_history/failed 每次重查（理由见 _can_reuse）；ready 条目另有三种
+# 重新寻优触发（2026-10-09 用户决策，见 _research_recheck_due）：自动候选
+# 「样本不足 / 跑输基准」超 30 天、上线后衰减（满 60 个交易日且上线后跑输
+# 同窗口基准 10%+）、保质期 180 天强制重算；
 # 研究窗口起点从 2015-01-05 裁到 RESEARCH_START（2016-01-01），2015 全年只作
 # 指标预热。门槛与研究窗口都会改变存量条目的有效性，v5 语义下的条目在
 # 下一次全市场重选时逐股重研究。复用节奏不影响研究结论本身，不参与指纹。
@@ -566,6 +569,9 @@ class MarketStrategyPoolService:
         signal_ids: Sequence[str],
         config_fingerprint: str,
         prior_entries: Mapping[tuple[str, str], tuple[str, str, str, bool, datetime | None]],
+        post_launch_summaries: (
+            Mapping[tuple[str, str, str], Mapping[str, object]] | None
+        ) = None,
         job_id: str,
         total_work: int,
         progress_callback: PoolProgressCallback | None,
@@ -573,6 +579,7 @@ class MarketStrategyPoolService:
         entry_writer: PoolEntryWriter | None,
     ) -> tuple[int, int, int, list[dict[str, str]]]:
         total = len(refs)
+        post_launch = post_launch_summaries or {}
         coordinator = _PoolProgressCoordinator(
             total_symbols=total,
             total_work=total_work,
@@ -616,13 +623,19 @@ class MarketStrategyPoolService:
                         and self._pool_store is not None
                         else None
                     )
-                    # 弱策略到期重查（2026-10-09 用户决策）：ready 条目如果自动候选
-                    # 样本不足或跑输基准，超过 30 天就在本次增量里重新寻优，与
-                    # no_strategy 的重查节奏同款。判定只看自动候选——手工覆盖是
-                    # 用户自己的决定，重新寻优不会替换它。
-                    if self._can_reuse(prior, config_fingerprint) and not self._weak_research_due(
-                        reused_entry, prior
-                    ):
+                    # 重新寻优判定（2026-10-09 用户决策）：弱策略 30 天、上线后衰减
+                    # （满 60 个交易日且跑输同窗口基准 10%+）、保质期 180 天，详见
+                    # _research_recheck_due。判定只看自动候选——手工覆盖是用户自己
+                    # 的决定，重新寻优不会替换它。
+                    stock_post_launch = {
+                        objective: post_launch.get((ref.market, ref.code, objective), {})
+                        for objective in ("annual_return", "sharpe")
+                    }
+                    can_reuse = self._can_reuse(prior, config_fingerprint)
+                    recheck_due = can_reuse and self._research_recheck_due(
+                        reused_entry, prior, stock_post_launch
+                    )
+                    if can_reuse and not recheck_due:
                         metrics_backfilled = False
                         if reused_entry is not None and self._needs_full_period_backfill(
                             reused_entry
@@ -1002,6 +1015,13 @@ class MarketStrategyPoolService:
             else:
                 raise ValueError("清空重建需要可写策略池")
         prior_entries = self._prior_entries() if not rebuild and mode in {"full", "single"} else {}
+        # 跟踪摘要只读 summary_json（免解压），供「上线后衰减」判定使用；
+        # 老快照没有对应字段时衰减判定不生效，跟踪刷新一轮后自然补齐。
+        post_launch_summaries = (
+            PoolTrackingStore(self._store).applied_summaries()
+            if not rebuild and mode in {"full", "single"} and self._store is not None
+            else {}
+        )
         started = date.today()
         if mode == "single" and self._pool_store is not None:
             ref = refs[0]
@@ -1077,6 +1097,7 @@ class MarketStrategyPoolService:
                 signal_ids=catalog.signal_ids,
                 config_fingerprint=config_fingerprint,
                 prior_entries=prior_entries,
+                post_launch_summaries=post_launch_summaries,
                 job_id=job_id,
                 total_work=total_work,
                 progress_callback=progress_callback,
@@ -1770,9 +1791,8 @@ class MarketStrategyPoolService:
         - **insufficient_history / failed → 每次重查**。前者数据在长、攒够当天
           就该补研究；后者错误应当重试，不把一次故障当成结论存下来。
 
-        ``ready``/``partial`` 的复用还有一个例外（见 :meth:`_weak_research_due`）：
-        自动候选全区间样本不足或跑输基准的条目按 ``WEAK_STRATEGY_RECHECK_DAYS``
-        到期重新寻优。
+        ``ready``/``partial`` 的复用还有例外（见 :meth:`_research_recheck_due`）：
+        自动候选弱策略超 30 天、上线后衰减、保质期 180 天的条目到期重新寻优。
         """
 
         if not prior or prior[1] != config_fingerprint:
@@ -1790,21 +1810,35 @@ class MarketStrategyPoolService:
         return (current - updated_at).days < NO_STRATEGY_RECHECK_DAYS
 
     @staticmethod
-    def _weak_research_due(
+    def _research_recheck_due(
         entry: Mapping[str, object] | None,
         prior: tuple[str, str, str, bool, datetime | None] | None,
+        post_launch: Mapping[str, Mapping[str, object]] | None = None,
         *,
         now: datetime | None = None,
     ) -> bool:
-        """弱策略的 ready 条目是否到期重查（``WEAK_STRATEGY_RECHECK_DAYS`` 节奏）。
+        """ready 条目是否需要重新寻优——三种触发（2026-10-09 用户决策）。
+
+        - **弱策略**：自动候选全区间样本不足或跑输基准，超过
+          ``WEAK_STRATEGY_RECHECK_DAYS``；
+        - **上线后衰减**：某目标生效版本上线满 ``POST_LAUNCH_MIN_TRADING_DAYS``
+          且上线后跑输同窗口基准超过 ``POST_LAUNCH_MAX_UNDERPERFORMANCE``；
+          全区间指标是研究时冻结的，反映不了上线后的失效，衰减只能靠跟踪
+          回放的实时表现；
+        - **保质期**：无论结论如何，超过 ``STRATEGY_SHELF_LIFE_DAYS`` 强制重算。
 
         只看自动候选：手工覆盖是用户自己的决定，重新寻优不会替换它，按它排队
-        只会白跑。条目读不到（如 worker 模式）或时间戳缺失时不强制重查，保持
-        原复用行为。命中返回 True，调用方跳过复用、落入正常研究队列重新寻优。
+        只会白跑。条目读不到（如 worker 模式）、时间戳缺失或老快照没有上线后
+        字段时，对应判定不生效，保持原复用行为。命中返回 True，调用方跳过
+        复用、落入正常研究队列重新寻优。
         """
 
         if entry is None or prior is None or prior[4] is None:
             return False
+        current = now or datetime.now(timezone.utc).replace(tzinfo=None)
+        age = (current - prior[4]).days
+        if age >= STRATEGY_SHELF_LIFE_DAYS:
+            return True
         automatic = _mapping(entry.get("automatic_candidates"))
         benchmark_return = benchmark_full_return(_mapping(entry.get("benchmark")))
         weak = any(
@@ -1815,10 +1849,12 @@ class MarketStrategyPoolService:
             for objective in ("annual_return", "sharpe")
             if not _mapping(automatic.get(objective)).get("candidate_ref")
         )
-        if not weak:
-            return False
-        current = now or datetime.now(timezone.utc).replace(tzinfo=None)
-        return (current - prior[4]).days >= WEAK_STRATEGY_RECHECK_DAYS
+        if weak and age >= WEAK_STRATEGY_RECHECK_DAYS:
+            return True
+        return any(
+            post_launch_degraded(_mapping((post_launch or {}).get(objective)))
+            for objective in ("annual_return", "sharpe")
+        )
 
     @staticmethod
     def _needs_full_period_backfill(entry: Mapping[str, object]) -> bool:
