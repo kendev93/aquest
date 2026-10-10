@@ -55,7 +55,7 @@ sh scripts/verify_ci.sh             # 全部
 
 ## 提交规范
 
-遵循仓库历史的短前缀风格：`feat:`、`fix:`、`refactor:`、`test:`、`docs:`、`chore:`，摘要用简洁的中文一句话说清用户可见的变化。
+提交信息使用短前缀：`feat:`、`fix:`、`refactor:`、`test:`、`docs:`、`chore:`，摘要用简洁的中文一句话说清用户可见的变化。
 
 ## Pull Request
 

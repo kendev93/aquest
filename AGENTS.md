@@ -16,7 +16,7 @@ Use Python 4-space indentation, `snake_case` modules/functions, and Ruff’s 100
 
 ## Commits and Pull Requests
 
-Follow the history’s short typed prefixes, for example `feat:`, `fix:`, `refactor:`, `test:`, `docs:`, and `chore:`; concise Chinese summaries are common. PRs should explain user-visible behavior, list verification commands and outcomes, and describe schema/data migration impact. Include screenshots for UI changes when they clarify the result.
+Use short typed commit prefixes, for example `feat:`, `fix:`, `refactor:`, `test:`, `docs:`, and `chore:`; concise Chinese summaries are common. PRs should explain user-visible behavior, list verification commands and outcomes, and describe schema/data migration impact. Include screenshots for UI changes when they clarify the result.
 
 ## Configuration and Data Safety
 

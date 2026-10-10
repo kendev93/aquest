@@ -67,7 +67,7 @@ python3 scripts/generate_user_manual.py   # 重新生成 docs/user-manual.md
 
 ## 启动
 
-要求 Python 3.10–3.13、Node.js 20+。推荐创建虚拟环境：
+要求 Python 3.10–3.13、Node.js 22.22+。推荐创建虚拟环境：
 
 ```bash
 python3 -m venv .venv
@@ -97,9 +97,11 @@ npm run dev
 如果不想在宿主机安装 Python 或 Node.js，可以直接使用 Docker：
 
 ```bash
-export INDICATOR_LAB_IMAGE=<你的镜像标签>
+export INDICATOR_LAB_IMAGE=indicator-lab:local
 sh scripts/start.sh
 ```
+
+`INDICATOR_LAB_IMAGE` 是本地构建的镜像名，起个自己认得的名字即可，不是要去拉别人的镜像；写进 `.env` 后就不用每次 export。
 
 脚本默认带 `--build`，改完代码直接跑就会重建镜像；配置写在 `.env` 里，不用每次 export。完整命令见部署文档。
 
