@@ -251,7 +251,8 @@ ETF 分析 = 单日横截面列表（每个标的评分 + 标签 + 指标值）+
    MIT，可以无条件放 GHCR 让人慢慢拉；我们卖给国内用户，拉不动就是零分体验。
 2. **许可证约束**：本项目是 Indicator Lab Commercial License（商业闭源），代码里**没有任何授权
    门控** ⇒ 任何 registry 上的包**都不能设公开**，否则 `docker pull` 就是免费拿走整个产品。
-   开源之前推 GHCR 没有意义；开源之后也只是"两边都放"。
+   开源之前推 GHCR 没有意义；开源之后也只是"两边都放"。（2026-10-10 更新：项目已转开源并改用
+   AGPL-3.0，registry 可见性决策需按开源口径重做，本条约束作废。）
 3. **现有的条件已经够用，不紧急**：
    - `docker-compose.yml` 用 `INDICATOR_LAB_IMAGE` / `INDICATOR_LAB_FRONTEND_IMAGE` 变量，
      **换 registry 不需要改编排文件**，只要把标签换成新 registry 的地址；
