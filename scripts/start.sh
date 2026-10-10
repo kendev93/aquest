@@ -4,7 +4,6 @@
 #   sh scripts/start.sh                 重建镜像并启动（默认）
 #   sh scripts/start.sh --build-only    只构建镜像，不启动
 #   sh scripts/start.sh --no-build      不重建，直接启动
-#   sh scripts/start.sh --protected     使用 Nuitka 编译版镜像
 #
 # 配置写在 .env 里（compose 会自动读取）：
 #   INDICATOR_LAB_IMAGE           必填，backend 与 strategy-worker 的镜像标签
@@ -26,16 +25,11 @@ usage() {
   awk 'NR > 1 { if (/^#/) { sub(/^# ?/, ""); print; next } exit }' "$0"
 }
 
-compose_mode=default
 build_only=0
 no_build=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --protected)
-      compose_mode=protected
-      shift
-      ;;
     --build-only)
       build_only=1
       shift
@@ -60,13 +54,6 @@ if [ -z "${DATA_DIR:-}" ] && [ -f "$REPO_ROOT/.env" ]; then
 fi
 
 compose() {
-  if [ "$compose_mode" = "protected" ]; then
-    docker compose \
-      -f "$REPO_ROOT/docker-compose.yml" \
-      -f "$REPO_ROOT/docker-compose.protected.yml" \
-      "$@"
-    return
-  fi
   if [ -n "${DATA_DIR:-}" ]; then
     docker compose \
       -f "$REPO_ROOT/docker-compose.yml" \
@@ -79,9 +66,6 @@ compose() {
 
 cd "$REPO_ROOT"
 
-if [ "$compose_mode" = "protected" ]; then
-  printf '%s\n' '模式：保护版（Nuitka 编译，镜像内不含源码）'
-fi
 if [ -n "${DATA_DIR:-}" ]; then
   printf '数据目录：%s（绑定挂载）\n' "$DATA_DIR"
 else

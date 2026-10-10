@@ -19,7 +19,6 @@ sh scripts/start.sh
 | `sh scripts/start.sh` | 重建镜像并启动 |
 | `sh scripts/start.sh --build-only` | 只构建，不启动 |
 | `sh scripts/start.sh --no-build` | 不重建，直接启动 |
-| `sh scripts/start.sh --protected` | 用 Nuitka 编译版镜像 |
 
 它会先跑 `docker compose config --quiet` 预校验再动手；`DATA_DIR` 无论来自环境变量还是
 `.env` 都会被识别，并自动叠加绑定挂载覆盖文件。

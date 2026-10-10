@@ -1,5 +1,0 @@
-# Build-only dependencies for the protected Nuitka release artifact.
-# Runtime dependencies remain in requirements.txt.
-Nuitka==4.2.2
-ordered-set==4.1.0
-zstandard==0.25.0

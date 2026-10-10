@@ -121,27 +121,6 @@ docker compose build
 
 本机 DuckDB 保存 Indicator Lab 的行情缓存、交易日历、回测/策略历史、策略任务状态和维护元数据。为兼容遗留文件，backend 仍会幂等导入本地数据目录中残留的旧任务 JSON 和维护记录；日常更新不需要手动执行数据迁移。需要提升 schema 版本的结构升级会先创建备份。策略池新增的可空 `benchmark_json` 列通过幂等扩列升级，不重写现有候选，也不触发整库备份；旧记录会在下一次全市场重选时补算基准。交易日历是可重取的公共行情缓存，以幂等建表方式保存，不提升 schema 版本，也不进入用户资产导出。
 
-### 保护版发布镜像
-
-开发镜像会保留 Python 源码，适合本地调试；对外分发时使用 Nuitka 保护版构建。构建阶段会编译 backend 和 `strategy-worker`，最终运行阶段只复制 standalone bundle，不复制 `selector_app` 源码：
-
-完整的 Windows、macOS 和 Docker 打包教程见 [打包与发布指南](docs/packaging.md)。
-
-```bash
-export INDICATOR_LAB_IMAGE=<你的镜像标签>
-sh scripts/start.sh --protected
-```
-
-也可以在宿主机生成 standalone bundle：
-
-```bash
-python3 -m pip install --require-hashes -r requirements.txt
-python3 -m pip install -r requirements-build.txt
-python3 scripts/build_nuitka.py --jobs 4
-```
-
-保护版默认使用文件夹模式，避免大型 NumPy/Pandas 依赖每次启动都解包；`NUITKA_JOBS`、`NUITKA_LTO` 和 `NUITKA_REPRODUCIBLE` 可在构建时覆盖。发布前运行 `sh scripts/verify_ci.sh protected`，它会检查 Compose 配置、编译产物和最终镜像。Nuitka 只能提高本地逆向门槛，不能对完全控制运行机器的用户提供绝对源码保密；需要强保护时应将核心策略计算放在你的远程服务。
-
 部署方式、数据目录、备份与恢复见 [独立分发部署](docs/standalone-deployment.md)。通达信日线导入是可选功能，不配置不影响在线同步。
 
 数据库位于数据卷或 `DATA_DIR` 下的 `market.duckdb`，停止或删除容器不会删除它，重建镜像或容器会继续使用同一份数据。`WEB_PORT` 和 `API_PORT` 可通过 `.env` 修改。⚠️ `docker compose down -v`、`docker volume prune` 和 Docker Desktop 的 Reset 会**删除命名卷**，执行前请先导出备份（见部署文档）。
