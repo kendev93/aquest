@@ -28,7 +28,7 @@ _MAX_SCALE_RATIO = 100.0
 # it fires even when the correlation cannot be computed.
 _DUPLICATE_AGREEMENT = 0.995
 # Two conditions whose hit vectors correlate at least this strongly are the same
-# finding wearing different thresholds. See ``docs/duplicate-merging-plan.md``:
+# finding wearing different thresholds. See ``docs/archive/duplicate-merging-plan.md``:
 # the same indicator at adjacent quantile thresholds lands near 0.6~0.7, while
 # thresholds two quantiles apart drop to ~0.4 and stay separate - they are a
 # different aggressiveness, not a repeat. Picking a cut point *within* one

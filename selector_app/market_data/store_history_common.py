@@ -73,7 +73,7 @@ STRATEGY_TRACKING_OFF = "off"
 STRATEGY_TRACKING_ACTIVE = "active"
 _STRATEGY_TRACKING_STATUSES = frozenset({STRATEGY_TRACKING_OFF, STRATEGY_TRACKING_ACTIVE})
 #: 策略列。上线曾经打算存一份「上线日末的模拟状态快照」用来增量重跑，后来确认
-#: 走不通（见 docs/strategy-tracking-plan.md §2.1 的行情指纹校验），改全量重跑后
+#: 走不通（见 docs/archive/strategy-tracking-plan.md §2.1 的行情指纹校验），改全量重跑后
 #: 这个字段就没用了——重算所需的全部信息就是 request_json 本身。
 _STRATEGY_COLUMNS = (
     "strategy_id, name, note, source_history_id, created_at, updated_at, "

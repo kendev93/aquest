@@ -9,7 +9,7 @@
   `mode / ruleMode / selectedSignals / conditions / combineMode / minimumMatches /
   universe / universeFile / instrumentTypes / boards / workers / period / formulaText /
   formulaParameters`。其余（`errors / loading / job / results / showAdvanced` …）是纯 UI 状态，不存。
-- 页面**没有**频率 / 分组 / 排序 / 分页（backlog 原文照抄 参照产品，与本项目现状不符）——
+- 页面**没有**频率 / 分组 / 排序 / 分页（backlog 原文照抄 同类产品，与本项目现状不符）——
   周期只有一个 `period='daily'` 选项。方案里存它，但不为不存在的字段预留。
 - 已有一个半成品：**「指标组合」存在浏览器 localStorage**（`utils/formulaScreen.ts`
   的 `loadSavedConditionSets` / `saveConditionSet`）。它只存规则部分，不含标的池 / 板块 /

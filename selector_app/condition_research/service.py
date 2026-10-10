@@ -627,7 +627,7 @@ class ConditionResearchService:
 
         挖掘只在训练段做一次，所以各窗用的是同一批条件——这才谈得上"同一个条件
         在几个窗口里的表现"。真 walk-forward（每窗重挖）要等能判定跨窗条件是否
-        同义之后再说，见 docs/rolling-validation-plan.md。
+        同义之后再说，见 docs/archive/rolling-validation-plan.md。
         """
 
         per_window_candidates: list[dict[str, list[Mapping[str, object]]]] = [

@@ -3,7 +3,7 @@
 为什么只用它做目录、而且必须关进子进程：
 
 - 东方财富的 ``clist`` 目录接口已被针对性封禁（实测见
-  ``docs/datasource-survey-2026-09-20.md`` 第二节），标的发现这一步断供；
+  ``docs/archive/datasource-survey-2026-09-20.md`` 第二节），标的发现这一步断供；
   baostock 的 ``query_all_stock`` 恰好补上这个缺口，且 ``query_all_stock(day=)``
   返回的是**时点成分**，含已退市标的，没有幸存者偏差。
 - baostock 的 ``SocketUtil`` 是**单例**，socket 挂在全局 ``context.default_socket``，

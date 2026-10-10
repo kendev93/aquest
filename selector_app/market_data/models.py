@@ -18,7 +18,7 @@ DataSource = Literal["local", "online"]
 # accounting and catalog provenance. They are not accepted as
 # ``MarketSyncConfig.provider`` — the online sync channel is still configured as a
 # whole and picks among these upstreams internally (see
-# docs/datasource-survey-2026-09-20.md section VII).
+# docs/archive/datasource-survey-2026-09-20.md section VII).
 MarketDataProvider = Literal["eastmoney", "tdx", "tencent", "baostock"]
 ResolvedMarketDataProvider = Literal["eastmoney", "tdx", "tencent", "baostock", "mixed"]
 BarStatus = Literal["completed", "provisional"]

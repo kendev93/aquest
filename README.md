@@ -129,7 +129,7 @@ docker compose build
 
 ## 行情配置
 
-行情按用途分两层取源（选型实测见 `docs/datasource-survey-2026-09-20.md`）：
+行情按用途分两层取源（选型实测见 `docs/archive/datasource-survey-2026-09-20.md`）：
 
 - **日线**：腾讯日 K 为主源，东方财富作为容错备用。两者都免费、无需密钥。
 - **证券目录**：baostock 的 `query_all_stock`（可选依赖，见下），东方财富目录接口兜底。

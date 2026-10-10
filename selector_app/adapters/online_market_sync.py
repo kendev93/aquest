@@ -1400,7 +1400,7 @@ class OnlineMarketSync:
         East Money's quote-list endpoint (``clist``) is the part that got blocked,
         so the catalog is no longer a single-provider concern: baostock answers
         the whole SH/SZ universe in one call and leads, East Money stays as the
-        fallback.  See docs/datasource-survey-2026-09-20.md section VII.
+        fallback.  See docs/archive/datasource-survey-2026-09-20.md section VII.
         """
 
         _check_cancelled(abort_check)
@@ -1793,7 +1793,7 @@ class OnlineMarketSync:
         date_start = start_date.strftime("%Y%m%d")
         date_end = end_date.strftime("%Y%m%d")
         # Tencent leads: East Money's day-kline endpoint is only intermittently
-        # reachable (measured 2026-09-20, see docs/datasource-survey-2026-09-20.md
+        # reachable (measured 2026-09-20, see docs/archive/datasource-survey-2026-09-20.md
         # section II) while Tencent's stayed up across every probe and carries
         # `amount` plus full ETF history.  East Money stays as the fallback so a
         # Tencent outage does not take the channel down entirely.

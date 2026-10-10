@@ -30,7 +30,7 @@
 
 - 写入是全量 `dict(result)`（`store_history.py:1043`），被裁剪的只有 `summary_json`——
   曲线**不在**摘要里，必须从 `read_backtest_history` 的完整 result 取。
-- `single_stock` 已无写入方（`docs/architecture.md:53`），只可能是存量，只读兼容。
+- `single_stock` 已无写入方（`../architecture.md:53`），只可能是存量，只读兼容。
 - 前端 `BacktestHistoryType` 漏了 `factor_test`，本轮补上。
 
 ---

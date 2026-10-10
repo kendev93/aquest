@@ -27,7 +27,7 @@ dependencies = [
 
 [project.optional-dependencies]
 # baostock 只用于「全市场证券目录 + 交易日历」：东财 clist 被封后这是唯一稳定
-# 的全市场标的发现通道（见 docs/datasource-survey-2026-09-20.md）。它是可选依赖，
+# 的全市场标的发现通道（见 docs/archive/datasource-survey-2026-09-20.md）。它是可选依赖，
 # 没装时目录自动回退到东财，日线主源（腾讯）不受影响。
 # 容器镜像不走这里：requirements.txt 已包含 baostock，Dockerfile 只装清单、不装
 # 本包（`pip install .` 会触发 PEP 517 构建隔离去拉 hatchling，白白多一个联网点）。
