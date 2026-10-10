@@ -9,10 +9,13 @@
 
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import pandas as pd
 import pytest
 
+from selector_app.jit import fast_sim_stats
 from selector_app.market_data.adjustment import CorporateAction
 from selector_app.portfolio_backtest import fast_sim
 from selector_app.portfolio_backtest.context import SortedDateIndex, _StockSeries
@@ -132,12 +135,26 @@ def run_sim(
     ranked_index = (
         service._build_ranked_candidate_index(contexts, dates, config) if ranked else None
     )
-    if pure_kernel:
-        # 内核未包装的纯 Python 版本：验证移植逻辑本身，不依赖 numba。
-        original = fast_sim._PORTFOLIO_KERNEL
-        fast_sim._PORTFOLIO_KERNEL = fast_sim._portfolio_kernel_impl
-        try:
-            return service._simulate(
+    fast_sim_stats(reset=True)
+    try:
+        if pure_kernel:
+            # 内核未包装的纯 Python 版本：验证移植逻辑本身，不依赖 numba。
+            original = fast_sim._PORTFOLIO_KERNEL
+            fast_sim._PORTFOLIO_KERNEL = fast_sim._portfolio_kernel_impl
+            try:
+                result = service._simulate(
+                    contexts,
+                    dates,
+                    config,
+                    None,
+                    include_details=False,
+                    data_fingerprint="test",
+                    ranked_candidate_index=ranked_index,
+                )
+            finally:
+                fast_sim._PORTFOLIO_KERNEL = original
+        else:
+            result = service._simulate(
                 contexts,
                 dates,
                 config,
@@ -146,17 +163,14 @@ def run_sim(
                 data_fingerprint="test",
                 ranked_candidate_index=ranked_index,
             )
-        finally:
-            fast_sim._PORTFOLIO_KERNEL = original
-    return service._simulate(
-        contexts,
-        dates,
-        config,
-        None,
-        include_details=False,
-        data_fingerprint="test",
-        ranked_candidate_index=ranked_index,
-    )
+    finally:
+        stats = fast_sim_stats(reset=True)
+    # 内核回退时产出的是原实现的结果，对拍照样「通过」—— 所以必须显式断言内核真的
+    # 跑了。否则内核静默失效（曾经因为除权事件排序键取错属性，生产环境 100% 回退）
+    # 在这套测试里完全看不出来。
+    if os.environ.get("SELECTOR_FAST_SIM", "1") != "0":
+        assert stats.get("portfolio:hit") == 1, f"内核未命中（静默回退）：{stats}"
+    return result
 
 
 def assert_same(baseline: dict[str, object], candidate: dict[str, object]) -> None:

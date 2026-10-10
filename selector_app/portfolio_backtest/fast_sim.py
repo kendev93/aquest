@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 
 from selector_app.backtest.profiles import profile_from_config
-from selector_app.jit import NUMBA_AVAILABLE, fast_sim_enabled, njit
+from selector_app.jit import NUMBA_AVAILABLE, fast_sim_enabled, njit, record_outcome
 from selector_app.portfolio_backtest.checkpoint import SimulationCheckpoint
 from selector_app.portfolio_backtest.risk import _risk_trigger_label
 from selector_app.portfolio_backtest.simulation_models import (
@@ -1124,7 +1124,8 @@ def _build_inputs(
     action_keys: list[list[str]] = []
     for s, context in enumerate(contexts):
         actions = service._corporate_actions_for_symbol(context)
-        ordered = sorted(actions, key=_action_date_int)
+        # 排序键必须是 ex_date（原实现 simulation.py 同款），传整个事件会取不到 .year。
+        ordered = sorted(actions, key=lambda item: _action_date_int(item.ex_date))
         keys: list[str] = []
         seen: set[str] = set()
         for action in ordered:
@@ -1216,31 +1217,43 @@ def try_fast_portfolio_simulation(
     """在内核支持范围内用 Numba 跑 ``_simulate``；否则返回 None 走原实现。"""
 
     global _WARNED
-    if not fast_sim_enabled() or not NUMBA_AVAILABLE:
+    if not fast_sim_enabled():
+        record_outcome("portfolio", "disabled")
+        return None
+    if not NUMBA_AVAILABLE:
+        record_outcome("portfolio", "no_numba")
         return None
     n_symbols = len(contexts)
     n_days = len(dates)
     if n_symbols == 0 or n_days == 0:
+        record_outcome("portfolio", "empty")
         return None
     if config.max_positions < 1:
+        record_outcome("portfolio", "no_positions")
         return None
     if n_symbols * n_days > _MAX_CELLS:
+        # 最容易被忽略的静默回退：全市场标的多、窗口一长，一次模拟就顶到上限。
+        record_outcome("portfolio", "too_many_cells")
         return None
     if n_days * (2 * config.max_positions + 1) + 8 > _MAX_TRADE_ROWS:
+        record_outcome("portfolio", "too_many_trade_rows")
         return None
     try:
         built = _build_inputs(
             service, contexts, dates, config, data_fingerprint, ranked_candidate_index
         )
         if built is None:
+            record_outcome("portfolio", "unsupported_inputs")
             return None
         inputs, action_keys, act_offsets = built
         outputs = _portfolio_kernel()(*inputs)
     except Exception:  # noqa: BLE001 - 内核异常一律退回 Python 实现
+        record_outcome("portfolio", "kernel_error")
         if not _WARNED:
             _WARNED = True
             _LOGGER.warning("组合回测内核执行失败，回退到 Python 实现", exc_info=True)
         return None
+    record_outcome("portfolio", "hit")
     return _build_result(
         service,
         contexts,

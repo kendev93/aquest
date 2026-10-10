@@ -257,8 +257,11 @@ def fast_signal_loop_outputs(
 
     from selector_app.backtest.engine import _trade  # 局部导入避免循环依赖
 
+    from selector_app.jit import record_outcome
+
     n_bars = int(opens.shape[0])
     if n_bars == 0 or int(buys.shape[0]) != n_bars or int(sells.shape[0]) != n_bars:
+        record_outcome("signal", "length_mismatch")
         return None
     (
         cash,
@@ -358,6 +361,7 @@ def fast_signal_loop_outputs(
                     "unrealized_pnl": (float(closes[i]) - float(avg_arr[i])) * float(pos_arr[i]),
                 }
             )
+    record_outcome("signal", "hit")
     return (
         float(cash),
         float(position),
