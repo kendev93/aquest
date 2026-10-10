@@ -25,6 +25,15 @@ interface StrategyPoolJobRequest {
   market?: 'SH' | 'SZ'
   code?: string
   objective?: StrategyPoolObjective
+  boards?: StrategyPoolBoard[]
+  exclude_st?: boolean
+}
+
+export type StrategyPoolBoard = 'main' | 'chinext' | 'star'
+
+export interface StrategyPoolResearchSettings {
+  boards: StrategyPoolBoard[]
+  exclude_st: boolean
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
@@ -79,6 +88,23 @@ export async function cancelStrategyPoolJob(jobId: string): Promise<{ cancelled:
 export async function fetchStrategyPoolJobs(): Promise<StrategyPoolJobSummary[]> {
   const response = await request<{ data: { items: StrategyPoolJobSummary[] } }>(`${API_BASE}/jobs`)
   return response.data.items
+}
+
+export async function fetchResearchSettings(): Promise<StrategyPoolResearchSettings> {
+  const response = await request<{ data: StrategyPoolResearchSettings }>(
+    `${API_BASE}/research-settings`,
+  )
+  return response.data
+}
+
+export async function saveResearchSettings(
+  payload: StrategyPoolResearchSettings,
+): Promise<StrategyPoolResearchSettings> {
+  const response = await request<{ data: StrategyPoolResearchSettings }>(
+    `${API_BASE}/research-settings`,
+    { method: 'PUT', body: JSON.stringify(payload) },
+  )
+  return response.data
 }
 
 export async function saveStrategyPoolOverride(

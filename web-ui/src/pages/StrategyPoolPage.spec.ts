@@ -11,9 +11,11 @@ vi.mock('../api/strategyPool', () => ({
   cancelStrategyPoolJob: vi.fn(),
   clearStrategyPoolOverride: vi.fn(),
   createStrategyPoolJob: vi.fn(),
+  fetchResearchSettings: vi.fn(),
   fetchStrategyPoolEntries: vi.fn(),
   fetchStrategyPoolJobs: vi.fn(),
   getStrategyPoolJob: vi.fn(),
+  saveResearchSettings: vi.fn(),
   saveStrategyPoolOverride: vi.fn(),
 }))
 
@@ -123,6 +125,11 @@ describe('StrategyPoolPage', () => {
       last_online_sync_at: '2026-10-01T18:00:00+08:00',
     })
     vi.mocked(api.createStrategyPoolJob).mockResolvedValue({ job_id: 'signal-1', status: 'queued' })
+    vi.mocked(api.fetchResearchSettings).mockResolvedValue({
+      boards: ['main', 'chinext', 'star'],
+      exclude_st: false,
+    })
+    vi.mocked(api.saveResearchSettings).mockImplementation(async (payload) => payload)
     vi.mocked(api.getStrategyPoolJob).mockResolvedValue({
       job_id: 'signal-1',
       status: 'completed',
@@ -1033,8 +1040,72 @@ describe('StrategyPoolPage', () => {
       await flushPromises()
       expect(api.createStrategyPoolJob).toHaveBeenLastCalledWith({
         mode: 'full', rebuild: true, risk_trials: 3000, max_hold_days: 20,
+        boards: ['main', 'chinext', 'star'], exclude_st: false,
       })
       expect(wrapper.find('[data-testid="pool-row-600000"]').exists()).toBe(false)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('renders default universe checkboxes and persists toggles immediately', async () => {
+    window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
+    const wrapper = mount(StrategyPoolPage)
+    try {
+      await flushPromises()
+      // 默认：三板块全选、不过滤 ST——与未保存偏好时的旧行为一致。
+      expect((wrapper.get('[data-testid="pool-board-main"]').element as HTMLInputElement).checked).toBe(true)
+      expect((wrapper.get('[data-testid="pool-board-chinext"]').element as HTMLInputElement).checked).toBe(true)
+      expect((wrapper.get('[data-testid="pool-board-star"]').element as HTMLInputElement).checked).toBe(true)
+      expect((wrapper.get('[data-testid="pool-exclude-st"]').element as HTMLInputElement).checked).toBe(false)
+
+      await wrapper.get('[data-testid="pool-board-star"]').setValue(false)
+      await flushPromises()
+      expect(api.saveResearchSettings).toHaveBeenLastCalledWith({
+        boards: ['main', 'chinext'], exclude_st: false,
+      })
+
+      await wrapper.get('[data-testid="pool-exclude-st"]').setValue(true)
+      await flushPromises()
+      expect(api.saveResearchSettings).toHaveBeenLastCalledWith({
+        boards: ['main', 'chinext'], exclude_st: true,
+      })
+
+      // 取消 main 后还剩创业板，是合法范围，照常保存；再取消创业板就会被拦下。
+      await wrapper.get('[data-testid="pool-board-main"]').setValue(false)
+      await flushPromises()
+      expect(api.saveResearchSettings).toHaveBeenCalledTimes(3)
+      expect(api.saveResearchSettings).toHaveBeenLastCalledWith({
+        boards: ['chinext'], exclude_st: true,
+      })
+
+      await wrapper.get('[data-testid="pool-board-chinext"]').setValue(false)
+      await flushPromises()
+      expect(api.saveResearchSettings).toHaveBeenCalledTimes(3)
+      expect(wrapper.text()).toContain('至少要保留一个板块')
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('loads saved universe preferences and submits them with full research', async () => {
+    window.localStorage.setItem('indicator-lab.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchResearchSettings).mockResolvedValue({
+      boards: ['main', 'chinext'], exclude_st: true,
+    })
+    const wrapper = mount(StrategyPoolPage)
+    try {
+      await flushPromises()
+      expect((wrapper.get('[data-testid="pool-board-main"]').element as HTMLInputElement).checked).toBe(true)
+      expect((wrapper.get('[data-testid="pool-board-chinext"]').element as HTMLInputElement).checked).toBe(true)
+      expect((wrapper.get('[data-testid="pool-board-star"]').element as HTMLInputElement).checked).toBe(false)
+      expect((wrapper.get('[data-testid="pool-exclude-st"]').element as HTMLInputElement).checked).toBe(true)
+
+      await wrapper.get('[data-testid="pool-start-full"]').trigger('click')
+      await flushPromises()
+      expect(api.createStrategyPoolJob).toHaveBeenLastCalledWith(expect.objectContaining({
+        mode: 'full', boards: ['main', 'chinext'], exclude_st: true,
+      }))
     } finally {
       wrapper.unmount()
     }

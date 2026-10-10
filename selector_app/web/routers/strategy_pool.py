@@ -38,6 +38,10 @@ class PoolJobRequest(BaseModel):
     atr_window: int = Field(default=14, ge=1, le=250)
     min_bars: int = Field(default=5, ge=1, le=1_000)
     horizon: int = Field(default=10, ge=1, le=250)
+    #: 全市场任务的研究范围。None = 不限板块（兼容历史任务）；单股重跑忽略。
+    #: 只决定"哪些票参与研究"，不进入研究口径指纹，改勾选不会触发存量重跑。
+    boards: list[Literal["main", "chinext", "star"]] | None = Field(default=None, min_length=1)
+    exclude_st: bool = False
 
     @model_validator(mode="after")
     def validate_mode(self) -> PoolJobRequest:
@@ -150,6 +154,51 @@ def list_strategy_pool_entries(
         item["tracking_as_of_date"] = tracking["summary"].get("as_of_date") if tracking else None
 
     return {"data": {"objective": selected, "items": items}}
+
+
+DEFAULT_RESEARCH_BOARDS: tuple[str, ...] = ("main", "chinext", "star")
+VALID_RESEARCH_BOARDS = frozenset(DEFAULT_RESEARCH_BOARDS)
+
+
+class ResearchSettingsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    boards: list[Literal["main", "chinext", "star"]] = Field(min_length=1)
+    exclude_st: bool = False
+
+
+@router.get("/research-settings")
+def get_research_settings(request: Request) -> dict[str, object]:
+    """研究范围偏好；从未保存过时返回默认（三个板块全选、不过滤 ST）。"""
+
+    try:
+        saved = _pool_store(request).read_research_settings()
+    except (MarketDataStoreError, OSError) as exc:
+        raise HTTPException(status_code=503, detail="研究范围偏好暂时无法读取") from exc
+    if saved is None:
+        return {"data": {"boards": list(DEFAULT_RESEARCH_BOARDS), "exclude_st": False}}
+    raw_boards = saved["boards"]
+    boards = [
+        str(item)
+        for item in (raw_boards if isinstance(raw_boards, list) else [])
+        if str(item) in VALID_RESEARCH_BOARDS
+    ]
+    if not boards:
+        return {"data": {"boards": list(DEFAULT_RESEARCH_BOARDS), "exclude_st": False}}
+    return {"data": {"boards": boards, "exclude_st": bool(saved["exclude_st"])}}
+
+
+@router.put("/research-settings")
+def update_research_settings(
+    payload: ResearchSettingsRequest, request: Request
+) -> dict[str, object]:
+    try:
+        saved = _pool_store(request).save_research_settings(
+            boards=payload.boards, exclude_st=payload.exclude_st
+        )
+    except (MarketDataStoreError, OSError) as exc:
+        raise HTTPException(status_code=503, detail="研究范围偏好暂时无法保存") from exc
+    return {"data": {"boards": saved["boards"], "exclude_st": saved["exclude_st"]}}
 
 
 @router.post("/jobs", status_code=status.HTTP_202_ACCEPTED)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Literal, cast
@@ -16,6 +16,9 @@ from selector_app.market_data.store_base import _WRITE_LOCK
 from .tracking_store import PoolTrackingStore
 
 Objective = Literal["annual_return", "sharpe"]
+
+#: 研究范围偏好只有一行，固定主键。
+RESEARCH_SETTINGS_ROW_ID = 1
 
 
 class DuckDbStrategyPoolStore:
@@ -31,6 +34,61 @@ class DuckDbStrategyPoolStore:
             connection.execute(
                 "ALTER TABLE strategy_pool_entries ADD COLUMN IF NOT EXISTS benchmark_json VARCHAR"
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS strategy_pool_research_settings (
+                    id INTEGER NOT NULL,
+                    boards_json VARCHAR NOT NULL,
+                    exclude_st BOOLEAN NOT NULL DEFAULT FALSE,
+                    updated_at TIMESTAMP NOT NULL,
+                    PRIMARY KEY (id)
+                )
+                """
+            )
+
+    def read_research_settings(self) -> dict[str, object] | None:
+        """读取保存的研究范围偏好；没有保存过或内容损坏时返回 None。"""
+
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT boards_json, exclude_st, updated_at
+                FROM strategy_pool_research_settings WHERE id = ?
+                """,
+                [RESEARCH_SETTINGS_ROW_ID],
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            boards = json.loads(str(row[0]))
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(boards, list) or not boards:
+            return None
+        return {"boards": boards, "exclude_st": bool(row[1])}
+
+    def save_research_settings(
+        self, *, boards: Sequence[str], exclude_st: bool
+    ) -> dict[str, object]:
+        """单行 upsert 保存研究范围偏好，返回规范化后的值。"""
+
+        normalized = sorted(set(boards))
+        boards_json = json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        with _WRITE_LOCK, self._transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO strategy_pool_research_settings
+                    (id, boards_json, exclude_st, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (id) DO UPDATE SET
+                    boards_json = excluded.boards_json,
+                    exclude_st = excluded.exclude_st,
+                    updated_at = excluded.updated_at
+                """,
+                [RESEARCH_SETTINGS_ROW_ID, boards_json, bool(exclude_st), now],
+            )
+        return {"boards": normalized, "exclude_st": bool(exclude_st)}
 
     def get(self, market: str, code: str) -> dict[str, object] | None:
         with self._connection() as connection:

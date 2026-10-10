@@ -624,6 +624,21 @@ class _DuckDbStoreBase:
                 )
                 """
             )
+            # 全市场策略池的研究范围偏好（板块勾选 + 是否过滤 ST）。单行键值，
+            # 只是"下次提交任务时前端预填什么"的持久化，不参与任何回测口径——
+            # 所以它绝不能进入 config_fingerprint，否则改一次勾选就会让全部
+            # 已完成标的失效重跑。
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS strategy_pool_research_settings (
+                    id INTEGER NOT NULL,
+                    boards_json VARCHAR NOT NULL,
+                    exclude_st BOOLEAN NOT NULL DEFAULT FALSE,
+                    updated_at TIMESTAMP NOT NULL,
+                    PRIMARY KEY (id)
+                )
+                """
+            )
             # Additive pool tracking storage; no OHLC rewrite or full database backup.
             from selector_app.strategy_pool.tracking_store import DDL as pool_tracking_ddl
 

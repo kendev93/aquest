@@ -7,9 +7,12 @@ import { fetchStoreStatus } from '../api/marketData'
 import {
   cancelStrategyPoolJob,
   createStrategyPoolJob,
+  fetchResearchSettings,
   fetchStrategyPoolEntries,
   fetchStrategyPoolJobs,
   getStrategyPoolJob,
+  saveResearchSettings,
+  type StrategyPoolBoard,
 } from '../api/strategyPool'
 import { FormulaScreenApiError } from '../api/formulaScreen'
 import type {
@@ -58,6 +61,15 @@ const successMessage = ref('')
 const riskTrials = ref<1_000 | 2_000 | 3_000>(3_000)
 // 最长持仓交易日数（≈ 天数×7/5 的自然日）。20 交易日 ≈ 30 自然日。
 const maxHoldDays = ref<number>(20)
+// 研究范围（板块 + 过滤 ST）：只决定哪些票参与全市场研究，改动即时保存到后端，
+// 下次提交任务自动带上。默认三板块全开、不过滤 ST——与未保存偏好时的行为一致。
+const BOARD_OPTIONS: { id: StrategyPoolBoard; label: string }[] = [
+  { id: 'main', label: '主板' },
+  { id: 'chinext', label: '创业板' },
+  { id: 'star', label: '科创板' },
+]
+const researchBoards = ref<StrategyPoolBoard[]>(['main', 'chinext', 'star'])
+const excludeSt = ref(false)
 const market = ref<'SH' | 'SZ'>('SH')
 const code = ref('')
 const searchQuery = ref('')
@@ -449,9 +461,53 @@ function formatResearchElapsed(startedAt: number | null): string {
     .map((value) => String(value).padStart(2, '0')).join(':')
 }
 
+async function loadResearchSettings(): Promise<void> {
+  try {
+    const settings = await fetchResearchSettings()
+    const boards = settings.boards.filter((id) => BOARD_OPTIONS.some((option) => option.id === id))
+    researchBoards.value = boards.length ? boards : BOARD_OPTIONS.map((option) => option.id)
+    excludeSt.value = settings.exclude_st
+  } catch {
+    // 偏好读不到就用默认值，不打断页面初始化。
+  }
+}
+
+async function persistResearchSettings(): Promise<void> {
+  try {
+    await saveResearchSettings({ boards: [...researchBoards.value], exclude_st: excludeSt.value })
+  } catch (error) {
+    errorMessage.value = apiMessage(error)
+  }
+}
+
+function toggleBoard(id: StrategyPoolBoard): void {
+  const next = researchBoards.value.includes(id)
+    ? researchBoards.value.filter((item) => item !== id)
+    : [...researchBoards.value, id]
+  if (!next.length) {
+    errorMessage.value = '至少要保留一个板块。'
+    return
+  }
+  errorMessage.value = ''
+  researchBoards.value = next
+  void persistResearchSettings()
+}
+
+function toggleExcludeSt(): void {
+  excludeSt.value = !excludeSt.value
+  void persistResearchSettings()
+}
+
 async function startFullResearch(rebuild = true): Promise<void> {
   if (isBusy.value) return
-  await startTask({ mode: 'full', rebuild, risk_trials: riskTrials.value, max_hold_days: maxHoldDays.value || null }, 'full')
+  await startTask({
+    mode: 'full',
+    rebuild,
+    risk_trials: riskTrials.value,
+    max_hold_days: maxHoldDays.value || null,
+    boards: [...researchBoards.value],
+    exclude_st: excludeSt.value,
+  }, 'full')
 }
 
 async function startSingleRerun(): Promise<void> {
@@ -511,7 +567,7 @@ async function startSignalScan(target?: { market: 'SH' | 'SZ'; code: string }, a
 }
 
 async function startTask(
-  payload: { mode: StrategyPoolMode; automatic?: boolean; rebuild?: boolean; risk_trials?: 1_000 | 2_000 | 3_000; max_hold_days?: number | null; market?: 'SH' | 'SZ'; code?: string; objective?: StrategyPoolObjective },
+  payload: { mode: StrategyPoolMode; automatic?: boolean; rebuild?: boolean; risk_trials?: 1_000 | 2_000 | 3_000; max_hold_days?: number | null; market?: 'SH' | 'SZ'; code?: string; objective?: StrategyPoolObjective; boards?: StrategyPoolBoard[]; exclude_st?: boolean },
   intent: StrategyPoolMode,
 ): Promise<void> {
   errorMessage.value = ''
@@ -900,6 +956,7 @@ function apiMessage(error: unknown): string {
 }
 
 async function initialize(): Promise<void> {
+  void loadResearchSettings()
   const params = new URLSearchParams(window.location.search)
   searchQuery.value = params.get('search') ?? ''
   page.value = Math.max(1, Number(params.get('page') ?? 1))
@@ -1007,6 +1064,28 @@ onUnmounted(() => {
             </label>
           </div>
           <div class="pool-actions">
+            <div class="board-filter" data-testid="pool-board-filter">
+              <label v-for="option in BOARD_OPTIONS" :key="option.id" class="board-option">
+                <input
+                  type="checkbox"
+                  :checked="researchBoards.includes(option.id)"
+                  :disabled="isBusy"
+                  :data-testid="`pool-board-${option.id}`"
+                  @change="toggleBoard(option.id)"
+                >
+                {{ option.label }}
+              </label>
+              <label class="board-option">
+                <input
+                  type="checkbox"
+                  :checked="excludeSt"
+                  :disabled="isBusy"
+                  data-testid="pool-exclude-st"
+                  @change="toggleExcludeSt"
+                >
+                过滤ST
+              </label>
+            </div>
             <label>每组规则最多尝试次数
               <select v-model.number="riskTrials" :disabled="isBusy" data-testid="pool-risk-trials">
                 <option :value="1000">1000 组</option>
@@ -1216,6 +1295,9 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .objective-switch, .pool-actions label, .pool-editor label { display: grid; gap: 7px; color: #9baac0; font-size: .9rem; }
 .pool-actions select, .pool-actions input, .objective-switch select, .pool-editor select, .pool-editor textarea { min-height: 42px; border: 1px solid #354b69; border-radius: 7px; padding: 9px 11px; background: #111c30; color: #edf2fb; font: inherit; }
 .pool-actions .ticker-input input { width: 140px; }
+.board-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 8px 12px; border: 1px solid #354b69; border-radius: 7px; background: #111c30; }
+.board-option { display: flex; align-items: center; gap: 5px; color: #9baac0; font-size: .9rem; }
+.board-option input { accent-color: #18c467; }
 .pool-progress { margin-top: 22px; padding: 16px; border: 1px solid #293c58; }
 .progress-track { height: 8px; overflow: hidden; margin: 12px 0; background: #17243a; }
 .progress-track span { display: block; height: 100%; background: #18c467; transition: width .2s ease; }

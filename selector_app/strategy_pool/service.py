@@ -31,6 +31,7 @@ from selector_app.individual_research.service import (
 from selector_app.market_data.adapter import BatchMarketDataAdapter
 from selector_app.market_data.adjustment import CorporateAction, mark_adjusted
 from selector_app.market_data.models import StockRef
+from selector_app.market_data.risk_warning import is_risk_warning_symbol
 from selector_app.market_data.store import DuckDbMarketDataStore
 from selector_app.market_data.store_base import RESEARCH_START
 from selector_app.portfolio_backtest.benchmark import curve_performance
@@ -956,8 +957,11 @@ class MarketStrategyPoolService:
             )
         single_symbol = _symbol_from_payload(payload) if mode == "single" else None
         risk_trials = _trial_count(payload.get("risk_trials", 3_000))
-        refs = self._list_refs(single_symbol)
+        research_boards, exclude_st = self._research_universe(payload, single_symbol)
+        refs = self._list_refs(single_symbol, boards=research_boards, exclude_st=exclude_st)
         if not refs:
+            if single_symbol is None and (research_boards is not None or exclude_st):
+                raise ValueError("研究范围过滤后没有可研究的标的，请放宽板块勾选或 ST 过滤")
             raise ValueError("本地行情没有可研究的 A 股日线")
         calendar = self._common_calendar()
         if not calendar:
@@ -1459,7 +1463,13 @@ class MarketStrategyPoolService:
             "reason": "；".join(failures[:3]) if failures else None,
         }
 
-    def _list_refs(self, single_symbol: tuple[str, str] | None) -> list[StockRef]:
+    def _list_refs(
+        self,
+        single_symbol: tuple[str, str] | None,
+        *,
+        boards: Sequence[str] | None = None,
+        exclude_st: bool = False,
+    ) -> list[StockRef]:
         refs = self._adapter.list_stock_refs(
             "",
             "all",
@@ -1477,11 +1487,35 @@ class MarketStrategyPoolService:
                 ).fetchall()
             }
         refs = [ref for ref in refs if (ref.market, ref.code) in completed_symbols]
+        # 板块与 ST 过滤只决定"谁参与全市场研究"，不改变单票的研究口径，所以
+        # 这两个参数刻意不进入 config_fingerprint——否则用户改一次勾选，全部
+        # 已完成标的都会被判定为口径变化而重跑。
+        if boards is not None:
+            allowed = {str(board) for board in boards}
+            refs = [ref for ref in refs if _symbol_board(ref.market, ref.code) in allowed]
+        if exclude_st:
+            refs = [ref for ref in refs if not is_risk_warning_symbol(ref)]
         if single_symbol is not None:
             refs = [ref for ref in refs if (ref.market, ref.code) == single_symbol]
             if not refs:
                 raise ValueError("本地行情找不到这只 A 股")
         return sorted(refs, key=lambda ref: (ref.market, ref.code))
+
+    def _research_universe(
+        self,
+        payload: Mapping[str, object],
+        single_symbol: tuple[str, str] | None,
+    ) -> tuple[Sequence[str] | None, bool]:
+        """解析任务里的研究范围（板块 + ST 过滤）。
+
+        - ``boards`` 缺省 = 不限板块（旧行为，兼容已排队的历史任务）；
+        - 单股重跑是用户指名的请求，板块/ST 过滤不套在它头上；
+        - 非法板块值直接报错，避免拼错 silently 扩大研究范围。
+        """
+
+        boards = _boards_from_payload(payload) if single_symbol is None else None
+        exclude_st = payload.get("exclude_st") is True and single_symbol is None
+        return boards, exclude_st
 
     def _scan_signals(
         self,
@@ -2161,6 +2195,37 @@ def _symbol_from_payload(payload: Mapping[str, object]) -> tuple[str, str]:
     if market not in {"SH", "SZ"} or len(code) != 6 or not code.isdigit():
         raise ValueError("单股重跑证券代码无效")
     return market, code
+
+
+#: 研究范围可选板块。本地行情库只有 SH/SZ 两市的 A 股（没有北交所），
+#: 所以三个板块穷尽了全部标的。
+POOL_BOARDS: tuple[str, ...] = ("main", "chinext", "star")
+
+
+def _symbol_board(market: str, code: str) -> str:
+    """按代码前缀归类板块；不属于创业板/科创板的都算主板。"""
+
+    prefix = code[:3]
+    if market == "SH" and prefix in {"688", "689"}:
+        return "star"
+    if market == "SZ" and prefix in {"300", "301", "302"}:
+        return "chinext"
+    return "main"
+
+
+def _boards_from_payload(payload: Mapping[str, object]) -> Sequence[str] | None:
+    raw = payload.get("boards")
+    if raw is None:
+        return None
+    if not isinstance(raw, Sequence) or isinstance(raw, (str, bytes)):
+        raise ValueError("研究范围板块必须是 main/chinext/star 的列表")
+    boards = [str(item) for item in raw]
+    invalid = sorted(set(boards) - set(POOL_BOARDS))
+    if invalid:
+        raise ValueError(f"研究范围板块无效: {', '.join(invalid)}")
+    if not boards:
+        raise ValueError("研究范围至少要保留一个板块")
+    return boards
 
 
 def _trial_count(value: object) -> int:
