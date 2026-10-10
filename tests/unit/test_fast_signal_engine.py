@@ -75,9 +75,7 @@ _CONFIGS = [
     SignalBacktestConfig(initial_cash=37_000.0),
 ]
 
-_CONFIG_PARAMS = [
-    pytest.param(config, id=f"cfg{index}") for index, config in enumerate(_CONFIGS)
-]
+_CONFIG_PARAMS = [pytest.param(config, id=f"cfg{index}") for index, config in enumerate(_CONFIGS)]
 
 _SCENARIO_NAMES = sorted(_mask_scenarios(60, 0))
 
@@ -138,9 +136,7 @@ def test_fast_kernel_matches_original_loop(
 
     # 内核未包装的纯 Python 版本也要对拍：这条不依赖 numba，验证移植逻辑本身。
     monkeypatch.setattr(fast_engine, "_SIGNAL_KERNEL", fast_engine._signal_backtest_kernel_impl)
-    pure = run_signal_backtest(
-        frame, buys, sells, config, market="SH", code="600000", name="对拍"
-    )
+    pure = run_signal_backtest(frame, buys, sells, config, market="SH", code="600000", name="对拍")
     _assert_results_equal(baseline, pure, summary_only=False)
 
 
