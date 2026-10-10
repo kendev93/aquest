@@ -178,6 +178,27 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
         ranked_candidate_index: Mapping[int, np.ndarray] | None = None,
         abort_check: Callable[[], bool] | None = None,
     ) -> dict[str, object]:
+        # numba 内核路径：只接发现寻优的形态（指标汇总、无检查点/fitness/中止回调），
+        # 与下面的原状态机逐行等价，由差分测试保证；不支持或异常时退回原实现。
+        if (
+            not include_details
+            and checkpoint is None
+            and fitness_filter is None
+            and abort_check is None
+        ):
+            from selector_app.portfolio_backtest.fast_sim import try_fast_portfolio_simulation
+
+            fast_result = try_fast_portfolio_simulation(
+                self,
+                contexts,
+                dates,
+                config,
+                data_fingerprint=data_fingerprint,
+                ranked_candidate_index=ranked_candidate_index,
+            )
+            if fast_result is not None:
+                return fast_result
+
         by_symbol = {context.symbol: context for context in contexts}
         start_index = 0
         if checkpoint is None:

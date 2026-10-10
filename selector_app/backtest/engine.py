@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, replace
 from datetime import date
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -169,7 +170,43 @@ def run_signal_backtest(
     opens = prepared["open"].to_numpy(dtype=float, copy=False)
     closes = prepared["close"].to_numpy(dtype=float, copy=False)
 
-    for index in range(len(prepared)):
+    # numba 内核路径：与下面的原循环逐行等价（同运算顺序），由差分测试保证；
+    # SELECTOR_FAST_SIM=0 或 numba 缺失时走原循环。
+    fast_outputs: (
+        tuple[
+            float,
+            float,
+            float,
+            list[dict[str, Any]],
+            list[dict[str, Any]],
+            list[dict[str, Any]],
+            list[float],
+        ]
+        | None
+    ) = None
+    if os.environ.get("SELECTOR_FAST_SIM", "1") != "0":
+        from selector_app.backtest.fast_engine import fast_signal_loop_outputs
+
+        fast_outputs = fast_signal_loop_outputs(
+            opens,
+            closes,
+            buys,
+            sells,
+            config,
+            profile,
+            dates,
+            market=market,
+            code=code,
+            name=name,
+            summary_only=summary_only,
+        )
+    if fast_outputs is not None:
+        cash, position, average_cost, trades, equity, positions, totals = fast_outputs
+
+    # fast 路径的输出就是完整记账；原循环只在回退时执行（range(0) 直接跳过），
+    # 保持原实现逐行不动，作为对拍的真值来源。
+    loop_range = range(len(prepared)) if fast_outputs is None else range(0)
+    for index in loop_range:
         current_date = pd.Timestamp(dates[index])
         if pending is not None:
             direction, signal_index = pending
