@@ -1293,11 +1293,12 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .toolbar-heading, .section-heading, .progress-heading, .progress-detail { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
 .toolbar-heading { margin-bottom: 18px; }
 .objective-switch, .pool-actions label, .pool-editor label { display: grid; gap: 7px; color: #9baac0; font-size: .9rem; }
-.pool-actions select, .pool-actions input, .objective-switch select, .pool-editor select, .pool-editor textarea { min-height: 42px; border: 1px solid #354b69; border-radius: 7px; padding: 9px 11px; background: #111c30; color: #edf2fb; font: inherit; }
+.pool-actions select, .pool-actions input:not([type="checkbox"]), .objective-switch select, .pool-editor select, .pool-editor textarea { min-height: 42px; border: 1px solid #354b69; border-radius: 7px; padding: 9px 11px; background: #111c30; color: #edf2fb; font: inherit; }
+/* 复选框不吃上面那套输入框规格（min-height/padding 会把它撑成 42px 的方块）。 */
+.board-option input { flex: 0 0 auto; width: 15px; height: 15px; margin: 0; accent-color: #18c467; }
 .pool-actions .ticker-input input { width: 140px; }
 .board-filter { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 8px 12px; border: 1px solid #354b69; border-radius: 7px; background: #111c30; }
 .board-option { display: flex; align-items: center; gap: 5px; color: #9baac0; font-size: .9rem; }
-.board-option input { accent-color: #18c467; }
 .pool-progress { margin-top: 22px; padding: 16px; border: 1px solid #293c58; }
 .progress-track { height: 8px; overflow: hidden; margin: 12px 0; background: #17243a; }
 .progress-track span { display: block; height: 100%; background: #18c467; transition: width .2s ease; }
