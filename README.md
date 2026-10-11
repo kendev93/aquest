@@ -79,14 +79,29 @@ npm run dev
 
 ### Docker Compose
 
-不想在宿主机装 Python 和 Node.js 就用 Docker：
+不想在宿主机装 Python 和 Node.js 就用 Docker。两种方式二选一。
+
+**方式一：用已发布的镜像（推荐）**。镜像由 CI 构建并发布到 GitHub 容器仓库，同时提供 amd64 与 arm64，拉取即可运行，跳过本地构建：
+
+```bash
+export INDICATOR_LAB_IMAGE=ghcr.io/kendev93/indicator-lab:latest
+export INDICATOR_LAB_FRONTEND_IMAGE=ghcr.io/kendev93/indicator-lab-frontend:latest
+docker compose pull
+docker compose up -d --no-build
+```
+
+`--no-build` 表示直接用刚拉下来的镜像，不再从源码构建。把两个变量写进 `.env` 后就不用每次 export，升级时同样执行 `pull` + `up -d` 即可。
+
+**方式二：从源码本地构建**：
 
 ```bash
 export INDICATOR_LAB_IMAGE=indicator-lab:local
 sh scripts/start.sh
 ```
 
-`INDICATOR_LAB_IMAGE` 是本地构建的镜像名，起个自己认得的名字即可，不是去拉别人的镜像；写进 `.env` 后就不用每次 export。脚本默认带 `--build`，改完代码直接跑就会重建镜像。
+`INDICATOR_LAB_IMAGE` 是本地构建的镜像名，起个自己认得的名字即可，不是去拉取别人的镜像；脚本默认带 `--build`，改完代码直接跑就会重建镜像。
+
+启动后在浏览器打开 <http://127.0.0.1:5173/indicator-lab>。
 
 配置项见 [`.env.example`](.env.example)；部署细节、数据目录、备份恢复、行情数据源与通达信导入见 [docs/standalone-deployment.md](docs/standalone-deployment.md)。
 
@@ -97,6 +112,7 @@ sh scripts/start.sh
 | [docs/user-manual.md](docs/user-manual.md) | 16 个页面的用法、口径与边界（自动生成） |
 | [docs/standalone-deployment.md](docs/standalone-deployment.md) | 部署、数据目录、备份恢复、行情源、通达信导入、数据清理 |
 | [docs/architecture.md](docs/architecture.md) | 系统架构、API 清单，以及跨股票可比的指标输出表 |
+| [docs/research-performance-log.md](docs/research-performance-log.md) | 研究管线性能档案：瓶颈定位、实测数据、调参指引与后续方向 |
 | [docs/packaging.md](docs/packaging.md) | 依赖锁定与打包 |
 | [docs/upstream-api-audit.md](docs/upstream-api-audit.md) | 在线行情接口审计 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 开发环境、验证流程、提交规范与贡献授权 |

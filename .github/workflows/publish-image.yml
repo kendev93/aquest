@@ -166,3 +166,58 @@ jobs:
 
       - name: 校验清单
         run: docker buildx imagetools inspect "$REGISTRY/$OWNER/${{ matrix.variant }}:latest"
+
+  # 多架构清单就绪后再生成 Release。写权限只在这个 job 上放开，
+  # 上面的构建任务继续维持 contents: read。
+  # 手动触发没有对应的 tag 与提交对象，因此只在推送 tag 时执行。
+  release:
+    name: 生成 Release
+    runs-on: ubuntu-24.04
+    needs: merge
+    if: github.event_name == 'push'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: 生成发布说明
+        run: |
+          set -eu
+          tag="$REF_NAME"
+          image="$REGISTRY/$OWNER/indicator-lab"
+          frontend="$REGISTRY/$OWNER/indicator-lab-frontend"
+
+          # 首个版本没有可比较的上一个 tag，此时列出该 tag 可达的全部提交。
+          if prev=$(git describe --tags --abbrev=0 "${tag}^" 2>/dev/null); then
+            range="$prev..$tag"
+          else
+            range="$tag"
+          fi
+
+          {
+            printf '容器镜像已发布到 GitHub 容器仓库，同时提供 amd64 与 arm64。\n\n'
+            printf '## 安装运行\n\n'
+            printf '```bash\n'
+            printf 'export INDICATOR_LAB_IMAGE=%s:%s\n' "$image" "$tag"
+            printf 'export INDICATOR_LAB_FRONTEND_IMAGE=%s:%s\n' "$frontend" "$tag"
+            printf 'docker compose pull\n'
+            printf 'docker compose up -d --no-build\n'
+            printf '```\n\n'
+            printf '随后访问 <http://127.0.0.1:5173/indicator-lab>。完整用法与配置项见仓库内的 README 与 `docs/standalone-deployment.md`。\n\n'
+            printf '## 更新内容\n\n'
+            git log --no-merges --pretty='- %s' "$range"
+          } > /tmp/release-notes.md
+
+      - name: 创建或更新 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          # 同一 tag 重跑流水线时改为更新已有的 Release，而不是让命令报错。
+          if gh release view "$REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$REF_NAME" --notes-file /tmp/release-notes.md
+          else
+            gh release create "$REF_NAME" --title "$REF_NAME" --notes-file /tmp/release-notes.md
+          fi
