@@ -17,6 +17,7 @@ import pytest
 
 from selector_app.jit import fast_sim_stats
 from selector_app.market_data.adjustment import CorporateAction
+from selector_app.portfolio_backtest.checkpoint import SimulationCheckpoint
 from selector_app.portfolio_backtest import fast_sim
 from selector_app.portfolio_backtest.context import SortedDateIndex, _StockSeries
 from selector_app.portfolio_backtest.models import (
@@ -131,6 +132,7 @@ def run_sim(
     *,
     ranked: bool,
     pure_kernel: bool = False,
+    checkpoint: SimulationCheckpoint | None = None,
 ) -> dict[str, object]:
     ranked_index = (
         service._build_ranked_candidate_index(contexts, dates, config) if ranked else None
@@ -150,6 +152,7 @@ def run_sim(
                     include_details=False,
                     data_fingerprint="test",
                     ranked_candidate_index=ranked_index,
+                    checkpoint=checkpoint,
                 )
             finally:
                 fast_sim._PORTFOLIO_KERNEL = original
@@ -162,6 +165,7 @@ def run_sim(
                 include_details=False,
                 data_fingerprint="test",
                 ranked_candidate_index=ranked_index,
+                checkpoint=checkpoint,
             )
     finally:
         stats = fast_sim_stats(reset=True)
@@ -186,6 +190,88 @@ def assert_same(baseline: dict[str, object], candidate: dict[str, object]) -> No
     ):
         assert baseline[key] == candidate[key], key
     assert baseline["checkpoint"] == candidate["checkpoint"]
+
+
+def make_hold_context(
+    code: str,
+    n: int = 280,
+    buy_days: tuple[int, ...] = (10,),
+    sell_days: tuple[int, ...] = (),
+) -> _StockSeries:
+    """买卖点完全指定的上下文：把持仓/挂单精确摆在检查点分界两侧用。"""
+
+    rng = np.random.default_rng(7)
+    close = np.maximum(np.round(10.0 + np.cumsum(rng.normal(0.0, 0.3, size=n)), 2), 1.5)
+    open_ = np.round(np.maximum(close * (1.0 + rng.normal(0.0, 0.01, size=n)), 0.5), 2)
+    high = np.round(np.maximum(open_, close) + 0.1, 2)
+    low = np.maximum(np.round(np.minimum(open_, close) - 0.1, 2), 0.1)
+    stamps = pd.bdate_range("2023-01-02", periods=n)
+    dates = np.asarray([_yyyymmdd(stamp) for stamp in stamps], dtype=np.int64)
+    buy_mask = np.zeros(n, dtype=bool)
+    buy_mask[list(buy_days)] = True
+    sell_mask = np.zeros(n, dtype=bool)
+    sell_mask[list(sell_days)] = True
+    return _StockSeries(
+        market="SH",
+        code=code,
+        instrument_type="stock",
+        board="main",
+        dates=dates,
+        opens=open_,
+        highs=high,
+        lows=low,
+        closes=close,
+        atrs=np.round(np.abs(rng.normal(0.4, 0.1, size=n)) + 0.05, 3),
+        buy_mask=buy_mask,
+        sell_mask=sell_mask,
+        signals={},
+        values={"custom.rank": np.round(rng.random(n), 4)},
+        date_to_index=SortedDateIndex(dates),
+        data_fingerprint=f"fp-hold-{code}",
+        name=f"测试{code}",
+    )
+
+
+def _resume_case(
+    monkeypatch: pytest.MonkeyPatch,
+    service: PortfolioBacktestService,
+    contexts: list[_StockSeries],
+    config: PortfolioBacktestConfig,
+    *,
+    ranked: bool,
+    split_fraction: float = 0.4,
+    split: int | None = None,
+) -> None:
+    """前缀 → 检查点 → 续跑的三路对拍（原实现 / JIT 内核 / 纯 Python 内核）。
+
+    前缀用原实现跑出检查点，续跑分别用三条路径跑完整日期区间；
+    run_sim 的「必须命中」断言保证内核路径不会静默回退。
+    """
+
+    dates = global_dates(contexts)
+    boundary = split if split is not None else max(1, int(len(dates) * split_fraction))
+
+    monkeypatch.setenv("SELECTOR_FAST_SIM", "0")
+    prefix = run_sim(service, contexts, dates[:boundary], config, ranked=ranked)
+    checkpoint = prefix["checkpoint"]
+    assert isinstance(checkpoint, SimulationCheckpoint)
+    assert not checkpoint.include_details
+    baseline = run_sim(service, contexts, dates, config, ranked=ranked, checkpoint=checkpoint)
+
+    monkeypatch.setenv("SELECTOR_FAST_SIM", "1")
+    jitted = run_sim(service, contexts, dates, config, ranked=ranked, checkpoint=checkpoint)
+    assert_same(baseline, jitted)
+
+    pure = run_sim(
+        service,
+        contexts,
+        dates,
+        config,
+        ranked=ranked,
+        checkpoint=checkpoint,
+        pure_kernel=True,
+    )
+    assert_same(baseline, pure)
 
 
 _SCENARIOS: list[tuple[str, dict[str, object], list[_StockSeries]]] = [
@@ -346,3 +432,65 @@ def test_fast_portfolio_sim_monthly_rebalance(
     monkeypatch.setenv("SELECTOR_FAST_SIM", "1")
     jitted = run_sim(service, contexts, dates, config, ranked=ranked_mode)
     assert_same(baseline, jitted)
+
+
+@pytest.mark.parametrize("name,overrides,contexts", _SCENARIOS, ids=[s[0] for s in _SCENARIOS])
+def test_fast_portfolio_sim_resume_matches_original(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    overrides: dict[str, object],
+    contexts: list[_StockSeries],
+    ranked_mode: bool,
+) -> None:
+    """全部既有场景走「前缀 → 检查点 → 续跑」三路对拍。"""
+
+    del name
+    config = make_config(**overrides)
+    _resume_case(monkeypatch, _SimService(), contexts, config, ranked=ranked_mode)
+
+
+def test_fast_portfolio_sim_resume_with_corporate_actions(
+    monkeypatch: pytest.MonkeyPatch, ranked_mode: bool
+) -> None:
+    """持仓跨过分界日：前缀内已应用的除权不得在续跑段重复应用。
+
+    day 60 的分红落在前缀（进检查点的 applied 集合），day 140 的送股落在续跑段；
+    若内核续跑不还原 applied 状态，day 60 的除权会被重复应用并立刻在对拍里暴露。
+    """
+
+    context = make_hold_context("600000")
+    dates = global_dates([context])
+    actions = (
+        CorporateAction(
+            market="SH",
+            code="600000",
+            ex_date=_stamp_of(dates[60]).date(),
+            share_ratio=0.0,
+            cash_per_share=0.3,
+            factor_ratio=1.001,
+            action_type="dividend",
+        ),
+        CorporateAction(
+            market="SH",
+            code="600000",
+            ex_date=_stamp_of(dates[140]).date(),
+            share_ratio=0.5,
+            cash_per_share=0.0,
+            factor_ratio=1.5,
+            action_type="bonus",
+        ),
+    )
+    config = make_config(codes=("SH600000",), max_positions=1)
+    service = _SimService({"600000": actions})
+    _resume_case(monkeypatch, service, [context], config, ranked=ranked_mode, split=100)
+
+
+def test_fast_portfolio_sim_resume_pending_sell_at_boundary(
+    monkeypatch: pytest.MonkeyPatch, ranked_mode: bool
+) -> None:
+    """分界日收盘挂出规则卖单、续跑首日开盘执行——覆盖挂单状态的恢复。"""
+
+    context = make_hold_context("600000", sell_days=(99,))
+    config = make_config(codes=("SH600000",), max_positions=1)
+    service = _SimService()
+    _resume_case(monkeypatch, service, [context], config, ranked=ranked_mode, split=100)

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import math
+from bisect import bisect_right
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -53,6 +54,7 @@ _MAX_TRADE_ROWS = 4_000_000
 
 # 原因编码：0 规则卖出、1 持有到期、2/3/4 风险退出（止损/止盈/移动止盈）、5 排名买入。
 _REASON_LABELS = ("卖出条件", "持有到期", "止损", "止盈", "移动止盈", "排名入选")
+_REASON_LABEL_SET = frozenset(_REASON_LABELS)
 _TRIGGER_NAMES = ("", "", "stop_loss", "take_profit", "trailing_stop", "")
 
 
@@ -426,38 +428,92 @@ def _portfolio_kernel_impl(  # noqa: PLR0913 - 内核参数即预处理后的市
     has_ranked: bool,
     ranked_offsets: np.ndarray,
     ranked_flat: np.ndarray,
+    resume_start: int,
+    init_pos_active: np.ndarray,
+    init_pos_size: np.ndarray,
+    init_pos_entry_price: np.ndarray,
+    init_pos_entry_date: np.ndarray,
+    init_pos_highest: np.ndarray,
+    init_pos_buy_comm: np.ndarray,
+    init_pos_buy_slip: np.ndarray,
+    init_pos_entry_local: np.ndarray,
+    init_pos_order: np.ndarray,
+    init_n_pos: int,
+    init_ps_slot: np.ndarray,
+    init_ps_sig: np.ndarray,
+    init_ps_reason: np.ndarray,
+    init_n_ps: int,
+    init_pb_slot: np.ndarray,
+    init_pb_sig: np.ndarray,
+    init_pb_budget: np.ndarray,
+    init_n_pb: int,
+    init_cooldown: np.ndarray,
+    init_last_price: np.ndarray,
+    init_last_seen: np.ndarray,
+    init_applied: np.ndarray,
+    init_cash: float,
+    init_peak: float,
+    init_drawdown: float,
 ) -> tuple[Any, ...]:
     n_days = dates.shape[0]
     n_symbols = g2l.shape[0]
 
-    # ---- 持仓状态（dict 语义：pos_order 保持插入序，pop 后其余元素次序不变）
-    pos_active = np.zeros(n_symbols, dtype=np.bool_)
-    pos_size = np.zeros(n_symbols, dtype=np.float64)
-    pos_entry_price = np.zeros(n_symbols, dtype=np.float64)
-    pos_entry_date = np.zeros(n_symbols, dtype=np.int64)
-    pos_highest = np.zeros(n_symbols, dtype=np.float64)
-    pos_buy_comm = np.zeros(n_symbols, dtype=np.float64)
-    pos_buy_slip = np.zeros(n_symbols, dtype=np.float64)
-    pos_entry_local = np.zeros(n_symbols, dtype=np.int64)
-    pos_order = np.zeros(max_positions, dtype=np.int64)
-    n_pos = 0
+    # ---- 持仓状态（dict 语义：pos_order 保持插入序，pop 后其余元素次序不变）。
+    # resume_start > 0 时由包装层从检查点恢复，字段语义与原 `_simulate` 的
+    # checkpoint 分支逐项一致；resume_start == 0 时初始数组全空，等价从头跑。
+    if resume_start > 0:
+        pos_active = init_pos_active
+        pos_size = init_pos_size
+        pos_entry_price = init_pos_entry_price
+        pos_entry_date = init_pos_entry_date
+        pos_highest = init_pos_highest
+        pos_buy_comm = init_pos_buy_comm
+        pos_buy_slip = init_pos_buy_slip
+        pos_entry_local = init_pos_entry_local
+        pos_order = init_pos_order
+        n_pos = init_n_pos
+        ps_slot = init_ps_slot
+        ps_sig = init_ps_sig
+        ps_reason = init_ps_reason
+        n_ps = init_n_ps
+        pb_slot = init_pb_slot
+        pb_sig = init_pb_sig
+        pb_budget = init_pb_budget
+        n_pb = init_n_pb
+        cooldown = init_cooldown
+        last_price = init_last_price
+        last_seen = init_last_seen
+        applied = init_applied
+        peak_value = init_peak
+        max_drawdown = init_drawdown
+    else:
+        pos_active = np.zeros(n_symbols, dtype=np.bool_)
+        pos_size = np.zeros(n_symbols, dtype=np.float64)
+        pos_entry_price = np.zeros(n_symbols, dtype=np.float64)
+        pos_entry_date = np.zeros(n_symbols, dtype=np.int64)
+        pos_highest = np.zeros(n_symbols, dtype=np.float64)
+        pos_buy_comm = np.zeros(n_symbols, dtype=np.float64)
+        pos_buy_slip = np.zeros(n_symbols, dtype=np.float64)
+        pos_entry_local = np.zeros(n_symbols, dtype=np.int64)
+        pos_order = np.zeros(max_positions, dtype=np.int64)
+        n_pos = 0
 
-    # ---- 挂单与冷却（均保持插入序）
-    ps_slot = np.zeros(max_positions, dtype=np.int64)
-    ps_sig = np.zeros(max_positions, dtype=np.int64)
-    ps_reason = np.zeros(max_positions, dtype=np.int8)
-    n_ps = 0
-    pb_slot = np.zeros(max_positions, dtype=np.int64)
-    pb_sig = np.zeros(max_positions, dtype=np.int64)
-    pb_budget = np.zeros(max_positions, dtype=np.float64)
-    n_pb = 0
-    cooldown = np.full(n_symbols, -1, dtype=np.int64)
-    last_price = np.full(n_symbols, math.nan)
-    last_seen = np.zeros(n_symbols, dtype=np.bool_)
-    applied = np.zeros(act_offsets[n_symbols], dtype=np.bool_)
+        # ---- 挂单与冷却（均保持插入序）
+        ps_slot = np.zeros(max_positions, dtype=np.int64)
+        ps_sig = np.zeros(max_positions, dtype=np.int64)
+        ps_reason = np.zeros(max_positions, dtype=np.int8)
+        n_ps = 0
+        pb_slot = np.zeros(max_positions, dtype=np.int64)
+        pb_sig = np.zeros(max_positions, dtype=np.int64)
+        pb_budget = np.zeros(max_positions, dtype=np.float64)
+        n_pb = 0
+        cooldown = np.full(n_symbols, -1, dtype=np.int64)
+        last_price = np.full(n_symbols, math.nan)
+        last_seen = np.zeros(n_symbols, dtype=np.bool_)
+        applied = np.zeros(act_offsets[n_symbols], dtype=np.bool_)
 
-    peak_value = initial_cash
-    max_drawdown = 0.0
+        peak_value = initial_cash
+        max_drawdown = 0.0
 
     # ---- 输出缓冲
     eq_cash = np.zeros(n_days, dtype=np.float64)
@@ -486,9 +542,9 @@ def _portfolio_kernel_impl(  # noqa: PLR0913 - 内核参数即预处理后的市
     taken = np.zeros(n_symbols, dtype=np.bool_)
 
     nan = math.nan
-    cash = initial_cash
+    cash = init_cash if resume_start > 0 else initial_cash
 
-    for day in range(n_days):
+    for day in range(resume_start, n_days):
         current_date = dates[day]
 
         # ---- 除权除息（原 _apply_corporate_actions：按持仓插入序，事件按日期序）
@@ -1007,8 +1063,15 @@ def _build_inputs(
     config: PortfolioBacktestConfig,
     data_fingerprint: str,
     ranked_candidate_index: Any,
+    checkpoint: SimulationCheckpoint | None = None,
+    resume_start: int = 0,
 ) -> tuple[tuple[Any, ...], list[list[str]], np.ndarray] | None:
-    """把上下文摊平成内核矩阵；返回 None 表示形态超出内核支持范围。"""
+    """把上下文摊平成内核矩阵；返回 None 表示形态超出内核支持范围。
+
+    ``checkpoint`` 非 None 时按原 ``_simulate`` 的恢复分支构造初始状态数组；
+    任何无法无损还原的字段（如拼接的卖出原因、未知标的）都返回 None 交回原实现，
+    由原实现抛出同样的校验错误或按 Python 语义继续。
+    """
 
     n_symbols = len(contexts)
     n_days = len(dates)
@@ -1152,6 +1215,92 @@ def _build_inputs(
         ranked_offsets = np.zeros(n_days + 1, dtype=np.int64)
         ranked_flat = np.zeros(0, dtype=np.int32)
 
+    # ---- 检查点续跑初始状态（resume_start == 0 时全空，内核走从头分支）。
+    # 字段与原 `_simulate` 的 checkpoint 恢复分支一一对应：持仓插入序 =
+    # checkpoint.positions 的键序，挂单/冷却/最新价同理。
+    symbol_slots = {symbol: s for s, symbol in enumerate(symbols)}
+    max_pos = int(config.max_positions)
+    init_pos_active = np.zeros(n_symbols, dtype=np.bool_)
+    init_pos_size = np.zeros(n_symbols, dtype=np.float64)
+    init_pos_entry_price = np.zeros(n_symbols, dtype=np.float64)
+    init_pos_entry_date = np.zeros(n_symbols, dtype=np.int64)
+    init_pos_highest = np.zeros(n_symbols, dtype=np.float64)
+    init_pos_buy_comm = np.zeros(n_symbols, dtype=np.float64)
+    init_pos_buy_slip = np.zeros(n_symbols, dtype=np.float64)
+    init_pos_entry_local = np.zeros(n_symbols, dtype=np.int64)
+    init_pos_order = np.full(max_pos, -1, dtype=np.int64)
+    init_ps_slot = np.zeros(max_pos, dtype=np.int64)
+    init_ps_sig = np.zeros(max_pos, dtype=np.int64)
+    init_ps_reason = np.zeros(max_pos, dtype=np.int8)
+    init_pb_slot = np.zeros(max_pos, dtype=np.int64)
+    init_pb_sig = np.zeros(max_pos, dtype=np.int64)
+    init_pb_budget = np.zeros(max_pos, dtype=np.float64)
+    init_cooldown = np.full(n_symbols, -1, dtype=np.int64)
+    init_last_price = np.full(n_symbols, math.nan)
+    init_last_seen = np.zeros(n_symbols, dtype=np.bool_)
+    init_n_pos = 0
+    init_n_ps = 0
+    init_n_pb = 0
+    resuming = checkpoint is not None and resume_start > 0
+    if resuming:
+        assert checkpoint is not None  # for type checkers; resuming 已保证
+        known = set(symbols)
+        if any(symbol not in known for symbol in checkpoint.positions):
+            return None
+        if any(symbol not in known for symbol in checkpoint.pending_sells):
+            return None
+        if any(pending.symbol not in known for pending in checkpoint.pending_buys):
+            return None
+        for symbol, position in checkpoint.positions.items():
+            s = symbol_slots[symbol]
+            day_idx = int(np.searchsorted(dates_arr, position.entry_date))
+            if day_idx >= n_days or int(dates_arr[day_idx]) != int(position.entry_date):
+                return None
+            init_pos_active[s] = True
+            init_pos_size[s] = float(position.size)
+            init_pos_entry_price[s] = float(position.entry_price)
+            init_pos_entry_date[s] = int(position.entry_date)
+            init_pos_highest[s] = float(position.highest_price)
+            init_pos_buy_comm[s] = float(position.buy_commission)
+            init_pos_buy_slip[s] = float(position.buy_slippage)
+            init_pos_entry_local[s] = int(g2l[s, day_idx])
+            init_pos_order[init_n_pos] = s
+            init_n_pos += 1
+        for symbol, pending in checkpoint.pending_sells.items():
+            # 内核用 int8 编码原因；拼接原因（如「止损、移动止盈」）无法无损还原，
+            # 交回原实现按字符串语义继续。
+            if pending.reason not in _REASON_LABEL_SET:
+                return None
+            init_ps_slot[init_n_ps] = symbol_slots[symbol]
+            init_ps_sig[init_n_ps] = int(pending.signal_date)
+            init_ps_reason[init_n_ps] = _REASON_LABELS.index(pending.reason)
+            init_n_ps += 1
+        for pending in checkpoint.pending_buys:
+            init_pb_slot[init_n_pb] = symbol_slots[pending.symbol]
+            init_pb_sig[init_n_pb] = int(pending.signal_date)
+            init_pb_budget[init_n_pb] = float(pending.budget)
+            init_n_pb += 1
+        for s, context in enumerate(contexts):
+            if context.symbol in checkpoint.cooldown_until:
+                init_cooldown[s] = int(checkpoint.cooldown_until[context.symbol])
+            if context.symbol in checkpoint.last_prices:
+                init_last_seen[s] = True
+                init_last_price[s] = float(checkpoint.last_prices[context.symbol])
+    init_applied = np.zeros(int(act_offsets[n_symbols]), dtype=np.bool_)
+    if resuming:
+        assert checkpoint is not None
+        # 已应用除权必须逐键还原：否则续跑会对前缀里已处理过的事件重复除权。
+        for s, context in enumerate(contexts):
+            position = checkpoint.positions.get(context.symbol)
+            if position is None or not position.applied_corporate_actions:
+                continue
+            keys = action_keys[s]
+            if not position.applied_corporate_actions.issubset(keys):
+                return None
+            for ai, key in enumerate(keys):
+                if key in position.applied_corporate_actions:
+                    init_applied[int(act_offsets[s]) + ai] = True
+
     inputs = (
         dates_arr,
         refresh_due,
@@ -1201,8 +1350,61 @@ def _build_inputs(
         has_ranked,
         ranked_offsets,
         ranked_flat,
+        resume_start,
+        init_pos_active,
+        init_pos_size,
+        init_pos_entry_price,
+        init_pos_entry_date,
+        init_pos_highest,
+        init_pos_buy_comm,
+        init_pos_buy_slip,
+        init_pos_entry_local,
+        init_pos_order,
+        init_n_pos,
+        init_ps_slot,
+        init_ps_sig,
+        init_ps_reason,
+        init_n_ps,
+        init_pb_slot,
+        init_pb_sig,
+        init_pb_budget,
+        init_n_pb,
+        init_cooldown,
+        init_last_price,
+        init_last_seen,
+        init_applied,
+        float(checkpoint.cash) if resuming else 0.0,
+        float(checkpoint.peak_value) if resuming else 0.0,
+        float(checkpoint.max_drawdown) if resuming else 0.0,
     )
     return inputs, action_keys, act_offsets
+
+
+def _checkpoint_resume_start(
+    checkpoint: SimulationCheckpoint, dates: list[int], data_fingerprint: str
+) -> int:
+    """与原 ``_checkpoint_start_index`` 同一套校验；返回续跑起点，-1 = 内核不支持。
+
+    不支持的形态交回原实现处理：无效检查点由原实现抛同样的 ValueError，
+    语义不会因为走了内核路径而改变。
+    """
+
+    if checkpoint.include_details is not False:
+        return -1
+    if checkpoint.data_fingerprint and data_fingerprint:
+        if checkpoint.data_fingerprint != data_fingerprint:
+            return -1
+    elif checkpoint.data_fingerprint != data_fingerprint:
+        return -1
+    processed = checkpoint.processed_dates
+    if tuple(int(value) for value in dates[: len(processed)]) != processed:
+        return -1
+    if len(dates) < len(processed):
+        return -1
+    resume_start = bisect_right(dates, checkpoint.last_date)
+    if resume_start >= len(dates):
+        return -1
+    return resume_start
 
 
 def try_fast_portfolio_simulation(
@@ -1213,8 +1415,13 @@ def try_fast_portfolio_simulation(
     *,
     data_fingerprint: str,
     ranked_candidate_index: Any,
+    checkpoint: SimulationCheckpoint | None = None,
 ) -> dict[str, object] | None:
-    """在内核支持范围内用 Numba 跑 ``_simulate``；否则返回 None 走原实现。"""
+    """在内核支持范围内用 Numba 跑 ``_simulate``；否则返回 None 走原实现。
+
+    ``checkpoint`` 非 None 时从该状态续跑（多保真度寻优的 medium/full 阶段），
+    输出与前缀结果拼接，语义与原实现的检查点续跑一致。
+    """
 
     global _WARNED
     if not fast_sim_enabled():
@@ -1238,9 +1445,22 @@ def try_fast_portfolio_simulation(
     if n_days * (2 * config.max_positions + 1) + 8 > _MAX_TRADE_ROWS:
         record_outcome("portfolio", "too_many_trade_rows")
         return None
+    resume_start = 0
+    if checkpoint is not None:
+        resume_start = _checkpoint_resume_start(checkpoint, dates, data_fingerprint)
+        if resume_start < 0:
+            record_outcome("portfolio", "checkpoint_unsupported")
+            return None
     try:
         built = _build_inputs(
-            service, contexts, dates, config, data_fingerprint, ranked_candidate_index
+            service,
+            contexts,
+            dates,
+            config,
+            data_fingerprint,
+            ranked_candidate_index,
+            checkpoint,
+            resume_start,
         )
         if built is None:
             record_outcome("portfolio", "unsupported_inputs")
@@ -1263,6 +1483,8 @@ def try_fast_portfolio_simulation(
         action_keys,
         act_offsets,
         outputs,
+        resume_start=resume_start,
+        prefix=checkpoint if resume_start > 0 else None,
     )
 
 
@@ -1275,6 +1497,8 @@ def _build_result(
     action_keys: list[list[str]],
     act_offsets: np.ndarray,
     outputs: tuple[Any, ...],
+    resume_start: int = 0,
+    prefix: SimulationCheckpoint | None = None,
 ) -> dict[str, object]:
     (
         cash,
@@ -1329,7 +1553,10 @@ def _build_result(
     # 对合法的 8 位 YYYYMMDD，纯切片与 pd.to_datetime().strftime() 逐字符等价。
     date_texts = [_fast_date_text(int(value)) for value in dates]
 
-    equity = [
+    # 续跑时净值/交易前缀直接取自检查点（与原实现的拼接语义一致），
+    # 内核输出只覆盖 [resume_start, n_days) 区间。
+    equity: list[dict[str, object]] = list(prefix.equity) if prefix is not None else []
+    equity.extend(
         {
             "date": date_texts[day],
             "cash": float(eq_cash[day]),
@@ -1337,10 +1564,10 @@ def _build_result(
             "total": float(eq_total[day]),
             "positions_count": int(eq_count[day]),
         }
-        for day in range(n_days)
-    ]
+        for day in range(resume_start, n_days)
+    )
 
-    trades: list[dict[str, object]] = []
+    trades: list[dict[str, object]] = list(prefix.trades) if prefix is not None else []
     for i in range(int(n_trades)):
         slot = int(t_slot[i])
         context = contexts[slot]

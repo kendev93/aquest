@@ -178,32 +178,21 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
         ranked_candidate_index: Mapping[int, np.ndarray] | None = None,
         abort_check: Callable[[], bool] | None = None,
     ) -> dict[str, object]:
-        # numba 内核路径：只接发现寻优的形态（指标汇总、无检查点/fitness/中止回调），
-        # 与下面的原状态机逐行等价，由差分测试保证；不支持或异常时退回原实现。
-        if not (
-            not include_details
-            and checkpoint is None
-            and fitness_filter is None
-            and abort_check is None
-        ):
+        # numba 内核路径：接发现寻优的形态（指标汇总、无 fitness/中止回调），
+        # 含检查点续跑（多保真度的 medium/full 阶段）。与下面的原状态机逐行等价，
+        # 由差分测试保证；不支持或异常时退回原实现。
+        if not (not include_details and fitness_filter is None and abort_check is None):
             # 记下是哪项形态不满足：内核长期不生效时，靠这个定位而不是靠猜。
             from selector_app.jit import record_outcome
 
             if include_details:
                 record_outcome("portfolio", "details_requested")
-            elif checkpoint is not None:
-                record_outcome("portfolio", "resume_checkpoint")
             elif fitness_filter is not None:
                 record_outcome("portfolio", "fitness_filter")
             else:
                 record_outcome("portfolio", "abort_check")
 
-        if (
-            not include_details
-            and checkpoint is None
-            and fitness_filter is None
-            and abort_check is None
-        ):
+        if not include_details and fitness_filter is None and abort_check is None:
             from selector_app.portfolio_backtest.fast_sim import try_fast_portfolio_simulation
 
             fast_result = try_fast_portfolio_simulation(
@@ -213,6 +202,7 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
                 config,
                 data_fingerprint=data_fingerprint,
                 ranked_candidate_index=ranked_candidate_index,
+                checkpoint=checkpoint,
             )
             if fast_result is not None:
                 return fast_result
