@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
+from threading import RLock
 from typing import NamedTuple, cast
 
 import numpy as np
@@ -56,6 +58,36 @@ class _ResolvedRefs(NamedTuple):
     filtered: tuple[str, ...] = ()
     #: 打开了 exclude_st 后被当作 ST / *ST / 退市剔除的代码。
     excluded_st: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _ContextBase:
+    """规则无关的行情底座：一次构建、同股同窗口的逐候选评估复用。
+
+    买卖规则对初筛（每股约 450 次 ``run_stock``）里，frame 预处理、复权、
+    全帧指纹、窗口切片、ATR、日期换算都只取决于 (标的, 窗口, ATR 周期,
+    公司行动)，与具体规则无关——逐候选重做是单股最大的确定性浪费。
+    指标 ``results`` 不进底座：它的公式集合随规则变化，且 IndicatorCache
+    已经按公式粒度复用。
+    """
+
+    frame: pd.DataFrame
+    metric_frame: pd.DataFrame
+    data_fingerprint: str
+    indices: np.ndarray
+    opens: np.ndarray
+    highs: np.ndarray
+    lows: np.ndarray
+    closes: np.ndarray
+    atrs: np.ndarray
+    metric_closes: np.ndarray
+    dates: np.ndarray
+
+
+#: 底座缓存的条目上限。同股规则对初筛只有训练/验证两个窗口，2 即可全热；
+#: 留 4 是给「同进程顺序研究多只」的场景留一层缓冲，代价是几份行情帧。
+_CONTEXT_BASE_CACHE_SIZE = 4
+_CONTEXT_BASE_CACHE_LOCK = RLock()
 
 
 class SortedDateIndex(Mapping[int, int]):
@@ -221,33 +253,18 @@ class PortfolioContextMixin(_PortfolioServiceState):
         parsed: ParsedFormula | None,
         frame: pd.DataFrame | None = None,
     ) -> _StockSeries | None:
-        frame = self._prepare_frame(frame if frame is not None else self._adapter.read_stock(ref))
-        if frame.empty:
-            raise ValueError("数据为空")
-        # 同一份行情在这里分成两个口径，各司其职：
-        #
-        # * ``metric_frame`` —— 指标、选股条件、排序值。除权日的 raw 跳空是价格
-        #   序列里的一个假断崖（浦发银行 2017-05-25 一天 -24%），留着它算出来的
-        #   ATR、动量、均线全是假的。
-        # * ``frame`` —— 成交价、整手取整、ATR。ATR 的单位是"元"，会和成交价直接
-        #   加减运算（``risk._risk_level``），一旦用复权价算，所有 ATR 止损/止盈
-        #   的阈值会完全错乱；除权当天开盘大幅低开是真实市场现象，ATR 反映它是
-        #   合理的。成交价更不能碰复权价：后复权价会随分红累积无限变大，股数和
-        #   整手全都不再对应现实。
-        actions = self._corporate_actions(ref)
-        metric_frame = mark_adjusted(frame, actions) if actions else frame
-        data_fingerprint = frame_fingerprint(metric_frame)
+        base = self._context_base(ref, config, frame)
         results = self._calculate_results(
-            metric_frame,
+            base.metric_frame,
             config,
             parsed,
             market=ref.market,
             code=ref.code,
         )
         minimum_bars = max(result.minimum_bars for result in results.values())
-        if len(frame) < minimum_bars:
+        if len(base.frame) < minimum_bars:
             raise ValueError(f"数据不足，至少需要 {minimum_bars} 根 K 线")
-        indices = self._window_indices(frame, config.start_date, config.end_date)
+        indices = base.indices
         if len(indices) == 0:
             raise ValueError("日期范围内没有可用日线")
 
@@ -280,15 +297,6 @@ class PortfolioContextMixin(_PortfolioServiceState):
             if selected_sell_rule is not None
             else np.zeros(len(indices), dtype=bool)
         )
-        window = frame.iloc[indices].reset_index(drop=True)
-        # 基准用的收盘价取自 metric_frame（已按除权事件校正），切成同一段窗口，
-        # 与成交用的 ``closes`` 逐根对齐。没有事件的标的 metric_frame 就是 frame，
-        # 此处自然退化成不复权，不需要分支。
-        metric_closes = metric_frame["close"].to_numpy(dtype=float)[indices].copy()
-        dates = np.asarray(
-            [int(pd.Timestamp(value).strftime("%Y%m%d")) for value in window["date"]],
-            dtype=np.int64,
-        )
         return _StockSeries(
             market=ref.market,
             code=ref.code,
@@ -298,18 +306,18 @@ class PortfolioContextMixin(_PortfolioServiceState):
                 InstrumentBoard,
                 classify_board(ref.market, ref.code) or getattr(ref, "board", "main"),
             ),
-            dates=dates,
-            opens=window["open"].to_numpy(dtype=float, copy=True),
-            highs=window["high"].to_numpy(dtype=float, copy=True),
-            lows=window["low"].to_numpy(dtype=float, copy=True),
-            closes=window["close"].to_numpy(dtype=float, copy=True),
-            atrs=_atr_series(frame, config.atr_period)[indices].copy(),
+            dates=base.dates,
+            opens=base.opens,
+            highs=base.highs,
+            lows=base.lows,
+            closes=base.closes,
+            atrs=base.atrs,
             buy_mask=np.asarray(buy_mask, dtype=bool),
             sell_mask=np.asarray(sell_mask, dtype=bool),
             signals=signal_arrays,
             values=value_arrays,
-            date_to_index=SortedDateIndex(dates),
-            data_fingerprint=data_fingerprint,
+            date_to_index=SortedDateIndex(base.dates),
+            data_fingerprint=base.data_fingerprint,
             buy_rule=selected_buy_rule,
             sell_rule=selected_sell_rule,
             strategy_config=strategy if isinstance(strategy, Mapping) else {},
@@ -318,7 +326,97 @@ class PortfolioContextMixin(_PortfolioServiceState):
                 if ref.market + ref.code in config.symbol_priority_scores
                 else None
             ),
-            adjusted_closes=metric_closes,
+            adjusted_closes=base.metric_closes,
+        )
+
+    def _context_base(
+        self,
+        ref: StockRef,
+        config: PortfolioBacktestConfig,
+        frame: pd.DataFrame | None,
+    ) -> _ContextBase:
+        """取规则无关底座；同股同窗口命中缓存，公司行动变化时自然重建。
+
+        缓存键里带公司行动的 repr：``run_stock`` 每次顶层调用都会刷新行动缓存并
+        重新查询（「每次运行都能看到最新除权事件」是既有契约），行动变了键就变，
+        底座随之重建——脏数据进不了缓存，缓存因此不需要主动失效。行情帧本身在
+        适配器线程缓存里本来就是整个研究期间一份，底座复用不引入新的失效面。
+        """
+
+        actions = self._corporate_actions(ref)
+        key = (
+            ref.market,
+            ref.code,
+            config.start_date,
+            config.end_date,
+            config.atr_period,
+            repr(actions),
+        )
+        use_cache = frame is None
+        cache: OrderedDict[tuple[object, ...], _ContextBase] | None = None
+        if use_cache:
+            with _CONTEXT_BASE_CACHE_LOCK:
+                cache = getattr(self, "_context_base_cache", None)
+                if cache is None:
+                    cache = OrderedDict()
+                    self._context_base_cache = cache
+                cached: _ContextBase | None = cache.get(key)
+                if cached is not None:
+                    cache.move_to_end(key)
+                    return cached
+        base = self._build_context_base(ref, config, frame, actions)
+        if use_cache and cache is not None:
+            with _CONTEXT_BASE_CACHE_LOCK:
+                cache[key] = base
+                while len(cache) > _CONTEXT_BASE_CACHE_SIZE:
+                    cache.popitem(last=False)
+        return base
+
+    def _build_context_base(
+        self,
+        ref: StockRef,
+        config: PortfolioBacktestConfig,
+        frame: pd.DataFrame | None,
+        actions: tuple[CorporateAction, ...],
+    ) -> _ContextBase:
+        """构建规则无关底座。批量路径传入的窗口帧（带 warmup）不进缓存。"""
+
+        prepared = self._prepare_frame(
+            frame if frame is not None else self._adapter.read_stock(ref)
+        )
+        if prepared.empty:
+            raise ValueError("数据为空")
+        # 同一份行情在这里分成两个口径，各司其职：
+        #
+        # * ``metric_frame`` —— 指标、选股条件、排序值。除权日的 raw 跳空是价格
+        #   序列里的一个假断崖（浦发银行 2017-05-25 一天 -24%），留着它算出来的
+        #   ATR、动量、均线全是假的。
+        # * ``frame`` —— 成交价、整手取整、ATR。ATR 的单位是"元"，会和成交价直接
+        #   加减运算（``risk._risk_level``），一旦用复权价算，所有 ATR 止损/止盈
+        #   的阈值会完全错乱；除权当天开盘大幅低开是真实市场现象，ATR 反映它是
+        #   合理的。成交价更不能碰复权价：后复权价会随分红累积无限变大，股数和
+        #   整手全都不再对应现实。
+        metric_frame = mark_adjusted(prepared, actions) if actions else prepared
+        data_fingerprint = frame_fingerprint(metric_frame)
+        indices = self._window_indices(prepared, config.start_date, config.end_date)
+        window = prepared.iloc[indices].reset_index(drop=True)
+        metric_closes = metric_frame["close"].to_numpy(dtype=float)[indices].copy()
+        dates = np.asarray(
+            [int(pd.Timestamp(value).strftime("%Y%m%d")) for value in window["date"]],
+            dtype=np.int64,
+        )
+        return _ContextBase(
+            frame=prepared,
+            metric_frame=metric_frame,
+            data_fingerprint=data_fingerprint,
+            indices=indices,
+            opens=window["open"].to_numpy(dtype=float, copy=True),
+            highs=window["high"].to_numpy(dtype=float, copy=True),
+            lows=window["low"].to_numpy(dtype=float, copy=True),
+            closes=window["close"].to_numpy(dtype=float, copy=True),
+            atrs=_atr_series(prepared, config.atr_period)[indices].copy(),
+            metric_closes=metric_closes,
+            dates=dates,
         )
 
     def _supports_batch_frames(self) -> bool:

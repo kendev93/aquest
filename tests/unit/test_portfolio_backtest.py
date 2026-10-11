@@ -13,6 +13,7 @@ import pandas as pd
 import pytest
 
 from selector_app.adapters.local_day_adapter import StockRef
+from selector_app.formulas.custom import parse_formula
 from selector_app.individual_research.service import _report_metrics
 from selector_app.jit import fast_sim_stats
 from selector_app.market_data.adjustment import CorporateAction, compute_factor_ratio
@@ -509,6 +510,84 @@ def test_run_stock_metrics_only_preflight_no_trade_matches_full_metrics() -> Non
     assert int(cast("float", metrics.performance["total_trades"])) == 0
     assert metrics.diagnostic == "预检无可交易候选"
     assert _report_metrics(metrics) == _report_metrics(full)
+
+
+class _CountingReadAdapter(FakeAdapter):
+    def __init__(self) -> None:
+        super().__init__()
+        self.read_calls = 0
+
+    def read_stock(self, ref: StockRef) -> pd.DataFrame:
+        self.read_calls += 1
+        return super().read_stock(ref)
+
+
+def test_context_base_cache_hits_within_same_window() -> None:
+    """同股同窗口的逐候选评估复用底座：行情只读一次，结果逐字段一致。"""
+
+    adapter = _CountingReadAdapter()
+    service = PortfolioBacktestService(adapter=adapter)
+    ref = adapter.stock_ref("/tmp/vipdoc", "SH", "600000")
+    settings = config(max_positions=1, initial_cash=100_000.0)
+
+    first = service.run_stock(ref, settings)
+    assert adapter.read_calls == 1
+    second = service.run_stock(ref, settings)
+    assert adapter.read_calls == 1
+    assert second.data_fingerprint == first.data_fingerprint
+    assert _trade_directions(second) == _trade_directions(first)
+    assert second.performance["total_return"] == first.performance["total_return"]
+
+
+def test_context_base_cache_keeps_both_research_windows() -> None:
+    """规则对初筛在训练/验证两个窗口间交替，两个底座都应保持全热。"""
+
+    adapter = _CountingReadAdapter()
+    service = PortfolioBacktestService(adapter=adapter)
+    ref = adapter.stock_ref("/tmp/vipdoc", "SH", "600000")
+    train = config(max_positions=1, start_date=date(2024, 1, 1), end_date=date(2024, 1, 4))
+    validation = config(max_positions=1, start_date=date(2024, 1, 5), end_date=date(2024, 1, 6))
+
+    for _ in range(3):
+        service.run_stock(ref, train)
+        service.run_stock(ref, validation)
+
+    assert adapter.read_calls == 2
+    assert len(service._context_base_cache) == 2  # type: ignore[attr-defined]
+
+
+def test_context_base_cache_evicts_oldest_entries() -> None:
+    adapter = FakeAdapter()
+    service = PortfolioBacktestService(adapter=adapter)
+    ref = adapter.stock_ref("/tmp/vipdoc", "SH", "600000")
+
+    for offset in range(5):
+        service.run_stock(
+            ref,
+            config(
+                max_positions=1,
+                start_date=date(2024, 1, 1),
+                end_date=date(2024, 1, 2 + offset),
+            ),
+        )
+
+    assert len(service._context_base_cache) == 4  # type: ignore[attr-defined]
+
+
+def test_context_base_cache_bypassed_for_explicit_frames() -> None:
+    """批量路径自带窗口帧（含 warmup），语义与全历史帧不同，绝不能进同一缓存。"""
+
+    adapter = FakeAdapter()
+    service = PortfolioBacktestService(adapter=adapter)
+    ref = adapter.stock_ref("/tmp/vipdoc", "SH", "600000")
+    settings = config(max_positions=1)
+    frame = adapter.read_stock(ref)
+    parsed = parse_formula(settings.formula_text) if settings.formula_text else None
+
+    context = service._build_context(ref, settings, parsed, frame)
+
+    assert context is not None
+    assert getattr(service, "_context_base_cache", None) is None
 
 
 def test_prepared_context_action_preload_caches_missing_events_as_empty() -> None:
