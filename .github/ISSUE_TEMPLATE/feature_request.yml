@@ -1,0 +1,40 @@
+name: 功能建议
+description: 提出新的能力、新的统计口径，或对现有页面的改进
+labels: ["enhancement"]
+body:
+  - type: markdown
+    value: |
+      本项目不试图保证某个指标盈利，目标是让指标更容易被**验证、比较和复盘**。
+
+      提建议时，最有说服力的是描述一个「现在还回答不了」的具体研究问题，
+      而不是一句「希望支持某某指标」。
+  - type: textarea
+    id: question
+    attributes:
+      label: 你想回答、但目前回答不了的问题
+      description: 越具体越好，例如「想在槽位有限时判断某条件是否还有意义」
+    validations:
+      required: true
+  - type: textarea
+    id: workaround
+    attributes:
+      label: 现在是怎么绕过去的
+      description: 目前在哪个页面做、凑合到什么程度，或者干脆做不了
+    validations:
+      required: false
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 期望的形式
+      description: 希望出现在哪个页面？输入什么、最后看到什么结果
+    validations:
+      required: false
+  - type: textarea
+    id: limits
+    attributes:
+      label: 你认为它不该回答什么
+      description: |
+        可留空。项目对每个页面都写明了「它不能回答什么」——如果一个需求会让人
+        误以为某指标「保证有效」，那就超出了本项目的范围
+    validations:
+      required: false

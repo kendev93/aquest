@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
 
+# 最小权限：CI 只读代码，不回写仓库，也不需要其他 scope。
+permissions:
+  contents: read
+
 jobs:
   python:
     runs-on: ubuntu-latest
