@@ -201,6 +201,26 @@ def _duckdb_memory_limit() -> str | None:
     return f"{budget // (1 << 30)}GiB" if budget >= (1 << 30) else f"{budget // (1 << 20)}MiB"
 
 
+@lru_cache(maxsize=1)
+def _duckdb_threads() -> int | None:
+    """Return the DuckDB ``threads`` cap from ``SELECTOR_DUCKDB_THREADS``, if set.
+
+    研究负载里全是单标的小查询，DuckDB 默认按可见 CPU 数起的内部线程池只会空转
+    吃核——单个 worker 就能占满整机 CPU，多开并发反而互相踩踏。取值必须整进程
+    一致并随 connect 传入：同一进程对同一库文件用不同 config 开连接时 DuckDB
+    直接拒绝。非法值与 ``0`` 按未配置处理，回到 DuckDB 默认行为。
+    """
+
+    raw = (os.getenv("SELECTOR_DUCKDB_THREADS") or "").strip()
+    if not raw:
+        return None
+    try:
+        threads = int(raw)
+    except ValueError:
+        return None
+    return threads if threads >= 1 else None
+
+
 class _DuckDbStoreBase:
     """Own connections and shared invariants for all storage repositories."""
 
@@ -260,6 +280,9 @@ class _DuckDbStoreBase:
         config: dict[str, str | bool | int | float | list[str]] | None = None
         if limit is not None:
             config = {"memory_limit": limit}
+        threads = _duckdb_threads()
+        if threads is not None:
+            config = {**(config or {}), "threads": threads}
         return duckdb.connect(str(self.database_path), read_only=read_only, config=config)
 
     @contextmanager

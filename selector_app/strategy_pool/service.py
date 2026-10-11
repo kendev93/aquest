@@ -449,6 +449,25 @@ class MarketStrategyPoolService:
                 and result_market_fingerprint != previous_market_fingerprint
             ):
                 raise ValueError("研究期间本地行情发生变化，请重新运行该股票")
+            # 研究结果里现成的阶段耗时此前没有任何落出口，全市场跑起来后时间去向
+            # 无从回答。逐股一行 INFO：量小、可 grep，是后续优化取舍的依据。
+            stage_durations = result.get("stage_durations_seconds")
+            if isinstance(stage_durations, Mapping):
+                logger.info(
+                    "个股研究阶段耗时（秒）%s:%s %s: %s",
+                    ref.market,
+                    ref.code,
+                    ref.name or "",
+                    json.dumps(
+                        {
+                            str(key): round(float(value), 2)
+                            for key, value in stage_durations.items()
+                            if isinstance(value, (int, float))
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                )
             benchmark = _symbol_benchmark(
                 self._adapter,
                 ref,

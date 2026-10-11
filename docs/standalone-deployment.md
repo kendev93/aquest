@@ -132,9 +132,16 @@ docker compose -f docker-compose.yml up -d
 | `SELECTOR_AUTO_SYNC_ENABLED` | `1` | 启动后自动同步在线行情 |
 | `SELECTOR_DISCOVERY_WORKERS` | `1` | 默认仅 1 个评估进程，降低 CPU 压力；设置 `auto` 可按可见 CPU 和内存分配 |
 | `SELECTOR_STRATEGY_POOL_MAX_WORKERS` | `1` | 默认同时研究 1 只；设置正整数或 `auto` 可增加股票并发，评估进程仍受共享预算限制 |
+| `SELECTOR_DUCKDB_THREADS` | `1` | DuckDB 查询线程数，仅注入策略 worker；研究查询都是单标的小查询，默认 1 把 CPU 让给股票并发，设 `0` 恢复 DuckDB 默认 |
+| `OPENBLAS_NUM_THREADS` 等 | `1` | BLAS/OpenMP 线程池上限（另有 `OMP_NUM_THREADS`/`MKL_NUM_THREADS`/`NUMEXPR_MAX_THREADS`）；worker 进程内已默认压到 1，个别负载想放开时显式覆盖 |
 | `SELECTOR_DISCOVERY_MEMORY_BUDGET_MB` | `auto` | 内存预算 |
 | `STRATEGY_WORKER_MEMORY_LIMIT` | 无 | 容器内存上限，如 `6g` |
 | `DATA_DIR` | 无 | 仅在叠加绑定挂载覆盖文件时需要 |
+
+`SELECTOR_DUCKDB_THREADS` 与 BLAS 四变量默认把策略 worker 的「隐形并行」（DuckDB
+查询线程与 BLAS 线程池）压到单线程：单个 worker 不再占满整机 CPU。想让全市场
+研究提速，应在此基础上调大 `SELECTOR_STRATEGY_POOL_MAX_WORKERS` 与
+`SELECTOR_DISCOVERY_WORKERS`——先压隐形并行、再放真实并发，顺序不能反。
 
 
 ### 策略池详情与跟踪升级

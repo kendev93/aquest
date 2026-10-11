@@ -256,7 +256,6 @@ def fast_signal_loop_outputs(
     """
 
     from selector_app.backtest.engine import _trade  # 局部导入避免循环依赖
-
     from selector_app.jit import record_outcome
 
     n_bars = int(opens.shape[0])

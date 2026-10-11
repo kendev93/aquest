@@ -11,7 +11,11 @@ import pytest
 
 from selector_app.market_data.models import InstrumentRef
 from selector_app.market_data.store import DuckDbMarketDataStore, default_data_dir
-from selector_app.market_data.store_base import _WRITE_LOCK, BACKTEST_HISTORY_LIMIT
+from selector_app.market_data.store_base import (
+    _WRITE_LOCK,
+    BACKTEST_HISTORY_LIMIT,
+    _duckdb_threads,
+)
 
 
 def _bars(*rows: tuple[str, str, str, float, str]) -> pd.DataFrame:
@@ -58,6 +62,37 @@ def test_store_initializes_schema_and_reads_one_symbol(tmp_path: Path) -> None:
 
     assert list(frame["date"].dt.strftime("%Y-%m-%d")) == ["2024-01-02", "2024-01-03"]
     assert list(frame["close"]) == [10.0, 11.0]
+
+
+def test_duckdb_threads_config_caps_query_threads(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("SELECTOR_DUCKDB_THREADS", "2")
+    _duckdb_threads.cache_clear()
+    try:
+        store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+        with store.read_session() as connection:
+            assert connection.execute("SELECT current_setting('threads')").fetchone() == (2,)
+    finally:
+        _duckdb_threads.cache_clear()
+
+
+def test_duckdb_threads_ignores_invalid_and_zero_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    reference = DuckDbMarketDataStore(tmp_path / "reference.duckdb")
+    with reference.read_session() as connection:
+        default = connection.execute("SELECT current_setting('threads')").fetchone()
+
+    for value in ("0", "-3", "abc"):
+        monkeypatch.setenv("SELECTOR_DUCKDB_THREADS", value)
+        _duckdb_threads.cache_clear()
+        try:
+            store = DuckDbMarketDataStore(tmp_path / f"capped-{value}.duckdb")
+            with store.read_session() as connection:
+                assert connection.execute("SELECT current_setting('threads')").fetchone() == default
+        finally:
+            _duckdb_threads.cache_clear()
 
 
 def test_store_excludes_provisional_bars_by_default(tmp_path: Path) -> None:

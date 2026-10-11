@@ -17,8 +17,8 @@ import pytest
 
 from selector_app.jit import fast_sim_stats
 from selector_app.market_data.adjustment import CorporateAction
-from selector_app.portfolio_backtest.checkpoint import SimulationCheckpoint
 from selector_app.portfolio_backtest import fast_sim
+from selector_app.portfolio_backtest.checkpoint import SimulationCheckpoint
 from selector_app.portfolio_backtest.context import SortedDateIndex, _StockSeries
 from selector_app.portfolio_backtest.models import (
     SINGLE_SECURITY_RANKING_VALUE,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import time
 from collections.abc import Callable, Mapping
@@ -11,6 +12,15 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event, Thread, get_ident
 from typing import Literal, Protocol, cast
+
+# BLAS/OpenMP 线程池默认按可见 CPU 数展开；研究负载里几乎没有它们能加速的运算，
+# 却足以让单个 worker 占满整机 CPU（多开股票并发反而互相踩踏）。numpy 首次导入
+# 之后再设置就不生效，所以必须放在下面所有 selector_app 导入之前；spawn 出去的
+# 评估子进程继承本进程环境，一并被覆盖。setdefault：用户显式配置的值优先。
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_MAX_THREADS", "1")
 
 from selector_app.backtest.service import BacktestService
 from selector_app.indicators.cache import IndicatorCache

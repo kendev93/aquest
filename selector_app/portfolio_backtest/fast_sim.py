@@ -14,7 +14,7 @@ import logging
 import math
 from bisect import bisect_right
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import pandas as pd
@@ -1275,10 +1275,10 @@ def _build_inputs(
             init_ps_sig[init_n_ps] = int(pending.signal_date)
             init_ps_reason[init_n_ps] = _REASON_LABELS.index(pending.reason)
             init_n_ps += 1
-        for pending in checkpoint.pending_buys:
-            init_pb_slot[init_n_pb] = symbol_slots[pending.symbol]
-            init_pb_sig[init_n_pb] = int(pending.signal_date)
-            init_pb_budget[init_n_pb] = float(pending.budget)
+        for buy in checkpoint.pending_buys:
+            init_pb_slot[init_n_pb] = symbol_slots[buy.symbol]
+            init_pb_sig[init_n_pb] = int(buy.signal_date)
+            init_pb_budget[init_n_pb] = float(buy.budget)
             init_n_pb += 1
         for s, context in enumerate(contexts):
             if context.symbol in checkpoint.cooldown_until:
@@ -1291,16 +1291,18 @@ def _build_inputs(
         assert checkpoint is not None
         # 已应用除权必须逐键还原：否则续跑会对前缀里已处理过的事件重复除权。
         for s, context in enumerate(contexts):
-            position = checkpoint.positions.get(context.symbol)
-            if position is None or not position.applied_corporate_actions:
+            resumed_position = checkpoint.positions.get(context.symbol)
+            if resumed_position is None or not resumed_position.applied_corporate_actions:
                 continue
             keys = action_keys[s]
-            if not position.applied_corporate_actions.issubset(keys):
+            if not resumed_position.applied_corporate_actions.issubset(keys):
                 return None
             for ai, key in enumerate(keys):
-                if key in position.applied_corporate_actions:
+                if key in resumed_position.applied_corporate_actions:
                     init_applied[int(act_offsets[s]) + ai] = True
 
+    # mypy 无法经由 resuming 布尔量推出 checkpoint 非 None；先取一次窄化别名。
+    resumed_checkpoint = checkpoint if resuming else None
     inputs = (
         dates_arr,
         refresh_due,
@@ -1373,9 +1375,9 @@ def _build_inputs(
         init_last_price,
         init_last_seen,
         init_applied,
-        float(checkpoint.cash) if resuming else 0.0,
-        float(checkpoint.peak_value) if resuming else 0.0,
-        float(checkpoint.max_drawdown) if resuming else 0.0,
+        float(resumed_checkpoint.cash) if resumed_checkpoint else 0.0,
+        float(resumed_checkpoint.peak_value) if resumed_checkpoint else 0.0,
+        float(resumed_checkpoint.max_drawdown) if resumed_checkpoint else 0.0,
     )
     return inputs, action_keys, act_offsets
 
@@ -1555,7 +1557,9 @@ def _build_result(
 
     # 续跑时净值/交易前缀直接取自检查点（与原实现的拼接语义一致），
     # 内核输出只覆盖 [resume_start, n_days) 区间。
-    equity: list[dict[str, object]] = list(prefix.equity) if prefix is not None else []
+    equity: list[dict[str, object]] = (
+        cast(list[dict[str, object]], list(prefix.equity)) if prefix is not None else []
+    )
     equity.extend(
         {
             "date": date_texts[day],
@@ -1567,7 +1571,9 @@ def _build_result(
         for day in range(resume_start, n_days)
     )
 
-    trades: list[dict[str, object]] = list(prefix.trades) if prefix is not None else []
+    trades: list[dict[str, object]] = (
+        cast(list[dict[str, object]], list(prefix.trades)) if prefix is not None else []
+    )
     for i in range(int(n_trades)):
         slot = int(t_slot[i])
         context = contexts[slot]
