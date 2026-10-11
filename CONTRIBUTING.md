@@ -44,7 +44,17 @@ cd web-ui && npm run dev
 
 ## 验证
 
-提交前按改动范围跑对应检查（依赖需提前安装）：
+首次跑前先装好依赖，并安装 Playwright 浏览器：
+
+```bash
+python -m pip install -e ".[dev,catalog]"
+cd web-ui
+npm ci
+npx playwright install --with-deps chromium
+cd ..
+```
+
+提交前按改动范围跑对应检查：
 
 ```bash
 sh scripts/verify_ci.sh python      # pytest + 覆盖率、Ruff format/check、mypy
@@ -52,6 +62,37 @@ sh scripts/verify_ci.sh frontend    # Vitest、类型检查、构建、Playwrigh
 sh scripts/verify_ci.sh docker      # Compose 配置与镜像构建
 sh scripts/verify_ci.sh             # 全部
 ```
+
+只想快速验一遍可以手动执行 `sh scripts/verify_ci.sh all --skip-docker`；提交前建议跑完整检查。
+
+不想每次手动跑，可以在克隆后启用 Git Hooks，让 `pre-commit` 与 `pre-push` 自动执行完整检查：
+
+```bash
+sh scripts/install_hooks.sh
+```
+
+### 分语言的具体命令
+
+后端：
+
+```bash
+PYTHONPATH=. pytest --cov=selector_app --cov-report=term-missing
+ruff check selector_app tests
+mypy selector_app
+```
+
+前端：
+
+```bash
+cd web-ui
+npm test
+npm run test:coverage
+npm run typecheck
+npm run build
+npm run e2e
+```
+
+E2E 通过 Playwright 路由模拟 API，不需要真实行情数据库；真实页面运行需要同时启动后端和前端。
 
 ## 提交规范
 
@@ -71,6 +112,14 @@ sh scripts/verify_ci.sh             # 全部
 - `.env.example` 是配置项的唯一参考，新增配置必须同步更新它；
 - **不要提交**：密钥与 token、本地 DuckDB 数据文件、导入的行情数据、缓存、构建产物（`data/vipdoc/` 下的本地行情文件一律不入库）；
 - 涉及 schema 的改动需要说明迁移与备份影响，并补充回归覆盖。
+
+## 改动在线数据接口时
+
+1. 需要调整在线行情接口时，先读 [docs/upstream-api-audit.md](docs/upstream-api-audit.md)；
+2. 修改 `.day` 系数、字段或 DuckDB schema 时，先补迁移/备份和回归测试；
+3. 运行后端公式、导入、协议、回测和 API 集成测试；
+4. 运行前端 typecheck/build 及 E2E；
+5. 检查 `git diff`，确认没有绝对路径依赖、密钥、临时文件或数据库文件。
 
 ## 许可与贡献授权
 

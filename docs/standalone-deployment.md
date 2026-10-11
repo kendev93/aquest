@@ -153,3 +153,52 @@ docker compose -f docker-compose.yml up -d
 回放语义升级会在下一次计划或手动跟踪时重建旧账户检查点；启动时保留策略版本、创建时间和实际上线日期，不会立即重放账户历史。
 
 部署需同步更新后端、前端和策略 worker。新增跟踪消费通道与寻优共享计算预算；旧 worker 不支持新操作。后台自动跟踪默认开启，可用 `SELECTOR_POOL_TRACKING_ENABLED=0` 暂停自动提交，手动刷新仍可使用。迁移为新增表，升级前可按原有流程备份数据卷，无须自动复制整个行情库。
+
+## 行情数据源与可选依赖
+
+行情按用途分两层取源（选型实测见 `docs/archive/datasource-survey-2026-09-20.md`）：
+
+- **日线**：腾讯日 K 为主源，东方财富作为容错备用。两者都免费、无需密钥。
+- **证券目录**：baostock 的 `query_all_stock`（可选依赖，见下），东方财富目录接口兜底。
+
+同步会先检查本地覆盖范围，自动跳过完整区间并补齐缺失区间。在线通道覆盖沪深主板、科创板、创业板。
+
+### 证券目录依赖（`catalog`）
+
+东方财富的 `clist` 目录接口已被封禁，全市场标的发现现在主要靠 baostock。它放在可选依赖 `catalog` 里：
+
+```bash
+python -m pip install -e ".[dev,catalog]"
+```
+
+没装也能正常启动，只是目录会退回东方财富——**而那个接口目前是封禁状态，所以表现是「同步成功但拿不到新标的」**，日志里会有明确告警。Docker 镜像已默认安装。
+
+## 导入通达信本地日线（可选）
+
+容器自带行情同步能力，不依赖任何外部行情软件；这一节只在你想用通达信已下载的日线做覆盖或补全时才需要。
+
+在通达信里执行「盘后数据下载」下载日线，然后把 vipdoc 目录挂进容器：
+
+```bash
+TDX_VIPDOC_PATH=/你的/通达信/vipdoc docker compose \
+  -f docker-compose.yml -f docker-compose.tdx.yml up -d
+docker compose build backend && docker compose \
+  -f docker-compose.yml -f docker-compose.tdx.yml up -d
+```
+
+也可以只挂上级目录 `TDX_HOST_ROOT=...`（挂到容器内 `/host`），之后在页面上填 `/host` 下的任意子路径即可。后端跑在容器里，只能看到已挂载的路径，直接填电脑上的原始目录是找不到的。
+
+之后在「本地行情」页（`/market-data`）点「自动检测」，找到的目录会自动填入；导入按同一只股票同一天覆盖库里已有的行情，目录里没有的日期保持原样。
+
+## 清理历史库里的非股票数据
+
+代码层面已经不再接受 ETF/基金、指数、债券和 B 股，但**升级前同步进来的旧数据还留在库里**。用下面这个脚本清掉（默认只体检，不会改数据；必须先停 backend，DuckDB 是单写者）：
+
+```bash
+docker compose stop backend
+scripts/container_python.sh scripts/prune_non_stock_data.py            # 先看会删什么
+scripts/container_python.sh scripts/prune_non_stock_data.py --apply --yes
+docker compose start backend
+```
+
+删除前会在库文件旁边写一份 `market.duckdb.prune-backup-<时间戳>`，确认无误后自己删掉备份即可（脚本不会自动清理）。指标缓存是可重建的派生数据，会连同被删标的的缓存行一起清掉。
