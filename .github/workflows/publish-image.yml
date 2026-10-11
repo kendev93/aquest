@@ -1,0 +1,161 @@
+name: 发布容器镜像
+
+# 推送 v* 标签时自动构建并发布到 GHCR。公开仓库可匿名拉取，
+# 也可在本页手动触发（不传版本号则只打 latest）。
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 额外的版本标签，例如 v0.1.0；留空则只打 latest
+        required: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  # 通过 env 传递事件上下文，避免直接把 ${{ }} 拼进 shell（防脚本注入）。
+  EVENT_NAME: ${{ github.event_name }}
+  INPUT_TAG: ${{ github.event.inputs.tag }}
+  REF_NAME: ${{ github.ref_name }}
+  OWNER: ${{ github.repository_owner }}
+
+jobs:
+  # 两个镜像 × 两种架构 = 4 个任务。arm64 使用原生 ARM runner 而不是
+  # QEMU 模拟：本项目的 Python 依赖较重，模拟编译会慢一个量级并可能超时。
+  # 原生 ARM runner 对公开仓库免费且不限额度。
+  build:
+    name: 构建 ${{ matrix.variant }} / ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: indicator-lab
+            dockerfile: Dockerfile
+            arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - variant: indicator-lab
+            dockerfile: Dockerfile
+            arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+          - variant: indicator-lab-frontend
+            dockerfile: Dockerfile.frontend
+            arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - variant: indicator-lab-frontend
+            dockerfile: Dockerfile.frontend
+            arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 准备 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 先按摘要推送单个架构的镜像，稍后合并成多架构清单。
+      # 直接打同名 tag 会让后推送的架构把前一个覆盖掉。
+      - name: 按摘要推送
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          sbom: false
+          tags: ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.variant }}
+          outputs: type=image,push-by-digest=true,name-canonical=true
+          cache-from: type=gha,scope=${{ matrix.variant }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}-${{ matrix.arch }}
+
+      - name: 导出摘要
+        run: |
+          mkdir -p /tmp/digests
+          digest='${{ steps.build.outputs.digest }}'
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: 上传摘要
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.variant }}-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+
+  # 把两个架构合并成一份多架构清单，打 latest 与版本标签。
+  # 拉取时会按本机架构自动选择 amd64 或 arm64。
+  #
+  # 摘要下载用精确列举而不是 `digests-${variant}-*` 通配：两个镜像名是
+  # 前缀关系（indicator-lab 与 indicator-lab-frontend），通配会把对方的
+  # 摘要一起捞进来。
+  merge:
+    name: 合并 ${{ matrix.variant }} 的多架构清单
+    runs-on: ubuntu-24.04
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [indicator-lab, indicator-lab-frontend]
+    steps:
+      - name: 准备 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 下载摘要
+        uses: actions/download-artifact@v4
+        with:
+          pattern: digests-${{ matrix.variant }}-amd64,digests-${{ matrix.variant }}-arm64
+          merge-multiple: true
+          path: /tmp/digests
+
+      - name: 计算标签
+        id: meta
+        run: |
+          image="$REGISTRY/$OWNER/${{ matrix.variant }}"
+          version=""
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            version="$INPUT_TAG"
+          else
+            version="$REF_NAME"
+          fi
+          tags="-t $image:latest"
+          # 手动触发且未填版本号时，只更新 latest。
+          if [ -n "$version" ] && [ "$version" != "latest" ]; then
+            tags="$tags -t $image:$version"
+          fi
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+
+      - name: 合并清单
+        run: |
+          set -eu
+          sources=""
+          for d in /tmp/digests/*; do
+            sources="$sources $REGISTRY/$OWNER/${{ matrix.variant }}@sha256:$(basename "$d")"
+          done
+          echo "待合并清单成员：$sources"
+          # shellcheck disable=SC2086
+          docker buildx imagetools create ${{ steps.meta.outputs.tags }} $sources
+
+      - name: 校验清单
+        run: docker buildx imagetools inspect "$REGISTRY/$OWNER/${{ matrix.variant }}:latest"
