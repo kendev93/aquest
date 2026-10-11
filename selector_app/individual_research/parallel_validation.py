@@ -53,8 +53,14 @@ def _evaluate_rule_pair(job: RulePairJob) -> RulePairMetrics:
         raise RuntimeError("买卖规则验证进程尚未初始化")
     ref, train, validation = job
     return (
-        _report_metrics(_WORKER_PORTFOLIO.run_stock(ref, PortfolioBacktestConfig(**train))),
-        _report_metrics(_WORKER_PORTFOLIO.run_stock(ref, PortfolioBacktestConfig(**validation))),
+        _report_metrics(
+            _WORKER_PORTFOLIO.run_stock(ref, PortfolioBacktestConfig(**train), metrics_only=True)
+        ),
+        _report_metrics(
+            _WORKER_PORTFOLIO.run_stock(
+                ref, PortfolioBacktestConfig(**validation), metrics_only=True
+            )
+        ),
     )
 
 

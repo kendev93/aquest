@@ -713,6 +713,7 @@ class IndividualStockResearchService:
         report = self._portfolio_service.run_stock(
             ref,
             _portfolio_config(config, buy_rule, sell_rule, start_date, end_date),
+            metrics_only=True,
         )
         return _report_metrics(report)
 
@@ -824,7 +825,9 @@ class IndividualStockResearchService:
         start_date: date,
         end_date: date,
     ) -> dict[str, object]:
-        return _report_metrics(self._backtest_candidate_report(raw_config, start_date, end_date))
+        return _report_metrics(
+            self._backtest_candidate_report(raw_config, start_date, end_date, metrics_only=True)
+        )
 
     def full_period_metrics(
         self,
@@ -894,6 +897,8 @@ class IndividualStockResearchService:
         raw_config: Mapping[str, object],
         start_date: date,
         end_date: date,
+        *,
+        metrics_only: bool = False,
     ) -> PortfolioBacktestReport:
         payload = dict(raw_config)
         payload["date_mode"] = "custom"
@@ -906,7 +911,7 @@ class IndividualStockResearchService:
         market_code = config.codes[0]
         market, code = market_code.split(":", 1) if ":" in market_code else ("SH", market_code)
         ref = self._adapter.stock_ref(config.vipdoc_path, cast(MarketCode, market), code)
-        return self._portfolio_service.run_stock(ref, config)
+        return self._portfolio_service.run_stock(ref, config, metrics_only=metrics_only)
 
     @staticmethod
     def _risk_progress(

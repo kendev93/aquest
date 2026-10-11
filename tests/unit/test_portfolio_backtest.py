@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Mapping
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -12,9 +13,14 @@ import pandas as pd
 import pytest
 
 from selector_app.adapters.local_day_adapter import StockRef
+from selector_app.individual_research.service import _report_metrics
+from selector_app.jit import fast_sim_stats
 from selector_app.market_data.adjustment import CorporateAction, compute_factor_ratio
 from selector_app.portfolio_backtest.context import SortedDateIndex
-from selector_app.portfolio_backtest.models import PortfolioBacktestConfig
+from selector_app.portfolio_backtest.models import (
+    PortfolioBacktestConfig,
+    PortfolioBacktestReport,
+)
 from selector_app.portfolio_backtest.service import (
     PortfolioBacktestService,
     SimulationCheckpoint,
@@ -420,6 +426,89 @@ def test_run_stock_refreshes_corporate_actions_between_top_level_runs() -> None:
     assert float(refreshed.equity_curve[-1]["total"]) == pytest.approx(100_000.0)
     assert before.data_fingerprint != refreshed.data_fingerprint
     assert refreshed.equity_curve == fresh_service.equity_curve
+
+
+def _trade_directions(report: PortfolioBacktestReport) -> list[tuple[str, bool]]:
+    return [
+        (str(trade["direction"]), bool(trade.get("rejected", False))) for trade in report.trades
+    ]
+
+
+def test_run_stock_metrics_only_matches_full_report_performance() -> None:
+    closes = [10.0, 12.0, 9.0, 11.0] * 20
+    adapter = FakeAdapter()
+    adapter.frames["600000"] = stock_frame(closes)
+    service = PortfolioBacktestService(adapter=adapter)
+    ref = adapter.stock_ref("/tmp/vipdoc", "SH", "600000")
+    settings = config(
+        max_positions=1,
+        initial_cash=100_000.0,
+        take_profit_pct=0.10,
+        stop_loss_pct=0.05,
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 1, 1) + timedelta(days=len(closes) - 1),
+    )
+
+    full = service.run_stock(ref, settings)
+    fast_sim_stats(reset=True)
+    try:
+        metrics = service.run_stock(ref, settings, metrics_only=True)
+    finally:
+        stats = fast_sim_stats(reset=True)
+    # 内核回退时对拍照样「通过」——必须显式断言 metrics_only 真的走了内核。
+    if os.environ.get("SELECTOR_FAST_SIM", "1") != "0":
+        assert stats.get("portfolio:hit") == 1, f"内核未命中（静默回退）：{stats}"
+
+    assert metrics.data_fingerprint == full.data_fingerprint
+    assert metrics.bars == full.bars
+    assert metrics.start_date == full.start_date
+    assert metrics.end_date == full.end_date
+    # 内核与状态机的成交序列一致（方向 + 被拒标记是 _report_metrics 的读取面）。
+    assert _trade_directions(metrics) == _trade_directions(full)
+    assert len(_trade_directions(full)) > 4
+    assert set(metrics.performance) >= {
+        "total_return",
+        "annual_return",
+        "sharpe",
+        "max_drawdown",
+        "win_rate",
+        "payoff_ratio",
+        "profit_factor",
+        "total_trades",
+        "avg_holding_days",
+        "turnover",
+    }
+    for key, value in metrics.performance.items():
+        if value is None:
+            assert full.performance[key] is None
+        else:
+            assert value == pytest.approx(cast("float", full.performance[key]))
+    assert metrics.equity_curve == ()
+    assert _report_metrics(metrics) == _report_metrics(full)
+
+
+def test_run_stock_metrics_only_preflight_no_trade_matches_full_metrics() -> None:
+    closes = [10.0 + index * 0.1 for index in range(30)]
+    adapter = FakeAdapter()
+    adapter.frames["600000"] = stock_frame(closes)
+    service = PortfolioBacktestService(adapter=adapter)
+    ref = adapter.stock_ref("/tmp/vipdoc", "SH", "600000")
+    settings = config(
+        formula_text="BUY:C<0; RANK:C;",
+        max_positions=1,
+        initial_cash=100_000.0,
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 1, 30),
+    )
+
+    full = service.run_stock(ref, settings)
+    metrics = service.run_stock(ref, settings, metrics_only=True)
+
+    assert metrics.data_fingerprint == full.data_fingerprint
+    assert _trade_directions(metrics) == _trade_directions(full) == []
+    assert int(cast("float", metrics.performance["total_trades"])) == 0
+    assert metrics.diagnostic == "预检无可交易候选"
+    assert _report_metrics(metrics) == _report_metrics(full)
 
 
 def test_prepared_context_action_preload_caches_missing_events_as_empty() -> None:

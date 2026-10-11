@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
 from typing import cast
@@ -347,8 +347,15 @@ class PortfolioBacktestService(
         ref: StockRef,
         config: PortfolioBacktestConfig,
         parsed_formula: ParsedFormula | None = None,
+        *,
+        metrics_only: bool = False,
     ) -> PortfolioBacktestReport:
-        """Run the same execution rules for one stock reference."""
+        """Run the same execution rules for one stock reference.
+
+        ``metrics_only`` 走 numba 内核路径并跳过净值/持仓等明细表组装，供规则对
+        初筛这类只读绩效数字的调用方使用；返回的 report 只保证 ``performance``、
+        ``trades``、``data_fingerprint``、``diagnostic`` 与完整路径一致。
+        """
 
         self._refresh_corporate_action_cache()
         parsed = parsed_formula
@@ -361,6 +368,23 @@ class PortfolioBacktestService(
         dates = self._global_dates([context])
         if not dates:
             raise ValueError("股票没有可用于回测的日期")
+        data_fingerprint = context.data_fingerprint
+        if metrics_only:
+            if self._has_preflight_candidates([context], config):
+                simulation = self._simulate([context], dates, config, include_details=False)
+            else:
+                simulation = self._no_trade_simulation(dates, config, include_details=False)
+            summary = self._build_search_summary(config, simulation, data_fingerprint)
+            return replace(
+                self._empty_report(config, 1, {}),
+                processed=1,
+                skipped=0,
+                bars=len(dates),
+                performance=cast("Mapping[str, float | None]", summary["performance"]),
+                trades=tuple(cast("list[Mapping[str, PortfolioJsonValue]]", summary["trades"])),
+                diagnostic=cast("str | None", summary["diagnostic"]),
+                data_fingerprint=data_fingerprint,
+            )
         simulation = self._simulate([context], dates, config)
         return self._build_report(
             config,
@@ -370,7 +394,7 @@ class PortfolioBacktestService(
             0,
             {},
             simulation,
-            context.data_fingerprint,
+            data_fingerprint,
             None,
             [context],
         )
