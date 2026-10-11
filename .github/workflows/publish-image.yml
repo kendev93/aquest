@@ -79,6 +79,13 @@ jobs:
           platforms: ${{ matrix.platform }}
           provenance: false
           sbom: false
+          # 让 GHCR 上的包在入库时就关联到本仓库，从而继承仓库的访问设置、
+          # 并让 Actions 自动获得包权限。注意：可见性不随仓库继承，
+          # 首次推送后仍需手动把包改成 public。
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
           tags: ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.variant }}
           outputs: type=image,push-by-digest=true,name-canonical=true
           cache-from: type=gha,scope=${{ matrix.variant }}-${{ matrix.arch }}
