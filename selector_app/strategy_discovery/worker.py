@@ -261,6 +261,7 @@ class StrategyDiscoveryWorker:
             return self._job_store.is_cancel_requested(job_id)
 
         last_progress_warning_at = 0.0
+        last_progress_sent_at = 0.0
 
         def progress_callback(
             current: int,
@@ -268,7 +269,15 @@ class StrategyDiscoveryWorker:
             phase: str,
             metadata: Mapping[str, object] | None = None,
         ) -> None:
-            nonlocal last_progress_warning_at
+            nonlocal last_progress_warning_at, last_progress_sent_at
+            # 全市场任务的上报由池协调器按 1.5s 节流；单股重跑没有协调器，逐 trial
+            # 的回调会退化成每 trial 一次 HTTP + 后端 DuckDB 写（实测把寻优阶段拖慢
+            # 约 4 倍）。这里按时间统一节流：终态由 run_once 的 completion 更新负责，
+            # 不经过这里，租约续期另有 15s 的心跳线程兜底。
+            now = time.monotonic()
+            if now - last_progress_sent_at < 1.0:
+                return
+            last_progress_sent_at = now
             details = dict(metadata or {})
             raw_progress = details.get("overall_progress")
             progress = (

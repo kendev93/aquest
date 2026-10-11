@@ -192,6 +192,53 @@ def test_worker_continues_when_a_transient_progress_update_fails(tmp_path) -> No
     assert store.read_state("job-1")["status"] == "completed"
 
 
+def test_worker_throttles_bursty_progress_updates(tmp_path) -> None:
+    """逐 trial 的进度回调必须被时间节流：单股重跑没有池协调器，不节流会退
+    化成每 trial 一次 HTTP + 后端 DuckDB 写，实测把寻优拖慢约 4 倍。"""
+
+    class BurstProgressService:
+        def __init__(self, bursts: int) -> None:
+            self.bursts = bursts
+
+        def run(self, request, *, progress_callback=None, abort_check=None):
+            for index in range(self.bursts):
+                if progress_callback is not None:
+                    progress_callback(
+                        index + 1,
+                        self.bursts,
+                        "searching",
+                        {"overall_progress": (index + 1) / self.bursts},
+                    )
+            return {"request": request.to_dict(), "results_by_sharpe": [], "results_by_return": []}
+
+    class CountingStore(StrategyJobStore):
+        def __init__(self, path) -> None:  # type: ignore[no-untyped-def]
+            super().__init__(path)
+            self.progress_updates = 0
+
+        def update(self, job_id, fields=None, **updates):
+            merged = {**dict(fields or {}), **updates}
+            if merged.get("phase") == "searching":
+                self.progress_updates += 1
+            return super().update(job_id, fields, **updates)
+
+    bursts = 20
+    service = BurstProgressService(bursts)
+    store = CountingStore(tmp_path / "jobs")
+    worker = StrategyDiscoveryWorker(store, service)
+    store.create(
+        "job-1",
+        operation="discovery",
+        payload={"request": {"base_config": {}, "splits": {}, "max_trials": 1}},
+        description="策略实验室",
+    )
+
+    assert worker.run_once() == "job-1"
+    # 一秒节流窗内的 20 连发只放行第一次;留 1 次余量防慢机器偶发跨窗。
+    assert 1 <= store.progress_updates <= 2
+    assert store.read_state("job-1")["status"] == "completed"
+
+
 class _StopAfter:
     """Stop the polling loop after ``limit`` iterations, whatever happened."""
 
