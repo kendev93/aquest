@@ -1,0 +1,16 @@
+/** 前端 wire 类型，按领域分文件；这里统一 re-export，import 路径不变。 */
+
+export * from './common'
+export * from './screen'
+export * from './candidate'
+export * from './market'
+export * from './history'
+export * from './portfolio'
+export * from './strategy'
+export * from './factor'
+export * from './condition'
+export * from './swing'
+export * from './individualResearch'
+export * from './strategyPool'
+export * from './stockGroup'
+export * from './manual'

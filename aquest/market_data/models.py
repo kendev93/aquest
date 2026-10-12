@@ -1,0 +1,141 @@
+"""Application-owned market-data contracts and reports."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import date
+from pathlib import Path
+from typing import Literal
+
+MarketCode = Literal["SH", "SZ"]
+# 本系统只研究股票：基金（含 ETF）、债券与指数都不进候选池。基金跟踪同一指数会
+# 产生大量共线标的，指数本身不可交易；两者混进候选池会让横截面排序失去意义。
+# 保留单值 Literal 而不是直接用 str，是为了让非法值在静态检查和运行时都被拒绝。
+InstrumentType = Literal["stock"]
+InstrumentBoard = Literal["main", "star", "chinext"]
+DataSource = Literal["local", "online"]
+# "tencent" / "baostock" are upstream channel ids used for per-source rate-limit
+# accounting and catalog provenance. They are not accepted as
+# ``MarketSyncConfig.provider`` — the online sync channel is still configured as a
+# whole and picks among these upstreams internally (see
+# docs/archive/datasource-survey-2026-09-20.md section VII).
+MarketDataProvider = Literal["eastmoney", "tdx", "tencent", "baostock"]
+ResolvedMarketDataProvider = Literal["eastmoney", "tdx", "tencent", "baostock", "mixed"]
+BarStatus = Literal["completed", "provisional"]
+# 回测历史类型的唯一登记处。新增一种回测要同时满足三处：store 用它校验入库、
+# web 用它约束路由参数、history_compare 用它做中文名映射。把类型放在这里并让
+# 后两处都按 BacktestHistoryType 取键，漏改任何一处都会在静态检查阶段报错，
+# 而不是等到运行时才发现历史存得进去、读不出来。
+BacktestHistoryType = Literal[
+    "single_stock",
+    "portfolio",
+    "strategy_fitness",
+    "condition_research",
+    "swing_research",
+    "individual_research",
+    "factor_test",
+    "factor_attribution",
+]
+
+
+def stored_end_year(status: DataStoreStatus) -> int | None:
+    """Calendar year of the newest stored bar, or None when the store is empty.
+
+    预计算按自然年分批，窗口终点不能取系统当前年份：行情库如果停在较早的年份，
+    「最近五年」会把最该算的那几年切掉。所有触发预计算的入口（手动同步、本地
+    导入、自动同步）都要走这里，保持一致。
+    """
+
+    raw = (status.data_end or "").strip()
+    if not raw:
+        return None
+    try:
+        return date.fromisoformat(raw[:10]).year
+    except ValueError:
+        return None
+
+
+@dataclass(frozen=True)
+class InstrumentRef:
+    """Stable identity for one instrument in the local data store."""
+
+    market: MarketCode
+    code: str
+    instrument_type: InstrumentType
+    source_path: Path | None = None
+    board: InstrumentBoard = "main"
+    name: str | None = None
+    provider: str | None = None
+    bar_count: int | None = None
+    first_date: date | None = None
+    last_date: date | None = None
+    last_close: float | None = None
+
+    @property
+    def symbol(self) -> str:
+        return f"{self.market}{self.code}"
+
+    @property
+    def path(self) -> Path:
+        """Compatibility path for services that only need an identity object."""
+
+        return self.source_path or Path()
+
+
+@dataclass(frozen=True)
+class StockRef:
+    """Compatibility identity used by the original service protocols."""
+
+    market: MarketCode
+    code: str
+    path: Path
+    instrument_type: InstrumentType = "stock"
+    board: InstrumentBoard = "main"
+    name: str | None = None
+    provider: str | None = None
+    bar_count: int | None = None
+    first_date: date | None = None
+    last_date: date | None = None
+    last_close: float | None = None
+
+    @property
+    def symbol(self) -> str:
+        return f"{self.market}{self.code}"
+
+
+@dataclass(frozen=True)
+class DataStoreStatus:
+    """Small status snapshot safe to expose from the local API."""
+
+    database_path: str
+    schema_version: int
+    instrument_count: int
+    bar_count: int
+    data_start: str | None
+    data_end: str | None
+    last_online_sync_at: str | None = None
+    last_online_provider: str | None = None
+    last_online_provider_version: str | None = None
+    market_calendar_latest_date: str | None = None
+    market_calendar_source: str | None = None
+    market_calendar_updated_at: str | None = None
+    last_auto_sync_check_date: str | None = None
+    last_auto_sync_check_session: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "database_path": self.database_path,
+            "schema_version": self.schema_version,
+            "instrument_count": self.instrument_count,
+            "bar_count": self.bar_count,
+            "data_start": self.data_start,
+            "data_end": self.data_end,
+            "last_online_sync_at": self.last_online_sync_at,
+            "last_online_provider": self.last_online_provider,
+            "last_online_provider_version": self.last_online_provider_version,
+            "market_calendar_latest_date": self.market_calendar_latest_date,
+            "market_calendar_source": self.market_calendar_source,
+            "market_calendar_updated_at": self.market_calendar_updated_at,
+            "last_auto_sync_check_date": self.last_auto_sync_check_date,
+            "last_auto_sync_check_session": self.last_auto_sync_check_session,
+        }

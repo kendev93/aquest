@@ -1,0 +1,222 @@
+name: 发布容器镜像
+
+# 推送 v* 标签时自动构建并发布到 GHCR。公开仓库可匿名拉取，
+# 也可在本页手动触发（不传版本号则只打 latest）。
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 额外的版本标签，例如 v0.1.0；留空则只打 latest
+        required: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  # 通过 env 传递事件上下文，避免直接把 ${{ }} 拼进 shell（防脚本注入）。
+  EVENT_NAME: ${{ github.event_name }}
+  INPUT_TAG: ${{ github.event.inputs.tag }}
+  REF_NAME: ${{ github.ref_name }}
+  OWNER: ${{ github.repository_owner }}
+
+jobs:
+  # 两个架构。arm64 使用原生 ARM runner 而不是 QEMU 模拟：本项目的 Python
+  # 依赖较重，模拟编译会慢一个量级并可能超时。
+  # 原生 ARM runner 对公开仓库免费且不限额度。
+  build:
+    name: 构建 ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 准备 Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 先按摘要推送单个架构的镜像，稍后合并成多架构清单。
+      # 直接打同名 tag 会让后推送的架构把前一个覆盖掉。
+      - name: 按摘要推送
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          sbom: false
+          # 让 GHCR 上的包在入库时就关联到本仓库，从而继承仓库的访问设置、
+          # 并让 Actions 自动获得包权限。注意：可见性不随仓库继承，
+          # 首次推送后仍需手动把包改成 public。
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+            org.aquest.build.run-id=${{ github.run_id }}
+          tags: ${{ env.REGISTRY }}/${{ env.OWNER }}/aquest
+          outputs: type=image,push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+      - name: 导出摘要
+        run: |
+          mkdir -p /tmp/digests
+          digest='${{ steps.build.outputs.digest }}'
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: 上传摘要
+        uses: actions/upload-artifact@v7
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+
+  # 把两个架构合并成一份多架构清单，打 latest 与版本标签。
+  # 拉取时会按本机架构自动选择 amd64 或 arm64。
+  merge:
+    name: 合并多架构清单
+    runs-on: ubuntu-24.04
+    needs: build
+    steps:
+      - name: 准备 Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: 登录 GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 下载摘要（amd64）
+        uses: actions/download-artifact@v8
+        with:
+          name: digests-amd64
+          path: /tmp/digests
+
+      - name: 下载摘要（arm64）
+        uses: actions/download-artifact@v8
+        with:
+          name: digests-arm64
+          path: /tmp/digests
+
+      - name: 计算标签
+        id: meta
+        run: |
+          image="$REGISTRY/$OWNER/aquest"
+          version=""
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            version="$INPUT_TAG"
+          else
+            version="$REF_NAME"
+          fi
+          tags="-t $image:latest"
+          # 手动触发且未填版本号时，只更新 latest。
+          if [ -n "$version" ] && [ "$version" != "latest" ]; then
+            tags="$tags -t $image:$version"
+          fi
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+
+      - name: 合并清单
+        run: |
+          set -eu
+          sources=""
+          for d in /tmp/digests/*; do
+            sources="$sources $REGISTRY/$OWNER/aquest@sha256:$(basename "$d")"
+          done
+          echo "待合并清单成员：$sources"
+          # shellcheck disable=SC2086
+          docker buildx imagetools create ${{ steps.meta.outputs.tags }} $sources
+
+      - name: 校验清单
+        run: docker buildx imagetools inspect "$REGISTRY/$OWNER/aquest:latest"
+
+  # 多架构清单就绪后再生成 Release。写权限只在这个 job 上放开，
+  # 上面的构建任务继续维持 contents: read。
+  # 手动触发没有对应的 tag 与提交对象，因此只在推送 tag 时执行。
+  release:
+    name: 生成 Release
+    runs-on: ubuntu-24.04
+    needs: merge
+    if: github.event_name == 'push'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: 生成发布说明
+        run: |
+          set -eu
+          tag="$REF_NAME"
+          image="$REGISTRY/$OWNER/aquest"
+
+          # 首个版本没有可比较的上一个 tag，此时列出该 tag 可达的全部提交。
+          if prev=$(git describe --tags --abbrev=0 "${tag}^" 2>/dev/null); then
+            range="$prev..$tag"
+          else
+            range="$tag"
+          fi
+
+          # 优先取 CHANGELOG.md 里与 tag 对应的版本段落（标题兼容带/不带 v 前缀）；
+          # 找不到对应条目时回退为列出自上个 tag 以来的提交。
+          ver="${tag#v}"
+          changelog_section=""
+          if [ -f CHANGELOG.md ]; then
+            changelog_section=$(awk -v ver="$ver" '
+              $0 ~ "^## \\[v?" ver "\\]" { found=1; next }
+              found && /^## / { exit }
+              found { print }
+            ' CHANGELOG.md | sed '/./,$!d')
+          fi
+
+          {
+            printf '容器镜像已发布到 GitHub 容器仓库，同时提供 amd64 与 arm64。\n\n'
+            printf '## 安装运行\n\n'
+            printf '```bash\n'
+            printf 'export AQUEST_IMAGE=%s:%s\n' "$image" "$tag"
+            printf 'docker compose pull\n'
+            printf 'docker compose up -d --no-build\n'
+            printf '```\n\n'
+            printf '随后访问 <http://127.0.0.1:5173/aquest>。完整用法与配置项见仓库内的 README 与 `docs/standalone-deployment.md`。\n\n'
+            printf '## 更新内容\n\n'
+            if [ -n "$changelog_section" ]; then
+              printf '%s\n' "$changelog_section"
+            else
+              git log --no-merges --pretty='- %s' "$range"
+            fi
+          } > /tmp/release-notes.md
+
+      - name: 创建或更新 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          # 同一 tag 重跑流水线时改为更新已有的 Release，而不是让命令报错。
+          if gh release view "$REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$REF_NAME" --notes-file /tmp/release-notes.md
+          else
+            gh release create "$REF_NAME" --title "$REF_NAME" --notes-file /tmp/release-notes.md
+          fi

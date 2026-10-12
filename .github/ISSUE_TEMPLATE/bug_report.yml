@@ -1,0 +1,82 @@
+name: 问题反馈
+description: 报告无法正常工作的行为、计算结果异常或崩溃
+labels: ["bug"]
+body:
+  - type: markdown
+    value: |
+      感谢反馈。提交前请先搜一下是否已有同类问题。
+
+      **请勿在此粘贴密钥、token 或数据库文件。** 行情库（`market.duckdb`）含有你的本地数据，不要作为附件上传。
+  - type: dropdown
+    id: mode
+    attributes:
+      label: 运行方式
+      options:
+        - Docker Compose
+        - 本地源码启动
+        - 其他 / 不确定
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: Docker 镜像标签，或执行 `git rev-parse --short HEAD` 得到的提交号
+    validations:
+      required: true
+  - type: dropdown
+    id: page
+    attributes:
+      label: 出现在哪个页面
+      options:
+        - 公式选股 /aquest
+        - 买卖条件研究 /condition-research
+        - 动态组合回测 /portfolio-backtest
+        - 策略实验室 /strategy-lab
+        - 策略适配性 /strategy-fitness
+        - 个股研究 /individual-research
+        - 波段研究 /swing-research
+        - 全市场策略池 /strategy-pool
+        - 因子检验 /factor-test
+        - 因子归因 /factor-attribution
+        - 标的检验台 /instrument-lab
+        - 候选库 /candidate-library
+        - 回测历史对比 /history-compare
+        - 策略追踪 /strategy-tracking
+        - 本地行情 /market-data
+        - 使用手册 /user-manual
+        - 启动 / 部署（不涉及具体页面）
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 打开某个页面
+        2. 设置……
+        3. 点击……
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际发生了什么
+      description: 用户可见的表现；截图或导出的结果直接贴在这里
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: 期望发生什么
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志或报错
+      description: Docker 部署可用 `docker compose logs backend` 查看；本地启动直接复制终端输出
+      render: shell
+    validations:
+      required: false

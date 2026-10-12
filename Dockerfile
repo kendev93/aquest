@@ -1,0 +1,56 @@
+FROM node:26-alpine AS web-build
+
+WORKDIR /webui
+COPY web-ui/package.json web-ui/package-lock.json ./
+RUN npm ci
+COPY web-ui ./
+RUN npm run build
+
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app
+
+# nginx 提供前端静态文件并反代 /api，supervisor 同时托管 nginx 与 uvicorn：
+# 部署侧只剩一个镜像，WEB_PORT 指向容器内 nginx(8080)，API_PORT 直连 uvicorn(8123)。
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y libgomp1 nginx supervisor \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt ./requirements.txt
+RUN python -m pip install --no-cache-dir --require-hashes -r requirements.txt
+
+COPY README.md LICENSE THIRD_PARTY_NOTICES.md ./
+COPY aquest ./aquest
+# 运行时刻意不把 aquest 装成 Python 包：源码已经在 /app 里、WORKDIR 就是 /app，
+# `import aquest` 直接可用；镜像里也没有任何地方读 aquest 自身的包元数据
+# （strategy_discovery/service.py 的 _package_version 只查 optuna 和 lightgbm）。
+#
+# 所以这里不走 `pip install '.[catalog]'`：那会触发 PEP 517 构建隔离，每次构建都要额外
+# 联网拉 hatchling，代理一关就 SSL EOF 失败，而装出来的东西我们根本用不上。
+# catalog extra 里唯一的包 baostock（全市场标的发现通道，见
+# docs/datasource-survey-2026-09-20.md）已并入 requirements.txt，跟着上面那层一起装。
+#
+# 副作用：源码变化不再让 pip 重装，构建只剩「拉 baostock 等 wheel」这一处联网点。
+RUN python -m pip check \
+    && python -c "import aquest, baostock; print('AQuest runtime ready')"
+
+# 前端静态资源由 node 阶段构建，nginx 的站点根目录就是它。
+COPY --from=web-build /webui/dist/ /usr/share/nginx/html/
+COPY docker/nginx.conf /etc/nginx/nginx.conf
+COPY docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+
+RUN useradd --create-home --uid 10001 appuser \
+    && mkdir -p /data/vipdoc /data/market \
+    && chown -R appuser:appuser /app /data /usr/share/nginx/html
+USER appuser
+
+EXPOSE 8123 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"
+
+CMD ["supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]

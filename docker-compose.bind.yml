@@ -1,0 +1,25 @@
+# 把数据目录换成用户自己管理的宿主目录。
+#
+#   DATA_DIR=/srv/aquest docker compose \
+#     -f docker-compose.yml \
+#     -f docker-compose.bind.yml up -d
+#
+# 只改变命名卷的落盘位置，服务定义完全不动，因此不存在多个文件里
+# volumes 列表谁覆盖谁的问题。
+#
+# ⚠️ 绑定挂载时 Docker **不会**把镜像里的目录属主带过来，宿主目录必须
+#    允许容器内的 appuser(uid 10001) 写入，否则容器启动即失败：
+#
+#     sudo mkdir -p "$DATA_DIR"
+#     sudo chown 10001:10001 "$DATA_DIR"
+#
+#    群晖/NAS、以及 macOS/Windows 上的共享目录往往无法这样改属主，
+#    那种情况下请直接用默认的命名卷。
+
+volumes:
+  aquest-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_DIR:?请设置 DATA_DIR 为宿主目录}

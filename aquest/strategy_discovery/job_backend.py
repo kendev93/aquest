@@ -1,0 +1,740 @@
+"""Backend implementations for persistent strategy discovery jobs."""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import replace
+from datetime import date, datetime, timezone
+from typing import Literal, Protocol, cast
+
+from aquest.market_data.adapter import (
+    BatchMarketDataAdapter,
+    DuckDbMarketDataAdapter,
+)
+from aquest.market_data.models import InstrumentBoard, InstrumentType
+from aquest.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
+from aquest.screening.jobs import ScreenJobRunner, TaskCancelledError, TaskUserError
+
+from .duckdb_job_store import DuckDbStrategyJobStore
+from .job_store import (
+    DEFAULT_STALE_AFTER_SECONDS,
+    JobOperation,
+    StrategyJobStore,
+    is_job_operation,
+)
+from .models import DiscoveryRequest
+from .refinement import discovery_request_from_dict
+from .replay import ReplayLeaderboard
+from .replay_service import ReplayProgressCallback
+from .resources import (
+    DiscoveryResourceBudgetError,
+    DiscoveryResourceEstimate,
+    estimate_discovery_resources,
+)
+from .service import ProgressCallback
+from .snapshot import snapshot_window
+
+logger = logging.getLogger(__name__)
+
+
+class StrategyJobBackend(Protocol):
+    """Common interface consumed by the strategy discovery API router."""
+
+    def preflight(self, request: DiscoveryRequest) -> DiscoveryResourceEstimate | None: ...
+
+    def preflight_operation(
+        self,
+        operation: JobOperation,
+        payload: Mapping[str, object],
+    ) -> DiscoveryResourceEstimate | None: ...
+
+    def submit(
+        self,
+        operation: JobOperation,
+        payload: Mapping[str, object],
+        *,
+        description: str,
+        worker_count: int | None = None,
+        metadata: Mapping[str, object] | None = None,
+    ) -> str: ...
+
+    def get(self, job_id: str) -> dict[str, object] | None: ...
+
+    def result(self, job_id: str) -> dict[str, object] | None: ...
+
+    def cancel(self, job_id: str) -> bool: ...
+
+    def active_snapshots(
+        self,
+        descriptions: Iterable[str] | None = None,
+    ) -> list[dict[str, object]]: ...
+
+    def risk_optimization_history(
+        self,
+        *,
+        limit: int,
+        offset: int,
+    ) -> dict[str, object]: ...
+
+
+class FileStrategyJobBackend:
+    """Compatibility backend for legacy tests using file-backed job state."""
+
+    def __init__(
+        self,
+        store: DuckDbMarketDataStore,
+        job_store: StrategyJobStore | DuckDbStrategyJobStore,
+        *,
+        worker_count: int | None = None,
+        market_data_adapter: BatchMarketDataAdapter | None = None,
+    ) -> None:
+        self._store = store
+        self._job_store = job_store
+        self._worker_count = worker_count
+        self._market_data_adapter: BatchMarketDataAdapter = (
+            market_data_adapter or DuckDbMarketDataAdapter(store)
+        )
+
+    def preflight(self, request: DiscoveryRequest) -> DiscoveryResourceEstimate:
+        return self._preflight_request(request)
+
+    def preflight_operation(
+        self,
+        operation: JobOperation,
+        payload: Mapping[str, object],
+    ) -> DiscoveryResourceEstimate | None:
+        if operation in {"discovery", "risk_optimization"}:
+            raw_request = payload.get("request")
+            if not isinstance(raw_request, Mapping):
+                raise ValueError("策略实验请求内容无效")
+            request = discovery_request_from_dict(raw_request)
+        elif operation == "refinement":
+            experiment = _mapping(payload.get("experiment"), "父实验")
+            raw_request = experiment.get("request")
+            if not isinstance(raw_request, Mapping):
+                raise ValueError("父实验请求内容无效")
+            request = discovery_request_from_dict(raw_request)
+        elif operation == "replay":
+            experiment = _mapping(payload.get("experiment"), "复核实验")
+            raw_request = experiment.get("request")
+            if not isinstance(raw_request, Mapping):
+                raise ValueError("复核实验请求内容无效")
+            request = _replay_resource_request(
+                discovery_request_from_dict(raw_request),
+                self._store,
+                self._market_data_adapter,
+            )
+        elif operation in {"market_strategy_pool", "market_strategy_pool_tracking"}:
+            # The pool is processed one security at a time in the worker. A
+            # whole-universe row-count estimate would reject valid long runs
+            # before the incremental checkpointing path can help.
+            return None
+        else:
+            raise ValueError("策略任务类型无效")
+        return self._preflight_request(request)
+
+    def _preflight_request(self, request: DiscoveryRequest) -> DiscoveryResourceEstimate:
+        base = request.base_config
+        instrument_types = cast(
+            tuple[InstrumentType, ...] | None,
+            _string_tuple(base.get("instrument_types")),
+        )
+        boards = cast(
+            tuple[InstrumentBoard, ...] | None,
+            _string_tuple(base.get("boards")),
+        )
+        adapter = self._market_data_adapter
+        refs = adapter.list_stock_refs(
+            str(base.get("vipdoc_path") or ""),
+            str(base.get("universe") or "all"),
+            str(base["universe_file"]) if base.get("universe_file") else None,
+            instrument_types=instrument_types,
+            boards=boards,
+        )
+        if not refs:
+            raise ValueError("行情数据库没有可用日线，请先同步行情")
+        window = snapshot_window(request)
+        row_count = adapter.count_many_stocks(
+            refs,
+            start_date=window.start,
+            end_date=window.end,
+        )
+        if row_count <= 0:
+            raise ValueError("行情数据库没有可用日线，请先同步行情")
+        estimate = estimate_discovery_resources(
+            row_count,
+            requested_workers=self._worker_count,
+        )
+        if not estimate.within_budget:
+            raise DiscoveryResourceBudgetError(estimate)
+        return estimate
+
+    def submit(
+        self,
+        operation: JobOperation,
+        payload: Mapping[str, object],
+        *,
+        description: str,
+        worker_count: int | None = None,
+        metadata: Mapping[str, object] | None = None,
+    ) -> str:
+        job_id = uuid.uuid4().hex
+        self._job_store.create(
+            job_id,
+            operation=operation,
+            payload=payload,
+            description=description,
+            worker_count=worker_count if worker_count is not None else self._worker_count,
+        )
+        if metadata:
+            self._job_store.update(job_id, metadata=metadata)
+        return job_id
+
+    def get(self, job_id: str) -> dict[str, object] | None:
+        try:
+            self._job_store.recover_stale_running(stale_after_seconds=DEFAULT_STALE_AFTER_SECONDS)
+            state = self._job_store.read_state(job_id)
+        except ValueError:
+            return None
+        if state is None:
+            return None
+        self._reconcile_completed(job_id, state)
+        refreshed = self._job_store.read_state(job_id)
+        return refreshed or state
+
+    def result(self, job_id: str) -> dict[str, object] | None:
+        try:
+            self._job_store.recover_stale_running(stale_after_seconds=DEFAULT_STALE_AFTER_SECONDS)
+            state = self._job_store.read_state(job_id)
+        except ValueError:
+            return None
+        if state is None:
+            return None
+        self._reconcile_completed(job_id, state)
+        return self._job_store.read_result(job_id)
+
+    def cancel(self, job_id: str) -> bool:
+        try:
+            return self._job_store.request_cancel(job_id)
+        except ValueError:
+            return False
+
+    def active_snapshots(
+        self,
+        descriptions: Iterable[str] | None = None,
+    ) -> list[dict[str, object]]:
+        try:
+            self._job_store.recover_stale_running(stale_after_seconds=DEFAULT_STALE_AFTER_SECONDS)
+            return self._job_store.active_snapshots(descriptions)
+        except (OSError, ValueError):
+            logger.exception("策略活动任务状态读取失败")
+            return []
+
+    def risk_optimization_history(
+        self,
+        *,
+        limit: int,
+        offset: int,
+    ) -> dict[str, object]:
+        history_reader = getattr(self._job_store, "list_risk_optimization_history", None)
+        if not callable(history_reader):
+            return {"items": [], "total": 0, "limit": limit, "offset": offset}
+        return cast(dict[str, object], history_reader(limit=limit, offset=offset))
+
+    def _reconcile_completed(self, job_id: str, state: Mapping[str, object]) -> None:
+        if state.get("status") != "completed":
+            return
+        metadata = state.get("metadata")
+        if isinstance(metadata, Mapping) and metadata.get("history_persisted") is True:
+            return
+        request = self._job_store.read_request(job_id)
+        result = self._job_store.read_result(job_id)
+        if request is None or result is None:
+            return
+        operation = request.get("operation")
+        if not is_job_operation(operation):
+            return
+        try:
+            normalized = decorate_result(
+                job_id,
+                operation,
+                result,
+                started_at=result.get("started_at"),
+            )
+            _persist_result(self._store, operation, job_id, normalized)
+            self._job_store.update(
+                job_id,
+                metadata={"history_persisted": True, "history_persistence_error": None},
+            )
+        except (MarketDataStoreError, OSError, RuntimeError, ValueError) as exc:
+            logger.exception("策略任务结果持久化失败: %s", job_id)
+            self._job_store.update(
+                job_id,
+                metadata={"history_persistence_error": str(exc)[:500]},
+            )
+
+
+class DuckDbStrategyJobBackend(FileStrategyJobBackend):
+    """Persist queued jobs in the same DuckDB as app histories and caches."""
+
+    def __init__(
+        self,
+        store: DuckDbMarketDataStore,
+        job_store: DuckDbStrategyJobStore,
+        *,
+        worker_count: int | None = None,
+        market_data_adapter: BatchMarketDataAdapter | None = None,
+    ) -> None:
+        super().__init__(
+            store,
+            job_store,
+            worker_count=worker_count,
+            market_data_adapter=market_data_adapter,
+        )
+
+
+class InProcessStrategyJobBackend:
+    """Compatibility backend for tests that inject a fake discovery service."""
+
+    def __init__(
+        self,
+        store: DuckDbMarketDataStore,
+        runner: ScreenJobRunner,
+        service: StrategyDiscoveryServiceLike,
+    ) -> None:
+        self._store = store
+        self._runner = runner
+        self._service = service
+
+    def preflight(self, request: DiscoveryRequest) -> None:
+        return None
+
+    def preflight_operation(
+        self,
+        operation: JobOperation,
+        payload: Mapping[str, object],
+    ) -> None:
+        return None
+
+    def submit(
+        self,
+        operation: JobOperation,
+        payload: Mapping[str, object],
+        *,
+        description: str,
+        worker_count: int | None = None,
+        metadata: Mapping[str, object] | None = None,
+    ) -> str:
+        job_id = uuid.uuid4().hex
+
+        def task(progress: Callable[[int, int], None]) -> dict[str, object]:
+            started_at = _utc_now_text()
+
+            def report_progress(
+                current: int,
+                total: int,
+                phase: str,
+                metadata: Mapping[str, object] | None = None,
+            ) -> None:
+                progress(current, total)
+                raw_progress = (metadata or {}).get("overall_progress")
+                self._runner.update_callable_state(
+                    job_id,
+                    phase=phase,
+                    metadata=dict(metadata or {}),
+                    progress=(
+                        float(raw_progress) if isinstance(raw_progress, (int, float)) else None
+                    ),
+                )
+
+            try:
+                result = _dispatch(
+                    self._service,
+                    operation,
+                    payload,
+                    progress_callback=report_progress,
+                    abort_check=lambda: self._runner.is_cancel_requested(job_id),
+                )
+                normalized = decorate_result(job_id, operation, result, started_at=started_at)
+                completion = completion_state(operation, normalized)
+                self._runner.update_callable_state(
+                    job_id,
+                    phase="completed",
+                    metadata=cast(dict[str, object], completion["metadata"]),
+                    progress=1.0,
+                    errors=cast(int | None, completion.get("errors")),
+                    total_candidates=cast(int | None, completion.get("total_candidates")),
+                    total_scanned=cast(int | None, completion.get("total_scanned")),
+                )
+                _persist_result(self._store, operation, job_id, normalized)
+                return normalized
+            except RuntimeError as exc:
+                if self._runner.is_cancel_requested(job_id):
+                    raise TaskCancelledError("策略实验已取消") from exc
+                raise TaskUserError(str(exc)) from exc
+            except (ValueError, MarketDataStoreError, OSError) as exc:
+                if self._runner.is_cancel_requested(job_id):
+                    raise TaskCancelledError("策略实验已取消") from exc
+                raise TaskUserError(str(exc)) from exc
+
+        self._runner.submit_callable(
+            task,
+            description=description,
+            worker_count=1,
+            job_id=job_id,
+        )
+        if metadata:
+            self._runner.update_callable_state(job_id, metadata=dict(metadata))
+        return job_id
+
+    def get(self, job_id: str) -> dict[str, object] | None:
+        state = self._runner.get(job_id)
+        if state is None:
+            return None
+        snapshot = state.snapshot()
+        snapshot["result"] = None
+        snapshot.setdefault("error_code", None)
+        return snapshot
+
+    def result(self, job_id: str) -> dict[str, object] | None:
+        state = self._runner.get(job_id)
+        if state is None or state.status != "completed":
+            return None
+        return dict(state.result_payload) if state.result_payload is not None else None
+
+    def cancel(self, job_id: str) -> bool:
+        return self._runner.request_cancel(job_id)
+
+    def active_snapshots(
+        self,
+        descriptions: Iterable[str] | None = None,
+    ) -> list[dict[str, object]]:
+        return self._runner.active_snapshots(descriptions)
+
+    def risk_optimization_history(
+        self,
+        *,
+        limit: int,
+        offset: int,
+    ) -> dict[str, object]:
+        # This compatibility backend keeps results in memory and has no durable history.
+        return {"items": [], "total": 0, "limit": limit, "offset": offset}
+
+
+class StrategyDiscoveryServiceLike(Protocol):
+    def run(
+        self,
+        request: DiscoveryRequest,
+        *,
+        progress_callback: ProgressCallback | None = None,
+        abort_check: Callable[[], bool] | None = None,
+    ) -> dict[str, object]: ...
+
+    def refine(
+        self,
+        experiment: Mapping[str, object],
+        parent_candidate_hash: str,
+        *,
+        max_trials: int | None = None,
+        seed: int | None = None,
+        radius: Literal["medium"] = "medium",
+        progress_callback: ProgressCallback | None = None,
+        abort_check: Callable[[], bool] | None = None,
+    ) -> dict[str, object]: ...
+
+    def replay(
+        self,
+        experiment: Mapping[str, object],
+        leaderboard: ReplayLeaderboard,
+        *,
+        progress_callback: ReplayProgressCallback | None = None,
+        abort_check: Callable[[], bool] | None = None,
+    ) -> dict[str, object]: ...
+
+
+def _dispatch(
+    service: StrategyDiscoveryServiceLike,
+    operation: JobOperation,
+    payload: Mapping[str, object],
+    *,
+    progress_callback: ProgressCallback,
+    abort_check: Callable[[], bool],
+) -> dict[str, object]:
+    if operation in {"discovery", "risk_optimization"}:
+        raw_request = payload.get("request")
+        if not isinstance(raw_request, Mapping):
+            raise ValueError("策略实验请求内容无效")
+        result = dict(
+            service.run(
+                discovery_request_from_dict(raw_request),
+                progress_callback=progress_callback,
+                abort_check=abort_check,
+            )
+        )
+        if operation == "risk_optimization":
+            result["mode"] = "risk_optimization"
+        return result
+    if operation == "refinement":
+        experiment = _mapping(payload.get("experiment"), "父实验")
+        parent_hash = _required_string(payload.get("parent_candidate_hash"), "父候选 hash")
+        radius = str(payload.get("radius") or "medium")
+        if radius != "medium":
+            raise ValueError("策略二次优化范围无效")
+        return dict(
+            service.refine(
+                experiment,
+                parent_hash,
+                max_trials=_optional_int(payload.get("max_trials")),
+                seed=_optional_int(payload.get("seed")),
+                radius="medium",
+                progress_callback=progress_callback,
+                abort_check=abort_check,
+            )
+        )
+    if operation == "replay":
+        experiment = _mapping(payload.get("experiment"), "复核实验")
+        leaderboard = str(payload.get("leaderboard") or "")
+        if leaderboard not in {"sharpe", "return"}:
+            raise ValueError("策略复核榜单类型无效")
+        return dict(
+            service.replay(
+                experiment,
+                cast(ReplayLeaderboard, leaderboard),
+                progress_callback=progress_callback,
+                abort_check=abort_check,
+            )
+        )
+    if operation in {"market_strategy_pool", "market_strategy_pool_tracking"}:
+        raise ValueError("全市场策略池任务只能由策略 worker 执行")
+    raise ValueError("策略任务类型无效")
+
+
+def decorate_result(
+    job_id: str,
+    operation: JobOperation,
+    result: Mapping[str, object],
+    *,
+    started_at: object | None = None,
+) -> dict[str, object]:
+    """Add stable task/history identifiers and timestamps to worker results."""
+
+    normalized = dict(result)
+    started = str(started_at or normalized.get("started_at") or _utc_now_text())
+    finished = str(normalized.get("finished_at") or _utc_now_text())
+    normalized["started_at"] = started
+    normalized["finished_at"] = finished
+    if operation in {"discovery", "refinement"}:
+        normalized["history_id"] = job_id
+        raw_duration = normalized.get("duration_seconds")
+        if not isinstance(raw_duration, (int, float)):
+            normalized["duration_seconds"] = _duration_seconds(started, finished)
+    elif operation == "risk_optimization":
+        normalized["risk_optimization_id"] = job_id
+        raw_duration = normalized.get("duration_seconds")
+        if not isinstance(raw_duration, (int, float)):
+            normalized["duration_seconds"] = _duration_seconds(started, finished)
+    elif operation in {"market_strategy_pool", "market_strategy_pool_tracking"}:
+        normalized["strategy_pool_job_id"] = job_id
+        raw_duration = normalized.get("duration_seconds")
+        if not isinstance(raw_duration, (int, float)):
+            normalized["duration_seconds"] = _duration_seconds(started, finished)
+    else:
+        normalized["replay_id"] = job_id
+        raw_duration = normalized.get("duration_seconds")
+        if not isinstance(raw_duration, (int, float)):
+            normalized["duration_seconds"] = _duration_seconds(started, finished)
+    return normalized
+
+
+def completion_state(operation: JobOperation, result: Mapping[str, object]) -> dict[str, object]:
+    """Build the public job metadata emitted when an operation completes."""
+
+    if operation in {"discovery", "risk_optimization", "refinement"}:
+        search_metadata = result.get("search_metadata")
+        search = search_metadata if isinstance(search_metadata, Mapping) else {}
+        metadata: dict[str, object] = {
+            "overall_progress": 1.0,
+            "estimated_seconds_remaining": 0.0,
+            "requested_trials": search.get("requested_trials"),
+            "evaluated_trials": search.get("evaluated_trials"),
+            "unique_evaluated_trials": search.get("unique_evaluated_trials"),
+            "duplicate_trials": search.get("duplicate_trials"),
+            "stage_durations_seconds": result.get("stage_durations_seconds"),
+        }
+        if operation == "refinement":
+            metadata["refinement"] = True
+        return {
+            "metadata": metadata,
+            "total_candidates": _nonnegative_int(search.get("requested_trials")),
+            "total_scanned": _nonnegative_int(search.get("evaluated_trials")),
+        }
+    if operation in {"market_strategy_pool", "market_strategy_pool_tracking"}:
+        completed = _nonnegative_int(result.get("completed_symbols"))
+        failed = _nonnegative_int(result.get("failed_symbols"))
+        total = _nonnegative_int(result.get("total_symbols"))
+        return {
+            "metadata": {
+                "overall_progress": 1.0,
+                "completed_symbols": completed,
+                "skipped_symbols": _nonnegative_int(result.get("skipped_symbols")),
+                "failed_symbols": failed,
+                "total_symbols": total,
+                "finished_at": result.get("finished_at"),
+                "duration_seconds": result.get("duration_seconds", 0.0),
+            },
+            "errors": failed,
+            "total_candidates": total,
+            "total_scanned": completed + failed,
+        }
+    diagnostics = result.get("diagnostics")
+    raw_candidate_count = result.get("candidate_count")
+    candidate_count = _nonnegative_int(raw_candidate_count)
+    return {
+        "metadata": {
+            "overall_progress": 1.0,
+            "candidate_count": candidate_count,
+            "data_changed": result.get("data_changed", False),
+            "finished_at": result.get("finished_at"),
+            "duration_seconds": result.get("duration_seconds", 0.0),
+        },
+        "errors": len(diagnostics) if isinstance(diagnostics, Mapping) else 0,
+        "total_candidates": candidate_count,
+        "total_scanned": candidate_count,
+    }
+
+
+def _persist_result(
+    store: DuckDbMarketDataStore,
+    operation: JobOperation,
+    job_id: str,
+    result: Mapping[str, object],
+) -> None:
+    if operation in {"discovery", "refinement"}:
+        store.save_strategy_discovery_history(
+            job_id,
+            result,
+            started_at=str(result.get("started_at") or ""),
+            finished_at=str(result.get("finished_at") or ""),
+        )
+        return
+    if operation == "risk_optimization":
+        # The worker job row itself retains the full request/result JSON.  Risk
+        # optimization runs are not strategy-discovery histories and therefore
+        # must not appear in that separate history table.
+        return
+    if operation in {"market_strategy_pool", "market_strategy_pool_tracking"}:
+        # Per-symbol records are already persisted as worker checkpoints.
+        return
+    store.save_strategy_discovery_replay_history(
+        job_id,
+        result,
+        started_at=str(result.get("started_at") or ""),
+        finished_at=str(result.get("finished_at") or ""),
+        duration_seconds=_duration_value(result.get("duration_seconds")),
+    )
+
+
+def _mapping(value: object, label: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label}内容无效")
+    return value
+
+
+def _required_string(value: object, label: str) -> str:
+    result = str(value or "").strip()
+    if not result:
+        raise ValueError(f"{label}不能为空")
+    return result
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise ValueError("策略任务整数参数无效")
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError("策略任务整数参数无效") from exc
+
+
+def _utc_now_text() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _duration_seconds(started_at: str, finished_at: str) -> float:
+    try:
+        started = datetime.fromisoformat(started_at)
+        finished = datetime.fromisoformat(finished_at)
+        return max(0.0, (finished - started).total_seconds())
+    except ValueError:
+        return 0.0
+
+
+def _duration_value(value: object) -> float | None:
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def _nonnegative_int(value: object) -> int:
+    if isinstance(value, bool):
+        return 0
+    try:
+        return max(0, int(value)) if isinstance(value, (int, float, str)) else 0
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+__all__ = [
+    "DuckDbStrategyJobBackend",
+    "FileStrategyJobBackend",
+    "InProcessStrategyJobBackend",
+    "StrategyDiscoveryServiceLike",
+    "StrategyJobBackend",
+    "completion_state",
+    "decorate_result",
+]
+
+
+def _string_tuple(value: object) -> tuple[str, ...] | None:
+    if not isinstance(value, (list, tuple)):
+        return None
+    values = tuple(str(item).strip() for item in value if str(item).strip())
+    return values or None
+
+
+def _replay_resource_request(
+    request: DiscoveryRequest,
+    store: DuckDbMarketDataStore,
+    market_data_adapter: BatchMarketDataAdapter | None = None,
+) -> DiscoveryRequest:
+    selected_adapter = market_data_adapter or DuckDbMarketDataAdapter(store)
+    status_reader = getattr(selected_adapter, "status", None)
+    store_status = status_reader() if callable(status_reader) else store.status()
+    start = _parse_date(request.base_config.get("start_date"))
+    end = _parse_date(store_status.data_end)
+    if start is None:
+        start = _parse_date(store_status.data_start)
+    if start is None or end is None:
+        raise ValueError("本地 DuckDB 没有可用于全量复核的已完成日线")
+    if start > end:
+        raise ValueError("全量复核开始日期晚于本地最新行情日")
+    base = {**request.base_config, "start_date": start.isoformat(), "end_date": end.isoformat()}
+    return replace(
+        request,
+        base_config=base,
+        splits={"search": {"start_date": start.isoformat(), "end_date": end.isoformat()}},
+    )
+
+
+def _parse_date(value: object) -> date | None:
+    if isinstance(value, date):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None

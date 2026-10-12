@@ -1,0 +1,194 @@
+"""Configuration for swing segmentation studies."""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from datetime import date
+
+from aquest.market_data.models import InstrumentBoard, InstrumentType
+
+from .labels import ALL_LABELS, DEFAULT_HORIZON, LabelKind
+from .scoring import (
+    DEFAULT_BLOCK_SIZE,
+    MIN_CROSS_SECTION,
+)
+from .segments import ATR_WINDOW, DEFAULT_MIN_BARS, DEFAULT_REVERSAL_MULTIPLE
+
+#: Reference thresholds swept by default. They are deliberately spread around
+#: the 3-ATR default: a leg that only survives at 2 ATR is usually noise, one
+#: that only shows up at 4 ATR is rare enough to be hard to study.
+REFERENCE_MULTIPLES: tuple[float, ...] = (2.0, 3.0, 4.0)
+DEFAULT_STOCK_LIMIT = 5_000
+DEFAULT_STUDY_PERMUTATIONS = 500
+
+
+@dataclass(frozen=True)
+class SwingOverviewConfig:
+    """One request to describe how a market moves, before scoring indicators.
+
+    The study deliberately sweeps several ``reversal_multiples`` in a single
+    pass. Picking a threshold from a single run is guesswork; seeing how the
+    segment count and the median travel move together is not.
+    """
+
+    universe: str = "all"
+    instrument_types: tuple[InstrumentType, ...] = ("stock",)
+    boards: tuple[InstrumentBoard, ...] = ()
+    vipdoc_path: str = ""
+    start_date: date | None = None
+    end_date: date | None = None
+    reversal_multiples: tuple[float, ...] = REFERENCE_MULTIPLES
+    min_bars: int = DEFAULT_MIN_BARS
+    atr_window: int = ATR_WINDOW
+    include_pending: bool = False
+    batch_size: int = 400
+    limit_stocks: int | None = DEFAULT_STOCK_LIMIT
+
+    def normalized(self) -> SwingOverviewConfig:
+        """Validate and de-duplicate, keeping the caller's ordering."""
+
+        multiples = tuple(
+            dict.fromkeys(float(item) for item in self.reversal_multiples if float(item) > 0)
+        )
+        if not multiples:
+            raise ValueError("至少要提供一个大于 0 的反转阈值倍数")
+        if self.min_bars < 0:
+            raise ValueError("最小持续天数不能为负数")
+        if self.atr_window < 1:
+            raise ValueError("ATR 窗口必须大于 0")
+        if self.batch_size < 1:
+            raise ValueError("分批读取的股票数必须大于 0")
+        if self.limit_stocks is not None and self.limit_stocks < 1:
+            raise ValueError("股票数量上限必须大于 0")
+        if self.start_date and self.end_date and self.start_date > self.end_date:
+            raise ValueError("开始日期不能晚于结束日期")
+        return SwingOverviewConfig(
+            universe=self.universe,
+            instrument_types=tuple(self.instrument_types) or ("stock",),
+            boards=tuple(self.boards),
+            vipdoc_path=self.vipdoc_path,
+            start_date=self.start_date,
+            end_date=self.end_date,
+            reversal_multiples=multiples,
+            min_bars=self.min_bars,
+            atr_window=self.atr_window,
+            include_pending=self.include_pending,
+            batch_size=self.batch_size,
+            limit_stocks=self.limit_stocks,
+        )
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read one environment override, ignoring anything that is not positive."""
+
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+#: Ceiling on the temporary panel file. The panel is a memmap on disk, not RAM,
+#: so this is a time guard more than a memory one: a full-market, full-history
+#: run needs ~5.5 GB and takes tens of minutes, and refusing only *after* it is
+#: half written would be far crueler than refusing up front. Sized to leave room
+#: for that worst case plus the labels; raise it with SWING_PANEL_MAX_BYTES if
+#: a machine has the disk and the patience for more.
+DEFAULT_MAX_PANEL_BYTES = 12 * 1024**3
+MAX_PANEL_BYTES = _env_int("SWING_PANEL_MAX_BYTES", DEFAULT_MAX_PANEL_BYTES)
+
+
+@dataclass(frozen=True)
+class SwingIndicatorConfig:
+    """One request to score indicators against swing-derived labels.
+
+    Unlike the overview, this studies a *single* threshold: sweeping several
+    here would multiply the multiplicity problem the significance test is
+    already struggling with, and the calibration pass already said which one to
+    use.
+    """
+
+    universe: str = "all"
+    instrument_types: tuple[InstrumentType, ...] = ("stock",)
+    boards: tuple[InstrumentBoard, ...] = ()
+    vipdoc_path: str = ""
+    start_date: date | None = None
+    end_date: date | None = None
+    reversal_multiple: float = DEFAULT_REVERSAL_MULTIPLE
+    min_bars: int = DEFAULT_MIN_BARS
+    atr_window: int = ATR_WINDOW
+    horizon: int = DEFAULT_HORIZON
+    labels: tuple[LabelKind, ...] = ALL_LABELS
+    value_ids: tuple[str, ...] = ()
+    #: Study allow-listed custom and newly added indicator outputs alongside
+    #: the technical ones. Some event lines are sparse and may have few usable
+    #: cross-sections in the result.
+    include_custom: bool = True
+    min_cross_section: int = MIN_CROSS_SECTION
+    permutations: int = DEFAULT_STUDY_PERMUTATIONS
+    block_size: int = DEFAULT_BLOCK_SIZE
+    alpha: float = 0.05
+    batch_size: int = 200
+    limit_stocks: int | None = DEFAULT_STOCK_LIMIT
+
+    def normalized(self) -> SwingIndicatorConfig:
+        if self.reversal_multiple <= 0:
+            raise ValueError("反转阈值倍数必须大于 0")
+        if self.min_bars < 0:
+            raise ValueError("最小持续天数不能为负数")
+        if self.atr_window < 1:
+            raise ValueError("ATR 窗口必须大于 0")
+        if self.horizon < 1:
+            raise ValueError("预警窗口至少要有 1 个交易日")
+        if self.min_cross_section < 2:
+            raise ValueError("每日横截面样本数至少为 2")
+        if self.permutations < 0:
+            raise ValueError("噪声门槛检验次数不能为负数")
+        if self.block_size < 1:
+            raise ValueError("置换块长度至少为 1 个交易日")
+        if not 0 < self.alpha < 1:
+            raise ValueError("显著性水平必须介于 0 与 1 之间")
+        if self.batch_size < 1:
+            raise ValueError("分批读取的股票数必须大于 0")
+        if self.limit_stocks is not None and self.limit_stocks < 1:
+            raise ValueError("股票数量上限必须大于 0")
+        if self.start_date and self.end_date and self.start_date > self.end_date:
+            raise ValueError("开始日期不能晚于结束日期")
+        unknown = tuple(item for item in self.labels if item not in ALL_LABELS)
+        if unknown:
+            raise ValueError(f"未知的标签类型: {', '.join(unknown)}")
+        return SwingIndicatorConfig(
+            universe=self.universe,
+            instrument_types=tuple(self.instrument_types) or ("stock",),
+            boards=tuple(self.boards),
+            vipdoc_path=self.vipdoc_path,
+            start_date=self.start_date,
+            end_date=self.end_date,
+            reversal_multiple=float(self.reversal_multiple),
+            min_bars=self.min_bars,
+            atr_window=self.atr_window,
+            horizon=self.horizon,
+            labels=tuple(dict.fromkeys(self.labels)) or ALL_LABELS,
+            value_ids=tuple(dict.fromkeys(self.value_ids)),
+            include_custom=bool(self.include_custom),
+            min_cross_section=self.min_cross_section,
+            permutations=self.permutations,
+            block_size=self.block_size,
+            alpha=self.alpha,
+            batch_size=self.batch_size,
+            limit_stocks=self.limit_stocks,
+        )
+
+
+__all__ = [
+    "DEFAULT_STOCK_LIMIT",
+    "DEFAULT_STUDY_PERMUTATIONS",
+    "MAX_PANEL_BYTES",
+    "REFERENCE_MULTIPLES",
+    "SwingIndicatorConfig",
+    "SwingOverviewConfig",
+]

@@ -1,0 +1,9 @@
+#!/bin/sh
+
+# 推送前跑 Python 核心检查：全量测试（含覆盖率）、格式、Ruff、mypy。
+# 前端 E2E 与 Docker 检查体积大、耗时长，交给 CI 执行。
+
+set -eu
+
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+exec sh "$REPO_ROOT/scripts/verify_ci.sh" python
