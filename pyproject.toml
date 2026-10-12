@@ -39,7 +39,7 @@ dev = [
   # requirements.txt、不影响容器镜像。
   "httpx2>=2.13,<3",
   # 用于从 requirements.in 更新 Python 3.12 的精确发布锁。
-  "pip-tools==7.6.1",
+  "pip-tools==7.6.2",
   "pytest>=8,<10",
   "pytest-cov>=5,<8",
   "ruff>=0.4,<1",
