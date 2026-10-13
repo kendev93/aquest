@@ -662,6 +662,20 @@ class _DuckDbStoreBase:
                 )
                 """
             )
+            # 特别关注：用户在策略池表里逐只勾出来的自选标的，一只一行。它和
+            # strategy_pool_entries 刻意分开——清空重建会 DELETE 全部 entries，
+            # 而关注是用户的选择而不是研究产物，重跑之后还得重新勾。
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS strategy_pool_focus (
+                    market VARCHAR NOT NULL,
+                    code VARCHAR NOT NULL,
+                    name VARCHAR NOT NULL DEFAULT '',
+                    created_at TIMESTAMP NOT NULL,
+                    PRIMARY KEY (market, code)
+                )
+                """
+            )
             # Additive pool tracking storage; no OHLC rewrite or full database backup.
             from aquest.strategy_pool.tracking_store import DDL as pool_tracking_ddl
 

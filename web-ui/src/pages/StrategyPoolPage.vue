@@ -3,14 +3,18 @@ import ResearchWorkDetails from '../components/ResearchWorkDetails.vue'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import PageIntro from '../components/PageIntro.vue'
+import StrategyPoolEntryTable from '../components/StrategyPoolEntryTable.vue'
 import { fetchStoreStatus } from '../api/marketData'
 import {
+  addStrategyPoolFocus,
   cancelStrategyPoolJob,
   createStrategyPoolJob,
   fetchResearchSettings,
   fetchStrategyPoolEntries,
+  fetchStrategyPoolFocus,
   fetchStrategyPoolJobs,
   getStrategyPoolJob,
+  removeStrategyPoolFocus,
   saveResearchSettings,
   type StrategyPoolBoard,
 } from '../api/strategyPool'
@@ -20,8 +24,8 @@ import { describeError } from '../api/client'
 // token 竞态守卫（canApply）和多种完成态的清理动作，抽象盖不住这些差异。
 import type {
   DataStoreStatus,
-  StrategyPoolCandidate,
   StrategyPoolEntry,
+  StrategyPoolFocusItem,
   StrategyPoolHolding,
   StrategyPoolJobResult,
   StrategyPoolJobState,
@@ -33,6 +37,18 @@ import type {
 } from '../types'
 import AppTopbar from '../components/AppTopbar.vue'
 import { formatNumber, formatPercent, formatSignedPercent } from '../utils/format'
+import {
+  entryIsHeld,
+  entryStatus,
+  formatHoldingDays,
+  metricValue,
+  objectiveLabel,
+  sortPoolEntriesByStatus,
+  statusOrder,
+  symbol,
+  type StrategyPoolMetricColumn,
+  type StrategyPoolSortColumn,
+} from '../utils/strategyPoolStatus'
 
 const OBJECTIVE_STORAGE_KEY = 'aquest.strategy-pool.objective'
 const SIGNAL_PAGE_SIZE = 10
@@ -50,6 +66,10 @@ type SellPanelItem =
 
 const objective = ref<StrategyPoolObjective | null>(null)
 const entries = ref<StrategyPoolEntry[]>([])
+// 特别关注名单来自后端，一只标的行；只有本页会改它，所以进页面读一次即可，
+// 不进 refreshPage 的并发读取（切目标/轮询时没必要重复拉）。
+const focusItems = ref<StrategyPoolFocusItem[]>([])
+const focusPending = ref(false)
 const history = ref<StrategyPoolJobSummary[]>([])
 const signalResult = ref<StrategyPoolJobResult | null>(null)
 const marketStatus = ref<DataStoreStatus | null>(null)
@@ -77,9 +97,7 @@ const excludeSt = ref(false)
 const market = ref<'SH' | 'SZ'>('SH')
 const code = ref('')
 const searchQuery = ref('')
-const sortColumn = ref<
-  'status' | 'strategy_return' | 'annual_return' | 'sharpe' | 'win_rate' | 'payoff_ratio' | 'max_drawdown' | 'avg_holding_days' | 'benchmark_return' | 'created_return'
->('status')
+const sortColumn = ref<StrategyPoolSortColumn>('status')
 // 买卖信号列表的显示排序（2026-10-13 用户需求）：后端返回顺序对跟踪增量结果是按
 // 证券代码的，这里允许按行内展示的全区间指标重排。'default' 表示保持返回顺序。
 const SIGNAL_SORT_OPTIONS = [
@@ -261,18 +279,17 @@ const filteredEntries = computed(() => {
   )
 })
 
+const signalStates = computed(() => signalResult.value?.states ?? [])
+
 const sortedEntries = computed(() => {
   const rows = [...filteredEntries.value]
   const metric = sortColumn.value
   if (metric === 'status') {
-    return rows.sort((a, b) => {
-      const order = statusOrder(entryStatus(a), entryIsHeld(a)) - statusOrder(entryStatus(b), entryIsHeld(b))
-      return order || metricValue(b, objective.value ?? 'annual_return', objective.value) - metricValue(a, objective.value ?? 'annual_return', objective.value) || symbol(a).localeCompare(symbol(b))
-    })
+    return sortPoolEntriesByStatus(rows, signalStates.value, heldSymbols.value, objective.value)
   }
   return rows.sort((a, b) => {
     const byMetric = metricValue(b, metric, objective.value) - metricValue(a, metric, objective.value)
-    return byMetric || statusOrder(entryStatus(a), entryIsHeld(a)) - statusOrder(entryStatus(b), entryIsHeld(b)) || symbol(a).localeCompare(symbol(b))
+    return byMetric || statusOrder(entryStatus(a, signalStates.value), entryIsHeld(a, heldSymbols.value)) - statusOrder(entryStatus(b, signalStates.value), entryIsHeld(b, heldSymbols.value)) || symbol(a).localeCompare(symbol(b))
   })
 })
 const totalPages = computed(() => Math.max(1, Math.ceil(sortedEntries.value.length / pageSize.value)))
@@ -282,6 +299,55 @@ const pageEntries = computed(() => {
 })
 const pageStart = computed(() => sortedEntries.value.length ? (page.value - 1) * pageSize.value + 1 : 0)
 const pageEnd = computed(() => Math.min(page.value * pageSize.value, sortedEntries.value.length))
+
+// 特别关注面板只按状态优先级排，不跟主表的搜索/排序/分页联动；行数据仍来自 entries，
+// 所以暂时不在策略池里的关注标的不会占行，只在面板上提示数量。
+const followKeys = computed(() => new Set(focusItems.value.map(symbol)))
+const focusRows = computed(() => sortPoolEntriesByStatus(
+  entries.value.filter((entry) => followKeys.value.has(symbol(entry))),
+  signalStates.value,
+  heldSymbols.value,
+  objective.value,
+))
+const focusMissingCount = computed(() => focusItems.value.length - focusRows.value.length)
+const listContext = computed(() => new URLSearchParams({
+  objective: objective.value ?? 'annual_return',
+  search: searchQuery.value,
+  sort: sortColumn.value,
+  page: String(page.value),
+  pageSize: String(pageSize.value),
+}).toString())
+
+async function toggleFollow(entry: StrategyPoolEntry): Promise<void> {
+  if (focusPending.value) return
+  const key = symbol(entry)
+  const followed = followKeys.value.has(key)
+  const previous = focusItems.value
+  focusPending.value = true
+  // 先按本地更新让面板跟手，再用服务端返回的权威名单覆盖；被拒（例如超过上限）就整表回滚。
+  focusItems.value = followed
+    ? previous.filter((item) => symbol(item) !== key)
+    : [...previous, { market: entry.market, code: entry.code, name: entry.name }]
+  errorMessage.value = ''
+  try {
+    focusItems.value = followed
+      ? await removeStrategyPoolFocus(entry.market, entry.code)
+      : await addStrategyPoolFocus(entry.market, entry.code, entry.name)
+  } catch (error) {
+    focusItems.value = previous
+    errorMessage.value = apiMessage(error)
+  } finally {
+    focusPending.value = false
+  }
+}
+
+async function loadFocus(): Promise<void> {
+  try {
+    focusItems.value = await fetchStrategyPoolFocus()
+  } catch {
+    // 读不到关注名单就当作一只都没关注，不打断页面初始化。
+  }
+}
 
 function selectObjective(value: StrategyPoolObjective): void {
   objective.value = value
@@ -449,16 +515,6 @@ function mergeSignalResult(
   }
 }
 
-function activeReplayableCandidate(entry: StrategyPoolEntry): StrategyPoolCandidate | null {
-  const candidate = entry.active_candidate
-  return candidate
-    && candidate.replayable !== false
-    && candidate.buy_rule
-    && candidate.sell_rule
-    ? candidate
-    : null
-}
-
 function timestampMillis(value: number | string | null | undefined): number {
   if (typeof value === 'number') return value < 1_000_000_000_000 ? value * 1_000 : value
   if (typeof value === 'string') return Date.parse(value) || 0
@@ -563,19 +619,6 @@ async function rerunEntry(entry: StrategyPoolEntry): Promise<void> {
   } catch (error) {
     errorMessage.value = apiMessage(error)
   }
-}
-
-function rerunEntryDisabled(): boolean {
-  return Boolean(queuedSingleSymbol.value) || (isBusy.value && activeIntent.value !== 'signals')
-}
-
-function rerunEntryTitle(entry: StrategyPoolEntry): string {
-  if (queuedSingleSymbol.value) {
-    return queuedSingleSymbol.value === symbol(entry) ? '该标的已排队重跑' : '已有逐股重跑在排队中'
-  }
-  if (isBusy.value && activeIntent.value === 'signals') return '点击后排在当天信号扫描之后重跑'
-  if (isBusy.value) return '当前全市场研究或组合回测结束后可重跑'
-  return `重跑 ${entry.market} ${entry.code}`
 }
 
 async function startSignalScan(target?: { market: 'SH' | 'SZ'; code: string }, automatic = false): Promise<void> {
@@ -753,12 +796,7 @@ async function cancelCurrentJob(): Promise<void> {
   }
 }
 
-function detailHref(entry: StrategyPoolEntry): string {
-  const list = new URLSearchParams({objective:objective.value ?? 'annual_return', search:searchQuery.value, sort:sortColumn.value, page:String(page.value), pageSize:String(pageSize.value)})
-  return `/strategy-pool/${entry.market}/${entry.code}?objective=${objective.value ?? 'annual_return'}&list=${encodeURIComponent(list.toString())}`
-}
-
-function setSort(column: typeof sortColumn.value): void {
+function setSort(column: StrategyPoolMetricColumn): void {
   sortColumn.value = column
   page.value = 1
 }
@@ -766,21 +804,6 @@ function setSort(column: typeof sortColumn.value): void {
 function changePageSize(value: string): void {
   pageSize.value = Number(value) || 50
   page.value = 1
-}
-
-function entryStatus(entry: StrategyPoolEntry): string {
-  const row = signalResult.value?.states?.find((item) => item.symbol === symbol(entry))
-  const candidate = activeReplayableCandidate(entry)
-  if (!candidate) return entry.status === 'insufficient_history' ? 'insufficient_history' : 'no_strategy'
-  if (!row || row.status === 'no_strategy' || row.candidate_id !== candidate.candidate_id) {
-    return 'signal_stale'
-  }
-  if (row.status === 'held') return 'flat'
-  return row.status ?? 'signal_stale'
-}
-
-function entryIsHeld(entry: StrategyPoolEntry): boolean {
-  return heldSymbols.value.has(symbol(entry))
 }
 
 function pageCount(count: number): number {
@@ -912,74 +935,6 @@ function riskExitReturnText(signal: Record<string, unknown>): string {
     : ''
 }
 
-// 默认排序档位：触发买入 → 触发卖出 → 持仓中 → 今日无买卖信号 → 待刷新 / 无策略 / 其他。
-// 持仓中不带买卖信号时状态为 flat，需要靠 held 与「今日无买卖信号」区分开。
-function statusOrder(value: string, held = false): number {
-  if (value === 'buy' || value === 'buy_sell') return 0
-  if (value === 'sell') return 1
-  // 有买卖信号的持仓标的归入买卖档；其余持仓标的统一排在「持仓中」。
-  if (held && value !== 'no_strategy' && value !== 'insufficient_history') return 2
-  if (value === 'flat') return 3
-  return { signal_stale: 4, no_strategy: 5 }[value] ?? 6
-}
-
-function metricValue(
-  entry: StrategyPoolEntry,
-  key: 'strategy_return' | 'annual_return' | 'sharpe' | 'win_rate' | 'payoff_ratio' | 'max_drawdown' | 'avg_holding_days' | 'benchmark_return' | 'created_return',
-  target: StrategyPoolObjective | null,
-): number {
-  if (key === 'created_return') return entry.created_return ?? Number.NEGATIVE_INFINITY
-  if (key === 'benchmark_return') {
-    return benchmarkReturn(entry) ?? Number.NEGATIVE_INFINITY
-  }
-  const candidate = entry.active_candidate
-    ?? (target ? entry.automatic_candidates[target] : null)
-  // 表格展示统一用全区间实际回放口径；验证段指标只在策略选择时使用。
-  const metricKey = key === 'strategy_return' ? 'total_return' : key
-  const value = candidate?.metrics?.full_period?.[metricKey]
-  return typeof value === 'number' && Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY
-}
-
-function tradeCount(
-  candidate: StrategyPoolCandidate | null | undefined,
-  phase: 'validation' | 'holdout',
-): number | null {
-  return candidate?.metrics?.[phase]?.closed_trades
-    ?? candidate?.metrics?.[phase]?.total_trades
-    ?? null
-}
-
-function benchmarkReturn(entry: StrategyPoolEntry): number | null {
-  const value = entry.benchmark?.full_period?.total_return
-  return typeof value === 'number' && Number.isFinite(value) ? value : null
-}
-
-function symbol(item: Pick<StrategyPoolEntry, 'market' | 'code'>): string {
-  return `${item.market}${item.code}`
-}
-
-function statusLabel(value: string): string {
-  return {
-    buy: '触发买入',
-    buy_sell: '买卖均触发',
-    sell: '触发卖出',
-    held: '持仓中',
-    flat: '今日无买卖信号',
-    signal_stale: '策略可用 · 信号待刷新',
-    no_strategy: '无可用策略',
-    insufficient_history: '历史样本不足',
-    error: '扫描失败',
-  }[value] ?? value
-}
-
-function objectiveLabel(value: StrategyPoolObjective | null): string {
-  return value === 'sharpe' ? '夏普' : '年化收益'
-}
-
-function formatHoldingDays(value: unknown): string {
-  return typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(1)} 天` : '—'
-}
-
 function formatTimestamp(value: unknown): string {
   if (typeof value !== 'number' && typeof value !== 'string') return '—'
   const date = typeof value === 'number' ? new Date(value * 1000) : new Date(value)
@@ -992,6 +947,7 @@ function apiMessage(error: unknown): string {
 
 async function initialize(): Promise<void> {
   void loadResearchSettings()
+  void loadFocus()
   const params = new URLSearchParams(window.location.search)
   searchQuery.value = params.get('search') ?? ''
   page.value = Math.max(1, Number(params.get('page') ?? 1))
@@ -1211,6 +1167,29 @@ onUnmounted(() => {
         </section>
         <p class="pool-scale-note">买入和卖出规则信号都在最新完整行情日收盘后判定，并于下一交易日执行。因此，今日触发卖出规则的标的当天仍列在持仓中，下一交易日卖出。止损、止盈按回测中的日线风控成交规则模拟。</p>
 
+        <section class="pool-focus-section panel-card" data-testid="pool-focus-section">
+          <div class="section-heading"><div><p class="eyebrow">FOLLOWED</p><h2>特别关注 <span>{{ focusRows.length }}</span></h2></div><small>只列关注的标的 · 按状态优先级排序，不跟随下方搜索、排序和分页</small></div>
+          <StrategyPoolEntryTable
+            v-if="focusRows.length"
+            :entries="focusRows"
+            :objective="objective"
+            :states="signalStates"
+            :held-keys="heldSymbols"
+            :follow-keys="followKeys"
+            testid="focus"
+            :sortable="false"
+            :follow-busy="focusPending"
+            :queued-symbol="queuedSingleSymbol"
+            :busy="isBusy"
+            :busy-intent="activeIntent"
+            :list-context="listContext"
+            @rerun="rerunEntry"
+            @toggle-follow="toggleFollow"
+          />
+          <p v-else class="empty-copy" data-testid="pool-focus-empty">{{ focusMissingCount ? '已关注的标的目前都不在策略池里；跑完全市场研究或单股重跑后会显示。' : '在下方「全市场标的状态」的维护列点击关注，这里就只显示这几只标的的当前状态。' }}</p>
+          <p v-if="focusMissingCount > 0" class="pool-scale-note" data-testid="pool-focus-missing">另有 {{ focusMissingCount }} 只关注标的暂时不在策略池，重跑后会显示。</p>
+        </section>
+
         <section class="pool-table-section panel-card">
           <div class="section-heading"><div><p class="eyebrow">DAILY STATUS</p><h2>全市场标的状态 <span>{{ entries.length.toLocaleString() }}</span></h2></div><span>{{ loading ? '正在读取策略池…' : `按${objectiveLabel(objective)}策略决策` }}</span></div>
           <p class="pool-scale-note">收益、年化、夏普、胜率、盈亏比、最大回撤均为该策略在完整历史区间实际回放（全区间）的指标；平均持仓天数为全区间已平仓交易按股数加权的平均持有天数，用于估算买入后大致需要持有多久。旧候选会在下次全市场重选时补算。策略的选择与排序目标仍按验证段年化/夏普决策，避免用未来数据选策略。全段基准显示个股买入持有涨跌；验证和留出分别用同区间基准计算总收益超额。</p>
@@ -1220,46 +1199,24 @@ onUnmounted(() => {
             </label>
             <small>匹配 {{ filteredEntries.length.toLocaleString() }} / {{ entries.length.toLocaleString() }} 只</small>
           </div>
-          <div class="table-scroll">
-            <table class="pool-table">
-              <thead><tr>
-                <th>持仓 / 今日信号</th><th>证券</th>
-                <th><button @click="setSort('benchmark_return')">基准涨跌{{ sortColumn === 'benchmark_return' ? ' ↓' : '' }}</button></th>
-                <th><button @click="setSort('created_return')">创建至今收益{{ sortColumn === 'created_return' ? ' ↓' : '' }}</button></th>
-                <th><button @click="setSort('strategy_return')">策略收益{{ sortColumn === 'strategy_return' ? ' ↓' : '' }}</button></th>
-                <th><button @click="setSort('annual_return')">年化{{ sortColumn === 'annual_return' ? ' ↓' : '' }}</button></th>
-                <th><button @click="setSort('sharpe')">夏普{{ sortColumn === 'sharpe' ? ' ↓' : '' }}</button></th>
-                <th><button @click="setSort('win_rate')">胜率{{ sortColumn === 'win_rate' ? ' ↓' : '' }}</button></th>
-                <th><button @click="setSort('payoff_ratio')">盈亏比{{ sortColumn === 'payoff_ratio' ? ' ↓' : '' }}</button></th>
-                <th><button @click="setSort('max_drawdown')">最大回撤{{ sortColumn === 'max_drawdown' ? ' ↓' : '' }}</button></th>
-                <th><button @click="setSort('avg_holding_days')">平均持仓{{ sortColumn === 'avg_holding_days' ? ' ↓' : '' }}</button></th>
-                <th>策略 / 风险标记</th><th>维护</th>
-              </tr></thead>
-              <tbody>
-                <tr v-for="entry in pageEntries" :key="symbol(entry)" :data-testid="`pool-row-${entry.code}`">
-                  <td><div class="status-stack"><span v-if="entryIsHeld(entry)" class="status-chip status-held">持仓中</span><span class="status-chip" :class="`status-${entryStatus(entry)}`">{{ statusLabel(entryStatus(entry)) }}</span></div></td>
-                  <td><strong>{{ entry.market }} {{ entry.code }}</strong><small>{{ entry.name }}</small></td>
-                  <td :data-testid="`pool-entry-benchmark-${entry.code}`">
-                    <div v-if="entry.benchmark" class="benchmark-summary">
-                      <div>全段基准 <b>{{ formatSignedPercent(benchmarkReturn(entry)) }}</b></div>
-                    </div>
-                    <span v-else class="empty-copy">下次全市场重选时补算</span>
-                  </td>
-                  <td :data-testid="`pool-created-return-${entry.code}`">{{ typeof entry.created_return === 'number' ? formatPercent(entry.created_return) : entry.tracking_status === 'pending' ? '待初始化' : entry.tracking_status === 'failed' ? '更新失败' : '—' }}<small v-if="entry.tracking_status === 'failed'">同步失败，保留上次结果</small><small v-if="entry.tracking_as_of_date">截至 {{ entry.tracking_as_of_date }}</small></td>
-                  <td>{{ formatPercent(metricValue(entry, 'strategy_return', objective)) }}</td>
-                  <td>{{ formatPercent(metricValue(entry, 'annual_return', objective)) }}</td>
-                  <td>{{ formatNumber(metricValue(entry, 'sharpe', objective)) }}</td>
-                  <td>{{ formatPercent(metricValue(entry, 'win_rate', objective)) }}</td>
-                  <td>{{ formatNumber(metricValue(entry, 'payoff_ratio', objective)) }}</td>
-                  <td>{{ formatPercent(metricValue(entry, 'max_drawdown', objective)) }}</td>
-                  <td :data-testid="`pool-holding-days-${entry.code}`">{{ formatHoldingDays(metricValue(entry, 'avg_holding_days', objective)) }}</td>
-                  <td><span v-if="entry.active_candidate?.quality?.badges?.length" class="badge-row"><i v-for="badge in entry.active_candidate.quality.badges" :key="badge">{{ badge }}</i></span><span v-else-if="entry.status === 'no_strategy'">无可计算的策略绩效</span><span v-else-if="entry.last_error" class="danger-text">{{ entry.last_error }}</span><span v-else>—</span><small v-if="entry.active_candidate?.metrics">交易数：验证 {{ formatNumber(tradeCount(entry.active_candidate, 'validation'), 0) }} · 留出 {{ formatNumber(tradeCount(entry.active_candidate, 'holdout'), 0) }} 笔</small><small v-if="entry.active_source === 'manual'">手工覆盖 · {{ objectiveLabel(objective) }}</small></td>
-                  <td><a class="text-button" :href="detailHref(entry)" :data-testid="`pool-detail-${entry.code}`">详情</a><button :data-testid="`pool-rerun-entry-${entry.code}`" class="text-button" :disabled="rerunEntryDisabled()" :title="rerunEntryTitle(entry)" @click="void rerunEntry(entry)">{{ queuedSingleSymbol === symbol(entry) ? '排队中' : '重跑' }}</button></td>
-                </tr>
-                <tr v-if="!filteredEntries.length"><td colspan="12" class="empty-copy" data-testid="pool-entry-empty">{{ searchQuery.trim() && entries.length ? '没有符合代码或名称的标的。' : loading ? '读取中…' : '策略池为空，开始全市场研究后会逐只写入候选。' }}</td></tr>
-              </tbody>
-            </table>
-          </div>
+          <StrategyPoolEntryTable
+            :entries="pageEntries"
+            :objective="objective"
+            :states="signalStates"
+            :held-keys="heldSymbols"
+            :follow-keys="followKeys"
+            testid="pool"
+            :sort-column="sortColumn"
+            :follow-busy="focusPending"
+            :queued-symbol="queuedSingleSymbol"
+            :busy="isBusy"
+            :busy-intent="activeIntent"
+            :list-context="listContext"
+            :empty-text="searchQuery.trim() && entries.length ? '没有符合代码或名称的标的。' : loading ? '读取中…' : '策略池为空，开始全市场研究后会逐只写入候选。'"
+            @sort="setSort"
+            @rerun="rerunEntry"
+            @toggle-follow="toggleFollow"
+          />
           <div class="pool-pagination" data-testid="pool-pagination">
             <span>显示 {{ pageStart }}–{{ pageEnd }} / {{ sortedEntries.length.toLocaleString() }} 只</span>
             <label>每页
@@ -1354,24 +1311,9 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .risk-signal { border-left-color: #ff6a69; }
 .holding-row { border-left-color: #6380a5; }
 .candidate-apply-grid article { padding: 16px; border: 1px solid #263850; background: #101a2d; }
-.table-scroll { overflow: auto; }
 .pool-pagination { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 10px; margin-top: 14px; color: #91a1b8; font-size: .88rem; }
 .pool-pagination label { display: flex; align-items: center; gap: 7px; }
 .pool-pagination select { border: 1px solid #354b69; border-radius: 7px; padding: 6px 8px; background: #111c30; color: #edf2fb; font: inherit; }
-.pool-table { width: 100%; min-width: 980px; border-collapse: collapse; text-align: left; }
-.pool-table th, .pool-table td { border-bottom: 1px solid #25364f; padding: 12px 10px; vertical-align: top; }
-.pool-table th { color: #8798b1; font-size: .88rem; white-space: nowrap; }
-.pool-table th button { border: 0; padding: 0; background: none; color: inherit; font: inherit; cursor: pointer; }
-.pool-table td small { display: block; margin-top: 5px; color: #899ab3; }
-.benchmark-summary { display: grid; min-width: 250px; gap: 4px; color: #a8b8cc; font-size: .78rem; line-height: 1.45; white-space: nowrap; }
-.benchmark-summary b { color: #eff4fc; }
-.status-chip { display: inline-block; padding: 4px 8px; border: 1px solid #42516a; border-radius: 999px; color: #a9b5c7; font-size: .78rem; white-space: nowrap; }
-.status-stack { display: flex; flex-wrap: wrap; gap: 5px; }
-.status-buy, .status-buy_sell { border-color: #128f4c; color: #25d475; }
-.status-sell, .status-error { border-color: #974d50; color: #ff7775; }
-.status-held { border-color: #8b7b3c; color: #e0c55b; }
-.badge-row { display: flex; flex-wrap: wrap; gap: 5px; }
-.badge-row i { padding: 3px 6px; border-radius: 4px; background: #263348; color: #b9c7d9; font-size: .75rem; font-style: normal; }
 .text-button { border: 0; padding: 4px 7px; background: none; color: #94a9c4; font: inherit; cursor: pointer; }
 .danger-text { color: #ff7775; }
 .notice { padding: 12px 15px; border: 1px solid #30435e; }

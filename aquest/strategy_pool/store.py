@@ -20,6 +20,11 @@ Objective = Literal["annual_return", "sharpe"]
 #: 研究范围偏好只有一行，固定主键。
 RESEARCH_SETTINGS_ROW_ID = 1
 
+#: 特别关注上限：面板要一眼看得完，不能退化成第二个全市场列表。
+FOCUS_LIMIT = 100
+#: 关注名单里的名称只是策略池暂时无此标的时的展示用快照，与股票组成员同规格截断。
+FOCUS_NAME_MAX_LENGTH = 60
+
 
 class DuckDbStrategyPoolStore:
     """Store compact winners, hand edits, and per-symbol research status."""
@@ -42,6 +47,17 @@ class DuckDbStrategyPoolStore:
                     exclude_st BOOLEAN NOT NULL DEFAULT FALSE,
                     updated_at TIMESTAMP NOT NULL,
                     PRIMARY KEY (id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS strategy_pool_focus (
+                    market VARCHAR NOT NULL,
+                    code VARCHAR NOT NULL,
+                    name VARCHAR NOT NULL DEFAULT '',
+                    created_at TIMESTAMP NOT NULL,
+                    PRIMARY KEY (market, code)
                 )
                 """
             )
@@ -89,6 +105,53 @@ class DuckDbStrategyPoolStore:
                 [RESEARCH_SETTINGS_ROW_ID, boards_json, bool(exclude_st), now],
             )
         return {"boards": normalized, "exclude_st": bool(exclude_st)}
+
+    def read_focus(self) -> list[dict[str, object]]:
+        """特别关注名单，按关注时间正序；一只都没关注时返回空列表。"""
+
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT market, code, name FROM strategy_pool_focus
+                ORDER BY created_at, market, code
+                """
+            ).fetchall()
+        return [{"market": row[0], "code": row[1], "name": row[2]} for row in rows]
+
+    def add_focus(self, market: str, code: str, name: str = "") -> list[dict[str, object]]:
+        """关注一只标的；重复关注幂等返回当前名单，超出上限时抛错。"""
+
+        _validate_symbol(market, code)
+        clean_name = str(name or "").strip()[:FOCUS_NAME_MAX_LENGTH]
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        with _WRITE_LOCK, self._transaction() as connection:
+            already = connection.execute(
+                "SELECT 1 FROM strategy_pool_focus WHERE market = ? AND code = ?",
+                [market, code],
+            ).fetchone()
+            if already is None:
+                counted = connection.execute("SELECT COUNT(*) FROM strategy_pool_focus").fetchone()
+                if int(counted[0] if counted else 0) >= FOCUS_LIMIT:
+                    raise ValueError(f"特别关注最多 {FOCUS_LIMIT} 只。")
+                connection.execute(
+                    """
+                    INSERT INTO strategy_pool_focus (market, code, name, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    [market, code, clean_name, now],
+                )
+        return self.read_focus()
+
+    def remove_focus(self, market: str, code: str) -> list[dict[str, object]]:
+        """取消关注；没有关注过时同样幂等返回当前名单。"""
+
+        _validate_symbol(market, code)
+        with _WRITE_LOCK, self._transaction() as connection:
+            connection.execute(
+                "DELETE FROM strategy_pool_focus WHERE market = ? AND code = ?",
+                [market, code],
+            )
+        return self.read_focus()
 
     def get(self, market: str, code: str) -> dict[str, object] | None:
         with self._connection() as connection:

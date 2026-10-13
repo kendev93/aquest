@@ -9,13 +9,16 @@ import StrategyPoolPage from './StrategyPoolPage.vue'
 import { ApiError } from '../api/client'
 
 vi.mock('../api/strategyPool', () => ({
+  addStrategyPoolFocus: vi.fn(),
   cancelStrategyPoolJob: vi.fn(),
   clearStrategyPoolOverride: vi.fn(),
   createStrategyPoolJob: vi.fn(),
   fetchResearchSettings: vi.fn(),
   fetchStrategyPoolEntries: vi.fn(),
+  fetchStrategyPoolFocus: vi.fn(),
   fetchStrategyPoolJobs: vi.fn(),
   getStrategyPoolJob: vi.fn(),
+  removeStrategyPoolFocus: vi.fn(),
   saveResearchSettings: vi.fn(),
   saveStrategyPoolOverride: vi.fn(),
 }))
@@ -145,6 +148,12 @@ describe('StrategyPoolPage', () => {
       exclude_st: false,
     })
     vi.mocked(api.saveResearchSettings).mockImplementation(async (payload) => payload)
+    vi.mocked(api.fetchStrategyPoolFocus).mockResolvedValue([])
+    // 关注接口都返回服务端权威名单；默认模拟"只关注了这一只"。
+    vi.mocked(api.addStrategyPoolFocus).mockImplementation(async (market, code, name) => [
+      { market: market as 'SH' | 'SZ', code, name },
+    ])
+    vi.mocked(api.removeStrategyPoolFocus).mockResolvedValue([])
     vi.mocked(api.getStrategyPoolJob).mockResolvedValue({
       job_id: 'signal-1',
       status: 'completed',
@@ -1505,6 +1514,131 @@ describe('StrategyPoolPage', () => {
       wrapper.unmount()
       vi.useRealTimers()
     }
+  })
+
+  describe('特别关注', () => {
+    it('follows a symbol from the maintenance column into the focus panel', async () => {
+      window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+      const wrapper = mount(StrategyPoolPage)
+      await flushPromises()
+
+      expect(wrapper.get('[data-testid="pool-focus-empty"]').text()).toContain('维护列点击关注')
+      expect(wrapper.find('[data-testid="focus-row-600000"]').exists()).toBe(false)
+
+      await wrapper.get('[data-testid="pool-follow-entry-600000"]').trigger('click')
+      await flushPromises()
+
+      expect(api.addStrategyPoolFocus).toHaveBeenCalledWith('SH', '600000', '测试600000')
+      const focusRow = wrapper.get('[data-testid="focus-row-600000"]')
+      expect(focusRow.text()).toContain('SH 600000')
+      expect(focusRow.get('[data-testid="focus-follow-entry-600000"]').text()).toBe('已关注')
+      expect(wrapper.find('[data-testid="pool-focus-empty"]').exists()).toBe(false)
+    })
+
+    it('unfollows from the focus panel and falls back to the hint', async () => {
+      window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+      vi.mocked(api.fetchStrategyPoolFocus).mockResolvedValue([
+        { market: 'SH', code: '600000', name: '测试600000' },
+      ])
+      const wrapper = mount(StrategyPoolPage)
+      await flushPromises()
+
+      expect(wrapper.find('[data-testid="focus-row-600000"]').exists()).toBe(true)
+      expect(wrapper.get('[data-testid="pool-follow-entry-600000"]').text()).toBe('已关注')
+
+      await wrapper.get('[data-testid="focus-follow-entry-600000"]').trigger('click')
+      await flushPromises()
+
+      expect(api.removeStrategyPoolFocus).toHaveBeenCalledWith('SH', '600000')
+      expect(wrapper.find('[data-testid="focus-row-600000"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="pool-focus-empty"]').exists()).toBe(true)
+    })
+
+    it('orders followed symbols by status priority, not by follow time', async () => {
+      window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+      // 600001 没有信号行 → 待刷新；600000 触发买入，必须排在前面。
+      vi.mocked(api.fetchStrategyPoolFocus).mockResolvedValue([
+        { market: 'SH', code: '600001', name: '测试600001' },
+        { market: 'SH', code: '600000', name: '测试600000' },
+      ])
+      const wrapper = mount(StrategyPoolPage)
+      await flushPromises()
+
+      expect(
+        wrapper.findAll('tbody tr[data-testid^="focus-row-"]').map((row) => row.attributes('data-testid')),
+      ).toEqual(['focus-row-600000', 'focus-row-600001'])
+    })
+
+    it('keeps the focus panel out of search, sorting and pagination', async () => {
+      window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+      vi.mocked(api.fetchStrategyPoolFocus).mockResolvedValue([
+        { market: 'SH', code: '600001', name: '测试600001' },
+      ])
+      const wrapper = mount(StrategyPoolPage)
+      await flushPromises()
+
+      await wrapper.get('[data-testid="pool-entry-search"]').setValue('600000')
+      await flushPromises()
+
+      expect(wrapper.findAll('tbody tr[data-testid^="pool-row-"]')).toHaveLength(1)
+      expect(wrapper.find('[data-testid="pool-row-600001"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="focus-row-600001"]').exists()).toBe(true)
+
+      await wrapper.get('thead button').trigger('click')
+      expect(wrapper.findAll('tbody tr[data-testid^="focus-row-"]')).toHaveLength(1)
+    })
+
+    it('hides followed symbols that are missing from the pool and counts them', async () => {
+      window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+      vi.mocked(api.fetchStrategyPoolFocus).mockResolvedValue([
+        { market: 'SH', code: '600000', name: '测试600000' },
+        { market: 'SZ', code: '000001', name: '平安银行' },
+      ])
+      vi.mocked(api.addStrategyPoolFocus).mockImplementation(async (market, code, name) => [
+        { market: 'SH', code: '600000', name: '测试600000' },
+        { market: 'SZ', code: '000001', name: '平安银行' },
+        { market: market as 'SH' | 'SZ', code, name },
+      ])
+      const wrapper = mount(StrategyPoolPage)
+      await flushPromises()
+
+      expect(wrapper.findAll('tbody tr[data-testid^="focus-row-"]')).toHaveLength(1)
+      expect(wrapper.get('[data-testid="pool-focus-missing"]').text()).toContain('1 只关注标的暂时不在策略池')
+
+      await wrapper.get('[data-testid="pool-follow-entry-600001"]').trigger('click')
+      await flushPromises()
+
+      // 600001 在策略池里，进面板；只有 SZ000001 仍然缺席，计数不变。
+      expect(wrapper.findAll('tbody tr[data-testid^="focus-row-"]')).toHaveLength(2)
+      expect(wrapper.get('[data-testid="pool-focus-missing"]').text()).toContain('1 只')
+    })
+
+    it('rolls the panel back and warns when the backend rejects a follow', async () => {
+      window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+      vi.mocked(api.addStrategyPoolFocus).mockRejectedValueOnce(
+        new ApiError('特别关注最多 100 只。', 422),
+      )
+      const wrapper = mount(StrategyPoolPage)
+      await flushPromises()
+
+      await wrapper.get('[data-testid="pool-follow-entry-600000"]').trigger('click')
+      await flushPromises()
+
+      expect(wrapper.get('[role="alert"]').text()).toContain('特别关注最多 100 只')
+      expect(wrapper.find('[data-testid="focus-row-600000"]').exists()).toBe(false)
+      expect(wrapper.get('[data-testid="pool-follow-entry-600000"]').text()).toBe('关注')
+    })
+
+    it('reads the focus list once on load without re-fetching it on objective switch', async () => {
+      window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+      const wrapper = mount(StrategyPoolPage)
+      await flushPromises()
+
+      await wrapper.get('[data-testid="pool-objective"]').setValue('sharpe')
+      await flushPromises()
+
+      expect(api.fetchStrategyPoolFocus).toHaveBeenCalledTimes(1)
+    })
   })
 
 })

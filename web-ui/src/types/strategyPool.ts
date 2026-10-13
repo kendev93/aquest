@@ -45,6 +45,12 @@ export interface StrategyPoolBenchmark {
   holdout?: StrategyPoolBenchmarkPhase | null
 }
 
+export interface StrategyPoolFocusItem {
+  market: 'SH' | 'SZ'
+  code: string
+  name: string
+}
+
 export interface StrategyPoolEntry {
   created_at?: string | null
   created_return?: number | null

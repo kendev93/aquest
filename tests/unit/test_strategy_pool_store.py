@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import pytest
+
 from aquest.market_data.store import DuckDbMarketDataStore
-from aquest.strategy_pool.store import DuckDbStrategyPoolStore
+from aquest.strategy_pool.store import (
+    FOCUS_LIMIT,
+    FOCUS_NAME_MAX_LENGTH,
+    DuckDbStrategyPoolStore,
+)
 from aquest.strategy_pool.tracking_store import ENGINE_VERSION, PoolTrackingStore, signature
 
 
@@ -331,3 +337,76 @@ def test_legacy_max_hold_signature_upgrades_in_place_and_changed_limit_reversion
     assert current_sixty["version_id"] != legacy_five["version_id"]
     assert current_sixty["signature"] == signature(hold_60)
     assert current_sixty["candidate"]["config"]["max_hold_days"] == 60
+
+
+def test_focus_round_trip_is_idempotent_per_symbol(tmp_path) -> None:
+    pool = DuckDbStrategyPoolStore(DuckDbMarketDataStore(tmp_path / "market.duckdb"))
+    pool.initialize()
+
+    assert pool.read_focus() == []
+    added = pool.add_focus("SH", "600000", "浦发银行")
+    assert added == [{"market": "SH", "code": "600000", "name": "浦发银行"}]
+
+    # 连点或两个标签页同时提交同一只标的，不会挤出第二条记录。
+    assert pool.add_focus("SH", "600000", "浦发银行") == added
+
+    assert pool.add_focus("SZ", "000001", "平安银行") == [
+        {"market": "SH", "code": "600000", "name": "浦发银行"},
+        {"market": "SZ", "code": "000001", "name": "平安银行"},
+    ]
+    assert pool.remove_focus("SH", "600000") == [
+        {"market": "SZ", "code": "000001", "name": "平安银行"}
+    ]
+    # 取消没有关注过的代码同样幂等。
+    assert pool.remove_focus("SH", "600000") == [
+        {"market": "SZ", "code": "000001", "name": "平安银行"}
+    ]
+
+
+def test_focus_validates_symbol_and_truncates_name(tmp_path) -> None:
+    pool = DuckDbStrategyPoolStore(DuckDbMarketDataStore(tmp_path / "market.duckdb"))
+    pool.initialize()
+
+    with pytest.raises(ValueError):
+        pool.add_focus("BJ", "600000")
+    with pytest.raises(ValueError):
+        pool.add_focus("SH", "60000")
+
+    long_name = "名称" * 40
+    assert pool.add_focus("SH", "600000", long_name)[0]["name"] == long_name[:FOCUS_NAME_MAX_LENGTH]
+
+
+def test_focus_limit_rejects_the_next_symbol(tmp_path) -> None:
+    pool = DuckDbStrategyPoolStore(DuckDbMarketDataStore(tmp_path / "market.duckdb"))
+    pool.initialize()
+    for index in range(FOCUS_LIMIT):
+        pool.add_focus("SH", f"{index:06d}")
+
+    with pytest.raises(ValueError, match="特别关注最多"):
+        pool.add_focus("SH", "999999")
+    # 被拒的写入不会把已有的关注名单弄脏。
+    assert len(pool.read_focus()) == FOCUS_LIMIT
+    assert pool.remove_focus("SH", "000000") and len(pool.read_focus()) == FOCUS_LIMIT - 1
+
+
+def test_focus_survives_full_pool_reset(tmp_path) -> None:
+    """清空重建会删空 entries；关注是用户的选择，不能跟着一起丢。"""
+
+    pool = DuckDbStrategyPoolStore(DuckDbMarketDataStore(tmp_path / "market.duckdb"))
+    pool.initialize()
+    pool.upsert_automatic(
+        market="SH",
+        code="600000",
+        name="浦发银行",
+        annual_candidate={"candidate_id": "auto-a"},
+        sharpe_candidate={"candidate_id": "auto-s"},
+        data_fingerprint="bars-1",
+        config_fingerprint="config-1",
+        source_job_id="job-1",
+    )
+    pool.add_focus("SH", "600000", "浦发银行")
+
+    pool.persist_worker_entry({"reset": True}, source_job_id="job-2")
+
+    assert pool.list_entries() == []
+    assert pool.read_focus() == [{"market": "SH", "code": "600000", "name": "浦发银行"}]

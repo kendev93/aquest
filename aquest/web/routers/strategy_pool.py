@@ -201,6 +201,51 @@ def update_research_settings(
     return {"data": {"boards": saved["boards"], "exclude_st": saved["exclude_st"]}}
 
 
+class FocusMemberRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    market: Literal["SH", "SZ"]
+    code: str = Field(pattern=r"^\d{6}$")
+    name: str = ""
+
+
+@router.get("/focus")
+def get_focus(request: Request) -> dict[str, object]:
+    """特别关注名单；一只都没关注过时返回空列表。"""
+
+    try:
+        items = _pool_store(request).read_focus()
+    except (MarketDataStoreError, OSError) as exc:
+        raise HTTPException(status_code=503, detail="特别关注暂时无法读取") from exc
+    return {"data": {"items": items}}
+
+
+@router.post("/focus")
+def add_focus_member(payload: FocusMemberRequest, request: Request) -> dict[str, object]:
+    """关注一只标的；重复关注幂等，超过上限 422。"""
+
+    try:
+        items = _pool_store(request).add_focus(payload.market, payload.code, payload.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (MarketDataStoreError, OSError) as exc:
+        raise HTTPException(status_code=503, detail="特别关注暂时无法保存") from exc
+    return {"data": {"items": items}}
+
+
+@router.delete("/focus/{market}/{code}")
+def remove_focus_member(market: str, code: str, request: Request) -> dict[str, object]:
+    """取消关注；没有关注过的代码同样幂等返回当前名单。"""
+
+    try:
+        items = _pool_store(request).remove_focus(market.upper(), code)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (MarketDataStoreError, OSError) as exc:
+        raise HTTPException(status_code=503, detail="特别关注暂时无法保存") from exc
+    return {"data": {"items": items}}
+
+
 @router.post("/jobs", status_code=status.HTTP_202_ACCEPTED)
 def create_strategy_pool_job(payload: PoolJobRequest, request: Request) -> dict[str, object]:
     backend = _job_backend(request)

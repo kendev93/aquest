@@ -195,3 +195,43 @@ test('pool details are read-only and expose both rules, launch curve and paged t
   await page.getByRole('link',{name:'← 返回全市场标的状态'}).click()
   await expect(page).toHaveURL(/page=2.*search=600000/)
 })
+
+test('following a symbol scopes it into the 特别关注 panel', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+  })
+  let focus: unknown[] = []
+  await page.route('**/api/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    const method = route.request().method()
+    let data: unknown = {}
+    if (path.includes('/strategy-pool/focus')) {
+      if (method === 'POST') focus = [{ market: 'SH', code: '600000', name: '测试股票' }]
+      else if (method === 'DELETE') focus = []
+      data = { items: focus }
+    } else if (path.endsWith('/strategy-pool/entries')) {
+      data = { items: [{
+        market: 'SH', code: '600000', name: '测试股票', status: 'ready',
+        active_candidate: null, automatic_candidates: {}, manual_overrides: {},
+      }] }
+    } else if (path.endsWith('/strategy-pool/jobs')) {
+      data = { items: [] }
+    }
+    await route.fulfill({ json: { data } })
+  })
+  await page.goto('/strategy-pool')
+
+  await expect(page.getByTestId('pool-focus-empty')).toBeVisible()
+
+  await page.getByTestId('pool-follow-entry-600000').click()
+  await expect(page.getByTestId('focus-row-600000')).toBeVisible()
+  await expect(page.getByTestId('focus-follow-entry-600000')).toHaveText('已关注')
+  await expect(page.getByTestId('pool-follow-entry-600000')).toHaveText('已关注')
+
+  await page.getByTestId('focus-follow-entry-600000').click()
+  await expect(page.getByTestId('focus-row-600000')).toHaveCount(0)
+  await expect(page.getByTestId('pool-focus-empty')).toBeVisible()
+
+  await page.reload()
+  await expect(page.getByTestId('pool-focus-empty')).toBeVisible()
+})

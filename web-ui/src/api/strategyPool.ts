@@ -2,6 +2,7 @@
 import { ApiError, createRequestClient } from './client'
 import type {
   StrategyPoolEntry,
+  StrategyPoolFocusItem,
   StrategyPoolJobState,
   StrategyPoolJobSummary,
   StrategyPoolObjective,
@@ -91,6 +92,41 @@ export async function saveResearchSettings(
     { method: 'PUT', body: JSON.stringify(payload) },
   )
   return response.data
+}
+
+// 特别关注走后端而不是 localStorage：清空重建全市场会删空标的条目，关注是用户的选择，
+// 不能跟着一起丢。三个函数都返回服务端权威名单，所以点一次就同步一次，不用二次 GET。
+// e2e 的接口兜底 mock 会返回空对象，这里一律 `?? []`。
+function readFocusItems(data: { items?: StrategyPoolFocusItem[] }): StrategyPoolFocusItem[] {
+  return data.items ?? []
+}
+
+export async function fetchStrategyPoolFocus(): Promise<StrategyPoolFocusItem[]> {
+  const response = await request<{ data: { items?: StrategyPoolFocusItem[] } }>(`${API_BASE}/focus`)
+  return readFocusItems(response.data)
+}
+
+export async function addStrategyPoolFocus(
+  market: string,
+  code: string,
+  name: string,
+): Promise<StrategyPoolFocusItem[]> {
+  const response = await request<{ data: { items?: StrategyPoolFocusItem[] } }>(`${API_BASE}/focus`, {
+    method: 'POST',
+    body: JSON.stringify({ market, code, name }),
+  })
+  return readFocusItems(response.data)
+}
+
+export async function removeStrategyPoolFocus(
+  market: string,
+  code: string,
+): Promise<StrategyPoolFocusItem[]> {
+  const response = await request<{ data: { items?: StrategyPoolFocusItem[] } }>(
+    `${API_BASE}/focus/${market}/${code}`,
+    { method: 'DELETE' },
+  )
+  return readFocusItems(response.data)
 }
 
 export async function saveStrategyPoolOverride(

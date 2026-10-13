@@ -9,7 +9,7 @@ from aquest.market_data.adapter import DuckDbMarketDataAdapter
 from aquest.market_data.store import DuckDbMarketDataStore
 from aquest.portfolio_backtest.service import PortfolioBacktestService
 from aquest.strategy_pool.service import MarketStrategyPoolService
-from aquest.strategy_pool.store import DuckDbStrategyPoolStore
+from aquest.strategy_pool.store import FOCUS_LIMIT, DuckDbStrategyPoolStore
 from aquest.web.app import create_app
 
 TOKEN = "pool-worker-test-token"
@@ -590,3 +590,71 @@ def test_manual_signal_refresh_uses_independent_both_objective_channel(tmp_path)
         assert job["operation"] == "market_strategy_pool_tracking"
         assert job["payload"]["objective"] == "sharpe"
         assert len(client.get("/api/v1/jobs/active").json()["data"]) == 2
+
+
+def test_focus_api_round_trip_and_validation(tmp_path) -> None:
+    app = create_app(
+        market_data_store=_store(tmp_path),
+        strategy_worker_token=TOKEN,
+        auto_sync_enabled=False,
+    )
+
+    with TestClient(app) as client:
+        empty = client.get("/api/v1/strategy-pool/focus")
+        assert empty.status_code == 200
+        assert empty.json()["data"]["items"] == []
+
+        added = client.post(
+            "/api/v1/strategy-pool/focus",
+            json={"market": "SH", "code": "600000", "name": "浦发银行"},
+        )
+        expected = [{"market": "SH", "code": "600000", "name": "浦发银行"}]
+        assert added.status_code == 200
+        assert added.json()["data"]["items"] == expected
+        assert (
+            client.post(
+                "/api/v1/strategy-pool/focus",
+                json={"market": "SH", "code": "600000", "name": "浦发银行"},
+            ).json()["data"]["items"]
+            == expected
+        )
+        assert client.get("/api/v1/strategy-pool/focus").json()["data"]["items"] == expected
+
+        assert (
+            client.post(
+                "/api/v1/strategy-pool/focus", json={"market": "SH", "code": "60000"}
+            ).status_code
+            == 422
+        )
+        assert (
+            client.post(
+                "/api/v1/strategy-pool/focus",
+                json={"market": "SH", "code": "600000", "name": "x", "objective": "sharpe"},
+            ).status_code
+            == 422
+        )
+        assert client.get("/api/v1/strategy-pool/focus").json()["data"]["items"] == expected
+
+        unchanged = client.delete("/api/v1/strategy-pool/focus/SZ/600000")
+        assert unchanged.json()["data"]["items"] == expected
+        assert client.delete("/api/v1/strategy-pool/focus/SH/600000").json()["data"]["items"] == []
+        assert client.delete("/api/v1/strategy-pool/focus/BJ/600000").status_code == 422
+
+
+def test_focus_api_rejects_members_beyond_the_limit(tmp_path) -> None:
+    app = create_app(
+        market_data_store=_store(tmp_path),
+        strategy_worker_token=TOKEN,
+        auto_sync_enabled=False,
+    )
+    pool_store = app.state.strategy_pool_store
+    for index in range(FOCUS_LIMIT):
+        pool_store.add_focus("SH", f"{index:06d}")
+
+    with TestClient(app) as client:
+        rejected = client.post(
+            "/api/v1/strategy-pool/focus", json={"market": "SH", "code": "999999"}
+        )
+        assert rejected.status_code == 422
+        assert "特别关注最多" in rejected.json()["error"]["message"]
+        assert len(client.get("/api/v1/strategy-pool/focus").json()["data"]["items"]) == FOCUS_LIMIT

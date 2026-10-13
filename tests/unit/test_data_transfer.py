@@ -23,6 +23,7 @@ from aquest.market_data.transfer import (
     import_user_assets,
     read_manifest,
 )
+from aquest.strategy_pool.store import DuckDbStrategyPoolStore
 
 
 def _bars() -> pd.DataFrame:
@@ -69,6 +70,7 @@ def test_asset_tables_never_include_market_or_cache_data() -> None:
         "strategy_discovery_history",
         "strategy_discovery_replay_history",
         "strategy_pool_entries",
+        "strategy_pool_focus",
         "screen_presets",
         "research_presets",
         "candidate_library",
@@ -105,6 +107,26 @@ def test_round_trip_moves_assets_and_leaves_market_data_behind(tmp_path: Path) -
     # 行情不在备份里，目标库仍然是空的
     assert target.read_bars("SH", "600000").empty
     assert source.read_bars("SH", "600000").shape[0] == 2
+
+
+def test_round_trip_carries_focus_list(tmp_path: Path) -> None:
+    """特别关注是用户逐只勾出来的，重跑研究补不回来，必须随资产一起搬走。"""
+
+    source = DuckDbMarketDataStore(tmp_path / "src.duckdb")
+    pool = DuckDbStrategyPoolStore(source)
+    pool.initialize()
+    pool.add_focus("SH", "600000", "浦发银行")
+    pool.add_focus("SZ", "000001", "平安银行")
+    archive = export_user_assets(source, tmp_path / "backup.zip").path
+
+    target = DuckDbMarketDataStore(tmp_path / "dst.duckdb")
+    summary = import_user_assets(target, archive)
+
+    assert summary.imported["strategy_pool_focus"] == 2
+    assert DuckDbStrategyPoolStore(target).read_focus() == [
+        {"market": "SH", "code": "600000", "name": "浦发银行"},
+        {"market": "SZ", "code": "000001", "name": "平安银行"},
+    ]
 
 
 def test_round_trip_keeps_tracking_snapshots_and_trade_costs(tmp_path: Path) -> None:
