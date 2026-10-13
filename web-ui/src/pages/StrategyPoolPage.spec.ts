@@ -1639,6 +1639,55 @@ describe('StrategyPoolPage', () => {
 
       expect(api.fetchStrategyPoolFocus).toHaveBeenCalledTimes(1)
     })
+    it('prunes followed symbols that are not in the pool', async () => {
+      window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+      vi.mocked(api.fetchStrategyPoolFocus).mockResolvedValue([
+        { market: 'SH', code: '600000', name: '测试600000' },
+        { market: 'SZ', code: '000001', name: '平安银行' },
+        { market: 'SZ', code: '000002', name: '万科A' },
+      ])
+      vi.mocked(api.removeStrategyPoolFocus)
+        .mockResolvedValueOnce([
+          { market: 'SH', code: '600000', name: '测试600000' },
+          { market: 'SZ', code: '000002', name: '万科A' },
+        ])
+        .mockResolvedValueOnce([{ market: 'SH', code: '600000', name: '测试600000' }])
+      const wrapper = mount(StrategyPoolPage)
+      await flushPromises()
+
+      expect(wrapper.get('[data-testid="pool-focus-missing"]').text()).toContain('2 只')
+      expect(wrapper.findAll('tbody tr[data-testid^="focus-row-"]')).toHaveLength(1)
+
+      await wrapper.get('[data-testid="pool-focus-prune"]').trigger('click')
+      await flushPromises()
+
+      // 只删池外的那两只，在池里的关注保持不动。
+      expect(api.removeStrategyPoolFocus).toHaveBeenNthCalledWith(1, 'SZ', '000001')
+      expect(api.removeStrategyPoolFocus).toHaveBeenNthCalledWith(2, 'SZ', '000002')
+      expect(wrapper.find('[data-testid="pool-focus-missing"]').exists()).toBe(false)
+      expect(wrapper.findAll('tbody tr[data-testid^="focus-row-"]')).toHaveLength(1)
+      expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+    })
+
+    it('re-reads the focus list when a prune request fails halfway', async () => {
+      window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+      vi.mocked(api.fetchStrategyPoolFocus)
+        .mockResolvedValueOnce([{ market: 'SZ', code: '000001', name: '平安银行' }])
+        .mockResolvedValueOnce([])
+      vi.mocked(api.removeStrategyPoolFocus).mockRejectedValue(
+        new ApiError('特别关注暂时无法保存', 503),
+      )
+      const wrapper = mount(StrategyPoolPage)
+      await flushPromises()
+
+      await wrapper.get('[data-testid="pool-focus-prune"]').trigger('click')
+      await flushPromises()
+
+      expect(wrapper.get('[role="alert"]').text()).toContain('特别关注暂时无法保存')
+      // 后端已经删掉了第一只，重读让界面跟库一致，而不是回滚成旧名单。
+      expect(wrapper.find('[data-testid="pool-focus-missing"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="pool-focus-empty"]').exists()).toBe(true)
+    })
   })
 
 })

@@ -309,7 +309,11 @@ const focusRows = computed(() => sortPoolEntriesByStatus(
   heldSymbols.value,
   objective.value,
 ))
-const focusMissingCount = computed(() => focusItems.value.length - focusRows.value.length)
+const focusMissing = computed(() => {
+  const poolKeys = new Set(entries.value.map(symbol))
+  return focusItems.value.filter((item) => !poolKeys.has(symbol(item)))
+})
+const focusMissingCount = computed(() => focusMissing.value.length)
 const listContext = computed(() => new URLSearchParams({
   objective: objective.value ?? 'annual_return',
   search: searchQuery.value,
@@ -335,6 +339,30 @@ async function toggleFollow(entry: StrategyPoolEntry): Promise<void> {
       : await addStrategyPoolFocus(entry.market, entry.code, entry.name)
   } catch (error) {
     focusItems.value = previous
+    errorMessage.value = apiMessage(error)
+  } finally {
+    focusPending.value = false
+  }
+}
+
+// 池外的关注标的在两张表里都没有行，也就没有单只取消的入口；这里给一个批量移出的出口，
+// 逐只走同一个 DELETE 接口，避免为了「清理」再加一套后端语义。
+async function pruneMissingFocus(): Promise<void> {
+  if (focusPending.value) return
+  const missing = focusMissing.value
+  if (!missing.length) return
+  const previous = focusItems.value
+  focusPending.value = true
+  errorMessage.value = ''
+  try {
+    let items = previous
+    for (const item of missing) {
+      items = await removeStrategyPoolFocus(item.market, item.code)
+    }
+    focusItems.value = items
+  } catch (error) {
+    // 中途失败时后端可能已经移除了几只，重读一次让界面和库里一致。
+    focusItems.value = await fetchStrategyPoolFocus().catch(() => previous)
     errorMessage.value = apiMessage(error)
   } finally {
     focusPending.value = false
@@ -1187,7 +1215,7 @@ onUnmounted(() => {
             @toggle-follow="toggleFollow"
           />
           <p v-else class="empty-copy" data-testid="pool-focus-empty">{{ focusMissingCount ? '已关注的标的目前都不在策略池里；跑完全市场研究或单股重跑后会显示。' : '在下方「全市场标的状态」的维护列点击关注，这里就只显示这几只标的的当前状态。' }}</p>
-          <p v-if="focusMissingCount > 0" class="pool-scale-note" data-testid="pool-focus-missing">另有 {{ focusMissingCount }} 只关注标的暂时不在策略池，重跑后会显示。</p>
+          <p v-if="focusMissingCount > 0" class="pool-scale-note" data-testid="pool-focus-missing">另有 {{ focusMissingCount }} 只关注标的暂时不在策略池，重跑后会显示；不需要了可以<button class="text-button" data-testid="pool-focus-prune" :disabled="focusPending" @click="void pruneMissingFocus()">移出这些关注</button>。</p>
         </section>
 
         <section class="pool-table-section panel-card">
