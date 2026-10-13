@@ -551,9 +551,7 @@ class MarketStrategyPoolService:
         refs: list[StockRef],
         prior_entries: Mapping[tuple[str, str], tuple[str, str, str, bool, datetime | None]],
         config_fingerprint: str,
-        post_launch_summaries: (
-            Mapping[tuple[str, str, str], Mapping[str, object]] | None
-        ) = None,
+        post_launch_summaries: (Mapping[tuple[str, str, str], Mapping[str, object]] | None) = None,
     ) -> tuple[list[StockRef], int]:
         """把本次增量无需触碰的标的预先剔除，让任务总数只反映真实工作量。
 
