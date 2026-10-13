@@ -146,6 +146,7 @@ export interface StrategyPoolJobResult {
     holdings?: StrategyPoolHolding[]
     risk_exit_signals?: Array<Record<string, unknown>>
     failed_batches?: number
+    failed_symbols?: number
     reason?: string
     data_fingerprint?: string
   }

@@ -197,7 +197,7 @@ const sellNextTradingDaySymbols = computed(() => new Set([
 ]))
 const currentHoldings = computed<StrategyPoolHolding[]>(
   () => signalResult.value?.holding_scope === 'per_stock_strategy'
-    && signalResult.value.holding_snapshot_complete === true
+    && signalResult.value.model_portfolio?.available !== false
     ? signalResult.value.model_portfolio?.holdings ?? []
     : [],
 )
@@ -789,6 +789,22 @@ function holdingStatus(holding: StrategyPoolHolding): string {
   return holdingReturn ? `${holdingReturn} · ${tradeStatus}` : tradeStatus
 }
 
+function incompleteHoldingsWarning(): string {
+  const result = signalResult.value
+  const portfolio = result?.model_portfolio
+  const reason = portfolio?.reason ? ` ${portfolio.reason}` : ''
+  if (typeof portfolio?.failed_symbols === 'number' && portfolio.failed_symbols > 0) {
+    return `逐股持仓回放有 ${portfolio.failed_symbols} 个标的未能确认，结果不完整；当前仅展示已确认的持仓。${reason}`
+  }
+  if (typeof portfolio?.failed_batches === 'number' && portfolio.failed_batches > 0) {
+    return `逐股持仓回放有 ${portfolio.failed_batches} 个批次失败，结果不完整；当前仅展示已确认的持仓。${reason}`
+  }
+  if (result?.signal_target) {
+    return '这是单股增量结果，尚未覆盖全市场；当前仅展示已确认的持仓，请刷新当天信号查看完整持仓。'
+  }
+  return '结果不完整，当前仅展示已确认的持仓；请刷新当天信号查看完整持仓。'
+}
+
 function holdingReturnText(signal: StrategyPoolSignal): string {
   const value = currentHoldingReturns.value.get(signal.symbol)
   return typeof value === 'number' && Number.isFinite(value)
@@ -1152,7 +1168,7 @@ onUnmounted(() => {
             <p v-if="!signalResult" class="empty-copy">信号扫描完成后显示各股对应策略的持仓状态。</p>
             <p v-else-if="signalResult.model_portfolio?.available === false" class="empty-copy">{{ signalResult.model_portfolio.reason || '当前无法计算逐股策略持仓。' }}</p>
             <p v-else-if="signalResult.holding_scope !== 'per_stock_strategy'" class="empty-copy">当前历史结果没有逐股持仓快照；请刷新当天信号后查看。</p>
-            <p v-else-if="signalResult.holding_snapshot_complete !== true" class="empty-copy">{{ signalResult.model_portfolio?.failed_batches ? `逐股持仓回放有 ${signalResult.model_portfolio.failed_batches} 个批次失败，当前结果不完整。${signalResult.model_portfolio.reason || ''}` : signalResult.signal_target ? '这是单股增量结果，尚未覆盖全市场；请刷新当天信号查看完整持仓。' : '当前历史结果没有完整的逐股持仓快照；请刷新当天信号后查看。' }}</p>
+            <p v-else-if="signalResult.holding_snapshot_complete !== true" class="empty-copy">{{ incompleteHoldingsWarning() }}</p>
             <p v-else-if="!currentHoldings.length" class="empty-copy">当前没有仍处于持仓状态的标的。</p>
           </article>
         </section>

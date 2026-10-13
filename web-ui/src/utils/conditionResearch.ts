@@ -431,3 +431,65 @@ export function presetLoadMessage(name: string, stale: number): string {
 export function buildPresetPayload(payload: ConditionResearchPayload): ConditionResearchPayload {
   return JSON.parse(JSON.stringify(payload)) as ConditionResearchPayload
 }
+/** 有门槛数据时给一句总结，避免用户看到五个候选全是「疑似噪声」却不知道意味着什么。 */
+export function significanceSummaryText(report: ConditionResearchReport | null): string {
+  const candidates = report?.candidates ?? []
+  const thresholds = candidates
+    .map((item) => item.mining.lift_threshold)
+    .filter((value): value is number => typeof value === 'number')
+  if (!thresholds.length) return ''
+  const threshold = Math.max(...thresholds)
+  const passed = candidates.filter((item) => item.mining.significant === true).length
+  if (passed > 0) {
+    return (
+      `噪声门槛 ${threshold.toFixed(3)}：${candidates.length} 个候选里有 ${passed} 个超过了纯运气能达到的水平。` +
+      '未过门槛的候选不会进入留出期复验。'
+    )
+  }
+  return (
+    `噪声门槛 ${threshold.toFixed(3)}：没有一个候选超过随机打乱能达到的水平，` +
+    '这次挖到的条件很可能是运气，建议扩大股票范围、延长时间区间或放宽基础规则以增加样本。' +
+    '未过门槛的候选不会进入留出期复验。'
+  )
+}
+
+/**
+ * 合并了多少条同义条件。合并不等于"少给几条"——空出来的名额由更靠后的、
+ * 不同义的条件顶上，所以这里要说明清楚，别让用户以为名额被砍了。
+ */
+export function duplicateSummaryText(report: ConditionResearchReport | null): string {
+  const merged = report?.merged_duplicate_count ?? 0
+  const threshold = report?.duplicate_correlation
+  if (!merged || threshold === undefined) return ''
+  return (
+    `按相关性门槛 ${threshold.toFixed(2)} 合并了 ${merged} 条同义条件（同一个发现的不同写法，`
+    + '多数只是阈值差一点）。空出的名额由更靠后、不同义的条件顶上，明细见每行条件名后的「已合并」。'
+  )
+}
+
+/**
+ * 累计试验记账（候选池 #20）。
+ *
+ * 两件事要说清楚，第二件比第一件更重要：
+ * ① 判定有没有因为「跑过很多轮」而被抬高；
+ * ② 同一段数据被反复挖过几次 —— 这不改变 p 值，但它是过拟合的直接信号。
+ */
+export function trialSummaryText(report: ConditionResearchReport | null): string {
+  const trials = report?.trials
+  if (!trials) return ''
+  const parts = [
+    `本次共评估 ${trials.tested_conditions} 个条件，是第 ${trials.trial_count} 轮独立研究（按数据区间算，不是按次数）。`,
+  ]
+  if (trials.adjusted) {
+    parts.push(
+      `判定已按 ${trials.trial_count} 轮校正：同样的 p 值，撞出来的机会是 ${trials.trial_count} 倍。`,
+    )
+  }
+  if (trials.repeated_studies > 0) {
+    parts.push(
+      `注意：这 ${trials.study_count} 次研究里有 ${trials.repeated_studies} 次是在同一段数据上重复挖的`
+        + '——重复挖不会增加撞好运的机会，所以不计入轮数，但它说明你在反复榨同一段行情。',
+    )
+  }
+  return parts.join('')
+}

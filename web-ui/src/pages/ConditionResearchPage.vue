@@ -11,13 +11,6 @@ import {
   getConditionResearchHistory,
   getConditionResearchResults,
 } from '../api/conditionResearch'
-import {
-  createResearchPreset,
-  deleteResearchPreset,
-  fetchResearchPresets,
-  getResearchPreset,
-  updateResearchPreset,
-} from '../api/researchPresets'
 import { fetchMetadata, parseFormula } from '../api/formulaScreen'
 import { ApiError } from '../api/client'
 import { fetchActiveJobs } from '../api/jobs'
@@ -25,6 +18,8 @@ import DateRangeSelector from '../components/DateRangeSelector.vue'
 import RuleGroupEditor from '../components/RuleGroupEditor.vue'
 import TermHint from '../components/TermHint.vue'
 import ConditionHistoryPanel from '../components/ConditionHistoryPanel.vue'
+import ConditionRankingAdvice from '../components/ConditionRankingAdvice.vue'
+import { useResearchPresets } from '../composables/useResearchPresets'
 import ConditionRollingTable from '../components/ConditionRollingTable.vue'
 import ConditionSensitivityTable from '../components/ConditionSensitivityTable.vue'
 import ConditionStockDetail from '../components/ConditionStockDetail.vue'
@@ -42,7 +37,6 @@ import type {
   InstrumentBoard,
   InstrumentType,
   RankOrder,
-  ResearchPresetSummary,
   RuleGroupPayload,
   ScreenCondition,
   ValueDefinition,
@@ -52,10 +46,10 @@ import { parseStoredRuleGroup } from '../utils/formulaScreen'
 import { importSummaryText } from '../utils/candidateLibrary'
 import { consumeSwingPlan } from '../utils/swingHandoff'
 import {
-  RANKING_CONFIDENCE_LABELS,
   STOCK_BOARD_OPTIONS,
   conditionHitRate as formatConditionHitRate,
   constraintText,
+  duplicateSummaryText,
   duplicateTitle as formatDuplicateTitle,
   formatConditionText,
   formatNumber,
@@ -63,12 +57,12 @@ import {
   hitRateTitle,
   mergedDuplicates,
   phaseCount,
-  presetLoadMessage,
   significanceLabel,
   significanceTitle as formatSignificanceTitle,
-  stalePresetReferences,
+  significanceSummaryText,
   topNTitle as formatTopNTitle,
   topNWinRate,
+  trialSummaryText,
   validationTrades as formatValidationTrades,
 } from '../utils/conditionResearch'
 import type { ResearchHistorySummary } from '../utils/conditionResearch'
@@ -123,10 +117,6 @@ const job = ref<ConditionResearchJobState | null>(null)
 const report = ref<ConditionResearchReport | null>(null)
 const history = ref<ResearchHistorySummary[]>([])
 const historyLoading = ref(false)
-const researchPresets = ref<ResearchPresetSummary[]>([])
-const selectedPresetId = ref('')
-const presetName = ref('')
-const presetBusy = ref(false)
 // 判断方案里的条件是否失效要看当前元数据里到底有哪些输出/信号。元数据还没到
 // 的时候一律不判——那时没有依据，宁可什么都不说。
 const presetAvailability = computed(() => ({
@@ -140,6 +130,29 @@ const presetAvailability = computed(() => ({
       (indicator) => (indicator.signals ?? []).map((signal) => signal.id),
     ),
 }))
+
+// 研究预设的状态与动作（保存/加载/覆盖/重命名/删除）在 composables/useResearchPresets。
+const {
+  researchPresets,
+  selectedPresetId,
+  presetName,
+  presetBusy,
+  refreshResearchPresets,
+  loadSelectedPreset,
+  quickResearch,
+  savePresetAsNew,
+  overwritePreset,
+  renamePreset,
+  deleteSelectedPreset,
+} = useResearchPresets({
+  buildPayload,
+  applyStoredRequest,
+  submit,
+  message,
+  customParseError,
+  presetAvailability,
+  describeError: apiMessage,
+})
 const selectedStockView = ref('baseline:full')
 // 历史列表：后端已按完成时间由近到远排好，这里只管切片分页。
 const activeHistoryId = ref('')
@@ -224,18 +237,6 @@ const slotHint = computed<string | null>(() => {
   }
   return `日均命中 ${hits} 只、槽位 ${slots} 个：条件和排序共同决定结果，两边都值得调。`
 })
-const rankingConfidenceLabel = computed(() => (
-  RANKING_CONFIDENCE_LABELS[rankingRecommendation.value?.confidence ?? 'none'] ?? '暂无法判断'
-))
-const rankingValueName = computed(() => (
-  rankingRecommendation.value?.display_name || rankingRecommendation.value?.value_id || '—'
-))
-const rankingOrderText = computed(() => (
-  rankingRecommendation.value?.order === 'asc' ? '从小到大' : '从大到小'
-))
-const rankingQuantiles = computed(() => (
-  (rankingRecommendation.value?.quantile_returns ?? []).map((item) => formatPercent(item))
-))
 const dateRange = computed<DateRangeSelection>({
   get: () => ({ mode: form.dateMode, startDate: form.startDate, endDate: form.endDate }),
   set: (value) => {
@@ -840,141 +841,6 @@ async function applyStoredRequest(raw: unknown): Promise<void> {
   }
 }
 
-async function refreshResearchPresets(): Promise<void> {
-  try {
-    researchPresets.value = await fetchResearchPresets()
-  } catch {
-    // 列表拉不到不影响研究，只在方案区留空即可。
-  }
-}
-
-/** 加载结果。stale 是「引用了当前不存在的指标 / 信号」的项数，必须往上传。 */
-interface PresetLoadOutcome {
-  name: string
-  stale: number
-}
-
-async function loadSelectedPreset(): Promise<PresetLoadOutcome | null> {
-  const presetId = selectedPresetId.value
-  if (!presetId) return null
-  presetBusy.value = true
-  try {
-    const preset = await getResearchPreset(presetId)
-    await applyStoredRequest(preset.payload)
-    presetName.value = preset.name
-    // 数的是 payload 这份原始记录，不是表单：还原时 signals 会被丢掉（研究页
-    // 的条件不用信号），数表单一项都数不出来。
-    //
-    // 放在还原之后而不是之前：自定义公式要解析完才知道它到底产出哪些输出/信
-    // 号，在还原前数的话，一个自定义方案的每一项都会被误判成失效——那时手上
-    // 的依据还是上一份（预置）元数据。
-    const stale = stalePresetReferences(preset.payload, presetAvailability.value)
-    if (customParseError.value) {
-      // 公式没解析出来时上面的失效计数是空的（没有可对照的清单），不能据此
-      // 报「已载入」。
-      message.value = `已载入研究方案「${preset.name}」，但自定义公式没能解析：${customParseError.value}`
-      return { name: preset.name, stale: 0 }
-    }
-    message.value = presetLoadMessage(preset.name, stale)
-    return { name: preset.name, stale }
-  } catch (error) {
-    message.value = apiMessage(error)
-    return null
-  } finally {
-    presetBusy.value = false
-  }
-}
-
-/** 一键研究：载入方案后立刻跑，省掉「加载 → 滚到底部点开始」两步。 */
-async function quickResearch(): Promise<void> {
-  const loaded = await loadSelectedPreset()
-  if (!loaded) return
-  const ran = await submit()
-  if (loaded.stale > 0) {
-    // 失效引用比「研究完成」重要：条件已经被悄悄换过，不能只报喜。
-    message.value = `已按方案「${loaded.name}」运行，但有 ${loaded.stale} 项引用了当前不存在的指标或信号、已被替换，请先核对条件。`
-  } else if (!ran) {
-    // submit 失败时自己会写 message（后端拒绝的原因就在里面）。只有它什么都没
-    // 说——也就是本地校验没过——才补这句，否则会把真正的原因盖掉。
-    if (!message.value) {
-      message.value = `已载入方案「${loaded.name}」，但当前配置没能通过校验，请修正后再运行。`
-    }
-  }
-}
-
-async function savePresetAsNew(): Promise<void> {
-  const name = presetName.value.trim()
-  if (!name) {
-    message.value = '请先填写研究方案名称。'
-    return
-  }
-  presetBusy.value = true
-  try {
-    const created = await createResearchPreset({ name, payload: buildPayload() })
-    await refreshResearchPresets()
-    selectedPresetId.value = created.preset_id
-    presetName.value = created.name
-    message.value = `已保存研究方案「${created.name}」。`
-  } catch (error) {
-    message.value = apiMessage(error)
-  } finally {
-    presetBusy.value = false
-  }
-}
-
-async function overwritePreset(): Promise<void> {
-  const presetId = selectedPresetId.value
-  if (!presetId) return
-  presetBusy.value = true
-  try {
-    const updated = await updateResearchPreset(presetId, { payload: buildPayload() })
-    await refreshResearchPresets()
-    message.value = `已用当前设置覆盖研究方案「${updated.name}」。`
-  } catch (error) {
-    message.value = apiMessage(error)
-  } finally {
-    presetBusy.value = false
-  }
-}
-
-async function renamePreset(): Promise<void> {
-  const presetId = selectedPresetId.value
-  const name = presetName.value.trim()
-  if (!presetId) return
-  if (!name) {
-    message.value = '请先填写新的研究方案名称。'
-    return
-  }
-  presetBusy.value = true
-  try {
-    const updated = await updateResearchPreset(presetId, { name })
-    await refreshResearchPresets()
-    presetName.value = updated.name
-    message.value = `研究方案已重命名为「${updated.name}」。`
-  } catch (error) {
-    message.value = apiMessage(error)
-  } finally {
-    presetBusy.value = false
-  }
-}
-
-async function deleteSelectedPreset(): Promise<void> {
-  const presetId = selectedPresetId.value
-  if (!presetId) return
-  presetBusy.value = true
-  try {
-    await deleteResearchPreset(presetId)
-    selectedPresetId.value = ''
-    presetName.value = ''
-    await refreshResearchPresets()
-    message.value = '已删除研究方案。'
-  } catch (error) {
-    message.value = apiMessage(error)
-  } finally {
-    presetBusy.value = false
-  }
-}
-
 /**
  * 候选库「载入复测」的接收端。
  *
@@ -1031,68 +897,10 @@ async function removeHistory(historyId: string): Promise<void> {
   }
 }
 
-/** 有门槛数据时给一句总结，避免用户看到五个候选全是「疑似噪声」却不知道意味着什么。 */
-const significanceSummary = computed(() => {
-  const candidates = report.value?.candidates ?? []
-  const thresholds = candidates
-    .map((item) => item.mining.lift_threshold)
-    .filter((value): value is number => typeof value === 'number')
-  if (!thresholds.length) return ''
-  const threshold = Math.max(...thresholds)
-  const passed = candidates.filter((item) => item.mining.significant === true).length
-  if (passed > 0) {
-    return (
-      `噪声门槛 ${threshold.toFixed(3)}：${candidates.length} 个候选里有 ${passed} 个超过了纯运气能达到的水平。` +
-      '未过门槛的候选不会进入留出期复验。'
-    )
-  }
-  return (
-    `噪声门槛 ${threshold.toFixed(3)}：没有一个候选超过随机打乱能达到的水平，` +
-    '这次挖到的条件很可能是运气，建议扩大股票范围、延长时间区间或放宽基础规则以增加样本。' +
-    '未过门槛的候选不会进入留出期复验。'
-  )
-})
-
-/**
- * 合并了多少条同义条件。合并不等于"少给几条"——空出来的名额由更靠后的、
- * 不同义的条件顶上，所以这里要说明清楚，别让用户以为名额被砍了。
- */
-const duplicateSummary = computed(() => {
-  const merged = report.value?.merged_duplicate_count ?? 0
-  const threshold = report.value?.duplicate_correlation
-  if (!merged || threshold === undefined) return ''
-  return (
-    `按相关性门槛 ${threshold.toFixed(2)} 合并了 ${merged} 条同义条件（同一个发现的不同写法，`
-    + '多数只是阈值差一点）。空出的名额由更靠后、不同义的条件顶上，明细见每行条件名后的「已合并」。'
-  )
-})
-
-/**
- * 累计试验记账（候选池 #20）。
- *
- * 两件事要说清楚，第二件比第一件更重要：
- * ① 判定有没有因为「跑过很多轮」而被抬高；
- * ② 同一段数据被反复挖过几次 —— 这不改变 p 值，但它是过拟合的直接信号。
- */
-const trialSummary = computed(() => {
-  const trials = report.value?.trials
-  if (!trials) return ''
-  const parts = [
-    `本次共评估 ${trials.tested_conditions} 个条件，是第 ${trials.trial_count} 轮独立研究（按数据区间算，不是按次数）。`,
-  ]
-  if (trials.adjusted) {
-    parts.push(
-      `判定已按 ${trials.trial_count} 轮校正：同样的 p 值，撞出来的机会是 ${trials.trial_count} 倍。`,
-    )
-  }
-  if (trials.repeated_studies > 0) {
-    parts.push(
-      `注意：这 ${trials.study_count} 次研究里有 ${trials.repeated_studies} 次是在同一段数据上重复挖的`
-        + '——重复挖不会增加撞好运的机会，所以不计入轮数，但它说明你在反复榨同一段行情。',
-    )
-  }
-  return parts.join('')
-})
+// 三句摘要的生成逻辑在 utils/conditionResearch（纯函数），页面只负责接上报告。
+const significanceSummary = computed(() => significanceSummaryText(report.value))
+const duplicateSummary = computed(() => duplicateSummaryText(report.value))
+const trialSummary = computed(() => trialSummaryText(report.value))
 
 function apiMessage(error: unknown): string {
   return error instanceof ApiError
@@ -1499,51 +1307,7 @@ onActivated(() => {
               <div><span>跳过 / 错误</span><strong>{{ report.skipped }} / {{ report.errors }}</strong></div>
               <div><span>基础验证逐股中位夏普 / 年化 / 总收益</span><strong>{{ formatNumber(report.baseline.validation?.per_stock.median_sharpe) }} / {{ formatPercent(report.baseline.validation?.per_stock.median_annual_return) }} / {{ formatPercent(report.baseline.validation?.per_stock.median_total_return) }}</strong></div>
             </div>
-            <div v-if="rankingReport" class="ranking-advice" data-testid="condition-ranking-advice">
-              <div class="ranking-advice-head">
-                <strong>排序规则推荐</strong>
-                <span class="ranking-confidence" data-testid="condition-ranking-confidence">{{ rankingConfidenceLabel }}</span>
-              </div>
-              <template v-if="rankingRecommendation">
-                <p class="ranking-advice-line">
-                  建议按 <b>{{ rankingValueName }}</b> {{ rankingOrderText }} 排序
-                  <button
-                    class="link-button"
-                    data-testid="condition-use-recommended-ranking"
-                    type="button"
-                    @click="applyRecommendedRanking"
-                  >采用这个排序</button>
-                </p>
-                <div class="ranking-evidence">
-                  <div>
-                    <span>平均信息系数<TermHint term="icMean" /></span>
-                    <strong>{{ formatNumber(rankingRecommendation.ic_mean, 3) }}</strong>
-                  </div>
-                  <div>
-                    <span>信息系数信息比率<TermHint term="icir" /></span>
-                    <strong>{{ formatNumber(rankingRecommendation.icir, 2) }}</strong>
-                  </div>
-                  <div>
-                    <span>分段同号<TermHint term="segment" /></span>
-                    <strong>{{ rankingRecommendation.same_sign_segments }} / {{ rankingRecommendation.segments }}</strong>
-                  </div>
-                  <div>
-                    <span>前 {{ rankingReport.top_n }} 名提升<TermHint term="topNLift" /></span>
-                    <strong>{{ formatPercent(rankingRecommendation.top_n_lift) }}</strong>
-                  </div>
-                </div>
-                <div v-if="rankingQuantiles.length" class="ranking-quantiles">
-                  <span>分层收益<TermHint term="quantile" /></span>
-                  <span v-for="(value, index) in rankingQuantiles" :key="index" class="ranking-quantile">
-                    <small>第 {{ index + 1 }} 档</small>{{ value }}
-                  </span>
-                </div>
-                <p class="ranking-note">{{ rankingRecommendation.note }}</p>
-              </template>
-              <p v-else class="ranking-note" data-testid="condition-ranking-reason">
-                {{ rankingReport.reason ?? '这次研究没有形成可用的排序结论。' }}
-              </p>
-            </div>
+            <ConditionRankingAdvice :ranking="rankingReport" @apply="applyRecommendedRanking" />
             <p v-if="slotHint" class="ranking-hint" data-testid="condition-slot-hint">
               <TermHint term="dailyHits" />{{ slotHint }}
             </p>
@@ -1933,90 +1697,6 @@ onActivated(() => {
   }
 }
 
-.ranking-advice {
-  display: grid;
-  gap: 10px;
-  margin-top: 18px;
-  padding: 14px 16px;
-  border: 1px solid var(--border);
-  border-left: 2px solid var(--accent);
-  background: rgba(34, 197, 94, 0.05);
-}
-
-.ranking-advice-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.ranking-confidence {
-  padding: 2px 8px;
-  border: 1px solid var(--border-strong);
-  border-radius: 999px;
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.ranking-advice-line {
-  margin: 0;
-  color: var(--text);
-  font-size: 14px;
-}
-
-.link-button {
-  margin-left: 8px;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--accent);
-  font-size: 13px;
-  cursor: pointer;
-  text-decoration: underline;
-}
-
-.ranking-evidence {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: 10px;
-}
-
-.ranking-evidence > div {
-  display: grid;
-  gap: 3px;
-}
-
-.ranking-evidence span {
-  color: var(--subtle);
-  font-size: 11px;
-}
-
-.ranking-evidence strong {
-  font-size: 15px;
-  font-weight: 500;
-}
-
-.ranking-quantiles {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 10px;
-  color: var(--subtle);
-  font-size: 11px;
-}
-
-.ranking-quantile {
-  color: var(--text);
-  font-size: 13px;
-}
-
-.ranking-quantile small {
-  margin-right: 4px;
-  color: var(--subtle);
-  font-size: 10px;
-}
-
-.ranking-note,
 .ranking-hint {
   margin: 0;
   color: var(--muted);

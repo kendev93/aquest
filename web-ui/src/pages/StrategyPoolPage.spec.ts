@@ -321,6 +321,111 @@ describe('StrategyPoolPage', () => {
     expect(wrapper.get('[data-testid="pool-row-600000"]').text()).not.toContain('空仓')
   })
 
+  it('shows confirmed holdings and their signal badge when the per-stock snapshot is incomplete', async () => {
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({
+      job_id: 'signal-partial',
+      status: 'completed',
+      result: {
+        mode: 'signals',
+        objective: 'annual_return',
+        holding_scope: 'per_stock_strategy',
+        holding_snapshot_complete: false,
+        as_of_date: '2026-10-01',
+        buy_signals: [buySignal],
+        sell_signals: [],
+        states: [buySignal],
+        model_portfolio: {
+          available: true,
+          holding_scope: 'per_stock_strategy',
+          failed_symbols: 7,
+          holdings: [{
+            market: 'SH',
+            code: '600000',
+            name: '浦发银行',
+            status: 'held',
+            holding_return_pct: 0.05,
+          }],
+          risk_exit_signals: [],
+        },
+      },
+    })
+
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    const holdings = wrapper.get('[data-testid="pool-current-holdings"]')
+    expect(holdings.text()).toContain('今日持仓中 1')
+    expect(holdings.text()).toContain('SH600000 · 浦发银行')
+    expect(holdings.text()).toContain('持仓阶段收益 +5.00%')
+    expect(holdings.text()).toContain('有 7 个标的未能确认')
+    const buySignals = wrapper.get('[data-testid="pool-buy-signals"]')
+    expect(buySignals.text()).toContain('当前持仓收益 +5.00%')
+    expect(buySignals.text()).toContain('买入信号触发')
+  })
+
+  it('keeps an incomplete empty snapshot distinct from a confirmed no-holdings result', async () => {
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({
+      job_id: 'signal-empty-partial',
+      status: 'completed',
+      result: {
+        mode: 'signals',
+        objective: 'annual_return',
+        holding_scope: 'per_stock_strategy',
+        holding_snapshot_complete: false,
+        as_of_date: '2026-10-01',
+        buy_signals: [],
+        sell_signals: [],
+        states: [],
+        model_portfolio: {
+          available: true,
+          holding_scope: 'per_stock_strategy',
+          holdings: [],
+          risk_exit_signals: [],
+        },
+      },
+    })
+
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    const holdings = wrapper.get('[data-testid="pool-current-holdings"]')
+    expect(holdings.text()).toContain('结果不完整')
+    expect(holdings.text()).not.toContain('当前没有仍处于持仓状态的标的')
+  })
+
+  it('does not show holdings from an unavailable portfolio even when they are present in the payload', async () => {
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({
+      job_id: 'signal-unavailable',
+      status: 'completed',
+      result: {
+        mode: 'signals',
+        objective: 'annual_return',
+        holding_scope: 'per_stock_strategy',
+        holding_snapshot_complete: false,
+        as_of_date: '2026-10-01',
+        buy_signals: [],
+        sell_signals: [],
+        states: [],
+        model_portfolio: {
+          available: false,
+          reason: '策略持仓计算失败',
+          holdings: [{ market: 'SH', code: '600000', name: '不应显示' }],
+          risk_exit_signals: [],
+        },
+      },
+    })
+
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    const holdings = wrapper.get('[data-testid="pool-current-holdings"]')
+    expect(holdings.text()).toContain('策略持仓计算失败')
+    expect(holdings.text()).not.toContain('不应显示')
+  })
+
   it('paginates each daily signal and holding panel by ten rows', async () => {
     window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
     const signals = Array.from({ length: 12 }, (_value, index) => {
