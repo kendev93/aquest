@@ -20,6 +20,7 @@ import TermHint from '../components/TermHint.vue'
 import ConditionHistoryPanel from '../components/ConditionHistoryPanel.vue'
 import ConditionRankingAdvice from '../components/ConditionRankingAdvice.vue'
 import { useResearchPresets } from '../composables/useResearchPresets'
+import { useConditionResearchJob } from '../composables/useConditionResearchJob'
 import ConditionRollingTable from '../components/ConditionRollingTable.vue'
 import ConditionSensitivityTable from '../components/ConditionSensitivityTable.vue'
 import ConditionStockDetail from '../components/ConditionStockDetail.vue'
@@ -41,9 +42,8 @@ import type {
   ScreenCondition,
   ValueDefinition,
 } from '../types'
-import { importCandidates } from '../api/candidateLibrary'
+import { useCandidateSelection } from '../composables/useCandidateSelection'
 import { parseStoredRuleGroup } from '../utils/formulaScreen'
-import { importSummaryText } from '../utils/candidateLibrary'
 import { consumeSwingPlan } from '../utils/swingHandoff'
 import {
   STOCK_BOARD_OPTIONS,
@@ -108,13 +108,23 @@ const form = reactive({
 })
 const errors = ref<Record<string, string>>({})
 const message = ref('')
-const loading = ref(false)
+// loading 由 useConditionResearchJob 持有（任务执行期间为真）。
 const saving = ref(false)
 const customParseLoading = ref(false)
 const customParseError = ref('')
 const showAdvanced = ref(false)
-const job = ref<ConditionResearchJobState | null>(null)
-const report = ref<ConditionResearchReport | null>(null)
+
+/** 历史列表：后端已按完成时间由近到远排好，这里只管整体刷新。 */
+async function loadHistory(): Promise<void> {
+  historyLoading.value = true
+  try {
+    history.value = await fetchConditionResearchHistory() as ResearchHistorySummary[]
+  } catch (error) {
+    message.value = apiMessage(error)
+  } finally {
+    historyLoading.value = false
+  }
+}
 const history = ref<ResearchHistorySummary[]>([])
 const historyLoading = ref(false)
 // 判断方案里的条件是否失效要看当前元数据里到底有哪些输出/信号。元数据还没到
@@ -130,6 +140,28 @@ const presetAvailability = computed(() => ({
       (indicator) => (indicator.signals ?? []).map((signal) => signal.id),
     ),
 }))
+
+// 任务执行（提交/轮询/取消/恢复）在 composables/useConditionResearchJob；
+// 完成后的收尾（重置结果视图、清旧勾选、刷新历史并定位新记录）写的是页面状态，在这里注入。
+const { job, report, loading, submit, cancel, resumeActiveJob } = useConditionResearchJob({
+  validate,
+  errors,
+  buildPayload,
+  message,
+  describeError: apiMessage,
+  onReportReady: async (jobId) => {
+    selectedStockView.value = 'baseline:full'
+    // 旧候选 id 已经不属于这份结果，勾选状态一并作废。
+    clearCandidateSelection()
+    await loadHistory()
+    // 新记录排在最前面。回到第一页并把它标成当前，否则页面还停在第二页，
+    // 看起来就像是这次研究没被保存。
+    historyPage.value = 1
+    if (history.value.some((item) => item.history_id === jobId)) {
+      activeHistoryId.value = jobId
+    }
+  },
+})
 
 // 研究预设的状态与动作（保存/加载/覆盖/重命名/删除）在 composables/useResearchPresets。
 const {
@@ -157,8 +189,7 @@ const selectedStockView = ref('baseline:full')
 // 历史列表：后端已按完成时间由近到远排好，这里只管切片分页。
 const activeHistoryId = ref('')
 const historyPage = ref(1)
-// 结果里勾选的候选条件，直接追加进基础规则后再跑一次研究。
-const selectedCandidateIds = ref<string[]>([])
+// 勾选集合由 useCandidateSelection 持有，见下面的接线。
 // 排序规则：研究不建组合，但结论要落到组合回测的「候选池 + 有限槽位」模型上。
 const rankingValue = ref('')
 const rankingOrder = ref<RankOrder>('desc')
@@ -519,195 +550,30 @@ function applyToFormulaScreen(): void {
   if (import.meta.env.MODE !== 'test') window.location.assign('/aquest')
 }
 
-async function submit(): Promise<boolean> {
-  errors.value = validate()
-  message.value = ''
-  if (Object.values(errors.value).some(Boolean)) return false
-  loading.value = true
-  report.value = null
-  try {
-    const created = await createConditionResearch(buildPayload())
-    job.value = {
-      job_id: created.job_id,
-      status: 'queued',
-      progress: 0,
-      total_candidates: 0,
-      total_scanned: 0,
-      errors: 0,
-      skipped: 0,
-      error: null,
-      result: null,
-    }
-    await pollJob(created.job_id)
-    return true
-  } catch (error) {
-    message.value = apiMessage(error)
-    return false
-  } finally {
-    loading.value = false
-  }
-}
-
-async function pollJob(jobId: string): Promise<void> {
-  for (;;) {
-    const state = await getConditionResearch(jobId)
-    job.value = state
-    if (state.status === 'completed') {
-      report.value = await getConditionResearchResults(jobId)
-      selectedStockView.value = 'baseline:full'
-      // 旧候选 id 已经不属于这份结果，勾选状态一并作废。
-      clearCandidateSelection()
-      message.value = '研究完成：处理 ' + report.value.processed + ' 只股票，发现 '
-        + report.value.candidates.length + ' 条候选规则。'
-      await loadHistory()
-      // 新记录排在最前面。回到第一页并把它标成当前，否则页面还停在第二页，
-      // 看起来就像是这次研究没被保存。
-      historyPage.value = 1
-      if (history.value.some((item) => item.history_id === jobId)) {
-        activeHistoryId.value = jobId
-      }
-      return
-    }
-    if (state.status === 'failed' || state.status === 'cancelled') {
-      message.value = state.error ?? (state.status === 'cancelled' ? '研究任务已取消。' : '买卖条件研究失败。')
-      return
-    }
-    await new Promise((resolve) => window.setTimeout(resolve, 220))
-  }
-}
-
-async function cancel(): Promise<void> {
-  if (!job.value || !loading.value) return
-  try {
-    await cancelConditionResearch(job.value.job_id)
-    message.value = '已请求取消，等待当前股票回测结束。'
-  } catch (error) {
-    message.value = apiMessage(error)
-  }
-}
-
-async function loadHistory(): Promise<void> {
-  historyLoading.value = true
-  try {
-    history.value = await fetchConditionResearchHistory() as ResearchHistorySummary[]
-  } catch (error) {
-    message.value = apiMessage(error)
-  } finally {
-    historyLoading.value = false
-  }
-}
-
-async function resumeActiveJob(): Promise<void> {
-  try {
-    const active = (await fetchActiveJobs()).find((item) => item.description === '买卖条件研究')
-    if (!active) return
-    job.value = active as unknown as ConditionResearchJobState
-    loading.value = true
-    await pollJob(active.job_id)
-  } catch (error) {
-    message.value = apiMessage(error)
-  } finally {
-    loading.value = false
-  }
-}
-
 /**
- * 把勾选的候选存进候选库。
- *
- * 和「加入基础规则并重测」是两件事：那条是继续往下挖（改规则、立刻重跑），
- * 这条是留档——候选编号只在本次报告里有效，研究结果保存在历史里也就只留最近
- * 20 条。存进库里的证据是快照，不回指这条历史记录。
+ * 把勾选的候选存进候选库、按方向并入基础规则的动作
+ * 在 composables/useCandidateSelection；这里接上表单与任务执行。
  */
-async function saveSelectedCandidates(): Promise<void> {
-  if (!selectedCandidateIds.value.length) return
-  if (!activeHistoryId.value) {
-    message.value = '这次研究还没有历史记录，无法入库。'
-    return
-  }
-  saving.value = true
-  try {
-    const outcome = await importCandidates({
-      history_id: activeHistoryId.value,
-      candidate_ids: [...selectedCandidateIds.value],
-    })
-    message.value = importSummaryText(outcome.added.length, outcome.skipped.length)
-    clearCandidateSelection()
-  } catch (error) {
-    message.value = apiMessage(error)
-  } finally {
-    saving.value = false
-  }
-}
-
-function isSameCondition(left: ScreenCondition, right: ScreenCondition): boolean {
-  return left.left_value === right.left_value
-    && left.operator === right.operator
-    && left.right_value === right.right_value
-    && left.right_constant === right.right_constant
-}
-
-function toggleCandidate(candidateId: string): void {
-  selectedCandidateIds.value = selectedCandidateIds.value.includes(candidateId)
-    ? selectedCandidateIds.value.filter((item) => item !== candidateId)
-    : [...selectedCandidateIds.value, candidateId]
-}
-
-function clearCandidateSelection(): void {
-  selectedCandidateIds.value = []
-}
-
-/**
- * 把勾选的候选条件按方向追加进基础规则，然后立刻重跑一次研究。
- *
- * 买入候选只进买入规则、卖出候选只进卖出规则：挖出来的方向就是它当初被
- * 评估时的位置，换到另一侧没有依据。已存在的相同条件不再重复添加。
- */
-async function applySelectedCandidates(): Promise<void> {
-  const selected = (report.value?.candidates ?? []).filter((candidate) => (
-    selectedCandidateIds.value.includes(candidate.candidate_id)
-  ))
-  if (!selected.length) return
-  let added = 0
-  for (const candidate of selected) {
-    const incoming: ScreenCondition = { ...candidate.condition }
-    if (candidate.side === 'sell' && holdToEnd.value) {
-      // 基准从「一直持有」换成这条候选，否则重测还是以持有到期末为参照，
-      // 只会挖出同一批条件。
-      holdToEnd.value = false
-      setSellRule({ ...emptyRule(), conditions: [incoming] })
-      added += 1
-      continue
-    }
-    if (candidate.side === 'buy' && alwaysInMarket.value) {
-      // 对偶：基准从「天天买」换成这条候选，否则重测还是以持续满仓为参照。
-      alwaysInMarket.value = false
-      setBuyRule({ ...emptyRule(), conditions: [incoming] })
-      added += 1
-      continue
-    }
-    const isSell = candidate.side === 'sell'
-    const target = isSell ? form.sellRule : form.buyRule
-    if (target.conditions.some((item) => isSameCondition(item, incoming))) continue
-    // 买入候选是 AND 到基础买入规则上的（收窄入场），卖出候选是 OR 上去的
-    // （多一个离场触发）—— 后端 sell_mask |= condition_window，界面必须同口径，
-    // 否则重测跑的是与候选当初被评估时不同的规则。
-    const merged: RuleGroupPayload = {
-      ...target,
-      signals: [],
-      combine_mode: isSell ? 'any' : target.combine_mode,
-      conditions: [...target.conditions, incoming],
-    }
-    if (isSell) setSellRule(merged)
-    else setBuyRule(merged)
-    added += 1
-  }
-  if (!added) {
-    message.value = '勾选的条件都已经在基础规则里了，无需重复添加。'
-    return
-  }
-  clearCandidateSelection()
-  await submit()
-}
+const {
+  selectedCandidateIds,
+  toggleCandidate,
+  clearCandidateSelection,
+  saveSelectedCandidates,
+  applySelectedCandidates,
+} = useCandidateSelection({
+  report,
+  activeHistoryId,
+  message,
+  saving,
+  holdToEnd,
+  alwaysInMarket,
+  emptyRule,
+  readRule: (side) => (side === 'sell' ? form.sellRule : form.buyRule),
+  setBuyRule,
+  setSellRule,
+  submit,
+  describeError: apiMessage,
+})
 
 function finiteNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback

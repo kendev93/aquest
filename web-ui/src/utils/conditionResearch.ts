@@ -493,3 +493,11 @@ export function trialSummaryText(report: ConditionResearchReport | null): string
   }
   return parts.join('')
 }
+
+/** 三元组相等：左右值、比较符、右侧常量都一致才算同一条（右侧表达式的字符串形式可能含变量，不参与比较）。 */
+export function isSameCondition(left: ScreenCondition, right: ScreenCondition): boolean {
+  return left.left_value === right.left_value
+    && left.operator === right.operator
+    && left.right_value === right.right_value
+    && left.right_constant === right.right_constant
+}
