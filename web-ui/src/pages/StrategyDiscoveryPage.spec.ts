@@ -570,7 +570,7 @@ describe('StrategyDiscoveryPage', () => {
       candidate_count: 1, diagnostics: {}, candidates: [],
     })
 
-    const wrapper = mount(StrategyDiscoveryPage)
+    mount(StrategyDiscoveryPage)
     await flushPromises()
 
     expect(api.getStrategyDiscoveryHistory).toHaveBeenCalledWith('discovery-1')

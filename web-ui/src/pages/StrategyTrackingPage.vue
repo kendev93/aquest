@@ -4,7 +4,6 @@ import { computed, onMounted, ref } from 'vue'
 
 import TermHint from '../components/TermHint.vue'
 import { fetchMetadata } from '../api/formulaScreen'
-import { ApiError } from '../api/client'
 import { PollTimeoutError, pollUntil } from '../composables/usePolling'
 import {
   fetchStrategyTracking,
@@ -57,7 +56,6 @@ const tradeError = ref('')
 const online = computed(() =>
   snapshots.value.filter((item) => item.tracking_status === 'active'),
 )
-const tracked = computed(() => snapshots.value.filter((item) => item.launched_at !== null))
 const decayedCount = computed(
   () => online.value.filter((item) => (item.decay?.annual_return ?? 1) < 0.5).length,
 )

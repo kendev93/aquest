@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { fetchActiveJobs } from './jobs'
-import { ApiError } from './client'
 
 describe('jobs API', () => {
   beforeEach(() => vi.restoreAllMocks())

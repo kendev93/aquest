@@ -14,7 +14,6 @@ import {
   fetchStoreStatus,
   getMarketDataJob,
 } from './marketData'
-import { ApiError } from './client'
 
 describe('market data API', () => {
   beforeEach(() => vi.restoreAllMocks())

@@ -28,9 +28,7 @@ import type {
   IndividualResearchJobState,
   IndividualResearchPayload,
   IndividualResearchResult,
-  InstrumentBoard,
   LocalInstrument,
-  PortfolioBacktestPayload,
   ValueDefinition,
 } from '../types'
 import type { SignalDefinition } from '../types'

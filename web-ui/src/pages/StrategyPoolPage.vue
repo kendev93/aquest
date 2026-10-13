@@ -21,7 +21,6 @@ import { ApiError } from '../api/client'
 import type {
   DataStoreStatus,
   StrategyPoolCandidate,
-  StrategyPoolBenchmark,
   StrategyPoolEntry,
   StrategyPoolHolding,
   StrategyPoolJobResult,

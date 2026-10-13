@@ -8,7 +8,6 @@ import {
   getPortfolioBacktestHistory,
   getPortfolioBacktestResults,
 } from './portfolioBacktest'
-import { ApiError } from './client'
 
 describe('portfolio backtest API', () => {
   beforeEach(() => {

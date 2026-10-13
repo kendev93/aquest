@@ -6,7 +6,6 @@ import {
   compareHistory,
   fetchHistoryCompareCandidates,
   type HistoryCompareCandidate,
-  type HistoryCompareItem,
   type HistoryCompareReport,
 } from '../api/historyCompare'
 import { ApiError } from '../api/client'

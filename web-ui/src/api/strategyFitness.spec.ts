@@ -8,7 +8,6 @@ import {
   getStrategyFitnessHistory,
   getStrategyFitnessResults,
 } from './strategyFitness'
-import { ApiError } from './client'
 
 describe('strategy fitness API', () => {
   beforeEach(() => {

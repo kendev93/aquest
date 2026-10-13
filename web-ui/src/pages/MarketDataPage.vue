@@ -95,28 +95,6 @@ const selectedTitle = computed(() => (
   selected.value ? `${selected.value.market} ${selected.value.code}` : '请选择品种'
 ))
 
-const autoSyncActive = computed(() => Boolean(
-  storeStatus.value?.auto_sync_enabled
-  && storeStatus.value.auto_sync_job_id
-  && marketJob.value?.job_id === storeStatus.value.auto_sync_job_id
-  && syncLoading.value,
-))
-
-const autoSyncStatusText = computed(() => {
-  if (storeStatus.value?.auto_sync_enabled === false) return '自动同步已关闭'
-  if (autoSyncActive.value) return syncLabel.value || '正在自动同步最新行情…'
-  if (storeStatus.value?.auto_sync_enabled) return '自动同步已开启'
-  return '自动同步状态读取中…'
-})
-
-const autoSyncScheduleText = computed(() => {
-  const seconds = storeStatus.value?.auto_sync_interval_seconds
-  if (typeof seconds !== 'number' || !Number.isFinite(seconds)) {
-    return '启动后检查；每天至少同步一次'
-  }
-  return `启动后检查；每 ${Math.max(Math.round(seconds / 60), 1)} 分钟检查一次，当天至少同步一次`
-})
-
 const syncPhaseText = computed(() => ({
   planning: '正在规划同步区间…',
   fetching: '正在并发下载在线日线…',
@@ -611,8 +589,6 @@ const healthRepaired = ref<MarketHealthRepairOutcome | null>(null)
 const healthJob = ref<MarketHealthJobState | null>(null)
 const healthMessage = ref('')
 /** 有问题的检查项才能送去重下；零成交重下多半还是同一份数据，不给按钮。 */
-const REPAIRABLE_SEVERITIES = new Set(['error', 'warn'])
-
 const healthIssues = computed(() =>
   (healthReport.value?.checks ?? []).filter(
     (check) => check.affected_instruments > 0 && check.repairable,

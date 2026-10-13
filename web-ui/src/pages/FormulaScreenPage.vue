@@ -660,7 +660,7 @@ async function parseCustomFormula(): Promise<void> {
 }
 
 async function pollUntilFinished(jobId: string): Promise<void> {
-  const state = await pollUntil(
+  await pollUntil(
     async () => {
       const current = await getJob(jobId)
       job.value = current

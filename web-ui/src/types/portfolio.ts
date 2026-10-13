@@ -1,6 +1,6 @@
 /** portfolio 相关的前端类型。 */
 
-import type { BacktestExecution, BacktestPositionMode, CombineMode, DateRangeMode, InstrumentBoard, InstrumentType, PortfolioCompareOperator, PortfolioRankOrder, PortfolioRebalanceFrequency, PortfolioSellValueOperator, PortfolioUniverse, Universe } from './common'
+import type { BacktestExecution, BacktestPositionMode, CombineMode, DateRangeMode, InstrumentBoard, InstrumentType, PortfolioCompareOperator, PortfolioRankOrder, PortfolioRebalanceFrequency, PortfolioSellValueOperator, PortfolioUniverse } from './common'
 
 import type { RuleGroupPayload } from './screen'
 
