@@ -22,18 +22,13 @@ import {
 import { fetchMetadata, parseFormula } from '../api/formulaScreen'
 import { ApiError } from '../api/client'
 import { pollUntil } from '../composables/usePolling'
+import { usePortfolioStrategyLibrary } from '../composables/usePortfolioStrategyLibrary'
+import { equityChartIndices, equityChartPoints, equityChartRange } from '../utils/portfolioChart'
 import { fetchActiveJobs } from '../api/jobs'
 import {
   consumePortfolioBacktestHandoff,
   type PortfolioBacktestHandoff,
 } from '../utils/portfolioBacktestHandoff'
-import {
-  createStrategy,
-  deleteStrategy,
-  fetchStrategies,
-  getStrategy,
-  updateStrategy,
-} from '../api/savedStrategies'
 import BacktestHistoryPanel from '../components/BacktestHistoryPanel.vue'
 import DateRangeSelector from '../components/DateRangeSelector.vue'
 import PortfolioPnlAnalysis from '../components/PortfolioPnlAnalysis.vue'
@@ -59,7 +54,6 @@ import type {
   PortfolioUniverse,
   RiskOptimizationHistorySummary,
   RuleGroupPayload,
-  SavedStrategySummary,
   SignalDefinition,
   StrategyDiscoveryCandidate,
   StrategyDiscoveryJobState,
@@ -298,52 +292,33 @@ const excessAnnualReturn = computed(() => {
   const base = benchmark.value?.performance.annual_return ?? null
   return strategy === null || base === null ? null : strategy - base
 })
-// 抽稀后的曲线下标。策略线和基准线共用同一批下标，两条线才对得上同一天。
-const chartIndices = computed(() => {
-  const curve = result.value?.equity_curve ?? []
-  if (curve.length < 2) return []
-  const step = curve.length > 120 ? Math.ceil(curve.length / 120) : 1
-  const indices: number[] = []
-  for (let index = 0; index < curve.length; index += step) indices.push(index)
-  if (indices[indices.length - 1] !== curve.length - 1) indices.push(curve.length - 1)
-  return indices
-})
-// 纵轴范围要同时装下策略与基准，否则基准跑出画框，看着像"策略完胜"。
+// 净值曲线的抽稀/范围/点串计算在 utils/portfolioChart（纯函数），这里只喂当前数据。
+const chartIndices = computed(() => equityChartIndices(result.value?.equity_curve.length ?? 0))
 const chartRange = computed(() => {
   const curve = result.value?.equity_curve ?? []
-  const base = benchmark.value?.totals ?? []
-  const values: number[] = []
-  for (const index of chartIndices.value) {
-    values.push(curve[index].total)
-    if (index < base.length) values.push(base[index])
-  }
-  if (!values.length) return { minimum: 0, span: 1 }
-  const minimum = Math.min(...values)
-  const maximum = Math.max(...values)
-  return { minimum, span: maximum - minimum || 1 }
+  const base = benchmark.value?.totals
+  return equityChartRange(
+    chartIndices.value.map((index) => curve[index].total),
+    chartIndices.value.map((index) => (base && index < base.length ? base[index] : undefined)),
+  )
 })
-function toChartPoints(values: (number | undefined)[]): string {
-  const indices = chartIndices.value
-  const { minimum, span } = chartRange.value
-  return values
-    .map((value, position) => {
-      if (value === undefined) return null
-      const x = (position / Math.max(indices.length - 1, 1)) * 800
-      const y = 220 - ((value - minimum) / span) * 190
-      return `${x.toFixed(1)},${y.toFixed(1)}`
-    })
-    .filter((point): point is string => point !== null)
-    .join(' ')
-}
 const chartPoints = computed(() => {
   const curve = result.value?.equity_curve ?? []
   if (!curve.length) return ''
-  return toChartPoints(chartIndices.value.map((index) => curve[index].total))
+  return equityChartPoints(
+    chartIndices.value.map((index) => curve[index].total),
+    chartIndices.value.length,
+    chartRange.value,
+  )
 })
 const benchmarkPoints = computed(() => {
   const base = benchmark.value?.totals
   if (!base) return ''
-  return toChartPoints(chartIndices.value.map((index) => (index < base.length ? base[index] : undefined)))
+  return equityChartPoints(
+    chartIndices.value.map((index) => (index < base.length ? base[index] : undefined)),
+    chartIndices.value.length,
+    chartRange.value,
+  )
 })
 const chartSummary = computed(() => {
   const curve = result.value?.equity_curve ?? []
@@ -1021,26 +996,27 @@ async function submit(): Promise<void> {
 }
 
 async function pollPortfolioBacktest(jobId: string): Promise<void> {
-  for (;;) {
-    const state = await getPortfolioBacktest(jobId)
-    job.value = state
-    if (state.status === 'completed') {
-      result.value = await getPortfolioBacktestResults(jobId)
-      await compareAppliedCandidate(result.value)
-      message.value = `组合回测完成：${result.value.trades.length} 笔成交，区间 ${result.value.start_date} 至 ${result.value.end_date}。`
-      await loadHistory()
-      return
-    }
-    if (state.status === 'failed') {
-      message.value = state.error ?? '组合回测任务失败，请检查配置和服务状态后重试。'
-      return
-    }
-    if (state.status === 'cancelled') {
-      message.value = state.error ?? '组合回测已取消。'
-      return
-    }
-    await new Promise((resolve) => window.setTimeout(resolve, 220))
+  const state = await pollUntil(
+    async () => {
+      const current = await getPortfolioBacktest(jobId)
+      job.value = current
+      return current
+    },
+    {
+      intervalMs: 220,
+      until: (current) =>
+        current.status === 'completed' || current.status === 'failed' || current.status === 'cancelled',
+    },
+  )
+  if (state.status === 'completed') {
+    result.value = await getPortfolioBacktestResults(jobId)
+    await compareAppliedCandidate(result.value)
+    message.value = `组合回测完成：${result.value.trades.length} 笔成交，区间 ${result.value.start_date} 至 ${result.value.end_date}。`
+    await loadHistory()
+    return
   }
+  message.value = state.error
+    ?? (state.status === 'cancelled' ? '组合回测已取消。' : '组合回测任务失败，请检查配置和服务状态后重试。')
 }
 
 async function cancelRunningPortfolioBacktest(): Promise<void> {
@@ -1454,123 +1430,32 @@ async function removeHistory(historyId: string): Promise<void> {
 // （只有用户显式删才消失）。日期区间在后端保存时固化成绝对日期，所以三个月
 // 后载入同一策略，回测的还是当初看的那个样本。
 // ---------------------------------------------------------------------------
-const strategies = ref<SavedStrategySummary[]>([])
-const newStrategyName = ref('')
-const strategyLoading = ref(false)
-const strategySaving = ref(false)
-const strategyBusyId = ref('')
-const renamingId = ref('')
-const renameDraft = ref('')
-const pendingDeleteId = ref('')
-
-async function loadStrategies(): Promise<void> {
-  strategyLoading.value = true
-  try {
-    strategies.value = await fetchStrategies()
-  } catch (error) {
-    message.value = apiMessage(error)
-  } finally {
-    strategyLoading.value = false
-  }
-}
-
-async function saveCurrentStrategy(): Promise<void> {
-  if (!result.value) return
-  const name = newStrategyName.value.trim()
-  if (!name) {
-    message.value = '请先填写策略名称。'
-    return
-  }
-  strategySaving.value = true
-  try {
-    await createStrategy({
-      name,
-      request: buildPayload(),
-      summary: {
-        start_date: result.value.start_date,
-        end_date: result.value.end_date,
-        bars: result.value.bars,
-        max_positions: result.value.max_positions,
-        ranking_value: result.value.ranking_value,
-        universe: result.value.universe,
-        performance: result.value.performance,
-        benchmark: result.value.benchmark ?? null,
-      },
-    })
-    newStrategyName.value = ''
-    await loadStrategies()
-    message.value = `策略「${name}」已保存。`
-  } catch (error) {
-    message.value = apiMessage(error)
-  } finally {
-    strategySaving.value = false
-  }
-}
-
-async function applyStrategy(strategyId: string): Promise<void> {
-  strategyBusyId.value = strategyId
-  try {
-    const detail = await getStrategy(strategyId)
-    await applyStoredResearch(
-      detail.request,
-      `已载入策略「${detail.name}」的配置，请确认后开始回测。`,
-    )
-  } catch (error) {
-    message.value = apiMessage(error)
-  } finally {
-    strategyBusyId.value = ''
-  }
-}
-
-function startRename(strategy: SavedStrategySummary): void {
-  renamingId.value = strategy.strategy_id
-  renameDraft.value = strategy.name
-  pendingDeleteId.value = ''
-}
-
-function cancelRename(): void {
-  renamingId.value = ''
-  renameDraft.value = ''
-}
-
-async function commitRename(strategyId: string): Promise<void> {
-  const name = renameDraft.value.trim()
-  if (!name) {
-    message.value = '策略名称不能为空。'
-    return
-  }
-  strategyBusyId.value = strategyId
-  try {
-    await updateStrategy(strategyId, { name })
-    renamingId.value = ''
-    await loadStrategies()
-    message.value = '策略已重命名。'
-  } catch (error) {
-    message.value = apiMessage(error)
-  } finally {
-    strategyBusyId.value = ''
-  }
-}
-
-async function confirmDelete(strategyId: string): Promise<void> {
-  strategyBusyId.value = strategyId
-  try {
-    await deleteStrategy(strategyId)
-    pendingDeleteId.value = ''
-    await loadStrategies()
-    message.value = '策略已删除。'
-  } catch (error) {
-    message.value = apiMessage(error)
-  } finally {
-    strategyBusyId.value = ''
-  }
-}
-
-function strategyRange(strategy: SavedStrategySummary): string {
-  const start = strategy.summary.start_date
-  const end = strategy.summary.end_date
-  return start && end ? `${start} ~ ${end}` : '区间未记录'
-}
+// 策略库（保存/载入/重命名/删除）在 composables/usePortfolioStrategyLibrary；
+// 保存要打包当前表单，载入要走表单回填，都在这里接上。
+const {
+  strategies,
+  newStrategyName,
+  strategyLoading,
+  strategySaving,
+  strategyBusyId,
+  renamingId,
+  renameDraft,
+  pendingDeleteId,
+  loadStrategies,
+  saveCurrentStrategy,
+  applyStrategy,
+  startRename,
+  cancelRename,
+  commitRename,
+  confirmDelete,
+  strategyRange,
+} = usePortfolioStrategyLibrary({
+  result,
+  message,
+  describeError: apiMessage,
+  buildPayload,
+  applyStoredResearch,
+})
 
 function valueName(id: string): string {
   return availableValues.value.find((value) => value.id === id)?.display_name ?? id
