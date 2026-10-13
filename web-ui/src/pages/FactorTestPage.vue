@@ -29,6 +29,7 @@ import type {
   ValueDefinition,
 } from '../types'
 import AppTopbar from '../components/AppTopbar.vue'
+import { pollUntil } from '../composables/usePolling'
 import { formatNumber, formatPercent } from '../utils/format'
 
 // 因子类指标（IC/IR/收益差）惯例 3 位小数；共享 formatNumber 的默认是 2 位。
@@ -185,22 +186,29 @@ async function submit(): Promise<void> {
 }
 
 async function poll(jobId: string): Promise<void> {
-  for (;;) {
-    const state = await getFactorTest(jobId)
-    job.value = state
-    if (state.status === 'completed') {
-      report.value = await getFactorTestResults(jobId)
-      selectedValueId.value = report.value.factors[0]?.value_id ?? ''
-      message.value = report.value.reason
-        ?? `因子检验完成：${report.value.value_count} 个指标，其中 ${report.value.significant_count} 个通过多重检验校正。`
-      await loadHistory()
-      return
-    }
-    if (state.status === 'failed') {
-      message.value = state.error ?? '因子检验任务失败，请检查配置和服务状态后重试。'
-      return
-    }
-    await new Promise((resolve) => window.setTimeout(resolve, 220))
+  const state = await pollUntil(
+    async () => {
+      const current = await getFactorTest(jobId)
+      job.value = current
+      return current
+    },
+    {
+      intervalMs: 220,
+      until: (current) => {
+        if (current.status === 'failed') {
+          message.value = current.error ?? '因子检验任务失败，请检查配置和服务状态后重试。'
+          return true
+        }
+        return current.status === 'completed'
+      },
+    },
+  )
+  if (state.status === 'completed') {
+    report.value = await getFactorTestResults(jobId)
+    selectedValueId.value = report.value.factors[0]?.value_id ?? ''
+    message.value = report.value.reason
+      ?? `因子检验完成：${report.value.value_count} 个指标，其中 ${report.value.significant_count} 个通过多重检验校正。`
+    await loadHistory()
   }
 }
 

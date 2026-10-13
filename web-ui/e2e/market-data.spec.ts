@@ -88,9 +88,11 @@ test('user can see and cancel an active market-data job', async ({ page }) => {
   } } }))
   await page.route('**/api/v1/market-data/local/instruments**', (route) => route.fulfill({ json: instruments }))
   await page.route('**/api/v1/market-data/local/SH/600000/bars*', (route) => route.fulfill({ json: chart('daily') }))
+  // 任务在用户点取消前必须一直"活着"：页面每秒轮询活动任务，若中途返回空列表，
+  // 页面会把任务判定为已结束并移除进度条，取消按钮随之消失（历史 flaky 根因）。
   await page.route('**/api/v1/market-data/jobs/active*', (route) => {
     activeReads += 1
-    return route.fulfill({ json: { data: activeReads === 1 ? [activeJob] : [] } })
+    return route.fulfill({ json: { data: [activeJob] } })
   })
   await page.route('**/api/v1/market-data/jobs/active-1/cancel', async (route) => {
     cancelRequest = route.request().method()
@@ -104,6 +106,6 @@ test('user can see and cancel an active market-data job', async ({ page }) => {
   await expect(page.getByTestId('market-data-progress')).toContainText('42%')
   await expect(page.getByTestId('market-data-progress')).toContainText('SZ 000001 · 平安银行')
   await page.getByTestId('market-sync-cancel').click()
-  await expect(page.getByTestId('market-data-message')).toContainText('已取消')
+  await expect(page.getByTestId('market-data-message')).toContainText('已请求取消')
   expect(cancelRequest).toBe('POST')
 })

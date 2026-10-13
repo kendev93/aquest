@@ -44,6 +44,7 @@ import type {
   ValueDefinition,
 } from '../types'
 import AppTopbar from '../components/AppTopbar.vue'
+import { pollUntil } from '../composables/usePolling'
 import { BOARD_OPTIONS, INSTRUMENT_TYPE_OPTIONS } from '../utils/instrumentOptions'
 import { formatNumber, formatPercent } from '../utils/format'
 
@@ -266,41 +267,48 @@ async function submit(): Promise<void> {
 type DiscoveryJobKind = 'discovery' | 'refinement'
 
 async function pollDiscoveryJob(jobId: string, kind: DiscoveryJobKind): Promise<void> {
-  for (;;) {
-    const state = await getStrategyDiscovery(jobId)
-    if (kind === 'refinement') refinementJob.value = state
-    else job.value = state
-    if (state.status === 'completed') {
-      result.value = await getStrategyDiscoveryResults(jobId)
-      if (kind === 'refinement') {
-        selectedCandidate.value = null
-        activeBoard.value = 'sharpe'
-        message.value = `二次优化完成：夏普榜 ${result.value.results_by_sharpe.length} 组，收益榜 ${result.value.results_by_return.length} 组${result.value.refinement?.data_changed ? '（行情已更新，已按最新本地行情重新优化）' : ''}。`
-      } else if (result.value.partial === true) {
-        const count = result.value.partial_candidate_count ?? 0
-        const sample = result.value.partial_by_sharpe?.[0]
-        const fidelity = sample?.achieved_fidelity
-        const fidelityLabel = fidelity === 'medium' ? '中等' : fidelity === 'coarse' ? '粗筛' : fidelity === 'search' ? '搜索' : fidelity === 'full' ? '完整' : fidelity
-        message.value = `搜索超时：${count} 组候选尚未完成完整精度复核${fidelityLabel ? `，当前最高完成到${fidelityLabel}精度` : ''}。这些候选未通过完整约束，不会进入正式榜单或自动候选池。`
-      } else {
-        message.value = `策略实验完成：夏普榜 ${result.value.results_by_sharpe.length} 组，收益榜 ${result.value.results_by_return.length} 组。`
-      }
-      await loadHistory()
-      return
+  const state = await pollUntil(
+    async () => {
+      const current = await getStrategyDiscovery(jobId)
+      if (kind === 'refinement') refinementJob.value = current
+      else job.value = current
+      return current
+    },
+    {
+      intervalMs: 220,
+      until: (current) => {
+        if (current.status === 'failed') {
+          message.value = kind === 'refinement'
+            ? current.error ?? '二次优化失败，请检查父候选和本地行情。'
+            : current.error ?? '策略实验任务失败，请检查配置和服务状态后重试。'
+          return true
+        }
+        if (current.status === 'cancelled') {
+          message.value = kind === 'refinement'
+            ? current.error ?? '二次优化已取消。'
+            : current.error ?? '策略实验已取消。'
+          return true
+        }
+        return current.status === 'completed'
+      },
+    },
+  )
+  if (state.status === 'completed') {
+    result.value = await getStrategyDiscoveryResults(jobId)
+    if (kind === 'refinement') {
+      selectedCandidate.value = null
+      activeBoard.value = 'sharpe'
+      message.value = `二次优化完成：夏普榜 ${result.value.results_by_sharpe.length} 组，收益榜 ${result.value.results_by_return.length} 组${result.value.refinement?.data_changed ? '（行情已更新，已按最新本地行情重新优化）' : ''}。`
+    } else if (result.value.partial === true) {
+      const count = result.value.partial_candidate_count ?? 0
+      const sample = result.value.partial_by_sharpe?.[0]
+      const fidelity = sample?.achieved_fidelity
+      const fidelityLabel = fidelity === 'medium' ? '中等' : fidelity === 'coarse' ? '粗筛' : fidelity === 'search' ? '搜索' : fidelity === 'full' ? '完整' : fidelity
+      message.value = `搜索超时：${count} 组候选尚未完成完整精度复核${fidelityLabel ? `，当前最高完成到${fidelityLabel}精度` : ''}。这些候选未通过完整约束，不会进入正式榜单或自动候选池。`
+    } else {
+      message.value = `策略实验完成：夏普榜 ${result.value.results_by_sharpe.length} 组，收益榜 ${result.value.results_by_return.length} 组。`
     }
-    if (state.status === 'failed') {
-      message.value = kind === 'refinement'
-        ? state.error ?? '二次优化失败，请检查父候选和本地行情。'
-        : state.error ?? '策略实验任务失败，请检查配置和服务状态后重试。'
-      return
-    }
-    if (state.status === 'cancelled') {
-      message.value = kind === 'refinement'
-        ? state.error ?? '二次优化已取消。'
-        : state.error ?? '策略实验已取消。'
-      return
-    }
-    await new Promise((resolve) => window.setTimeout(resolve, 220))
+    await loadHistory()
   }
 }
 
@@ -423,23 +431,30 @@ function replayTotal(state: StrategyReplayJobState | null): number {
 }
 
 async function pollReplayJob(jobId: string): Promise<void> {
-  for (;;) {
-    const state = await getStrategyReplay(jobId)
-    replayJob.value = state
-    if (state.status === 'completed') {
-      replayResult.value = await getStrategyReplayResults(jobId)
-      message.value = `全量复核完成：${replayResult.value.candidate_count} 个策略。`
-      return
-    }
-    if (state.status === 'failed') {
-      message.value = state.error ?? '策略复核失败，请检查本地行情和候选配置后重试。'
-      return
-    }
-    if (state.status === 'cancelled') {
-      message.value = state.error ?? '策略复核已取消。'
-      return
-    }
-    await new Promise((resolve) => window.setTimeout(resolve, 220))
+  const state = await pollUntil(
+    async () => {
+      const current = await getStrategyReplay(jobId)
+      replayJob.value = current
+      return current
+    },
+    {
+      intervalMs: 220,
+      until: (current) => {
+        if (current.status === 'failed') {
+          message.value = current.error ?? '策略复核失败，请检查本地行情和候选配置后重试。'
+          return true
+        }
+        if (current.status === 'cancelled') {
+          message.value = current.error ?? '策略复核已取消。'
+          return true
+        }
+        return current.status === 'completed'
+      },
+    },
+  )
+  if (state.status === 'completed') {
+    replayResult.value = await getStrategyReplayResults(jobId)
+    message.value = `全量复核完成：${replayResult.value.candidate_count} 个策略。`
   }
 }
 

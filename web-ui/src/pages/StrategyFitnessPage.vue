@@ -37,6 +37,7 @@ import type {
 } from '../types'
 import { numericRuleForSignal, parseStoredRuleGroup, valueOptionLabel } from '../utils/formulaScreen'
 import AppTopbar from '../components/AppTopbar.vue'
+import { pollUntil } from '../composables/usePolling'
 import { BOARD_OPTIONS, INSTRUMENT_TYPE_OPTIONS } from '../utils/instrumentOptions'
 import { formatNumber, formatPercent } from '../utils/format'
 
@@ -346,20 +347,27 @@ async function submit(): Promise<void> {
 }
 
 async function pollStrategyFitness(jobId: string): Promise<void> {
-  for (;;) {
-    const state = await getStrategyFitness(jobId)
-    job.value = state
-    if (state.status === 'completed') {
-      report.value = await getStrategyFitnessResults(jobId)
-      message.value = `适配性评估完成：处理 ${report.value.processed} 只股票，其中 ${passedCount.value} 只达到推荐阈值。`
-      await loadHistory()
-      return
-    }
-    if (state.status === 'failed') {
-      message.value = state.error ?? '策略适配性评估任务失败，请检查配置和服务状态后重试。'
-      return
-    }
-    await new Promise((resolve) => window.setTimeout(resolve, 220))
+  const state = await pollUntil(
+    async () => {
+      const current = await getStrategyFitness(jobId)
+      job.value = current
+      return current
+    },
+    {
+      intervalMs: 220,
+      until: (current) => {
+        if (current.status === 'failed') {
+          message.value = current.error ?? '策略适配性评估任务失败，请检查配置和服务状态后重试。'
+          return true
+        }
+        return current.status === 'completed'
+      },
+    },
+  )
+  if (state.status === 'completed') {
+    report.value = await getStrategyFitnessResults(jobId)
+    message.value = `适配性评估完成：处理 ${report.value.processed} 只股票，其中 ${passedCount.value} 只达到推荐阈值。`
+    await loadHistory()
   }
 }
 
