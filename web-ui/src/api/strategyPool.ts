@@ -1,4 +1,5 @@
-import { FormulaScreenApiError } from './formulaScreen'
+
+import { ApiError, createRequestClient } from './client'
 import type {
   StrategyPoolEntry,
   StrategyPoolJobState,
@@ -11,10 +12,10 @@ import type {
 
 const API_BASE = '/api/v1/strategy-pool'
 
-interface ApiErrorPayload {
-  error?: { message?: string }
-  detail?: string
-}
+const request = createRequestClient({
+  errorClass: ApiError,
+  messages: { fallback: '全市场策略池请求失败，请检查配置和本地行情。' },
+})
 
 interface StrategyPoolJobRequest {
   mode: StrategyPoolMode
@@ -34,21 +35,6 @@ export type StrategyPoolBoard = 'main' | 'chinext' | 'star'
 export interface StrategyPoolResearchSettings {
   boards: StrategyPoolBoard[]
   exclude_st: boolean
-}
-
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
-    ...init,
-    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
-  })
-  const payload = (await response.json()) as T & ApiErrorPayload
-  if (!response.ok) {
-    throw new FormulaScreenApiError(
-      payload.error?.message ?? payload.detail ?? '全市场策略池请求失败，请检查配置和本地行情。',
-      response.status,
-    )
-  }
-  return payload as T
 }
 
 export async function fetchStrategyPoolEntries(

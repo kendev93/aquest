@@ -1,4 +1,5 @@
-import { FormulaScreenApiError } from './formulaScreen'
+
+import { ApiError, createRequestClient } from './client'
 import type {
   StrategyDiscoveryLeaderboard,
   StrategyDiscoveryJobState,
@@ -13,54 +14,16 @@ import type {
 } from '../types'
 
 const API_BASE = '/api/v1/strategy-discovery'
+
 const MAX_GET_ATTEMPTS = 5
 const RETRYABLE_GATEWAY_STATUSES = new Set([500, 502, 503, 504])
 const GET_RETRY_DELAYS_MS = [100, 250, 500, 1000]
 
-interface ErrorPayload {
-  error?: { message?: string }
-  detail?: string
-}
-
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const method = (init?.method ?? 'GET').toUpperCase()
-  let response: Response
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      response = await fetch(url, {
-        ...init,
-        headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
-      })
-    } catch {
-      throw new FormulaScreenApiError('无法连接策略实验服务，请确认后端已启动或 Docker 容器健康。', 0)
-    }
-    if (
-      method === 'GET'
-      && RETRYABLE_GATEWAY_STATUSES.has(response.status)
-      && attempt < MAX_GET_ATTEMPTS - 1
-    ) {
-      await new Promise((resolve) => window.setTimeout(resolve, GET_RETRY_DELAYS_MS[attempt] ?? 100))
-      continue
-    }
-    break
-  }
-  let payload: T & ErrorPayload
-  try {
-    payload = await response.json() as T & ErrorPayload
-  } catch {
-    const message = RETRYABLE_GATEWAY_STATUSES.has(response.status)
-      ? `策略实验服务暂时不可用（HTTP ${response.status}），请稍后重试。`
-      : `策略实验服务返回了无效响应（HTTP ${response.status}）。`
-    throw new FormulaScreenApiError(message, response.status)
-  }
-  if (!response.ok) {
-    throw new FormulaScreenApiError(
-      payload.error?.message ?? payload.detail ?? '策略实验请求失败，请稍后重试。',
-      response.status,
-    )
-  }
-  return payload as T
-}
+const request = createRequestClient({
+  errorClass: ApiError,
+  messages: { fallback: '策略实验请求失败，请稍后重试。', offline: '无法连接策略实验服务，请确认后端已启动或 Docker 容器健康。', invalidBody: (status) => (RETRYABLE_GATEWAY_STATUSES.has(status) ? `策略实验服务暂时不可用（HTTP ${status}），请稍后重试。` : `策略实验服务返回了无效响应（HTTP ${status}）。`) },
+  retryGet: { attempts: MAX_GET_ATTEMPTS, retryableStatuses: RETRYABLE_GATEWAY_STATUSES, delaysMs: GET_RETRY_DELAYS_MS },
+})
 
 export async function fetchStrategyDiscoveryCapabilities(): Promise<Record<string, unknown>> {
   const response = await request<{ data: Record<string, unknown> }>(`${API_BASE}/capabilities`)
@@ -74,7 +37,6 @@ export async function createStrategyDiscovery(payload: StrategyDiscoveryPayload)
   })
   return response.data
 }
-
 
 export async function createPortfolioRiskOptimization(
   payload: PortfolioRiskOptimizationPayload,

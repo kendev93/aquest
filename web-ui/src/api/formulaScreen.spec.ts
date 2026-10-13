@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { createJob, createSyncJob, fetchMetadata, fetchScreenHistory, FormulaScreenApiError, getJob, getResults, getScreenHistory, getSyncJob, parseFormula } from './formulaScreen'
+import { createJob, createSyncJob, fetchMetadata, fetchScreenHistory, getJob, getResults, getScreenHistory, getSyncJob, parseFormula } from './formulaScreen'
+import { ApiError } from './client'
 
 describe('formula screen API client', () => {
   afterEach(() => vi.unstubAllGlobals())
@@ -43,8 +44,8 @@ describe('formula screen API client', () => {
 
     await expect(getResults('job-1')).resolves.toEqual({ results: [], meta: { total_signals: 0 } })
     await expect(fetchMetadata()).rejects.toEqual(expect.objectContaining({
-      name: 'FormulaScreenApiError', message: '路径无效', status: 422,
-    } satisfies Partial<FormulaScreenApiError>))
+      name: 'ApiError', message: '路径无效', status: 422,
+    } satisfies Partial<ApiError>))
   })
 
   it('loads screen history summaries and a selected history record', async () => {
@@ -64,7 +65,7 @@ describe('formula screen API client', () => {
     ))
 
     await expect(fetchMetadata()).rejects.toMatchObject({
-      name: 'FormulaScreenApiError', message: '请求失败，请检查配置后重试。', status: 503,
+      name: 'ApiError', message: '请求失败，请检查配置后重试。', status: 503,
     })
   })
 
@@ -74,7 +75,7 @@ describe('formula screen API client', () => {
     ))
 
     await expect(fetchMetadata()).rejects.toMatchObject({
-      name: 'FormulaScreenApiError', message: '任务执行器暂不可用', status: 503,
+      name: 'ApiError', message: '任务执行器暂不可用', status: 503,
     })
   })
 

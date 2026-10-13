@@ -2,7 +2,7 @@
 import PageGuide from '../components/PageGuide.vue'
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 
-import { FormulaScreenApiError } from '../api/formulaScreen'
+import { ApiError } from '../api/client'
 import {
   cancelMarketDataJob,
   createHealthCheck,
@@ -36,6 +36,7 @@ import type {
 } from '../types'
 import MarketCandlestickChart from '../components/MarketCandlestickChart.vue'
 import TermHint from '../components/TermHint.vue'
+import AppTopbar from '../components/AppTopbar.vue'
 
 const MA_OPTIONS = [
   { key: 'ma5', label: 'MA5' },
@@ -55,7 +56,6 @@ const BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
   { key: 'star', label: '科创板' },
   { key: 'chinext', label: '创业板' },
 ]
-
 
 const form = reactive({
   syncUniverse: 'all' as 'all' | 'sh' | 'sz',
@@ -257,7 +257,7 @@ function activeJobDescription(job: MarketSyncJobState): string {
 }
 
 function apiMessage(error: unknown): string {
-  if (error instanceof FormulaScreenApiError) return error.message
+  if (error instanceof ApiError) return error.message
   return '行情数据读取失败，请检查数据导入状态后重试。'
 }
 
@@ -269,7 +269,7 @@ function hasActiveMarketDataJob(): boolean {
 }
 
 function isTransientStoreStatusError(error: unknown): boolean {
-  return error instanceof FormulaScreenApiError
+  return error instanceof ApiError
     && error.status === 503
     && hasActiveMarketDataJob()
 }
@@ -420,7 +420,7 @@ async function waitForJob(jobId: string): Promise<void> {
       return
     }
     if (state.status === 'failed') {
-      throw new FormulaScreenApiError(state.error ?? '行情同步失败。', 500)
+      throw new ApiError(state.error ?? '行情同步失败。', 500)
     }
     await new Promise((resolve) => window.setTimeout(resolve, MARKET_JOB_POLL_INTERVAL_MS))
   }
@@ -665,7 +665,7 @@ async function waitForHealthJob(jobId: string): Promise<void> {
       return
     }
     if (state.status === 'failed') {
-      throw new FormulaScreenApiError(state.error ?? '行情任务失败。', 500)
+      throw new ApiError(state.error ?? '行情任务失败。', 500)
     }
     await new Promise((resolve) => window.setTimeout(resolve, MARKET_JOB_POLL_INTERVAL_MS))
   }
@@ -876,28 +876,7 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
 
 <template>
   <div class="screen-page market-data-page" data-testid="market-data-page">
-    <header class="topbar">
-      <a class="brand" href="/aquest" aria-label="A股策略研究首页"><img class="brand-mark" src="/aquest-mark.png" alt="" aria-hidden="true" width="34" height="34"><span><strong>AQuest</strong><small>A股策略研究</small></span></a>
-      <nav aria-label="主导航">
-        <a class="nav-link" href="/aquest">公式选股</a>
-                <a class="nav-link" href="/portfolio-backtest">组合回测</a>
-        <a class="nav-link" href="/strategy-lab">策略实验室</a>
-        <a class="nav-link" href="/condition-research">买卖条件研究</a>
-        <a class="nav-link" href="/individual-research">个股研究</a>
-        <a class="nav-link" href="/strategy-pool">全市场策略池</a>
-        <a class="nav-link" href="/strategy-fitness">策略适配性</a>
-        <a class="nav-link active" href="/market-data" aria-current="page">本地行情</a>
-        <a class="nav-link" href="/swing-research">波段研究</a>
-        <a class="nav-link" href="/strategy-tracking">策略追踪</a>
-        <a class="nav-link" href="/factor-test">因子检验</a>
-        <a class="nav-link" href="/history-compare">历史对比</a>
-        <a class="nav-link" href="/instrument-lab">标的检验台</a>
-        <a class="nav-link" href="/candidate-library">候选库</a>
-        <a class="nav-link" href="/factor-attribution">因子归因</a>
-        <a class="nav-link" href="/user-manual">使用手册</a>
-      </nav>
-      <div class="topbar-status"><span class="status-dot" aria-hidden="true"></span> 本地数据模式</div>
-    </header>
+    <AppTopbar />
 
     <main class="content-shell">
       <section class="page-intro">

@@ -1,4 +1,3 @@
-import { FormulaScreenApiError } from './formulaScreen'
 import type {
   DataStoreStatus,
   InstrumentBoard,
@@ -12,39 +11,14 @@ import type {
 } from '../types'
 import type { MarketSyncJobState, MarketSyncResult } from '../types'
 
+import { ApiError, createRequestClient } from './client'
+
 const API_BASE = '/api/v1/market-data'
 
-interface ApiErrorPayload {
-  error?: { code?: string; message?: string }
-  detail?: string
-}
-
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
-    ...init,
-    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
-  })
-  const raw = await response.text()
-  let payload: (T & ApiErrorPayload) | null = null
-  try {
-    payload = raw ? (JSON.parse(raw) as T & ApiErrorPayload) : null
-  } catch {
-    throw new FormulaScreenApiError(
-      raw.trim().slice(0, 240) || '服务器返回了无效响应，请稍后重试。',
-      response.status,
-    )
-  }
-  if (!response.ok) {
-    throw new FormulaScreenApiError(
-      payload?.error?.message ?? payload?.detail ?? '请求失败，请检查共享行情数据库后重试。',
-      response.status,
-    )
-  }
-  if (payload === null) {
-    throw new FormulaScreenApiError('服务器返回了空响应，请稍后重试。', response.status)
-  }
-  return payload as T
-}
+const request = createRequestClient({
+  errorClass: ApiError,
+  messages: { fallback: '请求失败，请检查共享行情数据库后重试。', emptyBody: '服务器返回了空响应，请稍后重试。', invalidBody: (_status, raw) => raw.trim().slice(0, 240) || '服务器返回了无效响应，请稍后重试。' },
+})
 
 export interface LocalInstrumentQuery {
   market?: LocalMarketScope

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { fetchActiveJobs } from './jobs'
+import { ApiError } from './client'
 
 describe('jobs API', () => {
   beforeEach(() => vi.restoreAllMocks())
@@ -39,7 +40,7 @@ describe('jobs API', () => {
     )
 
     await expect(fetchActiveJobs()).rejects.toMatchObject({
-      name: 'FormulaScreenApiError',
+      name: 'ApiError',
       message: '任务服务暂不可用',
       status: 503,
     })

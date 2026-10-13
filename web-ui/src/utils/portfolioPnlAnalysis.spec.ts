@@ -3,7 +3,6 @@ import { describe, expect, it } from 'vitest'
 import type { PortfolioBacktestResult, PortfolioTrade } from '../types'
 import { analyzePortfolioPnl, pairRoundTrips } from './portfolioPnlAnalysis'
 
-
 function trade(
   overrides: Partial<PortfolioTrade> & Pick<PortfolioTrade, 'date' | 'direction' | 'size'>,
 ): PortfolioTrade {
@@ -58,7 +57,6 @@ function resultWith(trades: PortfolioTrade[]): PortfolioBacktestResult {
   }
 }
 
-
 describe('pairRoundTrips', () => {
   it('matches sells to the oldest lots first and keeps the real holding days', () => {
     const trips = pairRoundTrips([...sells, ...buys])
@@ -77,7 +75,6 @@ describe('pairRoundTrips', () => {
     expect(trips[0].holdingDays).toBe(0)
   })
 })
-
 
 describe('analyzePortfolioPnl', () => {
   it('splits the P&L into winners, losers and their cost', () => {

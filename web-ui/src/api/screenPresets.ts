@@ -1,4 +1,5 @@
-import { FormulaScreenApiError } from './formulaScreen'
+
+import { ApiError, createRequestClient } from './client'
 import type {
   ScreenPreset,
   ScreenPresetPayload,
@@ -7,25 +8,10 @@ import type {
 
 const API_BASE = '/api/v1/screen-presets'
 
-interface ApiErrorPayload {
-  error?: { message?: string }
-  detail?: string
-}
-
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
-    ...init,
-    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
-  })
-  const payload = (await response.json()) as T & ApiErrorPayload
-  if (!response.ok) {
-    throw new FormulaScreenApiError(
-      payload.detail ?? payload.error?.message ?? '筛选方案请求失败，请稍后重试。',
-      response.status,
-    )
-  }
-  return payload as T
-}
+const request = createRequestClient({
+  errorClass: ApiError,
+  messages: { fallback: '筛选方案请求失败，请稍后重试。' },
+})
 
 export async function fetchScreenPresets(): Promise<ScreenPresetSummary[]> {
   const response = await request<{ data: ScreenPresetSummary[] }>(API_BASE)

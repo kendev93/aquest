@@ -1,3 +1,6 @@
+
+import { ApiError, createRequestClient } from './client'
+import type { ApiErrorPayload } from './client'
 import type {
   BacktestHistorySummary,
   SwingOverviewResult,
@@ -6,10 +9,11 @@ import type {
 
 const API_BASE = '/api/v1/swing-research'
 
-interface ApiErrorPayload {
-  error?: { message?: string }
-  detail?: string
-}
+const request = createRequestClient({
+  errorClass: ApiError,
+  messages: { fallback: '波段研究历史请求失败，请重试。', offline: '无法连接波段研究服务，请确认后端已启动。' },
+  baseUrl: API_BASE,
+})
 
 /**
  * 历史记录里存的研究请求：第二步的参数，外加第一步的表单与结果快照。
@@ -38,13 +42,6 @@ export interface SwingStoredRequest {
 export interface SwingHistoryRecord extends BacktestHistorySummary {
   request: SwingStoredRequest
   result: SwingStudyResult
-}
-
-export class SwingResearchApiError extends Error {
-  constructor(message: string, public readonly status: number) {
-    super(message)
-    this.name = 'SwingResearchApiError'
-  }
 }
 
 export interface SwingOverviewPayload {
@@ -102,7 +99,7 @@ async function streamRequest<T>(
   })
   if (!response.ok) {
     const failed = (await response.json().catch(() => ({}))) as ApiErrorPayload
-    throw new SwingResearchApiError(
+    throw new ApiError(
       failed.error?.message ?? failed.detail ?? '波段研究请求失败，请检查参数后重试。',
       response.status,
     )
@@ -154,8 +151,8 @@ async function streamRequest<T>(
   }
   handle(buffer)
 
-  if (failure !== null) throw new SwingResearchApiError(failure, 400)
-  if (result === null) throw new SwingResearchApiError('波段研究没有返回结果，请重试。', 500)
+  if (failure !== null) throw new ApiError(failure, 400)
+  if (result === null) throw new ApiError('波段研究没有返回结果，请重试。', 500)
   return { data: result, historyId }
 }
 
@@ -208,26 +205,6 @@ export async function runSwingIndicatorStudy(
     onProgress,
   )
   return { result: outcome.data, historyId: outcome.historyId }
-}
-
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  let response: Response
-  try {
-    response = await fetch(`${API_BASE}${path}`, {
-      ...init,
-      headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
-    })
-  } catch {
-    throw new SwingResearchApiError('无法连接波段研究服务，请确认后端已启动。', 0)
-  }
-  const payload = (await response.json().catch(() => ({}))) as T & ApiErrorPayload
-  if (!response.ok) {
-    throw new SwingResearchApiError(
-      payload.error?.message ?? payload.detail ?? '波段研究历史请求失败，请重试。',
-      response.status,
-    )
-  }
-  return payload as T
 }
 
 /** 历史列表：后端已按完成时间由近到远排好，这里只管渲染。 */

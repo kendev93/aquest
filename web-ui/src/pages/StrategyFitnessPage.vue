@@ -10,7 +10,8 @@ import {
   getStrategyFitnessHistory,
   getStrategyFitnessResults,
 } from '../api/strategyFitness'
-import { FormulaScreenApiError, fetchMetadata, parseFormula } from '../api/formulaScreen'
+import { fetchMetadata, parseFormula } from '../api/formulaScreen'
+import { ApiError } from '../api/client'
 import { fetchActiveJobs } from '../api/jobs'
 import BacktestHistoryPanel from '../components/BacktestHistoryPanel.vue'
 import DateRangeSelector from '../components/DateRangeSelector.vue'
@@ -35,6 +36,7 @@ import type {
   ValueDefinition,
 } from '../types'
 import { numericRuleForSignal, parseStoredRuleGroup, valueOptionLabel } from '../utils/formulaScreen'
+import AppTopbar from '../components/AppTopbar.vue'
 
 const INSTRUMENT_TYPE_OPTIONS: { key: InstrumentType; label: string }[] = [
   { key: 'stock', label: '股票' },
@@ -229,7 +231,7 @@ async function parseCustomFormula(): Promise<void> {
     form.buyRule = ruleForSignal('')
     form.sellRule = ruleForSignal('')
     form.rankingValue = ''
-    customParseError.value = error instanceof FormulaScreenApiError
+    customParseError.value = error instanceof ApiError
       ? error.message
       : '公式解析失败，请检查语法和函数是否受支持。'
   } finally {
@@ -321,7 +323,7 @@ function buildPayload(): StrategyFitnessPayload {
 }
 
 function apiMessage(error: unknown): string {
-  if (error instanceof FormulaScreenApiError) return error.message
+  if (error instanceof ApiError) return error.message
   return '策略适配性评估失败，请检查本地 DuckDB 数据和配置后重试。'
 }
 
@@ -564,28 +566,7 @@ watch(() => form.formulaText, (value) => {
 
 <template>
   <div class="screen-page fitness-page" data-testid="strategy-fitness-page">
-    <header class="topbar">
-      <a class="brand" href="/aquest" aria-label="A股策略研究首页"><img class="brand-mark" src="/aquest-mark.png" alt="" aria-hidden="true" width="34" height="34"><span><strong>AQuest</strong><small>A股策略研究</small></span></a>
-      <nav aria-label="主导航">
-        <a class="nav-link" href="/aquest">公式选股</a>
-                <a class="nav-link" href="/portfolio-backtest">组合回测</a>
-        <a class="nav-link" href="/strategy-lab">策略实验室</a>
-        <a class="nav-link" href="/condition-research">买卖条件研究</a>
-        <a class="nav-link" href="/individual-research">个股研究</a>
-        <a class="nav-link" href="/strategy-pool">全市场策略池</a>
-        <a class="nav-link active" href="/strategy-fitness" aria-current="page">策略适配性</a>
-        <a class="nav-link" href="/market-data">本地行情</a>
-        <a class="nav-link" href="/swing-research">波段研究</a>
-        <a class="nav-link" href="/strategy-tracking">策略追踪</a>
-        <a class="nav-link" href="/factor-test">因子检验</a>
-        <a class="nav-link" href="/history-compare">历史对比</a>
-        <a class="nav-link" href="/instrument-lab">标的检验台</a>
-        <a class="nav-link" href="/candidate-library">候选库</a>
-        <a class="nav-link" href="/factor-attribution">因子归因</a>
-        <a class="nav-link" href="/user-manual">使用手册</a>
-      </nav>
-      <div class="topbar-status"><span class="status-dot" aria-hidden="true"></span> 本地数据模式</div>
-    </header>
+    <AppTopbar />
 
     <main class="content-shell">
       <section class="page-intro">

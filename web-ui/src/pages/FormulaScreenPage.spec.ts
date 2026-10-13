@@ -9,6 +9,7 @@ import * as marketApi from '../api/marketData'
 import * as jobsApi from '../api/jobs'
 import * as presetApi from '../api/screenPresets'
 import * as groupApi from '../api/stockGroups'
+import { ApiError } from '../api/client'
 
 vi.mock('../api/stockGroups', async () => {
   const actual = await vi.importActual<typeof import('../api/stockGroups')>('../api/stockGroups')
@@ -692,7 +693,7 @@ describe('FormulaScreenPage', () => {
     await flushPromises()
     expect(wrapper.text()).toContain('公式解析失败，请检查语法和函数是否受支持')
 
-    vi.mocked(api.parseFormula).mockRejectedValueOnce(new api.FormulaScreenApiError('公式被拒绝', 422))
+    vi.mocked(api.parseFormula).mockRejectedValueOnce(new ApiError('公式被拒绝', 422))
     await wrapper.get('[data-testid="custom-formula"]').setValue('BAD:UNKNOWN(D);')
     await wrapper.get('[data-testid="parse-formula"]').trigger('click')
     await flushPromises()
@@ -710,7 +711,7 @@ describe('FormulaScreenPage', () => {
     await flushPromises()
     expect(wrapper.get('[data-testid="screen-message"]').text()).toContain('DuckDB 读取失败')
 
-    vi.mocked(api.createSyncJob).mockRejectedValueOnce(new api.FormulaScreenApiError('行情服务拒绝', 503))
+    vi.mocked(api.createSyncJob).mockRejectedValueOnce(new ApiError('行情服务拒绝', 503))
     await wrapper.get('[data-testid="sync-market-data"]').trigger('click')
     await flushPromises()
     expect(wrapper.get('[data-testid="screen-message"]').text()).toContain('行情服务拒绝')

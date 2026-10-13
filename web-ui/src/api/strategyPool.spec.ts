@@ -22,10 +22,7 @@ afterEach(() => vi.unstubAllGlobals())
 
 describe('strategy pool API', () => {
   it('requests entries with the selected optimization objective', async () => {
-    const fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ data: { items: [{ market: 'SH', code: '600000' }] } }),
-    })
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: { items: [{ market: 'SH', code: '600000' }] } }), { status: 200 }))
     vi.stubGlobal('fetch', fetch)
 
     const entries = await fetchStrategyPoolEntries('sharpe')
@@ -35,10 +32,7 @@ describe('strategy pool API', () => {
   })
 
   it('submits asynchronous signal scans and returns their durable task id', async () => {
-    const fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ data: { job_id: 'pool-job-1', status: 'queued' } }),
-    })
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: { job_id: 'pool-job-1', status: 'queued' } }), { status: 200 }))
     vi.stubGlobal('fetch', fetch)
 
     const job = await createStrategyPoolJob({ mode: 'signals', objective: 'annual_return' })
@@ -52,8 +46,8 @@ describe('strategy pool API', () => {
 
   it('loads completed job results and applies a mode-specific manual candidate', async () => {
     const fetch = vi.fn()
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ data: { job_id: 'j1', status: 'completed', result: { mode: 'single' } } }) })
-      .mockResolvedValueOnce({ ok: true, json: async () => ({ data: { code: '600000' } }) })
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { job_id: 'j1', status: 'completed', result: { mode: 'single' } } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: { code: '600000' } }), { status: 200 }))
     vi.stubGlobal('fetch', fetch)
 
     const job = await getStrategyPoolJob('j1')
@@ -67,10 +61,7 @@ describe('strategy pool API', () => {
 
   it('lists durable pool job summaries', async () => {
     const items = [{ job_id: 'job-1', mode: 'single', status: 'completed' }]
-    const fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ data: { items } }),
-    })
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: { items } }), { status: 200 }))
     vi.stubGlobal('fetch', fetch)
 
     const jobs = await fetchStrategyPoolJobs()
@@ -80,10 +71,7 @@ describe('strategy pool API', () => {
   })
 
   it('cancels a pool job by its encoded task id', async () => {
-    const fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ data: { cancelled: true } }),
-    })
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: { cancelled: true } }), { status: 200 }))
     vi.stubGlobal('fetch', fetch)
 
     const result = await cancelStrategyPoolJob('job/1')
@@ -94,10 +82,7 @@ describe('strategy pool API', () => {
   })
 
   it('clears an override with DELETE', async () => {
-    const fetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ data: {} }),
-    })
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: {} }), { status: 200 }))
     vi.stubGlobal('fetch', fetch)
 
     await clearStrategyPoolOverride('SH', '600000', 'sharpe')

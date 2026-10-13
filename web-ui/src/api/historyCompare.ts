@@ -1,6 +1,11 @@
-import { FormulaScreenApiError } from './formulaScreen'
 
+import { ApiError, createRequestClient } from './client'
 const API_BASE = '/api/v1/history-compare'
+
+const request = createRequestClient({
+  errorClass: ApiError,
+  messages: { fallback: '请求失败，请检查所选的历史记录后重试。' },
+})
 
 export interface HistoryCompareCandidate {
   history_id: string
@@ -91,25 +96,6 @@ export interface HistoryComparePayload {
   history_ids: string[]
   normalize?: 'capital' | 'first'
   x_axis?: 'date' | 'index'
-}
-
-interface ApiErrorPayload {
-  error?: { message?: string }
-}
-
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
-    ...init,
-    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
-  })
-  const payload = (await response.json()) as T & ApiErrorPayload
-  if (!response.ok) {
-    throw new FormulaScreenApiError(
-      payload.error?.message ?? '请求失败，请检查所选的历史记录后重试。',
-      response.status,
-    )
-  }
-  return payload as T
 }
 
 export async function fetchHistoryCompareCandidates(): Promise<HistoryCompareCandidates> {

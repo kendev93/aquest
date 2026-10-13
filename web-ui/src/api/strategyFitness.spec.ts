@@ -8,6 +8,7 @@ import {
   getStrategyFitnessHistory,
   getStrategyFitnessResults,
 } from './strategyFitness'
+import { ApiError } from './client'
 
 describe('strategy fitness API', () => {
   beforeEach(() => {
@@ -40,7 +41,7 @@ describe('strategy fitness API', () => {
     )
 
     await expect(getStrategyFitness('missing/job')).rejects.toMatchObject({
-      name: 'FormulaScreenApiError',
+      name: 'ApiError',
       message: '请求失败，请检查策略适配性配置后重试。',
       status: 500,
     })

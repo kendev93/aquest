@@ -3,9 +3,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import * as api from '../api/strategyPool'
 import * as marketDataApi from '../api/marketData'
-import { FormulaScreenApiError } from '../api/formulaScreen'
+
 import type { StrategyPoolCandidate, StrategyPoolEntry, StrategyPoolSignal } from '../types'
 import StrategyPoolPage from './StrategyPoolPage.vue'
+import { ApiError } from '../api/client'
 
 vi.mock('../api/strategyPool', () => ({
   cancelStrategyPoolJob: vi.fn(),
@@ -926,7 +927,7 @@ describe('StrategyPoolPage', () => {
     vi.useFakeTimers()
     vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValue([])
     vi.mocked(api.getStrategyPoolJob)
-      .mockRejectedValueOnce(new FormulaScreenApiError('DuckDB 暂时被占用', 503))
+      .mockRejectedValueOnce(new ApiError('DuckDB 暂时被占用', 503))
       .mockResolvedValueOnce({
         job_id: 'signal-1',
         status: 'completed',

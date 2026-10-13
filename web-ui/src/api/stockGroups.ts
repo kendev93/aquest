@@ -1,4 +1,5 @@
-import { FormulaScreenApiError } from './formulaScreen'
+
+import { ApiError, createRequestClient } from './client'
 import type {
   StockGroup,
   StockGroupCriteria,
@@ -10,25 +11,10 @@ import type {
 
 const API_BASE = '/api/v1/stock-groups'
 
-interface ApiErrorPayload {
-  error?: { message?: string }
-  detail?: string
-}
-
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
-    ...init,
-    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
-  })
-  const payload = (await response.json()) as T & ApiErrorPayload
-  if (!response.ok) {
-    throw new FormulaScreenApiError(
-      payload.detail ?? payload.error?.message ?? '股票组请求失败，请稍后重试。',
-      response.status,
-    )
-  }
-  return payload as T
-}
+const request = createRequestClient({
+  errorClass: ApiError,
+  messages: { fallback: '股票组请求失败，请稍后重试。' },
+})
 
 export async function fetchStockGroups(): Promise<StockGroupSummary[]> {
   const response = await request<{ data: StockGroupSummary[] }>(API_BASE)

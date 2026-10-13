@@ -1,3 +1,5 @@
+
+import { ApiError, createRequestClient } from './client'
 import type {
   CustomFormulaMetadata,
   FormulaScreenMetadata,
@@ -13,38 +15,19 @@ import type {
 } from '../types'
 
 const API_BASE = '/api/v1/formula-screen'
+
+const clientOptions = {
+  errorClass: ApiError,
+  messages: { fallback: '请求失败，请检查配置后重试。' },
+}
+
+/** 本模块自身的接口：传相对路径，自动补上 /api/v1/formula-screen。 */
+const request = createRequestClient({ ...clientOptions, baseUrl: API_BASE })
+
 const API_ROOT = '/api/v1'
 
-interface ApiErrorPayload {
-  error?: { message?: string }
-  detail?: string
-}
-
-export class FormulaScreenApiError extends Error {
-  constructor(message: string, public readonly status: number) {
-    super(message)
-    this.name = 'FormulaScreenApiError'
-  }
-}
-
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  return requestAt<T>(`${API_BASE}${path}`, init)
-}
-
-async function requestAt<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
-    ...init,
-    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
-  })
-  const payload = (await response.json()) as T & ApiErrorPayload
-  if (!response.ok) {
-    throw new FormulaScreenApiError(
-      payload.error?.message ?? payload.detail ?? '请求失败，请检查配置后重试。',
-      response.status,
-    )
-  }
-  return payload as T
-}
+/** 打到别的服务前缀的接口（行情同步属于 /market-data），调用方自己传完整 URL。 */
+const requestAt = createRequestClient(clientOptions)
 
 export async function fetchMetadata(): Promise<FormulaScreenMetadata> {
   const payload = await request<{ data: FormulaScreenMetadata }>('/metadata')

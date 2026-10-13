@@ -3,9 +3,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import * as api from '../api/candidateLibrary'
 import * as researchApi from '../api/conditionResearch'
-import { fetchMetadata, FormulaScreenApiError } from '../api/formulaScreen'
+import { fetchMetadata } from '../api/formulaScreen'
 import type { CandidateLibraryItem, CandidatePublishPreview, FormulaScreenMetadata } from '../types'
 import CandidateLibraryPage from './CandidateLibraryPage.vue'
+import { ApiError } from '../api/client'
 
 vi.mock('../api/candidateLibrary', async () => {
   const actual = await vi.importActual<typeof import('../api/candidateLibrary')>(
@@ -283,7 +284,7 @@ describe('CandidateLibraryPage', () => {
   it('says so instead of doing nothing when the source study was evicted', async () => {
     vi.mocked(api.fetchCandidates).mockResolvedValue([candidate()])
     vi.mocked(researchApi.getConditionResearchHistory)
-      .mockRejectedValue(new FormulaScreenApiError('历史记录不存在', 404))
+      .mockRejectedValue(new ApiError('历史记录不存在', 404))
 
     const wrapper = mount(CandidateLibraryPage)
     await flushPromises()

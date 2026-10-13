@@ -1,4 +1,5 @@
-import { FormulaScreenApiError } from './formulaScreen'
+
+import { ApiError, createRequestClient } from './client'
 import type {
   AttributionFactor,
   BacktestHistoryRecord,
@@ -10,24 +11,10 @@ import type {
 
 const API_BASE = '/api/v1/factor-attribution'
 
-interface ApiErrorPayload {
-  error?: { message?: string }
-}
-
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
-    ...init,
-    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
-  })
-  const payload = (await response.json()) as T & ApiErrorPayload
-  if (!response.ok) {
-    throw new FormulaScreenApiError(
-      payload.error?.message ?? '请求失败，请检查因子归因配置后重试。',
-      response.status,
-    )
-  }
-  return payload as T
-}
+const request = createRequestClient({
+  errorClass: ApiError,
+  messages: { fallback: '请求失败，请检查因子归因配置后重试。' },
+})
 
 export async function createFactorAttribution(
   payload: FactorAttributionPayload,

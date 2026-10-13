@@ -5,7 +5,8 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import PageGuide from '../components/PageGuide.vue'
 import DateRangeSelector from '../components/DateRangeSelector.vue'
 import IndividualResearchBacktestDetail from '../components/IndividualResearchBacktestDetail.vue'
-import { fetchMetadata, FormulaScreenApiError } from '../api/formulaScreen'
+import { fetchMetadata } from '../api/formulaScreen'
+import { ApiError } from '../api/client'
 import {
   cancelIndividualResearch,
   createIndividualResearch,
@@ -34,6 +35,7 @@ import type {
 import type { SignalDefinition } from '../types'
 import { formatTradingRule, formatRiskControls } from '../utils/strategyRules'
 import { buildIndicatorNameMap, indicatorDisplayName } from '../utils/indicatorNames'
+import AppTopbar from '../components/AppTopbar.vue'
 
 const BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
   { key: 'main', label: '主板' },
@@ -120,7 +122,7 @@ function showMessage(text: string, isError = false): void {
 }
 
 function apiMessage(error: unknown, fallback: string): string {
-  return error instanceof FormulaScreenApiError
+  return error instanceof ApiError
     ? error.message
     : error instanceof Error ? error.message : fallback
 }
@@ -547,31 +549,7 @@ onMounted(async () => {
 
 <template>
   <div class="screen-page individual-research-page" data-testid="individual-research-page">
-    <header class="topbar">
-      <a class="brand" href="/aquest" aria-label="A股策略研究首页">
-        <img class="brand-mark" src="/aquest-mark.png" alt="" aria-hidden="true" width="34" height="34">
-        <span><strong>AQuest</strong><small>A股策略研究</small></span>
-      </a>
-      <nav aria-label="主导航">
-        <a class="nav-link" href="/aquest">公式选股</a>
-        <a class="nav-link" href="/portfolio-backtest">组合回测</a>
-        <a class="nav-link" href="/strategy-lab">策略实验室</a>
-        <a class="nav-link" href="/condition-research">买卖条件研究</a>
-        <a class="nav-link active" href="/individual-research" aria-current="page">个股研究</a>
-        <a class="nav-link" href="/strategy-pool">全市场策略池</a>
-        <a class="nav-link" href="/strategy-fitness">策略适配性</a>
-        <a class="nav-link" href="/market-data">本地行情</a>
-        <a class="nav-link" href="/swing-research">波段研究</a>
-        <a class="nav-link" href="/strategy-tracking">策略追踪</a>
-        <a class="nav-link" href="/factor-test">因子检验</a>
-        <a class="nav-link" href="/history-compare">历史对比</a>
-        <a class="nav-link" href="/instrument-lab">标的检验台</a>
-        <a class="nav-link" href="/candidate-library">候选库</a>
-        <a class="nav-link" href="/factor-attribution">因子归因</a>
-        <a class="nav-link" href="/user-manual">使用手册</a>
-      </nav>
-      <div class="topbar-status"><span class="status-dot" aria-hidden="true"></span> 本地数据模式</div>
-    </header>
+    <AppTopbar />
 
     <main class="content-shell">
       <section class="page-intro">

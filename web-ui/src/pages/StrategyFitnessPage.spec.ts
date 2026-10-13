@@ -7,7 +7,7 @@ import StrategyFitnessPage from './StrategyFitnessPage.vue'
 import * as fitnessApi from '../api/strategyFitness'
 import * as formulaApi from '../api/formulaScreen'
 import * as jobsApi from '../api/jobs'
-import { FormulaScreenApiError } from '../api/formulaScreen'
+import { ApiError } from '../api/client'
 
 vi.mock('../api/formulaScreen', async () => {
   const actual = await vi.importActual<typeof import('../api/formulaScreen')>('../api/formulaScreen')
@@ -179,7 +179,7 @@ describe('StrategyFitnessPage', () => {
   })
 
   it('shows a metadata loading error from the API', async () => {
-    vi.mocked(formulaApi.fetchMetadata).mockRejectedValueOnce(new FormulaScreenApiError('元数据服务不可用', 503))
+    vi.mocked(formulaApi.fetchMetadata).mockRejectedValueOnce(new ApiError('元数据服务不可用', 503))
     const wrapper = mount(StrategyFitnessPage)
     await flushPromises()
 
@@ -200,7 +200,7 @@ describe('StrategyFitnessPage', () => {
     await flushPromises()
     expect(wrapper.text()).toContain('公式解析失败，请检查语法和函数是否受支持')
 
-    vi.mocked(formulaApi.parseFormula).mockRejectedValueOnce(new FormulaScreenApiError('公式被拒绝', 422))
+    vi.mocked(formulaApi.parseFormula).mockRejectedValueOnce(new ApiError('公式被拒绝', 422))
     await wrapper.get('[data-testid="fitness-formula"]').setValue('BAD:UNKNOWN(D);')
     await wrapper.get('[data-testid="fitness-parse-formula"]').trigger('click')
     await flushPromises()
@@ -222,7 +222,7 @@ describe('StrategyFitnessPage', () => {
 
     expect(wrapper.get('[data-testid="fitness-message"]').text()).toContain('策略适配性评估任务失败')
 
-    vi.mocked(fitnessApi.createStrategyFitness).mockRejectedValueOnce(new FormulaScreenApiError('服务拒绝任务', 422))
+    vi.mocked(fitnessApi.createStrategyFitness).mockRejectedValueOnce(new ApiError('服务拒绝任务', 422))
     await wrapper.get('[data-testid="start-fitness"]').trigger('click')
     await flushPromises()
     expect(wrapper.get('[data-testid="fitness-message"]').text()).toContain('服务拒绝任务')

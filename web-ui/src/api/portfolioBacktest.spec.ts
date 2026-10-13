@@ -8,6 +8,7 @@ import {
   getPortfolioBacktestHistory,
   getPortfolioBacktestResults,
 } from './portfolioBacktest'
+import { ApiError } from './client'
 
 describe('portfolio backtest API', () => {
   beforeEach(() => {
@@ -44,7 +45,7 @@ describe('portfolio backtest API', () => {
     )
 
     await expect(getPortfolioBacktest('missing/job')).rejects.toMatchObject({
-      name: 'FormulaScreenApiError',
+      name: 'ApiError',
       message: '请求失败，请检查组合回测配置后重试。',
       status: 500,
     })

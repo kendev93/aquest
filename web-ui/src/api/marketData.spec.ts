@@ -14,6 +14,7 @@ import {
   fetchStoreStatus,
   getMarketDataJob,
 } from './marketData'
+import { ApiError } from './client'
 
 describe('market data API', () => {
   beforeEach(() => vi.restoreAllMocks())
@@ -75,7 +76,7 @@ describe('market data API', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response(JSON.stringify({ error: {} }), { status: 422 }))
 
     await expect(fetchLocalInstruments()).rejects.toMatchObject({
-      name: 'FormulaScreenApiError',
+      name: 'ApiError',
       message: '请求失败，请检查共享行情数据库后重试。',
       status: 422,
     })
@@ -131,7 +132,7 @@ describe('market data API', () => {
     )
 
     await expect(fetchStoreStatus()).rejects.toMatchObject({
-      name: 'FormulaScreenApiError',
+      name: 'ApiError',
       status: 502,
       message: '<html><body>502 Bad Gateway</body></html>',
     })
@@ -141,7 +142,7 @@ describe('market data API', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(new Response('', { status: 200 }))
 
     await expect(fetchStoreStatus()).rejects.toMatchObject({
-      name: 'FormulaScreenApiError',
+      name: 'ApiError',
       status: 200,
       message: '服务器返回了空响应，请稍后重试。',
     })

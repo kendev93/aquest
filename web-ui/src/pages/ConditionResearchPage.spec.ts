@@ -11,6 +11,7 @@ import * as formulaApi from '../api/formulaScreen'
 import * as jobsApi from '../api/jobs'
 import * as presetApi from '../api/researchPresets'
 import { SWING_PLAN_STORAGE_KEY } from '../utils/swingHandoff'
+import { ApiError } from '../api/client'
 
 vi.mock('../api/formulaScreen', async () => {
   const actual = await vi.importActual<typeof import('../api/formulaScreen')>('../api/formulaScreen')
@@ -1751,7 +1752,7 @@ describe('ConditionResearchPage', () => {
       },
     })
     vi.mocked(researchApi.createConditionResearch).mockRejectedValueOnce(
-      new formulaApi.FormulaScreenApiError('研究服务正忙，请稍后再试', 503),
+      new ApiError('研究服务正忙，请稍后再试', 503),
     )
 
     const wrapper = mount(ConditionResearchPage)

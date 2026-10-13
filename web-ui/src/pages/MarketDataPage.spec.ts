@@ -1,10 +1,10 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { FormulaScreenApiError } from '../api/formulaScreen'
 import type { LocalInstrument, LocalMarketChart } from '../types'
 import * as marketApi from '../api/marketData'
 import MarketDataPage from './MarketDataPage.vue'
+import { ApiError } from '../api/client'
 
 vi.mock('../api/marketData', async () => {
   const actual = await vi.importActual<typeof import('../api/marketData')>('../api/marketData')
@@ -178,7 +178,7 @@ describe('MarketDataPage', () => {
   })
 
   it('shows a user-facing error when the local directory cannot be read', async () => {
-    vi.mocked(marketApi.fetchLocalInstruments).mockRejectedValueOnce(new FormulaScreenApiError('vipdoc 路径无效', 422))
+    vi.mocked(marketApi.fetchLocalInstruments).mockRejectedValueOnce(new ApiError('vipdoc 路径无效', 422))
     const wrapper = mountPage()
     await flushPromises()
 
@@ -385,7 +385,7 @@ describe('MarketDataPage', () => {
 
   it('does not show a store-open error while an active sync job is running', async () => {
     vi.mocked(marketApi.fetchStoreStatus).mockRejectedValueOnce(
-      new FormulaScreenApiError('行情数据库无法打开，请检查文件权限或数据库完整性', 503),
+      new ApiError('行情数据库无法打开，请检查文件权限或数据库完整性', 503),
     )
     vi.mocked(marketApi.fetchActiveMarketDataJobs).mockResolvedValueOnce([{
       job_id: 'active-store-write',

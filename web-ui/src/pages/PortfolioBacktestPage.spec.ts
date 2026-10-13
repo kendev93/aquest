@@ -18,7 +18,7 @@ import * as formulaApi from '../api/formulaScreen'
 import * as jobsApi from '../api/jobs'
 import * as strategiesApi from '../api/savedStrategies'
 import * as strategyDiscoveryApi from '../api/strategyDiscovery'
-import { FormulaScreenApiError } from '../api/formulaScreen'
+import { ApiError } from '../api/client'
 
 vi.mock('../api/formulaScreen', async () => {
   const actual = await vi.importActual<typeof import('../api/formulaScreen')>('../api/formulaScreen')
@@ -478,7 +478,7 @@ describe('PortfolioBacktestPage', () => {
   })
 
   it('shows a request error when the job cannot be created', async () => {
-    vi.mocked(portfolioApi.createPortfolioBacktest).mockRejectedValueOnce(new FormulaScreenApiError('服务器拒绝任务', 422))
+    vi.mocked(portfolioApi.createPortfolioBacktest).mockRejectedValueOnce(new ApiError('服务器拒绝任务', 422))
     const wrapper = mount(PortfolioBacktestPage)
     await flushPromises()
     await wrapper.get('[data-testid="portfolio-config"]').trigger('submit')

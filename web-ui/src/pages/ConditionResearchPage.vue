@@ -18,7 +18,8 @@ import {
   getResearchPreset,
   updateResearchPreset,
 } from '../api/researchPresets'
-import { FormulaScreenApiError, fetchMetadata, parseFormula } from '../api/formulaScreen'
+import { fetchMetadata, parseFormula } from '../api/formulaScreen'
+import { ApiError } from '../api/client'
 import { fetchActiveJobs } from '../api/jobs'
 import DateRangeSelector from '../components/DateRangeSelector.vue'
 import RuleGroupEditor from '../components/RuleGroupEditor.vue'
@@ -71,6 +72,7 @@ import {
   validationTrades as formatValidationTrades,
 } from '../utils/conditionResearch'
 import type { ResearchHistorySummary } from '../utils/conditionResearch'
+import AppTopbar from '../components/AppTopbar.vue'
 
 function emptyRule(): RuleGroupPayload {
   return { signals: [], conditions: [], required_conditions: [], combine_mode: 'all', minimum_matches: null }
@@ -366,7 +368,7 @@ async function parseCustomFormula(): Promise<void> {
     customMetadata.value = null
     form.buyRule = emptyRule()
     form.sellRule = emptyRule()
-    customParseError.value = error instanceof FormulaScreenApiError
+    customParseError.value = error instanceof ApiError
       ? error.message
       : '公式解析失败，请检查语法。'
   } finally {
@@ -1093,7 +1095,7 @@ const trialSummary = computed(() => {
 })
 
 function apiMessage(error: unknown): string {
-  return error instanceof FormulaScreenApiError
+  return error instanceof ApiError
     ? error.message
     : '买卖条件研究失败，请检查行情数据和配置后重试。'
 }
@@ -1164,31 +1166,7 @@ onActivated(() => {
 
 <template>
   <div class="screen-page condition-research-page" data-testid="condition-research-page">
-    <header class="topbar">
-      <a class="brand" href="/aquest" aria-label="A股策略研究首页">
-        <img class="brand-mark" src="/aquest-mark.png" alt="" aria-hidden="true" width="34" height="34">
-        <span><strong>AQuest</strong><small>A股策略研究</small></span>
-      </a>
-      <nav aria-label="主导航">
-        <a class="nav-link" href="/aquest">公式选股</a>
-                <a class="nav-link" href="/portfolio-backtest">组合回测</a>
-        <a class="nav-link" href="/strategy-lab">策略实验室</a>
-        <a class="nav-link active" href="/condition-research" aria-current="page">买卖条件研究</a>
-        <a class="nav-link" href="/individual-research">个股研究</a>
-        <a class="nav-link" href="/strategy-pool">全市场策略池</a>
-        <a class="nav-link" href="/strategy-fitness">策略适配性</a>
-        <a class="nav-link" href="/market-data">本地行情</a>
-        <a class="nav-link" href="/swing-research">波段研究</a>
-        <a class="nav-link" href="/strategy-tracking">策略追踪</a>
-        <a class="nav-link" href="/factor-test">因子检验</a>
-        <a class="nav-link" href="/history-compare">历史对比</a>
-        <a class="nav-link" href="/instrument-lab">标的检验台</a>
-        <a class="nav-link" href="/candidate-library">候选库</a>
-        <a class="nav-link" href="/factor-attribution">因子归因</a>
-        <a class="nav-link" href="/user-manual">使用手册</a>
-      </nav>
-      <div class="topbar-status"><span class="status-dot" aria-hidden="true"></span> 本地数据模式</div>
-    </header>
+    <AppTopbar />
 
     <main class="content-shell">
       <section class="page-intro">

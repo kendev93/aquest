@@ -14,7 +14,8 @@ import { PORTFOLIO_BACKTEST_HANDOFF_KEY } from '../utils/portfolioBacktestHandof
 import * as attributionApi from '../api/factorAttribution'
 import * as formulaApi from '../api/formulaScreen'
 import * as jobsApi from '../api/jobs'
-import { FormulaScreenApiError } from '../api/formulaScreen'
+import { ApiError } from '../api/client'
+import { syncPath } from '../router'
 
 vi.mock('../api/formulaScreen', async () => {
   const actual = await vi.importActual<typeof import('../api/formulaScreen')>('../api/formulaScreen')
@@ -235,7 +236,7 @@ describe('FactorAttributionPage', () => {
   it('shows the failure message when the history has no trades', async () => {
     // 服务端的可读文案只在 ApiError 里传出去，普通 Error 会被兜底成通用提示。
     vi.mocked(attributionApi.createFactorAttribution).mockRejectedValue(
-      new FormulaScreenApiError('这条回测记录没有成交明细，无法归因', 422),
+      new ApiError('这条回测记录没有成交明细，无法归因', 422),
     )
     const wrapper = mount(FactorAttributionPage)
     await flushPromises()
@@ -247,6 +248,10 @@ describe('FactorAttributionPage', () => {
   })
 
   it('marks the current page in the navigation', async () => {
+    // 导航高亮现在由地址决定，不再由页面自己写死。
+    window.history.replaceState({}, '', '/factor-attribution')
+    syncPath()
+
     const wrapper = mount(FactorAttributionPage)
     await flushPromises()
 

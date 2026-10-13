@@ -8,10 +8,7 @@ import guides from './pageGuides.json'
 // vitest 运行时 import.meta.url 不是 file: 协议，用进程工作目录定位源码
 //（这些用例都在 web-ui 目录下执行）。
 const pagesDir = resolve(process.cwd(), 'src', 'pages')
-const appSource = readFileSync(resolve(process.cwd(), 'src', 'App.vue'), 'utf-8')
-
-// App.vue 里没有 /aquest 的 startsWith 分支，它是兜底路由（最后那个 return）。
-const FALLBACK_PATH = '/aquest'
+const routerSource = readFileSync(resolve(process.cwd(), 'src', 'router.ts'), 'utf-8')
 
 function pageFiles(): string[] {
   return readdirSync(pagesDir).filter((name) => name.endsWith('.vue'))
@@ -46,12 +43,9 @@ describe('pageGuides', () => {
     }
   })
 
-  it('路由路径和 App.vue 的分支一致', () => {
+  it('路由表里收录了每个功能页的路径', () => {
     for (const guide of guides.guides) {
-      if (guide.path === FALLBACK_PATH) continue
-      expect(appSource, `App.vue 缺少 ${guide.path} 的路由分支`).toContain(
-        `pathname.startsWith('${guide.path}`,
-      )
+      expect(routerSource, `router.ts 缺少 ${guide.path} 的路由`).toContain(`prefix('${guide.path}')`)
     }
   })
 
@@ -75,13 +69,14 @@ describe('pageGuides', () => {
     }
   })
 
-  it('每个页面都手写齐了全部导航链接', () => {
-    const paths = guides.guides.map((guide) => guide.path)
+  it('导航项收录了每个功能页，页面统一交给 AppTopbar 渲染', () => {
+    for (const guide of guides.guides) {
+      expect(routerSource, `导航缺少 ${guide.path}`).toContain(`{ path: '${guide.path}', label:`)
+    }
+    // 以前每个页面都手抄一遍 16 项导航，加页面要全改；现在只认这一个组件。
     for (const file of pageFiles()) {
       const source = readFileSync(pagesDir + '/' + file, 'utf-8')
-      for (const path of paths) {
-        expect(source, `${file} 缺少指向 ${path} 的导航链接`).toContain(`href="${path}"`)
-      }
+      expect(source, `${file} 应改用 AppTopbar 而不是手写导航`).toContain('<AppTopbar />')
     }
   })
 

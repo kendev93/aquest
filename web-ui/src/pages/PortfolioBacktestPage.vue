@@ -19,7 +19,8 @@ import {
   getStrategyDiscovery,
   getStrategyDiscoveryResults,
 } from '../api/strategyDiscovery'
-import { FormulaScreenApiError, fetchMetadata, parseFormula } from '../api/formulaScreen'
+import { fetchMetadata, parseFormula } from '../api/formulaScreen'
+import { ApiError } from '../api/client'
 import { fetchActiveJobs } from '../api/jobs'
 import {
   consumePortfolioBacktestHandoff,
@@ -71,6 +72,7 @@ import {
   valueOptionLabel,
 } from '../utils/formulaScreen'
 import { formatChinaTimestamp } from '../utils/time'
+import AppTopbar from '../components/AppTopbar.vue'
 
 const DISCOVERY_APPLY_KEY = 'aquest.strategy-discovery.apply'
 const DISCOVERY_APPLY_META_KEY = 'aquest.strategy-discovery.apply-meta'
@@ -452,7 +454,7 @@ async function parseCustomFormula(): Promise<void> {
     form.buyRule = ruleForSignal('')
     form.sellRule = ruleForSignal('')
     form.rankingValue = ''
-    customParseError.value = error instanceof FormulaScreenApiError
+    customParseError.value = error instanceof ApiError
       ? error.message
       : '公式解析失败，请检查语法和函数是否受支持。'
   } finally {
@@ -634,7 +636,7 @@ function portfolioBaseFingerprint(
 }
 
 function apiMessage(error: unknown): string {
-  if (error instanceof FormulaScreenApiError) return error.message
+  if (error instanceof ApiError) return error.message
   return '组合回测失败，请检查本地 DuckDB 数据和配置后重试。'
 }
 
@@ -645,7 +647,6 @@ function finiteNumber(value: unknown, fallback: number): number {
 function enumValue<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
   return typeof value === 'string' && allowed.includes(value as T) ? value as T : fallback
 }
-
 
 function applyStoredCandidate(raw: unknown): void {
   if (!raw || typeof raw !== 'object') return
@@ -1154,7 +1155,7 @@ async function pollRiskOptimization(jobId: string): Promise<void> {
         message.value = ''
       }
     } catch (error) {
-      const transientStatus = error instanceof FormulaScreenApiError
+      const transientStatus = error instanceof ApiError
         && [0, 500, 502, 503, 504].includes(error.status)
       if (!transientStatus || consecutiveStatusFailures >= retryDelays.length) throw error
       const delay = retryDelays[consecutiveStatusFailures] ?? 3_000
@@ -1257,7 +1258,7 @@ async function loadRiskOptimizationHistoryDetail(jobId: string): Promise<void> {
       ? (savedRequest as Record<string, unknown>).base_config
       : null
     if (!baseConfig || typeof baseConfig !== 'object') {
-      throw new FormulaScreenApiError('这条历史记录缺少寻优时的基础配置，无法恢复候选。', 422)
+      throw new ApiError('这条历史记录缺少寻优时的基础配置，无法恢复候选。', 422)
     }
     await applyHistoryRequest(
       baseConfig,
@@ -1687,31 +1688,7 @@ watch(() => form.formulaText, (value) => {
 
 <template>
   <div class="screen-page portfolio-page" data-testid="portfolio-backtest-page">
-    <header class="topbar">
-      <a class="brand" href="/aquest" aria-label="A股策略研究首页">
-        <img class="brand-mark" src="/aquest-mark.png" alt="" aria-hidden="true" width="34" height="34">
-        <span><strong>AQuest</strong><small>A股策略研究</small></span>
-      </a>
-      <nav aria-label="主导航">
-        <a class="nav-link" href="/aquest">公式选股</a>
-                <a class="nav-link active" href="/portfolio-backtest" aria-current="page">组合回测</a>
-        <a class="nav-link" href="/strategy-lab">策略实验室</a>
-        <a class="nav-link" href="/condition-research">买卖条件研究</a>
-        <a class="nav-link" href="/individual-research">个股研究</a>
-        <a class="nav-link" href="/strategy-pool">全市场策略池</a>
-        <a class="nav-link" href="/strategy-fitness">策略适配性</a>
-        <a class="nav-link" href="/market-data">本地行情</a>
-        <a class="nav-link" href="/swing-research">波段研究</a>
-        <a class="nav-link" href="/strategy-tracking">策略追踪</a>
-        <a class="nav-link" href="/factor-test">因子检验</a>
-        <a class="nav-link" href="/history-compare">历史对比</a>
-        <a class="nav-link" href="/instrument-lab">标的检验台</a>
-        <a class="nav-link" href="/candidate-library">候选库</a>
-        <a class="nav-link" href="/factor-attribution">因子归因</a>
-        <a class="nav-link" href="/user-manual">使用手册</a>
-      </nav>
-      <div class="topbar-status"><span class="status-dot" aria-hidden="true"></span> 本地数据模式</div>
-    </header>
+    <AppTopbar />
 
     <main class="content-shell">
       <section class="page-intro">

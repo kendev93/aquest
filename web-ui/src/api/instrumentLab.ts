@@ -1,6 +1,12 @@
-import { FormulaScreenApiError } from './formulaScreen'
 
+import { ApiError, createRequestClient } from './client'
 const API_BASE = '/api/v1/instrument-lab'
+
+const request = createRequestClient({
+  errorClass: ApiError,
+  messages: { fallback: '请求失败，请检查所选标的后重试。' },
+  baseUrl: API_BASE,
+})
 
 export interface InstrumentLabScope {
   market?: 'SH' | 'SZ'
@@ -92,26 +98,6 @@ export interface InstrumentLabCheckReport {
   block_size: number
   items: InstrumentLabCheckItem[]
   notes: string[]
-}
-
-interface ApiErrorPayload {
-  error?: { message?: string }
-  detail?: string
-}
-
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
-    ...init,
-    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
-  })
-  const payload = (await response.json()) as T & ApiErrorPayload
-  if (!response.ok) {
-    throw new FormulaScreenApiError(
-      payload.error?.message ?? payload.detail ?? '请求失败，请检查所选标的后重试。',
-      response.status,
-    )
-  }
-  return payload as T
 }
 
 export async function fetchInstrumentValues(

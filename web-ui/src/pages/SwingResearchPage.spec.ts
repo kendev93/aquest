@@ -7,6 +7,7 @@ import SwingResearchPage from './SwingResearchPage.vue'
 import * as swingApi from '../api/swingResearch'
 import type { SwingHistoryRecord } from '../api/swingResearch'
 import { SWING_PLAN_STORAGE_KEY } from '../utils/swingHandoff'
+import { ApiError } from '../api/client'
 
 vi.mock('../api/swingResearch', async () => {
   const actual = await vi.importActual<typeof import('../api/swingResearch')>('../api/swingResearch')
@@ -260,7 +261,7 @@ describe('SwingResearchPage', () => {
 
   it('shows the backend message when a study is rejected', async () => {
     vi.mocked(swingApi.runSwingIndicatorStudy).mockRejectedValue(
-      new swingApi.SwingResearchApiError('面板需要 5.2 GB 临时空间，超出上限 3 GB', 400),
+      new ApiError('面板需要 5.2 GB 临时空间，超出上限 3 GB', 400),
     )
     const wrapper = mount(SwingResearchPage)
     await wrapper.get('[data-testid="swing-study-run"]').trigger('click')

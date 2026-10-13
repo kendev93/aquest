@@ -1,14 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import {
-  SwingResearchApiError,
-  deleteSwingResearchHistory,
-  fetchSwingResearchHistory,
-  getSwingResearchHistory,
-  runSwingIndicatorStudy,
-  runSwingOverview,
-  type SwingProgress,
-} from './swingResearch'
+import { deleteSwingResearchHistory, fetchSwingResearchHistory, getSwingResearchHistory, runSwingIndicatorStudy, runSwingOverview, type SwingProgress } from './swingResearch'
+import { ApiError } from './client'
 
 /** 一段 SSE 响应。故意把帧从中间切开，逼解析器自己攒 buffer。 */
 function sseResponse(frames: string[]): Response {
@@ -70,11 +63,11 @@ describe('swing research API', () => {
     )
 
     await expect(runSwingIndicatorStudy({ limit_stocks: 5000 })).rejects.toMatchObject({
-      name: 'SwingResearchApiError',
+      name: 'ApiError',
       message: '面板需要 5.2 GB 临时空间，超出上限 3 GB',
       status: 400,
     })
-    expect(SwingResearchApiError.prototype instanceof Error).toBe(true)
+    expect(ApiError.prototype instanceof Error).toBe(true)
   })
 
   it('reports each stage and resolves with the result frame', async () => {
@@ -109,7 +102,7 @@ describe('swing research API', () => {
     )
 
     await expect(runSwingIndicatorStudy({})).rejects.toMatchObject({
-      name: 'SwingResearchApiError',
+      name: 'ApiError',
       message: '以下指标不能用于波段研究: close',
     })
   })
@@ -146,7 +139,7 @@ describe('swing research API', () => {
     vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('fetch failed'))
 
     await expect(fetchSwingResearchHistory()).rejects.toMatchObject({
-      name: 'SwingResearchApiError',
+      name: 'ApiError',
       message: '无法连接波段研究服务，请确认后端已启动。',
     })
   })

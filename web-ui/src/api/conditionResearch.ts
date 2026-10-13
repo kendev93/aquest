@@ -1,4 +1,5 @@
-import { FormulaScreenApiError } from './formulaScreen'
+
+import { ApiError, createRequestClient } from './client'
 import type {
   BacktestHistoryRecord,
   BacktestHistorySummary,
@@ -9,38 +10,10 @@ import type {
 
 const API_BASE = '/api/v1/condition-research'
 
-interface ApiErrorPayload {
-  error?: { message?: string }
-  detail?: string
-}
-
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  let response: Response
-  try {
-    response = await fetch(url, {
-      ...init,
-      headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
-    })
-  } catch {
-    throw new FormulaScreenApiError('无法连接买卖条件研究服务，请确认后端已启动。', 0)
-  }
-  let payload: T & ApiErrorPayload
-  try {
-    payload = await response.json() as T & ApiErrorPayload
-  } catch {
-    throw new FormulaScreenApiError(
-      '买卖条件研究服务返回无效响应（HTTP ' + response.status + '）。',
-      response.status,
-    )
-  }
-  if (!response.ok) {
-    throw new FormulaScreenApiError(
-      payload.error?.message ?? payload.detail ?? '买卖条件研究请求失败，请检查配置后重试。',
-      response.status,
-    )
-  }
-  return payload as T
-}
+const request = createRequestClient({
+  errorClass: ApiError,
+  messages: { fallback: '买卖条件研究请求失败，请检查配置后重试。', offline: '无法连接买卖条件研究服务，请确认后端已启动。', invalidBody: (status) => `买卖条件研究服务返回无效响应（HTTP ${status}）。` },
+})
 
 export async function createConditionResearch(
   payload: ConditionResearchPayload,

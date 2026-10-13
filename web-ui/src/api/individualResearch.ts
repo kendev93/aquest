@@ -1,4 +1,5 @@
-import { FormulaScreenApiError } from './formulaScreen'
+
+import { ApiError, createRequestClient } from './client'
 import type {
   IndividualResearchHistoryRecord,
   IndividualResearchHistorySummary,
@@ -9,25 +10,10 @@ import type {
 
 const API_BASE = '/api/v1/individual-research'
 
-interface ApiErrorPayload {
-  error?: { message?: string }
-  detail?: string
-}
-
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
-    ...init,
-    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
-  })
-  const payload = (await response.json()) as T & ApiErrorPayload
-  if (!response.ok) {
-    throw new FormulaScreenApiError(
-      payload.error?.message ?? payload.detail ?? '个股研究请求失败，请检查配置和本地行情。',
-      response.status,
-    )
-  }
-  return payload as T
-}
+const request = createRequestClient({
+  errorClass: ApiError,
+  messages: { fallback: '个股研究请求失败，请检查配置和本地行情。' },
+})
 
 export async function createIndividualResearch(
   payload: IndividualResearchPayload,
