@@ -1,5 +1,5 @@
 import { flushPromises, mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type {
   FormulaScreenMetadata,
@@ -63,6 +63,8 @@ vi.mock('../api/strategyDiscovery', async () => {
     createPortfolioRiskOptimization: vi.fn(),
     getStrategyDiscovery: vi.fn(),
     getStrategyDiscoveryResults: vi.fn(),
+    fetchRiskOptimizationHistory: vi.fn(),
+    getRiskOptimizationHistory: vi.fn(),
   }
 })
 
@@ -199,6 +201,11 @@ const riskOptimizationResult: StrategyDiscoveryResult = {
 }
 
 describe('PortfolioBacktestPage', () => {
+  // jsdom 没有实现 scrollIntoView；风险寻优历史「载入候选」后会滚动到结果区。
+  beforeAll(() => {
+    Element.prototype.scrollIntoView = vi.fn()
+  })
+
   beforeEach(() => {
     vi.unstubAllGlobals()
     vi.clearAllMocks()
@@ -1018,5 +1025,93 @@ describe('PortfolioBacktestPage', () => {
     expect(strategiesApi.deleteStrategy).toHaveBeenCalledWith('strategy-1')
     expect(wrapper.get('[data-testid="strategy-count"]').text()).toBe('0 个策略')
     expect(wrapper.get('[data-testid="portfolio-message"]').text()).toContain('已删除')
+  })
+
+  it('runs the risk optimization search and shows the candidate board', async () => {
+    vi.mocked(strategyDiscoveryApi.fetchRiskOptimizationHistory).mockResolvedValue({
+      items: [], total: 0, limit: 20, offset: 0,
+    })
+    const wrapper = mount(PortfolioBacktestPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="start-portfolio-risk-optimization"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('风险参数寻优完成')
+    expect(wrapper.find('[data-testid="portfolio-risk-candidates"]').exists()).toBe(true)
+
+    // 候选榜可以折叠再展开，两个榜单切换不丢结果区。
+    await wrapper.get('[data-testid="portfolio-risk-hide-candidates"]').trigger('click')
+    expect(wrapper.find('[data-testid="portfolio-risk-optimization-collapsed"]').exists()).toBe(true)
+    await wrapper.get('[data-testid="portfolio-risk-show-candidates"]').trigger('click')
+    await wrapper.get('[data-testid="portfolio-risk-return-board"]').trigger('click')
+    expect(wrapper.find('[data-testid="portfolio-risk-candidates"]').exists()).toBe(true)
+  })
+
+  it('retries transient status failures while polling the risk search', async () => {
+    vi.mocked(strategyDiscoveryApi.getStrategyDiscovery)
+      .mockRejectedValueOnce(new ApiError('进度读取失败', 503))
+      .mockRejectedValueOnce(new ApiError('进度读取失败', 500))
+    vi.mocked(strategyDiscoveryApi.fetchRiskOptimizationHistory).mockResolvedValue({
+      items: [], total: 0, limit: 20, offset: 0,
+    })
+    const wrapper = mount(PortfolioBacktestPage)
+    await flushPromises()
+
+    await wrapper.get('[data-testid="start-portfolio-risk-optimization"]').trigger('click')
+    await flushPromises()
+    // 第一次失败后进入重试提示（250ms 后第二次尝试，再次失败进 500ms 窗口）。
+    expect(wrapper.get('[data-testid="portfolio-message"]').text()).toContain('进度读取暂时失败')
+
+    // 重试窗口过后恢复，寻优正常完成，重试提示被完成消息覆盖。
+    await new Promise((resolve) => setTimeout(resolve, 900))
+    await flushPromises()
+    expect(wrapper.get('[data-testid="portfolio-message"]').text()).toContain('风险参数寻优完成')
+  })
+
+  it('applies a risk candidate into the ordinary form and keeps the current range', async () => {
+    const wrapper = mount(PortfolioBacktestPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="start-portfolio-risk-optimization"]').trigger('click')
+    await flushPromises()
+
+    await wrapper.get('[data-testid="portfolio-risk-apply-risk-candidate-1"]').trigger('click')
+
+    // 当前区间与寻优的验证段不同：候选只进表单，验证段相关的复现标注不出现。
+    expect(wrapper.get('[data-testid="portfolio-message"]').text())
+      .toContain('已应用候选风险参数并保留当前区间')
+  })
+
+  it('loads a risk optimization history record back into the page', async () => {
+    const riskHistoryDetail = {
+      ...riskOptimizationResult,
+      request: {
+        ...riskOptimizationResult.request,
+        base_config: savedStrategyDetail.request,
+      },
+    }
+    vi.mocked(strategyDiscoveryApi.fetchRiskOptimizationHistory).mockResolvedValue({
+      items: [{
+        job_id: 'risk-opt-9', status: 'completed' as const, started_at: null,
+        finished_at: '2026-09-30 10:00:00', duration_seconds: 12.5,
+        start_date: '2024-01-01', end_date: '2024-02-29',
+        requested_trials: 1000, evaluated_trials: 1000, candidate_count: 1,
+        validation_best_sharpe: 1.2, validation_best_annual_return: 0.3,
+      }],
+      total: 1, limit: 20, offset: 0,
+    })
+    vi.mocked(strategyDiscoveryApi.getRiskOptimizationHistory).mockResolvedValue(riskHistoryDetail)
+    const wrapper = mount(PortfolioBacktestPage)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="portfolio-risk-history-risk-opt-9"]').text())
+      .toContain('2024-01-01')
+
+    await wrapper.get('[data-testid="portfolio-risk-history-load-risk-opt-9"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="portfolio-message"]').text())
+      .toContain('已恢复风险寻优 risk-opt-9 的配置和候选')
+    expect(wrapper.find('[data-testid="portfolio-risk-candidates"]').exists()).toBe(true)
   })
 })
