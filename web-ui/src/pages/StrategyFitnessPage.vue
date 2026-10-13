@@ -37,17 +37,8 @@ import type {
 } from '../types'
 import { numericRuleForSignal, parseStoredRuleGroup, valueOptionLabel } from '../utils/formulaScreen'
 import AppTopbar from '../components/AppTopbar.vue'
+import { BOARD_OPTIONS, INSTRUMENT_TYPE_OPTIONS } from '../utils/instrumentOptions'
 import { formatNumber, formatPercent } from '../utils/format'
-
-const INSTRUMENT_TYPE_OPTIONS: { key: InstrumentType; label: string }[] = [
-  { key: 'stock', label: '股票' },
-]
-
-const BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
-  { key: 'main', label: '主板' },
-  { key: 'star', label: '科创板' },
-  { key: 'chinext', label: '创业板' },
-]
 
 interface FitnessFormState {
   mode: 'preset' | 'custom'

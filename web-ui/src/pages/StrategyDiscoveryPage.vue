@@ -44,20 +44,11 @@ import type {
   ValueDefinition,
 } from '../types'
 import AppTopbar from '../components/AppTopbar.vue'
+import { BOARD_OPTIONS, INSTRUMENT_TYPE_OPTIONS } from '../utils/instrumentOptions'
 import { formatNumber, formatPercent } from '../utils/format'
 
 const APPLY_STORAGE_KEY = 'aquest.strategy-discovery.apply'
 const APPLY_METADATA_KEY = 'aquest.strategy-discovery.apply-meta'
-
-const INSTRUMENT_TYPE_OPTIONS: { key: InstrumentType; label: string }[] = [
-  { key: 'stock', label: '股票' },
-]
-
-const BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
-  { key: 'main', label: '主板' },
-  { key: 'star', label: '科创板' },
-  { key: 'chinext', label: '创业板' },
-]
 
 function emptyRule(): RuleGroupPayload {
   return { signals: [], conditions: [], combine_mode: 'all', minimum_matches: null }

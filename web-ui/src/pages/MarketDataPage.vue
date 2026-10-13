@@ -38,6 +38,7 @@ import type {
 import MarketCandlestickChart from '../components/MarketCandlestickChart.vue'
 import TermHint from '../components/TermHint.vue'
 import AppTopbar from '../components/AppTopbar.vue'
+import { BOARD_OPTIONS, INSTRUMENT_TYPE_OPTIONS } from '../utils/instrumentOptions'
 import { formatNumber } from '../utils/format'
 
 const MA_OPTIONS = [
@@ -49,16 +50,6 @@ const MA_OPTIONS = [
 
 // 本系统只研究股票：基金（含 ETF）、指数和 B 股既不在线同步也不本地导入，
 // 所以不再作为可选项出现。在线通道与本地导入的范围现在是同一套。
-const INSTRUMENT_TYPE_OPTIONS: { key: InstrumentType; label: string }[] = [
-  { key: 'stock', label: '股票' },
-]
-
-const BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
-  { key: 'main', label: '主板' },
-  { key: 'star', label: '科创板' },
-  { key: 'chinext', label: '创业板' },
-]
-
 const form = reactive({
   syncUniverse: 'all' as 'all' | 'sh' | 'sz',
   syncInstrumentTypes: ['stock'] as InstrumentType[],

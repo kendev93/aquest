@@ -488,3 +488,69 @@ export interface StrategyTrackingSnapshot {
   /** 每个最新行情日的信息型候选，和下一交易日计划分开。 */
   today_candidates: TrackingTodayCandidates | null
 }
+
+/** 组合回测页表单的完整状态（reactive 对象的形状）。 */
+export interface PortfolioFormState {
+  mode: 'preset' | 'custom'
+  buyRule: RuleGroupPayload
+  universe: PortfolioUniverse
+  universeFile: string
+  codesText: string
+  instrumentTypes: InstrumentType[]
+  boards: InstrumentBoard[]
+  rankingValue: string
+  rankOrder: PortfolioRankOrder
+  maxPositions: number
+  rebalanceFrequency: PortfolioRebalanceFrequency
+  execution: BacktestExecution
+  formulaText: string
+  formulaParameters: Record<string, number>
+  sellRule: RuleGroupPayload
+  stopLossEnabled: boolean
+  stopLossMode: 'pct' | 'atr'
+  stopLossPct: number
+  stopLossAtrMultiplier: number
+  stopLossCooldownDays: number
+  takeProfitEnabled: boolean
+  takeProfitMode: 'pct' | 'atr'
+  takeProfitPct: number
+  takeProfitAtrMultiplier: number
+  takeProfitCooldownDays: number
+  trailingStopEnabled: boolean
+  trailingStopMode: 'pct' | 'atr'
+  trailingStopPct: number
+  trailingStopAtrMultiplier: number
+  trailingStopCooldownDays: number
+  maxHoldDaysEnabled: boolean
+  maxHoldDays: number
+  atrPeriod: number
+  dateMode: DateRangeMode
+  startDate: string
+  endDate: string
+  initialCash: number
+  commission: number
+  minCommission: number
+  stampTax: number
+  slippage: number
+  fitnessRankWeight: number
+  fitnessMinTrades: number
+  fitnessMaxDrawdown: number
+  positionMode: BacktestPositionMode
+  fixedSize: number
+  excludeSt: boolean
+}
+
+/** 应用了策略发现候选后留在页面上的复现标注；与验证段区间一致时才带指标。 */
+export interface AppliedDiscoveryCandidate {
+  candidate_hash: string
+  data_fingerprint: string | null
+  validation_metrics: Record<string, number | string | boolean | null> | null
+}
+
+/** 重跑回测后，验证「榜单上的候选是否真的复现」的三项比对结论。 */
+export interface PortfolioReplayComparison {
+  candidateHash: string
+  tradeRecords: '一致' | '不一致' | '未提供'
+  performance: '一致' | '不一致' | '未提供'
+  dataFingerprint: '一致' | '不一致' | '未提供'
+}

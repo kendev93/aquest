@@ -52,17 +52,8 @@ import {
 import { formatChinaTimestamp } from '../utils/time'
 import { savePortfolioBacktestHandoff } from '../utils/portfolioBacktestHandoff'
 import AppTopbar from '../components/AppTopbar.vue'
+import { BOARD_OPTIONS, INSTRUMENT_TYPE_OPTIONS } from '../utils/instrumentOptions'
 import { formatNumber, formatSignedPercent } from '../utils/format'
-
-const INSTRUMENT_TYPE_OPTIONS: { key: InstrumentType; label: string }[] = [
-  { key: 'stock', label: '股票' },
-]
-
-const BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
-  { key: 'main', label: '主板' },
-  { key: 'star', label: '科创板' },
-  { key: 'chinext', label: '创业板' },
-]
 
 function emptyCondition(leftValue = 'indicator_three.var1'): ScreenCondition {
   return {

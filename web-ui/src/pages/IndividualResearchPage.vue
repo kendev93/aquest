@@ -37,13 +37,8 @@ import type { SignalDefinition } from '../types'
 import { formatTradingRule, formatRiskControls } from '../utils/strategyRules'
 import { buildIndicatorNameMap, indicatorDisplayName } from '../utils/indicatorNames'
 import AppTopbar from '../components/AppTopbar.vue'
+import { BOARD_OPTIONS } from '../utils/instrumentOptions'
 import { formatDuration, formatNumber, formatPercent, formatSignedPercent } from '../utils/format'
-
-const BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
-  { key: 'main', label: '主板' },
-  { key: 'star', label: '科创板' },
-  { key: 'chinext', label: '创业板' },
-]
 
 const metadata = ref<FormulaScreenMetadata | null>(null)
 const form = reactive({
