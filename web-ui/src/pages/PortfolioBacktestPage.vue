@@ -1,14 +1,11 @@
 <script setup lang="ts">
 import PageGuide from '../components/PageGuide.vue'
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import {
   cancelPortfolioBacktest,
   createPortfolioBacktest,
-  deletePortfolioBacktestHistory,
-  fetchPortfolioBacktestHistory,
   getPortfolioBacktest,
-  getPortfolioBacktestHistory,
   getPortfolioBacktestResults,
 } from '../api/portfolioBacktest'
 import { fetchMetadata, parseFormula } from '../api/formulaScreen'
@@ -17,27 +14,16 @@ import { pollUntil } from '../composables/usePolling'
 import { usePortfolioBacktestHistory } from '../composables/usePortfolioBacktestHistory'
 import { usePortfolioHandoff } from '../composables/usePortfolioHandoff'
 import { usePortfolioRiskOptimization } from '../composables/usePortfolioRiskOptimization'
-import { portfolioBaseFingerprint } from '../utils/portfolioFingerprint'
 import { usePortfolioStrategyLibrary } from '../composables/usePortfolioStrategyLibrary'
-import { equityChartIndices, equityChartPoints, equityChartRange } from '../utils/portfolioChart'
 import { fetchActiveJobs } from '../api/jobs'
-import {
-  consumePortfolioBacktestHandoff,
-  type PortfolioBacktestHandoff,
-} from '../utils/portfolioBacktestHandoff'
+import { consumePortfolioBacktestHandoff } from '../utils/portfolioBacktestHandoff'
 import BacktestHistoryPanel from '../components/BacktestHistoryPanel.vue'
 import DateRangeSelector from '../components/DateRangeSelector.vue'
-import PortfolioPnlAnalysis from '../components/PortfolioPnlAnalysis.vue'
 import PortfolioResultPanel from '../components/PortfolioResultPanel.vue'
 import RiskOptimizationHistoryDetail from '../components/RiskOptimizationHistoryDetail.vue'
 import RuleGroupEditor from '../components/RuleGroupEditor.vue'
-import TermHint from '../components/TermHint.vue'
 import type {
-  BacktestHistorySummary,
-  BacktestExecution,
-  BacktestPositionMode,
   CustomFormulaMetadata,
-  DateRangeMode,
   DateRangeSelection,
   FormulaScreenMetadata,
   InstrumentBoard,
@@ -47,28 +33,15 @@ import type {
   PortfolioBacktestPayload,
   PortfolioFormState,
   PortfolioBacktestResult,
-  PortfolioRiskOptimizationPayload,
-  PortfolioTrade,
-  PortfolioRebalanceFrequency,
   PortfolioReplayComparison,
-  PortfolioUniverse,
-  RiskOptimizationHistorySummary,
   RuleGroupPayload,
   SignalDefinition,
-  StrategyDiscoveryCandidate,
-  StrategyDiscoveryJobState,
-  StrategyDiscoveryResult,
   ValueDefinition,
 } from '../types'
-import {
-  numericRuleForSignal,
-  parseStoredRuleGroup,
-  signalDisplayName,
-  valueOptionLabel,
-} from '../utils/formulaScreen'
+import { numericRuleForSignal, valueOptionLabel } from '../utils/formulaScreen'
 import { formatChinaTimestamp } from '../utils/time'
 import AppTopbar from '../components/AppTopbar.vue'
-import { formatDuration, formatMoney, formatNumber, formatPercent } from '../utils/format'
+import { formatDuration, formatNumber, formatPercent } from '../utils/format'
 
 const DISCOVERY_APPLY_KEY = 'aquest.strategy-discovery.apply'
 const DISCOVERY_APPLY_META_KEY = 'aquest.strategy-discovery.apply-meta'
@@ -425,14 +398,6 @@ function buildPayload(): PortfolioBacktestPayload {
 function apiMessage(error: unknown): string {
   if (error instanceof ApiError) return error.message
   return '组合回测失败，请检查本地 DuckDB 数据和配置后重试。'
-}
-
-function finiteNumber(value: unknown, fallback: number): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : fallback
-}
-
-function enumValue<T extends string>(value: unknown, allowed: readonly T[], fallback: T): T {
-  return typeof value === 'string' && allowed.includes(value as T) ? value as T : fallback
 }
 
 // 跨页桥接与回填（策略实验室/条件研究/波段/股池 + 反向带到公式选股）

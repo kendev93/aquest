@@ -90,7 +90,6 @@ export function usePortfolioRiskOptimization(deps: PortfolioRiskOptimizationDeps
   const riskOptimizationHistoryDetailId = ref<string | null>(null)
   const riskOptimizationHistoryDetailLoadingId = ref<string | null>(null)
   const riskOptimizationHistoryDetailError = ref('')
-  const riskOptimizationResultsSection = ref<HTMLElement | null>(null)
 
   // 指纹不一致说明提交寻优后表单又被改过：候选不再对应眼前的配置。
   const riskOptimizationStale = computed(() => (
@@ -328,7 +327,7 @@ export function usePortfolioRiskOptimization(deps: PortfolioRiskOptimizationDeps
       riskOptimizationJob.value = null
       deps.onCandidateApplied(null)
       await nextTick()
-      riskOptimizationResultsSection.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      deps.resultsSection.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     } catch (error) {
       deps.message.value = deps.describeError(error)
     } finally {
@@ -418,7 +417,6 @@ export function usePortfolioRiskOptimization(deps: PortfolioRiskOptimizationDeps
     riskOptimizationHistoryDetailId,
     riskOptimizationHistoryDetailLoadingId,
     riskOptimizationHistoryDetailError,
-    riskOptimizationResultsSection,
     riskMetric,
     riskMetricRatio,
     riskOptimizationPhaseLabel,

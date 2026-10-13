@@ -182,6 +182,7 @@ async function applyStoredResearch(raw: unknown, notice?: string): Promise<void>
   const missing: string[] = []
   if (config.buy_rule === null) missing.push('买入')
   if (config.sell_rule === null) missing.push('卖出')
+  deps.errors.value = {}
   // 策略库加载时由调用方给整句话：策略场景不该出现"研究未设条件"这种措辞。
   deps.message.value = notice ?? (missing.length
     ? `已载入研究的规则与排序建议；研究未设${missing.join('、')}条件，该侧已保留当前默认，请确认后再回测。`

@@ -21,6 +21,7 @@ build/
 web-ui/node_modules/
 web-ui/dist/
 web-ui/coverage/
+web-ui/.vitest/
 web-ui/.vite/
 web-ui/test-results/
 web-ui/playwright-report/

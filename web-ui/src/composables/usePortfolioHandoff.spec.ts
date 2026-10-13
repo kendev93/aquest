@@ -174,6 +174,12 @@ describe('usePortfolioHandoff', () => {
       )
       expect(deps.message.value).toBe('策略已载入')
     })
+
+    it('clears stale field errors left over from a failed validation', async () => {
+      deps.errors.value = { codesText: '请输入至少一个证券代码' }
+      await api.applyStoredResearch({ universe: 'sh', date_mode: 'full' })
+      expect(deps.errors.value).toEqual({})
+    })
   })
 })
 

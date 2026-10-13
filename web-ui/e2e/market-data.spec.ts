@@ -79,7 +79,8 @@ test('user can see and cancel an active market-data job', async ({ page }) => {
       range_label: '正在读取完整日线…',
     }, result: null,
   }
-  let activeReads = 0
+  let cancelRequested = false
+  let cancelReads = 0
   let cancelRequest: unknown
   await page.route('**/api/v1/market-data/store', (route) => route.fulfill({ json: { data: {
     database_path: '/data/market/market.duckdb', schema_version: 12, instrument_count: 1,
@@ -90,12 +91,15 @@ test('user can see and cancel an active market-data job', async ({ page }) => {
   await page.route('**/api/v1/market-data/local/SH/600000/bars*', (route) => route.fulfill({ json: chart('daily') }))
   // 任务在用户点取消前必须一直"活着"：页面每秒轮询活动任务，若中途返回空列表，
   // 页面会把任务判定为已结束并移除进度条，取消按钮随之消失（历史 flaky 根因）。
+  // 取消之后先让「已请求取消」这句提示站稳两次轮询，再把任务从活动列表里摘掉——
+  // 终态文案要页面对上「列表里没了 + 详情已是 cancelled」两步才会出现。
   await page.route('**/api/v1/market-data/jobs/active*', (route) => {
-    activeReads += 1
-    return route.fulfill({ json: { data: [activeJob] } })
+    const listed = !cancelRequested || (cancelReads += 1) < 2
+    return route.fulfill({ json: { data: listed ? [activeJob] : [] } })
   })
   await page.route('**/api/v1/market-data/jobs/active-1/cancel', async (route) => {
     cancelRequest = route.request().method()
+    cancelRequested = true
     await route.fulfill({ json: { data: { job_id: 'active-1', status: 'cancelling', cancel_requested: true } } })
   })
   await page.route('**/api/v1/market-data/jobs/active-1', (route) => route.fulfill({ json: { data: {
@@ -107,5 +111,7 @@ test('user can see and cancel an active market-data job', async ({ page }) => {
   await expect(page.getByTestId('market-data-progress')).toContainText('SZ 000001 · 平安银行')
   await page.getByTestId('market-sync-cancel').click()
   await expect(page.getByTestId('market-data-message')).toContainText('已请求取消')
+  // 任务消失后页面会去读详情并给出终态；只验「已请求取消」等于没验取消真的收尾了。
+  await expect(page.getByTestId('market-data-message')).toContainText('已取消，已经写入的数据已保留')
   expect(cancelRequest).toBe('POST')
 })

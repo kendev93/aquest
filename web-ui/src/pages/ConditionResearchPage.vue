@@ -3,17 +3,12 @@ import PageGuide from '../components/PageGuide.vue'
 import { computed, nextTick, onActivated, onMounted, reactive, ref } from 'vue'
 
 import {
-  cancelConditionResearch,
-  createConditionResearch,
   deleteConditionResearchHistory,
   fetchConditionResearchHistory,
-  getConditionResearch,
   getConditionResearchHistory,
-  getConditionResearchResults,
 } from '../api/conditionResearch'
 import { fetchMetadata, parseFormula } from '../api/formulaScreen'
 import { ApiError } from '../api/client'
-import { fetchActiveJobs } from '../api/jobs'
 import DateRangeSelector from '../components/DateRangeSelector.vue'
 import RuleGroupEditor from '../components/RuleGroupEditor.vue'
 import TermHint from '../components/TermHint.vue'
@@ -27,10 +22,8 @@ import ConditionStockDetail from '../components/ConditionStockDetail.vue'
 import type {
   BacktestExecution,
   ConditionResearchCandidate,
-  ConditionResearchJobState,
   ConditionResearchPayload,
   ConditionResearchRanking,
-  ConditionResearchReport,
   CustomFormulaMetadata,
   DateRangeMode,
   DateRangeSelection,
@@ -39,7 +32,6 @@ import type {
   InstrumentType,
   RankOrder,
   RuleGroupPayload,
-  ScreenCondition,
   ValueDefinition,
 } from '../types'
 import { useCandidateSelection } from '../composables/useCandidateSelection'
