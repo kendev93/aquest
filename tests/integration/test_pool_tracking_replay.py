@@ -784,6 +784,14 @@ def test_tracking_group_accounts_each_version_when_one_writer_call_fails(tmp_pat
     assert result["completed_symbols"] == 1
     assert result["failed_symbols"] == 1
     assert result["skipped_symbols"] == 0
+    results = result["results_by_objective"]
+    successful_objective = versions[0]["objective"]
+    failed_objective = versions[1]["objective"]
+    assert results[successful_objective]["holding_snapshot_complete"] is True
+    assert results[successful_objective]["model_portfolio"]["failed_symbols"] == 0
+    assert results[successful_objective]["model_portfolio"]["holdings"]
+    assert results[failed_objective]["holding_snapshot_complete"] is False
+    assert results[failed_objective]["model_portfolio"]["failed_symbols"] == 1
     assert progress_events[-1][0:2] == (2, 2)
     assert budget.available_workers == 1
     assert "无法记录策略追踪失败状态" in caplog.text
@@ -824,6 +832,57 @@ def test_tracking_empty_selection_does_not_lease_worker(tmp_path):
     assert progress_events[-1][0:2] == (0, 0)
 
 
+def test_shadowed_automatic_failure_keeps_manual_holdings_complete(tmp_path):
+    from aquest.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
+    from aquest.strategy_pool.tracking_runner import PoolTrackingRunner
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", bars(3))
+    pool = DuckDbStrategyPoolStore(store)
+    automatic = candidate()
+    manual = candidate()
+    manual["candidate_id"] = "manual"
+    pool.upsert_automatic(
+        market="SH",
+        code="600000",
+        name="test",
+        annual_candidate=automatic,
+        sharpe_candidate=None,
+        data_fingerprint="a",
+        config_fingerprint="b",
+        source_job_id="job",
+    )
+    pool.set_manual_override("SH", "600000", "annual_return", manual)
+    tracks = PoolTrackingStore(store)
+    versions = tracks.current_versions()
+    automatic_version = next(v for v in versions if v["source"] == "automatic")
+    manual_version = next(v for v in versions if v["source"] == "manual")
+
+    def write(item):
+        if item.get("error"):
+            return None
+        if item["version_id"] == automatic_version["version_id"]:
+            raise RuntimeError("shadowed automatic snapshot write failed")
+        return {
+            "saved": tracks.save_snapshot(item["version_id"], item["signature"], item["snapshot"])
+        }
+
+    result = PoolTrackingRunner(store, EvaluationWorkerBudget(1)).run(
+        {"objective": "annual_return"},
+        progress=lambda *args: None,
+        abort_check=lambda: False,
+        writer=write,
+    )
+    annual = result["results_by_objective"]["annual_return"]
+
+    assert result["failed_symbols"] == 1
+    assert annual["holding_snapshot_complete"] is True
+    assert annual["model_portfolio"]["failed_symbols"] == 0
+    assert len(annual["model_portfolio"]["holdings"]) == 1
+    assert annual["states"][0]["candidate_id"] == manual_version["candidate"]["candidate_id"]
+    assert annual["model_portfolio"]["holdings"][0]["code"] == "600000"
+
+
 def test_tracking_runner_marks_failed_selected_version_incomplete(tmp_path):
     from aquest.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
     from aquest.strategy_pool.tracking_runner import PoolTrackingRunner
@@ -862,6 +921,7 @@ def test_tracking_runner_marks_failed_selected_version_incomplete(tmp_path):
     assert result["completed_symbols"] == 0
     assert result["failed_symbols"] == 1
     assert result["results_by_objective"]["annual_return"]["holding_snapshot_complete"] is False
+    assert result["results_by_objective"]["annual_return"]["model_portfolio"]["failed_symbols"] == 1
     assert len(written_errors) == 1
     assert written_errors[0]["version_id"] == selected["version_id"]
 

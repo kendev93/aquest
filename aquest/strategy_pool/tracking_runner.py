@@ -157,6 +157,7 @@ class PoolTrackingRunner:
                     holding_scope="per_stock_strategy",
                     holdings=[],
                     risk_exit_signals=[],
+                    failed_symbols=0,
                 ),
             )
             for goal in OBJECTIVES
@@ -173,6 +174,11 @@ class PoolTrackingRunner:
                 if v["source"] == "manual"
             }
         )
+
+        def is_applied(v: Mapping[str, Any]) -> bool:
+            current = applied.get((v["market"], v["code"], v["objective"]), {})
+            return bool(current.get("version_id") == v["version_id"])
+
         groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
         selected_ids = payload.get("version_ids")
         selected_versions = [
@@ -231,10 +237,7 @@ class PoolTrackingRunner:
             if isinstance(ack, Mapping) and ack.get("saved") is False:
                 skipped += 1
                 return
-            if (
-                applied.get((v["market"], v["code"], v["objective"]), {}).get("version_id")
-                != v["version_id"]
-            ):
+            if not is_applied(v):
                 return
             project(v, summary)
 
@@ -423,7 +426,10 @@ class PoolTrackingRunner:
                                     "无法记录策略追踪失败状态 version_id=%s",
                                     v["version_id"],
                                 )
-                            results[v["objective"]]["holding_snapshot_complete"] = False
+                            if is_applied(v):
+                                result = results[v["objective"]]
+                                result["holding_snapshot_complete"] = False
+                                result["model_portfolio"]["failed_symbols"] += 1
                     else:
                         for v in group:
                             skipped_before = skipped
@@ -446,7 +452,10 @@ class PoolTrackingRunner:
                                         "无法记录策略追踪失败状态 version_id=%s",
                                         v["version_id"],
                                     )
-                                results[v["objective"]]["holding_snapshot_complete"] = False
+                                if is_applied(v):
+                                    result = results[v["objective"]]
+                                    result["holding_snapshot_complete"] = False
+                                    result["model_portfolio"]["failed_symbols"] += 1
                             else:
                                 if skipped == skipped_before:
                                     completed += 1
