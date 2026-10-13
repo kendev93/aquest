@@ -123,6 +123,8 @@ docker compose -f docker-compose.yml up -d
 
 ## 相关环境变量
 
+首次配置：`cp .env.example .env` 后按需修改；Compose 会自动读取同目录的 `.env`，下表变量直接改值即可，`docker compose up -d` 重建后生效。
+
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `AQUEST_IMAGE` | 必填 | 后端与 worker 的镜像标签 |

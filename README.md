@@ -102,7 +102,7 @@ sh scripts/start.sh
 
 启动后在浏览器打开 <http://127.0.0.1:5173/aquest>。第一次使用，跟着 [docs/tutorial.md](docs/tutorial.md) 从同步行情走到第一个策略上线。
 
-配置项见 [`.env.example`](.env.example)；部署细节、数据目录、备份恢复、行情数据源与通达信导入见 [docs/standalone-deployment.md](docs/standalone-deployment.md)。
+首次配置：`cp .env.example .env` 后按需修改（端口、并发数等都在里面）；部署细节、数据目录、备份恢复、行情数据源与通达信导入见 [docs/standalone-deployment.md](docs/standalone-deployment.md)。
 
 ## 文档
 
