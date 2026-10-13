@@ -100,7 +100,7 @@ sh scripts/start.sh
 
 `AQUEST_IMAGE` 是本地构建的镜像名，起个自己认得的名字即可，不是去拉取别人的镜像；脚本默认带 `--build`，改完代码直接跑就会重建镜像。
 
-启动后在浏览器打开 <http://127.0.0.1:5173/aquest>。
+启动后在浏览器打开 <http://127.0.0.1:5173/aquest>。第一次使用，跟着 [docs/tutorial.md](docs/tutorial.md) 从同步行情走到第一个策略上线。
 
 配置项见 [`.env.example`](.env.example)；部署细节、数据目录、备份恢复、行情数据源与通达信导入见 [docs/standalone-deployment.md](docs/standalone-deployment.md)。
 
@@ -108,6 +108,7 @@ sh scripts/start.sh
 
 | 文档 | 内容 |
 |---|---|
+| [docs/tutorial.md](docs/tutorial.md) | 新手教程：从同步行情到第一个策略上线的完整路径 |
 | [docs/user-manual.md](docs/user-manual.md) | 16 个页面的用法、口径与边界（自动生成） |
 | [docs/standalone-deployment.md](docs/standalone-deployment.md) | 部署、数据目录、备份恢复、行情源、通达信导入、数据清理 |
 | [docs/architecture.md](docs/architecture.md) | 系统架构、API 清单，以及跨股票可比的指标输出表 |
