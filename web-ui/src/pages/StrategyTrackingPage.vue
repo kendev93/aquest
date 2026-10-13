@@ -28,6 +28,7 @@ import type {
 } from '../types'
 import { buildIndicatorNameMap, indicatorDisplayName } from '../utils/indicatorNames'
 import AppTopbar from '../components/AppTopbar.vue'
+import { formatNumber, formatPercent } from '../utils/format'
 
 type PerformanceKey = keyof SavedStrategyPerformance
 
@@ -323,16 +324,6 @@ function formatDate(value: number | null): string {
   if (value === null) return '—'
   const text = String(value)
   return `${text.slice(0, 4)}-${text.slice(4, 6)}-${text.slice(6, 8)}`
-}
-
-function formatPercent(value: number | null | undefined, digits = 2): string {
-  if (value === null || value === undefined || !Number.isFinite(value)) return '—'
-  return `${(value * 100).toFixed(digits)}%`
-}
-
-function formatNumber(value: number | null | undefined, digits = 2): string {
-  if (value === null || value === undefined || !Number.isFinite(value)) return '—'
-  return value.toFixed(digits)
 }
 
 function formatMoney(value: number | null | undefined): string {

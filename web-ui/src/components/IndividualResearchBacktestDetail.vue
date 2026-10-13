@@ -1,24 +1,9 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { IndividualResearchFullBacktest } from '../types'
+import { formatNumber, formatPercent, formatSignedPercent } from '../utils/format'
 
 const props = defineProps<{ backtest: IndividualResearchFullBacktest | null; launchDate?: string; baselineDate?: string; returnCurve?: boolean; hideMetrics?: boolean }>()
-
-function formatPercent(value: number | null | undefined): string {
-  return typeof value === 'number' && Number.isFinite(value)
-    ? `${(value * 100).toFixed(2)}%`
-    : '—'
-}
-
-function formatSignedPercent(value: number | null | undefined): string {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
-  const sign = value > 0 ? '+' : ''
-  return `${sign}${(value * 100).toFixed(2)}%`
-}
-
-function formatNumber(value: number | null | undefined, digits = 2): string {
-  return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '—'
-}
 
 function tradeValue(trade: Record<string, unknown>, key: string): string {
   const value = trade[key]

@@ -44,6 +44,7 @@ import type {
   ValueDefinition,
 } from '../types'
 import AppTopbar from '../components/AppTopbar.vue'
+import { formatNumber, formatPercent } from '../utils/format'
 
 const APPLY_STORAGE_KEY = 'aquest.strategy-discovery.apply'
 const APPLY_METADATA_KEY = 'aquest.strategy-discovery.apply-meta'
@@ -544,14 +545,6 @@ function selectReplayCandidate(candidateHash: string): void {
 function metric(candidate: StrategyDiscoveryCandidate, split: string, key: string): number | null {
   const value = candidate.metrics[split]?.[key]
   return typeof value === 'number' && Number.isFinite(value) ? value : null
-}
-
-function formatPercent(value: number | null): string {
-  return value === null ? '—' : `${(value * 100).toFixed(2)}%`
-}
-
-function formatNumber(value: number | null): string {
-  return value === null ? '—' : value.toFixed(2)
 }
 
 function metadataNumber(state: StrategyDiscoveryJobState | null, key: string): number | null {

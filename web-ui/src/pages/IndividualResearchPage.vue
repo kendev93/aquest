@@ -37,6 +37,7 @@ import type { SignalDefinition } from '../types'
 import { formatTradingRule, formatRiskControls } from '../utils/strategyRules'
 import { buildIndicatorNameMap, indicatorDisplayName } from '../utils/indicatorNames'
 import AppTopbar from '../components/AppTopbar.vue'
+import { formatDuration, formatNumber, formatPercent, formatSignedPercent } from '../utils/format'
 
 const BOARD_OPTIONS: { key: InstrumentBoard; label: string }[] = [
   { key: 'main', label: '主板' },
@@ -383,37 +384,9 @@ function validationMetrics(candidate: IndividualResearchCandidate): IndividualRe
   return candidate.metrics.validation ?? null
 }
 
-function formatPercent(value: number | null | undefined): string {
-  return typeof value === 'number' && Number.isFinite(value) ? `${(value * 100).toFixed(2)}%` : '—'
-}
-
-function formatNumber(value: number | null | undefined, digits = 2): string {
-  return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '—'
-}
-
 function historyMetric(item: IndividualResearchHistorySummary, key: string): number | null {
   const value = item.summary[key]
   return typeof value === 'number' && Number.isFinite(value) ? value : null
-}
-
-function formatDuration(seconds: number): string {
-  if (!Number.isFinite(seconds) || seconds < 0) return '—'
-  if (seconds < 60) return `${seconds.toFixed(1)} 秒`
-  const totalSeconds = Math.round(seconds)
-  const minutes = Math.floor(totalSeconds / 60)
-  const remainingSeconds = totalSeconds % 60
-  if (minutes < 60) {
-    return remainingSeconds ? `${minutes} 分 ${remainingSeconds} 秒` : `${minutes} 分钟`
-  }
-  const hours = Math.floor(minutes / 60)
-  const remainingMinutes = minutes % 60
-  return remainingMinutes ? `${hours} 小时 ${remainingMinutes} 分钟` : `${hours} 小时`
-}
-
-function formatSignedPercent(value: number | null | undefined): string {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
-  const sign = value > 0 ? '+' : ''
-  return `${sign}${(value * 100).toFixed(2)}%`
 }
 
 function indicatorName(id: string): string {

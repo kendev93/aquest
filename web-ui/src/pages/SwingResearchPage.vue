@@ -29,6 +29,7 @@ import { savePortfolioBacktestHandoff } from '../utils/portfolioBacktestHandoff'
 import { formatChinaTimestamp } from '../utils/time'
 import { ApiError } from '../api/client'
 import AppTopbar from '../components/AppTopbar.vue'
+import { formatNumber } from '../utils/format'
 
 /** 第一步表单的存档形状。存的是表单本身而不是请求体，回填时才能直接赋值。 */
 interface OverviewFormSnapshot {
@@ -398,10 +399,8 @@ function toggleLabel(label: SwingLabel): void {
     : [...study.labels, label]
 }
 
-function formatNumber(value: number | null | undefined, digits = 2): string {
-  return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '—'
-}
-
+// 这里的百分比输入已经是百分数（12.3 → "12.3%"），不乘 100，
+// 和 utils/format 的 formatPercent（小数比例 → 百分比）口径不同，所以保留本地。
 function formatPercent(value: number | null | undefined, digits = 1): string {
   return typeof value === 'number' && Number.isFinite(value)
     ? `${value.toFixed(digits)}%`

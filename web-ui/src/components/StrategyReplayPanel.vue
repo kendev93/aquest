@@ -6,6 +6,7 @@ import type {
   StrategyReplayCandidate,
   StrategyReplayResult,
 } from '../types'
+import { formatNumber, formatPercent } from '../utils/format'
 
 type ReplayPeriod = 'overall' | 'ytd' | 'one_year' | 'two_year' | 'annual'
 
@@ -40,14 +41,6 @@ function metricValue(metrics: unknown, key: string): number | null {
   if (typeof metrics !== 'object' || metrics === null) return null
   const value = (metrics as Record<string, unknown>)[key]
   return typeof value === 'number' && Number.isFinite(value) ? value : null
-}
-
-function formatPercent(value: number | null): string {
-  return value === null ? '—' : `${(value * 100).toFixed(2)}%`
-}
-
-function formatNumber(value: number | null, digits = 2): string {
-  return value === null ? '—' : value.toFixed(digits)
 }
 
 // 换手是「成交名义额 / 初始资金」的倍数，不是百分比，和组合回测页保持同一口径。

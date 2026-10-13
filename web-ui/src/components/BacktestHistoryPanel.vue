@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import type { BacktestHistorySummary } from '../types'
 import { formatChinaTimestamp } from '../utils/time'
+import { formatDuration, formatNumber, formatPercent } from '../utils/format'
 
 interface Props {
   items: BacktestHistorySummary[]
@@ -23,18 +24,6 @@ const emit = defineEmits<{
 
 function formatTimestamp(value: string): string {
   return formatChinaTimestamp(value)
-}
-
-function formatDuration(value: number): string {
-  if (!Number.isFinite(value) || value < 0) return '—'
-  if (value < 60) return `${value.toFixed(1)} 秒`
-  const totalSeconds = Math.round(value)
-  const minutes = Math.floor(totalSeconds / 60)
-  const seconds = totalSeconds % 60
-  if (minutes < 60) return seconds ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分钟`
-  const hours = Math.floor(minutes / 60)
-  const remainingMinutes = minutes % 60
-  return remainingMinutes ? `${hours} 小时 ${remainingMinutes} 分钟` : `${hours} 小时`
 }
 
 function summaryLabel(item: BacktestHistorySummary): string {
@@ -83,16 +72,6 @@ function metricValue(item: BacktestHistorySummary, key: string): number | null {
   if (!performance) return null
   const value = performance[key]
   return typeof value === 'number' && Number.isFinite(value) ? value : null
-}
-
-function formatPercent(value: number | null): string {
-  if (value === null) return '—'
-  return `${(value * 100).toFixed(2)}%`
-}
-
-function formatNumber(value: number | null, digits = 2): string {
-  if (value === null) return '—'
-  return value.toFixed(digits)
 }
 
 const showPerformanceColumn = computed(() => props.items.some((item) => performanceOf(item) !== null))

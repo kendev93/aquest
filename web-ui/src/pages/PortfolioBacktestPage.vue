@@ -74,6 +74,7 @@ import {
 } from '../utils/formulaScreen'
 import { formatChinaTimestamp } from '../utils/time'
 import AppTopbar from '../components/AppTopbar.vue'
+import { formatDuration, formatMoney, formatNumber, formatPercent } from '../utils/format'
 
 const DISCOVERY_APPLY_KEY = 'aquest.strategy-discovery.apply'
 const DISCOVERY_APPLY_META_KEY = 'aquest.strategy-discovery.apply-meta'
@@ -1290,18 +1291,6 @@ async function loadRiskOptimizationHistoryDetail(jobId: string): Promise<void> {
   }
 }
 
-function formatRiskOptimizationDuration(value: number | null): string {
-  if (value === null || !Number.isFinite(value) || value < 0) return '—'
-  if (value < 60) return `${value.toFixed(1)} 秒`
-  const totalSeconds = Math.round(value)
-  const minutes = Math.floor(totalSeconds / 60)
-  const seconds = totalSeconds % 60
-  if (minutes < 60) return seconds ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分钟`
-  const hours = Math.floor(minutes / 60)
-  const remainingMinutes = minutes % 60
-  return remainingMinutes ? `${hours} 小时 ${remainingMinutes} 分钟` : `${hours} 小时`
-}
-
 async function cancelRiskOptimization(): Promise<void> {
   const active = riskOptimizationJob.value
   if (!active || active.cancel_requested) return
@@ -1581,18 +1570,6 @@ function strategyRange(strategy: SavedStrategySummary): string {
   const start = strategy.summary.start_date
   const end = strategy.summary.end_date
   return start && end ? `${start} ~ ${end}` : '区间未记录'
-}
-
-function formatPercent(value: number | null | undefined): string {
-  return value === null || value === undefined ? '—' : `${(value * 100).toFixed(2)}%`
-}
-
-function formatNumber(value: number | null | undefined, digits = 2): string {
-  return value === null || value === undefined ? '—' : value.toFixed(digits)
-}
-
-function formatMoney(value: number | null | undefined): string {
-  return value === null || value === undefined ? '—' : `¥${value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
 function valueName(id: string): string {
@@ -2019,7 +1996,7 @@ watch(() => form.formulaText, (value) => {
                 <td>{{ item.evaluated_trials ?? '—' }} / {{ item.requested_trials ?? '—' }}</td>
                 <td>{{ item.candidate_count }}</td>
                 <td>夏普 {{ formatNumber(item.validation_best_sharpe) }}<small class="muted-code"> · 年化 {{ formatPercent(item.validation_best_annual_return) }}</small></td>
-                <td>{{ formatRiskOptimizationDuration(item.duration_seconds) }}</td>
+                <td>{{ formatDuration(item.duration_seconds) }}</td>
                 <td><div class="risk-optimization-history-actions"><button class="table-link" type="button" :data-testid="`portfolio-risk-history-detail-${item.job_id}`" :disabled="riskOptimizationHistoryDetailLoadingId !== null" @click="toggleRiskOptimizationHistoryDetail(item.job_id)">{{ riskOptimizationHistoryDetailLoadingId === item.job_id ? '读取详情…' : riskOptimizationHistoryDetailId === item.job_id ? '收起详情' : '详情' }}</button><button class="table-link" type="button" :data-testid="`portfolio-risk-history-load-${item.job_id}`" :disabled="riskOptimizationHistoryLoadingId !== null" @click="loadRiskOptimizationHistoryDetail(item.job_id)">{{ riskOptimizationHistoryLoadingId === item.job_id ? '载入中…' : '载入候选' }}</button></div></td>
               </tr>
             </tbody>

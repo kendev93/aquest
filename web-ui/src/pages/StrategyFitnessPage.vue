@@ -37,6 +37,7 @@ import type {
 } from '../types'
 import { numericRuleForSignal, parseStoredRuleGroup, valueOptionLabel } from '../utils/formulaScreen'
 import AppTopbar from '../components/AppTopbar.vue'
+import { formatNumber, formatPercent } from '../utils/format'
 
 const INSTRUMENT_TYPE_OPTIONS: { key: InstrumentType; label: string }[] = [
   { key: 'stock', label: '股票' },
@@ -513,14 +514,6 @@ async function removeHistory(historyId: string): Promise<void> {
   } catch (error) {
     message.value = apiMessage(error)
   }
-}
-
-function formatPercent(value: number | null | undefined): string {
-  return value === null || value === undefined ? '—' : `${(value * 100).toFixed(2)}%`
-}
-
-function formatNumber(value: number | null | undefined, digits = 2): string {
-  return value === null || value === undefined ? '—' : value.toFixed(digits)
 }
 
 function labelText(label: FitnessLabel): string {

@@ -33,6 +33,7 @@ import type {
   StrategyPoolSignal,
 } from '../types'
 import AppTopbar from '../components/AppTopbar.vue'
+import { formatNumber, formatPercent, formatSignedPercent } from '../utils/format'
 
 const OBJECTIVE_STORAGE_KEY = 'aquest.strategy-pool.objective'
 const SIGNAL_PAGE_SIZE = 10
@@ -923,20 +924,6 @@ function statusLabel(value: string): string {
 
 function objectiveLabel(value: StrategyPoolObjective | null): string {
   return value === 'sharpe' ? '夏普' : '年化收益'
-}
-
-function formatPercent(value: unknown): string {
-  return typeof value === 'number' && Number.isFinite(value) ? `${(value * 100).toFixed(2)}%` : '—'
-}
-
-function formatSignedPercent(value: unknown): string {
-  return typeof value === 'number' && Number.isFinite(value)
-    ? `${value >= 0 ? '+' : ''}${(value * 100).toFixed(2)}%`
-    : '—'
-}
-
-function formatNumber(value: unknown, digits = 2): string {
-  return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '—'
 }
 
 function formatHoldingDays(value: unknown): string {

@@ -28,6 +28,13 @@ import type {
 } from '../types'
 import { formatChinaTimestamp } from '../utils/time'
 import AppTopbar from '../components/AppTopbar.vue'
+import { formatCount, formatNumber } from '../utils/format'
+
+// 因子类指标（IC/IR/收益差）惯例 3 位小数；共享 formatNumber 的默认是 2 位。
+function formatNumber3(value: unknown): string {
+  return formatNumber(value, 3)
+}
+
 
 const JOB_DESCRIPTION = '因子归因'
 
@@ -243,14 +250,6 @@ async function removeHistory(historyId: string): Promise<void> {
   }
 }
 
-function formatNumber(value: number | null | undefined, digits = 3): string {
-  return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '—'
-}
-
-function formatCount(value: number | null | undefined): string {
-  return typeof value === 'number' && Number.isFinite(value) ? String(Math.round(value)) : '—'
-}
-
 function verdictText(factor: AttributionFactor): string {
   if (factor.significant === true) return '通过校正'
   if (factor.significant === false) return '不显著'
@@ -268,7 +267,7 @@ function handoffAttributionFactor(factor: AttributionFactor): void {
   const difference = factor.difference
   if (!canApplyAttributionFactor(factor) || typeof difference !== 'number') return
   const order = difference > 0 ? 'desc' : 'asc'
-  const evidence = `胜组均值减败组均值为 ${formatNumber(difference)}，${verdictText(factor)}；方向仅表示本次样本中的关联`
+  const evidence = `胜组均值减败组均值为 ${formatNumber3(difference)}，${verdictText(factor)}；方向仅表示本次样本中的关联`
   if (!savePortfolioBacktestHandoff({
     kind: 'ranking',
     source: 'factor-attribution',
@@ -462,14 +461,14 @@ onMounted(async () => {
                       {{ factor.display_name }}
                       <span v-if="factor.significant" class="attribution-badge" data-testid="attribution-significant-badge">通过</span>
                     </td>
-                    <td>{{ formatNumber(factor.win_mean) }}</td>
-                    <td>{{ formatNumber(factor.loss_mean) }}</td>
-                    <td>{{ formatNumber(factor.difference) }}</td>
+                    <td>{{ formatNumber3(factor.win_mean) }}</td>
+                    <td>{{ formatNumber3(factor.loss_mean) }}</td>
+                    <td>{{ formatNumber3(factor.difference) }}</td>
                     <td>{{ formatNumber(factor.standardized, 2) }}</td>
                     <td class="attribution-nowrap">{{ factor.win_count }} / {{ factor.loss_count }}</td>
                     <td>{{ factor.missing }}</td>
-                    <td>{{ formatNumber(factor.p_value) }}</td>
-                    <td>{{ formatNumber(factor.adjusted_p_value) }}</td>
+                    <td>{{ formatNumber3(factor.p_value) }}</td>
+                    <td>{{ formatNumber3(factor.adjusted_p_value) }}</td>
                     <td class="attribution-note">{{ verdictText(factor) }}</td>
                     <td>
                       <button

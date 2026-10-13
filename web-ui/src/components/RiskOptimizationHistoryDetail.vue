@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 
 import type { StrategyDiscoveryCandidate, StrategyDiscoveryResult } from '../types'
+import { formatDuration, formatMoney, formatNumber, formatPercent } from '../utils/format'
 
 const props = defineProps<{ result: StrategyDiscoveryResult }>()
 const emit = defineEmits<{ close: [] }>()
@@ -31,34 +32,8 @@ function numberAt(...path: string[]): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null
 }
 
-function formatDuration(value: number | null): string {
-  if (value === null || !Number.isFinite(value) || value < 0) return '—'
-  if (value < 60) return `${value.toFixed(1)} 秒`
-  const totalSeconds = Math.round(value)
-  const minutes = Math.floor(totalSeconds / 60)
-  const seconds = totalSeconds % 60
-  if (minutes < 60) return seconds ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分钟`
-  const hours = Math.floor(minutes / 60)
-  const remainingMinutes = minutes % 60
-  return remainingMinutes ? `${hours} 小时 ${remainingMinutes} 分钟` : `${hours} 小时`
-}
-
-function formatNumber(value: number | null, digits = 2): string {
-  return value === null ? '—' : value.toFixed(digits)
-}
-
 function formatRate(value: number | null): string {
   return value === null ? '—' : `${value.toFixed(2)} 组/秒`
-}
-
-function formatPercent(value: number | null): string {
-  return value === null ? '—' : `${(value * 100).toFixed(2)}%`
-}
-
-function formatMoney(value: number | null): string {
-  return value === null
-    ? '—'
-    : `¥${value.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
 }
 
 function formatBytes(value: number | null): string {

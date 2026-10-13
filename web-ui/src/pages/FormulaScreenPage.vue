@@ -52,6 +52,7 @@ import {
 import { formatChinaTimestamp } from '../utils/time'
 import { savePortfolioBacktestHandoff } from '../utils/portfolioBacktestHandoff'
 import AppTopbar from '../components/AppTopbar.vue'
+import { formatNumber, formatSignedPercent } from '../utils/format'
 
 const INSTRUMENT_TYPE_OPTIONS: { key: InstrumentType; label: string }[] = [
   { key: 'stock', label: '股票' },
@@ -355,10 +356,6 @@ function setPrimaryIndicator(result: ScreenResult, index: number, value: string)
   const next = [...selectedIndicatorIds(result)]
   next[index] = value
   primaryIndicatorSelections[key] = next.filter((id, current, all) => id && all.indexOf(id) === current)
-}
-
-function formatIndicatorValue(value: number | null | undefined): string {
-  return value === null || value === undefined || !Number.isFinite(value) ? '—' : value.toFixed(2)
 }
 
 function formatHistoryDate(value: string): string {
@@ -1236,11 +1233,6 @@ function toneClass(value: number | null | undefined): string {
   return value > 0 ? 'tone-up' : 'tone-down'
 }
 
-function formatPercent(value: number | null | undefined): string {
-  if (value === null || value === undefined || !Number.isFinite(value)) return '—'
-  return `${value >= 0 ? '+' : ''}${(value * 100).toFixed(2)}%`
-}
-
 function formatPoints(value: number | null | undefined): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return '—'
   return `${value >= 0 ? '+' : ''}${(value * 100).toFixed(2)} 个百分点`
@@ -1645,7 +1637,7 @@ watch(() => form.formulaText, (value) => {
                             <select :value="indicatorId" :data-testid="`result-indicator-${result.market}-${result.code}-${index}`" @click.stop @change="setPrimaryIndicator(result, index, ($event.target as HTMLSelectElement).value)">
                               <option v-for="option in indicatorOptions(result)" :key="option" :value="option">{{ resultValueLabel(option) }}</option>
                             </select>
-                            <strong>{{ formatIndicatorValue(result.indicator_values[indicatorId]) }}</strong>
+                            <strong>{{ formatNumber(result.indicator_values[indicatorId]) }}</strong>
                           </div>
                         </div>
                       </div>
@@ -1727,7 +1719,7 @@ watch(() => form.formulaText, (value) => {
                   <span v-if="foldedStats(group).length" class="group-fold-stats">
                     <span v-for="stat in foldedStats(group)" :key="stat.label" class="group-fold-stat">
                       <em>{{ stat.label }}</em>
-                      <b :class="toneClass(stat.value)">{{ formatPercent(stat.value) }}</b>
+                      <b :class="toneClass(stat.value)">{{ formatSignedPercent(stat.value) }}</b>
                       <i :class="toneClass(stat.excess)">{{ formatPoints(stat.excess) }}</i>
                       <small v-if="!stat.complete">仅 {{ stat.trading_days }} 个交易日</small>
                     </span>
@@ -1778,7 +1770,7 @@ watch(() => form.formulaText, (value) => {
                       <div class="group-stat">
                         <small>本组</small>
                         <strong :class="toneClass(detail.group_curve?.performance.total_return ?? null)" data-testid="group-return">
-                          {{ formatPercent(detail.group_curve?.performance.total_return ?? null) }}
+                          {{ formatSignedPercent(detail.group_curve?.performance.total_return ?? null) }}
                         </strong>
                         <span v-if="detail.group_curve" class="group-stat-note">
                           {{ detail.group_curve.instrument_count }} 只计入
@@ -1787,7 +1779,7 @@ watch(() => form.formulaText, (value) => {
                       <div class="group-stat">
                         <small>全市场同期</small>
                         <strong :class="toneClass(detail.market_curve?.performance.total_return ?? null)" data-testid="market-return">
-                          {{ formatPercent(detail.market_curve?.performance.total_return ?? null) }}
+                          {{ formatSignedPercent(detail.market_curve?.performance.total_return ?? null) }}
                         </strong>
                         <span v-if="detail.market_curve" class="group-stat-note">
                           {{ detail.market_curve.instrument_count }} 只计入
@@ -1848,10 +1840,10 @@ watch(() => form.formulaText, (value) => {
                     <div v-if="detail.spread" class="group-spread">
                       组内分布：{{ detail.spread.counted }} 只计入，
                       涨 {{ detail.spread.advanced }} 只 / 跌 {{ detail.spread.declined }} 只，
-                      中位数 {{ formatPercent(detail.spread.median_return) }}。
+                      中位数 {{ formatSignedPercent(detail.spread.median_return) }}。
                       <template v-if="detail.spread.best">
-                        最好 {{ detail.spread.best.code }}（{{ formatPercent(detail.spread.best.return) }}），
-                        最差 {{ detail.spread.worst?.code }}（{{ formatPercent(detail.spread.worst?.return) }}）。
+                        最好 {{ detail.spread.best.code }}（{{ formatSignedPercent(detail.spread.best.return) }}），
+                        最差 {{ detail.spread.worst?.code }}（{{ formatSignedPercent(detail.spread.worst?.return) }}）。
                       </template>
                     </div>
 

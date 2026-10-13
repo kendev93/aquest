@@ -38,6 +38,7 @@ import type {
 import MarketCandlestickChart from '../components/MarketCandlestickChart.vue'
 import TermHint from '../components/TermHint.vue'
 import AppTopbar from '../components/AppTopbar.vue'
+import { formatNumber } from '../utils/format'
 
 const MA_OPTIONS = [
   { key: 'ma5', label: 'MA5' },
@@ -842,7 +843,7 @@ async function changePage(next: number): Promise<void> {
 }
 
 function formatPrice(value: number | null): string {
-  return value === null ? '—' : value.toFixed(2)
+  return formatNumber(value)
 }
 
 onMounted(async () => {

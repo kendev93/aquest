@@ -29,6 +29,13 @@ import type {
   ValueDefinition,
 } from '../types'
 import AppTopbar from '../components/AppTopbar.vue'
+import { formatNumber, formatPercent } from '../utils/format'
+
+// 因子类指标（IC/IR/收益差）惯例 3 位小数；共享 formatNumber 的默认是 2 位。
+function formatNumber3(value: unknown): string {
+  return formatNumber(value, 3)
+}
+
 
 interface FactorFormState {
   universe: 'all' | 'sh' | 'sz'
@@ -285,16 +292,6 @@ async function removeHistory(historyId: string): Promise<void> {
   }
 }
 
-function formatPercent(value: number | null | undefined, digits = 2): string {
-  return typeof value === 'number' && Number.isFinite(value)
-    ? `${(value * 100).toFixed(digits)}%`
-    : '—'
-}
-
-function formatNumber(value: number | null | undefined, digits = 3): string {
-  return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '—'
-}
-
 function orderText(order: FactorEvidence['order']): string {
   return order === 'high' ? '买最高一组' : '买最低一组'
 }
@@ -303,7 +300,7 @@ function handoffSelectedFactor(): void {
   const factor = selectedFactor.value
   if (!factor) return
   const order = factor.order === 'high' ? 'desc' : 'asc'
-  const evidence = `因子检验建议${orderText(factor.order)}；IC ${formatNumber(factor.ic_mean)}，校正后 q 值 ${formatNumber(factor.qvalue)}`
+  const evidence = `因子检验建议${orderText(factor.order)}；IC ${formatNumber3(factor.ic_mean)}，校正后 q 值 ${formatNumber3(factor.qvalue)}`
   if (!savePortfolioBacktestHandoff({
     kind: 'ranking',
     source: 'factor-test',
@@ -563,14 +560,14 @@ onMounted(async () => {
                       <span v-if="factor.significant" class="factor-badge" data-testid="factor-significant-badge">通过</span>
                     </td>
                     <td class="factor-nowrap">{{ orderText(factor.order) }}</td>
-                    <td>{{ formatNumber(factor.ic_mean) }}</td>
+                    <td>{{ formatNumber3(factor.ic_mean) }}</td>
                     <td>{{ formatNumber(factor.icir, 2) }}</td>
                     <td>{{ formatPercent(factor.ic_positive_rate, 0) }}</td>
                     <td class="factor-nowrap">{{ monotonicText(factor) }}</td>
                     <td>{{ formatPercent(factor.long_short.mean_spread, 3) }}</td>
                     <td>{{ formatPercent(factor.long_short.win_rate, 0) }}</td>
-                    <td>{{ formatNumber(factor.pvalue) }}</td>
-                    <td>{{ formatNumber(factor.qvalue) }}</td>
+                    <td>{{ formatNumber3(factor.pvalue) }}</td>
+                    <td>{{ formatNumber3(factor.qvalue) }}</td>
                     <td class="factor-note">{{ factor.note }}</td>
                   </tr>
                 </tbody>
@@ -610,7 +607,7 @@ onMounted(async () => {
               <div class="factor-layers" data-testid="factor-layers">
                 <div class="factor-layers-heading">
                   <span>分层收益（第 1 档 = 该买的一组）</span>
-                  <span>前后半段信息系数：{{ formatNumber(selectedFactor.ic_first_half) }} / {{ formatNumber(selectedFactor.ic_second_half) }}</span>
+                  <span>前后半段信息系数：{{ formatNumber3(selectedFactor.ic_first_half) }} / {{ formatNumber3(selectedFactor.ic_second_half) }}</span>
                 </div>
                 <div v-for="layer in selectedFactor.layers" :key="layer.index" class="factor-layer-row">
                   <span class="factor-layer-index">第 {{ layer.index }} 档</span>
@@ -625,7 +622,7 @@ onMounted(async () => {
                 <div><dt>价差 t 值</dt><dd>{{ formatNumber(selectedFactor.long_short.t_stat, 2) }}</dd></div>
                 <div><dt>累计价差</dt><dd>{{ formatPercent(selectedFactor.long_short.final, 2) }}</dd></div>
                 <div><dt>最大回撤</dt><dd>{{ formatPercent(selectedFactor.long_short.max_drawdown, 2) }}</dd></div>
-                <div><dt>噪声门槛<TermHint term="noiseFloor" /></dt><dd>{{ formatNumber(selectedFactor.ic_threshold) }}</dd></div>
+                <div><dt>噪声门槛<TermHint term="noiseFloor" /></dt><dd>{{ formatNumber3(selectedFactor.ic_threshold) }}</dd></div>
                 <div><dt>有效交易日</dt><dd>{{ selectedFactor.ic_days }}</dd></div>
               </dl>
               <div class="factor-handoff-actions">
