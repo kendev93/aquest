@@ -80,8 +80,8 @@ PoolEntryWriter = Callable[[Mapping[str, object]], None]
 # 直接复用，no_strategy 在 NO_STRATEGY_RECHECK_DAYS 天内复用、到期才重查一次，
 # insufficient_history/failed 每次重查（理由见 _can_reuse）；ready 条目另有三种
 # 重新寻优触发（2026-10-09 用户决策，见 _research_recheck_due）：自动候选
-# 「样本不足 / 跑输基准」超 30 天、上线后衰减（满 60 个交易日且上线后跑输
-# 同窗口基准 10%+）、保质期 180 天强制重算；
+# 「样本不足 / 跑输基准」超 21 天、上线后衰减（满 60 个交易日且上线后跑输
+# 同窗口基准 10%+）、保质期 120 天强制重算；
 # 研究窗口起点从 2015-01-05 裁到 RESEARCH_START（2016-01-01），2015 全年只作
 # 指标预热。门槛与研究窗口都会改变存量条目的有效性，v5 语义下的条目在
 # 下一次全市场重选时逐股重研究。复用节奏不影响研究结论本身，不参与指纹。
@@ -91,8 +91,10 @@ MARKET_POOL_ALGORITHM_VERSION = "market-pool-v6"
 #: 策略」这个结论依赖当时的历史长度——数据攒够可能翻身；但一天新数据对样本量
 #: 的影响微乎其微，每天重查是纯浪费（2026-10-08 实测：一夜 57 只里 30 只
 #: no_strategy，用户每次点增量都看到它们从头再跑，全市场推算约 2700 只/天）。
-#: 30 天 ≈ 20 个交易日：到期重查一次，仍不足则刷新时间戳再等一个周期。
-NO_STRATEGY_RECHECK_DAYS = 30
+#: 14 天 ≈ 10 个交易日：寻优提速后（自适应剪枝）重查一只的成本低了不少，
+#: 节奏相应收短，让「数据攒够翻身」的标的更快回场（2026-10-13 用户决策）。
+#: 到期重查一次，仍不足则刷新时间戳再等一个周期。
+NO_STRATEGY_RECHECK_DAYS = 14
 
 #: 研究准入的最低上市历史（自然日，按「首根已入库日线 → 研究终点」的跨度计）。
 #: 不满一年的标的：年线级指标整段是 NaN，训练/验证/留出三段加起来覆盖不了
@@ -191,6 +193,7 @@ class _PoolProgressCoordinator:
         total_work: int,
         callback: PoolProgressCallback | None,
         maximum_workers: int,
+        reused_symbols: int = 0,
     ) -> None:
         self._total_symbols = total_symbols
         self._total_work = total_work
@@ -203,9 +206,11 @@ class _PoolProgressCoordinator:
         self._visible_cpus = maximum_workers
         self._target_workers = 1
         self._estimated_worker_bytes = 0
-        self._completed = 0
+        # 预扫描剔除的纯复用标的直接计入完成与跳过：前端「已完成」按
+        # completed - skipped 计算，两个计数同起点才不会出现负数。
+        self._completed = reused_symbols
         self._finished = 0
-        self._skipped = 0
+        self._skipped = reused_symbols
         self._failed = 0
         self._fractions: dict[int, float] = {}
         self._active_symbols: dict[int, dict[str, object]] = {}
@@ -546,6 +551,9 @@ class MarketStrategyPoolService:
         refs: list[StockRef],
         prior_entries: Mapping[tuple[str, str], tuple[str, str, str, bool, datetime | None]],
         config_fingerprint: str,
+        post_launch_summaries: (
+            Mapping[tuple[str, str, str], Mapping[str, object]] | None
+        ) = None,
     ) -> tuple[list[StockRef], int]:
         """把本次增量无需触碰的标的预先剔除，让任务总数只反映真实工作量。
 
@@ -557,11 +565,17 @@ class MarketStrategyPoolService:
         有欠账的条目不能纯跳过——缺全区间指标或基准缺失/口径过期的，补算本身
         就是真实工作量，留在队列里由提交循环的复用分支处理（``skipped`` 计数
         会在补算完成后才 +1，这是刻意的：补算期间任务确实没闲着）。
+
+        重新寻优判定也在这里过一遍（``_research_recheck_due``）：弱策略到期、
+        上线后衰减、保质期到期的 ready 条目必须留在队列里，否则预扫描会把它们
+        当成纯复用剔掉，提交循环里的重查分支永远轮不到——判定两处口径必须一致，
+        都走同一个函数（2026-10-13 修复）。
         """
 
         pending: list[StockRef] = []
         reused = 0
         now = datetime.now(timezone.utc).replace(tzinfo=None)
+        post_launch = post_launch_summaries or {}
         for ref in refs:
             prior = prior_entries.get((ref.market, ref.code))
             if not self._can_reuse(prior, config_fingerprint, now=now):
@@ -574,6 +588,14 @@ class MarketStrategyPoolService:
                     else None
                 )
                 if not prior[3] or (entry is not None and self._needs_full_period_backfill(entry)):
+                    pending.append(ref)
+                    continue
+                # 与提交循环同款判定：命中重查的条目留在队列里重新寻优。
+                stock_post_launch = {
+                    objective: post_launch.get((ref.market, ref.code, objective), {})
+                    for objective in ("annual_return", "sharpe")
+                }
+                if self._research_recheck_due(entry, prior, stock_post_launch, now=now):
                     pending.append(ref)
                     continue
             reused += 1
@@ -592,6 +614,7 @@ class MarketStrategyPoolService:
         post_launch_summaries: (Mapping[tuple[str, str, str], Mapping[str, object]] | None) = None,
         job_id: str,
         total_work: int,
+        reused_symbols: int = 0,
         progress_callback: PoolProgressCallback | None,
         abort_check: Callable[[], bool] | None,
         entry_writer: PoolEntryWriter | None,
@@ -601,6 +624,9 @@ class MarketStrategyPoolService:
         coordinator = _PoolProgressCoordinator(
             total_symbols=total,
             total_work=total_work,
+            # 预扫描剔除的纯复用标的直接计入跳过数：进度行把它们显示为「复用」，
+            # 真实研究工作量只看 total_symbols（预扫描后的队列长度）。
+            reused_symbols=reused_symbols,
             callback=progress_callback,
             maximum_workers=self._max_pool_workers,
         )
@@ -641,8 +667,8 @@ class MarketStrategyPoolService:
                         and self._pool_store is not None
                         else None
                     )
-                    # 重新寻优判定（2026-10-09 用户决策）：弱策略 30 天、上线后衰减
-                    # （满 60 个交易日且跑输同窗口基准 10%+）、保质期 180 天，详见
+                    # 重新寻优判定（2026-10-09 用户决策）：弱策略 21 天、上线后衰减
+                    # （满 60 个交易日且跑输同窗口基准 10%+）、保质期 120 天，详见
                     # _research_recheck_due。判定只看自动候选——手工覆盖是用户自己
                     # 的决定，重新寻优不会替换它。
                     stock_post_launch = {
@@ -666,7 +692,7 @@ class MarketStrategyPoolService:
                                 total_work,
                                 "补算全区间策略收益",
                                 symbol,
-                                skipped,
+                                reused_symbols + skipped,
                             )
                             updated = self._backfill_full_period_metrics(
                                 ref,
@@ -1107,7 +1133,12 @@ class MarketStrategyPoolService:
         total = len(refs)
         total_work = total
         if mode == "full":
-            refs, reused_count = self._filter_reusable(refs, prior_entries, config_fingerprint)
+            refs, reused_count = self._filter_reusable(
+                refs,
+                prior_entries,
+                config_fingerprint,
+                post_launch_summaries=post_launch_summaries,
+            )
             total = len(refs)
             total_work = total
             completed, skipped, failed, errors = self._run_full_research(
@@ -1121,6 +1152,7 @@ class MarketStrategyPoolService:
                 post_launch_summaries=post_launch_summaries,
                 job_id=job_id,
                 total_work=total_work,
+                reused_symbols=reused_count,
                 progress_callback=progress_callback,
                 abort_check=abort_check,
                 entry_writer=entry_writer,
@@ -1839,7 +1871,7 @@ class MarketStrategyPoolService:
           就该补研究；后者错误应当重试，不把一次故障当成结论存下来。
 
         ``ready``/``partial`` 的复用还有例外（见 :meth:`_research_recheck_due`）：
-        自动候选弱策略超 30 天、上线后衰减、保质期 180 天的条目到期重新寻优。
+        自动候选弱策略超 21 天、上线后衰减、保质期 120 天的条目到期重新寻优。
         """
 
         if not prior or prior[1] != config_fingerprint:

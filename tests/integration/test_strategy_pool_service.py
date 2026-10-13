@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from threading import Barrier
 from types import SimpleNamespace
@@ -333,6 +333,77 @@ def test_weak_ready_entry_is_researched_again_after_recheck_window() -> None:
         stale,
         now=now,
     )
+
+
+def test_full_research_prescan_keeps_recheck_due_ready_entry_in_queue(tmp_path) -> None:
+    """预扫描与提交循环的重查判定必须同口径（2026-10-13 修复）。
+
+    弱策略到期的 ready 条目若被预扫描当成纯复用剔掉，提交循环里的重查分支
+    就永远轮不到——这里端到端验证它会重新寻优，且进度总数把它计入队列。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "recheck-prescan.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars("2020-01-01", 60))
+    adapter = DuckDbMarketDataAdapter(store)
+    pool_store = DuckDbStrategyPoolStore(store)
+    pool_store.initialize()
+    individual = FakeIndividualResearchService()
+    service = MarketStrategyPoolService(
+        store=store,
+        adapter=adapter,
+        individual_service=individual,
+        pool_store=pool_store,
+        portfolio_service=FakePortfolioBacktestService(),
+    )
+
+    def persist(entry):
+        pool_store.persist_worker_entry(entry, source_job_id=str(entry["source_job_id"]))
+
+    first = service.run(
+        {"mode": "full", "risk_trials": 3_000, "horizon": 5},
+        job_id="recheck-first",
+        entry_writer=persist,
+    )
+    assert first["total_symbols"] == 1
+    assert len(individual.configs) == 1
+
+    # 把全区间指标改成「样本不足」（平仓交易 5 笔 < 20）制造弱策略，
+    # 再把 updated_at 回拨到重查窗口（21 天）之外。
+    entry = pool_store.get("SH", "600000")
+    annual = dict(entry["automatic_candidates"]["annual_return"])
+    annual_metrics = dict(annual["metrics"])
+    annual_metrics["full_period"] = {"closed_trades": 5, "total_return": 0.9}
+    annual["metrics"] = annual_metrics
+    pool_store.upsert_automatic(
+        market="SH",
+        code="600000",
+        name="浦发银行",
+        annual_candidate=annual,
+        sharpe_candidate=entry["automatic_candidates"]["sharpe"],
+        data_fingerprint=entry["data_fingerprint"],
+        market_fingerprint=entry["market_fingerprint"],
+        config_fingerprint=entry["config_fingerprint"],
+        source_job_id="recheck-weak",
+        benchmark=entry["benchmark"],
+    )
+    aged = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=30)
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE strategy_pool_entries SET updated_at = ? "
+            "WHERE market = 'SH' AND code = '600000'",
+            [aged],
+        )
+
+    second = service.run(
+        {"mode": "full", "risk_trials": 3_000, "horizon": 5},
+        job_id="recheck-second",
+        entry_writer=persist,
+    )
+
+    # 预扫描没有把它剔掉：仍计入任务总数并重新寻优，而不是纯复用。
+    assert second["total_symbols"] == 1
+    assert second["skipped_symbols"] == 0
+    assert len(individual.configs) == 2
 
 
 def test_shelf_life_and_post_launch_degradation_trigger_re_research() -> None:

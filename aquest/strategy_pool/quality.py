@@ -3,7 +3,7 @@
 2026-10-09 用户决策：三个信号列表（当天触发买入 / 当天触发卖出 / 今日持仓中）
 只展示「值得按其行动」的策略——全区间平仓交易不足或全区间跑输买入持有的
 标的直接过滤；这类策略在增量研究里按 ``WEAK_STRATEGY_RECHECK_DAYS`` 的节奏
-重新寻优（与 ``no_strategy`` 的 30 天重查同款机制，见 service._can_reuse）。
+重新寻优（与 ``no_strategy`` 的 14 天重查同款机制，见 service._can_reuse）。
 
 口径一律用全区间（2016 年至今的实际回放），与「全市场标的状态」表格的
 「策略收益 vs 全段基准」完全一致。判定函数只吃候选指标与基准值两个输入，
@@ -18,8 +18,10 @@ from collections.abc import Mapping
 #: 全区间平仓交易低于该笔数的策略，胜率 / 盈亏比统计上不可信（2026-10-09 用户选定）。
 WEAK_STRATEGY_MIN_TRADES = 20
 
-#: 弱策略的重新寻优节奏（自然日），从上次研究完成时间起算。
-WEAK_STRATEGY_RECHECK_DAYS = 30
+#: 弱策略的重新寻优节奏（自然日），从上次研究完成时间起算。21 天 ≈ 15 个
+#: 交易日：比 no_strategy 的 14 天稍长——弱策略毕竟选出了策略，给市场风格
+#: 一点换手空间，避免刚落地就被重算（2026-10-13 用户决策）。
+WEAK_STRATEGY_RECHECK_DAYS = 21
 
 #: 上线后衰减判定（2026-10-09 用户决策）：跟踪回放的「上线后收益」对照同窗口
 #: 买入持有基准；上线不满该交易日数不判定——窗口太短噪声大，一波回调就会误杀。
@@ -30,8 +32,9 @@ POST_LAUNCH_MIN_TRADING_DAYS = 60
 POST_LAUNCH_MAX_UNDERPERFORMANCE = 0.10
 
 #: 保质期兜底：ready 结论超过该自然日数无论表现如何都重新寻优——市场风格漂移
-#: 不一定表现为跑输基准（策略与基准一起阴跌时超额可能接近 0）。
-STRATEGY_SHELF_LIFE_DAYS = 180
+#: 不一定表现为跑输基准（策略与基准一起阴跌时超额可能接近 0）。180 天对全市场
+#: 日频寻优偏宽松，收到 120 天让陈旧结论更快退场（2026-10-13 用户决策）。
+STRATEGY_SHELF_LIFE_DAYS = 120
 
 REASON_INSUFFICIENT_SAMPLE = "insufficient_sample"
 REASON_UNDERPERFORMING = "underperforming"

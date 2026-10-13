@@ -169,16 +169,15 @@ const progressCountText = computed(() => {
     : activeJob.value?.total_candidates
   if (typeof total !== 'number') return ''
   const completed = typeof metadata.completed_symbols === 'number' ? metadata.completed_symbols : 0
-  const skipped = typeof metadata.skipped_symbols === 'number' ? metadata.skipped_symbols : 0
+  // 跳过数 = 预扫描纯复用 + 队列内补算完成，都是「复用旧结论没重新研究」的标的；
+  // total_symbols 是预扫描后的真实研究队列，进度行以它为主（2026-10-13 用户决策）。
+  const reused = typeof metadata.skipped_symbols === 'number' ? metadata.skipped_symbols : 0
   const failed = typeof metadata.failed_symbols === 'number' ? metadata.failed_symbols : 0
-  const processed = typeof metadata.finished_symbols === 'number'
-    ? metadata.finished_symbols
-    : completed + failed
-  const successful = Math.max(0, completed - skipped)
+  const successful = Math.max(0, completed - reused)
   const active = typeof metadata.current_parallelism === 'number'
     ? metadata.current_parallelism
     : activeTickerProgress.value.length
-  return `已处理 ${processed} / ${total} 只（完成 ${successful} · 进行中 ${active} · 跳过 ${skipped} · 失败 ${failed}）`
+  return `需重算 ${total} 只（已完成 ${successful} · 进行中 ${active} · 复用 ${reused} · 失败 ${failed}）`
 })
 const parallelismText = computed(() => {
   const metadata = activeJob.value?.metadata ?? {}

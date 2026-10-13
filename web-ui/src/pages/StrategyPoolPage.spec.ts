@@ -1022,7 +1022,7 @@ describe('StrategyPoolPage', () => {
       'CPU允许 2 个标的并发（8核，系统1分钟负载 0.8）',
     )
     expect(wrapper.get('[data-testid="pool-progress-count"]').text()).toContain(
-      '已处理 85 / 5223 只（完成 79 · 进行中 2 · 跳过 1 · 失败 5）',
+      '需重算 5223 只（已完成 79 · 进行中 2 · 复用 1 · 失败 5）',
     )
     expect(wrapper.findAll('[data-testid^="pool-active-symbol-"]')).toHaveLength(2)
     expect(
