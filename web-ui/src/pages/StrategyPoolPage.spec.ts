@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import * as api from '../api/strategyPool'
 import * as marketDataApi from '../api/marketData'
 
-import type { StrategyPoolCandidate, StrategyPoolEntry, StrategyPoolSignal } from '../types'
+import type { StrategyPoolCandidate, StrategyPoolEntry, StrategyPoolMetrics, StrategyPoolSignal } from '../types'
 import StrategyPoolPage from './StrategyPoolPage.vue'
 import { ApiError } from '../api/client'
 
@@ -110,6 +110,20 @@ const buySignal: StrategyPoolSignal = {
   holdout_trades: 4,
 }
 
+function signalFor(code: string): StrategyPoolSignal {
+  return { ...buySignal, code, name: `测试${code}`, symbol: `SH${code}`, candidate_id: `candidate-${code}` }
+}
+
+function entryWithQuality(code: string, fullPeriod: Partial<StrategyPoolMetrics>): StrategyPoolEntry {
+  const base = entry(code, 0.2)
+  const active = base.active_candidate as StrategyPoolCandidate
+  const candidate: StrategyPoolCandidate = {
+    ...active,
+    metrics: { ...active.metrics, full_period: { ...active.metrics?.full_period, ...fullPeriod } },
+  }
+  return { ...base, active_candidate: candidate, automatic_candidates: { annual_return: candidate, sharpe: candidate } }
+}
+
 describe('StrategyPoolPage', () => {
   beforeEach(() => {
     vi.resetAllMocks()
@@ -204,6 +218,60 @@ describe('StrategyPoolPage', () => {
     expect(wrapper.get('[data-testid="pool-buy-signals"]').text()).toContain('全区间胜率 55.00%')
     expect(wrapper.get('[data-testid="pool-sell-signals"]').text()).toContain('全区间盈亏比 1.60')
     expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('平均持仓 12.5 天')
+  })
+
+  it('sorts buy and sell signal rows by full-period payoff ratio and win rate', async () => {
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    // 跟踪增量路径返回的信号行不带指标，顺序是证券代码升序；排序只能靠条目表补全区间口径。
+    // SH600003 没有全区间指标，按指标排序时落到末尾。
+    vi.mocked(api.fetchStrategyPoolEntries).mockResolvedValue([
+      entryWithQuality('600000', { win_rate: 0.4, payoff_ratio: 3, total_return: 0.1 }),
+      entryWithQuality('600001', { win_rate: 0.7, payoff_ratio: 1, total_return: 0.3 }),
+      entryWithQuality('600002', { win_rate: 0.55, payoff_ratio: 2, total_return: 0.2 }),
+    ])
+    const codes = ['600003', '600000', '600001', '600002']
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValue({
+      job_id: 'signal-1',
+      status: 'completed',
+      result: {
+        mode: 'signals',
+        objective: 'annual_return',
+        holding_scope: 'per_stock_strategy',
+        holding_snapshot_complete: true,
+        as_of_date: '2026-10-01',
+        buy_signals: codes.map(signalFor),
+        sell_signals: codes.map((code) => ({ ...signalFor(code), status: 'sell', signal_type: 'sell' })),
+        states: codes.map((code) => ({ ...signalFor(code), status: 'flat' })),
+        model_portfolio: {
+          available: true,
+          holding_scope: 'per_stock_strategy',
+          holdings: [],
+          risk_exit_signals: [],
+        },
+      },
+    })
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    const rowSymbols = (testid: string) => wrapper
+      .findAll(`[data-testid="${testid}"] .signal-row`)
+      .map((row) => row.text().slice(0, 8))
+    const returned = ['SH600003', 'SH600000', 'SH600001', 'SH600002']
+    expect(rowSymbols('pool-buy-signals')).toEqual(returned)
+
+    const sort = wrapper.get('[data-testid="pool-signal-sort"]')
+    await sort.setValue('payoff_ratio')
+    expect(rowSymbols('pool-buy-signals')).toEqual(['SH600000', 'SH600002', 'SH600001', 'SH600003'])
+    expect(rowSymbols('pool-sell-signals')).toEqual(['SH600000', 'SH600002', 'SH600001', 'SH600003'])
+
+    await sort.setValue('win_rate')
+    expect(rowSymbols('pool-buy-signals')).toEqual(['SH600001', 'SH600002', 'SH600000', 'SH600003'])
+
+    await sort.setValue('total_return')
+    expect(rowSymbols('pool-buy-signals')).toEqual(['SH600001', 'SH600002', 'SH600000', 'SH600003'])
+
+    await sort.setValue('default')
+    expect(rowSymbols('pool-buy-signals')).toEqual(returned)
   })
 
   it('switches the saved objective and lets metric sorting change only the table view', async () => {

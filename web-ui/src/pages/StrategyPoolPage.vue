@@ -81,6 +81,16 @@ const searchQuery = ref('')
 const sortColumn = ref<
   'status' | 'strategy_return' | 'annual_return' | 'sharpe' | 'win_rate' | 'payoff_ratio' | 'max_drawdown' | 'avg_holding_days' | 'benchmark_return' | 'created_return'
 >('status')
+// 买卖信号列表的显示排序（2026-10-13 用户需求）：后端返回顺序对跟踪增量结果是按
+// 证券代码的，这里允许按行内展示的全区间指标重排。'default' 表示保持返回顺序。
+const SIGNAL_SORT_OPTIONS = [
+  { value: 'default', label: '默认顺序' },
+  { value: 'win_rate', label: '全区间胜率 高→低' },
+  { value: 'payoff_ratio', label: '全区间盈亏比 高→低' },
+  { value: 'total_return', label: '全区间收益 高→低' },
+] as const
+type SignalSortValue = (typeof SIGNAL_SORT_OPTIONS)[number]['value']
+const signalSort = ref<SignalSortValue>('default')
 const page = ref(1)
 const pageSize = ref(50)
 const elapsedClock = ref(Date.now())
@@ -226,8 +236,10 @@ const signalAsOf = computed(() => signalResult.value?.as_of_date ?? '')
 const buyPage = ref(1)
 const sellPage = ref(1)
 const holdingsPage = ref(1)
-const visibleBuySignals = computed(() => pageItems(buySignals.value, buyPage.value))
-const visibleSellSignals = computed(() => pageItems(sellPanelItems.value, sellPage.value))
+const sortedBuySignals = computed(() => sortSignalRows(buySignals.value, (item) => item.symbol))
+const sortedSellPanelItems = computed(() => sortSignalRows(sellPanelItems.value, sellItemSymbol))
+const visibleBuySignals = computed(() => pageItems(sortedBuySignals.value, buyPage.value))
+const visibleSellSignals = computed(() => pageItems(sortedSellPanelItems.value, sellPage.value))
 const visibleCurrentHoldings = computed(() => pageItems(currentHoldings.value, holdingsPage.value))
 const buyPageCount = computed(() => pageCount(buySignals.value.length))
 const sellPageCount = computed(() => pageCount(sellPanelItems.value.length))
@@ -237,6 +249,10 @@ watch([buySignals, sellPanelItems, currentHoldings], () => {
   buyPage.value = 1
   sellPage.value = 1
   holdingsPage.value = 1
+})
+watch(signalSort, () => {
+  buyPage.value = 1
+  sellPage.value = 1
 })
 
 const filteredEntries = computed(() => {
@@ -871,6 +887,26 @@ function qualityText(key: string): string {
   return parts.join(' · ')
 }
 
+function sellItemSymbol(item: SellPanelItem): string {
+  return item.kind === 'rule'
+    ? item.signal.symbol
+    : `${String(item.signal.market ?? '')}${String(item.signal.code ?? '')}`
+}
+
+// 排序取全区间指标：与行内「全区间胜率 / 盈亏比」文案同一口径，且跟踪增量返回的
+// 信号行本身不带指标，只有条目表补得上。缺全区间指标的行排在末尾。
+function sortSignalRows<T>(rows: T[], keyOf: (row: T) => string): T[] {
+  if (signalSort.value === 'default') return rows
+  const metric = signalSort.value
+  const score = (row: T): number => {
+    const value = entryQualityMap.value.get(keyOf(row))?.[metric]
+    return typeof value === 'number' && Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY
+  }
+  return [...rows].sort((left, right) => (
+    score(right) - score(left) || keyOf(left).localeCompare(keyOf(right))
+  ))
+}
+
 function riskExitReturnText(signal: Record<string, unknown>): string {
   const value = signal.trade_return_pct
   return typeof value === 'number' && Number.isFinite(value)
@@ -1115,6 +1151,15 @@ onUnmounted(() => {
         <p v-if="successMessage" class="notice success-notice" role="status">{{ successMessage }}</p>
         <p v-if="pollWarning && isBusy" class="notice poll-warning" role="status" data-testid="pool-poll-warning">{{ pollWarning }}</p>
 
+        <div class="signal-controls-row" data-testid="pool-signal-controls">
+          <label class="signal-sort">买卖信号排序
+            <select v-model="signalSort" data-testid="pool-signal-sort">
+              <option v-for="option in SIGNAL_SORT_OPTIONS" :key="option.value" :value="option.value">{{ option.label }}</option>
+            </select>
+          </label>
+          <small>按全区间指标排序只改显示顺序；没有全区间指标的标的排在末尾。</small>
+        </div>
+
         <section class="signal-grid">
           <article class="signal-panel panel-card" data-testid="pool-buy-signals">
             <div class="section-heading"><div><p class="eyebrow">BUY SIGNALS</p><h2>当天触发买入 <span>{{ buySignals.length }}</span></h2></div><small>{{ signalAsOf || '信号扫描后显示日期' }}</small></div>
@@ -1302,6 +1347,9 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .pool-search input { min-height: 42px; border: 1px solid #354b69; border-radius: 7px; padding: 9px 11px; background: #111c30; color: #edf2fb; font: inherit; }
 .signal-grid, .candidate-apply-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .signal-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.signal-controls-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 12px; color: #8798b1; font-size: .88rem; }
+.signal-sort { display: flex; align-items: center; gap: 8px; color: #9baac0; }
+.signal-sort select { width: auto; min-width: 0; border: 1px solid #354b69; border-radius: 7px; padding: 6px 8px; background: #111c30; color: #edf2fb; font: inherit; }
 .section-heading { margin-bottom: 16px; }
 .section-heading h2 span { color: #18c467; }
 .signal-panel { min-height: 180px; }
