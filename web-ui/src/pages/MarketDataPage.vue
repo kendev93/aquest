@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import PageGuide from '../components/PageGuide.vue'
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 
 import { ApiError } from '../api/client'
+import { pollUntil, useBackgroundPoll } from '../composables/usePolling'
 import {
   cancelMarketDataJob,
   createHealthCheck,
@@ -97,9 +98,6 @@ const activeMarketJobs = ref<MarketSyncJobState[]>([])
 const MARKET_JOB_POLL_INTERVAL_MS = 500
 const MARKET_STATUS_POLL_INTERVAL_MS = 5000
 const ACTIVE_JOB_POLL_INTERVAL_MS = 1000
-let storeStatusPollTimer: number | null = null
-let activeJobPollTimer: number | null = null
-let marketDataPageUnmounted = false
 
 const selectedTitle = computed(() => (
   selected.value ? `${selected.value.market} ${selected.value.code}` : '请选择品种'
@@ -403,26 +401,31 @@ async function loadActiveMarketJobs(): Promise<void> {
 }
 
 async function waitForJob(jobId: string): Promise<void> {
-  for (;;) {
-    const state = await getMarketDataJob(jobId)
-    marketJob.value = state
-    updateActiveMarketJob(state)
-    if (state.status === 'completed') {
-      if (state.result?.errors) {
-        message.value = `同步完成，但有 ${state.result.errors} 个错误。`
-      } else {
-        message.value = ''
-      }
-      return
+  const state = await pollUntil(
+    async () => {
+      const current = await getMarketDataJob(jobId)
+      marketJob.value = current
+      updateActiveMarketJob(current)
+      return current
+    },
+    {
+      intervalMs: MARKET_JOB_POLL_INTERVAL_MS,
+      until: (current) => {
+        if (current.status === 'failed') {
+          throw new ApiError(current.error ?? '行情同步失败。', 500)
+        }
+        return current.status === 'completed' || current.status === 'cancelled'
+      },
+    },
+  )
+  if (state.status === 'completed') {
+    if (state.result?.errors) {
+      message.value = `同步完成，但有 ${state.result.errors} 个错误。`
+    } else {
+      message.value = ''
     }
-    if (state.status === 'cancelled') {
-      message.value = '行情同步已取消，已经写入的数据已保留。'
-      return
-    }
-    if (state.status === 'failed') {
-      throw new ApiError(state.error ?? '行情同步失败。', 500)
-    }
-    await new Promise((resolve) => window.setTimeout(resolve, MARKET_JOB_POLL_INTERVAL_MS))
+  } else {
+    message.value = '行情同步已取消，已经写入的数据已保留。'
   }
 }
 
@@ -656,19 +659,23 @@ function beginHealthJob(jobId: string, status: string): void {
 }
 
 async function waitForHealthJob(jobId: string): Promise<void> {
-  for (;;) {
-    const state = (await getMarketDataJob(jobId)) as unknown as MarketHealthJobState
-    healthJob.value = state
-    if (state.status === 'completed') return
-    if (state.status === 'cancelled') {
-      healthMessage.value = '行情任务已取消。'
-      return
-    }
-    if (state.status === 'failed') {
-      throw new ApiError(state.error ?? '行情任务失败。', 500)
-    }
-    await new Promise((resolve) => window.setTimeout(resolve, MARKET_JOB_POLL_INTERVAL_MS))
-  }
+  const state = await pollUntil(
+    async () => {
+      const current = (await getMarketDataJob(jobId)) as unknown as MarketHealthJobState
+      healthJob.value = current
+      return current
+    },
+    {
+      intervalMs: MARKET_JOB_POLL_INTERVAL_MS,
+      until: (current) => {
+        if (current.status === 'failed') {
+          throw new ApiError(current.error ?? '行情任务失败。', 500)
+        }
+        return current.status === 'completed' || current.status === 'cancelled'
+      },
+    },
+  )
+  if (state.status === 'cancelled') healthMessage.value = '行情任务已取消。'
 }
 
 async function runHealthCheck(): Promise<void> {
@@ -774,27 +781,14 @@ async function loadInstruments(): Promise<void> {
   }
 }
 
-function scheduleStoreStatusPoll(): void {
-  if (marketDataPageUnmounted) return
-  if (storeStatusPollTimer !== null) window.clearTimeout(storeStatusPollTimer)
-  storeStatusPollTimer = window.setTimeout(async () => {
-    storeStatusPollTimer = null
-    if (marketDataPageUnmounted) return
-    if (!syncLoading.value) await loadStoreStatus()
-    if (!marketDataPageUnmounted) scheduleStoreStatusPoll()
-  }, MARKET_STATUS_POLL_INTERVAL_MS)
-}
-
-function scheduleActiveJobPoll(): void {
-  if (marketDataPageUnmounted) return
-  if (activeJobPollTimer !== null) window.clearTimeout(activeJobPollTimer)
-  activeJobPollTimer = window.setTimeout(async () => {
-    activeJobPollTimer = null
-    if (marketDataPageUnmounted) return
-    await loadActiveMarketJobs()
-    if (!marketDataPageUnmounted) scheduleActiveJobPoll()
-  }, ACTIVE_JOB_POLL_INTERVAL_MS)
-}
+// 页面级持续刷新：数据目录状态每 5 秒、活动任务每 1 秒。
+// 同步进行中（syncLoading）时让路：那段时间 waitForJob 已经在盯任务状态，
+// 再并发拉一遍 store 状态只会互相踩。组件卸载时 useBackgroundPoll 自停。
+useBackgroundPoll(
+  () => (syncLoading.value ? Promise.resolve() : loadStoreStatus()),
+  { intervalMs: MARKET_STATUS_POLL_INTERVAL_MS },
+)
+useBackgroundPoll(() => loadActiveMarketJobs(), { intervalMs: ACTIVE_JOB_POLL_INTERVAL_MS })
 
 async function loadChart(instrument = selected.value): Promise<void> {
   if (!instrument) {
@@ -852,21 +846,10 @@ function formatPrice(value: number | null): string {
 }
 
 onMounted(async () => {
-  marketDataPageUnmounted = false
   await loadActiveMarketJobs()
   await loadStoreStatus()
   if (!marketJob.value) await loadInstruments()
   await detectVipdocPath(true)
-  scheduleStoreStatusPoll()
-  scheduleActiveJobPoll()
-})
-
-onUnmounted(() => {
-  marketDataPageUnmounted = true
-  if (storeStatusPollTimer !== null) window.clearTimeout(storeStatusPollTimer)
-  if (activeJobPollTimer !== null) window.clearTimeout(activeJobPollTimer)
-  storeStatusPollTimer = null
-  activeJobPollTimer = null
 })
 
 function instrumentLabel(type: LocalInstrument['instrument_type']): string {

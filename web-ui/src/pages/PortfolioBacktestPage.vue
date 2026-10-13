@@ -21,6 +21,7 @@ import {
 } from '../api/strategyDiscovery'
 import { fetchMetadata, parseFormula } from '../api/formulaScreen'
 import { ApiError } from '../api/client'
+import { pollUntil } from '../composables/usePolling'
 import { fetchActiveJobs } from '../api/jobs'
 import {
   consumePortfolioBacktestHandoff,
@@ -1144,40 +1145,47 @@ async function startRiskOptimization(): Promise<void> {
 }
 
 async function pollRiskOptimization(jobId: string): Promise<void> {
-  let consecutiveStatusFailures = 0
+  // 任务是分钟级的，进度读取偶尔抖一下不该把整个等待作废：
+  // 瞬时错误按递增间隔重试 5 次，仍失败才向上抛。
   const retryDelays = [250, 500, 1_000, 2_000, 3_000]
-  for (;;) {
-    let state: StrategyDiscoveryJobState
-    try {
-      state = await getStrategyDiscovery(jobId)
+  let consecutiveStatusFailures = 0
+  const state = await pollUntil(
+    async () => {
+      const current = await getStrategyDiscovery(jobId)
+      riskOptimizationJob.value = current
       if (consecutiveStatusFailures > 0) {
         consecutiveStatusFailures = 0
         message.value = ''
       }
-    } catch (error) {
-      const transientStatus = error instanceof ApiError
-        && [0, 500, 502, 503, 504].includes(error.status)
-      if (!transientStatus || consecutiveStatusFailures >= retryDelays.length) throw error
-      const delay = retryDelays[consecutiveStatusFailures] ?? 3_000
-      consecutiveStatusFailures += 1
-      message.value = `寻优仍在后台运行，进度读取暂时失败，${Math.ceil(delay / 1000)} 秒后重试（${consecutiveStatusFailures}/${retryDelays.length}）。`
-      await new Promise((resolve) => window.setTimeout(resolve, delay))
-      continue
-    }
-    riskOptimizationJob.value = state
-    if (state.status === 'completed') {
-      riskOptimizationResult.value = await getStrategyDiscoveryResults(jobId)
-      riskOptimizationResultsVisible.value = true
-      riskOptimizationBoard.value = 'sharpe'
-      message.value = '风险参数寻优完成：请按验证榜查看候选，并用留出段结果做独立复核。'
-      await loadRiskOptimizationHistory()
-      return
-    }
-    if (state.status === 'failed' || state.status === 'cancelled') {
-      message.value = state.error ?? (state.status === 'cancelled' ? '风险参数寻优已取消。' : '风险参数寻优失败。')
-      return
-    }
-    await new Promise((resolve) => window.setTimeout(resolve, 250))
+      return current
+    },
+    {
+      intervalMs: 250,
+      until: (current) => {
+        if (current.status === 'failed' || current.status === 'cancelled') {
+          message.value = current.error
+            ?? (current.status === 'cancelled' ? '风险参数寻优已取消。' : '风险参数寻优失败。')
+          return true
+        }
+        return current.status === 'completed'
+      },
+      retryableError: (error, failures) => {
+        const transientStatus = error instanceof ApiError
+          && [0, 500, 502, 503, 504].includes(error.status)
+        if (!transientStatus || failures > retryDelays.length) return null
+        const delay = retryDelays[failures - 1] ?? 3_000
+        consecutiveStatusFailures = failures
+        message.value = `寻优仍在后台运行，进度读取暂时失败，${Math.ceil(delay / 1000)} 秒后重试（${failures}/${retryDelays.length}）。`
+        return delay
+      },
+    },
+  )
+  if (state.status === 'completed') {
+    riskOptimizationResult.value = await getStrategyDiscoveryResults(jobId)
+    riskOptimizationResultsVisible.value = true
+    riskOptimizationBoard.value = 'sharpe'
+    message.value = '风险参数寻优完成：请按验证榜查看候选，并用留出段结果做独立复核。'
+    await loadRiskOptimizationHistory()
   }
 }
 

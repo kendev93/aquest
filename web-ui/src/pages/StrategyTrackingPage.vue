@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import PageGuide from '../components/PageGuide.vue'
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 
 import TermHint from '../components/TermHint.vue'
 import { fetchMetadata } from '../api/formulaScreen'
 import { ApiError } from '../api/client'
+import { PollTimeoutError, pollUntil } from '../composables/usePolling'
 import {
   fetchStrategyTracking,
   getStrategyTracking,
@@ -51,7 +52,6 @@ const detailLoadingId = ref('')
 const detailError = ref('')
 const tradeLoadingId = ref('')
 const tradeError = ref('')
-let pollTimer: ReturnType<typeof setTimeout> | null = null
 
 const online = computed(() =>
   snapshots.value.filter((item) => item.tracking_status === 'active'),
@@ -218,28 +218,37 @@ function signalSummary(signals: Array<{ id: string; matched: boolean }>): string
     : '未配置独立信号'
 }
 
-/** 重跑要重算全历史，是分钟级任务，所以提交完只能轮询。 */
+/** 重跑要重算全历史，是分钟级任务，所以提交完只能轮询。30 分钟内没跑完就放弃。 */
 async function waitForJob(jobId: string, strategyId: string): Promise<void> {
   busyId.value = strategyId
-  const deadline = Date.now() + 30 * 60 * 1000
   try {
-    while (Date.now() < deadline) {
-      const state = await getTrackingJob(jobId)
-      if (state.status === 'completed') {
-        await load()
-        showMessage('追踪已更新。')
-        return
-      }
-      if (state.status === 'failed') {
-        showMessage(state.error || '追踪任务失败，已保留上一次成功的结果。', true)
-        await load()
-        return
-      }
-      await new Promise((resolve) => setTimeout(resolve, 2000))
+    const state = await pollUntil(
+      () => getTrackingJob(jobId),
+      {
+        intervalMs: 2000,
+        timeoutMs: 30 * 60 * 1000,
+        until: (current) => {
+          if (current.status === 'failed') {
+            showMessage(current.error || '追踪任务失败，已保留上一次成功的结果。', true)
+            return true
+          }
+          return current.status === 'completed'
+        },
+      },
+    )
+    if (state.status === 'completed') {
+      await load()
+      showMessage('追踪已更新。')
+    } else {
+      // until 里已把失败消息提示过了，这里补一次列表刷新。
+      await load()
     }
-    showMessage('追踪任务超时，请稍后手动重算。', true)
   } catch (error) {
-    showMessage(error instanceof Error ? error.message : '追踪任务状态读取失败。', true)
+    if (error instanceof PollTimeoutError) {
+      showMessage('追踪任务超时，请稍后手动重算。', true)
+    } else {
+      showMessage(error instanceof Error ? error.message : '追踪任务状态读取失败。', true)
+    }
   } finally {
     busyId.value = ''
   }
@@ -304,9 +313,6 @@ onMounted(() => {
   void fetchMetadata()
     .then((value) => { metadata.value = value })
     .catch(() => undefined)
-})
-onUnmounted(() => {
-  if (pollTimer !== null) clearTimeout(pollTimer)
 })
 
 // ---------------------------------------------------------------------------

@@ -15,6 +15,9 @@ import {
   type StrategyPoolBoard,
 } from '../api/strategyPool'
 import { ApiError } from '../api/client'
+// 这里的任务轮询有意不用 composables/usePolling 的 pollUntil：它内嵌了
+// 「标的状态刷新」编排（refreshPoolEntries + refreshingEntries 抑制）、
+// token 竞态守卫（canApply）和多种完成态的清理动作，抽象盖不住这些差异。
 import type {
   DataStoreStatus,
   StrategyPoolCandidate,

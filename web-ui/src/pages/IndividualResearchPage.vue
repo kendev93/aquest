@@ -7,6 +7,7 @@ import DateRangeSelector from '../components/DateRangeSelector.vue'
 import IndividualResearchBacktestDetail from '../components/IndividualResearchBacktestDetail.vue'
 import { fetchMetadata } from '../api/formulaScreen'
 import { ApiError } from '../api/client'
+import { pollUntil } from '../composables/usePolling'
 import {
   cancelIndividualResearch,
   createIndividualResearch,
@@ -237,25 +238,32 @@ function buildPayload(): IndividualResearchPayload {
 async function pollJob(jobId: string): Promise<void> {
   running.value = true
   try {
-    for (;;) {
-      const state = await getIndividualResearchJob(jobId)
-      job.value = state
-      if (state.status === 'completed') {
-        result.value = state.result
-        if (result.value) result.value.history_id = jobId
-        showMessage(state.result?.reason ?? '个股研究完成。')
-        await loadHistory()
-        return
-      }
-      if (state.status === 'failed') {
-        showMessage(state.error ?? '个股研究失败，请检查配置和本地行情。', true)
-        return
-      }
-      if (state.status === 'cancelled') {
-        showMessage('个股研究已取消。')
-        return
-      }
-      await new Promise((resolve) => window.setTimeout(resolve, 500))
+    const state = await pollUntil(
+      async () => {
+        const current = await getIndividualResearchJob(jobId)
+        job.value = current
+        return current
+      },
+      {
+        intervalMs: 500,
+        until: (current) => {
+          if (current.status === 'failed') {
+            showMessage(current.error ?? '个股研究失败，请检查配置和本地行情。', true)
+            return true
+          }
+          if (current.status === 'cancelled') {
+            showMessage('个股研究已取消。')
+            return true
+          }
+          return current.status === 'completed'
+        },
+      },
+    )
+    if (state.status === 'completed') {
+      result.value = state.result
+      if (result.value) result.value.history_id = jobId
+      showMessage(state.result?.reason ?? '个股研究完成。')
+      await loadHistory()
     }
   } catch (error) {
     showMessage(apiMessage(error, '读取个股研究任务状态失败。'), true)
