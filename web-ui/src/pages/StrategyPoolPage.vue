@@ -2,7 +2,7 @@
 import ResearchWorkDetails from '../components/ResearchWorkDetails.vue'
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
-import PageGuide from '../components/PageGuide.vue'
+import PageIntro from '../components/PageIntro.vue'
 import { fetchStoreStatus } from '../api/marketData'
 import {
   cancelStrategyPoolJob,
@@ -1038,20 +1038,18 @@ onUnmounted(() => {
     <AppTopbar />
 
     <main class="content-shell">
-      <section class="page-intro">
-        <div>
-          <p class="eyebrow">MARKET / STRATEGY POOL</p>
-          <h1>全市场策略池</h1>
-          <p class="intro-copy">每只股票分别维护年化收益与夏普最高的策略，查看当天信号和逐股策略的分段表现。</p>
-        </div>
-        <div v-if="objective" class="intro-note">
+      <PageIntro
+        eyebrow="MARKET / STRATEGY POOL"
+        title="全市场策略池"
+        copy="每只股票分别维护年化收益与夏普最高的策略，查看当天信号和逐股策略的分段表现。"
+        guide-key="strategy-pool"
+      >
+        <template v-if="objective" #default>
           <span class="note-label">当前决策目标</span>
           <strong>{{ objectiveLabel(objective) }}</strong>
           <small>此目标决定每只股票采用哪套策略，也决定 5 个持仓槽的买入优先级。</small>
-        </div>
-      </section>
-
-      <PageGuide page-key="strategy-pool" />
+        </template>
+      </PageIntro>
 
       <section v-if="!objective" class="pool-choice panel-card" data-testid="strategy-pool-first-choice">
         <p class="eyebrow">CHOOSE YOUR OBJECTIVE</p>
@@ -1302,10 +1300,10 @@ onUnmounted(() => {
 <style scoped>
 .strategy-pool-page { min-height: 100vh; }
 .strategy-pool-page .content-shell { display: grid; gap: 20px; }
-.panel-card { border: 1px solid var(--line, #25364f); background: rgba(12, 20, 36, .78); padding: 22px; }
+.panel-card { border: 1px solid #25364f; background: rgba(12, 20, 36, .78); padding: 22px; }
 .pool-choice { max-width: 900px; margin: 24px auto; text-align: center; }
 .pool-choice h2, .toolbar-heading h2, .section-heading h2 { margin: 6px 0 10px; }
-.pool-choice p:not(.eyebrow) { color: var(--muted, #91a1b8); }
+.pool-choice p:not(.eyebrow) { color: var(--muted); }
 .choice-buttons, .pool-actions, .editor-actions { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; }
 .choice-buttons { justify-content: center; margin-top: 24px; }
 .button-primary, .button-secondary { border: 1px solid #37506f; border-radius: 8px; padding: 11px 16px; font: inherit; font-weight: 700; cursor: pointer; }

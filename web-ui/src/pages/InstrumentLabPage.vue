@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import PageGuide from '../components/PageGuide.vue'
+import PageIntro from '../components/PageIntro.vue'
 import { computed, onMounted, ref } from 'vue'
 
 import { fetchMetadata } from '../api/formulaScreen'
@@ -305,20 +305,16 @@ onMounted(async () => {
     <AppTopbar />
 
     <main class="content-shell">
-      <section class="page-intro">
-        <div>
-          <p class="eyebrow">INSTRUMENT / WORKBENCH</p>
-          <h1>标的检验台</h1>
-          <p class="intro-copy">一只票，三种读数：指标在它自己历史上的位置、一组规则在它身上的回测、已通过置换检验的条件在它身上是否还成立。</p>
-        </div>
-        <div class="intro-note">
-          <span class="note-label">先把话说前头</span>
-          <strong>这里不打分</strong>
-          <small>综合评分的权重没有可证伪的依据，所以只给可核对的读数：取值、命中、收益差、置换 p 值</small>
-        </div>
-      </section>
-
-      <PageGuide page-key="instrument-lab" />
+      <PageIntro
+        eyebrow="INSTRUMENT / WORKBENCH"
+        title="标的检验台"
+        copy="一只票，三种读数：指标在它自己历史上的位置、一组规则在它身上的回测、已通过置换检验的条件在它身上是否还成立。"
+        note-label="先把话说前头"
+        guide-key="instrument-lab"
+      >
+        <strong>这里不打分</strong>
+        <small>综合评分的权重没有可证伪的依据，所以只给可核对的读数：取值、命中、收益差、置换 p 值</small>
+      </PageIntro>
 
       <div v-if="message" class="notice" role="alert" data-testid="lab-message">{{ message }}</div>
 

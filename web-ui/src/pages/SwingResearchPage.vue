@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import PageGuide from '../components/PageGuide.vue'
+import PageIntro from '../components/PageIntro.vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import {
@@ -557,20 +557,16 @@ async function copyPlan(): Promise<void> {
     <AppTopbar />
 
     <main class="content-shell">
-      <section class="page-intro">
-        <div>
-          <p class="eyebrow">SWING RESEARCH / SEGMENTS</p>
-          <h1>波段研究</h1>
-          <p class="intro-copy">先把行情切成一段段涨跌，再看哪些指标在这些段的起点附近出现异常值。</p>
-        </div>
-        <div class="intro-note">
-          <span class="note-label">它能回答什么</span>
-          <strong>哪些指标伴随波段启动</strong>
-          <small>给的是相关性排序，不是交易信号；结论要拿去买卖条件研究重新搜阈值才算数</small>
-        </div>
-      </section>
-
-      <PageGuide page-key="swing-research" />
+      <PageIntro
+        eyebrow="SWING RESEARCH / SEGMENTS"
+        title="波段研究"
+        copy="先把行情切成一段段涨跌，再看哪些指标在这些段的起点附近出现异常值。"
+        note-label="它能回答什么"
+        guide-key="swing-research"
+      >
+        <strong>哪些指标伴随波段启动</strong>
+        <small>给的是相关性排序，不是交易信号；结论要拿去买卖条件研究重新搜阈值才算数</small>
+      </PageIntro>
 
       <div v-if="message" class="notice error" role="alert" data-testid="swing-message">{{ message }}</div>
 

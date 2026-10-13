@@ -30,6 +30,6 @@ function metric(key: string, percent = false): string {
   </div>
 </template>
 <style scoped>
-.research-work { margin: 10px 0; padding: 12px; border-left: 3px solid var(--accent, #19c77a); background: rgba(25, 199, 122, .05); overflow-wrap: anywhere; }
+.research-work { margin: 10px 0; padding: 12px; border-left: 3px solid var(--accent); background: rgba(25, 199, 122, .05); overflow-wrap: anywhere; }
 p { margin: 4px 0; } small { opacity: .7; }
 </style>

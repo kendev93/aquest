@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import PageGuide from '../components/PageGuide.vue'
+import PageIntro from '../components/PageIntro.vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import { fetchLocalChart } from '../api/marketData'
@@ -1277,16 +1277,16 @@ watch(() => form.formulaText, (value) => {
     <AppTopbar />
 
     <main class="content-shell">
-      <section class="page-intro">
-        <div>
-          <p class="eyebrow">FORMULA SCREEN / DAILY</p>
-          <h1>公式选股</h1>
-          <p class="intro-copy">把通达信条件拆成可组合的信号，扫描已完成的日线 K 线。</p>
-        </div>
-        <div class="intro-note"><span class="note-label">扫描范围</span><strong>DuckDB 全量行情</strong><small>信号筛选和回测统一读取本地数据仓库</small></div>
-      </section>
-
-      <PageGuide page-key="formula-screen" />
+      <PageIntro
+        eyebrow="FORMULA SCREEN / DAILY"
+        title="公式选股"
+        copy="把通达信条件拆成可组合的信号，扫描已完成的日线 K 线。"
+        note-label="扫描范围"
+        guide-key="formula-screen"
+      >
+        <strong>DuckDB 全量行情</strong>
+        <small>信号筛选和回测统一读取本地数据仓库</small>
+      </PageIntro>
 
       <div v-if="message" class="notice" :class="{ error: !message.includes('完成') }" role="alert" data-testid="screen-message">
         <span>{{ message }}</span>

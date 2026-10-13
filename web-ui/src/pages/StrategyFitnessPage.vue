@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import PageGuide from '../components/PageGuide.vue'
+import PageIntro from '../components/PageIntro.vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import {
@@ -558,12 +558,16 @@ watch(() => form.formulaText, (value) => {
     <AppTopbar />
 
     <main class="content-shell">
-      <section class="page-intro">
-        <div><p class="eyebrow">STRATEGY FITNESS / TIME SPLIT</p><h1>策略适配性</h1><p class="intro-copy">用同一套买卖规则分别回测每个标的，按训练、验证、测试三段时间判断是否适合。</p></div>
-        <div class="intro-note"><span class="note-label">评估原则</span><strong>时间顺序 · 样本外优先</strong><small>先筛适配性，再交给组合回测按当前指标排序</small></div>
-      </section>
-
-      <PageGuide page-key="strategy-fitness" />
+      <PageIntro
+        eyebrow="STRATEGY FITNESS / TIME SPLIT"
+        title="策略适配性"
+        copy="用同一套买卖规则分别回测每个标的，按训练、验证、测试三段时间判断是否适合。"
+        note-label="评估原则"
+        guide-key="strategy-fitness"
+      >
+        <strong>时间顺序 · 样本外优先</strong>
+        <small>先筛适配性，再交给组合回测按当前指标排序</small>
+      </PageIntro>
 
       <div v-if="message" class="notice" :class="{ error: !message.includes('完成') }" role="alert" data-testid="fitness-message">{{ message }}</div>
 

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import PageGuide from '../components/PageGuide.vue'
+import PageIntro from '../components/PageIntro.vue'
 import { computed, onMounted, reactive, ref } from 'vue'
 
 import {
@@ -403,20 +403,16 @@ onMounted(async () => {
     <AppTopbar />
 
     <main class="content-shell">
-      <section class="page-intro">
-        <div>
-          <p class="eyebrow">FACTOR TEST / FORWARD RETURN</p>
-          <h1>因子检验</h1>
-          <p class="intro-copy">每一天、每一只股票都在样本里：看指标能不能把股票按「未来 N 天的收益」排个先后。</p>
-        </div>
-        <div class="intro-note">
-          <span class="note-label">它能回答什么</span>
-          <strong>这个指标有没有预测力</strong>
-          <small>无条件全样本，和条件研究（只看信号日）、波段研究（只看事件）不是一回事</small>
-        </div>
-      </section>
-
-      <PageGuide page-key="factor-test" />
+      <PageIntro
+        eyebrow="FACTOR TEST / FORWARD RETURN"
+        title="因子检验"
+        copy="每一天、每一只股票都在样本里：看指标能不能把股票按「未来 N 天的收益」排个先后。"
+        note-label="它能回答什么"
+        guide-key="factor-test"
+      >
+        <strong>这个指标有没有预测力</strong>
+        <small>无条件全样本，和条件研究（只看信号日）、波段研究（只看事件）不是一回事</small>
+      </PageIntro>
 
       <div v-if="message" class="notice" role="alert" data-testid="factor-message">{{ message }}</div>
 
@@ -688,7 +684,7 @@ onMounted(async () => {
   gap: 0.25rem 0.75rem;
   max-height: 220px;
   overflow-y: auto;
-  border: 1px solid var(--border-subtle, rgba(148, 163, 184, 0.25));
+  border: 1px solid var(--border-subtle);
   border-radius: 8px;
   padding: 0.5rem 0.75rem;
 }
@@ -704,11 +700,11 @@ onMounted(async () => {
   margin: 0 0 0.75rem;
   padding-left: 1.1rem;
   font-size: 0.8rem;
-  color: var(--text-muted, #64748b);
+  color: var(--subtle);
 }
 
 .factor-row-active {
-  background: var(--accent-soft, rgba(59, 130, 246, 0.08));
+  background: var(--accent-soft);
 }
 
 .factor-nowrap {
@@ -729,12 +725,12 @@ onMounted(async () => {
 .factor-note {
   min-width: 260px;
   font-size: 0.78rem;
-  color: var(--text-muted, #64748b);
+  color: var(--subtle);
 }
 
 .factor-detail {
   margin-top: 1rem;
-  border-top: 1px solid var(--border-subtle, rgba(148, 163, 184, 0.25));
+  border-top: 1px solid var(--border-subtle);
   padding-top: 0.75rem;
 }
 
@@ -746,7 +742,7 @@ onMounted(async () => {
 .factor-detail-heading p {
   margin: 0 0 0.75rem;
   font-size: 0.8rem;
-  color: var(--text-muted, #64748b);
+  color: var(--subtle);
 }
 
 .factor-charts {
@@ -761,20 +757,20 @@ onMounted(async () => {
 
 .factor-chart figcaption {
   font-size: 0.78rem;
-  color: var(--text-muted, #64748b);
+  color: var(--subtle);
   margin-bottom: 0.25rem;
 }
 
 .factor-chart svg {
   width: 100%;
   height: 120px;
-  border: 1px solid var(--border-subtle, rgba(148, 163, 184, 0.25));
+  border: 1px solid var(--border-subtle);
   border-radius: 8px;
-  background: var(--surface-soft, rgba(148, 163, 184, 0.06));
+  background: rgba(148, 163, 184, 0.06);
 }
 
 .factor-axis {
-  stroke: var(--border-subtle, rgba(148, 163, 184, 0.5));
+  stroke: rgba(148, 163, 184, 0.5);
   stroke-width: 1;
   stroke-dasharray: 4 4;
 }
@@ -803,7 +799,7 @@ onMounted(async () => {
   gap: 1rem;
   flex-wrap: wrap;
   font-size: 0.8rem;
-  color: var(--text-muted, #64748b);
+  color: var(--subtle);
   margin-bottom: 0.35rem;
 }
 
@@ -832,7 +828,7 @@ onMounted(async () => {
 }
 
 .factor-layer-size {
-  color: var(--text-muted, #64748b);
+  color: var(--subtle);
 }
 
 .factor-facts {
@@ -843,14 +839,14 @@ onMounted(async () => {
 }
 
 .factor-facts div {
-  border: 1px solid var(--border-subtle, rgba(148, 163, 184, 0.25));
+  border: 1px solid var(--border-subtle);
   border-radius: 8px;
   padding: 0.45rem 0.6rem;
 }
 
 .factor-facts dt {
   font-size: 0.75rem;
-  color: var(--text-muted, #64748b);
+  color: var(--subtle);
 }
 
 .factor-facts dd {

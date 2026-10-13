@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import PageGuide from '../components/PageGuide.vue'
+import PageIntro from '../components/PageIntro.vue'
 import { computed, onMounted, ref } from 'vue'
 
 import {
@@ -156,20 +156,16 @@ onMounted(async () => {
     <AppTopbar />
 
     <main class="content-shell">
-      <section class="page-intro">
-        <div>
-          <p class="eyebrow">HISTORY / COMPARE</p>
-          <h1>回测历史对比</h1>
-          <p class="intro-copy">把做过的实验摆在一起看：曲线叠绘 + 指标并排。只读历史，不重跑任何回测。</p>
-        </div>
-        <div class="intro-note">
-          <span class="note-label">先把话说前头</span>
-          <strong>不同口径不排在一列里比大小</strong>
-          <small>跨类型时收益类数字只能定性参照；界面会写明每个数字来自哪一口径</small>
-        </div>
-      </section>
-
-      <PageGuide page-key="history-compare" />
+      <PageIntro
+        eyebrow="HISTORY / COMPARE"
+        title="回测历史对比"
+        copy="把做过的实验摆在一起看：曲线叠绘 + 指标并排。只读历史，不重跑任何回测。"
+        note-label="先把话说前头"
+        guide-key="history-compare"
+      >
+        <strong>不同口径不排在一列里比大小</strong>
+        <small>跨类型时收益类数字只能定性参照；界面会写明每个数字来自哪一口径</small>
+      </PageIntro>
 
       <div v-if="message" class="notice" role="alert" data-testid="compare-message">{{ message }}</div>
 

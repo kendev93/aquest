@@ -2,7 +2,7 @@
 import ResearchWorkDetails from '../components/ResearchWorkDetails.vue'
 import { computed, onMounted, reactive, ref } from 'vue'
 
-import PageGuide from '../components/PageGuide.vue'
+import PageIntro from '../components/PageIntro.vue'
 import DateRangeSelector from '../components/DateRangeSelector.vue'
 import IndividualResearchBacktestDetail from '../components/IndividualResearchBacktestDetail.vue'
 import { fetchMetadata } from '../api/formulaScreen'
@@ -524,12 +524,12 @@ onMounted(async () => {
     <AppTopbar />
 
     <main class="content-shell">
-      <section class="page-intro">
-        <div><span class="section-kicker">SINGLE SECURITY RESEARCH</span><h1>个股研究</h1>
-          <p>默认研究所选股票的全部本地历史；系统挖掘买卖条件、优化退出风控，并自动回测最终候选供你比较。</p>
-        </div>
-      </section>
-      <PageGuide page-key="individual-research" />
+      <PageIntro
+        eyebrow="SINGLE SECURITY RESEARCH"
+        title="个股研究"
+        copy="默认研究所选股票的全部本地历史；系统挖掘买卖条件、优化退出风控，并自动回测最终候选供你比较。"
+        guide-key="individual-research"
+      />
       <p v-if="message" class="notice" :class="{ error: messageIsError }" role="status" data-testid="individual-research-message">{{ message }}</p>
 
       <div class="workspace-grid">

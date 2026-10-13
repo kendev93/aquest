@@ -210,7 +210,7 @@ function valueLabel(valueId: string): string {
 .rule-subtitle {
   display: block;
   margin-bottom: 0.55rem;
-  color: var(--text-muted);
+  color: var(--subtle);
   font-size: 0.78rem;
   font-weight: 700;
   letter-spacing: 0.08em;

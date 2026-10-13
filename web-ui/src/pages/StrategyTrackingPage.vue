@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import PageGuide from '../components/PageGuide.vue'
+import PageIntro from '../components/PageIntro.vue'
 import { computed, onMounted, ref } from 'vue'
 
 import TermHint from '../components/TermHint.vue'
@@ -385,16 +385,18 @@ function chartFor(item: StrategyTrackingSnapshot) {
     <AppTopbar />
 
     <main class="content-shell">
-      <section class="page-intro">
-        <div>
-          <p class="eyebrow">OUT OF SAMPLE / DAILY</p>
-          <h1>策略追踪</h1>
-          <p class="intro-copy">把保存下来的策略沿着交易日历往前推，回答别的功能回答不了的那个问题：<strong>从今天起，它还灵不灵。</strong></p>
-        </div>
-        <div class="intro-note"><span class="note-label">研究方法</span><strong>规则上线即冻结</strong><small>要改规则请新开一个追踪，改了就不是样本外了</small></div>
-      </section>
-
-      <PageGuide page-key="strategy-tracking" />
+      <PageIntro
+        eyebrow="OUT OF SAMPLE / DAILY"
+        title="策略追踪"
+        note-label="研究方法"
+        guide-key="strategy-tracking"
+      >
+        <template #copy>
+          把保存下来的策略沿着交易日历往前推，回答别的功能回答不了的那个问题：<strong>从今天起，它还灵不灵。</strong>
+        </template>
+        <strong>规则上线即冻结</strong>
+        <small>要改规则请新开一个追踪，改了就不是样本外了</small>
+      </PageIntro>
 
       <p v-if="message" class="notice" :class="{ error: messageIsError }" role="alert" data-testid="tracking-message">{{ message }}</p>
 

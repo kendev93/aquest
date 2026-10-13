@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import PageGuide from '../components/PageGuide.vue'
+import PageIntro from '../components/PageIntro.vue'
 import { computed, onMounted, reactive, ref } from 'vue'
 
 import { ApiError, describeError } from '../api/client'
@@ -829,12 +829,16 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
     <AppTopbar />
 
     <main class="content-shell">
-      <section class="page-intro">
-        <div><p class="eyebrow">LOCAL MARKET DATA / DUCKDB</p><h1>本地行情</h1><p class="intro-copy">行情由本机 DuckDB 保存，可在本页面一键同步最新日线。</p></div>
-        <div class="intro-note"><span class="note-label">数据边界</span><strong>本地 DuckDB</strong><small>同步结果直接写入本机数据库，图表、筛选和回测读取同一份数据</small></div>
-      </section>
-
-      <PageGuide page-key="market-data" />
+      <PageIntro
+        eyebrow="LOCAL MARKET DATA / DUCKDB"
+        title="本地行情"
+        copy="行情由本机 DuckDB 保存，可在本页面一键同步最新日线。"
+        note-label="数据边界"
+        guide-key="market-data"
+      >
+        <strong>本地 DuckDB</strong>
+        <small>同步结果直接写入本机数据库，图表、筛选和回测读取同一份数据</small>
+      </PageIntro>
 
       <div v-if="message" class="notice error" role="alert" data-testid="market-data-message">{{ message }}</div>
 

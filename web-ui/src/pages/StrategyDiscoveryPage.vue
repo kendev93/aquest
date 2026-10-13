@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import PageGuide from '../components/PageGuide.vue'
+import PageIntro from '../components/PageIntro.vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import { ApiError, describeError } from '../api/client'
@@ -788,12 +788,16 @@ onMounted(async () => {
     <AppTopbar />
 
     <main class="content-shell">
-      <section class="page-intro">
-        <div><p class="eyebrow">STRATEGY DISCOVERY / DAILY</p><h1>策略实验室</h1><p class="intro-copy">只设置品种范围和持仓数量，系统默认使用最近 5 年已完成日线寻找排序、买卖和风险控制配置。</p></div>
-        <div class="intro-note"><span class="note-label">自动流程</span><strong>寻优 · 验证 · 最终留出</strong><small>真实组合回测裁定候选结果</small></div>
-      </section>
-
-      <PageGuide page-key="strategy-lab" />
+      <PageIntro
+        eyebrow="STRATEGY DISCOVERY / DAILY"
+        title="策略实验室"
+        copy="只设置品种范围和持仓数量，系统默认使用最近 5 年已完成日线寻找排序、买卖和风险控制配置。"
+        note-label="自动流程"
+        guide-key="strategy-lab"
+      >
+        <strong>寻优 · 验证 · 最终留出</strong>
+        <small>真实组合回测裁定候选结果</small>
+      </PageIntro>
 
       <div v-if="message" class="notice" :class="{ error: !message.includes('完成') && !message.includes('加载') && !message.includes('删除') }" role="alert" data-testid="strategy-discovery-message">{{ message }}</div>
 

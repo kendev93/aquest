@@ -14,19 +14,36 @@ function pageFiles(): string[] {
   return readdirSync(pagesDir).filter((name) => name.endsWith('.vue'))
 }
 
+// 标题区抽成 PageIntro 之后，页面把说明的 key 交给它的 guide-key；
+// 没有标题区的页面（策略池详情）仍然直挂 <PageGuide page-key="…">。
+// 两种写法都算「这个页面挂了说明」。
+const GUIDE_TAG = /<(PageIntro|PageGuide)\b([^<]*)>/g
+const GUIDE_KEY = /(?:page-key|guide-key)="([^"]+)"/
+
+function guideKeysOf(source: string): string[] {
+  const keys: string[] = []
+  for (const tag of source.match(GUIDE_TAG) ?? []) {
+    const key = GUIDE_KEY.exec(tag)
+    if (key) keys.push(key[1])
+  }
+  return keys
+}
+
+function pageSource(file: string): string {
+  return readFileSync(pagesDir + '/' + file, 'utf-8')
+}
+
 function pageKeysMentioned(): Map<string, string> {
   const found = new Map<string, string>()
   for (const file of pageFiles()) {
-    const source = readFileSync(pagesDir + '/' + file, 'utf-8')
-    const match = /<PageGuide\s+page-key="([^"]+)"/.exec(source)
-    if (match) found.set(match[1], file)
+    for (const key of guideKeysOf(pageSource(file))) found.set(key, file)
   }
   return found
 }
 
 describe('pageGuides', () => {
   it('每个页面都挂了一份说明', () => {
-    const missing = pageFiles().filter((file) => !/<PageGuide\s+page-key="([^"]+)"/.test(readFileSync(pagesDir + '/' + file, 'utf-8')) )
+    const missing = pageFiles().filter((file) => guideKeysOf(pageSource(file)).length === 0)
     expect(missing).toEqual([])
   })
 

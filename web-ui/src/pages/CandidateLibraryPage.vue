@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import PageGuide from '../components/PageGuide.vue'
+import PageIntro from '../components/PageIntro.vue'
 import { computed, onMounted, ref } from 'vue'
 
 import { getConditionResearchHistory } from '../api/conditionResearch'
@@ -223,26 +223,22 @@ onMounted(async () => {
     <AppTopbar />
 
     <main class="content-shell">
-      <section class="page-intro">
-        <div>
-          <p class="eyebrow">CANDIDATE LIBRARY</p>
-          <h1>候选库<TermHint term="candidateLibrary" /></h1>
-          <p class="intro-copy">
-            研究挖出来的候选条件存在这里，带它当时的证据快照和你的表态。
-            <strong>发布必须由你确认，且发布后永远是离线的。</strong>
-            <TermHint term="adoptVsPublish" />
-          </p>
-        </div>
-        <div class="intro-note">
-          <span class="note-label">为什么单独存一份</span>
-          <p>
-            研究历史的候选编号只在一次报告里有效，而历史只留最近 20 条。
-            所以入库时把证据整份复制进来——它不回指历史记录，也就不会跟着消失。
-          </p>
-        </div>
-      </section>
-
-      <PageGuide page-key="candidate-library" />
+      <PageIntro
+        eyebrow="CANDIDATE LIBRARY"
+        note-label="为什么单独存一份"
+        guide-key="candidate-library"
+      >
+        <template #title>候选库<TermHint term="candidateLibrary" /></template>
+        <template #copy>
+          研究挖出来的候选条件存在这里，带它当时的证据快照和你的表态。
+          <strong>发布必须由你确认，且发布后永远是离线的。</strong>
+          <TermHint term="adoptVsPublish" />
+        </template>
+        <p>
+          研究历史的候选编号只在一次报告里有效，而历史只留最近 20 条。
+          所以入库时把证据整份复制进来——它不回指历史记录，也就不会跟着消失。
+        </p>
+      </PageIntro>
 
       <section class="panel">
         <div class="panel-head">

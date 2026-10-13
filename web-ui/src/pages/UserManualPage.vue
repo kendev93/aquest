@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 
 import HighlightText from '../components/HighlightText.vue'
-import PageGuide from '../components/PageGuide.vue'
+import PageIntro from '../components/PageIntro.vue'
 import { manualAnchor, searchManual } from '../utils/manual'
 import AppTopbar from '../components/AppTopbar.vue'
 
@@ -22,25 +22,21 @@ const countText = computed(() => {
     <AppTopbar />
 
     <main class="content-shell">
-      <section class="page-intro">
-        <div>
-          <p class="eyebrow">USER MANUAL</p>
-          <h1>使用手册</h1>
-          <p class="intro-copy">
-            每个页面各自能回答什么、不能回答什么，以及每个数字背后的口径，都在这里。
-            <strong>左边是目录，上面可以搜。</strong>
-          </p>
-        </div>
-        <div class="intro-note">
-          <span class="note-label">为什么汇总成一页</span>
-          <p>
-            口径散在各页时，「这个数到底怎么算的」只能靠翻。汇总之后可以搜索，
-            而且内容与页内折叠说明、<code>docs/user-manual.md</code> 出自同一份数据源，不会说法不一致。
-          </p>
-        </div>
-      </section>
-
-      <PageGuide page-key="user-manual" />
+      <PageIntro
+        eyebrow="USER MANUAL"
+        title="使用手册"
+        note-label="为什么汇总成一页"
+        guide-key="user-manual"
+      >
+        <template #copy>
+          每个页面各自能回答什么、不能回答什么，以及每个数字背后的口径，都在这里。
+          <strong>左边是目录，上面可以搜。</strong>
+        </template>
+        <p>
+          口径散在各页时，「这个数到底怎么算的」只能靠翻。汇总之后可以搜索，
+          而且内容与页内折叠说明、<code>docs/user-manual.md</code> 出自同一份数据源，不会说法不一致。
+        </p>
+      </PageIntro>
 
       <section class="manual-layout" data-testid="manual-layout">
         <aside class="manual-sidebar">

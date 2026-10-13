@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import PageGuide from '../components/PageGuide.vue'
+import PageIntro from '../components/PageIntro.vue'
 import { computed, nextTick, onActivated, onMounted, reactive, ref } from 'vue'
 
 import {
@@ -831,20 +831,16 @@ onActivated(() => {
     <AppTopbar />
 
     <main class="content-shell">
-      <section class="page-intro">
-        <div>
-          <p class="eyebrow">BUY / SELL CONDITION RESEARCH</p>
-          <h1>买卖条件研究</h1>
-          <p class="intro-copy">从全市场逐股回测中，挖掘并验证更有效的买入、卖出条件。</p>
-        </div>
-        <div class="intro-note">
-          <span class="note-label">研究口径</span>
-          <strong>逐股独立 · 不做组合</strong>
-          <small>基础规则固定，候选条件按时间留出验证</small>
-        </div>
-      </section>
-
-      <PageGuide page-key="condition-research" />
+      <PageIntro
+        eyebrow="BUY / SELL CONDITION RESEARCH"
+        title="买卖条件研究"
+        copy="从全市场逐股回测中，挖掘并验证更有效的买入、卖出条件。"
+        note-label="研究口径"
+        guide-key="condition-research"
+      >
+        <strong>逐股独立 · 不做组合</strong>
+        <small>基础规则固定，候选条件按时间留出验证</small>
+      </PageIntro>
 
       <div v-if="message" class="notice" :class="{ error: message.includes('失败') || message.includes('错误') }" role="alert" data-testid="condition-research-message">
         {{ message }}
@@ -1382,7 +1378,7 @@ onActivated(() => {
   align-items: center;
   gap: 0.75rem;
   margin-bottom: 0.35rem;
-  color: var(--text-muted);
+  color: var(--muted);
   font-size: 0.85rem;
 }
 
@@ -1405,13 +1401,13 @@ onActivated(() => {
 .condition-hold-to-end small {
   display: block;
   margin-top: 0.35rem;
-  color: var(--text-muted, #6b7280);
+  color: var(--subtle);
   line-height: 1.5;
 }
 
 :deep(.condition-rule) {
   min-width: 180px;
-  font-family: var(--font-mono, monospace);
+  font-family: monospace;
   font-size: 0.85rem;
 }
 
@@ -1419,11 +1415,11 @@ onActivated(() => {
   display: inline-block;
   margin-left: 0.4rem;
   padding: 0 0.35rem;
-  border: 1px solid var(--border, #d1d5db);
+  border: 1px solid var(--border);
   border-radius: 999px;
-  font-family: var(--font-body, inherit);
+  font-family: inherit;
   font-size: 0.7rem;
-  color: var(--text-muted, #6b7280);
+  color: var(--subtle);
   cursor: help;
   white-space: nowrap;
 }
@@ -1451,7 +1447,7 @@ onActivated(() => {
 }
 
 .condition-performance-warning {
-  color: var(--warning, #f59e0b);
+  color: var(--warning);
   line-height: 1.4;
 }
 
@@ -1478,7 +1474,7 @@ onActivated(() => {
 
 :deep(.sensitivity-cell.sens-weak) {
   background: rgba(148, 163, 184, 0.16);
-  color: var(--text-muted, #94a3b8);
+  color: var(--muted);
 }
 
 /* 优势打反：邻域比基线还差，是最需要看见的一格。 */
@@ -1488,7 +1484,7 @@ onActivated(() => {
 }
 
 :deep(.sensitivity-cell.sens-excluded) {
-  color: var(--text-subtle, #64748b);
+  color: var(--subtle);
 }
 
 .condition-stock-details {
@@ -1500,7 +1496,7 @@ onActivated(() => {
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
-  color: var(--text-muted);
+  color: var(--muted);
   font-size: 0.82rem;
 }
 
@@ -1530,9 +1526,9 @@ onActivated(() => {
   gap: 0.35rem;
   margin-bottom: 1rem;
   padding: 0.75rem 0.9rem;
-  border: 1px solid color-mix(in srgb, var(--warning, #b45309) 35%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warning) 35%, transparent);
   border-radius: 0.6rem;
-  background: color-mix(in srgb, var(--warning, #b45309) 8%, transparent);
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
   font-size: 0.86rem;
   line-height: 1.5;
 }

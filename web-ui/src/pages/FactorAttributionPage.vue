@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import PageGuide from '../components/PageGuide.vue'
+import PageIntro from '../components/PageIntro.vue'
 import { computed, onMounted, reactive, ref } from 'vue'
 
 import {
@@ -318,20 +318,16 @@ onMounted(async () => {
     <AppTopbar />
 
     <main class="content-shell">
-      <section class="page-intro">
-        <div>
-          <p class="eyebrow">FACTOR ATTRIBUTION / WHY THESE WON</p>
-          <h1>因子归因</h1>
-          <p class="intro-copy">拿一次已经跑完的回测，把赢的单和输的单分开，看它们在买入当天的指标长什么样。</p>
-        </div>
-        <div class="intro-note">
-          <span class="note-label">它能回答什么</span>
-          <strong>这批单为什么赢</strong>
-          <small>事后解释，不是预测；和因子检验（指标能不能预测未来收益）方向相反</small>
-        </div>
-      </section>
-
-      <PageGuide page-key="factor-attribution" />
+      <PageIntro
+        eyebrow="FACTOR ATTRIBUTION / WHY THESE WON"
+        title="因子归因"
+        copy="拿一次已经跑完的回测，把赢的单和输的单分开，看它们在买入当天的指标长什么样。"
+        note-label="它能回答什么"
+        guide-key="factor-attribution"
+      >
+        <strong>这批单为什么赢</strong>
+        <small>事后解释，不是预测；和因子检验（指标能不能预测未来收益）方向相反</small>
+      </PageIntro>
 
       <div v-if="message" class="notice" role="alert" data-testid="attribution-message">{{ message }}</div>
 
@@ -537,7 +533,7 @@ onMounted(async () => {
   gap: 0.25rem 0.75rem;
   max-height: 220px;
   overflow-y: auto;
-  border: 1px solid var(--border-subtle, rgba(148, 163, 184, 0.25));
+  border: 1px solid var(--border-subtle);
   border-radius: 8px;
   padding: 0.5rem 0.75rem;
 }
@@ -559,7 +555,7 @@ onMounted(async () => {
   margin: 0 0 0.75rem;
   padding-left: 1.1rem;
   font-size: 0.8rem;
-  color: var(--text-muted, #64748b);
+  color: var(--subtle);
 }
 
 /* 中文表头会逐字换行，短标签统一不换行，放不下交给表格横向滚动。 */
@@ -573,7 +569,7 @@ onMounted(async () => {
 
 .attribution-note {
   font-size: 0.8rem;
-  color: var(--text-muted, #64748b);
+  color: var(--subtle);
 }
 
 /* 描边而非绿底：这是「通过校正」的标记，不是涨跌，染成红/绿会被读成收益。 */
