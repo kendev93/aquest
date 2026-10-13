@@ -8,7 +8,7 @@ import {
   type HistoryCompareCandidate,
   type HistoryCompareReport,
 } from '../api/historyCompare'
-import { ApiError } from '../api/client'
+import { describeError } from '../api/client'
 import TermHint from '../components/TermHint.vue'
 import { buildChartGeometry, formatChartValue } from '../utils/chart'
 import {
@@ -136,9 +136,7 @@ async function run(): Promise<void> {
 }
 
 function apiMessage(error: unknown): string {
-  return error instanceof ApiError
-    ? error.message
-    : '读取历史记录失败，请检查本地 DuckDB 数据后重试。'
+  return describeError(error, { fallback: '读取历史记录失败，请检查本地 DuckDB 数据后重试。' })
 }
 
 onMounted(async () => {

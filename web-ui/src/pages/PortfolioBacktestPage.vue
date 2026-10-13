@@ -9,7 +9,7 @@ import {
   getPortfolioBacktestResults,
 } from '../api/portfolioBacktest'
 import { fetchMetadata, parseFormula } from '../api/formulaScreen'
-import { ApiError } from '../api/client'
+import { describeError } from '../api/client'
 import { pollUntil } from '../composables/usePolling'
 import { usePortfolioBacktestHistory } from '../composables/usePortfolioBacktestHistory'
 import { usePortfolioHandoff } from '../composables/usePortfolioHandoff'
@@ -247,9 +247,7 @@ async function parseCustomFormula(): Promise<void> {
     form.buyRule = ruleForSignal('')
     form.sellRule = ruleForSignal('')
     form.rankingValue = ''
-    customParseError.value = error instanceof ApiError
-      ? error.message
-      : '公式解析失败，请检查语法和函数是否受支持。'
+    customParseError.value = describeError(error, { fallback: '公式解析失败，请检查语法和函数是否受支持。' })
   } finally {
     customParseLoading.value = false
   }
@@ -396,8 +394,7 @@ function buildPayload(): PortfolioBacktestPayload {
 }
 
 function apiMessage(error: unknown): string {
-  if (error instanceof ApiError) return error.message
-  return '组合回测失败，请检查本地 DuckDB 数据和配置后重试。'
+  return describeError(error, { fallback: '组合回测失败，请检查本地 DuckDB 数据和配置后重试。' })
 }
 
 // 跨页桥接与回填（策略实验室/条件研究/波段/股池 + 反向带到公式选股）

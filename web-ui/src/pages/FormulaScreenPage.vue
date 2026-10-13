@@ -7,7 +7,7 @@ import { fetchActiveJobs } from '../api/jobs'
 import MarketCandlestickChart from '../components/MarketCandlestickChart.vue'
 import TermHint from '../components/TermHint.vue'
 import { createJob, createSyncJob, fetchMetadata, fetchScreenHistory, getJob, getResults, getScreenHistory, getSyncJob, parseFormula } from '../api/formulaScreen'
-import { ApiError } from '../api/client'
+import { ApiError, describeError } from '../api/client'
 import { pollUntil } from '../composables/usePolling'
 import type { BasketCurve, CombineMode, ConditionOperator, CustomFormulaMetadata, FormulaScreenMetadata, InstrumentBoard, InstrumentType, JobState, LocalMarketChart, MarketSyncJobState, ResultsMeta, SavedConditionSet, ScreenCondition, ScreenFormState, ScreenHistorySummary, ScreenPresetSummary, ScreenResult, StockGroup, StockGroupMember, StockGroupPerformance, StockGroupsSummary, StockGroupSummary, RuleMode, Universe, ValueDefinition } from '../types'
 import {
@@ -612,9 +612,7 @@ async function importLegacyConditionSets(): Promise<void> {
 }
 
 function apiMessage(error: unknown, context: string): string {
-  if (error instanceof ApiError) return error.message
-  if (error instanceof Error && error.message) return `${context}：${error.message}`
-  return context
+  return describeError(error, { fallback: context, localMessage: 'prefix' })
 }
 
 async function parseCustomFormula(): Promise<void> {
@@ -651,9 +649,7 @@ async function parseCustomFormula(): Promise<void> {
     customMetadata.value = null
     parsedFormulaText.value = ''
     form.selectedSignals = []
-    customParseError.value = error instanceof ApiError
-      ? error.message
-      : '公式解析失败，请检查语法和函数是否受支持。'
+    customParseError.value = describeError(error, { fallback: '公式解析失败，请检查语法和函数是否受支持。' })
   } finally {
     customParseLoading.value = false
   }

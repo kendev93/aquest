@@ -2,7 +2,7 @@
 import PageGuide from '../components/PageGuide.vue'
 import { computed, onMounted, reactive, ref } from 'vue'
 
-import { ApiError } from '../api/client'
+import { ApiError, describeError } from '../api/client'
 import { pollUntil, useBackgroundPoll } from '../composables/usePolling'
 import {
   cancelMarketDataJob,
@@ -225,8 +225,7 @@ function activeJobDescription(job: MarketSyncJobState): string {
 }
 
 function apiMessage(error: unknown): string {
-  if (error instanceof ApiError) return error.message
-  return '行情数据读取失败，请检查数据导入状态后重试。'
+  return describeError(error, { fallback: '行情数据读取失败，请检查数据导入状态后重试。' })
 }
 
 function hasActiveMarketDataJob(): boolean {

@@ -21,7 +21,8 @@ import {
 import { ApiError } from '../api/client'
 import { fetchActiveJobs } from '../api/jobs'
 import { pollUntil } from './usePolling'
-import { formatNumber } from '../utils/format'
+import { formatTradeRatio } from '../utils/format'
+import type { TradeRatioKey } from '../utils/format'
 import { portfolioBaseFingerprint } from '../utils/portfolioFingerprint'
 import type {
   PortfolioBacktestPayload,
@@ -120,17 +121,13 @@ export function usePortfolioRiskOptimization(deps: PortfolioRiskOptimizationDeps
   function riskMetricRatio(
     candidate: StrategyDiscoveryCandidate,
     split: string,
-    key: 'payoff_ratio' | 'profit_factor',
+    key: TradeRatioKey,
   ): string {
-    const value = riskMetric(candidate, split, key)
-    if (key === 'profit_factor' && value !== null && value >= 999) return '无亏损'
-    if (key === 'payoff_ratio' && value === null) {
-      const trades = riskMetric(candidate, split, 'total_trades') ?? 0
-      const losses = riskMetric(candidate, split, 'lose_trades')
-      return trades > 0 && losses === 0 ? '无亏损' : '—'
-    }
-    if ((riskMetric(candidate, split, 'total_trades') ?? 0) === 0) return '—'
-    return formatNumber(value)
+    return formatTradeRatio(key, {
+      value: riskMetric(candidate, split, key),
+      totalTrades: riskMetric(candidate, split, 'total_trades'),
+      loseTrades: riskMetric(candidate, split, 'lose_trades'),
+    })
   }
 
   function riskOptimizationPhaseLabel(state: StrategyDiscoveryJobState | null): string {

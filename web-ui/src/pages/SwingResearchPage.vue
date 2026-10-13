@@ -27,7 +27,7 @@ import type {
 import { saveSwingPlan } from '../utils/swingHandoff'
 import { savePortfolioBacktestHandoff } from '../utils/portfolioBacktestHandoff'
 import { formatChinaTimestamp } from '../utils/time'
-import { ApiError } from '../api/client'
+import { describeError } from '../api/client'
 import AppTopbar from '../components/AppTopbar.vue'
 import { formatNumber } from '../utils/format'
 
@@ -145,9 +145,7 @@ function optionalDate(value: string): string | null {
 }
 
 function errorMessage(error: unknown): string {
-  if (error instanceof ApiError) return error.message
-  if (error instanceof Error) return error.message
-  return '波段研究失败，请检查参数后重试。'
+  return describeError(error, { fallback: '波段研究失败，请检查参数后重试。', localMessage: 'raw' })
 }
 
 async function runOverview(): Promise<void> {

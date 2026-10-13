@@ -2,7 +2,7 @@
 import PageGuide from '../components/PageGuide.vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 
-import { ApiError } from '../api/client'
+import { ApiError, describeError } from '../api/client'
 import { fetchActiveJobs } from '../api/jobs'
 import {
   createStrategyDiscovery,
@@ -204,9 +204,11 @@ function refinementMaxTrials(): number {
 }
 
 function apiMessage(error: unknown): string {
-  if (error instanceof ApiError) return error.message
-  if (error instanceof Error && error.message) return `策略实验失败：${error.message}`
-  return '策略实验失败，请检查本地 DuckDB 数据和配置后重试。'
+  return describeError(error, {
+    fallback: '策略实验失败，请检查本地 DuckDB 数据和配置后重试。',
+    localMessage: 'prefix',
+    prefix: '策略实验失败',
+  })
 }
 
 function toggleInstrumentType(type: InstrumentType): void {

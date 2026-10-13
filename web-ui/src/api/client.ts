@@ -158,4 +158,34 @@ export function createRequestClient(options: RequestClientOptions): RequestFn {
   }
 }
 
+export interface ErrorTextOptions {
+  /** 后端没给文案、本地异常也给不出可用信息时的兜底句。 */
+  fallback: string
+  /**
+   * 非 ApiError 的本地异常怎么显示：
+   * `hide`（默认，只给兜底句，不把内部异常文本抛给用户）、
+   * `raw`（直接用它的 message）、
+   * `prefix`（拼成「prefix：message」，prefix 省略时用兜底句）。
+   */
+  localMessage?: 'hide' | 'raw' | 'prefix'
+  /** `localMessage: 'prefix'` 时的前缀。 */
+  prefix?: string
+}
+
+/**
+ * catch 到的未知异常 → 界面文案。
+ *
+ * ApiError 的 message 来自后端响应体，是最有帮助的一句，任何情况下都直接透出。
+ * 其余异常是前端本地抛的，要不要把它的原始文本露给用户是个逐页决定，所以规则只写
+ * 在这里一次，各页只声明自己的兜底句和显示方式，不再各抄一份 `instanceof` 判断。
+ */
+export function describeError(error: unknown, options: ErrorTextOptions): string {
+  const { fallback, localMessage = 'hide', prefix } = options
+  if (error instanceof ApiError) return error.message
+  if (localMessage !== 'hide' && error instanceof Error && error.message) {
+    return localMessage === 'raw' ? error.message : `${prefix ?? fallback}：${error.message}`
+  }
+  return fallback
+}
+
 

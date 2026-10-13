@@ -7,6 +7,7 @@ import {
   formatNumber,
   formatPercent,
   formatSignedPercent,
+  formatTradeRatio,
 } from './format'
 
 describe('formatNumber', () => {
@@ -78,5 +79,29 @@ describe('formatDuration', () => {
     expect(formatDuration(-1)).toBe('—')
     expect(formatDuration(null)).toBe('—')
     expect(formatDuration(Number.NaN)).toBe('—')
+  })
+})
+
+describe('formatTradeRatio', () => {
+  it('零成交一律占位符：没亏过不等于赚过', () => {
+    expect(formatTradeRatio('profit_factor', { value: 999, totalTrades: 0, loseTrades: 0 })).toBe('—')
+    expect(formatTradeRatio('payoff_ratio', { value: null, totalTrades: null, loseTrades: 0 })).toBe('—')
+  })
+
+  it('两种「没有亏损」都认：除零给 null 与盈利因子的 999 哨兵', () => {
+    expect(formatTradeRatio('payoff_ratio', { value: null, totalTrades: 10, loseTrades: 0 })).toBe('无亏损')
+    expect(formatTradeRatio('profit_factor', { value: null, totalTrades: 10, loseTrades: 0 })).toBe('无亏损')
+    expect(formatTradeRatio('profit_factor', { value: 999, totalTrades: 10, loseTrades: 0 })).toBe('无亏损')
+  })
+
+  it('指标缺失但确有亏损时不谎报', () => {
+    expect(formatTradeRatio('payoff_ratio', { value: null, totalTrades: 10, loseTrades: 4 })).toBe('—')
+    expect(formatTradeRatio('profit_factor', { value: null, totalTrades: 10, loseTrades: null })).toBe('—')
+  })
+
+  it('哨兵只管盈利因子：真实盈亏比再大也照样显示数字', () => {
+    expect(formatTradeRatio('payoff_ratio', { value: 1500, totalTrades: 10, loseTrades: 1 })).toBe('1500.00')
+    expect(formatTradeRatio('payoff_ratio', { value: 2, totalTrades: 10, loseTrades: 4 })).toBe('2.00')
+    expect(formatTradeRatio('profit_factor', { value: 1.6, totalTrades: 10, loseTrades: 4 })).toBe('1.60')
   })
 })

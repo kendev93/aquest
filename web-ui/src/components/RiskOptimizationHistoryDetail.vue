@@ -2,7 +2,8 @@
 import { computed, ref } from 'vue'
 
 import type { StrategyDiscoveryCandidate, StrategyDiscoveryResult } from '../types'
-import { formatDuration, formatMoney, formatNumber, formatPercent } from '../utils/format'
+import { formatDuration, formatMoney, formatNumber, formatPercent, formatTradeRatio } from '../utils/format'
+import type { TradeRatioKey } from '../utils/format'
 
 const props = defineProps<{ result: StrategyDiscoveryResult }>()
 const emit = defineEmits<{ close: [] }>()
@@ -60,17 +61,13 @@ function metric(
 function formatRatio(
   candidate: StrategyDiscoveryCandidate,
   period: RiskMetricPeriod,
-  key: 'payoff_ratio' | 'profit_factor',
+  key: TradeRatioKey,
 ): string {
-  const value = metric(candidate, period, key)
-  if ((metric(candidate, period, 'total_trades') ?? 0) === 0) return '—'
-  if (key === 'profit_factor' && value !== null && value >= 999) return '无亏损'
-  if (key === 'payoff_ratio' && value === null) {
-    const trades = metric(candidate, period, 'total_trades') ?? 0
-    const losses = metric(candidate, period, 'lose_trades')
-    return trades > 0 && losses === 0 ? '无亏损' : '—'
-  }
-  return formatNumber(value)
+  return formatTradeRatio(key, {
+    value: metric(candidate, period, key),
+    totalTrades: metric(candidate, period, 'total_trades'),
+    loseTrades: metric(candidate, period, 'lose_trades'),
+  })
 }
 
 function formatAverageLoss(

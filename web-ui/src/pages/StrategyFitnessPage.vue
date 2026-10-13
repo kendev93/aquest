@@ -11,7 +11,7 @@ import {
   getStrategyFitnessResults,
 } from '../api/strategyFitness'
 import { fetchMetadata, parseFormula } from '../api/formulaScreen'
-import { ApiError } from '../api/client'
+import { describeError } from '../api/client'
 import { fetchActiveJobs } from '../api/jobs'
 import BacktestHistoryPanel from '../components/BacktestHistoryPanel.vue'
 import DateRangeSelector from '../components/DateRangeSelector.vue'
@@ -224,9 +224,7 @@ async function parseCustomFormula(): Promise<void> {
     form.buyRule = ruleForSignal('')
     form.sellRule = ruleForSignal('')
     form.rankingValue = ''
-    customParseError.value = error instanceof ApiError
-      ? error.message
-      : '公式解析失败，请检查语法和函数是否受支持。'
+    customParseError.value = describeError(error, { fallback: '公式解析失败，请检查语法和函数是否受支持。' })
   } finally {
     customParseLoading.value = false
   }
@@ -316,8 +314,7 @@ function buildPayload(): StrategyFitnessPayload {
 }
 
 function apiMessage(error: unknown): string {
-  if (error instanceof ApiError) return error.message
-  return '策略适配性评估失败，请检查本地 DuckDB 数据和配置后重试。'
+  return describeError(error, { fallback: '策略适配性评估失败，请检查本地 DuckDB 数据和配置后重试。' })
 }
 
 async function submit(): Promise<void> {

@@ -14,7 +14,7 @@ import {
   saveResearchSettings,
   type StrategyPoolBoard,
 } from '../api/strategyPool'
-import { ApiError } from '../api/client'
+import { describeError } from '../api/client'
 // 这里的任务轮询有意不用 composables/usePolling 的 pollUntil：它内嵌了
 // 「标的状态刷新」编排（refreshPoolEntries + refreshingEntries 抑制）、
 // token 竞态守卫（canApply）和多种完成态的清理动作，抽象盖不住这些差异。
@@ -987,11 +987,7 @@ function formatTimestamp(value: unknown): string {
 }
 
 function apiMessage(error: unknown): string {
-  return error instanceof ApiError
-    ? error.message
-    : error instanceof Error
-      ? error.message
-      : '全市场策略池请求失败，请重试。'
+  return describeError(error, { fallback: '全市场策略池请求失败，请重试。', localMessage: 'raw' })
 }
 
 async function initialize(): Promise<void> {

@@ -3,7 +3,7 @@ import PageGuide from '../components/PageGuide.vue'
 import { computed, onMounted, ref } from 'vue'
 
 import { fetchMetadata } from '../api/formulaScreen'
-import { ApiError } from '../api/client'
+import { describeError } from '../api/client'
 import {
   checkInstrumentConditions,
   fetchInstrumentConditionLibrary,
@@ -144,7 +144,7 @@ function currentScope() {
 }
 
 function apiMessage(error: unknown): string {
-  return error instanceof ApiError ? error.message : '读取失败，请检查本地行情数据后重试。'
+  return describeError(error, { fallback: '读取失败，请检查本地行情数据后重试。' })
 }
 
 async function searchInstruments(): Promise<void> {

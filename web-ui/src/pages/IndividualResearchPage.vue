@@ -6,7 +6,7 @@ import PageGuide from '../components/PageGuide.vue'
 import DateRangeSelector from '../components/DateRangeSelector.vue'
 import IndividualResearchBacktestDetail from '../components/IndividualResearchBacktestDetail.vue'
 import { fetchMetadata } from '../api/formulaScreen'
-import { ApiError } from '../api/client'
+import { describeError } from '../api/client'
 import { pollUntil } from '../composables/usePolling'
 import {
   cancelIndividualResearch,
@@ -117,9 +117,7 @@ function showMessage(text: string, isError = false): void {
 }
 
 function apiMessage(error: unknown, fallback: string): string {
-  return error instanceof ApiError
-    ? error.message
-    : error instanceof Error ? error.message : fallback
+  return describeError(error, { fallback, localMessage: 'raw' })
 }
 
 function toggleValue(valueId: string): void {

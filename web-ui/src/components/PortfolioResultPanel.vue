@@ -13,7 +13,8 @@ import { computed } from 'vue'
 
 import PortfolioPnlAnalysis from './PortfolioPnlAnalysis.vue'
 import TermHint from './TermHint.vue'
-import { formatMoney, formatNumber, formatPercent } from '../utils/format'
+import { formatMoney, formatNumber, formatPercent, formatTradeRatio } from '../utils/format'
+import type { TradeRatioKey } from '../utils/format'
 import { equityChartIndices, equityChartPoints, equityChartRange } from '../utils/portfolioChart'
 import type {
   PortfolioBacktestResult,
@@ -62,16 +63,12 @@ function benchmarkValue(key: string): number | null {
   return benchmark.value?.performance[key] ?? null
 }
 
-function formatPortfolioRatio(key: 'payoff_ratio' | 'profit_factor'): string {
-  const value = performanceValue(key)
-  if ((performanceValue('total_trades') ?? 0) === 0) return '—'
-  if (value !== null) return value >= 999 ? '无亏损' : value.toFixed(2)
-  const trades = performanceValue('total_trades') ?? 0
-  const losses = performanceValue('lose_trades')
-  const wins = performanceValue('win_trades')
-  return key === 'payoff_ratio' && trades > 0 && losses === 0 && wins !== null
-    ? '无亏损'
-    : '—'
+function formatPortfolioRatio(key: TradeRatioKey): string {
+  return formatTradeRatio(key, {
+    value: performanceValue(key),
+    totalTrades: performanceValue('total_trades'),
+    loseTrades: performanceValue('lose_trades'),
+  })
 }
 
 function formatTurnoverMultiple(key: 'buy_turnover' | 'sell_turnover' | 'turnover'): string {

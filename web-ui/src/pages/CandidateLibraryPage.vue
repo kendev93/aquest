@@ -11,7 +11,7 @@ import {
   updateCandidateStatus,
 } from '../api/candidateLibrary'
 import { fetchMetadata } from '../api/formulaScreen'
-import { ApiError } from '../api/client'
+import { ApiError, describeError } from '../api/client'
 import TermHint from '../components/TermHint.vue'
 import type {
   CandidateLibraryItem,
@@ -77,7 +77,7 @@ function showMessage(text: string, isError = false): void {
 }
 
 function apiMessage(error: unknown): string {
-  return error instanceof ApiError ? error.message : '候选库请求失败，请稍后重试。'
+  return describeError(error, { fallback: '候选库请求失败，请稍后重试。' })
 }
 
 async function load(): Promise<void> {

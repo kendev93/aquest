@@ -68,3 +68,26 @@ export function formatDuration(seconds: number | null | undefined): string {
   const remainingMinutes = minutes % 60
   return remainingMinutes ? `${hours} 小时 ${remainingMinutes} 分钟` : `${hours} 小时`
 }
+
+export type TradeRatioKey = 'payoff_ratio' | 'profit_factor'
+
+/**
+ * 盈亏比 / 盈利因子的统一显示口径（组合结果面板、寻优候选榜、寻优历史详情共用）。
+ *
+ * 「没有亏损」在后端有两种写法：`portfolio_backtest/report.py` 的 `_payoff_ratio()`
+ * 和 `condition_research/metrics.py` 的 `_ratio()` 在除数为零时给 null，
+ * `strategy_fitness/rolling.py` 则给 `profit_factor` 填 999 哨兵。两种都要认，
+ * 否则同一件事在不同面板里一个显示「无亏损」、一个显示「—」或「999.00」。
+ *
+ * 999 只对 `profit_factor` 生效：真实盈亏比可以大到四位数（平均亏损极小），
+ * 把它当哨兵等于谎报没有亏损。零成交一律占位符——没亏过不等于赚过。
+ */
+export function formatTradeRatio(
+  key: TradeRatioKey,
+  metrics: { value: number | null; totalTrades: number | null; loseTrades: number | null },
+): string {
+  if (!metrics.totalTrades || metrics.totalTrades <= 0) return PLACEHOLDER
+  if (metrics.value === null) return metrics.loseTrades === 0 ? '无亏损' : PLACEHOLDER
+  if (key === 'profit_factor' && metrics.value >= 999) return '无亏损'
+  return formatNumber(metrics.value)
+}

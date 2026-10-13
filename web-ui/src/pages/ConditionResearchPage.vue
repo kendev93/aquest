@@ -8,7 +8,7 @@ import {
   getConditionResearchHistory,
 } from '../api/conditionResearch'
 import { fetchMetadata, parseFormula } from '../api/formulaScreen'
-import { ApiError } from '../api/client'
+import { describeError } from '../api/client'
 import DateRangeSelector from '../components/DateRangeSelector.vue'
 import RuleGroupEditor from '../components/RuleGroupEditor.vue'
 import TermHint from '../components/TermHint.vue'
@@ -392,9 +392,7 @@ async function parseCustomFormula(): Promise<void> {
     customMetadata.value = null
     form.buyRule = emptyRule()
     form.sellRule = emptyRule()
-    customParseError.value = error instanceof ApiError
-      ? error.message
-      : '公式解析失败，请检查语法。'
+    customParseError.value = describeError(error, { fallback: '公式解析失败，请检查语法。' })
   } finally {
     customParseLoading.value = false
   }
@@ -761,9 +759,7 @@ const duplicateSummary = computed(() => duplicateSummaryText(report.value))
 const trialSummary = computed(() => trialSummaryText(report.value))
 
 function apiMessage(error: unknown): string {
-  return error instanceof ApiError
-    ? error.message
-    : '买卖条件研究失败，请检查行情数据和配置后重试。'
+  return describeError(error, { fallback: '买卖条件研究失败，请检查行情数据和配置后重试。' })
 }
 
 /**

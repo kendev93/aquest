@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { ApiError, createApiErrorClass, createRequestClient } from './client'
+import { ApiError, createApiErrorClass, createRequestClient, describeError } from './client'
 import type { ApiRequestMessages, RequestClientOptions } from './client'
 
 const ErrorClass = createApiErrorClass('SampleApiError')
@@ -109,5 +109,29 @@ describe('api client', () => {
     const error = new ErrorClass('boom', 418)
     expect(error).toBeInstanceOf(ApiError)
     expect(error.name).toBe('SampleApiError')
+  })
+})
+
+describe('describeError', () => {
+  const fallback = '组合回测失败，请检查本地 DuckDB 数据和配置后重试。'
+
+  it('passes backend messages through and hides local exception text by default', () => {
+    expect(describeError(new ErrorClass('标的代码不能为空', 422), { fallback })).toBe('标的代码不能为空')
+    expect(describeError(new TypeError('reading "codes"'), { fallback })).toBe(fallback)
+    expect(describeError('boom', { fallback })).toBe(fallback)
+    expect(describeError(new Error(''), { fallback })).toBe(fallback)
+  })
+
+  it('shows local exception text when the page asks for it', () => {
+    expect(describeError(new Error('IndexedDB 配额不足'), { fallback, localMessage: 'raw' }))
+      .toBe('IndexedDB 配额不足')
+  })
+
+  it('appends local exception text to a prefix, defaulting the prefix to the fallback', () => {
+    expect(describeError(new Error('boom'), { fallback: '扫描失败', localMessage: 'prefix' }))
+      .toBe('扫描失败：boom')
+    expect(describeError(new Error('boom'), { fallback, localMessage: 'prefix', prefix: '策略实验失败' }))
+      .toBe('策略实验失败：boom')
+    expect(describeError('boom', { fallback: '扫描失败', localMessage: 'prefix' })).toBe('扫描失败')
   })
 })

@@ -12,7 +12,7 @@ import {
   getFactorAttributionResults,
 } from '../api/factorAttribution'
 import { fetchMetadata } from '../api/formulaScreen'
-import { ApiError } from '../api/client'
+import { describeError } from '../api/client'
 import { fetchActiveJobs } from '../api/jobs'
 import { savePortfolioBacktestHandoff } from '../utils/portfolioBacktestHandoff'
 import BacktestHistoryPanel from '../components/BacktestHistoryPanel.vue'
@@ -127,9 +127,7 @@ function buildPayload(): FactorAttributionPayload {
 }
 
 function apiMessage(error: unknown): string {
-  return error instanceof ApiError
-    ? error.message
-    : '因子归因失败，请检查本地 DuckDB 数据和配置后重试。'
+  return describeError(error, { fallback: '因子归因失败，请检查本地 DuckDB 数据和配置后重试。' })
 }
 
 async function submit(): Promise<void> {
