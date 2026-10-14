@@ -82,20 +82,6 @@ export async function createMarketDataSync(payload: {
   return response.data
 }
 
-export async function createOnlineBackfill(payload: {
-  universe?: 'all' | 'sh' | 'sz'
-  boards?: InstrumentBoard[]
-} = {}): Promise<{ job_id: string; status: string }> {
-  const response = await request<{ data: { job_id: string; status: string } }>(
-    `${API_BASE}/backfill`,
-    {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    },
-  )
-  return response.data
-}
-
 export interface LocalVipdocDetection {
   candidates: LocalVipdocCandidate[]
   default_path: string
@@ -125,7 +111,6 @@ export async function createLocalImport(payload: {
 
 export async function createOnlineSync(payload: {
   universe?: 'all' | 'sh' | 'sz'
-  bars?: number
   instrument_types?: InstrumentType[]
   boards?: InstrumentBoard[]
 } = {}): Promise<{ job_id: string; status: string }> {

@@ -33,6 +33,10 @@ class MarketSyncConfig:
     """Configuration for one online-to-DuckDB synchronization run."""
 
     universe: SyncUniverse = "all"
+    # 兼容保留：早期按"最近 N 根"拉取用过它，现在没人读。每只标的实际请求的区间由
+    # 库里自己的覆盖决定（没有就 2015-01-01 起全量，已有就补到今天并回看若干天做
+    # 逐值对照，见 online_market_sync._requested_ranges）。校验留着只为了拦住旧调用
+    # 传进来的荒谬值，改这个值不会改变任何行为。
     bars: int = 800
     timeout: float = 30.0
     instrument_types: tuple[InstrumentType, ...] | None = None

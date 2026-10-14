@@ -21,6 +21,9 @@ const chart = (period: 'daily' | 'monthly' | 'yearly') => ({
 })
 
 test('user can browse local instruments and switch chart periods', async ({ page }) => {
+  // 没 mock 的 /jobs/active 会穿过 vite 代理打到真实后端：那台容器只要正在跑自动同步，
+  // 页面就会进入"有任务在跑"的状态，列表被清空、同步按钮禁用，测试红的还不是自己的代码。
+  await page.route('**/api/v1/market-data/jobs/active*', (route) => route.fulfill({ json: { data: [] } }))
   await page.route('**/api/v1/market-data/store', (route) => route.fulfill({ json: { data: {
     database_path: '/data/market/market.duckdb', schema_version: 1, instrument_count: 2,
     bar_count: 620, data_start: '2020-01-01', data_end: '2024-12-31',
@@ -41,8 +44,9 @@ test('user can browse local instruments and switch chart periods', async ({ page
   await expect(page.getByTestId('market-candlestick-chart')).toBeVisible()
 })
 
-test('user can start a full-history backfill', async ({ page }) => {
-  let backfillRequest: unknown
+test('user can start a market-data sync', async ({ page }) => {
+  let syncRequest: unknown
+  await page.route('**/api/v1/market-data/jobs/active*', (route) => route.fulfill({ json: { data: [] } }))
   await page.route('**/api/v1/market-data/store', (route) => route.fulfill({ json: { data: {
     database_path: '/data/market/market.duckdb', schema_version: 12, instrument_count: 1,
     bar_count: 100, data_start: '2010-01-01', data_end: '2026-09-10',
@@ -50,23 +54,23 @@ test('user can start a full-history backfill', async ({ page }) => {
   } } }))
   await page.route('**/api/v1/market-data/local/instruments**', (route) => route.fulfill({ json: instruments }))
   await page.route('**/api/v1/market-data/local/SH/600000/bars*', (route) => route.fulfill({ json: chart('daily') }))
-  await page.route('**/api/v1/market-data/backfill', async (route) => {
-    backfillRequest = route.request().postDataJSON()
-    await route.fulfill({ json: { data: { job_id: 'backfill-1', status: 'queued' } } })
+  await page.route('**/api/v1/market-data/sync-online', async (route) => {
+    syncRequest = route.request().postDataJSON()
+    await route.fulfill({ json: { data: { job_id: 'online-e2e-1', status: 'queued' } } })
   })
-  await page.route('**/api/v1/market-data/jobs/backfill-1', (route) => route.fulfill({ json: { data: {
-    job_id: 'backfill-1', status: 'completed', progress: 1, total_candidates: 2,
+  await page.route('**/api/v1/market-data/jobs/online-e2e-1', (route) => route.fulfill({ json: { data: {
+    job_id: 'online-e2e-1', status: 'completed', progress: 1, total_candidates: 2,
     total_scanned: 2, errors: 0, error: null,
     result: { source: 'online', provider: 'eastmoney', written_bars: 100 },
   } } }))
 
   await page.goto('/market-data')
-  await page.getByTestId('market-online-backfill').click()
+  await page.getByTestId('market-sync-online').click()
   // 上游行情源是内部实现细节：结果里带着 provider，但界面不展示它。
   await expect(page.getByTestId('market-data-progress')).toContainText('写入 K 线 100')
   await expect(page.getByTestId('market-data-progress')).not.toContainText('eastmoney')
-  // 回填现在把证券类型一起带过去，勾了 ETF 也能补齐。
-  expect(backfillRequest).toEqual({ universe: 'all', instrument_types: ['stock'] })
+  // 同步把证券类型一起带过去（勾了 ETF 也能同步），并且不再发那个无人消费的 bars。
+  expect(syncRequest).toEqual({ universe: 'all', instrument_types: ['stock'] })
 })
 
 test('user can see and cancel an active market-data job', async ({ page }) => {

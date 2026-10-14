@@ -9,7 +9,6 @@ import {
   createHealthCheck,
   createHealthRepair,
   createLocalImport,
-  createOnlineBackfill,
   createOnlineRefresh,
   createOnlineSync,
   deleteMarketBars,
@@ -452,34 +451,13 @@ async function cancelActiveMarketJob(jobId: string): Promise<void> {
 
 async function syncOnlineData(): Promise<void> {
   syncLoading.value = true
-  syncLabel.value = '正在同步最近行情…'
+  syncLabel.value = '正在同步行情…'
   message.value = ''
   try {
+    // 不发 bars：这个字段从请求到配置都无人消费（区间只由 _requested_ranges 决定），
+    // 界面上也没有"拉多少根"可调。
     const job = await createOnlineSync({
       universe: form.syncUniverse,
-      bars: 800,
-      ...syncScopePayload(),
-    })
-    beginJob(job.job_id, job.status)
-    await waitForJob(job.job_id)
-    await loadStoreStatus()
-    await loadInstruments()
-  } catch (error) {
-    message.value = apiMessage(error)
-  } finally {
-    syncLoading.value = false
-    syncLabel.value = ''
-  }
-}
-
-async function backfillOnlineData(): Promise<void> {
-  syncLoading.value = true
-  syncLabel.value = '正在补齐全部历史…'
-  message.value = ''
-  try {
-    const job = await createOnlineBackfill({
-      universe: form.syncUniverse,
-      // 回填曾经只发股票，现在把类型一起传过去。
       ...syncScopePayload(),
     })
     beginJob(job.job_id, job.status)
@@ -927,11 +905,10 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
             <div><label for="market-sync-universe">同步市场</label><select id="market-sync-universe" v-model="form.syncUniverse" data-testid="market-sync-universe"><option value="all">沪深全部</option><option value="sh">仅上海</option><option value="sz">仅深圳</option></select></div>
             <div class="scope-options"><span>证券类型</span><label v-for="option in INSTRUMENT_TYPE_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-sync-type-${option.key}`" :checked="form.syncInstrumentTypes.includes(option.key)" @change="toggleInstrumentType(option.key)">{{ option.label }}</label></div>
             <div class="scope-options"><span>板块</span><label v-for="option in BOARD_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-sync-board-${option.key}`" :checked="form.syncBoards.includes(option.key)" @change="toggleBoard(option.key)">{{ option.label }}</label></div>
-            <small class="scope-helper">板块未勾选表示不限制；类型和板块同时选择时取交集。在线同步下载不复权日线（raw）；除权跳空由指标计算时按分红送转事件校正，成交价始终是真实价。三个入口的区别只在看多少段历史：<b>同步最近行情</b>每只标的只拉最近 800 根（约 3 年），日常更新用它；<b>补齐全部历史</b>只请求库里已有区间之外的缺口，前后缺段用它，已有区间不动；<b>删除并重下全部历史</b>先删掉所选范围内标的的全部日线（含本地导入）再整段重下，能覆盖已经写歪的中间段，耗时最久。</small>
+            <small class="scope-helper" data-testid="market-sync-helper">板块未勾选表示不限制；类型和板块同时选择时取交集。在线同步下载不复权日线（raw）；除权跳空由指标计算时按分红送转事件校正，成交价始终是真实价。<b>同步行情</b>按每只标的自己的覆盖决定拉哪段：库里没有这只标的就从 2015-01-01 全量下载；已有行情就补到最新交易日，并把它最近 10 天一起重下用作对照——逐值比过没变就不写库，也不会因此重算指标，只有上游改写了近期数据才会覆盖。<b>删除并重下全部历史</b>先删掉所选范围内标的的全部日线（含本地导入）再整段重下，只有它能修正已经写歪的中间那段，耗时最久。</small>
           </div>
           <div class="market-sync-actions">
-            <button class="primary-button" data-testid="market-sync-online" type="button" :disabled="syncLoading" @click="syncOnlineData">同步最近行情</button>
-            <button class="secondary-button" data-testid="market-online-backfill" type="button" :disabled="syncLoading" @click="backfillOnlineData">{{ syncLoading ? '补齐中…' : '补齐全部历史' }}</button>
+            <button class="primary-button" data-testid="market-sync-online" type="button" :disabled="syncLoading" @click="syncOnlineData">同步行情</button>
             <button class="secondary-button" data-testid="market-online-refresh" type="button" :disabled="syncLoading" @click="refreshOnlineData">{{ syncLoading ? '重下中…' : '删除并重下全部历史' }}</button>
           </div>
           <div class="local-import-row">

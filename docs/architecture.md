@@ -33,7 +33,7 @@ Tencent（日线首选）／East Money（日线兜底） ─────┘
 - `screening/` 负责条件合并、批量读取、单标的容错、进度和导出，不处理网络或文件格式。
 - `backtest/` 负责单标的交易模拟和绩效计算；`portfolio_backtest/` 负责动态候选、固定槽位和补位；`strategy_fitness/` 复用这些交易语义完成时间切分评估。
 - `web/` 负责 Pydantic 校验、任务提交/轮询、任务互斥分组和安全错误响应。正式 Docker 运行时，策略发现、二次优化和榜单复核由独立 `strategy-worker` 执行；worker 使用容器内认证 API 上报领取、进度、取消和结果，backend 是 DuckDB 的唯一写入者。worker 对 AQuest 数据库只读，计算期指标缓存留在内存，普通任务继续使用进程内 runner。
-- `web-ui/` 负责行情状态展示、同步范围表单、进度和图表；除在线同步、East Money 全量补齐和强制全量重刷（先删后下）外，也提供显式的通达信 `vipdoc` 本地日线导入。
+- `web-ui/` 负责行情状态展示、同步范围表单、进度和图表；界面上的同步入口只有一个「同步行情」（库里没有的标的从 2015-01-01 全量下载，已有行情的标的补到最新交易日并回看最近若干天做逐值对照），另有强制全量重刷（先删后下）和显式的通达信 `vipdoc` 本地日线导入。East Money 全量补齐端点保留，但不再是界面入口——体检「修复」自己在内部按 `full_history` 配置重下。
 
 行情适配器对业务层提供项目内的 provider 接口和规范化 DataFrame。证券目录和交易日历优先使用 Baostock、回退到 East Money；常规日线优先使用 Tencent、回退到 East Money；全量历史补齐接口固定使用 East Money。项目自有 `.day` 读取器由本地导入服务显式调用，Docker 可通过 `docker-compose.tdx.yml` 只读挂载 `vipdoc`。应用启动时不会扫描或自动导入本地文件。
 
@@ -287,7 +287,7 @@ East Money 证券目录在服务端按板块收窄（`fs=m:0 t:6,m:0 t:80,m:1 t:
 - `POST /api/v1/instrument-lab/backtest`（单标的回测，吃既有的 `BacktestRequest`）
 - `POST /api/v1/market-data/sync-online`（按所选 provider、市场和品种范围在线更新）
 - `POST /api/v1/market-data/sync`（一键在线同步兼容入口，与 `sync-online` 同一实现）
-- `POST /api/v1/market-data/backfill`（East Money 股票历史全量补齐，固定使用 `eastmoney` provider）
+- `POST /api/v1/market-data/backfill`（East Money 股票历史全量补齐，固定使用 `eastmoney` provider；界面已合并为单一「同步行情」，此端点留给脚本调用与兼容）
 - `POST /api/v1/market-data/refresh`（强制全量重刷：先删除所选范围内标的的全部日线再整段重下，需 `confirm=true`）
 - `GET /api/v1/market-data/capabilities`（provider 能力、版本、当前来源、同步执行模式和范围）
 - `GET /api/v1/market-data/store`（本机库状态、自动同步状态和最近一次同步摘要；`full_market_sync_supported` 恒为 false、`market_sync_lock` 恒为 null，仅为兼容旧客户端保留）

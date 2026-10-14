@@ -16,7 +16,6 @@ vi.mock('../api/marketData', async () => {
     fetchLocalChart: vi.fn(),
     fetchStoreStatus: vi.fn(),
     fetchActiveMarketDataJobs: vi.fn(),
-    createOnlineBackfill: vi.fn(),
     createOnlineSync: vi.fn(),
     createOnlineRefresh: vi.fn(),
     createLocalImport: vi.fn(),
@@ -268,7 +267,6 @@ describe('MarketDataPage', () => {
 
     expect(marketApi.createOnlineSync).toHaveBeenCalledWith({
       universe: 'all',
-      bars: 800,
       instrument_types: ['stock'],
     })
     expect(wrapper.get('[data-testid="market-data-progress"]').text()).not.toContain('文件导入')
@@ -305,25 +303,41 @@ describe('MarketDataPage', () => {
     )
   })
 
-  it('starts a full-history backfill for the selected scope', async () => {
-    vi.mocked(marketApi.createOnlineBackfill).mockResolvedValue({ job_id: 'backfill-1', status: 'queued' })
+  it('sends the selected instrument types and boards with the merged sync', async () => {
+    vi.mocked(marketApi.createOnlineSync).mockResolvedValue({ job_id: 'online-3', status: 'queued' })
     vi.mocked(marketApi.getMarketDataJob).mockResolvedValue({
-      job_id: 'backfill-1', status: 'completed', progress: 1, total_candidates: 2,
+      job_id: 'online-3', status: 'completed', progress: 1, total_candidates: 2,
       total_scanned: 2, errors: 0, error: null, result: { source: 'online', provider: 'eastmoney', written_bars: 1200 },
     })
     const wrapper = mountPage()
     await flushPromises()
 
     await wrapper.get('[data-testid="market-sync-board-main"]').setValue(true)
-    await wrapper.get('[data-testid="market-online-backfill"]').trigger('click')
+    await wrapper.get('[data-testid="market-sync-online"]').trigger('click')
     await flushPromises()
 
-    // 回填要把类型一起带过去：以前硬编码只发股票，勾了 ETF 也补不到。
-    expect(marketApi.createOnlineBackfill).toHaveBeenCalledWith({
+    // 类型和板块必须一起带上：以前回填硬编码只发股票，勾了 ETF 也补不到。
+    // 两个入口合成一个之后，这条约束落在同步上，不能再退回去。
+    expect(marketApi.createOnlineSync).toHaveBeenCalledWith({
       universe: 'all',
       instrument_types: ['stock'],
       boards: ['main'],
     })
+  })
+
+  it('offers one sync action plus the destructive re-download, and stops claiming an 800-bar window', async () => {
+    // 「拉最近 800 根」是从没人消费的 bars 字段脑补出来的描述：区间只由标的自己的覆盖
+    // 决定——库里没有就从 2015-01-01 全量下，已有就补到今天并回看 10 天做逐值对照。
+    const wrapper = mountPage()
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="market-online-backfill"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="market-sync-online"]').text()).toBe('同步行情')
+    expect(wrapper.get('[data-testid="market-online-refresh"]').text()).toBe('删除并重下全部历史')
+    const helper = wrapper.get('[data-testid="market-sync-helper"]').text()
+    expect(helper).not.toContain('800')
+    expect(helper).toContain('从 2015-01-01 全量下载')
+    expect(helper).toContain('最近 10 天')
   })
 
   it('refreshes the selected scope from scratch after an explicit confirmation', async () => {

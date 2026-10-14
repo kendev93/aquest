@@ -320,7 +320,6 @@ class AutomaticMarketSyncScheduler:
                 MarketSyncConfig(
                     universe="all",
                     provider="eastmoney",
-                    bars=800,
                     end_date=end_date,
                     prefer_store_targets=False,
                     refresh_names=False,

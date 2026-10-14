@@ -54,6 +54,8 @@ class MarketSyncRequest(BaseModel):
     # The legacy TDX provider was removed; the field stays for API compatibility
     # and only accepts the default so old callers sending it do not 422.
     provider: Literal["eastmoney"] = "eastmoney"
+    # 兼容保留、不再生效：区间由库里每只标的自己的覆盖决定（空库 2015-01-01 起全量，
+    # 已有则补到今天并回看若干天做逐值对照）。老调用还在发这个值，所以留着并继续校验。
     bars: int = Field(default=800, ge=1, le=800)
     instrument_types: list[InstrumentType] | None = Field(default=None, max_length=1)
     boards: list[InstrumentBoard] | None = Field(default=None, max_length=7)

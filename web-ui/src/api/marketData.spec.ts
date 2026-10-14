@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   createLocalImport,
-  createOnlineBackfill,
   createMarketDataSync,
   createOnlineSync,
   cancelMarketDataJob,
@@ -111,7 +110,7 @@ describe('market data API', () => {
       .mockResolvedValueOnce(new Response(JSON.stringify({ data: { database_path: '/data/market/market.duckdb', schema_version: 1, instrument_count: 2, bar_count: 10, data_start: '2024-01-01', data_end: '2024-01-10', last_online_sync_at: null } }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ data: { job_id: 'online-1', status: 'completed', progress: 1, total_candidates: 1, total_scanned: 1, errors: 0, error: null, result: null } }), { status: 200 }))
 
-    await expect(createOnlineSync({ universe: 'all', bars: 800 })).resolves.toMatchObject({ job_id: 'online-1' })
+    await expect(createOnlineSync({ universe: 'all' })).resolves.toMatchObject({ job_id: 'online-1' })
     await expect(fetchStoreStatus()).resolves.toMatchObject({ instrument_count: 2 })
     await expect(getMarketDataJob('online-1')).resolves.toMatchObject({ status: 'completed' })
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
@@ -119,9 +118,10 @@ describe('market data API', () => {
       '/api/v1/market-data/store',
       '/api/v1/market-data/jobs/online-1',
     ])
+    // 不再发 bars：区间由每只标的自己的覆盖决定，这个值全程无人消费。
     expect(fetchMock.mock.calls[0][1]).toMatchObject({
       method: 'POST',
-      body: JSON.stringify({ universe: 'all', bars: 800 }),
+      body: JSON.stringify({ universe: 'all' }),
     })
   })
 
@@ -145,23 +145,6 @@ describe('market data API', () => {
       status: 200,
       message: '服务器返回了空响应，请稍后重试。',
     })
-  })
-
-  it('starts a full-history backfill', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
-      new Response(JSON.stringify({ data: { job_id: 'backfill-1', status: 'queued' } }), { status: 202 }),
-    )
-
-    await expect(createOnlineBackfill({ universe: 'sh', boards: ['main'] })).resolves.toMatchObject({
-      job_id: 'backfill-1',
-    })
-    expect(fetchMock).toHaveBeenCalledWith(
-      '/api/v1/market-data/backfill',
-      expect.objectContaining({
-        method: 'POST',
-        body: JSON.stringify({ universe: 'sh', boards: ['main'] }),
-      }),
-    )
   })
 
   it('lists active market-data jobs and cancels one job', async () => {
