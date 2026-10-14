@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 MAX_WORKERS = 8
+_CGROUP_ROOT = Path("/sys/fs/cgroup")
 
 
 def visible_cpu_count() -> int:
@@ -34,9 +35,28 @@ def visible_cpu_count() -> int:
 
 
 def _cgroup_cpu_quota() -> int | None:
-    """Read the v2 ``cpu.max`` quota, rounded up to whole CPUs."""
+    """CPU 配额：先 cgroup v2 的 ``cpu.max``，再退到 v1 的 cfs 两兄弟文件。"""
 
-    for path in (Path("/sys/fs/cgroup/cpu.max"), Path("/sys/fs/cgroup/cpu/cpu.max")):
+    return _cgroup_v2_cpu_quota(_CGROUP_ROOT) or _cgroup_v1_cpu_quota(_CGROUP_ROOT)
+
+
+def _cpu_cores(quota: int | None, period: int | None) -> int | None:
+    if quota is None or period is None or quota <= 0 or period <= 0:  # "max" 或未设置
+        return None
+    return max(1, -(-quota // period))
+
+
+def _read_int(path: Path) -> int | None:
+    try:
+        return int(path.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def _cgroup_v2_cpu_quota(root: Path) -> int | None:
+    """v2：``cpu.max`` 一行两列（``<quota> <period>``，不限时是 ``max``）。"""
+
+    for path in (root / "cpu.max", root / "cpu" / "cpu.max"):
         try:
             raw = path.read_text(encoding="utf-8").split()
         except OSError:
@@ -44,11 +64,22 @@ def _cgroup_cpu_quota() -> int | None:
         if len(raw) != 2:
             continue
         try:
-            quota = int(raw[0])
-            period = int(raw[1])
+            cores = _cpu_cores(int(raw[0]), int(raw[1]))
         except ValueError:
             continue
-        if quota <= 0 or period <= 0:  # "max" or unset
-            continue
-        return max(1, -(-quota // period))
+        if cores is not None:
+            return cores
     return None
+
+
+def _cgroup_v1_cpu_quota(root: Path) -> int | None:
+    """v1 没有 ``cpu/cpu.max``：配额拆在 ``cpu.cfs_quota_us``（-1 = 不限）与 ``cpu.cfs_period_us``。
+
+    以前只找 ``cpu.max``，v1 容器里等于什么都没读到，worker 池按宿主核数放大——
+    恰好是这个函数注释声称要防的过订阅。
+    """
+
+    return _cpu_cores(
+        _read_int(root / "cpu" / "cpu.cfs_quota_us"),
+        _read_int(root / "cpu" / "cpu.cfs_period_us"),
+    )

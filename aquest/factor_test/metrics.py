@@ -90,6 +90,12 @@ class LongShortStat:
         }
 
 
+def _is_finite(value: float | None) -> bool:
+    """``None`` 与 NaN/inf 都算"没有可上线的数值"。"""
+
+    return value is not None and bool(np.isfinite(value))
+
+
 @dataclass(frozen=True)
 class FactorEvidence:
     """One value, measured against forward returns."""
@@ -127,8 +133,9 @@ class FactorEvidence:
             "ic_positive_rate": self.ic_positive_rate,
             "ic_series": list(self.ic_series),
             "ic_cumulative": list(self.ic_cumulative),
-            "ic_first_half": self.ic_first_half,
-            "ic_second_half": self.ic_second_half,
+            # 半段均值同样不能带 NaN 上线，理由与 ic_mean 相同。
+            "ic_first_half": self.ic_first_half if _is_finite(self.ic_first_half) else None,
+            "ic_second_half": self.ic_second_half if _is_finite(self.ic_second_half) else None,
             "layers": [layer.to_dict() for layer in self.layers],
             "layer_inversions": self.layer_inversions,
             "long_short": self.long_short.to_dict(),
@@ -365,8 +372,13 @@ def _halves(ic_series: np.ndarray, usable: np.ndarray) -> tuple[float | None, fl
     middle = size // 2
     first = ic_series[:middle][usable[:middle]]
     second = ic_series[middle:][usable[middle:]]
-    first_mean = float(np.mean(first)) if np.isfinite(first).any() else None
-    second_mean = float(np.mean(second)) if np.isfinite(second).any() else None
+    # 只在**有限的那些天**上求均值：`isfinite(...).any()` 只要有一天有限就会放行整段，
+    # 而带 NaN 的 np.mean 直接返回 NaN——这个值随后要进 JSON（没有 NaN 这个字面量），
+    # 也要参与 `_note` 的同向判断（NaN 乘积既不 >0 也不 <0，"半段背离"的告警被静默吞掉）。
+    first_finite = first[np.isfinite(first)]
+    second_finite = second[np.isfinite(second)]
+    first_mean = float(np.mean(first_finite)) if first_finite.size else None
+    second_mean = float(np.mean(second_finite)) if second_finite.size else None
     return first_mean, second_mean
 
 

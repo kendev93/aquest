@@ -28,6 +28,16 @@ web-ui/playwright-report/
 
 data/vipdoc/*
 !data/vipdoc/.gitkeep
+# DATA_DIR 指到仓库内时（docker-compose.bind.yml / AQUEST_DATA_DIR）整个运行目录都是
+# 派生数据：行情库、指标缓存、worker token、prune 之前的整库备份。曾经只有 *.duckdb
+# 被忽略，`.strategy-worker-token` 和 `market.duckdb.prune-backup-<时间戳>` 都不在任何
+# 规则里，`git add -A` 会把凭据和几 GB 备份一起提交上去。
+data/market/
+*.prune-backup-*
+*.strategy-worker-token
+strategy-worker-token
+# docker-compose.tdx.yml 未设 TDX_* 时用的空占位目录（Docker 会自动建出来）。
+.tdx-unset/
 
 *.duckdb
 *.duckdb.wal

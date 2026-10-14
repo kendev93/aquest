@@ -124,12 +124,20 @@ jobs:
       - name: 计算标签
         id: meta
         run: |
+          set -eu
           image="$REGISTRY/$OWNER/aquest"
           version=""
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             version="$INPUT_TAG"
           else
             version="$REF_NAME"
+          fi
+          # 手动触发的版本号是自由输入，而它会被拼进后面 `docker buildx ... -t` 的参数。
+          # 只允许 Docker 认可的标签字符：空白、`-`、`;`、`$()` 之类一旦进到这里，就等于
+          # 在带 packages:write 的任务里注入命令，发布出去的镜像标签也会被篡改。
+          if [ -n "$version" ] && ! printf '%s' "$version" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'; then
+            echo "非法的镜像标签：$version" >&2
+            exit 1
           fi
           tags="-t $image:latest"
           # 手动触发且未填版本号时，只更新 latest。
@@ -139,6 +147,10 @@ jobs:
           echo "tags=$tags" >> "$GITHUB_OUTPUT"
 
       - name: 合并清单
+        # 输出经 env 传进脚本，不要写 `${{ steps.meta.outputs.tags }}`：GitHub 是在
+        # shell 之前做文本内插的，那样前面这道标签校验就形同虚设。
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           set -eu
           sources=""
@@ -147,7 +159,7 @@ jobs:
           done
           echo "待合并清单成员：$sources"
           # shellcheck disable=SC2086
-          docker buildx imagetools create ${{ steps.meta.outputs.tags }} $sources
+          docker buildx imagetools create $IMAGE_TAGS $sources
 
       - name: 校验清单
         run: docker buildx imagetools inspect "$REGISTRY/$OWNER/aquest:latest"

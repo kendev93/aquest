@@ -5,6 +5,7 @@ from __future__ import annotations
 import numpy as np
 
 from aquest.factor_test.metrics import (
+    _halves,
     annotate_significance,
     correlation_gram,
     evaluate_factor,
@@ -159,6 +160,27 @@ def test_halves_only_disagree_when_their_signs_disagree() -> None:
     stable = evaluate_factor(*_panel(), value_id="f", display_name="f", config=_config())
     assert stable.ic_first_half is not None and stable.ic_second_half is not None
     assert "前后半段同向" in stable.note
+
+
+def test_halves_never_emit_nan_into_the_json_payload() -> None:
+    """可用但取值恒定的那一列，半段均值必须落成 null 而不是 NaN。
+
+    旧写法是 `np.mean(first) if np.isfinite(first).any() else None`：只要有一天有限就
+    放行整段，而带 NaN 的 `np.mean` 返回 NaN。JSON 没有 NaN 这个字面量，而 `_note` 里
+    NaN 的乘积既大于 0 也小于 0 不成立，"前后半段方向相反"的告警会被静默吞掉。
+    """
+
+    series = np.array([0.01, np.nan, 0.03, np.nan], dtype=float)
+    usable = np.array([True, True, True, True], dtype=bool)
+    first_half, second_half = _halves(series, usable)
+    assert first_half == 0.01
+    assert second_half == 0.03
+
+    # 半段里一个有限值都没有时是 None，而不是 NaN。
+    empty_half = np.array([0.01, np.nan, np.nan, np.nan], dtype=float)
+    assert _halves(empty_half, usable) == (0.01, None)
+    all_nan = np.array([np.nan, np.nan, np.nan, np.nan], dtype=float)
+    assert _halves(all_nan, usable) == (None, None)
 
 
 def test_a_flat_ladder_is_not_counted_as_inverted() -> None:

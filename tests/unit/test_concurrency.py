@@ -1,8 +1,48 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
-from aquest.concurrency import visible_cpu_count
+from aquest.concurrency import (
+    _cgroup_v1_cpu_quota,
+    _cgroup_v2_cpu_quota,
+    visible_cpu_count,
+)
+
+
+def _write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def test_cgroup_v1_quota_reads_the_cfs_pair(tmp_path: Path) -> None:
+    """cgroup v1 的配额是 cpu.cfs_quota_us + cpu.cfs_period_us 两个文件。
+
+    以前只找 ``cpu/cpu.max``（v1 里根本不存在），v1 容器内配额被完全忽略、worker 池
+    按宿主核数放大——正是这个模块要防的过订阅。
+    """
+
+    _write(tmp_path / "cpu" / "cpu.cfs_quota_us", "150000\n")
+    _write(tmp_path / "cpu" / "cpu.cfs_period_us", "100000\n")
+    assert _cgroup_v1_cpu_quota(tmp_path) == 2  # 1.5 核向上取整
+
+
+def test_cgroup_v1_quota_treats_minus_one_as_unlimited(tmp_path: Path) -> None:
+    _write(tmp_path / "cpu" / "cpu.cfs_quota_us", "-1\n")
+    _write(tmp_path / "cpu" / "cpu.cfs_period_us", "100000\n")
+    assert _cgroup_v1_cpu_quota(tmp_path) is None
+
+
+def test_cgroup_v1_quota_is_none_without_the_controller(tmp_path: Path) -> None:
+    assert _cgroup_v1_cpu_quota(tmp_path) is None
+
+
+def test_cgroup_v2_quota_reads_cpu_max(tmp_path: Path) -> None:
+    _write(tmp_path / "cpu.max", "400000 100000\n")
+    assert _cgroup_v2_cpu_quota(tmp_path) == 4
+
+    _write(tmp_path / "cpu.max", "max 100000\n")
+    assert _cgroup_v2_cpu_quota(tmp_path) is None
 
 
 def test_visible_cpu_count_prefers_process_affinity(monkeypatch) -> None:

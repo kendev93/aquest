@@ -34,7 +34,10 @@ services:
       AQUEST_VIPDOC_PATH: /data/vipdoc
       AQUEST_HOST_MOUNT_PREFIX: ${TDX_HOST_PREFIX:-}
     volumes:
-      # 未设置 TDX_VIPDOC_PATH 时挂到自身空目录，等于不挂，不会报错。
-      - ${TDX_VIPDOC_PATH:-/data/vipdoc}:/data/vipdoc:ro
-      # 未设置 TDX_HOST_ROOT 时挂 /data（容器内），同样无副作用。
-      - ${TDX_HOST_ROOT:-/data}:/host:ro
+      # 未设置时挂到项目内的空占位目录，而不是宿主的 /data/vipdoc。bind 的源路径永远按
+      # **宿主**解析：默认写成 /data/vipdoc 时，宿主上存在这个目录就会直接被只读挂进来，
+      # 不存在则 Docker 以 root 把它建出来——注释里的"等于不挂"从来不成立。
+      - ${TDX_VIPDOC_PATH:-./.tdx-unset/vipdoc}:/data/vipdoc:ro
+      # 同理：以前留空会挂 /data，在群晖这类机器上等于把整个存储根（含其它容器的卷、
+      # 行情库）暴露给应用容器。
+      - ${TDX_HOST_ROOT:-./.tdx-unset/host}:/host:ro
