@@ -316,6 +316,56 @@ def test_codes_without_bars_after_a_failed_redownload(tmp_path: Path) -> None:
     assert store.health.codes_without_bars(("600000", "000001")) == ("000001",)
 
 
+def _with_key(frame: pd.DataFrame, market: str, code: str) -> pd.DataFrame:
+    """把单标的帧补成 ``upsert_local_bars`` 需要的多标的帧。"""
+
+    filled = frame.copy()
+    filled["market"] = market
+    filled["code"] = code
+    filled["instrument_type"] = "stock"
+    return filled
+
+
+def test_other_price_basis_does_not_create_a_price_jump(tmp_path: Path) -> None:
+    """体检只能看研究读路径的那个口径：跨口径去重会凭空造出超限跳变。
+
+    raw 恒定 10.00、另有同日 hfq 行 13.00 时，按 ``imported_at`` 取最新一行的去重
+    会把那根 hfq 插进原始价序列里，报成 30% 跳变。而 ``read_bars`` 只回 raw，
+    研究侧根本看不到它——体检的结论是修复（删掉重下）的输入，误报会删掉好数据。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    flat = bars()
+    for column in ("open", "high", "low", "close"):
+        flat[column] = 10.0
+    store.replace_local_bars("SH", "600000", "stock", flat, name="原始价")
+
+    hfq = flat.copy()
+    for column in ("open", "high", "low", "close"):
+        hfq.loc[hfq.index[10], column] = 13.0
+    store.upsert_local_bars(_with_key(hfq, "SH", "600000"), price_basis="hfq")
+
+    checks = check_by_key(store)
+    assert checks["price_jump"].severity == "ok"
+    assert store.health.codes_for(("price_jump",)) == ()
+    # 研究读路径确实只有 raw 那一套价。
+    assert set(store.read_bars("SH", "600000")["close"]) == {10.0}
+
+
+def test_codes_without_bars_ignores_other_price_basis(tmp_path: Path) -> None:
+    """只剩其它口径的残留行，等于研究视图里没有行情，必须继续报成「没有数据」。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", bars(), name="原始价")
+    store.upsert_online_bars(_with_key(bars(), "SZ", "000001"))
+    store.upsert_local_bars(_with_key(bars(), "SZ", "000001"), price_basis="hfq")
+
+    assert store.health.codes_without_bars(("600000", "000001")) == ()
+    # 只删在线写入的 raw 行，hfq 残留行留在库里。
+    store.delete_bars(source="online", codes=["000001"])
+    assert store.health.codes_without_bars(("600000", "000001")) == ("000001",)
+
+
 def test_report_carries_overview_counts(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     store.replace_local_bars("SH", "600000", "stock", bars(), name="基准")

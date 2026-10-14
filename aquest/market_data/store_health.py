@@ -25,11 +25,16 @@ from .health import (
     HealthReport,
     build_check,
 )
-from .store_base import _DuckDbStoreBase
+from .store_base import DEFAULT_PRICE_BASIS, _DuckDbStoreBase
 
 #: 同一 (market, code, trade_date) 可能有多行（不同 price_basis、本地行压过在线行），
 #: 所有检查都只看最新的一行，否则同一天会被重复计数、前收盘价也会错位。
-_COMMON_CTE = """
+#:
+#: 「最新的一行」必须在 ``DEFAULT_PRICE_BASIS`` 里挑：研究读路径（``read_bars``）只回
+#: 这个口径，体检却跨口径去重的话，一根正常的后复权残留行会被拿去和原始价比前收，
+#: 报成超限跳变。体检的结论是 ``/health/repair`` 的输入，而修复是**删掉重下**——
+#: 误报的代价是把研究侧完全正常的行情删一遍。
+_COMMON_CTE = f"""
 WITH ranked AS (
     SELECT market, code, trade_date, open, high, low, close, volume,
            ROW_NUMBER() OVER (
@@ -37,6 +42,7 @@ WITH ranked AS (
                ORDER BY imported_at DESC, source DESC
            ) AS dedup_rank
     FROM daily_bars
+    WHERE price_basis = '{DEFAULT_PRICE_BASIS}'
 ),
 bars_one AS (
     SELECT market, code, trade_date, open, high, low, close, volume
@@ -154,7 +160,7 @@ LIMIT ?
 """
 )
 
-_BAR_JOIN_CTE = """
+_BAR_JOIN_CTE = f"""
 WITH ranked AS (
     SELECT market, code, trade_date, open, high, low, close, volume,
            ROW_NUMBER() OVER (
@@ -162,6 +168,7 @@ WITH ranked AS (
                ORDER BY imported_at DESC, source DESC
            ) AS dedup_rank
     FROM daily_bars
+    WHERE price_basis = '{DEFAULT_PRICE_BASIS}'
 ),
 bars_one AS (
     SELECT market, code, trade_date, open, high, low, close, volume
@@ -297,11 +304,15 @@ LIMIT ?
 """
 )
 
-_CODES_WITHOUT_BARS_SQL = """
+#: 与体检其余项同口径：只有其它口径的残留行、研究视图里是空的，这些代码必须报成
+#: 「仍然没有行情」，否则修复后只剩 hfq 行的标的会被误判为已恢复。
+_CODES_WITHOUT_BARS_SQL = f"""
 WITH wanted AS (SELECT UNNEST(?) AS code)
 SELECT wanted.code
 FROM wanted
-ANTI JOIN (SELECT DISTINCT code FROM daily_bars) AS stored
+ANTI JOIN (
+    SELECT DISTINCT code FROM daily_bars WHERE price_basis = '{DEFAULT_PRICE_BASIS}'
+) AS stored
   ON stored.code = wanted.code
 ORDER BY wanted.code
 """

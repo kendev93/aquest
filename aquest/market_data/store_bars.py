@@ -1363,10 +1363,15 @@ class DuckDbBarsStore:
         "所有股票都停牌"的，所以日期并集就是实际交易日历。``source`` 标成
         ``derived_from_bars`` 而不是冒充 provider，审计时能看出这不是交易所口径。
 
-        只删除早于最早 bar 的记录，所以 provider 写入的、更靠近今天的日历不受影响。
+        日期取自 :meth:`read_completed_trading_dates` 而不是 :meth:`read_trading_dates`：
+        provisional 行和其它口径的行会造出研究视图里根本不存在的交易日，而自动同步
+        正是拿这张表定"该补到哪一天"的目标日。
+
+        只写入、不删除任何已有日历行：``save_market_trading_calendar`` 是 upsert，
+        provider 写入的 ``eastmoney_sse_composite`` 来源也不会被派生行覆盖。
         """
 
-        dates = self.read_trading_dates()
+        dates = self.read_completed_trading_dates()
         if not dates:
             return 0
         return self.save_market_trading_calendar(dates, source="derived_from_bars")
@@ -1597,8 +1602,15 @@ class DuckDbBarsStore:
         *,
         count: int = 2,
         include_provisional: bool = False,
+        price_basis: str | None = DEFAULT_PRICE_BASIS,
     ) -> pd.DataFrame:
-        """Read a bounded latest-bar snapshot for many instruments in one query."""
+        """Read a bounded latest-bar snapshot for many instruments in one query.
+
+        ``price_basis`` 与 :meth:`read_bars` 同义：缺省只回统一口径，``None`` 才看全部
+        口径。增量同步把这份快照按 ``trade_date`` 建索引比对"有没有新数据"，跨口径
+        返回会让同一天两行互相覆盖，比较结果取决于未定义的同键顺序，40 根快照的
+        有效回看窗口也被砍半。
+        """
 
         if isinstance(count, bool) or count < 1:
             raise ValueError("最新行情条数必须大于 0")
@@ -1608,7 +1620,12 @@ class DuckDbBarsStore:
         symbol_frame = pd.DataFrame(
             [{"market": item.market, "code": item.code} for item in requested]
         ).drop_duplicates()
-        status_filter = "" if include_provisional else "WHERE bars.bar_status = 'completed'"
+        conditions: list[str] = []
+        if not include_provisional:
+            conditions.append("bars.bar_status = 'completed'")
+        if price_basis is not None:
+            conditions.append("bars.price_basis = ?")
+        filters = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         query = f"""
             WITH ranked AS (
                 SELECT
@@ -1635,7 +1652,7 @@ class DuckDbBarsStore:
                 FROM daily_bars AS bars
                 INNER JOIN _requested_symbols AS requested
                     ON bars.market = requested.market AND bars.code = requested.code
-                {status_filter}
+                {filters}
             )
             SELECT market, code, instrument_type, board, trade_date, open, high, low, close,
                    volume, amount, source, provider, price_basis, bar_status, imported_at
@@ -1643,10 +1660,12 @@ class DuckDbBarsStore:
             WHERE row_number <= ?
             ORDER BY market, code, trade_date
         """
+        parameters: list[object] = [price_basis] if price_basis is not None else []
+        parameters.append(count)
         with self._store._connect(read_only=True) as connection:
             connection.register("_requested_symbols", symbol_frame)
             try:
-                result = connection.execute(query, [count]).df()
+                result = connection.execute(query, parameters).df()
             finally:
                 connection.unregister("_requested_symbols")
         return self._store._frame_from_query(result)

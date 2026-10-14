@@ -126,6 +126,11 @@ def test_research_trading_dates_ignore_provisional_and_hfq_only_sessions(
     assert store.read_trading_dates() == [date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4)]
     assert store.read_completed_trading_dates() == [date(2024, 1, 2)]
 
+    # 日历表同口径：provisional 与 hfq-only 的日期不能进去，否则自动同步会把目标日
+    # 定在一个研究视图里根本不存在、也没有收盘数据的交易日上。
+    assert store.rebuild_trading_calendar_from_bars() == 1
+    assert store.latest_market_trading_date(date(2024, 1, 4)) == date(2024, 1, 2)
+
 
 def test_online_rows_fill_missing_dates_but_never_replace_local(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
@@ -174,6 +179,17 @@ def test_stale_hfq_rows_are_invisible_to_reads_and_coverage(tmp_path: Path) -> N
     )
     assert len(store.read_bars("SH", "600000", price_basis="hfq")) == 2
     assert len(store.read_bars("SH", "600000", price_basis=None)) == 4
+
+    # 最新快照同样只认 raw：增量同步拿它按日期比对"有没有新数据"，跨口径返回会让
+    # 同一天两行互相覆盖，count 根的有效回看窗口也被砍半。
+    refs = [ref for ref in store.list_instruments(include_missing=True) if ref.code == "600000"]
+    latest = store.read_latest_bars(refs, count=2, include_provisional=True)
+    # 修复前这 2 行是同一天的 raw + hfq（排序只按日期，两行并列），回看窗口被砍半。
+    assert sorted(str(item.date()) for item in latest["date"]) == ["2024-01-02", "2024-01-03"]
+    assert set(latest["price_basis"]) == {"raw"}
+    assert latest["source"].tolist() == ["online", "online"]
+    # 维护视角显式要全部口径时，同一天是两行——这正是缺省口径要挡掉的情况。
+    assert len(store.read_latest_bars(refs, count=4, price_basis=None)) == 4
 
 
 def test_batch_query_returns_sorted_instrument_groups(tmp_path: Path) -> None:
@@ -629,6 +645,33 @@ def test_delete_bars_realigns_instrument_coverage(tmp_path: Path) -> None:
     assert coverage["000001"].first_date == date(2024, 1, 5)
     assert coverage["000001"].last_date == date(2024, 1, 5)
     assert coverage["000001"].bar_count == 1
+
+
+def test_delete_bars_zeroes_coverage_when_other_price_basis_remains(tmp_path: Path) -> None:
+    """raw 删空、其它口径还有残留行时，覆盖元数据必须清零。
+
+    回填按 raw 聚合、清零却看全部口径时，这种标的两条 UPDATE 都不命中：旧区间原封
+    不动留着，full_history 据此只补首尾两段，中间那段再也回不来。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.upsert_online_bars(
+        _bars(
+            ("SH", "600000", "2024-01-02", 10.0, "online"),
+            ("SH", "600000", "2024-01-03", 10.0, "online"),
+            ("SH", "600000", "2024-01-04", 10.0, "online"),
+        )
+    )
+    store.upsert_local_bars(_bars(("SH", "600000", "2024-01-02", 13.0, "local")), price_basis="hfq")
+
+    assert store.delete_bars(source="online", codes=["600000"]) == 3
+
+    coverage = {ref.code: ref for ref in store.list_instruments(include_missing=True)}
+    assert (coverage["600000"].first_date, coverage["600000"].last_date) == (None, None)
+    assert coverage["600000"].bar_count == 0
+    # 残留的 hfq 行本身不动，只是不再参与覆盖区间判定。
+    assert len(store.read_bars("SH", "600000", price_basis="hfq")) == 1
+    assert store.read_bars("SH", "600000").empty
 
 
 def test_reset_instrument_coverage_zeroes_stale_metadata(tmp_path: Path) -> None:

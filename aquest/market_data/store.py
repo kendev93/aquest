@@ -330,11 +330,13 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
         *,
         count: int = 2,
         include_provisional: bool = False,
+        price_basis: str | None = DEFAULT_PRICE_BASIS,
     ) -> pd.DataFrame:
         return self._bars.read_latest_bars(
             instruments,
             count=count,
             include_provisional=include_provisional,
+            price_basis=price_basis,
         )
 
     def list_instruments(

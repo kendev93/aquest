@@ -1258,7 +1258,8 @@ class _DuckDbStoreBase:
         重算一次，删空的标的显式清零。
 
         覆盖区间只统计 ``DEFAULT_PRICE_BASIS`` 行：其它口径的残留行不能让同步误以为
-        "数据还在"而跳过重下。
+        "数据还在"而跳过重下。两条 UPDATE 必须用同一个谓词——回填按 raw 聚合、清零
+        却看全部口径时，raw 删空而 hfq 残留的标的两条都不命中，旧区间原封不动留着。
         """
 
         now = _now()
@@ -1283,13 +1284,14 @@ class _DuckDbStoreBase:
         connection.execute(
             """
             UPDATE instruments SET
-                first_date = NULL, last_date = NULL, bar_count = 0, updated_at = ?
+                first_date = NULL, last_date = NULL, bar_count = 0, updated_at = $1
             WHERE NOT EXISTS (
                 SELECT 1 FROM daily_bars AS bars
                 WHERE bars.market = instruments.market AND bars.code = instruments.code
+                  AND bars.price_basis = $2
             )
             """,
-            [now],
+            [now, DEFAULT_PRICE_BASIS],
         )
 
     def status(self) -> DataStoreStatus:
