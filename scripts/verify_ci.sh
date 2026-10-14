@@ -7,12 +7,13 @@ REPO_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
 
 usage() {
   cat <<'EOF'
-用法: sh scripts/verify_ci.sh [all|python|frontend|docker] [--skip-docker] [--install-playwright]
+用法: sh scripts/verify_ci.sh [all|python|frontend|frontend-fast|docker] [--skip-docker] [--install-playwright]
 
 依赖需要提前安装；脚本只执行检查，不自动安装 Python/npm 依赖。
 默认 all 会执行 Python、前端和 Docker 全部检查。
 --skip-docker 只对 all 生效，用于本地快速检查。
 --install-playwright 在前端检查前执行与 CI 相同的浏览器安装命令。
+frontend-fast 只跑 Vitest 与类型检查（不含构建与 Playwright E2E），供推送前使用。
 EOF
 }
 
@@ -23,7 +24,7 @@ compose_fixture=""
 
 for argument in "$@"; do
   case "$argument" in
-    all|python|frontend|docker)
+    all|python|frontend|frontend-fast|docker)
       mode=$argument
       ;;
     --skip-docker)
@@ -93,6 +94,15 @@ run_frontend_checks() {
   )
 }
 
+run_frontend_fast_checks() {
+  printf '%s\n' '验证前端（快档）：单元测试、类型检查'
+  (
+    cd "$REPO_ROOT/web-ui"
+    npm test -- --run
+    npm run typecheck
+  )
+}
+
 run_docker_checks() {
   printf '%s\n' '验证 Docker：Compose 配置（默认与绑定挂载）、后端镜像、前端镜像'
   prepare_compose_fixture
@@ -112,6 +122,10 @@ case "$mode" in
   frontend)
     run_frontend_checks
     verify_mark frontend
+    ;;
+  frontend-fast)
+    run_frontend_fast_checks
+    verify_mark frontend-fast
     ;;
   docker)
     run_docker_checks

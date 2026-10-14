@@ -26,16 +26,21 @@ while read -r _ref_name local_oid _remote_ref _remote_oid; do
 done
 
 # 推的不是当前检出的 HEAD 时，盖章用的 tree 对不上，按未验证处理。
+scopes="python frontend-fast"
 if [ "$pushed_other_ref" -eq 1 ]; then
   printf '%s\n' '推送的不是当前 HEAD，按未验证处理。' >&2
-  exec sh "$REPO_ROOT/scripts/verify_ci.sh" python
-fi
-
-if verify_is_fresh python; then
-  printf '推送前检查：%s，跳过重跑（改了代码会自动重跑；AQUEST_VERIFY_FORCE=1 可强制）\n' \
-    "$(verify_describe python)"
+  for scope in $scopes; do
+    sh "$REPO_ROOT/scripts/verify_ci.sh" "$scope"
+  done
   exit 0
 fi
 
-printf '%s\n' '推送前检查：这份代码还没验证过，开始跑 Python 全量检查。'
-exec sh "$REPO_ROOT/scripts/verify_ci.sh" python
+for scope in $scopes; do
+  if verify_is_fresh "$scope"; then
+    printf '推送前检查：%s %s，跳过重跑（改了代码会自动重跑；AQUEST_VERIFY_FORCE=1 可强制）\n' \
+      "$scope" "$(verify_describe "$scope")"
+    continue
+  fi
+  printf '推送前检查：%s 还没验证过，开始跑。\n' "$scope"
+  sh "$REPO_ROOT/scripts/verify_ci.sh" "$scope"
+done
