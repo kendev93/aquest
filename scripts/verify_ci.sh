@@ -46,6 +46,9 @@ done
 
 cd "$REPO_ROOT"
 
+# 验证通过后按范围盖章，pre-push 据此决定要不要重跑。
+. "$SCRIPT_DIR/verify_stamp.sh"
+
 cleanup_compose_fixture() {
   if [ -n "$compose_fixture" ] && [ -d "$compose_fixture" ]; then
     rm -r "$compose_fixture"
@@ -104,18 +107,24 @@ run_docker_checks() {
 case "$mode" in
   python)
     run_python_checks
+    verify_mark python
     ;;
   frontend)
     run_frontend_checks
+    verify_mark frontend
     ;;
   docker)
     run_docker_checks
+    verify_mark docker
     ;;
   all)
     run_python_checks
+    verify_mark python
     run_frontend_checks
+    verify_mark frontend
     if [ "$skip_docker" -eq 0 ]; then
       run_docker_checks
+      verify_mark docker
     else
       printf '%s\n' '已跳过 Docker 检查（显式指定 --skip-docker）'
     fi

@@ -10,6 +10,8 @@ Use Python 3.10–3.13 and Node 22.22+ (CI uses Node 24; `web-ui` engines enforc
 
 Use `sh scripts/verify_ci.sh python` for pytest with coverage, Ruff, and mypy; use `frontend` for Vitest, type checking, build, and Playwright E2E; use `docker` for Compose and image checks. `sh scripts/verify_ci.sh` runs the full CI set. These commands require dependencies to be installed first.
 
+Verification and committing are separate steps: a passing scope writes a stamp under `.git/aquest-verify/` keyed by the HEAD tree plus interpreter version, so `git push` re-runs the Python suite only when the content being pushed actually changed (retrying a failed push is instant). Use `AQUEST_VERIFY_FORCE=1 git push` to force a re-run; never disable the hooks with `--no-verify`.
+
 ## Coding Style and Tests
 
 Use Python 4-space indentation, `snake_case` modules/functions, and Ruff’s 100-character line limit. Ruff checks `E`, `F`, `I`, and `UP`; mypy runs in strict mode. Keep tests named `test_*.py` under the matching unit or integration area. Python coverage must remain at or above 80%. Frontend components use PascalCase `.vue` names; Vitest specs use `.spec.ts`.

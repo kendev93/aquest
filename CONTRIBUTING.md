@@ -54,7 +54,7 @@ npx playwright install --with-deps chromium
 cd ..
 ```
 
-提交前按改动范围跑对应检查：
+验证与提交是两个动作，分开做：
 
 ```bash
 sh scripts/verify_ci.sh python      # pytest + 覆盖率、Ruff format/check、mypy
@@ -65,7 +65,12 @@ sh scripts/verify_ci.sh             # 全部
 
 只想快速验一遍可以手动执行 `sh scripts/verify_ci.sh all --skip-docker`；提交前建议跑完整检查。
 
-不想每次手动跑，可以在克隆后启用 Git Hooks，让 `pre-commit` 与 `pre-push` 自动执行完整检查：
+每个范围验证通过后会在 `.git/aquest-verify/` 下按**代码内容**盖章，所以之后重复推送、
+网络失败重推都不会再跑一遍测试——只有要推的 commit 变了才重跑。工作区里未提交的改动
+不参与指纹（它们也不会被推上去）。需要无条件重跑时：`AQUEST_VERIFY_FORCE=1 git push`。
+
+启用 Git Hooks 后，`pre-commit` 只跑秒级的格式化与静态检查，`pre-push` 按上面这个章判断
+要不要跑 Python 全量检查：
 
 ```bash
 sh scripts/install_hooks.sh
