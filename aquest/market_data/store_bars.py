@@ -184,15 +184,19 @@ class DuckDbBarsStore:
         board: InstrumentBoard | None = None,
         price_basis: str | None = None,
     ) -> int:
-        """Replace one instrument atomically; local data wins over online data.
+        """Replace one instrument's rows **within one price basis**; local beats online.
 
         ``price_basis`` 缺省按 source 推断为 raw（本地 vipdoc 是不复权的）；
-        确有后复权本地文件时显式传 ``"hfq"``，否则默认读取路径看不到它。
+        确有后复权本地文件时显式传 ``"hfq"``，否则默认读取路径看不到它。传了哪个
+        口径就只替换哪个口径——其它口径的行原样保留。
         """
 
         self._store._require_writer()
         market = market.strip().upper()
         code = code.strip()
+        # 与 ``_normalize_frame`` 同一套推断：本地写入默认 raw。替换的范围必须是这一
+        # 个口径，否则给同一个标的写 hfq 会把它来之不易的 raw 全历史静默删掉。
+        resolved_basis = price_basis or DEFAULT_PRICE_BASIS
         resolved_board = board or classify_board(market, code)
         if resolved_board is None:
             raise ValueError(f"证券板块无效: {market} {code}")
@@ -210,22 +214,23 @@ class DuckDbBarsStore:
             try:
                 compare_columns = ", ".join(_BAR_INDICATOR_COLUMNS)
                 if incoming.empty:
-                    # 空帧等于"删光这个标的"：只有本来就没有行才算没变。
+                    # 空帧等于"删光这个标的在这个口径下的行"：只有本来就没有行才算没变。
                     stored = connection.execute(
-                        "SELECT COUNT(*) FROM daily_bars WHERE market = ? AND code = ?",
-                        [market, code],
+                        "SELECT COUNT(*) FROM daily_bars "
+                        "WHERE market = ? AND code = ? AND price_basis = ?",
+                        [market, code, resolved_basis],
                     ).fetchone()
                     unchanged = int(stored[0] if stored else 0) == 0
                 else:
                     connection.register("_incoming_local_bars", incoming)
-                    # 这一条路径会删掉该标的的全部行，所以"没变"必须是两侧集合互相相等，
-                    # 而不是只比对来行情覆盖的那些日期。必须在 DELETE 之前算。
+                    # 这一条路径会删掉该标的在这个口径下的全部行，所以"没变"必须是两侧集合
+                    # 互相相等，而不是只比对来行情覆盖的那些日期。必须在 DELETE 之前算。
                     unchanged_row = connection.execute(
                         f"""
                         SELECT (
                             (SELECT COUNT(*) FROM (
                                 SELECT {compare_columns} FROM daily_bars
-                                WHERE market = ? AND code = ?
+                                WHERE market = ? AND code = ? AND price_basis = ?
                                 EXCEPT ALL
                                 SELECT {compare_columns} FROM _incoming_local_bars
                             )) + (
@@ -233,15 +238,16 @@ class DuckDbBarsStore:
                                 SELECT {compare_columns} FROM _incoming_local_bars
                                 EXCEPT ALL
                                 SELECT {compare_columns} FROM daily_bars
-                                WHERE market = ? AND code = ?
+                                WHERE market = ? AND code = ? AND price_basis = ?
                             ))
                         ) = 0
                         """,
-                        [market, code, market, code],
+                        [market, code, resolved_basis, market, code, resolved_basis],
                     ).fetchone()
                     unchanged = bool(unchanged_row and unchanged_row[0])
                 connection.execute(
-                    "DELETE FROM daily_bars WHERE market = ? AND code = ?", [market, code]
+                    "DELETE FROM daily_bars WHERE market = ? AND code = ? AND price_basis = ?",
+                    [market, code, resolved_basis],
                 )
                 if not incoming.empty:
                     columns = ", ".join(_BAR_COLUMNS)

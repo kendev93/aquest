@@ -126,7 +126,16 @@ def SMA(values: Any, period: float, weight: float = 1) -> np.ndarray:
 
 
 def COUNT(values: Any, period: int) -> np.ndarray:
-    return SUM(np.asarray(values, dtype=bool), period)
+    """周期内条件成立的根数；无效值（NaN/inf）按「不成立」计。
+
+    ``dtype=bool`` 把 NaN 变成 True，于是预热段每根都被当成"条件成立过"：
+    ``COUNT(CROSS(...), 5) >= 3`` 这类判据在前几根几乎必然为真，和筛选侧
+    ``valid &`` 以及同模块 :func:`BARSLAST` 的口径都相反。
+    """
+
+    source = np.asarray(values, dtype=float)
+    matched = np.isfinite(source) & (source != 0)
+    return SUM(matched.astype(float), period)
 
 
 def BARSLAST(values: Any) -> np.ndarray:

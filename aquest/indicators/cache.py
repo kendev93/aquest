@@ -41,7 +41,10 @@ _OPTIONAL_FINGERPRINT_COLUMNS = ("bar_status", "price_basis")
 _MAX_CACHE_BLOB_BYTES = 64 * 1024 * 1024
 # v2：IF / CROSS / BARSLAST 的 NaN 口径改了（预热段不再凭空取真值分支、上穿要求前后
 # 两根都有效）。自定义公式可以直接调用这三个函数，旧缓存行必须整体作废。
-_CUSTOM_ENGINE_VERSION = "2"
+# v3：COUNT 同族 —— 以前把 NaN 当成「条件成立过一次」，预热段就能把
+# ``COUNT(x, 5) >= 3`` 喂真；现在 NaN 不计数。注册指标里只有 indicator_two 用了
+# COUNT，且喂的是 CROSS 的布尔输出，数值不变，所以只动引擎版本、不动 cache_version。
+_CUSTOM_ENGINE_VERSION = "3"
 # Keep this aligned with the precompute window: each annual result depends on
 # the year's bars plus the preceding warm-up rows used to initialize rolling
 # and recursive indicators.

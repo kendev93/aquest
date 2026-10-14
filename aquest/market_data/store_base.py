@@ -1318,7 +1318,14 @@ class _DuckDbStoreBase:
         # progress update into a misleading "database cannot be opened" error.
         with _WRITE_LOCK, self._connect(read_only=True) as connection:
             instrument_row = connection.execute("SELECT COUNT(*) FROM instruments").fetchone()
-            bar_row = connection.execute("SELECT COUNT(*) FROM daily_bars").fetchone()
+            # 只数 DEFAULT_PRICE_BASIS 的行：这个数既是 store 面板上的「行情根数」，也是
+            # ``should_defer_precompute`` 的输入。库里同时存在 hfq 行时，全表计数会把它
+            # 直接翻倍，指标预计算就被提前判成「数据量过大」而改成按需计算 —— 而
+            # ``instruments.bar_count`` 也是只按默认口径聚合的，两边必须同一把尺子。
+            bar_row = connection.execute(
+                "SELECT COUNT(*) FROM daily_bars WHERE price_basis = ?",
+                [DEFAULT_PRICE_BASIS],
+            ).fetchone()
             date_row = connection.execute(
                 "SELECT MIN(trade_date), MAX(trade_date) "
                 "FROM daily_bars WHERE bar_status = 'completed'"

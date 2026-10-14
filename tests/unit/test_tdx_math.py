@@ -26,6 +26,22 @@ def test_tdx_math_preserves_warmup_and_cross_semantics() -> None:
     assert COUNT(np.array([True, False, True, True]), 3)[-1] == 2
 
 
+def test_count_treats_warmup_nan_as_not_satisfied() -> None:
+    """COUNT 里的 NaN 是「还没成立」，不是「成立」。
+
+    自定义公式走的是 ``COUNT(np.asarray(values, dtype=float), n)``，而旧实现又把它
+    转成 ``dtype=bool``：NaN 变成 True，预热段每根都被计数，于是
+    ``COUNT(CROSS(...), 3) >= 2`` 在什么条件都没满足过的头几根就判真。
+    """
+
+    condition = np.array([np.nan, np.nan, 1.0, 0.0, 1.0])
+
+    result = COUNT(condition, 3)
+
+    assert np.isnan(result[:2]).tolist() == [True, True]
+    assert result[2:].tolist() == [1.0, 1.0, 2.0]
+
+
 def test_fractional_sma_period_is_supported() -> None:
     values = np.array([1.0, 2.0, 4.0, 8.0])
 

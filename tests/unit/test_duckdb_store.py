@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from pathlib import Path
 from threading import Event, Thread
-from time import monotonic
 
 import duckdb
 import pandas as pd
@@ -260,6 +259,63 @@ def test_store_status_reports_counts_and_range(tmp_path: Path) -> None:
     assert status.data_end == "2024-01-03"
 
 
+def test_store_status_bar_count_ignores_other_price_bases(tmp_path: Path) -> None:
+    """行情根数只按默认口径数，不能把 hfq 的衍生行也叠上去。
+
+    这个数是 ``should_defer_precompute`` 的输入，也是 store 面板上那个「行情根数」。
+    全表计数会在两种口径都落库时把它翻倍，于是预计算被提前判成「数据量过大」改成
+    按需计算，而 ``instruments.bar_count`` 早就是只按默认口径聚合的了。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "bases.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars(), price_basis="raw")
+    store.replace_local_bars("SH", "600000", "stock", _bars(), price_basis="hfq")
+
+    status = store.status()
+
+    assert status.instrument_count == 1
+    assert status.bar_count == 2
+    # 覆盖元数据同一把尺子：per-instrument 的 bar_count 也只数默认口径。
+    refs = {item.code: item for item in store.list_instruments(include_missing=True)}
+    assert refs["600000"].bar_count == 2
+
+
+def test_replace_local_bars_only_replaces_its_own_price_basis(tmp_path: Path) -> None:
+    """给同一个标的写 hfq 不能顺手把 raw 的全历史删掉。
+
+    替换的范围就是"这个标的、这个口径、这些行"。以前 DELETE 只按 ``(market, code)``
+    过滤，于是照 docstring 显式传 ``price_basis="hfq"`` 的调用方会静默丢掉 raw 历史 ——
+    而 raw 才是默认读取、研究和指标缓存唯一认的口径。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "replace-basis.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars(), price_basis="raw")
+    store.replace_local_bars(
+        "SH",
+        "600000",
+        "stock",
+        _bars(("SH", "600000", "2024-01-02", 20.0, "local")),
+        price_basis="hfq",
+    )
+
+    assert len(store.read_bars("SH", "600000")) == 2
+    assert len(store.read_bars("SH", "600000", price_basis="hfq")) == 1
+    assert store.status().bar_count == 2
+
+    # 同口径替换照旧覆盖，别把"按口径隔离"误解成"只增不删"。
+    store.replace_local_bars(
+        "SH",
+        "600000",
+        "stock",
+        _bars(("SH", "600000", "2024-02-01", 9.0, "local")),
+        price_basis="raw",
+    )
+    assert store.read_bars("SH", "600000")["date"].dt.strftime("%Y-%m-%d").tolist() == [
+        "2024-02-01"
+    ]
+    assert len(store.read_bars("SH", "600000", price_basis="hfq")) == 1
+
+
 def test_store_status_waits_for_an_in_process_writer(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     store.replace_local_bars("SH", "600000", "stock", _bars(), price_basis="raw")
@@ -283,14 +339,13 @@ def test_store_status_waits_for_an_in_process_writer(tmp_path: Path) -> None:
 
     reader = Thread(target=read_status)
     reader.start()
-    started_waiting = monotonic()
+    # 这一条才是本测试的判据：写锁没放手，status() 就必须还卡着。
     assert not reader_finished.wait(timeout=0.1)
     release_writer.set()
     reader.join(timeout=2)
     writer.join(timeout=2)
 
     assert reader_finished.is_set()
-    assert monotonic() >= started_waiting
     assert observed[0].bar_count == 2
 
 
