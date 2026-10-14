@@ -1,5 +1,6 @@
-# Node 与 CI 对齐：CI 跑的是 24，`web-ui` 的 engines 只写了下限（>=22.22.2）。
-# 用更大的主版本构建等于让镜像依赖一个 CI 从没测过的工具链。
+# 这个 tag 就是 CI 实际测试的 Node 大版本（.github/workflows/ci.yml 的 frontend 任务从
+# 本文件读它），所以升版本等于同时换掉被测工具链；`web-ui` 的 engines 只保证下限
+# （>=22.22.2）。镜像与 CI 不必再各写一个数字，也就不会出现"CI 绿、镜像用另一版本构建"。
 FROM node:24-alpine AS web-build
 
 WORKDIR /webui

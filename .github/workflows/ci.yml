@@ -35,10 +35,30 @@ jobs:
         working-directory: web-ui
     steps:
       - uses: actions/checkout@v7
+      # 镜像里用哪个 Node 大版本，CI 就测哪个： Dependabot 的 docker 升级因此会把 CI 一起
+      # 带走，而不是留下"CI 测 24、镜像用 26"这种从没被测过的组合（交付的静态产物恰恰是
+      # 后者构建的）。想升到新版本就改 Dockerfile 那行 FROM。
+      - name: 读取镜像的 Node 大版本
+        id: node-major
+        working-directory: .
+        run: |
+          major=$(sed -n 's/^FROM node:\([0-9][0-9]*\)[.-].*/\1/p' Dockerfile | head -1)
+          case "$major" in
+            ''|*[!0-9]*)
+              echo "没能从 Dockerfile 读出 node 主版本，得到：[$major]" >&2
+              exit 1
+              ;;
+          esac
+          # 下限来自 web-ui 的 engines（>=22.22.2）：jsdom 30 -> undici 8 需要
+          # node:worker_threads.markAsUncloneable，低于 22 直接别测了。
+          if [ "$major" -lt 22 ]; then
+            echo "镜像的 Node 大版本 $major 低于前端测试要求的 22" >&2
+            exit 1
+          fi
+          printf 'major=%s\n' "$major" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v7
         with:
-          # jsdom 30 -> undici 8 需要 node:worker_threads.markAsUncloneable（Node >= 22.19）
-          node-version: 24
+          node-version: ${{ steps.node-major.outputs.major }}
           cache: npm
           cache-dependency-path: web-ui/package-lock.json
       - run: npm ci

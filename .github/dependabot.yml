@@ -44,6 +44,14 @@ updates:
       docker-images:
         patterns:
           - "*"
+    ignore:
+      # 镜像的 Python 解释器必须跟哈希锁同版本：requirements.txt 是在 3.12 下用
+      # pip-tools 编译出来的（见 requirements.in 头部与 AGENTS.md），CI 也固定在 3.12
+      # 上 --require-hashes 校验。让 dependabot 把 FROM python:3.12-slim 顶到 3.13+，
+      # 就等于"用另一个解释器装 3.12 编出来的 wheel"，PR 绿了也不代表镜像能装起来。
+      # 换解释器要人为决定：先在目标版本下重编译哈希锁、跑一遍 CI，再删掉这里。
+      - dependency-name: "python"
+        versions: ["3.13", "3.13.*", "3.14", "3.14.*", "3.15", "3.15.*"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
