@@ -40,6 +40,7 @@ import TermHint from '../components/TermHint.vue'
 import AppTopbar from '../components/AppTopbar.vue'
 import { BOARD_OPTIONS, INSTRUMENT_TYPE_OPTIONS } from '../utils/instrumentOptions'
 import { formatNumber } from '../utils/format'
+import { formatChinaTimestamp } from '../utils/time'
 
 const MA_OPTIONS = [
   { key: 'ma5', label: 'MA5' },
@@ -184,7 +185,22 @@ const lastFullSyncText = computed(() => {
   const skipped = typeof summary.skipped === 'number' ? summary.skipped : 0
   const failed = typeof summary.failed === 'number' ? summary.failed : 0
   const finishedAt = typeof summary.finished_at === 'string' ? summary.finished_at : ''
-  return `上次全市场同步：完成 ${completed} · 跳过 ${skipped} · 失败 ${failed}${finishedAt ? ` · ${finishedAt}` : ''}`
+  return `上次全市场同步：完成 ${completed} · 跳过 ${skipped} · 失败 ${failed}${finishedAt ? ` · ${formatChinaTimestamp(finishedAt)}` : ''}`
+})
+
+/**
+ * 行情比交易日历新时给一句解释。
+ *
+ * 日历表只由自动同步在收盘后（18:30 之后）写入，手动同步只补日线、不碰它，所以
+ * 只要那晚容器没在线、或日历请求失败回退到自然日，日历就会停在最后一个成功写入的
+ * session。面板上三个日期来自两条路径，不点破就会被读成"日期错了"——而停牌判定和
+ * 自动同步的目标 session 都以这张表为准，滞后本身是有后果的。
+ */
+const calendarBehindBarsText = computed(() => {
+  const latest = storeStatus.value?.market_calendar_latest_date
+  const dataEnd = storeStatus.value?.data_end
+  if (!latest || !dataEnd || latest >= dataEnd) return ''
+  return `交易日历停在 ${latest}，行情已到 ${dataEnd}：日历只由自动同步在收盘后写入，手动同步不会更新它`
 })
 
 const discoveryWaiting = computed(() => Boolean(
@@ -436,7 +452,7 @@ async function cancelActiveMarketJob(jobId: string): Promise<void> {
 
 async function syncOnlineData(): Promise<void> {
   syncLoading.value = true
-  syncLabel.value = '正在同步在线行情…'
+  syncLabel.value = '正在同步最近行情…'
   message.value = ''
   try {
     const job = await createOnlineSync({
@@ -458,7 +474,7 @@ async function syncOnlineData(): Promise<void> {
 
 async function backfillOnlineData(): Promise<void> {
   syncLoading.value = true
-  syncLabel.value = '正在进行全量回填…'
+  syncLabel.value = '正在补齐全部历史…'
   message.value = ''
   try {
     const job = await createOnlineBackfill({
@@ -487,7 +503,7 @@ async function refreshOnlineData(): Promise<void> {
     return
   }
   syncLoading.value = true
-  syncLabel.value = '正在全量重刷…'
+  syncLabel.value = '正在删除并重下全部历史…'
   message.value = ''
   try {
     const job = await createOnlineRefresh({
@@ -900,9 +916,10 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
         </div>
         <div class="store-meta" data-testid="market-store-meta">
           <span>数据库 {{ storeStatus?.database_path ?? '—' }}</span>
-          <span>最近在线更新 {{ storeStatus?.last_online_sync_at ?? '—' }}</span>
-          <span>最近交易日历 {{ storeStatus?.market_calendar_latest_date ?? '—' }} · {{ storeStatus?.market_calendar_source ?? '未获取' }}</span>
-          <span v-if="storeStatus?.last_auto_sync_check_date">自动同步核对 {{ storeStatus.last_auto_sync_check_date }} · 截至交易日 {{ storeStatus.last_auto_sync_check_session ?? '—' }}</span>
+          <span data-testid="market-last-online-sync">最近在线更新 {{ formatChinaTimestamp(storeStatus?.last_online_sync_at) }}</span>
+          <span data-testid="market-calendar-meta">最近交易日历 {{ storeStatus?.market_calendar_latest_date ?? '—' }} · {{ storeStatus?.market_calendar_source ?? '未获取' }}<template v-if="storeStatus?.market_calendar_updated_at"> · 表更新于 {{ formatChinaTimestamp(storeStatus.market_calendar_updated_at) }}</template></span>
+          <span v-if="calendarBehindBarsText" class="scope-warning" data-testid="market-calendar-behind">{{ calendarBehindBarsText }}</span>
+          <span v-if="storeStatus?.last_auto_sync_check_date">自动同步最近判定「不缺数据」 {{ storeStatus.last_auto_sync_check_date }} · 截至交易日 {{ storeStatus.last_auto_sync_check_session ?? '—' }}（真补了数据的日子不更新这里）</span>
           <span v-if="lastFullSyncText" data-testid="last-full-market-sync">{{ lastFullSyncText }}</span>
         </div>
         <div class="market-sync-form">
@@ -910,12 +927,12 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
             <div><label for="market-sync-universe">同步市场</label><select id="market-sync-universe" v-model="form.syncUniverse" data-testid="market-sync-universe"><option value="all">沪深全部</option><option value="sh">仅上海</option><option value="sz">仅深圳</option></select></div>
             <div class="scope-options"><span>证券类型</span><label v-for="option in INSTRUMENT_TYPE_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-sync-type-${option.key}`" :checked="form.syncInstrumentTypes.includes(option.key)" @change="toggleInstrumentType(option.key)">{{ option.label }}</label></div>
             <div class="scope-options"><span>板块</span><label v-for="option in BOARD_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-sync-board-${option.key}`" :checked="form.syncBoards.includes(option.key)" @change="toggleBoard(option.key)">{{ option.label }}</label></div>
-            <small class="scope-helper">板块未勾选表示不限制；类型和板块同时选择时取交集。在线同步下载不复权日线（raw）；除权跳空由指标计算时按分红送转事件校正，成交价始终是真实价。全量补齐只请求缺失的历史区间；强制全量重刷先删除所选范围内标的的全部日线（含本地导入）再整段重下，能覆盖已经写歪的中间段，耗时最久。</small>
+            <small class="scope-helper">板块未勾选表示不限制；类型和板块同时选择时取交集。在线同步下载不复权日线（raw）；除权跳空由指标计算时按分红送转事件校正，成交价始终是真实价。三个入口的区别只在看多少段历史：<b>同步最近行情</b>每只标的只拉最近 800 根（约 3 年），日常更新用它；<b>补齐全部历史</b>只请求库里已有区间之外的缺口，前后缺段用它，已有区间不动；<b>删除并重下全部历史</b>先删掉所选范围内标的的全部日线（含本地导入）再整段重下，能覆盖已经写歪的中间段，耗时最久。</small>
           </div>
           <div class="market-sync-actions">
-            <button class="primary-button" data-testid="market-sync-online" type="button" :disabled="syncLoading" @click="syncOnlineData">一键同步行情</button>
-            <button class="secondary-button" data-testid="market-online-backfill" type="button" :disabled="syncLoading" @click="backfillOnlineData">{{ syncLoading ? '回填进行中…' : '全量补齐' }}</button>
-            <button class="secondary-button" data-testid="market-online-refresh" type="button" :disabled="syncLoading" @click="refreshOnlineData">{{ syncLoading ? '重刷进行中…' : '强制全量重刷' }}</button>
+            <button class="primary-button" data-testid="market-sync-online" type="button" :disabled="syncLoading" @click="syncOnlineData">同步最近行情</button>
+            <button class="secondary-button" data-testid="market-online-backfill" type="button" :disabled="syncLoading" @click="backfillOnlineData">{{ syncLoading ? '补齐中…' : '补齐全部历史' }}</button>
+            <button class="secondary-button" data-testid="market-online-refresh" type="button" :disabled="syncLoading" @click="refreshOnlineData">{{ syncLoading ? '重下中…' : '删除并重下全部历史' }}</button>
           </div>
           <div class="local-import-row">
             <div class="local-import-field">

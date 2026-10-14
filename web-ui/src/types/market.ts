@@ -81,7 +81,7 @@ export interface MarketSyncResult {
   failed?: number
   rows?: number
   catalog_counts?: Record<string, number>
-  /** 以下是「强制全量重刷」专用的键：先删后下，同步/回填都不会返回。 */
+  /** 以下是「删除并重下全部历史」专用的键：先删后下，同步/补齐都不会返回。 */
   deleted_bars?: number
   refreshed_instruments?: number
   /** 删除后重新下载却拿不到数据的标的（退市等），后端最多回传 20 个。 */

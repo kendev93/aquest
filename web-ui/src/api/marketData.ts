@@ -177,7 +177,7 @@ export async function deleteMarketBars(payload: {
 }
 
 /**
- * 强制全量重刷：先删掉所选范围内的全部日线，再整段重新下载。
+ * 「删除并重下全部历史」：先删掉所选范围内的全部日线，再整段重新下载。
  * 常规同步只补最新一段，补齐只补首尾缺口——中间写歪的那段只有这个入口能覆盖。
  */
 export async function createOnlineRefresh(payload: {

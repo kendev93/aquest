@@ -160,7 +160,7 @@ describe('MarketDataPage', () => {
       '最近交易日历 2026-09-30 · eastmoney_sse_composite',
     )
     expect(wrapper.get('[data-testid="market-store-meta"]').text()).toContain(
-      '自动同步核对 2026-10-02 · 截至交易日 2026-09-30',
+      '自动同步最近判定「不缺数据」 2026-10-02 · 截至交易日 2026-09-30',
     )
   })
 
@@ -186,8 +186,40 @@ describe('MarketDataPage', () => {
       '最近交易日历 2026-09-30 · eastmoney_sse_composite',
     )
     expect(wrapper.get('[data-testid="market-store-meta"]').text()).toContain(
-      '自动同步核对 2026-10-02 · 截至交易日 2026-09-30',
+      '自动同步最近判定「不缺数据」 2026-10-02 · 截至交易日 2026-09-30',
     )
+    // 日历没落后于行情时不提示，免得制造噪声。
+    expect(wrapper.find('[data-testid="market-calendar-behind"]').exists()).toBe(false)
+  })
+
+  it('renders the store dates in China time and explains a calendar behind the bars', async () => {
+    // 面板上那几个日期来自两条路径、两套钟：在线同步写的是带 +08:00 的时间戳，
+    // 日历表的时间列是 UTC-naive（容器时区 UTC），而日历只在自动同步收盘后被写。
+    // 不格式化、不解释，看着就是"日期错了"。
+    vi.mocked(marketApi.fetchStoreStatus).mockResolvedValueOnce({
+      database_path: '/data/market/market.duckdb',
+      schema_version: 1,
+      instrument_count: 2,
+      bar_count: 580,
+      data_start: '2020-01-01',
+      data_end: '2026-10-13',
+      last_online_sync_at: '2026-10-13T22:24:43.660850+08:00',
+      market_calendar_latest_date: '2026-10-09',
+      market_calendar_source: 'eastmoney_sse_composite',
+      market_calendar_updated_at: '2026-10-13 13:46:43.407910',
+      last_auto_sync_check_date: '2026-10-10',
+      last_auto_sync_check_session: '2026-10-09',
+    })
+
+    const wrapper = mountPage()
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="market-last-online-sync"]').text())
+      .toBe('最近在线更新 2026-10-13 22:24:43')
+    expect(wrapper.get('[data-testid="market-calendar-meta"]').text())
+      .toContain('表更新于 2026-10-13 21:46:43')
+    expect(wrapper.get('[data-testid="market-calendar-behind"]').text())
+      .toContain('交易日历停在 2026-10-09，行情已到 2026-10-13')
   })
 
   it('selects a data-bearing instrument when the first catalog item has no bars', async () => {
