@@ -674,6 +674,40 @@ def test_delete_bars_zeroes_coverage_when_other_price_basis_remains(tmp_path: Pa
     assert store.read_bars("SH", "600000").empty
 
 
+def test_reimporting_identical_bars_keeps_indicator_revision(tmp_path: Path) -> None:
+    """重导同一份 vipdoc 不该作废该标的的指标缓存。
+
+    ``instruments.updated_at`` 参与修订号，而修订号是分块缓存的失效依据。本地写入以前
+    无条件 bump：``imported_at`` 一定会变，但没有任何一个指标值会变，于是每导一次就把
+    该标的全部分块重算一遍。在线写入侧早就按"真的改了才算改"处理了。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    frame = _bars(
+        ("SH", "600000", "2024-01-02", 10.0, "local"),
+        ("SH", "600000", "2024-01-03", 11.0, "local"),
+    )
+    store.replace_local_bars("SH", "600000", "stock", frame)
+    revision = store.data_revision("SH", "600000")
+    assert revision is not None
+
+    store.replace_local_bars("SH", "600000", "stock", frame)
+    assert store.data_revision("SH", "600000") == revision
+
+    store.upsert_local_bars(frame)
+    assert store.data_revision("SH", "600000") == revision
+
+    # 改一个价、少一天，都必须让修订号往前走，否则旧指标值会接着服务新行情。
+    changed = frame.copy(deep=True)
+    changed.loc[1, "close"] = 12.0
+    store.replace_local_bars("SH", "600000", "stock", changed)
+    assert store.data_revision("SH", "600000") != revision
+
+    trimmed = changed.iloc[:1]
+    store.replace_local_bars("SH", "600000", "stock", trimmed)
+    assert store.data_revision("SH", "600000") != revision
+
+
 def test_reset_instrument_coverage_zeroes_stale_metadata(tmp_path: Path) -> None:
     """删除一行都没命中时也要能重置覆盖：上一次重刷删了没补回来就是这种状态。
 

@@ -15,6 +15,7 @@ from .models import InstrumentBoard, InstrumentRef, InstrumentType, MarketCode, 
 from .staging import StageMergeReport
 from .store_base import (
     _BAR_COLUMNS,
+    _BAR_INDICATOR_COLUMNS,
     _FRAME_COLUMNS,
     _WRITE_LOCK,
     DEFAULT_PRICE_BASIS,
@@ -207,11 +208,42 @@ class DuckDbBarsStore:
         with _WRITE_LOCK, self._store._connect() as connection:
             connection.execute("BEGIN")
             try:
+                compare_columns = ", ".join(_BAR_INDICATOR_COLUMNS)
+                if incoming.empty:
+                    # 空帧等于"删光这个标的"：只有本来就没有行才算没变。
+                    stored = connection.execute(
+                        "SELECT COUNT(*) FROM daily_bars WHERE market = ? AND code = ?",
+                        [market, code],
+                    ).fetchone()
+                    unchanged = int(stored[0] if stored else 0) == 0
+                else:
+                    connection.register("_incoming_local_bars", incoming)
+                    # 这一条路径会删掉该标的的全部行，所以"没变"必须是两侧集合互相相等，
+                    # 而不是只比对来行情覆盖的那些日期。必须在 DELETE 之前算。
+                    unchanged_row = connection.execute(
+                        f"""
+                        SELECT (
+                            (SELECT COUNT(*) FROM (
+                                SELECT {compare_columns} FROM daily_bars
+                                WHERE market = ? AND code = ?
+                                EXCEPT ALL
+                                SELECT {compare_columns} FROM _incoming_local_bars
+                            )) + (
+                            SELECT COUNT(*) FROM (
+                                SELECT {compare_columns} FROM _incoming_local_bars
+                                EXCEPT ALL
+                                SELECT {compare_columns} FROM daily_bars
+                                WHERE market = ? AND code = ?
+                            ))
+                        ) = 0
+                        """,
+                        [market, code, market, code],
+                    ).fetchone()
+                    unchanged = bool(unchanged_row and unchanged_row[0])
                 connection.execute(
                     "DELETE FROM daily_bars WHERE market = ? AND code = ?", [market, code]
                 )
                 if not incoming.empty:
-                    connection.register("_incoming_local_bars", incoming)
                     columns = ", ".join(_BAR_COLUMNS)
                     connection.execute(
                         f"INSERT INTO daily_bars ({columns}) "
@@ -227,6 +259,7 @@ class DuckDbBarsStore:
                     name=name,
                     source_path=source_path,
                     provider="local",
+                    force_updated_at=not unchanged,
                 )
                 connection.execute("COMMIT")
             except Exception:
@@ -306,6 +339,34 @@ class DuckDbBarsStore:
                      AND existing.price_basis = incoming.price_basis
                     """
                 ).fetchone()
+                # 哪些标的发生了一次"会影响指标值"的改动。逐列比对的口径与在线写入侧
+                # 一致，``imported_at`` / ``source`` / ``provider`` 不参与（见
+                # ``_BAR_INDICATOR_COLUMNS``）。
+                changed_key_rows = connection.execute(
+                    """
+                    SELECT DISTINCT incoming.market, incoming.code
+                    FROM _incoming_local_upsert AS incoming
+                    LEFT JOIN daily_bars AS existing
+                      ON existing.market = incoming.market
+                     AND existing.code = incoming.code
+                     AND existing.trade_date = incoming.trade_date
+                     AND existing.price_basis = incoming.price_basis
+                    WHERE existing.market IS NULL
+                      OR incoming.instrument_type IS DISTINCT FROM existing.instrument_type
+                      OR incoming.board IS DISTINCT FROM existing.board
+                      OR incoming.open IS DISTINCT FROM existing.open
+                      OR incoming.high IS DISTINCT FROM existing.high
+                      OR incoming.low IS DISTINCT FROM existing.low
+                      OR incoming.close IS DISTINCT FROM existing.close
+                      OR incoming.volume IS DISTINCT FROM existing.volume
+                      OR incoming.amount IS DISTINCT FROM existing.amount
+                      OR incoming.bar_status IS DISTINCT FROM existing.bar_status
+                    """
+                ).fetchall()
+                changed_keys = {
+                    (str(market).strip().upper(), str(code).strip())
+                    for market, code in changed_key_rows
+                }
                 connection.execute(
                     """
                     DELETE FROM daily_bars AS existing
@@ -335,6 +396,8 @@ class DuckDbBarsStore:
                         instrument_type,
                         board,
                         provider="local",
+                        force_updated_at=(str(market).strip().upper(), str(code).strip())
+                        in changed_keys,
                     )
                 connection.unregister("_incoming_local_upsert")
                 connection.execute("COMMIT")
@@ -1595,6 +1658,47 @@ class DuckDbBarsStore:
             finally:
                 connection.unregister("_requested_symbols")
         return int(row[0]) if row and row[0] is not None else 0
+
+    def count_bars_before(
+        self,
+        instruments: Iterable[InstrumentRef | StockRef],
+        *,
+        before_date: date,
+        include_provisional: bool = False,
+    ) -> dict[tuple[str, str], int]:
+        """Count each instrument's bars strictly before ``before_date``.
+
+        预计算按自然年分块落缓存，块里的 ``bar_offset`` 必须是"该年第一根在**全历史**
+        中的位置"（读取端按它拼接，见 ``IndicatorCache._decode_chunks``）。窗口第一年的
+        那个位置，就是窗口之前已经存在的根数，所以只能按标的分别计数。
+        """
+
+        requested = list(instruments)
+        if not requested:
+            return {}
+        symbol_frame = pd.DataFrame(
+            [{"market": item.market, "code": item.code} for item in requested]
+        ).drop_duplicates()
+        conditions: list[str] = ["bars.price_basis = ?", "bars.trade_date < ?"]
+        parameters: list[object] = [DEFAULT_PRICE_BASIS, before_date]
+        if not include_provisional:
+            conditions.append("bars.bar_status = 'completed'")
+        query = (
+            "SELECT bars.market, bars.code, COUNT(*) FROM daily_bars AS bars"
+            " INNER JOIN _requested_symbols AS requested"
+            " ON bars.market = requested.market AND bars.code = requested.code"
+            f" WHERE {' AND '.join(conditions)} GROUP BY bars.market, bars.code"
+        )
+        with self._store._connect(read_only=True) as connection:
+            connection.register("_requested_symbols", symbol_frame)
+            try:
+                rows = connection.execute(query, parameters).fetchall()
+            finally:
+                connection.unregister("_requested_symbols")
+        return {
+            (str(market).strip().upper(), str(code).strip()): int(count)
+            for market, code, count in rows
+        }
 
     def read_latest_bars(
         self,

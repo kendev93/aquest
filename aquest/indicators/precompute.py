@@ -178,7 +178,9 @@ class IndicatorPrecomputeService:
             batch = refs[offset : offset + _PRECOMPUTE_CHUNK_SIZE]
             batch_keys = {(str(ref.market).strip().upper(), str(ref.code).strip()) for ref in batch}
             cached_index = self._cache.cached_chunk_index(batch_keys, formula_ids)
-            offsets_by_key: dict[tuple[str, str], int] = dict.fromkeys(batch_keys, 0)
+            offsets_by_key: dict[tuple[str, str], int] = self._initial_offsets(
+                batch, batch_keys, windows
+            )
             failed_keys: set[tuple[str, str]] = set()
             seen_keys: set[tuple[str, str]] = set()
             retags: list[dict[str, object]] = []
@@ -366,6 +368,26 @@ class IndicatorPrecomputeService:
             cache_hits=cache_hits,
             failure_reasons=failures,
         )
+
+    def _initial_offsets(
+        self,
+        batch: Sequence[StockRef],
+        batch_keys: set[tuple[str, str]],
+        windows: Sequence[tuple[date, date]],
+    ) -> dict[tuple[str, str], int]:
+        """块偏移的起点：每个标的在窗口第一年之前已有的根数。
+
+        读取端按 ``bar_offset`` 把年块首尾相接，并要求链尾等于**全历史**根数（见
+        ``IndicatorCache._decode_chunks``）。从 0 起算只在"历史正好从窗口开始"时成立；
+        历史更长时链尾永远差着窗口前那一段，预计算对请求路径一次都命中不了，而下一轮
+        预计算自己报 ``cache_hits``，把这份浪费藏起来。
+        """
+
+        offsets = dict.fromkeys(batch_keys, 0)
+        if not windows:
+            return offsets
+        offsets.update(self._cache.bar_counts_before(batch, before_date=windows[0][0]))
+        return offsets
 
     def _changed_refs(
         self,

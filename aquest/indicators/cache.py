@@ -26,6 +26,7 @@ from aquest.formulas.custom import (
 from aquest.formulas.registry import FORMULA_REGISTRY, FormulaDefinition, FormulaRegistry
 from aquest.formulas.types import FormulaResult
 from aquest.market_data.adjustment import frame_adjust_version
+from aquest.market_data.models import InstrumentRef, StockRef
 from aquest.market_data.store import DuckDbMarketDataStore
 from aquest.market_data.store_base import DEFAULT_PRICE_BASIS
 from aquest.market_data.store_indicator_cache import _ADJUST_VERSION_MARKER
@@ -417,6 +418,22 @@ class IndicatorCache:
 
     def revision_for(self, market: str, code: str, frame: pd.DataFrame) -> str:
         return self._revision(market, code, frame)
+
+    def bar_counts_before(
+        self, instruments: Iterable[InstrumentRef | StockRef], *, before_date: date
+    ) -> dict[tuple[str, str], int]:
+        """每个标的在 ``before_date`` 之前已有的根数——分块偏移的起点。
+
+        缓存块的 ``bar_offset`` 以**全历史**为坐标系（见 :meth:`_decode_chunks`），预计算
+        从窗口第一年按 0 起算的话，链尾永远到不了全历史根数，请求路径就一次都命中不了。
+        """
+
+        if self._store is None:
+            return {}
+        requested = list(instruments)
+        if not requested:
+            return {}
+        return self._store.count_bars_before(requested, before_date=before_date)
 
     def cached_chunk_index(
         self,

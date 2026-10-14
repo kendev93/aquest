@@ -96,6 +96,23 @@ _BAR_COLUMNS = [
     "imported_at",
 ]
 _FRAME_COLUMNS = ["date", "open", "high", "low", "close", "volume", "amount", "bar_status"]
+#: 判定"这一次本地导入到底改没改行情"只比这些列：它们决定指标值。``imported_at`` /
+#: ``source`` / ``provider`` 刻意不参与——重导同一份 vipdoc 一定会变它们，可任何一个指标
+#: 都不会因此不同；那时 bump ``instruments.updated_at`` 等于把该标的的全部分块缓存作废、
+#: 白重算一遍。在线写入侧早就按 ``changed_keys`` 规避了这一点。
+_BAR_INDICATOR_COLUMNS = [
+    "trade_date",
+    "instrument_type",
+    "board",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "amount",
+    "price_basis",
+    "bar_status",
+]
 _WRITE_LOCK = RLock()
 _CONNECT_RETRY_DELAYS = (0.1, 0.25, 0.5, 1.0, 2.0)
 # 本系统只研究股票；基金、债券、指数都不入库。

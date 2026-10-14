@@ -74,11 +74,11 @@ def backend(request: pytest.FixtureRequest) -> str:
     return str(request.param)
 
 
-def _bars(length: int = 80) -> pd.DataFrame:
+def _bars(length: int = 80, *, start: str = "2024-01-01") -> pd.DataFrame:
     close = 10.0 + np.linspace(0.0, 8.0, length) + np.sin(np.arange(length) / 3.0)
     return pd.DataFrame(
         {
-            "date": pd.date_range("2024-01-01", periods=length, freq="D"),
+            "date": pd.date_range(start, periods=length, freq="D"),
             "open": close - 0.2,
             "high": close + 0.5,
             "low": close - 0.5,
@@ -348,6 +348,37 @@ def test_precompute_service_materializes_all_builtin_formulas(tmp_path: Path, ba
     )
     assert cold_cache.metrics()["persistent_hits"] == formula_count
     assert cold_cache.metrics()["computed"] == 0
+
+
+def test_precompute_offsets_are_history_relative(tmp_path: Path, backend: str) -> None:
+    """历史比预计算窗口长时，块偏移必须落在全历史坐标系里。
+
+    读取端要求块链的链尾等于 ``instruments.bar_count``（``IndicatorCache._decode_chunks``）。
+    从 0 起算的链尾只走到窗口长度，于是预计算的钱全白花、请求路径照样整段重算；更糟的是
+    下一轮预计算自己报 ``cache_hits``，把浪费藏得看不见。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb", indicator_cache_backend=backend)
+    # 2023-01-01 ~ 2024-12-31 共 731 根，只预计算 2024 年：窗口前有 365 根历史。
+    store.replace_local_bars("SH", "600000", "stock", _bars(731, start="2023-01-01"))
+    adapter = DuckDbMarketDataAdapter(store)
+
+    report = IndicatorPrecomputeService(adapter=adapter, cache=IndicatorCache(store)).run(
+        vipdoc_path=str(tmp_path),
+        universe="all",
+        years=1,
+        end_year=2024,
+    )
+    assert report.errors == 0
+    assert report.processed == 1
+
+    window = store.read_bars("SH", "600000").tail(100).reset_index(drop=True)
+    assert window["date"].iloc[-1] == pd.Timestamp("2024-12-31")
+    cold = IndicatorCache(store)
+    cold.get_or_compute(window, ("technical",), market="SH", code="600000")
+    metrics = cold.metrics()
+    assert metrics["persistent_hits"] == 1, metrics
+    assert metrics["computed"] == 0, metrics
 
 
 def test_precompute_cancellation_during_compute_drains_workers_without_persisting(
