@@ -65,6 +65,10 @@ ACTIVE_DATA_JOB_DESCRIPTIONS = frozenset(
 # Compatibility alias for embedders that used the narrower first-release name.
 ACTIVE_SYNC_DESCRIPTIONS = ACTIVE_DATA_JOB_DESCRIPTIONS
 DEFAULT_AUTO_SYNC_INTERVAL_SECONDS = 15 * 60
+#: 连续失败后的等待上限：源站限流或断网时，按 15 分钟猛敲一整个交易日只会更糟。
+AUTO_SYNC_MAX_BACKOFF_SECONDS: float = 2 * 60 * 60
+#: 指数位移的上限，只为了不把连错几个月的次数算成天文数字（真实上限由上面的封顶决定）。
+_AUTO_SYNC_BACKOFF_MAX_STEPS = 24
 AUTO_SYNC_AFTER_CLOSE = time(18, 30)
 TRADING_CALENDAR_LOOKBACK_DAYS = 120
 TRADING_CALENDAR_PROVIDER = "eastmoney_sse_composite"
@@ -135,12 +139,14 @@ class AutomaticMarketSyncScheduler:
         self._enabled = enabled
         self._clock = clock or (lambda: datetime.now(_SHANGHAI_TZ))
         self._active_job_id: str | None = None
+        self._failure_streak = 0
 
     def submit_if_due(self) -> str | None:
         """Submit one session-bounded refresh when the latest market session is missing."""
 
         if not self._enabled:
             return None
+        self._settle_auto_job()
         if self._has_active_auto_job() or self._runner.has_active_jobs(
             ACTIVE_DATA_JOB_DESCRIPTIONS
         ):
@@ -218,6 +224,7 @@ class AutomaticMarketSyncScheduler:
             )
         except Exception:
             self._active_job_id = None
+            self._note_failure("提交自动行情同步任务失败")
             raise
         logger.info("已提交每日自动行情同步任务: %s", job_id)
         return job_id
@@ -232,7 +239,55 @@ class AutomaticMarketSyncScheduler:
                     on_job_submitted(job_id)
             except Exception:  # noqa: BLE001 - scheduler must not kill the web app
                 logger.exception("每日自动行情同步调度检查失败")
-            await asyncio.sleep(self._interval_seconds)
+            await asyncio.sleep(self.next_check_delay_seconds())
+
+    def next_check_delay_seconds(self) -> float:
+        """距离下一次调度检查该等多久。
+
+        没有失败时就是配置的 ``interval_seconds``；连续失败按 15 → 30 → 60 → 120 分钟
+        退避并封顶 2 小时，成功后由 ``_settle_auto_job`` 清零。
+        """
+
+        if self._failure_streak <= 0:
+            return self._interval_seconds
+        # 2.0 而不是 2：整数幂在类型上算不出确定结果，这里要的就是一个倍数。
+        growth: float = 2.0 ** min(self._failure_streak, _AUTO_SYNC_BACKOFF_MAX_STEPS)
+        return min(self._interval_seconds * growth, AUTO_SYNC_MAX_BACKOFF_SECONDS)
+
+    def _settle_auto_job(self) -> None:
+        """给上一轮自动任务收尾：成功把退避清零，失败进入下一档等待。"""
+
+        if self._active_job_id is None:
+            return
+        state = self._runner.get(self._active_job_id)
+        if state is None:
+            # 任务记录已被回收，判不出成败：放开引用继续调度，退避留到下一个真实终态。
+            self._active_job_id = None
+            return
+        if state.status in {"queued", "running"}:
+            return
+        self._active_job_id = None
+        if state.status == "completed":
+            if self._failure_streak:
+                logger.info(
+                    "自动行情同步恢复正常，检查间隔回到 %s 分钟",
+                    round(self._interval_seconds / 60, 1),
+                )
+            self._failure_streak = 0
+            return
+        if state.status == "failed":
+            self._note_failure("自动行情同步任务失败", error=state.error)
+        # cancelled 是用户主动停的，不算故障。
+
+    def _note_failure(self, reason: str, *, error: str | None = None) -> None:
+        self._failure_streak += 1
+        logger.warning(
+            "%s（连续 %s 次），%s 分钟后再检查调度：%s",
+            reason,
+            self._failure_streak,
+            round(self.next_check_delay_seconds() / 60, 1),
+            error or "无错误详情",
+        )
 
     def _drop_indicator_cache(self) -> None:
         if self._indicator_cache is None:
@@ -246,10 +301,7 @@ class AutomaticMarketSyncScheduler:
         if self._active_job_id is None:
             return False
         state = self._runner.get(self._active_job_id)
-        if state is not None and state.status in {"queued", "running"}:
-            return True
-        self._active_job_id = None
-        return False
+        return bool(state is not None and state.status in {"queued", "running"})
 
     def _run_sync(
         self,
@@ -378,6 +430,7 @@ __all__ = [
     "MARKET_SYNC_JOB_DESCRIPTIONS",
     "MARKET_SYNC_EXCLUSIVE_GROUP",
     "DEFAULT_AUTO_SYNC_INTERVAL_SECONDS",
+    "AUTO_SYNC_MAX_BACKOFF_SECONDS",
     "AUTO_SYNC_AFTER_CLOSE",
     "TRADING_CALENDAR_LOOKBACK_DAYS",
     "TRADING_CALENDAR_PROVIDER",

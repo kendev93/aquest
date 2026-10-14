@@ -306,6 +306,9 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
     ) -> list[date]:
         return self._bars.read_authoritative_trading_dates(start_date, end_date)
 
+    def read_authoritative_calendar_coverage(self) -> list[tuple[date, date]]:
+        return self._bars.read_authoritative_calendar_coverage()
+
     def latest_market_trading_date(self, on_or_before: date) -> date | None:
         return self._bars.latest_market_trading_date(on_or_before)
 

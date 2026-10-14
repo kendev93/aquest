@@ -1,4 +1,6 @@
-FROM node:26-alpine AS web-build
+# Node 与 CI 对齐：CI 跑的是 24，`web-ui` 的 engines 只写了下限（>=22.22.2）。
+# 用更大的主版本构建等于让镜像依赖一个 CI 从没测过的工具链。
+FROM node:24-alpine AS web-build
 
 WORKDIR /webui
 COPY web-ui/package.json web-ui/package-lock.json ./

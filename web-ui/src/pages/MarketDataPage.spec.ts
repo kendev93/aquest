@@ -5,6 +5,7 @@ import type { LocalInstrument, LocalMarketChart } from '../types'
 import * as marketApi from '../api/marketData'
 import MarketDataPage from './MarketDataPage.vue'
 import { ApiError } from '../api/client'
+import { INTERACTIVE_JOB_TIMEOUT_MS } from '../composables/usePolling'
 
 vi.mock('../api/marketData', async () => {
   const actual = await vi.importActual<typeof import('../api/marketData')>('../api/marketData')
@@ -902,6 +903,26 @@ describe('MarketDataPage', () => {
     expect(malformed.get('[data-testid="market-health-message"]').text()).toContain('体检没有返回报告')
   })
 
+  it('stops waiting on a stuck health check after the interactive budget', async () => {
+    // 体检正常是十秒级：卡住就停止等待，别把面板锁在「检查中」。
+    vi.useFakeTimers()
+    vi.mocked(marketApi.createHealthCheck).mockResolvedValue({ job_id: 'health-1', status: 'queued' })
+    vi.mocked(marketApi.getMarketDataJob).mockResolvedValue({
+      ...healthJobState({}),
+      status: 'running',
+      progress: 0.4,
+      result: null,
+    })
+    const wrapper = mountPage()
+    await vi.advanceTimersByTimeAsync(0)
+    await wrapper.get('[data-testid="market-health-check"]').trigger('click')
+    await vi.advanceTimersByTimeAsync(INTERACTIVE_JOB_TIMEOUT_MS + 1_000)
+
+    expect(wrapper.get('[data-testid="market-health-message"]').text()).toContain('任务仍在后台运行')
+    expect(wrapper.get('[data-testid="market-health-check"]').attributes('disabled')).toBeUndefined()
+    vi.useRealTimers()
+  })
+
   it('repairs only the flagged check after an explicit confirmation', async () => {
     vi.mocked(marketApi.createHealthCheck).mockResolvedValue({ job_id: 'health-1', status: 'queued' })
     vi.mocked(marketApi.getMarketDataJob).mockResolvedValue(healthJobState(healthReport()))
@@ -932,6 +953,34 @@ describe('MarketDataPage', () => {
     // 删了没补回来的标的必须点名，否则"修复"会静默变成删库。
     expect(wrapper.get('[data-testid="market-health-empty-codes"]').text()).toContain('000001')
     confirmSpy.mockRestore()
+  })
+
+  it('keeps waiting on a repair that legitimately runs for hours', async () => {
+    // 先删后下的全市场修复不是「卡住」：给它套交互预算会把正常任务误报成超时，
+    // 所以 waitForHealthJob 只有体检传预算。
+    vi.useFakeTimers()
+    vi.mocked(marketApi.createHealthCheck).mockResolvedValue({ job_id: 'health-1', status: 'queued' })
+    vi.mocked(marketApi.createHealthRepair).mockResolvedValue({ job_id: 'repair-1', status: 'queued' })
+    vi.mocked(marketApi.getMarketDataJob).mockResolvedValue(healthJobState(healthReport()))
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const wrapper = mountPage()
+    await vi.advanceTimersByTimeAsync(0)
+    await wrapper.get('[data-testid="market-health-check"]').trigger('click')
+    await vi.advanceTimersByTimeAsync(0)
+
+    vi.mocked(marketApi.getMarketDataJob).mockResolvedValue({
+      ...healthJobState({}),
+      status: 'running',
+      progress: 0.1,
+      result: null,
+    })
+    await wrapper.get('[data-testid="market-health-repair"]').trigger('click')
+    await vi.advanceTimersByTimeAsync(INTERACTIVE_JOB_TIMEOUT_MS + 1_000)
+
+    expect(wrapper.get('[data-testid="market-health-repair"]').text()).toContain('修复中')
+    expect(wrapper.find('[data-testid="market-health-message"]').exists()).toBe(false)
+    confirmSpy.mockRestore()
+    vi.useRealTimers()
   })
 
   it('does not call the repair endpoint when the user cancels the confirmation', async () => {

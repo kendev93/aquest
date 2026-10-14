@@ -7,6 +7,7 @@ import FactorTestPage from './FactorTestPage.vue'
 import * as factorApi from '../api/factorTest'
 import * as formulaApi from '../api/formulaScreen'
 import * as jobsApi from '../api/jobs'
+import { INTERACTIVE_JOB_TIMEOUT_MS } from '../composables/usePolling'
 
 vi.mock('../api/formulaScreen', async () => {
   const actual = await vi.importActual<typeof import('../api/formulaScreen')>('../api/formulaScreen')
@@ -275,5 +276,26 @@ describe('FactorTestPage', () => {
 
     expect(factorApi.createFactorTest).not.toHaveBeenCalled()
     expect(wrapper.text()).toContain('请至少选择一个指标输出')
+  })
+
+  it('stops waiting after the interactive budget instead of staying stuck on 检验中', async () => {
+    // 后端卡住时页面不能永远转圈：预算到点要解锁，并说清任务仍在后台跑、结果会进历史。
+    vi.useFakeTimers()
+    vi.mocked(factorApi.getFactorTest).mockResolvedValue({
+      job_id: 'job-1',
+      status: 'running',
+      progress: 0.2,
+      error: null,
+      result: null,
+    })
+    const wrapper = mount(FactorTestPage)
+    await vi.advanceTimersByTimeAsync(0)
+    await wrapper.get('[data-testid="factor-horizon"]').setValue(10)
+    await wrapper.get('[data-testid="factor-config"]').trigger('submit')
+    await vi.advanceTimersByTimeAsync(INTERACTIVE_JOB_TIMEOUT_MS + 1_000)
+
+    expect(wrapper.get('[data-testid="factor-message"]').text()).toContain('任务仍在后台运行')
+    expect(wrapper.get('[data-testid="start-factor-test"]').attributes('disabled')).toBeUndefined()
+    vi.useRealTimers()
   })
 })

@@ -3,7 +3,7 @@ import PageIntro from '../components/PageIntro.vue'
 import { computed, onMounted, reactive, ref } from 'vue'
 
 import { ApiError, describeError } from '../api/client'
-import { pollUntil, useBackgroundPoll } from '../composables/usePolling'
+import { INTERACTIVE_JOB_TIMEOUT_MS, PollTimeoutError, pollUntil, useBackgroundPoll } from '../composables/usePolling'
 import {
   cancelMarketDataJob,
   createHealthCheck,
@@ -635,7 +635,13 @@ function beginHealthJob(jobId: string, status: string): void {
   }
 }
 
-async function waitForHealthJob(jobId: string): Promise<void> {
+/**
+ * 等待体检/修复任务结束。
+ *
+ * 只有体检带预算：它通常几秒到几分钟，卡住就是后端或队列有问题。
+ * 一键修复是先删后下全市场，跑几小时属于正常，所以有意不传 timeoutMs。
+ */
+async function waitForHealthJob(jobId: string, timeoutMs?: number): Promise<void> {
   const state = await pollUntil(
     async () => {
       const current = (await getMarketDataJob(jobId)) as unknown as MarketHealthJobState
@@ -644,6 +650,7 @@ async function waitForHealthJob(jobId: string): Promise<void> {
     },
     {
       intervalMs: MARKET_JOB_POLL_INTERVAL_MS,
+      timeoutMs,
       until: (current) => {
         if (current.status === 'failed') {
           throw new ApiError(current.error ?? '行情任务失败。', 500)
@@ -682,11 +689,13 @@ async function runHealthCheck(): Promise<void> {
   try {
     const job = await createHealthCheck()
     beginHealthJob(job.job_id, job.status)
-    await waitForHealthJob(job.job_id)
+    await waitForHealthJob(job.job_id, INTERACTIVE_JOB_TIMEOUT_MS)
     healthReport.value = asHealthReport(healthJob.value?.result)
     if (!healthReport.value) healthMessage.value = '体检没有返回报告，请重试。'
   } catch (error) {
-    healthMessage.value = apiMessage(error)
+    healthMessage.value = error instanceof PollTimeoutError
+      ? '行情体检已等待超过 15 分钟，页面停止等待；任务仍在后台运行，可稍后重新发起体检。'
+      : apiMessage(error)
   } finally {
     healthChecking.value = false
   }

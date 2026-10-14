@@ -1,6 +1,9 @@
+import logging
 from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
+
+import pytest
 
 from aquest.indicators.precompute import PRECOMPUTE_MAX_BARS
 from aquest.market_data.auto_sync import AutomaticMarketSyncScheduler, auto_sync_due
@@ -452,3 +455,103 @@ def test_auto_sync_precompute_failure_does_not_fail_the_sync() -> None:
     payload = scheduler._run_sync(lambda done, total: None)
 
     assert payload["written_bars"] == 1
+
+
+class _AlwaysDueStore:
+    """永远「今天还没同步」：只考察调度，不掺行情判定。"""
+
+    def status(self):
+        return SimpleNamespace(
+            instrument_count=1,
+            bar_count=PRECOMPUTE_MAX_BARS + 1,
+            last_online_sync_at=None,
+        )
+
+
+class _FlippableRunner:
+    """一个能被测试拨到任意终态的假任务队列。"""
+
+    def __init__(self) -> None:
+        self.state: SimpleNamespace | None = SimpleNamespace(status="running", error=None)
+        self.submits = 0
+
+    def has_active_jobs(self, descriptions):
+        del descriptions
+        return False
+
+    def get(self, job_id):
+        del job_id
+        return self.state
+
+    def submit_callable(self, target, **kwargs):
+        del target, kwargs
+        self.submits += 1
+        self.state = SimpleNamespace(status="running", error=None)
+
+
+def _backoff_scheduler(runner: _FlippableRunner) -> AutomaticMarketSyncScheduler:
+    return AutomaticMarketSyncScheduler(
+        store=_AlwaysDueStore(),
+        runner=runner,
+        market_sync=object(),
+        precomputer=object(),
+        clock=lambda: datetime(2026, 9, 1, 19, 0, tzinfo=SHANGHAI),
+        interval_seconds=15 * 60,
+    )
+
+
+def test_auto_sync_backs_off_after_repeated_failures_and_resets_on_success(caplog) -> None:
+    """源站限流或断网时，每 15 分钟重敲一次全市场只会更糟：15 → 30 → 60 → 120 分钟，封顶 2 小时。"""
+
+    runner = _FlippableRunner()
+    scheduler = _backoff_scheduler(runner)
+
+    assert scheduler.submit_if_due() is not None
+    assert scheduler.next_check_delay_seconds() == 15 * 60
+
+    with caplog.at_level(logging.WARNING, logger="aquest.market_data.auto_sync"):
+        for streak, expected_minutes in ((1, 30), (2, 60), (3, 120), (4, 120)):
+            runner.state = SimpleNamespace(status="failed", error="源站限流")
+            assert scheduler.submit_if_due() is not None
+            assert scheduler.next_check_delay_seconds() == expected_minutes * 60
+            assert f"连续 {streak} 次" in caplog.text
+
+        # 每一档都要留下可读的等待时长，否则运维只能靠猜。
+        assert "120.0 分钟后再检查调度：源站限流" in caplog.text
+
+    runner.state = SimpleNamespace(status="completed", error=None)
+    assert scheduler.submit_if_due() is not None
+    assert scheduler.next_check_delay_seconds() == 15 * 60
+
+
+def test_auto_sync_backs_off_when_the_submission_itself_fails() -> None:
+    """提交都失败（队列满、线程池炸）同样是失败，不能继续按 15 分钟硬撞。"""
+
+    class RejectingRunner(_FlippableRunner):
+        def submit_callable(self, target, **kwargs):
+            del target, kwargs
+            raise RuntimeError("后台任务队列已满")
+
+    scheduler = _backoff_scheduler(RejectingRunner())
+
+    with pytest.raises(RuntimeError, match="后台任务队列已满"):
+        scheduler.submit_if_due()
+
+    assert scheduler.next_check_delay_seconds() == 30 * 60
+
+
+def test_auto_sync_keeps_the_normal_interval_for_cancelled_and_recycled_jobs() -> None:
+    """用户主动取消不是故障；任务记录被回收时判不出成败，也不能当成失败。"""
+
+    runner = _FlippableRunner()
+    scheduler = _backoff_scheduler(runner)
+
+    assert scheduler.submit_if_due() is not None
+    runner.state = SimpleNamespace(status="cancelled", error=None)
+    assert scheduler.submit_if_due() is not None
+    assert scheduler.next_check_delay_seconds() == 15 * 60
+
+    runner.state = None
+    assert scheduler.submit_if_due() is not None
+    assert scheduler.next_check_delay_seconds() == 15 * 60
+    assert scheduler._active_job_id is not None

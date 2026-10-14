@@ -10,6 +10,8 @@
  *
  * - `pollUntil`：await 式。fn 是调用方的闭包，每轮副作用（写 ref、发消息）
  *   写在里面；`until` 决定何时结束；`until` 或 fn 抛错即中止并向上传播。
+ *   交互型短任务用 `timeoutMs` 设预算（见 `INTERACTIVE_JOB_TIMEOUT_MS`），
+ *   小时级的全量任务有意不设——预算到点只会停止等待，不会取消后台任务。
  * - `useBackgroundPoll`：setup 式。组件卸载自动停；单轮失败不终止轮询——
  *   后台刷新死于一次网络抖动是最糟的失败模式。
  *
@@ -19,16 +21,50 @@
 
 import { getCurrentInstance, onUnmounted } from 'vue'
 
-/** `timeoutMs` 预算耗尽时抛出；调用方用它区分「超时」和「任务失败」。 */
+/** `timeoutMs` 预算耗尽时抛出；调用方用它区分「超时」和「任务失败」。超时只停止前端等待，后台任务照常跑完。 */
 export class PollTimeoutError extends Error {
-  constructor(message = '轮询超时。') {
+  constructor(message = '等待任务结束超时，任务仍在后台运行。') {
     super(message)
     this.name = 'PollTimeoutError'
   }
 }
 
+/**
+ * 交互型短任务的等待预算：个股研究、因子检验、因子归因、行情体检、公式选股。
+ *
+ * 这些任务正常是秒级到分钟级，用户盯着进度条等；超过 15 分钟基本是后端卡住或
+ * 排到了长任务，继续空等只会把页面锁死在「运行中」。
+ * 全量行情同步和策略实验室是小时级任务，有意不设预算——见 MarketDataPage 的
+ * 「没有固定尝试上限」测试。
+ */
+export const INTERACTIVE_JOB_TIMEOUT_MS = 15 * 60 * 1000
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
+/**
+ * 跑一轮，但到点就撤——预算必须真的能终止等待。
+ *
+ * fetch 没有默认超时，某一次状态读取挂住时只在循环开头查预算等于没查：页面会一直
+ * 卡在「运行中」。让这一轮和截止时刻赛跑，超时先到；悬挂的那一轮已经被 race 订阅过，
+ * 之后失败也不会变成未处理的 rejection，结果直接丢掉即可。
+ */
+async function runWithinBudget<T>(fn: () => Promise<T>, deadline: number | null): Promise<T> {
+  if (deadline === null) return fn()
+  const remainingMs = deadline - Date.now()
+  if (remainingMs <= 0) throw new PollTimeoutError()
+  let timer: number | undefined
+  try {
+    return await Promise.race([
+      fn(),
+      new Promise<never>((_resolve, reject) => {
+        timer = window.setTimeout(() => reject(new PollTimeoutError()), remainingMs)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) window.clearTimeout(timer)
+  }
 }
 
 export interface PollUntilOptions<T> {
@@ -39,7 +75,7 @@ export interface PollUntilOptions<T> {
    * 在这里抛错同样中止轮询并向上传播。attempt 从 1 开始。
    */
   until: (result: T, attempt: number) => boolean
-  /** 可选总预算（毫秒）。到点抛 PollTimeoutError；不设就无限等。 */
+  /** 可选总预算（毫秒）。到点抛 PollTimeoutError，卡住的单轮也会被撤掉；不设就无限等。 */
   timeoutMs?: number
   /**
    * 瞬时错误重试：返回这一轮失败后要先等的毫秒数；返回 null 表示致命错误，
@@ -61,7 +97,7 @@ export async function pollUntil<T>(
     attempt += 1
     let result: T
     try {
-      result = await fn()
+      result = await runWithinBudget(fn, deadline)
       failures = 0
     } catch (error) {
       if (options.retryableError) {

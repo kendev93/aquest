@@ -31,6 +31,7 @@ from aquest.market_data.gap_backfill import (
     BAOSTOCK_SOURCE,
     MAX_INFERRED_FACTOR,
     SkippedGap,
+    _merge_coverage,
     _trading_days_between,
     _verify_halted,
     backfill_inferred_actions,
@@ -172,12 +173,14 @@ def test_trading_days_between_counts_calendar_only() -> None:
     assert _trading_days_between(date(2024, 2, 20), date(2024, 3, 1), CALENDAR) == 4
 
 
-def test_incomplete_calendar_is_rejected() -> None:
-    """日历覆盖不到候选范围时必须报错，不能静默把停牌当成除权。
+def test_gaps_outside_the_calendar_are_skipped_and_disclosed() -> None:
+    """日历覆盖不到的候选绝不能推断。
 
-    这是最隐蔽的失效：``_trading_days_between`` 在范围之外一律返回 0，于是
-    所有跨停牌的跳空都会被判成"紧邻交易日"而被写成除权事件 —— 正是本模块要
-    防的那件事。缺日历时的正确反应是拒绝处理。
+    这是最隐蔽的失效：``_trading_days_between`` 在范围之外一律返回 0，于是所有
+    跨停牌的跳空都会被判成"紧邻交易日"而被写成除权事件 —— 正是本模块要防的那件事。
+    以前覆盖不全是整批 ``ValueError``（接口 503，而唯一的日历写入方每次只声明 120 天，
+    于是这功能在真实库里几乎永远跑不起来）；现在按候选逐条降级成 ``calendar_uncovered``，
+    范围内的照判，范围外的点名报数。
     """
 
     gaps = frame(
@@ -187,10 +190,90 @@ def test_incomplete_calendar_is_rejected() -> None:
             prev_close=137.49,
             open_price=41.25,
             close=41.25,
-        )
+        ),
+        candidate(prev_close=10.0, open_price=5.0, close=5.05),
     )
-    with pytest.raises(ValueError, match="未覆盖"):
-        infer_corporate_actions(gaps, [date(2024, 2, 5), date(2024, 2, 6)])
+    recent = [item for item in CALENDAR if item >= date(2024, 2, 5)]
+
+    actions, skipped = infer_corporate_actions(gaps, recent)
+
+    assert [action.ex_date for action in actions] == [date(2024, 2, 26)]
+    assert len(skipped) == 1
+    assert skipped[0].reason == SkippedGap.REASON_CALENDAR_UNCOVERED
+    assert "无法判定 2015-06-12 ~ 2015-09-14" in skipped[0].detail
+
+    # 一段日历都没有时全部原样跳过，不写任何事件。
+    actions, skipped = infer_corporate_actions(gaps, [])
+    assert not actions
+    assert [item.reason for item in skipped] == [SkippedGap.REASON_CALENDAR_UNCOVERED] * 2
+
+
+def test_coverage_windows_merge_only_when_they_touch() -> None:
+    """自动同步每天声明一段 120 天：接着的段必须接起来，断开的不能假装连着。"""
+
+    assert _merge_coverage(
+        [(date(2024, 1, 1), date(2024, 1, 20)), (date(2024, 1, 21), date(2024, 2, 10))]
+    ) == [(date(2024, 1, 1), date(2024, 2, 10))]
+    assert _merge_coverage(
+        [(date(2024, 1, 1), date(2024, 1, 20)), (date(2024, 1, 22), date(2024, 2, 10))]
+    ) == [(date(2024, 1, 1), date(2024, 1, 20)), (date(2024, 1, 22), date(2024, 2, 10))]
+
+
+class _CoveredStore:
+    """只有近段权威日历的 store —— 自动同步在真实库里的形状。"""
+
+    def __init__(self, gaps: pd.DataFrame, windows: list[tuple[date, date]]) -> None:
+        self._gaps = gaps
+        self._windows = windows
+        self.calendar_calls: list[tuple[date, date]] = []
+        self.writes = 0
+
+    def read_price_gap_candidates(self) -> pd.DataFrame:
+        return self._gaps
+
+    def read_authoritative_calendar_coverage(self) -> list[tuple[date, date]]:
+        return self._windows
+
+    def read_authoritative_trading_dates(self, start_date: date, end_date: date) -> list[date]:
+        self.calendar_calls.append((start_date, end_date))
+        return [item for item in CALENDAR if start_date <= item <= end_date]
+
+    def upsert_corporate_actions(
+        self,
+        actions: Sequence[CorporateAction],
+        *,
+        source: str = "online",
+        provider: str = "eastmoney",
+    ) -> int:
+        del actions, source, provider
+        self.writes += 1
+        return 1
+
+
+def test_backfill_degrades_to_the_covered_window_and_discloses_the_rest() -> None:
+    """只查覆盖到的那段，别拿全历史候选去要求整段日历。"""
+
+    gaps = frame(
+        candidate(
+            prev_date=date(2015, 6, 12),
+            trade_date=date(2015, 9, 14),
+            prev_close=137.49,
+            open_price=41.25,
+            close=41.25,
+        ),
+        candidate(prev_close=10.0, open_price=5.0, close=5.05),
+    )
+    store = _CoveredStore(gaps, [(date(2024, 2, 1), date(2024, 4, 1))])
+
+    report = backfill_inferred_actions(store, write=True)
+
+    # 请求范围被裁到候选范围内：不会去问 2015 年那段根本没有日历的区间。
+    assert store.calendar_calls == [(date(2024, 2, 1), date(2024, 2, 26))]
+    assert report.inferred == 1
+    assert report.written == 1
+    payload = report.to_dict()
+    assert payload["skipped_by_reason"] == {"calendar_uncovered": 1}
+    assert payload["skipped_detail"][0]["trade_date"] == "2015-09-14"
 
 
 def test_backfill_fails_closed_without_persisted_authoritative_coverage() -> None:

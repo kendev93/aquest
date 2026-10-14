@@ -29,7 +29,7 @@ import type {
   ValueDefinition,
 } from '../types'
 import AppTopbar from '../components/AppTopbar.vue'
-import { pollUntil } from '../composables/usePolling'
+import { INTERACTIVE_JOB_TIMEOUT_MS, PollTimeoutError, pollUntil } from '../composables/usePolling'
 import { formatNumber, formatPercent } from '../utils/format'
 
 // 因子类指标（IC/IR/收益差）惯例 3 位小数；共享 formatNumber 的默认是 2 位。
@@ -184,23 +184,33 @@ async function submit(): Promise<void> {
 }
 
 async function poll(jobId: string): Promise<void> {
-  const state = await pollUntil(
-    async () => {
-      const current = await getFactorTest(jobId)
-      job.value = current
-      return current
-    },
-    {
-      intervalMs: 220,
-      until: (current) => {
-        if (current.status === 'failed') {
-          message.value = current.error ?? '因子检验任务失败，请检查配置和服务状态后重试。'
-          return true
-        }
-        return current.status === 'completed'
+  let state: FactorTestJobState
+  try {
+    state = await pollUntil(
+      async () => {
+        const current = await getFactorTest(jobId)
+        job.value = current
+        return current
       },
-    },
-  )
+      {
+        intervalMs: 220,
+        timeoutMs: INTERACTIVE_JOB_TIMEOUT_MS,
+        until: (current) => {
+          if (current.status === 'failed') {
+            message.value = current.error ?? '因子检验任务失败，请检查配置和服务状态后重试。'
+            return true
+          }
+          return current.status === 'completed'
+        },
+      },
+    )
+  } catch (error) {
+    if (error instanceof PollTimeoutError) {
+      message.value = '因子检验已等待超过 15 分钟，页面停止等待；任务仍在后台运行，稍后可刷新查看结果。'
+      return
+    }
+    throw error
+  }
   if (state.status === 'completed') {
     report.value = await getFactorTestResults(jobId)
     selectedValueId.value = report.value.factors[0]?.value_id ?? ''

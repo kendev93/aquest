@@ -17,8 +17,15 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install --upgrade pip
-      - run: python -m pip install --require-hashes -r requirements.txt
+      # 顺序很重要：先装 dev/catalog extras（pytest、ruff、mypy、baostock 与 uvicorn 的
+      # standard extras 从这里来），再用带 hashes 的 requirements.txt 收尾。反过来写的话，
+      # 第二次解析会按 pyproject 的宽范围重新挑版本，运行时依赖就可能不再是镜像里那套了。
+      # 注意镜像只装 requirements.txt，不带 extras：容器里的 uvicorn 用的是默认事件循环，
+      # 也没有 watchfiles（supervisord 的启动命令不用 --reload）。
       - run: python -m pip install -e ".[dev,catalog]"
+      - run: python -m pip install --require-hashes -r requirements.txt
+      # 和 Dockerfile 同一道校验：依赖之间挑出版本冲突就在这里失败，而不是等镜像构建。
+      - run: python -m pip check
       - run: sh scripts/verify_ci.sh python
 
   frontend:

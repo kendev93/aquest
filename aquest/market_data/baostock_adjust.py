@@ -73,10 +73,18 @@ def factor_on(symbol: str, day: str):
     只查一次序列（从很早的起点到目标日），取最后两条：若最后一条的日期正是
     目标日，说明当天因子变了，也就是当天除权；比值即这次事件的因子增量。
     这样一次往返就能同时回答「有没有」和「是多少」。
+
+    查询本身失败（error_code 非 0）要**抛出去**，不能退化成 None：None 的语义是
+    「当天没有除权」，把「没查到」说成「查过了」，漏记就永久留在库里，而报告上
+    还写着已经过权威源校验 —— 比不校验更糟。
     \"\"\"
     result = bs.query_adjust_factor(symbol, "1990-01-01", day)
+    if result.error_code != "0":
+        raise RuntimeError(
+            "query_adjust_factor error_code=%s %s" % (result.error_code, result.error_msg)
+        )
     rows = []
-    while result.error_code == "0" and result.next():
+    while result.next():
         item = result.get_row_data()
         rows.append((item[1], float(item[3])))
     if len(rows) < 2 or rows[-1][0] != day:
@@ -86,20 +94,40 @@ def factor_on(symbol: str, day: str):
     return rows[-1][1] / rows[-2][1]
 
 
+login = bs.login()
+if login.error_code != "0":
+    # baostock 登录失败不抛异常，只回一个 error_code。不查它，后面每一次查询都会
+    # 安静地「查不到」，文档承诺的 503 就永远轮不到出场。
+    sys.stdout = _real_stdout
+    sys.stderr.write("baostock 登录失败 error_code=%s %s\\n" % (login.error_code, login.error_msg))
+    sys.exit(3)
+
 answers = {}
-bs.login()
+failures = 0
+first_failure = ""
+requests = []
 try:
     requests = json.loads(sys.stdin.read())
     for market, code, day in requests:
         try:
             value = factor_on("%s.%s" % (market.lower(), code), day)
-        except Exception:
+        except Exception as exc:
             # 单只失败不该让整批白跑：这只标成"查不到"，其余照常返回。
+            failures += 1
+            first_failure = first_failure or str(exc)
             value = None
         if value is not None:
             answers["%s|%s|%s" % (market, code, day)] = value
 finally:
     bs.logout()
+if requests and failures == len(requests):
+    # 全军覆没不是"这一批都没除权"，而是这条源没通：交回空结果会被上层当成
+    # 权威结论，所以这里非零退出，让父进程把它翻成 BaostockAdjustUnavailable。
+    sys.stdout = _real_stdout
+    sys.stderr.write(
+        "baostock 整批 %d 个标的查询全部失败：%s\\n" % (failures, first_failure)
+    )
+    sys.exit(4)
 # logout 的打印也要落进缓冲区，所以等它之后再换回真实 stdout 写结果。
 sys.stdout = _real_stdout
 sys.stdout.write(json.dumps(answers))
@@ -111,10 +139,11 @@ AdjustFactorMap = Mapping[tuple[str, str, date], float]
 
 
 class BaostockAdjustUnavailable(RuntimeError):
-    """因子查询不可用：没装可选依赖、子进程起不来、或超时。
+    """因子查询不可用：没装可选依赖、子进程起不来、超时、登录失败，或整批查询全部失败。
 
-    这是可降级的失败 —— 调用方（补全流程）应当照常完成它能做的部分，把这个
-    缺口留在报告里，而不是让整次维护失败。
+    它的语义是**权威源没答上话**，不是「这些天都没有除权」。把前者当成后者，漏记
+    就会永久留在库里而报告上还写着已校验。所以调用方要么整体重试，要么明确降级并
+    把这个缺口说出去 —— 维护接口选的是前者：503 且不动任何数据。
     """
 
 
@@ -160,6 +189,10 @@ def fetch_adjust_factors(
 
     分批串行执行：baostock 并发会在单例 socket 上串数据，这里宁可慢也不冒
     数据错位的风险。查询量是"被跳过跳空"的量级（数百），串行完全够用。
+
+    单个标的查不到（退市、代码不认识、这一次接口报错）只会缺项；**登录失败或整批
+    全部失败**会抛 :class:`BaostockAdjustUnavailable` —— 那种情况下"结果里没有"根本
+    不构成证据，不能替权威源回答「没有除权」。
     """
 
     normalized: list[tuple[str, str, str]] = []

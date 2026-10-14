@@ -51,6 +51,31 @@ describe('pollUntil', () => {
     await assertion
   })
 
+  it('enforces the budget even when a single attempt never settles', async () => {
+    // fetch 没有默认超时：状态读取挂住时，只在整个循环开始时查预算等于没查。
+    vi.useFakeTimers()
+    const promise = pollUntil(() => new Promise<number>(() => undefined), {
+      intervalMs: 1_000,
+      timeoutMs: 5_000,
+      until: () => false,
+    })
+    const assertion = expect(promise).rejects.toBeInstanceOf(PollTimeoutError)
+    await vi.advanceTimersByTimeAsync(6_000)
+    await assertion
+  })
+
+  it('clears the deadline timer once an attempt settles', async () => {
+    vi.useFakeTimers()
+    const promise = pollUntil(async () => 'ok', {
+      intervalMs: 100,
+      timeoutMs: 5_000,
+      until: () => true,
+    })
+    await vi.advanceTimersByTimeAsync(0)
+    await expect(promise).resolves.toBe('ok')
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
   it('retries transient failures with the caller-chosen delay and resets on success', async () => {
     vi.useFakeTimers()
     let calls = 0

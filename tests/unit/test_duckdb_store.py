@@ -1012,6 +1012,12 @@ def test_provider_calendar_coverage_survives_rolling_refresh_and_derived_rebuild
         date(2024, 1, 8),
     ]
     assert store.status().market_calendar_source == "eastmoney_sse_composite"
+    # 覆盖窗口按开始日期原样交出去，不合并也不判断"够不够"：这是 gap_backfill 降级
+    # 判定范围的依据，而重建日历（从行情日期并集写入）不该往里加声明。
+    assert store.read_authoritative_calendar_coverage() == [
+        (date(2024, 1, 2), date(2024, 1, 4)),
+        (date(2024, 1, 4), date(2024, 1, 8)),
+    ]
 
 
 def test_provider_calendar_endpoints_do_not_prove_full_interval_coverage(
@@ -1033,6 +1039,11 @@ def test_provider_calendar_endpoints_do_not_prove_full_interval_coverage(
 
     with pytest.raises(ValueError, match="未覆盖完整日期范围"):
         store.read_authoritative_trading_dates(date(2024, 1, 2), date(2024, 1, 8))
+    # 断在哪一段要能问出来，调用方才可能只判接得上的那段而不是整批失败。
+    assert store.read_authoritative_calendar_coverage() == [
+        (date(2024, 1, 2), date(2024, 1, 3)),
+        (date(2024, 1, 6), date(2024, 1, 8)),
+    ]
 
 
 def test_untrusted_calendar_sources_cannot_replace_authoritative_rows(tmp_path: Path) -> None:

@@ -1213,6 +1213,31 @@ class DuckDbBarsStore:
             ).df()
         return list(frame["trade_date"].dt.date)
 
+    def read_authoritative_calendar_coverage(self) -> list[tuple[date, date]]:
+        """Return the raw provider fetch windows declared for the authoritative source.
+
+        只把 ``market_trading_calendar_coverage`` 的行按开始日期排好交出去，不合并、
+        不判断"够不够"：能判定什么范围是调用方的策略（:mod:`gap_backfill` 用它决定
+        哪些跳空可以推断），存储层只负责说出请求过哪几段。
+        """
+
+        source = "eastmoney_sse_composite"
+        with self._store.read_session() as connection:
+            rows = connection.execute(
+                """
+                SELECT coverage_start, coverage_end
+                FROM market_trading_calendar_coverage
+                WHERE source = ?
+                ORDER BY coverage_start, coverage_end
+                """,
+                [source],
+            ).fetchall()
+
+        def _as_date(value: object) -> date:
+            return value if isinstance(value, date) else date.fromisoformat(str(value)[:10])
+
+        return [(_as_date(start), _as_date(end)) for start, end in rows]
+
     def upsert_corporate_actions(
         self,
         actions: Sequence[CorporateAction],

@@ -39,7 +39,7 @@ from __future__ import annotations
 import bisect
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Protocol, cast
 
 import pandas as pd
@@ -100,6 +100,9 @@ class SkippedGap:
     REASON_HALTED = "halted"
     #: 开盘价不低于前收盘，算不出大于 1 的因子 —— 多半是盘中跌停而非除权。
     REASON_IMPLAUSIBLE = "implausible_factor"
+    #: 权威交易日历没覆盖到这一段，前后两根 bar 之间漏了几个交易日无从判定。
+    #: 判定范围因此变小，但范围内的结论仍然可信。
+    REASON_CALENDAR_UNCOVERED = "calendar_uncovered"
 
     market: str
     code: str
@@ -234,27 +237,10 @@ def _trading_days_between(
     return max(right - left, 0)
 
 
-def _require_calendar_coverage(
-    candidates: pd.DataFrame,
-    calendar: Sequence[date],
-) -> None:
-    """要求交易日历完整覆盖候选日期范围，否则直接报错。
+def _calendar_window_text(calendar: Sequence[date]) -> str:
+    """把日历实际覆盖到的范围写成人话，空日历也要能说清。"""
 
-    这个检查挡的是一个很隐蔽的失效：:func:`_trading_days_between` 在范围之外
-    只会返回 0，于是**所有**跨停牌的跳空都会被判成"紧邻交易日"，全部按除权
-    写入事件表 —— 恰好是本模块存在的意义所反对的那件事。缺日历时的正确反应
-    是拒绝处理，不是猜。
-    """
-
-    if not calendar:
-        raise ValueError("交易日历为空，无法判定停牌跨越")
-    first = _as_date(candidates["date"].min())
-    last = _as_date(candidates["date"].max())
-    if calendar[0] > first or calendar[-1] < last:
-        raise ValueError(
-            "交易日历未覆盖候选日期范围："
-            f"候选 {first} ~ {last}，日历 {calendar[0]} ~ {calendar[-1]}"
-        )
+    return f"{calendar[0]} ~ {calendar[-1]}" if calendar else "（空）"
 
 
 def infer_corporate_actions(
@@ -267,11 +253,16 @@ def infer_corporate_actions(
     ``share_ratio = factor - 1``、``cash_per_share = 0``：这样
     :func:`~aquest.market_data.adjustment.compute_factor_ratio` 能从
     存进去的字段原样重算出同一个因子，事件表的自洽校验不会失败。
+
+    ``calendar`` 是权威交易日历**实际覆盖到**的那几天。日历之外不做推断，也不报错：
+    候选会被逐条记成 ``calendar_uncovered`` 交回调用方。以前这里覆盖不全就抛
+    ``ValueError``，而唯一的写入方（自动同步）每次只声明 120 天，于是全历史候选
+    几乎必然触发它 —— 接口 503，功能在真实库里等于没有。降级成"范围内的部分照判、
+    范围外的部分点名"，判定面小了，但结论仍然可信。
     """
 
     if candidates.empty:
         return [], []
-    _require_calendar_coverage(candidates, calendar)
     actions: list[CorporateAction] = []
     skipped: list[SkippedGap] = []
     for row in candidates.itertuples(index=False):
@@ -281,6 +272,23 @@ def infer_corporate_actions(
         open_price = float(cast(float, row.open))
         prev_close = float(cast(float, row.prev_close))
         drop_pct = (close / prev_close - 1) * 100 if prev_close else 0.0
+
+        if not calendar or prev_date < calendar[0] or trade_date > calendar[-1]:
+            skipped.append(
+                SkippedGap(
+                    market=str(row.market),
+                    code=str(row.code),
+                    trade_date=trade_date,
+                    close=close,
+                    drop_pct=drop_pct,
+                    reason=SkippedGap.REASON_CALENDAR_UNCOVERED,
+                    detail=(
+                        f"权威交易日历只覆盖 {_calendar_window_text(calendar)}，"
+                        f"无法判定 {prev_date} ~ {trade_date} 之间是否停牌"
+                    ),
+                )
+            )
+            continue
 
         missed = _trading_days_between(prev_date, trade_date, calendar)
         if missed:
@@ -324,6 +332,45 @@ def infer_corporate_actions(
             )
         )
     return actions, skipped
+
+
+def _merge_coverage(intervals: Sequence[tuple[date, date]]) -> list[tuple[date, date]]:
+    """把请求窗口合并成互不相邻的连续区间。
+
+    自动同步每天声明一段 120 天的覆盖，相邻（甚至重叠）的段必须接起来才能用；
+    接不上就是中间真的断过（服务停了一个月），那一段就判不了。
+    """
+
+    merged: list[tuple[date, date]] = []
+    for start, end in sorted(intervals):
+        if merged and start <= merged[-1][1] + timedelta(days=1):
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _usable_calendar(
+    store: _ActionStore,
+    required_start: date,
+    required_end: date,
+) -> list[date]:
+    """读出权威日历里真正落在候选范围之内的交易日。
+
+    有覆盖表时按合并后的连续区间逐段读，读几段算几段；没有覆盖表的老式 store 只能
+    整段要求（读不到就照旧抛错），因为那种 store 无法回答"到底覆盖了哪儿"。
+    """
+
+    reader = store.read_authoritative_trading_dates
+    coverage = getattr(store, "read_authoritative_calendar_coverage", None)
+    if not callable(coverage):
+        return list(reader(required_start, required_end))
+    dates: list[date] = []
+    for span_start, span_end in _merge_coverage(coverage()):
+        if span_start > required_end or span_end < required_start:
+            continue
+        dates.extend(reader(max(span_start, required_start), min(span_end, required_end)))
+    return sorted(set(dates))
 
 
 #: 权威因子查询的签名：给一批 ``(market, code, date)``，返回其中**确实除权**的
@@ -403,6 +450,11 @@ def backfill_inferred_actions(
 
     ``write=False`` 只做体检、不落库，用来先看看能补出多少、哪些补不了。
 
+    只判定**权威交易日历覆盖得到**的那部分历史：覆盖之外的候选逐条记成
+    ``calendar_uncovered`` 进报告，不再像以前那样整批抛 ``ValueError``（表现为
+    接口 503）。自动同步每天只声明 120 天的权威日历，所以缺口会随运行天数慢慢
+    变宽；``skipped_by_reason`` 里能看到这次判了多宽、漏了多少。
+
     ``verify_halted_with`` 是给跨停牌候选的**权威判定通道**。默认 ``None``：
     跨停牌跳空一律跳过，行为与过去一致（宁可漏，也不能把复牌后的累计跌幅当成
     除权）。给了之后，跨停牌的候选会先交给它判定"这天到底除没除权"，只有返回
@@ -416,15 +468,14 @@ def backfill_inferred_actions(
     candidates = store.read_price_gap_candidates()
     if candidates.empty:
         return BackfillReport(0, 0, 0, (), ())
-    calendar_reader = getattr(store, "read_authoritative_trading_dates", None)
-    if not callable(calendar_reader):
+    if not callable(getattr(store, "read_authoritative_trading_dates", None)):
         raise ValueError(
             "市场数据存储没有可验证的权威交易日历覆盖 API；"
             "需要持久化 provider 请求的完整覆盖区间，并按来源读取覆盖期内交易日"
         )
     calendar_start = min(_as_date(item) for item in candidates["prev_date"])
     calendar_end = max(_as_date(item) for item in candidates["date"])
-    calendar = calendar_reader(calendar_start, calendar_end)
+    calendar = _usable_calendar(store, calendar_start, calendar_end)
     actions, skipped = infer_corporate_actions(candidates, calendar)
     verified: list[VerifiedGap] = []
     verified_actions: list[CorporateAction] = []

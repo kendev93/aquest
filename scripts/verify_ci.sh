@@ -21,6 +21,7 @@ mode=all
 skip_docker=0
 install_playwright=0
 compose_fixture=""
+pytest_basetemp=""
 
 for argument in "$@"; do
   case "$argument" in
@@ -57,11 +58,26 @@ cleanup_compose_fixture() {
   compose_fixture=""
 }
 
+# pytest 会在 session 开头 rm_rf 它指定的 basetemp。整套测试共用一个固定目录时，
+# 并发跑的第二个 session 会删掉第一个正在用的那个（这个仓库经常好几个会话同时改）。
+# 每次运行各给一个独立目录，退出时清掉。
+cleanup_pytest_basetemp() {
+  if [ -n "$pytest_basetemp" ] && [ -d "$pytest_basetemp" ]; then
+    rm -r "$pytest_basetemp"
+  fi
+  pytest_basetemp=""
+}
+
+cleanup_fixtures() {
+  cleanup_compose_fixture
+  cleanup_pytest_basetemp
+}
+
 prepare_compose_fixture() {
   compose_fixture=$(mktemp -d "${TMPDIR:-/tmp}/aquest-compose.XXXXXX")
 }
 
-trap cleanup_compose_fixture EXIT
+trap cleanup_fixtures EXIT
 
 run_python_checks() {
   printf '%s\n' '验证 Python：测试、覆盖率、格式、Ruff、mypy'
@@ -73,10 +89,14 @@ run_python_checks() {
     printf '%s\n' '未找到 python 或 python3' >&2
     exit 1
   fi
-  PYTHONPATH=. "$python_bin" -m pytest --cov=aquest --cov-report=term-missing
-  ruff format --check aquest tests
-  ruff check aquest tests
-  mypy aquest
+  pytest_basetemp=$(mktemp -d "${TMPDIR:-/tmp}/aquest-pytest.XXXXXX")
+  PYTHONPATH=. "$python_bin" -m pytest --basetemp="$pytest_basetemp" --cov=aquest --cov-report=term-missing
+  cleanup_pytest_basetemp
+  # 工具也走同一个解释器：裸 `ruff` / `mypy` 取的是 PATH 上碰到的那一份，
+  # 可能是另一个 Python 装的版本，检出来的结果和刚跑完测试的这套依赖无关。
+  "$python_bin" -m ruff format --check aquest tests
+  "$python_bin" -m ruff check aquest tests
+  "$python_bin" -m mypy aquest
 }
 
 run_frontend_checks() {

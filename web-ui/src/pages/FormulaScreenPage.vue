@@ -8,7 +8,7 @@ import MarketCandlestickChart from '../components/MarketCandlestickChart.vue'
 import TermHint from '../components/TermHint.vue'
 import { createJob, createSyncJob, fetchMetadata, fetchScreenHistory, getJob, getResults, getScreenHistory, getSyncJob, parseFormula } from '../api/formulaScreen'
 import { ApiError, describeError } from '../api/client'
-import { pollUntil } from '../composables/usePolling'
+import { INTERACTIVE_JOB_TIMEOUT_MS, PollTimeoutError, pollUntil } from '../composables/usePolling'
 import type { BasketCurve, CombineMode, ConditionOperator, CustomFormulaMetadata, FormulaScreenMetadata, InstrumentBoard, InstrumentType, JobState, LocalMarketChart, MarketSyncJobState, ResultsMeta, SavedConditionSet, ScreenCondition, ScreenFormState, ScreenHistorySummary, ScreenPresetSummary, ScreenResult, StockGroup, StockGroupMember, StockGroupPerformance, StockGroupsSummary, StockGroupSummary, RuleMode, Universe, ValueDefinition } from '../types'
 import {
   buildPresetPayload,
@@ -672,22 +672,31 @@ async function parseCustomFormula(): Promise<void> {
 }
 
 async function pollUntilFinished(jobId: string): Promise<void> {
-  await pollUntil(
-    async () => {
-      const current = await getJob(jobId)
-      job.value = current
-      return current
-    },
-    {
-      intervalMs: 250,
-      until: (current) => {
-        if (current.status === 'failed') {
-          throw new ApiError(current.error ?? '扫描任务执行失败。', 500)
-        }
-        return current.status === 'completed'
+  try {
+    await pollUntil(
+      async () => {
+        const current = await getJob(jobId)
+        job.value = current
+        return current
       },
-    },
-  )
+      {
+        intervalMs: 250,
+        timeoutMs: INTERACTIVE_JOB_TIMEOUT_MS,
+        until: (current) => {
+          if (current.status === 'failed') {
+            throw new ApiError(current.error ?? '扫描任务执行失败。', 500)
+          }
+          return current.status === 'completed'
+        },
+      },
+    )
+  } catch (error) {
+    if (error instanceof PollTimeoutError) {
+      showMessage('扫描已等待超过 15 分钟，页面停止等待；任务仍在后台运行，可稍后重新扫描或查看历史。')
+      return
+    }
+    throw error
+  }
   const payload = await getResults(jobId)
   applyResultPayload(payload.results, payload.meta)
   await refreshScreenHistory()

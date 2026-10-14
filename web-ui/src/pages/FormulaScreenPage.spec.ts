@@ -10,6 +10,7 @@ import * as jobsApi from '../api/jobs'
 import * as presetApi from '../api/screenPresets'
 import * as groupApi from '../api/stockGroups'
 import { ApiError } from '../api/client'
+import { INTERACTIVE_JOB_TIMEOUT_MS } from '../composables/usePolling'
 
 vi.mock('../api/stockGroups', async () => {
   const actual = await vi.importActual<typeof import('../api/stockGroups')>('../api/stockGroups')
@@ -592,6 +593,29 @@ describe('FormulaScreenPage', () => {
 
     expect(wrapper.get('[data-testid="screen-message"]').text()).toContain('扫描任务提交失败')
     expect(wrapper.get('[data-testid="screen-message"]').text()).toContain('network down')
+  })
+
+  it('stops waiting on a stuck scan after the interactive budget without calling it a failure', async () => {
+    // 扫描卡住时页面不能永远「扫描中」；但到点停止等待不等于任务失败，
+    // 所以提示条保持中性色，也不走「扫描任务执行失败」那段文案。
+    vi.useFakeTimers()
+    vi.mocked(api.getJob).mockResolvedValue({
+      job_id: 'job-1', status: 'running', progress: 0.4, total_candidates: 2, total_scanned: 1,
+      total_signals: 0, errors: 0, skipped: 0, error: null,
+    })
+    const wrapper = mount(FormulaScreenPage)
+    await vi.advanceTimersByTimeAsync(0)
+    await wrapper.get('[data-testid="signal-indicator_three.prepare_rally"]').setValue(true)
+    await wrapper.get('[data-testid="advanced-toggle"]').trigger('click')
+    await wrapper.get('[data-testid="minimum-matches"]').setValue(1)
+    await wrapper.get('[data-testid="screen-config"]').trigger('submit')
+    await vi.advanceTimersByTimeAsync(INTERACTIVE_JOB_TIMEOUT_MS + 1_000)
+
+    const notice = wrapper.get('[data-testid="screen-message"]')
+    expect(notice.text()).toContain('任务仍在后台运行')
+    expect(notice.classes()).not.toContain('error')
+    expect(wrapper.get('[data-testid="start-scan"]').attributes('disabled')).toBeUndefined()
+    vi.useRealTimers()
   })
 
   it('marks the notice by the outcome, not by the wording of the message', async () => {

@@ -48,8 +48,27 @@ while [ "$#" -gt 0 ]; do
 done
 
 # .env 由 compose 自己读取，但这里也要判断 DATA_DIR 是否需要绑定挂载覆盖文件。
+read_env_data_dir() {
+  # 只看最后一行赋值，和 compose 一致。
+  sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}DATA_DIR[[:space:]]*=[[:space:]]*//p' "$1" | tail -1
+}
+
 if [ -z "${DATA_DIR:-}" ] && [ -f "$REPO_ROOT/.env" ]; then
-  DATA_DIR=$(sed -n 's/^[[:space:]]*DATA_DIR[[:space:]]*=[[:space:]]*//p' "$REPO_ROOT/.env" | tail -1)
+  DATA_DIR=$(read_env_data_dir "$REPO_ROOT/.env")
+  # compose 会把值两边的引号剥掉，所以 `.env` 里写 `DATA_DIR=""` 是"没配"；照原样读
+  # 成 `""` 就会误判成已配置，白叠一层绑定挂载覆盖文件，数据落去另一个地方。
+  # 行尾 \r（Windows 上编辑过的 .env）只会污染下面那行打印，顺带一起剥掉。
+  DATA_DIR=$(printf '%s' "$DATA_DIR" | tr -d '\r')
+  case "$DATA_DIR" in
+    \"*\")
+      DATA_DIR=${DATA_DIR#\"}
+      DATA_DIR=${DATA_DIR%\"}
+      ;;
+    \'*\')
+      DATA_DIR=${DATA_DIR#\'}
+      DATA_DIR=${DATA_DIR%\'}
+      ;;
+  esac
 fi
 
 compose() {

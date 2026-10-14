@@ -57,12 +57,15 @@ packages = ["aquest"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-# Pin the scratch directory outside the working tree and let pytest wipe it at
-# the start of every run (see tmpdir.py: it rm_rf's a pinned basetemp, but
-# stacks numbered copies otherwise).  Without this the macOS per-user temp root
-# is reused across runs and test scratch files pile up in the repository.
-# Requires a POSIX temp root; override with --basetemp=<dir> if needed.
-addopts = "--tb=short --basetemp=/tmp/aquest-pytest"
+# Scratch directories stay out of the working tree either way: pytest's default
+# root is the system temp dir.  We used to pin it to one fixed path so each run
+# wiped it instead of stacking numbered copies, but that made two concurrent
+# runs destroy each other mid-suite -- and this repo is routinely worked on by
+# several sessions at once.  `scripts/verify_ci.sh` now passes its own
+# `--basetemp=<mktemp>` and removes it on exit; a plain `pytest` run falls back
+# to pytest's rotation. Override with --basetemp=<dir> when a sandbox blocks the
+# default per-user temp root.
+addopts = "--tb=short"
 # 只过滤上游自己的弃用：starlette 1.6.0 的 testclient 在模块级类型别名里仍引用
 # anyio 4.15 已弃用的 anyio.abc.BlockingPortal，导入即触发，改不了。留下它会让
 # warnings summary 常驻一行噪声，真正属于本项目的警告就不显眼了——所以精确匹配
