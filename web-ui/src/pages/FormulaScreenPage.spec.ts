@@ -594,6 +594,36 @@ describe('FormulaScreenPage', () => {
     expect(wrapper.get('[data-testid="screen-message"]').text()).toContain('network down')
   })
 
+  it('marks the notice by the outcome, not by the wording of the message', async () => {
+    // 旧判据是 `!message.includes('完成')`，两头都错过：后端 409 的 detail 就是
+    // 「扫描尚未完成」，被渲染成绿色成功条；而「已删除方案。」这类成功提示被标红。
+    vi.mocked(presetApi.fetchScreenPresets).mockResolvedValue([
+      { preset_id: 'preset-1', name: '甲', note: '', created_at: '2026-09-21T10:00:00', updated_at: '2026-09-21T10:00:00' },
+    ])
+    vi.mocked(presetApi.deleteScreenPreset).mockResolvedValue({ deleted: true })
+
+    const saved = mount(FormulaScreenPage)
+    await flushPromises()
+    await saved.get('[data-testid="preset-select"]').setValue('preset-1')
+    await saved.get('[data-testid="delete-preset"]').trigger('click')
+    await flushPromises()
+
+    expect(saved.get('[data-testid="screen-message"]').text()).toContain('已删除方案')
+    expect(saved.get('[data-testid="screen-message"]').classes()).not.toContain('error')
+
+    vi.mocked(api.createJob).mockRejectedValueOnce(new ApiError('扫描尚未完成', 409))
+    const failed = mount(FormulaScreenPage)
+    await flushPromises()
+    await failed.get('[data-testid="signal-indicator_three.prepare_rally"]').setValue(true)
+    await failed.get('[data-testid="advanced-toggle"]').trigger('click')
+    await failed.get('[data-testid="minimum-matches"]').setValue(1)
+    await failed.get('[data-testid="screen-config"]').trigger('submit')
+    await flushPromises()
+
+    expect(failed.get('[data-testid="screen-message"]').text()).toContain('扫描尚未完成')
+    expect(failed.get('[data-testid="screen-message"]').classes()).toContain('error')
+  })
+
   it('parses a custom formula, exposes parameters, and submits the override', async () => {
     const wrapper = mount(FormulaScreenPage)
     await flushPromises()

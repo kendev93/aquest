@@ -352,6 +352,25 @@ describe('StrategyPoolPage', () => {
     expect(wrapper.text()).not.toContain('载入结果')
   })
 
+  it('shows task history timestamps in China time, not the browser zone', async () => {
+    // created_at 是后端 `_now()` 落库时去掉 tzinfo 的裸 UTC 串。按浏览器时区解释会整体
+    // 差 8 小时，和站内其它走 formatChinaTimestamp 的位置也对不上。
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValue([{
+      job_id: 'job-utc',
+      status: 'completed',
+      mode: 'signals',
+      created_at: '2026-10-01T01:00:00',
+    }])
+
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    const row = wrapper.get('.history-row')
+    expect(row.text()).toContain('2026-10-01 09:00:00')
+    expect(row.text()).not.toContain('01:00:00')
+  })
+
   it('shows simulated current holdings in a separate panel from daily signal status', async () => {
     window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
     vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({

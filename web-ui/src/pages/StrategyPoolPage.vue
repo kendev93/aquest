@@ -49,6 +49,7 @@ import {
   type StrategyPoolMetricColumn,
   type StrategyPoolSortColumn,
 } from '../utils/strategyPoolStatus'
+import { formatChinaTimestamp } from '../utils/time'
 
 const OBJECTIVE_STORAGE_KEY = 'aquest.strategy-pool.objective'
 const SIGNAL_PAGE_SIZE = 10
@@ -963,10 +964,16 @@ function riskExitReturnText(signal: Record<string, unknown>): string {
     : ''
 }
 
+// created_at 是裸 UTC（后端 `_now()` 落库前把 tzinfo 去掉了），必须显式按东八区展示。
+// 以前直接 `new Date(串).toLocaleString('zh-CN')` 会按浏览器时区解释，同一个
+// job.created_at 在本页和别的页面能差出 8 小时。
 function formatTimestamp(value: unknown): string {
-  if (typeof value !== 'number' && typeof value !== 'string') return '—'
-  const date = typeof value === 'number' ? new Date(value * 1000) : new Date(value)
-  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('zh-CN', { hour12: false })
+  if (typeof value === 'number') {
+    return Number.isFinite(value)
+      ? formatChinaTimestamp(new Date(value * 1000).toISOString())
+      : '—'
+  }
+  return formatChinaTimestamp(value)
 }
 
 function apiMessage(error: unknown): string {

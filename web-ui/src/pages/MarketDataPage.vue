@@ -74,6 +74,9 @@ const form = reactive({
 const instruments = ref<LocalInstrument[]>([])
 const listMeta = ref<LocalInstrumentMeta | null>(null)
 const selected = ref<LocalInstrument | null>(null)
+// 目录到底读到过没有。挂载时若有任务在跑会跳过首屏加载（见 onMounted），
+// 任务结束那次刷新就是唯一的补调时机，否则列表和 K 线会一直空白。
+const catalogLoaded = ref(false)
 const chart = ref<LocalMarketChart | null>(null)
 const maKeys = ref(MA_OPTIONS.map((option) => option.key))
 const period = ref<MarketChartPeriod>('daily')
@@ -363,6 +366,13 @@ async function loadActiveMarketJobs(): Promise<void> {
       if (!syncLoading.value || (currentStatus && !currentFinished)) return
       syncLoading.value = false
       syncLabel.value = ''
+      if (!catalogLoaded.value) {
+        // loadInstruments 会先清空提示条（它自己的失败分支要写 message），所以刚写下的
+        // 任务终态提示——例如「已取消」——得先保住，否则会被这次补调吞掉。
+        const notice = message.value
+        await loadInstruments()
+        if (notice && !message.value) message.value = notice
+      }
     }
   } catch {
     // Active-job discovery is informational; the individual task poll remains authoritative.
@@ -645,6 +655,26 @@ async function waitForHealthJob(jobId: string): Promise<void> {
   if (state.status === 'cancelled') healthMessage.value = '行情任务已取消。'
 }
 
+/**
+ * 体检报告驱动着「一键修复」——那是先删后下，所以残缺负载必须报错，不能当成「一切正常」。
+ *
+ * 以前这里是一句 `as unknown as`：`checks` 只要是真值（哪怕是空数组）就照单全收，
+ * 于是空报告会被渲染成「六项检查都没有命中」，而字段漂移会让 healthIssues 静默变空、
+ * 把修复按钮悄悄禁用。后端永远会给出全部检查项，所以非空、且每项带 key / 计数 /
+ * repairable 才算一份报告。
+ */
+function asHealthReport(value: unknown): MarketDataHealthReport | null {
+  const report = value as Partial<MarketDataHealthReport> | null
+  const checks = Array.isArray(report?.checks) ? report.checks : null
+  if (!checks || !checks.length) return null
+  const wellFormed = checks.every(
+    (check) => typeof check?.key === 'string'
+      && typeof check?.repairable === 'boolean'
+      && Number.isFinite(Number(check?.affected_instruments)),
+  )
+  return wellFormed ? (report as MarketDataHealthReport) : null
+}
+
 async function runHealthCheck(): Promise<void> {
   healthChecking.value = true
   healthMessage.value = ''
@@ -653,10 +683,7 @@ async function runHealthCheck(): Promise<void> {
     const job = await createHealthCheck()
     beginHealthJob(job.job_id, job.status)
     await waitForHealthJob(job.job_id)
-    const result = healthJob.value?.result
-    healthReport.value = result?.checks
-      ? (result as unknown as MarketDataHealthReport)
-      : null
+    healthReport.value = asHealthReport(healthJob.value?.result)
     if (!healthReport.value) healthMessage.value = '体检没有返回报告，请重试。'
   } catch (error) {
     healthMessage.value = apiMessage(error)
@@ -717,6 +744,7 @@ const localImportSummary = computed(() => {
 })
 
 async function loadInstruments(): Promise<void> {
+  const requestId = ++instrumentsRequestId
   loading.value = true
   message.value = ''
   try {
@@ -726,8 +754,10 @@ async function loadInstruments(): Promise<void> {
       page: form.page,
       page_size: form.pageSize,
     })
+    if (requestId !== instrumentsRequestId) return
     instruments.value = response.items
     listMeta.value = response.meta
+    catalogLoaded.value = true
     const current = selected.value && response.items.find(
       (item) => item.market === selected.value?.market && item.code === selected.value?.code,
     )
@@ -738,13 +768,14 @@ async function loadInstruments(): Promise<void> {
     if (selected.value?.bars > 0 && !selected.value.error) await loadChart(selected.value)
     else chart.value = null
   } catch (error) {
+    if (requestId !== instrumentsRequestId) return
     instruments.value = []
     listMeta.value = null
     selected.value = null
     chart.value = null
     message.value = apiMessage(error)
   } finally {
-    loading.value = false
+    if (requestId === instrumentsRequestId) loading.value = false
   }
 }
 
@@ -757,7 +788,13 @@ useBackgroundPoll(
 )
 useBackgroundPoll(() => loadActiveMarketJobs(), { intervalMs: ACTIVE_JOB_POLL_INTERVAL_MS })
 
+// 图表与目录都按"最后一次请求才生效"应用响应：连点两只票时，先发的请求可能后到，
+// 选中的是 A、图上画的却是 B（StrategyPoolPage 的 canApply 是同一个口径）。
+let chartRequestId = 0
+let instrumentsRequestId = 0
+
 async function loadChart(instrument = selected.value): Promise<void> {
+  const requestId = ++chartRequestId
   if (!instrument) {
     chart.value = null
     return
@@ -769,19 +806,22 @@ async function loadChart(instrument = selected.value): Promise<void> {
   }
   chartLoading.value = true
   try {
-    chart.value = await fetchLocalChart({
+    const next = await fetchLocalChart({
       market: instrument.market,
       code: instrument.code,
       period: period.value,
       start_date: form.startDate || undefined,
       end_date: form.endDate || undefined,
     })
+    if (requestId !== chartRequestId) return
+    chart.value = next
     message.value = ''
   } catch (error) {
+    if (requestId !== chartRequestId) return
     chart.value = null
     message.value = apiMessage(error)
   } finally {
-    chartLoading.value = false
+    if (requestId === chartRequestId) chartLoading.value = false
   }
 }
 

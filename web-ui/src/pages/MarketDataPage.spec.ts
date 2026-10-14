@@ -86,6 +86,35 @@ describe('MarketDataPage', () => {
     mountedWrappers = []
   })
 
+  it('drops a stale chart response when another instrument was picked afterwards', async () => {
+    // 连点两只票时，先发的请求可能后到。旧实现拿到响应就无条件写 chart：选中的是
+    // SZ 000001，图上画的却是 SH 600000，而且没有任何提示。
+    const shChart: LocalMarketChart = { ...chart }
+    const szChart: LocalMarketChart = { ...chart, market: 'SZ', code: '000001', total_daily_bars: 280 }
+    let releaseStale: ((value: LocalMarketChart) => void) | undefined
+    vi.mocked(marketApi.fetchLocalChart).mockImplementation((params) =>
+      params.code === '600000'
+        ? new Promise<LocalMarketChart>((resolve) => { releaseStale = resolve })
+        : Promise.resolve(szChart),
+    )
+
+    const wrapper = mountPage()
+    await flushPromises()
+
+    await wrapper.get('[data-testid="instrument-SH-600000"]').trigger('click')
+    await wrapper.get('[data-testid="instrument-SZ-000001"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="market-chart-summary"]').text()).toContain('280 根')
+
+    // 迟到的旧响应必须被丢弃，而不是把图表改回上一只票。
+    releaseStale?.(shChart)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="market-chart-summary"]').text()).toContain('280 根')
+    expect(wrapper.get('[data-testid="market-chart-summary"]').text()).not.toContain('300 根')
+  })
+
   it('lists local instruments and loads daily, monthly, and yearly charts', async () => {
     const wrapper = mountPage()
     await flushPromises()
@@ -409,6 +438,52 @@ describe('MarketDataPage', () => {
     expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('10%')
     expect(wrapper.find('[data-testid="market-active-jobs"]').exists()).toBe(false)
     wrapper.unmount()
+  })
+
+  it('loads the instrument catalog once the job that was running at mount is gone', async () => {
+    // 挂载时有任务在跑，onMounted 的守卫会跳过首屏目录加载；任务结束那一次后台刷新必须
+    // 补上，否则品种列表和 K 线一直空白，直到用户手动再点一次同步或刷新浏览器。
+    vi.useFakeTimers()
+    try {
+      vi.mocked(marketApi.fetchActiveMarketDataJobs)
+        .mockResolvedValueOnce([{
+          job_id: 'active-catalog',
+          description: '历史全量回填',
+          status: 'running',
+          progress: 0.4,
+          total_candidates: 10,
+          total_scanned: 4,
+          errors: 0,
+          error: null,
+          worker_count: 8,
+          phase: 'online_bars',
+          metadata: { provider: 'eastmoney' },
+          result: null,
+        }])
+        .mockResolvedValue([])
+      vi.mocked(marketApi.getMarketDataJob).mockResolvedValue({
+        job_id: 'active-catalog',
+        status: 'completed',
+        progress: 1,
+        total_candidates: 10,
+        total_scanned: 10,
+        errors: 0,
+        error: null,
+        result: { source: 'online', updated_files: 1, written_bars: 1 },
+      })
+
+      mountPage()
+      await flushPromises()
+      expect(marketApi.fetchLocalInstruments).not.toHaveBeenCalled()
+
+      await vi.advanceTimersByTimeAsync(1000)
+      await flushPromises()
+
+      expect(marketApi.fetchLocalInstruments).toHaveBeenCalled()
+    } finally {
+      vi.clearAllTimers()
+      vi.useRealTimers()
+    }
   })
 
   it('shows staged download and merge progress in the single progress panel', async () => {
@@ -796,6 +871,35 @@ describe('MarketDataPage', () => {
     expect(wrapper.get('[data-testid="market-health-row-gap"]').text()).toContain('000001')
     // 干净的一项必须显示正常，否则用户没法分辨"没查"和"查了没问题"。
     expect(wrapper.get('[data-testid="market-health-row-ohlc"]').text()).toContain('正常')
+  })
+
+  it('refuses to read an empty or malformed health payload as a clean store', async () => {
+    // 体检的价值在于"它说安全时真的安全"。以前这里是一句 `as unknown as`：`checks` 只要
+    // 是真值就照单全收，空数组因此被渲染成「六项检查都没有命中」，而字段漂移会让
+    // healthIssues 静默变空、把"一键修复"（先删后下）悄悄禁用。
+    vi.mocked(marketApi.createHealthCheck).mockResolvedValue({ job_id: 'health-1', status: 'queued' })
+
+    vi.mocked(marketApi.getMarketDataJob).mockResolvedValue(
+      healthJobState({ ...healthReport(), checks: [] }),
+    )
+    const empty = mountPage()
+    await flushPromises()
+    await empty.get('[data-testid="market-health-check"]').trigger('click')
+    await flushPromises()
+
+    expect(empty.find('[data-testid="market-health-clean"]').exists()).toBe(false)
+    expect(empty.get('[data-testid="market-health-message"]').text()).toContain('体检没有返回报告')
+
+    vi.mocked(marketApi.getMarketDataJob).mockResolvedValue(
+      healthJobState({ ...healthReport(), checks: [{ label: '行情缺口' }] }),
+    )
+    const malformed = mountPage()
+    await flushPromises()
+    await malformed.get('[data-testid="market-health-check"]').trigger('click')
+    await flushPromises()
+
+    expect(malformed.find('[data-testid="market-health-clean"]').exists()).toBe(false)
+    expect(malformed.get('[data-testid="market-health-message"]').text()).toContain('体检没有返回报告')
   })
 
   it('repairs only the flagged check after an explicit confirmation', async () => {

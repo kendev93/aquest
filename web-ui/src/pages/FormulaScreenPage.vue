@@ -87,6 +87,7 @@ const form = reactive<ScreenFormState>({
 })
 const errors = ref<Record<string, string>>({})
 const message = ref('')
+const messageIsError = ref(false)
 const loading = ref(false)
 const job = ref<JobState | null>(null)
 const results = ref<ScreenResult[]>([])
@@ -201,7 +202,7 @@ function setMode(mode: ScreenFormState['mode']): void {
   customMetadata.value = null
   parsedFormulaText.value = ''
   errors.value = {}
-  message.value = ''
+  showMessage('')
   customParseError.value = ''
   normalizeConditionsToAvailableValues()
   normalizeRankingToAvailableValues()
@@ -225,7 +226,7 @@ function setRuleMode(ruleMode: RuleMode): void {
   }
   normalizeConditionsToAvailableValues()
   errors.value = {}
-  message.value = ''
+  showMessage('')
 }
 
 function toggleSignal(signalId: string, checked: boolean): void {
@@ -409,9 +410,9 @@ async function loadScreenHistory(historyId: string): Promise<void> {
       skipped: record.meta.skipped,
       result_count: record.results.length,
     })
-    message.value = `已加载历史筛选：${formatHistoryDate(record.created_at)}`
+    showMessage(`已加载历史筛选：${formatHistoryDate(record.created_at)}`)
   } catch (error) {
-    message.value = apiMessage(error, '历史筛选加载失败')
+    showMessage(apiMessage(error, '历史筛选加载失败'), true)
   }
 }
 
@@ -489,11 +490,13 @@ async function loadSelectedPreset(): Promise<PresetLoadOutcome | null> {
     normalizeRankingToAvailableValues()
     const rankingUnavailable = Boolean(requestedRankingValue && !form.rankingValue)
     presetName.value = preset.name
-    message.value = presetLoadMessage(preset.name, result)
-      + (rankingUnavailable ? ' 排序指标已不可用，已清除。' : '')
+    showMessage(
+      presetLoadMessage(preset.name, result)
+      + (rankingUnavailable ? ' 排序指标已不可用，已清除。' : ''),
+    )
     return { name: preset.name, stale: result.staleConditions + result.staleSignals }
   } catch (error) {
-    message.value = apiMessage(error, '方案加载失败')
+    showMessage(apiMessage(error, '方案加载失败'), true)
     return null
   } finally {
     presetBusy.value = false
@@ -507,9 +510,9 @@ async function quickScreen(): Promise<void> {
   const scanned = await submit()
   if (loaded.stale > 0) {
     // 失效引用比「扫描完成」重要：结果里的条件已经被悄悄换过，不能只报喜。
-    message.value = `已按方案「${loaded.name}」扫描，但有 ${loaded.stale} 项引用了当前不存在的指标或信号、已被替换，请先核对条件。`
+    showMessage(`已按方案「${loaded.name}」扫描，但有 ${loaded.stale} 项引用了当前不存在的指标或信号、已被替换，请先核对条件。`, true)
   } else if (scanned) {
-    message.value = `已按方案「${loaded.name}」扫描完成。`
+    showMessage(`已按方案「${loaded.name}」扫描完成。`)
   }
 }
 
@@ -525,11 +528,14 @@ async function savePresetAsNew(): Promise<void> {
     const created = await createScreenPreset({ name, payload: buildPresetPayload(form) })
     await refreshScreenPresets()
     selectedPresetId.value = created.preset_id
-    message.value = created.notes?.length
-      ? `已保存方案「${created.name}」，但内容被调整过：${created.notes.join('；')}`
-      : `已保存方案「${created.name}」。`
+    showMessage(
+      created.notes?.length
+        ? `已保存方案「${created.name}」，但内容被调整过：${created.notes.join('；')}`
+        : `已保存方案「${created.name}」。`,
+      Boolean(created.notes?.length),
+    )
   } catch (error) {
-    message.value = apiMessage(error, '方案保存失败')
+    showMessage(apiMessage(error, '方案保存失败'), true)
   } finally {
     presetBusy.value = false
   }
@@ -542,9 +548,9 @@ async function overwritePreset(): Promise<void> {
   try {
     const updated = await updateScreenPreset(presetId, { payload: buildPresetPayload(form) })
     await refreshScreenPresets()
-    message.value = `已用当前设置覆盖方案「${updated.name}」。`
+    showMessage(`已用当前设置覆盖方案「${updated.name}」。`)
   } catch (error) {
-    message.value = apiMessage(error, '方案覆盖失败')
+    showMessage(apiMessage(error, '方案覆盖失败'), true)
   } finally {
     presetBusy.value = false
   }
@@ -562,9 +568,9 @@ async function renamePreset(): Promise<void> {
   try {
     const updated = await updateScreenPreset(presetId, { name })
     await refreshScreenPresets()
-    message.value = `方案已重命名为「${updated.name}」。`
+    showMessage(`方案已重命名为「${updated.name}」。`)
   } catch (error) {
-    message.value = apiMessage(error, '方案重命名失败')
+    showMessage(apiMessage(error, '方案重命名失败'), true)
   } finally {
     presetBusy.value = false
   }
@@ -579,9 +585,9 @@ async function deleteSelectedPreset(): Promise<void> {
     selectedPresetId.value = ''
     presetName.value = ''
     await refreshScreenPresets()
-    message.value = '已删除方案。'
+    showMessage('已删除方案。')
   } catch (error) {
-    message.value = apiMessage(error, '方案删除失败')
+    showMessage(apiMessage(error, '方案删除失败'), true)
   } finally {
     presetBusy.value = false
   }
@@ -603,9 +609,12 @@ async function importLegacyConditionSets(): Promise<void> {
       }
     }
     await refreshScreenPresets()
-    message.value = imported > 0
-      ? `已导入 ${imported} 个本地指标组合为筛选方案。`
-      : '没有导入任何组合（可能已重名）。'
+    showMessage(
+      imported > 0
+        ? `已导入 ${imported} 个本地指标组合为筛选方案。`
+        : '没有导入任何组合（可能已重名）。',
+      imported === 0,
+    )
   } finally {
     presetBusy.value = false
   }
@@ -613,6 +622,13 @@ async function importLegacyConditionSets(): Promise<void> {
 
 function apiMessage(error: unknown, context: string): string {
   return describeError(error, { fallback: context, localMessage: 'prefix' })
+}
+
+/** 提示条的成败由调用点说明，不从文案里猜：后端 409 的 detail 是「扫描尚未完成」，
+ *  含"完成"两字的旧判据会把它渲染成绿色成功条，而"已删除方案"这类成功提示反被标红。 */
+function showMessage(text: string, isError = false): void {
+  message.value = text
+  messageIsError.value = Boolean(text) && isError
 }
 
 async function parseCustomFormula(): Promise<void> {
@@ -644,7 +660,7 @@ async function parseCustomFormula(): Promise<void> {
       Math.max(conditionCount, 1),
     )
     errors.value = {}
-    message.value = `公式解析完成：已识别 ${parsed.parameters.length} 个参数、${parsed.signals.length} 个输出信号。`
+    showMessage(`公式解析完成：已识别 ${parsed.parameters.length} 个参数、${parsed.signals.length} 个输出信号。`)
   } catch (error) {
     customMetadata.value = null
     parsedFormulaText.value = ''
@@ -675,7 +691,7 @@ async function pollUntilFinished(jobId: string): Promise<void> {
   const payload = await getResults(jobId)
   applyResultPayload(payload.results, payload.meta)
   await refreshScreenHistory()
-  message.value = `扫描完成：命中 ${payload.meta.total_signals} 个条件，得到 ${payload.results.length} 只股票。`
+  showMessage(`扫描完成：命中 ${payload.meta.total_signals} 个条件，得到 ${payload.results.length} 只股票。`)
 }
 
 async function resumeActiveScreenJob(): Promise<void> {
@@ -686,7 +702,7 @@ async function resumeActiveScreenJob(): Promise<void> {
     loading.value = true
     await pollUntilFinished(active.job_id)
   } catch (error) {
-    message.value = apiMessage(error, '扫描任务恢复失败，请检查后端服务和本地行情')
+    showMessage(apiMessage(error, '扫描任务恢复失败，请检查后端服务和本地行情'), true)
   } finally {
     loading.value = false
   }
@@ -694,7 +710,7 @@ async function resumeActiveScreenJob(): Promise<void> {
 
 async function syncMarketData(): Promise<void> {
   syncLoading.value = true
-  message.value = ''
+  showMessage('')
   try {
     const universe = form.universe === 'custom' ? 'all' : form.universe
     const created = await createSyncJob({
@@ -729,11 +745,13 @@ async function syncMarketData(): Promise<void> {
       },
     )
     const result = state.result
-    message.value = result
-      ? `行情同步完成：写入 ${result.written_bars} 根，更新 ${result.updated_files} 个标的。`
-      : '行情同步完成。'
+    showMessage(
+      result
+        ? `行情同步完成：写入 ${result.written_bars} 根，更新 ${result.updated_files} 个标的。`
+        : '行情同步完成。',
+    )
   } catch (error) {
-    message.value = apiMessage(error, '行情同步失败，请检查网络和 DuckDB 数据状态后重试')
+    showMessage(apiMessage(error, '行情同步失败，请检查网络和 DuckDB 数据状态后重试'), true)
   } finally {
     syncLoading.value = false
   }
@@ -741,7 +759,7 @@ async function syncMarketData(): Promise<void> {
 
 async function submit(): Promise<boolean> {
   errors.value = validateScreenForm(form, customMetadata.value)
-  message.value = ''
+  showMessage('')
   if (Object.values(errors.value).some(Boolean)) return false
 
   loading.value = true
@@ -765,11 +783,14 @@ async function submit(): Promise<boolean> {
     }
     await pollUntilFinished(created.job_id)
   } catch (error) {
-    message.value = apiMessage(
-      error,
-      jobCreated
-        ? '扫描任务执行失败，请检查后端服务、数据目录和配置后重试'
-        : '扫描任务提交失败，请检查后端服务、数据目录和配置后重试',
+    showMessage(
+      apiMessage(
+        error,
+        jobCreated
+          ? '扫描任务执行失败，请检查后端服务、数据目录和配置后重试'
+          : '扫描任务提交失败，请检查后端服务、数据目录和配置后重试',
+      ),
+      true,
     )
     return false
   } finally {
@@ -872,9 +893,12 @@ async function applyResearchToScreen(): Promise<void> {
     // 读完立即删：刷新时不该再被套用一次，否则用户改完表单一刷新就被覆盖回去。
     sessionStorage.removeItem(RESEARCH_TO_SCREEN_KEY)
   }
-  message.value = notes.length
-    ? `已带入${sourceLabel}的买入条件。${notes.join('；')}`
-    : `已带入${sourceLabel}的买入条件，确认后直接扫描即可。`
+  showMessage(
+    notes.length
+      ? `已带入${sourceLabel}的买入条件。${notes.join('；')}`
+      : `已带入${sourceLabel}的买入条件，确认后直接扫描即可。`,
+    Boolean(notes.length),
+  )
 }
 
 /* ---------------- 股票组：把扫出来的票留下来观察 ---------------- */
@@ -1046,7 +1070,7 @@ function handoffStockPool(
 ): void {
   const normalizedCodes = [...new Set(codes.map((code) => code.trim()).filter(Boolean))]
   if (!normalizedCodes.length) {
-    message.value = '这组没有可回测的标的。'
+    showMessage('这组没有可回测的标的。', true)
     return
   }
 
@@ -1069,7 +1093,7 @@ function handoffStockPool(
     signal_date: signalDate,
   })
   if (!handoff) {
-    message.value = '浏览器暂时无法保存这次跨页配置，请检查隐私模式或存储权限。'
+    showMessage('浏览器暂时无法保存这次跨页配置，请检查隐私模式或存储权限。', true)
     return
   }
   if (import.meta.env.MODE !== 'test') window.location.assign('/portfolio-backtest')
@@ -1257,7 +1281,7 @@ onMounted(async () => {
     await Promise.all([refreshStockGroups(), refreshGroupSummaries()])
     await applyResearchToScreen()
   } catch (error) {
-    message.value = apiMessage(error, '公式元数据加载失败，请检查后端服务和网络后重试')
+    showMessage(apiMessage(error, '公式元数据加载失败，请检查后端服务和网络后重试'), true)
   }
 })
 
@@ -1288,7 +1312,7 @@ watch(() => form.formulaText, (value) => {
         <small>信号筛选和回测统一读取本地数据仓库</small>
       </PageIntro>
 
-      <div v-if="message" class="notice" :class="{ error: !message.includes('完成') }" role="alert" data-testid="screen-message">
+      <div v-if="message" class="notice" :class="{ error: messageIsError }" role="alert" data-testid="screen-message">
         <span>{{ message }}</span>
       </div>
 
