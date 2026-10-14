@@ -38,7 +38,9 @@ _DEFAULT_PRICE_BASIS = DEFAULT_PRICE_BASIS
 _FINGERPRINT_COLUMNS = ("date", "open", "high", "low", "close", "volume", "amount")
 _OPTIONAL_FINGERPRINT_COLUMNS = ("bar_status", "price_basis")
 _MAX_CACHE_BLOB_BYTES = 64 * 1024 * 1024
-_CUSTOM_ENGINE_VERSION = "1"
+# v2：IF / CROSS / BARSLAST 的 NaN 口径改了（预热段不再凭空取真值分支、上穿要求前后
+# 两根都有效）。自定义公式可以直接调用这三个函数，旧缓存行必须整体作废。
+_CUSTOM_ENGINE_VERSION = "2"
 # Keep this aligned with the precompute window: each annual result depends on
 # the year's bars plus the preceding warm-up rows used to initialize rolling
 # and recursive indicators.

@@ -494,3 +494,28 @@ def test_fast_portfolio_sim_resume_pending_sell_at_boundary(
     config = make_config(codes=("SH600000",), max_positions=1)
     service = _SimService()
     _resume_case(monkeypatch, service, [context], config, ranked=ranked_mode, split=100)
+
+
+def test_equal_length_segments_do_not_share_the_rebalance_mask(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """分段评估不能复用另一段的调仓掩码。
+
+    train/validation/test 用的是同一个整帧指纹、切的却是各自的日期区间。缓存键只记天数
+    时，两段等长就会让后跑的那段拿到前一段的星期对齐，报出来的分段收益不是它自己的，
+    换个执行顺序结论就变。
+    """
+
+    monkeypatch.setenv("AQUEST_FAST_SIM", "1")
+    contexts = [make_context("600000", 1), make_context("600001", 2)]
+    dates = global_dates(contexts)
+    head, tail = dates[:139], dates[141:]
+    assert len(head) == len(tail)
+    config = make_config(rebalance_frequency="weekly")
+
+    warm = _SimService()
+    run_sim(warm, contexts, head, config, ranked=False)
+    warmed_tail = run_sim(warm, contexts, tail, config, ranked=False)
+    cold_tail = run_sim(_SimService(), contexts, tail, config, ranked=False)
+
+    assert_same(cold_tail, warmed_tail)

@@ -156,13 +156,16 @@ def test_formula_version_and_corrupt_payload_are_cache_misses(tmp_path: Path, ba
     cache.get_or_compute(frame, ("indicator_three",), market="SH", code="600000")
 
     definition = FORMULA_REGISTRY.formula("indicator_three")
+    # 刻意不写死下一个版本号：cache_version 会随语义修正往上走，写死就会在下一次升版
+    # 时静默变成"版本没变"，这条用例也就不再验证版本失活了。
+    bumped_version = f"{definition.cache_version}-bumped"
 
     def versioned_calculate(data: pd.DataFrame):
         calls["indicator_three"] = calls.get("indicator_three", 0) + 1
         return definition.calculate(data)
 
     version_two = FormulaRegistry(
-        (replace(definition, cache_version="2", calculate=versioned_calculate),)
+        (replace(definition, cache_version=bumped_version, calculate=versioned_calculate),)
     )
     IndicatorCache(store, registry=version_two).get_or_compute(
         frame,
@@ -178,7 +181,7 @@ def test_formula_version_and_corrupt_payload_are_cache_misses(tmp_path: Path, ba
         timeframe="daily",
         price_basis="raw",
         formula_id="indicator_three",
-        formula_version="2",
+        formula_version=bumped_version,
         data_fingerprint=fingerprint,
         data_start=date(2024, 1, 1),
         data_end=date(2024, 3, 20),

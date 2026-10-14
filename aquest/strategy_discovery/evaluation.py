@@ -33,6 +33,12 @@ def _passes(metrics: Mapping[str, object], request: DiscoveryRequest) -> bool:
         )
     except (TypeError, ValueError):
         trades = 0
+    # 与 ``search._passes_constraints`` 同规则：一单都没成交的候选是一条纯现金曲线
+    # （年化、夏普、回撤全为 0），``min_trades=0`` 时它会以"零风险零收益"通过全部阈值。
+    # 指标缺失时 ``_metric`` 返回 -inf，按"无法判定"放行。
+    executed = _metric(metrics, "executed_buy_orders") + _metric(metrics, "executed_sell_orders")
+    if math.isfinite(executed) and executed <= 0:
+        return False
     if trades < request.min_trades:
         return False
     if (

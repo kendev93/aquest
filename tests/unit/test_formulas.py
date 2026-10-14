@@ -76,7 +76,21 @@ def test_mytt_core_functions_have_expected_warmup_and_cross_semantics() -> None:
         False,
         True,
     ]
-    assert BARSLAST(np.array([False, False, True, False])).tolist() == [1, 2, 0, 1]
+    # 从未为真之前是无效值，而不是递增计数：旧写法会让 BARSLAST(x) > 30 对一条从未
+    # 成立过的条件判真。
+    bars_last = BARSLAST(np.array([False, False, True, False]))
+    assert np.isnan(bars_last[:2]).tolist() == [True, True]
+    assert bars_last[2:].tolist() == [0.0, 1.0]
+    # NaN 输入不算"真"：dtype=bool 会把 NaN 变成 True，预热段于是被当成"本根刚刚为真"。
+    nan_last = BARSLAST(np.array([np.nan, np.nan, 1.0, 0.0]))
+    assert np.isnan(nan_last[:2]).tolist() == [True, True]
+    assert nan_last[2:].tolist() == [0.0, 1.0]
+    # 前一根是 NaN 时不算上穿：旧实现把 NaN 比较结果当"没在上面"，均线出第一个有效值
+    # 的当天就凭空报一根金叉；筛选侧 cross_up 要求前后两根都有效。
+    warm = CROSS(np.array([1.0, 3.0]), np.array([np.nan, 2.0]))
+    assert warm.tolist() == [False, False]
+    settled = CROSS(np.array([1.0, 3.0]), np.array([1.5, 2.0]))
+    assert settled.tolist() == [False, True]
     assert COUNT(np.array([True, False, True, True]), 3)[-1] == 2
 
 

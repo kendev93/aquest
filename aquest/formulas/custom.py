@@ -731,8 +731,12 @@ def _call(name: str, arguments: list[object]) -> object:
     if name == "MIN":
         return np.minimum(np.asarray(arguments[0]), np.asarray(arguments[1]))
     if name == "IF":
+        # 条件里的 NaN 按"假"处理：np.where 只看"非零"，而指标预热段整片都是 NaN，
+        # 于是 IF(MA(C,5),1,0) 会在前几根凭空取真值分支——与 TDX 的无效值语义和筛选侧
+        # ``valid &`` 的口径都相反。
+        condition = np.asarray(arguments[0], dtype=float)
         return np.where(
-            np.asarray(arguments[0]),
+            np.isfinite(condition) & (condition != 0),
             np.asarray(arguments[1]),
             np.asarray(arguments[2]),
         )
@@ -775,7 +779,8 @@ def _call(name: str, arguments: list[object]) -> object:
     if name == "COUNT":
         return MYTT.COUNT(np.asarray(arguments[0], dtype=float), _period(arguments[1], "COUNT"))
     if name == "BARSLAST":
-        return MYTT.BARSLAST(np.asarray(arguments[0], dtype=bool))
+        # 不转 bool：``dtype=bool`` 会把预热段的 NaN 变成 True，等于"本根刚刚为真"。
+        return MYTT.BARSLAST(np.asarray(arguments[0], dtype=float))
     if name == "CROSS":
         return MYTT.CROSS(
             np.asarray(arguments[0], dtype=float), np.asarray(arguments[1], dtype=float)

@@ -278,3 +278,38 @@ def test_formula_screen_request_rejects_a_condition_without_right_operand() -> N
                 "period": "daily",
             }
         )
+
+
+def test_eq_and_neq_use_one_tolerance_on_both_sides() -> None:
+    """同一个 eq/neq 条件在筛选页与单股回放必须给同一个答案。
+
+    回放侧一度用严格 ``np.equal``：浮点递推出来的指标差 1e-13 就不算相等，于是筛选页
+    命中、回放不命中，``neq`` 反过来。榜单和回放对不上时没人能看出是口径分叉。
+    """
+
+    from aquest.individual_research.service import _condition_mask as replay_mask
+    from aquest.screening.engine import _condition_mask as screening_mask
+
+    values = [1e-13, 5.0, 0.0, float("nan")]
+    results = {
+        "technical": FormulaResult.build(
+            formula_id="technical",
+            display_name="technical",
+            minimum_bars=1,
+            recommended_bars=1,
+            data_length=4,
+            values={"ma5": values},
+            signals={},
+        )
+    }
+    features = pd.DataFrame({"technical.ma5": values})
+
+    for operator, expected in (
+        ("eq", [True, False, True, False]),
+        ("neq", [False, True, False, False]),
+    ):
+        condition = ScreenCondition(
+            left_value="technical.ma5", operator=operator, right_constant=0.0
+        )
+        assert screening_mask(condition, results).tolist() == expected
+        assert replay_mask(condition, features, features).tolist() == expected

@@ -88,6 +88,17 @@ def _value_series(value_id: str, formula_results: Mapping[str, FormulaResult]) -
     raise ValueError(f"未知指标输出: {value_id}")
 
 
+def values_equal(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    """指标相等判定，带容差：指标值来自浮点递推（SMA/EMA 那些），逐位相等几乎不出现。
+
+    全市场筛选与单股回放必须走这一份实现。两侧一度一边一个口径（这里 ``isclose``、
+    那边严格 ``np.equal``），同一个 ``x eq 0`` 条件在筛选页命中、在研究回放不命中，
+    ``neq`` 反之——榜单和回放对不上时没人能看出是口径分叉。
+    """
+
+    return np.asarray(np.isclose(left, right, rtol=1e-9, atol=1e-12), dtype=bool)
+
+
 def _condition_mask(
     condition: ScreenCondition, formula_results: Mapping[str, FormulaResult]
 ) -> np.ndarray:
@@ -110,7 +121,7 @@ def _condition_mask(
         return np.asarray(valid & (left < right), dtype=bool)
     if operator == "lte":
         return np.asarray(valid & (left <= right), dtype=bool)
-    equality = np.asarray(np.isclose(left, right, rtol=1e-9, atol=1e-12), dtype=bool)
+    equality = values_equal(left, right)
     if operator == "eq":
         return np.asarray(valid & equality, dtype=bool)
     if operator == "neq":

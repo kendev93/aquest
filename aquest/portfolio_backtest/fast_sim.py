@@ -1083,12 +1083,15 @@ def _build_inputs(
     if n_days > 1 and not bool(np.all(np.diff(dates_arr) > 0)):
         return None
 
-    # 调仓日数组按 (行情指纹, 频率, 天数) 缓存——跨 trial 完全一致。
+    # 调仓日数组按 (行情指纹, 频率, 日期轴) 缓存——同一份快照、同一份日历才复用。
+    # 日期轴必须进键：train/validation/test 用的是同一个整帧指纹，切的却是各自的日期
+    # 区间，而 weekly/monthly 的调仓日取决于真实星期与月界。只按天数缓存时，两段天数
+    # 相等就会让后跑的那段直接复用另一段日历的掩码，报出来的分段收益根本不是那一段的。
     cache = getattr(service, "_fast_sim_cache", None)
     if cache is None:
         cache = {}
         service._fast_sim_cache = cache
-    refresh_key = ("refresh", data_fingerprint, config.rebalance_frequency, n_days)
+    refresh_key = ("refresh", data_fingerprint, config.rebalance_frequency, dates_arr.tobytes())
     refresh_due = cache.get(refresh_key)
     if not isinstance(refresh_due, np.ndarray):
         refresh_due = _refresh_due_array(dates_arr, config.rebalance_frequency)

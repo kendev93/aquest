@@ -50,10 +50,21 @@ def test_parameter_override_changes_formula_result_without_future_data() -> None
 
 def test_formula_outputs_are_selectable_boolean_signals() -> None:
     parsed = parse_formula("N:=2; BREAKOUT:CROSS(C,REF(C,N));")
-    result = evaluate_custom_formula(parsed, bars())
+    rising = evaluate_custom_formula(parsed, bars())
 
-    assert result.signals["custom.breakout"].any()
-    assert result.signals["custom.breakout"].dtype == bool
+    # bars() 是 1..80 严格递增：REF(C,2) 的前两根是 NaN，"前一根在下方"根本无从判定。
+    # 旧实现把 NaN 当成"没在上面"，于是均线出第一个有效值的当天凭空报了一根金叉。
+    assert rising.signals["custom.breakout"].dtype == bool
+    assert not rising.signals["custom.breakout"].any()
+
+    # 真实的上穿（回踩后再越过两根前的价位）必须照常出信号，且只出在该穿越的一根。
+    frame = bars()
+    closes = list(frame["close"])
+    closes[8] = closes[6]  # 回踩到两根前的价位：仍未在上
+    closes[9] = closes[7] + 1.0  # 这一根才真正上穿
+    frame["close"] = closes
+    dipped = evaluate_custom_formula(parsed, frame)
+    assert dipped.signals["custom.breakout"].tolist().index(True) == 9
 
 
 def test_custom_formula_supports_dynamic_ref_periods() -> None:

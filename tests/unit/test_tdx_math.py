@@ -20,7 +20,9 @@ def test_tdx_math_preserves_warmup_and_cross_semantics() -> None:
         False,
         True,
     ]
-    assert BARSLAST(np.array([False, False, True, False])).tolist() == [1, 2, 0, 1]
+    bars_last = BARSLAST(np.array([False, False, True, False]))
+    assert np.isnan(bars_last[:2]).tolist() == [True, True]
+    assert bars_last[2:].tolist() == [0.0, 1.0]
     assert COUNT(np.array([True, False, True, True]), 3)[-1] == 2
 
 

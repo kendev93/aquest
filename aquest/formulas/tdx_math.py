@@ -130,23 +130,41 @@ def COUNT(values: Any, period: int) -> np.ndarray:
 
 
 def BARSLAST(values: Any) -> np.ndarray:
-    source = np.asarray(values, dtype=bool)
-    result = np.empty(len(source), dtype=int)
-    elapsed = 0
-    for index, matched in enumerate(source):
-        if matched:
-            elapsed = 0
-        else:
-            elapsed += 1
-        result[index] = elapsed
+    """距上次条件为真的根数；从未为真时返回无效值（NaN）。
+
+    ``dtype=bool`` 会把 NaN 变成 True，于是预热段一开头就报 0（"刚刚为真"）；而"从未
+    为真"用递增计数表达时，``BARSLAST(x) > 30`` 会对一条从未成立过的条件判真。两者都
+    与筛选侧 ``valid &`` 的口径相反，同一根 K 线上公式信号和指标条件会给出不同结论。
+    """
+
+    source = np.asarray(values, dtype=float)
+    matched = np.isfinite(source) & (source != 0)
+    result = np.full(len(source), np.nan)
+    last_index: int | None = None
+    for index, hit in enumerate(matched):
+        if hit:
+            last_index = index
+        if last_index is not None:
+            result[index] = index - last_index
     return result
 
 
 def CROSS(left: Any, right: Any) -> np.ndarray:
-    crossed = np.asarray(left) > np.asarray(right)
-    if crossed.size == 0:
-        return np.array([], dtype=bool)
-    return np.concatenate((np.array([False]), np.logical_not(crossed[:-1]) & crossed[1:]))
+    """上穿：前一根不高于右侧、这一根高于右侧，且两侧的数在两根 bar 上都有效。
+
+    旧写法把"前一根是 NaN"当成"前一根在下方"，于是均线出第一个有效值的当天就报金叉；
+    筛选侧 ``cross_up`` 要求前后两根都有效，同一份数据两侧结论相反。
+    """
+
+    left_array = np.asarray(left, dtype=float)
+    right_array = np.asarray(right, dtype=float)
+    crossed = np.zeros(left_array.size, dtype=bool)
+    if left_array.size < 2:
+        return crossed
+    above = left_array > right_array
+    valid = np.isfinite(left_array) & np.isfinite(right_array)
+    crossed[1:] = ~above[:-1] & above[1:] & valid[:-1] & valid[1:]
+    return crossed
 
 
 class _TdxMath:

@@ -470,7 +470,8 @@ FORMULA_REGISTRY = FormulaRegistry(
             ),
             value_names=BREAKOUT_VALUE_NAMES,
             screen_value_names=BREAKOUT_VALUE_NAMES,
-            cache_version="1",
+            # v2 跟随 CROSS 的 NaN 口径修正：预热段不再凭空报出上穿信号。
+            cache_version="2",
         ),
         FormulaDefinition(
             id="indicator_two",
@@ -541,6 +542,9 @@ FORMULA_REGISTRY = FormulaRegistry(
                 "holding",
                 "warning_line",
             ),
+            # v2 跟随 CROSS/BARSLAST 的 NaN 口径修正：w2/w4 与两个"短高于中长"信号
+            # 的取值都会变，旧缓存行必须作废。
+            cache_version="2",
         ),
         FormulaDefinition(
             id="indicator_three",
@@ -584,6 +588,8 @@ FORMULA_REGISTRY = FormulaRegistry(
                 "prepare_rally",
                 "suppress_main",
             ),
+            # v2 跟随 CROSS 的 NaN 口径修正：prepare_rally 是 CROSS(VAR1, VAR2)。
+            cache_version="2",
         ),
         FormulaDefinition(
             id="technical",

@@ -112,6 +112,10 @@ class _LightGBMSurrogate:
         return features
 
     def fit(self, candidates: Sequence[StrategyCandidate], objective: str) -> bool:
+        # 先放下上一轮的模型：objective 是逐轮交替的，本轮任何一条失败分支退出时，
+        # 留着上一个目标训出的模型会让 predict 拿它给候选排序——特征名相同就完全不
+        # 报错，只是"谁拿到真实回测"悄悄换了人。清空后 predict 返回 -inf，按无建议处理。
+        self._model = None
         if len(candidates) < 10:
             self.status = "warming_up"
             self.reason = "有效样本不足"
@@ -876,6 +880,13 @@ def _passes_constraints(
         )
     except (TypeError, ValueError):
         trades = 0
+    # 一单都没成交的候选不参与排名：它是一条纯现金曲线（年化、夏普、回撤全是 0），
+    # ``min_trades`` 设成 0 时会在真实候选普遍为负时登顶，还会经 ``best_scores`` 把
+    # "什么都不做"当成最优解喂给 Optuna。买了却没卖的候选不在此列——那条曲线有真实
+    # 浮动盈亏，是合法结果。指标缺失时 ``_metric`` 返回 -inf，按"无法判定"放行。
+    executed = _metric(metrics, "executed_buy_orders") + _metric(metrics, "executed_sell_orders")
+    if math.isfinite(executed) and executed <= 0:
+        return False
     if trades < (request.min_trades if min_trades is None else min_trades):
         return False
     if enforce_max_drawdown and request.max_drawdown is not None:

@@ -14,7 +14,11 @@ from aquest.screening.rules import RuleGroup
 
 _DEFAULT_PATTERN = np.array([0, 1, 2, 1, 0, -1, 0, 2, 3, 2, 0, -1], dtype=float)
 # 训练段需要同时出现盈利与亏损交易，挖掘阶段才可能产出候选。
-_MIXED_OUTCOME_PATTERN = np.array([0, 1, 2, 3, 4, 3, 2, 1, 0, -1, -2, -1], dtype=float)
+# 旧形态 [0,1,2,3,4,3,2,1,0,-1,-2,-1] 已经不合格了：它每笔真实交易都在低点买入、
+# 高点卖出，全胜；那两笔"亏损"其实是 CROSS 把预热段的 NaN 当成"前一根在下方"凭空
+# 造出来的伪买入信号（22 笔 0 负 vs 旧语义 24 笔 2 负）。现在的形态里假突破和真盈利
+# 都来自数据本身。
+_MIXED_OUTCOME_PATTERN = np.array([0, 1, 3, 5, 4, 2, 0, 1, 2, 1, 0, -1], dtype=float)
 
 
 class FakeUniverseAdapter:

@@ -12,6 +12,7 @@ import pytest
 from aquest.screening.models import ScreenCondition
 from aquest.screening.rules import RuleGroup
 from aquest.strategy_discovery import candidates as candidates_module
+from aquest.strategy_discovery import evaluation as evaluation_module
 from aquest.strategy_discovery import search as search_module
 from aquest.strategy_discovery.candidates import (
     build_random_candidate,
@@ -842,3 +843,90 @@ def test_max_hold_days_resolves_as_policy_not_search_dimension() -> None:
     # 非法值退回安全默认，而不是让整个研究跑不起来。
     assert resolve({"max_hold_days": 0}) == 20
     assert resolve({"max_hold_days": "abc"}) == 20
+
+
+def test_lightgbm_surrogate_drops_stale_model_when_fit_fails() -> None:
+    """本轮 fit 失败不能继续用上一个目标的模型给候选排序。
+
+    objective 逐轮交替，而失败分支原先不复位 ``_model``：sharpe 轮训好后，annual_return
+    轮因"评分没有足够变化"退出时，predict 仍拿 sharpe 模型打分——特征名相同所以完全不
+    报错，只是"谁拿到真实回测"悄悄换了人。
+    """
+
+    pytest.importorskip("lightgbm")
+    request = DiscoveryRequest(
+        base_config={"max_positions": 1},
+        indicator_ids=("technical.ma5", "technical.ma20"),
+        signal_ids=(),
+        max_conditions_per_side=1,
+        required_buy_conditions=(
+            ScreenCondition(left_value="technical.ma5", operator="gt", right_constant=10.0),
+        ),
+        required_sell_conditions=(
+            ScreenCondition(left_value="technical.ma20", operator="gt", right_constant=10.0),
+        ),
+    )
+    candidates = [
+        build_random_candidate(request, random.Random(seed)).with_metrics(
+            "search",
+            # sharpe 有变化（能训出来），annual_return 全相同（必然拟合失败）。
+            {"sharpe": float(seed), "annual_return": 0.05},
+        )
+        for seed in range(40)
+    ]
+    surrogate = search_module._LightGBMSurrogate()
+
+    assert surrogate.fit(candidates[:10], "sharpe") is True
+    assert surrogate.predict(candidates[:2]) != [float("-inf"), float("-inf")]
+
+    assert surrogate.fit(candidates, "annual_return") is False
+    assert surrogate.reason == "评分没有足够变化"
+    assert surrogate.predict(candidates[:2]) == [float("-inf"), float("-inf")]
+
+
+def test_candidate_that_never_traded_cannot_beat_a_losing_one() -> None:
+    """``min_trades=0`` 时，一单都没成交的候选不能压过有成交的候选。
+
+    全现金曲线的年化、夏普、回撤全是 0：真实候选普遍为负时它既通过约束又登顶，还会经
+    ``best_scores`` 把"什么都不做"当成最优解喂给 Optuna。买了却没卖的候选不在此列——
+    那条曲线有真实浮动盈亏。搜索与验证两道闸门必须同规则，否则又留下一份漂移实现。
+    """
+
+    request = DiscoveryRequest(
+        base_config={"max_positions": 1},
+        indicator_ids=("ma5",),
+        signal_ids=(),
+        max_conditions_per_side=1,
+        min_trades=0,
+        max_drawdown=None,
+    )
+    idle = {
+        "annual_return": 0.0,
+        "sharpe": 0.0,
+        "max_drawdown": 0.0,
+        "total_trades": 0,
+        "executed_buy_orders": 0,
+        "executed_sell_orders": 0,
+    }
+    losing = {
+        "annual_return": -0.2,
+        "sharpe": -1.0,
+        "max_drawdown": 0.1,
+        "total_trades": 5,
+        "executed_buy_orders": 5,
+        "executed_sell_orders": 5,
+    }
+    holding_forever = {
+        "annual_return": 0.3,
+        "sharpe": 1.2,
+        "max_drawdown": 0.1,
+        "total_trades": 0,
+        "executed_buy_orders": 3,
+        "executed_sell_orders": 0,
+    }
+
+    for metrics in (losing, holding_forever):
+        assert search_module._passes_constraints(metrics, request) is True
+        assert evaluation_module._passes(metrics, request) is True
+    assert search_module._passes_constraints(idle, request) is False
+    assert evaluation_module._passes(idle, request) is False

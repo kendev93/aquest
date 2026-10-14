@@ -27,6 +27,7 @@ from aquest.portfolio_backtest.models import (
     PortfolioBacktestReport,
 )
 from aquest.portfolio_backtest.service import PortfolioBacktestService
+from aquest.screening.engine import values_equal
 from aquest.screening.jobs import TaskCancelledError
 from aquest.screening.models import ScreenCondition
 from aquest.screening.rules import RuleGroup
@@ -1108,12 +1109,16 @@ def _condition_mask(
         "gte": np.greater_equal,
         "lt": np.less,
         "lte": np.less_equal,
-        "eq": np.equal,
-        "neq": np.not_equal,
     }
     comparison = operators.get(str(condition.operator))
     if comparison is None:
-        return np.zeros(size, dtype=bool)
+        if str(condition.operator) not in {"eq", "neq"}:
+            return np.zeros(size, dtype=bool)
+        # 相等判定走筛选侧那一份实现：严格 np.equal 对浮点递推出来的指标基本不成立，
+        # 同一个 eq/neq 条件于是"筛选页命中、回放不命中"（neq 反之）。
+        equality = values_equal(left, right)
+        matched = equality if condition.operator == "eq" else ~equality
+        return np.asarray(matched & valid, dtype=bool)
     return np.asarray(comparison(left, right) & valid, dtype=bool)
 
 
