@@ -4,6 +4,7 @@ import type {
   StrategyPoolEntry,
   StrategyPoolFocusItem,
   StrategyPoolJobState,
+  StrategyPoolJobStats,
   StrategyPoolJobSummary,
   StrategyPoolObjective,
   StrategyPoolCandidate,
@@ -75,6 +76,13 @@ export async function cancelStrategyPoolJob(jobId: string): Promise<{ cancelled:
 export async function fetchStrategyPoolJobs(): Promise<StrategyPoolJobSummary[]> {
   const response = await request<{ data: { items: StrategyPoolJobSummary[] } }>(`${API_BASE}/jobs`)
   return response.data.items
+}
+
+// 平均耗时按模式各取最近若干条终态任务，跟列表分页无关，所以单独一个接口：
+// 列表每页 20 条里几乎全是十分钟一次的信号扫描，就地聚合算不出全市场那一轮多久。
+export async function fetchStrategyPoolJobStats(): Promise<StrategyPoolJobStats> {
+  const response = await request<{ data: StrategyPoolJobStats }>(`${API_BASE}/jobs/stats`)
+  return response.data
 }
 
 export async function fetchResearchSettings(): Promise<StrategyPoolResearchSettings> {

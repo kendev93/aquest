@@ -167,6 +167,9 @@ export interface StrategyPoolJobState {
   total_candidates?: number
   total_scanned?: number
   cancel_requested?: boolean
+  created_at?: number | string | null
+  started_at?: number | string | null
+  finished_at?: number | string | null
   error?: string | null
   metadata?: Record<string, unknown>
   result?: StrategyPoolJobResult | null
@@ -178,14 +181,38 @@ export interface StrategyPoolJobSummary {
   job_id: string
   status: string
   mode: StrategyPoolMode
+  automatic?: boolean
   objective?: StrategyPoolObjective | null
   market?: string | null
   code?: string | null
   created_at?: number | string
-  finished_at?: number | string
+  started_at?: number | string | null
+  finished_at?: number | string | null
+  duration_seconds?: number | null
+  duration_includes_queue?: boolean
   completed_symbols?: number
   skipped_symbols?: number
+  newly_researched_symbols?: number
   failed_symbols?: number
   total_symbols?: number
+  maximum_parallelism?: number | null
+  phase_label?: string | null
+  error_code?: string | null
   error?: string | null
+}
+
+export interface StrategyPoolJobModeStats {
+  samples: number
+  avg_duration_seconds: number | null
+  median_duration_seconds: number | null
+  started_at_samples: number
+  throughput_samples: number
+  avg_seconds_per_symbol: number | null
+  median_seconds_per_symbol: number | null
+  avg_parallelism: number | null
+}
+
+export interface StrategyPoolJobStats {
+  sample_limit: number
+  modes: Partial<Record<StrategyPoolMode, StrategyPoolJobModeStats>>
 }

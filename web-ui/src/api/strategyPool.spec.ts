@@ -5,6 +5,7 @@ import {
   clearStrategyPoolOverride,
   createStrategyPoolJob,
   fetchStrategyPoolEntries,
+  fetchStrategyPoolJobStats,
   fetchStrategyPoolJobs,
   getStrategyPoolJob,
   saveStrategyPoolOverride,
@@ -68,6 +69,17 @@ describe('strategy pool API', () => {
 
     expect(fetch.mock.calls[0]?.[0]).toBe('/api/v1/strategy-pool/jobs')
     expect(jobs).toEqual(items)
+  })
+
+  it('reads task duration stats from the separate stats route', async () => {
+    // /jobs/stats 必须原样请求：后端把它注册在 /jobs/{job_id} 之前，写成别的路径会 404。
+    const stats = { sample_limit: 60, modes: { full: { samples: 3, median_duration_seconds: 2400 } } }
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: stats }), { status: 200 }))
+    vi.stubGlobal('fetch', fetch)
+
+    await expect(fetchStrategyPoolJobStats()).resolves.toEqual(stats)
+
+    expect(fetch.mock.calls[0]?.[0]).toBe('/api/v1/strategy-pool/jobs/stats')
   })
 
   it('cancels a pool job by its encoded task id', async () => {

@@ -254,6 +254,7 @@ def test_active_jobs_endpoint_reads_a_queued_strategy_job_from_shared_storage(tm
             "description": "策略实验室",
             "worker_count": None,
             "created_at": response.json()["data"][0]["created_at"],
+            "started_at": None,
             "finished_at": None,
             "phase": "queued",
             "metadata": {},

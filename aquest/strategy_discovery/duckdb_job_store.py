@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
+import statistics
 import time
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,10 @@ from .job_store import (
 
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 _VALID_STATUSES = frozenset({"queued", "running", *_TERMINAL_STATUSES})
+#: 任务时长统计每个模式最多采样多少条终态任务。跟踪轮询每十分钟写一条信号扫描
+#: 记录，全市场研究跑几小时也只有几条，不限窗口就会把样本全花在信号扫描上。
+POOL_STATS_SAMPLE_LIMIT = 60
+POOL_STATS_MODES = ("full", "single", "signals", "portfolio")
 _WORKER_PROGRESS_FIELDS = frozenset(
     {
         "phase",
@@ -294,40 +299,22 @@ class DuckDbStrategyJobStore:
                         [history_limit, offset],
                     ).fetchall()
                 )
-        items: list[dict[str, object]] = []
-        for job_id, raw_request, raw_state in rows:
-            request = _load_object(raw_request)
-            state = _load_object(raw_state)
-            envelope = request.get("payload")
-            payload = envelope if isinstance(envelope, Mapping) else {}
-            metadata = state.get("metadata")
-            progress = metadata if isinstance(metadata, Mapping) else {}
-            items.append(
-                {
-                    "job_id": str(job_id),
-                    "status": state.get("status"),
-                    "mode": payload.get("mode", "full"),
-                    "rebuild": payload.get("rebuild") is True,
-                    "dual_objectives": payload.get("mode") == "signals"
-                    and request.get("operation") == "market_strategy_pool_tracking",
-                    "objective": payload.get("objective"),
-                    "market": payload.get("market"),
-                    "code": payload.get("code"),
-                    "created_at": state.get("created_at"),
-                    "finished_at": state.get("finished_at"),
-                    "completed_symbols": progress.get("completed_symbols", 0),
-                    "skipped_symbols": progress.get("skipped_symbols", 0),
-                    "failed_symbols": progress.get("failed_symbols", 0),
-                    "total_symbols": progress.get("total_symbols", 0),
-                    "error": state.get("error"),
-                }
-            )
+        items = [
+            _pool_history_summary(str(job_id), _load_object(raw_request), _load_object(raw_state))
+            for job_id, raw_request, raw_state in rows
+        ]
         return {
             "items": items,
             "total": int(total_row[0]) if total_row else 0,
             "limit": limit,
             "offset": offset,
         }
+
+    def market_pool_job_stats(self) -> dict[str, object]:
+        """Average and median durations of recent pool tasks, grouped by mode."""
+
+        with self._read_connection() as connection:
+            return _pool_mode_stats(connection)
 
     def claim_next(
         self, worker_id: str | None = None, operations: list[str] | None = None
@@ -352,6 +339,10 @@ class DuckDbStrategyJobStore:
             job_id = str(row[0])
             state = _load_object(row[1])
             state.update(status="running", phase="running", heartbeat_at=now)
+            if _optional_float(state.get("started_at")) is None:
+                # 认领时刻就是研究起点：created_at 起算会把排队等 worker 的时间
+                # 也算进任务时长，自动跟踪任务堆在全市场研究后面时能虚高几小时。
+                state["started_at"] = now
             connection.execute(
                 """
                 UPDATE strategy_jobs
@@ -711,8 +702,11 @@ class DuckDbStrategyJobStore:
         now = time.time()
         if status in _TERMINAL_STATUSES:
             merged["finished_at"] = merged.get("finished_at") or now
-        elif status == "running" and "heartbeat_at" not in updates:
-            merged["heartbeat_at"] = now
+        elif status == "running":
+            if merged.get("started_at") is None:
+                merged["started_at"] = now
+            if "heartbeat_at" not in updates:
+                merged["heartbeat_at"] = now
         cancel_requested = bool(row[2])
         merged["cancel_requested"] = cancel_requested
         heartbeat_at = _number(merged.get("heartbeat_at"), now)
@@ -773,6 +767,141 @@ def _load_object(raw: object) -> dict[str, object]:
     if not isinstance(value, Mapping):
         raise ValueError("DuckDB 策略任务 JSON 格式无效")
     return {str(key): cast(object, item) for key, item in value.items()}
+
+
+def _pool_history_summary(
+    job_id: str,
+    request: Mapping[str, object],
+    state: Mapping[str, object],
+) -> dict[str, object]:
+    """Flatten one pool task row into the fields the task history list shows."""
+
+    payload = _mapping_or_empty(request.get("payload"))
+    progress = _mapping_or_empty(state.get("metadata"))
+    completed = _optional_int(progress.get("completed_symbols")) or 0
+    skipped = _optional_int(progress.get("skipped_symbols")) or 0
+    started_at = _optional_float(state.get("started_at"))
+    # started_at 由 worker 认领时写入；更早入库的任务没有它，只能从创建时间起算，
+    # 于是时长里含排队。duration_includes_queue 让页面能把这个口径说清楚。
+    duration = _duration_between(
+        started_at if started_at is not None else _optional_float(state.get("created_at")),
+        _optional_float(state.get("finished_at")),
+    )
+    return {
+        "job_id": job_id,
+        "status": state.get("status"),
+        "mode": payload.get("mode", "full"),
+        "rebuild": payload.get("rebuild") is True,
+        "automatic": payload.get("automatic") is True,
+        "dual_objectives": payload.get("mode") == "signals"
+        and request.get("operation") == "market_strategy_pool_tracking",
+        "objective": payload.get("objective"),
+        "market": payload.get("market"),
+        "code": payload.get("code"),
+        "created_at": state.get("created_at"),
+        "started_at": started_at,
+        "finished_at": state.get("finished_at"),
+        "duration_seconds": duration,
+        "duration_includes_queue": started_at is None,
+        "completed_symbols": completed,
+        "skipped_symbols": skipped,
+        "failed_symbols": _optional_int(progress.get("failed_symbols")) or 0,
+        # completed_symbols 把复用标的也算进去了，真正研究了几个要自己减。
+        "newly_researched_symbols": max(0, completed - skipped),
+        "total_symbols": _optional_int(progress.get("total_symbols")) or 0,
+        "maximum_parallelism": _optional_int(progress.get("maximum_parallelism")),
+        "phase_label": progress.get("phase_label"),
+        "error": state.get("error"),
+        "error_code": state.get("error_code"),
+    }
+
+
+def _pool_mode_stats(connection: duckdb.DuckDBPyConnection) -> dict[str, object]:
+    """Summarize recent terminal pool tasks per mode without loading every result blob."""
+
+    modes: dict[str, object] = {}
+    for mode in POOL_STATS_MODES:
+        rows = connection.execute(
+            """
+            SELECT status, created_at, updated_at,
+                   TRY_CAST(json_extract_string(state_json, '$.started_at') AS DOUBLE),
+                   TRY_CAST(json_extract_string(state_json, '$.finished_at') AS DOUBLE),
+                   TRY_CAST(
+                       json_extract_string(state_json, '$.metadata.completed_symbols') AS BIGINT),
+                   TRY_CAST(
+                       json_extract_string(state_json, '$.metadata.skipped_symbols') AS BIGINT),
+                   TRY_CAST(
+                       json_extract_string(state_json, '$.metadata.maximum_parallelism') AS BIGINT)
+            FROM strategy_jobs
+            WHERE operation IN ('market_strategy_pool', 'market_strategy_pool_tracking')
+              AND status IN ('completed', 'failed', 'cancelled')
+              AND json_extract_string(request_json, '$.payload.mode') = ?
+            ORDER BY created_at DESC, job_id DESC
+            LIMIT ?
+            """,
+            [mode, POOL_STATS_SAMPLE_LIMIT],
+        ).fetchall()
+        durations: list[float] = []
+        started_samples = 0
+        per_symbol: list[float] = []
+        parallelism: list[float] = []
+        for (
+            status,
+            created_at,
+            updated_at,
+            raw_started_at,
+            raw_finished_at,
+            raw_completed,
+            raw_skipped,
+            raw_parallelism,
+        ) in rows:
+            started = _optional_float(raw_started_at)
+            # 终态行的 updated_at 就是写下终态的那一刻；早期从 JSON 文件导入的行没有 finished_at。
+            finished = _optional_float(raw_finished_at)
+            if finished is None:
+                finished = _optional_float(updated_at)
+            elapsed = _duration_between(
+                started if started is not None else _optional_float(created_at), finished
+            )
+            terminal = str(status)
+            if terminal == "completed" and elapsed is not None:
+                durations.append(elapsed)
+                if started is not None:
+                    started_samples += 1
+            # 被取消的轮次只跑了一半，总时长没有意义，但「每只新研究标的花了多久」
+            # 仍然是这一轮吞吐量的实测值，所以放进吞吐量样本而不是时长样本。
+            # 失败任务两者都不进：它可能在第一只标的就断了，样本没有代表性。
+            if terminal not in {"completed", "cancelled"}:
+                continue
+            workers = _optional_int(raw_parallelism)
+            if workers:
+                parallelism.append(float(workers))
+            researched = (_optional_int(raw_completed) or 0) - (_optional_int(raw_skipped) or 0)
+            if elapsed is not None and researched > 0:
+                per_symbol.append(elapsed / researched)
+        modes[mode] = {
+            "samples": len(durations),
+            "avg_duration_seconds": _round_mean(durations),
+            "median_duration_seconds": _round_median(durations),
+            "started_at_samples": started_samples,
+            "throughput_samples": len(per_symbol),
+            "avg_seconds_per_symbol": _round_mean(per_symbol),
+            "median_seconds_per_symbol": _round_median(per_symbol),
+            "avg_parallelism": _round_mean(parallelism),
+        }
+    return {"sample_limit": POOL_STATS_SAMPLE_LIMIT, "modes": modes}
+
+
+def _round_mean(values: Sequence[float]) -> float | None:
+    if not values:
+        return None
+    return round(sum(values) / len(values), 1)
+
+
+def _round_median(values: Sequence[float]) -> float | None:
+    if not values:
+        return None
+    return round(float(statistics.median(values)), 1)
 
 
 def _risk_optimization_history_summary(

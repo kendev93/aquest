@@ -374,6 +374,21 @@ def list_strategy_pool_jobs(
         raise HTTPException(status_code=503, detail="策略池任务历史暂不可用") from exc
 
 
+@router.get("/jobs/stats")
+def get_strategy_pool_job_stats(request: Request) -> dict[str, object]:
+    """按模式汇总最近终态任务的耗时。
+
+    单独一个接口而不是塞进列表：列表每页只有 20 条且几乎全是十分钟一次的信号
+    扫描，平均时长必须按模式各取最近若干条终态任务，跟分页无关。必须注册在
+    ``/jobs/{job_id}`` 之前，否则 stats 会被当成 job_id。
+    """
+
+    try:
+        return {"data": _job_store(request).market_pool_job_stats()}
+    except (MarketDataStoreError, OSError) as exc:
+        raise HTTPException(status_code=503, detail="策略池任务统计暂不可用") from exc
+
+
 @router.get("/jobs/{job_id}")
 def get_strategy_pool_job(job_id: str, request: Request) -> dict[str, object]:
     state = _pool_job_state(job_id, request)

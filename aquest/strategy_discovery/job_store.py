@@ -333,6 +333,7 @@ def _initial_state(
         "description": description,
         "worker_count": worker_count,
         "created_at": created_at,
+        "started_at": None,
         "finished_at": None,
         "phase": "queued",
         "metadata": {},

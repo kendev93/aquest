@@ -50,6 +50,7 @@ def test_pool_job_submission_single_rerun_history_and_cancel(tmp_path) -> None:
         job_id = created.json()["data"]["job_id"]
         detail = client.get(f"/api/v1/strategy-pool/jobs/{job_id}")
         history = client.get("/api/v1/strategy-pool/jobs")
+        stats = client.get("/api/v1/strategy-pool/jobs/stats")
         cancelled = client.post(f"/api/v1/strategy-pool/jobs/{job_id}/cancel")
         missing = client.post(
             "/api/v1/strategy-pool/jobs",
@@ -59,7 +60,20 @@ def test_pool_job_submission_single_rerun_history_and_cancel(tmp_path) -> None:
     assert created.status_code == 202
     assert detail.status_code == 200
     assert detail.json()["data"]["status"] == "queued"
-    assert history.json()["data"]["items"][0]["job_id"] == job_id
+    payload = history.json()["data"]
+    item = payload["items"][0]
+    assert item["job_id"] == job_id
+    # 排队中的任务既没有 started_at 也没有终态时长，页面据此区分「含排队」与「研究中」。
+    assert item["mode"] == "single"
+    assert item["duration_seconds"] is None
+    assert item["duration_includes_queue"] is True
+    assert item["newly_researched_symbols"] == 0
+    assert item["maximum_parallelism"] is None
+    # /jobs/stats 必须注册在 /jobs/{job_id} 之前，否则 stats 会被当成任务 ID 打成 404。
+    assert stats.status_code == 200
+    stats_payload = stats.json()["data"]
+    assert stats_payload["sample_limit"] == 60
+    assert all(row["samples"] == 0 for row in stats_payload["modes"].values())
     assert cancelled.json()["data"]["cancelled"] is True
     assert missing.status_code == 422
 

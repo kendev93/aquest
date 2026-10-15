@@ -161,6 +161,51 @@ test('per-stock research timers advance and survive page reload', async ({ page 
   expect(await elapsed()).toBeGreaterThanOrEqual(beforeReload)
 })
 
+test('task history shows durations, research split and per-mode averages', async ({ page }) => {
+  const startedAt = Date.now() / 1000 - 3_600
+  await page.addInitScript(() => localStorage.setItem('aquest.strategy-pool.objective', 'annual_return'))
+  await page.route('**/api/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    let data: unknown = {}
+    if (path.endsWith('/strategy-pool/jobs/stats')) {
+      data = { sample_limit: 60, modes: { full: {
+        samples: 3, avg_duration_seconds: 3_600, median_duration_seconds: 3_000, started_at_samples: 3,
+        throughput_samples: 4, avg_seconds_per_symbol: 60, median_seconds_per_symbol: 45, avg_parallelism: 4,
+      } } }
+    } else if (path.endsWith('/strategy-pool/jobs')) {
+      data = { items: [
+        { job_id: 'timed', mode: 'full', status: 'running', created_at: startedAt - 600, started_at: startedAt,
+          total_symbols: 4_000, completed_symbols: 120, skipped_symbols: 20, newly_researched_symbols: 100, maximum_parallelism: 4 },
+        ...Array.from({ length: 8 }, (_, index) => ({ job_id: `scan-${index}`, mode: 'signals', status: 'completed',
+          created_at: Date.now() / 1000 - index, duration_seconds: 30, duration_includes_queue: false, automatic: true })),
+        { job_id: 'old-full', mode: 'full', status: 'cancelled', created_at: 1_700_000_000, automatic: true,
+          duration_seconds: 18_720, duration_includes_queue: true, total_symbols: 4_357, completed_symbols: 3_498,
+          skipped_symbols: 859, newly_researched_symbols: 2_639, failed_symbols: 10, maximum_parallelism: 4 },
+      ] }
+    } else if (path.endsWith('/strategy-pool/jobs/timed')) {
+      data = { job_id: 'timed', status: 'running', created_at: startedAt - 600, started_at: startedAt, metadata: {
+        total_symbols: 4_000, completed_symbols: 120, skipped_symbols: 20, failed_symbols: 0,
+        current_parallelism: 4, maximum_parallelism: 4,
+      } }
+    } else if (path.endsWith('/strategy-pool/entries')) {
+      data = { items: [] }
+    }
+    await route.fulfill({ json: { data } })
+  })
+  await page.goto('/strategy-pool')
+
+  // 后台跟踪每十分钟一条扫描记录：分组之后长跑的全市场任务不会再被挤出列表。
+  await expect(page.getByTestId('pool-history-old-full')).toContainText('耗时 5 小时 12 分钟（含排队）')
+  await expect(page.getByTestId('pool-history-old-full')).toContainText('已完成 3498/4357（新研究 2639 · 复用 859）')
+  await expect(page.getByTestId('pool-history-old-full')).toContainText('自动触发')
+  await expect(page.getByTestId('pool-history-timed')).toContainText('已运行 1 小时')
+  await expect(page.getByTestId('pool-research-pace')).toContainText('平均每只新研究标的 36')
+  await expect(page.getByTestId('pool-research-pace')).toContainText('剩余 3880 只预计还需')
+  await expect(page.getByTestId('pool-history-stats')).toContainText('全市场重选近 3 次完成耗时：中位 50 分钟')
+  await expect(page.getByTestId('pool-history-stats')).toContainText('每只新研究标的中位 45.0 秒（4 轮样本，平均并行 4.0）')
+  await expect(page.getByTestId('pool-history-stats-note')).toContainText('每种任务各取最近 60 次终态记录')
+})
+
 test('pool details are read-only and expose both rules, launch curve and paged trades', async ({ page }) => {
   let posts = 0
   const version = (id: string) => ({ version_id:id,created_at:'2026-09-02T06:00:00+00:00',

@@ -137,6 +137,11 @@ mode=full（全市场任务）从未受单股进度 bug 影响：用户实测均
   A/B 时缩减符号数，种子固定保证同 trial 数。
 - 生产对照：`POST /api/v1/strategy-pool/jobs`（mode=single）+ worker 日志的
   `个股研究阶段耗时` 行 + 任务结果 JSON 里的 `risk_search_runs` 分组元数据。
+- 轮次吞吐量：页面「策略池任务记录」逐条显示耗时与新研究/复用拆分，上方汇总
+  由 `GET /api/v1/strategy-pool/jobs/stats` 按任务类型各取最近 60 条终态记录给
+  平均与中位。每只新研究标的耗时 = 任务时长 ÷（`completed_symbols` −
+  `skipped_symbols`）；时长从 worker 认领（`state_json.started_at`）起算，更早
+  入库的行没有该字段、含排队，页面会标「含排队」，跨版本对比要分开看。
 - 资源采样：`docker stats --no-stream` 每 10-15s（worker/backend 分开）；
   后端请求量用 `docker compose logs backend` 按 URL 聚合计数。
 - 注意：risk_search 阶段有 ±10% 的运行间波动，跨轮对比必须同股同 seed 同

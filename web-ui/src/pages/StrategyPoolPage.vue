@@ -12,6 +12,7 @@ import {
   fetchResearchSettings,
   fetchStrategyPoolEntries,
   fetchStrategyPoolFocus,
+  fetchStrategyPoolJobStats,
   fetchStrategyPoolJobs,
   getStrategyPoolJob,
   removeStrategyPoolFocus,
@@ -29,6 +30,7 @@ import type {
   StrategyPoolHolding,
   StrategyPoolJobResult,
   StrategyPoolJobState,
+  StrategyPoolJobStats,
   StrategyPoolJobSummary,
   StrategyPoolMetrics,
   StrategyPoolMode,
@@ -36,7 +38,7 @@ import type {
   StrategyPoolSignal,
 } from '../types'
 import AppTopbar from '../components/AppTopbar.vue'
-import { formatNumber, formatPercent, formatSignedPercent } from '../utils/format'
+import { formatDuration, formatNumber, formatPercent, formatSignedPercent } from '../utils/format'
 import {
   formatHoldingDays,
   objectiveLabel,
@@ -70,6 +72,7 @@ const entries = ref<StrategyPoolEntry[]>([])
 const focusItems = ref<StrategyPoolFocusItem[]>([])
 const focusPending = ref(false)
 const history = ref<StrategyPoolJobSummary[]>([])
+const historyStats = ref<StrategyPoolJobStats | null>(null)
 const signalResult = ref<StrategyPoolJobResult | null>(null)
 const marketStatus = ref<DataStoreStatus | null>(null)
 const activeJobId = ref('')
@@ -216,6 +219,146 @@ const parallelismText = computed(() => {
   return typeof active === 'number' && typeof maximum === 'number'
     ? `标的并行 ${active} / 最大 ${maximum}${cpuText ? ` · ${cpuText}` : ''} · 内存动态上限 ${typeof memoryLimit === 'number' ? memoryLimit : maximum}${typeof availableMemory === 'number' ? `（可用约 ${availableMemory} MiB）` : ''}`
     : ''
+})
+
+// 运行中的这轮跑得是快还是慢，只有百分比看不出来：按已完成的新研究标的数
+// 外推。分母故意用「completed - 复用」，复用标的不花时间，算进去会假装很快。
+const researchPace = computed(() => {
+  if (activeIntent.value !== 'full') return null
+  const job = activeJob.value
+  const metadata = job?.metadata ?? {}
+  const total = typeof metadata.total_symbols === 'number' ? metadata.total_symbols : 0
+  const completed = typeof metadata.completed_symbols === 'number' ? metadata.completed_symbols : 0
+  const reused = typeof metadata.skipped_symbols === 'number' ? metadata.skipped_symbols : 0
+  const failed = typeof metadata.failed_symbols === 'number' ? metadata.failed_symbols : 0
+  const researched = Math.max(0, completed - reused)
+  const started = researchStartedAt(job?.started_at)
+  const base = started ?? researchStartedAt(job?.created_at)
+  if (base === null || researched < 1 || total <= 0) return null
+  const elapsedSeconds = Math.max(1, (elapsedClock.value - base) / 1000)
+  return {
+    elapsedSeconds,
+    excludesQueue: started !== null,
+    perSymbolSeconds: elapsedSeconds / researched,
+    remainingSymbols: Math.max(0, total - completed - failed),
+  }
+})
+
+const researchPaceText = computed(() => {
+  const pace = researchPace.value
+  if (!pace) return ''
+  const parts = [
+    `已运行 ${formatDuration(pace.elapsedSeconds)}${pace.excludesQueue ? '' : '（含排队）'}`,
+    `平均每只新研究标的 ${formatDuration(pace.perSymbolSeconds)}`,
+  ]
+  if (pace.remainingSymbols > 0) {
+    parts.push(
+      `剩余 ${pace.remainingSymbols} 只预计还需 ${formatDuration(pace.perSymbolSeconds * pace.remainingSymbols)}（队列里剩余的复用标的不会花这么多时间）`,
+    )
+  }
+  return parts.join(' · ')
+})
+
+const POOL_JOB_STATUS_LABELS: Record<string, string> = {
+  queued: '排队中',
+  running: '运行中',
+  completed: '已完成',
+  failed: '失败',
+  cancelled: '已取消',
+}
+
+function poolJobModeLabel(job: StrategyPoolJobSummary): string {
+  if (job.mode === 'full') return job.rebuild ? '全市场重选（清空重建）' : '全市场重选'
+  if (job.mode === 'single') return `${job.market ?? ''} ${job.code ?? ''} 单股重跑`.trim()
+  if (job.mode === 'signals') return '当天信号扫描'
+  return '组合回测'
+}
+
+// 终态任务用后端算好的时长；没跑完的行按页面自己的秒表走，不然列表里正在
+// 研究的那条永远停在「0 分钟」，看不出它到底是卡住了还是刚起步。
+function poolJobDurationText(job: StrategyPoolJobSummary): string {
+  if (!['queued', 'running'].includes(job.status)) {
+    if (typeof job.duration_seconds !== 'number') return ''
+    return `耗时 ${formatDuration(job.duration_seconds)}${job.duration_includes_queue ? '（含排队）' : ''}`
+  }
+  const started = researchStartedAt(job.started_at)
+  const base = started ?? researchStartedAt(job.created_at)
+  if (base === null) return ''
+  const seconds = Math.max(0, (elapsedClock.value - base) / 1000)
+  if (job.status === 'queued') return `已等待 ${formatDuration(seconds)}`
+  return `已运行 ${formatDuration(seconds)}${started === null ? '（含排队）' : ''}`
+}
+
+function poolJobDetailText(job: StrategyPoolJobSummary): string {
+  const parts = [POOL_JOB_STATUS_LABELS[job.status] ?? job.status]
+  const duration = poolJobDurationText(job)
+  if (duration) parts.push(duration)
+  const total = job.total_symbols ?? 0
+  if (total > 0) {
+    parts.push(
+      `已完成 ${job.completed_symbols ?? 0}/${total}（新研究 ${job.newly_researched_symbols ?? 0} · 复用 ${job.skipped_symbols ?? 0}）`,
+    )
+    if (job.failed_symbols) parts.push(`失败 ${job.failed_symbols}`)
+  }
+  if (job.maximum_parallelism) parts.push(`并行 ${job.maximum_parallelism}`)
+  if (job.mode === 'full' || job.mode === 'signals') parts.push(job.automatic ? '自动触发' : '手动触发')
+  if (job.dual_objectives) parts.push('两套目标')
+  // 正在被本页轮询的那条已经有上方进度面板显示阶段，这里只给其它运行中的任务补。
+  if (job.status === 'running' && job.job_id !== activeJobId.value && job.phase_label) {
+    parts.push(job.phase_label)
+  }
+  if (job.error) parts.push(`原因：${job.error}`)
+  return parts.join(' · ')
+}
+
+// 后台跟踪每十分钟写一条信号扫描记录，纯按时间倒序取十条就全是同一句话的扫描，
+// 跑了几小时的全市场研究一条都看不见。分两组各留几条，时间顺序在组内保持。
+const historyGroups = computed(() => {
+  const groups = [
+    {
+      label: '研究与重跑任务（全市场重选 · 单股重跑 · 组合回测）',
+      jobs: history.value.filter((job) => job.mode !== 'signals').slice(0, 4),
+    },
+    {
+      label: '当天信号扫描（后台跟踪每十分钟一条）',
+      jobs: history.value.filter((job) => job.mode === 'signals').slice(0, 5),
+    },
+  ]
+  return groups.filter((group) => group.jobs.length > 0)
+})
+
+const historyStatsText = computed(() => {
+  const modes = historyStats.value?.modes
+  if (!modes) return ''
+  const lines: string[] = []
+  const full = modes.full
+  if (full && full.samples > 0) {
+    lines.push(
+      `全市场重选近 ${full.samples} 次完成耗时：中位 ${formatDuration(full.median_duration_seconds)} · 平均 ${formatDuration(full.avg_duration_seconds)}`,
+    )
+  }
+  if (full && full.throughput_samples > 0) {
+    lines.push(
+      `每只新研究标的中位 ${formatDuration(full.median_seconds_per_symbol)}（${full.throughput_samples} 轮样本，平均并行 ${full.avg_parallelism?.toFixed(1) ?? '—'}）`,
+    )
+  }
+  const signals = modes.signals
+  if (signals && signals.samples > 0) {
+    lines.push(`信号扫描近 ${signals.samples} 次中位 ${formatDuration(signals.median_duration_seconds)}`)
+  }
+  const single = modes.single
+  if (single && single.samples > 0) {
+    lines.push(`单股重跑近 ${single.samples} 次中位 ${formatDuration(single.median_duration_seconds)}`)
+  }
+  return lines.join('；')
+})
+
+const historyStatsNote = computed(() => {
+  const stats = historyStats.value
+  if (!stats || typeof stats.sample_limit !== 'number') return ''
+  const full = stats.modes?.full
+  const missingStart = full && full.samples > 0 ? full.samples - full.started_at_samples : 0
+  return `统计口径：每种任务各取最近 ${stats.sample_limit} 次终态记录；被取消的轮次只计入「每只新研究标的」耗时，不计入完成耗时；失败任务两项都不计。${missingStart > 0 ? `其中 ${missingStart} 次全市场重选没有记录开始时间，时长含排队。` : ''}`
 })
 const buySignals = computed(() => signalResult.value?.buy_signals ?? [])
 const ruleSellSignals = computed(() => signalResult.value?.sell_signals ?? [])
@@ -407,6 +550,7 @@ async function refreshPage(_refreshSignals: boolean): Promise<void> {
     marketStatus.value = nextMarketStatus
     page.value = Math.min(page.value, Math.max(1, Math.ceil(nextEntries.length / pageSize.value)))
     history.value = nextHistory
+    void loadHistoryStats()
     await restoreLatestSignalResult(nextHistory)
   } catch (error) {
     errorMessage.value = apiMessage(error)
@@ -794,6 +938,16 @@ async function loadHistory(): Promise<void> {
   } catch (error) {
     errorMessage.value = apiMessage(error)
   }
+  await loadHistoryStats()
+}
+
+// 统计读不到不影响任务列表本身（例如后端还没有这个路由），单独吞掉错误。
+async function loadHistoryStats(): Promise<void> {
+  try {
+    historyStats.value = await fetchStrategyPoolJobStats()
+  } catch {
+    historyStats.value = null
+  }
 }
 
 async function activateQueuedSingleRerun(): Promise<boolean> {
@@ -1132,6 +1286,7 @@ onUnmounted(() => {
             <div class="progress-heading"><strong>{{ activeIntent === 'signals' ? '正在扫描当天信号' : activeIntent === 'portfolio' ? '组合回测任务进行中' : activeIntent === 'single' ? '正在重跑单只股票' : '全市场研究进行中' }}</strong><strong>{{ progressPercent }}%</strong></div>
             <div class="progress-track"><span :style="{ width: `${progressPercent}%` }"></span></div>
             <p v-if="progressCountText" class="progress-count" data-testid="pool-progress-count">{{ progressCountText }}</p>
+            <p v-if="researchPaceText" class="progress-count" data-testid="pool-research-pace">{{ researchPaceText }}</p>
             <div v-if="activeTickerProgress.length" class="active-ticker-progress" data-testid="pool-active-ticker-progress" role="list" aria-label="正在研究的标的进度">
               <div v-for="item in activeTickerProgress" :key="item.symbol" class="active-ticker-progress-row" :data-testid="`pool-active-symbol-${item.symbol}`" role="listitem">
                 <div class="active-ticker-progress-heading"><strong>{{ item.symbol }}<template v-if="item.name"> · {{ item.name }}</template></strong><span>{{ item.phaseLabel }} · {{ Math.round(item.progress * 100) }}%<span class="ticker-elapsed" :data-testid="`pool-elapsed-${item.symbol}`"> · 耗时 {{ formatResearchElapsed(item.startedAt) }}</span></span></div>
@@ -1294,8 +1449,13 @@ onUnmounted(() => {
 
         <section class="pool-history panel-card">
           <div class="section-heading"><div><p class="eyebrow">TASK HISTORY</p><h2>策略池任务记录</h2></div><button class="text-button" @click="loadHistory">刷新</button></div>
-          <div v-if="history.length" class="history-list">
-            <div v-for="job in history.slice(0, 10)" :key="job.job_id" class="history-row"><strong>{{ job.mode === 'full' ? '全市场重选' : job.mode === 'single' ? `${job.market} ${job.code} 单股重跑` : job.mode === 'signals' ? '当天信号扫描' : `${job.mode} 组合回测` }}</strong><span>{{ job.status }} · {{ job.completed_symbols ?? 0 }}/{{ job.total_symbols ?? '—' }} 只完成 · 跳过 {{ job.skipped_symbols ?? 0 }} · 失败 {{ job.failed_symbols ?? 0 }}</span><small>{{ formatTimestamp(job.created_at) }}</small></div>
+          <p v-if="historyStatsText" class="progress-count" data-testid="pool-history-stats">{{ historyStatsText }}</p>
+          <p v-if="historyStatsNote" class="pool-scale-note" data-testid="pool-history-stats-note">{{ historyStatsNote }}</p>
+          <div v-if="historyGroups.length" class="history-groups">
+            <div v-for="group in historyGroups" :key="group.label" class="history-group">
+              <p class="history-group-label">{{ group.label }}</p>
+              <div v-for="job in group.jobs" :key="job.job_id" class="history-row" :data-testid="`pool-history-${job.job_id}`"><strong>{{ poolJobModeLabel(job) }}</strong><span>{{ poolJobDetailText(job) }}</span><small>{{ formatTimestamp(job.created_at) }}</small></div>
+            </div>
           </div>
           <p v-else class="empty-copy">完成或启动的任务会保存在本地历史中。取消任务后，再次全量重选会继续复用已完成标的。</p>
         </section>
@@ -1354,7 +1514,10 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .section-heading h2 span { color: #18c467; }
 .signal-panel { min-height: 180px; }
 .signal-panel .section-heading small { color: #899ab3; white-space: nowrap; }
-.signal-list, .history-list { display: grid; gap: 8px; }
+.signal-list { display: grid; gap: 8px; }
+.history-groups, .history-group { display: grid; gap: 8px; }
+.history-groups { gap: 16px; }
+.history-group-label { margin: 0; color: #8798b1; font-size: .82rem; }
 .signal-pagination { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 12px; color: #91a1b8; font-size: .82rem; }
 .signal-pagination .button-secondary { padding: 6px 9px; font-size: .82rem; }
 .signal-row, .history-row { display: grid; gap: 5px; padding: 10px 12px; border-left: 3px solid #18c467; background: #111c30; }

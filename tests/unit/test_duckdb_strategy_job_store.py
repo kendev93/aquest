@@ -206,3 +206,195 @@ def test_market_pool_history_keeps_running_research_above_tracking_noise(tmp_pat
     # 终态历史照常按时间倒序补位，不再被活跃任务挤占名额。
     terminal = [item["job_id"] for item in page["items"] if item["status"] != "running"]
     assert terminal == [f"tracking-{index:02d}" for index in range(24, 5, -1)]
+
+
+def _finish_pool_job(
+    store: DuckDbStrategyJobStore,
+    job_id: str,
+    *,
+    mode: str,
+    status: str,
+    started_at: float,
+    finished_at: float,
+    completed: int,
+    skipped: int,
+    parallelism: int,
+) -> None:
+    """按显式时间戳落一条终态任务，模拟 worker 跑完（或中途取消）之后的样子。"""
+
+    operation = "market_strategy_pool_tracking" if mode == "signals" else "market_strategy_pool"
+    store.create(job_id, operation=operation, payload={"mode": mode}, description="策略池")
+    store.update(
+        job_id,
+        status=status,
+        started_at=started_at,
+        finished_at=finished_at,
+        metadata={
+            "completed_symbols": completed,
+            "skipped_symbols": skipped,
+            "total_symbols": max(completed, 1),
+            "maximum_parallelism": parallelism,
+        },
+    )
+
+
+def test_market_pool_history_exposes_duration_and_research_split(tmp_path) -> None:
+    """记录只写「X/Y 只完成」，看不出这轮跑了多久、其中几只是真研究。
+
+    completed_symbols 把复用标的也算进去了，页面必须有 duration_seconds 和
+    newly_researched_symbols 才能回答「全市场重选到底多慢」。
+    """
+
+    store = _store(tmp_path)
+    store.create(
+        "full-1",
+        operation="market_strategy_pool",
+        payload={"mode": "full"},
+        description="全市场策略池研究",
+    )
+    assert store.claim_next("pool-worker") == "full-1"
+    claimed = store.read_state("full-1")
+    assert claimed is not None and claimed["started_at"] is not None
+    store.update_from_worker(
+        "full-1",
+        "pool-worker",
+        metadata={
+            "completed_symbols": 30,
+            "skipped_symbols": 20,
+            "failed_symbols": 2,
+            "total_symbols": 100,
+            "maximum_parallelism": 4,
+            "phase_label": "规则 3/7 · 搜索止损、止盈和冷却参数",
+        },
+    )
+    store.write_result_from_worker("full-1", "pool-worker", {})
+
+    item = next(
+        row
+        for row in store.list_market_strategy_pool_history()["items"]
+        if row["job_id"] == "full-1"
+    )
+    assert item["newly_researched_symbols"] == 10
+    assert item["maximum_parallelism"] == 4
+    assert item["phase_label"] == "规则 3/7 · 搜索止损、止盈和冷却参数"
+    assert item["automatic"] is False
+    assert item["duration_includes_queue"] is False
+    duration = item["duration_seconds"]
+    assert isinstance(duration, float) and duration >= 0.0
+
+    # 认领过的任务才有 started_at；更早入库的行只能从创建时间起算，时长含排队，
+    # 必须用 duration_includes_queue 把口径标出来，否则页面会把排队说成研究耗时。
+    store.create(
+        "legacy-1",
+        operation="market_strategy_pool",
+        payload={"mode": "full"},
+        description="全市场策略池研究",
+    )
+    store.update(
+        "legacy-1",
+        status="cancelled",
+        created_at=1_000.0,
+        finished_at=4_000.0,
+        metadata={"completed_symbols": 8, "skipped_symbols": 3},
+    )
+    legacy = next(
+        row
+        for row in store.list_market_strategy_pool_history()["items"]
+        if row["job_id"] == "legacy-1"
+    )
+    assert legacy["duration_seconds"] == 3_000.0
+    assert legacy["duration_includes_queue"] is True
+    assert legacy["newly_researched_symbols"] == 5
+    assert legacy["maximum_parallelism"] is None
+
+
+def test_market_pool_history_stats_average_only_counts_finished_runs(tmp_path) -> None:
+    """平均完成时长只取跑完的轮次；取消的半截任务进吞吐样本，失败任务两个都不进。"""
+
+    store = _store(tmp_path)
+    _finish_pool_job(
+        store,
+        "full-20m",
+        mode="full",
+        status="completed",
+        started_at=1_000.0,
+        finished_at=2_200.0,
+        completed=120,
+        skipped=100,
+        parallelism=4,
+    )
+    _finish_pool_job(
+        store,
+        "full-40m",
+        mode="full",
+        status="completed",
+        started_at=1_000.0,
+        finished_at=3_400.0,
+        completed=220,
+        skipped=100,
+        parallelism=4,
+    )
+    _finish_pool_job(
+        store,
+        "full-60m",
+        mode="full",
+        status="completed",
+        started_at=1_000.0,
+        finished_at=4_600.0,
+        completed=400,
+        skipped=280,
+        parallelism=2,
+    )
+    # 15 分钟只研究了 10 只就被取消：总时长不算进平均，每只 90 秒算进吞吐。
+    _finish_pool_job(
+        store,
+        "full-cancelled",
+        mode="full",
+        status="cancelled",
+        started_at=1_000.0,
+        finished_at=1_900.0,
+        completed=18,
+        skipped=8,
+        parallelism=4,
+    )
+    _finish_pool_job(
+        store,
+        "full-failed",
+        mode="full",
+        status="failed",
+        started_at=1_000.0,
+        finished_at=6_000.0,
+        completed=1,
+        skipped=0,
+        parallelism=8,
+    )
+    _finish_pool_job(
+        store,
+        "signals-1",
+        mode="signals",
+        status="completed",
+        started_at=1_000.0,
+        finished_at=1_030.0,
+        completed=2,
+        skipped=0,
+        parallelism=1,
+    )
+
+    stats = store.market_pool_job_stats()
+
+    assert stats["sample_limit"] == 60
+    full = stats["modes"]["full"]
+    assert full["samples"] == 3
+    assert full["avg_duration_seconds"] == 2_400.0
+    assert full["median_duration_seconds"] == 2_400.0
+    assert full["started_at_samples"] == 3
+    # 每只新研究标的：60、20、30、90 秒
+    assert full["throughput_samples"] == 4
+    assert full["avg_seconds_per_symbol"] == 50.0
+    assert full["median_seconds_per_symbol"] == 45.0
+    assert full["avg_parallelism"] == 3.5
+    assert stats["modes"]["signals"]["samples"] == 1
+    assert stats["modes"]["signals"]["avg_duration_seconds"] == 30.0
+    assert stats["modes"]["single"]["samples"] == 0
+    assert stats["modes"]["single"]["avg_duration_seconds"] is None
+    assert stats["modes"]["single"]["throughput_samples"] == 0

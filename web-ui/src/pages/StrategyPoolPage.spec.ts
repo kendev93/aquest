@@ -4,7 +4,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import * as api from '../api/strategyPool'
 import * as marketDataApi from '../api/marketData'
 
-import type { StrategyPoolCandidate, StrategyPoolEntry, StrategyPoolMetrics, StrategyPoolSignal } from '../types'
+import type {
+  StrategyPoolCandidate,
+  StrategyPoolEntry,
+  StrategyPoolJobSummary,
+  StrategyPoolMetrics,
+  StrategyPoolSignal,
+} from '../types'
 import StrategyPoolPage from './StrategyPoolPage.vue'
 import { ApiError } from '../api/client'
 
@@ -17,6 +23,7 @@ vi.mock('../api/strategyPool', () => ({
   fetchStrategyPoolEntries: vi.fn(),
   fetchStrategyPoolFocus: vi.fn(),
   fetchStrategyPoolJobs: vi.fn(),
+  fetchStrategyPoolJobStats: vi.fn(),
   getStrategyPoolJob: vi.fn(),
   removeStrategyPoolFocus: vi.fn(),
   saveResearchSettings: vi.fn(),
@@ -375,23 +382,152 @@ describe('StrategyPoolPage', () => {
     expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('历史样本不足')
   })
 
-  it('shows at most ten task history rows without manual result loading or pooled holdout UI', async () => {
+  it('splits task history into research and signal-scan groups so long runs stay visible', async () => {
     window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
-    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValue(Array.from({ length: 12 }, (_, index) => ({
-      job_id: `job-${index}`,
-      status: 'completed',
-      mode: 'single',
-      market: 'SH',
-      code: `6000${String(index).padStart(2, '0')}`,
-      created_at: index,
-    })))
+    const rows = (mode: 'single' | 'signals', count: number): StrategyPoolJobSummary[] =>
+      Array.from({ length: count }, (_, index) => ({
+        job_id: `${mode}-${index}`,
+        status: 'completed',
+        mode,
+        market: 'SH',
+        code: `6000${String(index).padStart(2, '0')}`,
+        created_at: index,
+      }))
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValue([
+      ...rows('signals', 8),
+      ...rows('single', 8),
+    ])
 
     const wrapper = mount(StrategyPoolPage)
     await flushPromises()
 
-    expect(wrapper.findAll('.history-row')).toHaveLength(10)
+    // 后台跟踪每十分钟写一条扫描记录：不分组的话十条里十条是同一句话的扫描，
+    // 跑了几小时的全市场重选一条都看不见。
+    const groups = wrapper.findAll('.history-group')
+    expect(groups).toHaveLength(2)
+    expect(groups[0]?.text()).toContain('研究与重跑任务')
+    expect(groups[0]?.findAll('.history-row')).toHaveLength(4)
+    expect(groups[1]?.text()).toContain('当天信号扫描')
+    expect(groups[1]?.findAll('.history-row')).toHaveLength(5)
+    expect(wrapper.findAll('.history-row')).toHaveLength(9)
     expect(wrapper.text()).not.toContain('组合留出段验证')
     expect(wrapper.text()).not.toContain('载入结果')
+  })
+
+  it('shows duration, research split and parallelism on every task history row', async () => {
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValue([{
+      job_id: 'full-1',
+      status: 'completed',
+      mode: 'full',
+      created_at: 1_700_000_000,
+      duration_seconds: 18_720,
+      duration_includes_queue: false,
+      completed_symbols: 3_498,
+      skipped_symbols: 859,
+      newly_researched_symbols: 2_639,
+      failed_symbols: 10,
+      total_symbols: 4_357,
+      maximum_parallelism: 4,
+      automatic: false,
+    }])
+
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    const row = wrapper.get('[data-testid="pool-history-full-1"]').text()
+    expect(row).toContain('全市场重选')
+    expect(row).toContain('已完成 · 耗时 5 小时 12 分钟')
+    // completed_symbols 把复用也算进去了，只说「3498 只完成」看不出真研究了几只。
+    expect(row).toContain('已完成 3498/4357（新研究 2639 · 复用 859）')
+    expect(row).toContain('失败 10')
+    expect(row).toContain('并行 4')
+    expect(row).toContain('手动触发')
+    expect(row).not.toContain('含排队')
+  })
+
+  it('marks durations that had to include queue time', async () => {
+    // started_at 是 worker 认领时才写的；在那之前入库的任务只能从创建时间起算。
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValue([{
+      job_id: 'full-old',
+      status: 'cancelled',
+      mode: 'full',
+      created_at: 1_700_000_000,
+      duration_seconds: 3_600,
+      duration_includes_queue: true,
+      newly_researched_symbols: 40,
+      automatic: true,
+    }])
+
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    const row = wrapper.get('[data-testid="pool-history-full-old"]').text()
+    expect(row).toContain('已取消')
+    expect(row).toContain('耗时 1 小时（含排队）')
+    expect(row).toContain('自动触发')
+  })
+
+  it('summarizes recent task durations by mode above the history list', async () => {
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolJobStats).mockResolvedValue({
+      sample_limit: 60,
+      modes: {
+        full: {
+          samples: 5,
+          avg_duration_seconds: 3_000,
+          median_duration_seconds: 2_400,
+          started_at_samples: 3,
+          throughput_samples: 6,
+          avg_seconds_per_symbol: 40,
+          median_seconds_per_symbol: 36,
+          avg_parallelism: 3.5,
+        },
+        single: {
+          samples: 0,
+          avg_duration_seconds: null,
+          median_duration_seconds: null,
+          started_at_samples: 0,
+          throughput_samples: 0,
+          avg_seconds_per_symbol: null,
+          median_seconds_per_symbol: null,
+          avg_parallelism: null,
+        },
+        signals: {
+          samples: 60,
+          avg_duration_seconds: 30,
+          median_duration_seconds: 26,
+          started_at_samples: 60,
+          throughput_samples: 60,
+          avg_seconds_per_symbol: 13,
+          median_seconds_per_symbol: 12,
+          avg_parallelism: 1,
+        },
+        portfolio: {
+          samples: 0,
+          avg_duration_seconds: null,
+          median_duration_seconds: null,
+          started_at_samples: 0,
+          throughput_samples: 0,
+          avg_seconds_per_symbol: null,
+          median_seconds_per_symbol: null,
+          avg_parallelism: null,
+        },
+      },
+    })
+
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    const stats = wrapper.get('[data-testid="pool-history-stats"]').text()
+    expect(stats).toContain('全市场重选近 5 次完成耗时：中位 40 分钟 · 平均 50 分钟')
+    expect(stats).toContain('每只新研究标的中位 36.0 秒（6 轮样本，平均并行 3.5）')
+    expect(stats).toContain('信号扫描近 60 次中位 26.0 秒')
+    expect(stats).not.toContain('单股重跑')
+    const note = wrapper.get('[data-testid="pool-history-stats-note"]').text()
+    expect(note).toContain('每种任务各取最近 60 次终态记录')
+    expect(note).toContain('其中 2 次全市场重选没有记录开始时间')
   })
 
   it('shows task history timestamps in China time, not the browser zone', async () => {
@@ -1100,6 +1236,40 @@ describe('StrategyPoolPage', () => {
     ).toContain('SH:600000 · 浦发银行')
     expect(wrapper.get('[data-testid="pool-active-symbol-SH:600000"]').text()).toContain('37%')
     expect(wrapper.get('[data-testid="pool-active-symbol-SH:600000"] [role="progressbar"]').attributes('aria-valuenow')).toBe('37')
+  })
+
+  it('extrapolates the remaining full-market research time from symbols actually researched', async () => {
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValueOnce([
+      { job_id: 'full-1', status: 'running', mode: 'full' },
+    ])
+    // 一小时前被 worker 认领，创建时间还要早半小时：耗时从 started_at 起算，
+    // 分母只算真研究了的那 100 只（120 完成里有 20 只是复用，几乎不花时间）。
+    const startedAt = Date.now() / 1000 - 3_600
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({
+      job_id: 'full-1',
+      status: 'running',
+      progress: 0.03,
+      created_at: startedAt - 1_800,
+      started_at: startedAt,
+      metadata: {
+        total_symbols: 4_000,
+        completed_symbols: 120,
+        skipped_symbols: 20,
+        failed_symbols: 0,
+        current_parallelism: 4,
+        maximum_parallelism: 4,
+      },
+    })
+
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    const pace = wrapper.get('[data-testid="pool-research-pace"]').text()
+    expect(pace).toContain('已运行 1 小时')
+    expect(pace).toContain('平均每只新研究标的 36.0 秒')
+    expect(pace).toContain('剩余 3880 只预计还需 38 小时 48 分钟')
+    expect(pace).not.toContain('含排队')
   })
 
   it('queues a row rerun behind the active signal scan without replacing its progress', async () => {
