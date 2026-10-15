@@ -38,16 +38,14 @@ import type {
 import AppTopbar from '../components/AppTopbar.vue'
 import { formatNumber, formatPercent, formatSignedPercent } from '../utils/format'
 import {
-  entryIsHeld,
-  entryStatus,
   formatHoldingDays,
-  metricValue,
   objectiveLabel,
+  sortPoolEntriesByMetric,
   sortPoolEntriesByStatus,
-  statusOrder,
   symbol,
   type StrategyPoolMetricColumn,
   type StrategyPoolSortColumn,
+  type StrategyPoolSortDirection,
 } from '../utils/strategyPoolStatus'
 import { formatChinaTimestamp } from '../utils/time'
 
@@ -99,6 +97,9 @@ const market = ref<'SH' | 'SZ'>('SH')
 const code = ref('')
 const searchQuery = ref('')
 const sortColumn = ref<StrategyPoolSortColumn>('status')
+// 'status' 档就是「未点任何指标列」的默认分组，也是取消排序落回的地方，
+// 因此方向只在指标列档位生效。
+const sortDirection = ref<StrategyPoolSortDirection>('desc')
 // 买卖信号列表的显示排序（2026-10-13 用户需求）：后端返回顺序对跟踪增量结果是按
 // 证券代码的，这里允许按行内展示的全区间指标重排。'default' 表示保持返回顺序。
 const SIGNAL_SORT_OPTIONS = [
@@ -283,15 +284,18 @@ const filteredEntries = computed(() => {
 const signalStates = computed(() => signalResult.value?.states ?? [])
 
 const sortedEntries = computed(() => {
-  const rows = [...filteredEntries.value]
   const metric = sortColumn.value
   if (metric === 'status') {
-    return sortPoolEntriesByStatus(rows, signalStates.value, heldSymbols.value, objective.value)
+    return sortPoolEntriesByStatus(filteredEntries.value, signalStates.value, heldSymbols.value, objective.value)
   }
-  return rows.sort((a, b) => {
-    const byMetric = metricValue(b, metric, objective.value) - metricValue(a, metric, objective.value)
-    return byMetric || statusOrder(entryStatus(a, signalStates.value), entryIsHeld(a, heldSymbols.value)) - statusOrder(entryStatus(b, signalStates.value), entryIsHeld(b, heldSymbols.value)) || symbol(a).localeCompare(symbol(b))
-  })
+  return sortPoolEntriesByMetric(
+    filteredEntries.value,
+    metric,
+    sortDirection.value,
+    signalStates.value,
+    heldSymbols.value,
+    objective.value,
+  )
 })
 const totalPages = computed(() => Math.max(1, Math.ceil(sortedEntries.value.length / pageSize.value)))
 const pageEntries = computed(() => {
@@ -319,6 +323,7 @@ const listContext = computed(() => new URLSearchParams({
   objective: objective.value ?? 'annual_return',
   search: searchQuery.value,
   sort: sortColumn.value,
+  dir: sortDirection.value,
   page: String(page.value),
   pageSize: String(pageSize.value),
 }).toString())
@@ -825,8 +830,15 @@ async function cancelCurrentJob(): Promise<void> {
   }
 }
 
+// 列头三态循环：高→低 → 低→高 → 取消排序（回到默认的按状态分组）。
+// 点别的列直接从高→低开始，不让上一列的方向状态串到新的一列。
 function setSort(column: StrategyPoolMetricColumn): void {
-  sortColumn.value = column
+  if (sortColumn.value !== column || sortDirection.value === 'asc') {
+    sortColumn.value = sortColumn.value === column ? 'status' : column
+    sortDirection.value = 'desc'
+  } else {
+    sortDirection.value = 'asc'
+  }
   page.value = 1
 }
 
@@ -989,6 +1001,8 @@ async function initialize(): Promise<void> {
   pageSize.value = Number(params.get('pageSize') ?? 50)
   const sort = params.get('sort')
   if (['status','strategy_return','annual_return','sharpe','win_rate','payoff_ratio','max_drawdown','avg_holding_days','benchmark_return','created_return'].includes(sort ?? '')) sortColumn.value = sort as typeof sortColumn.value
+  // 方向只认 asc，其余一律回到高→低；sort 已经是 status（取消排序）时方向不参与排序。
+  sortDirection.value = params.get('dir') === 'asc' ? 'asc' : 'desc'
   const stored = params.get('objective') ?? window.localStorage.getItem(OBJECTIVE_STORAGE_KEY)
   if (stored === 'annual_return' || stored === 'sharpe') {
     objective.value = stored
@@ -1228,6 +1242,7 @@ onUnmounted(() => {
         <section class="pool-table-section panel-card">
           <div class="section-heading"><div><p class="eyebrow">DAILY STATUS</p><h2>全市场标的状态 <span>{{ entries.length.toLocaleString() }}</span></h2></div><span>{{ loading ? '正在读取策略池…' : `按${objectiveLabel(objective)}策略决策` }}</span></div>
           <p class="pool-scale-note">收益、年化、夏普、胜率、盈亏比、最大回撤均为该策略在完整历史区间实际回放（全区间）的指标；平均持仓天数为全区间已平仓交易按股数加权的平均持有天数，用于估算买入后大致需要持有多久。旧候选会在下次全市场重选时补算。策略的选择与排序目标仍按验证段年化/夏普决策，避免用未来数据选策略。全段基准显示个股买入持有涨跌；验证和留出分别用同区间基准计算总收益超额。</p>
+          <p class="pool-scale-note">列头排序三态循环：点一次按这一列从高到低，再点从低到高，第三次取消排序、回到默认的按状态分组；点别的列直接从高到低开始。排序只改显示顺序，取不到这一列指标的标的（无可用策略、创建至今待初始化或更新失败）无论升降都排在末尾。</p>
           <div class="pool-search-row">
             <label class="pool-search">搜索标的
               <input v-model="searchQuery" type="search" placeholder="输入证券代码或中文名称" data-testid="pool-entry-search" @input="page = 1">
@@ -1242,6 +1257,7 @@ onUnmounted(() => {
             :follow-keys="followKeys"
             testid="pool"
             :sort-column="sortColumn"
+            :sort-direction="sortDirection"
             :follow-busy="focusPending"
             :queued-symbol="queuedSingleSymbol"
             :busy="isBusy"

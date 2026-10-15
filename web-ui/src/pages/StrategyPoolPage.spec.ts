@@ -297,6 +297,48 @@ describe('StrategyPoolPage', () => {
     expect(wrapper.findAll('tbody tr')[0]?.text()).toContain('600000')
   })
 
+  it('cycles a metric column through 高→低, 低→高 and back to the status grouping', async () => {
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    // 全区间收益：600000 = 0.72，600001 = 0.36；默认档按状态分组，600000 触发买入在前。
+    const rowCodes = () => wrapper
+      .findAll('[data-testid^="pool-row-"]')
+      .map((row) => row.attributes('data-testid')?.replace('pool-row-', ''))
+    const sortButton = () => wrapper.get('[data-testid="pool-sort-strategy_return"]')
+
+    expect(sortButton().text()).toBe('策略收益')
+    expect(rowCodes()).toEqual(['600000', '600001'])
+
+    await sortButton().trigger('click')
+    expect(sortButton().text()).toBe('策略收益 ↓')
+    expect(rowCodes()).toEqual(['600000', '600001'])
+
+    await sortButton().trigger('click')
+    expect(sortButton().text()).toBe('策略收益 ↑')
+    expect(rowCodes()).toEqual(['600001', '600000'])
+
+    await sortButton().trigger('click')
+    expect(sortButton().text()).toBe('策略收益')
+    expect(rowCodes()).toEqual(['600000', '600001'])
+  })
+
+  it('restores the ascending direction from the list query so 返回 keeps the column order', async () => {
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    window.history.replaceState({}, '', '/strategy-pool?objective=annual_return&sort=strategy_return&dir=asc')
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="pool-sort-strategy_return"]').text()).toBe('策略收益 ↑')
+    expect(wrapper.findAll('[data-testid^="pool-row-"]')[0]?.attributes('data-testid'))
+      .toBe('pool-row-600001')
+    // 进详情时把方向一起带过去，返回列表不会掉回高→低。
+    expect(wrapper.get('[data-testid="pool-detail-600000"]').attributes('href')).toContain('dir%3Dasc')
+
+    window.history.replaceState({}, '', '/strategy-pool')
+  })
+
   it('searches the status table by code and Chinese stock name', async () => {
     window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
     const wrapper = mount(StrategyPoolPage)

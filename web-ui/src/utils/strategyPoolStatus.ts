@@ -20,6 +20,9 @@ export type StrategyPoolSortColumn =
 
 export type StrategyPoolMetricColumn = Exclude<StrategyPoolSortColumn, 'status'>
 
+/** 列头点击在 高→低 / 低→高 / 取消排序（回到 'status' 档）之间循环。 */
+export type StrategyPoolSortDirection = 'asc' | 'desc'
+
 export interface PoolJobStateContext {
   queuedSymbol: string
   busy: boolean
@@ -80,21 +83,27 @@ export function statusLabel(value: string): string {
   }[value] ?? value
 }
 
-export function metricValue(
+export function metricRawValue(
   entry: StrategyPoolEntry,
   key: StrategyPoolMetricColumn,
   objective: StrategyPoolObjective | null,
-): number {
-  if (key === 'created_return') return entry.created_return ?? Number.NEGATIVE_INFINITY
-  if (key === 'benchmark_return') {
-    return benchmarkReturn(entry) ?? Number.NEGATIVE_INFINITY
-  }
+): number | null {
+  if (key === 'created_return') return entry.created_return ?? null
+  if (key === 'benchmark_return') return benchmarkReturn(entry)
   const candidate = entry.active_candidate
     ?? (objective ? entry.automatic_candidates[objective] : null)
   // 表格展示统一用全区间实际回放口径；验证段指标只在策略选择时使用。
   const metricKey = key === 'strategy_return' ? 'total_return' : key
   const value = candidate?.metrics?.full_period?.[metricKey]
-  return typeof value === 'number' && Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+export function metricValue(
+  entry: StrategyPoolEntry,
+  key: StrategyPoolMetricColumn,
+  objective: StrategyPoolObjective | null,
+): number {
+  return metricRawValue(entry, key, objective) ?? Number.NEGATIVE_INFINITY
 }
 
 export function benchmarkReturn(entry: StrategyPoolEntry): number | null {
@@ -136,6 +145,36 @@ export function sortPoolEntriesByStatus(
       || metricValue(b, objective ?? 'annual_return', objective)
         - metricValue(a, objective ?? 'annual_return', objective)
       || symbol(a).localeCompare(symbol(b))
+  })
+}
+
+/**
+ * 表格按指标列排序：方向可升可降，同值时仍按状态优先级、证券代码兜底。
+ * 取不到值的标的（无候选、创建至今待初始化或更新失败）无论升降都排在末尾——
+ * 否则升序会把几千只没有策略的票顶到第一页，等于没排。
+ */
+export function sortPoolEntriesByMetric(
+  rows: StrategyPoolEntry[],
+  metric: StrategyPoolMetricColumn,
+  direction: StrategyPoolSortDirection,
+  states: StrategyPoolSignal[],
+  heldKeys: Set<string>,
+  objective: StrategyPoolObjective | null,
+): StrategyPoolEntry[] {
+  const byStatusThenSymbol = (a: StrategyPoolEntry, b: StrategyPoolEntry): number =>
+    statusOrder(entryStatus(a, states), entryIsHeld(a, heldKeys))
+      - statusOrder(entryStatus(b, states), entryIsHeld(b, heldKeys))
+      || symbol(a).localeCompare(symbol(b))
+  const sign = direction === 'asc' ? 1 : -1
+
+  return [...rows].sort((a, b) => {
+    const valueA = metricRawValue(a, metric, objective)
+    const valueB = metricRawValue(b, metric, objective)
+    if (valueA === null || valueB === null) {
+      if (valueA === null && valueB === null) return byStatusThenSymbol(a, b)
+      return valueA === null ? 1 : -1
+    }
+    return sign * (valueA - valueB) || byStatusThenSymbol(a, b)
   })
 }
 

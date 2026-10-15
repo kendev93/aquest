@@ -82,6 +82,26 @@ describe('StrategyPoolEntryTable', () => {
     expect(fixed.get('thead').text()).toContain('平均持仓')
   })
 
+  it('marks the active sort direction on one column and hints the next click', () => {
+    const descending = mountTable({ sortColumn: 'sharpe' as const, sortDirection: 'desc' as const })
+    expect(descending.get('[data-testid="pool-sort-sharpe"]').text()).toBe('夏普 ↓')
+    expect(descending.get('[data-testid="pool-sort-sharpe"]').attributes('title'))
+      .toBe('当前按夏普从高到低排序；点击改为低→高，再点取消排序回到按状态分组')
+    // 非活动列不带方向箭头，但提示里说明三态循环怎么走。
+    expect(descending.get('[data-testid="pool-sort-annual_return"]').text()).toBe('年化')
+    expect(descending.get('[data-testid="pool-sort-annual_return"]').attributes('title'))
+      .toBe('点击按年化从高到低排序；再点改为低→高，第三次取消排序')
+
+    const ascending = mountTable({ sortColumn: 'sharpe' as const, sortDirection: 'asc' as const })
+    expect(ascending.get('[data-testid="pool-sort-sharpe"]').text()).toBe('夏普 ↑')
+    expect(ascending.get('[data-testid="pool-sort-sharpe"]').attributes('title'))
+      .toBe('当前按夏普从低到高排序；点击取消排序，回到按状态分组')
+
+    // 取消排序回到 status 档：所有列头都不再显示箭头。
+    const unsorted = mountTable({ sortColumn: 'status' as const, sortDirection: 'asc' as const })
+    expect(unsorted.get('[data-testid="pool-sort-sharpe"]').text()).toBe('夏普')
+  })
+
   it('marks followed rows and emits the row the user acted on', async () => {
     const wrapper = mountTable({ followKeys: new Set(['SH600000']) })
 

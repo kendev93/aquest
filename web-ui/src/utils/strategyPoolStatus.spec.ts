@@ -6,10 +6,12 @@ import {
   entryIsHeld,
   entryStatus,
   formatHoldingDays,
+  metricRawValue,
   metricValue,
   objectiveLabel,
   rerunEntryDisabled,
   rerunEntryTitle,
+  sortPoolEntriesByMetric,
   sortPoolEntriesByStatus,
   statusLabel,
   statusOrder,
@@ -92,6 +94,10 @@ describe('strategyPoolStatus', () => {
     expect(metricValue(row, 'annual_return', 'annual_return')).toBe(0.19)
     expect(metricValue(row, 'sharpe', 'annual_return')).toBe(Number.NEGATIVE_INFINITY)
     expect(metricValue(entry('600000', { created_return: 0.1 }), 'created_return', 'sharpe')).toBe(0.1)
+    // 取不到值时原始口径给出 null，排序用它把缺值标的沉底；metricValue 仍返回 -Infinity 供表格兜底显示。
+    expect(metricRawValue(row, 'sharpe', 'annual_return')).toBeNull()
+    expect(metricRawValue(row, 'created_return', 'annual_return')).toBeNull()
+    expect(metricRawValue(row, 'annual_return', 'annual_return')).toBe(0.19)
     expect(benchmarkReturn(row)).toBe(0.5)
     expect(benchmarkReturn(entry('600000', { benchmark: null }))).toBeNull()
     expect(tradeCount(candidate, 'validation')).toBe(12)
@@ -112,6 +118,29 @@ describe('strategyPoolStatus', () => {
     expect(entryIsHeld(buy, held)).toBe(false)
     // 不改动入参数组：调用方还在用同一份 entries。
     expect(input.map(symbol)).toEqual(['SH600002', 'SH600001'])
+  })
+
+  it('sorts a metric column in both directions and keeps rows without the metric last', () => {
+    const high = entry('600001', { created_return: 0.3 })
+    const low = entry('600002', { created_return: 0.1 })
+    // 创建至今收益还没初始化（待重跑或更新失败）的标的。
+    const waiting = entry('600003', { created_return: null })
+    const states = [state('600001', 'buy')]
+    const held = new Set<string>()
+    const input = [waiting, low, high]
+    const orderOf = (direction: 'asc' | 'desc') => sortPoolEntriesByMetric(
+      input, 'created_return', direction, states, held, 'annual_return',
+    ).map(symbol)
+
+    expect(orderOf('desc')).toEqual(['SH600001', 'SH600002', 'SH600003'])
+    // 升序只翻转指标高低，缺值仍然沉底：否则第一页全是还没有策略的票。
+    expect(orderOf('asc')).toEqual(['SH600002', 'SH600001', 'SH600003'])
+    // 同值时仍按状态优先级兜底，与 status 档共用一条兜底链。
+    expect(sortPoolEntriesByMetric(
+      [entry('600010', { created_return: 0.3 }), high],
+      'created_return', 'asc', states, held, 'annual_return',
+    ).map(symbol)).toEqual(['SH600001', 'SH600010'])
+    expect(input.map(symbol)).toEqual(['SH600003', 'SH600002', 'SH600001'])
   })
 
   it('gates and labels the per-symbol rerun button', () => {

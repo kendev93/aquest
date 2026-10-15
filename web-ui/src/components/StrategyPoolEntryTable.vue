@@ -17,6 +17,7 @@ import {
   tradeCount,
   type StrategyPoolMetricColumn,
   type StrategyPoolSortColumn,
+  type StrategyPoolSortDirection,
 } from '../utils/strategyPoolStatus'
 
 interface Props {
@@ -29,6 +30,7 @@ interface Props {
   emptyText?: string
   sortable?: boolean
   sortColumn?: StrategyPoolSortColumn
+  sortDirection?: StrategyPoolSortDirection
   queuedSymbol?: string
   busy?: boolean
   busyIntent?: string
@@ -39,6 +41,7 @@ interface Props {
 const props = withDefaults(defineProps<Props>(), {
   sortable: true,
   sortColumn: 'status',
+  sortDirection: 'desc',
   queuedSymbol: '',
   busy: false,
   busyIntent: '',
@@ -72,6 +75,22 @@ const jobContext = computed(() => ({
   busyIntent: props.busyIntent,
 }))
 
+// 列头一次点击只上报「点了这一列」，高→低 → 低→高 → 取消排序的循环由父组件持有，
+// 这里只按它给的方向画箭头，并在提示里说清下一次点击会排什么。
+function sortGlyph(column: StrategyPoolMetricColumn): string {
+  if (props.sortColumn !== column) return ''
+  return props.sortDirection === 'asc' ? ' ↑' : ' ↓'
+}
+
+function sortHint(column: StrategyPoolMetricColumn, label: string): string {
+  if (props.sortColumn !== column) {
+    return `点击按${label}从高到低排序；再点改为低→高，第三次取消排序`
+  }
+  return props.sortDirection === 'desc'
+    ? `当前按${label}从高到低排序；点击改为低→高，再点取消排序回到按状态分组`
+    : `当前按${label}从低到高排序；点击取消排序，回到按状态分组`
+}
+
 function detailHref(entry: StrategyPoolEntry): string {
   return `/strategy-pool/${entry.market}/${entry.code}?objective=${props.objective ?? 'annual_return'}`
     + `&list=${encodeURIComponent(props.listContext)}`
@@ -94,7 +113,7 @@ function followTitle(entry: StrategyPoolEntry): string {
       <thead><tr>
         <th>持仓 / 今日信号</th><th>证券</th>
         <th v-for="column in METRIC_COLUMNS" :key="column.key">
-          <button v-if="sortable" @click="emit('sort', column.key)">{{ column.label }}{{ sortColumn === column.key ? ' ↓' : '' }}</button>
+          <button v-if="sortable" :data-testid="`${testid}-sort-${column.key}`" :title="sortHint(column.key, column.label)" @click="emit('sort', column.key)">{{ column.label }}{{ sortGlyph(column.key) }}</button>
           <template v-else>{{ column.label }}</template>
         </th>
         <th>策略 / 风险标记</th><th>维护</th>
