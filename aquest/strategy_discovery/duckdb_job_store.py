@@ -27,6 +27,9 @@ from .job_store import (
 
 _TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled"})
 _VALID_STATUSES = frozenset({"queued", "running", *_TERMINAL_STATUSES})
+#: 「认领后从未续租」的任务最多退回队列几次。超过就按原来的方式判死：连续几次都拿不到
+#: 心跳说明 worker 与后端之间的通道一直坏着，继续重排只会让队列里堆一堆没人能跑的任务。
+MAX_CLAIM_REQUEUES = 3
 #: 任务时长统计每个模式最多采样多少条终态任务。跟踪轮询每十分钟写一条信号扫描
 #: 记录，全市场研究跑几小时也只有几条，不限窗口就会把样本全花在信号扫描上。
 POOL_STATS_SAMPLE_LIMIT = 60
@@ -328,6 +331,25 @@ class DuckDbStrategyJobStore:
                 if operations
                 else ""
             )
+            # 先把"认领响应丢失"的那一次重放出去：worker 只在空闲时才 claim，所以绑在它
+            # 名下、状态还是 running 且**从未续租**的任务必然是后端已提交认领、响应没回到
+            # worker 的那一次。不先把它交回去，这个任务就永远没人执行（后续 claim 只找 queued），
+            # 最后被 stale 扫描判成「worker 已停止」，用户看到的是一次几分钟的空等加一次手动重试。
+            # 只认"从未续租"的：同一个容器里可能跑着多个共用 hostname 的 worker 进程，正在被
+            # 正常执行的任务（已经续过租）不能重复发给第二个进程。已被要求取消的也不重放——
+            # 它注定要结束，占着一次 claim 会把队列里真正的任务饿住（取消由 stale 回收退回队列
+            # 后，领到它的人按普通任务一样收尾）。
+            replay_rows = connection.execute(
+                "SELECT job_id, state_json FROM strategy_jobs "
+                "WHERE status='running' AND worker_id=? AND NOT cancel_requested"
+                + operation_clause
+                + " ORDER BY heartbeat_at,job_id",
+                [selected_worker, *(operations or [])],
+            ).fetchall()
+            for replay_row in replay_rows:
+                replay_state = _load_object(replay_row[1])
+                if replay_state.get("renewed_at") is None:
+                    return str(replay_row[0])
             row = connection.execute(
                 "SELECT job_id,state_json FROM strategy_jobs WHERE status='queued'"
                 + operation_clause
@@ -338,7 +360,16 @@ class DuckDbStrategyJobStore:
                 return None
             job_id = str(row[0])
             state = _load_object(row[1])
-            state.update(status="running", phase="running", heartbeat_at=now)
+            # ``claimed_at`` 记下这次认领的时刻；``renewed_at`` 只有在 worker 真的回来说过话
+            # （心跳或进度）才会被填上。stale 回收靠「认领后从未续租」区分"响应丢在网络上"
+            # 的孤儿任务与"跑一半 worker 死了"的任务，前者退回队列，后者照旧判死。
+            state.update(
+                status="running",
+                phase="running",
+                heartbeat_at=now,
+                claimed_at=now,
+                renewed_at=None,
+            )
             if _optional_float(state.get("started_at")) is None:
                 # 认领时刻就是研究起点：created_at 起算会把排队等 worker 的时间
                 # 也算进任务时长，自动跟踪任务堆在全市场研究后面时能虚高几小时。
@@ -500,6 +531,29 @@ class DuckDbStrategyJobStore:
                     continue
                 job_id = str(raw_job_id)
                 state = _load_object(raw_state)
+                requeues = int(_number(state.get("claim_requeues"), 0.0))
+                # 认领后一次都没续租：这不是"跑一半死了"，而是认领的响应丢在网络上——后端已经
+                # 把任务标成 running 并绑了 worker_id，worker 却没拿到 job_id，于是这个任务永远
+                # 没人执行（后续 claim 只找 queued），到点被判死，用户白等几分钟再手动重提。
+                # 退回队列让任何 worker 重新领走；超过上限才判死，避免网络持续故障时的无限循环。
+                if state.get("renewed_at") is None and requeues < MAX_CLAIM_REQUEUES:
+                    state.update(
+                        status="queued",
+                        phase="queued",
+                        claimed_at=None,
+                        heartbeat_at=now,
+                        finished_at=None,
+                        claim_requeues=requeues + 1,
+                        note="上一次认领的响应没有回到 worker，任务已退回队列重新排队",
+                    )
+                    connection.execute(
+                        "UPDATE strategy_jobs SET status = 'queued', worker_id = NULL, "
+                        "state_json = ?, heartbeat_at = ?, updated_at = ? "
+                        "WHERE job_id = ? AND status = 'running'",
+                        [_dump_json(state), now, now, job_id],
+                    )
+                    recovered.append(job_id)
+                    continue
                 state.update(
                     status="failed",
                     phase="failed",
@@ -582,7 +636,9 @@ class DuckDbStrategyJobStore:
             row = self._select_state(connection, job_id)
             if row is None or row[3] != selected_worker or row[1] != "running":
                 raise ValueError("策略任务 worker 不匹配或任务已结束")
-            self._save_state(connection, job_id, row, fields)
+            # 能走到这一行就说明 worker 还活着、并且在做这个任务：把续租痕迹写进状态，
+            # stale 回收据此区分"真的开始跑过"与"认领响应根本没回到 worker"。
+            self._save_state(connection, job_id, row, {**fields, "renewed_at": now})
         state = self.read_state(job_id)
         if state is None:
             raise ValueError("策略任务不存在")

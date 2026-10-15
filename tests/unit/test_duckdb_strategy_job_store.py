@@ -5,7 +5,10 @@ import time
 import pytest
 
 from aquest.market_data.store import DuckDbMarketDataStore
-from aquest.strategy_discovery.duckdb_job_store import DuckDbStrategyJobStore
+from aquest.strategy_discovery.duckdb_job_store import (
+    MAX_CLAIM_REQUEUES,
+    DuckDbStrategyJobStore,
+)
 from aquest.strategy_discovery.job_store import StrategyJobStore
 
 
@@ -100,6 +103,8 @@ def test_duckdb_job_store_cancel_heartbeat_and_stale_recovery(tmp_path) -> None:
 
     store.create("job-2", operation="discovery", payload={}, description="实验")
     assert store.claim_next("worker-a") == "job-2"
+    # 先续一次租，表示这个任务真的跑起来了：只有"开始过"的任务断心跳才按判死处理。
+    store.update_from_worker("job-2", "worker-a", phase="searching", progress=0.1)
     store.update("job-2", heartbeat_at=time.time() - 100)
     assert store.recover_stale_running(stale_after_seconds=10) == ["job-2"]
     assert store.read_state("job-2")["error_code"] == "worker_stale"
@@ -110,6 +115,77 @@ def test_duckdb_job_store_cancel_heartbeat_and_stale_recovery(tmp_path) -> None:
     failed = store.fail_from_worker("job-3", "worker-a", "interrupted", "worker_failed")
     assert failed["status"] == "cancelled"
     assert failed["error_code"] == "cancelled"
+
+
+def test_lost_claim_response_is_replayed_then_requeued(tmp_path) -> None:
+    """认领响应丢在网络上时，任务不能变成永远没人跑的孤儿。
+
+    后端在 claim 事务里就把任务标成 running 并绑上 worker_id，worker 却没拿到 job_id：
+    之后它每 0.5 秒的 claim 只查 queued，这个任务再也没人执行，120 秒后被判「worker 已停止」，
+    用户白等几分钟还要手动重提（2026-10-16 实测三次，全部卡在 121 秒）。
+    """
+
+    store = _store(tmp_path)
+    store.create("job-lost", operation="discovery", payload={}, description="实验")
+    assert store.claim_next("worker-a") == "job-lost"
+    # 同一个 worker 再来 claim：必须把同一份任务重新交给它。
+    assert store.claim_next("worker-a") == "job-lost"
+    # 别的 worker 不能插进来抢这个任务。
+    assert store.claim_next("worker-b") is None
+
+    # worker 进程重启（换了 worker_id）：这个任务从没续过租，退回队列让别人领，而不是判死。
+    store.update("job-lost", heartbeat_at=time.time() - 600)
+    assert store.recover_stale_running(stale_after_seconds=10) == ["job-lost"]
+    state = store.read_state("job-lost")
+    assert state["status"] == "queued"
+    assert state["claim_requeues"] == 1
+    assert store.claim_next("worker-c") == "job-lost"
+
+
+def test_renewed_jobs_are_never_replayed_to_the_same_worker(tmp_path) -> None:
+    """已经续过租的任务不能再重放给同一个 worker_id。
+
+    一个容器里可能跑着多个共用 hostname 的 worker 进程：正在被其中一个执行的任务如果又被
+    发给另一个，同一份研究会跑两遍、两边还会互相抢租约。
+    """
+
+    store = _store(tmp_path)
+    store.create("job-busy", operation="discovery", payload={}, description="实验")
+    assert store.claim_next("worker-a") == "job-busy"
+    store.update_from_worker("job-busy", "worker-a", phase="searching", progress=0.1)
+    assert store.claim_next("worker-a") is None
+
+
+def test_cancelled_orphan_does_not_starve_the_queue(tmp_path) -> None:
+    """已被要求取消的孤儿不能占住 claim：否则队列里真正的任务永远等不到 worker。"""
+
+    store = _store(tmp_path)
+    store.create("job-cancel", operation="discovery", payload={}, description="实验")
+    assert store.claim_next("worker-a") == "job-cancel"
+    assert store.request_cancel("job-cancel") is True
+    store.create("job-next", operation="discovery", payload={}, description="实验")
+    assert store.claim_next("worker-a") == "job-next"
+
+
+def test_never_renewed_jobs_stop_requeueing_after_the_cap(tmp_path) -> None:
+    """worker 与后端之间的通道一直坏着时不能无限重排：超过上限仍按「worker 已停止」判死。"""
+
+    store = _store(tmp_path)
+    store.create("job-loop", operation="discovery", payload={}, description="实验")
+    for round_index in range(MAX_CLAIM_REQUEUES):
+        assert store.claim_next("worker-a") == "job-loop"
+        store.update("job-loop", heartbeat_at=time.time() - 600)
+        assert store.recover_stale_running(stale_after_seconds=10) == ["job-loop"]
+        state = store.read_state("job-loop")
+        assert state["status"] == "queued"
+        assert state["claim_requeues"] == round_index + 1
+
+    assert store.claim_next("worker-a") == "job-loop"
+    store.update("job-loop", heartbeat_at=time.time() - 600)
+    assert store.recover_stale_running(stale_after_seconds=10) == ["job-loop"]
+    final = store.read_state("job-loop")
+    assert final["status"] == "failed"
+    assert final["error_code"] == "worker_stale"
 
 
 def test_cancel_requested_before_atomic_completion_wins_and_discards_result(tmp_path) -> None:
