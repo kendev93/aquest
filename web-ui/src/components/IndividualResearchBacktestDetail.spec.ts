@@ -61,4 +61,32 @@ describe('IndividualResearchBacktestDetail', () => {
     expect(wrapper.text()).toContain('卖出')
     expect(wrapper.findAll('circle title')).toHaveLength(2)
   })
+
+  it('renders trade rows with Chinese sides, the signal date, and no English risk token', () => {
+    const withTrades = backtest({
+      trades: [
+        { date: '2024-01-02', signal_date: '2024-01-01', direction: 'BUY', price: 10, size: 100, pnl: 0, reason: '排名入选' },
+        // 风控出场的 reason 已经是中文「止损」，再挂一列英文 stop_loss 是同一件事说两遍
+        { date: '2024-02-20', signal_date: '2024-02-19', direction: 'SELL', price: 12, size: 100, pnl: 200, reason: '止损', risk_trigger: 'stop_loss' },
+      ],
+    })
+    const wrapper = mount(IndividualResearchBacktestDetail, {
+      props: { backtest: withTrades, returnCurve: true },
+      slots: { 'trades-toolbar': '<nav id="pager">分页</nav>' },
+    })
+    const headers = wrapper.findAll('thead th').map((header) => header.text())
+    expect(headers).toEqual(['日期', '方向', '价格', '数量', '盈亏', '原因', '信号日'])
+    const rows = wrapper.findAll('tbody tr')
+    const buyCells = rows[0]!.findAll('td')
+    const sellCells = rows[1]!.findAll('td')
+    expect(buyCells[1]?.text()).toBe('买入')
+    expect(sellCells[1]?.text()).toBe('卖出')
+    expect(sellCells[1]?.classes()).toContain('trade-sell')
+    expect(sellCells[6]?.text()).toBe('2024-02-19')
+    expect(wrapper.text()).not.toContain('stop_loss')
+    // 分页插槽排在表格之前，父页面才能把翻页按钮放到表头上面
+    const toolbar = wrapper.get('#pager').element
+    const table = wrapper.get('.individual-trades').element
+    expect(toolbar.compareDocumentPosition(table) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
 })

@@ -421,6 +421,74 @@ def test_detail_api_is_readonly_and_trade_pages_are_owned_by_symbol(tmp_path):
         assert client.get("/api/v1/jobs/active").json()["data"] == []
 
 
+def test_trade_pages_default_to_the_latest_settlement_first(tmp_path):
+    """详情页的历史交易默认最近成交在前：打开详情关心的是刚发生的买卖，不是第一笔。
+
+    分页由后端按 offset 切片，所以翻转必须发生在切片之前；前端只反转返回的
+    items 会让第 2 页变成「次旧的 50 笔倒过来」，全局顺序就错了。
+    """
+    from fastapi.testclient import TestClient
+
+    from aquest.web.app import create_app
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", bars(3))
+    app = create_app(
+        market_data_store=store, auto_sync_enabled=False, strategy_worker_token="test-token"
+    )
+    app.state.strategy_pool_store.upsert_automatic(
+        market="SH",
+        code="600000",
+        name="test",
+        annual_candidate=candidate(),
+        sharpe_candidate=candidate(),
+        data_fingerprint="a",
+        config_fingerprint="b",
+        source_job_id="job",
+    )
+    tracks = PoolTrackingStore(store)
+    version = tracks.current_versions()[0]
+    stored = [
+        {"date": "2026-01-05", "direction": "BUY", "price": 10.0, "size": 100},
+        {"date": "2026-03-11", "direction": "SELL", "price": 12.0, "size": 100},
+        {"date": "2026-03-11", "direction": "BUY", "price": 13.0, "size": 50},
+        {"date": "2026-05-20", "direction": "BUY", "price": 14.0, "size": 80},
+    ]
+    snapshot = {
+        "summary": {
+            "created_return": 0.2,
+            "as_of_date": "2026-05-20",
+            "baseline_date": "2026-01-01",
+        },
+        "checkpoint": {"trades": stored, "equity": [], "positions": {}},
+    }
+    assert tracks.save_snapshot(version["version_id"], version["signature"], snapshot)
+    url = f"/api/v1/strategy-pool/entries/SH/600000/versions/{version['version_id']}/trades"
+
+    with TestClient(app) as client:
+        newest_first = client.get(f"{url}?scope=full").json()["data"]
+        oldest_first = client.get(f"{url}?scope=full&order=asc").json()["data"]
+        second_page = client.get(f"{url}?scope=full&limit=1&offset=1").json()["data"]
+
+    assert [t["date"] for t in newest_first["items"]] == [
+        "2026-05-20",
+        "2026-03-11",
+        "2026-03-11",
+        "2026-01-05",
+    ]
+    # 同一天的成交不颠倒：稳定排序保留落库时的成交先后（先平仓、后开新仓）。
+    assert [t["direction"] for t in newest_first["items"][1:3]] == ["SELL", "BUY"]
+    assert [t["date"] for t in oldest_first["items"]] == [
+        "2026-01-05",
+        "2026-03-11",
+        "2026-03-11",
+        "2026-05-20",
+    ]
+    assert oldest_first["items"][1]["direction"] == "SELL"
+    assert second_page["total"] == 4
+    assert [t["date"] for t in second_page["items"]] == ["2026-03-11"]
+
+
 def test_tracking_runner_deduplicates_goals_and_uses_shared_budget(tmp_path):
     from aquest.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
     from aquest.strategy_pool.tracking_runner import PoolTrackingRunner

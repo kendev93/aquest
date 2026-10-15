@@ -208,20 +208,22 @@ test('task history shows durations, research split and per-mode averages', async
 
 test('pool details are read-only and expose both rules, launch curve and paged trades', async ({ page }) => {
   let posts = 0
+  const tradeQueries: string[] = []
   const version = (id: string) => ({ version_id:id,created_at:'2026-09-02T06:00:00+00:00',
     source:'automatic',is_current:true,status:'ready',summary:{},candidate:{candidate_id:id,
       buy_rule:{conditions:[{left_value:'price.close',operator:'gt',right_constant:10}]},
       sell_rule:{conditions:[{left_value:'price.close',operator:'lt',right_constant:9}]},config:{stop_loss_pct:.12}} })
   await page.route('**/api/v1/**', async route => {
     if (route.request().method()==='POST') posts++
-    const path = new URL(route.request().url()).pathname
+    const url = new URL(route.request().url())
+    const path = url.pathname
     let data: unknown = {}
     if (path.endsWith('/detail')) data={name:'测试股',objectives:{annual_return:[version('a')],sharpe:[version('s')]}}
     else if (path.endsWith('/curve')) data={summary:{created_return:.5,post_launch_return:.25,
       inherited_position:true,baseline_date:'2026-09-01',as_of_date:'2026-09-03',holding:[],has_post_launch_data:true},
       backtest:{start_date:'2026-09-01',end_date:'2026-09-03',bars:3,performance:{total_return:.5},
         equity_curve:[{date:'2026-09-01',total:1000,return_pct:0,trade_directions:['BUY']},{date:'2026-09-03',total:1500,return_pct:.5}],trades:[]} }
-    else if (path.endsWith('/trades')) data={items:[{date:'2026-09-01',direction:'BUY',size:100,price:10}],total:101}
+    else if (path.endsWith('/trades')) { tradeQueries.push(url.search); data={items:[{date:'2026-09-01',signal_date:'2026-08-31',direction:'BUY',size:100,price:10,reason:'排名入选'}],total:101} }
     else if (path.includes('/metadata')) data={indicators:[]}
     await route.fulfill({json:{data}})
   })
@@ -233,9 +235,16 @@ test('pool details are read-only and expose both rules, launch curve and paged t
   await expect(page.getByText('上线 2026-09-02',{exact:true})).toBeVisible()
   await expect(page.locator('svg line[stroke-dasharray]')).toHaveAttribute('x1','400')
   await expect(page.locator('textarea')).toHaveCount(0)
+  // 历史交易默认最近成交在前，排序由后端在 offset 切片之前完成。
+  expect(tradeQueries[0]).toContain('order=desc')
+  // 分页条紧贴交易表并给出页码；方向列与曲线图例同词
+  await expect(page.getByTestId('pool-trade-pager')).toContainText('第 1 / 3 页 · 显示 1–50 笔 / 共 101 笔')
+  await expect(page.locator('.individual-trades tbody td').nth(1)).toHaveText('买入')
   await page.getByTestId('detail-sharpe').click()
-  await page.getByRole('button',{name:'下一页',exact:true}).click()
-  await expect(page.getByText('51–100 / 101 笔')).toBeVisible()
+  await page.getByTestId('pool-trade-next').click()
+  await expect(page.getByTestId('pool-trade-pager')).toContainText('第 2 / 3 页 · 显示 51–100 笔 / 共 101 笔')
+  await page.getByTestId('pool-trade-order').selectOption('asc')
+  await expect.poll(() => tradeQueries.at(-1)).toContain('order=asc&offset=0')
   expect(posts).toBe(0)
   await page.getByRole('link',{name:'← 返回全市场标的状态'}).click()
   await expect(page).toHaveURL(/page=2.*search=600000/)

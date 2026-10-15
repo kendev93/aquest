@@ -562,10 +562,16 @@ def pool_trades(
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
     scope: Literal["created", "full"] = "created",
+    order: Literal["asc", "desc"] = "desc",
 ) -> dict[str, object]:
     tracks, version = _owned_version(market, code, version_id, request)
     snapshot = tracks.snapshot(version_id)
     trades = snapshot["checkpoint"]["trades"] if snapshot else []
     if snapshot and scope == "created":
         trades = [t for t in trades if t["date"] >= snapshot["summary"]["baseline_date"]]
+    if order == "desc":
+        # 默认最近成交在前：详情里要看的是刚发生的买卖，不是 2015 年的第一笔。
+        # 排序是稳定的，同一天的买入仍然排在卖出前面。分页按 offset 切片，
+        # 所以翻转必须在这里做——前端反转 items 只会把第 2 页变成次旧的 50 笔。
+        trades = sorted(trades, key=lambda trade: str(trade["date"]), reverse=True)
     return {"data": {"items": trades[offset : offset + limit], "total": len(trades)}}

@@ -18,6 +18,8 @@ const query = new URLSearchParams(window.location.search)
 const objective = ref<StrategyPoolObjective>(query.get('objective') === 'sharpe' ? 'sharpe' : 'annual_return')
 // 查看区间固定默认“全历史”；不读 URL，保持每次打开行为一致
 const scope = ref<'created' | 'full'>('full')
+// 历史交易默认最近成交在前：关注的是刚发生的买卖，不是 2015 年的第一笔
+const tradeOrder = ref<'desc' | 'asc'>('desc')
 const detail = ref<{ name: string; objectives: Record<StrategyPoolObjective, Version[]> } | null>(null)
 const selectedId = ref('')
 const versions = computed(() => detail.value?.objectives[objective.value] ?? [])
@@ -29,6 +31,13 @@ const summary = ref<Record<string, unknown>>({})
 const names = ref(new Map<string, string>())
 const holdings = computed(() => Array.isArray(summary.value.holding) ? summary.value.holding as Array<Record<string, unknown>> : [])
 const error = ref(''); const loading = ref(false); const offset = ref(0); const total = ref(0)
+// 每页笔数与 /trades 请求里的 limit 用同一个常量，分页按钮的位移也按它算
+const TRADE_PAGE_SIZE = 50
+const tradePage = computed(() => Math.floor(offset.value / TRADE_PAGE_SIZE) + 1)
+const tradePageCount = computed(() => Math.max(1, Math.ceil(total.value / TRADE_PAGE_SIZE)))
+const tradeRangeText = computed(() => total.value
+  ? `${offset.value + 1}–${Math.min(offset.value + TRADE_PAGE_SIZE, total.value)} 笔`
+  : '暂无成交')
 const returnHref = computed(() => `/strategy-pool${query.get('list') ? `?${query.get('list')}` : ''}`)
 const endpoint = `/api/v1/strategy-pool/entries/${encodeURIComponent(market)}/${encodeURIComponent(code)}`
 let requestId = 0
@@ -60,7 +69,7 @@ async function loadVersion() {
     const base = `${endpoint}/versions/${selectedId.value}`
     const [curve, trades] = await Promise.all([
       get<{ backtest: IndividualResearchFullBacktest | null; summary?: Record<string, unknown> }>(`${base}/curve?scope=${scope.value}`),
-      get<{ items: Record<string, unknown>[]; total: number }>(`${base}/trades?scope=${scope.value}&offset=${offset.value}&limit=50`),
+      get<{ items: Record<string, unknown>[]; total: number }>(`${base}/trades?scope=${scope.value}&order=${tradeOrder.value}&offset=${offset.value}&limit=${TRADE_PAGE_SIZE}`),
     ])
     if (current !== requestId) return
     backtest.value = curve.backtest ? { ...curve.backtest, trades: trades.items } : null
@@ -75,6 +84,15 @@ onMounted(async () => {
     await selectGoal(objective.value)
   } catch (e) { error.value = e instanceof Error ? e.message : '详情加载失败' }
 })
+
+function loadTradePage(nextOffset: number): void {
+  offset.value = Math.max(0, nextOffset)
+  void loadVersion()
+}
+
+// 版本状态是研究侧词表（pending/ready/failed），与标的状态不是一套，别混用 statusLabel
+const VERSION_STATUS_LABELS: Record<string, string> = { pending: '待初始化', ready: '已就绪', failed: '更新失败' }
+function versionStatus(value: string): string { return VERSION_STATUS_LABELS[value] ?? value }
 </script>
 
 <template>
@@ -93,7 +111,7 @@ onMounted(async () => {
       <h2>交易规则</h2>
       <div class="rules"><div><h3>买入规则</h3><p>{{ formatTradingRule(selected.candidate.buy_rule, indicator) }}</p></div><div><h3>卖出规则</h3><p>{{ formatTradingRule(selected.candidate.sell_rule, indicator) }}</p></div><div><h3>退出风控</h3><p>{{ formatRiskControls(selected.candidate.config) }}</p></div></div>
       <p>创建时间 {{ date(selected.created_at) }}<span v-if="selected.stopped_at"> · 停用时间 {{ date(selected.stopped_at) }}</span></p>
-      <p>状态 {{ selected.status }} · 行情截至 {{ summary.as_of_date ?? selected.summary.as_of_date ?? '待初始化' }}</p>
+      <p>状态 {{ versionStatus(selected.status) }} · 行情截至 {{ summary.as_of_date ?? selected.summary.as_of_date ?? '待初始化' }}</p>
       <p v-if="selected.last_error" role="alert">更新失败：{{ selected.last_error }}。保留最后成功结果。</p>
       <div class="metrics"><span>{{ selected.is_current ? '创建至今收益' : '截至停用收益' }} <b>{{ percent(summary.created_return) }}</b></span><span>上线后收益 <b>{{ percent(summary.post_launch_return) }}</b></span></div>
       <p v-if="summary.inherited_position">含跨创建日持仓，收益统计起点为原买入日 {{ summary.baseline_date }}；不包含更早已完成交易的收益。</p>
@@ -104,9 +122,18 @@ onMounted(async () => {
     </section>
     <section v-if="selected" class="panel-card">
       <label>查看区间 <select v-model="scope" @change="offset = 0; loadVersion()"><option value="created">创建以来，含承接持仓</option><option value="full">全历史</option></select></label>
+      <label>历史交易排序 <select v-model="tradeOrder" data-testid="pool-trade-order" @change="offset = 0; loadVersion()"><option value="desc">最近成交在前</option><option value="asc">最早成交在前</option></select></label>
       <p v-if="loading">读取跟踪缓存…</p><p v-else-if="!backtest">账户尚未初始化，等待后台跟踪任务完成。</p>
-      <IndividualResearchBacktestDetail v-else :backtest="backtest" :launch-date="selected.created_at" :baseline-date="String(summary.baseline_date ?? '')" return-curve hide-metrics />
-      <nav v-if="total"><button :disabled="offset === 0 || loading" @click="offset = Math.max(0, offset - 50); loadVersion()">上一页</button><span>{{ offset + 1 }}–{{ Math.min(offset + 50, total) }} / {{ total }} 笔</span><button :disabled="offset + 50 >= total || loading" @click="offset += 50; loadVersion()">下一页</button></nav>
+      <IndividualResearchBacktestDetail v-else :backtest="backtest" :launch-date="selected.created_at" :baseline-date="String(summary.baseline_date ?? '')" return-curve>
+        <!-- 分页紧贴交易表：以前它在这块面板外面，看 50 笔要先在表里滚一遍、再往下找按钮 -->
+        <template #trades-toolbar>
+          <nav class="trades-pager" data-testid="pool-trade-pager">
+            <button :disabled="offset === 0 || loading" data-testid="pool-trade-prev" @click="loadTradePage(offset - TRADE_PAGE_SIZE)">上一页</button>
+            <span>第 {{ tradePage }} / {{ tradePageCount }} 页 · 显示 {{ tradeRangeText }} / 共 {{ total }} 笔</span>
+            <button :disabled="offset + TRADE_PAGE_SIZE >= total || loading" data-testid="pool-trade-next" @click="loadTradePage(offset + TRADE_PAGE_SIZE)">下一页</button>
+          </nav>
+        </template>
+      </IndividualResearchBacktestDetail>
     </section>
   </main>
 </template>
@@ -116,6 +143,11 @@ onMounted(async () => {
 .rules { display:grid; grid-template-columns:repeat(3,1fr); gap:24px; }
 .rules p { white-space:pre-wrap; }
 button, select { padding:10px; }
+.trades-pager { align-items:center; gap:12px; }
+.trades-pager span { color:var(--muted); }
+/* 组件里 340px 的窗口是给不分页的个股研究用的；详情页每页只有 50 笔且有分页，
+   再压高度就是让用户在表格里二次滚动 */
+.pool-detail :deep(.individual-trades) { max-height:620px; }
 [aria-pressed="true"] { color:var(--accent); border-color:var(--accent); }
 @media (max-width:800px) { .rules { grid-template-columns:1fr; } }
 </style>
