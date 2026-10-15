@@ -169,4 +169,20 @@ describe('StrategyPoolEntryTable', () => {
     const noSnapshot = mountTable({ entries: [entry('600001')], heldKeys: new Set(['SH600001']) })
     expect(noSnapshot.find('[data-testid="pool-holding-risk-600001"]').exists()).toBe(false)
   })
+
+  it('collapses a research failure into one label with the raw reason in the tooltip', () => {
+    // 后端把整段异常（含底层 traceback）存进 last_error，直接铺在单元格里会把表格撑成
+    // 一堵墙；表格里只需要知道这只没搜出结果，原因悬停看。
+    const failed = entry('600010')
+    failed.automatic_candidates = { annual_return: null, sharpe: null }
+    failed.active_candidate = null
+    failed.status = 'failed'
+    failed.last_error = '行情数据库当前被其它进程占用或存在瞬态 I/O 错误，请稍后重试；底层错误：Traceback ... _duckdb.IOException: IO'
+
+    const wrapper = mountTable({ entries: [failed] })
+    const cell = wrapper.get('[data-testid="pool-entry-error-600010"]')
+    expect(cell.text()).toBe('策略搜索失败 · 悬停查看原因')
+    expect(cell.attributes('title')).toContain('_duckdb.IOException')
+    expect(wrapper.get('[data-testid="pool-row-600010"]').text()).not.toContain('Traceback')
+  })
 })
