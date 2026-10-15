@@ -288,6 +288,33 @@ def test_training_mining_creates_and_or_rules_from_two_indicators() -> None:
     assert len(risk_base["buy_rule"]["conditions"]) == 2
 
 
+def test_risk_search_complexity_cap_leaves_room_for_the_risk_groups() -> None:
+    """风控寻优的复杂度上限必须容得下**继承来的**规则。
+
+    ``max_complexity`` 是给「规则本身正在被搜索」的条件挖掘用的；risk_only 搜索里规则来自
+    父代，只有止损 / 止盈 / 移动止盈三组在变。以前写死 3，2+2 的规则对（挖掘出来的组合很
+    常见）算出来额度是 -1：1000 组全部撞在约束上，最后报「没有找到满足约束的策略候选」，
+    整只标的被记成无可用策略。实测 SH600067 就是这样丢了 10 对、训练段 3–19 笔买入的规则对。
+    """
+
+    def rule(signals: int, conditions: int) -> dict[str, object]:
+        return {
+            "signals": [f"technical.rsi14.{index}" for index in range(signals)],
+            "conditions": [
+                {"left_value": "technical.rsi14", "operator": "lt", "right_constant": 30.0}
+                for _ in range(conditions)
+            ],
+            "required_conditions": [],
+        }
+
+    cap = IndividualStockResearchService._risk_complexity_cap
+    assert cap({"buy_rule": rule(1, 1), "sell_rule": rule(1, 1)}) == 4 + 3
+    assert cap({"buy_rule": rule(1, 0), "sell_rule": rule(0, 1)}) == 2 + 3
+    assert cap({}) == 3
+    # 规则结构不认识时按「没有额外项」处理，宁可放宽也不能把搜索锁死。
+    assert cap({"buy_rule": "not-a-mapping", "sell_rule": None}) == 3
+
+
 def test_validation_rule_shortlist_keeps_five_candidates_per_board() -> None:
     candidates = [
         {

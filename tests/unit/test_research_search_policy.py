@@ -11,7 +11,7 @@ def test_research_defaults_share_expanded_policy():
     )
     assert config.candidate_limit == 15
     assert _research_settings({}, 3000)["candidate_limit"] == 15
-    assert MARKET_POOL_ALGORITHM_VERSION == "market-pool-v7"
+    assert MARKET_POOL_ALGORITHM_VERSION == "market-pool-v8"
 
 
 def test_research_risk_search_enables_bounded_adaptive_policy():
@@ -27,6 +27,20 @@ def test_research_risk_search_enables_bounded_adaptive_policy():
     )
     assert request.convergence_enabled
     assert request.research_search_policy == "adaptive-v1"
+
+    # 复杂度上限跟着继承来的规则走：规则本身不是风控寻优在搜的东西，写死 3 会让 2+2
+    # 的规则对永远过不了约束。
+    pair_request = IndividualStockResearchService._risk_discovery_request(
+        None,
+        {
+            "buy_rule": {"signals": ["a"], "conditions": [{}], "required_conditions": []},
+            "sell_rule": {"signals": ["b"], "conditions": [{}], "required_conditions": []},
+        },
+        config,
+        windows,
+        seed=7,
+    )
+    assert pair_request.max_complexity == 7
 
 
 def _search(metrics, *, limit=1000, fidelity=False, batch=1):

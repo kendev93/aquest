@@ -804,6 +804,28 @@ class IndividualStockResearchService:
             PortfolioBacktestRequest.model_validate(payload).model_dump(mode="json"),
         )
 
+    @staticmethod
+    def _risk_complexity_cap(payload: Mapping[str, object]) -> int:
+        """风控寻优的复杂度上限 = 这对规则自身的项数 + 三组风控参数。
+
+        ``max_complexity`` 本来是给「规则本身正在被搜索」的条件挖掘用的；risk_only 搜索里
+        规则是从父代继承的、只有止损 / 止盈 / 移动止盈三组在变。沿用挖掘那档 3 会让规则稍微
+        复杂一点的标的**永远**没有候选能过约束：实测 SH600067 的短名单 6 对里有 2 对算出来
+        上限是负数，1000 组全部撞在约束上，最后报「没有找到满足约束的策略候选」，整只标的被
+        记成无可用策略——它其实有 10 对规则、训练段 3–19 笔买入。
+        """
+
+        parts = 0
+        for side in ("buy_rule", "sell_rule"):
+            rule = payload.get(side)
+            if not isinstance(rule, Mapping):
+                continue
+            for key in ("signals", "conditions", "required_conditions"):
+                items = rule.get(key)
+                if isinstance(items, (list, tuple)):
+                    parts += len(items)
+        return parts + 3
+
     def _risk_discovery_request(
         self,
         base_config: Mapping[str, object],
@@ -830,7 +852,7 @@ class IndividualStockResearchService:
             holdout_candidates=0,
             min_trades=0,
             max_drawdown=None,
-            max_complexity=3,
+            max_complexity=IndividualStockResearchService._risk_complexity_cap(base_config),
             multifidelity_enabled=True,
             convergence_enabled=config.search_policy == SEARCH_POLICY_ID,
             research_search_policy=config.search_policy,
