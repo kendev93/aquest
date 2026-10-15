@@ -210,7 +210,25 @@ class IndividualStockResearchService:
 
         rule_by_sharpe = _rank_candidates(rule_candidates, "sharpe")
         rule_by_return = _rank_candidates(rule_candidates, "annual_return")
-        selected_rule_pairs = _select_rule_pairs(rule_candidates)
+        # 退出风控只能作用在**已经持有**的仓位上：训练段一笔买入都没成交的规则对，跑 3000 组
+        # 参数得到的净值与基准恒等——没有仓位就没有卖出，现金不变，之后的买入也永远开不了。
+        # 这种对既不该占用短名单名额（它年化 0.00、回撤 0，会排在真实候选前面），也不该进寻优
+        # （风控搜索的 min_trades 被设成 0，唯一拦住它的就是"零成交不参评"这条规则）。
+        searchable = [item for item in rule_candidates if _has_executed_buy(item)]
+        if rule_candidates and not searchable:
+            return self._empty_result(
+                config,
+                ref,
+                prepared.data_fingerprint,
+                segmentation,
+                split_metadata,
+                _public_conditions(candidates_by_side),
+                "买卖规则候选在训练段没有任何买入成交，退出风控寻优不可能产生交易，已按零成交跳过；"
+                "请放宽买入条件或扩大日期区间后重试。",
+                trading_days=len(dates),
+                rule_candidates=rule_candidates,
+            )
+        selected_rule_pairs = _select_rule_pairs(searchable)
         if not selected_rule_pairs:
             return self._empty_result(
                 config,
@@ -963,6 +981,7 @@ class IndividualStockResearchService:
                     "elapsed_seconds": _details.get("elapsed_seconds") if _details else None,
                     "best_sharpe": _details.get("best_sharpe") if _details else None,
                     "best_return": _details.get("best_return") if _details else None,
+                    "best_orders": _details.get("best_orders") if _details else None,
                 },
             )
 
@@ -1491,6 +1510,11 @@ def _report_metrics(report: PortfolioBacktestReport) -> dict[str, object]:
         "profit_factor": _number(performance.get("profit_factor")),
         "total_trades": _integer(performance.get("total_trades"), closed_trades),
         "closed_trades": closed_trades,
+        # 买入侧成交笔数：判定「这组规则根本买不进去」只能用它。``total_trades`` 是平仓
+        # 计数，"买了拿到期末没卖"同样是 0，而那恰恰是退出风控最能改变结果的一类。
+        # 取不到值时给 None（不是 0），让上层按「无法判定」放行，绝不因为缺字段就跳过寻优。
+        "executed_buy_orders": _number(performance.get("executed_buy_orders")),
+        "executed_sell_orders": _number(performance.get("executed_sell_orders")),
         # 平均持仓天数（按买卖配对、股数加权），供全市场标的状态表格展示
         "avg_holding_days": _number(performance.get("avg_holding_days")),
         "data_fingerprint": report.data_fingerprint,
@@ -1522,6 +1546,17 @@ def _rank_candidates(
         )
 
     return sorted(candidates, key=sort_key)
+
+
+def _has_executed_buy(candidate: Mapping[str, object]) -> bool:
+    """训练段（也就是风控寻优的 search 段）有没有买入成交。
+
+    取不到值时按「无法判定」放行：宁可多跑一组，也不要因为一个缺字段把真实候选悄悄删掉。
+    """
+
+    metrics = _mapping(candidate.get("train"))
+    executed = _number(metrics.get("executed_buy_orders"))
+    return executed is None or executed > 0
 
 
 def _select_rule_pairs(

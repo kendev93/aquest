@@ -503,6 +503,9 @@ class StrategyDiscoveryService:
             "sharpe": None,
             "annual_return": None,
         }
+        # 本组观察到的最多成交笔数。零成交候选的年化与夏普都是 0.0（一条纯现金曲线），只看
+        # 那两个指标会把「什么都没买进去」显示成「收益 0.00% 的有效结果」。
+        best_executed_orders: list[float | None] = [None]
         progress_plan = _progress_plan(request)
         fidelity_checkpoints: dict[str, Mapping[str, object]] = {}
         checkpoint_metrics = {
@@ -514,6 +517,11 @@ class StrategyDiscoveryService:
         def observe_metrics(metrics: Mapping[str, object], split: str) -> None:
             if split not in {"search", "validation", "holdout"}:
                 return
+            executed = _executed_orders(metrics)
+            if executed is not None:
+                observed = best_executed_orders[0]
+                if observed is None or executed > observed:
+                    best_executed_orders[0] = executed
             for key in best_metrics:
                 try:
                     raw = metrics.get(key, float("nan"))
@@ -539,6 +547,7 @@ class StrategyDiscoveryService:
                     {
                         "best_sharpe": best_metrics["sharpe"],
                         "best_return": best_metrics["annual_return"],
+                        "best_orders": best_executed_orders[0],
                     }
                 )
                 progress_callback(
@@ -737,6 +746,7 @@ class StrategyDiscoveryService:
                     {
                         "best_sharpe": best_metrics["sharpe"],
                         "best_return": best_metrics["annual_return"],
+                        "best_orders": best_executed_orders[0],
                     }
                 )
                 progress_callback(
@@ -1103,6 +1113,22 @@ def _turnover(report: PortfolioBacktestReport, initial_cash: float) -> float:
         _number(trade.get("size")) * _number(trade.get("price")) for trade in report.trades
     )
     return total_notional / initial_cash
+
+
+def _executed_orders(metrics: Mapping[str, object]) -> float | None:
+    """本笔候选成交了多少单（买 + 卖）。任一侧取不到有效数就按「无法判定」返回 None，
+    免得把缺字段显示成「0 笔成交」。"""
+
+    total = 0.0
+    for key in ("executed_buy_orders", "executed_sell_orders"):
+        value = metrics.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        number = float(value)
+        if not math.isfinite(number):
+            return None
+        total += number
+    return total
 
 
 def _number(value: object) -> float:

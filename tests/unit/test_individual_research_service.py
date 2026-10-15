@@ -12,6 +12,7 @@ import pandas as pd
 from aquest.individual_research.models import IndividualResearchConfig
 from aquest.individual_research.service import (
     IndividualStockResearchService,
+    _has_executed_buy,
     _rank_candidates,
     _select_rule_pairs,
 )
@@ -302,6 +303,67 @@ def test_validation_rule_shortlist_keeps_five_candidates_per_board() -> None:
     assert {item["candidate_id"] for item in shortlisted} == {
         *(f"rules-{index}" for index in range(10))
     }
+
+
+def test_rule_pairs_that_never_buy_skip_the_risk_search() -> None:
+    """一次都没买进去的规则对不进退出风控寻优。
+
+    风控只能作用在**已经持有**的仓位上：训练段零买入 ⇒ 永不开仓 ⇒ 任何止损 / 止盈 / 移动止盈
+    / 冷却 / 持有上限参数跑出来的净值都与基准恒等（没有卖出，现金不变，之后的买入也开不了）。
+    以前这种对照样占满短名单并跑完每组 3000 次回测，半小时后才报「没有候选」——日照港（SH601018）
+    就是这样：买卖规则都有可计算的验证绩效，一笔买入都没有。
+    """
+
+    risk = FakeRiskService()
+
+    class NoFillService(FixtureIndividualResearchService):
+        def _backtest_metrics(
+            self, _config, _ref, _buy_rule, _sell_rule, start_date: date, _end_date: date
+        ) -> dict[str, object]:
+            metrics = super()._backtest_metrics(
+                _config, _ref, _buy_rule, _sell_rule, start_date, _end_date
+            )
+            return {
+                **metrics,
+                "total_trades": 0,
+                "closed_trades": 0,
+                "executed_buy_orders": 0.0,
+                "executed_sell_orders": 0.0,
+            }
+
+    service = NoFillService(
+        adapter=FakeAdapter(),
+        backtest_service=object(),
+        portfolio_service=object(),
+        strategy_service=risk,
+    )
+
+    result = service.run(_config())
+
+    assert risk.requests == []
+    assert "没有任何买入成交" in str(result["reason"])
+    assert result["results_by_sharpe"] == []
+    # 规则对本身留在结果里：界面要能看出是哪几组买不进去，而不是凭空没有候选。
+    assert result["rule_candidates"]["results_by_return"]
+
+
+def test_bought_but_never_sold_pairs_stay_in_the_risk_search() -> None:
+    """判据必须取买入侧：买了拿到期末没卖的规则对 total_trades 也是 0，
+    而那正是风控与持有到期最能改变结果的一类。"""
+
+    never_bought = {"candidate_id": "flat", "train": {"executed_buy_orders": 0.0}}
+    bought_and_held = {"candidate_id": "held", "train": {"executed_buy_orders": 3.0}}
+    unknown = {"candidate_id": "unknown", "train": {"total_trades": 0}}
+
+    assert _has_executed_buy(never_bought) is False
+    assert _has_executed_buy(bought_and_held) is True
+    # 取不到成交数按「无法判定」放行：宁可多跑一组，也不能因为缺字段悄悄删掉真实候选。
+    assert _has_executed_buy(unknown) is True
+
+    shortlisted = _select_rule_pairs(
+        [item for item in (never_bought, bought_and_held, unknown) if _has_executed_buy(item)]
+    )
+    assert [item["candidate_id"] for item in shortlisted] == ["held", "unknown"]
 
 
 def test_risk_candidates_are_ranked_by_nested_validation_metrics() -> None:
