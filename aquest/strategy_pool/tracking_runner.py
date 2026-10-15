@@ -228,6 +228,7 @@ class PoolTrackingRunner:
                     snapshot["checkpoint"],
                     boundary,
                     float(v["candidate"].get("config", {}).get("initial_cash", 1000000)),
+                    (snapshot.get("report") or {}).get("current_state"),
                 ),
             }
             snapshot["summary"] = summary

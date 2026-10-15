@@ -380,7 +380,7 @@ def build_random_candidate(
         trailing_stop_pct=trailing_pct,
         trailing_stop_atr_multiplier=trailing_atr,
         trailing_stop_cooldown_days=trailing_cooldown,
-        atr_period=14,
+        atr_period=_as_int(base_config.get("atr_period"), 14),
         base_config=base_config,
         complexity=(
             len(buy_rule.signals)

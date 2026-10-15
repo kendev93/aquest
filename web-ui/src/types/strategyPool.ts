@@ -92,7 +92,25 @@ export interface StrategyPoolSignal extends StrategyPoolMetrics {
   error?: string | null
 }
 
-export interface StrategyPoolHolding {
+/**
+ * 引擎按每标的生效配置算出的风控展示。三处视图共用：全市场页的当前持仓、
+ * 个股详情的跟踪持仓、特别关注 / 全市场表格。价格是原始价口径，
+ * `risk_level_as_of` 说明这条线用的是哪一天收盘后的数据。
+ */
+export interface HoldingRiskDisplay {
+  stop_loss_price?: number | null
+  trailing_stop_price?: number | null
+  take_profit_price?: number | null
+  risk_level_as_of?: string | null
+  pending_exit_reason?: string | null
+  pending_exit_signal_date?: string | null
+  pending_exit_risk_trigger?: string | null
+  max_hold_days?: number | null
+  max_hold_days_left?: number | null
+  max_hold_expiry_date?: string | null
+}
+
+export interface StrategyPoolHolding extends HoldingRiskDisplay {
   market: 'SH' | 'SZ'
   code: string
   name?: string | null

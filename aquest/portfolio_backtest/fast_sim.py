@@ -68,13 +68,19 @@ def _ps_contains(ps_slot: np.ndarray, n_ps: int, slot: int) -> bool:
 
 @njit(cache=True)
 def _ps_remove_at(
-    ps_slot: np.ndarray, ps_sig: np.ndarray, ps_reason: np.ndarray, index: int, n_ps: int
+    ps_slot: np.ndarray,
+    ps_sig: np.ndarray,
+    ps_reason: np.ndarray,
+    ps_cd: np.ndarray,
+    index: int,
+    n_ps: int,
 ) -> int:
     last = n_ps - 1
     for cursor in range(index, last):
         ps_slot[cursor] = ps_slot[cursor + 1]
         ps_sig[cursor] = ps_sig[cursor + 1]
         ps_reason[cursor] = ps_reason[cursor + 1]
+        ps_cd[cursor] = ps_cd[cursor + 1]
     return last
 
 
@@ -136,18 +142,19 @@ def _risk_check(
     tr_pct: np.ndarray,
     tr_mult: np.ndarray,
     tr_cd: np.ndarray,
-) -> tuple[int, float, int]:
-    """移植 ``risk._risk_trigger``；返回 (trigger_id, fill_price, cooldown_days)。
+) -> tuple[int, int]:
+    """移植 ``risk._risk_trigger``；返回 (trigger_id, cooldown_days)。
 
     trigger_id：-1 无触发、2 止损、3 止盈、4 移动止盈（判定优先级与原实现一致）。
-    与原实现相同，最高价在判定前就地更新（无论是否触发）。
+    与原实现相同，最高价在判定前就地更新（无论是否触发）。成交价不在这里定：
+    风控触碰只登记挂单，由下一交易日开盘撮合，与规则卖出同一条滞后。
     """
 
     high = highs_m[slot, day]
     low = lows_m[slot, day]
     open_price = opens_m[slot, day]
     if not (math.isfinite(high) and math.isfinite(low) and math.isfinite(open_price)):
-        return -1, 0.0, 0
+        return -1, 0
     if pos_highest[slot] < high:
         pos_highest[slot] = high
     atr = math.nan
@@ -157,21 +164,18 @@ def _risk_check(
     entry = pos_entry_price[slot]
     level = _risk_level_impl(entry, sl_is_atr[slot], sl_pct[slot], sl_mult[slot], atr, atr_ok, True)
     if not math.isnan(level) and low <= level:
-        fill = open_price if open_price <= level else level
-        return 2, fill, sl_cd[slot]
+        return 2, sl_cd[slot]
     level = _risk_level_impl(
         pos_highest[slot], tr_is_atr[slot], tr_pct[slot], tr_mult[slot], atr, atr_ok, True
     )
     if not math.isnan(level) and low <= level:
-        fill = open_price if open_price <= level else level
-        return 4, fill, tr_cd[slot]
+        return 4, tr_cd[slot]
     level = _risk_level_impl(
         entry, tp_is_atr[slot], tp_pct[slot], tp_mult[slot], atr, atr_ok, False
     )
     if not math.isnan(level) and high >= level:
-        fill = open_price if open_price >= level else level
-        return 3, fill, tp_cd[slot]
-    return -1, 0.0, 0
+        return 3, tp_cd[slot]
+    return -1, 0
 
 
 @njit(cache=True)
@@ -400,7 +404,7 @@ def _portfolio_kernel_impl(  # noqa: PLR0913 - 内核参数即预处理后的市
     slippage: float,
     initial_cash: float,
     max_positions: int,
-    max_hold_days: int,
+    hold_days_m: np.ndarray,
     single_security: bool,
     prof_comm: np.ndarray,
     prof_min_comm: np.ndarray,
@@ -442,6 +446,7 @@ def _portfolio_kernel_impl(  # noqa: PLR0913 - 内核参数即预处理后的市
     init_ps_slot: np.ndarray,
     init_ps_sig: np.ndarray,
     init_ps_reason: np.ndarray,
+    init_ps_cd: np.ndarray,
     init_n_ps: int,
     init_pb_slot: np.ndarray,
     init_pb_sig: np.ndarray,
@@ -475,6 +480,7 @@ def _portfolio_kernel_impl(  # noqa: PLR0913 - 内核参数即预处理后的市
         ps_slot = init_ps_slot
         ps_sig = init_ps_sig
         ps_reason = init_ps_reason
+        ps_cd = init_ps_cd
         n_ps = init_n_ps
         pb_slot = init_pb_slot
         pb_sig = init_pb_sig
@@ -502,6 +508,7 @@ def _portfolio_kernel_impl(  # noqa: PLR0913 - 内核参数即预处理后的市
         ps_slot = np.zeros(max_positions, dtype=np.int64)
         ps_sig = np.zeros(max_positions, dtype=np.int64)
         ps_reason = np.zeros(max_positions, dtype=np.int8)
+        ps_cd = np.zeros(max_positions, dtype=np.int64)
         n_ps = 0
         pb_slot = np.zeros(max_positions, dtype=np.int64)
         pb_sig = np.zeros(max_positions, dtype=np.int64)
@@ -572,12 +579,19 @@ def _portfolio_kernel_impl(  # noqa: PLR0913 - 内核参数即预处理后的市
                 pos_highest[slot] = (pos_highest[slot] - act_cash[ai]) / ratio
                 applied[ai] = True
 
-        # ---- 规则卖出（原 _execute_sells：按 pending_sells 插入序逐个成交）
+        # ---- 卖出成交（原 _execute_sells：按 pending_sells 插入序逐个成交，
+        #      含规则卖出、持有到期与昨日触碰风控线登记的风控卖单）
         k = 0
         while k < n_ps:
             slot = ps_slot[k]
             sig_day = ps_sig[k]
             reason_id = ps_reason[k]
+            cooldown_days = ps_cd[k]
+            is_risk_reason = reason_id == 2 or reason_id == 3 or reason_id == 4
+            # 先落成局部变量：njit 里在长参数调用中写三元表达式会触发
+            # 「CALL_FUNCTION_EX with **kwargs not supported」。
+            risk_id = reason_id if is_risk_reason else -1
+            trade_cd = cooldown_days if is_risk_reason else -1
             if not pos_active[slot]:
                 k += 1
                 continue
@@ -633,15 +647,19 @@ def _portfolio_kernel_impl(  # noqa: PLR0913 - 内核参数即预处理后的市
                 pnl,
                 cost_basis,
                 reason_id,
-                -1,
-                -1,
+                risk_id,
+                trade_cd,
                 nan,
             )
             pos_active[slot] = False
             n_pos = _pos_remove(pos_order, n_pos, slot)
-            n_ps = _ps_remove_at(ps_slot, ps_sig, ps_reason, k, n_ps)
+            n_ps = _ps_remove_at(ps_slot, ps_sig, ps_reason, ps_cd, k, n_ps)
+            if is_risk_reason and cooldown_days > 0:
+                # 冷却从成交日起算，与 Python 状态机同一条锚点。
+                cooldown[slot] = day + cooldown_days + 1
 
-        # ---- 风险卖出（原 _execute_risk_sells：按 symbol 字典序，当日 OHLC 触发）
+        # ---- 风控触碰（原 _execute_risk_sells：按 symbol 字典序，当日 OHLC 判定）
+        #      只登记挂单，成交与冷却都落到下一交易日开盘，和规则卖出同一口径。
         for rank_i in range(n_symbols):
             slot = slot_by_rank[rank_i]
             if not pos_active[slot]:
@@ -651,7 +669,7 @@ def _portfolio_kernel_impl(  # noqa: PLR0913 - 内核参数即预处理后的市
             local = g2l[slot, day]
             if local < 0:
                 continue
-            trigger_id, fill, cooldown_days = _risk_check(
+            trigger_id, cooldown_days = _risk_check(
                 highs_m,
                 lows_m,
                 opens_m,
@@ -675,59 +693,11 @@ def _portfolio_kernel_impl(  # noqa: PLR0913 - 内核参数即预处理后的市
             )
             if trigger_id < 0:
                 continue
-            price = fill
-            size = pos_size[slot]
-            comm = max(size * price * prof_comm[slot], prof_min_comm[slot])
-            stamp = size * price * prof_stamp[slot]
-            slip = size * slippage
-            proceeds = size * price - comm - stamp - slip
-            cash += proceeds
-            pnl = (
-                (price - pos_entry_price[slot]) * size
-                - pos_buy_comm[slot]
-                - pos_buy_slip[slot]
-                - comm
-                - stamp
-                - slip
-            )
-            cost_basis = pos_entry_price[slot] * size + pos_buy_comm[slot] + pos_buy_slip[slot]
-            n_trades = _record_trade(
-                t_day,
-                t_sig,
-                t_slot,
-                t_dir,
-                t_size,
-                t_price,
-                t_comm,
-                t_stamp,
-                t_slip,
-                t_pnl,
-                t_cb,
-                t_reason,
-                t_risk,
-                t_cd,
-                t_eqb,
-                n_trades,
-                day,
-                current_date,
-                slot,
-                1,
-                size,
-                price,
-                comm,
-                stamp,
-                slip,
-                pnl,
-                cost_basis,
-                trigger_id,
-                trigger_id,
-                cooldown_days,
-                nan,
-            )
-            pos_active[slot] = False
-            n_pos = _pos_remove(pos_order, n_pos, slot)
-            if cooldown_days > 0:
-                cooldown[slot] = day + cooldown_days + 1
+            ps_slot[n_ps] = slot
+            ps_sig[n_ps] = current_date
+            ps_reason[n_ps] = trigger_id
+            ps_cd[n_ps] = cooldown_days
+            n_ps += 1
 
         # ---- 买入（原 _execute_buys：按 pending_buys 顺序，槽位满即停）
         for k in range(n_pb):
@@ -884,13 +854,16 @@ def _portfolio_kernel_impl(  # noqa: PLR0913 - 内核参数即预处理后的市
                 ps_slot[n_ps] = slot
                 ps_sig[n_ps] = current_date
                 ps_reason[n_ps] = 0
+                ps_cd[n_ps] = 0
                 n_ps += 1
                 new_exit = True
                 continue
-            if max_hold_days > 0 and local - pos_entry_local[slot] + 1 >= max_hold_days:
+            hold_limit = hold_days_m[slot]
+            if hold_limit > 0 and local - pos_entry_local[slot] + 1 >= hold_limit:
                 ps_slot[n_ps] = slot
                 ps_sig[n_ps] = current_date
                 ps_reason[n_ps] = 1
+                ps_cd[n_ps] = 0
                 n_ps += 1
                 new_exit = True
 
@@ -950,6 +923,7 @@ def _portfolio_kernel_impl(  # noqa: PLR0913 - 内核参数即预处理后的市
         ps_slot,
         ps_sig,
         ps_reason,
+        ps_cd,
         n_pb,
         pb_slot,
         pb_sig,
@@ -1005,6 +979,10 @@ def _action_key(action: Any) -> str:
 
 
 def _risk_override(context: _StockSeries, config: PortfolioBacktestConfig, name: str) -> Any:
+    """``risk._risk_config_for_symbol`` 的第三份拷贝：njit 里拿不到 dataclass 替换，
+    只能按字段逐个取。改动 ``risk._SYMBOL_RISK_FIELDS`` 时这里要一起改，否则内核与
+    状态机用的是两套生效配置。"""
+
     strategy = context.strategy_config
     if name in strategy:
         return strategy[name]
@@ -1145,6 +1123,9 @@ def _build_inputs(
     tr_pct = np.full(n_symbols, math.nan)
     tr_mult = np.full(n_symbols, math.nan)
     tr_cd = np.zeros(n_symbols, dtype=np.int64)
+    # 最长持有天数与风控参数一样按标的覆盖：全市场池的组合回放里，全局不设上限，
+    # 到期只能来自每条逐股策略自己的 max_hold_days。
+    hold_days = np.zeros(n_symbols, dtype=np.int64)
     for s, context in enumerate(contexts):
         profile = profile_from_config(
             context.instrument_type,
@@ -1174,6 +1155,7 @@ def _build_inputs(
             _risk_override(context, config, "trailing_stop_atr_multiplier")
         )
         tr_cd[s] = int(_risk_override(context, config, "trailing_stop_cooldown_days") or 0)
+        hold_days[s] = int(_risk_override(context, config, "max_hold_days") or 0)
 
     order = sorted(range(n_symbols), key=lambda s: symbols[s])
     slot_by_rank = np.asarray(order, dtype=np.int64)
@@ -1235,6 +1217,7 @@ def _build_inputs(
     init_ps_slot = np.zeros(max_pos, dtype=np.int64)
     init_ps_sig = np.zeros(max_pos, dtype=np.int64)
     init_ps_reason = np.zeros(max_pos, dtype=np.int8)
+    init_ps_cd = np.zeros(max_pos, dtype=np.int64)
     init_pb_slot = np.zeros(max_pos, dtype=np.int64)
     init_pb_sig = np.zeros(max_pos, dtype=np.int64)
     init_pb_budget = np.zeros(max_pos, dtype=np.float64)
@@ -1274,9 +1257,16 @@ def _build_inputs(
             # 交回原实现按字符串语义继续。
             if pending.reason not in _REASON_LABEL_SET:
                 return None
+            reason_id = _REASON_LABELS.index(pending.reason)
+            # 风控挂单的触发身份就是 reason id；对不上说明这份检查点不是内核能
+            # 表达的形态（例如别处写来的、或拼接原因），同样交回原实现。
+            expected_trigger = _TRIGGER_NAMES[reason_id] if reason_id in (2, 3, 4) else ""
+            if (pending.risk_trigger or "") != expected_trigger:
+                return None
             init_ps_slot[init_n_ps] = symbol_slots[symbol]
             init_ps_sig[init_n_ps] = int(pending.signal_date)
-            init_ps_reason[init_n_ps] = _REASON_LABELS.index(pending.reason)
+            init_ps_reason[init_n_ps] = reason_id
+            init_ps_cd[init_n_ps] = int(pending.cooldown_days)
             init_n_ps += 1
         for buy in checkpoint.pending_buys:
             init_pb_slot[init_n_pb] = symbol_slots[buy.symbol]
@@ -1327,7 +1317,7 @@ def _build_inputs(
         float(config.slippage),
         float(config.initial_cash),
         int(config.max_positions),
-        int(config.max_hold_days or 0),
+        hold_days,
         bool(config.single_security_mode),
         prof_comm,
         prof_min_comm,
@@ -1369,6 +1359,7 @@ def _build_inputs(
         init_ps_slot,
         init_ps_sig,
         init_ps_reason,
+        init_ps_cd,
         init_n_ps,
         init_pb_slot,
         init_pb_sig,
@@ -1524,6 +1515,7 @@ def _build_result(
         ps_slot,
         ps_sig,
         ps_reason,
+        ps_cd,
         n_pb,
         pb_slot,
         pb_sig,
@@ -1640,8 +1632,12 @@ def _build_result(
     for i in range(int(n_ps)):
         slot = int(ps_slot[i])
         context = contexts[slot]
+        reason_id = int(ps_reason[i])
         pending_sells[context.symbol] = _PendingSell(
-            int(ps_sig[i]), _REASON_LABELS[int(ps_reason[i])]
+            int(ps_sig[i]),
+            _REASON_LABELS[reason_id],
+            risk_trigger=_TRIGGER_NAMES[reason_id] if reason_id in (2, 3, 4) else None,
+            cooldown_days=int(ps_cd[i]),
         )
     pending_buys = [
         _PendingBuy(contexts[int(pb_slot[i])].symbol, int(pb_sig[i]), float(pb_budget[i]))

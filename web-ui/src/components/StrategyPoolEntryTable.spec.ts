@@ -138,4 +138,35 @@ describe('StrategyPoolEntryTable', () => {
     expect(empty.text()).toContain('策略池为空')
     expect(empty.attributes('colspan')).toBe('13')
   })
+
+  it('prints the risk lines of a held symbol under its status column', () => {
+    const held = entry('600000')
+    held.tracking = {
+      summary: {
+        holding: [{
+          market: 'SH',
+          code: '600000',
+          stop_loss_price: 9,
+          trailing_stop_price: 11.4,
+          take_profit_price: null,
+          risk_level_as_of: '2026-10-16',
+          pending_exit_reason: null,
+          pending_exit_signal_date: null,
+          pending_exit_risk_trigger: null,
+          max_hold_days: 20,
+          max_hold_days_left: 9,
+          max_hold_expiry_date: null,
+        }],
+      },
+    }
+
+    const wrapper = mountTable({ entries: [held], heldKeys: new Set(['SH600000']) })
+    // 未启用的止盈线留空而不是显示 0；到期那根还没走出来就只报剩余交易日。
+    expect(wrapper.get('[data-testid="pool-holding-risk-600000"]').text()).toBe(
+      '止损 9.00 · 移动止盈 11.40（截至 2026-10-16 收盘） · 还剩 9 个交易日到期',
+    )
+
+    const noSnapshot = mountTable({ entries: [entry('600001')], heldKeys: new Set(['SH600001']) })
+    expect(noSnapshot.find('[data-testid="pool-holding-risk-600001"]').exists()).toBe(false)
+  })
 })

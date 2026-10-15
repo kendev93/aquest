@@ -581,6 +581,36 @@ describe('StrategyTrackingPage', () => {
       expect(card.text()).toContain('估算')
     })
 
+    it('names the risk line behind a pending exit and the day it was judged', async () => {
+      vi.mocked(strategiesApi.fetchStrategyTracking).mockResolvedValue([
+        {
+          ...online,
+          next_plan: {
+            ...plan,
+            sells: [{
+              ...plan.sells[0],
+              reason: '止损',
+              risk_trigger: 'stop_loss',
+              stop_loss_price: 9,
+              trailing_stop_price: null,
+              take_profit_price: null,
+              risk_level_as_of: '2026-09-10',
+            }],
+          },
+        },
+      ])
+
+      const wrapper = mount(StrategyTrackingPage)
+      await flushPromises()
+      await wrapper.get('[data-testid="tracking-toggle-strategy-1"]').trigger('click')
+      await flushPromises()
+
+      const sells = wrapper.get('[data-testid="tracking-plan-sells-strategy-1"]')
+      expect(sells.text()).toContain('止损 · 线 9.00 · 2026-09-10 收盘判定')
+      // 未启用的线不给 0，也不该被读成「跌到 0 才止损」。
+      expect(sells.text()).not.toContain('0.00')
+    })
+
     it('says plainly when there is nothing to do tomorrow', async () => {
       vi.mocked(strategiesApi.fetchStrategyTracking).mockResolvedValue([
         {

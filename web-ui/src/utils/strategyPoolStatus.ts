@@ -1,9 +1,12 @@
 import type {
+  HoldingRiskDisplay,
   StrategyPoolCandidate,
   StrategyPoolEntry,
   StrategyPoolObjective,
   StrategyPoolSignal,
 } from '../types'
+
+import { formatNumber } from './format'
 
 /** 「全市场标的状态」表格的排序列；'status' 表示按状态优先级排。 */
 export type StrategyPoolSortColumn =
@@ -176,6 +179,54 @@ export function sortPoolEntriesByMetric(
     }
     return sign * (valueA - valueB) || byStatusThenSymbol(a, b)
   })
+}
+
+/** 持仓生效中的风控线，拼成「止损 9.00 · 移动止盈 11.40（截至 2026-10-16 收盘）」。 */
+export function holdingRiskLevelText(holding: HoldingRiskDisplay): string {
+  const lines: Array<[string, number | null | undefined]> = [
+    ['止损', holding.stop_loss_price],
+    ['移动止盈', holding.trailing_stop_price],
+    ['止盈', holding.take_profit_price],
+  ]
+  const active = lines
+    .filter(([, value]) => typeof value === 'number' && Number.isFinite(value))
+    .map(([label, value]) => `${label} ${formatNumber(value, 2)}`)
+  if (!active.length) return '未设置风控线'
+  return `${active.join(' · ')}${
+    holding.risk_level_as_of ? `（截至 ${holding.risk_level_as_of} 收盘）` : ''
+  }`
+}
+
+/**
+ * 持有到期提示。到期日只有行情已经覆盖到那一天才给得出，否则只报还剩几个交易日，
+ * 免得显示一个没有依据的日期。
+ */
+export function holdingExpiryText(holding: HoldingRiskDisplay): string {
+  if (typeof holding.max_hold_days !== 'number' || !Number.isFinite(holding.max_hold_days)) return ''
+  const left = typeof holding.max_hold_days_left === 'number' ? holding.max_hold_days_left : null
+  if (left !== null && left <= 0) return '今日收盘满持有期限 · 下一交易日开盘卖出'
+  if (holding.max_hold_expiry_date && left !== null) {
+    return `${holding.max_hold_expiry_date} 到期 · 还剩 ${left} 个交易日`
+  }
+  return left === null ? '' : `还剩 ${left} 个交易日到期`
+}
+
+/** 风控条：生效中的三档线 + 判定日期 + 持有到期，用一行说清明天会按哪条线动。 */
+export function holdingRiskSummary(holding: HoldingRiskDisplay): string {
+  return [holdingRiskLevelText(holding), holdingExpiryText(holding)].filter(Boolean).join(' · ')
+}
+
+/**
+ * 跟踪快照里该标的当前持仓行的风控展示；没有持仓或快照缺失时返回 null。
+ *
+ * 条目接口把每只标的的当前跟踪行挂在 `tracking` 上，`summary.holding` 里带着引擎
+ * 算出的风控线，所以「全市场标的状态」与「特别关注」两张表不用另外请求就能显示。
+ */
+export function entryHoldingRisk(entry: StrategyPoolEntry): HoldingRiskDisplay | null {
+  const summary = (entry.tracking as { summary?: unknown } | null | undefined)?.summary
+  const holding = (summary as { holding?: unknown } | null | undefined)?.holding
+  const row = Array.isArray(holding) ? holding[0] : null
+  return row && typeof row === 'object' ? (row as HoldingRiskDisplay) : null
 }
 
 export function rerunEntryDisabled(context: PoolJobStateContext): boolean {

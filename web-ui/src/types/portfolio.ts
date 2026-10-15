@@ -4,6 +4,8 @@ import type { BacktestExecution, BacktestPositionMode, CombineMode, DateRangeMod
 
 import type { RuleGroupPayload } from './screen'
 
+import type { HoldingRiskDisplay } from './strategyPool'
+
 
 export interface PortfolioBacktestPayload {
   universe: PortfolioUniverse
@@ -368,10 +370,17 @@ export interface TrackingPlanOrder {
   estimated_cost?: number
   reason?: string
   signal_date?: string
+  /** 卖出由哪条风控线触发；规则卖出为 null。 */
+  risk_trigger?: string | null
+  /** 触发线本身（原始价口径）与判定所用日期。 */
+  stop_loss_price?: number | null
+  trailing_stop_price?: number | null
+  take_profit_price?: number | null
+  risk_level_as_of?: string | null
 }
 
 
-export interface TrackingHolding {
+export interface TrackingHolding extends HoldingRiskDisplay {
   market: string
   code: string
   name: string

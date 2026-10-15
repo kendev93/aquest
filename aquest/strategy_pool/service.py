@@ -35,7 +35,7 @@ from aquest.market_data.risk_warning import is_risk_warning_symbol
 from aquest.market_data.store import DuckDbMarketDataStore
 from aquest.market_data.store_base import RESEARCH_START
 from aquest.portfolio_backtest.benchmark import curve_performance
-from aquest.portfolio_backtest.models import PortfolioBacktestConfig
+from aquest.portfolio_backtest.models import HOLDING_RISK_FIELDS, PortfolioBacktestConfig
 from aquest.portfolio_backtest.service import PortfolioBacktestService
 from aquest.screening.engine import evaluate_rule_group
 from aquest.screening.jobs import TaskCancelledError
@@ -85,7 +85,9 @@ PoolEntryWriter = Callable[[Mapping[str, object]], None]
 # 研究窗口起点从 2015-01-05 裁到 RESEARCH_START（2016-01-01），2015 全年只作
 # 指标预热。门槛与研究窗口都会改变存量条目的有效性，v5 语义下的条目在
 # 下一次全市场重选时逐股重研究。复用节奏不影响研究结论本身，不参与指纹。
-MARKET_POOL_ALGORITHM_VERSION = "market-pool-v6"
+# 风控退出改到次日开盘成交、组合回放按标的执行最长持有天数、ATR 线改用 Wilder 平滑
+# 且每标的 atr_period 真正生效：三者都会改变存量条形的绩效与排名，旧结果不可复用。
+MARKET_POOL_ALGORITHM_VERSION = "market-pool-v7"
 
 #: 「没有策略」条目的重查节奏（自然日）。验证段按可用交易日比例切，「没有
 #: 策略」这个结论依赖当时的历史长度——数据攒够可能翻身；但一天新数据对样本量
@@ -1466,6 +1468,11 @@ class MarketStrategyPoolService:
                         "name": str(item.get("name") or ""),
                         "status": "held",
                     }
+                    # 三档风控线、挂单状态与持有到期原样透传：界面上「今日触发风控、
+                    # 下一交易日开盘卖出」就靠这几个字段说清楚。
+                    holding.update(
+                        {key: item.get(key) for key in HOLDING_RISK_FIELDS if key in item}
+                    )
                     holding_return = _finite_metric(item.get("unrealized_pnl_pct"))
                     if holding_return is not None:
                         holding["holding_return_pct"] = holding_return
@@ -2502,6 +2509,9 @@ def _portfolio_strategies(
         "trailing_stop_atr_multiplier",
         "trailing_stop_cooldown_days",
         "atr_period",
+        # 最长持有天数是逐股策略自己的参数：组合回放必须带着它，否则 20 日的策略在
+        # 池子里变成无限持有，而同一策略在跟踪账户里却按到期卖出。
+        "max_hold_days",
     )
     entry_map = {(str(entry.get("market")), str(entry.get("code"))): entry for entry in entries}
     ranked: list[tuple[float, float, float, str, dict[str, object]]] = []

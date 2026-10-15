@@ -967,25 +967,28 @@ def test_portfolio_fills_a_vacated_slot_by_rank_after_stop_loss() -> None:
         "BUY",
         "SELL",
         "BUY",
-        "SELL",
-        "BUY",
     ]
     assert [(trade["code"], trade["date"]) for trade in report.trades] == [
         ("600001", "2024-01-02"),
         ("600000", "2024-01-02"),
-        ("600001", "2024-01-03"),
         ("600001", "2024-01-04"),
-        ("600001", "2024-01-05"),
-        ("600001", "2024-01-06"),
+        ("600002", "2024-01-04"),
     ]
+    # 600001 在第 3 根收盘碰到止损线，但成交与规则卖出一样落在第 4 根开盘；
+    # 槽位也直到那一刻才腾出来，所以替补 600002 与原口径同日买入却晚一根成交。
+    sell = report.trades[2]
+    assert sell["signal_date"] == "2024-01-03"
+    assert sell["risk_trigger"] == "stop_loss"
+    assert sell["reason"] == "止损"
+    assert report.trades[3]["signal_date"] == "2024-01-03"
     assert report.trades[0]["name"] == "测试600001"
-    assert {holding["code"] for holding in report.states[-1]["holdings"]} == {"600000", "600001"}
+    assert {holding["code"] for holding in report.states[-1]["holdings"]} == {"600000", "600002"}
     assert {holding["name"] for holding in report.states[-1]["holdings"]} == {
         "测试600000",
-        "测试600001",
+        "测试600002",
     }
     assert report.states[-1]["positions_count"] == 2
-    assert report.performance["end_value"] == 11_100.0
+    assert report.performance["end_value"] == 12_400.0
     json.dumps(report.to_dict(), ensure_ascii=False)
 
 

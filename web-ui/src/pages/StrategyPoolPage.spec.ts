@@ -595,6 +595,75 @@ describe('StrategyPoolPage', () => {
     expect(wrapper.get('[data-testid="pool-row-600000"]').text()).not.toContain('空仓')
   })
 
+  it('labels a risk exit by the day it triggered and the day it filled', async () => {
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({
+      job_id: 'signal-risk',
+      status: 'completed',
+      result: {
+        mode: 'signals',
+        objective: 'annual_return',
+        holding_scope: 'per_stock_strategy',
+        holding_snapshot_complete: true,
+        as_of_date: '2026-10-01',
+        buy_signals: [],
+        sell_signals: [],
+        states: [],
+        model_portfolio: {
+          available: true,
+          holding_scope: 'per_stock_strategy',
+          holdings: [{
+            market: 'SH',
+            code: '600001',
+            name: '在途止损',
+            status: 'held',
+            holding_return_pct: -0.06,
+            pending_exit_reason: '止损',
+            pending_exit_signal_date: '2026-10-01',
+            pending_exit_risk_trigger: 'stop_loss',
+            stop_loss_price: 9,
+            trailing_stop_price: 11.4,
+            take_profit_price: null,
+            risk_level_as_of: '2026-10-01',
+            max_hold_days: 20,
+            max_hold_days_left: 3,
+            max_hold_expiry_date: '2026-10-28',
+          }],
+          risk_exit_signals: [{
+            market: 'SH',
+            code: '600000',
+            name: '浦发银行',
+            reason: '止损',
+            risk_trigger: 'stop_loss',
+            signal_date: '2026-09-30',
+            date: '2026-10-01',
+            price: 10,
+            trade_return_pct: -0.08,
+          }],
+        },
+      },
+    })
+
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    // 昨收触发、今开成交：挂单在途那天它仍是持仓，标签要说清是哪条线、按哪天的数据算。
+    const holdings = wrapper.get('[data-testid="pool-current-holdings"]')
+    expect(holdings.text()).toContain('今日触发止损 · 下一交易日开盘卖出')
+    expect(holdings.get('[data-testid="pool-holding-risk-600001"]').text()).toBe(
+      '止损 9.00 · 移动止盈 11.40（截至 2026-10-01 收盘） · 2026-10-28 到期 · 还剩 3 个交易日',
+    )
+
+    const sells = wrapper.get('[data-testid="pool-sell-signals"]')
+    expect(sells.text()).toContain('2026-09-30 收盘触发止损 · 2026-10-01 开盘已成交')
+    expect(sells.text()).toContain('本次持仓收益 -8.00%')
+    expect(sells.text()).not.toContain('按风控成交规则处理')
+    // 面板标题不能再说「当天触发卖出」：风控退出是昨天收盘触发、今天开盘成交。
+    expect(sells.text()).toContain('卖出规则与风控退出 1')
+    expect(sells.text()).toContain('2026-10-01 收盘判定卖出规则 · 风控退出为今日开盘成交')
+    expect(wrapper.text()).toContain('止损、止盈、移动止盈走同一条口径')
+  })
+
   it('shows confirmed holdings and their signal badge when the per-stock snapshot is incomplete', async () => {
     window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
     vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({

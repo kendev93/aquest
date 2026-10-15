@@ -25,6 +25,22 @@ CompareOperator = Literal["gt", "gte", "lt", "lte"]
 PositionMode = Literal["full", "fixed"]
 PortfolioJsonValue = object
 PORTFOLIO_BACKTEST_PRICE_BASIS: Literal["raw"] = "raw"
+
+#: 持仓行上供界面展示的风控字段。引擎在 ``current_state.holdings`` 里产出，
+#: 策略池的组合投影与逐股跟踪都按这一份名单透传，加字段只需改这一处再加渲染。
+HOLDING_RISK_FIELDS: tuple[str, ...] = (
+    "stop_loss_price",
+    "trailing_stop_price",
+    "take_profit_price",
+    "risk_level_as_of",
+    "highest_price",
+    "pending_exit_reason",
+    "pending_exit_signal_date",
+    "pending_exit_risk_trigger",
+    "max_hold_days",
+    "max_hold_days_left",
+    "max_hold_expiry_date",
+)
 PORTFOLIO_BACKTEST_LIMITATIONS = (
     "持仓跨越除权除息日时按交易所规则同步调整股数与成本价，现金分红计入可用资金"
     "（不计税）：账户现金流按「真实持有」处理，成交价仍用不复权价。",
@@ -224,8 +240,8 @@ class PortfolioBacktestConfig:
                 raise ValueError(f"{prefix}_pct 不能在 ATR 模式下设置")
             if mode == "pct" and multiplier is not None:
                 raise ValueError(f"{prefix}_atr_multiplier 不能在 pct 模式下设置")
-        if self.atr_period != 14:
-            raise ValueError("atr_period 固定为 14")
+        if isinstance(self.atr_period, bool) or not 1 <= self.atr_period <= 1_000:
+            raise ValueError("atr_period 必须在 1 到 1000 之间")
         if self.sell_value_threshold is not None and not math.isfinite(self.sell_value_threshold):
             raise ValueError("sell_value_threshold 必须是有限数字")
         if self.sell_value is None:
@@ -303,6 +319,9 @@ class PortfolioBacktestConfig:
                     "take_profit_atr_multiplier",
                     "trailing_stop_pct",
                     "trailing_stop_atr_multiplier",
+                    # 每标的的持有上限现在真的会被引擎执行（组合回放按标的取），
+                    # 所以只设它的策略也算有出口。
+                    "max_hold_days",
                 )
             )
             for strategy in self.symbol_strategies.values()

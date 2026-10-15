@@ -95,6 +95,11 @@ def test_verified_append_replays_only_new_dates_and_matches_full_backtest(tmp_pa
     ):
         assert legacy_engine["summary"][identity_key] == before["summary"][identity_key]
     assert legacy_engine["checkpoint"] == before["checkpoint"]
+    # v2 盐是「风控当日按触发价平仓」的口径，成交日一改整批账户必须重建：留着它
+    # 就等于让新代码在旧口径的账户上续跑，混出口一份回测两种成交日。
+    recalibrated = replay_account(service, ref, version, {**before, "engine": "pool-account-v2"})
+    assert recalibrated["summary"]["mode"] == "rebuilt"
+    assert recalibrated["checkpoint"] == before["checkpoint"]
     store.replace_local_bars("SH", "600000", "stock", bars(3))
     started = time.perf_counter()
     resumed = replay_account(service, ref, version, before)
@@ -249,6 +254,75 @@ def test_buy_rule_stays_true_but_is_reported_blocked_during_risk_cooldown(tmp_pa
     assert summary["buy_blocked_reason"] == "cooldown"
     assert summary["holding"] == []
     assert result["checkpoint"]["pending_buys"] == []
+
+
+def test_risk_exit_stays_open_on_the_trigger_day_and_closes_the_next(tmp_path):
+    """触发当日仍持仓、次日开盘成交——跟踪面板只能显示用户做得出的动作。
+
+    当日 OHLC 要收盘后才算得出来，盘中那一下触碰既不知道也来不及挂单，所以模拟
+    里也不许按触发价平仓。冷却同样锚在成交日，不是触碰日。
+    """
+
+    dates = pd.date_range("2026-09-01", periods=5, freq="D")
+    frame = pd.DataFrame(
+        dict(
+            date=dates,
+            open=[10.0, 10.0, 10.0, 10.0, 10.0],
+            close=[10.0, 10.0, 10.0, 7.0, 7.0],
+            high=[11.0, 11.0, 11.0, 11.0, 11.0],
+            low=[9.0, 9.0, 9.0, 7.0, 7.0],
+            volume=[1000.0] * 5,
+            amount=[10_000.0, 10_000.0, 10_000.0, 7_000.0, 7_000.0],
+            bar_status=["completed"] * 5,
+        )
+    )
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", frame)
+    adapter = DuckDbMarketDataAdapter(store)
+    service = PortfolioBacktestService(adapter=adapter)
+    value = candidate()
+    value["config"].update(initial_cash=1000, stop_loss_pct=0.2, stop_loss_cooldown_days=2)
+    version = dict(
+        candidate=value,
+        signature=signature(value),
+        launch_data_date="2026-09-01",
+        created_at="2026-09-01T16:00:00+00:00",
+    )
+    ref = adapter.stock_ref("", "SH", "600000")
+
+    # 回放到 09-04（当日最低 7.0 跌破 8.0 的止损线）就停：只剩挂单，没有成交。
+    trigger = replay_account(service, ref, dict(version, target_data_date="2026-09-04"))
+    assert trigger["summary"]["as_of_date"] == "2026-09-04"
+    held = trigger["summary"]["holding"]
+    assert [row["code"] for row in held] == ["600000"]
+    assert held[0]["pending_exit_reason"] == "止损"
+    assert held[0]["pending_exit_risk_trigger"] == "stop_loss"
+    assert held[0]["pending_exit_signal_date"] == "2026-09-04"
+    assert held[0]["stop_loss_price"] == pytest.approx(8.0)
+    assert held[0]["risk_level_as_of"] == "2026-09-04"
+    assert held[0]["max_hold_days"] is None
+    assert held[0]["take_profit_price"] is None
+    assert trigger["summary"]["risk_exits"] == []
+    assert trigger["checkpoint"]["cooldown_until"] == {}
+    pending = trigger["checkpoint"]["pending_sells"]["SH600000"]
+    assert pending["reason"] == "止损"
+    assert pending["risk_trigger"] == "stop_loss"
+    assert pending["cooldown_days"] == 2
+    assert pending["signal_date"] == 20260904
+
+    # 补上 09-05：开盘成交，冷却从这一根的 bar 序号起算。
+    closed = replay_account(service, ref, version)
+    assert closed["summary"]["holding"] == []
+    sells = [row for row in closed["checkpoint"]["trades"] if row["direction"] == "SELL"]
+    assert len(sells) == 1
+    assert sells[0]["signal_date"] == "2026-09-04"
+    assert sells[0]["date"] == "2026-09-05"
+    assert sells[0]["price"] == 10.0
+    assert sells[0]["risk_trigger"] == "stop_loss"
+    assert sells[0]["cooldown_days"] == 2
+    assert closed["summary"]["risk_exits"][0]["signal_date"] == "2026-09-04"
+    # 成交日是第 5 根（下标 4），冷却 2 根 → 到 4 + 2 + 1 = 7 才解禁。
+    assert closed["checkpoint"]["cooldown_until"] == {"SH600000": 7}
 
 
 def test_held_position_keeps_its_buy_signal_unblocked(tmp_path):

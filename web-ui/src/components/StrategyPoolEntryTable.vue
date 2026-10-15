@@ -5,9 +5,11 @@ import type { StrategyPoolEntry, StrategyPoolObjective, StrategyPoolSignal } fro
 import { formatNumber, formatPercent, formatSignedPercent } from '../utils/format'
 import {
   benchmarkReturn,
+  entryHoldingRisk,
   entryIsHeld,
   entryStatus,
   formatHoldingDays,
+  holdingRiskSummary,
   metricValue,
   objectiveLabel,
   rerunEntryDisabled,
@@ -100,6 +102,12 @@ function followLabel(entry: StrategyPoolEntry): string {
   return props.followKeys.has(symbol(entry)) ? '已关注' : '关注'
 }
 
+/** 持仓中标的风控条；没持仓或还没有跟踪快照时为空，不显示占位符。 */
+function holdingRiskText(entry: StrategyPoolEntry): string {
+  const risk = entryHoldingRisk(entry)
+  return risk ? holdingRiskSummary(risk) : ''
+}
+
 function followTitle(entry: StrategyPoolEntry): string {
   return props.followKeys.has(symbol(entry))
     ? `取消关注 ${entry.market} ${entry.code}`
@@ -120,7 +128,7 @@ function followTitle(entry: StrategyPoolEntry): string {
       </tr></thead>
       <tbody>
         <tr v-for="entry in entries" :key="symbol(entry)" :data-testid="`${testid}-row-${entry.code}`">
-          <td><div class="status-stack"><span v-if="entryIsHeld(entry, heldKeys)" class="status-chip status-held">持仓中</span><span class="status-chip" :class="`status-${entryStatus(entry, states)}`">{{ statusLabel(entryStatus(entry, states)) }}</span></div></td>
+          <td><div class="status-stack"><span v-if="entryIsHeld(entry, heldKeys)" class="status-chip status-held">持仓中</span><span class="status-chip" :class="`status-${entryStatus(entry, states)}`">{{ statusLabel(entryStatus(entry, states)) }}</span></div><small v-if="holdingRiskText(entry)" :data-testid="`${testid}-holding-risk-${entry.code}`">{{ holdingRiskText(entry) }}</small></td>
           <td><strong>{{ entry.market }} {{ entry.code }}</strong><small>{{ entry.name }}</small></td>
           <td :data-testid="`${testid}-entry-benchmark-${entry.code}`">
             <div v-if="entry.benchmark" class="benchmark-summary">

@@ -543,6 +543,19 @@ class DiscoverySnapshot:
         return results
 
 
+def _snapshot_atr_period(base: Mapping[str, object]) -> int:
+    """快照里那条 ``atr`` 数组用的周期，与候选风控 ATR 同源。
+
+    写死 14 会让「研究配置声明了别的周期」时搜索用的线和最终回放用的线不是同一条；
+    寻优本身不搜周期（只搜模式与倍数），所以这里跟着请求走就够了。
+    """
+
+    value = base.get("atr_period")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return 14
+    return int(value)
+
+
 def _discovery_snapshot_cache_key(
     store: DuckDbMarketDataStore,
     request: DiscoveryRequest,
@@ -608,7 +621,7 @@ def _discovery_snapshot_cache_key(
             )
             for formula_id in FORMULA_REGISTRY.all_formula_ids()
         ],
-        "atr_period": 14,
+        "atr_period": _snapshot_atr_period(base),
     }
     encoded = json.dumps(
         payload,
@@ -693,6 +706,7 @@ def _write_snapshot(
 ) -> None:
     snapshot_started = time.perf_counter()
     base = request.base_config
+    atr_period = _snapshot_atr_period(base)
     window = snapshot_window(request)
     instrument_types = _string_tuple(base.get("instrument_types"))
     boards = _string_tuple(base.get("boards"))
@@ -825,7 +839,7 @@ def _write_snapshot(
                 bars[index, cursor:end] = prepared[column].to_numpy(dtype=float, copy=False)[
                     positions
                 ]
-            bars[4, cursor:end] = _atr_series(prepared, 14)[positions]
+            bars[4, cursor:end] = _atr_series(prepared, atr_period)[positions]
             # 基准口径：复权收盘价。metric_frames 已经在上面按事件校正过，
             # 这里只是把同一段窗口搬进快照数组，避免基准再单独做一次复权。
             bars[5, cursor:end] = metric_frames[(market, code)]["close"].to_numpy(

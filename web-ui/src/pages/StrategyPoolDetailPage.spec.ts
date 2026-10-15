@@ -127,3 +127,34 @@ it('does not claim the account is uninitialized while the first read is still in
     expect(wrapper.find('.individual-full-detail').exists()).toBe(false)
   } finally { wrapper.unmount() }
 })
+
+it('prints the risk lines and the holding deadline of the tracked position', async () => {
+  // 风控线只有引擎那份才算数：界面上标的价格、判定日期和到期日必须同源，
+  // 否则用户按一个算不出来的价位挂单。
+  window.history.replaceState({}, '', '/strategy-pool/SH/600000?objective=annual_return')
+  const version = { version_id: 'v1', created_at: '2026-09-02T06:00:00+00:00', source: 'automatic',
+    is_current: true, status: 'ready', summary: {},
+    candidate: { candidate_id: 'v1', buy_rule: { conditions: [] }, sell_rule: { signals: [] }, config: {} } }
+  const fetch = vi.fn(async (url: string) => {
+    let data: unknown
+    if (url.endsWith('/detail')) data = { name: '测试股', objectives: { annual_return: [version], sharpe: [] } }
+    else if (url.includes('/curve')) data = { summary: { as_of_date: '2026-09-03', baseline_date: '2026-09-01',
+      holding: [{ size: 100, entry_date: '2026-09-01', entry_price: 10, close: 9.4, unrealized_pnl_pct: -0.06,
+        stop_loss_price: 9, trailing_stop_price: null, take_profit_price: null, risk_level_as_of: '2026-09-03',
+        pending_exit_reason: '止损', pending_exit_signal_date: '2026-09-03', pending_exit_risk_trigger: 'stop_loss',
+        max_hold_days: 20, max_hold_days_left: 3, max_hold_expiry_date: '2026-10-01' }] },
+      backtest: { start_date: '2026-09-01', end_date: '2026-09-03', bars: 3, performance: { total_return: 0.5 },
+        equity_curve: [{ date: '2026-09-01', total: 1000, return_pct: 0 }], trades: [] } }
+    else data = { items: [], total: 0 }
+    return { ok: true, json: async () => ({ data }) }
+  })
+  vi.stubGlobal('fetch', fetch)
+  const wrapper = mount(StrategyPoolDetailPage)
+  try {
+    await flushPromises()
+    const holding = wrapper.get('[data-testid="pool-detail-holding"]').text()
+    expect(holding).toContain('止损 9.00（截至 2026-09-03 收盘） · 2026-10-01 到期 · 还剩 3 个交易日')
+    // 未启用的止盈线不能显示成 0。
+    expect(holding).not.toContain('0.00')
+  } finally { wrapper.unmount() }
+})

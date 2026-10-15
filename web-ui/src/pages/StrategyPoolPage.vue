@@ -41,6 +41,7 @@ import AppTopbar from '../components/AppTopbar.vue'
 import { formatDuration, formatNumber, formatPercent, formatSignedPercent } from '../utils/format'
 import {
   formatHoldingDays,
+  holdingRiskSummary,
   objectiveLabel,
   sortPoolEntriesByMetric,
   sortPoolEntriesByStatus,
@@ -1011,14 +1012,17 @@ function pageItems<T>(items: T[], page: number): T[] {
 }
 
 function holdingStatus(holding: StrategyPoolHolding): string {
-  const tradeStatus = sellNextTradingDaySymbols.value.has(`${holding.market}${holding.code}`)
-    ? '今日触发卖出 · 下一交易日卖出'
-    : '当前持仓中'
+  // 风控挂单是昨收判定、今开成交，还没成交前它仍是持仓，标签要说清是哪条线触发的。
+  const exitLabel = holding.pending_exit_reason
+    ? `今日触发${holding.pending_exit_reason} · 下一交易日开盘卖出`
+    : sellNextTradingDaySymbols.value.has(`${holding.market}${holding.code}`)
+      ? '今日触发卖出 · 下一交易日卖出'
+      : '当前持仓中'
   const holdingReturn = typeof holding.holding_return_pct === 'number'
     && Number.isFinite(holding.holding_return_pct)
     ? `持仓阶段收益 ${formatSignedPercent(holding.holding_return_pct)}`
     : ''
-  return holdingReturn ? `${holdingReturn} · ${tradeStatus}` : tradeStatus
+  return holdingReturn ? `${holdingReturn} · ${exitLabel}` : exitLabel
 }
 
 function incompleteHoldingsWarning(): string {
@@ -1128,6 +1132,18 @@ function riskExitReturnText(signal: Record<string, unknown>): string {
   return typeof value === 'number' && Number.isFinite(value)
     ? `本次持仓收益 ${formatSignedPercent(value)}`
     : ''
+}
+
+/** 风控退出行的出处：哪一天的收盘碰到哪条线、哪一天开盘成交，两个日期都写出来。 */
+function riskExitFilledText(signal: Record<string, unknown>): string {
+  const reason = (typeof signal.reason === 'string' && signal.reason)
+    || (typeof signal.risk_trigger === 'string' && signal.risk_trigger)
+    || '风控'
+  const trigger = typeof signal.signal_date === 'string' && signal.signal_date
+    ? `${signal.signal_date} 收盘`
+    : '前一交易日收盘'
+  const filled = typeof signal.date === 'string' && signal.date ? `${signal.date} 开盘` : '今日开盘'
+  return `${trigger}触发${reason} · ${filled}已成交`
 }
 
 // created_at 是裸 UTC（后端 `_now()` 落库前把 tzinfo 去掉了），必须显式按东八区展示。
@@ -1329,7 +1345,7 @@ onUnmounted(() => {
             <p v-if="!buySignals.length" class="empty-copy">{{ signalResult ? '当前没有股票触发买入规则。' : '选择目标后点击“刷新当天信号”，扫描最新完整行情日。' }}</p>
           </article>
           <article class="signal-panel panel-card" data-testid="pool-sell-signals">
-            <div class="section-heading"><div><p class="eyebrow">SELL SIGNALS</p><h2>当天触发卖出 <span>{{ ruleSellSignals.length + riskSellSignals.length }}</span></h2></div><small>{{ signalAsOf || '卖出条件和持仓风控退出' }}</small></div>
+            <div class="section-heading"><div><p class="eyebrow">SELL SIGNALS</p><h2>卖出规则与风控退出 <span>{{ ruleSellSignals.length + riskSellSignals.length }}</span></h2></div><small>{{ signalAsOf ? `${signalAsOf} 收盘判定卖出规则 · 风控退出为今日开盘成交` : '卖出条件与持仓风控退出' }}</small></div>
             <div v-if="ruleSellSignals.length || riskSellSignals.length" class="signal-list">
               <template v-for="item in visibleSellSignals" :key="item.key">
                 <div v-if="item.kind === 'rule'" class="signal-row">
@@ -1338,7 +1354,7 @@ onUnmounted(() => {
                 </div>
                 <div v-else class="signal-row risk-signal">
                   <strong>{{ item.signal.market }}{{ item.signal.code }}<template v-if="item.signal.name"> · {{ item.signal.name }}</template></strong>
-                  <span>回测日内风控已触发：{{ item.signal.reason || item.signal.risk_trigger || '风控规则' }} · 按风控成交规则处理<template v-if="riskExitReturnText(item.signal)"> · {{ riskExitReturnText(item.signal) }}</template></span>
+                  <span>{{ riskExitFilledText(item.signal) }}<template v-if="riskExitReturnText(item.signal)"> · {{ riskExitReturnText(item.signal) }}</template></span>
                 </div>
               </template>
             </div>
@@ -1355,6 +1371,7 @@ onUnmounted(() => {
               <div v-for="holding in visibleCurrentHoldings" :key="`${holding.market}${holding.code}`" class="signal-row holding-row">
                 <strong>{{ holding.market }}{{ holding.code }} · {{ holding.name || '—' }}</strong>
                 <span>{{ holdingStatus(holding) }}<template v-if="qualityText(symbol(holding))"> · {{ qualityText(symbol(holding)) }}</template></span>
+                <small v-if="holdingRiskSummary(holding)" :data-testid="`pool-holding-risk-${holding.code}`">{{ holdingRiskSummary(holding) }}</small>
               </div>
             </div>
             <div v-if="currentHoldings.length > SIGNAL_PAGE_SIZE" class="signal-pagination" data-testid="pool-holdings-pagination">
@@ -1369,7 +1386,7 @@ onUnmounted(() => {
             <p v-else-if="!currentHoldings.length" class="empty-copy">当前没有仍处于持仓状态的标的。</p>
           </article>
         </section>
-        <p class="pool-scale-note">买入和卖出规则信号都在最新完整行情日收盘后判定，并于下一交易日执行。因此，今日触发卖出规则的标的当天仍列在持仓中，下一交易日卖出。止损、止盈按回测中的日线风控成交规则模拟。</p>
+        <p class="pool-scale-note">买入和卖出规则都在最新完整行情日收盘后判定，下一交易日执行，因此今日触发卖出规则的标的当天仍列在持仓中。止损、止盈、移动止盈走同一条口径：触发当日收盘后判定、下一交易日按开盘价成交；持仓行上的三档风控价是引擎实际在用的那三条线，按标注那一日收盘后的数据算出。</p>
 
         <section class="pool-focus-section panel-card" data-testid="pool-focus-section">
           <div class="section-heading"><div><p class="eyebrow">FOLLOWED</p><h2>特别关注 <span>{{ focusRows.length }}</span></h2></div><small>只列关注的标的 · 按状态优先级排序，不跟随下方搜索、排序和分页</small></div>

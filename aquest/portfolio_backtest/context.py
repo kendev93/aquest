@@ -253,7 +253,13 @@ class PortfolioContextMixin(_PortfolioServiceState):
         parsed: ParsedFormula | None,
         frame: pd.DataFrame | None = None,
     ) -> _StockSeries | None:
-        base = self._context_base(ref, config, frame)
+        # 标的覆盖必须在建底座之前解析：ATR 序列的周期是标的策略自己的参数，
+        # 底座一旦按全局周期算完就来不及改了（此前正是这里把 per-symbol atr_period
+        # 静默吃掉）。
+        strategy = config.symbol_strategies.get(ref.market + ref.code)
+        if strategy is None:
+            strategy = config.symbol_strategies.get(f"{ref.market}:{ref.code}", {})
+        base = self._context_base(ref, config, frame, self._effective_atr_period(config, strategy))
         results = self._calculate_results(
             base.metric_frame,
             config,
@@ -268,9 +274,6 @@ class PortfolioContextMixin(_PortfolioServiceState):
         if len(indices) == 0:
             raise ValueError("日期范围内没有可用日线")
 
-        strategy = config.symbol_strategies.get(ref.market + ref.code)
-        if strategy is None:
-            strategy = config.symbol_strategies.get(f"{ref.market}:{ref.code}", {})
         buy_rule = strategy.get("buy_rule") if isinstance(strategy, Mapping) else None
         sell_rule = strategy.get("sell_rule") if isinstance(strategy, Mapping) else None
         selected_buy_rule = buy_rule if isinstance(buy_rule, RuleGroup) else config.buy_rule
@@ -329,16 +332,31 @@ class PortfolioContextMixin(_PortfolioServiceState):
             adjusted_closes=base.metric_closes,
         )
 
+    @staticmethod
+    def _effective_atr_period(config: PortfolioBacktestConfig, strategy: object) -> int:
+        """标的策略声明的 ATR 周期优先，缺失或非法时回落到全局配置。
+
+        风控线的 ATR 是策略参数（每标的寻优时各带一个），不是目录里那个固定 14 的
+        ``atr_pct`` 指标；两者只在周期都为 14 时数值相同。
+        """
+
+        if isinstance(strategy, Mapping):
+            value = strategy.get("atr_period")
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                return value
+        return int(config.atr_period)
+
     def _context_base(
         self,
         ref: StockRef,
         config: PortfolioBacktestConfig,
         frame: pd.DataFrame | None,
+        atr_period: int,
     ) -> _ContextBase:
-        """取规则无关底座；同股同窗口命中缓存，公司行动变化时自然重建。
+        """取规则无关底座；同股同窗口同 ATR 周期命中缓存，公司行动变化时自然重建。
 
         缓存键里带公司行动的 repr：``run_stock`` 每次顶层调用都会刷新行动缓存并
-        重新查询（「每次运行都能看到最新除权事件」是既有契约），行动变了键就变，
+        重新查询（「每次运行都能看到最新除权价」是既有契约），行动变了键就变，
         底座随之重建——脏数据进不了缓存，缓存因此不需要主动失效。行情帧本身在
         适配器线程缓存里本来就是整个研究期间一份，底座复用不引入新的失效面。
         """
@@ -349,7 +367,7 @@ class PortfolioContextMixin(_PortfolioServiceState):
             ref.code,
             config.start_date,
             config.end_date,
-            config.atr_period,
+            atr_period,
             repr(actions),
         )
         use_cache = frame is None
@@ -364,7 +382,7 @@ class PortfolioContextMixin(_PortfolioServiceState):
                 if cached is not None:
                     cache.move_to_end(key)
                     return cached
-        base = self._build_context_base(ref, config, frame, actions)
+        base = self._build_context_base(ref, config, frame, actions, atr_period)
         if use_cache and cache is not None:
             with _CONTEXT_BASE_CACHE_LOCK:
                 cache[key] = base
@@ -378,6 +396,7 @@ class PortfolioContextMixin(_PortfolioServiceState):
         config: PortfolioBacktestConfig,
         frame: pd.DataFrame | None,
         actions: tuple[CorporateAction, ...],
+        atr_period: int,
     ) -> _ContextBase:
         """构建规则无关底座。批量路径传入的窗口帧（带 warmup）不进缓存。"""
 
@@ -414,7 +433,7 @@ class PortfolioContextMixin(_PortfolioServiceState):
             highs=window["high"].to_numpy(dtype=float, copy=True),
             lows=window["low"].to_numpy(dtype=float, copy=True),
             closes=window["close"].to_numpy(dtype=float, copy=True),
-            atrs=_atr_series(prepared, config.atr_period)[indices].copy(),
+            atrs=_atr_series(prepared, atr_period)[indices].copy(),
             metric_closes=metric_closes,
             dates=dates,
         )

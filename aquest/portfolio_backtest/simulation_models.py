@@ -31,6 +31,10 @@ class _Position:
 class _PendingSell:
     signal_date: int
     reason: str
+    # 风控卖单与规则卖单同一套 T+1 撮合，但要留下出处：成交日才能补设冷却、
+    # 交易行才能标 risk_trigger（规则卖出为 None）。
+    risk_trigger: str | None = None
+    cooldown_days: int = 0
 
 
 @dataclass(frozen=True)

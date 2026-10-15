@@ -75,6 +75,8 @@ class SimulationCheckpoint:
                 symbol: {
                     "signal_date": pending.signal_date,
                     "reason": pending.reason,
+                    "risk_trigger": pending.risk_trigger,
+                    "cooldown_days": pending.cooldown_days,
                 }
                 for symbol, pending in self.pending_sells.items()
             },
@@ -117,12 +119,7 @@ class SimulationCheckpoint:
             for symbol, value in positions_payload.items()
         }
         pending_sells = {
-            str(symbol): _PendingSell(
-                signal_date=_checkpoint_int(
-                    _checkpoint_mapping(value, "pending_sells"), "signal_date"
-                ),
-                reason=str(_checkpoint_mapping(value, "pending_sells").get("reason") or ""),
-            )
+            str(symbol): _pending_sell_from_dict(str(symbol), value)
             for symbol, value in pending_sells_payload.items()
         }
         pending_buys = tuple(
@@ -206,6 +203,22 @@ def _checkpoint_records(
     return tuple(
         dict(_checkpoint_mapping(row, field_name))
         for row in _checkpoint_list(payload.get(field_name), field_name)
+    )
+
+
+def _pending_sell_from_dict(symbol: str, payload: object) -> _PendingSell:
+    values = _checkpoint_mapping(payload, f"pending_sells[{symbol}]")
+    risk_trigger = values.get("risk_trigger")
+    if risk_trigger is not None and not isinstance(risk_trigger, str):
+        raise ValueError(f"模拟检查点字段 pending_sells[{symbol}].risk_trigger 必须是字符串")
+    cooldown_days = values.get("cooldown_days", 0)
+    if isinstance(cooldown_days, bool) or not isinstance(cooldown_days, int) or cooldown_days < 0:
+        raise ValueError(f"模拟检查点字段 pending_sells[{symbol}].cooldown_days 必须是非负整数")
+    return _PendingSell(
+        signal_date=_checkpoint_int(values, "signal_date"),
+        reason=str(values.get("reason") or ""),
+        risk_trigger=risk_trigger,
+        cooldown_days=int(cooldown_days),
     )
 
 

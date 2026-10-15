@@ -8,7 +8,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import replace
 from datetime import date
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 
 import numpy as np
 import pandas as pd
@@ -25,31 +25,29 @@ from .checkpoint import SimulationCheckpoint
 from .context import _StockSeries
 from .models import PortfolioBacktestConfig, PortfolioJsonValue
 from .report import _date_text
-from .risk import _risk_trigger, _risk_trigger_label
+from .risk import (
+    _risk_config_for_symbol,
+    _risk_level_set,
+    _risk_trigger,
+    _risk_trigger_label,
+)
 from .simulation_models import _PendingBuy, _PendingSell, _Position
 from .state import _PortfolioServiceState
-
-_SYMBOL_RISK_FIELDS = (
-    "stop_loss_pct",
-    "stop_loss_mode",
-    "stop_loss_atr_multiplier",
-    "stop_loss_cooldown_days",
-    "take_profit_pct",
-    "take_profit_mode",
-    "take_profit_atr_multiplier",
-    "take_profit_cooldown_days",
-    "trailing_stop_pct",
-    "trailing_stop_mode",
-    "trailing_stop_atr_multiplier",
-    "trailing_stop_cooldown_days",
-    "atr_period",
-)
 
 
 def _action_date_int(value: date) -> int:
     """``date`` -> ``YYYYMMDD``，与回测日期轴用的整数格式对齐。"""
 
     return value.year * 10000 + value.month * 100 + value.day
+
+
+#: 明日卖出计划只带这几项：挂单状态与持有到期已在持仓侧说过，重复列会互相打架。
+_SELL_PLAN_FIELDS = (
+    "stop_loss_price",
+    "trailing_stop_price",
+    "take_profit_price",
+    "risk_level_as_of",
+)
 
 
 class PortfolioSimulationMixin(_PortfolioServiceState):
@@ -270,6 +268,7 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
                 actions_by_symbol,
             )
             cash = self._execute_sells(
+                date_index,
                 current_date,
                 positions,
                 pending_sells,
@@ -277,18 +276,15 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
                 last_prices,
                 cash,
                 config,
+                cooldown_until,
                 trades,
             )
-            cash = self._execute_risk_sells(
-                date_index,
+            self._queue_risk_exits(
                 current_date,
                 positions,
                 pending_sells,
                 by_symbol,
-                cash,
                 config,
-                cooldown_until,
-                trades,
             )
             cash = self._execute_buys(
                 current_date,
@@ -367,7 +363,13 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
                     ranking_events.append(event)
 
         current_state = (
-            self._current_state_with_diagnostics(states[-1], by_symbol, config)
+            self._current_state_with_diagnostics(
+                states[-1],
+                by_symbol,
+                config,
+                positions=positions,
+                pending_sells=pending_sells,
+            )
             if include_details and states
             else None
         )
@@ -612,12 +614,78 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
             "rows": rows,
         }
 
+    @staticmethod
+    def _risk_display_fields(
+        context: _StockSeries | None,
+        position: _Position | None,
+        pending_sell: _PendingSell | None,
+        config: PortfolioBacktestConfig,
+        index: int | None,
+    ) -> dict[str, object]:
+        """持仓行上的风控展示：三档线、线位截止日、挂单状态与持有到期。
+
+        线取引擎真正生效的那份配置（含每标的覆盖）与判定当根的 ATR，界面显示的价
+        因此和回放里碰到的那条线同源。未启用的规则给 None，前端不能显示成 0；到期日
+        只有行情已经覆盖到那一天才给得出，否则只给剩余交易日。
+        """
+
+        fields: dict[str, object] = {
+            "stop_loss_price": None,
+            "trailing_stop_price": None,
+            "take_profit_price": None,
+            "risk_level_as_of": None,
+            "highest_price": None,
+            "pending_exit_reason": None,
+            "pending_exit_signal_date": None,
+            "pending_exit_risk_trigger": None,
+            "max_hold_days": None,
+            "max_hold_days_left": None,
+            "max_hold_expiry_date": None,
+        }
+        if pending_sell is not None:
+            fields["pending_exit_reason"] = pending_sell.reason
+            fields["pending_exit_signal_date"] = _date_text(pending_sell.signal_date)
+            fields["pending_exit_risk_trigger"] = pending_sell.risk_trigger
+        if context is None or position is None or index is None or index < 0:
+            return fields
+
+        risk_config = _risk_config_for_symbol(config, context.strategy_config)
+        atr_value = float(context.atrs[index])
+        levels = _risk_level_set(
+            position, risk_config, atr_value if np.isfinite(atr_value) else None
+        )
+        fields.update(
+            {
+                "stop_loss_price": levels["stop_loss"],
+                "trailing_stop_price": levels["trailing_stop"],
+                "take_profit_price": levels["take_profit"],
+                "risk_level_as_of": _date_text(int(context.dates[index])),
+                "highest_price": float(position.highest_price),
+                "max_hold_days": risk_config.max_hold_days,
+            }
+        )
+        hold_days = risk_config.max_hold_days
+        if not hold_days:
+            return fields
+        entry_index = context.date_to_index.get(position.entry_date)
+        if entry_index is None:
+            return fields
+        # 持有天数含买入当日，与 _held_enough_bars 的口径一致；到期那根还没走出来
+        # 就给不出日期，只报还剩几根。
+        fields["max_hold_days_left"] = max(0, int(hold_days) - (index - entry_index + 1))
+        expiry_index = entry_index + int(hold_days) - 1
+        if expiry_index < len(context.dates):
+            fields["max_hold_expiry_date"] = _date_text(int(context.dates[expiry_index]))
+        return fields
+
     @classmethod
     def _current_state_with_diagnostics(
         cls,
         state: Mapping[str, PortfolioJsonValue],
         by_symbol: Mapping[str, _StockSeries],
         config: PortfolioBacktestConfig,
+        positions: Mapping[str, _Position] | None = None,
+        pending_sells: Mapping[str, _PendingSell] | None = None,
     ) -> dict[str, object]:
         as_of = int(str(state.get("date") or "").replace("-", ""))
         total = float(cast(float, state.get("total", 0.0)))
@@ -631,6 +699,7 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
                 row = dict(raw)
                 symbol = f"{row.get('market', '')}{row.get('code', '')}"
                 context = by_symbol.get(symbol)
+                index: int | None = None
                 if context is not None:
                     index = context.date_to_index.get(as_of)
                     if index is None:
@@ -650,6 +719,15 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
                 else:
                     row["sell_signal"] = {"matched": False, "signals": [], "conditions": []}
                     row["indicator_as_of"] = None
+                row.update(
+                    cls._risk_display_fields(
+                        context,
+                        (positions or {}).get(symbol),
+                        (pending_sells or {}).get(symbol),
+                        config,
+                        index if index is not None and index >= 0 else None,
+                    )
+                )
                 price = float(cast(float, row.get("close", row.get("entry_price", 0.0))))
                 size = float(cast(float, row.get("size", 0.0)))
                 market_value = size * price
@@ -716,31 +794,52 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
         :meth:`_execution_price`），所以循环结束时还挂在 ``pending`` 里的单，正好
         就是明天的动作——不需要再算一遍，也不存在别的口径。
 
-        但有两件事今天不可能知道：明天的开盘价，和明天会不会触发止损 / 止盈。
+        但有两件事今天不可能知道：明天的开盘价，和明天**新**触发的止损 / 止盈。
         所以数量一律按**今日收盘价**估算，字段名一律带 ``estimated_`` 前缀：谁都
         不许把它当成实际成交，界面上也不能省掉"估算"两个字。
+
+        今天收盘已经触碰风控线的标的也在这里列出，``risk_trigger`` 标明是哪条线；
+        它们和规则卖出一样，明日开盘成交。
         """
 
         holdings: list[PortfolioJsonValue] = []
+
+        def risk_fields(symbol: str, position: _Position) -> dict[str, object]:
+            context = by_symbol.get(symbol)
+            index: int | None = None
+            if context is not None:
+                index = context.date_to_index.get(as_of)
+                if index is None:
+                    index = bisect_right(context.dates, as_of) - 1
+            return self._risk_display_fields(
+                context,
+                position,
+                pending_sells.get(symbol),
+                config,
+                index if index is not None and index >= 0 else None,
+            )
+
         for symbol, position in positions.items():
             price = float(last_prices.get(symbol, position.entry_price))
-            holdings.append(
-                {
-                    "market": position.market,
-                    "code": position.code,
-                    "name": position.name or "",
-                    "size": float(position.size),
-                    "reference_price": price,
-                    "market_value": float(position.size) * price,
-                    "entry_price": float(position.entry_price),
-                    "entry_date": _date_text(position.entry_date),
-                    "unrealized_pnl_pct": (
-                        (price - float(position.entry_price)) / float(position.entry_price)
-                        if position.entry_price > 0
-                        else 0.0
-                    ),
-                }
-            )
+            row: dict[str, PortfolioJsonValue] = {
+                "market": position.market,
+                "code": position.code,
+                "name": position.name or "",
+                "size": float(position.size),
+                "reference_price": price,
+                "market_value": float(position.size) * price,
+                "entry_price": float(position.entry_price),
+                "entry_date": _date_text(position.entry_date),
+                "unrealized_pnl_pct": (
+                    (price - float(position.entry_price)) / float(position.entry_price)
+                    if position.entry_price > 0
+                    else 0.0
+                ),
+            }
+            # 计划里也带上三档风控线与持有到期：界面要能说明这条单是哪条线触发的、
+            # 判定用的是哪一天的数据，而不只写一个「止损」。
+            row.update(risk_fields(symbol, position))
+            holdings.append(row)
 
         sells: list[PortfolioJsonValue] = []
         proceeds = 0.0
@@ -770,7 +869,14 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
                     "reference_price": price,
                     "estimated_proceeds": net,
                     "reason": sell_order.reason or "卖出条件",
+                    "risk_trigger": sell_order.risk_trigger,
                     "signal_date": _date_text(sell_order.signal_date),
+                    # 只带触发线与判定日期：挂单状态在持仓侧已经说过，这里重复会打架。
+                    **{
+                        key: value
+                        for key, value in risk_fields(symbol, held).items()
+                        if key in _SELL_PLAN_FIELDS
+                    },
                 }
             )
 
@@ -890,6 +996,7 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
 
     def _execute_sells(
         self,
+        date_index: int,
         current_date: int,
         positions: dict[str, _Position],
         pending_sells: dict[str, _PendingSell],
@@ -897,6 +1004,7 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
         last_prices: Mapping[str, float],
         cash: float,
         config: PortfolioBacktestConfig,
+        cooldown_until: dict[str, int],
         trades: list[dict[str, PortfolioJsonValue]],
     ) -> float:
         for symbol, pending in list(pending_sells.items()):
@@ -918,125 +1026,80 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
             slippage = size * config.slippage
             proceeds = size * price - commission - stamp_tax - slippage
             cash += proceeds
-            trades.append(
-                {
-                    "date": _date_text(current_date),
-                    "signal_date": _date_text(pending.signal_date),
-                    "market": position.market,
-                    "code": position.code,
-                    "name": position.name,
-                    "instrument_type": position.instrument_type,
-                    "board": position.board,
-                    "direction": "SELL",
-                    "size": float(size),
-                    "price": float(price),
-                    "commission": float(commission),
-                    "stamp_tax": float(stamp_tax),
-                    "slippage": float(slippage),
-                    "pnl": float(
-                        (price - position.entry_price) * size
-                        - position.buy_commission
-                        - position.buy_slippage
-                        - commission
-                        - stamp_tax
-                        - slippage
-                    ),
-                    "cost_basis": float(
-                        position.entry_price * size
-                        + position.buy_commission
-                        + position.buy_slippage
-                    ),
-                    "reason": pending.reason,
-                    "rejected": False,
-                }
-            )
+            row: dict[str, PortfolioJsonValue] = {
+                "date": _date_text(current_date),
+                "signal_date": _date_text(pending.signal_date),
+                "market": position.market,
+                "code": position.code,
+                "name": position.name,
+                "instrument_type": position.instrument_type,
+                "board": position.board,
+                "direction": "SELL",
+                "size": float(size),
+                "price": float(price),
+                "commission": float(commission),
+                "stamp_tax": float(stamp_tax),
+                "slippage": float(slippage),
+                "pnl": float(
+                    (price - position.entry_price) * size
+                    - position.buy_commission
+                    - position.buy_slippage
+                    - commission
+                    - stamp_tax
+                    - slippage
+                ),
+                "cost_basis": float(
+                    position.entry_price * size + position.buy_commission + position.buy_slippage
+                ),
+                "reason": pending.reason,
+                "rejected": False,
+            }
+            if pending.risk_trigger is not None:
+                # 风控卖单要留下出处：交易明细与「今日触发风控、下一交易日卖出」都读它。
+                row["risk_trigger"] = pending.risk_trigger
+                row["cooldown_days"] = pending.cooldown_days
+            trades.append(row)
             positions.pop(symbol, None)
             pending_sells.pop(symbol, None)
+            if pending.cooldown_days > 0:
+                # 冷却从成交日起算，与原来「触发当日平仓再设冷却」等价地平移一根。
+                cooldown_until[symbol] = date_index + pending.cooldown_days + 1
         return cash
 
-    def _execute_risk_sells(
+    def _queue_risk_exits(
         self,
-        date_index: int,
         current_date: int,
-        positions: dict[str, _Position],
-        pending_sells: Mapping[str, _PendingSell],
+        positions: Mapping[str, _Position],
+        pending_sells: dict[str, _PendingSell],
         by_symbol: Mapping[str, _StockSeries],
-        cash: float,
         config: PortfolioBacktestConfig,
-        cooldown_until: dict[str, int],
-        trades: list[dict[str, PortfolioJsonValue]],
-    ) -> float:
-        """Execute OHLC-based risk exits on the trigger bar itself."""
+    ) -> None:
+        """登记当日 OHLC 触碰风控线的卖单，由下一交易日开盘成交。
 
-        for symbol in sorted(list(positions)):
+        判定输入不变（当根 K 线高低点、当日 ATR、当日高点折叠后的移动止盈线），改的
+        只有成交：本系统只在收盘后批处理，盘中那一下触碰当天既不知道也来不及执行，
+        所以风控卖出与规则卖出、持有到期共用同一根 K 线的滞后。冷却在成交日设。
+        """
+
+        for symbol in sorted(positions):
             if symbol in pending_sells:
                 continue
-            position = positions.get(symbol)
+            position = positions[symbol]
             context = by_symbol[symbol]
             index = context.date_to_index.get(current_date)
-            if position is None or index is None:
+            if index is None:
                 continue
-            risk_overrides: dict[str, Any] = {
-                key: context.strategy_config[key]
-                for key in _SYMBOL_RISK_FIELDS
-                if key in context.strategy_config
-            }
-            risk_config = replace(config, **risk_overrides)
+            risk_config = _risk_config_for_symbol(config, context.strategy_config)
             trigger = _risk_trigger(context, index, position, risk_config)
             if trigger is None:
                 continue
-            trigger_name, trigger_price, cooldown_days = trigger
-            price = float(trigger_price)
-            size = position.size
-            profile = profile_from_config(
-                position.instrument_type,
-                commission=config.commission,
-                min_commission=config.min_commission,
-                stamp_tax=config.stamp_tax,
+            trigger_name, cooldown_days = trigger
+            pending_sells[symbol] = _PendingSell(
+                current_date,
+                _risk_trigger_label(trigger_name),
+                risk_trigger=trigger_name,
+                cooldown_days=cooldown_days,
             )
-            commission = max(size * price * profile.commission, profile.min_commission)
-            stamp_tax = size * price * profile.stamp_tax
-            slippage = size * config.slippage
-            proceeds = size * price - commission - stamp_tax - slippage
-            cash += proceeds
-            trades.append(
-                {
-                    "date": _date_text(current_date),
-                    "signal_date": _date_text(current_date),
-                    "market": position.market,
-                    "code": position.code,
-                    "name": position.name,
-                    "instrument_type": position.instrument_type,
-                    "board": position.board,
-                    "direction": "SELL",
-                    "size": float(size),
-                    "price": price,
-                    "commission": float(commission),
-                    "stamp_tax": float(stamp_tax),
-                    "slippage": float(slippage),
-                    "pnl": float(
-                        (price - position.entry_price) * size
-                        - position.buy_commission
-                        - position.buy_slippage
-                        - commission
-                        - stamp_tax
-                        - slippage
-                    ),
-                    "cost_basis": float(
-                        position.entry_price * size
-                        + position.buy_commission
-                        + position.buy_slippage
-                    ),
-                    "reason": _risk_trigger_label(trigger_name),
-                    "risk_trigger": trigger_name,
-                    "cooldown_days": cooldown_days,
-                    "rejected": False,
-                }
-            )
-            positions.pop(symbol, None)
-            if cooldown_days > 0:
-                cooldown_until[symbol] = date_index + cooldown_days + 1
-        return cash
 
     def _execute_buys(
         self,
@@ -1185,9 +1248,10 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
                 pending_sells[symbol] = _PendingSell(current_date, "、".join(reasons))
                 scheduled = True
                 continue
-            if config.max_hold_days and self._held_enough_bars(
-                context, position, index, config.max_hold_days
-            ):
+            # 最长持有天数按标的生效：全市场池的组合回放里，每条逐股策略带着自己的
+            # 持有上限，全局配置不设这一项（None），到期只能来自标的覆盖。
+            hold_limit = _risk_config_for_symbol(config, context.strategy_config).max_hold_days
+            if hold_limit and self._held_enough_bars(context, position, index, int(hold_limit)):
                 pending_sells[symbol] = _PendingSell(current_date, "持有到期")
                 scheduled = True
         return scheduled

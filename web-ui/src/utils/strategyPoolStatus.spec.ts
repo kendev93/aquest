@@ -1,11 +1,20 @@
 import { describe, expect, it } from 'vitest'
 
-import type { StrategyPoolCandidate, StrategyPoolEntry, StrategyPoolSignal } from '../types'
+import type {
+  HoldingRiskDisplay,
+  StrategyPoolCandidate,
+  StrategyPoolEntry,
+  StrategyPoolSignal,
+} from '../types'
 import {
   benchmarkReturn,
+  entryHoldingRisk,
   entryIsHeld,
   entryStatus,
   formatHoldingDays,
+  holdingExpiryText,
+  holdingRiskLevelText,
+  holdingRiskSummary,
   metricRawValue,
   metricValue,
   objectiveLabel,
@@ -159,5 +168,58 @@ describe('strategyPoolStatus', () => {
     expect(rerunEntryDisabled({ ...idle, busy: true, busyIntent: 'full' })).toBe(true)
     expect(rerunEntryTitle(row, { ...idle, busy: true, busyIntent: 'full' }))
       .toBe('当前全市场研究或组合回测结束后可重跑')
+  })
+})
+
+describe('持仓风控展示', () => {
+  const holding: HoldingRiskDisplay = {
+    stop_loss_price: 9,
+    trailing_stop_price: null,
+    take_profit_price: null,
+    risk_level_as_of: '2026-10-16',
+    pending_exit_reason: null,
+    pending_exit_signal_date: null,
+    pending_exit_risk_trigger: null,
+    max_hold_days: null,
+    max_hold_days_left: null,
+    max_hold_expiry_date: null,
+  }
+
+  it('只列出真正生效的线，并说明判定用的是哪一天', () => {
+    expect(holdingRiskLevelText(holding)).toBe('止损 9.00（截至 2026-10-16 收盘）')
+    expect(holdingRiskLevelText({ ...holding, trailing_stop_price: 11.4, take_profit_price: 12 })).toBe(
+      '止损 9.00 · 移动止盈 11.40 · 止盈 12.00（截至 2026-10-16 收盘）',
+    )
+    // 未启用的规则不能显示成 0，那会被读成「跌到 0 才止损」。
+    expect(holdingRiskLevelText({ ...holding, stop_loss_price: null })).toBe('未设置风控线')
+    expect(holdingRiskLevelText({ ...holding, risk_level_as_of: null })).toBe('止损 9.00')
+  })
+
+  it('到期日没有行情依据时只报剩余交易日', () => {
+    expect(holdingExpiryText(holding)).toBe('')
+    expect(
+      holdingExpiryText({ ...holding, max_hold_days: 20, max_hold_days_left: 3, max_hold_expiry_date: '2026-11-06' }),
+    ).toBe('2026-11-06 到期 · 还剩 3 个交易日')
+    expect(holdingExpiryText({ ...holding, max_hold_days: 20, max_hold_days_left: 9 })).toBe('还剩 9 个交易日到期')
+    expect(
+      holdingExpiryText({ ...holding, max_hold_days: 20, max_hold_days_left: 0, max_hold_expiry_date: '2026-11-06' }),
+    ).toBe('今日收盘满持有期限 · 下一交易日开盘卖出')
+  })
+
+  it('把风控线和持有到期拼成一行', () => {
+    expect(holdingRiskSummary(holding)).toBe('止损 9.00（截至 2026-10-16 收盘）')
+    expect(holdingRiskSummary({ ...holding, max_hold_days: 20, max_hold_days_left: 9 })).toBe(
+      '止损 9.00（截至 2026-10-16 收盘） · 还剩 9 个交易日到期',
+    )
+  })
+
+  it('从条目的跟踪快照里取当前持仓行', () => {
+    expect(entryHoldingRisk(entry('600000'))).toBeNull()
+    const tracked = entry('600001', {
+      tracking: { summary: { holding: [{ ...holding, market: 'SH', code: '600001' }] } },
+    })
+    expect(entryHoldingRisk(tracked)?.stop_loss_price).toBe(9)
+    expect(entryHoldingRisk(tracked)?.pending_exit_risk_trigger).toBeNull()
+    expect(entryHoldingRisk(entry('600002', { tracking: { summary: { holding: [] } } }))).toBeNull()
   })
 })

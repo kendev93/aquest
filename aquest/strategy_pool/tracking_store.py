@@ -20,7 +20,9 @@ from aquest.market_data.store_base import _WRITE_LOCK
 # Strategy signatures describe trading intent and remain stable across replay fixes. Snapshot
 # engines version the serialized simulation semantics independently so old checkpoints rebuild.
 SIGNATURE_ENGINE_VERSION = "pool-account-v1"
-ENGINE_VERSION = "pool-account-v2"
+# v3：风控退出改为「触发当日收盘判定、下一交易日开盘成交」，并新增持仓风控线与持有
+# 到期的展示字段。成交时点变了会让既有跟踪账户的净值与持仓对不上，旧快照一律重建。
+ENGINE_VERSION = "pool-account-v3"
 OBJECTIVES = ("annual_return", "sharpe")
 DDL = """CREATE TABLE IF NOT EXISTS pool_tracking_versions (
  version_id VARCHAR PRIMARY KEY, market VARCHAR NOT NULL, code VARCHAR NOT NULL,

@@ -15,7 +15,15 @@ from aquest.web.app import create_app
 TOKEN = "pool-worker-test-token"
 
 
-def _store(tmp_path) -> DuckDbMarketDataStore:
+def _store(
+    tmp_path, *, tail: tuple[tuple[float, float, float, float], ...] = ()
+) -> DuckDbMarketDataStore:
+    """120 根上涨日线，最后一根砸到止损线以下；``tail`` 用来再追加几根。
+
+    风控卖出与规则卖出一样要等下一根开盘成交，所以「触发当日」和「次日成交」是两条
+    不同的断言，靠 ``tail`` 把回放终点推到成交那天。
+    """
+
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     close = np.linspace(10.0, 15.0, 120)
     bars = pd.DataFrame(
@@ -31,6 +39,26 @@ def _store(tmp_path) -> DuckDbMarketDataStore:
         }
     )
     bars.loc[bars.index[-1], ["open", "high", "low", "close"]] = [10.0, 10.2, 9.5, 10.0]
+    if tail:
+        dates = pd.date_range("2025-01-01", periods=120 + len(tail), freq="D")[120:]
+        bars = pd.concat(
+            [
+                bars,
+                pd.DataFrame(
+                    {
+                        "date": dates,
+                        "open": [row[0] for row in tail],
+                        "high": [row[1] for row in tail],
+                        "low": [row[2] for row in tail],
+                        "close": [row[3] for row in tail],
+                        "volume": 1_000.0,
+                        "amount": [row[3] * 1_000 for row in tail],
+                        "bar_status": "completed",
+                    }
+                ),
+            ],
+            ignore_index=True,
+        )
     store.replace_local_bars("SH", "600000", "stock", bars)
     return store
 
@@ -309,8 +337,10 @@ def test_worker_checkpoints_only_accept_claimed_pool_jobs(tmp_path) -> None:
     assert entries.json()["data"]["items"][0]["benchmark"]["validation"]["total_return"] == 0.3
 
 
-def test_signal_scan_evaluates_active_rules_on_latest_completed_bar(tmp_path) -> None:
-    market_store = _store(tmp_path)
+def _signal_scan(tmp_path, *, tail: tuple[tuple[float, float, float, float], ...] = ()) -> dict:
+    """跑一次「刷新当天信号」，返回结果。``tail`` 决定 600000 在止损触发日之后还有几根。"""
+
+    market_store = _store(tmp_path, tail=tail)
     extra_close = np.linspace(20.0, 22.0, 120)
     market_store.replace_local_bars(
         "SH",
@@ -377,11 +407,11 @@ def test_signal_scan_evaluates_active_rules_on_latest_completed_bar(tmp_path) ->
         pool_store=pool,
         portfolio_service=PortfolioBacktestService(adapter=adapter),
     )
+    return service.run({"mode": "signals", "objective": "annual_return"}, job_id="signals-job")
 
-    result = service.run(
-        {"mode": "signals", "objective": "annual_return"},
-        job_id="signals-job",
-    )
+
+def test_signal_scan_evaluates_active_rules_on_latest_completed_bar(tmp_path) -> None:
+    result = _signal_scan(tmp_path)
 
     assert result["buy_signals"][0]["code"] == "600000"
     assert result["buy_signals"][0]["total_return"] == 0.32
@@ -393,8 +423,15 @@ def test_signal_scan_evaluates_active_rules_on_latest_completed_bar(tmp_path) ->
     assert result["states"][0]["status"] == "buy"
     assert result["model_portfolio"]["available"] is True
     assert result["model_portfolio"]["holding_scope"] == "per_stock_strategy"
-    assert result["model_portfolio"]["holdings"] == []
-    assert result["model_portfolio"]["risk_exit_signals"][0]["risk_trigger"] == "stop_loss"
+    held = result["model_portfolio"]["holdings"]
+    # 最后一根砸破 5% 止损线：当日收盘才算得出来，所以只能登记成挂单，仍算持仓。
+    assert [row["code"] for row in held] == ["600000"]
+    assert held[0]["pending_exit_risk_trigger"] == "stop_loss"
+    assert held[0]["pending_exit_reason"] == "止损"
+    assert held[0]["pending_exit_signal_date"] == "2025-04-30"
+    assert held[0]["stop_loss_price"] is not None
+    assert held[0]["risk_level_as_of"] == "2025-04-30"
+    assert result["model_portfolio"]["risk_exit_signals"] == []
     assert result["signal_target"] is None
     assert result["holding_scope"] == "per_stock_strategy"
     assert result["holding_snapshot_complete"] is True
@@ -404,6 +441,19 @@ def test_signal_scan_evaluates_active_rules_on_latest_completed_bar(tmp_path) ->
     assert result["strategy_snapshot"] == [
         {"market": "SH", "code": "600000", "candidate_id": "signal-candidate"}
     ]
+
+
+def test_risk_exit_fills_at_the_next_completed_bar_open(tmp_path) -> None:
+    result = _signal_scan(tmp_path, tail=((11.9, 12.1, 11.8, 12.0),))
+
+    # 追加一根之后，昨日的止损挂单按那根开盘成交：成交日比触发日晚一根。
+    exits = result["model_portfolio"]["risk_exit_signals"]
+    assert [row["risk_trigger"] for row in exits] == ["stop_loss"]
+    assert exits[0]["signal_date"] == "2025-04-30"
+    assert exits[0]["date"] == "2025-05-01"
+    assert exits[0]["price"] == 11.9
+    assert result["model_portfolio"]["holdings"] == []
+    assert result["holding_snapshot_complete"] is True
 
 
 def test_signal_status_stays_flat_when_simulated_portfolio_holds_the_symbol(tmp_path) -> None:

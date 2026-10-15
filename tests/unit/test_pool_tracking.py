@@ -80,6 +80,66 @@ def test_buy_blockades_report_only_blocked_symbols_for_the_queried_objective(tmp
     assert tracks.buy_blockades("sharpe") == {}
 
 
+def test_account_summary_merges_risk_lines_from_current_state():
+    """三档风控线、挂单出处与持有到期只存在于 current_state，投影时按标的并回持仓。
+
+    净值快照（states）会序列化进每个检查点 blob，把展示字段塞那里等于给每只标的
+    乘上几千行；所以它们只在回放尾部算一次，由 account_summary 合到展示行上。
+    没传 current_state 就留空，绝不编一条线或填 0。
+    """
+
+    state_holdings = [
+        {
+            "market": "SH",
+            "code": "600000",
+            "entry_date": "2026-09-01",
+            "entry_price": 10.0,
+            "close": 9.4,
+        }
+    ]
+    checkpoint = {
+        "equity": [
+            {"date": "2026-09-01", "total": 1000},
+            {"date": "2026-09-02", "total": 1000},
+        ],
+        "states": [{"date": "2026-09-02", "holdings": state_holdings}],
+        "trades": [{"date": "2026-09-01", "direction": "BUY", "equity_before": 1000}],
+    }
+    current_state = {
+        "holdings": [
+            {
+                "market": "SH",
+                "code": "600000",
+                "stop_loss_price": 9.0,
+                "trailing_stop_price": None,
+                "take_profit_price": None,
+                "risk_level_as_of": "2026-09-02",
+                "highest_price": 10.5,
+                "pending_exit_reason": "止损",
+                "pending_exit_signal_date": "2026-09-02",
+                "pending_exit_risk_trigger": "stop_loss",
+                "max_hold_days": 20,
+                "max_hold_days_left": 3,
+                "max_hold_expiry_date": "2026-09-05",
+            }
+        ]
+    }
+
+    merged = account_summary(checkpoint, "2026-09-02", 1000, current_state)["holding"][0]
+    assert merged["stop_loss_price"] == 9.0
+    assert merged["trailing_stop_price"] is None
+    assert merged["pending_exit_risk_trigger"] == "stop_loss"
+    assert merged["max_hold_days_left"] == 3
+    assert merged["max_hold_expiry_date"] == "2026-09-05"
+    assert merged["unrealized_pnl_pct"] == 9.4 / 10.0 - 1.0
+    # 注入必须是拷贝：检查点 blob 不能因为这些展示字段被改写。
+    assert "stop_loss_price" not in state_holdings[0]
+
+    plain = account_summary(checkpoint, "2026-09-02", 1000)["holding"][0]
+    assert "stop_loss_price" not in plain
+    assert "pending_exit_risk_trigger" not in plain
+
+
 def test_inherited_trade_includes_full_gain_and_separate_post_launch_return():
     checkpoint = {
         "equity": [

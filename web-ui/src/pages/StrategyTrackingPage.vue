@@ -20,6 +20,7 @@ import type {
   StrategyTrackingSnapshot,
   TrackingConditionReading,
   TrackingCurrentState,
+  TrackingPlanOrder,
   TrackingTradeRow,
   TrackingTradePage,
   TrackingTodayCandidates,
@@ -62,6 +63,19 @@ const decayedCount = computed(
 
 /** 一年按 252 个交易日折算，和后端绩效口径保持一致。 */
 const TRADING_DAYS_PER_YEAR = 252
+
+/** 明日卖出的触发来源：风控单要能说出是哪条线、哪天判定出来的。 */
+function planTriggerText(order: TrackingPlanOrder): string {
+  if (!order.risk_trigger) return order.reason || '—'
+  const price = order.risk_trigger === 'stop_loss'
+    ? order.stop_loss_price
+    : order.risk_trigger === 'trailing_stop'
+      ? order.trailing_stop_price
+      : order.take_profit_price
+  const line = typeof price === 'number' && Number.isFinite(price) ? `线 ${formatNumber(price, 2)}` : ''
+  const judged = order.signal_date ? `${order.signal_date} 收盘判定` : ''
+  return [order.reason, line, judged].filter(Boolean).join(' · ')
+}
 
 /**
  * 最小跟踪记录长度（MinTRL）的提示文案。返回空串表示不用提示：
@@ -607,14 +621,14 @@ function chartFor(item: StrategyTrackingSnapshot) {
               <p v-if="!item.next_plan.sells.length" class="plan-empty">明日没有要卖的。</p>
               <div v-else class="table-wrap">
                 <table :data-testid="`tracking-plan-sells-${item.strategy_id}`">
-                  <thead><tr><th>代码</th><th>名称</th><th>股数</th><th>参考价</th><th>原因</th></tr></thead>
+                  <thead><tr><th>代码</th><th>名称</th><th>股数</th><th>参考价</th><th>触发来源</th></tr></thead>
                   <tbody>
                     <tr v-for="order in item.next_plan.sells" :key="order.code">
                       <td><strong class="code">{{ order.code }}</strong></td>
                       <td>{{ order.name || '—' }}</td>
                       <td>{{ formatMoney(order.size) }}</td>
                       <td>{{ formatPreciseMoney(order.reference_price) }}</td>
-                      <td>{{ order.reason || '—' }}</td>
+                      <td>{{ planTriggerText(order) }}</td>
                     </tr>
                   </tbody>
                 </table>

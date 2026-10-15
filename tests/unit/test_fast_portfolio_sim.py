@@ -38,6 +38,27 @@ def _stamp_of(value: int) -> pd.Timestamp:
     return pd.Timestamp(f"{text[:4]}-{text[4:6]}-{text[6:]}")
 
 
+def _date_text(value: int) -> str:
+    """报告里的日期写法（``YYYY-MM-DD``），用来和 ``YYYYMMDD`` 的日期轴对照。"""
+
+    return _stamp_of(value).strftime("%Y-%m-%d")
+
+
+def _record_rows(value: object) -> list[dict[str, object]]:
+    assert isinstance(value, list)
+    return [dict(row) for row in value if isinstance(row, dict)]
+
+
+def _trade_rows(result: dict[str, object]) -> list[dict[str, object]]:
+    return _record_rows(result["trades"])
+
+
+def _plan_rows(result: dict[str, object], section: str) -> list[dict[str, object]]:
+    plan = result["next_plan"]
+    assert isinstance(plan, dict)
+    return _record_rows(plan.get(section))
+
+
 def make_context(code: str, seed: int, n: int = 280, halted: tuple[int, ...] = ()) -> _StockSeries:
     rng = np.random.default_rng(seed)
     close = np.maximum(np.round(10.0 + np.cumsum(rng.normal(0.0, 0.3, size=n)), 2), 1.5)
@@ -232,6 +253,63 @@ def make_hold_context(
     )
 
 
+_RISK_STOP_LOSS_PCT = 0.05
+_RISK_COOLDOWN_DAYS = 3
+_RISK_BREACH_DAY = 99
+
+
+def make_risk_hold_context(
+    code: str,
+    n: int = 280,
+    *,
+    buy_day: int = 10,
+    breach_day: int = _RISK_BREACH_DAY,
+) -> _StockSeries:
+    """价格平直、只在指定那根 bar 打到止损线的上下文。
+
+    买入次日开盘 10.0 → 止损线 9.5；其余各日低点 9.95 恒在线上，只有 breach_day
+    那根收到 9.45。风控挂单因此可以精确摆到检查点分界的那一根上。
+    """
+
+    stamps = pd.bdate_range("2023-01-02", periods=n)
+    dates = np.asarray([_yyyymmdd(stamp) for stamp in stamps], dtype=np.int64)
+    flat = np.full(n, 10.0)
+    lows = np.full(n, 9.95)
+    lows[breach_day] = 9.45
+    buy_mask = np.zeros(n, dtype=bool)
+    buy_mask[buy_day] = True
+    return _StockSeries(
+        market="SH",
+        code=code,
+        instrument_type="stock",
+        board="main",
+        dates=dates,
+        opens=flat,
+        highs=flat.copy(),
+        lows=lows,
+        closes=flat.copy(),
+        atrs=np.full(n, 0.4),
+        buy_mask=buy_mask,
+        sell_mask=np.zeros(n, dtype=bool),
+        signals={},
+        values={"custom.rank": np.full(n, 1.0)},
+        date_to_index=SortedDateIndex(dates),
+        data_fingerprint=f"fp-risk-{code}",
+        name=f"测试{code}",
+    )
+
+
+def risk_config(**overrides: object) -> PortfolioBacktestConfig:
+    base: dict[str, object] = {
+        "codes": ("SH600000",),
+        "max_positions": 1,
+        "stop_loss_pct": _RISK_STOP_LOSS_PCT,
+        "stop_loss_cooldown_days": _RISK_COOLDOWN_DAYS,
+    }
+    base.update(overrides)
+    return make_config(**base)
+
+
 def _resume_case(
     monkeypatch: pytest.MonkeyPatch,
     service: PortfolioBacktestService,
@@ -241,11 +319,12 @@ def _resume_case(
     ranked: bool,
     split_fraction: float = 0.4,
     split: int | None = None,
-) -> None:
+) -> SimulationCheckpoint:
     """前缀 → 检查点 → 续跑的三路对拍（原实现 / JIT 内核 / 纯 Python 内核）。
 
     前缀用原实现跑出检查点，续跑分别用三条路径跑完整日期区间；
-    run_sim 的「必须命中」断言保证内核路径不会静默回退。
+    run_sim 的「必须命中」断言保证内核路径不会静默回退。返回检查点供调用方继续
+    断言挂单字段——没有这个断言，「边界上挂着风控单」的用例可能其实没挂到。
     """
 
     dates = global_dates(contexts)
@@ -272,6 +351,7 @@ def _resume_case(
         pure_kernel=True,
     )
     assert_same(baseline, pure)
+    return checkpoint
 
 
 _SCENARIOS: list[tuple[str, dict[str, object], list[_StockSeries]]] = [
@@ -494,6 +574,151 @@ def test_fast_portfolio_sim_resume_pending_sell_at_boundary(
     config = make_config(codes=("SH600000",), max_positions=1)
     service = _SimService()
     _resume_case(monkeypatch, service, [context], config, ranked=ranked_mode, split=100)
+
+
+def test_fast_portfolio_sim_resume_risk_sell_at_boundary(
+    monkeypatch: pytest.MonkeyPatch, ranked_mode: bool
+) -> None:
+    """风控挂单恰好停在检查点边界——内核恢复那一段唯一的真载荷。
+
+    分界日就是触碰日，所以检查点里的这条单既不是规则卖出、也还没有成交记录：
+    reason 要用 int8 编码回「止损」，risk_trigger 必须与它自洽（对不上内核会交回
+    原实现），冷却天数走 ps_cd 单独一列。任一项没还原，续跑首日就少一笔冷却或者
+    直接静默回退——run_sim 的「必须命中」断言和三路对拍一起兜住。
+    """
+
+    context = make_risk_hold_context("600000")
+    service = _SimService()
+    checkpoint = _resume_case(
+        monkeypatch,
+        service,
+        [context],
+        risk_config(),
+        ranked=ranked_mode,
+        split=_RISK_BREACH_DAY + 1,
+    )
+    pending = checkpoint.pending_sells["SH600000"]
+    assert pending.reason == "止损"
+    assert pending.risk_trigger == "stop_loss"
+    assert pending.cooldown_days == _RISK_COOLDOWN_DAYS
+    assert pending.signal_date == global_dates([context])[_RISK_BREACH_DAY]
+
+
+def test_checkpoint_roundtrip_keeps_risk_fields_and_loads_legacy_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """风控挂单的序列化：新键原样往返，旧形状（没有这两个键）也要读得进来。
+
+    检查点格式没有升 version——研究侧的多段检查点只在进程内存在，池跟踪另有更硬
+    的盐，所以这里靠「缺键取默认」保持可读，而不是把历史 blob 判死。
+    """
+
+    context = make_risk_hold_context("600000")
+    dates = global_dates([context])
+    monkeypatch.setenv("AQUEST_FAST_SIM", "0")
+    prefix = run_sim(
+        _SimService(),
+        [context],
+        dates[: _RISK_BREACH_DAY + 1],
+        risk_config(),
+        ranked=False,
+    )
+    checkpoint = prefix["checkpoint"]
+    assert isinstance(checkpoint, SimulationCheckpoint)
+    pending = checkpoint.pending_sells["SH600000"]
+    assert pending.risk_trigger == "stop_loss"
+    assert pending.cooldown_days == _RISK_COOLDOWN_DAYS
+
+    payload = checkpoint.to_dict()
+    sells = payload["pending_sells"]
+    assert isinstance(sells, dict)
+    assert sells["SH600000"]["risk_trigger"] == "stop_loss"
+    assert sells["SH600000"]["cooldown_days"] == _RISK_COOLDOWN_DAYS
+    assert SimulationCheckpoint.from_dict(payload) == checkpoint
+
+    for key in ("risk_trigger", "cooldown_days"):
+        sells["SH600000"].pop(key)
+    restored = SimulationCheckpoint.from_dict(payload)
+    legacy = restored.pending_sells["SH600000"]
+    assert legacy.reason == "止损"
+    assert legacy.risk_trigger is None
+    assert legacy.cooldown_days == 0
+
+
+def test_kernel_defers_the_risk_exit_to_the_next_open(
+    monkeypatch: pytest.MonkeyPatch, ranked_mode: bool
+) -> None:
+    """内核与状态机同一条口径：触碰当根不平仓，下一根开盘才成交。
+
+    寻优跑的是内核、上报的是状态机；两边成交日不同，选出来的风控参数就是在优化
+    一个界面上看不到的口径。
+    """
+
+    context = make_risk_hold_context("600000")
+    dates = global_dates([context])
+    config = risk_config()
+    service = _SimService()
+
+    monkeypatch.setenv("AQUEST_FAST_SIM", "0")
+    baseline = run_sim(service, [context], dates, config, ranked=ranked_mode)
+
+    monkeypatch.setenv("AQUEST_FAST_SIM", "1")
+    jitted = run_sim(service, [context], dates, config, ranked=ranked_mode)
+    assert_same(baseline, jitted)
+    pure = run_sim(service, [context], dates, config, ranked=ranked_mode, pure_kernel=True)
+    assert_same(baseline, pure)
+
+    trades = _trade_rows(baseline)
+    assert [row["direction"] for row in trades] == ["BUY", "SELL"]
+    assert trades[0]["date"] == _date_text(dates[11])
+    sell = trades[1]
+    assert sell["reason"] == "止损"
+    assert sell["risk_trigger"] == "stop_loss"
+    assert sell["cooldown_days"] == _RISK_COOLDOWN_DAYS
+    assert sell["signal_date"] == _date_text(dates[_RISK_BREACH_DAY])
+    assert sell["date"] == _date_text(dates[_RISK_BREACH_DAY + 1])
+    assert float(sell["price"]) == 10.0
+
+
+def test_kernel_leaves_the_trigger_day_exit_in_the_next_plan(
+    monkeypatch: pytest.MonkeyPatch, ranked_mode: bool
+) -> None:
+    """回测停在触碰日：明天要卖的单据已经排好，线位与判定日期一并给出。"""
+
+    context = make_risk_hold_context("600000")
+    dates = global_dates([context])
+    window = dates[: _RISK_BREACH_DAY + 1]
+    service = _SimService()
+
+    monkeypatch.setenv("AQUEST_FAST_SIM", "0")
+    baseline = run_sim(service, [context], window, risk_config(), ranked=ranked_mode)
+
+    monkeypatch.setenv("AQUEST_FAST_SIM", "1")
+    jitted = run_sim(service, [context], window, risk_config(), ranked=ranked_mode)
+    assert_same(baseline, jitted)
+    pure = run_sim(service, [context], window, risk_config(), ranked=ranked_mode, pure_kernel=True)
+    assert_same(baseline, pure)
+
+    assert [row for row in _trade_rows(baseline) if row["direction"] == "SELL"] == []
+    sells = _plan_rows(baseline, "sells")
+    assert len(sells) == 1
+    order = sells[0]
+    assert order["code"] == "600000"
+    assert order["reason"] == "止损"
+    assert order["risk_trigger"] == "stop_loss"
+    assert order["signal_date"] == _date_text(dates[_RISK_BREACH_DAY])
+    assert order["stop_loss_price"] == pytest.approx(9.5)
+    assert order["take_profit_price"] is None
+    assert order["trailing_stop_price"] is None
+    assert order["risk_level_as_of"] == _date_text(dates[_RISK_BREACH_DAY])
+
+    holdings = _plan_rows(baseline, "holdings")
+    assert len(holdings) == 1
+    assert holdings[0]["pending_exit_reason"] == "止损"
+    assert holdings[0]["pending_exit_risk_trigger"] == "stop_loss"
+    assert holdings[0]["pending_exit_signal_date"] == _date_text(dates[_RISK_BREACH_DAY])
+    assert holdings[0]["max_hold_days"] is None
+    assert holdings[0]["max_hold_expiry_date"] is None
 
 
 def test_equal_length_segments_do_not_share_the_rebalance_mask(

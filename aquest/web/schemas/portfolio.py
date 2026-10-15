@@ -191,8 +191,6 @@ class PortfolioBacktestRequest(BaseModel):
             value is not None for value in comparison
         ):
             raise ValueError("指标比较卖出规则需要左右指标和比较方式")
-        if self.atr_period != 14:
-            raise ValueError("atr_period 固定为 14")
         risk_enabled = any(
             value is not None
             for value in (

@@ -17,6 +17,7 @@ from aquest.market_data.models import StockRef
 from aquest.market_data.store_base import RESEARCH_START
 from aquest.portfolio_backtest.checkpoint import SimulationCheckpoint
 from aquest.portfolio_backtest.context import _StockSeries
+from aquest.portfolio_backtest.models import HOLDING_RISK_FIELDS
 from aquest.portfolio_backtest.report import _portfolio_fingerprint
 from aquest.portfolio_backtest.service import PortfolioBacktestService
 from aquest.web.schemas import PortfolioBacktestRequest
@@ -25,7 +26,10 @@ from .tracking_store import ENGINE_VERSION, dumps
 
 
 def account_summary(
-    checkpoint: Mapping[str, Any], launch_date: str | None, initial_cash: float
+    checkpoint: Mapping[str, Any],
+    launch_date: str | None,
+    initial_cash: float,
+    current_state: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     equity = checkpoint.get("equity", [])
     states = checkpoint.get("states", [])
@@ -58,6 +62,13 @@ def account_summary(
         raise ValueError("跟踪收益基准无效")
     # 快照持仓只有 unrealized_pnl 金额，补算展示用的百分比字段（详情页浮动收益与
     # 跟踪投影的持仓收益都依赖它）。注意必须拷贝注入，不能原地改 checkpoint。
+    # 三档风控线、风控挂单与持有到期只存在于 current_state（净值快照里没有这些，
+    # 也不该塞进每个检查点 blob），这里按标的并进展示行；没传就留空。
+    risk_lines = {
+        f"{row.get('market')}{row.get('code')}": row
+        for row in (current_state or {}).get("holdings", [])
+        if isinstance(row, Mapping)
+    }
     latest_holdings: list[dict[str, Any]] = []
     for h in states[-1].get("holdings", []) if states else []:
         row = dict(h)
@@ -65,6 +76,9 @@ def account_summary(
         close = row.get("close")
         if isinstance(entry, (int, float)) and entry > 0 and isinstance(close, (int, float)):
             row["unrealized_pnl_pct"] = close / entry - 1.0
+        line = risk_lines.get(f"{row.get('market')}{row.get('code')}")
+        if line is not None:
+            row.update({key: line.get(key) for key in HOLDING_RISK_FIELDS if key in line})
         latest_holdings.append(row)
     return dict(
         created_return=current / baseline - 1,
@@ -184,7 +198,13 @@ def replay_account(
     if not isinstance(captured, SimulationCheckpoint):
         raise ValueError("跟踪没有生成可恢复账户状态")
     packed = captured.to_dict()
-    summary = account_summary(packed, version.get("launch_data_date"), config.initial_cash)
+    current_state = simulation.get("current_state")
+    summary = account_summary(
+        packed,
+        version.get("launch_data_date"),
+        config.initial_cash,
+        current_state if isinstance(current_state, Mapping) else None,
+    )
     summary["checkpoint_hash"] = hashlib.sha256(dumps(packed).encode()).hexdigest()
     # 上线后窗口的对照基准：同区间买入持有（复权收盘价口径），与 post_launch_return
     # 同一起点（上线日），供「上线后衰减」判定使用（2026-10-09 用户决策）。没有
@@ -226,7 +246,14 @@ def replay_account(
         signal_sell=bool(context.sell_mask[-1]),
         pending_buys=len(captured.pending_buys),
         pending_sells=[
-            dict(symbol=key, reason=value.reason) for key, value in captured.pending_sells.items()
+            dict(
+                symbol=key,
+                reason=value.reason,
+                signal_date=value.signal_date,
+                risk_trigger=value.risk_trigger,
+                cooldown_days=value.cooldown_days,
+            )
+            for key, value in captured.pending_sells.items()
         ],
     )
     summary["risk_exits"] = [
