@@ -65,7 +65,9 @@ it('defaults history trades to the latest settlement first and re-requests from 
   try {
     await flushPromises()
     const tradeCalls = () => fetch.mock.calls.map(([url]) => String(url)).filter((url) => url.includes('/trades'))
+    const curveCalls = () => fetch.mock.calls.map(([url]) => String(url)).filter((url) => url.includes('/curve'))
     expect(tradeCalls()[0]).toContain('scope=full&order=desc&offset=0')
+    expect(curveCalls()).toHaveLength(1)
     // 版本状态、区间指标行和交易方向都得是中文，分页条要贴着表格显示页码。
     // 断言用结构而不是「夏普」「卖出」这类词——页面上本来就有「夏普最优」标签和
     // 「卖出规则」标题，用文字包含会假装验到了。
@@ -79,9 +81,49 @@ it('defaults history trades to the latest settlement first and re-requests from 
     await flushPromises()
     expect(tradeCalls().at(-1)).toContain('offset=50')
     expect(wrapper.get('[data-testid="pool-trade-pager"]').text()).toContain('第 2 / 3 页 · 显示 51–100 笔 / 共 123 笔')
+    // 曲线只跟「版本+区间」有关：翻页和换排序都不该重拉它，否则每点一次整张图重建一次
+    expect(curveCalls()).toHaveLength(1)
+    expect(wrapper.find('.individual-full-detail').exists()).toBe(true)
 
     await wrapper.get('[data-testid="pool-trade-order"]').setValue('asc')
     await flushPromises()
     expect(tradeCalls().at(-1)).toContain('order=asc&offset=0')
+    expect(curveCalls()).toHaveLength(1)
+
+    await wrapper.get('[data-testid="pool-detail-scope"]').setValue('created')
+    await flushPromises()
+    expect(curveCalls()).toHaveLength(2)
+    expect(tradeCalls().at(-1)).toContain('scope=created&order=asc&offset=0')
+  } finally { wrapper.unmount() }
+})
+
+it('does not claim the account is uninitialized while the first read is still in flight', async () => {
+  // 加载途中也会闪「账户尚未初始化」，看起来像后台根本没跑，其实只是还没读完。
+  window.history.replaceState({}, '', '/strategy-pool/SH/600000?objective=annual_return')
+  const version = { version_id: 'v1', created_at: '2026-09-02T06:00:00+00:00', source: 'automatic',
+    is_current: true, status: 'pending', summary: {},
+    candidate: { candidate_id: 'v1', buy_rule: { conditions: [] }, sell_rule: { signals: [] }, config: {} } }
+  let release: (value: unknown) => void = () => {}
+  const pending = new Promise((resolve) => { release = resolve })
+  const fetch = vi.fn((url: string) => {
+    if (String(url).endsWith('/detail')) {
+      return Promise.resolve({ ok: true, json: async () => ({ data: { name: '测试股', objectives: { annual_return: [version], sharpe: [] } } }) })
+    }
+    return pending
+  })
+  vi.stubGlobal('fetch', fetch)
+  const wrapper = mount(StrategyPoolDetailPage)
+  try {
+    await flushPromises()
+    expect(wrapper.find('[data-testid="pool-detail-not-initialized"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="pool-curve-state"]').text()).toContain('读取中')
+
+    // 一份响应同时喂 /curve 和 /trades：账户真的没初始化时两者都是空
+    release({ ok: true, json: async () => ({ data: { backtest: null, summary: {}, items: [], total: 0 } }) })
+    await flushPromises()
+    await flushPromises()
+    expect(wrapper.text()).toContain('状态 待初始化')
+    expect(wrapper.get('[data-testid="pool-detail-not-initialized"]').text()).toContain('账户尚未初始化')
+    expect(wrapper.find('.individual-full-detail').exists()).toBe(false)
   } finally { wrapper.unmount() }
 })

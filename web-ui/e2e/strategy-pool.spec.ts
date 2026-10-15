@@ -230,6 +230,7 @@ test('pool details are read-only and expose both rules, launch curve and paged t
   await page.goto('/strategy-pool/SH/600000?objective=annual_return&list=page%3D2%26search%3D600000')
   await expect(page.getByTestId('pool-detail-page')).toBeVisible()
   await expect(page.getByRole('heading',{name:'交易规则'})).toBeVisible()
+  await expect(page.getByRole('heading',{name:'收益曲线与历史交易'})).toBeVisible()
   await expect(page.locator('.metrics b').filter({hasText:'50.00%'})).toBeVisible()
   await expect(page.locator('svg')).toBeVisible()
   await expect(page.getByText('上线 2026-09-02',{exact:true})).toBeVisible()
