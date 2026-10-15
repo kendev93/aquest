@@ -138,6 +138,16 @@ const progress = computed(() => {
   return Math.max(0, Math.min(1, activeJob.value?.progress ?? 0))
 })
 const progressPercent = computed(() => Math.round(progress.value * 100))
+// 任务在 worker 领取之前一直是 queued：标题不能说「进行中」，否则"排队两分钟"和"真的在跑"
+// 看起来一模一样（2026-10-16 一次认领响应丢失，任务在队列里空转到 120 秒被判死，页面全程
+// 写着「全市场研究进行中 0%」加一排 0 计数）。
+const progressHeading = computed(() => {
+  const queued = activeJob.value?.status === 'queued'
+  if (activeIntent.value === 'signals') return queued ? '当天信号扫描排队中' : '正在扫描当天信号'
+  if (activeIntent.value === 'portfolio') return queued ? '组合回测排队中' : '组合回测任务进行中'
+  if (activeIntent.value === 'single') return queued ? '单股重跑排队中' : '正在重跑单只股票'
+  return queued ? '全市场研究排队中' : '全市场研究进行中'
+})
 const phaseLabel = computed(() => {
   const metadata = activeJob.value?.metadata ?? {}
   const label = metadata.phase_label ?? metadata.current_symbol ?? activeJob.value?.phase
@@ -190,7 +200,9 @@ const progressCountText = computed(() => {
   const total = typeof metadata.total_symbols === 'number'
     ? metadata.total_symbols
     : activeJob.value?.total_candidates
-  if (typeof total !== 'number') return ''
+  // 后端还没报过标的数时不给「需重算 0 只（已完成 0 · 进行中 0 …）」——那行字看着像
+  // 一份算完的计划，实际是任务还在排队。
+  if (typeof total !== 'number' || total <= 0) return ''
   const completed = typeof metadata.completed_symbols === 'number' ? metadata.completed_symbols : 0
   // 跳过数 = 预扫描纯复用 + 队列内补算完成，都是「复用旧结论没重新研究」的标的；
   // total_symbols 是预扫描后的真实研究队列，进度行以它为主（2026-10-13 用户决策）。
@@ -1299,7 +1311,7 @@ onUnmounted(() => {
           <p class="empty-copy">清空重建会删除当前自动策略、手动覆盖和失败记录，从头逐只研究；增量更新保留已有策略并复用未变化的结果。</p>
 
           <div v-if="isBusy" class="pool-progress" data-testid="pool-job-progress">
-            <div class="progress-heading"><strong>{{ activeIntent === 'signals' ? '正在扫描当天信号' : activeIntent === 'portfolio' ? '组合回测任务进行中' : activeIntent === 'single' ? '正在重跑单只股票' : '全市场研究进行中' }}</strong><strong>{{ progressPercent }}%</strong></div>
+            <div class="progress-heading" data-testid="pool-progress-heading"><strong>{{ progressHeading }}</strong><strong>{{ progressPercent }}%</strong></div>
             <div class="progress-track"><span :style="{ width: `${progressPercent}%` }"></span></div>
             <p v-if="progressCountText" class="progress-count" data-testid="pool-progress-count">{{ progressCountText }}</p>
             <p v-if="researchPaceText" class="progress-count" data-testid="pool-research-pace">{{ researchPaceText }}</p>

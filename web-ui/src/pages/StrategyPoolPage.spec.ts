@@ -1260,6 +1260,29 @@ describe('StrategyPoolPage', () => {
     },
   )
 
+  it('says plainly that a full run is still queued instead of faking a zero plan', async () => {
+    // 任务在被 worker 领取之前一直是 queued。标题写「进行中」、计数写「需重算 0 只（全 0）」
+    // 时，排队两分钟和真的在跑完全分不出来——2026-10-16 一次认领响应丢失就是这样空转到被判死。
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValueOnce([
+      { job_id: 'full-queued', status: 'queued', mode: 'full' },
+    ])
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({
+      job_id: 'full-queued',
+      status: 'queued',
+      progress: 0,
+      total_candidates: 0,
+      metadata: { mode: 'full', phase_label: '排队等待策略 worker' },
+    })
+
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="pool-progress-heading"]').text()).toContain('全市场研究排队中')
+    expect(wrapper.find('[data-testid="pool-progress-count"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="pool-job-progress"]').text()).toContain('排队等待策略 worker')
+  })
+
   it('shows the two-worker cap and active ticker progress during a full scan', async () => {
     window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
     vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValueOnce([
