@@ -454,35 +454,20 @@ class DuckDbStrategyPoolStore:
 
     @contextmanager
     def _read_connection(self) -> Iterator[duckdb.DuckDBPyConnection]:
-        """能只读就只读：读写打开是独占的，研究进行中会把页面的读顶死（反之亦然）。
+        """读策略只有一份：市场库的 `read_session`（只读优先 + 被自己打回就退回读写）。
 
-        只读打开失败就**立刻**退回原来的读写路径，不额外等待：同一个进程里如果有
-        写事务，只读打开必然被自己拒绝（DuckDB 报 Conflicting lock is held in
-        PID 0），而研究 worker 正是既读又写同一个库。后端没有并发写事务时读到的是
-        只读快路径，页面因此不再排队。
+        这里以前自己决定退路，而任务表的同名方法只重试、不退路——同一个锁压力下
+        一个能读一个硬失败。策略收口到 `store_base` 之后，卫星库不再各自理解 DuckDB
+        的锁语义。
         """
 
-        try:
-            connection = self._store._open(read_only=True)
-        except duckdb.Error:
-            connection = self._store._connect()
-        try:
+        with self._store.read_session() as connection:
             yield connection
-        finally:
-            connection.close()
 
     @contextmanager
     def _transaction(self) -> Iterator[duckdb.DuckDBPyConnection]:
-        connection = self._store._connect()
-        connection.execute("BEGIN TRANSACTION")
-        try:
+        with self._store.write_transaction() as connection:
             yield connection
-            connection.execute("COMMIT")
-        except BaseException:
-            connection.execute("ROLLBACK")
-            raise
-        finally:
-            connection.close()
 
 
 def _row_to_entry(row: object) -> dict[str, object]:

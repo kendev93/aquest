@@ -785,22 +785,19 @@ class DuckDbStrategyJobStore:
 
     @contextmanager
     def _read_connection(self) -> Iterator[duckdb.DuckDBPyConnection]:
-        connection = self._store._connect(read_only=True)
-        try:
+        """读策略只有一份：市场库的 `read_session`（只读优先 + 被自己打回就退回读写）。
+
+        以前这里只重试、不退路：研究进程占着库时，池表读能退回读写继续服务，而任务
+        表读等满预算直接抛错——同一个锁压力下两种行为。
+        """
+
+        with self._store.read_session() as connection:
             yield connection
-        finally:
-            connection.close()
 
     @contextmanager
     def _transaction(self) -> Iterator[duckdb.DuckDBPyConnection]:
-        with self._connection() as connection:
-            connection.execute("BEGIN TRANSACTION")
-            try:
-                yield connection
-                connection.execute("COMMIT")
-            except BaseException:
-                connection.execute("ROLLBACK")
-                raise
+        with self._store.write_transaction() as connection:
+            yield connection
 
 
 def _dump_json(value: Mapping[str, object]) -> str:

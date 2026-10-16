@@ -343,12 +343,27 @@ class _DuckDbStoreBase:
             config = {**(config or {}), "threads": threads}
         return duckdb.connect(str(self.database_path), read_only=read_only, config=config)
 
+    def _open_read(self) -> duckdb.DuckDBPyConnection:
+        """只读快路径：先无等待地试一次，被自己已有的读写连接打回就退回实例默认模式。
+
+        只读打开会在两种完全不同的情况下失败：别的进程以读写模式占着库（该等，而且
+        等得到），以及**同一个进程**里已经开了读写连接（DuckDB 报 `Conflicting lock
+        is held in PID 0`——PID 0 就是本进程）。后者再等多久都不会成功，所以必须先
+        试只读、失败立刻交给 `_connect()` 按实例自己的读写模式走完整重试阶梯。
+        既读又写同一张表的进程（后端与策略 worker）就是靠这条退路不被自己锁死。
+        """
+
+        try:
+            return self._open(read_only=True)
+        except duckdb.Error:
+            return self._connect()
+
     @contextmanager
     def read_session(self) -> Iterator[duckdb.DuckDBPyConnection]:
-        """Yield a read-only connection, reusing one per thread when pooling is on."""
+        """读会话：只读优先 + 打不开就退回实例模式等待；开池时按线程复用同一条。"""
 
         if not self.pool_read_connections:
-            connection = self._connect(read_only=True)
+            connection = self._open_read()
             try:
                 yield connection
             finally:
@@ -356,9 +371,24 @@ class _DuckDbStoreBase:
             return
         existing = getattr(self._read_sessions, "connection", None)
         if existing is None:
-            existing = self._connect(read_only=True)
+            existing = self._open_read()
             self._read_sessions.connection = existing
         yield existing
+
+    @contextmanager
+    def write_transaction(self) -> Iterator[duckdb.DuckDBPyConnection]:
+        """一个连接上跑完一个写事务；是否要与其他写者互斥由调用方自己套 `_WRITE_LOCK`。"""
+
+        connection = self._connect()
+        connection.execute("BEGIN TRANSACTION")
+        try:
+            yield connection
+            connection.execute("COMMIT")
+        except BaseException:
+            connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
 
     def _ensure_initialized(self) -> None:
         if self._initialized:

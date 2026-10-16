@@ -70,19 +70,25 @@ def test_duckdb_job_store_claim_is_exclusive_and_worker_owned(tmp_path) -> None:
 
 
 def test_polling_job_metadata_uses_read_only_connections(tmp_path, monkeypatch) -> None:
+    """轮询任务的读必须走只读快路径：独占打开会与研究进程互相顶死。
+
+    只读打开被打回时会退回读写（见 `test_job_store_reads_survive_a_refused_read_only_open`），
+    所以这里盯的是 `_open` 的实参而不是 `_connect`：正常路径上一条读写连接都不该开。
+    """
+
     market_store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     store = DuckDbStrategyJobStore(market_store)
     store.create(
         "job-read", operation="market_strategy_pool", payload={"mode": "full"}, description="策略池"
     )
-    calls: list[bool | None] = []
-    open_connection = market_store._connect
+    calls: list[bool] = []
+    open_connection = market_store._open
 
-    def track_connection(*, read_only=None):
+    def track_open(*, read_only: bool):
         calls.append(read_only)
         return open_connection(read_only=read_only)
 
-    monkeypatch.setattr(market_store, "_connect", track_connection)
+    monkeypatch.setattr(market_store, "_open", track_open)
 
     assert store.read_request("job-read") is not None
     assert store.read_state("job-read") is not None
