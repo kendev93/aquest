@@ -3,7 +3,7 @@ import PageIntro from '../components/PageIntro.vue'
 import { computed, onMounted, reactive, ref } from 'vue'
 
 import { ApiError, describeError } from '../api/client'
-import { INTERACTIVE_JOB_TIMEOUT_MS, PollTimeoutError, pollUntil, useBackgroundPoll } from '../composables/usePolling'
+import { INTERACTIVE_JOB_TIMEOUT_MS, PollFatalError, PollTimeoutError, pollUntil, useBackgroundPoll } from '../composables/usePolling'
 import {
   cancelMarketDataJob,
   createHealthCheck,
@@ -38,7 +38,7 @@ import MarketCandlestickChart from '../components/MarketCandlestickChart.vue'
 import TermHint from '../components/TermHint.vue'
 import AppTopbar from '../components/AppTopbar.vue'
 import { BOARD_OPTIONS, INSTRUMENT_TYPE_OPTIONS } from '../utils/instrumentOptions'
-import { formatNumber } from '../utils/format'
+import { formatDuration, formatNumber } from '../utils/format'
 import { formatChinaTimestamp } from '../utils/time'
 
 const MA_OPTIONS = [
@@ -93,36 +93,103 @@ const activeMarketJobs = ref<MarketSyncJobState[]>([])
 const MARKET_JOB_POLL_INTERVAL_MS = 500
 const MARKET_STATUS_POLL_INTERVAL_MS = 5000
 const ACTIVE_JOB_POLL_INTERVAL_MS = 1000
+const MARKET_POLL_RETRY_STEP_MS = 2_000
+const MARKET_POLL_RETRY_MAX_MS = 10_000
+/** 连续读状态到这个次数就认输：一直 5xx 说明服务真出问题，无限重试只是把假死藏起来。 */
+const MARKET_POLL_MAX_FAILURES = 10
+
+/** 体检/修复任务由健康检查面板负责显示，同一个任务不在上方同步面板再画一条进度条。 */
+const healthOwnedJobId = ref('')
+/** 按任务记「页面已经不再跟踪」的原因：进度条停在旧数字上时必须同时说明它在停什么。 */
+const trackingLostReason = ref<Record<string, string>>({})
+
+function trackingLostText(jobId: string | undefined): string {
+  return jobId ? trackingLostReason.value[jobId] ?? '' : ''
+}
+
+function clearTrackingLost(jobId: string): void {
+  if (!trackingLostReason.value[jobId]) return
+  const rest = { ...trackingLostReason.value }
+  delete rest[jobId]
+  trackingLostReason.value = rest
+}
+
+/**
+ * 读一次任务状态失败不代表任务死了。
+ *
+ * 以前一次网络抖动就把 `pollUntil` 打断，而进度条继续显示「正在重新下载… 13%」：
+ * 用户既看不出页面已经放弃，也看不出后台还在跑，这正是「不知道好了还是没好」的来路。
+ * 任务是终态（`until` 抛的 `PollFatalError`）和状态已被回收（404）不该重试——
+ * 前者会把真失败藏成十次重试，后者再怎么等都不会再有状态。
+ */
+function marketPollRetryDelay(error: unknown, failures: number): number | null {
+  if (error instanceof PollFatalError) return null
+  if (error instanceof ApiError && error.status === 404) return null
+  if (failures >= MARKET_POLL_MAX_FAILURES) return null
+  return Math.min(MARKET_POLL_RETRY_STEP_MS * failures, MARKET_POLL_RETRY_MAX_MS)
+}
+
+function noteTrackingLost(job: MarketSyncJobState | null): void {
+  if (!job || (job.status !== 'queued' && job.status !== 'running')) return
+  // 失败原因由提示条负责，这里只负责说一句"下面的数字不再更新了，但任务还活着"。
+  trackingLostReason.value = {
+    ...trackingLostReason.value,
+    [job.job_id]: '页面已停止读取任务状态，后台任务仍在运行；下面的数字停在最后一次读到的状态。',
+  }
+}
 
 const selectedTitle = computed(() => (
   selected.value ? `${selected.value.market} ${selected.value.code}` : '请选择品种'
 ))
 
-const syncPhaseText = computed(() => ({
+/**
+ * 任务阶段的人话。`deleting` 是修复独有的第一段：它没有任何可报的中间量，
+ * 不点名的话用户看到的就是一条钉在 0% 的进度条，而这段时间命中标的在库里是空的。
+ */
+const MARKET_PHASE_TEXT: Record<string, string> = {
   planning: '正在规划同步区间…',
+  deleting: '正在删除待修标的的全部历史…',
   fetching: '正在并发下载在线日线…',
   instrument_discovery: '正在刷新证券列表…',
   online_bars: '正在同步在线日线…',
   merging: '正在合并行情分片…',
   cleanup: '正在清理临时分片…',
-}[marketJob.value?.phase ?? ''] ?? null))
+}
+
+/** 进度条的数字是**按阶段**归一的：合并阶段会从现在的 99% 掉回 60% 左右，所以百分比必须跟着阶段名一起看。 */
+function progressPhaseText(job: MarketSyncJobState | null): string {
+  if (!job) return ''
+  if (job.status === 'queued') return '排队等待行情任务闸门…'
+  return MARKET_PHASE_TEXT[job.phase ?? ''] ?? ''
+}
 
 const marketJobTitle = computed(() => {
   if (marketJob.value?.status === 'queued' || marketJob.value?.status === 'running') {
     return activeJobDescription(marketJob.value)
   }
-  if (syncLoading.value) return syncPhaseText.value || syncLabel.value || '后台任务进行中…'
+  if (syncLoading.value) return syncLabel.value || '后台任务进行中…'
   return '最近一次任务'
 })
 
-const currentSyncDetail = computed<Record<string, unknown> | null>(() => {
-  const value = marketJob.value?.metadata?.current_instrument
+/** 同步与体检/修复共用这套显示函数：同一个任务不该在两个面板各画一套口径。 */
+function isLiveMarketJob(job: MarketSyncJobState | null): boolean {
+  return job?.status === 'queued' || job?.status === 'running'
+}
+
+function progressWorkerCount(job: MarketSyncJobState | null): number {
+  const value = job?.metadata?.worker_count
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  return job?.worker_count ?? 8
+}
+
+function currentSyncDetail(job: MarketSyncJobState | null): Record<string, unknown> | null {
+  const value = job?.metadata?.current_instrument
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   return value as Record<string, unknown>
-})
+}
 
-const currentSyncInstrumentText = computed(() => {
-  const detail = currentSyncDetail.value
+function currentSyncInstrumentText(job: MarketSyncJobState | null): string {
+  const detail = currentSyncDetail(job)
   if (!detail) return '—'
   const market = typeof detail.market === 'string' ? detail.market : ''
   const code = typeof detail.code === 'string' ? detail.code : ''
@@ -131,10 +198,10 @@ const currentSyncInstrumentText = computed(() => {
   const assetType = typeof detail.asset_type === 'string' ? detail.asset_type : ''
   const identity = [market, code].filter(Boolean).join(' ') || symbol
   return [identity, name, assetType].filter(Boolean).join(' · ') || '—'
-})
+}
 
-const currentSyncRangeText = computed(() => {
-  const metadata = marketJob.value?.metadata
+function currentSyncRangeText(job: MarketSyncJobState | null): string {
+  const metadata = job?.metadata
   if (!metadata) return '—'
   const start = typeof metadata.range_start === 'string'
     ? metadata.range_start
@@ -144,10 +211,10 @@ const currentSyncRangeText = computed(() => {
     : typeof metadata.requested_end === 'string' ? metadata.requested_end : ''
   if (start && end) return `${start} → ${end}`
   return typeof metadata.range_label === 'string' ? metadata.range_label : '正在读取日期范围…'
-})
+}
 
-const currentSyncStatusText = computed(() => {
-  const status = marketJob.value?.metadata?.current_status
+function currentSyncStatusText(job: MarketSyncJobState | null): string {
+  const status = job?.metadata?.current_status
   return {
     fetching: '正在请求',
     imported: '已导入',
@@ -155,21 +222,35 @@ const currentSyncStatusText = computed(() => {
     unchanged: '无变化',
     error: '失败',
   }[typeof status === 'string' ? status : ''] ?? '处理中'
-})
+}
 
-const currentSyncDetailLabel = computed(() => (
-  marketJob.value?.status === 'running' ? '当前同步' : '最近同步'
-))
+/**
+ * 并发下载时这只标的只是「某个 worker 最后上报的那一只」。
+ *
+ * 8 路进程池都往同一个 `current_instrument` 键上写自己那只，谁最后写完谁上屏；
+ * 说「当前同步」会让用户以为整条任务只在传这只票，进而误判「下错标的了」。
+ */
+function currentSyncDetailLabel(job: MarketSyncJobState | null): string {
+  if (job?.status !== 'running') return '最近同步'
+  const workers = progressWorkerCount(job)
+  return workers > 1 ? `${workers} 路并发下载中，这是最近上报的一只` : '当前同步'
+}
 
-const currentSyncBarCount = computed(() => {
-  const value = marketJob.value?.metadata?.bar_count
+/** 哪一路 worker 报的，用来解释这条记录为什么会被下一秒换掉。 */
+function currentSyncWorkerText(job: MarketSyncJobState | null): string {
+  const value = job?.metadata?.worker_id
+  return typeof value === 'number' && Number.isFinite(value) ? `worker ${value} 上报` : ''
+}
+
+function currentSyncBarCount(job: MarketSyncJobState | null): number | null {
+  const value = job?.metadata?.bar_count
   return typeof value === 'number' && Number.isFinite(value) ? value : null
-})
+}
 
-const currentSyncRetry = computed(() => {
-  const value = marketJob.value?.metadata?.retry
+function currentSyncRetry(job: MarketSyncJobState | null): number {
+  const value = job?.metadata?.retry
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
-})
+}
 
 const catalogCountsText = computed(() => {
   const counts = marketJob.value?.result?.catalog_counts
@@ -202,16 +283,88 @@ const calendarBehindBarsText = computed(() => {
   return `交易日历停在 ${latest}，行情已到 ${dataEnd}：日历只由自动同步在收盘后写入，手动同步不会更新它`
 })
 
-const discoveryWaiting = computed(() => Boolean(
-  marketJob.value?.status === 'running'
-  && marketJob.value.phase === 'instrument_discovery'
-  && !currentSyncDetail.value,
-))
+/**
+ * 按任务记最近 30 秒的轮询采样。
+ *
+ * 速率只能在这儿算：任务状态里没有一个"开始下载"的时间戳（`created_at` 还含着排队
+ * 和删除），而后端各阶段的总数口径又各不相同。更要紧的是页面侧能分辨"跑得慢"和
+ * "真卡住"——一条不动的百分比分不出这两种情况。
+ */
+interface PaceSample {
+  at: number
+  scanned: number
+}
 
-const marketProgressSummary = computed(() => {
-  const job = marketJob.value
+const PACE_WINDOW_MS = 30_000
+const PACE_MIN_SAMPLES_MS = 3_000
+const paceSamples = ref<Record<string, PaceSample[]>>({})
+
+function noteProgressSample(job: MarketSyncJobState): void {
+  if (job.status !== 'running') {
+    if (!paceSamples.value[job.job_id]) return
+    const rest = { ...paceSamples.value }
+    delete rest[job.job_id]
+    paceSamples.value = rest
+    return
+  }
+  const now = Date.now()
+  const kept = [...(paceSamples.value[job.job_id] ?? []), { at: now, scanned: job.total_scanned }]
+    .filter((sample) => now - sample.at <= PACE_WINDOW_MS)
+    .slice(-60)
+  paceSamples.value = { ...paceSamples.value, [job.job_id]: kept }
+}
+
+/** 进度条的百分比是按阶段归一的，所以单位也跟着阶段走：合并数的是区间，不是标的。 */
+function progressUnit(job: MarketSyncJobState | null): string {
+  if (job?.phase === 'merging') return '个区间'
+  if (job?.phase === 'cleanup') return '个分片'
+  return '只'
+}
+
+function progressPaceText(job: MarketSyncJobState | null): string {
+  if (!job || job.status !== 'running' || job.total_candidates <= 1) return ''
+  const samples = paceSamples.value[job.job_id] ?? []
+  if (samples.length < 2) return ''
+  const first = samples[0]
+  const last = samples[samples.length - 1]
+  const elapsedSeconds = (last.at - first.at) / 1000
+  if (elapsedSeconds < PACE_MIN_SAMPLES_MS / 1000) return ''
+  const advanced = last.scanned - first.scanned
+  const unit = progressUnit(job)
+  if (advanced <= 0) {
+    return elapsedSeconds >= 5
+      ? `最近 ${Math.round(elapsedSeconds)} 秒没有新增进度（多半卡在等在线源或等库）`
+      : ''
+  }
+  const perSecond = advanced / elapsedSeconds
+  const remaining = Math.max(job.total_candidates - job.total_scanned, 0)
+  const eta = remaining > 0 ? ` · 本阶段还剩约 ${formatDuration(remaining / perSecond)}` : ' · 本阶段即将结束'
+  return `实测 ${perSecond.toFixed(1)} ${unit}/秒${eta}`
+}
+
+/** 阶段那行只说「这一步跑得多快、还差多久」；已下载多少只由上面的统计行负责，两行不重复。 */
+function progressStageNote(job: MarketSyncJobState | null): string {
+  if (!job) return ''
+  if (job.phase === 'instrument_discovery' && !currentSyncDetail(job)) return '等待在线证券列表返回…'
+  return progressPaceText(job)
+}
+
+/**
+ * 只报 0/1 的任务（体检就是：扫完之前拿不出分母）用动画条而不是 0%：
+ * 一条钉在 0% 的实心和「卡住了」长得一模一样，而体检本来就要跑几十秒。
+ */
+function marketProgressIndeterminate(job: MarketSyncJobState | null): boolean {
+  return Boolean(job?.status === 'running' && job.total_candidates <= 1)
+}
+
+function marketProgressSummary(job: MarketSyncJobState | null): string {
   if (!job) return '已处理 0 / 0'
   const metadata = job.metadata ?? {}
+  if (job.phase === 'deleting') {
+    const targets = typeof metadata.delete_targets === 'number' ? metadata.delete_targets : job.total_candidates
+    const range = typeof metadata.delete_range === 'string' ? `（${metadata.delete_range}）` : ''
+    return `待删除 ${targets} 只标的的全部历史${range}`
+  }
   if (job.phase === 'merging') {
     const planned = typeof metadata.planned_jobs === 'number' ? metadata.planned_jobs : null
     if (planned !== null) {
@@ -231,12 +384,7 @@ const marketProgressSummary = computed(() => {
     return `已下载 ${downloaded} / ${total}`
   }
   return `已处理 ${job.total_scanned} / ${job.total_candidates}`
-})
-
-const marketProgressIndeterminate = computed(() => Boolean(
-  marketJob.value?.status === 'running'
-  && marketJob.value.total_candidates === 0,
-))
+}
 
 function activeJobDescription(job: MarketSyncJobState): string {
   return job.description || '行情同步'
@@ -247,10 +395,14 @@ function apiMessage(error: unknown): string {
 }
 
 function hasActiveMarketDataJob(): boolean {
+  // 体检和修复一样独占行情库，所以它们进行中时 503 同样是噪声，不该弹错误条。
+  const health = healthJob.value
   return syncLoading.value
     || activeMarketJobs.value.some((job) => job.status === 'queued' || job.status === 'running')
     || marketJob.value?.status === 'queued'
     || marketJob.value?.status === 'running'
+    || health?.status === 'queued'
+    || health?.status === 'running'
 }
 
 function isTransientStoreStatusError(error: unknown): boolean {
@@ -347,7 +499,10 @@ function updateActiveMarketJob(state: MarketSyncJobState): void {
 async function loadActiveMarketJobs(): Promise<void> {
   try {
     const previous = activeMarketJobs.value
-    const jobs = (await fetchActiveMarketDataJobs()) ?? []
+    const running = (await fetchActiveMarketDataJobs()) ?? []
+    running.forEach(noteProgressSample)
+    // 体检/修复交给健康检查面板显示；在两个面板各画一条进度条只会让人对不上数。
+    const jobs = running.filter((job) => job.job_id !== healthOwnedJobId.value)
     activeMarketJobs.value = jobs
     const activeIds = new Set(jobs.map((job) => job.job_id))
     for (const previousJob of previous) {
@@ -395,23 +550,31 @@ async function loadActiveMarketJobs(): Promise<void> {
 }
 
 async function waitForJob(jobId: string): Promise<void> {
-  const state = await pollUntil(
-    async () => {
-      const current = await getMarketDataJob(jobId)
-      marketJob.value = current
-      updateActiveMarketJob(current)
-      return current
-    },
-    {
-      intervalMs: MARKET_JOB_POLL_INTERVAL_MS,
-      until: (current) => {
-        if (current.status === 'failed') {
-          throw new ApiError(current.error ?? '行情同步失败。', 500)
-        }
-        return current.status === 'completed' || current.status === 'cancelled'
+  let state: MarketSyncJobState
+  try {
+    state = await pollUntil(
+      async () => {
+        const current = await getMarketDataJob(jobId)
+        marketJob.value = current
+        updateActiveMarketJob(current)
+        noteProgressSample(current)
+        return current
       },
-    },
-  )
+      {
+        intervalMs: MARKET_JOB_POLL_INTERVAL_MS,
+        retryableError: marketPollRetryDelay,
+        until: (current) => {
+          if (current.status === 'failed') {
+            throw new PollFatalError(current.error ?? '行情同步失败。')
+          }
+          return current.status === 'completed' || current.status === 'cancelled'
+        },
+      },
+    )
+  } catch (error) {
+    noteTrackingLost(marketJob.value)
+    throw error
+  }
   if (state.status === 'completed') {
     if (state.result?.errors) {
       message.value = `同步完成，但有 ${state.result.errors} 个错误。`
@@ -435,6 +598,7 @@ function beginJob(jobId: string, status: string): void {
     result: null,
     metadata: {},
   }
+  clearTrackingLost(jobId)
   marketJob.value = state
   updateActiveMarketJob(state)
 }
@@ -610,6 +774,26 @@ const healthSummary = computed(() => {
   }
 })
 
+const healthJobTitle = computed(() => {
+  const description = healthJob.value?.description
+  if (description) return healthRepairing.value ? `${description}（先删后下）` : description
+  return healthRepairing.value ? '正在准备修复…' : '正在扫描行情库…'
+})
+
+/**
+ * 删多少、回多少 = 在线源给的就是同一批日线。
+ *
+ * 这时候缺口不是"没下载下来"，重下改不出任何东西。不点破的话，用户只会反复点
+ * 「一键修复」，每轮删上百万行、重下几分钟、把指标缓存整体作废一遍。
+ */
+function repairNoChangeText(outcome: MarketHealthRepairOutcome | null): string {
+  if (!outcome || !outcome.requested_codes) return ''
+  const deleted = outcome.deleted_bars ?? 0
+  const written = outcome.written_bars ?? 0
+  if (!deleted || deleted !== written || (outcome.errors ?? 0) > 0) return ''
+  return `删 ${deleted} 根、原样写回 ${written} 根：这批缺口在线源同样没有（多为长期停牌），重下改不出任何东西，别反复点。`
+}
+
 function severityText(severity: string): string {
   if (severity === 'error') return '异常'
   if (severity === 'warn') return '提示'
@@ -627,6 +811,11 @@ function beginHealthJob(jobId: string, status: string): void {
     error: null,
     result: null,
   }
+  healthOwnedJobId.value = jobId
+  clearTrackingLost(jobId)
+  // 页面可能在任务开跑之后才挂上（刷新过），那时上方同步面板已经把这个任务收下了。
+  // 健康面板接手后要撤掉上面那一份，否则同一个任务两条进度条，数字还会互相打脸。
+  if (marketJob.value?.job_id === jobId) marketJob.value = null
 }
 
 /**
@@ -634,25 +823,34 @@ function beginHealthJob(jobId: string, status: string): void {
  *
  * 只有体检带预算：它通常几秒到几分钟，卡住就是后端或队列有问题。
  * 一键修复是先删后下全市场，跑几小时属于正常，所以有意不传 timeoutMs。
+ * 读状态失败先退避重试而不是直接放弃——中途退出会把进度条冻在最后一次读到的数字上。
  */
 async function waitForHealthJob(jobId: string, timeoutMs?: number): Promise<void> {
-  const state = await pollUntil(
-    async () => {
-      const current = (await getMarketDataJob(jobId)) as unknown as MarketHealthJobState
-      healthJob.value = current
-      return current
-    },
-    {
-      intervalMs: MARKET_JOB_POLL_INTERVAL_MS,
-      timeoutMs,
-      until: (current) => {
-        if (current.status === 'failed') {
-          throw new ApiError(current.error ?? '行情任务失败。', 500)
-        }
-        return current.status === 'completed' || current.status === 'cancelled'
+  let state: MarketHealthJobState
+  try {
+    state = await pollUntil(
+      async () => {
+        const current = (await getMarketDataJob(jobId)) as unknown as MarketHealthJobState
+        healthJob.value = current
+        noteProgressSample(current)
+        return current
       },
-    },
-  )
+      {
+        intervalMs: MARKET_JOB_POLL_INTERVAL_MS,
+        timeoutMs,
+        retryableError: marketPollRetryDelay,
+        until: (current) => {
+          if (current.status === 'failed') {
+            throw new PollFatalError(current.error ?? '行情任务失败。')
+          }
+          return current.status === 'completed' || current.status === 'cancelled'
+        },
+      },
+    )
+  } catch (error) {
+    noteTrackingLost(healthJob.value)
+    throw error
+  }
   if (state.status === 'cancelled') healthMessage.value = '行情任务已取消。'
 }
 
@@ -695,19 +893,32 @@ async function runHealthCheck(): Promise<void> {
   }
 }
 
-async function repairHealth(checks: string[]): Promise<void> {
+/**
+ * 修复确认框必须把两个代价写在点下去之前。
+ *
+ * ① 它独占行情库几分钟，这期间提交的全市场研究会因为打不开库而整条失败；
+ * ② 缺口大多来自长期停牌，在线源同样没有那几天，重下改不出任何东西——
+ * 2026-10-16 实测一批 500 只「删 1,133,865 根、写回 1,133,865 根，体检各项数字一项没变」。
+ * 以前这两条都要等用户点完、跑完才看得见，于是"点了没变化"只能靠猜。
+ */
+function repairConfirmText(offset: number): string {
+  const from = offset > 0 ? `本轮从名单第 ${offset + 1} 只开始` : '本轮从名单最前面开始'
+  return `将删除命中检查项的标的的全部历史行情，再重新下载覆盖（${from}；一批修不完会在结果里报还剩多少只）。\n\n`
+    + '先知道两个代价：修复会独占行情库几分钟，同时在跑的全市场研究会因为打不开库而失败；'
+    + '而缺口大多来自长期停牌，在线源同样没有那几天，重下改不出任何东西'
+    + '（2026-10-16 实测一批 500 只：删 1,133,865 根、写回 1,133,865 根，体检各项数字一项没变）。\n\n'
+    + '在线源已经没有数据的标的（如退市）删了就补不回来，会在结果里单独列出。确定继续？'
+}
+
+async function repairHealth(checks: string[], offset = 0): Promise<void> {
   if (!checks.length) return
-  if (
-    !window.confirm(
-      '将删除命中检查项的标的的全部历史行情，再重新下载覆盖。在线源已无数据的标的（如退市）删了就补不回来，会在结果里单独列出。确定继续？',
-    )
-  ) {
+  if (!window.confirm(repairConfirmText(offset))) {
     return
   }
   healthRepairing.value = true
   healthMessage.value = ''
   try {
-    const job = await createHealthRepair({ checks, confirm: true })
+    const job = await createHealthRepair({ checks, offset, confirm: true })
     beginHealthJob(job.job_id, job.status)
     await waitForHealthJob(job.job_id)
     healthRepaired.value = healthJob.value?.result ?? null
@@ -724,6 +935,20 @@ async function repairHealth(checks: string[]): Promise<void> {
 
 function repairAllHealth(): void {
   void repairHealth(healthIssues.value.map((check) => check.key))
+}
+
+/** 下一批的起点：本轮起点 + 本轮真正修掉的只数。名单按「市场+代码」排序，所以只能这样往后推。 */
+function nextRepairOffset(outcome: MarketHealthRepairOutcome | null): number {
+  if (!outcome) return 0
+  return (outcome.offset ?? 0) + (outcome.requested_codes ?? 0)
+}
+
+function continueHealthRepair(): void {
+  const outcome = healthRepaired.value
+  const checks = outcome?.checked_keys?.length
+    ? outcome.checked_keys
+    : healthIssues.value.map((check) => check.key)
+  void repairHealth(checks, nextRepairOffset(outcome))
 }
 
 const localImportSummary = computed(() => {
@@ -930,12 +1155,13 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
           </div>
           <div v-if="marketJob" class="sync-progress" data-testid="market-data-progress">
           <div class="sync-progress-heading"><span>{{ marketJobTitle }}</span><div class="sync-progress-actions"><button v-if="marketJob.status === 'queued' || marketJob.status === 'running'" class="text-button" data-testid="market-sync-cancel" type="button" :disabled="marketJob.cancel_requested || marketJob.phase === 'cancelling'" @click="cancelActiveMarketJob(marketJob.job_id)">{{ marketJob.cancel_requested || marketJob.phase === 'cancelling' ? '取消中…' : '取消任务' }}</button><strong>{{ Math.round(marketJob.progress * 100) }}%</strong></div></div>
-          <div class="progress-track sync-progress-track" :class="{ indeterminate: marketProgressIndeterminate }"><span :style="{ width: `${Math.round(marketJob.progress * 100)}%` }"></span></div>
-          <div class="sync-progress-stats"><span>{{ marketProgressSummary }}</span><span>worker <strong>{{ typeof marketJob.metadata?.worker_count === 'number' ? marketJob.metadata.worker_count : marketJob.worker_count ?? 8 }}</strong></span><span :class="{ negative: marketJob.errors > 0 }">错误 <strong>{{ marketJob.errors }}</strong></span></div>
-          <div v-if="discoveryWaiting" class="sync-stage-status" data-testid="market-sync-stage"><strong>正在刷新证券列表</strong><span>等待在线证券列表返回…</span></div>
-          <div v-if="currentSyncDetail" class="sync-current-instrument" data-testid="market-sync-current">
-            <div class="sync-current-heading"><span>{{ currentSyncDetailLabel }}</span><strong>{{ currentSyncInstrumentText }}</strong><span>{{ currentSyncStatusText }}</span></div>
-            <div class="sync-current-meta"><span>同步区间 <strong>{{ currentSyncRangeText }}</strong></span><span v-if="currentSyncBarCount !== null">{{ currentSyncBarCount }} 根日线</span><span v-if="currentSyncRetry > 0">重试 {{ currentSyncRetry }} 次</span></div>
+          <div class="progress-track sync-progress-track" :class="{ indeterminate: marketProgressIndeterminate(marketJob) }"><span :style="{ width: `${Math.round(marketJob.progress * 100)}%` }"></span></div>
+          <div class="sync-progress-stats"><span>{{ marketProgressSummary(marketJob) }}</span><span>worker <strong>{{ progressWorkerCount(marketJob) }}</strong></span><span :class="{ negative: marketJob.errors > 0 }">错误 <strong>{{ marketJob.errors }}</strong></span></div>
+          <p v-if="trackingLostText(marketJob.job_id)" class="scope-warning" data-testid="market-sync-stalled">{{ trackingLostText(marketJob.job_id) }}</p>
+          <div v-if="isLiveMarketJob(marketJob)" class="sync-stage-status" data-testid="market-sync-stage"><strong>{{ progressPhaseText(marketJob) || '任务进行中' }}</strong><span>{{ progressStageNote(marketJob) }}</span></div>
+          <div v-if="currentSyncDetail(marketJob)" class="sync-current-instrument" data-testid="market-sync-current">
+            <div class="sync-current-heading"><span>{{ currentSyncDetailLabel(marketJob) }}</span><strong>{{ currentSyncInstrumentText(marketJob) }}</strong><span>{{ currentSyncStatusText(marketJob) }}</span></div>
+            <div class="sync-current-meta"><span>同步区间 <strong>{{ currentSyncRangeText(marketJob) }}</strong></span><span v-if="currentSyncBarCount(marketJob) !== null">{{ currentSyncBarCount(marketJob) }} 根日线</span><span v-if="currentSyncRetry(marketJob) > 0">重试 {{ currentSyncRetry(marketJob) }} 次</span><span v-if="currentSyncWorkerText(marketJob)">{{ currentSyncWorkerText(marketJob) }}</span></div>
           </div>
           <div v-if="localImportSummary" class="sync-result-stats" data-testid="local-import-result">
             <span>发现文件 {{ localImportSummary.discovered }}</span>
@@ -976,18 +1202,28 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
           <span>耗时 {{ (healthReport?.duration_seconds ?? 0).toFixed(1) }} 秒</span>
         </div>
 
-        <div v-if="healthChecking || (healthJob && (healthJob.status === 'queued' || healthJob.status === 'running'))" class="sync-progress" data-testid="market-health-progress">
-          <div class="sync-progress-heading"><span>{{ healthRepairing ? '正在重新下载…' : '正在扫描行情库…' }}</span><div class="sync-progress-actions"><button class="text-button" data-testid="market-health-cancel" type="button" :disabled="healthJob?.cancel_requested" @click="cancelActiveMarketJob(healthJob?.job_id ?? '')">{{ healthJob?.cancel_requested ? '取消中…' : '取消任务' }}</button><strong>{{ Math.round((healthJob?.progress ?? 0) * 100) }}%</strong></div></div>
-          <div class="progress-track sync-progress-track"><span :style="{ width: `${Math.round((healthJob?.progress ?? 0) * 100)}%` }"></span></div>
+        <div v-if="healthChecking || isLiveMarketJob(healthJob)" class="sync-progress" data-testid="market-health-progress">
+          <div class="sync-progress-heading"><span>{{ healthJobTitle }}</span><div class="sync-progress-actions"><button class="text-button" data-testid="market-health-cancel" type="button" :disabled="!healthJob || healthJob.cancel_requested" @click="cancelActiveMarketJob(healthJob?.job_id ?? '')">{{ healthJob?.cancel_requested ? '取消中…' : '取消任务' }}</button><strong>本阶段 {{ Math.round((healthJob?.progress ?? 0) * 100) }}%</strong></div></div>
+          <div class="progress-track sync-progress-track" :class="{ indeterminate: marketProgressIndeterminate(healthJob) }"><span :style="{ width: `${Math.round((healthJob?.progress ?? 0) * 100)}%` }"></span></div>
+          <div v-if="healthJob" class="sync-progress-stats"><span>{{ marketProgressSummary(healthJob) }}</span><span>worker <strong>{{ progressWorkerCount(healthJob) }}</strong></span><span :class="{ negative: healthJob.errors > 0 }">错误 <strong>{{ healthJob.errors }}</strong></span></div>
+          <p v-if="trackingLostText(healthJob?.job_id)" class="scope-warning" data-testid="market-health-stalled">{{ trackingLostText(healthJob?.job_id) }}</p>
+          <div v-if="healthJob" class="sync-stage-status" data-testid="market-health-stage"><strong>{{ progressPhaseText(healthJob) || '正在扫描行情库（只读，不改数据）…' }}</strong><span>{{ progressStageNote(healthJob) }}</span></div>
+          <div v-if="currentSyncDetail(healthJob)" class="sync-current-instrument" data-testid="market-health-current">
+            <div class="sync-current-heading"><span>{{ currentSyncDetailLabel(healthJob) }}</span><strong>{{ currentSyncInstrumentText(healthJob) }}</strong><span>{{ currentSyncStatusText(healthJob) }}</span></div>
+            <div class="sync-current-meta"><span>同步区间 <strong>{{ currentSyncRangeText(healthJob) }}</strong></span><span v-if="currentSyncWorkerText(healthJob)">{{ currentSyncWorkerText(healthJob) }}</span></div>
+          </div>
         </div>
 
         <div v-if="healthRepaired" class="store-meta" data-testid="market-health-repair-result">
           <span>删除 {{ healthRepaired.deleted_bars ?? 0 }} 根</span>
           <span>重写 {{ healthRepaired.written_bars ?? 0 }} 根</span>
           <span :class="{ negative: (healthRepaired.errors ?? 0) > 0 }">失败 {{ healthRepaired.errors ?? 0 }}</span>
-          <span v-if="healthRepaired.truncated">本次只修了前 {{ healthRepaired.requested_codes ?? 0 }} 只，还有更多未修</span>
+          <span v-if="healthRepaired.remaining" data-testid="market-health-remaining">名单共 {{ healthRepaired.flagged_total ?? 0 }} 只，本轮修的是第 {{ (healthRepaired.offset ?? 0) + 1 }} ~ {{ (healthRepaired.offset ?? 0) + (healthRepaired.requested_codes ?? 0) }} 只，还剩 {{ healthRepaired.remaining }} 只没轮到</span>
+          <span v-else-if="healthRepaired.requested_codes">本轮 {{ healthRepaired.requested_codes }} 只都已重下（名单共 {{ healthRepaired.flagged_total ?? healthRepaired.requested_codes }} 只）</span>
+          <span v-if="repairNoChangeText(healthRepaired)" class="scope-warning" data-testid="market-health-no-change">{{ repairNoChangeText(healthRepaired) }}</span>
           <span v-if="healthRepaired.message">{{ healthRepaired.message }}</span>
           <span v-if="healthRepaired.empty_after_repair?.length" class="negative" data-testid="market-health-empty-codes">重下后仍无数据 {{ healthRepaired.empty_after_repair.join('、') }}</span>
+          <button v-if="healthRepaired.remaining" class="secondary-button" data-testid="market-health-repair-next" type="button" :disabled="healthChecking || healthRepairing" @click="continueHealthRepair">从第 {{ nextRepairOffset(healthRepaired) + 1 }} 只继续修 {{ Math.min(healthRepaired.remaining, healthRepaired.requested_codes ?? 0) }} 只</button>
         </div>
 
         <div v-if="!healthReport" class="inline-empty" data-testid="market-health-empty">{{ healthChecking ? '正在扫描行情库，全库约 600 万行时需要十秒左右…' : '还没有检查结果，点「开始检查」跑一次只读体检。' }}</div>

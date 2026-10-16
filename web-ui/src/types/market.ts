@@ -272,6 +272,10 @@ export interface MarketHealthRepairOutcome {
   checked_keys?: string[]
   requested_codes?: number
   truncated?: boolean
+  /** 本轮从名单第几只开始（0 起）与名单总数，用来讲清「还有多少只没轮到」。 */
+  offset?: number
+  flagged_total?: number
+  remaining?: number
   deleted_bars?: number
   written_bars?: number
   errors?: number

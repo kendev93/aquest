@@ -197,6 +197,8 @@ export async function createHealthRepair(payload: {
   checks?: string[]
   codes?: string[]
   limit?: number
+  /** 名单按 market+code 排序后从第几只开始；一轮修不完时用它推进下一批。 */
+  offset?: number
   confirm: boolean
 }): Promise<{ job_id: string; status: string }> {
   const response = await request<{ data: { job_id: string; status: string } }>(

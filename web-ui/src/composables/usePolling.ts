@@ -21,11 +21,27 @@
 
 import { getCurrentInstance, onUnmounted } from 'vue'
 
+import { ApiError } from '../api/client'
+
 /** `timeoutMs` 预算耗尽时抛出；调用方用它区分「超时」和「任务失败」。超时只停止前端等待，后台任务照常跑完。 */
 export class PollTimeoutError extends Error {
   constructor(message = '等待任务结束超时，任务仍在后台运行。') {
     super(message)
     this.name = 'PollTimeoutError'
+  }
+}
+
+/**
+ * 「这是任务自己的终态，不该当成读状态失败去重试」的标记。
+ *
+ * `until` 里判出任务失败时抛的就是它：不区分的話，配了 `retryableError` 的轮询会把
+ * 一次真失败当成网络抖动重试十次，失败原因永远到不了用户面前。继承 ApiError 是为了
+ * 让 `describeError` 照旧把 message 原样显示出来。
+ */
+export class PollFatalError extends ApiError {
+  constructor(message: string, status = 500) {
+    super(message, status)
+    this.name = 'PollFatalError'
   }
 }
 

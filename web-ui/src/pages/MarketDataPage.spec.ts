@@ -969,6 +969,30 @@ describe('MarketDataPage', () => {
     vi.useRealTimers()
   })
 
+  it('animates the bar while a read-only check has no denominator yet', async () => {
+    // 体检在扫完之前给不出分母，只能报 0/1。画成 0% 的实心条和「卡住了」长得一模一样。
+    vi.useFakeTimers()
+    vi.mocked(marketApi.createHealthCheck).mockResolvedValue({ job_id: 'health-1', status: 'queued' })
+    vi.mocked(marketApi.getMarketDataJob).mockResolvedValue({
+      ...healthJobState({}),
+      description: '行情健康检查',
+      status: 'running',
+      progress: 0,
+      total_candidates: 1,
+      total_scanned: 0,
+      result: null,
+    })
+    const wrapper = mountPage()
+    await vi.advanceTimersByTimeAsync(0)
+    await wrapper.get('[data-testid="market-health-check"]').trigger('click')
+    await vi.advanceTimersByTimeAsync(10)
+
+    const progress = wrapper.get('[data-testid="market-health-progress"]')
+    expect(progress.find('.progress-track.indeterminate').exists()).toBe(true)
+    expect(progress.text()).toContain('正在扫描行情库（只读，不改数据）')
+    vi.useRealTimers()
+  })
+
   it('repairs only the flagged check after an explicit confirmation', async () => {
     vi.mocked(marketApi.createHealthCheck).mockResolvedValue({ job_id: 'health-1', status: 'queued' })
     vi.mocked(marketApi.getMarketDataJob).mockResolvedValue(healthJobState(healthReport()))
@@ -992,7 +1016,7 @@ describe('MarketDataPage', () => {
     await flushPromises()
 
     expect(confirmSpy).toHaveBeenCalled()
-    expect(marketApi.createHealthRepair).toHaveBeenCalledWith({ checks: ['gap'], confirm: true })
+    expect(marketApi.createHealthRepair).toHaveBeenCalledWith({ checks: ['gap'], offset: 0, confirm: true })
     const result = wrapper.get('[data-testid="market-health-repair-result"]').text()
     expect(result).toContain('删除 77 根')
     expect(result).toContain('重写 60 根')
@@ -1027,6 +1051,292 @@ describe('MarketDataPage', () => {
     expect(wrapper.find('[data-testid="market-health-message"]').exists()).toBe(false)
     confirmSpy.mockRestore()
     vi.useRealTimers()
+  })
+
+  it('labels a parallel download as one symbol of many, not as the only one in flight', async () => {
+    // 进程池 8 路并发时，8 个 worker 都往同一个 current_instrument 上写自己那只，
+    // 谁最后写完谁上屏。说「当前同步」会让用户把正常的换行读成「下错标的了」。
+    vi.mocked(marketApi.fetchActiveMarketDataJobs).mockResolvedValue([{
+      job_id: 'parallel-1',
+      description: '行情修复',
+      status: 'running',
+      progress: 0.232,
+      total_candidates: 500,
+      total_scanned: 115,
+      errors: 0,
+      error: null,
+      worker_count: 8,
+      phase: 'fetching',
+      metadata: {
+        worker_count: 8,
+        worker_id: 6,
+        downloaded_targets: 115,
+        current_status: 'fetching',
+        current_instrument: { market: 'SH', code: '601231', name: '环旭电子' },
+      },
+      result: null,
+    }])
+    const wrapper = mountPage()
+    await flushPromises()
+
+    const current = wrapper.get('[data-testid="market-sync-current"]').text()
+    expect(current).toContain('8 路并发下载中')
+    expect(current).toContain('worker 6 上报')
+    expect(current).toContain('SH 601231 · 环旭电子')
+    expect(current).not.toContain('当前同步')
+  })
+
+  it('still says 当前同步 when only one worker is pulling', async () => {
+    vi.mocked(marketApi.fetchActiveMarketDataJobs).mockResolvedValue([{
+      job_id: 'single-1',
+      description: '行情同步',
+      status: 'running',
+      progress: 0.4,
+      total_candidates: 5,
+      total_scanned: 2,
+      errors: 0,
+      error: null,
+      worker_count: 1,
+      phase: 'fetching',
+      metadata: {
+        worker_count: 1,
+        current_status: 'fetching',
+        current_instrument: { market: 'SH', code: '600000', name: '浦发银行' },
+      },
+      result: null,
+    }])
+    const wrapper = mountPage()
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="market-sync-current"]').text()).toContain('当前同步')
+  })
+
+  it('names the delete stage of a repair instead of leaving a bar parked at zero', async () => {
+    // 先删后下的删除段没有任何可报的中间量，而这段时间命中标的在库里是空的：
+    // 不点名就只剩一条钉在 0% 的进度条，谁也不知道它是在跑还是卡住。
+    vi.mocked(marketApi.fetchActiveMarketDataJobs).mockResolvedValue([{
+      job_id: 'delete-1',
+      description: '行情修复',
+      status: 'running',
+      progress: 0,
+      total_candidates: 500,
+      total_scanned: 0,
+      errors: 0,
+      error: null,
+      worker_count: 8,
+      phase: 'deleting',
+      metadata: { worker_count: 8, delete_targets: 500, delete_range: '第 1 ~ 500 只' },
+      result: null,
+    }])
+    const wrapper = mountPage()
+    await flushPromises()
+
+    const progress = wrapper.get('[data-testid="market-data-progress"]').text()
+    expect(progress).toContain('正在删除待修标的的全部历史')
+    expect(progress).toContain('待删除 500 只标的的全部历史（第 1 ~ 500 只）')
+  })
+
+  it('measures the pace off the poll stream so a slow download is not read as stuck', async () => {
+    vi.useFakeTimers()
+    let ticks = 0
+    vi.mocked(marketApi.fetchActiveMarketDataJobs).mockImplementation(async () => {
+      ticks += 1
+      const scanned = ticks * 8
+      return [{
+        job_id: 'pace-1',
+        description: '行情修复',
+        status: 'running',
+        progress: scanned / 500,
+        total_candidates: 500,
+        total_scanned: scanned,
+        errors: 0,
+        error: null,
+        worker_count: 8,
+        phase: 'fetching',
+        metadata: { worker_count: 8, downloaded_targets: scanned },
+        result: null,
+      }]
+    })
+    const wrapper = mountPage()
+    await vi.advanceTimersByTimeAsync(5_000)
+
+    const block = wrapper.get('[data-testid="market-data-progress"]').text()
+    expect(block).toContain('已下载 48 / 500')
+    const stage = wrapper.get('[data-testid="market-sync-stage"]').text()
+    expect(stage).toContain('实测 8.0 只/秒')
+    expect(stage).toContain('本阶段还剩约 56.5 秒')
+    vi.useRealTimers()
+  })
+
+  it('says outright when nothing advanced for several seconds', async () => {
+    vi.useFakeTimers()
+    vi.mocked(marketApi.fetchActiveMarketDataJobs).mockResolvedValue([{
+      job_id: 'stall-1',
+      description: '行情修复',
+      status: 'running',
+      progress: 0.99,
+      total_candidates: 500,
+      total_scanned: 495,
+      errors: 0,
+      error: null,
+      worker_count: 8,
+      phase: 'fetching',
+      metadata: { worker_count: 8, downloaded_targets: 495 },
+      result: null,
+    }])
+    const wrapper = mountPage()
+    await vi.advanceTimersByTimeAsync(7_000)
+
+    expect(wrapper.get('[data-testid="market-sync-stage"]').text())
+      .toContain('秒没有新增进度（多半卡在等在线源或等库）')
+    vi.useRealTimers()
+  })
+
+  it('rides out one transient status-read failure instead of freezing the bar', async () => {
+    vi.useFakeTimers()
+    vi.mocked(marketApi.createHealthCheck).mockResolvedValue({ job_id: 'health-1', status: 'queued' })
+    vi.mocked(marketApi.createHealthRepair).mockResolvedValue({ job_id: 'repair-1', status: 'queued' })
+    vi.mocked(marketApi.getMarketDataJob)
+      .mockResolvedValueOnce(healthJobState(healthReport()))
+      .mockRejectedValueOnce(new ApiError('行情数据库暂不可用', 503))
+      .mockResolvedValue(healthJobState({
+        checked_keys: ['gap'],
+        requested_codes: 2,
+        deleted_bars: 10,
+        written_bars: 10,
+        errors: 0,
+      }))
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const wrapper = mountPage()
+    await vi.advanceTimersByTimeAsync(0)
+    await wrapper.get('[data-testid="market-health-check"]').trigger('click')
+    await vi.advanceTimersByTimeAsync(0)
+    await wrapper.get('[data-testid="market-health-repair"]').trigger('click')
+    await vi.advanceTimersByTimeAsync(5_000)
+
+    // 一次 503 就放弃轮询的话，进度条会永远停在最后一次读到的数字上。
+    expect(wrapper.find('[data-testid="market-health-stalled"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="market-health-repair-result"]').text()).toContain('删除 10 根')
+    vi.useRealTimers()
+  })
+
+  it('does not mistake a failed task for a transient read error', async () => {
+    vi.useFakeTimers()
+    vi.mocked(marketApi.createHealthCheck).mockResolvedValue({ job_id: 'health-1', status: 'queued' })
+    vi.mocked(marketApi.createHealthRepair).mockResolvedValue({ job_id: 'repair-1', status: 'queued' })
+    let polls = 0
+    vi.mocked(marketApi.getMarketDataJob).mockImplementation(async () => {
+      polls += 1
+      if (polls === 1) return healthJobState(healthReport())
+      return {
+        ...healthJobState({}),
+        description: '行情修复',
+        status: 'failed',
+        progress: 0.13,
+        total_candidates: 500,
+        total_scanned: 65,
+        error: '行情数据库当前被其它进程占用或存在瞬态 I/O 错误，请稍后重试',
+        result: null,
+      }
+    })
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const wrapper = mountPage()
+    await vi.advanceTimersByTimeAsync(0)
+    await wrapper.get('[data-testid="market-health-check"]').trigger('click')
+    await vi.advanceTimersByTimeAsync(0)
+    await wrapper.get('[data-testid="market-health-repair"]').trigger('click')
+    await vi.advanceTimersByTimeAsync(60_000)
+
+    // 任务自己是终态就必须立刻报出来，不能被「读状态失败重试」退避成十次。
+    expect(polls).toBe(2)
+    expect(wrapper.get('[data-testid="market-health-message"]').text()).toContain('被其它进程占用')
+    vi.useRealTimers()
+  })
+
+  it('tells the user the page stopped tracking while the task keeps running', async () => {
+    vi.useFakeTimers()
+    vi.mocked(marketApi.createHealthCheck).mockResolvedValue({ job_id: 'health-1', status: 'queued' })
+    vi.mocked(marketApi.createHealthRepair).mockResolvedValue({ job_id: 'repair-1', status: 'queued' })
+    // /jobs/active 也认得这个任务：健康面板接手之后上方同步面板必须不再收它，
+    // 否则同一个任务两条进度条，用户更分不清哪条作数。
+    vi.mocked(marketApi.fetchActiveMarketDataJobs).mockResolvedValue([{
+      job_id: 'repair-1',
+      description: '行情修复',
+      status: 'running',
+      progress: 0.13,
+      total_candidates: 500,
+      total_scanned: 65,
+      errors: 0,
+      error: null,
+      worker_count: 8,
+      phase: 'fetching',
+      metadata: { worker_count: 8, downloaded_targets: 65 },
+      result: null,
+    }])
+    vi.mocked(marketApi.getMarketDataJob)
+      .mockResolvedValueOnce(healthJobState(healthReport()))
+      .mockResolvedValueOnce({
+        ...healthJobState({}),
+        description: '行情修复',
+        status: 'running',
+        progress: 0.13,
+        total_candidates: 500,
+        total_scanned: 65,
+        result: null,
+      })
+      .mockRejectedValue(new ApiError('行情数据库暂不可用', 503))
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const wrapper = mountPage()
+    await vi.advanceTimersByTimeAsync(0)
+    await wrapper.get('[data-testid="market-health-check"]').trigger('click')
+    await vi.advanceTimersByTimeAsync(0)
+    await wrapper.get('[data-testid="market-health-repair"]').trigger('click')
+    await vi.advanceTimersByTimeAsync(120_000)
+
+    const progress = wrapper.get('[data-testid="market-health-progress"]')
+    expect(progress.text()).toContain('本阶段 13%')
+    expect(wrapper.get('[data-testid="market-health-stalled"]').text()).toContain('页面已停止读取任务状态')
+    // 同一个任务不再在上方同步面板画第二条进度条，否则两处数字对不上更难判断。
+    expect(wrapper.find('[data-testid="market-data-progress"]').exists()).toBe(false)
+    vi.useRealTimers()
+  })
+
+  it('reports the tail that never got a turn and continues from the next symbol', async () => {
+    vi.mocked(marketApi.createHealthCheck).mockResolvedValue({ job_id: 'health-1', status: 'queued' })
+    vi.mocked(marketApi.createHealthRepair).mockResolvedValue({ job_id: 'repair-1', status: 'queued' })
+    vi.mocked(marketApi.getMarketDataJob)
+      .mockResolvedValueOnce(healthJobState(healthReport()))
+      .mockResolvedValue(healthJobState({
+        checked_keys: ['gap'],
+        requested_codes: 500,
+        offset: 0,
+        flagged_total: 2272,
+        remaining: 1772,
+        truncated: true,
+        deleted_bars: 1_133_865,
+        written_bars: 1_133_865,
+        errors: 0,
+      }))
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const wrapper = mountPage()
+    await flushPromises()
+    await wrapper.get('[data-testid="market-health-check"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid="market-health-repair"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="market-health-remaining"]').text())
+      .toContain('还剩 1772 只没轮到')
+    // 删多少回多少 = 在线源给的就是同一批日线，不点破用户只会反复点这个破坏性按钮。
+    expect(wrapper.get('[data-testid="market-health-no-change"]').text()).toContain('原样写回 1133865 根')
+    const warning = String(confirmSpy.mock.calls[0]?.[0])
+    expect(warning).toContain('全市场研究会因为打不开库而失败')
+    expect(warning).toContain('重下改不出任何东西')
+
+    await wrapper.get('[data-testid="market-health-repair-next"]').trigger('click')
+    await flushPromises()
+    // 下一批必须从第 501 只开始，否则永远重复修名单最前面那 500 只。
+    expect(marketApi.createHealthRepair).toHaveBeenLastCalledWith({ checks: ['gap'], offset: 500, confirm: true })
   })
 
   it('does not call the repair endpoint when the user cancels the confirmation', async () => {

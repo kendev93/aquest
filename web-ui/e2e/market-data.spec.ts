@@ -119,3 +119,87 @@ test('user can see and cancel an active market-data job', async ({ page }) => {
   await expect(page.getByTestId('market-data-message')).toContainText('已取消，已经写入的数据已保留')
   expect(cancelRequest).toBe('POST')
 })
+
+const healthReport = {
+  generated_at: '2026-10-16T13:33:20', instrument_count: 5346, bar_count: 6180000, calendar_days: 2308,
+  data_start: '2015-01-01', data_end: '2026-10-16', duration_seconds: 61.7,
+  checks: [
+    { key: 'gap', label: '行情缺口', description: '标的在自己首末交易日之间本该有日线却没有的交易日。',
+      severity: 'error', affected_instruments: 1836, occurrences: 68023, repairable: true,
+      examples: [{ market: 'SZ', code: '000029', name: '深深房A', trade_date: '2017-04-12', detail: '共缺 869 个交易日，分 1 段' }] },
+    { key: 'stale', label: '数据陈旧', description: '最后一条日线落后全市场最新交易日两周以上。',
+      severity: 'warn', affected_instruments: 7, occurrences: 7, repairable: true, examples: [] },
+  ],
+}
+
+test('a repair discloses its stages, its cost and the symbols that never got a turn', async ({ page }) => {
+  // 先删后下是唯一会先把标的清空的任务：用户必须看得见「现在在删、接下来在传哪只、
+  // 名单还剩多少只没轮到」，否则只能靠猜——2026-10-16 就是这样被读成「卡住了」。
+  let confirmText = ''
+  page.on('dialog', async (dialog) => {
+    confirmText = dialog.message()
+    await dialog.accept()
+  })
+  let repairBody: Record<string, unknown> | null = null
+  let repairReads = 0
+  const base = { description: '行情修复', errors: 0, error: null, worker_count: 8, cancel_requested: false, result: null }
+  await page.route('**/api/v1/market-data/jobs/active*', (route) => route.fulfill({ json: { data: [] } }))
+  await page.route('**/api/v1/market-data/store', (route) => route.fulfill({ json: { data: {
+    database_path: '/data/market/market.duckdb', schema_version: 12, instrument_count: 2,
+    bar_count: 6180000, data_start: '2015-01-01', data_end: '2026-10-16', last_online_sync_at: null,
+  } } }))
+  await page.route('**/api/v1/market-data/local/instruments**', (route) => route.fulfill({ json: instruments }))
+  await page.route('**/api/v1/market-data/local/SH/600000/bars*', (route) => route.fulfill({ json: chart('daily') }))
+  await page.route('**/api/v1/market-data/health/check', (route) => route.fulfill({ json: { data: { job_id: 'check-1', status: 'queued' } } }))
+  await page.route('**/api/v1/market-data/jobs/check-1', (route) => route.fulfill({ json: { data: {
+    job_id: 'check-1', description: '行情健康检查', status: 'completed', progress: 1,
+    total_candidates: 1, total_scanned: 1, errors: 0, error: null, result: healthReport,
+  } } }))
+  await page.route('**/api/v1/market-data/health/repair', async (route) => {
+    repairBody = route.request().postDataJSON() as Record<string, unknown>
+    await route.fulfill({ json: { data: { job_id: 'repair-1', status: 'queued' } } })
+  })
+  await page.route('**/api/v1/market-data/jobs/repair-1', (route) => {
+    const read = repairReads
+    repairReads += 1
+    if (read < 2) {
+      return route.fulfill({ json: { data: { ...base, job_id: 'repair-1', status: 'running', progress: 0,
+        total_candidates: 500, total_scanned: 0, phase: 'deleting',
+        metadata: { worker_count: 8, delete_targets: 500, delete_range: '第 1 ~ 500 只' } } } })
+    }
+    if (read < 6) {
+      return route.fulfill({ json: { data: { ...base, job_id: 'repair-1', status: 'running', progress: 0.23,
+        total_candidates: 500, total_scanned: 115, phase: 'fetching',
+        metadata: { worker_count: 8, worker_id: 6, downloaded_targets: 115, current_status: 'fetching',
+          range_label: '2015-01-01 → 2026-10-16',
+          current_instrument: { market: 'SH', code: '601231', name: '环旭电子' } } } } })
+    }
+    return route.fulfill({ json: { data: { ...base, job_id: 'repair-1', status: 'completed', progress: 1,
+      total_candidates: 500, total_scanned: 500, phase: 'completed', metadata: { worker_count: 8 },
+      result: { checked_keys: ['gap', 'stale'], requested_codes: 500, offset: 0, flagged_total: 2272,
+        remaining: 1772, truncated: true, deleted_bars: 1133865, written_bars: 1133865, errors: 0,
+        empty_after_repair: [] } } } })
+  })
+
+  await page.goto('/market-data')
+  await page.getByTestId('market-health-check').click()
+  await expect(page.getByTestId('market-health-repair')).toContainText('一键修复 2 项')
+  await page.getByTestId('market-health-repair').click()
+
+  expect(confirmText).toContain('全市场研究会因为打不开库而失败')
+  expect(confirmText).toContain('重下改不出任何东西')
+  await expect(page.getByTestId('market-health-stage')).toContainText('正在删除待修标的的全部历史')
+  await expect(page.getByTestId('market-health-progress')).toContainText('待删除 500 只标的的全部历史（第 1 ~ 500 只）')
+  // 8 路并发时那只「最近上报」的标的不能被称为「当前同步」。
+  await expect(page.getByTestId('market-health-current')).toContainText('8 路并发下载中')
+  await expect(page.getByTestId('market-health-current')).toContainText('SH 601231 · 环旭电子')
+  await expect(page.getByTestId('market-health-current')).toContainText('worker 6 上报')
+  // 同一个任务不在上方同步面板再画一条进度条，两处数字才会互相对不上。
+  await expect(page.getByTestId('market-data-progress')).toHaveCount(0)
+  await expect(page.getByTestId('market-health-remaining')).toContainText('还剩 1772 只没轮到')
+  await expect(page.getByTestId('market-health-no-change')).toContainText('原样写回 1133865 根')
+  expect(repairBody).toMatchObject({ checks: ['gap', 'stale'], offset: 0, confirm: true })
+
+  await page.getByTestId('market-health-repair-next').click()
+  await expect.poll(() => repairBody).toMatchObject({ offset: 500 })
+})
