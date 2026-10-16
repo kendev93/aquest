@@ -70,7 +70,9 @@ def _init_discovery_worker(
     snapshot_path: str | None = None,
 ) -> None:
     global _WORKER_DISCOVERY_SERVICE
-    worker_store = DuckDbMarketDataStore(database_path, read_only=True)
+    # 评估进程只服务一次寻优，读连接复用（与条件挖掘 worker 同一做法）：默认每查询
+    # 新建再关闭一条连接，逐候选的查询会被放大成热路径上的主要开销。
+    worker_store = DuckDbMarketDataStore(database_path, read_only=True, pool_read_connections=True)
     market_adapter = DuckDbMarketDataAdapter(worker_store)
     worker_portfolio = PortfolioBacktestService(
         adapter=market_adapter,

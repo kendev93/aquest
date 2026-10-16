@@ -22,6 +22,7 @@ from aquest.portfolio_backtest.models import (
     PortfolioBacktestConfig,
     PortfolioBacktestReport,
 )
+from aquest.portfolio_backtest.report import _date_text
 from aquest.portfolio_backtest.service import (
     PortfolioBacktestService,
     SimulationCheckpoint,
@@ -616,6 +617,76 @@ def test_prepared_context_action_preload_caches_missing_events_as_empty() -> Non
     )
     assert adapter.batch_calls == 1
     assert adapter.single_calls == 0
+
+
+def test_prepared_runs_refresh_actions_once_per_context_batch() -> None:
+    """一次寻优里上万个候选共用同一批 contexts：逐候选重查等于逐候选开一条库连接。
+
+    「每次运行都能看到最新除权事件」的契约粒度是一次运行，不是一个 trial；换一批
+    contexts（下一组规则对的寻优）必须立刻重查，否则新登记的除权进不了复权。
+    """
+
+    class CountingAdapter:
+        def __init__(self) -> None:
+            self.batch_calls = 0
+
+        def load_corporate_actions(self, keys):
+            self.batch_calls += 1
+            return {}
+
+    adapter = CountingAdapter()
+    service = PortfolioBacktestService(adapter=adapter)
+    dates = np.asarray([20240102, 20240103, 20240104], dtype=np.int64)
+    context = _StockSeries(
+        market="SH",
+        code="600000",
+        instrument_type="stock",
+        board="main",
+        dates=dates,
+        opens=np.full(3, 10.0),
+        highs=np.full(3, 10.0),
+        lows=np.full(3, 10.0),
+        closes=np.full(3, 10.0),
+        atrs=np.full(3, np.nan),
+        buy_mask=np.asarray([True, False, False]),
+        sell_mask=np.zeros(3, dtype=bool),
+        signals={},
+        values={"price.close": np.full(3, 10.0)},
+        date_to_index=SortedDateIndex(dates),
+        data_fingerprint="batch-guard",
+    )
+    settings = config(
+        formula_text=None,
+        selected_signals=(),
+        ranking_value="price.close",
+        buy_rule=RuleGroup(
+            conditions=(
+                ScreenCondition(left_value="price.close", operator="gt", right_constant=0.0),
+            ),
+        ),
+        sell_rule=RuleGroup(
+            conditions=(
+                ScreenCondition(left_value="price.close", operator="lt", right_constant=0.0),
+            ),
+        ),
+        start_date=date(2024, 1, 2),
+        end_date=date(2024, 1, 4),
+    )
+    contexts = [context]
+
+    service.run_prepared_metrics(settings, contexts)
+    service.run_prepared_metrics(settings, contexts)
+    assert adapter.batch_calls == 1
+
+    service.run_prepared_metrics(settings, list(contexts))
+    assert adapter.batch_calls == 2
+
+
+@pytest.mark.parametrize("value", [20150105, 20240101, 20240229, 20261231])
+def test_date_text_matches_the_pandas_formatting_it_replaces(value: int) -> None:
+    """明细路径每根 bar 都转一次日期文本，纯切片必须与原来的 pandas 逐字符一致。"""
+
+    assert _date_text(value) == pd.to_datetime(str(value), format="%Y%m%d").strftime("%Y-%m-%d")
 
 
 @pytest.mark.parametrize("prefix_length", [2, 3, 4])

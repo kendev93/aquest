@@ -175,6 +175,7 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
         data_fingerprint: str = "",
         ranked_candidate_index: Mapping[int, np.ndarray] | None = None,
         abort_check: Callable[[], bool] | None = None,
+        lightweight: bool = False,
     ) -> dict[str, object]:
         # numba 内核路径：接发现寻优的形态（指标汇总、无 fitness/中止回调），
         # 含检查点续跑（多保真度的 medium/full 阶段）。与下面的原状态机逐行等价，
@@ -201,6 +202,9 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
                 data_fingerprint=data_fingerprint,
                 ranked_candidate_index=ranked_candidate_index,
                 checkpoint=checkpoint,
+                # lightweight 只影响内核的结果装配；退回 Python 实现时照旧产出全
+                # 明细，指标汇总两种形态都读得懂，不需要跟着分支。
+                lightweight=lightweight,
             )
             if fast_result is not None:
                 return fast_result

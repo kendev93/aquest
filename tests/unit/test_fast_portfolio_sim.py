@@ -4,11 +4,14 @@
 调仓、风险退出（pct/atr/移动止盈 + 冷却）、除权除息、最长持有、固定股数、
 排序方向、next_close、停牌缺口、优先级分数、排名索引（快路径）与全量扫描
 （通用路径）。同输入强制分别走原状态机与内核（JIT 版 + 纯 Python 版），
-断言净值、交易、检查点、明日计划逐项完全一致（bit-exact）。
+断言净值、交易、检查点、明日计划逐项完全一致（bit-exact）。另断言寻优用的
+lightweight 装配（只留净值 total 数组、不建检查点与明日计划）与原装配的
+指标汇总逐键一致。
 """
 
 from __future__ import annotations
 
+import functools
 import os
 
 import numpy as np
@@ -744,3 +747,50 @@ def test_equal_length_segments_do_not_share_the_rebalance_mask(
     cold_tail = run_sim(_SimService(), contexts, tail, config, ranked=False)
 
     assert_same(cold_tail, warmed_tail)
+
+
+@pytest.mark.parametrize("name,overrides,contexts", _SCENARIOS, ids=[s[0] for s in _SCENARIOS])
+def test_lightweight_assembly_keeps_summary_metrics_identical(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    overrides: dict[str, object],
+    contexts: list[_StockSeries],
+    ranked_mode: bool,
+) -> None:
+    """寻优只要净值里的 total 一列：省掉逐 bar 明细与检查点深拷，绩效数字必须逐键不变。
+
+    这一条守的是全市场重跑的可比性——3000 组 × 数千只标的都走 lightweight 形态，
+    它与逐候选全装配算出来的分数必须一模一样，否则选出来的风控参数就不是同一个口径。
+    """
+
+    del name
+    monkeypatch.setenv("AQUEST_FAST_SIM", "1")
+    dates = global_dates(contexts)
+    config = make_config(**overrides)
+    service = _SimService()
+    ranked_index = (
+        service._build_ranked_candidate_index(contexts, dates, config) if ranked_mode else None
+    )
+    call = functools.partial(
+        fast_sim.try_fast_portfolio_simulation,
+        service,
+        contexts,
+        dates,
+        config,
+        data_fingerprint="test",
+        ranked_candidate_index=ranked_index,
+    )
+    detailed = call()
+    lightweight = call(lightweight=True)
+    assert detailed is not None and lightweight is not None
+
+    assert lightweight["equity"] == []
+    assert lightweight["checkpoint"] is None
+    assert lightweight["next_plan"] is None
+    assert [float(value) for value in lightweight["equity_totals"]] == [
+        float(row["total"]) for row in detailed["equity"]
+    ]
+
+    detailed_summary = service._build_search_summary(config, detailed, "test")
+    lightweight_summary = service._build_search_summary(config, lightweight, "test")
+    assert lightweight_summary == detailed_summary

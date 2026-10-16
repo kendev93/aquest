@@ -37,9 +37,14 @@ class PortfolioReportMixin(_PortfolioServiceState):
         columns; the normal backtest still uses ``_build_report`` unchanged.
         """
 
-        equity = cast(list[dict[str, PortfolioJsonValue]], simulation["equity"])
         trades = cast(list[dict[str, PortfolioJsonValue]], simulation["trades"])
-        equity_frame = pd.DataFrame({"total": [float(cast(float, row["total"])) for row in equity]})
+        # 内核的 lightweight 形态直接给净值 total 数组；其余调用方（含退回 Python
+        # 实现的路径）仍是逐 bar 明细，两条都收成同一列，数值逐点一致。
+        totals = simulation.get("equity_totals")
+        if totals is None:
+            equity = cast(list[dict[str, PortfolioJsonValue]], simulation["equity"])
+            totals = [float(cast(float, row["total"])) for row in equity]
+        equity_frame = pd.DataFrame({"total": totals})
         trade_frame = pd.DataFrame(
             [
                 {
@@ -354,7 +359,14 @@ def _benchmark_block(
 
 
 def _date_text(value: int) -> str:
-    return str(pd.to_datetime(str(value), format="%Y%m%d").strftime("%Y-%m-%d"))
+    """YYYYMMDD 整数转 ISO 文本，与内核的 `_fast_date_text` 逐字符一致。
+
+    原来每次调用要走两趟 pandas（解析再格式化），而明细路径每根 bar、每笔成交
+    都调它——实测占掉最终重放阶段三成时间（182,841 次调用 19.5 秒）。
+    """
+
+    text = str(value)
+    return f"{text[:4]}-{text[4:6]}-{text[6:]}"
 
 
 def _portfolio_fingerprint(contexts: list[_StockSeries]) -> str:

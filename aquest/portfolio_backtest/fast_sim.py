@@ -1412,11 +1412,15 @@ def try_fast_portfolio_simulation(
     data_fingerprint: str,
     ranked_candidate_index: Any,
     checkpoint: SimulationCheckpoint | None = None,
+    lightweight: bool = False,
 ) -> dict[str, object] | None:
     """在内核支持范围内用 Numba 跑 ``_simulate``；否则返回 None 走原实现。
 
     ``checkpoint`` 非 None 时从该状态续跑（多保真度寻优的 medium/full 阶段），
     输出与前缀结果拼接，语义与原实现的检查点续跑一致。
+
+    ``lightweight`` 表示调用方是寻优的指标汇总形态：净值只留 total 一列的数组，
+    不再产出逐 bar 明细、下一笔挂单计划和检查点。
     """
 
     global _WARNED
@@ -1481,6 +1485,7 @@ def try_fast_portfolio_simulation(
         outputs,
         resume_start=resume_start,
         prefix=checkpoint if resume_start > 0 else None,
+        lightweight=lightweight,
     )
 
 
@@ -1495,6 +1500,7 @@ def _build_result(
     outputs: tuple[Any, ...],
     resume_start: int = 0,
     prefix: SimulationCheckpoint | None = None,
+    lightweight: bool = False,
 ) -> dict[str, object]:
     (
         cash,
@@ -1552,19 +1558,28 @@ def _build_result(
 
     # 续跑时净值/交易前缀直接取自检查点（与原实现的拼接语义一致），
     # 内核输出只覆盖 [resume_start, n_days) 区间。
+    #
+    # lightweight 是寻优的指标汇总形态：它只读净值里的 total 一列，且这一批候选
+    # 既没有检查点消费者也没有下一笔挂单消费者。逐 bar 建 5 键 dict、再把整段
+    # 净值和成交深拷进一个用完即丢的检查点，是这条路径上最大的纯开销。
     equity: list[dict[str, object]] = (
         cast(list[dict[str, object]], list(prefix.equity)) if prefix is not None else []
     )
-    equity.extend(
-        {
-            "date": date_texts[day],
-            "cash": float(eq_cash[day]),
-            "position_value": float(eq_posval[day]),
-            "total": float(eq_total[day]),
-            "positions_count": int(eq_count[day]),
-        }
-        for day in range(resume_start, n_days)
-    )
+    equity_totals: np.ndarray | None = None
+    if lightweight:
+        equity = []
+        equity_totals = np.asarray(eq_total[resume_start:n_days], dtype=float)
+    else:
+        equity.extend(
+            {
+                "date": date_texts[day],
+                "cash": float(eq_cash[day]),
+                "position_value": float(eq_posval[day]),
+                "total": float(eq_total[day]),
+                "positions_count": int(eq_count[day]),
+            }
+            for day in range(resume_start, n_days)
+        )
 
     trades: list[dict[str, object]] = (
         cast(list[dict[str, object]], list(prefix.trades)) if prefix is not None else []
@@ -1603,6 +1618,27 @@ def _build_result(
         if direction == "BUY" and config.single_security_mode:
             row["equity_before"] = float(t_eqb[i])
         trades.append(row)
+
+    if lightweight:
+        # 指标汇总形态的消费方只读 trades 与 equity_totals：净值的逐 bar dict、
+        # 下一笔挂单计划和深拷一份检查点都在这里无人认领，直接不建。
+        return {
+            "cash": float(cash),
+            "equity": equity,
+            "equity_totals": equity_totals,
+            "states": [],
+            "trades": trades,
+            "ranking_events": [],
+            "current_state": None,
+            "today_candidates": {
+                "as_of": None,
+                "ranking_value": config.ranking_value,
+                "total": 0,
+                "rows": [],
+            },
+            "next_plan": None,
+            "checkpoint": None,
+        }
 
     positions: dict[str, _Position] = {}
     for oi in range(int(n_pos)):

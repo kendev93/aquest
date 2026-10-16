@@ -54,6 +54,7 @@ class PortfolioBacktestService(
         self._risk_ranked_context_source: Sequence[_StockSeries] | None = None
         self._risk_ranked_context_key: tuple[str, str] | None = None
         self._risk_ranked_candidate_index: dict[int, np.ndarray] | None = None
+        self._prepared_action_contexts: Sequence[_StockSeries] | None = None
 
     def run(
         self,
@@ -246,8 +247,15 @@ class PortfolioBacktestService(
         truth.
         """
 
-        self._refresh_corporate_action_cache()
-        self._preload_corporate_actions((context.market, context.code) for context in contexts)
+        # 公司行动只取决于 (标的, 窗口)，与候选的风控参数无关；共享快照会把同一个
+        # contexts 对象回给一次寻优里的每个候选，所以这里只在批次换脸时查一次。
+        # 逐候选重查等于每候选开一条只读库连接（实测 12.9ms，占单候选成本四成）。
+        # 顶层运行仍在 run / run_stock / replay_account 各自入口刷新，「每次运行
+        # 都能看到最新除权事件」的契约不变。
+        if contexts is not self._prepared_action_contexts:
+            self._refresh_corporate_action_cache()
+            self._preload_corporate_actions((context.market, context.code) for context in contexts)
+            self._prepared_action_contexts = contexts
         if config.formula_text:
             raise ValueError("共享行情快照不支持自定义公式")
         self._validate_outputs(config, None)
@@ -312,6 +320,9 @@ class PortfolioBacktestService(
             self._risk_ranked_context_key = None
             self._risk_ranked_candidate_index = None
         fitness_filter = self._build_fitness_filter(prepared, config)
+        # 寻优把每个候选的模拟结果只折成几个绩效数字：没有检查点消费者时，逐 bar 净值
+        # 明细、下一笔挂单计划和整份检查点的深拷都没人读，属于纯开销。
+        lightweight = bool(metrics_only and checkpoint_callback is None and checkpoint is None)
         simulation = self._simulate(
             prepared,
             dates,
@@ -321,6 +332,7 @@ class PortfolioBacktestService(
             checkpoint=checkpoint,
             data_fingerprint=data_fingerprint,
             ranked_candidate_index=ranked_candidate_index,
+            lightweight=lightweight,
         )
         restored_checkpoint = simulation.get("checkpoint")
         if checkpoint_callback is not None and isinstance(
