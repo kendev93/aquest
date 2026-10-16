@@ -94,6 +94,60 @@ mypy strict）全绿。
 - rule_pair_validation 23.9s（3.6%）；
 - final_replays 15.5s、mine_conditions 4.7s、prepare 0.7s。
 
+## 第二轮（2026-10-16）：逐候选装配开销
+
+P1+P2 之后 risk_search 仍占单股 90%+，但每候选 ~30ms 的构成一直没拆开。
+这轮把「后续方向 2」做了：cProfile 挂在**同进程内联的评估路径**上（生产把候选
+交给 spawn 出来的子进程，父进程 profile 只看得见 `select.poll`，需要把
+`_evaluation_executor` 换成同步 `map` 才能测到真实工作）。
+
+定位结果（基准股 SH601939，600 trial × ≤2 组规则，profile 放大后仍看得出比例）：
+
+| 逐项 | 实测 | 结论 |
+|---|---|---|
+| 逐候选重查公司行动 | `_duckdb.connect` **2798 次 / 36.0s**（12.9ms/候选），加上每次 `read_session` 退出关连接 | 大头。共享快照把同一批 contexts 对象回给一次寻优的所有候选，而 `_run_prepared_contexts` 每候选都清缓存重查——等于每候选开一条只读库连接 |
+| 逐候选净值/成交装配 | `_build_result` cum 11.1s，其中检查点深拷 `equity=tuple(dict(r) for r in equity)` 4.3M+4.6M 次调用 ~5.5s | risk_only 传的 `checkpoint_callback=None`（多保真度对 risk_only 关闭，fidelity 恒为 `search`），拷完即丢 |
+| 明细路径日期文本 | `report._date_text` **182,841 次 / cum 19.5s**（每次两趟 pandas） | 只影响全明细路径（最终重放、跟踪），但比例可观；内核侧早就改成了批量切片 |
+| 规则掩码全历史求值 | `contexts_for_config` 未进前列 | **不成立**：risk_only 的 contexts 按 (窗口, 规则, atr_period) 缓存复用，掩码不是逐候选求值 |
+
+实施的改动：
+
+1. 公司行动按**批次**刷新：同一批 contexts 只查一次，换批立刻重查（「每次运行看到
+   最新除权事件」的粒度本来就是一次运行，`run` / `run_stock` / `replay_account`
+   三个顶层入口的刷新原样保留）。
+2. 两个 spawn 出来的 worker（发现寻优、规则对初筛）读连接复用
+   `pool_read_connections=True`——与条件挖掘 worker 同一做法，进程寿命就是
+   一次寻优/一只股票的初筛，不存在跨任务的可见性问题。
+3. `metrics_only` 且无检查点消费者时走 lightweight 装配：净值只留 total 数组，
+   不建逐 bar 明细、不建明日挂单计划、不深拷检查点；指标汇总两种形态都读。
+4. `_date_text` 改为纯字符串切片（与内核 `_fast_date_text` 同一等价口径）。
+
+### 第二轮实测（生产路径，同股同 seed 同 trial 数）
+
+`--risk-trials 1000 --candidate-limit 3` → 6 组规则 × 1000 trial = 6000 trial，
+串行评估（evaluation_workers=1），三轮全部 `stop_reason=completed`：
+
+| | 总时长 | risk_search | rule_pair_validation | final_replays | 每 trial |
+|---|---|---|---|---|---|
+| 改前 v0.1.3 | 246.7s | 206.1s | 6.8s | 32.2s | 34.3ms |
+| 改后（三轮） | **56.9-66.9s** | **39.8-49.4s（-79%）** | 6.6-6.9s | **8.7-9.7s（-70%）** | **7.4ms** |
+
+初筛阶段本就不是逐候选开连接（每个规则对只跑 train/validation 两次回测），
+所以没跟着降——它在这条口径里只占 11%。
+
+入选结果逐位一致：`results_by_return` / `results_by_sharpe` 各 10 条，
+四轮（改前 1 + 改后 3）candidate_hash 序列相同，annual_return / sharpe /
+max_drawdown / total_trades / sortino / turnover / executed_buy_orders 的 float
+表示完全相同（最优一条 0.0316894473244389 / 0.856606282035552 /
+0.05887209976283407 / 5 笔）。四轮之间唯一差异是
+`research_search.search_metadata` 里的耗时字段——**这条管线在候选选择上是可复现的**，
+以后做 A/B 只需要把摘要口径定到这两列上。
+
+守住口径的测试：`test_lightweight_assembly_keeps_summary_metrics_identical`
+（8 场景 × 排名/通用两形态，lightweight 与原装配的汇总逐键相等）、
+`test_prepared_runs_refresh_actions_once_per_context_batch`（同批不重查、换批必重查）、
+`test_date_text_matches_the_pandas_formatting_it_replaces`。
+
 ## 全市场推算
 
 mode=full（全市场任务）从未受单股进度 bug 影响：用户实测均值约 8 分钟/股
@@ -104,6 +158,10 @@ mode=full（全市场任务）从未受单股进度 bug 影响：用户实测均
 - 线程闸已就位、内存峰值 ~1.2 GiB/股，`AQUEST_STRATEGY_POOL_MAX_WORKERS`
   与 `AQUEST_DISCOVERY_WORKERS` 开到 6-8 后 ≈ **3 天**（待实测）。
 
+第二轮改动不动并发配置，直接把单候选成本从 34.3ms 压到 7.2ms。按生产实测口径
+外推（4 只并发、单股 ~620s、剩余 4225 只 ETA 157h，risk_search 占 90%）：
+**同配置同口径下 ETA 约 40h**，代价是重跑一次全市场——数字待实测回填。
+
 ## 调参指引
 
 | 变量 | 建议值 | 说明 |
@@ -113,6 +171,22 @@ mode=full（全市场任务）从未受单股进度 bug 影响：用户实测均
 | `AQUEST_STRATEGY_POOL_MAX_WORKERS` | 核数 × 0.7~1 | 回测是数组密集型，内存带宽先于核数成为天花板 |
 | `AQUEST_DISCOVERY_WORKERS` | 与上同步放大 | 评估进程受共享预算约束（`EvaluationWorkerBudget`） |
 
+## 后续方向（未立项）
+
+1. **并发放开**：零开发，改环境变量即可。当前 `.env` 是 `POOL_MAX_WORKERS=4` +
+   `DISCOVERY_WORKERS=4`，而共享评估进程预算取 `min(可见核数 8, DISCOVERY_WORKERS)`
+   → 4 只并发每只只分到 1 个评估进程，容器实测只用 2.79/8 核、1.0/11.7 GiB。
+   按文档建议开到 6-8 是下一步最便宜的一档（2026-10-16 用户决定：先不动配置，
+   先把口径内的开销吃掉）。
+2. **指标汇总本身**：改前每候选 `_build_search_summary` cum ~5.6ms（DataFrame +
+   `PerformanceAnalyzer.compute` + `_average_holding_days`）、`_trade_fingerprint`
+   ~1.5ms、`PortfolioBacktestRequest.model_validate` + `_context_config_cache_key`
+   的 json.dumps 各一次。要再降就得把已验证的绩效公式改成数组口径——收益只剩
+   risk_search 的几成，但要重写对拍的参照物，风险明显高于第一轮。
+3. **spawn 池复用（P3）**：每股 ~11 个进程池、~12s（2%）。第一轮改动把单股压到
+   1/4 后，这 12s 的**相对**占比回到 ~8%，值得重新评估；跨股票常驻池是原方案。
+4. 内存是并发的天花板而不是核数：Docker VM 11.67 GiB、实测峰值 ~1.2 GiB/股。
+
 ## 决策记录
 
 - **P5（risk_trials 降回 1000）不采纳**（2026-10-11 用户决策）：提前退出
@@ -120,16 +194,14 @@ mode=full（全市场任务）从未受单股进度 bug 影响：用户实测均
   现状给收敛留了空间；数据已归档，未来若重新评估可直接引用。
 - **P3（spawn 池复用）后置**：实测 12s/股（~2%）低于立项门槛（<10s/股则
   后置，实测处于边缘）；真正价值在并发放开后的 spawn 风暴缓解。
-
-## 后续方向（未立项）
-
-1. **并发放开**：零开发，改环境变量即可，是当前投入产出比最高的一步；
-   开完跑一轮全市场实测，再决定是否继续深挖。
-2. **快照评估路径解剖**（~30ms/trial）：`contexts_for_config` 切片、规则
-   掩码（当前对全历史求值再切窗口）、内核模拟的占比未拆分；若并发后仍不
-   满意再立项。
-3. 规则掩码只评窗口：`evaluate_rule_group` 目前对全历史求值后切窗，理论
-   上可只评窗口（需确认指标预热语义）。
+- **规则掩码只评窗口不立项**（2026-10-16）：profile 里 `contexts_for_config`
+  根本没进前列——risk_only 的 contexts 按 (窗口, 规则, atr_period) 缓存复用，
+  掩码不是逐候选求值。原判断来自「全历史求值再切窗」这一步确实存在，但它
+  每次寻优只做几遍，不做也不亏。
+- **逐候选装配瘦身采纳**（2026-10-16 用户决策：在不牺牲结果最优性的前提下优化，
+  改前后最好结果要一致）：做法是只删无人认领的工作（重查、深拷、明细），
+  不动任何 trial 数、约束、评分或采样序列；用同股同 seed 的生产路径三轮对拍
+  证明入选候选与绩效数字逐位一致。
 
 ## 基准方法
 
@@ -147,3 +219,14 @@ mode=full（全市场任务）从未受单股进度 bug 影响：用户实测均
 - 注意：risk_search 阶段有 ±10% 的运行间波动，跨轮对比必须同股同 seed 同
   trial 数；`nproc` 会读 `OMP_NUM_THREADS`，在已上闸的容器里显示 1，不代表
   真实核数。
+- 逐候选 profile：生产的候选评估跑在 spawn 出来的子进程里，父进程 cProfile 只
+  看得见 `select.poll`。要看真实装配开销就把
+  `StrategyDiscoveryService._evaluation_executor` 换成同步 `map`（保留真实快照
+  构建，只把进程池换成内联），并按子进程同样的方式构造 worker 服务
+  （`DiscoverySnapshot(snapshot_path)` + `pool_read_connections=True`），否则
+  测到的是回退路径。
+- 结果一致性对拍：`scripts/benchmark_research_search.py` 的输出里，
+  `results_by_return` / `results_by_sharpe` 的 candidate_hash 序列与绩效字段是
+  可比口径；`risk_search_runs[].search_metadata` 含耗时字段，跨轮必然不同，
+  不要整段比哈希。第二轮就是按这个口径确认四轮（改前一轮 + 改后三轮）入选结果
+  逐位一致。
