@@ -454,13 +454,18 @@ class DuckDbStrategyPoolStore:
 
     @contextmanager
     def _read_connection(self) -> Iterator[duckdb.DuckDBPyConnection]:
-        """只读打开：读写打开要求独占，会把正在研究的市场 worker 顶死，反过来也一样。
+        """能只读就只读：读写打开是独占的，研究进行中会把页面的读顶死（反之亦然）。
 
-        共享卷上 DuckDB 允许任意多个只读进程并存，只读句柄之间不冲突；页面的读
-        走这里之后，全市场研究跑着也能打开策略池。写路径仍按原来的重试间隙走。
+        只读打开失败就**立刻**退回原来的读写路径，不额外等待：同一个进程里如果有
+        写事务，只读打开必然被自己拒绝（DuckDB 报 Conflicting lock is held in
+        PID 0），而研究 worker 正是既读又写同一个库。后端没有并发写事务时读到的是
+        只读快路径，页面因此不再排队。
         """
 
-        connection = self._store._connect(read_only=True)
+        try:
+            connection = self._store._open(read_only=True)
+        except duckdb.Error:
+            connection = self._store._connect()
         try:
             yield connection
         finally:

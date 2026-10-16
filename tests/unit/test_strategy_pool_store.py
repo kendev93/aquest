@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import duckdb
 import pytest
 
 from aquest.market_data.store import DuckDbMarketDataStore
@@ -412,35 +413,43 @@ def test_focus_survives_full_pool_reset(tmp_path) -> None:
     assert pool.read_focus() == [{"market": "SH", "code": "600000", "name": "浦发银行"}]
 
 
-def test_pool_page_reads_open_the_database_read_only(tmp_path, monkeypatch) -> None:
-    """研究进程持有只读句柄时页面还得能读：池表读不允许要求独占打开。
+def test_pool_page_reads_prefer_the_read_only_fast_path(tmp_path, monkeypatch) -> None:
+    """研究进行中页面还得能读：读优先走只读打开，成功就不该再去要独占连接。
 
-    DuckDB 的读写打开是独占的：另一个进程只要持有一条只读连接，读写打开就会失败
-    并重试约 3.8 秒（_CONNECT_RETRY_DELAYS）。全市场研究跑起来时 UI 每秒轮询多个
-    接口，这些等待会占满请求线程池，整站跟着超时——页面看起来就是「卡住不动」。
+    DuckDB 的读写打开是独占的：研究进程只要持有一条连接，后端的读写打开就会失败并
+    重试约 3.8 秒（_CONNECT_RETRY_DELAYS）。UI 每秒轮询好几个池接口，这些等待会占满
+    请求线程池，整站跟着超时——页面看起来就是「卡在某个阶段不动」。
     """
 
-    modes: list[bool] = []
-    original = DuckDbMarketDataStore._connect
+    opened: list[bool] = []
+    connected: list[bool] = []
+    original_open = DuckDbMarketDataStore._open
+    original_connect = DuckDbMarketDataStore._connect
 
-    def spy(self, *, read_only=None):  # noqa: ANN001, ANN003
+    def spy_open(self, *, read_only):  # noqa: ANN001
+        opened.append(bool(read_only))
+        return original_open(self, read_only=read_only)
+
+    def spy_connect(self, *, read_only=None):  # noqa: ANN001
         resolved = self.read_only if read_only is None else read_only
-        modes.append(bool(resolved))
-        return original(self, read_only=read_only)
+        connected.append(bool(resolved))
+        return original_connect(self, read_only=read_only)
 
-    monkeypatch.setattr(DuckDbMarketDataStore, "_connect", spy)
+    monkeypatch.setattr(DuckDbMarketDataStore, "_open", spy_open)
+    monkeypatch.setattr(DuckDbMarketDataStore, "_connect", spy_connect)
     market_store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     pool = DuckDbStrategyPoolStore(market_store)
     pool.initialize()
-    modes.clear()
+    opened.clear()
+    connected.clear()
 
     assert pool.list_entries() == []
     assert pool.read_focus() == []
     assert pool.read_research_settings() is None
     assert pool.get("SH", "600000") is None
-    assert modes and set(modes) == {True}
+    assert opened and set(opened) == {True}
+    assert connected == []
 
-    modes.clear()
     pool.upsert_automatic(
         market="SH",
         code="600000",
@@ -451,4 +460,38 @@ def test_pool_page_reads_open_the_database_read_only(tmp_path, monkeypatch) -> N
         config_fingerprint="config-1",
         source_job_id="job-1",
     )
-    assert modes[0] is False
+    assert connected[0] is False
+
+
+def test_pool_reads_fall_back_when_read_only_open_conflicts(tmp_path, monkeypatch) -> None:
+    """同进程已有写连接时只读打开会被自己拒绝（DuckDB 报 PID 0）：立刻退回读写路径。
+
+    研究 worker 就是同一个进程里既读又写这张表，只读打开在那里必然冲突；不退回
+    去就等于把整条全市场任务拖死——2026-10-16 上线只读快路径后 4 分钟整条任务
+    失败就是这么来的。退回时不额外等待，页面侧本来也用不到这条分支。
+    """
+
+    market_store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    pool = DuckDbStrategyPoolStore(market_store)
+    pool.initialize()
+    pool.upsert_automatic(
+        market="SH",
+        code="600000",
+        name="浦发银行",
+        annual_candidate={"candidate_id": "auto-a"},
+        sharpe_candidate={"candidate_id": "auto-s"},
+        data_fingerprint="bars-1",
+        config_fingerprint="config-1",
+        source_job_id="job-1",
+    )
+    original_open = DuckDbMarketDataStore._open
+
+    def refuse_read_only(self, *, read_only):  # noqa: ANN001
+        if read_only:
+            raise duckdb.Error("Could not set lock: Conflicting lock is held in PID 0")
+        return original_open(self, read_only=read_only)
+
+    monkeypatch.setattr(DuckDbMarketDataStore, "_open", refuse_read_only)
+
+    assert [row["code"] for row in pool.list_entries()] == ["600000"]
+    assert pool.read_focus() == []

@@ -176,13 +176,19 @@ max_drawdown / total_trades / sortino / turnover / executed_buy_orders 的 float
 一起做（见后续方向 2、3）。
 
 已实施的对症改动：池页的四个读（`list_entries` / `get` / `read_focus` /
-`read_research_settings`）改走只读打开（`StrategyPoolStore._read_connection`，
-与任务表读路径同一做法），写路径原样保留。关键数字是
+`read_research_settings`）先试一次**只读打开**，成功就用它，失败**立刻**退回原来
+的读写打开（`StrategyPoolStore._read_connection`），写路径不变。关键数字是
 `_CONNECT_RETRY_DELAYS = (0.1, 0.25, 0.5, 1.0, 2.0)`：一次打不开就占住请求线程
 约 3.85 秒才抛错，而 UI 每秒轮询多个池接口，线程池被这类等待填满之后整站接口
-一起超时——这才是「页面卡死」的直接原因，只读打开之间不冲突，读因此不再排队。
-回归测试 `test_pool_page_reads_open_the_database_read_only` 钉住这个契约
-（把四个读改回读写打开就会失败）。
+一起超时——这才是「页面卡死」的直接原因。
+
+**只读打开必须带回退，别照搬「只读更安全」。** 报错里的
+`Conflicting lock is held in PID 0` 指的是**同进程**冲突：研究 worker 一个进程里
+既写池表又读池表，4 条线程并发时一条线程持有读写连接，另一条线程的只读打开就被
+自己进程拒绝。第一版没有回退，结果 worker 侧一次任务级读抛错、整条全市场任务
+4 分钟就失败（`worker_failed`）。后端没有这种同进程写事务，才稳定吃到只读的收益。
+回归测试两条：只读快路径命中且不再要读写连接；只读被打回时能退回读写路径并读到
+同样的数据。
 
 ## 生产实测（2026-10-16 13:0x，mode=full，risk_trials=3000，4 并发）
 
