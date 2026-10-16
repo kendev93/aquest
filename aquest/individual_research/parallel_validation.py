@@ -38,9 +38,10 @@ def config_payload(config: PortfolioBacktestConfig) -> dict[str, Any]:
 
 def _initialize_validation_worker(database_path: str) -> None:
     global _WORKER_PORTFOLIO
-    # 与发现寻优的 worker 同一做法：进程只服务一只股票的规则对初筛，读连接复用。
-    # 逐次查询新建连接会让每次 run_stock 多付一趟连接开销。
-    store = DuckDbMarketDataStore(database_path, read_only=True, pool_read_connections=True)
+    # 与寻优 worker 同理：**不**复用读连接。共享卷上 backend 要以独占方式打开
+    # market.duckdb 写池表，评估进程长期持有共享锁会把 backend 的读写顶死
+    # （锁语义见 docs/research-performance-log.md）。
+    store = DuckDbMarketDataStore(database_path, read_only=True)
     adapter = DuckDbMarketDataAdapter(store, cache_stock_reads=True)
     cache_store = store if store.indicator_cache_backend == "sqlite" else None
     _WORKER_PORTFOLIO = PortfolioBacktestService(

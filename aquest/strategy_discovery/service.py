@@ -70,9 +70,11 @@ def _init_discovery_worker(
     snapshot_path: str | None = None,
 ) -> None:
     global _WORKER_DISCOVERY_SERVICE
-    # 评估进程只服务一次寻优，读连接复用（与条件挖掘 worker 同一做法）：默认每查询
-    # 新建再关闭一条连接，逐候选的查询会被放大成热路径上的主要开销。
-    worker_store = DuckDbMarketDataStore(database_path, read_only=True, pool_read_connections=True)
+    # 这里刻意**不**复用读连接：DuckDB 的只读句柄会挡住另一个进程的读写打开，而
+    # backend 的池表读写只能以读写模式打开（同锁语义实验见
+    # docs/research-performance-log.md）。逐候选的查询已经由「公司行动按批次刷新」
+    # 消掉，剩下的是每批一次开合，让出的窗口正是 backend 写进度用的。
+    worker_store = DuckDbMarketDataStore(database_path, read_only=True)
     market_adapter = DuckDbMarketDataAdapter(worker_store)
     worker_portfolio = PortfolioBacktestService(
         adapter=market_adapter,
