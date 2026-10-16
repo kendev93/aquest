@@ -410,3 +410,45 @@ def test_focus_survives_full_pool_reset(tmp_path) -> None:
 
     assert pool.list_entries() == []
     assert pool.read_focus() == [{"market": "SH", "code": "600000", "name": "浦发银行"}]
+
+
+def test_pool_page_reads_open_the_database_read_only(tmp_path, monkeypatch) -> None:
+    """研究进程持有只读句柄时页面还得能读：池表读不允许要求独占打开。
+
+    DuckDB 的读写打开是独占的：另一个进程只要持有一条只读连接，读写打开就会失败
+    并重试约 3.8 秒（_CONNECT_RETRY_DELAYS）。全市场研究跑起来时 UI 每秒轮询多个
+    接口，这些等待会占满请求线程池，整站跟着超时——页面看起来就是「卡住不动」。
+    """
+
+    modes: list[bool] = []
+    original = DuckDbMarketDataStore._connect
+
+    def spy(self, *, read_only=None):  # noqa: ANN001, ANN003
+        resolved = self.read_only if read_only is None else read_only
+        modes.append(bool(resolved))
+        return original(self, read_only=read_only)
+
+    monkeypatch.setattr(DuckDbMarketDataStore, "_connect", spy)
+    market_store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    pool = DuckDbStrategyPoolStore(market_store)
+    pool.initialize()
+    modes.clear()
+
+    assert pool.list_entries() == []
+    assert pool.read_focus() == []
+    assert pool.read_research_settings() is None
+    assert pool.get("SH", "600000") is None
+    assert modes and set(modes) == {True}
+
+    modes.clear()
+    pool.upsert_automatic(
+        market="SH",
+        code="600000",
+        name="浦发银行",
+        annual_candidate={"candidate_id": "auto-a"},
+        sharpe_candidate={"candidate_id": "auto-s"},
+        data_fingerprint="bars-1",
+        config_fingerprint="config-1",
+        source_job_id="job-1",
+    )
+    assert modes[0] is False

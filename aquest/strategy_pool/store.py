@@ -65,7 +65,7 @@ class DuckDbStrategyPoolStore:
     def read_research_settings(self) -> dict[str, object] | None:
         """读取保存的研究范围偏好；没有保存过或内容损坏时返回 None。"""
 
-        with self._connection() as connection:
+        with self._read_connection() as connection:
             row = connection.execute(
                 """
                 SELECT boards_json, exclude_st, updated_at
@@ -109,7 +109,7 @@ class DuckDbStrategyPoolStore:
     def read_focus(self) -> list[dict[str, object]]:
         """特别关注名单，按关注时间正序；一只都没关注时返回空列表。"""
 
-        with self._connection() as connection:
+        with self._read_connection() as connection:
             rows = connection.execute(
                 """
                 SELECT market, code, name FROM strategy_pool_focus
@@ -154,7 +154,7 @@ class DuckDbStrategyPoolStore:
         return self.read_focus()
 
     def get(self, market: str, code: str) -> dict[str, object] | None:
-        with self._connection() as connection:
+        with self._read_connection() as connection:
             row = connection.execute(
                 """
                 SELECT market, code, name, annual_candidate_json, sharpe_candidate_json,
@@ -168,7 +168,7 @@ class DuckDbStrategyPoolStore:
         return _row_to_entry(row) if row else None
 
     def list_entries(self) -> list[dict[str, object]]:
-        with self._connection() as connection:
+        with self._read_connection() as connection:
             rows = connection.execute(
                 """
                 SELECT market, code, name, annual_candidate_json, sharpe_candidate_json,
@@ -447,6 +447,20 @@ class DuckDbStrategyPoolStore:
     @contextmanager
     def _connection(self) -> Iterator[duckdb.DuckDBPyConnection]:
         connection = self._store._connect()
+        try:
+            yield connection
+        finally:
+            connection.close()
+
+    @contextmanager
+    def _read_connection(self) -> Iterator[duckdb.DuckDBPyConnection]:
+        """只读打开：读写打开要求独占，会把正在研究的市场 worker 顶死，反过来也一样。
+
+        共享卷上 DuckDB 允许任意多个只读进程并存，只读句柄之间不冲突；页面的读
+        走这里之后，全市场研究跑着也能打开策略池。写路径仍按原来的重试间隙走。
+        """
+
+        connection = self._store._connect(read_only=True)
         try:
             yield connection
         finally:
