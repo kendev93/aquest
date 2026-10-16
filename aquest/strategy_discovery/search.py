@@ -309,6 +309,16 @@ class HybridSearchEngine:
         observed: list[StrategyCandidate] = []
         seen: set[str] = set()
         risk_only_sampling = request.candidate_mode == "risk_only"
+        # 风控寻优不做多精度粗筛：它只搜止损 / 止盈 / 移动止盈三组参数，空间本来就小
+        # （代理模型因此被停用，见下面 surrogate.reason），粗筛省不下多少时间；而粗筛窗口
+        # 只取训练段前 25%，买入信号没落进那一段的标的会在筛选上被整批判成"零成交"，
+        # 一路走到"没有找到满足约束的策略候选"，最后把整只标的记成无可用策略
+        # （2026-10-16 实测 SH600067：最早一笔买入在第 28%，六对规则全部白跑）。
+        use_fidelity = (
+            fidelity_evaluator is not None
+            and request.multifidelity_enabled
+            and not risk_only_sampling
+        )
         allow_fallback = _fallback_enabled()
         if not allow_fallback and not risk_only_sampling:
             _assert_ml_dependencies()
@@ -533,11 +543,7 @@ class HybridSearchEngine:
                 accepted.append((trial, candidate))
             if not accepted:
                 continue
-            evaluation_stage = (
-                "coarse"
-                if fidelity_evaluator is not None and request.multifidelity_enabled
-                else "search"
-            )
+            evaluation_stage = "coarse" if use_fidelity else "search"
             metrics_batch = evaluate_stage_batch(
                 [candidate for _, candidate in accepted], evaluation_stage
             )
@@ -558,10 +564,9 @@ class HybridSearchEngine:
                 passes_constraints = _passes_constraints(
                     raw_metrics,
                     request,
-                    min_trades=_fidelity_min_trades(request, "coarse")
-                    if fidelity_evaluator is not None and request.multifidelity_enabled
-                    else None,
+                    min_trades=_fidelity_min_trades(request, "coarse") if use_fidelity else None,
                     enforce_max_drawdown=request.candidate_mode != "risk_only",
+                    allow_zero_execution=use_fidelity,
                 )
                 if passes_constraints:
                     observed.append(candidate)
@@ -598,14 +603,14 @@ class HybridSearchEngine:
                     progress_callback(evaluated, trial_limit, "converged")
                 break
         stage_durations["search"] = time.perf_counter() - search_started
-        if fidelity_evaluator is not None and request.multifidelity_enabled:
+        if use_fidelity:
             stage_durations["coarse"] = stage_durations["search"]
         if evaluated < trial_limit and stop_reason == "completed":
             stop_reason = "attempt_limit"
 
         final_observed = observed
         partial_observed: list[StrategyCandidate] = []
-        if fidelity_evaluator is not None and request.multifidelity_enabled and observed:
+        if use_fidelity and observed:
             medium_limit = max(1, min(len(observed), math.ceil(len(observed) * 0.35)))
             if adaptive:
                 medium_limit = min(medium_limit, MEDIUM_LIMIT)
@@ -821,9 +826,9 @@ class HybridSearchEngine:
                 key: (
                     float(
                         evaluated
-                        if key == "search" and not request.multifidelity_enabled
+                        if key == "search" and not use_fidelity
                         else fidelity_counts["coarse"]
-                        if key == "search" and request.multifidelity_enabled
+                        if key == "search" and use_fidelity
                         else fidelity_counts.get(key, 0)
                     )
                     / duration
@@ -868,6 +873,7 @@ def _passes_constraints(
     *,
     min_trades: int | None = None,
     enforce_max_drawdown: bool = True,
+    allow_zero_execution: bool = False,
 ) -> bool:
     if metrics.get("error"):
         return False
@@ -884,9 +890,14 @@ def _passes_constraints(
     # ``min_trades`` 设成 0 时会在真实候选普遍为负时登顶，还会经 ``best_scores`` 把
     # "什么都不做"当成最优解喂给 Optuna。买了却没卖的候选不在此列——那条曲线有真实
     # 浮动盈亏，是合法结果。指标缺失时 ``_metric`` 返回 -inf，按"无法判定"放行。
-    executed = _metric(metrics, "executed_buy_orders") + _metric(metrics, "executed_sell_orders")
-    if math.isfinite(executed) and executed <= 0:
-        return False
+    # ``allow_zero_execution``：粗筛只看训练段前 25%，一笔信号都没落进那段是常态而不是
+    # 候选的问题，所以筛选阶段不能用这条做终判（终判在 medium/full 与榜单上照旧生效）。
+    if not allow_zero_execution:
+        executed = _metric(metrics, "executed_buy_orders") + _metric(
+            metrics, "executed_sell_orders"
+        )
+        if math.isfinite(executed) and executed <= 0:
+            return False
     if trades < (request.min_trades if min_trades is None else min_trades):
         return False
     if enforce_max_drawdown and request.max_drawdown is not None:

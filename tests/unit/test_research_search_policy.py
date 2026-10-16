@@ -90,9 +90,50 @@ def test_adaptive_plateau_stops_and_completes_refinement():
     meta = result.search_metadata
     assert meta["stop_reason"] == "converged"
     assert 1500 <= meta["evaluated_trials"] < 3000
-    assert 0 < meta["fidelity_evaluations"]["medium"] <= 120
-    assert 0 < meta["fidelity_evaluations"]["full"] <= 40
     assert result.results_by_return
+    # 风控寻优不做精度粗筛（见 test_risk_only_search_ignores_multifidelity_screening），
+    # 所以即使请求里开着多精度，也不该有 coarse/medium/full 的分层评估。
+    assert meta["fidelity_evaluations"] == {"coarse": 0, "medium": 0, "full": 0}
+
+
+def test_risk_only_search_ignores_multifidelity_screening() -> None:
+    """风控寻优即使开着多精度也必须按全精度评估，一组都不能被粗筛窗口筛掉。
+
+    粗筛窗口只取训练段前 25%。买入信号没落进那一段的标的（实测 SH600067 最早一笔买入
+    在第 28%）会在筛选上被判成"零成交"，六对规则全部跑完也拿不到候选，最后整只标的被记成
+    无可用策略。风控寻优只搜三组参数，省这点时间不值当，直接把分层筛选关掉。
+    """
+
+    stages: list[str] = []
+
+    def metrics(_candidate, stage):
+        stages.append(stage)
+        return {"annual_return": 0.1, "sharpe": 1.0, "total_trades": 10}
+
+    result = _search(metrics, limit=40, fidelity=True, batch=8)
+    assert set(stages) == {"search"}
+    assert result.search_metadata["fidelity_evaluations"] == {"coarse": 0, "medium": 0, "full": 0}
+    assert result.results_by_return
+
+
+def test_coarse_screening_does_not_reject_for_missing_signals_in_its_window() -> None:
+    """粗筛窗口里没有成交是常态，不能据此把候选判死；终判在 medium/full 与榜单上。"""
+
+    from aquest.strategy_discovery.models import DiscoveryRequest
+    from aquest.strategy_discovery.search import _passes_constraints
+
+    flat = {
+        "annual_return": 0.0,
+        "sharpe": 0.0,
+        "total_trades": 0,
+        "executed_buy_orders": 0.0,
+        "executed_sell_orders": 0.0,
+    }
+    request = DiscoveryRequest(
+        base_config={}, candidate_mode="risk_only", min_trades=0, max_drawdown=None
+    )
+    assert _passes_constraints(flat, request) is False
+    assert _passes_constraints(flat, request, allow_zero_execution=True) is True
 
 
 def test_adaptive_invalid_candidates_do_not_converge():
@@ -162,8 +203,7 @@ def test_three_thousand_budget_respects_minimum_and_batch_boundary():
     assert result.search_metadata["evaluated_trials"] == 1504
     assert result.search_metadata["convergence_min_trials"] == 1500
     assert result.search_metadata["convergence_patience"] == 1000
-    assert result.search_metadata["fidelity_evaluations"]["medium"] == 120
-    assert result.search_metadata["fidelity_evaluations"]["full"] == 40
+    assert result.search_metadata["fidelity_evaluations"] == {"coarse": 0, "medium": 0, "full": 0}
 
 
 def test_one_thousand_budget_runs_to_completion():
