@@ -12,8 +12,8 @@ import {
   getFactorAttributionResults,
 } from '../api/factorAttribution'
 import { fetchMetadata } from '../api/formulaScreen'
+import { adoptActiveJob, useActiveJobResume } from '../composables/useActiveJobResume'
 import { describeError } from '../api/client'
-import { fetchActiveJobs } from '../api/jobs'
 import { savePortfolioBacktestHandoff } from '../utils/portfolioBacktestHandoff'
 import BacktestHistoryPanel from '../components/BacktestHistoryPanel.vue'
 import TermHint from '../components/TermHint.vue'
@@ -183,19 +183,13 @@ async function poll(jobId: string): Promise<void> {
   }
 }
 
-async function resumeActive(): Promise<void> {
-  try {
-    const active = (await fetchActiveJobs()).find((item) => item.description === JOB_DESCRIPTION)
-    if (!active) return
-    job.value = active as unknown as FactorAttributionJobState
-    loading.value = true
-    await poll(active.job_id)
-  } catch (error) {
-    message.value = apiMessage(error)
-  } finally {
-    loading.value = false
-  }
-}
+const { resumeActiveJob: resumeActive } = useActiveJobResume({
+  descriptions: [JOB_DESCRIPTION],
+  adopt: (active) => { job.value = adoptActiveJob<FactorAttributionJobState>(active) },
+  poll: (active) => poll(active.job_id),
+  setLoading: (value) => { loading.value = value },
+  reportError: (error) => { message.value = apiMessage(error) },
+})
 
 async function loadSources(): Promise<void> {
   try {

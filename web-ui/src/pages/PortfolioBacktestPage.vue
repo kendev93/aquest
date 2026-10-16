@@ -9,13 +9,13 @@ import {
   getPortfolioBacktestResults,
 } from '../api/portfolioBacktest'
 import { fetchMetadata, parseFormula } from '../api/formulaScreen'
+import { adoptActiveJob, useActiveJobResume } from '../composables/useActiveJobResume'
 import { describeError } from '../api/client'
 import { pollUntil } from '../composables/usePolling'
 import { usePortfolioBacktestHistory } from '../composables/usePortfolioBacktestHistory'
 import { usePortfolioHandoff } from '../composables/usePortfolioHandoff'
 import { usePortfolioRiskOptimization } from '../composables/usePortfolioRiskOptimization'
 import { usePortfolioStrategyLibrary } from '../composables/usePortfolioStrategyLibrary'
-import { fetchActiveJobs } from '../api/jobs'
 import { consumePortfolioBacktestHandoff } from '../utils/portfolioBacktestHandoff'
 import BacktestHistoryPanel from '../components/BacktestHistoryPanel.vue'
 import DateRangeSelector from '../components/DateRangeSelector.vue'
@@ -554,19 +554,13 @@ const {
 })
 
 // 刷新页面时后端可能还在跑上一轮：找到它并接上轮询，而不是让用户重新提交。
-async function resumeActivePortfolioBacktest(): Promise<void> {
-  try {
-    const active = (await fetchActiveJobs()).find((item) => item.description === '组合回测')
-    if (!active) return
-    job.value = active as unknown as PortfolioBacktestJobState
-    loading.value = true
-    await pollPortfolioBacktest(active.job_id)
-  } catch (error) {
-    message.value = apiMessage(error)
-  } finally {
-    loading.value = false
-  }
-}
+const { resumeActiveJob: resumeActivePortfolioBacktest } = useActiveJobResume({
+  descriptions: ['组合回测'],
+  adopt: (active) => { job.value = adoptActiveJob<PortfolioBacktestJobState>(active) },
+  poll: (active) => pollPortfolioBacktest(active.job_id),
+  setLoading: (value) => { loading.value = value },
+  reportError: (error) => { message.value = apiMessage(error) },
+})
 
 // 退出风控寻优（提交/轮询/取消/候选榜/历史）在 composables/usePortfolioRiskOptimization；
 // 表单校验与组装、通用回填留在页面，应用候选后的复现标注也由页面持有。

@@ -11,8 +11,8 @@ import {
   getFactorTestResults,
 } from '../api/factorTest'
 import { fetchMetadata } from '../api/formulaScreen'
+import { adoptActiveJob, useActiveJobResume } from '../composables/useActiveJobResume'
 import { describeError } from '../api/client'
-import { fetchActiveJobs } from '../api/jobs'
 import { savePortfolioBacktestHandoff } from '../utils/portfolioBacktestHandoff'
 import BacktestHistoryPanel from '../components/BacktestHistoryPanel.vue'
 import DateRangeSelector from '../components/DateRangeSelector.vue'
@@ -220,19 +220,13 @@ async function poll(jobId: string): Promise<void> {
   }
 }
 
-async function resumeActive(): Promise<void> {
-  try {
-    const active = (await fetchActiveJobs()).find((item) => item.description === '因子检验')
-    if (!active) return
-    job.value = active as unknown as FactorTestJobState
-    loading.value = true
-    await poll(active.job_id)
-  } catch (error) {
-    message.value = apiMessage(error)
-  } finally {
-    loading.value = false
-  }
-}
+const { resumeActiveJob: resumeActive } = useActiveJobResume({
+  descriptions: ['因子检验'],
+  adopt: (active) => { job.value = adoptActiveJob<FactorTestJobState>(active) },
+  poll: (active) => poll(active.job_id),
+  setLoading: (value) => { loading.value = value },
+  reportError: (error) => { message.value = apiMessage(error) },
+})
 
 async function loadHistory(): Promise<void> {
   historyLoading.value = true

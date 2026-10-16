@@ -3,7 +3,7 @@ import PageIntro from '../components/PageIntro.vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import { fetchLocalChart } from '../api/marketData'
-import { fetchActiveJobs } from '../api/jobs'
+import { adoptActiveJob, useActiveJobResume } from '../composables/useActiveJobResume'
 import MarketCandlestickChart from '../components/MarketCandlestickChart.vue'
 import TermHint from '../components/TermHint.vue'
 import { createJob, createSyncJob, fetchMetadata, fetchScreenHistory, getJob, getResults, getScreenHistory, getSyncJob, parseFormula } from '../api/formulaScreen'
@@ -703,19 +703,14 @@ async function pollUntilFinished(jobId: string): Promise<void> {
   showMessage(`扫描完成：命中 ${payload.meta.total_signals} 个条件，得到 ${payload.results.length} 只股票。`)
 }
 
-async function resumeActiveScreenJob(): Promise<void> {
-  try {
-    const active = (await fetchActiveJobs()).find((item) => item.description === '公式选股')
-    if (!active) return
-    job.value = active as unknown as JobState
-    loading.value = true
-    await pollUntilFinished(active.job_id)
-  } catch (error) {
-    showMessage(apiMessage(error, '扫描任务恢复失败，请检查后端服务和本地行情'), true)
-  } finally {
-    loading.value = false
-  }
-}
+const { resumeActiveJob: resumeActiveScreenJob } = useActiveJobResume({
+  descriptions: ['公式选股'],
+  adopt: (active) => { job.value = adoptActiveJob<JobState>(active) },
+  poll: (active) => pollUntilFinished(active.job_id),
+  setLoading: (value) => { loading.value = value },
+  reportError: (error) =>
+    showMessage(apiMessage(error, '扫描任务恢复失败，请检查后端服务和本地行情'), true),
+})
 
 async function syncMarketData(): Promise<void> {
   syncLoading.value = true

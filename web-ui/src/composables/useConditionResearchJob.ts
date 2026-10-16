@@ -11,7 +11,7 @@ import { ref } from 'vue'
 import type { Ref } from 'vue'
 
 import { createConditionResearch, cancelConditionResearch, getConditionResearch, getConditionResearchResults } from '../api/conditionResearch'
-import { fetchActiveJobs } from '../api/jobs'
+import { adoptActiveJob, useActiveJobResume } from '../composables/useActiveJobResume'
 import { pollUntil } from './usePolling'
 import type { ConditionResearchJobState, ConditionResearchReport, ConditionResearchPayload } from '../types'
 
@@ -99,19 +99,16 @@ export function useConditionResearchJob(deps: ConditionResearchJobDeps) {
   }
 
   /** 刷新页面时后端可能还在跑上一轮：找到它并接上轮询，而不是让用户重新提交。 */
-  async function resumeActiveJob(): Promise<void> {
-    try {
-      const active = (await fetchActiveJobs()).find((item) => item.description === '买卖条件研究')
-      if (!active) return
-      job.value = active as unknown as ConditionResearchJobState
-      loading.value = true
-      await pollJob(active.job_id)
-    } catch (error) {
-      deps.message.value = deps.describeError(error)
-    } finally {
-      loading.value = false
-    }
-  }
+  const { resumeActiveJob } = useActiveJobResume({
+    descriptions: ['买卖条件研究'],
+    // `/jobs/active` 只给通用任务形状，`result` 要等轮询拉到详情才有；这里只校验
+    // 页面在接管瞬间就会读的字段，其余由 poll 的第一次拉取补齐。
+    requiredFields: ['job_id', 'status', 'progress'],
+    adopt: (active) => { job.value = adoptActiveJob<ConditionResearchJobState>(active) },
+    poll: (active) => pollJob(active.job_id),
+    setLoading: (value) => { loading.value = value },
+    reportError: (error) => { deps.message.value = deps.describeError(error) },
+  })
 
   return { job, report, loading, submit, cancel, resumeActiveJob }
 }
