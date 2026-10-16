@@ -3,7 +3,7 @@ import PageIntro from '../components/PageIntro.vue'
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 
 import { ApiError, describeError } from '../api/client'
-import { fetchActiveJobs } from '../api/jobs'
+import { adoptActiveJob, useActiveJobResume } from '../composables/useActiveJobResume'
 import {
   createStrategyDiscovery,
   createStrategyDiscoveryRefinement,
@@ -346,38 +346,32 @@ async function startRefinement(candidate: StrategyDiscoveryCandidate): Promise<v
   }
 }
 
-async function resumeActiveDiscoveryJob(): Promise<void> {
-  try {
-    const activeJobs = await fetchActiveJobs()
-    const active = activeJobs.find((item) => (
-      item.description === '策略实验室' || item.description === '策略二次优化'
-    ))
-    if (active) {
-      const kind: DiscoveryJobKind = active.description === '策略二次优化'
-        ? 'refinement'
-        : 'discovery'
-      if (kind === 'refinement') {
-        refinementJob.value = active as unknown as StrategyDiscoveryJobState
-        refinementLoading.value = true
-      } else {
-        job.value = active as unknown as StrategyDiscoveryJobState
-        loading.value = true
-      }
-      await pollDiscoveryJob(active.job_id, kind)
-      return
-    }
-    const replay = activeJobs.find((item) => item.description === '策略前十全量复核')
-    if (replay) {
-      await resumeActiveReplay(replay as unknown as StrategyReplayJobState)
-    }
-  } catch (error) {
-    message.value = apiMessage(error)
-  } finally {
-    loading.value = false
-    refinementLoading.value = false
-    replayLoading.value = false
-  }
-}
+// 一次拉取里按顺序接管：实验室寻优与二次优化各自落到自己的状态，两类都没有时
+// 再接管随后的全量复核。三类都没命中时也各自归一次加载态（与收口前一致）。
+const { resumeActiveJob: resumeActiveDiscoveryJob } = useActiveJobResume({
+  candidates: [
+    {
+      descriptions: ['策略实验室'],
+      adopt: (active) => { job.value = adoptActiveJob<StrategyDiscoveryJobState>(active) },
+      poll: (active) => pollDiscoveryJob(active.job_id, 'discovery'),
+      setLoading: (value) => { loading.value = value },
+    },
+    {
+      descriptions: ['策略二次优化'],
+      adopt: (active) => {
+        refinementJob.value = adoptActiveJob<StrategyDiscoveryJobState>(active)
+      },
+      poll: (active) => pollDiscoveryJob(active.job_id, 'refinement'),
+      setLoading: (value) => { refinementLoading.value = value },
+    },
+    {
+      descriptions: ['策略前十全量复核'],
+      poll: (active) => resumeActiveReplay(adoptActiveJob<StrategyReplayJobState>(active)),
+      setLoading: (value) => { replayLoading.value = value },
+    },
+  ],
+  reportError: (error) => { message.value = apiMessage(error) },
+})
 
 async function cancel(): Promise<void> {
   if (!job.value || !loading.value) return

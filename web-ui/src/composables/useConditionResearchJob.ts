@@ -100,13 +100,14 @@ export function useConditionResearchJob(deps: ConditionResearchJobDeps) {
 
   /** 刷新页面时后端可能还在跑上一轮：找到它并接上轮询，而不是让用户重新提交。 */
   const { resumeActiveJob } = useActiveJobResume({
-    descriptions: ['买卖条件研究'],
-    // `/jobs/active` 只给通用任务形状，`result` 要等轮询拉到详情才有；这里只校验
-    // 页面在接管瞬间就会读的字段，其余由 poll 的第一次拉取补齐。
-    requiredFields: ['job_id', 'status', 'progress'],
-    adopt: (active) => { job.value = adoptActiveJob<ConditionResearchJobState>(active) },
-    poll: (active) => pollJob(active.job_id),
-    setLoading: (value) => { loading.value = value },
+    candidates: [{
+      descriptions: ['买卖条件研究'],
+      // 只校验接管那一刻就会读的字段：`result` 要等 poll 拉到详情才有。
+      requiredFields: ['job_id', 'status', 'progress'],
+      adopt: (active) => { job.value = adoptActiveJob<ConditionResearchJobState>(active) },
+      poll: (active) => pollJob(active.job_id),
+      setLoading: (value) => { loading.value = value },
+    }],
     reportError: (error) => { deps.message.value = deps.describeError(error) },
   })
 

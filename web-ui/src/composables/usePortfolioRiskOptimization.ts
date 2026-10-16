@@ -19,8 +19,8 @@ import {
   getStrategyDiscoveryResults,
 } from '../api/strategyDiscovery'
 import { ApiError } from '../api/client'
-import { fetchActiveJobs } from '../api/jobs'
 import { pollUntil } from './usePolling'
+import { adoptActiveJob, useActiveJobResume } from './useActiveJobResume'
 import { formatTradeRatio } from '../utils/format'
 import type { TradeRatioKey } from '../utils/format'
 import { portfolioBaseFingerprint } from '../utils/portfolioFingerprint'
@@ -230,30 +230,28 @@ export function usePortfolioRiskOptimization(deps: PortfolioRiskOptimizationDeps
     }
   }
 
-  async function resumeActiveRiskOptimization(): Promise<void> {
-    try {
-      const active = (await fetchActiveJobs()).find(
-        (item) => item.description === '组合风险寻优',
-      )
-      if (!active) return
-      riskOptimizationJob.value = active as unknown as StrategyDiscoveryJobState
-      // 接回后台任务时无从得知提交时的指纹，只能先标记「需从历史还原」，
-      // 等用户从历史列表载入后再解锁候选应用。
-      riskOptimizationBaseFingerprint.value = null
-      riskOptimizationBaseFingerprintWithoutSt.value = null
-      riskOptimizationRestoreRequired.value = true
-      riskOptimizationLoading.value = true
-      void pollRiskOptimization(active.job_id)
-        .catch((error: unknown) => {
+  // 加载态由 pollRiskOptimization 自己的 catch/finally 收尾，因此不把 setLoading
+  // 交给接管流程：接管函数在任务真正跑完前就返回，提前归零会让转圈消失而任务还在跑。
+  const { resumeActiveJob: resumeActiveRiskOptimization } = useActiveJobResume({
+    candidates: [{
+      descriptions: ['组合风险寻优'],
+      adopt: (active) => {
+        riskOptimizationJob.value = adoptActiveJob<StrategyDiscoveryJobState>(active)
+        // 接回后台任务时无从得知提交时的指纹，只能先标记「需从历史还原」，
+        // 等用户从历史列表载入后再解锁候选应用。
+        riskOptimizationBaseFingerprint.value = null
+        riskOptimizationBaseFingerprintWithoutSt.value = null
+        riskOptimizationRestoreRequired.value = true
+        riskOptimizationLoading.value = true
+      },
+      poll: async (active) => {
+        void pollRiskOptimization(active.job_id).catch((error: unknown) => {
           deps.message.value = deps.describeError(error)
         })
-        .finally(() => {
-          riskOptimizationLoading.value = false
-        })
-    } catch (error) {
-      deps.message.value = deps.describeError(error)
-    }
-  }
+      },
+    }],
+    reportError: (error) => { deps.message.value = deps.describeError(error) },
+  })
 
   async function loadRiskOptimizationHistory(append = false): Promise<void> {
     if (riskOptimizationHistoryLoading.value) return

@@ -18,7 +18,7 @@ import {
 } from '../api/individualResearch'
 import { fetchLocalInstruments } from '../api/marketData'
 import { createStrategy } from '../api/savedStrategies'
-import { fetchActiveJobs } from '../api/jobs'
+import { useActiveJobResume } from '../composables/useActiveJobResume'
 import type {
   DateRangeSelection,
   FormulaScreenMetadata,
@@ -505,19 +505,28 @@ function formatTime(value: string): string {
   return value ? value.replace('T', ' ').slice(0, 16) : '—'
 }
 
+// 刷新页面时后端可能还在跑上一轮：接上它的轮询，而不是让用户重新提交。
+// 个股研究的活动任务只有 job_id 是可信的，状态要等详情拉回来才能落，所以不传 adopt。
+const { resumeActiveJob: resumeActiveResearch } = useActiveJobResume({
+  candidates: [{
+    descriptions: ['个股研究'],
+    poll: async (active) => {
+      const state = await getIndividualResearchJob(active.job_id)
+      job.value = state
+      if (state.status === 'queued' || state.status === 'running') await pollJob(state.job_id)
+      else if (state.status === 'completed') result.value = state.result
+    },
+  }],
+  reportError: (error) => showMessage(apiMessage(error, '个股研究初始化失败，请检查本地服务。'), true),
+})
+
 onMounted(async () => {
   try {
     metadata.value = await fetchMetadata()
     if (!selectedValues.value.size) setAllValues()
     if (!selectedSignals.value.size) setAllSignals()
     await loadHistory()
-    const active = (await fetchActiveJobs()).find((item) => item.description === '个股研究')
-    if (active) {
-      const state = await getIndividualResearchJob(active.job_id)
-      job.value = state
-      if (state.status === 'queued' || state.status === 'running') await pollJob(state.job_id)
-      else if (state.status === 'completed') result.value = state.result
-    }
+    await resumeActiveResearch()
   } catch (error) {
     showMessage(apiMessage(error, '个股研究初始化失败，请检查本地服务。'), true)
   }

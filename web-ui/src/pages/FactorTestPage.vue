@@ -221,10 +221,12 @@ async function poll(jobId: string): Promise<void> {
 }
 
 const { resumeActiveJob: resumeActive } = useActiveJobResume({
-  descriptions: ['因子检验'],
-  adopt: (active) => { job.value = adoptActiveJob<FactorTestJobState>(active) },
-  poll: (active) => poll(active.job_id),
-  setLoading: (value) => { loading.value = value },
+  candidates: [{
+    descriptions: ['因子检验'],
+    adopt: (active) => { job.value = adoptActiveJob<FactorTestJobState>(active) },
+    poll: (active) => poll(active.job_id),
+    setLoading: (value) => { loading.value = value },
+  }],
   reportError: (error) => { message.value = apiMessage(error) },
 })
 

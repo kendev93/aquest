@@ -555,10 +555,12 @@ const {
 
 // 刷新页面时后端可能还在跑上一轮：找到它并接上轮询，而不是让用户重新提交。
 const { resumeActiveJob: resumeActivePortfolioBacktest } = useActiveJobResume({
-  descriptions: ['组合回测'],
-  adopt: (active) => { job.value = adoptActiveJob<PortfolioBacktestJobState>(active) },
-  poll: (active) => pollPortfolioBacktest(active.job_id),
-  setLoading: (value) => { loading.value = value },
+  candidates: [{
+    descriptions: ['组合回测'],
+    adopt: (active) => { job.value = adoptActiveJob<PortfolioBacktestJobState>(active) },
+    poll: (active) => pollPortfolioBacktest(active.job_id),
+    setLoading: (value) => { loading.value = value },
+  }],
   reportError: (error) => { message.value = apiMessage(error) },
 })
 

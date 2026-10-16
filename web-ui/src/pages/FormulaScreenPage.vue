@@ -704,10 +704,12 @@ async function pollUntilFinished(jobId: string): Promise<void> {
 }
 
 const { resumeActiveJob: resumeActiveScreenJob } = useActiveJobResume({
-  descriptions: ['公式选股'],
-  adopt: (active) => { job.value = adoptActiveJob<JobState>(active) },
-  poll: (active) => pollUntilFinished(active.job_id),
-  setLoading: (value) => { loading.value = value },
+  candidates: [{
+    descriptions: ['公式选股'],
+    adopt: (active) => { job.value = adoptActiveJob<JobState>(active) },
+    poll: (active) => pollUntilFinished(active.job_id),
+    setLoading: (value) => { loading.value = value },
+  }],
   reportError: (error) =>
     showMessage(apiMessage(error, '扫描任务恢复失败，请检查后端服务和本地行情'), true),
 })

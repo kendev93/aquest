@@ -12,7 +12,7 @@ import {
 } from '../api/strategyFitness'
 import { fetchMetadata, parseFormula } from '../api/formulaScreen'
 import { describeError } from '../api/client'
-import { fetchActiveJobs } from '../api/jobs'
+import { adoptActiveJob, useActiveJobResume } from '../composables/useActiveJobResume'
 import BacktestHistoryPanel from '../components/BacktestHistoryPanel.vue'
 import DateRangeSelector from '../components/DateRangeSelector.vue'
 import RuleGroupEditor from '../components/RuleGroupEditor.vue'
@@ -368,19 +368,15 @@ async function pollStrategyFitness(jobId: string): Promise<void> {
   }
 }
 
-async function resumeActiveStrategyFitness(): Promise<void> {
-  try {
-    const active = (await fetchActiveJobs()).find((item) => item.description === '策略适配性评估')
-    if (!active) return
-    job.value = active as unknown as StrategyFitnessJobState
-    loading.value = true
-    await pollStrategyFitness(active.job_id)
-  } catch (error) {
-    message.value = apiMessage(error)
-  } finally {
-    loading.value = false
-  }
-}
+const { resumeActiveJob: resumeActiveStrategyFitness } = useActiveJobResume({
+  candidates: [{
+    descriptions: ['策略适配性评估'],
+    adopt: (active) => { job.value = adoptActiveJob<StrategyFitnessJobState>(active) },
+    poll: (active) => pollStrategyFitness(active.job_id),
+    setLoading: (value) => { loading.value = value },
+  }],
+  reportError: (error) => { message.value = apiMessage(error) },
+})
 
 async function loadHistory(): Promise<void> {
   historyLoading.value = true
