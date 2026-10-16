@@ -307,6 +307,72 @@ def test_health_repair_deletes_before_redownloading(tmp_path: Path) -> None:
     assert service.bars_when_called == [80]
 
 
+def test_health_repair_advances_by_offset_and_reports_the_tail(tmp_path: Path) -> None:
+    """命中面超过单批上限时，必须报出还剩多少只、并允许往后推。
+
+    名单按 ``market, code`` 排序，所以不报 offset/remaining 的话，「一键修复」再点一次
+    只会反复重修同一批最前面的标的，而后面的永远轮不上——用户看到的就是"点了没变化"。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars().drop(index=[5]))
+    store.replace_local_bars("SZ", "000001", "stock", _bars().drop(index=[10, 11, 12]))
+    service = FakeMarketSyncService(store)
+    app = create_app(market_data_store=store, market_sync=service, auto_sync_enabled=False)
+
+    def restore() -> None:
+        """假同步什么都不写回，被删掉的那只会直接从名单上消失。
+
+        真实场景里重下会把同样的缺口带回来（停牌那几天在线源也没有），所以这里把两只票
+        恢复成修复前的样子，测的才是"同一份名单上的下一批"。
+        """
+
+        store.replace_local_bars("SH", "600000", "stock", _bars().drop(index=[5]))
+        store.replace_local_bars("SZ", "000001", "stock", _bars().drop(index=[10, 11, 12]))
+
+    with TestClient(app) as client:
+        first = client.post(
+            "/api/v1/market-data/health/repair",
+            json={"checks": ["gap"], "confirm": True, "limit": 1},
+        )
+        first_state = _wait_for_market_job(client, first.json()["data"]["job_id"])
+        restore()
+        second = client.post(
+            "/api/v1/market-data/health/repair",
+            json={"checks": ["gap"], "confirm": True, "limit": 1, "offset": 1},
+        )
+        second_state = _wait_for_market_job(client, second.json()["data"]["job_id"])
+        restore()
+        beyond = client.post(
+            "/api/v1/market-data/health/repair",
+            json={"checks": ["gap"], "confirm": True, "limit": 1, "offset": 9},
+        )
+        beyond_state = _wait_for_market_job(client, beyond.json()["data"]["job_id"])
+
+    first_result = first_state["result"]
+    assert first_result["flagged_total"] == 2
+    assert first_result["offset"] == 0
+    assert first_result["remaining"] == 1
+    assert first_result["truncated"] is True
+    assert service.configs[0].codes == ("600000",)
+    # 删除这段是唯一会让标的变空的窗口，必须先把阶段报出来（假同步不再报后续阶段）。
+    assert first_state["metadata"]["phase"] == "deleting"
+    assert first_state["metadata"]["delete_targets"] == 1
+
+    second_result = second_state["result"]
+    assert second_result["flagged_total"] == 2
+    assert second_result["offset"] == 1
+    assert second_result["remaining"] == 0
+    assert second_result["truncated"] is False
+    assert service.configs[1].codes == ("000001",)
+
+    # 越过名单末尾就什么都不做：既不删，也不调在线同步。
+    assert beyond_state["result"]["requested_codes"] == 0
+    assert beyond_state["result"]["deleted_bars"] == 0
+    assert "第 10 只之后" in str(beyond_state["result"]["message"])
+    assert len(service.configs) == 2
+
+
 def test_health_repair_without_candidates_does_not_call_the_provider(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     store.replace_local_bars("SH", "600000", "stock", _bars())

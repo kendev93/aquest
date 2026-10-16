@@ -116,6 +116,10 @@ class HealthRepairRequest(BaseModel):
     #: 直接指定标的（六位代码）时跳过检查项扫描。
     codes: list[str] | None = Field(default=None, max_length=REPAIR_MAX_CODES)
     limit: int = Field(default=REPAIR_MAX_CODES, ge=1, le=REPAIR_MAX_CODES)
+    #: 名单按 ``market, code`` 排序后从第几位开始取。命中面一旦超过上限，修复结果里的
+    #: 缺口标记不会消失（停牌缺口重下也修不掉），所以只能靠 offset 往后推进下一批，
+    #: 不能指望"再点一次"自动换标的。给了 ``codes`` 时忽略。
+    offset: int = Field(default=0, ge=0)
     confirm: bool = False
 
     @model_validator(mode="after")

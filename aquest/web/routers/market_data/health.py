@@ -88,6 +88,10 @@ def create_health_repair_job(
     顺序不能反：在线行写不进已有本地行的位置（本地行永远压过在线行），而且
     ``full_history`` 只补已有区间**之外**的缺口——不先删就覆盖不到中间那段。
     代价是删掉后在线拉不到的标的会变空，所以结果里会单独列出这批。
+
+    一次最多修 ``REPAIR_MAX_CODES`` 只，多出来的用 ``offset`` 往后推：名单按
+    ``market, code`` 排序，所以"再点一次"默认还是同一批标的，不报 ``remaining``
+    用户就永远不知道自己只修了前 500 只。
     """
 
     runner = _runner(request)
@@ -110,22 +114,43 @@ def create_health_repair_job(
             )
         except (MarketDataStoreError, duckdb.Error, OSError, RuntimeError) as exc:
             raise TaskUserError(_storage_error_message(exc)) from exc
-        truncated = len(pairs) > limit
-        pairs = pairs[:limit]
-        if not pairs:
+        flagged_total = len(pairs)
+        # 指定代码时没有"名单"可推进，offset 只对按检查项扫出来的名单有意义。越界不夹紧，
+        # 让它自然切成空批——报的是用户点的那一位，比报一个被改过的序号更好核对。
+        start = 0 if explicit_codes else payload.offset
+        batch = pairs[start : start + limit]
+        remaining = max(flagged_total - start - len(batch), 0)
+        if not batch:
             return {
                 "checked_keys": list(keys),
                 "requested_codes": 0,
                 "truncated": False,
+                "offset": start,
+                "flagged_total": flagged_total,
+                "remaining": 0,
                 "deleted_bars": 0,
                 "written_bars": 0,
                 "errors": 0,
                 "failure_reasons": {},
                 "empty_after_repair": [],
-                "message": "没有需要修复的标的。",
+                "message": (
+                    "没有需要修复的标的。"
+                    if not flagged_total
+                    else f"名单只有 {flagged_total} 只，第 {start + 1} 只之后没有更多了。"
+                ),
             }
-        codes = tuple(code for _market, code in pairs)
+        codes = tuple(code for _market, code in batch)
         progress(0, len(codes))
+        # 删除整段没有任何可报的中间量：不点名就只剩一条钉在 0% 的进度条，
+        # 而这段时间库里这些标的是**空的**，是整只任务里最危险的窗口。
+        report_progress_detail(
+            progress,
+            {
+                "phase": "deleting",
+                "delete_targets": len(codes),
+                "delete_range": f"第 {start + 1} ~ {start + len(codes)} 只",
+            },
+        )
         try:
             deleted = store.delete_bars(codes=list(codes))
         except (MarketDataStoreError, duckdb.Error, OSError, RuntimeError) as exc:
@@ -167,7 +192,10 @@ def create_health_repair_job(
         return {
             "checked_keys": list(keys),
             "requested_codes": len(codes),
-            "truncated": truncated,
+            "truncated": remaining > 0,
+            "offset": start,
+            "flagged_total": flagged_total,
+            "remaining": remaining,
             "deleted_bars": deleted,
             "written_bars": _sync_value(result, "written_bars"),
             "errors": _sync_value(result, "errors"),
