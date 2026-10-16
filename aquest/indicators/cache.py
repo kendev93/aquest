@@ -29,7 +29,10 @@ from aquest.market_data.adjustment import frame_adjust_version
 from aquest.market_data.models import InstrumentRef, StockRef
 from aquest.market_data.store import DuckDbMarketDataStore
 from aquest.market_data.store_base import DEFAULT_PRICE_BASIS
-from aquest.market_data.store_indicator_cache import _ADJUST_VERSION_MARKER
+from aquest.market_data.store_indicator_cache import (
+    _ADJUST_VERSION_MARKER,
+    _CHUNK_FINGERPRINT_MARKER,
+)
 
 _TIMEFRAME = "daily"
 # 行情口径的全局默认（见 ``store_base.DEFAULT_PRICE_BASIS``，当前是 raw 不复权）。
@@ -49,7 +52,6 @@ _CUSTOM_ENGINE_VERSION = "3"
 # the year's bars plus the preceding warm-up rows used to initialize rolling
 # and recursive indicators.
 INDICATOR_CACHE_WARMUP_BARS = 268
-_CHUNK_FINGERPRINT_MARKER = "|chunk:"
 # 落库用 float32：价格只有两位小数、指标值不需要 float64 的 17 位有效数字，
 # 实测缓存体积直接减半。读回来仍转成 float64，下游无感。
 _VALUE_DTYPE = np.float32

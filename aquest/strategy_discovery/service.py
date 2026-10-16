@@ -38,6 +38,7 @@ from .candidates import build_random_candidate
 from .catalog import default_indicator_catalog
 from .evaluation import run_validation_pipeline
 from .evaluation_budget import EvaluationWorkerBudget
+from .fingerprints import trade_fingerprint
 from .models import DiscoveryRequest, StrategyCandidate
 from .refinement import (
     RefinementRadius,
@@ -963,7 +964,7 @@ class StrategyDiscoveryService:
             if isinstance(report, PortfolioBacktestReport)
             else report.get("diagnostic")
         )
-        metrics["trade_fingerprint"] = _trade_fingerprint(trades)
+        metrics["trade_fingerprint"] = trade_fingerprint(trades)
         metrics["preflight_skipped"] = diagnostic == "预检无可交易候选"
         if captured_checkpoint is not None:
             metrics["_simulation_checkpoint"] = captured_checkpoint.to_dict()
@@ -1151,45 +1152,6 @@ def _stage_duration(metadata: object, stage: str) -> float:
     if not isinstance(durations, Mapping):
         return 0.0
     return max(0.0, _number(durations.get(stage)))
-
-
-def _trade_fingerprint(trades: object) -> str:
-    if not isinstance(trades, (list, tuple)):
-        return ""
-    fields = (
-        "board",
-        "code",
-        "commission",
-        "cooldown_days",
-        "cost_basis",
-        "date",
-        "direction",
-        "instrument_type",
-        "market",
-        "pnl",
-        "price",
-        "reason",
-        "risk_trigger",
-        "signal_date",
-        "size",
-        "slippage",
-        "stamp_tax",
-    )
-    rows: list[dict[str, object]] = []
-    for trade in trades:
-        if not isinstance(trade, Mapping):
-            continue
-        rows.append({field: _fingerprint_value(trade.get(field)) for field in fields})
-    payload = json.dumps(rows, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-def _fingerprint_value(value: object) -> object:
-    if isinstance(value, bool) or value is None:
-        return value
-    if isinstance(value, (int, float)):
-        return format(value, ".15g")
-    return str(value)
 
 
 def _find_parent_candidate(

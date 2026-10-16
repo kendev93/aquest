@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -13,6 +11,7 @@ from typing import Literal
 import pandas as pd
 
 from aquest.backtest.performance import PerformanceAnalyzer
+from aquest.strategy_discovery.fingerprints import trade_fingerprint
 
 ReplayLeaderboard = Literal["sharpe", "return"]
 ReplayJobStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
@@ -282,7 +281,7 @@ def build_replay_candidate(
     overall_metrics = {
         **dict(overall_metrics),
         "turnover": _turnover(trades, config, overall_metrics),
-        "trade_fingerprint": _trade_fingerprint(trades),
+        "trade_fingerprint": trade_fingerprint(trades),
     }
     periods = build_period_windows(start_date, end_date)
     period_metrics = {
@@ -404,40 +403,3 @@ def _turnover(
         price = _finite(trade.get("price")) or 0.0
         total_notional += size * price
     return total_notional / initial_cash
-
-
-def _trade_fingerprint(trades: Sequence[object]) -> str:
-    fields = (
-        "board",
-        "code",
-        "commission",
-        "cooldown_days",
-        "cost_basis",
-        "date",
-        "direction",
-        "instrument_type",
-        "market",
-        "pnl",
-        "price",
-        "reason",
-        "risk_trigger",
-        "signal_date",
-        "size",
-        "slippage",
-        "stamp_tax",
-    )
-    rows: list[dict[str, object]] = []
-    for trade in trades:
-        if not isinstance(trade, Mapping):
-            continue
-        rows.append({field: _fingerprint_value(trade.get(field)) for field in fields})
-    payload = json.dumps(rows, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
-
-
-def _fingerprint_value(value: object) -> object:
-    if isinstance(value, bool) or value is None:
-        return value
-    if isinstance(value, (int, float)):
-        return format(value, ".15g")
-    return str(value)
