@@ -115,6 +115,43 @@ _BAR_INDICATOR_COLUMNS = [
 ]
 _WRITE_LOCK = RLock()
 _CONNECT_RETRY_DELAYS = (0.1, 0.25, 0.5, 1.0, 2.0)
+_CONNECT_RETRY_ENV = "AQUEST_DUCKDB_CONNECT_RETRY_SECONDS"
+_RETRY_LADDER_CACHE: dict[str, tuple[float, ...]] = {}
+
+
+def connect_retry_delays() -> tuple[float, ...]:
+    """库连接的等待阶梯；不设环境变量就沿用内置的短阶梯（约 3.9 秒后放弃）。
+
+    backend 与研究 worker 的处境相反：页面一次读打不开就该快速失败（下一秒还会
+    再轮询，占着请求线程反而把整站拖死），而研究里一次失败就废掉整只标的、白跑
+    几分钟，所以只给 worker 配预算。预算换成 0.1 起翻倍、单步最多 5 秒的阶梯，
+    总等待不超过预算。
+    """
+
+    raw = os.getenv(_CONNECT_RETRY_ENV, "").strip()
+    if not raw:
+        return _CONNECT_RETRY_DELAYS
+    cached = _RETRY_LADDER_CACHE.get(raw)
+    if cached is not None:
+        return cached
+    try:
+        budget = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{_CONNECT_RETRY_ENV} 必须是数字秒数") from exc
+    if budget <= 0:
+        raise ValueError(f"{_CONNECT_RETRY_ENV} 必须大于 0")
+    ladder: list[float] = []
+    total = 0.0
+    step = 0.1
+    while total + step <= budget:
+        ladder.append(step)
+        total += step
+        step = min(step * 2, 5.0)
+    delays = tuple(ladder)
+    _RETRY_LADDER_CACHE[raw] = delays
+    return delays
+
+
 # 本系统只研究股票；基金、债券、指数都不入库。
 _INSTRUMENT_TYPES = {"stock"}
 # DuckDB 默认按**宿主机**内存给自己配额，看不到容器的 cgroup 上限。批量写指标
@@ -252,10 +289,14 @@ class _DuckDbStoreBase:
         self.read_only = read_only
         self._initialized = False
         # 打开一条 DuckDB 连接实测约 9.5 ms（占 read_bars 的 57%），逐标的读取时
-        # 是主要开销。研究 worker 是只读短命进程，复用同一条只读连接可以省掉这部分。
-        # 默认关闭：写库进程里长期持有只读连接可能读到本进程刚写入前的快照。
+        # 是主要开销。默认关闭：写库进程里长期持有只读连接可能读到本进程刚写入前的快照。
         # 跨阶段一致性不受影响——研究的三个阶段各自新建进程池，也就是各自新建连接，
         # 因此阶段之间的行情变化仍会被指纹校验捕获。
+        #
+        # 也**不要**给研究 worker 打开它：共享卷上 DuckDB 的读写打开是独占的，研究
+        # 进程长期持有只读句柄会把 backend 的池表读写顶死（实测 Could not set lock
+        # on file … Conflicting lock is held）。逐候选那趟查询已经由「公司行动按
+        # 批次刷新」消掉，复用连接在这里没有收益，只有把偶发锁冲突变成常驻的风险。
         self.pool_read_connections = pool_read_connections
         self._read_sessions = local()
 
@@ -269,7 +310,7 @@ class _DuckDbStoreBase:
         else:
             self._ensure_initialized()
         last_error: duckdb.Error | None = None
-        for delay in (0.0, *_CONNECT_RETRY_DELAYS):
+        for delay in (0.0, *connect_retry_delays()):
             if delay:
                 time.sleep(delay)
             try:

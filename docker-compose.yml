@@ -58,6 +58,9 @@ services:
       # 研究查询都是单标的小查询，DuckDB/BLAS 的默认全核线程池只会空转吃核；
       # 压到 1 把核让给真实的股票并发。只注入 strategy-worker，后端同步/导入不受影响。
       AQUEST_DUCKDB_THREADS: "${AQUEST_DUCKDB_THREADS:-1}"
+      # backend 的读打不开就该快速失败（页面下一秒还会再轮询），研究里一次失败就
+      # 废掉整只标的、白跑几分钟。只给 worker 更长的库连接重试预算。
+      AQUEST_DUCKDB_CONNECT_RETRY_SECONDS: "${AQUEST_DUCKDB_CONNECT_RETRY_SECONDS:-25}"
       OPENBLAS_NUM_THREADS: "${OPENBLAS_NUM_THREADS:-1}"
       OMP_NUM_THREADS: "${OMP_NUM_THREADS:-1}"
       MKL_NUM_THREADS: "${MKL_NUM_THREADS:-1}"
