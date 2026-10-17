@@ -56,6 +56,15 @@ export interface StrategyPoolEntry {
   created_return?: number | null
   tracking_status?: string
   tracking_as_of_date?: string | null
+  /**
+   * 上线后窗口（从这一版策略的 launch_data_date 起算）。后端从当前生效版本（手工优先）
+   * 的摘要里投影出来，`post_launch_has_data` 为假表示创建后还没有新行情——那是「还没跑」
+   * 而不是「平盘」，不能和真数字一起排。
+   */
+  post_launch_return?: number | null
+  post_launch_benchmark_return?: number | null
+  post_launch_days?: number | null
+  post_launch_has_data?: boolean | null
   tracking?: Record<string, unknown> | null
   market: 'SH' | 'SZ'
   code: string

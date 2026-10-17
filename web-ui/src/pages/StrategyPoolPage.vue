@@ -4,6 +4,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import PageIntro from '../components/PageIntro.vue'
 import StrategyPoolEntryTable from '../components/StrategyPoolEntryTable.vue'
+import StrategyPoolPostLaunchBoard from '../components/StrategyPoolPostLaunchBoard.vue'
 import { fetchStoreStatus } from '../api/marketData'
 import {
   addStrategyPoolFocus,
@@ -1423,7 +1424,14 @@ onUnmounted(() => {
           <p v-if="focusMissingCount > 0" class="pool-scale-note" data-testid="pool-focus-missing">另有 {{ focusMissingCount }} 只关注标的暂时不在策略池，重跑后会显示；不需要了可以<button class="text-button" data-testid="pool-focus-prune" :disabled="focusPending" @click="void pruneMissingFocus()">移出这些关注</button>。</p>
         </section>
 
-        <section class="pool-table-section panel-card">
+        <StrategyPoolPostLaunchBoard
+          :entries="entries"
+          :objective="objective"
+          :loading="loading"
+          :list-context="listContext"
+        />
+
+        <section class="pool-table-section panel-card" data-testid="pool-entry-table-section">
           <div class="section-heading"><div><p class="eyebrow">DAILY STATUS</p><h2>全市场标的状态 <span>{{ entries.length.toLocaleString() }}</span></h2></div><span>{{ loading ? '正在读取策略池…' : `按${objectiveLabel(objective)}策略决策` }}</span></div>
           <p class="pool-scale-note">收益、年化、夏普、胜率、盈亏比、最大回撤均为该策略在完整历史区间实际回放（全区间）的指标；平均持仓天数为全区间已平仓交易按股数加权的平均持有天数，用于估算买入后大致需要持有多久。旧候选会在下次全市场重选时补算。策略的选择与排序目标仍按验证段年化/夏普决策，避免用未来数据选策略。全段基准显示个股买入持有涨跌；验证和留出分别用同区间基准计算总收益超额。</p>
           <p class="pool-scale-note">列头排序三态循环：点一次按这一列从高到低，再点从低到高，第三次取消排序、回到默认的按状态分组；点别的列直接从高到低开始。排序只改显示顺序，取不到这一列指标的标的（无可用策略、创建至今待初始化或更新失败）无论升降都排在末尾。</p>

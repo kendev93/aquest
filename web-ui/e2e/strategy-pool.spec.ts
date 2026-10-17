@@ -290,3 +290,52 @@ test('following a symbol scopes it into the 特别关注 panel', async ({ page }
   await page.reload()
   await expect(page.getByTestId('pool-focus-empty')).toBeVisible()
 })
+
+test('the post-launch board ranks tracked symbols and keeps symbols without a window out', async ({ page }) => {
+  // 上线后收益榜的价值全在「谁在前面」和「谁不该在这里」：刚创建、还没有新行情的标的
+  // 后端给的收益是 0，排进去就是一条假平线压住真数字。
+  const item = (code: string, name: string, post: number | null, benchmark: number | null, days: number | null, asOf: string, hasData: boolean) => ({
+    market: code.startsWith('6') ? 'SH' : 'SZ', code, name, status: 'ready',
+    automatic_candidates: {}, manual_overrides: {}, active_source: 'automatic',
+    active_candidate: { candidate_id: `c-${code}`, buy_rule: { signals: [] }, sell_rule: { signals: [] }, metrics: {} },
+    tracking: { version_id: `v-${code}` }, tracking_status: 'ready', tracking_as_of_date: asOf,
+    created_return: 0.1, post_launch_return: post, post_launch_benchmark_return: benchmark,
+    post_launch_days: days, post_launch_has_data: hasData,
+  })
+  await page.addInitScript(() => localStorage.setItem('aquest.strategy-pool.objective', 'annual_return'))
+  await page.route('**/api/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    let data: unknown = {}
+    if (path.endsWith('/strategy-pool/entries')) {
+      data = { items: [
+        item('600000', '浦发银行', 0.3, 0.1, 80, '2026-09-30', true),
+        item('601133', '柏诚股份', 0.55, -0.2, 12, '2026-10-16', true),
+        item('000001', '平安银行', 0, null, 0, '2026-10-16', false),
+      ] }
+    } else if (path.endsWith('/strategy-pool/jobs')) {
+      data = { items: [] }
+    }
+    await route.fulfill({ json: { data } })
+  })
+
+  await page.goto('/strategy-pool')
+  const board = page.getByTestId('pool-post-launch-board')
+  await expect(board).toContainText('上线后收益榜 2')
+  await expect(board.locator('tbody tr').first()).toContainText('601133')
+  await expect(board.locator('tbody tr').first()).toContainText('+75.00%')
+  await expect(board).not.toContainText('平安银行')
+  await expect(board).toContainText('创建后还没有新行情 1 只')
+  // 两只标的的行情截至日不同，窗口一长一短，必须点出来。
+  await expect(board).toContainText('榜内 1 只的行情截至日落后')
+
+  await page.getByTestId('pool-board-asc').click()
+  await expect(board.locator('tbody tr').first()).toContainText('600000')
+
+  await page.getByTestId('pool-board-min-days').selectOption('60')
+  await expect(board.locator('tbody tr')).toHaveCount(1)
+  await expect(board).toContainText('另有 1 只未满 60 个交易日')
+
+  await page.getByTestId('pool-board-min-days').selectOption('0')
+  // 每一行都要能点进详情，并且带上当前的目标与列表位置。
+  await expect(board.locator('tbody tr a').first()).toHaveAttribute('href', /\/strategy-pool\/SH\/600000\?objective=annual_return/)
+})

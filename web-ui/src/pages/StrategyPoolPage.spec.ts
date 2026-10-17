@@ -304,6 +304,44 @@ describe('StrategyPoolPage', () => {
     expect(wrapper.findAll('tbody tr')[0]?.text()).toContain('600000')
   })
 
+  it('ranks post-launch returns off the same objective-scoped list the table reads', async () => {
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    const withWindow = (code: string, post: number, benchmark: number) => ({
+      ...entry(code, 0.2),
+      tracking: { version_id: `v-${code}` },
+      tracking_status: 'ready',
+      tracking_as_of_date: '2026-10-01',
+      created_return: post / 2,
+      post_launch_return: post,
+      post_launch_benchmark_return: benchmark,
+      post_launch_days: 40,
+      post_launch_has_data: true,
+    })
+    vi.mocked(api.fetchStrategyPoolEntries).mockImplementation(async (objective) =>
+      objective === 'sharpe'
+        ? [withWindow('600009', 0.02, 0.3)]
+        : [withWindow('600000', 0.3, 0.1), withWindow('600001', 0.5, -0.2)])
+
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    const board = wrapper.get('[data-testid="pool-post-launch-board"]')
+    expect(board.findAll('tbody tr')[0].text()).toContain('600001')
+    expect(board.text()).toContain('50.00%')
+    expect(board.text()).toContain('+70.00%')
+    // 位置：特别关注之后、全市场状态表之前——它是概览，不是另一张全量清单。
+    expect(
+      wrapper
+        .findAll('[data-testid="pool-focus-section"], [data-testid="pool-post-launch-board"], [data-testid="pool-entry-table-section"]')
+        .map((node) => node.attributes('data-testid')),
+    ).toEqual(['pool-focus-section', 'pool-post-launch-board', 'pool-entry-table-section'])
+
+    // 换目标要跟着换：上线后窗口是「当前生效版本」的，两个目标各自一条榜。
+    await wrapper.get('[data-testid="pool-objective"]').setValue('sharpe')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="pool-post-launch-board"]').findAll('tbody tr')[0].text()).toContain('600009')
+  })
+
   it('cycles a metric column through 高→低, 低→高 and back to the status grouping', async () => {
     window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
     const wrapper = mount(StrategyPoolPage)

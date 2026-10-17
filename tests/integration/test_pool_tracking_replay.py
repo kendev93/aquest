@@ -563,6 +563,69 @@ def test_trade_pages_default_to_the_latest_settlement_first(tmp_path):
     assert [t["date"] for t in second_page["items"]] == ["2026-03-11"]
 
 
+def test_entries_project_the_post_launch_window_for_the_leaderboard(tmp_path):
+    """/entries 把上线后窗口逐字段投影到每一行，收益榜才不用为一次排名解压每版的快照。
+
+    榜和详情页必须读同一份 ``summary_json``：数字对不上就没有比较的意义。另一个方向
+    同样重要——还没跑过跟踪的标的必须留空而不是给 0，否则「没数据」会被排成「平盘」。
+    """
+    from fastapi.testclient import TestClient
+
+    from aquest.web.app import create_app
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", bars(3))
+    app = create_app(
+        market_data_store=store, auto_sync_enabled=False, strategy_worker_token="test-token"
+    )
+    pool = app.state.strategy_pool_store
+    for market, code in (("SH", "600000"), ("SZ", "000001")):
+        pool.upsert_automatic(
+            market=market,
+            code=code,
+            name="test",
+            annual_candidate=candidate(),
+            sharpe_candidate=candidate(),
+            data_fingerprint="a",
+            config_fingerprint="b",
+            source_job_id="job",
+        )
+    tracks = PoolTrackingStore(store)
+    version = next(v for v in tracks.current_versions() if v["code"] == "600000")
+    assert tracks.save_snapshot(
+        version["version_id"],
+        version["signature"],
+        {
+            "summary": {
+                "created_return": 0.4,
+                "post_launch_return": 0.25,
+                "post_launch_benchmark_return": 0.05,
+                "post_launch_days": 12,
+                "has_post_launch_data": True,
+                "as_of_date": "2026-09-03",
+            },
+            "checkpoint": {"trades": [], "equity": [], "positions": {}},
+        },
+    )
+
+    with TestClient(app) as client:
+        items = client.get("/api/v1/strategy-pool/entries?objective=annual_return").json()["data"][
+            "items"
+        ]
+
+    tracked = next(item for item in items if item["code"] == "600000")
+    assert tracked["created_return"] == 0.4
+    assert tracked["post_launch_return"] == 0.25
+    assert tracked["post_launch_benchmark_return"] == 0.05
+    assert tracked["post_launch_days"] == 12
+    assert tracked["post_launch_has_data"] is True
+    assert tracked["tracking_as_of_date"] == "2026-09-03"
+
+    fresh = next(item for item in items if item["code"] == "000001")
+    assert fresh["post_launch_return"] is None
+    assert fresh["post_launch_has_data"] is None
+
+
 def test_tracking_runner_deduplicates_goals_and_uses_shared_budget(tmp_path):
     from aquest.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
     from aquest.strategy_pool.tracking_runner import PoolTrackingRunner
