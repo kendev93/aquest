@@ -13,6 +13,7 @@ from aquest.adapters.local_day_adapter import StockRef
 from aquest.portfolio_backtest.benchmark import (
     BENCHMARK_LABEL,
     BenchmarkCurve,
+    curve_return,
     equal_weight_buy_hold,
 )
 from aquest.portfolio_backtest.context import _StockSeries
@@ -272,3 +273,31 @@ def test_report_without_a_benchmark_stays_valid() -> None:
     )
 
     assert report.benchmark is None
+
+
+def test_curve_return_uses_the_window_start_as_denominator() -> None:
+    """切窗口重算基准收益：分母必须是窗口第一天，不是整段第一天。
+
+    策略池详情页的「创建以来」区间就是这个用途：拿全段 performance.total_return
+    会把基线日之前的涨跌算进「创建以来」，与同窗口的策略收益根本不是同一段行情。
+    """
+
+    curve = {
+        "dates": [20240102, 20240103, 20240104, 20240105],
+        "totals": [100.0, 50.0, 80.0, 120.0],
+    }
+
+    assert curve_return(curve) == pytest.approx(0.2)
+    assert curve_return(curve, "2024-01-03") == pytest.approx(1.4)
+    assert curve_return(curve, date(2024, 1, 4)) == pytest.approx(0.5)
+    assert curve_return(curve, "") == pytest.approx(0.2)
+
+
+def test_curve_return_says_nothing_when_the_window_has_no_valid_start() -> None:
+    curve = {"dates": [20240102, 20240103], "totals": [100.0, 120.0]}
+
+    assert curve_return(curve, "2024-01-06") is None
+    assert curve_return(None) is None
+    assert curve_return({"dates": [], "totals": []}) is None
+    assert curve_return({"dates": [20240102], "totals": [0.0, 5.0]}) is None
+    assert curve_return({"dates": 5, "totals": 5}) is None

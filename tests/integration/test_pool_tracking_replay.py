@@ -1198,3 +1198,65 @@ def test_cancelled_initialization_is_not_requeued_on_unchanged_input(tmp_path):
     first = scheduler.submit_if_due()
     jobs.update(first, status="cancelled")
     assert scheduler.submit_if_due() is None
+
+
+def test_pool_curve_reports_benchmark_and_excess_over_the_viewed_window(tmp_path):
+    """详情页的「持有基准 / 超额收益」按所看区间给；区间外就宁可不给。
+
+    此前接口 payload 里根本没有这两个键——数值其实躺在 `benchmark.performance` 里，
+    没人抬上来，页面两处只能显示空占位。修好后必须与同一窗口的策略收益可比：
+    「创建以来」用整段基准收益会把基线日之前的涨跌算进来，那是另一段行情。
+    """
+
+    from fastapi.testclient import TestClient
+
+    from aquest.web.app import create_app
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", bars(4))
+    app = create_app(
+        market_data_store=store, auto_sync_enabled=False, strategy_worker_token="test-token"
+    )
+    pool = app.state.strategy_pool_store
+    pool.upsert_automatic(
+        market="SH",
+        code="600000",
+        name="test",
+        annual_candidate=candidate(),
+        sharpe_candidate=candidate(),
+        data_fingerprint="a",
+        config_fingerprint="b",
+        source_job_id="job",
+    )
+    tracks = PoolTrackingStore(store)
+    version = tracks.current_versions()[0]
+    service = PortfolioBacktestService(adapter=DuckDbMarketDataAdapter(store))
+    snapshot = replay_account(service, service._adapter.stock_ref("", "SH", "600000"), version)
+    assert tracks.save_snapshot(version["version_id"], version["signature"], snapshot)
+
+    url = f"/api/v1/strategy-pool/entries/SH/600000/versions/{version['version_id']}"
+    with TestClient(app) as client:
+        full = client.get(url + "/curve?scope=full").json()["data"]["backtest"]
+        created = client.get(url + "/curve?scope=created").json()["data"]["backtest"]
+
+    curve = full["benchmark"]
+    assert curve is not None
+    dates, totals = curve["dates"], curve["totals"]
+    assert full["benchmark_return"] == pytest.approx(totals[-1] / totals[0] - 1)
+    assert full["excess_return"] == pytest.approx(
+        full["performance"]["total_return"] - full["benchmark_return"]
+    )
+    # 「创建以来」必须按基线日重算，且基线日在行情之外时宁缺勿假：不能退回整段基准
+    # 收益充数，否则策略收益是一段窗口、基准是另一段窗口。
+    baseline = int(str(created["baseline_date"]).replace("-", ""))
+    window = [value for day, value in zip(dates, totals, strict=True) if day >= baseline]
+    expected = window[-1] / window[0] - 1 if window else None
+    assert created["benchmark_return"] == (
+        pytest.approx(expected) if expected is not None else None
+    )
+    assert created["benchmark"]["total_return"] == created["benchmark_return"]
+    assert created["excess_return"] == (
+        pytest.approx(created["performance"]["total_return"] - expected)
+        if expected is not None
+        else None
+    )

@@ -82,6 +82,51 @@ class BenchmarkCurve:
         }
 
 
+def curve_return(curve: Mapping[str, object] | None, start_date: object = None) -> float | None:
+    """一段窗口内的买入持有收益：分母取窗口第一天收盘的金额。
+
+    曲线存的是整段研究的绝对金额。切窗口（例如策略池详情的「创建以来」）时必须用
+    窗口内第一天重新起算，直接拿全段的 ``performance.total_return`` 会把创建日之前
+    的涨跌也算进「创建以来」，与同窗口重算的策略收益对不上口径。
+    """
+
+    if not isinstance(curve, Mapping):
+        return None
+    raw_dates = curve.get("dates")
+    raw_totals = curve.get("totals")
+    if not isinstance(raw_dates, Sequence) or not isinstance(raw_totals, Sequence):
+        return None
+    if isinstance(raw_dates, str) or isinstance(raw_totals, str):
+        return None
+    dates = [int(cast(int, value)) for value in raw_dates]
+    totals = [float(cast(float, value)) for value in raw_totals]
+    if not dates or len(dates) != len(totals):
+        return None
+    boundary = _start_date_int(start_date)
+    first = next(
+        (index for index, value in enumerate(dates) if boundary is None or value >= boundary),
+        None,
+    )
+    if first is None:
+        return None
+    window = totals[first:]
+    start_value = window[0]
+    if not np.isfinite(start_value) or start_value <= 0:
+        return None
+    return float(window[-1] / start_value - 1.0)
+
+
+def _start_date_int(value: object) -> int | None:
+    """把 ISO 文本 / date / 整数日期转成 YYYYMMDD 整数；空值表示整段窗口。"""
+
+    if value is None:
+        return None
+    text = str(value).strip()[:10].replace("-", "")
+    if not text.isdigit():
+        return None
+    return int(text)
+
+
 def equal_weight_buy_hold(
     contexts: Sequence[_StockSeries],
     dates: Sequence[int],

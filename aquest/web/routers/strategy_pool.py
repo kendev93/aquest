@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from aquest.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
 from aquest.market_data.store_base import _WRITE_LOCK
+from aquest.portfolio_backtest.benchmark import curve_return
 from aquest.strategy_discovery.duckdb_job_store import DuckDbStrategyJobStore
 from aquest.strategy_discovery.job_backend import StrategyJobBackend
 from aquest.strategy_pool.store import DuckDbStrategyPoolStore, Objective
@@ -147,11 +148,19 @@ def list_strategy_pool_entries(
         item["active_candidate"] = active
         item["active_source"] = "manual" if override_map.get(selected) is not None else "automatic"
         tracking = track_index.get((item["market"], item["code"], selected, item["active_source"]))
+        summary = tracking["summary"] if tracking else {}
         item["tracking"] = tracking
         item["created_at"] = tracking["created_at"] if tracking else None
-        item["created_return"] = tracking["summary"].get("created_return") if tracking else None
         item["tracking_status"] = tracking["status"] if tracking else "unavailable"
-        item["tracking_as_of_date"] = tracking["summary"].get("as_of_date") if tracking else None
+        item["tracking_as_of_date"] = summary.get("as_of_date")
+        item["created_return"] = summary.get("created_return")
+        # 上线后窗口（从这一版策略的 launch_data_date 起算）单独投影：收益榜要在一次读取里
+        # 同时比收益、同期买入持有基准和上线天数，靠这里给的就绪摘要，不去解压每个版本的
+        # checkpoint。没有上线时间的老版本给不出窗口，has_post_launch_data 为假，不进榜。
+        item["post_launch_return"] = summary.get("post_launch_return")
+        item["post_launch_benchmark_return"] = summary.get("post_launch_benchmark_return")
+        item["post_launch_days"] = summary.get("post_launch_days")
+        item["post_launch_has_data"] = summary.get("has_post_launch_data")
 
     return {"data": {"objective": selected, "items": items}}
 
@@ -528,24 +537,42 @@ def pool_curve(
         for i, p in enumerate(points)
         if i in preserve or i % step == 0
     ]
+    report = snapshot["report"]
+    strategy_return = (
+        summary["created_return"]
+        if scope == "created"
+        else report["performance"].get("total_return")
+    )
+    # 基准按**同一窗口**重算：full 是整段研究，created 从账户基线日起算。直接取全段
+    # performance.total_return 会把基线日之前的涨跌算进「创建以来」，与策略收益口径不
+    # 一致；这两个值此前根本没进 payload，所以详情页的持有基准与超额收益一直是空的。
+    benchmark_curve = report.get("benchmark")
+    benchmark_return = curve_return(benchmark_curve, start)
+    excess_return = (
+        float(strategy_return) - benchmark_return
+        if isinstance(strategy_return, (int, float)) and benchmark_return is not None
+        else None
+    )
     return {
         "data": {
             "version": version,
             "summary": summary,
             "backtest": {
-                **snapshot["report"],
+                **report,
                 "equity_curve": sampled,
                 "closed_trades": sum(
                     t["direction"] == "SELL" and not t.get("rejected") for t in trades
                 ),
-                "start_date": points[0]["date"] if points else snapshot["report"]["start_date"],
+                "start_date": points[0]["date"] if points else report["start_date"],
                 "trades": [],
-                "performance": {
-                    **snapshot["report"]["performance"],
-                    "total_return": summary["created_return"]
-                    if scope == "created"
-                    else snapshot["report"]["performance"].get("total_return"),
-                },
+                "performance": {**report["performance"], "total_return": strategy_return},
+                "benchmark": (
+                    {**benchmark_curve, "total_return": benchmark_return}
+                    if isinstance(benchmark_curve, Mapping)
+                    else None
+                ),
+                "benchmark_return": benchmark_return,
+                "excess_return": excess_return,
                 "launch_date": launch_day,
                 "baseline_date": summary["baseline_date"],
             },
