@@ -1399,7 +1399,7 @@ onUnmounted(() => {
             <p v-else-if="!currentHoldings.length" class="empty-copy">当前没有仍处于持仓状态的标的。</p>
           </article>
         </section>
-        <p class="pool-scale-note">买入和卖出规则都在最新完整行情日收盘后判定，下一交易日执行，因此今日触发卖出规则的标的当天仍列在持仓中。止损、止盈、移动止盈走同一条口径：触发当日收盘后判定、下一交易日按开盘价成交；持仓行上的三档风控价是引擎实际在用的那三条线，按标注那一日收盘后的数据算出。</p>
+        <p class="pool-scale-note">买入和卖出规则都在最新完整行情日收盘后判定，下一交易日执行，因此今日触发卖出规则的标的当天仍列在持仓中。止损、止盈、移动止盈走同一条口径：触发当日收盘后判定、下一交易日按开盘价成交；持仓行上的三档风控价是引擎实际在用的那三条线，按标注那一日收盘后的数据算出。「最新收盘」是同一根已完成日线的收盘价（不复权），空仓和当天没有买卖信号的标的同样给，那三条线才有能直接比的参照物；这套口径之前算好、还没重跑跟踪的老结果里，空仓标的先留白，等下一次每日跟踪补上，不拿别的日期的价凑数。</p>
 
         <section class="pool-focus-section panel-card" data-testid="pool-focus-section">
           <div class="section-heading"><div><p class="eyebrow">FOLLOWED</p><h2>特别关注 <span>{{ focusRows.length }}</span></h2></div><small>只列关注的标的 · 按状态优先级排序，不跟随下方搜索、排序和分页</small></div>

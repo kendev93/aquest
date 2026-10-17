@@ -7,6 +7,7 @@ import {
   benchmarkReturn,
   entryHoldingRisk,
   entryIsHeld,
+  entryLatestClose,
   entryStatus,
   formatHoldingDays,
   holdingRiskSummary,
@@ -108,6 +109,12 @@ function holdingRiskText(entry: StrategyPoolEntry): string {
   return risk ? holdingRiskSummary(risk) : ''
 }
 
+/** 最新收盘价：有没有信号、有没有持仓都看得到，风控线才有参照物。 */
+function latestCloseText(entry: StrategyPoolEntry): string {
+  const close = entryLatestClose(entry)
+  return close ? formatNumber(close.price, 2) : '—'
+}
+
 function followTitle(entry: StrategyPoolEntry): string {
   return props.followKeys.has(symbol(entry))
     ? `取消关注 ${entry.market} ${entry.code}`
@@ -119,7 +126,7 @@ function followTitle(entry: StrategyPoolEntry): string {
   <div class="table-scroll">
     <table class="pool-table">
       <thead><tr>
-        <th>持仓 / 今日信号</th><th>证券</th>
+        <th>持仓 / 今日信号</th><th>证券</th><th title="最后一根已完成日线的收盘价（不复权），与持仓那三条风控线同一个判定时点">最新收盘</th>
         <th v-for="column in METRIC_COLUMNS" :key="column.key">
           <button v-if="sortable" :data-testid="`${testid}-sort-${column.key}`" :title="sortHint(column.key, column.label)" @click="emit('sort', column.key)">{{ column.label }}{{ sortGlyph(column.key) }}</button>
           <template v-else>{{ column.label }}</template>
@@ -130,6 +137,7 @@ function followTitle(entry: StrategyPoolEntry): string {
         <tr v-for="entry in entries" :key="symbol(entry)" :data-testid="`${testid}-row-${entry.code}`">
           <td><div class="status-stack"><span v-if="entryIsHeld(entry, heldKeys)" class="status-chip status-held">持仓中</span><span class="status-chip" :class="`status-${entryStatus(entry, states)}`">{{ statusLabel(entryStatus(entry, states)) }}</span></div><small v-if="holdingRiskText(entry)" :data-testid="`${testid}-holding-risk-${entry.code}`">{{ holdingRiskText(entry) }}</small></td>
           <td><strong>{{ entry.market }} {{ entry.code }}</strong><small>{{ entry.name }}</small></td>
+          <td :data-testid="`${testid}-latest-close-${entry.code}`">{{ latestCloseText(entry) }}</td>
           <td :data-testid="`${testid}-entry-benchmark-${entry.code}`">
             <div v-if="entry.benchmark" class="benchmark-summary">
               <div>全段基准 <b>{{ formatSignedPercent(benchmarkReturn(entry)) }}</b></div>
@@ -155,7 +163,7 @@ function followTitle(entry: StrategyPoolEntry): string {
 
 <style scoped>
 .table-scroll { overflow: auto; }
-.pool-table { width: 100%; min-width: 980px; border-collapse: collapse; text-align: left; }
+.pool-table { width: 100%; min-width: 1060px; border-collapse: collapse; text-align: left; }
 .pool-table th, .pool-table td { border-bottom: 1px solid #25364f; padding: 12px 10px; vertical-align: top; }
 .pool-table th { color: #8798b1; font-size: .88rem; white-space: nowrap; }
 .pool-table th button { border: 0; padding: 0; background: none; color: inherit; font: inherit; cursor: pointer; }

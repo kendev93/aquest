@@ -48,10 +48,10 @@ function mountTable(overrides: Record<string, unknown> = {}) {
 }
 
 describe('StrategyPoolEntryTable', () => {
-  it('renders the same 13 columns with prefixed test ids for each scope', () => {
+  it('renders the same 14 columns with prefixed test ids for each scope', () => {
     const wrapper = mountTable()
 
-    expect(wrapper.findAll('thead th')).toHaveLength(13)
+    expect(wrapper.findAll('thead th')).toHaveLength(14)
     expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('触发买入')
     expect(wrapper.get('[data-testid="pool-entry-benchmark-600000"]').text()).toContain('全段基准 +50.00%')
     expect(wrapper.get('[data-testid="pool-holding-days-600000"]').text()).toContain('12.5 天')
@@ -63,6 +63,31 @@ describe('StrategyPoolEntryTable', () => {
     const focus = mountTable({ testid: 'focus' })
     expect(focus.find('[data-testid="focus-row-600000"]').exists()).toBe(true)
     expect(focus.find('[data-testid="pool-row-600000"]').exists()).toBe(false)
+  })
+
+  it('prints the latest completed close on every row, held or not', () => {
+    // 空仓和没有信号的行也要有现价：风控三档线没有现价对照就只是一串抽象数字。
+    // 现价列读的是条目接口从当前生效版本摘要投影出来的顶层字段，和创建至今收益同一个来源。
+    const tracked = {
+      ...entry('600000'),
+      latest_close: 12.34,
+      latest_close_date: '2026-10-16',
+      tracking: { summary: { holding: [] } },
+    }
+    const flat = mountTable({ entries: [tracked] })
+    expect(flat.get('[data-testid="pool-latest-close-600000"]').text()).toBe('12.34')
+
+    // 老摘要没有这个字段：持仓中的标的还能用持仓行里同一个收盘价，不算凭空造数。
+    const legacy = {
+      ...entry('600000'),
+      tracking: { summary: { as_of_date: '2026-10-15', holding: [{ code: '600000', close: 9.5 }] } },
+    }
+    const held = mountTable({ entries: [legacy], heldKeys: new Set(['SH600000']) })
+    expect(held.get('[data-testid="pool-latest-close-600000"]').text()).toBe('9.50')
+
+    // 没有跟踪快照就是没有，不给一个别的日期的价。
+    const none = mountTable({ entries: [entry('600000')] })
+    expect(none.get('[data-testid="pool-latest-close-600000"]').text()).toBe('—')
   })
 
   it('carries the list context into the detail link so 返回 restores the table state', () => {

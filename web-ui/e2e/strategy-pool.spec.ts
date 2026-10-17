@@ -301,6 +301,7 @@ test('the post-launch board ranks tracked symbols and keeps symbols without a wi
     tracking: { version_id: `v-${code}` }, tracking_status: 'ready', tracking_as_of_date: asOf,
     created_return: 0.1, post_launch_return: post, post_launch_benchmark_return: benchmark,
     post_launch_days: days, post_launch_has_data: hasData,
+    latest_close: post === null ? null : 12.34, latest_close_date: asOf,
   })
   await page.addInitScript(() => localStorage.setItem('aquest.strategy-pool.objective', 'annual_return'))
   await page.route('**/api/v1/**', async (route) => {
@@ -327,6 +328,9 @@ test('the post-launch board ranks tracked symbols and keeps symbols without a wi
   await expect(board).toContainText('创建后还没有新行情 1 只')
   // 两只标的的行情截至日不同，窗口一长一短，必须点出来。
   await expect(board).toContainText('榜内 1 只的行情截至日落后')
+  // 现价列：不管有没有信号、有没有持仓，每一行都要能和风控线对着看。
+  await expect(page.getByTestId('pool-latest-close-601133')).toHaveText('12.34')
+  await expect(page.getByTestId('pool-latest-close-600000')).toHaveText('12.34')
 
   await page.getByTestId('pool-board-asc').click()
   await expect(board.locator('tbody tr').first()).toContainText('600000')

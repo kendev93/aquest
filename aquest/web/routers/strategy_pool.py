@@ -161,6 +161,10 @@ def list_strategy_pool_entries(
         item["post_launch_benchmark_return"] = summary.get("post_launch_benchmark_return")
         item["post_launch_days"] = summary.get("post_launch_days")
         item["post_launch_has_data"] = summary.get("has_post_launch_data")
+        # 最新一根已完成日线的收盘价，与风控三档线同时点同口径：空仓、没有信号的行也要能
+        # 看出「现价离那条线还有多远」，所以它跟着摘要落库，而不是每次读表再扫一遍全市场。
+        item["latest_close"] = summary.get("latest_close")
+        item["latest_close_date"] = summary.get("latest_close_date")
 
     return {"data": {"objective": selected, "items": items}}
 

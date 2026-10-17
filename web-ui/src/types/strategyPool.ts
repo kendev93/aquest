@@ -65,6 +65,12 @@ export interface StrategyPoolEntry {
   post_launch_benchmark_return?: number | null
   post_launch_days?: number | null
   post_launch_has_data?: boolean | null
+  /**
+   * 该标的最新一根已完成日线的收盘价（不复权）及其日期。它与风控三档线出自同一次回放的
+   * 同一个判定时点，所以能直接比较；空仓、当天没有买卖信号的标的同样有这个价。
+   */
+  latest_close?: number | null
+  latest_close_date?: string | null
   tracking?: Record<string, unknown> | null
   market: 'SH' | 'SZ'
   code: string

@@ -300,6 +300,9 @@ def test_risk_exit_stays_open_on_the_trigger_day_and_closes_the_next(tmp_path):
     assert held[0]["pending_exit_signal_date"] == "2026-09-04"
     assert held[0]["stop_loss_price"] == pytest.approx(8.0)
     assert held[0]["risk_level_as_of"] == "2026-09-04"
+    # 现价必须落在与风控线同一个判定时点上：不然「现价跌破止损线」是拿今天的价比昨天的线。
+    assert trigger["summary"]["latest_close_date"] == "2026-09-04"
+    assert trigger["summary"]["latest_close"] == pytest.approx(held[0]["close"])
     assert held[0]["max_hold_days"] is None
     assert held[0]["take_profit_price"] is None
     assert trigger["summary"]["risk_exits"] == []
@@ -313,6 +316,14 @@ def test_risk_exit_stays_open_on_the_trigger_day_and_closes_the_next(tmp_path):
     # 补上 09-05：开盘成交，冷却从这一根的 bar 序号起算。
     closed = replay_account(service, ref, version)
     assert closed["summary"]["holding"] == []
+    # 空仓也要给现价：判断「现在离那条线多远」不能只在持仓时有数。口径就是最后一根
+    # 已完成日线的收盘价，不是引擎账户里那份只在持仓时才更新的 last_prices。
+    last_bar = adapter.read_stock(ref)
+    assert closed["summary"]["latest_close"] == pytest.approx(float(last_bar["close"].iloc[-1]))
+    assert closed["summary"]["latest_close_date"] == str(
+        pd.Timestamp(last_bar["date"].iloc[-1]).date()
+    )
+    assert closed["summary"]["latest_close_date"] == closed["summary"]["as_of_date"]
     sells = [row for row in closed["checkpoint"]["trades"] if row["direction"] == "SELL"]
     assert len(sells) == 1
     assert sells[0]["signal_date"] == "2026-09-04"
@@ -603,6 +614,8 @@ def test_entries_project_the_post_launch_window_for_the_leaderboard(tmp_path):
                 "post_launch_days": 12,
                 "has_post_launch_data": True,
                 "as_of_date": "2026-09-03",
+                "latest_close": 12.5,
+                "latest_close_date": "2026-09-03",
             },
             "checkpoint": {"trades": [], "equity": [], "positions": {}},
         },
@@ -620,10 +633,13 @@ def test_entries_project_the_post_launch_window_for_the_leaderboard(tmp_path):
     assert tracked["post_launch_days"] == 12
     assert tracked["post_launch_has_data"] is True
     assert tracked["tracking_as_of_date"] == "2026-09-03"
+    assert tracked["latest_close"] == 12.5
+    assert tracked["latest_close_date"] == "2026-09-03"
 
     fresh = next(item for item in items if item["code"] == "000001")
     assert fresh["post_launch_return"] is None
     assert fresh["post_launch_has_data"] is None
+    assert fresh["latest_close"] is None
 
 
 def test_tracking_runner_deduplicates_goals_and_uses_shared_budget(tmp_path):
