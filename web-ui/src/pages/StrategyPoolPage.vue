@@ -237,6 +237,11 @@ const parallelismText = computed(() => {
 
 // 运行中的这轮跑得是快还是慢，只有百分比看不出来：按已完成的新研究标的数
 // 外推。分母故意用「completed - 复用」，复用标的不花时间，算进去会假装很快。
+//
+// 两个计数器的分母不一样，混着用会把剩余算成负数：`total_symbols` 是**预扫描剔除纯复用
+// 之后**的队列长度（2026-10-08 改的，增量轮里 5224 只哪怕 5100 只可复用也不再显示
+// 「0 / 5224」），而 `completed_symbols` 把复用也计进去了。所以剩下的只数必须拿
+// 「队列长度 − 真正研究完的 − 失败的」，不能直接减 completed。
 const researchPace = computed(() => {
   if (activeIntent.value !== 'full') return null
   const job = activeJob.value
@@ -254,7 +259,7 @@ const researchPace = computed(() => {
     elapsedSeconds,
     excludesQueue: started !== null,
     perSymbolSeconds: elapsedSeconds / researched,
-    remainingSymbols: Math.max(0, total - completed - failed),
+    remainingSymbols: Math.max(0, total - researched - failed),
   }
 })
 
@@ -344,12 +349,17 @@ const historyGroups = computed(() => {
 const historyStatsText = computed(() => {
   const modes = historyStats.value?.modes
   if (!modes) return ''
+  const limit = typeof historyStats.value?.sample_limit === 'number' ? historyStats.value.sample_limit : 0
   const lines: string[] = []
   const full = modes.full
   if (full && full.samples > 0) {
     lines.push(
       `全市场重选近 ${full.samples} 次完成耗时：中位 ${formatDuration(full.median_duration_seconds)} · 平均 ${formatDuration(full.avg_duration_seconds)}`,
     )
+  }
+  if (full && full.samples === 0 && full.throughput_samples > 0 && limit > 0) {
+    // 没有一次正常完成的全市场重选时，这一行会整条消失；不点破就被读成「统计坏了」。
+    lines.push(`全市场重选最近 ${limit} 次终态里没有一次正常完成（都是失败或取消），给不出平均完成耗时`)
   }
   if (full && full.throughput_samples > 0) {
     lines.push(

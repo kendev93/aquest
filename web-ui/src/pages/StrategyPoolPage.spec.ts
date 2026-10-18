@@ -568,6 +568,46 @@ describe('StrategyPoolPage', () => {
     expect(note).toContain('其中 2 次全市场重选没有记录开始时间')
   })
 
+  it('says why there is no average completion time when no full run finished', async () => {
+    // 2026-10-18 线上形状：最近 60 次全市场终态里没有一次 completed（全是失败/取消），
+    // 「平均完成耗时」那一行整条消失，用户读到的是「统计坏了」而不是「没有可平均的样本」。
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolJobStats).mockResolvedValue({
+      sample_limit: 60,
+      modes: {
+        full: {
+          samples: 0, avg_duration_seconds: null, median_duration_seconds: null,
+          started_at_samples: 0, throughput_samples: 36,
+          avg_seconds_per_symbol: 674.3, median_seconds_per_symbol: 659.6, avg_parallelism: 2.1,
+        },
+        single: {
+          samples: 0, avg_duration_seconds: null, median_duration_seconds: null,
+          started_at_samples: 0, throughput_samples: 0,
+          avg_seconds_per_symbol: null, median_seconds_per_symbol: null, avg_parallelism: null,
+        },
+        signals: {
+          samples: 60, avg_duration_seconds: 24.1, median_duration_seconds: 22.3,
+          started_at_samples: 60, throughput_samples: 60,
+          avg_seconds_per_symbol: 12.4, median_seconds_per_symbol: 10.5, avg_parallelism: 4,
+        },
+        portfolio: {
+          samples: 0, avg_duration_seconds: null, median_duration_seconds: null,
+          started_at_samples: 0, throughput_samples: 0,
+          avg_seconds_per_symbol: null, median_seconds_per_symbol: null, avg_parallelism: null,
+        },
+      },
+    })
+
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    const stats = wrapper.get('[data-testid="pool-history-stats"]').text()
+    expect(stats).toContain('最近 60 次终态里没有一次正常完成')
+    expect(stats).not.toContain('完成耗时：中位')
+    // 每只新研究标的的耗时仍然给得出：被取消的半截轮次只进这一项。
+    expect(stats).toContain('每只新研究标的中位 11 分钟（36 轮样本，平均并行 2.1）')
+  })
+
   it('shows task history timestamps in China time, not the browser zone', async () => {
     // created_at 是后端 `_now()` 落库时去掉 tzinfo 的裸 UTC 串。按浏览器时区解释会整体
     // 差 8 小时，和站内其它走 formatChinaTimestamp 的位置也对不上。
@@ -1375,6 +1415,7 @@ describe('StrategyPoolPage', () => {
     ])
     // 一小时前被 worker 认领，创建时间还要早半小时：耗时从 started_at 起算，
     // 分母只算真研究了的那 100 只（120 完成里有 20 只是复用，几乎不花时间）。
+    // total_symbols 是预扫描剔除纯复用之后的队列长度，所以它比 completed 小是正常的。
     const startedAt = Date.now() / 1000 - 3_600
     vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({
       job_id: 'full-1',
@@ -1383,7 +1424,7 @@ describe('StrategyPoolPage', () => {
       created_at: startedAt - 1_800,
       started_at: startedAt,
       metadata: {
-        total_symbols: 4_000,
+        total_symbols: 1_000,
         completed_symbols: 120,
         skipped_symbols: 20,
         failed_symbols: 0,
@@ -1398,8 +1439,40 @@ describe('StrategyPoolPage', () => {
     const pace = wrapper.get('[data-testid="pool-research-pace"]').text()
     expect(pace).toContain('已运行 1 小时')
     expect(pace).toContain('平均每只新研究标的 36.0 秒')
-    expect(pace).toContain('剩余 3880 只预计还需 38 小时 48 分钟')
+    expect(pace).toContain('剩余 900 只预计还需 9 小时')
     expect(pace).not.toContain('含排队')
+  })
+
+  it('keeps the estimate when most of the queue is reused results', async () => {
+    // 2026-10-18 线上形状：1402 只待重算、3020 只复用直接计入 completed。
+    // 拿 total − completed 会把剩余算成负数并夹到 0，「剩余预计」那一行就凭空消失了。
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValueOnce([
+      { job_id: 'full-2', status: 'running', mode: 'full' },
+    ])
+    const startedAt = Date.now() / 1000 - 3_302
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({
+      job_id: 'full-2',
+      status: 'running',
+      progress: 0.05,
+      created_at: startedAt,
+      started_at: startedAt,
+      metadata: {
+        total_symbols: 1_402,
+        completed_symbols: 3_085,
+        skipped_symbols: 3_020,
+        failed_symbols: 2,
+        current_parallelism: 4,
+        maximum_parallelism: 4,
+      },
+    })
+
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    const pace = wrapper.get('[data-testid="pool-research-pace"]').text()
+    expect(pace).toContain('平均每只新研究标的 50.8 秒')
+    expect(pace).toContain('剩余 1335 只预计还需')
   })
 
   it('queues a row rerun behind the active signal scan without replacing its progress', async () => {

@@ -175,7 +175,8 @@ test('task history shows durations, research split and per-mode averages', async
     } else if (path.endsWith('/strategy-pool/jobs')) {
       data = { items: [
         { job_id: 'timed', mode: 'full', status: 'running', created_at: startedAt - 600, started_at: startedAt,
-          total_symbols: 4_000, completed_symbols: 120, skipped_symbols: 20, newly_researched_symbols: 100, maximum_parallelism: 4 },
+          // total_symbols 是预扫描剔掉复用之后的队列长度，completed 却含复用：两者分母不同。
+          total_symbols: 1_000, completed_symbols: 120, skipped_symbols: 20, newly_researched_symbols: 100, maximum_parallelism: 4 },
         ...Array.from({ length: 8 }, (_, index) => ({ job_id: `scan-${index}`, mode: 'signals', status: 'completed',
           created_at: Date.now() / 1000 - index, duration_seconds: 30, duration_includes_queue: false, automatic: true })),
         { job_id: 'old-full', mode: 'full', status: 'cancelled', created_at: 1_700_000_000, automatic: true,
@@ -184,7 +185,7 @@ test('task history shows durations, research split and per-mode averages', async
       ] }
     } else if (path.endsWith('/strategy-pool/jobs/timed')) {
       data = { job_id: 'timed', status: 'running', created_at: startedAt - 600, started_at: startedAt, metadata: {
-        total_symbols: 4_000, completed_symbols: 120, skipped_symbols: 20, failed_symbols: 0,
+        total_symbols: 1_000, completed_symbols: 120, skipped_symbols: 20, failed_symbols: 0,
         current_parallelism: 4, maximum_parallelism: 4,
       } }
     } else if (path.endsWith('/strategy-pool/entries')) {
@@ -200,7 +201,7 @@ test('task history shows durations, research split and per-mode averages', async
   await expect(page.getByTestId('pool-history-old-full')).toContainText('自动触发')
   await expect(page.getByTestId('pool-history-timed')).toContainText('已运行 1 小时')
   await expect(page.getByTestId('pool-research-pace')).toContainText('平均每只新研究标的 36')
-  await expect(page.getByTestId('pool-research-pace')).toContainText('剩余 3880 只预计还需')
+  await expect(page.getByTestId('pool-research-pace')).toContainText('剩余 900 只预计还需 9 小时')
   await expect(page.getByTestId('pool-history-stats')).toContainText('全市场重选近 3 次完成耗时：中位 50 分钟')
   await expect(page.getByTestId('pool-history-stats')).toContainText('每只新研究标的中位 45.0 秒（4 轮样本，平均并行 4.0）')
   await expect(page.getByTestId('pool-history-stats-note')).toContainText('每种任务各取最近 60 次终态记录')
