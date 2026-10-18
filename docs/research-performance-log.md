@@ -295,6 +295,56 @@ mode=full（全市场任务）从未受单股进度 bug 影响：用户实测均
 先让当前这轮（预算修复 + 4 并发）跑完拿实测；只有明显偏离 ~70h 才去调 4 只 ×
 2 进程。
 
+## 第四轮（2026-10-18）：一次写库失败判死三小时任务
+
+### 现象
+
+10:29:36 发起的 `mode=full` 增量更新跑到 13:26:43 停住，任务原因只有一个名字：
+`策略 worker API 响应超时或暂不可用`。24 小时内 worker 侧这类 transient 失败 221 次、
+「领取任务失败」184 次；同一段时间里浏览器的 `GET /jobs/{id}` 每 2 秒都拿到 200。
+**只有要写库的请求饿死**，读请求照常——所以不是「后端挂了」，是后端答不上写。
+
+### 定位
+
+1. 逐标的结果落库走 `POST /internal/strategy-worker/jobs/{id}/pool-entry`，客户端预算
+   是 5 次 × 5s + 退避（0.1/0.25/0.5/1.0）≈ 27 秒；耗尽后 `TransientWorkerApiError`
+   从 `strategy_pool/service.py:903` 的 `entry_writer(record)` 一路冒到 `run_once`，
+   **整任务判死**。研究节拍 75–100 秒/只，一次 5 分钟的后端不可用足够撞上去。
+2. 后端为什么答不上写：`f004085` 把池表读改成只读优先之后，同一个后端进程里既有只读
+   句柄又有读写打开，DuckDB 直接拒绝
+   （`Can't open a connection to same database file with a different configuration
+   than existing connections`），而后端**没有**配 `AQUEST_DUCKDB_CONNECT_RETRY_SECONDS`
+   （25s 那档只给了 strategy-worker），短阶梯 3.85 秒走完就抛 500。并发 3 次列表请求
+   实测 4.07 秒且必现 500。
+3. 把后端压成这样的正是列表本身：`GET /entries` 一次回 **32.5 MB**（3350 行 × 9.7 KB），
+   nginx 明确记了 `an upstream response is buffered to a temporary file`。字段占比
+   `automatic_candidates` 35.3% / `tracking` 32.9% / `active_candidate` 25.6%，逐字段
+   核对前端后确认这 94% 页面一行都没读（列表只用 `metrics`、`quality.badges`、
+   `candidate_id`、有没有买卖规则、以及 `tracking.summary.holding` 的风控三档线）。
+
+### 改动与数字
+
+- 列表按白名单投影：每行 9.7 KB → **2.9 KB**（3.6 倍）。买卖规则只留「有没有」，
+  `config` / 规则树 / `split_metadata` / 跟踪快照里那整套 `candidate` 一律不回，
+  完整内容仍由 `/detail` 与 `/versions/{id}/curve|trades` 提供。
+- gzip 放在 **nginx** 而不是 backend 中间件：同一个 uvicorn 进程要随时应答 worker 的
+  落库，把压缩 CPU 花在它身上等于继续饿它。上线体积 32.5 MB → **约 1.2 MB**（≈29 倍）。
+  `gzip_proxied any` 是必须的——反代回来的响应默认不压。SSE 的 `text/event-stream`
+  不在 `gzip_types` 里，进度流不受影响。
+- 逐标的落库改成 `DeferredPoolEntryWriter`：只对 transient 失败让步，结果按写入顺序
+  攒在内存里继续研究，恢复后顺带补齐，任务收尾再兜一轮；仍送不出去的条数如实写进
+  结果（`unpersisted_entries`）。连续攒到 256 条才认输——那些结果只在本进程内存里，
+  默默攒着等于丢掉几千只标的的产出。
+
+### 没做的
+
+- 后端只用一种打开模式（关掉只读优先）+ 给后端也配长阶梯——那是选项 3，需要先复测
+  页面延迟确认不回退。
+- claim 空轮询退避（现在约每秒 1 次，每次 2 个读写打开，是常态锁压力）。
+- 任务状态/池表与行情分库（选项 5，改动最大）。
+- 跟踪任务的 writer **没有**套用同一容忍：它的返回值有语义（`ack.saved` 用来计数跳过），
+  攒着不发就会把账算错。
+
 ## 决策记录
 
 - **P5（risk_trials 降回 1000）不采纳**（2026-10-11 用户决策）：提前退出
