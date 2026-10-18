@@ -559,7 +559,9 @@ class DatabaseMaintenanceService:
     def _copy_database(self, source_path: Path, target_path: Path) -> None:
         """Copy every schema object through DuckDB's database copy operation."""
 
-        with duckdb.connect(str(source_path), read_only=True) as connection:
+        from .store_base import open_database
+
+        with open_database(source_path, read_only=True) as connection:
             databases = [
                 str(row[0])
                 for row in connection.execute(
@@ -576,7 +578,9 @@ class DatabaseMaintenanceService:
                 connection.execute("DETACH compact")
 
     def _database_snapshot(self, path: Path) -> _DatabaseSnapshot:
-        with duckdb.connect(str(path), read_only=True) as connection:
+        from .store_base import open_database
+
+        with open_database(path, read_only=True) as connection:
             tables = [
                 str(row[0])
                 for row in connection.execute(
@@ -617,11 +621,11 @@ class DatabaseMaintenanceService:
     def _load_record(self) -> dict[str, object]:
         try:
             if self.database_path.is_file():
-                from .store_base import _WRITE_LOCK
+                from .store_base import _WRITE_LOCK, open_database
 
                 with (
                     _WRITE_LOCK,
-                    duckdb.connect(str(self.database_path), read_only=False) as connection,
+                    open_database(self.database_path, read_only=False) as connection,
                 ):
                     row = connection.execute(
                         "SELECT value FROM data_meta WHERE key = 'maintenance_state'"
@@ -679,9 +683,9 @@ class DatabaseMaintenanceService:
             separators=(",", ":"),
         )
         updated_at = _utc_now(self._clock()).replace(tzinfo=None)
-        from .store_base import _WRITE_LOCK
+        from .store_base import _WRITE_LOCK, open_database
 
-        with _WRITE_LOCK, duckdb.connect(str(self.database_path), read_only=False) as connection:
+        with _WRITE_LOCK, open_database(self.database_path, read_only=False) as connection:
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS data_meta (

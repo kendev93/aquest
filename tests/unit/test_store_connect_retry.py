@@ -17,6 +17,7 @@ from aquest.market_data.store import DuckDbMarketDataStore
 from aquest.market_data.store_base import (
     _CONNECT_RETRY_DELAYS,
     _RETRY_LADDER_CACHE,
+    SCHEMA_VERSION,
     MarketDataStoreError,
     connect_retry_delays,
 )
@@ -202,3 +203,30 @@ def test_job_store_reads_survive_a_refused_read_only_open(tmp_path, monkeypatch)
 
     state = jobs.read_state(job_id)
     assert state is not None and state["status"] == "queued"
+
+
+def test_every_open_carries_the_same_duckdb_config(tmp_path, monkeypatch) -> None:
+    """同一进程里对同一库文件的配置必须一模一样，否则后一把连接被 DuckDB 直接拒。
+
+    `memory_limit` 在容器里按 cgroup 自动推导（后端实测 5GiB），`threads` 由
+    AQUEST_DUCKDB_THREADS 给。只要有一处图省事写裸 `duckdb.connect(...)`，它自己跑得好好
+    的，却让这个进程里所有正经读写都随机变成「库打不开」——2026-10-18 策略 worker 落库
+    拿 500 就是这个形状，看起来像锁冲突，其实是配置不一致。这里拿 schema 版本探测当样本：
+    它就是历史上那处裸 connect。
+    """
+
+    monkeypatch.setenv("AQUEST_DUCKDB_THREADS", "1")
+    store_base._duckdb_threads.cache_clear()
+    try:
+        config = store_base._connect_config()
+        assert config is not None and config.get("threads") == 1
+
+        store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+        store._ensure_initialized()
+
+        with store.read_session() as connection:
+            assert connection.execute("select 1").fetchone()[0] == 1
+            # 裸 connect 在这里会被自己进程的已有连接拒掉（different configuration）。
+            assert store._schema_version_on_disk() == SCHEMA_VERSION
+    finally:
+        store_base._duckdb_threads.cache_clear()

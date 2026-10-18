@@ -275,6 +275,31 @@ def _duckdb_threads() -> int | None:
     return threads if threads >= 1 else None
 
 
+def _connect_config() -> dict[str, str | bool | int | float | list[str]] | None:
+    limit = _duckdb_memory_limit()
+    threads = _duckdb_threads()
+    config: dict[str, str | bool | int | float | list[str]] = {}
+    #: 必须在 connect 时就带上：事后 `SET memory_limit` 在只读连接上会失败。
+    if limit is not None:
+        config["memory_limit"] = limit
+    if threads is not None:
+        config["threads"] = threads
+    return config or None
+
+
+def open_database(path: str | Path, *, read_only: bool) -> duckdb.DuckDBPyConnection:
+    """打开行情库的唯一入口：配置必须一模一样。
+
+    DuckDB 规定同一进程内针对同一个库文件的后一把连接必须与已有连接配置一致，否则直接
+    拒绝（`Can't open a connection to same database file with a different configuration
+    than existing connections`）。而这里的配置是自动按 cgroup 推导的 `memory_limit`
+    加上 `AQUEST_DUCKDB_THREADS`：只要有一处图省事写裸 `duckdb.connect(...)`，那个进程
+    里所有正经读写就都会随机变成打不开库——排查起来像锁冲突，其实是配置不一致。
+    """
+
+    return duckdb.connect(str(path), read_only=read_only, config=_connect_config())
+
+
 class _DuckDbStoreBase:
     """Own connections and shared invariants for all storage repositories."""
 
@@ -332,16 +357,7 @@ class _DuckDbStoreBase:
             connection.close()
 
     def _open(self, *, read_only: bool) -> duckdb.DuckDBPyConnection:
-        # 必须在 connect 时通过 config 传入：事后 `SET memory_limit` 在只读连接上
-        # 会失败，而同一库文件的连接配置不一致时 DuckDB 会直接拒绝再开连接。
-        limit = _duckdb_memory_limit()
-        config: dict[str, str | bool | int | float | list[str]] | None = None
-        if limit is not None:
-            config = {"memory_limit": limit}
-        threads = _duckdb_threads()
-        if threads is not None:
-            config = {**(config or {}), "threads": threads}
-        return duckdb.connect(str(self.database_path), read_only=read_only, config=config)
+        return open_database(self.database_path, read_only=read_only)
 
     def _open_read(self) -> duckdb.DuckDBPyConnection:
         """只读快路径：先无等待地试一次，被自己已有的读写连接打回就退回实例默认模式。
@@ -1143,7 +1159,7 @@ class _DuckDbStoreBase:
         if not self.database_path.exists():
             return None
         try:
-            with duckdb.connect(str(self.database_path), read_only=True) as connection:
+            with open_database(self.database_path, read_only=True) as connection:
                 row = connection.execute(
                     "SELECT value FROM data_meta WHERE key = 'schema_version'"
                 ).fetchone()
