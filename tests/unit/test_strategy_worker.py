@@ -392,3 +392,35 @@ def test_market_pool_job_reports_unpersisted_entries_instead_of_failing(tmp_path
     assert store.read_state("job-2")["status"] == "completed"
     assert store.entries == []
     assert store.read_result("job-2")["unpersisted_entries"] == 2
+
+
+def test_worker_backs_off_while_idle_and_resets_when_it_claims(tmp_path, monkeypatch) -> None:
+    """空闲时越等越长，领取到任务立刻回到最快节拍：一次领取要开两把库连接。"""
+
+    from threading import Event
+
+    store = StrategyJobStore(tmp_path / "jobs")
+    worker = StrategyDiscoveryWorker(store, FakeDiscoveryService(), poll_interval_seconds=0.5)
+    sleeps: list[float] = []
+    stop_event = Event()
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) == 3:
+            store.create(
+                "job-1",
+                operation="discovery",
+                payload={"request": {"base_config": {}, "splits": {}, "max_trials": 1}},
+                description="策略实验室",
+            )
+        if len(sleeps) >= 6:
+            stop_event.set()
+
+    monkeypatch.setattr("aquest.strategy_discovery.worker.time.sleep", fake_sleep)
+
+    worker.run_forever(stop_event=stop_event)
+
+    # 前三次空转按 0.5 / 1 / 2 递增，第三次之后队列里有任务，被认领的那一轮回到 0.5。
+    assert sleeps[:3] == [0.5, 1.0, 2.0]
+    assert sleeps[3] == 0.5
+    assert max(sleeps) <= 3.0

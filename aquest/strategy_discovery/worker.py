@@ -49,6 +49,8 @@ from .worker_api_client import HttpStrategyJobClient, TransientWorkerApiError
 
 logger = logging.getLogger(__name__)
 DEFAULT_WORKER_POLL_INTERVAL_SECONDS = 0.5
+#: 空闲轮询的退避上限：新任务最多晚这么几秒起跑。
+DEFAULT_WORKER_IDLE_POLL_MAX_SECONDS = 3.0
 DEFAULT_STALE_AFTER_SECONDS = 120.0
 DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 15.0
 
@@ -286,13 +288,29 @@ class StrategyDiscoveryWorker:
         stop serving the next job, so it is logged and the loop goes on.
         """
 
+        idle_attempts = 0
         while stop_event is None or not stop_event.is_set():
             try:
-                if self.run_once() is None:
-                    time.sleep(self._poll_interval_seconds)
+                idle_attempts = 0 if self.run_once() is not None else idle_attempts + 1
+                time.sleep(self._idle_sleep_seconds(idle_attempts))
             except Exception:  # noqa: BLE001 - one poll failing must not end the loop
                 logger.exception("策略 worker 领取任务失败，稍后重试")
-                time.sleep(self._poll_interval_seconds)
+                idle_attempts += 1
+                time.sleep(self._idle_sleep_seconds(idle_attempts))
+
+    def _idle_sleep_seconds(self, idle_attempts: int) -> float:
+        """没有活可干时越等越长，领取到任务就立刻回到最快节拍。
+
+        一次领取要做两把库连接（清理失联任务 + 认领），空闲时按 0.5 秒轮一次就是每秒 4
+        把：全市场页的读、策略 worker 的落库都跟它在同一个 DuckDB 文件上排队。退到 3 秒
+        封顶只让新任务的起跑晚几秒，却把常态锁压力削掉八成。
+        """
+
+        if idle_attempts <= 0:
+            return self._poll_interval_seconds
+        steps = min(idle_attempts - 1, 3)
+        backed_off: float = self._poll_interval_seconds * (2.0**steps)
+        return min(DEFAULT_WORKER_IDLE_POLL_MAX_SECONDS, backed_off)
 
     def _dispatch(
         self,
