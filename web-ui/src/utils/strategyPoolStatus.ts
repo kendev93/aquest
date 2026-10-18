@@ -47,7 +47,10 @@ export function activeReplayableCandidate(entry: StrategyPoolEntry): StrategyPoo
 }
 
 export function entryStatus(entry: StrategyPoolEntry, states: StrategyPoolSignal[]): string {
-  const row = states.find((item) => item.symbol === symbol(entry))
+  return resolveStatus(entry, states.find((item) => item.symbol === symbol(entry)))
+}
+
+function resolveStatus(entry: StrategyPoolEntry, row: StrategyPoolSignal | undefined): string {
   const candidate = activeReplayableCandidate(entry)
   if (!candidate) return entry.status === 'insufficient_history' ? 'insufficient_history' : 'no_strategy'
   if (!row || row.status === 'no_strategy' || row.candidate_id !== candidate.candidate_id) {
@@ -55,6 +58,29 @@ export function entryStatus(entry: StrategyPoolEntry, states: StrategyPoolSignal
   }
   if (row.status === 'held') return 'flat'
   return row.status ?? 'signal_stale'
+}
+
+/**
+ * 排序用的状态查找表：先把当天状态按证券代码建一次索引，再记住每个标的算出来的状态。
+ *
+ * 排序里每个标的要被比较十几次，逐个查数组就是 O(n log n × m)：3350 行 × 3350 条状态
+ * 实测一次 1.4 秒，而全市场页每拿一次列表都要排一遍，浏览器直接卡到弹「页面无响应」。
+ * 同一份状态里重复的证券代码取第一条，和 `states.find` 的行为一致。
+ */
+function statusLookup(states: StrategyPoolSignal[]): (entry: StrategyPoolEntry) => string {
+  const bySymbol = new Map<string, StrategyPoolSignal>()
+  for (const item of states) {
+    if (!bySymbol.has(item.symbol)) bySymbol.set(item.symbol, item)
+  }
+  const cache = new Map<string, string>()
+  return (entry) => {
+    const key = symbol(entry)
+    const cached = cache.get(key)
+    if (cached !== undefined) return cached
+    const resolved = resolveStatus(entry, bySymbol.get(key))
+    cache.set(key, resolved)
+    return resolved
+  }
 }
 
 export function entryIsHeld(entry: StrategyPoolEntry, heldKeys: Set<string>): boolean {
@@ -141,9 +167,10 @@ export function sortPoolEntriesByStatus(
   heldKeys: Set<string>,
   objective: StrategyPoolObjective | null,
 ): StrategyPoolEntry[] {
+  const statusOf = statusLookup(states)
   return [...rows].sort((a, b) => {
-    const order = statusOrder(entryStatus(a, states), entryIsHeld(a, heldKeys))
-      - statusOrder(entryStatus(b, states), entryIsHeld(b, heldKeys))
+    const order = statusOrder(statusOf(a), entryIsHeld(a, heldKeys))
+      - statusOrder(statusOf(b), entryIsHeld(b, heldKeys))
     return order
       || metricValue(b, objective ?? 'annual_return', objective)
         - metricValue(a, objective ?? 'annual_return', objective)
@@ -164,9 +191,10 @@ export function sortPoolEntriesByMetric(
   heldKeys: Set<string>,
   objective: StrategyPoolObjective | null,
 ): StrategyPoolEntry[] {
+  const statusOf = statusLookup(states)
   const byStatusThenSymbol = (a: StrategyPoolEntry, b: StrategyPoolEntry): number =>
-    statusOrder(entryStatus(a, states), entryIsHeld(a, heldKeys))
-      - statusOrder(entryStatus(b, states), entryIsHeld(b, heldKeys))
+    statusOrder(statusOf(a), entryIsHeld(a, heldKeys))
+      - statusOrder(statusOf(b), entryIsHeld(b, heldKeys))
       || symbol(a).localeCompare(symbol(b))
   const sign = direction === 'asc' ? 1 : -1
 

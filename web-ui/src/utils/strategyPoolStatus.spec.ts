@@ -129,6 +129,28 @@ describe('strategyPoolStatus', () => {
     expect(input.map(symbol)).toEqual(['SH600002', 'SH600001'])
   })
 
+  it('indexes the daily states without changing who lands where', () => {
+    // 排序改成「先给状态表建索引」，那结果必须和原来逐个 find 完全一致：同一个代码
+    // 出现两行时取第一条，没有可回放候选的标的按条目自己的状态。
+    const rows = [entry('600001'), entry('600002'), entry('600003', { active_candidate: null })]
+    const states = [
+      state('600001', 'buy'),
+      state('600001', 'sell', 'other-candidate'),
+      state('600002', 'no_strategy'),
+    ]
+    const held = new Set(['SH600003'])
+    const naive = [...rows].sort((a, b) => {
+      const order = statusOrder(entryStatus(a, states), entryIsHeld(a, held))
+        - statusOrder(entryStatus(b, states), entryIsHeld(b, held))
+      return order || symbol(a).localeCompare(symbol(b))
+    }).map(symbol)
+
+    expect(sortPoolEntriesByStatus(rows, states, held, null).map(symbol)).toEqual(naive)
+    // 指标全都取不到值时，指标档退到同一条状态兜底链，结果同样一致。
+    expect(sortPoolEntriesByMetric(rows, 'sharpe', 'desc', states, held, null).map(symbol))
+      .toEqual(naive)
+  })
+
   it('sorts a metric column in both directions and keeps rows without the metric last', () => {
     const high = entry('600001', { created_return: 0.3 })
     const low = entry('600002', { created_return: 0.1 })
