@@ -53,7 +53,16 @@ USER appuser
 
 EXPOSE 8123 8080
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+# 宽限给到 60 分钟：启动会在绑定端口之前做一次全库压缩（COPY FROM DATABASE 整库重写），
+# 而这是有意为之——交换数据文件必须在还没有读取者的时候做。本轮实测（2026-10-18，昨天那次
+# 「一键修复」删并重写 113 万根之后触发）4.69GB 压到 3.06GB 用了约 6 分钟；但共享卷的写入
+# 速度受缓存与宿主负载影响，慢的场景能到几十分钟，所以按上限留足余量。旧值
+# start-period=20s + retries=3 约 110 秒就把容器判成 unhealthy，于是合法压缩被报成「起不来」，
+# `depends_on: service_healthy` 的 worker 卡在 Created。
+# 代价：真的启动失败也要等满 60 分钟才被标红，但 `docker compose ps` 会一直显示 starting，
+# 日志里 `Waiting for application startup.` 迟迟不消失就是异常信号，不必等健康检查下结论。
+# 过了宽限期之后恢复成 3 次连败即失败（约 90 秒），服务中途真的坏掉仍能被及时发现。
+HEALTHCHECK --interval=30s --timeout=5s --start-period=3600s --retries=3 \
   CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)"
 
 CMD ["supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]

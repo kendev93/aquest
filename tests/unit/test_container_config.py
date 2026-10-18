@@ -1,6 +1,32 @@
+import re
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_backend_healthcheck_tolerates_a_startup_compaction() -> None:
+    """启动时的一次全库压缩不能被健康检查判成「起不来」。
+
+    lifespan 在绑定端口之前同步跑 `maintenance.run_if_needed()`：交换数据文件必须在还没有
+    读取者时做。本轮实测（2026-10-18，昨天「一键修复」删并重写 113 万根之后触发）4.69GB 压到
+    3.06GB 用了约 6 分钟，但共享卷慢的场景能到几十分钟，所以宽限按上限留到 60 分钟。旧配置
+    start-period=20s + retries=3 约 110 秒就判 unhealthy，worker 因 `depends_on:
+    service_healthy` 一直卡在 Created，看上去像整站挂了。
+    """
+
+    dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    lines = dockerfile.splitlines()
+    start = next(index for index, item in enumerate(lines) if item.startswith("HEALTHCHECK"))
+    # 指令用反斜杠续行，真正的探测命令在下一行，要整块看。
+    block = " ".join(lines[start : start + 2])
+    flags = dict(re.findall(r"--([a-z-]+)=(\d+)s?", block))
+
+    # 宽限期要盖得住一次最慢的全库压缩（实测 45 分钟）并留余量。
+    assert int(flags["start-period"]) >= 3600
+    # 过了宽限期必须恢复灵敏：真坏掉的启动不能被继续说成“还在启动”，取 3 次连败 × 30 秒。
+    assert int(flags["retries"]) * int(flags["interval"]) <= 180
+    # 健康检查探测的是 readiness（/healthz 经 nginx 打到应用），不是进程活着而已。
+    assert "/healthz" in block
 
 
 def test_container_backend_uses_port_8123_end_to_end() -> None:

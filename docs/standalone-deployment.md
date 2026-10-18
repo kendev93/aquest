@@ -93,6 +93,31 @@ AQUEST_DB_BACKUP_RETENTION_DAYS=3 docker compose -f docker-compose.yml up -d
 
 压缩用的是硬链接而不是整库拷贝，所以压缩期间的峰值是两份库大小而不是三份。
 
+### 启动时正在压缩，不是起不来
+
+全库压缩跑在**绑定端口之前**（交换数据文件必须在还没有读取者的时候做），所以这段时间里
+`/healthz` 只会拿到 502，`docker compose ps` 显示 `health: starting`，而 `docker compose up`
+可能在等待超时后报 `dependency backend failed to start`——**容器里的进程仍在正常干活，别
+`stop` 也别 `down`**。中途杀掉这一轮的写入全部作废（下次启动会清掉那份 `.compact` 临时文件并
+记一次 `recovered`），而碎片条件没变，回来还得照样重压一次。
+
+一次压缩要多久取决于卷的写入速度：本轮实测（4.69GB 压到 3.06GB）约 6 分钟，共享卷被宿主
+负载拖慢时可达几十分钟，所以健康检查的宽限期给了 60 分钟。判断它确实在干活而不是死等：
+
+```bash
+docker stats --no-stream --format '{{.Name}} {{.CPUPerc}} {{.MemUsage}}'   # CPU 打满、内存上涨
+docker exec aquest-backend-1 ls -l /data/market                            # 有 market.compact-*.duckdb
+docker logs --tail 20 aquest-backend-1                                     # 还停在 Waiting for application startup.
+```
+
+别用临时文件的大小估算进度：DuckDB 的写入先落在缓冲里，文件大小会长时间不动。
+
+等应用日志出现 `Uvicorn running on http://0.0.0.0:8123` 并且 `docker compose ps` 转为
+`(healthy)`，再执行一次 `docker compose up -d`，被 `depends_on: service_healthy` 挡住的
+worker 才会起来。触发条件：文件不小于 512MB 且空块比例达到 20%（首次压缩），或自上次压缩
+以来体积增长 50%。删掉大批行情再重下（行情页的「一键修复」「删除并重下全部历史」）最容易
+把空块比例顶过那条线。
+
 ## 换成自己管理的目录
 
 想让数据落在一个能直接看到、直接备份的宿主目录，叠加覆盖文件：
