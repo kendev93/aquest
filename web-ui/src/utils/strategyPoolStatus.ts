@@ -230,26 +230,18 @@ export function entryHoldingRisk(entry: StrategyPoolEntry): HoldingRiskDisplay |
 }
 
 /**
- * 该标的的最新收盘价（最后一根已完成日线，不复权），与风控三档线同一个判定时点。
+ * 该标的的最新收盘价（最后一根已完成日线，不复权）和它自己的日期。
  *
- * 读的是条目接口从当前生效版本摘要里投影出来的顶层字段，和「创建至今收益」「上线后收益」
- * 同一个来源。老摘要里没有这个字段——那是这次改动之前算好、还没重跑跟踪的版本：持仓中的
- * 标的还能从持仓行拿到同一个收盘价（引擎本来就往持仓行写了 close），空仓的只能留白，
- * 等下一次每日跟踪补上；宁缺毋滥，不拿别的日期的价凑一个看起来能比的数。
+ * 价是从行情直接取的，不是跟踪摘要里的字段：空仓、当天没有信号、甚至还没有跟踪版本的行
+ * 都要有同一个数，不然只有持仓中的能看见价，整列就没法横向看。日期跟着一起给——风控三档
+ * 线自己带着判定日期，两个日期不一致就说明跟踪落后于行情（停牌或落库失败），这里不粉饰。
  */
 export function entryLatestClose(
   entry: StrategyPoolEntry,
 ): { price: number; asOf: string | null } | null {
-  const projected = entry.latest_close
-  if (typeof projected === 'number' && Number.isFinite(projected)) {
-    return { price: projected, asOf: entry.latest_close_date ?? entry.tracking_as_of_date ?? null }
-  }
-  const held = entryHoldingRisk(entry) as (HoldingRiskDisplay & { close?: unknown }) | null
-  const heldClose = held ? held.close : undefined
-  if (typeof heldClose === 'number' && Number.isFinite(heldClose)) {
-    return { price: heldClose, asOf: held?.risk_level_as_of ?? entry.tracking_as_of_date ?? null }
-  }
-  return null
+  const price = entry.latest_close
+  if (typeof price !== 'number' || !Number.isFinite(price)) return null
+  return { price, asOf: entry.latest_close_date ?? null }
 }
 
 export function rerunEntryDisabled(context: PoolJobStateContext): boolean {

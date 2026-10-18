@@ -66,8 +66,9 @@ export interface StrategyPoolEntry {
   post_launch_days?: number | null
   post_launch_has_data?: boolean | null
   /**
-   * 该标的最新一根已完成日线的收盘价（不复权）及其日期。它与风控三档线出自同一次回放的
-   * 同一个判定时点，所以能直接比较；空仓、当天没有买卖信号的标的同样有这个价。
+   * 该标的最新一根已完成日线的收盘价（不复权）及其日期。后端一次聚合从行情表直接投影，
+   * 不读跟踪摘要，所以空仓、当天没有买卖信号、甚至还没有跟踪版本的行都有；它和风控三档
+   * 线各自的日期不一定相同，不一致时表格会标出「价截至 X」。
    */
   latest_close?: number | null
   latest_close_date?: string | null

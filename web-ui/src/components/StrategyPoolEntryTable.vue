@@ -109,10 +109,22 @@ function holdingRiskText(entry: StrategyPoolEntry): string {
   return risk ? holdingRiskSummary(risk) : ''
 }
 
-/** 最新收盘价：有没有信号、有没有持仓都看得到，风控线才有参照物。 */
+/** 最新收盘价：直接从行情取，每一行都有，与有没有持仓无关。 */
 function latestCloseText(entry: StrategyPoolEntry): string {
   const close = entryLatestClose(entry)
   return close ? formatNumber(close.price, 2) : '—'
+}
+
+/**
+ * 只有当价和风控线的判定日期不是同一天时才补一句日期。
+ *
+ * 一致时全表已经有「截至 X」那行，重复写两遍同样的日期只是噪声；不一致说明跟踪落后于
+ * 行情（停牌或落库失败），这时必须让人看见价是哪一天的，不然会拿今天的价去比昨天的线。
+ */
+function latestCloseAsOf(entry: StrategyPoolEntry): string {
+  const close = entryLatestClose(entry)
+  if (!close?.asOf || close.asOf === entry.tracking_as_of_date) return ''
+  return close.asOf
 }
 
 function followTitle(entry: StrategyPoolEntry): string {
@@ -126,7 +138,7 @@ function followTitle(entry: StrategyPoolEntry): string {
   <div class="table-scroll">
     <table class="pool-table">
       <thead><tr>
-        <th>持仓 / 今日信号</th><th>证券</th><th title="最后一根已完成日线的收盘价（不复权），与持仓那三条风控线同一个判定时点">最新收盘</th>
+        <th>持仓 / 今日信号</th><th>证券</th><th title="最后一根已完成日线的收盘价（不复权），每行都有；日期与风控线判定日期不一致时会在价下面标出来">最新收盘</th>
         <th v-for="column in METRIC_COLUMNS" :key="column.key">
           <button v-if="sortable" :data-testid="`${testid}-sort-${column.key}`" :title="sortHint(column.key, column.label)" @click="emit('sort', column.key)">{{ column.label }}{{ sortGlyph(column.key) }}</button>
           <template v-else>{{ column.label }}</template>
@@ -137,7 +149,7 @@ function followTitle(entry: StrategyPoolEntry): string {
         <tr v-for="entry in entries" :key="symbol(entry)" :data-testid="`${testid}-row-${entry.code}`">
           <td><div class="status-stack"><span v-if="entryIsHeld(entry, heldKeys)" class="status-chip status-held">持仓中</span><span class="status-chip" :class="`status-${entryStatus(entry, states)}`">{{ statusLabel(entryStatus(entry, states)) }}</span></div><small v-if="holdingRiskText(entry)" :data-testid="`${testid}-holding-risk-${entry.code}`">{{ holdingRiskText(entry) }}</small></td>
           <td><strong>{{ entry.market }} {{ entry.code }}</strong><small>{{ entry.name }}</small></td>
-          <td :data-testid="`${testid}-latest-close-${entry.code}`">{{ latestCloseText(entry) }}</td>
+          <td :data-testid="`${testid}-latest-close-${entry.code}`">{{ latestCloseText(entry) }}<small v-if="latestCloseAsOf(entry)">价截至 {{ latestCloseAsOf(entry) }}</small></td>
           <td :data-testid="`${testid}-entry-benchmark-${entry.code}`">
             <div v-if="entry.benchmark" class="benchmark-summary">
               <div>全段基准 <b>{{ formatSignedPercent(benchmarkReturn(entry)) }}</b></div>

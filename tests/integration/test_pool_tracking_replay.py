@@ -300,9 +300,6 @@ def test_risk_exit_stays_open_on_the_trigger_day_and_closes_the_next(tmp_path):
     assert held[0]["pending_exit_signal_date"] == "2026-09-04"
     assert held[0]["stop_loss_price"] == pytest.approx(8.0)
     assert held[0]["risk_level_as_of"] == "2026-09-04"
-    # 现价必须落在与风控线同一个判定时点上：不然「现价跌破止损线」是拿今天的价比昨天的线。
-    assert trigger["summary"]["latest_close_date"] == "2026-09-04"
-    assert trigger["summary"]["latest_close"] == pytest.approx(held[0]["close"])
     assert held[0]["max_hold_days"] is None
     assert held[0]["take_profit_price"] is None
     assert trigger["summary"]["risk_exits"] == []
@@ -316,14 +313,6 @@ def test_risk_exit_stays_open_on_the_trigger_day_and_closes_the_next(tmp_path):
     # 补上 09-05：开盘成交，冷却从这一根的 bar 序号起算。
     closed = replay_account(service, ref, version)
     assert closed["summary"]["holding"] == []
-    # 空仓也要给现价：判断「现在离那条线多远」不能只在持仓时有数。口径就是最后一根
-    # 已完成日线的收盘价，不是引擎账户里那份只在持仓时才更新的 last_prices。
-    last_bar = adapter.read_stock(ref)
-    assert closed["summary"]["latest_close"] == pytest.approx(float(last_bar["close"].iloc[-1]))
-    assert closed["summary"]["latest_close_date"] == str(
-        pd.Timestamp(last_bar["date"].iloc[-1]).date()
-    )
-    assert closed["summary"]["latest_close_date"] == closed["summary"]["as_of_date"]
     sells = [row for row in closed["checkpoint"]["trades"] if row["direction"] == "SELL"]
     assert len(sells) == 1
     assert sells[0]["signal_date"] == "2026-09-04"
@@ -586,6 +575,7 @@ def test_entries_project_the_post_launch_window_for_the_leaderboard(tmp_path):
 
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     store.replace_local_bars("SH", "600000", "stock", bars(3))
+    store.replace_local_bars("SZ", "000001", "stock", bars(2))
     app = create_app(
         market_data_store=store, auto_sync_enabled=False, strategy_worker_token="test-token"
     )
@@ -614,8 +604,6 @@ def test_entries_project_the_post_launch_window_for_the_leaderboard(tmp_path):
                 "post_launch_days": 12,
                 "has_post_launch_data": True,
                 "as_of_date": "2026-09-03",
-                "latest_close": 12.5,
-                "latest_close_date": "2026-09-03",
             },
             "checkpoint": {"trades": [], "equity": [], "positions": {}},
         },
@@ -633,13 +621,16 @@ def test_entries_project_the_post_launch_window_for_the_leaderboard(tmp_path):
     assert tracked["post_launch_days"] == 12
     assert tracked["post_launch_has_data"] is True
     assert tracked["tracking_as_of_date"] == "2026-09-03"
-    assert tracked["latest_close"] == 12.5
+    # 现价来自行情本身，不依赖跟踪摘要：空仓、没有跟踪版本的行也得有同一个数。
+    assert tracked["latest_close"] == 15.0
     assert tracked["latest_close_date"] == "2026-09-03"
 
+    # 还没有跟踪快照的标的：收益字段留空（不能凭空给 0），但现价照样有，取它自己的末棒。
     fresh = next(item for item in items if item["code"] == "000001")
     assert fresh["post_launch_return"] is None
     assert fresh["post_launch_has_data"] is None
-    assert fresh["latest_close"] is None
+    assert fresh["latest_close"] == 12.0
+    assert fresh["latest_close_date"] == "2026-09-02"
 
 
 def test_tracking_runner_deduplicates_goals_and_uses_shared_budget(tmp_path):
@@ -1412,5 +1403,10 @@ def test_pool_entry_list_keeps_holding_risk_lines_but_not_the_snapshot(tmp_path)
     assert summary["holding"][0]["trailing_stop_price"] == 12.9
     assert "checkpoint_hash" not in summary
     assert "equity" not in summary
-    assert row["latest_close"] == 12.5
+    # 「最新收盘」只认行情末棒（bars(3) 收在 15.0）。摘要里那个 12.5 是旧口径留下的字段：
+    # 它只有跑过全量回放的版本才有，空仓和没有跟踪版本的行拿不到，整列就没法横向比，
+    # 所以现在既不再投影它，也不让它盖住真实的行情末棒。
+    assert row["latest_close"] == 15.0
+    assert row["latest_close_date"] == "2026-09-03"
+    assert "latest_close" not in summary
     assert row["tracking_as_of_date"] == "2026-09-03"

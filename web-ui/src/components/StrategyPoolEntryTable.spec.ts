@@ -66,28 +66,46 @@ describe('StrategyPoolEntryTable', () => {
   })
 
   it('prints the latest completed close on every row, held or not', () => {
-    // 空仓和没有信号的行也要有现价：风控三档线没有现价对照就只是一串抽象数字。
-    // 现价列读的是条目接口从当前生效版本摘要投影出来的顶层字段，和创建至今收益同一个来源。
+    // 价从行情直接取，不依赖跟踪摘要：空仓、没有信号、甚至还没有跟踪版本的行都得有同一个数。
     const tracked = {
       ...entry('600000'),
       latest_close: 12.34,
       latest_close_date: '2026-10-16',
+      tracking_as_of_date: '2026-10-16',
       tracking: { summary: { holding: [] } },
     }
     const flat = mountTable({ entries: [tracked] })
     expect(flat.get('[data-testid="pool-latest-close-600000"]').text()).toBe('12.34')
 
-    // 老摘要没有这个字段：持仓中的标的还能用持仓行里同一个收盘价，不算凭空造数。
-    const legacy = {
-      ...entry('600000'),
-      tracking: { summary: { as_of_date: '2026-10-15', holding: [{ code: '600000', close: 9.5 }] } },
+    const untracked = {
+      ...entry('600001'),
+      latest_close: 8.5,
+      latest_close_date: '2026-10-16',
+      tracking: null,
+      tracking_status: 'unavailable',
+      tracking_as_of_date: null,
     }
-    const held = mountTable({ entries: [legacy], heldKeys: new Set(['SH600000']) })
-    expect(held.get('[data-testid="pool-latest-close-600000"]').text()).toBe('9.50')
+    const noVersion = mountTable({ entries: [untracked] })
+    // 这一行没有别的日期可对照，所以价的日期直接标出来：停牌很久的票，这个日期本身就是信息。
+    expect(noVersion.get('[data-testid="pool-latest-close-600001"]').text()).toBe('8.50价截至 2026-10-16')
 
-    // 没有跟踪快照就是没有，不给一个别的日期的价。
+    // 价和风控线的判定日期不是一天时，必须把价的日期标出来，不然就是拿今天的价比昨天的线。
+    const stale = { ...tracked, tracking_as_of_date: '2026-09-30' }
+    const lagging = mountTable({ entries: [stale] })
+    expect(lagging.get('[data-testid="pool-latest-close-600000"]').text()).toBe('12.34价截至 2026-10-16')
+
+    // 库里没有这根日线（行情还没同步进来）就留白，不拿别的日期的价凑一个。
     const none = mountTable({ entries: [entry('600000')] })
     expect(none.get('[data-testid="pool-latest-close-600000"]').text()).toBe('—')
+
+    // 持仓行上那个收盘价也不再拿来填空：价只有行情这一份来源。检查点里的价是回放算出来的
+    // 历史价，让它冒名「最新收盘」，这一列就重新变成只有持仓中的才有、而且来源不同。
+    const heldOnly = {
+      ...entry('600002'),
+      tracking: { summary: { holding: [{ market: 'SH', code: '600002', close: 9.9 }] } },
+    }
+    const noProjection = mountTable({ entries: [heldOnly] })
+    expect(noProjection.get('[data-testid="pool-latest-close-600002"]').text()).toBe('—')
   })
 
   it('carries the list context into the detail link so 返回 restores the table state', () => {

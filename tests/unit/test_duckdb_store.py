@@ -107,6 +107,37 @@ def test_store_excludes_provisional_bars_by_default(tmp_path: Path) -> None:
     assert len(all_bars) == 2
 
 
+def test_latest_completed_closes_skips_provisional_and_other_bases(tmp_path: Path) -> None:
+    """策略池每一行的「最新收盘」只认 raw 口径里最后一根已收盘的日线。
+
+    列表把这一列直接读成一次全市场聚合，所以盘中 provisional 行和改口径之前留下的 hfq
+    行都不能顶掉它：前者还没有真正的收盘价，后者和表格其余部分不是同一个价。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars(), price_basis="raw")
+
+    intraday = _bars(
+        ("SH", "600001", "2024-01-02", 20.0, "local"),
+        ("SH", "600001", "2024-01-03", 21.0, "local"),
+    )
+    intraday.loc[intraday["date"] == pd.Timestamp("2024-01-03"), "bar_status"] = "provisional"
+    store.replace_local_bars("SH", "600001", "stock", intraday, price_basis="raw")
+
+    store.replace_local_bars(
+        "SH",
+        "600002",
+        "stock",
+        _bars(("SH", "600002", "2024-01-04", 30.0, "local")),
+        price_basis="hfq",
+    )
+
+    assert store.latest_completed_closes() == {
+        ("SH", "600000"): (11.0, "2024-01-03"),
+        ("SH", "600001"): (20.0, "2024-01-02"),
+    }
+
+
 def test_research_trading_dates_ignore_provisional_and_hfq_only_sessions(
     tmp_path: Path,
 ) -> None:

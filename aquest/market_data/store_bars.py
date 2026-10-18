@@ -1805,6 +1805,33 @@ class DuckDbBarsStore:
                 connection.unregister("_requested_symbols")
         return self._store._frame_from_query(result)
 
+    def latest_completed_closes(self) -> dict[tuple[str, str], tuple[float, str]]:
+        """每只标的最后一根**已完成**日线的收盘价与日期，一次聚合覆盖全市场。
+
+        策略池列表要在每一行上给出「最新收盘」，包括还没有跟踪版本的标的——那些行没有
+        摘要可取，只能从行情读，所以这里一次 ``arg_max`` 聚合，而不是逐只去查。口径与
+        :meth:`list_instruments` 的 ``last_close`` 完全一致（同一价格基准、只认已收盘），
+        否则列表里的价会和取出来的行情对不上。
+        """
+
+        with self._store._connect(read_only=True) as connection:
+            rows = connection.execute(
+                """
+                SELECT market, code, arg_max(close, trade_date) AS last_close,
+                    max(trade_date) AS last_date
+                FROM daily_bars
+                WHERE price_basis = ? AND bar_status = 'completed'
+                GROUP BY market, code
+                """,
+                [DEFAULT_PRICE_BASIS],
+            ).fetchall()
+        result: dict[tuple[str, str], tuple[float, str]] = {}
+        for market, code, close, last_date in rows:
+            if close is None or last_date is None:
+                continue
+            result[(str(market), str(code))] = (float(close), str(last_date))
+        return result
+
     def list_instruments(
         self,
         *,

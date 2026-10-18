@@ -206,14 +206,6 @@ def replay_account(
         current_state if isinstance(current_state, Mapping) else None,
     )
     summary["checkpoint_hash"] = hashlib.sha256(dumps(packed).encode()).hexdigest()
-    # 当前价：该标的最新一根**已完成**日线的收盘价（不复权）。它必须和风控三档线同一个时点、
-    # 同一个口径，否则「现价跌破止损线」是拿今天的价比昨天的线。不能从账户状态取——
-    # 引擎的 ``last_prices`` 只在遍历持仓时更新（从没买过的标的恒为 0，买过又卖的拿到过期价），
-    # 空仓标的根本没有价，所以直接取回放用的那份行情末棒。
-    last_close = float(raw["close"].iloc[-1])
-    if np.isfinite(last_close) and last_close > 0:
-        summary["latest_close"] = last_close
-        summary["latest_close_date"] = pd.Timestamp(raw["date"].iloc[-1]).date().isoformat()
     # 上线后窗口的对照基准：同区间买入持有（复权收盘价口径），与 post_launch_return
     # 同一起点（上线日），供「上线后衰减」判定使用（2026-10-09 用户决策）。没有
     # 上线时间的老版本没有窗口，两个结论都无从谈起，置空即可。只算基准、不动

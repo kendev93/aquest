@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime, time, timedelta
+from time import monotonic
 from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo
 
+import duckdb
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -172,10 +174,38 @@ _LIST_SUMMARY_FIELDS = frozenset(
         "post_launch_benchmark_return",
         "post_launch_days",
         "has_post_launch_data",
-        "latest_close",
-        "latest_close_date",
     }
 )
+
+#: 「最新收盘」的缓存时长：这个数一天只变一次（收盘后同步进来才变），而一次全市场重选里
+#: 页面每 1.5 秒轮询一次、完成数一变就重取列表。生产库有 1105 万行日线，同规模合成表实测
+#: 这次聚合冷读 0.41 秒、热读 0.05 秒（8 线程）——单次不贵，但按轮询节奏重复它就是在和
+#: 正在逐标的落库的研究请求抢同一批查询线程。
+_LATEST_CLOSE_TTL_SECONDS = 60.0
+
+
+def _latest_closes(request: Request) -> dict[tuple[str, str], tuple[float, str]]:
+    """每只标的最后一根已完成日线的收盘价与日期，带 60 秒缓存。
+
+    不走跟踪摘要里的字段：摘要只有"跑过全量回放"的版本才有，而列表要求每一行都给价，
+    包括还没有跟踪版本的标的。价和日期是配套的，日期本身就是这条数的时点。
+    """
+
+    state = request.app.state
+    cached: tuple[float, dict[tuple[str, str], tuple[float, str]]] | None = getattr(
+        state, "latest_close_cache", None
+    )
+    now = monotonic()
+    if cached is not None and now - cached[0] < _LATEST_CLOSE_TTL_SECONDS:
+        return cached[1]
+    try:
+        closes = _market_store(request).latest_completed_closes()
+    except (MarketDataStoreError, duckdb.Error, OSError, RuntimeError):
+        # 读不到行情时宁可继续用上一轮那份（日期跟着一起给，不会假装是今天的价），
+        # 也没有缓存就让整列留白——不能拿别的标的的价或旧的判定日期凑数。
+        return cached[1] if cached is not None else {}
+    state.latest_close_cache = (now, closes)
+    return closes
 
 
 def _project_candidate_for_list(candidate: object) -> object:
@@ -219,6 +249,7 @@ def list_strategy_pool_entries(
     items = _pool_store(request).list_entries()
     tracks = PoolTrackingStore(_market_store(request)).current_versions()
     track_index = {(v["market"], v["code"], v["objective"], v["source"]): v for v in tracks}
+    closes = _latest_closes(request)
     projected_items: list[dict[str, object]] = []
     for item in items:
         automatic = item.get("automatic_candidates")
@@ -244,10 +275,12 @@ def list_strategy_pool_entries(
         item["post_launch_benchmark_return"] = summary.get("post_launch_benchmark_return")
         item["post_launch_days"] = summary.get("post_launch_days")
         item["post_launch_has_data"] = summary.get("has_post_launch_data")
-        # 最新一根已完成日线的收盘价，与风控三档线同时点同口径：空仓、没有信号的行也要能
-        # 看出「现价离那条线还有多远」，所以它跟着摘要落库，而不是每次读表再扫一遍全市场。
-        item["latest_close"] = summary.get("latest_close")
-        item["latest_close_date"] = summary.get("latest_close_date")
+        # 最新收盘：每一行都给，包括空仓、没有信号、甚至还没有跟踪版本的标的。价与日期
+        # 配套，日期就是这条数的时点；风控三档线自己带着判定日期，两个日期不一致就说明
+        # 跟踪落后于行情（停牌或落库失败），而不是这里算错了。
+        price = closes.get((str(item["market"]), str(item["code"])))
+        item["latest_close"] = price[0] if price else None
+        item["latest_close_date"] = price[1] if price else None
         projected_items.append(
             {
                 **{key: value for key, value in item.items() if key in _LIST_ENTRY_FIELDS},
