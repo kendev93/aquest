@@ -117,6 +117,14 @@ sh scripts/start.sh
 | [docs/upstream-api-audit.md](docs/upstream-api-audit.md) | 在线行情接口审计 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 开发环境、验证流程、提交规范与贡献授权 |
 
+## 交流与反馈
+
+欢迎扫描二维码关注开发者公众号进行联系。
+
+<p align="center">
+  <img src="assets/branding/wechat-mp.jpg" alt="开发者公众号二维码" width="180">
+</p>
+
 ## 许可证
 
 本项目源代码以 [GNU Affero General Public License v3（AGPL-3.0）](LICENSE) 发布：你可以自由地使用、学习、修改和再分发；但若将修改后的版本作为网络服务对外提供，必须向服务使用者开放该版本完整的源代码。具体权利和义务以根目录的 [LICENSE](LICENSE) 全文为准。
