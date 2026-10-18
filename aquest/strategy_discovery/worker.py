@@ -32,7 +32,7 @@ from aquest.strategy_pool.resources import (
     pool_evaluation_budget_capacity,
     pool_evaluation_worker_count,
 )
-from aquest.strategy_pool.service import MarketStrategyPoolService
+from aquest.strategy_pool.service import MarketStrategyPoolService, PoolEntryWriter
 from aquest.strategy_pool.store import DuckDbStrategyPoolStore
 from aquest.strategy_pool.tracking_runner import PoolTrackingRunner
 
@@ -103,6 +103,56 @@ class StrategyJobClient(Protocol):
     ) -> None: ...
 
     def write_result(self, job_id: str, result: Mapping[str, object]) -> None: ...
+
+
+#: 逐标的结果连续攒到这么多条还没送进库，就认定后端已经不是一时抖动：这些结果只在
+#: 本进程内存里，继续跑等于默默丢掉几千只标的的研究产出，不如让任务带着原因失败。
+_MAX_DEFERRED_POOL_ENTRIES = 256
+
+
+class DeferredPoolEntryWriter:
+    """后端一时答不上时把逐标的结果按序攒着继续研究，别把几小时的任务判死。
+
+    只对 `TransientWorkerApiError`（超时或暂时不可用）让步——其它异常说明请求本身有
+    问题，重试也不会变好，照旧抛出。补发严格按写入顺序：同一标的的检查点晚落库才有
+    意义，乱序会让早先的结果盖掉新的。生产实测一次后端不可用持续了 5 分钟，而逐标的
+    节拍约 75-100 秒，一次抖动只攒得下几条，下一次写入就顺带补出去了。
+    """
+
+    def __init__(self, write: PoolEntryWriter) -> None:
+        self._write = write
+        self._pending: list[Mapping[str, object]] = []
+        self._warning_open = False
+
+    def __call__(self, entry: Mapping[str, object]) -> None:
+        self._pending.append(entry)
+        self._flush()
+        if len(self._pending) > _MAX_DEFERRED_POOL_ENTRIES:
+            raise TransientWorkerApiError(
+                f"逐标的结果已连续 {len(self._pending)} 条未能落库，策略 worker API 持续不可用"
+            )
+
+    def flush(self) -> int:
+        """任务收尾再补一轮，返回仍然没能落库的条数。"""
+
+        self._flush()
+        return len(self._pending)
+
+    def _flush(self) -> None:
+        while self._pending:
+            try:
+                self._write(self._pending[0])
+            except TransientWorkerApiError as exc:
+                if not self._warning_open:
+                    logger.warning(
+                        "策略 worker 暂时无法落库逐标的结果，先攒着并继续研究（%d 条待补）: %s",
+                        len(self._pending),
+                        exc,
+                    )
+                    self._warning_open = True
+                return
+            self._pending.pop(0)
+            self._warning_open = False
 
 
 class StrategyDiscoveryWorker:
@@ -367,13 +417,21 @@ class StrategyDiscoveryWorker:
             writer = getattr(self._job_store, "write_pool_entry", None)
             if not callable(writer):
                 raise ValueError("策略 worker 不支持逐股保存策略池检查点")
-            return self._strategy_pool_service.run(
-                payload,
-                job_id=job_id,
-                progress_callback=progress_callback,
-                abort_check=abort_check,
-                entry_writer=lambda entry: writer(job_id, entry),
+            deferred = DeferredPoolEntryWriter(lambda entry: writer(job_id, entry))
+            result = dict(
+                self._strategy_pool_service.run(
+                    payload,
+                    job_id=job_id,
+                    progress_callback=progress_callback,
+                    abort_check=abort_check,
+                    entry_writer=deferred,
+                )
             )
+            leftover = deferred.flush()
+            if leftover:
+                logger.error("策略池任务结束时仍有 %d 条逐标的结果没能落库", leftover)
+                result["unpersisted_entries"] = leftover
+            return result
         raise ValueError("策略任务类型无效")
 
     def _mark_cancelled(self, job_id: str) -> None:

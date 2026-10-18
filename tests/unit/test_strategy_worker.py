@@ -2,8 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+import pytest
+
 from aquest.strategy_discovery.job_store import StrategyJobStore
-from aquest.strategy_discovery.worker import StrategyDiscoveryWorker
+from aquest.strategy_discovery.worker import (
+    DeferredPoolEntryWriter,
+    StrategyDiscoveryWorker,
+)
 from aquest.strategy_discovery.worker_api_client import TransientWorkerApiError
 
 
@@ -271,3 +276,119 @@ def test_worker_factory_receives_the_persisted_worker_count(tmp_path) -> None:
 
     assert worker.run_once() == "job-1"
     assert selected == [1]
+
+
+def test_deferred_pool_entry_writer_parks_transient_failures_and_refills_in_order() -> None:
+    """后端一时答不上：结果先按序攒着，恢复后一次补齐，研究不许被打断。"""
+
+    written: list[str] = []
+    remaining_failures = 2
+
+    def write(entry: Mapping[str, object]) -> None:
+        nonlocal remaining_failures
+        if remaining_failures:
+            remaining_failures -= 1
+            raise TransientWorkerApiError("策略 worker API 响应超时或暂不可用")
+        written.append(str(entry["code"]))
+
+    deferred = DeferredPoolEntryWriter(write)
+    deferred({"code": "600000"})
+    deferred({"code": "600001"})
+    assert written == []
+    deferred({"code": "600002"})
+
+    assert written == ["600000", "600001", "600002"]
+    assert deferred.flush() == 0
+
+
+def test_deferred_pool_entry_writer_does_not_swallow_real_errors() -> None:
+    def write(_entry: Mapping[str, object]) -> None:
+        raise ValueError("逐标的检查点内容无效")
+
+    deferred = DeferredPoolEntryWriter(write)
+
+    with pytest.raises(ValueError, match="检查点内容无效"):
+        deferred({"code": "600000"})
+
+
+def test_deferred_pool_entry_writer_gives_up_before_losing_results() -> None:
+    """一直送不出去就不许默默攒着——那些结果只在本进程内存里。"""
+
+    def write(_entry: Mapping[str, object]) -> None:
+        raise TransientWorkerApiError("策略 worker API 响应超时或暂不可用")
+
+    deferred = DeferredPoolEntryWriter(write)
+
+    with pytest.raises(TransientWorkerApiError, match="持续不可用"):
+        for index in range(257):
+            deferred({"code": f"60{index:04d}"})
+
+
+class _FlakyPoolJobStore(StrategyJobStore):
+    """带 write_pool_entry 的任务存储：可按需让前几次落库失败。"""
+
+    def __init__(self, root: object) -> None:
+        super().__init__(root)
+        self.entries: list[Mapping[str, object]] = []
+        self.failures = 0
+
+    def write_pool_entry(self, job_id: str, entry: Mapping[str, object]) -> None:
+        if self.failures:
+            self.failures -= 1
+            raise TransientWorkerApiError("策略 worker API 响应超时或暂不可用")
+        self.entries.append(entry)
+
+
+class _FakePoolService:
+    def __init__(self, codes: tuple[str, ...]) -> None:
+        self._codes = codes
+
+    def run(self, payload, *, job_id, progress_callback, abort_check, entry_writer):  # noqa: ANN001
+        for code in self._codes:
+            entry_writer({"code": code})
+        return {"completed_symbols": len(self._codes)}
+
+
+def test_market_pool_job_survives_a_flaky_entry_write(tmp_path) -> None:
+    store = _FlakyPoolJobStore(tmp_path / "jobs")
+    store.failures = 2
+    worker = StrategyDiscoveryWorker(
+        store,
+        _FakePoolService(()),
+        strategy_pool_service=_FakePoolService(("600000", "600001")),
+        poll_interval_seconds=0.001,
+    )
+    store.create(
+        "job-1",
+        operation="market_strategy_pool",
+        payload={"symbols": []},
+        description="全市场策略池研究",
+    )
+
+    assert worker.run_once() == "job-1"
+    assert store.read_state("job-1")["status"] == "completed"
+    # 两次抖动把两条结果都攒住了；收尾补发照样按写入顺序落库，一条都没丢。
+    assert [entry["code"] for entry in store.entries] == ["600000", "600001"]
+
+
+def test_market_pool_job_reports_unpersisted_entries_instead_of_failing(tmp_path) -> None:
+    store = _FlakyPoolJobStore(tmp_path / "jobs")
+    store.failures = 99
+    worker = StrategyDiscoveryWorker(
+        store,
+        _FakePoolService(()),
+        strategy_pool_service=_FakePoolService(("600000", "600001")),
+        poll_interval_seconds=0.001,
+    )
+    store.create(
+        "job-2",
+        operation="market_strategy_pool",
+        payload={"symbols": []},
+        description="全市场策略池研究",
+    )
+
+    assert worker.run_once() == "job-2"
+    # 后端全程答不上也不能把几小时的研究判死：任务照常结束，未落库条数如实报出。
+    assert store.read_state("job-2")["status"] == "completed"
+    assert store.entries == []
+    assert store.read_result("job-2")["unpersisted_entries"] == 2
