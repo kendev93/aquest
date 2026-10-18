@@ -310,12 +310,18 @@ mode=full（全市场任务）从未受单股进度 bug 影响：用户实测均
    是 5 次 × 5s + 退避（0.1/0.25/0.5/1.0）≈ 27 秒；耗尽后 `TransientWorkerApiError`
    从 `strategy_pool/service.py:903` 的 `entry_writer(record)` 一路冒到 `run_once`，
    **整任务判死**。研究节拍 75–100 秒/只，一次 5 分钟的后端不可用足够撞上去。
-2. 后端为什么答不上写：`f004085` 把池表读改成只读优先之后，同一个后端进程里既有只读
-   句柄又有读写打开，DuckDB 直接拒绝
-   （`Can't open a connection to same database file with a different configuration
-   than existing connections`），而后端**没有**配 `AQUEST_DUCKDB_CONNECT_RETRY_SECONDS`
-   （25s 那档只给了 strategy-worker），短阶梯 3.85 秒走完就抛 500。并发 3 次列表请求
-   实测 4.07 秒且必现 500。
+2. 后端为什么答不上写：traceback 里的报错文本是
+   `Can't open a connection to same database file with a different configuration than
+   existing connections`——这是**同一进程内连接配置不一致**，不是只读/读写模式冲突
+   （我在 32.5 MB 那条下过结论时把它归给了 `f004085` 的只读优先，那是错的）。真实配置
+   按容器实测：backend `memory_limit=5GiB`（从 cgroup 自动推导）、`threads=None`；worker
+   同一份 memory_limit 再加 `threads=1`。`_open()` 带着这份 config，而 `_schema_version_on_disk`
+   与 `maintenance.py` 里 4 处是裸 `duckdb.connect(...)`：同进程同文件，后一把一律被拒。
+   最小复现：`duckdb.connect(p, read_only=True, config={"threads": 1})` 之后再
+   `duckdb.connect(p, read_only=True)` 就抛这句——两把都是只读也照样拒，跟锁没关系。
+   后端又没配 `AQUEST_DUCKDB_CONNECT_RETRY_SECONDS`（25s 那档当时只给了 strategy-worker），
+   阶梯 3.85 秒走完就报成「行情数据库当前被其它进程占用」。并发 3 次列表请求实测 4.07 秒
+   且必现 500。
 3. 把后端压成这样的正是列表本身：`GET /entries` 一次回 **32.5 MB**（3350 行 × 9.7 KB），
    nginx 明确记了 `an upstream response is buffered to a temporary file`。字段占比
    `automatic_candidates` 35.3% / `tracking` 32.9% / `active_candidate` 25.6%，逐字段
@@ -335,15 +341,38 @@ mode=full（全市场任务）从未受单股进度 bug 影响：用户实测均
   攒在内存里继续研究，恢复后顺带补齐，任务收尾再兜一轮；仍送不出去的条数如实写进
   结果（`unpersisted_entries`）。连续攒到 256 条才认输——那些结果只在本进程内存里，
   默默攒着等于丢掉几千只标的的产出。
+- 打开行情库只剩一个入口 `open_database(path, read_only=...)`，配置只有一份来源；
+  `store_base` 的 schema 探测与 `maintenance` 的 4 处裸 connect 全部改走它。回归测试用
+  `AQUEST_DUCKDB_THREADS=1` 把配置差异做出来，再让 schema 探测与 `read_session` 撞在
+  同一进程里——改之前那条测试是红的。
+- 页面「卡到浏览器弹页面无响应」还有一处纯算法账：状态档排序的比较器每次线性扫整份
+  当天状态表，3350 行 × 3350 条实测一次 **1.4 秒**，而列表每刷新一次就重排一遍、特别关注
+  面板再排一遍。改成先建一次索引并记住每个标的算出的状态之后 **12 毫秒**，排名逐行一致
+  （含同一证券代码出现多行时取第一条的旧口径）。标的少的时候完全看不出来，全市场跑到
+  几千只才暴露。
+- 空闲领取退避：0.5s → 1s → 2s → 3s 封顶，领到任务立刻回到 0.5s。一次领取要做两把库
+  连接（清理失联任务 + 认领），空闲按 0.5 秒轮就是每秒 4 把，全市场页的读和 worker 的
+  落库都跟它在同一个文件上排队；代价只是新任务起跑最晚晚 3 秒。
+
+### 部署后复测（2026-10-18 23:5x，重建镜像之后）
+
+- `GET /entries`：直连 8123 回 **8.88 MB**（原 32.5 MB），经 nginx 压缩上线 **1.21 MB**，
+  ttfb 0.8–1.5 秒（原 1.7–4.1 秒且并发必现 500）。
+- 重启后 90 分钟内后端 `different configuration` 计数 **0**；剩下的失败集中在启动压缩窗口
+  （`POST /jobs/claim` 拿 503，worker 重试即可，不影响任务）。
 
 ### 没做的
 
-- 后端只用一种打开模式（关掉只读优先）+ 给后端也配长阶梯——那是选项 3，需要先复测
-  页面延迟确认不回退。
-- claim 空轮询退避（现在约每秒 1 次，每次 2 个读写打开，是常态锁压力）。
-- 任务状态/池表与行情分库（选项 5，改动最大）。
-- 跟踪任务的 writer **没有**套用同一容忍：它的返回值有语义（`ack.saved` 用来计数跳过），
-  攒着不发就会把账算错。
+- 状态表与行情还在同一个 DuckDB 文件里（选项 5）。`strategy_jobs` 的认领/心跳/进度是
+  常态写库最高频的一张表，却和几千标的的行情读挤同一个独占文件。拆开的三处必须先设计：
+  整库压缩与备份只认单文件（`maintenance.py` 的 `{stem}.bak-*` 与 `COPY FROM DATABASE`
+  校验含 `data_meta.schema_version`）、数据导出只走 `ASSET_TABLES` 一条连接、以及
+  `tracking_store.py:190` 在写跟踪快照的同一条连接里读 `daily_bars`——跨文件就不是一个
+  事务了。
+- 后端要不要也吃长阶梯：现在配置的 bug 修了，剩下的只是真·跨进程占用；给页面读加 25 秒
+  等待等于把「快速报错」换成「长时间白屏」，暂不改。
+- 跟踪任务的 writer 仍一击致命：它的返回值有语义（`ack.saved` 用来计数跳过），攒着不发
+  就会把账算错，要单独设计。
 
 ## 决策记录
 
