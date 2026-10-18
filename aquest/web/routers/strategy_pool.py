@@ -128,6 +128,88 @@ def _pool_job_state(job_id: str, request: Request) -> dict[str, object]:
     return state
 
 
+#: 列表页真正读的顶层字段。逐标的的完整内容另有出处：`/detail` 给两套策略的规则全文，
+#: `/versions/{id}/curve|trades` 给曲线与成交。整份候选（config 与规则树）、跟踪快照里
+#: 重复带的整套 candidate、分段切分元数据都只是带宽：拿 2026-10-18 的生产数据实测，
+#: 3350 行一次刷新回 32.5 MB（每行 9.7 KB），其中 94% 的字节是页面一行都没读的候选与
+#: 快照；按下表白名单投影后每行 2.9 KB（3.6 倍），nginx 再压缩上线约 1.2 MB。省掉的不
+#: 只是等待——这些字节要让后端序列化、让代理落成临时文件、让浏览器解析，把进程和库
+#: 一起占住，策略 worker 的逐标的落库请求正是被这类长读挤到超时的。
+_LIST_ENTRY_FIELDS = frozenset(
+    {
+        "market",
+        "code",
+        "name",
+        "status",
+        "last_error",
+        "active_source",
+        "active_candidate",
+        "automatic_candidates",
+        "benchmark",
+        "tracking",
+        "tracking_status",
+        "tracking_as_of_date",
+        "created_return",
+        "post_launch_return",
+        "post_launch_benchmark_return",
+        "post_launch_days",
+        "post_launch_has_data",
+        "latest_close",
+        "latest_close_date",
+    }
+)
+#: 候选里表格会读的键（`candidate_id`、是否可回放、有没有买卖规则、绩效、质量标记）。
+_LIST_CANDIDATE_FIELDS = frozenset(
+    {"candidate_id", "objective", "replayable", "buy_rule", "sell_rule", "metrics", "quality"}
+)
+#: 跟踪摘要里已经投影成顶层字段、或持仓风控线要用的键。
+_LIST_SUMMARY_FIELDS = frozenset(
+    {
+        "as_of_date",
+        "holding",
+        "created_return",
+        "post_launch_return",
+        "post_launch_benchmark_return",
+        "post_launch_days",
+        "has_post_launch_data",
+        "latest_close",
+        "latest_close_date",
+    }
+)
+
+
+def _project_candidate_for_list(candidate: object) -> object:
+    """列表用的候选：丢掉 config / 分段元数据，买卖规则只留「有没有」。"""
+
+    if not isinstance(candidate, Mapping):
+        return candidate
+    projected = {key: value for key, value in candidate.items() if key in _LIST_CANDIDATE_FIELDS}
+    for rule_key in ("buy_rule", "sell_rule"):
+        # 表格只按 `buy_rule && sell_rule` 判定策略能否回放；空规则本来就不算有，
+        # 所以留着键只把内容换成空对象，缺失与假值原样保留，不改变真值。
+        if projected.get(rule_key):
+            projected[rule_key] = {}
+    return projected
+
+
+def _project_tracking_for_list(tracking: object) -> object:
+    """列表用的跟踪版本：持仓风控线要读的摘要留下，整份 candidate 不带。"""
+
+    if not isinstance(tracking, Mapping):
+        return tracking
+    projected = {
+        key: tracking[key]
+        for key in ("version_id", "status", "objective", "launch_data_date", "summary")
+        if key in tracking
+    }
+    summary = tracking.get("summary")
+    if isinstance(summary, Mapping):
+        projected["summary"] = {
+            key: value for key, value in summary.items() if key in _LIST_SUMMARY_FIELDS
+        }
+    return projected
+
+
 @router.get("/entries")
 def list_strategy_pool_entries(
     request: Request,
@@ -137,6 +219,7 @@ def list_strategy_pool_entries(
     items = _pool_store(request).list_entries()
     tracks = PoolTrackingStore(_market_store(request)).current_versions()
     track_index = {(v["market"], v["code"], v["objective"], v["source"]): v for v in tracks}
+    projected_items: list[dict[str, object]] = []
     for item in items:
         automatic = item.get("automatic_candidates")
         overrides = item.get("manual_overrides")
@@ -165,8 +248,19 @@ def list_strategy_pool_entries(
         # 看出「现价离那条线还有多远」，所以它跟着摘要落库，而不是每次读表再扫一遍全市场。
         item["latest_close"] = summary.get("latest_close")
         item["latest_close_date"] = summary.get("latest_close_date")
+        projected_items.append(
+            {
+                **{key: value for key, value in item.items() if key in _LIST_ENTRY_FIELDS},
+                "active_candidate": _project_candidate_for_list(active),
+                # 只回当前所选目标的自动候选：页面切换目标时会重新取列表。
+                "automatic_candidates": {
+                    selected: _project_candidate_for_list(automatic_map.get(selected))
+                },
+                "tracking": _project_tracking_for_list(tracking),
+            }
+        )
 
-    return {"data": {"objective": selected, "items": items}}
+    return {"data": {"objective": selected, "items": projected_items}}
 
 
 DEFAULT_RESEARCH_BOARDS: tuple[str, ...] = ("main", "chinext", "star")

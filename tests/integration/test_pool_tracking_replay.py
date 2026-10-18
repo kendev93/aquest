@@ -1339,3 +1339,78 @@ def test_pool_curve_reports_benchmark_and_excess_over_the_viewed_window(tmp_path
         if expected is not None
         else None
     )
+
+
+def test_pool_entry_list_keeps_holding_risk_lines_but_not_the_snapshot(tmp_path):
+    """列表要留持仓风控线，但别把跟踪版本里那整套候选一起拖着。
+
+    表格与「特别关注」靠 ``tracking.summary.holding`` 显示止损/移动止盈/止盈和到期提示；
+    而版本里再带一份 candidate 是详情页 ``/detail`` 会另外取来的同一份内容，全市场一次
+    就多传 8 MB。收益曲线的逐日金额与检查点摘要同理：它们只在详情页用得上。
+    """
+    from fastapi.testclient import TestClient
+
+    from aquest.web.app import create_app
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", bars(3), name="浦发银行")
+    app = create_app(
+        market_data_store=store, auto_sync_enabled=False, strategy_worker_token="test-token"
+    )
+    pool = app.state.strategy_pool_store
+    pool.upsert_automatic(
+        market="SH",
+        code="600000",
+        name="浦发银行",
+        annual_candidate=candidate(),
+        sharpe_candidate=candidate(),
+        data_fingerprint="a",
+        config_fingerprint="b",
+        source_job_id="job",
+    )
+    tracks = PoolTrackingStore(store)
+    version = next(v for v in tracks.current_versions() if v["code"] == "600000")
+    assert tracks.save_snapshot(
+        version["version_id"],
+        version["signature"],
+        {
+            "summary": {
+                "as_of_date": "2026-09-03",
+                "created_return": 0.4,
+                "latest_close": 12.5,
+                "latest_close_date": "2026-09-03",
+                "checkpoint_hash": "x" * 64,
+                "equity": [1_000_000.0, 1_100_000.0, 1_400_000.0],
+                "holding": [
+                    {
+                        "market": "SH",
+                        "code": "600000",
+                        "close": 12.5,
+                        "stop_loss_price": 11.2,
+                        "trailing_stop_price": 12.9,
+                        "take_profit_price": 14.0,
+                        "risk_level_as_of": "2026-09-03",
+                    }
+                ],
+            },
+            "checkpoint": {"trades": [], "equity": [], "positions": {}},
+        },
+    )
+
+    with TestClient(app) as client:
+        row = next(
+            item
+            for item in client.get("/api/v1/strategy-pool/entries").json()["data"]["items"]
+            if item["code"] == "600000"
+        )
+
+    tracking = row["tracking"]
+    assert tracking["version_id"] == version["version_id"]
+    assert "candidate" not in tracking
+    assert "signature" not in tracking
+    summary = tracking["summary"]
+    assert summary["holding"][0]["trailing_stop_price"] == 12.9
+    assert "checkpoint_hash" not in summary
+    assert "equity" not in summary
+    assert row["latest_close"] == 12.5
+    assert row["tracking_as_of_date"] == "2026-09-03"

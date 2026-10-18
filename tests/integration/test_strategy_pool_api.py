@@ -722,3 +722,78 @@ def test_focus_api_rejects_members_beyond_the_limit(tmp_path) -> None:
         assert rejected.status_code == 422
         assert "特别关注最多" in rejected.json()["error"]["message"]
         assert len(client.get("/api/v1/strategy-pool/focus").json()["data"]["items"]) == FOCUS_LIMIT
+
+
+def test_pool_entry_list_carries_only_what_the_table_reads(tmp_path) -> None:
+    """列表接口别把整套候选拖给浏览器：表格只画十几个字段，其余该留在详情里。
+
+    全市场 3350 行时一次刷新要传 31.5 MB，其中约 94% 是 config、规则树、分段元数据
+    这些页面根本没读的内容，却要让后端序列化、被代理缓冲成临时文件、再让浏览器解析，
+    同时把库和进程 CPU 占住——策略 worker 的落库请求就是在这里被饿死的。
+    """
+
+    store = _store(tmp_path)
+    fat = {
+        "candidate_id": "candidate-1",
+        "buy_rule": {"signals": ["technical.macd"], "conditions": [{"left_value": "x"}] * 30},
+        "sell_rule": {"signals": ["technical.rsi14"]},
+        "config": {
+            "codes": ["SH:600000"],
+            "stop_loss_pct": 0.08,
+            "buy_rule": {"signals": ["technical.macd"]},
+        },
+        "split_metadata": {"train": [0, 100], "holdout": [110, 120]},
+        "metrics": {
+            "full_period": {"total_return": 1.5, "sharpe": 2.0, "bars": 120},
+            "validation": {"closed_trades": 6},
+            "holdout": {"total_trades": 3},
+        },
+        "quality": {"badges": ["样本偏少"], "sample_adequate": False},
+        "replayable": True,
+        "data_fingerprint": "candidate-data-fingerprint",
+    }
+    DuckDbStrategyPoolStore(store).upsert_automatic(
+        market="SH",
+        code="600000",
+        name="浦发银行",
+        annual_candidate=fat,
+        sharpe_candidate=dict(fat, candidate_id="candidate-2"),
+        data_fingerprint="result-fingerprint",
+        config_fingerprint="config-fingerprint",
+        source_job_id="job-1",
+        benchmark={"full_period": {"total_return": 0.2}},
+    )
+    app = create_app(market_data_store=store, auto_sync_enabled=False)
+
+    with TestClient(app) as client:
+        rows: dict[str, dict] = {}
+        for objective in ("annual_return", "sharpe"):
+            listed = client.get(f"/api/v1/strategy-pool/entries?objective={objective}").json()
+            rows[objective] = listed["data"]["items"][0]
+
+    for objective, row in rows.items():
+        candidate = row["active_candidate"]
+        # 页面只按「有没有买卖规则」判定策略能否回放，规则树与回测配置留给 /detail。
+        assert candidate["buy_rule"] == {}
+        assert candidate["sell_rule"] == {}
+        assert "config" not in candidate
+        assert "split_metadata" not in candidate
+        assert "data_fingerprint" not in candidate
+        # 表格这几列要的字段一个都不能少。
+        expected = "candidate-1" if objective == "annual_return" else "candidate-2"
+        assert candidate["candidate_id"] == expected
+        assert candidate["metrics"]["full_period"]["total_return"] == 1.5
+        assert candidate["metrics"]["validation"]["closed_trades"] == 6
+        assert candidate["quality"]["badges"] == ["样本偏少"]
+        assert row["benchmark"]["full_period"]["total_return"] == 0.2
+        # 自动候选只带当前所选目标那一路：切换目标时页面会重新取列表。
+        assert set(row["automatic_candidates"]) == {objective}
+        for dropped in (
+            "manual_overrides",
+            "data_fingerprint",
+            "market_fingerprint",
+            "config_fingerprint",
+            "source_job_id",
+            "updated_at",
+        ):
+            assert dropped not in row
