@@ -4,14 +4,14 @@
 
 ## 准备运行环境
 
-项目根目录执行（Python 3.10–3.14，发布锁定 3.12）：
+项目根目录执行（Python 3.14；仓库里的锁目前仍是在 3.12 下编译的，重编译要在 3.14 环境里做）：
 
 ~~~bash
 python3 -m pip install --require-hashes -r requirements.txt
 python3 -m pip install -e ".[dev,catalog]"
 ~~~
 
-运行依赖由 Python 3.12 下 `requirements.in` 编译成 `requirements.txt`，包含精确版本和 SHA-256；Docker 与 CI 使用 `pip install --require-hashes -r requirements.txt`。修改直接依赖范围后，使用开发环境中的 pip-tools 运行 `python -m piptools compile --generate-hashes --strip-extras --resolver=backtracking --output-file=requirements.txt requirements.in` 并提交两个文件。Dependabot 每周为 pip-tools、npm、Docker 基础镜像和 GitHub Actions 检查升级并创建 PR。
+运行依赖由 Python 3.14 下 `requirements.in` 编译成 `requirements.txt`，包含精确版本和 SHA-256（在库的那份仍是在 3.12 下编译的：2026-10-19 实测它在 `python:3.14-slim` 下能按哈希原样装上、挑到的都是 cp314 轮子，但改直接依赖范围时要按 3.14 重新编译）；Docker 与 CI 使用 `pip install --require-hashes -r requirements.txt`。修改直接依赖范围后，使用开发环境中的 pip-tools 运行 `python -m piptools compile --generate-hashes --strip-extras --resolver=backtracking --output-file=requirements.txt requirements.in` 并提交两个文件。Dependabot 每周为 pip-tools、npm、Docker 基础镜像和 GitHub Actions 检查升级并创建 PR。
 
 ## 统一入口
 

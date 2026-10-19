@@ -4,7 +4,7 @@
 
 ## 开发环境
 
-- Python 3.10–3.14（发布锁定 3.12），Node 22.22+（CI 测的就是镜像 `Dockerfile` 里 pin 的主版本，当前 24）；
+- Python 3.14，Node 22.22+（CI 测的就是镜像 `Dockerfile` 里 pin 的那个版本，当前 3.14 / 26）；哈希锁目前仍是在 3.12 下编译的，下次重编译要在 3.14 环境里做；
 - 后端依赖（含哈希校验的运行时清单 + 开发/目录工具）：
 
   ```bash
@@ -13,7 +13,7 @@
   ```
 
 - 前端依赖：`cd web-ui && npm ci`；
-- 直接依赖的版本范围维护在 `requirements.in`，用 Python 3.12 环境的 pip-tools 重新生成锁文件并一起提交（详见 [docs/packaging.md](docs/packaging.md)）。
+- 直接依赖的版本范围维护在 `requirements.in`，用 Python 3.14 环境的 pip-tools 重新生成锁文件并一起提交（详见 [docs/packaging.md](docs/packaging.md)）。
 
 ## 本地运行
 

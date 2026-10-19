@@ -8,7 +8,7 @@ version = "0.1.5"
 description = "A股策略研究：基于 DuckDB 的跨平台指标筛选、组合与回测应用"
 readme = "README.md"
 license = { file = "LICENSE" }
-requires-python = ">=3.10,<3.15"
+requires-python = ">=3.14,<3.15"
 dependencies = [
   "cryptography>=41,<51",
   "duckdb>=1.5,<2",
@@ -41,7 +41,7 @@ dev = [
   # 顶替 httpx，装上即可消除该警告。生产运行时不用 TestClient，因此不进
   # requirements.txt、不影响容器镜像。
   "httpx2>=2.13,<3",
-  # 用于从 requirements.in 更新 Python 3.12 的精确发布锁。
+  # 用于从 requirements.in 更新 Python 3.14 的精确发布锁。
   "pip-tools==7.6.2",
   "pytest>=8,<10",
   "pytest-cov>=5,<8",
@@ -90,7 +90,7 @@ line-length = 100
 select = ["E", "F", "I", "UP"]
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.14"
 strict = true
 ignore_missing_imports = true
 exclude = ["tests/"]
