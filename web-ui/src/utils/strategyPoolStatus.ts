@@ -115,12 +115,13 @@ export function statusLabel(value: string): string {
 export function metricRawValue(
   entry: StrategyPoolEntry,
   key: StrategyPoolMetricColumn,
-  objective: StrategyPoolObjective | null,
 ): number | null {
   if (key === 'created_return') return entry.created_return ?? null
   if (key === 'benchmark_return') return benchmarkReturn(entry)
+  // 列表只给 active_candidate：后端已经把「手工覆盖优先于自动最优」算成这一个字段，
+  // 以前的 `?? automatic_candidates[目标]` 兜底永远走不到（active 为空时它也必为空），
+  // 而那一整块占 11.5 MB 响应的 31.3%，所以接口不再回它。
   const candidate = entry.active_candidate
-    ?? (objective ? entry.automatic_candidates[objective] : null)
   // 表格展示统一用全区间实际回放口径；验证段指标只在策略选择时使用。
   const metricKey = key === 'strategy_return' ? 'total_return' : key
   const value = candidate?.metrics?.full_period?.[metricKey]
@@ -130,9 +131,8 @@ export function metricRawValue(
 export function metricValue(
   entry: StrategyPoolEntry,
   key: StrategyPoolMetricColumn,
-  objective: StrategyPoolObjective | null,
 ): number {
-  return metricRawValue(entry, key, objective) ?? Number.NEGATIVE_INFINITY
+  return metricRawValue(entry, key) ?? Number.NEGATIVE_INFINITY
 }
 
 export function benchmarkReturn(entry: StrategyPoolEntry): number | null {
@@ -172,8 +172,8 @@ export function sortPoolEntriesByStatus(
     const order = statusOrder(statusOf(a), entryIsHeld(a, heldKeys))
       - statusOrder(statusOf(b), entryIsHeld(b, heldKeys))
     return order
-      || metricValue(b, objective ?? 'annual_return', objective)
-        - metricValue(a, objective ?? 'annual_return', objective)
+      || metricValue(b, objective ?? 'annual_return')
+        - metricValue(a, objective ?? 'annual_return')
       || symbol(a).localeCompare(symbol(b))
   })
 }
@@ -199,8 +199,8 @@ export function sortPoolEntriesByMetric(
   const sign = direction === 'asc' ? 1 : -1
 
   return [...rows].sort((a, b) => {
-    const valueA = metricRawValue(a, metric, objective)
-    const valueB = metricRawValue(b, metric, objective)
+    const valueA = metricRawValue(a, metric)
+    const valueB = metricRawValue(b, metric)
     if (valueA === null || valueB === null) {
       if (valueA === null && valueB === null) return byStatusThenSymbol(a, b)
       return valueA === null ? 1 : -1

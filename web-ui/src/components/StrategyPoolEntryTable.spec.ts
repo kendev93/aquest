@@ -21,7 +21,6 @@ function entry(code: string, name = `测试${code}`): StrategyPoolEntry {
     market: 'SH',
     code,
     name,
-    automatic_candidates: { annual_return: candidate, sharpe: candidate },
     manual_overrides: { annual_return: null, sharpe: null },
     active_candidate: candidate,
     active_source: 'automatic',
@@ -217,7 +216,6 @@ describe('StrategyPoolEntryTable', () => {
     // 后端把整段异常（含底层 traceback）存进 last_error，直接铺在单元格里会把表格撑成
     // 一堵墙；表格里只需要知道这只没搜出结果，原因悬停看。
     const failed = entry('600010')
-    failed.automatic_candidates = { annual_return: null, sharpe: null }
     failed.active_candidate = null
     failed.status = 'failed'
     failed.last_error = '行情数据库当前被其它进程占用或存在瞬态 I/O 错误，请稍后重试；底层错误：Traceback ... _duckdb.IOException: IO'

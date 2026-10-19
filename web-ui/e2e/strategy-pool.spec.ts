@@ -25,7 +25,7 @@ for (const rebuild of [true, false]) {
       } else if (path.endsWith('/strategy-pool/entries')) {
         data = { items: [{
           market: 'SH', code: '600000', name: '旧股票', status: 'no_strategy',
-          active_candidate: null, automatic_candidates: {}, manual_overrides: {},
+          active_candidate: null, manual_overrides: {},
         }] }
       }
       await route.fulfill({ json: { data } })
@@ -62,7 +62,7 @@ test('dismissing the rebuild confirmation submits nothing and keeps the pool on 
     } else if (path.endsWith('/strategy-pool/entries')) {
       data = { items: [{
         market: 'SH', code: '600000', name: '旧股票', status: 'no_strategy',
-        active_candidate: null, automatic_candidates: {}, manual_overrides: {},
+        active_candidate: null, manual_overrides: {},
       }] }
     }
     await route.fulfill({ json: { data } })
@@ -104,7 +104,7 @@ test('daily signals are not repeated on reload or objective switch, and manual s
     } else if (path.endsWith('/strategy-pool/entries')) {
       data = { items: [{ market: 'SH', code: '600000', name: '测试股', status: 'ready',
         active_candidate: { candidate_id: 'c1', buy_rule: { signals: [] }, sell_rule: { signals: [] }, metrics: {} },
-        automatic_candidates: {}, manual_overrides: {},
+        manual_overrides: {},
       }] }
     }
     await route.fulfill({ json: { data } })
@@ -123,13 +123,15 @@ test('daily signals are not repeated on reload or objective switch, and manual s
   expect(requests[0]).toEqual({ mode: 'signals', objective: 'sharpe' })
 })
 
-test('saved stock statuses appear during full research without starting a signal scan', async ({ page }) => {
+// 研究跑动中列表按 20 秒节流重取（见 StrategyPoolPage 的 ENTRIES_REFRESH_MIN_MS），
+// 所以这里断言的是「新的保存结果最迟在下一个刷新窗口里出现」，需要比默认 30 秒更长的预算。
+test('saved stock statuses appear during full research without starting a signal scan', { timeout: 60_000 }, async ({ page }) => {
   let saved = 0
   let submitted = 0
   let listReads = 0
   const stock = { market: 'SH', code: '600004', name: '白云机场', status: 'ready',
     active_candidate: { candidate_id: 'c1', buy_rule: { signals: [] }, sell_rule: { signals: [] }, metrics: {} },
-    automatic_candidates: {}, manual_overrides: {},
+    manual_overrides: {},
   }
   await page.addInitScript(() => localStorage.setItem('aquest.strategy-pool.objective', 'annual_return'))
   await page.route('**/api/v1/**', async (route) => {
@@ -156,7 +158,8 @@ test('saved stock statuses appear during full research without starting a signal
   await expect(page.getByTestId('pool-row-600004')).toBeVisible()
   await page.getByTestId('pool-entry-search').fill('600006')
   saved = 2
-  await expect(page.getByTestId('pool-row-600006')).toContainText('历史样本不足')
+  // 列表按 20 秒节流重取，所以这里等到下一个窗口为止（默认的 5 秒断言预算不够）。
+  await expect(page.getByTestId('pool-row-600006')).toContainText('历史样本不足', { timeout: 30_000 })
   await expect(page.getByTestId('pool-entry-search')).toHaveValue('600006')
   await expect(page.getByTestId('pool-job-progress')).toContainText('全市场研究进行中')
   expect(listReads).toBe(3)
@@ -309,7 +312,7 @@ test('following a symbol scopes it into the 特别关注 panel', async ({ page }
     } else if (path.endsWith('/strategy-pool/entries')) {
       data = { items: [{
         market: 'SH', code: '600000', name: '测试股票', status: 'ready',
-        active_candidate: null, automatic_candidates: {}, manual_overrides: {},
+        active_candidate: null, manual_overrides: {},
       }] }
     } else if (path.endsWith('/strategy-pool/jobs')) {
       data = { items: [] }
@@ -338,7 +341,7 @@ test('the post-launch board ranks tracked symbols and keeps symbols without a wi
   // 后端给的收益是 0，排进去就是一条假平线压住真数字。
   const item = (code: string, name: string, post: number | null, benchmark: number | null, days: number | null, asOf: string, hasData: boolean) => ({
     market: code.startsWith('6') ? 'SH' : 'SZ', code, name, status: 'ready',
-    automatic_candidates: {}, manual_overrides: {}, active_source: 'automatic',
+    manual_overrides: {}, active_source: 'automatic',
     active_candidate: { candidate_id: `c-${code}`, buy_rule: { signals: [] }, sell_rule: { signals: [] }, metrics: {} },
     tracking: { version_id: `v-${code}` }, tracking_status: 'ready', tracking_as_of_date: asOf,
     created_return: 0.1, post_launch_return: post, post_launch_benchmark_return: benchmark,

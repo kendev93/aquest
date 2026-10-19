@@ -86,7 +86,6 @@ function entry(code: string, score: number): StrategyPoolEntry {
     market: 'SH',
     code,
     name: `测试${code}`,
-    automatic_candidates: { annual_return: candidate, sharpe: candidate },
     manual_overrides: { annual_return: null, sharpe: null },
     active_candidate: candidate,
     active_source: 'automatic',
@@ -131,7 +130,7 @@ function entryWithQuality(code: string, fullPeriod: Partial<StrategyPoolMetrics>
     ...active,
     metrics: { ...active.metrics, full_period: { ...active.metrics?.full_period, ...fullPeriod } },
   }
-  return { ...base, active_candidate: candidate, automatic_candidates: { annual_return: candidate, sharpe: candidate } }
+  return { ...base, active_candidate: candidate }
 }
 
 describe('StrategyPoolPage', () => {
@@ -407,7 +406,6 @@ describe('StrategyPoolPage', () => {
     window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
     const insufficient: StrategyPoolEntry = {
       ...entry('600000', 0.24),
-      automatic_candidates: { annual_return: null, sharpe: null },
       active_candidate: null,
       status: 'insufficient_history',
       last_error: '历史样本不足：无法切出训练、验证、留出三段',
@@ -1864,6 +1862,10 @@ describe('StrategyPoolPage', () => {
       expect(api.fetchStrategyPoolEntries).toHaveBeenCalledTimes(2)
       saved = 2
       await vi.advanceTimersByTimeAsync(1500)
+      await flushPromises()
+      // 节流：上一次重取才过 3 秒，完成数变了也不重取整张表（4439 行 / 7 MB）。
+      expect(api.fetchStrategyPoolEntries).toHaveBeenCalledTimes(2)
+      await vi.advanceTimersByTimeAsync(20_000)
       await flushPromises()
       expect(api.fetchStrategyPoolEntries).toHaveBeenCalledTimes(3)
       expect((wrapper.get('[data-testid="pool-entry-search"]').element as HTMLInputElement).value).toBe('600004')

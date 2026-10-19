@@ -86,7 +86,6 @@ export interface StrategyPoolEntry {
   market: 'SH' | 'SZ'
   code: string
   name: string
-  automatic_candidates: Record<StrategyPoolObjective, StrategyPoolCandidate | null>
   manual_overrides: Record<StrategyPoolObjective, StrategyPoolCandidate | null>
   active_candidate: StrategyPoolCandidate | null
   active_source: 'manual' | 'automatic'

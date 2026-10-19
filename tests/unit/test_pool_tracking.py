@@ -155,3 +155,40 @@ def test_inherited_trade_includes_full_gain_and_separate_post_launch_return():
     assert summary["post_launch_return"] == 0.25
     assert summary["baseline_date"] == "2026-09-01"
     assert summary["inherited_position"] is True
+
+
+def test_current_versions_can_skip_the_candidate_column(tmp_path):
+    """列表那条热路径可以只要摘要，不必把每份候选读出来再丢掉。
+
+    ``_query`` 默认带 candidate（跟踪 runner 与详情页确实要用），列表接口显式关掉：
+    2026-10-19 实测一次刷新要解析 4439 份 candidate_json，而投影时整份丢弃。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    pool = DuckDbStrategyPoolStore(store)
+    pool.upsert_automatic(
+        market="SH",
+        code="600000",
+        name="test",
+        annual_candidate={
+            "candidate_id": "a",
+            "buy_rule": {"signals": ["technical.macd"]},
+            "sell_rule": {"signals": []},
+            "config": {"stop_loss_pct": 0.1},
+        },
+        sharpe_candidate=None,
+        data_fingerprint="x",
+        config_fingerprint="y",
+        source_job_id="job",
+    )
+    tracks = PoolTrackingStore(store)
+
+    full = tracks.current_versions()[0]
+    light = tracks.current_versions(with_candidate=False)[0]
+
+    assert full["candidate"]["candidate_id"] == "a"
+    assert "candidate" not in light
+    assert "candidate_json" not in light
+    # 摘要、签名与上线时间这些列表/投影还要读的东西一个都不能少。
+    for key in ("version_id", "signature", "objective", "source", "summary", "status"):
+        assert light[key] == full[key]

@@ -45,7 +45,6 @@ function entry(code: string, overrides: Partial<StrategyPoolEntry> = {}): Strate
     market: 'SH',
     code,
     name: `测试${code}`,
-    automatic_candidates: { annual_return: candidate, sharpe: candidate },
     manual_overrides: { annual_return: null, sharpe: null },
     active_candidate: candidate,
     active_source: 'automatic',
@@ -99,14 +98,14 @@ describe('strategyPoolStatus', () => {
 
   it('reads full-period metrics and the buy-and-hold baseline', () => {
     const row = entry('600000')
-    expect(metricValue(row, 'strategy_return', 'annual_return')).toBe(0.71)
-    expect(metricValue(row, 'annual_return', 'annual_return')).toBe(0.19)
-    expect(metricValue(row, 'sharpe', 'annual_return')).toBe(Number.NEGATIVE_INFINITY)
-    expect(metricValue(entry('600000', { created_return: 0.1 }), 'created_return', 'sharpe')).toBe(0.1)
+    expect(metricValue(row, 'strategy_return')).toBe(0.71)
+    expect(metricValue(row, 'annual_return')).toBe(0.19)
+    expect(metricValue(row, 'sharpe')).toBe(Number.NEGATIVE_INFINITY)
+    expect(metricValue(entry('600000', { created_return: 0.1 }), 'created_return')).toBe(0.1)
     // 取不到值时原始口径给出 null，排序用它把缺值标的沉底；metricValue 仍返回 -Infinity 供表格兜底显示。
-    expect(metricRawValue(row, 'sharpe', 'annual_return')).toBeNull()
-    expect(metricRawValue(row, 'created_return', 'annual_return')).toBeNull()
-    expect(metricRawValue(row, 'annual_return', 'annual_return')).toBe(0.19)
+    expect(metricRawValue(row, 'sharpe')).toBeNull()
+    expect(metricRawValue(row, 'created_return')).toBeNull()
+    expect(metricRawValue(row, 'annual_return')).toBe(0.19)
     expect(benchmarkReturn(row)).toBe(0.5)
     expect(benchmarkReturn(entry('600000', { benchmark: null }))).toBeNull()
     expect(tradeCount(candidate, 'validation')).toBe(12)

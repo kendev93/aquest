@@ -131,6 +131,10 @@ let elapsedTimer: number | null = null
 let pollTimer: number | null = null
 let activePollToken = 0
 let activeSignalTarget: { market: 'SH' | 'SZ'; code: string } | null = null
+// 跑动中重取整张列表的最小间隔：见 pollJob 里那段注释。
+const ENTRIES_REFRESH_MIN_MS = 20_000
+let lastEntriesRefreshAt = 0
+let refreshingEntriesLive = false
 
 const isBusy = computed(() => Boolean(activeJobId.value))
 watch(() => isBusy.value && ['full', 'single'].includes(activeIntent.value), (running) => {
@@ -898,9 +902,30 @@ async function pollJob(jobId: string, intent: StrategyPoolMode): Promise<void> {
         const finishedCount = typeof rawCount === 'number' && Number.isFinite(rawCount)
           ? Math.max(0, Math.floor(rawCount))
           : 0
-        if (finishedCount !== refreshedFinishedCount) {
+        // 一次重取是整张表（2026-10-19 实测 4439 行 / 7 MB），4 路并行几乎每几秒就有
+        // 一只完成，逐次刷新会让浏览器一直在解析与重排。跑动中最少隔
+        // ENTRIES_REFRESH_MIN_MS 再刷；没刷时保留旧的完成数，下一轮照样会补上。
+        // 任务到终态、失败或被取消那些分支不受这条限制，仍然立刻刷一次。
+        if (
+          finishedCount !== refreshedFinishedCount
+          && !refreshingEntriesLive
+          && Date.now() - lastEntriesRefreshAt >= ENTRIES_REFRESH_MIN_MS
+        ) {
           refreshingEntries = true
-          if (await refreshPoolEntries(canApply)) refreshedFinishedCount = finishedCount
+          // 一次重取要 1.4–3.3 秒，比 1.5 秒的轮询间隔还长，所以「正在刷」和「上次刷成
+          // 功是几时」要分开记：前者挡住重叠发请求，后者只在成功时消耗这个窗口——失败
+          // 不该赔进去，下一轮就得立刻重试。
+          refreshingEntriesLive = true
+          let refreshed: boolean
+          try {
+            refreshed = await refreshPoolEntries(canApply)
+          } finally {
+            refreshingEntriesLive = false
+          }
+          if (refreshed) {
+            refreshedFinishedCount = finishedCount
+            lastEntriesRefreshAt = Date.now()
+          }
           if (!canApply()) return
         }
       }
@@ -1128,9 +1153,7 @@ function signalMetricsSummary(signal: StrategyPoolSignal): string {
 const entryQualityMap = computed(() => {
   const map = new Map<string, StrategyPoolMetrics>()
   for (const entry of entries.value) {
-    const candidate =
-      entry.active_candidate ??
-      (objective.value ? entry.automatic_candidates?.[objective.value] : null)
+    const candidate = entry.active_candidate
     const full = candidate?.metrics?.full_period
     if (full) map.set(symbol(entry), full)
   }

@@ -153,13 +153,13 @@ function latestCloseAsOf(entry: StrategyPoolEntry): string {
             <span v-else class="empty-copy">下次全市场重选时补算</span>
           </td>
           <td :data-testid="`${testid}-created-return-${entry.code}`">{{ typeof entry.created_return === 'number' ? formatPercent(entry.created_return) : entry.tracking_status === 'pending' ? '待初始化' : entry.tracking_status === 'failed' ? '更新失败' : '—' }}<small v-if="entry.tracking_status === 'failed'">同步失败，保留上次结果</small><small v-if="entry.tracking_as_of_date">截至 {{ entry.tracking_as_of_date }}</small></td>
-          <td>{{ formatPercent(metricValue(entry, 'strategy_return', objective)) }}</td>
-          <td>{{ formatPercent(metricValue(entry, 'annual_return', objective)) }}</td>
-          <td>{{ formatNumber(metricValue(entry, 'sharpe', objective)) }}</td>
-          <td>{{ formatPercent(metricValue(entry, 'win_rate', objective)) }}</td>
-          <td>{{ formatNumber(metricValue(entry, 'payoff_ratio', objective)) }}</td>
-          <td>{{ formatPercent(metricValue(entry, 'max_drawdown', objective)) }}</td>
-          <td :data-testid="`${testid}-holding-days-${entry.code}`">{{ formatHoldingDays(metricValue(entry, 'avg_holding_days', objective)) }}</td>
+          <td>{{ formatPercent(metricValue(entry, 'strategy_return')) }}</td>
+          <td>{{ formatPercent(metricValue(entry, 'annual_return')) }}</td>
+          <td>{{ formatNumber(metricValue(entry, 'sharpe')) }}</td>
+          <td>{{ formatPercent(metricValue(entry, 'win_rate')) }}</td>
+          <td>{{ formatNumber(metricValue(entry, 'payoff_ratio')) }}</td>
+          <td>{{ formatPercent(metricValue(entry, 'max_drawdown')) }}</td>
+          <td :data-testid="`${testid}-holding-days-${entry.code}`">{{ formatHoldingDays(metricValue(entry, 'avg_holding_days')) }}</td>
           <td><span v-if="entry.active_candidate?.quality?.badges?.length" class="badge-row"><i v-for="badge in entry.active_candidate.quality.badges" :key="badge">{{ badge }}</i></span><span v-else-if="entry.status === 'no_strategy'">无可计算的策略绩效</span><span v-else-if="entry.last_error" class="danger-text" :data-testid="`${testid}-entry-error-${entry.code}`" :title="entry.last_error">策略搜索失败 · 悬停查看原因</span><span v-else>—</span><small v-if="entry.active_candidate?.metrics">交易数：验证 {{ formatNumber(tradeCount(entry.active_candidate, 'validation'), 0) }} · 留出 {{ formatNumber(tradeCount(entry.active_candidate, 'holdout'), 0) }} 笔</small><small v-if="entry.active_source === 'manual'">手工覆盖 · {{ objectiveLabel(objective) }}</small></td>
           <td><a class="text-button" :href="detailHref(entry)" :data-testid="`${testid}-detail-${entry.code}`">详情</a><button :data-testid="`${testid}-rerun-entry-${entry.code}`" class="text-button" :disabled="rerunEntryDisabled(jobContext)" :title="rerunEntryTitle(entry, jobContext)" @click="emit('rerun', entry)">{{ queuedSymbol === symbol(entry) ? '排队中' : '重跑' }}</button><StrategyPoolFollowButton :target="entry" :follow-keys="followKeys" :busy="followBusy" :test-id="`${testid}-follow-entry-${entry.code}`" @toggle="emit('toggleFollow', $event)" /></td>
         </tr>

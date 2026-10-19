@@ -233,8 +233,10 @@ class PoolTrackingStore:
             [datetime.now(timezone.utc).isoformat()],
         )
 
-    def current_versions(self) -> list[dict[str, Any]]:
-        return self._query("WHERE is_current ORDER BY market,code,objective,source")
+    def current_versions(self, *, with_candidate: bool = True) -> list[dict[str, Any]]:
+        return self._query(
+            "WHERE is_current ORDER BY market,code,objective,source", with_candidate=with_candidate
+        )
 
     def versions(self, market: str, code: str, objective: str) -> list[dict[str, Any]]:
         return self._query(
@@ -242,11 +244,18 @@ class PoolTrackingStore:
             [market, code, objective],
         )
 
-    def _query(self, suffix: str, args: list[Any] | None = None) -> list[dict[str, Any]]:
+    def _query(
+        self, suffix: str, args: list[Any] | None = None, *, with_candidate: bool = True
+    ) -> list[dict[str, Any]]:
+        # ``with_candidate=False`` 是给列表那条热路径的：candidate_json 是每次刷新里最大的一
+        # 块（2026-10-19 实测 4439 行回 11.5 MB），而接口在投影时会把整份 candidate 丢掉，
+        # 读出来再解析一遍纯属白做。其余调用方（跟踪 runner、详情页）确实要 candidate，保持默认。
+        candidate_column = "candidate_json, " if with_candidate else ""
         with self.store.read_session() as connection:
             cursor = connection.execute(
-                "SELECT version_id, market, code, objective, source, "
-                "signature, candidate_json, created_at, launch_data_date, stopped_at, is_current, "
+                "SELECT version_id, market, code, objective, source, signature, "
+                + candidate_column
+                + "created_at, launch_data_date, stopped_at, is_current, "
                 "summary_json, status, last_error, updated_at FROM pool_tracking_versions "
                 + suffix,
                 args or [],
@@ -256,7 +265,8 @@ class PoolTrackingStore:
         result = []
         for row in rows:
             item = dict(zip(columns, row, strict=True))
-            item["candidate"] = json.loads(item.pop("candidate_json"))
+            if with_candidate:
+                item["candidate"] = json.loads(item.pop("candidate_json"))
             item["summary"] = json.loads(item.pop("summary_json") or "{}")
             result.append(item)
         return result

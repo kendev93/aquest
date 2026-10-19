@@ -146,7 +146,6 @@ _LIST_ENTRY_FIELDS = frozenset(
         "last_error",
         "active_source",
         "active_candidate",
-        "automatic_candidates",
         "benchmark",
         "tracking",
         "tracking_status",
@@ -240,6 +239,22 @@ def _project_tracking_for_list(tracking: object) -> object:
     return projected
 
 
+def _project_benchmark_for_list(benchmark: object) -> object:
+    """列表用的基准：只留表格会渲染的那一个数。
+
+    ``label`` / ``method`` / ``caliber_version`` 对每一行都是同一段文字（2026-10-19 实测
+    4439 行重复出 51 万字节，占整份响应 4.5%），口径说明在页面说明与使用手册里读得到，
+    列头也写了是「全段基准」；这一列真正显示的只有 ``full_period.total_return``。缺失的
+    标的照旧给「没有基准」而不是补 0。
+    """
+
+    if not isinstance(benchmark, Mapping):
+        return benchmark
+    full_period = benchmark.get("full_period")
+    total_return = full_period.get("total_return") if isinstance(full_period, Mapping) else None
+    return {"full_period": {"total_return": total_return}}
+
+
 @router.get("/entries")
 def list_strategy_pool_entries(
     request: Request,
@@ -247,7 +262,8 @@ def list_strategy_pool_entries(
 ) -> dict[str, object]:
     selected = _objective(objective)
     items = _pool_store(request).list_entries()
-    tracks = PoolTrackingStore(_market_store(request)).current_versions()
+    # 列表只要摘要：candidate_json 读出来会在投影里整个丢掉，所以干脆不读、不解析。
+    tracks = PoolTrackingStore(_market_store(request)).current_versions(with_candidate=False)
     track_index = {(v["market"], v["code"], v["objective"], v["source"]): v for v in tracks}
     closes = _latest_closes(request)
     projected_items: list[dict[str, object]] = []
@@ -281,14 +297,14 @@ def list_strategy_pool_entries(
         price = closes.get((str(item["market"]), str(item["code"])))
         item["latest_close"] = price[0] if price else None
         item["latest_close_date"] = price[1] if price else None
+        item["benchmark"] = _project_benchmark_for_list(item.get("benchmark"))
         projected_items.append(
             {
                 **{key: value for key, value in item.items() if key in _LIST_ENTRY_FIELDS},
                 "active_candidate": _project_candidate_for_list(active),
-                # 只回当前所选目标的自动候选：页面切换目标时会重新取列表。
-                "automatic_candidates": {
-                    selected: _project_candidate_for_list(automatic_map.get(selected))
-                },
+                # 不再单回 automatic_candidates：active_candidate 已经是「手工覆盖优先于
+                # 自动最优」算完的那一份，页面切目标时会重新取列表，剩下那两处读它的地方
+                # 是永远走不到的兜底。这一整块在 2026-10-19 占 11.5 MB 响应的 31.3%。
                 "tracking": _project_tracking_for_list(tracking),
             }
         )

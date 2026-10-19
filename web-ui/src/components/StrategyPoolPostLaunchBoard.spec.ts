@@ -9,7 +9,6 @@ function entry(overrides: Partial<StrategyPoolEntry> = {}): StrategyPoolEntry {
     market: 'SH',
     code: '600000',
     name: '浦发银行',
-    automatic_candidates: { annual_return: null, sharpe: null },
     manual_overrides: { annual_return: null, sharpe: null },
     active_candidate: null,
     active_source: 'automatic',

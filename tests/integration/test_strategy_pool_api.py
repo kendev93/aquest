@@ -10,6 +10,7 @@ from aquest.market_data.store import DuckDbMarketDataStore
 from aquest.portfolio_backtest.service import PortfolioBacktestService
 from aquest.strategy_pool.service import MarketStrategyPoolService
 from aquest.strategy_pool.store import FOCUS_LIMIT, DuckDbStrategyPoolStore
+from aquest.strategy_pool.tracking_store import PoolTrackingStore
 from aquest.web.app import create_app
 
 TOKEN = "pool-worker-test-token"
@@ -330,11 +331,14 @@ def test_worker_checkpoints_only_accept_claimed_pool_jobs(tmp_path) -> None:
     assert wrong_worker.status_code == 409
     assert saved.status_code == 200
     assert benchmark_saved.status_code == 200
-    assert (
-        entries.json()["data"]["items"][0]["automatic_candidates"]["annual_return"]["candidate_id"]
-        == "candidate-1"
-    )
-    assert entries.json()["data"]["items"][0]["benchmark"]["validation"]["total_return"] == 0.3
+    row = entries.json()["data"]["items"][0]
+    assert row["active_candidate"]["candidate_id"] == "candidate-1"
+    # 自动候选不再单回一份：active_candidate 就是「手工覆盖优先于自动最优」算完的那一个，
+    # 页面切目标时重新取列表，那一整块原本占响应的三分之一。
+    assert "automatic_candidates" not in row
+    # 基准那一列只渲染全段收益率；其它阶段不再跟着发。这条 benchmark_only 落库是整份替换
+    # （update_benchmark 不按阶段合并），所以这里看到的正是「有基准记录、但没有全段数」。
+    assert row["benchmark"] == {"full_period": {"total_return": None}}
 
 
 def _signal_scan(tmp_path, *, tail: tuple[tuple[float, float, float, float], ...] = ()) -> dict:
@@ -724,7 +728,7 @@ def test_focus_api_rejects_members_beyond_the_limit(tmp_path) -> None:
         assert len(client.get("/api/v1/strategy-pool/focus").json()["data"]["items"]) == FOCUS_LIMIT
 
 
-def test_pool_entry_list_carries_only_what_the_table_reads(tmp_path) -> None:
+def test_pool_entry_list_carries_only_what_the_table_reads(tmp_path, monkeypatch) -> None:
     """列表接口别把整套候选拖给浏览器：表格只画十几个字段，其余该留在详情里。
 
     全市场 3350 行时一次刷新要传 31.5 MB，其中约 94% 是 config、规则树、分段元数据
@@ -763,6 +767,17 @@ def test_pool_entry_list_carries_only_what_the_table_reads(tmp_path) -> None:
         source_job_id="job-1",
         benchmark={"full_period": {"total_return": 0.2}},
     )
+    # 列表这条热路径还得走「不读 candidate_json」的那条查询：读出来再在投影里丢掉，
+    # 等于每次刷新白白解析几千份候选（2026-10-19 实测一次刷新 4439 行）。
+    asked_with_candidate: list[bool] = []
+    real_current_versions = PoolTrackingStore.current_versions
+
+    def spy(self, *, with_candidate: bool = True):
+        asked_with_candidate.append(with_candidate)
+        return real_current_versions(self, with_candidate=with_candidate)
+
+    monkeypatch.setattr(PoolTrackingStore, "current_versions", spy)
+
     app = create_app(market_data_store=store, auto_sync_enabled=False)
 
     with TestClient(app) as client:
@@ -770,6 +785,8 @@ def test_pool_entry_list_carries_only_what_the_table_reads(tmp_path) -> None:
         for objective in ("annual_return", "sharpe"):
             listed = client.get(f"/api/v1/strategy-pool/entries?objective={objective}").json()
             rows[objective] = listed["data"]["items"][0]
+
+    assert asked_with_candidate and all(not flag for flag in asked_with_candidate)
 
     for objective, row in rows.items():
         candidate = row["active_candidate"]
@@ -786,8 +803,10 @@ def test_pool_entry_list_carries_only_what_the_table_reads(tmp_path) -> None:
         assert candidate["metrics"]["validation"]["closed_trades"] == 6
         assert candidate["quality"]["badges"] == ["样本偏少"]
         assert row["benchmark"]["full_period"]["total_return"] == 0.2
-        # 自动候选只带当前所选目标那一路：切换目标时页面会重新取列表。
-        assert set(row["automatic_candidates"]) == {objective}
+        assert set(row["benchmark"]) == {"full_period"}
+        assert set(row["benchmark"]["full_period"]) == {"total_return"}
+        # 列表不再回自动候选那一份重复内容（2026-10-19 实测占 11.5 MB 的 31.3%）。
+        assert "automatic_candidates" not in row
         for dropped in (
             "manual_overrides",
             "data_fingerprint",
