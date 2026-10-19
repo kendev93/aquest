@@ -45,13 +45,16 @@ updates:
         patterns:
           - "*"
     ignore:
-      # 镜像的 Python 解释器必须跟哈希锁同版本：requirements.txt 是在 3.12 下用
-      # pip-tools 编译出来的（见 requirements.in 头部与 AGENTS.md），CI 也固定在 3.12
-      # 上 --require-hashes 校验。让 dependabot 把 FROM python:3.12-slim 顶到 3.13+，
-      # 就等于"用另一个解释器装 3.12 编出来的 wheel"，PR 绿了也不代表镜像能装起来。
-      # 换解释器要人为决定：先在目标版本下重编译哈希锁、跑一遍 CI，再删掉这里。
+      # 上限与本仓库声明的 requires-python（<3.15）一致：3.15 刚发布（2026-10），哈希锁里那些
+      # 编译包（numpy / pandas / scipy / numba / llvmlite / duckdb）还没有对应的轮子，先别让
+      # dependabot 把镜像顶上去。3.14 这一档已经放开：2026-10-19 在同一份 --require-hashes
+      # 锁上实测 python:3.14-slim 装得起来（全是 cp314 轮子，pip check 与 import 都通过），
+      # 所以挡的理由不再是「装不起来」，只是「还没在 3.14 上跑过测试」。
+      # 写法注意：docker 的 tag 带后缀（如 3.15.0-slim），原先只写 ["3.14", "3.14.*"] 想挡 3.14，
+      # dependabot 照样开了 PR（#27 就是 3.14-slim），所以这里同时给比较式与几种裸号写法。
+      # 哪几种写法真能匹配，只有下周一（2026-10-26）那次定时检查能验证。
       - dependency-name: "python"
-        versions: ["3.13", "3.13.*", "3.14", "3.14.*", "3.15", "3.15.*"]
+        versions: [">= 3.15", "3.15", "3.15.*", "3.15-slim", "3.16", "3.16.*"]
 
   - package-ecosystem: "github-actions"
     directory: "/"

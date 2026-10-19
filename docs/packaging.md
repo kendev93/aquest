@@ -4,7 +4,7 @@
 
 ## 准备运行环境
 
-项目根目录执行（Python 3.10–3.13，发布锁定 3.12）：
+项目根目录执行（Python 3.10–3.14，发布锁定 3.12）：
 
 ~~~bash
 python3 -m pip install --require-hashes -r requirements.txt
