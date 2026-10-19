@@ -273,3 +273,9 @@ export interface StrategyPoolJobStats {
   sample_limit: number
   modes: Partial<Record<StrategyPoolMode, StrategyPoolJobModeStats>>
 }
+
+/** 一个可以回看的信号交易日：后端每个交易日只留最后一次全市场扫描的结果。 */
+export interface StrategyPoolSignalDay {
+  as_of_date: string
+  job_id: string
+}

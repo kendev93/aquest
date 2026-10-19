@@ -16,6 +16,7 @@ import {
   fetchStrategyPoolFocus,
   fetchStrategyPoolJobStats,
   fetchStrategyPoolJobs,
+  fetchPoolSignalDays,
   fetchStrategyPoolResearchEstimate,
   getStrategyPoolJob,
   removeStrategyPoolFocus,
@@ -42,6 +43,7 @@ import type {
   StrategyPoolMode,
   StrategyPoolObjective,
   StrategyPoolSignal,
+  StrategyPoolSignalDay,
 } from '../types'
 import AppTopbar from '../components/AppTopbar.vue'
 import { formatDuration, formatNumber, formatPercent, formatSignedPercent } from '../utils/format'
@@ -87,7 +89,22 @@ const focusItems = ref<StrategyPoolFocusItem[]>([])
 const focusPending = ref(false)
 const history = ref<StrategyPoolJobSummary[]>([])
 const historyStats = ref<StrategyPoolJobStats | null>(null)
-const signalResult = ref<StrategyPoolJobResult | null>(null)
+// 显示哪一天的信号由 signalDate 决定：默认是最新行情那天（live 路径，全市场扫描结果
+// 再合并之后逐股重跑的增量）；选到更早的交易日就读那一天的扫描结果，两者形状一样。
+const liveSignalResult = ref<StrategyPoolJobResult | null>(null)
+const pinnedSignalResult = ref<StrategyPoolJobResult | null>(null)
+const signalDays = ref<StrategyPoolSignalDay[]>([])
+const signalDate = ref('')
+const latestSignalDay = computed(() => signalDays.value[0]?.as_of_date ?? '')
+const signalIsPinned = computed(() => !!signalDate.value
+  && !!latestSignalDay.value
+  && signalDate.value !== latestSignalDay.value)
+const signalResult = computed<StrategyPoolJobResult | null>(() => {
+  if (!signalIsPinned.value) return liveSignalResult.value
+  const raw = pinnedSignalResult.value
+  if (!raw) return null
+  return raw.results_by_objective?.[objective.value ?? 'annual_return'] ?? raw
+})
 const marketStatus = ref<DataStoreStatus | null>(null)
 const activeJobId = ref('')
 const activeIntent = ref<StrategyPoolMode | ''>('')
@@ -619,7 +636,9 @@ function selectObjective(value: StrategyPoolObjective): void {
   errorMessage.value = ''
   pollWarning.value = ''
   successMessage.value = ''
-  signalResult.value = null
+  liveSignalResult.value = null
+  pinnedSignalResult.value = null
+  signalDate.value = latestSignalDay.value
   void refreshPage(true)
 }
 
@@ -638,7 +657,7 @@ async function refreshPage(_refreshSignals: boolean): Promise<void> {
     page.value = Math.min(page.value, Math.max(1, Math.ceil(nextEntries.length / pageSize.value)))
     history.value = nextHistory
     void loadHistoryStats()
-    await restoreLatestSignalResult(nextHistory)
+    await Promise.all([restoreLatestSignalResult(nextHistory), loadSignalDays()])
   } catch (error) {
     errorMessage.value = apiMessage(error)
   } finally {
@@ -668,7 +687,7 @@ async function restoreLatestSignalResult(jobs: StrategyPoolJobSummary[]): Promis
   const baselineIndex = signalJobs.findIndex((job) => !job.market || !job.code)
   if (baselineIndex < 0) {
     if (cutoff) {
-      signalResult.value = null
+      liveSignalResult.value = null
     }
     return
   }
@@ -688,7 +707,43 @@ async function restoreLatestSignalResult(jobs: StrategyPoolJobSummary[]): Promis
       code: job.code ?? '',
     })
   }
-  signalResult.value = restored
+  liveSignalResult.value = restored
+  if (!signalDate.value) signalDate.value = restored.as_of_date ?? latestSignalDay.value
+}
+
+// 可回看的交易日：后端每个交易日只留最后一次全市场扫描，最多 10 天。读不到就当没有
+// 历史可看，页面照常显示最新那天，不打断初始化。
+async function loadSignalDays(): Promise<void> {
+  const before = signalDate.value
+  try {
+    signalDays.value = (await fetchPoolSignalDays()) ?? []
+  } catch {
+    signalDays.value = []
+    return
+  }
+  if (!before || before === latestSignalDay.value) signalDate.value = latestSignalDay.value
+}
+
+async function selectSignalDay(value: string): Promise<void> {
+  if (value === latestSignalDay.value) {
+    signalDate.value = value
+    pinnedSignalResult.value = null
+    await restoreLatestSignalResult(history.value)
+    return
+  }
+  const day = signalDays.value.find((item) => item.as_of_date === value)
+  if (!day) return
+  signalDate.value = value
+  try {
+    const state = await getStrategyPoolJob(day.job_id)
+    pinnedSignalResult.value = state.result ?? null
+    if (!state.result) {
+      errorMessage.value = `${value} 那天已经没有可看的信号结果了。`
+    }
+  } catch (error) {
+    pinnedSignalResult.value = null
+    errorMessage.value = apiMessage(error)
+  }
 }
 
 async function readCompletedSignalResult(
@@ -969,7 +1024,10 @@ async function startTask(
     }
     if (payload.rebuild) {
       entries.value = []
-      signalResult.value = null
+      liveSignalResult.value = null
+      pinnedSignalResult.value = null
+      signalDays.value = []
+      signalDate.value = ''
     }
     activeJobId.value = created.job_id
     activeIntent.value = intent
@@ -1075,11 +1133,14 @@ async function finishJob(
       const requestedTarget = activeSignalTarget
       activeSignalTarget = null
       if (result?.objective === objective.value) {
-        const previous = signalResult.value
-        signalResult.value = requestedTarget && previous?.objective === result.objective
+        const previous = liveSignalResult.value
+        liveSignalResult.value = requestedTarget && previous?.objective === result.objective
           ? mergeSignalResult(previous, result, requestedTarget)
           : result
         page.value = 1
+        // 新的一天要出现在日期下拉里；用户钉在更早的交易日时不抢他的显示。
+        await loadSignalDays()
+        if (!signalIsPinned.value) signalDate.value = latestSignalDay.value
       }
       successMessage.value = `当天信号已按 ${objectiveLabel(objective.value)} 目标更新。`
       await loadHistory()
@@ -1500,12 +1561,26 @@ onUnmounted(() => {
               <option v-for="option in SIGNAL_SORT_OPTIONS" :key="option.value" :value="option.value">{{ option.label }}</option>
             </select>
           </label>
+          <label class="signal-sort">信号日期
+            <select
+              :value="signalDate"
+              data-testid="pool-signal-date"
+              :disabled="!signalDays.length"
+              @change="selectSignalDay(($event.target as HTMLSelectElement).value)"
+            >
+              <option v-for="day in signalDays" :key="day.as_of_date" :value="day.as_of_date">
+                {{ day.as_of_date }}{{ day.as_of_date === latestSignalDay ? '（最新）' : '' }}
+              </option>
+            </select>
+          </label>
           <small>按全区间指标排序只改显示顺序；没有全区间指标的标的排在末尾。</small>
+          <small v-if="signalIsPinned" data-testid="pool-signal-day-note">{{ signalDate }} 那天最后一次全市场扫描的结果；之后的逐股重跑不进历史视图</small>
+          <small v-else-if="signalDays.length > 1" data-testid="pool-signal-day-note">可回看最近 {{ signalDays.length }} 个交易日的扫描结果，默认显示最新行情那天</small>
         </div>
 
         <section class="signal-grid">
           <article class="signal-panel panel-card" data-testid="pool-buy-signals">
-            <div class="section-heading"><div><p class="eyebrow">BUY SIGNALS</p><h2>当天触发买入 <span>{{ buySignals.length }}</span></h2></div><small>{{ signalAsOf || '信号扫描后显示日期' }}</small></div>
+            <div class="section-heading"><div><p class="eyebrow">BUY SIGNALS</p><h2>触发买入 <span>{{ buySignals.length }}</span></h2></div><small>{{ signalAsOf || '信号扫描后显示日期' }}</small></div>
             <div v-if="buySignals.length" class="signal-list">
               <div v-for="item in visibleBuySignals" :key="item.symbol" class="signal-row">
                 <strong>{{ item.symbol }}<template v-if="item.name"> · {{ item.name }}</template></strong>
@@ -1527,7 +1602,7 @@ onUnmounted(() => {
             <p v-if="!buySignals.length" class="empty-copy">{{ signalResult ? '当前没有股票触发买入规则。' : '选择目标后点击“刷新当天信号”，扫描最新完整行情日。' }}</p>
           </article>
           <article class="signal-panel panel-card" data-testid="pool-sell-signals">
-            <div class="section-heading"><div><p class="eyebrow">SELL SIGNALS</p><h2>卖出规则与风控退出 <span>{{ ruleSellSignals.length + riskSellSignals.length }}</span></h2></div><small>{{ signalAsOf ? `${signalAsOf} 收盘判定卖出规则 · 风控退出为今日开盘成交` : '卖出条件与持仓风控退出' }}</small></div>
+            <div class="section-heading"><div><p class="eyebrow">SELL SIGNALS</p><h2>卖出规则与风控退出 <span>{{ ruleSellSignals.length + riskSellSignals.length }}</span></h2></div><small>{{ signalAsOf ? `${signalAsOf} 收盘判定卖出规则 · 风控退出在下一交易日开盘成交` : '卖出条件与持仓风控退出' }}</small></div>
             <div v-if="ruleSellSignals.length || riskSellSignals.length" class="signal-list">
               <template v-for="item in visibleSellSignals" :key="item.key">
                 <div v-if="item.kind === 'rule'" class="signal-row">
@@ -1562,7 +1637,7 @@ onUnmounted(() => {
             <p v-if="!sellPanelItems.length" class="empty-copy">{{ signalResult ? '当前没有卖出条件或持仓风控退出信号。' : '信号扫描会同时检查卖出规则，并复核逐股策略的风控退出。' }}</p>
           </article>
           <article class="signal-panel panel-card" data-testid="pool-current-holdings">
-            <div class="section-heading"><div><p class="eyebrow">CURRENT HOLDINGS</p><h2>今日持仓中 <span>{{ currentHoldings.length }}</span></h2></div><small>{{ objectiveLabel(objective) }}目标逐股策略 · {{ signalAsOf || '信号扫描后显示日期' }}</small></div>
+            <div class="section-heading"><div><p class="eyebrow">CURRENT HOLDINGS</p><h2>持仓中 <span>{{ currentHoldings.length }}</span></h2></div><small>{{ objectiveLabel(objective) }}目标逐股策略 · {{ signalAsOf || '信号扫描后显示日期' }}</small></div>
             <div v-if="currentHoldings.length" class="signal-list">
               <div v-for="holding in visibleCurrentHoldings" :key="`${holding.market}${holding.code}`" class="signal-row holding-row">
                 <strong>{{ holding.market }}{{ holding.code }} · {{ holding.name || '—' }}</strong>

@@ -20,6 +20,7 @@ vi.mock('../api/strategyPool', () => ({
   clearStrategyPoolOverride: vi.fn(),
   createStrategyPoolJob: vi.fn(),
   fetchResearchSettings: vi.fn(),
+  fetchPoolSignalDays: vi.fn(),
   fetchStrategyPoolEntries: vi.fn(),
   fetchStrategyPoolFocus: vi.fn(),
   fetchStrategyPoolJobs: vi.fn(),
@@ -657,7 +658,7 @@ describe('StrategyPoolPage', () => {
     const wrapper = mount(StrategyPoolPage)
     await flushPromises()
 
-    expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('今日持仓中 1')
+    expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('持仓中 1')
     expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('SH600000 · 浦发银行')
     expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('今日触发卖出 · 下一交易日卖出')
     expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('持仓阶段收益 +12.00%')
@@ -737,7 +738,7 @@ describe('StrategyPoolPage', () => {
     expect(sells.text()).not.toContain('按风控成交规则处理')
     // 面板标题不能再说「当天触发卖出」：风控退出是昨天收盘触发、今天开盘成交。
     expect(sells.text()).toContain('卖出规则与风控退出 1')
-    expect(sells.text()).toContain('2026-10-01 收盘判定卖出规则 · 风控退出为今日开盘成交')
+    expect(sells.text()).toContain('2026-10-01 收盘判定卖出规则 · 风控退出在下一交易日开盘成交')
     expect(wrapper.text()).toContain('止损、止盈、移动止盈走同一条口径')
   })
 
@@ -775,7 +776,7 @@ describe('StrategyPoolPage', () => {
     await flushPromises()
 
     const holdings = wrapper.get('[data-testid="pool-current-holdings"]')
-    expect(holdings.text()).toContain('今日持仓中 1')
+    expect(holdings.text()).toContain('持仓中 1')
     expect(holdings.text()).toContain('SH600000 · 浦发银行')
     expect(holdings.text()).toContain('持仓阶段收益 +5.00%')
     expect(holdings.text()).toContain('有 7 个标的未能确认')
@@ -1831,6 +1832,71 @@ describe('StrategyPoolPage', () => {
     } finally {
       wrapper.unmount()
     }
+  })
+
+  it('lets the user review an earlier trading day through the signal date picker', async () => {
+    // 「信号日期」下拉给的是后端每个交易日最后一次全市场扫描；默认最新那天，选更早的就按
+    // 那天的名单显示，标题不能再宣称是「当天」。
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValue([
+      {
+        job_id: 'scan-2', mode: 'signals', status: 'completed',
+        objective: 'annual_return', dual_objectives: true, created_at: Date.now() / 1000,
+      },
+    ])
+    vi.mocked(api.fetchPoolSignalDays).mockResolvedValue([
+      { as_of_date: '2026-10-02', job_id: 'scan-2' },
+      { as_of_date: '2026-10-01', job_id: 'scan-1' },
+    ])
+    const resultFor = (asOf: string, withBuy: boolean): Record<string, unknown> => ({
+      mode: 'signals',
+      objective: 'annual_return',
+      as_of_date: asOf,
+      holding_scope: 'per_stock_strategy',
+      holding_snapshot_complete: true,
+      buy_signals: withBuy ? [{ ...buySignal }] : [],
+      sell_signals: [],
+      states: withBuy ? [{ ...buySignal }] : [],
+      model_portfolio: {
+        available: true,
+        holding_scope: 'per_stock_strategy',
+        holdings: [],
+        risk_exit_signals: [],
+      },
+    })
+    vi.mocked(api.getStrategyPoolJob).mockImplementation(async (jobId: string) => ({
+      job_id: jobId,
+      status: 'completed',
+      result: jobId === 'scan-1'
+        ? resultFor('2026-10-01', true)
+        : resultFor('2026-10-02', false),
+    } as never))
+
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    const picker = wrapper.get('[data-testid="pool-signal-date"]')
+    expect(picker.findAll('option').map((option) => option.text())).toEqual([
+      '2026-10-02（最新）', '2026-10-01',
+    ])
+    expect((picker.element as HTMLSelectElement).value).toBe('2026-10-02')
+    const buys = wrapper.get('[data-testid="pool-buy-signals"]')
+    expect(buys.text()).toContain('当前没有股票触发买入规则')
+
+    await picker.setValue('2026-10-01')
+    await flushPromises()
+    const historical = wrapper.get('[data-testid="pool-buy-signals"]')
+    expect(historical.text()).toContain('触发买入 1')
+    expect(historical.text()).toContain('SH600000')
+    expect(historical.text()).not.toContain('当天')
+    expect(wrapper.get('[data-testid="pool-signal-day-note"]').text())
+      .toContain('2026-10-01 那天最后一次全市场扫描')
+
+    // 切回最新那天：重新走「全市场扫描 + 逐股增量合并」那条路，不是留着历史那份。
+    await picker.setValue('2026-10-02')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="pool-buy-signals"]').text()).toContain('当前没有股票触发买入规则')
+    expect(wrapper.find('[data-testid="pool-signal-day-note"]').exists()).toBe(true)
   })
 
   it('loads saved universe preferences and submits them with full research', async () => {

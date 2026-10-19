@@ -389,3 +389,49 @@ test('the post-launch board ranks tracked symbols and keeps symbols without a wi
   // 每一行都要能点进详情，并且带上当前的目标与列表位置。
   await expect(board.locator('tbody tr a').first()).toHaveAttribute('href', /\/strategy-pool\/SH\/600000\?objective=annual_return/)
 })
+
+test('the signal date picker switches the panels to an earlier trading day', async ({ page }) => {
+  // 回看用的是后端每个交易日留一份的那次全市场扫描：默认最新那天，选更早的就按那天的名单显示。
+  const resultFor = (asOf: string, withBuy: boolean) => ({
+    job_id: asOf, status: 'completed', result: {
+      mode: 'signals', objective: 'annual_return', as_of_date: asOf,
+      holding_scope: 'per_stock_strategy', holding_snapshot_complete: true,
+      buy_signals: withBuy ? [{
+        market: 'SH', code: '600000', symbol: 'SH600000', name: '浦发银行', status: 'buy',
+        signal_type: 'buy', candidate_id: 'c-1',
+      }] : [],
+      sell_signals: [], states: [],
+      model_portfolio: { available: true, holding_scope: 'per_stock_strategy', holdings: [], risk_exit_signals: [] },
+    },
+  })
+  await page.addInitScript(() => localStorage.setItem('aquest.strategy-pool.objective', 'annual_return'))
+  await page.route('**/api/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    let data: unknown = {}
+    if (path.endsWith('/signal-days')) {
+      data = { items: [{ as_of_date: '2026-10-02', job_id: 'scan-2' }, { as_of_date: '2026-10-01', job_id: 'scan-1' }] }
+    } else if (path.endsWith('/jobs/scan-2')) {
+      data = resultFor('2026-10-02', false)
+    } else if (path.endsWith('/jobs/scan-1')) {
+      data = resultFor('2026-10-01', true)
+    } else if (path.endsWith('/jobs')) {
+      data = { items: [{ job_id: 'scan-2', mode: 'signals', status: 'completed', objective: 'annual_return', dual_objectives: true, created_at: Date.now() / 1000 }] }
+    } else if (path.endsWith('/entries')) {
+      data = { items: [] }
+    }
+    await route.fulfill({ json: { data } })
+  })
+
+  await page.goto('/strategy-pool')
+  const picker = page.getByTestId('pool-signal-date')
+  await expect(picker).toHaveValue('2026-10-02')
+  await expect(page.getByTestId('pool-buy-signals')).toContainText('当前没有股票触发买入规则')
+
+  await picker.selectOption('2026-10-01')
+  await expect(page.getByTestId('pool-buy-signals')).toContainText('SH600000')
+  await expect(page.getByTestId('pool-buy-signals')).toContainText('触发买入 1')
+  await expect(page.getByTestId('pool-signal-day-note')).toContainText('2026-10-01 那天最后一次全市场扫描')
+
+  await picker.selectOption('2026-10-02')
+  await expect(page.getByTestId('pool-buy-signals')).toContainText('当前没有股票触发买入规则')
+})

@@ -7,6 +7,7 @@ import type {
   StrategyPoolJobState,
   StrategyPoolJobStats,
   StrategyPoolJobSummary,
+  StrategyPoolSignalDay,
   StrategyPoolObjective,
   StrategyPoolCandidate,
   StrategyPoolBenchmark,
@@ -87,6 +88,15 @@ export async function cancelStrategyPoolJob(jobId: string): Promise<{ cancelled:
 export async function fetchStrategyPoolJobs(): Promise<StrategyPoolJobSummary[]> {
   const response = await request<{ data: { items: StrategyPoolJobSummary[] } }>(`${API_BASE}/jobs`)
   return response.data.items
+}
+
+// 可回看的信号交易日：每个交易日一份（当天最后一次全市场扫描），后端只留最近 10 个交易日。
+// 选中某天就用它的 job_id 走 /jobs/{job_id} 取结果，形状和当天那份完全一样。
+export async function fetchPoolSignalDays(): Promise<StrategyPoolSignalDay[]> {
+  const response = await request<{ data: { items?: StrategyPoolSignalDay[] } }>(
+    `${API_BASE}/signal-days`,
+  )
+  return response.data.items ?? []
 }
 
 // 平均耗时按模式各取最近若干条终态任务，跟列表分页无关，所以单独一个接口：
