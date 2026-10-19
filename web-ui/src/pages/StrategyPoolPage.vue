@@ -16,10 +16,12 @@ import {
   fetchStrategyPoolFocus,
   fetchStrategyPoolJobStats,
   fetchStrategyPoolJobs,
+  fetchStrategyPoolResearchEstimate,
   getStrategyPoolJob,
   removeStrategyPoolFocus,
   saveResearchSettings,
   type StrategyPoolBoard,
+  type StrategyPoolJobRequest,
 } from '../api/strategyPool'
 import { describeError } from '../api/client'
 // 这里的任务轮询有意不用 composables/usePolling 的 pollUntil：它内嵌了
@@ -36,6 +38,7 @@ import type {
   StrategyPoolJobStats,
   StrategyPoolJobSummary,
   StrategyPoolMetrics,
+  StrategyPoolResearchEstimate,
   StrategyPoolMode,
   StrategyPoolObjective,
   StrategyPoolSignal,
@@ -107,6 +110,11 @@ const BOARD_OPTIONS: { id: StrategyPoolBoard; label: string }[] = [
 ]
 const researchBoards = ref<StrategyPoolBoard[]>(['main', 'chinext', 'star'])
 const excludeSt = ref(false)
+// 点「增量更新策略池」之前的工作量预估：不点按钮也该知道这一轮要跑多少只。
+const researchEstimate = ref<StrategyPoolResearchEstimate | null>(null)
+const researchEstimatePending = ref(false)
+// 第一次任务历史回来之前不许预估：那时还不知道有没有任务在跑，而预扫描要读整张池表。
+const researchEstimateArmed = ref(false)
 const market = ref<'SH' | 'SZ'>('SH')
 const code = ref('')
 const searchQuery = ref('')
@@ -792,6 +800,53 @@ function toggleExcludeSt(): void {
   void persistResearchSettings()
 }
 
+/**
+ * 全市场任务的参数。预估和点击共用这一个构造器：分两处写就会漂移，
+ * 而页面上那个数字正是用户决定「现在就点」还是「等会儿再点」的依据。
+ */
+function fullJobPayload(rebuild: boolean): StrategyPoolJobRequest {
+  return {
+    mode: 'full',
+    rebuild,
+    risk_trials: riskTrials.value,
+    max_hold_days: maxHoldDays.value || null,
+    boards: [...researchBoards.value],
+    exclude_st: excludeSt.value,
+  }
+}
+
+async function refreshResearchEstimate(): Promise<void> {
+  // 有任务在跑时队列已经在动了，进度条上有实时数；这时预估反而会说谎。
+  if (isBusy.value) return
+  researchEstimatePending.value = true
+  try {
+    researchEstimate.value = await fetchStrategyPoolResearchEstimate(fullJobPayload(false))
+  } catch {
+    // 预估失败就留白，不拿上一次的数字冒充现在的状态。
+    researchEstimate.value = null
+  } finally {
+    researchEstimatePending.value = false
+  }
+}
+
+const researchEstimateText = computed(() => {
+  if (researchEstimatePending.value) return '统计中…'
+  const estimate = researchEstimate.value
+  if (!estimate) return ''
+  if (!estimate.universe_symbols) return '当前研究范围里没有可研究的标的'
+  if (estimate.pending_symbols === 0) {
+    return `没有待更新：${estimate.reusable_symbols} 只可直接复用`
+  }
+  return `待重算 ${estimate.pending_symbols} 只 · 可复用 ${estimate.reusable_symbols} 只`
+})
+const researchEstimateTitle = computed(() => {
+  const estimate = researchEstimate.value
+  if (!estimate) return '按当前研究范围与参数预估下一次「增量更新策略池」的工作量'
+  return '按当前研究范围与参数，下次「增量更新策略池」真正要逐只研究的标的数：'
+    + '研究口径指纹没变、结果没欠账的直接复用，弱策略到期与上线后衰减的仍会重跑。'
+    + `标的范围 ${estimate.universe_symbols} 只，数据截至 ${estimate.data_end ?? '未知'}。`
+})
+
 async function startFullResearch(rebuild = true): Promise<void> {
   if (isBusy.value) return
   // 这个入口会先删空整张策略池再从头逐只重跑，误点一次的代价是几个小时，所以先确认。
@@ -802,14 +857,7 @@ async function startFullResearch(rebuild = true): Promise<void> {
   )) {
     return
   }
-  await startTask({
-    mode: 'full',
-    rebuild,
-    risk_trials: riskTrials.value,
-    max_hold_days: maxHoldDays.value || null,
-    boards: [...researchBoards.value],
-    exclude_st: excludeSt.value,
-  }, 'full')
+  await startTask(fullJobPayload(rebuild), 'full')
 }
 
 async function startSingleRerun(): Promise<void> {
@@ -1267,9 +1315,19 @@ async function initialize(): Promise<void> {
       void pollJob(running.job_id, running.mode)
     }
   }
+  // 到这一步第一次任务历史已经回来，才知道有没有任务在跑；研究正忙的时候白跑一次
+  // 预扫描（要读整张池表）等于给正在被锁饿着的库再加一份读。
+  researchEstimateArmed.value = true
+  void refreshResearchEstimate()
 }
 
 onMounted(() => void initialize())
+watch(
+  [riskTrials, maxHoldDays, researchBoards, excludeSt, isBusy],
+  () => {
+    if (researchEstimateArmed.value) void refreshResearchEstimate()
+  },
+)
 onUnmounted(() => {
   activePollToken += 1
   if (pollTimer !== null) window.clearTimeout(pollTimer)
@@ -1354,6 +1412,7 @@ onUnmounted(() => {
             </label>
             <button class="button-primary" data-testid="pool-start-full" :disabled="isBusy" @click="startFullResearch(true)">清空并重建全市场</button>
             <button class="button-secondary" data-testid="pool-start-incremental" :disabled="isBusy" @click="startFullResearch(false)">增量更新策略池</button>
+            <small v-if="researchEstimateText" class="research-estimate" data-testid="pool-research-estimate" :title="researchEstimateTitle">{{ researchEstimateText }}</small>
             <button class="button-secondary" data-testid="pool-refresh-signals" :disabled="isBusy || !entries.some((item) => item.active_candidate)" @click="startSignalScan()">刷新当天信号</button>
             <label class="ticker-input">市场
               <select v-model="market" :disabled="isBusy"><option value="SH">SH</option><option value="SZ">SZ</option></select>
@@ -1641,6 +1700,7 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .history-group-label { margin: 0; color: #8798b1; font-size: .82rem; }
 .signal-pagination { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 12px; color: #91a1b8; font-size: .82rem; }
 .signal-pagination .button-secondary { padding: 6px 9px; font-size: .82rem; }
+.research-estimate { color: #91a1b8; font-size: .78rem; white-space: nowrap; align-self: center; }
 .signal-row, .history-row { display: grid; gap: 5px; padding: 10px 12px; border-left: 3px solid #18c467; background: #111c30; }
 /* 关注开关贴在文字下面，不占满整行宽度。 */
 .signal-row .pool-follow-button { justify-self: start; margin-top: 2px; padding-left: 0; }

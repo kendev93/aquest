@@ -816,3 +816,24 @@ def test_pool_entry_list_carries_only_what_the_table_reads(tmp_path, monkeypatch
             "updated_at",
         ):
             assert dropped not in row
+
+
+def test_research_estimate_endpoint_reports_pending_work(tmp_path) -> None:
+    """页面上的「待重算 N 只」走这个接口：没点按钮也得知道要跑多少。"""
+
+    # `_store` 里已经落了一只标的的 120 根已完成日线，研究范围默认不限板块。
+    app = create_app(market_data_store=_store(tmp_path), auto_sync_enabled=False)
+
+    with TestClient(app) as client:
+        ok = client.post("/api/v1/strategy-pool/research-estimate", json={"mode": "full"})
+        wrong_mode = client.post(
+            "/api/v1/strategy-pool/research-estimate",
+            json={"mode": "single", "market": "SH", "code": "600000"},
+        )
+
+    assert ok.status_code == 200
+    body = ok.json()["data"]
+    assert body["universe_symbols"] == 1
+    assert body["pending_symbols"] == 1
+    assert body["reusable_symbols"] == 0
+    assert wrong_mode.status_code == 422

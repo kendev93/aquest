@@ -23,6 +23,7 @@ vi.mock('../api/strategyPool', () => ({
   fetchStrategyPoolEntries: vi.fn(),
   fetchStrategyPoolFocus: vi.fn(),
   fetchStrategyPoolJobs: vi.fn(),
+  fetchStrategyPoolResearchEstimate: vi.fn(),
   fetchStrategyPoolJobStats: vi.fn(),
   getStrategyPoolJob: vi.fn(),
   removeStrategyPoolFocus: vi.fn(),
@@ -1982,6 +1983,87 @@ describe('StrategyPoolPage', () => {
       wrapper.unmount()
       vi.useRealTimers()
     }
+  })
+
+  describe('增量更新的工作量预估', () => {
+    const estimate = {
+      universe_symbols: 4417,
+      pending_symbols: 112,
+      reusable_symbols: 4305,
+      rebuild: false,
+      risk_trials: 3_000 as const,
+      data_end: '2026-10-19',
+    }
+
+    it('explains the workload before the click, with the payload the click would send', async () => {
+      window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+      vi.mocked(api.fetchStrategyPoolResearchEstimate).mockResolvedValue(estimate)
+      const wrapper = mount(StrategyPoolPage)
+      await flushPromises()
+
+      const hint = wrapper.get('[data-testid="pool-research-estimate"]')
+      expect(hint.text()).toBe('待重算 112 只 · 可复用 4305 只')
+      expect(hint.attributes('title')).toContain('弱策略到期与上线后衰减的仍会重跑')
+      expect(api.fetchStrategyPoolResearchEstimate).toHaveBeenCalledWith(
+        expect.objectContaining({ mode: 'full', rebuild: false, risk_trials: 3_000 }),
+      )
+    })
+
+    it('re-estimates when a research parameter changes', async () => {
+      window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+      vi.mocked(api.fetchStrategyPoolResearchEstimate).mockResolvedValue(estimate)
+      const wrapper = mount(StrategyPoolPage)
+      await flushPromises()
+
+      await wrapper.get('[data-testid="pool-max-hold-days"]').setValue('30')
+      await flushPromises()
+
+      expect(api.fetchStrategyPoolResearchEstimate).toHaveBeenLastCalledWith(
+        expect.objectContaining({ max_hold_days: 30 }),
+      )
+    })
+
+    it('says so when there is nothing to recompute', async () => {
+      window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+      vi.mocked(api.fetchStrategyPoolResearchEstimate).mockResolvedValue({
+        ...estimate,
+        pending_symbols: 0,
+        reusable_symbols: 4417,
+      })
+      const wrapper = mount(StrategyPoolPage)
+      await flushPromises()
+
+      expect(wrapper.get('[data-testid="pool-research-estimate"]').text())
+        .toBe('没有待更新：4417 只可直接复用')
+    })
+
+    it('stays quiet while a pool job is running', async () => {
+      window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+      vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValue([
+        { job_id: 'full-1', mode: 'full', status: 'running', created_at: Date.now() / 1000 },
+      ])
+      vi.mocked(api.getStrategyPoolJob).mockResolvedValue({
+        job_id: 'full-1',
+        status: 'running',
+        progress: 0.01,
+        metadata: { total_symbols: 151, finished_symbols: 12 },
+      })
+      vi.mocked(api.fetchStrategyPoolResearchEstimate).mockResolvedValue(estimate)
+      const wrapper = mount(StrategyPoolPage)
+      await flushPromises()
+
+      expect(api.fetchStrategyPoolResearchEstimate).not.toHaveBeenCalled()
+      expect(wrapper.find('[data-testid="pool-research-estimate"]').exists()).toBe(false)
+    })
+
+    it('leaves the hint out when the estimate fails instead of showing a stale number', async () => {
+      window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+      vi.mocked(api.fetchStrategyPoolResearchEstimate).mockRejectedValue(new Error('统计失败'))
+      const wrapper = mount(StrategyPoolPage)
+      await flushPromises()
+
+      expect(wrapper.find('[data-testid="pool-research-estimate"]').exists()).toBe(false)
+    })
   })
 
   describe('特别关注', () => {

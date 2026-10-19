@@ -2,6 +2,7 @@
 import { ApiError, createRequestClient } from './client'
 import type {
   StrategyPoolEntry,
+  StrategyPoolResearchEstimate,
   StrategyPoolFocusItem,
   StrategyPoolJobState,
   StrategyPoolJobStats,
@@ -46,6 +47,16 @@ export async function fetchStrategyPoolEntries(
     `${API_BASE}/entries?objective=${objective}`,
   )
   return response.data.items
+}
+
+export async function fetchStrategyPoolResearchEstimate(
+  payload: StrategyPoolJobRequest,
+): Promise<StrategyPoolResearchEstimate> {
+  const response = await request<{ data: StrategyPoolResearchEstimate }>(`${API_BASE}/research-estimate`, {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+  return response.data
 }
 
 export async function createStrategyPoolJob(

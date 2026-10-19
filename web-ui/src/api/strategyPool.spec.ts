@@ -7,6 +7,7 @@ import {
   fetchStrategyPoolEntries,
   fetchStrategyPoolJobStats,
   fetchStrategyPoolJobs,
+  fetchStrategyPoolResearchEstimate,
   getStrategyPoolJob,
   saveStrategyPoolOverride,
 } from './strategyPool'
@@ -105,3 +106,18 @@ describe('strategy pool API', () => {
     expect(fetch.mock.calls[0]?.[1]?.method).toBe('DELETE')
   })
 })
+
+  it('posts the incremental estimate with the same payload the run button sends', async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ data: { pending_symbols: 112, reusable_symbols: 4305 } }), { status: 200 }))
+    vi.stubGlobal('fetch', fetch)
+
+    const estimate = await fetchStrategyPoolResearchEstimate({ mode: 'full', rebuild: false, risk_trials: 3_000 })
+
+    expect(estimate.pending_symbols).toBe(112)
+    expect(fetch.mock.calls[0]?.[0]).toBe('/api/v1/strategy-pool/research-estimate')
+    expect(JSON.parse(String(fetch.mock.calls[0]?.[1]?.body))).toEqual({
+      mode: 'full',
+      rebuild: false,
+      risk_trials: 3000,
+    })
+  })

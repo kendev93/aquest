@@ -12,7 +12,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import nullcontext
 from datetime import date, datetime, timezone
 from threading import Lock, local
-from typing import Literal, cast
+from typing import Literal, NamedTuple, cast
 
 import numpy as np
 import pandas as pd
@@ -41,7 +41,7 @@ from aquest.screening.engine import evaluate_rule_group
 from aquest.screening.jobs import TaskCancelledError
 from aquest.screening.rules import RuleGroup
 from aquest.strategy_discovery.candidates import DEFAULT_MAX_HOLD_DAYS
-from aquest.strategy_discovery.catalog import default_indicator_catalog
+from aquest.strategy_discovery.catalog import IndicatorCatalog, default_indicator_catalog
 from aquest.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
 from aquest.web.schemas.screening import RuleGroupRequest
 
@@ -371,7 +371,7 @@ class MarketStrategyPoolService:
         *,
         store: DuckDbMarketDataStore,
         adapter: BatchMarketDataAdapter,
-        individual_service: IndividualStockResearchService,
+        individual_service: IndividualStockResearchService | None = None,
         backtest_service: BacktestService | None = None,
         pool_store: DuckDbStrategyPoolStore | None = None,
         portfolio_service: PortfolioBacktestService | None = None,
@@ -401,6 +401,8 @@ class MarketStrategyPoolService:
 
     def _individual_service_for_thread(self) -> IndividualStockResearchService:
         if self._individual_service_factory is None:
+            if self._individual_service is None:
+                raise ValueError("全市场策略池研究引擎未配置：这个实例只用于预扫描统计")
             return self._individual_service
         service = getattr(self._research_local, "service", None)
         if service is None:
@@ -591,6 +593,7 @@ class MarketStrategyPoolService:
         prior_entries: Mapping[tuple[str, str], tuple[str, str, str, bool, datetime | None]],
         config_fingerprint: str,
         post_launch_summaries: (Mapping[tuple[str, str, str], Mapping[str, object]] | None) = None,
+        entries: Mapping[tuple[str, str], Mapping[str, object]] | None = None,
     ) -> tuple[list[StockRef], int]:
         """把本次增量无需触碰的标的预先剔除，让任务总数只反映真实工作量。
 
@@ -620,9 +623,13 @@ class MarketStrategyPoolService:
                 continue
             if prior is not None and prior[2] in {"ready", "partial"}:
                 entry = (
-                    self._pool_store.get(ref.market, ref.code)
-                    if self._pool_store is not None
-                    else None
+                    entries.get((ref.market, ref.code))
+                    if entries is not None
+                    else (
+                        self._pool_store.get(ref.market, ref.code)
+                        if self._pool_store is not None
+                        else None
+                    )
                 )
                 if not prior[3] or (entry is not None and self._needs_full_period_backfill(entry)):
                     pending.append(ref)
@@ -1070,22 +1077,7 @@ class MarketStrategyPoolService:
                 abort_check=abort_check,
             )
             return {"mode": "portfolio", "common_calendar": metadata, "portfolio": summary}
-        catalog = default_indicator_catalog()
-        settings = _research_settings(payload, risk_trials)
-        settings["value_ids"] = list(catalog.value_ids)
-        settings["signal_ids"] = list(catalog.signal_ids)
-        formula_ids = {
-            value_id.split(".", 1)[0] for value_id in (*catalog.value_ids, *catalog.signal_ids)
-        }
-        settings["formula_versions"] = {
-            formula_id: FORMULA_REGISTRY.formula(formula_id).cache_version
-            for formula_id in sorted(formula_ids)
-        }
-        from aquest.individual_research.search_policy import search_policy_settings
-
-        settings["search_policy"] = search_policy_settings()
-        settings["algorithm_version"] = MARKET_POOL_ALGORITHM_VERSION
-        config_fingerprint = _fingerprint(settings)
+        settings, catalog, config_fingerprint = _research_config(payload, risk_trials)
         rebuild = payload.get("rebuild") is True
         if rebuild:
             if mode != "full":
@@ -1175,6 +1167,7 @@ class MarketStrategyPoolService:
                 prior_entries,
                 config_fingerprint,
                 post_launch_summaries=post_launch_summaries,
+                entries=self._pool_entries_index(),
             )
             total = len(refs)
             total_work = total
@@ -1861,6 +1854,64 @@ class MarketStrategyPoolService:
             ).fetchall()
         return [row[0] for row in rows if row and isinstance(row[0], date)]
 
+    def _pool_entries_index(self) -> dict[tuple[str, str], Mapping[str, object]]:
+        """一次读全表建索引。
+
+        预扫描以前对每只可复用标的单开一条连接去 `get()`，4300 只就是几十秒白等，
+        而且每开一次都要在行情库上举一次读锁——正好是研究读最容易被饿死的时刻。
+        """
+
+        if self._pool_store is None:
+            return {}
+        return {
+            (str(entry["market"]), str(entry["code"])): entry
+            for entry in self._pool_store.list_entries()
+        }
+
+    def estimate_incremental(self, payload: Mapping[str, object]) -> dict[str, object]:
+        """点「增量更新策略池」之前的工作量预估。
+
+        与任务预扫描同源：同一份研究口径指纹、同一批跟踪摘要、同一个
+        `_filter_reusable`（含弱策略到期与上线后衰减那两道判定），所以这里的
+        「待重算」就是点下去之后进度条上「需重算 N 只」的那个数。
+        """
+
+        research_boards, exclude_st = self._research_universe(payload, None)
+        refs = self._list_refs(None, boards=research_boards, exclude_st=exclude_st)
+        calendar = [day for day in self._common_calendar() if day >= RESEARCH_START]
+        risk_trials = _trial_count(payload.get("risk_trials", 3_000))
+        _, _, config_fingerprint = _research_config(payload, risk_trials)
+        rebuild = payload.get("rebuild") is True
+        if rebuild or not refs:
+            # 清空重建不复用任何东西；范围过滤到没有标的时没什么可跑。
+            return {
+                "universe_symbols": len(refs),
+                "pending_symbols": len(refs),
+                "reusable_symbols": 0,
+                "rebuild": rebuild,
+                "risk_trials": risk_trials,
+                "boards": sorted(research_boards) if research_boards is not None else None,
+                "exclude_st": exclude_st,
+                "data_end": calendar[-1].isoformat() if calendar else None,
+            }
+        pending, reused = self._filter_reusable(
+            refs,
+            self._prior_entries(),
+            config_fingerprint,
+            post_launch_summaries=PoolTrackingStore(self._store).applied_summaries(),
+            entries=self._pool_entries_index(),
+        )
+        return {
+            "universe_symbols": len(refs),
+            "pending_symbols": len(pending),
+            "reusable_symbols": reused,
+            "rebuild": False,
+            "risk_trials": risk_trials,
+            "boards": sorted(research_boards) if research_boards is not None else None,
+            "exclude_st": exclude_st,
+            "data_end": calendar[-1].isoformat() if calendar else None,
+        }
+
     def _prior_entries(
         self,
     ) -> dict[tuple[str, str], tuple[str, str, str, bool, datetime | None]]:
@@ -2102,6 +2153,39 @@ def _individual_config(
         split_windows=None,
         common_split_metadata=None,
     )
+
+
+class ResearchConfig(NamedTuple):
+    """一次研究请求的口径：设置、指标目录与它们的指纹。"""
+
+    settings: dict[str, object]
+    catalog: IndicatorCatalog
+    fingerprint: str
+
+
+def _research_config(payload: Mapping[str, object], risk_trials: int) -> ResearchConfig:
+    """把"这次研究用什么口径"算成一份设置 + 指纹。
+
+    任务的复用判定与页面上的「待重算」预估必须走这里同一份代码：两边各算一套的话，
+    预估迟早会和真实工作量不一致，而用户就是拿这个数决定要不要点增量更新。
+    """
+
+    catalog = default_indicator_catalog()
+    settings = _research_settings(payload, risk_trials)
+    settings["value_ids"] = list(catalog.value_ids)
+    settings["signal_ids"] = list(catalog.signal_ids)
+    formula_ids = {
+        value_id.split(".", 1)[0] for value_id in (*catalog.value_ids, *catalog.signal_ids)
+    }
+    settings["formula_versions"] = {
+        formula_id: FORMULA_REGISTRY.formula(formula_id).cache_version
+        for formula_id in sorted(formula_ids)
+    }
+    from aquest.individual_research.search_policy import search_policy_settings
+
+    settings["search_policy"] = search_policy_settings()
+    settings["algorithm_version"] = MARKET_POOL_ALGORITHM_VERSION
+    return ResearchConfig(settings, catalog, _fingerprint(settings))
 
 
 def _research_settings(

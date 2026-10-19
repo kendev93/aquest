@@ -218,6 +218,16 @@ export interface StrategyPoolJobState {
   result?: StrategyPoolJobResult | null
 }
 
+/** 「增量更新策略池」点下去之前的工作量预估，与任务预扫描同源。 */
+export interface StrategyPoolResearchEstimate {
+  universe_symbols: number
+  pending_symbols: number
+  reusable_symbols: number
+  rebuild: boolean
+  risk_trials: number
+  data_end: string | null
+}
+
 export interface StrategyPoolJobSummary {
   dual_objectives?: boolean
   rebuild?: boolean

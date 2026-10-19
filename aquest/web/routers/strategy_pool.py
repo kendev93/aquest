@@ -12,11 +12,13 @@ import duckdb
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from aquest.market_data.adapter import DuckDbMarketDataAdapter
 from aquest.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
 from aquest.market_data.store_base import _WRITE_LOCK
 from aquest.portfolio_backtest.benchmark import curve_return
 from aquest.strategy_discovery.duckdb_job_store import DuckDbStrategyJobStore
 from aquest.strategy_discovery.job_backend import StrategyJobBackend
+from aquest.strategy_pool.service import MarketStrategyPoolService
 from aquest.strategy_pool.store import DuckDbStrategyPoolStore, Objective
 from aquest.strategy_pool.tracking_scheduler import TRACKING_OPERATION, latest_completed_day
 from aquest.strategy_pool.tracking_store import PoolTrackingStore
@@ -310,6 +312,30 @@ def list_strategy_pool_entries(
         )
 
     return {"data": {"objective": selected, "items": projected_items}}
+
+
+@router.post("/research-estimate")
+def estimate_research_workload(payload: PoolJobRequest, request: Request) -> dict[str, object]:
+    """点「增量更新策略池」之前，先给出这次真正要跑多少只标的。
+
+    判定与任务预扫描同源（同一份研究口径指纹、同一个复用剔除函数，含弱策略到期与上线后
+    衰减两道判定），所以这里算出的「待重算」就是点下去之后进度条上「需重算 N 只」那个数。
+    """
+
+    if payload.mode != "full":
+        raise HTTPException(status_code=422, detail="只有全市场任务支持预先统计工作量")
+    store = _market_store(request)
+    service = MarketStrategyPoolService(
+        store=store,
+        adapter=DuckDbMarketDataAdapter(store),
+        pool_store=_pool_store(request),
+    )
+    try:
+        return {"data": service.estimate_incremental(payload.model_dump())}
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (MarketDataStoreError, OSError) as exc:
+        raise HTTPException(status_code=503, detail="工作量统计暂时无法读取") from exc
 
 
 DEFAULT_RESEARCH_BOARDS: tuple[str, ...] = ("main", "chinext", "star")

@@ -1032,3 +1032,58 @@ def test_pool_research_reports_contention_after_exhausting_retries(tmp_path, mon
     assert "行情库被占用" in message
     assert "退避重跑 2 次" in message
     assert "增量更新策略池" in message
+
+
+def test_estimate_reports_exactly_what_the_next_run_will_do(tmp_path) -> None:
+    """预估必须和任务预扫描给出同一个数：用户是拿这个数字决定要不要点增量更新的。"""
+
+    store, pool_store = _busy_market_setup(tmp_path)
+    service = MarketStrategyPoolService(
+        store=store,
+        adapter=DuckDbMarketDataAdapter(store),
+        individual_service=FakeIndividualResearchService(),
+        pool_store=pool_store,
+    )
+    payload = {"mode": "full", "risk_trials": 3_000, "horizon": 5}
+
+    def persist(item):  # noqa: ANN001
+        pool_store.persist_worker_entry(item, source_job_id="first-run")
+
+    first = service.run(payload, job_id="first-run", entry_writer=persist)
+    estimate = service.estimate_incremental(payload)
+    second = service.run(payload, job_id="second-run", entry_writer=persist)
+
+    assert first["total_symbols"] == 2
+    # 预估的「待重算」= 下一次任务真正排进队列的量；「可复用」= 被预扫描剔掉的量。
+    assert estimate["pending_symbols"] == second["total_symbols"]
+    assert estimate["universe_symbols"] == 2
+    assert (
+        estimate["pending_symbols"] + estimate["reusable_symbols"] == estimate["universe_symbols"]
+    )
+    assert estimate["risk_trials"] == 3_000
+    assert estimate["data_end"] is not None
+
+
+def test_estimate_counts_every_symbol_when_rebuilding(tmp_path) -> None:
+    """清空重建不复用任何存量，预估也得照同一个口径说「全部要跑」。"""
+
+    store, pool_store = _busy_market_setup(tmp_path)
+    service = MarketStrategyPoolService(
+        store=store,
+        adapter=DuckDbMarketDataAdapter(store),
+        individual_service=FakeIndividualResearchService(),
+        pool_store=pool_store,
+    )
+    service.run(
+        {"mode": "full", "risk_trials": 3_000, "horizon": 5},
+        job_id="third-run",
+        entry_writer=lambda item: pool_store.persist_worker_entry(item, source_job_id="third-run"),
+    )
+
+    estimate = service.estimate_incremental(
+        {"mode": "full", "rebuild": True, "risk_trials": 3_000, "horizon": 5}
+    )
+
+    assert estimate["rebuild"] is True
+    assert estimate["pending_symbols"] == 2
+    assert estimate["reusable_symbols"] == 0
