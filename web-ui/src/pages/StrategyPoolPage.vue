@@ -245,13 +245,30 @@ const progressCountText = computed(() => {
   const parts = [`已完成 ${successful}`]
   if (insufficient > 0) parts.push(`历史样本不足 ${insufficient}`)
   parts.push(`进行中 ${active}`, `复用 ${reused - insufficient}`, `失败 ${failed}`)
-  return `需重算 ${total} 只（${parts.join(' · ')}）`
+  const line = `需重算 ${total} 只（${parts.join(' · ')}）`
+  // 排期出去的标的在预扫描就不进队列了，括号里的几项加起来仍然是队列长度；单独说一句
+  // 它们哪天回来，免得「需重算 0 只」看着像整池都研究完了。
+  const scheduled = typeof metadata.deferred_insufficient_symbols === 'number'
+    ? metadata.deferred_insufficient_symbols
+    : 0
+  return scheduled > 0 ? `${line} · 另排期 ${scheduled} 只` : line
 })
 const progressCountTitle = computed(() => {
-  const insufficient = (activeJob.value?.metadata ?? {}).insufficient_symbols
-  if (typeof insufficient !== 'number' || insufficient <= 0) return undefined
-  return `其中 ${insufficient} 只历史样本不足（多数是上市未满一年），本轮不产出结果：`
-    + '每次都重查一次日期，攒满一年后自动纳入研究，不需要手动重跑。'
+  const metadata = activeJob.value?.metadata ?? {}
+  const insufficient = typeof metadata.insufficient_symbols === 'number' ? metadata.insufficient_symbols : 0
+  const scheduled = typeof metadata.deferred_insufficient_symbols === 'number'
+    ? metadata.deferred_insufficient_symbols
+    : 0
+  const eligible = typeof metadata.next_eligible_date === 'string' ? metadata.next_eligible_date : ''
+  const notes: string[] = []
+  if (insufficient > 0) {
+    notes.push(`本轮有 ${insufficient} 只研究完仍然历史样本不足（绝大多数是上市未满一年），不产出策略结果。`)
+  }
+  if (scheduled > 0) {
+    notes.push(`另有 ${scheduled} 只历史样本不足的不进今天的队列：未满一年的排到「上市首日 + 365 天」，`
+      + `其余每 30 天重查一次${eligible ? `，最早 ${eligible} 自动回到增量队列` : ''}，不需要手动重跑。`)
+  }
+  return notes.length ? notes.join('') : undefined
 })
 const parallelismText = computed(() => {
   const metadata = activeJob.value?.metadata ?? {}
@@ -853,16 +870,27 @@ const researchEstimateText = computed(() => {
   const estimate = researchEstimate.value
   if (!estimate) return ''
   if (!estimate.universe_symbols) return '当前研究范围里没有可研究的标的'
+  // 排期只报最早的那一天：各标的回来的日子不同，但用户只需要知道哪天之前点了也一样。
+  const scheduled = estimate.deferred_symbols ?? 0
+  const schedule = scheduled > 0
+    ? ` · ${scheduled} 只样本不足已排期（最早 ${estimate.next_eligible_date ?? '待定'}）`
+    : ''
   if (estimate.pending_symbols === 0) {
-    return `没有待更新：${estimate.reusable_symbols} 只可直接复用`
+    return `没有待更新：${estimate.reusable_symbols} 只可直接复用${schedule}`
   }
-  return `待重算 ${estimate.pending_symbols} 只 · 可复用 ${estimate.reusable_symbols} 只`
+  return `待重算 ${estimate.pending_symbols} 只 · 可复用 ${estimate.reusable_symbols} 只${schedule}`
 })
 const researchEstimateTitle = computed(() => {
   const estimate = researchEstimate.value
   if (!estimate) return '按当前研究范围与参数预估下一次「增量更新策略池」的工作量'
+  const scheduled = estimate.deferred_symbols ?? 0
+  const schedule = scheduled > 0
+    ? `另有 ${scheduled} 只历史样本不足（绝大多数是上市未满一年）不进队列：未满一年的排到「上市首日 + 365 天」、`
+      + `其余每 30 天重查一次，最早 ${estimate.next_eligible_date ?? '待定'} 自动回来，不需要手动重跑。`
+    : ''
   return '按当前研究范围与参数，下次「增量更新策略池」真正要逐只研究的标的数：'
     + '研究口径指纹没变、结果没欠账的直接复用，弱策略到期与上线后衰减的仍会重跑。'
+    + schedule
     + `标的范围 ${estimate.universe_symbols} 只，数据截至 ${estimate.data_end ?? '未知'}。`
 })
 

@@ -1437,7 +1437,40 @@ describe('StrategyPoolPage', () => {
     expect(count.text()).toBe(
       '需重算 80 只（已完成 20 · 历史样本不足 59 · 进行中 1 · 复用 4342 · 失败 0）',
     )
-    expect(count.attributes('title')).toContain('攒满一年后自动纳入研究')
+    expect(count.attributes('title')).toContain('不产出策略结果')
+  })
+
+  it('reports scheduled symbols separately from the queue', async () => {
+    // 排期出标的在预扫描就不进队列了：括号里的几项加起来仍然是队列长度，
+    // 「另排期 N 只」单独报它们哪天自动回来，免得「需重算 0 只」看着像整池跑完了。
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValueOnce([
+      { job_id: 'full-1', status: 'running', mode: 'full' },
+    ])
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({
+      job_id: 'full-1',
+      status: 'running',
+      progress: 0.5,
+      metadata: {
+        total_symbols: 21,
+        completed_symbols: 4_381,
+        skipped_symbols: 4_360,
+        insufficient_symbols: 0,
+        deferred_insufficient_symbols: 59,
+        next_eligible_date: '2026-11-30',
+        failed_symbols: 0,
+        current_parallelism: 1,
+        maximum_parallelism: 4,
+      },
+    })
+
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    const count = wrapper.get('[data-testid="pool-progress-count"]')
+    expect(count.text()).toBe('需重算 21 只（已完成 21 · 进行中 1 · 复用 4360 · 失败 0） · 另排期 59 只')
+    expect(count.attributes('title')).toContain('最早 2026-11-30 自动回到增量队列')
+    expect(count.attributes('title')).toContain('不需要手动重跑')
   })
 
   it('does not bill insufficient-history symbols to the remaining time', async () => {
@@ -2087,6 +2120,24 @@ describe('StrategyPoolPage', () => {
       expect(api.fetchStrategyPoolResearchEstimate).toHaveBeenLastCalledWith(
         expect.objectContaining({ max_hold_days: 30 }),
       )
+    })
+
+    it('names the day the deferred symbols come back on its own', async () => {
+      window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+      vi.mocked(api.fetchStrategyPoolResearchEstimate).mockResolvedValue({
+        ...estimate,
+        pending_symbols: 0,
+        reusable_symbols: 4_305,
+        deferred_symbols: 112,
+        next_eligible_date: '2026-11-30',
+      })
+      const wrapper = mount(StrategyPoolPage)
+      await flushPromises()
+
+      const hint = wrapper.get('[data-testid="pool-research-estimate"]')
+      expect(hint.text())
+        .toBe('没有待更新：4305 只可直接复用 · 112 只样本不足已排期（最早 2026-11-30）')
+      expect(hint.attributes('title')).toContain('未满一年的排到「上市首日 + 365 天」')
     })
 
     it('says so when there is nothing to recompute', async () => {

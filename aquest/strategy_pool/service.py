@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import nullcontext
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from threading import Lock, local
 from typing import Literal, NamedTuple, cast
 
@@ -106,12 +106,18 @@ MARKET_POOL_ALGORITHM_VERSION = "market-pool-v8"
 #: 到期重查一次，仍不足则刷新时间戳再等一个周期。
 NO_STRATEGY_RECHECK_DAYS = 14
 
+#: 「历史样本不足」中算不出确切日期的那一类（上市已满一年，但现有数据仍切不出
+#: 三段）的重查节奏（自然日）。它跟 no_strategy 一样依赖数据在长，但每天重查只会
+#: 每天以同样的「不足」收场。2026-10-19 用户要求：能准确排期就排期，否则按 30 天
+#: 重跑；未满一年的标的用「首日 + 365 天」排期，只有排不出日期的走这个兜底节奏。
+INSUFFICIENT_RECHECK_DAYS = 30
+
 #: 研究准入的最低上市历史（自然日，按「首根已入库日线 → 研究终点」的跨度计）。
 #: 不满一年的标的：年线级指标整段是 NaN，训练/验证/留出三段加起来覆盖不了
 #: 一个完整的市场周期，机械通过样本门槛选出的策略统计上不可信
-#: （2026-10-08 用户决策）。命中后按「历史样本不足」落库（insufficient_history，
-#: 每次增量重查），攒满一年后的增量研究自动纳入——无需人工干预。手动单股
-#: 研究不走此闸：那是显式指名的研究请求，用户自担其结论质量。
+#: （2026-10-08 用户决策）。命中后按「历史样本不足」落库，并排期到「首日 + 365 天」
+#: 自动回到增量队列——那一天之前每天重查都只会以同样的「不足」收场（2026-10-19 用户
+#: 要求）。手动单股研究不走此闸：那是显式指名的研究请求，用户自担其结论质量。
 MIN_LISTING_HISTORY_DAYS = 365
 POOL_PROGRESS_EMIT_INTERVAL_SECONDS = 1.5
 STRATEGY_HOLDING_BATCH_SIZE = 100
@@ -204,8 +210,13 @@ class _PoolProgressCoordinator:
         callback: PoolProgressCallback | None,
         maximum_workers: int,
         reused_symbols: int = 0,
+        deferred_symbols: int = 0,
+        next_eligible_date: str | None = None,
     ) -> None:
         self._total_symbols = total_symbols
+        # 本轮被"还没够格"挡在队列外的标的：不占进度也不占预计时间，但要说清哪天回来。
+        self._deferred_symbols = deferred_symbols
+        self._next_eligible_date = next_eligible_date
         self._total_work = total_work
         self._callback = callback
         self._maximum_workers = maximum_workers
@@ -294,6 +305,8 @@ class _PoolProgressCoordinator:
                     "completed_symbols": self._completed,
                     "failed_symbols": self._failed,
                     "insufficient_symbols": self._insufficient,
+                    "deferred_insufficient_symbols": self._deferred_symbols,
+                    "next_eligible_date": self._next_eligible_date,
                     "skipped_symbols": self._skipped,
                     "finished_symbols": self._finished,
                     "total_symbols": self._total_symbols,
@@ -347,6 +360,8 @@ class _PoolProgressCoordinator:
                     "skipped_symbols": self._skipped,
                     "failed_symbols": self._failed,
                     "insufficient_symbols": self._insufficient,
+                    "deferred_insufficient_symbols": self._deferred_symbols,
+                    "next_eligible_date": self._next_eligible_date,
                     "finished_symbols": self._finished,
                     "current_parallelism": len(self._fractions),
                     "active_symbols": [
@@ -441,8 +456,9 @@ class MarketStrategyPoolService:
                 if observed_days < MIN_LISTING_HISTORY_DAYS:
                     # 上市未满一年：这不是「切不出三段」的机械失败，而是研究政策
                     # 上的不接纳——年线级指标整段是 NaN，三段加起来也覆盖不了
-                    # 一个完整的市场周期。落 insufficient_history（每次增量都
-                    # 重查，代价只是一次日期比较），攒满一年后自动纳入。
+                    # 一个完整的市场周期。落 insufficient_history，并由预扫描按
+                    # 「首日 + 365 天」排期，攒满一年后自动回到增量队列。
+                    eligible_date = ref.first_date + timedelta(days=MIN_LISTING_HISTORY_DAYS)
                     raise InsufficientResearchHistoryError(
                         "",
                         {
@@ -451,11 +467,12 @@ class MarketStrategyPoolService:
                             "first_date": ref.first_date.isoformat(),
                             "end_date": config.end_date.isoformat(),
                             "observed_days": observed_days,
+                            "eligible_date": eligible_date.isoformat(),
                         },
                         message=(
                             f"上市未满一年（{ref.first_date.isoformat()} 起，观察期 "
                             f"{observed_days} 天 < {MIN_LISTING_HISTORY_DAYS} 天）："
-                            "指标预热与分段样本都不足，满一年后的增量研究自动纳入"
+                            f"指标预热与分段样本都不足，{eligible_date.isoformat()} 起自动重算"
                         ),
                     )
             clear_stock_cache = getattr(self._adapter, "clear_thread_stock_cache", None)
@@ -601,7 +618,8 @@ class MarketStrategyPoolService:
         config_fingerprint: str,
         post_launch_summaries: (Mapping[tuple[str, str, str], Mapping[str, object]] | None) = None,
         entries: Mapping[tuple[str, str], Mapping[str, object]] | None = None,
-    ) -> tuple[list[StockRef], int]:
+        data_end: date | None = None,
+    ) -> tuple[list[StockRef], int, list[date]]:
         """把本次增量无需触碰的标的预先剔除，让任务总数只反映真实工作量。
 
         之前复用判定发生在提交循环里，被跳过的标的仍计入 ``total_symbols``：
@@ -621,10 +639,15 @@ class MarketStrategyPoolService:
 
         pending: list[StockRef] = []
         reused = 0
+        deferred: list[date] = []
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         post_launch = post_launch_summaries or {}
         for ref in refs:
             prior = prior_entries.get((ref.market, ref.code))
+            until = self._insufficient_deferral(ref, prior, data_end=data_end, now=now)
+            if until is not None:
+                deferred.append(until)
+                continue
             if not self._can_reuse(prior, config_fingerprint, now=now):
                 pending.append(ref)
                 continue
@@ -650,7 +673,7 @@ class MarketStrategyPoolService:
                     pending.append(ref)
                     continue
             reused += 1
-        return pending, reused
+        return pending, reused, deferred
 
     def _run_full_research(
         self,
@@ -666,6 +689,7 @@ class MarketStrategyPoolService:
         job_id: str,
         total_work: int,
         reused_symbols: int = 0,
+        deferred: Sequence[date] = (),
         progress_callback: PoolProgressCallback | None,
         abort_check: Callable[[], bool] | None,
         entry_writer: PoolEntryWriter | None,
@@ -678,6 +702,8 @@ class MarketStrategyPoolService:
             # 预扫描剔除的纯复用标的直接计入跳过数：进度行把它们显示为「复用」，
             # 真实研究工作量只看 total_symbols（预扫描后的队列长度）。
             reused_symbols=reused_symbols,
+            deferred_symbols=len(deferred),
+            next_eligible_date=min(deferred).isoformat() if deferred else None,
             callback=progress_callback,
             maximum_workers=self._max_pool_workers,
         )
@@ -1171,16 +1197,18 @@ class MarketStrategyPoolService:
         completed = 0
         skipped = 0
         failed = 0
+        deferred: list[date] = []
         errors: list[dict[str, str]] = []
         total = len(refs)
         total_work = total
         if mode == "full":
-            refs, reused_count = self._filter_reusable(
+            refs, reused_count, deferred = self._filter_reusable(
                 refs,
                 prior_entries,
                 config_fingerprint,
                 post_launch_summaries=post_launch_summaries,
                 entries=self._pool_entries_index(),
+                data_end=calendar[-1] if calendar else None,
             )
             total = len(refs)
             total_work = total
@@ -1196,6 +1224,7 @@ class MarketStrategyPoolService:
                 job_id=job_id,
                 total_work=total_work,
                 reused_symbols=reused_count,
+                deferred=deferred,
                 progress_callback=progress_callback,
                 abort_check=abort_check,
                 entry_writer=entry_writer,
@@ -1314,6 +1343,10 @@ class MarketStrategyPoolService:
             "completed_symbols": completed,
             "skipped_symbols": skipped,
             "failed_symbols": failed,
+            # 排期出去的历史样本不足标的：本轮不占队列，但用户得知道它们哪天回来，
+            # 否则「需重算 0 只」看着像任务什么都不用做（2026-10-19 用户要求）。
+            "deferred_symbols": len(deferred),
+            "next_eligible_date": min(deferred).isoformat() if deferred else None,
             "errors": errors[:200],
             "split_policy": {
                 "method": "按每只股票自身的已完成交易日顺序切分训练、验证、留出",
@@ -1901,23 +1934,28 @@ class MarketStrategyPoolService:
                 "universe_symbols": len(refs),
                 "pending_symbols": len(refs),
                 "reusable_symbols": 0,
+                "deferred_symbols": 0,
+                "next_eligible_date": None,
                 "rebuild": rebuild,
                 "risk_trials": risk_trials,
                 "boards": sorted(research_boards) if research_boards is not None else None,
                 "exclude_st": exclude_st,
                 "data_end": calendar[-1].isoformat() if calendar else None,
             }
-        pending, reused = self._filter_reusable(
+        pending, reused, deferred = self._filter_reusable(
             refs,
             self._prior_entries(),
             config_fingerprint,
             post_launch_summaries=PoolTrackingStore(self._store).applied_summaries(),
             entries=self._pool_entries_index(),
+            data_end=calendar[-1] if calendar else None,
         )
         return {
             "universe_symbols": len(refs),
             "pending_symbols": len(pending),
             "reusable_symbols": reused,
+            "deferred_symbols": len(deferred),
+            "next_eligible_date": min(deferred).isoformat() if deferred else None,
             "rebuild": False,
             "risk_trials": risk_trials,
             "boards": sorted(research_boards) if research_boards is not None else None,
@@ -1952,6 +1990,37 @@ class MarketStrategyPoolService:
         }
 
     @staticmethod
+    def _insufficient_deferral(
+        ref: StockRef,
+        prior: tuple[str, str, str, bool, datetime | None] | None,
+        *,
+        data_end: date | None,
+        now: datetime | None = None,
+    ) -> date | None:
+        """历史样本不足的标的什么时候才够格重新排队；返回 None 表示现在就该研究。
+
+        上市未满一年的能算出确切日子：``首日 + 365 天``，也就是研究闸（``_research_symbol``
+        里的 MIN_LISTING_HISTORY_DAYS）唯一会失手的条件。在那之前每天重查都只会以同样的
+        "不足"收场（实测一轮 80 只队列里 59 只是这么占位的），所以直接排期到那一天，
+        下一次增量自动回到队列，不需要人盯着。算不出这个日期的——上市历史已经够长却
+        仍切不出三段，或标的连首根日线都读不到——沿用回查节奏（INSUFFICIENT_RECHECK_DAYS）：
+        数据每天在长，隔一阵子值得再看一次，但不必每天看。
+        """
+
+        if prior is None or prior[2] != "insufficient_history":
+            return None
+        if ref.first_date is not None:
+            eligible = ref.first_date + timedelta(days=MIN_LISTING_HISTORY_DAYS)
+            if data_end is None or data_end < eligible:
+                return eligible
+        updated_at = prior[4]
+        if updated_at is None:
+            return None
+        current = now or datetime.now(timezone.utc).replace(tzinfo=None)
+        due = updated_at + timedelta(days=INSUFFICIENT_RECHECK_DAYS)
+        return None if current >= due else due.date()
+
+    @staticmethod
     def _can_reuse(
         prior: tuple[str, str, str, bool, datetime | None] | None,
         config_fingerprint: str,
@@ -1973,8 +2042,10 @@ class MarketStrategyPoolService:
           可能让样本攒够。但一天新数据对样本量的影响微乎其微，每天重查是纯浪费
           （2026-10-08 实测：一夜 57 只里 30 只 no_strategy，用户每次点增量都
           看到它们从头再跑）。到期重查一次，仍不足则刷新时间戳再等一个周期。
-        - **insufficient_history / failed → 每次重查**。前者数据在长、攒够当天
-          就该补研究；后者错误应当重试，不把一次故障当成结论存下来。
+        - **insufficient_history / failed → 不复用**。后者错误应当重试，不把一次
+          故障当成结论存下来；前者由 :meth:`_insufficient_deferral` 在预扫描里先
+          排期（未满一年排到「首日 + 365 天」，其余每 ``INSUFFICIENT_RECHECK_DAYS``
+          天重查一次），所以这里的「不复用」只在排期到期之后才真正触发重查。
 
         ``ready``/``partial`` 的复用还有例外（见 :meth:`_research_recheck_due`）：
         自动候选弱策略超 21 天、上线后衰减、保质期 120 天的条目到期重新寻优。

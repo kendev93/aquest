@@ -836,4 +836,7 @@ def test_research_estimate_endpoint_reports_pending_work(tmp_path) -> None:
     assert body["universe_symbols"] == 1
     assert body["pending_symbols"] == 1
     assert body["reusable_symbols"] == 0
+    # 页面要在点之前就说清「排期出去的那几只哪天回来」，接口得把这两项带出来。
+    assert body["deferred_symbols"] == 0
+    assert body["next_eligible_date"] is None
     assert wrong_mode.status_code == 422

@@ -223,6 +223,10 @@ export interface StrategyPoolResearchEstimate {
   universe_symbols: number
   pending_symbols: number
   reusable_symbols: number
+  /** 历史样本不足、本轮不进队列的只数；它们按排期自动回来。 */
+  deferred_symbols?: number
+  /** 这些标的里最早自动重算的那一天（ISO 日期），一只都没有排期时为 null。 */
+  next_eligible_date?: string | null
   rebuild: boolean
   risk_trials: number
   data_end: string | null

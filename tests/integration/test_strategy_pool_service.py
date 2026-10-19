@@ -473,12 +473,37 @@ def test_shelf_life_and_post_launch_degradation_trigger_re_research() -> None:
     )
 
 
-def test_full_research_retries_insufficient_history_but_single_reuses_unchanged_inputs(
-    tmp_path,
-) -> None:
+def _young_bars(start: str, count: int) -> pd.DataFrame:
+    """按真实日距展开的短历史（上市未满一年），用来测排期而不是研究本身。"""
+
+    close = np.linspace(10.0, 12.0, count)
+    return pd.DataFrame(
+        {
+            "date": pd.date_range(start, periods=count, freq="D"),
+            "open": close,
+            "high": close + 0.2,
+            "low": close - 0.2,
+            "close": close,
+            "volume": np.full(count, 5_000.0),
+            "amount": close * 5_000,
+            "bar_status": "completed",
+        }
+    )
+
+
+def test_full_research_defers_insufficient_history_to_a_scheduled_date(tmp_path) -> None:
+    """历史样本不足不再每天占位：未满一年的排到「首日 + 365 天」，其余每 30 天重查。
+
+    2026-10-19 实测一轮 80 只的增量队列里 59 只是这么被反复重查的（全是上市未满一年），
+    进度条 100% 而「已完成」只有几十，用户以为任务没干活。
+    """
+
     store = DuckDbMarketDataStore(tmp_path / "insufficient-history.duckdb")
-    bars = _bars("2021-01-01", 40)
+    # 老标的：上市历史已经够长（相对全局研究终点满一年），研究却仍切不出三段 → 走 30 天节奏。
+    bars = _bars("2020-01-01", 40)
     store.replace_local_bars("SH", "600000", "stock", bars)
+    # 新标的：首根日线起不满一年 → 能算出确切的重算日子。
+    store.replace_local_bars("SZ", "000001", "stock", _young_bars("2021-01-01", 60))
     adapter = DuckDbMarketDataAdapter(store)
     pool_store = DuckDbStrategyPoolStore(store)
     pool_store.initialize()
@@ -520,17 +545,44 @@ def test_full_research_retries_insufficient_history_but_single_reuses_unchanged_
     )
 
     item = pool_store.get("SH", "600000")
-    assert individual.calls == 2
+    young = pool_store.get("SZ", "000001")
     assert first["failed_symbols"] == 0
-    assert first["skipped_symbols"] == 1
-    assert second["skipped_symbols"] == 1
+    assert first["total_symbols"] == first["skipped_symbols"] == 2
+    # 未满一年是政策闸，连研究都不该开始。
+    assert individual.calls == 1
     assert item["status"] == "insufficient_history"
+    assert young["status"] == "insufficient_history"
+    assert item["data_fingerprint"] == "data-1"
+    # 重算日子写在错误里：用户在详情里就能看到它哪天回来，不用自己算。
+    assert "2022-01-01 起自动重算" in (young["last_error"] or "")
     # 进度元数据要单独报出这个数：它本来混在 skipped 里，摊不开的话进度条 100% 而
     # 「已完成」只有几十，看着就像任务没干活（2026-10-19 用户报告）。
-    assert progress[-1]["insufficient_symbols"] == 1
-    # 「已完成」按 completed − skipped 算，所以这里必须还是 0；摊开的那一项才是 1。
-    assert progress[-1]["completed_symbols"] == progress[-1]["skipped_symbols"] == 1
-    assert item["data_fingerprint"] == "data-2"
+    assert progress[-1]["insufficient_symbols"] == 2
+    # 「已完成」按 completed − skipped 算，所以这里必须还是 0；摊开的那一项才是 2。
+    assert progress[-1]["completed_symbols"] == progress[-1]["skipped_symbols"] == 2
+
+    # 首轮没有排期：这两只都是真跑了研究才知道不足（一个当场被政策闸掉）。
+    assert first["deferred_symbols"] == 0
+    # 同一天再点增量：两只都排在未来，队列里一只都不剩。
+    assert second["total_symbols"] == 0
+    assert second["skipped_symbols"] == second["failed_symbols"] == 0
+    assert individual.calls == 1
+    assert item["data_fingerprint"] == "data-1"
+    assert second["deferred_symbols"] == 2
+    # 最早的那天就是用户能等到结果的日期：新股 2022-01-01，老标的要等 30 天节奏。
+    assert second["next_eligible_date"] == "2022-01-01"
+
+    estimate = service.estimate_incremental({"mode": "full", "risk_trials": 1_000})
+    assert estimate["pending_symbols"] == 0
+    assert estimate["deferred_symbols"] == 2
+    # 排期出去的量单独算一项，不混进「可复用」：用户看到「待重算 0」时得知道
+    # 这两只是哪天回来，而不是以为它们已经有策略了。
+    assert estimate["reusable_symbols"] == 0
+    assert (
+        estimate["pending_symbols"] + estimate["reusable_symbols"] + estimate["deferred_symbols"]
+        == estimate["universe_symbols"]
+    )
+    assert estimate["next_eligible_date"] == "2022-01-01"
 
     single_cached = service.run(
         {"mode": "single", "market": "SH", "code": "600000", "risk_trials": 1_000},
@@ -539,7 +591,7 @@ def test_full_research_retries_insufficient_history_but_single_reuses_unchanged_
     )
     assert single_cached["single_candidate"]["status"] == "insufficient_history"
     assert single_cached["skipped_symbols"] == 1
-    assert individual.calls == 2
+    assert individual.calls == 1
 
     bars.loc[0, "close"] += 0.1
     bars.loc[0, "open"] += 0.1
@@ -555,15 +607,44 @@ def test_full_research_retries_insufficient_history_but_single_reuses_unchanged_
     assert single["single_candidate"]["saved_to_pool"] is True
     assert single["skipped_symbols"] == 1
     assert pool_store.get("SH", "600000")["status"] == "insufficient_history"
-    assert individual.calls == 3
+    # 显式单股重跑不受排期影响：用户点名要研究这只，当天就得重查。
+    assert individual.calls == 2
 
-    third = service.run(
-        {"mode": "full", "risk_trials": 1_000},
-        job_id="third",
-        entry_writer=writer,
+
+def test_insufficient_deferral_dates_and_fallback_rhythm() -> None:
+    """排期口径：算得出日期的用「首日 + 365 天」，算不出的按 30 天节奏回查。"""
+
+    ref = StockRef(
+        market="SH",
+        code="600000",
+        path=Path("SH600000"),
+        first_date=date(2021, 1, 1),
     )
-    assert third["skipped_symbols"] == 1
-    assert individual.calls == 4
+    now = datetime(2026, 10, 19, 12, 0)
+    prior = ("market-1", "config-1", "insufficient_history", False, now)
+    defer = MarketStrategyPoolService._insufficient_deferral
+
+    # 上市未满一年：排到首日 + 365 天，哪怕行情截至日还在那之前。
+    assert defer(ref, prior, data_end=date(2021, 2, 9), now=now) == date(2022, 1, 1)
+    # 攒满一年的当天就回队列：上次失败在满一年之前，30 天节奏早就到期了。
+    crossed = ("market-1", "config-1", "insufficient_history", False, datetime(2021, 1, 5))
+    assert defer(ref, crossed, data_end=date(2022, 1, 1), now=now) is None
+    # 历史够长却仍然不足（切不出三段）：没有确切日子可排，按 30 天节奏回查。
+    old_bars = StockRef(
+        market="SH", code="600000", path=Path("SH600000"), first_date=date(2015, 1, 1)
+    )
+    assert defer(old_bars, prior, data_end=date(2026, 10, 16), now=now) == date(2026, 11, 18)
+    assert defer(old_bars, prior, data_end=date(2026, 10, 16), now=datetime(2026, 12, 1)) is None
+    # 时间戳缺失时宁可重查一次：结论会被刷新进库，排期没有依据。
+    no_stamp = ("market-1", "config-1", "insufficient_history", False, None)
+    assert defer(old_bars, no_stamp, data_end=date(2026, 10, 16), now=now) is None
+    # 排期只管历史样本不足；ready / no_strategy / failed 一律照常走各自判定。
+    for status in ("ready", "partial", "no_strategy", "failed"):
+        assert defer(ref, ("m", "c", status, True, now), data_end=date(2021, 2, 9), now=now) is None
+    assert defer(ref, None, data_end=date(2021, 2, 9), now=now) is None
+    # 首根日线读不到（新入库、目录里还没有）时按 30 天节奏，不假装排得出日期。
+    no_first = StockRef(market="SH", code="600000", path=Path("SH600000"), first_date=None)
+    assert defer(no_first, prior, data_end=date(2026, 10, 16), now=now) == date(2026, 11, 18)
 
 
 def test_current_strategy_snapshot_includes_holds_beyond_five_portfolio_slots(tmp_path) -> None:
@@ -1066,8 +1147,10 @@ def test_estimate_reports_exactly_what_the_next_run_will_do(tmp_path) -> None:
     # 预估的「待重算」= 下一次任务真正排进队列的量；「可复用」= 被预扫描剔掉的量。
     assert estimate["pending_symbols"] == second["total_symbols"]
     assert estimate["universe_symbols"] == 2
+    # 三个数得刚好摊开整个标的池：待重算 + 可复用 + 排期 = 全市场。
     assert (
-        estimate["pending_symbols"] + estimate["reusable_symbols"] == estimate["universe_symbols"]
+        estimate["pending_symbols"] + estimate["reusable_symbols"] + estimate["deferred_symbols"]
+        == estimate["universe_symbols"]
     )
     assert estimate["risk_trials"] == 3_000
     assert estimate["data_end"] is not None
