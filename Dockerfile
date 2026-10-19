@@ -1,7 +1,7 @@
 # 这个 tag 就是 CI 实际测试的 Node 大版本（.github/workflows/ci.yml 的 frontend 任务从
 # 本文件读它），所以升版本等于同时换掉被测工具链；`web-ui` 的 engines 只保证下限
 # （>=22.22.2）。镜像与 CI 不必再各写一个数字，也就不会出现"CI 绿、镜像用另一版本构建"。
-FROM node:24-alpine AS web-build
+FROM node:26-alpine AS web-build
 
 WORKDIR /webui
 COPY web-ui/package.json web-ui/package-lock.json ./
@@ -9,7 +9,7 @@ RUN npm ci
 COPY web-ui ./
 RUN npm run build
 
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
