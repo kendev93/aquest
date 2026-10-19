@@ -182,13 +182,23 @@ max_drawdown / total_trades / sortino / turnover / executed_buy_orders 的 float
 约 3.85 秒才抛错，而 UI 每秒轮询多个池接口，线程池被这类等待填满之后整站接口
 一起超时——这才是「页面卡死」的直接原因。
 
-**只读打开必须带回退，别照搬「只读更安全」。** 报错里的
-`Conflicting lock is held in PID 0` 指的是**同进程**冲突：研究 worker 一个进程里
-既写池表又读池表，4 条线程并发时一条线程持有读写连接，另一条线程的只读打开就被
-自己进程拒绝。第一版没有回退，结果 worker 侧一次任务级读抛错、整条全市场任务
-4 分钟就失败（`worker_failed`）。后端没有这种同进程写事务，才稳定吃到只读的收益。
-回归测试两条：只读快路径命中且不再要读写连接；只读被打回时能退回读写路径并读到
-同样的数据。
+**只读打开必须带回退，别照搬「只读更安全」。** 这里要分清两种完全不同的报错，我在
+2026-10-16 把它们混成一种过：
+
+- `IO Error: Could not set lock on file "…": Conflicting lock is held in PID 0`
+  是**文件锁被别人占着**，`PID 0` 只是锁信息上报不出持有者——共享卷（Docker Desktop 的
+  virtiofs）上跨进程冲突就是这样显示的。2026-10-19 实测：研究子进程以 `read_only=True`
+  打开也拿到这条错误，当时的持锁者是 backend 的写事务，根本不是本进程。**当时我把
+  「PID 0」当成同进程的证据，是错的。**
+- `Can't open a connection to same database file with a different configuration than
+  existing connections` 才是**同进程**的问题：只读/读写模式混着开，或者同一进程里有
+  连接没带上相同的 `memory_limit` / `threads`（见第四轮的修复）。
+
+同进程那一条确实存在：研究 worker 一个进程里既写池表又读池表，4 条线程并发时一条线程
+持有读写连接，另一条线程的只读打开就被自己进程拒绝。第一版没有回退，结果 worker 侧一次
+任务级读抛错、整条全市场任务 4 分钟就失败（`worker_failed`）。回退到实例默认模式因此
+是必需的，两条回归测试也留着：只读快路径命中且不再要读写连接；只读被打回时能退回读写
+路径并读到同样的数据。
 
 ## 生产实测（2026-10-16 13:0x，mode=full，risk_trials=3000，4 并发）
 
@@ -375,6 +385,55 @@ mode=full（全市场任务）从未受单股进度 bug 影响：用户实测均
   等待等于把「快速报错」换成「长时间白屏」，暂不改。
 - 跟踪任务的 writer 仍一击致命：它的返回值有语义（`ack.saved` 用来计数跳过），攒着不发
   就会把账算错，要单独设计。
+
+## 第五轮（2026-10-19）：backend 独占写库把研究读饿死，一只标的白跑几分钟
+
+### 现象
+
+16:34 发起的全市场轮次里，进度条写着「需重算 151 只（已完成 12 · 进行中 4 · 复用 4305 ·
+失败 9）」，检查时日志里已经是 **16 只**单标的失败，而这一轮总共才完成 56 只左右——约两成
+研究白跑。16 只的异常签名**完全相同**，没有第二种原因：
+
+```
+parallel_validation._evaluate_rule_pair → run_stock → _context_base → _corporate_actions
+→ adapter.read_corporate_actions → store.read_session → open_database(read_only=True)
+IO Error: Could not set lock on file "/data/market/market.duckdb": Conflicting lock is held in PID 0
+→ MarketDataStoreError（等满 25 秒预算后）
+```
+
+### 机制
+
+研究子进程一律**只读**打开行情库（`parallel_validation.py:44`），而 backend 每次落库、每写一次
+跟踪快照、每更新一次任务状态都要**独占**打开同一个文件。DuckDB 在一台机器上一个库文件只允许
+一个读写连接，读写打开还必须等所有只读句柄放手——于是 backend 的写窗口越密，子进程连只读句柄
+都拿不到，等满预算就抛错，`_run_full_research` 的兜底把这一只记成 failed 继续下一只。**丢的是
+整只标的几十到几百秒的已完成研究**，而它本来只需要多等一分钟。
+
+同期 backend 侧的账（第四轮修复是否有效）：6 小时 2502 个请求**全是 200**，
+`different configuration` 0 次、「行情数据库当前被其它进程占用」0 次；6 个 502 全部落在启动
+压缩把 lifespan 阻塞住的那 124 秒里。worker 侧 61 次领取失败 / 36 次进度上报失败 / 41 次取消
+状态读取失败，多数也集中在那个窗口。
+
+### 做的（止血）
+
+`_research_symbol` 只在 `MarketDataStoreError` 上退避重跑本轮研究：**2 次，30 秒 → 90 秒**，
+重跑用尽或任务已取消才记失败；失败原因从裸异常文本改成一句能读的
+「行情库被占用（backend 正在独占写状态表），退避重跑 N 次后仍拿不到只读句柄：稍后点
+「增量更新策略池」会只重算这一只」。取消语义没变（`TaskCancelledError` 照旧直接上抛，
+不睡退避）。代价是最坏情况一只标的多等 120 秒；换掉的是「一次 unlucky 的等待废掉整只标的」。
+
+回归测试两条，都在隔离树里对着未修代码确认变红：前两次占用第三次成功 →
+`failed_symbols == 0`、两次退避都发生、结果照常落库；始终占用 → 每只标的 3 次尝试、
+退避 `[30, 30, 90, 90]`、失败原因里那句话能读出来。
+
+### 没做的（结构性）
+
+状态表还和行情挤在一个文件里，所以「backend 写 → 研究读等着」这个方向仍然存在，只是不再把
+标的弄丢。真正解耦要把 `strategy_jobs` / `strategy_pool_entries` / `pool_tracking_versions`
+与关注、研究范围搬到第二个 DuckDB 文件：行情库从此只有读者 + 偶发同步写入，backend 的状态写
+不再抢它的排他锁。三处必须先设计（见「选项 5」的调研）：整库压缩与备份只认单文件、数据导出
+只走一条连接、`tracking_store.py` 在写跟踪快照的同一条连接里顺手读 `daily_bars`（跨文件就不
+是一个事务）。
 
 ## 决策记录
 
