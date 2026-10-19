@@ -1,7 +1,13 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
-import type { StrategyPoolEntry, StrategyPoolObjective, StrategyPoolSignal } from '../types'
+import StrategyPoolFollowButton from './StrategyPoolFollowButton.vue'
+import type {
+  StrategyPoolEntry,
+  StrategyPoolFollowTarget,
+  StrategyPoolObjective,
+  StrategyPoolSignal,
+} from '../types'
 import { formatNumber, formatPercent, formatSignedPercent } from '../utils/format'
 import {
   benchmarkReturn,
@@ -56,7 +62,7 @@ const props = withDefaults(defineProps<Props>(), {
 const emit = defineEmits<{
   sort: [column: StrategyPoolMetricColumn]
   rerun: [entry: StrategyPoolEntry]
-  toggleFollow: [entry: StrategyPoolEntry]
+  toggleFollow: [target: StrategyPoolFollowTarget]
 }>()
 
 // 表格指标列：列头和单元格口径一致，'status' 档不进这里（没有可点的排序按钮）。
@@ -99,10 +105,6 @@ function detailHref(entry: StrategyPoolEntry): string {
     + `&list=${encodeURIComponent(props.listContext)}`
 }
 
-function followLabel(entry: StrategyPoolEntry): string {
-  return props.followKeys.has(symbol(entry)) ? '已关注' : '关注'
-}
-
 /** 持仓中标的风控条；没持仓或还没有跟踪快照时为空，不显示占位符。 */
 function holdingRiskText(entry: StrategyPoolEntry): string {
   const risk = entryHoldingRisk(entry)
@@ -125,12 +127,6 @@ function latestCloseAsOf(entry: StrategyPoolEntry): string {
   const close = entryLatestClose(entry)
   if (!close?.asOf || close.asOf === entry.tracking_as_of_date) return ''
   return close.asOf
-}
-
-function followTitle(entry: StrategyPoolEntry): string {
-  return props.followKeys.has(symbol(entry))
-    ? `取消关注 ${entry.market} ${entry.code}`
-    : `关注 ${entry.market} ${entry.code}，加入特别关注面板`
 }
 </script>
 
@@ -165,7 +161,7 @@ function followTitle(entry: StrategyPoolEntry): string {
           <td>{{ formatPercent(metricValue(entry, 'max_drawdown', objective)) }}</td>
           <td :data-testid="`${testid}-holding-days-${entry.code}`">{{ formatHoldingDays(metricValue(entry, 'avg_holding_days', objective)) }}</td>
           <td><span v-if="entry.active_candidate?.quality?.badges?.length" class="badge-row"><i v-for="badge in entry.active_candidate.quality.badges" :key="badge">{{ badge }}</i></span><span v-else-if="entry.status === 'no_strategy'">无可计算的策略绩效</span><span v-else-if="entry.last_error" class="danger-text" :data-testid="`${testid}-entry-error-${entry.code}`" :title="entry.last_error">策略搜索失败 · 悬停查看原因</span><span v-else>—</span><small v-if="entry.active_candidate?.metrics">交易数：验证 {{ formatNumber(tradeCount(entry.active_candidate, 'validation'), 0) }} · 留出 {{ formatNumber(tradeCount(entry.active_candidate, 'holdout'), 0) }} 笔</small><small v-if="entry.active_source === 'manual'">手工覆盖 · {{ objectiveLabel(objective) }}</small></td>
-          <td><a class="text-button" :href="detailHref(entry)" :data-testid="`${testid}-detail-${entry.code}`">详情</a><button :data-testid="`${testid}-rerun-entry-${entry.code}`" class="text-button" :disabled="rerunEntryDisabled(jobContext)" :title="rerunEntryTitle(entry, jobContext)" @click="emit('rerun', entry)">{{ queuedSymbol === symbol(entry) ? '排队中' : '重跑' }}</button><button :data-testid="`${testid}-follow-entry-${entry.code}`" class="text-button" :disabled="followBusy" :title="followTitle(entry)" @click="emit('toggleFollow', entry)">{{ followLabel(entry) }}</button></td>
+          <td><a class="text-button" :href="detailHref(entry)" :data-testid="`${testid}-detail-${entry.code}`">详情</a><button :data-testid="`${testid}-rerun-entry-${entry.code}`" class="text-button" :disabled="rerunEntryDisabled(jobContext)" :title="rerunEntryTitle(entry, jobContext)" @click="emit('rerun', entry)">{{ queuedSymbol === symbol(entry) ? '排队中' : '重跑' }}</button><StrategyPoolFollowButton :target="entry" :follow-keys="followKeys" :busy="followBusy" :test-id="`${testid}-follow-entry-${entry.code}`" @toggle="emit('toggleFollow', $event)" /></td>
         </tr>
         <tr v-if="!entries.length"><td colspan="13" class="empty-copy" :data-testid="`${testid}-entry-empty`">{{ emptyText }}</td></tr>
       </tbody>

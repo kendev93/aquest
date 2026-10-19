@@ -51,6 +51,16 @@ export interface StrategyPoolFocusItem {
   name: string
 }
 
+/**
+ * 关注开关需要的最小信息。买卖信号行、持仓行和标的表行都能给全，
+ * 所以四处共用同一个按钮与同一个接口，不为某一处再开一套语义。
+ */
+export interface StrategyPoolFollowTarget {
+  market: 'SH' | 'SZ'
+  code: string
+  name?: string | null
+}
+
 export interface StrategyPoolEntry {
   created_at?: string | null
   created_return?: number | null

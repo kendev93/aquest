@@ -1965,7 +1965,7 @@ describe('StrategyPoolPage', () => {
       expect(api.addStrategyPoolFocus).toHaveBeenCalledWith('SH', '600000', '测试600000')
       const focusRow = wrapper.get('[data-testid="focus-row-600000"]')
       expect(focusRow.text()).toContain('SH 600000')
-      expect(focusRow.get('[data-testid="focus-follow-entry-600000"]').text()).toBe('已关注')
+      expect(focusRow.get('[data-testid="focus-follow-entry-600000"]').text()).toBe('取消关注')
       expect(wrapper.find('[data-testid="pool-focus-empty"]').exists()).toBe(false)
     })
 
@@ -1978,7 +1978,7 @@ describe('StrategyPoolPage', () => {
       await flushPromises()
 
       expect(wrapper.find('[data-testid="focus-row-600000"]').exists()).toBe(true)
-      expect(wrapper.get('[data-testid="pool-follow-entry-600000"]').text()).toBe('已关注')
+      expect(wrapper.get('[data-testid="pool-follow-entry-600000"]').text()).toBe('取消关注')
 
       await wrapper.get('[data-testid="focus-follow-entry-600000"]').trigger('click')
       await flushPromises()
@@ -1986,6 +1986,89 @@ describe('StrategyPoolPage', () => {
       expect(api.removeStrategyPoolFocus).toHaveBeenCalledWith('SH', '600000')
       expect(wrapper.find('[data-testid="focus-row-600000"]').exists()).toBe(false)
       expect(wrapper.find('[data-testid="pool-focus-empty"]').exists()).toBe(true)
+    })
+
+    it('follows a symbol straight from a buy signal row', async () => {
+      window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+      const wrapper = mount(StrategyPoolPage)
+      await flushPromises()
+
+      const button = wrapper.get('[data-testid="pool-buy-follow-600000"]')
+      expect(button.text()).toBe('关注')
+      expect(button.attributes('title')).toBe('关注 SH 600000，加入特别关注面板')
+
+      await button.trigger('click')
+      await flushPromises()
+
+      expect(api.addStrategyPoolFocus).toHaveBeenCalledWith('SH', '600000', '测试600000')
+      expect(wrapper.get('[data-testid="pool-buy-follow-600000"]').text()).toBe('取消关注')
+      expect(wrapper.find('[data-testid="focus-row-600000"]').exists()).toBe(true)
+    })
+
+    it('gives sell-rule, risk-exit and holding rows the same switch and one name list', async () => {
+      window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+      vi.mocked(api.getStrategyPoolJob).mockResolvedValue({
+        job_id: 'signal-1',
+        status: 'completed',
+        result: {
+          mode: 'signals',
+          objective: 'annual_return',
+          holding_scope: 'per_stock_strategy',
+          holding_snapshot_complete: true,
+          as_of_date: '2026-10-01',
+          buy_signals: [buySignal],
+          sell_signals: [{ ...buySignal, signal_type: 'sell', status: 'sell' }],
+          states: [buySignal],
+          model_portfolio: {
+            available: true,
+            holding_scope: 'per_stock_strategy',
+            holdings: [
+              { market: 'SH', code: '600000', name: '测试600000', status: 'held' },
+              // 持仓行没给名字时也要能关注：名称留空，市场与代码照样传过去。
+              { market: 'SZ', code: '000002', status: 'held' },
+            ],
+            risk_exit_signals: [
+              { market: 'SZ', code: '000002', name: '测试000002', date: '2026-10-01' },
+            ],
+          },
+        },
+      })
+      vi.mocked(api.fetchStrategyPoolFocus).mockResolvedValue([
+        { market: 'SH', code: '600000', name: '测试600000' },
+      ])
+      vi.mocked(api.addStrategyPoolFocus).mockImplementation(async (market, code, name) => [
+        { market: 'SH', code: '600000', name: '测试600000' },
+        { market: market as 'SH' | 'SZ', code, name },
+      ])
+      const wrapper = mount(StrategyPoolPage)
+      await flushPromises()
+
+      // 同一份名单：已关注的行不管出现在哪个框里，都是「取消关注」。
+      expect(wrapper.get('[data-testid="pool-buy-follow-600000"]').text()).toBe('取消关注')
+      expect(wrapper.get('[data-testid="pool-sell-rule-follow-600000"]').text()).toBe('取消关注')
+      expect(wrapper.get('[data-testid="pool-holding-follow-600000"]').text()).toBe('取消关注')
+      expect(wrapper.get('[data-testid="pool-holding-follow-000002"]').text()).toBe('关注')
+      expect(wrapper.get('[data-testid="pool-sell-risk-follow-000002"]').text()).toBe('关注')
+
+      await wrapper.get('[data-testid="pool-sell-risk-follow-000002"]').trigger('click')
+      await flushPromises()
+
+      expect(api.addStrategyPoolFocus).toHaveBeenCalledWith('SZ', '000002', '测试000002')
+      expect(wrapper.get('[data-testid="pool-sell-risk-follow-000002"]').text()).toBe('取消关注')
+      expect(wrapper.get('[data-testid="pool-holding-follow-000002"]').text()).toBe('取消关注')
+      expect(wrapper.get('[data-testid="pool-buy-follow-600000"]').text()).toBe('取消关注')
+
+      // 再从持仓行取消：同一个标的在四个位置一起回到「关注」，别的行不受影响。
+      vi.mocked(api.removeStrategyPoolFocus).mockResolvedValue([
+        { market: 'SH', code: '600000', name: '测试600000' },
+      ])
+      await wrapper.get('[data-testid="pool-holding-follow-000002"]').trigger('click')
+      await flushPromises()
+
+      expect(api.removeStrategyPoolFocus).toHaveBeenCalledWith('SZ', '000002')
+      expect(wrapper.get('[data-testid="pool-holding-follow-000002"]').text()).toBe('关注')
+      expect(wrapper.get('[data-testid="pool-sell-risk-follow-000002"]').text()).toBe('关注')
+      expect(wrapper.get('[data-testid="pool-buy-follow-600000"]').text()).toBe('取消关注')
     })
 
     it('orders followed symbols by status priority, not by follow time', async () => {

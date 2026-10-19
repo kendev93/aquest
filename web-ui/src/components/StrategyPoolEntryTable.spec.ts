@@ -148,7 +148,7 @@ describe('StrategyPoolEntryTable', () => {
   it('marks followed rows and emits the row the user acted on', async () => {
     const wrapper = mountTable({ followKeys: new Set(['SH600000']) })
 
-    expect(wrapper.get('[data-testid="pool-follow-entry-600000"]').text()).toBe('已关注')
+    expect(wrapper.get('[data-testid="pool-follow-entry-600000"]').text()).toBe('取消关注')
     expect(wrapper.get('[data-testid="pool-follow-entry-600000"]').attributes('title'))
       .toBe('取消关注 SH 600000')
 

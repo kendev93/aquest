@@ -4,6 +4,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import PageIntro from '../components/PageIntro.vue'
 import StrategyPoolEntryTable from '../components/StrategyPoolEntryTable.vue'
+import StrategyPoolFollowButton from '../components/StrategyPoolFollowButton.vue'
 import StrategyPoolPostLaunchBoard from '../components/StrategyPoolPostLaunchBoard.vue'
 import { fetchStoreStatus } from '../api/marketData'
 import {
@@ -28,6 +29,7 @@ import type {
   DataStoreStatus,
   StrategyPoolEntry,
   StrategyPoolFocusItem,
+  StrategyPoolFollowTarget,
   StrategyPoolHolding,
   StrategyPoolJobResult,
   StrategyPoolJobState,
@@ -65,7 +67,14 @@ interface ActivePoolTickerProgress {
 }
 type SellPanelItem =
   | { kind: 'rule'; key: string; signal: StrategyPoolSignal }
-  | { kind: 'risk'; key: string; signal: Record<string, unknown> }
+  // 风控退出行是引擎直接落库的宽松对象，这里顺手把它归一成关注开关需要的市场+代码+名称，
+  // 免得模板里再对 unknown 做一遍判断。
+  | {
+      kind: 'risk'
+      key: string
+      signal: Record<string, unknown>
+      target: StrategyPoolFollowTarget
+    }
 
 const objective = ref<StrategyPoolObjective | null>(null)
 const entries = ref<StrategyPoolEntry[]>([])
@@ -406,6 +415,11 @@ const sellPanelItems = computed<SellPanelItem[]>(() => [
     kind: 'risk' as const,
     key: `risk-${String(signal.market ?? '')}-${String(signal.code ?? '')}-${String(signal.date ?? index)}`,
     signal,
+    target: {
+      market: signal.market === 'SZ' ? 'SZ' as const : 'SH' as const,
+      code: String(signal.code ?? ''),
+      name: typeof signal.name === 'string' ? signal.name : '',
+    },
   })),
 ])
 const heldSymbols = computed(() => new Set(
@@ -495,21 +509,22 @@ const listContext = computed(() => new URLSearchParams({
   pageSize: String(pageSize.value),
 }).toString())
 
-async function toggleFollow(entry: StrategyPoolEntry): Promise<void> {
+async function toggleFollow(target: StrategyPoolFollowTarget): Promise<void> {
   if (focusPending.value) return
-  const key = symbol(entry)
+  const key = symbol(target)
+  const name = target.name ?? ''
   const followed = followKeys.value.has(key)
   const previous = focusItems.value
   focusPending.value = true
   // 先按本地更新让面板跟手，再用服务端返回的权威名单覆盖；被拒（例如超过上限）就整表回滚。
   focusItems.value = followed
     ? previous.filter((item) => symbol(item) !== key)
-    : [...previous, { market: entry.market, code: entry.code, name: entry.name }]
+    : [...previous, { market: target.market, code: target.code, name }]
   errorMessage.value = ''
   try {
     focusItems.value = followed
-      ? await removeStrategyPoolFocus(entry.market, entry.code)
-      : await addStrategyPoolFocus(entry.market, entry.code, entry.name)
+      ? await removeStrategyPoolFocus(target.market, target.code)
+      : await addStrategyPoolFocus(target.market, target.code, name)
   } catch (error) {
     focusItems.value = previous
     errorMessage.value = apiMessage(error)
@@ -1358,6 +1373,13 @@ onUnmounted(() => {
               <div v-for="item in visibleBuySignals" :key="item.symbol" class="signal-row">
                 <strong>{{ item.symbol }}<template v-if="item.name"> · {{ item.name }}</template></strong>
                 <span>买入信号触发 · 下一交易日执行<template v-if="holdingReturnText(item)"> · {{ holdingReturnText(item) }}</template><template v-if="signalMetricsSummary(item)"> · {{ signalMetricsSummary(item) }}</template><template v-if="qualityText(item.symbol)"> · {{ qualityText(item.symbol) }}</template></span>
+                <StrategyPoolFollowButton
+                  :target="item"
+                  :follow-keys="followKeys"
+                  :busy="focusPending"
+                  :test-id="`pool-buy-follow-${item.code}`"
+                  @toggle="toggleFollow(item)"
+                />
               </div>
             </div>
             <div v-if="buySignals.length > SIGNAL_PAGE_SIZE" class="signal-pagination" data-testid="pool-buy-pagination">
@@ -1374,10 +1396,24 @@ onUnmounted(() => {
                 <div v-if="item.kind === 'rule'" class="signal-row">
                   <strong>{{ item.signal.symbol }}<template v-if="item.signal.name"> · {{ item.signal.name }}</template></strong>
                   <span>卖出规则触发 · 下一交易日执行<template v-if="holdingReturnText(item.signal)"> · {{ holdingReturnText(item.signal) }}</template><template v-if="signalMetricsSummary(item.signal)"> · {{ signalMetricsSummary(item.signal) }}</template><template v-if="qualityText(item.signal.symbol)"> · {{ qualityText(item.signal.symbol) }}</template></span>
+                  <StrategyPoolFollowButton
+                    :target="item.signal"
+                    :follow-keys="followKeys"
+                    :busy="focusPending"
+                    :test-id="`pool-sell-rule-follow-${item.signal.code}`"
+                    @toggle="toggleFollow(item.signal)"
+                  />
                 </div>
                 <div v-else class="signal-row risk-signal">
                   <strong>{{ item.signal.market }}{{ item.signal.code }}<template v-if="item.signal.name"> · {{ item.signal.name }}</template></strong>
                   <span>{{ riskExitFilledText(item.signal) }}<template v-if="riskExitReturnText(item.signal)"> · {{ riskExitReturnText(item.signal) }}</template></span>
+                  <StrategyPoolFollowButton
+                    :target="item.target"
+                    :follow-keys="followKeys"
+                    :busy="focusPending"
+                    :test-id="`pool-sell-risk-follow-${item.target.code}`"
+                    @toggle="toggleFollow(item.target)"
+                  />
                 </div>
               </template>
             </div>
@@ -1395,6 +1431,13 @@ onUnmounted(() => {
                 <strong>{{ holding.market }}{{ holding.code }} · {{ holding.name || '—' }}</strong>
                 <span>{{ holdingStatus(holding) }}<template v-if="qualityText(symbol(holding))"> · {{ qualityText(symbol(holding)) }}</template></span>
                 <small v-if="holdingRiskSummary(holding)" :data-testid="`pool-holding-risk-${holding.code}`">{{ holdingRiskSummary(holding) }}</small>
+                <StrategyPoolFollowButton
+                  :target="holding"
+                  :follow-keys="followKeys"
+                  :busy="focusPending"
+                  :test-id="`pool-holding-follow-${holding.code}`"
+                  @toggle="toggleFollow(holding)"
+                />
               </div>
             </div>
             <div v-if="currentHoldings.length > SIGNAL_PAGE_SIZE" class="signal-pagination" data-testid="pool-holdings-pagination">
@@ -1568,6 +1611,8 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .signal-pagination { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 12px; color: #91a1b8; font-size: .82rem; }
 .signal-pagination .button-secondary { padding: 6px 9px; font-size: .82rem; }
 .signal-row, .history-row { display: grid; gap: 5px; padding: 10px 12px; border-left: 3px solid #18c467; background: #111c30; }
+/* 关注开关贴在文字下面，不占满整行宽度。 */
+.signal-row .pool-follow-button { justify-self: start; margin-top: 2px; padding-left: 0; }
 .signal-row span, .history-row span, .history-row small { color: #9aaac0; font-size: .88rem; }
 .risk-signal { border-left-color: #ff6a69; }
 .holding-row { border-left-color: #6380a5; }

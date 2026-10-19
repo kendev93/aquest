@@ -281,8 +281,8 @@ test('following a symbol scopes it into the 特别关注 panel', async ({ page }
 
   await page.getByTestId('pool-follow-entry-600000').click()
   await expect(page.getByTestId('focus-row-600000')).toBeVisible()
-  await expect(page.getByTestId('focus-follow-entry-600000')).toHaveText('已关注')
-  await expect(page.getByTestId('pool-follow-entry-600000')).toHaveText('已关注')
+  await expect(page.getByTestId('focus-follow-entry-600000')).toHaveText('取消关注')
+  await expect(page.getByTestId('pool-follow-entry-600000')).toHaveText('取消关注')
 
   await page.getByTestId('focus-follow-entry-600000').click()
   await expect(page.getByTestId('focus-row-600000')).toHaveCount(0)
