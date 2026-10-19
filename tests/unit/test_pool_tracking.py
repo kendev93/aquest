@@ -1,7 +1,37 @@
+import numpy as np
+import pandas as pd
+
 from aquest.market_data.store import DuckDbMarketDataStore
 from aquest.strategy_pool.store import DuckDbStrategyPoolStore
 from aquest.strategy_pool.tracking import account_summary
-from aquest.strategy_pool.tracking_store import PoolTrackingStore
+from aquest.strategy_pool.tracking_store import (
+    PoolTrackingStore,
+    launch_data_date,
+    launch_data_dates,
+)
+
+
+def _bars(count: int, start: str = "2020-01-01") -> pd.DataFrame:
+    close = np.linspace(10.0, 12.0, count)
+    return pd.DataFrame(
+        {
+            "date": pd.date_range(start, periods=count, freq="D"),
+            "open": close,
+            "high": close + 0.2,
+            "low": close - 0.2,
+            "close": close,
+            "volume": np.full(count, 1_000.0),
+            "amount": close * 1_000,
+            "bar_status": "completed",
+        }
+    )
+
+
+def _store_with_bars(tmp_path):  # noqa: ANN001, ANN202
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars(20), name="浦发银行")
+    store.replace_local_bars("SZ", "000001", "stock", _bars(12, "2020-02-01"), name="平安银行")
+    return store
 
 
 def test_versions_ignore_candidate_ids_metrics_and_dates_but_change_rules(tmp_path):
@@ -192,3 +222,57 @@ def test_current_versions_can_skip_the_candidate_column(tmp_path):
     # 摘要、签名与上线时间这些列表/投影还要读的东西一个都不能少。
     for key in ("version_id", "signature", "objective", "source", "summary", "status"):
         assert light[key] == full[key]
+
+
+def test_launch_data_date_is_the_last_completed_bar_and_the_batch_agrees(tmp_path) -> None:
+    """上线首日口径：封顶在今天的最后一根已完成日线；批量与逐只必须一模一样。"""
+
+    store = _store_with_bars(tmp_path)
+
+    assert launch_data_date(store, "SH", "600000") == "2020-01-20"
+    assert launch_data_date(store, "SZ", "000001") == "2020-02-12"
+    # 没有行情的标的不能编一个日期出来，否则「上线后窗口」会拿假首日去算收益。
+    assert launch_data_date(store, "SH", "688888") is None
+    assert launch_data_dates(
+        store, [("SH", "600000"), ("SZ", "000001"), ("SH", "688888"), ("SH", "600999")]
+    ) == {
+        ("SH", "600000"): "2020-01-20",
+        ("SZ", "000001"): "2020-02-12",
+    }
+
+
+def test_bootstrap_stamps_every_version_with_its_own_launch_date(tmp_path) -> None:
+    """bootstrap 走批量查询：几千只标的各扫一遍日线的写法会把整库排他锁举到读者超时。"""
+
+    store = _store_with_bars(tmp_path)
+    pool = DuckDbStrategyPoolStore(store)
+    candidate = {
+        "buy_rule": {"signals": ["technical.macd"]},
+        "sell_rule": {"signals": ["technical.rsi14"]},
+        "config": {"stop_loss_pct": 0.1},
+    }
+    for market, code in (("SH", "600000"), ("SZ", "000001")):
+        pool.upsert_automatic(
+            market=market,
+            code=code,
+            name=code,
+            annual_candidate=candidate,
+            sharpe_candidate=candidate,
+            data_fingerprint="x",
+            config_fingerprint="y",
+            source_job_id="job",
+        )
+    with store.write_transaction() as connection:
+        connection.execute("DELETE FROM pool_tracking_versions")
+
+    tracks = PoolTrackingStore(store)
+    tracks.bootstrap()
+
+    stamps = {
+        (item["market"], item["code"]): item["launch_data_date"]
+        for item in tracks.current_versions()
+    }
+    assert stamps == {
+        ("SH", "600000"): "2020-01-20",
+        ("SZ", "000001"): "2020-02-12",
+    }

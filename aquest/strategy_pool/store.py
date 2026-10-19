@@ -13,7 +13,7 @@ import duckdb
 from aquest.market_data.store import DuckDbMarketDataStore
 from aquest.market_data.store_base import _WRITE_LOCK
 
-from .tracking_store import PoolTrackingStore
+from .tracking_store import PoolTrackingStore, launch_data_date
 
 Objective = Literal["annual_return", "sharpe"]
 
@@ -204,6 +204,9 @@ class DuckDbStrategyPoolStore:
             else "no_strategy"
         )
         now = datetime.now(timezone.utc).replace(tzinfo=None)
+        # 上线首日要在写事务**之外**算：这条查询扫 4.8 GB 的日线表，留在事务里就等于
+        # 把整库排他锁按扫描时长举着，全市场研究的只读读者会一起等到超时。
+        data_date = launch_data_date(self._store, market, code)
         with _WRITE_LOCK, self._transaction() as connection:
             connection.execute(
                 """
@@ -240,7 +243,7 @@ class DuckDbStrategyPoolStore:
                     _dump_json(benchmark),
                 ],
             )
-            PoolTrackingStore.sync_entry(connection, market, code)
+            PoolTrackingStore.sync_entry(connection, market, code, data_date=data_date)
 
     def update_benchmark(
         self,
@@ -279,6 +282,9 @@ class DuckDbStrategyPoolStore:
         if status not in {"failed", "insufficient_history"}:
             raise ValueError("策略池标的错误状态无效")
         now = datetime.now(timezone.utc).replace(tzinfo=None)
+        # 上线首日要在写事务**之外**算：这条查询扫 4.8 GB 的日线表，留在事务里就等于
+        # 把整库排他锁按扫描时长举着，全市场研究的只读读者会一起等到超时。
+        data_date = launch_data_date(self._store, market, code)
         with _WRITE_LOCK, self._transaction() as connection:
             connection.execute(
                 """
@@ -330,7 +336,7 @@ class DuckDbStrategyPoolStore:
                     config_fingerprint or "",
                 ],
             )
-            PoolTrackingStore.sync_entry(connection, market, code)
+            PoolTrackingStore.sync_entry(connection, market, code, data_date=data_date)
 
     def persist_worker_entry(self, entry: Mapping[str, object], *, source_job_id: str) -> None:
         if entry.get("reset") is True:
@@ -399,6 +405,9 @@ class DuckDbStrategyPoolStore:
         _validate_objective(objective)
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         column = "manual_annual_json" if objective == "annual_return" else "manual_sharpe_json"
+        # 上线首日要在写事务**之外**算：这条查询扫 4.8 GB 的日线表，留在事务里就等于
+        # 把整库排他锁按扫描时长举着，全市场研究的只读读者会一起等到超时。
+        data_date = launch_data_date(self._store, market, code)
         with _WRITE_LOCK, self._transaction() as connection:
             connection.execute(
                 f"""
@@ -415,19 +424,22 @@ class DuckDbStrategyPoolStore:
                 [market, code, _dump_json(candidate), _dump_json(benchmark), now],
             )
 
-            PoolTrackingStore.sync_entry(connection, market, code)
+            PoolTrackingStore.sync_entry(connection, market, code, data_date=data_date)
 
     def clear_manual_override(self, market: str, code: str, objective: Objective) -> None:
         _validate_symbol(market, code)
         _validate_objective(objective)
         column = "manual_annual_json" if objective == "annual_return" else "manual_sharpe_json"
+        # 上线首日要在写事务**之外**算：这条查询扫 4.8 GB 的日线表，留在事务里就等于
+        # 把整库排他锁按扫描时长举着，全市场研究的只读读者会一起等到超时。
+        data_date = launch_data_date(self._store, market, code)
         with _WRITE_LOCK, self._transaction() as connection:
             connection.execute(
                 f"UPDATE strategy_pool_entries SET {column} = NULL, updated_at = ? "
                 "WHERE market = ? AND code = ?",
                 [datetime.now(timezone.utc).replace(tzinfo=None), market, code],
             )
-            PoolTrackingStore.sync_entry(connection, market, code)
+            PoolTrackingStore.sync_entry(connection, market, code, data_date=data_date)
 
     def active_candidate(
         self, market: str, code: str, objective: Objective

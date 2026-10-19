@@ -6,8 +6,8 @@ import hashlib
 import json
 import uuid
 import zlib
-from collections.abc import Mapping
-from datetime import datetime, timezone
+from collections.abc import Mapping, Sequence
+from datetime import date, datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -125,14 +125,71 @@ def _signature(candidate: Mapping[str, Any], *, include_max_hold_days: bool) -> 
     return hashlib.sha256(encoded).hexdigest()
 
 
+def launch_day() -> date:
+    """新版本落库那一刻的「上线日」（上海时区的自然日），首根日线按这天封顶。"""
+
+    return datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Shanghai")).date()
+
+
+def launch_data_date(store: DuckDbMarketDataStore, market: str, code: str) -> str | None:
+    """该标的上线窗口第一天的最后一根已完成日线。
+
+    必须在写事务**之外**查：`daily_bars` 现在是 4.8 GB 的表，而这条 `MAX(trade_date)`
+    以前跑在 `sync_entry` 里，`sync_entry` 又一直被调在持有整库排他锁的写事务中——等于
+    每建一个跟踪账户版本，就把全市场研究的只读读者冻住一次扫描（2026-10-19 一轮里
+    16–25 只标的就是这么等满 25 秒预算后失败的）。
+    """
+
+    with store.read_session() as connection:
+        row = connection.execute(
+            "SELECT MAX(trade_date) FROM daily_bars "
+            "WHERE market = ? AND code = ? AND bar_status = 'completed' AND trade_date <= ?",
+            [market, code, launch_day()],
+        ).fetchone()
+    value = row[0] if row else None
+    return value.isoformat() if value is not None else None
+
+
+def launch_data_dates(
+    store: DuckDbMarketDataStore, symbols: Sequence[tuple[str, str]]
+) -> dict[tuple[str, str], str | None]:
+    """批量版：一次分组查询算出很多只标的的上线首日，口径与逐只查询一致。"""
+
+    wanted = {(market, code) for market, code in symbols}
+    if not wanted:
+        return {}
+    with store.read_session() as connection:
+        rows = connection.execute(
+            "SELECT market, code, MAX(trade_date) FROM daily_bars "
+            "WHERE bar_status = 'completed' AND trade_date <= ? GROUP BY market, code",
+            [launch_day()],
+        ).fetchall()
+    return {
+        (str(market), str(code)): (value.isoformat() if value is not None else None)
+        for market, code, value in rows
+        if (str(market), str(code)) in wanted
+    }
+
+
 class PoolTrackingStore:
     def __init__(self, store: DuckDbMarketDataStore):
         self.store = store
 
     @staticmethod
     def sync_entry(
-        connection: duckdb.DuckDBPyConnection, market: str, code: str, now: str | None = None
+        connection: duckdb.DuckDBPyConnection,
+        market: str,
+        code: str,
+        now: str | None = None,
+        *,
+        data_date: str | None,
     ) -> None:
+        """同步一只标的的跟踪账户版本。
+
+        `data_date`（新版本的上线首日）必须由调用方在**写事务之外**算好传进来：这条查询
+        扫的是日线大表，留在写事务里就是把整库排他锁按扫描时长举着，见 `launch_data_date`。
+        """
+
         now = now or datetime.now(timezone.utc).isoformat()
         row = connection.execute(
             """SELECT annual_candidate_json, sharpe_candidate_json,
@@ -184,15 +241,6 @@ class PoolTrackingStore:
                     )
                 if not candidate:
                     continue
-                creation_day = (
-                    datetime.fromisoformat(now).astimezone(ZoneInfo("Asia/Shanghai")).date()
-                )
-                date_row = connection.execute(
-                    """SELECT MAX(trade_date) FROM daily_bars
-                   WHERE market=? AND code=? AND bar_status='completed' AND trade_date<=?""",
-                    [market, code, creation_day],
-                ).fetchone()
-                data_date = date_row[0].isoformat() if date_row and date_row[0] else None
                 connection.execute(
                     """INSERT INTO pool_tracking_versions
                     (version_id,market,code,objective,source,signature,candidate_json,
@@ -213,14 +261,24 @@ class PoolTrackingStore:
                 )
 
     def bootstrap(self) -> None:
+        with self.store.read_session() as connection:
+            symbols = [
+                (str(market), str(code))
+                for market, code in connection.execute(
+                    "SELECT market, code FROM strategy_pool_entries"
+                ).fetchall()
+            ]
+        # 上线首日先在写事务之外一次算完：逐只在写事务里扫一遍日线，等于把整库排他锁
+        # 按几千次扫描的总时长举着，全市场研究的只读读者就是这么被等到超时的。
+        data_dates = launch_data_dates(self.store, symbols)
+        now = datetime.now(timezone.utc).isoformat()
         with _WRITE_LOCK, self.store._connect() as connection:
             connection.execute("BEGIN TRANSACTION")
             try:
-                now = datetime.now(timezone.utc).isoformat()
-                for market, code in connection.execute(
-                    "SELECT market,code FROM strategy_pool_entries"
-                ).fetchall():
-                    self.sync_entry(connection, market, code, now)
+                for market, code in symbols:
+                    self.sync_entry(
+                        connection, market, code, now, data_date=data_dates.get((market, code))
+                    )
                 connection.execute("COMMIT")
             except BaseException:
                 connection.execute("ROLLBACK")
