@@ -556,6 +556,20 @@ def list_strategy_pool_jobs(
         raise HTTPException(status_code=503, detail="策略池任务历史暂不可用") from exc
 
 
+@router.get("/signal-days")
+def list_pool_signal_days(request: Request) -> dict[str, object]:
+    """可以回看的信号交易日：每个交易日一份（当天最后一次成功扫描），最多 10 个交易日。
+
+    信号面板默认显示最新那一天，选这里给出的日期就能回看；结果本身由 ``/jobs/{job_id}``
+    取，形状和当天那份完全一样。
+    """
+
+    try:
+        return {"data": {"items": _job_store(request).pool_signal_days()}}
+    except (MarketDataStoreError, OSError) as exc:
+        raise HTTPException(status_code=503, detail="信号交易日列表暂不可用") from exc
+
+
 @router.get("/jobs/stats")
 def get_strategy_pool_job_stats(request: Request) -> dict[str, object]:
     """按模式汇总最近终态任务的耗时。

@@ -8,6 +8,7 @@ from aquest.backtest.service import BacktestService
 from aquest.market_data.adapter import DuckDbMarketDataAdapter
 from aquest.market_data.store import DuckDbMarketDataStore
 from aquest.portfolio_backtest.service import PortfolioBacktestService
+from aquest.strategy_discovery.duckdb_job_store import DuckDbStrategyJobStore
 from aquest.strategy_pool.service import MarketStrategyPoolService
 from aquest.strategy_pool.store import FOCUS_LIMIT, DuckDbStrategyPoolStore
 from aquest.strategy_pool.tracking_store import PoolTrackingStore
@@ -726,6 +727,37 @@ def test_focus_api_rejects_members_beyond_the_limit(tmp_path) -> None:
         assert rejected.status_code == 422
         assert "特别关注最多" in rejected.json()["error"]["message"]
         assert len(client.get("/api/v1/strategy-pool/focus").json()["data"]["items"]) == FOCUS_LIMIT
+
+
+def test_signal_days_offer_only_the_last_scan_of_each_trading_day(tmp_path) -> None:
+    """回看面板能选到哪些日期：每个交易日一份、按日期倒序。
+
+    这个接口只负责告诉前端「哪天有结果可看」，每天留哪一条由任务存储的裁剪决定，两边
+    必须按同一条规则挑，否则选到的日期会点开一份已经被摘掉的结果。
+    """
+
+    store = _store(tmp_path)
+    jobs = DuckDbStrategyJobStore(store)
+    for day in (1, 2, 3):
+        for attempt in (1, 2):
+            as_of = f"2026-10-0{day}"
+            jobs.create(
+                f"scan-{day}-{attempt}",
+                operation="market_strategy_pool_tracking",
+                payload={"mode": "signals", "as_of_date": as_of},
+                description="策略池双目标跟踪",
+            )
+            jobs.write_result(
+                f"scan-{day}-{attempt}",
+                {"mode": "signals", "as_of_date": as_of, "buy_signals": []},
+            )
+    app = create_app(market_data_store=store, auto_sync_enabled=False)
+
+    with TestClient(app) as client:
+        items = client.get("/api/v1/strategy-pool/signal-days").json()["data"]["items"]
+
+    assert [item["as_of_date"] for item in items] == ["2026-10-03", "2026-10-02", "2026-10-01"]
+    assert [item["job_id"] for item in items] == ["scan-3-2", "scan-2-2", "scan-1-2"]
 
 
 def test_pool_entry_list_carries_only_what_the_table_reads(tmp_path, monkeypatch) -> None:

@@ -480,3 +480,95 @@ def test_market_pool_history_stats_average_only_counts_finished_runs(tmp_path) -
     assert stats["modes"]["single"]["samples"] == 0
     assert stats["modes"]["single"]["avg_duration_seconds"] is None
     assert stats["modes"]["single"]["throughput_samples"] == 0
+
+
+def test_signal_results_keep_only_the_last_scan_per_trading_day(tmp_path) -> None:
+    """每十分钟一次的跟踪扫描，只留每个交易日最后一份，窗口最近 10 个交易日。
+
+    2026-10-19 实测：库里 3,063 条已完成的跟踪结果共 2.58 GB，占整库（4.1 GB）的 62%，
+    而回看买卖信号只需要每天那一份。任务行必须原样留着——历史列表和耗时平均值都靠它。
+    """
+
+    store = _store(tmp_path)
+
+    def scan(job_id: str, as_of: str) -> None:
+        store.create(
+            job_id,
+            operation="market_strategy_pool_tracking",
+            payload={"mode": "signals", "as_of_date": as_of},
+            description="策略池双目标跟踪",
+        )
+        store.write_result(
+            job_id,
+            {
+                "mode": "signals",
+                "as_of_date": as_of,
+                "buy_signals": [{"symbol": "SH600000"}],
+            },
+        )
+
+    days = [f"2026-10-{day:02d}" for day in range(1, 13)]
+    for index, day in enumerate(days):
+        scan(f"s-{index:02d}-1", day)
+        scan(f"s-{index:02d}-2", day)
+    # 最新那个交易日又扫了一次：这一天的「最后一次」应该换成它
+    scan("s-11-3", days[-1])
+
+    # 全市场研究那条不是扫描结果，不该被这条规则碰
+    store.create(
+        "research-1",
+        operation="market_strategy_pool",
+        payload={"mode": "full"},
+        description="全市场策略池研究",
+    )
+    store.write_result("research-1", {"mode": "full", "results_by_objective": {}})
+
+    assert store.read_result("s-00-2") is None
+    assert store.read_result("s-01-2") is None
+    assert store.read_state("s-00-2") is not None
+    assert store.read_state("s-00-2")["status"] == "completed"
+    assert store.read_result("research-1") is not None
+
+    days_back = store.pool_signal_days()
+    assert [item["as_of_date"] for item in days_back] == list(reversed(days[2:]))
+    assert days_back[0]["job_id"] == "s-11-3"
+    assert days_back[1]["job_id"] == "s-10-2"
+    # 每天那份留着：第二新的交易日与最旧那条可回看的日期都在
+    assert store.read_result("s-10-2") is not None
+    assert store.read_result("s-02-2") is not None
+    # 同一天被顶掉的那次全市场扫描，结果已经摘掉，任务行还在
+    assert store.read_result("s-11-2") is None
+    assert store.read_state("s-11-2") is not None
+
+
+def test_incremental_signal_results_are_never_pruned(tmp_path) -> None:
+    """个股级信号刷新的结果不参与裁剪：它们才几 KB，而且当天面板要合并着用。
+
+    面板显示的最新一天 = 当天最后一次全市场扫描 + 之后逐只重跑的增量结果。把增量也裁掉，
+    「当天」那一栏就会少标的，所以规则只针对没有 market/code 的全市场扫描。
+    """
+
+    store = _store(tmp_path)
+
+    def create(job_id: str, payload: dict[str, object], as_of: str) -> None:
+        store.create(
+            job_id,
+            operation="market_strategy_pool_tracking",
+            payload=payload,
+            description="策略池双目标跟踪",
+        )
+        store.write_result(job_id, {"mode": "signals", "as_of_date": as_of, "buy_signals": []})
+
+    create("baseline-1", {"mode": "signals"}, "2026-10-19")
+    create("baseline-2", {"mode": "signals"}, "2026-10-19")
+    create(
+        "single-1",
+        {"mode": "signals", "market": "SH", "code": "600000"},
+        "2026-10-19",
+    )
+
+    assert store.read_result("baseline-1") is None
+    assert store.read_result("baseline-2") is not None
+    assert store.read_result("single-1") is not None
+    # 交易日列表只由全市场扫描构成：个股级那份不该变成一个可选日期
+    assert [item["job_id"] for item in store.pool_signal_days()] == ["baseline-2"]

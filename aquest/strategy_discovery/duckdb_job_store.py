@@ -33,6 +33,10 @@ MAX_CLAIM_REQUEUES = 3
 #: 任务时长统计每个模式最多采样多少条终态任务。跟踪轮询每十分钟写一条信号扫描
 #: 记录，全市场研究跑几小时也只有几条，不限窗口就会把样本全花在信号扫描上。
 POOL_STATS_SAMPLE_LIMIT = 60
+#: 信号扫描结果保留多少个交易日。跟踪通道每十分钟就写一次全量结果，实测一次约 2 MB：
+#: 2026-10-19 库里 3,063 条已完成的跟踪结果共 2.58 GB，占整库（4.1 GB）的 62%，而回看只需要
+#: 每个交易日那一份，留 10 个交易日也就 20 MB。任务行本身不动，耗时与历史统计照旧。
+POOL_SIGNAL_HISTORY_DAYS = 10
 POOL_STATS_MODES = ("full", "single", "signals", "portfolio")
 _WORKER_PROGRESS_FIELDS = frozenset(
     {
@@ -251,6 +255,52 @@ class DuckDbStrategyJobStore:
         if row is None:
             return None
         return {"job_id": str(row[0]), "status": _load_object(row[1]).get("status")}
+
+    def pool_signal_days(self, *, days: int = POOL_SIGNAL_HISTORY_DAYS) -> list[dict[str, object]]:
+        """有信号结果可看的交易日：每个交易日取最后一次成功扫描，最多 ``days`` 天。
+
+        给的是 ``as_of_date``（信号判定的那一天），不是任务提交时间——同一个交易日里跑的
+        多轮扫描都归到同一天，页面上选到的日期和「买卖规则在那一天收盘后判定」是同一件事。
+        """
+
+        with self._read_connection() as connection:
+            rows = connection.execute(
+                """
+                WITH candidates AS (
+                    SELECT job_id,
+                        TRY_CAST(json_extract_string(result_json, '$.as_of_date') AS DATE)
+                            AS signal_date,
+                        updated_at
+                    FROM strategy_jobs
+                    WHERE operation = 'market_strategy_pool_tracking'
+                      AND status = 'completed'
+                      AND result_json IS NOT NULL
+                      AND json_extract_string(request_json, '$.payload.mode') = 'signals'
+                      -- 只裁全市场那一份：个股级增量结果才几 KB，而且当天面板要把它们合并
+                      -- 到全市场结果上，裁掉就把最新一天的显示弄坏了。
+                      AND json_extract_string(request_json, '$.payload.market') IS NULL
+                ), ranked AS (
+                    SELECT job_id, signal_date,
+                        DENSE_RANK() OVER (ORDER BY signal_date DESC) AS day_rank,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY signal_date ORDER BY updated_at DESC, job_id DESC
+                        ) AS within_day
+                    FROM candidates
+                    WHERE signal_date IS NOT NULL
+                )
+                SELECT signal_date, job_id FROM ranked
+                WHERE within_day = 1 AND day_rank <= ?
+                ORDER BY signal_date DESC
+                """,
+                [days],
+            ).fetchall()
+        return [
+            {
+                "as_of_date": row[0].isoformat() if hasattr(row[0], "isoformat") else str(row[0]),
+                "job_id": str(row[1]),
+            }
+            for row in rows
+        ]
 
     def list_market_strategy_pool_history(
         self,
@@ -722,7 +772,55 @@ class DuckDbStrategyJobStore:
                     job_id,
                 ],
             )
+        if final_status == "completed":
+            self._prune_signal_results(job_id)
         return self.read_state(job_id) if worker_id is not None else None
+
+    def _prune_signal_results(
+        self, keep_job_id: str, *, days: int = POOL_SIGNAL_HISTORY_DAYS
+    ) -> int:
+        """把每个交易日重复的信号结果压到只剩最后一次，并且只留最近 ``days`` 个交易日。
+
+        只摘 ``result_json``：任务行、状态与耗时统计全部留着，历史列表和平均值不受影响。
+        ``keep_job_id`` 是刚写完的那一条，无论它落在哪个档位都保住，不会自裁。
+        """
+
+        with _WRITE_LOCK, self._transaction() as connection:
+            rows = connection.execute(
+                """
+                WITH candidates AS (
+                    SELECT job_id,
+                        TRY_CAST(json_extract_string(result_json, '$.as_of_date') AS DATE)
+                            AS signal_date,
+                        updated_at
+                    FROM strategy_jobs
+                    WHERE operation = 'market_strategy_pool_tracking'
+                      AND status = 'completed'
+                      AND result_json IS NOT NULL
+                      AND json_extract_string(request_json, '$.payload.mode') = 'signals'
+                      -- 只裁全市场那一份：个股级增量结果才几 KB，而且当天面板要把它们合并
+                      -- 到全市场结果上，裁掉就把最新一天的显示弄坏了。
+                      AND json_extract_string(request_json, '$.payload.market') IS NULL
+                ), ranked AS (
+                    SELECT job_id,
+                        DENSE_RANK() OVER (ORDER BY signal_date DESC) AS day_rank,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY signal_date ORDER BY updated_at DESC, job_id DESC
+                        ) AS within_day
+                    FROM candidates
+                    WHERE signal_date IS NOT NULL
+                )
+                UPDATE strategy_jobs AS jobs
+                SET result_json = NULL
+                FROM ranked
+                WHERE jobs.job_id = ranked.job_id
+                  AND jobs.job_id <> ?
+                  AND (ranked.day_rank > ? OR ranked.within_day > 1)
+                RETURNING jobs.job_id
+                """,
+                [keep_job_id, days],
+            ).fetchall()
+        return len(rows)
 
     @staticmethod
     def _select_state(
