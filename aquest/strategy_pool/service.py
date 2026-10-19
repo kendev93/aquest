@@ -33,7 +33,7 @@ from aquest.market_data.adjustment import CorporateAction, mark_adjusted
 from aquest.market_data.models import StockRef
 from aquest.market_data.risk_warning import is_risk_warning_symbol
 from aquest.market_data.store import DuckDbMarketDataStore
-from aquest.market_data.store_base import RESEARCH_START
+from aquest.market_data.store_base import RESEARCH_START, MarketDataStoreError
 from aquest.portfolio_backtest.benchmark import curve_performance
 from aquest.portfolio_backtest.models import HOLDING_RISK_FIELDS, PortfolioBacktestConfig
 from aquest.portfolio_backtest.service import PortfolioBacktestService
@@ -73,6 +73,11 @@ from .tracking_store import PoolTrackingStore
 PoolObjective = Literal["annual_return", "sharpe"]
 PoolProgressCallback = Callable[[int, int, str, Mapping[str, object] | None], None]
 PoolEntryWriter = Callable[[Mapping[str, object]], None]
+#: backend 落库与跟踪快照都要独占整个行情库，研究进程这时连只读句柄都拿不到。等到预算
+#: 用尽（worker 侧默认 25 秒）就抛错——以前这会把这只标的几十到几百秒的已完成研究直接
+#: 扔掉：2026-10-19 一轮里 16 只全是这么失败的。所以先退避重跑，重跑用尽才记失败。
+_TRANSIENT_DB_RETRIES = 2
+_TRANSIENT_DB_RETRY_SECONDS = (30.0, 90.0)
 # v6：选优加了两道硬门槛（样本不足直接出局、平均持仓超上限出局，见
 # strategy_pool.selection）；增量复用判定不再看行情指纹（每天同步都会新增
 # 日线，指纹一变全部作废，增量永远等不到复用——2026-10-07 实测每天点增量都
@@ -448,7 +453,36 @@ class MarketStrategyPoolService:
             if callable(clear_stock_cache):
                 clear_stock_cache()
             individual_service = self._individual_service_for_thread()
-            result = individual_service.run(config, progress, abort_check)
+            retries_left = _TRANSIENT_DB_RETRIES
+            retried = 0
+            while True:
+                try:
+                    result = individual_service.run(config, progress, abort_check)
+                except MarketDataStoreError as exc:
+                    # backend 每落一只标的、每写一次跟踪快照都要独占整个行情库，这时研究
+                    # 进程连只读句柄都拿不到，等满预算（worker 侧默认 25 秒）就抛到这里。
+                    # 一次 unlucky 的等待不该把这只标的几十到几百秒的已完成研究扔掉，
+                    # 所以先退避重跑；重跑次数用尽（或任务已取消）才认输。
+                    if retries_left <= 0 or (abort_check is not None and abort_check()):
+                        raise MarketDataStoreError(
+                            f"行情库被占用（backend 正在独占写状态表），退避重跑 {retried} 次"
+                            f"后仍拿不到只读句柄：稍后点「增量更新策略池」会只重算这一只"
+                        ) from exc
+                    pause = _TRANSIENT_DB_RETRY_SECONDS[
+                        min(retried, len(_TRANSIENT_DB_RETRY_SECONDS) - 1)
+                    ]
+                    retries_left -= 1
+                    retried += 1
+                    logger.warning(
+                        "全市场策略池拿不到行情库只读句柄，%s：%s；%.0f 秒后重跑这一只（第 %d 次）",
+                        f"{ref.market}:{ref.code}",
+                        exc,
+                        pause,
+                        retried,
+                    )
+                    time.sleep(pause)
+                    continue
+                break
             result_market_fingerprint = result.get("market_fingerprint")
             if not isinstance(result_market_fingerprint, str) or not result_market_fingerprint:
                 result_market_fingerprint = previous_market_fingerprint or _market_fingerprint(

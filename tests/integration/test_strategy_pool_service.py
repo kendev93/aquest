@@ -12,7 +12,9 @@ from aquest.individual_research.service import InsufficientResearchHistoryError
 from aquest.market_data.adapter import DuckDbMarketDataAdapter
 from aquest.market_data.models import StockRef
 from aquest.market_data.store import DuckDbMarketDataStore
+from aquest.market_data.store_base import MarketDataStoreError
 from aquest.screening.rules import RuleGroup
+from aquest.strategy_pool import service as pool_service
 from aquest.strategy_pool.resources import GiB, MemoryStatus
 from aquest.strategy_pool.service import MarketStrategyPoolService
 from aquest.strategy_pool.store import DuckDbStrategyPoolStore
@@ -942,3 +944,91 @@ def test_cancelled_rebuild_does_not_clear_existing_strategies(tmp_path) -> None:
     with pytest.raises(TaskCancelledError):
         service.run({"mode": "full", "rebuild": True}, job_id="cancelled", abort_check=lambda: True)
     assert pool.get("SH", "600000") is not None
+
+
+class _BusyMarketResearchService(FakeIndividualResearchService):
+    """前 N 次运行报「行情库被占用」，模拟 backend 独占写库时拿不到只读句柄。"""
+
+    def __init__(self, failures: int) -> None:
+        super().__init__()
+        self.failures = failures
+        self.calls = 0
+
+    def run(self, config, progress_callback=None, abort_check=None):  # noqa: ANN001
+        self.calls += 1
+        if self.failures > 0:
+            self.failures -= 1
+            raise MarketDataStoreError(
+                "行情数据库当前被其它进程占用或存在瞬态 I/O 错误，请稍后重试"
+            )
+        return super().run(config, progress_callback, abort_check)
+
+
+def _busy_market_setup(tmp_path):  # noqa: ANN001, ANN202
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars("2020-01-01", 60))
+    store.replace_local_bars("SZ", "000001", "stock", _bars("2020-01-11", 50))
+    pool_store = DuckDbStrategyPoolStore(store)
+    pool_store.initialize()
+    return store, pool_store
+
+
+def test_pool_research_retries_a_symbol_while_the_market_db_is_busy(tmp_path, monkeypatch) -> None:
+    """backend 落库/写跟踪快照的窗口不该白丢整只标的已完成的研究。"""
+
+    store, pool_store = _busy_market_setup(tmp_path)
+    individual = _BusyMarketResearchService(failures=2)
+    service = MarketStrategyPoolService(
+        store=store,
+        adapter=DuckDbMarketDataAdapter(store),
+        individual_service=individual,
+        pool_store=pool_store,
+    )
+    pauses: list[float] = []
+    monkeypatch.setattr(pool_service.time, "sleep", pauses.append)
+
+    result = service.run(
+        {"mode": "full", "risk_trials": 3_000, "horizon": 5},
+        job_id="retry-1",
+        entry_writer=lambda item: pool_store.persist_worker_entry(item, source_job_id="retry-1"),
+    )
+
+    assert result["failed_symbols"] == 0
+    assert result["completed_symbols"] == 2
+    assert result["errors"] == []
+    # 两次失败各退避一次（30 秒、90 秒），然后同一只标的重新研究成功。
+    assert len(pauses) == 2
+    assert individual.calls >= 4
+    assert pool_store.get("SH", "600000")["automatic_candidates"]["annual_return"] is not None
+    assert pool_store.get("SH", "600000")["last_error"] in (None, "")
+
+
+def test_pool_research_reports_contention_after_exhausting_retries(tmp_path, monkeypatch) -> None:
+    """退避重跑用尽才记失败，而且原因要写成人能看懂的一句。"""
+
+    store, pool_store = _busy_market_setup(tmp_path)
+    individual = _BusyMarketResearchService(failures=99)
+    service = MarketStrategyPoolService(
+        store=store,
+        adapter=DuckDbMarketDataAdapter(store),
+        individual_service=individual,
+        pool_store=pool_store,
+    )
+    pauses: list[float] = []
+    monkeypatch.setattr(pool_service.time, "sleep", pauses.append)
+
+    result = service.run(
+        {"mode": "full", "risk_trials": 3_000, "horizon": 5},
+        job_id="retry-2",
+        entry_writer=lambda item: pool_store.persist_worker_entry(item, source_job_id="retry-2"),
+    )
+
+    assert result["failed_symbols"] == 2
+    assert result["completed_symbols"] == 0
+    # 每只标的：首跑 + 2 次退避重跑 = 3 次尝试，退避 30 秒再 90 秒。
+    assert sorted(pauses) == [30.0, 30.0, 90.0, 90.0]
+    assert individual.calls == 6
+    message = " ".join(item["error"] for item in result["errors"])
+    assert "行情库被占用" in message
+    assert "退避重跑 2 次" in message
+    assert "增量更新策略池" in message
