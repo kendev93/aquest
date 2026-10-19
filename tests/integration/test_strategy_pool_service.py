@@ -504,10 +504,14 @@ def test_full_research_retries_insufficient_history_but_single_reuses_unchanged_
             source_job_id=str(item.get("source_job_id") or "job"),
         )
 
+    progress: list[dict[str, object]] = []
     first = service.run(
         {"mode": "full", "risk_trials": 1_000},
         job_id="first",
         entry_writer=writer,
+        progress_callback=lambda _index, _total, _phase, metadata: progress.append(
+            dict(metadata or {})
+        ),
     )
     second = service.run(
         {"mode": "full", "risk_trials": 1_000},
@@ -521,6 +525,11 @@ def test_full_research_retries_insufficient_history_but_single_reuses_unchanged_
     assert first["skipped_symbols"] == 1
     assert second["skipped_symbols"] == 1
     assert item["status"] == "insufficient_history"
+    # 进度元数据要单独报出这个数：它本来混在 skipped 里，摊不开的话进度条 100% 而
+    # 「已完成」只有几十，看着就像任务没干活（2026-10-19 用户报告）。
+    assert progress[-1]["insufficient_symbols"] == 1
+    # 「已完成」按 completed − skipped 算，所以这里必须还是 0；摊开的那一项才是 1。
+    assert progress[-1]["completed_symbols"] == progress[-1]["skipped_symbols"] == 1
     assert item["data_fingerprint"] == "data-2"
 
     single_cached = service.run(

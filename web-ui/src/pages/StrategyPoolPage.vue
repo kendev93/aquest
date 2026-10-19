@@ -230,11 +230,28 @@ const progressCountText = computed(() => {
   // total_symbols 是预扫描后的真实研究队列，进度行以它为主（2026-10-13 用户决策）。
   const reused = typeof metadata.skipped_symbols === 'number' ? metadata.skipped_symbols : 0
   const failed = typeof metadata.failed_symbols === 'number' ? metadata.failed_symbols : 0
+  // 历史样本不足（绝大多数是上市未满一年）每轮都会排进队列，也每轮都在几毫秒内以"跳过"
+  // 结束。不摊开的话，进度条 100% 而「已完成」只有几十，看着就像任务没干活（2026-10-19
+  // 用户报告）。摊开之后这一行的几项加起来就是队列长度，读者能自己对上。
+  // 注意：历史样本不足的标的本来就在 skipped 里（它们也是"没重新研究"结束的），所以
+  // 「已完成」照旧是 completed − skipped，这里只是把 skipped 拆成两半报出来，不能再减一次。
+  const insufficient = typeof metadata.insufficient_symbols === 'number'
+    ? Math.min(reused, metadata.insufficient_symbols)
+    : 0
   const successful = Math.max(0, completed - reused)
   const active = typeof metadata.current_parallelism === 'number'
     ? metadata.current_parallelism
     : activeTickerProgress.value.length
-  return `需重算 ${total} 只（已完成 ${successful} · 进行中 ${active} · 复用 ${reused} · 失败 ${failed}）`
+  const parts = [`已完成 ${successful}`]
+  if (insufficient > 0) parts.push(`历史样本不足 ${insufficient}`)
+  parts.push(`进行中 ${active}`, `复用 ${reused - insufficient}`, `失败 ${failed}`)
+  return `需重算 ${total} 只（${parts.join(' · ')}）`
+})
+const progressCountTitle = computed(() => {
+  const insufficient = (activeJob.value?.metadata ?? {}).insufficient_symbols
+  if (typeof insufficient !== 'number' || insufficient <= 0) return undefined
+  return `其中 ${insufficient} 只历史样本不足（多数是上市未满一年），本轮不产出结果：`
+    + '每次都重查一次日期，攒满一年后自动纳入研究，不需要手动重跑。'
 })
 const parallelismText = computed(() => {
   const metadata = activeJob.value?.metadata ?? {}
@@ -271,6 +288,7 @@ const researchPace = computed(() => {
   const completed = typeof metadata.completed_symbols === 'number' ? metadata.completed_symbols : 0
   const reused = typeof metadata.skipped_symbols === 'number' ? metadata.skipped_symbols : 0
   const failed = typeof metadata.failed_symbols === 'number' ? metadata.failed_symbols : 0
+  const insufficient = typeof metadata.insufficient_symbols === 'number' ? metadata.insufficient_symbols : 0
   const researched = Math.max(0, completed - reused)
   const started = researchStartedAt(job?.started_at)
   const base = started ?? researchStartedAt(job?.created_at)
@@ -280,7 +298,8 @@ const researchPace = computed(() => {
     elapsedSeconds,
     excludesQueue: started !== null,
     perSymbolSeconds: elapsedSeconds / researched,
-    remainingSymbols: Math.max(0, total - researched - failed),
+    // 历史样本不足的那些几毫秒就结束，按"每只平均耗时"去外推会凭空多出几十分钟的假剩余。
+    remainingSymbols: Math.max(0, total - researched - failed - insufficient),
   }
 })
 
@@ -1429,7 +1448,7 @@ onUnmounted(() => {
           <div v-if="isBusy" class="pool-progress" data-testid="pool-job-progress">
             <div class="progress-heading" data-testid="pool-progress-heading"><strong>{{ progressHeading }}</strong><strong>{{ progressPercent }}%</strong></div>
             <div class="progress-track"><span :style="{ width: `${progressPercent}%` }"></span></div>
-            <p v-if="progressCountText" class="progress-count" data-testid="pool-progress-count">{{ progressCountText }}</p>
+            <p v-if="progressCountText" class="progress-count" data-testid="pool-progress-count" :title="progressCountTitle">{{ progressCountText }}</p>
             <p v-if="researchPaceText" class="progress-count" data-testid="pool-research-pace">{{ researchPaceText }}</p>
             <div v-if="activeTickerProgress.length" class="active-ticker-progress" data-testid="pool-active-ticker-progress" role="list" aria-label="正在研究的标的进度">
               <div v-for="item in activeTickerProgress" :key="item.symbol" class="active-ticker-progress-row" :data-testid="`pool-active-symbol-${item.symbol}`" role="listitem">

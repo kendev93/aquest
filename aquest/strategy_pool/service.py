@@ -222,6 +222,8 @@ class _PoolProgressCoordinator:
         self._finished = 0
         self._skipped = reused_symbols
         self._failed = 0
+        # 历史样本不足（多数是上市未满一年）本轮不产出结果，也不该被算进"还要跑多久"。
+        self._insufficient = 0
         self._fractions: dict[int, float] = {}
         self._active_symbols: dict[int, dict[str, object]] = {}
         self._last_emit_at = 0.0
@@ -291,6 +293,7 @@ class _PoolProgressCoordinator:
                     "phase_label": phase_label,
                     "completed_symbols": self._completed,
                     "failed_symbols": self._failed,
+                    "insufficient_symbols": self._insufficient,
                     "skipped_symbols": self._skipped,
                     "finished_symbols": self._finished,
                     "total_symbols": self._total_symbols,
@@ -319,6 +322,7 @@ class _PoolProgressCoordinator:
         *,
         skipped: bool = False,
         failed: bool = False,
+        insufficient: bool = False,
     ) -> None:
         with self._lock:
             self._fractions.pop(index, None)
@@ -330,6 +334,8 @@ class _PoolProgressCoordinator:
                 self._completed += 1
                 if skipped:
                     self._skipped += 1
+                if insufficient:
+                    self._insufficient += 1
             self._emit(
                 self._finished,
                 phase,
@@ -340,6 +346,7 @@ class _PoolProgressCoordinator:
                     "total_symbols": self._total_symbols,
                     "skipped_symbols": self._skipped,
                     "failed_symbols": self._failed,
+                    "insufficient_symbols": self._insufficient,
                     "finished_symbols": self._finished,
                     "current_parallelism": len(self._fractions),
                     "active_symbols": [
@@ -972,7 +979,13 @@ class MarketStrategyPoolService:
                                 )
                             skipped += 1
                             completed += 1
-                            coordinator.finish(index, symbol, "历史样本不足，已记录", skipped=True)
+                            coordinator.finish(
+                                index,
+                                symbol,
+                                "历史样本不足，已记录",
+                                skipped=True,
+                                insufficient=True,
+                            )
                         else:
                             failed += 1
                             errors.append({"symbol": symbol, "error": str(exc)[:500]})

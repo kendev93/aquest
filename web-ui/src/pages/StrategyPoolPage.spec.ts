@@ -1407,6 +1407,72 @@ describe('StrategyPoolPage', () => {
     expect(wrapper.get('[data-testid="pool-active-symbol-SH:600000"] [role="progressbar"]').attributes('aria-valuenow')).toBe('37')
   })
 
+  it('breaks out the symbols skipped for insufficient history', async () => {
+    // 2026-10-19 用户报告：进度条已经 100%，「已完成」却只有 20，看着像任务没干活。
+    // 队列里那 59 只是上市未满一年，每轮都在几毫秒内以跳过结束——它们本来就在 skipped
+    // 里，所以要摊开成单独一项，但不能从「已完成」里再减一次。
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValueOnce([
+      { job_id: 'full-1', status: 'running', mode: 'full' },
+    ])
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({
+      job_id: 'full-1',
+      status: 'running',
+      progress: 0.9996,
+      metadata: {
+        total_symbols: 80,
+        completed_symbols: 4_421,
+        skipped_symbols: 4_401,
+        insufficient_symbols: 59,
+        failed_symbols: 0,
+        current_parallelism: 1,
+        maximum_parallelism: 4,
+      },
+    })
+
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    const count = wrapper.get('[data-testid="pool-progress-count"]')
+    expect(count.text()).toBe(
+      '需重算 80 只（已完成 20 · 历史样本不足 59 · 进行中 1 · 复用 4342 · 失败 0）',
+    )
+    expect(count.attributes('title')).toContain('攒满一年后自动纳入研究')
+  })
+
+  it('does not bill insufficient-history symbols to the remaining time', async () => {
+    // 那 59 只几乎不花时间；按「每只平均耗时」把它们算进剩余，会凭空多出几十分钟假预计。
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValueOnce([
+      { job_id: 'full-1', status: 'running', mode: 'full' },
+    ])
+    const startedAt = Date.now() / 1000 - 3_600
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({
+      job_id: 'full-1',
+      status: 'running',
+      progress: 0.25,
+      created_at: startedAt,
+      started_at: startedAt,
+      metadata: {
+        total_symbols: 80,
+        completed_symbols: 4_421,
+        skipped_symbols: 4_401,
+        insufficient_symbols: 59,
+        failed_symbols: 0,
+        current_parallelism: 1,
+        maximum_parallelism: 4,
+      },
+    })
+
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    const pace = wrapper.get('[data-testid="pool-research-pace"]').text()
+    expect(pace).toContain('平均每只新研究标的 3 分钟')
+    expect(pace).toContain('剩余 1 只预计还需 3 分钟')
+    expect(pace).not.toContain('剩余 60 只')
+  })
+
   it('extrapolates the remaining full-market research time from symbols actually researched', async () => {
     window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
     vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValueOnce([
