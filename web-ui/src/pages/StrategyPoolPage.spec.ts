@@ -1647,6 +1647,8 @@ describe('StrategyPoolPage', () => {
 
   it('submits an explicit rebuild and clears the displayed old pool', async () => {
     window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    // 清空重建是不可逆操作，页面上有确认框；这里按「确定」走下去。
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
     const wrapper = mount(StrategyPoolPage)
     try {
       await flushPromises()
@@ -1662,6 +1664,34 @@ describe('StrategyPoolPage', () => {
       expect(wrapper.find('[data-testid="pool-row-600000"]').exists()).toBe(false)
     } finally {
       wrapper.unmount()
+      confirmSpy.mockRestore()
+    }
+  })
+
+  it('submits nothing and keeps the pool on screen when the rebuild is dismissed', async () => {
+    // 误点一次的代价是整张策略池被删空 + 几小时重跑，所以取消必须是什么都不做。
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const wrapper = mount(StrategyPoolPage)
+    try {
+      await flushPromises()
+      await wrapper.get('[data-testid="pool-start-full"]').trigger('click')
+      await flushPromises()
+      expect(confirmSpy).toHaveBeenCalledTimes(1)
+      expect(api.createStrategyPoolJob).not.toHaveBeenCalled()
+      expect(wrapper.find('[data-testid="pool-row-600000"]').exists()).toBe(true)
+
+      // 增量更新不删东西，不该跟着弹确认。
+      confirmSpy.mockClear()
+      await wrapper.get('[data-testid="pool-start-incremental"]').trigger('click')
+      await flushPromises()
+      expect(confirmSpy).not.toHaveBeenCalled()
+      expect(api.createStrategyPoolJob).toHaveBeenLastCalledWith(expect.objectContaining({
+        mode: 'full', rebuild: false,
+      }))
+    } finally {
+      wrapper.unmount()
+      confirmSpy.mockRestore()
     }
   })
 
@@ -1710,6 +1740,7 @@ describe('StrategyPoolPage', () => {
     vi.mocked(api.fetchResearchSettings).mockResolvedValue({
       boards: ['main', 'chinext'], exclude_st: true,
     })
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
     const wrapper = mount(StrategyPoolPage)
     try {
       await flushPromises()
@@ -1725,6 +1756,7 @@ describe('StrategyPoolPage', () => {
       }))
     } finally {
       wrapper.unmount()
+      confirmSpy.mockRestore()
     }
   })
 

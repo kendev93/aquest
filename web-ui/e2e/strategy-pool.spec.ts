@@ -3,6 +3,12 @@ import { expect, test } from '@playwright/test'
 for (const rebuild of [true, false]) {
   test(`full market submission rebuild=${rebuild}`, async ({ page }) => {
     let submitted: unknown
+    let confirmText = ''
+    // 清空重建是删空整张策略池的操作，页面上要先确认一次；增量更新不该弹这个框。
+    page.on('dialog', async (dialog) => {
+      confirmText = dialog.message()
+      await dialog.accept()
+    })
     await page.addInitScript(() => {
       localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
     })
@@ -34,8 +40,43 @@ for (const rebuild of [true, false]) {
     await expect(page.getByTestId('pool-job-progress')).toBeVisible()
     if (rebuild) await expect(page.getByTestId('pool-row-600000')).toHaveCount(0)
     else await expect(page.getByTestId('pool-row-600000')).toBeVisible()
+    // 确认框只在清空重建时出现，内容要点明删什么、留什么。
+    if (rebuild) expect(confirmText).toContain('会删除当前的自动策略、手动覆盖和失败记录')
+    else expect(confirmText).toBe('')
   })
 }
+
+test('dismissing the rebuild confirmation submits nothing and keeps the pool on screen', async ({ page }) => {
+  const submitted: unknown[] = []
+  await page.addInitScript(() => {
+    localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+  })
+  await page.route('**/api/v1/**', async (route) => {
+    const path = new URL(route.request().url()).pathname
+    let data: unknown = {}
+    if (path.endsWith('/strategy-pool/jobs') && route.request().method() === 'POST') {
+      submitted.push(route.request().postDataJSON())
+      data = { job_id: 'research', status: 'queued' }
+    } else if (path.endsWith('/strategy-pool/jobs')) {
+      data = { items: [] }
+    } else if (path.endsWith('/strategy-pool/entries')) {
+      data = { items: [{
+        market: 'SH', code: '600000', name: '旧股票', status: 'no_strategy',
+        active_candidate: null, automatic_candidates: {}, manual_overrides: {},
+      }] }
+    }
+    await route.fulfill({ json: { data } })
+  })
+  page.on('dialog', async (dialog) => { await dialog.dismiss() })
+
+  await page.goto('/strategy-pool')
+  await expect(page.getByTestId('pool-row-600000')).toBeVisible()
+  await page.getByTestId('pool-start-full').click()
+  await page.waitForTimeout(300)
+  expect(submitted).toEqual([])
+  await expect(page.getByTestId('pool-row-600000')).toBeVisible()
+  await expect(page.getByTestId('pool-job-progress')).toHaveCount(0)
+})
 
 test('daily signals are not repeated on reload or objective switch, and manual scanning remains available', async ({ page }) => {
   const requests: unknown[] = []

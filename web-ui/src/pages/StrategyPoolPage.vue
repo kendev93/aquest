@@ -790,6 +790,14 @@ function toggleExcludeSt(): void {
 
 async function startFullResearch(rebuild = true): Promise<void> {
   if (isBusy.value) return
+  // 这个入口会先删空整张策略池再从头逐只重跑，误点一次的代价是几个小时，所以先确认。
+  // 增量更新不删任何东西，不拦。
+  if (rebuild && !window.confirm(
+    '清空并重建全市场：会删除当前的自动策略、手动覆盖和失败记录（行情、任务历史与特别关注名单都保留），'
+    + '然后从第一只股票重新逐只研究，跑完一轮要几个小时。确定继续？',
+  )) {
+    return
+  }
   await startTask({
     mode: 'full',
     rebuild,
@@ -1334,7 +1342,7 @@ onUnmounted(() => {
           </div>
 
           <p class="empty-copy">后台在新收盘行情就绪后每日跟踪两套策略一次；打开页面只读取缓存。需要重算时请点击“刷新当天信号”。</p>
-          <p class="empty-copy">清空重建会删除当前自动策略、手动覆盖和失败记录，从头逐只研究；增量更新保留已有策略并复用未变化的结果。</p>
+          <p class="empty-copy">清空重建会删除当前自动策略、手动覆盖和失败记录，从头逐只研究，点击后会先让你确认一次；增量更新保留已有策略并复用未变化的结果。</p>
 
           <div v-if="isBusy" class="pool-progress" data-testid="pool-job-progress">
             <div class="progress-heading" data-testid="pool-progress-heading"><strong>{{ progressHeading }}</strong><strong>{{ progressPercent }}%</strong></div>
