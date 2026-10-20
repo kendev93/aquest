@@ -50,11 +50,12 @@ updates:
       # dependabot 把镜像顶上去。3.14 这一档已经放开：2026-10-19 在同一份 --require-hashes
       # 锁上实测 python:3.14-slim 装得起来（全是 cp314 轮子，pip check 与 import 都通过），
       # 所以挡的理由不再是「装不起来」，只是「还没在 3.14 上跑过测试」。
-      # 写法注意：docker 的 tag 带后缀（如 3.15.0-slim），原先只写 ["3.14", "3.14.*"] 想挡 3.14，
-      # dependabot 照样开了 PR（#27 就是 3.14-slim），所以这里同时给比较式与几种裸号写法。
-      # 哪几种写法真能匹配，只有下周一（2026-10-26）那次定时检查能验证。
+      # docker 的 versions 认 Bundler/Gem 比较式（官方文档：Docker 用 Bundler 版本语法），
+      # 不接受 3.15.* 这种通配符——写进去会让整份配置解析失败。比较时会先剥掉 tag 后缀，
+      # 所以一条 ">= 3.15" 同时盖住 3.15-slim、3.15.0-slim 以及之后的 3.16；别写
+      # 3.15-slim，它会被当成版本号，永远匹配不上。
       - dependency-name: "python"
-        versions: [">= 3.15", "3.15", "3.15.*", "3.15-slim", "3.16", "3.16.*"]
+        versions: [">= 3.15"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
