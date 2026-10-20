@@ -7,6 +7,11 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     include: ['src/**/*.{test,spec}.{ts,tsx}'],
+    // 78 个 jsdom 环境同时起、每个都是一整棵 Vue 组件树；策略池那几条轮询用例按
+    // 「推进定时器 → 断言调用次数」写的，机器被别的进程（比如在跑的策略 worker）挤住时
+    // 会在两次全量跑里各挂一条不同的用例，单文件跑却稳定通过。限到 4 个 worker 后
+    // 连续两轮全量都绿；CI 的 4 核 runner 本来也是这个量级。
+    maxWorkers: 4,
     exclude: ['node_modules', 'e2e'],
     coverage: {
       provider: 'v8',
