@@ -1,5 +1,5 @@
-import { flushPromises, mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import * as api from '../api/strategyPool'
 import * as marketDataApi from '../api/marketData'
@@ -9,6 +9,7 @@ import type {
   StrategyPoolEntry,
   StrategyPoolJobSummary,
   StrategyPoolMetrics,
+  StrategyPoolResearchEstimate,
   StrategyPoolSignal,
 } from '../types'
 import StrategyPoolPage from './StrategyPoolPage.vue'
@@ -33,6 +34,10 @@ vi.mock('../api/strategyPool', () => ({
 }))
 
 vi.mock('../api/marketData', () => ({ fetchStoreStatus: vi.fn() }))
+
+// 页面里有轮询与延迟响应；不卸载的话，上一个用例的组件会在下一个用例里继续调 mock，
+// 断言「最后一次调用」时就会被别人的请求顶掉（全量并发跑时偶发）。
+enableAutoUnmount(afterEach)
 
 const baseCandidate: StrategyPoolCandidate = {
   candidate_id: 'candidate-1',
@@ -2220,11 +2225,35 @@ describe('StrategyPoolPage', () => {
       await flushPromises()
 
       await wrapper.get('[data-testid="pool-max-hold-days"]').setValue('30')
+      await vi.waitFor(() => {
+        expect(api.fetchStrategyPoolResearchEstimate).toHaveBeenLastCalledWith(
+          expect.objectContaining({ max_hold_days: 30 }),
+        )
+      })
+    })
+
+    it('keeps the latest estimate when an older response arrives last', async () => {
+      window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+      const resolvers: Array<(value: StrategyPoolResearchEstimate) => void> = []
+      vi.mocked(api.fetchStrategyPoolResearchEstimate).mockImplementation(
+        () => new Promise<StrategyPoolResearchEstimate>((resolve) => resolvers.push(resolve)),
+      )
+      const wrapper = mount(StrategyPoolPage)
       await flushPromises()
 
-      expect(api.fetchStrategyPoolResearchEstimate).toHaveBeenLastCalledWith(
-        expect.objectContaining({ max_hold_days: 30 }),
-      )
+      await wrapper.get('[data-testid="pool-max-hold-days"]').setValue('30')
+      await flushPromises()
+      expect(resolvers.length).toBeGreaterThan(1)
+
+      // 新参数的响应先回、旧参数的后回：界面必须停在新参数的结果上。
+      resolvers[resolvers.length - 1]!({ ...estimate, pending_symbols: 5, reusable_symbols: 4_400 })
+      for (const resolve of resolvers.slice(0, -1)) {
+        resolve({ ...estimate, pending_symbols: 112, reusable_symbols: 4_305 })
+      }
+      await flushPromises()
+
+      expect(wrapper.get('[data-testid="pool-research-estimate"]').text())
+        .toBe('待重算 5 只 · 可复用 4400 只')
     })
 
     it('names the day the deferred symbols come back on its own', async () => {

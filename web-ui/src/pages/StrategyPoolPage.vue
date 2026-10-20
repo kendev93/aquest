@@ -134,6 +134,8 @@ const researchEstimate = ref<StrategyPoolResearchEstimate | null>(null)
 const researchEstimatePending = ref(false)
 // 第一次任务历史回来之前不许预估：那时还不知道有没有任务在跑，而预扫描要读整张池表。
 const researchEstimateArmed = ref(false)
+// 连续改参数会并行发几次预估；参数已经变了，晚到的旧响应不能覆盖新结果。
+let researchEstimateSequence = 0
 const market = ref<'SH' | 'SZ'>('SH')
 const code = ref('')
 const searchQuery = ref('')
@@ -916,14 +918,16 @@ function fullJobPayload(rebuild: boolean): StrategyPoolJobRequest {
 async function refreshResearchEstimate(): Promise<void> {
   // 有任务在跑时队列已经在动了，进度条上有实时数；这时预估反而会说谎。
   if (isBusy.value) return
+  const sequence = ++researchEstimateSequence
   researchEstimatePending.value = true
   try {
-    researchEstimate.value = await fetchStrategyPoolResearchEstimate(fullJobPayload(false))
+    const next = await fetchStrategyPoolResearchEstimate(fullJobPayload(false))
+    if (sequence === researchEstimateSequence) researchEstimate.value = next
   } catch {
     // 预估失败就留白，不拿上一次的数字冒充现在的状态。
-    researchEstimate.value = null
+    if (sequence === researchEstimateSequence) researchEstimate.value = null
   } finally {
-    researchEstimatePending.value = false
+    if (sequence === researchEstimateSequence) researchEstimatePending.value = false
   }
 }
 
