@@ -362,7 +362,7 @@ def create_app(
     app = FastAPI(
         title="AQuest",
         description="基于项目自有 DuckDB 行情仓库的指标筛选、组合与回测 API",
-        version="0.1.5",
+        version="0.1.6",
         lifespan=lifespan,
     )
     app.state.screen_job_runner = selected_runner
