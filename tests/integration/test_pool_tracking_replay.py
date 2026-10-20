@@ -428,7 +428,12 @@ def test_scheduler_trading_day_dedup_and_new_version_initialization(tmp_path):
         store, jobs, market_data_adapter=DuckDbMarketDataAdapter(store)
     )
     scheduler = PoolTrackingScheduler(
-        store, backend, SimpleNamespace(has_active_jobs=lambda *args: False)
+        store,
+        backend,
+        SimpleNamespace(has_active_jobs=lambda *args: False),
+        # 这个用例验证「按交易日去重」与「新版本触发初始化」，不看最短间隔，所以关掉它；
+        # 间隔本身由下一个用例单独钉住。
+        min_interval_seconds=0,
     )
     first = scheduler.submit_if_due()
     assert first
@@ -455,6 +460,58 @@ def test_scheduler_trading_day_dedup_and_new_version_initialization(tmp_path):
     assert initialization
     assert jobs.read_request(initialization)["payload"]["initialization"] is True
     assert len(jobs.read_request(initialization)["payload"]["version_ids"]) == 2
+
+
+def test_scheduler_does_not_rescan_the_same_day_more_often_than_the_interval(tmp_path):
+    """研究跑着的时候每完成一只都会产生新版本，不能因此每几分钟就重扫一遍全市场。
+
+    2026-10-19 实测：研究期间自动扫描每 4 分钟一次、每次 53–164 秒扫 4,409 只，一天 94 次，
+    跟踪通道被占满，手动「刷新当天信号」只能排队。研究期间的新版本汇总到下一个半小时窗口
+    再扫就够；手动刷新走接口，不受这个下限限制。
+    """
+
+    from types import SimpleNamespace
+
+    from aquest.strategy_discovery.duckdb_job_store import DuckDbStrategyJobStore
+    from aquest.strategy_discovery.job_backend import DuckDbStrategyJobBackend
+    from aquest.strategy_pool.tracking_scheduler import PoolTrackingScheduler
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", bars(3))
+    pool = DuckDbStrategyPoolStore(store)
+    pool.upsert_automatic(
+        market="SH",
+        code="600000",
+        name="test",
+        annual_candidate=candidate(),
+        sharpe_candidate=candidate(),
+        data_fingerprint="a",
+        config_fingerprint="b",
+        source_job_id="job",
+    )
+    jobs = DuckDbStrategyJobStore(store)
+    backend = DuckDbStrategyJobBackend(
+        store, jobs, market_data_adapter=DuckDbMarketDataAdapter(store)
+    )
+    scheduler = PoolTrackingScheduler(
+        store, backend, SimpleNamespace(has_active_jobs=lambda *args: False)
+    )
+    assert scheduler.submit_if_due()
+
+    # 研究又完成一只：新版本出现，但离上一次扫描还不到半小时，先不扫。
+    newer = candidate()
+    newer["config"]["stop_loss_pct"] = 0.1
+    pool.upsert_automatic(
+        market="SH",
+        code="600001",
+        name="新标的",
+        annual_candidate=newer,
+        sharpe_candidate=newer,
+        data_fingerprint="a",
+        config_fingerprint="b",
+        source_job_id="job-2",
+    )
+    assert scheduler.submit_if_due() is None
 
 
 def test_detail_api_is_readonly_and_trade_pages_are_owned_by_symbol(tmp_path):

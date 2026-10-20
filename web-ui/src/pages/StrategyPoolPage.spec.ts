@@ -1834,6 +1834,30 @@ describe('StrategyPoolPage', () => {
     }
   })
 
+  it('shows a submitting state while the signal scan request is in flight', async () => {
+    // 提交要写一次任务行，研究正在跑时库被它占着，可能要等十几秒；这段时间既没有进度条
+    // 也没有任务 id，按钮必须自己说明「正在提交」，否则看起来就是点了没反应。
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    let resolveCreate: (value: unknown) => void = () => {}
+    vi.mocked(api.createStrategyPoolJob).mockImplementation(
+      () => new Promise((resolve) => { resolveCreate = resolve }) as never,
+    )
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    const button = wrapper.get('[data-testid="pool-refresh-signals"]')
+    await button.trigger('click')
+    expect(button.text()).toBe('正在提交…')
+    expect(button.attributes('disabled')).toBeDefined()
+    expect(wrapper.get('[data-testid="pool-submitting"]').text()).toContain('正在把任务提交给后端')
+
+    resolveCreate({ job_id: 'scan-1', status: 'queued' })
+    await flushPromises()
+    expect(wrapper.find('[data-testid="pool-submitting"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="pool-refresh-signals"]').text()).toBe('刷新当天信号')
+    wrapper.unmount()
+  })
+
   it('says so when the signal trading days cannot be read', async () => {
     // 一个空的禁用下拉框看不出是「读不到」还是「还没有历史」，所以读失败时换成一句说明。
     window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')

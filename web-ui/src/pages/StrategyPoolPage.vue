@@ -108,6 +108,7 @@ const signalResult = computed<StrategyPoolJobResult | null>(() => {
 })
 const marketStatus = ref<DataStoreStatus | null>(null)
 const activeJobId = ref('')
+const submittingTask = ref(false)
 const activeIntent = ref<StrategyPoolMode | ''>('')
 const activeJob = ref<StrategyPoolJobState | null>(null)
 const queuedSingleSymbol = ref('')
@@ -1015,6 +1016,10 @@ async function startTask(
   payload: { mode: StrategyPoolMode; automatic?: boolean; rebuild?: boolean; risk_trials?: 1_000 | 2_000 | 3_000; max_hold_days?: number | null; market?: 'SH' | 'SZ'; code?: string; objective?: StrategyPoolObjective; boards?: StrategyPoolBoard[]; exclude_st?: boolean },
   intent: StrategyPoolMode,
 ): Promise<void> {
+  // 提交到后端要写一次任务行：研究正在跑时库被它占着，这一步可能要等十几秒。
+  // 这段时间 activeJob 还没回来、进度条也不会出现，不给反馈就像点了没反应。
+  if (submittingTask.value) return
+  submittingTask.value = true
   errorMessage.value = ''
   pollWarning.value = ''
   successMessage.value = ''
@@ -1041,6 +1046,8 @@ async function startTask(
     void pollJob(created.job_id, intent)
   } catch (error) {
     errorMessage.value = apiMessage(error)
+  } finally {
+    submittingTask.value = false
   }
 }
 
@@ -1525,17 +1532,17 @@ onUnmounted(() => {
             <label class="ticker-input">最长持仓(交易日)
               <input v-model.number="maxHoldDays" type="number" min="1" max="10000" :disabled="isBusy" data-testid="pool-max-hold-days">
             </label>
-            <button class="button-primary" data-testid="pool-start-full" :disabled="isBusy" @click="startFullResearch(true)">清空并重建全市场</button>
-            <button class="button-secondary" data-testid="pool-start-incremental" :disabled="isBusy" @click="startFullResearch(false)">增量更新策略池</button>
+            <button class="button-primary" data-testid="pool-start-full" :disabled="isBusy || submittingTask" @click="startFullResearch(true)">清空并重建全市场</button>
+            <button class="button-secondary" data-testid="pool-start-incremental" :disabled="isBusy || submittingTask" @click="startFullResearch(false)">增量更新策略池</button>
             <small v-if="researchEstimateText" class="research-estimate" data-testid="pool-research-estimate" :title="researchEstimateTitle">{{ researchEstimateText }}</small>
-            <button class="button-secondary" data-testid="pool-refresh-signals" :disabled="isBusy || !entries.some((item) => item.active_candidate)" @click="startSignalScan()">刷新当天信号</button>
+            <button class="button-secondary" data-testid="pool-refresh-signals" :disabled="isBusy || submittingTask || !entries.some((item) => item.active_candidate)" @click="startSignalScan()">{{ submittingTask ? '正在提交…' : '刷新当天信号' }}</button>
             <label class="ticker-input">市场
               <select v-model="market" :disabled="isBusy"><option value="SH">SH</option><option value="SZ">SZ</option></select>
             </label>
             <label class="ticker-input">单股代码
               <input v-model="code" inputmode="numeric" maxlength="6" placeholder="例如 600000" :disabled="isBusy" data-testid="pool-single-code">
             </label>
-            <button class="button-secondary" data-testid="pool-rerun-single" :disabled="isBusy" @click="startSingleRerun">逐股重跑</button>
+            <button class="button-secondary" data-testid="pool-rerun-single" :disabled="isBusy || submittingTask" @click="startSingleRerun">逐股重跑</button>
           </div>
 
           <p class="empty-copy">后台在新收盘行情就绪后每日跟踪两套策略一次；打开页面只读取缓存。需要重算时请点击“刷新当天信号”。</p>
@@ -1561,6 +1568,7 @@ onUnmounted(() => {
         <p v-if="errorMessage" class="notice error-notice" role="alert">{{ errorMessage }}</p>
         <p v-if="successMessage" class="notice success-notice" role="status">{{ successMessage }}</p>
         <p v-if="pollWarning && isBusy" class="notice poll-warning" role="status" data-testid="pool-poll-warning">{{ pollWarning }}</p>
+        <p v-if="submittingTask" class="empty-copy" role="status" data-testid="pool-submitting">正在把任务提交给后端，研究正在跑时这一步可能要等十几秒…</p>
 
         <div class="signal-controls-row" data-testid="pool-signal-controls">
           <label class="signal-sort">买卖信号排序
