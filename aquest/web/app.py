@@ -132,6 +132,13 @@ def create_app(
     pool_tracking_enabled: bool | None = None,
     strategy_tracking_interval_seconds: float | None = None,
 ) -> FastAPI:
+    # uvicorn 只为自己的 logger 配 handler，应用模块的 INFO 会落到没有 handler 的 root
+    # 被丢掉——启动维护、自动同步这类一次性提示在生产里看不到。这里补上 root handler；
+    # 测试或嵌入方已经配过 logging 时 basicConfig 不会重复添加。
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     owns_runner = runner is None
     selected_store = cast(
         DuckDbMarketDataStore,
