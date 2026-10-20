@@ -1834,6 +1834,21 @@ describe('StrategyPoolPage', () => {
     }
   })
 
+  it('says so when the signal trading days cannot be read', async () => {
+    // 一个空的禁用下拉框看不出是「读不到」还是「还没有历史」，所以读失败时换成一句说明。
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValue([])
+    vi.mocked(api.fetchPoolSignalDays).mockRejectedValue(new Error('temporary unavailable'))
+
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="pool-signal-date"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="pool-signal-day-unavailable"]').text())
+      .toContain('暂时读不到交易日')
+    wrapper.unmount()
+  })
+
   it('lets the user review an earlier trading day through the signal date picker', async () => {
     // 「信号日期」下拉给的是后端每个交易日最后一次全市场扫描；默认最新那天，选更早的就按
     // 那天的名单显示，标题不能再宣称是「当天」。

@@ -261,6 +261,8 @@ class DuckDbStrategyJobStore:
 
         给的是 ``as_of_date``（信号判定的那一天），不是任务提交时间——同一个交易日里跑的
         多轮扫描都归到同一天，页面上选到的日期和「买卖规则在那一天收盘后判定」是同一件事。
+        日期取自提交时的 payload（回放的目标日），不解析结果本身：结果一份约 2 MB，全表
+        2.58 GB，线上按结果解析会直接把查询内存吃爆。
         """
 
         with self._read_connection() as connection:
@@ -268,20 +270,19 @@ class DuckDbStrategyJobStore:
                 """
                 WITH candidates AS (
                     SELECT job_id,
-                        TRY_CAST(json_extract_string(result_json, '$.as_of_date') AS DATE)
-                            AS signal_date,
+                        TRY_CAST(
+                            json_extract_string(request_json, '$.payload.as_of_date') AS DATE
+                        ) AS signal_date,
                         updated_at
                     FROM strategy_jobs
                     WHERE operation = 'market_strategy_pool_tracking'
                       AND status = 'completed'
                       AND result_json IS NOT NULL
                       AND json_extract_string(request_json, '$.payload.mode') = 'signals'
-                      -- 只裁全市场那一份：个股级增量结果才几 KB，而且当天面板要把它们合并
-                      -- 到全市场结果上，裁掉就把最新一天的显示弄坏了。
                       AND json_extract_string(request_json, '$.payload.market') IS NULL
                 ), ranked AS (
                     SELECT job_id, signal_date,
-                        DENSE_RANK() OVER (ORDER BY signal_date DESC) AS day_rank,
+                        DENSE_RANK() OVER (ORDER BY signal_date DESC NULLS LAST) AS day_rank,
                         ROW_NUMBER() OVER (
                             PARTITION BY signal_date ORDER BY updated_at DESC, job_id DESC
                         ) AS within_day
@@ -789,9 +790,13 @@ class DuckDbStrategyJobStore:
             rows = connection.execute(
                 """
                 WITH candidates AS (
+                    -- 交易日从提交时的 payload 读：那里写的就是这次回放的目标日，而且只有
+                    -- 几十字节。早先版本这里解析 result_json（一份约 2 MB、全表 2.58 GB），
+                    -- 线上第一次查询就把 DuckDB 的内存吃爆了（500）。
                     SELECT job_id,
-                        TRY_CAST(json_extract_string(result_json, '$.as_of_date') AS DATE)
-                            AS signal_date,
+                        TRY_CAST(
+                            json_extract_string(request_json, '$.payload.as_of_date') AS DATE
+                        ) AS signal_date,
                         updated_at
                     FROM strategy_jobs
                     WHERE operation = 'market_strategy_pool_tracking'
@@ -802,19 +807,23 @@ class DuckDbStrategyJobStore:
                       -- 到全市场结果上，裁掉就把最新一天的显示弄坏了。
                       AND json_extract_string(request_json, '$.payload.market') IS NULL
                 ), ranked AS (
-                    SELECT job_id,
-                        DENSE_RANK() OVER (ORDER BY signal_date DESC) AS day_rank,
+                    SELECT job_id, signal_date,
+                        DENSE_RANK() OVER (ORDER BY signal_date DESC NULLS LAST) AS day_rank,
                         ROW_NUMBER() OVER (
                             PARTITION BY signal_date ORDER BY updated_at DESC, job_id DESC
-                        ) AS within_day
+                        ) AS within_day,
+                        ROW_NUMBER() OVER (ORDER BY updated_at DESC, job_id DESC) AS newest_rank
                     FROM candidates
-                    WHERE signal_date IS NOT NULL
                 )
                 UPDATE strategy_jobs AS jobs
                 SET result_json = NULL
                 FROM ranked
                 WHERE jobs.job_id = ranked.job_id
                   AND jobs.job_id <> ?
+                  -- 最新那一条永远不裁：当天面板就靠它（它也刚被写进来，这道判断是兜底）。
+                  AND ranked.newest_rank > 1
+                  -- 解析不出目标日的记录不进列表也不裁（日期为空时 day_rank 也是空，
+                  -- 下面的比较不成立），宁可留着也不误伤当天那份。
                   AND (ranked.day_rank > ? OR ranked.within_day > 1)
                 RETURNING jobs.job_id
                 """,

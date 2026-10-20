@@ -559,16 +559,19 @@ def test_incremental_signal_results_are_never_pruned(tmp_path) -> None:
         )
         store.write_result(job_id, {"mode": "signals", "as_of_date": as_of, "buy_signals": []})
 
-    create("baseline-1", {"mode": "signals"}, "2026-10-19")
-    create("baseline-2", {"mode": "signals"}, "2026-10-19")
+    create("baseline-1", {"mode": "signals", "as_of_date": "2026-10-19"}, "2026-10-19")
+    create("baseline-2", {"mode": "signals", "as_of_date": "2026-10-19"}, "2026-10-19")
     create(
         "single-1",
-        {"mode": "signals", "market": "SH", "code": "600000"},
+        {"mode": "signals", "as_of_date": "2026-10-19", "market": "SH", "code": "600000"},
         "2026-10-19",
     )
+    # 提交时没有目标日的老记录（理论上不存在）：不进日期列表，结果也不裁，避免误伤
+    create("no-date", {"mode": "signals"}, "2026-10-19")
 
     assert store.read_result("baseline-1") is None
     assert store.read_result("baseline-2") is not None
     assert store.read_result("single-1") is not None
+    assert store.read_result("no-date") is not None
     # 交易日列表只由全市场扫描构成：个股级那份不该变成一个可选日期
     assert [item["job_id"] for item in store.pool_signal_days()] == ["baseline-2"]

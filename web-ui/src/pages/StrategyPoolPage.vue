@@ -94,6 +94,7 @@ const historyStats = ref<StrategyPoolJobStats | null>(null)
 const liveSignalResult = ref<StrategyPoolJobResult | null>(null)
 const pinnedSignalResult = ref<StrategyPoolJobResult | null>(null)
 const signalDays = ref<StrategyPoolSignalDay[]>([])
+const signalDaysUnavailable = ref(false)
 const signalDate = ref('')
 const latestSignalDay = computed(() => signalDays.value[0]?.as_of_date ?? '')
 const signalIsPinned = computed(() => !!signalDate.value
@@ -657,7 +658,9 @@ async function refreshPage(_refreshSignals: boolean): Promise<void> {
     page.value = Math.min(page.value, Math.max(1, Math.ceil(nextEntries.length / pageSize.value)))
     history.value = nextHistory
     void loadHistoryStats()
-    await Promise.all([restoreLatestSignalResult(nextHistory), loadSignalDays()])
+    // 交易日列表只喂那个下拉，不挡页面首屏；读不到时下拉自己退成一句说明。
+    void loadSignalDays()
+    await restoreLatestSignalResult(nextHistory)
   } catch (error) {
     errorMessage.value = apiMessage(error)
   } finally {
@@ -717,8 +720,11 @@ async function loadSignalDays(): Promise<void> {
   const before = signalDate.value
   try {
     signalDays.value = (await fetchPoolSignalDays()) ?? []
+    signalDaysUnavailable.value = false
   } catch {
+    // 读不到和「还没有历史」要分开说：一个空下拉框看不出是哪一种。
     signalDays.value = []
+    signalDaysUnavailable.value = true
     return
   }
   if (!before || before === latestSignalDay.value) signalDate.value = latestSignalDay.value
@@ -1139,8 +1145,9 @@ async function finishJob(
           : result
         page.value = 1
         // 新的一天要出现在日期下拉里；用户钉在更早的交易日时不抢他的显示。
-        await loadSignalDays()
-        if (!signalIsPinned.value) signalDate.value = latestSignalDay.value
+        void loadSignalDays().then(() => {
+          if (!signalIsPinned.value) signalDate.value = latestSignalDay.value
+        })
       }
       successMessage.value = `当天信号已按 ${objectiveLabel(objective.value)} 目标更新。`
       await loadHistory()
@@ -1561,11 +1568,10 @@ onUnmounted(() => {
               <option v-for="option in SIGNAL_SORT_OPTIONS" :key="option.value" :value="option.value">{{ option.label }}</option>
             </select>
           </label>
-          <label class="signal-sort">信号日期
+          <label v-if="signalDays.length" class="signal-sort">信号日期
             <select
               :value="signalDate"
               data-testid="pool-signal-date"
-              :disabled="!signalDays.length"
               @change="selectSignalDay(($event.target as HTMLSelectElement).value)"
             >
               <option v-for="day in signalDays" :key="day.as_of_date" :value="day.as_of_date">
@@ -1573,6 +1579,7 @@ onUnmounted(() => {
               </option>
             </select>
           </label>
+          <small v-else-if="signalDaysUnavailable" data-testid="pool-signal-day-unavailable">信号日期暂时读不到交易日，稍后会自动重试</small>
           <small>按全区间指标排序只改显示顺序；没有全区间指标的标的排在末尾。</small>
           <small v-if="signalIsPinned" data-testid="pool-signal-day-note">{{ signalDate }} 那天最后一次全市场扫描的结果；之后的逐股重跑不进历史视图</small>
           <small v-else-if="signalDays.length > 1" data-testid="pool-signal-day-note">可回看最近 {{ signalDays.length }} 个交易日的扫描结果，默认显示最新行情那天</small>
