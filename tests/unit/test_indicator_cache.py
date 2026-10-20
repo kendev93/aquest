@@ -1112,6 +1112,8 @@ def test_sqlite_cache_maintenance_prunes_stale_generations_and_vacuums(tmp_path:
 
     assert stats["pruned_indicator_cache"] == 2
     assert stats["vacuumed"] is True
+    # VACUUM 重建的库页写在 WAL 里，维护结束必须截断，否则文件系统上的占用收不回来。
+    assert stats["wal_size_after"] == 0
     remaining = connection.execute(
         "SELECT code, formula_version, data_fingerprint, bar_offset FROM indicator_cache "
         "ORDER BY code, formula_version, data_fingerprint, bar_offset"

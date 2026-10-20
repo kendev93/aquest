@@ -1217,17 +1217,21 @@ class SqliteIndicatorCacheStore:
             "size_before": size_before,
             "vacuumed": False,
         }
-        if free_ratio < vacuum_min_free_ratio:
-            stats["size_after"] = size_before
-            return stats
+        if free_ratio >= vacuum_min_free_ratio:
+            try:
+                connection.execute("VACUUM")
+                stats["vacuumed"] = True
+            except sqlite3.Error as exc:
+                stats["vacuum_error"] = str(exc)[:200]
+        # VACUUM 在 WAL 模式下把重建后的库页先写进 WAL，不截断的话文件还占着几 GB；
+        # 启动阶段没有别的读连接，TRUNCATE 能立刻把空间还给文件系统。
         try:
-            connection.execute("VACUUM")
+            connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         except sqlite3.Error as exc:
-            stats["vacuum_error"] = str(exc)[:200]
-            stats["size_after"] = self._path.stat().st_size if self._path.is_file() else 0
-            return stats
-        stats["vacuumed"] = True
+            stats["wal_checkpoint_error"] = str(exc)[:200]
         stats["size_after"] = self._path.stat().st_size if self._path.is_file() else 0
+        wal_path = Path(f"{self._path}-wal")
+        stats["wal_size_after"] = wal_path.stat().st_size if wal_path.is_file() else 0
         stats["page_size"] = page_size
         return stats
 
