@@ -403,6 +403,96 @@ def test_incremental_preserves_exit_state_and_pending_orders(tmp_path, settings)
     assert resumed["checkpoint"] == replay_account(service, ref, version)["checkpoint"]
 
 
+def test_tracking_runner_batches_snapshots_and_falls_back_when_the_batch_fails(tmp_path):
+    """扫描里的快照按批上报；整批被拒的那一只从 completed 退回 skipped。
+
+    逐只写库实测 15.8 ms，4,409 只需要约 70 秒串行写库；批量上报让后端一个事务写完。
+    这里钉住：一次扫描只发一批、被拒的条目计数不重复、批量通道失败时退回逐只写。
+    """
+
+    from aquest.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
+    from aquest.strategy_pool.tracking_runner import PoolTrackingRunner
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    codes = ("600000", "600001", "600002")
+    for code in codes:
+        store.replace_local_bars("SH", code, "stock", bars(3))
+    pool = DuckDbStrategyPoolStore(store)
+    for code in codes:
+        pool.upsert_automatic(
+            market="SH",
+            code=code,
+            name="test",
+            annual_candidate=candidate(),
+            sharpe_candidate=None,
+            data_fingerprint="a",
+            config_fingerprint="b",
+            source_job_id="job",
+        )
+    tracks = PoolTrackingStore(store)
+
+    def payload() -> dict:
+        return {"objective": "annual_return", "as_of_date": "2026-09-03"}
+
+    batches: list[list[str]] = []
+
+    def batch_write(items):
+        batches.append([item["version_id"] for item in items])
+        results = []
+        for index, item in enumerate(items):
+            signature = "stale-signature" if index == 1 else item["signature"]
+            results.append(
+                {
+                    "saved": tracks.save_snapshots(
+                        [(item["version_id"], signature, item["snapshot"])]
+                    )[0]
+                }
+            )
+        return results
+
+    result = PoolTrackingRunner(store, EvaluationWorkerBudget(2)).run(
+        payload(),
+        progress=lambda *args: None,
+        abort_check=lambda: False,
+        writer=lambda item: (_ for _ in ()).throw(AssertionError("不该逐只写")),
+        batch_writer=batch_write,
+    )
+
+    assert len(batches) == 1 and len(batches[0]) == 3
+    assert result["completed_symbols"] == 2
+    assert result["skipped_symbols"] == 1
+    assert result["failed_symbols"] == 0
+    rejected = batches[0][1]
+    assert tracks.snapshot(rejected) is None
+    saved = [tracks.snapshot(v) for v in batches[0] if v != rejected]
+    assert all(item is not None for item in saved)
+
+    # 批量通道整体失败：退回逐只写，结果一只能不少
+    fallback: list[str] = []
+
+    def broken_batch(_items):
+        raise RuntimeError("backend hiccup")
+
+    def write_one(item):
+        fallback.append(item["version_id"])
+        return {
+            "saved": tracks.save_snapshots(
+                [(item["version_id"], item["signature"], item["snapshot"])]
+            )[0]
+        }
+
+    result = PoolTrackingRunner(store, EvaluationWorkerBudget(2)).run(
+        payload(),
+        progress=lambda *args: None,
+        abort_check=lambda: False,
+        writer=write_one,
+        batch_writer=broken_batch,
+    )
+    assert len(fallback) == 3
+    assert result["completed_symbols"] == 3
+    assert result["skipped_symbols"] == 0
+
+
 def test_scheduler_trading_day_dedup_and_new_version_initialization(tmp_path):
     from types import SimpleNamespace
 

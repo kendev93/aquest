@@ -423,11 +423,15 @@ class StrategyDiscoveryWorker:
             if not callable(writer):
                 raise ValueError("策略 worker 不支持保存跟踪账户")
             tracking_writer = writer
+            batch_writer = getattr(self._job_store, "write_pool_tracking_many", None)
             return self._pool_tracking_service.run(
                 payload,
                 progress=progress_callback,
                 abort_check=abort_check,
                 writer=lambda snapshot: tracking_writer(job_id, snapshot),
+                batch_writer=(
+                    (lambda items: batch_writer(job_id, items)) if callable(batch_writer) else None
+                ),
             )
         if operation == "market_strategy_pool":
             if self._strategy_pool_service is None:

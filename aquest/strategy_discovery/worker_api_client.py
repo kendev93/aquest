@@ -8,7 +8,7 @@ import math
 import os
 import socket
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from threading import RLock
 from urllib.error import HTTPError, URLError
@@ -259,6 +259,21 @@ class HttpStrategyJobClient:
             {"worker_id": self.worker_id, "entry": dict(snapshot)},
         )
         return dict(_mapping(response.get("data"), "跟踪保存结果"))
+
+    def write_pool_tracking_many(
+        self, job_id: str, snapshots: Sequence[Mapping[str, object]]
+    ) -> list[dict[str, object]]:
+        """一次上报多只跟踪快照，后端合成一个事务落库。"""
+
+        response = self._post(
+            f"/internal/strategy-worker/jobs/{job_id}/pool-tracking/batch",
+            {"worker_id": self.worker_id, "entries": [dict(item) for item in snapshots]},
+        )
+        data = _mapping(response.get("data"), "批量跟踪保存结果")
+        saved = data.get("saved")
+        if not isinstance(saved, list) or len(saved) != len(snapshots):
+            raise ValueError("批量跟踪保存结果与上报条数不一致")
+        return [{"saved": bool(flag)} for flag in saved]
 
     def write_pool_entry(self, job_id: str, entry: Mapping[str, object]) -> None:
         self._post(

@@ -729,6 +729,72 @@ def test_focus_api_rejects_members_beyond_the_limit(tmp_path) -> None:
         assert len(client.get("/api/v1/strategy-pool/focus").json()["data"]["items"]) == FOCUS_LIMIT
 
 
+def test_worker_can_save_tracking_snapshots_in_one_batch(tmp_path) -> None:
+    """扫描逐只算完发过来的快照合成一个事务落库，返回的标志与传入顺序一一对应。"""
+
+    from aquest.strategy_pool.tracking_store import PoolTrackingStore
+
+    store = _store(tmp_path)
+    pool = DuckDbStrategyPoolStore(store)
+    for code in ("600000", "600001"):
+        pool.upsert_automatic(
+            market="SH",
+            code=code,
+            name="测试",
+            annual_candidate={
+                "candidate_id": "a",
+                "buy_rule": {"signals": ["technical.macd"]},
+                "sell_rule": {"signals": []},
+                "config": {"stop_loss_pct": 0.1},
+            },
+            sharpe_candidate=None,
+            data_fingerprint="x",
+            config_fingerprint="y",
+            source_job_id="job",
+        )
+    jobs = DuckDbStrategyJobStore(store)
+    jobs.create(
+        "track-1",
+        operation="market_strategy_pool_tracking",
+        payload={"mode": "signals", "as_of_date": "2026-10-19"},
+        description="策略池双目标跟踪",
+    )
+    assert jobs.claim_next("worker-a") == "track-1"
+    tracks = PoolTrackingStore(store)
+    versions = {v["code"]: v for v in tracks.current_versions()}
+
+    def snapshot(day: str) -> dict:
+        return {"summary": {"as_of_date": day}, "checkpoint": {"positions": {}}}
+
+    first, second = versions["600000"], versions["600001"]
+    app = create_app(market_data_store=store, auto_sync_enabled=False, strategy_worker_token=TOKEN)
+    with TestClient(app) as client:
+        response = client.post(
+            "/internal/strategy-worker/jobs/track-1/pool-tracking/batch",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+            json={
+                "worker_id": "worker-a",
+                "entries": [
+                    {
+                        "version_id": first["version_id"],
+                        "signature": first["signature"],
+                        "snapshot": snapshot("2026-10-19"),
+                    },
+                    {
+                        "version_id": second["version_id"],
+                        "signature": "stale-signature",
+                        "snapshot": snapshot("2026-10-19"),
+                    },
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["saved"] == [True, False]
+    assert tracks.snapshot(first["version_id"])["summary"]["as_of_date"] == "2026-10-19"
+    assert tracks.snapshot(second["version_id"]) is None
+
+
 def test_signal_days_offer_only_the_last_scan_of_each_trading_day(tmp_path) -> None:
     """回看面板能选到哪些日期：每个交易日一份、按日期倒序。
 

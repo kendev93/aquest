@@ -276,3 +276,59 @@ def test_bootstrap_stamps_every_version_with_its_own_launch_date(tmp_path) -> No
         ("SH", "600000"): "2020-01-20",
         ("SZ", "000001"): "2020-02-12",
     }
+
+
+def test_save_snapshots_batches_with_the_same_guards_as_single_writes(tmp_path):
+    """一次扫描把几千只快照合成批次写：口径必须和逐只写完全一致。
+
+    逐只写实测 15.8 ms，4,409 只就是约 70 秒的串行写库；批量摊到 0.14 ms/行。这里钉住
+    三件事：签名不符不写、日期不许倒退（同批内也按顺序判定）、有效条目真落库。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    pool = DuckDbStrategyPoolStore(store)
+    for code in ("600000", "600001"):
+        pool.upsert_automatic(
+            market="SH",
+            code=code,
+            name="test",
+            annual_candidate={
+                "candidate_id": "a",
+                "buy_rule": {"signals": ["technical.macd"]},
+                "sell_rule": {"signals": []},
+                "config": {"stop_loss_pct": 0.1},
+            },
+            sharpe_candidate=None,
+            data_fingerprint="x",
+            config_fingerprint="y",
+            source_job_id="job",
+        )
+    tracks = PoolTrackingStore(store)
+    versions = {v["code"]: v for v in tracks.current_versions()}
+
+    def snapshot(day: str) -> dict:
+        return {"summary": {"as_of_date": day}, "checkpoint": {"positions": {}}}
+
+    first, second = versions["600000"], versions["600001"]
+    saved = tracks.save_snapshots(
+        [
+            (first["version_id"], first["signature"], snapshot("2026-10-19")),
+            (second["version_id"], "not-the-signature", snapshot("2026-10-19")),
+            (first["version_id"], first["signature"], snapshot("2026-10-18")),
+        ]
+    )
+
+    assert saved == [True, False, False]
+    assert tracks.snapshot(first["version_id"])["summary"]["as_of_date"] == "2026-10-19"
+    assert tracks.snapshot(second["version_id"]) is None
+    assert next(v for v in tracks.current_versions() if v["code"] == "600000")["status"] == "ready"
+
+    # 同批重复版本：后一条更新的照常写入，旧的不许覆盖新的
+    saved = tracks.save_snapshots(
+        [
+            (first["version_id"], first["signature"], snapshot("2026-10-17")),
+            (first["version_id"], first["signature"], snapshot("2026-10-20")),
+        ]
+    )
+    assert saved == [False, True]
+    assert tracks.snapshot(first["version_id"])["summary"]["as_of_date"] == "2026-10-20"

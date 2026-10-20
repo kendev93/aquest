@@ -64,6 +64,12 @@ class WorkerPoolCheckpoint(WorkerIdentity):
     entry: dict[str, object]
 
 
+class WorkerPoolTrackingBatch(WorkerIdentity):
+    """一次上报多只标的的跟踪结果，落库合并成一个事务。"""
+
+    entries: list[dict[str, object]] = Field(min_length=1, max_length=256)
+
+
 def require_worker_token(request: Request) -> None:
     expected = str(getattr(request.app.state, "strategy_worker_token", "") or "")
     if not expected:
@@ -189,6 +195,49 @@ def persist_pool_tracking(
                 str(entry["version_id"]), str(entry["signature"]), snapshot
             )
         return {"data": {"saved": saved}}
+    except (MarketDataStoreError, OSError) as exc:
+        raise _store_unavailable() from exc
+    except (ValueError, KeyError) as exc:
+        raise _conflict(ValueError(str(exc))) from exc
+
+
+@router.post(
+    "/jobs/{job_id}/pool-tracking/batch",
+    dependencies=[Depends(require_worker_token)],
+)
+def persist_pool_tracking_batch(
+    job_id: str, payload: WorkerPoolTrackingBatch, request: Request
+) -> dict[str, object]:
+    """批量保存跟踪快照：扫描逐只算完就发过来，这里合成一个事务写库。
+
+    返回的 ``saved`` 与传入顺序一一对应；带 ``error`` 的条目照旧走失败状态记录。
+    单只上报那条接口保留不动（重跑单只等场景还在用）。
+    """
+
+    try:
+        claimed = _store(request).read_claimed_job(job_id, payload.worker_id)
+        envelope = claimed["request"]
+        if (
+            not isinstance(envelope, Mapping)
+            or envelope.get("operation") != "market_strategy_pool_tracking"
+        ):
+            raise ValueError("当前任务不是策略池跟踪任务")
+        tracks = PoolTrackingStore(request.app.state.market_data_store)
+        pending: list[tuple[str, str, Mapping[str, object]]] = []
+        positions: list[int] = []
+        results: list[bool] = [False] * len(payload.entries)
+        for index, entry in enumerate(payload.entries):
+            if entry.get("error"):
+                tracks.record_error(str(entry["version_id"]), str(entry["error"]))
+                continue
+            snapshot = entry.get("snapshot")
+            if not isinstance(snapshot, Mapping):
+                raise ValueError("跟踪快照必须是对象")
+            positions.append(index)
+            pending.append((str(entry["version_id"]), str(entry["signature"]), snapshot))
+        for position, saved in zip(positions, tracks.save_snapshots(pending), strict=True):
+            results[position] = saved
+        return {"data": {"saved": results}}
     except (MarketDataStoreError, OSError) as exc:
         raise _store_unavailable() from exc
     except (ValueError, KeyError) as exc:
