@@ -1046,3 +1046,67 @@ def test_fingerprint_matches_revision_across_adjust_version_suffix() -> None:
     assert not _fingerprint_matches_revision(chunked, f"{revision}~other")
     # 没有块标记的指纹（帧指纹降级路径）不该被误判成命中。
     assert not _fingerprint_matches_revision("unrelated-fingerprint", revision)
+
+
+def test_sqlite_cache_maintenance_prunes_stale_generations_and_vacuums(tmp_path: Path) -> None:
+    """过期指纹的缓存行自动清掉、空页多时回收文件；最新一代与别的标的原样不动。
+
+    写入路径只清「这次重算过」的标的；数据变了却没再被重算的标的会留着旧指纹的行，
+    而旧指纹永远查不到（读取按当前指纹精确匹配）——所以这里按每个分组的最新 computed_at
+    判定过期代。
+    """
+
+    from aquest.market_data.store import DuckDbMarketDataStore
+    from aquest.market_data.store_indicator_cache_sqlite import SqliteIndicatorCacheStore
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    cache = SqliteIndicatorCacheStore(store, tmp_path / "cache.sqlite")
+    connection = cache._connection()
+    columns = (
+        "market, code, timeframe, price_basis, formula_id, formula_version, "
+        "data_fingerprint, bar_offset, data_start, data_end, data_length, "
+        "values_blob, signals_blob, computed_at"
+    )
+
+    def row(code: str, fingerprint: str, offset: int, computed_at: str) -> tuple:
+        return (
+            "SH",
+            code,
+            "1d",
+            "raw",
+            "technical.ma5",
+            "v1",
+            fingerprint,
+            offset,
+            "2015-01-05",
+            "2026-10-19",
+            2065,
+            b"values",
+            b"signals",
+            computed_at,
+        )
+
+    rows = [
+        row("600000", "old", 0, "2026-10-01T00:00:00"),
+        row("600000", "old", 1, "2026-10-01T00:00:00"),
+        row("600000", "new", 0, "2026-10-02T00:00:00"),
+        row("600000", "new", 1, "2026-10-02T00:00:00"),
+        row("600001", "only", 0, "2026-10-02T00:00:00"),
+    ]
+    connection.executemany(
+        f"INSERT INTO indicator_cache ({columns}) VALUES ({','.join('?' * 14)})", rows
+    )
+
+    stats = cache.maintain(vacuum_min_free_ratio=0.0)
+
+    assert stats["pruned_indicator_cache"] == 2
+    assert stats["vacuumed"] is True
+    remaining = connection.execute(
+        "SELECT code, data_fingerprint, bar_offset FROM indicator_cache "
+        "ORDER BY code, data_fingerprint, bar_offset"
+    ).fetchall()
+    assert remaining == [("600000", "new", 0), ("600000", "new", 1), ("600001", "only", 0)]
+
+    # 再跑一次没有可清的行，也不该出错
+    again = cache.maintain(vacuum_min_free_ratio=0.0)
+    assert again["pruned_indicator_cache"] == 0

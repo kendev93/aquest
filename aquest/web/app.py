@@ -290,6 +290,16 @@ def create_app(
                 "status": "failed",
                 "reason": "maintenance_check_failed",
             }
+        # 指标缓存（SQLite）里每天的新指纹都会留下一份，旧指纹永远查不到。启动时清掉
+        # 过期代并在空页多时 VACUUM——此刻还没有别的连接，是唯一能独占整库的时机。
+        # 失败不影响启动：清理下次还会再做。
+        try:
+            cache_stats = selected_store.maintain_indicator_cache()
+            if cache_stats:
+                app.state.indicator_cache_maintenance = cache_stats
+                logger.info("启动时指标缓存维护: %s", cache_stats)
+        except Exception:  # noqa: BLE001 - cache maintenance must not block the app
+            logger.exception("启动时指标缓存维护失败")
         if owns_runner:
             maintenance_scheduler = DatabaseMaintenanceScheduler(
                 selected_maintenance_service,

@@ -92,6 +92,18 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
 
         return self._indicator_cache_backend
 
+    def maintain_indicator_cache(self) -> dict[str, object]:
+        """清理过期指标缓存并回收文件空间；后端不支持维护时返回空。
+
+        SQLite 后端把每天新指纹的缓存都留在文件里（旧指纹永远查不到），启动时清一次、
+        必要时 VACUUM；DuckDB 后端的空间由全库压缩负责，这里不重复做。
+        """
+
+        maintain = getattr(self._indicator_cache, "maintain", None)
+        if not callable(maintain):
+            return {}
+        return dict(maintain())
+
     @property
     def health(self) -> DuckDbHealthStore:
         """Read-only health scan over the stored daily bars."""

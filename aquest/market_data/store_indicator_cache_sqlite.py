@@ -1095,6 +1095,86 @@ class SqliteIndicatorCacheStore:
             "latest_computed_at": _timestamp_text(_latest(built_in[3], custom[3])),
         }
 
+    def prune_stale_generations(self) -> dict[str, int]:
+        """删掉每个（标的, 周期, 口径, 公式）里不是最新一代的缓存行。
+
+        写入路径只清理「这次重算过的」标的；数据变了却再没被重算的标的会一直留着旧指纹的
+        行。旧指纹永远查不到（读取按当前指纹精确匹配），删掉最多换来一次重算，所以这里按
+        每个分组的最新 ``computed_at`` 判定——同一代的分块共享同一个时间戳。
+        """
+
+        pruned = {"indicator_cache": 0, "custom_indicator_cache": 0}
+        with _WRITE_LOCK:
+            connection = self._connection()
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                for table, partition in (
+                    (
+                        "indicator_cache",
+                        "market, code, timeframe, price_basis, formula_id",
+                    ),
+                    (
+                        "custom_indicator_cache",
+                        "market, code, timeframe, price_basis, formula_hash, "
+                        "parameter_hash, engine_version",
+                    ),
+                ):
+                    cursor = connection.execute(
+                        f"""
+                        DELETE FROM {table} WHERE rowid IN (
+                            SELECT rowid FROM (
+                                SELECT rowid,
+                                       MAX(computed_at) OVER (PARTITION BY {partition})
+                                           AS newest
+                                FROM {table}
+                            ) WHERE computed_at < newest
+                        )
+                        """
+                    )
+                    pruned[table] = max(0, int(cursor.rowcount or 0))
+                connection.execute("COMMIT")
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
+        return pruned
+
+    def maintain(self, *, vacuum_min_free_ratio: float = 0.2) -> dict[str, object]:
+        """清理过期代并（必要时）回收文件空间；返回一份可写进日志的统计。
+
+        VACUUM 要独占整个文件，只在没有其他连接时（启动维护阶段）调用才安全；这里失败
+        不算错误——清理已经生效，空间下次再收。
+        """
+
+        if self._store.read_only:
+            return {"skipped": "read_only"}
+        pruned = self.prune_stale_generations()
+        connection = self._connection()
+        page_size = int(connection.execute("PRAGMA page_size").fetchone()[0])
+        page_count = int(connection.execute("PRAGMA page_count").fetchone()[0])
+        free_pages = int(connection.execute("PRAGMA freelist_count").fetchone()[0])
+        size_before = self._path.stat().st_size if self._path.is_file() else 0
+        free_ratio = free_pages / page_count if page_count else 0.0
+        stats: dict[str, object] = {
+            "pruned_indicator_cache": pruned["indicator_cache"],
+            "pruned_custom_indicator_cache": pruned["custom_indicator_cache"],
+            "free_ratio_before": round(free_ratio, 3),
+            "size_before": size_before,
+            "vacuumed": False,
+        }
+        if free_ratio < vacuum_min_free_ratio:
+            stats["size_after"] = size_before
+            return stats
+        try:
+            connection.execute("VACUUM")
+        except sqlite3.Error as exc:
+            stats["vacuum_error"] = str(exc)[:200]
+            stats["size_after"] = self._path.stat().st_size if self._path.is_file() else 0
+            return stats
+        stats["vacuumed"] = True
+        stats["size_after"] = self._path.stat().st_size if self._path.is_file() else 0
+        stats["page_size"] = page_size
+        return stats
+
 
 def default_indicator_cache_path(database_path: str | Path) -> Path:
     """Sibling SQLite file for the market database's derived caches."""
