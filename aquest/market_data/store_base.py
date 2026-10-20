@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import re
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from functools import lru_cache
@@ -1348,6 +1348,125 @@ class _DuckDbStoreBase:
                 DEFAULT_PRICE_BASIS,
                 force_updated_at,
             ],
+        )
+
+    def _refresh_instruments_batch(
+        self,
+        connection: duckdb.DuckDBPyConnection,
+        entries: Sequence[
+            tuple[
+                str,
+                str,
+                str,
+                str,
+                str | None,
+                str | None,
+                str | None,
+                str,
+                bool,
+            ]
+        ],
+    ) -> None:
+        """一批标的的覆盖区间合成两条语句刷新（单只版本见 ``_refresh_instrument``）。
+
+        ON CONFLICT 里引用不到 INSERT 的源别名（DuckDB 只给了 ``excluded``），所以
+        「强制 bump 的 updated_at」拆成第二步：先按字段差异决定是否 bump，再把
+        ``force`` 的那批统一 bump 一次。两组合起来与逐只刷新的条件完全等价。
+        """
+
+        if not entries:
+            return
+        updated_at = _now()
+        values = ",".join("(?,?,?,?,?,?,?,?,?)" for _ in entries)
+        params: list[object] = []
+        for (
+            market,
+            code,
+            instrument_type,
+            board,
+            name,
+            provider,
+            source_path,
+            source_state,
+            _force,
+        ) in entries:
+            params.extend(
+                [
+                    market,
+                    code,
+                    _clean_name(name),
+                    instrument_type,
+                    board,
+                    source_path,
+                    provider,
+                    source_state,
+                    updated_at,
+                ]
+            )
+        keys = ",".join("(?,?)" for _ in entries)
+        key_params = [value for entry in entries for value in (entry[0], entry[1])]
+        connection.execute(
+            f"""
+            INSERT INTO instruments (
+                market, code, name, instrument_type, board, source_path, first_date, last_date,
+                bar_count, source_state, last_provider, updated_at
+            )
+            SELECT meta.market, meta.code, meta.name, meta.instrument_type, meta.board,
+                   meta.source_path, agg.first_date, agg.last_date, agg.bar_count,
+                   meta.source_state, meta.provider, meta.updated_at
+            FROM (VALUES {values})
+                 AS meta(market, code, name, instrument_type, board, source_path, provider,
+                         source_state, updated_at)
+            JOIN (
+                SELECT bars.market, bars.code, MIN(bars.trade_date) AS first_date,
+                       MAX(bars.trade_date) AS last_date, COUNT(*) AS bar_count
+                FROM daily_bars AS bars
+                JOIN (VALUES {keys}) AS wanted(market, code)
+                  ON bars.market = wanted.market AND bars.code = wanted.code
+                WHERE bars.price_basis = ?
+                GROUP BY bars.market, bars.code
+            ) AS agg
+              ON agg.market = meta.market AND agg.code = meta.code
+            ON CONFLICT (market, code) DO UPDATE SET
+                name = COALESCE(excluded.name, instruments.name),
+                instrument_type = excluded.instrument_type,
+                board = excluded.board,
+                source_path = COALESCE(excluded.source_path, instruments.source_path),
+                first_date = excluded.first_date,
+                last_date = excluded.last_date,
+                bar_count = excluded.bar_count,
+                source_state = excluded.source_state,
+                last_provider = COALESCE(excluded.last_provider, instruments.last_provider),
+                updated_at = CASE
+                    WHEN instruments.name IS DISTINCT FROM
+                             COALESCE(excluded.name, instruments.name)
+                      OR instruments.instrument_type IS DISTINCT FROM excluded.instrument_type
+                      OR instruments.board IS DISTINCT FROM excluded.board
+                      OR (excluded.source_path IS NOT NULL AND
+                          instruments.source_path IS DISTINCT FROM excluded.source_path)
+                      OR instruments.first_date IS DISTINCT FROM excluded.first_date
+                      OR instruments.last_date IS DISTINCT FROM excluded.last_date
+                      OR instruments.bar_count IS DISTINCT FROM excluded.bar_count
+                      OR instruments.source_state IS DISTINCT FROM excluded.source_state
+                      OR (excluded.last_provider IS NOT NULL AND
+                          instruments.last_provider IS DISTINCT FROM excluded.last_provider)
+                    THEN excluded.updated_at
+                    ELSE instruments.updated_at
+                END
+            """,
+            [*params, *key_params, DEFAULT_PRICE_BASIS],
+        )
+        forced = [(entry[0], entry[1]) for entry in entries if entry[8]]
+        if not forced:
+            return
+        forced_values = ",".join("(?,?)" for _ in forced)
+        forced_params = [value for pair in forced for value in pair]
+        connection.execute(
+            f"""
+            UPDATE instruments SET updated_at = ?
+            WHERE (market, code) IN (SELECT * FROM (VALUES {forced_values}))
+            """,
+            [updated_at, *forced_params],
         )
 
     def _refresh_instrument_coverage(

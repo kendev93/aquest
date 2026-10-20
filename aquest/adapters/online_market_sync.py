@@ -10,10 +10,10 @@ import re
 import time
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
-from threading import Lock
+from threading import Lock, local
 from typing import Any, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlsplit, urlunsplit
@@ -125,58 +125,46 @@ _EASTMONEY_SHAREBONUS_PAGE_SIZE = 100
 _EASTMONEY_SHAREBONUS_MAX_PAGES = 20
 
 
-class _BatchedBarWriter:
-    """把并发到达的逐只在线日线合并成一个事务写库。
+class _BarWriteBuffer:
+    """每个同步线程自己攒的写缓冲：攒满 ``flush_size`` 只、或线程收尾时一次写入。
 
-    同步器用 8 个线程各拉各的，写库却是每只一次事务（实测单只 42 ms，其中 11.4 ms 是
-    BEGIN/COMMIT）。这里攒批提交：谁先把批攒满谁负责冲刷，其余线程等自己的那一份结果；
-    每个调用仍然要等自己落库之后才返回，可见性与逐只写一致。
+    整批语句的收益随批大小走：1,104 万行的临时库上实测 200 只一批 5.4 ms/只、20 只
+    9.4 ms/只、4 只 36.9 ms/只（比逐只 17.9 ms 还贵）。而 8 个线程并发到达的瞬间平均
+    只有 4 只，靠合并器凑不出大批；线程内部本来就有连续的一串标的，按 32 只攒一次正好。
+    代价是单只可见性从「抓完即写」变成「最多攒 32 只」，同步报表的 written_bars 在冲刷
+    时回填。
     """
 
-    def __init__(self, store: Any, *, max_batch: int = 64, provider: str = "eastmoney") -> None:
+    def __init__(self, store: Any, *, flush_size: int = 32, provider: str = "eastmoney") -> None:
         self._store = store
-        self._max_batch = max_batch
+        self._flush_size = flush_size
         self._provider = provider
-        self._lock = Lock()
-        self._pending: list[tuple[pd.DataFrame, Future[tuple[int, int]]]] = []
-        self._flushing = False
+        self._frames: list[pd.DataFrame] = []
+        self.written = 0
+        self.failed = 0
 
-    def upsert(self, frame: pd.DataFrame) -> tuple[int, int]:
-        future: Future[tuple[int, int]] = Future()
-        with self._lock:
-            self._pending.append((frame, future))
-            leader = not self._flushing
-            if leader:
-                self._flushing = True
-                batch = self._take_locked()
-            else:
-                batch = []
-        if leader:
-            self._drain(batch)
-        return future.result()
+    def add(self, frame: pd.DataFrame) -> None:
+        self._frames.append(frame)
+        if len(self._frames) >= self._flush_size:
+            self.flush()
 
-    def _take_locked(self) -> list[tuple[pd.DataFrame, Future[tuple[int, int]]]]:
-        batch = self._pending[: self._max_batch]
-        del self._pending[: self._max_batch]
-        return batch
-
-    def _drain(self, batch: list[tuple[pd.DataFrame, Future[tuple[int, int]]]]) -> None:
-        while batch:
-            frames = [frame for frame, _ in batch]
+    def flush(self) -> None:
+        if not self._frames:
+            return
+        batch, self._frames[:] = self._frames[:], []
+        results = None
+        for attempt in (1, 2):
             try:
-                results = self._store.upsert_online_bars_many(frames, provider=self._provider)
-            except BaseException as exc:  # 整批失败：每个等待者都得到同一个错误
-                for _, future in batch:
-                    future.set_exception(exc)
+                results = self._store.upsert_online_bars_many(batch, provider=self._provider)
+            except Exception:
+                logger.exception("批量写入行情失败（第 %s 次）", attempt)
             else:
-                for (_, future), result in zip(batch, results, strict=True):
-                    future.set_result(result)
-            with self._lock:
-                if self._pending:
-                    batch = self._take_locked()
-                else:
-                    self._flushing = False
-                    batch = []
+                break
+        if results is None:
+            # 写不进去就按失败计，别让一次库抖动把整轮同步判死。
+            self.failed += len(batch)
+            return
+        self.written += sum(written for written, _updated in results)
 
 
 class OnlineProviderError(RuntimeError):
@@ -1005,8 +993,8 @@ def _default_module() -> OnlineModule:
 
 
 class OnlineMarketSync:
-    #: 只在一次同步的线程池生命周期内设置：并发写入的合并器。
-    _batched_bar_writer: _BatchedBarWriter | None
+    #: 每个同步线程自己的写缓冲（线程本地，避免 8 个线程互相等）。
+    _bar_buffers: local
     """Synchronize SH/SZ stock data through the project-owned store contract."""
 
     def __init__(
@@ -1028,6 +1016,7 @@ class OnlineMarketSync:
         self._catalog_sources = tuple(
             catalog_sources if catalog_sources is not None else _DEFAULT_CATALOG_SOURCES
         )
+        self._bar_buffers = local()
 
     def supports_process_staging(self) -> bool:
         """Return whether the provider can be reconstructed safely in a child process."""
@@ -1326,9 +1315,6 @@ class OnlineMarketSync:
                 if progress_callback is not None:
                     progress_callback(current, total)
 
-            # 8 个线程各自逐只写库时，每只一次事务（单只 42 ms 里 11.4 ms 是提交）；
-            # 合并器把它们攒批提交，每个请求仍等自己落库后才返回。
-            self._batched_bar_writer = _BatchedBarWriter(self._store)
             with ThreadPoolExecutor(
                 max_workers=len(batches),
                 thread_name_prefix="eastmoney-sync",
@@ -1353,7 +1339,6 @@ class OnlineMarketSync:
                     written_bars += batch_report.written_bars
                     failure_reasons.update(batch_report.failure_reasons)
                     history_sources.update(batch_report.history_sources)
-            self._batched_bar_writer = None
         now = self._clock().isoformat()
         self._store.set_meta("last_online_sync_at", now)
         self._store.set_meta("last_online_provider", "eastmoney")
@@ -1607,6 +1592,8 @@ class OnlineMarketSync:
         written_bars = 0
         history_sources: Counter[str] = Counter()
         module = self._module_factory()
+        buffer = _BarWriteBuffer(self._store)
+        self._bar_buffers.buffer = buffer
         for market, code, instrument_type, board, name in batch:
             if abort_check is not None and abort_check():
                 raise MarketDataCancelledError("行情同步已取消")
@@ -1677,6 +1664,11 @@ class OnlineMarketSync:
                 )
             processed += 1
             target_done()
+        buffer.flush()
+        self._bar_buffers.buffer = None
+        written_bars += buffer.written
+        if buffer.failed:
+            failure_reasons["批量写入失败"] += buffer.failed
         return _BatchReport(
             processed=processed,
             updated_files=updated_files,
@@ -1747,14 +1739,15 @@ class OnlineMarketSync:
         )
 
     def _write_online(self, frame: pd.DataFrame) -> tuple[int, int]:
-        """在线日线落库：同步跑动期间走合并器（多只一个事务），否则直接写。
+        """在线日线落库：同步线程里先攒进写缓冲，攒满一批再写；其他路径直接写。
 
-        合并器只在一次同步的线程池生命周期内挂在 self 上；单只调用与测试路径照旧。
+        缓冲期间这里返回 (0, 0)，写入数在线程收尾冲刷时回填到批次报表里。
         """
 
-        writer: _BatchedBarWriter | None = getattr(self, "_batched_bar_writer", None)
-        if writer is not None:
-            return writer.upsert(frame)
+        buffer: _BarWriteBuffer | None = getattr(self._bar_buffers, "buffer", None)
+        if buffer is not None:
+            buffer.add(frame)
+            return (0, 0)
         return self._store.upsert_online_bars(frame)
 
     def _fetch_target(

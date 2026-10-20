@@ -1339,30 +1339,21 @@ def test_market_sync_config_rejects_unknown_and_removed_providers() -> None:
         MarketSyncConfig(provider="tdx")  # type: ignore[arg-type]
 
 
-def test_batched_bar_writer_merges_concurrent_writes_and_returns_each_result(
-    tmp_path, monkeypatch
-) -> None:
-    """8 路并发写库合并成一个事务：每个调用拿到自己的计数，一只都不能少。"""
+def test_bar_write_buffer_flushes_in_batches_and_counts_written(tmp_path, monkeypatch) -> None:
+    """线程内攒满一批再写：批大小、写入计数、整批失败不抛都按约定走。"""
 
-    from concurrent.futures import ThreadPoolExecutor
-    from threading import Barrier
-
-    from aquest.adapters.online_market_sync import _BatchedBarWriter
+    from aquest.adapters.online_market_sync import _BarWriteBuffer
 
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
-    writer = _BatchedBarWriter(store, max_batch=8)
+    sizes: list[int] = []
     real = store.upsert_online_bars_many
-    batches: list[int] = []
 
     def recording(frames, *, provider: str = "eastmoney"):
-        batches.append(len(frames))
+        sizes.append(len(frames))
         return real(frames, provider=provider)
 
-    monkeypatch.setattr(store, "upsert_online_bars_many", recording)
-    barrier = Barrier(8)
-
-    def one(index: int) -> tuple[int, int]:
-        frame = pd.DataFrame(
+    def frame_for(index: int):
+        return pd.DataFrame(
             {
                 "market": ["SH"],
                 "code": [f"{600000 + index:06d}"],
@@ -1380,15 +1371,25 @@ def test_batched_bar_writer_merges_concurrent_writes_and_returns_each_result(
                 "provider": ["eastmoney"],
             }
         )
-        barrier.wait()
-        return writer.upsert(frame)
 
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        results = list(pool.map(one, range(40)))
-
-    assert results == [(1, 0)] * 40
-    assert sum(batches) == 40
-    # 并发到达的那一刻至少有一批被合并（否则和逐只写没有区别）
-    assert max(batches) >= 2
+    monkeypatch.setattr(store, "upsert_online_bars_many", recording)
+    buffer = _BarWriteBuffer(store, flush_size=4)
+    for index in range(10):
+        buffer.add(frame_for(index))
+    assert sizes == [4, 4]
+    assert buffer.written == 8
+    buffer.flush()
+    assert sizes == [4, 4, 2]
+    assert buffer.written == 10
     with store.read_session() as connection:
-        assert connection.execute("SELECT COUNT(*) FROM daily_bars").fetchone()[0] == 40
+        assert connection.execute("SELECT COUNT(*) FROM daily_bars").fetchone()[0] == 10
+
+    # 整批写不进去：不抛异常，按失败计数，别让一次库抖动拖垮整轮同步
+    def broken(_frames, *, provider: str = "eastmoney"):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(store, "upsert_online_bars_many", broken)
+    failing = _BarWriteBuffer(store, flush_size=4)
+    failing.add(frame_for(99))
+    failing.flush()
+    assert (failing.written, failing.failed) == (0, 1)

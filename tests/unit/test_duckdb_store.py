@@ -1249,3 +1249,106 @@ def test_online_batch_write_matches_per_row_writes_exactly(tmp_path: Path) -> No
         return bars, instruments
 
     assert snapshot(row_by_row) == snapshot(batched)
+
+
+def test_online_batch_matches_per_row_protection_and_counts(tmp_path: Path) -> None:
+    """批量入口的三种保护与逐只写一致：本地行、已收盘不被降级、已有在线行更新。
+
+    批量把整批压成一条 DELETE/INSERT，最容易悄无声息丢掉的就是这些逐行条件，所以这里
+    用同样的输入灌两个库，逐行比对行情、覆盖与计数。
+    """
+
+    def frame(
+        market: str,
+        code: str,
+        day: str,
+        close: float,
+        status: str = "completed",
+        name: str | None = None,
+    ) -> pd.DataFrame:
+        data = {
+            "market": [market],
+            "code": [code],
+            "instrument_type": ["stock"],
+            "date": [pd.Timestamp(day)],
+            "open": [close - 0.5],
+            "high": [close + 0.5],
+            "low": [close - 1.0],
+            "close": [close],
+            "volume": [1000.0],
+            "amount": [close * 1000],
+            "source": ["online"],
+            "price_basis": ["raw"],
+            "bar_status": [status],
+            "provider": ["eastmoney"],
+        }
+        if name is not None:
+            data["name"] = [name]
+        return pd.DataFrame(data)
+
+    def seed(store: DuckDbMarketDataStore) -> None:
+        store.replace_local_bars(
+            "SH",
+            "600000",
+            "stock",
+            pd.DataFrame(
+                {
+                    "date": [pd.Timestamp("2026-10-19")],
+                    "open": [50.0],
+                    "high": [51.0],
+                    "low": [49.0],
+                    "close": [50.0],
+                    "volume": [100.0],
+                    "amount": [5000.0],
+                    "bar_status": ["completed"],
+                }
+            ),
+            name="本地股",
+        )
+        store.upsert_online_bars(frame("SH", "600000", "2026-10-18", 49.0))
+        store.upsert_online_bars(frame("SH", "600001", "2026-10-18", 20.0))
+
+    row_by_row = DuckDbMarketDataStore(tmp_path / "row.duckdb")
+    batched = DuckDbMarketDataStore(tmp_path / "batch.duckdb")
+    seed(row_by_row)
+    seed(batched)
+
+    incoming = [
+        frame("SH", "600000", "2026-10-19", 99.0),  # 本地行保护：不覆盖
+        frame("SH", "600001", "2026-10-18", 20.0),  # 已有在线行、值没变
+        frame("SH", "600001", "2026-10-19", 21.0, status="provisional"),  # 新的一天、盘中行
+        frame("SH", "600002", "2026-10-19", 10.0, name="新股"),  # 全新标的
+    ]
+
+    def updated_at(store: DuckDbMarketDataStore) -> dict[str, object]:
+        with store.read_session() as connection:
+            return dict(connection.execute("SELECT code, updated_at FROM instruments").fetchall())
+
+    before_row, before_batch = updated_at(row_by_row), updated_at(batched)
+    row_results = [row_by_row.upsert_online_bars(item) for item in incoming]
+    batch_results = batched.upsert_online_bars_many(incoming)
+    after_row, after_batch = updated_at(row_by_row), updated_at(batched)
+
+    assert row_results == batch_results
+
+    def bars(store: DuckDbMarketDataStore) -> list[tuple]:
+        with store.read_session() as connection:
+            return connection.execute(
+                "SELECT market, code, trade_date, open, high, low, close, volume, amount, "
+                "source, provider, price_basis, bar_status FROM daily_bars "
+                "ORDER BY market, code, trade_date"
+            ).fetchall()
+
+    def instruments(store: DuckDbMarketDataStore) -> list[tuple]:
+        with store.read_session() as connection:
+            return connection.execute(
+                "SELECT market, code, name, first_date, last_date, bar_count, last_provider "
+                "FROM instruments ORDER BY market, code"
+            ).fetchall()
+
+    assert bars(row_by_row) == bars(batched)
+    assert instruments(row_by_row) == instruments(batched)
+    # updated_at 的 bump 行为也要一致（时间戳本身是各自取的 _now()，只比是否被 bump）
+    assert {code: after_row[code] != before_row.get(code) for code in after_row} == {
+        code: after_batch[code] != before_batch.get(code) for code in after_batch
+    }
