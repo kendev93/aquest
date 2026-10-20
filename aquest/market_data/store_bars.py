@@ -7,6 +7,7 @@ from datetime import date
 from pathlib import Path
 from typing import cast
 
+import duckdb
 import pandas as pd
 
 from .adjustment import CorporateAction
@@ -526,21 +527,17 @@ class DuckDbBarsStore:
                 raise
         return affected
 
-    def upsert_online_bars(
+    def _prepare_online_frame(
         self,
         frame: pd.DataFrame,
-        *,
-        provider: str = "eastmoney",
-    ) -> tuple[int, int]:
-        """Upsert online rows without overwriting any local row."""
+        provider: str,
+    ) -> tuple[pd.DataFrame, dict[tuple[str, str], str | None]] | None:
+        """校验并规范化一只标的的在线日线，返回（待写入帧, 名称映射）。"""
 
-        self._store._require_writer()
-        # "tdx" stays accepted for compatibility with callers replaying rows that
-        # were downloaded by the removed legacy provider.
         if provider not in {"tdx", "eastmoney", "tencent"}:
             raise ValueError(f"在线行情数据源无效: {provider}")
         if frame.empty:
-            return (0, 0)
+            return None
         incoming_frame = frame.copy(deep=True)
         names_by_key: dict[tuple[str, str], str | None] = {}
         if "name" in incoming_frame.columns:
@@ -589,7 +586,7 @@ class DuckDbBarsStore:
                 )
             )
         if not normalized_parts:
-            return (0, 0)
+            return None
         incoming = pd.concat(normalized_parts, ignore_index=True)
         incoming = incoming.sort_values(
             ["market", "code", "trade_date"], kind="stable"
@@ -601,170 +598,218 @@ class DuckDbBarsStore:
         incoming = incoming.drop_duplicates(
             subset=["market", "code", "trade_date", "price_basis"], keep="last"
         ).reset_index(drop=True)
-        with _WRITE_LOCK, self._store._connect() as connection:
-            connection.execute("BEGIN")
-            try:
-                connection.register("_incoming_online_bars", incoming)
-                eligible_row = connection.execute(
-                    """
-                    SELECT COUNT(*)
-                    FROM _incoming_online_bars AS incoming
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM daily_bars AS local
-                        WHERE local.market = incoming.market
-                          AND local.code = incoming.code
-                          AND local.trade_date = incoming.trade_date
-                          AND local.price_basis = incoming.price_basis
-                          AND local.source = 'local'
-                    )
-                      -- 被 completed/provisional 保护跳过的行不会真正写入，不能计进
-                      -- written_bars，否则重放历史日线时报表虚高。
-                      AND NOT EXISTS (
-                        SELECT 1 FROM daily_bars AS existing
-                        WHERE existing.market = incoming.market
-                          AND existing.code = incoming.code
-                          AND existing.trade_date = incoming.trade_date
-                          AND existing.price_basis = incoming.price_basis
-                          AND existing.source = 'online'
-                          AND existing.bar_status = 'completed'
-                          AND incoming.bar_status = 'provisional'
-                    )
-                    """
-                ).fetchone()
-                existing_online_row = connection.execute(
-                    """
-                    SELECT COUNT(*)
-                    FROM _incoming_online_bars AS incoming
-                    INNER JOIN daily_bars AS existing
-                      ON existing.market = incoming.market
-                     AND existing.code = incoming.code
-                     AND existing.trade_date = incoming.trade_date
-                     AND existing.price_basis = incoming.price_basis
-                     AND existing.source = 'online'
-                    """
-                ).fetchone()
-                eligible_count = int(eligible_row[0] if eligible_row else 0)
-                existing_online_count = int(existing_online_row[0] if existing_online_row else 0)
-                changed_key_rows = connection.execute(
-                    """
-                    SELECT DISTINCT incoming.market, incoming.code
-                    FROM _incoming_online_bars AS incoming
-                    LEFT JOIN daily_bars AS existing
-                      ON existing.market = incoming.market
-                     AND existing.code = incoming.code
-                     AND existing.trade_date = incoming.trade_date
-                     AND existing.price_basis = incoming.price_basis
-                     AND existing.source = 'online'
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM daily_bars AS local
-                        WHERE local.market = incoming.market
-                          AND local.code = incoming.code
-                          AND local.trade_date = incoming.trade_date
-                          AND local.price_basis = incoming.price_basis
-                          AND local.source = 'local'
-                    )
-                      AND (
-                          existing.market IS NULL
-                          OR existing.instrument_type IS DISTINCT FROM incoming.instrument_type
-                          OR existing.board IS DISTINCT FROM incoming.board
-                          OR existing.open IS DISTINCT FROM incoming.open
-                          OR existing.high IS DISTINCT FROM incoming.high
-                          OR existing.low IS DISTINCT FROM incoming.low
-                          OR existing.close IS DISTINCT FROM incoming.close
-                          OR existing.volume IS DISTINCT FROM incoming.volume
-                          OR existing.amount IS DISTINCT FROM incoming.amount
-                          OR existing.provider IS DISTINCT FROM incoming.provider
-                          OR existing.bar_status IS DISTINCT FROM incoming.bar_status
-                      )
-                      -- completed → provisional 是下面刻意拒绝写入的差异：行情一个字节
-                      -- 都没变，不该 bump updated_at（那会作废该标的的全部指标缓存）。
-                      AND (
-                          existing.market IS NULL
-                          OR NOT (
-                              existing.bar_status = 'completed'
-                              AND incoming.bar_status = 'provisional'
-                          )
-                      )
-                    """
-                ).fetchall()
-                changed_keys = {
-                    (str(market).strip().upper(), str(code).strip())
-                    for market, code in changed_key_rows
-                }
-                connection.execute(
-                    """
-                    DELETE FROM daily_bars AS existing
-                    USING _incoming_online_bars AS incoming
-                    WHERE existing.market = incoming.market
-                      AND existing.code = incoming.code
-                      AND existing.trade_date = incoming.trade_date
-                      AND existing.price_basis = incoming.price_basis
-                      AND existing.source = 'online'
-                      -- 盘中重放（重试 / --as-of / 定时任务）不该把已收盘的行降级成
-                      -- provisional：所有读路径都只认 completed，覆盖之后这一天会对
-                      -- 选股、回测、画图整体消失。
-                      AND NOT (
-                        existing.bar_status = 'completed'
-                        AND incoming.bar_status = 'provisional'
-                      )
-                    """
-                )
-                connection.execute(
-                    f"""
-                    INSERT INTO daily_bars ({", ".join(_BAR_COLUMNS)})
-                    SELECT {", ".join(f"incoming.{column}" for column in _BAR_COLUMNS)}
-                    FROM _incoming_online_bars AS incoming
-                    WHERE NOT EXISTS (
-                        SELECT 1 FROM daily_bars AS local
-                        WHERE local.market = incoming.market
-                          AND local.code = incoming.code
-                          AND local.trade_date = incoming.trade_date
-                          AND local.price_basis = incoming.price_basis
-                          AND local.source = 'local'
-                    )
-                    AND NOT EXISTS (
-                        SELECT 1 FROM daily_bars AS existing
-                        WHERE existing.market = incoming.market
-                          AND existing.code = incoming.code
-                          AND existing.trade_date = incoming.trade_date
-                          AND existing.price_basis = incoming.price_basis
-                          AND existing.source = 'online'
-                          AND existing.bar_status = 'completed'
-                          AND incoming.bar_status = 'provisional'
-                    )
-                    """
-                )
-                provenance_by_key: dict[tuple[str, str], set[str]] = {}
-                for row in incoming[["market", "code", "provider"]].itertuples(
-                    index=False, name=None
-                ):
-                    provenance_by_key.setdefault((str(row[0]), str(row[1])), set()).add(str(row[2]))
-                for market, code, instrument_type, board in (
-                    incoming[["market", "code", "instrument_type", "board"]]
-                    .drop_duplicates()
-                    .itertuples(index=False, name=None)
-                ):
-                    key = (str(market).strip().upper(), str(code).strip())
-                    source_providers = provenance_by_key.get(key, {provider})
-                    instrument_provider = (
-                        next(iter(source_providers)) if len(source_providers) == 1 else "mixed"
-                    )
-                    self._store._refresh_instrument(
-                        connection,
-                        market,
-                        code,
-                        instrument_type,
-                        board,
-                        name=names_by_key.get((str(market).upper(), str(code))),
-                        provider=instrument_provider,
-                        force_updated_at=key in changed_keys,
-                    )
-                connection.unregister("_incoming_online_bars")
-                connection.execute("COMMIT")
-            except Exception:
-                connection.execute("ROLLBACK")
-                raise
+        return incoming, names_by_key
+
+    def _upsert_online_frame(
+        self,
+        connection: duckdb.DuckDBPyConnection,
+        incoming: pd.DataFrame,
+        provider: str,
+        names_by_key: dict[tuple[str, str], str | None],
+    ) -> tuple[int, int]:
+        """把一只标的的在线日线写进调用方的事务里，返回（新写入, 已有在线行）。
+
+        保护规则与计数跟 ``upsert_online_bars`` 同一套，只是事务由调用方开——批量入口
+        因此能把多只标的的写入合到一个事务里（提交一次约 11 ms，日更五千多只时这是最大
+        的一块固定开销）。
+        """
+
+        connection.register("_incoming_online_bars", incoming)
+        eligible_row = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM _incoming_online_bars AS incoming
+            WHERE NOT EXISTS (
+                SELECT 1 FROM daily_bars AS local
+                WHERE local.market = incoming.market
+                  AND local.code = incoming.code
+                  AND local.trade_date = incoming.trade_date
+                  AND local.price_basis = incoming.price_basis
+                  AND local.source = 'local'
+            )
+              -- 被 completed/provisional 保护跳过的行不会真正写入，不能计进
+              -- written_bars，否则重放历史日线时报表虚高。
+              AND NOT EXISTS (
+                SELECT 1 FROM daily_bars AS existing
+                WHERE existing.market = incoming.market
+                  AND existing.code = incoming.code
+                  AND existing.trade_date = incoming.trade_date
+                  AND existing.price_basis = incoming.price_basis
+                  AND existing.source = 'online'
+                  AND existing.bar_status = 'completed'
+                  AND incoming.bar_status = 'provisional'
+            )
+            """
+        ).fetchone()
+        existing_online_row = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM _incoming_online_bars AS incoming
+            INNER JOIN daily_bars AS existing
+              ON existing.market = incoming.market
+             AND existing.code = incoming.code
+             AND existing.trade_date = incoming.trade_date
+             AND existing.price_basis = incoming.price_basis
+             AND existing.source = 'online'
+            """
+        ).fetchone()
+        eligible_count = int(eligible_row[0] if eligible_row else 0)
+        existing_online_count = int(existing_online_row[0] if existing_online_row else 0)
+        changed_key_rows = connection.execute(
+            """
+            SELECT DISTINCT incoming.market, incoming.code
+            FROM _incoming_online_bars AS incoming
+            LEFT JOIN daily_bars AS existing
+              ON existing.market = incoming.market
+             AND existing.code = incoming.code
+             AND existing.trade_date = incoming.trade_date
+             AND existing.price_basis = incoming.price_basis
+             AND existing.source = 'online'
+            WHERE NOT EXISTS (
+                SELECT 1 FROM daily_bars AS local
+                WHERE local.market = incoming.market
+                  AND local.code = incoming.code
+                  AND local.trade_date = incoming.trade_date
+                  AND local.price_basis = incoming.price_basis
+                  AND local.source = 'local'
+            )
+              AND (
+                  existing.market IS NULL
+                  OR existing.instrument_type IS DISTINCT FROM incoming.instrument_type
+                  OR existing.board IS DISTINCT FROM incoming.board
+                  OR existing.open IS DISTINCT FROM incoming.open
+                  OR existing.high IS DISTINCT FROM incoming.high
+                  OR existing.low IS DISTINCT FROM incoming.low
+                  OR existing.close IS DISTINCT FROM incoming.close
+                  OR existing.volume IS DISTINCT FROM incoming.volume
+                  OR existing.amount IS DISTINCT FROM incoming.amount
+                  OR existing.provider IS DISTINCT FROM incoming.provider
+                  OR existing.bar_status IS DISTINCT FROM incoming.bar_status
+              )
+              -- completed → provisional 是下面刻意拒绝写入的差异：行情一个字节
+              -- 都没变，不该 bump updated_at（那会作废该标的的全部指标缓存）。
+              AND (
+                  existing.market IS NULL
+                  OR NOT (
+                      existing.bar_status = 'completed'
+                      AND incoming.bar_status = 'provisional'
+                  )
+              )
+            """
+        ).fetchall()
+        changed_keys = {
+            (str(market).strip().upper(), str(code).strip()) for market, code in changed_key_rows
+        }
+        connection.execute(
+            """
+            DELETE FROM daily_bars AS existing
+            USING _incoming_online_bars AS incoming
+            WHERE existing.market = incoming.market
+              AND existing.code = incoming.code
+              AND existing.trade_date = incoming.trade_date
+              AND existing.price_basis = incoming.price_basis
+              AND existing.source = 'online'
+              -- 盘中重放（重试 / --as-of / 定时任务）不该把已收盘的行降级成
+              -- provisional：所有读路径都只认 completed，覆盖之后这一天会对
+              -- 选股、回测、画图整体消失。
+              AND NOT (
+                existing.bar_status = 'completed'
+                AND incoming.bar_status = 'provisional'
+              )
+            """
+        )
+        connection.execute(
+            f"""
+            INSERT INTO daily_bars ({", ".join(_BAR_COLUMNS)})
+            SELECT {", ".join(f"incoming.{column}" for column in _BAR_COLUMNS)}
+            FROM _incoming_online_bars AS incoming
+            WHERE NOT EXISTS (
+                SELECT 1 FROM daily_bars AS local
+                WHERE local.market = incoming.market
+                  AND local.code = incoming.code
+                  AND local.trade_date = incoming.trade_date
+                  AND local.price_basis = incoming.price_basis
+                  AND local.source = 'local'
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM daily_bars AS existing
+                WHERE existing.market = incoming.market
+                  AND existing.code = incoming.code
+                  AND existing.trade_date = incoming.trade_date
+                  AND existing.price_basis = incoming.price_basis
+                  AND existing.source = 'online'
+                  AND existing.bar_status = 'completed'
+                  AND incoming.bar_status = 'provisional'
+            )
+            """
+        )
+        provenance_by_key: dict[tuple[str, str], set[str]] = {}
+        for row in incoming[["market", "code", "provider"]].itertuples(index=False, name=None):
+            provenance_by_key.setdefault((str(row[0]), str(row[1])), set()).add(str(row[2]))
+        for market, code, instrument_type, board in (
+            incoming[["market", "code", "instrument_type", "board"]]
+            .drop_duplicates()
+            .itertuples(index=False, name=None)
+        ):
+            key = (str(market).strip().upper(), str(code).strip())
+            source_providers = provenance_by_key.get(key, {provider})
+            instrument_provider = (
+                next(iter(source_providers)) if len(source_providers) == 1 else "mixed"
+            )
+            self._store._refresh_instrument(
+                connection,
+                market,
+                code,
+                instrument_type,
+                board,
+                name=names_by_key.get((str(market).upper(), str(code))),
+                provider=instrument_provider,
+                force_updated_at=key in changed_keys,
+            )
+        connection.unregister("_incoming_online_bars")
         return (eligible_count, existing_online_count)
+
+    def upsert_online_bars(
+        self,
+        frame: pd.DataFrame,
+        *,
+        provider: str = "eastmoney",
+    ) -> tuple[int, int]:
+        """Upsert online rows without overwriting any local row."""
+
+        self._store._require_writer()
+        prepared = self._prepare_online_frame(frame, provider)
+        if prepared is None:
+            return (0, 0)
+        incoming, names_by_key = prepared
+        with _WRITE_LOCK, self._store.write_transaction() as connection:
+            return self._upsert_online_frame(connection, incoming, provider, names_by_key)
+
+    def upsert_online_bars_many(
+        self,
+        frames: Sequence[pd.DataFrame],
+        *,
+        provider: str = "eastmoney",
+    ) -> list[tuple[int, int]]:
+        """多只标的的在线日线合成一个事务写入，按传入顺序返回每只的计数。
+
+        逐只写实测 42 ms（其中 11.4 ms 是事务本身），五千多只就是几分钟的写锁占用；
+        这里只合并事务，每只的规范化、删除/插入与元数据刷新与逐只写完全相同。
+        """
+
+        prepared = [self._prepare_online_frame(frame, provider) for frame in frames]
+        results: list[tuple[int, int]] = [(0, 0)] * len(frames)
+        if not any(prepared):
+            return results
+        with _WRITE_LOCK, self._store.write_transaction() as connection:
+            for index, item in enumerate(prepared):
+                if item is None:
+                    continue
+                incoming, names_by_key = item
+                results[index] = self._upsert_online_frame(
+                    connection, incoming, provider, names_by_key
+                )
+        return results
 
     def merge_online_stage(self, stage_path: str | Path) -> StageMergeReport:
         """Merge one completed process-local staging database into the main store."""

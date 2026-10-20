@@ -1196,3 +1196,56 @@ def test_calendar_sessions_and_coverage_roll_back_together_on_write_failure(
     assert store.latest_market_trading_date(date(2024, 1, 3)) is None
     with pytest.raises(ValueError, match="未覆盖完整日期范围"):
         store.read_authoritative_trading_dates(date(2024, 1, 2), date(2024, 1, 3))
+
+
+def _online_frame(market: str, code: str, day: str, close: float) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "market": [market],
+            "code": [code],
+            "instrument_type": ["stock"],
+            "date": [pd.Timestamp(day)],
+            "open": [close - 0.5],
+            "high": [close + 0.5],
+            "low": [close - 1.0],
+            "close": [close],
+            "volume": [1000.0],
+            "amount": [close * 1000],
+            "source": ["online"],
+            "price_basis": ["raw"],
+            "bar_status": ["completed"],
+            "provider": ["eastmoney"],
+        }
+    )
+
+
+def test_online_batch_write_matches_per_row_writes_exactly(tmp_path: Path) -> None:
+    """批量入口只合并事务：行情行与 instruments 元数据必须与逐只写逐位一致。"""
+
+    row_by_row = DuckDbMarketDataStore(tmp_path / "row.duckdb")
+    batched = DuckDbMarketDataStore(tmp_path / "batch.duckdb")
+    frames = [_online_frame("SH", f"{600000 + i:06d}", "2026-10-19", 10.0 + i) for i in range(6)]
+    empty = frames[0].iloc[0:0]
+
+    for frame in frames:
+        row_by_row.upsert_online_bars(frame)
+    results = batched.upsert_online_bars_many([frames[0], frames[1], empty, *frames[2:]])
+    assert results[:2] == [(1, 0), (1, 0)]
+    assert results[2] == (0, 0)  # 空帧按位置给 (0, 0)
+    assert results[3:] == [(1, 0)] * 4
+
+    def snapshot(store: DuckDbMarketDataStore) -> tuple[list[tuple], list[tuple]]:
+        with store.read_session() as connection:
+            bars = connection.execute(
+                "SELECT market, code, trade_date, open, high, low, close, volume, amount, "
+                "source, provider, price_basis, bar_status FROM daily_bars "
+                "ORDER BY market, code, trade_date"
+            ).fetchall()
+            instruments = connection.execute(
+                "SELECT market, code, instrument_type, board, first_date, last_date, "
+                "bar_count, source_state, last_provider FROM instruments "
+                "ORDER BY market, code"
+            ).fetchall()
+        return bars, instruments
+
+    assert snapshot(row_by_row) == snapshot(batched)

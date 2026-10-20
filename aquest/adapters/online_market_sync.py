@@ -10,7 +10,7 @@ import re
 import time
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from threading import Lock
@@ -123,6 +123,60 @@ _EASTMONEY_STOCK_FILTER = "m:0 t:6,m:0 t:80,m:1 t:2,m:1 t:23"
 #: 单页 100 条足够覆盖绝大多数标的，个别超出的靠翻页补齐。
 _EASTMONEY_SHAREBONUS_PAGE_SIZE = 100
 _EASTMONEY_SHAREBONUS_MAX_PAGES = 20
+
+
+class _BatchedBarWriter:
+    """把并发到达的逐只在线日线合并成一个事务写库。
+
+    同步器用 8 个线程各拉各的，写库却是每只一次事务（实测单只 42 ms，其中 11.4 ms 是
+    BEGIN/COMMIT）。这里攒批提交：谁先把批攒满谁负责冲刷，其余线程等自己的那一份结果；
+    每个调用仍然要等自己落库之后才返回，可见性与逐只写一致。
+    """
+
+    def __init__(self, store: Any, *, max_batch: int = 64, provider: str = "eastmoney") -> None:
+        self._store = store
+        self._max_batch = max_batch
+        self._provider = provider
+        self._lock = Lock()
+        self._pending: list[tuple[pd.DataFrame, Future[tuple[int, int]]]] = []
+        self._flushing = False
+
+    def upsert(self, frame: pd.DataFrame) -> tuple[int, int]:
+        future: Future[tuple[int, int]] = Future()
+        with self._lock:
+            self._pending.append((frame, future))
+            leader = not self._flushing
+            if leader:
+                self._flushing = True
+                batch = self._take_locked()
+            else:
+                batch = []
+        if leader:
+            self._drain(batch)
+        return future.result()
+
+    def _take_locked(self) -> list[tuple[pd.DataFrame, Future[tuple[int, int]]]]:
+        batch = self._pending[: self._max_batch]
+        del self._pending[: self._max_batch]
+        return batch
+
+    def _drain(self, batch: list[tuple[pd.DataFrame, Future[tuple[int, int]]]]) -> None:
+        while batch:
+            frames = [frame for frame, _ in batch]
+            try:
+                results = self._store.upsert_online_bars_many(frames, provider=self._provider)
+            except BaseException as exc:  # 整批失败：每个等待者都得到同一个错误
+                for _, future in batch:
+                    future.set_exception(exc)
+            else:
+                for (_, future), result in zip(batch, results, strict=True):
+                    future.set_result(result)
+            with self._lock:
+                if self._pending:
+                    batch = self._take_locked()
+                else:
+                    self._flushing = False
+                    batch = []
 
 
 class OnlineProviderError(RuntimeError):
@@ -951,6 +1005,8 @@ def _default_module() -> OnlineModule:
 
 
 class OnlineMarketSync:
+    #: 只在一次同步的线程池生命周期内设置：并发写入的合并器。
+    _batched_bar_writer: _BatchedBarWriter | None
     """Synchronize SH/SZ stock data through the project-owned store contract."""
 
     def __init__(
@@ -1270,6 +1326,9 @@ class OnlineMarketSync:
                 if progress_callback is not None:
                     progress_callback(current, total)
 
+            # 8 个线程各自逐只写库时，每只一次事务（单只 42 ms 里 11.4 ms 是提交）；
+            # 合并器把它们攒批提交，每个请求仍等自己落库后才返回。
+            self._batched_bar_writer = _BatchedBarWriter(self._store)
             with ThreadPoolExecutor(
                 max_workers=len(batches),
                 thread_name_prefix="eastmoney-sync",
@@ -1294,6 +1353,7 @@ class OnlineMarketSync:
                     written_bars += batch_report.written_bars
                     failure_reasons.update(batch_report.failure_reasons)
                     history_sources.update(batch_report.history_sources)
+            self._batched_bar_writer = None
         now = self._clock().isoformat()
         self._store.set_meta("last_online_sync_at", now)
         self._store.set_meta("last_online_provider", "eastmoney")
@@ -1675,7 +1735,7 @@ class OnlineMarketSync:
                 retries=fetched.retries,
                 history_source=fetched.history_source,
             )
-        written, _updated = self._store.upsert_online_bars(normalized)
+        written, _updated = self._write_online(normalized)
         return _SyncResult(
             written_bars=written,
             bar_count=len(normalized),
@@ -1685,6 +1745,17 @@ class OnlineMarketSync:
             history_source=fetched.history_source,
             bar_provider=_frame_provider(normalized),
         )
+
+    def _write_online(self, frame: pd.DataFrame) -> tuple[int, int]:
+        """在线日线落库：同步跑动期间走合并器（多只一个事务），否则直接写。
+
+        合并器只在一次同步的线程池生命周期内挂在 self 上；单只调用与测试路径照旧。
+        """
+
+        writer: _BatchedBarWriter | None = getattr(self, "_batched_bar_writer", None)
+        if writer is not None:
+            return writer.upsert(frame)
+        return self._store.upsert_online_bars(frame)
 
     def _fetch_target(
         self,

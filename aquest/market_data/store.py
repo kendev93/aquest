@@ -176,6 +176,14 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
     ) -> tuple[int, int]:
         return self._bars.upsert_online_bars(frame, provider=provider)
 
+    def upsert_online_bars_many(
+        self,
+        frames: Sequence[pd.DataFrame],
+        *,
+        provider: str = "eastmoney",
+    ) -> list[tuple[int, int]]:
+        return self._bars.upsert_online_bars_many(frames, provider=provider)
+
     def merge_online_stage(self, stage_path: str | Path) -> StageMergeReport:
         return self._bars.merge_online_stage(stage_path)
 

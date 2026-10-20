@@ -1337,3 +1337,58 @@ def test_market_sync_config_rejects_unknown_and_removed_providers() -> None:
         MarketSyncConfig(provider="unknown")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="行情数据源"):
         MarketSyncConfig(provider="tdx")  # type: ignore[arg-type]
+
+
+def test_batched_bar_writer_merges_concurrent_writes_and_returns_each_result(
+    tmp_path, monkeypatch
+) -> None:
+    """8 路并发写库合并成一个事务：每个调用拿到自己的计数，一只都不能少。"""
+
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from aquest.adapters.online_market_sync import _BatchedBarWriter
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    writer = _BatchedBarWriter(store, max_batch=8)
+    real = store.upsert_online_bars_many
+    batches: list[int] = []
+
+    def recording(frames, *, provider: str = "eastmoney"):
+        batches.append(len(frames))
+        return real(frames, provider=provider)
+
+    monkeypatch.setattr(store, "upsert_online_bars_many", recording)
+    barrier = Barrier(8)
+
+    def one(index: int) -> tuple[int, int]:
+        frame = pd.DataFrame(
+            {
+                "market": ["SH"],
+                "code": [f"{600000 + index:06d}"],
+                "instrument_type": ["stock"],
+                "date": [pd.Timestamp("2026-10-19")],
+                "open": [10.0],
+                "high": [11.0],
+                "low": [9.0],
+                "close": [10.5],
+                "volume": [1000.0],
+                "amount": [10500.0],
+                "source": ["online"],
+                "price_basis": ["raw"],
+                "bar_status": ["completed"],
+                "provider": ["eastmoney"],
+            }
+        )
+        barrier.wait()
+        return writer.upsert(frame)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(one, range(40)))
+
+    assert results == [(1, 0)] * 40
+    assert sum(batches) == 40
+    # 并发到达的那一刻至少有一批被合并（否则和逐只写没有区别）
+    assert max(batches) >= 2
+    with store.read_session() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM daily_bars").fetchone()[0] == 40
