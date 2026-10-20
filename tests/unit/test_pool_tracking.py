@@ -1,3 +1,5 @@
+import json
+
 import numpy as np
 import pandas as pd
 
@@ -6,8 +8,10 @@ from aquest.strategy_pool.store import DuckDbStrategyPoolStore
 from aquest.strategy_pool.tracking import account_summary
 from aquest.strategy_pool.tracking_store import (
     PoolTrackingStore,
+    dumps,
     launch_data_date,
     launch_data_dates,
+    signature,
 )
 
 
@@ -276,6 +280,91 @@ def test_bootstrap_stamps_every_version_with_its_own_launch_date(tmp_path) -> No
         ("SH", "600000"): "2020-01-20",
         ("SZ", "000001"): "2020-02-12",
     }
+
+
+def test_bootstrap_only_rewrites_candidate_json_when_the_content_changed(tmp_path, monkeypatch):
+    """bootstrap 预加载当前版本；候选没变一条都不写，指标变了才刷新同一版本。
+
+    逐只 sync_entry 每只做 4 次全表查找，4,409 只启动实测 8 秒；预加载后稳态启动只比对
+    内存字典。签名只看交易规则，指标变化不能新建版本，但要把候选内容回写到同一版本。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    pool = DuckDbStrategyPoolStore(store)
+    candidate = {
+        "buy_rule": {"signals": ["technical.macd"]},
+        "sell_rule": {"signals": ["technical.rsi14"]},
+        "config": {"stop_loss_pct": 0.1},
+    }
+    pool.upsert_automatic(
+        market="SH",
+        code="600000",
+        name="test",
+        annual_candidate=candidate,
+        sharpe_candidate=None,
+        data_fingerprint="x",
+        config_fingerprint="y",
+        source_job_id="job",
+    )
+    tracks = PoolTrackingStore(store)
+    calls: list[tuple[str, str]] = []
+
+    def fake_refresh(connection: object, version_id: str, candidate_json: str) -> None:
+        calls.append((version_id, candidate_json))
+
+    monkeypatch.setattr(PoolTrackingStore, "_refresh_candidate_json", staticmethod(fake_refresh))
+    tracks.bootstrap()
+    assert calls == []
+
+    refreshed = {**candidate, "metrics": {"validation": {"annual_return": 0.2}}}
+    with store.write_transaction() as connection:
+        connection.execute(
+            "UPDATE strategy_pool_entries SET annual_candidate_json=? WHERE market=? AND code=?",
+            [dumps(refreshed), "SH", "600000"],
+        )
+    tracks.bootstrap()
+    assert len(calls) == 1
+    assert json.loads(calls[0][1])["metrics"] == {"validation": {"annual_return": 0.2}}
+
+
+def test_bootstrap_replaces_a_changed_strategy_candidate(tmp_path):
+    """交易规则变了就归档旧版本、建新版本；预加载路径不能只看候选内容是否相同。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    pool = DuckDbStrategyPoolStore(store)
+    candidate = {
+        "buy_rule": {"signals": ["technical.macd"]},
+        "sell_rule": {"signals": ["technical.rsi14"]},
+        "config": {"stop_loss_pct": 0.1},
+    }
+    pool.upsert_automatic(
+        market="SH",
+        code="600000",
+        name="test",
+        annual_candidate=candidate,
+        sharpe_candidate=None,
+        data_fingerprint="x",
+        config_fingerprint="y",
+        source_job_id="job",
+    )
+    tracks = PoolTrackingStore(store)
+    original = next(v for v in tracks.current_versions() if v["objective"] == "annual_return")
+
+    changed = {**candidate, "config": {"stop_loss_pct": 0.2}}
+    with store.write_transaction() as connection:
+        connection.execute(
+            "UPDATE strategy_pool_entries SET annual_candidate_json=? WHERE market=? AND code=?",
+            [dumps(changed), "SH", "600000"],
+        )
+    tracks.bootstrap()
+    current = [
+        v
+        for v in tracks.current_versions()
+        if v["objective"] == "annual_return" and v["source"] == "automatic"
+    ]
+    assert len(current) == 1
+    assert current[0]["version_id"] != original["version_id"]
+    assert current[0]["signature"] == signature(changed)
 
 
 def test_save_snapshots_batches_with_the_same_guards_as_single_writes(tmp_path):

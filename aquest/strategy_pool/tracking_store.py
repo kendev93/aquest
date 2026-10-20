@@ -6,7 +6,7 @@ import hashlib
 import json
 import uuid
 import zlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, MutableMapping, Sequence
 from datetime import date, datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -176,6 +176,98 @@ class PoolTrackingStore:
         self.store = store
 
     @staticmethod
+    def _refresh_candidate_json(
+        connection: duckdb.DuckDBPyConnection,
+        version_id: str,
+        candidate_json: str,
+    ) -> None:
+        connection.execute(
+            "UPDATE pool_tracking_versions SET candidate_json=? WHERE version_id=?",
+            [candidate_json, version_id],
+        )
+
+    @staticmethod
+    def _sync_version(
+        connection: duckdb.DuckDBPyConnection,
+        known: MutableMapping[tuple[str, str, str, str], tuple[str, str, str]] | None,
+        *,
+        market: str,
+        code: str,
+        objective: str,
+        source: str,
+        candidate: Mapping[str, Any] | None,
+        old: tuple[str, str, str] | None,
+        now: str,
+        data_date: str | None,
+    ) -> None:
+        """把一条（标的, 目标, 来源）的版本对齐到当前候选。
+
+        `known` 是 bootstrap 预加载的当前版本索引；单只写入传 None，逐条查。候选的指标
+        会随新数据变、但交易规则签名不变，所以签名相同时只在 JSON 真的变了才回写。
+        """
+
+        key = (market, code, objective, source)
+        fingerprint = signature(candidate) if candidate else None
+        if old and old[1] == fingerprint:
+            candidate_json = dumps(candidate)
+            if candidate_json != old[2]:
+                PoolTrackingStore._refresh_candidate_json(connection, old[0], candidate_json)
+                if known is not None:
+                    known[key] = (old[0], old[1], candidate_json)
+            return
+        if old and candidate:
+            old_candidate = json.loads(old[2])
+            # Upgrade only the legacy signature salt/whitelist in place when both the
+            # old and new candidate encode the same current trading rules. This keeps
+            # created_at and launch_data_date stable; the v2 replay engine rebuilds any
+            # incompatible saved checkpoint on its next run.
+            if (
+                old[1] == _legacy_signature(old_candidate)
+                and signature(old_candidate) == fingerprint
+            ):
+                candidate_json = dumps(candidate)
+                connection.execute(
+                    "UPDATE pool_tracking_versions SET signature=?,candidate_json=? "
+                    "WHERE version_id=?",
+                    [fingerprint, candidate_json, old[0]],
+                )
+                if known is not None:
+                    known[key] = (old[0], str(fingerprint), candidate_json)
+                return
+        if old:
+            connection.execute(
+                "UPDATE pool_tracking_versions SET is_current=FALSE, "
+                "stopped_at=? WHERE version_id=?",
+                [now, old[0]],
+            )
+            if known is not None:
+                known.pop(key, None)
+        if not candidate:
+            return
+        version_id = uuid.uuid4().hex
+        candidate_json = dumps(candidate)
+        connection.execute(
+            """INSERT INTO pool_tracking_versions
+            (version_id,market,code,objective,source,signature,candidate_json,
+             created_at,launch_data_date,is_current,updated_at)
+             VALUES (?,?,?,?,?,?,?,?,?,TRUE,?)""",
+            [
+                version_id,
+                market,
+                code,
+                objective,
+                source,
+                fingerprint,
+                candidate_json,
+                now,
+                data_date,
+                now,
+            ],
+        )
+        if known is not None:
+            known[key] = (version_id, str(fingerprint), candidate_json)
+
+    @staticmethod
     def sync_entry(
         connection: duckdb.DuckDBPyConnection,
         market: str,
@@ -210,54 +302,17 @@ class PoolTrackingStore:
                     WHERE market=? AND code=? AND objective=? AND source=? AND is_current""",
                     [market, code, objective, source],
                 ).fetchone()
-                fingerprint = signature(candidate) if candidate else None
-                if old and old[1] == fingerprint:
-                    connection.execute(
-                        "UPDATE pool_tracking_versions SET candidate_json=? WHERE version_id=?",
-                        [dumps(candidate), old[0]],
-                    )
-                    continue
-                if old and candidate:
-                    old_candidate = json.loads(old[2])
-                    # Upgrade only the legacy signature salt/whitelist in place when both the
-                    # old and new candidate encode the same current trading rules. This keeps
-                    # created_at and launch_data_date stable; the v2 replay engine rebuilds any
-                    # incompatible saved checkpoint on its next run.
-                    if (
-                        old[1] == _legacy_signature(old_candidate)
-                        and signature(old_candidate) == fingerprint
-                    ):
-                        connection.execute(
-                            "UPDATE pool_tracking_versions SET signature=?,candidate_json=? "
-                            "WHERE version_id=?",
-                            [fingerprint, dumps(candidate), old[0]],
-                        )
-                        continue
-                if old:
-                    connection.execute(
-                        "UPDATE pool_tracking_versions SET is_current=FALSE, "
-                        "stopped_at=? WHERE version_id=?",
-                        [now, old[0]],
-                    )
-                if not candidate:
-                    continue
-                connection.execute(
-                    """INSERT INTO pool_tracking_versions
-                    (version_id,market,code,objective,source,signature,candidate_json,
-                     created_at,launch_data_date,is_current,updated_at)
-                     VALUES (?,?,?,?,?,?,?,?,?,TRUE,?)""",
-                    [
-                        uuid.uuid4().hex,
-                        market,
-                        code,
-                        objective,
-                        source,
-                        fingerprint,
-                        dumps(candidate),
-                        now,
-                        data_date,
-                        now,
-                    ],
+                PoolTrackingStore._sync_version(
+                    connection,
+                    None,
+                    market=market,
+                    code=code,
+                    objective=objective,
+                    source=source,
+                    candidate=candidate,
+                    old=old,
+                    now=now,
+                    data_date=data_date,
                 )
 
     def bootstrap(self) -> None:
@@ -275,10 +330,58 @@ class PoolTrackingStore:
         with _WRITE_LOCK, self.store._connect() as connection:
             connection.execute("BEGIN TRANSACTION")
             try:
-                for market, code in symbols:
-                    self.sync_entry(
-                        connection, market, code, now, data_date=data_dates.get((market, code))
+                # 当前版本与池条目各只读一次：逐只调 sync_entry 会按标的做 4 次全表查找，
+                # 4,409 只启动要 8 秒；一次预加载后逐条比对，写事务里只剩有变化的行。
+                current_rows = connection.execute(
+                    """SELECT version_id, market, code, objective, source, signature,
+                              candidate_json
+                       FROM pool_tracking_versions WHERE is_current"""
+                ).fetchall()
+                known: dict[tuple[str, str, str, str], tuple[str, str, str]] = {}
+                for (
+                    version_id,
+                    market,
+                    code,
+                    objective,
+                    source,
+                    fingerprint,
+                    candidate_json,
+                ) in current_rows:
+                    known.setdefault(
+                        (str(market), str(code), str(objective), str(source)),
+                        (str(version_id), str(fingerprint), str(candidate_json)),
                     )
+                entry_rows = connection.execute(
+                    """SELECT market, code, annual_candidate_json, sharpe_candidate_json,
+                              manual_annual_json, manual_sharpe_json
+                       FROM strategy_pool_entries"""
+                ).fetchall()
+                for market, code, *raw_candidates in entry_rows:
+                    candidates = [json.loads(value) if value else None for value in raw_candidates]
+                    data_date = data_dates.get((str(market), str(code)))
+                    for index, objective in enumerate(OBJECTIVES):
+                        automatic = candidates[index]
+                        if automatic and automatic.get("candidate_ref"):
+                            automatic = candidates[
+                                0 if automatic["candidate_ref"] == "annual_return" else 1
+                            ]
+                        for source, candidate in (
+                            ("automatic", automatic),
+                            ("manual", candidates[index + 2]),
+                        ):
+                            key = (str(market), str(code), objective, source)
+                            PoolTrackingStore._sync_version(
+                                connection,
+                                known,
+                                market=str(market),
+                                code=str(code),
+                                objective=objective,
+                                source=source,
+                                candidate=candidate,
+                                old=known.get(key),
+                                now=now,
+                                data_date=data_date,
+                            )
                 connection.execute("COMMIT")
             except BaseException:
                 connection.execute("ROLLBACK")
