@@ -1096,11 +1096,10 @@ class SqliteIndicatorCacheStore:
         }
 
     def prune_stale_generations(self) -> dict[str, int]:
-        """删掉每个（标的, 周期, 口径, 公式）里不是最新一代的缓存行。
+        """删掉每个（标的, 周期, 口径, 公式, 公式版本）里不是最新一代的缓存行。
 
         写入路径只清理「这次重算过的」标的；数据变了却再没被重算的标的会一直留着旧指纹的
-        行。旧指纹永远查不到（读取按当前指纹精确匹配），删掉最多换来一次重算，所以这里按
-        每个分组的最新 ``computed_at`` 判定——同一代的分块共享同一个时间戳。
+        行。旧指纹永远查不到（读取按当前指纹精确匹配），删掉最多换来一次重算。
         """
 
         pruned = {"indicator_cache": 0, "custom_indicator_cache": 0}
@@ -1111,32 +1110,89 @@ class SqliteIndicatorCacheStore:
                 for table, partition in (
                     (
                         "indicator_cache",
-                        "market, code, timeframe, price_basis, formula_id",
+                        (
+                            "market",
+                            "code",
+                            "timeframe",
+                            "price_basis",
+                            "formula_id",
+                            "formula_version",
+                        ),
                     ),
                     (
                         "custom_indicator_cache",
-                        "market, code, timeframe, price_basis, formula_hash, "
-                        "parameter_hash, engine_version",
+                        (
+                            "market",
+                            "code",
+                            "timeframe",
+                            "price_basis",
+                            "formula_hash",
+                            "parameter_hash",
+                            "engine_version",
+                        ),
                     ),
                 ):
-                    cursor = connection.execute(
-                        f"""
-                        DELETE FROM {table} WHERE rowid IN (
-                            SELECT rowid FROM (
-                                SELECT rowid,
-                                       MAX(computed_at) OVER (PARTITION BY {partition})
-                                           AS newest
-                                FROM {table}
-                            ) WHERE computed_at < newest
-                        )
-                        """
-                    )
-                    pruned[table] = max(0, int(cursor.rowcount or 0))
+                    pruned[table] = self._prune_table(connection, table, partition)
                 connection.execute("COMMIT")
             except BaseException:
                 connection.execute("ROLLBACK")
                 raise
         return pruned
+
+    @staticmethod
+    def _prune_table(
+        connection: sqlite3.Connection,
+        table: str,
+        partition: tuple[str, ...],
+    ) -> int:
+        """按「整代」删除：同一指纹的分块必须一起留或一起删。
+
+        一条长序列按年/根数分成多块，每块各写各的 ``computed_at``（相差几微秒），所以
+        行级 ``MAX(computed_at)`` 只会留下当前代最后写入的一块，把同代其他块误删。这里先
+        按（分组, 指纹）取最后写入时刻、挑出每组最新的指纹，再删其余指纹的所有行。
+
+        rowid 必须先物化进临时表再删：直接写 ``rowid IN (窗口子查询)`` 时 SQLite 会把
+        子查询当成关联子查询，对外层每一行重跑一遍全表窗口（5 GB 库实测一小时跑不完）。
+        """
+
+        keys = ", ".join(partition)
+        join = " AND ".join(f"l.{column} = i.{column}" for column in partition)
+        latest = f"_latest_{table}"
+        stale = f"_stale_{table}"
+        connection.execute(f"DROP TABLE IF EXISTS temp.{latest}")
+        connection.execute(f"DROP TABLE IF EXISTS temp.{stale}")
+        connection.execute(
+            f"""
+            CREATE TEMP TABLE {latest} AS
+            SELECT {keys}, data_fingerprint FROM (
+                SELECT {keys}, data_fingerprint,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY {keys}
+                           ORDER BY last_at DESC, data_fingerprint DESC
+                       ) AS generation_rank
+                FROM (
+                    SELECT {keys}, data_fingerprint, MAX(computed_at) AS last_at
+                    FROM {table}
+                    GROUP BY {keys}, data_fingerprint
+                )
+            ) WHERE generation_rank = 1
+            """
+        )
+        connection.execute(
+            f"""
+            CREATE TEMP TABLE {stale} AS
+            SELECT i.rowid AS rid
+            FROM {table} i
+            LEFT JOIN {latest} l
+              ON {join} AND l.data_fingerprint = i.data_fingerprint
+            WHERE l.data_fingerprint IS NULL
+            """
+        )
+        cursor = connection.execute(f"DELETE FROM {table} WHERE rowid IN (SELECT rid FROM {stale})")
+        deleted = max(0, int(cursor.rowcount or 0))
+        connection.execute(f"DROP TABLE temp.{stale}")
+        connection.execute(f"DROP TABLE temp.{latest}")
+        return deleted
 
     def maintain(self, *, vacuum_min_free_ratio: float = 0.2) -> dict[str, object]:
         """清理过期代并（必要时）回收文件空间；返回一份可写进日志的统计。

@@ -1052,8 +1052,8 @@ def test_sqlite_cache_maintenance_prunes_stale_generations_and_vacuums(tmp_path:
     """过期指纹的缓存行自动清掉、空页多时回收文件；最新一代与别的标的原样不动。
 
     写入路径只清「这次重算过」的标的；数据变了却没再被重算的标的会留着旧指纹的行，
-    而旧指纹永远查不到（读取按当前指纹精确匹配）——所以这里按每个分组的最新 computed_at
-    判定过期代。
+    而旧指纹永远查不到（读取按当前指纹精确匹配）——所以这里按每个分组的指纹判定过期代。
+    同代的各分块各写各的 computed_at，必须整代一起留下。
     """
 
     from aquest.market_data.store import DuckDbMarketDataStore
@@ -1068,14 +1068,20 @@ def test_sqlite_cache_maintenance_prunes_stale_generations_and_vacuums(tmp_path:
         "values_blob, signals_blob, computed_at"
     )
 
-    def row(code: str, fingerprint: str, offset: int, computed_at: str) -> tuple:
+    def row(
+        code: str,
+        fingerprint: str,
+        offset: int,
+        computed_at: str,
+        formula_version: str = "v1",
+    ) -> tuple:
         return (
             "SH",
             code,
             "1d",
             "raw",
             "technical.ma5",
-            "v1",
+            formula_version,
             fingerprint,
             offset,
             "2015-01-05",
@@ -1087,10 +1093,15 @@ def test_sqlite_cache_maintenance_prunes_stale_generations_and_vacuums(tmp_path:
         )
 
     rows = [
+        # 过期代：两块，时间戳相同
         row("600000", "old", 0, "2026-10-01T00:00:00"),
         row("600000", "old", 1, "2026-10-01T00:00:00"),
-        row("600000", "new", 0, "2026-10-02T00:00:00"),
-        row("600000", "new", 1, "2026-10-02T00:00:00"),
+        # 当前代：三块，每块各写各的 computed_at——只看时间戳会只剩最后一块
+        row("600000", "new", 0, "2026-10-02T00:00:00.100000"),
+        row("600000", "new", 1, "2026-10-02T00:00:00.200000"),
+        row("600000", "new", 2, "2026-10-02T00:00:00.300000"),
+        # 旧公式版本按自己的代判定，不该被新版本连带删掉
+        row("600000", "v2only", 0, "2026-09-01T00:00:00", formula_version="v2"),
         row("600001", "only", 0, "2026-10-02T00:00:00"),
     ]
     connection.executemany(
@@ -1102,11 +1113,71 @@ def test_sqlite_cache_maintenance_prunes_stale_generations_and_vacuums(tmp_path:
     assert stats["pruned_indicator_cache"] == 2
     assert stats["vacuumed"] is True
     remaining = connection.execute(
-        "SELECT code, data_fingerprint, bar_offset FROM indicator_cache "
-        "ORDER BY code, data_fingerprint, bar_offset"
+        "SELECT code, formula_version, data_fingerprint, bar_offset FROM indicator_cache "
+        "ORDER BY code, formula_version, data_fingerprint, bar_offset"
     ).fetchall()
-    assert remaining == [("600000", "new", 0), ("600000", "new", 1), ("600001", "only", 0)]
+    assert remaining == [
+        ("600000", "v1", "new", 0),
+        ("600000", "v1", "new", 1),
+        ("600000", "v1", "new", 2),
+        ("600000", "v2", "v2only", 0),
+        ("600001", "v1", "only", 0),
+    ]
 
     # 再跑一次没有可清的行，也不该出错
     again = cache.maintain(vacuum_min_free_ratio=0.0)
     assert again["pruned_indicator_cache"] == 0
+
+
+def test_sqlite_cache_prune_scales_with_rows(tmp_path: Path) -> None:
+    """清理的工作量必须随行数线性增长。
+
+    早先的写法 ``rowid IN (窗口子查询)`` 被 SQLite 当成关联子查询，对每一行重跑一次
+    全表窗口；5 GB 生产缓存一小时删不完，容器健康检查直接判死。这里用两万行卡住：
+    线性扫描是毫秒级，平方级实现会远超 10 秒。
+    """
+
+    import time
+
+    from aquest.market_data.store import DuckDbMarketDataStore
+    from aquest.market_data.store_indicator_cache_sqlite import SqliteIndicatorCacheStore
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    cache = SqliteIndicatorCacheStore(store, tmp_path / "cache.sqlite")
+    connection = cache._connection()
+    columns = (
+        "market, code, timeframe, price_basis, formula_id, formula_version, "
+        "data_fingerprint, bar_offset, data_start, data_end, data_length, "
+        "values_blob, signals_blob, computed_at"
+    )
+    rows = []
+    for instrument in range(10_000):
+        code = f"{600000 + instrument}"
+        for generation in ("old", "new"):
+            rows.append(
+                (
+                    "SH",
+                    code,
+                    "1d",
+                    "raw",
+                    "technical.ma5",
+                    "v1",
+                    generation,
+                    0,
+                    "2015-01-05",
+                    "2026-10-19",
+                    2065,
+                    b"x" * 64,
+                    b"y" * 64,
+                    "2026-10-01T00:00:00" if generation == "old" else "2026-10-02T00:00:00",
+                )
+            )
+    connection.executemany(
+        f"INSERT INTO indicator_cache ({columns}) VALUES ({','.join('?' * 14)})", rows
+    )
+
+    started = time.monotonic()
+    stats = cache.prune_stale_generations()
+    elapsed = time.monotonic() - started
+    assert stats["indicator_cache"] == 10_000
+    assert elapsed < 10
