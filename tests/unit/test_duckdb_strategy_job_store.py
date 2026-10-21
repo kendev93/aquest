@@ -470,10 +470,11 @@ def test_market_pool_history_stats_average_only_counts_finished_runs(tmp_path) -
     assert full["avg_duration_seconds"] == 2_400.0
     assert full["median_duration_seconds"] == 2_400.0
     assert full["started_at_samples"] == 3
-    # 每只新研究标的：60、20、30、90 秒
+    # 每只新研究标的：60、20、30、90 秒；三轮各研究 20、120、120 只，取消轮 10 只。
+    # 按研究只数加权后是 8,100 / 270 = 30 秒，而不是四个比值的简单平均 50 秒。
     assert full["throughput_samples"] == 4
-    assert full["avg_seconds_per_symbol"] == 50.0
-    assert full["median_seconds_per_symbol"] == 45.0
+    assert full["avg_seconds_per_symbol"] == 30.0
+    assert full["median_seconds_per_symbol"] == 30.0
     assert full["avg_parallelism"] == 3.5
     assert stats["modes"]["signals"]["samples"] == 1
     assert stats["modes"]["signals"]["avg_duration_seconds"] == 30.0

@@ -1004,6 +1004,7 @@ def _pool_mode_stats(connection: duckdb.DuckDBPyConnection) -> dict[str, object]
         durations: list[float] = []
         started_samples = 0
         per_symbol: list[float] = []
+        per_symbol_weights: list[int] = []
         parallelism: list[float] = []
         for (
             status,
@@ -1039,14 +1040,17 @@ def _pool_mode_stats(connection: duckdb.DuckDBPyConnection) -> dict[str, object]
             researched = (_optional_int(raw_completed) or 0) - (_optional_int(raw_skipped) or 0)
             if elapsed is not None and researched > 0:
                 per_symbol.append(elapsed / researched)
+                # 按这一轮真正研究的只数加权：只研究 1 只的小任务会把「平均每只」
+                # 拉成整轮墙钟，全市场重建的真实边际被它盖掉。
+                per_symbol_weights.append(researched)
         modes[mode] = {
             "samples": len(durations),
             "avg_duration_seconds": _round_mean(durations),
             "median_duration_seconds": _round_median(durations),
             "started_at_samples": started_samples,
             "throughput_samples": len(per_symbol),
-            "avg_seconds_per_symbol": _round_mean(per_symbol),
-            "median_seconds_per_symbol": _round_median(per_symbol),
+            "avg_seconds_per_symbol": _round_weighted_mean(per_symbol, per_symbol_weights),
+            "median_seconds_per_symbol": _round_weighted_median(per_symbol, per_symbol_weights),
             "avg_parallelism": _round_mean(parallelism),
         }
     return {"sample_limit": POOL_STATS_SAMPLE_LIMIT, "modes": modes}
@@ -1062,6 +1066,27 @@ def _round_median(values: Sequence[float]) -> float | None:
     if not values:
         return None
     return round(float(statistics.median(values)), 1)
+
+
+def _round_weighted_mean(values: Sequence[float], weights: Sequence[int]) -> float | None:
+    total = sum(weights)
+    if not values or total <= 0:
+        return None
+    return round(sum(value * weight for value, weight in zip(values, weights)) / total, 1)
+
+
+def _round_weighted_median(values: Sequence[float], weights: Sequence[int]) -> float | None:
+    """按权重取中位：每个任务的比值按它研究的只数计入。"""
+
+    total = sum(weights)
+    if not values or total <= 0:
+        return None
+    cumulative = 0
+    for value, weight in sorted(zip(values, weights)):
+        cumulative += weight
+        if cumulative * 2 >= total:
+            return round(float(value), 1)
+    return None
 
 
 def _risk_optimization_history_summary(
