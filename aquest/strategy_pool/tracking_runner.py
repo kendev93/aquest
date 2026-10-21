@@ -21,6 +21,7 @@ from aquest.market_data.store import DuckDbMarketDataStore
 from aquest.portfolio_backtest.service import PortfolioBacktestService
 from aquest.screening.jobs import TaskCancelledError
 from aquest.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
+from aquest.strategy_discovery.worker_api_client import TransientWorkerApiError
 
 from .quality import benchmark_full_return, weak_strategy_reasons
 from .resources import (
@@ -32,7 +33,7 @@ from .resources import (
     pool_worker_cap,
 )
 from .tracking import account_summary, replay_account
-from .tracking_store import OBJECTIVES, PoolTrackingStore
+from .tracking_store import ENGINE_VERSION, OBJECTIVES, PoolTrackingStore
 
 _WORKER_SERVICE: PortfolioBacktestService | None = None
 logger = logging.getLogger(__name__)
@@ -61,6 +62,25 @@ def _replay(version: dict[str, Any], previous: dict[str, Any] | None) -> dict[st
         clear()
     ref = adapter.stock_ref("", version["market"], version["code"])
     return replay_account(_WORKER_SERVICE, ref, version, previous)
+
+
+def _snapshot_reusable(version: Mapping[str, Any], revision: str | None, target_date: str) -> bool:
+    """行情日、数据修订与回放引擎都没变时，上一份快照就是这一轮的结果。
+
+    只比日期不够：同一天的数据被修正（本地导入/全量刷新）时修订号会变，必须重放。
+    旧快照没有修订号/引擎版本，第一次扫描重放一遍后写入摘要，之后才可复用。
+    """
+
+    if not target_date or not revision or str(version.get("status") or "") == "failed":
+        return False
+    summary = version.get("summary")
+    if not isinstance(summary, Mapping):
+        return False
+    return (
+        str(summary.get("engine_version") or "") == ENGINE_VERSION
+        and str(summary.get("data_revision") or "") == revision
+        and str(summary.get("as_of_date") or "") == target_date
+    )
 
 
 class PoolTrackingRunner:
@@ -99,6 +119,17 @@ class PoolTrackingRunner:
                 params,
             ).fetchall()
         return {(str(row[0]), str(row[1])): str(row[2] or "") for row in rows}
+
+    def _data_revisions(self, keys: set[tuple[str, str]]) -> dict[tuple[str, str], str]:
+        """一次取本轮所有标的的数据修订号；读不到就全部回放，跳过只是优化。"""
+
+        if not keys:
+            return {}
+        try:
+            return self.store.data_revisions(keys)
+        except Exception:  # noqa: BLE001 - 复用优化不能反过来让扫描失败
+            logger.warning("无法读取行情数据修订号，本轮全部回放", exc_info=True)
+            return {}
 
     def _benchmark_returns(
         self, versions: list[dict[str, Any]]
@@ -190,6 +221,10 @@ class PoolTrackingRunner:
             v for v in versions if selected_ids is None or v["version_id"] in selected_ids
         ]
         total = len(selected_versions)
+        target_data_date = str(payload.get("as_of_date") or "")
+        revisions = self._data_revisions(
+            {(str(v["market"]), str(v["code"])) for v in selected_versions}
+        )
         for v in selected_versions:
             key = (
                 v["market"],
@@ -214,6 +249,8 @@ class PoolTrackingRunner:
             if batch_writer is not None:
                 try:
                     acks = batch_writer(batch)
+                except TransientWorkerApiError as exc:
+                    logger.warning("批量保存跟踪快照暂不可用，退回逐只写入: %s", exc)
                 except Exception:
                     logger.exception("批量保存跟踪快照失败，退回逐只写入")
             if acks is None:
@@ -221,6 +258,13 @@ class PoolTrackingRunner:
                 for item in batch:
                     try:
                         acks.append(writer(item))
+                    except TransientWorkerApiError as exc:
+                        logger.warning(
+                            "跟踪快照暂未落库，下一轮重试 version_id=%s: %s",
+                            item.get("version_id"),
+                            exc,
+                        )
+                        acks.append({"saved": False})
                     except Exception:
                         logger.exception("无法保存跟踪快照 version_id=%s", item.get("version_id"))
                         acks.append({"saved": False})
@@ -246,7 +290,7 @@ class PoolTrackingRunner:
                 ),
             )
 
-        def consume(v: dict[str, Any], snapshot: dict[str, Any]) -> None:
+        def consume(v: dict[str, Any], snapshot: dict[str, Any], *, persist: bool = True) -> None:
             nonlocal skipped
             snapshot = dict(snapshot)
             boundary = (
@@ -265,15 +309,27 @@ class PoolTrackingRunner:
                     (snapshot.get("report") or {}).get("current_state"),
                 ),
             }
+            # 这两个值只用于判断下一轮能否复用；摘要里已有就不再写库。
+            summary["engine_version"] = ENGINE_VERSION
+            summary["data_revision"] = revisions.get((str(v["market"]), str(v["code"])))
             snapshot["summary"] = summary
-            entry = dict(version_id=v["version_id"], signature=v["signature"], snapshot=snapshot)
-            if batch_writer is not None:
-                snapshot_batch.append(entry)
-            else:
-                ack = writer(entry)
-                if isinstance(ack, Mapping) and ack.get("saved") is False:
-                    skipped += 1
-                    return
+            if persist:
+                entry = dict(
+                    version_id=v["version_id"], signature=v["signature"], snapshot=snapshot
+                )
+                if batch_writer is not None:
+                    snapshot_batch.append(entry)
+                else:
+                    try:
+                        ack = writer(entry)
+                    except TransientWorkerApiError:
+                        # 本轮的回放结果仍然有效，只是快照没落库；照常产出信号，下一轮再存。
+                        if is_applied(v):
+                            project(v, summary)
+                        raise
+                    if isinstance(ack, Mapping) and ack.get("saved") is False:
+                        skipped += 1
+                        return
             if not is_applied(v):
                 return
             project(v, summary)
@@ -392,6 +448,23 @@ class PoolTrackingRunner:
             slots = [first] if first is not None else []
             pending: dict[Any, tuple[list[dict[str, Any]], ProcessPoolExecutor]] = {}
             exhausted = not bool(groups)
+
+            def report_progress() -> None:
+                progress(
+                    completed + failed + skipped,
+                    max(1, total),
+                    "跟踪各股策略",
+                    dict(
+                        mode="signals",
+                        completed_symbols=completed,
+                        failed_symbols=failed,
+                        total_symbols=total,
+                        current_parallelism=len(pending),
+                        maximum_parallelism=maximum,
+                        phase_label="增量跟踪各股账户",
+                    ),
+                )
+
             while not exhausted or pending:
                 if abort_check():
                     for future in pending:
@@ -437,6 +510,24 @@ class PoolTrackingRunner:
                         break
                     v = dict(group[0], target_data_date=payload.get("as_of_date"))
                     previous = self.tracks.snapshot(v["version_id"])
+                    if (
+                        previous is not None
+                        and isinstance(previous.get("checkpoint"), Mapping)
+                        and all(
+                            _snapshot_reusable(
+                                member,
+                                revisions.get((str(member["market"]), str(member["code"]))),
+                                target_data_date,
+                            )
+                            for member in group
+                        )
+                    ):
+                        # 同一行情日、同一份数据、同一版引擎：上一份快照就是这一轮的结果。
+                        for member in group:
+                            consume(member, previous, persist=False)
+                            completed += 1
+                        report_progress()
+                        continue
                     pending[executor.submit(_replay, v, previous)] = (group, executor)
                 if not pending:
                     break
@@ -474,6 +565,14 @@ class PoolTrackingRunner:
                                 consume(v, snapshot)
                             except TaskCancelledError:
                                 raise
+                            except TransientWorkerApiError as exc:
+                                # 传输/忙碌不是策略失败：版本状态保持原样，下一轮扫描重试。
+                                skipped += 1
+                                logger.warning(
+                                    "跟踪快照暂未落库，下一轮重试 version_id=%s: %s",
+                                    v["version_id"],
+                                    exc,
+                                )
                             except Exception as exc:
                                 failed += 1
                                 try:
@@ -498,20 +597,7 @@ class PoolTrackingRunner:
                                     completed += 1
                                 if len(snapshot_batch) >= SNAPSHOT_BATCH_SIZE:
                                     flush_snapshots()
-                progress(
-                    completed + failed + skipped,
-                    max(1, total),
-                    "跟踪各股策略",
-                    dict(
-                        mode="signals",
-                        completed_symbols=completed,
-                        failed_symbols=failed,
-                        total_symbols=total,
-                        current_parallelism=len(pending),
-                        maximum_parallelism=maximum,
-                        phase_label="增量跟踪各股账户",
-                    ),
-                )
+                report_progress()
         flush_snapshots()
         goal = str(payload.get("objective") or "annual_return")
         return {

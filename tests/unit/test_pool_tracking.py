@@ -7,6 +7,7 @@ from aquest.market_data.store import DuckDbMarketDataStore
 from aquest.strategy_pool.store import DuckDbStrategyPoolStore
 from aquest.strategy_pool.tracking import account_summary
 from aquest.strategy_pool.tracking_store import (
+    ENGINE_VERSION,
     PoolTrackingStore,
     dumps,
     launch_data_date,
@@ -421,3 +422,30 @@ def test_save_snapshots_batches_with_the_same_guards_as_single_writes(tmp_path):
     )
     assert saved == [False, True]
     assert tracks.snapshot(first["version_id"])["summary"]["as_of_date"] == "2026-10-20"
+
+
+def test_snapshot_reuse_requires_same_date_revision_and_engine() -> None:
+    """跳过回放的三个前提缺一不可：同一行情日、同一份数据、同一版回放引擎。"""
+
+    from aquest.strategy_pool.tracking_runner import _snapshot_reusable
+
+    version = {
+        "status": "ready",
+        "summary": {
+            "engine_version": ENGINE_VERSION,
+            "data_revision": "rev-1",
+            "as_of_date": "2026-10-19",
+        },
+    }
+    assert _snapshot_reusable(version, "rev-1", "2026-10-19")
+    # 同一天的数据被修正：修订号变了，必须重放。
+    assert not _snapshot_reusable(version, "rev-2", "2026-10-19")
+    # 行情日前进了一天：上一份快照不含新 bar。
+    assert not _snapshot_reusable(version, "rev-1", "2026-10-20")
+    # 读不到修订号时保守回放。
+    assert not _snapshot_reusable(version, None, "2026-10-19")
+    # 上一次失败过的版本要重新回放，不能拿失败状态冒充完成。
+    assert not _snapshot_reusable({**version, "status": "failed"}, "rev-1", "2026-10-19")
+    # 回放引擎升级后旧快照一律作废。
+    old_engine = {**version, "summary": {**version["summary"], "engine_version": "v2"}}
+    assert not _snapshot_reusable(old_engine, "rev-1", "2026-10-19")

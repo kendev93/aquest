@@ -467,7 +467,12 @@ def test_tracking_runner_batches_snapshots_and_falls_back_when_the_batch_fails(t
     saved = [tracks.snapshot(v) for v in batches[0] if v != rejected]
     assert all(item is not None for item in saved)
 
-    # 批量通道整体失败：退回逐只写，结果一只能不少
+    # 批量通道整体失败：退回逐只写，结果一只能不少。
+    # 先修正同一天的数据，让修订号变化，避免命中「行情没变就复用快照」的短路。
+    corrected = bars(3)
+    corrected.loc[2, ["close", "high", "low"]] = [16.0, 17.0, 13.0]
+    for code in codes:
+        store.replace_local_bars("SH", code, "stock", corrected)
     fallback: list[str] = []
 
     def broken_batch(_items):
@@ -491,6 +496,119 @@ def test_tracking_runner_batches_snapshots_and_falls_back_when_the_batch_fails(t
     assert len(fallback) == 3
     assert result["completed_symbols"] == 3
     assert result["skipped_symbols"] == 0
+
+
+def test_tracking_runner_keeps_version_status_when_snapshot_transport_is_transient(tmp_path):
+    """后端繁忙/网络抖动只是快照没落库：本轮信号照常产出，版本状态不能被标成 failed。"""
+
+    from aquest.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
+    from aquest.strategy_discovery.worker_api_client import TransientWorkerApiError
+    from aquest.strategy_pool.tracking_runner import PoolTrackingRunner
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", bars(3))
+    pool = DuckDbStrategyPoolStore(store)
+    pool.upsert_automatic(
+        market="SH",
+        code="600000",
+        name="test",
+        annual_candidate=candidate(),
+        sharpe_candidate=None,
+        data_fingerprint="a",
+        config_fingerprint="b",
+        source_job_id="job",
+    )
+    tracks = PoolTrackingStore(store)
+    snapshot_attempts: list[dict] = []
+    errors: list[dict] = []
+
+    def write_one(item):
+        if "error" in item:
+            errors.append(item)
+            return {"saved": False}
+        snapshot_attempts.append(item)
+        raise TransientWorkerApiError("策略 worker API 响应超时或暂不可用")
+
+    result = PoolTrackingRunner(store, EvaluationWorkerBudget(2)).run(
+        {"objective": "annual_return", "as_of_date": "2026-09-03"},
+        progress=lambda *args: None,
+        abort_check=lambda: False,
+        writer=write_one,
+    )
+
+    assert len(snapshot_attempts) == 1
+    assert errors == []
+    assert result["failed_symbols"] == 0
+    assert result["skipped_symbols"] == 1
+    assert result["holding_snapshot_complete"] is True
+    assert any(row["symbol"] == "SH600000" for row in result["states"])
+    assert tracks.current_versions()[0]["status"] == "pending"
+
+
+def test_tracking_runner_reuses_snapshot_until_market_data_changes(tmp_path):
+    """同一行情日、同一份数据不重放；同日数据被修正（修订号变化）必须重放。"""
+
+    from aquest.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
+    from aquest.strategy_pool.tracking_runner import PoolTrackingRunner
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", bars(3))
+    pool = DuckDbStrategyPoolStore(store)
+    pool.upsert_automatic(
+        market="SH",
+        code="600000",
+        name="test",
+        annual_candidate=candidate(),
+        sharpe_candidate=None,
+        data_fingerprint="a",
+        config_fingerprint="b",
+        source_job_id="job",
+    )
+    tracks = PoolTrackingStore(store)
+    writes: list[dict] = []
+
+    def save_one(item):
+        writes.append(item)
+        saved = tracks.save_snapshot(item["version_id"], item["signature"], item["snapshot"])
+        return {"saved": saved}
+
+    def run_once(writer) -> dict:
+        return PoolTrackingRunner(store, EvaluationWorkerBudget(2)).run(
+            {"objective": "annual_return", "as_of_date": "2026-09-03"},
+            progress=lambda *args: None,
+            abort_check=lambda: False,
+            writer=writer,
+        )
+
+    first = run_once(save_one)
+    assert first["completed_symbols"] == 1
+    assert len(writes) == 1
+    version = tracks.current_versions()[0]
+    assert version["summary"]["engine_version"] == "pool-account-v3"
+    assert version["summary"]["data_revision"]
+    assert version["summary"]["as_of_date"] == "2026-09-03"
+
+    # 数据没变：第二轮直接复用上一份快照，不再逐只回放/落库。
+    writes.clear()
+    second = run_once(save_one)
+    assert second["completed_symbols"] == 1
+    assert second["skipped_symbols"] == 0
+    assert second["failed_symbols"] == 0
+    assert writes == []
+    assert any(row["symbol"] == "SH600000" for row in second["states"])
+
+    # 同一天的数据被修正：修订号变了，必须重放并写回新快照。
+    corrected = bars(3)
+    corrected.loc[2, ["close", "high", "low"]] = [16.0, 17.0, 13.0]
+    store.replace_local_bars("SH", "600000", "stock", corrected)
+    writes.clear()
+    third = run_once(save_one)
+    assert third["completed_symbols"] == 1
+    assert len(writes) == 1
+    assert (
+        tracks.current_versions()[0]["summary"]["data_revision"]
+        != version["summary"]["data_revision"]
+    )
 
 
 def test_scheduler_trading_day_dedup_and_new_version_initialization(tmp_path):
@@ -1079,6 +1197,11 @@ def test_partial_tracking_projects_only_applied_versions_for_both_objectives(tmp
     assert len(sharpe["model_portfolio"]["holdings"]) == 1
     assert sharpe["model_portfolio"]["holdings"][0]["label"] == "automatic sharpe"
 
+    # 修正同一天的数据，逼出一次真正的回放；否则会被「行情没变就复用快照」短路，
+    # 测不到 writer 拒绝时「不投影」的那条分支。
+    corrected = bars(3)
+    corrected.loc[2, ["close", "high", "low"]] = [16.0, 17.0, 13.0]
+    store.replace_local_bars("SH", "600000", "stock", corrected)
     skipped = PoolTrackingRunner(store, EvaluationWorkerBudget(2)).run(
         {
             "objective": "annual_return",

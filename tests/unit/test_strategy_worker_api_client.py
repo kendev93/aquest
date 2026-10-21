@@ -269,3 +269,41 @@ def test_cancel_poll_does_not_hold_client_lock_during_network_io(tmp_path) -> No
             updater.join(timeout=2)
 
     assert request_results == [True]
+
+
+def test_pool_tracking_batch_retries_transport_errors_and_reports_transient(
+    tmp_path, monkeypatch
+) -> None:
+    """快照是派生数据，网络抖动要重试；重试耗尽后抛可识别的瞬态错误。"""
+
+    from aquest.strategy_discovery import worker_api_client
+    from aquest.strategy_discovery.worker_api_client import TransientWorkerApiError
+
+    monkeypatch.setattr(worker_api_client, "_WORKER_RETRY_DELAYS_SECONDS", (0.0,))
+    token_file = tmp_path / "worker.token"
+    token_file.write_text("secret-token", encoding="utf-8")
+    attempts = 0
+
+    def handler(
+        _url: str,
+        _payload: Mapping[str, object],
+        _headers: Mapping[str, str],
+        _timeout: float,
+    ) -> Mapping[str, object]:
+        nonlocal attempts
+        attempts += 1
+        raise TimeoutError("backend busy")
+
+    with HttpStrategyJobClient(
+        "http://backend:8123",
+        token_file,
+        "worker-a",
+        requester=handler,
+    ) as client:
+        with pytest.raises(TransientWorkerApiError):
+            client.write_pool_tracking_many(
+                "job-1",
+                [{"version_id": "v1", "signature": "s", "snapshot": {}}],
+            )
+
+    assert attempts == 2

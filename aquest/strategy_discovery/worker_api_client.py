@@ -304,6 +304,9 @@ class HttpStrategyJobClient:
             path.endswith("/heartbeat")
             or path.endswith("/progress")
             or path.endswith("/pool-entry")
+            # 快照是派生数据，网络抖动/后端忙时可以重发；重发是幂等 upsert。
+            or path.endswith("/pool-tracking")
+            or path.endswith("/pool-tracking/batch")
         )
         attempt_limit = max_attempts or len(_WORKER_RETRY_DELAYS_SECONDS) + 1
         if attempt_limit < 1:
