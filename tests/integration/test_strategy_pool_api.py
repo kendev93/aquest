@@ -938,3 +938,38 @@ def test_research_estimate_endpoint_reports_pending_work(tmp_path) -> None:
     assert body["deferred_symbols"] == 0
     assert body["next_eligible_date"] is None
     assert wrong_mode.status_code == 422
+
+
+def test_research_estimate_cannot_broaden_the_saved_scope(tmp_path) -> None:
+    """外部调用显式传全板块/不过滤 ST，也不能越过保存的研究设置。
+
+    2026-10 的一次错误全市场任务显式传了 ``boards=[main,chinext,star]``、
+    ``exclude_st=false``，在用户保存的是 main+chinext、排除 ST 的情况下把 25 只
+    ST 写进了池子。范围只允许收窄，不允许放宽。
+    """
+
+    app = create_app(market_data_store=_store(tmp_path), auto_sync_enabled=False)
+    with TestClient(app) as client:
+        saved = client.put(
+            "/api/v1/strategy-pool/research-settings",
+            json={"boards": ["main", "chinext"], "exclude_st": True},
+        )
+        broad = client.post(
+            "/api/v1/strategy-pool/research-estimate",
+            json={
+                "mode": "full",
+                "boards": ["main", "chinext", "star"],
+                "exclude_st": False,
+            },
+        )
+        disjoint = client.post(
+            "/api/v1/strategy-pool/research-estimate",
+            json={"mode": "full", "boards": ["star"], "exclude_st": False},
+        )
+
+    assert saved.status_code == 200
+    assert broad.status_code == 200
+    body = broad.json()["data"]
+    assert set(body["boards"]) == {"main", "chinext"}
+    assert body["exclude_st"] is True
+    assert disjoint.status_code == 422

@@ -1640,14 +1640,34 @@ class MarketStrategyPoolService:
     ) -> tuple[Sequence[str] | None, bool]:
         """解析任务里的研究范围（板块 + ST 过滤）。
 
-        - ``boards`` 缺省 = 不限板块（旧行为，兼容已排队的历史任务）；
+        保存的研究设置是**上限**：任务可以在它基础上收窄（少选板块、排除 ST），
+        但不能放宽。否则外部调用漏传字段或显式传 ``exclude_st=False`` 就能把用户
+        明确排除的 ST/板块重新带进研究。没有保存设置时才沿用 payload 的默认。
+
         - 单股重跑是用户指名的请求，板块/ST 过滤不套在它头上；
         - 非法板块值直接报错，避免拼错 silently 扩大研究范围。
         """
 
-        boards = _boards_from_payload(payload) if single_symbol is None else None
-        exclude_st = payload.get("exclude_st") is True and single_symbol is None
-        return boards, exclude_st
+        if single_symbol is not None:
+            return None, False
+        payload_boards = _boards_from_payload(payload)
+        payload_exclude_st = payload.get("exclude_st") is True
+        pool_store = self._pool_store
+        if pool_store is None:
+            return payload_boards, payload_exclude_st
+        saved = pool_store.read_research_settings()
+        if saved is None:
+            return payload_boards, payload_exclude_st
+        saved_boards = _boards_from_payload(saved)
+        saved_exclude_st = saved.get("exclude_st") is True
+        if payload_boards is None:
+            boards: Sequence[str] | None = saved_boards
+        else:
+            allowed = {str(board) for board in saved_boards or ()}
+            boards = [board for board in payload_boards if str(board) in allowed]
+            if not boards:
+                raise ValueError("研究范围与保存的设置没有交集；先在研究设置里放开对应板块")
+        return boards, payload_exclude_st or saved_exclude_st
 
     def _scan_signals(
         self,
