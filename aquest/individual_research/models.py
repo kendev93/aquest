@@ -44,6 +44,11 @@ class IndividualResearchConfig:
     fixed_size: int | None = None
     split_windows: Mapping[str, tuple[date, date]] | None = None
     common_split_metadata: Mapping[str, object] | None = None
+    #: 研究窗口开头只作指标预热的 K 线根数；0 表示不启用（手动研究默认）。
+    #: 只在标的自身数据起点就落在研究起点之后时生效（2016 年后上市的池内标的）。
+    warmup_bars: int = 0
+    #: 预热之后至少保留的研究 K 线根数；不足时判为历史样本不足。0 表示不限制。
+    min_research_bars: int = 0
 
     @property
     def symbol(self) -> str:

@@ -192,6 +192,25 @@ def test_inherited_trade_includes_full_gain_and_separate_post_launch_return():
     assert summary["inherited_position"] is True
 
 
+def test_account_summary_starts_at_first_replayed_day_when_launch_is_earlier():
+    """2016 后上市的票回放起点后移，老版本上线日更早时不能拿初始资金冒充上线净值。"""
+
+    checkpoint = {
+        "equity": [
+            {"date": "2026-09-01", "total": 1000},
+            {"date": "2026-09-02", "total": 1100},
+        ],
+        "states": [{"date": "2026-09-02", "holdings": []}],
+        "trades": [],
+    }
+
+    summary = account_summary(checkpoint, "2020-01-01", 1000)
+
+    assert summary["baseline_date"] == "2026-09-01"
+    assert summary["has_post_launch_data"] is True
+    assert round(summary["post_launch_return"], 6) == 0.1
+
+
 def test_current_versions_can_skip_the_candidate_column(tmp_path):
     """列表那条热路径可以只要摘要，不必把每份候选读出来再丢掉。
 

@@ -334,6 +334,11 @@ class FormulaRegistry:
         formula_ids = {value_id.split(".", 1)[0] for value_id in value_ids}
         return tuple(definition for definition in self._definitions if definition.id in formula_ids)
 
+    def max_recommended_bars(self) -> int:
+        """Longest warm-up any registered output needs before it carries a value."""
+
+        return max((definition.recommended_bars for definition in self._definitions), default=0)
+
     def metadata(self) -> list[dict[str, object]]:
         return [
             {

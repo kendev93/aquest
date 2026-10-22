@@ -1437,7 +1437,7 @@ describe('StrategyPoolPage', () => {
 
   it('breaks out the symbols skipped for insufficient history', async () => {
     // 2026-10-19 用户报告：进度条已经 100%，「已完成」却只有 20，看着像任务没干活。
-    // 队列里那 59 只是上市未满一年，每轮都在几毫秒内以跳过结束——它们本来就在 skipped
+    // 队列里那 59 只是上市历史不足，每轮都在几毫秒内以跳过结束——它们本来就在 skipped
     // 里，所以要摊开成单独一项，但不能从「已完成」里再减一次。
     window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
     vi.mocked(api.fetchStrategyPoolJobs).mockResolvedValueOnce([
@@ -2293,7 +2293,7 @@ describe('StrategyPoolPage', () => {
       const hint = wrapper.get('[data-testid="pool-research-estimate"]')
       expect(hint.text())
         .toBe('没有待更新：4305 只可直接复用 · 112 只样本不足已排期（最早 2026-11-30）')
-      expect(hint.attributes('title')).toContain('未满一年的排到「上市首日 + 365 天」')
+      expect(hint.attributes('title')).toContain('未满两年的排到「上市首日 + 730 天」')
     })
 
     it('says so when there is nothing to recompute', async () => {

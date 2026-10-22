@@ -8,10 +8,13 @@ from typing import cast
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from aquest.individual_research.models import IndividualResearchConfig
 from aquest.individual_research.service import (
     IndividualStockResearchService,
+    InsufficientResearchHistoryError,
+    _apply_warmup_window,
     _has_executed_buy,
     _rank_candidates,
     _select_rule_pairs,
@@ -185,6 +188,34 @@ def _config() -> IndividualResearchConfig:
         signal_ids=(),
         risk_trials=1000,
     )
+
+
+def test_warmup_window_skips_the_stocks_own_first_bars() -> None:
+    frame = pd.DataFrame({"date": pd.date_range("2020-01-01", periods=300, freq="B")})
+    config = replace(
+        _config(),
+        start_date=frame["date"].iloc[0].date(),
+        warmup_bars=268,
+        min_research_bars=10,
+    )
+
+    adjusted = _apply_warmup_window(config, frame, "data-1")
+
+    # 前 268 根只作指标预热，研究从第 269 根开始。
+    assert adjusted.start_date == frame["date"].iloc[268].date()
+    assert adjusted.end_date == config.end_date
+
+    with pytest.raises(InsufficientResearchHistoryError) as raised:
+        _apply_warmup_window(replace(config, min_research_bars=33), frame, "data-2")
+    assert "预热" in str(raised.value)
+    assert raised.value.split_metadata["reason"] == "warmup_history"
+    assert raised.value.split_metadata["bars"] == 300
+
+    # 已经有足够的前置 K 线时不移动窗口；手动研究默认 warmup=0 也原样返回。
+    later = replace(config, start_date=frame["date"].iloc[280].date())
+    assert _apply_warmup_window(later, frame, "data-3") is later
+    untouched = replace(_config(), start_date=frame["date"].iloc[0].date())
+    assert _apply_warmup_window(untouched, frame, "data-4") is untouched
 
 
 def test_individual_pipeline_optimizes_validation_top_rule_and_only_marks_holdout() -> None:

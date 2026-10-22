@@ -74,8 +74,10 @@ HISTORY_START = date(2015, 1, 1)
 #: 年线一类）需要一段历史才有值，从 2015-01-05 直接起跑的研究开头一年指标是
 #: 冷的，那些天产生的信号全是半成品。所以 2015 全年只喂给指标计算，不算研究
 #: 样本。引擎侧的配合机制是 ``portfolio_backtest.context`` 的 ``warmup_bars``
-#: （按公式推荐条数取最大，约 268 根，从 2016-01-01 向前正好覆盖 2015 全年）。
-#: 本常量从 ``HISTORY_START`` 派生：数据保留起点挪，研究起点跟着挪。
+#: （按公式推荐条数取最大，约 268 根）。注意 2015 年只有 244 个交易日，老票
+#: 2016 年初仍差约 24 根长窗口指标；2016 年后上市的标的由 ``strategy_pool``
+#: 按自身前 268 根 K 线预热，老票这段残余尚未处理。本常量从 ``HISTORY_START``
+#: 派生：数据保留起点挪，研究起点跟着挪。
 RESEARCH_START = date(HISTORY_START.year + 1, HISTORY_START.month, HISTORY_START.day)
 _BAR_COLUMNS = [
     "market",

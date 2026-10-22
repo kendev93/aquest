@@ -1009,13 +1009,7 @@ def _snapshot_warmup_bars() -> int:
     disagreed on the same indicator.
     """
 
-    return max(
-        1,
-        max(
-            FORMULA_REGISTRY.formula(formula_id).recommended_bars
-            for formula_id in FORMULA_REGISTRY.all_formula_ids()
-        ),
-    )
+    return max(1, FORMULA_REGISTRY.max_recommended_bars())
 
 
 def _condition_to_dict(condition: ScreenCondition) -> dict[str, object]:

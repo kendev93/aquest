@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from aquest.formulas.registry import FORMULA_REGISTRY
 from aquest.indicators.cache import frame_fingerprint
 from aquest.market_data.adjustment import mark_adjusted
 from aquest.market_data.models import StockRef
@@ -36,6 +37,11 @@ def account_summary(
     if not equity:
         raise ValueError("跟踪没有可用行情")
     boundary = launch_date or equity[-1]["date"]
+    # 2016 年后上市的标的回放起点会让出预热段；老版本的上线日可能落在起点之前，
+    # 这时账户没有那段净值，基线只能从回放首日算，不能拿初始资金冒充上线净值。
+    first_equity = str(equity[0]["date"])
+    if boundary < first_equity:
+        boundary = first_equity
     prior = [point for point in equity if point["date"] <= boundary]
     launch_equity = float(prior[-1]["total"]) if prior else initial_cash
     state: dict[str, Any] = next((row for row in reversed(states) if row["date"] <= boundary), {})
@@ -137,8 +143,16 @@ def replay_account(
     # 「2015 只预热、不算样本」的口径矛盾。本地数据整体早于 RESEARCH_START 的
     # 存量条目保持原窗口，避免回放窗口为空导致重建失败。
     replay_dates = pd.to_datetime(raw["date"])
+    data_start = replay_dates.iloc[0].date()
     if replay_dates.iloc[-1].date() >= RESEARCH_START:
         raw = raw.loc[replay_dates.dt.date >= RESEARCH_START].reset_index(drop=True)
+        # 2016 年后上市的标的没有 2015 年那段公共预热：它们自己的前 N 根就是
+        # 全部的预热来源。把这段让出回放窗口，引擎再从库里读它作 warmup_bars；
+        # 不足 N 根的老版本保持原窗口，等下一次重新研究替换掉。判断用裁剪前的
+        # 首根日期，否则老票裁到 2016 后也会被误认为次新。
+        warmup_bars = FORMULA_REGISTRY.max_recommended_bars()
+        if data_start >= RESEARCH_START and len(raw) > warmup_bars:
+            raw = raw.iloc[warmup_bars:].reset_index(drop=True)
     config_payload = dict(candidate.get("config") or {})
     config_payload.update(
         vipdoc_path="",
@@ -217,6 +231,10 @@ def replay_account(
         for row in (equity_rows if isinstance(equity_rows, list) else [])
         if isinstance(row, Mapping)
     ]
+    if equity_list:
+        first_replay = str(equity_list[0].get("date", ""))
+        if first_replay and boundary < first_replay:
+            boundary = first_replay
     summary["post_launch_days"] = sum(
         1 for row in equity_list if str(row.get("date", "")) > str(boundary)
     )
@@ -228,7 +246,7 @@ def replay_account(
         close = pd.to_numeric(adjusted["close"], errors="coerce")
         bar_dates = pd.to_datetime(adjusted["date"]).dt.date
         try:
-            boundary_date = pd.Timestamp(str(version["launch_data_date"])).date()
+            boundary_date = pd.Timestamp(str(boundary)).date()
         except ValueError:
             boundary_date = None
         prior_closes = (

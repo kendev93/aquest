@@ -584,7 +584,7 @@ def test_tracking_runner_reuses_snapshot_until_market_data_changes(tmp_path):
     assert first["completed_symbols"] == 1
     assert len(writes) == 1
     version = tracks.current_versions()[0]
-    assert version["summary"]["engine_version"] == "pool-account-v3"
+    assert version["summary"]["engine_version"] == "pool-account-v4"
     assert version["summary"]["data_revision"]
     assert version["summary"]["as_of_date"] == "2026-09-03"
 
@@ -1503,6 +1503,50 @@ def test_replay_window_starts_at_research_start_with_prior_bars_as_warmup(tmp_pa
     assert len(equity_dates) == len(window_bars)
     assert all(day >= start_text for day in equity_dates)
     # 2015 年没有任何交易；买入规则 close>0 恒真，窗口首日即触发、次日成交。
+    trade_dates = [str(row["date"]) for row in result["checkpoint"]["trades"]]
+    assert trade_dates
+    assert all(day >= start_text for day in trade_dates)
+
+
+def test_replay_window_skips_late_listed_stocks_own_warmup(tmp_path):
+    """2016 后上市的票没有 2015 预热：回放从第 269 根开始，前 268 根只作指标预热。"""
+
+    import numpy as np
+
+    store = DuckDbMarketDataStore(tmp_path / "late-listed.duckdb")
+    dates = pd.date_range("2020-01-01", periods=300, freq="B")
+    close = 10.0 + np.arange(300) / 100
+    frame = pd.DataFrame(
+        dict(
+            date=dates,
+            open=close,
+            close=close,
+            high=close + 0.1,
+            low=close - 0.1,
+            volume=1000.0,
+            amount=close * 1000,
+            bar_status="completed",
+        )
+    )
+    store.replace_local_bars("SH", "600000", "stock", frame)
+    adapter = DuckDbMarketDataAdapter(store)
+    service = PortfolioBacktestService(adapter=adapter)
+    ref = adapter.stock_ref("", "SH", "600000")
+    value = candidate()
+    value["config"].update(initial_cash=100_000, stop_loss_pct=None)
+    version = dict(
+        candidate=value,
+        signature=signature(value),
+        launch_data_date=dates[-1].date().isoformat(),
+        created_at="2026-10-09T16:00:00+00:00",
+    )
+
+    result = replay_account(service, ref, version)
+
+    start_text = dates[268].strftime("%Y-%m-%d")
+    equity_dates = [str(row["date"]) for row in result["checkpoint"]["equity"]]
+    assert equity_dates[0] == start_text
+    assert len(equity_dates) == 300 - 268
     trade_dates = [str(row["date"]) for row in result["checkpoint"]["trades"]]
     assert trade_dates
     assert all(day >= start_text for day in trade_dates)

@@ -251,7 +251,7 @@ const progressCountText = computed(() => {
   // total_symbols 是预扫描后的真实研究队列，进度行以它为主（2026-10-13 用户决策）。
   const reused = typeof metadata.skipped_symbols === 'number' ? metadata.skipped_symbols : 0
   const failed = typeof metadata.failed_symbols === 'number' ? metadata.failed_symbols : 0
-  // 历史样本不足（绝大多数是上市未满一年）每轮都会排进队列，也每轮都在几毫秒内以"跳过"
+  // 历史样本不足（绝大多数是上市历史不够长）每轮都会排进队列，也每轮都在几毫秒内以"跳过"
   // 结束。不摊开的话，进度条 100% 而「已完成」只有几十，看着就像任务没干活（2026-10-19
   // 用户报告）。摊开之后这一行的几项加起来就是队列长度，读者能自己对上。
   // 注意：历史样本不足的标的本来就在 skipped 里（它们也是"没重新研究"结束的），所以
@@ -283,10 +283,11 @@ const progressCountTitle = computed(() => {
   const eligible = typeof metadata.next_eligible_date === 'string' ? metadata.next_eligible_date : ''
   const notes: string[] = []
   if (insufficient > 0) {
-    notes.push(`本轮有 ${insufficient} 只研究完仍然历史样本不足（绝大多数是上市未满一年），不产出策略结果。`)
+    notes.push(`本轮有 ${insufficient} 只研究完仍然历史样本不足，不产出策略结果。`)
   }
   if (scheduled > 0) {
-    notes.push(`另有 ${scheduled} 只历史样本不足的不进今天的队列：未满一年的排到「上市首日 + 365 天」，`
+    notes.push(`另有 ${scheduled} 只历史样本不足的不进今天的队列：2016 年后上市、未满两年的排到`
+      + `「上市首日 + 730 天」（268 根预热 + 一年研究样本），`
       + `其余每 30 天重查一次${eligible ? `，最早 ${eligible} 自动回到增量队列` : ''}，不需要手动重跑。`)
   }
   return notes.length ? notes.join('') : undefined
@@ -1005,7 +1006,8 @@ const researchEstimateTitle = computed(() => {
   if (!estimate) return '按当前研究范围与参数预估下一次「增量更新策略池」的工作量'
   const scheduled = estimate.deferred_symbols ?? 0
   const schedule = scheduled > 0
-    ? `另有 ${scheduled} 只历史样本不足（绝大多数是上市未满一年）不进队列：未满一年的排到「上市首日 + 365 天」、`
+    ? `另有 ${scheduled} 只历史样本不足不进队列：2016 年后上市、未满两年的排到`
+      + `「上市首日 + 730 天」（268 根预热 + 一年研究样本）、`
       + `其余每 30 天重查一次，最早 ${estimate.next_eligible_date ?? '待定'} 自动回来，不需要手动重跑。`
     : ''
   return '按当前研究范围与参数，下次「增量更新策略池」真正要逐只研究的标的数：'

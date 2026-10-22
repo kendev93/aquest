@@ -16,7 +16,12 @@ from aquest.market_data.store_base import MarketDataStoreError
 from aquest.screening.rules import RuleGroup
 from aquest.strategy_pool import service as pool_service
 from aquest.strategy_pool.resources import GiB, MemoryStatus
-from aquest.strategy_pool.service import MarketStrategyPoolService
+from aquest.strategy_pool.service import (
+    MIN_RESEARCH_BARS,
+    RESEARCH_WARMUP_BARS,
+    RESEARCH_WINDOW_VERSION,
+    MarketStrategyPoolService,
+)
 from aquest.strategy_pool.store import DuckDbStrategyPoolStore
 
 
@@ -53,15 +58,15 @@ class FakeIndividualResearchService:
                 "observed_windows": {
                     "train": {
                         "start_date": stock_start.isoformat(),
-                        "end_date": date(2020, 1, 20).isoformat(),
+                        "end_date": date(2020, 6, 30).isoformat(),
                     },
                     "validation": {
-                        "start_date": date(2020, 1, 25).isoformat(),
-                        "end_date": date(2020, 2, 5).isoformat(),
+                        "start_date": date(2020, 7, 1).isoformat(),
+                        "end_date": date(2020, 12, 31).isoformat(),
                     },
                     "holdout": {
-                        "start_date": date(2020, 2, 10).isoformat(),
-                        "end_date": date(2020, 2, 20).isoformat(),
+                        "start_date": date(2021, 1, 1).isoformat(),
+                        "end_date": date(2022, 1, 31).isoformat(),
                     },
                 },
             },
@@ -96,11 +101,11 @@ class FakePortfolioBacktestService:
 
 def _bars(start: str, count: int) -> pd.DataFrame:
     close = np.linspace(10.0, 16.0, count)
-    # 测试标的的历史跨度必须跨过研究准入门槛（上市满一年，见
-    # MIN_LISTING_HISTORY_DAYS）：条数少的夹具按更大的日距展开，保证
-    # 首根到末根 ≥ 370 天，否则所有短夹具都会被「上市未满一年」拦下，
+    # 测试标的的历史跨度必须跨过研究准入门槛（2016 年后上市按 730 天，见
+    # MIN_LATE_LISTING_HISTORY_DAYS）：条数少的夹具按更大的日距展开，保证
+    # 首根到末根 ≥ 740 天，否则所有短夹具都会被「上市历史不足」拦下，
     # 测的就不再是它们本来要测的东西。
-    step = max(1, -(-370 // max(count - 1, 1)))
+    step = max(1, -(-740 // max(count - 1, 1)))
     return pd.DataFrame(
         {
             "date": pd.date_range(start, periods=count, freq=f"{step}D"),
@@ -172,6 +177,9 @@ def test_full_pool_research_splits_each_symbol_and_saves_each_symbol_incremental
     ]
     assert all(config.split_windows is None for config in individual.configs)
     assert all(config.common_split_metadata is None for config in individual.configs)
+    # 2016 年后上市的池内标的：前 268 根只作预热，预热后至少留一年样本。
+    assert all(config.warmup_bars == 268 for config in individual.configs)
+    assert all(config.min_research_bars == 244 for config in individual.configs)
     assert first["manual_overrides"]["annual_return"]["candidate_id"] == "kept-manual"
     assert first["automatic_candidates"]["annual_return"]["candidate_id"] == "candidate-600000"
     assert (
@@ -226,6 +234,96 @@ def test_full_pool_research_splits_each_symbol_and_saves_each_symbol_incremental
     assert refreshed["source_job_id"] == "single-rerun"
     assert refreshed["automatic_candidates"]["annual_return"]["candidate_id"] == "candidate-600000"
     assert refreshed["manual_overrides"]["annual_return"]["candidate_id"] == "kept-manual"
+
+
+def test_late_listed_entries_warm_up_from_their_own_bars_and_invalidate_old_windows(
+    tmp_path,
+) -> None:
+    """2016 后上市的票按自己的 268 根预热；老窗口的存量条目只失效一次。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "warmup-window.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars("2015-01-01", 40))
+    store.replace_local_bars("SZ", "000001", "stock", _bars("2020-01-01", 40))
+    adapter = DuckDbMarketDataAdapter(store)
+    pool_store = DuckDbStrategyPoolStore(store)
+    pool_store.initialize()
+    individual = FakeIndividualResearchService()
+    service = MarketStrategyPoolService(
+        store=store,
+        adapter=adapter,
+        individual_service=individual,
+        pool_store=pool_store,
+        portfolio_service=FakePortfolioBacktestService(),
+    )
+
+    def persist(entry):
+        pool_store.persist_worker_entry(entry, source_job_id=str(entry["source_job_id"]))
+
+    payload = {"mode": "full", "risk_trials": 1_000, "horizon": 5}
+    service.run(payload, job_id="warmup-first", entry_writer=persist)
+
+    configs = {config.code: config for config in individual.configs}
+    assert configs["600000"].warmup_bars == 0
+    assert configs["000001"].warmup_bars == RESEARCH_WARMUP_BARS
+    assert configs["000001"].min_research_bars == MIN_RESEARCH_BARS
+    old = pool_store.get("SH", "600000")
+    late = pool_store.get("SZ", "000001")
+    assert RESEARCH_WINDOW_VERSION not in old["config_fingerprint"]
+    assert late["config_fingerprint"].endswith(f"|{RESEARCH_WINDOW_VERSION}")
+
+    # 模拟升级前落库的次新条目：指纹还是全局值，下一轮必须重研；老票照常复用。
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE strategy_pool_entries SET config_fingerprint = ? "
+            "WHERE market = 'SZ' AND code = '000001'",
+            [old["config_fingerprint"]],
+        )
+
+    second = service.run(payload, job_id="warmup-second", entry_writer=persist)
+    assert second["skipped_symbols"] == 1
+    assert len(individual.configs) == 3
+    assert individual.configs[-1].code == "000001"
+    assert individual.configs[-1].warmup_bars == RESEARCH_WARMUP_BARS
+    refreshed = pool_store.get("SZ", "000001")
+    assert refreshed["config_fingerprint"].endswith(f"|{RESEARCH_WINDOW_VERSION}")
+
+
+def test_full_period_replay_uses_the_effective_warmup_start(tmp_path) -> None:
+    """研究服务后移了起点后，池里的全区间回测不能又回到上市首日。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "warmup-full-period.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars("2020-01-01", 60))
+    adapter = DuckDbMarketDataAdapter(store)
+    pool_store = DuckDbStrategyPoolStore(store)
+    pool_store.initialize()
+
+    class WarmStartFake(FakeIndividualResearchService):
+        def run(self, config, progress_callback=None, abort_check=None):
+            result = super().run(config, progress_callback, abort_check)
+            result["start_date"] = (config.start_date + timedelta(days=500)).isoformat()
+            return result
+
+    individual = WarmStartFake()
+    service = MarketStrategyPoolService(
+        store=store,
+        adapter=adapter,
+        individual_service=individual,
+        pool_store=pool_store,
+        portfolio_service=FakePortfolioBacktestService(),
+    )
+    service.run(
+        {"mode": "full", "risk_trials": 1_000, "horizon": 5},
+        job_id="warmup-full-period",
+        entry_writer=lambda item: pool_store.persist_worker_entry(
+            item,
+            source_job_id="warmup-full-period",
+        ),
+    )
+
+    assert individual.full_period_ranges
+    assert individual.full_period_ranges[0][0] == individual.configs[0].start_date + timedelta(
+        days=500
+    )
 
 
 def test_no_strategy_entry_is_reused_until_recheck_window_elapses() -> None:
@@ -492,17 +590,17 @@ def _young_bars(start: str, count: int) -> pd.DataFrame:
 
 
 def test_full_research_defers_insufficient_history_to_a_scheduled_date(tmp_path) -> None:
-    """历史样本不足不再每天占位：未满一年的排到「首日 + 365 天」，其余每 30 天重查。
+    """历史样本不足不再每天占位：2016 后上市未满两年排到「首日 + 730 天」，其余每 30 天重查。
 
     2026-10-19 实测一轮 80 只的增量队列里 59 只是这么被反复重查的（全是上市未满一年），
     进度条 100% 而「已完成」只有几十，用户以为任务没干活。
     """
 
     store = DuckDbMarketDataStore(tmp_path / "insufficient-history.duckdb")
-    # 老标的：上市历史已经够长（相对全局研究终点满一年），研究却仍切不出三段 → 走 30 天节奏。
-    bars = _bars("2020-01-01", 40)
+    # 老标的：上市历史已经够长（≥365 天），研究却仍切不出三段 → 走 30 天节奏。
+    bars = _bars("2015-01-01", 40)
     store.replace_local_bars("SH", "600000", "stock", bars)
-    # 新标的：首根日线起不满一年 → 能算出确切的重算日子。
+    # 新标的：首根日线起不满两年（268 根预热 + 一年样本）→ 能算出确切的重算日子。
     store.replace_local_bars("SZ", "000001", "stock", _young_bars("2021-01-01", 60))
     adapter = DuckDbMarketDataAdapter(store)
     pool_store = DuckDbStrategyPoolStore(store)
@@ -548,13 +646,13 @@ def test_full_research_defers_insufficient_history_to_a_scheduled_date(tmp_path)
     young = pool_store.get("SZ", "000001")
     assert first["failed_symbols"] == 0
     assert first["total_symbols"] == first["skipped_symbols"] == 2
-    # 未满一年是政策闸，连研究都不该开始。
+    # 未满两年是政策闸，连研究都不该开始。
     assert individual.calls == 1
     assert item["status"] == "insufficient_history"
     assert young["status"] == "insufficient_history"
     assert item["data_fingerprint"] == "data-1"
     # 重算日子写在错误里：用户在详情里就能看到它哪天回来，不用自己算。
-    assert "2022-01-01 起自动重算" in (young["last_error"] or "")
+    assert "2023-01-01 起自动重算" in (young["last_error"] or "")
     # 进度元数据要单独报出这个数：它本来混在 skipped 里，摊不开的话进度条 100% 而
     # 「已完成」只有几十，看着就像任务没干活（2026-10-19 用户报告）。
     assert progress[-1]["insufficient_symbols"] == 2
@@ -569,8 +667,8 @@ def test_full_research_defers_insufficient_history_to_a_scheduled_date(tmp_path)
     assert individual.calls == 1
     assert item["data_fingerprint"] == "data-1"
     assert second["deferred_symbols"] == 2
-    # 最早的那天就是用户能等到结果的日期：新股 2022-01-01，老标的要等 30 天节奏。
-    assert second["next_eligible_date"] == "2022-01-01"
+    # 最早的那天就是用户能等到结果的日期：新股 2023-01-01，老标的要等 30 天节奏。
+    assert second["next_eligible_date"] == "2023-01-01"
 
     estimate = service.estimate_incremental({"mode": "full", "risk_trials": 1_000})
     assert estimate["pending_symbols"] == 0
@@ -582,7 +680,7 @@ def test_full_research_defers_insufficient_history_to_a_scheduled_date(tmp_path)
         estimate["pending_symbols"] + estimate["reusable_symbols"] + estimate["deferred_symbols"]
         == estimate["universe_symbols"]
     )
-    assert estimate["next_eligible_date"] == "2022-01-01"
+    assert estimate["next_eligible_date"] == "2023-01-01"
 
     single_cached = service.run(
         {"mode": "single", "market": "SH", "code": "600000", "risk_trials": 1_000},
@@ -612,7 +710,7 @@ def test_full_research_defers_insufficient_history_to_a_scheduled_date(tmp_path)
 
 
 def test_insufficient_deferral_dates_and_fallback_rhythm() -> None:
-    """排期口径：算得出日期的用「首日 + 365 天」，算不出的按 30 天节奏回查。"""
+    """排期口径：2016 后上市的用「首日 + 730 天」，算不出的按 30 天节奏回查。"""
 
     ref = StockRef(
         market="SH",
@@ -624,11 +722,12 @@ def test_insufficient_deferral_dates_and_fallback_rhythm() -> None:
     prior = ("market-1", "config-1", "insufficient_history", False, now)
     defer = MarketStrategyPoolService._insufficient_deferral
 
-    # 上市未满一年：排到首日 + 365 天，哪怕行情截至日还在那之前。
-    assert defer(ref, prior, data_end=date(2021, 2, 9), now=now) == date(2022, 1, 1)
-    # 攒满一年的当天就回队列：上次失败在满一年之前，30 天节奏早就到期了。
+    # 2016 后上市：排到首日 + 730 天（268 根预热 + 一年研究样本），
+    # 哪怕行情截至日还在那之前。
+    assert defer(ref, prior, data_end=date(2022, 2, 9), now=now) == date(2023, 1, 1)
+    # 攒满两年的当天就回队列：上次失败在两年之前，30 天节奏早就到期了。
     crossed = ("market-1", "config-1", "insufficient_history", False, datetime(2021, 1, 5))
-    assert defer(ref, crossed, data_end=date(2022, 1, 1), now=now) is None
+    assert defer(ref, crossed, data_end=date(2023, 1, 1), now=now) is None
     # 历史够长却仍然不足（切不出三段）：没有确切日子可排，按 30 天节奏回查。
     old_bars = StockRef(
         market="SH", code="600000", path=Path("SH600000"), first_date=date(2015, 1, 1)
@@ -794,12 +893,12 @@ def test_full_reselection_skips_fresh_no_strategy_and_reruns_stale_ones(
     assert pool_store.get("SH", "600000")["status"] == "no_strategy"
 
 
-def test_full_research_defers_symbols_listed_less_than_a_year(tmp_path) -> None:
-    """上市不满一年的标的不研究：指标预热与分段样本都不足。
+def test_full_research_defers_symbols_listed_less_than_two_years(tmp_path) -> None:
+    """2016 后上市不满两年的标的不研究：268 根预热 + 一年样本都不足。
 
     年线级指标在短历史上整段是 NaN，训练/验证段也覆盖不了一个完整的市场
     周期——机械通过样本门槛选出的策略统计上不可信。落 insufficient_history
-    （每次增量重查），攒满一年后自动纳入，无需人工干预。
+    （按首日 + 730 天排期），攒满两年后自动纳入，无需人工干预。
     """
 
     store = DuckDbMarketDataStore(tmp_path / "young.duckdb")
@@ -865,7 +964,7 @@ def test_full_research_defers_symbols_listed_less_than_a_year(tmp_path) -> None:
     assert pool_store.get("SH", "600000")["status"] == "no_strategy"
     young = pool_store.get("SZ", "000001")
     assert young["status"] == "insufficient_history"
-    assert "上市未满一年" in (young["last_error"] or "")
+    assert "上市历史不足" in (young["last_error"] or "")
 
 
 def test_reselection_backfills_full_period_return_without_researching_cached_rules(

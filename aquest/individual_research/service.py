@@ -8,6 +8,7 @@ import math
 import time
 from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from contextlib import closing
+from dataclasses import replace
 from datetime import date
 from itertools import combinations
 from typing import cast
@@ -66,6 +67,59 @@ class InsufficientResearchHistoryError(ValueError):
         self.split_metadata = dict(split_metadata)
 
 
+def _apply_warmup_window(
+    config: IndividualResearchConfig,
+    frame: pd.DataFrame,
+    data_fingerprint: str,
+) -> IndividualResearchConfig:
+    """Move the research start past the stock's own indicator warm-up.
+
+    2016 年后上市的标的没有 2015 年那段公共预热：引擎只能读 ``start_date``
+    之前的 K 线，而它们之前没有数据。这里把标的自己的前 ``warmup_bars`` 根
+    让给指标计算，研究区间从下一根开始；预热段自然落在训练/验证/留出与
+    全区间回测之外。老票 ``warmup_bars=0``，仍从 RESEARCH_START 起跑。
+    """
+
+    if config.warmup_bars <= 0:
+        return config
+    dates = pd.to_datetime(frame["date"], errors="coerce").dt.date
+    in_window = (dates >= config.start_date) & (dates <= config.end_date)
+    window_rows = np.flatnonzero(in_window.to_numpy(dtype=bool, copy=False))
+    start_index = int(window_rows[0]) if window_rows.size else 0
+    if start_index >= config.warmup_bars:
+        return config
+    warm_index = config.warmup_bars
+    remaining = (
+        int((dates.iloc[warm_index:] <= config.end_date).sum())
+        if warm_index < len(dates) and dates.iloc[warm_index] <= config.end_date
+        else 0
+    )
+    required = max(1, config.min_research_bars)
+    if remaining < required:
+        first_date = dates.iloc[0] if dates.size else config.start_date
+        raise InsufficientResearchHistoryError(
+            data_fingerprint,
+            {
+                "reason": "warmup_history",
+                "warmup_bars": config.warmup_bars,
+                "min_research_bars": config.min_research_bars,
+                "bars": len(window_rows),
+                "first_date": first_date.isoformat(),
+                "start_date": config.start_date.isoformat(),
+            },
+            message=(
+                f"上市历史不足：前 {config.warmup_bars} 根只作指标预热，"
+                f"之后只剩 {remaining} 根研究样本"
+                + (
+                    f"，少于要求的 {config.min_research_bars} 根"
+                    if config.min_research_bars > 0
+                    else ""
+                )
+            ),
+        )
+    return replace(config, start_date=dates.iloc[warm_index])
+
+
 class IndividualStockResearchService:
     """Run all stages for one symbol, keeping the final holdout untouched."""
 
@@ -104,6 +158,8 @@ class IndividualStockResearchService:
         self._report(progress_callback, 2, "准备行情", "读取单股日线和指标")
 
         prepared = self._prepare(config, ref)
+        if config.warmup_bars > 0:
+            config = _apply_warmup_window(config, prepared.frame, prepared.data_fingerprint)
         dates, features, labels, signal_values, segments = self._research_window(prepared, config)
         windows: dict[str, dict[str, date] | None]
         if config.split_windows:

@@ -221,7 +221,7 @@ def test_pool_signature_includes_max_hold_days_but_preserves_unlimited_hash() ->
 
     assert signature(base) == signature(explicit_none)
     assert signature(hold_5) != signature(hold_60)
-    assert ENGINE_VERSION == "pool-account-v3"
+    assert ENGINE_VERSION == "pool-account-v4"
 
 
 def test_legacy_max_hold_signature_upgrades_in_place_and_changed_limit_reversions(tmp_path) -> None:

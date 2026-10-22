@@ -42,10 +42,7 @@ DEFAULT_DATE_INDEX_CACHE_LIMIT = 512
 #: have something to roll over. Without it every stock was loaded from its first
 #: ever bar - thousands of bars of indicator work for a few hundred days of
 #: backtest, which is why shortening the range never made a run any faster.
-_WARMUP_BARS = max(
-    (cast(int, item["recommended_bars"]) for item in FORMULA_REGISTRY.metadata()),
-    default=0,
-)
+_WARMUP_BARS = FORMULA_REGISTRY.max_recommended_bars()
 
 
 class _ResolvedRefs(NamedTuple):
