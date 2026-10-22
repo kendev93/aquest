@@ -506,12 +506,21 @@ const sellPage = ref(1)
 const holdingsPage = ref(1)
 const sortedBuySignals = computed(() => sortSignalRows(buySignals.value, (item) => item.symbol))
 const sortedSellPanelItems = computed(() => sortSignalRows(sellPanelItems.value, sellItemSymbol))
+// 特别关注的标的有就直接置顶，买入/卖出/持仓三个框都一样；组内仍沿用原排序。
+const sortedCurrentHoldings = computed(() => {
+  const pinned: StrategyPoolHolding[] = []
+  const rest: StrategyPoolHolding[] = []
+  for (const holding of currentHoldings.value) {
+    (followKeys.value.has(symbol(holding)) ? pinned : rest).push(holding)
+  }
+  return [...pinned, ...rest]
+})
 const visibleBuySignals = computed(() => pageItems(sortedBuySignals.value, buyPage.value))
 const visibleSellSignals = computed(() => pageItems(sortedSellPanelItems.value, sellPage.value))
-const visibleCurrentHoldings = computed(() => pageItems(currentHoldings.value, holdingsPage.value))
+const visibleCurrentHoldings = computed(() => pageItems(sortedCurrentHoldings.value, holdingsPage.value))
 const buyPageCount = computed(() => pageCount(buySignals.value.length))
 const sellPageCount = computed(() => pageCount(sellPanelItems.value.length))
-const holdingsPageCount = computed(() => pageCount(currentHoldings.value.length))
+const holdingsPageCount = computed(() => pageCount(sortedCurrentHoldings.value.length))
 
 watch([buySignals, sellPanelItems, currentHoldings], () => {
   buyPage.value = 1
@@ -1359,15 +1368,21 @@ function sellItemSymbol(item: SellPanelItem): string {
 // 排序取全区间指标：与行内「全区间胜率 / 盈亏比」文案同一口径，且跟踪增量返回的
 // 信号行本身不带指标，只有条目表补得上。缺全区间指标的行排在末尾。
 function sortSignalRows<T>(rows: T[], keyOf: (row: T) => string): T[] {
-  if (signalSort.value === 'default') return rows
+  const pinned: T[] = []
+  const rest: T[] = []
+  for (const row of rows) {
+    (followKeys.value.has(keyOf(row)) ? pinned : rest).push(row)
+  }
+  if (signalSort.value === 'default') return [...pinned, ...rest]
   const metric = signalSort.value
   const score = (row: T): number => {
     const value = entryQualityMap.value.get(keyOf(row))?.[metric]
     return typeof value === 'number' && Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY
   }
-  return [...rows].sort((left, right) => (
+  const ordered = (list: T[]): T[] => [...list].sort((left, right) => (
     score(right) - score(left) || keyOf(left).localeCompare(keyOf(right))
   ))
+  return [...ordered(pinned), ...ordered(rest)]
 }
 
 function riskExitReturnText(signal: Record<string, unknown>): string {

@@ -7,6 +7,7 @@ import * as marketDataApi from '../api/marketData'
 import type {
   StrategyPoolCandidate,
   StrategyPoolEntry,
+  StrategyPoolHolding,
   StrategyPoolJobSummary,
   StrategyPoolMetrics,
   StrategyPoolResearchEstimate,
@@ -2573,5 +2574,56 @@ describe('StrategyPoolPage', () => {
       expect(wrapper.find('[data-testid="pool-focus-empty"]').exists()).toBe(true)
     })
   })
+  it('pins followed symbols above the selected sort in buy, sell and holdings panels', async () => {
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolFocus).mockResolvedValue([
+      { market: 'SH', code: '600000', name: '测试600000' },
+    ])
+    vi.mocked(api.fetchStrategyPoolEntries).mockResolvedValue([
+      entry('600000', 0.2),
+      entry('600002', 0.9),
+    ])
+    const focused = buySignal
+    const other = signalFor('600002')
+    const sellFocused = { ...focused, status: 'sell' as const, signal_type: 'sell' as const }
+    const sellOther = { ...other, status: 'sell' as const, signal_type: 'sell' as const }
+    const focusedHolding: StrategyPoolHolding = {
+      market: 'SH',
+      code: '600000',
+      name: '测试600000',
+      status: 'held',
+      holding_return_pct: 0.05,
+    }
+    const otherHolding = { ...focusedHolding, code: '600002', name: '测试600002' }
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValue({
+      job_id: 'signal-1',
+      status: 'completed',
+      result: {
+        mode: 'signals',
+        objective: 'annual_return',
+        holding_scope: 'per_stock_strategy',
+        holding_snapshot_complete: true,
+        as_of_date: '2026-10-01',
+        buy_signals: [other, focused],
+        sell_signals: [sellOther, sellFocused],
+        states: [other, focused],
+        model_portfolio: {
+          available: true,
+          holding_scope: 'per_stock_strategy',
+          holdings: [otherHolding, focusedHolding],
+          risk_exit_signals: [],
+        },
+      },
+    })
 
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+    await wrapper.get('[data-testid="pool-signal-sort"]').setValue('total_return')
+    await flushPromises()
+
+    const firstRow = (panel: string) => wrapper.findAll(`${panel} .signal-row`)[0]
+    expect(firstRow('[data-testid="pool-buy-signals"]')?.find('[data-testid="pool-buy-follow-600000"]').exists()).toBe(true)
+    expect(firstRow('[data-testid="pool-sell-signals"]')?.find('[data-testid="pool-sell-rule-follow-600000"]').exists()).toBe(true)
+    expect(firstRow('[data-testid="pool-current-holdings"]')?.find('[data-testid="pool-holding-follow-600000"]').exists()).toBe(true)
+  })
 })
