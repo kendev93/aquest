@@ -681,6 +681,9 @@ describe('StrategyPoolPage', () => {
 
   it('labels a risk exit by the day it triggered and the day it filled', async () => {
     window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolFocus).mockResolvedValue([
+      { market: 'SH', code: '600001', name: '在途止损' },
+    ])
     vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({
       job_id: 'signal-risk',
       status: 'completed',
@@ -690,9 +693,12 @@ describe('StrategyPoolPage', () => {
         holding_scope: 'per_stock_strategy',
         holding_snapshot_complete: true,
         as_of_date: '2026-10-01',
-        buy_signals: [],
+        buy_signals: [{ ...signalFor('600001'), signal_type: 'buy' }],
         sell_signals: [],
-        states: [],
+        states: [
+          { ...signalFor('600001'), status: 'buy' },
+          { ...signalFor('600000'), status: 'flat' },
+        ],
         model_portfolio: {
           available: true,
           holding_scope: 'per_stock_strategy',
@@ -741,11 +747,26 @@ describe('StrategyPoolPage', () => {
     const sells = wrapper.get('[data-testid="pool-sell-signals"]')
     expect(sells.text()).toContain('2026-09-30 收盘触发止损 · 2026-10-01 开盘已成交')
     expect(sells.text()).toContain('本次持仓收益 -8.00%')
+    // 触发日当天就要看到卖出信号：成交前它只挂在持仓行的 pending_exit_* 上。
+    expect(sells.text()).toContain('2026-10-01 收盘触发止损 · 下一交易日开盘待成交')
+    expect(sells.text()).toContain('当前持仓收益 -6.00%')
     expect(sells.text()).not.toContain('按风控成交规则处理')
     // 面板标题不能再说「当天触发卖出」：风控退出是昨天收盘触发、今天开盘成交。
-    expect(sells.text()).toContain('卖出规则与风控退出 1')
+    expect(sells.text()).toContain('卖出规则与风控退出 2')
     expect(sells.text()).toContain('2026-10-01 收盘判定卖出规则 · 风控退出在下一交易日开盘成交')
     expect(wrapper.text()).toContain('止损、止盈、移动止盈走同一条口径')
+
+    // 三个状态并列：风控触发日仍持仓、买入规则照常成立、卖出（次日开盘执行）。
+    for (const testid of ['pool-row-600001', 'focus-row-600001']) {
+      const row = wrapper.get(`[data-testid="${testid}"]`)
+      expect(row.text()).toContain('持仓中')
+      expect(row.text()).toContain('触发买入')
+      expect(row.text()).toContain('触发卖出')
+    }
+    // 成交日已不在持仓：只剩卖出，不能凭空多一个持仓徽章。
+    const exited = wrapper.get('[data-testid="pool-row-600000"]')
+    expect(exited.text()).toContain('触发卖出')
+    expect(exited.text()).not.toContain('持仓中')
   })
 
   it('shows confirmed holdings and their signal badge when the per-stock snapshot is incomplete', async () => {

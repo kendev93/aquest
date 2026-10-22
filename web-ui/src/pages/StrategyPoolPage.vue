@@ -464,7 +464,6 @@ const historyStatsNote = computed(() => {
 })
 const buySignals = computed(() => signalResult.value?.buy_signals ?? [])
 const ruleSellSignals = computed(() => signalResult.value?.sell_signals ?? [])
-const riskSellSignals = computed(() => signalResult.value?.model_portfolio?.risk_exit_signals ?? [])
 const sellNextTradingDaySymbols = computed(() => new Set([
   ...ruleSellSignals.value.map((item) => item.symbol),
 ]))
@@ -474,6 +473,35 @@ const currentHoldings = computed<StrategyPoolHolding[]>(
     ? signalResult.value.model_portfolio?.holdings ?? []
     : [],
 )
+// 风控在触发日收盘就出信号，下一交易日开盘才成交：成交前它只挂在持仓行的
+// pending_exit_* 上，成交后才进 risk_exit_signals。卖出面板按触发日展示，
+// 两段合并去重，避免同一次退出在成交日之前完全看不到。
+const pendingRiskSellSignals = computed<Array<Record<string, unknown>>>(() => currentHoldings.value
+  // held_stale 是没参与本轮回放的旧快照：次日是否已经成交无法确认，不能当作当天待成交信号。
+  .filter((holding) => holding.status !== 'held_stale'
+    && (holding.pending_exit_reason || holding.pending_exit_risk_trigger))
+  .map((holding) => ({
+    market: holding.market,
+    code: holding.code,
+    name: holding.name ?? '',
+    signal_date: holding.pending_exit_signal_date ?? signalResult.value?.as_of_date ?? '',
+    pending: true,
+    risk_trigger: holding.pending_exit_risk_trigger ?? '',
+    reason: holding.pending_exit_reason ?? '',
+    holding_return_pct: holding.holding_return_pct,
+  })))
+const riskSellSignals = computed<Array<Record<string, unknown>>>(() => {
+  const executed = signalResult.value?.model_portfolio?.risk_exit_signals ?? []
+  const executedKeys = new Set(
+    executed.map((signal) => `${String(signal.market ?? '')}${String(signal.code ?? '')}`),
+  )
+  return [
+    ...pendingRiskSellSignals.value.filter(
+      (signal) => !executedKeys.has(`${String(signal.market)}${String(signal.code)}`),
+    ),
+    ...executed,
+  ]
+})
 const sellPanelItems = computed<SellPanelItem[]>(() => [
   ...ruleSellSignals.value.map((signal) => ({
     kind: 'rule' as const,
@@ -482,7 +510,9 @@ const sellPanelItems = computed<SellPanelItem[]>(() => [
   })),
   ...riskSellSignals.value.map((signal, index) => ({
     kind: 'risk' as const,
-    key: `risk-${String(signal.market ?? '')}-${String(signal.code ?? '')}-${String(signal.date ?? index)}`,
+    key: `risk-${String(signal.market ?? '')}-${String(signal.code ?? '')}-${String(
+      signal.date ?? (signal.pending === true ? 'pending' : index),
+    )}`,
     signal,
     target: {
       market: signal.market === 'SZ' ? 'SZ' as const : 'SH' as const,
@@ -540,7 +570,22 @@ const filteredEntries = computed(() => {
   )
 })
 
-const signalStates = computed(() => signalResult.value?.states ?? [])
+// 风控退出也是一条当日卖出信号（触发日收盘，下一交易日开盘成交），把它并进状态列：
+// 触发买入时状态升级为买卖均触发，无规则信号的持仓/空仓显示卖出。持仓徽章另由
+// heldSymbols 给出，所以同一行能同时看到「持仓中」「触发买入」「触发卖出」。
+const signalStates = computed<StrategyPoolSignal[]>(() => {
+  const states = signalResult.value?.states ?? []
+  const riskSellKeys = new Set(riskSellSignals.value.map(
+    (signal) => `${String(signal.market ?? '')}${String(signal.code ?? '')}`,
+  ))
+  if (!riskSellKeys.size) return states
+  return states.map((state) => {
+    if (!riskSellKeys.has(state.symbol)) return state
+    if (state.status === 'buy') return { ...state, status: 'buy_sell' }
+    if (state.status === 'flat' || state.status === 'held') return { ...state, status: 'sell' }
+    return state
+  })
+})
 
 const sortedEntries = computed(() => {
   const metric = sortColumn.value
@@ -1386,13 +1431,19 @@ function sortSignalRows<T>(rows: T[], keyOf: (row: T) => string): T[] {
 }
 
 function riskExitReturnText(signal: Record<string, unknown>): string {
+  if (signal.pending === true) {
+    const current = signal.holding_return_pct
+    return typeof current === 'number' && Number.isFinite(current)
+      ? `当前持仓收益 ${formatSignedPercent(current)}`
+      : ''
+  }
   const value = signal.trade_return_pct
   return typeof value === 'number' && Number.isFinite(value)
     ? `本次持仓收益 ${formatSignedPercent(value)}`
     : ''
 }
 
-/** 风控退出行的出处：哪一天的收盘碰到哪条线、哪一天开盘成交，两个日期都写出来。 */
+/** 风控退出行的出处：哪一天的收盘碰到哪条线、成交了没有，状态要写清。 */
 function riskExitFilledText(signal: Record<string, unknown>): string {
   const reason = (typeof signal.reason === 'string' && signal.reason)
     || (typeof signal.risk_trigger === 'string' && signal.risk_trigger)
@@ -1400,6 +1451,7 @@ function riskExitFilledText(signal: Record<string, unknown>): string {
   const trigger = typeof signal.signal_date === 'string' && signal.signal_date
     ? `${signal.signal_date} 收盘`
     : '前一交易日收盘'
+  if (signal.pending === true) return `${trigger}触发${reason} · 下一交易日开盘待成交`
   const filled = typeof signal.date === 'string' && signal.date ? `${signal.date} 开盘` : '今日开盘'
   return `${trigger}触发${reason} · ${filled}已成交`
 }

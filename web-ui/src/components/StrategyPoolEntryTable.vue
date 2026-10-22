@@ -105,6 +105,12 @@ function detailHref(entry: StrategyPoolEntry): string {
     + `&list=${encodeURIComponent(props.listContext)}`
 }
 
+// 买卖同时触发时拆成两个徽章：持仓行再加「持仓中」，三个状态就能并列看到。
+function entryStatusChips(entry: StrategyPoolEntry): string[] {
+  const status = entryStatus(entry, props.states)
+  return status === 'buy_sell' ? ['buy', 'sell'] : [status]
+}
+
 /** 持仓中标的风控条；没持仓或还没有跟踪快照时为空，不显示占位符。 */
 function holdingRiskText(entry: StrategyPoolEntry): string {
   const risk = entryHoldingRisk(entry)
@@ -143,7 +149,7 @@ function latestCloseAsOf(entry: StrategyPoolEntry): string {
       </tr></thead>
       <tbody>
         <tr v-for="entry in entries" :key="symbol(entry)" :data-testid="`${testid}-row-${entry.code}`">
-          <td><div class="status-stack"><span v-if="entryIsHeld(entry, heldKeys)" class="status-chip status-held">持仓中</span><span class="status-chip" :class="`status-${entryStatus(entry, states)}`">{{ statusLabel(entryStatus(entry, states)) }}</span></div><small v-if="holdingRiskText(entry)" :data-testid="`${testid}-holding-risk-${entry.code}`">{{ holdingRiskText(entry) }}</small></td>
+          <td><div class="status-stack"><span v-if="entryIsHeld(entry, heldKeys)" class="status-chip status-held">持仓中</span><span v-for="chip in entryStatusChips(entry)" :key="chip" class="status-chip" :class="`status-${chip}`">{{ statusLabel(chip) }}</span></div><small v-if="holdingRiskText(entry)" :data-testid="`${testid}-holding-risk-${entry.code}`">{{ holdingRiskText(entry) }}</small></td>
           <td><strong>{{ entry.market }} {{ entry.code }}</strong><small>{{ entry.name }}</small></td>
           <td :data-testid="`${testid}-latest-close-${entry.code}`">{{ latestCloseText(entry) }}<small v-if="latestCloseAsOf(entry)">价截至 {{ latestCloseAsOf(entry) }}</small></td>
           <td :data-testid="`${testid}-entry-benchmark-${entry.code}`">
@@ -181,7 +187,7 @@ function latestCloseAsOf(entry: StrategyPoolEntry): string {
 .benchmark-summary b { color: #eff4fc; }
 .status-chip { display: inline-block; padding: 4px 8px; border: 1px solid #42516a; border-radius: 999px; color: #a9b5c7; font-size: .78rem; white-space: nowrap; }
 .status-stack { display: flex; flex-wrap: wrap; gap: 5px; }
-.status-buy, .status-buy_sell { border-color: #128f4c; color: #25d475; }
+.status-buy { border-color: #128f4c; color: #25d475; }
 .status-sell, .status-error { border-color: #974d50; color: #ff7775; }
 .status-held { border-color: #8b7b3c; color: #e0c55b; }
 .badge-row { display: flex; flex-wrap: wrap; gap: 5px; }
