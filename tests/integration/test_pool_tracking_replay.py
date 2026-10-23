@@ -584,7 +584,7 @@ def test_tracking_runner_reuses_snapshot_until_market_data_changes(tmp_path):
     assert first["completed_symbols"] == 1
     assert len(writes) == 1
     version = tracks.current_versions()[0]
-    assert version["summary"]["engine_version"] == "pool-account-v4"
+    assert version["summary"]["engine_version"] == "pool-account-v5"
     assert version["summary"]["data_revision"]
     assert version["summary"]["as_of_date"] == "2026-09-03"
 
@@ -1509,13 +1509,13 @@ def test_replay_window_starts_at_research_start_with_prior_bars_as_warmup(tmp_pa
 
 
 def test_replay_window_skips_late_listed_stocks_own_warmup(tmp_path):
-    """2016 后上市的票没有 2015 预热：回放从第 269 根开始，前 268 根只作指标预热。"""
+    """次新股的回放从自己的第 269 根开始：前 268 根只作指标预热。"""
 
     import numpy as np
 
     store = DuckDbMarketDataStore(tmp_path / "late-listed.duckdb")
-    dates = pd.date_range("2020-01-01", periods=300, freq="B")
-    close = 10.0 + np.arange(300) / 100
+    dates = pd.date_range("2020-01-01", periods=600, freq="B")
+    close = 10.0 + np.arange(600) / 100
     frame = pd.DataFrame(
         dict(
             date=dates,
@@ -1546,10 +1546,85 @@ def test_replay_window_skips_late_listed_stocks_own_warmup(tmp_path):
     start_text = dates[268].strftime("%Y-%m-%d")
     equity_dates = [str(row["date"]) for row in result["checkpoint"]["equity"]]
     assert equity_dates[0] == start_text
-    assert len(equity_dates) == 300 - 268
+    assert len(equity_dates) == 600 - 268
     trade_dates = [str(row["date"]) for row in result["checkpoint"]["trades"]]
     assert trade_dates
     assert all(day >= start_text for day in trade_dates)
+
+
+def test_replay_window_yields_its_own_268_bars_for_old_listed_stocks_too(tmp_path):
+    """老票也一样：2015 全年只有 244 个交易日，凑不满 268，差额继续从 2016 年里让。
+
+    研究侧同一口径（``_apply_warmup_window``），两边不一致的话回放会比研究窗口多出一截
+    没热透的指标交易（2026-10-23 全市场统一）。历史短到一个研究样本都不剩的旧版本
+    保持原窗口，等重新研究后再对齐。
+    """
+
+    import numpy as np
+
+    store = DuckDbMarketDataStore(tmp_path / "old-listed-warmup.duckdb")
+    dates = pd.date_range("2015-01-05", periods=600, freq="B")
+    close = 10.0 + np.arange(600) / 100
+    frame = pd.DataFrame(
+        dict(
+            date=dates,
+            open=close,
+            close=close,
+            high=close + 0.1,
+            low=close - 0.1,
+            volume=1000.0,
+            amount=close * 1000,
+            bar_status="completed",
+        )
+    )
+    store.replace_local_bars("SH", "600000", "stock", frame)
+    adapter = DuckDbMarketDataAdapter(store)
+    service = PortfolioBacktestService(adapter=adapter)
+    ref = adapter.stock_ref("", "SH", "600000")
+    value = candidate()
+    value["config"].update(initial_cash=100_000, stop_loss_pct=None)
+    version = dict(
+        candidate=value,
+        signature=signature(value),
+        launch_data_date=dates[-1].date().isoformat(),
+        created_at="2026-10-09T16:00:00+00:00",
+    )
+
+    result = replay_account(service, ref, version)
+
+    # 统一口径就一句话：回放第一根永远是这只标的自己的第 269 根。
+    start_text = dates[268].strftime("%Y-%m-%d")
+    equity_dates = [str(row["date"]) for row in result["checkpoint"]["equity"]]
+    assert equity_dates[0] == start_text
+    assert len(equity_dates) == 600 - 268
+
+    short = DuckDbMarketDataStore(tmp_path / "short-history.duckdb")
+    short_dates = pd.date_range("2015-01-05", periods=300, freq="B")
+    short.replace_local_bars(
+        "SH",
+        "600000",
+        "stock",
+        pd.DataFrame(
+            dict(
+                date=short_dates,
+                open=close[:300],
+                close=close[:300],
+                high=close[:300] + 0.1,
+                low=close[:300] - 0.1,
+                volume=1000.0,
+                amount=close[:300] * 1000,
+                bar_status="completed",
+            )
+        ),
+    )
+    short_service = PortfolioBacktestService(adapter=DuckDbMarketDataAdapter(short))
+    kept = replay_account(
+        short_service,
+        DuckDbMarketDataAdapter(short).stock_ref("", "SH", "600000"),
+        {**version, "launch_data_date": short_dates[-1].date().isoformat()},
+    )
+    # 让完就剩 32 根，连一个完整交易年的样本都不到：保持原窗口，不剪成空。
+    assert [str(row["date"]) for row in kept["checkpoint"]["equity"]][0] == "2016-01-01"
 
 
 def test_cancelled_initialization_is_not_requeued_on_unchanged_input(tmp_path):

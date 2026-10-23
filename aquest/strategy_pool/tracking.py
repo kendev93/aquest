@@ -11,7 +11,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from aquest.formulas.registry import FORMULA_REGISTRY
 from aquest.indicators.cache import frame_fingerprint
 from aquest.market_data.adjustment import mark_adjusted
 from aquest.market_data.models import StockRef
@@ -23,6 +22,7 @@ from aquest.portfolio_backtest.report import _portfolio_fingerprint
 from aquest.portfolio_backtest.service import PortfolioBacktestService
 from aquest.web.schemas import PortfolioBacktestRequest
 
+from .service import MIN_RESEARCH_BARS, RESEARCH_WARMUP_BARS
 from .tracking_store import ENGINE_VERSION, dumps
 
 
@@ -138,21 +138,22 @@ def replay_account(
     if raw.empty:
         raise ValueError("该标的没有已完成行情")
     # 回放窗口与研究对象对齐（2026-10-09 用户确认）：从 RESEARCH_START（2016-01-01）
-    # 起跑，之前的行情经引擎 warmup_bars 只作指标预热，不再产生「冷指标」交易记录。
-    # 此前从本地首根日线起跑，2015 年的半成品信号被当成真实交易展示，与研究侧
-    # 「2015 只预热、不算样本」的口径矛盾。本地数据整体早于 RESEARCH_START 的
-    # 存量条目保持原窗口，避免回放窗口为空导致重建失败。
+    # 起跑，之前的行情只作指标预热，不再产生「冷指标」交易记录。此前从本地首根日线
+    # 起跑，2015 年的半成品信号被当成真实交易展示，与研究侧口径矛盾。
     replay_dates = pd.to_datetime(raw["date"])
-    data_start = replay_dates.iloc[0].date()
     if replay_dates.iloc[-1].date() >= RESEARCH_START:
-        raw = raw.loc[replay_dates.dt.date >= RESEARCH_START].reset_index(drop=True)
-        # 2016 年后上市的标的没有 2015 年那段公共预热：它们自己的前 N 根就是
-        # 全部的预热来源。把这段让出回放窗口，引擎再从库里读它作 warmup_bars；
-        # 不足 N 根的老版本保持原窗口，等下一次重新研究替换掉。判断用裁剪前的
-        # 首根日期，否则老票裁到 2016 后也会被误认为次新。
-        warmup_bars = FORMULA_REGISTRY.max_recommended_bars()
-        if data_start >= RESEARCH_START and len(raw) > warmup_bars:
-            raw = raw.iloc[warmup_bars:].reset_index(drop=True)
+        # 回放窗口与研究对象对齐（2026-10-23 全市场统一）：每只标的都要先凑满
+        # RESEARCH_WARMUP_BARS 根才算指标热透，而 2015 全年只有 244 个交易日，差额
+        # 继续从 2016 年里让出去。研究侧用的是同一个口径（``_apply_warmup_window``），
+        # 两边不一致的话回放会比研究窗口多出一截冷指标交易。让完剩不下研究样本
+        # （MIN_RESEARCH_BARS）就保持原窗口——那是历史更短的旧版本，等重新研究后自
+        # 然对齐，不能把回放窗口剪成空。
+        in_window = replay_dates.dt.date >= RESEARCH_START
+        window_rows = int(in_window.sum())
+        shift = max(0, RESEARCH_WARMUP_BARS - int((~in_window).sum()))
+        raw = raw.loc[in_window].reset_index(drop=True)
+        if window_rows - shift >= MIN_RESEARCH_BARS:
+            raw = raw.iloc[shift:].reset_index(drop=True)
     config_payload = dict(candidate.get("config") or {})
     config_payload.update(
         vipdoc_path="",

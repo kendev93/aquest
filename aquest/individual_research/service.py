@@ -74,10 +74,12 @@ def _apply_warmup_window(
 ) -> IndividualResearchConfig:
     """Move the research start past the stock's own indicator warm-up.
 
-    2016 年后上市的标的没有 2015 年那段公共预热：引擎只能读 ``start_date``
-    之前的 K 线，而它们之前没有数据。这里把标的自己的前 ``warmup_bars`` 根
-    让给指标计算，研究区间从下一根开始；预热段自然落在训练/验证/留出与
-    全区间回测之外。老票 ``warmup_bars=0``，仍从 RESEARCH_START 起跑。
+    引擎只能读 ``start_date`` 之前的 K 线做预热，而每个标的能力不同：2016 年后
+    上市的在它之前根本没有数据，老票也只有 2015 年那 244 个交易日（不足 268）。
+    所以统一按「累计凑满 ``warmup_bars`` 根」决定研究起点：起点前已有的根数不够，
+    就把差额从窗口里继续让出去，研究区间从让完之后的那一根开始；预热段自然落在
+    训练/验证/留出与全区间回测之外（2026-10-23 全市场统一，此前只有新上市标的走
+    这条路，老票带着没热透的指标起跑）。
     """
 
     if config.warmup_bars <= 0:

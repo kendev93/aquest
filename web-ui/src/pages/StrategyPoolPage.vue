@@ -286,8 +286,8 @@ const progressCountTitle = computed(() => {
     notes.push(`本轮有 ${insufficient} 只研究完仍然历史样本不足，不产出策略结果。`)
   }
   if (scheduled > 0) {
-    notes.push(`另有 ${scheduled} 只历史样本不足的不进今天的队列：2016 年后上市、未满两年的排到`
-      + `「上市首日 + 730 天」（268 根预热 + 一年研究样本），`
+    notes.push(`另有 ${scheduled} 只历史样本不足的不进今天的队列：上市历史未满两年的排到`
+      + `「上市首日 + 730 天」（自身 268 根预热 + 244 根研究样本），`
       + `其余每 30 天重查一次${eligible ? `，最早 ${eligible} 自动回到增量队列` : ''}，不需要手动重跑。`)
   }
   return notes.length ? notes.join('') : undefined
@@ -1006,8 +1006,8 @@ const researchEstimateTitle = computed(() => {
   if (!estimate) return '按当前研究范围与参数预估下一次「增量更新策略池」的工作量'
   const scheduled = estimate.deferred_symbols ?? 0
   const schedule = scheduled > 0
-    ? `另有 ${scheduled} 只历史样本不足不进队列：2016 年后上市、未满两年的排到`
-      + `「上市首日 + 730 天」（268 根预热 + 一年研究样本）、`
+    ? `另有 ${scheduled} 只历史样本不足不进队列：上市历史未满两年的排到`
+      + `「上市首日 + 730 天」（自身 268 根预热 + 244 根研究样本）、`
       + `其余每 30 天重查一次，最早 ${estimate.next_eligible_date ?? '待定'} 自动回来，不需要手动重跑。`
     : ''
   return '按当前研究范围与参数，下次「增量更新策略池」真正要逐只研究的标的数：'

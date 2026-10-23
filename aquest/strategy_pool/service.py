@@ -96,31 +96,19 @@ _TRANSIENT_DB_RETRY_SECONDS = (30.0, 90.0)
 # v8：退出风控寻优的复杂度上限改为「继承的规则项数 + 三组风控参数」。之前沿用条件挖掘
 # 那档 3，规则稍微复杂一点的标的永远没有候选能过约束，整只被记成「无可用策略」——存量
 # no_strategy 条目里混着这类假阴性，必须重研究才能洗掉。
-MARKET_POOL_ALGORITHM_VERSION = "market-pool-v8"
+# v9：预热口径全市场统一。以前只有 2016 年后上市的标的让出自己的前 268 根做指标预热，
+# 老票直接用 2015 全年——而 2015 只有 244 个交易日，实测没有一只标的能凑满 268（最多
+# 244、中位 226），研究窗口开头那几十根是「冷指标」。现在所有标的都按「自身 268 根预热
+# + 244 根样本 = 512 根」准入，老票的研究起点随之后移（约到 2016-02 下旬），全部存量
+# 条目的绩效与排名都要重算一次才可比（2026-10-23 用户决策）。
+MARKET_POOL_ALGORITHM_VERSION = "market-pool-v9"
 
 #: 指标完全预热所需的最长 K 线根数（当前是 RSRS：18 根回归 + 250 根标准化）。
 RESEARCH_WARMUP_BARS = FORMULA_REGISTRY.max_recommended_bars()
-#: 预热之后至少保留一个完整交易年的研究样本；2016 年后上市的标的按
-#: 「268 根预热 + 244 根样本」准入。老票仍用 2015 全年预热、从 RESEARCH_START 起研究。
+#: 预热之后至少保留一个完整交易年的研究样本。全市场统一按「自身 268 根预热 + 244 根
+#: 样本 = 512 根」准入：老票在 2016-01-01 之前最多只有 244 根（2015 全年），补不满
+#: 268，研究起点同样后移（2026-10-23 用户决策）。
 MIN_RESEARCH_BARS = 244
-#: 2016 年后上市标的的准入跨度（自然日近似）：268 根预热约 13 个月，再加一年样本，
-#: 排期按两年算；实际是否够由每只标的自己的 K 线根数决定。
-MIN_LATE_LISTING_HISTORY_DAYS = 730
-#: 预热窗口口径版本。2016 年后上市的条目在 config_fingerprint 上带这个后缀，
-#: 让旧窗口的存量条目光失效一次；老票不加后缀，保持原复用节奏。
-RESEARCH_WINDOW_VERSION = "warmup-v1"
-
-
-def _is_late_listed(ref: StockRef) -> bool:
-    """2016 年后上市（或本地数据从 2016 后才开始）的标的没有公共预热段。"""
-
-    return ref.first_date is not None and ref.first_date >= RESEARCH_START
-
-
-def _ref_config_fingerprint(ref: StockRef, config_fingerprint: str) -> str:
-    if not _is_late_listed(ref):
-        return config_fingerprint
-    return f"{config_fingerprint}|{RESEARCH_WINDOW_VERSION}"
 
 
 def _entry_research_start(entry: Mapping[str, object] | None) -> date | None:
@@ -153,21 +141,21 @@ def _entry_research_start(entry: Mapping[str, object] | None) -> date | None:
 #: 到期重查一次，仍不足则刷新时间戳再等一个周期。
 NO_STRATEGY_RECHECK_DAYS = 14
 
-#: 「历史样本不足」中算不出确切日期的那一类（2016 后上市未满两年、或上市历史
-#: 已够长却仍切不出三段）的重查节奏（自然日）。它跟 no_strategy 一样依赖数据在长，
-#: 但每天重查只会每天以同样的「不足」收场。2026-10-19 用户要求：能准确排期就排期，
-#: 否则按 30 天重跑；2016 后上市未满两年的用「首日 + 730 天」排期，只有排不出
-#: 日期的走这个兜底节奏。
+#: 「历史样本不足」中算不出确切日期的那一类（上市跨度已经够两年、但自己的 K 线
+#: 仍凑不满 512 根——长期停牌或数据有洞）的重查节奏（自然日）。它跟 no_strategy
+#: 一样依赖数据在长，但每天重查只会每天以同样的「不足」收场。2026-10-19 用户要求：
+#: 能准确排期就排期，否则按 30 天重跑；排得出日期的用「首日 + 730 天」。
 INSUFFICIENT_RECHECK_DAYS = 30
 
-#: 研究准入的最低上市历史（自然日，按「首根已入库日线 → 研究终点」的跨度计）。
-#: 老票按一年闸；2016 年后上市的另见 MIN_LATE_LISTING_HISTORY_DAYS（268 根预热
-#: + 一年研究样本，按两年排期）。不满的标的：年线级指标整段是 NaN，训练/验证/
-#: 留出三段加起来覆盖不了一个完整的市场周期，机械通过样本门槛选出的策略统计上
-#: 不可信（2026-10-08 用户决策）。命中后按「历史样本不足」落库，并排期到
-#: 「首日 + 对应天数」自动回到增量队列（2026-10-19 用户要求）。手动单股研究不走
-#: 此闸：那是显式指名的研究请求，用户自担其结论质量。
-MIN_LISTING_HISTORY_DAYS = 365
+#: 研究准入的最低上市历史（自然日，按「首根已入库日线 → 研究终点」的跨度计），
+#: 是 512 根 K 线的自然日近似：268 根预热约 13 个月 + 244 根研究样本约 12 个月。
+#: 不满的标的：年线级指标整段是 NaN 或半值，训练/验证/留出三段加起来覆盖不了一个
+#: 完整的市场周期，机械通过样本门槛选出的策略统计上不可信（2026-10-08 用户决策，
+#: 两年口径 2026-10-23）。命中后按「历史样本不足」落库，并排期到「首日 + 730 天」
+#: 自动回到增量队列（2026-10-19 用户要求）。真正决定够不够的是每只标的自己的 K 线
+#: 根数（不足 512 根会在研究阶段被判不足），这道天数闸只用来提前拒绝与排期。
+#: 手动单股研究不走此闸：那是显式指名的研究请求，用户自担其结论质量。
+MIN_LISTING_HISTORY_DAYS = 730
 POOL_PROGRESS_EMIT_INTERVAL_SECONDS = 1.5
 STRATEGY_HOLDING_BATCH_SIZE = 100
 STRATEGY_HOLDING_VIRTUAL_CASH = 1_000_000_000_000.0
@@ -502,16 +490,11 @@ class MarketStrategyPoolService:
             progress.start()
             if ref.first_date is not None and config.end_date is not None:
                 observed_days = (config.end_date - ref.first_date).days
-                policy_days = (
-                    MIN_LATE_LISTING_HISTORY_DAYS
-                    if _is_late_listed(ref)
-                    else MIN_LISTING_HISTORY_DAYS
-                )
+                policy_days = MIN_LISTING_HISTORY_DAYS
                 if observed_days < policy_days:
-                    # 2016 年后上市的标的没有 2015 年那段公共预热，准入要看
-                    # 「268 根预热 + 一年研究样本」，排期按两年算；老票仍是
-                    # 一年闸（实际上所有老票都早已满足）。命中后由预扫描按
-                    # 首日 + policy_days 排期，到期自动回到增量队列。
+                    # 准入统一看「自身 268 根预热 + 244 根研究样本 = 512 根」，
+                    # 自然日近似两年。命中后由预扫描按首日 + 730 排期，到期自动
+                    # 回到增量队列；自己的 K 线到底够不够，由研究阶段按根数判定。
                     eligible_date = ref.first_date + timedelta(days=policy_days)
                     raise InsufficientResearchHistoryError(
                         "",
@@ -596,8 +579,9 @@ class MarketStrategyPoolService:
                         sort_keys=True,
                     ),
                 )
-            # 2016 年后上市的标的，研究服务会把起点后移到自己的预热段之后；
-            # 全区间回测与基准必须用同一个有效起点，否则会把预热段又算回来。
+            # 研究服务会把起点后移到该标的自己的预热段之后（老票也一样，它的
+            # 2015 段最多只有 244 根）；全区间回测与基准必须用同一个有效起点，
+            # 否则会把预热段又算回来。
             effective_start = config.start_date
             result_start = result.get("start_date")
             if isinstance(result_start, str):
@@ -717,7 +701,7 @@ class MarketStrategyPoolService:
                 continue
             if not self._can_reuse(
                 prior,
-                _ref_config_fingerprint(ref, config_fingerprint),
+                config_fingerprint,
                 now=now,
             ):
                 pending.append(ref)
@@ -809,10 +793,10 @@ class MarketStrategyPoolService:
                     index = next_index + 1
                     symbol = f"{ref.market}:{ref.code}"
                     prior = prior_entries.get((ref.market, ref.code))
-                    ref_fingerprint = _ref_config_fingerprint(ref, config_fingerprint)
                     reused_entry = (
                         self._pool_store.get(ref.market, ref.code)
-                        if self._can_reuse(prior, ref_fingerprint) and self._pool_store is not None
+                        if self._pool_store is not None
+                        and self._can_reuse(prior, config_fingerprint)
                         else None
                     )
                     # 重新寻优判定（2026-10-09 用户决策）：弱策略 21 天、上线后衰减
@@ -823,7 +807,7 @@ class MarketStrategyPoolService:
                         objective: post_launch.get((ref.market, ref.code, objective), {})
                         for objective in ("annual_return", "sharpe")
                     }
-                    can_reuse = self._can_reuse(prior, ref_fingerprint)
+                    can_reuse = self._can_reuse(prior, config_fingerprint)
                     recheck_due = can_reuse and self._research_recheck_due(
                         reused_entry, prior, stock_post_launch
                     )
@@ -1024,7 +1008,7 @@ class MarketStrategyPoolService:
                         config,
                         job_id=job_id,
                         mode="full",
-                        config_fingerprint=ref_fingerprint,
+                        config_fingerprint=config_fingerprint,
                         previous_market_fingerprint="",
                         progress=ticker_progress,
                         abort_check=abort_check,
@@ -1212,10 +1196,9 @@ class MarketStrategyPoolService:
         if mode == "single" and self._pool_store is not None:
             ref = refs[0]
             prior = prior_entries.get((ref.market, ref.code))
-            ref_fingerprint = _ref_config_fingerprint(ref, config_fingerprint)
             if (
                 prior is not None
-                and prior[1] == ref_fingerprint
+                and prior[1] == config_fingerprint
                 and prior[2] == "insufficient_history"
             ):
                 try:
@@ -1326,7 +1309,7 @@ class MarketStrategyPoolService:
                     config,
                     job_id=job_id,
                     mode="single",
-                    config_fingerprint=_ref_config_fingerprint(ref, config_fingerprint),
+                    config_fingerprint=config_fingerprint,
                     previous_market_fingerprint="",
                     progress=ticker_progress,
                     abort_check=abort_check,
@@ -1381,7 +1364,7 @@ class MarketStrategyPoolService:
                     "status": "insufficient_history",
                     "data_fingerprint": exc.data_fingerprint,
                     "market_fingerprint": market_fingerprint,
-                    "config_fingerprint": _ref_config_fingerprint(ref, config_fingerprint),
+                    "config_fingerprint": config_fingerprint,
                     "source_job_id": job_id,
                 }
                 if entry_writer is not None:
@@ -2102,10 +2085,7 @@ class MarketStrategyPoolService:
         if prior is None or prior[2] != "insufficient_history":
             return None
         if ref.first_date is not None:
-            policy_days = (
-                MIN_LATE_LISTING_HISTORY_DAYS if _is_late_listed(ref) else MIN_LISTING_HISTORY_DAYS
-            )
-            eligible = ref.first_date + timedelta(days=policy_days)
+            eligible = ref.first_date + timedelta(days=MIN_LISTING_HISTORY_DAYS)
             if data_end is None or data_end < eligible:
                 return eligible
         updated_at = prior[4]
@@ -2304,7 +2284,6 @@ def _individual_config(
     signal_ids: Sequence[str],
     settings: Mapping[str, object],
 ) -> IndividualResearchConfig:
-    late_listed = _is_late_listed(ref)
     return IndividualResearchConfig(
         market=ref.market,
         code=ref.code,
@@ -2333,10 +2312,11 @@ def _individual_config(
         position_mode="full",
         split_windows=None,
         common_split_metadata=None,
-        # 2016 年后上市的标的没有 2015 年那段公共预热，必须把标的自己的前 N 根
-        # 让给指标计算；老票继续由引擎在 RESEARCH_START 之前读取 2015 年预热。
-        warmup_bars=RESEARCH_WARMUP_BARS if late_listed else 0,
-        min_research_bars=MIN_RESEARCH_BARS if late_listed else 0,
+        # 每只标的都把自己的前 268 根让给指标计算：老票在 2016-01-01 之前只有
+        # 2015 年那 244 根，不够的部分由研究起点再往后让（见 _apply_warmup_window），
+        # 剩下的样本不足 244 根就判「上市历史不足」。
+        warmup_bars=RESEARCH_WARMUP_BARS,
+        min_research_bars=MIN_RESEARCH_BARS,
     )
 
 

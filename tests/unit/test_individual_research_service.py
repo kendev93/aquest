@@ -190,6 +190,39 @@ def _config() -> IndividualResearchConfig:
     )
 
 
+def test_warmup_window_only_yields_the_shortfall_for_old_listed_stocks() -> None:
+    """老票在研究起点前只有 2015 年那一段：凑不满 268 根，差额继续从窗口里让出去。
+
+    2026-10-23 全市场统一口径——预热没满就不算热透，所以老票的研究起点也不是恰好
+    RESEARCH_START，而是各自第 269 根 K 线；已经攒够 268 根起点的标的才原地不动。
+    """
+
+    frame = pd.DataFrame({"date": pd.date_range("2015-01-05", periods=600, freq="B")})
+    pre_window_rows = int((frame["date"].dt.date < date(2016, 1, 1)).sum())
+    assert pre_window_rows < 268  # 2015 段确实不够
+    config = replace(
+        _config(),
+        start_date=date(2016, 1, 1),
+        end_date=frame["date"].iloc[-1].date(),
+        warmup_bars=268,
+        min_research_bars=244,
+    )
+
+    adjusted = _apply_warmup_window(config, frame, "data-1")
+
+    # 起点前已有的根数计入预热，整体仍然是这只标的自己的第 269 根。
+    assert adjusted.start_date == frame["date"].iloc[268].date()
+
+    plenty = pd.DataFrame({"date": pd.date_range("2014-01-02", periods=800, freq="B")})
+    kept = replace(
+        config,
+        start_date=date(2016, 1, 1),
+        end_date=plenty["date"].iloc[-1].date(),
+    )
+
+    assert _apply_warmup_window(kept, plenty, "data-2").start_date == date(2016, 1, 1)
+
+
 def test_warmup_window_skips_the_stocks_own_first_bars() -> None:
     frame = pd.DataFrame({"date": pd.date_range("2020-01-01", periods=300, freq="B")})
     config = replace(

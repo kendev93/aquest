@@ -24,7 +24,9 @@ SIGNATURE_ENGINE_VERSION = "pool-account-v1"
 # 到期的展示字段。成交时点变了会让既有跟踪账户的净值与持仓对不上，旧快照一律重建。
 # v4：2016 年后上市的标的把前 268 根让给指标预热，回放起点随研究窗口后移；
 # 旧快照按前移的窗口重放会多出冷指标交易，必须重建。
-ENGINE_VERSION = "pool-account-v4"
+# v5：预热口径全市场统一——老票的 2015 段只有 244 根、凑不满 268，差额继续从 2016
+# 年里让出去。回放起点再后移一次，旧快照的净值与持仓都不再可比，一律重建。
+ENGINE_VERSION = "pool-account-v5"
 OBJECTIVES = ("annual_return", "sharpe")
 DDL = """CREATE TABLE IF NOT EXISTS pool_tracking_versions (
  version_id VARCHAR PRIMARY KEY, market VARCHAR NOT NULL, code VARCHAR NOT NULL,
