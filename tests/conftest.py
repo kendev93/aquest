@@ -16,6 +16,18 @@ def disable_automatic_market_sync(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def disable_release_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """默认关掉上游版本检查。
+
+    它是 app 装配期起来的后台任务，不关掉的话每个 `create_app` 的测试都会真的去连
+    GitHub——慢、看网络、还可能在 CI 里被限流。版本检查自己的用例注入假的上游，
+    或者显式改回这个环境变量。
+    """
+
+    monkeypatch.setenv("AQUEST_UPDATE_CHECK", "off")
+
+
+@pytest.fixture(autouse=True)
 def disable_real_baostock_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep the baostock catalog offline too.
 

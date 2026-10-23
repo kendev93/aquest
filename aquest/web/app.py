@@ -12,6 +12,7 @@ from typing import cast
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from aquest import __version__
 from aquest.adapters.market_data_sync import MarketDataSync
 from aquest.backtest.service import BacktestService
 from aquest.candidate_library.service import CandidateLibraryService
@@ -39,6 +40,11 @@ from aquest.market_data.staging import cleanup_stale_staging, staging_directory
 from aquest.market_data.store import DuckDbMarketDataStore
 from aquest.portfolio_backtest.auto_tracking import StrategyTrackingScheduler
 from aquest.portfolio_backtest.service import PortfolioBacktestService
+from aquest.release_check import (
+    ReleaseChecker,
+    release_check_enabled,
+    release_repository,
+)
 from aquest.research_presets.service import ResearchPresetService
 from aquest.screen_presets.service import ScreenPresetService
 from aquest.screening.engine import ScreenEngine
@@ -131,6 +137,7 @@ def create_app(
     strategy_tracking_enabled: bool | None = None,
     pool_tracking_enabled: bool | None = None,
     strategy_tracking_interval_seconds: float | None = None,
+    release_checker: ReleaseChecker | None = None,
 ) -> FastAPI:
     # uvicorn 只为自己的 logger 配 handler，应用模块的 INFO 会落到没有 handler 的 root
     # 被丢掉——启动维护、自动同步这类一次性提示在生产里看不到。这里补上 root handler；
@@ -171,6 +178,13 @@ def create_app(
     selected_tracking_enabled = _resolve_strategy_tracking_enabled(strategy_tracking_enabled)
     selected_tracking_interval = _resolve_strategy_tracking_interval(
         strategy_tracking_interval_seconds
+    )
+    # 上游版本检查：默认每天查一次，AQUEST_UPDATE_CHECK=off 就彻底不出网。
+    # 它既不读行情库也不写任何东西，因此不参与"有没有任务在跑"那套互斥。
+    selected_release_checker = release_checker or ReleaseChecker(
+        current_version=__version__,
+        repository=release_repository(),
+        enabled=release_check_enabled(),
     )
     selected_maintenance_service = cast(
         DatabaseMaintenanceService,
@@ -268,6 +282,7 @@ def create_app(
         maintenance_task: asyncio.Task[None] | None = None
         tracking_task: asyncio.Task[None] | None = None
         pool_tracking_task: asyncio.Task[None] | None = None
+        release_task: asyncio.Task[None] | None = None
         selected_store.status()
         selected_strategy_pool_store.initialize()
         PoolTrackingStore(selected_store).bootstrap()
@@ -348,12 +363,20 @@ def create_app(
                     selected_store, selected_strategy_backend, selected_runner
                 ).run()
             )
+        if selected_release_checker.enabled:
+            release_task = asyncio.create_task(selected_release_checker.run())
         try:
             yield
         finally:
             try:
                 await _cancel_background_tasks(
-                    [pool_tracking_task, maintenance_task, auto_sync_task, tracking_task]
+                    [
+                        pool_tracking_task,
+                        maintenance_task,
+                        auto_sync_task,
+                        tracking_task,
+                        release_task,
+                    ]
                 )
             finally:
                 if owns_runner:
@@ -415,6 +438,7 @@ def create_app(
     app.state.market_data_adapter = selected_adapter
     app.state.backtest_service = selected_backtest_service
     app.state.indicator_cache = selected_indicator_cache
+    app.state.release_checker = selected_release_checker
     # 行情重写后要一起失效的全部缓存实例（组合回测那份是独立实例）。
     app.state.indicator_caches = [selected_indicator_cache, selected_backtest_cache]
     app.state.indicator_precompute_service = selected_precompute_service

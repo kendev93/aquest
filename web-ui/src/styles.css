@@ -41,6 +41,11 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .nav-link:hover, .nav-link.active { color: var(--text); border-bottom-color: var(--accent); }
 .topbar-status { display: flex; align-items: center; gap: 8px; margin-left: auto; color: var(--subtle); font-size: 12px; }
 .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+/* 上游有新版本时的顶栏提示：暖色描边表示"可以动，但还没动"，不借用红色的失败语义。 */
+.release-notice { display: inline-flex; align-items: center; padding: 3px 9px; border: 1px solid rgba(245, 158, 11, 0.5); border-radius: 999px; background: rgba(245, 158, 11, 0.12); color: #fbbf24; font-size: 12px; text-decoration: none; white-space: nowrap; }
+.release-notice:hover { border-color: rgba(245, 158, 11, 0.82); color: #fcd34d; }
+.release-dismiss { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; padding: 0; border: 0; border-radius: 50%; background: transparent; color: var(--subtle); font-size: 14px; line-height: 1; cursor: pointer; }
+.release-dismiss:hover { color: var(--text); background: rgba(148, 163, 184, 0.18); }
 
 .content-shell { width: min(1500px, calc(100% - 84px)); margin: 0 auto; padding: 58px 0 80px; }
 .page-intro { display: flex; justify-content: space-between; gap: 40px; align-items: flex-end; margin-bottom: 32px; }

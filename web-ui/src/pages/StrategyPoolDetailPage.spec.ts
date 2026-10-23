@@ -40,7 +40,10 @@ it('reads both objectives, human-readable rules, launch marker and paginated tra
     const next = wrapper.findAll('nav button')[1]!
     await next.trigger('click'); await flushPromises()
     expect(fetch.mock.calls.some(([url]) => url.includes('offset=50'))).toBe(true)
-    expect(fetch.mock.calls.every((call) => call.length===1)).toBe(true)
+    // 顶栏每次挂载会读一次上游版本状态，那条走公共客户端、带请求选项；
+    // 这里的断言只管本页自己的读请求：全是单参数 GET，没有偷偷用 POST 读数据。
+    const pageCalls = fetch.mock.calls.filter(([url]) => !String(url).includes('/release-status'))
+    expect(pageCalls.every((call) => call.length===1)).toBe(true)
   } finally { wrapper.unmount() }
 })
 
