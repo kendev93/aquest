@@ -343,6 +343,139 @@ def test_market_data_sync_forwards_the_calendar_probe_to_its_online_provider(
     )
 
 
+def _daily_frame(dates: list[str], status: str = "completed") -> pd.DataFrame:
+    close = [10.0 + index * 0.1 for index in range(len(dates))]
+    return pd.DataFrame(
+        {
+            "date": pd.to_datetime(dates),
+            "open": close,
+            "high": [value + 0.2 for value in close],
+            "low": [value - 0.2 for value in close],
+            "close": close,
+            "volume": [1_000.0] * len(dates),
+            "amount": [value * 1_000 for value in close],
+            "bar_status": [status] * len(dates),
+        }
+    )
+
+
+def _seed_store(
+    tmp_path: Path,
+    name: str = "gap-plan.duckdb",
+    *,
+    coverage_end: date = date(2026, 9, 12),
+) -> DuckDbMarketDataStore:
+    """三只标的：600000 已有 9-11、000001 只到 9-10、688001 全是盘中临时行。
+
+    ``coverage_end`` 决定日历敢不敢回答「9-12 是不是交易日」：只声明到 9-11 时判不出，
+    计划就不许裁掉任何一只。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / name)
+    for market, code, dates, status in (
+        ("SH", "600000", ["2026-09-10", "2026-09-11"], "completed"),
+        ("SZ", "000001", ["2026-09-09", "2026-09-10"], "completed"),
+        ("SH", "688001", ["2026-09-10", "2026-09-11"], "provisional"),
+    ):
+        store.replace_local_bars(market, code, "stock", _daily_frame(dates, status))
+    store.save_market_trading_calendar(
+        [date(2026, 9, 10), date(2026, 9, 11)],
+        source="eastmoney_sse_composite",
+        coverage_start=date(2026, 1, 1),
+        coverage_end=coverage_end,
+    )
+    return store
+
+
+def _plan_service(store: DuckDbMarketDataStore, clock_now: datetime) -> OnlineMarketSync:
+    return OnlineMarketSync(
+        store=store,
+        module_factory=lambda: FakeOnline(),
+        clock=lambda: clock_now,
+    )
+
+
+def test_stage_plan_drops_instruments_already_covered_by_the_latest_session(
+    tmp_path: Path,
+) -> None:
+    """已有本交易日已收盘日线的标的不进下载计划：一次点击不该把整个范围重新问一遍。"""
+
+    store = _seed_store(tmp_path, "covered.duckdb")
+    plan = _plan_service(store, _NOW).prepare_stage_plan(
+        _config(prefer_store_targets=True, end_date=date(2026, 9, 12))
+    )
+
+    # 9-12 不是交易日（日历只到 9-11），判据落在 9-11：600000 已经有了，不再问。
+    assert plan.covered_session == "2026-09-11"
+    assert plan.skipped_current == 1
+    assert {(target.market, target.code) for target in plan.targets} == {
+        ("SZ", "000001"),  # 还差一天
+        ("SH", "688001"),  # 只有盘中临时行，收盘后必须重下一次
+    }
+    # 真要下的那几只，仍然按原来的重叠段回看做逐值对照。
+    missing = next(target for target in plan.targets if target.code == "000001")
+    assert missing.requested_ranges[-1] == (date(2026, 8, 31), date(2026, 9, 12))
+
+
+def test_stage_plan_keeps_every_instrument_when_the_calendar_cannot_judge(
+    tmp_path: Path,
+) -> None:
+    """日历判不出「今天是不是交易日」时一只都不裁：宁可多下一轮，不能漏下该下的那只。"""
+
+    # 覆盖声明只到 9-11：9-12 到底是不是交易日无从判断。
+    store = _seed_store(tmp_path, "no-verdict.duckdb", coverage_end=date(2026, 9, 11))
+
+    plan = _plan_service(store, _NOW).prepare_stage_plan(
+        _config(prefer_store_targets=True, end_date=date(2026, 9, 12))
+    )
+
+    assert plan.covered_session is None
+    assert plan.skipped_current == 0
+    assert len(plan.targets) == 3
+
+
+def test_stage_plan_trims_nothing_for_a_full_history_download(tmp_path: Path) -> None:
+    """全量回填要的就是"每只都重新下一遍"，闸门不参与。"""
+
+    store = _seed_store(tmp_path, "full-history.duckdb")
+
+    plan = _plan_service(store, _NOW).prepare_stage_plan(
+        _config(prefer_store_targets=True, full_history=True)
+    )
+
+    assert plan.covered_session is None
+    assert plan.skipped_current == 0
+    assert len(plan.targets) == 3
+
+
+def test_stage_plan_still_downloads_the_session_before_it_is_published(
+    tmp_path: Path,
+) -> None:
+    """收盘点之前，当天那根还不算已覆盖：判据要退到上一个交易日。"""
+
+    store = _seed_store(tmp_path, "publish-time.duckdb")
+
+    # 19:00 已过发布时点：判据是 9-11，600000 与 000001 都在它之前就有了当天那根之外
+    # 的最新已收盘日线？不——只有 600000 到了 9-11，000001 还差一天，所以只跳过一只。
+    after_close = datetime(2026, 9, 11, 19, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    plan = _plan_service(store, after_close).prepare_stage_plan(
+        _config(prefer_store_targets=True, end_date=date(2026, 9, 11))
+    )
+    assert plan.covered_session == "2026-09-11"
+    assert plan.skipped_current == 1
+
+    # 15:00 还没收盘：9-11 只能算盘中临时行，判据退回 9-10，于是 600000 也得再下一次。
+    # 15:00 还没收盘：9-11 只能算盘中临时行，判据退回 9-10。
+    intraday = datetime(2026, 9, 11, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    early = _plan_service(store, intraday).prepare_stage_plan(
+        _config(prefer_store_targets=True, end_date=date(2026, 9, 11))
+    )
+    assert early.covered_session == "2026-09-10"
+    # 两只已有 9-10 已收盘日线的被跳过；688001 只有临时行，任何时候都得重下。
+    assert early.skipped_current == 2
+    assert {(target.market, target.code) for target in early.targets} == {("SH", "688001")}
+
+
 def test_stage_plan_caps_incremental_ranges_at_the_selected_session(tmp_path: Path) -> None:
     store = DuckDbMarketDataStore(tmp_path / "bounded-sync.duckdb")
     store.replace_local_bars(

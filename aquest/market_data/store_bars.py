@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import cast
 
@@ -2072,6 +2072,34 @@ class DuckDbBarsStore:
             if close is None or last_date is None:
                 continue
             result[(str(market), str(code))] = (float(close), str(last_date))
+        return result
+
+    def last_completed_dates(self) -> dict[tuple[str, str], date]:
+        """每只标的最后一根**已收盘**日线属于哪一个交易日，一次聚合覆盖全市场。
+
+        同步计划靠它决定「这只今天已经有了，不必再发一次请求」。口径必须比
+        ``instruments.last_date`` 更严：那里连盘中的临时行（``provisional``）也算数，
+        而临时行正是收盘后要重新下一次去替换的东西；也只看 ``raw``，因为在线同步写的
+        就是这一种价格基准，别的基准留在库里不代表今天已经下完。
+        """
+
+        with self._store._connect(read_only=True) as connection:
+            rows = connection.execute(
+                """
+                SELECT market, code, max(trade_date) AS last_date
+                FROM daily_bars
+                WHERE price_basis = ? AND bar_status = 'completed'
+                GROUP BY market, code
+                """,
+                [DEFAULT_PRICE_BASIS],
+            ).fetchall()
+        result: dict[tuple[str, str], date] = {}
+        for market, code, last_date in rows:
+            if last_date is None:
+                continue
+            value = last_date.date() if isinstance(last_date, datetime) else last_date
+            if isinstance(value, date):
+                result[(str(market), str(code))] = value
         return result
 
     def list_instruments(

@@ -376,6 +376,9 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
     def latest_completed_closes(self) -> dict[tuple[str, str], tuple[float, str]]:
         return self._bars.latest_completed_closes()
 
+    def last_completed_dates(self) -> dict[tuple[str, str], date]:
+        return self._bars.last_completed_dates()
+
     def list_instruments(
         self,
         *,

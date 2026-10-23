@@ -39,6 +39,7 @@ from aquest.market_data.staging import (
     staging_directory,
 )
 from aquest.market_data.store import DuckDbMarketDataStore
+from aquest.market_data.sync_session import record_synced_session, sync_scope_fingerprint
 
 from .market_sync import (
     AbortCheck,
@@ -417,6 +418,30 @@ class MarketDataSync:
             finished_at = datetime.now(tz=prepared[0].as_of.tzinfo)
             self._store.set_meta("last_online_sync_at", finished_at.isoformat())
             self._store.set_meta("last_online_provider", provider)
+            # 盖「这个范围已经下到了这个交易日」的记号，下一次点同步就能直接挡回来说不用下载。
+            # 只有计划真的按交易日裁剪过（``covered_session`` 有值）才盖：判不出今天是不是
+            # 交易日时，这一轮下完也不代表"下完了"，宁可让用户多点一次。
+            for (stage_provider, stage_config, _stage_service), plan in zip(
+                plans, prepared, strict=True
+            ):
+                if plan.covered_session is None:
+                    continue
+                record_synced_session(
+                    self._store,
+                    session=date.fromisoformat(plan.covered_session),
+                    scope=sync_scope_fingerprint(
+                        universe=stage_config.universe,
+                        provider=stage_provider,
+                        instrument_types=stage_config.instrument_types,
+                        boards=stage_config.boards,
+                    ),
+                    # 存的是库里当时的标的数，专门用来发现「记号之后又多了标的」：
+                    # 本地导入或刚入库的新票没有那天的数据，闸门不能替它们做主。
+                    instruments=self._store.status().instrument_count,
+                    failed=worker_summary.errors,
+                    provider=cast_provider(stage_provider),
+                    finished_at=finished_at,
+                )
             if prepared[0].provider_version is not None:
                 self._store.set_meta(
                     "last_online_provider_version",
@@ -469,6 +494,11 @@ class MarketDataSync:
                 cleanup_seconds=cleanup_seconds,
                 rate_limit_events=_as_int(rate.get("rate_limit_events")),
                 rate_limit_backoffs=_as_int(rate.get("backoffs")),
+                covered_session=next(
+                    (plan.covered_session for plan in prepared if plan.covered_session),
+                    None,
+                ),
+                skipped_current=sum(plan.skipped_current for plan in prepared),
             )
         except MarketDataCancelledError:
             _report_stage_detail(

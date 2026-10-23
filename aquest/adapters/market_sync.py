@@ -110,6 +110,10 @@ class MarketSyncReport:
     merged_rows: int = 0
     stage_files: tuple[str, ...] = ()
     download_seconds: float = 0.0
+    #: 这一轮按哪个交易日裁剪下载计划（判不出时为 None，也就没裁）。
+    covered_session: str | None = None
+    #: 因为「本交易日已经有已收盘日线」而一只请求都没发的标的数。
+    skipped_current: int = 0
     merge_seconds: float = 0.0
     cleanup_seconds: float = 0.0
     rate_limit_events: int = 0
@@ -138,6 +142,8 @@ class MarketSyncReport:
             "worker_count": self.worker_count,
             "staged_rows": self.staged_rows,
             "merged_rows": self.merged_rows,
+            "covered_session": self.covered_session,
+            "skipped_current": self.skipped_current,
             "stage_files": list(self.stage_files),
             "download_seconds": self.download_seconds,
             "merge_seconds": self.merge_seconds,

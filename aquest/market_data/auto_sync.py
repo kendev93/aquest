@@ -6,7 +6,7 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Callable
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime
 from inspect import Parameter, signature
 from pathlib import Path
 from typing import Protocol
@@ -26,6 +26,11 @@ from aquest.indicators.precompute import (
 )
 from aquest.market_data.models import stored_end_year
 from aquest.market_data.store import DuckDbMarketDataStore
+from aquest.market_data.sync_session import (
+    MARKET_SESSION_PUBLISHED_TIME,
+    latest_completed_session,
+    refresh_calendar_once_per_day,
+)
 from aquest.screening.jobs import (
     ProgressReporter,
     ScreenJobRunner,
@@ -69,9 +74,6 @@ DEFAULT_AUTO_SYNC_INTERVAL_SECONDS = 15 * 60
 AUTO_SYNC_MAX_BACKOFF_SECONDS: float = 2 * 60 * 60
 #: 指数位移的上限，只为了不把连错几个月的次数算成天文数字（真实上限由上面的封顶决定）。
 _AUTO_SYNC_BACKOFF_MAX_STEPS = 24
-AUTO_SYNC_AFTER_CLOSE = time(18, 30)
-TRADING_CALENDAR_LOOKBACK_DAYS = 120
-TRADING_CALENDAR_PROVIDER = "eastmoney_sse_composite"
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 
@@ -157,6 +159,11 @@ class AutomaticMarketSyncScheduler:
             return None
         now = _as_shanghai(self._clock())
         today = now.date()
+        fetch_calendar = getattr(self._market_sync, "fetch_trading_calendar", None)
+        # 交易日历是「今天算不算一个新交易日」的唯一依据，所以每天独立取一次，而且刻意放在
+        # due 判定之前：任何一次手动同步都会把下面整段挡掉，绑在一起日历能连着几天不刷新
+        # （2026-10-22 实测 market_calendar_latest_date 停在 10-16，全靠用户手点补行情）。
+        refresh_calendar_once_per_day(self._store, fetch_calendar, now=now)
         if not auto_sync_due(status.last_online_sync_at, now=now):
             return None
 
@@ -166,39 +173,18 @@ class AutomaticMarketSyncScheduler:
             return None
 
         end_date: date | None = None
-        fetch_calendar = getattr(self._market_sync, "fetch_trading_calendar", None)
         if callable(fetch_calendar):
             # Daily bars are complete only after the market close and provider publication.
             # Before then, wait locally instead of asking every stock for an unfinished date.
-            if now.time() < AUTO_SYNC_AFTER_CLOSE:
+            if now.time() < MARKET_SESSION_PUBLISHED_TIME:
                 return None
-            try:
-                calendar_start = today - timedelta(days=TRADING_CALENDAR_LOOKBACK_DAYS)
-                calendar_dates = tuple(
-                    sorted(
-                        {
-                            item
-                            for item in fetch_calendar(
-                                calendar_start,
-                                today,
-                                timeout=10.0,
-                            )
-                            if isinstance(item, date) and item <= today
-                        }
-                    )
-                )
-                if not calendar_dates:
-                    raise ValueError("上证综指没有返回有效交易日")
-                save_calendar = getattr(self._store, "save_market_trading_calendar", None)
-                if not callable(save_calendar):
-                    raise RuntimeError("行情库不支持保存交易日历")
-                save_calendar(
-                    calendar_dates,
-                    source=TRADING_CALENDAR_PROVIDER,
-                    coverage_start=calendar_start,
-                    coverage_end=today,
-                )
-                end_date = calendar_dates[-1]
+            end_date = latest_completed_session(self._store, now=now)
+            if end_date is None:
+                # 日历判不出来（覆盖不够长或读失败）时按自然日照旧发起：宁可多下一轮，
+                # 也不能因为判不出交易日而整天不补行情。
+                logger.warning("交易日历判不出最新交易日，自动同步回退到自然日范围")
+                end_date = today
+            else:
                 local_data_end = _parse_date(status.data_end)
                 if local_data_end is not None and end_date <= local_data_end:
                     self._store.set_meta("last_auto_sync_check_date", today.isoformat())
@@ -209,9 +195,6 @@ class AutomaticMarketSyncScheduler:
                         today,
                     )
                     return None
-            except Exception:  # noqa: BLE001 - calendar failure must not suppress a real sync
-                logger.exception("读取交易日历失败，自动同步回退到自然日范围")
-                end_date = today
 
         job_id = uuid.uuid4().hex
         self._active_job_id = job_id
@@ -430,9 +413,6 @@ __all__ = [
     "MARKET_SYNC_EXCLUSIVE_GROUP",
     "DEFAULT_AUTO_SYNC_INTERVAL_SECONDS",
     "AUTO_SYNC_MAX_BACKOFF_SECONDS",
-    "AUTO_SYNC_AFTER_CLOSE",
-    "TRADING_CALENDAR_LOOKBACK_DAYS",
-    "TRADING_CALENDAR_PROVIDER",
     "AutomaticMarketSyncScheduler",
     "auto_sync_due",
 ]

@@ -55,6 +55,15 @@ def test_auto_sync_skips_holiday_after_calendar_check_and_persists_the_check_dat
             coverage_end=None,
         ):
             self.saved_calendar = (tuple(trade_dates), source, coverage_start, coverage_end)
+            return len(tuple(trade_dates))
+
+        def read_authoritative_trading_dates(self, start_date, end_date):
+            """按刚落库的那一份日历回答「<= end_date 的交易日」，覆盖不够就抛错。"""
+
+            dates, _source, coverage_start, coverage_end = self.saved_calendar
+            if coverage_start > start_date or coverage_end < end_date:
+                raise ValueError("权威交易日历未覆盖完整日期范围")
+            return [item for item in dates if start_date <= item <= end_date]
 
     class Runner:
         def __init__(self) -> None:
@@ -119,9 +128,15 @@ def test_auto_sync_uses_latest_exchange_session_as_provider_end_date() -> None:
                 last_online_sync_at="2026-10-02T00:16:41+08:00",
             )
 
+        def __init__(self) -> None:
+            self.saved_calendar = None
+            self.metadata: dict[str, str] = {}
+
         def get_meta(self, key):
-            del key
-            return None
+            return self.metadata.get(key)
+
+        def set_meta(self, key, value):
+            self.metadata[key] = value
 
         def save_market_trading_calendar(
             self,
@@ -131,8 +146,16 @@ def test_auto_sync_uses_latest_exchange_session_as_provider_end_date() -> None:
             coverage_start=None,
             coverage_end=None,
         ):
-            del trade_dates, source
-            del coverage_start, coverage_end
+            self.saved_calendar = (tuple(trade_dates), source, coverage_start, coverage_end)
+            return len(tuple(trade_dates))
+
+        def read_authoritative_trading_dates(self, start_date, end_date):
+            """按刚落库的那一份日历回答「<= end_date 的交易日」，覆盖不够就抛错。"""
+
+            dates, _source, coverage_start, coverage_end = self.saved_calendar
+            if coverage_start > start_date or coverage_end < end_date:
+                raise ValueError("权威交易日历未覆盖完整日期范围")
+            return [item for item in dates if start_date <= item <= end_date]
 
     class Runner:
         def __init__(self) -> None:
@@ -176,12 +199,16 @@ def test_auto_sync_uses_latest_exchange_session_as_provider_end_date() -> None:
     )
 
     assert scheduler.submit_if_due() is None
-    assert sync.calendar_calls == 0
+    # 收盘前不会发起同步，但日历照取：它现在是「今天算不算交易日」的唯一依据，
+    # 而且必须独立于同步动作，否则一次手动同步就能让它连着几天不刷新。
+    assert sync.calendar_calls == 1
     now[0] = datetime(2026, 10, 9, 19, 0, tzinfo=SHANGHAI)
     assert scheduler.submit_if_due() is not None
     assert runner.target is not None
     runner.target(lambda _current, _total: None)
     assert sync.configs[0].end_date == date(2026, 10, 9)
+    # 19:00 这一轮用的是早上已落库的日历，没有再取第二次。
+    assert sync.calendar_calls == 1
 
 
 def test_auto_sync_falls_back_to_natural_date_when_calendar_is_unavailable() -> None:

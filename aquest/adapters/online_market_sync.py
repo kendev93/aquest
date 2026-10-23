@@ -42,6 +42,7 @@ from aquest.market_data.staging import (
 )
 from aquest.market_data.store import DuckDbMarketDataStore
 from aquest.market_data.store_base import HISTORY_START
+from aquest.market_data.sync_session import latest_completed_session
 
 from .baostock_catalog import BaostockCatalogError, fetch_all_securities
 from .market_sync import (
@@ -1044,6 +1045,13 @@ class OnlineMarketSync:
             raise OnlineDataError("行情源没有返回有效交易日历")
         return tuple(sorted(dates))
 
+    def _stage_covered_session(self, config: MarketSyncConfig, as_of: datetime) -> date | None:
+        """本轮可以按「已有本交易日」裁剪到哪个交易日；判不出来就返回 None（不裁剪）。"""
+
+        if config.full_history or self._store is None:
+            return None
+        return latest_completed_session(self._store, now=as_of)
+
     def prepare_stage_plan(
         self,
         config: MarketSyncConfig,
@@ -1059,9 +1067,25 @@ class OnlineMarketSync:
             config, abort_check=abort_check
         )
         existing_by_key = self._latest_existing_bars(selection.targets)
+        # 本交易日已经有已收盘日线的标的直接不进下载计划：一次分组查询给出每只标的的最后一根
+        # 已收盘日线，够得上判据的一只请求都不发（以前每次点同步都要把整个范围重新下一遍，
+        # 因为回看重叠段是拿来逐值对照的，而当天那一段早在上一次就对照过了）。
+        # 判不出交易日时一律照旧逐只下——宁可多下一轮，不能漏下该下的那只。
+        session = self._stage_covered_session(config, as_of)
+        completed_dates = (
+            self._store.last_completed_dates()
+            if session is not None and self._store is not None
+            else {}
+        )
         stage_targets: list[StageTarget] = []
+        skipped_current = 0
         for market, code, instrument_type, board, name in selection.targets:
-            snapshot = existing_by_key.get((market, code), _ExistingBars(pd.DataFrame()))
+            key = (market, code)
+            last_completed = completed_dates.get(key)
+            if session is not None and last_completed is not None and last_completed >= session:
+                skipped_current += 1
+                continue
+            snapshot = existing_by_key.get(key, _ExistingBars(pd.DataFrame()))
             stage_targets.append(
                 StageTarget(
                     provider="eastmoney",
@@ -1088,6 +1112,8 @@ class OnlineMarketSync:
             provider_version=self.provider_version(),
             instrument_list_fingerprint=selection.fingerprint,
             as_of=as_of,
+            covered_session=session.isoformat() if session is not None else None,
+            skipped_current=skipped_current,
         )
 
     def fetch_stage_target(

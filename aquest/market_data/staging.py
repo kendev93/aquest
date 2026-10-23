@@ -88,6 +88,10 @@ class ProviderStagePlan:
     provider_version: str | None
     instrument_list_fingerprint: str | None
     as_of: datetime
+    #: 判据用的那个交易日（日历说它已经收盘）。判不出来时为 None，整轮照旧逐只下。
+    covered_session: str | None = None
+    #: 因为「本交易日已经有了已收盘日线」而没发请求的标数，报告里要说清省下了多少。
+    skipped_current: int = 0
 
 
 @dataclass(frozen=True)
