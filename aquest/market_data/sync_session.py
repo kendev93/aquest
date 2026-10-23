@@ -32,7 +32,7 @@ MARKET_SESSION_PUBLISHED_TIME = time(18, 30)
 #: 一次取多长的日历。120 天足够跨过最长连休，也让"今天是不是交易日"有权威答案。
 TRADING_CALENDAR_LOOKBACK_DAYS = 120
 TRADING_CALENDAR_PROVIDER = "eastmoney_sse_composite"
-#: 日历每天最多取一次（``data_meta``）。失败时不写这个键，下一次调度就重试。
+#: 最近一次成功刷新日历的时刻（``data_meta``，上海时区 ISO）；按发布时点分段判断该不该再取。
 CALENDAR_REFRESH_META_KEY = "market_calendar_refresh_date"
 #: 某个研究范围在某个交易日已经完整同步过的记号（``data_meta``，值是按范围分格的 JSON）。
 SYNCED_SESSION_META_KEY = "market_sync_completed_session"
@@ -137,13 +137,46 @@ def refresh_trading_calendar(
     return unique
 
 
-def refresh_calendar_once_per_day(
+def calendar_refresh_is_due(stored: str | None, current: datetime) -> bool:
+    """今天还需不需要再取一次日历：发布时点之前一次、之后再一次。
+
+    上游把「今天」列进交易日历要等收盘发布之后（实测 10-23 09:16 问它，最新交易日还
+    是 10-22），所以凌晨那次刷新拿到的列表只到昨天，却会把覆盖声明做到今天。按"一天
+    一次"记的话，当晚发布之后就再也不会刷新，判据整个晚上都停在昨天——等于当天的行情
+    要到第二天才被认出来。分两段各允许一次：发布时点之前那一次负责把覆盖声明做到今天
+    （周末和节假日就靠它），之后的那一次才真正看见新交易日。
+    """
+
+    published = current.replace(
+        hour=MARKET_SESSION_PUBLISHED_TIME.hour,
+        minute=MARKET_SESSION_PUBLISHED_TIME.minute,
+        second=0,
+        microsecond=0,
+    )
+    boundary = (
+        published
+        if current >= published
+        else current.replace(hour=0, minute=0, second=0, microsecond=0)
+    )
+    if not stored:
+        return True
+    try:
+        stamped = datetime.fromisoformat(stored)
+    except ValueError:
+        # 老格式（只记日期）或写坏了的值：按"没刷过"处理，多取一次日历没有代价。
+        return True
+    if stamped.tzinfo is None:
+        stamped = stamped.replace(tzinfo=_SHANGHAI_TZ)
+    return stamped.astimezone(_SHANGHAI_TZ) < boundary
+
+
+def refresh_calendar_when_stale(
     store: DuckDbMarketDataStore,
     fetcher: CalendarFetcher | None,
     *,
     now: datetime | None = None,
 ) -> bool:
-    """每天最多取一次日历；成功返回 True，失败或今天已经取过返回 False。
+    """日历该刷就刷一次；成功返回 True，取不到或本轮还不该取时返回 False。
 
     刻意不跟"今天是否已经同步过行情"绑定：日历是判据，同步是动作，绑在一起的话用户
     手点一次同步，当天就再也不会刷新日历，判据从此停在旧日期上。
@@ -154,18 +187,20 @@ def refresh_calendar_once_per_day(
     current = shanghai_now(now)
     today = current.date()
     try:
-        if store.get_meta(CALENDAR_REFRESH_META_KEY) == today.isoformat():
-            return False
+        stored = store.get_meta(CALENDAR_REFRESH_META_KEY)
     except Exception:  # noqa: BLE001 - 读不到记号按没取过处理，宁可多取一次日历
         logger.exception("读取交易日历刷新记号失败，按未刷新处理")
+        stored = None
+    if not calendar_refresh_is_due(stored, current):
+        return False
     try:
         refresh_trading_calendar(store, fetcher, today=today)
     except Exception as exc:  # noqa: BLE001 - 日历失败不能拖垮调度本身
         logger.warning("交易日历刷新失败，下一次调度再试：%s", str(exc)[:200])
         return False
     try:
-        store.set_meta(CALENDAR_REFRESH_META_KEY, today.isoformat())
-    except Exception:  # noqa: BLE001 - 已落库，记号写失败只是明天会多取一次
+        store.set_meta(CALENDAR_REFRESH_META_KEY, current.isoformat())
+    except Exception:  # noqa: BLE001 - 已落库，记号写失败只是这轮会多取一次
         logger.exception("写入交易日历刷新记号失败")
     return True
 

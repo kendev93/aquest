@@ -12,10 +12,11 @@ from aquest.market_data.sync_session import (
     SYNCED_SESSION_META_KEY,
     SYNCED_SESSION_SCOPE_LIMIT,
     CalendarRefreshError,
+    calendar_refresh_is_due,
     latest_completed_session,
     read_synced_session,
     record_synced_session,
-    refresh_calendar_once_per_day,
+    refresh_calendar_when_stale,
     refresh_trading_calendar,
     sync_scope_fingerprint,
 )
@@ -70,27 +71,72 @@ def _fetcher(*sessions: date):
     return fetch
 
 
-def test_calendar_refresh_runs_once_per_day_and_retries_after_failure() -> None:
+def test_calendar_refresh_runs_before_and_after_the_publish_time() -> None:
+    """一天最多取两次：发布时点前一次把覆盖做到今天，之后一次才看得见今天这个交易日。
+
+    上游在收盘发布之前不会把今天列进日历（2026-10-23 09:16 实测问它，最新交易日还是
+    10-22）。只按"今天取过了"记一次的话，当晚就再也看不见新交易日，行情天天晚一天。
+    """
+
     store = Store()
-    today = datetime(2026, 10, 22, 9, 5, tzinfo=SHANGHAI)
+    morning = datetime(2026, 10, 22, 9, 5, tzinfo=SHANGHAI)
     fetcher = _fetcher(date(2026, 10, 21), date(2026, 10, 22))
 
-    assert refresh_calendar_once_per_day(store, fetcher, now=today) is True
-    assert store.metadata[CALENDAR_REFRESH_META_KEY] == "2026-10-22"
+    assert refresh_calendar_when_stale(store, fetcher, now=morning) is True
+    assert store.metadata[CALENDAR_REFRESH_META_KEY] == morning.isoformat()
     assert len(fetcher.calls) == 1
-    # 同一天再调度不许多打一次请求。
-    assert refresh_calendar_once_per_day(store, fetcher, now=today) is False
+    # 发布时点之前反复调度，不许多打一次请求。
+    assert refresh_calendar_when_stale(store, fetcher, now=morning + timedelta(hours=3)) is False
     assert len(fetcher.calls) == 1
+    # 18:30 之后必须再取一次，否则当天那根交易日进不了判据。
+    assert (
+        refresh_calendar_when_stale(
+            store, fetcher, now=datetime(2026, 10, 22, 18, 40, tzinfo=SHANGHAI)
+        )
+        is True
+    )
+    assert len(fetcher.calls) == 2
+    # 取过了就不再取；过零点重新开一段。
+    assert (
+        refresh_calendar_when_stale(store, fetcher, now=datetime(2026, 10, 22, 21, tzinfo=SHANGHAI))
+        is False
+    )
+    assert len(fetcher.calls) == 2
+    assert (
+        refresh_calendar_when_stale(
+            store, fetcher, now=datetime(2026, 10, 23, 0, 30, tzinfo=SHANGHAI)
+        )
+        is True
+    )
+    assert len(fetcher.calls) == 3
 
-    # 写库失败不留记号，下一次调度就会重试——否则日历会一直缺着。
+    # 写库失败不留记号，下一次调度就重试——否则日历会一直缺着。
     failing = Store()
     failing.save_rows = 0
     broken = _fetcher(date(2026, 10, 21))
 
-    assert refresh_calendar_once_per_day(failing, broken, now=today) is False
+    assert refresh_calendar_when_stale(failing, broken, now=morning) is False
     assert CALENDAR_REFRESH_META_KEY not in failing.metadata
     # 没有取日历的对象时直接跳过，不影响调度本身。
-    assert refresh_calendar_once_per_day(Store(), None, now=today) is False
+    assert refresh_calendar_when_stale(Store(), None, now=morning) is False
+
+
+def test_calendar_refresh_is_due_ignores_broken_stamps() -> None:
+    """记号写坏了（包括只记日期的老格式）都不能让日历从此不再刷新。"""
+
+    morning = datetime(2026, 10, 22, 9, 5, tzinfo=SHANGHAI)
+    published = datetime(2026, 10, 22, 18, 40, tzinfo=SHANGHAI)
+
+    assert calendar_refresh_is_due(None, morning) is True
+    assert calendar_refresh_is_due("", morning) is True
+    assert calendar_refresh_is_due("昨天", morning) is True
+    # 老格式只记日期：按"今天凌晨"理解，发布前那一段已经算取过，发布后仍然要再取。
+    assert calendar_refresh_is_due("2026-10-22", morning) is False
+    assert calendar_refresh_is_due("2026-10-22", published) is True
+    # 正常记号：发布前取过就够一段，到了发布时点之后就该再取。
+    assert calendar_refresh_is_due(morning.isoformat(), morning + timedelta(minutes=30)) is False
+    assert calendar_refresh_is_due(morning.isoformat(), published) is True
+    assert calendar_refresh_is_due(published.isoformat(), published + timedelta(hours=1)) is False
 
 
 def test_calendar_refresh_reports_empty_provider_response_as_failure() -> None:

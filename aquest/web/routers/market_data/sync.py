@@ -31,7 +31,7 @@ from aquest.market_data.store import MarketDataStoreError
 from aquest.market_data.sync_session import (
     latest_completed_session,
     read_synced_session,
-    refresh_calendar_once_per_day,
+    refresh_calendar_when_stale,
     sync_scope_fingerprint,
 )
 from aquest.screening.jobs import (
@@ -282,8 +282,8 @@ def _already_covered_session(
     store = _store(request)
     fetcher = getattr(_service(request), "fetch_trading_calendar", None)
     now = datetime.now(_SHANGHAI_TZ)
-    # 每天最多取一次日历，一次请求；调度器没跑到（服务刚重启）时这里就是当天第一次。
-    refresh_calendar_once_per_day(store, fetcher, now=now)
+    # 该刷就刷一次（发布时点前后各一次）；调度器没跑到（服务刚重启）时这里就补上那一次。
+    refresh_calendar_when_stale(store, fetcher, now=now)
     session = latest_completed_session(store, now=now)
     if session is None:
         return None

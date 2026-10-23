@@ -29,7 +29,7 @@ from aquest.market_data.store import DuckDbMarketDataStore
 from aquest.market_data.sync_session import (
     MARKET_SESSION_PUBLISHED_TIME,
     latest_completed_session,
-    refresh_calendar_once_per_day,
+    refresh_calendar_when_stale,
 )
 from aquest.screening.jobs import (
     ProgressReporter,
@@ -160,10 +160,11 @@ class AutomaticMarketSyncScheduler:
         now = _as_shanghai(self._clock())
         today = now.date()
         fetch_calendar = getattr(self._market_sync, "fetch_trading_calendar", None)
-        # 交易日历是「今天算不算一个新交易日」的唯一依据，所以每天独立取一次，而且刻意放在
-        # due 判定之前：任何一次手动同步都会把下面整段挡掉，绑在一起日历能连着几天不刷新
-        # （2026-10-22 实测 market_calendar_latest_date 停在 10-16，全靠用户手点补行情）。
-        refresh_calendar_once_per_day(self._store, fetch_calendar, now=now)
+        # 交易日历是「今天算不算一个新交易日」的唯一依据，所以该刷就刷（发布时点前后各一次），
+        # 而且刻意放在 due 判定之前：任何一次手动同步都会把下面整段挡掉，绑在一起日历就能
+        # 连着几天不刷新（2026-10-22 实测 market_calendar_latest_date 停在 10-16，
+        # 全靠用户手点补行情）。
+        refresh_calendar_when_stale(self._store, fetch_calendar, now=now)
         if not auto_sync_due(status.last_online_sync_at, now=now):
             return None
 

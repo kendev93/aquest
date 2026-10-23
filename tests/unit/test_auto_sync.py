@@ -207,8 +207,9 @@ def test_auto_sync_uses_latest_exchange_session_as_provider_end_date() -> None:
     assert runner.target is not None
     runner.target(lambda _current, _total: None)
     assert sync.configs[0].end_date == date(2026, 10, 9)
-    # 19:00 这一轮用的是早上已落库的日历，没有再取第二次。
-    assert sync.calendar_calls == 1
+    # 18:30 之后必须再取一次：上游在收盘发布之前不会把当天列进日历，只按"今天取过了"
+    # 记一次的话，当天那根交易日要等到第二天才看得见，行情就天天晚一天。
+    assert sync.calendar_calls == 2
 
 
 def test_auto_sync_falls_back_to_natural_date_when_calendar_is_unavailable() -> None:
