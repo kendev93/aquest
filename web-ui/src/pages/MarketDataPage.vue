@@ -54,6 +54,8 @@ const form = reactive({
   syncUniverse: 'all' as 'all' | 'sh' | 'sz',
   syncInstrumentTypes: ['stock'] as InstrumentType[],
   syncBoards: [] as InstrumentBoard[],
+  // 默认不强制：本交易日已经下完时，点一次应该什么都没发生，而不是把 5000 多只重新问一遍。
+  syncForce: false,
   // 本地导入走自己的范围：默认不限制，否则会沿用在线的默认勾选，
   // 把未勾选的板块静默过滤掉而界面上完全看不出来。
   localInstrumentTypes: [] as InstrumentType[],
@@ -88,6 +90,7 @@ const message = ref('')
 const storeStatus = ref<DataStoreStatus | null>(null)
 const syncLoading = ref(false)
 const syncLabel = ref('')
+const syncNotice = ref('')
 const marketJob = ref<MarketSyncJobState | null>(null)
 const activeMarketJobs = ref<MarketSyncJobState[]>([])
 const MARKET_JOB_POLL_INTERVAL_MS = 500
@@ -411,6 +414,17 @@ function isTransientStoreStatusError(error: unknown): boolean {
     && hasActiveMarketDataJob()
 }
 
+// 后端说「不用下载」时要讲清三件事：覆盖到哪一天、这个范围有多少只、想硬下该怎么办。
+function skippedSyncText(job: {
+  session?: string | null
+  instruments?: number | null
+  synced_at?: string | null
+}): string {
+  const session = job.session ?? '最新交易日'
+  const at = job.synced_at ? `，完成于 ${formatChinaTimestamp(job.synced_at)}` : ''
+  return `本地已覆盖 ${session} 收盘${at}，本次没有下载。要重下请勾选「强制重新下载」。`
+}
+
 function syncScopePayload(): {
   instrument_types?: InstrumentType[]
   boards?: InstrumentBoard[]
@@ -617,15 +631,24 @@ async function syncOnlineData(): Promise<void> {
   syncLoading.value = true
   syncLabel.value = '正在同步行情…'
   message.value = ''
+  syncNotice.value = ''
   try {
     // 不发 bars：这个字段从请求到配置都无人消费（区间只由 _requested_ranges 决定），
     // 界面上也没有"拉多少根"可调。
     const job = await createOnlineSync({
       universe: form.syncUniverse,
       ...syncScopePayload(),
+      force: form.syncForce,
     })
-    beginJob(job.job_id, job.status)
-    await waitForJob(job.job_id)
+    // 后端判定「这个范围已经下到了本交易日收盘」时不会建任务：没有 job_id 可跟，
+    // 直接把结论说给用户，而不是让他盯一条 0/0 的进度条。
+    if (job.skipped) {
+      syncNotice.value = skippedSyncText(job)
+      await loadStoreStatus()
+      return
+    }
+    beginJob(job.job_id ?? '', job.status)
+    await waitForJob(job.job_id ?? '')
     await loadStoreStatus()
     await loadInstruments()
   } catch (error) {
@@ -1109,6 +1132,7 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
       </PageIntro>
 
       <div v-if="message" class="notice error" role="alert" data-testid="market-data-message">{{ message }}</div>
+      <div v-if="syncNotice" class="notice" data-testid="market-sync-notice">{{ syncNotice }}</div>
 
       <section class="panel market-store-panel" data-testid="market-store-panel">
         <div class="panel-heading"><div><span class="section-kicker">00 / DATA STORE</span><h2>行情数据仓库</h2></div><span class="required-hint">{{ syncLabel || 'DuckDB' }}</span></div>
@@ -1130,7 +1154,8 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
             <div><label for="market-sync-universe">同步市场</label><select id="market-sync-universe" v-model="form.syncUniverse" data-testid="market-sync-universe"><option value="all">沪深全部</option><option value="sh">仅上海</option><option value="sz">仅深圳</option></select></div>
             <div class="scope-options"><span>证券类型</span><label v-for="option in INSTRUMENT_TYPE_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-sync-type-${option.key}`" :checked="form.syncInstrumentTypes.includes(option.key)" @change="toggleInstrumentType(option.key)">{{ option.label }}</label></div>
             <div class="scope-options"><span>板块</span><label v-for="option in BOARD_OPTIONS" :key="option.key"><input type="checkbox" :data-testid="`market-sync-board-${option.key}`" :checked="form.syncBoards.includes(option.key)" @change="toggleBoard(option.key)">{{ option.label }}</label></div>
-            <small class="scope-helper" data-testid="market-sync-helper">板块未勾选表示不限制；类型和板块同时选择时取交集。在线同步下载不复权日线（raw）；除权跳空由指标计算时按分红送转事件校正，成交价始终是真实价。<b>同步行情</b>按每只标的自己的覆盖决定拉哪段：库里没有这只标的就从 2015-01-01 全量下载；已有行情就补到最新交易日，并把它最近 10 天一起重下用作对照——逐值比过没变就不写库，也不会因此重算指标，只有上游改写了近期数据才会覆盖。<b>删除并重下全部历史</b>先删掉所选范围内标的的全部日线（含本地导入）再整段重下，只有它能修正已经写歪的中间那段，耗时最久。</small>
+            <div class="scope-options" data-testid="market-sync-force-row"><span>重复下载</span><label><input id="market-sync-force" v-model="form.syncForce" data-testid="market-sync-force" type="checkbox" :disabled="syncLoading">强制重新下载本交易日</label></div>
+            <small class="scope-helper" data-testid="market-sync-helper">板块未勾选表示不限制；类型和板块同时选择时取交集。在线同步下载不复权日线（raw）；除权跳空由指标计算时按分红送转事件校正，成交价始终是真实价。<b>同步行情</b>按每只标的自己的覆盖决定拉哪段：库里没有这只标的就从 2015-01-01 全量下载；已有行情就补到最新交易日，并把它最近 10 天一起重下用作对照——逐值比过没变就不写库，也不会因此重算指标，只有上游改写了近期数据才会覆盖。已经拉到本交易日收盘的那几只当天不再问一次；同一范围在同一个交易日里第二次点「同步行情」会直接回「本地已覆盖 X 收盘，无需下载」，什么都不下载（要重下就勾「强制重新下载」，怀疑上游改写了近期数据时也用它）。<b>删除并重下全部历史</b>先删掉所选范围内标的的全部日线（含本地导入）再整段重下，只有它能修正已经写歪的中间那段，耗时最久。</small>
           </div>
           <div class="market-sync-actions">
             <button class="primary-button" data-testid="market-sync-online" type="button" :disabled="syncLoading" @click="syncOnlineData">同步行情</button>
@@ -1178,7 +1203,7 @@ function instrumentLabel(type: LocalInstrument['instrument_type']): string {
             <span v-if="marketJob.result.execution_mode === 'process_pool_staging'">执行模式 {{ marketJob.result.worker_count ?? 0 }} 进程分片</span>
             <span v-if="marketJob.result.staged_rows !== undefined">暂存 {{ marketJob.result.staged_rows }} 根</span>
             <span v-if="marketJob.result.merged_rows !== undefined">合并 {{ marketJob.result.merged_rows }} 根</span>
-            <span>证券列表 {{ marketJob.result.listed_instruments ?? marketJob.result.total_candidates ?? marketJob.result.total_targets ?? 0 }}</span><span>新增标的 {{ marketJob.result.new_instruments ?? 0 }}</span><span>更新标的 {{ marketJob.result.updated_files ?? marketJob.result.completed ?? 0 }}</span><span>写入 K 线 {{ marketJob.result.written_bars ?? marketJob.result.rows ?? 0 }}</span><span>无变化 {{ marketJob.result.unchanged_files ?? marketJob.result.skipped ?? 0 }}</span><span v-if="marketJob.result.actual_start || marketJob.result.actual_end">实际覆盖 {{ marketJob.result.actual_start ?? '—' }} → {{ marketJob.result.actual_end ?? '—' }}</span>
+            <span>证券列表 {{ marketJob.result.listed_instruments ?? marketJob.result.total_candidates ?? marketJob.result.total_targets ?? 0 }}</span><span>新增标的 {{ marketJob.result.new_instruments ?? 0 }}</span><span>更新标的 {{ marketJob.result.updated_files ?? marketJob.result.completed ?? 0 }}</span><span>写入 K 线 {{ marketJob.result.written_bars ?? marketJob.result.rows ?? 0 }}</span><span>无变化 {{ marketJob.result.unchanged_files ?? marketJob.result.skipped ?? 0 }}</span><span v-if="marketJob.result.actual_start || marketJob.result.actual_end">实际覆盖 {{ marketJob.result.actual_start ?? '—' }} → {{ marketJob.result.actual_end ?? '—' }}</span><span v-if="marketJob.result.skipped_current" :title="`本交易日（${marketJob.result.covered_session ?? '—'}）已经有已收盘日线的标的，一只请求都没发`">已覆盖本交易日 {{ marketJob.result.skipped_current }} 只</span>
             <span v-if="catalogCountsText">分类 {{ catalogCountsText }}</span>
             <span :class="{ negative: (marketJob.result.errors ?? 0) > 0 }">失败 {{ marketJob.result.errors ?? 0 }}</span>
           </div>

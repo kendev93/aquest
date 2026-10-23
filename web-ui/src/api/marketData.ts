@@ -109,12 +109,24 @@ export async function createLocalImport(payload: {
   return response.data
 }
 
+/** 点「同步行情」的两种结果：建了任务（有 job_id），或后端判定不用下载（skipped）。 */
+export interface MarketSyncSubmit {
+  job_id: string | null
+  status: string
+  skipped?: boolean
+  session?: string | null
+  instruments?: number | null
+  synced_at?: string | null
+}
+
 export async function createOnlineSync(payload: {
   universe?: 'all' | 'sh' | 'sz'
   instrument_types?: InstrumentType[]
   boards?: InstrumentBoard[]
-} = {}): Promise<{ job_id: string; status: string }> {
-  const response = await request<{ data: { job_id: string; status: string } }>(
+  /** 绕过「本交易日已覆盖」的判定，强制把这个范围重新下一遍。 */
+  force?: boolean
+} = {}): Promise<MarketSyncSubmit> {
+  const response = await request<{ data: MarketSyncSubmit }>(
     `${API_BASE}/sync-online`,
     { method: 'POST', body: JSON.stringify(payload) },
   )

@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime
 from inspect import Parameter, signature
+from zoneinfo import ZoneInfo
 
 import duckdb
 from fastapi import APIRouter, HTTPException, Request, status
@@ -26,6 +28,12 @@ from aquest.market_data.auto_sync import (
     MARKET_SYNC_EXCLUSIVE_GROUP,
 )
 from aquest.market_data.store import MarketDataStoreError
+from aquest.market_data.sync_session import (
+    latest_completed_session,
+    read_synced_session,
+    refresh_calendar_once_per_day,
+    sync_scope_fingerprint,
+)
 from aquest.screening.jobs import (
     ActiveJobConflictError,
     ProgressReporter,
@@ -38,6 +46,7 @@ from ...schemas import MarketRefreshRequest, MarketSyncRequest
 from ._shared import (
     MarketSyncService,
     _invalidate_indicator_cache,
+    _market_status,
     _reject_duplicate_market_job,
     _runner,
     _service,
@@ -133,6 +142,11 @@ def _create_sync_job(
         return bool(job_id_holder[0]) and runner.is_cancel_requested(job_id_holder[0])
 
     config = _sync_config(payload, prefer_store_targets=False)
+    # 全量回填与重刷是显式要求「把这段整个下回来」，force 是用户自己绕过闸门，都不拦。
+    if not reset and not payload.full_history and not payload.force:
+        already_covered = _already_covered_session(request, config)
+        if already_covered is not None:
+            return JSONResponse(status_code=200, content={"data": already_covered})
 
     def run_sync(progress: ProgressReporter) -> dict[str, object]:
         reset_codes: tuple[str, ...] = ()
@@ -248,6 +262,57 @@ def _empty_after_refresh(request: Request, codes: tuple[str, ...]) -> list[str]:
         return list(_store(request).health.codes_without_bars(codes))[:_EMPTY_REPORT_LIMIT]
     except (MarketDataStoreError, duckdb.Error, OSError, RuntimeError):
         return []
+
+
+#: 上海时区：交易日历与收盘时点都按交易所当地时刻判定。
+_SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _already_covered_session(
+    request: Request,
+    config: MarketSyncConfig,
+) -> dict[str, object] | None:
+    """本地已经覆盖本交易日时给前端的答复；还需要下载时返回 None（照常建任务）。
+
+    判据两条，缺一不可：交易日历说今天（或最近一个该收盘的交易日）已经有行情可下，且这个
+    下载范围在同步记号里被记为"已经下到了那一天、且没有失败标的"。日历判不出今天是不是交易日
+    时一律放行下载——判不出来就该多下一轮，而不是少下一轮。
+    """
+
+    store = _store(request)
+    fetcher = getattr(_service(request), "fetch_trading_calendar", None)
+    now = datetime.now(_SHANGHAI_TZ)
+    # 每天最多取一次日历，一次请求；调度器没跑到（服务刚重启）时这里就是当天第一次。
+    refresh_calendar_once_per_day(store, fetcher, now=now)
+    session = latest_completed_session(store, now=now)
+    if session is None:
+        return None
+    status = _market_status(request)
+    if not status.data_end or date.fromisoformat(status.data_end[:10]) < session:
+        # 记号之外还要看库本身：数据被清过或没落进去时，记号再新也不算覆盖。
+        return None
+    scope = sync_scope_fingerprint(
+        universe=config.universe,
+        provider=config.provider,
+        instrument_types=config.instrument_types,
+        boards=config.boards,
+    )
+    stamp = read_synced_session(store, scope)
+    if stamp is None or not stamp.usable_for(session=session, scope=scope):
+        return None
+    if stamp.instruments != status.instrument_count:
+        # 记号只能说明「那个范围跑过一轮」，管不了记号之后库里又多了标的：本地导入或
+        # 刚入库的新票没有那天的数据，必须放行下载，否则它们永远补不上。
+        return None
+    return {
+        "job_id": None,
+        "status": "skipped",
+        "skipped": True,
+        "session": session.isoformat(),
+        "instruments": stamp.instruments,
+        "synced_at": stamp.finished_at.isoformat(),
+        "message": f"本地已覆盖 {session.isoformat()} 收盘，无需下载",
+    }
 
 
 def _sync_config(payload: MarketSyncRequest, *, prefer_store_targets: bool) -> MarketSyncConfig:

@@ -247,6 +247,57 @@ describe('MarketDataPage', () => {
     expect(wrapper.get('[data-testid="market-chart-empty"]').text()).toContain('请选择品种')
   })
 
+  it('says nothing was downloaded when the backend already covered this session', async () => {
+    // 后端的回答是「不用下载」：没有 job_id，也就不该有进度面板、不该轮询任务。
+    vi.mocked(marketApi.createOnlineSync).mockResolvedValue({
+      job_id: null,
+      status: 'skipped',
+      skipped: true,
+      session: '2026-10-22',
+      synced_at: '2026-10-22T18:40:00+08:00',
+    })
+    const wrapper = mountPage()
+    await flushPromises()
+
+    await wrapper.get('[data-testid="market-sync-online"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="market-sync-notice"]').text())
+      .toContain('本地已覆盖 2026-10-22 收盘')
+    expect(wrapper.find('[data-testid="market-data-progress"]').exists()).toBe(false)
+    expect(marketApi.getMarketDataJob).not.toHaveBeenCalled()
+    // 提示不是错误：不能借用红色告警条，否则"什么都没做"看着像失败了。
+    expect(wrapper.find('[data-testid="market-data-message"]').exists()).toBe(false)
+  })
+
+  it('only bypasses the already-covered check when the user asks to force it', async () => {
+    vi.mocked(marketApi.createOnlineSync).mockResolvedValue({ job_id: 'sync-force', status: 'queued' })
+    vi.mocked(marketApi.getMarketDataJob).mockResolvedValue({
+      job_id: 'sync-force', status: 'completed', progress: 1, total_candidates: 1,
+      total_scanned: 1, errors: 0, error: null, result: { source: 'online', written_bars: 1 },
+    })
+    const wrapper = mountPage()
+    await flushPromises()
+
+    // 默认不强制——同一次点击第二次按下去就该被闸门挡回来。
+    await wrapper.get('[data-testid="market-sync-online"]').trigger('click')
+    await flushPromises()
+    expect(marketApi.createOnlineSync).toHaveBeenLastCalledWith({
+      universe: 'all',
+      instrument_types: ['stock'],
+      force: false,
+    })
+
+    await wrapper.get('[data-testid="market-sync-force"]').setValue(true)
+    await wrapper.get('[data-testid="market-sync-online"]').trigger('click')
+    await flushPromises()
+    expect(marketApi.createOnlineSync).toHaveBeenLastCalledWith({
+      universe: 'all',
+      instrument_types: ['stock'],
+      force: true,
+    })
+  })
+
   it('uses one-click sync to update online data without importing local files', async () => {
     vi.mocked(marketApi.createOnlineSync).mockResolvedValue({ job_id: 'sync-1', status: 'queued' })
     vi.mocked(marketApi.getMarketDataJob).mockResolvedValue({
@@ -268,6 +319,7 @@ describe('MarketDataPage', () => {
     expect(marketApi.createOnlineSync).toHaveBeenCalledWith({
       universe: 'all',
       instrument_types: ['stock'],
+      force: false,
     })
     expect(wrapper.get('[data-testid="market-data-progress"]').text()).not.toContain('文件导入')
     expect(wrapper.get('[data-testid="market-data-progress"]').text()).toContain('更新标的 1')
@@ -322,6 +374,7 @@ describe('MarketDataPage', () => {
       universe: 'all',
       instrument_types: ['stock'],
       boards: ['main'],
+      force: false,
     })
   })
 

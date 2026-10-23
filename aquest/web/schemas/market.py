@@ -60,6 +60,9 @@ class MarketSyncRequest(BaseModel):
     instrument_types: list[InstrumentType] | None = Field(default=None, max_length=1)
     boards: list[InstrumentBoard] | None = Field(default=None, max_length=7)
     full_history: bool = False
+    # 本地已经覆盖本交易日时，同步会被直接挡回来（不发请求）。这个开关用来绕过那道闸门：
+    # 除权修正、把上次失败的那几只补回来，都得显式要求重下。
+    force: bool = False
     # 指标预计算按自然年分批执行，这里决定往前算几年（None = 用服务端默认值）。
     precompute_years: int | None = Field(default=None, ge=1, le=30)
     # 只补算缓存缺失或已过期的标的，而不是整个 universe 重算一遍。

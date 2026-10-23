@@ -61,6 +61,10 @@ export interface MarketSyncResult {
   worker_count?: number
   staged_rows?: number
   merged_rows?: number
+  /** 这一轮按哪个交易日裁剪下载计划；判不出今天是不是交易日时为 null。 */
+  covered_session?: string | null
+  /** 因为「本交易日已经有已收盘日线」而一只请求都没发的标的数。 */
+  skipped_current?: number
   stage_files?: string[]
   download_seconds?: number
   merge_seconds?: number

@@ -256,12 +256,16 @@ def test_refresh_requires_explicit_confirmation(tmp_path: Path) -> None:
 
 
 def test_refresh_rejects_unknown_fields(tmp_path: Path) -> None:
-    """extra=forbid：拼错的字段名要被拒，不能悄悄按默认值刷一遍全市场。"""
+    """extra=forbid：拼错的字段名要被拒，不能悄悄按默认值刷一遍全市场。
+
+    ``forced`` 故意写成一个真不存在的名字——``force`` 已经是在线同步的正式字段
+    （绕过「本交易日已覆盖就不下载」的闸门），拿它当拼错的例子会测不到 forbid。
+    """
 
     with _client(tmp_path, {}) as (client, _service):
         response = client.post(
             "/api/v1/market-data/refresh",
-            json={"universe": "all", "confirm": True, "force": True},
+            json={"universe": "all", "confirm": True, "forced": True},
         )
 
         assert response.status_code == 422
