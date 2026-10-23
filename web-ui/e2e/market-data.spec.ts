@@ -70,7 +70,8 @@ test('user can start a market-data sync', async ({ page }) => {
   await expect(page.getByTestId('market-data-progress')).toContainText('写入 K 线 100')
   await expect(page.getByTestId('market-data-progress')).not.toContainText('eastmoney')
   // 同步把证券类型一起带过去（勾了 ETF 也能同步），并且不再发那个无人消费的 bars。
-  expect(syncRequest).toEqual({ universe: 'all', instrument_types: ['stock'] })
+  // force 常态为 false：它是绕过「本交易日已覆盖就不下载」那道闸门的开关，关着才走判定。
+  expect(syncRequest).toEqual({ universe: 'all', instrument_types: ['stock'], force: false })
 })
 
 test('user can see and cancel an active market-data job', async ({ page }) => {
