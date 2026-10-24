@@ -10,9 +10,15 @@ from typing import Protocol, cast
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
+from aquest.concurrency import HEAVY_RESEARCH_EXCLUSIVE_GROUP
 from aquest.market_data.models import DataStoreStatus
 from aquest.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
-from aquest.screening.jobs import JobState, ScreenJobRunner, TaskUserError
+from aquest.screening.jobs import (
+    ActiveJobConflictError,
+    JobState,
+    ScreenJobRunner,
+    TaskUserError,
+)
 from aquest.strategy_fitness.models import StrategyFitnessConfig, StrategyFitnessReport
 from aquest.strategy_fitness.service import (
     StrategyFitnessProgressCallback,
@@ -110,13 +116,20 @@ def create_strategy_fitness(
             return result_payload
 
         job_id = _runner(request).submit_callable(
-            run_fitness, description="策略适配性评估", job_id=job_id
+            run_fitness,
+            description="策略适配性评估",
+            job_id=job_id,
+            exclusive_group=HEAVY_RESEARCH_EXCLUSIVE_GROUP,
         )
     except ValueError as exc:
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             content={"error": {"code": "validation_error", "message": str(exc)}},
         )
+    except ActiveJobConflictError as exc:
+        # 它是 RuntimeError 的子类，落到下面的兜底会变成 503「执行器暂不可用」；
+        # 重活排队冲突要回 409，和其他路由保持一致。
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail="任务执行器暂不可用") from exc
     return JSONResponse(

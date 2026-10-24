@@ -1193,14 +1193,19 @@ SCHEMA_VERSION**——bump 会让每个老库先整库备份一份（4.6GB），
 本地 runner 对非预期异常本来就会换成固定安全文案，策略 worker 侧的错误文本是自家代码生成的
 且截到 500 字，逐案例重新分类只会引入新的误判。
 
-### 10.3 缺全局并发闸门，跨任务族的重活会叠加跑满 executor
+### 10.3 缺全局并发闸门，跨任务族的重活会叠加跑满 executor — ✅ 后台任务已修（2026-10-24）
 
-`exclusive_group` 只存在于 `condition_research.py:166`、`individual_research.py:113`、
-`strategies.py:314`、`market_data/*`；**缺于** `portfolio_backtest.py:154`、`factor_test.py`、
-`factor_attribution.py`、`strategy_fitness.py`、`swing_research.py`、`instrument_lab.py`。
-`concurrency.py:8` 的 `MAX_WORKERS=8` 全站共享，而资源预检只对单任务做比较。
+`MAX_WORKERS=8` 全站共享，原先 `exclusive_group` 只覆盖 5 个 router 族，资源预检又只按单任务算，
+`portfolio_backtest` / `factor_test` / `factor_attribution` / `strategy_fitness` / `formula_screen`
+互不设防，两页同时点就把 8 个 worker 和内存一起占满。
 
-单项配置的预算不能证明并发组合安全；并发峰值未重测。
+现在所有后台研究任务共用 `HEAVY_RESEARCH_EXCLUSIVE_GROUP`（`aquest/concurrency.py`），第二个直接
+409 并点名在跑的那个任务；五个原先没有闸门的路由补齐了 `ActiveJobConflictError → 409` 的映射
+（它继承 `RuntimeError`，不显式接住会落成 503「执行器暂不可用」）。行情同步与策略跟踪保留各自的
+互斥组：它们是数据写入，不该被一次回测挡住。
+
+**仍未覆盖**：`swing_research` 与 `instrument_lab` 在请求线程里同步算（SSE），不占 executor，也就
+不受互斥组约束；要挡得住得再加一层进程内信号量。并发峰值仍未重测。
 
 ### 10.4 strategy_discovery 快照构建的时间预算
 
@@ -1208,14 +1213,22 @@ SCHEMA_VERSION**——bump 会让每个老库先整库备份一份（4.6GB），
 带 `achieved_fidelity` 且 `qualified=false`，不进正式榜单）。**剩余待定**：快照构建的时间预算
 仍待产品 / 作业预算口径决定，当前不计入搜索 `timeout_seconds`。
 
-### 10.5 strategy_pool 多副本调度与写入串行性
+### 10.5 strategy_pool 多副本调度与写入串行性 — 部分已修（2026-10-24）
 
-三处都没有跨进程保护：
+原记录的三处：
 
-- `strategy_pool/tracking_scheduler.py:33-94`：进程内 `_WRITE_LOCK` + SELECT→INSERT 之间**无 DB 唯一约束**，
-  且它是唯一没挂在 `owns_runner` 门禁下的 scheduler（`web/app.py:302-312`）；
-- `store.py:214-219`：reset 与其它写入没整体串行，晚到的 upsert 会把刚删空的条目写回并留下孤儿版本；
-- `tracking_store.py:238-263`：`save_snapshot` 的校验与 UPDATE 是两条独立 SQL，**无事务包裹**。
+- `strategy_pool/tracking_scheduler.py`：进程内 `_WRITE_LOCK` + SELECT→INSERT 之间没有 DB 唯一约束；
+  且它是唯一没挂在 `owns_runner` 门禁下的 scheduler。
+- `store.py`：reset 与其它写入没整体串行，晚到的 upsert 会把刚删空的条目写回。
+- `tracking_store.py`：`save_snapshot` 的校验与 UPDATE 是两条独立 SQL。
+
+**已修**：三套后台调度（策略跟踪、池跟踪、自动同步）都挂到了 `owns_runner` 下，嵌入方传了执行器
+时不再重复起一套；`save_snapshot` 改走 `write_transaction()`，与批量版 `save_snapshots` 对齐。
+
+**剩余的判据**：真正的「多副本并发写」在这个部署里不会发生——DuckDB 对同一个库只允许一个写进程，
+第二个会直接拿不到写锁；库内的写又都套在进程内 `_WRITE_LOCK` 上。所以 SELECT→INSERT 的唯一约束
+和 reset 与 upsert 的先后，只有在换成多写者存储（或把状态表拆到独立库、放开多进程写）时才需要
+补——正好是 #37 分库要一起设计的部分。
 
 **附带观察（已核实为误报，2026-10-24）**：`get_or_compute` 只在 `full_history` 时才调
 `_persistent_put_many`，窗口请求既不写内存也不落库
@@ -1223,14 +1236,11 @@ SCHEMA_VERSION**——bump 会让每个老库先整库备份一份（4.6GB），
 读路径还会用 `bar_count` 把长度对不上的旧条目判成未命中
 （`test_partial_poisoned_persistent_entry_is_rejected`）。保护从 v0.1.0 起就在，无需改动。
 
-### 10.6 当天的行情同步会压掉当晚的自动同步（待修，2026-10-24 发现）
+### 10.6 当天的行情同步会压掉当晚的自动同步 — ✅ 已修（2026-10-24）
 
-`market_data/auto_sync.py` 的 `auto_sync_due()` 只比日期：只要今天发生过一次在线同步（手动点击
-也算），当晚 18:30 后的自动调度就不再发起。于是「早上点一次同步 → 当晚那根日线不下载 → 第二天
-才补上」，和日历节奏那个问题是同一个症状、不同入口。
+`auto_sync_due()` 只比日期：当天发生过一次在线同步（手动点击也算），当晚 18:30 后的自动调度
+就不再发起，日线要第二天才补上。
 
-判据应该换成「最近一个已发布交易日是否已经完整同步」：自动同步本来就已经算出
-`latest_completed_session()`，但比较对象用的是 `status().data_end`，而它包含盘中临时行
-（15:00 手动同步后 `data_end` 已等于当天），直接拿它当「已完成」会跳过临时行的收盘重写。
-**不能简单改成 `data_end >= session`**，需要一个「已完成日线的最后日期」判据（可复用
-`last_completed_dates()` 或同步盖章 `read_synced_session()`）。
+判据已换成「最近一个已发布交易日是否已经完整同步」：看每只标的的**已完成**日线
+（`session_fully_downloaded`），不看 `data_end`——后者含盘中临时行，15:00 手动同步后已经等于
+当天，拿它当已完成会跳过收盘那根的重写。日历判不出交易日时仍退回自然日口径去重。

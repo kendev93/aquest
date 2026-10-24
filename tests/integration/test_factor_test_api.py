@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -180,3 +181,30 @@ def test_out_of_range_horizon_is_rejected(tmp_path: Path) -> None:
         payload = _payload()
         payload["horizon"] = 0
         assert client.post("/api/v1/factor-test", json=payload).status_code == 422
+
+
+def test_a_second_heavy_job_is_rejected_while_one_is_still_running(tmp_path: Path) -> None:
+    """全站重活排一条队：第一个还没跑完时第二个直接 409，而不是叠着一起跑。"""
+
+    release = threading.Event()
+
+    class BlockingService(FakeFactorTestService):
+        def run(self, config, progress_callback=None):
+            release.wait(timeout=10)
+            return _result()
+
+    (tmp_path / "vipdoc").mkdir()
+    with TestClient(
+        create_app(
+            engine=EmptyEngine(),
+            factor_test_service=BlockingService(),
+            market_data_store=DuckDbMarketDataStore(tmp_path / "market.duckdb"),
+        )
+    ) as client:
+        first = client.post("/api/v1/factor-test", json=_payload())
+        assert first.status_code == 202
+
+        second = client.post("/api/v1/factor-test", json=_payload())
+        assert second.status_code == 409
+        assert "已有任务正在运行（因子检验）" in second.json()["error"]["message"]
+        release.set()

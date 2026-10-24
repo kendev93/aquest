@@ -6,6 +6,9 @@ import os
 from pathlib import Path
 
 MAX_WORKERS = 8
+#: 重计算任务的全局互斥组。全站共用同一个执行器，两个重活叠加时各自的 8 路池一起排队，
+#: 内存预检却只按单个任务的规模算——跨任务族也要排成一条队。
+HEAVY_RESEARCH_EXCLUSIVE_GROUP = "heavy-research"
 _CGROUP_ROOT = Path("/sys/fs/cgroup")
 
 

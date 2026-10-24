@@ -9,6 +9,7 @@ from typing import Protocol, cast
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
+from aquest.concurrency import HEAVY_RESEARCH_EXCLUSIVE_GROUP
 from aquest.condition_research.models import ConditionResearchConfig
 from aquest.condition_research.resources import (
     ResearchResourceBudgetError,
@@ -164,7 +165,7 @@ def create_condition_research(
             description="买卖条件研究",
             job_id=job_id,
             worker_count=1,
-            exclusive_group="condition-research",
+            exclusive_group=HEAVY_RESEARCH_EXCLUSIVE_GROUP,
         )
     except ValueError as exc:
         return JSONResponse(

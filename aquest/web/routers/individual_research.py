@@ -8,6 +8,7 @@ from typing import Literal, cast
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
+from aquest.concurrency import HEAVY_RESEARCH_EXCLUSIVE_GROUP
 from aquest.individual_research.service import IndividualStockResearchService
 from aquest.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
 from aquest.screening.jobs import (
@@ -110,7 +111,7 @@ def create_individual_research(
             description=JOB_DESCRIPTION,
             job_id=job_id,
             worker_count=1,
-            exclusive_group="individual-research",
+            exclusive_group=HEAVY_RESEARCH_EXCLUSIVE_GROUP,
         )
     except ValueError as exc:
         return JSONResponse(

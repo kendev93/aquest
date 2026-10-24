@@ -140,15 +140,39 @@ class ScreenJobRunner:
         self._max_results = max_results
         self._shutdown = False
 
-    def submit(self, config: ScanConfig) -> str:
+    def submit(self, config: ScanConfig, *, exclusive_group: str | None = None) -> str:
         job_id = uuid.uuid4().hex
         with self._lock:
             if self._shutdown:
                 raise RuntimeError("任务执行器已关闭")
-            self._jobs[job_id] = JobState(job_id=job_id, worker_count=config.workers)
+            self._ensure_group_free_locked(exclusive_group)
+            self._jobs[job_id] = JobState(
+                job_id=job_id,
+                worker_count=config.workers,
+                exclusive_group=exclusive_group,
+            )
             self._executor.submit(self._run, job_id, config)
             self._evict_if_needed_locked()
         return job_id
+
+    def _ensure_group_free_locked(self, exclusive_group: str | None) -> None:
+        """互斥组里已经有任务在排队或运行就拒绝；消息里带上它，用户才知道在等谁。"""
+
+        if exclusive_group is None:
+            return
+        blocking = next(
+            (
+                state
+                for state in self._jobs.values()
+                if state.status in {"queued", "running"}
+                and state.exclusive_group == exclusive_group
+            ),
+            None,
+        )
+        if blocking is not None:
+            raise ActiveJobConflictError(
+                f"已有任务正在运行（{blocking.description or '未命名任务'}），请等它结束再发起"
+            )
 
     def get(self, job_id: str) -> JobState | None:
         with self._lock:
@@ -246,11 +270,7 @@ class ScreenJobRunner:
         with self._lock:
             if self._shutdown:
                 raise RuntimeError("任务执行器已关闭")
-            if exclusive_group is not None and any(
-                state.status in {"queued", "running"} and state.exclusive_group == exclusive_group
-                for state in self._jobs.values()
-            ):
-                raise ActiveJobConflictError("已有任务正在运行")
+            self._ensure_group_free_locked(exclusive_group)
             self._jobs[resolved_job_id] = JobState(
                 job_id=resolved_job_id,
                 description=description,

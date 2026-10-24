@@ -11,11 +11,15 @@ import duckdb
 from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response
 
+from aquest.concurrency import HEAVY_RESEARCH_EXCLUSIVE_GROUP
 from aquest.formulas.custom import FormulaParseError, parse_formula
 from aquest.formulas.registry import FORMULA_REGISTRY
 from aquest.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
 from aquest.screening.export import report_to_csv, report_to_json
-from aquest.screening.jobs import ScreenJobRunner
+from aquest.screening.jobs import (
+    ActiveJobConflictError,
+    ScreenJobRunner,
+)
 from aquest.screening.models import ScanReport
 from aquest.strategy_discovery.catalog import default_indicator_catalog
 from aquest.web.app_errors import TaskFailedError
@@ -136,12 +140,18 @@ def create_job(payload: FormulaScreenRequest, request: Request) -> JSONResponse:
         if payload.universe == "custom" and payload.universe_file:
             if not Path(payload.universe_file).expanduser().is_file():
                 raise ValueError(f"自定义股票列表文件不存在: {payload.universe_file}")
-        job_id = _runner(request).submit(payload.to_config())
+        job_id = _runner(request).submit(
+            payload.to_config(), exclusive_group=HEAVY_RESEARCH_EXCLUSIVE_GROUP
+        )
     except ValueError as exc:
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             content={"error": {"code": "validation_error", "message": str(exc)}},
         )
+    except ActiveJobConflictError as exc:
+        # 它是 RuntimeError 的子类，落到下面的兜底会变成 503「执行器暂不可用」；
+        # 重活排队冲突要回 409，和其他路由保持一致。
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail="任务执行器暂不可用") from exc
     return JSONResponse(
