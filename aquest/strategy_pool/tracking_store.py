@@ -501,7 +501,9 @@ class PoolTrackingStore:
         return json.loads(zlib.decompress(bytes(row[0]))) if row and row[0] else None
 
     def save_snapshot(self, version_id: str, fingerprint: str, snapshot: Mapping[str, Any]) -> bool:
-        with _WRITE_LOCK, self.store._connect() as connection:
+        # 校验与写入要在同一个事务里：分成两条独立语句时，中间被别的写者插进来就可能
+        # 把「已经不是当前版本」的快照写回去。口径与 save_snapshots 的批量版一致。
+        with _WRITE_LOCK, self.store.write_transaction() as connection:
             row = connection.execute(
                 "SELECT signature,is_current,summary_json FROM pool_tracking_versions "
                 "WHERE version_id=?",

@@ -329,7 +329,9 @@ def create_app(
                 additional_busy_check=has_active_strategy_jobs,
             )
             maintenance_task = asyncio.create_task(maintenance_scheduler.run())
-        if selected_auto_sync_enabled:
+        # 后台调度只由「自己持有执行器」的那个进程起：嵌入方传了 runner 时调度归它管，
+        # 同一个库上再起一套只会在同一交易日重复提交。
+        if owns_runner and selected_auto_sync_enabled:
             scheduler = AutomaticMarketSyncScheduler(
                 store=selected_store,
                 runner=selected_runner,
@@ -343,7 +345,7 @@ def create_app(
                     on_job_submitted=lambda job_id: setattr(app.state, "auto_sync_job_id", job_id)
                 )
             )
-        if selected_tracking_enabled:
+        if owns_runner and selected_tracking_enabled:
             tracking_task = asyncio.create_task(
                 StrategyTrackingScheduler(
                     store=selected_store,
@@ -352,11 +354,14 @@ def create_app(
                     interval_seconds=selected_tracking_interval,
                 ).run()
             )
-        if pool_tracking_enabled is True or (
-            pool_tracking_enabled is None
-            and auto_sync_enabled is not False
-            and os.getenv("AQUEST_POOL_TRACKING_ENABLED", "1").strip().lower()
-            not in {"0", "false", "off"}
+        if owns_runner and (
+            pool_tracking_enabled is True
+            or (
+                pool_tracking_enabled is None
+                and auto_sync_enabled is not False
+                and os.getenv("AQUEST_POOL_TRACKING_ENABLED", "1").strip().lower()
+                not in {"0", "false", "off"}
+            )
         ):
             pool_tracking_task = asyncio.create_task(
                 PoolTrackingScheduler(
