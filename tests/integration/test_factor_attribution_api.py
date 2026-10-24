@@ -171,7 +171,13 @@ def test_a_service_complaint_fails_the_job_with_its_message(tmp_path: Path) -> N
         state = wait_for_done(client, job_id, expect="failed")
         assert "没有成交明细" in (state.get("error") or "")
         results = client.get(f"/api/v1/factor-attribution/{job_id}/results")
-        assert results.status_code == 500
+        # 任务跑完但失败不是「服务器坏了」：结果接口回 409 + task_failed，和「尚未完成」
+        # 用同一个语义层级，前端与告警才不会把它当服务故障。
+        assert results.status_code == 409
+        assert results.json()["error"] == {
+            "code": "task_failed",
+            "message": "这条回测记录没有成交明细，无法归因",
+        }
 
 
 def test_sources_offer_only_history_kinds_that_carry_trades(tmp_path: Path) -> None:

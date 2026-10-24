@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse
 from aquest.factor_test.models import FactorTestConfig
 from aquest.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
 from aquest.screening.jobs import JobState, ScreenJobRunner, TaskUserError
+from aquest.web.app_errors import TaskFailedError
 
 from ..backtest_history import save_completed_backtest_history, utc_now
 from ..date_ranges import resolve_date_range
@@ -157,7 +158,7 @@ def factor_test_status(job_id: str, request: Request) -> dict[str, object]:
 def factor_test_results(job_id: str, request: Request) -> dict[str, object]:
     state = _state_or_404(job_id, request)
     if state.status == "failed":
-        raise HTTPException(status_code=500, detail=state.error or "因子检验任务失败")
+        raise TaskFailedError(state.error or "因子检验任务失败")
     if state.status != "completed" or state.result_payload is None:
         raise HTTPException(status_code=409, detail="因子检验尚未完成")
     return {"data": state.result_payload}

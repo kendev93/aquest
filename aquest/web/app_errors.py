@@ -15,7 +15,27 @@ from fastapi.responses import JSONResponse
 logger = logging.getLogger(__name__)
 
 
+class TaskFailedError(Exception):
+    """后台任务已经结束但失败了：结果永远不会有。
+
+    它不是「服务器坏了」——任务跑完了，原因写在任务自己的错误里，所以统一回 409；
+    真正的服务故障走请求链路上的 5xx。``message`` 由调用方给出（任务错误或该路由的
+    兜底文案），``app_errors`` 会把它放进 ``{"error": {"code": "task_failed"}}``。
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
 def install_error_handlers(app: FastAPI) -> None:
+    @app.exception_handler(TaskFailedError)
+    async def task_failed(_: Request, exc: TaskFailedError) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content={"error": {"code": "task_failed", "message": exc.message}},
+        )
+
     @app.exception_handler(RequestValidationError)
     async def request_validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
         messages = [error.get("msg", "请求参数无效") for error in exc.errors()]

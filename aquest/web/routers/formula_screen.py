@@ -18,6 +18,7 @@ from aquest.screening.export import report_to_csv, report_to_json
 from aquest.screening.jobs import ScreenJobRunner
 from aquest.screening.models import ScanReport
 from aquest.strategy_discovery.catalog import default_indicator_catalog
+from aquest.web.app_errors import TaskFailedError
 
 from ..schemas import (
     CustomFormulaParseRequest,
@@ -163,7 +164,7 @@ def _completed_report(job_id: str, request: Request) -> ScanReport:
         raise HTTPException(status_code=404, detail="任务不存在或已过期")
     if state.status != "completed" or state.report is None:
         if state.status == "failed":
-            raise HTTPException(status_code=500, detail="扫描任务失败，请检查任务状态中的错误提示")
+            raise TaskFailedError("扫描任务失败，请检查任务状态中的错误提示")
         raise HTTPException(status_code=409, detail="扫描尚未完成")
     return state.report
 

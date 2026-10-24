@@ -18,6 +18,7 @@ from aquest.strategy_discovery.resources import (
     DiscoveryResourceEstimate,
 )
 from aquest.strategy_discovery.service import StrategyDiscoveryService
+from aquest.web.app_errors import TaskFailedError
 
 from ..date_ranges import resolve_date_range
 from ..schemas import (
@@ -467,7 +468,7 @@ def strategy_replay_status(job_id: str, request: Request) -> dict[str, object]:
 def strategy_replay_results(job_id: str, request: Request) -> dict[str, object]:
     state = _replay_state_or_404(job_id, request)
     if state.get("status") == "failed":
-        raise HTTPException(status_code=500, detail=str(state.get("error") or "策略复核任务失败"))
+        raise TaskFailedError(str(state.get("error") or "策略复核任务失败"))
     if state.get("status") != "completed":
         raise HTTPException(status_code=409, detail="策略复核尚未完成")
     result = _backend(request).result(job_id)
@@ -518,7 +519,7 @@ def strategy_discovery_status(job_id: str, request: Request) -> dict[str, object
 def strategy_discovery_results(job_id: str, request: Request) -> dict[str, object]:
     state = _state_or_404(job_id, request)
     if state.get("status") == "failed":
-        raise HTTPException(status_code=500, detail=str(state.get("error") or "策略实验任务失败"))
+        raise TaskFailedError(str(state.get("error") or "策略实验任务失败"))
     if state.get("status") != "completed":
         raise HTTPException(status_code=409, detail="策略实验尚未完成")
     result = _backend(request).result(job_id)

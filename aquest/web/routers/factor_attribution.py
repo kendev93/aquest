@@ -19,6 +19,7 @@ from aquest.factor_attribution.models import FactorAttributionConfig
 from aquest.factor_attribution.service import TRADABLE_TYPES
 from aquest.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
 from aquest.screening.jobs import JobState, ScreenJobRunner, TaskUserError
+from aquest.web.app_errors import TaskFailedError
 
 from ..backtest_history import save_completed_backtest_history, utc_now
 from ..schemas import FactorAttributionRequest
@@ -151,7 +152,7 @@ def attribution_status(job_id: str, request: Request) -> dict[str, object]:
 def attribution_results(job_id: str, request: Request) -> dict[str, object]:
     state = _state_or_404(job_id, request)
     if state.status == "failed":
-        raise HTTPException(status_code=500, detail=state.error or "因子归因任务失败")
+        raise TaskFailedError(state.error or "因子归因任务失败")
     if state.status != "completed" or state.result_payload is None:
         raise HTTPException(status_code=409, detail="因子归因尚未完成")
     return {"data": state.result_payload}

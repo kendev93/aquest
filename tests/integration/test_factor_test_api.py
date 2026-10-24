@@ -88,14 +88,39 @@ def _result() -> dict[str, object]:
 
 
 class FakeFactorTestService:
-    def __init__(self) -> None:
+    def __init__(self, *, raise_message: str | None = None) -> None:
         self.configs: list[object] = []
+        self._raise_message = raise_message
 
     def run(self, config, progress_callback=None):
         self.configs.append(config)
+        if self._raise_message is not None:
+            raise ValueError(self._raise_message)
         if progress_callback:
             progress_callback(1, 1)
         return _result()
+
+
+def test_a_failed_job_result_is_a_conflict_not_a_server_error(tmp_path: Path) -> None:
+    """任务失败的 details 已在任务状态里给出，结果接口只负责说"没有结果"。"""
+
+    (tmp_path / "vipdoc").mkdir()
+    with TestClient(
+        create_app(
+            engine=EmptyEngine(),
+            factor_test_service=FakeFactorTestService(raise_message="因子检验窗口不足 20 个交易日"),
+            market_data_store=DuckDbMarketDataStore(tmp_path / "market.duckdb"),
+        )
+    ) as client:
+        job_id = client.post("/api/v1/factor-test", json=_payload()).json()["data"]["job_id"]
+        assert wait_for_done(client, job_id)["status"] == "failed"
+
+        results = client.get(f"/api/v1/factor-test/{job_id}/results")
+        assert results.status_code == 409
+        assert results.json()["error"] == {
+            "code": "task_failed",
+            "message": "因子检验窗口不足 20 个交易日",
+        }
 
 
 def test_factor_test_job_can_be_created_and_results_are_available(tmp_path: Path) -> None:

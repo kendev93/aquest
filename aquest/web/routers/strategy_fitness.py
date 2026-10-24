@@ -18,6 +18,7 @@ from aquest.strategy_fitness.service import (
     StrategyFitnessProgressCallback,
     StrategyFitnessService,
 )
+from aquest.web.app_errors import TaskFailedError
 
 from ..backtest_history import save_completed_backtest_history, utc_now
 from ..date_ranges import resolve_date_range
@@ -167,7 +168,7 @@ def strategy_fitness_status(job_id: str, request: Request) -> dict[str, object]:
 def strategy_fitness_results(job_id: str, request: Request) -> dict[str, object]:
     state = _state_or_404(job_id, request)
     if state.status == "failed":
-        raise HTTPException(status_code=500, detail=state.error or "策略适配性评估任务失败")
+        raise TaskFailedError(state.error or "策略适配性评估任务失败")
     if state.status != "completed" or state.result_payload is None:
         raise HTTPException(status_code=409, detail="策略适配性评估尚未完成")
     return {"data": state.result_payload}
