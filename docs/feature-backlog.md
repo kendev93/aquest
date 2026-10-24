@@ -1180,15 +1180,18 @@ SCHEMA_VERSION**——bump 会让每个老库先整库备份一份（4.6GB），
 - 待验证：用一组已退市证券 + 历史窗口核对 refs 与每日横截面；
 - 若证明退市证券从历史横截面缺席，再考虑用「窗口内出现过 bar」构建 universe，并披露每日有效横截面数。
 
-### 10.2 任务结果查询对失败状态返回 500
+### 10.2 任务结果查询对失败状态返回 500 — ✅ 已修（2026-10-24）
 
-`routers/strategy_discovery.py:470,521`、`factor_test.py:160`、`factor_attribution.py:154`、
-`strategy_fitness.py:170`、`formula_screen.py:166`、`condition_research.py:235`、
-`portfolio_backtest.py:228`（同一模板 8 处）。
+原来 8 处同一模板：任务跑完但 `failed` 时结果查询抛 500 + 任务错误文案，前端与告警分不清
+用户错误、资源冲突和服务故障。
 
-任务完成但 `failed` 时结果查询返回 500，前端与告警无法区分用户错误 / 资源冲突 / 服务故障。
-修法：**统一 409 + `error.code = "task_failed"`**，真正的服务故障才 500，并对非 `TaskUserError`
-文案脱敏。逐路由确认内部错误原文的暴露范围。
+现在 8 处统一 `raise TaskFailedError(...)`，由 `web/app_errors.py` 落成
+`409 + {"error": {"code": "task_failed", "message": ...}}`——和同一路由「尚未完成」用的 409
+同一层语义；真正的服务故障仍由异常处理给 5xx。
+
+**没做**：按 `TaskUserError` 再分 5xx。任务失败无论成因都已经结束，成因写在 `message` 里；
+本地 runner 对非预期异常本来就会换成固定安全文案，策略 worker 侧的错误文本是自家代码生成的
+且截到 500 字，逐案例重新分类只会引入新的误判。
 
 ### 10.3 缺全局并发闸门，跨任务族的重活会叠加跑满 executor
 
@@ -1214,7 +1217,20 @@ SCHEMA_VERSION**——bump 会让每个老库先整库备份一份（4.6GB），
 - `store.py:214-219`：reset 与其它写入没整体串行，晚到的 upsert 会把刚删空的条目写回并留下孤儿版本；
 - `tracking_store.py:238-263`：`save_snapshot` 的校验与 UPDATE 是两条独立 SQL，**无事务包裹**。
 
-**附带观察**：`indicators/cache.py:814-832` 内存层有 `full_history` 保护，但 `:1088-1131`
-`_persistent_put_many` 没有——任何以窗口 frame 调用 `get_or_compute`（默认 `persist=True`）都会
-落脏条目。现有两个调用方（`portfolio_backtest/context.py:499` 显式 `persist=False`、
-`backtest/service.py:319` 传全序列）恰好规避，**属尚未被触发的缺口**。
+**附带观察（已核实为误报，2026-10-24）**：`get_or_compute` 只在 `full_history` 时才调
+`_persistent_put_many`，窗口请求既不写内存也不落库
+（`test_partial_request_does_not_persist_or_poison_complete_history`，sqlite/duckdb 两个后端各跑一遍）；
+读路径还会用 `bar_count` 把长度对不上的旧条目判成未命中
+（`test_partial_poisoned_persistent_entry_is_rejected`）。保护从 v0.1.0 起就在，无需改动。
+
+### 10.6 当天的行情同步会压掉当晚的自动同步（待修，2026-10-24 发现）
+
+`market_data/auto_sync.py` 的 `auto_sync_due()` 只比日期：只要今天发生过一次在线同步（手动点击
+也算），当晚 18:30 后的自动调度就不再发起。于是「早上点一次同步 → 当晚那根日线不下载 → 第二天
+才补上」，和日历节奏那个问题是同一个症状、不同入口。
+
+判据应该换成「最近一个已发布交易日是否已经完整同步」：自动同步本来就已经算出
+`latest_completed_session()`，但比较对象用的是 `status().data_end`，而它包含盘中临时行
+（15:00 手动同步后 `data_end` 已等于当天），直接拿它当「已完成」会跳过临时行的收盘重写。
+**不能简单改成 `data_end >= session`**，需要一个「已完成日线的最后日期」判据（可复用
+`last_completed_dates()` 或同步盖章 `read_synced_session()`）。
