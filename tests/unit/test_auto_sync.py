@@ -370,6 +370,108 @@ def test_auto_sync_submits_one_online_refresh_per_day() -> None:
     assert payload["written_bars"] == 1
 
 
+def test_auto_sync_records_the_check_date_when_it_actually_downloads() -> None:
+    """提交下载的那天也要落下核对记号，但失败时必须清掉，退避后还能重试。
+
+    记号以前只在「本地已覆盖、无需下载」分支写，真正发起过下载的日子反而没有，状态接口
+    看起来像自动调度停在半个月前（2026-10-24 实测停在 10-10）。
+    """
+
+    now = [datetime(2026, 10, 9, 19, 0, tzinfo=SHANGHAI)]
+
+    class Store:
+        def __init__(self) -> None:
+            self.metadata: dict[str, str] = {}
+            self.data_end = "2026-10-08"
+            self.saved_calendar = None
+
+        def status(self):
+            return SimpleNamespace(
+                instrument_count=1,
+                bar_count=100,
+                data_end=self.data_end,
+                last_online_sync_at="2026-10-08T19:00:00+08:00",
+            )
+
+        def get_meta(self, key):
+            return self.metadata.get(key)
+
+        def set_meta(self, key, value):
+            self.metadata[key] = value
+
+        def save_market_trading_calendar(
+            self, trade_dates, *, source, coverage_start=None, coverage_end=None
+        ):
+            self.saved_calendar = (tuple(trade_dates), source, coverage_start, coverage_end)
+            return len(tuple(trade_dates))
+
+        def read_authoritative_trading_dates(self, start_date, end_date):
+            dates, _source, coverage_start, coverage_end = self.saved_calendar
+            if coverage_start > start_date or coverage_end < end_date:
+                raise ValueError("权威交易日历未覆盖完整日期范围")
+            return [item for item in dates if start_date <= item <= end_date]
+
+    class Runner:
+        def __init__(self) -> None:
+            self.submitted: list[str] = []
+            self.states: dict[str, SimpleNamespace] = {}
+
+        def has_active_jobs(self, descriptions):
+            del descriptions
+            return False
+
+        def get(self, job_id):
+            return self.states.get(job_id)
+
+        def is_cancel_requested(self, job_id):
+            del job_id
+            return False
+
+        def submit_callable(self, target, *, description, job_id, exclusive_group):
+            del target, description, exclusive_group
+            self.submitted.append(job_id)
+            self.states[job_id] = SimpleNamespace(status="queued", error=None)
+            return job_id
+
+    class Sync:
+        def fetch_trading_calendar(self, start_date, end_date, *, timeout):
+            del start_date, end_date, timeout
+            return (date(2026, 10, 8), date(2026, 10, 9))
+
+    store = Store()
+    runner = Runner()
+    scheduler = AutomaticMarketSyncScheduler(
+        store=store,
+        runner=runner,
+        market_sync=Sync(),
+        precomputer=object(),
+        clock=lambda: now[0],
+    )
+
+    job_id = scheduler.submit_if_due()
+    assert job_id is not None
+    assert store.metadata["last_auto_sync_check_date"] == "2026-10-09"
+    assert store.metadata["last_auto_sync_check_session"] == "2026-10-09"
+
+    # 同一天再检查：记号和队列里那条任务都挡住了，不能再发一遍。
+    assert scheduler.submit_if_due() is None
+    assert len(runner.submitted) == 1
+
+    # 失败：清掉核对记号，退避结束后按同一天重试。
+    runner.states[job_id] = SimpleNamespace(status="failed", error="上游限流")
+    now[0] = datetime(2026, 10, 9, 20, 0, tzinfo=SHANGHAI)
+    assert scheduler.submit_if_due() is not None
+    assert len(runner.submitted) == 2
+    assert store.metadata["last_auto_sync_check_date"] == "2026-10-09"
+
+    # 成功：记号留着，哪怕行情表还没更新，这一天也不会再发起第三次。
+    retried = runner.submitted[-1]
+    runner.states[retried] = SimpleNamespace(status="completed", error=None)
+    now[0] = datetime(2026, 10, 9, 20, 15, tzinfo=SHANGHAI)
+    assert scheduler.submit_if_due() is None
+    assert len(runner.submitted) == 2
+
+
 def test_auto_sync_invalidates_the_cache_and_precomputes_incrementally() -> None:
     """自动同步也要走手动同步那套：清内存缓存 + 增量 + 按行情末年锚定。
 

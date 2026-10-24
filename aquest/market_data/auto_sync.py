@@ -166,6 +166,10 @@ class AutomaticMarketSyncScheduler:
         # 全靠用户手点补行情）。
         refresh_calendar_when_stale(self._store, fetch_calendar, now=now)
         if not auto_sync_due(status.last_online_sync_at, now=now):
+            # 今天已经同步过（手动或自动都算）：调度这边无事可做，但「核对日」仍要记成今天。
+            # 只在真正需要下载的那条分支写记号的话，状态接口会一直停在最后一次下载的日子，
+            # 看起来像自动调度已经停了（2026-10-24 实测停在 10-10）。
+            self._note_check(today, _parse_date(status.data_end))
             return None
 
         get_meta = getattr(self._store, "get_meta", None)
@@ -188,8 +192,7 @@ class AutomaticMarketSyncScheduler:
             else:
                 local_data_end = _parse_date(status.data_end)
                 if local_data_end is not None and end_date <= local_data_end:
-                    self._store.set_meta("last_auto_sync_check_date", today.isoformat())
-                    self._store.set_meta("last_auto_sync_check_session", end_date.isoformat())
+                    self._note_check(today, end_date)
                     logger.info(
                         "自动行情同步跳过：本地行情已覆盖最近交易日 %s（核对日 %s）",
                         end_date,
@@ -210,6 +213,9 @@ class AutomaticMarketSyncScheduler:
             self._active_job_id = None
             self._note_failure("提交自动行情同步任务失败")
             raise
+        # 发起了下载也算「今天核对过」：这一段跑完要十几分钟，期间不该再被同一个判据
+        # 重新发起一次。任务失败时在 ``_settle_auto_job`` 里把这个记号清掉，退避后照旧重试。
+        self._note_check(today, end_date)
         logger.info("已提交每日自动行情同步任务: %s", job_id)
         return job_id
 
@@ -261,7 +267,32 @@ class AutomaticMarketSyncScheduler:
             return
         if state.status == "failed":
             self._note_failure("自动行情同步任务失败", error=state.error)
-        # cancelled 是用户主动停的，不算故障。
+            # 失败不该占住「今天已核对」：退避结束后还要能重新发起。
+            self._clear_check()
+        # cancelled 是用户主动停的，不算故障，也不重试：这一天就到此为止。
+
+    def _note_check(self, today: date, session: date | None) -> None:
+        """记下这一天的核对结果；记号只服务可观测量，写不进去不能影响调度。"""
+
+        set_meta = getattr(self._store, "set_meta", None)
+        if not callable(set_meta):
+            return
+        try:
+            set_meta("last_auto_sync_check_date", today.isoformat())
+            set_meta(
+                "last_auto_sync_check_session", session.isoformat() if session is not None else ""
+            )
+        except Exception:  # noqa: BLE001 - 可观测性失败不参与调度决策
+            logger.exception("写入自动行情同步核对记号失败")
+
+    def _clear_check(self) -> None:
+        set_meta = getattr(self._store, "set_meta", None)
+        if not callable(set_meta):
+            return
+        try:
+            set_meta("last_auto_sync_check_date", "")
+        except Exception:  # noqa: BLE001 - 同上
+            logger.exception("清除自动行情同步核对记号失败")
 
     def _note_failure(self, reason: str, *, error: str | None = None) -> None:
         self._failure_streak += 1
