@@ -408,6 +408,8 @@ def test_stage_plan_drops_instruments_already_covered_by_the_latest_session(
     # 9-12 不是交易日（日历只到 9-11），判据落在 9-11：600000 已经有了，不再问。
     assert plan.covered_session == "2026-09-11"
     assert plan.skipped_current == 1
+    # 进度文案的区间右端也收到 9-11：周六那天不会有任何一根日线要下。
+    assert plan.range_display_end == date(2026, 9, 11)
     assert {(target.market, target.code) for target in plan.targets} == {
         ("SZ", "000001"),  # 还差一天
         ("SH", "688001"),  # 只有盘中临时行，收盘后必须重下一次
@@ -432,6 +434,8 @@ def test_stage_plan_keeps_every_instrument_when_the_calendar_cannot_judge(
     assert plan.covered_session is None
     assert plan.skipped_current == 0
     assert len(plan.targets) == 3
+    # 判不出今天是不是交易日，区间右端就不许收——宁可写得宽，也不能藏掉真要下的那天。
+    assert plan.range_display_end is None
 
 
 def test_stage_plan_trims_nothing_for_a_full_history_download(tmp_path: Path) -> None:
@@ -446,6 +450,8 @@ def test_stage_plan_trims_nothing_for_a_full_history_download(tmp_path: Path) ->
     assert plan.covered_session is None
     assert plan.skipped_current == 0
     assert len(plan.targets) == 3
+    # 全量回填同样没有周六那根日线，区间右端照样收到 9-11（只改文案，段数不变）。
+    assert plan.range_display_end == date(2026, 9, 11)
 
 
 def test_stage_plan_still_downloads_the_session_before_it_is_published(
@@ -463,14 +469,17 @@ def test_stage_plan_still_downloads_the_session_before_it_is_published(
     )
     assert plan.covered_session == "2026-09-11"
     assert plan.skipped_current == 1
+    # 9-11 当天就是交易日，区间右端本来就是它 → 不收。
+    assert plan.range_display_end is None
 
     # 15:00 还没收盘：9-11 只能算盘中临时行，判据退回 9-10，于是 600000 也得再下一次。
-    # 15:00 还没收盘：9-11 只能算盘中临时行，判据退回 9-10。
     intraday = datetime(2026, 9, 11, 15, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
     early = _plan_service(store, intraday).prepare_stage_plan(
         _config(prefer_store_targets=True, end_date=date(2026, 9, 11))
     )
     assert early.covered_session == "2026-09-10"
+    # 收盘前不藏当天：这一轮下的就是 9-11 那根盘中日线，区间右端仍然写到 9-11。
+    assert early.range_display_end is None
     # 两只已有 9-10 已收盘日线的被跳过；688001 只有临时行，任何时候都得重下。
     assert early.skipped_current == 2
     assert {(target.market, target.code) for target in early.targets} == {("SH", "688001")}

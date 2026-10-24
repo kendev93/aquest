@@ -4,6 +4,7 @@ import multiprocessing
 import os
 import queue
 from concurrent.futures import Future, ProcessPoolExecutor
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from aquest.market_data.staging import (
     StageWorkerRequest,
     StageWorkerResult,
     StageWriter,
+    _target_range_label,
     cleanup_stale_staging,
     create_rate_state,
     rate_state_snapshot,
@@ -191,6 +193,37 @@ def test_cleanup_stale_staging_removes_only_old_job_directories(tmp_path: Path) 
     assert removed == (old_job,)
     assert not old_job.exists()
     assert fresh_job.exists()
+
+
+def test_range_label_clamps_the_right_end_to_a_real_session() -> None:
+    """区间右端是「下载到今天为止」的自然日语义：周六那一段一只票都不会有日线。
+
+    进度里把非交易日写成区间终点，会让人以为同步在下的一天根本不存在（2026-10-24 实测
+    如此）。这里只改文案，``requested_ranges`` 本身不动——收盘前那一轮仍然要取当天的
+    临时日线。
+    """
+
+    weekend = replace(_target(), requested_ranges=((date(2026, 10, 12), date(2026, 10, 24)),))
+    config = MarketSyncConfig()
+
+    assert _target_range_label(weekend, config) == "2026-10-12 → 2026-10-24"
+    assert _target_range_label(weekend, config, date(2026, 10, 23)) == "2026-10-12 → 2026-10-23"
+    assert weekend.requested_ranges == ((date(2026, 10, 12), date(2026, 10, 24)),)
+
+    # 补齐历史的两段区间里只有尾段越界；头段本来就是历史上的交易日，不碰。
+    split = replace(
+        _target(),
+        requested_ranges=(
+            (date(1990, 12, 19), date(2016, 1, 4)),
+            (date(2026, 10, 22), date(2026, 10, 24)),
+        ),
+    )
+    assert _target_range_label(split, config, date(2026, 10, 23)) == (
+        "1990-12-19 → 2016-01-04；2026-10-22 → 2026-10-23"
+    )
+
+    # 收端比区间起点还早时什么都不改，不能倒着写区间。
+    assert _target_range_label(weekend, config, date(2026, 1, 1)) == "2026-10-12 → 2026-10-24"
 
 
 def test_stage_worker_entrypoint_runs_in_a_spawned_process(tmp_path: Path) -> None:

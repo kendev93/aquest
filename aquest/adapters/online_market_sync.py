@@ -42,7 +42,7 @@ from aquest.market_data.staging import (
 )
 from aquest.market_data.store import DuckDbMarketDataStore
 from aquest.market_data.store_base import HISTORY_START
-from aquest.market_data.sync_session import latest_completed_session
+from aquest.market_data.sync_session import latest_completed_session, range_display_bound
 
 from .baostock_catalog import BaostockCatalogError, fetch_all_securities
 from .market_sync import (
@@ -1072,6 +1072,8 @@ class OnlineMarketSync:
         # 因为回看重叠段是拿来逐值对照的，而当天那一段早在上一次就对照过了）。
         # 判不出交易日时一律照旧逐只下——宁可多下一轮，不能漏下该下的那只。
         session = self._stage_covered_session(config, as_of)
+        # 进度里的区间右端只收「今天确定不出日线」的那些日子；下载请求本身仍然走到今天。
+        display_end = None if self._store is None else range_display_bound(self._store, now=as_of)
         completed_dates = (
             self._store.last_completed_dates()
             if session is not None and self._store is not None
@@ -1114,6 +1116,7 @@ class OnlineMarketSync:
             as_of=as_of,
             covered_session=session.isoformat() if session is not None else None,
             skipped_current=skipped_current,
+            range_display_end=display_end,
         )
 
     def fetch_stage_target(

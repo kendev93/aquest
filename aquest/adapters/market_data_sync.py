@@ -261,6 +261,10 @@ class MarketDataSync:
             )
 
         provider = prepared[0].provider
+        range_display_end = next(
+            (plan.range_display_end for plan in prepared if plan.range_display_end is not None),
+            None,
+        )
         run_id = uuid.uuid4().hex
         cleanup_stale_staging(staging_directory(self._store.database_path))
         ensure_staging_capacity(self._store.database_path)
@@ -300,6 +304,7 @@ class MarketDataSync:
                         rate_state=rate_state,
                         rate_lock=rate_lock,
                         event_queue=event_queue,
+                        range_display_end=range_display_end,
                     )
                 )
             if worker_count:

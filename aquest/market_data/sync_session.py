@@ -238,6 +238,33 @@ def latest_completed_session(
     return last_session
 
 
+def range_display_bound(
+    store: DuckDbMarketDataStore,
+    *,
+    now: datetime | None = None,
+) -> date | None:
+    """同步区间在界面上可以放心写到的右端；返回 None 表示别收，照旧写到今天。
+
+    区间右端一直是「下载到今天为止」的自然日语义：数据源在周末只会把最近几根交易日
+    给回来，今天那一段本来就取不到东西。把今天写进区间里会让人以为要下一根不存在的
+    日线（2026-10-24 周六实测如此）。只在能确定今天不出日线时才收成最近一个交易日：
+    周末，或者收盘后日历已覆盖到今天却仍没列出今天。收盘前不收——那天可能正好是要
+    下的那一天，藏掉它就等于说错这一轮在下什么。
+    """
+
+    current = shanghai_now(now)
+    today = current.date()
+    if today.weekday() < 5 and (current.hour, current.minute) < (
+        MARKET_SESSION_PUBLISHED_TIME.hour,
+        MARKET_SESSION_PUBLISHED_TIME.minute,
+    ):
+        return None
+    last_session = latest_completed_session(store, now=now)
+    if last_session is None or last_session >= today:
+        return None
+    return last_session
+
+
 def sync_scope_fingerprint(
     *,
     universe: str,

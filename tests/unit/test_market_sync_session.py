@@ -14,6 +14,7 @@ from aquest.market_data.sync_session import (
     CalendarRefreshError,
     calendar_refresh_is_due,
     latest_completed_session,
+    range_display_bound,
     read_synced_session,
     record_synced_session,
     refresh_calendar_when_stale,
@@ -182,6 +183,57 @@ def test_latest_completed_session_follows_close_time_and_holidays() -> None:
             raise RuntimeError("行情库读不动")
 
     assert latest_completed_session(NoCalendar(), now=after) is None  # type: ignore[arg-type]
+
+
+def test_range_display_bound_only_hides_days_that_cannot_have_bars() -> None:
+    """区间右端只在「今天一定不出日线」时才收成最近交易日，收盘前不许藏掉当天。
+
+    请求窗口按自然日写到今天是有意为之（盘中那一轮要的就是当天那根），但进度文案跟着
+    把周六/节假日写成一个要下的日子就会误导人。判据收不出来的时候必须原样保留。
+    """
+
+    store = Store()
+
+    # 周六早上：日历覆盖做到 10-24，最新交易日是 10-23 → 右端收到 10-23。
+    store.saved = (
+        (date(2026, 10, 22), date(2026, 10, 23)),
+        date(2026, 6, 1),
+        date(2026, 10, 24),
+    )
+    assert range_display_bound(store, now=datetime(2026, 10, 24, 7, 37, tzinfo=SHANGHAI)) == date(
+        2026, 10, 23
+    )
+
+    # 周四 15:00：日历还没列出 10-22，可那天正是该下的那一天 → 不收。
+    store.saved = (
+        (date(2026, 10, 21), date(2026, 10, 22)),
+        date(2026, 6, 1),
+        date(2026, 10, 22),
+    )
+    assert range_display_bound(store, now=datetime(2026, 10, 22, 15, 0, tzinfo=SHANGHAI)) is None
+
+    # 周四 19:00：日历已经列出 10-22，判据就是今天 → 区间右端本来就是交易日，不收。
+    assert range_display_bound(store, now=datetime(2026, 10, 22, 19, 0, tzinfo=SHANGHAI)) is None
+
+    # 周四节假日（国庆）收盘后：覆盖做到今天却没列出今天 → 收到 9-30。
+    store.saved = (
+        (date(2026, 9, 29), date(2026, 9, 30)),
+        date(2026, 6, 1),
+        date(2026, 10, 1),
+    )
+    assert range_display_bound(store, now=datetime(2026, 10, 1, 19, 0, tzinfo=SHANGHAI)) == date(
+        2026, 9, 30
+    )
+
+    # 覆盖没做到今天：无从判断今天是不是交易日，原样保留区间右端。
+    store.saved = ((date(2026, 10, 16),), date(2026, 6, 1), date(2026, 10, 16))
+    assert range_display_bound(store, now=datetime(2026, 10, 24, 7, 37, tzinfo=SHANGHAI)) is None
+
+    class NoCalendar:
+        def read_authoritative_trading_dates(self, *_args):
+            raise RuntimeError("行情库读不动")
+
+    assert range_display_bound(NoCalendar(), now=datetime(2026, 10, 24, tzinfo=SHANGHAI)) is None  # type: ignore[arg-type]
 
 
 def test_sync_scope_fingerprint_names_the_scope_not_its_order() -> None:

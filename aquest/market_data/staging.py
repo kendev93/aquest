@@ -92,6 +92,8 @@ class ProviderStagePlan:
     covered_session: str | None = None
     #: 因为「本交易日已经有了已收盘日线」而没发请求的标数，报告里要说清省下了多少。
     skipped_current: int = 0
+    #: 区间标签右端可以收到的交易日（周末或已确定的节假日）。None 表示区间照旧写到今天。
+    range_display_end: date | None = None
 
 
 @dataclass(frozen=True)
@@ -118,6 +120,8 @@ class StageWorkerRequest:
     rate_state: Any
     rate_lock: Any
     event_queue: Any
+    #: 只影响进度里那行区间文案；下载请求仍然按 ``requested_ranges`` 走。
+    range_display_end: date | None = None
 
 
 @dataclass(frozen=True)
@@ -562,7 +566,9 @@ def run_stage_worker(request: StageWorkerRequest) -> StageWorkerResult:
                     "code": target.code,
                     "name": target.name,
                     "provider": target.provider,
-                    "range_label": _target_range_label(target, request.config),
+                    "range_label": _target_range_label(
+                        target, request.config, request.range_display_end
+                    ),
                 },
             )
             try:
@@ -660,11 +666,16 @@ def _target_detail(target: StageTarget, result: StageTargetResult) -> dict[str, 
     return detail
 
 
-def _target_range_label(target: StageTarget, config: Any) -> str:
+def _target_range_label(target: StageTarget, config: Any, display_end: date | None = None) -> str:
     if target.requested_ranges:
-        return "；".join(
-            f"{start.isoformat()} → {end.isoformat()}" for start, end in target.requested_ranges
-        )
+        parts: list[str] = []
+        for start, end in target.requested_ranges:
+            if display_end is not None and start <= display_end < end:
+                # 右端是「下载到今天」的自然日语义，落在非交易日时只把它写成最近那个交易日；
+                # 请求本身不变，盘中那一轮仍然会去取当天的临时日线。
+                end = display_end
+            parts.append(f"{start.isoformat()} → {end.isoformat()}")
+        return "；".join(parts)
     return f"最新 {getattr(config, 'bars', 0)} 根日线"
 
 
