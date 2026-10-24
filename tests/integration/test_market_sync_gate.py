@@ -170,8 +170,9 @@ def _settle(client: TestClient, job_id: str) -> None:
 def test_sync_is_skipped_when_the_session_is_already_downloaded(tmp_path: Path) -> None:
     with _gate_client(tmp_path) as (client, store, service):
         # 收盘发布时点之前判到昨天、之后判到今天，两种都要能挡住。
-        _stamp(store, _TODAY)
+        # 记号按范围只留一份、后写的生效：先写昨天再写今天，发布时点前后都够用。
         _stamp(store, _PREVIOUS)
+        _stamp(store, _TODAY)
 
         response = client.post("/api/v1/market-data/sync-online", json={"universe": "all"})
 
@@ -189,8 +190,9 @@ def test_force_flag_bypasses_the_gate(tmp_path: Path) -> None:
     """除权修正、补上次失败的洞都靠这个开关绕过判定，默认那一次仍然什么都不做。"""
 
     with _gate_client(tmp_path) as (client, store, service):
-        _stamp(store, _TODAY)
+        # 记号按范围只留一份、后写的生效：先写昨天再写今天，发布时点前后都够用。
         _stamp(store, _PREVIOUS)
+        _stamp(store, _TODAY)
 
         response = client.post("/api/v1/market-data/sync-online", json={"force": True})
 
@@ -219,8 +221,9 @@ def test_gate_downloads_for_a_scope_that_was_never_synced(tmp_path: Path) -> Non
     """记号按范围分开：全市场下完了，不代表「只下深圳」或「只下主板」也可以跳过。"""
 
     with _gate_client(tmp_path) as (client, store, service):
-        _stamp(store, _TODAY)
+        # 记号按范围只留一份、后写的生效：先写昨天再写今天，发布时点前后都够用。
         _stamp(store, _PREVIOUS)
+        _stamp(store, _TODAY)
 
         shenzhen = client.post("/api/v1/market-data/sync-online", json={"universe": "sz"})
         assert shenzhen.status_code == 202
@@ -243,8 +246,8 @@ def test_gate_downloads_when_the_last_run_had_failures(tmp_path: Path) -> None:
     """上一次有标的失败过就不算下完了：漏掉的那几只正是用户重点一次想补的东西。"""
 
     with _gate_client(tmp_path) as (client, store, service):
-        _stamp(store, _TODAY, failed=3)
         _stamp(store, _PREVIOUS, failed=3)
+        _stamp(store, _TODAY, failed=3)
 
         assert client.post("/api/v1/market-data/sync-online", json={}).status_code == 202
         assert len(service.configs) == 1
@@ -258,8 +261,9 @@ def test_gate_downloads_when_the_store_lost_the_session(tmp_path: Path) -> None:
         store,
         service,
     ):
-        _stamp(store, _TODAY)
+        # 记号按范围只留一份、后写的生效：先写昨天再写今天，发布时点前后都够用。
         _stamp(store, _PREVIOUS)
+        _stamp(store, _TODAY)
 
         assert client.post("/api/v1/market-data/sync-online", json={}).status_code == 202
         assert len(service.configs) == 1
@@ -273,8 +277,9 @@ def test_gate_downloads_when_only_one_symbol_is_behind(tmp_path: Path) -> None:
     """
 
     with _gate_client(tmp_path) as (client, store, service):
-        _stamp(store, _TODAY)
+        # 记号按范围只留一份、后写的生效：先写昨天再写今天，发布时点前后都够用。
         _stamp(store, _PREVIOUS)
+        _stamp(store, _TODAY)
         # 代码必须是上海的合法号段：行情库按市场+代码判板块，认不出就整批拒收。
         store.upsert_online_bars(_bars("600519", [_TODAY - timedelta(days=2)]))
 
