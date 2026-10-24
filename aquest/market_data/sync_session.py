@@ -265,6 +265,21 @@ def range_display_bound(
     return last_session
 
 
+def session_fully_downloaded(store: DuckDbMarketDataStore, *, session: date) -> bool:
+    """每只有已完成日线的标的都到了 ``session``：这一轮已经没有任何东西可下。
+
+    不能只看 ``status().data_end``：它包含盘中临时行，15:00 手动同步之后当天就已经是
+    ``data_end``，拿它当「已完成」会跳过收盘那根的重写。
+    """
+
+    try:
+        completed = store.last_completed_dates()
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        # 认不出来的行情库按「还没下完」处理：宁可多查一轮，不能漏下。
+        return False
+    return bool(completed) and all(day >= session for day in completed.values())
+
+
 def sync_scope_fingerprint(
     *,
     universe: str,

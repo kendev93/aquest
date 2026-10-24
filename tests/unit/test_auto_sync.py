@@ -65,6 +65,10 @@ def test_auto_sync_skips_holiday_after_calendar_check_and_persists_the_check_dat
                 raise ValueError("权威交易日历未覆盖完整日期范围")
             return [item for item in dates if start_date <= item <= end_date]
 
+        def last_completed_dates(self):
+            """9-30 那根已经收尾，所以这一轮没有任何东西可下。"""
+            return {("SH", "600000"): date(2026, 9, 30)}
+
     class Runner:
         def __init__(self) -> None:
             self.submitted = []
@@ -210,6 +214,118 @@ def test_auto_sync_uses_latest_exchange_session_as_provider_end_date() -> None:
     # 18:30 之后必须再取一次：上游在收盘发布之前不会把当天列进日历，只按"今天取过了"
     # 记一次的话，当天那根交易日要等到第二天才看得见，行情就天天晚一天。
     assert sync.calendar_calls == 2
+
+
+def test_auto_sync_still_runs_after_a_manual_sync_earlier_the_same_day() -> None:
+    """早上手动点过一次同步只补了昨天那根，当晚这一轮不能因此被压掉。
+
+    旧的 `auto_sync_due()` 只比日期：当天同步过就整天不再发起，于是日线要等到第二天
+    17:00 才补上——和日历节奏那个问题是同一个症状、不同入口。
+    """
+
+    now = [datetime(2026, 10, 9, 9, 5, tzinfo=SHANGHAI)]
+    completed = {"SH/600000": date(2026, 10, 8)}
+
+    class Store:
+        def __init__(self) -> None:
+            self.metadata: dict[str, str] = {}
+            self.saved_calendar = None
+
+        def status(self):
+            return SimpleNamespace(
+                instrument_count=1,
+                bar_count=100,
+                data_end="2026-10-08",
+                # 09:00 刚手动同步过一次：今天确实同步过，但只到昨天。
+                last_online_sync_at="2026-10-09T09:00:00+08:00",
+            )
+
+        def get_meta(self, key):
+            return self.metadata.get(key)
+
+        def set_meta(self, key, value):
+            self.metadata[key] = value
+
+        def save_market_trading_calendar(
+            self, trade_dates, *, source, coverage_start=None, coverage_end=None
+        ):
+            self.saved_calendar = (tuple(trade_dates), source, coverage_start, coverage_end)
+            return len(tuple(trade_dates))
+
+        def read_authoritative_trading_dates(self, start_date, end_date):
+            dates, _source, coverage_start, coverage_end = self.saved_calendar
+            if coverage_start > start_date or coverage_end < end_date:
+                raise ValueError("权威交易日历未覆盖完整日期范围")
+            return [item for item in dates if start_date <= item <= end_date]
+
+        def last_completed_dates(self):
+            return {tuple(key.split("/")): day for key, day in completed.items()}
+
+    class Runner:
+        def __init__(self) -> None:
+            self.submitted: list[str] = []
+            self.targets: list[object] = []
+
+        def has_active_jobs(self, descriptions):
+            del descriptions
+            return False
+
+        def get(self, job_id):
+            del job_id
+            return None
+
+        def is_cancel_requested(self, job_id):
+            del job_id
+            return False
+
+        def submit_callable(self, target, *, description, job_id, exclusive_group):
+            del description, exclusive_group
+            self.submitted.append(job_id)
+            self.targets.append(target)
+            return job_id
+
+    class Sync:
+        def __init__(self) -> None:
+            self.configs: list[object] = []
+
+        def fetch_trading_calendar(self, start_date, end_date, *, timeout):
+            del start_date, end_date, timeout
+            return (date(2026, 10, 8), date(2026, 10, 9))
+
+        def sync(self, config, progress_callback=None, *, detail_callback=None, abort_check=None):
+            del progress_callback, detail_callback, abort_check
+            self.configs.append(config)
+            return {"written_bars": 1, "errors": 0}
+
+    store = Store()
+    runner = Runner()
+    sync = Sync()
+    scheduler = AutomaticMarketSyncScheduler(
+        store=store,
+        runner=runner,
+        market_sync=sync,
+        precomputer=object(),
+        clock=lambda: now[0],
+    )
+
+    # 09:05 还没收盘发布：本地等着，不发起。
+    assert scheduler.submit_if_due() is None
+
+    # 19:00：最新交易日是 10-09，本地已完成日线只到 10-08 → 照常发起，不能被
+    # 「今天已经同步过」压掉。
+    now[0] = datetime(2026, 10, 9, 19, 0, tzinfo=SHANGHAI)
+    assert scheduler.submit_if_due() is not None
+    runner.targets[0](lambda _done, _total: None)
+    assert sync.configs[0].end_date == date(2026, 10, 9)
+
+    # 同步把当天那根写完之后（清掉核对记号，模拟重启后的第一次检查），判据只看
+    # 已完成日线：没有东西可下就跳过。
+    completed["SH/600000"] = date(2026, 10, 9)
+    store.metadata.pop("last_auto_sync_check_date", None)
+    now[0] = datetime(2026, 10, 9, 19, 15, tzinfo=SHANGHAI)
+    assert scheduler.submit_if_due() is None
+    assert len(runner.submitted) == 1
+    assert store.metadata["last_auto_sync_check_date"] == "2026-10-09"
 
 
 def test_auto_sync_falls_back_to_natural_date_when_calendar_is_unavailable() -> None:

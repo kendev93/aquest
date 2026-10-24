@@ -30,6 +30,7 @@ from aquest.market_data.sync_session import (
     MARKET_SESSION_PUBLISHED_TIME,
     latest_completed_session,
     refresh_calendar_when_stale,
+    session_fully_downloaded,
 )
 from aquest.screening.jobs import (
     ProgressReporter,
@@ -165,13 +166,6 @@ class AutomaticMarketSyncScheduler:
         # 连着几天不刷新（2026-10-22 实测 market_calendar_latest_date 停在 10-16，
         # 全靠用户手点补行情）。
         refresh_calendar_when_stale(self._store, fetch_calendar, now=now)
-        if not auto_sync_due(status.last_online_sync_at, now=now):
-            # 今天已经同步过（手动或自动都算）：调度这边无事可做，但「核对日」仍要记成今天。
-            # 只在真正需要下载的那条分支写记号的话，状态接口会一直停在最后一次下载的日子，
-            # 看起来像自动调度已经停了（2026-10-24 实测停在 10-10）。
-            self._note_check(today, _parse_date(status.data_end))
-            return None
-
         get_meta = getattr(self._store, "get_meta", None)
         last_check_date = get_meta("last_auto_sync_check_date") if callable(get_meta) else None
         if last_check_date == today.isoformat():
@@ -179,8 +173,7 @@ class AutomaticMarketSyncScheduler:
 
         end_date: date | None = None
         if callable(fetch_calendar):
-            # Daily bars are complete only after the market close and provider publication.
-            # Before then, wait locally instead of asking every stock for an unfinished date.
+            # 当天日线只有在收盘并发布之后才算完整；之前一律本地等着，不去逐只问。
             if now.time() < MARKET_SESSION_PUBLISHED_TIME:
                 return None
             end_date = latest_completed_session(self._store, now=now)
@@ -189,16 +182,21 @@ class AutomaticMarketSyncScheduler:
                 # 也不能因为判不出交易日而整天不补行情。
                 logger.warning("交易日历判不出最新交易日，自动同步回退到自然日范围")
                 end_date = today
-            else:
-                local_data_end = _parse_date(status.data_end)
-                if local_data_end is not None and end_date <= local_data_end:
-                    self._note_check(today, end_date)
-                    logger.info(
-                        "自动行情同步跳过：本地行情已覆盖最近交易日 %s（核对日 %s）",
-                        end_date,
-                        today,
-                    )
-                    return None
+        if end_date is not None:
+            # 判据是「最近一个已发布交易日是否已经完整同步」，不是「今天有没有同步过」：
+            # 早上点过一次手动同步只补了昨天的日线，不该因此压掉当晚这一轮。
+            if session_fully_downloaded(self._store, session=end_date):
+                self._note_check(today, end_date)
+                logger.info(
+                    "自动行情同步跳过：本地已完成日线已覆盖最近交易日 %s（核对日 %s）",
+                    end_date,
+                    today,
+                )
+                return None
+        elif not auto_sync_due(status.last_online_sync_at, now=now):
+            # 没有日历判据可用，只能退回自然日口径：今天同步过就不再重复发起。
+            self._note_check(today, _parse_date(status.data_end))
+            return None
 
         job_id = uuid.uuid4().hex
         self._active_job_id = job_id
