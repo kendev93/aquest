@@ -451,10 +451,11 @@ class _DuckDbStoreBase:
                 return self._open(read_only=True)
             except duckdb.Error:
                 return self._connect()
-        try:
-            return open_database(self.state_database_path, read_only=True)
-        except duckdb.Error:
-            return self.state_connect()
+        # 状态库不再单独开只读连接：同一个文件在同进程里混着只读/读写打开，DuckDB 会报
+        # "Can't open a connection to same database file with a different configuration"，
+        # 而状态库每时每刻都有 worker 在写任务状态，撞上的概率很高（实测 worker claim
+        # 一半 500）。这里统一用实例自己的模式：读写进程就是读写，worker 本来就是只读。
+        return self.state_connect()
 
     @contextmanager
     def state_read_session(self) -> Iterator[duckdb.DuckDBPyConnection]:
@@ -492,6 +493,9 @@ class _DuckDbStoreBase:
         """
 
         if self.read_only or self.has_state_database():
+            return {}
+        if not self.database_path.exists():
+            # 全新安装：行情库还没建，没有东西可拷；等它建好后的下一次启动再拆。
             return {}
         target = self.state_database_path
         temp = target.with_name(f"{target.name}.tmp")

@@ -88,3 +88,23 @@ def test_the_market_file_keeps_working_without_a_state_database(tmp_path: Path) 
 
     assert store.has_state_database() is False
     assert jobs.read_state("job-1") is not None
+
+
+def test_read_and_write_connections_can_coexist(tmp_path: Path) -> None:
+    """同一个状态库里读会话与写事务可以同时开。
+
+    混着只读/读写打开同一个文件，DuckDB 会报 "different configuration"；状态库上
+    worker 一直在写任务状态，撞上就是 claim 500（2026-10-25 实测一半请求失败）。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    DuckDbStrategyJobStore(store).create(
+        "job-1", operation="market_strategy_pool", payload={}, description="建库"
+    )
+    store.ensure_state_database()
+
+    with store.state_read_session() as reader:
+        row = reader.execute("SELECT COUNT(*) FROM strategy_jobs").fetchone()
+        assert row is not None
+        with store.state_write_transaction() as writer:
+            assert writer.execute("SELECT 1").fetchone() is not None
