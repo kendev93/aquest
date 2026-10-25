@@ -1,15 +1,27 @@
 from __future__ import annotations
 
 import time
+from datetime import date, timedelta
 
 import pytest
 
 from aquest.market_data.store import DuckDbMarketDataStore
+from aquest.market_data.sync_session import shanghai_now
 from aquest.strategy_discovery.duckdb_job_store import (
     MAX_CLAIM_REQUEUES,
     DuckDbStrategyJobStore,
 )
 from aquest.strategy_discovery.job_store import StrategyJobStore
+
+
+def _weekdays(start: date, count: int) -> list[str]:
+    days: list[str] = []
+    cursor = start
+    while len(days) < count:
+        if cursor.isoweekday() <= 5:
+            days.append(cursor.isoformat())
+        cursor += timedelta(days=1)
+    return days
 
 
 def _store(tmp_path) -> DuckDbStrategyJobStore:
@@ -508,7 +520,7 @@ def test_signal_results_keep_only_the_last_scan_per_trading_day(tmp_path) -> Non
             },
         )
 
-    days = [f"2026-10-{day:02d}" for day in range(1, 13)]
+    days = _weekdays(date(2026, 9, 1), 12)
     for index, day in enumerate(days):
         scan(f"s-{index:02d}-1", day)
         scan(f"s-{index:02d}-2", day)
@@ -540,6 +552,33 @@ def test_signal_results_keep_only_the_last_scan_per_trading_day(tmp_path) -> Non
     # 同一天被顶掉的那次全市场扫描，结果已经摘掉，任务行还在
     assert store.read_result("s-11-2") is None
     assert store.read_state("s-11-2") is not None
+
+
+def test_signal_day_list_excludes_weekends_and_future_dates(tmp_path) -> None:
+    """下拉里的日期必须是交易日：周末与未来日期只会来自旧版本写入或本地导入的脏行。
+
+    这些行还留在库里（旧结果仍可读），但不该被当成可选日期，更不能排到第一位当作「最新」。
+    """
+
+    store = _store(tmp_path)
+
+    def scan(job_id: str, as_of: str) -> None:
+        store.create(
+            job_id,
+            operation="market_strategy_pool_tracking",
+            payload={"mode": "signals", "as_of_date": as_of},
+            description="策略池双目标跟踪",
+        )
+        store.write_result(job_id, {"mode": "signals", "as_of_date": as_of, "buy_signals": []})
+
+    future = (shanghai_now().date() + timedelta(days=7)).isoformat()
+    scan("fri", "2026-09-04")
+    scan("sat", "2026-09-05")
+    scan("sun", "2026-09-06")
+    scan("future", future)
+
+    assert [item["as_of_date"] for item in store.pool_signal_days()] == ["2026-09-04"]
+    assert store.read_result("sat") is not None
 
 
 def test_incremental_signal_results_are_never_pruned(tmp_path) -> None:

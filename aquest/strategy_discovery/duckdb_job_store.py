@@ -15,6 +15,7 @@ import duckdb
 
 from aquest.market_data.store import DuckDbMarketDataStore
 from aquest.market_data.store_base import _WRITE_LOCK
+from aquest.market_data.sync_session import shanghai_now
 
 from .job_store import (
     DEFAULT_STALE_AFTER_SECONDS,
@@ -263,8 +264,12 @@ class DuckDbStrategyJobStore:
         多轮扫描都归到同一天，页面上选到的日期和「买卖规则在那一天收盘后判定」是同一件事。
         日期取自提交时的 payload（回放的目标日），不解析结果本身：结果一份约 2 MB，全表
         2.58 GB，线上按结果解析会直接把查询内存吃爆。
+
+        列表只收交易日：未来日期与周末是旧版本写入或本地导入留下的脏行，放进下拉会被
+        当成「最新」那一天，连带把默认视图和后续刷新都指错日子。
         """
 
+        today = shanghai_now().date()
         with self._read_connection() as connection:
             rows = connection.execute(
                 """
@@ -288,12 +293,14 @@ class DuckDbStrategyJobStore:
                         ) AS within_day
                     FROM candidates
                     WHERE signal_date IS NOT NULL
+                      AND signal_date <= ?
+                      AND isodow(signal_date) BETWEEN 1 AND 5
                 )
                 SELECT signal_date, job_id FROM ranked
                 WHERE within_day = 1 AND day_rank <= ?
                 ORDER BY signal_date DESC
                 """,
-                [days],
+                [today, days],
             ).fetchall()
         return [
             {

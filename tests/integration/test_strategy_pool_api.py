@@ -804,17 +804,17 @@ def test_signal_days_offer_only_the_last_scan_of_each_trading_day(tmp_path) -> N
 
     store = _store(tmp_path)
     jobs = DuckDbStrategyJobStore(store)
-    for day in (1, 2, 3):
+    days = ("2026-09-14", "2026-09-15", "2026-09-16")
+    for index, as_of in enumerate(days, start=1):
         for attempt in (1, 2):
-            as_of = f"2026-10-0{day}"
             jobs.create(
-                f"scan-{day}-{attempt}",
+                f"scan-{index}-{attempt}",
                 operation="market_strategy_pool_tracking",
                 payload={"mode": "signals", "as_of_date": as_of},
                 description="策略池双目标跟踪",
             )
             jobs.write_result(
-                f"scan-{day}-{attempt}",
+                f"scan-{index}-{attempt}",
                 {"mode": "signals", "as_of_date": as_of, "buy_signals": []},
             )
     app = create_app(market_data_store=store, auto_sync_enabled=False)
@@ -822,7 +822,7 @@ def test_signal_days_offer_only_the_last_scan_of_each_trading_day(tmp_path) -> N
     with TestClient(app) as client:
         items = client.get("/api/v1/strategy-pool/signal-days").json()["data"]["items"]
 
-    assert [item["as_of_date"] for item in items] == ["2026-10-03", "2026-10-02", "2026-10-01"]
+    assert [item["as_of_date"] for item in items] == ["2026-09-16", "2026-09-15", "2026-09-14"]
     assert [item["job_id"] for item in items] == ["scan-3-2", "scan-2-2", "scan-1-2"]
 
 
