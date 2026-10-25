@@ -19,7 +19,7 @@ from aquest.indicators.cache import IndicatorCache
 from aquest.market_data.adapter import DuckDbMarketDataAdapter
 from aquest.market_data.store import DuckDbMarketDataStore
 from aquest.portfolio_backtest.service import PortfolioBacktestService
-from aquest.screening.jobs import TaskCancelledError
+from aquest.screening.jobs import TaskCancelledError, TaskUserError
 from aquest.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
 from aquest.strategy_discovery.worker_api_client import TransientWorkerApiError
 
@@ -532,7 +532,15 @@ class PoolTrackingRunner:
                         continue
                     pending[executor.submit(_replay, v, previous)] = (group, executor)
                 if not pending:
-                    break
+                    if exhausted:
+                        break
+                    if not slots or target <= 0:
+                        raise TaskUserError("资源不足，本轮信号扫描已跳过，稍后自动重试")
+                    # 复用路径不提交任何任务（行情没变时整轮都是复用），以前这里直接
+                    # break，结果只扫到第一组就当成"扫完了"发布出去：周末全命中复用时，
+                    # 当天面板会只剩一只标的，其余全部显示"信号待刷新"。还有组没处理
+                    # 就得继续下一轮。
+                    continue
                 finished, _ = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
                 for future in finished:
                     group, _executor = pending.pop(future)

@@ -611,6 +611,54 @@ def test_tracking_runner_reuses_snapshot_until_market_data_changes(tmp_path):
     )
 
 
+def test_a_fully_reused_signal_scan_still_projects_every_symbol(tmp_path):
+    """行情没变、整轮都命中复用快照时，仍要把每只标的都写进结果。
+
+    复用路径不提交任何后台任务；以前「没有在跑的任务」被当成「扫完了」，只扫到第一组
+    就停，周末的信号面板于是只剩一只标的、其余全部显示「信号待刷新」（2026-10-25 实测）。
+    """
+
+    from aquest.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
+    from aquest.strategy_pool.tracking_runner import PoolTrackingRunner
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    pool = DuckDbStrategyPoolStore(store)
+    tracks = PoolTrackingStore(store)
+    for market, code in (("SH", "600000"), ("SZ", "000001")):
+        store.replace_local_bars(market, code, "stock", bars(3))
+        pool.upsert_automatic(
+            market=market,
+            code=code,
+            name=code,
+            annual_candidate=candidate(),
+            sharpe_candidate=None,
+            data_fingerprint="a",
+            config_fingerprint="b",
+            source_job_id="job",
+        )
+
+    def save_one(item):
+        return {
+            "saved": tracks.save_snapshot(item["version_id"], item["signature"], item["snapshot"])
+        }
+
+    def run_once() -> dict:
+        return PoolTrackingRunner(store, EvaluationWorkerBudget(2)).run(
+            {"objective": "annual_return", "as_of_date": "2026-09-03"},
+            progress=lambda *args: None,
+            abort_check=lambda: False,
+            writer=save_one,
+        )
+
+    first = run_once()
+    assert first["completed_symbols"] == 2
+
+    # 数据没变：第二轮整轮复用上一份快照，也要把两只都投影出来。
+    second = run_once()
+    assert second["completed_symbols"] == 2
+    assert {row["symbol"] for row in second["states"]} == {"SH600000", "SZ000001"}
+
+
 def test_scheduler_trading_day_dedup_and_new_version_initialization(tmp_path):
     from types import SimpleNamespace
 
