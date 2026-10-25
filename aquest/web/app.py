@@ -151,6 +151,15 @@ def create_app(
         DuckDbMarketDataStore,
         market_data_store if market_data_store is not None else DuckDbMarketDataStore(),
     )
+    # 状态表（池、跟踪、任务）拆到同目录的 state.duckdb：行情同步合并日线时，它们不再
+    # 跟着抢同一把写锁。只拷贝不删除，拆库失败就退回单库，不能让应用起不来。
+    if not selected_store.read_only:
+        try:
+            split_tables = selected_store.ensure_state_database()
+            if split_tables:
+                logger.info("状态表已拆到 %s：%s", selected_store.state_database_path, split_tables)
+        except Exception:  # noqa: BLE001 - 拆库失败退回单库即可
+            logger.exception("状态表拆库失败，继续使用行情库")
     selected_strategy_job_store = DuckDbStrategyJobStore(selected_store)
     selected_strategy_pool_store = DuckDbStrategyPoolStore(selected_store)
     selected_adapter = cast(

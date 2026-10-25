@@ -117,6 +117,21 @@ _BAR_INDICATOR_COLUMNS = [
     "bar_status",
 ]
 _WRITE_LOCK = RLock()
+#: 状态库的写锁。和行情库分开：行情同步合并日线时，池/跟踪/任务的写入不该跟着一起排队。
+STATE_WRITE_LOCK = RLock()
+#: 拆到状态库的文件名：与行情库同目录，备份时两个文件一起拿。
+STATE_DB_FILENAME = "state.duckdb"
+#: 拆出去的表：用户资产里写得最频繁、又和日线合并没有关系的那几张。
+#: 池条目与跟踪版本在同一个事务里写，必须整体搬，不能各拆一半。
+STATE_TABLES: tuple[str, ...] = (
+    "strategy_jobs",
+    "strategy_pool_entries",
+    "strategy_pool_focus",
+    "strategy_pool_research_settings",
+    "pool_tracking_versions",
+)
+#: 状态库建完后写进自己 `data_meta` 的记号；迁移只认这个记号，不认文件在不在。
+STATE_READY_META_KEY = "state_database_ready"
 _CONNECT_RETRY_DELAYS = (0.1, 0.25, 0.5, 1.0, 2.0)
 _CONNECT_RETRY_ENV = "AQUEST_DUCKDB_CONNECT_RETRY_SECONDS"
 _RETRY_LADDER_CACHE: dict[str, tuple[float, ...]] = {}
@@ -314,6 +329,8 @@ class _DuckDbStoreBase:
         pool_read_connections: bool = False,
     ) -> None:
         self.database_path = Path(database_path or default_database_path()).expanduser()
+        # 状态表拆出去之后放这里；没拆（测试单库、迁移前）时状态表仍然在行情库里。
+        self.state_database_path = self.database_path.with_name(STATE_DB_FILENAME)
         self.read_only = read_only
         self._initialized = False
         # 打开一条 DuckDB 连接实测约 9.5 ms（占 read_bars 的 57%），逐标的读取时
@@ -408,6 +425,114 @@ class _DuckDbStoreBase:
             raise
         finally:
             connection.close()
+
+    def has_state_database(self) -> bool:
+        """状态库是否已经启用。
+
+        只看文件在不在：迁移是先建 ``.tmp``、写完 CHECKPOINT 再原子改名，所以这个名字
+        出现时必然是一份完整的库。这里刻意不去连库探测——探测在别的进程握着写锁时会失败，
+        而「探测失败就退回行情库」正是最不该发生的事：一半写入落状态库、一半落行情库。
+        """
+
+        return self.state_database_path != self.database_path and self.state_database_path.exists()
+
+    def state_connect(self, *, read_only: bool | None = None) -> duckdb.DuckDBPyConnection:
+        """状态表的连接：拆库后指向 state.duckdb，否则就是行情库自己。"""
+
+        if not self.has_state_database():
+            return self._connect(read_only=read_only)
+        mode = self.read_only if read_only is None else read_only
+        return open_database(self.state_database_path, read_only=mode)
+
+    def _open_state_read(self) -> duckdb.DuckDBPyConnection:
+        if not self.has_state_database():
+            # 没拆库：仍旧走行情库那条「只读优先、被自己打回再退回读写」的老路。
+            try:
+                return self._open(read_only=True)
+            except duckdb.Error:
+                return self._connect()
+        try:
+            return open_database(self.state_database_path, read_only=True)
+        except duckdb.Error:
+            return self.state_connect()
+
+    @contextmanager
+    def state_read_session(self) -> Iterator[duckdb.DuckDBPyConnection]:
+        """状态表的读会话；拆库后走 state.duckdb，没拆就是行情库。"""
+
+        connection = self._open_state_read()
+        try:
+            yield connection
+        finally:
+            connection.close()
+
+    @contextmanager
+    def state_write_transaction(self) -> Iterator[duckdb.DuckDBPyConnection]:
+        """状态库写事务：独立写锁 + 独立连接，行情合并时池的写入不再跟着排队。"""
+
+        with STATE_WRITE_LOCK:
+            connection = self.state_connect()
+            connection.execute("BEGIN TRANSACTION")
+            try:
+                yield connection
+                connection.execute("COMMIT")
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
+            finally:
+                connection.close()
+
+    def ensure_state_database(self) -> dict[str, int]:
+        """把状态表拆到同目录的 ``state.duckdb``；只拷贝，不动行情库里的旧表。
+
+        整库先建在 ``.tmp`` 里、写完再原子改名：中途失败只会留下临时文件，下一次启动
+        照旧按「还没拆库」处理，读取方不会看到半份池。迁完写一条
+        ``state_database_ready`` 记号，之后只认它——删掉 state.duckdb 能退回单库
+        （退回时看到的是拆分前的旧数据，不是当前数据）。
+        """
+
+        if self.read_only or self.has_state_database():
+            return {}
+        target = self.state_database_path
+        temp = target.with_name(f"{target.name}.tmp")
+        copied: dict[str, int] = {}
+        self._remove_temp_files(temp)
+        try:
+            fresh = _DuckDbStoreBase(temp, read_only=False)
+            fresh._ensure_initialized()
+            with fresh.write_transaction() as connection:
+                connection.execute(
+                    f"ATTACH '{str(self.database_path).replace(chr(39), chr(39) * 2)}' "
+                    "AS market_db (READ_ONLY)"
+                )
+                for table in STATE_TABLES:
+                    counted = connection.execute(
+                        f"SELECT COUNT(*) FROM market_db.{table}"
+                    ).fetchone()
+                    rows = int(counted[0]) if counted is not None else 0
+                    if rows:
+                        connection.execute(f"INSERT INTO {table} SELECT * FROM market_db.{table}")
+                    copied[table] = rows
+                # 连接关掉时 DuckDB 会自己断开附加库；在事务里 DETACH 会报
+                # "outstanding work on it"，所以显式断开留到事务提交之后（连接关闭即可）。
+                connection.execute(
+                    "INSERT INTO data_meta (key, value, updated_at) VALUES (?, ?, ?)"
+                    " ON CONFLICT (key) DO UPDATE SET value = excluded.value,"
+                    " updated_at = excluded.updated_at",
+                    [STATE_READY_META_KEY, target.name, _now()],
+                )
+            with open_database(temp, read_only=False) as connection:
+                connection.execute("CHECKPOINT")
+            os.replace(temp, target)
+        except BaseException:
+            self._remove_temp_files(temp)
+            raise
+        return copied
+
+    @staticmethod
+    def _remove_temp_files(temp: Path) -> None:
+        for leftover in (temp, temp.with_name(f"{temp.name}.wal")):
+            leftover.unlink(missing_ok=True)
 
     def _ensure_initialized(self) -> None:
         if self._initialized:

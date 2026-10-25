@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager
 
 import duckdb
 
 from .store_base import (
     _WRITE_LOCK,
+    STATE_TABLES,
     _DuckDbStoreBase,
 )
 from .store_history_candidates import CandidateHistoryMixin
@@ -100,7 +102,7 @@ class DuckDbHistoryStore(
         """Column names of one user-asset table, in physical order."""
 
         _require_asset_table(table)
-        with self._store._connect(read_only=True) as connection:
+        with self._asset_read(table) as connection:
             rows = connection.execute(
                 """
                 SELECT column_name FROM information_schema.columns
@@ -130,7 +132,7 @@ class DuckDbHistoryStore(
         if not columns:
             return
         projection = ", ".join(f'"{column}"' for column in columns)
-        with self._store._connect(read_only=True) as connection:
+        with self._asset_read(table) as connection:
             cursor = connection.execute(f'SELECT {projection} FROM "{table}"')
             while True:
                 batch = cursor.fetchmany(batch_size)
@@ -170,7 +172,7 @@ class DuckDbHistoryStore(
         inserted = 0
         attempted = 0
         batch: list[tuple[object, ...]] = []
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._asset_write(table) as connection:
             for row in rows:
                 batch.append(tuple(row.get(column) for column in columns))
                 if len(batch) < batch_size:
@@ -186,6 +188,26 @@ class DuckDbHistoryStore(
                 inserted += _count_rows(connection, count_statement) - before
                 attempted += len(batch)
         return inserted, attempted
+
+    @contextmanager
+    def _asset_read(self, table: str) -> Iterator[duckdb.DuckDBPyConnection]:
+        """资产表的读连接：拆到状态库的那几张走 state.duckdb，其余仍读行情库。"""
+
+        if table in STATE_TABLES:
+            with self._store.state_read_session() as connection:
+                yield connection
+            return
+        with self._store._connect(read_only=True) as connection:
+            yield connection
+
+    @contextmanager
+    def _asset_write(self, table: str) -> Iterator[duckdb.DuckDBPyConnection]:
+        if table in STATE_TABLES:
+            with self._store.state_write_transaction() as connection:
+                yield connection
+            return
+        with _WRITE_LOCK, self._store._connect() as connection:
+            yield connection
 
 
 def _count_rows(connection: duckdb.DuckDBPyConnection, statement: str) -> int:

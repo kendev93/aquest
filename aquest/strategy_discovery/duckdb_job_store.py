@@ -14,7 +14,7 @@ from typing import cast
 import duckdb
 
 from aquest.market_data.store import DuckDbMarketDataStore
-from aquest.market_data.store_base import _WRITE_LOCK
+from aquest.market_data.store_base import STATE_WRITE_LOCK
 from aquest.market_data.sync_session import shanghai_now
 
 from .job_store import (
@@ -64,7 +64,7 @@ class DuckDbStrategyJobStore:
     def initialize(self, legacy_root: str | Path | None = None) -> int:
         """Initialize the DuckDB schema and idempotently import legacy JSON jobs."""
 
-        with _WRITE_LOCK, self._connection() as connection:
+        with STATE_WRITE_LOCK, self._connection() as connection:
             connection.execute("SELECT 1 FROM strategy_jobs LIMIT 0")
         if legacy_root is None:
             return 0
@@ -95,7 +95,7 @@ class DuckDbStrategyJobStore:
             worker_count=worker_count,
             created_at=now,
         )
-        with _WRITE_LOCK, self._transaction() as connection:
+        with self._transaction() as connection:
             existing = connection.execute(
                 "SELECT 1 FROM strategy_jobs WHERE job_id = ?", [job_id]
             ).fetchone()
@@ -383,7 +383,7 @@ class DuckDbStrategyJobStore:
         selected_worker = _validate_worker_id(worker_id or "local-worker")
         self.recover_stale_running(stale_after_seconds=DEFAULT_STALE_AFTER_SECONDS)
         now = time.time()
-        with _WRITE_LOCK, self._transaction() as connection:
+        with self._transaction() as connection:
             operation_clause = (
                 (" AND operation IN (" + ",".join("?" for _ in operations) + ")")
                 if operations
@@ -469,7 +469,7 @@ class DuckDbStrategyJobStore:
     ) -> None:
         StrategyJobStore._validate_job_id(job_id)
         explicit = {**dict(fields or {}), **updates}
-        with _WRITE_LOCK, self._transaction() as connection:
+        with self._transaction() as connection:
             row = self._select_state(connection, job_id)
             if row is None:
                 raise ValueError("策略任务不存在")
@@ -498,7 +498,7 @@ class DuckDbStrategyJobStore:
     def request_cancel(self, job_id: str) -> bool:
         StrategyJobStore._validate_job_id(job_id)
         now = time.time()
-        with _WRITE_LOCK, self._transaction() as connection:
+        with self._transaction() as connection:
             row = self._select_state(connection, job_id)
             if row is None or str(row[1]) in _TERMINAL_STATUSES:
                 return False
@@ -577,7 +577,7 @@ class DuckDbStrategyJobStore:
             return []
 
         recovered: list[str] = []
-        with _WRITE_LOCK, self._transaction() as connection:
+        with self._transaction() as connection:
             rows = connection.execute(
                 "SELECT job_id, state_json, heartbeat_at FROM strategy_jobs "
                 "WHERE status = 'running' ORDER BY created_at, job_id"
@@ -660,7 +660,7 @@ class DuckDbStrategyJobStore:
             )
         if not prepared:
             return 0
-        with _WRITE_LOCK, self._transaction() as connection:
+        with self._transaction() as connection:
             before_row = connection.execute("SELECT COUNT(*) FROM strategy_jobs").fetchone()
             if before_row is None:
                 raise RuntimeError("策略任务计数查询失败")
@@ -690,7 +690,7 @@ class DuckDbStrategyJobStore:
         StrategyJobStore._validate_job_id(job_id)
         selected_worker = _validate_worker_id(worker_id)
         now = time.time()
-        with _WRITE_LOCK, self._transaction() as connection:
+        with self._transaction() as connection:
             row = self._select_state(connection, job_id)
             if row is None or row[3] != selected_worker or row[1] != "running":
                 raise ValueError("策略任务 worker 不匹配或任务已结束")
@@ -714,7 +714,7 @@ class DuckDbStrategyJobStore:
     ) -> dict[str, object]:
         StrategyJobStore._validate_job_id(job_id)
         selected_worker = _validate_worker_id(worker_id)
-        with _WRITE_LOCK, self._transaction() as connection:
+        with self._transaction() as connection:
             row = self._select_state(connection, job_id)
             if row is None or row[3] != selected_worker or row[1] != "running":
                 raise ValueError("策略任务 worker 不匹配或任务已结束")
@@ -745,7 +745,7 @@ class DuckDbStrategyJobStore:
         worker_id: str | None,
     ) -> dict[str, object] | None:
         now = time.time()
-        with _WRITE_LOCK, self._transaction() as connection:
+        with self._transaction() as connection:
             row = self._select_state(connection, job_id)
             if row is None:
                 raise ValueError("策略任务不存在")
@@ -793,7 +793,7 @@ class DuckDbStrategyJobStore:
         ``keep_job_id`` 是刚写完的那一条，无论它落在哪个档位都保住，不会自裁。
         """
 
-        with _WRITE_LOCK, self._transaction() as connection:
+        with self._transaction() as connection:
             rows = connection.execute(
                 """
                 WITH candidates AS (
@@ -891,7 +891,7 @@ class DuckDbStrategyJobStore:
 
     @contextmanager
     def _connection(self) -> Iterator[duckdb.DuckDBPyConnection]:
-        connection = self._store._connect()
+        connection = self._store.state_connect()
         try:
             yield connection
         finally:
@@ -905,12 +905,12 @@ class DuckDbStrategyJobStore:
         表读等满预算直接抛错——同一个锁压力下两种行为。
         """
 
-        with self._store.read_session() as connection:
+        with self._store.state_read_session() as connection:
             yield connection
 
     @contextmanager
     def _transaction(self) -> Iterator[duckdb.DuckDBPyConnection]:
-        with self._store.write_transaction() as connection:
+        with self._store.state_write_transaction() as connection:
             yield connection
 
 

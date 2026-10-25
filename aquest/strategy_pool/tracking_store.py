@@ -15,7 +15,7 @@ import duckdb
 
 from aquest.formulas.registry import FORMULA_REGISTRY
 from aquest.market_data.store import DuckDbMarketDataStore
-from aquest.market_data.store_base import _WRITE_LOCK
+from aquest.market_data.store_base import STATE_WRITE_LOCK
 
 # Strategy signatures describe trading intent and remain stable across replay fixes. Snapshot
 # engines version the serialized simulation semantics independently so old checkpoints rebuild.
@@ -320,7 +320,7 @@ class PoolTrackingStore:
                 )
 
     def bootstrap(self) -> None:
-        with self.store.read_session() as connection:
+        with self.store.state_read_session() as connection:
             symbols = [
                 (str(market), str(code))
                 for market, code in connection.execute(
@@ -331,7 +331,7 @@ class PoolTrackingStore:
         # 按几千次扫描的总时长举着，全市场研究的只读读者就是这么被等到超时的。
         data_dates = launch_data_dates(self.store, symbols)
         now = datetime.now(timezone.utc).isoformat()
-        with _WRITE_LOCK, self.store._connect() as connection:
+        with STATE_WRITE_LOCK, self.store.state_connect() as connection:
             connection.execute("BEGIN TRANSACTION")
             try:
                 # 当前版本与池条目各只读一次：逐只调 sync_entry 会按标的做 4 次全表查找，
@@ -416,7 +416,7 @@ class PoolTrackingStore:
         # 块（2026-10-19 实测 4439 行回 11.5 MB），而接口在投影时会把整份 candidate 丢掉，
         # 读出来再解析一遍纯属白做。其余调用方（跟踪 runner、详情页）确实要 candidate，保持默认。
         candidate_column = "candidate_json, " if with_candidate else ""
-        with self.store.read_session() as connection:
+        with self.store.state_read_session() as connection:
             cursor = connection.execute(
                 "SELECT version_id, market, code, objective, source, signature, "
                 + candidate_column
@@ -444,7 +444,7 @@ class PoolTrackingStore:
         手动策略优先于自动策略，与 ``tracking_runner`` 的 ``applied`` 取舍一致。
         """
 
-        with self.store.read_session() as connection:
+        with self.store.state_read_session() as connection:
             rows = connection.execute(
                 """SELECT market, code, source, summary_json FROM pool_tracking_versions
                 WHERE is_current AND objective=? AND summary_json IS NOT NULL""",
@@ -473,7 +473,7 @@ class PoolTrackingStore:
         ``(market, code, objective) -> summary``。
         """
 
-        with self.store.read_session() as connection:
+        with self.store.state_read_session() as connection:
             rows = connection.execute(
                 """SELECT market, code, objective, source, summary_json
                 FROM pool_tracking_versions
@@ -494,7 +494,7 @@ class PoolTrackingStore:
         return result
 
     def snapshot(self, version_id: str) -> dict[str, Any] | None:
-        with self.store.read_session() as connection:
+        with self.store.state_read_session() as connection:
             row = connection.execute(
                 "SELECT snapshot FROM pool_tracking_versions WHERE version_id=?", [version_id]
             ).fetchone()
@@ -503,7 +503,7 @@ class PoolTrackingStore:
     def save_snapshot(self, version_id: str, fingerprint: str, snapshot: Mapping[str, Any]) -> bool:
         # 校验与写入要在同一个事务里：分成两条独立语句时，中间被别的写者插进来就可能
         # 把「已经不是当前版本」的快照写回去。口径与 save_snapshots 的批量版一致。
-        with _WRITE_LOCK, self.store.write_transaction() as connection:
+        with self.store.state_write_transaction() as connection:
             row = connection.execute(
                 "SELECT signature,is_current,summary_json FROM pool_tracking_versions "
                 "WHERE version_id=?",
@@ -547,7 +547,7 @@ class PoolTrackingStore:
         placeholders = ",".join("?" for _ in version_ids)
         updated_at = datetime.now(timezone.utc).isoformat()
         saved: list[bool] = []
-        with _WRITE_LOCK, self.store.write_transaction() as connection:
+        with self.store.state_write_transaction() as connection:
             rows = connection.execute(
                 "SELECT version_id, signature, is_current, summary_json "
                 f"FROM pool_tracking_versions WHERE version_id IN ({placeholders})",
@@ -596,7 +596,7 @@ class PoolTrackingStore:
         return saved
 
     def record_error(self, version_id: str, message: str) -> None:
-        with _WRITE_LOCK, self.store._connect() as connection:
+        with STATE_WRITE_LOCK, self.store.state_connect() as connection:
             connection.execute(
                 "UPDATE pool_tracking_versions SET status='failed',last_error=? "
                 "WHERE version_id=? AND is_current",

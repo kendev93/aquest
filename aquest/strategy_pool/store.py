@@ -11,7 +11,6 @@ from typing import Literal, cast
 import duckdb
 
 from aquest.market_data.store import DuckDbMarketDataStore
-from aquest.market_data.store_base import _WRITE_LOCK
 
 from .tracking_store import PoolTrackingStore, launch_data_date
 
@@ -91,7 +90,7 @@ class DuckDbStrategyPoolStore:
         normalized = sorted(set(boards))
         boards_json = json.dumps(normalized, ensure_ascii=False, separators=(",", ":"))
         now = datetime.now(timezone.utc).replace(tzinfo=None)
-        with _WRITE_LOCK, self._transaction() as connection:
+        with self._transaction() as connection:
             connection.execute(
                 """
                 INSERT INTO strategy_pool_research_settings
@@ -124,7 +123,7 @@ class DuckDbStrategyPoolStore:
         _validate_symbol(market, code)
         clean_name = str(name or "").strip()[:FOCUS_NAME_MAX_LENGTH]
         now = datetime.now(timezone.utc).replace(tzinfo=None)
-        with _WRITE_LOCK, self._transaction() as connection:
+        with self._transaction() as connection:
             already = connection.execute(
                 "SELECT 1 FROM strategy_pool_focus WHERE market = ? AND code = ?",
                 [market, code],
@@ -146,7 +145,7 @@ class DuckDbStrategyPoolStore:
         """取消关注；没有关注过时同样幂等返回当前名单。"""
 
         _validate_symbol(market, code)
-        with _WRITE_LOCK, self._transaction() as connection:
+        with self._transaction() as connection:
             connection.execute(
                 "DELETE FROM strategy_pool_focus WHERE market = ? AND code = ?",
                 [market, code],
@@ -207,7 +206,7 @@ class DuckDbStrategyPoolStore:
         # 上线首日要在写事务**之外**算：这条查询扫 4.8 GB 的日线表，留在事务里就等于
         # 把整库排他锁按扫描时长举着，全市场研究的只读读者会一起等到超时。
         data_date = launch_data_date(self._store, market, code)
-        with _WRITE_LOCK, self._transaction() as connection:
+        with self._transaction() as connection:
             connection.execute(
                 """
                 INSERT INTO strategy_pool_entries (
@@ -254,7 +253,7 @@ class DuckDbStrategyPoolStore:
         """Backfill benchmark metrics without rewriting saved strategy choices."""
 
         _validate_symbol(market, code)
-        with _WRITE_LOCK, self._transaction() as connection:
+        with self._transaction() as connection:
             connection.execute(
                 "UPDATE strategy_pool_entries SET benchmark_json = ?, updated_at = ? "
                 "WHERE market = ? AND code = ?",
@@ -285,7 +284,7 @@ class DuckDbStrategyPoolStore:
         # 上线首日要在写事务**之外**算：这条查询扫 4.8 GB 的日线表，留在事务里就等于
         # 把整库排他锁按扫描时长举着，全市场研究的只读读者会一起等到超时。
         data_date = launch_data_date(self._store, market, code)
-        with _WRITE_LOCK, self._transaction() as connection:
+        with self._transaction() as connection:
             connection.execute(
                 """
                 INSERT INTO strategy_pool_entries (
@@ -340,7 +339,7 @@ class DuckDbStrategyPoolStore:
 
     def persist_worker_entry(self, entry: Mapping[str, object], *, source_job_id: str) -> None:
         if entry.get("reset") is True:
-            with _WRITE_LOCK, self._transaction() as connection:
+            with self._transaction() as connection:
                 PoolTrackingStore.archive_all(connection)
                 connection.execute("DELETE FROM strategy_pool_entries")
             return
@@ -408,7 +407,7 @@ class DuckDbStrategyPoolStore:
         # 上线首日要在写事务**之外**算：这条查询扫 4.8 GB 的日线表，留在事务里就等于
         # 把整库排他锁按扫描时长举着，全市场研究的只读读者会一起等到超时。
         data_date = launch_data_date(self._store, market, code)
-        with _WRITE_LOCK, self._transaction() as connection:
+        with self._transaction() as connection:
             connection.execute(
                 f"""
                 INSERT INTO strategy_pool_entries (
@@ -433,7 +432,7 @@ class DuckDbStrategyPoolStore:
         # 上线首日要在写事务**之外**算：这条查询扫 4.8 GB 的日线表，留在事务里就等于
         # 把整库排他锁按扫描时长举着，全市场研究的只读读者会一起等到超时。
         data_date = launch_data_date(self._store, market, code)
-        with _WRITE_LOCK, self._transaction() as connection:
+        with self._transaction() as connection:
             connection.execute(
                 f"UPDATE strategy_pool_entries SET {column} = NULL, updated_at = ? "
                 "WHERE market = ? AND code = ?",
@@ -458,7 +457,7 @@ class DuckDbStrategyPoolStore:
 
     @contextmanager
     def _connection(self) -> Iterator[duckdb.DuckDBPyConnection]:
-        connection = self._store._connect()
+        connection = self._store.state_connect()
         try:
             yield connection
         finally:
@@ -473,12 +472,12 @@ class DuckDbStrategyPoolStore:
         的锁语义。
         """
 
-        with self._store.read_session() as connection:
+        with self._store.state_read_session() as connection:
             yield connection
 
     @contextmanager
     def _transaction(self) -> Iterator[duckdb.DuckDBPyConnection]:
-        with self._store.write_transaction() as connection:
+        with self._store.state_write_transaction() as connection:
             yield connection
 
 

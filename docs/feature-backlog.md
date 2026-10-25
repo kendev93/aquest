@@ -1226,9 +1226,9 @@ SCHEMA_VERSION**——bump 会让每个老库先整库备份一份（4.6GB），
 时不再重复起一套；`save_snapshot` 改走 `write_transaction()`，与批量版 `save_snapshots` 对齐。
 
 **剩余的判据**：真正的「多副本并发写」在这个部署里不会发生——DuckDB 对同一个库只允许一个写进程，
-第二个会直接拿不到写锁；库内的写又都套在进程内 `_WRITE_LOCK` 上。所以 SELECT→INSERT 的唯一约束
-和 reset 与 upsert 的先后，只有在换成多写者存储（或把状态表拆到独立库、放开多进程写）时才需要
-补——正好是 #37 分库要一起设计的部分。
+第二个会直接拿不到写锁；库内的写又都套在进程内写锁上。状态表已拆到独立库（`state.duckdb`，见
+`docs/architecture.md`），但它同样是单写者，所以 SELECT→INSERT 的唯一约束和 reset 与 upsert 的先后
+仍然不需要补；只有换成多写者存储时才要重新设计。
 
 **附带观察（已核实为误报，2026-10-24）**：`get_or_compute` 只在 `full_history` 时才调
 `_persistent_put_many`，窗口请求既不写内存也不落库
