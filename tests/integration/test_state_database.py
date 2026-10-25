@@ -10,7 +10,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import duckdb
+import pytest
 
+from aquest.market_data import store_base as store_base_module
 from aquest.market_data.store import DuckDbMarketDataStore
 from aquest.strategy_discovery.duckdb_job_store import DuckDbStrategyJobStore
 from aquest.strategy_pool.store import DuckDbStrategyPoolStore
@@ -108,3 +110,51 @@ def test_read_and_write_connections_can_coexist(tmp_path: Path) -> None:
         assert row is not None
         with store.state_write_transaction() as writer:
             assert writer.execute("SELECT 1").fetchone() is not None
+
+
+def test_a_transient_cross_process_lock_is_waited_out(monkeypatch, tmp_path: Path) -> None:
+    """worker 读状态库、backend 同时写时，DuckDB 会报 Conflicting lock；等一下再来即可。
+
+    两个容器在同一个卷上看到的是两个进程，跨 PID 命名空间拿不到对方 PID，报错里显示
+    「held in PID 0」（2026-10-25 实测）。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    DuckDbStrategyJobStore(store).create(
+        "job-1", operation="market_strategy_pool", payload={}, description="建库"
+    )
+    store.ensure_state_database()
+
+    real = store_base_module.open_database
+    failures = {"left": 1}
+
+    def flaky(path, *, read_only):
+        if str(path).endswith("state.duckdb") and failures["left"]:
+            failures["left"] -= 1
+            raise duckdb.IOException(
+                "Could not set lock on file: Conflicting lock is held in PID 0"
+            )
+        return real(path, read_only=read_only)
+
+    monkeypatch.setattr(store_base_module, "open_database", flaky)
+
+    with store.state_read_session() as reader:
+        assert reader.execute("SELECT COUNT(*) FROM strategy_jobs").fetchone() is not None
+    assert failures["left"] == 0
+
+
+def test_a_persistent_lock_conflict_surfaces_as_a_store_error(monkeypatch, tmp_path: Path) -> None:
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    DuckDbStrategyJobStore(store).create(
+        "job-1", operation="market_strategy_pool", payload={}, description="建库"
+    )
+    store.ensure_state_database()
+    monkeypatch.setattr(store_base_module, "connect_retry_delays", lambda: (0.0, 0.0))
+    monkeypatch.setattr(
+        store_base_module,
+        "open_database",
+        lambda path, *, read_only: (_ for _ in ()).throw(duckdb.IOException("Conflicting lock")),
+    )
+
+    with pytest.raises(store_base_module.MarketDataStoreError, match="状态库当前被其它进程占用"):
+        store.state_read_session().__enter__()

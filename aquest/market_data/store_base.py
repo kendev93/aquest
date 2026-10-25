@@ -442,7 +442,20 @@ class _DuckDbStoreBase:
         if not self.has_state_database():
             return self._connect(read_only=read_only)
         mode = self.read_only if read_only is None else read_only
-        return open_database(self.state_database_path, read_only=mode)
+        # backend 与 worker 是两个进程，共享卷上 DuckDB 的读写打开互斥：worker 读状态库时
+        # backend 的写入会拿不到锁（反过来也一样），报
+        # `Could not set lock on file … Conflicting lock is held in PID 0`——跨容器看不到
+        # 对方 PID，所以显示 0。这种撞车是毫秒级的，按行情库同一套阶梯等一下即可。
+        last_error: duckdb.Error | None = None
+        for delay in (0.0, *connect_retry_delays()):
+            if delay:
+                time.sleep(delay)
+            try:
+                return open_database(self.state_database_path, read_only=mode)
+            except duckdb.Error as exc:
+                last_error = exc
+                continue
+        raise MarketDataStoreError("状态库当前被其它进程占用，请稍后重试") from last_error
 
     def _open_state_read(self) -> duckdb.DuckDBPyConnection:
         if not self.has_state_database():
