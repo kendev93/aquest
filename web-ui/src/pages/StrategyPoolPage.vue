@@ -532,6 +532,7 @@ const currentHoldingReturns = computed(() => new Map(
   ]),
 ))
 const signalAsOf = computed(() => signalResult.value?.as_of_date ?? '')
+const signalLag = computed(() => signalResult.value?.data_lag ?? null)
 const buyPage = ref(1)
 const sellPage = ref(1)
 const holdingsPage = ref(1)
@@ -1337,9 +1338,9 @@ function incompleteHoldingsWarning(): string {
     return `逐股持仓回放有 ${portfolio.failed_batches} 个批次失败，结果不完整；当前仅展示已确认的持仓。${reason}`
   }
   if (result?.signal_target) {
-    return '这是单股增量结果，尚未覆盖全市场；当前仅展示已确认的持仓，请刷新当天信号查看完整持仓。'
+    return '这是单股增量结果，尚未覆盖全市场；当前仅展示已确认的持仓，请刷新最新交易日信号查看完整持仓。'
   }
-  return '结果不完整，当前仅展示已确认的持仓；请刷新当天信号查看完整持仓。'
+  return '结果不完整，当前仅展示已确认的持仓；请刷新最新交易日信号查看完整持仓。'
 }
 
 function holdingReturnText(signal: StrategyPoolSignal): string {
@@ -1608,7 +1609,7 @@ onUnmounted(() => {
             <button class="button-primary" data-testid="pool-start-full" :disabled="isBusy || submittingTask" @click="startFullResearch(true)">清空并重建全市场</button>
             <button class="button-secondary" data-testid="pool-start-incremental" :disabled="isBusy || submittingTask" @click="startFullResearch(false)">增量更新策略池</button>
             <small v-if="researchEstimateText" class="research-estimate" data-testid="pool-research-estimate" :title="researchEstimateTitle">{{ researchEstimateText }}</small>
-            <button class="button-secondary" data-testid="pool-refresh-signals" :disabled="isBusy || submittingTask || !entries.some((item) => item.active_candidate)" @click="startSignalScan()">{{ submittingTask ? '正在提交…' : '刷新当天信号' }}</button>
+            <button class="button-secondary" data-testid="pool-refresh-signals" :disabled="isBusy || submittingTask || !entries.some((item) => item.active_candidate)" @click="startSignalScan()">{{ submittingTask ? '正在提交…' : '刷新最新交易日信号' }}</button>
             <label class="ticker-input">市场
               <select v-model="market" :disabled="isBusy"><option value="SH">SH</option><option value="SZ">SZ</option></select>
             </label>
@@ -1618,7 +1619,7 @@ onUnmounted(() => {
             <button class="button-secondary" data-testid="pool-rerun-single" :disabled="isBusy || submittingTask" @click="startSingleRerun">逐股重跑</button>
           </div>
 
-          <p class="empty-copy">后台在新收盘行情就绪后每日跟踪两套策略一次；打开页面只读取缓存。需要重算时请点击“刷新当天信号”。</p>
+          <p class="empty-copy">后台在新收盘行情就绪后每日跟踪两套策略一次；打开页面只读取缓存。需要重算时请点击“刷新最新交易日信号”。</p>
           <p class="empty-copy">清空重建会删除当前自动策略、手动覆盖和失败记录，从头逐只研究，点击后会先让你确认一次；增量更新保留已有策略并复用未变化的结果。</p>
 
           <div v-if="isBusy" class="pool-progress" data-testid="pool-job-progress">
@@ -1666,6 +1667,8 @@ onUnmounted(() => {
           <small v-else-if="signalDays.length > 1" data-testid="pool-signal-day-note">可回看最近 {{ signalDays.length }} 个交易日的扫描结果，默认显示最新行情那天</small>
         </div>
 
+        <p v-if="signalLag" class="empty-copy" data-testid="pool-signal-lag">最新交易日 {{ signalLag.expected_session }} 的行情尚未同步，本次按 {{ signalLag.scanned_session }} 扫描；行情同步到 {{ signalLag.expected_session }} 后再刷新即可补齐。</p>
+
         <section class="signal-grid">
           <article class="signal-panel panel-card" data-testid="pool-buy-signals">
             <div class="section-heading"><div><p class="eyebrow">BUY SIGNALS</p><h2>触发买入 <span>{{ buySignals.length }}</span></h2></div><small>{{ signalAsOf || '信号扫描后显示日期' }}</small></div>
@@ -1687,7 +1690,7 @@ onUnmounted(() => {
               <span>第 {{ buyPage }} / {{ buyPageCount }} 页 · 共 {{ buySignals.length }} 条</span>
               <button class="button-secondary" :disabled="buyPage >= buyPageCount" @click="buyPage += 1">下一页</button>
             </div>
-            <p v-if="!buySignals.length" class="empty-copy">{{ signalResult ? '当前没有股票触发买入规则。' : '选择目标后点击“刷新当天信号”，扫描最新完整行情日。' }}</p>
+            <p v-if="!buySignals.length" class="empty-copy">{{ signalResult ? '当前没有股票触发买入规则。' : '选择目标后点击“刷新最新交易日信号”，扫描最新完整行情日。' }}</p>
           </article>
           <article class="signal-panel panel-card" data-testid="pool-sell-signals">
             <div class="section-heading"><div><p class="eyebrow">SELL SIGNALS</p><h2>卖出规则与风控退出 <span>{{ ruleSellSignals.length + riskSellSignals.length }}</span></h2></div><small>{{ signalAsOf ? `${signalAsOf} 收盘判定卖出规则 · 风控退出在下一交易日开盘成交` : '卖出条件与持仓风控退出' }}</small></div>
@@ -1747,7 +1750,7 @@ onUnmounted(() => {
             </div>
             <p v-if="!signalResult" class="empty-copy">信号扫描完成后显示各股对应策略的持仓状态。</p>
             <p v-else-if="signalResult.model_portfolio?.available === false" class="empty-copy">{{ signalResult.model_portfolio.reason || '当前无法计算逐股策略持仓。' }}</p>
-            <p v-else-if="signalResult.holding_scope !== 'per_stock_strategy'" class="empty-copy">当前历史结果没有逐股持仓快照；请刷新当天信号后查看。</p>
+            <p v-else-if="signalResult.holding_scope !== 'per_stock_strategy'" class="empty-copy">当前历史结果没有逐股持仓快照；请刷新最新交易日信号后查看。</p>
             <p v-else-if="signalResult.holding_snapshot_complete !== true" class="empty-copy">{{ incompleteHoldingsWarning() }}</p>
             <p v-else-if="!currentHoldings.length" class="empty-copy">当前没有仍处于持仓状态的标的。</p>
           </article>

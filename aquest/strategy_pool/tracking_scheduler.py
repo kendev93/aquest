@@ -11,6 +11,7 @@ from typing import Any, Literal, cast
 from aquest.market_data.auto_sync import ACTIVE_DATA_JOB_DESCRIPTIONS
 from aquest.market_data.store import DuckDbMarketDataStore
 from aquest.strategy_discovery.duckdb_job_store import DuckDbStrategyJobStore
+from aquest.strategy_pool.signal_session import resolve_signal_session
 from aquest.strategy_pool.tracking_store import PoolTrackingStore
 
 TRACKING_OPERATION: Literal["market_strategy_pool_tracking"] = "market_strategy_pool_tracking"
@@ -18,17 +19,8 @@ TRACKING_OPERATION: Literal["market_strategy_pool_tracking"] = "market_strategy_
 #: 同一个交易日的自动扫描最短间隔。全市场研究每完成一只就产生一个新版本，调度器原来看到
 #: 「有没扫过的版本」就立刻再提交一次：2026-10-19 实测研究跑着的时候每 4 分钟就扫一遍全市场
 #: （每次 53–164 秒、4,409 只），一天 94 次，把跟踪通道占满、手动刷新只能排队。研究期间
-#: 新版本每半小时汇总扫一次就够了；手动「刷新当天信号」走接口，不受这个下限限制。
+#: 新版本每半小时汇总扫一次就够了；手动「刷新最新交易日信号」走接口，不受这个下限限制。
 AUTO_TRACKING_MIN_INTERVAL_SECONDS = 30 * 60
-
-
-def latest_completed_day(store: DuckDbMarketDataStore) -> str | None:
-    with store.read_session() as connection:
-        row = connection.execute(
-            "SELECT MAX(trade_date) FROM daily_bars WHERE "
-            "instrument_type='stock' AND bar_status='completed'"
-        ).fetchone()
-    return row[0].isoformat() if row and row[0] else None
 
 
 class PoolTrackingScheduler:
@@ -56,7 +48,8 @@ class PoolTrackingScheduler:
                 for item in self.backend.active_snapshots()
             ):
                 return None
-            latest = latest_completed_day(self.store)
+            session = resolve_signal_session(self.store)
+            latest = session.scanned.isoformat() if session.scanned else None
             versions = self.tracks.current_versions()
             if not latest or not any(
                 v["status"] == "pending" or str(v["summary"].get("as_of_date") or "") < latest
@@ -100,6 +93,7 @@ class PoolTrackingScheduler:
                         objective="annual_return",
                         automatic=True,
                         as_of_date=latest,
+                        data_lag=session.lag,
                         version_ids=pending_ids
                         if attempts
                         else [v["version_id"] for v in versions],

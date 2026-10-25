@@ -183,6 +183,8 @@ class PoolTrackingRunner:
             goal: dict(
                 mode="signals",
                 objective=goal,
+                as_of_date=payload.get("as_of_date"),
+                data_lag=payload.get("data_lag"),
                 buy_signals=[],
                 sell_signals=[],
                 states=[],

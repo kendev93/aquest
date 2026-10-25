@@ -204,6 +204,39 @@ describe('StrategyPoolPage', () => {
     expect(wrapper.get('[data-testid="pool-sell-signals"]').text()).toContain('当前没有卖出条件')
   })
 
+  it('explains when the latest trading day has no synced bars yet', async () => {
+    // 周末重跑时如果上一交易日的行情还没同步，扫描日会落在更早的一天；
+    // 只说日期而不说缺口，用户只会以为信号日期错了。
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValue({
+      job_id: 'signal-1',
+      status: 'completed',
+      result: {
+        mode: 'signals',
+        objective: 'annual_return',
+        holding_scope: 'per_stock_strategy',
+        holding_snapshot_complete: true,
+        as_of_date: '2026-10-22',
+        data_lag: { expected_session: '2026-10-23', scanned_session: '2026-10-22' },
+        buy_signals: [],
+        sell_signals: [],
+        states: [],
+        model_portfolio: {
+          available: true,
+          holding_scope: 'per_stock_strategy',
+          holdings: [],
+          risk_exit_signals: [],
+        },
+      },
+    })
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    const notice = wrapper.get('[data-testid="pool-signal-lag"]').text()
+    expect(notice).toContain('2026-10-23 的行情尚未同步')
+    expect(notice).toContain('2026-10-22 扫描')
+  })
+
   it('shows full-period quality metrics on buy, sell and holding rows', async () => {
     window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
     vi.mocked(api.getStrategyPoolJob).mockResolvedValue({
@@ -1881,7 +1914,7 @@ describe('StrategyPoolPage', () => {
     resolveCreate({ job_id: 'scan-1', status: 'queued' })
     await flushPromises()
     expect(wrapper.find('[data-testid="pool-submitting"]').exists()).toBe(false)
-    expect(wrapper.get('[data-testid="pool-refresh-signals"]').text()).toBe('刷新当天信号')
+    expect(wrapper.get('[data-testid="pool-refresh-signals"]').text()).toBe('刷新最新交易日信号')
     wrapper.unmount()
   })
 

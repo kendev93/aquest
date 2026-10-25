@@ -68,6 +68,7 @@ from .resources import (
     pool_worker_cap,
 )
 from .selection import common_calendar_windows, summarize_objective_winners
+from .signal_session import resolve_signal_session
 from .store import DuckDbStrategyPoolStore
 from .tracking_store import PoolTrackingStore
 
@@ -1777,8 +1778,16 @@ class MarketStrategyPoolService:
             else 0
         )
         total_work = len(position_refs) + max(1, position_batches)
-        latest_date: date | None = None
-        if market_status.data_end:
+        # 扫描日以提交时定下的 as_of_date 为准：任务排队期间行情又同步了新一天，
+        # 也不能把这一轮的结果改挂到另一天（历史视图按这个日期分组）。
+        target_session = _payload_session(payload.get("as_of_date"))
+        data_lag: object = payload.get("data_lag")
+        if target_session is None:
+            session = resolve_signal_session(self._store)
+            target_session = session.scanned
+            data_lag = data_lag or session.lag
+        latest_date: date | None = target_session
+        if latest_date is None and market_status.data_end:
             try:
                 latest_date = date.fromisoformat(market_status.data_end[:10])
             except ValueError:
@@ -1818,6 +1827,10 @@ class MarketStrategyPoolService:
                 if hasattr(observed_date, "date"):
                     observed_date = observed_date.date()
                 if isinstance(observed_date, date):
+                    # 单只标的的最后一根 bar 不能晚于这一轮的扫描日，否则未来日期或
+                    # 错年份的已完成行会把整轮的 as_of_date 推后。
+                    if target_session is not None:
+                        observed_date = min(observed_date, target_session)
                     latest_date = max(latest_date, observed_date) if latest_date else observed_date
                 buy = bool(
                     evaluate_rule_group(buy_rule, prepared.formula_results, FORMULA_REGISTRY)[-1]
@@ -1941,6 +1954,7 @@ class MarketStrategyPoolService:
                 and not model_portfolio.get("failed_batches")
             ),
             "as_of_date": latest_date.isoformat() if latest_date else None,
+            "data_lag": data_lag,
             "signal_target": (
                 {"market": single_symbol[0], "code": single_symbol[1]}
                 if single_symbol is not None
@@ -2537,6 +2551,17 @@ def _symbol_from_payload(payload: Mapping[str, object]) -> tuple[str, str]:
     if market not in {"SH", "SZ"} or len(code) != 6 or not code.isdigit():
         raise ValueError("单股重跑证券代码无效")
     return market, code
+
+
+def _payload_session(value: object) -> date | None:
+    """任务请求里的扫描日；格式不对就当没传，回落到本地判据。"""
+
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
 
 
 #: 研究范围可选板块。本地行情库只有 SH/SZ 两市的 A 股（没有北交所），

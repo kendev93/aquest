@@ -19,8 +19,9 @@ from aquest.portfolio_backtest.benchmark import curve_return
 from aquest.strategy_discovery.duckdb_job_store import DuckDbStrategyJobStore
 from aquest.strategy_discovery.job_backend import StrategyJobBackend
 from aquest.strategy_pool.service import MarketStrategyPoolService
+from aquest.strategy_pool.signal_session import resolve_signal_session
 from aquest.strategy_pool.store import DuckDbStrategyPoolStore, Objective
-from aquest.strategy_pool.tracking_scheduler import TRACKING_OPERATION, latest_completed_day
+from aquest.strategy_pool.tracking_scheduler import TRACKING_OPERATION
 from aquest.strategy_pool.tracking_store import PoolTrackingStore
 
 router = APIRouter(prefix="/strategy-pool", tags=["strategy-pool"])
@@ -488,11 +489,13 @@ def create_strategy_pool_job(payload: PoolJobRequest, request: Request) -> dict[
                 for v in PoolTrackingStore(_market_store(request)).current_versions()
                 if v["market"] == payload.market and v["code"] == payload.code
             ]
+        session = resolve_signal_session(_market_store(request))
         job_id = backend.submit(
             TRACKING_OPERATION,
             {
                 **payload.model_dump(exclude_none=True),
-                "as_of_date": latest_completed_day(_market_store(request)),
+                "as_of_date": session.scanned.isoformat() if session.scanned else None,
+                "data_lag": session.lag,
                 "version_ids": target_ids,
             },
             description="策略池双目标跟踪",

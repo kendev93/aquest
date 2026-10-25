@@ -155,6 +155,12 @@ export interface StrategyPoolMarketSnapshot {
   last_online_sync_at: string | null
 }
 
+/** 最新交易日的行情还没同步完时，后端说明实际扫描的是哪一天。 */
+export interface StrategyPoolSignalLag {
+  expected_session: string
+  scanned_session: string
+}
+
 export interface StrategyPoolJobResult {
   results_by_objective?: Partial<Record<StrategyPoolObjective, StrategyPoolJobResult>>
   mode?: StrategyPoolMode
@@ -180,6 +186,7 @@ export interface StrategyPoolJobResult {
   portfolio?: Record<string, unknown>
   common_calendar?: Record<string, unknown>
   as_of_date?: string | null
+  data_lag?: StrategyPoolSignalLag | null
   signal_target?: { market: 'SH' | 'SZ'; code: string } | null
   holding_scope?: 'per_stock_strategy' | string
   holding_snapshot_complete?: boolean
