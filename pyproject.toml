@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "aquest"
-version = "0.1.7"
+version = "0.1.8"
 description = "A股策略研究：基于 DuckDB 的跨平台指标筛选、组合与回测应用"
 readme = "README.md"
 license = { file = "LICENSE" }
