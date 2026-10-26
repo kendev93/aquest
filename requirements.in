@@ -1,7 +1,7 @@
 # Runtime dependency constraints for the Python 3.12 release lock.
 # Compile requirements.txt in Python 3.12 with pip-tools; Docker and CI install
 # the generated exact pins and hashes from that file.
-alembic>=1.18.4
+alembic>=1.20.1
 # baostock 来自 pyproject 的 catalog extra：东财 clist 目录接口被封后它是唯一稳定的
 # 全市场标的发现通道。正式镜像需要它，所以直接并进运行时清单，由 Dockerfile 在
 # COPY 源码之前那一层装好，避免为它再跑一次需要联网的 pip。
@@ -15,7 +15,7 @@ click>=8.4.2
 colorama>=0.4.6
 colorlog>=6.12.0
 cryptography>=41,<51
-duckdb>=1.5.5,<2
+duckdb>=1.5.5,<3
 fastapi>=0.135.1,<1
 greenlet>=3.5.0
 h11>=0.16.0
@@ -33,13 +33,13 @@ pandas>=2.3.3,<4
 PyYAML>=6.0.3
 pydantic>=2.12.5,<3
 pydantic-core>=2.41.5
-python-dateutil>=2.9.0.post0
+python-dateutil>=3.0.0
 python-multipart>=0.0.22
 pytz>=2026.5
 scipy>=1.18.1
 six>=1.17.0
-SQLAlchemy>=2.1.5
-starlette>=1.8.0
+SQLAlchemy>=2.1.6
+starlette>=1.9.0
 tqdm>=4.67.3
 typing-extensions>=4.16.0
 typing-inspection>=0.4.4
