@@ -1416,21 +1416,24 @@ function sellItemSymbol(item: SellPanelItem): string {
 // 排序取全区间指标：与行内「全区间胜率 / 盈亏比」文案同一口径，且跟踪增量返回的
 // 信号行本身不带指标，只有条目表补得上。缺全区间指标的行排在末尾。
 function sortSignalRows<T>(rows: T[], keyOf: (row: T) => string): T[] {
-  const pinned: T[] = []
-  const rest: T[] = []
-  for (const row of rows) {
-    (followKeys.value.has(keyOf(row)) ? pinned : rest).push(row)
+  // 关注只在默认排序（按状态优先级）时置顶：选了指标以后还钉在榜首，关注行就会挡住
+  // 真正的排序结果，看着像是排序没生效。
+  if (signalSort.value === 'default') {
+    const pinned: T[] = []
+    const rest: T[] = []
+    for (const row of rows) {
+      (followKeys.value.has(keyOf(row)) ? pinned : rest).push(row)
+    }
+    return [...pinned, ...rest]
   }
-  if (signalSort.value === 'default') return [...pinned, ...rest]
   const metric = signalSort.value
   const score = (row: T): number => {
     const value = entryQualityMap.value.get(keyOf(row))?.[metric]
     return typeof value === 'number' && Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY
   }
-  const ordered = (list: T[]): T[] => [...list].sort((left, right) => (
+  return [...rows].sort((left, right) => (
     score(right) - score(left) || keyOf(left).localeCompare(keyOf(right))
   ))
-  return [...ordered(pinned), ...ordered(rest)]
 }
 
 function riskExitReturnText(signal: Record<string, unknown>): string {

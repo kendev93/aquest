@@ -2628,7 +2628,7 @@ describe('StrategyPoolPage', () => {
       expect(wrapper.find('[data-testid="pool-focus-empty"]').exists()).toBe(true)
     })
   })
-  it('pins followed symbols above the selected sort in buy, sell and holdings panels', async () => {
+  it('pins followed symbols only under the default sort, not under a metric sort', async () => {
     window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
     vi.mocked(api.fetchStrategyPoolFocus).mockResolvedValue([
       { market: 'SH', code: '600000', name: '测试600000' },
@@ -2676,8 +2676,15 @@ describe('StrategyPoolPage', () => {
     await flushPromises()
 
     const firstRow = (panel: string) => wrapper.findAll(`${panel} .signal-row`)[0]
-    expect(firstRow('[data-testid="pool-buy-signals"]')?.find('[data-testid="pool-buy-follow-600000"]').exists()).toBe(true)
-    expect(firstRow('[data-testid="pool-sell-signals"]')?.find('[data-testid="pool-sell-rule-follow-600000"]').exists()).toBe(true)
+    // 按指标排序时关注行不再置顶：0.9 的 600002 排第一，0.2 的关注票排第二。
+    expect(firstRow('[data-testid="pool-buy-signals"]')?.find('[data-testid="pool-buy-follow-600002"]').exists()).toBe(true)
+    expect(firstRow('[data-testid="pool-sell-signals"]')?.find('[data-testid="pool-sell-rule-follow-600002"]').exists()).toBe(true)
+    // 持仓面板没有指标排序，默认顺序下关注仍然置顶。
     expect(firstRow('[data-testid="pool-current-holdings"]')?.find('[data-testid="pool-holding-follow-600000"]').exists()).toBe(true)
+
+    // 切回默认排序：关注行重新置顶。
+    await wrapper.get('[data-testid="pool-signal-sort"]').setValue('default')
+    await flushPromises()
+    expect(firstRow('[data-testid="pool-buy-signals"]')?.find('[data-testid="pool-buy-follow-600000"]').exists()).toBe(true)
   })
 })
