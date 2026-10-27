@@ -149,7 +149,7 @@ const SIGNAL_SORT_OPTIONS = [
   { value: 'default', label: '默认顺序' },
   { value: 'win_rate', label: '全区间胜率 高→低' },
   { value: 'payoff_ratio', label: '全区间盈亏比 高→低' },
-  { value: 'total_return', label: '全区间收益 高→低' },
+  { value: 'annual_return', label: '全区间年化收益 高→低' },
 ] as const
 type SignalSortValue = (typeof SIGNAL_SORT_OPTIONS)[number]['value']
 const signalSort = ref<SignalSortValue>('default')
@@ -1395,6 +1395,11 @@ function qualityText(key: string): string {
   const full = entryQualityMap.value.get(key)
   if (!full) return ''
   const parts: string[] = []
+  // 全区间累计收益不可跨标的比较（上市早的累计年份更多），排序按年化；
+  // 这里把年化一并写出来，排序结果才在行内看得见。
+  if (typeof full.annual_return === 'number' && Number.isFinite(full.annual_return)) {
+    parts.push(`全区间年化 ${formatPercent(full.annual_return)}`)
+  }
   if (typeof full.win_rate === 'number' && Number.isFinite(full.win_rate)) {
     parts.push(`全区间胜率 ${formatPercent(full.win_rate)}`)
   }

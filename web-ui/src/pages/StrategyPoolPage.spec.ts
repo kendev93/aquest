@@ -276,14 +276,15 @@ describe('StrategyPoolPage', () => {
     expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('平均持仓 12.5 天')
   })
 
-  it('sorts buy and sell signal rows by full-period payoff ratio and win rate', async () => {
+  it('sorts buy and sell signal rows by full-period payoff ratio, win rate and annualized return', async () => {
     window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
     // 跟踪增量路径返回的信号行不带指标，顺序是证券代码升序；排序只能靠条目表补全区间口径。
-    // SH600003 没有全区间指标，按指标排序时落到末尾。
+    // SH600003 没有全区间指标，按指标排序时落到末尾。四组指标刻意排成互相不同的顺序：
+    // 累计收益（600000 最高）与年化（600002 最高）必须能被区分开。
     vi.mocked(api.fetchStrategyPoolEntries).mockResolvedValue([
-      entryWithQuality('600000', { win_rate: 0.4, payoff_ratio: 3, total_return: 0.1 }),
-      entryWithQuality('600001', { win_rate: 0.7, payoff_ratio: 1, total_return: 0.3 }),
-      entryWithQuality('600002', { win_rate: 0.55, payoff_ratio: 2, total_return: 0.2 }),
+      entryWithQuality('600000', { win_rate: 0.4, payoff_ratio: 3, total_return: 0.9, annual_return: 0.2 }),
+      entryWithQuality('600001', { win_rate: 0.7, payoff_ratio: 1, total_return: 0.3, annual_return: 0.1 }),
+      entryWithQuality('600002', { win_rate: 0.55, payoff_ratio: 2, total_return: 0.2, annual_return: 0.3 }),
     ])
     const codes = ['600003', '600000', '600001', '600002']
     vi.mocked(api.getStrategyPoolJob).mockResolvedValue({
@@ -323,8 +324,9 @@ describe('StrategyPoolPage', () => {
     await sort.setValue('win_rate')
     expect(rowSymbols('pool-buy-signals')).toEqual(['SH600001', 'SH600002', 'SH600000', 'SH600003'])
 
-    await sort.setValue('total_return')
-    expect(rowSymbols('pool-buy-signals')).toEqual(['SH600001', 'SH600002', 'SH600000', 'SH600003'])
+    await sort.setValue('annual_return')
+    // 按年化而不是累计收益：600002 年化最高，累计最高的 600000 只排第二。
+    expect(rowSymbols('pool-buy-signals')).toEqual(['SH600002', 'SH600000', 'SH600001', 'SH600003'])
 
     await sort.setValue('default')
     expect(rowSymbols('pool-buy-signals')).toEqual(returned)
@@ -2634,8 +2636,8 @@ describe('StrategyPoolPage', () => {
       { market: 'SH', code: '600000', name: '测试600000' },
     ])
     vi.mocked(api.fetchStrategyPoolEntries).mockResolvedValue([
-      entry('600000', 0.2),
-      entry('600002', 0.9),
+      entryWithQuality('600000', { annual_return: 0.2 }),
+      entryWithQuality('600002', { annual_return: 0.9 }),
     ])
     const focused = buySignal
     const other = signalFor('600002')
@@ -2672,11 +2674,11 @@ describe('StrategyPoolPage', () => {
 
     const wrapper = mount(StrategyPoolPage)
     await flushPromises()
-    await wrapper.get('[data-testid="pool-signal-sort"]').setValue('total_return')
+    await wrapper.get('[data-testid="pool-signal-sort"]').setValue('annual_return')
     await flushPromises()
 
     const firstRow = (panel: string) => wrapper.findAll(`${panel} .signal-row`)[0]
-    // 按指标排序时关注行不再置顶：0.9 的 600002 排第一，0.2 的关注票排第二。
+    // 按指标排序时关注行不再置顶：年化 0.9 的 600002 排第一，0.2 的关注票排第二。
     expect(firstRow('[data-testid="pool-buy-signals"]')?.find('[data-testid="pool-buy-follow-600002"]').exists()).toBe(true)
     expect(firstRow('[data-testid="pool-sell-signals"]')?.find('[data-testid="pool-sell-rule-follow-600002"]').exists()).toBe(true)
     // 持仓面板没有指标排序，默认顺序下关注仍然置顶。
