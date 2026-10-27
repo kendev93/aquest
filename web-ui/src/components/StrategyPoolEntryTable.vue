@@ -11,6 +11,7 @@ import type {
 import { formatNumber, formatPercent, formatSignedPercent } from '../utils/format'
 import {
   benchmarkReturn,
+  fullPeriodAsOf,
   entryHoldingRisk,
   entryIsHeld,
   entryLatestClose,
@@ -155,11 +156,12 @@ function latestCloseAsOf(entry: StrategyPoolEntry): string {
           <td :data-testid="`${testid}-entry-benchmark-${entry.code}`">
             <div v-if="entry.benchmark" class="benchmark-summary">
               <div>全段基准 <b>{{ formatSignedPercent(benchmarkReturn(entry)) }}</b></div>
+              <small v-if="fullPeriodAsOf(entry)">截至 {{ fullPeriodAsOf(entry) }}</small>
             </div>
             <span v-else class="empty-copy">下次全市场重选时补算</span>
           </td>
           <td :data-testid="`${testid}-created-return-${entry.code}`">{{ typeof entry.created_return === 'number' ? formatPercent(entry.created_return) : entry.tracking_status === 'pending' ? '待初始化' : entry.tracking_status === 'failed' ? '更新失败' : '—' }}<small v-if="entry.tracking_status === 'failed'">同步失败，保留上次结果</small><small v-if="entry.tracking_as_of_date">截至 {{ entry.tracking_as_of_date }}</small></td>
-          <td>{{ formatPercent(metricValue(entry, 'strategy_return')) }}</td>
+          <td :data-testid="`${testid}-strategy-return-${entry.code}`">{{ formatPercent(metricValue(entry, 'strategy_return')) }}<small v-if="fullPeriodAsOf(entry)">截至 {{ fullPeriodAsOf(entry) }}</small></td>
           <td>{{ formatPercent(metricValue(entry, 'annual_return')) }}</td>
           <td>{{ formatNumber(metricValue(entry, 'sharpe')) }}</td>
           <td>{{ formatPercent(metricValue(entry, 'win_rate')) }}</td>

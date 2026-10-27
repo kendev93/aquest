@@ -26,6 +26,7 @@ import {
   statusOrder,
   symbol,
   tradeCount,
+  fullPeriodAsOf,
 } from './strategyPoolStatus'
 
 const candidate = {
@@ -231,6 +232,13 @@ describe('持仓风控展示', () => {
     expect(holdingRiskSummary(holding)).toBe('止损 9.00（截至 2026-10-16 收盘）')
     expect(holdingRiskSummary({ ...holding, max_hold_days: 20, max_hold_days_left: 9 })).toBe(
       '止损 9.00（截至 2026-10-16 收盘） · 还剩 9 个交易日到期',
+    )
+  })
+
+  it('全区间指标的截至日只在有最新口径时给出', () => {
+    expect(fullPeriodAsOf(entry('600000'))).toBeNull()
+    expect(fullPeriodAsOf(entry('600001', { full_period_as_of_date: '2026-10-27' }))).toBe(
+      '2026-10-27',
     )
   })
 

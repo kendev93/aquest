@@ -64,6 +64,22 @@ describe('StrategyPoolEntryTable', () => {
     expect(focus.find('[data-testid="pool-row-600000"]').exists()).toBe(false)
   })
 
+  it('marks the full-period metrics with the replay end date', () => {
+    // 绩效与基准每天按当前策略回放到最新收盘；标出截至日，避免把「研究那一刻」的数
+    // 当成「到今天」的数。旧摘要没有这一块时不标，继续显示研究口径。
+    const tracked = { ...entry('600000'), full_period_as_of_date: '2026-10-27' }
+    const wrapper = mountTable({ entries: [tracked] })
+    expect(wrapper.get('[data-testid="pool-strategy-return-600000"]').text()).toContain(
+      '截至 2026-10-27',
+    )
+    expect(wrapper.get('[data-testid="pool-entry-benchmark-600000"]').text()).toContain(
+      '截至 2026-10-27',
+    )
+
+    const legacy = mountTable({ entries: [entry('600001')] })
+    expect(legacy.get('[data-testid="pool-strategy-return-600001"]').text()).not.toContain('截至')
+  })
+
   it('prints the latest completed close on every row, held or not', () => {
     // 价从行情直接取，不依赖跟踪摘要：空仓、没有信号、甚至还没有跟踪版本的行都得有同一个数。
     const tracked = {

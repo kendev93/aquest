@@ -153,6 +153,7 @@ _LIST_ENTRY_FIELDS = frozenset(
         "tracking",
         "tracking_status",
         "tracking_as_of_date",
+        "full_period_as_of_date",
         "created_return",
         "post_launch_return",
         "post_launch_benchmark_return",
@@ -242,6 +243,23 @@ def _project_tracking_for_list(tracking: object) -> object:
     return projected
 
 
+def _with_fresh_full_period(
+    candidate: Mapping[str, object],
+    fresh: Mapping[str, object],
+) -> dict[str, object]:
+    """列表里的全区间指标换成「回放到最新收盘」的那一份。
+
+    规则、配置与分段指标都保持研究时的样子，只替换 ``metrics.full_period``——
+    这一块每天由跟踪回放重算，表格的收益 / 年化 / 夏普 / 胜率 / 盈亏比 / 回撤 /
+    持仓天数都从这里读。
+    """
+
+    metrics = candidate.get("metrics")
+    merged = dict(metrics) if isinstance(metrics, Mapping) else {}
+    merged["full_period"] = dict(fresh)
+    return {**candidate, "metrics": merged}
+
+
 def _project_benchmark_for_list(benchmark: object) -> object:
     """列表用的基准：只留表格会渲染的那一个数。
 
@@ -282,6 +300,20 @@ def list_strategy_pool_entries(
         item["active_source"] = "manual" if override_map.get(selected) is not None else "automatic"
         tracking = track_index.get((item["market"], item["code"], selected, item["active_source"]))
         summary = tracking["summary"] if tracking else {}
+        # 全区间指标与基准：跟踪摘要里那份是「当前策略回放到最新收盘」的口径，
+        # 每天跟着信号扫描刷新；没有这一块（升级前的老快照）就继续显示研究口径。
+        use_fresh = False
+        fresh_benchmark: Mapping[str, object] | None = None
+        item["full_period_as_of_date"] = None
+        if isinstance(summary, Mapping):
+            benchmark_value = summary.get("benchmark")
+            fresh_benchmark = benchmark_value if isinstance(benchmark_value, Mapping) else None
+            fresh_value = summary.get("full_period")
+            if isinstance(active, Mapping) and isinstance(fresh_value, Mapping):
+                active = _with_fresh_full_period(active, fresh_value)
+                item["active_candidate"] = active
+                item["full_period_as_of_date"] = fresh_value.get("as_of_date")
+                use_fresh = True
         item["tracking"] = tracking
         item["created_at"] = tracking["created_at"] if tracking else None
         item["tracking_status"] = tracking["status"] if tracking else "unavailable"
@@ -300,7 +332,11 @@ def list_strategy_pool_entries(
         price = closes.get((str(item["market"]), str(item["code"])))
         item["latest_close"] = price[0] if price else None
         item["latest_close_date"] = price[1] if price else None
-        item["benchmark"] = _project_benchmark_for_list(item.get("benchmark"))
+        item["benchmark"] = _project_benchmark_for_list(
+            fresh_benchmark
+            if use_fresh and isinstance(fresh_benchmark, Mapping)
+            else item.get("benchmark")
+        )
         projected_items.append(
             {
                 **{key: value for key, value in item.items() if key in _LIST_ENTRY_FIELDS},

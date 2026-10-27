@@ -135,6 +135,12 @@ export function metricValue(
   return metricRawValue(entry, key) ?? Number.NEGATIVE_INFINITY
 }
 
+/** 全区间指标回放到的日期；旧摘要没有这一块时返回 null，页面继续显示研究口径。 */
+export function fullPeriodAsOf(entry: StrategyPoolEntry): string | null {
+  const value = entry.full_period_as_of_date
+  return typeof value === 'string' && value ? value : null
+}
+
 export function benchmarkReturn(entry: StrategyPoolEntry): number | null {
   const value = entry.benchmark?.full_period?.total_return
   return typeof value === 'number' && Number.isFinite(value) ? value : null

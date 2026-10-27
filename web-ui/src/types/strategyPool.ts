@@ -66,6 +66,8 @@ export interface StrategyPoolEntry {
   created_return?: number | null
   tracking_status?: string
   tracking_as_of_date?: string | null
+  /** 表格里的全区间指标与基准回放到哪一天（来自跟踪摘要，旧数据为空）。 */
+  full_period_as_of_date?: string | null
   /**
    * 上线后窗口（从这一版策略的 launch_data_date 起算）。后端从当前生效版本（手工优先）
    * 的摘要里投影出来，`post_launch_has_data` 为假表示创建后还没有新行情——那是「还没跑」

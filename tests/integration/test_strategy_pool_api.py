@@ -729,6 +729,102 @@ def test_focus_api_rejects_members_beyond_the_limit(tmp_path) -> None:
         assert len(client.get("/api/v1/strategy-pool/focus").json()["data"]["items"]) == FOCUS_LIMIT
 
 
+def test_list_shows_the_daily_replayed_metrics_with_their_end_date(tmp_path) -> None:
+    """列表里的绩效与基准用跟踪摘要那份「回放到最新收盘」的口径，并标出截至日。
+
+    研究那一刻冻结的候选指标只作为老快照的兜底；分段指标（验证 / 留出）保持研究口径。
+    """
+
+    import json
+
+    store = _store(tmp_path)
+    pool = DuckDbStrategyPoolStore(store)
+    pool.upsert_automatic(
+        market="SH",
+        code="600000",
+        name="浦发银行",
+        annual_candidate={
+            "candidate_id": "candidate-1",
+            "buy_rule": {"signals": ["technical.macd"]},
+            "sell_rule": {"signals": []},
+            "metrics": {
+                "full_period": {"total_return": 0.30, "closed_trades": 30},
+                "validation": {"closed_trades": 6},
+            },
+            "replayable": True,
+        },
+        sharpe_candidate=None,
+        data_fingerprint="d",
+        config_fingerprint="c",
+        source_job_id="job",
+        benchmark={"full_period": {"total_return": 0.10}},
+    )
+    fresh = {
+        "as_of_date": "2026-10-27",
+        "full_period": {"as_of_date": "2026-10-27", "total_return": 0.62, "closed_trades": 31},
+        "benchmark": {
+            "caliber_version": "tracking-window-buy-hold-v1",
+            "full_period": {"end_date": "2026-10-27", "total_return": 0.45},
+        },
+    }
+    with store.state_write_transaction() as connection:
+        connection.execute(
+            "UPDATE pool_tracking_versions SET summary_json=? WHERE is_current",
+            [json.dumps(fresh)],
+        )
+
+    app = create_app(market_data_store=store, auto_sync_enabled=False)
+    with TestClient(app) as client:
+        row = client.get("/api/v1/strategy-pool/entries").json()["data"]["items"][0]
+
+    assert row["full_period_as_of_date"] == "2026-10-27"
+    metrics = row["active_candidate"]["metrics"]
+    assert metrics["full_period"]["total_return"] == 0.62
+    assert metrics["full_period"]["closed_trades"] == 31
+    # 分段指标仍是研究口径，不被覆盖。
+    assert metrics["validation"]["closed_trades"] == 6
+    assert row["benchmark"]["full_period"]["total_return"] == 0.45
+
+
+def test_list_falls_back_to_research_metrics_for_old_summaries(tmp_path) -> None:
+    """升级前的老快照没有最新口径：列表继续显示研究时的指标，且不标截至日。"""
+
+    import json
+
+    store = _store(tmp_path)
+    pool = DuckDbStrategyPoolStore(store)
+    pool.upsert_automatic(
+        market="SH",
+        code="600000",
+        name="浦发银行",
+        annual_candidate={
+            "candidate_id": "candidate-1",
+            "buy_rule": {"signals": ["technical.macd"]},
+            "sell_rule": {"signals": []},
+            "metrics": {"full_period": {"total_return": 0.30, "closed_trades": 30}},
+            "replayable": True,
+        },
+        sharpe_candidate=None,
+        data_fingerprint="d",
+        config_fingerprint="c",
+        source_job_id="job",
+        benchmark={"full_period": {"total_return": 0.10}},
+    )
+    with store.state_write_transaction() as connection:
+        connection.execute(
+            "UPDATE pool_tracking_versions SET summary_json=? WHERE is_current",
+            [json.dumps({"as_of_date": "2026-10-20"})],
+        )
+
+    app = create_app(market_data_store=store, auto_sync_enabled=False)
+    with TestClient(app) as client:
+        row = client.get("/api/v1/strategy-pool/entries").json()["data"]["items"][0]
+
+    assert row["full_period_as_of_date"] is None
+    assert row["active_candidate"]["metrics"]["full_period"]["total_return"] == 0.30
+    assert row["benchmark"]["full_period"]["total_return"] == 0.10
+
+
 def test_worker_can_save_tracking_snapshots_in_one_batch(tmp_path) -> None:
     """扫描逐只算完发过来的快照合成一个事务落库，返回的标志与传入顺序一一对应。"""
 
