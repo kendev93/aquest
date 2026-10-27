@@ -157,6 +157,7 @@ const MARKET_PHASE_TEXT: Record<string, string> = {
   online_bars: '正在同步在线日线…',
   merging: '正在合并行情分片…',
   cleanup: '正在清理临时分片…',
+  precomputing: '正在重算指标缓存…',
 }
 
 /** 进度条的数字是**按阶段**归一的：合并阶段会从现在的 99% 掉回 60% 左右，所以百分比必须跟着阶段名一起看。 */
@@ -319,8 +320,8 @@ function noteProgressSample(job: MarketSyncJobState): void {
 
 /** 进度条的百分比是按阶段归一的，所以单位也跟着阶段走：合并数的是区间，不是标的。 */
 function progressUnit(job: MarketSyncJobState | null): string {
-  if (job?.phase === 'merging') return '个区间'
-  if (job?.phase === 'cleanup') return '个分片'
+  // 合并与清理现在是几步就做完的事，用「只/秒」去外推只剩几十毫秒的剩余没有意义。
+  if (job?.phase === 'merging' || job?.phase === 'cleanup') return ''
   return '只'
 }
 
@@ -334,6 +335,7 @@ function progressPaceText(job: MarketSyncJobState | null): string {
   if (elapsedSeconds < PACE_MIN_SAMPLES_MS / 1000) return ''
   const advanced = last.scanned - first.scanned
   const unit = progressUnit(job)
+  if (!unit) return ''
   if (advanced <= 0) {
     return elapsedSeconds >= 5
       ? `最近 ${Math.round(elapsedSeconds)} 秒没有新增进度（多半卡在等在线源或等库）`
@@ -369,15 +371,14 @@ function marketProgressSummary(job: MarketSyncJobState | null): string {
     return `待删除 ${targets} 只标的的全部历史${range}`
   }
   if (job.phase === 'merging') {
-    const planned = typeof metadata.planned_jobs === 'number' ? metadata.planned_jobs : null
-    if (planned !== null) {
-      const completed = typeof metadata.completed === 'number' ? metadata.completed : job.total_scanned
-      const failed = typeof metadata.failed === 'number' ? metadata.failed : job.errors
-      return `已合并 ${completed + failed} / ${planned} 个区间`
-    }
-    const merged = typeof metadata.merged_workers === 'number' ? metadata.merged_workers : job.total_scanned
-    const total = typeof metadata.total_workers === 'number' ? metadata.total_workers : job.worker_count ?? 8
-    return `已合并 ${merged} / ${total} 个分片`
+    // 所有分片一次合并，没有「第几个分片」可报；给要写入的日线根数，能看出工作量。
+    const staged = typeof metadata.staged_rows === 'number' ? metadata.staged_rows : null
+    return staged !== null ? `正在合并 ${staged.toLocaleString()} 根日线…` : '正在合并行情分片…'
+  }
+  if (job.phase === 'precomputing') {
+    const done = typeof metadata.precompute_done === 'number' ? metadata.precompute_done : 0
+    const total = typeof metadata.precompute_total === 'number' ? metadata.precompute_total : 0
+    return total > 0 ? `已重算 ${done} / ${total} 只` : '正在重算指标缓存…'
   }
   if (job.phase === 'fetching') {
     const downloaded = typeof metadata.downloaded_targets === 'number'

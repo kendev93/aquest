@@ -600,9 +600,10 @@ describe('MarketDataPage', () => {
       phase: 'merging',
       metadata: {
         execution_mode: 'process_pool_staging',
-        merged_workers: 3,
+        merged_workers: 0,
         total_workers: 8,
-        merged_rows: 1200,
+        staged_rows: 52123,
+        merged_rows: 0,
       },
       result: null,
     }])
@@ -611,9 +612,38 @@ describe('MarketDataPage', () => {
     await flushPromises()
 
     const progress = wrapper.get('[data-testid="market-data-progress"]')
-    expect(progress.text()).toContain('已合并 3 / 8 个分片')
+    expect(progress.text()).toContain('正在合并 52,123 根日线…')
     expect(progress.findAll('.progress-track')).toHaveLength(1)
     expect(wrapper.find('[data-testid="market-active-jobs"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('names the indicator precompute stage instead of leaving the merge label up', async () => {
+    vi.mocked(marketApi.fetchActiveMarketDataJobs).mockResolvedValueOnce([{
+      job_id: 'precompute-1',
+      description: '行情同步',
+      status: 'running',
+      progress: 0.25,
+      total_candidates: 5227,
+      total_scanned: 1200,
+      errors: 0,
+      error: null,
+      worker_count: 8,
+      phase: 'precomputing',
+      metadata: {
+        execution_mode: 'process_pool_staging',
+        precompute_done: 1200,
+        precompute_total: 5227,
+      },
+      result: null,
+    }])
+
+    const wrapper = mountPage()
+    await flushPromises()
+
+    const progress = wrapper.get('[data-testid="market-data-progress"]')
+    expect(progress.text()).toContain('正在重算指标缓存…')
+    expect(progress.text()).toContain('已重算 1200 / 5227 只')
     wrapper.unmount()
   })
 

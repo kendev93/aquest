@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from datetime import date, datetime
 from pathlib import Path
 
@@ -198,6 +198,14 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
 
     def merge_online_stage(self, stage_path: str | Path) -> StageMergeReport:
         return self._bars.merge_online_stage(stage_path)
+
+    def merge_online_stages(
+        self,
+        stage_paths: Sequence[str | Path],
+        *,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> StageMergeReport:
+        return self._bars.merge_online_stages(stage_paths, progress=progress)
 
     def read_bars(
         self,

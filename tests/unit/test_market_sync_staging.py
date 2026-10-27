@@ -179,6 +179,43 @@ def test_stage_merge_preserves_each_fetched_bar_provider(tmp_path: Path) -> None
     assert next(ref for ref in store.list_instruments() if ref.code == "600000").provider == "mixed"
 
 
+def test_merging_all_stages_in_one_pass_keeps_every_instrument(tmp_path: Path) -> None:
+    """8 个分片一次并进主库：行、覆盖区间与进度都要对。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    codes = ("600000", "600001", "600002")
+    paths = []
+    for index, code in enumerate(codes):
+        path = tmp_path / f"worker-{index}.duckdb"
+        with StageWriter(path) as writer:
+            writer.write_target(
+                _target(code),
+                _staged_frame(),
+                status="updated",
+                range_start="2024-01-02",
+                range_end="2024-01-03",
+                retries=0,
+                history_source="eastmoney",
+            )
+        paths.append(path)
+
+    calls: list[tuple[int, int]] = []
+    report = store.merge_online_stages(
+        paths, progress=lambda done, total: calls.append((done, total))
+    )
+
+    assert report.staged_rows == len(codes) * 2
+    assert report.merged_rows == len(codes) * 2
+    assert report.affected_instruments == len(codes)
+    # 每一步都回调一次：拖挂 3 个分片 + 建临时表 + 刷新覆盖区间。
+    assert calls[0] == (1, len(paths) + 2)
+    assert calls[-1] == (len(paths) + 2, len(paths) + 2)
+    for code in codes:
+        assert len(store.read_bars("SH", code)) == 2
+    covered = {(item.code, item.bar_count) for item in store.list_instruments()}
+    assert covered == {(code, 2) for code in codes}
+
+
 def test_cleanup_stale_staging_removes_only_old_job_directories(tmp_path: Path) -> None:
     staging_root = tmp_path / ".sync-staging"
     old_job = staging_root / "old-job"

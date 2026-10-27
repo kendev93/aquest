@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from datetime import date, datetime
 from pathlib import Path
 from typing import cast
@@ -1009,26 +1009,58 @@ class DuckDbBarsStore:
         return results
 
     def merge_online_stage(self, stage_path: str | Path) -> StageMergeReport:
-        """Merge one completed process-local staging database into the main store."""
+        """单个分片就是「多分片合并」的特例。"""
+
+        return self.merge_online_stages([stage_path])
+
+    def merge_online_stages(
+        self,
+        stage_paths: Sequence[str | Path],
+        *,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> StageMergeReport:
+        """一次把所有分片合并进主库。
+
+        逐片合并会把 1,100 万行的 ``daily_bars`` 按「计数、变更键、删除、写入」重复扫
+        8 遍；一次并进来只扫一遍。``progress`` 按步骤回调（拖挂分片、建临时表、刷新
+        覆盖区间），不按分片号。
+        """
 
         self._store._require_writer()
-        path = Path(stage_path).expanduser().resolve()
-        if not path.is_file():
-            raise FileNotFoundError(f"行情分片数据库不存在: {path}")
-        attached = False
+        paths = [Path(item).expanduser().resolve() for item in stage_paths]
+        if not paths:
+            return StageMergeReport(
+                staged_rows=0,
+                merged_rows=0,
+                existing_online_rows=0,
+                affected_instruments=0,
+            )
+        for path in paths:
+            if not path.is_file():
+                raise FileNotFoundError(f"行情分片数据库不存在: {path}")
+        steps = len(paths) + 2
+        done = 0
+        attached: list[str] = []
         with _WRITE_LOCK, self._store._connect() as connection:
             try:
-                connection.execute(f"ATTACH {_sql_path_literal(path)} AS sync_stage (READ_ONLY)")
-                attached = True
-                connection.execute(
-                    """
-                    CREATE TEMP TABLE _staged_online AS
-                    SELECT market, code, instrument_type, board, trade_date,
-                           open, high, low, close, volume, amount, source,
-                           provider, price_basis, bar_status, imported_at
-                    FROM sync_stage.staged_bars
-                    """
+                for index, path in enumerate(paths):
+                    alias = f"sync_stage_{index}"
+                    connection.execute(f"ATTACH {_sql_path_literal(path)} AS {alias} (READ_ONLY)")
+                    attached.append(alias)
+                    done += 1
+                    if progress is not None:
+                        progress(done, steps)
+                union = " UNION ALL ".join(
+                    "SELECT market, code, instrument_type, board, trade_date,"
+                    " open, high, low, close, volume, amount, source,"
+                    " provider, price_basis, bar_status, imported_at"
+                    f" FROM {alias}.staged_bars"
+                    for alias in attached
                 )
+                connection.execute(f"CREATE TEMP TABLE _staged_online AS {union}")
+                done += 1
+                if progress is not None:
+                    progress(done, steps)
                 staged_row = connection.execute("SELECT COUNT(*) FROM _staged_online").fetchone()
                 existing_online_row = connection.execute(
                     """
@@ -1182,25 +1214,36 @@ class DuckDbBarsStore:
                         )
                         """
                     )
-                    for market, code, instrument_type, board, provider in keys:
-                        self._store._refresh_instrument(
-                            connection,
-                            str(market),
-                            str(code),
-                            cast(InstrumentType, str(instrument_type)),
-                            cast(InstrumentBoard, str(board)),
-                            provider=str(provider),
-                            force_updated_at=(str(market).strip().upper(), str(code).strip())
-                            in changed_keys,
-                        )
+                    # 逐只刷新覆盖区间是 5,227 条 SQL（每条都要按 key 回表聚合一次）；
+                    # 合成一条批量语句后只剩一次分组扫描。
+                    self._store._refresh_instruments_batch(
+                        connection,
+                        [
+                            (
+                                str(market),
+                                str(code),
+                                str(instrument_type),
+                                str(board),
+                                None,
+                                str(provider),
+                                None,
+                                "active",
+                                (str(market).strip().upper(), str(code).strip()) in changed_keys,
+                            )
+                            for market, code, instrument_type, board, provider in keys
+                        ],
+                    )
+                    done += 1
+                    if progress is not None:
+                        progress(done, steps)
                     connection.execute("COMMIT")
                 except Exception:
                     connection.execute("ROLLBACK")
                     raise
             finally:
                 connection.execute("DROP TABLE IF EXISTS _staged_online")
-                if attached:
-                    connection.execute("DETACH sync_stage")
+                for alias in attached:
+                    connection.execute(f"DETACH {alias}")
         return StageMergeReport(
             staged_rows=int(staged_row[0] if staged_row else 0),
             merged_rows=int(merged_row[0] if merged_row else 0),

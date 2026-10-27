@@ -383,30 +383,31 @@ class MarketDataSync:
                     "total_workers": worker_count,
                 },
             )
+            if abort_check is not None and abort_check():
+                raise MarketDataCancelledError("行情同步已取消")
+            # 所有分片一次合并：逐片会把 1,100 万行的日线表按分片数重复扫好几遍。
+            merge_report = self._store.merge_online_stages(
+                sorted(stage_paths),
+                progress=progress_callback,
+            )
+            merged_rows = merge_report.merged_rows
+            merged_workers = worker_count
             if progress_callback is not None:
-                progress_callback(0, worker_count or 1)
-            for path in sorted(stage_paths):
-                if abort_check is not None and abort_check():
-                    raise MarketDataCancelledError("行情同步已取消")
-                merge_report = self._store.merge_online_stage(path)
-                merged_rows += merge_report.merged_rows
-                merged_workers += 1
-                if progress_callback is not None:
-                    progress_callback(merged_workers, worker_count or 1)
-                _report_stage_detail(
-                    detail_callback,
-                    {
-                        "phase": "merging",
-                        "current_status": "running",
-                        "execution_mode": "process_pool_staging",
-                        "worker_count": worker_count,
-                        "downloaded_targets": downloaded,
-                        "staged_rows": worker_summary.staged_rows,
-                        "merged_workers": merged_workers,
-                        "total_workers": worker_count,
-                        "merged_rows": merged_rows,
-                    },
-                )
+                progress_callback(worker_count or 1, worker_count or 1)
+            _report_stage_detail(
+                detail_callback,
+                {
+                    "phase": "merging",
+                    "current_status": "running",
+                    "execution_mode": "process_pool_staging",
+                    "worker_count": worker_count,
+                    "downloaded_targets": downloaded,
+                    "staged_rows": worker_summary.staged_rows,
+                    "merged_workers": merged_workers,
+                    "total_workers": worker_count,
+                    "merged_rows": merged_rows,
+                },
+            )
             merge_seconds = max(0.0, time.monotonic() - merge_started)
             cleanup_started = time.monotonic()
             _report_stage_detail(
