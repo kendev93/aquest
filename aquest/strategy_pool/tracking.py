@@ -120,6 +120,76 @@ def _context_prefix(context: _StockSeries, count: int, raw: pd.DataFrame) -> str
     return digest.hexdigest()
 
 
+#: 跟踪回放给出的同窗口基准口径。与条目里研究时写下的 ``benchmark_json`` 分开标记，
+#: 消费方据此知道这个数是从哪条路径、哪段窗口来的。
+TRACKING_BENCHMARK_CALIBER = "tracking-window-buy-hold-v1"
+
+
+def _full_period_projection(
+    report: Mapping[str, object],
+) -> tuple[dict[str, object], dict[str, object] | None]:
+    """把这一轮回放的绩效与同窗口基准投影成摘要字段。
+
+    回放窗口与研究对象一致（RESEARCH_START + 预热后移，见 ``replay_account``），
+    所以报告里的 ``performance`` 就是「当前策略回放到最新收盘」的全区间指标，
+    ``benchmark`` 就是同一窗口的买入持有——两者都不用再读库或重算。
+    """
+
+    performance = report.get("performance")
+    if not isinstance(performance, Mapping):
+        return {}, None
+    closed = 0
+    trades = report.get("trades")
+    if isinstance(trades, Sequence):
+        closed = sum(
+            1
+            for trade in trades
+            if isinstance(trade, Mapping)
+            and str(trade.get("direction")) == "SELL"
+            and not trade.get("rejected")
+        )
+    full_period: dict[str, object] = {
+        "as_of_date": str(report.get("end_date") or ""),
+        "closed_trades": closed,
+    }
+    for key in (
+        "total_return",
+        "annual_return",
+        "sharpe",
+        "max_drawdown",
+        "win_rate",
+        "payoff_ratio",
+        "profit_factor",
+        "avg_holding_days",
+        "total_trades",
+        "win_trades",
+        "lose_trades",
+    ):
+        full_period[key] = performance.get(key)
+    benchmark_block = report.get("benchmark")
+    if not isinstance(benchmark_block, Mapping):
+        return full_period, None
+    benchmark_performance = benchmark_block.get("performance")
+    if not isinstance(benchmark_performance, Mapping):
+        return full_period, None
+    dates = benchmark_block.get("dates")
+    bars = len(dates) if isinstance(dates, Sequence) and not isinstance(dates, str) else None
+    return full_period, {
+        "label": benchmark_block.get("label"),
+        "method": "equal_weight_buy_hold",
+        "caliber_version": TRACKING_BENCHMARK_CALIBER,
+        "full_period": {
+            "start_date": report.get("start_date"),
+            "end_date": report.get("end_date"),
+            "bars": bars,
+            "total_return": benchmark_performance.get("total_return"),
+            "annual_return": benchmark_performance.get("annual_return"),
+            "sharpe": benchmark_performance.get("sharpe"),
+            "max_drawdown": benchmark_performance.get("max_drawdown"),
+        },
+    }
+
+
 def replay_account(
     service: PortfolioBacktestService,
     ref: StockRef,
@@ -296,6 +366,13 @@ def replay_account(
         config, dates, 1, 1, 0, {}, simulation, fingerprint, None, [context]
     )
     detail = report.to_dict()
+    # 绩效与同窗口基准就地从报告投影：这是「当前策略回放到最新收盘」的口径，
+    # 每天跟着信号扫描刷新，不再等于研究那一刻冻结的数字。
+    full_period, benchmark = _full_period_projection(detail)
+    if full_period:
+        summary["full_period"] = full_period
+    if benchmark is not None:
+        summary["benchmark"] = benchmark
     for key in ("equity_curve", "trades", "states", "ranking_events"):
         detail.pop(key, None)
     return dict(

@@ -456,6 +456,9 @@ def test_snapshot_reuse_requires_same_date_revision_and_engine() -> None:
             "as_of_date": "2026-10-19",
             # 复用路径直接按摘要投影，所以摘要必须带持仓；缺了就得回放。
             "holding": [],
+            # 表格里的绩效来自这份「回放到最新收盘」的全区间指标；旧快照没有它，
+            # 要让下一次扫描重放补上，而不是继续复用研究时的那份数字。
+            "full_period": {"as_of_date": "2026-10-19", "closed_trades": 25},
         },
     }
     assert _snapshot_reusable(version, "rev-1", "2026-10-19")
@@ -470,6 +473,14 @@ def test_snapshot_reuse_requires_same_date_revision_and_engine() -> None:
     # 回放引擎升级后旧快照一律作废。
     old_engine = {**version, "summary": {**version["summary"], "engine_version": "v2"}}
     assert not _snapshot_reusable(old_engine, "rev-1", "2026-10-19")
+    # 摘要里还没有全区间指标（升级前的老快照）：必须回放一次补上。
+    stale = {
+        **version,
+        "summary": {
+            key: value for key, value in version["summary"].items() if key != "full_period"
+        },
+    }
+    assert not _snapshot_reusable(stale, "rev-1", "2026-10-19")
     # 摘要不完整（没有持仓字段）时没法直接投影，照旧回放。
     partial = {
         **version,

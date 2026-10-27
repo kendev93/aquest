@@ -52,6 +52,70 @@ def candidate():
     )
 
 
+def test_summary_full_period_and_benchmark_follow_the_replay_window(tmp_path):
+    """摘要里的全区间指标与基准就是这一轮回放报告的内容，窗口跟着最新 bar 走。
+
+    表格的「策略收益 / 年化 / 夏普 / 胜率 / 盈亏比 / 回撤 / 持仓天数」与「基准涨跌」
+    都读这一块——研究那一刻冻结的数字不再作为展示口径。
+    """
+
+    from aquest.portfolio_backtest.service import PortfolioBacktestService
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", bars(4))
+    adapter = DuckDbMarketDataAdapter(store)
+    service = PortfolioBacktestService(adapter=adapter)
+    value = candidate()
+    version = dict(
+        candidate=value,
+        signature=signature(value),
+        created_at="2026-09-01T00:00:00+00:00",
+        launch_data_date="2026-09-02",
+    )
+    ref = adapter.stock_ref("", "SH", "600000")
+
+    first = replay_account(service, ref, version)
+    full = first["summary"]["full_period"]
+    report = first["report"]
+    for key in (
+        "total_return",
+        "annual_return",
+        "sharpe",
+        "max_drawdown",
+        "win_rate",
+        "payoff_ratio",
+        "avg_holding_days",
+        "total_trades",
+    ):
+        assert full[key] == report["performance"][key]
+    assert full["as_of_date"] == report["end_date"] == "2026-09-04"
+    # 平仓笔数按「非 rejected 的 SELL」计，与研究方向同一口径：赢单 + 亏单。
+    assert full["closed_trades"] == int(
+        (report["performance"]["win_trades"] or 0) + (report["performance"]["lose_trades"] or 0)
+    )
+    benchmark = first["summary"]["benchmark"]["full_period"]
+    assert benchmark["end_date"] == report["end_date"]
+    assert benchmark["total_return"] == report["benchmark"]["performance"]["total_return"]
+
+    # 追加一根新 bar：回放窗口、基准与截至日一起往前。
+    extra = pd.DataFrame(
+        dict(
+            date=pd.to_datetime(["2026-09-05"]),
+            open=[15.0],
+            close=[15.0],
+            high=[16.0],
+            low=[14.0],
+            volume=[1000.0],
+            amount=[10000.0],
+            bar_status=["completed"],
+        )
+    )
+    store.replace_local_bars("SH", "600000", "stock", pd.concat([bars(4), extra]))
+    second = replay_account(service, ref, version)
+    assert second["summary"]["full_period"]["as_of_date"] == "2026-09-05"
+    assert second["summary"]["benchmark"]["full_period"]["end_date"] == "2026-09-05"
+
+
 def test_verified_append_replays_only_new_dates_and_matches_full_backtest(tmp_path):
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     store.replace_local_bars("SH", "600000", "stock", bars(2))

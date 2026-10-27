@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable, Mapping
 from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from contextlib import ExitStack
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -23,7 +23,13 @@ from aquest.screening.jobs import TaskCancelledError, TaskUserError
 from aquest.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
 from aquest.strategy_discovery.worker_api_client import TransientWorkerApiError
 
-from .quality import benchmark_full_return, weak_strategy_reasons
+from .quality import (
+    benchmark_full_return,
+    fresh_quality_inputs,
+    research_end_from_entry,
+    strategy_is_weak,
+    weak_strategy_reasons,
+)
 from .resources import (
     PoolConcurrencyRamp,
     cpu_bounded_worker_count,
@@ -81,6 +87,10 @@ def _snapshot_reusable(version: Mapping[str, Any], revision: str | None, target_
     if "holding" not in summary:
         # 摘要不完整（旧版本只写了半份）就没法直接投影，照旧读检查点回放。
         return False
+    if not isinstance(summary.get("full_period"), Mapping):
+        # 升级前的老快照没有「回放到最新收盘」的全区间指标：重放一次把它补上，
+        # 否则表格里的绩效会一直停在研究那一刻。
+        return False
     return (
         str(summary.get("engine_version") or "") == ENGINE_VERSION
         and str(summary.get("data_revision") or "") == revision
@@ -136,18 +146,19 @@ class PoolTrackingRunner:
             logger.warning("无法读取行情数据修订号，本轮全部回放", exc_info=True)
             return {}
 
-    def _benchmark_returns(
+    def _entry_context(
         self, versions: list[dict[str, Any]]
-    ) -> dict[tuple[str, str], float | None]:
-        """按跟踪版本批量取条目的全区间基准收益，供弱策略判定使用。
+    ) -> tuple[dict[tuple[str, str], float | None], dict[tuple[str, str], date | None]]:
+        """按跟踪版本批量取条目的全区间基准与研究结论日期。
 
-        跟踪版本自带候选指标（sync_entry 与条目保持同步），基准在条目级
-        benchmark_json 里——与信号扫描路径读的是同一份数据，口径一致。
+        基准在条目级 benchmark_json 里，与研究、信号扫描读的是同一份数据；
+        ``updated_at`` 用来判断跟踪回放窗口有没有覆盖到研究结论那天（正常日更
+        下总是覆盖，构造出来的短窗口夹具里不覆盖，就该退回研究口径）。
         """
 
         keys = {(str(v["market"]), str(v["code"])) for v in versions}
         if not keys:
-            return {}
+            return {}, {}
         placeholders = ", ".join("(?, ?)" for _ in keys)
         params: list[object] = []
         for market, code in sorted(keys):
@@ -155,21 +166,25 @@ class PoolTrackingRunner:
         with self.store.read_session() as connection:
             rows = connection.execute(
                 f"""
-                SELECT market, code, benchmark_json FROM strategy_pool_entries
+                SELECT market, code, benchmark_json, updated_at
+                FROM strategy_pool_entries
                 WHERE (market, code) IN ({placeholders})
                 """,
                 params,
             ).fetchall()
-        result: dict[tuple[str, str], float | None] = {}
+        returns: dict[tuple[str, str], float | None] = {}
+        research_ends: dict[tuple[str, str], date | None] = {}
         for row in rows:
             try:
                 benchmark = json.loads(row[2]) if row[2] else None
             except (TypeError, ValueError):
                 benchmark = None
-            result[(str(row[0]), str(row[1]))] = benchmark_full_return(
+            key = (str(row[0]), str(row[1]))
+            returns[key] = benchmark_full_return(
                 benchmark if isinstance(benchmark, Mapping) else None
             )
-        return result
+            research_ends[key] = research_end_from_entry({"updated_at": row[3]})
+        return returns, research_ends
 
     def run(
         self,
@@ -182,7 +197,7 @@ class PoolTrackingRunner:
     ) -> dict[str, Any]:
         versions = self.tracks.current_versions()
         names = self._instrument_names(versions)
-        benchmarks = self._benchmark_returns(versions)
+        benchmarks, research_ends = self._entry_context(versions)
         pool_total = len(versions)
         results: dict[str, dict[str, Any]] = {
             goal: dict(
@@ -352,6 +367,25 @@ class PoolTrackingRunner:
             # 这两个值只用于判断下一轮能否复用；摘要里已有就不再写库。
             summary["engine_version"] = ENGINE_VERSION
             summary["data_revision"] = revisions.get((str(v["market"]), str(v["code"])))
+            # 弱策略的「第一次判弱」日期：转弱时记下来，连续满确认天数才会排进重研
+            # 队列（quality.WEAK_STRATEGY_CONFIRM_DAYS），转强时清空。
+            previous_summary = v.get("summary")
+            previous_weak_since = (
+                previous_summary.get("weak_since")
+                if isinstance(previous_summary, Mapping)
+                else None
+            )
+            symbol_key = (str(v["market"]), str(v["code"]))
+            weak_metrics, weak_benchmark = fresh_quality_inputs(
+                summary,
+                v["candidate"] if isinstance(v["candidate"], Mapping) else None,
+                fallback_benchmark=benchmarks.get(symbol_key),
+                research_end=research_ends.get(symbol_key),
+            )
+            if strategy_is_weak(weak_metrics, weak_benchmark):
+                summary["weak_since"] = previous_weak_since or str(summary.get("as_of_date") or "")
+            else:
+                summary["weak_since"] = None
             snapshot["summary"] = summary
             if persist:
                 entry = dict(
@@ -411,10 +445,14 @@ class PoolTrackingRunner:
             #    策略，三个信号列表都不展示，状态退回 held/flat。判定用该版本自带
             #    候选指标（sync_entry 与条目保持同步）+ 条目级基准，与信号扫描路径
             #    （service._scan_signals）共用 quality 模块，口径必须一致。
-            weak_reasons = weak_strategy_reasons(
-                v["candidate"].get("metrics") if isinstance(v["candidate"], Mapping) else None,
-                benchmarks.get((str(v["market"]), str(v["code"]))),
+            symbol_key = (str(v["market"]), str(v["code"]))
+            weak_metrics, weak_benchmark = fresh_quality_inputs(
+                summary,
+                v["candidate"] if isinstance(v["candidate"], Mapping) else None,
+                fallback_benchmark=benchmarks.get(symbol_key),
+                research_end=research_ends.get(symbol_key),
             )
+            weak_reasons = weak_strategy_reasons(weak_metrics, weak_benchmark)
             buy = (
                 fresh
                 and summary["signal_buy"]

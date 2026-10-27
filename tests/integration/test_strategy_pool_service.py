@@ -379,6 +379,46 @@ def test_only_selected_strategies_and_fresh_no_strategy_are_reused() -> None:
     )
 
 
+def test_weak_judgment_follows_fresh_metrics_and_needs_confirmation() -> None:
+    """判定用「回放到最新收盘」的口径，但要连续几天成立才排进重研队列。
+
+    研究时的指标是好的（30 笔、跑赢基准），最新口径已跌破基准：按新口径判弱；
+    只弱两天不排队（避免一天的波动把老条目翻进重研），弱满 5 天才排队。
+    """
+
+    now = datetime(2026, 10, 27, 12, 0, 0)
+    stale = ("market-v1", "config-v1", "ready", True, datetime(2026, 9, 1))
+    entry = {
+        "automatic_candidates": {
+            "annual_return": {
+                "metrics": {"full_period": {"closed_trades": 30, "total_return": 0.8}}
+            },
+            "sharpe": {"candidate_ref": "annual_return"},
+        },
+        "benchmark": {"full_period": {"total_return": 0.5}},
+    }
+
+    def summary(weak_since: str | None) -> dict:
+        return {
+            "as_of_date": "2026-10-27",
+            "full_period": {
+                "as_of_date": "2026-10-27",
+                "closed_trades": 30,
+                "total_return": 0.1,
+            },
+            "benchmark": {"full_period": {"total_return": 0.5}},
+            "weak_since": weak_since,
+        }
+
+    two_days = {"annual_return": summary("2026-10-25")}
+    six_days = {"annual_return": summary("2026-10-21")}
+
+    assert not MarketStrategyPoolService._research_recheck_due(entry, stale, two_days, now=now)
+    assert MarketStrategyPoolService._research_recheck_due(entry, stale, six_days, now=now)
+    # 没有最新口径（升级前的老快照）时按老行为：研究口径不弱，就不排队。
+    assert not MarketStrategyPoolService._research_recheck_due(entry, stale, None, now=now)
+
+
 def test_weak_ready_entry_is_researched_again_after_recheck_window() -> None:
     """弱策略（样本不足 / 跑输基准）到期重查：节奏与 no_strategy 一致（2026-10-09）。
 

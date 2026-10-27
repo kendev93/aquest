@@ -4,9 +4,12 @@
 判定逻辑被信号扫描、跟踪投影、增量复用三处共用，口径改动必须先改这里。
 """
 
+from datetime import date
+
 from aquest.strategy_pool.quality import (
     WEAK_STRATEGY_MIN_TRADES,
     benchmark_full_return,
+    fresh_quality_inputs,
     post_launch_degraded,
     strategy_is_weak,
     weak_strategy_reasons,
@@ -72,3 +75,32 @@ def test_post_launch_degradation_requires_window_return_and_benchmark() -> None:
     assert not post_launch_degraded({**degraded, "post_launch_benchmark_return": -0.2})
     assert not post_launch_degraded({"post_launch_days": 70, "post_launch_return": -0.05})
     assert not post_launch_degraded(None)
+
+
+def test_fresh_metrics_override_research_metrics_only_when_the_window_covers_research() -> None:
+    """弱策略判定用最新口径，但回放窗口必须至少覆盖到研究结论写下那天。
+
+    正常日更下回放只会比研究窗口更长；构造出来的短窗口（数据被清过、夹具）里用它
+    判「样本不足」会把正常策略误伤，所以那时回退研究口径。
+    """
+
+    candidate = {"metrics": {"full_period": {"closed_trades": 30, "total_return": 0.8}}}
+    fresh = {
+        "full_period": {"as_of_date": "2026-10-27", "closed_trades": 30, "total_return": 0.1},
+        "benchmark": {"full_period": {"total_return": 0.5}},
+    }
+
+    metrics, benchmark = fresh_quality_inputs(
+        fresh, candidate, fallback_benchmark=0.5, research_end=date(2026, 10, 24)
+    )
+    assert metrics is not None and metrics["full_period"]["total_return"] == 0.1
+    assert strategy_is_weak(metrics, benchmark)  # 研究时跑赢、最新跑输 → 判弱
+
+    metrics, benchmark = fresh_quality_inputs(
+        fresh, candidate, fallback_benchmark=0.5, research_end=date(2026, 10, 28)
+    )
+    assert metrics is not None and metrics["full_period"]["total_return"] == 0.8
+    assert not strategy_is_weak(metrics, benchmark)  # 窗口更短：回退研究口径，不误伤
+
+    # 没有研究指标的老条目本来就不参与质量过滤。
+    assert fresh_quality_inputs(fresh, {"candidate_id": "x"}) == (None, None)

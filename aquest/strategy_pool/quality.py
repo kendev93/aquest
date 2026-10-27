@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import date, datetime
 
 #: 全区间平仓交易低于该笔数的策略，胜率 / 盈亏比统计上不可信（2026-10-09 用户选定）。
 WEAK_STRATEGY_MIN_TRADES = 20
@@ -30,6 +31,11 @@ POST_LAUNCH_MIN_TRADING_DAYS = 60
 #: 上线后收益跑输同窗口基准超过该幅度即视为衰减（净费用口径对基准未计费用，
 #: 有轻微利于触发的偏置，阈值取 10% 吸收它）。
 POST_LAUNCH_MAX_UNDERPERFORMANCE = 0.10
+
+#: 弱策略要连续多少天成立才会排进重研队列。指标改成每天延长之后，一天的跑输就
+#: 触发重研会把队列搅乱；跟踪摘要里的 ``weak_since`` 记录第一次判弱的那天，
+#: 连续满该天数才排队（2026-10-27 用户决策：展示用最新口径，重研要确认趋势）。
+WEAK_STRATEGY_CONFIRM_DAYS = 5
 
 #: 保质期兜底：ready 结论超过该自然日数无论表现如何都重新寻优——市场风格漂移
 #: 不一定表现为跑输基准（策略与基准一起阴跌时超额可能接近 0）。180 天对全市场
@@ -112,3 +118,90 @@ def post_launch_degraded(summary: Mapping[str, object] | None) -> bool:
     if days < POST_LAUNCH_MIN_TRADING_DAYS:
         return False
     return (post - benchmark) < -POST_LAUNCH_MAX_UNDERPERFORMANCE
+
+
+def research_end_from_entry(entry: Mapping[str, object] | None) -> date | None:
+    """条目里研究结论写下的日期（``updated_at``），用来判断回放窗口是否可比。"""
+
+    if not isinstance(entry, Mapping):
+        return None
+    raw = entry.get("updated_at")
+    if isinstance(raw, datetime):
+        return raw.date()
+    if isinstance(raw, date):
+        return raw
+    if not isinstance(raw, str) or len(raw) < 10:
+        return None
+    try:
+        return date.fromisoformat(raw[:10])
+    except ValueError:
+        return None
+
+
+def _covers_research(fresh: Mapping[str, object], research_end: date | None) -> bool:
+    """回放窗口是否至少覆盖到研究结论写下的那天。
+
+    正常日更下回放窗口只会比研究窗口更长；数据被清过、或构造出来的短窗口夹具
+    里，回放会更短，这时拿它判「样本不足」会把正常策略误伤。
+    """
+
+    if research_end is None:
+        return True
+    as_of = fresh.get("as_of_date")
+    if not isinstance(as_of, str) or len(as_of) < 10:
+        return False
+    return as_of[:10] >= research_end.isoformat()
+
+
+def fresh_quality_inputs(
+    summary: Mapping[str, object] | None,
+    candidate: Mapping[str, object] | None,
+    *,
+    fallback_benchmark: float | None = None,
+    research_end: date | None = None,
+) -> tuple[Mapping[str, object] | None, float | None]:
+    """弱策略判定用的（指标, 基准收益）：优先跟踪摘要里的最新口径。
+
+    摘要里的 ``full_period`` / ``benchmark`` 是每天回放到最新收盘的；没有这两块
+    （升级前的老快照）就回退研究时冻结的候选指标与条目基准，绝不因为缺字段把
+    策略误判成弱或强。
+
+    只有研究时算过全区间指标的条目才切到最新口径：没有研究指标的条目本来就不
+    参与质量过滤，而回放窗口比研究窗口短的情形（数据被清过、构造出来的夹具）下
+    拿一个更短的窗口判「样本不足」会把正常策略误伤。
+    """
+
+    summary_map = summary if isinstance(summary, Mapping) else {}
+    metrics = candidate.get("metrics") if isinstance(candidate, Mapping) else None
+    if not isinstance(metrics, Mapping):
+        return None, fallback_benchmark
+    fresh = summary_map.get("full_period")
+    if isinstance(fresh, Mapping) and _covers_research(fresh, research_end):
+        benchmark_block = summary_map.get("benchmark")
+        value = benchmark_full_return(
+            benchmark_block if isinstance(benchmark_block, Mapping) else None
+        )
+        return (
+            {"full_period": fresh},
+            value if value is not None else fallback_benchmark,
+        )
+    return metrics, fallback_benchmark
+
+
+def weak_since_days(summary: Mapping[str, object] | None, now: datetime) -> int | None:
+    """摘要里第一次判弱那天距今多少天；没有记录或格式不认识时返回 None。
+
+    返回 None 表示「判不了」。调用方要把它和「当前是否判弱」分开处理：老快照
+    没有这个字段时按老行为走，新快照有字段时要求连续满确认天数。
+    """
+
+    if not isinstance(summary, Mapping):
+        return None
+    raw = summary.get("weak_since")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        since = date.fromisoformat(raw[:10])
+    except ValueError:
+        return None
+    return max(0, (now.date() - since).days)

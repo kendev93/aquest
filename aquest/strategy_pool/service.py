@@ -48,10 +48,14 @@ from aquest.web.schemas.screening import RuleGroupRequest
 
 from .quality import (
     STRATEGY_SHELF_LIFE_DAYS,
+    WEAK_STRATEGY_CONFIRM_DAYS,
     WEAK_STRATEGY_RECHECK_DAYS,
     benchmark_full_return,
+    fresh_quality_inputs,
     post_launch_degraded,
+    research_end_from_entry,
     strategy_is_weak,
+    weak_since_days,
     weak_strategy_reasons,
 )
 from .resources import (
@@ -1768,6 +1772,9 @@ class MarketStrategyPoolService:
         # 结论，让两条路径的买入口径一致（2026-10-08 用户澄清：冷却期内不触发买入
         # 信号）。读不到就当没有阻断，行为退回改动前，不会因为查询失败把信号全吃掉。
         blockades = PoolTrackingStore(self._store).buy_blockades(objective)
+        # 弱策略判定改用跟踪摘要里的最新口径：那是每天回放到最新收盘的全区间指标，
+        # 研究时冻结的候选指标只作为老快照的兜底。
+        summaries = PoolTrackingStore(self._store).applied_summaries()
         buy_signals: list[dict[str, object]] = []
         sell_signals: list[dict[str, object]] = []
         states: list[dict[str, object]] = []
@@ -1847,10 +1854,15 @@ class MarketStrategyPoolService:
                 # 全段基准的策略，三个信号列表都不展示——规则事实照常评估，但
                 # 「不值得按其行动」的信号隐藏、状态退回 flat。判定与跟踪路径共用
                 # quality 模块，两处口径必须一致。
-                weak_reasons = weak_strategy_reasons(
-                    _mapping(active_candidate.get("metrics")),
-                    benchmark_full_return(_mapping(entry.get("benchmark") if entry else None)),
+                weak_metrics, weak_benchmark = fresh_quality_inputs(
+                    summaries.get((ref.market, ref.code, objective)),
+                    active_candidate,
+                    fallback_benchmark=benchmark_full_return(
+                        _mapping(entry.get("benchmark") if entry else None)
+                    ),
+                    research_end=research_end_from_entry(entry),
                 )
+                weak_reasons = weak_strategy_reasons(weak_metrics, weak_benchmark)
                 buy = buy and not blocked and not weak_reasons
                 sell = sell and not weak_reasons
                 if buy:
@@ -1933,7 +1945,9 @@ class MarketStrategyPoolService:
         # 持仓行同样按策略质量过滤（2026-10-09 用户决策，三个列表口径一致）：
         # 弱策略的持仓行隐藏。判定用该目标当前生效候选（与回放所用策略一致）。
         model_portfolio["holdings"] = [
-            row for row in raw_holdings if not _holding_strategy_is_weak(row, entries, objective)
+            row
+            for row in raw_holdings
+            if not _holding_strategy_is_weak(row, entries, objective, summaries)
         ]
         model_portfolio["risk_exit_signals"] = (
             list(risk_exit_signals) if isinstance(risk_exit_signals, (list, tuple)) else []
@@ -2187,14 +2201,28 @@ class MarketStrategyPoolService:
             return True
         automatic = _mapping(entry.get("automatic_candidates"))
         benchmark_return = benchmark_full_return(_mapping(entry.get("benchmark")))
-        weak = any(
-            strategy_is_weak(
-                _mapping(_mapping(automatic.get(objective)).get("metrics")),
-                benchmark_return,
+        weak = False
+        for objective in ("annual_return", "sharpe"):
+            candidate = _mapping(automatic.get(objective))
+            if candidate.get("candidate_ref"):
+                continue
+            summary = _mapping((post_launch or {}).get(objective))
+            metrics, objective_benchmark = fresh_quality_inputs(
+                summary,
+                candidate,
+                fallback_benchmark=benchmark_return,
+                research_end=prior[4].date(),
             )
-            for objective in ("annual_return", "sharpe")
-            if not _mapping(automatic.get(objective)).get("candidate_ref")
-        )
+            if not strategy_is_weak(metrics, objective_benchmark):
+                continue
+            if isinstance(summary.get("full_period"), Mapping):
+                # 每天评估之后，一天的跑输就把老条目录进重研会把队列搅乱：最新口径
+                # 要求连续满 WEAK_STRATEGY_CONFIRM_DAYS 天才算数。
+                since = weak_since_days(summary, current)
+                if since is None or since < WEAK_STRATEGY_CONFIRM_DAYS:
+                    continue
+            weak = True
+            break
         if weak and age >= WEAK_STRATEGY_RECHECK_DAYS:
             return True
         return any(
@@ -2754,6 +2782,7 @@ def _holding_strategy_is_weak(
     holding: Mapping[str, object],
     entries: Mapping[tuple[str, str], Mapping[str, object]],
     objective: str,
+    summaries: Mapping[tuple[str, str, str], Mapping[str, object]] | None = None,
 ) -> bool:
     """持仓行的策略质量过滤（2026-10-09 用户决策，三个信号列表口径一致）。
 
@@ -2766,10 +2795,16 @@ def _holding_strategy_is_weak(
     candidate = _active_candidate(entry, objective)
     if candidate is None:
         return False
-    return strategy_is_weak(
-        _mapping(candidate.get("metrics")),
-        benchmark_full_return(_mapping(entry.get("benchmark")) if entry else None),
+    summary = (summaries or {}).get((key[0], key[1], objective))
+    metrics, benchmark_return = fresh_quality_inputs(
+        summary,
+        candidate,
+        fallback_benchmark=benchmark_full_return(
+            _mapping(entry.get("benchmark")) if entry else None
+        ),
+        research_end=research_end_from_entry(entry),
     )
+    return strategy_is_weak(metrics, benchmark_return)
 
 
 def _signal_sort_key(row: Mapping[str, object], objective: str) -> tuple[float, float, str]:
