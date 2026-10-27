@@ -1159,21 +1159,36 @@ class SqliteIndicatorCacheStore:
         join = " AND ".join(f"l.{column} = i.{column}" for column in partition)
         latest = f"_latest_{table}"
         stale = f"_stale_{table}"
+        marker = _CHUNK_FINGERPRINT_MARKER.replace("'", "''")
+        # 「一代」不是一行指纹：同一条序列按年分块，每块的指纹是
+        # ``<行情版本>[~adj:…]|chunk:<摘要>``，块摘要逐块不同。按行指纹挑最新，
+        # 只会留下最后写的那一块，把同代其它年份全删掉——启动维护后缓存缩水到 1/5、
+        # 下一次预计算整段重算（2026-10-25 实测：删 139,031 行、2.8 GB → 495 MB，
+        # 两天后的日更重算 175,495 段、18 分钟）。这里按行情版本比对，同代的块一起留。
+        generation = (
+            f"CASE WHEN instr({{prefix}}data_fingerprint, '{marker}') > 0 "
+            f"THEN substr({{prefix}}data_fingerprint, 1, "
+            f"instr({{prefix}}data_fingerprint, '{marker}') - 1) "
+            "ELSE {prefix}data_fingerprint END"
+        )
         connection.execute(f"DROP TABLE IF EXISTS temp.{latest}")
         connection.execute(f"DROP TABLE IF EXISTS temp.{stale}")
         connection.execute(
             f"""
             CREATE TEMP TABLE {latest} AS
-            SELECT {keys}, data_fingerprint FROM (
-                SELECT {keys}, data_fingerprint,
+            SELECT {keys}, generation FROM (
+                SELECT {keys}, generation,
                        ROW_NUMBER() OVER (
                            PARTITION BY {keys}
-                           ORDER BY last_at DESC, data_fingerprint DESC
+                           ORDER BY last_at DESC, generation DESC
                        ) AS generation_rank
                 FROM (
-                    SELECT {keys}, data_fingerprint, MAX(computed_at) AS last_at
-                    FROM {table}
-                    GROUP BY {keys}, data_fingerprint
+                    SELECT {keys}, generation, MAX(computed_at) AS last_at
+                    FROM (
+                        SELECT {keys}, {generation.format(prefix="")} AS generation, computed_at
+                        FROM {table}
+                    )
+                    GROUP BY {keys}, generation
                 )
             ) WHERE generation_rank = 1
             """
@@ -1184,8 +1199,8 @@ class SqliteIndicatorCacheStore:
             SELECT i.rowid AS rid
             FROM {table} i
             LEFT JOIN {latest} l
-              ON {join} AND l.data_fingerprint = i.data_fingerprint
-            WHERE l.data_fingerprint IS NULL
+              ON {join} AND l.generation = {generation.format(prefix="i.")}
+            WHERE l.generation IS NULL
             """
         )
         cursor = connection.execute(f"DELETE FROM {table} WHERE rowid IN (SELECT rid FROM {stale})")

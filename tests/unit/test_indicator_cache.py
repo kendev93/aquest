@@ -1131,6 +1131,67 @@ def test_sqlite_cache_maintenance_prunes_stale_generations_and_vacuums(tmp_path:
     assert again["pruned_indicator_cache"] == 0
 
 
+def test_sqlite_cache_prune_keeps_every_chunk_of_the_current_generation(tmp_path: Path) -> None:
+    """同一条序列按年分块，块的指纹逐块不同；清理必须按行情版本整代保留。
+
+    以前按行指纹挑最新，只会留下最后写的那一块，把同代其它年份全删掉：启动维护后
+    缓存缩水到 1/5，下一次日更整段重算（2026-10-25 实测删 139,031 行、2.8 GB → 495 MB，
+    两天后的日更重算了 175,495 段、18 分钟）。
+    """
+
+    from aquest.market_data.store import DuckDbMarketDataStore
+    from aquest.market_data.store_indicator_cache_sqlite import SqliteIndicatorCacheStore
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    cache = SqliteIndicatorCacheStore(store, tmp_path / "cache.sqlite")
+    connection = cache._connection()
+    columns = (
+        "market, code, timeframe, price_basis, formula_id, formula_version, "
+        "data_fingerprint, bar_offset, data_start, data_end, data_length, "
+        "values_blob, signals_blob, computed_at"
+    )
+
+    def row(fingerprint: str, offset: int, computed_at: str) -> tuple:
+        return (
+            "SH",
+            "600000",
+            "1d",
+            "raw",
+            "technical.ma5",
+            "v1",
+            fingerprint,
+            offset,
+            "2015-01-05",
+            "2026-10-27",
+            2065,
+            b"values",
+            b"signals",
+            computed_at,
+        )
+
+    rows = [
+        # 当前代：同一行情版本的两块（2025 / 2026），都该留。
+        row("rev2|chunk:aaa", 0, "2026-10-27T00:00:00.100000"),
+        row("rev2|chunk:bbb", 1, "2026-10-27T00:00:00.200000"),
+        # 上一代：两块都该删。
+        row("rev1|chunk:ccc", 0, "2026-10-25T00:00:00"),
+        row("rev1|chunk:ddd", 1, "2026-10-25T00:00:00"),
+    ]
+    connection.executemany(
+        f"INSERT INTO indicator_cache ({columns}) VALUES ({','.join('?' * 14)})", rows
+    )
+
+    stats = cache.prune_stale_generations()
+
+    assert stats["indicator_cache"] == 2
+    remaining = connection.execute(
+        "SELECT data_fingerprint FROM indicator_cache ORDER BY data_fingerprint"
+    ).fetchall()
+    assert remaining == [("rev2|chunk:aaa",), ("rev2|chunk:bbb",)]
+    # 当前代再跑一次不许动。
+    assert cache.prune_stale_generations()["indicator_cache"] == 0
+
+
 def test_sqlite_cache_prune_scales_with_rows(tmp_path: Path) -> None:
     """清理的工作量必须随行数线性增长。
 
