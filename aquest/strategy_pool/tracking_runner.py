@@ -36,6 +36,8 @@ from .tracking import account_summary, replay_account
 from .tracking_store import ENGINE_VERSION, OBJECTIVES, PoolTrackingStore
 
 _WORKER_SERVICE: PortfolioBacktestService | None = None
+#: 回放前一次预取多少只检查点：解压后一只接近 1 MB，窗口太大只是白占内存。
+_SNAPSHOT_BATCH = 64
 logger = logging.getLogger(__name__)
 
 #: 一次批量上报多少只跟踪快照。64 只 × 4 个参数远低于 SQLite 的 999 变量上限，
@@ -239,7 +241,40 @@ class PoolTrackingRunner:
                 bool(v["summary"]),
             )
             groups.setdefault(key, []).append(v)
-        work = iter(groups.values())
+        # 复用与否只看摘要，先整体判定一遍；后面按这个顺序消费，需要回放的那几只
+        # 检查点也按同样的顺序成批预取（一只检查点解压后接近 1 MB，不能一次全拿）。
+        work_items = list(groups.values())
+        reusable = [
+            all(
+                _snapshot_reusable(
+                    member,
+                    revisions.get((str(member["market"]), str(member["code"]))),
+                    target_data_date,
+                )
+                for member in group
+            )
+            for group in work_items
+        ]
+        work = iter(zip(work_items, reusable, strict=True))
+        replay_ids = [
+            group[0]["version_id"]
+            for group, is_reusable in zip(work_items, reusable, strict=True)
+            if not is_reusable
+        ]
+        snapshot_window: dict[str, dict[str, Any]] = {}
+        snapshot_cursor = 0
+
+        def take_snapshot(version_id: str) -> dict[str, Any] | None:
+            """回放用的检查点：窗口里没有再补一批（正常就是接下来要用的那几只）。"""
+
+            nonlocal snapshot_cursor
+            if version_id in snapshot_window:
+                return snapshot_window.pop(version_id)
+            chunk = replay_ids[snapshot_cursor : snapshot_cursor + _SNAPSHOT_BATCH]
+            snapshot_cursor += len(chunk)
+            snapshot_window.update(self.tracks.snapshots(chunk))
+            return snapshot_window.pop(version_id, None)
+
         completed = failed = skipped = 0
         # 逐只写库实测 15.8 ms：一次全市场扫描 4,409 只就是约 70 秒串行写库。批量上报把
         # 一批合成一个事务（实测摊到 0.14 ms/行），快照是派生数据，丢了下一轮重算。
@@ -521,19 +556,13 @@ class PoolTrackingRunner:
                 for _, executor in slots[:target]:
                     if exhausted or id(executor) in busy:
                         continue
-                    group = next(work, None)
-                    if group is None:
+                    item = next(work, None)
+                    if item is None:
                         exhausted = True
                         break
+                    group, is_reusable = item
                     v = dict(group[0], target_data_date=payload.get("as_of_date"))
-                    if all(
-                        _snapshot_reusable(
-                            member,
-                            revisions.get((str(member["market"]), str(member["code"]))),
-                            target_data_date,
-                        )
-                        for member in group
-                    ):
+                    if is_reusable:
                         # 同一行情日、同一份数据、同一版引擎：上一份快照就是这一轮的结果。
                         # 摘要里已经有上一轮算好的持仓与账户字段，不必再解压检查点——
                         # 一条序列的检查点解压加解析约 10 ms，全市场就是 40 秒。
@@ -542,7 +571,7 @@ class PoolTrackingRunner:
                             completed += 1
                         report_progress()
                         continue
-                    previous = self.tracks.snapshot(v["version_id"])
+                    previous = take_snapshot(v["version_id"])
                     pending[executor.submit(_replay, v, previous)] = (group, executor)
                 if not pending:
                     if exhausted:

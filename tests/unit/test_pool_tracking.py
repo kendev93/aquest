@@ -454,6 +454,8 @@ def test_snapshot_reuse_requires_same_date_revision_and_engine() -> None:
             "engine_version": ENGINE_VERSION,
             "data_revision": "rev-1",
             "as_of_date": "2026-10-19",
+            # 复用路径直接按摘要投影，所以摘要必须带持仓；缺了就得回放。
+            "holding": [],
         },
     }
     assert _snapshot_reusable(version, "rev-1", "2026-10-19")
@@ -468,3 +470,13 @@ def test_snapshot_reuse_requires_same_date_revision_and_engine() -> None:
     # 回放引擎升级后旧快照一律作废。
     old_engine = {**version, "summary": {**version["summary"], "engine_version": "v2"}}
     assert not _snapshot_reusable(old_engine, "rev-1", "2026-10-19")
+    # 摘要不完整（没有持仓字段）时没法直接投影，照旧回放。
+    partial = {
+        **version,
+        "summary": {
+            "engine_version": ENGINE_VERSION,
+            "data_revision": "rev-1",
+            "as_of_date": "2026-10-19",
+        },
+    }
+    assert not _snapshot_reusable(partial, "rev-1", "2026-10-19")

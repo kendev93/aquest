@@ -500,6 +500,30 @@ class PoolTrackingStore:
             ).fetchone()
         return json.loads(zlib.decompress(bytes(row[0]))) if row and row[0] else None
 
+    def snapshots(self, version_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """一次取多只的检查点。
+
+        回放要逐只读检查点，但没必要为每一只开一条状态库连接、发一条 SQL；调用方
+        按窗口成批取，连接与查询次数就按窗口大小摊下来。解压仍在调用方这一侧，
+        放在这里是为了让「取一批」是一次完整的往返。
+        """
+
+        ids = [str(item) for item in version_ids if item]
+        if not ids:
+            return {}
+        placeholders = ", ".join("?" for _ in ids)
+        with self.store.state_read_session() as connection:
+            rows = connection.execute(
+                "SELECT version_id, snapshot FROM pool_tracking_versions "
+                f"WHERE version_id IN ({placeholders})",
+                ids,
+            ).fetchall()
+        return {
+            str(version_id): json.loads(zlib.decompress(bytes(blob)))
+            for version_id, blob in rows
+            if blob
+        }
+
     def save_snapshot(self, version_id: str, fingerprint: str, snapshot: Mapping[str, Any]) -> bool:
         # 校验与写入要在同一个事务里：分成两条独立语句时，中间被别的写者插进来就可能
         # 把「已经不是当前版本」的快照写回去。口径与 save_snapshots 的批量版一致。

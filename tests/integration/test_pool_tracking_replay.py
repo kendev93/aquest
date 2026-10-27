@@ -602,13 +602,60 @@ def test_tracking_runner_reuses_snapshot_until_market_data_changes(tmp_path):
     corrected.loc[2, ["close", "high", "low"]] = [16.0, 17.0, 13.0]
     store.replace_local_bars("SH", "600000", "stock", corrected)
     writes.clear()
+    # 回放要读检查点，但按窗口成批取，不再一只一条连接。
+    single_reads = {"count": 0}
+    single_snapshot = tracks.snapshot
+
+    def counting_snapshot(version_id: str) -> dict:
+        single_reads["count"] += 1
+        return single_snapshot(version_id)
+
+    tracks.snapshot = counting_snapshot  # type: ignore[method-assign]
     third = run_once(save_one)
+    assert single_reads["count"] == 0
     assert third["completed_symbols"] == 1
     assert len(writes) == 1
     assert (
         tracks.current_versions()[0]["summary"]["data_revision"]
         != version["summary"]["data_revision"]
     )
+
+
+def test_batch_snapshot_read_matches_single_reads(tmp_path):
+    """成批取检查点与逐只取结果一致，不存在的 id 直接漏掉。"""
+
+    import json
+    import zlib
+
+    from aquest.strategy_pool.tracking_store import PoolTrackingStore
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    tracks = PoolTrackingStore(store)
+    payloads = {
+        "v1": {"summary": {"as_of_date": "2026-09-03"}, "checkpoint": {"cash": 1.0}},
+        "v2": {"summary": {"as_of_date": "2026-09-03"}, "checkpoint": {"cash": 2.0}},
+    }
+    with store.state_write_transaction() as connection:
+        for version_id, payload in payloads.items():
+            connection.execute(
+                """
+                INSERT INTO pool_tracking_versions (
+                    version_id, market, code, objective, source, signature,
+                    candidate_json, created_at, is_current, summary_json, snapshot,
+                    status, last_error, updated_at
+                ) VALUES (?, 'SH', '600000', 'annual_return', 'automatic', 'sig',
+                          '{}', '2026-09-01T00:00:00', TRUE, '{}', ?, 'ready', '',
+                          '2026-09-03T00:00:00')
+                """,
+                [version_id, zlib.compress(json.dumps(payload).encode())],
+            )
+
+    batched = tracks.snapshots(["v1", "v2", "missing"])
+
+    assert set(batched) == {"v1", "v2"}
+    assert batched["v1"] == tracks.snapshot("v1")
+    assert batched["v2"] == payloads["v2"]
+    assert tracks.snapshots([]) == {}
 
 
 def test_a_fully_reused_signal_scan_still_projects_every_symbol(tmp_path):
