@@ -10,6 +10,7 @@ from aquest.screening.jobs import (
     ScreenJobRunner,
     TaskCancelledError,
     TaskUserError,
+    phased_progress_callback,
 )
 
 
@@ -282,3 +283,37 @@ def test_runner_rejects_a_second_job_in_the_same_exclusive_group() -> None:
     finally:
         release.set()
         runner.shutdown()
+
+
+def test_phased_progress_callback_marks_its_own_stage() -> None:
+    """预计算这类长阶段要有自己的阶段名，否则界面会一直停在上一段文案上。"""
+
+    events: list[tuple[int, int]] = []
+    details: list[dict[str, object]] = []
+
+    def progress(current: int, total: int) -> None:
+        events.append((current, total))
+
+    setattr(progress, "report_detail", details.append)
+    wrapped = phased_progress_callback(
+        progress,
+        phase="precomputing",
+        done_key="precompute_done",
+        total_key="precompute_total",
+    )
+
+    assert wrapped is not None
+    wrapped(3, 10)
+    assert details[0] == {
+        "phase": "precomputing",
+        "current_status": "running",
+        "precompute_done": 0,
+    }
+    assert details[-1] == {
+        "phase": "precomputing",
+        "current_status": "running",
+        "precompute_done": 3,
+        "precompute_total": 10,
+    }
+    assert events == [(3, 10)]
+    assert phased_progress_callback(None, phase="precomputing", done_key="a", total_key="b") is None

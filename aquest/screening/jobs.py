@@ -54,6 +54,38 @@ def report_progress_detail(
         reporter(details)
 
 
+def phased_progress_callback(
+    progress: ProgressReporter | None,
+    *,
+    phase: str,
+    done_key: str,
+    total_key: str,
+) -> ProgressReporter | None:
+    """给某个阶段的进度打上阶段名和计数，界面才不会停在上一段文案上。
+
+    同步之后的指标预计算就是这种情况：它只报百分比，而合并/清理的文案会一直挂着，
+    十几分钟看起来都像是在合并。
+    """
+
+    if progress is None:
+        return None
+    report_progress_detail(progress, {"phase": phase, "current_status": "running", done_key: 0})
+
+    def report(current: int, total: int) -> None:
+        report_progress_detail(
+            progress,
+            {
+                "phase": phase,
+                "current_status": "running",
+                done_key: current,
+                total_key: total,
+            },
+        )
+        progress(current, total)
+
+    return report
+
+
 class TaskUserError(Exception):
     """A safe, user-facing error raised by a background task."""
 

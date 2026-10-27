@@ -21,7 +21,11 @@ from aquest.indicators.precompute import (
 )
 from aquest.market_data.models import InstrumentBoard, InstrumentType
 from aquest.market_data.store import MarketDataStoreError
-from aquest.screening.jobs import TaskCancelledError, TaskUserError
+from aquest.screening.jobs import (
+    TaskCancelledError,
+    TaskUserError,
+    phased_progress_callback,
+)
 
 from ...schemas import MarketSyncRequest
 from ._shared import (
@@ -78,6 +82,12 @@ def _with_indicator_precompute(
                 },
             }
         precomputer = _precomputer(request)
+        progress_callback = phased_progress_callback(
+            progress_callback,
+            phase="precomputing",
+            done_key="precompute_done",
+            total_key="precompute_total",
+        )
         if _supports_abort_check(precomputer.run):
             precomputed = precomputer.run(
                 vipdoc_path=vipdoc_path or ".",

@@ -36,6 +36,7 @@ from aquest.screening.jobs import (
     ProgressReporter,
     ScreenJobRunner,
     TaskCancelledError,
+    phased_progress_callback,
     report_progress_detail,
 )
 
@@ -368,7 +369,12 @@ class AutomaticMarketSyncScheduler:
             else:
                 precomputed = self._precomputer.run(
                     vipdoc_path=".",
-                    progress_callback=progress,
+                    progress_callback=phased_progress_callback(
+                        progress,
+                        phase="precomputing",
+                        done_key="precompute_done",
+                        total_key="precompute_total",
+                    ),
                     # 与手动同步同一套参数：增量补算 + 按行情库实际末年锚定。
                     only_changed=True,
                     end_year=stored_end_year(store_status),
