@@ -302,7 +302,13 @@ describe('StrategyPoolPage', () => {
         model_portfolio: {
           available: true,
           holding_scope: 'per_stock_strategy',
-          holdings: [],
+          holdings: codes.map((code) => ({
+            market: 'SH',
+            code,
+            name: `测试${code}`,
+            status: 'held',
+            holding_return_pct: 0.01,
+          })),
           risk_exit_signals: [],
         },
       },
@@ -315,11 +321,19 @@ describe('StrategyPoolPage', () => {
       .map((row) => row.text().slice(0, 8))
     const returned = ['SH600003', 'SH600000', 'SH600001', 'SH600002']
     expect(rowSymbols('pool-buy-signals')).toEqual(returned)
+    expect(rowSymbols('pool-current-holdings')).toEqual(returned)
 
     const sort = wrapper.get('[data-testid="pool-signal-sort"]')
     await sort.setValue('payoff_ratio')
     expect(rowSymbols('pool-buy-signals')).toEqual(['SH600000', 'SH600002', 'SH600001', 'SH600003'])
     expect(rowSymbols('pool-sell-signals')).toEqual(['SH600000', 'SH600002', 'SH600001', 'SH600003'])
+    // 持仓面板跟着同一个排序，不再是固定的 API 顺序。
+    expect(rowSymbols('pool-current-holdings')).toEqual([
+      'SH600000',
+      'SH600002',
+      'SH600001',
+      'SH600003',
+    ])
 
     await sort.setValue('win_rate')
     expect(rowSymbols('pool-buy-signals')).toEqual(['SH600001', 'SH600002', 'SH600000', 'SH600003'])
@@ -2681,12 +2695,13 @@ describe('StrategyPoolPage', () => {
     // 按指标排序时关注行不再置顶：年化 0.9 的 600002 排第一，0.2 的关注票排第二。
     expect(firstRow('[data-testid="pool-buy-signals"]')?.find('[data-testid="pool-buy-follow-600002"]').exists()).toBe(true)
     expect(firstRow('[data-testid="pool-sell-signals"]')?.find('[data-testid="pool-sell-rule-follow-600002"]').exists()).toBe(true)
-    // 持仓面板没有指标排序，默认顺序下关注仍然置顶。
-    expect(firstRow('[data-testid="pool-current-holdings"]')?.find('[data-testid="pool-holding-follow-600000"]').exists()).toBe(true)
+    // 持仓面板共用同一个排序：同样按年化，600002 在前、关注票在后。
+    expect(firstRow('[data-testid="pool-current-holdings"]')?.find('[data-testid="pool-holding-follow-600002"]').exists()).toBe(true)
 
-    // 切回默认排序：关注行重新置顶。
+    // 切回默认排序：三个面板的关注行都重新置顶。
     await wrapper.get('[data-testid="pool-signal-sort"]').setValue('default')
     await flushPromises()
     expect(firstRow('[data-testid="pool-buy-signals"]')?.find('[data-testid="pool-buy-follow-600000"]').exists()).toBe(true)
+    expect(firstRow('[data-testid="pool-current-holdings"]')?.find('[data-testid="pool-holding-follow-600000"]').exists()).toBe(true)
   })
 })

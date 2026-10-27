@@ -143,10 +143,11 @@ const sortColumn = ref<StrategyPoolSortColumn>('status')
 // 'status' 档就是「未点任何指标列」的默认分组，也是取消排序落回的地方，
 // 因此方向只在指标列档位生效。
 const sortDirection = ref<StrategyPoolSortDirection>('desc')
-// 买卖信号列表的显示排序（2026-10-13 用户需求）：后端返回顺序对跟踪增量结果是按
-// 证券代码的，这里允许按行内展示的全区间指标重排。'default' 表示保持返回顺序。
+// 三个信号面板（触发买入 / 触发卖出 / 持仓中）共用的显示排序（2026-10-13 用户需求）：
+// 后端返回顺序对跟踪增量结果是按证券代码的，这里允许按行内展示的全区间指标重排。
+// 'default' 表示保持返回顺序，只有这一档把特别关注置顶。
 const SIGNAL_SORT_OPTIONS = [
-  { value: 'default', label: '默认顺序' },
+  { value: 'default', label: '默认顺序（关注置顶）' },
   { value: 'win_rate', label: '全区间胜率 高→低' },
   { value: 'payoff_ratio', label: '全区间盈亏比 高→低' },
   { value: 'annual_return', label: '全区间年化收益 高→低' },
@@ -538,15 +539,10 @@ const sellPage = ref(1)
 const holdingsPage = ref(1)
 const sortedBuySignals = computed(() => sortSignalRows(buySignals.value, (item) => item.symbol))
 const sortedSellPanelItems = computed(() => sortSignalRows(sellPanelItems.value, sellItemSymbol))
-// 特别关注的标的有就直接置顶，买入/卖出/持仓三个框都一样；组内仍沿用原排序。
-const sortedCurrentHoldings = computed(() => {
-  const pinned: StrategyPoolHolding[] = []
-  const rest: StrategyPoolHolding[] = []
-  for (const holding of currentHoldings.value) {
-    (followKeys.value.has(symbol(holding)) ? pinned : rest).push(holding)
-  }
-  return [...pinned, ...rest]
-})
+// 三个面板共用同一个排序：默认顺序下特别关注置顶，选了指标就一起按指标排。
+const sortedCurrentHoldings = computed(() =>
+  sortSignalRows(currentHoldings.value, (holding) => symbol(holding)),
+)
 const visibleBuySignals = computed(() => pageItems(sortedBuySignals.value, buyPage.value))
 const visibleSellSignals = computed(() => pageItems(sortedSellPanelItems.value, sellPage.value))
 const visibleCurrentHoldings = computed(() => pageItems(sortedCurrentHoldings.value, holdingsPage.value))
@@ -1653,7 +1649,7 @@ onUnmounted(() => {
         <p v-if="submittingTask" class="empty-copy" role="status" data-testid="pool-submitting">正在把任务提交给后端，研究正在跑时这一步可能要等十几秒…</p>
 
         <div class="signal-controls-row" data-testid="pool-signal-controls">
-          <label class="signal-sort">买卖信号排序
+          <label class="signal-sort">排序方式
             <select v-model="signalSort" data-testid="pool-signal-sort">
               <option v-for="option in SIGNAL_SORT_OPTIONS" :key="option.value" :value="option.value">{{ option.label }}</option>
             </select>
