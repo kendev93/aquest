@@ -76,6 +76,9 @@ def _snapshot_reusable(version: Mapping[str, Any], revision: str | None, target_
     summary = version.get("summary")
     if not isinstance(summary, Mapping):
         return False
+    if "holding" not in summary:
+        # 摘要不完整（旧版本只写了半份）就没法直接投影，照旧读检查点回放。
+        return False
     return (
         str(summary.get("engine_version") or "") == ENGINE_VERSION
         and str(summary.get("data_revision") or "") == revision
@@ -336,6 +339,18 @@ class PoolTrackingRunner:
                 return
             project(v, summary)
 
+        def project_reused(v: dict[str, Any]) -> None:
+            """复用上一份快照时直接按摘要投影。
+
+            ``summary_json`` 就是上一轮 ``consume`` 的产物（已经合并过持仓与账户字段），
+            所以复用路径不需要再把检查点 blob 读出来解压。
+            """
+
+            summary = v.get("summary")
+            if not isinstance(summary, Mapping) or not is_applied(v):
+                return
+            project(v, dict(summary))
+
         def project(v: dict[str, Any], summary: dict[str, Any]) -> None:
             result = results[v["objective"]]
             result["as_of_date"] = payload.get("as_of_date") or summary["as_of_date"]
@@ -511,25 +526,23 @@ class PoolTrackingRunner:
                         exhausted = True
                         break
                     v = dict(group[0], target_data_date=payload.get("as_of_date"))
-                    previous = self.tracks.snapshot(v["version_id"])
-                    if (
-                        previous is not None
-                        and isinstance(previous.get("checkpoint"), Mapping)
-                        and all(
-                            _snapshot_reusable(
-                                member,
-                                revisions.get((str(member["market"]), str(member["code"]))),
-                                target_data_date,
-                            )
-                            for member in group
+                    if all(
+                        _snapshot_reusable(
+                            member,
+                            revisions.get((str(member["market"]), str(member["code"]))),
+                            target_data_date,
                         )
+                        for member in group
                     ):
                         # 同一行情日、同一份数据、同一版引擎：上一份快照就是这一轮的结果。
+                        # 摘要里已经有上一轮算好的持仓与账户字段，不必再解压检查点——
+                        # 一条序列的检查点解压加解析约 10 ms，全市场就是 40 秒。
                         for member in group:
-                            consume(member, previous, persist=False)
+                            project_reused(member)
                             completed += 1
                         report_progress()
                         continue
+                    previous = self.tracks.snapshot(v["version_id"])
                     pending[executor.submit(_replay, v, previous)] = (group, executor)
                 if not pending:
                     if exhausted:

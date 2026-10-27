@@ -653,10 +653,21 @@ def test_a_fully_reused_signal_scan_still_projects_every_symbol(tmp_path):
     first = run_once()
     assert first["completed_symbols"] == 2
 
-    # 数据没变：第二轮整轮复用上一份快照，也要把两只都投影出来。
+    # 数据没变：第二轮整轮复用上一份快照，也要把两只都投影出来，并且不再读检查点
+    # （摘要里已经有上一轮算好的字段，解压一条检查点要 10 ms，全市场就是 40 秒）。
+    reads = {"count": 0}
+    snapshot = tracks.snapshot
+
+    def counting(version_id: str) -> dict:
+        reads["count"] += 1
+        return snapshot(version_id)
+
+    tracks.snapshot = counting  # type: ignore[method-assign]
     second = run_once()
+    assert reads["count"] == 0
     assert second["completed_symbols"] == 2
     assert {row["symbol"] for row in second["states"]} == {"SH600000", "SZ000001"}
+    assert second["states"] == first["states"]
 
 
 def test_scheduler_trading_day_dedup_and_new_version_initialization(tmp_path):
