@@ -16,7 +16,7 @@ import duckdb
 import pandas as pd
 
 from .models import MarketDataProvider
-from .store_base import DEFAULT_PRICE_BASIS
+from .store_base import DEFAULT_PRICE_BASIS, drain_result
 
 STAGE_DIRECTORY_NAME = ".sync-staging"
 STAGE_WORKERS = 8
@@ -362,6 +362,7 @@ class StageWriter:
                 [target.market, target.code],
             )
             if not incoming.empty:
+                drain_result(self._connection)
                 self._connection.register("_stage_incoming", incoming)
                 try:
                     self._connection.execute(
@@ -369,6 +370,7 @@ class StageWriter:
                         f"SELECT {', '.join(_STAGE_COLUMNS)} FROM _stage_incoming"
                     )
                 finally:
+                    drain_result(self._connection)
                     self._connection.unregister("_stage_incoming")
             self._connection.execute(
                 """

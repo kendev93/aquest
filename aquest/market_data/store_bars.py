@@ -24,6 +24,7 @@ from .store_base import (
     _clean_name,
     _DuckDbStoreBase,
     _now,
+    drain_result,
 )
 
 
@@ -80,6 +81,7 @@ class DuckDbBarsStore:
         with _WRITE_LOCK, self._store._connect() as connection:
             connection.execute("BEGIN")
             try:
+                drain_result(connection)
                 connection.register("_instrument_names", frame)
                 matched = connection.execute(
                     """
@@ -101,6 +103,7 @@ class DuckDbBarsStore:
                     """,
                     [_now()],
                 )
+                drain_result(connection)
                 connection.unregister("_instrument_names")
                 connection.execute("COMMIT")
             except Exception:
@@ -128,6 +131,7 @@ class DuckDbBarsStore:
         with _WRITE_LOCK, self._store._connect() as connection:
             connection.execute("BEGIN")
             try:
+                drain_result(connection)
                 connection.register("_discovered_instruments", frame)
                 matched = connection.execute(
                     """
@@ -165,6 +169,7 @@ class DuckDbBarsStore:
                     """,
                     [_now()],
                 )
+                drain_result(connection)
                 connection.unregister("_discovered_instruments")
                 connection.execute("COMMIT")
             except Exception:
@@ -223,6 +228,7 @@ class DuckDbBarsStore:
                     ).fetchone()
                     unchanged = int(stored[0] if stored else 0) == 0
                 else:
+                    drain_result(connection)
                     connection.register("_incoming_local_bars", incoming)
                     # 这一条路径会删掉该标的在这个口径下的全部行，所以"没变"必须是两侧集合
                     # 互相相等，而不是只比对来行情覆盖的那些日期。必须在 DELETE 之前算。
@@ -256,6 +262,7 @@ class DuckDbBarsStore:
                         f"INSERT INTO daily_bars ({columns}) "
                         f"SELECT {columns} FROM _incoming_local_bars"
                     )
+                    drain_result(connection)
                     connection.unregister("_incoming_local_bars")
                 self._store._refresh_instrument(
                     connection,
@@ -334,6 +341,7 @@ class DuckDbBarsStore:
         with _WRITE_LOCK, self._store._connect() as connection:
             connection.execute("BEGIN")
             try:
+                drain_result(connection)
                 connection.register("_incoming_local_upsert", incoming)
                 replaced_row = connection.execute(
                     """
@@ -406,6 +414,7 @@ class DuckDbBarsStore:
                         force_updated_at=(str(market).strip().upper(), str(code).strip())
                         in changed_keys,
                     )
+                drain_result(connection)
                 connection.unregister("_incoming_local_upsert")
                 connection.execute("COMMIT")
             except Exception:
@@ -492,6 +501,7 @@ class DuckDbBarsStore:
         with _WRITE_LOCK, self._store._connect() as connection:
             connection.execute("BEGIN")
             try:
+                drain_result(connection)
                 connection.register("_coverage_reset", symbols)
                 try:
                     row = connection.execute(
@@ -520,6 +530,7 @@ class DuckDbBarsStore:
                             [_now()],
                         )
                 finally:
+                    drain_result(connection)
                     connection.unregister("_coverage_reset")
                 connection.execute("COMMIT")
             except Exception:
@@ -614,6 +625,7 @@ class DuckDbBarsStore:
         的一块固定开销）。
         """
 
+        drain_result(connection)
         connection.register("_incoming_online_bars", incoming)
         eligible_row = connection.execute(
             """
@@ -766,6 +778,7 @@ class DuckDbBarsStore:
                 provider=instrument_provider,
                 force_updated_at=key in changed_keys,
             )
+        drain_result(connection)
         connection.unregister("_incoming_online_bars")
         return (eligible_count, existing_online_count)
 
@@ -812,6 +825,7 @@ class DuckDbBarsStore:
         for _, item in active:
             names_by_key.update(item[1])
         with _WRITE_LOCK, self._store.write_transaction() as connection:
+            drain_result(connection)
             connection.register("_incoming_online_bars", incoming)
             try:
                 eligible_rows = connection.execute(
@@ -969,6 +983,7 @@ class DuckDbBarsStore:
                     )
                 self._store._refresh_instruments_batch(connection, entries)
             finally:
+                drain_result(connection)
                 connection.unregister("_incoming_online_bars")
 
         # 计数按 (市场, 代码, 交易日, 口径) 分组，按每个帧自己的行回填——同一只票的不同
@@ -1255,6 +1270,7 @@ class DuckDbBarsStore:
         if frame.empty:
             return 0
         with self._store._connect(read_only=True) as connection:
+            drain_result(connection)
             connection.register("_keys", frame[["market", "code", "trade_date", "price_basis"]])
             value = connection.execute(
                 """
@@ -1267,6 +1283,7 @@ class DuckDbBarsStore:
                  AND bars.price_basis = keys.price_basis
                 """
             ).fetchone()
+            drain_result(connection)
             connection.unregister("_keys")
         return int(value[0] if value else 0)
 
@@ -1350,6 +1367,7 @@ class DuckDbBarsStore:
         )
         with self._store._connect(read_only=True) as connection:
             if symbols:
+                drain_result(connection)
                 connection.register("_requested_symbols", symbol_frame)
             return self._store._frame_from_query(connection.execute(query, parameters).df())
 
@@ -1892,6 +1910,7 @@ class DuckDbBarsStore:
             )
         with self._store._connect(read_only=True) as connection:
             if symbols:
+                drain_result(connection)
                 connection.register("_requested_symbols", symbol_frame)
             try:
                 if warmup_bars > 0:
@@ -1927,6 +1946,7 @@ class DuckDbBarsStore:
                     result = connection.execute(query, parameters).df()
             finally:
                 if symbols:
+                    drain_result(connection)
                     connection.unregister("_requested_symbols")
             return self._store._frame_from_query(result)
 
@@ -1968,10 +1988,12 @@ class DuckDbBarsStore:
             " ON bars.market = requested.market AND bars.code = requested.code" + where
         )
         with self._store._connect(read_only=True) as connection:
+            drain_result(connection)
             connection.register("_requested_symbols", symbol_frame)
             try:
                 row = connection.execute(query, parameters).fetchone()
             finally:
+                drain_result(connection)
                 connection.unregister("_requested_symbols")
         return int(row[0]) if row and row[0] is not None else 0
 
@@ -2006,10 +2028,12 @@ class DuckDbBarsStore:
             f" WHERE {' AND '.join(conditions)} GROUP BY bars.market, bars.code"
         )
         with self._store._connect(read_only=True) as connection:
+            drain_result(connection)
             connection.register("_requested_symbols", symbol_frame)
             try:
                 rows = connection.execute(query, parameters).fetchall()
             finally:
+                drain_result(connection)
                 connection.unregister("_requested_symbols")
         return {
             (str(market).strip().upper(), str(code).strip()): int(count)
@@ -2083,10 +2107,12 @@ class DuckDbBarsStore:
         parameters: list[object] = [price_basis] if price_basis is not None else []
         parameters.append(count)
         with self._store._connect(read_only=True) as connection:
+            drain_result(connection)
             connection.register("_requested_symbols", symbol_frame)
             try:
                 result = connection.execute(query, parameters).df()
             finally:
+                drain_result(connection)
                 connection.unregister("_requested_symbols")
         return self._store._frame_from_query(result)
 

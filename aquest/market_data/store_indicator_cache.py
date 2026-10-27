@@ -9,7 +9,13 @@ from typing import cast
 import duckdb
 import pandas as pd
 
-from .store_base import _WRITE_LOCK, _DuckDbStoreBase, _now, _timestamp_text
+from .store_base import (
+    _WRITE_LOCK,
+    _DuckDbStoreBase,
+    _now,
+    _timestamp_text,
+    drain_result,
+)
 
 _CHUNK_FINGERPRINT_MARKER = "|chunk:"
 #: 复权事件版本后缀，插在标的级版本号与年度块指纹之间（见 ``indicators/cache.py``）。
@@ -275,6 +281,7 @@ class DuckDbIndicatorCacheStore:
         lookup_frame = pd.DataFrame(pending, columns=lookup_columns).drop_duplicates()
         try:
             with self._store._connect(read_only=True) as connection:
+                drain_result(connection)
                 connection.register("_indicator_cache_keys", lookup_frame)
                 try:
                     rows = connection.execute(
@@ -305,6 +312,7 @@ class DuckDbIndicatorCacheStore:
                         """
                     ).fetchall()
                 finally:
+                    drain_result(connection)
                     connection.unregister("_indicator_cache_keys")
         except duckdb.CatalogException:
             return []
@@ -341,6 +349,7 @@ class DuckDbIndicatorCacheStore:
         ).drop_duplicates()
         try:
             with self._store._connect(read_only=True) as connection:
+                drain_result(connection)
                 connection.register("_indicator_cache_index_keys", lookup_frame)
                 try:
                     rows = connection.execute(
@@ -363,6 +372,7 @@ class DuckDbIndicatorCacheStore:
                         """
                     ).fetchall()
                 finally:
+                    drain_result(connection)
                     connection.unregister("_indicator_cache_index_keys")
         except duckdb.CatalogException:
             return []

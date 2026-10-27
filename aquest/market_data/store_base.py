@@ -195,6 +195,20 @@ def default_database_path() -> Path:
     return default_data_dir() / "market.duckdb"
 
 
+def drain_result(connection: duckdb.DuckDBPyConnection) -> None:
+    """把连接上挂起的结果读干净。
+
+    DuckDB 2.0 起，只要上一次查询还有没读完的行，``register`` / ``unregister`` 就会
+    报 ``ResourceInUseException``（1.x 会默默丢弃）。``fetchone()`` 只取一行正好会
+    留下这个尾巴，所以注册与注销前显式收尾；没有打开结果集时什么也不做。
+    """
+
+    try:
+        connection.fetchall()
+    except duckdb.Error:
+        pass
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
