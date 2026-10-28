@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import date, datetime
 from inspect import Parameter, signature
 from zoneinfo import ZoneInfo
@@ -53,9 +54,10 @@ from ._shared import (
     _storage_error_message,
     _store,
 )
-from .precompute import _with_indicator_precompute
+from .precompute import submit_precompute_job
 
 router = APIRouter(tags=["market-data"])
+logger = logging.getLogger(__name__)
 
 #: 重刷要删掉两种写入来源：本地导入的行永久压过在线行，只删 online 覆盖不到它们。
 _BAR_SOURCES = ("online", "local")
@@ -180,19 +182,33 @@ def _create_sync_job(
             raise TaskUserError(_storage_error_message(exc)) from exc
         if abort_check():
             raise TaskCancelledError("行情同步已取消")
-        # 同步只影响一部分标的，缓存也只补算那些缺失或过期的。
-        result = _with_indicator_precompute(
-            request,
-            result,
-            vipdoc_path=None,
-            universe=payload.universe,
-            instrument_types=payload.instrument_types,
-            boards=payload.boards,
-            progress_callback=progress,
-            abort_check=abort_check,
-            only_changed=True,
-            years=payload.precompute_years,
-        )
+        # 行情写完先丢掉进程内的指标缓存：键里的版本号在本进程是缓存住的，不丢的话
+        # 「日期不变、数值变了」的重写会继续命中旧条目。随后把指标预热排成独立任务，
+        # 同步任务不再等它——点完同步几秒就能看到结果，进度条换到那条任务上。
+        _invalidate_indicator_cache(request)
+        try:
+            precompute_job_id = submit_precompute_job(
+                request,
+                universe=payload.universe,
+                instrument_types=payload.instrument_types,
+                boards=payload.boards,
+                only_changed=True,
+                years=payload.precompute_years,
+            )
+        except Exception:  # noqa: BLE001 - 排不上队不能让同步本身失败
+            logger.exception("指标预计算任务提交失败")
+            result = {
+                **result,
+                "indicator_precompute": {
+                    "status": "failed",
+                    "message": "指标预计算任务没排上队，后续筛选或回测会按需重建",
+                },
+            }
+        else:
+            result = {
+                **result,
+                "indicator_precompute": {"status": "queued", "job_id": precompute_job_id},
+            }
         if not reset:
             return result
         # 重刷是"删了再下"，删掉却没补回来的标的必须单独点名，否则用户只会看到

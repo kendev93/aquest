@@ -186,6 +186,22 @@ def test_sync_is_skipped_when_the_session_is_already_downloaded(tmp_path: Path) 
         assert service.configs == []
 
 
+def test_sync_returns_before_indicators_are_warmed(tmp_path: Path) -> None:
+    """行情写完就返回：指标预热排成另一条「指标预计算」任务，同步结果里只报排队。"""
+
+    with _gate_client(tmp_path) as (client, store, service):
+        created = client.post("/api/v1/market-data/sync-online", json={"force": True})
+        assert created.status_code == 202
+        job_id = created.json()["data"]["job_id"]
+        _settle(client, job_id)
+
+        state = client.get(f"/api/v1/market-data/jobs/{job_id}").json()["data"]
+        precompute = state["result"]["indicator_precompute"]
+        assert precompute["status"] == "queued"
+        assert precompute["job_id"]
+        assert len(service.configs) == 1
+
+
 def test_force_flag_bypasses_the_gate(tmp_path: Path) -> None:
     """除权修正、补上次失败的洞都靠这个开关绕过判定，默认那一次仍然什么都不做。"""
 

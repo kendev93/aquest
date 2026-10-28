@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from inspect import Parameter, signature
 
 import duckdb
@@ -128,15 +128,23 @@ def _with_indicator_precompute(
         }
 
 
-@router.post(
-    "/indicator-cache/precompute",
-    status_code=status.HTTP_202_ACCEPTED,
-    response_model=None,
-)
-def create_indicator_precompute_job(
-    payload: MarketSyncRequest,
+def submit_precompute_job(
     request: Request,
-) -> JSONResponse:
+    *,
+    universe: str,
+    instrument_types: Sequence[InstrumentType] | tuple[InstrumentType, ...] | None,
+    boards: Sequence[InstrumentBoard] | tuple[InstrumentBoard, ...] | None,
+    only_changed: bool,
+    years: int | None,
+    vipdoc_path: str | None = None,
+    description: str = "指标预计算",
+) -> str:
+    """把指标预热排成一个独立任务。
+
+    同步任务收尾不再等它：行情写完之后页面立刻能看结果，指标在后台补。任务
+    自己报「正在重算指标缓存」阶段，页面那条进度条换到这一条任务上照常显示。
+    """
+
     job_id_holder = [""]
 
     def abort_check() -> bool:
@@ -159,28 +167,36 @@ def create_indicator_precompute_job(
                     ),
                 }
             precomputer = _precomputer(request)
+            callback = phased_progress_callback(
+                progress,
+                phase="precomputing",
+                done_key="precompute_done",
+                total_key="precompute_total",
+            )
+            resolved_years = years if years is not None else DEFAULT_PRECOMPUTE_YEARS
+            end_year = _stored_end_year(store_status)
             if _supports_abort_check(precomputer.run):
                 report = precomputer.run(
-                    vipdoc_path=payload.vipdoc_path or ".",
-                    universe=payload.universe,
-                    instrument_types=tuple(payload.instrument_types or ()),
-                    boards=tuple(payload.boards or ()),
-                    years=payload.precompute_years or DEFAULT_PRECOMPUTE_YEARS,
-                    end_year=_stored_end_year(store_status),
-                    only_changed=payload.precompute_only_changed,
-                    progress_callback=progress,
+                    vipdoc_path=vipdoc_path or ".",
+                    universe=universe,
+                    instrument_types=tuple(instrument_types or ()),
+                    boards=tuple(boards or ()),
+                    years=resolved_years,
+                    end_year=end_year,
+                    only_changed=only_changed,
+                    progress_callback=callback,
                     abort_check=abort_check,
                 )
             else:
                 report = precomputer.run(
-                    vipdoc_path=payload.vipdoc_path or ".",
-                    universe=payload.universe,
-                    instrument_types=tuple(payload.instrument_types or ()),
-                    boards=tuple(payload.boards or ()),
-                    years=payload.precompute_years or DEFAULT_PRECOMPUTE_YEARS,
-                    end_year=_stored_end_year(store_status),
-                    only_changed=payload.precompute_only_changed,
-                    progress_callback=progress,
+                    vipdoc_path=vipdoc_path or ".",
+                    universe=universe,
+                    instrument_types=tuple(instrument_types or ()),
+                    boards=tuple(boards or ()),
+                    years=resolved_years,
+                    end_year=end_year,
+                    only_changed=only_changed,
+                    progress_callback=callback,
                 )
         except PrecomputeCancelledError as exc:
             raise TaskCancelledError(str(exc)) from exc
@@ -189,10 +205,31 @@ def create_indicator_precompute_job(
         return report.to_dict()
 
     try:
-        job_id = _runner(request).submit_callable(run_precompute, description="指标预计算")
+        job_id = _runner(request).submit_callable(run_precompute, description=description)
         job_id_holder[0] = job_id
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail="任务执行器暂不可用") from exc
+    return job_id
+
+
+@router.post(
+    "/indicator-cache/precompute",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=None,
+)
+def create_indicator_precompute_job(
+    payload: MarketSyncRequest,
+    request: Request,
+) -> JSONResponse:
+    job_id = submit_precompute_job(
+        request,
+        universe=payload.universe,
+        instrument_types=payload.instrument_types,
+        boards=payload.boards,
+        only_changed=payload.precompute_only_changed,
+        years=payload.precompute_years,
+        vipdoc_path=payload.vipdoc_path,
+    )
     return JSONResponse(
         status_code=status.HTTP_202_ACCEPTED,
         content={"data": {"job_id": job_id, "status": "queued"}},

@@ -41,7 +41,10 @@ class PrecomputeCancelledError(RuntimeError):
     """Raised when a derived indicator cache warmup is cancelled."""
 
 
-_PRECOMPUTE_CHUNK_SIZE = 32
+#: 一批取多少只标的。每批要按窗口各查一次行情、再把整批的 frame 留在内存里；
+#: 32 只时 5,225 只分成 164 批、每批 5 个窗口共 820 次往返，翻倍到 64 只后往返
+#: 减半，内存只多几十 MB（一只 11 年的 frame 不到 1 MB）。
+_PRECOMPUTE_CHUNK_SIZE = 64
 # 预计算按自然年分块：一次只把"一年 + 预热"的行情读进内存，算完留下当年那一段，
 # 各年段首尾相接后再落库。一次读全市场全历史会同时带来十几 GB 的峰值内存和
 # 十几 GB 的 blob 写入，实测会把容器打崩。
