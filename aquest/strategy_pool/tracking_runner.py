@@ -169,7 +169,7 @@ class PoolTrackingRunner:
         params: list[object] = []
         for market, code in sorted(keys):
             params.extend((market, code))
-        with self.store.read_session() as connection:
+        with self.store.state_read_session() as connection:
             rows = connection.execute(
                 f"""
                 SELECT market, code, benchmark_json, updated_at

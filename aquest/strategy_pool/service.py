@@ -2069,7 +2069,7 @@ class MarketStrategyPoolService:
     def _prior_entries(
         self,
     ) -> dict[tuple[str, str], tuple[str, str, str, bool, datetime | None]]:
-        with self._store.read_session() as connection:
+        with self._store.state_read_session() as connection:
             # 「已有基准」的要求版本也得对得上：口径改过之后（例如从不复权换成
             # 分红再投资），老行必须重新补算，否则页面上会一直是改口径前的数字。
             rows = connection.execute(

@@ -7,9 +7,11 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import duckdb
+import pandas as pd
 import pytest
 
 from aquest.market_data import store_base as store_base_module
@@ -17,6 +19,22 @@ from aquest.market_data.store import DuckDbMarketDataStore
 from aquest.strategy_discovery.duckdb_job_store import DuckDbStrategyJobStore
 from aquest.strategy_pool.store import DuckDbStrategyPoolStore
 from aquest.strategy_pool.tracking_store import PoolTrackingStore
+
+
+def _bars() -> pd.DataFrame:
+    close = [10.0, 12.0, 15.0]
+    return pd.DataFrame(
+        {
+            "date": pd.date_range("2026-09-01", periods=3, freq="D"),
+            "open": close,
+            "high": [11.0, 13.0, 16.0],
+            "low": [9.0, 11.0, 13.0],
+            "close": close,
+            "volume": [1000.0] * 3,
+            "amount": [10000.0] * 3,
+            "bar_status": ["completed"] * 3,
+        }
+    )
 
 
 def _count(path: Path, table: str, where: str = "") -> int:
@@ -158,3 +176,86 @@ def test_a_persistent_lock_conflict_surfaces_as_a_store_error(monkeypatch, tmp_p
 
     with pytest.raises(store_base_module.MarketDataStoreError, match="状态库当前被其它进程占用"):
         store.state_read_session().__enter__()
+
+
+def test_pool_tracking_throttle_sees_jobs_written_after_the_split(tmp_path: Path) -> None:
+    """调度器要在状态库里查「今天已经尝试过几次」，否则 30 分钟下限永远不生效。
+
+    行情库里的 strategy_jobs 是拆分时留下的旧副本：查它得到的最近一次尝试永远是几天前
+    的记录，于是一轮扫完就再扫一轮，全市场每 60 秒被重扫一次（2026-10-28 实测）。
+    """
+
+    from aquest.strategy_pool.tracking_scheduler import PoolTrackingScheduler
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars())
+    store.ensure_state_database()
+    assert store.has_state_database() is True
+    with store.state_write_transaction() as connection:
+        connection.execute(
+            """
+            INSERT INTO pool_tracking_versions (
+                version_id, market, code, objective, source, signature,
+                candidate_json, created_at, is_current, summary_json, snapshot,
+                status, last_error, updated_at
+            ) VALUES ('v1', 'SH', '600000', 'annual_return', 'automatic', 'sig',
+                      '{}', '2026-09-01T00:00:00', TRUE, ?, NULL, 'ready', '',
+                      '2026-09-02T00:00:00')
+            """,
+            [json.dumps({"as_of_date": "2026-09-02", "holding": [], "full_period": {}})],
+        )
+    DuckDbStrategyJobStore(store).create(
+        "scan-1",
+        operation="market_strategy_pool_tracking",
+        payload={"mode": "signals", "as_of_date": "2026-09-03"},
+        description="每日策略池跟踪",
+    )
+
+    class Backend:
+        def __init__(self) -> None:
+            self.submitted: list[dict[str, object]] = []
+
+        def active_snapshots(self) -> list[dict[str, object]]:
+            return []
+
+        def submit(self, _operation, payload, **_kwargs) -> str:  # noqa: ANN001, ANN003
+            self.submitted.append(dict(payload))
+            return "scan-2"
+
+    class Runner:
+        def has_active_jobs(self, _descriptions) -> bool:  # noqa: ANN001
+            return False
+
+    backend = Backend()
+    scheduler = PoolTrackingScheduler(store, backend, Runner())
+
+    assert scheduler.submit_if_due() is None
+    assert backend.submitted == []
+
+
+def test_tracking_runner_reads_pool_entries_from_the_state_database(tmp_path: Path) -> None:
+    """跟踪回放要读到拆分后写进状态库的基准，否则质量判定会退回研究口径（或缺失）。"""
+
+    from aquest.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
+    from aquest.strategy_pool.tracking_runner import PoolTrackingRunner
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars())
+    store.ensure_state_database()
+    assert store.has_state_database() is True
+    DuckDbStrategyPoolStore(store).upsert_automatic(
+        market="SH",
+        code="600000",
+        name="test",
+        annual_candidate={"candidate_id": "c", "buy_rule": {}, "sell_rule": {}},
+        sharpe_candidate=None,
+        data_fingerprint="a",
+        config_fingerprint="b",
+        source_job_id="job",
+        benchmark={"full_period": {"total_return": 0.2}},
+    )
+    runner = PoolTrackingRunner(store, EvaluationWorkerBudget(1))
+
+    benchmarks, _ = runner._entry_context([{"market": "SH", "code": "600000"}])  # noqa: SLF001
+
+    assert benchmarks[("SH", "600000")] == 0.2

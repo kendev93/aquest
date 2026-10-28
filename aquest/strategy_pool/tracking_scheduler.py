@@ -56,7 +56,7 @@ class PoolTrackingScheduler:
                 for v in versions
             ):
                 return None
-            with self.store.read_session() as connection:
+            with self.store.state_read_session() as connection:
                 attempts = connection.execute(
                     "SELECT request_json,created_at FROM strategy_jobs WHERE operation=? "
                     "AND json_extract_string(request_json,'$.payload.as_of_date')=? "
