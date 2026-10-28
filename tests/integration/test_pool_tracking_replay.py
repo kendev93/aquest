@@ -562,6 +562,65 @@ def test_tracking_runner_batches_snapshots_and_falls_back_when_the_batch_fails(t
     assert result["skipped_symbols"] == 0
 
 
+def test_tracking_runner_reports_phase_timing_and_reuse(tmp_path):
+    """计时埋点要能回答「慢在哪一段」：同一份数据第二次扫描必须全命中复用。
+
+    主进程逐只串行做检查点解压与写库压缩，worker 才能并行回放；只有分开记才知道
+    下次该动哪边。复用那一轮的确定性最高：零回放、零检查点读取、零写库。
+    """
+
+    from aquest.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
+    from aquest.strategy_pool.tracking_runner import PoolTrackingRunner
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    codes = ("600000", "600001")
+    for code in codes:
+        store.replace_local_bars("SH", code, "stock", bars(3))
+    pool = DuckDbStrategyPoolStore(store)
+    for code in codes:
+        pool.upsert_automatic(
+            market="SH",
+            code=code,
+            name="test",
+            annual_candidate=candidate(),
+            sharpe_candidate=None,
+            data_fingerprint="a",
+            config_fingerprint="b",
+            source_job_id="job",
+        )
+    tracks = PoolTrackingStore(store)
+
+    def save(item):
+        return {
+            "saved": tracks.save_snapshots(
+                [(item["version_id"], item["signature"], item["snapshot"])]
+            )[0]
+        }
+
+    def run() -> dict:
+        return PoolTrackingRunner(store, EvaluationWorkerBudget(2)).run(
+            {"objective": "annual_return", "as_of_date": "2026-09-03"},
+            progress=lambda *args: None,
+            abort_check=lambda: False,
+            writer=save,
+            batch_writer=lambda items: [save(item) for item in items],
+        )
+
+    first = run()["timing"]
+    assert first["replayed_symbols"] == 2
+    assert first["reused_symbols"] == 0
+    assert first["replay_compute_s"] > 0
+    assert first["write_s"] > 0
+    assert first["total_s"] >= first["replay_wall_s"] > 0
+
+    second = run()["timing"]
+    assert second["reused_symbols"] == 2
+    assert second["replayed_symbols"] == 0
+    assert second["replay_compute_s"] == 0
+    assert second["snapshot_load_s"] == 0
+    assert second["write_s"] == 0
+
+
 def test_tracking_runner_keeps_version_status_when_snapshot_transport_is_transient(tmp_path):
     """后端繁忙/网络抖动只是快照没落库：本轮信号照常产出，版本状态不能被标成 failed。"""
 

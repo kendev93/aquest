@@ -61,7 +61,11 @@ def _initialize(database_path: str) -> None:
     )
 
 
-def _replay(version: dict[str, Any], previous: dict[str, Any] | None) -> dict[str, Any]:
+def _replay(
+    version: dict[str, Any], previous: dict[str, Any] | None
+) -> tuple[dict[str, Any], float]:
+    """回放一只标的；顺带带回进程内的计算耗时，供主进程区分计算与排队/IPC。"""
+
     if _WORKER_SERVICE is None:
         raise RuntimeError("跟踪回放进程未初始化")
     adapter = _WORKER_SERVICE._adapter
@@ -69,7 +73,9 @@ def _replay(version: dict[str, Any], previous: dict[str, Any] | None) -> dict[st
     if callable(clear):
         clear()
     ref = adapter.stock_ref("", version["market"], version["code"])
-    return replay_account(_WORKER_SERVICE, ref, version, previous)
+    started = time.monotonic()
+    snapshot = replay_account(_WORKER_SERVICE, ref, version, previous)
+    return snapshot, time.monotonic() - started
 
 
 def _snapshot_reusable(version: Mapping[str, Any], revision: str | None, target_date: str) -> bool:
@@ -195,6 +201,23 @@ class PoolTrackingRunner:
         writer: Callable[[dict[str, Any]], Any],
         batch_writer: Callable[[list[dict[str, Any]]], list[Any]] | None = None,
     ) -> dict[str, Any]:
+        run_started = time.monotonic()
+        # 阶段耗时：主进程里逐只串行的工作（检查点解压、写库压缩）和 worker 并行回放
+        # 分开记，否则只看总时长会误判瓶颈。全部是计数与单调时钟，不改任何行为。
+        # ``replay_compute_s`` 是各 worker 计算耗时之和，并行时可能大于 ``replay_wall_s``；
+        # 两者之差要结合 ``replay_overhead_s``（排队 + IPC + worker 启动）一起看。
+        timing: dict[str, float | int] = {
+            "prepare_s": 0.0,
+            "replay_wall_s": 0.0,
+            "snapshot_load_s": 0.0,
+            "replay_compute_s": 0.0,
+            "replay_overhead_s": 0.0,
+            "write_s": 0.0,
+            "total_s": 0.0,
+            "reused_symbols": 0,
+            "replayed_symbols": 0,
+            "worker_starts": 0,
+        }
         versions = self.tracks.current_versions()
         names = self._instrument_names(versions)
         benchmarks, research_ends = self._entry_context(versions)
@@ -287,7 +310,9 @@ class PoolTrackingRunner:
                 return snapshot_window.pop(version_id)
             chunk = replay_ids[snapshot_cursor : snapshot_cursor + _SNAPSHOT_BATCH]
             snapshot_cursor += len(chunk)
+            started = time.monotonic()
             snapshot_window.update(self.tracks.snapshots(chunk))
+            timing["snapshot_load_s"] += time.monotonic() - started
             return snapshot_window.pop(version_id, None)
 
         completed = failed = skipped = 0
@@ -299,6 +324,7 @@ class PoolTrackingRunner:
             nonlocal skipped, completed
             if not snapshot_batch:
                 return
+            started = time.monotonic()
             batch, snapshot_batch[:] = list(snapshot_batch), []
             acks: list[Any] | None = None
             if batch_writer is not None:
@@ -328,6 +354,7 @@ class PoolTrackingRunner:
                     # 这些标的进循环时已按「已完成」计过，退回给 skipped，三个计数不重复。
                     skipped += 1
                     completed -= 1
+            timing["write_s"] += time.monotonic() - started
 
         if not groups:
             progress(
@@ -509,6 +536,8 @@ class PoolTrackingRunner:
                     project(v, v["summary"])
         ramp = PoolConcurrencyRamp()
         maximum = pool_worker_cap()
+        timing["prepare_s"] = time.monotonic() - run_started
+        replay_started = time.monotonic()
         with self.budget.stock(), ExitStack() as cleanup:
 
             def new_slot(blocking: bool) -> tuple[ExitStack, ProcessPoolExecutor] | None:
@@ -529,6 +558,7 @@ class PoolTrackingRunner:
                         )
                     )
                     cleanup.callback(context.close)
+                    timing["worker_starts"] += 1
                     return context, executor
                 except BaseException:
                     context.close()
@@ -536,7 +566,7 @@ class PoolTrackingRunner:
 
             first = new_slot(True) if groups else None
             slots = [first] if first is not None else []
-            pending: dict[Any, tuple[list[dict[str, Any]], ProcessPoolExecutor]] = {}
+            pending: dict[Any, tuple[list[dict[str, Any]], ProcessPoolExecutor, float]] = {}
             exhausted = not bool(groups)
 
             def report_progress() -> None:
@@ -579,7 +609,7 @@ class PoolTrackingRunner:
                     active_workers=len(pending),
                     now=time.monotonic(),
                 )
-                busy = {id(executor) for _, executor in pending.values()}
+                busy = {id(executor) for _, executor, _ in pending.values()}
                 if len(slots) > target:
                     for slot in list(reversed(slots)):
                         if len(slots) <= target:
@@ -604,13 +634,18 @@ class PoolTrackingRunner:
                         # 同一行情日、同一份数据、同一版引擎：上一份快照就是这一轮的结果。
                         # 摘要里已经有上一轮算好的持仓与账户字段，不必再解压检查点——
                         # 一条序列的检查点解压加解析约 10 ms，全市场就是 40 秒。
+                        timing["reused_symbols"] += len(group)
                         for member in group:
                             project_reused(member)
                             completed += 1
                         report_progress()
                         continue
                     previous = take_snapshot(v["version_id"])
-                    pending[executor.submit(_replay, v, previous)] = (group, executor)
+                    pending[executor.submit(_replay, v, previous)] = (
+                        group,
+                        executor,
+                        time.monotonic(),
+                    )
                 if not pending:
                     if exhausted:
                         break
@@ -623,9 +658,9 @@ class PoolTrackingRunner:
                     continue
                 finished, _ = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
                 for future in finished:
-                    group, _executor = pending.pop(future)
+                    group, _executor, submitted_at = pending.pop(future)
                     try:
-                        snapshot = future.result()
+                        snapshot, compute_s = future.result()
                     except TaskCancelledError:
                         raise
                     except Exception as exc:
@@ -649,6 +684,11 @@ class PoolTrackingRunner:
                                 result["holding_snapshot_complete"] = False
                                 result["model_portfolio"]["failed_symbols"] += 1
                     else:
+                        timing["replay_compute_s"] += compute_s
+                        timing["replay_overhead_s"] += max(
+                            0.0, (time.monotonic() - submitted_at) - compute_s
+                        )
+                        timing["replayed_symbols"] += len(group)
                         for v in group:
                             skipped_before = skipped
                             try:
@@ -688,7 +728,24 @@ class PoolTrackingRunner:
                                 if len(snapshot_batch) >= SNAPSHOT_BATCH_SIZE:
                                     flush_snapshots()
                 report_progress()
+        timing["replay_wall_s"] = time.monotonic() - replay_started
         flush_snapshots()
+        timing["total_s"] = time.monotonic() - run_started
+        logger.info(
+            "策略池信号扫描耗时 %.1fs：准备 %.1fs，回放墙钟 %.1fs"
+            "（计算 %.1fs，排队/IPC %.1fs），检查点读取 %.1fs，写库 %.1fs；"
+            "复用 %d 只，回放 %d 只，worker 启动 %d 次",
+            timing["total_s"],
+            timing["prepare_s"],
+            timing["replay_wall_s"],
+            timing["replay_compute_s"],
+            timing["replay_overhead_s"],
+            timing["snapshot_load_s"],
+            timing["write_s"],
+            timing["reused_symbols"],
+            timing["replayed_symbols"],
+            timing["worker_starts"],
+        )
         goal = str(payload.get("objective") or "annual_return")
         return {
             **results[goal],
@@ -698,4 +755,5 @@ class PoolTrackingRunner:
             "completed_symbols": completed,
             "failed_symbols": failed,
             "skipped_symbols": skipped,
+            "timing": timing,
         }
