@@ -1070,6 +1070,75 @@ def test_reselection_backfills_full_period_return_without_researching_cached_rul
     assert backfilled[0]["annual_candidate"]["metrics"]["full_period"]["total_return"] == 0.31
 
 
+def test_backfill_copies_full_period_metrics_to_a_shared_candidate(tmp_path) -> None:
+    """两个目标选出同一个候选时，全区间指标只回放一次，也要复制给另一个目标。
+
+    以前按 candidate_id 去重后直接跳过第二个目标：那个目标永远缺 full_period，增量预估
+    就把它算作「待重算」，重跑多少次都清不掉（2026-10-28 实测 SH601515）。
+    """
+
+    store = DuckDbMarketDataStore(tmp_path / "shared-candidate.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars("2020-01-01", 60))
+    pool_store = DuckDbStrategyPoolStore(store)
+    pool_store.initialize()
+
+    class FakeWithHoldingDays(FakeIndividualResearchService):
+        def full_period_metrics(self, candidate, start_date, end_date):  # noqa: ANN001, ANN201
+            self.full_period_ranges.append((start_date, end_date))
+            return {"total_return": 0.31, "annual_return": 0.11, "avg_holding_days": 12.0}
+
+    individual = FakeWithHoldingDays()
+    service = MarketStrategyPoolService(
+        store=store,
+        adapter=DuckDbMarketDataAdapter(store),
+        individual_service=individual,
+        pool_store=pool_store,
+        portfolio_service=FakePortfolioBacktestService(),
+    )
+    payload = {"mode": "full", "risk_trials": 3_000, "horizon": 5}
+    service.run(
+        payload,
+        job_id="initial",
+        entry_writer=lambda item: pool_store.persist_worker_entry(item, source_job_id="initial"),
+    )
+
+    entry = pool_store.get("SH", "600000")
+    annual = dict(entry["automatic_candidates"]["annual_return"])
+    # 线上形态：两个目标各自保存完整候选（不是引用），规则相同 → 同一个 candidate_hash。
+    sharpe = {**annual, "objective": "sharpe"}
+    for candidate in (annual, sharpe):
+        metrics = dict(candidate["metrics"])
+        metrics.pop("full_period")
+        candidate["metrics"] = metrics
+    pool_store.upsert_automatic(
+        market="SH",
+        code="600000",
+        name="浦发银行",
+        annual_candidate=annual,
+        sharpe_candidate=sharpe,
+        data_fingerprint=entry["data_fingerprint"],
+        market_fingerprint=entry["market_fingerprint"],
+        config_fingerprint=entry["config_fingerprint"],
+        source_job_id="legacy-without-full-period",
+        benchmark=entry["benchmark"],
+    )
+    configs_before = len(individual.configs)
+    ranges_before = len(individual.full_period_ranges)
+
+    written: list[dict[str, object]] = []
+    result = service.run(payload, job_id="backfill-shared", entry_writer=written.append)
+
+    assert result["skipped_symbols"] == 1
+    assert len(individual.configs) == configs_before
+    # 同一个候选只回放一次，另一份直接复制。
+    assert len(individual.full_period_ranges) == ranges_before + 1
+    for objective in ("annual_candidate", "sharpe_candidate"):
+        metrics = written[0][objective]["metrics"]["full_period"]
+        assert metrics["total_return"] == 0.31
+    pool_store.persist_worker_entry(written[0], source_job_id="backfill-shared")
+    assert service._needs_full_period_backfill(pool_store.get("SH", "600000")) is False
+
+
 def test_full_pool_research_runs_tickers_concurrently_when_memory_allows(
     tmp_path,
     monkeypatch,

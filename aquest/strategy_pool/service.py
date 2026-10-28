@@ -2269,7 +2269,10 @@ class MarketStrategyPoolService:
         if not callable(calculator):
             return None
         changed = False
-        seen: set[str] = set()
+        # 两个目标可能选出完全相同的候选（同一套规则、同一个 candidate_id）：全区间指标
+        # 只算一次，但必须复制给另一个目标。以前去重后直接跳过第二个目标，那个目标就
+        # 永远缺 full_period，增量预估一直把它算作「待重算」，重跑多少次都清不掉。
+        seen: dict[str, Mapping[str, object] | None] = {}
         for objective in ("annual_return", "sharpe"):
             candidate_value = automatic.get(objective)
             if (
@@ -2278,25 +2281,38 @@ class MarketStrategyPoolService:
                 or candidate_value.get("replayable") is False
             ):
                 continue
-            candidate_id = str(
-                candidate_value.get("candidate_id")
-                or candidate_value.get("candidate_hash")
+            candidate_key = str(
+                candidate_value.get("candidate_hash")
+                or candidate_value.get("candidate_id")
                 or objective
             )
-            if candidate_id in seen:
-                continue
-            seen.add(candidate_id)
-            if not self._needs_full_period_backfill(
+            needs_backfill = self._needs_full_period_backfill(
                 {"automatic_candidates": {objective: candidate_value}}
-            ):
+            )
+            if candidate_key in seen:
+                cached = seen[candidate_key]
+                if needs_backfill and cached is not None:
+                    updated = dict(candidate_value)
+                    current_metrics = _mapping(updated.get("metrics"))
+                    updated["metrics"] = {**current_metrics, "full_period": dict(cached)}
+                    automatic[objective] = updated
+                    changed = True
+                continue
+            if not needs_backfill:
+                existing = _mapping(_mapping(candidate_value.get("metrics")).get("full_period"))
+                if existing:
+                    seen[candidate_key] = existing
                 continue
             try:
                 full_metrics = calculator(candidate_value, start_date, end_date)
             except Exception:  # noqa: BLE001 - display metric backfill must not discard cached winners
                 logger.exception("全区间策略收益补算失败: %s %s", ref.symbol, objective)
+                seen[candidate_key] = None
                 continue
             if not isinstance(full_metrics, Mapping):
+                seen[candidate_key] = None
                 continue
+            seen[candidate_key] = full_metrics
             updated = dict(candidate_value)
             current_metrics = _mapping(updated.get("metrics"))
             updated["metrics"] = {**current_metrics, "full_period": dict(full_metrics)}
