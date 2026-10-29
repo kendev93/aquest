@@ -8,7 +8,13 @@ import math
 import multiprocessing
 import time
 from collections.abc import Callable, Mapping
-from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
+from concurrent.futures import (
+    FIRST_COMPLETED,
+    Future,
+    ProcessPoolExecutor,
+    ThreadPoolExecutor,
+    wait,
+)
 from contextlib import ExitStack
 from datetime import date, datetime
 from typing import Any
@@ -42,8 +48,9 @@ from .tracking import account_summary, replay_account
 from .tracking_store import ENGINE_VERSION, OBJECTIVES, PoolTrackingStore
 
 _WORKER_SERVICE: PortfolioBacktestService | None = None
-#: 回放前一次预取多少只检查点：解压后一只接近 1 MB，窗口太大只是白占内存。
-_SNAPSHOT_BATCH = 64
+#: 回放进程自己读上一份检查点：主进程不再预取、解压再传进来（全量扫描实测省下约 98 秒
+#: 串行解压和 4,261 次 1 MB 级 IPC 入参）。
+_WORKER_TRACKS: PoolTrackingStore | None = None
 logger = logging.getLogger(__name__)
 
 #: 一次批量上报多少只跟踪快照。64 只 × 4 个参数远低于 SQLite 的 999 变量上限，
@@ -52,19 +59,23 @@ SNAPSHOT_BATCH_SIZE = 64
 
 
 def _initialize(database_path: str) -> None:
-    global _WORKER_SERVICE
+    global _WORKER_SERVICE, _WORKER_TRACKS
     store = DuckDbMarketDataStore(database_path, read_only=True)
     adapter = DuckDbMarketDataAdapter(store, cache_stock_reads=True)
     cache_store = store if store.indicator_cache_backend == "sqlite" else None
     _WORKER_SERVICE = PortfolioBacktestService(
         adapter=adapter, indicator_cache=IndicatorCache(cache_store, max_memory_entries=64)
     )
+    _WORKER_TRACKS = PoolTrackingStore(store)
 
 
-def _replay(
-    version: dict[str, Any], previous: dict[str, Any] | None
-) -> tuple[dict[str, Any], float]:
-    """回放一只标的；顺带带回进程内的计算耗时，供主进程区分计算与排队/IPC。"""
+def _replay(version: dict[str, Any]) -> tuple[dict[str, Any], float, float]:
+    """回放一只标的，带回进程内耗时。
+
+    返回值里 ``compute_s`` 是回放计算，``load_s`` 是读上一份检查点。上一份检查点读不到
+    时按「没有历史」从窗口起点重放：结果一样，只是慢一点，不能因为状态库一时的锁冲突
+    把这只标的判成失败。
+    """
 
     if _WORKER_SERVICE is None:
         raise RuntimeError("跟踪回放进程未初始化")
@@ -74,8 +85,16 @@ def _replay(
         clear()
     ref = adapter.stock_ref("", version["market"], version["code"])
     started = time.monotonic()
+    previous: dict[str, Any] | None = None
+    if _WORKER_TRACKS is not None:
+        try:
+            previous = _WORKER_TRACKS.snapshot(str(version["version_id"]))
+        except Exception as exc:  # noqa: BLE001 - 读不到就整段重放，不能判失败
+            logger.warning("读取上一份跟踪检查点失败，本轮整段重放 %s: %s", ref.symbol, exc)
+    load_s = time.monotonic() - started
+    started = time.monotonic()
     snapshot = replay_account(_WORKER_SERVICE, ref, version, previous)
-    return snapshot, time.monotonic() - started
+    return snapshot, time.monotonic() - started, load_s
 
 
 def _snapshot_reusable(version: Mapping[str, Any], revision: str | None, target_date: str) -> bool:
@@ -294,38 +313,15 @@ class PoolTrackingRunner:
             for group in work_items
         ]
         work = iter(zip(work_items, reusable, strict=True))
-        replay_ids = [
-            group[0]["version_id"]
-            for group, is_reusable in zip(work_items, reusable, strict=True)
-            if not is_reusable
-        ]
-        snapshot_window: dict[str, dict[str, Any]] = {}
-        snapshot_cursor = 0
-
-        def take_snapshot(version_id: str) -> dict[str, Any] | None:
-            """回放用的检查点：窗口里没有再补一批（正常就是接下来要用的那几只）。"""
-
-            nonlocal snapshot_cursor
-            if version_id in snapshot_window:
-                return snapshot_window.pop(version_id)
-            chunk = replay_ids[snapshot_cursor : snapshot_cursor + _SNAPSHOT_BATCH]
-            snapshot_cursor += len(chunk)
-            started = time.monotonic()
-            snapshot_window.update(self.tracks.snapshots(chunk))
-            timing["snapshot_load_s"] += time.monotonic() - started
-            return snapshot_window.pop(version_id, None)
 
         completed = failed = skipped = 0
         # 逐只写库实测 15.8 ms：一次全市场扫描 4,409 只就是约 70 秒串行写库。批量上报把
         # 一批合成一个事务（实测摊到 0.14 ms/行），快照是派生数据，丢了下一轮重算。
         snapshot_batch: list[dict[str, Any]] = []
 
-        def flush_snapshots() -> None:
-            nonlocal skipped, completed
-            if not snapshot_batch:
-                return
-            started = time.monotonic()
-            batch, snapshot_batch[:] = list(snapshot_batch), []
+        def write_batch(batch: list[dict[str, Any]]) -> list[Any]:
+            """写一批快照，返回逐只回执；不碰计数器（回执在主线程里结算）。"""
+
             acks: list[Any] | None = None
             if batch_writer is not None:
                 try:
@@ -334,27 +330,23 @@ class PoolTrackingRunner:
                     logger.warning("批量保存跟踪快照暂不可用，退回逐只写入: %s", exc)
                 except Exception:
                     logger.exception("批量保存跟踪快照失败，退回逐只写入")
-            if acks is None:
-                acks = []
-                for item in batch:
-                    try:
-                        acks.append(writer(item))
-                    except TransientWorkerApiError as exc:
-                        logger.warning(
-                            "跟踪快照暂未落库，下一轮重试 version_id=%s: %s",
-                            item.get("version_id"),
-                            exc,
-                        )
-                        acks.append({"saved": False})
-                    except Exception:
-                        logger.exception("无法保存跟踪快照 version_id=%s", item.get("version_id"))
-                        acks.append({"saved": False})
-            for ack in acks:
-                if isinstance(ack, Mapping) and ack.get("saved") is False:
-                    # 这些标的进循环时已按「已完成」计过，退回给 skipped，三个计数不重复。
-                    skipped += 1
-                    completed -= 1
-            timing["write_s"] += time.monotonic() - started
+            if acks is not None:
+                return list(acks)
+            acks = []
+            for item in batch:
+                try:
+                    acks.append(writer(item))
+                except TransientWorkerApiError as exc:
+                    logger.warning(
+                        "跟踪快照暂未落库，下一轮重试 version_id=%s: %s",
+                        item.get("version_id"),
+                        exc,
+                    )
+                    acks.append({"saved": False})
+                except Exception:
+                    logger.exception("无法保存跟踪快照 version_id=%s", item.get("version_id"))
+                    acks.append({"saved": False})
+            return acks
 
         if not groups:
             progress(
@@ -539,6 +531,34 @@ class PoolTrackingRunner:
         timing["prepare_s"] = time.monotonic() - run_started
         replay_started = time.monotonic()
         with self.budget.stock(), ExitStack() as cleanup:
+            # 写库放到后台线程：压缩 + 批量写一批约十几秒，占着这段主循环就等于让所有
+            # worker 空转（全量扫描实测写库占墙钟 46%）。最多排两批，超出的先等最早的。
+            flush_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="snapshot-write")
+            cleanup.callback(flush_pool.shutdown, wait=False, cancel_futures=True)
+            flush_futures: list[Future[list[Any]]] = []
+
+            def apply_acks(acks: list[Any]) -> None:
+                nonlocal skipped, completed
+                for ack in acks:
+                    if isinstance(ack, Mapping) and ack.get("saved") is False:
+                        # 这些标的进循环时已按「已完成」计过，退回给 skipped，三个计数不重复。
+                        skipped += 1
+                        completed -= 1
+
+            def drain_one() -> None:
+                if not flush_futures:
+                    return
+                started = time.monotonic()
+                acks = flush_futures.pop(0).result()
+                timing["write_s"] += time.monotonic() - started
+                apply_acks(acks)
+
+            def flush_snapshots(*, drain_all: bool = False) -> None:
+                if snapshot_batch:
+                    batch, snapshot_batch[:] = list(snapshot_batch), []
+                    flush_futures.append(flush_pool.submit(write_batch, batch))
+                while flush_futures and (drain_all or len(flush_futures) >= 2):
+                    drain_one()
 
             def new_slot(blocking: bool) -> tuple[ExitStack, ProcessPoolExecutor] | None:
                 context = ExitStack()
@@ -632,7 +652,7 @@ class PoolTrackingRunner:
                     v = dict(group[0], target_data_date=payload.get("as_of_date"))
                     if is_reusable:
                         # 同一行情日、同一份数据、同一版引擎：上一份快照就是这一轮的结果。
-                        # 摘要里已经有上一轮算好的持仓与账户字段，不必再解压检查点——
+                        # 摘要里已经有上一轮算好的持仓与账户字段，不提交回放、不读检查点——
                         # 一条序列的检查点解压加解析约 10 ms，全市场就是 40 秒。
                         timing["reused_symbols"] += len(group)
                         for member in group:
@@ -640,8 +660,7 @@ class PoolTrackingRunner:
                             completed += 1
                         report_progress()
                         continue
-                    previous = take_snapshot(v["version_id"])
-                    pending[executor.submit(_replay, v, previous)] = (
+                    pending[executor.submit(_replay, v)] = (
                         group,
                         executor,
                         time.monotonic(),
@@ -660,7 +679,7 @@ class PoolTrackingRunner:
                 for future in finished:
                     group, _executor, submitted_at = pending.pop(future)
                     try:
-                        snapshot, compute_s = future.result()
+                        snapshot, compute_s, load_s = future.result()
                     except TaskCancelledError:
                         raise
                     except Exception as exc:
@@ -684,9 +703,10 @@ class PoolTrackingRunner:
                                 result["holding_snapshot_complete"] = False
                                 result["model_portfolio"]["failed_symbols"] += 1
                     else:
+                        timing["snapshot_load_s"] += load_s
                         timing["replay_compute_s"] += compute_s
                         timing["replay_overhead_s"] += max(
-                            0.0, (time.monotonic() - submitted_at) - compute_s
+                            0.0, (time.monotonic() - submitted_at) - compute_s - load_s
                         )
                         timing["replayed_symbols"] += len(group)
                         for v in group:
@@ -728,12 +748,13 @@ class PoolTrackingRunner:
                                 if len(snapshot_batch) >= SNAPSHOT_BATCH_SIZE:
                                     flush_snapshots()
                 report_progress()
+            # 最后一批也要落库：仍走后台线程，避免重复一套同步写。
+            flush_snapshots(drain_all=True)
         timing["replay_wall_s"] = time.monotonic() - replay_started
-        flush_snapshots()
         timing["total_s"] = time.monotonic() - run_started
         logger.info(
             "策略池信号扫描耗时 %.1fs：准备 %.1fs，回放墙钟 %.1fs"
-            "（计算 %.1fs，排队/IPC %.1fs），检查点读取 %.1fs，写库 %.1fs；"
+            "（计算 %.1fs，排队/IPC %.1fs），检查点读取 %.1fs，写库等待 %.1fs；"
             "复用 %d 只，回放 %d 只，worker 启动 %d 次",
             timing["total_s"],
             timing["prepare_s"],

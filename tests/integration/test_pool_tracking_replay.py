@@ -2028,3 +2028,69 @@ def test_pool_entry_list_keeps_holding_risk_lines_but_not_the_snapshot(tmp_path)
     assert row["latest_close_date"] == "2026-09-03"
     assert "latest_close" not in summary
     assert row["tracking_as_of_date"] == "2026-09-03"
+
+
+def test_worker_replay_reads_its_own_previous_checkpoint(tmp_path, monkeypatch) -> None:
+    """回放进程自己读上一份检查点：主进程不再预取、解压、塞进进程间参数。
+
+    读不到时按「没有历史」整段重放——结果一样，只是慢一点，不能把这只看成失败。
+    """
+
+    from aquest.strategy_pool import tracking_runner as runner_module
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", bars(3))
+    tracks = PoolTrackingStore(store)
+    with store.state_write_transaction() as connection:
+        connection.execute(
+            """
+            INSERT INTO pool_tracking_versions (
+                version_id, market, code, objective, source, signature,
+                candidate_json, created_at, is_current, summary_json, snapshot,
+                status, last_error, updated_at
+            ) VALUES ('v1', 'SH', '600000', 'annual_return', 'automatic', 'sig',
+                      '{}', '2026-09-01T00:00:00', TRUE, '{}', NULL, 'ready', '',
+                      '2026-09-02T00:00:00')
+            """
+        )
+    tracks.save_snapshot(
+        "v1",
+        "sig",
+        {
+            "summary": {"as_of_date": "2026-09-03"},
+            "checkpoint": {"processed_dates": [], "equity": []},
+        },
+    )
+    version = {
+        "version_id": "v1",
+        "market": "SH",
+        "code": "600000",
+        "signature": "sig",
+        "candidate": candidate(),
+        "target_data_date": "2026-09-03",
+        "launch_data_date": "2026-09-01",
+    }
+
+    reads: list[str] = []
+    real_snapshot = PoolTrackingStore.snapshot
+
+    def spy(self, version_id: str):  # noqa: ANN001, ANN202
+        reads.append(version_id)
+        return real_snapshot(self, version_id)
+
+    monkeypatch.setattr(PoolTrackingStore, "snapshot", spy)
+    runner_module._initialize(str(store.database_path))
+
+    snapshot, compute_s, load_s = runner_module._replay(version)
+
+    assert reads == ["v1"]
+    assert compute_s > 0
+    assert load_s >= 0
+    assert snapshot["summary"]["as_of_date"] == "2026-09-03"
+
+    def broken(self, version_id: str):  # noqa: ANN001, ANN202
+        raise RuntimeError("状态库暂时读不到")
+
+    monkeypatch.setattr(PoolTrackingStore, "snapshot", broken)
+    snapshot, _, _ = runner_module._replay(version)
+    assert snapshot["summary"]["as_of_date"] == "2026-09-03"
