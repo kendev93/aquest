@@ -2071,26 +2071,81 @@ def test_worker_replay_reads_its_own_previous_checkpoint(tmp_path, monkeypatch) 
         "launch_data_date": "2026-09-01",
     }
 
-    reads: list[str] = []
-    real_snapshot = PoolTrackingStore.snapshot
+    reads: list[list[str]] = []
+    real_snapshots = PoolTrackingStore.snapshots
 
-    def spy(self, version_id: str):  # noqa: ANN001, ANN202
-        reads.append(version_id)
-        return real_snapshot(self, version_id)
+    def spy(self, version_ids):  # noqa: ANN001, ANN202
+        reads.append(list(version_ids))
+        return real_snapshots(self, version_ids)
 
-    monkeypatch.setattr(PoolTrackingStore, "snapshot", spy)
+    monkeypatch.setattr(PoolTrackingStore, "snapshots", spy)
     runner_module._initialize(str(store.database_path))
 
     snapshot, compute_s, load_s = runner_module._replay(version)
 
-    assert reads == ["v1"]
+    assert reads == [["v1"]]
     assert compute_s > 0
     assert load_s >= 0
     assert snapshot["summary"]["as_of_date"] == "2026-09-03"
 
-    def broken(self, version_id: str):  # noqa: ANN001, ANN202
+    def broken(self, version_ids):  # noqa: ANN001, ANN202
         raise RuntimeError("状态库暂时读不到")
 
-    monkeypatch.setattr(PoolTrackingStore, "snapshot", broken)
+    monkeypatch.setattr(PoolTrackingStore, "snapshots", broken)
     snapshot, _, _ = runner_module._replay(version)
     assert snapshot["summary"]["as_of_date"] == "2026-09-03"
+
+
+def test_worker_replay_batch_reads_checkpoints_once(tmp_path, monkeypatch) -> None:
+    """一批标的只读一次检查点；其中一只失败不连累同批其它标的。"""
+
+    from aquest.strategy_pool import tracking_runner as runner_module
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    for market, code in (("SH", "600000"), ("SZ", "000001")):
+        store.replace_local_bars(market, code, "stock", bars(3))
+    reads: list[list[str]] = []
+    real_snapshots = PoolTrackingStore.snapshots
+
+    def spy(self, version_ids):  # noqa: ANN001, ANN202
+        reads.append(list(version_ids))
+        return real_snapshots(self, version_ids)
+
+    monkeypatch.setattr(PoolTrackingStore, "snapshots", spy)
+    runner_module._initialize(str(store.database_path))
+    versions = [
+        {
+            "version_id": "v1",
+            "market": "SH",
+            "code": "600000",
+            "signature": "sig",
+            "candidate": candidate(),
+            "target_data_date": "2026-09-03",
+        },
+        {
+            "version_id": "v2",
+            "market": "SZ",
+            "code": "000001",
+            "signature": "sig",
+            "candidate": candidate(),
+            "target_data_date": "2026-09-03",
+        },
+        {
+            "version_id": "v3",
+            "market": "SH",
+            "code": "999999",
+            "signature": "sig",
+            "candidate": candidate(),
+            "target_data_date": "2026-09-03",
+        },
+    ]
+
+    outcomes, load_s = runner_module._replay_batch(versions)
+
+    assert reads == [["v1", "v2", "v3"]]
+    assert [status for status, _ in outcomes] == ["ok", "ok", "error"]
+    assert load_s >= 0
+    for status, payload in outcomes[:2]:
+        snapshot, compute_s = payload
+        assert compute_s > 0
+        assert snapshot["summary"]["as_of_date"] == "2026-09-03"

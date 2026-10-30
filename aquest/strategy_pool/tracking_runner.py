@@ -17,7 +17,7 @@ from concurrent.futures import (
 )
 from contextlib import ExitStack
 from datetime import date, datetime
-from typing import Any
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 from aquest.concurrency import visible_cpu_count
@@ -56,6 +56,13 @@ logger = logging.getLogger(__name__)
 #: 一次批量上报多少只跟踪快照。64 只 × 4 个参数远低于 SQLite 的 999 变量上限，
 #: 单批快照体量约十几 MB；再大只会把一次请求的超时和内存风险放大。
 SNAPSHOT_BATCH_SIZE = 64
+#: 一个回放任务领多少只：整批只开一次状态库连接读检查点（全量扫描实测逐只打开
+#: 0.67 秒/只），单只慢票对整轮的拖尾也只有一批的量。
+REPLAY_CHUNK_SIZE = 12
+#: 跟踪扫描的并发起步与爬坡。默认从 1 个、每 30 秒 +1，全量扫描前 3.5 分钟都在爬坡；
+#: 实际并发仍受内存与 CPU 压力上限约束。
+TRACKING_RAMP_INITIAL_WORKERS = 4
+TRACKING_RAMP_INTERVAL_SECONDS = 2.0
 
 
 def _initialize(database_path: str) -> None:
@@ -69,14 +76,26 @@ def _initialize(database_path: str) -> None:
     _WORKER_TRACKS = PoolTrackingStore(store)
 
 
-def _replay(version: dict[str, Any]) -> tuple[dict[str, Any], float, float]:
-    """回放一只标的，带回进程内耗时。
+def _load_previous(version_ids: list[str]) -> tuple[dict[str, dict[str, Any]], float]:
+    """整批读上一份检查点：一次连接摊掉逐只打开状态库的开销。
 
-    返回值里 ``compute_s`` 是回放计算，``load_s`` 是读上一份检查点。上一份检查点读不到
-    时按「没有历史」从窗口起点重放：结果一样，只是慢一点，不能因为状态库一时的锁冲突
-    把这只标的判成失败。
+    全量扫描实测逐只打开 0.67 秒/只（跨进程只读连接与 backend 的写事务抢锁、走重试），
+    整批读一次后这部分开销按批摊薄。读不到就整段重放——结果一样、只是慢，不能判失败。
     """
 
+    if _WORKER_TRACKS is None or not version_ids:
+        return {}, 0.0
+    started = time.monotonic()
+    try:
+        return _WORKER_TRACKS.snapshots(version_ids), time.monotonic() - started
+    except Exception as exc:  # noqa: BLE001 - 读不到就整段重放，不能判失败
+        logger.warning("读取跟踪检查点失败，本轮整段重放: %s", exc)
+        return {}, time.monotonic() - started
+
+
+def _replay_one(
+    version: dict[str, Any], previous: dict[str, Any] | None
+) -> tuple[dict[str, Any], float]:
     if _WORKER_SERVICE is None:
         raise RuntimeError("跟踪回放进程未初始化")
     adapter = _WORKER_SERVICE._adapter
@@ -85,16 +104,33 @@ def _replay(version: dict[str, Any]) -> tuple[dict[str, Any], float, float]:
         clear()
     ref = adapter.stock_ref("", version["market"], version["code"])
     started = time.monotonic()
-    previous: dict[str, Any] | None = None
-    if _WORKER_TRACKS is not None:
-        try:
-            previous = _WORKER_TRACKS.snapshot(str(version["version_id"]))
-        except Exception as exc:  # noqa: BLE001 - 读不到就整段重放，不能判失败
-            logger.warning("读取上一份跟踪检查点失败，本轮整段重放 %s: %s", ref.symbol, exc)
-    load_s = time.monotonic() - started
-    started = time.monotonic()
     snapshot = replay_account(_WORKER_SERVICE, ref, version, previous)
-    return snapshot, time.monotonic() - started, load_s
+    return snapshot, time.monotonic() - started
+
+
+def _replay(version: dict[str, Any]) -> tuple[dict[str, Any], float, float]:
+    """回放一只标的，带回进程内耗时（检查点读取、回放计算）。"""
+
+    previous, load_s = _load_previous([str(version["version_id"])])
+    snapshot, compute_s = _replay_one(version, previous.get(str(version["version_id"])))
+    return snapshot, compute_s, load_s
+
+
+def _replay_batch(
+    versions: list[dict[str, Any]],
+) -> tuple[list[tuple[str, Any]], float]:
+    """一批标的共用一次状态库连接；单只失败不连累同批其它标的。"""
+
+    previous, load_s = _load_previous([str(version["version_id"]) for version in versions])
+    outcomes: list[tuple[str, Any]] = []
+    for version in versions:
+        try:
+            snapshot, compute_s = _replay_one(version, previous.get(str(version["version_id"])))
+        except Exception as exc:  # noqa: BLE001 - 一只失败不能连累同批
+            outcomes.append(("error", str(exc)[:500] or type(exc).__name__))
+        else:
+            outcomes.append(("ok", (snapshot, compute_s)))
+    return outcomes, load_s
 
 
 def _snapshot_reusable(version: Mapping[str, Any], revision: str | None, target_date: str) -> bool:
@@ -312,7 +348,24 @@ class PoolTrackingRunner:
             )
             for group in work_items
         ]
-        work = iter(zip(work_items, reusable, strict=True))
+        # 回放任务按批提交：整批只开一次状态库连接读检查点，也不让单只慢票把整轮拖长。
+        # 复用组仍逐组内联处理（不提交任何任务），保持原来的「行情没变就秒过」。
+        tasks: list[tuple[list[list[dict[str, Any]]], bool]] = []
+        chunk: list[list[dict[str, Any]]] = []
+        for group, is_reusable in zip(work_items, reusable, strict=True):
+            if is_reusable:
+                if chunk:
+                    tasks.append((chunk, False))
+                    chunk = []
+                tasks.append(([group], True))
+            else:
+                chunk.append(group)
+                if len(chunk) >= REPLAY_CHUNK_SIZE:
+                    tasks.append((chunk, False))
+                    chunk = []
+        if chunk:
+            tasks.append((chunk, False))
+        work = iter(tasks)
 
         completed = failed = skipped = 0
         # 逐只写库实测 15.8 ms：一次全市场扫描 4,409 只就是约 70 秒串行写库。批量上报把
@@ -526,7 +579,74 @@ class PoolTrackingRunner:
                     == v["version_id"]
                 ):
                     project(v, v["summary"])
-        ramp = PoolConcurrencyRamp()
+
+        def fail_group(group: list[dict[str, Any]], message: str) -> None:
+            nonlocal failed
+            failed += len(group)
+            for v in group:
+                try:
+                    writer(
+                        dict(
+                            version_id=v["version_id"],
+                            signature=v["signature"],
+                            error=message,
+                        )
+                    )
+                except Exception:
+                    logger.exception(
+                        "无法记录策略追踪失败状态 version_id=%s",
+                        v["version_id"],
+                    )
+                if is_applied(v):
+                    result = results[v["objective"]]
+                    result["holding_snapshot_complete"] = False
+                    result["model_portfolio"]["failed_symbols"] += 1
+
+        def apply_snapshot(group: list[dict[str, Any]], snapshot: dict[str, Any]) -> None:
+            nonlocal skipped, completed, failed
+            for v in group:
+                skipped_before = skipped
+                try:
+                    consume(v, snapshot)
+                except TaskCancelledError:
+                    raise
+                except TransientWorkerApiError as exc:
+                    # 传输/忙碌不是策略失败：版本状态保持原样，下一轮扫描重试。
+                    skipped += 1
+                    logger.warning(
+                        "跟踪快照暂未落库，下一轮重试 version_id=%s: %s",
+                        v["version_id"],
+                        exc,
+                    )
+                except Exception as exc:
+                    failed += 1
+                    try:
+                        writer(
+                            dict(
+                                version_id=v["version_id"],
+                                signature=v["signature"],
+                                error=str(exc)[:500],
+                            )
+                        )
+                    except Exception:
+                        logger.exception(
+                            "无法记录策略追踪失败状态 version_id=%s",
+                            v["version_id"],
+                        )
+                    if is_applied(v):
+                        result = results[v["objective"]]
+                        result["holding_snapshot_complete"] = False
+                        result["model_portfolio"]["failed_symbols"] += 1
+                else:
+                    if skipped == skipped_before:
+                        completed += 1
+                    if len(snapshot_batch) >= SNAPSHOT_BATCH_SIZE:
+                        flush_snapshots()
+
+        ramp = PoolConcurrencyRamp(
+            interval_seconds=TRACKING_RAMP_INTERVAL_SECONDS,
+            initial_target=TRACKING_RAMP_INITIAL_WORKERS,
+        )
         maximum = pool_worker_cap()
         timing["prepare_s"] = time.monotonic() - run_started
         replay_started = time.monotonic()
@@ -586,7 +706,7 @@ class PoolTrackingRunner:
 
             first = new_slot(True) if groups else None
             slots = [first] if first is not None else []
-            pending: dict[Any, tuple[list[dict[str, Any]], ProcessPoolExecutor, float]] = {}
+            pending: dict[Any, tuple[list[list[dict[str, Any]]], ProcessPoolExecutor, float]] = {}
             exhausted = not bool(groups)
 
             def report_progress() -> None:
@@ -648,20 +768,24 @@ class PoolTrackingRunner:
                     if item is None:
                         exhausted = True
                         break
-                    group, is_reusable = item
-                    v = dict(group[0], target_data_date=payload.get("as_of_date"))
+                    chunk, is_reusable = item
                     if is_reusable:
                         # 同一行情日、同一份数据、同一版引擎：上一份快照就是这一轮的结果。
                         # 摘要里已经有上一轮算好的持仓与账户字段，不提交回放、不读检查点——
                         # 一条序列的检查点解压加解析约 10 ms，全市场就是 40 秒。
+                        group = chunk[0]
                         timing["reused_symbols"] += len(group)
                         for member in group:
                             project_reused(member)
                             completed += 1
                         report_progress()
                         continue
-                    pending[executor.submit(_replay, v)] = (
-                        group,
+                    versions = [
+                        dict(group[0], target_data_date=payload.get("as_of_date"))
+                        for group in chunk
+                    ]
+                    pending[executor.submit(_replay_batch, versions)] = (
+                        chunk,
                         executor,
                         time.monotonic(),
                     )
@@ -677,76 +801,29 @@ class PoolTrackingRunner:
                     continue
                 finished, _ = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
                 for future in finished:
-                    group, _executor, submitted_at = pending.pop(future)
+                    chunk, _executor, submitted_at = pending.pop(future)
                     try:
-                        snapshot, compute_s, load_s = future.result()
+                        outcomes, load_s = future.result()
                     except TaskCancelledError:
                         raise
                     except Exception as exc:
-                        failed += len(group)
-                        for v in group:
-                            try:
-                                writer(
-                                    dict(
-                                        version_id=v["version_id"],
-                                        signature=v["signature"],
-                                        error=str(exc)[:500],
-                                    )
-                                )
-                            except Exception:
-                                logger.exception(
-                                    "无法记录策略追踪失败状态 version_id=%s",
-                                    v["version_id"],
-                                )
-                            if is_applied(v):
-                                result = results[v["objective"]]
-                                result["holding_snapshot_complete"] = False
-                                result["model_portfolio"]["failed_symbols"] += 1
-                    else:
-                        timing["snapshot_load_s"] += load_s
+                        for chunk_group in chunk:
+                            fail_group(chunk_group, str(exc)[:500])
+                        continue
+                    elapsed = time.monotonic() - submitted_at
+                    timing["snapshot_load_s"] += load_s
+                    computed = 0.0
+                    for group, outcome in zip(chunk, outcomes, strict=True):
+                        status, outcome_payload = outcome
+                        if status != "ok":
+                            fail_group(group, str(outcome_payload))
+                            continue
+                        snapshot, compute_s = cast(tuple[dict[str, Any], float], outcome_payload)
+                        computed += compute_s
                         timing["replay_compute_s"] += compute_s
-                        timing["replay_overhead_s"] += max(
-                            0.0, (time.monotonic() - submitted_at) - compute_s - load_s
-                        )
                         timing["replayed_symbols"] += len(group)
-                        for v in group:
-                            skipped_before = skipped
-                            try:
-                                consume(v, snapshot)
-                            except TaskCancelledError:
-                                raise
-                            except TransientWorkerApiError as exc:
-                                # 传输/忙碌不是策略失败：版本状态保持原样，下一轮扫描重试。
-                                skipped += 1
-                                logger.warning(
-                                    "跟踪快照暂未落库，下一轮重试 version_id=%s: %s",
-                                    v["version_id"],
-                                    exc,
-                                )
-                            except Exception as exc:
-                                failed += 1
-                                try:
-                                    writer(
-                                        dict(
-                                            version_id=v["version_id"],
-                                            signature=v["signature"],
-                                            error=str(exc)[:500],
-                                        )
-                                    )
-                                except Exception:
-                                    logger.exception(
-                                        "无法记录策略追踪失败状态 version_id=%s",
-                                        v["version_id"],
-                                    )
-                                if is_applied(v):
-                                    result = results[v["objective"]]
-                                    result["holding_snapshot_complete"] = False
-                                    result["model_portfolio"]["failed_symbols"] += 1
-                            else:
-                                if skipped == skipped_before:
-                                    completed += 1
-                                if len(snapshot_batch) >= SNAPSHOT_BATCH_SIZE:
-                                    flush_snapshots()
+                        apply_snapshot(group, snapshot)
+                    timing["replay_overhead_s"] += max(0.0, elapsed - computed - load_s)
                 report_progress()
             # 最后一批也要落库：仍走后台线程，避免重复一套同步写。
             flush_snapshots(drain_all=True)

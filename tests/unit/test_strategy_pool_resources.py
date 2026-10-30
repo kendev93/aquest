@@ -215,3 +215,20 @@ def test_process_budget_does_not_double_charge_memory_already_used_by_leases(mon
         lambda: MemoryStatus(4 * GiB, 3 * GiB, "test"),
     )
     assert pool_evaluation_budget_capacity(in_use_workers=8) == before
+
+
+def test_pool_ramp_can_start_with_several_slots_within_the_resource_limit() -> None:
+    """跟踪扫描起步就要几个 worker：默认从 1 个、每 30 秒 +1，前几分钟一直在爬坡。
+
+    初始目标只是起步更快，不能越过内存/CPU 算出的资源上限。
+    """
+
+    from aquest.strategy_pool.resources import PoolConcurrencyRamp
+
+    quick = PoolConcurrencyRamp(interval_seconds=2, initial_target=4)
+    assert quick.target(resource_limit=8, active_workers=0, now=0) == 4
+    assert quick.target(resource_limit=8, active_workers=4, now=1.9) == 4
+    assert quick.target(resource_limit=8, active_workers=4, now=2.0) == 5
+
+    clamped = PoolConcurrencyRamp(interval_seconds=2, initial_target=4)
+    assert clamped.target(resource_limit=2, active_workers=0, now=0) == 2

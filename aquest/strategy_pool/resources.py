@@ -110,11 +110,18 @@ def pool_evaluation_worker_count() -> int:
 class PoolConcurrencyRamp:
     """Grow one slot per observation interval; pressure resets the growth timer."""
 
-    def __init__(self, *, interval_seconds: float = POOL_RAMP_INTERVAL_SECONDS) -> None:
+    def __init__(
+        self,
+        *,
+        interval_seconds: float = POOL_RAMP_INTERVAL_SECONDS,
+        initial_target: int = 1,
+    ) -> None:
         if interval_seconds < 0:
             raise ValueError("并发观察间隔不能小于 0")
+        if initial_target < 1:
+            raise ValueError("并发初始目标不能小于 1")
         self.interval_seconds = interval_seconds
-        self._target = 1
+        self._target = initial_target
         self._next_growth: float | None = None
         self._initial_available: int | None = None
         self.observed_worker_bytes = 0
@@ -134,6 +141,8 @@ class PoolConcurrencyRamp:
         limit = max(1, active_workers, resource_limit)
         if self._next_growth is None:
             self._next_growth = now + self.interval_seconds
+            # 初始目标只是「起步就多开几个」，不是资源上限的豁免。
+            self._target = min(limit, self._target)
             return max(active_workers, self._target)
         if resource_limit <= self._target:
             self._target = min(self._target, limit)
