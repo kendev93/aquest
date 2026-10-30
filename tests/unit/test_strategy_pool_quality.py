@@ -4,14 +4,17 @@
 判定逻辑被信号扫描、跟踪投影、增量复用三处共用，口径改动必须先改这里。
 """
 
-from datetime import date
+from datetime import date, datetime
 
 from aquest.strategy_pool.quality import (
+    POST_LAUNCH_RECENT_WINDOW_DAYS,
     WEAK_STRATEGY_MIN_TRADES,
     benchmark_full_return,
     fresh_quality_inputs,
     post_launch_degraded,
+    recent_degraded,
     strategy_is_weak,
+    weak_confirmation_days,
     weak_strategy_reasons,
 )
 
@@ -75,6 +78,34 @@ def test_post_launch_degradation_requires_window_return_and_benchmark() -> None:
     assert not post_launch_degraded({**degraded, "post_launch_benchmark_return": -0.2})
     assert not post_launch_degraded({"post_launch_days": 70, "post_launch_return": -0.05})
     assert not post_launch_degraded(None)
+
+
+def test_recent_degradation_uses_rolling_window_not_cumulative_cushion() -> None:
+    """上线以来赚得再多，近期跑输也要能触发（2026-10-30 用户决策）。"""
+
+    recent = {
+        "recent_days": POST_LAUNCH_RECENT_WINDOW_DAYS,
+        "recent_return": -0.05,
+        "recent_benchmark_return": 0.15,
+    }
+    assert recent_degraded(recent)
+    # 不满窗口 / 跑赢基准 / 字段缺失（老快照）都不算衰减
+    assert not recent_degraded({**recent, "recent_days": POST_LAUNCH_RECENT_WINDOW_DAYS - 1})
+    assert not recent_degraded({**recent, "recent_return": 0.1})
+    assert not recent_degraded({**recent, "recent_benchmark_return": -0.2})
+    assert not recent_degraded({"recent_days": 60, "recent_return": -0.05})
+    assert not recent_degraded(None)
+
+
+def test_weak_confirmation_prefers_trading_days_and_falls_back_to_calendar() -> None:
+    now = datetime(2026, 10, 27, 12, 0, 0)
+    # 新快照：直接按交易日计数，周末不替策略凑天数。
+    assert weak_confirmation_days({"weak_trading_days": 4, "weak_since": "2026-10-20"}, now) == 4
+    assert weak_confirmation_days({"weak_trading_days": 5, "weak_since": "2026-10-20"}, now) == 5
+    # 老快照没有计数：退回自然日差，等下一轮回放换新字段。
+    assert weak_confirmation_days({"weak_since": "2026-10-25"}, now) == 2
+    assert weak_confirmation_days({"weak_since": None}, now) is None
+    assert weak_confirmation_days(None, now) is None
 
 
 def test_fresh_metrics_override_research_metrics_only_when_the_window_covers_research() -> None:

@@ -6,6 +6,7 @@ import pandas as pd
 from aquest.market_data.store import DuckDbMarketDataStore
 from aquest.strategy_pool.store import DuckDbStrategyPoolStore
 from aquest.strategy_pool.tracking import account_summary
+from aquest.strategy_pool.tracking_runner import _weak_trading_days
 from aquest.strategy_pool.tracking_store import (
     ENGINE_VERSION,
     PoolTrackingStore,
@@ -38,6 +39,24 @@ def _store_with_bars(tmp_path):  # noqa: ANN001, ANN202
     store.replace_local_bars("SH", "600000", "stock", _bars(20), name="浦发银行")
     store.replace_local_bars("SZ", "000001", "stock", _bars(12, "2020-02-01"), name="平安银行")
     return store
+
+
+def test_weak_trading_days_counts_equity_rows_since_first_weak_day() -> None:
+    checkpoint = {
+        "equity": [
+            {"date": "2026-10-19"},
+            {"date": "2026-10-20"},
+            {"date": "2026-10-21"},
+            {"date": "2026-10-22"},
+            {"date": "2026-10-23"},
+        ]
+    }
+    assert _weak_trading_days(checkpoint, "2026-10-21") == 3
+    assert _weak_trading_days(checkpoint, "2026-10-19") == 5
+    # 没有起点、没有净值行或起点晚于全部行：都判不了，交给自然日回退。
+    assert _weak_trading_days(checkpoint, None) is None
+    assert _weak_trading_days({}, "2026-10-21") is None
+    assert _weak_trading_days(checkpoint, "2026-10-24") is None
 
 
 def test_versions_ignore_candidate_ids_metrics_and_dates_but_change_rules(tmp_path):

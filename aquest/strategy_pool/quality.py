@@ -32,9 +32,15 @@ POST_LAUNCH_MIN_TRADING_DAYS = 60
 #: 有轻微利于触发的偏置，阈值取 10% 吸收它）。
 POST_LAUNCH_MAX_UNDERPERFORMANCE = 0.10
 
-#: 弱策略要连续多少天成立才会排进重研队列。指标改成每天延长之后，一天的跑输就
-#: 触发重研会把队列搅乱；跟踪摘要里的 ``weak_since`` 记录第一次判弱的那天，
-#: 连续满该天数才排队（2026-10-27 用户决策：展示用最新口径，重研要确认趋势）。
+#: 近期衰减的滚动窗口（交易日）。「上线以来累计」跑输要先把上线后的利润垫亏完
+#: 才会触发，先赚 200% 再横盘一年也看不出来；滚动窗口只看最近一段，用来抓
+#: 长期盈利之后的近期失效（2026-10-30 用户决策）。
+POST_LAUNCH_RECENT_WINDOW_DAYS = 60
+
+#: 弱策略要连续多少个交易日成立才会排进重研队列。指标改成每天延长之后，一天的
+#: 跑输就触发重研会把队列搅乱；跟踪摘要里的 ``weak_since`` 记录第一次判弱的那天，
+#: 连续满该交易日数才排队（2026-10-27 用户决策：展示用最新口径，重研要确认趋势；
+#: 2026-10-30 改为按交易日计数，周末不再替策略凑天数）。
 WEAK_STRATEGY_CONFIRM_DAYS = 5
 
 #: 保质期兜底：ready 结论超过该自然日数无论表现如何都重新寻优——市场风格漂移
@@ -118,6 +124,44 @@ def post_launch_degraded(summary: Mapping[str, object] | None) -> bool:
     if days < POST_LAUNCH_MIN_TRADING_DAYS:
         return False
     return (post - benchmark) < -POST_LAUNCH_MAX_UNDERPERFORMANCE
+
+
+def recent_degraded(summary: Mapping[str, object] | None) -> bool:
+    """近期衰减：最近 ``POST_LAUNCH_RECENT_WINDOW_DAYS`` 个交易日跑输同窗口基准。
+
+    与 :func:`post_launch_degraded` 的区别是只看最近一段，不管上线以来累计赚了
+    多少。三个输入由 ``tracking.replay_account`` 从跟踪净值和复权收盘价写入；
+    老快照缺字段时返回 False，下一轮跟踪刷新后自然补齐。
+    """
+
+    if not isinstance(summary, Mapping):
+        return False
+    days = _finite(summary.get("recent_days"))
+    recent = _finite(summary.get("recent_return"))
+    benchmark = _finite(summary.get("recent_benchmark_return"))
+    if days is None or recent is None or benchmark is None:
+        return False
+    if days < POST_LAUNCH_RECENT_WINDOW_DAYS:
+        return False
+    return (recent - benchmark) < -POST_LAUNCH_MAX_UNDERPERFORMANCE
+
+
+def weak_confirmation_days(
+    summary: Mapping[str, object] | None,
+    now: datetime,
+) -> int | None:
+    """连续判弱的交易日数；老快照没有计数时退回自然日差。
+
+    跟踪回放按净值行数写入 ``weak_trading_days``，不受周末和节假日影响；升级前
+    的摘要只有 ``weak_since``，用自然日差保持原来的行为，等下一轮回放换新字段。
+    """
+
+    if not isinstance(summary, Mapping):
+        return None
+    raw = summary.get("weak_trading_days")
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        return max(0, raw)
+    return weak_since_days(summary, now)
 
 
 def research_end_from_entry(entry: Mapping[str, object] | None) -> date | None:

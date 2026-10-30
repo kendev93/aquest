@@ -53,9 +53,10 @@ from .quality import (
     benchmark_full_return,
     fresh_quality_inputs,
     post_launch_degraded,
+    recent_degraded,
     research_end_from_entry,
     strategy_is_weak,
-    weak_since_days,
+    weak_confirmation_days,
     weak_strategy_reasons,
 )
 from .resources import (
@@ -2179,10 +2180,13 @@ class MarketStrategyPoolService:
     ) -> bool:
         """ready 条目是否需要重新寻优——三种触发（2026-10-09 用户决策）。
 
-        - **弱策略**：自动候选全区间样本不足或跑输基准，超过
+        - **弱策略**：自动候选全区间样本不足或跑输基准，连续
+          ``WEAK_STRATEGY_CONFIRM_DAYS`` 个交易日成立，且超过
           ``WEAK_STRATEGY_RECHECK_DAYS``；
         - **上线后衰减**：某目标生效版本上线满 ``POST_LAUNCH_MIN_TRADING_DAYS``
           且上线后跑输同窗口基准超过 ``POST_LAUNCH_MAX_UNDERPERFORMANCE``；
+          另看最近 ``POST_LAUNCH_RECENT_WINDOW_DAYS`` 个交易日的滚动超额——
+          上线以来累计赚得再多，也挡不住近期失效（2026-10-30 用户决策）。
           全区间指标是研究时冻结的，反映不了上线后的失效，衰减只能靠跟踪
           回放的实时表现；
         - **保质期**：无论结论如何，超过 ``STRATEGY_SHELF_LIFE_DAYS`` 强制重算。
@@ -2217,9 +2221,10 @@ class MarketStrategyPoolService:
                 continue
             if isinstance(summary.get("full_period"), Mapping):
                 # 每天评估之后，一天的跑输就把老条目录进重研会把队列搅乱：最新口径
-                # 要求连续满 WEAK_STRATEGY_CONFIRM_DAYS 天才算数。
-                since = weak_since_days(summary, current)
-                if since is None or since < WEAK_STRATEGY_CONFIRM_DAYS:
+                # 要求连续满 WEAK_STRATEGY_CONFIRM_DAYS 个交易日才算数（老快照没有
+                # 交易日计数时退回自然日差）。
+                confirmed = weak_confirmation_days(summary, current)
+                if confirmed is None or confirmed < WEAK_STRATEGY_CONFIRM_DAYS:
                     continue
             weak = True
             break
@@ -2227,6 +2232,7 @@ class MarketStrategyPoolService:
             return True
         return any(
             post_launch_degraded(_mapping((post_launch or {}).get(objective)))
+            or recent_degraded(_mapping((post_launch or {}).get(objective)))
             for objective in ("annual_return", "sharpe")
         )
 

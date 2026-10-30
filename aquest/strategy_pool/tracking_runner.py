@@ -129,10 +129,32 @@ def _final_summary(version: dict[str, Any], snapshot: dict[str, Any]) -> None:
         research_end=version.get("research_end"),
     )
     if strategy_is_weak(weak_metrics, weak_benchmark):
-        summary["weak_since"] = previous_weak_since or str(summary.get("as_of_date") or "")
+        weak_since = previous_weak_since or str(summary.get("as_of_date") or "")
+        summary["weak_since"] = weak_since
+        # 连续判弱按交易日数，而不是自然日差：周五判弱、下周三只有 3 个交易日，
+        # 自然日却已经过了 5 天。净值行本身就是账户的交易日序列，直接数行。
+        summary["weak_trading_days"] = _weak_trading_days(snapshot["checkpoint"], weak_since)
     else:
         summary["weak_since"] = None
+        summary["weak_trading_days"] = None
     snapshot["summary"] = summary
+
+
+def _weak_trading_days(
+    checkpoint: Mapping[str, Any],
+    weak_since: str | None,
+) -> int | None:
+    """从第一次判弱那天起，账户净值已经走过多少个交易日（含当天）。"""
+
+    if not isinstance(weak_since, str) or not weak_since:
+        return None
+    equity = checkpoint.get("equity")
+    if not isinstance(equity, list):
+        return None
+    count = sum(
+        1 for row in equity if isinstance(row, Mapping) and str(row.get("date", "")) >= weak_since
+    )
+    return count or None
 
 
 def _replay_one(

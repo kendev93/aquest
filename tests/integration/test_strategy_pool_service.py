@@ -398,7 +398,7 @@ def test_weak_judgment_follows_fresh_metrics_and_needs_confirmation() -> None:
         "benchmark": {"full_period": {"total_return": 0.5}},
     }
 
-    def summary(weak_since: str | None) -> dict:
+    def summary(weak_since: str | None, weak_trading_days: int | None = None) -> dict:
         return {
             "as_of_date": "2026-10-27",
             "full_period": {
@@ -408,13 +408,20 @@ def test_weak_judgment_follows_fresh_metrics_and_needs_confirmation() -> None:
             },
             "benchmark": {"full_period": {"total_return": 0.5}},
             "weak_since": weak_since,
+            "weak_trading_days": weak_trading_days,
         }
 
-    two_days = {"annual_return": summary("2026-10-25")}
-    six_days = {"annual_return": summary("2026-10-21")}
+    two_days = {"annual_return": summary("2026-10-25", 2)}
+    five_days = {"annual_return": summary("2026-10-21", 5)}
+    # 自然日已经过 6 天、但实际只走了 3 个交易日：按交易日口径不能凑成 5 天。
+    weekend_skew = {"annual_return": summary("2026-10-21", 3)}
+    # 老快照没有交易日计数：退回自然日差，保持升级前的行为。
+    legacy_five_days = {"annual_return": summary("2026-10-21")}
 
     assert not MarketStrategyPoolService._research_recheck_due(entry, stale, two_days, now=now)
-    assert MarketStrategyPoolService._research_recheck_due(entry, stale, six_days, now=now)
+    assert not MarketStrategyPoolService._research_recheck_due(entry, stale, weekend_skew, now=now)
+    assert MarketStrategyPoolService._research_recheck_due(entry, stale, five_days, now=now)
+    assert MarketStrategyPoolService._research_recheck_due(entry, stale, legacy_five_days, now=now)
     # 没有最新口径（升级前的老快照）时按老行为：研究口径不弱，就不排队。
     assert not MarketStrategyPoolService._research_recheck_due(entry, stale, None, now=now)
 
@@ -590,11 +597,45 @@ def test_shelf_life_and_post_launch_degradation_trigger_re_research() -> None:
         "post_launch_benchmark_return": 0.15,
     }
     legacy_snapshot = {"post_launch_days": 70, "post_launch_return": -0.05}
+    recent_degraded = {
+        "recent_days": 60,
+        "recent_return": -0.05,
+        "recent_benchmark_return": 0.15,
+    }
+    recent_healthy = {
+        "recent_days": 60,
+        "recent_return": 0.2,
+        "recent_benchmark_return": 0.15,
+    }
+    recent_too_short = {
+        "recent_days": 30,
+        "recent_return": -0.05,
+        "recent_benchmark_return": 0.15,
+    }
 
     assert MarketStrategyPoolService._research_recheck_due(
         strong_entry,
         fresh,
         {"annual_return": degraded, "sharpe": {}},
+        now=now,
+    )
+    # 滚动窗口：上线以来累计仍健康，但最近 60 个交易日跑输 20%，也要重研。
+    assert MarketStrategyPoolService._research_recheck_due(
+        strong_entry,
+        fresh,
+        {"annual_return": recent_degraded, "sharpe": {}},
+        now=now,
+    )
+    assert not MarketStrategyPoolService._research_recheck_due(
+        strong_entry,
+        fresh,
+        {"annual_return": recent_healthy, "sharpe": {}},
+        now=now,
+    )
+    assert not MarketStrategyPoolService._research_recheck_due(
+        strong_entry,
+        fresh,
+        {"annual_return": recent_too_short, "sharpe": {}},
         now=now,
     )
     assert not MarketStrategyPoolService._research_recheck_due(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 
 import numpy as np
@@ -22,6 +22,7 @@ from aquest.portfolio_backtest.report import _portfolio_fingerprint
 from aquest.portfolio_backtest.service import PortfolioBacktestService
 from aquest.web.schemas import PortfolioBacktestRequest
 
+from .quality import POST_LAUNCH_RECENT_WINDOW_DAYS
 from .service import MIN_RESEARCH_BARS, RESEARCH_WARMUP_BARS
 from .tracking_store import ENGINE_VERSION, dumps
 
@@ -310,12 +311,20 @@ def replay_account(
         1 for row in equity_list if str(row.get("date", "")) > str(boundary)
     )
     post_launch_benchmark = None
+    recent_days = None
+    recent_return = None
+    recent_benchmark = None
     if version.get("launch_data_date") is not None:
         actions_reader = getattr(service._adapter, "read_corporate_actions", None)
         actions = actions_reader(ref) if callable(actions_reader) else ()
         adjusted = mark_adjusted(raw, actions if isinstance(actions, Sequence) else ())
         close = pd.to_numeric(adjusted["close"], errors="coerce")
         bar_dates = pd.to_datetime(adjusted["date"]).dt.date
+
+        def close_on_or_before(day: date) -> float | None:
+            values = close[bar_dates <= day].dropna()
+            return float(values.iloc[-1]) if not values.empty else None
+
         try:
             boundary_date = pd.Timestamp(str(boundary)).date()
         except ValueError:
@@ -326,7 +335,30 @@ def replay_account(
         last_close = close.dropna()
         if not prior_closes.empty and not last_close.empty and float(prior_closes.iloc[-1]) > 0:
             post_launch_benchmark = float(last_close.iloc[-1]) / float(prior_closes.iloc[-1]) - 1.0
+        # 近期衰减的滚动窗口：只取上线后（含上线日基线）的净值行，最后 61 行正好
+        # 覆盖 60 个交易日的涨跌。基准取同一组日期的复权收盘价——窗口起点那天停牌
+        # 就沿用之前最近一个有效收盘，与累计基准的回填口径一致。
+        post_rows = [row for row in equity_list if str(row.get("date", "")) >= str(boundary)]
+        if len(post_rows) >= 2:
+            recent_rows = post_rows[-(POST_LAUNCH_RECENT_WINDOW_DAYS + 1) :]
+            try:
+                start_day = pd.Timestamp(str(recent_rows[0].get("date"))).date()
+                end_day = pd.Timestamp(str(recent_rows[-1].get("date"))).date()
+            except ValueError:
+                start_day = end_day = None
+            start_equity = float(recent_rows[0].get("total") or 0.0)
+            end_equity = float(recent_rows[-1].get("total") or 0.0)
+            if start_day is not None and end_day is not None and start_equity > 0:
+                recent_days = len(recent_rows) - 1
+                recent_return = end_equity / start_equity - 1.0
+                start_close = close_on_or_before(start_day)
+                end_close = close_on_or_before(end_day)
+                if start_close is not None and start_close > 0 and end_close is not None:
+                    recent_benchmark = end_close / start_close - 1.0
     summary["post_launch_benchmark_return"] = post_launch_benchmark
+    summary["recent_days"] = recent_days
+    summary["recent_return"] = recent_return
+    summary["recent_benchmark_return"] = recent_benchmark
     summary.update(
         processed_new_days=len(dates) - (len(checkpoint.processed_dates) if checkpoint else 0),
         mode=mode,

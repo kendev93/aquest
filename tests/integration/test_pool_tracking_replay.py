@@ -205,11 +205,18 @@ def test_summary_reports_post_launch_days_and_benchmark(tmp_path):
     summary = replay_account(service, ref, version)["summary"]
     assert summary["post_launch_days"] == 1
     assert summary["post_launch_benchmark_return"] == pytest.approx(0.25)
+    # 滚动窗口从上线日基线（含）开始算，只有 1 个交易日就不够 60 天，但字段要写。
+    assert summary["recent_days"] == 1
+    assert summary["recent_return"] is not None
+    assert summary["recent_benchmark_return"] == pytest.approx(0.25)
 
     legacy = dict(version, launch_data_date=None)
     legacy_summary = replay_account(service, ref, legacy)["summary"]
     assert legacy_summary["post_launch_days"] == 0
     assert legacy_summary["post_launch_benchmark_return"] is None
+    assert legacy_summary["recent_days"] is None
+    assert legacy_summary["recent_return"] is None
+    assert legacy_summary["recent_benchmark_return"] is None
 
 
 def test_replay_account_refreshes_actions_between_runs_on_a_reused_service(tmp_path):
