@@ -157,6 +157,7 @@ docker compose -f docker-compose.yml up -d
 | `API_PORT` | `8123` | 后端端口（绑定 127.0.0.1） |
 | `AQUEST_DB_BACKUP_RETENTION_DAYS` | `0` | 整库备份保留天数，0 表示不保留 |
 | `AQUEST_AUTO_SYNC_ENABLED` | `1` | 启动后自动同步在线行情 |
+| `AQUEST_POOL_RESEARCH_ENABLED` | `1` | 跟随自动同步启动到期策略的自动增量研究；设 `0` 单独关闭，手动增量不受影响 |
 | `AQUEST_DISCOVERY_WORKERS` | `1` | 默认仅 1 个评估进程，降低 CPU 压力；设置 `auto` 可按可见 CPU 和内存分配 |
 | `AQUEST_STRATEGY_POOL_MAX_WORKERS` | `1` | 默认同时研究 1 只；设置正整数或 `auto` 可增加股票并发，评估进程仍受共享预算限制 |
 | `AQUEST_DUCKDB_THREADS` | `1` | DuckDB 查询线程数，仅注入策略 worker；研究查询都是单标的小查询，默认 1 把 CPU 让给股票并发，设 `0` 恢复 DuckDB 默认 |

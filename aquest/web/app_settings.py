@@ -102,6 +102,23 @@ def _resolve_auto_sync_enabled(value: bool | None) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _resolve_pool_research_enabled(value: bool | None) -> bool:
+    """是否随自动行情同步启动「到期策略自动增量研究」。
+
+    默认开启（与自动同步同生命周期）；``AQUEST_POOL_RESEARCH_ENABLED=0`` 或
+    ``create_app(pool_research_enabled=False)`` 可以单独关掉，手动增量不受影响。
+    """
+
+    if value is not None:
+        if not isinstance(value, bool):
+            raise ValueError("策略池自动增量研究开关必须是布尔值")
+        return value
+    raw = os.getenv("AQUEST_POOL_RESEARCH_ENABLED")
+    if raw is None:
+        return True
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _resolve_auto_sync_interval(value: float | None) -> float:
     if value is None:
         raw = os.getenv("AQUEST_AUTO_SYNC_CHECK_INTERVAL_SECONDS")

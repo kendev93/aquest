@@ -31,6 +31,7 @@ def _install_spies(monkeypatch) -> None:
         "AutomaticMarketSyncScheduler",
         "StrategyTrackingScheduler",
         "PoolTrackingScheduler",
+        "PoolResearchScheduler",
     ):
         monkeypatch.setattr(app_module, name, type(name, (_SpyScheduler,), {}))
     _SpyScheduler.started = []
@@ -65,5 +66,19 @@ def test_the_owning_process_starts_the_schedulers(monkeypatch, tmp_path: Path) -
 
     with TestClient(_create(store=store)):
         assert sorted(_SpyScheduler.started) == sorted(
-            ["AutomaticMarketSyncScheduler", "PoolTrackingScheduler", "StrategyTrackingScheduler"]
+            [
+                "AutomaticMarketSyncScheduler",
+                "PoolResearchScheduler",
+                "PoolTrackingScheduler",
+                "StrategyTrackingScheduler",
+            ]
         )
+
+
+def test_pool_research_scheduler_can_be_disabled_independently(monkeypatch, tmp_path: Path) -> None:
+    _install_spies(monkeypatch)
+    store = DuckDbMarketDataStore(tmp_path / "research-off.duckdb")
+
+    with TestClient(_create(store=store, pool_research_enabled=False)):
+        assert "PoolResearchScheduler" not in _SpyScheduler.started
+        assert "PoolTrackingScheduler" in _SpyScheduler.started

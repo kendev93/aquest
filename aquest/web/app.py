@@ -63,6 +63,8 @@ from aquest.strategy_discovery.job_store import default_strategy_job_root
 from aquest.strategy_discovery.resources import resolve_discovery_workers
 from aquest.strategy_discovery.service import StrategyDiscoveryService
 from aquest.strategy_fitness.service import StrategyFitnessService
+from aquest.strategy_pool.research_scheduler import PoolResearchScheduler
+from aquest.strategy_pool.service import MarketStrategyPoolService
 from aquest.strategy_pool.store import DuckDbStrategyPoolStore
 from aquest.strategy_pool.tracking_scheduler import PoolTrackingScheduler
 from aquest.strategy_pool.tracking_store import PoolTrackingStore
@@ -73,6 +75,7 @@ from .app_routes import install_meta_endpoints, install_routers
 from .app_settings import (
     _resolve_auto_sync_enabled,
     _resolve_auto_sync_interval,
+    _resolve_pool_research_enabled,
     _resolve_strategy_tracking_enabled,
     _resolve_strategy_tracking_interval,
     _resolve_strategy_worker_token,
@@ -136,6 +139,7 @@ def create_app(
     auto_sync_interval_seconds: float | None = None,
     strategy_tracking_enabled: bool | None = None,
     pool_tracking_enabled: bool | None = None,
+    pool_research_enabled: bool | None = None,
     strategy_tracking_interval_seconds: float | None = None,
     release_checker: ReleaseChecker | None = None,
 ) -> FastAPI:
@@ -188,6 +192,7 @@ def create_app(
     selected_tracking_interval = _resolve_strategy_tracking_interval(
         strategy_tracking_interval_seconds
     )
+    selected_pool_research_enabled = _resolve_pool_research_enabled(pool_research_enabled)
     # 上游版本检查：默认每天查一次，AQUEST_UPDATE_CHECK=off 就彻底不出网。
     # 它既不读行情库也不写任何东西，因此不参与"有没有任务在跑"那套互斥。
     selected_release_checker = release_checker or ReleaseChecker(
@@ -291,6 +296,7 @@ def create_app(
         maintenance_task: asyncio.Task[None] | None = None
         tracking_task: asyncio.Task[None] | None = None
         pool_tracking_task: asyncio.Task[None] | None = None
+        pool_research_task: asyncio.Task[None] | None = None
         release_task: asyncio.Task[None] | None = None
         selected_store.status()
         selected_strategy_pool_store.initialize()
@@ -377,6 +383,21 @@ def create_app(
                     selected_store, selected_strategy_backend, selected_runner
                 ).run()
             )
+        # 到期策略的自动增量研究跟着自动行情同步走：没有新行情时不重研，
+        # 有任务在跑时调度器自己会让路；首次全市场研究仍由用户手动发起。
+        if owns_runner and selected_auto_sync_enabled and selected_pool_research_enabled:
+            pool_research_task = asyncio.create_task(
+                PoolResearchScheduler(
+                    selected_strategy_pool_store,
+                    selected_strategy_backend,
+                    selected_runner,
+                    lambda: MarketStrategyPoolService(
+                        store=selected_store,
+                        adapter=cast(BatchMarketDataAdapter, selected_adapter),
+                        pool_store=selected_strategy_pool_store,
+                    ),
+                ).run()
+            )
         if selected_release_checker.enabled:
             release_task = asyncio.create_task(selected_release_checker.run())
         try:
@@ -386,6 +407,7 @@ def create_app(
                 await _cancel_background_tasks(
                     [
                         pool_tracking_task,
+                        pool_research_task,
                         maintenance_task,
                         auto_sync_task,
                         tracking_task,
