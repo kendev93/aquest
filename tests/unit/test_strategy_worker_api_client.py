@@ -303,7 +303,7 @@ def test_pool_tracking_batch_retries_transport_errors_and_reports_transient(
         with pytest.raises(TransientWorkerApiError):
             client.write_pool_tracking_many(
                 "job-1",
-                [{"version_id": "v1", "signature": "s", "snapshot": {}}],
+                [{"version_id": "v1", "signature": "s", "snapshot_blob": "AA==", "summary": {}}],
             )
 
     assert attempts == 2

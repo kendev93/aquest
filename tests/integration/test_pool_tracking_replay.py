@@ -11,7 +11,7 @@ from aquest.market_data.store_base import RESEARCH_START
 from aquest.portfolio_backtest.service import PortfolioBacktestService
 from aquest.strategy_pool.store import DuckDbStrategyPoolStore
 from aquest.strategy_pool.tracking import replay_account
-from aquest.strategy_pool.tracking_store import PoolTrackingStore, signature
+from aquest.strategy_pool.tracking_store import PoolTrackingStore, encode_snapshot, signature
 
 
 def bars(count):
@@ -427,11 +427,11 @@ def test_snapshot_commit_rejects_archived_versions_and_keeps_last_good_on_failur
     tracks = PoolTrackingStore(store)
     v = tracks.current_versions()[0]
     snap = {"summary": {"created_return": 0.2, "as_of_date": "2026-09-03"}, "checkpoint": {}}
-    assert tracks.save_snapshot(v["version_id"], v["signature"], snap)
+    assert tracks.save_snapshot(v["version_id"], v["signature"], *encode_snapshot(snap))
     tracks.record_error(v["version_id"], "temporary error")
     assert tracks.snapshot(v["version_id"]) == snap
     pool.persist_worker_entry({"reset": True}, source_job_id="reset")
-    assert not tracks.save_snapshot(v["version_id"], v["signature"], snap)
+    assert not tracks.save_snapshot(v["version_id"], v["signature"], *encode_snapshot(snap))
 
 
 @pytest.mark.parametrize(
@@ -508,7 +508,7 @@ def test_tracking_runner_batches_snapshots_and_falls_back_when_the_batch_fails(t
             results.append(
                 {
                     "saved": tracks.save_snapshots(
-                        [(item["version_id"], signature, item["snapshot"])]
+                        [(item["version_id"], signature, item["snapshot_blob"], item["summary"])]
                     )[0]
                 }
             )
@@ -546,7 +546,7 @@ def test_tracking_runner_batches_snapshots_and_falls_back_when_the_batch_fails(t
         fallback.append(item["version_id"])
         return {
             "saved": tracks.save_snapshots(
-                [(item["version_id"], item["signature"], item["snapshot"])]
+                [(item["version_id"], item["signature"], item["snapshot_blob"], item["summary"])]
             )[0]
         }
 
@@ -593,7 +593,7 @@ def test_tracking_runner_reports_phase_timing_and_reuse(tmp_path):
     def save(item):
         return {
             "saved": tracks.save_snapshots(
-                [(item["version_id"], item["signature"], item["snapshot"])]
+                [(item["version_id"], item["signature"], item["snapshot_blob"], item["summary"])]
             )[0]
         }
 
@@ -692,7 +692,9 @@ def test_tracking_runner_reuses_snapshot_until_market_data_changes(tmp_path):
 
     def save_one(item):
         writes.append(item)
-        saved = tracks.save_snapshot(item["version_id"], item["signature"], item["snapshot"])
+        saved = tracks.save_snapshot(
+            item["version_id"], item["signature"], item["snapshot_blob"], item["summary"]
+        )
         return {"saved": saved}
 
     def run_once(writer) -> dict:
@@ -809,7 +811,9 @@ def test_a_fully_reused_signal_scan_still_projects_every_symbol(tmp_path):
 
     def save_one(item):
         return {
-            "saved": tracks.save_snapshot(item["version_id"], item["signature"], item["snapshot"])
+            "saved": tracks.save_snapshot(
+                item["version_id"], item["signature"], item["snapshot_blob"], item["summary"]
+            )
         }
 
     def run_once() -> dict:
@@ -976,7 +980,7 @@ def test_detail_api_is_readonly_and_trade_pages_are_owned_by_symbol(tmp_path):
     v = tracks.current_versions()[0]
     service = PortfolioBacktestService(adapter=DuckDbMarketDataAdapter(store))
     snapshot = replay_account(service, service._adapter.stock_ref("", "SH", "600000"), v)
-    assert tracks.save_snapshot(v["version_id"], v["signature"], snapshot)
+    assert tracks.save_snapshot(v["version_id"], v["signature"], *encode_snapshot(snapshot))
     with TestClient(app) as client:
         detail = client.get("/api/v1/strategy-pool/entries/SH/600000/detail")
         assert detail.status_code == 200
@@ -1030,7 +1034,9 @@ def test_trade_pages_default_to_the_latest_settlement_first(tmp_path):
         },
         "checkpoint": {"trades": stored, "equity": [], "positions": {}},
     }
-    assert tracks.save_snapshot(version["version_id"], version["signature"], snapshot)
+    assert tracks.save_snapshot(
+        version["version_id"], version["signature"], *encode_snapshot(snapshot)
+    )
     url = f"/api/v1/strategy-pool/entries/SH/600000/versions/{version['version_id']}/trades"
 
     with TestClient(app) as client:
@@ -1090,17 +1096,19 @@ def test_entries_project_the_post_launch_window_for_the_leaderboard(tmp_path):
     assert tracks.save_snapshot(
         version["version_id"],
         version["signature"],
-        {
-            "summary": {
-                "created_return": 0.4,
-                "post_launch_return": 0.25,
-                "post_launch_benchmark_return": 0.05,
-                "post_launch_days": 12,
-                "has_post_launch_data": True,
-                "as_of_date": "2026-09-03",
-            },
-            "checkpoint": {"trades": [], "equity": [], "positions": {}},
-        },
+        *encode_snapshot(
+            {
+                "summary": {
+                    "created_return": 0.4,
+                    "post_launch_return": 0.25,
+                    "post_launch_benchmark_return": 0.05,
+                    "post_launch_days": 12,
+                    "has_post_launch_data": True,
+                    "as_of_date": "2026-09-03",
+                },
+                "checkpoint": {"trades": [], "equity": [], "positions": {}},
+            }
+        ),
     )
 
     with TestClient(app) as client:
@@ -1151,7 +1159,9 @@ def test_tracking_runner_deduplicates_goals_and_uses_shared_budget(tmp_path):
         if item.get("error"):
             raise AssertionError(item["error"])
         return {
-            "saved": tracks.save_snapshot(item["version_id"], item["signature"], item["snapshot"])
+            "saved": tracks.save_snapshot(
+                item["version_id"], item["signature"], item["snapshot_blob"], item["summary"]
+            )
         }
 
     result = PoolTrackingRunner(store, budget).run(
@@ -1257,7 +1267,9 @@ def test_weak_strategy_signals_and_holdings_are_filtered_in_tracking_projection(
         if item.get("error"):
             raise AssertionError(item["error"])
         return {
-            "saved": tracks.save_snapshot(item["version_id"], item["signature"], item["snapshot"])
+            "saved": tracks.save_snapshot(
+                item["version_id"], item["signature"], item["snapshot_blob"], item["summary"]
+            )
         }
 
     result = PoolTrackingRunner(store, EvaluationWorkerBudget(2)).run(
@@ -1311,7 +1323,9 @@ def test_tracking_both_rules_firing_show_in_both_panels(tmp_path):
         if item.get("error"):
             raise AssertionError(item["error"])
         return {
-            "saved": tracks.save_snapshot(item["version_id"], item["signature"], item["snapshot"])
+            "saved": tracks.save_snapshot(
+                item["version_id"], item["signature"], item["snapshot_blob"], item["summary"]
+            )
         }
 
     result = PoolTrackingRunner(store, EvaluationWorkerBudget(2)).run(
@@ -1384,7 +1398,7 @@ def test_partial_tracking_projects_only_applied_versions_for_both_objectives(tmp
             },
             "checkpoint": {},
         }
-        assert tracks.save_snapshot(v["version_id"], v["signature"], snapshot)
+        assert tracks.save_snapshot(v["version_id"], v["signature"], *encode_snapshot(snapshot))
 
     save_existing(automatic_annual, "stale automatic annual")
     save_existing(automatic_sharpe, "automatic sharpe")
@@ -1394,7 +1408,9 @@ def test_partial_tracking_projects_only_applied_versions_for_both_objectives(tmp
         if item.get("error"):
             raise AssertionError(item["error"])
         return {
-            "saved": tracks.save_snapshot(item["version_id"], item["signature"], item["snapshot"])
+            "saved": tracks.save_snapshot(
+                item["version_id"], item["signature"], item["snapshot_blob"], item["summary"]
+            )
         }
 
     progress_events = []
@@ -1478,7 +1494,7 @@ def test_tracking_group_accounts_each_version_when_one_writer_call_fails(tmp_pat
         calls.append(value)
         if value.get("error"):
             raise OSError("failure-state acknowledgement unavailable")
-        if len([item for item in calls if "snapshot" in item]) == 2:
+        if len([entry for entry in calls if "snapshot_blob" in entry]) == 2:
             raise RuntimeError("second acknowledgement failed")
         return {"saved": True}
 
@@ -1575,7 +1591,9 @@ def test_shadowed_automatic_failure_keeps_manual_holdings_complete(tmp_path):
         if item["version_id"] == automatic_version["version_id"]:
             raise RuntimeError("shadowed automatic snapshot write failed")
         return {
-            "saved": tracks.save_snapshot(item["version_id"], item["signature"], item["snapshot"])
+            "saved": tracks.save_snapshot(
+                item["version_id"], item["signature"], item["snapshot_blob"], item["summary"]
+            )
         }
 
     result = PoolTrackingRunner(store, EvaluationWorkerBudget(1)).run(
@@ -1619,7 +1637,9 @@ def test_tracking_runner_marks_failed_selected_version_incomplete(tmp_path):
             written_errors.append(item)
             return None
         return {
-            "saved": tracks.save_snapshot(item["version_id"], item["signature"], item["snapshot"])
+            "saved": tracks.save_snapshot(
+                item["version_id"], item["signature"], item["snapshot_blob"], item["summary"]
+            )
         }
 
     result = PoolTrackingRunner(store, EvaluationWorkerBudget(1)).run(
@@ -1920,7 +1940,9 @@ def test_pool_curve_reports_benchmark_and_excess_over_the_viewed_window(tmp_path
     version = tracks.current_versions()[0]
     service = PortfolioBacktestService(adapter=DuckDbMarketDataAdapter(store))
     snapshot = replay_account(service, service._adapter.stock_ref("", "SH", "600000"), version)
-    assert tracks.save_snapshot(version["version_id"], version["signature"], snapshot)
+    assert tracks.save_snapshot(
+        version["version_id"], version["signature"], *encode_snapshot(snapshot)
+    )
 
     url = f"/api/v1/strategy-pool/entries/SH/600000/versions/{version['version_id']}"
     with TestClient(app) as client:
@@ -1982,28 +2004,30 @@ def test_pool_entry_list_keeps_holding_risk_lines_but_not_the_snapshot(tmp_path)
     assert tracks.save_snapshot(
         version["version_id"],
         version["signature"],
-        {
-            "summary": {
-                "as_of_date": "2026-09-03",
-                "created_return": 0.4,
-                "latest_close": 12.5,
-                "latest_close_date": "2026-09-03",
-                "checkpoint_hash": "x" * 64,
-                "equity": [1_000_000.0, 1_100_000.0, 1_400_000.0],
-                "holding": [
-                    {
-                        "market": "SH",
-                        "code": "600000",
-                        "close": 12.5,
-                        "stop_loss_price": 11.2,
-                        "trailing_stop_price": 12.9,
-                        "take_profit_price": 14.0,
-                        "risk_level_as_of": "2026-09-03",
-                    }
-                ],
-            },
-            "checkpoint": {"trades": [], "equity": [], "positions": {}},
-        },
+        *encode_snapshot(
+            {
+                "summary": {
+                    "as_of_date": "2026-09-03",
+                    "created_return": 0.4,
+                    "latest_close": 12.5,
+                    "latest_close_date": "2026-09-03",
+                    "checkpoint_hash": "x" * 64,
+                    "equity": [1_000_000.0, 1_100_000.0, 1_400_000.0],
+                    "holding": [
+                        {
+                            "market": "SH",
+                            "code": "600000",
+                            "close": 12.5,
+                            "stop_loss_price": 11.2,
+                            "trailing_stop_price": 12.9,
+                            "take_profit_price": 14.0,
+                            "risk_level_as_of": "2026-09-03",
+                        }
+                    ],
+                },
+                "checkpoint": {"trades": [], "equity": [], "positions": {}},
+            }
+        ),
     )
 
     with TestClient(app) as client:
@@ -2056,10 +2080,12 @@ def test_worker_replay_reads_its_own_previous_checkpoint(tmp_path, monkeypatch) 
     tracks.save_snapshot(
         "v1",
         "sig",
-        {
-            "summary": {"as_of_date": "2026-09-03"},
-            "checkpoint": {"processed_dates": [], "equity": []},
-        },
+        *encode_snapshot(
+            {
+                "summary": {"as_of_date": "2026-09-03"},
+                "checkpoint": {"processed_dates": [], "equity": []},
+            }
+        ),
     )
     version = {
         "version_id": "v1",
@@ -2069,6 +2095,7 @@ def test_worker_replay_reads_its_own_previous_checkpoint(tmp_path, monkeypatch) 
         "candidate": candidate(),
         "target_data_date": "2026-09-03",
         "launch_data_date": "2026-09-01",
+        "created_at": "2026-09-01T00:00:00+00:00",
     }
 
     reads: list[list[str]] = []
@@ -2081,19 +2108,20 @@ def test_worker_replay_reads_its_own_previous_checkpoint(tmp_path, monkeypatch) 
     monkeypatch.setattr(PoolTrackingStore, "snapshots", spy)
     runner_module._initialize(str(store.database_path))
 
-    snapshot, compute_s, load_s = runner_module._replay(version)
+    blob, summary, compute_s, load_s = runner_module._replay(version)
 
     assert reads == [["v1"]]
     assert compute_s > 0
     assert load_s >= 0
-    assert snapshot["summary"]["as_of_date"] == "2026-09-03"
+    assert summary["as_of_date"] == "2026-09-03"
+    assert isinstance(blob, str) and blob
 
     def broken(self, version_ids):  # noqa: ANN001, ANN202
         raise RuntimeError("状态库暂时读不到")
 
     monkeypatch.setattr(PoolTrackingStore, "snapshots", broken)
-    snapshot, _, _ = runner_module._replay(version)
-    assert snapshot["summary"]["as_of_date"] == "2026-09-03"
+    blob, summary, _, _ = runner_module._replay(version)
+    assert summary["as_of_date"] == "2026-09-03"
 
 
 def test_worker_replay_batch_reads_checkpoints_once(tmp_path, monkeypatch) -> None:
@@ -2121,6 +2149,7 @@ def test_worker_replay_batch_reads_checkpoints_once(tmp_path, monkeypatch) -> No
             "signature": "sig",
             "candidate": candidate(),
             "target_data_date": "2026-09-03",
+            "created_at": "2026-09-01T00:00:00+00:00",
         },
         {
             "version_id": "v2",
@@ -2129,6 +2158,7 @@ def test_worker_replay_batch_reads_checkpoints_once(tmp_path, monkeypatch) -> No
             "signature": "sig",
             "candidate": candidate(),
             "target_data_date": "2026-09-03",
+            "created_at": "2026-09-01T00:00:00+00:00",
         },
         {
             "version_id": "v3",
@@ -2137,6 +2167,7 @@ def test_worker_replay_batch_reads_checkpoints_once(tmp_path, monkeypatch) -> No
             "signature": "sig",
             "candidate": candidate(),
             "target_data_date": "2026-09-03",
+            "created_at": "2026-09-01T00:00:00+00:00",
         },
     ]
 
@@ -2146,6 +2177,7 @@ def test_worker_replay_batch_reads_checkpoints_once(tmp_path, monkeypatch) -> No
     assert [status for status, _ in outcomes] == ["ok", "ok", "error"]
     assert load_s >= 0
     for status, payload in outcomes[:2]:
-        snapshot, compute_s = payload
+        blob, summary, compute_s = payload
         assert compute_s > 0
-        assert snapshot["summary"]["as_of_date"] == "2026-09-03"
+        assert summary["as_of_date"] == "2026-09-03"
+        assert isinstance(blob, str) and blob

@@ -188,11 +188,12 @@ def persist_pool_tracking(
             tracks.record_error(str(entry["version_id"]), str(entry["error"]))
             saved = False
         else:
-            snapshot = entry.get("snapshot")
-            if not isinstance(snapshot, Mapping):
-                raise ValueError("跟踪快照必须是对象")
+            snapshot_blob = entry.get("snapshot_blob")
+            summary = entry.get("summary")
+            if not isinstance(snapshot_blob, str) or not isinstance(summary, Mapping):
+                raise ValueError("跟踪快照必须是压缩块 + 摘要")
             saved = tracks.save_snapshot(
-                str(entry["version_id"]), str(entry["signature"]), snapshot
+                str(entry["version_id"]), str(entry["signature"]), snapshot_blob, summary
             )
         return {"data": {"saved": saved}}
     except (MarketDataStoreError, OSError) as exc:
@@ -223,18 +224,21 @@ def persist_pool_tracking_batch(
         ):
             raise ValueError("当前任务不是策略池跟踪任务")
         tracks = PoolTrackingStore(request.app.state.market_data_store)
-        pending: list[tuple[str, str, Mapping[str, object]]] = []
+        pending: list[tuple[str, str, str, Mapping[str, object]]] = []
         positions: list[int] = []
         results: list[bool] = [False] * len(payload.entries)
         for index, entry in enumerate(payload.entries):
             if entry.get("error"):
                 tracks.record_error(str(entry["version_id"]), str(entry["error"]))
                 continue
-            snapshot = entry.get("snapshot")
-            if not isinstance(snapshot, Mapping):
-                raise ValueError("跟踪快照必须是对象")
+            snapshot_blob = entry.get("snapshot_blob")
+            summary = entry.get("summary")
+            if not isinstance(snapshot_blob, str) or not isinstance(summary, Mapping):
+                raise ValueError("跟踪快照必须是压缩块 + 摘要")
             positions.append(index)
-            pending.append((str(entry["version_id"]), str(entry["signature"]), snapshot))
+            pending.append(
+                (str(entry["version_id"]), str(entry["signature"]), snapshot_blob, summary)
+            )
         for position, saved in zip(positions, tracks.save_snapshots(pending), strict=True):
             results[position] = saved
         return {"data": {"saved": results}}

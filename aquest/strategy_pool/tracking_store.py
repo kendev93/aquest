@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import uuid
 import zlib
 from collections.abc import Mapping, MutableMapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -45,14 +45,25 @@ def dumps(value: Any) -> str:
     )
 
 
-#: 快照压缩是纯 CPU（zlib 释放 GIL）：一批 64 只串行压缩实测约 12 秒，放线程池里能压到
-#: 秒级。压缩同时挪到写事务之外——写锁只包一次批量 UPDATE，别的进程读状态库不必等整批
-#: 压缩完成（2026-10-29 全量扫描实测写库占墙钟 46%）。
-_SNAPSHOT_COMPRESS_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="snapshot-compress")
+def encode_snapshot(snapshot: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
+    """把快照压成可传输的块，连同摘要一起交出去。
+
+    序列化与压缩由回放进程做：一只快照序列化后约 2.3 MB、压缩后只有 7.2%。以前整个快照
+    以 JSON 经过 worker→backend 的 HTTP，一天一次全量就是 8.7 GB，后端还要再解析压缩一遍
+    （2026-10-30 实测写库等待 818 秒）。
+    """
+
+    blob = zlib.compress(dumps(snapshot).encode())
+    return base64.b64encode(blob).decode("ascii"), dict(snapshot["summary"])
 
 
-def _compress_snapshot(snapshot: Mapping[str, Any]) -> tuple[bytes, str]:
-    return zlib.compress(dumps(snapshot).encode()), dumps(dict(snapshot["summary"]))
+def _decode_blob(snapshot_blob: str) -> bytes:
+    if not snapshot_blob:
+        raise ValueError("跟踪快照块不能为空")
+    try:
+        return base64.b64decode(snapshot_blob, validate=True)
+    except ValueError as exc:
+        raise ValueError("跟踪快照块不是合法的 base64") from exc
 
 
 def signature(candidate: Mapping[str, Any]) -> str:
@@ -535,13 +546,18 @@ class PoolTrackingStore:
             if blob
         }
 
-    def save_snapshot(self, version_id: str, fingerprint: str, snapshot: Mapping[str, Any]) -> bool:
+    def save_snapshot(
+        self,
+        version_id: str,
+        fingerprint: str,
+        snapshot_blob: str,
+        summary: Mapping[str, Any],
+    ) -> bool:
         # 校验与写入要在同一个事务里：分成两条独立语句时，中间被别的写者插进来就可能
         # 把「已经不是当前版本」的快照写回去。口径与 save_snapshots 的批量版一致。
-        # 序列化与压缩放在事务之外，写锁只包一次 UPDATE。
-        if not isinstance(snapshot.get("checkpoint"), Mapping):
-            raise ValueError("跟踪快照缺少账户检查点")
-        blob, summary_json = _compress_snapshot(snapshot)
+        # 快照已经在回放进程里序列化压缩好，这里只解码后写库。
+        blob = _decode_blob(snapshot_blob)
+        summary_json = dumps(dict(summary))
         with self.store.state_write_transaction() as connection:
             row = connection.execute(
                 "SELECT signature,is_current,summary_json FROM pool_tracking_versions "
@@ -550,7 +566,6 @@ class PoolTrackingStore:
             ).fetchone()
             if not row or row[0] != fingerprint or not row[1]:
                 return False
-            summary = dict(snapshot["summary"])
             old_summary = json.loads(row[2] or "{}")
             if str(old_summary.get("as_of_date") or "") > str(summary.get("as_of_date") or ""):
                 return False
@@ -566,7 +581,9 @@ class PoolTrackingStore:
             )
         return True
 
-    def save_snapshots(self, items: Sequence[tuple[str, str, Mapping[str, Any]]]) -> list[bool]:
+    def save_snapshots(
+        self, items: Sequence[tuple[str, str, str, Mapping[str, Any]]]
+    ) -> list[bool]:
         """把一批跟踪快照写进一个事务，按传入顺序返回每一只是否真的保存了。
 
         口径与 :meth:`save_snapshot` 逐条一致（签名对得上、仍是当前生效、日期不许倒退、
@@ -577,16 +594,11 @@ class PoolTrackingStore:
 
         if not items:
             return []
-        for _, _, snapshot in items:
-            if not isinstance(snapshot.get("checkpoint"), Mapping):
-                raise ValueError("跟踪快照缺少账户检查点")
-        version_ids = list(dict.fromkeys(version_id for version_id, _, _ in items))
+        version_ids = list(dict.fromkeys(version_id for version_id, _, _, _ in items))
         placeholders = ",".join("?" for _ in version_ids)
         updated_at = datetime.now(timezone.utc).isoformat()
-        # 压缩在线程池里并行做、且在写事务之外：写锁从「压缩整批」缩短到一次批量 UPDATE。
-        prepared = list(
-            _SNAPSHOT_COMPRESS_POOL.map(_compress_snapshot, [snapshot for _, _, snapshot in items])
-        )
+        # 快照块在回放进程里已经压好；这里只做 base64 解码与摘要序列化（摘要只有 KB 级）。
+        prepared = [(_decode_blob(blob), dumps(dict(summary))) for _, _, blob, summary in items]
         saved: list[bool] = []
         with self.store.state_write_transaction() as connection:
             rows = connection.execute(
@@ -599,14 +611,13 @@ class PoolTrackingStore:
             # 最后一条真正发出去——多行 VALUES 里重复键的行为没有保证。
             accepted: dict[str, list[Any]] = {}
             effective_date: dict[str, str] = {}
-            for (version_id, fingerprint, snapshot), (blob, summary_json) in zip(
+            for (version_id, fingerprint, _, summary), (blob, summary_json) in zip(
                 items, prepared, strict=True
             ):
                 row = known.get(version_id)
                 if not row or row[1] != fingerprint or not row[2]:
                     saved.append(False)
                     continue
-                summary = dict(snapshot["summary"])
                 previous = json.loads(row[3] or "{}")
                 as_of = str(summary.get("as_of_date") or "")
                 floor = max(

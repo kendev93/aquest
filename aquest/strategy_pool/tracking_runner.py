@@ -45,7 +45,7 @@ from .resources import (
     pool_worker_cap,
 )
 from .tracking import account_summary, replay_account
-from .tracking_store import ENGINE_VERSION, OBJECTIVES, PoolTrackingStore
+from .tracking_store import ENGINE_VERSION, OBJECTIVES, PoolTrackingStore, encode_snapshot
 
 _WORKER_SERVICE: PortfolioBacktestService | None = None
 #: 回放进程自己读上一份检查点：主进程不再预取、解压再传进来（全量扫描实测省下约 98 秒
@@ -93,9 +93,53 @@ def _load_previous(version_ids: list[str]) -> tuple[dict[str, dict[str, Any]], f
         return {}, time.monotonic() - started
 
 
+def _final_summary(version: dict[str, Any], snapshot: dict[str, Any]) -> None:
+    """回放后的最终摘要：账户字段、引擎版本、数据修订与弱策略起点一次算完。
+
+    这一步原来在主进程里逐只做（全量扫描的「排队/IPC」一大半就是它），现在跟回放
+    一起在 worker 里并行。
+    """
+
+    boundary = (
+        version.get("launch_data_date")
+        or datetime.fromisoformat(version["created_at"])
+        .astimezone(ZoneInfo("Asia/Shanghai"))
+        .date()
+        .isoformat()
+    )
+    summary = {
+        **snapshot["summary"],
+        **account_summary(
+            snapshot["checkpoint"],
+            boundary,
+            float(version["candidate"].get("config", {}).get("initial_cash", 1000000)),
+            (snapshot.get("report") or {}).get("current_state"),
+        ),
+    }
+    summary["engine_version"] = ENGINE_VERSION
+    summary["data_revision"] = version.get("data_revision")
+    previous_summary = version.get("summary")
+    previous_weak_since = (
+        previous_summary.get("weak_since") if isinstance(previous_summary, Mapping) else None
+    )
+    weak_metrics, weak_benchmark = fresh_quality_inputs(
+        summary,
+        version["candidate"] if isinstance(version["candidate"], Mapping) else None,
+        fallback_benchmark=version.get("benchmark_return"),
+        research_end=version.get("research_end"),
+    )
+    if strategy_is_weak(weak_metrics, weak_benchmark):
+        summary["weak_since"] = previous_weak_since or str(summary.get("as_of_date") or "")
+    else:
+        summary["weak_since"] = None
+    snapshot["summary"] = summary
+
+
 def _replay_one(
     version: dict[str, Any], previous: dict[str, Any] | None
-) -> tuple[dict[str, Any], float]:
+) -> tuple[str, dict[str, Any], float]:
+    """回放一只并压好快照：返回（压缩块, 最终摘要, 计算耗时）。"""
+
     if _WORKER_SERVICE is None:
         raise RuntimeError("跟踪回放进程未初始化")
     adapter = _WORKER_SERVICE._adapter
@@ -105,15 +149,17 @@ def _replay_one(
     ref = adapter.stock_ref("", version["market"], version["code"])
     started = time.monotonic()
     snapshot = replay_account(_WORKER_SERVICE, ref, version, previous)
-    return snapshot, time.monotonic() - started
+    _final_summary(version, snapshot)
+    blob, summary = encode_snapshot(snapshot)
+    return blob, summary, time.monotonic() - started
 
 
-def _replay(version: dict[str, Any]) -> tuple[dict[str, Any], float, float]:
+def _replay(version: dict[str, Any]) -> tuple[str, dict[str, Any], float, float]:
     """回放一只标的，带回进程内耗时（检查点读取、回放计算）。"""
 
     previous, load_s = _load_previous([str(version["version_id"])])
-    snapshot, compute_s = _replay_one(version, previous.get(str(version["version_id"])))
-    return snapshot, compute_s, load_s
+    blob, summary, compute_s = _replay_one(version, previous.get(str(version["version_id"])))
+    return blob, summary, compute_s, load_s
 
 
 def _replay_batch(
@@ -125,11 +171,13 @@ def _replay_batch(
     outcomes: list[tuple[str, Any]] = []
     for version in versions:
         try:
-            snapshot, compute_s = _replay_one(version, previous.get(str(version["version_id"])))
+            blob, summary, compute_s = _replay_one(
+                version, previous.get(str(version["version_id"]))
+            )
         except Exception as exc:  # noqa: BLE001 - 一只失败不能连累同批
             outcomes.append(("error", str(exc)[:500] or type(exc).__name__))
         else:
-            outcomes.append(("ok", (snapshot, compute_s)))
+            outcomes.append(("ok", (blob, summary, compute_s)))
     return outcomes, load_s
 
 
@@ -417,69 +465,6 @@ class PoolTrackingRunner:
                 ),
             )
 
-        def consume(v: dict[str, Any], snapshot: dict[str, Any], *, persist: bool = True) -> None:
-            nonlocal skipped
-            snapshot = dict(snapshot)
-            boundary = (
-                v.get("launch_data_date")
-                or datetime.fromisoformat(v["created_at"])
-                .astimezone(ZoneInfo("Asia/Shanghai"))
-                .date()
-                .isoformat()
-            )
-            summary = {
-                **snapshot["summary"],
-                **account_summary(
-                    snapshot["checkpoint"],
-                    boundary,
-                    float(v["candidate"].get("config", {}).get("initial_cash", 1000000)),
-                    (snapshot.get("report") or {}).get("current_state"),
-                ),
-            }
-            # 这两个值只用于判断下一轮能否复用；摘要里已有就不再写库。
-            summary["engine_version"] = ENGINE_VERSION
-            summary["data_revision"] = revisions.get((str(v["market"]), str(v["code"])))
-            # 弱策略的「第一次判弱」日期：转弱时记下来，连续满确认天数才会排进重研
-            # 队列（quality.WEAK_STRATEGY_CONFIRM_DAYS），转强时清空。
-            previous_summary = v.get("summary")
-            previous_weak_since = (
-                previous_summary.get("weak_since")
-                if isinstance(previous_summary, Mapping)
-                else None
-            )
-            symbol_key = (str(v["market"]), str(v["code"]))
-            weak_metrics, weak_benchmark = fresh_quality_inputs(
-                summary,
-                v["candidate"] if isinstance(v["candidate"], Mapping) else None,
-                fallback_benchmark=benchmarks.get(symbol_key),
-                research_end=research_ends.get(symbol_key),
-            )
-            if strategy_is_weak(weak_metrics, weak_benchmark):
-                summary["weak_since"] = previous_weak_since or str(summary.get("as_of_date") or "")
-            else:
-                summary["weak_since"] = None
-            snapshot["summary"] = summary
-            if persist:
-                entry = dict(
-                    version_id=v["version_id"], signature=v["signature"], snapshot=snapshot
-                )
-                if batch_writer is not None:
-                    snapshot_batch.append(entry)
-                else:
-                    try:
-                        ack = writer(entry)
-                    except TransientWorkerApiError:
-                        # 本轮的回放结果仍然有效，只是快照没落库；照常产出信号，下一轮再存。
-                        if is_applied(v):
-                            project(v, summary)
-                        raise
-                    if isinstance(ack, Mapping) and ack.get("saved") is False:
-                        skipped += 1
-                        return
-            if not is_applied(v):
-                return
-            project(v, summary)
-
         def project_reused(v: dict[str, Any]) -> None:
             """复用上一份快照时直接按摘要投影。
 
@@ -602,14 +587,26 @@ class PoolTrackingRunner:
                     result["holding_snapshot_complete"] = False
                     result["model_portfolio"]["failed_symbols"] += 1
 
-        def apply_snapshot(group: list[dict[str, Any]], snapshot: dict[str, Any]) -> None:
-            nonlocal skipped, completed, failed
+        def apply_snapshot(group: list[dict[str, Any]], blob: str, summary: dict[str, Any]) -> None:
+            nonlocal completed, failed, skipped
             for v in group:
-                skipped_before = skipped
+                entry = dict(
+                    version_id=v["version_id"],
+                    signature=v["signature"],
+                    snapshot_blob=blob,
+                    summary=summary,
+                )
                 try:
-                    consume(v, snapshot)
-                except TaskCancelledError:
-                    raise
+                    if batch_writer is not None:
+                        snapshot_batch.append(entry)
+                        if len(snapshot_batch) >= SNAPSHOT_BATCH_SIZE:
+                            flush_snapshots()
+                        if is_applied(v):
+                            project(v, summary)
+                        completed += 1
+                        continue
+                    # 没有批量通道（单只重跑等）：写被拒就不投影，面板里不留没落库的状态。
+                    ack = writer(entry)
                 except TransientWorkerApiError as exc:
                     # 传输/忙碌不是策略失败：版本状态保持原样，下一轮扫描重试。
                     skipped += 1
@@ -618,6 +615,11 @@ class PoolTrackingRunner:
                         v["version_id"],
                         exc,
                     )
+                    if is_applied(v):
+                        project(v, summary)
+                    continue
+                except TaskCancelledError:
+                    raise
                 except Exception as exc:
                     failed += 1
                     try:
@@ -637,11 +639,13 @@ class PoolTrackingRunner:
                         result = results[v["objective"]]
                         result["holding_snapshot_complete"] = False
                         result["model_portfolio"]["failed_symbols"] += 1
-                else:
-                    if skipped == skipped_before:
-                        completed += 1
-                    if len(snapshot_batch) >= SNAPSHOT_BATCH_SIZE:
-                        flush_snapshots()
+                    continue
+                if isinstance(ack, Mapping) and ack.get("saved") is False:
+                    skipped += 1
+                    continue
+                if is_applied(v):
+                    project(v, summary)
+                completed += 1
 
         ramp = PoolConcurrencyRamp(
             interval_seconds=TRACKING_RAMP_INTERVAL_SECONDS,
@@ -781,7 +785,19 @@ class PoolTrackingRunner:
                         report_progress()
                         continue
                     versions = [
-                        dict(group[0], target_data_date=payload.get("as_of_date"))
+                        dict(
+                            group[0],
+                            target_data_date=payload.get("as_of_date"),
+                            data_revision=revisions.get(
+                                (str(group[0]["market"]), str(group[0]["code"]))
+                            ),
+                            benchmark_return=benchmarks.get(
+                                (str(group[0]["market"]), str(group[0]["code"]))
+                            ),
+                            research_end=research_ends.get(
+                                (str(group[0]["market"]), str(group[0]["code"]))
+                            ),
+                        )
                         for group in chunk
                     ]
                     pending[executor.submit(_replay_batch, versions)] = (
@@ -818,11 +834,13 @@ class PoolTrackingRunner:
                         if status != "ok":
                             fail_group(group, str(outcome_payload))
                             continue
-                        snapshot, compute_s = cast(tuple[dict[str, Any], float], outcome_payload)
+                        blob, summary, compute_s = cast(
+                            tuple[str, dict[str, Any], float], outcome_payload
+                        )
                         computed += compute_s
                         timing["replay_compute_s"] += compute_s
                         timing["replayed_symbols"] += len(group)
-                        apply_snapshot(group, snapshot)
+                        apply_snapshot(group, blob, summary)
                     timing["replay_overhead_s"] += max(0.0, elapsed - computed - load_s)
                 report_progress()
             # 最后一批也要落库：仍走后台线程，避免重复一套同步写。

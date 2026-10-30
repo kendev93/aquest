@@ -10,6 +10,7 @@ from aquest.strategy_pool.tracking_store import (
     ENGINE_VERSION,
     PoolTrackingStore,
     dumps,
+    encode_snapshot,
     launch_data_date,
     launch_data_dates,
     signature,
@@ -104,13 +105,17 @@ def test_buy_blockades_report_only_blocked_symbols_for_the_queried_objective(tmp
     version = tracks.current_versions()[0]
     # 没有阻断原因的版本不该出现在结果里，否则会把正常买入信号一起吃掉。
     clean = {"summary": {"as_of_date": "2026-10-08"}, "checkpoint": {}}
-    assert tracks.save_snapshot(version["version_id"], version["signature"], clean)
+    assert tracks.save_snapshot(
+        version["version_id"], version["signature"], *encode_snapshot(clean)
+    )
     assert tracks.buy_blockades("annual_return") == {}
     blocked = {
         "summary": {"as_of_date": "2026-10-08", "buy_blocked_reason": "cooldown"},
         "checkpoint": {},
     }
-    assert tracks.save_snapshot(version["version_id"], version["signature"], blocked)
+    assert tracks.save_snapshot(
+        version["version_id"], version["signature"], *encode_snapshot(blocked)
+    )
     assert tracks.buy_blockades("annual_return") == {("SH", "600000"): ("cooldown", "2026-10-08")}
     assert tracks.buy_blockades("sharpe") == {}
 
@@ -421,9 +426,9 @@ def test_save_snapshots_batches_with_the_same_guards_as_single_writes(tmp_path):
     first, second = versions["600000"], versions["600001"]
     saved = tracks.save_snapshots(
         [
-            (first["version_id"], first["signature"], snapshot("2026-10-19")),
-            (second["version_id"], "not-the-signature", snapshot("2026-10-19")),
-            (first["version_id"], first["signature"], snapshot("2026-10-18")),
+            (first["version_id"], first["signature"], *encode_snapshot(snapshot("2026-10-19"))),
+            (second["version_id"], "not-the-signature", *encode_snapshot(snapshot("2026-10-19"))),
+            (first["version_id"], first["signature"], *encode_snapshot(snapshot("2026-10-18"))),
         ]
     )
 
@@ -435,8 +440,8 @@ def test_save_snapshots_batches_with_the_same_guards_as_single_writes(tmp_path):
     # 同批重复版本：后一条更新的照常写入，旧的不许覆盖新的
     saved = tracks.save_snapshots(
         [
-            (first["version_id"], first["signature"], snapshot("2026-10-17")),
-            (first["version_id"], first["signature"], snapshot("2026-10-20")),
+            (first["version_id"], first["signature"], *encode_snapshot(snapshot("2026-10-17"))),
+            (first["version_id"], first["signature"], *encode_snapshot(snapshot("2026-10-20"))),
         ]
     )
     assert saved == [False, True]

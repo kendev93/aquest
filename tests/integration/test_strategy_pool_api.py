@@ -11,7 +11,7 @@ from aquest.portfolio_backtest.service import PortfolioBacktestService
 from aquest.strategy_discovery.duckdb_job_store import DuckDbStrategyJobStore
 from aquest.strategy_pool.service import MarketStrategyPoolService
 from aquest.strategy_pool.store import FOCUS_LIMIT, DuckDbStrategyPoolStore
-from aquest.strategy_pool.tracking_store import PoolTrackingStore
+from aquest.strategy_pool.tracking_store import PoolTrackingStore, encode_snapshot
 from aquest.web.app import create_app
 
 TOKEN = "pool-worker-test-token"
@@ -874,12 +874,14 @@ def test_worker_can_save_tracking_snapshots_in_one_batch(tmp_path) -> None:
                     {
                         "version_id": first["version_id"],
                         "signature": first["signature"],
-                        "snapshot": snapshot("2026-10-19"),
+                        "snapshot_blob": encode_snapshot(snapshot("2026-10-19"))[0],
+                        "summary": snapshot("2026-10-19")["summary"],
                     },
                     {
                         "version_id": second["version_id"],
                         "signature": "stale-signature",
-                        "snapshot": snapshot("2026-10-19"),
+                        "snapshot_blob": encode_snapshot(snapshot("2026-10-19"))[0],
+                        "summary": snapshot("2026-10-19")["summary"],
                     },
                 ],
             },
