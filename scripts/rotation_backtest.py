@@ -98,7 +98,7 @@ def _candidates(store: DuckDbMarketDataStore, *, objective: str, metric: str) ->
     return found
 
 
-Feed = tuple[dict[date, float], dict[date, bool], dict[date, float]]
+Feed = tuple[dict[date, float], dict[date, bool], dict[date, bool], dict[date, float]]
 
 
 class SymbolFeed:
@@ -143,12 +143,14 @@ class SymbolFeed:
         frame = prepared.frame
         dates = pd.to_datetime(frame["date"]).dt.date
         sell_mask = evaluate_rule_group(sell_rule, prepared.formula_results, FORMULA_REGISTRY)
+        buy_mask = evaluate_rule_group(buy_rule, prepared.formula_results, FORMULA_REGISTRY)
         opens = {dates.iloc[index]: float(frame["open"].iloc[index]) for index in range(len(frame))}
         closes = {
             dates.iloc[index]: float(frame["close"].iloc[index]) for index in range(len(frame))
         }
         sells = {dates.iloc[index]: bool(sell_mask[index]) for index in range(len(frame))}
-        self._cache[key] = (opens, sells, closes)
+        buys = {dates.iloc[index]: bool(buy_mask[index]) for index in range(len(frame))}
+        self._cache[key] = (opens, sells, buys, closes)
         return self._cache[key]
 
 
@@ -159,6 +161,7 @@ def simulate(
     metric: str,
     top_n: int,
     start: date,
+    max_rank: int = 50,
     initial_cash: float = 1_000_000.0,
 ) -> dict[str, object]:
     adapter = DuckDbMarketDataAdapter(store, cache_stock_reads=True)
@@ -172,7 +175,6 @@ def simulate(
     positions: dict[str, dict[str, float]] = {}
     pending_buys: list[str] = []
     pending_sells: list[str] = []
-    next_index = 0
     equity_curve: list[tuple[date, float]] = []
     round_trips: list[float] = []
     traded = 0.0
@@ -189,7 +191,7 @@ def simulate(
     def buy(symbol: str, day: date) -> None:
         nonlocal cash, traded
         market, code = symbol[:2], symbol[2:]
-        opens, _sells, _closes = feeds.load(market, code)
+        opens, _sells, _buys, _closes = feeds.load(market, code)
         price = opens.get(day)
         if not price:
             pending_buys.append(symbol)
@@ -216,7 +218,7 @@ def simulate(
         if position is None:
             return
         market, code = symbol[:2], symbol[2:]
-        opens, _sells, _closes = feeds.load(market, code)
+        opens, _sells, _buys, _closes = feeds.load(market, code)
         price = opens.get(day)
         if not price:
             pending_sells.append(symbol)
@@ -233,7 +235,7 @@ def simulate(
         for symbol, position in positions.items():
             market, code = symbol[:2], symbol[2:]
             try:
-                _opens, _sells, closes = feeds.load(market, code)
+                _opens, _sells, _buys, closes = feeds.load(market, code)
             except Exception:  # noqa: BLE001
                 total += position["shares"] * position["entry"]
                 continue
@@ -242,11 +244,29 @@ def simulate(
         return total
 
     prepared_set: set[str] = set()
-    while len(positions) < top_n and next_index < len(ranked):
-        symbol = ranked[next_index].symbol
-        next_index += 1
-        if not try_prepare(symbol):
-            continue
+    universe = ranked if max_rank <= 0 else ranked[:max_rank]
+
+    def buy_signal_candidates(day: date, limit: int) -> list[str]:
+        """当天买入信号成立、且没有持仓的标的，按排名从前往后取 ``limit`` 只。"""
+
+        picked: list[str] = []
+        for candidate in universe:
+            symbol = candidate.symbol
+            if symbol in positions or symbol in pending_buys or symbol in picked:
+                continue
+            market, code = symbol[:2], symbol[2:]
+            try:
+                _opens, _sells, buys, _closes = feeds.load(market, code)
+            except Exception:  # noqa: BLE001
+                continue
+            if buys.get(day):
+                picked.append(symbol)
+                if len(picked) >= limit:
+                    break
+        return picked
+
+    # 建仓：开仓日当天触发买入信号的标的里，按排名取前 N 只。
+    for symbol in buy_signal_candidates(calendar[0], top_n):
         prepared_set.add(symbol)
         buy(symbol, calendar[0])
     initial_symbols = list(positions)
@@ -262,23 +282,21 @@ def simulate(
         for symbol in list(positions):
             market, code = symbol[:2], symbol[2:]
             try:
-                _opens, sells, closes = feeds.load(market, code)
+                _opens, sells, _buys, closes = feeds.load(market, code)
             except Exception:  # noqa: BLE001
                 continue
             if closes.get(day):
                 last_close[symbol] = closes[day]
             if sells.get(day):
                 pending_sells.append(symbol)
-        # 空出的仓位按排名补位（次日开盘买入）。
-        while len(positions) + len(pending_buys) < top_n and next_index < len(ranked):
-            symbol = ranked[next_index].symbol
-            next_index += 1
-            if symbol in positions or symbol in pending_buys:
-                continue
-            if not try_prepare(symbol):
-                continue
-            prepared_set.add(symbol)
-            pending_buys.append(symbol)
+        # 空出的仓位补位（次日开盘买入）：当天从排名头部往下找第一个有买入信号、
+        # 且未持仓的标的；一只都没有就让仓位空着，下一天再看。
+        while len(positions) + len(pending_buys) < top_n:
+            filled = buy_signal_candidates(day, 1)
+            if not filled:
+                break
+            prepared_set.add(filled[0])
+            pending_buys.append(filled[0])
         equity_curve.append((day, equity_value(day)))
 
     values = pd.Series({day: value for day, value in equity_curve})
@@ -303,6 +321,7 @@ def simulate(
     return {
         "metric": metric,
         "top_n": top_n,
+        "max_rank": max_rank,
         "start": calendar[0].isoformat(),
         "end": calendar[-1].isoformat(),
         "total_return": round(total_return, 4),
@@ -334,7 +353,7 @@ def equal_weight_benchmark(
     for symbol in symbols:
         market, code = symbol[:2], symbol[2:]
         try:
-            opens, _sells, closes = feeds.load(market, code)
+            opens, _sells, _buys, closes = feeds.load(market, code)
         except Exception:  # noqa: BLE001
             continue
         entry = opens.get(calendar[0]) or next(
@@ -357,6 +376,7 @@ def main() -> None:
     parser.add_argument("--top-n", type=int, default=5)
     parser.add_argument("--start", default="2024-01-01")
     parser.add_argument("--min-trades", type=int, default=MIN_TRADES)
+    parser.add_argument("--max-rank", type=int, default=0)
     parser.add_argument("--database", default="/data/market/market.duckdb")
     args = parser.parse_args()
 
@@ -382,6 +402,7 @@ def main() -> None:
         metric=args.metric,
         top_n=args.top_n,
         start=date.fromisoformat(args.start),
+        max_rank=args.max_rank,
     )
     print(json.dumps(report, ensure_ascii=False, indent=1))
 
