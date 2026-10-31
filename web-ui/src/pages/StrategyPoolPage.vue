@@ -558,6 +558,8 @@ watch([buySignals, sellPanelItems, currentHoldings], () => {
 watch(signalSort, () => {
   buyPage.value = 1
   sellPage.value = 1
+  // 持仓面板也共用这个排序：不重置的话第 2 页之后会停在旧页码，甚至显示空表。
+  holdingsPage.value = 1
 })
 
 const filteredEntries = computed(() => {

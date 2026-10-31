@@ -2704,4 +2704,49 @@ describe('StrategyPoolPage', () => {
     expect(firstRow('[data-testid="pool-buy-signals"]')?.find('[data-testid="pool-buy-follow-600000"]').exists()).toBe(true)
     expect(firstRow('[data-testid="pool-current-holdings"]')?.find('[data-testid="pool-holding-follow-600000"]').exists()).toBe(true)
   })
+
+  it('resets the holdings page when the shared signal sort changes', async () => {
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    const codes = Array.from({ length: 11 }, (_, index) => `6000${String(index).padStart(2, '0')}`)
+    vi.mocked(api.fetchStrategyPoolEntries).mockResolvedValue(
+      codes.map((code, index) => entryWithQuality(code, { annual_return: index / 100 })),
+    )
+    const holdings: StrategyPoolHolding[] = codes.map((code): StrategyPoolHolding => ({
+      market: 'SH',
+      code,
+      name: `测试${code}`,
+      status: 'held',
+      holding_return_pct: 0.01,
+    }))
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValue({
+      job_id: 'signal-1',
+      status: 'completed',
+      result: {
+        mode: 'signals',
+        objective: 'annual_return',
+        holding_scope: 'per_stock_strategy',
+        holding_snapshot_complete: true,
+        as_of_date: '2026-10-01',
+        buy_signals: [],
+        sell_signals: [],
+        states: [],
+        model_portfolio: {
+          available: true,
+          holding_scope: 'per_stock_strategy',
+          holdings,
+          risk_exit_signals: [],
+        },
+      },
+    })
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    const pagination = () => wrapper.get('[data-testid="pool-holdings-pagination"]').text()
+    expect(pagination()).toContain('第 1 / 2 页')
+    await wrapper.get('[data-testid="pool-holdings-pagination"] button:last-child').trigger('click')
+    expect(pagination()).toContain('第 2 / 2 页')
+
+    await wrapper.get('[data-testid="pool-signal-sort"]').setValue('annual_return')
+    expect(pagination()).toContain('第 1 / 2 页')
+  })
 })
