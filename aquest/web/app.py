@@ -396,6 +396,9 @@ def create_app(
                         adapter=cast(BatchMarketDataAdapter, selected_adapter),
                         pool_store=selected_strategy_pool_store,
                     ),
+                    research_params_loader=(
+                        selected_strategy_job_store.latest_full_research_payload
+                    ),
                 ).run()
             )
         if selected_release_checker.enabled:

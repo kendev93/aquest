@@ -239,6 +239,38 @@ class DuckDbStrategyJobStore:
             "offset": offset,
         }
 
+    def latest_full_research_payload(self) -> dict[str, object] | None:
+        """最近一次成功的手动全市场研究请求，供自动增量沿用研究参数。
+
+        自动任务固定用默认参数的话，用户用非默认 ``risk_trials`` / ``max_hold_days``
+        建出来的池会因为配置指纹不符而整池重研，等于悄悄换掉研究口径。这里只读
+        任务信封，不解析结果；auto 任务自己带 ``automatic=true``，必须排除，否则
+        第一次自动研究之后就会把默认参数固化下来。
+        """
+
+        with self._read_connection() as connection:
+            row = connection.execute(
+                """
+                SELECT request_json FROM strategy_jobs
+                WHERE operation = 'market_strategy_pool'
+                  AND status = 'completed'
+                  AND json_extract_string(request_json, '$.payload.mode') = 'full'
+                  AND COALESCE(
+                        TRY_CAST(
+                            json_extract_string(request_json, '$.payload.automatic') AS BOOLEAN
+                        ),
+                        FALSE
+                      ) = FALSE
+                ORDER BY created_at DESC, job_id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        if row is None:
+            return None
+        request = _load_object(row[0])
+        payload = request.get("payload") if isinstance(request, Mapping) else None
+        return dict(payload) if isinstance(payload, Mapping) else None
+
     def latest_pool_signal_attempt(self, start: float, end: float) -> dict[str, object] | None:
         """Read any persisted signal attempt in a Shanghai calendar day, regardless of status."""
 

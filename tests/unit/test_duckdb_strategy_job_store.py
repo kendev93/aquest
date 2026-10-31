@@ -615,3 +615,51 @@ def test_incremental_signal_results_are_never_pruned(tmp_path) -> None:
     assert store.read_result("no-date") is not None
     # 交易日列表只由全市场扫描构成：个股级那份不该变成一个可选日期
     assert [item["job_id"] for item in store.pool_signal_days()] == ["baseline-2"]
+
+
+def test_latest_full_research_payload_uses_the_last_successful_manual_full_job(tmp_path) -> None:
+    store = _store(tmp_path)
+    store.create(
+        "manual-old",
+        operation="market_strategy_pool",
+        payload={"mode": "full", "risk_trials": 1_000, "max_hold_days": None},
+        description="手动全量",
+    )
+    assert store.claim_next("worker-a") == "manual-old"
+    store.write_result_from_worker("manual-old", "worker-a", {})
+
+    time.sleep(0.01)
+    store.create(
+        "auto-new",
+        operation="market_strategy_pool",
+        payload={"mode": "full", "automatic": True, "risk_trials": 3_000, "max_hold_days": 20},
+        description="自动增量",
+    )
+    assert store.claim_next("worker-a") == "auto-new"
+    store.write_result_from_worker("auto-new", "worker-a", {})
+
+    time.sleep(0.01)
+    store.create(
+        "manual-single",
+        operation="market_strategy_pool",
+        payload={"mode": "single", "risk_trials": 2_000},
+        description="逐股重跑",
+    )
+    assert store.claim_next("worker-a") == "manual-single"
+    store.write_result_from_worker("manual-single", "worker-a", {})
+
+    time.sleep(0.01)
+    store.create(
+        "manual-failed",
+        operation="market_strategy_pool",
+        payload={"mode": "full", "risk_trials": 500},
+        description="失败的全量",
+    )
+    assert store.claim_next("worker-a") == "manual-failed"
+    store.fail_from_worker("manual-failed", "worker-a", "boom", "worker_failed")
+
+    assert store.latest_full_research_payload() == {
+        "mode": "full",
+        "risk_trials": 1_000,
+        "max_hold_days": None,
+    }

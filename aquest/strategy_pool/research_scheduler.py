@@ -35,6 +35,23 @@ BUSY_RETRY_SECONDS = 10 * 60
 FAILURE_RETRY_SECONDS = 60 * 60
 #: 与研究设置页一致的默认板块。
 DEFAULT_RESEARCH_BOARDS = ("main", "chinext", "star")
+#: 自动任务需要沿用的研究参数。没跑过手动全市场研究时才用这里的默认值。
+_RESEARCH_PARAM_KEYS = (
+    "risk_trials",
+    "max_hold_days",
+    "reversal_multiple",
+    "atr_window",
+    "min_bars",
+    "horizon",
+)
+_DEFAULT_RESEARCH_PARAMS: dict[str, object] = {
+    "risk_trials": 3_000,
+    "max_hold_days": 20,
+    "reversal_multiple": 2.0,
+    "atr_window": 14,
+    "min_bars": 5,
+    "horizon": 10,
+}
 
 RESEARCH_OPERATION: Literal["market_strategy_pool"] = "market_strategy_pool"
 TRACKING_OPERATIONS = frozenset({RESEARCH_OPERATION, "market_strategy_pool_tracking"})
@@ -76,6 +93,7 @@ class PoolResearchScheduler:
         runner: _RunnerLike,
         service_factory: Callable[[], _ResearchEstimator],
         *,
+        research_params_loader: Callable[[], Mapping[str, object] | None] | None = None,
         check_interval_seconds: float = RESEARCH_CHECK_INTERVAL_SECONDS,
         min_interval_seconds: float = AUTO_RESEARCH_MIN_INTERVAL_SECONDS,
         idle_interval_seconds: float = IDLE_CHECK_INTERVAL_SECONDS,
@@ -87,6 +105,7 @@ class PoolResearchScheduler:
         self.backend = backend
         self.runner = runner
         self.service_factory = service_factory
+        self.research_params_loader = research_params_loader
         self.check_interval_seconds = check_interval_seconds
         self.min_interval_seconds = min_interval_seconds
         self.idle_interval_seconds = idle_interval_seconds
@@ -108,7 +127,8 @@ class PoolResearchScheduler:
         if self._busy():
             self._next_attempt = now + self.busy_retry_seconds
             return None
-        payload = self._payload()
+        saved_params = self._saved_research_params()
+        payload = self._payload(saved_params)
         try:
             estimate = self.service_factory().estimate_incremental(payload)
         except Exception:  # noqa: BLE001 - 预估失败不能拖垮调度循环
@@ -117,6 +137,25 @@ class PoolResearchScheduler:
             return None
         pending = estimate.get("pending_symbols")
         if not isinstance(pending, int) or isinstance(pending, bool) or pending <= 0:
+            self._next_attempt = now + self.idle_interval_seconds
+            return None
+        universe = estimate.get("universe_symbols")
+        reusable = estimate.get("reusable_symbols")
+        if (
+            isinstance(universe, int)
+            and not isinstance(universe, bool)
+            and isinstance(reusable, int)
+            and not isinstance(reusable, bool)
+            and universe > 0
+            and reusable == 0
+            and pending == universe
+        ):
+            # 整池都要重研不是“到期增量”，而是换了研究口径或全池过期。全市场
+            # 寻优几小时起，宁可让用户手动点一次，也不能让调度器夜里悄悄开跑。
+            logger.warning(
+                "策略池自动增量：整池 %d 只均需重算，留给手动“增量更新策略池”",
+                pending,
+            )
             self._next_attempt = now + self.idle_interval_seconds
             return None
         # 预估不持锁；提交前在写锁里重新确认没有任务抢跑，和手动提交同一把锁。
@@ -152,7 +191,21 @@ class PoolResearchScheduler:
             for item in self.backend.active_snapshots()
         )
 
-    def _payload(self) -> dict[str, object]:
+    def _saved_research_params(self) -> dict[str, object]:
+        """最近一次成功的手动全市场研究参数；读不到就退回默认口径。"""
+
+        if self.research_params_loader is None:
+            return {}
+        try:
+            payload = self.research_params_loader()
+        except Exception:  # noqa: BLE001 - 读参数失败不能挡住自动研究
+            logger.exception("策略池自动增量：读取上次研究参数失败，本轮用默认口径")
+            return {}
+        if not isinstance(payload, Mapping):
+            return {}
+        return {key: payload[key] for key in _RESEARCH_PARAM_KEYS if key in payload}
+
+    def _payload(self, saved_params: Mapping[str, object]) -> dict[str, object]:
         saved = self.pool_store.read_research_settings()
         boards: list[str] = list(DEFAULT_RESEARCH_BOARDS)
         exclude_st = False
@@ -161,17 +214,15 @@ class PoolResearchScheduler:
             if isinstance(raw_boards, list) and raw_boards:
                 boards = [str(item) for item in raw_boards]
             exclude_st = bool(saved.get("exclude_st"))
-        # 参数与页面手动增量任务的默认值一致；用户改过的单次参数不会被记住，
-        # 自动任务刻意用默认口径，避免一次实验参数长期偏向后续研究。
+        # 沿用上次手动全市场研究的搜索参数（风险试验次数、最长持有等）。不沿用的话
+        # 自定义参数建出来的池会因配置指纹不符被判成全池待重算，自动任务会拿默认
+        # 参数悄悄换掉研究口径。
+        params = dict(_DEFAULT_RESEARCH_PARAMS)
+        params.update(saved_params)
         return {
             "mode": "full",
             "automatic": True,
-            "risk_trials": 3_000,
-            "max_hold_days": 20,
-            "reversal_multiple": 2.0,
-            "atr_window": 14,
-            "min_bars": 5,
-            "horizon": 10,
+            **params,
             "boards": boards,
             "exclude_st": exclude_st,
         }
