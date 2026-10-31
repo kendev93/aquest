@@ -47,6 +47,7 @@ from aquest.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
 from aquest.web.schemas.screening import RuleGroupRequest
 
 from .quality import (
+    DEGRADATION_RECHECK_DAYS,
     STRATEGY_SHELF_LIFE_DAYS,
     WEAK_STRATEGY_CONFIRM_DAYS,
     WEAK_STRATEGY_RECHECK_DAYS,
@@ -1191,10 +1192,10 @@ class MarketStrategyPoolService:
             else:
                 raise ValueError("清空重建需要可写策略池")
         prior_entries = self._prior_entries() if not rebuild and mode in {"full", "single"} else {}
-        # 跟踪摘要只读 summary_json（免解压），供「上线后衰减」判定使用；
-        # 老快照没有对应字段时衰减判定不生效，跟踪刷新一轮后自然补齐。
+        # 只取自动版本的跟踪摘要：手工覆盖生效时，手工账户的表现不能拿来决定
+        # 自动候选要不要重研；老快照缺字段时衰减判定不生效，跟踪刷新一轮后补齐。
         post_launch_summaries = (
-            PoolTrackingStore(self._store).applied_summaries()
+            PoolTrackingStore(self._store).automatic_summaries()
             if not rebuild and mode in {"full", "single"} and self._store is not None
             else {}
         )
@@ -2050,7 +2051,7 @@ class MarketStrategyPoolService:
             refs,
             self._prior_entries(),
             config_fingerprint,
-            post_launch_summaries=PoolTrackingStore(self._store).applied_summaries(),
+            post_launch_summaries=PoolTrackingStore(self._store).automatic_summaries(),
             entries=self._pool_entries_index(),
             data_end=calendar[-1] if calendar else None,
         )
@@ -2187,8 +2188,8 @@ class MarketStrategyPoolService:
           且上线后跑输同窗口基准超过 ``POST_LAUNCH_MAX_UNDERPERFORMANCE``；
           另看最近 ``POST_LAUNCH_RECENT_WINDOW_DAYS`` 个交易日的滚动超额——
           上线以来累计赚得再多，也挡不住近期失效（2026-10-30 用户决策）。
-          全区间指标是研究时冻结的，反映不了上线后的失效，衰减只能靠跟踪
-          回放的实时表现；
+          重研后同签名候选会保留原上线日，衰减结论不会自己消失，所以这条触发
+          也要满 ``DEGRADATION_RECHECK_DAYS`` 天才再排一次队；
         - **保质期**：无论结论如何，超过 ``STRATEGY_SHELF_LIFE_DAYS`` 强制重算。
 
         只看自动候选：手工覆盖是用户自己的决定，重新寻优不会替换它，按它排队
@@ -2228,8 +2229,11 @@ class MarketStrategyPoolService:
                     continue
             weak = True
             break
-        if weak and age >= WEAK_STRATEGY_RECHECK_DAYS:
-            return True
+        if weak:
+            # 重研后的同签名候选仍会判弱；没有冷却，自动增量研究每天都会重跑它。
+            return age >= WEAK_STRATEGY_RECHECK_DAYS
+        if age < DEGRADATION_RECHECK_DAYS:
+            return False
         return any(
             post_launch_degraded(_mapping((post_launch or {}).get(objective)))
             or recent_degraded(_mapping((post_launch or {}).get(objective)))

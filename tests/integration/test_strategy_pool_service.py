@@ -612,10 +612,25 @@ def test_shelf_life_and_post_launch_degradation_trigger_re_research() -> None:
         "recent_return": -0.05,
         "recent_benchmark_return": 0.15,
     }
+    # 重研后同签名候选会保留原上线日，衰减结论不会自己消失；21 天内不再排队。
+    just_researched = ("market-v1", "config-v1", "ready", True, datetime(2026, 10, 8, 12, 0, 0))
+    cooldown_elapsed = ("market-v1", "config-v1", "ready", True, datetime(2026, 9, 18, 12, 0, 0))
 
     assert MarketStrategyPoolService._research_recheck_due(
         strong_entry,
         fresh,
+        {"annual_return": degraded, "sharpe": {}},
+        now=now,
+    )
+    assert MarketStrategyPoolService._research_recheck_due(
+        strong_entry,
+        cooldown_elapsed,
+        {"annual_return": degraded, "sharpe": {}},
+        now=now,
+    )
+    assert not MarketStrategyPoolService._research_recheck_due(
+        strong_entry,
+        just_researched,
         {"annual_return": degraded, "sharpe": {}},
         now=now,
     )
@@ -624,6 +639,25 @@ def test_shelf_life_and_post_launch_degradation_trigger_re_research() -> None:
         strong_entry,
         fresh,
         {"annual_return": recent_degraded, "sharpe": {}},
+        now=now,
+    )
+    assert not MarketStrategyPoolService._research_recheck_due(
+        strong_entry,
+        just_researched,
+        {"annual_return": recent_degraded, "sharpe": {}},
+        now=now,
+    )
+    # 弱策略未满 21 天时，也不能借“衰减”这条触发绕过确认周期。
+    weak_entry = {
+        "automatic_candidates": {
+            "annual_return": {"metrics": {"full_period": {"closed_trades": 5, "total_return": 0.1}}}
+        },
+        "benchmark": {"full_period": {"total_return": 0.5}},
+    }
+    assert not MarketStrategyPoolService._research_recheck_due(
+        weak_entry,
+        just_researched,
+        {"annual_return": degraded, "sharpe": {}},
         now=now,
     )
     assert not MarketStrategyPoolService._research_recheck_due(

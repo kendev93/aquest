@@ -102,6 +102,65 @@ def test_versions_ignore_candidate_ids_metrics_and_dates_but_change_rules(tmp_pa
     assert len(tracks.versions("SH", "600000", "annual_return")) == 2
 
 
+def test_automatic_summaries_ignore_manual_versions(tmp_path):
+    """研究重研只看自动候选自己的回放；展示才用“手工优先”的生效版本。"""
+
+    store = _store_with_bars(tmp_path)
+    pool = DuckDbStrategyPoolStore(store)
+    automatic_candidate = {
+        "candidate_id": "automatic-1",
+        "buy_rule": {"signals": ["technical.macd"]},
+        "sell_rule": {"signals": []},
+        "config": {"stop_loss_pct": 0.1},
+    }
+    pool.upsert_automatic(
+        market="SH",
+        code="600000",
+        name="test",
+        annual_candidate=automatic_candidate,
+        sharpe_candidate=None,
+        data_fingerprint="x",
+        config_fingerprint="y",
+        source_job_id="job",
+    )
+    tracks = PoolTrackingStore(store)
+    automatic = next(v for v in tracks.current_versions() if v["source"] == "automatic")
+    automatic_summary = {
+        "as_of_date": "2026-10-19",
+        "recent_days": 60,
+        "recent_return": -0.2,
+        "recent_benchmark_return": 0.0,
+    }
+    assert tracks.save_snapshot(
+        automatic["version_id"],
+        automatic["signature"],
+        *encode_snapshot({"summary": automatic_summary, "checkpoint": {"positions": {}}}),
+    )
+
+    pool.set_manual_override(
+        "SH",
+        "600000",
+        "annual_return",
+        {**automatic_candidate, "sell_rule": {"signals": ["technical.rsi14"]}},
+    )
+    manual = next(v for v in tracks.current_versions() if v["source"] == "manual")
+    manual_summary = {
+        "as_of_date": "2026-10-19",
+        "recent_days": 60,
+        "recent_return": 0.5,
+        "recent_benchmark_return": 0.0,
+    }
+    assert tracks.save_snapshot(
+        manual["version_id"],
+        manual["signature"],
+        *encode_snapshot({"summary": manual_summary, "checkpoint": {"positions": {}}}),
+    )
+
+    key = ("SH", "600000", "annual_return")
+    assert tracks.automatic_summaries()[key]["recent_return"] == -0.2
+    assert tracks.applied_summaries()[key]["recent_return"] == 0.5
+
+
 def test_buy_blockades_report_only_blocked_symbols_for_the_queried_objective(tmp_path):
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     pool = DuckDbStrategyPoolStore(store)

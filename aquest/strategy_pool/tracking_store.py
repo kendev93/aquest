@@ -491,10 +491,25 @@ class PoolTrackingStore:
         """当前生效版本（手工优先）的 summary_json，免解压读取。
 
         与 :meth:`buy_blockades` 同款：只读 ``summary_json``、不解压 checkpoint
-        blob，给「上线后衰减」这类只需要摘要字段的判定用。返回
-        ``(market, code, objective) -> summary``。
+        blob。信号展示要跟随用户当前看到的生效版本，所以手工覆盖优先；研究侧的
+        衰减判定必须用 :meth:`automatic_summaries`，否则会拿手工策略的表现去
+        触发自动候选重研。
         """
 
+        return self._summaries_by_source(None)
+
+    def automatic_summaries(self) -> dict[tuple[str, str, str], dict[str, Any]]:
+        """只取自动版本当前生效的摘要，供自动候选的弱策略/衰减判定使用。
+
+        手工覆盖生效时，自动版本仍然 is_current，但它的账户不是用户正在持有的
+        那一份；研究重研看的是自动候选自己的表现，不能混用手工摘要。
+        """
+
+        return self._summaries_by_source(frozenset({"automatic"}))
+
+    def _summaries_by_source(
+        self, sources: frozenset[str] | None
+    ) -> dict[tuple[str, str, str], dict[str, Any]]:
         with self.store.state_read_session() as connection:
             rows = connection.execute(
                 """SELECT market, code, objective, source, summary_json
@@ -503,6 +518,8 @@ class PoolTrackingStore:
             ).fetchall()
         result: dict[tuple[str, str, str], dict[str, Any]] = {}
         for market, code, objective, source, summary in rows:
+            if sources is not None and str(source) not in sources:
+                continue
             try:
                 payload = json.loads(summary or "{}")
             except (TypeError, ValueError):
