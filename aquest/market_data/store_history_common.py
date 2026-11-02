@@ -10,6 +10,8 @@ from typing import cast
 
 import duckdb
 
+from aquest.coercion import as_finite_float as _finite_or_none
+
 from .store_base import (
     _BACKTEST_HISTORY_TYPES,
     MarketDataStoreError,
@@ -150,15 +152,6 @@ def _normalize_timestamp(value: object | None, fallback: datetime) -> datetime:
 def _validate_backtest_history_type(backtest_type: str) -> None:
     if backtest_type not in _BACKTEST_HISTORY_TYPES:
         raise ValueError("回测历史类型无效")
-
-
-def _finite_or_none(value: object) -> float | None:
-    """Return a finite float, or None for anything unusable (NaN, None, text)."""
-
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    number = float(value)
-    return number if math.isfinite(number) else None
 
 
 def _typed_history_summary(

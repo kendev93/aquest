@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping, Sequence
 from datetime import date
 
 import numpy as np
 
+from aquest.coercion import as_finite_float as _finite_number
+from aquest.coercion import as_mapping as _mapping
 from aquest.individual_research.metrics import MIN_VALIDATION_TRADES, candidate_quality
 from aquest.strategy_discovery.candidates import DEFAULT_MAX_HOLD_DAYS
 
@@ -245,17 +246,6 @@ def _trade_count(metrics: Mapping[str, object]) -> int:
         except ValueError:
             return 0
     return 0
-
-
-def _finite_number(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    number = float(value)
-    return number if math.isfinite(number) else None
-
-
-def _mapping(value: object) -> Mapping[str, object]:
-    return value if isinstance(value, Mapping) else {}
 
 
 def _mapping_sequence(value: object) -> list[Mapping[str, object]]:

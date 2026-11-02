@@ -8,9 +8,11 @@
 
 from __future__ import annotations
 
-import math
 import statistics
 from collections.abc import Mapping, Sequence
+
+from aquest.coercion import as_finite_float as _number
+from aquest.coercion import as_mapping as _mapping
 
 from .models import (
     CURVE_KIND_EQUITY,
@@ -51,21 +53,10 @@ SOURCE_FACTOR = "因子检验 IC 口径"
 _NO_EQUITY_NOTE = "{type}不产生资金曲线，收益类数字不能与组合回测并列"
 
 
-def _mapping(value: object) -> Mapping[str, object]:
-    return value if isinstance(value, Mapping) else {}
-
-
 def _rows(value: object) -> list[Mapping[str, object]]:
     if not isinstance(value, (list, tuple)):
         return []
     return [item for item in value if isinstance(item, Mapping)]
-
-
-def _number(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    number = float(value)
-    return number if math.isfinite(number) else None
 
 
 def _text(value: object) -> str | None:

@@ -21,6 +21,8 @@ from datetime import date
 import numpy as np
 
 from aquest.backtest.service import PreparedBacktest
+from aquest.coercion import as_finite_float as _number
+from aquest.coercion import as_mapping as _mapping
 from aquest.formulas.registry import FORMULA_REGISTRY, FormulaRegistry
 from aquest.screening.engine import evaluate_rule_group
 from aquest.screening.models import ScreenCondition
@@ -118,17 +120,6 @@ def condition_from_mapping(payload: Mapping[str, object]) -> ScreenCondition:
         right_value=right_value.strip() if isinstance(right_value, str) else None,
         right_constant=None if right_constant is None else float(right_constant),
     )
-
-
-def _mapping(value: object) -> Mapping[str, object]:
-    return value if isinstance(value, Mapping) else {}
-
-
-def _number(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    result = float(value)
-    return result if np.isfinite(result) else None
 
 
 def significant_conditions(

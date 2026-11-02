@@ -21,6 +21,8 @@ import pandas as pd
 from aquest.backtest.models import BacktestConfig
 from aquest.backtest.service import BacktestService
 from aquest.backtest.trades import count_closed_trades
+from aquest.coercion import as_finite_float as _finite_metric
+from aquest.coercion import as_mapping as _mapping
 from aquest.concurrency import visible_cpu_count
 from aquest.errors import error_reason
 from aquest.formulas.registry import FORMULA_REGISTRY
@@ -2839,17 +2841,6 @@ def _signal_sort_key(row: Mapping[str, object], objective: str) -> tuple[float, 
 
 def _status_order(state: str) -> int:
     return {"buy": 0, "buy_sell": 0, "sell": 1, "flat": 2, "no_strategy": 3}.get(state, 4)
-
-
-def _mapping(value: object) -> Mapping[str, object]:
-    return value if isinstance(value, Mapping) else {}
-
-
-def _finite_metric(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    number = float(value)
-    return number if math.isfinite(number) else None
 
 
 def _portfolio_strategies(

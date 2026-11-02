@@ -26,6 +26,7 @@ import numpy as np
 import pandas as pd
 
 from aquest.backtest.performance import PerformanceAnalyzer
+from aquest.coercion import as_finite_float as _finite_or_none
 from aquest.market_data.store import DuckDbMarketDataStore
 from aquest.market_data.store_history import (
     STRATEGY_TRACKING_ACTIVE,
@@ -205,13 +206,6 @@ def _date_key(value: object) -> int:
 def _date_text(trade_date: int) -> str:
     text = str(int(trade_date))
     return f"{text[:4]}-{text[4:6]}-{text[6:]}"
-
-
-def _finite_or_none(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    number = float(value)
-    return number if np.isfinite(number) else None
 
 
 def _number(value: object) -> float:

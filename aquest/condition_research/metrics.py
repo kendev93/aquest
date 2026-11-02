@@ -9,6 +9,7 @@ from typing import cast
 import numpy as np
 
 from aquest.backtest.models import BacktestReport
+from aquest.coercion import as_mapping as _mapping
 
 _Report = Mapping[str, object] | BacktestReport
 
@@ -152,10 +153,6 @@ def summarize_backtests(
 
 def _report_dict(report: _Report) -> dict[str, object]:
     return report.to_dict() if isinstance(report, BacktestReport) else dict(report)
-
-
-def _mapping(value: object) -> Mapping[str, object]:
-    return value if isinstance(value, Mapping) else {}
 
 
 def _closed_trades(value: object) -> list[dict[str, float]]:

@@ -8,6 +8,7 @@ from collections.abc import Callable, Mapping, MutableMapping, Sequence
 
 import pandas as pd
 
+from aquest.coercion import as_finite_float as _number
 from aquest.screening.models import ScreenCondition
 from aquest.screening.rules import RuleGroup
 
@@ -504,13 +505,6 @@ def _without_stock_rows(summary: Mapping[str, object]) -> dict[str, object]:
 def _pooled(summary: Mapping[str, object]) -> Mapping[str, object]:
     value = summary.get("pooled_trades")
     return value if isinstance(value, Mapping) else {}
-
-
-def _number(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    resolved = float(value)
-    return resolved if math.isfinite(resolved) else None
 
 
 def _combined_fingerprint(fingerprints: Mapping[str, str]) -> str | None:

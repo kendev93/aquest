@@ -12,6 +12,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from aquest.candidate_library.models import as_mapping
+from aquest.coercion import as_finite_float as _number
 from aquest.instrument_lab.conditions import condition_from_mapping, condition_label
 
 
@@ -25,13 +26,6 @@ def build_label(condition: Mapping[str, object]) -> str:
         left = condition.get("left_value")
         operator = condition.get("operator")
         return f"{left or '?'} {operator or '?'}"
-
-
-def _number(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    number = float(value)
-    return number if number == number and number not in (float("inf"), float("-inf")) else None
 
 
 def _integer(value: object) -> int | None:

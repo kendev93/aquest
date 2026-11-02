@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import time
 from collections.abc import Callable, Generator, Iterator, Mapping, Sequence
 from contextlib import closing
@@ -19,6 +18,8 @@ import pandas as pd
 from aquest.backtest.models import BacktestConfig
 from aquest.backtest.service import BacktestService, PreparedBacktest
 from aquest.backtest.trades import count_closed_trades
+from aquest.coercion import as_finite_float as _number
+from aquest.coercion import as_mapping as _mapping
 from aquest.condition_research.mining import MinedCondition, mine_binary_conditions
 from aquest.condition_research.models import rule_to_dict
 from aquest.market_data.adapter import MarketDataAdapter
@@ -1707,13 +1708,6 @@ def _segmentation_summary(
     }
 
 
-def _number(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    result = float(value)
-    return result if math.isfinite(result) else None
-
-
 def _integer(value: object, fallback: int = 0) -> int:
     number = _number(value)
     return int(number) if number is not None else fallback
@@ -1724,10 +1718,6 @@ def _trade_count(metrics: Mapping[str, object]) -> int:
     if isinstance(closed, (int, float)) and not isinstance(closed, bool):
         return max(0, int(closed))
     return max(0, _integer(metrics.get("total_trades")))
-
-
-def _mapping(value: object) -> Mapping[str, object]:
-    return value if isinstance(value, Mapping) else {}
 
 
 def _mapping_sequence(value: object) -> list[Mapping[str, object]]:

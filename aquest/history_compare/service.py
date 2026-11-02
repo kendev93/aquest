@@ -10,6 +10,7 @@ from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import replace
 
+from aquest.coercion import as_mapping as _mapping
 from aquest.market_data.store import DuckDbMarketDataStore
 
 from .extract import extract_curve, extract_date_range, extract_label, extract_metrics
@@ -26,10 +27,6 @@ from .models import (
     CompareItem,
     HistoryCompareReport,
 )
-
-
-def _mapping(value: object) -> Mapping[str, object]:
-    return value if isinstance(value, Mapping) else {}
 
 
 def _text(value: object) -> str | None:
