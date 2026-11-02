@@ -8,37 +8,36 @@ import StrategyPoolFollowButton from '../components/StrategyPoolFollowButton.vue
 import StrategyPoolPostLaunchBoard from '../components/StrategyPoolPostLaunchBoard.vue'
 import { fetchStoreStatus } from '../api/marketData'
 import {
-  addStrategyPoolFocus,
   cancelStrategyPoolJob,
   createStrategyPoolJob,
   fetchResearchSettings,
   fetchStrategyPoolEntries,
-  fetchStrategyPoolFocus,
   fetchStrategyPoolJobStats,
   fetchStrategyPoolJobs,
   fetchPoolSignalDays,
   fetchStrategyPoolResearchEstimate,
   getStrategyPoolJob,
-  removeStrategyPoolFocus,
   saveResearchSettings,
   type StrategyPoolBoard,
   type StrategyPoolJobRequest,
 } from '../api/strategyPool'
 import { describeError } from '../api/client'
+import { useStrategyPoolFocus } from '../composables/useStrategyPoolFocus'
+import {
+  useStrategyPoolSignalView,
+  type SellPanelItem,
+} from '../composables/useStrategyPoolSignalView'
 // 这里的任务轮询有意不用 composables/usePolling 的 pollUntil：它内嵌了
 // 「标的状态刷新」编排（refreshPoolEntries + refreshingEntries 抑制）、
 // token 竞态守卫（canApply）和多种完成态的清理动作，抽象盖不住这些差异。
 import type {
   DataStoreStatus,
   StrategyPoolEntry,
-  StrategyPoolFocusItem,
-  StrategyPoolFollowTarget,
   StrategyPoolHolding,
   StrategyPoolJobResult,
   StrategyPoolJobState,
   StrategyPoolJobStats,
   StrategyPoolJobSummary,
-  StrategyPoolMetrics,
   StrategyPoolResearchEstimate,
   StrategyPoolMode,
   StrategyPoolObjective,
@@ -48,7 +47,6 @@ import type {
 import AppTopbar from '../components/AppTopbar.vue'
 import { formatDuration, formatNumber, formatPercent, formatSignedPercent } from '../utils/format'
 import {
-  formatHoldingDays,
   holdingRiskSummary,
   objectiveLabel,
   sortPoolEntriesByMetric,
@@ -62,7 +60,6 @@ import { formatChinaTimestamp } from '../utils/time'
 import { isActiveJobStatus, isTerminalJobStatus } from '../utils/jobStatus'
 
 const OBJECTIVE_STORAGE_KEY = 'aquest.strategy-pool.objective'
-const SIGNAL_PAGE_SIZE = 10
 interface ActivePoolTickerProgress {
   symbol: string
   name: string
@@ -71,23 +68,9 @@ interface ActivePoolTickerProgress {
   phaseLabel: string
   startedAt: number | null
 }
-type SellPanelItem =
-  | { kind: 'rule'; key: string; signal: StrategyPoolSignal }
-  // 风控退出行是引擎直接落库的宽松对象，这里顺手把它归一成关注开关需要的市场+代码+名称，
-  // 免得模板里再对 unknown 做一遍判断。
-  | {
-      kind: 'risk'
-      key: string
-      signal: Record<string, unknown>
-      target: StrategyPoolFollowTarget
-    }
 
 const objective = ref<StrategyPoolObjective | null>(null)
 const entries = ref<StrategyPoolEntry[]>([])
-// 特别关注名单来自后端，一只标的行；只有本页会改它，所以进页面读一次即可，
-// 不进 refreshPage 的并发读取（切目标/轮询时没必要重复拉）。
-const focusItems = ref<StrategyPoolFocusItem[]>([])
-const focusPending = ref(false)
 const history = ref<StrategyPoolJobSummary[]>([])
 const historyStats = ref<StrategyPoolJobStats | null>(null)
 // 显示哪一天的信号由 signalDate 决定：默认是最新行情那天（live 路径，全市场扫描结果
@@ -144,17 +127,6 @@ const sortColumn = ref<StrategyPoolSortColumn>('status')
 // 'status' 档就是「未点任何指标列」的默认分组，也是取消排序落回的地方，
 // 因此方向只在指标列档位生效。
 const sortDirection = ref<StrategyPoolSortDirection>('desc')
-// 三个信号面板（触发买入 / 触发卖出 / 持仓中）共用的显示排序（2026-10-13 用户需求）：
-// 后端返回顺序对跟踪增量结果是按证券代码的，这里允许按行内展示的全区间指标重排。
-// 'default' 表示保持返回顺序，只有这一档把特别关注置顶。
-const SIGNAL_SORT_OPTIONS = [
-  { value: 'default', label: '默认顺序（关注置顶）' },
-  { value: 'win_rate', label: '全区间胜率 高→低' },
-  { value: 'payoff_ratio', label: '全区间盈亏比 高→低' },
-  { value: 'annual_return', label: '全区间年化收益 高→低' },
-] as const
-type SignalSortValue = (typeof SIGNAL_SORT_OPTIONS)[number]['value']
-const signalSort = ref<SignalSortValue>('default')
 const page = ref(1)
 const pageSize = ref(50)
 const elapsedClock = ref(Date.now())
@@ -535,34 +507,6 @@ const currentHoldingReturns = computed(() => new Map(
 ))
 const signalAsOf = computed(() => signalResult.value?.as_of_date ?? '')
 const signalLag = computed(() => signalResult.value?.data_lag ?? null)
-const buyPage = ref(1)
-const sellPage = ref(1)
-const holdingsPage = ref(1)
-const sortedBuySignals = computed(() => sortSignalRows(buySignals.value, (item) => item.symbol))
-const sortedSellPanelItems = computed(() => sortSignalRows(sellPanelItems.value, sellItemSymbol))
-// 三个面板共用同一个排序：默认顺序下特别关注置顶，选了指标就一起按指标排。
-const sortedCurrentHoldings = computed(() =>
-  sortSignalRows(currentHoldings.value, (holding) => symbol(holding)),
-)
-const visibleBuySignals = computed(() => pageItems(sortedBuySignals.value, buyPage.value))
-const visibleSellSignals = computed(() => pageItems(sortedSellPanelItems.value, sellPage.value))
-const visibleCurrentHoldings = computed(() => pageItems(sortedCurrentHoldings.value, holdingsPage.value))
-const buyPageCount = computed(() => pageCount(buySignals.value.length))
-const sellPageCount = computed(() => pageCount(sellPanelItems.value.length))
-const holdingsPageCount = computed(() => pageCount(sortedCurrentHoldings.value.length))
-
-watch([buySignals, sellPanelItems, currentHoldings], () => {
-  buyPage.value = 1
-  sellPage.value = 1
-  holdingsPage.value = 1
-})
-watch(signalSort, () => {
-  buyPage.value = 1
-  sellPage.value = 1
-  // 持仓面板也共用这个排序：不重置的话第 2 页之后会停在旧页码，甚至显示空表。
-  holdingsPage.value = 1
-})
-
 const filteredEntries = computed(() => {
   const query = searchQuery.value.trim().toLocaleLowerCase()
   if (!query) return entries.value
@@ -612,18 +556,6 @@ const pageEnd = computed(() => Math.min(page.value * pageSize.value, sortedEntri
 
 // 特别关注面板只按状态优先级排，不跟主表的搜索/排序/分页联动；行数据仍来自 entries，
 // 所以暂时不在策略池里的关注标的不会占行，只在面板上提示数量。
-const followKeys = computed(() => new Set(focusItems.value.map(symbol)))
-const focusRows = computed(() => sortPoolEntriesByStatus(
-  entries.value.filter((entry) => followKeys.value.has(symbol(entry))),
-  signalStates.value,
-  heldSymbols.value,
-  objective.value,
-))
-const focusMissing = computed(() => {
-  const poolKeys = new Set(entries.value.map(symbol))
-  return focusItems.value.filter((item) => !poolKeys.has(symbol(item)))
-})
-const focusMissingCount = computed(() => focusMissing.value.length)
 const listContext = computed(() => new URLSearchParams({
   objective: objective.value ?? 'annual_return',
   search: searchQuery.value,
@@ -633,61 +565,44 @@ const listContext = computed(() => new URLSearchParams({
   pageSize: String(pageSize.value),
 }).toString())
 
-async function toggleFollow(target: StrategyPoolFollowTarget): Promise<void> {
-  if (focusPending.value) return
-  const key = symbol(target)
-  const name = target.name ?? ''
-  const followed = followKeys.value.has(key)
-  const previous = focusItems.value
-  focusPending.value = true
-  // 先按本地更新让面板跟手，再用服务端返回的权威名单覆盖；被拒（例如超过上限）就整表回滚。
-  focusItems.value = followed
-    ? previous.filter((item) => symbol(item) !== key)
-    : [...previous, { market: target.market, code: target.code, name }]
-  errorMessage.value = ''
-  try {
-    focusItems.value = followed
-      ? await removeStrategyPoolFocus(target.market, target.code)
-      : await addStrategyPoolFocus(target.market, target.code, name)
-  } catch (error) {
-    focusItems.value = previous
-    errorMessage.value = apiMessage(error)
-  } finally {
-    focusPending.value = false
-  }
-}
+const {
+  focusPending,
+  followKeys,
+  focusRows,
+  focusMissingCount,
+  toggleFollow,
+  pruneMissingFocus,
+  loadFocus,
+} = useStrategyPoolFocus({
+  entries,
+  signalStates,
+  heldSymbols,
+  objective,
+  errorMessage,
+  describeError: apiMessage,
+})
 
-// 池外的关注标的在两张表里都没有行，也就没有单只取消的入口；这里给一个批量移出的出口，
-// 逐只走同一个 DELETE 接口，避免为了「清理」再加一套后端语义。
-async function pruneMissingFocus(): Promise<void> {
-  if (focusPending.value) return
-  const missing = focusMissing.value
-  if (!missing.length) return
-  const previous = focusItems.value
-  focusPending.value = true
-  errorMessage.value = ''
-  try {
-    let items = previous
-    for (const item of missing) {
-      items = await removeStrategyPoolFocus(item.market, item.code)
-    }
-    focusItems.value = items
-  } catch (error) {
-    // 中途失败时后端可能已经移除了几只，重读一次让界面和库里一致。
-    focusItems.value = await fetchStrategyPoolFocus().catch(() => previous)
-    errorMessage.value = apiMessage(error)
-  } finally {
-    focusPending.value = false
-  }
-}
-
-async function loadFocus(): Promise<void> {
-  try {
-    focusItems.value = await fetchStrategyPoolFocus()
-  } catch {
-    // 读不到关注名单就当作一只都没关注，不打断页面初始化。
-  }
-}
+const {
+  SIGNAL_PAGE_SIZE,
+  SIGNAL_SORT_OPTIONS,
+  signalSort,
+  buyPage,
+  sellPage,
+  holdingsPage,
+  visibleBuySignals,
+  visibleSellSignals,
+  visibleCurrentHoldings,
+  buyPageCount,
+  sellPageCount,
+  holdingsPageCount,
+  qualityText,
+} = useStrategyPoolSignalView({
+  buySignals,
+  sellPanelItems,
+  currentHoldings,
+  entries,
+  followKeys,
+})
 
 function selectObjective(value: StrategyPoolObjective): void {
   objective.value = value
@@ -1303,15 +1218,6 @@ function changePageSize(value: string): void {
   page.value = 1
 }
 
-function pageCount(count: number): number {
-  return Math.max(1, Math.ceil(count / SIGNAL_PAGE_SIZE))
-}
-
-function pageItems<T>(items: T[], page: number): T[] {
-  const start = (page - 1) * SIGNAL_PAGE_SIZE
-  return items.slice(start, start + SIGNAL_PAGE_SIZE)
-}
-
 function holdingStatus(holding: StrategyPoolHolding): string {
   // 风控挂单是昨收判定、今开成交，还没成交前它仍是持仓，标签要说清是哪条线触发的。
   const exitLabel = holding.pending_exit_reason
@@ -1375,69 +1281,6 @@ function signalMetricsSummary(signal: StrategyPoolSignal): string {
     )
   }
   return values.join(' · ')
-}
-
-// 三个信号列表行内的策略质量指标（2026-10-09 用户需求）：全区间胜率 / 盈亏比 /
-// 平均持仓天数，与「全市场标的状态」表格口径一致。从条目表按代码查找——跟踪
-// 路径的信号行与持仓行本身不带指标，这样两条来源的行都能显示。
-const entryQualityMap = computed(() => {
-  const map = new Map<string, StrategyPoolMetrics>()
-  for (const entry of entries.value) {
-    const candidate = entry.active_candidate
-    const full = candidate?.metrics?.full_period
-    if (full) map.set(symbol(entry), full)
-  }
-  return map
-})
-
-function qualityText(key: string): string {
-  const full = entryQualityMap.value.get(key)
-  if (!full) return ''
-  const parts: string[] = []
-  // 全区间累计收益不可跨标的比较（上市早的累计年份更多），排序按年化；
-  // 这里把年化一并写出来，排序结果才在行内看得见。
-  if (typeof full.annual_return === 'number' && Number.isFinite(full.annual_return)) {
-    parts.push(`全区间年化 ${formatPercent(full.annual_return)}`)
-  }
-  if (typeof full.win_rate === 'number' && Number.isFinite(full.win_rate)) {
-    parts.push(`全区间胜率 ${formatPercent(full.win_rate)}`)
-  }
-  if (typeof full.payoff_ratio === 'number' && Number.isFinite(full.payoff_ratio)) {
-    parts.push(`全区间盈亏比 ${formatNumber(full.payoff_ratio)}`)
-  }
-  if (typeof full.avg_holding_days === 'number' && Number.isFinite(full.avg_holding_days)) {
-    parts.push(`平均持仓 ${formatHoldingDays(full.avg_holding_days)}`)
-  }
-  return parts.join(' · ')
-}
-
-function sellItemSymbol(item: SellPanelItem): string {
-  return item.kind === 'rule'
-    ? item.signal.symbol
-    : `${String(item.signal.market ?? '')}${String(item.signal.code ?? '')}`
-}
-
-// 排序取全区间指标：与行内「全区间胜率 / 盈亏比」文案同一口径，且跟踪增量返回的
-// 信号行本身不带指标，只有条目表补得上。缺全区间指标的行排在末尾。
-function sortSignalRows<T>(rows: T[], keyOf: (row: T) => string): T[] {
-  // 关注只在默认排序（按状态优先级）时置顶：选了指标以后还钉在榜首，关注行就会挡住
-  // 真正的排序结果，看着像是排序没生效。
-  if (signalSort.value === 'default') {
-    const pinned: T[] = []
-    const rest: T[] = []
-    for (const row of rows) {
-      (followKeys.value.has(keyOf(row)) ? pinned : rest).push(row)
-    }
-    return [...pinned, ...rest]
-  }
-  const metric = signalSort.value
-  const score = (row: T): number => {
-    const value = entryQualityMap.value.get(keyOf(row))?.[metric]
-    return typeof value === 'number' && Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY
-  }
-  return [...rows].sort((left, right) => (
-    score(right) - score(left) || keyOf(left).localeCompare(keyOf(right))
-  ))
 }
 
 function riskExitReturnText(signal: Record<string, unknown>): string {
