@@ -79,3 +79,5 @@ export interface ConditionOperatorDefinition {
 }
 
 export type MarketChartPeriod = 'daily' | 'monthly' | 'yearly'
+
+export type JobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'

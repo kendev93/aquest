@@ -59,6 +59,7 @@ import {
   type StrategyPoolSortDirection,
 } from '../utils/strategyPoolStatus'
 import { formatChinaTimestamp } from '../utils/time'
+import { isActiveJobStatus, isTerminalJobStatus } from '../utils/jobStatus'
 
 const OBJECTIVE_STORAGE_KEY = 'aquest.strategy-pool.objective'
 const SIGNAL_PAGE_SIZE = 10
@@ -376,7 +377,7 @@ function poolJobModeLabel(job: StrategyPoolJobSummary): string {
 // 终态任务用后端算好的时长；没跑完的行按页面自己的秒表走，不然列表里正在
 // 研究的那条永远停在「0 分钟」，看不出它到底是卡住了还是刚起步。
 function poolJobDurationText(job: StrategyPoolJobSummary): string {
-  if (!['queued', 'running'].includes(job.status)) {
+  if (!isActiveJobStatus(job.status)) {
     if (typeof job.duration_seconds !== 'number') return ''
     return `耗时 ${formatDuration(job.duration_seconds)}${job.duration_includes_queue ? '（含排队）' : ''}`
   }
@@ -1160,7 +1161,7 @@ async function pollJob(jobId: string, intent: StrategyPoolMode): Promise<void> {
         if (!canApply()) return
       }
       if (intent === 'single' && state.status === 'running') queuedSingleSymbol.value = ''
-      if (['completed', 'failed', 'cancelled'].includes(state.status)) {
+      if (isTerminalJobStatus(state.status)) {
         const result = state.result?.results_by_objective?.[objective.value ?? 'annual_return'] ?? state.result ?? null
         if (intent === 'single') queuedSingleSymbol.value = ''
         activeJobId.value = ''
@@ -1253,7 +1254,7 @@ async function loadHistoryStats(): Promise<void> {
 
 async function activateQueuedSingleRerun(): Promise<boolean> {
   const queued = history.value.find(
-    (job) => job.mode === 'single' && ['queued', 'running'].includes(job.status),
+    (job) => job.mode === 'single' && isActiveJobStatus(job.status),
   )
   if (!queued) {
     queuedSingleSymbol.value = ''

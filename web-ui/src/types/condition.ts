@@ -1,6 +1,6 @@
 /** condition 相关的前端类型。 */
 
-import type { BacktestExecution, BacktestPositionMode, DateRangeMode, InstrumentBoard, InstrumentType } from './common'
+import type { BacktestExecution, BacktestPositionMode, DateRangeMode, InstrumentBoard, InstrumentType, JobStatus } from './common'
 
 import type { RuleGroupPayload, ScreenCondition } from './screen'
 
@@ -55,7 +55,7 @@ export type RankOrder = 'asc' | 'desc'
 
 export interface ConditionResearchJobState {
   job_id: string
-  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+  status: JobStatus
   progress: number
   total_candidates: number
   total_scanned: number

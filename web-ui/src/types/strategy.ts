@@ -1,6 +1,6 @@
 /** strategy 相关的前端类型。 */
 
-import type { BacktestExecution, InstrumentBoard, InstrumentType, StrategyDiscoveryDateMode, Universe } from './common'
+import type { BacktestExecution, InstrumentBoard, InstrumentType, StrategyDiscoveryDateMode, Universe, JobStatus } from './common'
 
 import type { PortfolioBacktestPayload, PortfolioBacktestResult } from './portfolio'
 
@@ -55,7 +55,7 @@ export interface StrategyDiscoveryRefinementPayload {
 
 export interface StrategyDiscoveryJobState {
   job_id: string
-  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+  status: JobStatus
   progress: number
   total_candidates: number
   total_scanned: number
@@ -206,7 +206,7 @@ export interface StrategyReplayResult {
 
 export interface StrategyReplayJobState {
   job_id: string
-  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+  status: JobStatus
   progress: number
   total_candidates: number
   total_scanned: number

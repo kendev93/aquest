@@ -1,6 +1,6 @@
 /** portfolio 相关的前端类型。 */
 
-import type { BacktestExecution, BacktestPositionMode, CombineMode, DateRangeMode, InstrumentBoard, InstrumentType, PortfolioCompareOperator, PortfolioRankOrder, PortfolioRebalanceFrequency, PortfolioSellValueOperator, PortfolioUniverse } from './common'
+import type { BacktestExecution, BacktestPositionMode, CombineMode, DateRangeMode, InstrumentBoard, InstrumentType, PortfolioCompareOperator, PortfolioRankOrder, PortfolioRebalanceFrequency, PortfolioSellValueOperator, PortfolioUniverse, JobStatus } from './common'
 
 import type { RuleGroupPayload } from './screen'
 
@@ -67,7 +67,7 @@ export interface PortfolioBacktestPayload {
 
 export interface PortfolioBacktestJobState {
   job_id: string
-  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+  status: JobStatus
   progress: number
   total_candidates: number
   total_scanned: number

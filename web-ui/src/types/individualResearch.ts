@@ -1,4 +1,4 @@
-import type { BacktestExecution, BacktestPositionMode, DateRangeMode } from './common'
+import type { BacktestExecution, BacktestPositionMode, DateRangeMode, JobStatus } from './common'
 import type { BacktestHistoryRecord, BacktestHistorySummary } from './history'
 import type { PortfolioBacktestPayload } from './portfolio'
 
@@ -136,7 +136,7 @@ export interface IndividualResearchResult {
 
 export interface IndividualResearchJobState {
   job_id: string
-  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+  status: JobStatus
   progress: number
   total_candidates: number
   total_scanned: number

@@ -1,6 +1,6 @@
 /** market 相关的前端类型。 */
 
-import type { InstrumentBoard, InstrumentType, MarketChartPeriod } from './common'
+import type { InstrumentBoard, InstrumentType, MarketChartPeriod, JobStatus } from './common'
 
 
 export interface JobState {
@@ -108,7 +108,7 @@ export interface MarketSyncResult {
 export interface MarketSyncJobState {
   job_id: string
   description?: string
-  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+  status: JobStatus
   progress: number
   total_candidates: number
   total_scanned: number
