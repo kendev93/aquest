@@ -69,6 +69,18 @@ export function formatDuration(seconds: number | null | undefined): string {
   return remainingMinutes ? `${hours} 小时 ${remainingMinutes} 分钟` : `${hours} 小时`
 }
 
+/** 因子类指标（IC/IR/收益差）惯例 3 位小数；共享 formatNumber 的默认是 2 位。 */
+export function formatNumber3(value: unknown): string {
+  return formatNumber(value, 3)
+}
+
+/** 历史任务列表的粗粒度耗时文案；非有限秒数返回空串。 */
+export function formatElapsedRounded(seconds: unknown): string {
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) return ''
+  if (seconds < 60) return `耗时 ${Math.round(seconds)} 秒`
+  return `耗时 ${Math.round(seconds / 60)} 分钟`
+}
+
 export type TradeRatioKey = 'payoff_ratio' | 'profit_factor'
 
 /**

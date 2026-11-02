@@ -30,12 +30,7 @@ import type {
 } from '../types'
 import AppTopbar from '../components/AppTopbar.vue'
 import { INTERACTIVE_JOB_TIMEOUT_MS, PollTimeoutError, pollUntil } from '../composables/usePolling'
-import { formatNumber, formatPercent } from '../utils/format'
-
-// 因子类指标（IC/IR/收益差）惯例 3 位小数；共享 formatNumber 的默认是 2 位。
-function formatNumber3(value: unknown): string {
-  return formatNumber(value, 3)
-}
+import { formatNumber3, formatNumber, formatPercent } from '../utils/format'
 
 
 interface FactorFormState {

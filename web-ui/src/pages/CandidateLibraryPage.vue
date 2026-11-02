@@ -34,10 +34,11 @@ import {
   studyRangeText,
   studyScaleText,
 } from '../utils/candidateLibrary'
+import { CONDITION_RESEARCH_RESTORE_KEY } from '../utils/handoffKeys'
 import AppTopbar from '../components/AppTopbar.vue'
 
 /** 候选库的「载入复测」：把来源研究的整份输入搬到条件研究页。走 storage 不走 URL 参数。 */
-const RESTORE_KEY = 'aquest.condition-research.restore'
+const RESTORE_KEY = CONDITION_RESEARCH_RESTORE_KEY
 
 const FILTERS: { key: '' | CandidateStatus; label: string }[] = [
   { key: '', label: '全部' },

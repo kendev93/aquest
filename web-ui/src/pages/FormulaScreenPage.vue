@@ -51,6 +51,7 @@ import {
 } from '../api/stockGroups'
 import { formatChinaTimestamp } from '../utils/time'
 import { savePortfolioBacktestHandoff } from '../utils/portfolioBacktestHandoff'
+import { CONDITION_RESEARCH_TO_SCREEN_KEY } from '../utils/handoffKeys'
 import AppTopbar from '../components/AppTopbar.vue'
 import { BOARD_OPTIONS, INSTRUMENT_TYPE_OPTIONS } from '../utils/instrumentOptions'
 import { formatNumber, formatSignedPercent } from '../utils/format'
@@ -845,10 +846,8 @@ interface ResearchToScreenPayload {
   source_label?: '买卖条件研究' | '组合回测'
 }
 
-const RESEARCH_TO_SCREEN_KEY = 'aquest.condition-research.to-screen'
-
 async function applyResearchToScreen(): Promise<void> {
-  const raw = sessionStorage.getItem(RESEARCH_TO_SCREEN_KEY)
+  const raw = sessionStorage.getItem(CONDITION_RESEARCH_TO_SCREEN_KEY)
   if (!raw) return
   const notes: string[] = []
   let sourceLabel: '买卖条件研究' | '组合回测' = '买卖条件研究'
@@ -897,7 +896,7 @@ async function applyResearchToScreen(): Promise<void> {
     notes.push('带过来的条件没能还原，已保留原有设置。')
   } finally {
     // 读完立即删：刷新时不该再被套用一次，否则用户改完表单一刷新就被覆盖回去。
-    sessionStorage.removeItem(RESEARCH_TO_SCREEN_KEY)
+    sessionStorage.removeItem(CONDITION_RESEARCH_TO_SCREEN_KEY)
   }
   showMessage(
     notes.length

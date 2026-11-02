@@ -7,6 +7,7 @@
  */
 
 import { valueOptionLabel } from './formulaScreen'
+import { formatElapsedRounded } from './format'
 import { formatChinaTimestamp } from './time'
 import type {
   ConditionResearchCandidate,
@@ -337,10 +338,7 @@ export function historySideText(item: ResearchHistorySummary): string {
 }
 
 export function historyDurationText(item: ResearchHistorySummary): string {
-  const seconds = item.duration_seconds
-  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) return ''
-  if (seconds < 60) return `耗时 ${Math.round(seconds)} 秒`
-  return `耗时 ${Math.round(seconds / 60)} 分钟`
+  return formatElapsedRounded(item.duration_seconds)
 }
 
 // 历史记录的 created_at 存的是朴素 UTC 时间，直接渲染会比北京时间慢 8 小时，

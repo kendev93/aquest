@@ -35,6 +35,11 @@ import type {
   ValueDefinition,
 } from '../types'
 import { useCandidateSelection } from '../composables/useCandidateSelection'
+import {
+  CONDITION_RESEARCH_APPLY_KEY,
+  CONDITION_RESEARCH_RESTORE_KEY,
+  CONDITION_RESEARCH_TO_SCREEN_KEY,
+} from '../utils/handoffKeys'
 import { parseStoredRuleGroup } from '../utils/formulaScreen'
 import { consumeSwingPlan } from '../utils/swingHandoff'
 import {
@@ -187,11 +192,8 @@ const rankingValue = ref('')
 const rankingOrder = ref<RankOrder>('desc')
 const rankingTopN = ref(5)
 // 条件研究页 → 组合回测页的桥接，走独立的键，避免和策略实验室的回填互相覆盖。
-const RESEARCH_APPLY_KEY = 'aquest.condition-research.apply'
 // 候选库 → 条件研究页：「载入复测」把来源研究的整份输入搬过来还原表单。
-const RESTORE_KEY = 'aquest.condition-research.restore'
 // 条件研究页 → 公式选股页：只搬买入侧的条件（选股是一次性扫描，没有卖出这一说）。
-const RESEARCH_TO_SCREEN_KEY = 'aquest.condition-research.to-screen'
 // 「持有到期末」：不设基础卖出条件，让研究以「一直持有」为基准去搜索卖点。
 const holdToEnd = ref(false)
 // 「持续满仓」：持有到期末的对偶。不设基础买入条件，让研究以「天天买」为基准去搜索买点。
@@ -492,7 +494,7 @@ function applyRecommendedRanking(): void {
 
 /** 把研究结果整包搬到组合回测：规则 + 排序 + 槽位，省掉手动重填一遍。 */
 function applyToPortfolio(): void {
-  sessionStorage.setItem(RESEARCH_APPLY_KEY, JSON.stringify({
+  sessionStorage.setItem(CONDITION_RESEARCH_APPLY_KEY, JSON.stringify({
     universe: form.universe,
     instrument_types: [form.instrumentType],
     boards: [...form.boards],
@@ -516,7 +518,7 @@ function applyToPortfolio(): void {
 /** 把买入规则搬到公式选股：一次性的「今天谁满足条件」扫描。 */
 function applyToFormulaScreen(): void {
   const rule = alwaysInMarket.value ? null : form.buyRule
-  sessionStorage.setItem(RESEARCH_TO_SCREEN_KEY, JSON.stringify({
+  sessionStorage.setItem(CONDITION_RESEARCH_TO_SCREEN_KEY, JSON.stringify({
     signals: rule?.signals ?? [],
     conditions: rule?.conditions ?? [],
     // 强制条件在选股里没有对应概念（选股只有「条件」一种），带过去让目标页决定
@@ -704,7 +706,7 @@ async function applyStoredRequest(raw: unknown): Promise<void> {
  * 做完立刻清除 key —— 刷新页面不该再还原一次，否则用户手动改过的东西会被悄悄覆盖。
  */
 async function restoreFromCandidateLibrary(): Promise<void> {
-  const stored = sessionStorage.getItem(RESTORE_KEY)
+  const stored = sessionStorage.getItem(CONDITION_RESEARCH_RESTORE_KEY)
   if (!stored) return
   try {
     await applyStoredRequest(JSON.parse(stored) as unknown)
@@ -712,7 +714,7 @@ async function restoreFromCandidateLibrary(): Promise<void> {
   } catch {
     message.value = '候选库传来的研究配置无法解析，已忽略。'
   } finally {
-    sessionStorage.removeItem(RESTORE_KEY)
+    sessionStorage.removeItem(CONDITION_RESEARCH_RESTORE_KEY)
   }
 }
 

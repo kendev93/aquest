@@ -46,10 +46,11 @@ import type {
 import AppTopbar from '../components/AppTopbar.vue'
 import { pollUntil } from '../composables/usePolling'
 import { BOARD_OPTIONS, INSTRUMENT_TYPE_OPTIONS } from '../utils/instrumentOptions'
-import { formatNumber, formatPercent } from '../utils/format'
-
-const APPLY_STORAGE_KEY = 'aquest.strategy-discovery.apply'
-const APPLY_METADATA_KEY = 'aquest.strategy-discovery.apply-meta'
+import { formatDuration as formatSecondsDuration, formatNumber, formatPercent } from '../utils/format'
+import {
+  DISCOVERY_APPLY_KEY as APPLY_STORAGE_KEY,
+  DISCOVERY_APPLY_META_KEY as APPLY_METADATA_KEY,
+} from '../utils/handoffKeys'
 
 function emptyRule(): RuleGroupPayload {
   return { signals: [], conditions: [], combine_mode: 'all', minimum_matches: null }
@@ -588,17 +589,7 @@ function formatDuration(state: StrategyDiscoveryJobState | null): string {
 }
 
 function formatHistoryDuration(value: unknown): string {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return '—'
-  if (value < 60) return `${value.toFixed(1)} 秒`
-  const totalSeconds = Math.round(value)
-  const totalMinutes = Math.floor(totalSeconds / 60)
-  if (totalMinutes < 60) {
-    const seconds = totalSeconds % 60
-    return seconds ? `${totalMinutes} 分 ${seconds} 秒` : `${totalMinutes} 分钟`
-  }
-  const hours = Math.floor(totalMinutes / 60)
-  const minutes = totalMinutes % 60
-  return minutes ? `${hours} 小时 ${minutes} 分钟` : `${hours} 小时`
+  return typeof value === 'number' ? formatSecondsDuration(value) : '—'
 }
 
 function stageDuration(state: StrategyDiscoveryJobState | null, key: string): string {

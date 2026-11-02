@@ -42,11 +42,12 @@ import { numericRuleForSignal, valueOptionLabel } from '../utils/formulaScreen'
 import { formatChinaTimestamp } from '../utils/time'
 import AppTopbar from '../components/AppTopbar.vue'
 import { formatDuration, formatNumber, formatPercent } from '../utils/format'
+import {
+  CONDITION_RESEARCH_APPLY_KEY as RESEARCH_APPLY_KEY,
+  DISCOVERY_APPLY_KEY,
+  DISCOVERY_APPLY_META_KEY,
+} from '../utils/handoffKeys'
 
-const DISCOVERY_APPLY_KEY = 'aquest.strategy-discovery.apply'
-const DISCOVERY_APPLY_META_KEY = 'aquest.strategy-discovery.apply-meta'
-// 条件研究页的桥接，键独立于策略实验室，两者不会互相覆盖。
-const RESEARCH_APPLY_KEY = 'aquest.condition-research.apply'
 const PORTFOLIO_BACKTEST_LIMITATIONS = [
   '成交、持仓与整手按真实不复权价模拟；指标按分红送转事件校正后的价格计算，除权跳空只影响指标口径、不影响成交价。',
   '仅模拟单一做多组合和固定持仓槽位，不模拟实盘下单、融资融券或多策略资金隔离。',

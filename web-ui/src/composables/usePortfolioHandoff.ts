@@ -24,6 +24,7 @@ import type {
   ValueDefinition,
 } from '../types'
 import type { PortfolioBacktestHandoff } from '../utils/portfolioBacktestHandoff'
+import { CONDITION_RESEARCH_TO_SCREEN_KEY } from '../utils/handoffKeys'
 
 export interface PortfolioHandoffDeps {
   form: PortfolioFormState
@@ -54,8 +55,8 @@ function enumValue<T extends string>(value: unknown, allowed: readonly T[], fall
 export function usePortfolioHandoff(deps: PortfolioHandoffDeps) {
   const { form } = deps
 
-  // 组合回测 → 公式选股的交接键。这个方向只有本模块在用，键就定义在这。
-  const FORMULA_SCREEN_HANDOFF_KEY = 'aquest.condition-research.to-screen'
+  // 组合回测 → 公式选股的交接键。这个方向只有本模块在用，键统一在 handoffKeys。
+  const FORMULA_SCREEN_HANDOFF_KEY = CONDITION_RESEARCH_TO_SCREEN_KEY
 
   /** 策略实验室候选 → 表单。覆盖规则、排序、风控与成本；日期区间不动。 */
   function applyStoredCandidate(raw: unknown): void {

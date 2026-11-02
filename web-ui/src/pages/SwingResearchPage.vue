@@ -29,7 +29,7 @@ import { savePortfolioBacktestHandoff } from '../utils/portfolioBacktestHandoff'
 import { formatChinaTimestamp } from '../utils/time'
 import { describeError } from '../api/client'
 import AppTopbar from '../components/AppTopbar.vue'
-import { formatNumber } from '../utils/format'
+import { formatElapsedRounded, formatNumber } from '../utils/format'
 
 /** 第一步表单的存档形状。存的是表单本身而不是请求体，回填时才能直接赋值。 */
 interface OverviewFormSnapshot {
@@ -377,10 +377,7 @@ function historyUniverseText(item: BacktestHistorySummary): string {
 }
 
 function historyDurationText(item: BacktestHistorySummary): string {
-  const seconds = item.duration_seconds
-  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) return ''
-  if (seconds < 60) return `耗时 ${Math.round(seconds)} 秒`
-  return `耗时 ${Math.round(seconds / 60)} 分钟`
+  return formatElapsedRounded(item.duration_seconds)
 }
 
 onMounted(() => {
