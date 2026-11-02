@@ -12,6 +12,7 @@ import duckdb
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from aquest.backtest.trades import count_closed_trades
 from aquest.market_data.adapter import DuckDbMarketDataAdapter
 from aquest.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
 from aquest.market_data.store_base import _WRITE_LOCK
@@ -786,9 +787,7 @@ def pool_curve(
             "backtest": {
                 **report,
                 "equity_curve": sampled,
-                "closed_trades": sum(
-                    t["direction"] == "SELL" and not t.get("rejected") for t in trades
-                ),
+                "closed_trades": count_closed_trades(trades),
                 "start_date": points[0]["date"] if points else report["start_date"],
                 "trades": [],
                 "performance": {**report["performance"], "total_return": strategy_return},

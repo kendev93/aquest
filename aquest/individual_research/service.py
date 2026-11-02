@@ -18,6 +18,7 @@ import pandas as pd
 
 from aquest.backtest.models import BacktestConfig
 from aquest.backtest.service import BacktestService, PreparedBacktest
+from aquest.backtest.trades import count_closed_trades
 from aquest.condition_research.mining import MinedCondition, mine_binary_conditions
 from aquest.condition_research.models import rule_to_dict
 from aquest.market_data.adapter import MarketDataAdapter
@@ -977,11 +978,7 @@ class IndividualStockResearchService:
             "start_date": report.start_date,
             "end_date": report.end_date,
             "bars": report.bars,
-            "closed_trades": sum(
-                1
-                for trade in report.trades
-                if trade.get("direction") == "SELL" and not bool(trade.get("rejected", False))
-            ),
+            "closed_trades": count_closed_trades(report.trades),
             "performance": dict(report.performance),
             "benchmark": benchmark,
             "benchmark_return": benchmark_return,
@@ -1575,11 +1572,7 @@ def _portfolio_config(
 
 def _report_metrics(report: PortfolioBacktestReport) -> dict[str, object]:
     performance = dict(report.performance)
-    closed_trades = sum(
-        1
-        for trade in report.trades
-        if trade.get("direction") == "SELL" and not bool(trade.get("rejected", False))
-    )
+    closed_trades = count_closed_trades(report.trades)
     return {
         "total_return": _number(performance.get("total_return")),
         "annual_return": _number(performance.get("annual_return")),

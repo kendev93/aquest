@@ -11,6 +11,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from aquest.backtest.trades import count_closed_trades
 from aquest.indicators.cache import frame_fingerprint
 from aquest.market_data.adjustment import mark_adjusted
 from aquest.market_data.models import StockRef
@@ -139,16 +140,8 @@ def _full_period_projection(
     performance = report.get("performance")
     if not isinstance(performance, Mapping):
         return {}, None
-    closed = 0
     trades = report.get("trades")
-    if isinstance(trades, Sequence):
-        closed = sum(
-            1
-            for trade in trades
-            if isinstance(trade, Mapping)
-            and str(trade.get("direction")) == "SELL"
-            and not trade.get("rejected")
-        )
+    closed = count_closed_trades(trades if isinstance(trades, Sequence) else [])
     full_period: dict[str, object] = {
         "as_of_date": str(report.get("end_date") or ""),
         "closed_trades": closed,

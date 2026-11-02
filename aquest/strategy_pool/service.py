@@ -20,6 +20,7 @@ import pandas as pd
 
 from aquest.backtest.models import BacktestConfig
 from aquest.backtest.service import BacktestService
+from aquest.backtest.trades import count_closed_trades
 from aquest.concurrency import visible_cpu_count
 from aquest.formulas.registry import FORMULA_REGISTRY
 from aquest.indicators.cache import frame_fingerprint
@@ -1492,7 +1493,7 @@ class MarketStrategyPoolService:
             "benchmark": dict(report.benchmark) if report.benchmark is not None else None,
             "risk_controls": dict(report.risk_controls),
             "transactions": len(report.trades),
-            "closed_trades": sum(1 for trade in report.trades if trade.get("direction") == "SELL"),
+            "closed_trades": count_closed_trades(report.trades),
             "data_fingerprint": report.data_fingerprint,
         }
 
