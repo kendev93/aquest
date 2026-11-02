@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 from aquest.concurrency import MAX_WORKERS
+from aquest.errors import error_reason
 from aquest.formulas.common import validate_market_data
 from aquest.formulas.custom import ParsedFormula, parse_formula
 from aquest.formulas.registry import FORMULA_REGISTRY, FormulaRegistry
@@ -219,7 +220,7 @@ class StrategyFitnessService:
                     raise ValueError("数据为空")
                 frames[ref_key(ref)] = frame
             except Exception as exc:  # noqa: BLE001 - one bad stock must not abort the batch
-                reason = str(exc).strip()[:200] or type(exc).__name__
+                reason = error_reason(exc)
                 failures[reason] += 1
         return frames, failures
 

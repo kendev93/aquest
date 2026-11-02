@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from inspect import Parameter, signature
 
 import duckdb
 from fastapi import APIRouter, HTTPException, Request, status
@@ -21,6 +20,7 @@ from aquest.indicators.precompute import (
 )
 from aquest.market_data.models import InstrumentBoard, InstrumentType
 from aquest.market_data.store import MarketDataStoreError
+from aquest.market_data.sync_call import supports_abort_check
 from aquest.screening.jobs import (
     TaskCancelledError,
     TaskUserError,
@@ -38,13 +38,6 @@ from ._shared import (
 )
 
 router = APIRouter(tags=["market-data"])
-
-
-def _supports_abort_check(method: Callable[..., object]) -> bool:
-    return any(
-        parameter.name == "abort_check" or parameter.kind is Parameter.VAR_KEYWORD
-        for parameter in signature(method).parameters.values()
-    )
 
 
 def _with_indicator_precompute(
@@ -88,7 +81,7 @@ def _with_indicator_precompute(
             done_key="precompute_done",
             total_key="precompute_total",
         )
-        if _supports_abort_check(precomputer.run):
+        if supports_abort_check(precomputer.run, accept_var_keyword=True):
             precomputed = precomputer.run(
                 vipdoc_path=vipdoc_path or ".",
                 universe=universe,
@@ -175,7 +168,7 @@ def submit_precompute_job(
             )
             resolved_years = years if years is not None else DEFAULT_PRECOMPUTE_YEARS
             end_year = _stored_end_year(store_status)
-            if _supports_abort_check(precomputer.run):
+            if supports_abort_check(precomputer.run, accept_var_keyword=True):
                 report = precomputer.run(
                     vipdoc_path=vipdoc_path or ".",
                     universe=universe,

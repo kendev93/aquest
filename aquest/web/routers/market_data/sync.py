@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime
-from inspect import Parameter, signature
 from zoneinfo import ZoneInfo
 
 import duckdb
@@ -16,8 +15,6 @@ from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from aquest.adapters.market_sync import (
-    AbortCheck,
-    DetailCallback,
     InstrumentDiscoveryReport,
     MarketDataCancelledError,
     MarketSyncConfig,
@@ -29,6 +26,7 @@ from aquest.market_data.auto_sync import (
     MARKET_SYNC_EXCLUSIVE_GROUP,
 )
 from aquest.market_data.store import MarketDataStoreError
+from aquest.market_data.sync_call import call_market_sync
 from aquest.market_data.sync_session import (
     latest_completed_session,
     read_synced_session,
@@ -45,7 +43,6 @@ from aquest.screening.jobs import (
 
 from ...schemas import MarketRefreshRequest, MarketSyncRequest
 from ._shared import (
-    MarketSyncService,
     _invalidate_indicator_cache,
     _market_status,
     _reject_duplicate_market_job,
@@ -164,7 +161,7 @@ def _create_sync_job(
             if abort_check():
                 raise MarketDataCancelledError("行情同步已取消")
             result = _result_dict(
-                _call_market_sync(
+                call_market_sync(
                     _service(request),
                     config,
                     progress,
@@ -351,36 +348,4 @@ def _result_dict(
         result.to_dict()
         if isinstance(result, (InstrumentDiscoveryReport, MarketSyncReport))
         else result
-    )
-
-
-def _call_market_sync(
-    service: MarketSyncService,
-    config: MarketSyncConfig,
-    progress: ProgressReporter,
-    *,
-    detail_callback: DetailCallback,
-    abort_check: AbortCheck,
-) -> MarketSyncReport | dict[str, object]:
-    if _supports_abort_check(service.sync):
-        return service.sync(
-            config,
-            progress,
-            detail_callback=detail_callback,
-            abort_check=abort_check,
-        )
-    return service.sync(config, progress, detail_callback=detail_callback)
-
-
-def _supports_abort_check(method: object) -> bool:
-    if not callable(method):
-        return False
-    try:
-        parameters = signature(method).parameters.values()
-    except (TypeError, ValueError):
-        return False
-    return any(
-        parameter.name == "abort_check"
-        and parameter.kind in {Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY}
-        for parameter in parameters
     )

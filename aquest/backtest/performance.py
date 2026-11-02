@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections import deque
-from datetime import date, datetime
+from datetime import date
 
 import numpy as np
 import pandas as pd
+
+from aquest.market_data.dates import parse_store_date
 
 
 class PerformanceAnalyzer:
@@ -171,7 +173,7 @@ class PerformanceAnalyzer:
         for row in self._trades.to_dict(orient="records"):
             if bool(row.get("rejected", False)):
                 continue
-            current_date = _to_date(row.get("datetime"))
+            current_date = parse_store_date(row.get("datetime"))
             if current_date is None:
                 continue
             size = float(row.get("size", 0) or 0)
@@ -224,17 +226,3 @@ class PerformanceAnalyzer:
             "start_cash": 0.0,
             "end_value": 0.0,
         }
-
-
-def _to_date(value: object) -> date | None:
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    try:
-        text = str(value)
-        if "-" in text:
-            return datetime.fromisoformat(text).date()
-        return datetime.strptime(text[:8], "%Y%m%d").date()
-    except (TypeError, ValueError, OverflowError):
-        return None

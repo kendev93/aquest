@@ -53,7 +53,7 @@ MIN_OBSERVATION_BARS = 20
 #: 又没人看；超出就如实给出总数和"还有 N 笔"，不装作这就是全部。
 MAX_TRADES_PER_SEGMENT = 200
 
-_PERFORMANCE_KEYS = (
+_SEGMENT_PERFORMANCE_KEYS = (
     "total_return",
     "annual_return",
     "max_drawdown",
@@ -323,10 +323,10 @@ def _trades_frame(
 
 def _performance(totals: Sequence[float], trades: pd.DataFrame) -> Mapping[str, float | None]:
     if len(totals) < 2:
-        return {key: None for key in _PERFORMANCE_KEYS}
+        return {key: None for key in _SEGMENT_PERFORMANCE_KEYS}
     frame = pd.DataFrame({"total": np.asarray(totals, dtype=float)})
     computed = PerformanceAnalyzer(frame, trades).compute()
-    return {key: _finite_or_none(computed.get(key)) for key in _PERFORMANCE_KEYS}
+    return {key: _finite_or_none(computed.get(key)) for key in _SEGMENT_PERFORMANCE_KEYS}
 
 
 def _decay(

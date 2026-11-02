@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 from aquest.concurrency import HEAVY_RESEARCH_EXCLUSIVE_GROUP
 from aquest.market_data.auto_sync import MARKET_SYNC_JOB_DESCRIPTIONS
 from aquest.market_data.models import DataStoreStatus
-from aquest.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
+from aquest.market_data.store import MarketDataStoreError
 from aquest.portfolio_backtest.models import (
     PortfolioBacktestConfig,
     PortfolioBacktestReport,
@@ -25,7 +25,6 @@ from aquest.portfolio_backtest.service import (
 from aquest.screening.jobs import (
     ActiveJobConflictError,
     JobState,
-    ScreenJobRunner,
     TaskCancelledError,
     TaskUserError,
 )
@@ -35,6 +34,8 @@ from ..backtest_history import save_completed_backtest_history, utc_now
 from ..date_ranges import resolve_date_range
 from ..market_source import resolve_market_status
 from ..schemas import PortfolioBacktestRequest
+from ._deps import job_runner as _runner
+from ._deps import market_store as _store
 
 router = APIRouter(prefix="/portfolio-backtests", tags=["portfolio-backtests"])
 
@@ -47,19 +48,11 @@ class PortfolioBacktestServiceLike(Protocol):
     ) -> PortfolioBacktestReport | dict[str, object]: ...
 
 
-def _runner(request: Request) -> ScreenJobRunner:
-    return cast(ScreenJobRunner, request.app.state.screen_job_runner)
-
-
 def _service(request: Request) -> PortfolioBacktestServiceLike:
     return cast(
         PortfolioBacktestService | PortfolioBacktestServiceLike,
         request.app.state.portfolio_backtest_service,
     )
-
-
-def _store(request: Request) -> DuckDbMarketDataStore:
-    return cast(DuckDbMarketDataStore, request.app.state.market_data_store)
 
 
 def _market_data_merge_in_progress(request: Request) -> bool:

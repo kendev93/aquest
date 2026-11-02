@@ -6,13 +6,14 @@ import logging
 import uuid
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import replace
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from typing import Literal, Protocol, cast
 
 from aquest.market_data.adapter import (
     BatchMarketDataAdapter,
     DuckDbMarketDataAdapter,
 )
+from aquest.market_data.dates import parse_iso_date
 from aquest.market_data.models import InstrumentBoard, InstrumentType
 from aquest.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
 from aquest.screening.jobs import ScreenJobRunner, TaskCancelledError, TaskUserError
@@ -712,10 +713,10 @@ def _replay_resource_request(
     selected_adapter = market_data_adapter or DuckDbMarketDataAdapter(store)
     status_reader = getattr(selected_adapter, "status", None)
     store_status = status_reader() if callable(status_reader) else store.status()
-    start = _parse_date(request.base_config.get("start_date"))
-    end = _parse_date(store_status.data_end)
+    start = parse_iso_date(request.base_config.get("start_date"))
+    end = parse_iso_date(store_status.data_end)
     if start is None:
-        start = _parse_date(store_status.data_start)
+        start = parse_iso_date(store_status.data_start)
     if start is None or end is None:
         raise ValueError("本地 DuckDB 没有可用于全量复核的已完成日线")
     if start > end:
@@ -726,15 +727,3 @@ def _replay_resource_request(
         base_config=base,
         splits={"search": {"start_date": start.isoformat(), "end_date": end.isoformat()}},
     )
-
-
-def _parse_date(value: object) -> date | None:
-    if isinstance(value, date):
-        return value
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        return date.fromisoformat(text[:10])
-    except ValueError:
-        return None

@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 from pathlib import Path
-from typing import cast
 
 import duckdb
 from fastapi import APIRouter, HTTPException, Request, status
@@ -14,11 +13,10 @@ from fastapi.responses import JSONResponse, Response
 from aquest.concurrency import HEAVY_RESEARCH_EXCLUSIVE_GROUP
 from aquest.formulas.custom import FormulaParseError, parse_formula
 from aquest.formulas.registry import FORMULA_REGISTRY
-from aquest.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
+from aquest.market_data.store import MarketDataStoreError
 from aquest.screening.export import report_to_csv, report_to_json
 from aquest.screening.jobs import (
     ActiveJobConflictError,
-    ScreenJobRunner,
 )
 from aquest.screening.models import ScanReport
 from aquest.strategy_discovery.catalog import default_indicator_catalog
@@ -28,17 +26,11 @@ from ..schemas import (
     CustomFormulaParseRequest,
     FormulaScreenRequest,
 )
+from ._deps import job_runner as _runner
+from ._deps import market_store as _store
 
 router = APIRouter(prefix="/formula-screen", tags=["formula-screen"])
 logger = logging.getLogger(__name__)
-
-
-def _runner(request: Request) -> ScreenJobRunner:
-    return cast(ScreenJobRunner, request.app.state.screen_job_runner)
-
-
-def _store(request: Request) -> DuckDbMarketDataStore:
-    return cast(DuckDbMarketDataStore, request.app.state.market_data_store)
 
 
 def _rankable_value_ids() -> frozenset[str]:

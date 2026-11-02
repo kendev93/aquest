@@ -18,23 +18,11 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
-from datetime import date, datetime
+from datetime import date
+
+from aquest.market_data.dates import parse_iso_date
 
 RoundTripKey = tuple[date, int]
-
-
-def _parse_day(value: object) -> date | None:
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        return date.fromisoformat(text[:10])
-    except ValueError:
-        return None
 
 
 def _number(value: object) -> float | None:
@@ -115,7 +103,7 @@ def pair_round_trips(trades: Iterable[Mapping[str, object]]) -> TradeSample:
             rejected += 1
             continue
         direction = str(trade.get("direction", "")).strip().upper()
-        day = _parse_day(trade.get("date"))
+        day = parse_iso_date(trade.get("date"))
         market = str(trade.get("market", "")).strip()
         code = str(trade.get("code", "")).strip()
         if direction not in ("BUY", "SELL") or day is None or not code:
@@ -145,7 +133,7 @@ def pair_round_trips(trades: Iterable[Mapping[str, object]]) -> TradeSample:
             if pnl is None or cost_basis is None or cost_basis <= 0:
                 unparsable += 1
                 continue
-            signal = _parse_day(entry.get("signal_date")) or entry_day
+            signal = parse_iso_date(entry.get("signal_date")) or entry_day
             trips.append(
                 RoundTrip(
                     key=key,

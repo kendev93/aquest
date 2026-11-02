@@ -12,11 +12,10 @@ from fastapi.responses import JSONResponse
 
 from aquest.concurrency import HEAVY_RESEARCH_EXCLUSIVE_GROUP
 from aquest.market_data.models import DataStoreStatus
-from aquest.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
+from aquest.market_data.store import MarketDataStoreError
 from aquest.screening.jobs import (
     ActiveJobConflictError,
     JobState,
-    ScreenJobRunner,
     TaskUserError,
 )
 from aquest.strategy_fitness.models import StrategyFitnessConfig, StrategyFitnessReport
@@ -30,6 +29,8 @@ from ..backtest_history import save_completed_backtest_history, utc_now
 from ..date_ranges import resolve_date_range
 from ..market_source import resolve_market_status
 from ..schemas import StrategyFitnessRequest
+from ._deps import job_runner as _runner
+from ._deps import market_store as _store
 
 router = APIRouter(prefix="/strategy-fitness", tags=["strategy-fitness"])
 
@@ -42,19 +43,11 @@ class StrategyFitnessServiceLike(Protocol):
     ) -> StrategyFitnessReport | dict[str, object]: ...
 
 
-def _runner(request: Request) -> ScreenJobRunner:
-    return cast(ScreenJobRunner, request.app.state.screen_job_runner)
-
-
 def _service(request: Request) -> StrategyFitnessServiceLike:
     return cast(
         StrategyFitnessService | StrategyFitnessServiceLike,
         request.app.state.strategy_fitness_service,
     )
-
-
-def _store(request: Request) -> DuckDbMarketDataStore:
-    return cast(DuckDbMarketDataStore, request.app.state.market_data_store)
 
 
 def _resolve_payload_dates(

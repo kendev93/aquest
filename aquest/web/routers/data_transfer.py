@@ -12,7 +12,6 @@ import shutil
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
-from typing import cast
 
 from fastapi import APIRouter, File, Request, UploadFile, status
 from fastapi.responses import FileResponse, JSONResponse
@@ -27,6 +26,8 @@ from aquest.market_data.transfer import (
     read_manifest,
 )
 
+from ._deps import market_store as _store
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/data-transfer", tags=["data-transfer"])
@@ -34,10 +35,6 @@ router = APIRouter(prefix="/data-transfer", tags=["data-transfer"])
 _MEDIA_TYPE = "application/zip"
 _MAX_UPLOAD_BYTES = 1024 * 1024 * 1024
 _CHUNK_BYTES = 1024 * 1024
-
-
-def _store(request: Request) -> DuckDbMarketDataStore:
-    return cast(DuckDbMarketDataStore, request.app.state.market_data_store)
 
 
 def _message(exc: Exception) -> str:

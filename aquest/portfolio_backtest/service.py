@@ -11,6 +11,7 @@ from typing import cast
 import numpy as np
 
 from aquest.concurrency import MAX_WORKERS
+from aquest.errors import error_reason
 from aquest.formulas.custom import ParsedFormula, parse_formula
 from aquest.formulas.registry import FORMULA_REGISTRY, FormulaRegistry
 from aquest.indicators.cache import IndicatorCache
@@ -113,7 +114,7 @@ class PortfolioBacktestService(
                         try:
                             context = build(ref)
                         except Exception as exc:  # noqa: BLE001 - one bad stock must not abort a portfolio
-                            reason = str(exc).strip()[:200] or type(exc).__name__
+                            reason = error_reason(exc)
                             failure_reasons[reason] += 1
                             context = None
                         if context is not None:
@@ -133,7 +134,7 @@ class PortfolioBacktestService(
                     try:
                         context = future.result()
                     except Exception as exc:  # noqa: BLE001 - one bad stock must not abort a portfolio
-                        reason = str(exc).strip()[:200] or type(exc).__name__
+                        reason = error_reason(exc)
                         failure_reasons[reason] += 1
                         context = None
                     if context is not None:

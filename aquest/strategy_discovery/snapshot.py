@@ -29,6 +29,7 @@ from aquest.market_data.adapter import (
     parse_universe_code,
 )
 from aquest.market_data.adjustment import mark_adjusted
+from aquest.market_data.dates import parse_iso_date
 from aquest.market_data.day_format import classify_board
 from aquest.market_data.models import InstrumentBoard, InstrumentType, MarketCode, StockRef
 from aquest.market_data.store import DuckDbMarketDataStore
@@ -957,12 +958,12 @@ def snapshot_window(request: DiscoveryRequest) -> SnapshotWindow:
     ends: list[date] = []
     base = request.base_config
     for key, target in (("start_date", starts), ("end_date", ends)):
-        parsed = _parse_date(base.get(key))
+        parsed = parse_iso_date(base.get(key))
         if parsed is not None:
             target.append(parsed)
     for split in request.splits.values():
-        parsed_start = _parse_date(split.get("start_date"))
-        parsed_end = _parse_date(split.get("end_date"))
+        parsed_start = parse_iso_date(split.get("start_date"))
+        parsed_end = parse_iso_date(split.get("end_date"))
         if parsed_start is not None:
             starts.append(parsed_start)
         if parsed_end is not None:
@@ -985,18 +986,6 @@ def _iter_ref_batches(
     items = list(refs)
     for offset in range(0, len(items), batch_size):
         yield items[offset : offset + batch_size]
-
-
-def _parse_date(value: object) -> date | None:
-    if isinstance(value, date):
-        return value
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        return date.fromisoformat(text[:10])
-    except ValueError:
-        return None
 
 
 def _snapshot_warmup_bars() -> int:

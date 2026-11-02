@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 
 from aquest.market_data.auto_sync import ACTIVE_DATA_JOB_DESCRIPTIONS
 from aquest.market_data.models import DataStoreStatus
-from aquest.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
+from aquest.market_data.store import MarketDataStoreError
 from aquest.portfolio_backtest.auto_tracking import (
     TRACKING_DESCRIPTION,
     TRACKING_EXCLUSIVE_GROUP,
@@ -23,7 +23,6 @@ from aquest.screening.jobs import (
     ActiveJobConflictError,
     JobState,
     ProgressReporter,
-    ScreenJobRunner,
     TaskUserError,
 )
 
@@ -34,6 +33,8 @@ from ..schemas import (
     SavedStrategyCreateRequest,
     SavedStrategyUpdateRequest,
 )
+from ._deps import job_runner as _runner
+from ._deps import market_store as _store
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
 
@@ -48,7 +49,7 @@ _SUMMARY_SCALAR_KEYS = (
     "universe",
     "total_candidates",
 )
-_PERFORMANCE_KEYS = (
+_LIST_PERFORMANCE_KEYS = (
     "total_return",
     "annual_return",
     "max_drawdown",
@@ -58,14 +59,6 @@ _PERFORMANCE_KEYS = (
     "total_trades",
     "win_rate",
 )
-
-
-def _store(request: Request) -> DuckDbMarketDataStore:
-    return cast(DuckDbMarketDataStore, request.app.state.market_data_store)
-
-
-def _runner(request: Request) -> ScreenJobRunner:
-    return cast(ScreenJobRunner, request.app.state.screen_job_runner)
 
 
 def _tracking_service(request: Request) -> StrategyTrackingService:
@@ -81,7 +74,7 @@ def _numeric_performance(performance: Mapping[str, object]) -> dict[str, float |
     """Keep only comparable numeric metrics, and only the ones we display."""
 
     kept: dict[str, float | None] = {}
-    for key in _PERFORMANCE_KEYS:
+    for key in _LIST_PERFORMANCE_KEYS:
         if key not in performance:
             continue
         value = performance[key]

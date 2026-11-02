@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
+from aquest.errors import error_reason
 from aquest.market_data.adjustment import CorporateAction, compute_factor_ratio
 from aquest.market_data.day_format import classify_board, classify_instrument
 from aquest.market_data.models import (
@@ -1678,7 +1679,7 @@ class OnlineMarketSync:
             except MarketDataCancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - isolate one instrument
-                reason = str(exc).strip()[:200] or type(exc).__name__
+                reason = error_reason(exc)
                 failure_reasons[reason] += 1
                 _report_detail(
                     detail_callback,

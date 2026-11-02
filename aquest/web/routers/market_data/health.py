@@ -30,6 +30,7 @@ from aquest.market_data.health import (
     normalize_keys,
 )
 from aquest.market_data.store import MarketDataStoreError
+from aquest.market_data.sync_call import call_market_sync
 from aquest.screening.jobs import (
     ActiveJobConflictError,
     ProgressReporter,
@@ -47,7 +48,6 @@ from ._shared import (
     _storage_error_message,
     _store,
 )
-from .sync import _call_market_sync
 
 router = APIRouter(tags=["market-data"])
 
@@ -172,7 +172,7 @@ def create_health_repair_job(
         try:
             if abort_check():
                 raise MarketDataCancelledError("行情修复已取消")
-            result = _call_market_sync(
+            result = call_market_sync(
                 _service(request),
                 config,
                 progress,

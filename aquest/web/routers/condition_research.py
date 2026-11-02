@@ -16,12 +16,11 @@ from aquest.condition_research.resources import (
     ResearchResourceEstimate,
 )
 from aquest.condition_research.service import ConditionResearchService
-from aquest.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
+from aquest.market_data.store import MarketDataStoreError
 from aquest.screening.jobs import (
     ActiveJobConflictError,
     JobState,
     ProgressReporter,
-    ScreenJobRunner,
     TaskUserError,
 )
 from aquest.web.app_errors import TaskFailedError
@@ -30,6 +29,8 @@ from ..backtest_history import save_completed_backtest_history, utc_now
 from ..date_ranges import resolve_date_range
 from ..market_source import resolve_market_status
 from ..schemas import ConditionResearchRequest
+from ._deps import job_runner as _runner
+from ._deps import market_store as _store
 
 
 def _estimate_payload(estimate: ResearchResourceEstimate) -> dict[str, object]:
@@ -60,19 +61,11 @@ class ConditionResearchServiceLike(Protocol):
     def estimate_resources(self, config: ConditionResearchConfig) -> ResearchResourceEstimate: ...
 
 
-def _runner(request: Request) -> ScreenJobRunner:
-    return cast(ScreenJobRunner, request.app.state.screen_job_runner)
-
-
 def _service(request: Request) -> ConditionResearchServiceLike:
     return cast(
         ConditionResearchService | ConditionResearchServiceLike,
         request.app.state.condition_research_service,
     )
-
-
-def _store(request: Request) -> DuckDbMarketDataStore:
-    return cast(DuckDbMarketDataStore, request.app.state.market_data_store)
 
 
 def _state_or_404(job_id: str, request: Request) -> JobState:

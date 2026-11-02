@@ -18,17 +18,18 @@ from fastapi.responses import JSONResponse
 from aquest.concurrency import HEAVY_RESEARCH_EXCLUSIVE_GROUP
 from aquest.factor_attribution.models import FactorAttributionConfig
 from aquest.factor_attribution.service import TRADABLE_TYPES
-from aquest.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
+from aquest.market_data.store import MarketDataStoreError
 from aquest.screening.jobs import (
     ActiveJobConflictError,
     JobState,
-    ScreenJobRunner,
     TaskUserError,
 )
 from aquest.web.app_errors import TaskFailedError
 
 from ..backtest_history import save_completed_backtest_history, utc_now
 from ..schemas import FactorAttributionRequest
+from ._deps import job_runner as _runner
+from ._deps import market_store as _store
 
 router = APIRouter(prefix="/factor-attribution", tags=["factor-attribution"])
 
@@ -43,16 +44,8 @@ class FactorAttributionServiceLike(Protocol):
     ) -> dict[str, object]: ...
 
 
-def _runner(request: Request) -> ScreenJobRunner:
-    return cast(ScreenJobRunner, request.app.state.screen_job_runner)
-
-
 def _service(request: Request) -> FactorAttributionServiceLike:
     return cast(FactorAttributionServiceLike, request.app.state.factor_attribution_service)
-
-
-def _store(request: Request) -> DuckDbMarketDataStore:
-    return cast(DuckDbMarketDataStore, request.app.state.market_data_store)
 
 
 def _state_or_404(job_id: str, request: Request) -> JobState:

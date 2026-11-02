@@ -22,6 +22,7 @@ from aquest.backtest.models import BacktestConfig
 from aquest.backtest.service import BacktestService
 from aquest.backtest.trades import count_closed_trades
 from aquest.concurrency import visible_cpu_count
+from aquest.errors import error_reason
 from aquest.formulas.registry import FORMULA_REGISTRY
 from aquest.indicators.cache import frame_fingerprint
 from aquest.individual_research.models import IndividualResearchConfig
@@ -32,6 +33,7 @@ from aquest.individual_research.service import (
 )
 from aquest.market_data.adapter import BatchMarketDataAdapter
 from aquest.market_data.adjustment import CorporateAction, mark_adjusted
+from aquest.market_data.dates import parse_iso_date
 from aquest.market_data.models import StockRef
 from aquest.market_data.risk_warning import is_risk_warning_symbol
 from aquest.market_data.store import DuckDbMarketDataStore
@@ -1097,7 +1099,7 @@ class MarketStrategyPoolService:
                         continue
                     except Exception as exc:  # noqa: BLE001 - isolate stock failures
                         failed += 1
-                        message = str(exc).strip()[:500] or type(exc).__name__
+                        message = error_reason(exc, limit=500)
                         if exc.__cause__ is not None:
                             cause = str(exc.__cause__).strip()
                             if cause and cause not in message:
@@ -1481,7 +1483,7 @@ class MarketStrategyPoolService:
             return {
                 "objective": objective,
                 "available": False,
-                "reason": str(exc).strip()[:500] or "组合留出段回测失败",
+                "reason": error_reason(exc, limit=500, fallback="组合留出段回测失败"),
             }
         return {
             "objective": objective,
@@ -1590,7 +1592,7 @@ class MarketStrategyPoolService:
             except TaskCancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - isolate one group of ticker failures
-                failures.append(str(exc).strip()[:200] or type(exc).__name__)
+                failures.append(error_reason(exc))
                 continue
 
             fingerprints.append(report.data_fingerprint)
@@ -1929,7 +1931,7 @@ class MarketStrategyPoolService:
                     "holding_scope": "per_stock_strategy",
                     "holdings": [],
                     "risk_exit_signals": [],
-                    "reason": str(exc).strip()[:500] or "模拟组合状态计算失败",
+                    "reason": error_reason(exc, limit=500, fallback="模拟组合状态计算失败"),
                 }
         elif progress_callback is not None:
             _report(
@@ -2539,8 +2541,8 @@ def _summarize_symbol_benchmark(
     observed_windows = _mapping(split_metadata.get("observed_windows"))
     for phase in ("train", "validation", "holdout"):
         observed = _mapping(observed_windows.get(phase))
-        start = _parse_date(observed.get("start_date"))
-        end = _parse_date(observed.get("end_date"))
+        start = parse_iso_date(observed.get("start_date"))
+        end = parse_iso_date(observed.get("end_date"))
         if start is not None and end is not None:
             windows[phase] = (start, end)
 
@@ -2570,17 +2572,6 @@ def _summarize_symbol_benchmark(
             },
         }
     return benchmark
-
-
-def _parse_date(value: object) -> date | None:
-    if isinstance(value, date):
-        return value
-    if isinstance(value, str):
-        try:
-            return date.fromisoformat(value[:10])
-        except ValueError:
-            return None
-    return None
 
 
 def _same_candidate(

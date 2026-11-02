@@ -36,12 +36,13 @@ from typing import Protocol, cast
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from aquest.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
+from aquest.market_data.store import MarketDataStoreError
 from aquest.swing_research.models import SwingIndicatorConfig, SwingOverviewConfig
 from aquest.swing_research.service import ProgressCallback, StudyProgressCallback
 
 from ..backtest_history import save_completed_backtest_history, utc_now
 from ..schemas import SwingIndicatorRequest, SwingOverviewRequest
+from ._deps import market_store as _store
 
 router = APIRouter(prefix="/swing-research", tags=["swing-research"])
 
@@ -72,10 +73,6 @@ class SwingResearchServiceLike(Protocol):
 
 def _service(request: Request) -> SwingResearchServiceLike:
     return cast(SwingResearchServiceLike, request.app.state.swing_research_service)
-
-
-def _store(request: Request) -> DuckDbMarketDataStore:
-    return cast(DuckDbMarketDataStore, request.app.state.market_data_store)
 
 
 def _study_request_snapshot(payload: SwingIndicatorRequest) -> dict[str, object]:

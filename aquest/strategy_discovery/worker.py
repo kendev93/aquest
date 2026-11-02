@@ -13,6 +13,8 @@ from tempfile import TemporaryDirectory
 from threading import Event, Thread, get_ident
 from typing import Literal, Protocol, cast
 
+from aquest.errors import error_reason
+
 # BLAS/OpenMP 线程池默认按可见 CPU 数展开；研究负载里几乎没有它们能加速的运算，
 # 却足以让单个 worker 占满整机 CPU（多开股票并发反而互相踩踏）。numpy 首次导入
 # 之后再设置就不生效，所以必须放在下面所有 aquest 导入之前；spawn 出去的
@@ -238,7 +240,7 @@ class StrategyDiscoveryWorker:
                     job_id,
                     status="failed",
                     phase="failed",
-                    error=str(exc).strip()[:500] or "策略 worker 执行失败",
+                    error=error_reason(exc, limit=500, fallback="策略 worker 执行失败"),
                     error_code=_error_code(exc),
                 )
         return job_id

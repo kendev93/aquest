@@ -7,7 +7,6 @@ import logging
 import uuid
 from collections.abc import Callable
 from datetime import date, datetime
-from inspect import Parameter, signature
 from pathlib import Path
 from typing import Protocol
 from zoneinfo import ZoneInfo
@@ -24,8 +23,10 @@ from aquest.indicators.precompute import (
     IndicatorPrecomputeService,
     should_defer_precompute,
 )
+from aquest.market_data.dates import parse_iso_date
 from aquest.market_data.models import stored_end_year
 from aquest.market_data.store import DuckDbMarketDataStore
+from aquest.market_data.sync_call import call_market_sync
 from aquest.market_data.sync_session import (
     MARKET_SESSION_PUBLISHED_TIME,
     latest_completed_session,
@@ -69,8 +70,6 @@ ACTIVE_DATA_JOB_DESCRIPTIONS = frozenset(
         "指标预计算",
     }
 )
-# Compatibility alias for embedders that used the narrower first-release name.
-ACTIVE_SYNC_DESCRIPTIONS = ACTIVE_DATA_JOB_DESCRIPTIONS
 DEFAULT_AUTO_SYNC_INTERVAL_SECONDS = 15 * 60
 #: 连续失败后的等待上限：源站限流或断网时，按 15 分钟猛敲一整个交易日只会更糟。
 AUTO_SYNC_MAX_BACKOFF_SECONDS: float = 2 * 60 * 60
@@ -196,7 +195,7 @@ class AutomaticMarketSyncScheduler:
                 return None
         elif not auto_sync_due(status.last_online_sync_at, now=now):
             # 没有日历判据可用，只能退回自然日口径：今天同步过就不再重复发起。
-            self._note_check(today, _parse_date(status.data_end))
+            self._note_check(today, parse_iso_date(status.data_end))
             return None
 
         job_id = uuid.uuid4().hex
@@ -329,7 +328,7 @@ class AutomaticMarketSyncScheduler:
             return bool(job_id) and self._runner.is_cancel_requested(job_id)
 
         try:
-            result = _call_market_sync(
+            result = call_market_sync(
                 self._market_sync,
                 MarketSyncConfig(
                     universe="all",
@@ -393,51 +392,6 @@ def _as_shanghai(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=_SHANGHAI_TZ)
     return value.astimezone(_SHANGHAI_TZ)
-
-
-def _parse_date(value: object) -> date | None:
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    if isinstance(value, str):
-        try:
-            return date.fromisoformat(value[:10])
-        except ValueError:
-            return None
-    return None
-
-
-def _call_market_sync(
-    service: MarketSyncService,
-    config: MarketSyncConfig,
-    progress: ProgressReporter,
-    *,
-    detail_callback: DetailCallback,
-    abort_check: AbortCheck,
-) -> MarketSyncReport | dict[str, object]:
-    if _supports_abort_check(service.sync):
-        return service.sync(
-            config,
-            progress,
-            detail_callback=detail_callback,
-            abort_check=abort_check,
-        )
-    return service.sync(config, progress, detail_callback=detail_callback)
-
-
-def _supports_abort_check(method: object) -> bool:
-    if not callable(method):
-        return False
-    try:
-        parameters = signature(method).parameters.values()
-    except (TypeError, ValueError):
-        return False
-    return any(
-        parameter.name == "abort_check"
-        and parameter.kind in {Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY}
-        for parameter in parameters
-    )
 
 
 __all__ = [

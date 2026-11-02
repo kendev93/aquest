@@ -19,6 +19,44 @@ from .models import PortfolioBacktestConfig, PortfolioBacktestReport, PortfolioJ
 from .risk import _risk_controls
 from .state import _PortfolioServiceState
 
+PERFORMANCE_KEYS = (
+    "total_return",
+    "annual_return",
+    "sharpe",
+    "sortino",
+    "calmar",
+    "max_drawdown",
+    "max_dd_duration",
+    "total_trades",
+    "win_rate",
+    "win_trades",
+    "lose_trades",
+    "rejected_trades",
+    "profit_factor",
+    "avg_win",
+    "avg_loss",
+    "max_win",
+    "max_loss",
+    "avg_holding_days",
+    "volatility",
+)
+TRADE_ACTIVITY_KEYS = (
+    "executed_buy_orders",
+    "executed_sell_orders",
+    "rejected_buy_orders",
+    "rejected_sell_orders",
+    "buy_turnover",
+    "sell_turnover",
+    "buy_transaction_costs",
+    "sell_transaction_costs",
+)
+SEARCH_SUMMARY_PERFORMANCE_KEYS = (
+    *PERFORMANCE_KEYS,
+    "payoff_ratio",
+    "turnover",
+    *TRADE_ACTIVITY_KEYS,
+)
+
 
 class PortfolioReportMixin(_PortfolioServiceState):
     """Turn simulation rows into the public immutable portfolio report."""
@@ -80,28 +118,7 @@ class PortfolioReportMixin(_PortfolioServiceState):
         )
         raw_performance = PerformanceAnalyzer(equity_frame, trade_frame).compute()
         performance: dict[str, float | None] = {
-            key: _finite_number(raw_performance.get(key, 0.0))
-            for key in (
-                "total_return",
-                "annual_return",
-                "sharpe",
-                "sortino",
-                "calmar",
-                "max_drawdown",
-                "max_dd_duration",
-                "total_trades",
-                "win_rate",
-                "win_trades",
-                "lose_trades",
-                "rejected_trades",
-                "profit_factor",
-                "avg_win",
-                "avg_loss",
-                "max_win",
-                "max_loss",
-                "avg_holding_days",
-                "volatility",
-            )
+            key: _finite_number(raw_performance.get(key, 0.0)) for key in PERFORMANCE_KEYS
         }
         performance["payoff_ratio"] = _payoff_ratio(performance)
         performance.update(_trade_activity_metrics(trades, config.initial_cash))
@@ -121,38 +138,7 @@ class PortfolioReportMixin(_PortfolioServiceState):
 
         return {
             "performance": {
-                key: report.performance.get(key)
-                for key in (
-                    "total_return",
-                    "annual_return",
-                    "sharpe",
-                    "sortino",
-                    "calmar",
-                    "max_drawdown",
-                    "max_dd_duration",
-                    "total_trades",
-                    "win_rate",
-                    "win_trades",
-                    "lose_trades",
-                    "rejected_trades",
-                    "profit_factor",
-                    "payoff_ratio",
-                    "avg_win",
-                    "avg_loss",
-                    "max_win",
-                    "max_loss",
-                    "avg_holding_days",
-                    "volatility",
-                    "turnover",
-                    "executed_buy_orders",
-                    "executed_sell_orders",
-                    "rejected_buy_orders",
-                    "rejected_sell_orders",
-                    "buy_turnover",
-                    "sell_turnover",
-                    "buy_transaction_costs",
-                    "sell_transaction_costs",
-                )
+                key: report.performance.get(key) for key in SEARCH_SUMMARY_PERFORMANCE_KEYS
             },
             "data_fingerprint": report.data_fingerprint,
             "turnover": report.performance.get("turnover", 0.0),

@@ -10,7 +10,7 @@ from typing import Literal, Protocol, cast
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 
-from aquest.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
+from aquest.market_data.store import MarketDataStoreError
 from aquest.strategy_discovery.job_backend import StrategyJobBackend
 from aquest.strategy_discovery.job_store import JobOperation
 from aquest.strategy_discovery.resources import (
@@ -28,6 +28,7 @@ from ..schemas import (
     StrategyReplayRequest,
     resolve_strategy_discovery_defaults,
 )
+from ._deps import market_store as _store
 
 router = APIRouter(prefix="/strategy-discovery", tags=["strategy-discovery"])
 logger = logging.getLogger(__name__)
@@ -43,10 +44,6 @@ def _service(request: Request) -> StrategyDiscoveryServiceLike:
 
 def _backend(request: Request) -> StrategyJobBackend:
     return cast(StrategyJobBackend, request.app.state.strategy_job_backend)
-
-
-def _store(request: Request) -> DuckDbMarketDataStore:
-    return cast(DuckDbMarketDataStore, request.app.state.market_data_store)
 
 
 def _preflight_job(

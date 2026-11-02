@@ -5,12 +5,13 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date
 from typing import Literal
 
 import pandas as pd
 
 from aquest.backtest.performance import PerformanceAnalyzer
+from aquest.market_data.dates import parse_store_date
 from aquest.strategy_discovery.fingerprints import trade_fingerprint
 
 ReplayLeaderboard = Literal["sharpe", "return"]
@@ -322,7 +323,7 @@ def _equity_rows(
 ) -> list[dict[str, object]]:
     selected: list[dict[str, object]] = []
     for row in rows:
-        current = _as_date(row.get("date"))
+        current = parse_store_date(row.get("date"))
         total = _finite(row.get("total"))
         if current is None or total is None or not start_date <= current <= end_date:
             continue
@@ -336,7 +337,7 @@ def _trade_rows(
 ) -> list[dict[str, object]]:
     selected: list[dict[str, object]] = []
     for row in rows:
-        current = _as_date(row.get("date"))
+        current = parse_store_date(row.get("date"))
         if current is not None and start_date <= current <= end_date:
             selected.append({**dict(row), "date": current.isoformat()})
     return selected
@@ -356,24 +357,8 @@ def _finite(value: object) -> float | None:
     return number if math.isfinite(number) else None
 
 
-def _as_date(value: object) -> date | None:
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        if "-" in text:
-            return date.fromisoformat(text[:10])
-        return datetime.strptime(text[:8], "%Y%m%d").date()
-    except (TypeError, ValueError, OverflowError):
-        return None
-
-
 def _date_text(value: object) -> str:
-    current = _as_date(value)
+    current = parse_store_date(value)
     return current.isoformat() if current is not None else ""
 
 

@@ -10,12 +10,11 @@ from fastapi.responses import JSONResponse
 
 from aquest.concurrency import HEAVY_RESEARCH_EXCLUSIVE_GROUP
 from aquest.individual_research.service import IndividualStockResearchService
-from aquest.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
+from aquest.market_data.store import MarketDataStoreError
 from aquest.screening.jobs import (
     ActiveJobConflictError,
     JobState,
     ProgressReporter,
-    ScreenJobRunner,
     TaskCancelledError,
     TaskUserError,
 )
@@ -24,18 +23,12 @@ from ..backtest_history import save_completed_backtest_history, utc_now
 from ..date_ranges import resolve_date_range
 from ..market_source import resolve_market_status
 from ..schemas.individual_research import IndividualResearchRequest
+from ._deps import job_runner as _runner
+from ._deps import market_store as _store
 
 router = APIRouter(prefix="/individual-research", tags=["individual-research"])
 JOB_DESCRIPTION = "个股研究"
 HISTORY_TYPE: Literal["individual_research"] = "individual_research"
-
-
-def _runner(request: Request) -> ScreenJobRunner:
-    return cast(ScreenJobRunner, request.app.state.screen_job_runner)
-
-
-def _store(request: Request) -> DuckDbMarketDataStore:
-    return cast(DuckDbMarketDataStore, request.app.state.market_data_store)
 
 
 def _service(request: Request) -> IndividualStockResearchService:

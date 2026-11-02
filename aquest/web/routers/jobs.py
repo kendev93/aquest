@@ -7,15 +7,12 @@ from typing import cast
 
 from fastapi import APIRouter, Request
 
-from aquest.screening.jobs import ScreenJobRunner
 from aquest.strategy_discovery.job_backend import StrategyJobBackend
+
+from ._deps import job_runner as _runner
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 logger = logging.getLogger(__name__)
-
-
-def _runner(request: Request) -> ScreenJobRunner:
-    return cast(ScreenJobRunner, request.app.state.screen_job_runner)
 
 
 def _strategy_backend(request: Request) -> StrategyJobBackend | None:

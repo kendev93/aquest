@@ -19,6 +19,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from aquest.errors import error_reason
+
 from ..concurrency import MAX_WORKERS, visible_cpu_count
 from .day_format import DAY_RECORD_SIZE, classify_board, classify_instrument, discover_day_files
 from .local_adapter import LocalDayMarketDataAdapter
@@ -195,7 +197,7 @@ class LocalDayImportService:
                 # already committed, so the honest thing is to report this batch
                 # as failed per file and keep going rather than abort with a
                 # generic error after half the tree has been overwritten.
-                reason = str(exc).strip()[:200] or type(exc).__name__
+                reason = error_reason(exc)
                 for ref, _bars in batch:
                     failures[reason] += 1
                     report["errors"] = int(report["errors"]) + 1
@@ -254,7 +256,7 @@ class LocalDayImportService:
                         try:
                             parsed = future.result()
                         except (OSError, ValueError) as exc:
-                            skip(ref, str(exc).strip()[:200] or type(exc).__name__)
+                            skip(ref, error_reason(exc))
                             continue
                         if parsed.frame.empty:
                             skip(ref, _empty_file_reason(ref), status="skipped")

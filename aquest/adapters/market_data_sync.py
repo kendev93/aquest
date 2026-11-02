@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import inspect
 import multiprocessing
 import queue
 import time
@@ -13,10 +12,10 @@ from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import replace
 from datetime import date, datetime
-from inspect import Parameter, signature
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+from aquest.errors import error_reason
 from aquest.market_data.models import (
     InstrumentBoard,
     InstrumentType,
@@ -39,6 +38,7 @@ from aquest.market_data.staging import (
     staging_directory,
 )
 from aquest.market_data.store import DuckDbMarketDataStore
+from aquest.market_data.sync_call import supports_abort_check
 from aquest.market_data.sync_session import record_synced_session, sync_scope_fingerprint
 
 from .market_sync import (
@@ -218,14 +218,9 @@ class MarketDataSync:
             if abort_check is not None and abort_check():
                 raise MarketDataCancelledError("行情同步已取消")
             prepare = getattr(service, "prepare_stage_plan")
-            parameters = inspect.signature(prepare).parameters.values()
-            accepts_abort = any(
-                parameter.name == "abort_check" or parameter.kind is inspect.Parameter.VAR_KEYWORD
-                for parameter in parameters
-            )
             plan = (
                 prepare(provider_config, abort_check=abort_check)
-                if accepts_abort
+                if supports_abort_check(prepare, accept_var_keyword=True)
                 else prepare(provider_config)
             )
             prepared.append(cast(ProviderStagePlan, plan))
@@ -523,7 +518,7 @@ class MarketDataSync:
                     "phase": "failed",
                     "current_status": "error",
                     "execution_mode": "process_pool_staging",
-                    "error": str(exc).strip()[:200] or type(exc).__name__,
+                    "error": error_reason(exc),
                 },
             )
             raise
@@ -716,7 +711,7 @@ def _call_provider_sync(
     detail_callback: DetailCallback | None,
     abort_check: AbortCheck | None,
 ) -> MarketSyncReport | Mapping[str, object]:
-    if abort_check is not None and _supports_abort_check(service.sync):
+    if abort_check is not None and supports_abort_check(service.sync):
         return service.sync(
             config,
             progress_callback,
@@ -724,20 +719,6 @@ def _call_provider_sync(
             abort_check=abort_check,
         )
     return service.sync(config, progress_callback, detail_callback=detail_callback)
-
-
-def _supports_abort_check(method: object) -> bool:
-    if not callable(method):
-        return False
-    try:
-        parameters = signature(method).parameters.values()
-    except (TypeError, ValueError):
-        return False
-    return any(
-        parameter.name == "abort_check"
-        and parameter.kind in {Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY}
-        for parameter in parameters
-    )
 
 
 def _eastmoney_types(config: MarketSyncConfig) -> tuple[InstrumentType, ...] | None:
