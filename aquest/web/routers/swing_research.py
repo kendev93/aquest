@@ -36,13 +36,13 @@ from typing import Protocol, cast
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from aquest.market_data.store import MarketDataStoreError
 from aquest.swing_research.models import SwingIndicatorConfig, SwingOverviewConfig
 from aquest.swing_research.service import ProgressCallback, StudyProgressCallback
 
 from ..backtest_history import save_completed_backtest_history, utc_now
 from ..schemas import SwingIndicatorRequest, SwingOverviewRequest
 from ._deps import market_store as _store
+from ._errors import store_guard
 
 router = APIRouter(prefix="/swing-research", tags=["swing-research"])
 
@@ -130,18 +130,14 @@ def swing_indicator_study(payload: SwingIndicatorRequest, request: Request) -> d
 
 @router.get("/history")
 def swing_research_history(request: Request) -> dict[str, object]:
-    try:
+    with store_guard("波段研究历史暂不可用", include_runtime=False):
         return {"data": _store(request).list_backtest_history("swing_research")}
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="波段研究历史暂不可用") from exc
 
 
 @router.get("/history/{history_id}")
 def swing_research_history_detail(history_id: str, request: Request) -> dict[str, object]:
-    try:
+    with store_guard("波段研究历史暂不可用", include_runtime=False):
         record = _store(request).read_backtest_history(history_id)
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="波段研究历史暂不可用") from exc
     if record is None or record.get("backtest_type") != "swing_research":
         raise HTTPException(status_code=404, detail="波段研究历史不存在")
     return {"data": record}
@@ -149,10 +145,8 @@ def swing_research_history_detail(history_id: str, request: Request) -> dict[str
 
 @router.delete("/history/{history_id}")
 def delete_swing_research_history(history_id: str, request: Request) -> dict[str, object]:
-    try:
+    with store_guard("波段研究历史暂不可用", include_runtime=False):
         record = _store(request).read_backtest_history(history_id)
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="波段研究历史暂不可用") from exc
     if record is None or record.get("backtest_type") != "swing_research":
         return {"data": {"deleted": False}}
     deleted = _store(request).delete_backtest_history(history_id)

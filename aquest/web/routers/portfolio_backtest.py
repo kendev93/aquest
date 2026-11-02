@@ -36,6 +36,7 @@ from ..market_source import resolve_market_status
 from ..schemas import PortfolioBacktestRequest
 from ._deps import job_runner as _runner
 from ._deps import market_store as _store
+from ._errors import store_guard
 
 router = APIRouter(prefix="/portfolio-backtests", tags=["portfolio-backtests"])
 
@@ -187,18 +188,14 @@ def cancel_portfolio_backtest(job_id: str, request: Request) -> dict[str, object
 
 @router.get("/history")
 def portfolio_backtest_history(request: Request) -> dict[str, object]:
-    try:
+    with store_guard("组合回测历史暂不可用", include_runtime=False):
         return {"data": _store(request).list_backtest_history("portfolio")}
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="组合回测历史暂不可用") from exc
 
 
 @router.get("/history/{history_id}")
 def portfolio_backtest_history_detail(history_id: str, request: Request) -> dict[str, object]:
-    try:
+    with store_guard("组合回测历史暂不可用", include_runtime=False):
         record = _store(request).read_backtest_history(history_id)
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="组合回测历史暂不可用") from exc
     if record is None or record.get("backtest_type") != "portfolio":
         raise HTTPException(status_code=404, detail="组合回测历史不存在")
     return {"data": record}
@@ -206,13 +203,11 @@ def portfolio_backtest_history_detail(history_id: str, request: Request) -> dict
 
 @router.delete("/history/{history_id}")
 def delete_portfolio_backtest_history(history_id: str, request: Request) -> dict[str, object]:
-    try:
+    with store_guard("组合回测历史暂不可用", include_runtime=True):
         record = _store(request).read_backtest_history(history_id)
         if record is None or record.get("backtest_type") != "portfolio":
             return {"data": {"deleted": False}}
         deleted = _store(request).delete_backtest_history(history_id)
-    except (MarketDataStoreError, OSError, RuntimeError) as exc:
-        raise HTTPException(status_code=503, detail="组合回测历史暂不可用") from exc
     return {"data": {"deleted": deleted}}
 
 

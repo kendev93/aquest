@@ -12,7 +12,6 @@ from fastapi.responses import JSONResponse
 
 from aquest.concurrency import HEAVY_RESEARCH_EXCLUSIVE_GROUP
 from aquest.market_data.models import DataStoreStatus
-from aquest.market_data.store import MarketDataStoreError
 from aquest.screening.jobs import (
     ActiveJobConflictError,
     JobState,
@@ -31,6 +30,7 @@ from ..market_source import resolve_market_status
 from ..schemas import StrategyFitnessRequest
 from ._deps import job_runner as _runner
 from ._deps import market_store as _store
+from ._errors import store_guard
 
 router = APIRouter(prefix="/strategy-fitness", tags=["strategy-fitness"])
 
@@ -133,18 +133,14 @@ def create_strategy_fitness(
 
 @router.get("/history")
 def strategy_fitness_history(request: Request) -> dict[str, object]:
-    try:
+    with store_guard("策略适配性历史暂不可用", include_runtime=False):
         return {"data": _store(request).list_backtest_history("strategy_fitness")}
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="策略适配性历史暂不可用") from exc
 
 
 @router.get("/history/{history_id}")
 def strategy_fitness_history_detail(history_id: str, request: Request) -> dict[str, object]:
-    try:
+    with store_guard("策略适配性历史暂不可用", include_runtime=False):
         record = _store(request).read_backtest_history(history_id)
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="策略适配性历史暂不可用") from exc
     if record is None or record.get("backtest_type") != "strategy_fitness":
         raise HTTPException(status_code=404, detail="策略适配性历史不存在")
     return {"data": record}
@@ -152,13 +148,11 @@ def strategy_fitness_history_detail(history_id: str, request: Request) -> dict[s
 
 @router.delete("/history/{history_id}")
 def delete_strategy_fitness_history(history_id: str, request: Request) -> dict[str, object]:
-    try:
+    with store_guard("策略适配性历史暂不可用", include_runtime=True):
         record = _store(request).read_backtest_history(history_id)
         if record is None or record.get("backtest_type") != "strategy_fitness":
             return {"data": {"deleted": False}}
         deleted = _store(request).delete_backtest_history(history_id)
-    except (MarketDataStoreError, OSError, RuntimeError) as exc:
-        raise HTTPException(status_code=503, detail="策略适配性历史暂不可用") from exc
     return {"data": {"deleted": deleted}}
 
 

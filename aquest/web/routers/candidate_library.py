@@ -23,6 +23,7 @@ from ..schemas import (
     CandidatePublishRequest,
     CandidateStatusRequest,
 )
+from ._errors import store_guard
 
 router = APIRouter(prefix="/candidate-library", tags=["candidate-library"])
 
@@ -36,30 +37,28 @@ def _service(request: Request) -> CandidateLibraryService:
 @router.get("")
 def list_candidates(request: Request, status: str | None = None) -> dict[str, object]:
     try:
-        items = _service(request).list_candidates(status)
+        with store_guard(_UNAVAILABLE, include_runtime=False):
+            items = _service(request).list_candidates(status)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail=_UNAVAILABLE) from exc
     return {"data": {"items": items, "status_labels": STATUS_LABELS}}
 
 
 @router.post("/import", status_code=status.HTTP_201_CREATED)
 def import_candidates(payload: CandidateImportRequest, request: Request) -> dict[str, object]:
     try:
-        outcome = _service(request).import_candidates(
-            history_id=payload.history_id,
-            candidate_ids=payload.candidate_ids,
-            note=payload.note,
-        )
+        with store_guard(_UNAVAILABLE, include_runtime=False):
+            outcome = _service(request).import_candidates(
+                history_id=payload.history_id,
+                candidate_ids=payload.candidate_ids,
+                note=payload.note,
+            )
     except CandidateNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except CandidateLibraryError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail=_UNAVAILABLE) from exc
     return {"data": outcome}
 
 
@@ -81,9 +80,10 @@ def update_candidate(
     request: Request,
 ) -> dict[str, object]:
     try:
-        record = _service(request).set_status(
-            candidate_id, status=payload.status, note=payload.note
-        )
+        with store_guard(_UNAVAILABLE, include_runtime=False):
+            record = _service(request).set_status(
+                candidate_id, status=payload.status, note=payload.note
+            )
     except CandidateNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except CandidateLibraryError as exc:
@@ -91,21 +91,18 @@ def update_candidate(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail=_UNAVAILABLE) from exc
     return {"data": record}
 
 
 @router.delete("/{candidate_id}")
 def delete_candidate(candidate_id: str, request: Request) -> dict[str, object]:
     try:
-        deleted = _service(request).delete_candidate(candidate_id)
+        with store_guard(_UNAVAILABLE, include_runtime=True):
+            deleted = _service(request).delete_candidate(candidate_id)
     except CandidateNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except CandidateLibraryError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except (MarketDataStoreError, OSError, RuntimeError) as exc:
-        raise HTTPException(status_code=503, detail=_UNAVAILABLE) from exc
     return {"data": {"deleted": deleted}}
 
 
@@ -114,13 +111,12 @@ def publish_preview(candidate_id: str, request: Request) -> dict[str, object]:
     """把「发布将写入什么」先摊开给人看：配置、说明、以及拦着的事。"""
 
     try:
-        preview = _service(request).publish_preview(candidate_id)
+        with store_guard(_UNAVAILABLE, include_runtime=False):
+            preview = _service(request).publish_preview(candidate_id)
     except CandidateNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except CandidateLibraryError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail=_UNAVAILABLE) from exc
     return {"data": preview}
 
 
@@ -131,25 +127,24 @@ def publish_candidate(
     request: Request,
 ) -> dict[str, object]:
     try:
-        outcome = _service(request).publish(
-            candidate_id,
-            name=payload.name,
-            note=payload.note,
-            overrides={
-                "ranking_value": payload.ranking_value,
-                "rank_order": payload.rank_order,
-                "max_positions": payload.max_positions,
-                "initial_cash": payload.initial_cash,
-                "stop_loss_pct": payload.stop_loss_pct,
-                "take_profit_pct": payload.take_profit_pct,
-            },
-        )
+        with store_guard(_UNAVAILABLE, include_runtime=False):
+            outcome = _service(request).publish(
+                candidate_id,
+                name=payload.name,
+                note=payload.note,
+                overrides={
+                    "ranking_value": payload.ranking_value,
+                    "rank_order": payload.rank_order,
+                    "max_positions": payload.max_positions,
+                    "initial_cash": payload.initial_cash,
+                    "stop_loss_pct": payload.stop_loss_pct,
+                    "take_profit_pct": payload.take_profit_pct,
+                },
+            )
     except CandidateNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except CandidateLibraryError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail=_UNAVAILABLE) from exc
     return {"data": outcome}

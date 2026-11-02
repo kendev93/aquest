@@ -12,7 +12,6 @@ from fastapi.responses import JSONResponse
 
 from aquest.market_data.auto_sync import ACTIVE_DATA_JOB_DESCRIPTIONS
 from aquest.market_data.models import DataStoreStatus
-from aquest.market_data.store import MarketDataStoreError
 from aquest.portfolio_backtest.auto_tracking import (
     TRACKING_DESCRIPTION,
     TRACKING_EXCLUSIVE_GROUP,
@@ -35,6 +34,7 @@ from ..schemas import (
 )
 from ._deps import job_runner as _runner
 from ._deps import market_store as _store
+from ._errors import store_guard
 
 router = APIRouter(prefix="/strategies", tags=["strategies"])
 
@@ -138,35 +138,32 @@ def _freeze_dates(
 @router.post("", status_code=status.HTTP_201_CREATED)
 def create_strategy(payload: SavedStrategyCreateRequest, request: Request) -> dict[str, object]:
     try:
-        frozen = _freeze_dates(payload.request, resolve_market_status(request))
-        record = _store(request).save_strategy(
-            uuid.uuid4().hex,
-            name=payload.name,
-            note=payload.note,
-            request=cast(dict[str, object], frozen.model_dump(mode="json")),
-            summary=_strategy_summary(payload.summary),
-            source_history_id=payload.source_history_id,
-        )
+        with store_guard("策略库暂不可用", include_runtime=False):
+            frozen = _freeze_dates(payload.request, resolve_market_status(request))
+            record = _store(request).save_strategy(
+                uuid.uuid4().hex,
+                name=payload.name,
+                note=payload.note,
+                request=cast(dict[str, object], frozen.model_dump(mode="json")),
+                summary=_strategy_summary(payload.summary),
+                source_history_id=payload.source_history_id,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="策略库暂不可用") from exc
     return {"data": record}
 
 
 @router.get("")
 def list_strategies(request: Request) -> dict[str, object]:
-    try:
+    with store_guard("策略库暂不可用", include_runtime=False):
         return {"data": _store(request).list_strategies()}
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="策略库暂不可用") from exc
 
 
 @router.get("/tracking")
 def list_strategy_tracking(request: Request) -> dict[str, object]:
     """Every saved strategy together with how it has behaved since going online."""
 
-    try:
+    with store_guard("策略追踪暂不可用", include_runtime=False):
         service = _tracking_service(request)
         rows: list[dict[str, object]] = []
         for record in _store(request).list_strategies():
@@ -180,8 +177,6 @@ def list_strategy_tracking(request: Request) -> dict[str, object]:
             snapshot["name"] = record["name"]
             snapshot["note"] = record["note"]
             rows.append(snapshot)
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="策略追踪暂不可用") from exc
     return {"data": rows}
 
 
@@ -201,11 +196,10 @@ def read_strategy_tracking(strategy_id: str, request: Request) -> dict[str, obje
     """One strategy's full tracking snapshot, including the observation curve."""
 
     try:
-        snapshot = _tracking_service(request).snapshot(strategy_id)
+        with store_guard("策略追踪暂不可用", include_runtime=False):
+            snapshot = _tracking_service(request).snapshot(strategy_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="策略追踪暂不可用") from exc
     return {"data": snapshot.to_dict()}
 
 
@@ -224,22 +218,21 @@ def page_strategy_tracking_trades(
     if date_from is not None and date_to is not None and date_from > date_to:
         raise HTTPException(status_code=422, detail="成交日期范围无效")
     try:
-        if _store(request).read_strategy(strategy_id) is None:
-            raise HTTPException(status_code=404, detail="策略不存在")
-        page = _store(request).page_tracking_trades(
-            strategy_id,
-            phase=phase,
-            date_from=(int(date_from.strftime("%Y%m%d")) if date_from else None),
-            date_to=(int(date_to.strftime("%Y%m%d")) if date_to else None),
-            limit=limit,
-            offset=offset,
-        )
+        with store_guard("策略追踪暂不可用", include_runtime=False):
+            if _store(request).read_strategy(strategy_id) is None:
+                raise HTTPException(status_code=404, detail="策略不存在")
+            page = _store(request).page_tracking_trades(
+                strategy_id,
+                phase=phase,
+                date_from=(int(date_from.strftime("%Y%m%d")) if date_from else None),
+                date_to=(int(date_to.strftime("%Y%m%d")) if date_to else None),
+                limit=limit,
+                offset=offset,
+            )
     except HTTPException:
         raise
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="策略追踪暂不可用") from exc
     return {"data": page}
 
 
@@ -270,11 +263,10 @@ def stop_strategy_tracking(strategy_id: str, request: Request) -> dict[str, obje
     """Take it offline, keeping whatever it already observed."""
 
     try:
-        snapshot = _tracking_service(request).stop(strategy_id)
+        with store_guard("策略追踪暂不可用", include_runtime=False):
+            snapshot = _tracking_service(request).stop(strategy_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="策略追踪暂不可用") from exc
     return {"data": snapshot.to_dict()}
 
 
@@ -321,10 +313,8 @@ def _submit_tracking_job(strategy_id: str, request: Request, *, launch: bool) ->
 
 
 def _require_strategy(strategy_id: str, request: Request) -> Mapping[str, object]:
-    try:
+    with store_guard("策略库暂不可用", include_runtime=False):
         record = _store(request).read_strategy(strategy_id)
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="策略库暂不可用") from exc
     if record is None:
         raise HTTPException(status_code=404, detail="策略不存在")
     return record
@@ -344,10 +334,8 @@ def _job_state_or_404(job_id: str, request: Request) -> JobState:
 
 @router.get("/{strategy_id}")
 def read_strategy(strategy_id: str, request: Request) -> dict[str, object]:
-    try:
+    with store_guard("策略库暂不可用", include_runtime=False):
         record = _store(request).read_strategy(strategy_id)
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="策略库暂不可用") from exc
     if record is None:
         raise HTTPException(status_code=404, detail="策略不存在")
     return {"data": record}
@@ -360,15 +348,14 @@ def update_strategy(
     request: Request,
 ) -> dict[str, object]:
     try:
-        record = _store(request).update_strategy(
-            strategy_id,
-            name=payload.name,
-            note=payload.note,
-        )
+        with store_guard("策略库暂不可用", include_runtime=False):
+            record = _store(request).update_strategy(
+                strategy_id,
+                name=payload.name,
+                note=payload.note,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="策略库暂不可用") from exc
     if record is None:
         raise HTTPException(status_code=404, detail="策略不存在")
     return {"data": record}
@@ -376,8 +363,6 @@ def update_strategy(
 
 @router.delete("/{strategy_id}")
 def delete_strategy(strategy_id: str, request: Request) -> dict[str, object]:
-    try:
+    with store_guard("策略库暂不可用", include_runtime=True):
         deleted = _store(request).delete_strategy(strategy_id)
-    except (MarketDataStoreError, OSError, RuntimeError) as exc:
-        raise HTTPException(status_code=503, detail="策略库暂不可用") from exc
     return {"data": {"deleted": deleted}}

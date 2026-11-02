@@ -25,6 +25,8 @@ from aquest.strategy_pool.store import DuckDbStrategyPoolStore, Objective
 from aquest.strategy_pool.tracking_scheduler import TRACKING_OPERATION
 from aquest.strategy_pool.tracking_store import PoolTrackingStore
 
+from ._errors import store_guard
+
 router = APIRouter(prefix="/strategy-pool", tags=["strategy-pool"])
 JOB_DESCRIPTION = "全市场策略池研究"
 
@@ -369,11 +371,10 @@ def estimate_research_workload(payload: PoolJobRequest, request: Request) -> dic
         pool_store=_pool_store(request),
     )
     try:
-        return {"data": service.estimate_incremental(payload.model_dump())}
+        with store_guard("工作量统计暂时无法读取", include_runtime=False):
+            return {"data": service.estimate_incremental(payload.model_dump())}
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="工作量统计暂时无法读取") from exc
 
 
 DEFAULT_RESEARCH_BOARDS: tuple[str, ...] = ("main", "chinext", "star")
@@ -391,10 +392,8 @@ class ResearchSettingsRequest(BaseModel):
 def get_research_settings(request: Request) -> dict[str, object]:
     """研究范围偏好；从未保存过时返回默认（三个板块全选、不过滤 ST）。"""
 
-    try:
+    with store_guard("研究范围偏好暂时无法读取", include_runtime=False):
         saved = _pool_store(request).read_research_settings()
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="研究范围偏好暂时无法读取") from exc
     if saved is None:
         return {"data": {"boards": list(DEFAULT_RESEARCH_BOARDS), "exclude_st": False}}
     raw_boards = saved["boards"]
@@ -412,12 +411,10 @@ def get_research_settings(request: Request) -> dict[str, object]:
 def update_research_settings(
     payload: ResearchSettingsRequest, request: Request
 ) -> dict[str, object]:
-    try:
+    with store_guard("研究范围偏好暂时无法保存", include_runtime=False):
         saved = _pool_store(request).save_research_settings(
             boards=payload.boards, exclude_st=payload.exclude_st
         )
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="研究范围偏好暂时无法保存") from exc
     return {"data": {"boards": saved["boards"], "exclude_st": saved["exclude_st"]}}
 
 
@@ -433,10 +430,8 @@ class FocusMemberRequest(BaseModel):
 def get_focus(request: Request) -> dict[str, object]:
     """特别关注名单；一只都没关注过时返回空列表。"""
 
-    try:
+    with store_guard("特别关注暂时无法读取", include_runtime=False):
         items = _pool_store(request).read_focus()
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="特别关注暂时无法读取") from exc
     return {"data": {"items": items}}
 
 
@@ -445,11 +440,10 @@ def add_focus_member(payload: FocusMemberRequest, request: Request) -> dict[str,
     """关注一只标的；重复关注幂等，超过上限 422。"""
 
     try:
-        items = _pool_store(request).add_focus(payload.market, payload.code, payload.name)
+        with store_guard("特别关注暂时无法保存", include_runtime=False):
+            items = _pool_store(request).add_focus(payload.market, payload.code, payload.name)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="特别关注暂时无法保存") from exc
     return {"data": {"items": items}}
 
 
@@ -458,11 +452,10 @@ def remove_focus_member(market: str, code: str, request: Request) -> dict[str, o
     """取消关注；没有关注过的代码同样幂等返回当前名单。"""
 
     try:
-        items = _pool_store(request).remove_focus(market.upper(), code)
+        with store_guard("特别关注暂时无法保存", include_runtime=False):
+            items = _pool_store(request).remove_focus(market.upper(), code)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="特别关注暂时无法保存") from exc
     return {"data": {"items": items}}
 
 
@@ -545,12 +538,10 @@ def create_strategy_pool_job(payload: PoolJobRequest, request: Request) -> dict[
         if payload.automatic:
             current = datetime.now(ZoneInfo("Asia/Shanghai"))
             start = datetime.combine(current.date(), time.min, tzinfo=current.tzinfo)
-            try:
+            with store_guard("每日扫描记录暂时无法读取", include_runtime=False):
                 existing = _job_store(request).latest_pool_signal_attempt(
                     start.timestamp(), (start + timedelta(days=1)).timestamp()
                 )
-            except (MarketDataStoreError, OSError) as exc:
-                raise HTTPException(status_code=503, detail="每日扫描记录暂时无法读取") from exc
             if existing is not None:
                 return {"data": {**existing, "skipped": True}}
         active = [
@@ -567,7 +558,7 @@ def create_strategy_pool_job(payload: PoolJobRequest, request: Request) -> dict[
         if active and not can_queue_single_after_signal_scan:
             raise HTTPException(status_code=409, detail="已有全市场策略池任务正在运行")
         job_payload = payload.model_dump(exclude_none=True)
-        try:
+        with store_guard("策略池任务暂时无法提交", include_runtime=True):
             job_id = backend.submit(
                 "market_strategy_pool",
                 job_payload,
@@ -575,8 +566,6 @@ def create_strategy_pool_job(payload: PoolJobRequest, request: Request) -> dict[
                 worker_count=1,
                 metadata={"mode": payload.mode, "phase_label": "排队等待策略 worker"},
             )
-        except (MarketDataStoreError, OSError, RuntimeError) as exc:
-            raise HTTPException(status_code=503, detail="策略池任务暂时无法提交") from exc
         return {"data": {"job_id": job_id, "status": "queued"}}
 
 
@@ -586,14 +575,12 @@ def list_strategy_pool_jobs(
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, object]:
-    try:
+    with store_guard("策略池任务历史暂不可用", include_runtime=False):
         return {
             "data": _job_store(request).list_market_strategy_pool_history(
                 limit=limit, offset=offset
             )
         }
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="策略池任务历史暂不可用") from exc
 
 
 @router.get("/signal-days")
@@ -604,10 +591,8 @@ def list_pool_signal_days(request: Request) -> dict[str, object]:
     取，形状和当天那份完全一样。
     """
 
-    try:
+    with store_guard("信号交易日列表暂不可用", include_runtime=False):
         return {"data": {"items": _job_store(request).pool_signal_days()}}
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="信号交易日列表暂不可用") from exc
 
 
 @router.get("/jobs/stats")
@@ -619,10 +604,8 @@ def get_strategy_pool_job_stats(request: Request) -> dict[str, object]:
     ``/jobs/{job_id}`` 之前，否则 stats 会被当成 job_id。
     """
 
-    try:
+    with store_guard("策略池任务统计暂不可用", include_runtime=False):
         return {"data": _job_store(request).market_pool_job_stats()}
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="策略池任务统计暂不可用") from exc
 
 
 @router.get("/jobs/{job_id}")
@@ -643,10 +626,8 @@ def get_strategy_pool_job(job_id: str, request: Request) -> dict[str, object]:
 @router.post("/jobs/{job_id}/cancel")
 def cancel_strategy_pool_job(job_id: str, request: Request) -> dict[str, object]:
     _pool_job_state(job_id, request)
-    try:
+    with store_guard("策略池取消请求暂不可用", include_runtime=False):
         return {"data": {"cancelled": _job_backend(request).cancel(job_id)}}
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="策略池取消请求暂不可用") from exc
 
 
 @router.post("/entries/{market}/{code}/overrides/{objective}")

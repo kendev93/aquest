@@ -29,6 +29,7 @@ from ..schemas import (
     resolve_strategy_discovery_defaults,
 )
 from ._deps import market_store as _store
+from ._errors import store_guard
 
 router = APIRouter(prefix="/strategy-discovery", tags=["strategy-discovery"])
 logger = logging.getLogger(__name__)
@@ -101,10 +102,8 @@ def _resource_metadata(estimate: DiscoveryResourceEstimate | None) -> dict[str, 
 
 
 def _state_or_404(job_id: str, request: Request) -> dict[str, object]:
-    try:
+    with store_guard("策略任务状态暂时不可用，请稍后重试", include_runtime=False):
         state = _backend(request).get(job_id)
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="策略任务状态暂时不可用，请稍后重试") from exc
     if state is None or state.get("description") not in {
         "策略实验室",
         "策略二次优化",
@@ -358,10 +357,8 @@ def portfolio_risk_optimization_history_detail(job_id: str, request: Request) ->
         raise HTTPException(status_code=404, detail="退出风控寻优历史不存在")
     if state.get("status") != "completed":
         raise HTTPException(status_code=409, detail="退出风控寻优尚未完成")
-    try:
+    with store_guard("策略实验结果暂时不可用，请稍后重试", include_runtime=False):
         result = _backend(request).result(job_id)
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="策略实验结果暂时不可用，请稍后重试") from exc
     if result is None:
         raise HTTPException(status_code=404, detail="退出风控寻优结果不存在")
     return {"data": result}
@@ -369,18 +366,14 @@ def portfolio_risk_optimization_history_detail(job_id: str, request: Request) ->
 
 @router.get("/history")
 def strategy_discovery_history(request: Request) -> dict[str, object]:
-    try:
+    with store_guard("策略实验历史暂不可用", include_runtime=False):
         return {"data": _store(request).list_strategy_discovery_history()}
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="策略实验历史暂不可用") from exc
 
 
 @router.get("/history/{history_id}")
 def strategy_discovery_history_detail(history_id: str, request: Request) -> dict[str, object]:
-    try:
+    with store_guard("策略实验历史暂不可用", include_runtime=False):
         result = _store(request).read_strategy_discovery_history(history_id)
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="策略实验历史暂不可用") from exc
     if result is None:
         raise HTTPException(status_code=404, detail="策略实验历史不存在")
     return {"data": result}
@@ -388,10 +381,8 @@ def strategy_discovery_history_detail(history_id: str, request: Request) -> dict
 
 @router.delete("/history/{history_id}")
 def delete_strategy_discovery_history(history_id: str, request: Request) -> dict[str, object]:
-    try:
+    with store_guard("策略实验历史暂不可用", include_runtime=True):
         deleted = _store(request).delete_strategy_discovery_history(history_id)
-    except (MarketDataStoreError, OSError, RuntimeError) as exc:
-        raise HTTPException(status_code=503, detail="策略实验历史暂不可用") from exc
     return {"data": {"deleted": deleted}}
 
 
@@ -495,10 +486,8 @@ def strategy_replay_history(
     request: Request,
     leaderboard: Literal["sharpe", "return"],
 ) -> dict[str, object]:
-    try:
+    with store_guard("策略复核历史暂不可用", include_runtime=False):
         record = _store(request).read_strategy_discovery_replay_history(experiment_id, leaderboard)
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="策略复核历史暂不可用") from exc
     if record is None:
         raise HTTPException(status_code=404, detail="策略复核历史不存在")
     return {"data": record}

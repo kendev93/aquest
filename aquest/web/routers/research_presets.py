@@ -11,10 +11,10 @@ from typing import cast
 
 from fastapi import APIRouter, HTTPException, Request, status
 
-from aquest.market_data.store import MarketDataStoreError
 from aquest.research_presets.service import ResearchPresetService
 
 from ..schemas import ResearchPresetCreateRequest, ResearchPresetUpdateRequest
+from ._errors import store_guard
 
 router = APIRouter(prefix="/research-presets", tags=["research-presets"])
 
@@ -25,10 +25,8 @@ def _service(request: Request) -> ResearchPresetService:
 
 @router.get("")
 def list_research_presets(request: Request) -> dict[str, object]:
-    try:
+    with store_guard("研究方案暂不可用", include_runtime=False):
         return {"data": _service(request).list_presets()}
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="研究方案暂不可用") from exc
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -37,24 +35,21 @@ def create_research_preset(
     request: Request,
 ) -> dict[str, object]:
     try:
-        record = _service(request).create_preset(
-            payload.name,
-            payload.payload.model_dump(mode="json"),
-            note=payload.note,
-        )
+        with store_guard("研究方案暂不可用", include_runtime=False):
+            record = _service(request).create_preset(
+                payload.name,
+                payload.payload.model_dump(mode="json"),
+                note=payload.note,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="研究方案暂不可用") from exc
     return {"data": record}
 
 
 @router.get("/{preset_id}")
 def read_research_preset(preset_id: str, request: Request) -> dict[str, object]:
-    try:
+    with store_guard("研究方案暂不可用", include_runtime=False):
         record = _service(request).read_preset(preset_id)
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="研究方案暂不可用") from exc
     if record is None:
         raise HTTPException(status_code=404, detail="研究方案不存在")
     return {"data": record}
@@ -67,16 +62,15 @@ def update_research_preset(
     request: Request,
 ) -> dict[str, object]:
     try:
-        record = _service(request).update_preset(
-            preset_id,
-            name=payload.name,
-            note=payload.note,
-            payload=payload.payload.model_dump(mode="json") if payload.payload else None,
-        )
+        with store_guard("研究方案暂不可用", include_runtime=False):
+            record = _service(request).update_preset(
+                preset_id,
+                name=payload.name,
+                note=payload.note,
+                payload=payload.payload.model_dump(mode="json") if payload.payload else None,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="研究方案暂不可用") from exc
     if record is None:
         raise HTTPException(status_code=404, detail="研究方案不存在")
     return {"data": record}
@@ -84,10 +78,8 @@ def update_research_preset(
 
 @router.delete("/{preset_id}")
 def delete_research_preset(preset_id: str, request: Request) -> dict[str, object]:
-    try:
+    with store_guard("研究方案暂不可用", include_runtime=True):
         deleted = _service(request).delete_preset(preset_id)
-    except (MarketDataStoreError, OSError, RuntimeError) as exc:
-        raise HTTPException(status_code=503, detail="研究方案暂不可用") from exc
     return {"data": {"deleted": deleted}}
 
 

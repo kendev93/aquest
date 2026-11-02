@@ -12,9 +12,9 @@ from typing import cast
 from fastapi import APIRouter, HTTPException, Request
 
 from aquest.history_compare import HistoryCompareService
-from aquest.market_data.store import MarketDataStoreError
 
 from ..schemas import HistoryCompareRequest
+from ._errors import store_guard
 
 router = APIRouter(prefix="/history-compare", tags=["history-compare"])
 
@@ -25,22 +25,19 @@ def _service(request: Request) -> HistoryCompareService:
 
 @router.get("/candidates")
 def history_compare_candidates(request: Request) -> dict[str, object]:
-    try:
+    with store_guard("历史记录暂不可用", include_runtime=False):
         return {"data": _service(request).candidates()}
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="历史记录暂不可用") from exc
 
 
 @router.post("")
 def create_history_compare(payload: HistoryCompareRequest, request: Request) -> dict[str, object]:
     try:
-        report = _service(request).compare(
-            payload.history_ids,
-            normalize=payload.normalize,
-            x_axis=payload.x_axis,
-        )
+        with store_guard("历史记录暂不可用", include_runtime=False):
+            report = _service(request).compare(
+                payload.history_ids,
+                normalize=payload.normalize,
+                x_axis=payload.x_axis,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="历史记录暂不可用") from exc
     return {"data": report.to_dict()}

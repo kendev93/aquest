@@ -12,7 +12,6 @@ from typing import cast
 
 from fastapi import APIRouter, HTTPException, Request, status
 
-from aquest.market_data.store import MarketDataStoreError
 from aquest.stock_groups.service import StockGroupService
 
 from ..schemas import (
@@ -20,6 +19,7 @@ from ..schemas import (
     StockGroupRemoveMembersRequest,
     StockGroupUpdateRequest,
 )
+from ._errors import store_guard
 
 router = APIRouter(prefix="/stock-groups", tags=["stock-groups"])
 
@@ -30,27 +30,24 @@ def _service(request: Request) -> StockGroupService:
 
 @router.get("")
 def list_stock_groups(request: Request) -> dict[str, object]:
-    try:
+    with store_guard("股票组暂不可用", include_runtime=False):
         return {"data": _service(request).list_groups()}
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="股票组暂不可用") from exc
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 def create_stock_group(payload: StockGroupCreateRequest, request: Request) -> dict[str, object]:
     try:
-        record = _service(request).create_group(
-            name=payload.name,
-            items=[item.model_dump() for item in payload.items],
-            note=payload.note,
-            source=payload.source,
-            source_history_id=payload.source_history_id,
-            criteria=payload.criteria,
-        )
+        with store_guard("股票组暂不可用", include_runtime=False):
+            record = _service(request).create_group(
+                name=payload.name,
+                items=[item.model_dump() for item in payload.items],
+                note=payload.note,
+                source=payload.source,
+                source_history_id=payload.source_history_id,
+                criteria=payload.criteria,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="股票组暂不可用") from exc
     return {"data": record}
 
 
@@ -66,10 +63,8 @@ def summarize_stock_groups(request: Request, windows: str = "") -> dict[str, obj
         parsed = [int(part) for part in windows.split(",") if part.strip()]
     except ValueError as exc:
         raise HTTPException(status_code=422, detail="窗口必须是逗号分隔的整数") from exc
-    try:
+    with store_guard("股票组暂不可用", include_runtime=False):
         result = _service(request).summarize(parsed)
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="股票组暂不可用") from exc
     return {"data": result}
 
 
@@ -86,17 +81,18 @@ def update_stock_group(
     request: Request,
 ) -> dict[str, object]:
     try:
-        record = _service(request).update_group(
-            group_id,
-            name=payload.name,
-            note=payload.note,
-            items=None if payload.items is None else [item.model_dump() for item in payload.items],
-            criteria=payload.criteria,
-        )
+        with store_guard("股票组暂不可用", include_runtime=False):
+            record = _service(request).update_group(
+                group_id,
+                name=payload.name,
+                note=payload.note,
+                items=None
+                if payload.items is None
+                else [item.model_dump() for item in payload.items],
+                criteria=payload.criteria,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="股票组暂不可用") from exc
     if record is None:
         raise HTTPException(status_code=404, detail="分组不存在")
     return {"data": record}
@@ -109,13 +105,12 @@ def remove_stock_group_members(
     request: Request,
 ) -> dict[str, object]:
     try:
-        record = _service(request).remove_members(
-            group_id, [(item.market, item.code) for item in payload.members]
-        )
+        with store_guard("股票组暂不可用", include_runtime=False):
+            record = _service(request).remove_members(
+                group_id, [(item.market, item.code) for item in payload.members]
+            )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="股票组暂不可用") from exc
     if record is None:
         raise HTTPException(status_code=404, detail="分组不存在")
     return {"data": record}
@@ -123,10 +118,8 @@ def remove_stock_group_members(
 
 @router.delete("/{group_id}")
 def delete_stock_group(group_id: str, request: Request) -> dict[str, object]:
-    try:
+    with store_guard("股票组暂不可用", include_runtime=True):
         deleted = _service(request).delete_group(group_id)
-    except (MarketDataStoreError, OSError, RuntimeError) as exc:
-        raise HTTPException(status_code=503, detail="股票组暂不可用") from exc
     return {"data": {"deleted": deleted}}
 
 
@@ -134,20 +127,16 @@ def delete_stock_group(group_id: str, request: Request) -> dict[str, object]:
 def read_stock_group_performance(group_id: str, request: Request) -> dict[str, object]:
     """入组至今的等权买入持有曲线，外加同一区间的全市场等权对照。"""
 
-    try:
+    with store_guard("股票组暂不可用", include_runtime=False):
         result = _service(request).performance(group_id)
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="股票组暂不可用") from exc
     if result is None:
         raise HTTPException(status_code=404, detail="分组不存在")
     return {"data": result.to_dict()}
 
 
 def _read_or_404(request: Request, group_id: str) -> dict[str, object]:
-    try:
+    with store_guard("股票组暂不可用", include_runtime=False):
         record = _service(request).read_group(group_id)
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="股票组暂不可用") from exc
     if record is None:
         raise HTTPException(status_code=404, detail="分组不存在")
     return record

@@ -16,7 +16,6 @@ from aquest.condition_research.resources import (
     ResearchResourceEstimate,
 )
 from aquest.condition_research.service import ConditionResearchService
-from aquest.market_data.store import MarketDataStoreError
 from aquest.screening.jobs import (
     ActiveJobConflictError,
     JobState,
@@ -31,6 +30,7 @@ from ..market_source import resolve_market_status
 from ..schemas import ConditionResearchRequest
 from ._deps import job_runner as _runner
 from ._deps import market_store as _store
+from ._errors import store_guard
 
 
 def _estimate_payload(estimate: ResearchResourceEstimate) -> dict[str, object]:
@@ -179,10 +179,8 @@ def create_condition_research(
 
 @router.get("/history")
 def condition_research_history(request: Request) -> dict[str, object]:
-    try:
+    with store_guard("买卖条件研究历史暂不可用", include_runtime=False):
         return {"data": _store(request).list_backtest_history("condition_research")}
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="买卖条件研究历史暂不可用") from exc
 
 
 @router.get("/history/{history_id}")
@@ -190,10 +188,8 @@ def condition_research_history_detail(
     history_id: str,
     request: Request,
 ) -> dict[str, object]:
-    try:
+    with store_guard("买卖条件研究历史暂不可用", include_runtime=False):
         record = _store(request).read_backtest_history(history_id)
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="买卖条件研究历史暂不可用") from exc
     if record is None or record.get("backtest_type") != "condition_research":
         raise HTTPException(status_code=404, detail="买卖条件研究历史不存在")
     return {"data": record}
@@ -204,10 +200,8 @@ def delete_condition_research_history(
     history_id: str,
     request: Request,
 ) -> dict[str, object]:
-    try:
+    with store_guard("买卖条件研究历史暂不可用", include_runtime=False):
         record = _store(request).read_backtest_history(history_id)
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="买卖条件研究历史暂不可用") from exc
     # 别的历史类型共用一张表，删错了只剩一句「已删除」会让人以为删的是研究。
     if record is None or record.get("backtest_type") != "condition_research":
         return {"data": {"deleted": False}}

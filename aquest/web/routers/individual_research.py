@@ -10,7 +10,6 @@ from fastapi.responses import JSONResponse
 
 from aquest.concurrency import HEAVY_RESEARCH_EXCLUSIVE_GROUP
 from aquest.individual_research.service import IndividualStockResearchService
-from aquest.market_data.store import MarketDataStoreError
 from aquest.screening.jobs import (
     ActiveJobConflictError,
     JobState,
@@ -25,6 +24,7 @@ from ..market_source import resolve_market_status
 from ..schemas.individual_research import IndividualResearchRequest
 from ._deps import job_runner as _runner
 from ._deps import market_store as _store
+from ._errors import store_guard
 
 router = APIRouter(prefix="/individual-research", tags=["individual-research"])
 JOB_DESCRIPTION = "个股研究"
@@ -123,18 +123,14 @@ def create_individual_research(
 
 @router.get("/history")
 def individual_research_history(request: Request) -> dict[str, object]:
-    try:
+    with store_guard("个股研究历史暂不可用", include_runtime=False):
         return {"data": _store(request).list_backtest_history(HISTORY_TYPE)}
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="个股研究历史暂不可用") from exc
 
 
 @router.get("/history/{history_id}")
 def individual_research_history_detail(history_id: str, request: Request) -> dict[str, object]:
-    try:
+    with store_guard("个股研究历史暂不可用", include_runtime=False):
         record = _store(request).read_backtest_history(history_id)
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="个股研究历史暂不可用") from exc
     if record is None or record.get("backtest_type") != HISTORY_TYPE:
         raise HTTPException(status_code=404, detail="个股研究历史不存在")
     return {"data": record}
@@ -142,13 +138,11 @@ def individual_research_history_detail(history_id: str, request: Request) -> dic
 
 @router.delete("/history/{history_id}")
 def delete_individual_research_history(history_id: str, request: Request) -> dict[str, object]:
-    try:
+    with store_guard("个股研究历史暂不可用", include_runtime=False):
         record = _store(request).read_backtest_history(history_id)
         if record is None or record.get("backtest_type") != HISTORY_TYPE:
             return {"data": {"deleted": False}}
         return {"data": {"deleted": _store(request).delete_backtest_history(history_id)}}
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="个股研究历史暂不可用") from exc
 
 
 @router.get("/jobs/{job_id}")

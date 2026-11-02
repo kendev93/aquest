@@ -12,13 +12,13 @@ from typing import cast
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from aquest.instrument_lab import InstrumentLabService
-from aquest.market_data.store import MarketDataStoreError
 
 from ..schemas import (
     BacktestRequest,
     InstrumentLabCheckRequest,
     InstrumentLabValuesRequest,
 )
+from ._errors import store_guard
 
 router = APIRouter(prefix="/instrument-lab", tags=["instrument-lab"])
 
@@ -30,18 +30,17 @@ def _service(request: Request) -> InstrumentLabService:
 @router.post("/values")
 def instrument_values(payload: InstrumentLabValuesRequest, request: Request) -> dict[str, object]:
     try:
-        values = _service(request).values(
-            market=payload.market,
-            code=payload.code,
-            vipdoc_path=payload.vipdoc_path,
-            value_ids=payload.value_ids,
-            start_date=payload.start_date,
-            end_date=payload.end_date,
-        )
+        with store_guard("行情数据暂不可用", include_runtime=False):
+            values = _service(request).values(
+                market=payload.market,
+                code=payload.code,
+                vipdoc_path=payload.vipdoc_path,
+                value_ids=payload.value_ids,
+                start_date=payload.start_date,
+                end_date=payload.end_date,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="行情数据暂不可用") from exc
     return {"data": values.to_dict()}
 
 
@@ -49,10 +48,8 @@ def instrument_values(payload: InstrumentLabValuesRequest, request: Request) -> 
 def instrument_condition_library(
     request: Request, limit: int = Query(default=60, ge=1, le=500)
 ) -> dict[str, object]:
-    try:
+    with store_guard("历史记录暂不可用", include_runtime=False):
         items = _service(request).condition_library(limit=limit)
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="历史记录暂不可用") from exc
     return {"data": {"items": [item.to_dict() for item in items]}}
 
 
@@ -70,31 +67,29 @@ def instrument_condition_check(
         for item in payload.conditions
     ]
     try:
-        report = _service(request).check_conditions(
-            market=payload.market,
-            code=payload.code,
-            vipdoc_path=payload.vipdoc_path,
-            conditions=conditions,
-            horizon=payload.horizon,
-            start_date=payload.start_date,
-            end_date=payload.end_date,
-            permutations=payload.permutations,
-            block_size=payload.block_size,
-            alpha=payload.alpha,
-        )
+        with store_guard("行情数据暂不可用", include_runtime=False):
+            report = _service(request).check_conditions(
+                market=payload.market,
+                code=payload.code,
+                vipdoc_path=payload.vipdoc_path,
+                conditions=conditions,
+                horizon=payload.horizon,
+                start_date=payload.start_date,
+                end_date=payload.end_date,
+                permutations=payload.permutations,
+                block_size=payload.block_size,
+                alpha=payload.alpha,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="行情数据暂不可用") from exc
     return {"data": report.to_dict()}
 
 
 @router.post("/backtest")
 def instrument_backtest(payload: BacktestRequest, request: Request) -> dict[str, object]:
     try:
-        report = _service(request).backtest(payload.to_config())
+        with store_guard("行情数据暂不可用", include_runtime=False):
+            report = _service(request).backtest(payload.to_config())
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except (MarketDataStoreError, OSError) as exc:
-        raise HTTPException(status_code=503, detail="行情数据暂不可用") from exc
     return {"data": report.to_dict()}
