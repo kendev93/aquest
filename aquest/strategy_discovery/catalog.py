@@ -167,8 +167,3 @@ def default_indicator_catalog(registry: FormulaRegistry | None = None) -> Indica
         values=tuple(dict.fromkeys(values)),
         signals=tuple(dict.fromkeys(signals)),
     )
-
-
-def numeric_display_names(value_ids: Iterable[str]) -> dict[str, str]:
-    catalog = default_indicator_catalog()
-    return {value_id: catalog.display_name(value_id) for value_id in value_ids}

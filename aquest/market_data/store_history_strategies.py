@@ -6,7 +6,7 @@ import json
 from collections.abc import Mapping
 from datetime import datetime
 
-from .store_base import _WRITE_LOCK, _DuckDbStoreBase, _now
+from .store_base import _DuckDbStoreBase, _now
 from .store_history_common import (
     _STRATEGY_COLUMNS,
     SAVED_STRATEGY_TABLE,
@@ -30,7 +30,7 @@ class StrategyHistoryMixin:
         normalized = name.strip()
         if not normalized:
             return False
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             row = connection.execute(
                 f"SELECT 1 FROM {SAVED_STRATEGY_TABLE} WHERE name = ? AND strategy_id <> ? LIMIT 1",
                 [normalized, exclude_strategy_id.strip()],
@@ -75,7 +75,7 @@ class StrategyHistoryMixin:
             "request": dict(request),
             "summary": dict(summary),
         }
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 connection.execute(
@@ -112,7 +112,7 @@ class StrategyHistoryMixin:
     def list_strategies(self) -> list[dict[str, object]]:
         """Return every saved strategy, most recently updated first."""
 
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             rows = connection.execute(
                 f"""
                 SELECT {_STRATEGY_COLUMNS}
@@ -131,7 +131,7 @@ class StrategyHistoryMixin:
     def read_strategy(self, strategy_id: str) -> dict[str, object] | None:
         """Read one saved strategy including its replayable request."""
 
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             row = connection.execute(
                 f"""
                 SELECT {_STRATEGY_COLUMNS}
@@ -181,7 +181,7 @@ class StrategyHistoryMixin:
         assignments.append("updated_at = ?")
         parameters.append(_now())
         parameters.append(normalized_id)
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 updated = connection.execute(
@@ -197,35 +197,6 @@ class StrategyHistoryMixin:
             return None
         return self.read_strategy(normalized_id)
 
-    def update_strategy_summary(
-        self,
-        strategy_id: str,
-        summary: Mapping[str, object],
-    ) -> dict[str, object] | None:
-        """Replace the stored performance snapshot.
-
-        追踪上线时用它把「研究段绩效」钉进策略里，之后**永不再改**——分母要是
-        会动，衰减比就没有意义了。
-        """
-
-        self._store._require_writer()
-        normalized_id = strategy_id.strip()
-        if not normalized_id:
-            return None
-        with _WRITE_LOCK, self._store._connect() as connection:
-            updated = connection.execute(
-                f"UPDATE {SAVED_STRATEGY_TABLE} SET summary_json = ?, updated_at = ? "
-                "WHERE strategy_id = ? RETURNING strategy_id",
-                [
-                    json.dumps(dict(summary), ensure_ascii=False, separators=(",", ":")),
-                    _now(),
-                    normalized_id,
-                ],
-            ).fetchone()
-        if updated is None:
-            return None
-        return self.read_strategy(normalized_id)
-
     def delete_strategy(self, strategy_id: str) -> bool:
         """Delete one saved strategy together with its tracking observations."""
 
@@ -233,7 +204,7 @@ class StrategyHistoryMixin:
         normalized_id = strategy_id.strip()
         if not normalized_id:
             return False
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 deleted = connection.execute(

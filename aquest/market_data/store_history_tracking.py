@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Mapping
 
-from .store_base import _WRITE_LOCK, _DuckDbStoreBase, _now
+from .store_base import _DuckDbStoreBase, _now
 from .store_history_common import (
     _STRATEGY_COLUMNS,
     SAVED_STRATEGY_TABLE,
@@ -44,7 +44,7 @@ class StrategyTrackingHistoryMixin(StrategyHistoryMixin):
         normalized_id = strategy_id.strip()
         if not normalized_id:
             return None
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 updated = connection.execute(
@@ -105,7 +105,7 @@ class StrategyTrackingHistoryMixin(StrategyHistoryMixin):
                 parameters.append(int(last_tracked_date))
         parameters.append(normalized_id)
         parameters.append(STRATEGY_TRACKING_ACTIVE)
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             updated = connection.execute(
                 f"UPDATE {SAVED_STRATEGY_TABLE} SET {', '.join(assignments)} "
                 "WHERE strategy_id = ? AND tracking_status = ? RETURNING strategy_id",
@@ -122,7 +122,7 @@ class StrategyTrackingHistoryMixin(StrategyHistoryMixin):
         normalized_id = strategy_id.strip()
         if not normalized_id:
             return None
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             updated = connection.execute(
                 f"""
                 UPDATE {SAVED_STRATEGY_TABLE} SET
@@ -168,7 +168,7 @@ class StrategyTrackingHistoryMixin(StrategyHistoryMixin):
         rows = list(points)
         if not rows:
             return 0
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 written = _write_tracking_points(connection, normalized_id, rows)
@@ -205,7 +205,7 @@ class StrategyTrackingHistoryMixin(StrategyHistoryMixin):
         prepared_points = list(points)
         prepared_trades = list(trades)
         normalized_date = _tracking_date(last_tracked_date)
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 row = connection.execute(
@@ -321,7 +321,7 @@ class StrategyTrackingHistoryMixin(StrategyHistoryMixin):
             statement += " AND trade_date >= ?"
             parameters.append(int(since))
         statement += " ORDER BY trade_date"
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             rows = connection.execute(statement, parameters).fetchall()
         return [
             {
@@ -351,7 +351,7 @@ class StrategyTrackingHistoryMixin(StrategyHistoryMixin):
         if not normalized_id:
             return 0
         prepared = list(rows)
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 _write_tracking_trades(connection, normalized_id, prepared)
@@ -370,7 +370,7 @@ class StrategyTrackingHistoryMixin(StrategyHistoryMixin):
         normalized_id = strategy_id.strip()
         if not normalized_id:
             return []
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             rows = connection.execute(
                 "SELECT trade_date, phase, direction, market, code, name, size, price, "
                 f"pnl, reason, signal_date, commission, stamp_tax, slippage, cost_basis "
@@ -432,7 +432,7 @@ class StrategyTrackingHistoryMixin(StrategyHistoryMixin):
             conditions.append("trade_date <= ?")
             parameters.append(int(date_to))
         where = " AND ".join(conditions)
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             count_row = connection.execute(
                 f"SELECT COUNT(*) FROM {STRATEGY_TRACKING_TRADES_TABLE} WHERE {where}",
                 parameters,
@@ -482,14 +482,14 @@ class StrategyTrackingHistoryMixin(StrategyHistoryMixin):
         normalized_id = strategy_id.strip()
         if not normalized_id:
             return
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             _write_tracking_plan(connection, normalized_id, payload)
 
     def read_tracking_plan(self, strategy_id: str) -> dict[str, object] | None:
         normalized_id = strategy_id.strip()
         if not normalized_id:
             return None
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             row = connection.execute(
                 f"SELECT payload_json FROM {STRATEGY_TRACKING_PLAN_TABLE} WHERE strategy_id = ?",
                 [normalized_id],
@@ -502,7 +502,7 @@ class StrategyTrackingHistoryMixin(StrategyHistoryMixin):
     def list_tracked_strategies(self) -> list[dict[str, object]]:
         """Return every strategy that is currently online."""
 
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             rows = connection.execute(
                 f"""
                 SELECT {_STRATEGY_COLUMNS}

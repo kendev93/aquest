@@ -56,7 +56,6 @@ _OPERATOR_SYMBOLS = {
     "cross_up": "上穿",
     "cross_down": "下穿",
 }
-_SIDE_LABELS = {"buy": "买入侧", "sell": "卖出侧"}
 _LIBRARY_HISTORY_LIMIT = 10
 
 

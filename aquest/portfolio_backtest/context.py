@@ -35,8 +35,6 @@ from .risk import _atr_series
 from .state import PortfolioMarketDataAdapter, _PortfolioServiceState
 
 _CONTEXT_PRELOAD_CHUNK_SIZE = 32
-DEFAULT_BASE_CONTEXT_CACHE_LIMIT = 256
-DEFAULT_DATE_INDEX_CACHE_LIMIT = 512
 
 #: How much history to load *before* the backtest window so rolling indicators
 #: have something to roll over. Without it every stock was loaded from its first

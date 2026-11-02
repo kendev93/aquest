@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import re
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
@@ -18,7 +17,6 @@ from .day_format import classify_board, classify_instrument, discover_day_files,
 from .models import InstrumentBoard, InstrumentType, MarketCode, StockRef
 from .scope import InstrumentScope
 
-_CODE_PATTERN = re.compile(r"^\d{6}$")
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 # Where a host directory may be mounted inside the container. ``/host`` is the
@@ -165,17 +163,6 @@ def is_supported_instrument(market: MarketCode, code: str) -> bool:
     return classify_instrument(market, code) is not None
 
 
-def is_supported_a_stock(market: MarketCode, code: str) -> bool:
-    """Legacy predicate retained for older callers that only scan A shares."""
-
-    normalized = code.strip()
-    if not _CODE_PATTERN.fullmatch(normalized):
-        return False
-    if market == "SH":
-        return normalized.startswith(("60", "68"))
-    return normalized.startswith(("00", "30"))
-
-
 def _parse_universe_line(line: str) -> tuple[MarketCode, str] | None:
     try:
         return parse_universe_code(line)
@@ -195,11 +182,6 @@ class LocalDayMarketDataAdapter:
             if vipdoc_path is not None
             else Path(suggested_vipdoc_path())
         )
-
-    def resolve_vipdoc(self, vipdoc_path: str | Path | None) -> Path:
-        """Compatibility helper; it only resolves a path and never writes."""
-
-        return self._resolve_root(vipdoc_path)
 
     @staticmethod
     def _path(root: Path, market: MarketCode, code: str) -> Path:
@@ -317,7 +299,6 @@ __all__ = [
     "VipdocCandidate",
     "detect_vipdoc_roots",
     "host_mount_prefix",
-    "is_supported_a_stock",
     "is_supported_instrument",
     "map_host_path",
     "suggested_vipdoc_path",

@@ -61,7 +61,6 @@ from .snapshot import (
 )
 
 ProgressCallback = Callable[[int, int, str, Mapping[str, object]], None]
-DISCOVERY_EVALUATION_WORKERS = resolve_discovery_workers()
 
 _WORKER_DISCOVERY_SERVICE: StrategyDiscoveryService | None = None
 

@@ -9,7 +9,6 @@ from datetime import datetime, timedelta
 from typing import cast
 
 from .store_base import (
-    _WRITE_LOCK,
     STRATEGY_DISCOVERY_HISTORY_LIMIT,
     MarketDataStoreError,
     _DuckDbStoreBase,
@@ -96,7 +95,7 @@ class StrategyDiscoveryHistoryMixin:
         )
         if finished < started:
             raise ValueError("策略实验结束时间不能早于开始时间")
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 connection.execute(
@@ -168,7 +167,7 @@ class StrategyDiscoveryHistoryMixin:
     def list_strategy_discovery_history(self) -> list[dict[str, object]]:
         """Return recent strategy-discovery summaries without full candidate payloads."""
 
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             rows = connection.execute(
                 """
                 SELECT history_id, created_at, data_fingerprint,
@@ -230,7 +229,7 @@ class StrategyDiscoveryHistoryMixin:
     def read_strategy_discovery_history(self, history_id: str) -> dict[str, object] | None:
         """Read a complete strategy-discovery history snapshot."""
 
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             row = connection.execute(
                 """
                 SELECT history_id, created_at, started_at, finished_at,
@@ -288,7 +287,7 @@ class StrategyDiscoveryHistoryMixin:
         normalized_id = history_id.strip()
         if not normalized_id:
             return False
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 connection.execute(
@@ -346,7 +345,7 @@ class StrategyDiscoveryHistoryMixin:
         data_start = str(payload.get("data_start") or "")
         data_end = str(payload.get("data_end") or "")
         data_fingerprint = str(payload.get("data_fingerprint") or "")
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 connection.execute(
@@ -393,7 +392,7 @@ class StrategyDiscoveryHistoryMixin:
 
         if leaderboard not in {"sharpe", "return"}:
             raise ValueError("策略复核榜单类型无效")
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             row = connection.execute(
                 """
                 SELECT replay_id, experiment_id, leaderboard, created_at, started_at,

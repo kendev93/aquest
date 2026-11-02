@@ -6,7 +6,7 @@ import json
 from collections.abc import Mapping
 from datetime import datetime
 
-from .store_base import _WRITE_LOCK, _DuckDbStoreBase, _now
+from .store_base import _DuckDbStoreBase, _now
 from .store_history_common import (
     _PRESET_COLUMNS,
     PRESET_NAME_MAX_LENGTH,
@@ -28,7 +28,7 @@ class PresetHistoryMixin:
         normalized = name.strip()
         if not normalized:
             return False
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             row = connection.execute(
                 f"SELECT 1 FROM {SCREEN_PRESET_TABLE} WHERE name = ? AND preset_id <> ? LIMIT 1",
                 [normalized, exclude_preset_id.strip()],
@@ -69,7 +69,7 @@ class PresetHistoryMixin:
             "updated_at": created,
             "payload": dict(payload),
         }
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 connection.execute(
@@ -101,7 +101,7 @@ class PresetHistoryMixin:
     def list_screen_presets(self) -> list[dict[str, object]]:
         """Return every saved preset, most recently updated first, without payloads."""
 
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             rows = connection.execute(
                 f"""
                 SELECT {_PRESET_COLUMNS}
@@ -119,7 +119,7 @@ class PresetHistoryMixin:
     def read_screen_preset(self, preset_id: str) -> dict[str, object] | None:
         """Read one saved preset including its replayable payload."""
 
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             row = connection.execute(
                 f"SELECT {_PRESET_COLUMNS} FROM {SCREEN_PRESET_TABLE} WHERE preset_id = ?",
                 [str(preset_id).strip()],
@@ -173,7 +173,7 @@ class PresetHistoryMixin:
         assignments.append("updated_at = ?")
         parameters.append(_now())
         parameters.append(normalized_id)
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 updated = connection.execute(
@@ -196,7 +196,7 @@ class PresetHistoryMixin:
         normalized_id = preset_id.strip()
         if not normalized_id:
             return False
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             deleted = connection.execute(
                 f"DELETE FROM {SCREEN_PRESET_TABLE} WHERE preset_id = ? RETURNING preset_id",
                 [normalized_id],
@@ -209,7 +209,7 @@ class PresetHistoryMixin:
         normalized = name.strip()
         if not normalized:
             return False
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             row = connection.execute(
                 f"SELECT 1 FROM {RESEARCH_PRESET_TABLE} WHERE name = ? AND preset_id <> ? LIMIT 1",
                 [normalized, exclude_preset_id.strip()],
@@ -250,7 +250,7 @@ class PresetHistoryMixin:
             "updated_at": created,
             "payload": dict(payload),
         }
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 connection.execute(
@@ -282,7 +282,7 @@ class PresetHistoryMixin:
     def list_research_presets(self) -> list[dict[str, object]]:
         """Return every saved research preset, most recently updated first, without payloads."""
 
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             rows = connection.execute(
                 f"""
                 SELECT {_PRESET_COLUMNS}
@@ -300,7 +300,7 @@ class PresetHistoryMixin:
     def read_research_preset(self, preset_id: str) -> dict[str, object] | None:
         """Read one saved research preset including its replayable payload."""
 
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             row = connection.execute(
                 f"SELECT {_PRESET_COLUMNS} FROM {RESEARCH_PRESET_TABLE} WHERE preset_id = ?",
                 [str(preset_id).strip()],
@@ -354,7 +354,7 @@ class PresetHistoryMixin:
         assignments.append("updated_at = ?")
         parameters.append(_now())
         parameters.append(normalized_id)
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 updated = connection.execute(
@@ -377,7 +377,7 @@ class PresetHistoryMixin:
         normalized_id = preset_id.strip()
         if not normalized_id:
             return False
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             deleted = connection.execute(
                 f"DELETE FROM {RESEARCH_PRESET_TABLE} WHERE preset_id = ? RETURNING preset_id",
                 [normalized_id],

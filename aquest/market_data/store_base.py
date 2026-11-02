@@ -412,6 +412,7 @@ class _DuckDbStoreBase:
     def read_session(self) -> Iterator[duckdb.DuckDBPyConnection]:
         """读会话：只读优先 + 打不开就退回实例模式等待；开池时按线程复用同一条。"""
 
+        self._ensure_initialized()
         if not self.pool_read_connections:
             connection = self._open_read()
             try:
@@ -439,6 +440,29 @@ class _DuckDbStoreBase:
             raise
         finally:
             connection.close()
+
+    @contextmanager
+    def locked_write_connection(self) -> Iterator[duckdb.DuckDBPyConnection]:
+        """进程内互斥的写连接，不隐式开事务；适合单条自动提交语句。"""
+
+        with _WRITE_LOCK, self._connect() as connection:
+            yield connection
+
+    @contextmanager
+    def locked_write_transaction(self) -> Iterator[duckdb.DuckDBPyConnection]:
+        """进程内互斥 + 显式写事务；异常时回滚。"""
+
+        with _WRITE_LOCK:
+            with self.write_transaction() as connection:
+                yield connection
+
+    @contextmanager
+    def locked_read_session(self) -> Iterator[duckdb.DuckDBPyConnection]:
+        """需要和进程内写者互斥的读；走 read_session 的只读优先退路。"""
+
+        with _WRITE_LOCK:
+            with self.read_session() as connection:
+                yield connection
 
     def has_state_database(self) -> bool:
         """状态库是否已经启用。
@@ -1681,7 +1705,7 @@ class _DuckDbStoreBase:
         # DuckDB transaction.  Taking it before opening a read-only connection
         # prevents the status poller from racing a writer and turning a normal
         # progress update into a misleading "database cannot be opened" error.
-        with _WRITE_LOCK, self._connect(read_only=True) as connection:
+        with self.locked_read_session() as connection:
             instrument_row = connection.execute("SELECT COUNT(*) FROM instruments").fetchone()
             # 只数 DEFAULT_PRICE_BASIS 的行：这个数既是 store 面板上的「行情根数」，也是
             # ``should_defer_precompute`` 的输入。库里同时存在 hfq 行时，全表计数会把它
@@ -1770,7 +1794,7 @@ class _DuckDbStoreBase:
     def get_meta(self, key: str) -> str | None:
         """Read one metadata value without exposing the DuckDB connection."""
 
-        with self._connect(read_only=True) as connection:
+        with self.read_session() as connection:
             row = connection.execute(
                 "SELECT value FROM data_meta WHERE key = ?",
                 [key],

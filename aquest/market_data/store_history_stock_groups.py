@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence, Sized
 from datetime import datetime
 from typing import cast
 
-from .store_base import _WRITE_LOCK, _DuckDbStoreBase, _now
+from .store_base import _DuckDbStoreBase, _now
 from .store_history_common import (
     _STOCK_GROUP_COLUMNS,
     _STOCK_GROUP_CRITERIA_COLUMNS,
@@ -34,7 +34,7 @@ class StockGroupHistoryMixin:
         normalized = name.strip()
         if not normalized:
             return False
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             row = connection.execute(
                 f"SELECT 1 FROM {STOCK_GROUP_TABLE} WHERE name = ? AND group_id <> ? LIMIT 1",
                 [normalized, exclude_group_id.strip()],
@@ -89,7 +89,7 @@ class StockGroupHistoryMixin:
             "updated_at": created,
             "items": normalized_items,
         }
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 connection.execute(
@@ -136,7 +136,7 @@ class StockGroupHistoryMixin:
         return self._list_stock_groups(with_items=True)
 
     def _list_stock_groups(self, *, with_items: bool) -> list[dict[str, object]]:
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             rows = connection.execute(
                 f"""
                 SELECT {_STOCK_GROUP_COLUMNS}
@@ -156,7 +156,7 @@ class StockGroupHistoryMixin:
     def read_stock_group(self, group_id: str) -> dict[str, object] | None:
         """Read one group including its members."""
 
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             row = connection.execute(
                 f"SELECT {_STOCK_GROUP_COLUMNS} FROM {STOCK_GROUP_TABLE} WHERE group_id = ?",
                 [str(group_id).strip()],
@@ -220,7 +220,7 @@ class StockGroupHistoryMixin:
         assignments.append("updated_at = ?")
         parameters.append(_now())
         parameters.append(normalized_id)
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 updated = connection.execute(
@@ -247,7 +247,7 @@ class StockGroupHistoryMixin:
         normalized_id = group_id.strip()
         if not normalized_id:
             return False
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 deleted = connection.execute(
@@ -300,7 +300,7 @@ class StockGroupHistoryMixin:
         if len(encoded) > STOCK_GROUP_CRITERIA_PAYLOAD_MAX_LENGTH:
             raise ValueError("筛选条件快照过大，请精简后再保存")
         stamp = _normalize_timestamp(created_at, _now())
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 connection.execute(
@@ -330,7 +330,7 @@ class StockGroupHistoryMixin:
         if not wanted:
             return {}
         placeholders = ", ".join("?" for _ in wanted)
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             rows = connection.execute(
                 f"SELECT {_STOCK_GROUP_CRITERIA_COLUMNS} FROM {STOCK_GROUP_CRITERIA_TABLE} "
                 f"WHERE group_id IN ({placeholders})",
@@ -359,7 +359,7 @@ class StockGroupHistoryMixin:
         normalized_id = group_id.strip()
         if not normalized_id:
             return False
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             deleted = connection.execute(
                 f"DELETE FROM {STOCK_GROUP_CRITERIA_TABLE} WHERE group_id = ? RETURNING group_id",
                 [normalized_id],

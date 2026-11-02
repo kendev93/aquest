@@ -3,7 +3,6 @@
 from aquest.market_data.local_adapter import (
     LocalDayMarketDataAdapter,
     StockRef,
-    is_supported_a_stock,
     suggested_vipdoc_path,
 )
 
@@ -20,7 +19,6 @@ __all__ = [
     "InstrumentDiscoveryReport",
     "StockRef",
     "LocalDayMarketDataAdapter",
-    "is_supported_a_stock",
     "suggested_vipdoc_path",
     "MarketDataSync",
 ]

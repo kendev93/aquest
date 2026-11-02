@@ -7,7 +7,6 @@ from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
 
 from .store_base import (
-    _WRITE_LOCK,
     SCREEN_HISTORY_LIMIT,
     MarketDataStoreError,
     _DuckDbStoreBase,
@@ -41,7 +40,7 @@ class ScreenHistoryMixin:
         created = created_at or _now()
         if created.tzinfo is not None:
             created = created.astimezone(timezone.utc).replace(tzinfo=None)
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 connection.execute(
@@ -96,7 +95,7 @@ class ScreenHistoryMixin:
     def list_screen_history(self) -> list[dict[str, object]]:
         """Return the most recent formula-screen history summaries."""
 
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             rows = connection.execute(
                 """
                 SELECT history_id, created_at, total_candidates, total_scanned,
@@ -124,7 +123,7 @@ class ScreenHistoryMixin:
     def read_screen_history(self, history_id: str) -> dict[str, object] | None:
         """Read one formula-screen history record with its complete results."""
 
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             row = connection.execute(
                 """
                 SELECT history_id, created_at, meta_json, results_json

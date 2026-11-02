@@ -72,10 +72,8 @@ _CANDIDATE_STATUSES = frozenset(
 #: 没有「暂停后改参数继续」这种说法，否则样本外就不再是样本外了。
 STRATEGY_TRACKING_OFF = "off"
 STRATEGY_TRACKING_ACTIVE = "active"
-_STRATEGY_TRACKING_STATUSES = frozenset({STRATEGY_TRACKING_OFF, STRATEGY_TRACKING_ACTIVE})
-#: 策略列。上线曾经打算存一份「上线日末的模拟状态快照」用来增量重跑，后来确认
-#: 走不通（见 docs/archive/strategy-tracking-plan.md §2.1 的行情指纹校验），改全量重跑后
-#: 这个字段就没用了——重算所需的全部信息就是 request_json 本身。
+#: 策略列。``tracking_state_json`` 保存最近一次跟踪的账户/候选快照，详情页和
+#: 增量跟踪都会读它；它不是增量重跑所需的唯一信息，但仍随每次跟踪刷新。
 _STRATEGY_COLUMNS = (
     "strategy_id, name, note, source_history_id, created_at, updated_at, "
     "request_json, summary_json, tracking_status, launched_at, last_tracked_date, last_error, "

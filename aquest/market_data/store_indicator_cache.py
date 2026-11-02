@@ -10,7 +10,6 @@ import duckdb
 import pandas as pd
 
 from .store_base import (
-    _WRITE_LOCK,
     _DuckDbStoreBase,
     _now,
     _timestamp_text,
@@ -65,7 +64,7 @@ class DuckDbIndicatorCacheStore:
         if wanted is not None and not wanted:
             return {}
         try:
-            with self._store._connect(read_only=True) as connection:
+            with self._store.read_session() as connection:
                 rows = connection.execute(
                     """
                     SELECT market, code, bar_count, last_date, updated_at
@@ -87,7 +86,7 @@ class DuckDbIndicatorCacheStore:
         """Return the data revision of a single instrument."""
 
         try:
-            with self._store._connect(read_only=True) as connection:
+            with self._store.read_session() as connection:
                 row = connection.execute(
                     """
                     SELECT i.bar_count, i.last_date, i.updated_at,
@@ -128,7 +127,7 @@ class DuckDbIndicatorCacheStore:
         """Read every stored chunk of one immutable, versioned indicator result."""
 
         try:
-            with self._store._connect(read_only=True) as connection:
+            with self._store.read_session() as connection:
                 rows = connection.execute(
                     """
                     SELECT market, code, timeframe, price_basis, formula_id,
@@ -235,7 +234,7 @@ class DuckDbIndicatorCacheStore:
             "ORDER BY formula_id, bar_offset"
         )
         try:
-            with self._store._connect(read_only=True) as connection:
+            with self._store.read_session() as connection:
                 rows = connection.execute(query, parameters).fetchall()
         except duckdb.CatalogException:
             return {}
@@ -280,7 +279,7 @@ class DuckDbIndicatorCacheStore:
         ]
         lookup_frame = pd.DataFrame(pending, columns=lookup_columns).drop_duplicates()
         try:
-            with self._store._connect(read_only=True) as connection:
+            with self._store.read_session() as connection:
                 drain_result(connection)
                 connection.register("_indicator_cache_keys", lookup_frame)
                 try:
@@ -348,7 +347,7 @@ class DuckDbIndicatorCacheStore:
             columns=["market", "code", "timeframe", "price_basis", "formula_id", "formula_version"],
         ).drop_duplicates()
         try:
-            with self._store._connect(read_only=True) as connection:
+            with self._store.read_session() as connection:
                 drain_result(connection)
                 connection.register("_indicator_cache_index_keys", lookup_frame)
                 try:
@@ -406,7 +405,7 @@ class DuckDbIndicatorCacheStore:
         """Read one parameterized custom-formula result from DuckDB."""
 
         try:
-            with self._store._connect(read_only=True) as connection:
+            with self._store.read_session() as connection:
                 row = connection.execute(
                     """
                     SELECT market, code, timeframe, price_basis, formula_hash,
@@ -538,7 +537,7 @@ class DuckDbIndicatorCacheStore:
                     legacy_revisions[identity] = revision
             else:
                 stale[identity] = version_and_fingerprint
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 for (
@@ -671,7 +670,7 @@ class DuckDbIndicatorCacheStore:
         if not pending:
             return
         self._store._require_writer()
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 for entry in pending:
@@ -757,7 +756,7 @@ class DuckDbIndicatorCacheStore:
         self._store._require_writer()
         normalized_market = market.strip().upper()
         normalized_code = code.strip()
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 connection.execute(
@@ -843,7 +842,7 @@ class DuckDbIndicatorCacheStore:
 
         self._store._require_writer()
         removed = {"builtin_entries": 0, "custom_entries": 0}
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 for table, key in (
@@ -877,7 +876,7 @@ class DuckDbIndicatorCacheStore:
         if not revisions:
             return set()
         try:
-            with self._store._connect(read_only=True) as connection:
+            with self._store.read_session() as connection:
                 rows = connection.execute(
                     "SELECT market, code, data_fingerprint, formula_id, formula_version, "
                     "bar_offset, data_length "
@@ -928,7 +927,7 @@ class DuckDbIndicatorCacheStore:
         """Return persistent cache size and freshness metadata."""
 
         try:
-            with self._store._connect(read_only=True) as connection:
+            with self._store.read_session() as connection:
                 built_in = connection.execute(
                     """
                     SELECT COUNT(*),

@@ -8,7 +8,6 @@ from contextlib import contextmanager
 import duckdb
 
 from .store_base import (
-    _WRITE_LOCK,
     STATE_TABLES,
     _DuckDbStoreBase,
 )
@@ -197,7 +196,7 @@ class DuckDbHistoryStore(
             with self._store.state_read_session() as connection:
                 yield connection
             return
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             yield connection
 
     @contextmanager
@@ -206,7 +205,7 @@ class DuckDbHistoryStore(
             with self._store.state_write_transaction() as connection:
                 yield connection
             return
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             yield connection
 
 

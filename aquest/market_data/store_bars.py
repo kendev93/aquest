@@ -18,7 +18,6 @@ from .store_base import (
     _BAR_COLUMNS,
     _BAR_INDICATOR_COLUMNS,
     _FRAME_COLUMNS,
-    _WRITE_LOCK,
     DEFAULT_PRICE_BASIS,
     _append_filter,
     _clean_name,
@@ -78,7 +77,7 @@ class DuckDbBarsStore:
         if not rows:
             return 0
         frame = pd.DataFrame(rows, columns=["market", "code", "name"])
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 drain_result(connection)
@@ -128,7 +127,7 @@ class DuckDbBarsStore:
         if not rows:
             return 0
         frame = pd.DataFrame(rows).drop_duplicates(subset=["market", "code"], keep="last")
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 drain_result(connection)
@@ -215,7 +214,7 @@ class DuckDbBarsStore:
             source="local",
             price_basis=price_basis,
         )
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 compare_columns = ", ".join(_BAR_INDICATOR_COLUMNS)
@@ -338,7 +337,7 @@ class DuckDbBarsStore:
         incoming = incoming.sort_values(
             ["market", "code", "trade_date"], kind="stable"
         ).reset_index(drop=True)
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 drain_result(connection)
@@ -462,7 +461,7 @@ class DuckDbBarsStore:
             conditions.append("trade_date <= ?")
             parameters.append(end_date)
         where = f" WHERE {' AND '.join(conditions)}" if conditions else ""
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 row = connection.execute(
@@ -498,7 +497,7 @@ class DuckDbBarsStore:
         ).drop_duplicates()
         if symbols.empty:
             return 0
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 drain_result(connection)
@@ -795,7 +794,7 @@ class DuckDbBarsStore:
         if prepared is None:
             return (0, 0)
         incoming, names_by_key = prepared
-        with _WRITE_LOCK, self._store.write_transaction() as connection:
+        with self._store.locked_write_transaction() as connection:
             return self._upsert_online_frame(connection, incoming, provider, names_by_key)
 
     def upsert_online_bars_many(
@@ -824,7 +823,7 @@ class DuckDbBarsStore:
         names_by_key: dict[tuple[str, str], str | None] = {}
         for _, item in active:
             names_by_key.update(item[1])
-        with _WRITE_LOCK, self._store.write_transaction() as connection:
+        with self._store.locked_write_transaction() as connection:
             drain_result(connection)
             connection.register("_incoming_online_bars", incoming)
             try:
@@ -1056,7 +1055,7 @@ class DuckDbBarsStore:
         steps = len(paths) + 2
         done = 0
         attached: list[str] = []
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             try:
                 for index, path in enumerate(paths):
                     alias = f"sync_stage_{index}"
@@ -1269,7 +1268,7 @@ class DuckDbBarsStore:
     def _count_matching_keys(self, frame: pd.DataFrame) -> int:
         if frame.empty:
             return 0
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             drain_result(connection)
             connection.register("_keys", frame[["market", "code", "trade_date", "price_basis"]])
             value = connection.execute(
@@ -1365,7 +1364,7 @@ class DuckDbBarsStore:
             f"FROM daily_bars AS bars{join_clause} WHERE {' AND '.join(conditions)} "
             "ORDER BY bars.trade_date"
         )
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             if symbols:
                 drain_result(connection)
                 connection.register("_requested_symbols", symbol_frame)
@@ -1379,7 +1378,7 @@ class DuckDbBarsStore:
         再把原因错怪到标的上。
         """
 
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             row = connection.execute(
                 "SELECT MAX(trade_date) FROM daily_bars WHERE bar_status = 'completed'"
                 " AND price_basis = ?",
@@ -1425,7 +1424,7 @@ class DuckDbBarsStore:
                 raise ValueError("交易日历日期超出声明的覆盖范围")
         now = _now()
         rows = [(item, normalized_source, now) for item in dates]
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN TRANSACTION")
             try:
                 connection.executemany(
@@ -1585,7 +1584,7 @@ class DuckDbBarsStore:
         ]
         if not rows:
             return 0
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             # 事件表是 data_revisions() 的哈希输入：半途写入会留下一个既非旧也非新的
             # 事件版本，指标缓存随后无法判定有效性。必须整批原子提交。
             connection.execute("BEGIN")
@@ -1828,7 +1827,7 @@ class DuckDbBarsStore:
             )
 
     def latest_market_trading_date(self, on_or_before: date) -> date | None:
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             row = connection.execute(
                 "SELECT MAX(trade_date) FROM market_trading_calendar WHERE trade_date <= ?",
                 [on_or_before],
@@ -1837,26 +1836,6 @@ class DuckDbBarsStore:
             return None
         value = row[0]
         return value if isinstance(value, date) else date.fromisoformat(str(value)[:10])
-
-    def has_provisional_bars(self, market: str, code: str) -> bool:
-        """Return whether a symbol still needs its intraday bar finalized."""
-
-        with self._store._connect(read_only=True) as connection:
-            row = connection.execute(
-                "SELECT 1 FROM daily_bars "
-                "WHERE market = ? AND code = ? AND bar_status = 'provisional' LIMIT 1",
-                [market.strip().upper(), code.strip()],
-            ).fetchone()
-        return row is not None
-
-    def list_provisional_symbols(self) -> set[tuple[str, str]]:
-        """Read all symbols with provisional bars in one bounded query."""
-
-        with self._store._connect(read_only=True) as connection:
-            rows = connection.execute(
-                "SELECT DISTINCT market, code FROM daily_bars WHERE bar_status = 'provisional'"
-            ).fetchall()
-        return {(str(market), str(code)) for market, code in rows}
 
     def read_many_bars(
         self,
@@ -1908,7 +1887,7 @@ class DuckDbBarsStore:
                 " INNER JOIN _requested_symbols AS requested"
                 " ON bars.market = requested.market AND bars.code = requested.code"
             )
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             if symbols:
                 drain_result(connection)
                 connection.register("_requested_symbols", symbol_frame)
@@ -1987,7 +1966,7 @@ class DuckDbBarsStore:
             " INNER JOIN _requested_symbols AS requested"
             " ON bars.market = requested.market AND bars.code = requested.code" + where
         )
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             drain_result(connection)
             connection.register("_requested_symbols", symbol_frame)
             try:
@@ -2027,7 +2006,7 @@ class DuckDbBarsStore:
             " ON bars.market = requested.market AND bars.code = requested.code"
             f" WHERE {' AND '.join(conditions)} GROUP BY bars.market, bars.code"
         )
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             drain_result(connection)
             connection.register("_requested_symbols", symbol_frame)
             try:
@@ -2106,7 +2085,7 @@ class DuckDbBarsStore:
         """
         parameters: list[object] = [price_basis] if price_basis is not None else []
         parameters.append(count)
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             drain_result(connection)
             connection.register("_requested_symbols", symbol_frame)
             try:
@@ -2125,7 +2104,7 @@ class DuckDbBarsStore:
         否则列表里的价会和取出来的行情对不上。
         """
 
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             rows = connection.execute(
                 """
                 SELECT market, code, arg_max(close, trade_date) AS last_close,
@@ -2152,7 +2131,7 @@ class DuckDbBarsStore:
         就是这一种价格基准，别的基准留在库里不代表今天已经下完。
         """
 
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             rows = connection.execute(
                 """
                 SELECT market, code, max(trade_date) AS last_date
@@ -2215,7 +2194,7 @@ class DuckDbBarsStore:
             + (f" WHERE {' AND '.join(conditions)}" if conditions else "")
             + " ORDER BY instruments.market, instruments.code"
         )
-        with _WRITE_LOCK, self._store._connect(read_only=True) as connection:
+        with self._store.locked_read_session() as connection:
             # CTE 里的占位符在整条 SQL 中出现得最早，绑定值必须排在最前面。
             rows = connection.execute(query, [DEFAULT_PRICE_BASIS, *parameters]).fetchall()
         return [

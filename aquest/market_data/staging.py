@@ -15,6 +15,8 @@ from typing import Any, Literal
 import duckdb
 import pandas as pd
 
+from aquest.errors import error_reason
+
 from .models import MarketDataProvider
 from .store_base import DEFAULT_PRICE_BASIS, drain_result
 
@@ -30,13 +32,6 @@ _SUCCESS_STEP = 32
 # 也必须有一份，否则 worker 第一次请求就会 KeyError——东财那个桶是历史遗留，
 # 只给它建状态会让「主源」反而没有限流记录。
 _RATE_LIMITED_PROVIDERS: tuple[MarketDataProvider, ...] = ("eastmoney", "tencent")
-_RATE_STATE_KEYS = (
-    "next_allowed_{provider}",
-    "interval_{provider}",
-    "successes_{provider}",
-    "rate_limit_events_{provider}",
-    "backoffs_{provider}",
-)
 _LATEST_COLUMNS = ("date", "open", "high", "low", "close", "volume", "amount", "bar_status")
 _STAGE_COLUMNS = (
     "market",
@@ -599,7 +594,7 @@ def run_stage_worker(request: StageWorkerRequest) -> StageWorkerResult:
             except MarketDataCancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 - isolate one instrument
-                reason = str(exc).strip()[:200] or type(exc).__name__
+                reason = error_reason(exc)
                 failures[reason] += 1
                 writer.write_target(
                     target,

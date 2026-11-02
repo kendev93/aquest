@@ -226,9 +226,6 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
             price_basis=price_basis,
         )
 
-    def has_provisional_bars(self, market: str, code: str) -> bool:
-        return self._bars.has_provisional_bars(market, code)
-
     def upsert_corporate_actions(
         self,
         actions: Sequence[CorporateAction],
@@ -273,9 +270,6 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
 
     def rebuild_trading_calendar_from_bars(self) -> int:
         return self._bars.rebuild_trading_calendar_from_bars()
-
-    def list_provisional_symbols(self) -> set[tuple[str, str]]:
-        return self._bars.list_provisional_symbols()
 
     def read_many_bars(
         self,
@@ -819,13 +813,6 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
 
     def delete_candidate(self, candidate_id: str) -> bool:
         return self._history.delete_candidate(candidate_id)
-
-    def update_strategy_summary(
-        self,
-        strategy_id: str,
-        summary: Mapping[str, object],
-    ) -> dict[str, object] | None:
-        return self._history.update_strategy_summary(strategy_id, summary)
 
     def start_strategy_tracking(
         self,

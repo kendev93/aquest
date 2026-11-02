@@ -78,10 +78,6 @@ def status_label(status: str) -> str:
     return STATUS_LABELS.get(status, status)
 
 
-def side_label(side: str) -> str:
-    return SIDE_LABELS.get(side, side)
-
-
 def can_transition(current: str, target: str) -> bool:
     return target in ALLOWED_TRANSITIONS.get(current, ())
 

@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from aquest.concurrency import MAX_WORKERS
+from aquest.errors import error_reason
 from aquest.formulas.common import validate_market_data
 from aquest.formulas.registry import FORMULA_REGISTRY, FormulaRegistry
 from aquest.formulas.types import FormulaResult
@@ -25,7 +26,6 @@ from aquest.indicators.cache import (
     chunk_data_fingerprint,
     chunk_source_hash,
     frame_fingerprint,
-    merge_results,
 )
 from aquest.market_data.adjustment import CorporateAction, mark_adjusted
 from aquest.market_data.models import InstrumentBoard, InstrumentType, StockRef
@@ -316,7 +316,7 @@ class IndicatorPrecomputeService:
                         try:
                             outcome = future.result()
                         except Exception as exc:  # noqa: BLE001 - isolate one instrument
-                            reason = str(exc).strip()[:200] or type(exc).__name__
+                            reason = error_reason(exc)
                             failures[reason] += 1
                             failed_keys.add(key)
                             logger.warning("指标预计算 %s 失败，已跳过", key[1], exc_info=True)
@@ -352,7 +352,7 @@ class IndicatorPrecomputeService:
                             preserve_other_chunks=True,
                         )
                     except (OSError, RuntimeError, ValueError) as exc:
-                        reason = str(exc).strip()[:200] or type(exc).__name__
+                        reason = error_reason(exc)
                         failures[reason] += 1
                         logger.warning("指标缓存写入失败，本批跳过", exc_info=True)
                         failed_keys.update(write_results)
@@ -627,12 +627,6 @@ def _frame_bounds(frame: pd.DataFrame) -> tuple[date | None, date | None]:
         head.date() if hasattr(head, "date") else None,
         tail.date() if hasattr(tail, "date") else None,
     )
-
-
-def _merge_segments(segments: list[FormulaResult]) -> FormulaResult:
-    """Concatenate consecutive yearly segments back into one series."""
-
-    return merge_results(segments)
 
 
 def _prepare_frame(

@@ -6,7 +6,7 @@ import json
 from collections.abc import Mapping
 from datetime import datetime
 
-from .store_base import _WRITE_LOCK, MarketDataStoreError, _DuckDbStoreBase, _now
+from .store_base import MarketDataStoreError, _DuckDbStoreBase, _now
 from .store_history_common import (
     _CANDIDATE_COLUMNS,
     _CANDIDATE_STATUSES,
@@ -39,7 +39,7 @@ class CandidateHistoryMixin:
     ) -> dict[str, object] | None:
         """Look up a candidate by where it came from (入库去重用)。"""
 
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             row = connection.execute(
                 f"SELECT {_CANDIDATE_COLUMNS} FROM {CANDIDATE_LIBRARY_TABLE} "
                 "WHERE source_history_id = ? AND source_candidate_id = ? LIMIT 1",
@@ -77,7 +77,7 @@ class CandidateHistoryMixin:
         if len(normalized_note) > CANDIDATE_NOTE_MAX_LENGTH:
             raise ValueError(f"候选备注不能超过 {CANDIDATE_NOTE_MAX_LENGTH} 个字符")
         created = _normalize_timestamp(created_at, _now())
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 connection.execute(
@@ -138,14 +138,14 @@ class CandidateHistoryMixin:
                 "ORDER BY updated_at DESC, candidate_id DESC"
             )
             parameters = []
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             rows = connection.execute(sql, parameters).fetchall()
         return [_decode_candidate_row(row) for row in rows]
 
     def read_candidate(self, candidate_id: str) -> dict[str, object] | None:
         """Read one stored candidate."""
 
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             row = connection.execute(
                 f"SELECT {_CANDIDATE_COLUMNS} FROM {CANDIDATE_LIBRARY_TABLE} "
                 "WHERE candidate_id = ?",
@@ -197,7 +197,7 @@ class CandidateHistoryMixin:
         assignments.append("updated_at = ?")
         parameters.append(_now())
         parameters.append(normalized_id)
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 updated = connection.execute(
@@ -220,7 +220,7 @@ class CandidateHistoryMixin:
         normalized_id = candidate_id.strip()
         if not normalized_id:
             return False
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             deleted = connection.execute(
                 f"DELETE FROM {CANDIDATE_LIBRARY_TABLE} WHERE candidate_id = ? "
                 "RETURNING candidate_id",
@@ -264,7 +264,7 @@ class CandidateHistoryMixin:
         normalized_source = (source_history_id or "").strip() or None
         encoded_request = json.dumps(dict(request), ensure_ascii=False, separators=(",", ":"))
         encoded_summary = json.dumps(dict(summary), ensure_ascii=False, separators=(",", ":"))
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 name_taken = connection.execute(

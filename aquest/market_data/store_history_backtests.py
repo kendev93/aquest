@@ -9,7 +9,6 @@ from datetime import datetime
 
 from .store_base import (
     _BACKTEST_HISTORY_TYPES,
-    _WRITE_LOCK,
     BACKTEST_HISTORY_LIMIT,
     _DuckDbStoreBase,
     _now,
@@ -66,7 +65,7 @@ class BacktestHistoryMixin:
         request_payload = dict(request)
         result_payload = dict(result)
         summary = _backtest_history_summary(result_payload, backtest_type)
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 connection.execute(
@@ -148,7 +147,7 @@ class BacktestHistoryMixin:
         if count < 0:
             raise ValueError("检验条件数不能为负数")
         created = _normalize_timestamp(created_at, _now())
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 connection.execute(
@@ -186,7 +185,7 @@ class BacktestHistoryMixin:
     def list_research_trials(self) -> list[dict[str, object]]:
         """Return every recorded trial, oldest first."""
 
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             rows = connection.execute(
                 """
                 SELECT history_id, created_at, data_fingerprint,
@@ -214,7 +213,7 @@ class BacktestHistoryMixin:
         """
 
         self._store._require_writer()
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             connection.execute("BEGIN")
             try:
                 total = connection.execute(
@@ -232,7 +231,7 @@ class BacktestHistoryMixin:
         """Return recent summaries for one kind of backtest."""
 
         _validate_backtest_history_type(backtest_type)
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             rows = connection.execute(
                 f"""
                 SELECT {_BACKTEST_HISTORY_LIST_COLUMNS}
@@ -258,7 +257,7 @@ class BacktestHistoryMixin:
         """
 
         limit = max(1, limit_per_type)
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             rows = connection.execute(
                 f"""
                 SELECT {_BACKTEST_HISTORY_LIST_COLUMNS}
@@ -301,7 +300,7 @@ class BacktestHistoryMixin:
         if not ids:
             return []
         placeholders = ", ".join("?" for _ in ids)
-        with self._store._connect(read_only=True) as connection:
+        with self._store.read_session() as connection:
             rows = connection.execute(
                 f"""
                 SELECT {_BACKTEST_HISTORY_FULL_COLUMNS}
@@ -323,7 +322,7 @@ class BacktestHistoryMixin:
         normalized_id = history_id.strip()
         if not normalized_id:
             return False
-        with _WRITE_LOCK, self._store._connect() as connection:
+        with self._store.locked_write_connection() as connection:
             deleted = connection.execute(
                 "DELETE FROM backtest_history WHERE history_id = ? RETURNING history_id",
                 [normalized_id],

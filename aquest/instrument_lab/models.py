@@ -7,7 +7,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 # 前瞻收益的 horizon：当日收盘 → N 日后收盘，与因子检验同一口径。
@@ -203,10 +203,3 @@ def thin_indices(count: int, limit: int = MAX_TIMELINE_POINTS) -> tuple[int, ...
     if indices[-1] != count - 1:
         indices[-1] = count - 1
     return tuple(indices)
-
-
-def thin_values(
-    values: Sequence[float | None], limit: int = MAX_TIMELINE_POINTS
-) -> list[float | None]:
-    indices = thin_indices(len(values), limit)
-    return [values[index] for index in indices]

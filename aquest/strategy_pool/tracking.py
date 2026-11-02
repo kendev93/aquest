@@ -408,10 +408,3 @@ def replay_account(
         summary=summary,
         report=detail,
     )
-
-
-def snapshot_cache_key(version: Mapping[str, Any], previous: Mapping[str, Any] | None) -> str:
-    checkpoint = previous.get("checkpoint") if previous else None
-    return hashlib.sha256(
-        dumps([version["market"], version["code"], version["signature"], checkpoint]).encode()
-    ).hexdigest()
