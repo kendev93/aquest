@@ -24,7 +24,14 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./requirements.txt
-RUN python -m pip install --no-cache-dir --require-hashes -r requirements.txt
+# 构建期取包源。默认官方 PyPI；国内网络在没有代理时 pypi.org 会被 TLS 掐断
+# （`SSLEOFError: UNEXPECTED_EOF_WHILE_READING` → "No matching distribution found"），
+# 这时把源换成镜像站就能构建：
+#   PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ sh scripts/start.sh
+# 换源不改变可信性：--require-hashes 仍逐文件比对 requirements.txt 里的 sha256，
+# 镜像站只是另一条传输通道，文件内容必须和锁文件一致才装得上。
+ARG PIP_INDEX_URL=https://pypi.org/simple
+RUN python -m pip install --no-cache-dir --require-hashes --index-url "${PIP_INDEX_URL}" -r requirements.txt
 
 COPY README.md LICENSE THIRD_PARTY_NOTICES.md ./
 COPY aquest ./aquest

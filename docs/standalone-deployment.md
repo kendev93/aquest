@@ -28,6 +28,26 @@ sh scripts/start.sh
 > ⚠️ 直接敲 `docker compose up -d` **不会**重建已有镜像。代码改了却忘记 `--build`，
 > 容器会静默继续跑旧镜像——这是从旧启动脚本迁过来最容易踩的坑。
 
+### 构建时拉不到 Python 依赖
+
+镜像里唯一需要联网装包的是 `pip install --require-hashes -r requirements.txt`。不开代理时
+国内直连 pypi.org 常在 TLS 上被掐断，构建会报：
+
+```text
+SSLError(SSLEOFError ... /simple/alembic/)
+ERROR: No matching distribution found for alembic==1.20.1
+```
+
+把这一步的源换成镜像站即可，一行就行（值走 `.env` 里的 `PIP_INDEX_URL` 也一样）：
+
+```bash
+PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/ sh scripts/start.sh
+```
+
+换源不放松校验：`--require-hashes` 会逐文件比对锁文件里的 sha256，镜像站只是另一条传输
+通道，文件内容对不上就装不上。不设 `PIP_INDEX_URL` 时默认仍是官方 PyPI，CI 不受影响。
+注意它只在构建期生效，不会写进运行中的容器；换了源会让 pip 那一层缓存失效、重装一次依赖。
+
 打开 `http://127.0.0.1:${WEB_PORT:-5173}`。首次进入后触发一次全市场同步，行情会存进数据卷。
 
 ## 数据放在哪里

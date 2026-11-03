@@ -128,3 +128,30 @@ def test_image_tag_must_be_set_explicitly() -> None:
     compose = COMPOSE.read_text(encoding="utf-8")
 
     assert compose.count("${AQUEST_IMAGE:?") == 2
+
+
+def test_pip_index_is_an_opt_in_build_argument() -> None:
+    """构建期取包源可以换，但默认必须是官方 PyPI，而且换源不能放松哈希校验。
+
+    直连 pypi.org 在部分网络会在 TLS 上被掐断（`SSLEOFError` → "No matching distribution
+    found"），整场构建挂在装依赖这一层。镜像站只是另一条传输通道：`--require-hashes`
+    仍然逐文件比对锁文件里的 sha256，所以这里同时钉住"默认没被改成镜像站"和"哈希没被去掉"。
+    """
+
+    dockerfile = (PROJECT_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    compose = COMPOSE.read_text(encoding="utf-8")
+    env_example = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
+
+    assert "ARG PIP_INDEX_URL=https://pypi.org/simple" in dockerfile
+    install = next(
+        line
+        for line in dockerfile.splitlines()
+        if "pip install" in line and "requirements.txt" in line
+    )
+    assert "--require-hashes" in install
+    assert '--index-url "${PIP_INDEX_URL}"' in install
+    assert "PIP_INDEX_URL: " not in dockerfile  # 只读构建参数，不污染运行期环境
+    assert compose.count('PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.org/simple}"') == 2, (
+        "两个服务共用同一镜像，构建参数必须一致，否则会重复构建"
+    )
+    assert "PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/" in env_example

@@ -131,7 +131,12 @@ run_docker_checks() {
   AQUEST_IMAGE=aquest-backend:ci DATA_DIR="$compose_fixture" \
     docker compose -f docker-compose.yml -f docker-compose.bind.yml config --quiet
   cleanup_compose_fixture
-  docker build --file Dockerfile --tag aquest-backend:ci .
+  # 装依赖是镜像里唯一的联网点：不开代理时直连 pypi.org 会 SSL EOF，所以把构建期
+  # 取包源从环境透传进去（默认官方源，CI 不受影响）。
+  docker build \
+    --build-arg PIP_INDEX_URL="${PIP_INDEX_URL:-https://pypi.org/simple}" \
+    --file Dockerfile \
+    --tag aquest-backend:ci .
 }
 
 case "$mode" in

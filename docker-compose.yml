@@ -21,6 +21,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # 构建期 PyPI 源，只在重建镜像时用；不设就走官方源。见 Dockerfile。
+        PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.org/simple}"
     environment:
       PYTHONUNBUFFERED: "1"
       AQUEST_DATA_DIR: /data/market
@@ -50,6 +53,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # 构建期 PyPI 源，只在重建镜像时用；不设就走官方源。见 Dockerfile。
+        PIP_INDEX_URL: "${PIP_INDEX_URL:-https://pypi.org/simple}"
     environment:
       PYTHONUNBUFFERED: "1"
       AQUEST_DATA_DIR: /data/market
