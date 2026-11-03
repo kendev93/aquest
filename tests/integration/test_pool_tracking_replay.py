@@ -1,4 +1,6 @@
+import json
 import time
+import zlib
 
 import pandas as pd
 import pytest
@@ -2061,13 +2063,8 @@ def test_pool_entry_list_keeps_holding_risk_lines_but_not_the_snapshot(tmp_path)
     assert row["tracking_as_of_date"] == "2026-09-03"
 
 
-def test_worker_replay_reads_its_own_previous_checkpoint(tmp_path, monkeypatch) -> None:
-    """回放进程自己读上一份检查点：主进程不再预取、解压、塞进进程间参数。
-
-    读不到时按「没有历史」整段重放——结果一样，只是慢一点，不能把这只看成失败。
-    """
-
-    from aquest.strategy_pool import tracking_runner as runner_module
+def test_snapshot_blobs_returns_compressed_blocks_without_decompressing(tmp_path) -> None:
+    """整批取检查点时只搬压缩字节：解压放到回放进程里并行做。"""
 
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     store.replace_local_bars("SH", "600000", "stock", bars(3))
@@ -2084,16 +2081,27 @@ def test_worker_replay_reads_its_own_previous_checkpoint(tmp_path, monkeypatch) 
                       '2026-09-02T00:00:00')
             """
         )
-    tracks.save_snapshot(
-        "v1",
-        "sig",
-        *encode_snapshot(
-            {
-                "summary": {"as_of_date": "2026-09-03"},
-                "checkpoint": {"processed_dates": [], "equity": []},
-            }
-        ),
-    )
+    payload = {
+        "summary": {"as_of_date": "2026-09-03"},
+        "checkpoint": {"processed_dates": [], "equity": []},
+    }
+    assert tracks.save_snapshot("v1", "sig", *encode_snapshot(payload))
+
+    blobs = tracks.snapshot_blobs(["v1", "missing"])
+
+    assert list(blobs) == ["v1"]
+    assert isinstance(blobs["v1"], bytes) and blobs["v1"]
+    assert json.loads(zlib.decompress(blobs["v1"])) == tracks.snapshot("v1")
+
+
+def test_worker_replay_uses_the_prefetched_checkpoint_blob(tmp_path) -> None:
+    """回放进程从主进程传来的压缩块接着回放；块坏了解析失败就整段重放，不判失败。"""
+
+    from aquest.strategy_pool import tracking_runner as runner_module
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", bars(3))
+    runner_module._initialize(str(store.database_path))
     version = {
         "version_id": "v1",
         "market": "SH",
@@ -2104,85 +2112,48 @@ def test_worker_replay_reads_its_own_previous_checkpoint(tmp_path, monkeypatch) 
         "launch_data_date": "2026-09-01",
         "created_at": "2026-09-01T00:00:00+00:00",
     }
+    previous = {
+        "summary": {"as_of_date": "2026-09-02"},
+        "checkpoint": {"processed_dates": [], "equity": []},
+    }
 
-    reads: list[list[str]] = []
-    real_snapshots = PoolTrackingStore.snapshots
+    blob, summary, compute_s = runner_module._replay(
+        version, zlib.compress(json.dumps(previous).encode())
+    )
 
-    def spy(self, version_ids):  # noqa: ANN001, ANN202
-        reads.append(list(version_ids))
-        return real_snapshots(self, version_ids)
-
-    monkeypatch.setattr(PoolTrackingStore, "snapshots", spy)
-    runner_module._initialize(str(store.database_path))
-
-    blob, summary, compute_s, load_s = runner_module._replay(version)
-
-    assert reads == [["v1"]]
     assert compute_s > 0
-    assert load_s >= 0
     assert summary["as_of_date"] == "2026-09-03"
     assert isinstance(blob, str) and blob
 
-    def broken(self, version_ids):  # noqa: ANN001, ANN202
-        raise RuntimeError("状态库暂时读不到")
-
-    monkeypatch.setattr(PoolTrackingStore, "snapshots", broken)
-    blob, summary, _, _ = runner_module._replay(version)
+    # 坏的检查点块不能把这只标的判成失败：解析不了就整段重放。
+    blob, summary, _ = runner_module._replay(version, b"not-a-snapshot")
     assert summary["as_of_date"] == "2026-09-03"
 
 
-def test_worker_replay_batch_reads_checkpoints_once(tmp_path, monkeypatch) -> None:
-    """一批标的只读一次检查点；其中一只失败不连累同批其它标的。"""
+def test_worker_replay_batch_isolates_failures(tmp_path) -> None:
+    """一批共用一个预取窗口；其中一只失败不连累同批其它标的。"""
 
     from aquest.strategy_pool import tracking_runner as runner_module
 
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     for market, code in (("SH", "600000"), ("SZ", "000001")):
         store.replace_local_bars(market, code, "stock", bars(3))
-    reads: list[list[str]] = []
-    real_snapshots = PoolTrackingStore.snapshots
-
-    def spy(self, version_ids):  # noqa: ANN001, ANN202
-        reads.append(list(version_ids))
-        return real_snapshots(self, version_ids)
-
-    monkeypatch.setattr(PoolTrackingStore, "snapshots", spy)
     runner_module._initialize(str(store.database_path))
+    base = {
+        "signature": "sig",
+        "candidate": candidate(),
+        "target_data_date": "2026-09-03",
+        "created_at": "2026-09-01T00:00:00+00:00",
+    }
     versions = [
-        {
-            "version_id": "v1",
-            "market": "SH",
-            "code": "600000",
-            "signature": "sig",
-            "candidate": candidate(),
-            "target_data_date": "2026-09-03",
-            "created_at": "2026-09-01T00:00:00+00:00",
-        },
-        {
-            "version_id": "v2",
-            "market": "SZ",
-            "code": "000001",
-            "signature": "sig",
-            "candidate": candidate(),
-            "target_data_date": "2026-09-03",
-            "created_at": "2026-09-01T00:00:00+00:00",
-        },
-        {
-            "version_id": "v3",
-            "market": "SH",
-            "code": "999999",
-            "signature": "sig",
-            "candidate": candidate(),
-            "target_data_date": "2026-09-03",
-            "created_at": "2026-09-01T00:00:00+00:00",
-        },
+        {**base, "version_id": "v1", "market": "SH", "code": "600000"},
+        {**base, "version_id": "v2", "market": "SZ", "code": "000001"},
+        {**base, "version_id": "v3", "market": "SH", "code": "999999"},
     ]
 
-    outcomes, load_s = runner_module._replay_batch(versions)
+    outcomes = runner_module._replay_batch(versions, [None, None, None])
 
-    assert reads == [["v1", "v2", "v3"]]
     assert [status for status, _ in outcomes] == ["ok", "ok", "error"]
-    assert load_s >= 0
     for status, payload in outcomes[:2]:
         blob, summary, compute_s = payload
         assert compute_s > 0

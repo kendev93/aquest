@@ -539,6 +539,25 @@ class PoolTrackingStore:
             ).fetchone()
         return json.loads(zlib.decompress(bytes(row[0]))) if row and row[0] else None
 
+    def snapshot_blobs(self, version_ids: Sequence[str]) -> dict[str, bytes]:
+        """整批取压缩块（不解压）：解压放到回放进程里并行做。
+
+        回放进程自己去开状态库会和 backend 的写事务抢跨进程锁（2026-11-03 实测大量
+        「状态库当前被其它进程占用」→ 整段重放），所以读取仍由主进程整批做一次。
+        """
+
+        ids = [str(item) for item in version_ids if item]
+        if not ids:
+            return {}
+        placeholders = ", ".join("?" for _ in ids)
+        with self.store.state_read_session() as connection:
+            rows = connection.execute(
+                "SELECT version_id, snapshot FROM pool_tracking_versions "
+                f"WHERE version_id IN ({placeholders})",
+                ids,
+            ).fetchall()
+        return {str(version_id): bytes(blob) for version_id, blob in rows if blob}
+
     def snapshots(self, version_ids: Sequence[str]) -> dict[str, dict[str, Any]]:
         """一次取多只的检查点。
 

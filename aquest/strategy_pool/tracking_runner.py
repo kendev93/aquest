@@ -7,6 +7,7 @@ import logging
 import math
 import multiprocessing
 import time
+import zlib
 from collections.abc import Callable, Mapping
 from concurrent.futures import (
     FIRST_COMPLETED,
@@ -48,9 +49,6 @@ from .tracking import account_summary, replay_account
 from .tracking_store import ENGINE_VERSION, OBJECTIVES, PoolTrackingStore, encode_snapshot
 
 _WORKER_SERVICE: PortfolioBacktestService | None = None
-#: 回放进程自己读上一份检查点：主进程不再预取、解压再传进来（全量扫描实测省下约 98 秒
-#: 串行解压和 4,261 次 1 MB 级 IPC 入参）。
-_WORKER_TRACKS: PoolTrackingStore | None = None
 logger = logging.getLogger(__name__)
 
 #: 一次批量上报多少只跟踪快照。64 只 × 4 个参数远低于 SQLite 的 999 变量上限，
@@ -59,6 +57,8 @@ SNAPSHOT_BATCH_SIZE = 64
 #: 一个回放任务领多少只：整批只开一次状态库连接读检查点（全量扫描实测逐只打开
 #: 0.67 秒/只），单只慢票对整轮的拖尾也只有一批的量。
 REPLAY_CHUNK_SIZE = 12
+#: 一次预取多少只的上一份检查点压缩块（块已压缩，一只约 0.3 MB）。
+SNAPSHOT_PREFETCH = 64
 #: 跟踪扫描的并发起步与爬坡。默认从 1 个、每 30 秒 +1，全量扫描前 3.5 分钟都在爬坡；
 #: 实际并发仍受内存与 CPU 压力上限约束。
 TRACKING_RAMP_INITIAL_WORKERS = 4
@@ -66,31 +66,13 @@ TRACKING_RAMP_INTERVAL_SECONDS = 2.0
 
 
 def _initialize(database_path: str) -> None:
-    global _WORKER_SERVICE, _WORKER_TRACKS
+    global _WORKER_SERVICE
     store = DuckDbMarketDataStore(database_path, read_only=True)
     adapter = DuckDbMarketDataAdapter(store, cache_stock_reads=True)
     cache_store = store if store.indicator_cache_backend == "sqlite" else None
     _WORKER_SERVICE = PortfolioBacktestService(
         adapter=adapter, indicator_cache=IndicatorCache(cache_store, max_memory_entries=64)
     )
-    _WORKER_TRACKS = PoolTrackingStore(store)
-
-
-def _load_previous(version_ids: list[str]) -> tuple[dict[str, dict[str, Any]], float]:
-    """整批读上一份检查点：一次连接摊掉逐只打开状态库的开销。
-
-    全量扫描实测逐只打开 0.67 秒/只（跨进程只读连接与 backend 的写事务抢锁、走重试），
-    整批读一次后这部分开销按批摊薄。读不到就整段重放——结果一样、只是慢，不能判失败。
-    """
-
-    if _WORKER_TRACKS is None or not version_ids:
-        return {}, 0.0
-    started = time.monotonic()
-    try:
-        return _WORKER_TRACKS.snapshots(version_ids), time.monotonic() - started
-    except Exception as exc:  # noqa: BLE001 - 读不到就整段重放，不能判失败
-        logger.warning("读取跟踪检查点失败，本轮整段重放: %s", exc)
-        return {}, time.monotonic() - started
 
 
 def _final_summary(version: dict[str, Any], snapshot: dict[str, Any]) -> None:
@@ -158,9 +140,13 @@ def _weak_trading_days(
 
 
 def _replay_one(
-    version: dict[str, Any], previous: dict[str, Any] | None
+    version: dict[str, Any], previous_blob: bytes | None
 ) -> tuple[str, dict[str, Any], float]:
-    """回放一只并压好快照：返回（压缩块, 最终摘要, 计算耗时）。"""
+    """回放一只并压好快照：返回（压缩块, 最终摘要, 计算耗时）。
+
+    上一份检查点由主进程整批读好、以压缩块传进来（回放进程自己开状态库会和 backend
+    的写事务抢跨进程锁），这里只负责解压解析；解析失败就整段重放，不能判失败。
+    """
 
     if _WORKER_SERVICE is None:
         raise RuntimeError("跟踪回放进程未初始化")
@@ -169,6 +155,12 @@ def _replay_one(
     if callable(clear):
         clear()
     ref = adapter.stock_ref("", version["market"], version["code"])
+    previous: dict[str, Any] | None = None
+    if previous_blob is not None:
+        try:
+            previous = json.loads(zlib.decompress(previous_blob))
+        except (TypeError, ValueError, zlib.error) as exc:
+            logger.warning("上一份跟踪检查点无法解析，本轮整段重放 %s: %s", ref.symbol, exc)
     started = time.monotonic()
     snapshot = replay_account(_WORKER_SERVICE, ref, version, previous)
     _final_summary(version, snapshot)
@@ -176,31 +168,28 @@ def _replay_one(
     return blob, summary, time.monotonic() - started
 
 
-def _replay(version: dict[str, Any]) -> tuple[str, dict[str, Any], float, float]:
-    """回放一只标的，带回进程内耗时（检查点读取、回放计算）。"""
+def _replay(
+    version: dict[str, Any], previous_blob: bytes | None = None
+) -> tuple[str, dict[str, Any], float]:
+    """回放一只标的（单只路径/测试用）。"""
 
-    previous, load_s = _load_previous([str(version["version_id"])])
-    blob, summary, compute_s = _replay_one(version, previous.get(str(version["version_id"])))
-    return blob, summary, compute_s, load_s
+    return _replay_one(version, previous_blob)
 
 
 def _replay_batch(
-    versions: list[dict[str, Any]],
-) -> tuple[list[tuple[str, Any]], float]:
-    """一批标的共用一次状态库连接；单只失败不连累同批其它标的。"""
+    versions: list[dict[str, Any]], previous_blobs: list[bytes | None]
+) -> list[tuple[str, Any]]:
+    """一批标的共用同一份预取的检查点块；单只失败不连累同批其它标的。"""
 
-    previous, load_s = _load_previous([str(version["version_id"]) for version in versions])
     outcomes: list[tuple[str, Any]] = []
-    for version in versions:
+    for version, previous_blob in zip(versions, previous_blobs, strict=True):
         try:
-            blob, summary, compute_s = _replay_one(
-                version, previous.get(str(version["version_id"]))
-            )
+            blob, summary, compute_s = _replay_one(version, previous_blob)
         except Exception as exc:  # noqa: BLE001 - 一只失败不能连累同批
             outcomes.append(("error", str(exc)[:500] or type(exc).__name__))
         else:
             outcomes.append(("ok", (blob, summary, compute_s)))
-    return outcomes, load_s
+    return outcomes
 
 
 def _snapshot_reusable(version: Mapping[str, Any], revision: str | None, target_date: str) -> bool:
@@ -265,6 +254,17 @@ class PoolTrackingRunner:
                 params,
             ).fetchall()
         return {(str(row[0]), str(row[1])): str(row[2] or "") for row in rows}
+
+    def _snapshot_blobs(self, version_ids: list[str]) -> dict[str, bytes]:
+        """整批取上一份检查点的压缩块；读不到就整段重放，跳过只是优化。"""
+
+        if not version_ids:
+            return {}
+        try:
+            return self.tracks.snapshot_blobs(version_ids)
+        except Exception as exc:  # noqa: BLE001 - 复用优化不能反过来让扫描失败
+            logger.warning("读取跟踪检查点失败，本轮整段重放: %s", exc)
+            return {}
 
     def _data_revisions(self, keys: set[tuple[str, str]]) -> dict[tuple[str, str], str]:
         """一次取本轮所有标的的数据修订号；读不到就全部回放，跳过只是优化。"""
@@ -436,6 +436,26 @@ class PoolTrackingRunner:
         if chunk:
             tasks.append((chunk, False))
         work = iter(tasks)
+        replay_ids = [
+            group[0]["version_id"]
+            for group, is_reusable in zip(work_items, reusable, strict=True)
+            if not is_reusable
+        ]
+        blob_window: dict[str, bytes] = {}
+        blob_cursor = 0
+
+        def take_blob(version_id: str) -> bytes | None:
+            """上一份检查点的压缩块：窗口里没有再补一批（正常就是接下来要用的那几只）。"""
+
+            nonlocal blob_cursor
+            if version_id in blob_window:
+                return blob_window.pop(version_id)
+            chunk_ids = replay_ids[blob_cursor : blob_cursor + SNAPSHOT_PREFETCH]
+            blob_cursor += len(chunk_ids)
+            started = time.monotonic()
+            blob_window.update(self._snapshot_blobs(chunk_ids))
+            timing["snapshot_load_s"] += time.monotonic() - started
+            return blob_window.pop(version_id, None)
 
         completed = failed = skipped = 0
         # 逐只写库实测 15.8 ms：一次全市场扫描 4,409 只就是约 70 秒串行写库。批量上报把
@@ -822,7 +842,8 @@ class PoolTrackingRunner:
                         )
                         for group in chunk
                     ]
-                    pending[executor.submit(_replay_batch, versions)] = (
+                    previous_blobs = [take_blob(group[0]["version_id"]) for group in chunk]
+                    pending[executor.submit(_replay_batch, versions, previous_blobs)] = (
                         chunk,
                         executor,
                         time.monotonic(),
@@ -841,7 +862,7 @@ class PoolTrackingRunner:
                 for future in finished:
                     chunk, _executor, submitted_at = pending.pop(future)
                     try:
-                        outcomes, load_s = future.result()
+                        outcomes = future.result()
                     except TaskCancelledError:
                         raise
                     except Exception as exc:
@@ -849,7 +870,6 @@ class PoolTrackingRunner:
                             fail_group(chunk_group, str(exc)[:500])
                         continue
                     elapsed = time.monotonic() - submitted_at
-                    timing["snapshot_load_s"] += load_s
                     computed = 0.0
                     for group, outcome in zip(chunk, outcomes, strict=True):
                         status, outcome_payload = outcome
@@ -863,7 +883,7 @@ class PoolTrackingRunner:
                         timing["replay_compute_s"] += compute_s
                         timing["replayed_symbols"] += len(group)
                         apply_snapshot(group, blob, summary)
-                    timing["replay_overhead_s"] += max(0.0, elapsed - computed - load_s)
+                    timing["replay_overhead_s"] += max(0.0, elapsed - computed)
                 report_progress()
             # 最后一批也要落库：仍走后台线程，避免重复一套同步写。
             flush_snapshots(drain_all=True)
