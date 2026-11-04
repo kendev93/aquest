@@ -79,6 +79,10 @@ export function useStrategyPoolSignalView(options: StrategyPoolSignalViewOptions
     if (typeof full.annual_return === 'number' && Number.isFinite(full.annual_return)) {
       parts.push(`全区间年化 ${formatPercent(full.annual_return)}`)
     }
+    // 夏普夹在年化与胜率之间：它是这三档排序里唯一的「波动调整后收益」，和表格列序一致。
+    if (typeof full.sharpe === 'number' && Number.isFinite(full.sharpe)) {
+      parts.push(`全区间夏普 ${formatNumber(full.sharpe)}`)
+    }
     if (typeof full.win_rate === 'number' && Number.isFinite(full.win_rate)) {
       parts.push(`全区间胜率 ${formatPercent(full.win_rate)}`)
     }
@@ -216,5 +220,8 @@ export function useStrategyPoolSignalView(options: StrategyPoolSignalViewOptions
     sellPageCount,
     holdingsPageCount,
     qualityText,
+    // 风控卖出行是引擎的宽松对象，市场+代码要这样拼；页面拼指标串时用同一个函数，
+    // 不在模板里再写一遍拼接规则。
+    sellItemSymbol,
   }
 }

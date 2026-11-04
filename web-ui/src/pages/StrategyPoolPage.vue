@@ -597,6 +597,7 @@ const {
   sellPageCount,
   holdingsPageCount,
   qualityText,
+  sellItemSymbol,
 } = useStrategyPoolSignalView({
   buySignals,
   sellPanelItems,
@@ -1228,7 +1229,7 @@ function holdingStatus(holding: StrategyPoolHolding): string {
       : '当前持仓中'
   const holdingReturn = typeof holding.holding_return_pct === 'number'
     && Number.isFinite(holding.holding_return_pct)
-    ? `持仓阶段收益 ${formatSignedPercent(holding.holding_return_pct)}`
+    ? `当前持仓收益 ${formatSignedPercent(holding.holding_return_pct)}`
     : ''
   return holdingReturn ? `${holdingReturn} · ${exitLabel}` : exitLabel
 }
@@ -1560,7 +1561,7 @@ onUnmounted(() => {
                 </div>
                 <div v-else class="signal-row risk-signal">
                   <strong>{{ item.signal.market }}{{ item.signal.code }}<template v-if="item.signal.name"> · {{ item.signal.name }}</template></strong>
-                  <span>{{ riskExitFilledText(item.signal) }}<template v-if="riskExitReturnText(item.signal)"> · {{ riskExitReturnText(item.signal) }}</template></span>
+                  <span>{{ riskExitFilledText(item.signal) }}<template v-if="riskExitReturnText(item.signal)"> · {{ riskExitReturnText(item.signal) }}</template><template v-if="qualityText(sellItemSymbol(item))"> · {{ qualityText(sellItemSymbol(item)) }}</template></span>
                   <StrategyPoolFollowButton
                     :target="item.target"
                     :follow-keys="followKeys"
