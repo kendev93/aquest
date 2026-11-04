@@ -574,12 +574,14 @@ def test_tracking_runner_batches_snapshots_and_falls_back_when_the_batch_fails(t
 def test_tracking_runner_reports_phase_timing_and_reuse(tmp_path):
     """计时埋点要能回答「慢在哪一段」：同一份数据第二次扫描必须全命中复用。
 
-    主进程逐只串行做检查点解压与写库压缩，worker 才能并行回放；只有分开记才知道
-    下次该动哪边。复用那一轮的确定性最高：零回放、零检查点读取、零写库。
+    每天全市场重放只多处理一个交易日，但单只的成本是按整段历史付的：读行情、建上下文、
+    前缀校验、账户回放、全历史报告、存档哈希、快照编码各占多少，只有分开记才知道下次该
+    动哪边；解压上一份检查点也在 compute 之外，同样要单独有一份账。复用那一轮的确定性
+    最高：零回放、零检查点读取、零写库，连回放进程都不该起。
     """
 
     from aquest.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
-    from aquest.strategy_pool.tracking_runner import PoolTrackingRunner
+    from aquest.strategy_pool.tracking_runner import REPLAY_PHASE_KEYS, PoolTrackingRunner
 
     store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
     codes = ("600000", "600001")
@@ -621,6 +623,11 @@ def test_tracking_runner_reports_phase_timing_and_reuse(tmp_path):
     assert first["replay_compute_s"] > 0
     assert first["write_s"] > 0
     assert first["total_s"] >= first["replay_wall_s"] > 0
+    # 「慢在哪一段」要能直接读出来：除解压之外的阶段之和必须铺满 compute，
+    # 漏计的那一段会在这里露出来（比如以前没人记的检查点解压）。
+    assert first["decode_s"] == 0  # 第一轮没有上一份检查点可解压
+    covered = sum(first[key] for key in REPLAY_PHASE_KEYS if key != "decode_s")
+    assert covered == pytest.approx(first["replay_compute_s"], abs=0.1)
 
     second = run()["timing"]
     assert second["reused_symbols"] == 2
@@ -628,6 +635,70 @@ def test_tracking_runner_reports_phase_timing_and_reuse(tmp_path):
     assert second["replay_compute_s"] == 0
     assert second["snapshot_load_s"] == 0
     assert second["write_s"] == 0
+    assert all(second[key] == 0 for key in REPLAY_PHASE_KEYS)
+    # 全命中复用不该为一件不干的事去 spawn 进程：建 slot 要 spawn + import。
+    assert second["worker_starts"] == 0
+
+
+def test_tracking_runner_keeps_idle_slots_under_cpu_pressure(tmp_path, monkeypatch):
+    """CPU 压力只该限制「还开几个」，不该拆掉已经建好的 slot。
+
+    并发拉起来之后，抬高分位数的就是我们自己那批 worker：按 CPU 压力回收 slot，下一批
+    又要重新 spawn + import（实测一轮 101 次启动，有效并行只有 2.4/8）。内存告警才是
+    该回收的信号，那时每个活着的 slot 都真的占着那份常驻内存。
+    """
+
+    from aquest.concurrency import visible_cpu_count
+    from aquest.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
+    from aquest.strategy_pool import tracking_runner as runner_module
+    from aquest.strategy_pool.tracking_runner import PoolTrackingRunner
+
+    high_water = min(3, visible_cpu_count())
+    monkeypatch.setenv("AQUEST_STRATEGY_POOL_MAX_WORKERS", str(high_water))
+    # 爬坡间隔归零：压力一解除就立刻允许补 slot，回收过的实现一定会在这里多建进程。
+    monkeypatch.setattr(runner_module, "TRACKING_RAMP_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(runner_module, "REPLAY_CHUNK_SIZE", 1)
+    # 前两轮放开建满，中间三轮按高压压到「只剩在跑的那些」，之后一直放开。
+    loads = iter([0.0] * 2 + [1e6] * 3 + [0.0] * 400)
+    monkeypatch.setattr(runner_module, "get_cpu_load_average_1m", lambda: next(loads, 0.0))
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    codes = tuple(f"60000{i}" for i in range(8))
+    for code in codes:
+        store.replace_local_bars("SH", code, "stock", bars(3))
+    pool = DuckDbStrategyPoolStore(store)
+    for code in codes:
+        pool.upsert_automatic(
+            market="SH",
+            code=code,
+            name="test",
+            annual_candidate=candidate(),
+            sharpe_candidate=None,
+            data_fingerprint="a",
+            config_fingerprint="b",
+            source_job_id="job",
+        )
+    tracks = PoolTrackingStore(store)
+
+    def save(item):
+        return {
+            "saved": tracks.save_snapshots(
+                [(item["version_id"], item["signature"], item["snapshot_blob"], item["summary"])]
+            )[0]
+        }
+
+    result = PoolTrackingRunner(store, EvaluationWorkerBudget(high_water)).run(
+        {"objective": "annual_return", "as_of_date": "2026-09-03"},
+        progress=lambda *args: None,
+        abort_check=lambda: False,
+        writer=save,
+        batch_writer=lambda items: [save(item) for item in items],
+    )
+    timing = result["timing"]
+    assert timing["replayed_symbols"] == len(codes)
+    assert result["failed_symbols"] == 0
+    # 建过的进程数不得超过并发上限：拆掉再重建就会在这里超。
+    assert timing["worker_starts"] <= high_water
 
 
 def test_tracking_runner_keeps_version_status_when_snapshot_transport_is_transient(tmp_path):
@@ -2117,16 +2188,20 @@ def test_worker_replay_uses_the_prefetched_checkpoint_blob(tmp_path) -> None:
         "checkpoint": {"processed_dates": [], "equity": []},
     }
 
-    blob, summary, compute_s = runner_module._replay(
+    blob, summary, compute_s, timings = runner_module._replay(
         version, zlib.compress(json.dumps(previous).encode())
     )
 
     assert compute_s > 0
     assert summary["as_of_date"] == "2026-09-03"
     assert isinstance(blob, str) and blob
+    # 解压在 compute 计时起点之前，必须单独有一份账，否则这段开销谁都不认。
+    assert timings["decode_s"] > 0
+    covered = sum(value for key, value in timings.items() if key != "decode_s")
+    assert covered == pytest.approx(compute_s, abs=0.05)
 
     # 坏的检查点块不能把这只标的判成失败：解析不了就整段重放。
-    blob, summary, _ = runner_module._replay(version, b"not-a-snapshot")
+    blob, summary, _, _ = runner_module._replay(version, b"not-a-snapshot")
     assert summary["as_of_date"] == "2026-09-03"
 
 
@@ -2155,7 +2230,9 @@ def test_worker_replay_batch_isolates_failures(tmp_path) -> None:
 
     assert [status for status, _ in outcomes] == ["ok", "ok", "error"]
     for status, payload in outcomes[:2]:
-        blob, summary, compute_s = payload
+        blob, summary, compute_s, timings = payload
         assert compute_s > 0
         assert summary["as_of_date"] == "2026-09-03"
         assert isinstance(blob, str) and blob
+        # 每只都要带回完整的一套阶段键，缺一段就会被静默当成「没花时间」。
+        assert set(timings) == set(runner_module.REPLAY_PHASE_KEYS)

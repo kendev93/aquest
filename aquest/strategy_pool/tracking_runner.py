@@ -59,10 +59,35 @@ SNAPSHOT_BATCH_SIZE = 64
 REPLAY_CHUNK_SIZE = 12
 #: 一次预取多少只的上一份检查点压缩块（块已压缩，一只约 0.3 MB）。
 SNAPSHOT_PREFETCH = 64
-#: 跟踪扫描的并发起步与爬坡。默认从 1 个、每 30 秒 +1，全量扫描前 3.5 分钟都在爬坡；
-#: 实际并发仍受内存与 CPU 压力上限约束。
+#: 跟踪扫描的并发起步与爬坡：从 4 个起，每 2 秒 +1；实际并发仍受内存与 CPU 压力上限约束。
 TRACKING_RAMP_INITIAL_WORKERS = 4
 TRACKING_RAMP_INTERVAL_SECONDS = 2.0
+#: worker 里按阶段计的耗时键，全部是「各进程之和」，用来看比例，不能和墙钟相加。
+#: ``bars_s``…``finalize_s`` 这 6 项在 tracking.replay_account 里记，``weak_s``/``encode_s``
+#: 是它返回之后的收尾，``decode_s`` 是回放进程解压上一份检查点（在计算计时之前）。
+REPLAY_PHASE_KEYS = (
+    "decode_s",
+    "bars_s",
+    "context_s",
+    "prefix_s",
+    "simulate_s",
+    "summary_s",
+    "finalize_s",
+    "weak_s",
+    "encode_s",
+)
+#: 日志里每个阶段键对应的中文说明（写的是这段时间**覆盖什么**，不是键名）。
+REPLAY_PHASE_LABELS = {
+    "decode_s": "检查点解压",
+    "bars_s": "行情读取",
+    "context_s": "建上下文",
+    "prefix_s": "前缀校验",
+    "simulate_s": "账户回放",
+    "summary_s": "摘要与报告",
+    "finalize_s": "存档哈希",
+    "weak_s": "弱判定与版本摘要",
+    "encode_s": "快照编码",
+}
 
 
 def _initialize(database_path: str) -> None:
@@ -141,11 +166,12 @@ def _weak_trading_days(
 
 def _replay_one(
     version: dict[str, Any], previous_blob: bytes | None
-) -> tuple[str, dict[str, Any], float]:
-    """回放一只并压好快照：返回（压缩块, 最终摘要, 计算耗时）。
+) -> tuple[str, dict[str, Any], float, dict[str, float]]:
+    """回放一只并压好快照：返回（压缩块, 最终摘要, 计算耗时, 阶段耗时）。
 
     上一份检查点由主进程整批读好、以压缩块传进来（回放进程自己开状态库会和 backend
     的写事务抢跨进程锁），这里只负责解压解析；解析失败就整段重放，不能判失败。
+    解压在计时起点之前，所以单独计一份 ``decode_s``，否则这段开销谁都不认。
     """
 
     if _WORKER_SERVICE is None:
@@ -156,21 +182,30 @@ def _replay_one(
         clear()
     ref = adapter.stock_ref("", version["market"], version["code"])
     previous: dict[str, Any] | None = None
+    decode_s = 0.0
     if previous_blob is not None:
+        decode_started = time.monotonic()
         try:
             previous = json.loads(zlib.decompress(previous_blob))
         except (TypeError, ValueError, zlib.error) as exc:
             logger.warning("上一份跟踪检查点无法解析，本轮整段重放 %s: %s", ref.symbol, exc)
+        decode_s = time.monotonic() - decode_started
+    timings: dict[str, float] = {}
     started = time.monotonic()
-    snapshot = replay_account(_WORKER_SERVICE, ref, version, previous)
+    snapshot = replay_account(_WORKER_SERVICE, ref, version, previous, timings)
+    weak_started = time.monotonic()
     _final_summary(version, snapshot)
+    encode_started = time.monotonic()
     blob, summary = encode_snapshot(snapshot)
-    return blob, summary, time.monotonic() - started
+    timings["weak_s"] = encode_started - weak_started
+    timings["encode_s"] = time.monotonic() - encode_started
+    timings["decode_s"] = decode_s
+    return blob, summary, time.monotonic() - started, timings
 
 
 def _replay(
     version: dict[str, Any], previous_blob: bytes | None = None
-) -> tuple[str, dict[str, Any], float]:
+) -> tuple[str, dict[str, Any], float, dict[str, float]]:
     """回放一只标的（单只路径/测试用）。"""
 
     return _replay_one(version, previous_blob)
@@ -184,11 +219,11 @@ def _replay_batch(
     outcomes: list[tuple[str, Any]] = []
     for version, previous_blob in zip(versions, previous_blobs, strict=True):
         try:
-            blob, summary, compute_s = _replay_one(version, previous_blob)
+            blob, summary, compute_s, timings = _replay_one(version, previous_blob)
         except Exception as exc:  # noqa: BLE001 - 一只失败不能连累同批
             outcomes.append(("error", str(exc)[:500] or type(exc).__name__))
         else:
-            outcomes.append(("ok", (blob, summary, compute_s)))
+            outcomes.append(("ok", (blob, summary, compute_s, timings)))
     return outcomes
 
 
@@ -327,10 +362,12 @@ class PoolTrackingRunner:
         batch_writer: Callable[[list[dict[str, Any]]], list[Any]] | None = None,
     ) -> dict[str, Any]:
         run_started = time.monotonic()
-        # 阶段耗时：主进程里逐只串行的工作（检查点解压、写库压缩）和 worker 并行回放
+        # 阶段耗时：主进程里串行的工作（整批读检查点块、写库等待）和 worker 里的并行回放
         # 分开记，否则只看总时长会误判瓶颈。全部是计数与单调时钟，不改任何行为。
         # ``replay_compute_s`` 是各 worker 计算耗时之和，并行时可能大于 ``replay_wall_s``；
         # 两者之差要结合 ``replay_overhead_s``（排队 + IPC + worker 启动）一起看。
+        # ``REPLAY_PHASE_KEYS`` 把 compute 再拆开：每天只多处理一个交易日，单只却按整段
+        # 历史付时间，得先看清是读行情、前缀校验还是全历史报告在吃。
         timing: dict[str, float | int] = {
             "prepare_s": 0.0,
             "replay_wall_s": 0.0,
@@ -342,6 +379,7 @@ class PoolTrackingRunner:
             "reused_symbols": 0,
             "replayed_symbols": 0,
             "worker_starts": 0,
+            **{key: 0.0 for key in REPLAY_PHASE_KEYS},
         }
         versions = self.tracks.current_versions()
         names = self._instrument_names(versions)
@@ -435,7 +473,6 @@ class PoolTrackingRunner:
                     chunk = []
         if chunk:
             tasks.append((chunk, False))
-        work = iter(tasks)
         replay_ids = [
             group[0]["version_id"]
             for group, is_reusable in zip(work_items, reusable, strict=True)
@@ -458,6 +495,9 @@ class PoolTrackingRunner:
             return blob_window.pop(version_id, None)
 
         completed = failed = skipped = 0
+        # worker 各阶段的耗时在这里汇总（各进程之和）；只统计认得的键，
+        # 免得 worker 与主进程版本不一致时静默丢数。
+        phase_totals: dict[str, float] = dict.fromkeys(REPLAY_PHASE_KEYS, 0.0)
         # 逐只写库实测 15.8 ms：一次全市场扫描 4,409 只就是约 70 秒串行写库。批量上报把
         # 一批合成一个事务（实测摊到 0.14 ms/行），快照是派生数据，丢了下一轮重算。
         snapshot_batch: list[dict[str, Any]] = []
@@ -750,10 +790,13 @@ class PoolTrackingRunner:
                     context.close()
                     raise
 
-            first = new_slot(True) if groups else None
+            # 首个 slot 只在「确实有要回放的组」时申请：建一个 slot 要 spawn 进程 + 重新
+            # import（实测 0.7-0.9 秒），全命中复用时它整轮都在闲着，白付一次冷启动。
+            first = new_slot(True) if replay_ids else None
             slots = [first] if first is not None else []
             pending: dict[Any, tuple[list[list[dict[str, Any]]], ProcessPoolExecutor, float]] = {}
-            exhausted = not bool(groups)
+            task_cursor = 0
+            exhausted = not bool(tasks)
 
             def report_progress() -> None:
                 progress(
@@ -776,29 +819,52 @@ class PoolTrackingRunner:
                     for future in pending:
                         future.cancel()
                     raise TaskCancelledError("每日策略池跟踪已取消")
+                # 复用组就地处理，不占进程也不占 slot：先把排在队头的复用组全处理掉，
+                # 行情没变的整轮就能在零个 worker 的情况下扫完。
+                while task_cursor < len(tasks) and tasks[task_cursor][1]:
+                    chunk, _reusable = tasks[task_cursor]
+                    task_cursor += 1
+                    # 同一行情日、同一份数据、同一版引擎：上一份快照就是这一轮的结果。
+                    # 摘要里已经有上一轮算好的持仓与账户字段，不提交回放、也不读检查点。
+                    group = chunk[0]
+                    timing["reused_symbols"] += len(group)
+                    for member in group:
+                        project_reused(member)
+                        completed += 1
+                    report_progress()
+                exhausted = task_cursor >= len(tasks)
                 memory = memory_status()
+                memory_limit = memory_bounded_worker_count(
+                    status=memory,
+                    estimated_worker_bytes=512 * 1024**2,
+                    maximum_workers=maximum,
+                    active_workers=len(pending),
+                )
+                cpu_limit = cpu_bounded_worker_count(
+                    load_average_1m=get_cpu_load_average_1m(),
+                    visible_cpus=visible_cpu_count(),
+                    maximum_workers=maximum,
+                    active_workers=len(pending),
+                )
                 target = ramp.target(
-                    resource_limit=min(
-                        memory_bounded_worker_count(
-                            status=memory,
-                            estimated_worker_bytes=512 * 1024**2,
-                            maximum_workers=maximum,
-                            active_workers=len(pending),
-                        ),
-                        cpu_bounded_worker_count(
-                            load_average_1m=get_cpu_load_average_1m(),
-                            visible_cpus=visible_cpu_count(),
-                            maximum_workers=maximum,
-                            active_workers=len(pending),
-                        ),
-                    ),
+                    resource_limit=min(memory_limit, cpu_limit),
                     active_workers=len(pending),
                     now=time.monotonic(),
                 )
                 busy = {id(executor) for _, executor, _ in pending.values()}
-                if len(slots) > target:
+                # 回收只看内存，不看 CPU 压力：把并发拉起来之后抬高分位数的主要是我们
+                # 自己那批 worker，按 CPU 拆掉再重开要再付一次 spawn+import。实测一轮
+                # 101 次启动、有效并行只有 2.4/8。空闲 slot 不占 CPU，只占配额，下一批直接用。
+                affordable = memory_bounded_worker_count(
+                    status=memory,
+                    estimated_worker_bytes=512 * 1024**2,
+                    maximum_workers=maximum,
+                    active_workers=0,
+                )
+                keep = max(1, affordable)
+                if len(slots) > keep:
                     for slot in list(reversed(slots)):
-                        if len(slots) <= target:
+                        if len(slots) <= keep:
                             break
                         if id(slot[1]) not in busy:
                             slot[0].close()
@@ -810,22 +876,10 @@ class PoolTrackingRunner:
                 for _, executor in slots[:target]:
                     if exhausted or id(executor) in busy:
                         continue
-                    item = next(work, None)
-                    if item is None:
-                        exhausted = True
-                        break
-                    chunk, is_reusable = item
-                    if is_reusable:
-                        # 同一行情日、同一份数据、同一版引擎：上一份快照就是这一轮的结果。
-                        # 摘要里已经有上一轮算好的持仓与账户字段，不提交回放、不读检查点——
-                        # 一条序列的检查点解压加解析约 10 ms，全市场就是 40 秒。
-                        group = chunk[0]
-                        timing["reused_symbols"] += len(group)
-                        for member in group:
-                            project_reused(member)
-                            completed += 1
-                        report_progress()
-                        continue
+                    # 队头到这里一定已经不是复用组（上面刚排干净），直接当回放任务领。
+                    chunk, _reusable = tasks[task_cursor]
+                    task_cursor += 1
+                    exhausted = task_cursor >= len(tasks)
                     versions = [
                         dict(
                             group[0],
@@ -876,12 +930,15 @@ class PoolTrackingRunner:
                         if status != "ok":
                             fail_group(group, str(outcome_payload))
                             continue
-                        blob, summary, compute_s = cast(
-                            tuple[str, dict[str, Any], float], outcome_payload
+                        blob, summary, compute_s, timings = cast(
+                            tuple[str, dict[str, Any], float, dict[str, float]], outcome_payload
                         )
                         computed += compute_s
                         timing["replay_compute_s"] += compute_s
                         timing["replayed_symbols"] += len(group)
+                        for phase_key, phase_seconds in timings.items():
+                            if phase_key in phase_totals:
+                                phase_totals[phase_key] += phase_seconds
                         apply_snapshot(group, blob, summary)
                     timing["replay_overhead_s"] += max(0.0, elapsed - computed)
                 report_progress()
@@ -889,6 +946,7 @@ class PoolTrackingRunner:
             flush_snapshots(drain_all=True)
         timing["replay_wall_s"] = time.monotonic() - replay_started
         timing["total_s"] = time.monotonic() - run_started
+        timing.update(phase_totals)
         logger.info(
             "策略池信号扫描耗时 %.1fs：准备 %.1fs，回放墙钟 %.1fs"
             "（计算 %.1fs，排队/IPC %.1fs），检查点读取 %.1fs，写库等待 %.1fs；"
@@ -903,6 +961,16 @@ class PoolTrackingRunner:
             timing["reused_symbols"],
             timing["replayed_symbols"],
             timing["worker_starts"],
+        )
+        replayed = max(1, int(timing["replayed_symbols"]))
+        logger.info(
+            "跟踪回放阶段拆解（各进程之和，回放 %d 只；括号内是单只均摊）：%s",
+            replayed,
+            "，".join(
+                f"{REPLAY_PHASE_LABELS[key]} {phase_totals[key]:.1f}s"
+                f"({phase_totals[key] * 1000 / replayed:.0f}ms)"
+                for key in REPLAY_PHASE_KEYS
+            ),
         )
         goal = str(payload.get("objective") or "annual_return")
         return {

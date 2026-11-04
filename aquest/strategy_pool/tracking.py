@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import date, datetime, timezone
@@ -189,7 +190,20 @@ def replay_account(
     ref: StockRef,
     version: Mapping[str, Any],
     previous: Mapping[str, Any] | None = None,
+    timings: dict[str, float] | None = None,
 ) -> dict[str, Any]:
+    # 阶段归因计时：每天全市场重放只多处理一个交易日，但单只耗时是按历史长度付的，
+    # 只有一个总时长就分不清该动「读行情+建上下文」「前缀校验」「全历史报告」哪一段。
+    # 只在调用方传字典时记账，其它调用方（研究、复核）行为不变。
+    phase_started = time.perf_counter()
+
+    def mark(key: str) -> None:
+        nonlocal phase_started
+        now = time.perf_counter()
+        if timings is not None:
+            timings[key] = timings.get(key, 0.0) + now - phase_started
+        phase_started = now
+
     service._refresh_corporate_action_cache()
     candidate = version["candidate"]
     raw = service._adapter.read_stock(ref)
@@ -218,6 +232,7 @@ def replay_account(
         raw = raw.loc[in_window].reset_index(drop=True)
         if window_rows - shift >= MIN_RESEARCH_BARS:
             raw = raw.iloc[shift:].reset_index(drop=True)
+    mark("bars_s")
     config_payload = dict(candidate.get("config") or {})
     config_payload.update(
         vipdoc_path="",
@@ -246,6 +261,7 @@ def replay_account(
         raise ValueError("股票没有可用于跟踪的行情")
     dates = service._global_dates([context])
     fingerprint = _portfolio_fingerprint([context])
+    mark("context_s")
     checkpoint = None
     mode = "initialized"
     if previous:
@@ -265,6 +281,7 @@ def replay_account(
                 mode = "incremental"
         except (KeyError, TypeError, ValueError):
             checkpoint = None
+    mark("prefix_s")
     simulation = service._simulate(
         [context],
         dates,
@@ -276,6 +293,7 @@ def replay_account(
     captured = simulation["checkpoint"]
     if not isinstance(captured, SimulationCheckpoint):
         raise ValueError("跟踪没有生成可恢复账户状态")
+    mark("simulate_s")
     packed = captured.to_dict()
     current_state = simulation.get("current_state")
     summary = account_summary(
@@ -400,11 +418,16 @@ def replay_account(
         summary["benchmark"] = benchmark
     for key in ("equity_curve", "trades", "states", "ranking_events"):
         detail.pop(key, None)
+    mark("summary_s")
+    # 收尾这份哈希是留给下一轮的：第二天要用它校验「已处理前缀」没变过，
+    # 所以每天会为此标的整段历史算两次哈希（一次校验、一次存档）。
+    prefix_hash = _context_prefix(context, len(dates), raw)
+    mark("finalize_s")
     return dict(
         engine=ENGINE_VERSION,
         signature=version["signature"],
         checkpoint=packed,
-        prefix_hash=_context_prefix(context, len(dates), raw),
+        prefix_hash=prefix_hash,
         summary=summary,
         report=detail,
     )
