@@ -34,8 +34,14 @@ export const SIGNAL_SORT_OPTIONS = [
   { value: 'win_rate', label: '全区间胜率 高→低' },
   { value: 'payoff_ratio', label: '全区间盈亏比 高→低' },
   { value: 'annual_return', label: '全区间年化收益 高→低' },
+  { value: 'composite', label: '综合（全区间 年化·胜率·盈亏比 名次平均）' },
 ] as const
 type SignalSortValue = (typeof SIGNAL_SORT_OPTIONS)[number]['value']
+
+// 综合排序（2026-11-04 用户需求）：这三项各取在本列表内的名次，平均以后从高到低。
+// 必须先换名次而不能直接相加：年化是小数、盈亏比可以大于 1，直接加等于让盈亏比独大。
+const COMPOSITE_METRICS = ['annual_return', 'win_rate', 'payoff_ratio'] as const
+type SignalMetric = (typeof COMPOSITE_METRICS)[number]
 
 interface StrategyPoolSignalViewOptions {
   buySignals: Ref<StrategyPoolSignal[]>
@@ -92,11 +98,57 @@ export function useStrategyPoolSignalView(options: StrategyPoolSignalViewOptions
   }
 
   // 排序取全区间指标：与行内「全区间胜率 / 盈亏比」文案同一口径，且跟踪增量返回的
-  // 信号行本身不带指标，只有条目表补得上。缺全区间指标的行排在末尾。
+  // 信号行本身不带指标，只有条目表补得上。缺指标的行排在末尾。
+  function metricValue(key: string, metric: SignalMetric): number | null {
+    const value = entryQualityMap.value.get(key)?.[metric]
+    return typeof value === 'number' && Number.isFinite(value) ? value : null
+  }
+
+  /**
+   * 三项指标各在本列表内取名次（最低 0、最高 1），等权平均。
+   *
+   * 名次只由**这一档列表**里的行算出，所以两个面板的 1.0 不可互相比。三项齐了才给分：
+   * 少一项就凑不出「三个名次平均」，这类行没有条目、排在所有有分的行之后。同值并列
+   * 共享同名次，免得两个指标完全相同的行只靠代码顺序分出高下。
+   */
+  function compositeRanks(keys: string[]): Map<string, number> {
+    const scored = keys
+      .map((key) => ({
+        key,
+        values: COMPOSITE_METRICS.map((metric) => metricValue(key, metric)),
+      }))
+      .filter(
+        (row): row is { key: string; values: number[] } =>
+          row.values.every((value): value is number => value !== null),
+      )
+    if (!scored.length) return new Map()
+    const rankOf = COMPOSITE_METRICS.map((_metric, index) => {
+      const column = scored.map((row) => row.values[index]).sort((left, right) => left - right)
+      // 同值只记第一次出现的位置：严格小于该值的行数就是它的名次分子。
+      const lowestPosition = new Map<number, number>()
+      column.forEach((value, position) => {
+        if (!lowestPosition.has(value)) lowestPosition.set(value, position)
+      })
+      const top = column.length - 1
+      return (value: number): number => (top > 0 ? (lowestPosition.get(value) ?? 0) / top : 1)
+    })
+    return new Map(
+      scored.map((row) => [
+        row.key,
+        row.values.reduce((sum, value, index) => sum + rankOf[index](value), 0) / rankOf.length,
+      ]),
+    )
+  }
+
   function sortSignalRows<T>(rows: T[], keyOf: (row: T) => string): T[] {
+    const sort = signalSort.value
+    const NEGATIVE = Number.NEGATIVE_INFINITY
+    // 缺指标的行拿不出分数，一律排在末尾；两行都缺时相减是 NaN，落到代码顺序兜底。
+    const compare = (left: T, right: T, scoreOf: (row: T) => number): number =>
+      scoreOf(right) - scoreOf(left) || keyOf(left).localeCompare(keyOf(right))
     // 关注只在默认排序（按状态优先级）时置顶：选了指标以后还钉在榜首，关注行就会挡住
     // 真正的排序结果，看着像是排序没生效。
-    if (signalSort.value === 'default') {
+    if (sort === 'default') {
       const pinned: T[] = []
       const rest: T[] = []
       for (const row of rows) {
@@ -104,14 +156,15 @@ export function useStrategyPoolSignalView(options: StrategyPoolSignalViewOptions
       }
       return [...pinned, ...rest]
     }
-    const metric = signalSort.value
-    const score = (row: T): number => {
-      const value = entryQualityMap.value.get(keyOf(row))?.[metric]
-      return typeof value === 'number' && Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY
+    if (sort === 'composite') {
+      const scores = compositeRanks(rows.map(keyOf))
+      return [...rows].sort((left, right) =>
+        compare(left, right, (row) => scores.get(keyOf(row)) ?? NEGATIVE),
+      )
     }
-    return [...rows].sort((left, right) => (
-      score(right) - score(left) || keyOf(left).localeCompare(keyOf(right))
-    ))
+    return [...rows].sort((left, right) =>
+      compare(left, right, (row) => metricValue(keyOf(row), sort) ?? NEGATIVE),
+    )
   }
 
   function pageCount(count: number): number {
