@@ -21,7 +21,7 @@
 
 const PLACEHOLDER = '—'
 
-function asFiniteNumber(value: unknown): number | null {
+export function asFiniteNumber(value: unknown): number | null {
   return typeof value === 'number' && Number.isFinite(value) ? value : null
 }
 

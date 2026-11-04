@@ -15,9 +15,12 @@ import {
   holdingExpiryText,
   holdingRiskLevelText,
   holdingRiskSummary,
+  isStrategyPoolSortColumn,
   metricRawValue,
   metricValue,
   objectiveLabel,
+  postLaunchExcess,
+  postLaunchWindowNote,
   rerunEntryDisabled,
   rerunEntryTitle,
   sortPoolEntriesByMetric,
@@ -172,6 +175,58 @@ describe('strategyPoolStatus', () => {
       'created_return', 'asc', states, held, 'annual_return',
     ).map(symbol)).toEqual(['SH600001', 'SH600010'])
     expect(input.map(symbol)).toEqual(['SH600003', 'SH600002', 'SH600001'])
+  })
+
+  it('derives the post-launch excess only from a window that actually ran', () => {
+    const ran = entry('600001', {
+      post_launch_return: 0.082,
+      post_launch_benchmark_return: 0.031,
+      post_launch_days: 90,
+      post_launch_has_data: true,
+    })
+    expect(postLaunchExcess(ran)).toBeCloseTo(0.051, 10)
+    expect(postLaunchWindowNote(ran)).toBe('')
+
+    // 创建之后还没有新行情时后端给的上线后收益是 0，那是「还没跑」不是平盘：
+    // 减出 0.00% 会混进超额排序里，把没数据的标的排成一条平线。
+    const noWindow = entry('600002', {
+      post_launch_return: 0,
+      post_launch_benchmark_return: 0,
+      post_launch_has_data: false,
+    })
+    expect(postLaunchExcess(noWindow)).toBeNull()
+    expect(postLaunchWindowNote(noWindow)).toBe('上线后还没有新行情')
+
+    // 老快照给不出同期基准，就不能拿上线后收益本身冒充超额。
+    expect(postLaunchExcess(entry('600003', {
+      post_launch_return: 0.2,
+      post_launch_has_data: true,
+    }))).toBeNull()
+
+    // 不满 60 个交易日的窗口和后端「上线后衰减」判定同门槛：数字照给，但要标出来。
+    expect(postLaunchWindowNote(entry('600004', {
+      post_launch_return: 0.02,
+      post_launch_benchmark_return: 0.01,
+      post_launch_days: 12,
+      post_launch_has_data: true,
+    }))).toBe('仅 12 个交易日')
+
+    // 拿不到窗口的行无论升降都沉底，和其他指标列共用同一条兜底规则。
+    const noValue = entry('600005')
+    for (const direction of ['asc', 'desc'] as const) {
+      expect(sortPoolEntriesByMetric(
+        [noValue, ran, noWindow], 'post_launch_excess', direction, [], new Set<string>(), 'annual_return',
+      ).map(symbol)[0]).toBe('SH600001')
+    }
+  })
+
+  it('restores only real sort columns from the shared link', () => {
+    expect(isStrategyPoolSortColumn('post_launch_excess')).toBe(true)
+    expect(isStrategyPoolSortColumn('status')).toBe(true)
+    // 拼错的列名和已经不存在的那一档都回落到按状态分组，而不是把表格排空。
+    expect(isStrategyPoolSortColumn('total_return')).toBe(false)
+    expect(isStrategyPoolSortColumn('')).toBe(false)
+    expect(isStrategyPoolSortColumn(null)).toBe(false)
   })
 
   it('gates and labels the per-symbol rerun button', () => {

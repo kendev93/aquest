@@ -47,10 +47,10 @@ function mountTable(overrides: Record<string, unknown> = {}) {
 }
 
 describe('StrategyPoolEntryTable', () => {
-  it('renders the same 14 columns with prefixed test ids for each scope', () => {
+  it('renders the same 15 columns with prefixed test ids for each scope', () => {
     const wrapper = mountTable()
 
-    expect(wrapper.findAll('thead th')).toHaveLength(14)
+    expect(wrapper.findAll('thead th')).toHaveLength(15)
     expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('触发买入')
     expect(wrapper.get('[data-testid="pool-entry-benchmark-600000"]').text()).toContain('全段基准 +50.00%')
     expect(wrapper.get('[data-testid="pool-holding-days-600000"]').text()).toContain('12.5 天')
@@ -132,7 +132,7 @@ describe('StrategyPoolEntryTable', () => {
 
   it('shows sort buttons only for the sortable market table', () => {
     const sortable = mountTable()
-    expect(sortable.findAll('thead button')).toHaveLength(9)
+    expect(sortable.findAll('thead button')).toHaveLength(10)
     expect(sortable.get('thead button').text()).toContain('基准涨跌')
 
     const fixed = mountTable({ sortable: false, sortColumn: 'win_rate' as const })
@@ -189,12 +189,63 @@ describe('StrategyPoolEntryTable', () => {
     expect(rerun.attributes('title')).toBe('该标的已排队重跑')
   })
 
+  it('shows the post-launch excess against its own benchmark window', () => {
+    const withWindow = {
+      ...entry('600000'),
+      post_launch_return: 0.082,
+      post_launch_benchmark_return: 0.031,
+      post_launch_days: 90,
+      post_launch_has_data: true,
+      tracking_as_of_date: '2026-11-03',
+    }
+    const wrapper = mountTable({ entries: [withWindow] })
+    const cell = wrapper.get('[data-testid="pool-post-launch-excess-600000"]')
+    // 单元格只给减出来的差额，减掉的那两项写进悬停明细，省掉两个并列列。
+    expect(cell.text()).toContain('+5.10%')
+    expect(cell.attributes('title'))
+      .toBe('上线后 +8.20% · 同期买入持有 +3.10% · 超额 +5.10% · 90 个交易日 · 截至 2026-11-03')
+    // 窗口够用就不再标天数。
+    expect(wrapper.find('[data-testid="pool-post-launch-note-600000"]').exists()).toBe(false)
+
+    const short = mountTable({ entries: [{ ...withWindow, post_launch_days: 12 }] })
+    // 不满 60 个交易日和后端「上线后衰减」判定同门槛：数字照给，但标明窗口太短。
+    expect(short.get('[data-testid="pool-post-launch-note-600000"]').text()).toBe('仅 12 个交易日')
+  })
+
+  it('keeps a missing post-launch window out of the numbers instead of showing zero', () => {
+    // 创建之后还没有新行情时后端给的上线后收益是 0，那是「还没跑」不是平盘；
+    // 显示成 0.00% 会让整池看起来都像跑过却没赚钱，所以这里必须是占位符并写明原因。
+    const noWindow = {
+      ...entry('600000'),
+      post_launch_return: 0,
+      post_launch_benchmark_return: 0,
+      post_launch_has_data: false,
+    }
+    const wrapper = mountTable({ entries: [noWindow] })
+    const cell = wrapper.get('[data-testid="pool-post-launch-excess-600000"]')
+    expect(cell.text()).toContain('—')
+    expect(wrapper.get('[data-testid="pool-post-launch-note-600000"]').text()).toBe('上线后还没有新行情')
+    expect(cell.attributes('title')).toBe('这一版策略创建之后还没有新行情，还没有上线后窗口')
+  })
+
+  it('sorts the post-launch column and explains its window in the header', async () => {
+    const wrapper = mountTable()
+    const header = wrapper.get('[data-testid="pool-sort-post_launch_excess"]')
+    expect(header.text()).toContain('上线后超额')
+    // 列头要自己说清窗口口径，否则它和「创建至今收益」看着像在讲同一件事。
+    expect(wrapper.get('thead th[title*="上线后收益"]').attributes('title'))
+      .toContain('不满 60 个交易日会标出天数')
+
+    await header.trigger('click')
+    expect(wrapper.emitted('sort')?.[0]).toEqual(['post_launch_excess'])
+  })
+
   it('renders the empty row with the caller wording across all columns', () => {
     const wrapper = mountTable({ entries: [], emptyText: '策略池为空，开始全市场研究后会逐只写入候选。' })
 
     const empty = wrapper.get('[data-testid="pool-entry-empty"]')
     expect(empty.text()).toContain('策略池为空')
-    expect(empty.attributes('colspan')).toBe('13')
+    expect(empty.attributes('colspan')).toBe('14')
   })
 
   it('prints the risk lines of a held symbol under its status column', () => {

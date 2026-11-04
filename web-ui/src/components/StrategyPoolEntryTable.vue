@@ -20,6 +20,9 @@ import {
   holdingRiskSummary,
   metricValue,
   objectiveLabel,
+  postLaunchExcess,
+  postLaunchWindowDetail,
+  postLaunchWindowNote,
   rerunEntryDisabled,
   rerunEntryTitle,
   statusLabel,
@@ -67,9 +70,19 @@ const emit = defineEmits<{
 }>()
 
 // 表格指标列：列头和单元格口径一致，'status' 档不进这里（没有可点的排序按钮）。
-const METRIC_COLUMNS: { key: StrategyPoolMetricColumn; label: string }[] = [
+// `hint` 写给列头的口径说明——窗口不是「研究区间」的列必须自己说清算到哪一天，
+// 不然同一张表里两列看起来都在讲收益，实际是两个窗口。
+const METRIC_COLUMNS: { key: StrategyPoolMetricColumn; label: string; hint?: string }[] = [
   { key: 'benchmark_return', label: '基准涨跌' },
   { key: 'created_return', label: '创建至今收益' },
+  {
+    key: 'post_launch_excess',
+    label: '上线后超额',
+    hint:
+      '上线后收益 − 同期买入持有基准。窗口从这一版策略（手工覆盖优先于自动最优）的上线日算到它自己的行情截至日，'
+      + '标的之间起点和长度都不同；上线后还没有新行情的标的拿不到窗口，显示「—」且无论升降都排在末尾。'
+      + '不满 60 个交易日会标出天数——那段窗口太短，一波回调就能把正负翻过去。',
+  },
   { key: 'strategy_return', label: '策略收益' },
   { key: 'annual_return', label: '年化' },
   { key: 'sharpe', label: '夏普' },
@@ -142,7 +155,7 @@ function latestCloseAsOf(entry: StrategyPoolEntry): string {
     <table class="pool-table">
       <thead><tr>
         <th>持仓 / 今日信号</th><th>证券</th><th title="最后一根已完成日线的收盘价（不复权），每行都有；日期与风控线判定日期不一致时会在价下面标出来">最新收盘</th>
-        <th v-for="column in METRIC_COLUMNS" :key="column.key">
+        <th v-for="column in METRIC_COLUMNS" :key="column.key" :title="column.hint">
           <button v-if="sortable" :data-testid="`${testid}-sort-${column.key}`" :title="sortHint(column.key, column.label)" @click="emit('sort', column.key)">{{ column.label }}{{ sortGlyph(column.key) }}</button>
           <template v-else>{{ column.label }}</template>
         </th>
@@ -161,6 +174,7 @@ function latestCloseAsOf(entry: StrategyPoolEntry): string {
             <span v-else class="empty-copy">下次全市场重选时补算</span>
           </td>
           <td :data-testid="`${testid}-created-return-${entry.code}`">{{ typeof entry.created_return === 'number' ? formatPercent(entry.created_return) : entry.tracking_status === 'pending' ? '待初始化' : entry.tracking_status === 'failed' ? '更新失败' : '—' }}<small v-if="entry.tracking_status === 'failed'">同步失败，保留上次结果</small><small v-if="entry.tracking_as_of_date">截至 {{ entry.tracking_as_of_date }}</small></td>
+          <td :data-testid="`${testid}-post-launch-excess-${entry.code}`" :title="postLaunchWindowDetail(entry)">{{ formatSignedPercent(postLaunchExcess(entry)) }}<small v-if="postLaunchWindowNote(entry)" :data-testid="`${testid}-post-launch-note-${entry.code}`">{{ postLaunchWindowNote(entry) }}</small></td>
           <td :data-testid="`${testid}-strategy-return-${entry.code}`">{{ formatPercent(metricValue(entry, 'strategy_return')) }}<small v-if="fullPeriodAsOf(entry)">截至 {{ fullPeriodAsOf(entry) }}</small></td>
           <td>{{ formatPercent(metricValue(entry, 'annual_return')) }}</td>
           <td>{{ formatNumber(metricValue(entry, 'sharpe')) }}</td>
@@ -171,7 +185,7 @@ function latestCloseAsOf(entry: StrategyPoolEntry): string {
           <td><span v-if="entry.active_candidate?.quality?.badges?.length" class="badge-row"><i v-for="badge in entry.active_candidate.quality.badges" :key="badge">{{ badge }}</i></span><span v-else-if="entry.status === 'no_strategy'">无可计算的策略绩效</span><span v-else-if="entry.last_error" class="danger-text" :data-testid="`${testid}-entry-error-${entry.code}`" :title="entry.last_error">策略搜索失败 · 悬停查看原因</span><span v-else>—</span><small v-if="entry.active_candidate?.metrics">交易数：验证 {{ formatNumber(tradeCount(entry.active_candidate, 'validation'), 0) }} · 留出 {{ formatNumber(tradeCount(entry.active_candidate, 'holdout'), 0) }} 笔</small><small v-if="entry.active_source === 'manual'">手工覆盖 · {{ objectiveLabel(objective) }}</small></td>
           <td><a class="text-button" :href="detailHref(entry)" :data-testid="`${testid}-detail-${entry.code}`">详情</a><button :data-testid="`${testid}-rerun-entry-${entry.code}`" class="text-button" :disabled="rerunEntryDisabled(jobContext)" :title="rerunEntryTitle(entry, jobContext)" @click="emit('rerun', entry)">{{ queuedSymbol === symbol(entry) ? '排队中' : '重跑' }}</button><StrategyPoolFollowButton :target="entry" :follow-keys="followKeys" :busy="followBusy" :test-id="`${testid}-follow-entry-${entry.code}`" @toggle="emit('toggleFollow', $event)" /></td>
         </tr>
-        <tr v-if="!entries.length"><td colspan="13" class="empty-copy" :data-testid="`${testid}-entry-empty`">{{ emptyText }}</td></tr>
+        <tr v-if="!entries.length"><td colspan="14" class="empty-copy" :data-testid="`${testid}-entry-empty`">{{ emptyText }}</td></tr>
       </tbody>
     </table>
   </div>
@@ -179,7 +193,7 @@ function latestCloseAsOf(entry: StrategyPoolEntry): string {
 
 <style scoped>
 .table-scroll { overflow: auto; }
-.pool-table { width: 100%; min-width: 1060px; border-collapse: collapse; text-align: left; }
+.pool-table { width: 100%; min-width: 1140px; border-collapse: collapse; text-align: left; }
 .pool-table th, .pool-table td { border-bottom: 1px solid #25364f; padding: 12px 10px; vertical-align: top; }
 .pool-table th { color: #8798b1; font-size: .88rem; white-space: nowrap; }
 .pool-table th button { border: 0; padding: 0; background: none; color: inherit; font: inherit; cursor: pointer; }

@@ -6,20 +6,34 @@ import type {
   StrategyPoolSignal,
 } from '../types'
 
-import { formatNumber } from './format'
+import { asFiniteNumber, formatNumber, formatSignedPercent } from './format'
 
-/** 「全市场标的状态」表格的排序列；'status' 表示按状态优先级排。 */
-export type StrategyPoolSortColumn =
-  | 'status'
-  | 'strategy_return'
-  | 'annual_return'
-  | 'sharpe'
-  | 'win_rate'
-  | 'payoff_ratio'
-  | 'max_drawdown'
-  | 'avg_holding_days'
-  | 'benchmark_return'
-  | 'created_return'
+/**
+ * 「全市场标的状态」表格的排序列；'status' 表示按状态优先级排。
+ *
+ * 这一份名单同时是地址栏的白名单：列类型和恢复排序用的数组来自同一个常量，
+ * 加一列不会再出现「表格里能点、分享链接回去却丢了排序」。
+ */
+const SORT_COLUMNS = [
+  'status',
+  'strategy_return',
+  'annual_return',
+  'sharpe',
+  'win_rate',
+  'payoff_ratio',
+  'max_drawdown',
+  'avg_holding_days',
+  'benchmark_return',
+  'created_return',
+  'post_launch_excess',
+] as const
+
+export type StrategyPoolSortColumn = (typeof SORT_COLUMNS)[number]
+
+/** 只认这张表真有的列；旧链接里的列名或拼错的值一律回落到按状态分组。 */
+export function isStrategyPoolSortColumn(value: unknown): value is StrategyPoolSortColumn {
+  return (SORT_COLUMNS as readonly string[]).includes(String(value))
+}
 
 export type StrategyPoolMetricColumn = Exclude<StrategyPoolSortColumn, 'status'>
 
@@ -118,6 +132,8 @@ export function metricRawValue(
 ): number | null {
   if (key === 'created_return') return entry.created_return ?? null
   if (key === 'benchmark_return') return benchmarkReturn(entry)
+  // 上线后超额读的是跟踪摘要里的上线后窗口，不在候选的全区间指标里，必须单独取。
+  if (key === 'post_launch_excess') return postLaunchExcess(entry)
   // 列表只给 active_candidate：后端已经把「手工覆盖优先于自动最优」算成这一个字段，
   // 以前的 `?? automatic_candidates[目标]` 兜底永远走不到（active 为空时它也必为空），
   // 而那一整块占 11.5 MB 响应的 31.3%，所以接口不再回它。
@@ -126,6 +142,56 @@ export function metricRawValue(
   const metricKey = key === 'strategy_return' ? 'total_return' : key
   const value = candidate?.metrics?.full_period?.[metricKey]
   return typeof value === 'number' && Number.isFinite(value) ? value : null
+}
+
+/**
+ * 上线后超额 = 上线后收益 − 同期买入持有基准（都是「当前生效版本」自己的上线后窗口）。
+ *
+ * 两个来源任一拿不到就返回 null：`post_launch_has_data` 为假时后端给的上线后收益是 0，
+ * 那是「创建之后还没有新行情」而不是平盘，排成 0.00% 会让一堆没数据的标的看起来像
+ * 「都跑过、只是没赚」。这一判定和「上线后收益榜」用的是同一条（board 里直接复用本函数）。
+ */
+export function postLaunchExcess(entry: StrategyPoolEntry): number | null {
+  if (entry.post_launch_has_data === false) return null
+  const value = asFiniteNumber(entry.post_launch_return)
+  const benchmark = asFiniteNumber(entry.post_launch_benchmark_return)
+  return value === null || benchmark === null ? null : value - benchmark
+}
+
+/**
+ * 上线后窗口的最小交易日数，与后端「上线后衰减」判定同口径（`quality.POST_LAUNCH_MIN_TRADING_DAYS`）：
+ * 短于这段的超额噪声大，一波回调就能把符号翻过去，所以表格里标出天数而不是让它看起来和别的行等价。
+ */
+export const POST_LAUNCH_MIN_TRADING_DAYS = 60
+
+/** 超额单元格下面那行短说明；窗口长度够用时返回空串。 */
+export function postLaunchWindowNote(entry: StrategyPoolEntry): string {
+  if (entry.post_launch_has_data === false) return '上线后还没有新行情'
+  const days = asFiniteNumber(entry.post_launch_days)
+  if (days === null) return '拿不到上线日'
+  return days < POST_LAUNCH_MIN_TRADING_DAYS ? `仅 ${Math.round(days)} 个交易日` : ''
+}
+
+/** 超额单元格的悬停明细：把减掉的两项和窗口长度、时点都写出来，行内才有办法核对。 */
+export function postLaunchWindowDetail(entry: StrategyPoolEntry): string {
+  const value = asFiniteNumber(entry.post_launch_return)
+  const benchmark = asFiniteNumber(entry.post_launch_benchmark_return)
+  const days = asFiniteNumber(entry.post_launch_days)
+  const excess = postLaunchExcess(entry)
+  if (excess === null) {
+    // 拿不到窗口时也要说清为什么，否则「—」看着像是算错了或者是平盘。
+    if (entry.post_launch_has_data === false) return '这一版策略创建之后还没有新行情，还没有上线后窗口'
+    return value === null ? '还没有上线后收益结果' : '拿不到同期买入持有基准，减不出超额'
+  }
+  return [
+    `上线后 ${formatSignedPercent(value)}`,
+    `同期买入持有 ${formatSignedPercent(benchmark)}`,
+    `超额 ${formatSignedPercent(excess)}`,
+    days === null ? '' : `${Math.round(days)} 个交易日`,
+    entry.tracking_as_of_date ? `截至 ${entry.tracking_as_of_date}` : '',
+  ]
+    .filter(Boolean)
+    .join(' · ')
 }
 
 export function metricValue(

@@ -48,6 +48,7 @@ import AppTopbar from '../components/AppTopbar.vue'
 import { formatDuration, formatNumber, formatPercent, formatSignedPercent } from '../utils/format'
 import {
   holdingRiskSummary,
+  isStrategyPoolSortColumn,
   objectiveLabel,
   sortPoolEntriesByMetric,
   sortPoolEntriesByStatus,
@@ -1333,7 +1334,7 @@ async function initialize(): Promise<void> {
   page.value = Math.max(1, Number(params.get('page') ?? 1))
   pageSize.value = Number(params.get('pageSize') ?? 50)
   const sort = params.get('sort')
-  if (['status','strategy_return','annual_return','sharpe','win_rate','payoff_ratio','max_drawdown','avg_holding_days','benchmark_return','created_return'].includes(sort ?? '')) sortColumn.value = sort as typeof sortColumn.value
+  if (isStrategyPoolSortColumn(sort)) sortColumn.value = sort
   // 方向只认 asc，其余一律回到高→低；sort 已经是 status（取消排序）时方向不参与排序。
   sortDirection.value = params.get('dir') === 'asc' ? 'asc' : 'desc'
   const stored = params.get('objective') ?? window.localStorage.getItem(OBJECTIVE_STORAGE_KEY)

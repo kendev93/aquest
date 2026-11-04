@@ -3,7 +3,7 @@ import { computed, ref } from 'vue'
 
 import type { StrategyPoolEntry, StrategyPoolObjective } from '../types'
 import { formatPercent, formatSignedPercent } from '../utils/format'
-import { objectiveLabel, type StrategyPoolSortDirection } from '../utils/strategyPoolStatus'
+import { objectiveLabel, postLaunchExcess, type StrategyPoolSortDirection } from '../utils/strategyPoolStatus'
 
 interface Props {
   entries: StrategyPoolEntry[]
@@ -74,7 +74,7 @@ const eligible = computed<BoardRow[]>(() => {
       name: entry.name,
       postLaunchReturn: value,
       benchmark,
-      excess: benchmark === null ? null : value - benchmark,
+      excess: postLaunchExcess(entry),
       createdReturn: finite(entry.created_return),
       days: finite(entry.post_launch_days) ?? 0,
       asOfDate: entry.tracking_as_of_date ?? '',
