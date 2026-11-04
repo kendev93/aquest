@@ -346,17 +346,17 @@ describe('StrategyPoolPage', () => {
     expect(rowSymbols('pool-buy-signals')).toEqual(returned)
   })
 
-  it('ranks the composite sort by the average of the three in-list ranks', async () => {
+  it('ranks the composite sort by the average of the four in-list ranks', async () => {
     window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
-    // 四组指标刻意排成「每项冠军都不同」：年化 600000、盈亏比 600001、胜率 600003，
-    // 三项都第二的 600002 在任何一个单项档都拿不到第一，但综合名次平均以后它最高。
+    // 四组指标刻意排成「每项冠军都不同」：年化 600000、盈亏比 600001、胜率 600003、夏普 600002。
+    // 600002 三项第二、夏普第一，任何一个单项档都给不了它头名以外的位置，综合名次平均以后它最高。
     vi.mocked(api.fetchStrategyPoolEntries).mockResolvedValue([
-      entryWithQuality('600000', { annual_return: 0.3, win_rate: 0.5, payoff_ratio: 1 }),
-      entryWithQuality('600001', { annual_return: 0.1, win_rate: 0.4, payoff_ratio: 3 }),
-      entryWithQuality('600002', { annual_return: 0.25, win_rate: 0.6, payoff_ratio: 2 }),
-      entryWithQuality('600003', { annual_return: 0.15, win_rate: 0.8, payoff_ratio: 0.5 }),
+      entryWithQuality('600000', { annual_return: 0.3, win_rate: 0.5, payoff_ratio: 1, sharpe: 1.3 }),
+      entryWithQuality('600001', { annual_return: 0.1, win_rate: 0.4, payoff_ratio: 3, sharpe: 1.8 }),
+      entryWithQuality('600002', { annual_return: 0.25, win_rate: 0.6, payoff_ratio: 2, sharpe: 2.6 }),
+      entryWithQuality('600003', { annual_return: 0.15, win_rate: 0.8, payoff_ratio: 0.5, sharpe: 0.9 }),
     ])
-    // 600004 没有条目，也就拿不出任何全区间指标：凑不齐三项就没有综合名次，排到最后。
+    // 600004 没有条目，也就拿不出任何全区间指标：凑不齐四项就没有综合名次，排到最后。
     const codes = ['600004', '600000', '600001', '600002', '600003']
     vi.mocked(api.getStrategyPoolJob).mockResolvedValue({
       job_id: 'signal-1',
@@ -390,21 +390,23 @@ describe('StrategyPoolPage', () => {
     const rowSymbols = (testid: string) => wrapper
       .findAll(`[data-testid="${testid}"] .signal-row`)
       .map((row) => row.text().slice(0, 8))
-    const expected = ['SH600002', 'SH600000', 'SH600003', 'SH600001', 'SH600004']
+    const expected = ['SH600002', 'SH600000', 'SH600001', 'SH600003', 'SH600004']
 
     const sort = wrapper.get('[data-testid="pool-signal-sort"]')
-    // 这一档是加在三个单项档旁边的，不是替换：下拉里必须仍然看得见三项。
+    // 这一档是加在四个单项档旁边的，不是替换：下拉里必须仍然看得见每一项。
     expect(Array.from(sort.findAll('option')).map((option) => option.text())).toEqual([
       '默认顺序（关注置顶）',
       '全区间胜率 高→低',
       '全区间盈亏比 高→低',
       '全区间年化收益 高→低',
-      '综合（全区间 年化·胜率·盈亏比 名次平均）',
+      '全区间夏普 高→低',
+      '综合（全区间 年化·夏普·胜率·盈亏比 名次平均）',
     ])
 
     await sort.setValue('composite')
-    // 综合名次：600002 (2/3+2/3+2/3)/3=0.667 > 600000 0.556 > 600003 0.444 > 600001 0.333。
-    // 三个面板共用同一个排序键，持仓面板也一样。
+    // 四项名次平均：600002 0.75 > 600000 0.50 > 600001 0.42 > 600003 0.33。
+    // 只算三项时末位是 600001、倒数第二是 600003；把夏普计入以后两者换位——600003 夏普垫底、
+    // 600001 夏普第二。这个换位就是第四项确实参与计算的证据。
     expect(rowSymbols('pool-buy-signals')).toEqual(expected)
     expect(rowSymbols('pool-sell-signals')).toEqual(expected)
     expect(rowSymbols('pool-current-holdings')).toEqual(expected)
@@ -416,6 +418,8 @@ describe('StrategyPoolPage', () => {
     expect(rowSymbols('pool-buy-signals')[0]).toBe('SH600001')
     await sort.setValue('win_rate')
     expect(rowSymbols('pool-buy-signals')[0]).toBe('SH600003')
+    await sort.setValue('sharpe')
+    expect(rowSymbols('pool-buy-signals')[0]).toBe('SH600002')
   })
 
   it('gives risk exits and rule sells the same full-period metric string, sharpe included', async () => {

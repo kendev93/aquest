@@ -34,13 +34,16 @@ export const SIGNAL_SORT_OPTIONS = [
   { value: 'win_rate', label: '全区间胜率 高→低' },
   { value: 'payoff_ratio', label: '全区间盈亏比 高→低' },
   { value: 'annual_return', label: '全区间年化收益 高→低' },
-  { value: 'composite', label: '综合（全区间 年化·胜率·盈亏比 名次平均）' },
+  { value: 'sharpe', label: '全区间夏普 高→低' },
+  { value: 'composite', label: '综合（全区间 年化·夏普·胜率·盈亏比 名次平均）' },
 ] as const
 type SignalSortValue = (typeof SIGNAL_SORT_OPTIONS)[number]['value']
 
-// 综合排序（2026-11-04 用户需求）：这三项各取在本列表内的名次，平均以后从高到低。
+// 综合排序（2026-11-04 用户需求）：这四项各取在本列表内的名次，平均以后从高到低。
 // 必须先换名次而不能直接相加：年化是小数、盈亏比可以大于 1，直接加等于让盈亏比独大。
-const COMPOSITE_METRICS = ['annual_return', 'win_rate', 'payoff_ratio'] as const
+// 夏普的分子就是年化，所以这一档里收益被计了两次——面板要筛的是「值得按其行动」的策略，
+// 波动大的高年化本来就该被压，用户 2026-11-04 明确选了要这个倾斜。
+const COMPOSITE_METRICS = ['annual_return', 'sharpe', 'win_rate', 'payoff_ratio'] as const
 type SignalMetric = (typeof COMPOSITE_METRICS)[number]
 
 interface StrategyPoolSignalViewOptions {
@@ -109,10 +112,10 @@ export function useStrategyPoolSignalView(options: StrategyPoolSignalViewOptions
   }
 
   /**
-   * 三项指标各在本列表内取名次（最低 0、最高 1），等权平均。
+   * 四项指标各在本列表内取名次（最低 0、最高 1），等权平均。
    *
-   * 名次只由**这一档列表**里的行算出，所以两个面板的 1.0 不可互相比。三项齐了才给分：
-   * 少一项就凑不出「三个名次平均」，这类行没有条目、排在所有有分的行之后。同值并列
+   * 名次只由**这一档列表**里的行算出，所以两个面板的 1.0 不可互相比。四项齐了才给分：
+   * 少一项就凑不出「四个名次平均」，这类行没有条目、排在所有有分的行之后。同值并列
    * 共享同名次，免得两个指标完全相同的行只靠代码顺序分出高下。
    */
   function compositeRanks(keys: string[]): Map<string, number> {
