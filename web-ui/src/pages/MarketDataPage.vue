@@ -779,7 +779,9 @@ const healthRepairing = ref(false)
 const healthRepaired = ref<MarketHealthRepairOutcome | null>(null)
 const healthJob = ref<MarketHealthJobState | null>(null)
 const healthMessage = ref('')
-/** 有问题的检查项才能送去重下；零成交重下多半还是同一份数据，不给按钮。 */
+/** 有问题的检查项才能送去重下。不给按钮的三项各有各的理由：零成交重下多半还是同一份数据，
+ * 除权漏记嫌疑缺的是事件记录而不是 bar，数据陈旧里混着已退市与长期停牌——先删全史再重下
+ * 对它们是把补不回来的历史删掉。判据只由后端 `repairable` 决定，前端不再自己列名单。 */
 const healthIssues = computed(() =>
   (healthReport.value?.checks ?? []).filter(
     (check) => check.affected_instruments > 0 && check.repairable,

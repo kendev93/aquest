@@ -161,6 +161,9 @@ def test_zero_volume_and_stale_are_warned(tmp_path: Path) -> None:
     assert checks["zero_volume"].affected_instruments == 1
     assert checks["stale"].affected_instruments == 1
     assert "落后全市场" in checks["stale"].examples[0].detail
+    # 这一项混着已退市与长期停牌的标的，而一键修复要先删掉该标的全部历史再重下——那种票
+    # 删了就补不回来，且那段历史正是研究躲幸存者偏差要用的。不给修复，只给提示。
+    assert checks["stale"].repairable is False
 
 
 def crashed(frame: pd.DataFrame, index: int, *, ratio: float = 0.5) -> pd.DataFrame:

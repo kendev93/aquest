@@ -128,8 +128,9 @@ const healthReport = {
     { key: 'gap', label: '行情缺口', description: '标的在自己首末交易日之间本该有日线却没有的交易日。',
       severity: 'error', affected_instruments: 1836, occurrences: 68023, repairable: true,
       examples: [{ market: 'SZ', code: '000029', name: '深深房A', trade_date: '2017-04-12', detail: '共缺 869 个交易日，分 1 段' }] },
-    { key: 'stale', label: '数据陈旧', description: '最后一条日线落后全市场最新交易日两周以上。',
-      severity: 'warn', affected_instruments: 7, occurrences: 7, repairable: true, examples: [] },
+    // 数据陈旧不给一键修复：修复要先删全史再重下，这一项里混着已退市和长期停牌的标的。
+    { key: 'stale', label: '数据陈旧', description: '最后一条日线落后全市场最新交易日 5 个交易日以上。',
+      severity: 'warn', affected_instruments: 7, occurrences: 7, repairable: false, examples: [] },
   ],
 }
 
@@ -177,14 +178,16 @@ test('a repair discloses its stages, its cost and the symbols that never got a t
     }
     return route.fulfill({ json: { data: { ...base, job_id: 'repair-1', status: 'completed', progress: 1,
       total_candidates: 500, total_scanned: 500, phase: 'completed', metadata: { worker_count: 8 },
-      result: { checked_keys: ['gap', 'stale'], requested_codes: 500, offset: 0, flagged_total: 2272,
+      result: { checked_keys: ['gap'], requested_codes: 500, offset: 0, flagged_total: 2272,
         remaining: 1772, truncated: true, deleted_bars: 1133865, written_bars: 1133865, errors: 0,
         empty_after_repair: [] } } } })
   })
 
   await page.goto('/market-data')
   await page.getByTestId('market-health-check').click()
-  await expect(page.getByTestId('market-health-repair')).toContainText('一键修复 2 项')
+  // 只有缺口一项可修：数据陈旧被标成不可修以后，一键修复的项数必须跟着掉。
+  await expect(page.getByTestId('market-health-repair')).toContainText('一键修复 1 项')
+  await expect(page.getByTestId('market-health-fix-stale')).toHaveCount(0)
   await page.getByTestId('market-health-repair').click()
 
   expect(confirmText).toContain('全市场研究会因为打不开库而失败')

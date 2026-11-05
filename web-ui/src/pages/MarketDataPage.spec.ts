@@ -1108,6 +1108,39 @@ describe('MarketDataPage', () => {
     confirmSpy.mockRestore()
   })
 
+  it('offers no delete-and-redownload path for a check the backend marks unrepairable', async () => {
+    // 数据陈旧里混着已退市与长期停牌的标的，而一键修复要先删掉该标的全部历史再重下——
+    // 那种票删了就补不回来。后端把 repairable 设成 false 之后，前端既不给单行修复按钮，
+    // 也不能把它算进「一键修复 N 项」，提交出去的名单里更不能出现 stale。
+    vi.mocked(marketApi.createHealthCheck).mockResolvedValue({ job_id: 'health-1', status: 'queued' })
+    vi.mocked(marketApi.createHealthRepair).mockResolvedValue({ job_id: 'repair-1', status: 'queued' })
+    const report = healthReport()
+    ;(report.checks as Record<string, unknown>[]).push({
+      key: 'stale',
+      label: '数据陈旧',
+      description: '最后一条日线落后全市场最新交易日 5 个交易日以上。',
+      severity: 'warn',
+      affected_instruments: 7,
+      occurrences: 7,
+      repairable: false,
+      examples: [],
+    })
+    vi.mocked(marketApi.getMarketDataJob).mockResolvedValue(healthJobState(report))
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const wrapper = mountPage()
+    await flushPromises()
+    await wrapper.get('[data-testid="market-health-check"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="market-health-fix-stale"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="market-health-repair"]').text()).toContain('一键修复 1 项')
+
+    await wrapper.get('[data-testid="market-health-repair"]').trigger('click')
+    await flushPromises()
+    expect(marketApi.createHealthRepair).toHaveBeenCalledWith({ checks: ['gap'], offset: 0, confirm: true })
+    confirmSpy.mockRestore()
+  })
+
   it('keeps waiting on a repair that legitimately runs for hours', async () => {
     // 先删后下的全市场修复不是「卡住」：给它套交互预算会把正常任务误报成超时，
     // 所以 waitForHealthJob 只有体检传预算。
