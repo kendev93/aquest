@@ -20,6 +20,13 @@ _CANCEL_FAILURE_BACKOFF_SECONDS = 3.0
 _CANCEL_REQUEST_TIMEOUT_SECONDS = 3.0
 _RETRYABLE_WORKER_STATUSES = frozenset({500, 502, 503, 504})
 _WORKER_RETRY_DELAYS_SECONDS = (0.1, 0.25, 0.5, 1.0)
+#: 批量跟踪快照的预算：一笔 32 只、几 MB，后端要开一次状态库写事务。正常只要 0.3 秒，
+#: 但撞上 backend 正在写任务状态或做 WAL 检查点时会成秒地卡住。原先沿用 10 秒预算，
+#: 一超时就把整批退回逐只写（一次 32 张往返），反而把锁压力和总耗时放大——2026-11-05
+#: 实测 13 批超时被拆成 832 次逐只上报，写库等待从 249 秒涨到 2,062 秒。这里给足 60 秒，
+#: 且只重试一次：批量写本来就在后台线程，多等不会挡住回放。
+_SNAPSHOT_BATCH_TIMEOUT_SECONDS = 60.0
+_SNAPSHOT_BATCH_ATTEMPTS = 2
 logger = logging.getLogger(__name__)
 JsonRequester = Callable[
     [str, Mapping[str, object], Mapping[str, str], float], Mapping[str, object]
@@ -268,6 +275,8 @@ class HttpStrategyJobClient:
         response = self._post(
             f"/internal/strategy-worker/jobs/{job_id}/pool-tracking/batch",
             {"worker_id": self.worker_id, "entries": [dict(item) for item in snapshots]},
+            timeout_seconds=_SNAPSHOT_BATCH_TIMEOUT_SECONDS,
+            max_attempts=_SNAPSHOT_BATCH_ATTEMPTS,
         )
         data = _mapping(response.get("data"), "批量跟踪保存结果")
         saved = data.get("saved")

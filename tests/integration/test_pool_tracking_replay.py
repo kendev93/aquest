@@ -701,6 +701,66 @@ def test_tracking_runner_keeps_idle_slots_under_cpu_pressure(tmp_path, monkeypat
     assert timing["worker_starts"] <= high_water
 
 
+def test_tracking_runner_waits_out_a_locked_state_db_before_starting(tmp_path, monkeypatch):
+    """开跑第一把状态库读撞上 backend 的写事务时，等一等重试，而不是整单判死。
+
+    2026-11-05 实测：扫描开跑 20 秒内 `current_versions()` 撞上「状态库当前被其它进程
+    占用」，一轮就没了，用户只能再点一次。状态库的锁是秒级的，门口的读值得多等十几秒。
+    """
+
+    from aquest.market_data.store import MarketDataStoreError
+    from aquest.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
+    from aquest.strategy_pool import tracking_runner as runner_module
+    from aquest.strategy_pool.tracking_runner import PoolTrackingRunner
+
+    monkeypatch.setattr(runner_module, "_STATE_READ_RETRY_DELAYS_SECONDS", (0.0, 0.0))
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    codes = ("600000", "600001")
+    for code in codes:
+        store.replace_local_bars("SH", code, "stock", bars(3))
+    pool = DuckDbStrategyPoolStore(store)
+    for code in codes:
+        pool.upsert_automatic(
+            market="SH",
+            code=code,
+            name="test",
+            annual_candidate=candidate(),
+            sharpe_candidate=None,
+            data_fingerprint="a",
+            config_fingerprint="b",
+            source_job_id="job",
+        )
+    tracks = PoolTrackingStore(store)
+    original = PoolTrackingStore.current_versions
+    attempts = {"count": 0}
+
+    def flaky_current_versions(self):
+        attempts["count"] += 1
+        if attempts["count"] <= 2:
+            raise MarketDataStoreError("状态库当前被其它进程占用，请稍后重试")
+        return original(self)
+
+    monkeypatch.setattr(PoolTrackingStore, "current_versions", flaky_current_versions)
+
+    def save(item):
+        return {
+            "saved": tracks.save_snapshots(
+                [(item["version_id"], item["signature"], item["snapshot_blob"], item["summary"])]
+            )[0]
+        }
+
+    result = PoolTrackingRunner(store, EvaluationWorkerBudget(2)).run(
+        {"objective": "annual_return", "as_of_date": "2026-09-03"},
+        progress=lambda *args: None,
+        abort_check=lambda: False,
+        writer=save,
+        batch_writer=lambda items: [save(item) for item in items],
+    )
+    assert attempts["count"] == 3
+    assert result["completed_symbols"] == 2
+
+
 def test_tracking_runner_keeps_version_status_when_snapshot_transport_is_transient(tmp_path):
     """后端繁忙/网络抖动只是快照没落库：本轮信号照常产出，版本状态不能被标成 failed。"""
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime, time, timedelta
+from threading import Lock
 from time import monotonic
 from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo
@@ -133,6 +134,35 @@ def _pool_job_state(job_id: str, request: Request) -> dict[str, object]:
         ) from exc
     if state is None:
         raise HTTPException(status_code=404, detail="策略池任务不存在")
+    return state
+
+
+#: 任务状态轮询的进程内缓存。页面在任务运行期间每 1.5 秒问一次，每次都要为它开一条
+#: 状态库只读连接，正好和扫描的写事务抢同一把跨进程锁（2026-11-05 一轮扫描期间 1,030
+#: 次轮询）。缓存几秒足够让进度条照常走，跨进程的只读打开能少一大半；读库失败时退回
+#: 上一份——写事务占着库的那几秒，页面只会慢一拍，不会变成 503。
+_JOB_STATE_CACHE_TTL_SECONDS = 4.0
+_JOB_STATE_CACHE_LIMIT = 8
+_job_state_cache: dict[str, tuple[float, dict[str, object]]] = {}
+_job_state_cache_lock = Lock()
+
+
+def _cached_pool_job_state(job_id: str, request: Request) -> dict[str, object]:
+    with _job_state_cache_lock:
+        cached = _job_state_cache.get(job_id)
+    if cached is not None and monotonic() - cached[0] < _JOB_STATE_CACHE_TTL_SECONDS:
+        return cached[1]
+    try:
+        state = _pool_job_state(job_id, request)
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_503_SERVICE_UNAVAILABLE and cached is not None:
+            return cached[1]
+        raise
+    with _job_state_cache_lock:
+        _job_state_cache[job_id] = (monotonic(), state)
+        while len(_job_state_cache) > _JOB_STATE_CACHE_LIMIT:
+            oldest = min(_job_state_cache, key=lambda key: _job_state_cache[key][0])
+            _job_state_cache.pop(oldest, None)
     return state
 
 
@@ -610,7 +640,7 @@ def get_strategy_pool_job_stats(request: Request) -> dict[str, object]:
 
 @router.get("/jobs/{job_id}")
 def get_strategy_pool_job(job_id: str, request: Request) -> dict[str, object]:
-    state = _pool_job_state(job_id, request)
+    state = _cached_pool_job_state(job_id, request)
     try:
         result = (
             _job_backend(request).result(job_id) if state.get("status") == "completed" else None

@@ -283,15 +283,17 @@ def test_pool_tracking_batch_retries_transport_errors_and_reports_transient(
     token_file = tmp_path / "worker.token"
     token_file.write_text("secret-token", encoding="utf-8")
     attempts = 0
+    timeouts: list[float] = []
 
     def handler(
         _url: str,
         _payload: Mapping[str, object],
         _headers: Mapping[str, str],
-        _timeout: float,
+        timeout: float,
     ) -> Mapping[str, object]:
         nonlocal attempts
         attempts += 1
+        timeouts.append(timeout)
         raise TimeoutError("backend busy")
 
     with HttpStrategyJobClient(
@@ -306,4 +308,6 @@ def test_pool_tracking_batch_retries_transport_errors_and_reports_transient(
                 [{"version_id": "v1", "signature": "s", "snapshot_blob": "AA==", "summary": {}}],
             )
 
+    # 批量写有自己的预算：60 秒、只重试一次。沿用 10 秒会让一次卡顿把整批拆成逐只往返。
     assert attempts == 2
+    assert timeouts == [60.0, 60.0]

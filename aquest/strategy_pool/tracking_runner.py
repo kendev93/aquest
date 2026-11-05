@@ -18,13 +18,13 @@ from concurrent.futures import (
 )
 from contextlib import ExitStack
 from datetime import date, datetime
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 from zoneinfo import ZoneInfo
 
 from aquest.concurrency import visible_cpu_count
 from aquest.indicators.cache import IndicatorCache
 from aquest.market_data.adapter import DuckDbMarketDataAdapter
-from aquest.market_data.store import DuckDbMarketDataStore
+from aquest.market_data.store import DuckDbMarketDataStore, MarketDataStoreError
 from aquest.portfolio_backtest.service import PortfolioBacktestService
 from aquest.screening.jobs import TaskCancelledError, TaskUserError
 from aquest.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
@@ -52,8 +52,9 @@ _WORKER_SERVICE: PortfolioBacktestService | None = None
 logger = logging.getLogger(__name__)
 
 #: 一次批量上报多少只跟踪快照。64 只 × 4 个参数远低于 SQLite 的 999 变量上限，
-#: 单批快照体量约十几 MB；再大只会把一次请求的超时和内存风险放大。
-SNAPSHOT_BATCH_SIZE = 64
+#: 单批快照 32 只：一只压缩块约 70 KB，一批约 2 MB 进一个写事务。批再大，一次卡顿
+#: 牵连的行数就更多（退回逐只写时是一批的全量往返），批太小又会让提交次数翻倍。
+SNAPSHOT_BATCH_SIZE = 32
 #: 一个回放任务领多少只：整批只开一次状态库连接读检查点（全量扫描实测逐只打开
 #: 0.67 秒/只），单只慢票对整轮的拖尾也只有一批的量。
 REPLAY_CHUNK_SIZE = 12
@@ -88,6 +89,28 @@ REPLAY_PHASE_LABELS = {
     "weak_s": "弱判定与版本摘要",
     "encode_s": "快照编码",
 }
+
+
+#: 开跑前读状态库的重试间隔：backend 每写一次快照或任务状态就独占一次状态库，读会话
+#: 等满自己那套 0.1-2 秒的阶梯就会抛「状态库当前被其它进程占用」。一轮扫描半小时起，
+#: 在门口多等十几秒远好过整单判死（2026-11-05 实测：开跑 20 秒内整单失败、任务重来）。
+_STATE_READ_RETRY_DELAYS_SECONDS = (2.0, 5.0, 10.0)
+
+T = TypeVar("T")
+
+
+def _read_with_retry(read: Callable[[], T]) -> T:
+    """状态库被占用的瞬态错误重试；用尽后把错误抛出去，别装作读到了。"""
+
+    last: Exception | None = None
+    for delay in (0.0, *_STATE_READ_RETRY_DELAYS_SECONDS):
+        if delay:
+            time.sleep(delay)
+        try:
+            return read()
+        except (MarketDataStoreError, OSError) as exc:
+            last = exc
+    raise MarketDataStoreError("状态库连续被其它进程占用，本轮信号扫描未能开始") from last
 
 
 def _initialize(database_path: str) -> None:
@@ -381,9 +404,9 @@ class PoolTrackingRunner:
             "worker_starts": 0,
             **{key: 0.0 for key in REPLAY_PHASE_KEYS},
         }
-        versions = self.tracks.current_versions()
-        names = self._instrument_names(versions)
-        benchmarks, research_ends = self._entry_context(versions)
+        versions = _read_with_retry(self.tracks.current_versions)
+        names = _read_with_retry(lambda: self._instrument_names(versions))
+        benchmarks, research_ends = _read_with_retry(lambda: self._entry_context(versions))
         pool_total = len(versions)
         results: dict[str, dict[str, Any]] = {
             goal: dict(

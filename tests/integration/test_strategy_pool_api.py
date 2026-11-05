@@ -1071,3 +1071,43 @@ def test_research_estimate_cannot_broaden_the_saved_scope(tmp_path) -> None:
     assert set(body["boards"]) == {"main", "chinext"}
     assert body["exclude_st"] is True
     assert disjoint.status_code == 422
+
+
+def test_job_status_poll_is_cached_and_survives_state_db_lock(monkeypatch) -> None:
+    """状态轮询走进程内缓存；状态库被写事务占住时返回上一份，而不是 503。
+
+    页面在任务运行期间每 1.5 秒问一次，每次都开一条只读连接会和扫描的写事务抢同一把
+    跨进程锁（2026-11-05 一轮扫描被轮询 1,030 次）。缓存几秒不影响进度条，读失败时
+    退回上一份也比让页面报错有用。
+    """
+
+    from typing import Any, cast
+
+    from fastapi import HTTPException
+
+    from aquest.web.routers import strategy_pool as router
+
+    monkeypatch.setattr(router, "_JOB_STATE_CACHE_TTL_SECONDS", 60.0)
+    router._job_state_cache.clear()
+    calls = {"count": 0}
+
+    def fake_state(job_id: str, request: object) -> dict[str, object]:
+        calls["count"] += 1
+        return {"job_id": job_id, "status": "running", "progress": calls["count"]}
+
+    monkeypatch.setattr(router, "_pool_job_state", fake_state)
+    request = cast(Any, object())
+    first = router._cached_pool_job_state("job-1", request)
+    second = router._cached_pool_job_state("job-1", request)
+    assert first is second
+    assert calls["count"] == 1
+
+    # 缓存过期后状态库正好被写事务占着：拿上一份状态顶上，不抛 503。
+    monkeypatch.setattr(router, "_JOB_STATE_CACHE_TTL_SECONDS", 0.0)
+
+    def locked(job_id: str, request: object) -> dict[str, object]:
+        raise HTTPException(status_code=503, detail="状态库忙")
+
+    monkeypatch.setattr(router, "_pool_job_state", locked)
+    assert router._cached_pool_job_state("job-1", request) is first
+    router._job_state_cache.clear()
