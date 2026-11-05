@@ -710,6 +710,42 @@ def test_focus_api_round_trip_and_validation(tmp_path) -> None:
         assert client.delete("/api/v1/strategy-pool/focus/BJ/600000").status_code == 422
 
 
+def test_focus_groups_api_preserves_other_memberships(tmp_path) -> None:
+    app = create_app(
+        market_data_store=_store(tmp_path),
+        strategy_worker_token=TOKEN,
+        auto_sync_enabled=False,
+    )
+    with TestClient(app) as client:
+        base = "/api/v1/strategy-pool"
+        assert (
+            client.post(
+                f"{base}/focus", json={"market": "SH", "code": "600000", "name": "浦发银行"}
+            ).status_code
+            == 200
+        )
+        created = client.post(f"{base}/focus-groups", json={"name": "银行"})
+        assert created.status_code == 200
+        group_id = created.json()["data"]["groups"][1]["id"]
+        assert client.post(f"{base}/focus-groups", json={"name": "银行"}).status_code == 422
+        payload = {
+            "market": "SH",
+            "code": "600000",
+            "name": "浦发银行",
+            "group_ids": ["default", group_id],
+        }
+        assert client.put(f"{base}/focus-groups/membership", json=payload).status_code == 200
+        assert client.delete(f"{base}/focus/SH/600000").status_code == 200
+        groups = client.get(f"{base}/focus-groups").json()["data"]["groups"]
+        assert groups[0]["items"] == []
+        assert groups[1]["items"][0]["code"] == "600000"
+        assert (
+            client.put(f"{base}/focus-groups/{group_id}", json={"name": "金融"}).status_code == 200
+        )
+        assert client.delete(f"{base}/focus-groups/default").status_code == 422
+        assert client.delete(f"{base}/focus-groups/{group_id}").status_code == 200
+
+
 def test_focus_api_rejects_members_beyond_the_limit(tmp_path) -> None:
     app = create_app(
         market_data_store=_store(tmp_path),

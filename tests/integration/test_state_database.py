@@ -97,6 +97,26 @@ def test_state_tables_move_to_their_own_file(tmp_path: Path) -> None:
     assert _count(state_path, "pool_tracking_versions") == 0
 
 
+def test_old_state_database_focus_is_preserved_and_exportable(tmp_path: Path) -> None:
+    from aquest.market_data.transfer import export_user_assets
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    pool = DuckDbStrategyPoolStore(store)
+    pool.initialize()
+    pool.add_focus("SH", "600000", "浦发银行")
+    store.ensure_state_database()
+    with duckdb.connect(str(tmp_path / "state.duckdb")) as connection:
+        connection.execute("DROP TABLE strategy_pool_focus_members")
+        connection.execute("DROP TABLE strategy_pool_focus_groups")
+    reopened = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    result = export_user_assets(reopened, tmp_path / "old-state.zip")
+    assert result.counts["strategy_pool_focus"] == 1
+    reopened_pool = DuckDbStrategyPoolStore(reopened)
+    reopened_pool.initialize()
+    reopened_pool.initialize()
+    assert reopened_pool.read_focus_groups()[0]["items"][0]["code"] == "600000"
+
+
 def test_the_market_file_keeps_working_without_a_state_database(tmp_path: Path) -> None:
     """删掉 state.duckdb 就退回单库：读写走行情库，不报错。"""
 

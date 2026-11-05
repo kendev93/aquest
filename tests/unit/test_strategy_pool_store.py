@@ -364,6 +364,42 @@ def test_focus_round_trip_is_idempotent_per_symbol(tmp_path) -> None:
     ]
 
 
+def test_focus_groups_keep_memberships_independent(tmp_path) -> None:
+    pool = DuckDbStrategyPoolStore(DuckDbMarketDataStore(tmp_path / "market.duckdb"))
+    pool.initialize()
+    pool.add_focus("SH", "600000", "浦发银行")
+    group = pool.create_focus_group("银行")
+    group_id = str(group["id"])
+    pool.set_focus_groups("SH", "600000", "浦发银行", ["default", group_id])
+    pool.initialize()
+    groups = pool.read_focus_groups()
+    assert [g["name"] for g in groups] == ["默认分组", "银行"]
+    assert all(len(g["items"]) == 1 for g in groups)
+    pool.remove_focus("SH", "600000")
+    assert pool.read_focus_groups()[1]["items"][0]["code"] == "600000"
+    pool.delete_focus_group(group_id)
+    assert len(pool.read_focus_groups()) == 1
+
+
+def test_focus_group_validation_and_atomic_limit(tmp_path) -> None:
+    pool = DuckDbStrategyPoolStore(DuckDbMarketDataStore(tmp_path / "market.duckdb"))
+    pool.initialize()
+    group_id = str(pool.create_focus_group("银行")["id"])
+    with pytest.raises(ValueError, match="名称"):
+        pool.create_focus_group("银行")
+    with pytest.raises(ValueError, match="名称"):
+        pool.create_focus_group("  ")
+    with pytest.raises(ValueError):
+        pool.delete_focus_group("default")
+    pool.rename_focus_group(group_id, "金融")
+    for index in range(100):
+        pool.set_focus_groups("SH", f"{index:06d}", "", [group_id])
+    with pytest.raises(ValueError, match="100"):
+        pool.set_focus_groups("SH", "600000", "", ["default", group_id])
+    assert pool.read_focus() == []
+    assert len(pool.read_focus_groups()[1]["items"]) == 100
+
+
 def test_focus_validates_symbol_and_truncates_name(tmp_path) -> None:
     pool = DuckDbStrategyPoolStore(DuckDbMarketDataStore(tmp_path / "market.duckdb"))
     pool.initialize()

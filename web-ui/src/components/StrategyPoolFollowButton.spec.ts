@@ -15,16 +15,16 @@ describe('StrategyPoolFollowButton', () => {
     const wrapper = mountButton(new Set<string>())
     const button = wrapper.get('button')
 
-    expect(button.text()).toBe('关注')
-    expect(button.attributes('title')).toBe('关注 SH 600000，加入特别关注面板')
+    expect(button.text()).toBe('添加到分组')
+    expect(button.attributes('title')).toBe('管理 SH 600000 的关注分组')
     expect(button.attributes('data-testid')).toBe('pool-follow-600000')
   })
 
   it('switches to 取消关注 for a followed symbol', () => {
     const wrapper = mountButton(new Set(['SH600000']))
 
-    expect(wrapper.get('button').text()).toBe('取消关注')
-    expect(wrapper.get('button').attributes('title')).toBe('取消关注 SH 600000')
+    expect(wrapper.get('button').text()).toBe('管理分组')
+    expect(wrapper.get('button').attributes('title')).toBe('管理 SH 600000 的关注分组')
   })
 
   it('blocks a second click while the list is still saving, then emits this target', async () => {

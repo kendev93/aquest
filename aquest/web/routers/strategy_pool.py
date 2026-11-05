@@ -489,6 +489,71 @@ def remove_focus_member(market: str, code: str, request: Request) -> dict[str, o
     return {"data": {"items": items}}
 
 
+class FocusGroupNameRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str
+
+
+class FocusGroupMembershipRequest(FocusMemberRequest):
+    group_ids: list[str]
+
+
+@router.get("/focus-groups")
+def get_focus_groups(request: Request) -> dict[str, object]:
+    with store_guard("特别关注分组暂时无法读取", include_runtime=False):
+        groups = _pool_store(request).read_focus_groups()
+    return {"data": {"groups": groups}}
+
+
+@router.post("/focus-groups")
+def create_focus_group(payload: FocusGroupNameRequest, request: Request) -> dict[str, object]:
+    try:
+        with store_guard("特别关注分组暂时无法保存", include_runtime=False):
+            _pool_store(request).create_focus_group(payload.name)
+            groups = _pool_store(request).read_focus_groups()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"data": {"groups": groups}}
+
+
+@router.put("/focus-groups/membership")
+def set_focus_membership(
+    payload: FocusGroupMembershipRequest, request: Request
+) -> dict[str, object]:
+    try:
+        with store_guard("特别关注分组暂时无法保存", include_runtime=False):
+            groups = _pool_store(request).set_focus_groups(
+                payload.market, payload.code, payload.name, payload.group_ids
+            )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"data": {"groups": groups}}
+
+
+@router.put("/focus-groups/{group_id}")
+def rename_focus_group(
+    group_id: str, payload: FocusGroupNameRequest, request: Request
+) -> dict[str, object]:
+    try:
+        with store_guard("特别关注分组暂时无法保存", include_runtime=False):
+            _pool_store(request).rename_focus_group(group_id, payload.name)
+            groups = _pool_store(request).read_focus_groups()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"data": {"groups": groups}}
+
+
+@router.delete("/focus-groups/{group_id}")
+def delete_focus_group(group_id: str, request: Request) -> dict[str, object]:
+    try:
+        with store_guard("特别关注分组暂时无法保存", include_runtime=False):
+            _pool_store(request).delete_focus_group(group_id)
+            groups = _pool_store(request).read_focus_groups()
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"data": {"groups": groups}}
+
+
 @router.post("/jobs", status_code=status.HTTP_202_ACCEPTED)
 def create_strategy_pool_job(payload: PoolJobRequest, request: Request) -> dict[str, object]:
     backend = _job_backend(request)

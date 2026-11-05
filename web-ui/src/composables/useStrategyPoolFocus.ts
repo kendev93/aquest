@@ -1,17 +1,6 @@
 import { computed, ref, type Ref } from 'vue'
-
-import {
-  addStrategyPoolFocus,
-  fetchStrategyPoolFocus,
-  removeStrategyPoolFocus,
-} from '../api/strategyPool'
-import type {
-  StrategyPoolEntry,
-  StrategyPoolFocusItem,
-  StrategyPoolFollowTarget,
-  StrategyPoolObjective,
-  StrategyPoolSignal,
-} from '../types'
+import { createFocusGroup, deleteFocusGroup, fetchFocusGroups, renameFocusGroup, setFocusMembership, type StrategyPoolFocusGroup } from '../api/strategyPool'
+import type { StrategyPoolEntry, StrategyPoolFocusItem, StrategyPoolFollowTarget, StrategyPoolObjective, StrategyPoolSignal } from '../types'
 import { sortPoolEntriesByStatus, symbol } from '../utils/strategyPoolStatus'
 
 interface StrategyPoolFocusOptions {
@@ -23,89 +12,97 @@ interface StrategyPoolFocusOptions {
   describeError: (error: unknown) => string
 }
 
-/** 特别关注名单：读一次，本地先行更新，失败回滚。 */
 export function useStrategyPoolFocus(options: StrategyPoolFocusOptions) {
-  const focusItems = ref<StrategyPoolFocusItem[]>([])
-  const focusPending = ref(false)
-  const followKeys = computed(() => new Set(focusItems.value.map(symbol)))
-  const focusRows = computed(() =>
-    sortPoolEntriesByStatus(
-      options.entries.value.filter((entry) => followKeys.value.has(symbol(entry))),
-      options.signalStates.value,
-      options.heldSymbols.value,
-      options.objective.value,
-    ),
-  )
+  const groups = ref<StrategyPoolFocusGroup[]>([{ id: 'default', name: '默认分组', items: [] }])
+  const activeGroupId = ref('default')
+  const focusPending = ref(true)
+  const focusLoadError = ref(false)
+  const selectedTarget = ref<StrategyPoolFocusItem | null>(null)
+  const selectedGroupIds = ref<string[]>([])
+  const focusItems = computed(() => groups.value.find((group) => group.id === activeGroupId.value)?.items ?? [])
+  const followKeys = computed(() => new Set(groups.value.flatMap((group) => group.items.map(symbol))))
+  const activeKeys = computed(() => new Set(focusItems.value.map(symbol)))
+  const focusRows = computed(() => sortPoolEntriesByStatus(
+    options.entries.value.filter((entry) => activeKeys.value.has(symbol(entry))),
+    options.signalStates.value, options.heldSymbols.value, options.objective.value,
+  ))
   const focusMissing = computed(() => {
     const poolKeys = new Set(options.entries.value.map(symbol))
     return focusItems.value.filter((item) => !poolKeys.has(symbol(item)))
   })
   const focusMissingCount = computed(() => focusMissing.value.length)
 
-  async function toggleFollow(target: StrategyPoolFollowTarget): Promise<void> {
+  function toggleFollow(target: StrategyPoolFollowTarget): void {
     if (focusPending.value) return
-    const key = symbol(target)
-    const name = target.name ?? ''
-    const followed = followKeys.value.has(key)
-    const previous = focusItems.value
+    selectedTarget.value = { market: target.market, code: target.code, name: target.name ?? '' }
+    selectedGroupIds.value = groups.value.filter((group) => group.items.some((item) => symbol(item) === symbol(target))).map((group) => group.id)
+  }
+
+  async function change(action: () => Promise<StrategyPoolFocusGroup[]>): Promise<boolean> {
+    if (focusPending.value) return false
     focusPending.value = true
-    // 先按本地更新让面板跟手，再用服务端返回的权威名单覆盖；被拒（例如超过上限）就整表回滚。
-    focusItems.value = followed
-      ? previous.filter((item) => symbol(item) !== key)
-      : [...previous, { market: target.market, code: target.code, name }]
     options.errorMessage.value = ''
     try {
-      focusItems.value = followed
-        ? await removeStrategyPoolFocus(target.market, target.code)
-        : await addStrategyPoolFocus(target.market, target.code, name)
+      groups.value = await action()
+      return true
     } catch (error) {
-      focusItems.value = previous
       options.errorMessage.value = options.describeError(error)
+      return false
     } finally {
       focusPending.value = false
     }
   }
 
-  // 池外的关注标的在两张表里都没有行，也就没有单只取消的入口；这里给一个批量移出的出口，
-  // 逐只走同一个 DELETE 接口，避免为了「清理」再加一套后端语义。
+  async function saveMembership(): Promise<void> {
+    if (!selectedTarget.value) return
+    const target = selectedTarget.value
+    if (await change(() => setFocusMembership(target, selectedGroupIds.value))) selectedTarget.value = null
+  }
+  async function addGroup(name: string): Promise<boolean> {
+    const existing = new Set(groups.value.map((group) => group.id))
+    if (!await change(() => createFocusGroup(name))) return false
+    const created = groups.value.find((group) => !existing.has(group.id))
+    if (created && selectedTarget.value) selectedGroupIds.value = [...selectedGroupIds.value, created.id]
+    return true
+  }
+  async function renameGroup(id: string, name: string): Promise<void> {
+    await change(() => renameFocusGroup(id, name))
+  }
+  async function removeGroup(id: string): Promise<void> {
+    if (await change(() => deleteFocusGroup(id))) activeGroupId.value = 'default'
+  }
   async function pruneMissingFocus(): Promise<void> {
-    if (focusPending.value) return
-    const missing = focusMissing.value
-    if (!missing.length) return
-    const previous = focusItems.value
+    if (focusPending.value || !focusMissing.value.length) return
+    const missing = [...focusMissing.value]
+    const groupId = activeGroupId.value
     focusPending.value = true
     options.errorMessage.value = ''
     try {
-      let items = previous
       for (const item of missing) {
-        items = await removeStrategyPoolFocus(item.market, item.code)
+        const ids = groups.value.filter((group) => group.id !== groupId && group.items.some((member) => symbol(member) === symbol(item))).map((group) => group.id)
+        groups.value = await setFocusMembership(item, ids)
       }
-      focusItems.value = items
     } catch (error) {
-      // 中途失败时后端可能已经移除了几只，重读一次让界面和库里一致。
-      focusItems.value = await fetchStrategyPoolFocus().catch(() => previous)
+      groups.value = await fetchFocusGroups().catch(() => groups.value)
       options.errorMessage.value = options.describeError(error)
     } finally {
       focusPending.value = false
     }
   }
-
   async function loadFocus(): Promise<void> {
+    const retrying = focusLoadError.value
+    focusPending.value = true
+    focusLoadError.value = false
     try {
-      focusItems.value = await fetchStrategyPoolFocus()
-    } catch {
-      // 读不到关注名单就当作一只都没关注，不打断页面初始化。
+      groups.value = await fetchFocusGroups()
+      if (retrying) options.errorMessage.value = ''
+      focusPending.value = false
+    } catch (error) {
+      focusLoadError.value = true
+      options.errorMessage.value = options.describeError(error)
     }
   }
-
-  return {
-    focusItems,
-    focusPending,
-    followKeys,
-    focusRows,
-    focusMissingCount,
-    toggleFollow,
-    pruneMissingFocus,
-    loadFocus,
-  }
+  return { groups, activeGroupId, focusItems, focusPending, focusLoadError, followKeys, focusRows, focusMissingCount,
+    selectedTarget, selectedGroupIds, toggleFollow, saveMembership, addGroup, renameGroup,
+    removeGroup, pruneMissingFocus, loadFocus }
 }

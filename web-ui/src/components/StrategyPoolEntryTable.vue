@@ -159,7 +159,7 @@ function latestCloseAsOf(entry: StrategyPoolEntry): string {
           <button v-if="sortable" :data-testid="`${testid}-sort-${column.key}`" :title="sortHint(column.key, column.label)" @click="emit('sort', column.key)">{{ column.label }}{{ sortGlyph(column.key) }}</button>
           <template v-else>{{ column.label }}</template>
         </th>
-        <th>策略 / 风险标记</th><th>维护</th>
+        <th>策略 / 风险标记</th><th class="pool-actions">维护</th>
       </tr></thead>
       <tbody>
         <tr v-for="entry in entries" :key="symbol(entry)" :data-testid="`${testid}-row-${entry.code}`">
@@ -183,7 +183,7 @@ function latestCloseAsOf(entry: StrategyPoolEntry): string {
           <td>{{ formatPercent(metricValue(entry, 'max_drawdown')) }}</td>
           <td :data-testid="`${testid}-holding-days-${entry.code}`">{{ formatHoldingDays(metricValue(entry, 'avg_holding_days')) }}</td>
           <td><span v-if="entry.active_candidate?.quality?.badges?.length" class="badge-row"><i v-for="badge in entry.active_candidate.quality.badges" :key="badge">{{ badge }}</i></span><span v-else-if="entry.status === 'no_strategy'">无可计算的策略绩效</span><span v-else-if="entry.last_error" class="danger-text" :data-testid="`${testid}-entry-error-${entry.code}`" :title="entry.last_error">策略搜索失败 · 悬停查看原因</span><span v-else>—</span><small v-if="entry.active_candidate?.metrics">交易数：验证 {{ formatNumber(tradeCount(entry.active_candidate, 'validation'), 0) }} · 留出 {{ formatNumber(tradeCount(entry.active_candidate, 'holdout'), 0) }} 笔</small><small v-if="entry.active_source === 'manual'">手工覆盖 · {{ objectiveLabel(objective) }}</small></td>
-          <td><a class="text-button" :href="detailHref(entry)" :data-testid="`${testid}-detail-${entry.code}`">详情</a><button :data-testid="`${testid}-rerun-entry-${entry.code}`" class="text-button" :disabled="rerunEntryDisabled(jobContext)" :title="rerunEntryTitle(entry, jobContext)" @click="emit('rerun', entry)">{{ queuedSymbol === symbol(entry) ? '排队中' : '重跑' }}</button><StrategyPoolFollowButton :target="entry" :follow-keys="followKeys" :busy="followBusy" :test-id="`${testid}-follow-entry-${entry.code}`" @toggle="emit('toggleFollow', $event)" /></td>
+          <td class="pool-actions"><a class="text-button" :href="detailHref(entry)" :data-testid="`${testid}-detail-${entry.code}`">详情</a><button :data-testid="`${testid}-rerun-entry-${entry.code}`" class="text-button" :disabled="rerunEntryDisabled(jobContext)" :title="rerunEntryTitle(entry, jobContext)" @click="emit('rerun', entry)">{{ queuedSymbol === symbol(entry) ? '排队中' : '重跑' }}</button><StrategyPoolFollowButton :target="entry" :follow-keys="followKeys" :busy="followBusy" :test-id="`${testid}-follow-entry-${entry.code}`" @toggle="emit('toggleFollow', $event)" /></td>
         </tr>
         <tr v-if="!entries.length"><td colspan="14" class="empty-copy" :data-testid="`${testid}-entry-empty`">{{ emptyText }}</td></tr>
       </tbody>
@@ -199,7 +199,9 @@ function latestCloseAsOf(entry: StrategyPoolEntry): string {
 .pool-table th button { border: 0; padding: 0; background: none; color: inherit; font: inherit; cursor: pointer; }
 .pool-table td small { display: block; margin-top: 5px; color: #899ab3; }
 .empty-copy { color: #8798b1; font-size: .9rem; line-height: 1.6; }
-.benchmark-summary { display: grid; min-width: 250px; gap: 4px; color: #a8b8cc; font-size: .78rem; line-height: 1.45; white-space: nowrap; }
+.pool-table .pool-actions { width: 1%; white-space: nowrap; }
+.pool-actions .text-button { display: inline-block; white-space: nowrap; }
+.benchmark-summary { display: grid; gap: 4px; color: #a8b8cc; font-size: .78rem; line-height: 1.45; white-space: nowrap; }
 .benchmark-summary b { color: #eff4fc; }
 .status-chip { display: inline-block; padding: 4px 8px; border: 1px solid #42516a; border-radius: 999px; color: #a9b5c7; font-size: .78rem; white-space: nowrap; }
 .status-stack { display: flex; flex-wrap: wrap; gap: 5px; }

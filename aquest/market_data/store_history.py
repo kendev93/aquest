@@ -192,6 +192,9 @@ class DuckDbHistoryStore(
     def _asset_read(self, table: str) -> Iterator[duckdb.DuckDBPyConnection]:
         """资产表的读连接：拆到状态库的那几张走 state.duckdb，其余仍读行情库。"""
 
+        if table in {"strategy_pool_focus_groups", "strategy_pool_focus_members"}:
+            self._ensure_focus_group_tables()
+
         if table in STATE_TABLES:
             with self._store.state_read_session() as connection:
                 yield connection
@@ -201,12 +204,32 @@ class DuckDbHistoryStore(
 
     @contextmanager
     def _asset_write(self, table: str) -> Iterator[duckdb.DuckDBPyConnection]:
+        if table in {"strategy_pool_focus_groups", "strategy_pool_focus_members"}:
+            self._ensure_focus_group_tables()
         if table in STATE_TABLES:
             with self._store.state_write_transaction() as connection:
                 yield connection
             return
         with self._store.locked_write_connection() as connection:
             yield connection
+
+    def _ensure_focus_group_tables(self) -> None:
+        # Old split state databases can be exported before the web app is started.
+        if self._store.read_only or getattr(self, "_focus_tables_ready", False):
+            return
+        with self._store.state_write_transaction() as connection:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS strategy_pool_focus_groups ("
+                "group_id VARCHAR PRIMARY KEY, name VARCHAR NOT NULL UNIQUE, "
+                "created_at TIMESTAMP NOT NULL)"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS strategy_pool_focus_members ("
+                "group_id VARCHAR NOT NULL, market VARCHAR NOT NULL, code VARCHAR NOT NULL, "
+                "name VARCHAR NOT NULL DEFAULT '', created_at TIMESTAMP NOT NULL, "
+                "PRIMARY KEY (group_id, market, code))"
+            )
+        self._focus_tables_ready = True
 
 
 def _count_rows(connection: duckdb.DuckDBPyConnection, statement: str) -> int:

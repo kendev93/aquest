@@ -57,7 +57,7 @@ describe('StrategyPoolEntryTable', () => {
     expect(wrapper.get('[data-testid="pool-detail-600000"]').attributes('href')).toBe(
       '/strategy-pool/SH/600000?objective=annual_return&list=',
     )
-    expect(wrapper.get('[data-testid="pool-follow-entry-600000"]').text()).toBe('关注')
+    expect(wrapper.get('[data-testid="pool-follow-entry-600000"]').text()).toBe('添加到分组')
 
     const focus = mountTable({ testid: 'focus' })
     expect(focus.find('[data-testid="focus-row-600000"]').exists()).toBe(true)
@@ -163,9 +163,9 @@ describe('StrategyPoolEntryTable', () => {
   it('marks followed rows and emits the row the user acted on', async () => {
     const wrapper = mountTable({ followKeys: new Set(['SH600000']) })
 
-    expect(wrapper.get('[data-testid="pool-follow-entry-600000"]').text()).toBe('取消关注')
+    expect(wrapper.get('[data-testid="pool-follow-entry-600000"]').text()).toBe('管理分组')
     expect(wrapper.get('[data-testid="pool-follow-entry-600000"]').attributes('title'))
-      .toBe('取消关注 SH 600000')
+      .toBe('管理 SH 600000 的关注分组')
 
     await wrapper.get('[data-testid="pool-follow-entry-600000"]').trigger('click')
     await wrapper.get('[data-testid="pool-rerun-entry-600000"]').trigger('click')

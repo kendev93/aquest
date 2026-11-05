@@ -127,6 +127,8 @@ STATE_TABLES: tuple[str, ...] = (
     "strategy_jobs",
     "strategy_pool_entries",
     "strategy_pool_focus",
+    "strategy_pool_focus_groups",
+    "strategy_pool_focus_members",
     "strategy_pool_research_settings",
     "pool_tracking_versions",
 )
@@ -960,6 +962,23 @@ class _DuckDbStoreBase:
                     name VARCHAR NOT NULL DEFAULT '',
                     created_at TIMESTAMP NOT NULL,
                     PRIMARY KEY (market, code)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS strategy_pool_focus_groups (
+                    group_id VARCHAR PRIMARY KEY, name VARCHAR NOT NULL UNIQUE,
+                    created_at TIMESTAMP NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS strategy_pool_focus_members (
+                    group_id VARCHAR NOT NULL, market VARCHAR NOT NULL, code VARCHAR NOT NULL,
+                    name VARCHAR NOT NULL DEFAULT '', created_at TIMESTAMP NOT NULL,
+                    PRIMARY KEY (group_id, market, code)
                 )
                 """
             )

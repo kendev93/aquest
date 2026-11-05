@@ -260,6 +260,58 @@ def _iter_jsonl(archive: zipfile.ZipFile, entry: str) -> Iterator[dict[str, obje
             yield cast(dict[str, object], record)
 
 
+def _focus_import_mapping(store: _AssetStore, archive: zipfile.ZipFile) -> dict[str, str]:
+    """Map same-name groups on merge and reject imports that exceed a group limit."""
+    names = set(archive.namelist())
+    groups_entry = "strategy_pool_focus_groups.jsonl"
+    members_entry = "strategy_pool_focus_members.jsonl"
+    if "strategy_pool_focus.jsonl" in names:
+        default_members = {
+            (str(row["market"]), str(row["code"]))
+            for row in store.iter_history_rows("strategy_pool_focus")
+        }
+        for row in _iter_jsonl(archive, "strategy_pool_focus.jsonl"):
+            default_members.add((str(row["market"]), str(row["code"])))
+        if len(default_members) > 100:
+            raise MarketDataStoreError("导入后默认分组将超过 100 只")
+    if groups_entry not in names and members_entry not in names:
+        return {}
+    existing = list(store.iter_history_rows("strategy_pool_focus_groups"))
+    by_id = {str(row["group_id"]): str(row["group_id"]) for row in existing}
+    by_name = {str(row["name"]): str(row["group_id"]) for row in existing}
+    mapping: dict[str, str] = {}
+    if groups_entry in names:
+        for row in _iter_jsonl(archive, groups_entry):
+            source_id = str(row["group_id"])
+            name = str(row["name"])
+            target_id = by_id.get(source_id) or by_name.get(name) or source_id
+            mapping[source_id] = target_id
+            by_id[target_id] = target_id
+            by_name[name] = target_id
+    members: dict[str, set[tuple[str, str]]] = {}
+    for row in store.iter_history_rows("strategy_pool_focus_members"):
+        members.setdefault(str(row["group_id"]), set()).add((str(row["market"]), str(row["code"])))
+    if members_entry in names:
+        for row in _iter_jsonl(archive, members_entry):
+            source_id = str(row["group_id"])
+            target_id = mapping.get(source_id, source_id)
+            if target_id not in by_id:
+                raise MarketDataStoreError("备份中的特别关注分组成员缺少对应分组")
+            selected = members.setdefault(target_id, set())
+            selected.add((str(row["market"]), str(row["code"])))
+            if len(selected) > 100:
+                raise MarketDataStoreError("导入后特别关注分组将超过 100 只")
+    return mapping
+
+
+def _remap_focus_rows(
+    rows: Iterable[dict[str, object]], mapping: Mapping[str, str]
+) -> Iterator[dict[str, object]]:
+    for row in rows:
+        group_id = str(row["group_id"])
+        yield {**row, "group_id": mapping.get(group_id, group_id)}
+
+
 def import_user_assets(store: _AssetStore, source: str | Path) -> ImportSummary:
     """Merge a backup into this installation.
 
@@ -278,14 +330,16 @@ def import_user_assets(store: _AssetStore, source: str | Path) -> ImportSummary:
     skipped: dict[str, int] = {}
     with zipfile.ZipFile(archive_path) as archive:
         names = set(archive.namelist())
+        focus_mapping = _focus_import_mapping(store, archive)
         for table in ASSET_TABLES:
             entry = f"{table}{_TABLE_ENTRY_SUFFIX}"
             if entry not in names:
                 continue
             _ensure_columns_compatible(store, table, declared.get(table))
-            rows, attempted = store.insert_history_rows(
-                table, _iter_jsonl(archive, entry), batch_size=_STREAM_BATCH
-            )
+            records = _iter_jsonl(archive, entry)
+            if table in {"strategy_pool_focus_groups", "strategy_pool_focus_members"}:
+                records = _remap_focus_rows(records, focus_mapping)
+            rows, attempted = store.insert_history_rows(table, records, batch_size=_STREAM_BATCH)
             imported[table] = rows
             skipped[table] = max(0, attempted - rows)
     return ImportSummary(imported=imported, skipped=skipped)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -57,6 +58,24 @@ class DuckDbStrategyPoolStore:
                     name VARCHAR NOT NULL DEFAULT '',
                     created_at TIMESTAMP NOT NULL,
                     PRIMARY KEY (market, code)
+                )
+                """
+            )
+
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS strategy_pool_focus_groups (
+                    group_id VARCHAR PRIMARY KEY, name VARCHAR NOT NULL UNIQUE,
+                    created_at TIMESTAMP NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS strategy_pool_focus_members (
+                    group_id VARCHAR NOT NULL, market VARCHAR NOT NULL, code VARCHAR NOT NULL,
+                    name VARCHAR NOT NULL DEFAULT '', created_at TIMESTAMP NOT NULL,
+                    PRIMARY KEY (group_id, market, code)
                 )
                 """
             )
@@ -151,6 +170,164 @@ class DuckDbStrategyPoolStore:
                 [market, code],
             )
         return self.read_focus()
+
+    def read_focus_groups(self) -> list[dict[str, object]]:
+        """Return the default group and all custom groups with their members."""
+        with self._read_connection() as connection:
+            groups = connection.execute(
+                "SELECT group_id, name FROM strategy_pool_focus_groups "
+                "ORDER BY created_at, group_id"
+            ).fetchall()
+            members = connection.execute(
+                "SELECT group_id, market, code, name FROM strategy_pool_focus_members "
+                "ORDER BY created_at, market, code"
+            ).fetchall()
+        result: list[dict[str, object]] = [
+            {"id": "default", "name": "默认分组", "items": self.read_focus()}
+        ]
+        for group_id, name in groups:
+            result.append(
+                {
+                    "id": group_id,
+                    "name": name,
+                    "items": [
+                        {"market": row[1], "code": row[2], "name": row[3]}
+                        for row in members
+                        if row[0] == group_id
+                    ],
+                }
+            )
+        return result
+
+    def create_focus_group(self, name: str) -> dict[str, object]:
+        clean = self._validate_focus_group_name(name)
+        group_id = uuid.uuid4().hex
+        with self._transaction() as connection:
+            if connection.execute(
+                "SELECT 1 FROM strategy_pool_focus_groups WHERE name = ?", [clean]
+            ).fetchone():
+                raise ValueError("分组名称已存在")
+            connection.execute(
+                "INSERT INTO strategy_pool_focus_groups VALUES (?, ?, ?)",
+                [group_id, clean, datetime.now(timezone.utc).replace(tzinfo=None)],
+            )
+        return {"id": group_id, "name": clean, "items": []}
+
+    @staticmethod
+    def _validate_focus_group_name(name: str) -> str:
+        clean = name.strip()
+        if not clean or len(clean) > 60:
+            raise ValueError("分组名称须为 1 至 60 个字符")
+        if clean == "默认分组":
+            raise ValueError("分组名称已存在")
+        return clean
+
+    def rename_focus_group(self, group_id: str, name: str) -> None:
+        clean = self._validate_focus_group_name(name)
+        with self._transaction() as connection:
+            if (
+                group_id == "default"
+                or not connection.execute(
+                    "SELECT 1 FROM strategy_pool_focus_groups WHERE group_id = ?", [group_id]
+                ).fetchone()
+            ):
+                raise ValueError("分组不存在或不可修改")
+            if connection.execute(
+                "SELECT 1 FROM strategy_pool_focus_groups WHERE name = ? AND group_id != ?",
+                [clean, group_id],
+            ).fetchone():
+                raise ValueError("分组名称已存在")
+            connection.execute(
+                "UPDATE strategy_pool_focus_groups SET name = ? WHERE group_id = ?",
+                [clean, group_id],
+            )
+
+    def delete_focus_group(self, group_id: str) -> None:
+        with self._transaction() as connection:
+            if (
+                group_id == "default"
+                or not connection.execute(
+                    "SELECT 1 FROM strategy_pool_focus_groups WHERE group_id = ?", [group_id]
+                ).fetchone()
+            ):
+                raise ValueError("分组不存在或不可删除")
+            connection.execute(
+                "DELETE FROM strategy_pool_focus_members WHERE group_id = ?", [group_id]
+            )
+            connection.execute(
+                "DELETE FROM strategy_pool_focus_groups WHERE group_id = ?", [group_id]
+            )
+
+    def set_focus_groups(
+        self, market: str, code: str, name: str, group_ids: Sequence[str]
+    ) -> list[dict[str, object]]:
+        """Atomically replace this symbol's group membership."""
+        _validate_symbol(market, code)
+        selected = set(group_ids)
+        clean_name = str(name or "").strip()[:FOCUS_NAME_MAX_LENGTH]
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        with self._transaction() as connection:
+            valid = {"default"} | {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT group_id FROM strategy_pool_focus_groups"
+                ).fetchall()
+            }
+            if not selected <= valid:
+                raise ValueError("分组不存在")
+            current = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT group_id FROM strategy_pool_focus_members "
+                    "WHERE market = ? AND code = ?",
+                    [market, code],
+                ).fetchall()
+            }
+            default_exists = (
+                connection.execute(
+                    "SELECT 1 FROM strategy_pool_focus WHERE market = ? AND code = ?",
+                    [market, code],
+                ).fetchone()
+                is not None
+            )
+            if default_exists:
+                current.add("default")
+            for group_id in selected - current:
+                if group_id == "default":
+                    count = connection.execute(
+                        "SELECT COUNT(*) FROM strategy_pool_focus"
+                    ).fetchone()
+                else:
+                    count = connection.execute(
+                        "SELECT COUNT(*) FROM strategy_pool_focus_members WHERE group_id = ?",
+                        [group_id],
+                    ).fetchone()
+                if count and int(count[0]) >= FOCUS_LIMIT:
+                    raise ValueError(f"特别关注最多 {FOCUS_LIMIT} 只。")
+            for group_id in current - selected:
+                if group_id == "default":
+                    connection.execute(
+                        "DELETE FROM strategy_pool_focus WHERE market = ? AND code = ?",
+                        [market, code],
+                    )
+                else:
+                    connection.execute(
+                        "DELETE FROM strategy_pool_focus_members "
+                        "WHERE group_id = ? AND market = ? AND code = ?",
+                        [group_id, market, code],
+                    )
+            for group_id in selected - current:
+                if group_id == "default":
+                    connection.execute(
+                        "INSERT INTO strategy_pool_focus VALUES (?, ?, ?, ?)",
+                        [market, code, clean_name, now],
+                    )
+                else:
+                    connection.execute(
+                        "INSERT INTO strategy_pool_focus_members VALUES (?, ?, ?, ?, ?)",
+                        [group_id, market, code, clean_name, now],
+                    )
+        return self.read_focus_groups()
 
     def get(self, market: str, code: str) -> dict[str, object] | None:
         with self._read_connection() as connection:

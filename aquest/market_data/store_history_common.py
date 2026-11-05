@@ -32,6 +32,8 @@ ASSET_TABLES: tuple[str, ...] = (
     "strategy_discovery_replay_history",
     "strategy_pool_entries",
     "strategy_pool_focus",
+    "strategy_pool_focus_groups",
+    "strategy_pool_focus_members",
     "screen_presets",
     "research_presets",
     "candidate_library",

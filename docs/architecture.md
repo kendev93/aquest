@@ -56,9 +56,9 @@ Tencent（日线首选）／East Money（日线兜底） ─────┘
 
 ### 状态库 `state.duckdb`
 
-池条目、跟踪版本和任务这些写得最频繁、又和日线合并没有关系的表，放在与行情库同目录的 `state.duckdb` 里：`strategy_pool_entries`、`strategy_pool_focus`、`strategy_pool_research_settings`、`pool_tracking_versions`、`strategy_jobs`。这样行情同步合并日线时持有的是行情库写锁，池的写入各自持有状态库写锁，两条链不再互相排队。其余表（日线、指标缓存、各类历史与方案）仍在 `market.duckdb`。
+池条目、特别关注及其分组、跟踪版本和任务放在与行情库同目录的 `state.duckdb` 里：`strategy_pool_entries`、`strategy_pool_focus`、`strategy_pool_focus_groups`、`strategy_pool_focus_members`、`strategy_pool_research_settings`、`pool_tracking_versions`、`strategy_jobs`。这样行情同步合并日线时持有的是行情库写锁，池的写入各自持有状态库写锁，两条链不再互相排队。其余表（日线、指标缓存、各类历史与方案）仍在 `market.duckdb`。
 
-- **迁移**：backend 启动时如果还没拆库，就建一份 `state.duckdb.tmp`、把上面五张表整表拷贝过去、`CHECKPOINT` 之后原子改名。**只拷贝不删除**，行情库里的旧表原样保留；迁移幂等，失败就继续单库运行（`state.duckdb` 不存在时所有读写自动回落到行情库）。
+- **迁移**：backend 启动时如果还没拆库，就建一份 `state.duckdb.tmp`、把上面的状态表整表拷贝过去、`CHECKPOINT` 之后原子改名。**只拷贝不删除**，行情库里的旧表原样保留；迁移幂等，失败就继续单库运行（`state.duckdb` 不存在时所有读写自动回落到行情库）。
 - **备份**：完整备份必须同时包含 `market.duckdb` 与 `state.duckdb`。用户资产导出（JSONL + manifest）不受影响：导出按表分派，池条目等从状态库读。
 - **回滚**：删掉 `state.duckdb` 即可退回单库，但看到的是拆分前的池/跟踪/任务数据；要把拆分后的数据带回去，需先把这几张表从状态库拷回行情库再删文件。策略 worker 以只读方式打开状态库，和行情库一致。
 

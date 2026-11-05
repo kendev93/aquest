@@ -71,6 +71,8 @@ def test_asset_tables_never_include_market_or_cache_data() -> None:
         "strategy_discovery_replay_history",
         "strategy_pool_entries",
         "strategy_pool_focus",
+        "strategy_pool_focus_groups",
+        "strategy_pool_focus_members",
         "screen_presets",
         "research_presets",
         "candidate_library",
@@ -117,16 +119,42 @@ def test_round_trip_carries_focus_list(tmp_path: Path) -> None:
     pool.initialize()
     pool.add_focus("SH", "600000", "浦发银行")
     pool.add_focus("SZ", "000001", "平安银行")
+    group_id = str(pool.create_focus_group("银行")["id"])
+    pool.set_focus_groups("SH", "600000", "浦发银行", ["default", group_id])
     archive = export_user_assets(source, tmp_path / "backup.zip").path
 
     target = DuckDbMarketDataStore(tmp_path / "dst.duckdb")
     summary = import_user_assets(target, archive)
 
     assert summary.imported["strategy_pool_focus"] == 2
+    assert summary.imported["strategy_pool_focus_groups"] == 1
+    assert summary.imported["strategy_pool_focus_members"] == 1
+    assert DuckDbStrategyPoolStore(target).read_focus_groups()[1]["items"][0]["code"] == "600000"
     assert DuckDbStrategyPoolStore(target).read_focus() == [
         {"market": "SH", "code": "600000", "name": "浦发银行"},
         {"market": "SZ", "code": "000001", "name": "平安银行"},
     ]
+
+
+def test_focus_group_import_merges_same_name_without_orphans(tmp_path: Path) -> None:
+    source = DuckDbMarketDataStore(tmp_path / "src.duckdb")
+    source_pool = DuckDbStrategyPoolStore(source)
+    source_pool.initialize()
+    source_group = str(source_pool.create_focus_group("银行")["id"])
+    source_pool.set_focus_groups("SH", "600000", "浦发银行", [source_group])
+    archive = export_user_assets(source, tmp_path / "backup.zip").path
+
+    target = DuckDbMarketDataStore(tmp_path / "dst.duckdb")
+    target_pool = DuckDbStrategyPoolStore(target)
+    target_pool.initialize()
+    target_group = str(target_pool.create_focus_group("银行")["id"])
+    target_pool.set_focus_groups("SZ", "000001", "平安银行", [target_group])
+    import_user_assets(target, archive)
+    import_user_assets(target, archive)
+    groups = target_pool.read_focus_groups()
+    assert len(groups) == 2
+    assert groups[1]["id"] == target_group
+    assert {item["code"] for item in groups[1]["items"]} == {"600000", "000001"}
 
 
 def test_round_trip_keeps_tracking_snapshots_and_trade_costs(tmp_path: Path) -> None:

@@ -567,7 +567,16 @@ const listContext = computed(() => new URLSearchParams({
 }).toString())
 
 const {
+  groups,
+  activeGroupId,
+  selectedTarget,
+  selectedGroupIds,
+  saveMembership,
+  addGroup,
+  renameGroup,
+  removeGroup,
   focusPending,
+  focusLoadError,
   followKeys,
   focusRows,
   focusMissingCount,
@@ -582,6 +591,20 @@ const {
   errorMessage,
   describeError: apiMessage,
 })
+
+const newFocusGroupName = ref('')
+async function createNewFocusGroup(): Promise<void> {
+  if (await addGroup(newFocusGroupName.value)) newFocusGroupName.value = ''
+}
+function promptRenameFocusGroup(id: string, name: string): void {
+  const next = window.prompt('输入新的分组名称', name)
+  if (next !== null) void renameGroup(id, next)
+}
+function confirmDeleteFocusGroup(id: string, name: string): void {
+  if (window.confirm(`删除分组「${name}」？该分组的关注关系将被移除，其他分组不受影响。`)) {
+    void removeGroup(id)
+  }
+}
 
 const {
   SIGNAL_PAGE_SIZE,
@@ -1611,6 +1634,23 @@ onUnmounted(() => {
 
         <section class="pool-focus-section panel-card" data-testid="pool-focus-section">
           <div class="section-heading"><div><p class="eyebrow">FOLLOWED</p><h2>特别关注 <span>{{ focusRows.length }}</span></h2></div><small>只列关注的标的 · 按状态优先级排序，不跟随下方搜索、排序和分页</small></div>
+
+          <p v-if="focusLoadError">分组读取失败，暂不可修改。<button class="text-button" @click="loadFocus">重试读取</button></p>
+          <div class="focus-groups" aria-label="特别关注分组">
+            <button v-for="group in groups" :key="group.id" class="button-secondary"
+              :aria-pressed="activeGroupId === group.id" :disabled="focusPending"
+              @click="activeGroupId = group.id">{{ group.name }}（{{ group.items.length }}）</button>
+            <template v-for="group in groups" :key="`manage-${group.id}`">
+              <template v-if="group.id === activeGroupId && group.id !== 'default'">
+                <button class="text-button" :disabled="focusPending" @click="promptRenameFocusGroup(group.id, group.name)">重命名</button>
+                <button class="text-button" :disabled="focusPending" @click="confirmDeleteFocusGroup(group.id, group.name)">删除分组</button>
+              </template>
+            </template>
+            <form class="focus-group-create" @submit.prevent="createNewFocusGroup">
+              <input v-model="newFocusGroupName" type="text" aria-label="新分组名称" maxlength="60" placeholder="新分组名称" required>
+              <button class="button-secondary" :disabled="focusPending">新建分组</button>
+            </form>
+          </div>
           <StrategyPoolEntryTable
             v-if="focusRows.length"
             :entries="focusRows"
@@ -1628,9 +1668,30 @@ onUnmounted(() => {
             @rerun="rerunEntry"
             @toggle-follow="toggleFollow"
           />
-          <p v-else class="empty-copy" data-testid="pool-focus-empty">{{ focusMissingCount ? '已关注的标的目前都不在策略池里；跑完全市场研究或单股重跑后会显示。' : '在下方「全市场标的状态」的维护列点击关注，这里就只显示这几只标的的当前状态。' }}</p>
+          <p v-else class="empty-copy" data-testid="pool-focus-empty">{{ focusMissingCount ? '已关注的标的目前都不在策略池里；跑完全市场研究或单股重跑后会显示。' : '在下方「全市场标的状态」的维护列点击添加到分组，这里显示当前分组标的的状态。' }}</p>
           <p v-if="focusMissingCount > 0" class="pool-scale-note" data-testid="pool-focus-missing">另有 {{ focusMissingCount }} 只关注标的暂时不在策略池，重跑后会显示；不需要了可以<button class="text-button" data-testid="pool-focus-prune" :disabled="focusPending" @click="void pruneMissingFocus()">移出这些关注</button>。</p>
         </section>
+
+
+        <div v-if="selectedTarget" class="focus-dialog-backdrop" @click.self="selectedTarget = null">
+          <section class="focus-dialog panel-card" role="dialog" aria-modal="true" aria-labelledby="focus-dialog-title">
+            <h2 id="focus-dialog-title">添加到分组 · {{ selectedTarget.market }} {{ selectedTarget.code }} {{ selectedTarget.name }}</h2>
+            <p>勾选要关注的分组；取消勾选只会移出对应分组。</p>
+            <label v-for="group in groups" :key="group.id" class="focus-group-option">
+              <input v-model="selectedGroupIds" type="checkbox" :value="group.id" :disabled="focusPending">
+              {{ group.name }}（{{ group.items.length }}/100）
+            </label>
+            <form class="focus-group-create" @submit.prevent="createNewFocusGroup">
+              <input v-model="newFocusGroupName" type="text" aria-label="在选择器中新建分组" maxlength="60" placeholder="新分组名称" required>
+              <button class="button-secondary" :disabled="focusPending">新建分组</button>
+            </form>
+            <p v-if="errorMessage" role="alert">{{ errorMessage }}</p>
+            <div class="focus-dialog-actions">
+              <button class="button-secondary" :disabled="focusPending" @click="selectedTarget = null">取消</button>
+              <button class="button-primary" :disabled="focusPending" @click="saveMembership">保存</button>
+            </div>
+          </section>
+        </div>
 
         <StrategyPoolPostLaunchBoard
           :entries="entries"
@@ -1768,6 +1829,18 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .research-estimate { color: #91a1b8; font-size: .78rem; white-space: nowrap; align-self: center; }
 .signal-row, .history-row { display: grid; gap: 5px; padding: 10px 12px; border-left: 3px solid #18c467; background: #111c30; }
 /* 关注开关贴在文字下面，不占满整行宽度。 */
+.focus-groups, .focus-group-create, .focus-dialog-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.focus-groups { margin: 16px 0; }
+.focus-group-create { margin: 0; }
+.focus-group-create input { width: 180px; min-height: 42px; font: inherit; font-size: .875rem; }
+.focus-group-create .button-secondary { min-height: 42px; padding: 8px 14px; white-space: nowrap; }
+.focus-dialog .focus-group-create { margin: 16px 0; }
+.focus-dialog-actions { margin-top: 16px; }
+.focus-groups button[aria-pressed="true"] { font-weight: 700; border-color: currentColor; }
+.focus-dialog-backdrop { position: fixed; inset: 0; z-index: 1000; background: #0008; display: grid; place-items: center; padding: 16px; }
+.focus-dialog { width: min(520px, 100%); max-height: 85vh; overflow: auto; padding: 24px; }
+.focus-group-option { display: block; padding: 6px 0; }
+.focus-dialog-actions { justify-content: flex-end; }
 .signal-row .pool-follow-button { justify-self: start; margin-top: 2px; padding-left: 0; }
 .signal-row span, .history-row span, .history-row small { color: #9aaac0; font-size: .88rem; }
 .risk-signal { border-left-color: #ff6a69; }

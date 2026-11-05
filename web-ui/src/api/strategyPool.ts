@@ -158,6 +158,30 @@ export async function removeStrategyPoolFocus(
   return readFocusItems(response.data)
 }
 
+
+export interface StrategyPoolFocusGroup {
+  id: string
+  name: string
+  items: StrategyPoolFocusItem[]
+}
+
+async function focusGroupRequest(path: string, method = 'GET', body?: object): Promise<StrategyPoolFocusGroup[]> {
+  const response = await request<{ data: { groups: StrategyPoolFocusGroup[] } }>(
+    `${API_BASE}/focus-groups${path}`,
+    { method, ...(body ? { body: JSON.stringify(body) } : {}) },
+  )
+  return response.data.groups
+}
+
+export const fetchFocusGroups = () => focusGroupRequest('')
+export const createFocusGroup = (name: string) => focusGroupRequest('', 'POST', { name })
+export const renameFocusGroup = (id: string, name: string) =>
+  focusGroupRequest(`/${encodeURIComponent(id)}`, 'PUT', { name })
+export const deleteFocusGroup = (id: string) =>
+  focusGroupRequest(`/${encodeURIComponent(id)}`, 'DELETE')
+export const setFocusMembership = (item: StrategyPoolFocusItem, groupIds: string[]) =>
+  focusGroupRequest('/membership', 'PUT', { ...item, group_ids: groupIds })
+
 export async function saveStrategyPoolOverride(
   market: string,
   code: string,

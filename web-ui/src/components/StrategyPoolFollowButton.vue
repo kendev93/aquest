@@ -21,9 +21,7 @@ const emit = defineEmits<{
 }>()
 
 const followed = computed(() => props.followKeys.has(symbol(props.target)))
-const title = computed(() => (followed.value
-  ? `取消关注 ${props.target.market} ${props.target.code}`
-  : `关注 ${props.target.market} ${props.target.code}，加入特别关注面板`))
+const title = computed(() => `管理 ${props.target.market} ${props.target.code} 的关注分组`)
 </script>
 
 <template>
@@ -33,5 +31,5 @@ const title = computed(() => (followed.value
     :disabled="busy"
     :title="title"
     @click="emit('toggle', target)"
-  >{{ followed ? '取消关注' : '关注' }}</button>
+  >{{ followed ? '管理分组' : '添加到分组' }}</button>
 </template>
