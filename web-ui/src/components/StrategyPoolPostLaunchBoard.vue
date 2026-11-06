@@ -1,13 +1,15 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 
-import type { StrategyPoolEntry, StrategyPoolObjective } from '../types'
+import type { StrategyPoolEntry, StrategyPoolHolding, StrategyPoolObjective } from '../types'
 import { formatPercent, formatSignedPercent } from '../utils/format'
 import { objectiveLabel, postLaunchExcess, type StrategyPoolSortDirection } from '../utils/strategyPoolStatus'
 
 interface Props {
   entries: StrategyPoolEntry[]
   objective: StrategyPoolObjective
+  holdings?: Map<string, StrategyPoolHolding>
+  holdingAsOf?: string
   loading?: boolean
   listContext?: string
 }
@@ -15,6 +17,8 @@ interface Props {
 const props = withDefaults(defineProps<Props>(), {
   loading: false,
   listContext: '',
+  holdings: () => new Map(),
+  holdingAsOf: '',
 })
 
 /** 榜只画头部这么多行：排行榜的意义是比谁在前面，剩下的用「共 N 只可排」交代。 */
@@ -53,6 +57,12 @@ function finite(value: unknown): number | null {
 }
 
 const direction = ref<StrategyPoolSortDirection>('desc')
+const sortField = ref<'postLaunchReturn' | 'benchmark' | 'excess'>('postLaunchReturn')
+const sortLabels = { postLaunchReturn: '上线后收益', benchmark: '同期买入持有', excess: '超额' } as const
+function selectSort(field: typeof sortField.value): void {
+  if (sortField.value === field) direction.value = direction.value === 'desc' ? 'asc' : 'desc'
+  else { sortField.value = field; direction.value = 'desc' }
+}
 const minDays = ref(0)
 
 /**
@@ -89,10 +99,14 @@ const thresholdRows = computed(() => eligible.value.filter((row) => row.days >= 
 
 /** 并列先比上线天数（历史更长的更可信），再比代码，保证刷新前后是同一个顺序。 */
 const sorted = computed<BoardRow[]>(() => [...thresholdRows.value].sort((left, right) => {
-  const byReturn = direction.value === 'desc'
-    ? right.postLaunchReturn - left.postLaunchReturn
-    : left.postLaunchReturn - right.postLaunchReturn
-  if (byReturn !== 0) return byReturn
+  const a = left[sortField.value]
+  const b = right[sortField.value]
+  if (a === null || b === null) {
+    if (a !== b) return a === null ? 1 : -1
+  } else {
+    const delta = direction.value === 'desc' ? b - a : a - b
+    if (delta !== 0) return delta
+  }
   if (right.days !== left.days) return right.days - left.days
   return left.key.localeCompare(right.key)
 }))
@@ -130,8 +144,8 @@ function excessClass(value: number | null): string {
     </div>
     <div class="pool-board-controls">
       <div class="pool-board-tabs" role="group" aria-label="榜单排序方向">
-        <button type="button" data-testid="pool-board-desc" :class="{ active: direction === 'desc' }" :aria-pressed="direction === 'desc'" @click="direction = 'desc'">收益最高在前</button>
-        <button type="button" data-testid="pool-board-asc" :class="{ active: direction === 'asc' }" :aria-pressed="direction === 'asc'" @click="direction = 'asc'">收益最低在前</button>
+        <button type="button" data-testid="pool-board-desc" :class="{ active: direction === 'desc' }" :aria-pressed="direction === 'desc'" @click="direction = 'desc'">{{ sortLabels[sortField] }}最高在前</button>
+        <button type="button" data-testid="pool-board-asc" :class="{ active: direction === 'asc' }" :aria-pressed="direction === 'asc'" @click="direction = 'asc'">{{ sortLabels[sortField] }}最低在前</button>
       </div>
       <label class="pool-board-days">上线天数门槛
         <select v-model.number="minDays" data-testid="pool-board-min-days">
@@ -157,9 +171,10 @@ function excessClass(value: number | null): string {
           <tr>
             <th>#</th>
             <th>标的</th>
-            <th>上线后收益</th>
-            <th>同期买入持有</th>
-            <th>超额</th>
+            <th v-for="field in (['postLaunchReturn', 'benchmark', 'excess'] as const)" :key="field" :aria-sort="sortField === field ? (direction === 'asc' ? 'ascending' : 'descending') : 'none'">
+              <button class="pool-board-sort" :data-testid="`pool-board-sort-${field}`" @click="selectSort(field)">{{ sortLabels[field] }}{{ sortField === field ? (direction === 'asc' ? ' ↑' : ' ↓') : '' }}</button>
+            </th>
+            <th title="模拟持仓快照的未实现收益，非实时行情；旧快照可能已失效">当前持仓收益</th>
             <th>创建至今收益</th>
             <th>上线交易日</th>
             <th>行情截至</th>
@@ -173,6 +188,7 @@ function excessClass(value: number | null): string {
             <td :class="excessClass(row.postLaunchReturn)" data-testid="pool-board-return-cell"><b>{{ formatPercent(row.postLaunchReturn) }}</b></td>
             <td>{{ formatPercent(row.benchmark) }}</td>
             <td :class="excessClass(row.excess)">{{ formatSignedPercent(row.excess) }}</td>
+            <td :data-testid="`pool-board-holding-return-${row.key}`">{{ formatSignedPercent(holdings.get(row.key)?.holding_return_pct) }}<small v-if="holdings.get(row.key)?.status === 'held_stale'">旧持仓快照</small><small v-else-if="holdings.has(row.key) && holdingAsOf">快照截至 {{ holdingAsOf }}</small></td>
             <td>{{ formatPercent(row.createdReturn) }}</td>
             <td>{{ row.days }}</td>
             <td>{{ row.asOfDate || '—' }}</td>
@@ -194,6 +210,7 @@ function excessClass(value: number | null): string {
 .pool-board-days select { margin-left: 6px; padding: 5px 8px; border: 1px solid #2f4258; border-radius: 6px; background: #0b1428; color: #eff4fc; font-size: 12px; }
 .pool-board-table { width: 100%; min-width: 900px; border-collapse: collapse; text-align: left; }
 .pool-board-table th, .pool-board-table td { padding: 10px; border-bottom: 1px solid #25364f; vertical-align: top; white-space: nowrap; }
+.pool-board-sort { border: 0; padding: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
 .pool-board-table th { color: #8798b1; font-size: 12px; }
 .pool-board-table td small { display: block; margin-top: 4px; color: #899ab3; white-space: normal; }
 .table-link { color: var(--accent); text-decoration: none; font-size: 13px; }

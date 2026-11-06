@@ -62,6 +62,15 @@ describe('StrategyPoolPostLaunchBoard', () => {
     expect(noBenchmark.findAll('tbody tr td')[4].text()).toBe('—')
   })
 
+  it('shows the holding snapshot and marks stale holdings', () => {
+    const wrapper = mount(StrategyPoolPostLaunchBoard, { props: {
+      entries: [entry(), entry({ code: '600001' })], objective: 'annual_return', holdingAsOf: '2026-09-03',
+      holdings: new Map([['SH600000', { market: 'SH' as const, code: '600000', status: 'held_stale', holding_return_pct: -0.07 }]]),
+    } })
+    expect(wrapper.get('[data-testid="pool-board-holding-return-SH600000"]').text()).toContain('-7.00%旧持仓快照')
+    expect(wrapper.get('[data-testid="pool-board-holding-return-SH600001"]').text()).toBe('—')
+  })
+
   it('flips the direction and keeps the longer track record first on a tie', async () => {
     const wrapper = mountBoard([
       entry({ market: 'SZ', code: '000004', post_launch_return: 0.1, post_launch_days: 3 }),
@@ -80,6 +89,24 @@ describe('StrategyPoolPostLaunchBoard', () => {
     expect(asc[0].findAll('td')[2].text()).toBe('10.00%')
     expect(asc[0].text()).toContain('600005')
     expect(asc[2].text()).toContain('600006')
+  })
+
+  it('sorts benchmark and excess in either direction with missing values last', async () => {
+    const wrapper = mountBoard([
+      entry({ code: '600001', post_launch_return: 0.3, post_launch_benchmark_return: 0.2 }),
+      entry({ code: '600002', post_launch_return: 0.4, post_launch_benchmark_return: 0.05 }),
+      entry({ code: '600003', post_launch_return: 0.8, post_launch_benchmark_return: null }),
+    ])
+    const codes = () => wrapper.findAll('tbody tr').map((row) => row.text())
+    await wrapper.get('[data-testid="pool-board-sort-benchmark"]').trigger('click')
+    expect(codes()[0]).toContain('600001')
+    expect(codes()[2]).toContain('600003')
+    await wrapper.get('[data-testid="pool-board-sort-benchmark"]').trigger('click')
+    expect(codes()[0]).toContain('600002')
+    expect(codes()[2]).toContain('600003')
+    await wrapper.get('[data-testid="pool-board-sort-excess"]').trigger('click')
+    expect(codes()[0]).toContain('600002')
+    expect(codes()[2]).toContain('600003')
   })
 
   it('can require a track record and says how many symbols the gate dropped', async () => {

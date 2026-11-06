@@ -506,6 +506,9 @@ const currentHoldingReturns = computed(() => new Map(
     holding.holding_return_pct,
   ]),
 ))
+const holdingSnapshots = computed(() => new Map(
+  currentHoldings.value.map((holding) => [`${holding.market}${holding.code}`, holding]),
+))
 const signalAsOf = computed(() => signalResult.value?.as_of_date ?? '')
 const signalLag = computed(() => signalResult.value?.data_lag ?? null)
 const filteredEntries = computed(() => {
@@ -603,6 +606,20 @@ function promptRenameFocusGroup(id: string, name: string): void {
 function confirmDeleteFocusGroup(id: string, name: string): void {
   if (window.confirm(`删除分组「${name}」？该分组的关注关系将被移除，其他分组不受影响。`)) {
     void removeGroup(id)
+  }
+}
+
+const focusSortColumn = ref<StrategyPoolSortColumn>('status')
+const focusSortDirection = ref<StrategyPoolSortDirection>('desc')
+const sortedFocusRows = computed(() => focusSortColumn.value === 'status' ? focusRows.value : sortPoolEntriesByMetric(
+  focusRows.value, focusSortColumn.value, focusSortDirection.value, signalStates.value, heldSymbols.value, objective.value,
+))
+function setFocusSort(column: StrategyPoolMetricColumn): void {
+  if (focusSortColumn.value !== column || focusSortDirection.value === 'asc') {
+    focusSortColumn.value = focusSortColumn.value === column ? 'status' : column
+    focusSortDirection.value = 'desc'
+  } else {
+    focusSortDirection.value = 'asc'
   }
 }
 
@@ -1633,7 +1650,7 @@ onUnmounted(() => {
         <p class="pool-scale-note">买入和卖出规则都在最新完整行情日收盘后判定，下一交易日执行，因此今日触发卖出规则的标的当天仍列在持仓中。止损、止盈、移动止盈走同一条口径：触发当日收盘后判定、下一交易日按开盘价成交；持仓行上的三档风控价是引擎实际在用的那三条线，按标注那一日收盘后的数据算出。「最新收盘」是这一行标的最后一根已完成日线的收盘价（不复权），直接从行情取、不走跟踪摘要，所以空仓、当天没有买卖信号、甚至还没有跟踪版本的行都有。它和那三条线不一定同一天：风控线跟着跟踪快照的判定日期，行情却可能已经多走了几个交易日（停牌或那一轮跟踪没跑成），这时价下面会标出「价截至 X」，比对之前先看清各自是哪一天。</p>
 
         <section class="pool-focus-section panel-card" data-testid="pool-focus-section">
-          <div class="section-heading"><div><p class="eyebrow">FOLLOWED</p><h2>特别关注 <span>{{ focusRows.length }}</span></h2></div><small>只列关注的标的 · 按状态优先级排序，不跟随下方搜索、排序和分页</small></div>
+          <div class="section-heading"><div><p class="eyebrow">FOLLOWED</p><h2>特别关注 <span>{{ focusRows.length }}</span></h2></div><small>只列当前分组的标的 · 默认按状态排序，可点击列头排序</small></div>
 
           <p v-if="focusLoadError">分组读取失败，暂不可修改。<button class="text-button" @click="loadFocus">重试读取</button></p>
           <div class="focus-groups" aria-label="特别关注分组">
@@ -1653,13 +1670,16 @@ onUnmounted(() => {
           </div>
           <StrategyPoolEntryTable
             v-if="focusRows.length"
-            :entries="focusRows"
+            :entries="sortedFocusRows"
             :objective="objective"
             :states="signalStates"
             :held-keys="heldSymbols"
+            :holdings="holdingSnapshots"
+            :holding-as-of="signalAsOf"
             :follow-keys="followKeys"
             testid="focus"
-            :sortable="false"
+            :sort-column="focusSortColumn"
+            :sort-direction="focusSortDirection"
             :follow-busy="focusPending"
             :queued-symbol="queuedSingleSymbol"
             :busy="isBusy"
@@ -1667,6 +1687,7 @@ onUnmounted(() => {
             :list-context="listContext"
             @rerun="rerunEntry"
             @toggle-follow="toggleFollow"
+            @sort="setFocusSort"
           />
           <p v-else class="empty-copy" data-testid="pool-focus-empty">{{ focusMissingCount ? '已关注的标的目前都不在策略池里；跑完全市场研究或单股重跑后会显示。' : '在下方「全市场标的状态」的维护列点击添加到分组，这里显示当前分组标的的状态。' }}</p>
           <p v-if="focusMissingCount > 0" class="pool-scale-note" data-testid="pool-focus-missing">另有 {{ focusMissingCount }} 只关注标的暂时不在策略池，重跑后会显示；不需要了可以<button class="text-button" data-testid="pool-focus-prune" :disabled="focusPending" @click="void pruneMissingFocus()">移出这些关注</button>。</p>
@@ -1696,6 +1717,8 @@ onUnmounted(() => {
         <StrategyPoolPostLaunchBoard
           :entries="entries"
           :objective="objective"
+          :holdings="holdingSnapshots"
+          :holding-as-of="signalAsOf"
           :loading="loading"
           :list-context="listContext"
         />
@@ -1715,6 +1738,8 @@ onUnmounted(() => {
             :objective="objective"
             :states="signalStates"
             :held-keys="heldSymbols"
+            :holdings="holdingSnapshots"
+            :holding-as-of="signalAsOf"
             :follow-keys="followKeys"
             testid="pool"
             :sort-column="sortColumn"

@@ -576,6 +576,27 @@ describe('StrategyPoolPage', () => {
     expect(rowCodes()).toEqual(['600000', '600001'])
   })
 
+  it('sorts the focused group independently of the market table', async () => {
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchFocusGroups).mockResolvedValue([{ id: 'default', name: '默认分组', items: [
+      { market: 'SH', code: '600000', name: '测试600000' },
+      { market: 'SH', code: '600001', name: '测试600001' },
+    ] }])
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+    const focused = () => wrapper.findAll('[data-testid^="focus-row-"]').map((row) => row.attributes('data-testid'))
+    const market = () => wrapper.findAll('[data-testid^="pool-row-"]').map((row) => row.attributes('data-testid'))
+    const original = market()
+    const sort = wrapper.get('[data-testid="focus-sort-strategy_return"]')
+    await sort.trigger('click')
+    expect(focused()).toEqual(['focus-row-600000', 'focus-row-600001'])
+    await sort.trigger('click')
+    expect(focused()).toEqual(['focus-row-600001', 'focus-row-600000'])
+    expect(market()).toEqual(original)
+    await sort.trigger('click')
+    expect(sort.text()).toBe('策略收益')
+  })
+
   it('restores the ascending direction from the list query so 返回 keeps the column order', async () => {
     window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
     window.history.replaceState({}, '', '/strategy-pool?objective=annual_return&sort=strategy_return&dir=asc')
@@ -868,6 +889,8 @@ describe('StrategyPoolPage', () => {
     expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('SH600000 · 浦发银行')
     expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('今日触发卖出 · 下一交易日卖出')
     expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('当前持仓收益 +12.00%')
+    expect(wrapper.get('[data-testid="pool-holding-return-600000"]').text()).toContain('+12.00%')
+    expect(wrapper.get('[data-testid="pool-holding-return-600001"]').text()).toBe('—')
     expect(wrapper.get('[data-testid="pool-sell-signals"]').text()).toContain('验证收益 +24.00%')
     expect(wrapper.get('[data-testid="pool-sell-signals"]').text()).toContain('全区间收益 +71.00%')
     expect(wrapper.get('[data-testid="pool-sell-signals"]').text()).toContain('留出收益 +8.00%')

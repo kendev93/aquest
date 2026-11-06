@@ -5,6 +5,7 @@ import StrategyPoolFollowButton from './StrategyPoolFollowButton.vue'
 import type {
   StrategyPoolEntry,
   StrategyPoolFollowTarget,
+  StrategyPoolHolding,
   StrategyPoolObjective,
   StrategyPoolSignal,
 } from '../types'
@@ -38,6 +39,8 @@ interface Props {
   objective: StrategyPoolObjective | null
   states: StrategyPoolSignal[]
   heldKeys: Set<string>
+  holdings?: Map<string, StrategyPoolHolding>
+  holdingAsOf?: string
   followKeys: Set<string>
   testid: string
   emptyText?: string
@@ -61,6 +64,8 @@ const props = withDefaults(defineProps<Props>(), {
   listContext: '',
   emptyText: '',
   followBusy: false,
+  holdings: () => new Map(),
+  holdingAsOf: '',
 })
 
 const emit = defineEmits<{
@@ -154,7 +159,7 @@ function latestCloseAsOf(entry: StrategyPoolEntry): string {
   <div class="table-scroll">
     <table class="pool-table">
       <thead><tr>
-        <th>持仓 / 今日信号</th><th>证券</th><th title="最后一根已完成日线的收盘价（不复权），每行都有；日期与风控线判定日期不一致时会在价下面标出来">最新收盘</th>
+        <th>持仓 / 今日信号</th><th title="模拟持仓快照的未实现收益，非实时行情；旧快照可能已失效">当前持仓收益</th><th>证券</th><th title="最后一根已完成日线的收盘价（不复权），每行都有；日期与风控线判定日期不一致时会在价下面标出来">最新收盘</th>
         <th v-for="column in METRIC_COLUMNS" :key="column.key" :title="column.hint">
           <button v-if="sortable" :data-testid="`${testid}-sort-${column.key}`" :title="sortHint(column.key, column.label)" @click="emit('sort', column.key)">{{ column.label }}{{ sortGlyph(column.key) }}</button>
           <template v-else>{{ column.label }}</template>
@@ -164,6 +169,7 @@ function latestCloseAsOf(entry: StrategyPoolEntry): string {
       <tbody>
         <tr v-for="entry in entries" :key="symbol(entry)" :data-testid="`${testid}-row-${entry.code}`">
           <td><div class="status-stack"><span v-if="entryIsHeld(entry, heldKeys)" class="status-chip status-held">持仓中</span><span v-for="chip in entryStatusChips(entry)" :key="chip" class="status-chip" :class="`status-${chip}`">{{ statusLabel(chip) }}</span></div><small v-if="holdingRiskText(entry)" :data-testid="`${testid}-holding-risk-${entry.code}`">{{ holdingRiskText(entry) }}</small></td>
+          <td :data-testid="`${testid}-holding-return-${entry.code}`">{{ formatSignedPercent(holdings.get(symbol(entry))?.holding_return_pct) }}<small v-if="holdings.get(symbol(entry))?.status === 'held_stale'">旧持仓快照</small><small v-else-if="holdings.has(symbol(entry)) && holdingAsOf">快照截至 {{ holdingAsOf }}</small></td>
           <td><strong>{{ entry.market }} {{ entry.code }}</strong><small>{{ entry.name }}</small></td>
           <td :data-testid="`${testid}-latest-close-${entry.code}`">{{ latestCloseText(entry) }}<small v-if="latestCloseAsOf(entry)">价截至 {{ latestCloseAsOf(entry) }}</small></td>
           <td :data-testid="`${testid}-entry-benchmark-${entry.code}`">
@@ -185,7 +191,7 @@ function latestCloseAsOf(entry: StrategyPoolEntry): string {
           <td><span v-if="entry.active_candidate?.quality?.badges?.length" class="badge-row"><i v-for="badge in entry.active_candidate.quality.badges" :key="badge">{{ badge }}</i></span><span v-else-if="entry.status === 'no_strategy'">无可计算的策略绩效</span><span v-else-if="entry.last_error" class="danger-text" :data-testid="`${testid}-entry-error-${entry.code}`" :title="entry.last_error">策略搜索失败 · 悬停查看原因</span><span v-else>—</span><small v-if="entry.active_candidate?.metrics">交易数：验证 {{ formatNumber(tradeCount(entry.active_candidate, 'validation'), 0) }} · 留出 {{ formatNumber(tradeCount(entry.active_candidate, 'holdout'), 0) }} 笔</small><small v-if="entry.active_source === 'manual'">手工覆盖 · {{ objectiveLabel(objective) }}</small></td>
           <td class="pool-actions"><a class="text-button" :href="detailHref(entry)" :data-testid="`${testid}-detail-${entry.code}`">详情</a><button :data-testid="`${testid}-rerun-entry-${entry.code}`" class="text-button" :disabled="rerunEntryDisabled(jobContext)" :title="rerunEntryTitle(entry, jobContext)" @click="emit('rerun', entry)">{{ queuedSymbol === symbol(entry) ? '排队中' : '重跑' }}</button><StrategyPoolFollowButton :target="entry" :follow-keys="followKeys" :busy="followBusy" :test-id="`${testid}-follow-entry-${entry.code}`" @toggle="emit('toggleFollow', $event)" /></td>
         </tr>
-        <tr v-if="!entries.length"><td colspan="14" class="empty-copy" :data-testid="`${testid}-entry-empty`">{{ emptyText }}</td></tr>
+        <tr v-if="!entries.length"><td colspan="16" class="empty-copy" :data-testid="`${testid}-entry-empty`">{{ emptyText }}</td></tr>
       </tbody>
     </table>
   </div>

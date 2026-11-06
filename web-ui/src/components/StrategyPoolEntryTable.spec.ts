@@ -47,10 +47,10 @@ function mountTable(overrides: Record<string, unknown> = {}) {
 }
 
 describe('StrategyPoolEntryTable', () => {
-  it('renders the same 15 columns with prefixed test ids for each scope', () => {
+  it('renders the same 16 columns with prefixed test ids for each scope', () => {
     const wrapper = mountTable()
 
-    expect(wrapper.findAll('thead th')).toHaveLength(15)
+    expect(wrapper.findAll('thead th')).toHaveLength(16)
     expect(wrapper.get('[data-testid="pool-row-600000"]').text()).toContain('触发买入')
     expect(wrapper.get('[data-testid="pool-entry-benchmark-600000"]').text()).toContain('全段基准 +50.00%')
     expect(wrapper.get('[data-testid="pool-holding-days-600000"]').text()).toContain('12.5 天')
@@ -62,6 +62,17 @@ describe('StrategyPoolEntryTable', () => {
     const focus = mountTable({ testid: 'focus' })
     expect(focus.find('[data-testid="focus-row-600000"]').exists()).toBe(true)
     expect(focus.find('[data-testid="pool-row-600000"]').exists()).toBe(false)
+  })
+
+  it('shows snapshot holding returns without treating missing values as zero', () => {
+    const holdings = new Map([
+      ['SH600000', { market: 'SH', code: '600000', holding_return_pct: 0.12 }],
+      ['SH600001', { market: 'SH', code: '600001', holding_return_pct: -0.03, status: 'held_stale' }],
+    ])
+    const wrapper = mountTable({ entries: [entry('600000'), entry('600001'), entry('600002')], holdings, holdingAsOf: '2026-10-01' })
+    expect(wrapper.get('[data-testid="pool-holding-return-600000"]').text()).toContain('+12.00%快照截至 2026-10-01')
+    expect(wrapper.get('[data-testid="pool-holding-return-600001"]').text()).toContain('-3.00%旧持仓快照')
+    expect(wrapper.get('[data-testid="pool-holding-return-600002"]').text()).toBe('—')
   })
 
   it('marks the full-period metrics with the replay end date', () => {
@@ -245,7 +256,7 @@ describe('StrategyPoolEntryTable', () => {
 
     const empty = wrapper.get('[data-testid="pool-entry-empty"]')
     expect(empty.text()).toContain('策略池为空')
-    expect(empty.attributes('colspan')).toBe('14')
+    expect(empty.attributes('colspan')).toBe('16')
   })
 
   it('prints the risk lines of a held symbol under its status column', () => {
