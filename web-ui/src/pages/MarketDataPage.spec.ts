@@ -787,6 +787,17 @@ describe('MarketDataPage', () => {
     }
   })
 
+  it('does not fetch instruments after an unmounted page finishes loading its status', async () => {
+    let release: (value: Awaited<ReturnType<typeof marketApi.fetchStoreStatus>>) => void = () => {}
+    vi.mocked(marketApi.fetchStoreStatus).mockImplementationOnce(() => new Promise((resolve) => { release = resolve }))
+    const wrapper = mountPage()
+    await flushPromises()
+    wrapper.unmount()
+    release({ database_path: '/data/market/market.duckdb', schema_version: 1, instrument_count: 0, bar_count: 0, data_start: null, data_end: null, last_online_sync_at: null })
+    await flushPromises()
+    expect(marketApi.fetchLocalInstruments).not.toHaveBeenCalled()
+  })
+
   it('toggles sync scope, MA overlays, and paginates the instrument list', async () => {
     vi.mocked(marketApi.fetchLocalInstruments).mockResolvedValue({
       items: instruments,

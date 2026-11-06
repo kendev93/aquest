@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import PageIntro from '../components/PageIntro.vue'
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 
 import { ApiError, describeError } from '../api/client'
 import { INTERACTIVE_JOB_TIMEOUT_MS, PollFatalError, PollTimeoutError, pollUntil, useBackgroundPoll } from '../composables/usePolling'
@@ -474,9 +474,14 @@ function toggleBoard(board: InstrumentBoard): void {
     : [...form.syncBoards, board]
 }
 
+let pageUnmounted = false
+onUnmounted(() => { pageUnmounted = true })
+
 async function loadStoreStatus(): Promise<void> {
+  if (pageUnmounted) return
   try {
     const status = await fetchStoreStatus()
+    if (pageUnmounted) return
     storeStatus.value = status
     const pendingJob = status.auto_sync_job_id
       ? { id: status.auto_sync_job_id, label: '正在自动同步最新行情…' }
@@ -998,6 +1003,7 @@ const localImportSummary = computed(() => {
 })
 
 async function loadInstruments(): Promise<void> {
+  if (pageUnmounted) return
   const requestId = ++instrumentsRequestId
   loading.value = true
   message.value = ''
@@ -1108,9 +1114,11 @@ function formatPrice(value: number | null): string {
 
 onMounted(async () => {
   await loadActiveMarketJobs()
+  if (pageUnmounted) return
   await loadStoreStatus()
+  if (pageUnmounted) return
   if (!marketJob.value) await loadInstruments()
-  await detectVipdocPath(true)
+  if (!pageUnmounted) await detectVipdocPath(true)
 })
 
 function instrumentLabel(type: LocalInstrument['instrument_type']): string {

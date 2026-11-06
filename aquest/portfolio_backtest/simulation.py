@@ -971,7 +971,7 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
         """
 
         following = pd.Timestamp(_date_text(as_of)) + pd.Timedelta(1, unit="D")
-        while following.dayofweek >= 5:  # 5=周六 6=周日
+        while following.day_of_week >= 5:  # 5=周六 6=周日
             following = following + pd.Timedelta(1, unit="D")
         return int(following.strftime("%Y%m%d"))
 
@@ -995,7 +995,7 @@ class PortfolioSimulationMixin(_PortfolioServiceState):
         if frequency == "weekly":
             # 比 weekday 而不是 ISO 周号：跨年那一周 ISO 的 year 会变，比
             # (year, week) 会把同一周判成两周。dayofweek 周一=0，绕回周一即跨周。
-            return bool(following.dayofweek <= current.dayofweek)
+            return bool(following.day_of_week <= current.day_of_week)
         return (current.year, current.month) != (following.year, following.month)
 
     def _execute_sells(
