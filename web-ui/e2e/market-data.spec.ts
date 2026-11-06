@@ -202,7 +202,7 @@ test('a repair discloses its stages, its cost and the symbols that never got a t
   await expect(page.getByTestId('market-data-progress')).toHaveCount(0)
   await expect(page.getByTestId('market-health-remaining')).toContainText('还剩 1772 只没轮到')
   await expect(page.getByTestId('market-health-no-change')).toContainText('原样写回 1133865 根')
-  expect(repairBody).toMatchObject({ checks: ['gap', 'stale'], offset: 0, confirm: true })
+  expect(repairBody).toMatchObject({ checks: ['gap'], offset: 0, confirm: true })
 
   await page.getByTestId('market-health-repair-next').click()
   await expect.poll(() => repairBody).toMatchObject({ offset: 500 })

@@ -305,10 +305,12 @@ test('following a symbol scopes it into the 特别关注 panel', async ({ page }
     const path = new URL(route.request().url()).pathname
     const method = route.request().method()
     let data: unknown = {}
-    if (path.includes('/strategy-pool/focus')) {
-      if (method === 'POST') focus = [{ market: 'SH', code: '600000', name: '测试股票' }]
-      else if (method === 'DELETE') focus = []
-      data = { items: focus }
+    if (path.endsWith('/strategy-pool/focus-groups/membership') && method === 'PUT') {
+      const body = route.request().postDataJSON() as { market: string; code: string; name: string; group_ids: string[] }
+      focus = body.group_ids.includes('default') ? [{ market: body.market, code: body.code, name: body.name }] : []
+      data = { groups: [{ id: 'default', name: '默认分组', items: focus }] }
+    } else if (path.endsWith('/strategy-pool/focus-groups')) {
+      data = { groups: [{ id: 'default', name: '默认分组', items: focus }] }
     } else if (path.endsWith('/strategy-pool/entries')) {
       data = { items: [{
         market: 'SH', code: '600000', name: '测试股票', status: 'ready',
@@ -324,11 +326,16 @@ test('following a symbol scopes it into the 特别关注 panel', async ({ page }
   await expect(page.getByTestId('pool-focus-empty')).toBeVisible()
 
   await page.getByTestId('pool-follow-entry-600000').click()
+  const dialog = page.getByRole('dialog', { name: /添加到分组/ })
+  await dialog.getByRole('checkbox', { name: /默认分组/ }).check()
+  await dialog.getByRole('button', { name: '保存' }).click()
   await expect(page.getByTestId('focus-row-600000')).toBeVisible()
-  await expect(page.getByTestId('focus-follow-entry-600000')).toHaveText('取消关注')
-  await expect(page.getByTestId('pool-follow-entry-600000')).toHaveText('取消关注')
+  await expect(page.getByTestId('focus-follow-entry-600000')).toHaveText('管理分组')
+  await expect(page.getByTestId('pool-follow-entry-600000')).toHaveText('管理分组')
 
   await page.getByTestId('focus-follow-entry-600000').click()
+  await dialog.getByRole('checkbox', { name: /默认分组/ }).uncheck()
+  await dialog.getByRole('button', { name: '保存' }).click()
   await expect(page.getByTestId('focus-row-600000')).toHaveCount(0)
   await expect(page.getByTestId('pool-focus-empty')).toBeVisible()
 
