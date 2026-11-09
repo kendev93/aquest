@@ -480,11 +480,11 @@ const buySignals = computed(() => {
 const riskSellSignals = computed<Array<Record<string, unknown>>>(() => {
   const executed = signalResult.value?.model_portfolio?.risk_exit_signals ?? []
   const executedKeys = new Set(
-    executed.map((signal) => `${String(signal.market ?? '')}${String(signal.code ?? '')}`),
+    executed.map((signal) => `${String(signal.market ?? '')}${String(signal.code ?? '')}:${String(signal.signal_date ?? '')}`),
   )
   return [
     ...pendingRiskSellSignals.value.filter(
-      (signal) => !executedKeys.has(`${String(signal.market)}${String(signal.code)}`),
+      (signal) => !executedKeys.has(`${String(signal.market)}${String(signal.code)}:${String(signal.signal_date ?? '')}`),
     ),
     ...executed,
   ]

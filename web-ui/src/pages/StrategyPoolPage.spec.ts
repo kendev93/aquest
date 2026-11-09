@@ -243,6 +243,26 @@ describe('StrategyPoolPage', () => {
     expect(notice).toContain('2026-10-22 扫描')
   })
 
+  it('hides same-day buy when the sell rule also fires', async () => {
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    const other = signalFor('600001')
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValue({
+      job_id: 'signal-1', status: 'completed', result: {
+        mode: 'signals', objective: 'annual_return', as_of_date: '2026-10-01',
+        holding_scope: 'per_stock_strategy', holding_snapshot_complete: true,
+        buy_signals: [buySignal, other], sell_signals: [{ ...buySignal, status: 'sell', signal_type: 'sell' }],
+        states: [buySignal, other], model_portfolio: { available: true, holdings: [], risk_exit_signals: [] },
+      },
+    })
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+    const buys = wrapper.get('[data-testid="pool-buy-signals"]')
+    expect(buys.text()).toContain('600001')
+    expect(buys.text()).not.toContain('600000')
+    expect(wrapper.get('[data-testid="pool-sell-signals"]').text()).toContain('600000')
+    expect(buys.text()).toContain('触发买入 1')
+  })
+
   it('shows full-period quality metrics on buy, sell and holding rows', async () => {
     window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
     vi.mocked(api.getStrategyPoolJob).mockResolvedValue({
@@ -255,7 +275,7 @@ describe('StrategyPoolPage', () => {
         holding_snapshot_complete: true,
         as_of_date: '2026-10-01',
         buy_signals: [buySignal],
-        sell_signals: [{ ...buySignal, signal_type: 'sell', status: 'sell' }],
+        sell_signals: [],
         states: [buySignal],
         model_portfolio: {
           available: true,
@@ -269,7 +289,7 @@ describe('StrategyPoolPage', () => {
               holding_return_pct: 0.05,
             },
           ],
-          risk_exit_signals: [],
+          risk_exit_signals: [{ market: 'SH', code: '600000', signal_date: '2026-09-30', date: '2026-10-01', reason: '止损' }],
         },
       },
     })
@@ -303,7 +323,7 @@ describe('StrategyPoolPage', () => {
         holding_snapshot_complete: true,
         as_of_date: '2026-10-01',
         buy_signals: codes.map(signalFor),
-        sell_signals: codes.map((code) => ({ ...signalFor(code), status: 'sell', signal_type: 'sell' })),
+        sell_signals: [],
         states: codes.map((code) => ({ ...signalFor(code), status: 'flat' })),
         model_portfolio: {
           available: true,
@@ -315,7 +335,7 @@ describe('StrategyPoolPage', () => {
             status: 'held',
             holding_return_pct: 0.01,
           })),
-          risk_exit_signals: [],
+          risk_exit_signals: codes.map((code) => ({ market: 'SH', code, signal_date: '2026-09-30', date: '2026-10-01', reason: '止损' })),
         },
       },
     })
@@ -374,7 +394,7 @@ describe('StrategyPoolPage', () => {
         holding_snapshot_complete: true,
         as_of_date: '2026-10-01',
         buy_signals: codes.map(signalFor),
-        sell_signals: codes.map((code) => ({ ...signalFor(code), status: 'sell', signal_type: 'sell' })),
+        sell_signals: [],
         states: codes.map((code) => ({ ...signalFor(code), status: 'flat' })),
         model_portfolio: {
           available: true,
@@ -386,7 +406,7 @@ describe('StrategyPoolPage', () => {
             status: 'held',
             holding_return_pct: 0.01,
           })),
-          risk_exit_signals: [],
+          risk_exit_signals: codes.map((code) => ({ market: 'SH', code, signal_date: '2026-09-30', date: '2026-10-01', reason: '止损' })),
         },
       },
     })
@@ -952,7 +972,7 @@ describe('StrategyPoolPage', () => {
             date: '2026-10-01',
             price: 10,
             trade_return_pct: -0.08,
-          }],
+          }, { market: 'SH', code: '600001', name: '在途止损', reason: '止损', signal_date: '2026-09-30', date: '2026-10-01' }],
         },
       },
     })
@@ -979,7 +999,7 @@ describe('StrategyPoolPage', () => {
     expect(sells.text()).toContain('当前持仓收益 -6.00%')
     expect(sells.text()).not.toContain('按风控成交规则处理')
     // 面板标题不能再说「当天触发卖出」：风控退出是昨天收盘触发、今天开盘成交。
-    expect(sells.text()).toContain('卖出规则与风控退出 2')
+    expect(sells.text()).toContain('卖出规则与风控退出 3')
     expect(sells.text()).toContain('2026-10-01 收盘判定卖出规则 · 风控退出在下一交易日开盘成交')
     expect(wrapper.text()).toContain('止损、止盈、移动止盈走同一条口径')
 
@@ -1149,7 +1169,7 @@ describe('StrategyPoolPage', () => {
         holding_snapshot_complete: true,
         as_of_date: '2026-10-01',
         buy_signals: signals,
-        sell_signals: signals,
+        sell_signals: signals.map((signal) => ({ ...signal, market: 'SZ' as const, symbol: `SZ${signal.code}` })),
         states: [
           { ...buySignal, status: 'flat' },
           { ...buySignal, code: '600001', symbol: 'SH600001', candidate_id: 'candidate-600001', status: 'flat' },
@@ -2652,7 +2672,6 @@ describe('StrategyPoolPage', () => {
         { id: 'annual', name: '年化', items: [focused] },
         { id: 'swing', name: '短线', items: [focused] },
       ])
-      const sellSignal = { ...buySignal, status: 'sell' as const, signal_type: 'sell' as const }
       vi.mocked(api.getStrategyPoolJob).mockResolvedValue({
         job_id: 'signal-1',
         status: 'completed',
@@ -2663,7 +2682,7 @@ describe('StrategyPoolPage', () => {
           holding_snapshot_complete: true,
           as_of_date: '2026-10-01',
           buy_signals: [buySignal],
-          sell_signals: [sellSignal],
+          sell_signals: [],
           states: [buySignal],
           model_portfolio: {
             available: true,
@@ -2671,7 +2690,7 @@ describe('StrategyPoolPage', () => {
             holdings: [
               { market: 'SH', code: '600000', name: '测试600000', status: 'held', holding_return_pct: 0.05 },
             ],
-            risk_exit_signals: [],
+            risk_exit_signals: [{ market: 'SH', code: '600000', signal_date: '2026-09-30', date: '2026-10-01', reason: '止损' }],
           },
         },
       })
@@ -2747,7 +2766,6 @@ describe('StrategyPoolPage', () => {
 
     const firstRow = (panel: string) => wrapper.findAll(`${panel} .signal-row`)[0]
     // 按指标排序时关注行不再置顶：年化 0.9 的 600002 排第一，0.2 的关注票排第二。
-    expect(firstRow('[data-testid="pool-buy-signals"]')?.find('[data-testid="pool-buy-follow-600002"]').exists()).toBe(true)
     expect(firstRow('[data-testid="pool-sell-signals"]')?.find('[data-testid="pool-sell-rule-follow-600002"]').exists()).toBe(true)
     // 持仓面板共用同一个排序：同样按年化，600002 在前、关注票在后。
     expect(firstRow('[data-testid="pool-current-holdings"]')?.find('[data-testid="pool-holding-follow-600002"]').exists()).toBe(true)
@@ -2755,7 +2773,6 @@ describe('StrategyPoolPage', () => {
     // 切回默认排序：三个面板的关注行都重新置顶。
     await wrapper.get('[data-testid="pool-signal-sort"]').setValue('default')
     await flushPromises()
-    expect(firstRow('[data-testid="pool-buy-signals"]')?.find('[data-testid="pool-buy-follow-600000"]').exists()).toBe(true)
     expect(firstRow('[data-testid="pool-current-holdings"]')?.find('[data-testid="pool-holding-follow-600000"]').exists()).toBe(true)
   })
 
