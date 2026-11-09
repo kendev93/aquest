@@ -560,8 +560,8 @@ def test_full_research_prescan_keeps_recheck_due_ready_entry_in_queue(tmp_path) 
     assert len(individual.configs) == 2
 
 
-def test_shelf_life_and_post_launch_degradation_trigger_re_research() -> None:
-    """保质期与上线后衰减也会触发重新寻优（2026-10-09 用户决策）。"""
+def test_post_launch_degradation_triggers_re_research() -> None:
+    """上线后衰减会触发重新寻优（2026-10-09 用户决策）；策略年龄不单独触发。"""
 
     now = datetime(2026, 10, 9, 12, 0, 0)
     strong_entry = {
@@ -573,10 +573,10 @@ def test_shelf_life_and_post_launch_degradation_trigger_re_research() -> None:
         "benchmark": {"full_period": {"total_return": 0.5}},
     }
 
-    # 保质期：ready 结论超过 180 天无论表现如何都重算；没到期不触发
-    aged = ("market-v1", "config-v1", "ready", True, datetime(2026, 3, 1))
+    # 年龄不再单独触发重研：再老的结论只要表现健康、没有衰减，就继续复用。
+    historic = ("market-v1", "config-v1", "ready", True, datetime(2025, 1, 1))
     fresh = ("market-v1", "config-v1", "ready", True, datetime(2026, 8, 1))
-    assert MarketStrategyPoolService._research_recheck_due(strong_entry, aged, now=now)
+    assert not MarketStrategyPoolService._research_recheck_due(strong_entry, historic, now=now)
     assert not MarketStrategyPoolService._research_recheck_due(strong_entry, fresh, now=now)
 
     # 上线后衰减：满 60 个交易日且上线后跑输同窗口基准 10% 以上；三个条件

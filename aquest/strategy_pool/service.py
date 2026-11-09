@@ -53,7 +53,6 @@ from aquest.web.schemas.screening import RuleGroupRequest
 
 from .quality import (
     DEGRADATION_RECHECK_DAYS,
-    STRATEGY_SHELF_LIFE_DAYS,
     WEAK_STRATEGY_CONFIRM_DAYS,
     WEAK_STRATEGY_RECHECK_DAYS,
     benchmark_full_return,
@@ -96,10 +95,10 @@ _TRANSIENT_DB_RETRY_SECONDS = (30.0, 90.0)
 # 日线，指纹一变全部作废，增量永远等不到复用——2026-10-07 实测每天点增量都
 # 从第一只重新跑），改为按「上次结论是什么、多久之前下的」跳过：ready/partial
 # 直接复用，no_strategy 在 NO_STRATEGY_RECHECK_DAYS 天内复用、到期才重查一次，
-# insufficient_history/failed 每次重查（理由见 _can_reuse）；ready 条目另有三种
+# insufficient_history/failed 每次重查（理由见 _can_reuse）；ready 条目另有两种
 # 重新寻优触发（2026-10-09 用户决策，见 _research_recheck_due）：自动候选
 # 「样本不足 / 跑输基准」超 21 天、上线后衰减（满 60 个交易日且上线后跑输
-# 同窗口基准 10%+）、保质期 120 天强制重算；
+# 同窗口基准 10%+）；策略年龄本身不再触发重研（2026-11-09 用户决策）；
 # 研究窗口起点从 2015-01-05 裁到 RESEARCH_START（2016-01-01），2015 全年只作
 # 指标预热。门槛与研究窗口都会改变存量条目的有效性，v5 语义下的条目在
 # 下一次全市场重选时逐股重研究。复用节奏不影响研究结论本身，不参与指纹。
@@ -695,7 +694,7 @@ class MarketStrategyPoolService:
         会在补算完成后才 +1，这是刻意的：补算期间任务确实没闲着）。
 
         重新寻优判定也在这里过一遍（``_research_recheck_due``）：弱策略到期、
-        上线后衰减、保质期到期的 ready 条目必须留在队列里，否则预扫描会把它们
+        上线后衰减的 ready 条目必须留在队列里，否则预扫描会把它们
         当成纯复用剔掉，提交循环里的重查分支永远轮不到——判定两处口径必须一致，
         都走同一个函数（2026-10-13 修复）。
         """
@@ -812,7 +811,7 @@ class MarketStrategyPoolService:
                         else None
                     )
                     # 重新寻优判定（2026-10-09 用户决策）：弱策略 21 天、上线后衰减
-                    # （满 60 个交易日且跑输同窗口基准 10%+）、保质期 120 天，详见
+                    # （满 60 个交易日且跑输同窗口基准 10%+），详见
                     # _research_recheck_due。判定只看自动候选——手工覆盖是用户自己
                     # 的决定，重新寻优不会替换它。
                     stock_post_launch = {
@@ -2159,7 +2158,7 @@ class MarketStrategyPoolService:
           排期到期之后才真正触发重查。
 
         ``ready``/``partial`` 的复用还有例外（见 :meth:`_research_recheck_due`）：
-        自动候选弱策略超 21 天、上线后衰减、保质期 120 天的条目到期重新寻优。
+        自动候选弱策略超 21 天、上线后衰减的条目到期重新寻优；策略年龄本身不触发。
         """
 
         if not prior or prior[1] != config_fingerprint:
@@ -2184,7 +2183,7 @@ class MarketStrategyPoolService:
         *,
         now: datetime | None = None,
     ) -> bool:
-        """ready 条目是否需要重新寻优——三种触发（2026-10-09 用户决策）。
+        """ready 条目是否需要重新寻优——两种触发（2026-10-09 用户决策）。
 
         - **弱策略**：自动候选全区间样本不足或跑输基准，连续
           ``WEAK_STRATEGY_CONFIRM_DAYS`` 个交易日成立，且超过
@@ -2194,8 +2193,10 @@ class MarketStrategyPoolService:
           另看最近 ``POST_LAUNCH_RECENT_WINDOW_DAYS`` 个交易日的滚动超额——
           上线以来累计赚得再多，也挡不住近期失效（2026-10-30 用户决策）。
           重研后同签名候选会保留原上线日，衰减结论不会自己消失，所以这条触发
-          也要满 ``DEGRADATION_RECHECK_DAYS`` 天才再排一次队；
-        - **保质期**：无论结论如何，超过 ``STRATEGY_SHELF_LIFE_DAYS`` 强制重算。
+          也要满 ``DEGRADATION_RECHECK_DAYS`` 天才再排一次队。
+
+        不再按策略年龄强制重研（2026-11-09 用户决策）：只要表现没有转弱、
+        也没有上线后衰减，结论再旧也继续复用，避免把仍在有效的策略换掉。
 
         只看自动候选：手工覆盖是用户自己的决定，重新寻优不会替换它，按它排队
         只会白跑。条目读不到（如 worker 模式）、时间戳缺失或老快照没有上线后
@@ -2207,8 +2208,6 @@ class MarketStrategyPoolService:
             return False
         current = now or datetime.now(timezone.utc).replace(tzinfo=None)
         age = (current - prior[4]).days
-        if age >= STRATEGY_SHELF_LIFE_DAYS:
-            return True
         automatic = _mapping(entry.get("automatic_candidates"))
         benchmark_return = benchmark_full_return(_mapping(entry.get("benchmark")))
         weak = False

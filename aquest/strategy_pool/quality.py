@@ -48,11 +48,6 @@ WEAK_STRATEGY_CONFIRM_DAYS = 5
 #: 窗口会继续判弱；没有这道冷却，自动增量研究每天都会把同一只重新寻优一次。
 DEGRADATION_RECHECK_DAYS = 21
 
-#: 保质期兜底：ready 结论超过该自然日数无论表现如何都重新寻优——市场风格漂移
-#: 不一定表现为跑输基准（策略与基准一起阴跌时超额可能接近 0）。180 天对全市场
-#: 日频寻优偏宽松，收到 120 天让陈旧结论更快退场（2026-10-13 用户决策）。
-STRATEGY_SHELF_LIFE_DAYS = 120
-
 REASON_INSUFFICIENT_SAMPLE = "insufficient_sample"
 REASON_UNDERPERFORMING = "underperforming"
 
