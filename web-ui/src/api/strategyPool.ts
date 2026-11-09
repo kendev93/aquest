@@ -166,11 +166,13 @@ export interface StrategyPoolFocusGroup {
 }
 
 async function focusGroupRequest(path: string, method = 'GET', body?: object): Promise<StrategyPoolFocusGroup[]> {
-  const response = await request<{ data: { groups: StrategyPoolFocusGroup[] } }>(
+  const response = await request<{ data: { groups?: StrategyPoolFocusGroup[] } }>(
     `${API_BASE}/focus-groups${path}`,
     { method, ...(body ? { body: JSON.stringify(body) } : {}) },
   )
-  return response.data.groups
+  // 与关注名单同理：e2e 的接口兜底 mock 会返回空对象，缺 groups 时按空分组处理，
+  // 不能让 undefined 流进页面（分组标签与表格会逐项遍历它）。
+  return response.data.groups ?? []
 }
 
 export const fetchFocusGroups = () => focusGroupRequest('')
