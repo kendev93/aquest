@@ -22,6 +22,29 @@ export function useStrategyPoolFocus(options: StrategyPoolFocusOptions) {
   const focusItems = computed(() => groups.value.find((group) => group.id === activeGroupId.value)?.items ?? [])
   const followKeys = computed(() => new Set(groups.value.flatMap((group) => group.items.map(symbol))))
   const activeKeys = computed(() => new Set(focusItems.value.map(symbol)))
+  // 信号与持仓行名称后的分组标签：只取自定义分组，默认分组本来就不该在名称后加标签。
+  // 同一标的可属于多个自定义分组，按分组列表顺序依次展示。
+  const groupTags = computed(() => {
+    const tagsBySymbol = new Map<string, string[]>()
+    for (const group of groups.value) {
+      if (group.id === 'default') continue
+      for (const item of group.items) {
+        const key = symbol(item)
+        const tags = tagsBySymbol.get(key)
+        if (tags) {
+          tags.push(group.name)
+        } else {
+          tagsBySymbol.set(key, [group.name])
+        }
+      }
+    }
+    return tagsBySymbol
+  })
+
+  /** 返回某标的所属的自定义分组名称，用于名称后的标签展示。 */
+  function groupTagsOf(key: string): string[] {
+    return groupTags.value.get(key) ?? []
+  }
   const focusRows = computed(() => sortPoolEntriesByStatus(
     options.entries.value.filter((entry) => activeKeys.value.has(symbol(entry))),
     options.signalStates.value, options.heldSymbols.value, options.objective.value,
@@ -102,7 +125,7 @@ export function useStrategyPoolFocus(options: StrategyPoolFocusOptions) {
       options.errorMessage.value = options.describeError(error)
     }
   }
-  return { groups, activeGroupId, focusItems, focusPending, focusLoadError, followKeys, focusRows, focusMissingCount,
-    selectedTarget, selectedGroupIds, toggleFollow, saveMembership, addGroup, renameGroup,
+  return { groups, activeGroupId, focusItems, focusPending, focusLoadError, followKeys, groupTagsOf, focusRows,
+    focusMissingCount, selectedTarget, selectedGroupIds, toggleFollow, saveMembership, addGroup, renameGroup,
     removeGroup, pruneMissingFocus, loadFocus }
 }

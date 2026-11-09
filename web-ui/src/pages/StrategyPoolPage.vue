@@ -581,6 +581,7 @@ const {
   focusPending,
   focusLoadError,
   followKeys,
+  groupTagsOf,
   focusRows,
   focusMissingCount,
   toggleFollow,
@@ -1566,7 +1567,7 @@ onUnmounted(() => {
             <div class="section-heading"><div><p class="eyebrow">BUY SIGNALS</p><h2>触发买入 <span>{{ buySignals.length }}</span></h2></div><small>{{ signalAsOf || '信号扫描后显示日期' }}</small></div>
             <div v-if="buySignals.length" class="signal-list">
               <div v-for="item in visibleBuySignals" :key="item.symbol" class="signal-row">
-                <strong>{{ item.symbol }}<template v-if="item.name"> · {{ item.name }}</template></strong>
+                <strong>{{ item.symbol }}<template v-if="item.name"> · {{ item.name }}</template><span v-for="tag in groupTagsOf(item.symbol)" :key="tag" class="focus-group-tag">{{ tag }}</span></strong>
                 <span>买入信号触发 · 下一交易日执行<template v-if="holdingReturnText(item)"> · {{ holdingReturnText(item) }}</template><template v-if="signalMetricsSummary(item)"> · {{ signalMetricsSummary(item) }}</template><template v-if="qualityText(item.symbol)"> · {{ qualityText(item.symbol) }}</template></span>
                 <StrategyPoolFollowButton
                   :target="item"
@@ -1589,7 +1590,7 @@ onUnmounted(() => {
             <div v-if="ruleSellSignals.length || riskSellSignals.length" class="signal-list">
               <template v-for="item in visibleSellSignals" :key="item.key">
                 <div v-if="item.kind === 'rule'" class="signal-row">
-                  <strong>{{ item.signal.symbol }}<template v-if="item.signal.name"> · {{ item.signal.name }}</template></strong>
+                  <strong>{{ item.signal.symbol }}<template v-if="item.signal.name"> · {{ item.signal.name }}</template><span v-for="tag in groupTagsOf(item.signal.symbol)" :key="tag" class="focus-group-tag">{{ tag }}</span></strong>
                   <span>卖出规则触发 · 下一交易日执行<template v-if="holdingReturnText(item.signal)"> · {{ holdingReturnText(item.signal) }}</template><template v-if="signalMetricsSummary(item.signal)"> · {{ signalMetricsSummary(item.signal) }}</template><template v-if="qualityText(item.signal.symbol)"> · {{ qualityText(item.signal.symbol) }}</template></span>
                   <StrategyPoolFollowButton
                     :target="item.signal"
@@ -1600,7 +1601,7 @@ onUnmounted(() => {
                   />
                 </div>
                 <div v-else class="signal-row risk-signal">
-                  <strong>{{ item.signal.market }}{{ item.signal.code }}<template v-if="item.signal.name"> · {{ item.signal.name }}</template></strong>
+                  <strong>{{ item.signal.market }}{{ item.signal.code }}<template v-if="item.signal.name"> · {{ item.signal.name }}</template><span v-for="tag in groupTagsOf(sellItemSymbol(item))" :key="tag" class="focus-group-tag">{{ tag }}</span></strong>
                   <span>{{ riskExitFilledText(item.signal) }}<template v-if="riskExitReturnText(item.signal)"> · {{ riskExitReturnText(item.signal) }}</template><template v-if="qualityText(sellItemSymbol(item))"> · {{ qualityText(sellItemSymbol(item)) }}</template></span>
                   <StrategyPoolFollowButton
                     :target="item.target"
@@ -1623,7 +1624,7 @@ onUnmounted(() => {
             <div class="section-heading"><div><p class="eyebrow">CURRENT HOLDINGS</p><h2>持仓中 <span>{{ currentHoldings.length }}</span></h2></div><small>{{ objectiveLabel(objective) }}目标逐股策略 · {{ signalAsOf || '信号扫描后显示日期' }}</small></div>
             <div v-if="currentHoldings.length" class="signal-list">
               <div v-for="holding in visibleCurrentHoldings" :key="`${holding.market}${holding.code}`" class="signal-row holding-row">
-                <strong>{{ holding.market }}{{ holding.code }} · {{ holding.name || '—' }}</strong>
+                <strong>{{ holding.market }}{{ holding.code }} · {{ holding.name || '—' }}<span v-for="tag in groupTagsOf(symbol(holding))" :key="tag" class="focus-group-tag">{{ tag }}</span></strong>
                 <span>{{ holdingStatus(holding) }}<template v-if="qualityText(symbol(holding))"> · {{ qualityText(symbol(holding)) }}</template></span>
                 <small v-if="holdingRiskSummary(holding)" :data-testid="`pool-holding-risk-${holding.code}`">{{ holdingRiskSummary(holding) }}</small>
                 <StrategyPoolFollowButton
@@ -1868,6 +1869,8 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .focus-dialog-actions { justify-content: flex-end; }
 .signal-row .pool-follow-button { justify-self: start; margin-top: 2px; padding-left: 0; }
 .signal-row span, .history-row span, .history-row small { color: #9aaac0; font-size: .88rem; }
+/* 名称后的特别关注分组标签：只标自定义分组，默认分组不出现。 */
+.signal-row .focus-group-tag { display: inline-block; margin-left: 6px; padding: 1px 7px; border: 1px solid #3d6b91; border-radius: 999px; color: #7fc6ff; font-size: .74rem; font-weight: 400; vertical-align: middle; }
 .risk-signal { border-left-color: #ff6a69; }
 .holding-row { border-left-color: #6380a5; }
 .candidate-apply-grid article { padding: 16px; border: 1px solid #263850; background: #101a2d; }

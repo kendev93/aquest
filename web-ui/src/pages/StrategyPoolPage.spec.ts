@@ -2640,6 +2640,47 @@ describe('StrategyPoolPage', () => {
       expect(wrapper.get('[data-testid="pool-focus-missing"]').text()).toContain('1 只')
     })
 
+    it('tags symbols with their custom group names but not the default group', async () => {
+      window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+      const focused = { market: 'SH' as const, code: '600000', name: '测试600000' }
+      vi.mocked(api.fetchFocusGroups).mockResolvedValue([
+        { id: 'default', name: '默认分组', items: [focused] },
+        { id: 'annual', name: '年化', items: [focused] },
+        { id: 'swing', name: '短线', items: [focused] },
+      ])
+      const sellSignal = { ...buySignal, status: 'sell' as const, signal_type: 'sell' as const }
+      vi.mocked(api.getStrategyPoolJob).mockResolvedValue({
+        job_id: 'signal-1',
+        status: 'completed',
+        result: {
+          mode: 'signals',
+          objective: 'annual_return',
+          holding_scope: 'per_stock_strategy',
+          holding_snapshot_complete: true,
+          as_of_date: '2026-10-01',
+          buy_signals: [buySignal],
+          sell_signals: [sellSignal],
+          states: [buySignal],
+          model_portfolio: {
+            available: true,
+            holding_scope: 'per_stock_strategy',
+            holdings: [
+              { market: 'SH', code: '600000', name: '测试600000', status: 'held', holding_return_pct: 0.05 },
+            ],
+            risk_exit_signals: [],
+          },
+        },
+      })
+
+      const wrapper = mount(StrategyPoolPage)
+      await flushPromises()
+
+      for (const panel of ['pool-buy-signals', 'pool-sell-signals', 'pool-current-holdings']) {
+        const tags = wrapper.findAll(`[data-testid="${panel}"] .focus-group-tag`).map((tag) => tag.text())
+        expect(tags).toEqual(['年化', '短线'])
+      }
+    })
+
     it('preserves the previous state when saving fails', async () => {
       window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
       vi.mocked(api.setFocusMembership).mockRejectedValue(new ApiError('保存失败', 422))
