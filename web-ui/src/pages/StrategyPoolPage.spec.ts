@@ -2494,6 +2494,7 @@ describe('StrategyPoolPage', () => {
       const hint = wrapper.get('[data-testid="pool-research-estimate"]')
       expect(hint.text()).toBe('待重算 112 只 · 可复用 4305 只')
       expect(hint.attributes('title')).toContain('弱策略到期与上线后衰减的仍会重跑')
+      expect(hint.attributes('title')).toContain('重研没有选出候选或新候选明显变差时保留旧策略')
       expect(api.fetchStrategyPoolResearchEstimate).toHaveBeenCalledWith(
         expect.objectContaining({ mode: 'full', rebuild: false, risk_trials: 3_000 }),
       )

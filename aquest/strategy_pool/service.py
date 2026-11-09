@@ -158,6 +158,13 @@ NO_STRATEGY_RECHECK_DAYS = 14
 #: 能准确排期就排期，否则按 30 天重跑；排得出日期的用「首日 + 730 天」。
 INSUFFICIENT_RECHECK_DAYS = 30
 
+#: 重研不降级：新候选的验证段分数比旧候选低超过这些幅度时，保留旧候选。
+#: 年化按 5 个百分点、夏普按 0.2；留出段总收益再差 10 个百分点也算明显变差。
+#: 重研是为了替换走弱的结论，不是为了每天把仍在有效的策略换一遍；没有明显
+#: 变差就沿用旧策略，避免刷新后反而丢了一个可用策略。
+_CANDIDATE_VALIDATION_DOWNGRADE_MARGIN = {"annual_return": 0.05, "sharpe": 0.20}
+_CANDIDATE_HOLDOUT_DOWNGRADE_MARGIN = 0.10
+
 #: 研究准入的最低上市历史（自然日，按「首根已入库日线 → 研究终点」的跨度计），
 #: 是 512 根 K 线的自然日近似：268 根预热约 13 个月 + 244 根研究样本约 12 个月。
 #: 不满的标的：年线级指标整段是 NaN 或半值，训练/验证/留出三段加起来覆盖不了一个
@@ -752,6 +759,7 @@ class MarketStrategyPoolService:
         config_fingerprint: str,
         prior_entries: Mapping[tuple[str, str], tuple[str, str, str, bool, datetime | None]],
         post_launch_summaries: (Mapping[tuple[str, str, str], Mapping[str, object]] | None) = None,
+        previous_entries: (Mapping[tuple[str, str], Mapping[str, object]] | None) = None,
         job_id: str,
         total_work: int,
         reused_symbols: int = 0,
@@ -1039,6 +1047,16 @@ class MarketStrategyPoolService:
                     symbol = f"{ref.market}:{ref.code}"
                     try:
                         record, _single_result = future.result()
+                        prior = prior_entries.get((ref.market, ref.code))
+                        if (
+                            previous_entries is not None
+                            and prior is not None
+                            and prior[1] == config_fingerprint
+                            and prior[2] in {"ready", "partial"}
+                        ):
+                            record = _keep_better_automatic_candidates(
+                                record, previous_entries.get((ref.market, ref.code))
+                            )
                         if entry_writer is not None:
                             entry_writer(record)
                     except TaskCancelledError:
@@ -1268,12 +1286,15 @@ class MarketStrategyPoolService:
         total = len(refs)
         total_work = total
         if mode == "full":
+            # 清空重建不使用旧候选做降级保护；增量研究读一次全表，既给预扫描复用，
+            # 也给逐股重研时的「不降级」比较用。
+            entries_index = {} if rebuild else self._pool_entries_index()
             refs, reused_count, deferred = self._filter_reusable(
                 refs,
                 prior_entries,
                 config_fingerprint,
                 post_launch_summaries=post_launch_summaries,
-                entries=self._pool_entries_index(),
+                entries=entries_index,
                 data_end=calendar[-1] if calendar else None,
             )
             total = len(refs)
@@ -1287,6 +1308,7 @@ class MarketStrategyPoolService:
                 config_fingerprint=config_fingerprint,
                 prior_entries=prior_entries,
                 post_launch_summaries=post_launch_summaries,
+                previous_entries=entries_index,
                 job_id=job_id,
                 total_work=total_work,
                 reused_symbols=reused_count,
@@ -2585,6 +2607,110 @@ def _same_candidate(
         and annual.get("candidate_hash")
         and annual.get("candidate_hash") == sharpe.get("candidate_hash")
     )
+
+
+def _candidate_validation_metric(
+    candidate: Mapping[str, object],
+    objective: str,
+) -> float | None:
+    """取候选在验证段的目标分数（年化目标看 annual_return，夏普目标看 sharpe）。"""
+
+    metrics = _mapping(candidate.get("metrics"))
+    validation = _mapping(metrics.get("validation")) or _mapping(candidate.get("validation"))
+    return _finite_metric(validation.get(objective))
+
+
+def _candidate_holdout_return(candidate: Mapping[str, object]) -> float | None:
+    """取候选在留出段的总收益，作为“明显变差”的第二道判断。"""
+
+    metrics = _mapping(candidate.get("metrics"))
+    holdout = _mapping(metrics.get("holdout")) or _mapping(candidate.get("holdout"))
+    return _finite_metric(holdout.get("total_return"))
+
+
+def _candidate_is_clearly_worse(
+    candidate: Mapping[str, object],
+    previous: Mapping[str, object],
+    objective: str,
+) -> bool:
+    """新候选是否明显劣于旧候选；任一侧缺指标时不下结论，按不劣处理。"""
+
+    new_validation = _candidate_validation_metric(candidate, objective)
+    old_validation = _candidate_validation_metric(previous, objective)
+    if (
+        new_validation is not None
+        and old_validation is not None
+        and new_validation < old_validation - _CANDIDATE_VALIDATION_DOWNGRADE_MARGIN[objective]
+    ):
+        return True
+    new_holdout = _candidate_holdout_return(candidate)
+    old_holdout = _candidate_holdout_return(previous)
+    return (
+        new_holdout is not None
+        and old_holdout is not None
+        and new_holdout < old_holdout - _CANDIDATE_HOLDOUT_DOWNGRADE_MARGIN
+    )
+
+
+def _resolve_automatic_candidate(
+    automatic: Mapping[str, object],
+    objective: str,
+) -> Mapping[str, object] | None:
+    """取自动候选；``sharpe`` 的 ``candidate_ref`` 指回 ``annual_return`` 时解开引用。"""
+
+    candidate = automatic.get(objective)
+    if not isinstance(candidate, Mapping):
+        return None
+    reference = candidate.get("candidate_ref")
+    if isinstance(reference, str):
+        candidate = automatic.get(reference)
+    return candidate if isinstance(candidate, Mapping) else None
+
+
+def _preserve_existing_candidate(
+    candidate: Mapping[str, object] | None,
+    previous: Mapping[str, object] | None,
+    objective: str,
+) -> Mapping[str, object] | None:
+    """重研结果不降级：新结果为空或明显变差时保留旧候选。"""
+
+    if previous is None or previous.get("replayable") is False:
+        return candidate
+    if candidate is None or candidate.get("replayable") is False:
+        return previous
+    if previous.get("candidate_id") == candidate.get("candidate_id"):
+        return candidate
+    return previous if _candidate_is_clearly_worse(candidate, previous, objective) else candidate
+
+
+def _keep_better_automatic_candidates(
+    record: Mapping[str, object],
+    previous_entry: Mapping[str, object] | None,
+) -> dict[str, object]:
+    """把重研结果与旧候选逐目标比较，避免刷新后丢掉仍可用的策略。
+
+    只在同一研究口径下重研（弱策略/上线后衰减触发）时使用；配置变化后的重研
+    属于用户主动改口径，不保留旧候选。旧候选被保留时，新记录里的基准和指纹
+    仍用本次研究的值，后续跟踪会继续检验被保留的策略。
+    """
+
+    merged = dict(record)
+    if not isinstance(previous_entry, Mapping):
+        return merged
+    automatic = _mapping(previous_entry.get("automatic_candidates"))
+    previous_annual = _resolve_automatic_candidate(automatic, "annual_return")
+    previous_sharpe = _resolve_automatic_candidate(automatic, "sharpe")
+    current_annual_value = record.get("annual_candidate")
+    current_annual = current_annual_value if isinstance(current_annual_value, Mapping) else None
+    current_sharpe_value = record.get("sharpe_candidate")
+    current_sharpe = current_sharpe_value if isinstance(current_sharpe_value, Mapping) else None
+    if current_sharpe is not None and isinstance(current_sharpe.get("candidate_ref"), str):
+        current_sharpe = current_annual
+    annual = _preserve_existing_candidate(current_annual, previous_annual, "annual_return")
+    sharpe = _preserve_existing_candidate(current_sharpe, previous_sharpe, "sharpe")
+    merged["annual_candidate"] = dict(annual) if annual is not None else None
+    merged["sharpe_candidate"] = dict(sharpe) if sharpe is not None else None
+    return merged
 
 
 def _fingerprint(settings: Mapping[str, object]) -> str:

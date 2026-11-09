@@ -969,7 +969,8 @@ const researchEstimateTitle = computed(() => {
       + `其余每 30 天重查一次，最早 ${estimate.next_eligible_date ?? '待定'} 自动回来，不需要手动重跑。`
     : ''
   return '按当前研究范围与参数，下次「增量更新策略池」真正要逐只研究的标的数：'
-    + '研究口径指纹没变、结果没欠账的直接复用，弱策略到期与上线后衰减的仍会重跑。'
+    + '研究口径指纹没变、结果没欠账的直接复用，弱策略到期与上线后衰减的仍会重跑；'
+    + '重研没有选出候选或新候选明显变差时保留旧策略。'
     + schedule
     + `标的范围 ${estimate.universe_symbols} 只，数据截至 ${estimate.data_end ?? '未知'}。`
 })

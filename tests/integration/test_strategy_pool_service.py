@@ -560,6 +560,87 @@ def test_full_research_prescan_keeps_recheck_due_ready_entry_in_queue(tmp_path) 
     assert len(individual.configs) == 2
 
 
+def test_weak_strategy_re_research_keeps_old_candidate_when_new_result_is_empty(
+    tmp_path,
+) -> None:
+    """弱策略重研没有选出候选时，保留旧候选而不是把条目变成 no_strategy。"""
+
+    class EmptyOnRecheckService(FakeIndividualResearchService):
+        def __init__(self) -> None:
+            super().__init__()
+            self.runs = 0
+
+        def run(self, config, progress_callback=None, abort_check=None):
+            self.runs += 1
+            result = super().run(config, progress_callback, abort_check)
+            if self.runs >= 2:
+                result["results_by_return"] = []
+                result["results_by_sharpe"] = []
+            return result
+
+    store = DuckDbMarketDataStore(tmp_path / "recheck-keep.duckdb")
+    store.replace_local_bars("SH", "600000", "stock", _bars("2020-01-01", 60))
+    adapter = DuckDbMarketDataAdapter(store)
+    pool_store = DuckDbStrategyPoolStore(store)
+    pool_store.initialize()
+    individual = EmptyOnRecheckService()
+    service = MarketStrategyPoolService(
+        store=store,
+        adapter=adapter,
+        individual_service=individual,
+        pool_store=pool_store,
+        portfolio_service=FakePortfolioBacktestService(),
+    )
+
+    def persist(entry):
+        pool_store.persist_worker_entry(entry, source_job_id=str(entry["source_job_id"]))
+
+    first = service.run(
+        {"mode": "full", "risk_trials": 3_000, "horizon": 5},
+        job_id="keep-first",
+        entry_writer=persist,
+    )
+    assert first["total_symbols"] == 1
+    entry = pool_store.get("SH", "600000")
+    original = entry["automatic_candidates"]["annual_return"]
+
+    # 制造弱策略（全区间平仓 5 笔 < 20），并把上次研究时间回拨到 21 天之外。
+    annual = dict(original)
+    annual_metrics = dict(annual["metrics"])
+    annual_metrics["full_period"] = {"closed_trades": 5, "total_return": 0.9}
+    annual["metrics"] = annual_metrics
+    pool_store.upsert_automatic(
+        market="SH",
+        code="600000",
+        name="浦发银行",
+        annual_candidate=annual,
+        sharpe_candidate=entry["automatic_candidates"]["sharpe"],
+        data_fingerprint=entry["data_fingerprint"],
+        market_fingerprint=entry["market_fingerprint"],
+        config_fingerprint=entry["config_fingerprint"],
+        source_job_id="keep-weak",
+        benchmark=entry["benchmark"],
+    )
+    aged = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=30)
+    with store._connect() as connection:
+        connection.execute(
+            "UPDATE strategy_pool_entries SET updated_at = ? "
+            "WHERE market = 'SH' AND code = '600000'",
+            [aged],
+        )
+
+    second = service.run(
+        {"mode": "full", "risk_trials": 3_000, "horizon": 5},
+        job_id="keep-second",
+        entry_writer=persist,
+    )
+    assert second["total_symbols"] == 1
+    assert len(individual.configs) == 2
+    kept = pool_store.get("SH", "600000")
+    assert kept["status"] == "ready"
+    assert kept["automatic_candidates"]["annual_return"]["candidate_id"] == original["candidate_id"]
+
+
 def test_post_launch_degradation_triggers_re_research() -> None:
     """上线后衰减会触发重新寻优（2026-10-09 用户决策）；策略年龄不单独触发。"""
 
@@ -691,6 +772,83 @@ def test_post_launch_degradation_triggers_re_research() -> None:
         {"annual_return": legacy_snapshot, "sharpe": {}},
         now=now,
     )
+
+
+def _automatic_candidate(
+    candidate_id: str,
+    annual_return: float,
+    sharpe: float,
+    holdout_return: float,
+) -> dict[str, object]:
+    return {
+        "candidate_id": candidate_id,
+        "candidate_hash": candidate_id,
+        "replayable": True,
+        "metrics": {
+            "validation": {"annual_return": annual_return, "sharpe": sharpe},
+            "holdout": {"total_return": holdout_return},
+        },
+    }
+
+
+def test_re_research_keeps_old_candidates_when_new_result_is_empty() -> None:
+    """重研没有选出候选时，旧候选不能被覆盖掉（否则会从 ready 掉成 no_strategy）。"""
+
+    previous = {
+        "automatic_candidates": {
+            "annual_return": _automatic_candidate("old-annual", 0.2, 1.2, 0.08),
+            "sharpe": {"candidate_ref": "annual_return", "candidate_id": "old-annual"},
+        }
+    }
+    merged = pool_service._keep_better_automatic_candidates(
+        {"annual_candidate": None, "sharpe_candidate": None, "benchmark": {"v": 1}},
+        previous,
+    )
+    assert merged["annual_candidate"]["candidate_id"] == "old-annual"
+    assert merged["sharpe_candidate"]["candidate_id"] == "old-annual"
+    assert merged["benchmark"] == {"v": 1}
+
+
+def test_re_research_keeps_old_candidate_when_new_result_is_clearly_worse() -> None:
+    """新候选验证段/留出段明显变差时保留旧候选；小幅波动仍接受新结果。"""
+
+    previous = {
+        "automatic_candidates": {
+            "annual_return": _automatic_candidate("old", 0.20, 1.2, 0.08),
+            "sharpe": None,
+        }
+    }
+    clearly_worse = _automatic_candidate("new-worse", 0.10, 0.8, -0.05)
+    merged = pool_service._keep_better_automatic_candidates(
+        {"annual_candidate": clearly_worse, "sharpe_candidate": None, "benchmark": {}},
+        previous,
+    )
+    assert merged["annual_candidate"]["candidate_id"] == "old"
+
+    slightly_lower = _automatic_candidate("new-close", 0.18, 1.1, 0.06)
+    merged = pool_service._keep_better_automatic_candidates(
+        {"annual_candidate": slightly_lower, "sharpe_candidate": None, "benchmark": {}},
+        previous,
+    )
+    assert merged["annual_candidate"]["candidate_id"] == "new-close"
+
+
+def test_re_research_accepts_new_candidate_when_it_is_better() -> None:
+    previous = {
+        "automatic_candidates": {
+            "annual_return": _automatic_candidate("old", 0.20, 1.2, 0.08),
+            "sharpe": None,
+        }
+    }
+    merged = pool_service._keep_better_automatic_candidates(
+        {
+            "annual_candidate": _automatic_candidate("new", 0.30, 1.6, 0.15),
+            "sharpe_candidate": None,
+            "benchmark": {},
+        },
+        previous,
+    )
+    assert merged["annual_candidate"]["candidate_id"] == "new"
 
 
 def _young_bars(start: str, count: int) -> pd.DataFrame:
