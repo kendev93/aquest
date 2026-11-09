@@ -916,7 +916,7 @@ describe('StrategyPoolPage', () => {
         holding_scope: 'per_stock_strategy',
         holding_snapshot_complete: true,
         as_of_date: '2026-10-01',
-        buy_signals: [{ ...signalFor('600001'), signal_type: 'buy' }],
+        buy_signals: [{ ...signalFor('600001'), signal_type: 'buy' }, { ...signalFor('600000'), signal_type: 'buy' }],
         sell_signals: [],
         states: [
           { ...signalFor('600001'), status: 'buy' },
@@ -966,6 +966,10 @@ describe('StrategyPoolPage', () => {
     expect(holdings.get('[data-testid="pool-holding-risk-600001"]').text()).toBe(
       '止损 9.00 · 移动止盈 11.40（截至 2026-10-01 收盘） · 2026-10-28 到期 · 还剩 3 个交易日',
     )
+
+    const buys = wrapper.get('[data-testid="pool-buy-signals"]')
+    expect(buys.text()).not.toContain('600001')
+    expect(buys.text()).toContain('600000')
 
     const sells = wrapper.get('[data-testid="pool-sell-signals"]')
     expect(sells.text()).toContain('2026-09-30 收盘触发止损 · 2026-10-01 开盘已成交')

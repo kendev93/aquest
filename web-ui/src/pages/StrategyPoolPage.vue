@@ -438,7 +438,6 @@ const historyStatsNote = computed(() => {
   const missingStart = full && full.samples > 0 ? full.samples - full.started_at_samples : 0
   return `统计口径：每种任务各取最近 ${stats.sample_limit} 次终态记录；被取消的轮次只计入「每只新研究标的」耗时，不计入完成耗时；失败任务两项都不计。${missingStart > 0 ? `其中 ${missingStart} 次全市场重选没有记录开始时间，时长含排队。` : ''}`
 })
-const buySignals = computed(() => signalResult.value?.buy_signals ?? [])
 const ruleSellSignals = computed(() => signalResult.value?.sell_signals ?? [])
 const sellNextTradingDaySymbols = computed(() => new Set([
   ...ruleSellSignals.value.map((item) => item.symbol),
@@ -466,6 +465,18 @@ const pendingRiskSellSignals = computed<Array<Record<string, unknown>>>(() => cu
     reason: holding.pending_exit_reason ?? '',
     holding_return_pct: holding.holding_return_pct,
   })))
+// 当天卖出优先：成交于今天但前一交易日触发的风控退出不屏蔽今天的新买入。
+const buySignals = computed(() => {
+  const asOf = signalResult.value?.as_of_date ?? ''
+  const excluded = new Set(ruleSellSignals.value.map((signal) => signal.symbol))
+  for (const signal of pendingRiskSellSignals.value) {
+    if (!signal.signal_date || signal.signal_date === asOf) excluded.add(`${signal.market}${signal.code}`)
+  }
+  for (const signal of signalResult.value?.model_portfolio?.risk_exit_signals ?? []) {
+    if (asOf && signal.signal_date === asOf) excluded.add(`${signal.market}${signal.code}`)
+  }
+  return (signalResult.value?.buy_signals ?? []).filter((signal) => !excluded.has(signal.symbol))
+})
 const riskSellSignals = computed<Array<Record<string, unknown>>>(() => {
   const executed = signalResult.value?.model_portfolio?.risk_exit_signals ?? []
   const executedKeys = new Set(
@@ -1583,7 +1594,7 @@ onUnmounted(() => {
               <span>第 {{ buyPage }} / {{ buyPageCount }} 页 · 共 {{ buySignals.length }} 条</span>
               <button class="button-secondary" :disabled="buyPage >= buyPageCount" @click="buyPage += 1">下一页</button>
             </div>
-            <p v-if="!buySignals.length" class="empty-copy">{{ signalResult ? '当前没有股票触发买入规则。' : '选择目标后点击“刷新最新交易日信号”，扫描最新完整行情日。' }}</p>
+            <p v-if="!buySignals.length" class="empty-copy">{{ signalResult ? (signalResult.buy_signals?.length ? '当前没有可执行的买入信号（同日卖出优先）。' : '当前没有股票触发买入规则。') : '选择目标后点击“刷新最新交易日信号”，扫描最新完整行情日。' }}</p>
           </article>
           <article class="signal-panel panel-card" data-testid="pool-sell-signals">
             <div class="section-heading"><div><p class="eyebrow">SELL SIGNALS</p><h2>卖出规则与风控退出 <span>{{ ruleSellSignals.length + riskSellSignals.length }}</span></h2></div><small>{{ signalAsOf ? `${signalAsOf} 收盘判定卖出规则 · 风控退出在下一交易日开盘成交` : '卖出条件与持仓风控退出' }}</small></div>
