@@ -449,12 +449,12 @@ const currentHoldings = computed<StrategyPoolHolding[]>(
     : [],
 )
 // 风控在触发日收盘就出信号，下一交易日开盘才成交：成交前它只挂在持仓行的
-// pending_exit_* 上，成交后才进 risk_exit_signals。卖出面板按触发日展示，
-// 两段合并去重，避免同一次退出在成交日之前完全看不到。
+// pending_exit_* 上；已成交的历史退出记录不属于当天待执行信号。
 const pendingRiskSellSignals = computed<Array<Record<string, unknown>>>(() => currentHoldings.value
   // held_stale 是没参与本轮回放的旧快照：次日是否已经成交无法确认，不能当作当天待成交信号。
   .filter((holding) => holding.status !== 'held_stale'
-    && (holding.pending_exit_reason || holding.pending_exit_risk_trigger))
+    && (holding.pending_exit_reason || holding.pending_exit_risk_trigger)
+    && (!holding.pending_exit_signal_date || holding.pending_exit_signal_date === signalResult.value?.as_of_date))
   .map((holding) => ({
     market: holding.market,
     code: holding.code,
@@ -472,23 +472,9 @@ const buySignals = computed(() => {
   for (const signal of pendingRiskSellSignals.value) {
     if (!signal.signal_date || signal.signal_date === asOf) excluded.add(`${signal.market}${signal.code}`)
   }
-  for (const signal of signalResult.value?.model_portfolio?.risk_exit_signals ?? []) {
-    if (asOf && signal.signal_date === asOf) excluded.add(`${signal.market}${signal.code}`)
-  }
   return (signalResult.value?.buy_signals ?? []).filter((signal) => !excluded.has(signal.symbol))
 })
-const riskSellSignals = computed<Array<Record<string, unknown>>>(() => {
-  const executed = signalResult.value?.model_portfolio?.risk_exit_signals ?? []
-  const executedKeys = new Set(
-    executed.map((signal) => `${String(signal.market ?? '')}${String(signal.code ?? '')}:${String(signal.signal_date ?? '')}`),
-  )
-  return [
-    ...pendingRiskSellSignals.value.filter(
-      (signal) => !executedKeys.has(`${String(signal.market)}${String(signal.code)}:${String(signal.signal_date ?? '')}`),
-    ),
-    ...executed,
-  ]
-})
+const riskSellSignals = pendingRiskSellSignals
 const sellPanelItems = computed<SellPanelItem[]>(() => [
   ...ruleSellSignals.value.map((signal) => ({
     kind: 'rule' as const,

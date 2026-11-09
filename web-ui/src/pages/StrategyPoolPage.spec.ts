@@ -298,7 +298,6 @@ describe('StrategyPoolPage', () => {
 
     // 质量指标统一取条目的全区间口径（与表格一致），跟踪来源的行也能显示
     expect(wrapper.get('[data-testid="pool-buy-signals"]').text()).toContain('全区间胜率 55.00%')
-    expect(wrapper.get('[data-testid="pool-sell-signals"]').text()).toContain('全区间盈亏比 1.60')
     expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('平均持仓 12.5 天')
   })
 
@@ -307,11 +306,12 @@ describe('StrategyPoolPage', () => {
     // 跟踪增量路径返回的信号行不带指标，顺序是证券代码升序；排序只能靠条目表补全区间口径。
     // SH600003 没有全区间指标，按指标排序时落到末尾。四组指标刻意排成互相不同的顺序：
     // 累计收益（600000 最高）与年化（600002 最高）必须能被区分开。
-    vi.mocked(api.fetchStrategyPoolEntries).mockResolvedValue([
+    const qualityEntries = [
       entryWithQuality('600000', { win_rate: 0.4, payoff_ratio: 3, total_return: 0.9, annual_return: 0.2 }),
       entryWithQuality('600001', { win_rate: 0.7, payoff_ratio: 1, total_return: 0.3, annual_return: 0.1 }),
       entryWithQuality('600002', { win_rate: 0.55, payoff_ratio: 2, total_return: 0.2, annual_return: 0.3 }),
-    ])
+    ]
+    vi.mocked(api.fetchStrategyPoolEntries).mockResolvedValue([...qualityEntries, ...qualityEntries.map((row) => ({ ...row, market: 'SZ' as const }))])
     const codes = ['600003', '600000', '600001', '600002']
     vi.mocked(api.getStrategyPoolJob).mockResolvedValue({
       job_id: 'signal-1',
@@ -322,8 +322,8 @@ describe('StrategyPoolPage', () => {
         holding_scope: 'per_stock_strategy',
         holding_snapshot_complete: true,
         as_of_date: '2026-10-01',
-        buy_signals: codes.map(signalFor),
-        sell_signals: [],
+        buy_signals: codes.map((code) => ({ ...signalFor(code), market: 'SZ' as const, symbol: `SZ${code}` })),
+        sell_signals: codes.map((code) => ({ ...signalFor(code), status: 'sell', signal_type: 'sell' })),
         states: codes.map((code) => ({ ...signalFor(code), status: 'flat' })),
         model_portfolio: {
           available: true,
@@ -335,7 +335,7 @@ describe('StrategyPoolPage', () => {
             status: 'held',
             holding_return_pct: 0.01,
           })),
-          risk_exit_signals: codes.map((code) => ({ market: 'SH', code, signal_date: '2026-09-30', date: '2026-10-01', reason: '止损' })),
+          risk_exit_signals: [],
         },
       },
     })
@@ -346,12 +346,12 @@ describe('StrategyPoolPage', () => {
       .findAll(`[data-testid="${testid}"] .signal-row`)
       .map((row) => row.text().slice(0, 8))
     const returned = ['SH600003', 'SH600000', 'SH600001', 'SH600002']
-    expect(rowSymbols('pool-buy-signals')).toEqual(returned)
+    expect(rowSymbols('pool-buy-signals')).toEqual(returned.map((code) => code.replace('SH', 'SZ')))
     expect(rowSymbols('pool-current-holdings')).toEqual(returned)
 
     const sort = wrapper.get('[data-testid="pool-signal-sort"]')
     await sort.setValue('payoff_ratio')
-    expect(rowSymbols('pool-buy-signals')).toEqual(['SH600000', 'SH600002', 'SH600001', 'SH600003'])
+    expect(rowSymbols('pool-buy-signals')).toEqual(['SZ600000', 'SZ600002', 'SZ600001', 'SZ600003'])
     expect(rowSymbols('pool-sell-signals')).toEqual(['SH600000', 'SH600002', 'SH600001', 'SH600003'])
     // 持仓面板跟着同一个排序，不再是固定的 API 顺序。
     expect(rowSymbols('pool-current-holdings')).toEqual([
@@ -362,26 +362,26 @@ describe('StrategyPoolPage', () => {
     ])
 
     await sort.setValue('win_rate')
-    expect(rowSymbols('pool-buy-signals')).toEqual(['SH600001', 'SH600002', 'SH600000', 'SH600003'])
+    expect(rowSymbols('pool-buy-signals')).toEqual(['SZ600001', 'SZ600002', 'SZ600000', 'SZ600003'])
 
     await sort.setValue('annual_return')
     // 按年化而不是累计收益：600002 年化最高，累计最高的 600000 只排第二。
-    expect(rowSymbols('pool-buy-signals')).toEqual(['SH600002', 'SH600000', 'SH600001', 'SH600003'])
+    expect(rowSymbols('pool-buy-signals')).toEqual(['SZ600002', 'SZ600000', 'SZ600001', 'SZ600003'])
 
     await sort.setValue('default')
-    expect(rowSymbols('pool-buy-signals')).toEqual(returned)
+    expect(rowSymbols('pool-buy-signals')).toEqual(returned.map((code) => code.replace('SH', 'SZ')))
   })
-
   it('ranks the composite sort by the average of the four in-list ranks', async () => {
     window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
     // 四组指标刻意排成「每项冠军都不同」：年化 600000、盈亏比 600001、胜率 600003、夏普 600002。
     // 600002 三项第二、夏普第一，任何一个单项档都给不了它头名以外的位置，综合名次平均以后它最高。
-    vi.mocked(api.fetchStrategyPoolEntries).mockResolvedValue([
+    const qualityEntries = [
       entryWithQuality('600000', { annual_return: 0.3, win_rate: 0.5, payoff_ratio: 1, sharpe: 1.3 }),
       entryWithQuality('600001', { annual_return: 0.1, win_rate: 0.4, payoff_ratio: 3, sharpe: 1.8 }),
       entryWithQuality('600002', { annual_return: 0.25, win_rate: 0.6, payoff_ratio: 2, sharpe: 2.6 }),
       entryWithQuality('600003', { annual_return: 0.15, win_rate: 0.8, payoff_ratio: 0.5, sharpe: 0.9 }),
-    ])
+    ]
+    vi.mocked(api.fetchStrategyPoolEntries).mockResolvedValue([...qualityEntries, ...qualityEntries.map((row) => ({ ...row, market: 'SZ' as const }))])
     // 600004 没有条目，也就拿不出任何全区间指标：凑不齐四项就没有综合名次，排到最后。
     const codes = ['600004', '600000', '600001', '600002', '600003']
     vi.mocked(api.getStrategyPoolJob).mockResolvedValue({
@@ -393,8 +393,8 @@ describe('StrategyPoolPage', () => {
         holding_scope: 'per_stock_strategy',
         holding_snapshot_complete: true,
         as_of_date: '2026-10-01',
-        buy_signals: codes.map(signalFor),
-        sell_signals: [],
+        buy_signals: codes.map((code) => ({ ...signalFor(code), market: 'SZ' as const, symbol: `SZ${code}` })),
+        sell_signals: codes.map((code) => ({ ...signalFor(code), status: 'sell', signal_type: 'sell' })),
         states: codes.map((code) => ({ ...signalFor(code), status: 'flat' })),
         model_portfolio: {
           available: true,
@@ -406,7 +406,7 @@ describe('StrategyPoolPage', () => {
             status: 'held',
             holding_return_pct: 0.01,
           })),
-          risk_exit_signals: codes.map((code) => ({ market: 'SH', code, signal_date: '2026-09-30', date: '2026-10-01', reason: '止损' })),
+          risk_exit_signals: [],
         },
       },
     })
@@ -433,21 +433,20 @@ describe('StrategyPoolPage', () => {
     // 四项名次平均：600002 0.75 > 600000 0.50 > 600001 0.42 > 600003 0.33。
     // 只算三项时末位是 600001、倒数第二是 600003；把夏普计入以后两者换位——600003 夏普垫底、
     // 600001 夏普第二。这个换位就是第四项确实参与计算的证据。
-    expect(rowSymbols('pool-buy-signals')).toEqual(expected)
+    expect(rowSymbols('pool-buy-signals')).toEqual(expected.map((code) => code.replace('SH', 'SZ')))
     expect(rowSymbols('pool-sell-signals')).toEqual(expected)
     expect(rowSymbols('pool-current-holdings')).toEqual(expected)
 
     // 单项档各自把各自的冠军抬到第一，用来证明综合档不是在复现其中任何一档。
     await sort.setValue('annual_return')
-    expect(rowSymbols('pool-buy-signals')[0]).toBe('SH600000')
+    expect(rowSymbols('pool-buy-signals')[0]).toBe('SZ600000')
     await sort.setValue('payoff_ratio')
-    expect(rowSymbols('pool-buy-signals')[0]).toBe('SH600001')
+    expect(rowSymbols('pool-buy-signals')[0]).toBe('SZ600001')
     await sort.setValue('win_rate')
-    expect(rowSymbols('pool-buy-signals')[0]).toBe('SH600003')
+    expect(rowSymbols('pool-buy-signals')[0]).toBe('SZ600003')
     await sort.setValue('sharpe')
-    expect(rowSymbols('pool-buy-signals')[0]).toBe('SH600002')
+    expect(rowSymbols('pool-buy-signals')[0]).toBe('SZ600002')
   })
-
   it('gives risk exits and rule sells the same full-period metric string, sharpe included', async () => {
     window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
     // 行内那段全区间口径来自条目表：风控行是引擎的宽松对象、跟踪返回的规则行也不带指标，
@@ -462,6 +461,7 @@ describe('StrategyPoolPage', () => {
     vi.mocked(api.fetchStrategyPoolEntries).mockResolvedValue([
       entryWithQuality('600000', quality),
       entryWithQuality('600001', quality),
+      entryWithQuality('600002', quality),
     ])
     vi.mocked(api.getStrategyPoolJob).mockResolvedValue({
       job_id: 'signal-unified',
@@ -472,7 +472,7 @@ describe('StrategyPoolPage', () => {
         holding_scope: 'per_stock_strategy',
         holding_snapshot_complete: true,
         as_of_date: '2026-11-03',
-        buy_signals: [{ ...signalFor('600000'), signal_type: 'buy' }],
+        buy_signals: [{ ...signalFor('600002'), signal_type: 'buy' }],
         sell_signals: [{ ...signalFor('600001'), status: 'sell', signal_type: 'sell' }],
         states: [
           { ...signalFor('600001'), status: 'sell' },
@@ -481,7 +481,7 @@ describe('StrategyPoolPage', () => {
         model_portfolio: {
           available: true,
           holding_scope: 'per_stock_strategy',
-          holdings: [{
+          holdings: [{ market: 'SH', code: '600000', name: '测试600000', status: 'held', holding_return_pct: 0.115, pending_exit_reason: '止盈', pending_exit_signal_date: '2026-11-03', pending_exit_risk_trigger: 'take_profit' }, {
             market: 'SH',
             code: '600001',
             name: '测试600001',
@@ -507,7 +507,7 @@ describe('StrategyPoolPage', () => {
     const metrics = '全区间年化 28.50% · 全区间夏普 1.90 · 全区间胜率 61.90% · 全区间盈亏比 4.50 · 平均持仓 21.2 天'
     const sells = wrapper.get('[data-testid="pool-sell-signals"]')
     // 成交的风控行与规则行给出同一段全区间口径，差别只在触发说明与收益的口径标签。
-    expect(sells.text()).toContain(`2026-11-02 收盘触发止盈 · 2026-11-03 开盘已成交 · 本次持仓收益 +11.50% · ${metrics}`)
+    expect(sells.text()).toContain(`2026-11-03 收盘触发止盈 · 下一交易日开盘待成交 · 当前持仓收益 +11.50% · ${metrics}`)
     expect(sells.text()).toContain('卖出规则触发 · 下一交易日执行 · 当前持仓收益 +3.10%')
     // 规则行在持仓收益之后还夹一段研究分段指标，所以指标串单独断言它出现了，不比顺序。
     expect(sells.text()).toContain(metrics)
@@ -992,14 +992,14 @@ describe('StrategyPoolPage', () => {
     expect(buys.text()).toContain('600000')
 
     const sells = wrapper.get('[data-testid="pool-sell-signals"]')
-    expect(sells.text()).toContain('2026-09-30 收盘触发止损 · 2026-10-01 开盘已成交')
-    expect(sells.text()).toContain('本次持仓收益 -8.00%')
+    expect(sells.text()).not.toContain('2026-09-30 收盘触发止损')
+    expect(sells.text()).not.toContain('本次持仓收益 -8.00%')
     // 触发日当天就要看到卖出信号：成交前它只挂在持仓行的 pending_exit_* 上。
     expect(sells.text()).toContain('2026-10-01 收盘触发止损 · 下一交易日开盘待成交')
     expect(sells.text()).toContain('当前持仓收益 -6.00%')
     expect(sells.text()).not.toContain('按风控成交规则处理')
     // 面板标题不能再说「当天触发卖出」：风控退出是昨天收盘触发、今天开盘成交。
-    expect(sells.text()).toContain('卖出规则与风控退出 3')
+    expect(sells.text()).toContain('卖出规则与风控退出 1')
     expect(sells.text()).toContain('2026-10-01 收盘判定卖出规则 · 风控退出在下一交易日开盘成交')
     expect(wrapper.text()).toContain('止损、止盈、移动止盈走同一条口径')
 
@@ -1012,7 +1012,7 @@ describe('StrategyPoolPage', () => {
     }
     // 成交日已不在持仓：只剩卖出，不能凭空多一个持仓徽章。
     const exited = wrapper.get('[data-testid="pool-row-600000"]')
-    expect(exited.text()).toContain('触发卖出')
+    expect(exited.text()).not.toContain('触发卖出')
     expect(exited.text()).not.toContain('持仓中')
   })
 
@@ -1205,7 +1205,7 @@ describe('StrategyPoolPage', () => {
     await wrapper.get('[data-testid="pool-holdings-pagination"] button:last-child').trigger('click')
 
     expect(wrapper.findAll('[data-testid="pool-buy-signals"] .signal-row')).toHaveLength(2)
-    expect(wrapper.findAll('[data-testid="pool-sell-signals"] .signal-row')).toHaveLength(4)
+    expect(wrapper.findAll('[data-testid="pool-sell-signals"] .signal-row')).toHaveLength(2)
     expect(wrapper.findAll('[data-testid="pool-current-holdings"] .signal-row')).toHaveLength(1)
     expect(wrapper.get('[data-testid="pool-current-holdings"]').text()).toContain('当前持仓收益 +10.00%')
   })
@@ -2698,7 +2698,7 @@ describe('StrategyPoolPage', () => {
       const wrapper = mount(StrategyPoolPage)
       await flushPromises()
 
-      for (const panel of ['pool-buy-signals', 'pool-sell-signals', 'pool-current-holdings']) {
+      for (const panel of ['pool-buy-signals', 'pool-current-holdings']) {
         const tags = wrapper.findAll(`[data-testid="${panel}"] .focus-group-tag`).map((tag) => tag.text())
         expect(tags).toEqual(['年化', '短线'])
       }
