@@ -210,6 +210,18 @@ describe('StrategyPoolPage', () => {
     expect(wrapper.get('[data-testid="pool-sell-signals"]').text()).toContain('当前没有卖出条件')
   })
 
+  it('shows the valid strategy count next to the pool size', async () => {
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    vi.mocked(api.fetchStrategyPoolEntries).mockResolvedValue([
+      entry('600000', 0.24),
+      { ...entry('600001', 0.12), active_candidate: null, status: 'no_strategy' },
+    ])
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    expect(wrapper.get('[data-testid="pool-valid-strategy-count"]').text()).toBe('有效策略数 1')
+  })
+
   it('explains when the latest trading day has no synced bars yet', async () => {
     // 周末重跑时如果上一交易日的行情还没同步，扫描日会落在更早的一天；
     // 只说日期而不说缺口，用户只会以为信号日期错了。

@@ -47,6 +47,7 @@ import type {
 import AppTopbar from '../components/AppTopbar.vue'
 import { formatDuration, formatNumber, formatPercent, formatSignedPercent } from '../utils/format'
 import {
+  activeReplayableCandidate,
   holdingRiskSummary,
   isStrategyPoolSortColumn,
   objectiveLabel,
@@ -508,6 +509,8 @@ const holdingSnapshots = computed(() => new Map(
 ))
 const signalAsOf = computed(() => signalResult.value?.as_of_date ?? '')
 const signalLag = computed(() => signalResult.value?.data_lag ?? null)
+// 「有效策略数」与表格里「无可用策略」的判定同源：有可回放且买卖规则完整的生效候选才算有效。
+const validStrategyCount = computed(() => entries.value.filter((entry) => activeReplayableCandidate(entry)).length)
 const filteredEntries = computed(() => {
   const query = searchQuery.value.trim().toLocaleLowerCase()
   if (!query) return entries.value
@@ -1722,7 +1725,7 @@ onUnmounted(() => {
         />
 
         <section class="pool-table-section panel-card" data-testid="pool-entry-table-section">
-          <div class="section-heading"><div><p class="eyebrow">DAILY STATUS</p><h2>全市场标的状态 <span>{{ entries.length.toLocaleString() }}</span></h2></div><span>{{ loading ? '正在读取策略池…' : `按${objectiveLabel(objective)}策略决策` }}</span></div>
+          <div class="section-heading"><div><p class="eyebrow">DAILY STATUS</p><h2>全市场标的状态 <span>{{ entries.length.toLocaleString() }}</span><small class="valid-strategy-count" data-testid="pool-valid-strategy-count">有效策略数 <span>{{ validStrategyCount.toLocaleString() }}</span></small></h2></div><span>{{ loading ? '正在读取策略池…' : `按${objectiveLabel(objective)}策略决策` }}</span></div>
           <p class="pool-scale-note">收益、年化、夏普、胜率、盈亏比、最大回撤均为该策略在完整历史区间实际回放（全区间）的指标；平均持仓天数为全区间已平仓交易按股数加权的平均持有天数，用于估算买入后大致需要持有多久。旧候选会在下次全市场重选时补算。策略的选择与排序目标仍按验证段年化/夏普决策，避免用未来数据选策略。全段基准显示个股买入持有涨跌；验证和留出分别用同区间基准计算总收益超额。</p>
           <p class="pool-scale-note">列头排序三态循环：点一次按这一列从高到低，再点从低到高，第三次取消排序、回到默认的按状态分组；点别的列直接从高到低开始。排序只改显示顺序，取不到这一列指标的标的（无可用策略、创建至今待初始化或更新失败）无论升降都排在末尾。</p>
           <div class="pool-search-row">
@@ -1841,6 +1844,8 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .signal-sort select { width: auto; min-width: 0; border: 1px solid #354b69; border-radius: 7px; padding: 6px 8px; background: #111c30; color: #edf2fb; font: inherit; }
 .section-heading { margin-bottom: 16px; }
 .section-heading h2 span { color: #18c467; }
+/* 标的总数右侧的有效策略数：标签弱化，数字沿用同一档绿色。 */
+.valid-strategy-count { margin-left: 12px; color: #899ab3; font-size: .82rem; font-weight: 400; }
 .signal-panel { min-height: 180px; }
 .signal-panel .section-heading small { color: #899ab3; white-space: nowrap; }
 .signal-list { display: grid; gap: 8px; }
