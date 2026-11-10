@@ -264,13 +264,14 @@ def test_no_strategy_entries_are_reused_until_the_recheck_window_elapses() -> No
     验证段按可用交易日比例切，「没有策略」依赖当时的历史长度——数据攒够可能
     翻身；但一天新数据对样本量影响微乎其微，每天重查是纯浪费（2026-10-08
     实测：一夜 57 只里 30 只 no_strategy，用户每次点增量都看到它们从头再跑）。
-    窗口默认 30 天，重查后仍不足则刷新时间戳再等一个周期。
+    窗口默认 7 天（``AQUEST_POOL_NO_STRATEGY_RECHECK_DAYS`` 可调），重查后仍不足
+    则刷新时间戳再等一个周期。
     """
 
     config = _fingerprint({"algorithm_version": MARKET_POOL_ALGORITHM_VERSION})
     now = datetime(2026, 10, 8, 12, 0, 0)
-    fresh = ("bars-v1", config, "no_strategy", False, datetime(2026, 10, 1))
-    stale = ("bars-v1", config, "no_strategy", False, datetime(2026, 8, 1))
+    fresh = ("bars-v1", config, "no_strategy", False, datetime(2026, 10, 6))
+    stale = ("bars-v1", config, "no_strategy", False, datetime(2026, 10, 1))
     assert MarketStrategyPoolService._can_reuse(fresh, config, now=now)
     assert not MarketStrategyPoolService._can_reuse(stale, config, now=now)
     # 时间戳缺失按过期处理：重查一次是安全的，结论会被刷新进库。

@@ -171,10 +171,12 @@ def test_full_pool_research_splits_each_symbol_and_saves_each_symbol_incremental
         f"{item.market}{item.code}": (item.first_date, item.last_date)
         for item in store.list_instruments(instrument_types=("stock",))
     }
-    assert [(config.start_date, config.end_date) for config in individual.configs] == [
+    # 顺序由「上次研究时间」决定（见 test_pending_research_runs_oldest_first），
+    # 这里只核每只标的都用了自己的首末根作为窗口。
+    assert {(config.start_date, config.end_date) for config in individual.configs} == {
         spans["SH600000"],
         spans["SZ000001"],
-    ]
+    }
     assert all(config.split_windows is None for config in individual.configs)
     assert all(config.common_split_metadata is None for config in individual.configs)
     # 2016 年后上市的池内标的：前 268 根只作预热，预热后至少留一年样本。
@@ -639,6 +641,37 @@ def test_weak_strategy_re_research_keeps_old_candidate_when_new_result_is_empty(
     kept = pool_store.get("SH", "600000")
     assert kept["status"] == "ready"
     assert kept["automatic_candidates"]["annual_return"]["candidate_id"] == original["candidate_id"]
+
+
+def test_no_strategy_recheck_days_env_override(monkeypatch) -> None:
+    """no_strategy 的重查周期可配置；未设置或非法值回落到 7 天。"""
+
+    name = "AQUEST_POOL_NO_STRATEGY_RECHECK_DAYS"
+    assert pool_service._env_positive_int(name, 7) == 7
+    monkeypatch.setenv(name, "3")
+    assert pool_service._env_positive_int(name, 7) == 3
+    for invalid in ("0", "-1", "abc"):
+        monkeypatch.setenv(name, invalid)
+        assert pool_service._env_positive_int(name, 7) == 7
+
+
+def test_pending_research_runs_oldest_first() -> None:
+    """待研究队列按上次研究时间升序：跑不完的那天也先补齐最久没看的标的。"""
+
+    def ref(code: str) -> StockRef:
+        return StockRef(market="SH", code=code, path=Path("sh") / f"{code}.day")
+
+    refs = [ref("600001"), ref("600002"), ref("600003"), ref("600004")]
+    prior = {
+        ("SH", "600001"): ("m", "c", "no_strategy", True, datetime(2026, 11, 9)),
+        ("SH", "600002"): ("m", "c", "no_strategy", True, datetime(2026, 11, 1)),
+        # 600003 没有历史条目：按最久没研究处理，排在最前
+        ("SH", "600004"): ("m", "c", "no_strategy", True, datetime(2026, 11, 5)),
+    }
+
+    ordered = pool_service._sort_pending_oldest_first(refs, prior)
+
+    assert [item.code for item in ordered] == ["600003", "600002", "600004", "600001"]
 
 
 def test_post_launch_degradation_triggers_re_research() -> None:

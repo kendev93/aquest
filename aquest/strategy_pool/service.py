@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
@@ -143,14 +144,34 @@ def _entry_research_start(entry: Mapping[str, object] | None) -> date | None:
     return None
 
 
-#: 「没有策略」条目的重查节奏（自然日）。验证段按可用交易日比例切，「没有
-#: 策略」这个结论依赖当时的历史长度——数据攒够可能翻身；但一天新数据对样本量
-#: 的影响微乎其微，每天重查是纯浪费（2026-10-08 实测：一夜 57 只里 30 只
-#: no_strategy，用户每次点增量都看到它们从头再跑，全市场推算约 2700 只/天）。
-#: 14 天 ≈ 10 个交易日：寻优提速后（自适应剪枝）重查一只的成本低了不少，
-#: 节奏相应收短，让「数据攒够翻身」的标的更快回场（2026-10-13 用户决策）。
-#: 到期重查一次，仍不足则刷新时间戳再等一个周期。
-NO_STRATEGY_RECHECK_DAYS = 14
+def _env_positive_int(name: str, default: int) -> int:
+    """读取正整数环境变量；未设置或非法时回落到默认值并留一条告警。"""
+
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logging.getLogger(__name__).warning("%s=%r 不是整数，按默认值 %d 处理", name, raw, default)
+        return default
+    if value < 1:
+        logging.getLogger(__name__).warning(
+            "%s=%r 必须为正整数，按默认值 %d 处理", name, raw, default
+        )
+        return default
+    return value
+
+
+#: 「没有策略」条目的重查节奏（自然日），可用 ``AQUEST_POOL_NO_STRATEGY_RECHECK_DAYS``
+#: 覆盖。验证段按可用交易日比例切，「没有策略」这个结论依赖当时的历史长度——数据攒够
+#: 可能翻身；但一天新数据对样本量的影响微乎其微，每天重查是纯浪费（2026-10-08 实测：
+#: 一夜 57 只里 30 只 no_strategy，用户每次点增量都看到它们从头再跑，全市场推算约
+#: 2700 只/天）。默认 7 天（2026-11-10 用户决策）：按约 100 只/小时的实测吞吐，
+#: 日均到期约 250 只、2.5 小时左右，给跟踪、信号扫描和春节这类长假留出余量；
+#: 调成 1 天约 1800 只、17 小时/天，会长期占满机器。到期重查一次，仍不足则刷新
+#: 时间戳再等一个周期。
+NO_STRATEGY_RECHECK_DAYS = _env_positive_int("AQUEST_POOL_NO_STRATEGY_RECHECK_DAYS", 7)
 
 #: 「历史样本不足」中算不出确切日期的那一类（上市跨度已经够两年、但自己的 K 线
 #: 仍凑不满 512 根——长期停牌或数据有洞）的重查节奏（自然日）。它跟 no_strategy
@@ -1297,6 +1318,9 @@ class MarketStrategyPoolService:
                 entries=entries_index,
                 data_end=calendar[-1] if calendar else None,
             )
+            # 一天只跑有限时长时，按代码顺序会反复从头部开始：短期重查周期下头部标的
+            # 天天到期、尾部迟迟轮不到。按上次研究时间升序排队，欠账最久的先补齐。
+            refs = _sort_pending_oldest_first(refs, prior_entries)
             total = len(refs)
             total_work = total
             completed, skipped, failed, errors = self._run_full_research(
@@ -2595,6 +2619,36 @@ def _summarize_symbol_benchmark(
             },
         }
     return benchmark
+
+
+def _prior_updated_at(
+    prior: tuple[str, str, str, bool, datetime | None] | None,
+) -> datetime:
+    """上次研究完成时间；没有历史条目的按「最久没研究」处理。"""
+
+    value = prior[4] if prior is not None else None
+    return value or datetime.min
+
+
+def _sort_pending_oldest_first(
+    refs: Sequence[StockRef],
+    prior_entries: Mapping[tuple[str, str], tuple[str, str, str, bool, datetime | None]],
+) -> list[StockRef]:
+    """按上次研究时间升序排队，让跑不完的那天也覆盖到整张名单。
+
+    增量任务常在某个时间点被取消或跨天：固定按证券代码顺序时，每天都会从头开始，
+    短重查周期下头部标的反复重研、尾部长期轮不到。改为欠账最久的先跑，当天跑多久
+    都先补齐最久没看的标的；时间相同（或都没有历史）时按市场与代码保持确定性。
+    """
+
+    return sorted(
+        refs,
+        key=lambda ref: (
+            _prior_updated_at(prior_entries.get((ref.market, ref.code))),
+            ref.market,
+            ref.code,
+        ),
+    )
 
 
 def _same_candidate(
