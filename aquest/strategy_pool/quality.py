@@ -16,13 +16,17 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import date, datetime
 
+from .resources import env_positive_int
+
 #: 全区间平仓交易低于该笔数的策略，胜率 / 盈亏比统计上不可信（2026-10-09 用户选定）。
 WEAK_STRATEGY_MIN_TRADES = 20
 
-#: 弱策略的重新寻优节奏（自然日），从上次研究完成时间起算。21 天 ≈ 15 个
-#: 交易日：比 no_strategy 的默认重查周期稍长——弱策略毕竟选出了策略，给市场风格
-#: 一点换手空间，避免刚落地就被重算（2026-10-13 用户决策）。
-WEAK_STRATEGY_RECHECK_DAYS = 21
+#: 弱策略的重新寻优节奏（自然日），从上次研究完成时间起算，可用
+#: ``AQUEST_POOL_WEAK_RECHECK_DAYS`` 覆盖。默认 7 天（2026-11-10 用户决策）：
+#: 与「连续 5 个交易日判弱」的确认窗口对齐，确认后不必再空等两周多；实测池内
+#: 约 890 只弱策略，按 7 天分摊约 130 只/天，仍在日常研究时长之内。再短会让同一套
+#: 规则被反复重选、白跑寻优。
+WEAK_STRATEGY_RECHECK_DAYS = env_positive_int("AQUEST_POOL_WEAK_RECHECK_DAYS", 7)
 
 #: 上线后衰减判定（2026-10-09 用户决策）：跟踪回放的「上线后收益」对照同窗口
 #: 买入持有基准；上线不满该交易日数不判定——窗口太短噪声大，一波回调就会误杀。

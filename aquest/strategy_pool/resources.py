@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 from dataclasses import dataclass
@@ -27,6 +28,25 @@ class MemoryStatus:
     total_bytes: int | None
     available_bytes: int | None
     source: str
+
+
+def env_positive_int(name: str, default: int) -> int:
+    """读取正整数环境变量；未设置或非法时回落到默认值并留一条告警。"""
+
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logging.getLogger(__name__).warning("%s=%r 不是整数，按默认值 %d 处理", name, raw, default)
+        return default
+    if value < 1:
+        logging.getLogger(__name__).warning(
+            "%s=%r 必须为正整数，按默认值 %d 处理", name, raw, default
+        )
+        return default
+    return value
 
 
 def memory_status() -> MemoryStatus:

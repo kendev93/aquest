@@ -15,7 +15,7 @@ from aquest.market_data.store import DuckDbMarketDataStore
 from aquest.market_data.store_base import MarketDataStoreError
 from aquest.screening.rules import RuleGroup
 from aquest.strategy_pool import service as pool_service
-from aquest.strategy_pool.resources import GiB, MemoryStatus
+from aquest.strategy_pool.resources import GiB, MemoryStatus, env_positive_int
 from aquest.strategy_pool.service import (
     MIN_LISTING_HISTORY_DAYS,
     MIN_RESEARCH_BARS,
@@ -436,7 +436,7 @@ def test_weak_ready_entry_is_researched_again_after_recheck_window() -> None:
 
     now = datetime(2026, 10, 9, 12, 0, 0)
     stale = ("market-v1", "config-v1", "ready", True, datetime(2026, 8, 1))
-    recent = ("market-v1", "config-v1", "ready", True, datetime(2026, 10, 1))
+    recent = ("market-v1", "config-v1", "ready", True, datetime(2026, 10, 5))
 
     def entry(closed_trades: float, total_return: float, benchmark: float = 0.5) -> dict:
         return {
@@ -461,7 +461,7 @@ def test_weak_ready_entry_is_researched_again_after_recheck_window() -> None:
     assert MarketStrategyPoolService._research_recheck_due(weak, stale, now=now)
     assert MarketStrategyPoolService._research_recheck_due(loser, stale, now=now)
     assert not MarketStrategyPoolService._research_recheck_due(strong, stale, now=now)
-    # 30 天内不重查；条目缺失 / 时间戳缺失不强制重查（保持原复用行为）
+    # 重查窗口（默认 7 天）内不重查；条目缺失 / 时间戳缺失不强制重查（保持原复用行为）
     assert not MarketStrategyPoolService._research_recheck_due(weak, recent, now=now)
     assert not MarketStrategyPoolService._research_recheck_due(None, stale, now=now)
     assert not MarketStrategyPoolService._research_recheck_due(
@@ -524,7 +524,7 @@ def test_full_research_prescan_keeps_recheck_due_ready_entry_in_queue(tmp_path) 
     assert len(individual.configs) == 1
 
     # 把全区间指标改成「样本不足」（平仓交易 5 笔 < 20）制造弱策略，
-    # 再把 updated_at 回拨到重查窗口（21 天）之外。
+    # 再把 updated_at 回拨到弱策略重查窗口（7 天）之外。
     entry = pool_store.get("SH", "600000")
     annual = dict(entry["automatic_candidates"]["annual_return"])
     annual_metrics = dict(annual["metrics"])
@@ -606,7 +606,7 @@ def test_weak_strategy_re_research_keeps_old_candidate_when_new_result_is_empty(
     entry = pool_store.get("SH", "600000")
     original = entry["automatic_candidates"]["annual_return"]
 
-    # 制造弱策略（全区间平仓 5 笔 < 20），并把上次研究时间回拨到 21 天之外。
+    # 制造弱策略（全区间平仓 5 笔 < 20），并把上次研究时间回拨到 7 天之外。
     annual = dict(original)
     annual_metrics = dict(annual["metrics"])
     annual_metrics["full_period"] = {"closed_trades": 5, "total_return": 0.9}
@@ -643,16 +643,19 @@ def test_weak_strategy_re_research_keeps_old_candidate_when_new_result_is_empty(
     assert kept["automatic_candidates"]["annual_return"]["candidate_id"] == original["candidate_id"]
 
 
-def test_no_strategy_recheck_days_env_override(monkeypatch) -> None:
-    """no_strategy 的重查周期可配置；未设置或非法值回落到 7 天。"""
+def test_recheck_days_env_override(monkeypatch) -> None:
+    """重查周期可配置；未设置或非法值回落到默认值。"""
 
-    name = "AQUEST_POOL_NO_STRATEGY_RECHECK_DAYS"
-    assert pool_service._env_positive_int(name, 7) == 7
-    monkeypatch.setenv(name, "3")
-    assert pool_service._env_positive_int(name, 7) == 3
-    for invalid in ("0", "-1", "abc"):
-        monkeypatch.setenv(name, invalid)
-        assert pool_service._env_positive_int(name, 7) == 7
+    for name, default in (
+        ("AQUEST_POOL_NO_STRATEGY_RECHECK_DAYS", 7),
+        ("AQUEST_POOL_WEAK_RECHECK_DAYS", 7),
+    ):
+        assert env_positive_int(name, default) == default
+        monkeypatch.setenv(name, "3")
+        assert env_positive_int(name, default) == 3
+        for invalid in ("0", "-1", "abc"):
+            monkeypatch.setenv(name, invalid)
+            assert env_positive_int(name, default) == default
 
 
 def test_pending_research_runs_oldest_first() -> None:
@@ -761,7 +764,7 @@ def test_post_launch_degradation_triggers_re_research() -> None:
         {"annual_return": recent_degraded, "sharpe": {}},
         now=now,
     )
-    # 弱策略未满 21 天时，也不能借“衰减”这条触发绕过确认周期。
+    # 弱策略未满重查窗口时，也不能借“衰减”这条触发绕过确认周期。
     weak_entry = {
         "automatic_candidates": {
             "annual_return": {"metrics": {"full_period": {"closed_trades": 5, "total_return": 0.1}}}
