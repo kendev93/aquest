@@ -214,3 +214,28 @@ def test_pool_reset_requires_a_claimed_explicit_rebuild(tmp_path) -> None:
             assert response.status_code == (200 if rebuild else 409)
             assert bool(pool.list_entries()) is not rebuild
             backend.cancel(job_id)
+
+
+def test_pool_research_snapshot_requires_owner_and_returns_saved_data(tmp_path) -> None:
+    app = _app(tmp_path)
+    pool = app.state.strategy_pool_store
+    pool.set_manual_override("SH", "600000", "annual_return", {"candidate_id": "old"})
+    pool.save_research_settings(boards=["main"], exclude_st=True)
+    job_id = app.state.strategy_job_backend.submit(
+        "market_strategy_pool", {"mode": "full"}, description="snapshot-test"
+    )
+    with TestClient(app) as client:
+        client.post(
+            "/internal/strategy-worker/jobs/claim",
+            headers=_headers(),
+            json={"worker_id": "worker-a"},
+        )
+        url = f"/internal/strategy-worker/jobs/{job_id}/pool-research-snapshot"
+        denied = client.post(url, headers=_headers(), json={"worker_id": "worker-b"})
+        response = client.post(url, headers=_headers(), json={"worker_id": "worker-a"})
+    assert denied.status_code == 409
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["settings"]["exclude_st"] is True
+    assert data["entries"][0]["code"] == "600000"
+    assert data["prior"][0][1] == "600000"

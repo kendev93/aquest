@@ -291,6 +291,14 @@ class HttpStrategyJobClient:
             timeout_seconds=min(self._timeout_seconds, 5.0),
         )
 
+    def read_pool_research_snapshot(self, job_id: str) -> dict[str, object]:
+        response = self._post(
+            f"/internal/strategy-worker/jobs/{job_id}/pool-research-snapshot",
+            {"worker_id": self.worker_id},
+            timeout_seconds=60.0,
+        )
+        return dict(_mapping(response.get("data"), "策略池研究快照"))
+
     def _store_server_state(self, job_id: str, data: Mapping[str, object]) -> None:
         state = data.get("state")
         with self._lock:
@@ -313,6 +321,7 @@ class HttpStrategyJobClient:
             path.endswith("/heartbeat")
             or path.endswith("/progress")
             or path.endswith("/pool-entry")
+            or path.endswith("/pool-research-snapshot")
             # 快照是派生数据，网络抖动/后端忙时可以重发；重发是幂等 upsert。
             or path.endswith("/pool-tracking")
             or path.endswith("/pool-tracking/batch")

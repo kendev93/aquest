@@ -1152,6 +1152,7 @@ class MarketStrategyPoolService:
         progress_callback: PoolProgressCallback | None = None,
         abort_check: Callable[[], bool] | None = None,
         entry_writer: PoolEntryWriter | None = None,
+        research_snapshot_reader: Callable[[], Mapping[str, object]] | None = None,
     ) -> dict[str, object]:
         mode = str(payload.get("mode") or "full")
         if mode not in {"full", "single", "signals", "portfolio"}:
@@ -1171,7 +1172,13 @@ class MarketStrategyPoolService:
             )
         single_symbol = _symbol_from_payload(payload) if mode == "single" else None
         risk_trials = _trial_count(payload.get("risk_trials", 3_000))
-        research_boards, exclude_st = self._research_universe(payload, single_symbol)
+        snapshot = research_snapshot_reader() if research_snapshot_reader else None
+        research_boards, exclude_st = self._research_universe(
+            payload,
+            single_symbol,
+            saved_settings=snapshot.get("settings") if snapshot else None,
+            settings_supplied=snapshot is not None,
+        )
         refs = self._list_refs(single_symbol, boards=research_boards, exclude_st=exclude_st)
         if not refs:
             if single_symbol is None and (research_boards is not None or exclude_st):
@@ -1215,11 +1222,32 @@ class MarketStrategyPoolService:
                 self._pool_store.persist_worker_entry({"reset": True}, source_job_id=job_id)
             else:
                 raise ValueError("清空重建需要可写策略池")
-        prior_entries = self._prior_entries() if not rebuild and mode in {"full", "single"} else {}
+        if snapshot is not None and not rebuild:
+            prior_entries = {
+                (str(row[0]), str(row[1])): (
+                    str(row[2] or ""),
+                    str(row[3] or ""),
+                    str(row[4] or ""),
+                    bool(row[5]),
+                    datetime.fromisoformat(str(row[6])) if row[6] else None,
+                )
+                for row in cast(list[list[object]], snapshot["prior"])
+            }
+        else:
+            prior_entries = (
+                self._prior_entries() if not rebuild and mode in {"full", "single"} else {}
+            )
         # 只取自动版本的跟踪摘要：手工覆盖生效时，手工账户的表现不能拿来决定
         # 自动候选要不要重研；老快照缺字段时衰减判定不生效，跟踪刷新一轮后补齐。
         post_launch_summaries = (
-            PoolTrackingStore(self._store).automatic_summaries()
+            (
+                {
+                    (str(row[0]), str(row[1]), str(row[2])): cast(Mapping[str, object], row[3])
+                    for row in cast(list[list[object]], snapshot["summaries"])
+                }
+                if snapshot is not None
+                else PoolTrackingStore(self._store).automatic_summaries()
+            )
             if not rebuild and mode in {"full", "single"} and self._store is not None
             else {}
         )
@@ -1242,7 +1270,19 @@ class MarketStrategyPoolService:
                     # 开始（历史不足），行情没变时重试注定以同样失败收场，跳过省
                     # 一次必败寻优；数据长了的当天指纹就不同，自然落到重新研究。
                     if market_fingerprint and market_fingerprint == prior[0]:
-                        saved_entry = self._pool_store.get(ref.market, ref.code) or {}
+                        saved_entry = (
+                            next(
+                                (
+                                    item
+                                    for item in cast(list[dict[str, object]], snapshot["entries"])
+                                    if item.get("market") == ref.market
+                                    and item.get("code") == ref.code
+                                ),
+                                {},
+                            )
+                            if snapshot is not None
+                            else self._pool_store.get(ref.market, ref.code) or {}
+                        )
                         _report(
                             progress_callback,
                             1,
@@ -1290,7 +1330,16 @@ class MarketStrategyPoolService:
         if mode == "full":
             # 清空重建不使用旧候选做降级保护；增量研究读一次全表，既给预扫描复用，
             # 也给逐股重研时的「不降级」比较用。
-            entries_index = {} if rebuild else self._pool_entries_index()
+            entries_index = (
+                {}
+                if rebuild
+                else {
+                    (str(item["market"]), str(item["code"])): item
+                    for item in cast(list[dict[str, object]], snapshot["entries"])
+                }
+                if snapshot is not None
+                else self._pool_entries_index()
+            )
             refs, reused_count, deferred = self._filter_reusable(
                 refs,
                 prior_entries,
@@ -1730,6 +1779,9 @@ class MarketStrategyPoolService:
         self,
         payload: Mapping[str, object],
         single_symbol: tuple[str, str] | None,
+        *,
+        saved_settings: object = None,
+        settings_supplied: bool = False,
     ) -> tuple[Sequence[str] | None, bool]:
         """解析任务里的研究范围（板块 + ST 过滤）。
 
@@ -1748,9 +1800,11 @@ class MarketStrategyPoolService:
         pool_store = self._pool_store
         if pool_store is None:
             return payload_boards, payload_exclude_st
-        saved = pool_store.read_research_settings()
+        saved = saved_settings if settings_supplied else pool_store.read_research_settings()
         if saved is None:
             return payload_boards, payload_exclude_st
+        if not isinstance(saved, Mapping):
+            raise ValueError("研究范围设置格式无效")
         saved_boards = _boards_from_payload(saved)
         saved_exclude_st = saved.get("exclude_st") is True
         if payload_boards is None:

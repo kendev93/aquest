@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from aquest.market_data.store import MarketDataStoreError
 from aquest.strategy_discovery.duckdb_job_store import DuckDbStrategyJobStore
 from aquest.strategy_discovery.job_store import DEFAULT_STALE_AFTER_SECONDS, JobOperation
+from aquest.strategy_pool.service import _BENCHMARK_VERSION_LIKE
 from aquest.strategy_pool.store import DuckDbStrategyPoolStore
 from aquest.strategy_pool.tracking_store import PoolTrackingStore
 
@@ -168,6 +169,38 @@ def persist_pool_entry(
     except ValueError as exc:
         raise _conflict(exc) from exc
     return {"data": {"saved": True}}
+
+
+@router.post("/jobs/{job_id}/pool-research-snapshot", dependencies=[Depends(require_worker_token)])
+def pool_research_snapshot(
+    job_id: str, payload: WorkerIdentity, request: Request
+) -> dict[str, object]:
+    try:
+        claimed = _store(request).read_claimed_job(job_id, payload.worker_id)
+        envelope = claimed.get("request")
+        if not isinstance(envelope, Mapping) or envelope.get("operation") != "market_strategy_pool":
+            raise ValueError("当前任务不是全市场策略池任务")
+        store = request.app.state.market_data_store
+        with store.state_read_session() as connection:
+            rows = connection.execute(
+                "SELECT market, code, market_fingerprint, config_fingerprint, status, "
+                "benchmark_json IS NOT NULL AND benchmark_json LIKE ?, updated_at "
+                "FROM strategy_pool_entries",
+                [_BENCHMARK_VERSION_LIKE],
+            ).fetchall()
+        summaries = PoolTrackingStore(store).automatic_summaries()
+        return {
+            "data": {
+                "settings": _pool_store(request).read_research_settings(),
+                "entries": _pool_store(request).list_entries(),
+                "prior": [[*row[:6], row[6].isoformat() if row[6] else None] for row in rows],
+                "summaries": [[*key, value] for key, value in summaries.items()],
+            }
+        }
+    except (MarketDataStoreError, OSError) as exc:
+        raise _store_unavailable() from exc
+    except ValueError as exc:
+        raise _conflict(exc) from exc
 
 
 @router.post("/jobs/{job_id}/pool-tracking", dependencies=[Depends(require_worker_token)])

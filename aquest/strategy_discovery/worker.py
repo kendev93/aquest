@@ -442,6 +442,7 @@ class StrategyDiscoveryWorker:
             if not callable(writer):
                 raise ValueError("策略 worker 不支持逐股保存策略池检查点")
             deferred = DeferredPoolEntryWriter(lambda entry: writer(job_id, entry))
+            snapshot_reader = getattr(self._job_store, "read_pool_research_snapshot", None)
             result = dict(
                 self._strategy_pool_service.run(
                     payload,
@@ -449,6 +450,9 @@ class StrategyDiscoveryWorker:
                     progress_callback=progress_callback,
                     abort_check=abort_check,
                     entry_writer=deferred,
+                    research_snapshot_reader=(
+                        (lambda: snapshot_reader(job_id)) if callable(snapshot_reader) else None
+                    ),
                 )
             )
             leftover = deferred.flush()

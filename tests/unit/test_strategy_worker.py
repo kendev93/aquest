@@ -343,7 +343,16 @@ class _FakePoolService:
     def __init__(self, codes: tuple[str, ...]) -> None:
         self._codes = codes
 
-    def run(self, payload, *, job_id, progress_callback, abort_check, entry_writer):  # noqa: ANN001
+    def run(  # noqa: ANN001
+        self,
+        payload,
+        *,
+        job_id,
+        progress_callback,
+        abort_check,
+        entry_writer,
+        research_snapshot_reader=None,
+    ):
         for code in self._codes:
             entry_writer({"code": code})
         return {"completed_symbols": len(self._codes)}
