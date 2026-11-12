@@ -815,8 +815,8 @@ class MarketStrategyPoolService:
                     symbol = f"{ref.market}:{ref.code}"
                     prior = prior_entries.get((ref.market, ref.code))
                     reused_entry = (
-                        self._pool_store.get(ref.market, ref.code)
-                        if self._pool_store is not None
+                        previous_entries.get((ref.market, ref.code))
+                        if previous_entries is not None
                         and self._can_reuse(prior, config_fingerprint)
                         else None
                     )
