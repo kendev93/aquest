@@ -105,8 +105,9 @@ def _resolve_auto_sync_enabled(value: bool | None) -> bool:
 def _resolve_pool_research_enabled(value: bool | None) -> bool:
     """是否随自动行情同步启动「到期策略自动增量研究」。
 
-    默认开启（与自动同步同生命周期）；``AQUEST_POOL_RESEARCH_ENABLED=0`` 或
-    ``create_app(pool_research_enabled=False)`` 可以单独关掉，手动增量不受影响。
+    默认关闭（2026-11-12 用户决策）：重研只由用户点「增量更新策略池」触发，
+    后台不再自动提交。需要恢复每日自动检查时设 ``AQUEST_POOL_RESEARCH_ENABLED=1``
+    或传 ``create_app(pool_research_enabled=True)``。
     """
 
     if value is not None:
@@ -115,7 +116,7 @@ def _resolve_pool_research_enabled(value: bool | None) -> bool:
         return value
     raw = os.getenv("AQUEST_POOL_RESEARCH_ENABLED")
     if raw is None:
-        return True
+        return False
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 

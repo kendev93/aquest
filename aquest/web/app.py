@@ -369,12 +369,15 @@ def create_app(
                     interval_seconds=selected_tracking_interval,
                 ).run()
             )
+        # 池跟踪（每日信号与持仓重算）默认关闭（2026-11-12 用户决策）：信号面板与持仓
+        # 只在点「刷新最新交易日信号」时更新，后台不再自动扫；显式设
+        # AQUEST_POOL_TRACKING_ENABLED=1 才恢复收盘后自动跟踪。
         if owns_runner and (
             pool_tracking_enabled is True
             or (
                 pool_tracking_enabled is None
                 and auto_sync_enabled is not False
-                and os.getenv("AQUEST_POOL_TRACKING_ENABLED", "1").strip().lower()
+                and os.getenv("AQUEST_POOL_TRACKING_ENABLED", "0").strip().lower()
                 not in {"0", "false", "off"}
             )
         ):

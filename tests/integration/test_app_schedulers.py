@@ -64,7 +64,7 @@ def test_the_owning_process_starts_the_schedulers(monkeypatch, tmp_path: Path) -
     _install_spies(monkeypatch)
     store = DuckDbMarketDataStore(tmp_path / "owner.duckdb")
 
-    with TestClient(_create(store=store)):
+    with TestClient(_create(store=store, pool_research_enabled=True)):
         assert sorted(_SpyScheduler.started) == sorted(
             [
                 "AutomaticMarketSyncScheduler",
@@ -75,10 +75,13 @@ def test_the_owning_process_starts_the_schedulers(monkeypatch, tmp_path: Path) -
         )
 
 
-def test_pool_research_scheduler_can_be_disabled_independently(monkeypatch, tmp_path: Path) -> None:
+def test_pool_research_scheduler_is_manual_only_by_default(monkeypatch, tmp_path: Path) -> None:
+    """到期重研默认不自动提交：只有显式打开才启动调度器，其余后台任务照常。"""
+
     _install_spies(monkeypatch)
     store = DuckDbMarketDataStore(tmp_path / "research-off.duckdb")
 
-    with TestClient(_create(store=store, pool_research_enabled=False)):
+    with TestClient(_create(store=store)):
         assert "PoolResearchScheduler" not in _SpyScheduler.started
         assert "PoolTrackingScheduler" in _SpyScheduler.started
+        assert "AutomaticMarketSyncScheduler" in _SpyScheduler.started
