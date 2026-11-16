@@ -6,10 +6,10 @@ alembic>=1.20.1
 # 全市场标的发现通道。正式镜像需要它，所以直接并进运行时清单，由 Dockerfile 在
 # COPY 源码之前那一层装好，避免为它再跑一次需要联网的 pip。
 baostock>=0.8,<1
-annotated-doc>=0.0.5
+annotated-doc>=0.0.6
 annotated-types>=0.8.0
 anyio>=4.16.0
-click>=8.4.2
+click>=8.5.1
 # Click/tqdm require colorama on Windows; pin it on every target so the shared
 # hash lock also covers that platform-only dependency.
 colorama>=0.4.6
