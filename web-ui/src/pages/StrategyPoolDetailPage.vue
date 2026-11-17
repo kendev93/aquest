@@ -37,6 +37,15 @@ const ranges = ref<CurveRangeSummary[]>([])
 interface CurveExitSummary { key: string; label: string; trades: number; pnl: number }
 // 出场原因分布跟着所选区间走：窗口内的卖出成交按规则/止损/止盈/移动止盈/到期分类。
 const exits = ref<CurveExitSummary[]>([])
+interface CurveYearRow { year: number; start_date: string; end_date: string
+  total_return: number | null; max_drawdown: number | null }
+interface CurveAnalysis {
+  exposure: number | null; max_consecutive_losses: number; max_consecutive_wins: number
+  top3_profit_share: number | null; cost_total: number; cost_share: number | null
+  yearly: CurveYearRow[]
+}
+// 行为与成本指标同样是窗口口径：在场时间、连亏连盈、盈利集中度、成本占比、年度表现。
+const analysis = ref<CurveAnalysis | null>(null)
 const metricsVisible = computed(() => range.value === 'all' || range.value === 'created')
 // 历史交易默认最近成交在前：关注的是刚发生的买卖，不是 2015 年的第一笔
 const tradeOrder = ref<'desc' | 'asc'>('desc')
@@ -101,7 +110,7 @@ async function loadVersion() {
   loading.value = true
   try {
     const [curve, trades] = await Promise.all([
-      get<{ backtest: IndividualResearchFullBacktest | null; summary?: Record<string, unknown>; ranges?: CurveRangeSummary[]; exits?: CurveExitSummary[] }>(`${endpoint}/versions/${selectedId.value}/curve?range=${range.value}`),
+      get<{ backtest: IndividualResearchFullBacktest | null; summary?: Record<string, unknown>; ranges?: CurveRangeSummary[]; exits?: CurveExitSummary[]; analysis?: CurveAnalysis | null }>(`${endpoint}/versions/${selectedId.value}/curve?range=${range.value}`),
       get<{ items: Record<string, unknown>[]; total: number }>(tradesUrl()),
     ])
     if (current !== requestId) return
@@ -109,6 +118,7 @@ async function loadVersion() {
     summary.value = curve.summary ?? {}; total.value = trades.total
     ranges.value = curve.ranges ?? []
     exits.value = curve.exits ?? []
+    analysis.value = curve.analysis ?? null
   } catch (e) { if (current === requestId) error.value = e instanceof Error ? e.message : '详情加载失败' }
   finally { if (current === requestId) loading.value = false }
 }
@@ -225,11 +235,23 @@ const scopeLabel = computed(
             <p><span>平均持仓</span><b>{{ days(performance.avg_holding_days) }} 天（自然日）</b></p>
           </div>
         </div>
-        <table v-if="exits.length" class="exit-summary" data-testid="pool-exit-summary">
-          <thead><tr><th>出场原因</th><th>笔数</th><th>累计盈亏</th></tr></thead>
-          <tbody><tr v-for="item in exits" :key="item.key" :data-testid="`pool-exit-${item.key}`"><td>{{ item.label }}</td><td>{{ item.trades }}</td><td>{{ money(item.pnl) }}</td></tr></tbody>
-        </table>
+        <div class="side-tables">
+          <table v-if="exits.length" class="exit-summary" data-testid="pool-exit-summary">
+            <thead><tr><th>出场原因</th><th>笔数</th><th>累计盈亏</th></tr></thead>
+            <tbody><tr v-for="item in exits" :key="item.key" :data-testid="`pool-exit-${item.key}`"><td>{{ item.label }}</td><td>{{ item.trades }}</td><td>{{ money(item.pnl) }}</td></tr></tbody>
+          </table>
+          <dl v-if="analysis" class="behavior-stats" data-testid="pool-behavior-stats">
+            <div><dt>在场时间</dt><dd>{{ percent(analysis.exposure) }}</dd></div>
+            <div><dt>最长连亏 / 连盈</dt><dd>{{ analysis.max_consecutive_losses }} / {{ analysis.max_consecutive_wins }} 笔</dd></div>
+            <div><dt>前 3 笔盈利占比</dt><dd>{{ percent(analysis.top3_profit_share) }}</dd></div>
+            <div><dt>交易成本占比</dt><dd>{{ percent(analysis.cost_share) }}</dd></div>
+          </dl>
+        </div>
       </div>
+      <table v-if="analysis?.yearly.length" class="yearly-summary" data-testid="pool-yearly-summary">
+        <thead><tr><th>年份</th><th>收益</th><th>年内最大回撤</th><th>区间</th></tr></thead>
+        <tbody><tr v-for="row in analysis.yearly" :key="row.year"><td>{{ row.year }}</td><td>{{ percent(row.total_return) }}</td><td>{{ percent(row.max_drawdown) }}</td><td>{{ row.start_date }} → {{ row.end_date }}</td></tr></tbody>
+      </table>
       <IndividualResearchBacktestDetail v-if="backtest" :backtest="backtest" :launch-date="selected.created_at" :baseline-date="String(summary.baseline_date ?? '')" hide-metrics return-curve>
         <!-- 分页紧贴交易表：以前它在这块面板外面，看 50 笔要先在表里滚一遍、再往下找按钮 -->
         <template #trades-toolbar>
@@ -270,7 +292,17 @@ const scopeLabel = computed(
 .metric-group h3 { margin:0 0 6px; color:var(--subtle); font-size:11px; letter-spacing:.12em; }
 .metric-group p { display:flex; justify-content:space-between; gap:12px; margin:3px 0; color:var(--muted); font-size:11px; }
 .metric-group b { color:var(--text); font-weight:700; }
-.exit-summary { width:min(360px, 100%); border-collapse:collapse; font-size:11px; }
+.side-tables { display:grid; gap:12px; width:min(360px, 100%); }
+.exit-summary, .yearly-summary { width:100%; border-collapse:collapse; font-size:11px; }
+.yearly-summary { margin-bottom:14px; }
+.yearly-summary th, .yearly-summary td { padding:5px 10px; border-bottom:1px solid var(--border); text-align:right; white-space:nowrap; }
+.yearly-summary th:first-child, .yearly-summary td:first-child { text-align:left; color:var(--muted); }
+.yearly-summary th { color:var(--subtle); font-weight:700; }
+.yearly-summary td:last-child, .yearly-summary th:last-child { text-align:left; color:var(--subtle); }
+.behavior-stats { display:grid; gap:4px; margin:0; }
+.behavior-stats div { display:flex; justify-content:space-between; gap:12px; color:var(--muted); font-size:11px; }
+.behavior-stats dt { font-weight:400; }
+.behavior-stats dd { margin:0; color:var(--text); font-weight:700; }
 .exit-summary th, .exit-summary td { padding:5px 10px; border-bottom:1px solid var(--border); text-align:right; white-space:nowrap; }
 .exit-summary th:first-child, .exit-summary td:first-child { text-align:left; color:var(--muted); }
 .exit-summary th { color:var(--subtle); font-weight:700; }

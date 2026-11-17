@@ -835,6 +835,22 @@ _EXIT_REASON_LABELS = {
 _EXIT_REASON_ORDER = ("rule", "stop_loss", "take_profit", "trailing_stop", "max_hold")
 
 
+def _window_analysis(
+    points: Sequence[Mapping[str, object]], trades: Sequence[Mapping[str, object]]
+) -> dict[str, object]:
+    max_losses, max_wins = _trade_streaks(trades)
+    concentration, cost_total, cost_share = _concentration_and_cost(trades)
+    return {
+        "exposure": _exposure(points),
+        "max_consecutive_losses": max_losses,
+        "max_consecutive_wins": max_wins,
+        "top3_profit_share": concentration,
+        "cost_total": cost_total,
+        "cost_share": cost_share,
+        "yearly": _yearly_performance(points),
+    }
+
+
 def _exit_reasons(trades: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
     """按出场原因汇总窗口内的卖出成交：笔数与累计盈亏（净额，已扣成本）。"""
 
@@ -864,6 +880,112 @@ def _exit_reasons(trades: Sequence[Mapping[str, object]]) -> list[dict[str, obje
         for key in _EXIT_REASON_ORDER
         if key in buckets
     ]
+
+
+def _number(value: object) -> float | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return None
+
+
+def _exposure(points: Sequence[Mapping[str, object]]) -> float | None:
+    """在场时间占比：窗口里有持仓的交易日 ÷ 全部交易日。"""
+
+    days = [point for point in points if _number(point.get("total")) is not None]
+    if not days:
+        return None
+    holding = sum(1 for point in days if (_number(point.get("positions_count")) or 0) > 0)
+    return holding / len(days)
+
+
+def _trade_streaks(trades: Sequence[Mapping[str, object]]) -> tuple[int, int]:
+    """最长连亏 / 连盈笔数；被拒的卖单不是成交，按平局处理——不打断也不延续。"""
+
+    max_losses = max_wins = current_losses = current_wins = 0
+    for trade in sorted(trades, key=lambda item: str(item.get("date") or "")):
+        if str(trade.get("direction")) != "SELL" or trade.get("rejected"):
+            continue
+        pnl = _number(trade.get("pnl"))
+        if pnl is None:
+            continue
+        if pnl < 0:
+            current_losses += 1
+            current_wins = 0
+        elif pnl > 0:
+            current_wins += 1
+            current_losses = 0
+        else:
+            current_losses = current_wins = 0
+        max_losses = max(max_losses, current_losses)
+        max_wins = max(max_wins, current_wins)
+    return max_losses, max_wins
+
+
+def _concentration_and_cost(
+    trades: Sequence[Mapping[str, object]],
+) -> tuple[float | None, float, float | None]:
+    """前 3 笔盈利占净利润的比例，以及交易成本（佣金+印花税+滑点）占毛利的比例。"""
+
+    wins: list[float] = []
+    net_pnl = 0.0
+    cost = 0.0
+    for trade in trades:
+        if trade.get("rejected"):
+            continue
+        for field in ("commission", "stamp_tax", "slippage"):
+            value = _number(trade.get(field))
+            if value is not None:
+                cost += value
+        if str(trade.get("direction")) != "SELL":
+            continue
+        pnl = _number(trade.get("pnl"))
+        if pnl is None:
+            continue
+        net_pnl += pnl
+        if pnl > 0:
+            wins.append(pnl)
+    top3 = sum(sorted(wins, reverse=True)[:3])
+    concentration = top3 / net_pnl if net_pnl > 0 else None
+    gross = net_pnl + cost
+    return concentration, cost, (cost / gross if gross > 0 else None)
+
+
+def _yearly_performance(points: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    """按自然年切窗口净值：年收益与年内最大回撤；首尾年份按区间实际起止日计算。"""
+
+    by_year: dict[int, list[float]] = {}
+    days_by_year: dict[int, list[str]] = {}
+    for point in points:
+        value = _number(point.get("total"))
+        day = str(point.get("date") or "")
+        if value is None or len(day) < 10:
+            continue
+        year = int(day[:4])
+        by_year.setdefault(year, []).append(value)
+        days_by_year.setdefault(year, []).append(day)
+    rows: list[dict[str, object]] = []
+    previous_close: float | None = None
+    for year in sorted(by_year):
+        totals = by_year[year]
+        days = days_by_year[year]
+        base = previous_close if previous_close is not None else totals[0]
+        # 年内回撤从上一年收盘起算：跨年第一天下跌也是这一年的回撤，不能从当年首日重新计峰。
+        peak = base
+        drawdown = 0.0
+        for value in totals:
+            peak = max(peak, value)
+            drawdown = min(drawdown, value / peak - 1)
+        rows.append(
+            {
+                "year": year,
+                "start_date": days[0],
+                "end_date": days[-1],
+                "total_return": (totals[-1] / base - 1) if base else None,
+                "max_drawdown": drawdown,
+            }
+        )
+        previous_close = totals[-1]
+    return rows
 
 
 def _window_stats(points: Sequence[Mapping[str, object]]) -> tuple[float | None, float | None]:
@@ -978,6 +1100,7 @@ def pool_curve(
             "summary": summary,
             "ranges": window_ranges,
             "exits": _exit_reasons(trades),
+            "analysis": _window_analysis(points, trades),
             "backtest": {
                 **report,
                 "equity_curve": sampled,

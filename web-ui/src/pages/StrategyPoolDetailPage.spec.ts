@@ -70,6 +70,14 @@ it('defaults history trades to the latest settlement first and re-requests from 
         { key: 'rule', label: '规则卖出', trades: 2, pnl: 1200 },
         { key: 'max_hold', label: '持有到期', trades: 1, pnl: -300 },
       ],
+      analysis: {
+        exposure: 0.55, max_consecutive_losses: 3, max_consecutive_wins: 2,
+        top3_profit_share: 0.62, cost_total: 480, cost_share: 0.11,
+        yearly: [
+          { year: 2025, start_date: '2025-01-02', end_date: '2025-12-31', total_return: 0.1, max_drawdown: -0.05 },
+          { year: 2026, start_date: '2026-01-05', end_date: '2026-09-03', total_return: 0.4, max_drawdown: -0.2 },
+        ],
+      },
       backtest: { start_date: '2026-01-01', end_date: '2026-09-03', bars: 3,
         benchmark_return: 0.3, excess_return: 0.2,
         performance: { total_return: 0.5, annual_return: 0.2, sharpe: 1.4, sortino: 2.1, calmar: 0.8,
@@ -100,6 +108,16 @@ it('defaults history trades to the latest settlement first and re-requests from 
     const exits = wrapper.get('[data-testid="pool-exit-summary"]')
     expect(exits.text()).toContain('规则卖出')
     expect(exits.get('[data-testid="pool-exit-max_hold"]').text()).toContain('-300')
+    // 行为与成本指标同为窗口口径：在场时间、连亏/连盈、盈利集中度、成本占比。
+    const behavior = wrapper.get('[data-testid="pool-behavior-stats"]')
+    expect(behavior.text()).toContain('55.00%')
+    expect(behavior.text()).toContain('3 / 2 笔')
+    expect(behavior.text()).toContain('62.00%')
+    expect(behavior.text()).toContain('11.00%')
+    const yearly = wrapper.get('[data-testid="pool-yearly-summary"]').findAll('tbody tr')
+    expect(yearly).toHaveLength(2)
+    expect(yearly[1]!.text()).toContain('2026')
+    expect(yearly[1]!.text()).toContain('40.00%')
     expect(wrapper.find('.individual-trades .trade-sell').exists()).toBe(true)
     expect(wrapper.get('[data-testid="pool-trade-pager"]').text()).toContain('第 1 / 3 页 · 显示 1–50 笔 / 共 123 笔')
     expect(wrapper.get('[data-testid="pool-trade-prev"]').attributes('disabled')).toBeDefined()
@@ -141,6 +159,8 @@ it('defaults history trades to the latest settlement first and re-requests from 
     expect(wrapper.find('[data-testid="pool-metrics"]').exists()).toBe(false)
     // 出场原因分布是窗口口径，子区间照样展示。
     expect(wrapper.find('[data-testid="pool-exit-summary"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="pool-behavior-stats"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="pool-yearly-summary"]').exists()).toBe(true)
 
     await wrapper.get('[data-testid="pool-range-btn-all"]').trigger('click')
     await flushPromises()
