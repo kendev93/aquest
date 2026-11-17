@@ -1820,9 +1820,6 @@ onUnmounted(() => {
 .pool-choice p:not(.eyebrow) { color: var(--muted); }
 .choice-buttons, .pool-actions, .editor-actions { display: flex; flex-wrap: wrap; align-items: end; gap: 12px; }
 .choice-buttons { justify-content: center; margin-top: 24px; }
-.button-primary, .button-secondary { border: 1px solid #37506f; border-radius: 8px; padding: 11px 16px; font: inherit; font-weight: 700; cursor: pointer; }
-.button-primary { background: #18c467; border-color: #18c467; color: #07170e; }
-.button-secondary { background: #131f34; color: #e9f0fa; }
 button:disabled { opacity: .48; cursor: not-allowed; }
 .toolbar-heading, .section-heading, .progress-heading, .progress-detail { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
 .toolbar-heading { margin-bottom: 18px; }

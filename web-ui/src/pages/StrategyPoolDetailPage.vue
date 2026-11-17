@@ -126,14 +126,14 @@ const scopeLabel = computed(() => SCOPE_LABELS[scope.value])
 <template>
     <AppTopbar />
   <main class="content-shell pool-detail" data-testid="pool-detail-page">
-    <a data-testid="pool-detail-back" :href="returnHref">← 返回全市场标的状态</a>
+    <a class="text-button detail-back" data-testid="pool-detail-back" :href="returnHref">← 返回全市场标的状态</a>
     <header class="detail-head">
       <p class="eyebrow">STRATEGY POOL · DETAIL</p>
       <h1>{{ market }} {{ code }} · {{ detail?.name }} 策略详情</h1>
       <p class="detail-note">创建前为历史回测，创建后为模拟跟踪；只用已完成的行情，打开详情不会启动扫描。</p>
     </header>
     <PageGuide page-key="strategy-pool" />
-    <div class="tabs" role="group" aria-label="选择策略目标"><button :aria-pressed="objective === 'annual_return'" data-testid="detail-annual" @click="selectGoal('annual_return')">年化最优</button><button :aria-pressed="objective === 'sharpe'" data-testid="detail-sharpe" @click="selectGoal('sharpe')">夏普最优</button></div>
+    <div class="segmented-tabs" role="group" aria-label="选择策略目标"><button :aria-pressed="objective === 'annual_return'" data-testid="detail-annual" @click="selectGoal('annual_return')">年化最优</button><button :aria-pressed="objective === 'sharpe'" data-testid="detail-sharpe" @click="selectGoal('sharpe')">夏普最优</button></div>
     <p v-if="appliedOverride" class="detail-note">当前实际生效的是手工覆盖策略，列表收益和信号来自该版本。可切换到自动最优版本查看参考表现。</p>
     <div v-if="versions.length" class="detail-controls">
       <label>跟踪版本 <select v-model="selectedId" @change="offset = 0; loadVersion()"><option v-for="version in versions" :key="version.version_id" :value="version.version_id">{{ version.source === 'manual' ? '手工覆盖' : '自动最优' }} · {{ date(version.created_at) }} · {{ version.is_current ? '当前版本' : '已归档' }}</option></select></label>
@@ -162,9 +162,9 @@ const scopeLabel = computed(() => SCOPE_LABELS[scope.value])
         <!-- 分页紧贴交易表：以前它在这块面板外面，看 50 笔要先在表里滚一遍、再往下找按钮 -->
         <template #trades-toolbar>
           <nav class="trades-pager" data-testid="pool-trade-pager">
-            <button :disabled="offset === 0 || loading" data-testid="pool-trade-prev" @click="stepTrades(-TRADE_PAGE_SIZE)">上一页</button>
+            <button class="button-secondary" :disabled="offset === 0 || loading" data-testid="pool-trade-prev" @click="stepTrades(-TRADE_PAGE_SIZE)">上一页</button>
             <span>第 {{ tradePage }} / {{ tradePageCount }} 页 · 显示 {{ tradeRangeText }} / 共 {{ total }} 笔</span>
-            <button :disabled="offset + TRADE_PAGE_SIZE >= total || loading" data-testid="pool-trade-next" @click="stepTrades(TRADE_PAGE_SIZE)">下一页</button>
+            <button class="button-secondary" :disabled="offset + TRADE_PAGE_SIZE >= total || loading" data-testid="pool-trade-next" @click="stepTrades(TRADE_PAGE_SIZE)">下一页</button>
           </nav>
         </template>
       </IndividualResearchBacktestDetail>
@@ -181,15 +181,15 @@ const scopeLabel = computed(() => SCOPE_LABELS[scope.value])
 .detail-controls label { display:grid; gap:6px; color:var(--muted); font-size:.88rem; }
 .detail-controls select { width:auto; min-width:240px; }
 .section-heading h2 { margin:6px 0 0; }
-.tabs, .metrics, nav { display:flex; gap:24px; flex-wrap:wrap; }
+.metrics, nav { display:flex; gap:24px; flex-wrap:wrap; }
 .rules { display:grid; grid-template-columns:repeat(3,1fr); gap:24px; }
 .rules p { white-space:pre-wrap; }
-button, select { padding:10px; }
+.detail-back { display:inline-flex; align-items:center; justify-self:start; font-size:11px; }
 .trades-pager { align-items:center; gap:12px; }
+.trades-pager .button-secondary { min-height:31px; padding:0 10px; font-size:11px; }
 .trades-pager span { color:var(--muted); }
 /* 组件里 340px 的窗口是给不分页的个股研究用的；详情页每页只有 50 笔且有分页，
    再压高度就是让用户在表格里二次滚动 */
 .pool-detail :deep(.individual-trades) { max-height:620px; }
-[aria-pressed="true"] { color:var(--accent); border-color:var(--accent); }
 @media (max-width:800px) { .rules { grid-template-columns:1fr; } }
 </style>
