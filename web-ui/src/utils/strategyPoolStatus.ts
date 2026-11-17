@@ -356,3 +356,14 @@ export function rerunEntryTitle(entry: StrategyPoolEntry, context: PoolJobStateC
   if (context.busy) return '当前全市场研究或组合回测结束后可重跑'
   return `重跑 ${entry.market} ${entry.code}`
 }
+
+/** 策略详情页地址：带上当前目标与来源列表，从详情返回时能回到原视图。 */
+export function detailHrefFor(
+  market: string,
+  code: string,
+  objective: StrategyPoolObjective | null,
+  listContext: string,
+): string {
+  return `/strategy-pool/${market}/${code}?objective=${objective ?? 'annual_return'}`
+    + `&list=${encodeURIComponent(listContext)}`
+}

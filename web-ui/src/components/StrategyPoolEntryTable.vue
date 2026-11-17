@@ -12,6 +12,7 @@ import type {
 import { formatNumber, formatPercent, formatSignedPercent } from '../utils/format'
 import {
   benchmarkReturn,
+  detailHrefFor,
   fullPeriodAsOf,
   entryHoldingRisk,
   entryIsHeld,
@@ -124,8 +125,7 @@ function sortHint(column: StrategyPoolMetricColumn, label: string): string {
 }
 
 function detailHref(entry: StrategyPoolEntry): string {
-  return `/strategy-pool/${entry.market}/${entry.code}?objective=${props.objective ?? 'annual_return'}`
-    + `&list=${encodeURIComponent(props.listContext)}`
+  return detailHrefFor(entry.market, entry.code, props.objective, props.listContext)
 }
 
 // 买卖同时触发时拆成两个徽章：持仓行再加「持仓中」，三个状态就能并列看到。

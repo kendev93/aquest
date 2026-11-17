@@ -210,6 +210,56 @@ describe('StrategyPoolPage', () => {
     expect(wrapper.get('[data-testid="pool-sell-signals"]').text()).toContain('当前没有卖出条件')
   })
 
+  it('links every signal and holding row to its strategy detail', async () => {
+    window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+    const buy = signalFor('600000')
+    const sell = signalFor('600001')
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValue({
+      job_id: 'signal-1',
+      status: 'completed',
+      result: {
+        mode: 'signals',
+        objective: 'annual_return',
+        holding_scope: 'per_stock_strategy',
+        holding_snapshot_complete: true,
+        as_of_date: '2026-10-01',
+        buy_signals: [buy],
+        sell_signals: [sell],
+        states: [buy, sell],
+        model_portfolio: {
+          available: true,
+          holding_scope: 'per_stock_strategy',
+          // 风控行来自「已触发、下一交易日待成交」的持仓（pending_exit_*），不是历史成交记录。
+          holdings: [{
+            market: 'SH',
+            code: '600002',
+            name: '持仓股',
+            status: 'held',
+            holding_return_pct: -0.02,
+            pending_exit_reason: '止损',
+            pending_exit_risk_trigger: 'stop_loss',
+            pending_exit_signal_date: '2026-10-01',
+          }],
+          risk_exit_signals: [],
+        },
+      },
+    })
+    const wrapper = mount(StrategyPoolPage)
+    await flushPromises()
+
+    // 每行都能进详情，地址与表格同源：目标 + 当前列表状态，返回时回到原视图。
+    const href = (testid: string) => wrapper.get(`[data-testid="${testid}"]`).attributes('href')
+    for (const [testid, code] of [
+      ['pool-buy-detail-600000', '600000'],
+      ['pool-sell-rule-detail-600001', '600001'],
+      ['pool-sell-risk-detail-600002', '600002'],
+      ['pool-holding-detail-600002', '600002'],
+    ] as const) {
+      expect(href(testid)).toMatch(new RegExp(`^/strategy-pool/SH/${code}\\?objective=annual_return&list=`))
+      expect(wrapper.get(`[data-testid="${testid}"]`).text()).toBe('详情')
+    }
+  })
+
   it('shows the valid strategy count next to the pool size', async () => {
     window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
     vi.mocked(api.fetchStrategyPoolEntries).mockResolvedValue([

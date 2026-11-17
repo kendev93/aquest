@@ -48,6 +48,7 @@ import AppTopbar from '../components/AppTopbar.vue'
 import { formatDuration, formatNumber, formatPercent, formatSignedPercent } from '../utils/format'
 import {
   activeReplayableCandidate,
+  detailHrefFor,
   holdingRiskSummary,
   isStrategyPoolSortColumn,
   objectiveLabel,
@@ -568,6 +569,11 @@ const listContext = computed(() => new URLSearchParams({
   page: String(page.value),
   pageSize: String(pageSize.value),
 }).toString())
+
+/** 信号与持仓行的详情入口：与表格同一套地址，返回时回到当前列表状态。 */
+function signalDetailHref(target: { market: string; code: string }): string {
+  return detailHrefFor(target.market, target.code, objective.value, listContext.value)
+}
 
 const {
   groups,
@@ -1578,6 +1584,7 @@ onUnmounted(() => {
                   :test-id="`pool-buy-follow-${item.code}`"
                   @toggle="toggleFollow(item)"
                 />
+                <a class="text-button" :href="signalDetailHref(item)" :data-testid="`pool-buy-detail-${item.code}`">详情</a>
               </div>
             </div>
             <div v-if="buySignals.length > SIGNAL_PAGE_SIZE" class="signal-pagination" data-testid="pool-buy-pagination">
@@ -1601,6 +1608,7 @@ onUnmounted(() => {
                     :test-id="`pool-sell-rule-follow-${item.signal.code}`"
                     @toggle="toggleFollow(item.signal)"
                   />
+                  <a class="text-button" :href="signalDetailHref(item.signal)" :data-testid="`pool-sell-rule-detail-${item.signal.code}`">详情</a>
                 </div>
                 <div v-else class="signal-row risk-signal">
                   <strong>{{ item.signal.market }}{{ item.signal.code }}<template v-if="item.signal.name"> · {{ item.signal.name }}</template><span v-for="tag in groupTagsOf(sellItemSymbol(item))" :key="tag" class="focus-group-tag">{{ tag }}</span></strong>
@@ -1612,6 +1620,7 @@ onUnmounted(() => {
                     :test-id="`pool-sell-risk-follow-${item.target.code}`"
                     @toggle="toggleFollow(item.target)"
                   />
+                  <a class="text-button" :href="signalDetailHref(item.target)" :data-testid="`pool-sell-risk-detail-${item.target.code}`">详情</a>
                 </div>
               </template>
             </div>
@@ -1636,6 +1645,7 @@ onUnmounted(() => {
                   :test-id="`pool-holding-follow-${holding.code}`"
                   @toggle="toggleFollow(holding)"
                 />
+                <a class="text-button" :href="signalDetailHref(holding)" :data-testid="`pool-holding-detail-${holding.code}`">详情</a>
               </div>
             </div>
             <div v-if="currentHoldings.length > SIGNAL_PAGE_SIZE" class="signal-pagination" data-testid="pool-holdings-pagination">
