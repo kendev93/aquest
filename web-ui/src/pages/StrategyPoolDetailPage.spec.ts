@@ -58,6 +58,14 @@ it('defaults history trades to the latest settlement first and re-requests from 
     let data: unknown
     if (url.endsWith('/detail')) data = { name: '测试股', objectives: { annual_return: [version], sharpe: [] } }
     else if (url.includes('/curve')) data = { summary: { as_of_date: '2026-09-03', baseline_date: '2026-01-01' },
+      ranges: [
+        { key: '1y', label: '最近一年', start_date: '2025-09-03', end_date: '2026-09-03', total_return: 0.12, max_drawdown: -0.08 },
+        { key: 'ytd', label: '今年以来', start_date: '2026-01-01', end_date: '2026-09-03', total_return: 0.2, max_drawdown: -0.1 },
+        { key: '2y', label: '最近两年', start_date: '2024-09-03', end_date: '2026-09-03', total_return: 0.3, max_drawdown: -0.15 },
+        { key: '3y', label: '最近三年', start_date: '2023-09-03', end_date: '2026-09-03', total_return: 0.4, max_drawdown: -0.2 },
+        { key: 'all', label: '全部区间', start_date: '2020-01-01', end_date: '2026-09-03', total_return: 0.5, max_drawdown: -0.3 },
+        { key: 'created', label: '成立以来', start_date: '2026-01-01', end_date: '2026-09-03', total_return: 0.5, max_drawdown: -0.25 },
+      ],
       backtest: { start_date: '2026-01-01', end_date: '2026-09-03', bars: 3, performance: { total_return: 0.5 },
         equity_curve: [{ date: '2026-01-01', total: 1000, return_pct: 0 }], trades: [] } }
     else data = { items: [{ date: '2026-09-03', direction: 'SELL', price: 12, size: 100 }], total: 123 }
@@ -69,7 +77,7 @@ it('defaults history trades to the latest settlement first and re-requests from 
     await flushPromises()
     const tradeCalls = () => fetch.mock.calls.map(([url]) => String(url)).filter((url) => url.includes('/trades'))
     const curveCalls = () => fetch.mock.calls.map(([url]) => String(url)).filter((url) => url.includes('/curve'))
-    expect(tradeCalls()[0]).toContain('scope=full&order=desc&offset=0')
+    expect(tradeCalls()[0]).toContain('range=all&order=desc&offset=0')
     expect(curveCalls()).toHaveLength(1)
     // 版本状态、区间指标行和交易方向都得是中文，分页条要贴着表格显示页码。
     // 断言用结构而不是「夏普」「卖出」这类词——页面上本来就有「夏普最优」标签和
@@ -93,10 +101,32 @@ it('defaults history trades to the latest settlement first and re-requests from 
     expect(tradeCalls().at(-1)).toContain('order=asc&offset=0')
     expect(curveCalls()).toHaveLength(1)
 
-    await wrapper.get('[data-testid="pool-detail-scope"]').setValue('created')
+    // 区间表一次给全：六行、当前区间高亮，值直接来自后端算好的窗口数字。
+    const summaryRows = wrapper.get('[data-testid="pool-range-summary"]').findAll('tbody tr')
+    expect(summaryRows).toHaveLength(6)
+    expect(summaryRows.map((row) => row.find('td').text())).toEqual([
+      '最近一年', '今年以来', '最近两年', '最近三年', '全部区间', '成立以来',
+    ])
+    expect(summaryRows[4]!.classes()).toContain('active')
+    expect(summaryRows[4]!.text()).toContain('50.00%')
+    expect(summaryRows[4]!.text()).toContain('-30.00%')
+
+    await wrapper.get('[data-testid="pool-range-btn-created"]').trigger('click')
     await flushPromises()
     expect(curveCalls()).toHaveLength(2)
-    expect(tradeCalls().at(-1)).toContain('scope=created&order=asc&offset=0')
+    expect(curveCalls().at(-1)).toContain('range=created')
+    expect(tradeCalls().at(-1)).toContain('range=created&order=asc&offset=0')
+
+    // 子区间没有整段口径的夏普/胜率，那一排指标必须收起来，只留区间表上的收益与回撤。
+    await wrapper.get('[data-testid="pool-range-btn-1y"]').trigger('click')
+    await flushPromises()
+    expect(curveCalls().at(-1)).toContain('range=1y')
+    expect(tradeCalls().at(-1)).toContain('range=1y&order=asc&offset=0')
+    expect(wrapper.find('.individual-full-metrics').exists()).toBe(false)
+
+    await wrapper.get('[data-testid="pool-range-btn-all"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.findAll('.individual-full-metrics span')).toHaveLength(8)
   } finally { wrapper.unmount() }
 })
 

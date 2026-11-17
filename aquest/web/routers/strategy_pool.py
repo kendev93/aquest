@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from datetime import datetime, time, timedelta
+from collections.abc import Mapping, Sequence
+from datetime import date, datetime, time, timedelta
 from threading import Lock
 from time import monotonic
 from typing import Any, Literal, cast
@@ -793,13 +793,62 @@ def _owned_version(
     return tracks, version
 
 
+#: 详情页收益曲线的快捷区间：研究全区间、策略成立以来，以及最近一年 / 今年 / 两年 / 三年。
+PoolCurveRange = Literal["1y", "ytd", "2y", "3y", "all", "created"]
+POOL_CURVE_RANGES: tuple[PoolCurveRange, ...] = ("1y", "ytd", "2y", "3y", "all", "created")
+POOL_CURVE_RANGE_LABELS = {
+    "1y": "最近一年",
+    "ytd": "今年以来",
+    "2y": "最近两年",
+    "3y": "最近三年",
+    "all": "全部区间",
+    "created": "成立以来",
+}
+
+
+def _range_start(kind: PoolCurveRange, end_day: date, baseline: str) -> str:
+    """区间起点；空串表示不裁剪。``created`` 用基线日，其余从终点往前推。"""
+
+    if kind == "all":
+        return ""
+    if kind == "created":
+        return baseline
+    if kind == "ytd":
+        return date(end_day.year, 1, 1).isoformat()
+    years = {"1y": 1, "2y": 2, "3y": 3}[kind]
+    try:
+        start = end_day.replace(year=end_day.year - years)
+    except ValueError:
+        # 2 月 29 日推到平年：取 2 月 28 日，别让快捷区间整只失效。
+        start = end_day.replace(year=end_day.year - years, day=28)
+    return start.isoformat()
+
+
+def _window_stats(points: Sequence[Mapping[str, object]]) -> tuple[float | None, float | None]:
+    """窗口收益与最大回撤：都用账户总净值，和曲线同源。"""
+
+    totals: list[float] = []
+    for point in points:
+        value = point.get("total")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            totals.append(float(value))
+    if len(totals) < 2 or not totals[0]:
+        return None, None
+    peak = totals[0]
+    drawdown = 0.0
+    for value in totals:
+        peak = max(peak, value)
+        drawdown = min(drawdown, value / peak - 1)
+    return totals[-1] / totals[0] - 1, drawdown
+
+
 @router.get("/entries/{market}/{code}/versions/{version_id}/curve")
 def pool_curve(
     market: str,
     code: str,
     version_id: str,
     request: Request,
-    scope: Literal["created", "full"] = "created",
+    range_key: PoolCurveRange = Query("all", alias="range"),
 ) -> dict[str, object]:
     tracks, version = _owned_version(market, code, version_id, request)
     snapshot = tracks.snapshot(version_id)
@@ -807,12 +856,17 @@ def pool_curve(
         return {"data": {"version": version, "backtest": None}}
     cp = snapshot["checkpoint"]
     summary = snapshot["summary"]
-    start = summary["baseline_date"] if scope == "created" else ""
-    points = [p for p in cp["equity"] if p["date"] >= start]
+    report = snapshot["report"]
+    equity = list(cp["equity"])
+    end_day = date.fromisoformat(str(equity[-1]["date"])) if equity else date.today()
+    start = _range_start(range_key, end_day, summary["baseline_date"]) if equity else ""
+    points = [p for p in equity if p["date"] >= start]
+    initial_cash = float(version["candidate"].get("config", {}).get("initial_cash", 1000000))
+    # 子区间的分母取窗口第一天的总净值：拿初始资金当分母，曲线一开局就是几倍收益。
     baseline = (
         summary["baseline_equity"]
-        if scope == "created"
-        else float(version["candidate"].get("config", {}).get("initial_cash", 1000000))
+        if range_key == "created"
+        else (float(points[0]["total"]) if range_key != "all" and points else initial_cash)
     )
     trades = [t for t in cp["trades"] if t["date"] >= start]
     preserve = {0, len(points) - 1}
@@ -841,11 +895,31 @@ def pool_curve(
         if i in preserve or i % step == 0
     ]
     report = snapshot["report"]
-    strategy_return = (
-        summary["created_return"]
-        if scope == "created"
-        else report["performance"].get("total_return")
-    )
+    strategy_return, window_drawdown = _window_stats(points)
+    if range_key == "created":
+        strategy_return = summary["created_return"]
+    elif range_key == "all":
+        strategy_return = report["performance"].get("total_return")
+    # 六个快捷区间的收益与回撤一次算全：下面这张表要让用户一眼横向比较，点按钮时不再请求。
+    window_ranges: list[dict[str, object]] = []
+    for kind in POOL_CURVE_RANGES:
+        window_start = _range_start(kind, end_day, summary["baseline_date"])
+        window_points = [p for p in equity if p["date"] >= window_start]
+        total_return, drawdown = _window_stats(window_points)
+        if kind == "created":
+            total_return = summary["created_return"]
+        elif kind == "all":
+            total_return = report["performance"].get("total_return")
+        window_ranges.append(
+            {
+                "key": kind,
+                "label": POOL_CURVE_RANGE_LABELS[kind],
+                "start_date": window_points[0]["date"] if window_points else None,
+                "end_date": window_points[-1]["date"] if window_points else None,
+                "total_return": total_return,
+                "max_drawdown": drawdown,
+            }
+        )
     # 基准按**同一窗口**重算：full 是整段研究，created 从账户基线日起算。直接取全段
     # performance.total_return 会把基线日之前的涨跌算进「创建以来」，与策略收益口径不
     # 一致；这两个值此前根本没进 payload，所以详情页的持有基准与超额收益一直是空的。
@@ -860,13 +934,29 @@ def pool_curve(
         "data": {
             "version": version,
             "summary": summary,
+            "ranges": window_ranges,
             "backtest": {
                 **report,
                 "equity_curve": sampled,
                 "closed_trades": count_closed_trades(trades),
                 "start_date": points[0]["date"] if points else report["start_date"],
+                "end_date": points[-1]["date"] if points else report["end_date"],
+                # 子区间按窗口给交易日数；全部/成立以来沿用整段报告的根数。
+                "bars": (
+                    len(points) if range_key not in {"all", "created"} else report.get("bars", 0)
+                ),
                 "trades": [],
-                "performance": {**report["performance"], "total_return": strategy_return},
+                # 子区间只把收益与回撤换成窗口口径；夏普/胜率等仍是整段研究的数字，
+                # 页面对子区间不展示这一排指标，避免把两段窗口混着读。
+                "performance": {
+                    **report["performance"],
+                    "total_return": strategy_return,
+                    **(
+                        {"max_drawdown": window_drawdown}
+                        if range_key not in {"all", "created"}
+                        else {}
+                    ),
+                },
                 "benchmark": (
                     {**benchmark_curve, "total_return": benchmark_return}
                     if isinstance(benchmark_curve, Mapping)
@@ -889,14 +979,19 @@ def pool_trades(
     request: Request,
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
-    scope: Literal["created", "full"] = "created",
+    range_key: PoolCurveRange = Query("all", alias="range"),
     order: Literal["asc", "desc"] = "desc",
 ) -> dict[str, object]:
     tracks, version = _owned_version(market, code, version_id, request)
     snapshot = tracks.snapshot(version_id)
     trades = snapshot["checkpoint"]["trades"] if snapshot else []
-    if snapshot and scope == "created":
-        trades = [t for t in trades if t["date"] >= snapshot["summary"]["baseline_date"]]
+    if snapshot:
+        # 成交明细跟着曲线同一个区间走：看「最近一年」时，表里就不该出现更早的成交。
+        equity = snapshot["checkpoint"]["equity"]
+        end_day = date.fromisoformat(str(equity[-1]["date"])) if equity else date.today()
+        start = _range_start(range_key, end_day, snapshot["summary"]["baseline_date"])
+        if start:
+            trades = [t for t in trades if t["date"] >= start]
     if order == "desc":
         # 默认最近成交在前：详情里要看的是刚发生的买卖，不是 2015 年的第一笔。
         # 排序是稳定的，同一天的买入仍然排在卖出前面。分页按 offset 切片，

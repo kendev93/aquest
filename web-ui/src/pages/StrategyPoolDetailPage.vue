@@ -17,8 +17,24 @@ const segments = window.location.pathname.split('/')
 const market = segments[2] ?? ''; const code = segments[3] ?? ''
 const query = new URLSearchParams(window.location.search)
 const objective = ref<StrategyPoolObjective>(query.get('objective') === 'sharpe' ? 'sharpe' : 'annual_return')
-// 查看区间固定默认“全历史”；不读 URL，保持每次打开行为一致
-const scope = ref<'created' | 'full'>('full')
+// 收益曲线区间：默认「全部区间」；不读 URL，保持每次打开行为一致
+type PoolCurveRange = '1y' | 'ytd' | '2y' | '3y' | 'all' | 'created'
+const RANGE_OPTIONS: { key: PoolCurveRange; label: string }[] = [
+  { key: '1y', label: '最近一年' },
+  { key: 'ytd', label: '今年以来' },
+  { key: '2y', label: '最近两年' },
+  { key: '3y', label: '最近三年' },
+  { key: 'all', label: '全部区间' },
+  { key: 'created', label: '成立以来' },
+]
+const range = ref<PoolCurveRange>('all')
+interface CurveRangeSummary {
+  key: string; label: string; start_date: string | null; end_date: string | null
+  total_return: number | null; max_drawdown: number | null
+}
+// 六个区间的收益与回撤由后端一次算全：点按钮只换曲线，不重新请求这张表。
+const ranges = ref<CurveRangeSummary[]>([])
+const metricsVisible = computed(() => range.value === 'all' || range.value === 'created')
 // 历史交易默认最近成交在前：关注的是刚发生的买卖，不是 2015 年的第一笔
 const tradeOrder = ref<'desc' | 'asc'>('desc')
 const detail = ref<{ name: string; objectives: Record<StrategyPoolObjective, Version[]> } | null>(null)
@@ -64,7 +80,7 @@ async function selectGoal(goal: StrategyPoolObjective) {
 // 曲线只跟「版本 + 区间」有关，成交明细是按 offset 切的切片。以前翻页也走整块
 // 重取，每点一次下一页都要重拉曲线并重建图，看起来就是页面在闪。
 function tradesUrl(): string {
-  return `${endpoint}/versions/${selectedId.value}/trades?scope=${scope.value}&order=${tradeOrder.value}&offset=${offset.value}&limit=${TRADE_PAGE_SIZE}`
+  return `${endpoint}/versions/${selectedId.value}/trades?range=${range.value}&order=${tradeOrder.value}&offset=${offset.value}&limit=${TRADE_PAGE_SIZE}`
 }
 async function loadVersion() {
   const params = new URLSearchParams(window.location.search)
@@ -77,12 +93,13 @@ async function loadVersion() {
   loading.value = true
   try {
     const [curve, trades] = await Promise.all([
-      get<{ backtest: IndividualResearchFullBacktest | null; summary?: Record<string, unknown> }>(`${endpoint}/versions/${selectedId.value}/curve?scope=${scope.value}`),
+      get<{ backtest: IndividualResearchFullBacktest | null; summary?: Record<string, unknown>; ranges?: CurveRangeSummary[] }>(`${endpoint}/versions/${selectedId.value}/curve?range=${range.value}`),
       get<{ items: Record<string, unknown>[]; total: number }>(tradesUrl()),
     ])
     if (current !== requestId) return
     backtest.value = curve.backtest ? { ...curve.backtest, trades: trades.items } : null
     summary.value = curve.summary ?? {}; total.value = trades.total
+    ranges.value = curve.ranges ?? []
   } catch (e) { if (current === requestId) error.value = e instanceof Error ? e.message : '详情加载失败' }
   finally { if (current === requestId) loading.value = false }
 }
@@ -107,6 +124,12 @@ function stepTrades(delta: number): void {
   offset.value = Math.max(0, offset.value + delta)
   void refreshTrades()
 }
+
+function selectRange(next: PoolCurveRange): void {
+  if (next === range.value) return
+  range.value = next; offset.value = 0
+  void loadVersion()
+}
 onMounted(async () => {
   try {
     const [data, metadata] = await Promise.all([get<NonNullable<typeof detail.value>>(`${endpoint}/detail`), fetchMetadata().catch(() => null)])
@@ -119,8 +142,9 @@ onMounted(async () => {
 const VERSION_STATUS_LABELS: Record<string, string> = { pending: '待初始化', ready: '已就绪', failed: '更新失败' }
 function versionStatus(value: string): string { return VERSION_STATUS_LABELS[value] ?? value }
 
-const SCOPE_LABELS: Record<'created' | 'full', string> = { created: '创建以来（含承接持仓）', full: '全历史' }
-const scopeLabel = computed(() => SCOPE_LABELS[scope.value])
+const scopeLabel = computed(
+  () => RANGE_OPTIONS.find((option) => option.key === range.value)?.label ?? '',
+)
 </script>
 
 <template>
@@ -137,7 +161,6 @@ const scopeLabel = computed(() => SCOPE_LABELS[scope.value])
     <p v-if="appliedOverride" class="detail-note">当前实际生效的是手工覆盖策略，列表收益和信号来自该版本。可切换到自动最优版本查看参考表现。</p>
     <div v-if="versions.length" class="detail-controls">
       <label>跟踪版本 <select v-model="selectedId" @change="offset = 0; loadVersion()"><option v-for="version in versions" :key="version.version_id" :value="version.version_id">{{ version.source === 'manual' ? '手工覆盖' : '自动最优' }} · {{ date(version.created_at) }} · {{ version.is_current ? '当前版本' : '已归档' }}</option></select></label>
-      <label>查看区间 <select v-model="scope" data-testid="pool-detail-scope" @change="offset = 0; loadVersion()"><option value="created">创建以来，含承接持仓</option><option value="full">全历史</option></select></label>
       <label>历史交易排序 <select v-model="tradeOrder" data-testid="pool-trade-order" @change="offset = 0; refreshTrades()"><option value="desc">最近成交在前</option><option value="asc">最早成交在前</option></select></label>
     </div>
     <p v-if="!versions.length" class="empty-copy">该目标暂无可用策略。请在策略池研究完成后查看。</p>
@@ -156,9 +179,20 @@ const scopeLabel = computed(() => SCOPE_LABELS[scope.value])
     </section>
     <section v-if="selected" class="panel-card" :aria-busy="loading">
       <div class="section-heading"><div><p class="eyebrow">CURVE &amp; TRADES</p><h2>收益曲线与历史交易</h2></div><span data-testid="pool-curve-state">{{ loading ? '读取中…' : `${scopeLabel} · 成交明细每页 ${TRADE_PAGE_SIZE} 笔` }}</span></div>
+      <div class="curve-range">
+        <div class="segmented-tabs" role="group" aria-label="收益曲线区间"><button v-for="option in RANGE_OPTIONS" :key="option.key" :aria-pressed="range === option.key" :data-testid="`pool-range-btn-${option.key}`" @click="selectRange(option.key)">{{ option.label }}</button></div>
+        <table v-if="ranges.length" class="range-summary" data-testid="pool-range-summary">
+          <thead><tr><th>区间</th><th>收益率</th><th>最大回撤</th></tr></thead>
+          <tbody>
+            <tr v-for="item in ranges" :key="item.key" :class="{ active: item.key === range }" :data-testid="`pool-range-${item.key}`" @click="selectRange(item.key as PoolCurveRange)">
+              <td>{{ item.label }}</td><td>{{ percent(item.total_return) }}</td><td>{{ percent(item.max_drawdown) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
       <!-- 「尚未初始化」只在真的读完且没有数据时说，以前加载途中也会闪这句 -->
       <p v-if="!loading && !backtest" class="empty-copy" data-testid="pool-detail-not-initialized">账户尚未初始化，等待后台跟踪任务完成。</p>
-      <IndividualResearchBacktestDetail v-if="backtest" :backtest="backtest" :launch-date="selected.created_at" :baseline-date="String(summary.baseline_date ?? '')" return-curve>
+      <IndividualResearchBacktestDetail v-if="backtest" :backtest="backtest" :launch-date="selected.created_at" :baseline-date="String(summary.baseline_date ?? '')" :hide-metrics="!metricsVisible" return-curve>
         <!-- 分页紧贴交易表：以前它在这块面板外面，看 50 笔要先在表里滚一遍、再往下找按钮 -->
         <template #trades-toolbar>
           <nav class="trades-pager" data-testid="pool-trade-pager">
@@ -185,6 +219,14 @@ const scopeLabel = computed(() => SCOPE_LABELS[scope.value])
 .rules { display:grid; grid-template-columns:repeat(3,1fr); gap:24px; }
 .rules p { white-space:pre-wrap; }
 .detail-back { display:inline-flex; align-items:center; justify-self:start; font-size:11px; }
+.curve-range { display:flex; flex-wrap:wrap; align-items:flex-start; justify-content:space-between; gap:12px 20px; margin-bottom:14px; }
+.range-summary { width:min(420px, 100%); border-collapse:collapse; font-size:11px; }
+.range-summary th, .range-summary td { padding:5px 10px; border-bottom:1px solid var(--border); text-align:right; white-space:nowrap; }
+.range-summary th:first-child, .range-summary td:first-child { text-align:left; color:var(--muted); }
+.range-summary th { color:var(--subtle); font-weight:700; }
+.range-summary tbody tr { cursor:pointer; }
+.range-summary tbody tr:hover { background:var(--surface-hover); }
+.range-summary tbody tr.active { background:var(--accent-soft); color:var(--accent); }
 .trades-pager { align-items:center; gap:12px; }
 .trades-pager .button-secondary { min-height:31px; padding:0 10px; font-size:11px; }
 .trades-pager span { color:var(--muted); }

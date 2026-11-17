@@ -2086,8 +2086,9 @@ def test_pool_curve_reports_benchmark_and_excess_over_the_viewed_window(tmp_path
 
     url = f"/api/v1/strategy-pool/entries/SH/600000/versions/{version['version_id']}"
     with TestClient(app) as client:
-        full = client.get(url + "/curve?scope=full").json()["data"]["backtest"]
-        created = client.get(url + "/curve?scope=created").json()["data"]["backtest"]
+        payload = client.get(url + "/curve?range=all").json()["data"]
+        full = payload["backtest"]
+        created = client.get(url + "/curve?range=created").json()["data"]["backtest"]
 
     curve = full["benchmark"]
     assert curve is not None
@@ -2109,6 +2110,18 @@ def test_pool_curve_reports_benchmark_and_excess_over_the_viewed_window(tmp_path
         pytest.approx(created["performance"]["total_return"] - expected)
         if expected is not None
         else None
+    )
+    # 曲线快捷区间一次给全：六个入口都要有收益与回撤，供页面右侧那张表直接展示。
+    summary_rows = payload["ranges"]
+    assert [row["key"] for row in summary_rows] == ["1y", "ytd", "2y", "3y", "all", "created"]
+    for row in summary_rows:
+        assert row["label"]
+        assert row["total_return"] is None or isinstance(row["total_return"], float)
+        assert row["max_drawdown"] is None or row["max_drawdown"] <= 0
+    by_key = {row["key"]: row for row in summary_rows}
+    assert by_key["all"]["total_return"] == pytest.approx(full["performance"]["total_return"])
+    assert by_key["created"]["total_return"] == pytest.approx(
+        created["performance"]["total_return"]
     )
 
 
