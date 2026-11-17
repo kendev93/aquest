@@ -585,6 +585,7 @@ const {
   focusRows,
   focusMissingCount,
   toggleFollow,
+  removeFocus,
   pruneMissingFocus,
   loadFocus,
 } = useStrategyPoolFocus({
@@ -1683,12 +1684,14 @@ onUnmounted(() => {
             :sort-column="focusSortColumn"
             :sort-direction="focusSortDirection"
             :follow-busy="focusPending"
+            :focus-list="true"
             :queued-symbol="queuedSingleSymbol"
             :busy="isBusy"
             :busy-intent="activeIntent"
             :list-context="listContext"
             @rerun="rerunEntry"
             @toggle-follow="toggleFollow"
+            @remove-focus="removeFocus"
             @sort="setFocusSort"
           />
           <p v-else class="empty-copy" data-testid="pool-focus-empty">{{ focusMissingCount ? '已关注的标的目前都不在策略池里；跑完全市场研究或单股重跑后会显示。' : '在下方「全市场标的状态」的维护列点击添加到分组，这里显示当前分组标的的状态。' }}</p>

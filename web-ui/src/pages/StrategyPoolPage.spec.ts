@@ -2677,6 +2677,30 @@ describe('StrategyPoolPage', () => {
       expect(wrapper.get('[data-testid="pool-focus-missing"]').text()).toContain('1 只')
     })
 
+    it('removes a focused symbol from every group in one click', async () => {
+      window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
+      const focused = { market: 'SH' as const, code: '600000', name: '测试600000' }
+      vi.mocked(api.fetchFocusGroups).mockResolvedValue([
+        { id: 'default', name: '默认分组', items: [focused] },
+        { id: 'bank', name: '银行', items: [focused] },
+      ])
+      vi.mocked(api.setFocusMembership).mockResolvedValue([
+        { id: 'default', name: '默认分组', items: [] },
+        { id: 'bank', name: '银行', items: [] },
+      ])
+      const wrapper = mount(StrategyPoolPage)
+      await flushPromises()
+      expect(wrapper.get('[data-testid="focus-row-600000"]').text()).toContain('移除关注')
+
+      await wrapper.get('[data-testid="focus-remove-focus-600000"]').trigger('click')
+      await flushPromises()
+
+      // 一键移除＝把所有分组一起取消勾选，而不是只移出当前分组。
+      expect(api.setFocusMembership).toHaveBeenCalledWith(focused, [])
+      expect(wrapper.find('[data-testid="focus-row-600000"]').exists()).toBe(false)
+      expect(wrapper.find('[data-testid="pool-focus-empty"]').exists()).toBe(true)
+    })
+
     it('tags symbols with their custom group names but not the default group', async () => {
       window.localStorage.setItem('aquest.strategy-pool.objective', 'annual_return')
       const focused = { market: 'SH' as const, code: '600000', name: '测试600000' }

@@ -52,6 +52,8 @@ interface Props {
   busyIntent?: string
   listContext?: string
   followBusy?: boolean
+  /** 特别关注表：维护列多一个「移除关注」，一次把它从所有分组移除。 */
+  focusList?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -64,6 +66,7 @@ const props = withDefaults(defineProps<Props>(), {
   listContext: '',
   emptyText: '',
   followBusy: false,
+  focusList: false,
   holdings: () => new Map(),
   holdingAsOf: '',
 })
@@ -72,6 +75,7 @@ const emit = defineEmits<{
   sort: [column: StrategyPoolMetricColumn]
   rerun: [entry: StrategyPoolEntry]
   toggleFollow: [target: StrategyPoolFollowTarget]
+  removeFocus: [target: StrategyPoolFollowTarget]
 }>()
 
 // 表格指标列：列头和单元格口径一致，'status' 档不进这里（没有可点的排序按钮）。
@@ -189,7 +193,7 @@ function latestCloseAsOf(entry: StrategyPoolEntry): string {
           <td>{{ formatPercent(metricValue(entry, 'max_drawdown')) }}</td>
           <td :data-testid="`${testid}-holding-days-${entry.code}`">{{ formatHoldingDays(metricValue(entry, 'avg_holding_days')) }}</td>
           <td><span v-if="entry.active_candidate?.quality?.badges?.length" class="badge-row"><i v-for="badge in entry.active_candidate.quality.badges" :key="badge">{{ badge }}</i></span><span v-else-if="entry.status === 'no_strategy'">无可计算的策略绩效</span><span v-else-if="entry.last_error" class="danger-text" :data-testid="`${testid}-entry-error-${entry.code}`" :title="entry.last_error">策略搜索失败 · 悬停查看原因</span><span v-else>—</span><small v-if="entry.active_candidate?.metrics">交易数：验证 {{ formatNumber(tradeCount(entry.active_candidate, 'validation'), 0) }} · 留出 {{ formatNumber(tradeCount(entry.active_candidate, 'holdout'), 0) }} 笔</small><small v-if="entry.active_source === 'manual'">手工覆盖 · {{ objectiveLabel(objective) }}</small></td>
-          <td class="pool-actions"><a class="text-button" :href="detailHref(entry)" :data-testid="`${testid}-detail-${entry.code}`">详情</a><button :data-testid="`${testid}-rerun-entry-${entry.code}`" class="text-button" :disabled="rerunEntryDisabled(jobContext)" :title="rerunEntryTitle(entry, jobContext)" @click="emit('rerun', entry)">{{ queuedSymbol === symbol(entry) ? '排队中' : '重跑' }}</button><StrategyPoolFollowButton :target="entry" :follow-keys="followKeys" :busy="followBusy" :test-id="`${testid}-follow-entry-${entry.code}`" @toggle="emit('toggleFollow', $event)" /></td>
+          <td class="pool-actions"><a class="text-button" :href="detailHref(entry)" :data-testid="`${testid}-detail-${entry.code}`">详情</a><button :data-testid="`${testid}-rerun-entry-${entry.code}`" class="text-button" :disabled="rerunEntryDisabled(jobContext)" :title="rerunEntryTitle(entry, jobContext)" @click="emit('rerun', entry)">{{ queuedSymbol === symbol(entry) ? '排队中' : '重跑' }}</button><StrategyPoolFollowButton :target="entry" :follow-keys="followKeys" :busy="followBusy" :test-id="`${testid}-follow-entry-${entry.code}`" @toggle="emit('toggleFollow', $event)" /><button v-if="focusList" :data-testid="`${testid}-remove-focus-${entry.code}`" class="text-button" :disabled="followBusy" :title="`从所有分组移除 ${entry.market} ${entry.code}，其他分组也不保留`" @click="emit('removeFocus', entry)">移除关注</button></td>
         </tr>
         <tr v-if="!entries.length"><td colspan="16" class="empty-copy" :data-testid="`${testid}-entry-empty`">{{ emptyText }}</td></tr>
       </tbody>

@@ -61,6 +61,14 @@ export function useStrategyPoolFocus(options: StrategyPoolFocusOptions) {
     selectedGroupIds.value = groups.value.filter((group) => group.items.some((item) => symbol(item) === symbol(target))).map((group) => group.id)
   }
 
+  /** 一键移除关注：等价于在分组对话框里把全部分组都取消勾选后保存。 */
+  async function removeFocus(target: StrategyPoolFollowTarget): Promise<void> {
+    if (focusPending.value) return
+    // 只提交标的身份：表格行带整套候选与指标，后端请求模型是 extra="forbid"。
+    const item = { market: target.market, code: target.code, name: target.name ?? '' }
+    await change(() => setFocusMembership(item, []))
+  }
+
   async function change(action: () => Promise<StrategyPoolFocusGroup[]>): Promise<boolean> {
     if (focusPending.value) return false
     focusPending.value = true
@@ -126,6 +134,6 @@ export function useStrategyPoolFocus(options: StrategyPoolFocusOptions) {
     }
   }
   return { groups, activeGroupId, focusItems, focusPending, focusLoadError, followKeys, groupTagsOf, focusRows,
-    focusMissingCount, selectedTarget, selectedGroupIds, toggleFollow, saveMembership, addGroup, renameGroup,
-    removeGroup, pruneMissingFocus, loadFocus }
+    focusMissingCount, selectedTarget, selectedGroupIds, toggleFollow, removeFocus, saveMembership, addGroup,
+    renameGroup, removeGroup, pruneMissingFocus, loadFocus }
 }

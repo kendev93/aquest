@@ -187,6 +187,18 @@ describe('StrategyPoolEntryTable', () => {
     expect(wrapper.emitted('sort')?.[0]).toEqual(['benchmark_return'])
   })
 
+  it('only offers the one-click unfollow inside the focus list', async () => {
+    const pool = mountTable()
+    expect(pool.find('[data-testid="pool-remove-focus-600000"]').exists()).toBe(false)
+
+    const focus = mountTable({ testid: 'focus', focusList: true, followKeys: new Set(['SH600000']) })
+    const remove = focus.get('[data-testid="focus-remove-focus-600000"]')
+    expect(remove.text()).toBe('移除关注')
+    expect(remove.attributes('title')).toContain('所有分组')
+    await remove.trigger('click')
+    expect(focus.emitted('removeFocus')?.[0]?.[0]).toMatchObject({ code: '600000' })
+  })
+
   it('disables rerun while a task owns the worker and keeps the queue label', () => {
     const wrapper = mountTable({
       busy: true,
