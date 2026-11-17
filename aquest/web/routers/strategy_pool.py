@@ -824,6 +824,48 @@ def _range_start(kind: PoolCurveRange, end_day: date, baseline: str) -> str:
     return start.isoformat()
 
 
+#: 出场原因：规则卖出、三条风控线、以及「持有到期」的强平。
+_EXIT_REASON_LABELS = {
+    "rule": "规则卖出",
+    "stop_loss": "止损",
+    "take_profit": "止盈",
+    "trailing_stop": "移动止盈",
+    "max_hold": "持有到期",
+}
+_EXIT_REASON_ORDER = ("rule", "stop_loss", "take_profit", "trailing_stop", "max_hold")
+
+
+def _exit_reasons(trades: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    """按出场原因汇总窗口内的卖出成交：笔数与累计盈亏（净额，已扣成本）。"""
+
+    buckets: dict[str, dict[str, float | int]] = {}
+    for trade in trades:
+        if str(trade.get("direction")) != "SELL" or trade.get("rejected"):
+            continue
+        trigger = str(trade.get("risk_trigger") or "")
+        if trigger in {"stop_loss", "take_profit", "trailing_stop"}:
+            key = trigger
+        elif str(trade.get("reason") or "") == "持有到期":
+            key = "max_hold"
+        else:
+            key = "rule"
+        bucket = buckets.setdefault(key, {"trades": 0, "pnl": 0.0})
+        bucket["trades"] = int(bucket["trades"]) + 1
+        pnl = trade.get("pnl")
+        if isinstance(pnl, (int, float)) and not isinstance(pnl, bool):
+            bucket["pnl"] = float(bucket["pnl"]) + float(pnl)
+    return [
+        {
+            "key": key,
+            "label": _EXIT_REASON_LABELS[key],
+            "trades": int(buckets[key]["trades"]),
+            "pnl": float(buckets[key]["pnl"]),
+        }
+        for key in _EXIT_REASON_ORDER
+        if key in buckets
+    ]
+
+
 def _window_stats(points: Sequence[Mapping[str, object]]) -> tuple[float | None, float | None]:
     """窗口收益与最大回撤：都用账户总净值，和曲线同源。"""
 
@@ -935,6 +977,7 @@ def pool_curve(
             "version": version,
             "summary": summary,
             "ranges": window_ranges,
+            "exits": _exit_reasons(trades),
             "backtest": {
                 **report,
                 "equity_curve": sampled,

@@ -2114,6 +2114,8 @@ def test_pool_curve_reports_benchmark_and_excess_over_the_viewed_window(tmp_path
     # 曲线快捷区间一次给全：六个入口都要有收益与回撤，供页面右侧那张表直接展示。
     summary_rows = payload["ranges"]
     assert [row["key"] for row in summary_rows] == ["1y", "ytd", "2y", "3y", "all", "created"]
+    # 出场原因分布同样随窗口返回；这只样本没有卖出成交时给空表而不是缺键。
+    assert isinstance(payload["exits"], list)
     for row in summary_rows:
         assert row["label"]
         assert row["total_return"] is None or isinstance(row["total_return"], float)

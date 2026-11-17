@@ -4,7 +4,7 @@ from datetime import date
 
 import pytest
 
-from aquest.web.routers.strategy_pool import _range_start, _window_stats
+from aquest.web.routers.strategy_pool import _exit_reasons, _range_start, _window_stats
 
 
 def test_range_start_covers_calendar_windows() -> None:
@@ -38,3 +38,27 @@ def test_window_stats_uses_account_equity() -> None:
 def test_window_stats_needs_two_points() -> None:
     assert _window_stats([]) == (None, None)
     assert _window_stats([{"total": 100.0}]) == (None, None)
+
+
+def test_exit_reasons_buckets_sells_and_sums_net_pnl() -> None:
+    trades = [
+        {"direction": "BUY", "pnl": 0.0},
+        {"direction": "SELL", "reason": "跌破均线", "pnl": 120.0},
+        {"direction": "SELL", "reason": "止损", "risk_trigger": "stop_loss", "pnl": -80.0},
+        {"direction": "SELL", "reason": "止盈", "risk_trigger": "take_profit", "pnl": 50.0},
+        {"direction": "SELL", "reason": "持有到期", "pnl": -20.0},
+        # 被拒的卖单不是成交：不能计入出场分布。
+        {
+            "direction": "SELL",
+            "reason": "止损",
+            "risk_trigger": "stop_loss",
+            "pnl": -999.0,
+            "rejected": True,
+        },
+    ]
+    rows = _exit_reasons(trades)
+    assert [row["key"] for row in rows] == ["rule", "stop_loss", "take_profit", "max_hold"]
+    by_key = {row["key"]: row for row in rows}
+    assert by_key["rule"] == {"key": "rule", "label": "规则卖出", "trades": 1, "pnl": 120.0}
+    assert by_key["stop_loss"]["pnl"] == -80.0
+    assert by_key["max_hold"]["trades"] == 1

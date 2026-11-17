@@ -34,6 +34,9 @@ interface CurveRangeSummary {
 }
 // 六个区间的收益与回撤由后端一次算全：点按钮只换曲线，不重新请求这张表。
 const ranges = ref<CurveRangeSummary[]>([])
+interface CurveExitSummary { key: string; label: string; trades: number; pnl: number }
+// 出场原因分布跟着所选区间走：窗口内的卖出成交按规则/止损/止盈/移动止盈/到期分类。
+const exits = ref<CurveExitSummary[]>([])
 const metricsVisible = computed(() => range.value === 'all' || range.value === 'created')
 // 历史交易默认最近成交在前：关注的是刚发生的买卖，不是 2015 年的第一笔
 const tradeOrder = ref<'desc' | 'asc'>('desc')
@@ -69,6 +72,11 @@ async function get<T>(url: string): Promise<T> {
   return payload.data as T
 }
 function percent(value: unknown) { return typeof value === 'number' && Number.isFinite(value) ? `${(value * 100).toFixed(2)}%` : '—' }
+function signedPercent(value: unknown) { return typeof value === 'number' && Number.isFinite(value) ? `${value >= 0 ? '+' : ''}${(value * 100).toFixed(2)}%` : '—' }
+function number(value: unknown, digits = 2) { return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(digits) : '—' }
+function days(value: unknown) { return typeof value === 'number' && Number.isFinite(value) ? value.toFixed(1) : '—' }
+function money(value: unknown) { return typeof value === 'number' && Number.isFinite(value) ? value.toLocaleString('zh-CN', { maximumFractionDigits: 0 }) : '—' }
+const performance = computed(() => (backtest.value?.performance ?? {}) as Record<string, unknown>)
 function date(value: string | undefined) { return value ? new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : '—' }
 function indicator(id: string) { return indicatorDisplayName(names.value, id) }
 async function selectGoal(goal: StrategyPoolObjective) {
@@ -93,13 +101,14 @@ async function loadVersion() {
   loading.value = true
   try {
     const [curve, trades] = await Promise.all([
-      get<{ backtest: IndividualResearchFullBacktest | null; summary?: Record<string, unknown>; ranges?: CurveRangeSummary[] }>(`${endpoint}/versions/${selectedId.value}/curve?range=${range.value}`),
+      get<{ backtest: IndividualResearchFullBacktest | null; summary?: Record<string, unknown>; ranges?: CurveRangeSummary[]; exits?: CurveExitSummary[] }>(`${endpoint}/versions/${selectedId.value}/curve?range=${range.value}`),
       get<{ items: Record<string, unknown>[]; total: number }>(tradesUrl()),
     ])
     if (current !== requestId) return
     backtest.value = curve.backtest ? { ...curve.backtest, trades: trades.items } : null
     summary.value = curve.summary ?? {}; total.value = trades.total
     ranges.value = curve.ranges ?? []
+    exits.value = curve.exits ?? []
   } catch (e) { if (current === requestId) error.value = e instanceof Error ? e.message : '详情加载失败' }
   finally { if (current === requestId) loading.value = false }
 }
@@ -192,7 +201,36 @@ const scopeLabel = computed(
       </div>
       <!-- 「尚未初始化」只在真的读完且没有数据时说，以前加载途中也会闪这句 -->
       <p v-if="!loading && !backtest" class="empty-copy" data-testid="pool-detail-not-initialized">账户尚未初始化，等待后台跟踪任务完成。</p>
-      <IndividualResearchBacktestDetail v-if="backtest" :backtest="backtest" :launch-date="selected.created_at" :baseline-date="String(summary.baseline_date ?? '')" :hide-metrics="!metricsVisible" return-curve>
+      <div class="detail-metrics">
+        <div v-if="metricsVisible && backtest" class="metrics-grid" data-testid="pool-metrics">
+          <div class="metric-group"><h3>收益</h3>
+            <p><span>策略收益</span><b>{{ percent(performance.total_return) }}</b></p>
+            <p><span>持有基准</span><b>{{ signedPercent(backtest.benchmark_return) }}</b></p>
+            <p><span>超额收益</span><b>{{ signedPercent(backtest.excess_return) }}</b></p>
+            <p><span>年化</span><b>{{ percent(performance.annual_return) }}</b></p>
+            <p><span>夏普</span><b>{{ number(performance.sharpe, 3) }}</b></p>
+            <p><span>Calmar</span><b>{{ number(performance.calmar) }}</b></p>
+          </div>
+          <div class="metric-group"><h3>风险</h3>
+            <p><span>最大回撤</span><b>{{ percent(performance.max_drawdown) }}</b></p>
+            <p><span>回撤持续</span><b>{{ number(performance.max_dd_duration, 0) }} 个交易日</b></p>
+            <p><span>年化波动</span><b>{{ percent(performance.volatility) }}</b></p>
+            <p><span>Sortino</span><b>{{ number(performance.sortino) }}</b></p>
+          </div>
+          <div class="metric-group"><h3>交易</h3>
+            <p><span>成交笔数</span><b>{{ number(performance.total_trades, 0) }}</b></p>
+            <p><span>胜率</span><b>{{ percent(performance.win_rate) }}</b></p>
+            <p><span>盈亏比</span><b>{{ number(performance.payoff_ratio) }}</b></p>
+            <p><span>盈亏因子</span><b>{{ number(performance.profit_factor) }}</b></p>
+            <p><span>平均持仓</span><b>{{ days(performance.avg_holding_days) }} 天（自然日）</b></p>
+          </div>
+        </div>
+        <table v-if="exits.length" class="exit-summary" data-testid="pool-exit-summary">
+          <thead><tr><th>出场原因</th><th>笔数</th><th>累计盈亏</th></tr></thead>
+          <tbody><tr v-for="item in exits" :key="item.key" :data-testid="`pool-exit-${item.key}`"><td>{{ item.label }}</td><td>{{ item.trades }}</td><td>{{ money(item.pnl) }}</td></tr></tbody>
+        </table>
+      </div>
+      <IndividualResearchBacktestDetail v-if="backtest" :backtest="backtest" :launch-date="selected.created_at" :baseline-date="String(summary.baseline_date ?? '')" hide-metrics return-curve>
         <!-- 分页紧贴交易表：以前它在这块面板外面，看 50 笔要先在表里滚一遍、再往下找按钮 -->
         <template #trades-toolbar>
           <nav class="trades-pager" data-testid="pool-trade-pager">
@@ -227,6 +265,15 @@ const scopeLabel = computed(
 .range-summary tbody tr { cursor:pointer; }
 .range-summary tbody tr:hover { background:var(--surface-hover); }
 .range-summary tbody tr.active { background:var(--accent-soft); color:var(--accent); }
+.detail-metrics { display:flex; flex-wrap:wrap; align-items:flex-start; justify-content:space-between; gap:14px 24px; margin-bottom:14px; }
+.metrics-grid { display:grid; flex:1 1 560px; grid-template-columns:repeat(3, minmax(180px, 1fr)); gap:12px 24px; }
+.metric-group h3 { margin:0 0 6px; color:var(--subtle); font-size:11px; letter-spacing:.12em; }
+.metric-group p { display:flex; justify-content:space-between; gap:12px; margin:3px 0; color:var(--muted); font-size:11px; }
+.metric-group b { color:var(--text); font-weight:700; }
+.exit-summary { width:min(360px, 100%); border-collapse:collapse; font-size:11px; }
+.exit-summary th, .exit-summary td { padding:5px 10px; border-bottom:1px solid var(--border); text-align:right; white-space:nowrap; }
+.exit-summary th:first-child, .exit-summary td:first-child { text-align:left; color:var(--muted); }
+.exit-summary th { color:var(--subtle); font-weight:700; }
 .trades-pager { align-items:center; gap:12px; }
 .trades-pager .button-secondary { min-height:31px; padding:0 10px; font-size:11px; }
 .trades-pager span { color:var(--muted); }

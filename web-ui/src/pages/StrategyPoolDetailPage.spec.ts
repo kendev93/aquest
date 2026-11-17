@@ -66,7 +66,15 @@ it('defaults history trades to the latest settlement first and re-requests from 
         { key: 'all', label: '全部区间', start_date: '2020-01-01', end_date: '2026-09-03', total_return: 0.5, max_drawdown: -0.3 },
         { key: 'created', label: '成立以来', start_date: '2026-01-01', end_date: '2026-09-03', total_return: 0.5, max_drawdown: -0.25 },
       ],
-      backtest: { start_date: '2026-01-01', end_date: '2026-09-03', bars: 3, performance: { total_return: 0.5 },
+      exits: [
+        { key: 'rule', label: '规则卖出', trades: 2, pnl: 1200 },
+        { key: 'max_hold', label: '持有到期', trades: 1, pnl: -300 },
+      ],
+      backtest: { start_date: '2026-01-01', end_date: '2026-09-03', bars: 3,
+        benchmark_return: 0.3, excess_return: 0.2,
+        performance: { total_return: 0.5, annual_return: 0.2, sharpe: 1.4, sortino: 2.1, calmar: 0.8,
+          max_drawdown: -0.25, max_dd_duration: 33, volatility: 0.18, win_rate: 0.6, payoff_ratio: 1.5,
+          profit_factor: 2.2, avg_holding_days: 17.5, total_trades: 24 },
         equity_curve: [{ date: '2026-01-01', total: 1000, return_pct: 0 }], trades: [] } }
     else data = { items: [{ date: '2026-09-03', direction: 'SELL', price: 12, size: 100 }], total: 123 }
     return { ok: true, json: async () => ({ data }) }
@@ -83,7 +91,15 @@ it('defaults history trades to the latest settlement first and re-requests from 
     // 断言用结构而不是「夏普」「卖出」这类词——页面上本来就有「夏普最优」标签和
     // 「卖出规则」标题，用文字包含会假装验到了。
     expect(wrapper.text()).toContain('状态 已就绪')
-    expect(wrapper.findAll('.individual-full-metrics span')).toHaveLength(8)
+    const metrics = wrapper.get('[data-testid="pool-metrics"]')
+    expect(metrics.findAll('.metric-group p')).toHaveLength(15)
+    expect(metrics.text()).toContain('17.5 天（自然日）')
+    expect(metrics.text()).toContain('33 个交易日')
+    expect(metrics.text()).toContain('2.20')
+    // 出场原因分布读窗口内的卖出成交：笔数与累计盈亏（净额）。
+    const exits = wrapper.get('[data-testid="pool-exit-summary"]')
+    expect(exits.text()).toContain('规则卖出')
+    expect(exits.get('[data-testid="pool-exit-max_hold"]').text()).toContain('-300')
     expect(wrapper.find('.individual-trades .trade-sell').exists()).toBe(true)
     expect(wrapper.get('[data-testid="pool-trade-pager"]').text()).toContain('第 1 / 3 页 · 显示 1–50 笔 / 共 123 笔')
     expect(wrapper.get('[data-testid="pool-trade-prev"]').attributes('disabled')).toBeDefined()
@@ -122,11 +138,13 @@ it('defaults history trades to the latest settlement first and re-requests from 
     await flushPromises()
     expect(curveCalls().at(-1)).toContain('range=1y')
     expect(tradeCalls().at(-1)).toContain('range=1y&order=asc&offset=0')
-    expect(wrapper.find('.individual-full-metrics').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="pool-metrics"]').exists()).toBe(false)
+    // 出场原因分布是窗口口径，子区间照样展示。
+    expect(wrapper.find('[data-testid="pool-exit-summary"]').exists()).toBe(true)
 
     await wrapper.get('[data-testid="pool-range-btn-all"]').trigger('click')
     await flushPromises()
-    expect(wrapper.findAll('.individual-full-metrics span')).toHaveLength(8)
+    expect(wrapper.find('[data-testid="pool-metrics"]').exists()).toBe(true)
   } finally { wrapper.unmount() }
 })
 
