@@ -289,13 +289,14 @@ const scopeLabel = computed(
 .range-summary tbody tr { cursor:pointer; }
 .range-summary tbody tr:hover { background:var(--surface-hover); }
 .range-summary tbody tr.active { background:var(--accent-soft); color:var(--accent); }
-.detail-metrics { display:flex; flex-wrap:wrap; align-items:flex-start; justify-content:space-between; gap:14px 24px; margin-bottom:14px; }
-.metrics-grid { display:grid; flex:1 1 560px; grid-template-columns:repeat(3, minmax(180px, 1fr)); gap:12px 24px; }
+.detail-metrics { display:grid; grid-template-columns:minmax(0, 720px) minmax(260px, 420px); justify-content:start; align-items:start; gap:16px 32px; margin-bottom:14px; }
+.metrics-grid { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:12px 20px; min-width:0; }
+.metric-group { min-width:0; }
 .metric-group h3 { margin:0 0 6px; color:var(--subtle); font-size:11px; letter-spacing:.12em; }
 .metric-group p { display:flex; justify-content:space-between; gap:12px; margin:3px 0; color:var(--muted); font-size:11px; }
 .metric-group b { color:var(--text); font-weight:700; }
-.side-tables { display:grid; gap:12px; width:min(360px, 100%); }
-.exit-summary, .yearly-summary { width:100%; border-collapse:collapse; font-size:11px; }
+.side-tables { display:grid; gap:12px; width:100%; max-width:420px; min-width:0; }
+.exit-summary, .yearly-summary { width:100%; max-width:100%; border-collapse:collapse; font-size:11px; }
 .yearly-summary { margin-bottom:14px; }
 .yearly-summary th, .yearly-summary td { padding:5px 10px; border-bottom:1px solid var(--border); text-align:right; white-space:nowrap; }
 .yearly-summary th:first-child, .yearly-summary td:first-child { text-align:left; color:var(--muted); }
@@ -314,5 +315,10 @@ const scopeLabel = computed(
 /* 组件里 340px 的窗口是给不分页的个股研究用的；详情页每页只有 50 笔且有分页，
    再压高度就是让用户在表格里二次滚动 */
 .pool-detail :deep(.individual-trades) { max-height:620px; }
+@media (max-width:1080px) {
+  .detail-metrics { grid-template-columns:minmax(0, 1fr); }
+  .side-tables { max-width:none; }
+}
 @media (max-width:800px) { .rules { grid-template-columns:1fr; } }
+@media (max-width:720px) { .metrics-grid { grid-template-columns:minmax(0, 1fr); } }
 </style>
