@@ -1365,7 +1365,9 @@ class MarketStrategyPoolService:
                 if snapshot is not None
                 else self._pool_entries_index()
             )
-            bottom_symbols = _bottom_ranked_symbols(entries_index, BOTTOM_RECHECK_PERCENT)
+            bottom_symbols = _bottom_ranked_symbols(
+                entries_index, post_launch_summaries, BOTTOM_RECHECK_PERCENT
+            )
             refs, reused_count, deferred = self._filter_reusable(
                 refs,
                 prior_entries,
@@ -2161,14 +2163,15 @@ class MarketStrategyPoolService:
                 "data_end": calendar[-1].isoformat() if calendar else None,
             }
         entries = self._pool_entries_index()
+        summaries = PoolTrackingStore(self._store).automatic_summaries()
         pending, reused, deferred = self._filter_reusable(
             refs,
             self._prior_entries(),
             config_fingerprint,
-            post_launch_summaries=PoolTrackingStore(self._store).automatic_summaries(),
+            post_launch_summaries=summaries,
             entries=entries,
             data_end=calendar[-1] if calendar else None,
-            bottom_symbols=_bottom_ranked_symbols(entries, BOTTOM_RECHECK_PERCENT),
+            bottom_symbols=_bottom_ranked_symbols(entries, summaries, BOTTOM_RECHECK_PERCENT),
         )
         return {
             "universe_symbols": len(refs),
@@ -2802,10 +2805,14 @@ def _resolve_automatic_candidate(
 
 def _bottom_ranked_symbols(
     entries: Mapping[tuple[str, str], Mapping[str, object]],
+    summaries: Mapping[tuple[str, str, str], Mapping[str, object]] | None,
     percent: int,
 ) -> set[tuple[str, str]]:
     """每个目标内按四项名次平均排序，取后 ``percent``% 的并集。
 
+    指标优先用跟踪摘要里每天刷新的「截至最新收盘」全区间口径（与弱策略判定和页面
+    列同源）；没有摘要、或摘要没覆盖到研究日时回退研究时冻结的候选指标。这样
+    「横向垫底」看到的是当前表现，而不是研究那一刻的快照。
     名次口径与信号面板的综合排序一致：每项取「严格小于它的条目数 ÷ (n-1)」，
     同值并列；四项缺一不参与排名。只看自动候选（手工覆盖是用户的决定，重研
     不会替换它），两个目标各排各的，命中任一即算靠后。
@@ -2818,7 +2825,13 @@ def _bottom_ranked_symbols(
             candidate = _mapping(_mapping(entry.get("automatic_candidates")).get(objective))
             if candidate.get("replayable") is False or candidate.get("candidate_ref"):
                 continue
-            full = _mapping(_mapping(candidate.get("metrics")).get("full_period"))
+            quality_metrics, _benchmark = fresh_quality_inputs(
+                (summaries or {}).get((key[0], key[1], objective), {}),
+                candidate,
+                fallback_benchmark=benchmark_full_return(_mapping(entry.get("benchmark"))),
+                research_end=research_end_from_entry(entry),
+            )
+            full = _mapping(_mapping(quality_metrics).get("full_period"))
             metrics: list[float] = []
             for metric in COMPOSITE_METRICS:
                 value = _finite_metric(full.get(metric))
