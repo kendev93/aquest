@@ -268,7 +268,7 @@ const scopeLabel = computed(
   </main>
 </template>
 <style scoped>
-.pool-detail { display:grid; gap:18px; padding:24px; max-width:1400px; margin:auto; color:var(--text); }
+.pool-detail { display:grid; grid-template-columns:minmax(0, 1fr); gap:18px; padding:24px; max-width:1400px; margin:auto; color:var(--text); }
 /* 这页以前挂着 panel-card 却没定义它，两个面板其实就是裸内容堆在背景上 */
 .panel-card { padding:22px; border:1px solid #25364f; background:rgba(12,20,36,.78); }
 .detail-head { display:grid; gap:8px; }
@@ -295,15 +295,18 @@ const scopeLabel = computed(
 .metric-group { min-width:0; }
 /* 区间表、出场原因、行为指标统一排在指标组下面；宽屏并排，窄屏自动堆叠。 */
 .metric-tables { display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); align-items:start; gap:16px 24px; }
+/* 表格用固定布局随列宽收缩：nowrap 的单元格不会再把整块顶出面板。 */
+.metric-tables > * { min-width:0; }
+.range-summary, .exit-summary, .yearly-summary { table-layout:fixed; }
 .metric-group h3 { margin:0 0 6px; color:var(--subtle); font-size:11px; letter-spacing:.12em; }
 .metric-group p { display:flex; justify-content:space-between; gap:12px; margin:3px 0; color:var(--muted); font-size:11px; }
 .metric-group b { color:var(--text); font-weight:700; }
 .exit-summary, .yearly-summary { width:100%; max-width:100%; border-collapse:collapse; font-size:11px; }
-.yearly-summary { margin-bottom:14px; }
+.yearly-summary { margin-bottom:14px; min-width:0; }
 .yearly-summary th, .yearly-summary td { padding:5px 10px; border-bottom:1px solid var(--border); text-align:right; white-space:nowrap; }
 .yearly-summary th:first-child, .yearly-summary td:first-child { text-align:left; color:var(--muted); }
 .yearly-summary th { color:var(--subtle); font-weight:700; }
-.yearly-summary td:last-child, .yearly-summary th:last-child { text-align:left; color:var(--subtle); }
+.yearly-summary td:last-child, .yearly-summary th:last-child { text-align:left; color:var(--subtle); white-space:normal; }
 .behavior-stats { display:grid; gap:4px; margin:0; }
 .behavior-stats div { display:flex; justify-content:space-between; gap:12px; color:var(--muted); font-size:11px; }
 .behavior-stats dt { font-weight:400; }

@@ -1821,7 +1821,10 @@ onUnmounted(() => {
 
 <style scoped>
 .strategy-pool-page { min-height: 100vh; }
-.strategy-pool-page .content-shell { display: grid; gap: 20px; }
+/* 单列网格必须显式给可收缩的轨道：auto 轨道会被内部宽表（min-width 1140 以上）
+   撑到 min-content，整页跟着横向滚动。minmax(0,1fr) 让轨道始终等于容器宽度，
+   宽表交给各自的 .table-scroll 内部滚动。 */
+.strategy-pool-page .content-shell { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
 .panel-card { border: 1px solid #25364f; background: rgba(12, 20, 36, .78); padding: 22px; }
 .pool-choice { max-width: 900px; margin: 24px auto; text-align: center; }
 .pool-choice h2, .toolbar-heading h2, .section-heading h2 { margin: 6px 0 10px; }

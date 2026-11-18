@@ -160,7 +160,9 @@ function closedTrades(): number {
 </template>
 
 <style scoped>
-.individual-full-detail { display: grid; gap: 10px; padding: 10px; }
+/* 单列轨道必须可收缩：交易表 min-width 800，auto 轨道会把整块（含插槽里的详情分析）
+   撑出页面，出现整页横向滚动。表格自己的 .table-wrap 里滚动。 */
+.individual-full-detail { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 10px; }
 .individual-full-detail > p { margin: 0; color: var(--muted); }
 .individual-full-detail svg { width: min(100%, 800px); height: auto; min-height: 180px; border: 1px solid var(--border); background: var(--surface); }
 .individual-full-metrics { display: flex; flex-wrap: wrap; gap: 8px 16px; color: var(--muted); }
