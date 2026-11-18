@@ -200,59 +200,61 @@ const scopeLabel = computed(
       <div class="section-heading"><div><p class="eyebrow">CURVE &amp; TRADES</p><h2>收益曲线与历史交易</h2></div><span data-testid="pool-curve-state">{{ loading ? '读取中…' : `${scopeLabel} · 成交明细每页 ${TRADE_PAGE_SIZE} 笔` }}</span></div>
       <div class="curve-range">
         <div class="segmented-tabs" role="group" aria-label="收益曲线区间"><button v-for="option in RANGE_OPTIONS" :key="option.key" :aria-pressed="range === option.key" :data-testid="`pool-range-btn-${option.key}`" @click="selectRange(option.key)">{{ option.label }}</button></div>
-        <table v-if="ranges.length" class="range-summary" data-testid="pool-range-summary">
-          <thead><tr><th>区间</th><th>收益率</th><th>最大回撤</th></tr></thead>
-          <tbody>
-            <tr v-for="item in ranges" :key="item.key" :class="{ active: item.key === range }" :data-testid="`pool-range-${item.key}`" @click="selectRange(item.key as PoolCurveRange)">
-              <td>{{ item.label }}</td><td>{{ percent(item.total_return) }}</td><td>{{ percent(item.max_drawdown) }}</td>
-            </tr>
-          </tbody>
-        </table>
       </div>
       <!-- 「尚未初始化」只在真的读完且没有数据时说，以前加载途中也会闪这句 -->
       <p v-if="!loading && !backtest" class="empty-copy" data-testid="pool-detail-not-initialized">账户尚未初始化，等待后台跟踪任务完成。</p>
-      <div class="detail-metrics">
-        <div v-if="metricsVisible && backtest" class="metrics-grid" data-testid="pool-metrics">
-          <div class="metric-group"><h3>收益</h3>
-            <p><span>策略收益</span><b>{{ percent(performance.total_return) }}</b></p>
-            <p><span>持有基准</span><b>{{ signedPercent(backtest.benchmark_return) }}</b></p>
-            <p><span>超额收益</span><b>{{ signedPercent(backtest.excess_return) }}</b></p>
-            <p><span>年化</span><b>{{ percent(performance.annual_return) }}</b></p>
-            <p><span>夏普</span><b>{{ number(performance.sharpe, 3) }}</b></p>
-            <p><span>Calmar</span><b>{{ number(performance.calmar) }}</b></p>
-          </div>
-          <div class="metric-group"><h3>风险</h3>
-            <p><span>最大回撤</span><b>{{ percent(performance.max_drawdown) }}</b></p>
-            <p><span>回撤持续</span><b>{{ number(performance.max_dd_duration, 0) }} 个交易日</b></p>
-            <p><span>年化波动</span><b>{{ percent(performance.volatility) }}</b></p>
-            <p><span>Sortino</span><b>{{ number(performance.sortino) }}</b></p>
-          </div>
-          <div class="metric-group"><h3>交易</h3>
-            <p><span>成交笔数</span><b>{{ number(performance.total_trades, 0) }}</b></p>
-            <p><span>胜率</span><b>{{ percent(performance.win_rate) }}</b></p>
-            <p><span>盈亏比</span><b>{{ number(performance.payoff_ratio) }}</b></p>
-            <p><span>盈亏因子</span><b>{{ number(performance.profit_factor) }}</b></p>
-            <p><span>平均持仓</span><b>{{ days(performance.avg_holding_days) }} 天（自然日）</b></p>
-          </div>
-        </div>
-        <div class="side-tables">
-          <table v-if="exits.length" class="exit-summary" data-testid="pool-exit-summary">
-            <thead><tr><th>出场原因</th><th>笔数</th><th>累计盈亏</th></tr></thead>
-            <tbody><tr v-for="item in exits" :key="item.key" :data-testid="`pool-exit-${item.key}`"><td>{{ item.label }}</td><td>{{ item.trades }}</td><td>{{ money(item.pnl) }}</td></tr></tbody>
-          </table>
-          <dl v-if="analysis" class="behavior-stats" data-testid="pool-behavior-stats">
-            <div><dt>在场时间</dt><dd>{{ percent(analysis.exposure) }}</dd></div>
-            <div><dt>最长连亏 / 连盈</dt><dd>{{ analysis.max_consecutive_losses }} / {{ analysis.max_consecutive_wins }} 笔</dd></div>
-            <div><dt>前 3 笔盈利占比</dt><dd>{{ percent(analysis.top3_profit_share) }}</dd></div>
-            <div><dt>交易成本占比</dt><dd>{{ percent(analysis.cost_share) }}</dd></div>
-          </dl>
-        </div>
-      </div>
-      <table v-if="analysis?.yearly.length" class="yearly-summary" data-testid="pool-yearly-summary">
-        <thead><tr><th>年份</th><th>收益</th><th>年内最大回撤</th><th>区间</th></tr></thead>
-        <tbody><tr v-for="row in analysis.yearly" :key="row.year"><td>{{ row.year }}</td><td>{{ percent(row.total_return) }}</td><td>{{ percent(row.max_drawdown) }}</td><td>{{ row.start_date }} → {{ row.end_date }}</td></tr></tbody>
-      </table>
       <IndividualResearchBacktestDetail v-if="backtest" :backtest="backtest" :launch-date="selected.created_at" :baseline-date="String(summary.baseline_date ?? '')" hide-metrics return-curve>
+        <template #after-chart>
+        <div class="detail-metrics">
+          <div v-if="metricsVisible && backtest" class="metrics-grid" data-testid="pool-metrics">
+            <div class="metric-group"><h3>收益</h3>
+              <p><span>策略收益</span><b>{{ percent(performance.total_return) }}</b></p>
+              <p><span>持有基准</span><b>{{ signedPercent(backtest.benchmark_return) }}</b></p>
+              <p><span>超额收益</span><b>{{ signedPercent(backtest.excess_return) }}</b></p>
+              <p><span>年化</span><b>{{ percent(performance.annual_return) }}</b></p>
+              <p><span>夏普</span><b>{{ number(performance.sharpe, 3) }}</b></p>
+              <p><span>Calmar</span><b>{{ number(performance.calmar) }}</b></p>
+            </div>
+            <div class="metric-group"><h3>风险</h3>
+              <p><span>最大回撤</span><b>{{ percent(performance.max_drawdown) }}</b></p>
+              <p><span>回撤持续</span><b>{{ number(performance.max_dd_duration, 0) }} 个交易日</b></p>
+              <p><span>年化波动</span><b>{{ percent(performance.volatility) }}</b></p>
+              <p><span>Sortino</span><b>{{ number(performance.sortino) }}</b></p>
+            </div>
+            <div class="metric-group"><h3>交易</h3>
+              <p><span>成交笔数</span><b>{{ number(performance.total_trades, 0) }}</b></p>
+              <p><span>胜率</span><b>{{ percent(performance.win_rate) }}</b></p>
+              <p><span>盈亏比</span><b>{{ number(performance.payoff_ratio) }}</b></p>
+              <p><span>盈亏因子</span><b>{{ number(performance.profit_factor) }}</b></p>
+              <p><span>平均持仓</span><b>{{ days(performance.avg_holding_days) }} 天（自然日）</b></p>
+            </div>
+          </div>
+          <div class="side-tables">
+            <table v-if="ranges.length" class="range-summary" data-testid="pool-range-summary">
+              <thead><tr><th>区间</th><th>收益率</th><th>最大回撤</th></tr></thead>
+              <tbody>
+                <tr v-for="item in ranges" :key="item.key" :class="{ active: item.key === range }" :data-testid="`pool-range-${item.key}`" @click="selectRange(item.key as PoolCurveRange)">
+                  <td>{{ item.label }}</td><td>{{ percent(item.total_return) }}</td><td>{{ percent(item.max_drawdown) }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <table v-if="exits.length" class="exit-summary" data-testid="pool-exit-summary">
+              <thead><tr><th>出场原因</th><th>笔数</th><th>累计盈亏</th></tr></thead>
+              <tbody><tr v-for="item in exits" :key="item.key" :data-testid="`pool-exit-${item.key}`"><td>{{ item.label }}</td><td>{{ item.trades }}</td><td>{{ money(item.pnl) }}</td></tr></tbody>
+            </table>
+            <dl v-if="analysis" class="behavior-stats" data-testid="pool-behavior-stats">
+              <div><dt>在场时间</dt><dd>{{ percent(analysis.exposure) }}</dd></div>
+              <div><dt>最长连亏 / 连盈</dt><dd>{{ analysis.max_consecutive_losses }} / {{ analysis.max_consecutive_wins }} 笔</dd></div>
+              <div><dt>前 3 笔盈利占比</dt><dd>{{ percent(analysis.top3_profit_share) }}</dd></div>
+              <div><dt>交易成本占比</dt><dd>{{ percent(analysis.cost_share) }}</dd></div>
+            </dl>
+          </div>
+        </div>
+        <table v-if="analysis?.yearly.length" class="yearly-summary" data-testid="pool-yearly-summary">
+          <thead><tr><th>年份</th><th>收益</th><th>年内最大回撤</th><th>区间</th></tr></thead>
+          <tbody><tr v-for="row in analysis.yearly" :key="row.year"><td>{{ row.year }}</td><td>{{ percent(row.total_return) }}</td><td>{{ percent(row.max_drawdown) }}</td><td>{{ row.start_date }} → {{ row.end_date }}</td></tr></tbody>
+        </table>
+        </template>
         <!-- 分页紧贴交易表：以前它在这块面板外面，看 50 笔要先在表里滚一遍、再往下找按钮 -->
         <template #trades-toolbar>
           <nav class="trades-pager" data-testid="pool-trade-pager">
@@ -279,8 +281,8 @@ const scopeLabel = computed(
 .rules { display:grid; grid-template-columns:repeat(3,1fr); gap:24px; }
 .rules p { white-space:pre-wrap; }
 .detail-back { display:inline-flex; align-items:center; justify-self:start; font-size:11px; }
-.curve-range { display:flex; flex-wrap:wrap; align-items:flex-start; justify-content:space-between; gap:12px 20px; margin-bottom:14px; }
-.range-summary { width:min(420px, 100%); border-collapse:collapse; font-size:11px; }
+.curve-range { margin-bottom:12px; }
+.range-summary { width:100%; border-collapse:collapse; font-size:11px; }
 .range-summary th, .range-summary td { padding:5px 10px; border-bottom:1px solid var(--border); text-align:right; white-space:nowrap; }
 .range-summary th:first-child, .range-summary td:first-child { text-align:left; color:var(--muted); }
 .range-summary th { color:var(--subtle); font-weight:700; }

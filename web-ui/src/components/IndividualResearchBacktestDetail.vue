@@ -136,6 +136,7 @@ function closedTrades(): number {
           <circle cx="514" cy="30" r="4" fill="#f87171" stroke="var(--surface)" stroke-width="1.5" /><text x="522" y="34" fill="var(--muted)">卖出</text>
         </g>
       </svg>
+      <slot name="after-chart" />
       <template v-if="props.backtest.trades.length">
         <slot name="trades-toolbar" />
         <div class="table-wrap individual-trades">
