@@ -155,3 +155,25 @@ def test_pip_index_is_an_opt_in_build_argument() -> None:
         "两个服务共用同一镜像，构建参数必须一致，否则会重复构建"
     )
     assert "PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/" in env_example
+
+
+def test_pool_recheck_settings_reach_both_services() -> None:
+    """四个重研周期变量必须同时注入 backend 与 strategy-worker。
+
+    页面「待重算」由 backend 的预估端点算，实际重研跑在 worker；任何一边读不到变量，
+    两边就会按不同的周期各说各话（2026-11-18 之前只有 RESEARCH_ENABLED 被注入，
+    no_strategy / 弱策略两个周期写在 .env.example 里却从没进过容器）。
+    """
+
+    compose = (PROJECT_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    for name in (
+        "AQUEST_POOL_NO_STRATEGY_RECHECK_DAYS",
+        "AQUEST_POOL_WEAK_RECHECK_DAYS",
+        "AQUEST_POOL_BOTTOM_RECHECK_PERCENT",
+        "AQUEST_POOL_BOTTOM_RECHECK_DAYS",
+    ):
+        # 每个服务各一行；每行里变量名还会在 ${...:-默认值} 里再出现一次。
+        assert compose.count(f"      {name}:") == 2, name
+    env_example = (PROJECT_ROOT / ".env.example").read_text(encoding="utf-8")
+    assert "AQUEST_POOL_BOTTOM_RECHECK_PERCENT=10" in env_example
+    assert "AQUEST_POOL_BOTTOM_RECHECK_DAYS=7" in env_example

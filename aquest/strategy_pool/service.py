@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import time
+from bisect import bisect_left
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import nullcontext
@@ -153,6 +154,17 @@ def _entry_research_start(entry: Mapping[str, object] | None) -> date | None:
 #: 调成 1 天约 1800 只、17 小时/天，会长期占满机器。到期重查一次，仍不足则刷新
 #: 时间戳再等一个周期。
 NO_STRATEGY_RECHECK_DAYS = env_positive_int("AQUEST_POOL_NO_STRATEGY_RECHECK_DAYS", 7)
+
+#: 综合排行靠后的策略也定期重研：按每个目标内四项名次平均排名，取各自后
+#: ``BOTTOM_RECHECK_PERCENT``% 的并集（2026-11-18 用户决策）。绝对门槛（弱策略/
+#: 上线后衰减）只能抓「水平差」，抓不到「横向垫底但绝对数还过得去」的那批。
+BOTTOM_RECHECK_PERCENT = min(100, env_positive_int("AQUEST_POOL_BOTTOM_RECHECK_PERCENT", 10))
+#: 综合排行靠后的重研节奏（自然日，从上次研究完成时间起算）。
+BOTTOM_RECHECK_DAYS = env_positive_int("AQUEST_POOL_BOTTOM_RECHECK_DAYS", 7)
+#: 参与排名的条目少于该数时不取后分位：几十只里的后 10% 只是一两只的噪声。
+MIN_BOTTOM_RANK_ENTRIES = 20
+#: 综合排行的四项，与信号面板「综合（年化·夏普·胜率·盈亏比 名次平均）」同一套。
+COMPOSITE_METRICS = ("annual_return", "sharpe", "win_rate", "payoff_ratio")
 
 #: 「历史样本不足」中算不出确切日期的那一类（上市跨度已经够两年、但自己的 K 线
 #: 仍凑不满 512 根——长期停牌或数据有洞）的重查节奏（自然日）。它跟 no_strategy
@@ -690,6 +702,7 @@ class MarketStrategyPoolService:
         post_launch_summaries: (Mapping[tuple[str, str, str], Mapping[str, object]] | None) = None,
         entries: Mapping[tuple[str, str], Mapping[str, object]] | None = None,
         data_end: date | None = None,
+        bottom_symbols: set[tuple[str, str]] | None = None,
     ) -> tuple[list[StockRef], int, list[date]]:
         """把本次增量无需触碰的标的预先剔除，让任务总数只反映真实工作量。
 
@@ -744,7 +757,14 @@ class MarketStrategyPoolService:
                     objective: post_launch.get((ref.market, ref.code, objective), {})
                     for objective in ("annual_return", "sharpe")
                 }
-                if self._research_recheck_due(entry, prior, stock_post_launch, now=now):
+                if self._research_recheck_due(
+                    entry,
+                    prior,
+                    stock_post_launch,
+                    now=now,
+                    symbol=(ref.market, ref.code),
+                    bottom_symbols=bottom_symbols,
+                ):
                     pending.append(ref)
                     continue
             reused += 1
@@ -762,6 +782,7 @@ class MarketStrategyPoolService:
         prior_entries: Mapping[tuple[str, str], tuple[str, str, str, bool, datetime | None]],
         post_launch_summaries: (Mapping[tuple[str, str, str], Mapping[str, object]] | None) = None,
         previous_entries: (Mapping[tuple[str, str], Mapping[str, object]] | None) = None,
+        bottom_symbols: set[tuple[str, str]] | None = None,
         job_id: str,
         total_work: int,
         reused_symbols: int = 0,
@@ -830,7 +851,11 @@ class MarketStrategyPoolService:
                     }
                     can_reuse = self._can_reuse(prior, config_fingerprint)
                     recheck_due = can_reuse and self._research_recheck_due(
-                        reused_entry, prior, stock_post_launch
+                        reused_entry,
+                        prior,
+                        stock_post_launch,
+                        symbol=(ref.market, ref.code),
+                        bottom_symbols=bottom_symbols,
                     )
                     if can_reuse and not recheck_due:
                         metrics_backfilled = False
@@ -1340,6 +1365,7 @@ class MarketStrategyPoolService:
                 if snapshot is not None
                 else self._pool_entries_index()
             )
+            bottom_symbols = _bottom_ranked_symbols(entries_index, BOTTOM_RECHECK_PERCENT)
             refs, reused_count, deferred = self._filter_reusable(
                 refs,
                 prior_entries,
@@ -1347,6 +1373,7 @@ class MarketStrategyPoolService:
                 post_launch_summaries=post_launch_summaries,
                 entries=entries_index,
                 data_end=calendar[-1] if calendar else None,
+                bottom_symbols=bottom_symbols,
             )
             # 一天只跑有限时长时，按代码顺序会反复从头部开始：短期重查周期下头部标的
             # 天天到期、尾部迟迟轮不到。按上次研究时间升序排队，欠账最久的先补齐。
@@ -1363,6 +1390,7 @@ class MarketStrategyPoolService:
                 prior_entries=prior_entries,
                 post_launch_summaries=post_launch_summaries,
                 previous_entries=entries_index,
+                bottom_symbols=bottom_symbols,
                 job_id=job_id,
                 total_work=total_work,
                 reused_symbols=reused_count,
@@ -2132,13 +2160,15 @@ class MarketStrategyPoolService:
                 "exclude_st": exclude_st,
                 "data_end": calendar[-1].isoformat() if calendar else None,
             }
+        entries = self._pool_entries_index()
         pending, reused, deferred = self._filter_reusable(
             refs,
             self._prior_entries(),
             config_fingerprint,
             post_launch_summaries=PoolTrackingStore(self._store).automatic_summaries(),
-            entries=self._pool_entries_index(),
+            entries=entries,
             data_end=calendar[-1] if calendar else None,
+            bottom_symbols=_bottom_ranked_symbols(entries, BOTTOM_RECHECK_PERCENT),
         )
         return {
             "universe_symbols": len(refs),
@@ -2263,6 +2293,8 @@ class MarketStrategyPoolService:
         post_launch: Mapping[str, Mapping[str, object]] | None = None,
         *,
         now: datetime | None = None,
+        symbol: tuple[str, str] | None = None,
+        bottom_symbols: set[tuple[str, str]] | None = None,
     ) -> bool:
         """ready 条目是否需要重新寻优——两种触发（2026-10-09 用户决策）。
 
@@ -2275,6 +2307,11 @@ class MarketStrategyPoolService:
           上线以来累计赚得再多，也挡不住近期失效（2026-10-30 用户决策）。
           重研后同签名候选会保留原上线日，衰减结论不会自己消失，所以这条触发
           也要满 ``DEGRADATION_RECHECK_DAYS`` 天才再排一次队。
+
+        - **综合排行靠后**：按每个目标内四项（年化·夏普·胜率·盈亏比）名次平均
+          排名，落在后 ``BOTTOM_RECHECK_PERCENT``%（两个目标取并集）的条目满
+          ``BOTTOM_RECHECK_DAYS`` 天重研一次（2026-11-18 用户决策）。绝对门槛
+          只能抓水平差，抓不到「横向垫底但绝对数还过得去」的那批。
 
         不再按策略年龄强制重研（2026-11-09 用户决策）：只要表现没有转弱、
         也没有上线后衰减，结论再旧也继续复用，避免把仍在有效的策略换掉。
@@ -2317,12 +2354,19 @@ class MarketStrategyPoolService:
         if weak:
             # 重研后的同签名候选仍会判弱；没有冷却，自动增量研究每天都会重跑它。
             return age >= WEAK_STRATEGY_RECHECK_DAYS
-        if age < DEGRADATION_RECHECK_DAYS:
-            return False
-        return any(
+        if age >= DEGRADATION_RECHECK_DAYS and any(
             post_launch_degraded(_mapping((post_launch or {}).get(objective)))
             or recent_degraded(_mapping((post_launch or {}).get(objective)))
             for objective in ("annual_return", "sharpe")
+        ):
+            return True
+        # 综合排行靠后：绝对门槛没命中，但四项名次在末段；同样按冷却周期排队，
+        # 重研后时间戳刷新，仍在末段的话下一周期再排一次。
+        return (
+            symbol is not None
+            and bottom_symbols is not None
+            and symbol in bottom_symbols
+            and age >= BOTTOM_RECHECK_DAYS
         )
 
     @staticmethod
@@ -2754,6 +2798,47 @@ def _resolve_automatic_candidate(
     if isinstance(reference, str):
         candidate = automatic.get(reference)
     return candidate if isinstance(candidate, Mapping) else None
+
+
+def _bottom_ranked_symbols(
+    entries: Mapping[tuple[str, str], Mapping[str, object]],
+    percent: int,
+) -> set[tuple[str, str]]:
+    """每个目标内按四项名次平均排序，取后 ``percent``% 的并集。
+
+    名次口径与信号面板的综合排序一致：每项取「严格小于它的条目数 ÷ (n-1)」，
+    同值并列；四项缺一不参与排名。只看自动候选（手工覆盖是用户的决定，重研
+    不会替换它），两个目标各排各的，命中任一即算靠后。
+    """
+
+    bottom: set[tuple[str, str]] = set()
+    for objective in ("annual_return", "sharpe"):
+        samples: dict[tuple[str, str], tuple[float, ...]] = {}
+        for key, entry in entries.items():
+            candidate = _mapping(_mapping(entry.get("automatic_candidates")).get(objective))
+            if candidate.get("replayable") is False or candidate.get("candidate_ref"):
+                continue
+            full = _mapping(_mapping(candidate.get("metrics")).get("full_period"))
+            metrics: list[float] = []
+            for metric in COMPOSITE_METRICS:
+                value = _finite_metric(full.get(metric))
+                if value is None:
+                    break
+                metrics.append(value)
+            else:
+                samples[key] = tuple(metrics)
+        if len(samples) < MIN_BOTTOM_RANK_ENTRIES:
+            continue
+        size = len(samples)
+        scores = {key: 0.0 for key in samples}
+        for index in range(len(COMPOSITE_METRICS)):
+            ordered = sorted(sample[index] for sample in samples.values())
+            for key, sample in samples.items():
+                scores[key] += bisect_left(ordered, sample[index]) / (size - 1)
+        ranked = sorted(scores.items(), key=lambda item: (item[1], item[0]))
+        cutoff = max(1, math.ceil(size * percent / 100))
+        bottom.update(key for key, _ in ranked[:cutoff])
+    return bottom
 
 
 def _preserve_existing_candidate(
