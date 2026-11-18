@@ -229,7 +229,7 @@ const scopeLabel = computed(
               <p><span>平均持仓</span><b>{{ days(performance.avg_holding_days) }} 天（自然日）</b></p>
             </div>
           </div>
-          <div class="side-tables">
+          <div class="metric-tables">
             <table v-if="ranges.length" class="range-summary" data-testid="pool-range-summary">
               <thead><tr><th>区间</th><th>收益率</th><th>最大回撤</th></tr></thead>
               <tbody>
@@ -284,18 +284,20 @@ const scopeLabel = computed(
 .curve-range { margin-bottom:12px; }
 .range-summary { width:100%; border-collapse:collapse; font-size:11px; }
 .range-summary th, .range-summary td { padding:5px 10px; border-bottom:1px solid var(--border); text-align:right; white-space:nowrap; }
+.range-summary th:first-child, .range-summary td:first-child { white-space:normal; }
 .range-summary th:first-child, .range-summary td:first-child { text-align:left; color:var(--muted); }
 .range-summary th { color:var(--subtle); font-weight:700; }
 .range-summary tbody tr { cursor:pointer; }
 .range-summary tbody tr:hover { background:var(--surface-hover); }
 .range-summary tbody tr.active { background:var(--accent-soft); color:var(--accent); }
-.detail-metrics { display:grid; grid-template-columns:minmax(0, 720px) minmax(260px, 420px); justify-content:start; align-items:start; gap:16px 32px; margin-bottom:14px; }
-.metrics-grid { display:grid; grid-template-columns:repeat(3, minmax(0, 1fr)); gap:12px 20px; min-width:0; }
+.detail-metrics { display:grid; gap:16px; margin-bottom:14px; }
+.metrics-grid { display:grid; grid-template-columns:repeat(3, minmax(0, 240px)); gap:12px 28px; }
 .metric-group { min-width:0; }
+/* 区间表、出场原因、行为指标统一排在指标组下面；宽屏并排，窄屏自动堆叠。 */
+.metric-tables { display:grid; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr)); align-items:start; gap:16px 24px; }
 .metric-group h3 { margin:0 0 6px; color:var(--subtle); font-size:11px; letter-spacing:.12em; }
 .metric-group p { display:flex; justify-content:space-between; gap:12px; margin:3px 0; color:var(--muted); font-size:11px; }
 .metric-group b { color:var(--text); font-weight:700; }
-.side-tables { display:grid; gap:12px; width:100%; max-width:420px; min-width:0; }
 .exit-summary, .yearly-summary { width:100%; max-width:100%; border-collapse:collapse; font-size:11px; }
 .yearly-summary { margin-bottom:14px; }
 .yearly-summary th, .yearly-summary td { padding:5px 10px; border-bottom:1px solid var(--border); text-align:right; white-space:nowrap; }
@@ -315,10 +317,6 @@ const scopeLabel = computed(
 /* 组件里 340px 的窗口是给不分页的个股研究用的；详情页每页只有 50 笔且有分页，
    再压高度就是让用户在表格里二次滚动 */
 .pool-detail :deep(.individual-trades) { max-height:620px; }
-@media (max-width:1080px) {
-  .detail-metrics { grid-template-columns:minmax(0, 1fr); }
-  .side-tables { max-width:none; }
-}
 @media (max-width:800px) { .rules { grid-template-columns:1fr; } }
 @media (max-width:720px) { .metrics-grid { grid-template-columns:minmax(0, 1fr); } }
 </style>
