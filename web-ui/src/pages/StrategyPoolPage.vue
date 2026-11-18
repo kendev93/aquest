@@ -1577,14 +1577,16 @@ onUnmounted(() => {
               <div v-for="item in visibleBuySignals" :key="item.symbol" class="signal-row">
                 <strong>{{ item.symbol }}<template v-if="item.name"> · {{ item.name }}</template><span v-for="tag in groupTagsOf(item.symbol)" :key="tag" class="focus-group-tag">{{ tag }}</span></strong>
                 <span>买入信号触发 · 下一交易日执行<template v-if="holdingReturnText(item)"> · {{ holdingReturnText(item) }}</template><template v-if="signalMetricsSummary(item)"> · {{ signalMetricsSummary(item) }}</template><template v-if="qualityText(item.symbol)"> · {{ qualityText(item.symbol) }}</template></span>
-                <StrategyPoolFollowButton
-                  :target="item"
-                  :follow-keys="followKeys"
-                  :busy="focusPending"
-                  :test-id="`pool-buy-follow-${item.code}`"
-                  @toggle="toggleFollow(item)"
-                />
-                <a class="text-button" :href="signalDetailHref(item)" :data-testid="`pool-buy-detail-${item.code}`">详情</a>
+                <div class="signal-actions">
+                  <StrategyPoolFollowButton
+                    :target="item"
+                    :follow-keys="followKeys"
+                    :busy="focusPending"
+                    :test-id="`pool-buy-follow-${item.code}`"
+                    @toggle="toggleFollow(item)"
+                  />
+                  <a class="text-button" :href="signalDetailHref(item)" :data-testid="`pool-buy-detail-${item.code}`">详情</a>
+                </div>
               </div>
             </div>
             <div v-if="buySignals.length > SIGNAL_PAGE_SIZE" class="signal-pagination" data-testid="pool-buy-pagination">
@@ -1601,26 +1603,30 @@ onUnmounted(() => {
                 <div v-if="item.kind === 'rule'" class="signal-row">
                   <strong>{{ item.signal.symbol }}<template v-if="item.signal.name"> · {{ item.signal.name }}</template><span v-for="tag in groupTagsOf(item.signal.symbol)" :key="tag" class="focus-group-tag">{{ tag }}</span></strong>
                   <span>卖出规则触发 · 下一交易日执行<template v-if="holdingReturnText(item.signal)"> · {{ holdingReturnText(item.signal) }}</template><template v-if="signalMetricsSummary(item.signal)"> · {{ signalMetricsSummary(item.signal) }}</template><template v-if="qualityText(item.signal.symbol)"> · {{ qualityText(item.signal.symbol) }}</template></span>
-                  <StrategyPoolFollowButton
-                    :target="item.signal"
-                    :follow-keys="followKeys"
-                    :busy="focusPending"
-                    :test-id="`pool-sell-rule-follow-${item.signal.code}`"
-                    @toggle="toggleFollow(item.signal)"
-                  />
-                  <a class="text-button" :href="signalDetailHref(item.signal)" :data-testid="`pool-sell-rule-detail-${item.signal.code}`">详情</a>
+                  <div class="signal-actions">
+                    <StrategyPoolFollowButton
+                      :target="item.signal"
+                      :follow-keys="followKeys"
+                      :busy="focusPending"
+                      :test-id="`pool-sell-rule-follow-${item.signal.code}`"
+                      @toggle="toggleFollow(item.signal)"
+                    />
+                    <a class="text-button" :href="signalDetailHref(item.signal)" :data-testid="`pool-sell-rule-detail-${item.signal.code}`">详情</a>
+                  </div>
                 </div>
                 <div v-else class="signal-row risk-signal">
                   <strong>{{ item.signal.market }}{{ item.signal.code }}<template v-if="item.signal.name"> · {{ item.signal.name }}</template><span v-for="tag in groupTagsOf(sellItemSymbol(item))" :key="tag" class="focus-group-tag">{{ tag }}</span></strong>
                   <span>{{ riskExitFilledText(item.signal) }}<template v-if="riskExitReturnText(item.signal)"> · {{ riskExitReturnText(item.signal) }}</template><template v-if="qualityText(sellItemSymbol(item))"> · {{ qualityText(sellItemSymbol(item)) }}</template></span>
-                  <StrategyPoolFollowButton
-                    :target="item.target"
-                    :follow-keys="followKeys"
-                    :busy="focusPending"
-                    :test-id="`pool-sell-risk-follow-${item.target.code}`"
-                    @toggle="toggleFollow(item.target)"
-                  />
-                  <a class="text-button" :href="signalDetailHref(item.target)" :data-testid="`pool-sell-risk-detail-${item.target.code}`">详情</a>
+                  <div class="signal-actions">
+                    <StrategyPoolFollowButton
+                      :target="item.target"
+                      :follow-keys="followKeys"
+                      :busy="focusPending"
+                      :test-id="`pool-sell-risk-follow-${item.target.code}`"
+                      @toggle="toggleFollow(item.target)"
+                    />
+                    <a class="text-button" :href="signalDetailHref(item.target)" :data-testid="`pool-sell-risk-detail-${item.target.code}`">详情</a>
+                  </div>
                 </div>
               </template>
             </div>
@@ -1638,14 +1644,16 @@ onUnmounted(() => {
                 <strong>{{ holding.market }}{{ holding.code }} · {{ holding.name || '—' }}<span v-for="tag in groupTagsOf(symbol(holding))" :key="tag" class="focus-group-tag">{{ tag }}</span></strong>
                 <span>{{ holdingStatus(holding) }}<template v-if="qualityText(symbol(holding))"> · {{ qualityText(symbol(holding)) }}</template></span>
                 <small v-if="holdingRiskSummary(holding)" :data-testid="`pool-holding-risk-${holding.code}`">{{ holdingRiskSummary(holding) }}</small>
-                <StrategyPoolFollowButton
-                  :target="holding"
-                  :follow-keys="followKeys"
-                  :busy="focusPending"
-                  :test-id="`pool-holding-follow-${holding.code}`"
-                  @toggle="toggleFollow(holding)"
-                />
-                <a class="text-button" :href="signalDetailHref(holding)" :data-testid="`pool-holding-detail-${holding.code}`">详情</a>
+                <div class="signal-actions">
+                  <StrategyPoolFollowButton
+                    :target="holding"
+                    :follow-keys="followKeys"
+                    :busy="focusPending"
+                    :test-id="`pool-holding-follow-${holding.code}`"
+                    @toggle="toggleFollow(holding)"
+                  />
+                  <a class="text-button" :href="signalDetailHref(holding)" :data-testid="`pool-holding-detail-${holding.code}`">详情</a>
+                </div>
               </div>
             </div>
             <div v-if="currentHoldings.length > SIGNAL_PAGE_SIZE" class="signal-pagination" data-testid="pool-holdings-pagination">
@@ -1867,6 +1875,8 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .signal-pagination .button-secondary { padding: 6px 9px; font-size: .82rem; }
 .research-estimate { color: #91a1b8; font-size: .78rem; white-space: nowrap; align-self: center; }
 .signal-row, .history-row { display: grid; gap: 5px; padding: 10px 12px; border-left: 3px solid #18c467; background: #111c30; }
+/* 关注与详情是同一行的两个动作：不拆成两行，窄屏时才允许换行。 */
+.signal-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
 /* 关注开关贴在文字下面，不占满整行宽度。 */
 .focus-groups, .focus-group-create, .focus-dialog-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .focus-groups { margin: 16px 0; }

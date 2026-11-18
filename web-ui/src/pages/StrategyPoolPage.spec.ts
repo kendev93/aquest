@@ -258,6 +258,11 @@ describe('StrategyPoolPage', () => {
       expect(href(testid)).toMatch(new RegExp(`^/strategy-pool/SH/${code}\\?objective=annual_return&list=`))
       expect(wrapper.get(`[data-testid="${testid}"]`).text()).toBe('详情')
     }
+    // 关注与详情是同一行的两个动作，不能各占一行。
+    for (const panel of ['pool-buy-signals', 'pool-current-holdings']) {
+      const actions = wrapper.get(`[data-testid="${panel}"] .signal-actions`)
+      expect(actions.findAll('button, a')).toHaveLength(2)
+    }
   })
 
   it('shows the valid strategy count next to the pool size', async () => {
