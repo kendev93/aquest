@@ -1056,7 +1056,9 @@ describe('MarketDataPage', () => {
     const wrapper = mountPage()
     await vi.advanceTimersByTimeAsync(0)
     await wrapper.get('[data-testid="market-health-check"]').trigger('click')
-    await vi.advanceTimersByTimeAsync(INTERACTIVE_JOB_TIMEOUT_MS + 1_000)
+    await vi.advanceTimersByTimeAsync(0)
+    vi.setSystemTime(Date.now() + INTERACTIVE_JOB_TIMEOUT_MS)
+    await vi.advanceTimersByTimeAsync(2_000)
 
     expect(wrapper.get('[data-testid="market-health-message"]').text()).toContain('任务仍在后台运行')
     expect(wrapper.get('[data-testid="market-health-check"]').attributes('disabled')).toBeUndefined()

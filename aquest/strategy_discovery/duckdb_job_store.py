@@ -812,7 +812,7 @@ class DuckDbStrategyJobStore:
                     job_id,
                 ],
             )
-        if final_status == "completed":
+        if final_status == "completed" and row[4] == "market_strategy_pool_tracking":
             self._prune_signal_results(job_id)
         return self.read_state(job_id) if worker_id is not None else None
 
@@ -876,7 +876,7 @@ class DuckDbStrategyJobStore:
         job_id: str,
     ) -> tuple[object, ...] | None:
         row = connection.execute(
-            "SELECT state_json, status, cancel_requested, worker_id "
+            "SELECT state_json, status, cancel_requested, worker_id, operation "
             "FROM strategy_jobs WHERE job_id = ?",
             [job_id],
         ).fetchone()

@@ -609,7 +609,9 @@ describe('FormulaScreenPage', () => {
     await wrapper.get('[data-testid="advanced-toggle"]').trigger('click')
     await wrapper.get('[data-testid="minimum-matches"]').setValue(1)
     await wrapper.get('[data-testid="screen-config"]').trigger('submit')
-    await vi.advanceTimersByTimeAsync(INTERACTIVE_JOB_TIMEOUT_MS + 1_000)
+    await vi.advanceTimersByTimeAsync(0)
+    vi.setSystemTime(Date.now() + INTERACTIVE_JOB_TIMEOUT_MS)
+    await vi.advanceTimersByTimeAsync(2_000)
 
     const notice = wrapper.get('[data-testid="screen-message"]')
     expect(notice.text()).toContain('任务仍在后台运行')
