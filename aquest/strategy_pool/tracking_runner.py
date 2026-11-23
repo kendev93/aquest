@@ -530,10 +530,25 @@ class PoolTrackingRunner:
 
             acks: list[Any] | None = None
             if batch_writer is not None:
+                started = time.monotonic()
                 try:
                     acks = batch_writer(batch)
                 except TransientWorkerApiError as exc:
-                    logger.warning("批量保存跟踪快照暂不可用，退回逐只写入: %s", exc)
+                    # 后端繁忙时串行缩小批次，避免产生大量逐只写入请求。
+                    retry_batch_size = 8
+                    logger.warning(
+                        "批量保存跟踪快照暂不可用（%d 条，等待 %.1f 秒）: %s",
+                        len(batch),
+                        time.monotonic() - started,
+                        exc,
+                    )
+                    if len(batch) > retry_batch_size:
+                        return [
+                            ack
+                            for offset in range(0, len(batch), retry_batch_size)
+                            for ack in write_batch(batch[offset : offset + retry_batch_size])
+                        ]
+                    return [{"saved": False} for _ in batch]
                 except Exception:
                     logger.exception("批量保存跟踪快照失败，退回逐只写入")
             if acks is not None:

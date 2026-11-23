@@ -11,6 +11,7 @@ from aquest.market_data.models import StockRef
 from aquest.market_data.store import DuckDbMarketDataStore
 from aquest.market_data.store_base import RESEARCH_START
 from aquest.portfolio_backtest.service import PortfolioBacktestService
+from aquest.strategy_discovery.worker_api_client import TransientWorkerApiError
 from aquest.strategy_pool.store import DuckDbStrategyPoolStore
 from aquest.strategy_pool.tracking import replay_account
 from aquest.strategy_pool.tracking_store import PoolTrackingStore, encode_snapshot, signature
@@ -558,6 +559,19 @@ def test_tracking_runner_batches_snapshots_and_falls_back_when_the_batch_fails(t
                 [(item["version_id"], item["signature"], item["snapshot_blob"], item["summary"])]
             )[0]
         }
+
+    def timed_out(_items):
+        raise TransientWorkerApiError("backend timeout")
+
+    result = PoolTrackingRunner(store, EvaluationWorkerBudget(2)).run(
+        payload(),
+        progress=lambda *args: None,
+        abort_check=lambda: False,
+        writer=write_one,
+        batch_writer=timed_out,
+    )
+    assert fallback == []
+    assert result["skipped_symbols"] == 3
 
     result = PoolTrackingRunner(store, EvaluationWorkerBudget(2)).run(
         payload(),
