@@ -259,6 +259,7 @@ export interface StrategyPoolJobSummary {
   completed_symbols?: number
   skipped_symbols?: number
   newly_researched_symbols?: number
+  finished_symbols?: number | null
   failed_symbols?: number
   total_symbols?: number
   maximum_parallelism?: number | null

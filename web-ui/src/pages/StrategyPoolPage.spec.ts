@@ -779,7 +779,8 @@ describe('StrategyPoolPage', () => {
       skipped_symbols: 859,
       newly_researched_symbols: 2_639,
       failed_symbols: 10,
-      total_symbols: 4_357,
+      total_symbols: 2_650,
+      finished_symbols: 2_650,
       maximum_parallelism: 4,
       automatic: false,
     }])
@@ -791,7 +792,8 @@ describe('StrategyPoolPage', () => {
     expect(row).toContain('全市场重选')
     expect(row).toContain('已完成 · 耗时 5 小时 12 分钟')
     // completed_symbols 把复用也算进去了，只说「3498 只完成」看不出真研究了几只。
-    expect(row).toContain('已完成 3498/4357（新研究 2639 · 复用 859）')
+    expect(row).toContain('研究队列 2650/2650 · 新研究 2639 · 复用 859')
+    expect(row).not.toContain('3498/2650')
     expect(row).toContain('失败 10')
     expect(row).toContain('并行 4')
     expect(row).toContain('手动触发')

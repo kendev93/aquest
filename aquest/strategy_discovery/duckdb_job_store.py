@@ -1007,6 +1007,7 @@ def _pool_history_summary(
         "failed_symbols": _optional_int(progress.get("failed_symbols")) or 0,
         # completed_symbols 把复用标的也算进去了，真正研究了几个要自己减。
         "newly_researched_symbols": max(0, completed - skipped),
+        "finished_symbols": _optional_int(progress.get("finished_symbols")),
         "total_symbols": _optional_int(progress.get("total_symbols")) or 0,
         "maximum_parallelism": _optional_int(progress.get("maximum_parallelism")),
         "phase_label": progress.get("phase_label"),

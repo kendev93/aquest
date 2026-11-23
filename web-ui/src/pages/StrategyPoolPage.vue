@@ -369,10 +369,14 @@ function poolJobDetailText(job: StrategyPoolJobSummary): string {
   const duration = poolJobDurationText(job)
   if (duration) parts.push(duration)
   const total = job.total_symbols ?? 0
-  if (total > 0) {
-    parts.push(
-      `已完成 ${job.completed_symbols ?? 0}/${total}（新研究 ${job.newly_researched_symbols ?? 0} · 复用 ${job.skipped_symbols ?? 0}）`,
-    )
+  if (job.mode === 'full') {
+    // 完成数包含复用，只有队列内的已处理数能与队列总数直接比较。
+    const finished = job.finished_symbols ?? (job.status === 'completed' ? total : null)
+    if (total > 0) parts.push(finished === null ? `研究队列 ${total} 只` : `研究队列 ${finished}/${total}`)
+    parts.push(`新研究 ${job.newly_researched_symbols ?? 0} · 复用 ${job.skipped_symbols ?? 0}`)
+    if (job.failed_symbols) parts.push(`失败 ${job.failed_symbols}`)
+  } else if (total > 0) {
+    parts.push(`已完成 ${job.completed_symbols ?? 0}/${total}`)
     if (job.failed_symbols) parts.push(`失败 ${job.failed_symbols}`)
   }
   if (job.maximum_parallelism) parts.push(`并行 ${job.maximum_parallelism}`)
