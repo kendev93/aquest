@@ -6,7 +6,7 @@ alembic>=1.20.1
 # 全市场标的发现通道。正式镜像需要它，所以直接并进运行时清单，由 Dockerfile 在
 # COPY 源码之前那一层装好，避免为它再跑一次需要联网的 pip。
 baostock>=0.8,<1
-annotated-doc>=0.0.6
+annotated-doc>=0.0.7
 annotated-types>=0.8.0
 anyio>=4.16.0
 click>=8.5.1
@@ -22,7 +22,7 @@ h11>=0.16.0
 idna>=3.19
 lightgbm>=4.7.0,<5
 Mako>=1.3.10
-narwhals>=2.28.0
+narwhals>=2.29.0
 # 回测内核的可选 JIT 加速（aquest.jit 无它时纯 Python 回退）。0.68 支持
 # numpy<2.6，与上面的 numpy 约束兼容，不需要降级任何现有包。
 numba>=0.68,<0.69
@@ -38,7 +38,7 @@ python-multipart>=0.0.22
 pytz>=2026.6
 scipy>=1.18.1
 six>=1.17.0
-SQLAlchemy>=2.1.8
+SQLAlchemy>=2.1.9
 starlette>=1.10.0
 tqdm>=4.67.3
 typing-extensions>=4.16.0
