@@ -568,7 +568,20 @@ class _DuckDbStoreBase:
                     ).fetchone()
                     rows = int(counted[0]) if counted is not None else 0
                     if rows:
-                        connection.execute(f"INSERT INTO {table} SELECT * FROM market_db.{table}")
+                        if table == "strategy_jobs":
+                            # 老行情库没有 has_result，按列名复制并根据原结果补齐。
+                            connection.execute(
+                                "INSERT INTO strategy_jobs BY NAME "
+                                "SELECT job_id, operation, request_json, state_json, result_json, "
+                                "status, cancel_requested, worker_id, created_at, heartbeat_at, "
+                                "updated_at, "
+                                "result_json IS NOT NULL AS has_result "
+                                "FROM market_db.strategy_jobs"
+                            )
+                        else:
+                            connection.execute(
+                                f"INSERT INTO {table} SELECT * FROM market_db.{table}"
+                            )
                     copied[table] = rows
                 # 连接关掉时 DuckDB 会自己断开附加库；在事务里 DETACH 会报
                 # "outstanding work on it"，所以显式断开留到事务提交之后（连接关闭即可）。
@@ -903,6 +916,7 @@ class _DuckDbStoreBase:
                     request_json VARCHAR NOT NULL,
                     state_json VARCHAR NOT NULL,
                     result_json VARCHAR,
+                    has_result BOOLEAN DEFAULT FALSE,
                     status VARCHAR NOT NULL,
                     cancel_requested BOOLEAN NOT NULL DEFAULT FALSE,
                     worker_id VARCHAR,

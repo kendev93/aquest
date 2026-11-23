@@ -663,3 +663,25 @@ def test_latest_full_research_payload_uses_the_last_successful_manual_full_job(t
         "risk_trials": 1_000,
         "max_hold_days": None,
     }
+
+
+def test_signal_days_backfills_result_flag_for_existing_database(tmp_path) -> None:
+    market = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    jobs = DuckDbStrategyJobStore(market)
+    payload = {"mode": "signals", "as_of_date": "2026-09-01"}
+    for job_id in ("saved", "pruned"):
+        jobs.create(
+            job_id, operation="market_strategy_pool_tracking", payload=payload, description="扫描"
+        )
+        jobs.write_result(job_id, payload)
+    with market.state_write_transaction() as connection:
+        connection.execute("UPDATE strategy_jobs SET result_json = NULL WHERE job_id = 'pruned'")
+        connection.execute(
+            "UPDATE strategy_jobs SET result_json = ? WHERE job_id = 'saved'",
+            ['{"mode":"signals"}'],
+        )
+    with market.state_write_transaction() as connection:
+        connection.execute("ALTER TABLE strategy_jobs DROP COLUMN has_result")
+    jobs.initialize()
+    jobs.initialize()
+    assert jobs.pool_signal_days() == [{"as_of_date": "2026-09-01", "job_id": "saved"}]

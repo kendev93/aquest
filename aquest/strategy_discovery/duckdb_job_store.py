@@ -64,8 +64,15 @@ class DuckDbStrategyJobStore:
     def initialize(self, legacy_root: str | Path | None = None) -> int:
         """Initialize the DuckDB schema and idempotently import legacy JSON jobs."""
 
-        with STATE_WRITE_LOCK, self._connection() as connection:
-            connection.execute("SELECT 1 FROM strategy_jobs LIMIT 0")
+        with self._transaction() as connection:
+            columns = connection.execute("PRAGMA table_info('strategy_jobs')").fetchall()
+            if not any(row[1] == "has_result" for row in columns):
+                connection.execute(
+                    "ALTER TABLE strategy_jobs ADD COLUMN has_result BOOLEAN DEFAULT FALSE"
+                )
+                connection.execute(
+                    "UPDATE strategy_jobs SET has_result = TRUE WHERE result_json IS NOT NULL"
+                )
         if legacy_root is None:
             return 0
         return self.import_legacy_jobs(legacy_root)
@@ -302,7 +309,7 @@ class DuckDbStrategyJobStore:
         """
 
         today = shanghai_now().date()
-        with self._read_connection() as connection:
+        with STATE_WRITE_LOCK, self._read_connection() as connection:
             rows = connection.execute(
                 """
                 WITH candidates AS (
@@ -314,12 +321,11 @@ class DuckDbStrategyJobStore:
                     FROM strategy_jobs
                     WHERE operation = 'market_strategy_pool_tracking'
                       AND status = 'completed'
-                      AND result_json IS NOT NULL
+                      AND has_result
                       AND json_extract_string(request_json, '$.payload.mode') = 'signals'
                       AND json_extract_string(request_json, '$.payload.market') IS NULL
                 ), ranked AS (
                     SELECT job_id, signal_date,
-                        DENSE_RANK() OVER (ORDER BY signal_date DESC NULLS LAST) AS day_rank,
                         ROW_NUMBER() OVER (
                             PARTITION BY signal_date ORDER BY updated_at DESC, job_id DESC
                         ) AS within_day
@@ -329,8 +335,8 @@ class DuckDbStrategyJobStore:
                       AND isodow(signal_date) BETWEEN 1 AND 5
                 )
                 SELECT signal_date, job_id FROM ranked
-                WHERE within_day = 1 AND day_rank <= ?
-                ORDER BY signal_date DESC
+                WHERE within_day = 1
+                ORDER BY signal_date DESC LIMIT ?
                 """,
                 [today, days],
             ).fetchall()
@@ -682,6 +688,7 @@ class DuckDbStrategyJobStore:
                     _dump_json(request),
                     _dump_json(state),
                     _dump_json(result) if result is not None else None,
+                    result is not None,
                     status,
                     bool(state.get("cancel_requested")),
                     None,
@@ -700,9 +707,9 @@ class DuckDbStrategyJobStore:
             connection.executemany(
                 """
                 INSERT INTO strategy_jobs (
-                    job_id, operation, request_json, state_json, result_json,
+                    job_id, operation, request_json, state_json, result_json, has_result,
                     status, cancel_requested, worker_id, created_at, heartbeat_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (job_id) DO NOTHING
                 """,
                 prepared,
@@ -801,13 +808,14 @@ class DuckDbStrategyJobStore:
             connection.execute(
                 """
                 UPDATE strategy_jobs
-                SET status = ?, state_json = ?, result_json = ?, updated_at = ?
+                SET status = ?, state_json = ?, result_json = ?, has_result = ?, updated_at = ?
                 WHERE job_id = ?
                 """,
                 [
                     final_status,
                     _dump_json(state),
                     None if cancel_requested else _dump_json(result),
+                    not cancel_requested,
                     now,
                     job_id,
                 ],
@@ -855,7 +863,7 @@ class DuckDbStrategyJobStore:
                     FROM candidates
                 )
                 UPDATE strategy_jobs AS jobs
-                SET result_json = NULL
+                SET result_json = NULL, has_result = FALSE
                 FROM ranked
                 WHERE jobs.job_id = ranked.job_id
                   AND jobs.job_id <> ?
@@ -920,14 +928,6 @@ class DuckDbStrategyJobStore:
             """,
             [_dump_json(merged), status, heartbeat_at, now, job_id],
         )
-
-    @contextmanager
-    def _connection(self) -> Iterator[duckdb.DuckDBPyConnection]:
-        connection = self._store.state_connect()
-        try:
-            yield connection
-        finally:
-            connection.close()
 
     @contextmanager
     def _read_connection(self) -> Iterator[duckdb.DuckDBPyConnection]:
