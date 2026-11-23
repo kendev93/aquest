@@ -343,12 +343,27 @@ class DuckDbStrategyPoolStore:
             ).fetchone()
         return _row_to_entry(row) if row else None
 
-    def list_entries(self) -> list[dict[str, object]]:
+    def list_entries(self, *, objective: str | None = None) -> list[dict[str, object]]:
+        annual, sharpe = "annual_candidate_json", "sharpe_candidate_json"
+        manual_annual, manual_sharpe = "manual_annual_json", "manual_sharpe_json"
+        # 列表只读当前目标；候选引用另一目标时才读取被引用的候选。
+        if objective == "annual_return":
+            sharpe = """CASE WHEN 'sharpe' IN (
+                json_extract_string(TRY_CAST(manual_annual_json AS JSON), '$.candidate_ref'),
+                json_extract_string(TRY_CAST(annual_candidate_json AS JSON), '$.candidate_ref')
+            ) THEN sharpe_candidate_json END"""
+            manual_sharpe = "NULL"
+        elif objective == "sharpe":
+            annual = """CASE WHEN 'annual_return' IN (
+                json_extract_string(TRY_CAST(manual_sharpe_json AS JSON), '$.candidate_ref'),
+                json_extract_string(TRY_CAST(sharpe_candidate_json AS JSON), '$.candidate_ref')
+            ) THEN annual_candidate_json END"""
+            manual_annual = "NULL"
         with self._read_connection() as connection:
             rows = connection.execute(
-                """
-                SELECT market, code, name, annual_candidate_json, sharpe_candidate_json,
-                       manual_annual_json, manual_sharpe_json, status, last_error,
+                f"""
+                SELECT market, code, name, {annual}, {sharpe},
+                       {manual_annual}, {manual_sharpe}, status, last_error,
                        data_fingerprint, market_fingerprint, config_fingerprint,
                        source_job_id, updated_at, benchmark_json
                 FROM strategy_pool_entries ORDER BY market, code

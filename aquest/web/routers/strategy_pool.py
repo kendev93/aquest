@@ -315,7 +315,7 @@ def list_strategy_pool_entries(
     objective: str = Query(default="annual_return"),
 ) -> dict[str, object]:
     selected = _objective(objective)
-    items = _pool_store(request).list_entries()
+    items = _pool_store(request).list_entries(objective=selected)
     # 列表只要摘要：candidate_json 读出来会在投影里整个丢掉，所以干脆不读、不解析。
     tracks = PoolTrackingStore(_market_store(request)).current_versions(with_candidate=False)
     track_index = {(v["market"], v["code"], v["objective"], v["source"]): v for v in tracks}
