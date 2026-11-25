@@ -24,6 +24,9 @@ function tradeValue(trade: Record<string, unknown>, key: string): string {
   return typeof value === 'string' && value ? value : '—'
 }
 
+// 固定轴标签留白，图例和上线日期放在绘图区外。
+const plot = { left: 86, right: 774, top: 16, bottom: 204 }
+
 const chart = computed(() => {
   const points = (props.backtest?.equity_curve ?? []).flatMap((item) => {
     const record = item as Record<string, unknown>
@@ -63,28 +66,32 @@ const chart = computed(() => {
   const benchmarkSample = benchmark.length > 240
     ? benchmark.filter((_, i) => i % Math.ceil(benchmark.length / 240) === 0 || i === benchmark.length - 1)
     : benchmark
-  const x = (time: number) => 20 + (time - minimumTime) / (maximumTime - minimumTime || 1) * 760
+  const x = (time: number) => plot.left + (time - minimumTime) / (maximumTime - minimumTime || 1) * (plot.right - plot.left)
   const values = sample.map(point => point.value)
-  // Y 域合并策略与基准；high/low 标注只看策略曲线
   const minimum = Math.min(...values, ...benchmarkSample.map(p => p.value))
   const maximum = Math.max(...values, ...benchmarkSample.map(p => p.value))
-  const span = maximum - minimum || 1
-  const y = (value: number) => 210 - (value - minimum) / span * 180
-  // 年份刻度：次年起每年 1 月 1 日一个刻度
-  const yearTicks: Array<{ x: number; label: string }> = []
-  for (let year = new Date(minimumTime).getFullYear() + 1; year <= new Date(maximumTime).getFullYear(); year++) {
-    const time = Date.parse(`${year}-01-01`)
-    if (Number.isFinite(time) && time > minimumTime && time < maximumTime) yearTicks.push({ x: x(time), label: String(year) })
-  }
-  return { creation, launchX: x(launch), high: props.returnCurve ? formatPercent(Math.max(...values)) : formatNumber(Math.max(...values)), low: props.returnCurve ? formatPercent(Math.min(...values)) : formatNumber(Math.min(...values)),
+  const padding = minimum === maximum ? (props.returnCurve ? 0.01 : 1) : (maximum - minimum) * 0.05
+  const bottomValue = minimum - padding
+  const span = maximum + padding - bottomValue
+  const y = (value: number) => plot.bottom - (value - bottomValue) / span * (plot.bottom - plot.top)
+  const yTicks = Array.from({ length: 5 }, (_, i) => {
+    const value = bottomValue + span * i / 4
+    return { y: y(value), label: props.returnCurve ? formatPercent(value) : formatNumber(value) }
+  })
+  const xTicks = Number.isFinite(minimumTime) && Number.isFinite(maximumTime)
+    ? Array.from({ length: minimumTime === maximumTime ? 1 : 5 }, (_, i) => {
+      const time = minimumTime + (maximumTime - minimumTime) * i / 4
+      return { x: x(time), label: new Date(time).toISOString().slice(0, 10) }
+    })
+    : []
+  return { creation, launchX: Number.isFinite(launch) ? x(launch) : null,
     benchmark: benchmarkSample.length > 1
       ? { points: benchmarkSample.map(p => `${x(p.time).toFixed(1)},${y(p.value).toFixed(1)}`).join(' ') }
       : null,
-    yearTicks,
+    xTicks, yTicks,
     markers: sample.filter(p => p.directions.length && props.returnCurve).map(p => ({date:p.date, directions:p.directions.join('/'),x:x(Date.parse(p.date)),y:y(p.value)})),
-    first:sample[0]?.date ?? '', last:sample.at(-1)?.date ?? '',
     points:sample.map((point, i) => {
-      const horizontal = props.launchDate && Number.isFinite(times[i]) ? x(times[i]!) : 20 + i / Math.max(1,sample.length-1) * 760
+      const horizontal = Number.isFinite(times[i]) ? x(times[i]!) : plot.left + i / Math.max(1, sample.length - 1) * (plot.right - plot.left)
       return `${horizontal.toFixed(1)},${y(point.value).toFixed(1)}`
     }).join(' ') }
 })
@@ -114,27 +121,32 @@ function closedTrades(): number {
         <span>盈亏比 {{ formatNumber(props.backtest.performance.payoff_ratio, 2) }}</span>
       </div>
       <small v-if="!props.hideMetrics" class="individual-benchmark-note">基准按区间首日收盘买入并持有至末日收盘，不计交易费用；超额收益是策略收益减基准涨幅。</small>
+      <div v-if="chartPoints()" class="curve-header">
+        <div class="curve-legend" aria-label="曲线图例">
+          <span><i class="strategy-key" />策略</span>
+          <span v-if="chart.benchmark"><i class="benchmark-key" />基准·买入持有</span>
+          <template v-if="props.returnCurve">
+            <span><i class="buy-key" />买入</span>
+            <span><i class="sell-key" />卖出</span>
+          </template>
+        </div>
+        <small v-if="chart.launchX !== null">上线 {{ chart.creation }}</small>
+      </div>
       <svg v-if="chartPoints()" viewBox="0 0 800 240" role="img" :aria-label="props.returnCurve ? '策略收益曲线，叠加买入持有基准，标记买卖点与上线日期' : '完整区间权益曲线'">
-        <rect v-if="props.launchDate" :x="chart.launchX" y="10" :width="Math.max(0, 780-chart.launchX)" height="210" fill="var(--accent)" opacity="0.08" />
-        <line v-if="props.launchDate" :x1="chart.launchX" :x2="chart.launchX" y1="10" y2="220" stroke="var(--accent)" stroke-dasharray="5 4" />
-        <text v-if="props.launchDate" :x="Math.max(20,Math.min(chart.launchX,440))" y="16" fill="var(--text)">上线 {{ chart.creation }}</text>
-        <text x="20" y="28" fill="var(--muted)">{{ chart.high }}</text><text x="20" y="218" fill="var(--muted)">{{ chart.low }}</text>
-        <g v-if="chart.benchmark">
-          <polyline :points="chart.benchmark.points" fill="none" stroke="#f59e0b" stroke-width="1.6" stroke-dasharray="4 3" />
+        <rect v-if="chart.launchX !== null" :x="chart.launchX" :y="plot.top" :width="plot.right - chart.launchX" :height="plot.bottom - plot.top" fill="var(--accent)" opacity="0.08" />
+        <g v-for="tick in chart.yTicks" :key="tick.y">
+          <line :x1="plot.left" :x2="plot.right" :y1="tick.y" :y2="tick.y" class="curve-grid" />
+          <text :x="plot.left - 8" :y="tick.y" dominant-baseline="middle" text-anchor="end" class="curve-tick">{{ tick.label }}</text>
         </g>
-        <g v-for="tick in chart.yearTicks" :key="tick.label">
-          <line :x1="tick.x" :x2="tick.x" y1="220" y2="226" stroke="var(--border)" />
-          <text :x="tick.x" y="235" fill="var(--muted)" font-size="9" text-anchor="middle">{{ tick.label }}</text>
+        <path :d="`M ${plot.left} ${plot.top} V ${plot.bottom} H ${plot.right}`" class="curve-axis" />
+        <g v-for="tick in chart.xTicks" :key="tick.x">
+          <line :x1="tick.x" :x2="tick.x" :y1="plot.bottom" :y2="plot.bottom + 5" class="curve-axis" />
+          <text :x="tick.x" :y="plot.bottom + 21" :text-anchor="tick.x === plot.right ? 'end' : tick.x === plot.left ? 'start' : 'middle'" class="curve-tick">{{ tick.label }}</text>
         </g>
-        <circle v-for="marker in chart.markers" :key="marker.date" :cx="marker.x" :cy="marker.y" r="4" :fill="marker.directions.includes('SELL') ? '#f87171' : '#34d399'" stroke="var(--surface)" stroke-width="1.5"><title>{{ marker.date }} {{ marker.directions }}</title></circle>
-        <text x="20" y="235" fill="var(--muted)">{{ chart.first }}</text><text x="680" y="235" fill="var(--muted)">{{ chart.last }}</text>
+        <line v-if="chart.launchX !== null" :x1="chart.launchX" :x2="chart.launchX" :y1="plot.top" :y2="plot.bottom" stroke="var(--accent)" stroke-dasharray="5 4" />
+        <polyline v-if="chart.benchmark" :points="chart.benchmark.points" fill="none" stroke="#f59e0b" stroke-width="1.6" stroke-dasharray="4 3" />
         <polyline :points="chartPoints()" fill="none" stroke="var(--accent)" stroke-width="3" />
-        <g font-size="10">
-          <circle cx="470" cy="14" r="4" fill="var(--accent)" /><text x="478" y="18" fill="var(--muted)">策略</text>
-          <g v-if="chart.benchmark"><line x1="514" x2="534" y1="14" y2="14" stroke="#f59e0b" stroke-width="1.6" stroke-dasharray="4 3" /><text x="538" y="18" fill="var(--muted)">基准·买入持有</text></g>
-          <circle cx="470" cy="30" r="4" fill="#34d399" stroke="var(--surface)" stroke-width="1.5" /><text x="478" y="34" fill="var(--muted)">买入</text>
-          <circle cx="514" cy="30" r="4" fill="#f87171" stroke="var(--surface)" stroke-width="1.5" /><text x="522" y="34" fill="var(--muted)">卖出</text>
-        </g>
+        <circle v-for="marker in chart.markers" :key="marker.date" :cx="marker.x" :cy="marker.y" r="4" :fill="marker.directions.includes('SELL') ? '#f87171' : '#34d399'" stroke="var(--surface)" stroke-width="1.5"><title>{{ marker.date }} {{ marker.directions }}</title></circle>
       </svg>
       <slot name="after-chart" />
       <template v-if="props.backtest.trades.length">
@@ -164,6 +176,17 @@ function closedTrades(): number {
    撑出页面，出现整页横向滚动。表格自己的 .table-wrap 里滚动。 */
 .individual-full-detail { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 10px; }
 .individual-full-detail > p { margin: 0; color: var(--muted); }
+.curve-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 20px; width: min(100%, 800px); margin: 8px 0; color: var(--muted); }
+.curve-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; }
+.curve-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.curve-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; }
+.curve-legend .strategy-key { background: var(--accent); }
+.curve-legend .benchmark-key { width: 16px; height: 0; border-top: 2px dashed #f59e0b; border-radius: 0; }
+.curve-legend .buy-key { background: #34d399; }
+.curve-legend .sell-key { background: #f87171; }
+.curve-grid { stroke: var(--border); }
+.curve-axis { fill: none; stroke: var(--muted); }
+.curve-tick { fill: var(--muted); font-size: 12px; }
 .individual-full-detail svg { width: min(100%, 800px); height: auto; min-height: 180px; border: 1px solid var(--border); background: var(--surface); }
 .individual-full-metrics { display: flex; flex-wrap: wrap; gap: 8px 16px; color: var(--muted); }
 .individual-benchmark-note { color: var(--subtle); }
