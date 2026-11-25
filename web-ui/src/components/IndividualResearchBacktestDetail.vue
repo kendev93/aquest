@@ -24,6 +24,19 @@ function tradeValue(trade: Record<string, unknown>, key: string): string {
   return typeof value === 'string' && value ? value : '—'
 }
 
+function markerText(date: string, directions: string[], trades: Record<string, unknown>[]): string {
+  if (!trades.length) return `${date} · ${directions.map(tradeDirection).join(' / ')}`
+  return trades.map((trade) => [
+    `日期：${tradeValue(trade, 'date')}`,
+    `方向：${tradeDirection(trade.direction)}`,
+    `价格：${tradeValue(trade, 'price')}`,
+    `数量：${tradeValue(trade, 'size')}`,
+    `盈亏：${tradeValue(trade, 'pnl')}`,
+    `原因：${tradeValue(trade, 'reason')}`,
+    `信号日：${tradeValue(trade, 'signal_date')}`,
+  ].join('\n')).join('\n\n')
+}
+
 // 固定轴标签留白，图例和上线日期放在绘图区外。
 const plot = { left: 86, right: 774, top: 16, bottom: 204 }
 
@@ -32,7 +45,8 @@ const chart = computed(() => {
     const record = item as Record<string, unknown>
     const value = props.returnCurve ? record.return_pct : record.total ?? record.equity
     const date = String(record.date ?? '')
-    return typeof value === 'number' && Number.isFinite(value) ? [{ value, date, directions: Array.isArray(record.trade_directions) ? record.trade_directions as string[] : [] }] : []
+    const trades = Array.isArray(record.trade_events) ? record.trade_events as Record<string, unknown>[] : []
+    return typeof value === 'number' && Number.isFinite(value) ? [{ value, date, trades, directions: Array.isArray(record.trade_directions) ? record.trade_directions as string[] : [] }] : []
   })
   const sample = !props.returnCurve && points.length > 120
     ? points.filter((_, i) => i % Math.ceil(points.length / 120) === 0 || i === points.length - 1) : points
@@ -89,7 +103,7 @@ const chart = computed(() => {
       ? { points: benchmarkSample.map(p => `${x(p.time).toFixed(1)},${y(p.value).toFixed(1)}`).join(' ') }
       : null,
     xTicks, yTicks,
-    markers: sample.filter(p => p.directions.length && props.returnCurve).map(p => ({date:p.date, directions:p.directions.join('/'),x:x(Date.parse(p.date)),y:y(p.value)})),
+    markers: sample.filter(p => p.directions.length && props.returnCurve).map(p => ({date:p.date, directions:p.directions.join('/'), text: markerText(p.date, p.directions, p.trades),x:x(Date.parse(p.date)),y:y(p.value)})),
     points:sample.map((point, i) => {
       const horizontal = Number.isFinite(times[i]) ? x(times[i]!) : plot.left + i / Math.max(1, sample.length - 1) * (plot.right - plot.left)
       return `${horizontal.toFixed(1)},${y(point.value).toFixed(1)}`
@@ -146,7 +160,7 @@ function closedTrades(): number {
         <line v-if="chart.launchX !== null" :x1="chart.launchX" :x2="chart.launchX" :y1="plot.top" :y2="plot.bottom" stroke="var(--accent)" stroke-dasharray="5 4" />
         <polyline v-if="chart.benchmark" :points="chart.benchmark.points" fill="none" stroke="#f59e0b" stroke-width="1.6" stroke-dasharray="4 3" />
         <polyline :points="chartPoints()" fill="none" stroke="var(--accent)" stroke-width="3" />
-        <circle v-for="marker in chart.markers" :key="marker.date" :cx="marker.x" :cy="marker.y" r="4" :fill="marker.directions.includes('SELL') ? '#f87171' : '#34d399'" stroke="var(--surface)" stroke-width="1.5"><title>{{ marker.date }} {{ marker.directions }}</title></circle>
+        <circle v-for="marker in chart.markers" :key="marker.date" :cx="marker.x" :cy="marker.y" r="4" :fill="marker.directions.includes('SELL') ? '#f87171' : '#34d399'" stroke="var(--surface)" stroke-width="1.5"><title>{{ marker.text }}</title></circle>
       </svg>
       <slot name="after-chart" />
       <template v-if="props.backtest.trades.length">

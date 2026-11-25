@@ -1046,14 +1046,21 @@ def pool_curve(
         if point["date"] in event_dates or abs(i - launch_index) <= 1:
             preserve.add(i)
     step = max(1, len(points) // 240)
-    directions: dict[str, list[str]] = {}
+    # 曲线标记携带当天成交摘要，不依赖下方交易表的当前页。
+    events: dict[str, list[dict[str, object]]] = {}
     for trade in trades:
-        directions.setdefault(trade["date"], []).append(trade["direction"])
+        events.setdefault(trade["date"], []).append(
+            {
+                key: trade.get(key)
+                for key in ("date", "direction", "price", "size", "pnl", "reason", "signal_date")
+            }
+        )
     sampled = [
         dict(
             p,
             return_pct=float(p["total"]) / baseline - 1,
-            trade_directions=directions.get(p["date"], []),
+            trade_directions=[trade["direction"] for trade in events.get(p["date"], [])],
+            trade_events=events.get(p["date"], []),
         )
         for i, p in enumerate(points)
         if i in preserve or i % step == 0

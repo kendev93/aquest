@@ -83,7 +83,13 @@ it('defaults history trades to the latest settlement first and re-requests from 
         performance: { total_return: 0.5, annual_return: 0.2, sharpe: 1.4, sortino: 2.1, calmar: 0.8,
           max_drawdown: -0.25, max_dd_duration: 33, volatility: 0.18, win_rate: 0.6, payoff_ratio: 1.5,
           profit_factor: 2.2, avg_holding_days: 17.5, total_trades: 24 },
-        equity_curve: [{ date: '2026-01-01', total: 1000, return_pct: 0 }], trades: [] } }
+        equity_curve: [{
+          date: '2026-01-01', total: 1000, return_pct: 0, trade_directions: ['BUY', 'SELL'],
+          trade_events: [
+            { date: '2026-01-01', direction: 'BUY', price: 10, size: 100, signal_date: '2025-12-31' },
+            { date: '2026-01-01', direction: 'SELL', price: 11, size: 100, pnl: 100, reason: '止盈' },
+          ],
+        }], trades: [] } }
     else data = { items: [{ date: '2026-09-03', direction: 'SELL', price: 12, size: 100 }], total: 123 }
     return { ok: true, json: async () => ({ data }) }
   })
@@ -96,6 +102,11 @@ it('defaults history trades to the latest settlement first and re-requests from 
     expect(tradeCalls()[0]).toContain('range=1y&order=desc&offset=0')
     expect(curveCalls()).toHaveLength(1)
     expect(curveCalls()[0]).toContain('range=1y')
+    const marker = wrapper.get('circle title').element.textContent
+    for (const detail of ['日期：2026-01-01', '方向：买入', '方向：卖出', '价格：11.00',
+      '数量：100', '盈亏：100.00', '原因：止盈', '信号日：2025-12-31']) {
+      expect(marker).toContain(detail)
+    }
     // 版本状态、区间指标行和交易方向都得是中文，分页条要贴着表格显示页码。
     // 断言用结构而不是「夏普」「卖出」这类词——页面上本来就有「夏普最优」标签和
     // 「卖出规则」标题，用文字包含会假装验到了。
