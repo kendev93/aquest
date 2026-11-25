@@ -553,6 +553,8 @@ class MarketStrategyPoolService:
             if callable(clear_stock_cache):
                 clear_stock_cache()
             individual_service = self._individual_service_for_thread()
+            if mode == "full":
+                config = replace(config, pool_replay_only=True)
             retries_left = _TRANSIENT_DB_RETRIES
             retried = 0
             while True:

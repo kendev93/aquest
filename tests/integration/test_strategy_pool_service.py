@@ -179,6 +179,7 @@ def test_full_pool_research_splits_each_symbol_and_saves_each_symbol_incremental
     }
     assert all(config.split_windows is None for config in individual.configs)
     assert all(config.common_split_metadata is None for config in individual.configs)
+    assert all(config.pool_replay_only for config in individual.configs)
     # 2016 年后上市的池内标的：前 268 根只作预热，预热后至少留一年样本。
     assert all(config.warmup_bars == 268 for config in individual.configs)
     assert all(config.min_research_bars == 244 for config in individual.configs)
@@ -231,6 +232,7 @@ def test_full_pool_research_splits_each_symbol_and_saves_each_symbol_incremental
     assert single["single_candidate"]["benchmark"]["validation"]["total_return"] > 0
     assert single["single_candidate"]["saved_to_pool"] is True
     assert individual.configs[-1].split_windows is None
+    assert individual.configs[-1].pool_replay_only is False
     refreshed = pool_store.get("SH", "600000")
     assert refreshed["benchmark"]["validation"]["total_return"] > 0
     assert refreshed["source_job_id"] == "single-rerun"

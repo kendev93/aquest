@@ -49,6 +49,8 @@ class IndividualResearchConfig:
     warmup_bars: int = 0
     #: 预热之后至少保留的研究 K 线根数；不足时判为历史样本不足。0 表示不限制。
     min_research_bars: int = 0
+    # 全市场任务只需要入选策略的完整明细，单股研究仍返回所有榜单候选的明细。
+    pool_replay_only: bool = False
 
     @property
     def symbol(self) -> str:

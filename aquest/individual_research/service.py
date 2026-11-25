@@ -37,7 +37,7 @@ from aquest.screening.rules import RuleGroup
 from aquest.strategy_discovery.evaluation_budget import EvaluationWorkerBudget
 from aquest.strategy_discovery.models import DiscoveryRequest
 from aquest.strategy_discovery.service import StrategyDiscoveryService
-from aquest.strategy_pool.selection import slices_for_common_windows
+from aquest.strategy_pool.selection import slices_for_common_windows, summarize_objective_winners
 from aquest.swing_research.combinations import split_trading_days
 from aquest.swing_research.labels import bar_labels
 from aquest.swing_research.segments import SwingSegment, split_swings
@@ -422,9 +422,27 @@ class IndividualStockResearchService:
 
         full_backtest_fingerprints: set[str] = set()
         full_backtests: dict[str, dict[str, object]] = {}
+        winner_hashes: set[object] = set()
+        if config.pool_replay_only:
+            winners = summarize_objective_winners(
+                {"results_by_sharpe": ranked_sharpe, "results_by_return": ranked_return},
+                max_hold_days=config.max_hold_days,
+            )
+            winner_hashes = {
+                winner["candidate_hash"]
+                for winner in winners.values()
+                if winner and "candidate_hash" in winner
+            }
         total_full_backtests = len(final_holdout)
         for index, candidate in enumerate(final_holdout, start=1):
             self._check_cancelled(abort_check)
+            # 先保留一份成功回放用于核对指纹，余下落选候选无需生成曲线和成交。
+            if (
+                config.pool_replay_only
+                and full_backtest_fingerprints
+                and candidate.get("candidate_hash") not in winner_hashes
+            ):
+                continue
             candidate_config = candidate.get("config")
             if not isinstance(candidate_config, Mapping):
                 continue
