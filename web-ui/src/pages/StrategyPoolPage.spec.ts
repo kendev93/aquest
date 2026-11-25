@@ -2279,6 +2279,20 @@ describe('StrategyPoolPage', () => {
     await flushPromises()
     expect(wrapper.get('[data-testid="pool-buy-signals"]').text()).toContain('当前没有股票触发买入规则')
     expect(wrapper.find('[data-testid="pool-signal-day-note"]').exists()).toBe(true)
+    vi.mocked(api.fetchPoolSignalDays).mockResolvedValue([
+      { as_of_date: '2026-10-05', job_id: 'signal-1' },
+      { as_of_date: '2026-10-02', job_id: 'scan-2' },
+      { as_of_date: '2026-10-01', job_id: 'scan-1' },
+    ])
+    vi.mocked(api.getStrategyPoolJob).mockResolvedValueOnce({
+      job_id: 'signal-1',
+      status: 'completed',
+      result: resultFor('2026-10-05', true),
+    } as never)
+    await wrapper.get('[data-testid="pool-refresh-signals"]').trigger('click')
+    await flushPromises()
+    expect((picker.element as HTMLSelectElement).value).toBe('2026-10-05')
+    expect(wrapper.get('[data-testid="pool-buy-signals"]').text()).toContain('SH600000')
   })
 
   it('loads saved universe preferences and submits them with full research', async () => {

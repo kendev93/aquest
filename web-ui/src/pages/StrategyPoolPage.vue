@@ -744,9 +744,12 @@ async function restoreLatestSignalResult(jobs: StrategyPoolJobSummary[]): Promis
 // 可回看的交易日：后端每个交易日只留最后一次全市场扫描，最多 10 天。读不到就当没有
 // 历史可看，页面照常显示最新那天，不打断初始化。
 async function loadSignalDays(): Promise<void> {
-  const before = signalDate.value
   try {
-    signalDays.value = (await fetchPoolSignalDays()) ?? []
+    const days = (await fetchPoolSignalDays()) ?? []
+    // 更新日期列表前判断是否跟随最新，避免把原来的最新日期误判为历史选择。
+    const followsLatest = !signalDate.value || !signalIsPinned.value
+    signalDays.value = days
+    if (followsLatest) signalDate.value = latestSignalDay.value
     signalDaysUnavailable.value = false
   } catch {
     // 读不到和「还没有历史」要分开说：一个空下拉框看不出是哪一种。
@@ -754,7 +757,6 @@ async function loadSignalDays(): Promise<void> {
     signalDaysUnavailable.value = true
     return
   }
-  if (!before || before === latestSignalDay.value) signalDate.value = latestSignalDay.value
 }
 
 async function selectSignalDay(value: string): Promise<void> {
@@ -1182,9 +1184,7 @@ async function finishJob(
           : result
         page.value = 1
         // 新的一天要出现在日期下拉里；用户钉在更早的交易日时不抢他的显示。
-        void loadSignalDays().then(() => {
-          if (!signalIsPinned.value) signalDate.value = latestSignalDay.value
-        })
+        void loadSignalDays()
       }
       successMessage.value = `当天信号已按 ${objectiveLabel(objective.value)} 目标更新。`
       await loadHistory()
