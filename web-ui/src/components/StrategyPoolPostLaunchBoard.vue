@@ -45,6 +45,7 @@ interface BoardRow {
   postLaunchReturn: number
   benchmark: number | null
   excess: number | null
+  holdingReturn: number | null
   createdReturn: number | null
   days: number
   asOfDate: string
@@ -57,8 +58,14 @@ function finite(value: unknown): number | null {
 }
 
 const direction = ref<StrategyPoolSortDirection>('desc')
-const sortField = ref<'postLaunchReturn' | 'benchmark' | 'excess'>('postLaunchReturn')
-const sortLabels = { postLaunchReturn: '上线后收益', benchmark: '同期买入持有', excess: '超额' } as const
+const sortLabels = {
+  postLaunchReturn: '上线后收益',
+  benchmark: '同期买入持有',
+  excess: '超额',
+  holdingReturn: '当前持仓收益',
+  createdReturn: '创建至今收益',
+} as const
+const sortField = ref<keyof typeof sortLabels>('postLaunchReturn')
 function selectSort(field: typeof sortField.value): void {
   if (sortField.value === field) direction.value = direction.value === 'desc' ? 'asc' : 'desc'
   else { sortField.value = field; direction.value = 'desc' }
@@ -85,6 +92,8 @@ const eligible = computed<BoardRow[]>(() => {
       postLaunchReturn: value,
       benchmark,
       excess: postLaunchExcess(entry),
+      // 排序和显示使用同一份模拟持仓快照，缺失收益保留为空。
+      holdingReturn: finite(props.holdings.get(`${entry.market}${entry.code}`)?.holding_return_pct),
       createdReturn: finite(entry.created_return),
       days: finite(entry.post_launch_days) ?? 0,
       asOfDate: entry.tracking_as_of_date ?? '',
@@ -171,11 +180,9 @@ function excessClass(value: number | null): string {
           <tr>
             <th>#</th>
             <th>标的</th>
-            <th v-for="field in (['postLaunchReturn', 'benchmark', 'excess'] as const)" :key="field" :aria-sort="sortField === field ? (direction === 'asc' ? 'ascending' : 'descending') : 'none'">
-              <button class="pool-board-sort" :data-testid="`pool-board-sort-${field}`" @click="selectSort(field)">{{ sortLabels[field] }}{{ sortField === field ? (direction === 'asc' ? ' ↑' : ' ↓') : '' }}</button>
+            <th v-for="(_, field) in sortLabels" :key="field" :title="field === 'holdingReturn' ? '模拟持仓快照的未实现收益，非实时行情；旧快照可能已失效' : undefined" :aria-sort="sortField === field ? (direction === 'asc' ? 'ascending' : 'descending') : 'none'">
+              <button type="button" class="pool-board-sort" :data-testid="`pool-board-sort-${field}`" @click="selectSort(field)">{{ sortLabels[field] }}{{ sortField === field ? (direction === 'asc' ? ' ↑' : ' ↓') : '' }}</button>
             </th>
-            <th title="模拟持仓快照的未实现收益，非实时行情；旧快照可能已失效">当前持仓收益</th>
-            <th>创建至今收益</th>
             <th>上线交易日</th>
             <th>行情截至</th>
             <th>生效版本</th>
@@ -188,7 +195,7 @@ function excessClass(value: number | null): string {
             <td :class="excessClass(row.postLaunchReturn)" data-testid="pool-board-return-cell"><b>{{ formatPercent(row.postLaunchReturn) }}</b></td>
             <td>{{ formatPercent(row.benchmark) }}</td>
             <td :class="excessClass(row.excess)">{{ formatSignedPercent(row.excess) }}</td>
-            <td :data-testid="`pool-board-holding-return-${row.key}`">{{ formatSignedPercent(holdings.get(row.key)?.holding_return_pct) }}<small v-if="holdings.get(row.key)?.status === 'held_stale'">旧持仓快照</small><small v-else-if="holdings.has(row.key) && holdingAsOf">快照截至 {{ holdingAsOf }}</small></td>
+            <td :data-testid="`pool-board-holding-return-${row.key}`">{{ formatSignedPercent(row.holdingReturn) }}<small v-if="holdings.get(row.key)?.status === 'held_stale'">旧持仓快照</small><small v-else-if="holdings.has(row.key) && holdingAsOf">快照截至 {{ holdingAsOf }}</small></td>
             <td>{{ formatPercent(row.createdReturn) }}</td>
             <td>{{ row.days }}</td>
             <td>{{ row.asOfDate || '—' }}</td>
