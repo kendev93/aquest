@@ -27,7 +27,7 @@ const RANGE_OPTIONS: { key: PoolCurveRange; label: string }[] = [
   { key: 'all', label: '全部区间' },
   { key: 'created', label: '成立以来' },
 ]
-const range = ref<PoolCurveRange>('all')
+const range = ref<PoolCurveRange>('1y')
 interface CurveRangeSummary {
   key: string; label: string; start_date: string | null; end_date: string | null
   total_return: number | null; max_drawdown: number | null

@@ -93,17 +93,13 @@ it('defaults history trades to the latest settlement first and re-requests from 
     await flushPromises()
     const tradeCalls = () => fetch.mock.calls.map(([url]) => String(url)).filter((url) => url.includes('/trades'))
     const curveCalls = () => fetch.mock.calls.map(([url]) => String(url)).filter((url) => url.includes('/curve'))
-    expect(tradeCalls()[0]).toContain('range=all&order=desc&offset=0')
+    expect(tradeCalls()[0]).toContain('range=1y&order=desc&offset=0')
     expect(curveCalls()).toHaveLength(1)
+    expect(curveCalls()[0]).toContain('range=1y')
     // 版本状态、区间指标行和交易方向都得是中文，分页条要贴着表格显示页码。
     // 断言用结构而不是「夏普」「卖出」这类词——页面上本来就有「夏普最优」标签和
     // 「卖出规则」标题，用文字包含会假装验到了。
     expect(wrapper.text()).toContain('状态 已就绪')
-    const metrics = wrapper.get('[data-testid="pool-metrics"]')
-    expect(metrics.findAll('.metric-group p')).toHaveLength(15)
-    expect(metrics.text()).toContain('17.5 天（自然日）')
-    expect(metrics.text()).toContain('33 个交易日')
-    expect(metrics.text()).toContain('2.20')
     // 出场原因分布读窗口内的卖出成交：笔数与累计盈亏（净额）。
     const exits = wrapper.get('[data-testid="pool-exit-summary"]')
     expect(exits.text()).toContain('规则卖出')
@@ -141,7 +137,7 @@ it('defaults history trades to the latest settlement first and re-requests from 
     expect(summaryRows.map((row) => row.find('td').text())).toEqual([
       '最近一年', '今年以来', '最近两年', '最近三年', '全部区间', '成立以来',
     ])
-    expect(summaryRows[4]!.classes()).toContain('active')
+    expect(summaryRows[0]!.classes()).toContain('active')
     expect(summaryRows[4]!.text()).toContain('50.00%')
     expect(summaryRows[4]!.text()).toContain('-30.00%')
 
@@ -164,7 +160,11 @@ it('defaults history trades to the latest settlement first and re-requests from 
 
     await wrapper.get('[data-testid="pool-range-btn-all"]').trigger('click')
     await flushPromises()
-    expect(wrapper.find('[data-testid="pool-metrics"]').exists()).toBe(true)
+    const metrics = wrapper.get('[data-testid="pool-metrics"]')
+    expect(metrics.findAll('.metric-group p')).toHaveLength(15)
+    expect(metrics.text()).toContain('17.5 天（自然日）')
+    expect(metrics.text()).toContain('33 个交易日')
+    expect(metrics.text()).toContain('2.20')
   } finally { wrapper.unmount() }
 })
 
