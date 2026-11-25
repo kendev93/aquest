@@ -106,7 +106,7 @@ function closedTrades(): number {
 </script>
 
 <template>
-  <div v-if="props.backtest" class="individual-full-detail">
+  <div v-if="props.backtest" class="individual-full-detail" :class="{ 'return-curve-detail': props.returnCurve }">
     <p>{{ props.backtest.start_date }} → {{ props.backtest.end_date }} · {{ props.backtest.bars }} 个交易日 · {{ closedTrades() }} 笔交易</p>
     <p v-if="props.backtest.error" class="field-error">{{ props.backtest.error }}</p>
     <template v-else>
@@ -188,6 +188,8 @@ function closedTrades(): number {
 .curve-axis { fill: none; stroke: var(--muted); }
 .curve-tick { fill: var(--muted); font-size: 12px; }
 .individual-full-detail svg { width: min(100%, 800px); height: auto; min-height: 180px; border: 1px solid var(--border); background: var(--surface); }
+.return-curve-detail .curve-header,
+.return-curve-detail svg { box-sizing: border-box; width: 100%; }
 .individual-full-metrics { display: flex; flex-wrap: wrap; gap: 8px 16px; color: var(--muted); }
 .individual-benchmark-note { color: var(--subtle); }
 .individual-trades { max-height: 340px; }
