@@ -28,6 +28,7 @@ from aquest.concurrency import visible_cpu_count
 from aquest.errors import error_reason
 from aquest.formulas.registry import FORMULA_REGISTRY
 from aquest.indicators.cache import frame_fingerprint
+from aquest.individual_research.metrics import MIN_VALIDATION_TRADES
 from aquest.individual_research.models import IndividualResearchConfig
 from aquest.individual_research.search_policy import CANDIDATE_LIMIT
 from aquest.individual_research.service import (
@@ -1082,7 +1083,9 @@ class MarketStrategyPoolService:
                             and prior[2] in {"ready", "partial"}
                         ):
                             record = _keep_better_automatic_candidates(
-                                record, previous_entries.get((ref.market, ref.code))
+                                record,
+                                previous_entries.get((ref.market, ref.code)),
+                                is_worse=self._replacement_is_worse,
                             )
                         if entry_writer is not None:
                             entry_writer(record)
@@ -2393,6 +2396,39 @@ class MarketStrategyPoolService:
                 return True
         return False
 
+    def _replacement_is_worse(
+        self,
+        candidate: Mapping[str, object],
+        previous: Mapping[str, object],
+        objective: str,
+    ) -> bool:
+        """同一验证窗口复核新旧策略，留出段不参与自动替换。"""
+
+        split = _mapping(candidate.get("split_metadata"))
+        validation = _mapping(_mapping(split.get("observed_windows")).get("validation"))
+        validation = validation or _mapping(split.get("validation"))
+        start = parse_iso_date(validation.get("start_date") or validation.get("start"))
+        end = parse_iso_date(validation.get("end_date") or validation.get("end"))
+        if start is None or end is None or start > end:
+            return True
+        try:
+            replay = self._individual_service_for_thread().full_period_metrics
+            new = replay(candidate, start, end)
+            old = replay(previous, start, end)
+        except Exception:  # noqa: BLE001 - 复核失败时继续保留可运行的现有策略
+            logger.exception("新旧策略同区间复核失败，保留现有策略")
+            return True
+        new_score = _finite_metric(new.get(objective))
+        old_score = _finite_metric(old.get(objective))
+        new_trades = _candidate_trade_count(new)
+        return (
+            new_trades is None
+            or new_trades < MIN_VALIDATION_TRADES
+            or new_score is None
+            or old_score is None
+            or new_score < old_score - _CANDIDATE_VALIDATION_DOWNGRADE_MARGIN[objective]
+        )
+
     def _backfill_full_period_metrics(
         self,
         ref: StockRef,
@@ -2858,6 +2894,7 @@ def _preserve_existing_candidate(
     candidate: Mapping[str, object] | None,
     previous: Mapping[str, object] | None,
     objective: str,
+    is_worse: Callable[[Mapping[str, object], Mapping[str, object], str], bool],
 ) -> Mapping[str, object] | None:
     """重研结果不降级：新结果为空或明显变差时保留旧候选。"""
 
@@ -2867,12 +2904,16 @@ def _preserve_existing_candidate(
         return previous
     if previous.get("candidate_id") == candidate.get("candidate_id"):
         return candidate
-    return previous if _candidate_is_clearly_worse(candidate, previous, objective) else candidate
+    return previous if is_worse(candidate, previous, objective) else candidate
 
 
 def _keep_better_automatic_candidates(
     record: Mapping[str, object],
     previous_entry: Mapping[str, object] | None,
+    *,
+    is_worse: Callable[
+        [Mapping[str, object], Mapping[str, object], str], bool
+    ] = _candidate_is_clearly_worse,
 ) -> dict[str, object]:
     """把重研结果与旧候选逐目标比较，避免刷新后丢掉仍可用的策略。
 
@@ -2893,8 +2934,10 @@ def _keep_better_automatic_candidates(
     current_sharpe = current_sharpe_value if isinstance(current_sharpe_value, Mapping) else None
     if current_sharpe is not None and isinstance(current_sharpe.get("candidate_ref"), str):
         current_sharpe = current_annual
-    annual = _preserve_existing_candidate(current_annual, previous_annual, "annual_return")
-    sharpe = _preserve_existing_candidate(current_sharpe, previous_sharpe, "sharpe")
+    annual = _preserve_existing_candidate(
+        current_annual, previous_annual, "annual_return", is_worse
+    )
+    sharpe = _preserve_existing_candidate(current_sharpe, previous_sharpe, "sharpe", is_worse)
     merged["annual_candidate"] = dict(annual) if annual is not None else None
     merged["sharpe_candidate"] = dict(sharpe) if sharpe is not None else None
     return merged

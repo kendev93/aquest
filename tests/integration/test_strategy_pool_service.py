@@ -1664,3 +1664,32 @@ def test_estimate_counts_every_symbol_when_rebuilding(tmp_path) -> None:
     assert estimate["rebuild"] is True
     assert estimate["pending_symbols"] == 2
     assert estimate["reusable_symbols"] == 0
+
+
+def test_automatic_replacement_replays_both_candidates_on_current_validation_window() -> None:
+    calls = []
+
+    class Replay:
+        def full_period_metrics(self, candidate, start, end):
+            calls.append((candidate["candidate_id"], start, end))
+            return {"annual_return": candidate["score"], "closed_trades": candidate["trades"]}
+
+    class Research:
+        def _individual_service_for_thread(self):
+            return Replay()
+
+    new = {
+        "candidate_id": "new",
+        "score": 0.25,
+        "trades": 4,
+        "split_metadata": {"validation": {"start": "2025-01-02", "end": "2025-06-30"}},
+    }
+    old = {"candidate_id": "old", "score": 0.15, "trades": 8}
+    compare = pool_service.MarketStrategyPoolService._replacement_is_worse
+    assert compare(Research(), new, old, "annual_return")
+    assert calls == [
+        ("new", date(2025, 1, 2), date(2025, 6, 30)),
+        ("old", date(2025, 1, 2), date(2025, 6, 30)),
+    ]
+    new["trades"] = 5
+    assert not compare(Research(), new, old, "annual_return")
