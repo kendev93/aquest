@@ -102,11 +102,16 @@ it('defaults history trades to the latest settlement first and re-requests from 
     expect(tradeCalls()[0]).toContain('range=1y&order=desc&offset=0')
     expect(curveCalls()).toHaveLength(1)
     expect(curveCalls()[0]).toContain('range=1y')
-    const marker = wrapper.get('circle title').element.textContent
+    const point = wrapper.get('svg g[tabindex="0"]')
+    await point.trigger('pointerenter')
+    const marker = wrapper.get('[role="tooltip"]').text()
     for (const detail of ['日期：2026-01-01', '方向：买入', '方向：卖出', '价格：11.00',
       '数量：100', '盈亏：100.00', '原因：止盈', '信号日：2025-12-31']) {
       expect(marker).toContain(detail)
     }
+    await point.trigger('pointerleave')
+    expect(wrapper.find('[role="tooltip"]').exists()).toBe(false)
+
     // 版本状态、区间指标行和交易方向都得是中文，分页条要贴着表格显示页码。
     // 断言用结构而不是「夏普」「卖出」这类词——页面上本来就有「夏普最优」标签和
     // 「卖出规则」标题，用文字包含会假装验到了。

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { IndividualResearchFullBacktest } from '../types'
 import { formatNumber, formatPercent, formatSignedPercent } from '../utils/format'
 
@@ -111,6 +111,24 @@ const chart = computed(() => {
 })
 function chartPoints() { return chart.value.points }
 
+const curvePlot = ref<HTMLElement | null>(null)
+const tradeTooltip = ref<{ text: string; x: number; y: number } | null>(null)
+
+// 用实际像素定位，曲线缩放后提示仍跟着买卖点。
+function showTradeTooltip(event: Event, text: string): void {
+  const target = event.currentTarget
+  const plotBounds = curvePlot.value?.getBoundingClientRect()
+  if (!(target instanceof SVGElement) || !plotBounds) return
+  const marker = target.getBoundingClientRect()
+  tradeTooltip.value = {
+    text,
+    x: marker.left + marker.width / 2 - plotBounds.left,
+    y: marker.bottom - plotBounds.top + 6,
+  }
+}
+
+watch(chart, () => { tradeTooltip.value = null })
+
 function closedTrades(): number {
   return props.backtest?.closed_trades
     ?? (props.backtest?.trades ?? []).filter(
@@ -146,22 +164,35 @@ function closedTrades(): number {
         </div>
         <small v-if="chart.launchX !== null">上线 {{ chart.creation }}</small>
       </div>
-      <svg v-if="chartPoints()" viewBox="0 0 800 240" role="img" :aria-label="props.returnCurve ? '策略收益曲线，叠加买入持有基准，标记买卖点与上线日期' : '完整区间权益曲线'">
-        <rect v-if="chart.launchX !== null" :x="chart.launchX" :y="plot.top" :width="plot.right - chart.launchX" :height="plot.bottom - plot.top" fill="var(--accent)" opacity="0.08" />
-        <g v-for="tick in chart.yTicks" :key="tick.y">
-          <line :x1="plot.left" :x2="plot.right" :y1="tick.y" :y2="tick.y" class="curve-grid" />
-          <text :x="plot.left - 8" :y="tick.y" dominant-baseline="middle" text-anchor="end" class="curve-tick">{{ tick.label }}</text>
-        </g>
-        <path :d="`M ${plot.left} ${plot.top} V ${plot.bottom} H ${plot.right}`" class="curve-axis" />
-        <g v-for="tick in chart.xTicks" :key="tick.x">
-          <line :x1="tick.x" :x2="tick.x" :y1="plot.bottom" :y2="plot.bottom + 5" class="curve-axis" />
-          <text :x="tick.x" :y="plot.bottom + 21" :text-anchor="tick.x === plot.right ? 'end' : tick.x === plot.left ? 'start' : 'middle'" class="curve-tick">{{ tick.label }}</text>
-        </g>
-        <line v-if="chart.launchX !== null" :x1="chart.launchX" :x2="chart.launchX" :y1="plot.top" :y2="plot.bottom" stroke="var(--accent)" stroke-dasharray="5 4" />
-        <polyline v-if="chart.benchmark" :points="chart.benchmark.points" fill="none" stroke="#f59e0b" stroke-width="1.6" stroke-dasharray="4 3" />
-        <polyline :points="chartPoints()" fill="none" stroke="var(--accent)" stroke-width="3" />
-        <circle v-for="marker in chart.markers" :key="marker.date" :cx="marker.x" :cy="marker.y" r="4" :fill="marker.directions.includes('SELL') ? '#f87171' : '#34d399'" stroke="var(--surface)" stroke-width="1.5"><title>{{ marker.text }}</title></circle>
-      </svg>
+      <div v-if="chartPoints()" ref="curvePlot" class="curve-plot">
+        <svg viewBox="0 0 800 240" role="img" :aria-label="props.returnCurve ? '策略收益曲线，叠加买入持有基准，标记买卖点与上线日期' : '完整区间权益曲线'">
+          <rect v-if="chart.launchX !== null" :x="chart.launchX" :y="plot.top" :width="plot.right - chart.launchX" :height="plot.bottom - plot.top" fill="var(--accent)" opacity="0.08" />
+          <g v-for="tick in chart.yTicks" :key="tick.y">
+            <line :x1="plot.left" :x2="plot.right" :y1="tick.y" :y2="tick.y" class="curve-grid" />
+            <text :x="plot.left - 8" :y="tick.y" dominant-baseline="middle" text-anchor="end" class="curve-tick">{{ tick.label }}</text>
+          </g>
+          <path :d="`M ${plot.left} ${plot.top} V ${plot.bottom} H ${plot.right}`" class="curve-axis" />
+          <g v-for="tick in chart.xTicks" :key="tick.x">
+            <line :x1="tick.x" :x2="tick.x" :y1="plot.bottom" :y2="plot.bottom + 5" class="curve-axis" />
+            <text :x="tick.x" :y="plot.bottom + 21" :text-anchor="tick.x === plot.right ? 'end' : tick.x === plot.left ? 'start' : 'middle'" class="curve-tick">{{ tick.label }}</text>
+          </g>
+          <line v-if="chart.launchX !== null" :x1="chart.launchX" :x2="chart.launchX" :y1="plot.top" :y2="plot.bottom" stroke="var(--accent)" stroke-dasharray="5 4" />
+          <polyline v-if="chart.benchmark" :points="chart.benchmark.points" fill="none" stroke="#f59e0b" stroke-width="1.6" stroke-dasharray="4 3" />
+          <polyline :points="chartPoints()" fill="none" stroke="var(--accent)" stroke-width="3" />
+          <g v-for="marker in chart.markers" :key="marker.date"
+            tabindex="0" :aria-label="marker.text"
+            @pointerenter="showTradeTooltip($event, marker.text)"
+            @pointerleave="tradeTooltip = null"
+            @focus="showTradeTooltip($event, marker.text)"
+            @blur="tradeTooltip = null"
+            @keydown.esc="tradeTooltip = null">
+            <circle :cx="marker.x" :cy="marker.y" r="9" fill="transparent" />
+            <circle :cx="marker.x" :cy="marker.y" r="4" :fill="marker.directions.includes('SELL') ? '#f87171' : '#34d399'" stroke="var(--surface)" stroke-width="1.5" />
+          </g>
+        </svg>
+        <div v-if="tradeTooltip" class="curve-trade-tooltip" role="tooltip"
+          :style="{ '--marker-x': `${tradeTooltip.x}px`, top: `${tradeTooltip.y}px` }">{{ tradeTooltip.text }}</div>
+      </div>
       <slot name="after-chart" />
       <template v-if="props.backtest.trades.length">
         <slot name="trades-toolbar" />
@@ -190,6 +221,8 @@ function closedTrades(): number {
    撑出页面，出现整页横向滚动。表格自己的 .table-wrap 里滚动。 */
 .individual-full-detail { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 10px; }
 .individual-full-detail > p { margin: 0; color: var(--muted); }
+.curve-plot { position: relative; }
+.curve-trade-tooltip { position: absolute; z-index: 2; left: clamp(0px, var(--marker-x), 100% - min(260px, 100%)); width: min(260px, 100%); box-sizing: border-box; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); box-shadow: 0 4px 14px #0005; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; pointer-events: none; }
 .curve-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 20px; width: min(100%, 800px); margin: 8px 0; color: var(--muted); }
 .curve-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; }
 .curve-legend span { display: inline-flex; align-items: center; gap: 6px; }
