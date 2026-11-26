@@ -241,7 +241,8 @@ test('task history shows durations, research split and per-mode averages', async
 
   // 后台跟踪每十分钟一条扫描记录：分组之后长跑的全市场任务不会再被挤出列表。
   await expect(page.getByTestId('pool-history-old-full')).toContainText('耗时 5 小时 12 分钟（含排队）')
-  await expect(page.getByTestId('pool-history-old-full')).toContainText('已完成 3498/4357（新研究 2639 · 复用 859）')
+  // 旧任务缺少队列内已处理数，单独显示队列大小和新研究、复用数量。
+  await expect(page.getByTestId('pool-history-old-full')).toContainText('研究队列 4357 只 · 新研究 2639 · 复用 859')
   await expect(page.getByTestId('pool-history-old-full')).toContainText('自动触发')
   await expect(page.getByTestId('pool-history-timed')).toContainText('已运行 1 小时')
   await expect(page.getByTestId('pool-research-pace')).toContainText('平均每只新研究标的 36')
@@ -279,10 +280,12 @@ test('pool details are read-only and expose both rules, launch curve and paged t
   await expect(page.locator('.metrics b').filter({hasText:'50.00%'})).toBeVisible()
   await expect(page.locator('svg')).toBeVisible()
   await expect(page.getByText('上线 2026-09-02',{exact:true})).toBeVisible()
-  await expect(page.locator('svg line[stroke-dasharray]')).toHaveAttribute('x1','400')
+  // 上线日位于区间中点，绘图区给纵轴留白后横坐标为 430。
+  await expect(page.locator('svg line[stroke-dasharray]')).toHaveAttribute('x1', '430')
   await expect(page.locator('textarea')).toHaveCount(0)
   // 历史交易默认最近成交在前，排序由后端在 offset 切片之前完成。
   expect(tradeQueries[0]).toContain('order=desc')
+  expect(tradeQueries[0]).toContain('range=1y')
   // 分页条紧贴交易表并给出页码；方向列与曲线图例同词
   await expect(page.getByTestId('pool-trade-pager')).toContainText('第 1 / 3 页 · 显示 1–50 笔 / 共 101 笔')
   await expect(page.locator('.individual-trades tbody td').nth(1)).toHaveText('买入')
