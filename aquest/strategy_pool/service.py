@@ -180,6 +180,12 @@ INSUFFICIENT_RECHECK_DAYS = 30
 _CANDIDATE_VALIDATION_DOWNGRADE_MARGIN = {"annual_return": 0.05, "sharpe": 0.20}
 _CANDIDATE_HOLDOUT_DOWNGRADE_MARGIN = 0.10
 
+#: 全段复核的否决阈值：全段（训练 + 验证 + 留出）里 60% 是训练样本，新研究在
+#: 训练段上的样本内拟合优势会系统性抬高分数，所以阈值放到验证段的两倍——只拦
+#: 「差距大到不可能是噪声」的重研结果，避免验证段没差多少、全段明显走弱的新
+#: 策略顶掉仍可用的旧策略（2026-11-26 用户要求）。
+_CANDIDATE_FULL_PERIOD_DOWNGRADE_MARGIN = {"annual_return": 0.10, "sharpe": 0.40}
+
 #: 研究准入的最低上市历史（自然日，按「首根已入库日线 → 研究终点」的跨度计），
 #: 是 512 根 K 线的自然日近似：268 根预热约 13 个月 + 244 根研究样本约 12 个月。
 #: 不满的标的：年线级指标整段是 NaN 或半值，训练/验证/留出三段加起来覆盖不了一个
@@ -2404,32 +2410,51 @@ class MarketStrategyPoolService:
         previous: Mapping[str, object],
         objective: str,
     ) -> bool:
-        """同一验证窗口复核新旧策略，留出段不参与自动替换。"""
+        """同窗口复核新旧策略：验证段为主，全段极端走弱时也保留旧策略。
 
-        split = _mapping(candidate.get("split_metadata"))
-        validation = _mapping(_mapping(split.get("observed_windows")).get("validation"))
-        validation = validation or _mapping(split.get("validation"))
-        start = parse_iso_date(validation.get("start_date") or validation.get("start"))
-        end = parse_iso_date(validation.get("end_date") or validation.get("end"))
-        if start is None or end is None or start > end:
+        验证段是搜索过程中唯一参与选择的样本外窗口，先按常规阈值判定；过关后
+        再按「训练起点 → 留出终点」重放全段。全段含 60% 训练样本，新研究在
+        训练段上的样本内拟合优势会系统性抬高分数，所以全段只用更宽的阈值拦
+        明显劣化，避免「验证段没差多少、全段明显变差」的新策略顶掉仍可用的
+        旧策略。
+        """
+
+        windows = _candidate_replay_windows(candidate)
+        validation = windows.get("validation")
+        if validation is None:
             return True
         try:
             replay = self._individual_service_for_thread().full_period_metrics
-            new = replay(candidate, start, end)
-            old = replay(previous, start, end)
+            new = replay(candidate, *validation)
+            old = replay(previous, *validation)
         except Exception:  # noqa: BLE001 - 复核失败时继续保留可运行的现有策略
             logger.exception("新旧策略同区间复核失败，保留现有策略")
             return True
         new_score = _finite_metric(new.get(objective))
         old_score = _finite_metric(old.get(objective))
         new_trades = _candidate_trade_count(new)
-        return (
+        if (
             new_trades is None
             or new_trades < MIN_VALIDATION_TRADES
             or new_score is None
             or old_score is None
             or new_score < old_score - _CANDIDATE_VALIDATION_DOWNGRADE_MARGIN[objective]
-        )
+        ):
+            return True
+        full = windows.get("full")
+        if full is None:
+            return False
+        try:
+            new_full = replay(candidate, *full)
+            old_full = replay(previous, *full)
+        except Exception:  # noqa: BLE001 - 全段复核失败时按验证段结论处理
+            logger.exception("新旧策略全段复核失败，按验证段结论接受新策略")
+            return False
+        new_full_score = _finite_metric(new_full.get(objective))
+        old_full_score = _finite_metric(old_full.get(objective))
+        if new_full_score is None or old_full_score is None:
+            return False
+        return new_full_score < old_full_score - _CANDIDATE_FULL_PERIOD_DOWNGRADE_MARGIN[objective]
 
     def _backfill_full_period_metrics(
         self,
@@ -2800,6 +2825,37 @@ def _candidate_holdout_return(candidate: Mapping[str, object]) -> float | None:
     metrics = _mapping(candidate.get("metrics"))
     holdout = _mapping(metrics.get("holdout")) or _mapping(candidate.get("holdout"))
     return _finite_metric(holdout.get("total_return"))
+
+
+def _candidate_replay_windows(
+    candidate: Mapping[str, object],
+) -> dict[str, tuple[date, date]]:
+    """候选里可用于重放复核的窗口：验证段与全段（训练起点 → 留出终点）。
+
+    全段窗口由三段拼接得到，而不是直接读 ``full_period`` 指标：新旧候选要在
+    同一区间上重放才有可比性，冻结下来的全区间指标属于各自研究时的终点。
+    """
+
+    split = _mapping(candidate.get("split_metadata"))
+    observed = _mapping(split.get("observed_windows"))
+
+    def bounds(name: str) -> tuple[date, date] | None:
+        window = _mapping(observed.get(name)) or _mapping(split.get(name))
+        start = parse_iso_date(window.get("start_date") or window.get("start"))
+        end = parse_iso_date(window.get("end_date") or window.get("end"))
+        if start is None or end is None or start > end:
+            return None
+        return start, end
+
+    windows: dict[str, tuple[date, date]] = {}
+    validation = bounds("validation")
+    if validation is not None:
+        windows["validation"] = validation
+    train = bounds("train")
+    holdout = bounds("holdout")
+    if train is not None and holdout is not None:
+        windows["full"] = (train[0], holdout[1])
+    return windows
 
 
 def _candidate_is_clearly_worse(

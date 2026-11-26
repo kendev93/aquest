@@ -1695,3 +1695,46 @@ def test_automatic_replacement_replays_both_candidates_on_current_validation_win
     ]
     new["trades"] = 5
     assert not compare(Research(), new, old, "annual_return")
+
+
+def test_automatic_replacement_vetoes_candidate_that_weakens_over_the_full_period() -> None:
+    """验证段过关但全段明显走弱的新候选仍被否决，全段只差一点则接受。"""
+
+    scores: dict[tuple[str, date, date], float] = {}
+
+    class Replay:
+        def full_period_metrics(self, candidate, start, end):
+            return {
+                "annual_return": scores[(candidate["candidate_id"], start, end)],
+                "closed_trades": 8,
+            }
+
+    class Research:
+        def _individual_service_for_thread(self):
+            return Replay()
+
+    validation = (date(2025, 1, 2), date(2025, 6, 30))
+    full = (date(2016, 2, 1), date(2026, 10, 30))
+    new = {
+        "candidate_id": "new",
+        "split_metadata": {
+            "observed_windows": {
+                "train": {"start_date": "2016-02-01", "end_date": "2022-12-30"},
+                "validation": {"start_date": "2025-01-02", "end_date": "2025-06-30"},
+                "holdout": {"start_date": "2025-07-01", "end_date": "2026-10-30"},
+            }
+        },
+    }
+    old = {"candidate_id": "old"}
+    scores[("new", *validation)] = 0.25
+    scores[("old", *validation)] = 0.15
+    compare = pool_service.MarketStrategyPoolService._replacement_is_worse
+
+    # 全段年化低 25 个百分点：超过 10 个百分点的阈值，保留旧策略
+    scores[("new", *full)] = 0.05
+    scores[("old", *full)] = 0.30
+    assert compare(Research(), new, old, "annual_return")
+
+    # 全段只低 8 个百分点：落在噪声范围内，接受新策略
+    scores[("new", *full)] = 0.22
+    assert not compare(Research(), new, old, "annual_return")
