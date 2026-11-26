@@ -59,7 +59,11 @@ describe('IndividualResearchBacktestDetail', () => {
     expect(wrapper.findAll('polyline')).toHaveLength(1)
     expect(wrapper.text()).toContain('买入')
     expect(wrapper.text()).toContain('卖出')
-    expect(wrapper.findAll('circle title')).toHaveLength(2)
+    const markers = wrapper.findAll('svg g[tabindex="0"]')
+    expect(markers.map((marker) => marker.attributes('aria-label'))).toEqual([
+      expect.stringContaining('买入'),
+      expect.stringContaining('卖出'),
+    ])
   })
 
   it('renders trade rows with Chinese sides, the signal date, and no English risk token', () => {

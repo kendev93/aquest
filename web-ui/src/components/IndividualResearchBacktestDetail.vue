@@ -191,7 +191,7 @@ function closedTrades(): number {
           </g>
         </svg>
         <div v-if="tradeTooltip" class="curve-trade-tooltip" role="tooltip"
-          :style="{ '--marker-x': `${tradeTooltip.x}px`, top: `${tradeTooltip.y}px` }">{{ tradeTooltip.text }}</div>
+          :style="{ left: `clamp(0px, ${tradeTooltip.x}px, 100% - min(260px, 100%))`, top: `${tradeTooltip.y}px` }">{{ tradeTooltip.text }}</div>
       </div>
       <slot name="after-chart" />
       <template v-if="props.backtest.trades.length">
@@ -222,7 +222,7 @@ function closedTrades(): number {
 .individual-full-detail { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 10px; }
 .individual-full-detail > p { margin: 0; color: var(--muted); }
 .curve-plot { position: relative; }
-.curve-trade-tooltip { position: absolute; z-index: 2; left: clamp(0px, var(--marker-x), 100% - min(260px, 100%)); width: min(260px, 100%); box-sizing: border-box; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); box-shadow: 0 4px 14px #0005; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; pointer-events: none; }
+.curve-trade-tooltip { position: absolute; z-index: 2; width: min(260px, 100%); box-sizing: border-box; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); box-shadow: 0 4px 14px #0005; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; pointer-events: none; }
 .curve-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 20px; width: min(100%, 800px); margin: 8px 0; color: var(--muted); }
 .curve-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; }
 .curve-legend span { display: inline-flex; align-items: center; gap: 6px; }
