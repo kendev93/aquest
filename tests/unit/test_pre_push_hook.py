@@ -52,17 +52,17 @@ def test_pre_push_reuses_stamp_for_annotated_tag(tmp_path: Path) -> None:
 
     (repo / "file.txt").write_text("two")
     _git(repo, "commit", "-q", "-am", "two")
-    _git(repo, "tag", "-a", "current", "-m", "current")
-
     shutil.copytree(_REPO_ROOT / ".githooks", repo / ".githooks")
     (repo / "scripts").mkdir()
     shutil.copy(_REPO_ROOT / "scripts" / "verify_stamp.sh", repo / "scripts")
     # 真正的 verify_ci.sh 要跑几分钟；这里只记录调用并把该范围盖章。
     (repo / "scripts" / "verify_ci.sh").write_text(
-        '#!/bin/sh\nprintf "%s\\n" "$1" >> "$(dirname "$0")/../ran.log"\n'
-        '. "$(dirname "$0")/verify_stamp.sh"\nverify_mark "$1"\n'
+        '#!/bin/sh\n. "$(dirname "$0")/verify_stamp.sh"\nverify_mark "$1"\n'
+        'printf "%s\\n" "$1" >> "$(git rev-parse --git-dir)/ran.log"\n'
     )
-    _git(repo, "config", "core.hooksPath", ".githooks")
+    _git(repo, "add", ".githooks", "scripts")
+    _git(repo, "commit", "-qm", "verification fixtures")
+    _git(repo, "tag", "-a", "current", "-m", "current")
     subprocess.run(
         ["sh", "-c", ". scripts/verify_stamp.sh; verify_mark python; verify_mark frontend-fast"],
         cwd=repo,
@@ -73,8 +73,26 @@ def test_pre_push_reuses_stamp_for_annotated_tag(tmp_path: Path) -> None:
 
     # annotated tag 的 OID 与 commit 不同，但指向 HEAD 的内容：两个范围都该跳过。
     _run_hook(repo, "refs/tags/current", _git(repo, "rev-parse", "current"))
-    assert not (repo / "ran.log").exists()
+    log = repo / ".git" / "ran.log"
+    assert not log.exists()
+
+    # 浏览器测试由 CI 单独执行，不使本地两个范围的盖章失效。
+    e2e = repo / "web-ui" / "e2e" / "check.spec.ts"
+    e2e.parent.mkdir(parents=True)
+    e2e.write_text("// e2e")
+    _git(repo, "add", "web-ui")
+    _git(repo, "commit", "-qm", "e2e only")
+    _run_hook(repo, "refs/heads/main", _git(repo, "rev-parse", "HEAD"))
+    assert not log.exists()
+
+    source = repo / "web-ui" / "src" / "app.ts"
+    source.parent.mkdir()
+    source.write_text("// frontend")
+    _git(repo, "add", "web-ui")
+    _git(repo, "commit", "-qm", "frontend only")
+    _run_hook(repo, "refs/heads/main", _git(repo, "rev-parse", "HEAD"))
+    assert log.read_text().split() == ["frontend-fast"]
 
     # 指向旧内容的标签仍要完整验证，不能因为「是个标签」就复用 HEAD 的章。
     _run_hook(repo, "refs/tags/old", _git(repo, "rev-parse", "old"))
-    assert (repo / "ran.log").read_text().split() == ["python", "frontend-fast"]
+    assert log.read_text().split() == ["frontend-fast", "python", "frontend-fast"]

@@ -81,12 +81,8 @@ trap cleanup_fixtures EXIT
 
 run_python_checks() {
   printf '%s\n' '验证 Python：测试、覆盖率、格式、Ruff、mypy'
-  if command -v python >/dev/null 2>&1; then
-    python_bin=python
-  elif command -v python3 >/dev/null 2>&1; then
-    python_bin=python3
-  else
-    printf '%s\n' '未找到 python 或 python3' >&2
+  if ! python_bin=$(verify_python_bin); then
+    printf '%s\n' '未找到项目 .venv 或可用的 Python' >&2
     exit 1
   fi
   pytest_basetemp=$(mktemp -d "${TMPDIR:-/tmp}/aquest-pytest.XXXXXX")

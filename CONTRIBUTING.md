@@ -65,12 +65,13 @@ sh scripts/verify_ci.sh             # 全部
 
 只想快速验一遍可以手动执行 `sh scripts/verify_ci.sh all --skip-docker`；提交前建议跑完整检查。
 
-每个范围验证通过后会在 `.git/aquest-verify/` 下按**代码内容**盖章，所以之后重复推送、
-网络失败重推都不会再跑一遍测试——只有要推的 commit 变了才重跑。工作区里未提交的改动
-不参与指纹（它们也不会被推上去）。需要无条件重跑时：`AQUEST_VERIFY_FORCE=1 git push`。
+验证通过后会在 `.git/aquest-verify/` 下记录对应范围的已提交输入和运行环境。Python 与前端快档
+分别复用结果，只改浏览器 E2E 用例不会触发这两项重跑。工作区有未提交改动时可以运行检查，
+但不会给当前提交写入验证记录。需要无条件重跑时：`AQUEST_VERIFY_FORCE=1 git push`。
+本地 Python 检查优先使用项目的 `.venv/bin/python`。
 
 启用 Git Hooks 后，`pre-commit` 只跑秒级的格式化与静态检查，`pre-push` 按上面这个章判断
-要不要跑 Python 全量检查：
+要不要跑 Python 全量检查和前端快档：
 
 ```bash
 sh scripts/install_hooks.sh
