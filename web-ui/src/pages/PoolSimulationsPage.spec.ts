@@ -128,7 +128,7 @@ it('renames an account from the list and keeps the open detail in sync', async (
   }
 })
 
-it('draws single-day comparisons as dots instead of an invisible polyline', async () => {
+it('starts the comparison at the creation date so two net-value days connect', async () => {
   const original = window.location.href
   window.history.replaceState({}, '', '/strategy-pool/simulations')
   const account = {
@@ -148,12 +148,11 @@ it('draws single-day comparisons as dots instead of an invisible polyline', asyn
   }))
   try {
     await flushPromises()
-    const dots = wrapper.findAll('.simulation-chart circle')
-    expect(dots).toHaveLength(1)
-    expect(dots[0].attributes('cx')).toBe('418')
+    expect(wrapper.findAll('.simulation-chart polyline')).toHaveLength(1)
+    expect(wrapper.findAll('.simulation-chart circle')).toHaveLength(0)
     const dateLabels = wrapper.findAll('.simulation-chart text')
       .map(node => node.text()).filter(text => /^\d{4}-\d{2}-\d{2}$/.test(text))
-    expect(dateLabels).toEqual(['2026-11-25', '2026-11-26', '2026-11-27', '2026-11-28', '2026-11-29'])
+    expect(dateLabels).toEqual(['2026-11-26', '2026-11-27'])
   } finally {
     wrapper.unmount()
     vi.unstubAllGlobals()

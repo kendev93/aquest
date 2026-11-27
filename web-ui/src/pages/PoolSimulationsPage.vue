@@ -214,9 +214,20 @@ onActivated(() => {
 })
 onDeactivated(() => window.clearInterval(interval))
 
+// 成立日按 0 收益起画：模拟盘在首批信号日建仓、次日开盘才成交，净值从下一个
+// 交易日起才有值；不补这个点，只有一天净值时连不成线，也看不出从 0 起步。
+function equitySeries(item: Simulation): { date: string; value: number }[] {
+  const series = item.equity.slice()
+  if (series.length && item.start_date && series[0]!.date > item.start_date) {
+    series.unshift({ date: item.start_date, value: item.initial_cash })
+  }
+  return series
+}
+
 const chart = computed(() => {
-  const values = items.value.flatMap(item => item.equity.map(point => ({
-    date: Date.parse(point.date), value: point.value / item.initial_cash - 1,
+  const seriesByItem = items.value.map(item => equitySeries(item))
+  const values = seriesByItem.flatMap((series, index) => series.map(point => ({
+    date: Date.parse(point.date), value: point.value / items.value[index]!.initial_cash - 1,
   })))
   if (!values.length) return null
   const start = Math.min(...values.map(p => p.date)), end = Math.max(...values.map(p => p.date))
@@ -243,7 +254,7 @@ const chart = computed(() => {
     low, high, xTicks,
     lines: items.value.map((item, index) => {
       // 只有一天净值时 polyline 画不出线：把点放中间并单独画圆点。
-      const coords = item.equity.map(p => ({
+      const coords = seriesByItem[index]!.map(p => ({
         x: x(Date.parse(p.date)),
         y: 198 - (p.value / item.initial_cash - 1 - low) / span * 176,
       }))
@@ -281,9 +292,10 @@ function curveStart(end: string): string {
 const detailCurve = computed<IndividualResearchFullBacktest | null>(() => {
   const item = detail.value
   if (!item || !item.equity.length) return null
-  const end = item.equity[item.equity.length - 1].date
+  const series = equitySeries(item)
+  const end = series[series.length - 1].date
   const start = curveStart(end)
-  const points = item.equity.filter(point => point.date >= start)
+  const points = series.filter(point => point.date >= start)
   if (!points.length) return null
   // 子区间以窗口首日净值为基准，成立以来以初始资金为基准，起点都从 0 开始。
   const baseline = start ? points[0].value : item.initial_cash
