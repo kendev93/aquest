@@ -49,11 +49,12 @@ def test_detail_metrics_cover_trading_risk_ranges_and_stages():
         {"direction": "SELL", "pnl": 10.0},
         {"direction": "SELL", "pnl": -5.0},
     ]
-    positions = [{"size": 10, "mark": 12.0, "cost": 100.0}]
+    positions = [{"size": 5, "mark": 12.0, "cost": 50.0}]
 
     result = detail_metrics(
         equity=equity,
         initial_cash=100.0,
+        cash=50.0,
         trades=trades,
         positions=positions,
         benchmark=benchmark,
@@ -64,8 +65,14 @@ def test_detail_metrics_cover_trading_risk_ranges_and_stages():
     assert trading["closed"] == 2
     assert trading["win_rate"] == pytest.approx(0.5)
     assert trading["payoff_ratio"] == pytest.approx(2.0)
+    assert trading["profit_factor"] == pytest.approx(2.0)
+    assert trading["avg_win"] == pytest.approx(10.0)
+    assert trading["avg_loss"] == pytest.approx(5.0)
+    assert trading["best_trade"] == pytest.approx(10.0)
+    assert trading["worst_trade"] == pytest.approx(-5.0)
+    assert trading["expectancy"] == pytest.approx(2.5)
     assert trading["realized_pnl"] == pytest.approx(5.0)
-    assert trading["unrealized_pnl"] == pytest.approx(20.0)
+    assert trading["unrealized_pnl"] == pytest.approx(10.0)
     assert trading["avg_rank"] == pytest.approx(1.0)
 
     risk = result["risk"]
@@ -74,6 +81,26 @@ def test_detail_metrics_cover_trading_risk_ranges_and_stages():
     assert risk["max_drawdown_days"] == 1
     assert risk["sample_days"] == 3
     assert risk["volatility"] is None and risk["sharpe"] is None
+    assert risk["avg_drawdown"] == pytest.approx((1 - 105 / 110) / 3)
+    assert risk["underwater_ratio"] == pytest.approx(1 / 3)
+    assert risk["max_daily_gain"] == pytest.approx(0.1)
+    assert risk["max_daily_loss"] == pytest.approx(105 / 110 - 1)
+    assert risk["daily_win_rate"] == pytest.approx(1 / 3)
+    assert risk["max_up_streak"] == 1 and risk["max_down_streak"] == 1
+
+    relative = result["relative"]
+    assert relative["days"] == 3
+    assert relative["beta"] is not None
+    assert relative["correlation"] is not None
+    assert relative["excess_max_drawdown"] is not None
+    assert relative["tracking_error"] is None
+    assert relative["information_ratio"] is None
+
+    concentration = result["concentration"]
+    assert concentration["max_weight"] == pytest.approx(60 / 105)
+    assert concentration["top3_weight"] == pytest.approx(60 / 105)
+    assert concentration["hhi"] == pytest.approx((60 / 105) ** 2)
+    assert concentration["cash_ratio"] == pytest.approx(50 / 105)
 
     ranges = {row["key"]: row for row in result["ranges"]}
     near_month = ranges["1m"]
@@ -103,6 +130,7 @@ def test_annualised_risk_metrics_require_twenty_samples():
     short = detail_metrics(
         equity=curve(19),
         initial_cash=100.0,
+        cash=0.0,
         trades=[],
         positions=[],
         benchmark=None,
@@ -114,6 +142,7 @@ def test_annualised_risk_metrics_require_twenty_samples():
     enough = detail_metrics(
         equity=curve(20),
         initial_cash=100.0,
+        cash=0.0,
         trades=[],
         positions=[],
         benchmark=None,

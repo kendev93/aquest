@@ -479,6 +479,7 @@ class PoolSimulations:
                     metrics=detail_metrics(
                         equity=equity,
                         initial_cash=initial,
+                        cash=float(state["cash"]),
                         trades=state["trades"],
                         positions=positions,
                         benchmark=benchmark,

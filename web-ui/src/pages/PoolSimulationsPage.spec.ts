@@ -177,8 +177,23 @@ it('shows the detail return curve with range shortcuts and buy/sell markers', as
     day_return: 0.01, benchmark_return: 0.02, holdings_return: 0.015,
     excess_benchmark: -0.01, excess_holdings: -0.005,
     metrics: {
-      trading: { closed: 1, win_rate: 1, payoff_ratio: null, realized_pnl: 90, unrealized_pnl: 0, avg_rank: 1 },
-      risk: { max_drawdown: 0, max_drawdown_days: 0, current_drawdown: 0, volatility: null, sharpe: null, sample_days: 3 },
+      trading: {
+        closed: 1, win_rate: 1, payoff_ratio: null, profit_factor: null,
+        avg_win: 90, avg_loss: null, best_trade: 90, worst_trade: null, expectancy: 90,
+        realized_pnl: 90, unrealized_pnl: 0, avg_rank: 1,
+      },
+      risk: {
+        max_drawdown: 0, max_drawdown_days: 0, avg_drawdown: 0, current_drawdown: 0,
+        underwater_ratio: 0, sample_days: 3, annual_return: null, volatility: null,
+        downside_volatility: null, sharpe: null, sortino: null, calmar: null, var95: null,
+        max_daily_gain: 0.01, max_daily_loss: 0, daily_win_rate: 0.5, avg_daily_return: 0.005,
+        max_up_streak: 1, max_down_streak: 0,
+      },
+      relative: {
+        days: 3, beta: null, correlation: null, tracking_error: null, information_ratio: null,
+        up_capture: null, down_capture: null, excess_max_drawdown: 0,
+      },
+      concentration: { max_weight: 0, top3_weight: 0, hhi: 0, cash_ratio: 0.9 },
       ranges: [{ key: '1m', label: '近 1 月', start: '2026-06-30', strategy: 0.02, benchmark: 0.05, holdings: 0.03, excess_benchmark: -0.03, excess_holdings: -0.01 }],
       stages: [{ key: '5d', label: '近 5 日', days: 2, start: '2026-06-30', strategy: 0.02, benchmark: 0.05, holdings: 0.03, excess_benchmark: -0.03, excess_holdings: -0.01 }],
     },
@@ -218,7 +233,10 @@ it('shows the detail return curve with range shortcuts and buy/sell markers', as
     expect(wrapper.text()).toContain('沪深300ETF 510300 · 前复权')
     expect(wrapper.text()).toContain('持仓等权 · 每日再平衡')
     expect(wrapper.text()).toContain('区间表现')
-    expect(wrapper.text()).toContain('交易与风险')
+    expect(wrapper.text()).toContain('收益与回撤')
+    expect(wrapper.text()).toContain('风险调整')
+    expect(wrapper.text()).toContain('相对沪深300')
+    expect(wrapper.text()).toContain('交易与集中度')
     expect(wrapper.text()).toContain('已平仓')
     expect(wrapper.findAll('polyline[stroke="#f59e0b"]')).toHaveLength(1)
     expect(wrapper.findAll('polyline[stroke="#38bdf8"]')).toHaveLength(1)

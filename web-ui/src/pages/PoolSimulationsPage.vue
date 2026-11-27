@@ -20,11 +20,27 @@ type PeriodRow = {
 type SimulationMetrics = {
   trading: {
     closed: number; win_rate: number | null; payoff_ratio: number | null
+    profit_factor: number | null; avg_win: number | null; avg_loss: number | null
+    best_trade: number | null; worst_trade: number | null; expectancy: number | null
     realized_pnl: number; unrealized_pnl: number; avg_rank: number | null
   }
   risk: {
-    max_drawdown: number; max_drawdown_days: number; current_drawdown: number
-    volatility: number | null; sharpe: number | null; sample_days: number
+    max_drawdown: number; max_drawdown_days: number; avg_drawdown: number | null
+    current_drawdown: number; underwater_ratio: number | null; sample_days: number
+    annual_return: number | null; volatility: number | null; downside_volatility: number | null
+    sharpe: number | null; sortino: number | null; calmar: number | null; var95: number | null
+    max_daily_gain: number | null; max_daily_loss: number | null
+    daily_win_rate: number | null; avg_daily_return: number | null
+    max_up_streak: number; max_down_streak: number
+  }
+  relative: {
+    days: number; beta: number | null; correlation: number | null
+    tracking_error: number | null; information_ratio: number | null
+    up_capture: number | null; down_capture: number | null; excess_max_drawdown: number | null
+  }
+  concentration: {
+    max_weight: number | null; top3_weight: number | null
+    hhi: number | null; cash_ratio: number | null
   }
   ranges: PeriodRow[]
   stages: PeriodRow[]
@@ -420,20 +436,61 @@ const detailCurve = computed<IndividualResearchFullBacktest | null>(() => {
               </tbody>
             </table>
           </div>
-          <h3>交易与风险</h3>
+          <h3>收益与回撤</h3>
+          <dl class="simulation-metrics">
+            <div><dt>年化收益</dt><dd>{{ formatPercent(detail.metrics.risk.annual_return) }}</dd></div>
+            <div><dt>最大回撤</dt><dd>{{ formatPercent(detail.metrics.risk.max_drawdown) }}</dd></div>
+            <div><dt>最长回撤持续</dt><dd>{{ detail.metrics.risk.max_drawdown_days }} 天</dd></div>
+            <div><dt>当前回撤</dt><dd>{{ formatPercent(detail.metrics.risk.current_drawdown) }}</dd></div>
+            <div><dt>平均回撤</dt><dd>{{ formatPercent(detail.metrics.risk.avg_drawdown) }}</dd></div>
+            <div><dt>水下时间占比</dt><dd>{{ formatPercent(detail.metrics.risk.underwater_ratio) }}</dd></div>
+            <div><dt>单日最大涨幅</dt><dd>{{ formatSignedPercent(detail.metrics.risk.max_daily_gain) }}</dd></div>
+            <div><dt>单日最大跌幅</dt><dd>{{ formatSignedPercent(detail.metrics.risk.max_daily_loss) }}</dd></div>
+            <div><dt>日胜率</dt><dd>{{ formatPercent(detail.metrics.risk.daily_win_rate) }}</dd></div>
+            <div><dt>日均收益</dt><dd>{{ formatSignedPercent(detail.metrics.risk.avg_daily_return) }}</dd></div>
+            <div><dt>最大连涨</dt><dd>{{ detail.metrics.risk.max_up_streak }} 日</dd></div>
+            <div><dt>最大连亏</dt><dd>{{ detail.metrics.risk.max_down_streak }} 日</dd></div>
+          </dl>
+          <h3>风险调整</h3>
+          <dl class="simulation-metrics">
+            <div><dt>年化波动</dt><dd>{{ formatPercent(detail.metrics.risk.volatility) }}</dd></div>
+            <div><dt>下行波动</dt><dd>{{ formatPercent(detail.metrics.risk.downside_volatility) }}</dd></div>
+            <div><dt>夏普</dt><dd>{{ formatNumber(detail.metrics.risk.sharpe) }}</dd></div>
+            <div><dt>Sortino</dt><dd>{{ formatNumber(detail.metrics.risk.sortino) }}</dd></div>
+            <div><dt>Calmar</dt><dd>{{ formatNumber(detail.metrics.risk.calmar) }}</dd></div>
+            <div><dt>VaR 95%（单日）</dt><dd>{{ formatSignedPercent(detail.metrics.risk.var95) }}</dd></div>
+          </dl>
+          <h3>相对沪深300</h3>
+          <dl class="simulation-metrics">
+            <div><dt>对齐样本</dt><dd>{{ detail.metrics.relative.days }} 日</dd></div>
+            <div><dt>Beta</dt><dd>{{ formatNumber(detail.metrics.relative.beta) }}</dd></div>
+            <div><dt>相关系数</dt><dd>{{ formatNumber(detail.metrics.relative.correlation) }}</dd></div>
+            <div><dt>跟踪误差</dt><dd>{{ formatPercent(detail.metrics.relative.tracking_error) }}</dd></div>
+            <div><dt>信息比率</dt><dd>{{ formatNumber(detail.metrics.relative.information_ratio) }}</dd></div>
+            <div><dt>上行捕获</dt><dd>{{ formatPercent(detail.metrics.relative.up_capture) }}</dd></div>
+            <div><dt>下行捕获</dt><dd>{{ formatPercent(detail.metrics.relative.down_capture) }}</dd></div>
+            <div><dt>相对回撤</dt><dd>{{ formatPercent(detail.metrics.relative.excess_max_drawdown) }}</dd></div>
+          </dl>
+          <h3>交易与集中度</h3>
           <dl class="simulation-metrics">
             <div><dt>已平仓</dt><dd>{{ detail.metrics.trading.closed }} 笔</dd></div>
             <div><dt>胜率</dt><dd>{{ formatPercent(detail.metrics.trading.win_rate) }}</dd></div>
             <div><dt>盈亏比</dt><dd>{{ formatNumber(detail.metrics.trading.payoff_ratio) }}</dd></div>
+            <div><dt>盈亏因子</dt><dd>{{ formatNumber(detail.metrics.trading.profit_factor) }}</dd></div>
+            <div><dt>平均盈利</dt><dd>{{ formatNumber(detail.metrics.trading.avg_win) }}</dd></div>
+            <div><dt>平均亏损</dt><dd>{{ formatNumber(detail.metrics.trading.avg_loss) }}</dd></div>
+            <div><dt>单笔最佳</dt><dd>{{ formatNumber(detail.metrics.trading.best_trade) }}</dd></div>
+            <div><dt>单笔最差</dt><dd>{{ formatNumber(detail.metrics.trading.worst_trade) }}</dd></div>
+            <div><dt>每笔期望</dt><dd>{{ formatNumber(detail.metrics.trading.expectancy) }}</dd></div>
             <div><dt>已实现盈亏</dt><dd>{{ formatNumber(detail.metrics.trading.realized_pnl) }}</dd></div>
             <div><dt>浮动盈亏</dt><dd>{{ formatNumber(detail.metrics.trading.unrealized_pnl) }}</dd></div>
             <div><dt>平均买入名次</dt><dd>{{ formatNumber(detail.metrics.trading.avg_rank, 1) }}</dd></div>
-            <div><dt>最长回撤持续</dt><dd>{{ detail.metrics.risk.max_drawdown_days }} 天</dd></div>
-            <div><dt>当前回撤</dt><dd>{{ formatPercent(detail.metrics.risk.current_drawdown) }}</dd></div>
-            <div><dt>年化波动</dt><dd>{{ formatPercent(detail.metrics.risk.volatility) }}</dd></div>
-            <div><dt>夏普</dt><dd>{{ formatNumber(detail.metrics.risk.sharpe) }}</dd></div>
+            <div><dt>最大单只权重</dt><dd>{{ formatPercent(detail.metrics.concentration.max_weight) }}</dd></div>
+            <div><dt>前三大权重</dt><dd>{{ formatPercent(detail.metrics.concentration.top3_weight) }}</dd></div>
+            <div><dt>集中度 HHI</dt><dd>{{ formatNumber(detail.metrics.concentration.hhi, 3) }}</dd></div>
+            <div><dt>现金占比</dt><dd>{{ formatPercent(detail.metrics.concentration.cash_ratio) }}</dd></div>
           </dl>
-          <p class="simulation-copy">风险指标按 {{ detail.metrics.risk.sample_days }} 个净值日样本计算；不足 20 个交易日只显示回撤类，不给年化波动与夏普。</p>
+          <p class="simulation-copy">年化收益、波动、夏普、Sortino、Calmar、Beta、跟踪误差、信息比率与捕获率要求至少 20 个净值日样本；不足时显示 —。当前样本 {{ detail.metrics.risk.sample_days }} 个净值日、沪深300 对齐 {{ detail.metrics.relative.days }} 日。</p>
         </template>
         <h3>当前持仓</h3>
         <div class="table-wrap">
