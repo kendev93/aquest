@@ -236,7 +236,7 @@ const chart = computed(() => {
                 <td>{{ labels[item.objective] }} · {{ rankLabels[item.ranking as Rank] }}</td>
                 <td>{{ item.holding_count }}/{{ item.max_positions ?? 5 }}</td><td>{{ formatSignedPercent(item.total_return) }}</td>
                 <td>{{ formatPercent(item.max_drawdown) }}</td><td>{{ formatNumber(item.turnover) }} 倍</td><td>{{ formatNumber(item.total_fees) }}</td>
-                <td><button class="button-secondary" type="button" :disabled="busy" @click="toggle(item)">{{ item.paused ? '恢复' : '暂停' }}</button><button class="simulation-delete" type="button" :disabled="busy" @click="remove(item)">删除</button><small v-if="item.warning">{{ item.warning }}</small></td>
+                <td><button class="button-secondary" type="button" :disabled="busy" @click="toggle(item)">{{ item.paused ? '恢复' : '暂停' }}</button><button class="button-secondary simulation-delete" type="button" :disabled="busy" @click="remove(item)">删除</button><small v-if="item.warning">{{ item.warning }}</small></td>
               </tr>
             </tbody>
           </table>
@@ -309,9 +309,7 @@ th { color: var(--muted); }
 td small { display: block; margin-top: 5px; color: var(--warning); white-space: normal; }
 .simulation-name { color: var(--accent); font-size: inherit; }
 .simulation-name[aria-pressed="true"] { background: var(--accent-soft); }
-.simulation-delete { margin-left: 6px; min-height: 28px; padding: 0 10px; border: 1px solid var(--danger); border-radius: 5px; background: transparent; color: var(--danger); cursor: pointer; font-size: 11px; font-weight: 700; }
-.simulation-delete:hover:not(:disabled) { opacity: 0.75; }
-.simulation-delete:disabled { cursor: wait; opacity: 0.5; }
+.simulation-delete { margin-left: 6px; border-color: var(--danger); background: transparent; color: var(--danger); }
 .simulation-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 125px), 1fr)); gap: 10px; margin: 14px 0 18px; }
 .simulation-metrics > div { padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-raised); }
 .simulation-metrics dt { color: var(--muted); font-size: 12px; }
