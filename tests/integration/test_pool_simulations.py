@@ -258,6 +258,90 @@ def test_simulation_http_delete_removes_account(tmp_path):
         assert client.get(url).json() == {"data": []}
 
 
+def test_rebalance_trims_overweight_and_tops_up_underweight():
+    from aquest.portfolio_backtest.models import PortfolioBacktestConfig
+    from aquest.strategy_pool.simulations import execute_orders, rebalance_targets
+
+    config = PortfolioBacktestConfig(
+        vipdoc_path="",
+        universe="codes",
+        codes=("SH:600000", "SH:600001"),
+        selected_signals=("technical.macd",),
+        combine_mode="all",
+        minimum_matches=None,
+        ranking_value="price.close",
+        stop_loss_pct=0.2,
+    )
+    state = {
+        "cash": 10_000.0,
+        "started": True,
+        "cooldown": {},
+        "trades": [],
+        "pending": {},
+        "positions": {
+            "SH600000": {
+                "market": "SH",
+                "code": "600000",
+                "size": 4000,
+                "cost": 40_000.0,
+                "mark": 15.0,
+                "entry_price": 10.0,
+                "highest_price": 15.0,
+                "tracking_version_id": "A",
+            },
+            "SH600001": {
+                "market": "SH",
+                "code": "600001",
+                "size": 1000,
+                "cost": 10_000.0,
+                "mark": 10.0,
+                "entry_price": 10.0,
+                "highest_price": 10.0,
+                "tracking_version_id": "B",
+            },
+        },
+    }
+    # 50% 目标：A 占 75%、B 占 12.5%，两条都越过 ±5 个百分点的带子。
+    targets = rebalance_targets(state, 2, 0.05)
+    assert targets == {"SH600000": 40_000.0, "SH600001": 40_000.0}
+
+    execute_orders(
+        state,
+        [],
+        "2026-11-25",
+        "2026-11-26",
+        lambda symbol: (10.0, 10.0) if symbol == "SH600001" else (15.0, 15.0),
+        lambda _: config,
+        slots=2,
+        rebalance=targets,
+    )
+
+    assert [trade["reason"] for trade in state["trades"]] == ["再平衡减仓", "再平衡补仓"]
+    assert state["trades"][0]["symbol"] == "SH600000"
+    assert state["trades"][0]["size"] == 1300
+    assert state["positions"]["SH600000"]["size"] == 2700
+    assert state["positions"]["SH600001"]["size"] == 3900
+    assert state["cash"] >= 0
+
+
+def test_rebalance_targets_skip_positions_queued_to_exit():
+    from aquest.strategy_pool.simulations import rebalance_targets
+
+    state = {
+        "cash": 0.0,
+        "pending": {},
+        "positions": {
+            "SH600000": {"size": 4000, "mark": 10.0},
+            "SH600001": {"size": 6000, "mark": 10.0},
+        },
+    }
+    # 40% / 60%：两只都越过 50% ± 5 个百分点的带子。
+    assert set(rebalance_targets(state, 2, 0.05)) == {"SH600000", "SH600001"}
+    # 已经排队等卖出的仓位不参与再平衡，剩下的 B 仍按 60% 报超配。
+    state["pending"]["SH600000"] = {"signal_date": "2026-11-25", "reason": "卖出条件"}
+    assert rebalance_targets(state, 2, 0.05) == {"SH600001": 50_000.0}
+
+
 def test_unfilled_exit_keeps_slot_and_same_day_exit_cannot_reenter():
     from aquest.portfolio_backtest.models import PortfolioBacktestConfig
     from aquest.strategy_pool.simulations import execute_orders

@@ -263,7 +263,7 @@ const detailCurve = computed<IndividualResearchFullBacktest | null>(() => {
         <div>
           <p class="eyebrow">STRATEGY POOL / SIMULATIONS</p>
           <h1>榜单模拟盘</h1>
-          <p class="simulation-copy">按买入信号榜建仓，默认持有上限为 5 只。次日开盘先卖出，再补空出的仓位。</p>
+          <p class="simulation-copy">按买入信号榜建仓，默认持有上限为 5 只。次日开盘先卖出，再补空出的仓位；单只权重偏离目标（1/持仓上限）超过 5 个百分点时，同日开盘再平衡。</p>
         </div>
         <button v-if="!creating" class="button-primary" type="button" @click="creating = true">创建模拟盘</button>
       </header>

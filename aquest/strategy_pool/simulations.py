@@ -34,6 +34,8 @@ from .tracking_store import dumps
 
 logger = logging.getLogger(__name__)
 DEFAULT_SLOTS = 5
+#: 单只仓位权重偏离目标（1/持仓上限）多少个百分点时触发再平衡。
+DEFAULT_REBALANCE_BAND = 0.05
 
 
 def _symbol(row: dict[str, Any]) -> str:
@@ -94,6 +96,47 @@ def _order_fees(size: float, price: float, config: PortfolioBacktestConfig, *, s
     )
 
 
+def _lot_size(config: PortfolioBacktestConfig) -> int:
+    return profile_from_config(
+        "stock",
+        commission=config.commission,
+        min_commission=config.min_commission,
+        stamp_tax=config.stamp_tax,
+    ).lot_size
+
+
+def rebalance_targets(state: dict[str, Any], slots: int, band: float) -> dict[str, float]:
+    """按信号日收盘权重挑出偏离目标超过阈值的仓位，返回统一的调仓目标市值。
+
+    即将执行卖出的仓位（``pending``）不参与：它当天开盘就清仓，再平衡没有意义。
+    目标很小、5 个百分点超过目标一半时（持仓上限较大），下限收到目标的一半。
+    """
+
+    if band <= 0 or slots <= 0:
+        return {}
+    eligible = {
+        symbol: position
+        for symbol, position in state["positions"].items()
+        if symbol not in state["pending"]
+    }
+    if not eligible:
+        return {}
+    equity = state["cash"] + sum(
+        position["size"] * position["mark"] for position in state["positions"].values()
+    )
+    if equity <= 0:
+        return {}
+    target = 1 / slots
+    upper = target + band
+    lower = max(target - min(band, target / 2), 0.0)
+    per_position = equity * target
+    return {
+        symbol: per_position
+        for symbol, position in eligible.items()
+        if not lower <= position["size"] * position["mark"] / equity <= upper
+    }
+
+
 def execute_orders(
     state: dict[str, Any],
     buys: list[dict[str, Any]],
@@ -103,8 +146,9 @@ def execute_orders(
     version_config: Callable[[dict[str, Any]], PortfolioBacktestConfig | None],
     *,
     slots: int = DEFAULT_SLOTS,
+    rebalance: dict[str, float] | None = None,
 ) -> None:
-    """先卖后买；没有卖出成交的仓位不会变成买入名额。"""
+    """先卖后买；没有卖出成交的仓位不会变成买入名额。再平衡与卖出同一次开盘成交。"""
 
     positions = state["positions"]
     initial = not state["started"]
@@ -138,6 +182,43 @@ def execute_orders(
         del positions[symbol], state["pending"][symbol]
         sold.add(symbol)
 
+    # 再平衡减仓：与卖出同一次开盘成交；部分卖出后仓位保留，也不进冷却。
+    for symbol, target in (rebalance or {}).items():
+        position = positions.get(symbol)
+        if position is None or symbol in state["pending"]:
+            continue
+        prices = quote(symbol)
+        config = version_config(position)
+        if prices is None or config is None:
+            continue
+        price = prices[0]
+        size = position["size"]
+        excess = size * price - target
+        lot = _lot_size(config)
+        trim = min(int(excess / price / lot) * lot, size) if excess > 0 else 0
+        if not trim:
+            continue
+        fee = _order_fees(trim, price, config, sell=True)
+        proceeds = price * trim - fee
+        cost_part = position["cost"] * trim / size
+        state["cash"] += proceeds
+        position["size"] = size - trim
+        position["cost"] -= cost_part
+        state["trades"].append(
+            {
+                "symbol": symbol,
+                "date": trade_day,
+                "signal_date": signal_day,
+                "direction": "SELL",
+                "price": price,
+                "size": trim,
+                "fee": fee,
+                "reason": "再平衡减仓",
+                "pnl": proceeds - cost_part,
+                "version_id": position["tracking_version_id"],
+            }
+        )
+
     available = min(slots - len(positions), slots if initial else len(sold))
     # 每个空位最多用当前总权益的一个目标仓位的额度，未成交资金继续留在现金中。
     open_equity = state["cash"] + sum(
@@ -156,12 +237,7 @@ def execute_orders(
             continue
         price, close = prices
         budget = min(state["cash"], open_equity / slots)
-        lot = profile_from_config(
-            "stock",
-            commission=config.commission,
-            min_commission=config.min_commission,
-            stamp_tax=config.stamp_tax,
-        ).lot_size
+        lot = _lot_size(config)
         size = int(budget / price / lot) * lot
         while size and size * price + _order_fees(size, price, config, sell=False) > budget:
             size -= lot
@@ -198,6 +274,46 @@ def execute_orders(
             }
         )
         available -= 1
+
+    # 再平衡补仓：新开仓先用钱，剩下的现金补低配；缺口大的先补。
+    planned = [symbol for symbol in (rebalance or {}) if symbol in positions]
+    for symbol in sorted(planned, key=lambda key: positions[key]["size"] * positions[key]["mark"]):
+        position = positions[symbol]
+        target = (rebalance or {})[symbol]
+        prices = quote(symbol)
+        config = version_config(position)
+        if prices is None or config is None:
+            continue
+        price, _close = prices
+        budget = min(state["cash"], target - position["size"] * price)
+        if budget <= 0:
+            continue
+        lot = _lot_size(config)
+        size = int(budget / price / lot) * lot
+        while size and size * price + _order_fees(size, price, config, sell=False) > budget:
+            size -= lot
+        if not size:
+            continue
+        fee = _order_fees(size, price, config, sell=False)
+        cost = size * price + fee
+        state["cash"] -= cost
+        position["size"] += size
+        position["cost"] += cost
+        position["highest_price"] = max(position["highest_price"], price)
+        state["trades"].append(
+            {
+                "symbol": symbol,
+                "date": trade_day,
+                "signal_date": signal_day,
+                "direction": "BUY",
+                "price": price,
+                "size": size,
+                "fee": fee,
+                "reason": "再平衡补仓",
+                "version_id": position["tracking_version_id"],
+            }
+        )
+
     state["started"] = True
     for symbol, position in positions.items():
         if prices := quote(symbol):
@@ -524,12 +640,15 @@ class PoolSimulations:
                     state["cash"],
                     {},
                 )
+            # 暂停恢复时 mark 可能停在暂停前；用信号日最后一根已完成收盘校正权重口径。
+            row["mark"] = float(raw.iloc[-1]["close"])
             row.update(
                 size=position.size,
                 highest_price=position.highest_price,
                 entry_price=position.entry_price,
             )
             row["applied_corporate_actions"] = sorted(position.applied_corporate_actions)
+        slots = config.get("max_positions", DEFAULT_SLOTS)
         execute_orders(
             state,
             rank_buys(rows, config),
@@ -537,7 +656,12 @@ class PoolSimulations:
             str(trade_day),
             quote,
             version,
-            slots=config.get("max_positions", DEFAULT_SLOTS),
+            slots=slots,
+            rebalance=rebalance_targets(
+                state,
+                slots,
+                float(config.get("rebalance_band", DEFAULT_REBALANCE_BAND)),
+            ),
         )
         state["equity"].append(
             {
