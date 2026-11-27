@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import { computed, onActivated, onDeactivated, ref, watch } from 'vue'
 import AppTopbar from '../components/AppTopbar.vue'
+import IndividualResearchBacktestDetail from '../components/IndividualResearchBacktestDetail.vue'
+import PageGuide from '../components/PageGuide.vue'
 import { createRequestClient, ApiError } from '../api/client'
 import { formatNumber, formatPercent, formatSignedPercent } from '../utils/format'
+import type { IndividualResearchFullBacktest } from '../types'
 
 const endpoint = '/api/v1/strategy-pool/simulations'
 const request = createRequestClient({ errorClass: ApiError, messages: { fallback: '模拟盘请求失败' } })
@@ -15,7 +18,7 @@ type Simulation = {
   cash: number; value: number; total_return: number; max_drawdown: number
   total_fees: number; turnover: number; holding_count: number; max_positions?: number
   equity: { date: string; value: number }[]
-  positions?: Position[]; trades?: Trade[]; trades_total?: number
+  positions?: Position[]; trades?: Trade[]; trades_total?: number; all_trades?: Trade[]
 }
 
 const rankLabels = {
@@ -172,6 +175,57 @@ const chart = computed(() => {
     })).filter(line => line.points),
   }
 })
+
+type CurveRange = '1m' | '3m' | '6m' | '1y' | 'ytd' | 'all'
+const curveRanges: { key: CurveRange; label: string }[] = [
+  { key: '1m', label: '近 1 月' },
+  { key: '3m', label: '近 3 月' },
+  { key: '6m', label: '近半年' },
+  { key: '1y', label: '近 1 年' },
+  { key: 'ytd', label: '今年以来' },
+  { key: 'all', label: '成立以来' },
+]
+const curveRange = ref<CurveRange>('all')
+
+function curveStart(end: string): string {
+  if (curveRange.value === 'all') return ''
+  const [year, month, day] = end.split('-').map(Number)
+  if (curveRange.value === 'ytd') return `${year}-01-01`
+  const months = { '1m': 1, '3m': 3, '6m': 6, '1y': 12 }[curveRange.value]
+  const start = new Date(Date.UTC(year, month - 1 - months, 1))
+  const monthEnd = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 0))
+  start.setUTCDate(Math.min(day, monthEnd.getUTCDate()))
+  return start.toISOString().slice(0, 10)
+}
+
+const detailCurve = computed<IndividualResearchFullBacktest | null>(() => {
+  const item = detail.value
+  if (!item || !item.equity.length) return null
+  const end = item.equity[item.equity.length - 1].date
+  const start = curveStart(end)
+  const points = item.equity.filter(point => point.date >= start)
+  if (!points.length) return null
+  // 子区间以窗口首日净值为基准，成立以来以初始资金为基准，起点都从 0 开始。
+  const baseline = start ? points[0].value : item.initial_cash
+  const trades = (item.all_trades ?? []).filter(trade => trade.date >= start)
+  const events = new Map<string, Trade[]>()
+  for (const trade of trades) events.set(trade.date, [...(events.get(trade.date) ?? []), trade])
+  return {
+    start_date: points[0].date,
+    end_date: end,
+    bars: points.length,
+    closed_trades: trades.length,
+    performance: {},
+    benchmark: null,
+    equity_curve: points.map(point => ({
+      date: point.date,
+      return_pct: point.value / baseline - 1,
+      trade_directions: (events.get(point.date) ?? []).map(trade => trade.direction),
+      trade_events: events.get(point.date) ?? [],
+    })),
+    trades: [],
+  }
+})
 </script>
 
 <template>
@@ -179,6 +233,7 @@ const chart = computed(() => {
     <AppTopbar />
     <main class="content-shell simulation-shell">
       <a class="simulation-back" href="/strategy-pool">← 返回全市场策略池</a>
+      <PageGuide page-key="strategy-pool" />
       <header class="simulation-header">
         <div>
           <p class="eyebrow">STRATEGY POOL / SIMULATIONS</p>
@@ -250,6 +305,14 @@ const chart = computed(() => {
           <div><dt>现金</dt><dd>{{ formatNumber(detail.cash) }}</dd></div>
           <div><dt>持仓</dt><dd>{{ detail.holding_count }} / {{ detail.max_positions ?? 5 }}</dd></div>
         </dl>
+        <div class="simulation-curve-heading">
+          <h3>收益曲线</h3>
+          <div v-if="detail.equity.length" class="segmented-tabs" role="group" aria-label="收益曲线区间">
+            <button v-for="option in curveRanges" :key="option.key" :aria-pressed="curveRange === option.key" @click="curveRange = option.key">{{ option.label }}</button>
+          </div>
+        </div>
+        <IndividualResearchBacktestDetail v-if="detailCurve" :backtest="detailCurve" hide-metrics hide-trades return-curve />
+        <p v-else class="simulation-empty">等待下一交易日行情与信号齐备后生成净值。</p>
         <h3>当前持仓</h3>
         <div class="table-wrap">
           <table>
@@ -314,6 +377,8 @@ td small { display: block; margin-top: 5px; color: var(--warning); white-space: 
 .simulation-metrics > div { padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-raised); }
 .simulation-metrics dt { color: var(--muted); font-size: 12px; }
 .simulation-metrics dd { margin: 6px 0 0; font-weight: 700; font-variant-numeric: tabular-nums; }
+.simulation-curve-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin: 18px 0 10px; }
+.simulation-curve-heading h3 { margin: 0; }
 .simulation-trades-title { margin-top: 18px; }
 .simulation-empty + .table-wrap { margin-top: 14px; }
 @media (max-width: 640px) {

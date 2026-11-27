@@ -228,7 +228,7 @@ def test_simulation_http_delete_removes_account(tmp_path):
                 "INSERT INTO pool_simulations VALUES ('sim-delete', ?, ?)",
                 [dumps(config), dumps(state)],
             )
-        assert client.get(f"{url}/sim-delete").status_code == 200
+        assert client.get(f"{url}/sim-delete").json()["data"]["all_trades"] == []
         assert client.delete(f"{url}/missing").status_code == 404
         response = client.delete(f"{url}/sim-delete")
         assert response.status_code == 200

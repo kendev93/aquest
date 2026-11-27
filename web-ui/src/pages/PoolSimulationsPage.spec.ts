@@ -82,3 +82,52 @@ it('deletes an account after confirmation and clears its detail', async () => {
     window.history.replaceState({}, '', original)
   }
 })
+
+it('shows the detail return curve with range shortcuts and buy/sell markers', async () => {
+  const original = window.location.href
+  window.history.replaceState({}, '', '/strategy-pool/simulations')
+  const account = {
+    id: 'curve', name: '曲线盘', objective: 'annual_return', ranking: 'default', min_days: 0,
+    direction: 'desc', start_date: '2026-06-30', initial_cash: 1000000, paused: false,
+    cash: 900000, value: 1020000, total_return: 0.02, max_drawdown: 0, total_fees: 10,
+    turnover: 0.1, holding_count: 1, equity: [
+      { date: '2026-06-30', value: 1000000 },
+      { date: '2026-11-26', value: 1010000 },
+      { date: '2026-11-27', value: 1020000 },
+    ],
+    positions: [], trades: [], trades_total: 2,
+    all_trades: [
+      { date: '2026-06-30', signal_date: '2026-06-27', symbol: 'SH600000', direction: 'BUY', price: 10, size: 100, fee: 5, reason: '成立建仓' },
+      { date: '2026-11-27', signal_date: '2026-11-26', symbol: 'SH600000', direction: 'SELL', price: 11, size: 100, fee: 5, reason: '卖出条件', pnl: 90 },
+    ],
+  }
+  const api = vi.fn(async (url: string) => {
+    const data = url.includes('/signal-days') ? [] : url.includes('/curve?') ? account : [account]
+    return { ok: true, text: async () => JSON.stringify({ data }) }
+  })
+  vi.stubGlobal('fetch', api)
+  const wrapper = mount(defineComponent({
+    setup: () => () => h(KeepAlive, null, { default: () => h(PoolSimulationsPage) }),
+  }))
+  try {
+    await flushPromises()
+    await wrapper.get('.simulation-name').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('2026-06-30 → 2026-11-27 · 3 个交易日 · 2 笔交易')
+    expect(wrapper.findAll('.segmented-tabs button').map(button => button.text()))
+      .toEqual(['近 1 月', '近 3 月', '近半年', '近 1 年', '今年以来', '成立以来'])
+    const labels = wrapper.findAll('svg g[aria-label]').map(marker => marker.attributes('aria-label') ?? '')
+    expect(labels).toHaveLength(2)
+    expect(labels[0]).toContain('标的：SH600000')
+    expect(labels[0]).toContain('方向：买入')
+    await wrapper.findAll('.segmented-tabs button')[0].trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('2026-11-26 → 2026-11-27 · 2 个交易日 · 1 笔交易')
+    expect(wrapper.findAll('svg g[aria-label]').map(marker => marker.attributes('aria-label') ?? '').join('\n'))
+      .toBe('日期：2026-11-27\n标的：SH600000\n方向：卖出\n价格：11.00\n数量：100\n盈亏：90.00\n原因：卖出条件\n信号日：2026-11-26')
+  } finally {
+    wrapper.unmount()
+    vi.unstubAllGlobals()
+    window.history.replaceState({}, '', original)
+  }
+})

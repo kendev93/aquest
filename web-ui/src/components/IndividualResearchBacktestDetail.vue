@@ -3,7 +3,7 @@ import { computed, ref, watch } from 'vue'
 import type { IndividualResearchFullBacktest } from '../types'
 import { formatNumber, formatPercent, formatSignedPercent } from '../utils/format'
 
-const props = defineProps<{ backtest: IndividualResearchFullBacktest | null; launchDate?: string; baselineDate?: string; returnCurve?: boolean; hideMetrics?: boolean }>()
+const props = defineProps<{ backtest: IndividualResearchFullBacktest | null; launchDate?: string; baselineDate?: string; returnCurve?: boolean; hideMetrics?: boolean; hideTrades?: boolean }>()
 
 // 方向与曲线图例同词同色：图例写「买入/卖出」，表格里露 BUY/SELL 会让用户以为
 // 是两套东西。signal_date 单独成列，因为信号在收盘后判定、下一交易日才成交，
@@ -28,6 +28,7 @@ function markerText(date: string, directions: string[], trades: Record<string, u
   if (!trades.length) return `${date} · ${directions.map(tradeDirection).join(' / ')}`
   return trades.map((trade) => [
     `日期：${tradeValue(trade, 'date')}`,
+    ...(typeof trade.symbol === 'string' && trade.symbol ? [`标的：${trade.symbol}`] : []),
     `方向：${tradeDirection(trade.direction)}`,
     `价格：${tradeValue(trade, 'price')}`,
     `数量：${tradeValue(trade, 'size')}`,
@@ -194,24 +195,26 @@ function closedTrades(): number {
           :style="{ left: `clamp(0px, ${tradeTooltip.x}px, 100% - min(260px, 100%))`, top: `${tradeTooltip.y}px` }">{{ tradeTooltip.text }}</div>
       </div>
       <slot name="after-chart" />
-      <template v-if="props.backtest.trades.length">
-        <slot name="trades-toolbar" />
-        <div class="table-wrap individual-trades">
-          <table>
-            <thead><tr><th>日期</th><th>方向</th><th>价格</th><th>数量</th><th>盈亏</th><th>原因</th><th>信号日</th></tr></thead>
-            <tbody>
-              <tr v-for="(trade, index) in props.backtest.trades" :key="`${String(trade.date ?? '')}-${index}`">
-                <td>{{ tradeValue(trade, 'date') }}</td>
-                <td :class="tradeDirectionClass(trade.direction)">{{ tradeDirection(trade.direction) }}</td>
-                <td>{{ tradeValue(trade, 'price') }}</td><td>{{ tradeValue(trade, 'size') }}</td>
-                <td>{{ tradeValue(trade, 'pnl') }}</td><td>{{ tradeValue(trade, 'reason') }}</td>
-                <td>{{ tradeValue(trade, 'signal_date') }}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+      <template v-if="!props.hideTrades">
+        <template v-if="props.backtest.trades.length">
+          <slot name="trades-toolbar" />
+          <div class="table-wrap individual-trades">
+            <table>
+              <thead><tr><th>日期</th><th>方向</th><th>价格</th><th>数量</th><th>盈亏</th><th>原因</th><th>信号日</th></tr></thead>
+              <tbody>
+                <tr v-for="(trade, index) in props.backtest.trades" :key="`${String(trade.date ?? '')}-${index}`">
+                  <td>{{ tradeValue(trade, 'date') }}</td>
+                  <td :class="tradeDirectionClass(trade.direction)">{{ tradeDirection(trade.direction) }}</td>
+                  <td>{{ tradeValue(trade, 'price') }}</td><td>{{ tradeValue(trade, 'size') }}</td>
+                  <td>{{ tradeValue(trade, 'pnl') }}</td><td>{{ tradeValue(trade, 'reason') }}</td>
+                  <td>{{ tradeValue(trade, 'signal_date') }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </template>
+        <p v-else class="inline-empty">该候选在全区间没有成交。</p>
       </template>
-      <p v-else class="inline-empty">该候选在全区间没有成交。</p>
     </template>
   </div>
 </template>

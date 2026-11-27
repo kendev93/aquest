@@ -344,6 +344,7 @@ class PoolSimulations:
                     positions=list(state["positions"].values()),
                     trades_total=len(state["trades"]),
                     trades=list(reversed(state["trades"]))[offset : offset + limit],
+                    all_trades=list(state["trades"]),
                 )
             items.append(output)
         return items
