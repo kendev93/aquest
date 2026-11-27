@@ -30,6 +30,7 @@ from .models import (
     InstrumentBoard,
     InstrumentType,
 )
+from .pool_simulation_schema import ARCHIVE_DDL, SIMULATION_DDL
 
 # 13 → 17 是三次「加表」顺手带上去的，那几次没有要迁移的旧数据（新表本来就是空
 # 的，DDL 每次启动都会跑）。代价是每个老库升级前先整库备份一遍（4.6GB），一次性
@@ -131,6 +132,8 @@ STATE_TABLES: tuple[str, ...] = (
     "strategy_pool_focus_members",
     "strategy_pool_research_settings",
     "pool_tracking_versions",
+    "pool_simulation_signals",
+    "pool_simulations",
 )
 #: 状态库建完后写进自己 `data_meta` 的记号；迁移只认这个记号，不认文件在不在。
 STATE_READY_META_KEY = "state_database_ready"
@@ -562,7 +565,19 @@ class _DuckDbStoreBase:
                     f"ATTACH '{str(self.database_path).replace(chr(39), chr(39) * 2)}' "
                     "AS market_db (READ_ONLY)"
                 )
+                existing_tables = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT table_name FROM information_schema.tables "
+                        "WHERE table_catalog = 'market_db'"
+                    ).fetchall()
+                }
                 for table in STATE_TABLES:
+                    if (
+                        table in {"pool_simulation_signals", "pool_simulations"}
+                        and table not in existing_tables
+                    ):
+                        continue
                     counted = connection.execute(
                         f"SELECT COUNT(*) FROM market_db.{table}"
                     ).fetchone()
@@ -626,6 +641,8 @@ class _DuckDbStoreBase:
         if existing_version is not None and existing_version < SCHEMA_VERSION:
             self._backup_file()
         with self._open_session(read_only=False) as connection:
+            connection.execute(ARCHIVE_DDL)
+            connection.execute(SIMULATION_DDL)
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS instruments (

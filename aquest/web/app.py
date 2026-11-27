@@ -65,6 +65,7 @@ from aquest.strategy_discovery.service import StrategyDiscoveryService
 from aquest.strategy_fitness.service import StrategyFitnessService
 from aquest.strategy_pool.research_scheduler import PoolResearchScheduler
 from aquest.strategy_pool.service import MarketStrategyPoolService
+from aquest.strategy_pool.simulations import PoolSimulations
 from aquest.strategy_pool.store import DuckDbStrategyPoolStore
 from aquest.strategy_pool.tracking_scheduler import PoolTrackingScheduler
 from aquest.strategy_pool.tracking_store import PoolTrackingStore
@@ -165,6 +166,7 @@ def create_app(
         except Exception:  # noqa: BLE001 - 拆库失败退回单库即可
             logger.exception("状态表拆库失败，继续使用行情库")
     selected_strategy_job_store = DuckDbStrategyJobStore(selected_store)
+    pool_simulations = PoolSimulations(selected_store)
     selected_strategy_pool_store = DuckDbStrategyPoolStore(selected_store)
     selected_adapter = cast(
         MarketDataAdapter,
@@ -297,9 +299,11 @@ def create_app(
         tracking_task: asyncio.Task[None] | None = None
         pool_tracking_task: asyncio.Task[None] | None = None
         pool_research_task: asyncio.Task[None] | None = None
+        simulation_task: asyncio.Task[None] | None = None
         release_task: asyncio.Task[None] | None = None
         selected_store.status()
         selected_strategy_pool_store.initialize()
+        pool_simulations.initialize()
         PoolTrackingStore(selected_store).bootstrap()
         imported_strategy_jobs = selected_strategy_job_store.initialize(
             default_strategy_job_root(selected_store.database_path)
@@ -404,6 +408,8 @@ def create_app(
                     ),
                 ).run()
             )
+        if owns_runner:
+            simulation_task = asyncio.create_task(pool_simulations.run())
         if selected_release_checker.enabled:
             release_task = asyncio.create_task(selected_release_checker.run())
         try:
@@ -412,6 +418,7 @@ def create_app(
             try:
                 await _cancel_background_tasks(
                     [
+                        simulation_task,
                         pool_tracking_task,
                         pool_research_task,
                         maintenance_task,
@@ -438,6 +445,7 @@ def create_app(
     app.state.individual_research_service = selected_individual_research_service
     app.state.strategy_job_backend = selected_strategy_backend
     app.state.strategy_job_store = selected_strategy_job_store
+    app.state.pool_simulations = pool_simulations
     app.state.strategy_pool_store = selected_strategy_pool_store
     app.state.strategy_worker_token = _resolve_strategy_worker_token(strategy_worker_token)
     app.state.strategy_fitness_service = strategy_fitness_service or StrategyFitnessService(

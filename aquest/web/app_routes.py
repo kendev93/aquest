@@ -48,6 +48,7 @@ def install_routers(app: FastAPI) -> None:
     from .routers.instrument_lab import router as instrument_lab_router
     from .routers.jobs import router as jobs_router
     from .routers.market_data import router as market_data_router
+    from .routers.pool_simulations import router as pool_simulations_router
     from .routers.portfolio_backtest import router as portfolio_backtest_router
     from .routers.release import router as release_router
     from .routers.research_presets import router as research_presets_router
@@ -76,6 +77,7 @@ def install_routers(app: FastAPI) -> None:
     app.include_router(screen_presets_router, prefix="/api/v1")
     app.include_router(stock_groups_router, prefix="/api/v1")
     app.include_router(strategy_discovery_router, prefix="/api/v1")
+    app.include_router(pool_simulations_router, prefix="/api/v1")
     app.include_router(strategy_pool_router, prefix="/api/v1")
     app.include_router(strategy_fitness_router, prefix="/api/v1")
     app.include_router(strategies_router, prefix="/api/v1")

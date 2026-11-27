@@ -13,9 +13,11 @@ from typing import cast
 
 import duckdb
 
+from aquest.market_data.pool_simulation_schema import ARCHIVE_DDL
 from aquest.market_data.store import DuckDbMarketDataStore
 from aquest.market_data.store_base import STATE_WRITE_LOCK
 from aquest.market_data.sync_session import shanghai_now
+from aquest.strategy_pool.simulation_archive import archive_simulation_signals
 
 from .job_store import (
     DEFAULT_STALE_AFTER_SECONDS,
@@ -65,6 +67,7 @@ class DuckDbStrategyJobStore:
         """Initialize the DuckDB schema and idempotently import legacy JSON jobs."""
 
         with self._transaction() as connection:
+            connection.execute(ARCHIVE_DDL)
             columns = connection.execute("PRAGMA table_info('strategy_jobs')").fetchall()
             if not any(row[1] == "has_result" for row in columns):
                 connection.execute(
@@ -805,6 +808,14 @@ class DuckDbStrategyJobStore:
             )
             if not cancel_requested:
                 state["progress"] = 1.0
+                if row[4] == "market_strategy_pool_tracking":
+                    envelope = connection.execute(
+                        "SELECT request_json FROM strategy_jobs WHERE job_id = ?", [job_id]
+                    ).fetchone()
+                    if envelope:
+                        archive_simulation_signals(
+                            connection, job_id, _load_object(envelope[0]), result
+                        )
                 changes = result.get("strategy_changes")
                 if row[4] == "market_strategy_pool" and isinstance(changes, Mapping):
                     # 随结果一起提交，避免最终进度上报超时时历史缺少已落库成果。

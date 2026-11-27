@@ -647,7 +647,26 @@ class PoolTrackingRunner:
             )
             result["states"].append(row)
             if buy:
-                result["buy_signals"].append({**row, "signal_type": "buy"})
+                post_return = summary.get("post_launch_return")
+                if summary.get("has_post_launch_data") is False:
+                    post_return = None
+                benchmark = summary.get("post_launch_benchmark_return")
+                held: Mapping[str, Any] = next(iter(summary["holding"]), {})
+                result["buy_signals"].append(
+                    {
+                        **row,
+                        "signal_type": "buy",
+                        "postLaunchReturn": post_return,
+                        "benchmark": benchmark,
+                        "excess": post_return - benchmark
+                        if isinstance(post_return, (int, float))
+                        and isinstance(benchmark, (int, float))
+                        else None,
+                        "holdingReturn": held.get("unrealized_pnl_pct"),
+                        "createdReturn": summary.get("created_return"),
+                        "days": summary.get("post_launch_days"),
+                    }
+                )
             if sell:
                 result["sell_signals"].append({**row, "signal_type": "sell"})
             for h in summary["holding"]:
@@ -1014,6 +1033,7 @@ class PoolTrackingRunner:
         return {
             **results[goal],
             "results_by_objective": results,
+            "simulation_rank_version": 1,
             "total_symbols": total,
             "pool_total_symbols": pool_total,
             "completed_symbols": completed,
