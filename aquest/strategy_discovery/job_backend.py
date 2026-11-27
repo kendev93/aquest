@@ -577,6 +577,8 @@ def completion_state(operation: JobOperation, result: Mapping[str, object]) -> d
         total = _nonnegative_int(result.get("total_symbols"))
         return {
             "metadata": {
+                "strategy_changes": result.get("strategy_changes"),
+                "unpersisted_entries": result.get("unpersisted_entries"),
                 "overall_progress": 1.0,
                 "completed_symbols": completed,
                 "skipped_symbols": _nonnegative_int(result.get("skipped_symbols")),

@@ -361,7 +361,10 @@ def test_market_pool_history_exposes_duration_and_research_split(tmp_path) -> No
             "phase_label": "规则 3/7 · 搜索止损、止盈和冷却参数",
         },
     )
-    store.write_result_from_worker("full-1", "pool-worker", {})
+    changes = {"new_symbols": 3, "retained_symbols": 2}
+    store.write_result_from_worker(
+        "full-1", "pool-worker", {"strategy_changes": changes, "unpersisted_entries": 1}
+    )
 
     item = next(
         row
@@ -369,6 +372,8 @@ def test_market_pool_history_exposes_duration_and_research_split(tmp_path) -> No
         if row["job_id"] == "full-1"
     )
     assert item["newly_researched_symbols"] == 10
+    assert item["strategy_changes"] == changes
+    assert item["unpersisted_entries"] == 1
     assert item["maximum_parallelism"] == 4
     assert item["phase_label"] == "规则 3/7 · 搜索止损、止盈和冷却参数"
     assert item["automatic"] is False
@@ -400,6 +405,7 @@ def test_market_pool_history_exposes_duration_and_research_split(tmp_path) -> No
     assert legacy["duration_includes_queue"] is True
     assert legacy["newly_researched_symbols"] == 5
     assert legacy["maximum_parallelism"] is None
+    assert legacy["strategy_changes"] is None
 
 
 def test_market_pool_history_stats_average_only_counts_finished_runs(tmp_path) -> None:

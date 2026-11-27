@@ -354,8 +354,20 @@ class _FakePoolService:
         research_snapshot_reader=None,
     ):
         for code in self._codes:
-            entry_writer({"code": code})
-        return {"completed_symbols": len(self._codes)}
+            entry_writer(
+                {
+                    "code": code,
+                    "_research_change": {
+                        "market": "SH",
+                        "code": code,
+                        "new": code == "600000",
+                        "comparisons": {"annual_return": {"score": 0.02, "drawdown": 0.01}}
+                        if code == "600001"
+                        else {},
+                    },
+                }
+            )
+        return {"mode": "full", "completed_symbols": len(self._codes)}
 
 
 def test_market_pool_job_survives_a_flaky_entry_write(tmp_path) -> None:
@@ -378,6 +390,11 @@ def test_market_pool_job_survives_a_flaky_entry_write(tmp_path) -> None:
     assert store.read_state("job-1")["status"] == "completed"
     # 两次抖动把两条结果都攒住了；收尾补发照样按写入顺序落库，一条都没丢。
     assert [entry["code"] for entry in store.entries] == ["600000", "600001"]
+    assert all("_research_change" not in entry for entry in store.entries)
+    changes = store.read_state("job-1")["metadata"]["strategy_changes"]
+    assert changes["new_symbols"] == changes["drawdown_increased_symbols"] == 1
+    assert changes["annual_return"]["median_delta"] == 0.02
+    assert changes["annual_return"]["top"][0]["code"] == "600001"
 
 
 def test_market_pool_job_reports_unpersisted_entries_instead_of_failing(tmp_path) -> None:
@@ -401,6 +418,7 @@ def test_market_pool_job_reports_unpersisted_entries_instead_of_failing(tmp_path
     assert store.read_state("job-2")["status"] == "completed"
     assert store.entries == []
     assert store.read_result("job-2")["unpersisted_entries"] == 2
+    assert store.read_result("job-2")["strategy_changes"]["new_symbols"] == 0
 
 
 def test_worker_backs_off_while_idle_and_resets_when_it_claims(tmp_path, monkeypatch) -> None:

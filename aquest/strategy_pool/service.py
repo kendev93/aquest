@@ -1084,19 +1084,25 @@ class MarketStrategyPoolService:
                     try:
                         record, _single_result = future.result()
                         prior = prior_entries.get((ref.market, ref.code))
+                        previous = (previous_entries or {}).get((ref.market, ref.code))
+                        comparisons: dict[str, dict[str, float]] = {}
+
+                        def is_worse(
+                            new: Mapping[str, object], old: Mapping[str, object], objective: str
+                        ) -> bool:
+                            return self._replacement_is_worse(new, old, objective, comparisons)
+
                         if (
-                            previous_entries is not None
-                            and prior is not None
+                            prior is not None
                             and prior[1] == config_fingerprint
                             and prior[2] in {"ready", "partial"}
                         ):
                             record = _keep_better_automatic_candidates(
-                                record,
-                                previous_entries.get((ref.market, ref.code)),
-                                is_worse=self._replacement_is_worse,
+                                record, previous, is_worse=is_worse
                             )
                         if entry_writer is not None:
-                            entry_writer(record)
+                            change = _research_change(record, previous, comparisons)
+                            entry_writer({**record, "_research_change": change})
                     except TaskCancelledError:
                         raise
                     except InsufficientResearchHistoryError as exc:
@@ -2409,6 +2415,7 @@ class MarketStrategyPoolService:
         candidate: Mapping[str, object],
         previous: Mapping[str, object],
         objective: str,
+        comparisons: dict[str, dict[str, float]] | None = None,
     ) -> bool:
         """同窗口复核新旧策略：验证段为主，全段极端走弱时也保留旧策略。
 
@@ -2441,6 +2448,13 @@ class MarketStrategyPoolService:
             or new_score < old_score - _CANDIDATE_VALIDATION_DOWNGRADE_MARGIN[objective]
         ):
             return True
+        if comparisons is not None:
+            delta = {"score": new_score - old_score}
+            new_drawdown = _finite_metric(new.get("max_drawdown"))
+            old_drawdown = _finite_metric(old.get("max_drawdown"))
+            if new_drawdown is not None and old_drawdown is not None:
+                delta["drawdown"] = abs(new_drawdown) - abs(old_drawdown)
+            comparisons[objective] = delta
         full = windows.get("full")
         if full is None:
             return False
@@ -2963,6 +2977,46 @@ def _preserve_existing_candidate(
     if previous.get("candidate_id") == candidate.get("candidate_id"):
         return candidate
     return previous if is_worse(candidate, previous, objective) else candidate
+
+
+def _research_change(
+    record: Mapping[str, object],
+    previous: Mapping[str, object] | None,
+    comparisons: Mapping[str, Mapping[str, float]],
+) -> dict[str, object]:
+    """只记录最终待写入的候选，复用和补指标不进入这条路径。"""
+
+    automatic = _mapping(_mapping(previous).get("automatic_candidates"))
+    next_automatic = {
+        "annual_return": record.get("annual_candidate"),
+        "sharpe": record.get("sharpe_candidate"),
+    }
+    before = {
+        objective: _resolve_automatic_candidate(automatic, objective)
+        for objective in next_automatic
+    }
+    after = {
+        objective: _resolve_automatic_candidate(next_automatic, objective)
+        for objective in next_automatic
+    }
+    changes = {}
+    retained = False
+    for objective, new in after.items():
+        old = before[objective]
+        if old is None or new is None:
+            continue
+        if old.get("candidate_id") == new.get("candidate_id"):
+            retained = True
+        elif objective in comparisons:
+            changes[objective] = dict(comparisons[objective])
+    return {
+        "market": record["market"],
+        "code": record["code"],
+        "name": record.get("name"),
+        "new": not any(before.values()) and any(after.values()),
+        "retained": retained,
+        "comparisons": changes,
+    }
 
 
 def _keep_better_automatic_candidates(

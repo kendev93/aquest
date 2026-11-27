@@ -9,6 +9,7 @@ import time
 from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
+from statistics import median
 from tempfile import TemporaryDirectory
 from threading import Event, Thread, get_ident
 from typing import Literal, Protocol, cast
@@ -112,6 +113,43 @@ class StrategyJobClient(Protocol):
 #: 逐标的结果连续攒到这么多条还没送进库，就认定后端已经不是一时抖动：这些结果只在
 #: 本进程内存里，继续跑等于默默丢掉几千只标的的研究产出，不如让任务带着原因失败。
 _MAX_DEFERRED_POOL_ENTRIES = 256
+
+
+def _summarize_pool_changes(changes: list[Mapping[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {
+        "new_symbols": sum(row.get("new") is True for row in changes),
+        "retained_symbols": sum(row.get("retained") is True for row in changes),
+    }
+    drawdown_increased: set[tuple[object, object]] = set()
+    for objective in ("annual_return", "sharpe"):
+        improved: list[tuple[float, Mapping[str, object]]] = []
+        for row in changes:
+            comparisons = row.get("comparisons")
+            change = comparisons.get(objective) if isinstance(comparisons, Mapping) else None
+            if not isinstance(change, Mapping):
+                continue
+            score = change.get("score")
+            if isinstance(score, (int, float)) and score > 1e-9:
+                improved.append((score, row))
+            drawdown = change.get("drawdown")
+            if isinstance(drawdown, (int, float)) and drawdown > 1e-9:
+                drawdown_increased.add((row["market"], row["code"]))
+        improved.sort(key=lambda item: (-item[0], str(item[1]["market"]), str(item[1]["code"])))
+        result[objective] = {
+            "improved_symbols": len(improved),
+            "median_delta": median(score for score, _ in improved) if improved else None,
+            "top": [
+                {
+                    "market": row["market"],
+                    "code": row["code"],
+                    "name": row.get("name"),
+                    "delta": score,
+                }
+                for score, row in improved[:5]
+            ],
+        }
+    result["drawdown_increased_symbols"] = len(drawdown_increased)
+    return result
 
 
 class DeferredPoolEntryWriter:
@@ -441,7 +479,17 @@ class StrategyDiscoveryWorker:
             writer = getattr(self._job_store, "write_pool_entry", None)
             if not callable(writer):
                 raise ValueError("策略 worker 不支持逐股保存策略池检查点")
-            deferred = DeferredPoolEntryWriter(lambda entry: writer(job_id, entry))
+            saved_changes: dict[tuple[str, str], Mapping[str, object]] = {}
+
+            def save_entry(entry: Mapping[str, object]) -> None:
+                payload = dict(entry)
+                change = payload.pop("_research_change", None)
+                writer(job_id, payload)
+                # 延迟补写也经过这里；只有后端确认后才计入任务成果。
+                if isinstance(change, Mapping):
+                    saved_changes[str(change["market"]), str(change["code"])] = change
+
+            deferred = DeferredPoolEntryWriter(save_entry)
             snapshot_reader = getattr(self._job_store, "read_pool_research_snapshot", None)
             result = dict(
                 self._strategy_pool_service.run(
@@ -459,6 +507,8 @@ class StrategyDiscoveryWorker:
             if leftover:
                 logger.error("策略池任务结束时仍有 %d 条逐标的结果没能落库", leftover)
                 result["unpersisted_entries"] = leftover
+            if result.get("mode") == "full":
+                result["strategy_changes"] = _summarize_pool_changes(list(saved_changes.values()))
             return result
         raise ValueError("策略任务类型无效")
 

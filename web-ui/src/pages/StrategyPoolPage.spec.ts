@@ -781,6 +781,12 @@ describe('StrategyPoolPage', () => {
       failed_symbols: 10,
       total_symbols: 2_650,
       finished_symbols: 2_650,
+      strategy_changes: {
+        new_symbols: 12, retained_symbols: 37, drawdown_increased_symbols: 2,
+        annual_return: { improved_symbols: 1, median_delta: 0.024,
+          top: [{ market: 'SH', code: '600000', delta: 0.024 }] },
+        sharpe: { improved_symbols: 0, median_delta: null, top: [] },
+      },
       maximum_parallelism: 4,
       automatic: false,
     }])
@@ -793,6 +799,11 @@ describe('StrategyPoolPage', () => {
     expect(row).toContain('已完成 · 耗时 5 小时 12 分钟')
     // completed_symbols 把复用也算进去了，只说「3498 只完成」看不出真研究了几只。
     expect(row).toContain('研究队列 2650/2650 · 新研究 2639 · 复用 859')
+    expect(row).toContain('新增可用 12 只 · 年化收益改善 1 只 · 夏普改善 0 只 · 保留原策略 37 只')
+    const changes = wrapper.get('[data-testid="pool-history-full-1"] details')
+    expect(changes.text()).toContain('+2.40 个百分点')
+    expect(changes.text()).toContain('最大回撤扩大 2 只')
+    expect(changes.get('a').attributes('href')).toContain('/strategy-pool/SH/600000')
     expect(row).not.toContain('3498/2650')
     expect(row).toContain('失败 10')
     expect(row).toContain('并行 4')

@@ -241,6 +241,20 @@ export interface StrategyPoolResearchEstimate {
   data_end: string | null
 }
 
+export interface StrategyPoolImprovement {
+  improved_symbols: number
+  median_delta: number | null
+  top: { market: 'SH' | 'SZ'; code: string; name?: string; delta: number }[]
+}
+
+export interface StrategyPoolChanges {
+  new_symbols: number
+  retained_symbols: number
+  drawdown_increased_symbols: number
+  annual_return: StrategyPoolImprovement
+  sharpe: StrategyPoolImprovement
+}
+
 export interface StrategyPoolJobSummary {
   dual_objectives?: boolean
   rebuild?: boolean
@@ -259,6 +273,8 @@ export interface StrategyPoolJobSummary {
   completed_symbols?: number
   skipped_symbols?: number
   newly_researched_symbols?: number
+  strategy_changes?: StrategyPoolChanges | null
+  unpersisted_entries?: number | null
   finished_symbols?: number | null
   failed_symbols?: number
   total_symbols?: number

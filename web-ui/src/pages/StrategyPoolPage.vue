@@ -364,6 +364,13 @@ function poolJobDurationText(job: StrategyPoolJobSummary): string {
   return `已运行 ${formatDuration(seconds)}${started === null ? '（含排队）' : ''}`
 }
 
+const improvementObjectives = ['annual_return', 'sharpe'] as const
+
+function formatImprovement(value: number | null, objective: StrategyPoolObjective): string {
+  if (value == null) return '—'
+  return objective === 'annual_return' ? `+${(value * 100).toFixed(2)} 个百分点` : `+${value.toFixed(2)}`
+}
+
 function poolJobDetailText(job: StrategyPoolJobSummary): string {
   const parts = [POOL_JOB_STATUS_LABELS[job.status] ?? job.status]
   const duration = poolJobDurationText(job)
@@ -1812,7 +1819,25 @@ onUnmounted(() => {
           <div v-if="historyGroups.length" class="history-groups">
             <div v-for="group in historyGroups" :key="group.label" class="history-group">
               <p class="history-group-label">{{ group.label }}</p>
-              <div v-for="job in group.jobs" :key="job.job_id" class="history-row" :data-testid="`pool-history-${job.job_id}`"><strong>{{ poolJobModeLabel(job) }}</strong><span>{{ poolJobDetailText(job) }}</span><small>{{ formatTimestamp(job.created_at) }}</small></div>
+              <div v-for="job in group.jobs" :key="job.job_id" class="history-row" :data-testid="`pool-history-${job.job_id}`">
+                <strong>{{ poolJobModeLabel(job) }}</strong><span>{{ poolJobDetailText(job) }}</span><small>{{ formatTimestamp(job.created_at) }}</small>
+                <details v-if="job.mode === 'full' && job.status === 'completed' && job.strategy_changes" class="history-changes">
+                  <summary>新增可用 {{ job.strategy_changes.new_symbols }} 只 · 年化收益改善 {{ job.strategy_changes.annual_return.improved_symbols }} 只 · 夏普改善 {{ job.strategy_changes.sharpe.improved_symbols }} 只 · 保留原策略 {{ job.strategy_changes.retained_symbols }} 只</summary>
+                  <p>改善仅统计已保存的替换策略，按同一验证窗口对比。两榜可包含同一标的。</p>
+                  <p v-if="job.rebuild">清空重建的新增数量按清空后计算，本轮不与重建前的策略比较。</p>
+                  <p>最大回撤扩大 {{ job.strategy_changes.drawdown_increased_symbols }} 只<span v-if="job.unpersisted_entries"> · 尚未确认落库 {{ job.unpersisted_entries }} 条</span></p>
+                  <div v-for="key in improvementObjectives" :key="key">
+                    <p>{{ objectiveLabel(key) }}改善中位数 {{ formatImprovement(job.strategy_changes[key].median_delta, key) }}</p>
+                    <ul v-if="job.strategy_changes[key].top.length">
+                      <li v-for="item in job.strategy_changes[key].top" :key="`${item.market}${item.code}`">
+                        <a class="table-link" :href="detailHrefFor(item.market, item.code, key, listContext)">{{ item.market }}{{ item.code }} {{ item.name }}</a>
+                        · {{ formatImprovement(item.delta, key) }}
+                      </li>
+                    </ul>
+                  </div>
+                </details>
+                <small v-else-if="job.mode === 'full' && job.status === 'completed'" class="history-changes">策略变化：未记录</small>
+              </div>
             </div>
           </div>
           <p v-else class="empty-copy">完成或启动的任务会保存在本地历史中。取消任务后，再次全量重选会继续复用已完成标的。</p>
@@ -1914,6 +1939,8 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .success-notice { border-color: #14733f; color: #43d986; }
 .poll-warning { border-color: #816b32; color: #e6ca73; }
 .candidate-apply-grid { margin-top: 12px; }
+.history-changes { grid-column: 1 / -1; font-size: .88rem; color: var(--muted); }
+.history-changes summary { cursor: pointer; }
 .history-row { grid-template-columns: minmax(150px, 1fr) 2fr auto; align-items: center; border-left-color: #536b89; }
 .editor-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 24px; background: rgba(2, 7, 15, .78); }
 .pool-editor { width: min(1080px, 100%); max-height: 90vh; overflow: auto; box-shadow: 0 24px 80px rgba(0, 0, 0, .5); }
