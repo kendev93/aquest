@@ -150,6 +150,23 @@ def test_simulation_replays_signal_only_rank_and_replaces_only_after_filled_sale
         "totals": [4.0, 4.2],
     }
     assert result["holdings_benchmark"] is None
+    assert result["benchmark_return"] == pytest.approx(4.2 / 4.0 - 1)
+    assert result["holdings_return"] is None
+    assert result["day_return"] == pytest.approx(
+        result["equity"][-1]["value"] / result["equity"][-2]["value"] - 1
+    )
+    metrics = result["metrics"]
+    assert metrics["risk"]["sample_days"] == 3
+    assert metrics["trading"]["closed"] == 1
+    assert {row["key"] for row in metrics["ranges"]} == {
+        "1m",
+        "3m",
+        "6m",
+        "1y",
+        "ytd",
+        "all",
+    }
+    assert {row["key"] for row in metrics["stages"]} == {"5d", "20d", "60d"}
     assert result["trades_total"] == 7
     assert result["trades"][0]["symbol"] == "SH600007"
     assert result["trades"][0]["rank"] == 1

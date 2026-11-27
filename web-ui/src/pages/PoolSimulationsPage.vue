@@ -12,6 +12,23 @@ const request = createRequestClient({ errorClass: ApiError, messages: { fallback
 type Objective = 'annual_return' | 'sharpe'
 type Trade = { date: string; signal_date: string; symbol: string; direction: string; price: number; size: number; reason: string; rank?: number; pnl?: number }
 type Position = { market: string; code: string; name: string | null; size: number; entry_price: number; mark: number; entry_date: string }
+type PeriodRow = {
+  key: string; label: string; start?: string | null; days?: number
+  strategy: number | null; benchmark: number | null; holdings: number | null
+  excess_benchmark: number | null; excess_holdings: number | null
+}
+type SimulationMetrics = {
+  trading: {
+    closed: number; win_rate: number | null; payoff_ratio: number | null
+    realized_pnl: number; unrealized_pnl: number; avg_rank: number | null
+  }
+  risk: {
+    max_drawdown: number; max_drawdown_days: number; current_drawdown: number
+    volatility: number | null; sharpe: number | null; sample_days: number
+  }
+  ranges: PeriodRow[]
+  stages: PeriodRow[]
+}
 type Simulation = {
   id: string; name: string; objective: Objective; ranking: string; min_days: number; direction: string
   start_date: string; initial_cash: number; paused: boolean; warning?: string
@@ -21,6 +38,9 @@ type Simulation = {
   positions?: Position[]; trades?: Trade[]; trades_total?: number; all_trades?: Trade[]; rebalance_band_pct?: number
   benchmark?: { label?: string; dates: string[]; totals: number[] } | null
   holdings_benchmark?: { label?: string; dates: string[]; totals: number[] } | null
+  day_return?: number | null; benchmark_return?: number | null; holdings_return?: number | null
+  excess_benchmark?: number | null; excess_holdings?: number | null
+  metrics?: SimulationMetrics
 }
 
 const rankLabels = {
@@ -336,12 +356,16 @@ const detailCurve = computed<IndividualResearchFullBacktest | null>(() => {
         <p v-else class="simulation-empty">{{ items.length ? '等待下一交易日行情与信号齐备后生成净值。' : '还没有模拟盘，创建后可在这里对比收益。' }}</p>
         <div v-if="items.length" class="table-wrap">
           <table>
-            <thead><tr><th>模拟盘</th><th>榜单</th><th>持仓</th><th>累计收益</th><th>最大回撤</th><th>换手倍数</th><th>状态</th></tr></thead>
+            <thead><tr><th>模拟盘</th><th>榜单</th><th>持仓</th><th>累计收益</th><th>日收益</th><th>沪深300同期</th><th>持仓等权同期</th><th>最大回撤</th><th>换手倍数</th><th>状态</th></tr></thead>
             <tbody>
               <tr v-for="item in items" :key="item.id">
                 <td><button class="text-button simulation-name" type="button" :aria-pressed="detail?.id === item.id" @click="select(item.id)">{{ item.name }}</button><button class="text-button simulation-rename" type="button" :disabled="busy" @click="rename(item)">改名</button></td>
                 <td>{{ labels[item.objective] }} · {{ rankLabels[item.ranking as Rank] }}</td>
-                <td>{{ item.holding_count }}/{{ item.max_positions ?? 5 }}</td><td>{{ formatSignedPercent(item.total_return) }}</td>
+                <td>{{ item.holding_count }}/{{ item.max_positions ?? 5 }}</td>
+                <td>{{ formatSignedPercent(item.total_return) }}<small class="simulation-excess">较300 {{ formatSignedPercent(item.excess_benchmark ?? null) }} · 较持仓 {{ formatSignedPercent(item.excess_holdings ?? null) }}</small></td>
+                <td>{{ formatSignedPercent(item.day_return ?? null) }}</td>
+                <td>{{ formatSignedPercent(item.benchmark_return ?? null) }}</td>
+                <td>{{ formatSignedPercent(item.holdings_return ?? null) }}</td>
                 <td>{{ formatPercent(item.max_drawdown) }}</td><td>{{ formatNumber(item.turnover) }} 倍</td>
                 <td><button class="button-secondary" type="button" :disabled="busy" @click="toggle(item)">{{ item.paused ? '恢复' : '暂停' }}</button><button class="button-secondary simulation-delete" type="button" :disabled="busy" @click="remove(item)">删除</button><small v-if="item.warning">{{ item.warning }}</small></td>
               </tr>
@@ -365,6 +389,52 @@ const detailCurve = computed<IndividualResearchFullBacktest | null>(() => {
         </div>
         <IndividualResearchBacktestDetail v-if="detailCurve" :backtest="detailCurve" :benchmark-label="detail.benchmark?.label" :secondary-benchmark="detail.holdings_benchmark" hide-metrics hide-trades return-curve />
         <p v-else class="simulation-empty">等待下一交易日行情与信号齐备后生成净值。</p>
+        <template v-if="detail.metrics">
+          <h3>区间表现</h3>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>区间</th><th>策略</th><th>沪深300</th><th>持仓等权</th><th>较300</th><th>较持仓</th></tr></thead>
+              <tbody>
+                <tr v-for="row in detail.metrics.ranges" :key="row.key">
+                  <td>{{ row.label }}</td>
+                  <td>{{ formatSignedPercent(row.strategy) }}</td>
+                  <td>{{ formatSignedPercent(row.benchmark) }}</td>
+                  <td>{{ formatSignedPercent(row.holdings) }}</td>
+                  <td>{{ formatSignedPercent(row.excess_benchmark) }}</td>
+                  <td>{{ formatSignedPercent(row.excess_holdings) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <h3>阶段收益</h3>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>区间</th><th>策略</th><th>沪深300</th><th>持仓等权</th></tr></thead>
+              <tbody>
+                <tr v-for="row in detail.metrics.stages" :key="row.key">
+                  <td>{{ row.label }}（{{ row.days }} 个净值日）</td>
+                  <td>{{ formatSignedPercent(row.strategy) }}</td>
+                  <td>{{ formatSignedPercent(row.benchmark) }}</td>
+                  <td>{{ formatSignedPercent(row.holdings) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <h3>交易与风险</h3>
+          <dl class="simulation-metrics">
+            <div><dt>已平仓</dt><dd>{{ detail.metrics.trading.closed }} 笔</dd></div>
+            <div><dt>胜率</dt><dd>{{ formatPercent(detail.metrics.trading.win_rate) }}</dd></div>
+            <div><dt>盈亏比</dt><dd>{{ formatNumber(detail.metrics.trading.payoff_ratio) }}</dd></div>
+            <div><dt>已实现盈亏</dt><dd>{{ formatNumber(detail.metrics.trading.realized_pnl) }}</dd></div>
+            <div><dt>浮动盈亏</dt><dd>{{ formatNumber(detail.metrics.trading.unrealized_pnl) }}</dd></div>
+            <div><dt>平均买入名次</dt><dd>{{ formatNumber(detail.metrics.trading.avg_rank, 1) }}</dd></div>
+            <div><dt>最长回撤持续</dt><dd>{{ detail.metrics.risk.max_drawdown_days }} 天</dd></div>
+            <div><dt>当前回撤</dt><dd>{{ formatPercent(detail.metrics.risk.current_drawdown) }}</dd></div>
+            <div><dt>年化波动</dt><dd>{{ formatPercent(detail.metrics.risk.volatility) }}</dd></div>
+            <div><dt>夏普</dt><dd>{{ formatNumber(detail.metrics.risk.sharpe) }}</dd></div>
+          </dl>
+          <p class="simulation-copy">风险指标按 {{ detail.metrics.risk.sample_days }} 个净值日样本计算；不足 20 个交易日只显示回撤类，不给年化波动与夏普。</p>
+        </template>
         <h3>当前持仓</h3>
         <div class="table-wrap">
           <table>
@@ -425,6 +495,7 @@ td small { display: block; margin-top: 5px; color: var(--warning); white-space: 
 .simulation-name { color: var(--accent); font-size: inherit; }
 .simulation-name[aria-pressed="true"] { background: var(--accent-soft); }
 .simulation-rename { margin-left: 4px; color: var(--muted); font-size: 11px; }
+.simulation-excess { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; white-space: normal; }
 .simulation-delete { margin-left: 6px; border-color: var(--danger); background: transparent; color: var(--danger); }
 .simulation-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 125px), 1fr)); gap: 10px; margin: 14px 0 18px; }
 .simulation-metrics > div { padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-raised); }

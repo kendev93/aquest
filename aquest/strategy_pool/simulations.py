@@ -10,13 +10,18 @@ from collections.abc import Callable
 from dataclasses import replace
 from datetime import date, datetime, time
 from threading import Lock
+from time import monotonic
 from typing import Any, cast
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from aquest.backtest.profiles import profile_from_config
 from aquest.market_data.adapter import DuckDbMarketDataAdapter
-from aquest.market_data.benchmark import BENCHMARK_LABEL, BENCHMARK_SYMBOL
+from aquest.market_data.benchmark import (
+    BENCHMARK_LABEL,
+    BENCHMARK_START_DATE,
+    BENCHMARK_SYMBOL,
+)
 from aquest.market_data.models import MarketCode
 from aquest.market_data.pool_simulation_schema import ARCHIVE_DDL, SIMULATION_DDL
 from aquest.market_data.store import DuckDbMarketDataStore
@@ -30,6 +35,7 @@ from aquest.web.schemas import PortfolioBacktestRequest
 
 from .holdings_benchmark import holdings_benchmark
 from .simulation_archive import SIGNAL_METRICS, required_rank_version
+from .simulation_metrics import day_return, detail_metrics, series_return
 from .tracking_store import dumps
 
 logger = logging.getLogger(__name__)
@@ -303,6 +309,8 @@ class PoolSimulations:
         self.adapter = DuckDbMarketDataAdapter(store)
         self.engine = PortfolioBacktestService(adapter=self.adapter)
         self.lock = Lock()
+        # 持仓等权基准要反推成员、读整段收盘价；列表每 30 秒轮询一次，按净值日期缓存。
+        self._holdings_cache: dict[tuple[str, str, str], tuple[float, dict[str, Any] | None]] = {}
 
     def initialize(self) -> None:
         with self.store.state_write_transaction() as connection:
@@ -430,6 +438,13 @@ class PoolSimulations:
                 high = max(high, point["value"])
                 drawdown = max(drawdown, 1 - point["value"] / high)
             value = equity[-1]["value"] if equity else high
+            initial = float(config["initial_cash"])
+            total_return = value / initial - 1
+            positions = list(state["positions"].values())
+            benchmark = self._benchmark(state)
+            holdings = self._holdings_benchmark(config, state)
+            benchmark_return = series_return(benchmark)
+            holdings_return = series_return(holdings)
             output = {
                 **config,
                 "id": ident,
@@ -437,39 +452,66 @@ class PoolSimulations:
                 "warning": state["warning"],
                 "cash": state["cash"],
                 "value": value,
-                "total_return": value / config["initial_cash"] - 1,
+                "total_return": total_return,
                 "max_drawdown": drawdown,
                 "equity": equity,
-                "holding_count": len(state["positions"]),
+                "holding_count": len(positions),
                 "max_positions": config.get("max_positions", DEFAULT_SLOTS),
-                "turnover": sum(t["size"] * t["price"] for t in state["trades"])
-                / config["initial_cash"],
+                "turnover": sum(t["size"] * t["price"] for t in state["trades"]) / initial,
+                "day_return": day_return(equity, initial),
+                "benchmark_return": benchmark_return,
+                "holdings_return": holdings_return,
+                "excess_benchmark": total_return - benchmark_return
+                if benchmark_return is not None
+                else None,
+                "excess_holdings": total_return - holdings_return
+                if holdings_return is not None
+                else None,
             }
             if key is not None:
                 output.update(
-                    positions=list(state["positions"].values()),
+                    positions=positions,
                     trades_total=len(state["trades"]),
                     trades=list(reversed(state["trades"]))[offset : offset + limit],
                     all_trades=list(state["trades"]),
-                    benchmark=self._benchmark(state),
-                    holdings_benchmark=self._holdings_benchmark(config, state),
+                    benchmark=benchmark,
+                    holdings_benchmark=holdings,
+                    metrics=detail_metrics(
+                        equity=equity,
+                        initial_cash=initial,
+                        trades=state["trades"],
+                        positions=positions,
+                        benchmark=benchmark,
+                        holdings=holdings,
+                    ),
                 )
             items.append(output)
         return items
 
     def _benchmark(self, state: dict[str, Any]) -> dict[str, Any] | None:
-        """从成立日到最新净值日的 510300 前复权收盘；没同步过基准时返回 None。"""
+        """从成立日到最新净值日的 510300 前复权收盘；没同步过基准时返回 None。
+
+        期初取首个净值日之前最近一根收盘：模拟盘首日是开盘买入，基准按前收
+        持有，首个交易日的收益才能和策略放在同一窗口里比。
+        """
 
         equity = state["equity"]
         if not equity:
             return None
+        first = date.fromisoformat(equity[0]["date"])
         rows = self.store.read_benchmark_bars(
             BENCHMARK_SYMBOL,
-            start_date=date.fromisoformat(equity[0]["date"]),
+            start_date=BENCHMARK_START_DATE,
             end_date=date.fromisoformat(equity[-1]["date"]),
         )
         if not rows:
             return None
+        index = next((i for i, (day, _) in enumerate(rows) if day >= first), len(rows))
+        if index >= len(rows):
+            return None
+        if index > 0 and (first - rows[index - 1][0]).days <= 10:
+            index -= 1
+        rows = rows[index:]
         return {
             "label": BENCHMARK_LABEL,
             "dates": [day.isoformat() for day, _ in rows],
@@ -481,15 +523,28 @@ class PoolSimulations:
     ) -> dict[str, object] | None:
         """同目标的「持仓中」全集等权线；只做参考，算不出来不挡详情。"""
 
+        equity = state["equity"]
+        if not equity:
+            return None
+        key = (str(config["objective"]), str(equity[0]["date"]), str(equity[-1]["date"]))
+        now = monotonic()
+        cached = self._holdings_cache.get(key)
+        if cached is not None and now - cached[0] < 300:
+            return cached[1]
         try:
-            return holdings_benchmark(
+            value = holdings_benchmark(
                 self.store,
                 objective=str(config["objective"]),
-                equity_dates=[point["date"] for point in state["equity"]],
+                equity_dates=[point["date"] for point in equity],
+                start_date=str(config.get("start_date") or "") or None,
             )
         except Exception:  # noqa: BLE001 - 参考线失败不影响持仓与成交
             logger.exception("持仓等权基准计算失败")
-            return None
+            value = None
+        if len(self._holdings_cache) >= 32:
+            self._holdings_cache.clear()
+        self._holdings_cache[key] = (now, value)
+        return value
 
     def _version(self, row: dict[str, Any], day: date) -> PortfolioBacktestConfig | None:
         with STATE_WRITE_LOCK, self.store.state_read_session() as connection:

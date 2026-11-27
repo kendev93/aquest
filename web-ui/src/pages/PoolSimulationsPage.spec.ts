@@ -174,6 +174,14 @@ it('shows the detail return curve with range shortcuts and buy/sell markers', as
       { date: '2026-11-27', value: 1020000 },
     ],
     positions: [], trades: [], trades_total: 2,
+    day_return: 0.01, benchmark_return: 0.02, holdings_return: 0.015,
+    excess_benchmark: -0.01, excess_holdings: -0.005,
+    metrics: {
+      trading: { closed: 1, win_rate: 1, payoff_ratio: null, realized_pnl: 90, unrealized_pnl: 0, avg_rank: 1 },
+      risk: { max_drawdown: 0, max_drawdown_days: 0, current_drawdown: 0, volatility: null, sharpe: null, sample_days: 3 },
+      ranges: [{ key: '1m', label: '近 1 月', start: '2026-06-30', strategy: 0.02, benchmark: 0.05, holdings: 0.03, excess_benchmark: -0.03, excess_holdings: -0.01 }],
+      stages: [{ key: '5d', label: '近 5 日', days: 2, start: '2026-06-30', strategy: 0.02, benchmark: 0.05, holdings: 0.03, excess_benchmark: -0.03, excess_holdings: -0.01 }],
+    },
     benchmark: {
       label: '沪深300ETF 510300 · 前复权',
       dates: ['2026-06-30', '2026-11-26', '2026-11-27'],
@@ -199,6 +207,9 @@ it('shows the detail return curve with range shortcuts and buy/sell markers', as
   }))
   try {
     await flushPromises()
+    expect(wrapper.text()).toContain('日收益')
+    expect(wrapper.text()).toContain('沪深300同期')
+    expect(wrapper.text()).toContain('持仓等权同期')
     await wrapper.get('.simulation-name').trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('2026-06-30 → 2026-11-27 · 3 个交易日 · 2 笔交易')
@@ -206,6 +217,9 @@ it('shows the detail return curve with range shortcuts and buy/sell markers', as
       .toEqual(['近 1 月', '近 3 月', '近半年', '近 1 年', '今年以来', '成立以来'])
     expect(wrapper.text()).toContain('沪深300ETF 510300 · 前复权')
     expect(wrapper.text()).toContain('持仓等权 · 每日再平衡')
+    expect(wrapper.text()).toContain('区间表现')
+    expect(wrapper.text()).toContain('交易与风险')
+    expect(wrapper.text()).toContain('已平仓')
     expect(wrapper.findAll('polyline[stroke="#f59e0b"]')).toHaveLength(1)
     expect(wrapper.findAll('polyline[stroke="#38bdf8"]')).toHaveLength(1)
     const labels = wrapper.findAll('svg g[aria-label]').map(marker => marker.attributes('aria-label') ?? '')

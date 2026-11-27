@@ -31,10 +31,20 @@ def holdings_benchmark(
     *,
     objective: str,
     equity_dates: Sequence[str],
+    start_date: str | None = None,
 ) -> dict[str, object] | None:
-    """按模拟盘的净值日期返回持仓等权曲线；推不出成员时返回 None。"""
+    """按模拟盘的净值日期返回持仓等权曲线；推不出成员时返回 None。
+
+    ``start_date`` 是首批信号日：给曲线补一个信号日收盘的期初点，
+    首个交易日的收益才能和模拟盘按同一窗口比较。
+    """
 
     days = [date.fromisoformat(text) for text in equity_dates]
+    if not days:
+        return None
+    base = date.fromisoformat(start_date) if start_date else None
+    if base is not None and base < days[0]:
+        days.insert(0, base)
     if len(days) < 2:
         return None
     anchor = _latest_holdings(store, objective)
@@ -44,6 +54,11 @@ def holdings_benchmark(
     if not members:
         return None
     history = _membership_history(store, objective, anchor_day, members, earliest=days[0])
+    if base is not None and days[0] == base and base.isoformat() not in history:
+        # 期初那天没有归档就退回从第一个净值日起算，别整条基准一起丢掉。
+        days = days[1:]
+        if len(days) < 2:
+            return None
     instruments = sorted({key for holding in history.values() for key in holding})
     if not instruments:
         return None
