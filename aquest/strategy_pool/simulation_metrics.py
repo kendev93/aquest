@@ -111,6 +111,24 @@ def _trading(
         for trade in trades
         if trade.get("direction") == "BUY" and isinstance(trade.get("rank"), (int, float))
     ]
+    trade_returns = []
+    for trade in sells:
+        proceeds = float(trade.get("price") or 0) * float(trade.get("size") or 0)
+        cost = proceeds - float(trade.get("pnl") or 0)
+        if cost > 0:
+            trade_returns.append(float(trade.get("pnl") or 0) / cost)
+    max_win_streak = max_loss_streak = win_streak = loss_streak = 0
+    for pnl in pnls:
+        if pnl > 0:
+            win_streak += 1
+            loss_streak = 0
+        elif pnl < 0:
+            loss_streak += 1
+            win_streak = 0
+        else:
+            win_streak = loss_streak = 0
+        max_win_streak = max(max_win_streak, win_streak)
+        max_loss_streak = max(max_loss_streak, loss_streak)
     return {
         "closed": len(sells),
         "win_rate": len(wins) / len(sells) if sells else None,
@@ -121,6 +139,12 @@ def _trading(
         "best_trade": max(pnls) if pnls else None,
         "worst_trade": min(pnls) if pnls else None,
         "expectancy": statistics.fmean(pnls) if pnls else None,
+        "avg_trade_return": statistics.fmean(trade_returns) if trade_returns else None,
+        "best_trade_return": max(trade_returns) if trade_returns else None,
+        "worst_trade_return": min(trade_returns) if trade_returns else None,
+        "max_win_streak": max_win_streak,
+        "max_loss_streak": max_loss_streak,
+        "avg_holding_days": _avg_holding_days(trades),
         "realized_pnl": sum(pnls),
         "unrealized_pnl": sum(
             float(position["size"]) * float(position["mark"]) - float(position["cost"])
@@ -128,6 +152,41 @@ def _trading(
         ),
         "avg_rank": statistics.fmean(ranks) if ranks else None,
     }
+
+
+def _avg_holding_days(trades: Sequence[Mapping[str, Any]]) -> float | None:
+    """按先进先出把卖出配到买入批次，按股数加权算平均持仓自然日。"""
+
+    lots: dict[str, list[list[Any]]] = {}
+    total_days = 0.0
+    total_size = 0.0
+    for trade in trades:
+        try:
+            day = date.fromisoformat(str(trade.get("date"))[:10])
+        except ValueError:
+            continue
+        symbol = str(trade.get("symbol") or "")
+        size = float(trade.get("size") or 0)
+        if size <= 0:
+            continue
+        if trade.get("direction") == "BUY":
+            lots.setdefault(symbol, []).append([day, size])
+            continue
+        if trade.get("direction") != "SELL":
+            continue
+        remaining = size
+        queue = lots.get(symbol, [])
+        while remaining > 0 and queue:
+            entry_day, available = queue[0][0], float(queue[0][1])
+            used = min(remaining, available)
+            total_days += used * (day - entry_day).days
+            total_size += used
+            if used >= available:
+                queue.pop(0)
+            else:
+                queue[0][1] = available - used
+            remaining -= used
+    return total_days / total_size if total_size > 0 else None
 
 
 def _risk(
@@ -159,6 +218,9 @@ def _risk(
     if gated and sample > 0 and total_return > -1:
         annual_return = (1 + total_return) ** (TRADING_DAYS_PER_YEAR / sample) - 1
     volatility = sharpe = sortino = calmar = var95 = downside_volatility = None
+    ulcer = math.sqrt(statistics.fmean(value * value for value in drawdowns)) if drawdowns else None
+    recovery_factor = total_return / drawdown if drawdown > 0 else None
+    omega = gain_to_pain = martin = skew = kurtosis = tail_ratio = cvar95 = None
     if gated and len(returns) >= 2:
         deviation = statistics.stdev(returns)
         if deviation > 0:
@@ -170,7 +232,25 @@ def _risk(
                 sortino = statistics.fmean(returns) / downside * math.sqrt(TRADING_DAYS_PER_YEAR)
         if annual_return is not None and drawdown > 0:
             calmar = annual_return / drawdown
-        var95 = sorted(returns)[max(0, math.floor(0.05 * (len(returns) - 1)))]
+        positive = sum(value for value in returns if value > 0)
+        negative = abs(sum(value for value in returns if value < 0))
+        omega = positive / negative if negative > 0 else None
+        gain_to_pain = sum(returns) / negative if negative > 0 else None
+        mean_return = statistics.fmean(returns)
+        second = statistics.fmean((value - mean_return) ** 2 for value in returns)
+        if second > 0:
+            third = statistics.fmean((value - mean_return) ** 3 for value in returns)
+            fourth = statistics.fmean((value - mean_return) ** 4 for value in returns)
+            skew = third / second**1.5
+            kurtosis = fourth / second**2 - 3
+        ordered = sorted(returns)
+        var95 = ordered[max(0, math.floor(0.05 * (len(ordered) - 1)))]
+        upper = ordered[min(len(ordered) - 1, math.ceil(0.95 * (len(ordered) - 1)))]
+        tail_ratio = upper / abs(var95) if var95 < 0 else None
+        tail = ordered[: max(1, math.floor(0.05 * len(ordered)))]
+        cvar95 = statistics.fmean(tail)
+        if ulcer and ulcer > 0 and annual_return is not None:
+            martin = annual_return / ulcer
     up_streak = down_streak = max_up = max_down = 0
     for value in returns:
         if value > 0:
@@ -199,6 +279,15 @@ def _risk(
         "sortino": sortino,
         "calmar": calmar,
         "var95": var95,
+        "cvar95": cvar95,
+        "recovery_factor": recovery_factor,
+        "ulcer": ulcer,
+        "martin": martin,
+        "omega": omega,
+        "gain_to_pain": gain_to_pain,
+        "skew": skew,
+        "kurtosis": kurtosis,
+        "tail_ratio": tail_ratio,
         "max_daily_gain": max(returns) if returns else None,
         "max_daily_loss": min(returns) if returns else None,
         "daily_win_rate": (
@@ -235,6 +324,8 @@ def _relative(
         "up_capture": None,
         "down_capture": None,
         "excess_max_drawdown": None,
+        "alpha": None,
+        "treynor": None,
     }
     if len(pairs) < 2:
         return empty
@@ -262,7 +353,12 @@ def _relative(
         excess_drawdown = max(excess_drawdown, 1 - value / high if high > 0 else 0.0)
     gated = len(pairs) >= RISK_SAMPLE_MIN_DAYS
     tracking_error = information_ratio = up_capture = down_capture = None
+    alpha = treynor = None
     if gated:
+        if beta is not None:
+            alpha = (mean_strategy - beta * mean_bench) * TRADING_DAYS_PER_YEAR
+            if beta != 0:
+                treynor = mean_strategy * TRADING_DAYS_PER_YEAR / beta
         deviation = statistics.stdev(excess)
         tracking_error = deviation * math.sqrt(TRADING_DAYS_PER_YEAR)
         if deviation > 0:
@@ -292,6 +388,8 @@ def _relative(
         "up_capture": up_capture,
         "down_capture": down_capture,
         "excess_max_drawdown": excess_drawdown,
+        "alpha": alpha,
+        "treynor": treynor,
     }
 
 

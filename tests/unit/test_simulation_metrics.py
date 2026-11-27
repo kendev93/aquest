@@ -87,6 +87,10 @@ def test_detail_metrics_cover_trading_risk_ranges_and_stages():
     assert risk["max_daily_loss"] == pytest.approx(105 / 110 - 1)
     assert risk["daily_win_rate"] == pytest.approx(1 / 3)
     assert risk["max_up_streak"] == 1 and risk["max_down_streak"] == 1
+    assert risk["recovery_factor"] == pytest.approx(0.05 / (1 - 105 / 110))
+    assert risk["ulcer"] is not None
+    assert risk["omega"] is None and risk["skew"] is None
+    assert risk["cvar95"] is None and risk["martin"] is None
 
     relative = result["relative"]
     assert relative["days"] == 3
@@ -95,6 +99,9 @@ def test_detail_metrics_cover_trading_risk_ranges_and_stages():
     assert relative["excess_max_drawdown"] is not None
     assert relative["tracking_error"] is None
     assert relative["information_ratio"] is None
+    assert relative["alpha"] is None and relative["treynor"] is None
+
+    assert trading["avg_holding_days"] is None
 
     concentration = result["concentration"]
     assert concentration["max_weight"] == pytest.approx(60 / 105)
@@ -115,6 +122,25 @@ def test_detail_metrics_cover_trading_risk_ranges_and_stages():
     assert stages["5d"]["days"] == 2
     assert stages["5d"]["start"] == "2026-11-24"
     assert stages["5d"]["strategy"] == pytest.approx(0.05)
+
+
+def test_avg_holding_days_matches_buys_to_sells_fifo():
+    trades = [
+        {"direction": "BUY", "symbol": "SH600000", "date": "2026-11-20", "size": 100},
+        {"direction": "BUY", "symbol": "SH600000", "date": "2026-11-24", "size": 100},
+        {"direction": "SELL", "symbol": "SH600000", "date": "2026-11-27", "size": 150},
+    ]
+    result = detail_metrics(
+        equity=[{"date": "2026-11-27", "value": 100.0}],
+        initial_cash=100.0,
+        cash=0.0,
+        trades=trades,
+        positions=[],
+        benchmark=None,
+        holdings=None,
+    )
+    # 先买的 100 股持有 7 天，后买的 100 股卖出 50 股持有 3 天。
+    assert result["trading"]["avg_holding_days"] == pytest.approx((100 * 7 + 50 * 3) / 150)
 
 
 def test_annualised_risk_metrics_require_twenty_samples():
