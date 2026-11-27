@@ -4,7 +4,7 @@ from datetime import date
 from typing import Literal, cast
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from aquest.strategy_pool.simulations import DEFAULT_SLOTS, PoolSimulations
 
@@ -38,8 +38,17 @@ class SimulationCreate(BaseModel):
     initial_cash: float = Field(default=1_000_000, ge=1_000, le=100_000_000, allow_inf_nan=False)
 
 
-class SimulationStatus(BaseModel):
-    paused: bool
+class SimulationUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    paused: bool | None = None
+
+    @model_validator(mode="after")
+    def _require_change(self) -> "SimulationUpdate":
+        if self.name is None and self.paused is None:
+            raise ValueError("至少提供 name 或 paused")
+        return self
 
 
 def _service(request: Request) -> PoolSimulations:
@@ -87,15 +96,19 @@ def simulation_detail(
 
 
 @router.patch("/{simulation_id}")
-def set_simulation_status(
-    simulation_id: str, payload: SimulationStatus, request: Request
+def update_simulation(
+    simulation_id: str, payload: SimulationUpdate, request: Request
 ) -> dict[str, object]:
     with store_guard("暂时无法更新榜单模拟盘"):
+        service = _service(request)
         try:
-            _service(request).set_paused(simulation_id, payload.paused)
+            if payload.name is not None:
+                service.rename(simulation_id, payload.name)
+            if payload.paused is not None:
+                service.set_paused(simulation_id, payload.paused)
         except KeyError as exc:
             raise HTTPException(404, "模拟盘不存在") from exc
-        return {"data": {"paused": payload.paused}}
+        return {"data": {"id": simulation_id, "name": payload.name, "paused": payload.paused}}
 
 
 @router.delete("/{simulation_id}")

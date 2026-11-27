@@ -83,6 +83,47 @@ it('deletes an account after confirmation and clears its detail', async () => {
   }
 })
 
+it('renames an account from the list and keeps the open detail in sync', async () => {
+  const original = window.location.href
+  window.history.replaceState({}, '', '/strategy-pool/simulations')
+  const account = {
+    id: 'rename', name: '旧名称', objective: 'annual_return', ranking: 'default', min_days: 0,
+    direction: 'desc', start_date: '2026-11-26', initial_cash: 1000000, paused: false,
+    cash: 1000000, value: 1000000, total_return: 0, max_drawdown: 0, total_fees: 0,
+    turnover: 0, holding_count: 0, equity: [], positions: [], trades: [], trades_total: 0,
+  }
+  let renamed = false
+  const api = vi.fn(async (url: string, init?: RequestInit) => {
+    const data = init?.method === 'PATCH' ? { id: 'rename', name: '新名称', paused: null }
+      : url.includes('/signal-days') ? []
+      : url.includes('/rename?') ? { ...account, name: renamed ? '新名称' : account.name }
+      : [renamed ? { ...account, name: '新名称' } : account]
+    if (init?.method === 'PATCH') renamed = true
+    return { ok: true, text: async () => JSON.stringify({ data }) }
+  })
+  vi.stubGlobal('fetch', api)
+  const prompt = vi.spyOn(window, 'prompt').mockReturnValue('新名称')
+  const wrapper = mount(defineComponent({
+    setup: () => () => h(KeepAlive, null, { default: () => h(PoolSimulationsPage) }),
+  }))
+  try {
+    await flushPromises()
+    await wrapper.get('.simulation-name').trigger('click')
+    await flushPromises()
+    await wrapper.get('.simulation-rename').trigger('click')
+    await flushPromises()
+    const patch = api.mock.calls.find(([, init]) => init?.method === 'PATCH')
+    expect(JSON.parse(String(patch?.[1]?.body))).toEqual({ name: '新名称' })
+    expect(prompt).toHaveBeenCalledWith('输入新的模拟盘名称', '旧名称')
+    expect(wrapper.text()).toContain('新名称 · 持仓与成交')
+  } finally {
+    wrapper.unmount()
+    prompt.mockRestore()
+    vi.unstubAllGlobals()
+    window.history.replaceState({}, '', original)
+  }
+})
+
 it('shows the detail return curve with range shortcuts and buy/sell markers', async () => {
   const original = window.location.href
   window.history.replaceState({}, '', '/strategy-pool/simulations')

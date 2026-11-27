@@ -306,6 +306,19 @@ class PoolSimulations:
             state["paused"] = paused
             self._save(key, state)
 
+    def rename(self, key: str, name: str) -> None:
+        with self.lock:
+            rows = self._read(key)
+            if not rows:
+                raise KeyError(key)
+            _, config, _ = rows[0]
+            config["name"] = name
+            with self.store.state_write_transaction() as connection:
+                connection.execute(
+                    "UPDATE pool_simulations SET config_json = ? WHERE simulation_id = ?",
+                    [dumps(config), key],
+                )
+
     def delete(self, key: str) -> None:
         with self.lock:
             if not self._read(key):

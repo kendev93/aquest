@@ -121,6 +121,19 @@ async function toggle(item: Simulation): Promise<void> {
   finally { busy.value = false }
 }
 
+async function rename(item: Simulation): Promise<void> {
+  const next = window.prompt('输入新的模拟盘名称', item.name)?.trim()
+  if (!next || next === item.name) return
+  busy.value = true
+  error.value = ''
+  try {
+    await request(`${endpoint}/${item.id}`, { method: 'PATCH', body: JSON.stringify({ name: next }) })
+    if (detail.value?.id === item.id) detail.value = { ...detail.value, name: next }
+    await refresh()
+  } catch (exc) { showError(exc) }
+  finally { busy.value = false }
+}
+
 async function remove(item: Simulation): Promise<void> {
   if (!window.confirm(`删除模拟盘「${item.name}」？该盘的持仓、成交和净值记录将一并删除，且无法恢复。`)) return
   busy.value = true
@@ -299,7 +312,7 @@ const detailCurve = computed<IndividualResearchFullBacktest | null>(() => {
             <thead><tr><th>模拟盘</th><th>榜单</th><th>持仓</th><th>累计收益</th><th>最大回撤</th><th>换手倍数</th><th>交易成本</th><th>状态</th></tr></thead>
             <tbody>
               <tr v-for="item in items" :key="item.id">
-                <td><button class="text-button simulation-name" type="button" :aria-pressed="detail?.id === item.id" @click="select(item.id)">{{ item.name }}</button></td>
+                <td><button class="text-button simulation-name" type="button" :aria-pressed="detail?.id === item.id" @click="select(item.id)">{{ item.name }}</button><button class="text-button simulation-rename" type="button" :disabled="busy" @click="rename(item)">改名</button></td>
                 <td>{{ labels[item.objective] }} · {{ rankLabels[item.ranking as Rank] }}</td>
                 <td>{{ item.holding_count }}/{{ item.max_positions ?? 5 }}</td><td>{{ formatSignedPercent(item.total_return) }}</td>
                 <td>{{ formatPercent(item.max_drawdown) }}</td><td>{{ formatNumber(item.turnover) }} 倍</td><td>{{ formatNumber(item.total_fees) }}</td>
@@ -384,6 +397,7 @@ th { color: var(--muted); }
 td small { display: block; margin-top: 5px; color: var(--warning); white-space: normal; }
 .simulation-name { color: var(--accent); font-size: inherit; }
 .simulation-name[aria-pressed="true"] { background: var(--accent-soft); }
+.simulation-rename { margin-left: 4px; color: var(--muted); font-size: 11px; }
 .simulation-delete { margin-left: 6px; border-color: var(--danger); background: transparent; color: var(--danger); }
 .simulation-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 125px), 1fr)); gap: 10px; margin: 14px 0 18px; }
 .simulation-metrics > div { padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-raised); }

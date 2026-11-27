@@ -240,6 +240,16 @@ def test_simulation_http_delete_removes_account(tmp_path):
                 [dumps(config), dumps(state)],
             )
         assert client.get(f"{url}/sim-delete").json()["data"]["all_trades"] == []
+        renamed = client.patch(f"{url}/sim-delete", json={"name": "改名后的盘"})
+        assert renamed.status_code == 200
+        assert renamed.json() == {
+            "data": {"id": "sim-delete", "name": "改名后的盘", "paused": None}
+        }
+        assert client.get(f"{url}/sim-delete").json()["data"]["name"] == "改名后的盘"
+        assert client.patch(f"{url}/sim-delete", json={"paused": True}).status_code == 200
+        assert client.get(f"{url}/sim-delete").json()["data"]["paused"] is True
+        assert client.patch(f"{url}/sim-delete", json={}).status_code == 422
+        assert client.patch(f"{url}/missing", json={"name": "x"}).status_code == 404
         assert client.delete(f"{url}/missing").status_code == 404
         response = client.delete(f"{url}/sim-delete")
         assert response.status_code == 200
