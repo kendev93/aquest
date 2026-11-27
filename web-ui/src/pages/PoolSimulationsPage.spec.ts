@@ -152,8 +152,8 @@ it('draws single-day comparisons as dots instead of an invisible polyline', asyn
     expect(dots).toHaveLength(1)
     expect(dots[0].attributes('cx')).toBe('418')
     const dateLabels = wrapper.findAll('.simulation-chart text')
-      .map(node => node.text()).filter(text => text === '2026-11-27')
-    expect(dateLabels).toHaveLength(1)
+      .map(node => node.text()).filter(text => /^\d{4}-\d{2}-\d{2}$/.test(text))
+    expect(dateLabels).toEqual(['2026-11-25', '2026-11-26', '2026-11-27', '2026-11-28', '2026-11-29'])
   } finally {
     wrapper.unmount()
     vi.unstubAllGlobals()

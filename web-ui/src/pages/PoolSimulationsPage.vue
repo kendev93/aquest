@@ -180,12 +180,29 @@ const chart = computed(() => {
   const start = Math.min(...values.map(p => p.date)), end = Math.max(...values.map(p => p.date))
   const low = Math.min(0, ...values.map(p => p.value)), high = Math.max(0, ...values.map(p => p.value))
   const span = Math.max(0.001, high - low)
+  // 只有一天净值时把横轴前后各铺两天：日期照常按整段写，点位仍在中间。
+  const pad = start === end ? 2 * 86_400_000 : 0
+  const axisStart = start - pad, axisEnd = end + pad
+  const x = (time: number) => 62 + (time - axisStart) / Math.max(1, axisEnd - axisStart) * 712
+  const xTicks = start === end
+    ? Array.from({ length: 5 }, (_, index) => {
+      const time = axisStart + (axisEnd - axisStart) * index / 4
+      return {
+        x: x(time),
+        label: new Date(time).toISOString().slice(0, 10),
+        anchor: index === 0 ? 'start' : index === 4 ? 'end' : 'middle',
+      }
+    })
+    : [
+      { x: x(start), label: new Date(start).toISOString().slice(0, 10), anchor: 'start' },
+      { x: x(end), label: new Date(end).toISOString().slice(0, 10), anchor: 'end' },
+    ]
   return {
-    low, high, first: new Date(start).toISOString().slice(0, 10), last: new Date(end).toISOString().slice(0, 10),
+    low, high, xTicks,
     lines: items.value.map((item, index) => {
       // 只有一天净值时 polyline 画不出线：把点放中间并单独画圆点。
       const coords = item.equity.map(p => ({
-        x: start === end ? 418 : 62 + (Date.parse(p.date) - start) / Math.max(1, end - start) * 712,
+        x: x(Date.parse(p.date)),
         y: 198 - (p.value / item.initial_cash - 1 - low) / span * 176,
       }))
       return {
@@ -309,7 +326,7 @@ const detailCurve = computed<IndividualResearchFullBacktest | null>(() => {
             <path d="M62 22V198H774" fill="none" stroke="currentColor" />
             <text x="54" y="24" text-anchor="end">{{ formatPercent(chart.high) }}</text>
             <text x="54" y="199" text-anchor="end">{{ formatPercent(chart.low) }}</text>
-            <text v-if="chart.first !== chart.last" x="62" y="218">{{ chart.first }}</text><text v-if="chart.first !== chart.last" x="774" y="218" text-anchor="end">{{ chart.last }}</text><text v-else x="418" y="218" text-anchor="middle">{{ chart.first }}</text>
+            <text v-for="tick in chart.xTicks" :key="tick.x" :x="tick.x" y="218" :text-anchor="tick.anchor">{{ tick.label }}</text>
             <g v-for="line in chart.lines" :key="line.id">
               <polyline :points="line.points" :stroke="line.color" fill="none" stroke-width="2.5" />
               <circle v-for="(dot, index) in line.dots" :key="index" :cx="dot.x" :cy="dot.y" r="3.5" :fill="line.color" />
