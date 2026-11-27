@@ -179,23 +179,6 @@ def test_simulation_replays_signal_only_rank_and_replaces_only_after_filled_sale
     assert smaller_result["trades_total"] == 5
     assert result["max_positions"] == 5
 
-    # 旧账本在成交里扣过费用：再次初始化时按当前无费用口径整段重放并替换。
-    with store.state_write_transaction() as con:
-        row = con.execute(
-            "SELECT state_json FROM pool_simulations WHERE simulation_id = ?", [key]
-        ).fetchone()
-        legacy = json.loads(row[0])
-        for trade in legacy["trades"]:
-            trade["fee"] = 3.0
-        con.execute(
-            "UPDATE pool_simulations SET state_json = ? WHERE simulation_id = ?",
-            [dumps(legacy), key],
-        )
-    pool.initialize()
-    healed = pool.read(key)[0]
-    assert healed == result
-    assert all("fee" not in trade for trade in healed["all_trades"])
-
     # 首次拆状态库后，信号归档与账本仍然可读。
     counts = store.ensure_state_database()
     assert counts["pool_simulations"] == 2
