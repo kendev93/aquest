@@ -22,6 +22,7 @@ import MarketDataPage from './pages/MarketDataPage.vue'
 import PortfolioBacktestPage from './pages/PortfolioBacktestPage.vue'
 import StrategyDiscoveryPage from './pages/StrategyDiscoveryPage.vue'
 import StrategyFitnessPage from './pages/StrategyFitnessPage.vue'
+import PoolSimulationsPage from './pages/PoolSimulationsPage.vue'
 import StrategyPoolDetailPage from './pages/StrategyPoolDetailPage.vue'
 import StrategyPoolPage from './pages/StrategyPoolPage.vue'
 import StrategyTrackingPage from './pages/StrategyTrackingPage.vue'
@@ -89,6 +90,7 @@ const ROUTES: readonly RouteDefinition[] = [
     component: StrategyPoolDetailPage,
     keyed: true,
   },
+  { test: prefix('/strategy-pool/simulations'), component: PoolSimulationsPage },
   { test: prefix('/strategy-pool'), component: StrategyPoolPage },
   { test: prefix('/candidate-library'), component: CandidateLibraryPage },
   { test: prefix('/user-manual'), component: UserManualPage },

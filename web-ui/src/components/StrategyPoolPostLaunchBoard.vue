@@ -71,6 +71,11 @@ function selectSort(field: typeof sortField.value): void {
   else { sortField.value = field; direction.value = 'desc' }
 }
 const minDays = ref(0)
+const simulationHref = computed(() => '/strategy-pool/simulations?' + new URLSearchParams({
+  create: '1', objective: props.objective, ranking: sortField.value,
+  direction: direction.value, min_days: String(minDays.value),
+}))
+
 
 /**
  * 能进榜的只有「当前生效版本（手工覆盖优先）+ 创建之后确实有新行情」的标的。
@@ -156,6 +161,8 @@ function excessClass(value: number | null): string {
         <button type="button" data-testid="pool-board-desc" :class="{ active: direction === 'desc' }" :aria-pressed="direction === 'desc'" @click="direction = 'desc'">{{ sortLabels[sortField] }}最高在前</button>
         <button type="button" data-testid="pool-board-asc" :class="{ active: direction === 'asc' }" :aria-pressed="direction === 'asc'" @click="direction = 'asc'">{{ sortLabels[sortField] }}最低在前</button>
       </div>
+      <a class="button-secondary" :href="simulationHref">按此榜单建模拟盘</a>
+      <a class="table-link" href="/strategy-pool/simulations">查看榜单模拟盘</a>
       <label class="pool-board-days">上线天数门槛
         <select v-model.number="minDays" data-testid="pool-board-min-days">
           <option v-for="threshold in DAY_THRESHOLDS" :key="threshold.days" :value="threshold.days">{{ threshold.label }}</option>
