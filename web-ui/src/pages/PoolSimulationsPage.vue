@@ -182,14 +182,18 @@ const chart = computed(() => {
   const span = Math.max(0.001, high - low)
   return {
     low, high, first: new Date(start).toISOString().slice(0, 10), last: new Date(end).toISOString().slice(0, 10),
-    lines: items.value.map((item, index) => ({
-      id: item.id, name: item.name, color: colors[index % colors.length],
-      points: item.equity.map(p => {
-        const x = 62 + (Date.parse(p.date) - start) / Math.max(1, end - start) * 712
-        const y = 198 - (p.value / item.initial_cash - 1 - low) / span * 176
-        return `${x},${y}`
-      }).join(' '),
-    })).filter(line => line.points),
+    lines: items.value.map((item, index) => {
+      // 只有一天净值时 polyline 画不出线：把点放中间并单独画圆点。
+      const coords = item.equity.map(p => ({
+        x: start === end ? 418 : 62 + (Date.parse(p.date) - start) / Math.max(1, end - start) * 712,
+        y: 198 - (p.value / item.initial_cash - 1 - low) / span * 176,
+      }))
+      return {
+        id: item.id, name: item.name, color: colors[index % colors.length],
+        points: coords.map(c => `${c.x.toFixed(1)},${c.y.toFixed(1)}`).join(' '),
+        dots: coords.length === 1 ? coords : [],
+      }
+    }).filter(line => line.points),
   }
 })
 
@@ -305,8 +309,11 @@ const detailCurve = computed<IndividualResearchFullBacktest | null>(() => {
             <path d="M62 22V198H774" fill="none" stroke="currentColor" />
             <text x="54" y="24" text-anchor="end">{{ formatPercent(chart.high) }}</text>
             <text x="54" y="199" text-anchor="end">{{ formatPercent(chart.low) }}</text>
-            <text x="62" y="218">{{ chart.first }}</text><text x="774" y="218" text-anchor="end">{{ chart.last }}</text>
-            <polyline v-for="line in chart.lines" :key="line.id" :points="line.points" :stroke="line.color" fill="none" stroke-width="2.5" />
+            <text v-if="chart.first !== chart.last" x="62" y="218">{{ chart.first }}</text><text v-if="chart.first !== chart.last" x="774" y="218" text-anchor="end">{{ chart.last }}</text><text v-else x="418" y="218" text-anchor="middle">{{ chart.first }}</text>
+            <g v-for="line in chart.lines" :key="line.id">
+              <polyline :points="line.points" :stroke="line.color" fill="none" stroke-width="2.5" />
+              <circle v-for="(dot, index) in line.dots" :key="index" :cx="dot.x" :cy="dot.y" r="3.5" :fill="line.color" />
+            </g>
           </svg>
         </template>
         <p v-else class="simulation-empty">{{ items.length ? '等待下一交易日行情与信号齐备后生成净值。' : '还没有模拟盘，创建后可在这里对比收益。' }}</p>

@@ -128,6 +128,39 @@ it('renames an account from the list and keeps the open detail in sync', async (
   }
 })
 
+it('draws single-day comparisons as dots instead of an invisible polyline', async () => {
+  const original = window.location.href
+  window.history.replaceState({}, '', '/strategy-pool/simulations')
+  const account = {
+    id: 'one-day', name: '首日盘', objective: 'annual_return', ranking: 'default', min_days: 0,
+    direction: 'desc', start_date: '2026-11-26', initial_cash: 1000000, paused: false,
+    cash: 200000, value: 1074700, total_return: 0.0747, max_drawdown: 0, turnover: 0.8,
+    holding_count: 5, equity: [{ date: '2026-11-27', value: 1074700 }],
+    positions: [], trades: [], trades_total: 0,
+  }
+  const api = vi.fn(async (url: string) => {
+    const data = url.includes('/signal-days') ? [] : [account]
+    return { ok: true, text: async () => JSON.stringify({ data }) }
+  })
+  vi.stubGlobal('fetch', api)
+  const wrapper = mount(defineComponent({
+    setup: () => () => h(KeepAlive, null, { default: () => h(PoolSimulationsPage) }),
+  }))
+  try {
+    await flushPromises()
+    const dots = wrapper.findAll('.simulation-chart circle')
+    expect(dots).toHaveLength(1)
+    expect(dots[0].attributes('cx')).toBe('418')
+    const dateLabels = wrapper.findAll('.simulation-chart text')
+      .map(node => node.text()).filter(text => text === '2026-11-27')
+    expect(dateLabels).toHaveLength(1)
+  } finally {
+    wrapper.unmount()
+    vi.unstubAllGlobals()
+    window.history.replaceState({}, '', original)
+  }
+})
+
 it('shows the detail return curve with range shortcuts and buy/sell markers', async () => {
   const original = window.location.href
   window.history.replaceState({}, '', '/strategy-pool/simulations')
