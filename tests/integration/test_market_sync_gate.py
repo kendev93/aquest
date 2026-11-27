@@ -94,7 +94,7 @@ class _FakeSyncService:
         timeout: float = 30.0,
     ) -> tuple[tuple[date, float], ...]:
         del start_date, end_date, timeout
-        return ((date(2015, 1, 5), 3.1), (date(2015, 1, 6), 3.2), (_TODAY, 4.0))
+        return ((date(2015, 1, 5), 3.1), (date(2015, 1, 6), 3.2), (_PREVIOUS, 4.0))
 
 
 @contextmanager
@@ -133,7 +133,8 @@ def _gate_client(
         )
     service = _FakeSyncService()
     if benchmark:
-        store.replace_benchmark_bars(BENCHMARK_SYMBOL, [(_TODAY, 4.0)])
+        # 基准要覆盖到「最近一个已收盘交易日」；周末运行时会比今天早一天。
+        store.replace_benchmark_bars(BENCHMARK_SYMBOL, [(_PREVIOUS, 4.0), (_TODAY, 4.0)])
     app = create_app(
         market_data_store=store,
         market_sync=service,
@@ -230,7 +231,7 @@ def test_sync_refreshes_the_simulation_benchmark(tmp_path: Path) -> None:
         assert store.read_benchmark_bars(BENCHMARK_SYMBOL) == [
             (date(2015, 1, 5), 3.1),
             (date(2015, 1, 6), 3.2),
-            (_TODAY, 4.0),
+            (_PREVIOUS, 4.0),
         ]
 
 

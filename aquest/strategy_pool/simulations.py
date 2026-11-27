@@ -612,7 +612,7 @@ class PoolSimulations:
             if available <= 0:
                 break
             symbol = _symbol(candidate)
-            if symbol in held or state["cooldown"].get(symbol, 0):
+            if symbol in held or symbol in sold or state["cooldown"].get(symbol, 0):
                 continue
             actions.append(
                 {
@@ -624,8 +624,9 @@ class PoolSimulations:
                 }
             )
             available -= 1
-        # 再平衡也用信号日收盘价重算权重，和执行时的判定同一口径。
-        plan_positions = {symbol: dict(position) for symbol, position in remaining.items()}
+        # 再平衡也用信号日收盘价重算权重，和执行时的判定同一口径：已排队卖出的仓位
+        # 仍留在总权益里，只是不参与再平衡（直接把它的市值从分母拿掉会误判其余超配）。
+        plan_positions = {symbol: dict(position) for symbol, position in state["positions"].items()}
         for symbol, position in plan_positions.items():
             bars = self.store.read_bars(
                 position["market"], position["code"], start_date=signal_day, end_date=signal_day
@@ -633,7 +634,11 @@ class PoolSimulations:
             if not bars.empty:
                 position["mark"] = float(bars.iloc[0]["close"])
         targets = rebalance_targets(
-            {"positions": plan_positions, "pending": {}, "cash": state["cash"]},
+            {
+                "positions": plan_positions,
+                "pending": dict.fromkeys(sold, {}),
+                "cash": state["cash"],
+            },
             slots,
             float(config.get("rebalance_band_pct", DEFAULT_REBALANCE_BAND_PCT)) / 100,
         )
@@ -684,7 +689,11 @@ class PoolSimulations:
             buy_slippage=0,
             applied_corporate_actions=set(row["applied_corporate_actions"]),
         )
-        trigger = _risk_trigger(context, idx, position, pinned)
+        trigger = (
+            None
+            if str(row.get("entry_date")) == str(signal_day)
+            else _risk_trigger(context, idx, position, pinned)
+        )
         if trigger:
             return _risk_trigger_label(trigger[0])
         if bool(context.sell_mask[idx]):
@@ -791,7 +800,13 @@ class PoolSimulations:
                 day_number, {symbol: position}, {symbol: context}, state["cash"], {}
             )
             if idx is not None and symbol not in state["pending"]:
-                trigger = _risk_trigger(context, idx, position, pinned)
+                # 与跟踪回放引擎一致：当天开盘买入的仓位当天不做风控判定（引擎先判
+                # 风控、再执行买入）；规则卖出与持有到期照常按收盘判定。
+                trigger = (
+                    None
+                    if str(row["entry_date"]) == str(signal_day)
+                    else _risk_trigger(context, idx, position, pinned)
+                )
                 reason = (
                     _risk_trigger_label(trigger[0])
                     if trigger

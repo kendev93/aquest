@@ -71,7 +71,12 @@ def test_simulation_replays_signal_only_rank_and_replaces_only_after_filled_sale
                 "date": pd.to_datetime(days),
                 "open": [10.0] * 4,
                 "high": [10.0] * 4,
-                "low": [10.0, 10.0, 7.0 if code == codes[0] else 10.0, 10.0],
+                "low": [
+                    10.0,
+                    10.0,
+                    7.0 if code == codes[0] else 10.0,
+                    7.0 if code == codes[7] else 10.0,
+                ],
                 "close": [10.0] * 4,
                 "volume": [1000.0] * 4,
                 "amount": [10000.0] * 4,
@@ -259,6 +264,16 @@ def test_simulation_replays_signal_only_rank_and_replaces_only_after_filled_sale
     assert preview is not None
     assert preview["signal_date"] == days[3]
     assert preview["actions"] == []
+
+    # 回放盘在 26 号开盘买入、26 号当天最低 7 元已跌破 20% 止损：引擎当天不做
+    # 风控判定，预览不能报出这条卖出（否则榜单上没有的卖出席位会在账上出现）。
+    replay_preview = pool.read(replayed_key)[0]["next_actions"]
+    assert replay_preview is not None
+    assert replay_preview["signal_date"] == days[3]
+    assert all(
+        not (action["direction"] == "SELL" and action["symbol"] == codes[7])
+        for action in replay_preview["actions"]
+    )
 
 
 def test_simulation_http_rejects_start_without_archived_signal(tmp_path):
