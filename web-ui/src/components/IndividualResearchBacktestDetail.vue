@@ -3,7 +3,7 @@ import { computed, ref, watch } from 'vue'
 import type { IndividualResearchFullBacktest } from '../types'
 import { formatNumber, formatPercent, formatSignedPercent } from '../utils/format'
 
-const props = defineProps<{ backtest: IndividualResearchFullBacktest | null; launchDate?: string; baselineDate?: string; returnCurve?: boolean; hideMetrics?: boolean; hideTrades?: boolean }>()
+const props = defineProps<{ backtest: IndividualResearchFullBacktest | null; launchDate?: string; baselineDate?: string; returnCurve?: boolean; hideMetrics?: boolean; hideTrades?: boolean; benchmarkLabel?: string }>()
 
 // 方向与曲线图例同词同色：图例写「买入/卖出」，表格里露 BUY/SELL 会让用户以为
 // 是两套东西。signal_date 单独成列，因为信号在收盘后判定、下一交易日才成交，
@@ -157,7 +157,7 @@ function closedTrades(): number {
       <div v-if="chartPoints()" class="curve-header">
         <div class="curve-legend" aria-label="曲线图例">
           <span><i class="strategy-key" />策略</span>
-          <span v-if="chart.benchmark"><i class="benchmark-key" />基准·买入持有</span>
+          <span v-if="chart.benchmark"><i class="benchmark-key" />{{ props.benchmarkLabel ?? '基准·买入持有' }}</span>
           <template v-if="props.returnCurve">
             <span><i class="buy-key" />买入</span>
             <span><i class="sell-key" />卖出</span>

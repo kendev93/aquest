@@ -708,6 +708,19 @@ class _DuckDbStoreBase:
                 )
                 """
             )
+            # 模拟盘对比用的基准（510300 前复权）：全量覆盖写入，和个股日线分表。
+            # ETF 价格 3 位小数，进个股表会污染按 0.01 系数解析的日线口径与选股范围。
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS benchmark_daily (
+                    symbol VARCHAR NOT NULL,
+                    trade_date DATE NOT NULL,
+                    close DOUBLE NOT NULL,
+                    fetched_at TIMESTAMP NOT NULL,
+                    PRIMARY KEY (symbol, trade_date)
+                )
+                """
+            )
             # 除权除息事件：复权因子的唯一来源。刻意不落盘任何复权后的价格 ——
             # 价格一旦被写成"结果"就会随每次除权重算，历史不可复现。这里只存事件
             # 与由事件算出的单次因子增量，因子按时间顺序累乘即可得到任意区间的

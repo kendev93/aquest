@@ -321,6 +321,26 @@ class DuckDbMarketDataStore(_DuckDbStoreBase):
             coverage_end=coverage_end,
         )
 
+    def replace_benchmark_bars(
+        self,
+        symbol: str,
+        bars: Iterable[tuple[date, float]],
+    ) -> int:
+        return self._bars.replace_benchmark_bars(symbol, bars)
+
+    def read_benchmark_bars(
+        self,
+        symbol: str,
+        *,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> list[tuple[date, float]]:
+        return self._bars.read_benchmark_bars(
+            symbol,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
     def read_authoritative_trading_dates(
         self,
         start_date: date,

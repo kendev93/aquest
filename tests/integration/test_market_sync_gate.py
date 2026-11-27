@@ -23,6 +23,7 @@ import pandas as pd
 from fastapi.testclient import TestClient
 
 from aquest.adapters.market_sync import MarketSyncConfig
+from aquest.market_data.benchmark import BENCHMARK_SYMBOL
 from aquest.market_data.store import DuckDbMarketDataStore
 from aquest.market_data.sync_session import record_synced_session, sync_scope_fingerprint
 from aquest.web.app import create_app
@@ -84,6 +85,16 @@ class _FakeSyncService:
             "errors": 0,
             "failure_reasons": {},
         }
+
+    def fetch_benchmark_bars(
+        self,
+        start_date: date,
+        end_date: date,
+        *,
+        timeout: float = 30.0,
+    ) -> tuple[tuple[date, float], ...]:
+        del start_date, end_date, timeout
+        return ((date(2015, 1, 5), 3.1), (date(2015, 1, 6), 3.2))
 
 
 @contextmanager
@@ -200,6 +211,23 @@ def test_sync_returns_before_indicators_are_warmed(tmp_path: Path) -> None:
         assert precompute["status"] == "queued"
         assert precompute["job_id"]
         assert len(service.configs) == 1
+
+
+def test_sync_refreshes_the_simulation_benchmark(tmp_path: Path) -> None:
+    """点同步行情时顺手刷新模拟盘对比基准；结果里单独报一行。"""
+
+    with _gate_client(tmp_path) as (client, store, _service):
+        created = client.post("/api/v1/market-data/sync-online", json={"force": True})
+        assert created.status_code == 202
+        job_id = created.json()["data"]["job_id"]
+        _settle(client, job_id)
+
+        state = client.get(f"/api/v1/market-data/jobs/{job_id}").json()["data"]
+        assert state["result"]["benchmark"] == {"status": "ok", "bars": 2}
+        assert store.read_benchmark_bars(BENCHMARK_SYMBOL) == [
+            (date(2015, 1, 5), 3.1),
+            (date(2015, 1, 6), 3.2),
+        ]
 
 
 def test_force_flag_bypasses_the_gate(tmp_path: Path) -> None:

@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 from aquest.backtest.profiles import profile_from_config
 from aquest.market_data.adapter import DuckDbMarketDataAdapter
+from aquest.market_data.benchmark import BENCHMARK_LABEL, BENCHMARK_SYMBOL
 from aquest.market_data.models import MarketCode
 from aquest.market_data.pool_simulation_schema import ARCHIVE_DDL, SIMULATION_DDL
 from aquest.market_data.store import DuckDbMarketDataStore
@@ -345,9 +346,29 @@ class PoolSimulations:
                     trades_total=len(state["trades"]),
                     trades=list(reversed(state["trades"]))[offset : offset + limit],
                     all_trades=list(state["trades"]),
+                    benchmark=self._benchmark(state),
                 )
             items.append(output)
         return items
+
+    def _benchmark(self, state: dict[str, Any]) -> dict[str, Any] | None:
+        """从成立日到最新净值日的 510300 前复权收盘；没同步过基准时返回 None。"""
+
+        equity = state["equity"]
+        if not equity:
+            return None
+        rows = self.store.read_benchmark_bars(
+            BENCHMARK_SYMBOL,
+            start_date=date.fromisoformat(equity[0]["date"]),
+            end_date=date.fromisoformat(equity[-1]["date"]),
+        )
+        if not rows:
+            return None
+        return {
+            "label": BENCHMARK_LABEL,
+            "dates": [day.isoformat() for day, _ in rows],
+            "totals": [close for _, close in rows],
+        }
 
     def _version(self, row: dict[str, Any], day: date) -> PortfolioBacktestConfig | None:
         with STATE_WRITE_LOCK, self.store.state_read_session() as connection:

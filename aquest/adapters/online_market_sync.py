@@ -25,6 +25,7 @@ import pandas as pd
 
 from aquest.errors import error_reason
 from aquest.market_data.adjustment import CorporateAction, compute_factor_ratio
+from aquest.market_data.benchmark import BENCHMARK_FETCH_TIMEOUT_SECONDS, BENCHMARK_SYMBOL
 from aquest.market_data.day_format import classify_board, classify_instrument
 from aquest.market_data.models import (
     InstrumentBoard,
@@ -811,6 +812,61 @@ class OnlineMarketClient:
             raise OnlineDataError("East Money 日线响应包含无效日期或数值")
         return frame[columns]
 
+    def fetch_benchmark_history(
+        self,
+        symbol: str,
+        start_date: str,
+        end_date: str,
+        *,
+        timeout: float,
+    ) -> pd.DataFrame:
+        """Fetch forward-adjusted (前复权) daily closes for the SH benchmark ETF.
+
+        前复权按最新除权基准重算，只适合整段全量覆盖；不要拿它和个股的
+        不复权日线混存，两者的历史基准不同。
+        """
+
+        normalized_symbol = _clean_code(symbol)
+        if normalized_symbol is None:
+            raise OnlineDataError(f"基准代码无效: {symbol}")
+        payload = self._request(
+            _EASTMONEY_HISTORY_URL,
+            {
+                "fields1": "f1,f2,f3,f4,f5,f6",
+                "fields2": "f51,f52,f53,f54,f55,f56,f57,f58",
+                "ut": _EASTMONEY_HISTORY_UT,
+                "klt": "101",
+                "fqt": "1",
+                "secid": f"1.{normalized_symbol}",
+                "beg": start_date,
+                "end": end_date,
+            },
+            timeout,
+        )
+        data = payload.get("data")
+        if not isinstance(data, Mapping):
+            raise OnlineDataError("基准行情响应缺少有效 data 对象")
+        raw_klines = data.get("klines")
+        if not isinstance(raw_klines, (list, tuple)):
+            raise OnlineDataError("基准行情响应缺少有效 klines 列表")
+        if not raw_klines:
+            return pd.DataFrame(
+                {"date": pd.Series(dtype="datetime64[ns]"), "close": pd.Series(dtype="float64")}
+            )
+        rows: list[tuple[pd.Timestamp, float]] = []
+        for item in raw_klines:
+            if not isinstance(item, str):
+                raise OnlineDataError("基准行情响应包含格式无效的 kline")
+            parts = item.split(",")
+            if len(parts) < 3:
+                raise OnlineDataError("基准行情响应字段数量不足")
+            day = pd.to_datetime(parts[0], errors="coerce")
+            close = pd.to_numeric(parts[2], errors="coerce")
+            if pd.isna(day) or pd.isna(close):
+                raise OnlineDataError("基准行情响应包含无效日期或数值")
+            rows.append((day, float(close)))
+        return pd.DataFrame(rows, columns=["date", "close"])
+
     def fetch_tencent_daily_history(
         self,
         market: MarketCode,
@@ -1045,6 +1101,35 @@ class OnlineMarketSync:
         if not dates:
             raise OnlineDataError("行情源没有返回有效交易日历")
         return tuple(sorted(dates))
+
+    def fetch_benchmark_bars(
+        self,
+        start_date: date,
+        end_date: date,
+        *,
+        timeout: float = BENCHMARK_FETCH_TIMEOUT_SECONDS,
+    ) -> tuple[tuple[date, float], ...]:
+        """Fetch the 510300 forward-adjusted benchmark series for the given window."""
+
+        module = self._module_factory()
+        fetcher = getattr(module, "fetch_benchmark_history", None)
+        if not callable(fetcher):
+            raise OnlineProviderUnavailable("当前行情源不支持基准行情读取")
+        frame = fetcher(
+            BENCHMARK_SYMBOL,
+            start_date.isoformat(),
+            end_date.isoformat(),
+            timeout=timeout,
+        )
+        rows: list[tuple[date, float]] = []
+        for day, close in zip(frame["date"], frame["close"], strict=False):
+            parsed = day.date() if isinstance(day, datetime) else day
+            if not isinstance(parsed, date) or not start_date <= parsed <= end_date:
+                continue
+            rows.append((parsed, float(close)))
+        if not rows:
+            raise OnlineDataError("行情源没有返回有效基准日线")
+        return tuple(sorted(rows))
 
     def _stage_covered_session(self, config: MarketSyncConfig, as_of: datetime) -> date | None:
         """本轮可以按「已有本交易日」裁剪到哪个交易日；判不出来就返回 None（不裁剪）。"""

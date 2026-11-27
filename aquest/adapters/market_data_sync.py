@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 from aquest.errors import error_reason
+from aquest.market_data.benchmark import BENCHMARK_FETCH_TIMEOUT_SECONDS
 from aquest.market_data.models import (
     InstrumentBoard,
     InstrumentType,
@@ -109,6 +110,18 @@ class MarketDataSync:
         fetcher = getattr(self._eastmoney_sync, "fetch_trading_calendar", None)
         if not callable(fetcher):
             raise OnlineProviderUnavailable("当前行情源不支持交易日历读取")
+        return tuple(fetcher(start_date, end_date, timeout=timeout))
+
+    def fetch_benchmark_bars(
+        self,
+        start_date: date,
+        end_date: date,
+        *,
+        timeout: float = BENCHMARK_FETCH_TIMEOUT_SECONDS,
+    ) -> tuple[tuple[date, float], ...]:
+        fetcher = getattr(self._eastmoney_sync, "fetch_benchmark_bars", None)
+        if not callable(fetcher):
+            raise OnlineProviderUnavailable("当前行情源不支持基准行情读取")
         return tuple(fetcher(start_date, end_date, timeout=timeout))
 
     def discover_instruments(

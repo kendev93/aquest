@@ -105,6 +105,36 @@ def test_fetch_daily_history_maps_eastmoney_kline_rows() -> None:
     assert transport.calls[0][1]["fqt"] == "0"
 
 
+def test_fetch_benchmark_history_requests_forward_adjusted_etf_closes() -> None:
+    transport = FakeTransport(
+        [
+            {
+                "data": {
+                    "klines": [
+                        "2015-01-05,3.0,3.1,3.2,2.9,1000,3100,0.1,0.0,0.0,0.2",
+                        "2015-01-06,3.1,3.2,3.3,3.0,1200,3840,0.1,0.0,0.0,0.2",
+                    ]
+                }
+            }
+        ]
+    )
+
+    frame = OnlineMarketClient(transport=transport).fetch_benchmark_history(
+        "510300", "2015-01-01", "2015-01-31", timeout=8.0
+    )
+
+    assert frame["date"].dt.strftime("%Y-%m-%d").tolist() == ["2015-01-05", "2015-01-06"]
+    assert frame["close"].tolist() == [3.1, 3.2]
+    params = transport.calls[0][1]
+    assert params["secid"] == "1.510300"
+    # fqt=1：前复权。基准整段全量覆盖，不和个股的不复权日线混存。
+    assert params["fqt"] == "1"
+    assert params["klt"] == "101"
+    assert params["beg"] == "2015-01-01"
+    assert params["end"] == "2015-01-31"
+    assert transport.calls[0][2] == 8.0
+
+
 def test_eastmoney_empty_kline_list_is_an_explicit_valid_no_data_response() -> None:
     transport = FakeTransport([{"data": {"klines": []}}])
 

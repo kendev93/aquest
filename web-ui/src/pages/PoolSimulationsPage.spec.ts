@@ -96,6 +96,11 @@ it('shows the detail return curve with range shortcuts and buy/sell markers', as
       { date: '2026-11-27', value: 1020000 },
     ],
     positions: [], trades: [], trades_total: 2,
+    benchmark: {
+      label: '沪深300ETF 510300 · 前复权',
+      dates: ['2026-06-30', '2026-11-26', '2026-11-27'],
+      totals: [4.0, 4.1, 4.2],
+    },
     all_trades: [
       { date: '2026-06-30', signal_date: '2026-06-27', symbol: 'SH600000', direction: 'BUY', price: 10, size: 100, fee: 5, reason: '成立建仓' },
       { date: '2026-11-27', signal_date: '2026-11-26', symbol: 'SH600000', direction: 'SELL', price: 11, size: 100, fee: 5, reason: '卖出条件', pnl: 90 },
@@ -116,6 +121,8 @@ it('shows the detail return curve with range shortcuts and buy/sell markers', as
     expect(wrapper.text()).toContain('2026-06-30 → 2026-11-27 · 3 个交易日 · 2 笔交易')
     expect(wrapper.findAll('.segmented-tabs button').map(button => button.text()))
       .toEqual(['近 1 月', '近 3 月', '近半年', '近 1 年', '今年以来', '成立以来'])
+    expect(wrapper.text()).toContain('沪深300ETF 510300 · 前复权')
+    expect(wrapper.findAll('polyline[stroke="#f59e0b"]')).toHaveLength(1)
     const labels = wrapper.findAll('svg g[aria-label]').map(marker => marker.attributes('aria-label') ?? '')
     expect(labels).toHaveLength(2)
     expect(labels[0]).toContain('标的：SH600000')

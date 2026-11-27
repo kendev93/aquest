@@ -1391,6 +1391,51 @@ class DuckDbBarsStore:
             return value
         return date.fromisoformat(str(value)[:10])
 
+    def replace_benchmark_bars(
+        self,
+        symbol: str,
+        bars: Iterable[tuple[date, float]],
+    ) -> int:
+        """全量替换某个基准的日线（前复权收盘），旧行一条不留。"""
+
+        self._store._require_writer()
+        normalized = symbol.strip()
+        if not normalized:
+            raise ValueError("基准代码不能为空")
+        rows = [(item[0], float(item[1])) for item in bars if isinstance(item[0], date)]
+        now = _now()
+        with self._store.locked_write_transaction() as connection:
+            connection.execute("DELETE FROM benchmark_daily WHERE symbol = ?", [normalized])
+            if rows:
+                connection.executemany(
+                    "INSERT INTO benchmark_daily (symbol, trade_date, close, fetched_at)"
+                    " VALUES (?, ?, ?, ?)",
+                    [(normalized, trade_date, close, now) for trade_date, close in rows],
+                )
+        return len(rows)
+
+    def read_benchmark_bars(
+        self,
+        symbol: str,
+        *,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> list[tuple[date, float]]:
+        with self._store.read_session() as connection:
+            rows = connection.execute(
+                "SELECT trade_date, close FROM benchmark_daily WHERE symbol = ?"
+                " AND (? IS NULL OR trade_date >= ?) AND (? IS NULL OR trade_date <= ?)"
+                " ORDER BY trade_date",
+                [symbol, start_date, start_date, end_date, end_date],
+            ).fetchall()
+        return [
+            (
+                value if isinstance(value, date) else date.fromisoformat(str(value)[:10]),
+                float(close),
+            )
+            for value, close in rows
+        ]
+
     def save_market_trading_calendar(
         self,
         trade_dates: Iterable[date],

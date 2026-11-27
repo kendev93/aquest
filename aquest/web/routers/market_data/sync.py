@@ -25,12 +25,14 @@ from aquest.market_data.auto_sync import (
     FULL_REFRESH_DESCRIPTION,
     MARKET_SYNC_EXCLUSIVE_GROUP,
 )
+from aquest.market_data.benchmark import refresh_benchmark_bars
 from aquest.market_data.store import MarketDataStoreError
 from aquest.market_data.sync_call import call_market_sync
 from aquest.market_data.sync_session import (
     latest_completed_session,
     read_synced_session,
     refresh_calendar_when_stale,
+    shanghai_now,
     sync_scope_fingerprint,
 )
 from aquest.screening.jobs import (
@@ -206,6 +208,8 @@ def _create_sync_job(
                 **result,
                 "indicator_precompute": {"status": "queued", "job_id": precompute_job_id},
             }
+        # 基准只是模拟盘的对比参考：拉不到就只记一笔，不让整次同步失败。
+        result = {**result, "benchmark": _refresh_benchmark(request)}
         if not reset:
             return result
         # 重刷是"删了再下"，删掉却没补回来的标的必须单独点名，否则用户只会看到
@@ -233,6 +237,20 @@ def _create_sync_job(
         status_code=status.HTTP_202_ACCEPTED,
         content={"data": {"job_id": job_id, "status": "queued"}},
     )
+
+
+def _refresh_benchmark(request: Request) -> dict[str, object]:
+    """同步行情收尾时顺手刷新模拟盘对比基准（510300 前复权）。"""
+
+    fetcher = getattr(_service(request), "fetch_benchmark_bars", None)
+    if not callable(fetcher):
+        return {"status": "skipped", "message": "当前行情源不支持基准行情"}
+    try:
+        rows = refresh_benchmark_bars(_store(request), fetcher, today=shanghai_now().date())
+    except Exception as exc:  # noqa: BLE001 - 基准缺了不影响行情同步本身
+        logger.warning("基准行情刷新失败：%s", str(exc)[:200])
+        return {"status": "failed", "message": "基准行情刷新失败，模拟盘曲线暂不显示对比"}
+    return {"status": "ok", "bars": rows}
 
 
 def _reset_scope(

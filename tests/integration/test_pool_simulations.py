@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
 
+from aquest.market_data.benchmark import BENCHMARK_LABEL, BENCHMARK_SYMBOL
 from aquest.market_data.store import DuckDbMarketDataStore
 from aquest.strategy_discovery.duckdb_job_store import DuckDbStrategyJobStore
 from aquest.strategy_pool import simulation_archive, simulations
@@ -136,9 +137,18 @@ def test_simulation_replays_signal_only_rank_and_replaces_only_after_filled_sale
             "start_date": days[0],
         }
     )
+    store.replace_benchmark_bars(
+        BENCHMARK_SYMBOL,
+        [(date(2026, 11, 24), 4.0), (date(2026, 11, 26), 4.2)],
+    )
     pool.advance()
     result = pool.read(key)[0]
     assert result["holding_count"] == 5
+    assert result["benchmark"] == {
+        "label": BENCHMARK_LABEL,
+        "dates": ["2026-11-24", "2026-11-26"],
+        "totals": [4.0, 4.2],
+    }
     assert result["trades_total"] == 7
     assert result["trades"][0]["symbol"] == "SH600007"
     assert result["trades"][0]["rank"] == 1
