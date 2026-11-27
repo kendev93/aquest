@@ -60,6 +60,10 @@ type Simulation = {
   positions?: Position[]; trades?: Trade[]; trades_total?: number; all_trades?: Trade[]; rebalance_band_pct?: number
   benchmark?: { label?: string; dates: string[]; totals: number[] } | null
   holdings_benchmark?: { label?: string; dates: string[]; totals: number[] } | null
+  next_actions?: {
+    signal_date: string; warning?: string | null
+    actions: { direction: string; symbol: string; name?: string | null; reason: string; kind?: string }[]
+  } | null
   day_return?: number | null; benchmark_return?: number | null; holdings_return?: number | null
   excess_benchmark?: number | null; excess_holdings?: number | null
   metrics?: SimulationMetrics
@@ -538,6 +542,25 @@ const detailCurve = computed<IndividualResearchFullBacktest | null>(() => {
             </tr></tbody>
           </table>
         </div>
+        <h3>下个交易日操作</h3>
+        <template v-if="detail.next_actions">
+          <p class="simulation-copy">基于 {{ detail.next_actions.signal_date }} 收盘信号，下一交易日开盘执行；按开盘价成交、不计费用。</p>
+          <p v-if="detail.next_actions.warning" class="notice">{{ detail.next_actions.warning }}</p>
+          <div v-if="detail.next_actions.actions.length" class="table-wrap">
+            <table>
+              <thead><tr><th>操作</th><th>标的</th><th>说明</th></tr></thead>
+              <tbody>
+                <tr v-for="(action, index) in detail.next_actions.actions" :key="`${action.direction}-${action.symbol}-${index}`">
+                  <td :class="action.direction === 'SELL' ? 'simulation-negative' : 'simulation-positive'">{{ action.direction === 'SELL' ? '卖出' : '买入' }}</td>
+                  <td>{{ action.symbol }} {{ action.name }}</td>
+                  <td>{{ action.reason }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p v-else class="simulation-empty">没有待执行的操作。</p>
+        </template>
+        <p v-else class="simulation-empty">还没有待执行的收盘信号；刷新最新交易日信号后再看。</p>
         <h3 class="simulation-trades-title">成交记录</h3>
         <div class="table-wrap">
           <table>
@@ -589,6 +612,8 @@ td small { display: block; margin-top: 5px; color: var(--warning); white-space: 
 .simulation-name[aria-pressed="true"] { background: var(--accent-soft); }
 .simulation-rename { margin-left: 4px; color: var(--muted); font-size: 11px; }
 .simulation-excess { display: block; margin-top: 4px; color: var(--muted); font-size: 11px; white-space: normal; }
+.simulation-positive { color: #34d399; }
+.simulation-negative { color: #f87171; }
 .simulation-delete { margin-left: 6px; border-color: var(--danger); background: transparent; color: var(--danger); }
 .simulation-metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 125px), 1fr)); gap: 10px; margin: 14px 0 18px; }
 .simulation-metrics > div { padding: 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-raised); }

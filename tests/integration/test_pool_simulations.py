@@ -167,6 +167,7 @@ def test_simulation_replays_signal_only_rank_and_replaces_only_after_filled_sale
         "all",
     }
     assert {row["key"] for row in metrics["stages"]} == {"5d", "20d", "60d"}
+    assert result["next_actions"] is None
     assert result["trades_total"] == 7
     assert result["trades"][0]["symbol"] == "SH600007"
     assert result["trades"][0]["rank"] == 1
@@ -244,6 +245,20 @@ def test_simulation_replays_signal_only_rank_and_replaces_only_after_filled_sale
     assert counts["pool_simulations"] == 4
     assert counts["pool_simulation_signals"] == 3
     assert pool.read(key)[0] == result
+
+    # 下一份还没消化的归档给出下一交易日操作预览；没有离场也没有空位时操作列表为空。
+    monkeypatch.setattr(
+        simulation_archive,
+        "shanghai_now",
+        lambda: datetime.fromisoformat(f"{days[3]}T16:00:00").replace(
+            tzinfo=ZoneInfo("Asia/Shanghai")
+        ),
+    )
+    _publish(jobs, days[3], [_signal(codes[3], 0.5)])
+    preview = pool.read(key)[0]["next_actions"]
+    assert preview is not None
+    assert preview["signal_date"] == days[3]
+    assert preview["actions"] == []
 
 
 def test_simulation_http_rejects_start_without_archived_signal(tmp_path):

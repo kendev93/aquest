@@ -476,6 +476,7 @@ class PoolSimulations:
                     all_trades=list(state["trades"]),
                     benchmark=benchmark,
                     holdings_benchmark=holdings,
+                    next_actions=self._next_actions_safe(config, state),
                     metrics=detail_metrics(
                         equity=equity,
                         initial_cash=initial,
@@ -547,6 +548,152 @@ class PoolSimulations:
             self._holdings_cache.clear()
         self._holdings_cache[key] = (now, value)
         return value
+
+    def _next_actions_safe(
+        self, config: dict[str, Any], state: dict[str, Any]
+    ) -> dict[str, object] | None:
+        try:
+            return self._next_actions(config, state)
+        except Exception:  # noqa: BLE001 - 操作预览失败不影响持仓与成交
+            logger.exception("下个交易日操作预览失败")
+            return None
+
+    def _next_actions(
+        self, config: dict[str, Any], state: dict[str, Any]
+    ) -> dict[str, object] | None:
+        """基于下一份还没消化的收盘信号，列出下一交易日开盘会执行的操作。
+
+        与 ``_step`` 用同一套离场判定和榜单排序；只做预览，不改任何状态。
+        """
+
+        with STATE_WRITE_LOCK, self.store.state_read_session() as connection:
+            row = connection.execute(
+                "SELECT trade_date, entries_json FROM pool_simulation_signals "
+                "WHERE objective = ? AND trade_date >= ? AND trade_date > ? "
+                "ORDER BY trade_date ASC LIMIT 1",
+                [config["objective"], state["minimum_signal_date"], state.get("cursor") or ""],
+            ).fetchone()
+        if row is None:
+            return None
+        signal_day = row[0] if isinstance(row[0], date) else date.fromisoformat(str(row[0])[:10])
+        try:
+            data = json.loads(row[1])
+        except (TypeError, ValueError):
+            return None
+        if int(data.get("rank_version") or 0) < required_rank_version(config["ranking"]):
+            return {
+                "signal_date": signal_day.isoformat(),
+                "actions": [],
+                "warning": "该日的信号归档缺少当前排序所需的指标，暂时无法推进",
+            }
+        slots = int(config.get("max_positions", DEFAULT_SLOTS))
+        self.engine._refresh_corporate_action_cache()
+        actions: list[dict[str, object]] = []
+        remaining: dict[str, dict[str, Any]] = {}
+        sold: set[str] = set()
+        for symbol, position in state["positions"].items():
+            reason = self._plan_exit(position, signal_day)
+            if reason is None:
+                remaining[symbol] = position
+                continue
+            actions.append(
+                {
+                    "direction": "SELL",
+                    "symbol": symbol,
+                    "name": position.get("name"),
+                    "reason": reason,
+                    "kind": "exit",
+                }
+            )
+            sold.add(symbol)
+        available = min(slots - len(remaining), slots if not state["started"] else len(sold))
+        held = set(remaining)
+        for rank, candidate in enumerate(rank_buys(data.get("buys") or [], config), start=1):
+            if available <= 0:
+                break
+            symbol = _symbol(candidate)
+            if symbol in held or state["cooldown"].get(symbol, 0):
+                continue
+            actions.append(
+                {
+                    "direction": "BUY",
+                    "symbol": symbol,
+                    "name": candidate.get("name"),
+                    "reason": f"买入榜第 {rank} 名",
+                    "kind": "entry",
+                }
+            )
+            available -= 1
+        # 再平衡也用信号日收盘价重算权重，和执行时的判定同一口径。
+        plan_positions = {symbol: dict(position) for symbol, position in remaining.items()}
+        for symbol, position in plan_positions.items():
+            bars = self.store.read_bars(
+                position["market"], position["code"], start_date=signal_day, end_date=signal_day
+            )
+            if not bars.empty:
+                position["mark"] = float(bars.iloc[0]["close"])
+        targets = rebalance_targets(
+            {"positions": plan_positions, "pending": {}, "cash": state["cash"]},
+            slots,
+            float(config.get("rebalance_band_pct", DEFAULT_REBALANCE_BAND_PCT)) / 100,
+        )
+        for symbol, target in targets.items():
+            position = plan_positions[symbol]
+            overweight = position["size"] * position["mark"] > target
+            actions.append(
+                {
+                    "direction": "SELL" if overweight else "BUY",
+                    "symbol": symbol,
+                    "name": position.get("name"),
+                    "reason": "再平衡减仓" if overweight else "再平衡补仓",
+                    "kind": "rebalance",
+                }
+            )
+        return {
+            "signal_date": signal_day.isoformat(),
+            "actions": actions,
+            "warning": "模拟盘已暂停，恢复后才会执行" if state["paused"] else None,
+        }
+
+    def _plan_exit(self, row: dict[str, Any], signal_day: date) -> str | None:
+        pinned = self._version(row, signal_day)
+        if pinned is None:
+            return None
+        ref = self.adapter.stock_ref("", cast(MarketCode, row["market"]), row["code"])
+        raw = self.store.read_bars(row["market"], row["code"], end_date=signal_day)
+        if raw.empty:
+            return None
+        context = self.engine._build_context(
+            ref, replace(pinned, end_date=signal_day), None, frame=raw
+        )
+        if context is None:
+            return None
+        idx = context.date_to_index.get(int(signal_day.strftime("%Y%m%d")))
+        if idx is None:
+            return None
+        position = _Position(
+            market=row["market"],
+            code=row["code"],
+            instrument_type="stock",
+            board=context.board,
+            size=row["size"],
+            entry_price=row["entry_price"],
+            entry_date=int(str(row["entry_date"]).replace("-", "")),
+            highest_price=row["highest_price"],
+            buy_commission=0,
+            buy_slippage=0,
+            applied_corporate_actions=set(row["applied_corporate_actions"]),
+        )
+        trigger = _risk_trigger(context, idx, position, pinned)
+        if trigger:
+            return _risk_trigger_label(trigger[0])
+        if bool(context.sell_mask[idx]):
+            return "卖出条件"
+        if pinned.max_hold_days and self.engine._held_enough_bars(
+            context, position, idx, pinned.max_hold_days
+        ):
+            return "持有到期"
+        return None
 
     def _version(self, row: dict[str, Any], day: date) -> PortfolioBacktestConfig | None:
         with STATE_WRITE_LOCK, self.store.state_read_session() as connection:

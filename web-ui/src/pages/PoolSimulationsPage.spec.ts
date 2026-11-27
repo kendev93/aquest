@@ -196,6 +196,14 @@ it('shows the detail return curve with range shortcuts and buy/sell markers', as
       ranges: [{ key: '1m', label: '近 1 月', start: '2026-06-30', strategy: 0.02, benchmark: 0.05, holdings: 0.03, excess_benchmark: -0.03, excess_holdings: -0.01 }],
       stages: [{ key: '5d', label: '近 5 日', days: 2, start: '2026-06-30', strategy: 0.02, benchmark: 0.05, holdings: 0.03, excess_benchmark: -0.03, excess_holdings: -0.01 }],
     },
+    next_actions: {
+      signal_date: '2026-11-27',
+      warning: null,
+      actions: [
+        { direction: 'SELL', symbol: 'SH600000', name: '浦发银行', reason: '止损', kind: 'exit' },
+        { direction: 'BUY', symbol: 'SH600001', name: '邯郸钢铁', reason: '买入榜第 1 名', kind: 'entry' },
+      ],
+    },
     benchmark: {
       label: '沪深300ETF 510300 · 前复权',
       dates: ['2026-06-30', '2026-11-26', '2026-11-27'],
@@ -232,6 +240,9 @@ it('shows the detail return curve with range shortcuts and buy/sell markers', as
     expect(wrapper.text()).toContain('沪深300ETF 510300 · 前复权')
     expect(wrapper.text()).toContain('持仓等权 · 每日再平衡')
     expect(wrapper.text()).toContain('区间表现')
+    expect(wrapper.text()).toContain('下个交易日操作')
+    expect(wrapper.text()).toContain('止损')
+    expect(wrapper.text()).toContain('买入榜第 1 名')
     expect(wrapper.text()).toContain('收益与回撤')
     expect(wrapper.text()).toContain('风险调整')
     expect(wrapper.text()).toContain('相对沪深300')
