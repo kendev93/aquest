@@ -17,7 +17,10 @@ from aquest.market_data.pool_simulation_schema import ARCHIVE_DDL
 from aquest.market_data.store import DuckDbMarketDataStore
 from aquest.market_data.store_base import STATE_WRITE_LOCK
 from aquest.market_data.sync_session import shanghai_now
-from aquest.strategy_pool.simulation_archive import archive_simulation_signals
+from aquest.strategy_pool.simulation_archive import (
+    archive_simulation_signals,
+    backfill_simulation_signals,
+)
 
 from .job_store import (
     DEFAULT_STALE_AFTER_SECONDS,
@@ -76,6 +79,7 @@ class DuckDbStrategyJobStore:
                 connection.execute(
                     "UPDATE strategy_jobs SET has_result = TRUE WHERE result_json IS NOT NULL"
                 )
+            backfill_simulation_signals(connection)
         if legacy_root is None:
             return 0
         return self.import_legacy_jobs(legacy_root)

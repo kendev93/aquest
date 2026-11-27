@@ -240,3 +240,56 @@ def test_unfilled_exit_keeps_slot_and_same_day_exit_cannot_reenter():
     assert state["trades"][0]["signal_date"] == "2026-11-23"
     assert state["trades"][1]["rank"] == 2
     assert state["cash"] >= 0
+
+
+def test_existing_signal_is_recovered_only_with_same_day_ranking(tmp_path):
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    pool = PoolSimulations(store)
+    pool.initialize()
+    PoolTrackingStore(store).bootstrap()
+    jobs = DuckDbStrategyJobStore(store)
+    day = "2026-11-26"
+    job = "existing-scan"
+    jobs.create(
+        job,
+        operation="market_strategy_pool_tracking",
+        payload={"mode": "signals", "as_of_date": day},
+        description="旧信号",
+    )
+    jobs.write_result(
+        job,
+        {
+            "results_by_objective": {
+                "annual_return": {"buy_signals": [_signal("600000", 0.5)], "sell_signals": []},
+            }
+        },
+    )
+    original_time = datetime(2026, 11, 26, 16, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
+    with store.state_write_transaction() as con:
+        row = con.execute("SELECT state_json FROM strategy_jobs WHERE job_id = ?", [job]).fetchone()
+        assert row is not None
+        import json
+
+        state = json.loads(row[0])
+        state["finished_at"] = original_time
+        con.execute("UPDATE strategy_jobs SET state_json = ? WHERE job_id = ?", [dumps(state), job])
+        con.execute(
+            """INSERT INTO pool_tracking_versions
+               (version_id, market, code, objective, source, signature, candidate_json,
+                created_at, is_current, updated_at, summary_json) VALUES
+               ('600000', 'SH', '600000', 'annual_return', 'automatic', 'sig', '{}',
+                ?, TRUE, ?, ?)""",
+            [day, day, dumps({"as_of_date": "2026-11-27", "full_period": {"annual_return": 0.2}})],
+        )
+    jobs.initialize()
+    assert pool.signal_days("annual_return", "composite") == []
+    with store.state_write_transaction() as con:
+        con.execute(
+            "UPDATE pool_tracking_versions SET summary_json = ?",
+            [dumps({"as_of_date": day, "full_period": {"annual_return": 0.1}})],
+        )
+    jobs.initialize()
+    assert pool.signal_days("annual_return", "annual_return") == [day]
+    with store.state_read_session() as con:
+        archive = con.execute("SELECT archived_at FROM pool_simulation_signals").fetchone()
+    assert archive == (datetime(2026, 11, 26, 16),)
