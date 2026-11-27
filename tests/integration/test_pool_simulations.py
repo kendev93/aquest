@@ -195,6 +195,48 @@ def test_simulation_http_rejects_start_without_archived_signal(tmp_path):
         assert response.status_code == 422
 
 
+def test_simulation_http_delete_removes_account(tmp_path):
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    app = create_app(market_data_store=store, auto_sync_enabled=False)
+    with TestClient(app) as client:
+        url = "/api/v1/strategy-pool/simulations"
+        config = {
+            "name": "待删盘",
+            "objective": "annual_return",
+            "ranking": "default",
+            "direction": "desc",
+            "min_days": 0,
+            "start_date": "2026-11-26",
+            "max_positions": 5,
+            "initial_cash": 100_000.0,
+        }
+        state = {
+            "cash": 100_000.0,
+            "positions": {},
+            "pending": {},
+            "cooldown": {},
+            "trades": [],
+            "equity": [],
+            "started": False,
+            "paused": True,
+            "cursor": None,
+            "minimum_signal_date": "2026-11-26",
+            "warning": None,
+        }
+        with store.state_write_transaction() as con:
+            con.execute(
+                "INSERT INTO pool_simulations VALUES ('sim-delete', ?, ?)",
+                [dumps(config), dumps(state)],
+            )
+        assert client.get(f"{url}/sim-delete").status_code == 200
+        assert client.delete(f"{url}/missing").status_code == 404
+        response = client.delete(f"{url}/sim-delete")
+        assert response.status_code == 200
+        assert response.json() == {"data": {"id": "sim-delete"}}
+        assert client.get(f"{url}/sim-delete").status_code == 404
+        assert client.get(url).json() == {"data": []}
+
+
 def test_unfilled_exit_keeps_slot_and_same_day_exit_cannot_reenter():
     from aquest.portfolio_backtest.models import PortfolioBacktestConfig
     from aquest.strategy_pool.simulations import execute_orders

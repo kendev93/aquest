@@ -304,6 +304,13 @@ class PoolSimulations:
             state["paused"] = paused
             self._save(key, state)
 
+    def delete(self, key: str) -> None:
+        with self.lock:
+            if not self._read(key):
+                raise KeyError(key)
+            with self.store.state_write_transaction() as connection:
+                connection.execute("DELETE FROM pool_simulations WHERE simulation_id = ?", [key])
+
     def read(
         self, key: str | None = None, *, offset: int = 0, limit: int = 50
     ) -> list[dict[str, Any]]:

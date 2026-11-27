@@ -96,3 +96,13 @@ def set_simulation_status(
         except KeyError as exc:
             raise HTTPException(404, "模拟盘不存在") from exc
         return {"data": {"paused": payload.paused}}
+
+
+@router.delete("/{simulation_id}")
+def delete_simulation(simulation_id: str, request: Request) -> dict[str, object]:
+    with store_guard("暂时无法删除榜单模拟盘"):
+        try:
+            _service(request).delete(simulation_id)
+        except KeyError as exc:
+            raise HTTPException(404, "模拟盘不存在") from exc
+        return {"data": {"id": simulation_id}}
