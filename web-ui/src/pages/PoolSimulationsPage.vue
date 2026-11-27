@@ -390,14 +390,14 @@ const detailCurve = computed<IndividualResearchFullBacktest | null>(() => {
         <p v-else class="simulation-empty">{{ items.length ? '等待下一交易日行情与信号齐备后生成净值。' : '还没有模拟盘，创建后可在这里对比收益。' }}</p>
         <div v-if="items.length" class="table-wrap">
           <table>
-            <thead><tr><th>模拟盘</th><th>榜单</th><th>持仓</th><th>累计收益</th><th>日收益</th><th>沪深300同期</th><th>持仓等权同期</th><th>最大回撤</th><th>换手倍数</th><th>状态</th></tr></thead>
+            <thead><tr><th>模拟盘</th><th>榜单</th><th>持仓</th><th>累计收益</th><th>最新交易日收益</th><th>沪深300同期</th><th>持仓等权同期</th><th>最大回撤</th><th>换手倍数</th><th>状态</th></tr></thead>
             <tbody>
               <tr v-for="item in items" :key="item.id">
                 <td><button class="text-button simulation-name" type="button" :aria-pressed="detail?.id === item.id" @click="select(item.id)">{{ item.name }}</button><button class="text-button simulation-rename" type="button" :disabled="busy" @click="rename(item)">改名</button></td>
                 <td>{{ labels[item.objective] }} · {{ rankLabels[item.ranking as Rank] }}</td>
                 <td>{{ item.holding_count }}/{{ item.max_positions ?? 5 }}</td>
                 <td>{{ formatSignedPercent(item.total_return) }}<small class="simulation-excess">较300 {{ formatSignedPercent(item.excess_benchmark ?? null) }} · 较持仓 {{ formatSignedPercent(item.excess_holdings ?? null) }}</small></td>
-                <td>{{ formatSignedPercent(item.day_return ?? null) }}</td>
+                <td>{{ formatSignedPercent(item.day_return ?? null) }}<small class="simulation-excess">{{ item.equity.at(-1)?.date ?? '—' }}</small></td>
                 <td>{{ formatSignedPercent(item.benchmark_return ?? null) }}</td>
                 <td>{{ formatSignedPercent(item.holdings_return ?? null) }}</td>
                 <td>{{ formatPercent(item.max_drawdown) }}</td><td>{{ formatNumber(item.turnover) }} 倍</td>

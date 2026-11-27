@@ -221,7 +221,7 @@ it('shows the detail return curve with range shortcuts and buy/sell markers', as
   }))
   try {
     await flushPromises()
-    expect(wrapper.text()).toContain('日收益')
+    expect(wrapper.text()).toContain('最新交易日收益')
     expect(wrapper.text()).toContain('沪深300同期')
     expect(wrapper.text()).toContain('持仓等权同期')
     await wrapper.get('.simulation-name').trigger('click')
