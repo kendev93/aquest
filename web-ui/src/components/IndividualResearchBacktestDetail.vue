@@ -100,7 +100,7 @@ const chart = computed(() => {
     ? Array.from({ length: minimumTime === maximumTime ? 1 : 5 }, (_, i) => {
       const time = minimumTime + (maximumTime - minimumTime) * i / 4
       return { x: x(time), label: new Date(time).toISOString().slice(0, 10) }
-    })
+    }).filter((tick, index, all) => index === 0 || tick.label !== all[index - 1]!.label)
     : []
   return { creation, launchX: Number.isFinite(launch) ? x(launch) : null,
     benchmark: benchmarkSeries.length > 1 ? { points: toPoints(benchmarkSeries) } : null,

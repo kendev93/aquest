@@ -45,6 +45,26 @@ describe('IndividualResearchBacktestDetail', () => {
     expect(wrapper.text()).toContain('2026')
   })
 
+  it('does not repeat the same date on a two-day axis', () => {
+    const wrapper = mount(IndividualResearchBacktestDetail, {
+      props: {
+        backtest: backtest({
+          start_date: '2026-11-26',
+          end_date: '2026-11-27',
+          equity_curve: [
+            { date: '2026-11-26', return_pct: 0, total: 1_000_000 },
+            { date: '2026-11-27', return_pct: 0.0747, total: 1_074_700 },
+          ],
+        }),
+        returnCurve: true,
+      },
+    })
+    const labels = wrapper.findAll('svg text')
+      .map(node => node.text())
+      .filter(text => /^\d{4}-\d{2}-\d{2}$/.test(text))
+    expect(labels).toEqual(['2026-11-26', '2026-11-27'])
+  })
+
   it('renders legend markers for buy and sell and hides the benchmark when no series exists', () => {
     const withoutSeries = backtest({
       benchmark: { label: '个股买入持有', instrument_count: 1, total_return: 0.1, annual_return: 0.03, max_drawdown: -0.12 },
