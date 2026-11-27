@@ -16,12 +16,14 @@ import {
   fetchStrategyPoolJobs,
   fetchPoolSignalDays,
   fetchStrategyPoolResearchEstimate,
+  fetchStrategyPoolSignalGap,
   getStrategyPoolJob,
   saveResearchSettings,
   type StrategyPoolBoard,
   type StrategyPoolJobRequest,
 } from '../api/strategyPool'
 import { describeError } from '../api/client'
+import { runSignalBackfill } from '../utils/signalBackfill'
 import { useStrategyPoolFocus } from '../composables/useStrategyPoolFocus'
 import {
   useStrategyPoolSignalView,
@@ -1058,7 +1060,95 @@ async function rerunEntry(entry: StrategyPoolEntry): Promise<void> {
 
 async function startSignalScan(target?: { market: 'SH' | 'SZ'; code: string }, automatic = false): Promise<void> {
   if (!objective.value || isBusy.value) return
-  await startTask({ mode: 'signals', objective: objective.value, ...target, ...(automatic ? { automatic: true } : {}) }, 'signals')
+  if (target || automatic) {
+    await startTask({ mode: 'signals', objective: objective.value, ...target, ...(automatic ? { automatic: true } : {}) }, 'signals')
+    return
+  }
+  await startManualSignalScan()
+}
+
+/** 手动刷新：先查缺口，确认后逐日回放补齐，最后再扫最新交易日。 */
+async function startManualSignalScan(): Promise<void> {
+  if (submittingTask.value || !objective.value) return
+  let gapDays: string[] = []
+  try {
+    const gap = await fetchStrategyPoolSignalGap()
+    if (Array.isArray(gap.days)) gapDays = gap.days
+  } catch {
+    // 缺口读不到就按原来的单日刷新走，不挡主流程。
+  }
+  if (gapDays.length) {
+    const first = gapDays[0]
+    const last = gapDays[gapDays.length - 1]
+    const confirmed = window.confirm(
+      `发现 ${gapDays.length} 个缺失交易日（${first} 至 ${last}）。\n\n`
+      + '继续：逐日回放补齐历史信号（每天一轮全市场扫描，耗时较长），补完再刷新最新交易日。\n'
+      + '取消：只刷新最新交易日，中间缺失的日子继续缺着。',
+    )
+    if (!confirmed) {
+      await startTask({ mode: 'signals', objective: objective.value }, 'signals')
+      return
+    }
+    if (!(await runBackfillChain(gapDays))) return
+  }
+  await startTask({ mode: 'signals', objective: objective.value }, 'signals')
+}
+
+async function runBackfillChain(days: string[]): Promise<boolean> {
+  if (!objective.value) return false
+  submittingTask.value = true
+  errorMessage.value = ''
+  pollWarning.value = `正在补齐历史信号 0/${days.length}…`
+  try {
+    const outcome = await runSignalBackfill(days, {
+      submit: async (day) => {
+        const created = await createStrategyPoolJob({
+          mode: 'signals',
+          objective: objective.value!,
+          as_of_date: day,
+        })
+        if (created.skipped) throw new Error('历史信号补齐任务被跳过')
+        activeJobId.value = created.job_id
+        activeIntent.value = 'signals'
+        activeJob.value = { job_id: created.job_id, status: created.status, progress: 0 }
+        return created.job_id
+      },
+      poll: (jobId) => pollBackfillJob(jobId),
+      onProgress: (done, total) => {
+        pollWarning.value = `正在补齐历史信号 ${done}/${total}…`
+      },
+    })
+    if (outcome !== 'completed') {
+      errorMessage.value = outcome === 'cancelled'
+        ? '历史信号补齐已取消；缺口没补上时模拟盘会继续停在那里。'
+        : '历史信号补齐失败，请到任务记录里查看原因后重试。'
+      return false
+    }
+    pollWarning.value = ''
+    return true
+  } catch (error) {
+    errorMessage.value = apiMessage(error)
+    return false
+  } finally {
+    submittingTask.value = false
+    activeJobId.value = ''
+    activeIntent.value = ''
+    activeJob.value = null
+  }
+}
+
+/** 补齐任务只等终态，不把历史信号投影到当天面板。 */
+async function pollBackfillJob(jobId: string): Promise<'completed' | 'failed' | 'cancelled'> {
+  while (true) {
+    const state = await getStrategyPoolJob(jobId)
+    activeJob.value = state
+    if (isTerminalJobStatus(state.status)) {
+      if (state.status === 'completed') return 'completed'
+      if (state.status === 'cancelled') return 'cancelled'
+      return 'failed'
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 1_500))
+  }
 }
 
 async function startTask(

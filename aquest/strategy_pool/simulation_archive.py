@@ -208,6 +208,7 @@ def archive_simulation_signals(
                         "exits": exits,
                         "rank_version": archive_version,
                         "reconstructed": reconstructed,
+                        "replayed": bool(payload.get("replayed")),
                     }
                 ),
                 archived_at,

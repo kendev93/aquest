@@ -718,13 +718,18 @@ class PoolSimulations:
                 self._save(key, state)
                 return
             entries, saved_at = archives[signal_day]
+            data = json.loads(entries)
             opening = datetime.combine(trade_day, time(9, 30), ZoneInfo("Asia/Shanghai"))
-            if saved_at.replace(tzinfo=ZoneInfo("Asia/Shanghai")) >= opening:
+            # 事后按当日行情回放出来的归档（replayed）没有「次日开盘前生成」的自然时间，
+            # 但它只用了当日及之前的数据，口径上等价于当日收盘信号。
+            if (
+                not data.get("replayed")
+                and saved_at.replace(tzinfo=ZoneInfo("Asia/Shanghai")) >= opening
+            ):
                 state["warning"] = f"{signal_day} 的信号在 {trade_day} 开盘后生成，已跳过该批次"
                 state["cursor"] = str(signal_day)
                 self._save(key, state)
                 continue
-            data = json.loads(entries)
             if int(data.get("rank_version") or 0) < required_rank_version(config["ranking"]):
                 state["warning"] = f"{signal_day} 的归档缺少该排序所需指标，无法推进"
                 self._save(key, state)

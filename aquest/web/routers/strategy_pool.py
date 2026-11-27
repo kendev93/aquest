@@ -40,6 +40,8 @@ class PoolJobRequest(BaseModel):
     code: str | None = Field(default=None, pattern=r"^\d{6}$")
     objective: Literal["annual_return", "sharpe"] | None = None
     automatic: bool = False
+    #: 指定信号回放日（只用于手动补齐缺失的历史交易日；不填则扫最新已完成交易日）。
+    as_of_date: date | None = None
     rebuild: bool = False
     risk_trials: Literal[1_000, 2_000, 3_000] = 3_000
     #: 最长持仓**交易日**数，逐股研究时下发给每个候选（None = 不限制）。
@@ -57,6 +59,8 @@ class PoolJobRequest(BaseModel):
     def validate_mode(self) -> PoolJobRequest:
         if self.automatic and (self.mode != "signals" or self.market or self.code):
             raise ValueError("每日自动扫描只支持全市场当天信号")
+        if self.as_of_date is not None and (self.mode != "signals" or self.automatic):
+            raise ValueError("指定回放日期只支持手动信号扫描")
         if self.rebuild and self.mode != "full":
             raise ValueError("只有全市场任务支持清空重建")
         if self.mode == "single" and (self.market is None or self.code is None):
@@ -554,6 +558,51 @@ def delete_focus_group(group_id: str, request: Request) -> dict[str, object]:
     return {"data": {"groups": groups}}
 
 
+@router.get("/signals/gap")
+def signal_gap(request: Request) -> dict[str, object]:
+    """最新扫描日之前、两个目标都还没有归档的已收盘交易日。"""
+
+    with store_guard("暂时无法读取信号缺口"):
+        store = _market_store(request)
+        latest = resolve_signal_session(store).scanned
+        if latest is None:
+            return {"data": {"days": [], "latest": None}}
+        with store.state_read_session() as connection:
+            last_rows = connection.execute(
+                "SELECT objective, MAX(trade_date) FROM pool_simulation_signals GROUP BY objective"
+            ).fetchall()
+            covered_rows = connection.execute(
+                "SELECT trade_date, COUNT(DISTINCT objective) FROM pool_simulation_signals"
+                " GROUP BY trade_date"
+            ).fetchall()
+        last_days = [
+            row[1] if isinstance(row[1], date) else date.fromisoformat(str(row[1])[:10])
+            for row in last_rows
+            if row[1] is not None
+        ]
+        if len(last_days) < 2:
+            return {"data": {"days": [], "latest": latest.isoformat()}}
+        covered_through = min(last_days)
+        covered = {
+            (row[0] if isinstance(row[0], date) else date.fromisoformat(str(row[0])[:10])): int(
+                row[1]
+            )
+            for row in covered_rows
+        }
+        days = [
+            day.isoformat()
+            for day in store.read_completed_trading_dates()
+            if covered_through < day < latest and covered.get(day, 0) < 2
+        ]
+        return {
+            "data": {
+                "days": days,
+                "latest": latest.isoformat(),
+                "covered_through": covered_through.isoformat(),
+            }
+        }
+
+
 @router.post("/jobs", status_code=status.HTTP_202_ACCEPTED)
 def create_strategy_pool_job(payload: PoolJobRequest, request: Request) -> dict[str, object]:
     backend = _job_backend(request)
@@ -602,6 +651,20 @@ def create_strategy_pool_job(payload: PoolJobRequest, request: Request) -> dict[
     if payload.mode == "signals":
         if payload.automatic:
             return {"data": {"job_id": "", "status": "completed", "skipped": True}}
+        session = resolve_signal_session(_market_store(request))
+        scanned = payload.as_of_date or session.scanned
+        replayed = payload.as_of_date is not None
+        if payload.as_of_date is not None:
+            if session.scanned is None or payload.as_of_date > session.scanned:
+                raise HTTPException(status_code=422, detail="回放日期晚于最新已完成行情")
+            with _market_store(request).read_session() as connection:
+                completed_day = connection.execute(
+                    "SELECT 1 FROM daily_bars"
+                    " WHERE trade_date = ? AND bar_status = 'completed' LIMIT 1",
+                    [payload.as_of_date],
+                ).fetchone()
+            if completed_day is None:
+                raise HTTPException(status_code=422, detail="该日期没有已完成的本地日线，无法回放")
         active_tracking = [
             j for j in backend.active_snapshots() if j.get("operation") == TRACKING_OPERATION
         ]
@@ -614,13 +677,15 @@ def create_strategy_pool_job(payload: PoolJobRequest, request: Request) -> dict[
                 for v in PoolTrackingStore(_market_store(request)).current_versions()
                 if v["market"] == payload.market and v["code"] == payload.code
             ]
-        session = resolve_signal_session(_market_store(request))
+        job_payload = payload.model_dump(exclude_none=True)
+        job_payload.pop("as_of_date", None)
         job_id = backend.submit(
             TRACKING_OPERATION,
             {
-                **payload.model_dump(exclude_none=True),
-                "as_of_date": session.scanned.isoformat() if session.scanned else None,
+                **job_payload,
+                "as_of_date": scanned.isoformat() if scanned else None,
                 "data_lag": session.lag,
+                "replayed": replayed,
                 "version_ids": target_ids,
             },
             description="策略池双目标跟踪",

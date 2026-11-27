@@ -179,9 +179,52 @@ def test_simulation_replays_signal_only_rank_and_replaces_only_after_filled_sale
     assert smaller_result["trades_total"] == 5
     assert result["max_positions"] == 5
 
+    # 事后回放生成的归档带 replayed 标记：即使写入时间晚于次日开盘也照常推进。
+    with store.state_write_transaction() as con:
+        row = con.execute(
+            "SELECT entries_json FROM pool_simulation_signals"
+            " WHERE trade_date = '2026-11-25' AND objective = 'annual_return'"
+        ).fetchone()
+        entries = json.loads(row[0])
+        entries["replayed"] = True
+        con.execute(
+            "UPDATE pool_simulation_signals SET entries_json = ?, archived_at = ?"
+            " WHERE trade_date = '2026-11-25' AND objective = 'annual_return'",
+            [dumps(entries), datetime(2026, 11, 30, 12)],
+        )
+    replay_config = {
+        "name": "回放盘",
+        "objective": "annual_return",
+        "ranking": "annual_return",
+        "direction": "desc",
+        "initial_cash": 100_000.0,
+        "min_days": 0,
+        "start_date": days[2],
+        "max_positions": 5,
+    }
+    replayed_key = pool.create(replay_config)
+    pool.advance()
+    replayed_result = pool.read(replayed_key)[0]
+    assert replayed_result["holding_count"] > 0
+    assert replayed_result["warning"] is None
+
+    # 去掉标记后，同一份归档会按「开盘后生成」被跳过，模拟盘不再推进。
+    with store.state_write_transaction() as con:
+        entries.pop("replayed")
+        con.execute(
+            "UPDATE pool_simulation_signals SET entries_json = ?"
+            " WHERE trade_date = '2026-11-25' AND objective = 'annual_return'",
+            [dumps(entries)],
+        )
+    skipped_key = pool.create({**replay_config, "name": "跳过盘"})
+    pool.advance()
+    skipped_result = pool.read(skipped_key)[0]
+    assert skipped_result["holding_count"] == 0
+    assert "开盘后生成" in (skipped_result["warning"] or "")
+
     # 首次拆状态库后，信号归档与账本仍然可读。
     counts = store.ensure_state_database()
-    assert counts["pool_simulations"] == 2
+    assert counts["pool_simulations"] == 4
     assert counts["pool_simulation_signals"] == 3
     assert pool.read(key)[0] == result
 
@@ -340,6 +383,93 @@ def test_rebalance_targets_skip_positions_queued_to_exit():
     # 已经排队等卖出的仓位不参与再平衡，剩下的 B 仍按 60% 报超配。
     state["pending"]["SH600000"] = {"signal_date": "2026-11-25", "reason": "卖出条件"}
     assert rebalance_targets(state, 2, 0.05) == {"SH600001": 50_000.0}
+
+
+def test_signal_gap_lists_unarchived_sessions_and_accepts_replay_date(tmp_path):
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    days = ["2026-11-20", "2026-11-23", "2026-11-24", "2026-11-25", "2026-11-26"]
+    store.replace_local_bars(
+        "SH",
+        "600000",
+        "stock",
+        pd.DataFrame(
+            {
+                "date": pd.to_datetime(days),
+                "open": [10.0] * 5,
+                "high": [10.0] * 5,
+                "low": [10.0] * 5,
+                "close": [10.0] * 5,
+                "volume": [1000.0] * 5,
+                "amount": [10000.0] * 5,
+                "bar_status": ["completed"] * 5,
+            }
+        ),
+    )
+    with store.state_write_transaction() as con:
+        for day in ("2026-11-20", "2026-11-23"):
+            for objective in ("annual_return", "sharpe"):
+                con.execute(
+                    "INSERT INTO pool_simulation_signals VALUES (?, ?, ?, ?, ?)",
+                    [
+                        date.fromisoformat(day),
+                        objective,
+                        f"job-{day}-{objective}",
+                        dumps({"buys": [], "exits": [], "rank_version": 2}),
+                        datetime.fromisoformat(f"{day}T16:00:00"),
+                    ],
+                )
+    app = create_app(market_data_store=store, auto_sync_enabled=False)
+    pool_store = DuckDbStrategyPoolStore(store)
+    pool_store.initialize()
+    pool_store.record_symbol_error("SH", "600000", "测试占位", source_job_id="test")
+    with TestClient(app) as client:
+        gap = client.get("/api/v1/strategy-pool/signals/gap").json()["data"]
+        assert gap["days"] == ["2026-11-24", "2026-11-25"]
+        assert gap["latest"] == "2026-11-26"
+        assert gap["covered_through"] == "2026-11-23"
+
+        response = client.post(
+            "/api/v1/strategy-pool/jobs",
+            json={"mode": "signals", "objective": "annual_return", "as_of_date": "2026-11-25"},
+        )
+        assert response.status_code == 202, response.json()
+        job_id = response.json()["data"]["job_id"]
+        with store.state_read_session() as con:
+            row = con.execute(
+                "SELECT request_json FROM strategy_jobs WHERE job_id = ?", [job_id]
+            ).fetchone()
+        payload = json.loads(row[0])["payload"]
+        assert payload["as_of_date"] == "2026-11-25"
+        assert payload["replayed"] is True
+
+        assert (
+            client.post(
+                "/api/v1/strategy-pool/jobs",
+                json={"mode": "signals", "objective": "annual_return", "as_of_date": "2026-11-27"},
+            ).status_code
+            == 422
+        )
+
+
+def test_archive_records_replayed_flag(tmp_path):
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    with store.state_write_transaction() as con:
+        simulation_archive.archive_simulation_signals(
+            con,
+            "job-replay",
+            {"payload": {"mode": "signals", "as_of_date": "2026-11-25", "replayed": True}},
+            {
+                "simulation_rank_version": 2,
+                "results_by_objective": {
+                    "annual_return": {
+                        "buy_signals": [_signal("600000", 0.5)],
+                        "sell_signals": [],
+                    },
+                },
+            },
+        )
+        row = con.execute("SELECT entries_json FROM pool_simulation_signals").fetchone()
+    assert json.loads(row[0])["replayed"] is True
 
 
 def test_unfilled_exit_keeps_slot_and_same_day_exit_cannot_reenter():

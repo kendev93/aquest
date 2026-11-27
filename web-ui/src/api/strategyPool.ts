@@ -30,6 +30,7 @@ interface StrategyPoolJobRequest {
   market?: 'SH' | 'SZ'
   code?: string
   objective?: StrategyPoolObjective
+  as_of_date?: string
   boards?: StrategyPoolBoard[]
   exclude_st?: boolean
 }
@@ -48,6 +49,18 @@ export async function fetchStrategyPoolEntries(
     `${API_BASE}/entries?objective=${objective}`,
   )
   return response.data.items
+}
+
+export interface StrategyPoolSignalGap {
+  days: string[]
+  latest: string | null
+  covered_through?: string
+}
+
+/** 最新扫描日之前、两个目标都还没有归档的已收盘交易日。 */
+export async function fetchStrategyPoolSignalGap(): Promise<StrategyPoolSignalGap> {
+  const response = await request<{ data: StrategyPoolSignalGap }>(`${API_BASE}/signals/gap`)
+  return response.data
 }
 
 export async function fetchStrategyPoolResearchEstimate(
