@@ -69,19 +69,40 @@ def detail_metrics(
     positions: Sequence[Mapping[str, Any]],
     benchmark: Mapping[str, Any] | None,
     holdings: Mapping[str, Any] | None,
+    start_date: str | None = None,
 ) -> dict[str, object]:
     days = [date.fromisoformat(str(point["date"])) for point in equity]
     values = [float(point["value"]) for point in equity]
     returns = _daily_returns(values, initial_cash)
     benchmark_days, benchmark_values = _series(benchmark)
+    # 区间与阶段收益从成立日 0 起点算：首个净值日只有一个点时，策略也能和
+    # 带信号日基准点的两条基准放在同一个窗口里比较。风险统计仍只看真实净值日。
+    window_days, window_values = _with_baseline(days, values, initial_cash, start_date)
     return {
         "trading": _trading(trades, positions),
         "risk": _risk(days, values, returns, initial_cash),
         "relative": _relative(days, returns, benchmark_days, benchmark_values),
         "concentration": _concentration(values, cash, positions),
-        "ranges": _ranges(days, values, benchmark, holdings),
-        "stages": _stages(days, values, benchmark, holdings),
+        "ranges": _ranges(window_days, window_values, benchmark, holdings),
+        "stages": _stages(window_days, window_values, benchmark, holdings),
     }
+
+
+def _with_baseline(
+    days: Sequence[date],
+    values: Sequence[float],
+    initial_cash: float,
+    start_date: str | None,
+) -> tuple[list[date], list[float]]:
+    if not days or not start_date:
+        return list(days), list(values)
+    try:
+        base = date.fromisoformat(start_date)
+    except ValueError:
+        return list(days), list(values)
+    if days[0] <= base:
+        return list(days), list(values)
+    return [base, *days], [initial_cash, *values]
 
 
 def _daily_returns(values: Sequence[float], initial_cash: float) -> list[float]:
@@ -280,6 +301,8 @@ def _risk(
         "calmar": calmar,
         "var95": var95,
         "cvar95": cvar95,
+        "max_daily_gain": max((value for value in returns if value > 0), default=None),
+        "max_daily_loss": min((value for value in returns if value < 0), default=None),
         "recovery_factor": recovery_factor,
         "ulcer": ulcer,
         "martin": martin,
@@ -288,8 +311,6 @@ def _risk(
         "skew": skew,
         "kurtosis": kurtosis,
         "tail_ratio": tail_ratio,
-        "max_daily_gain": max(returns) if returns else None,
-        "max_daily_loss": min(returns) if returns else None,
         "daily_win_rate": (
             sum(1 for value in returns if value > 0) / len(returns) if returns else None
         ),

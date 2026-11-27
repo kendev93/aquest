@@ -484,6 +484,7 @@ class PoolSimulations:
                         positions=positions,
                         benchmark=benchmark,
                         holdings=holdings,
+                        start_date=str(config.get("start_date") or "") or None,
                     ),
                 )
             items.append(output)

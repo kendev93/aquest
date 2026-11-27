@@ -143,6 +143,36 @@ def test_avg_holding_days_matches_buys_to_sells_fifo():
     assert result["trading"]["avg_holding_days"] == pytest.approx((100 * 7 + 50 * 3) / 150)
 
 
+def test_single_net_value_day_still_gets_returns_from_inception():
+    result = detail_metrics(
+        equity=[{"date": "2026-11-27", "value": 107.47}],
+        initial_cash=100.0,
+        cash=0.0,
+        trades=[],
+        positions=[],
+        benchmark={"dates": ["2026-11-26", "2026-11-27"], "totals": [4.0, 4.2]},
+        holdings={"dates": ["2026-11-26", "2026-11-27"], "totals": [1.0, 1.05]},
+        start_date="2026-11-26",
+    )
+
+    # 风险统计仍只看真实净值日：只有一天时不把「最大跌幅」显示成一次上涨。
+    assert result["risk"]["sample_days"] == 1
+    assert result["risk"]["max_daily_gain"] == pytest.approx(0.0747)
+    assert result["risk"]["max_daily_loss"] is None
+
+    ranges = {row["key"]: row for row in result["ranges"]}
+    assert ranges["all"]["start"] == "2026-11-26"
+    assert ranges["all"]["strategy"] == pytest.approx(0.0747)
+    assert ranges["all"]["benchmark"] == pytest.approx(0.05)
+    assert ranges["all"]["holdings"] == pytest.approx(0.05)
+    assert ranges["all"]["excess_benchmark"] == pytest.approx(0.0247)
+
+    stages = {row["key"]: row for row in result["stages"]}
+    assert stages["5d"]["days"] == 1
+    assert stages["5d"]["strategy"] == pytest.approx(0.0747)
+    assert stages["5d"]["benchmark"] == pytest.approx(0.05)
+
+
 def test_annualised_risk_metrics_require_twenty_samples():
     def curve(count: int) -> list[dict[str, object]]:
         return [
