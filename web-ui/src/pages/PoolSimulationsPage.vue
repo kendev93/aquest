@@ -18,7 +18,7 @@ type Simulation = {
   cash: number; value: number; total_return: number; max_drawdown: number
   total_fees: number; turnover: number; holding_count: number; max_positions?: number
   equity: { date: string; value: number }[]
-  positions?: Position[]; trades?: Trade[]; trades_total?: number; all_trades?: Trade[]
+  positions?: Position[]; trades?: Trade[]; trades_total?: number; all_trades?: Trade[]; rebalance_band_pct?: number
   benchmark?: { label?: string; dates: string[]; totals: number[] } | null
   holdings_benchmark?: { label?: string; dates: string[]; totals: number[] } | null
 }
@@ -42,6 +42,7 @@ const ranking = ref<Rank>(signalRank(initialRank))
 const name = ref('')
 const cash = ref(1_000_000)
 const maxPositions = ref(5)
+const rebalanceBand = ref(5)
 const loadingDays = ref(false)
 const days = ref<string[]>([])
 const requestedDate = ref(query.get('start_date') ?? '')
@@ -100,6 +101,7 @@ async function create(): Promise<void> {
       method: 'POST', body: JSON.stringify({
         name: name.value, objective: objective.value, ranking: ranking.value,
         start_date: startDate.value, initial_cash: cash.value, max_positions: maxPositions.value,
+        rebalance_band_pct: rebalanceBand.value,
       }),
     })
     creating.value = false
@@ -263,7 +265,7 @@ const detailCurve = computed<IndividualResearchFullBacktest | null>(() => {
         <div>
           <p class="eyebrow">STRATEGY POOL / SIMULATIONS</p>
           <h1>榜单模拟盘</h1>
-          <p class="simulation-copy">按买入信号榜建仓，默认持有上限为 5 只。次日开盘先卖出，再补空出的仓位；单只权重偏离目标（1/持仓上限）超过 5 个百分点时，同日开盘再平衡。</p>
+          <p class="simulation-copy">按买入信号榜建仓，默认持有上限为 5 只。次日开盘先卖出，再补空出的仓位；单只权重偏离目标（1/持仓上限）超过设定阈值时，同日开盘再平衡。</p>
         </div>
         <button v-if="!creating" class="button-primary" type="button" @click="creating = true">创建模拟盘</button>
       </header>
@@ -279,6 +281,7 @@ const detailCurve = computed<IndividualResearchFullBacktest | null>(() => {
           <label>榜单<select v-model="ranking"><option v-for="key in signalRanks" :key="key" :value="key">{{ rankLabels[key] }}</option></select></label>
           <label>首批信号日<select v-model="startDate" required :disabled="loadingDays || !days.length"><option value="" disabled>{{ loadingDays ? '正在读取…' : days.length ? '请选择信号日' : '暂无可用日期' }}</option><option v-for="day in days" :key="day" :value="day">{{ day }}</option></select></label>
           <label>持仓上限（只）<input v-model.number="maxPositions" data-testid="simulation-max-positions" type="number" min="1" max="100" step="1" required /></label>
+          <label>再平衡阈值（百分点）<input v-model.number="rebalanceBand" data-testid="simulation-rebalance-band" type="number" min="0" max="100" step="1" placeholder="0 表示关闭" required /></label>
           <label>初始资金<input v-model.number="cash" type="number" min="1000" max="100000000" required /></label>
           <div class="simulation-form-footer">
             <p v-if="!loadingDays && !days.length" class="simulation-copy">

@@ -34,8 +34,8 @@ from .tracking_store import dumps
 
 logger = logging.getLogger(__name__)
 DEFAULT_SLOTS = 5
-#: 单只仓位权重偏离目标（1/持仓上限）多少个百分点时触发再平衡。
-DEFAULT_REBALANCE_BAND = 0.05
+#: 单只仓位权重偏离目标（1/持仓上限）多少个百分点时触发再平衡；0 表示不再平衡。
+DEFAULT_REBALANCE_BAND_PCT = 5.0
 
 
 def _symbol(row: dict[str, Any]) -> str:
@@ -660,7 +660,7 @@ class PoolSimulations:
             rebalance=rebalance_targets(
                 state,
                 slots,
-                float(config.get("rebalance_band", DEFAULT_REBALANCE_BAND)),
+                float(config.get("rebalance_band_pct", DEFAULT_REBALANCE_BAND_PCT)) / 100,
             ),
         )
         state["equity"].append(

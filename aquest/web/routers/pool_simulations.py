@@ -36,6 +36,8 @@ class SimulationCreate(BaseModel):
     start_date: date
     max_positions: int = Field(default=DEFAULT_SLOTS, ge=1, le=100)
     initial_cash: float = Field(default=1_000_000, ge=1_000, le=100_000_000, allow_inf_nan=False)
+    #: 再平衡阈值：单只权重偏离目标（1/持仓上限）超过多少个百分点时调仓，0 表示关闭。
+    rebalance_band_pct: float = Field(default=5, ge=0, le=100, allow_inf_nan=False)
 
 
 class SimulationUpdate(BaseModel):

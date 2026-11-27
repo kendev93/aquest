@@ -26,11 +26,15 @@ it('creates from the chosen signal-board settings and opens the account detail',
     const slots = wrapper.get<HTMLInputElement>('[data-testid="simulation-max-positions"]')
     expect(slots.element.value).toBe('5')
     await slots.setValue(3)
+    const band = wrapper.get<HTMLInputElement>('[data-testid="simulation-rebalance-band"]')
+    expect(band.element.value).toBe('5')
+    await band.setValue(8)
     await wrapper.get('form').trigger('submit')
     await flushPromises()
     const post = api.mock.calls.find(([, init]) => init?.method === 'POST')
     expect(JSON.parse(String(post?.[1]?.body))).toMatchObject({
       name: '超额盘', objective: 'sharpe', ranking: 'composite', start_date: '2026-11-26', max_positions: 3,
+      rebalance_band_pct: 8,
     })
     expect(wrapper.text()).toContain('超额盘 · 持仓与成交')
   } finally {
