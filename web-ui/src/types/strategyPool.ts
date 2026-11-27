@@ -164,6 +164,8 @@ export interface StrategyPoolSignalLag {
 }
 
 export interface StrategyPoolJobResult {
+  strategy_changes?: StrategyPoolChanges | null
+  unpersisted_entries?: number | null
   results_by_objective?: Partial<Record<StrategyPoolObjective, StrategyPoolJobResult>>
   mode?: StrategyPoolMode
   objective?: StrategyPoolObjective

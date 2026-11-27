@@ -2379,12 +2379,21 @@ describe('StrategyPoolPage', () => {
       job_id: 'research', mode: 'full', status: 'running',
     }])
     vi.mocked(api.getStrategyPoolJob).mockResolvedValue({
-      job_id: 'research', status: 'completed', result: { mode: 'full' },
+      job_id: 'research', status: 'completed', result: {
+        mode: 'full', unpersisted_entries: 1,
+        strategy_changes: {
+          new_symbols: 2, retained_symbols: 3, drawdown_increased_symbols: 0,
+          annual_return: { improved_symbols: 1, median_delta: 0.02, top: [] },
+          sharpe: { improved_symbols: 0, median_delta: null, top: [] },
+        },
+      },
     })
     const wrapper = mount(StrategyPoolPage)
     try {
       await flushPromises()
       expect(api.createStrategyPoolJob).not.toHaveBeenCalled()
+      expect(wrapper.text()).toContain('同窗口验证：新增可用 2 只 · 年化收益改善 1 只 · 夏普改善 0 只 · 保留原策略 3 只')
+      expect(wrapper.text()).toContain('另有 1 条尚未确认落库')
     } finally {
       wrapper.unmount()
     }

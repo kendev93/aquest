@@ -38,6 +38,7 @@ import type {
   StrategyPoolJobState,
   StrategyPoolJobStats,
   StrategyPoolJobSummary,
+  StrategyPoolChanges,
   StrategyPoolResearchEstimate,
   StrategyPoolMode,
   StrategyPoolObjective,
@@ -365,6 +366,10 @@ function poolJobDurationText(job: StrategyPoolJobSummary): string {
 }
 
 const improvementObjectives = ['annual_return', 'sharpe'] as const
+
+function strategyChangesText(changes: StrategyPoolChanges): string {
+  return `新增可用 ${changes.new_symbols} 只 · 年化收益改善 ${changes.annual_return.improved_symbols} 只 · 夏普改善 ${changes.sharpe.improved_symbols} 只 · 保留原策略 ${changes.retained_symbols} 只`
+}
 
 function formatImprovement(value: number | null, objective: StrategyPoolObjective): string {
   if (value == null) return '—'
@@ -1168,7 +1173,11 @@ async function finishJob(
   if (state.status === 'completed') {
     if (intent === 'full') {
       await refreshPage(false)
-      successMessage.value = '全市场策略重选已完成；每只股票的留出段表现仅用于复核。'
+      const changes = result?.strategy_changes
+      const summary = changes ? `同窗口验证：${strategyChangesText(changes)}。` : ''
+      const pending = result?.unpersisted_entries
+        ? `另有 ${result.unpersisted_entries} 条尚未确认落库。` : ''
+      successMessage.value = `全市场策略重选已完成。${summary}${pending}每只股票的留出段表现仅用于复核。`
       return
     }
     if (intent === 'single') {
@@ -1822,7 +1831,7 @@ onUnmounted(() => {
               <div v-for="job in group.jobs" :key="job.job_id" class="history-row" :data-testid="`pool-history-${job.job_id}`">
                 <strong>{{ poolJobModeLabel(job) }}</strong><span>{{ poolJobDetailText(job) }}</span><small>{{ formatTimestamp(job.created_at) }}</small>
                 <details v-if="job.mode === 'full' && job.status === 'completed' && job.strategy_changes" class="history-changes">
-                  <summary>新增可用 {{ job.strategy_changes.new_symbols }} 只 · 年化收益改善 {{ job.strategy_changes.annual_return.improved_symbols }} 只 · 夏普改善 {{ job.strategy_changes.sharpe.improved_symbols }} 只 · 保留原策略 {{ job.strategy_changes.retained_symbols }} 只</summary>
+                  <summary>{{ strategyChangesText(job.strategy_changes) }}</summary>
                   <p>改善仅统计已保存的替换策略，按同一验证窗口对比。两榜可包含同一标的。</p>
                   <p v-if="job.rebuild">清空重建的新增数量按清空后计算，本轮不与重建前的策略比较。</p>
                   <p>最大回撤扩大 {{ job.strategy_changes.drawdown_increased_symbols }} 只<span v-if="job.unpersisted_entries"> · 尚未确认落库 {{ job.unpersisted_entries }} 条</span></p>
