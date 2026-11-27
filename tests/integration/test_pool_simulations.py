@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import json
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import pytest
 from fastapi.testclient import TestClient
 
 from aquest.market_data.store import DuckDbMarketDataStore
@@ -268,8 +270,6 @@ def test_existing_signal_is_recovered_only_with_same_day_ranking(tmp_path):
     with store.state_write_transaction() as con:
         row = con.execute("SELECT state_json FROM strategy_jobs WHERE job_id = ?", [job]).fetchone()
         assert row is not None
-        import json
-
         state = json.loads(row[0])
         state["finished_at"] = original_time
         con.execute("UPDATE strategy_jobs SET state_json = ? WHERE job_id = ?", [dumps(state), job])
@@ -293,3 +293,63 @@ def test_existing_signal_is_recovered_only_with_same_day_ranking(tmp_path):
     with store.state_read_session() as con:
         archive = con.execute("SELECT archived_at FROM pool_simulation_signals").fetchone()
     assert archive == (datetime(2026, 11, 26, 16),)
+
+
+def test_legacy_signal_day_backfills_only_for_default_order(tmp_path):
+    """旧版完整扫描没有排序字段时，仍可按当日原始顺序回放。"""
+
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    pool = PoolSimulations(store)
+    pool.initialize()
+    DuckDbStrategyPoolStore(store).initialize()
+    PoolTrackingStore(store).bootstrap()
+    jobs = DuckDbStrategyJobStore(store)
+    day = "2026-11-25"
+    job = "legacy-scan"
+    jobs.create(
+        job,
+        operation="market_strategy_pool_tracking",
+        payload={"mode": "signals", "as_of_date": day},
+        description="旧版信号",
+    )
+    jobs.write_result(
+        job,
+        {
+            "results_by_objective": {
+                "annual_return": {
+                    "buy_signals": [
+                        {
+                            "market": "SH",
+                            "code": "600000",
+                            "name": "浦发银行",
+                            "tracking_version_id": "v1",
+                            "status": "buy",
+                        }
+                    ],
+                    "sell_signals": [],
+                },
+            },
+        },
+    )
+    finished = datetime(2026, 11, 25, 16, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp()
+    with store.state_write_transaction() as con:
+        row = con.execute("SELECT state_json FROM strategy_jobs WHERE job_id = ?", [job]).fetchone()
+        assert row is not None
+        state = json.loads(row[0])
+        state["finished_at"] = finished
+        con.execute("UPDATE strategy_jobs SET state_json = ? WHERE job_id = ?", [dumps(state), job])
+    jobs.initialize()
+    assert pool.signal_days("annual_return", "default") == [day]
+    assert pool.signal_days("annual_return", "composite") == []
+    base_config = {
+        "name": "旧信号盘",
+        "objective": "annual_return",
+        "direction": "desc",
+        "initial_cash": 100_000.0,
+        "min_days": 0,
+        "start_date": day,
+        "max_positions": 5,
+    }
+    assert pool.create({**base_config, "ranking": "default"})
+    with pytest.raises(ValueError):
+        pool.create({**base_config, "ranking": "composite"})

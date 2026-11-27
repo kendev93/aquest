@@ -27,7 +27,7 @@ from aquest.portfolio_backtest.service import PortfolioBacktestService
 from aquest.portfolio_backtest.simulation_models import _Position
 from aquest.web.schemas import PortfolioBacktestRequest
 
-from .simulation_archive import SIGNAL_METRICS, SIGNAL_RANKS
+from .simulation_archive import SIGNAL_METRICS, required_rank_version
 from .tracking_store import dumps
 
 logger = logging.getLogger(__name__)
@@ -216,14 +216,29 @@ class PoolSimulations:
             connection.execute(SIMULATION_DDL)
 
     def signal_days(self, objective: str, ranking: str = "") -> list[str]:
+        """返回该目标、该榜单下可回放的信号日。
+
+        默认顺序不依赖排序指标，旧版完整扫描的基础归档也能选；指标榜单
+        只开放带对应归档版本的交易日，避免用事后指标排序历史信号。
+
+        Args:
+            objective: 策略目标，``annual_return`` 或 ``sharpe``。
+            ranking: 榜单键；空字符串表示不过滤归档版本。
+
+        Returns:
+            按交易日倒序排列的可回放日期列表。
+        """
+
+        required = required_rank_version(ranking)
         with STATE_WRITE_LOCK, self.store.state_read_session() as connection:
             return [
                 str(row[0])
                 for row in connection.execute(
                     "SELECT trade_date FROM pool_simulation_signals WHERE objective = ? "
-                    "AND (NOT ? OR json_extract_string(entries_json, '$.rank_version') = '2') "
+                    "AND COALESCE(TRY_CAST("
+                    "json_extract_string(entries_json, '$.rank_version') AS INTEGER), 0) >= ? "
                     "ORDER BY trade_date DESC",
-                    [objective, ranking in SIGNAL_RANKS],
+                    [objective, required],
                 ).fetchall()
             ]
 
@@ -552,8 +567,8 @@ class PoolSimulations:
                 self._save(key, state)
                 continue
             data = json.loads(entries)
-            if config["ranking"] in SIGNAL_RANKS and data.get("rank_version") != 2:
-                state["warning"] = f"{signal_day} 的旧归档没有信号榜排序指标，无法推进"
+            if int(data.get("rank_version") or 0) < required_rank_version(config["ranking"]):
+                state["warning"] = f"{signal_day} 的归档缺少该排序所需指标，无法推进"
                 self._save(key, state)
                 return
             self._step(state, config, data["buys"], signal_day, trade_day)

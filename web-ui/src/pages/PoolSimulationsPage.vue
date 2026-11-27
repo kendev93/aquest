@@ -192,7 +192,7 @@ const chart = computed(() => {
             <p v-if="!loadingDays && !days.length" class="simulation-copy">
               暂无可用日期。旧版信号缺少排序归档，请到 <a class="simulation-back" href="/strategy-pool">全市场策略池</a> 完成一轮新版信号扫描。
             </p>
-            <p v-else-if="!loadingDays && requestedDate && !days.includes(requestedDate)" class="simulation-copy">原选日期没有此排序的归档，请选择可回放日期。</p>
+            <p v-else-if="!loadingDays && requestedDate && !days.includes(requestedDate)" class="simulation-copy">原选日期没有此排序的归档；指标排序需该日完成新版信号扫描，旧信号日只能按默认顺序回放。</p>
             <button class="button-secondary" type="button" :disabled="loadingDays" @click="loadDays">刷新日期</button>
             <button class="button-primary" type="submit" :disabled="busy || loadingDays || !startDate">{{ busy ? '正在创建…' : '创建并回放' }}</button>
           </div>
