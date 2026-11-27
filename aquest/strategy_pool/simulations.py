@@ -368,7 +368,44 @@ class PoolSimulations:
                 "INSERT INTO pool_simulations VALUES (?, ?, ?)",
                 [job_id, dumps(config), dumps(state)],
             )
+        # 新建后立刻回放一次：不让新盘干等到下一轮 60 秒调度才有净值。
+        self._advance_new(job_id)
         return job_id
+
+    def _advance_new(self, key: str) -> None:
+        """新建盘的首次回放；失败不影响创建，后台循环会继续重试。"""
+
+        if not self.lock.acquire(blocking=False):
+            return
+        try:
+            rows = self._read(key)
+            if not rows:
+                return
+            _, config, state = rows[0]
+            now = shanghai_now()
+            completed = {
+                day
+                for day in self.store.read_completed_trading_dates()
+                if day < now.date() or (day == now.date() and now.time() >= time(15))
+            }
+            days = self._replay_days(date.fromisoformat(state["minimum_signal_date"]), completed)
+            if len(days) >= 2:
+                self._advance_account(key, config, state, days, completed)
+        except Exception:  # noqa: BLE001 - 首次回放失败交给后台循环
+            logger.exception("新建模拟盘首次回放失败: %s", key)
+        finally:
+            self.lock.release()
+
+    def _replay_days(self, earliest: date, completed: set[date]) -> list[date]:
+        if not completed:
+            return []
+        dates = {day for day in completed if day >= earliest}
+        last_day = max(completed)
+        for lo, hi in self.store.read_authoritative_calendar_coverage():
+            start, end = max(lo, earliest), min(hi, last_day)
+            if start <= end:
+                dates.update(self.store.read_authoritative_trading_dates(start, end))
+        return sorted(dates)
 
     def _read(
         self, simulation_id: str | None = None
@@ -395,14 +432,17 @@ class PoolSimulations:
                 raise KeyError(key)
             _, config, state = rows[0]
             if state["paused"] and not paused:
-                now = shanghai_now()
-                latest = self.store.latest_trade_date()
-                today = self.store.latest_market_trading_date(now.date())
-                if today == now.date() and now.time() >= time(9, 30):
-                    latest = today
-                if latest is not None:
-                    state["minimum_signal_date"] = max(str(latest), config["start_date"])
-                state["pending"] = {}
+                # 只有真正跑过的盘才把信号起点对齐到最新交易日；从没起步的盘
+                # 暂停再恢复不该跳掉它的首日信号。
+                if state["started"]:
+                    now = shanghai_now()
+                    latest = self.store.latest_trade_date()
+                    today = self.store.latest_market_trading_date(now.date())
+                    if today == now.date() and now.time() >= time(9, 30):
+                        latest = today
+                    if latest is not None:
+                        state["minimum_signal_date"] = max(str(latest), config["start_date"])
+                    state["pending"] = {}
             state["paused"] = paused
             self._save(key, state)
 
@@ -571,7 +611,11 @@ class PoolSimulations:
                 "SELECT trade_date, entries_json FROM pool_simulation_signals "
                 "WHERE objective = ? AND trade_date >= ? AND trade_date > ? "
                 "ORDER BY trade_date ASC LIMIT 1",
-                [config["objective"], state["minimum_signal_date"], state.get("cursor") or ""],
+                [
+                    config["objective"],
+                    state["minimum_signal_date"],
+                    state.get("cursor") or "1900-01-01",
+                ],
             ).fetchone()
         if row is None:
             return None
@@ -885,13 +929,7 @@ class PoolSimulations:
                 earliest = min(
                     date.fromisoformat(state["minimum_signal_date"]) for _, _, state in accounts
                 )
-                dates = {day for day in completed if day >= earliest}
-                last_day = max(completed)
-                for lo, hi in self.store.read_authoritative_calendar_coverage():
-                    start, end = max(lo, earliest), min(hi, last_day)
-                    if start <= end:
-                        dates.update(self.store.read_authoritative_trading_dates(start, end))
-                days = sorted(dates)
+                days = self._replay_days(earliest, completed)
             for key, config, state in accounts:
                 try:
                     self._advance_account(key, config, state, days, completed)

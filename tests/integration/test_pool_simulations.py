@@ -146,6 +146,39 @@ def test_simulation_replays_signal_only_rank_and_replaces_only_after_filled_sale
         BENCHMARK_SYMBOL,
         [(date(2026, 11, 24), 4.0), (date(2026, 11, 26), 4.2)],
     )
+    # 新建后立即回放：不等下一轮 60 秒调度就该有首日持仓与净值。
+    created = pool.read(key)[0]
+    assert created["holding_count"] == 5
+    assert [point["date"] for point in created["equity"]] == days[1:4]
+
+    # 未起步（cursor 为空）的盘也要能给出首日操作预览。
+    preview_config = {
+        "name": "预览",
+        "objective": "annual_return",
+        "ranking": "annual_return",
+        "direction": "desc",
+        "initial_cash": 100_000.0,
+        "min_days": 0,
+        "start_date": days[0],
+        "max_positions": 5,
+    }
+    fresh_state = {
+        "cash": 100_000.0,
+        "positions": {},
+        "pending": {},
+        "cooldown": {},
+        "trades": [],
+        "equity": [],
+        "started": False,
+        "paused": False,
+        "cursor": None,
+        "minimum_signal_date": days[0],
+        "warning": None,
+    }
+    initial_preview = pool._next_actions(preview_config, fresh_state)
+    assert initial_preview is not None
+    assert initial_preview["signal_date"] == days[0]
+    assert sum(1 for action in initial_preview["actions"] if action["direction"] == "BUY") == 5
     pool.advance()
     result = pool.read(key)[0]
     assert result["holding_count"] == 5
@@ -517,6 +550,61 @@ def test_archive_records_replayed_flag(tmp_path):
         )
         row = con.execute("SELECT entries_json FROM pool_simulation_signals").fetchone()
     assert json.loads(row[0])["replayed"] is True
+
+
+def test_resuming_a_never_started_simulation_keeps_its_first_signal_day(tmp_path):
+    store = DuckDbMarketDataStore(tmp_path / "market.duckdb")
+    pool = PoolSimulations(store)
+    pool.initialize()
+    store.replace_local_bars(
+        "SH",
+        "600000",
+        "stock",
+        pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2026-11-27"]),
+                "open": [10.0],
+                "high": [10.0],
+                "low": [10.0],
+                "close": [10.0],
+                "volume": [1000.0],
+                "amount": [10000.0],
+                "bar_status": ["completed"],
+            }
+        ),
+    )
+    config = {
+        "name": "暂停盘",
+        "objective": "annual_return",
+        "ranking": "annual_return",
+        "direction": "desc",
+        "initial_cash": 100_000.0,
+        "min_days": 0,
+        "start_date": "2026-11-26",
+        "max_positions": 5,
+    }
+    state = {
+        "cash": 100_000.0,
+        "positions": {},
+        "pending": {},
+        "cooldown": {},
+        "trades": [],
+        "equity": [],
+        "started": False,
+        "paused": True,
+        "cursor": None,
+        "minimum_signal_date": "2026-11-26",
+        "warning": None,
+    }
+    with store.state_write_transaction() as con:
+        con.execute(
+            "INSERT INTO pool_simulations VALUES ('paused', ?, ?)",
+            [dumps(config), dumps(state)],
+        )
+
+    pool.set_paused("paused", False)
+
+    assert pool._read("paused")[0][2]["minimum_signal_date"] == "2026-11-26"
 
 
 def test_unfilled_exit_keeps_slot_and_same_day_exit_cannot_reenter():
