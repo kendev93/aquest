@@ -308,6 +308,70 @@ class PoolSimulations:
         with self.store.state_write_transaction() as connection:
             connection.execute(ARCHIVE_DDL)
             connection.execute(SIMULATION_DDL)
+        self._rebuild_legacy_fee_accounts()
+
+    def _rebuild_legacy_fee_accounts(self) -> None:
+        """旧账本在成交里扣过佣金/印花税/滑点；按当前无费用口径从首批信号日重放。
+
+        只重建带 ``fee`` 字段的老账本；重放必须完整到原来的最后一个净值日才替换，
+        任何一天推不动都保留原账本——宁可留着历史费用，也不丢已经发生的成交。
+        """
+
+        for key, config, state in self._read():
+            trades = state.get("trades")
+            if not isinstance(trades, list) or not any("fee" in trade for trade in trades):
+                continue
+            try:
+                rebuilt = self._rebuild_without_fees(key, config, state)
+            except Exception:  # noqa: BLE001 - 重建失败保留原账本
+                logger.exception("模拟盘历史费用重建失败: %s", key)
+                continue
+            if rebuilt is None:
+                logger.warning("模拟盘历史费用重建未完成，保留原账本: %s", key)
+                continue
+            self._save(key, rebuilt)
+            logger.info("模拟盘历史费用已按无费用口径重建: %s", key)
+
+    def _rebuild_without_fees(
+        self, key: str, config: dict[str, Any], old_state: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        equity = old_state.get("equity") or []
+        target = old_state.get("cursor")
+        start = str(config.get("start_date") or "")
+        if not equity or not target or not start:
+            return None
+        end = str(equity[-1]["date"])
+        days = [
+            day
+            for day in self.store.read_completed_trading_dates()
+            if start <= day.isoformat() <= end
+        ]
+        if not days or days[0].isoformat() != start or days[-1].isoformat() != end:
+            return None
+        state: dict[str, Any] = {
+            "cash": config["initial_cash"],
+            "positions": {},
+            "pending": {},
+            "cooldown": {},
+            "trades": [],
+            "equity": [],
+            "started": False,
+            "paused": bool(old_state.get("paused")),
+            "cursor": None,
+            "minimum_signal_date": start,
+            "warning": None,
+        }
+        completed = set(days)
+        for _ in range(len(days) + 5):
+            before = state["cursor"]
+            self._advance_account(key, config, state, days, completed, persist=False)
+            if state["cursor"] == before:
+                return None
+            if str(state["cursor"]) >= str(target):
+                break
+        if state["cursor"] != target or len(state["equity"]) != len(equity):
+            return None
+        return state
 
     def signal_days(self, objective: str, ranking: str = "") -> list[str]:
         """返回该目标、该榜单下可回放的信号日。
@@ -691,6 +755,8 @@ class PoolSimulations:
         state: dict[str, Any],
         days: list[date],
         completed: set[date],
+        *,
+        persist: bool = True,
     ) -> None:
         with STATE_WRITE_LOCK, self.store.state_read_session() as connection:
             rows = connection.execute(
@@ -711,27 +777,32 @@ class PoolSimulations:
                 continue
             if trade_day not in completed:
                 state["warning"] = f"等待 {trade_day} 的完整行情，尚未模拟成交"
-                self._save(key, state)
+                if persist:
+                    self._save(key, state)
                 return
             if signal_day not in archives:
                 state["warning"] = f"缺少 {signal_day} 的完整历史信号，等待补齐后继续"
-                self._save(key, state)
+                if persist:
+                    self._save(key, state)
                 return
             entries, saved_at = archives[signal_day]
             opening = datetime.combine(trade_day, time(9, 30), ZoneInfo("Asia/Shanghai"))
             if saved_at.replace(tzinfo=ZoneInfo("Asia/Shanghai")) >= opening:
                 state["warning"] = f"{signal_day} 的信号在 {trade_day} 开盘后生成，已跳过该批次"
                 state["cursor"] = str(signal_day)
-                self._save(key, state)
+                if persist:
+                    self._save(key, state)
                 continue
             data = json.loads(entries)
             if int(data.get("rank_version") or 0) < required_rank_version(config["ranking"]):
                 state["warning"] = f"{signal_day} 的归档缺少该排序所需指标，无法推进"
-                self._save(key, state)
+                if persist:
+                    self._save(key, state)
                 return
             self._step(state, config, data["buys"], signal_day, trade_day)
             state["warning"] = None
-            self._save(key, state)
+            if persist:
+                self._save(key, state)
             processed += 1
             if processed >= 20:
                 break
