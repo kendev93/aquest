@@ -20,6 +20,7 @@ type Simulation = {
   equity: { date: string; value: number }[]
   positions?: Position[]; trades?: Trade[]; trades_total?: number; all_trades?: Trade[]
   benchmark?: { label?: string; dates: string[]; totals: number[] } | null
+  holdings_benchmark?: { label?: string; dates: string[]; totals: number[] } | null
 }
 
 const rankLabels = {
@@ -322,7 +323,7 @@ const detailCurve = computed<IndividualResearchFullBacktest | null>(() => {
             <button v-for="option in curveRanges" :key="option.key" :aria-pressed="curveRange === option.key" @click="curveRange = option.key">{{ option.label }}</button>
           </div>
         </div>
-        <IndividualResearchBacktestDetail v-if="detailCurve" :backtest="detailCurve" :benchmark-label="detail.benchmark?.label" hide-metrics hide-trades return-curve />
+        <IndividualResearchBacktestDetail v-if="detailCurve" :backtest="detailCurve" :benchmark-label="detail.benchmark?.label" :secondary-benchmark="detail.holdings_benchmark" hide-metrics hide-trades return-curve />
         <p v-else class="simulation-empty">等待下一交易日行情与信号齐备后生成净值。</p>
         <h3>当前持仓</h3>
         <div class="table-wrap">

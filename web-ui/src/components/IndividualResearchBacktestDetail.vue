@@ -3,7 +3,7 @@ import { computed, ref, watch } from 'vue'
 import type { IndividualResearchFullBacktest } from '../types'
 import { formatNumber, formatPercent, formatSignedPercent } from '../utils/format'
 
-const props = defineProps<{ backtest: IndividualResearchFullBacktest | null; launchDate?: string; baselineDate?: string; returnCurve?: boolean; hideMetrics?: boolean; hideTrades?: boolean; benchmarkLabel?: string }>()
+const props = defineProps<{ backtest: IndividualResearchFullBacktest | null; launchDate?: string; baselineDate?: string; returnCurve?: boolean; hideMetrics?: boolean; hideTrades?: boolean; benchmarkLabel?: string; secondaryBenchmark?: { label?: string; dates?: unknown[]; totals?: unknown[] } | null }>()
 
 // 方向与曲线图例同词同色：图例写「买入/卖出」，表格里露 BUY/SELL 会让用户以为
 // 是两套东西。signal_date 单独成列，因为信号在收盘后判定、下一交易日才成交，
@@ -51,12 +51,8 @@ const chart = computed(() => {
   })
   const sample = !props.returnCurve && points.length > 120
     ? points.filter((_, i) => i % Math.ceil(points.length / 120) === 0 || i === points.length - 1) : points
-  // 基准（买入持有）净值序列：BenchmarkCurve 的 dates(int YYYYMMDD)/totals，
-  // 与策略资金曲线同交易日。先裁剪到策略显示窗口，再以窗口首日归一化，
-  // 保证“全历史”和“创建以来”两种区间下基准都与策略同起点可比
-  const benchmarkRaw = props.backtest?.benchmark ?? null
-  const benchDates = Array.isArray(benchmarkRaw?.dates) ? benchmarkRaw.dates : []
-  const benchTotals = Array.isArray(benchmarkRaw?.totals) ? benchmarkRaw.totals : []
+  // 基准曲线（沪深300ETF、持仓等权等）：dates 支持 20261127 整数与 ISO 字符串。
+  // 先裁剪到策略显示窗口，再以窗口首日归一化，保证各区间下与策略同起点可比。
   const parseCurveDate = (value: unknown): number => {
     if (typeof value === 'number') {
       const text = String(value)
@@ -70,25 +66,32 @@ const chart = computed(() => {
   const validTimes = times.filter(Number.isFinite)
   const minimumTime = Math.min(...validTimes, ...(Number.isFinite(launch) ? [launch] : []))
   const maximumTime = Math.max(...validTimes, ...(Number.isFinite(launch) ? [launch] : []))
-  let benchmark = benchDates
-    .map((raw, i) => ({ time: parseCurveDate(raw), value: Number(benchTotals[i]) }))
-    .filter(p => Number.isFinite(p.time) && p.time >= minimumTime && p.time <= maximumTime
-      && Number.isFinite(p.value) && p.value > 0)
-  if (benchmark.length > 1 && benchmark[0]!.value > 0) {
-    const base = benchmark[0]!.value
-    benchmark = benchmark.map(p => ({ time: p.time, value: props.returnCurve ? p.value / base - 1 : p.value }))
-  } else benchmark = []
-  const benchmarkSample = benchmark.length > 240
-    ? benchmark.filter((_, i) => i % Math.ceil(benchmark.length / 240) === 0 || i === benchmark.length - 1)
-    : benchmark
+  const normalizeSeries = (raw: { dates?: unknown[]; totals?: unknown[] } | null | undefined) => {
+    const dates = Array.isArray(raw?.dates) ? raw.dates : []
+    const totals = Array.isArray(raw?.totals) ? raw.totals : []
+    const parsed = dates
+      .map((item, i) => ({ time: parseCurveDate(item), value: Number(totals[i]) }))
+      .filter(p => Number.isFinite(p.time) && p.time >= minimumTime && p.time <= maximumTime
+        && Number.isFinite(p.value) && p.value > 0)
+    if (parsed.length < 2 || parsed[0]!.value <= 0) return []
+    const base = parsed[0]!.value
+    const series = parsed.map(p => ({ time: p.time, value: props.returnCurve ? p.value / base - 1 : p.value }))
+    return series.length > 240
+      ? series.filter((_, i) => i % Math.ceil(series.length / 240) === 0 || i === series.length - 1)
+      : series
+  }
+  const benchmarkSeries = normalizeSeries(props.backtest?.benchmark ?? null)
+  const secondarySeries = normalizeSeries(props.secondaryBenchmark ?? null)
   const x = (time: number) => plot.left + (time - minimumTime) / (maximumTime - minimumTime || 1) * (plot.right - plot.left)
   const values = sample.map(point => point.value)
-  const minimum = Math.min(...values, ...benchmarkSample.map(p => p.value))
-  const maximum = Math.max(...values, ...benchmarkSample.map(p => p.value))
+  const minimum = Math.min(...values, ...benchmarkSeries.map(p => p.value), ...secondarySeries.map(p => p.value))
+  const maximum = Math.max(...values, ...benchmarkSeries.map(p => p.value), ...secondarySeries.map(p => p.value))
   const padding = minimum === maximum ? (props.returnCurve ? 0.01 : 1) : (maximum - minimum) * 0.05
   const bottomValue = minimum - padding
   const span = maximum + padding - bottomValue
   const y = (value: number) => plot.bottom - (value - bottomValue) / span * (plot.bottom - plot.top)
+  const toPoints = (series: { time: number; value: number }[]) =>
+    series.map(p => `${x(p.time).toFixed(1)},${y(p.value).toFixed(1)}`).join(' ')
   const yTicks = Array.from({ length: 5 }, (_, i) => {
     const value = bottomValue + span * i / 4
     return { y: y(value), label: props.returnCurve ? formatPercent(value) : formatNumber(value) }
@@ -100,9 +103,8 @@ const chart = computed(() => {
     })
     : []
   return { creation, launchX: Number.isFinite(launch) ? x(launch) : null,
-    benchmark: benchmarkSample.length > 1
-      ? { points: benchmarkSample.map(p => `${x(p.time).toFixed(1)},${y(p.value).toFixed(1)}`).join(' ') }
-      : null,
+    benchmark: benchmarkSeries.length > 1 ? { points: toPoints(benchmarkSeries) } : null,
+    secondary: secondarySeries.length > 1 ? { points: toPoints(secondarySeries) } : null,
     xTicks, yTicks,
     markers: sample.filter(p => p.directions.length && props.returnCurve).map(p => ({date:p.date, directions:p.directions.join('/'), text: markerText(p.date, p.directions, p.trades),x:x(Date.parse(p.date)),y:y(p.value)})),
     points:sample.map((point, i) => {
@@ -158,6 +160,7 @@ function closedTrades(): number {
         <div class="curve-legend" aria-label="曲线图例">
           <span><i class="strategy-key" />策略</span>
           <span v-if="chart.benchmark"><i class="benchmark-key" />{{ props.benchmarkLabel ?? '基准·买入持有' }}</span>
+          <span v-if="chart.secondary"><i class="secondary-key" />{{ props.secondaryBenchmark?.label ?? '次级基准' }}</span>
           <template v-if="props.returnCurve">
             <span><i class="buy-key" />买入</span>
             <span><i class="sell-key" />卖出</span>
@@ -179,6 +182,7 @@ function closedTrades(): number {
           </g>
           <line v-if="chart.launchX !== null" :x1="chart.launchX" :x2="chart.launchX" :y1="plot.top" :y2="plot.bottom" stroke="var(--accent)" stroke-dasharray="5 4" />
           <polyline v-if="chart.benchmark" :points="chart.benchmark.points" fill="none" stroke="#f59e0b" stroke-width="1.6" stroke-dasharray="4 3" />
+          <polyline v-if="chart.secondary" :points="chart.secondary.points" fill="none" stroke="#38bdf8" stroke-width="1.6" stroke-dasharray="4 3" />
           <polyline :points="chartPoints()" fill="none" stroke="var(--accent)" stroke-width="3" />
           <g v-for="marker in chart.markers" :key="marker.date"
             tabindex="0" :aria-label="marker.text"
@@ -232,6 +236,7 @@ function closedTrades(): number {
 .curve-legend i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; }
 .curve-legend .strategy-key { background: var(--accent); }
 .curve-legend .benchmark-key { width: 16px; height: 0; border-top: 2px dashed #f59e0b; border-radius: 0; }
+.curve-legend .secondary-key { width: 16px; height: 0; border-top: 2px dashed #38bdf8; border-radius: 0; }
 .curve-legend .buy-key { background: #34d399; }
 .curve-legend .sell-key { background: #f87171; }
 .curve-grid { stroke: var(--border); }

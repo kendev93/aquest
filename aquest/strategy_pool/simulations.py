@@ -28,6 +28,7 @@ from aquest.portfolio_backtest.service import PortfolioBacktestService
 from aquest.portfolio_backtest.simulation_models import _Position
 from aquest.web.schemas import PortfolioBacktestRequest
 
+from .holdings_benchmark import holdings_benchmark
 from .simulation_archive import SIGNAL_METRICS, required_rank_version
 from .tracking_store import dumps
 
@@ -347,6 +348,7 @@ class PoolSimulations:
                     trades=list(reversed(state["trades"]))[offset : offset + limit],
                     all_trades=list(state["trades"]),
                     benchmark=self._benchmark(state),
+                    holdings_benchmark=self._holdings_benchmark(config, state),
                 )
             items.append(output)
         return items
@@ -369,6 +371,21 @@ class PoolSimulations:
             "dates": [day.isoformat() for day, _ in rows],
             "totals": [close for _, close in rows],
         }
+
+    def _holdings_benchmark(
+        self, config: dict[str, Any], state: dict[str, Any]
+    ) -> dict[str, object] | None:
+        """同目标的「持仓中」全集等权线；只做参考，算不出来不挡详情。"""
+
+        try:
+            return holdings_benchmark(
+                self.store,
+                objective=str(config["objective"]),
+                equity_dates=[point["date"] for point in state["equity"]],
+            )
+        except Exception:  # noqa: BLE001 - 参考线失败不影响持仓与成交
+            logger.exception("持仓等权基准计算失败")
+            return None
 
     def _version(self, row: dict[str, Any], day: date) -> PortfolioBacktestConfig | None:
         with STATE_WRITE_LOCK, self.store.state_read_session() as connection:

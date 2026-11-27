@@ -149,6 +149,7 @@ def test_simulation_replays_signal_only_rank_and_replaces_only_after_filled_sale
         "dates": ["2026-11-24", "2026-11-26"],
         "totals": [4.0, 4.2],
     }
+    assert result["holdings_benchmark"] is None
     assert result["trades_total"] == 7
     assert result["trades"][0]["symbol"] == "SH600007"
     assert result["trades"][0]["rank"] == 1

@@ -21,12 +21,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime
-from typing import Final
+from typing import Any, Final, cast
 
 import numpy as np
 import pandas as pd
 
 from aquest.market_data.adjustment import CorporateAction, build_factor_series
+from aquest.market_data.models import InstrumentRef, MarketCode
+from aquest.market_data.store_bars import corporate_actions_from_frame
 from aquest.portfolio_backtest.benchmark import curve_performance
 
 from .models import (
@@ -102,6 +104,52 @@ def pivot_closes(frame: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
     wide = work.groupby(["day", "key"], sort=True)["close"].mean().unstack("key")
     return wide.sort_index()
+
+
+#: 批量查事件时一次带多少只标的。全市场约 5000 只，一次性拼成 OR 条件会让 SQL
+#: 又长又慢，拆开走反而更快，单批失败也不会拖垮整批。
+_ACTION_BATCH_SIZE: Final = 500
+
+
+def actions_by_key(
+    store: Any,
+    frame: pd.DataFrame,
+) -> dict[str, tuple[CorporateAction, ...]]:
+    """按 ``市场:代码`` 取出这批标的的除权事件，供 ``adjust_closes_for_dividends`` 用。
+
+    取不到就返回空字典，调用方退化成不复权——少一个校正不该让整个观察页打不开。
+    """
+
+    if frame.empty or "market" not in frame.columns or "code" not in frame.columns:
+        return {}
+    unique = frame[["market", "code"]].drop_duplicates()
+    refs = [
+        InstrumentRef(
+            market=cast(MarketCode, str(row.market)),
+            code=str(row.code),
+            instrument_type="stock",
+        )
+        for row in unique.itertuples(index=False)
+    ]
+    grouped: dict[str, list[CorporateAction]] = {}
+    try:
+        for offset in range(0, len(refs), _ACTION_BATCH_SIZE):
+            batch = store.read_corporate_actions_batch(refs[offset : offset + _ACTION_BATCH_SIZE])
+            for action in corporate_actions_from_frame(batch):
+                grouped.setdefault(f"{action.market}:{action.code}", []).append(action)
+    except Exception:  # noqa: BLE001 - 事件取不到要退化而不是中断整个观察
+        return {}
+    return {key: tuple(value) for key, value in grouped.items()}
+
+
+def adjusted_close_matrix(store: Any, frame: pd.DataFrame) -> pd.DataFrame:
+    """读取的长表 → 复权 → 透视成日期 x 标的宽表。
+
+    股票组与模拟盘基准都从这里进口径，保证「股票组概览」「组内表现」与模拟盘
+    的持仓等权线三者数字一致。
+    """
+
+    return pivot_closes(adjust_closes_for_dividends(frame, actions_by_key(store, frame)))
 
 
 def equal_weight_curve(prices: pd.DataFrame, label: str) -> BasketCurve | None:
