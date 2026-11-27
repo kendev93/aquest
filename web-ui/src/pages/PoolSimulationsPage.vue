@@ -18,22 +18,26 @@ type Simulation = {
 }
 
 const rankLabels = {
+  default: '默认顺序（关注置顶）', win_rate: '全区间胜率', payoff_ratio: '全区间盈亏比',
+  annual_return: '全区间年化收益', sharpe: '全区间夏普', composite: '全区间综合',
   postLaunchReturn: '上线后收益', benchmark: '同期买入持有', excess: '超额',
   holdingReturn: '当前持仓收益', createdReturn: '创建至今收益',
 } as const
+const signalRanks = ['default', 'win_rate', 'payoff_ratio', 'annual_return', 'sharpe', 'composite'] as const
 type Rank = keyof typeof rankLabels
+function signalRank(value: string | null): Rank {
+  return signalRanks.find(rank => rank === value) ?? 'default'
+}
 const labels = { annual_return: '年化收益', sharpe: '夏普' }
 const query = new URLSearchParams(window.location.search)
 const objective = ref<Objective>(query.get('objective') === 'sharpe' ? 'sharpe' : 'annual_return')
 const initialRank = query.get('ranking')
-const ranking = ref<Rank>(initialRank && Object.hasOwn(rankLabels, initialRank) ? initialRank as Rank : 'postLaunchReturn')
-const direction = ref(query.get('direction') === 'asc' ? 'asc' : 'desc')
-const initialDays = Number(query.get('min_days'))
-const minDays = ref([0, 5, 20, 60].includes(initialDays) ? initialDays : 0)
+const ranking = ref<Rank>(signalRank(initialRank))
 const name = ref('')
 const cash = ref(1_000_000)
 const days = ref<string[]>([])
-const startDate = ref('')
+const requestedDate = ref(query.get('start_date') ?? '')
+const startDate = ref(requestedDate.value)
 const creating = ref(query.get('create') === '1')
 const busy = ref(false)
 const error = ref('')
@@ -54,10 +58,12 @@ function showError(exc: unknown): void {
 async function loadDays(): Promise<void> {
   const token = ++daysRequest
   try {
-    const response = await request<{ data: string[] }>(`${endpoint}/signal-days?objective=${objective.value}`)
+    const response = await request<{ data: string[] }>(`${endpoint}/signal-days?objective=${objective.value}&ranking=${ranking.value}`)
     if (token !== daysRequest) return
     days.value = response.data
-    if (!days.value.includes(startDate.value)) startDate.value = days.value[0] ?? ''
+    if (!days.value.includes(startDate.value)) {
+      startDate.value = requestedDate.value ? '' : days.value[0] ?? ''
+    }
   } catch (exc) { if (token === daysRequest) showError(exc) }
 }
 
@@ -82,8 +88,8 @@ async function create(): Promise<void> {
   try {
     const response = await request<{ data: { id: string } }>(endpoint, {
       method: 'POST', body: JSON.stringify({
-        name: name.value, objective: objective.value, ranking: ranking.value, direction: direction.value,
-        min_days: minDays.value, start_date: startDate.value, initial_cash: cash.value,
+        name: name.value, objective: objective.value, ranking: ranking.value,
+        start_date: startDate.value, initial_cash: cash.value,
       }),
     })
     creating.value = false
@@ -105,7 +111,7 @@ async function toggle(item: Simulation): Promise<void> {
   finally { busy.value = false }
 }
 
-watch(objective, () => { void loadDays() })
+watch([objective, ranking], () => { void loadDays() })
 onActivated(() => {
   const search = window.location.search
   if (search !== previousSearch) {
@@ -115,11 +121,9 @@ onActivated(() => {
       creating.value = true
       objective.value = params.get('objective') === 'sharpe' ? 'sharpe' : 'annual_return'
       const rank = params.get('ranking')
-      ranking.value = rank && Object.hasOwn(rankLabels, rank) ? rank as Rank : 'postLaunchReturn'
-      direction.value = params.get('direction') === 'asc' ? 'asc' : 'desc'
-      const threshold = Number(params.get('min_days'))
-      minDays.value = [0, 5, 20, 60].includes(threshold) ? threshold : 0
-      startDate.value = ''
+      ranking.value = signalRank(rank)
+      requestedDate.value = params.get('start_date') ?? ''
+      startDate.value = requestedDate.value
     }
   }
   void refresh()
@@ -166,12 +170,11 @@ const chart = computed(() => {
       <form v-if="creating" class="simulation-form" @submit.prevent="create">
         <label>名称<input v-model.trim="name" required maxlength="80" /></label>
         <label>策略目标<select v-model="objective"><option value="annual_return">年化收益</option><option value="sharpe">夏普</option></select></label>
-        <label>榜单<select v-model="ranking"><option v-for="(label, key) in rankLabels" :key="key" :value="key">{{ label }}</option></select></label>
-        <label>排序<select v-model="direction"><option value="desc">从高到低</option><option value="asc">从低到高</option></select></label>
-        <label>上线交易日门槛<select v-model.number="minDays"><option v-for="day in [0, 5, 20, 60]" :key="day" :value="day">{{ day }}</option></select></label>
-        <label>首批信号日<select v-model="startDate" required><option v-for="day in days" :key="day" :value="day">{{ day }}</option></select></label>
+        <label>榜单<select v-model="ranking"><option v-for="key in signalRanks" :key="key" :value="key">{{ rankLabels[key] }}</option></select></label>
+        <label>首批信号日<select v-model="startDate" required><option value="" disabled>请选择信号日</option><option v-for="day in days" :key="day" :value="day">{{ day }}</option></select></label>
         <label>初始资金<input v-model.number="cash" type="number" min="1000" max="100000000" required /></label>
         <button class="button-primary" type="submit" :disabled="busy || !startDate">创建并回放</button>
+        <p v-if="requestedDate && !days.includes(requestedDate) && days.length">所选日期没有这类信号榜的归档，请手动选择可回放日期。</p>
         <p v-if="!days.length">暂无可回放的完整信号。请先完成一轮新版全市场收盘信号扫描。</p>
       </form>
     </section>

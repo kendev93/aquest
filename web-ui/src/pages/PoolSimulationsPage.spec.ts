@@ -6,7 +6,7 @@ import PoolSimulationsPage from './PoolSimulationsPage.vue'
 
 it('creates from the chosen signal-board settings and opens the account detail', async () => {
   const original = window.location.href
-  window.history.replaceState({}, '', '/strategy-pool/simulations?create=1&objective=sharpe&ranking=excess&min_days=20')
+  window.history.replaceState({}, '', '/strategy-pool/simulations?create=1&objective=sharpe&ranking=composite&start_date=2026-11-26')
   const api = vi.fn(async (url: string, init?: RequestInit) => {
     const data = url.includes('/signal-days') ? ['2026-11-26']
       : init?.method === 'POST' ? { id: 'test' }
@@ -27,7 +27,7 @@ it('creates from the chosen signal-board settings and opens the account detail',
     await flushPromises()
     const post = api.mock.calls.find(([, init]) => init?.method === 'POST')
     expect(JSON.parse(String(post?.[1]?.body))).toMatchObject({
-      name: '超额盘', objective: 'sharpe', ranking: 'excess', min_days: 20, start_date: '2026-11-26',
+      name: '超额盘', objective: 'sharpe', ranking: 'composite', start_date: '2026-11-26',
     })
     expect(wrapper.text()).toContain('超额盘 · 持仓与成交')
   } finally {

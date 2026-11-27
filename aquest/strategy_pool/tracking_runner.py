@@ -647,6 +647,11 @@ class PoolTrackingRunner:
             )
             result["states"].append(row)
             if buy:
+                # 信号榜按全区间指标排序，与上线后收益榜的窗口不同。
+                full_period = summary.get("full_period")
+                if not isinstance(full_period, Mapping):
+                    metrics = v["candidate"].get("metrics") or {}
+                    full_period = metrics.get("full_period") or {}
                 post_return = summary.get("post_launch_return")
                 if summary.get("has_post_launch_data") is False:
                     post_return = None
@@ -665,6 +670,10 @@ class PoolTrackingRunner:
                         "holdingReturn": held.get("unrealized_pnl_pct"),
                         "createdReturn": summary.get("created_return"),
                         "days": summary.get("post_launch_days"),
+                        **{
+                            key: full_period.get(key)
+                            for key in ("annual_return", "sharpe", "win_rate", "payoff_ratio")
+                        },
                     }
                 )
             if sell:
@@ -1033,7 +1042,7 @@ class PoolTrackingRunner:
         return {
             **results[goal],
             "results_by_objective": results,
-            "simulation_rank_version": 1,
+            "simulation_rank_version": 2,
             "total_symbols": total,
             "pool_total_symbols": pool_total,
             "completed_symbols": completed,

@@ -670,6 +670,11 @@ const {
   followKeys,
 })
 
+const signalSimulationHref = computed(() => '/strategy-pool/simulations?' + new URLSearchParams({
+  create: '1', objective: objective.value ?? 'annual_return', ranking: signalSort.value,
+  start_date: signalDate.value || signalAsOf.value || '',
+}))
+
 function selectObjective(value: StrategyPoolObjective): void {
   objective.value = value
   window.localStorage.setItem(OBJECTIVE_STORAGE_KEY, value)
@@ -1566,11 +1571,15 @@ onUnmounted(() => {
         <p v-if="submittingTask" class="empty-copy" role="status" data-testid="pool-submitting">正在把任务提交给后端，研究正在跑时这一步可能要等十几秒…</p>
 
         <div class="signal-controls-row" data-testid="pool-signal-controls">
-          <label class="signal-sort">排序方式
-            <select v-model="signalSort" data-testid="pool-signal-sort">
-              <option v-for="option in SIGNAL_SORT_OPTIONS" :key="option.value" :value="option.value">{{ option.label }}</option>
-            </select>
-          </label>
+          <div class="signal-sort-actions">
+            <label class="signal-sort">排序方式
+              <select v-model="signalSort" data-testid="pool-signal-sort">
+                <option v-for="option in SIGNAL_SORT_OPTIONS" :key="option.value" :value="option.value">{{ option.label }}</option>
+              </select>
+            </label>
+            <a class="button-secondary" :href="signalSimulationHref" data-testid="pool-create-simulation">按此榜单建模拟盘</a>
+            <a class="table-link" href="/strategy-pool/simulations">查看榜单模拟盘</a>
+          </div>
           <label v-if="signalDays.length" class="signal-sort">信号日期
             <select
               :value="signalDate"
@@ -1899,6 +1908,7 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .pool-search input { min-height: 42px; border: 1px solid #354b69; border-radius: 7px; padding: 9px 11px; background: #111c30; color: #edf2fb; font: inherit; }
 .signal-grid, .candidate-apply-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .signal-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.signal-sort-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
 .signal-controls-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 12px; color: #8798b1; font-size: .88rem; }
 .signal-sort { display: flex; align-items: center; gap: 8px; color: #9baac0; }
 .signal-sort select { width: auto; min-width: 0; border: 1px solid #354b69; border-radius: 7px; padding: 6px 8px; background: #111c30; color: #edf2fb; font: inherit; }

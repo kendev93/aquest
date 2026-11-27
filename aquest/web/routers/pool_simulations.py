@@ -18,7 +18,19 @@ class SimulationCreate(BaseModel):
 
     name: str = Field(min_length=1, max_length=80)
     objective: Literal["annual_return", "sharpe"]
-    ranking: Literal["postLaunchReturn", "benchmark", "excess", "holdingReturn", "createdReturn"]
+    ranking: Literal[
+        "default",
+        "win_rate",
+        "payoff_ratio",
+        "annual_return",
+        "sharpe",
+        "composite",
+        "postLaunchReturn",
+        "benchmark",
+        "excess",
+        "holdingReturn",
+        "createdReturn",
+    ]
     direction: Literal["asc", "desc"] = "desc"
     min_days: Literal[0, 5, 20, 60] = 0
     start_date: date
@@ -41,10 +53,12 @@ def list_simulations(request: Request) -> dict[str, object]:
 
 @router.get("/signal-days")
 def list_simulation_signal_days(
-    request: Request, objective: Literal["annual_return", "sharpe"] = "annual_return"
+    request: Request,
+    objective: Literal["annual_return", "sharpe"] = "annual_return",
+    ranking: str = "",
 ) -> dict[str, object]:
     with store_guard("暂时无法读取模拟盘信号日期"):
-        return {"data": _service(request).signal_days(objective)}
+        return {"data": _service(request).signal_days(objective, ranking)}
 
 
 @router.post("", status_code=201)

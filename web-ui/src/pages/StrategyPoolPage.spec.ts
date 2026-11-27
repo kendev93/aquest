@@ -430,6 +430,8 @@ describe('StrategyPoolPage', () => {
 
     await sort.setValue('win_rate')
     expect(rowSymbols('pool-buy-signals')).toEqual(['SZ600001', 'SZ600002', 'SZ600000', 'SZ600003'])
+    const createHref = wrapper.get('[data-testid="pool-signal-controls"] [data-testid="pool-create-simulation"]').attributes('href')
+    expect(new URL(createHref, window.location.origin).searchParams.get('ranking')).toBe('win_rate')
 
     await sort.setValue('annual_return')
     // 按年化而不是累计收益：600002 年化最高，累计最高的 600000 只排第二。

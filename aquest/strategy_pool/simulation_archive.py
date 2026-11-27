@@ -11,6 +11,8 @@ from aquest.market_data.sync_session import shanghai_now
 
 from .tracking_store import dumps
 
+SIGNAL_METRICS = ("annual_return", "sharpe", "win_rate", "payoff_ratio")
+SIGNAL_RANKS = (*SIGNAL_METRICS, "default", "composite")
 RANK_FIELDS = ("postLaunchReturn", "benchmark", "excess", "holdingReturn", "createdReturn")
 
 
@@ -30,7 +32,8 @@ def archive_simulation_signals(
     ):
         return
     # 个股补跑和旧版没有排名字段的结果都不能代替当日完整榜单。
-    if result.get("simulation_rank_version") != 1 or result.get("failed_symbols"):
+    rank_version = result.get("simulation_rank_version")
+    if rank_version not in (1, 2) or result.get("failed_symbols"):
         return
     as_of = payload.get("as_of_date")
     if not isinstance(as_of, str):
@@ -43,6 +46,15 @@ def archive_simulation_signals(
     if archived_at.date() < day or (archived_at.date() == day and archived_at.time() < time(15)):
         return
     connection.execute(ARCHIVE_DDL)
+    follow_keys = set()
+    if rank_version == 2:
+        follow_keys = {
+            (market, code)
+            for market, code in connection.execute(
+                "SELECT market, code FROM strategy_pool_focus "
+                "UNION SELECT market, code FROM strategy_pool_focus_members"
+            ).fetchall()
+        }
     for objective in ("annual_return", "sharpe"):
         board = boards.get(objective)
         if not isinstance(board, Mapping):
@@ -62,7 +74,15 @@ def archive_simulation_signals(
         entries = [
             {
                 key: row.get(key)
-                for key in ("market", "code", "name", "tracking_version_id", "days", *RANK_FIELDS)
+                for key in (
+                    "market",
+                    "code",
+                    "name",
+                    "tracking_version_id",
+                    "days",
+                    *RANK_FIELDS,
+                    *SIGNAL_METRICS,
+                )
             }
             for row in buys
             if isinstance(row, Mapping)
@@ -70,6 +90,8 @@ def archive_simulation_signals(
             and (row.get("market"), row.get("code")) not in excluded
         ]
         # 保留首份已发布的完整信号，重复扫描不能改写历史模拟成交的依据。
+        for entry in entries:
+            entry["followed"] = (entry["market"], entry["code"]) in follow_keys
         exits = [
             {
                 "market": row["market"],
@@ -95,7 +117,7 @@ def archive_simulation_signals(
                 day,
                 objective,
                 job_id,
-                dumps({"buys": entries, "exits": exits}),
+                dumps({"buys": entries, "exits": exits, "rank_version": rank_version}),
                 archived_at,
             ],
         )

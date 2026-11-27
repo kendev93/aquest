@@ -27,6 +27,7 @@ from aquest.portfolio_backtest.service import PortfolioBacktestService
 from aquest.portfolio_backtest.simulation_models import _Position
 from aquest.web.schemas import PortfolioBacktestRequest
 
+from .simulation_archive import SIGNAL_METRICS, SIGNAL_RANKS
 from .tracking_store import dumps
 
 logger = logging.getLogger(__name__)
@@ -37,8 +38,30 @@ def _symbol(row: dict[str, Any]) -> str:
     return f"{row['market']}{row['code']}"
 
 
+def _score(row: dict[str, Any], field: str) -> float:
+    value = row.get(field)
+    return float(value) if isinstance(value, (int, float)) and math.isfinite(value) else -math.inf
+
+
 def rank_buys(rows: list[dict[str, Any]], config: dict[str, Any]) -> list[dict[str, Any]]:
     field = config["ranking"]
+    if field == "default":
+        return sorted(rows, key=lambda row: not row.get("followed"))
+    if field in SIGNAL_METRICS:
+        return sorted(rows, key=lambda row: (-_score(row, field), _symbol(row)))
+    if field == "composite":
+        complete = [
+            row for row in rows if all(math.isfinite(_score(row, k)) for k in SIGNAL_METRICS)
+        ]
+        scores: dict[str, float] = {}
+        for metric in SIGNAL_METRICS:
+            ranks: dict[float, int] = {}
+            for index, value in enumerate(sorted(_score(row, metric) for row in complete)):
+                ranks.setdefault(value, index)
+            for row in complete:
+                key = _symbol(row)
+                scores[key] = scores.get(key, 0) + ranks[_score(row, metric)]
+        return sorted(rows, key=lambda row: (-scores.get(_symbol(row), -math.inf), _symbol(row)))
     direction = 1 if config["direction"] == "asc" else -1
     selected = [
         row
@@ -190,19 +213,20 @@ class PoolSimulations:
             connection.execute(ARCHIVE_DDL)
             connection.execute(SIMULATION_DDL)
 
-    def signal_days(self, objective: str) -> list[str]:
+    def signal_days(self, objective: str, ranking: str = "") -> list[str]:
         with STATE_WRITE_LOCK, self.store.state_read_session() as connection:
             return [
                 str(row[0])
                 for row in connection.execute(
                     "SELECT trade_date FROM pool_simulation_signals WHERE objective = ? "
+                    "AND (NOT ? OR json_extract_string(entries_json, '$.rank_version') = '2') "
                     "ORDER BY trade_date DESC",
-                    [objective],
+                    [objective, ranking in SIGNAL_RANKS],
                 ).fetchall()
             ]
 
     def create(self, config: dict[str, Any]) -> str:
-        days = self.signal_days(config["objective"])
+        days = self.signal_days(config["objective"], config["ranking"])
         if not days or config["start_date"] not in days:
             raise ValueError("该日期没有可回放的完整买入信号榜")
         job_id = uuid4().hex
@@ -517,7 +541,12 @@ class PoolSimulations:
                 state["cursor"] = str(signal_day)
                 self._save(key, state)
                 continue
-            self._step(state, config, json.loads(entries)["buys"], signal_day, trade_day)
+            data = json.loads(entries)
+            if config["ranking"] in SIGNAL_RANKS and data.get("rank_version") != 2:
+                state["warning"] = f"{signal_day} 的旧归档没有信号榜排序指标，无法推进"
+                self._save(key, state)
+                return
+            self._step(state, config, data["buys"], signal_day, trade_day)
             state["warning"] = None
             self._save(key, state)
             processed += 1

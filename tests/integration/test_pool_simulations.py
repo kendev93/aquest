@@ -10,6 +10,7 @@ from aquest.market_data.store import DuckDbMarketDataStore
 from aquest.strategy_discovery.duckdb_job_store import DuckDbStrategyJobStore
 from aquest.strategy_pool import simulation_archive, simulations
 from aquest.strategy_pool.simulations import PoolSimulations
+from aquest.strategy_pool.store import DuckDbStrategyPoolStore
 from aquest.strategy_pool.tracking_store import PoolTrackingStore, dumps
 from aquest.web.app import create_app
 
@@ -21,6 +22,7 @@ def _signal(code: str, score: float) -> dict:
         "name": code,
         "tracking_version_id": code,
         "postLaunchReturn": score,
+        "annual_return": score,
         "days": 20,
     }
 
@@ -36,7 +38,7 @@ def _publish(jobs: DuckDbStrategyJobStore, day: str, buys: list[dict]) -> None:
     jobs.write_result(
         job,
         {
-            "simulation_rank_version": 1,
+            "simulation_rank_version": 2,
             "results_by_objective": {
                 "annual_return": {"buy_signals": buys, "sell_signals": []},
             },
@@ -55,6 +57,7 @@ def test_simulation_replays_signal_only_rank_and_replaces_only_after_filled_sale
     )
     pool = PoolSimulations(store)
     pool.initialize()
+    DuckDbStrategyPoolStore(store).initialize()
     PoolTrackingStore(store).bootstrap()
     jobs = DuckDbStrategyJobStore(store)
     days = ["2026-11-23", "2026-11-24", "2026-11-25", "2026-11-26"]
@@ -124,7 +127,7 @@ def test_simulation_replays_signal_only_rank_and_replaces_only_after_filled_sale
         {
             "name": "收益盘",
             "objective": "annual_return",
-            "ranking": "postLaunchReturn",
+            "ranking": "annual_return",
             "direction": "desc",
             "initial_cash": 100_000.0,
             "min_days": 0,
