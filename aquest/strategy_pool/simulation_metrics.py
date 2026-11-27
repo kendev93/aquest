@@ -236,7 +236,9 @@ def _risk(
     total_return = last / initial_cash - 1 if initial_cash > 0 else 0.0
     gated = sample >= RISK_SAMPLE_MIN_DAYS
     annual_return = None
-    if gated and sample > 0 and total_return > -1:
+    # 年化收益按当前样本机械折算：一天的样本也会给出一个很大的数，页面上要同时
+    # 标出样本天数；波动、夏普这类比率仍要求 20 个净值日。
+    if sample > 0 and total_return > -1:
         annual_return = (1 + total_return) ** (TRADING_DAYS_PER_YEAR / sample) - 1
     volatility = sharpe = sortino = calmar = var95 = downside_volatility = None
     ulcer = math.sqrt(statistics.fmean(value * value for value in drawdowns)) if drawdowns else None
@@ -336,6 +338,17 @@ def _relative(
         for day, value in zip(days, returns, strict=True)
         if day in benchmark_returns
     ]
+    # 相对回撤一天也能算：超额曲线的回撤不依赖方差，只要有一天对齐收益就成立。
+    excess = [left - right for left, right in pairs]
+    curve_value = 1.0
+    curve_high = 1.0
+    excess_drawdown = 0.0
+    for item in excess:
+        curve_value *= 1 + item
+        curve_high = max(curve_high, curve_value)
+        excess_drawdown = max(
+            excess_drawdown, 1 - curve_value / curve_high if curve_high > 0 else 0.0
+        )
     empty: dict[str, object] = {
         "days": len(pairs),
         "beta": None,
@@ -344,7 +357,7 @@ def _relative(
         "information_ratio": None,
         "up_capture": None,
         "down_capture": None,
-        "excess_max_drawdown": None,
+        "excess_max_drawdown": excess_drawdown if excess else None,
         "alpha": None,
         "treynor": None,
     }
@@ -364,14 +377,6 @@ def _relative(
     strategy_variance = statistics.variance(strategy)
     if strategy_variance > 0 and variance_bench > 0:
         correlation = covariance / math.sqrt(strategy_variance * variance_bench)
-    excess = [left - right for left, right in zip(strategy, bench, strict=True)]
-    value = 1.0
-    high = 1.0
-    excess_drawdown = 0.0
-    for item in excess:
-        value *= 1 + item
-        high = max(high, value)
-        excess_drawdown = max(excess_drawdown, 1 - value / high if high > 0 else 0.0)
     gated = len(pairs) >= RISK_SAMPLE_MIN_DAYS
     tracking_error = information_ratio = up_capture = down_capture = None
     alpha = treynor = None

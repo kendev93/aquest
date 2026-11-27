@@ -159,6 +159,12 @@ def test_single_net_value_day_still_gets_returns_from_inception():
     assert result["risk"]["sample_days"] == 1
     assert result["risk"]["max_daily_gain"] == pytest.approx(0.0747)
     assert result["risk"]["max_daily_loss"] is None
+    # 年化收益按这一天机械折算；波动、夏普这类比率仍留空。
+    assert result["risk"]["annual_return"] == pytest.approx((1.0747) ** 250 - 1)
+    assert result["risk"]["volatility"] is None
+    assert result["relative"]["days"] == 1
+    assert result["relative"]["excess_max_drawdown"] == pytest.approx(0.0)
+    assert result["relative"]["beta"] is None
 
     ranges = {row["key"]: row for row in result["ranges"]}
     assert ranges["all"]["start"] == "2026-11-26"

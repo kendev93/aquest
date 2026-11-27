@@ -526,7 +526,7 @@ const detailCurve = computed<IndividualResearchFullBacktest | null>(() => {
             <div><dt>集中度 HHI</dt><dd>{{ formatNumber(detail.metrics.concentration.hhi, 3) }}</dd></div>
             <div><dt>现金占比</dt><dd>{{ formatPercent(detail.metrics.concentration.cash_ratio) }}</dd></div>
           </dl>
-          <p class="simulation-copy">年化与比率类指标（年化收益、波动、夏普、Sortino、Calmar、Omega、Gain-to-Pain、Martin、偏度、峰度、尾部比、VaR/CVaR、Beta、跟踪误差、信息比率、Jensen Alpha、Treynor、捕获率）要求至少 20 个净值日样本；不足时显示 —。当前样本 {{ detail.metrics.risk.sample_days }} 个净值日、沪深300 对齐 {{ detail.metrics.relative.days }} 日。</p>
+          <p class="simulation-copy">年化收益按当前样本机械折算（当前 {{ detail.metrics.risk.sample_days }} 个净值日），样本很短时数值会很大；波动、夏普、Sortino、Calmar、Omega、Gain-to-Pain、Martin、偏度、峰度、尾部比、VaR/CVaR、Beta、跟踪误差、信息比率、Jensen Alpha、Treynor、捕获率要求至少 20 个净值日样本，不足时显示 —（沪深300 对齐 {{ detail.metrics.relative.days }} 日）。</p>
         </template>
         <h3>当前持仓</h3>
         <div class="table-wrap">
