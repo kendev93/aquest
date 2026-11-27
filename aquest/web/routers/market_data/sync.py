@@ -25,7 +25,7 @@ from aquest.market_data.auto_sync import (
     FULL_REFRESH_DESCRIPTION,
     MARKET_SYNC_EXCLUSIVE_GROUP,
 )
-from aquest.market_data.benchmark import refresh_benchmark_bars
+from aquest.market_data.benchmark import BENCHMARK_SYMBOL, refresh_benchmark_bars
 from aquest.market_data.store import MarketDataStoreError
 from aquest.market_data.sync_call import call_market_sync
 from aquest.market_data.sync_session import (
@@ -147,6 +147,16 @@ def _create_sync_job(
     if not reset and not payload.full_history and not payload.force:
         already_covered = _already_covered_session(request, config)
         if already_covered is not None:
+            # 行情已覆盖时不再下载个股，但 510300 基准可能还没拉过：补一条只刷新
+            # 基准的轻任务，别让「点同步」在跳过路径上永远补不上基准。
+            benchmark_job = _submit_benchmark_refresh(
+                request, session=date.fromisoformat(str(already_covered["session"]))
+            )
+            if benchmark_job is not None:
+                return JSONResponse(
+                    status_code=status.HTTP_202_ACCEPTED,
+                    content={"data": {"job_id": benchmark_job, "status": "queued"}},
+                )
             return JSONResponse(status_code=200, content={"data": already_covered})
 
     def run_sync(progress: ProgressReporter) -> dict[str, object]:
@@ -237,6 +247,31 @@ def _create_sync_job(
         status_code=status.HTTP_202_ACCEPTED,
         content={"data": {"job_id": job_id, "status": "queued"}},
     )
+
+
+def _submit_benchmark_refresh(request: Request, *, session: date) -> str | None:
+    """行情已覆盖时，基准还没覆盖到 session 就补一条只拉基准的任务。"""
+
+    fetcher = getattr(_service(request), "fetch_benchmark_bars", None)
+    if not callable(fetcher):
+        return None
+    rows = _store(request).read_benchmark_bars(BENCHMARK_SYMBOL, end_date=session)
+    if rows and rows[-1][0] >= session:
+        return None
+
+    def run_benchmark(progress: ProgressReporter) -> dict[str, object]:
+        del progress
+        return {"benchmark": _refresh_benchmark(request)}
+
+    try:
+        return _runner(request).submit_callable(
+            run_benchmark,
+            description="行情同步",
+            exclusive_group=MARKET_SYNC_EXCLUSIVE_GROUP,
+        )
+    except (ActiveJobConflictError, RuntimeError):
+        logger.exception("基准行情刷新任务提交失败")
+        return None
 
 
 def _refresh_benchmark(request: Request) -> dict[str, object]:

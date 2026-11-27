@@ -822,6 +822,9 @@ class OnlineMarketClient:
     ) -> pd.DataFrame:
         """Fetch forward-adjusted (前复权) daily closes for the SH benchmark ETF.
 
+        日期与 ``fetch_daily_history`` 一样用紧凑的 ``YYYYMMDD``；东财的 ETF
+        kline 接口对带横线的日期会返回空列表。
+
         前复权按最新除权基准重算，只适合整段全量覆盖；不要拿它和个股的
         不复权日线混存，两者的历史基准不同。
         """
@@ -1117,8 +1120,8 @@ class OnlineMarketSync:
             raise OnlineProviderUnavailable("当前行情源不支持基准行情读取")
         frame = fetcher(
             BENCHMARK_SYMBOL,
-            start_date.isoformat(),
-            end_date.isoformat(),
+            start_date.strftime("%Y%m%d"),
+            end_date.strftime("%Y%m%d"),
             timeout=timeout,
         )
         rows: list[tuple[date, float]] = []

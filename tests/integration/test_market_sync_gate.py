@@ -94,7 +94,7 @@ class _FakeSyncService:
         timeout: float = 30.0,
     ) -> tuple[tuple[date, float], ...]:
         del start_date, end_date, timeout
-        return ((date(2015, 1, 5), 3.1), (date(2015, 1, 6), 3.2))
+        return ((date(2015, 1, 5), 3.1), (date(2015, 1, 6), 3.2), (_TODAY, 4.0))
 
 
 @contextmanager
@@ -103,6 +103,7 @@ def _gate_client(
     *,
     stored_through: date = _TODAY,
     calendar_through: date | None = _TODAY,
+    benchmark: bool = True,
 ) -> Iterator[tuple[TestClient, DuckDbMarketDataStore, _FakeSyncService]]:
     """库里下到 ``stored_through``；日历说到 ``calendar_through`` 才是交易日。
 
@@ -131,6 +132,8 @@ def _gate_client(
             coverage_end=calendar_through,
         )
     service = _FakeSyncService()
+    if benchmark:
+        store.replace_benchmark_bars(BENCHMARK_SYMBOL, [(_TODAY, 4.0)])
     app = create_app(
         market_data_store=store,
         market_sync=service,
@@ -223,11 +226,29 @@ def test_sync_refreshes_the_simulation_benchmark(tmp_path: Path) -> None:
         _settle(client, job_id)
 
         state = client.get(f"/api/v1/market-data/jobs/{job_id}").json()["data"]
-        assert state["result"]["benchmark"] == {"status": "ok", "bars": 2}
+        assert state["result"]["benchmark"] == {"status": "ok", "bars": 3}
         assert store.read_benchmark_bars(BENCHMARK_SYMBOL) == [
             (date(2015, 1, 5), 3.1),
             (date(2015, 1, 6), 3.2),
+            (_TODAY, 4.0),
         ]
+
+
+def test_covered_session_still_refreshes_a_missing_benchmark(tmp_path: Path) -> None:
+    """行情已覆盖时，点同步也要把没拉过的 510300 基准补上。"""
+
+    with _gate_client(tmp_path, benchmark=False) as (client, store, _service):
+        _stamp(store, _PREVIOUS)
+        _stamp(store, _TODAY)
+
+        response = client.post("/api/v1/market-data/sync-online", json={})
+
+        assert response.status_code == 202
+        job_id = response.json()["data"]["job_id"]
+        _settle(client, job_id)
+        state = client.get(f"/api/v1/market-data/jobs/{job_id}").json()["data"]
+        assert state["result"]["benchmark"]["status"] == "ok"
+        assert store.read_benchmark_bars(BENCHMARK_SYMBOL)
 
 
 def test_force_flag_bypasses_the_gate(tmp_path: Path) -> None:

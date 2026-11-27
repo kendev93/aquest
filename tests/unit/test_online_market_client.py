@@ -120,7 +120,7 @@ def test_fetch_benchmark_history_requests_forward_adjusted_etf_closes() -> None:
     )
 
     frame = OnlineMarketClient(transport=transport).fetch_benchmark_history(
-        "510300", "2015-01-01", "2015-01-31", timeout=8.0
+        "510300", "20150101", "20150131", timeout=8.0
     )
 
     assert frame["date"].dt.strftime("%Y-%m-%d").tolist() == ["2015-01-05", "2015-01-06"]
@@ -130,8 +130,8 @@ def test_fetch_benchmark_history_requests_forward_adjusted_etf_closes() -> None:
     # fqt=1：前复权。基准整段全量覆盖，不和个股的不复权日线混存。
     assert params["fqt"] == "1"
     assert params["klt"] == "101"
-    assert params["beg"] == "2015-01-01"
-    assert params["end"] == "2015-01-31"
+    assert params["beg"] == "20150101"
+    assert params["end"] == "20150131"
     assert transport.calls[0][2] == 8.0
 
 
