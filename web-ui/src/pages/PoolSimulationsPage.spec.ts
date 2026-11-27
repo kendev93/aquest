@@ -50,7 +50,7 @@ it('deletes an account after confirmation and clears its detail', async () => {
   const account = {
     id: 'gone', name: '待删盘', objective: 'annual_return', ranking: 'default', min_days: 0,
     direction: 'desc', start_date: '2026-11-26', initial_cash: 1000000, paused: false,
-    cash: 1000000, value: 1000000, total_return: 0, max_drawdown: 0, total_fees: 0,
+    cash: 1000000, value: 1000000, total_return: 0, max_drawdown: 0,
     turnover: 0, holding_count: 0, equity: [], positions: [], trades: [], trades_total: 0,
   }
   let deleted = false
@@ -93,7 +93,7 @@ it('renames an account from the list and keeps the open detail in sync', async (
   const account = {
     id: 'rename', name: '旧名称', objective: 'annual_return', ranking: 'default', min_days: 0,
     direction: 'desc', start_date: '2026-11-26', initial_cash: 1000000, paused: false,
-    cash: 1000000, value: 1000000, total_return: 0, max_drawdown: 0, total_fees: 0,
+    cash: 1000000, value: 1000000, total_return: 0, max_drawdown: 0,
     turnover: 0, holding_count: 0, equity: [], positions: [], trades: [], trades_total: 0,
   }
   let renamed = false
@@ -134,7 +134,7 @@ it('shows the detail return curve with range shortcuts and buy/sell markers', as
   const account = {
     id: 'curve', name: '曲线盘', objective: 'annual_return', ranking: 'default', min_days: 0,
     direction: 'desc', start_date: '2026-06-30', initial_cash: 1000000, paused: false,
-    cash: 900000, value: 1020000, total_return: 0.02, max_drawdown: 0, total_fees: 10,
+    cash: 900000, value: 1020000, total_return: 0.02, max_drawdown: 0,
     turnover: 0.1, holding_count: 1, equity: [
       { date: '2026-06-30', value: 1000000 },
       { date: '2026-11-26', value: 1010000 },
@@ -152,8 +152,8 @@ it('shows the detail return curve with range shortcuts and buy/sell markers', as
       totals: [1.0, 1.03, 1.05],
     },
     all_trades: [
-      { date: '2026-06-30', signal_date: '2026-06-27', symbol: 'SH600000', direction: 'BUY', price: 10, size: 100, fee: 5, reason: '成立建仓' },
-      { date: '2026-11-27', signal_date: '2026-11-26', symbol: 'SH600000', direction: 'SELL', price: 11, size: 100, fee: 5, reason: '卖出条件', pnl: 90 },
+      { date: '2026-06-30', signal_date: '2026-06-27', symbol: 'SH600000', direction: 'BUY', price: 10, size: 100, reason: '成立建仓' },
+      { date: '2026-11-27', signal_date: '2026-11-26', symbol: 'SH600000', direction: 'SELL', price: 11, size: 100, reason: '卖出条件', pnl: 90 },
     ],
   }
   const api = vi.fn(async (url: string) => {

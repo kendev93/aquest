@@ -10,13 +10,13 @@ import type { IndividualResearchFullBacktest } from '../types'
 const endpoint = '/api/v1/strategy-pool/simulations'
 const request = createRequestClient({ errorClass: ApiError, messages: { fallback: '模拟盘请求失败' } })
 type Objective = 'annual_return' | 'sharpe'
-type Trade = { date: string; signal_date: string; symbol: string; direction: string; price: number; size: number; fee: number; reason: string; rank?: number; pnl?: number }
+type Trade = { date: string; signal_date: string; symbol: string; direction: string; price: number; size: number; reason: string; rank?: number; pnl?: number }
 type Position = { market: string; code: string; name: string | null; size: number; entry_price: number; mark: number; entry_date: string }
 type Simulation = {
   id: string; name: string; objective: Objective; ranking: string; min_days: number; direction: string
   start_date: string; initial_cash: number; paused: boolean; warning?: string
   cash: number; value: number; total_return: number; max_drawdown: number
-  total_fees: number; turnover: number; holding_count: number; max_positions?: number
+  turnover: number; holding_count: number; max_positions?: number
   equity: { date: string; value: number }[]
   positions?: Position[]; trades?: Trade[]; trades_total?: number; all_trades?: Trade[]; rebalance_band_pct?: number
   benchmark?: { label?: string; dates: string[]; totals: number[] } | null
@@ -265,7 +265,7 @@ const detailCurve = computed<IndividualResearchFullBacktest | null>(() => {
         <div>
           <p class="eyebrow">STRATEGY POOL / SIMULATIONS</p>
           <h1>榜单模拟盘</h1>
-          <p class="simulation-copy">按买入信号榜建仓，默认持有上限为 5 只。次日开盘先卖出，再补空出的仓位；单只权重偏离目标（1/持仓上限）超过设定阈值时，同日开盘再平衡。</p>
+          <p class="simulation-copy">按买入信号榜建仓，默认持有上限为 5 只。次日开盘先卖出，再补空出的仓位；单只权重偏离目标（1/持仓上限）超过设定阈值时，同日开盘再平衡。按开盘价成交，不计佣金、印花税和滑点。</p>
         </div>
         <button v-if="!creating" class="button-primary" type="button" @click="creating = true">创建模拟盘</button>
       </header>
@@ -312,13 +312,13 @@ const detailCurve = computed<IndividualResearchFullBacktest | null>(() => {
         <p v-else class="simulation-empty">{{ items.length ? '等待下一交易日行情与信号齐备后生成净值。' : '还没有模拟盘，创建后可在这里对比收益。' }}</p>
         <div v-if="items.length" class="table-wrap">
           <table>
-            <thead><tr><th>模拟盘</th><th>榜单</th><th>持仓</th><th>累计收益</th><th>最大回撤</th><th>换手倍数</th><th>交易成本</th><th>状态</th></tr></thead>
+            <thead><tr><th>模拟盘</th><th>榜单</th><th>持仓</th><th>累计收益</th><th>最大回撤</th><th>换手倍数</th><th>状态</th></tr></thead>
             <tbody>
               <tr v-for="item in items" :key="item.id">
                 <td><button class="text-button simulation-name" type="button" :aria-pressed="detail?.id === item.id" @click="select(item.id)">{{ item.name }}</button><button class="text-button simulation-rename" type="button" :disabled="busy" @click="rename(item)">改名</button></td>
                 <td>{{ labels[item.objective] }} · {{ rankLabels[item.ranking as Rank] }}</td>
                 <td>{{ item.holding_count }}/{{ item.max_positions ?? 5 }}</td><td>{{ formatSignedPercent(item.total_return) }}</td>
-                <td>{{ formatPercent(item.max_drawdown) }}</td><td>{{ formatNumber(item.turnover) }} 倍</td><td>{{ formatNumber(item.total_fees) }}</td>
+                <td>{{ formatPercent(item.max_drawdown) }}</td><td>{{ formatNumber(item.turnover) }} 倍</td>
                 <td><button class="button-secondary" type="button" :disabled="busy" @click="toggle(item)">{{ item.paused ? '恢复' : '暂停' }}</button><button class="button-secondary simulation-delete" type="button" :disabled="busy" @click="remove(item)">删除</button><small v-if="item.warning">{{ item.warning }}</small></td>
               </tr>
             </tbody>
@@ -354,11 +354,11 @@ const detailCurve = computed<IndividualResearchFullBacktest | null>(() => {
         <h3 class="simulation-trades-title">成交记录</h3>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>成交日</th><th>信号日</th><th>标的</th><th>方向</th><th>价格</th><th>数量</th><th>成本</th><th>盈亏</th><th>原因 / 买入榜名次</th></tr></thead>
+            <thead><tr><th>成交日</th><th>信号日</th><th>标的</th><th>方向</th><th>价格</th><th>数量</th><th>盈亏</th><th>原因 / 买入榜名次</th></tr></thead>
             <tbody><tr v-for="trade in detail.trades" :key="trade.date + trade.symbol + trade.direction">
               <td>{{ trade.date }}</td><td>{{ trade.signal_date }}</td><td>{{ trade.symbol }}</td>
               <td>{{ trade.direction === 'BUY' ? '买入' : '卖出' }}</td>
-              <td>{{ formatNumber(trade.price) }}</td><td>{{ formatNumber(trade.size) }}</td><td>{{ formatNumber(trade.fee) }}</td>
+              <td>{{ formatNumber(trade.price) }}</td><td>{{ formatNumber(trade.size) }}</td>
               <td>{{ formatNumber(trade.pnl) }}</td><td>{{ trade.reason }}{{ trade.rank ? ` · 第 ${trade.rank} 名` : '' }}</td>
             </tr></tbody>
           </table>

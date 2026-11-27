@@ -81,21 +81,6 @@ def rank_buys(rows: list[dict[str, Any]], config: dict[str, Any]) -> list[dict[s
     )
 
 
-def _order_fees(size: float, price: float, config: PortfolioBacktestConfig, *, sell: bool) -> float:
-    profile = profile_from_config(
-        "stock",
-        commission=config.commission,
-        min_commission=config.min_commission,
-        stamp_tax=config.stamp_tax,
-    )
-    value = size * price
-    return (
-        max(value * profile.commission, profile.min_commission)
-        + size * config.slippage
-        + (value * profile.stamp_tax if sell else 0)
-    )
-
-
 def _lot_size(config: PortfolioBacktestConfig) -> int:
     return profile_from_config(
         "stock",
@@ -148,7 +133,10 @@ def execute_orders(
     slots: int = DEFAULT_SLOTS,
     rebalance: dict[str, float] | None = None,
 ) -> None:
-    """先卖后买；没有卖出成交的仓位不会变成买入名额。再平衡与卖出同一次开盘成交。"""
+    """先卖后买；没有卖出成交的仓位不会变成买入名额。再平衡与卖出同一次开盘成交。
+
+    这是「信号榜最理想执行」的模拟盘：按开盘价成交，不计佣金、印花税与滑点。
+    """
 
     positions = state["positions"]
     initial = not state["started"]
@@ -161,8 +149,7 @@ def execute_orders(
             continue
         price = prices[0]
         size = position["size"]
-        fee = _order_fees(size, price, config, sell=True)
-        proceeds = price * size - fee
+        proceeds = price * size
         state["cash"] += proceeds
         state["trades"].append(
             {
@@ -172,7 +159,6 @@ def execute_orders(
                 "direction": "SELL",
                 "price": price,
                 "size": size,
-                "fee": fee,
                 "reason": order["reason"],
                 "pnl": proceeds - position["cost"],
                 "version_id": position["tracking_version_id"],
@@ -198,8 +184,7 @@ def execute_orders(
         trim = min(int(excess / price / lot) * lot, size) if excess > 0 else 0
         if not trim:
             continue
-        fee = _order_fees(trim, price, config, sell=True)
-        proceeds = price * trim - fee
+        proceeds = price * trim
         cost_part = position["cost"] * trim / size
         state["cash"] += proceeds
         position["size"] = size - trim
@@ -212,7 +197,6 @@ def execute_orders(
                 "direction": "SELL",
                 "price": price,
                 "size": trim,
-                "fee": fee,
                 "reason": "再平衡减仓",
                 "pnl": proceeds - cost_part,
                 "version_id": position["tracking_version_id"],
@@ -239,12 +223,9 @@ def execute_orders(
         budget = min(state["cash"], open_equity / slots)
         lot = _lot_size(config)
         size = int(budget / price / lot) * lot
-        while size and size * price + _order_fees(size, price, config, sell=False) > budget:
-            size -= lot
         if not size:
             continue
-        fee = _order_fees(size, price, config, sell=False)
-        cost = size * price + fee
+        cost = size * price
         state["cash"] -= cost
         positions[symbol] = {
             "market": row["market"],
@@ -267,7 +248,6 @@ def execute_orders(
                 "direction": "BUY",
                 "price": price,
                 "size": size,
-                "fee": fee,
                 "reason": "成立建仓" if initial else "卖出后补仓",
                 "rank": rank,
                 "version_id": row["tracking_version_id"],
@@ -290,12 +270,9 @@ def execute_orders(
             continue
         lot = _lot_size(config)
         size = int(budget / price / lot) * lot
-        while size and size * price + _order_fees(size, price, config, sell=False) > budget:
-            size -= lot
         if not size:
             continue
-        fee = _order_fees(size, price, config, sell=False)
-        cost = size * price + fee
+        cost = size * price
         state["cash"] -= cost
         position["size"] += size
         position["cost"] += cost
@@ -308,7 +285,6 @@ def execute_orders(
                 "direction": "BUY",
                 "price": price,
                 "size": size,
-                "fee": fee,
                 "reason": "再平衡补仓",
                 "version_id": position["tracking_version_id"],
             }
@@ -466,7 +442,6 @@ class PoolSimulations:
                 "equity": equity,
                 "holding_count": len(state["positions"]),
                 "max_positions": config.get("max_positions", DEFAULT_SLOTS),
-                "total_fees": sum(t["fee"] for t in state["trades"]),
                 "turnover": sum(t["size"] * t["price"] for t in state["trades"])
                 / config["initial_cash"],
             }
