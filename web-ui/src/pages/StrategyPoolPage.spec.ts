@@ -430,7 +430,9 @@ describe('StrategyPoolPage', () => {
 
     await sort.setValue('win_rate')
     expect(rowSymbols('pool-buy-signals')).toEqual(['SZ600001', 'SZ600002', 'SZ600000', 'SZ600003'])
-    const createHref = wrapper.get('[data-testid="pool-signal-controls"] [data-testid="pool-create-simulation"]').attributes('href')
+    const simulationLink = wrapper.get('[data-testid="pool-signal-controls"] [data-testid="pool-simulations"]')
+    expect(simulationLink.text()).toBe('模拟盘')
+    const createHref = simulationLink.attributes('href')
     expect(new URL(createHref ?? '', window.location.origin).searchParams.get('ranking')).toBe('win_rate')
 
     await sort.setValue('annual_return')

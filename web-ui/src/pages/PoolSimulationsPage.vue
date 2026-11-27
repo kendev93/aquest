@@ -122,8 +122,8 @@ onActivated(() => {
   if (search !== previousSearch) {
     previousSearch = search
     const params = new URLSearchParams(search)
-    if (params.get('create') === '1') {
-      creating.value = true
+    if (params.has('ranking') || params.get('create') === '1') {
+      creating.value = params.get('create') === '1'
       objective.value = params.get('objective') === 'sharpe' ? 'sharpe' : 'annual_return'
       const rank = params.get('ranking')
       ranking.value = signalRank(rank)

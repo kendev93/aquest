@@ -671,7 +671,7 @@ const {
 })
 
 const signalSimulationHref = computed(() => '/strategy-pool/simulations?' + new URLSearchParams({
-  create: '1', objective: objective.value ?? 'annual_return', ranking: signalSort.value,
+  objective: objective.value ?? 'annual_return', ranking: signalSort.value,
   start_date: signalDate.value || signalAsOf.value || '',
 }))
 
@@ -1577,8 +1577,7 @@ onUnmounted(() => {
                 <option v-for="option in SIGNAL_SORT_OPTIONS" :key="option.value" :value="option.value">{{ option.label }}</option>
               </select>
             </label>
-            <a class="button-secondary" :href="signalSimulationHref" data-testid="pool-create-simulation">按此榜单建模拟盘</a>
-            <a class="table-link" href="/strategy-pool/simulations">查看榜单模拟盘</a>
+            <a class="button-secondary simulation-link" :href="signalSimulationHref" data-testid="pool-simulations">模拟盘</a>
           </div>
           <label v-if="signalDays.length" class="signal-sort">信号日期
             <select
@@ -1909,6 +1908,7 @@ button:disabled { opacity: .48; cursor: not-allowed; }
 .signal-grid, .candidate-apply-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .signal-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .signal-sort-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.simulation-link { text-decoration: none; }
 .signal-controls-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 12px; color: #8798b1; font-size: .88rem; }
 .signal-sort { display: flex; align-items: center; gap: 8px; color: #9baac0; }
 .signal-sort select { width: auto; min-width: 0; border: 1px solid #354b69; border-radius: 7px; padding: 6px 8px; background: #111c30; color: #edf2fb; font: inherit; }
