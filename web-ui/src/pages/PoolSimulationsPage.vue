@@ -13,7 +13,7 @@ type Simulation = {
   id: string; name: string; objective: Objective; ranking: string; min_days: number; direction: string
   start_date: string; initial_cash: number; paused: boolean; warning?: string
   cash: number; value: number; total_return: number; max_drawdown: number
-  total_fees: number; turnover: number; holding_count: number
+  total_fees: number; turnover: number; holding_count: number; max_positions?: number
   equity: { date: string; value: number }[]
   positions?: Position[]; trades?: Trade[]; trades_total?: number
 }
@@ -36,6 +36,8 @@ const initialRank = query.get('ranking')
 const ranking = ref<Rank>(signalRank(initialRank))
 const name = ref('')
 const cash = ref(1_000_000)
+const maxPositions = ref(5)
+const loadingDays = ref(false)
 const days = ref<string[]>([])
 const requestedDate = ref(query.get('start_date') ?? '')
 const startDate = ref(requestedDate.value)
@@ -58,6 +60,7 @@ function showError(exc: unknown): void {
 
 async function loadDays(): Promise<void> {
   const token = ++daysRequest
+  loadingDays.value = true
   try {
     const response = await request<{ data: string[] }>(`${endpoint}/signal-days?objective=${objective.value}&ranking=${ranking.value}`)
     if (token !== daysRequest) return
@@ -66,6 +69,7 @@ async function loadDays(): Promise<void> {
       startDate.value = requestedDate.value ? '' : days.value[0] ?? ''
     }
   } catch (exc) { if (token === daysRequest) showError(exc) }
+  finally { if (token === daysRequest) loadingDays.value = false }
 }
 
 async function refresh(): Promise<void> {
@@ -90,7 +94,7 @@ async function create(): Promise<void> {
     const response = await request<{ data: { id: string } }>(endpoint, {
       method: 'POST', body: JSON.stringify({
         name: name.value, objective: objective.value, ranking: ranking.value,
-        start_date: startDate.value, initial_cash: cash.value,
+        start_date: startDate.value, initial_cash: cash.value, max_positions: maxPositions.value,
       }),
     })
     creating.value = false
@@ -167,7 +171,7 @@ const chart = computed(() => {
         <div>
           <p class="eyebrow">STRATEGY POOL / SIMULATIONS</p>
           <h1>榜单模拟盘</h1>
-          <p class="simulation-copy">按买入信号榜建仓，最多持有五只。次日开盘先卖出，再补空出的仓位。</p>
+          <p class="simulation-copy">按买入信号榜建仓，默认持有上限为 5 只。次日开盘先卖出，再补空出的仓位。</p>
         </div>
         <button v-if="!creating" class="button-primary" type="button" @click="creating = true">创建模拟盘</button>
       </header>
@@ -181,12 +185,16 @@ const chart = computed(() => {
           <label>名称<input v-model.trim="name" type="text" placeholder="例如：全区间综合榜" required maxlength="80" /></label>
           <label>策略目标<select v-model="objective"><option value="annual_return">年化收益</option><option value="sharpe">夏普</option></select></label>
           <label>榜单<select v-model="ranking"><option v-for="key in signalRanks" :key="key" :value="key">{{ rankLabels[key] }}</option></select></label>
-          <label>首批信号日<select v-model="startDate" required><option value="" disabled>请选择信号日</option><option v-for="day in days" :key="day" :value="day">{{ day }}</option></select></label>
+          <label>首批信号日<select v-model="startDate" required :disabled="loadingDays || !days.length"><option value="" disabled>{{ loadingDays ? '正在读取…' : days.length ? '请选择信号日' : '暂无可用日期' }}</option><option v-for="day in days" :key="day" :value="day">{{ day }}</option></select></label>
+          <label>持仓上限（只）<input v-model.number="maxPositions" data-testid="simulation-max-positions" type="number" min="1" max="100" step="1" required /></label>
           <label>初始资金<input v-model.number="cash" type="number" min="1000" max="100000000" required /></label>
           <div class="simulation-form-footer">
-            <p v-if="!days.length" class="simulation-copy">暂无可用信号日。请先在策略池完成全市场收盘信号扫描。</p>
-            <p v-else-if="requestedDate && !days.includes(requestedDate)" class="simulation-copy">原选日期没有此排序的归档，请选择可回放日期。</p>
-            <button class="button-primary" type="submit" :disabled="busy || !startDate">{{ busy ? '正在创建…' : '创建并回放' }}</button>
+            <p v-if="!loadingDays && !days.length" class="simulation-copy">
+              暂无可用日期。旧版信号缺少排序归档，请到 <a class="simulation-back" href="/strategy-pool">全市场策略池</a> 完成一轮新版信号扫描。
+            </p>
+            <p v-else-if="!loadingDays && requestedDate && !days.includes(requestedDate)" class="simulation-copy">原选日期没有此排序的归档，请选择可回放日期。</p>
+            <button class="button-secondary" type="button" :disabled="loadingDays" @click="loadDays">刷新日期</button>
+            <button class="button-primary" type="submit" :disabled="busy || loadingDays || !startDate">{{ busy ? '正在创建…' : '创建并回放' }}</button>
           </div>
         </form>
       </section>
@@ -214,7 +222,7 @@ const chart = computed(() => {
               <tr v-for="item in items" :key="item.id">
                 <td><button class="text-button simulation-name" type="button" :aria-pressed="detail?.id === item.id" @click="select(item.id)">{{ item.name }}</button></td>
                 <td>{{ labels[item.objective] }} · {{ rankLabels[item.ranking as Rank] }}</td>
-                <td>{{ item.holding_count }}/5</td><td>{{ formatSignedPercent(item.total_return) }}</td>
+                <td>{{ item.holding_count }}/{{ item.max_positions ?? 5 }}</td><td>{{ formatSignedPercent(item.total_return) }}</td>
                 <td>{{ formatPercent(item.max_drawdown) }}</td><td>{{ formatNumber(item.turnover) }} 倍</td><td>{{ formatNumber(item.total_fees) }}</td>
                 <td><button class="button-secondary" type="button" :disabled="busy" @click="toggle(item)">{{ item.paused ? '恢复' : '暂停' }}</button><small v-if="item.warning">{{ item.warning }}</small></td>
               </tr>
@@ -228,7 +236,7 @@ const chart = computed(() => {
         <dl class="simulation-metrics">
           <div><dt>总资产</dt><dd>{{ formatNumber(detail.value) }}</dd></div>
           <div><dt>现金</dt><dd>{{ formatNumber(detail.cash) }}</dd></div>
-          <div><dt>持仓</dt><dd>{{ detail.holding_count }} / 5</dd></div>
+          <div><dt>持仓</dt><dd>{{ detail.holding_count }} / {{ detail.max_positions ?? 5 }}</dd></div>
         </dl>
         <h3>当前持仓</h3>
         <div class="table-wrap">

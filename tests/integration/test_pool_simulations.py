@@ -148,9 +148,27 @@ def test_simulation_replays_signal_only_rank_and_replaces_only_after_filled_sale
     pool.advance()
     assert pool.read(key)[0] == result
 
+    smaller = pool.create(
+        {
+            "name": "三只持仓",
+            "objective": "annual_return",
+            "ranking": "annual_return",
+            "direction": "desc",
+            "initial_cash": 100_000.0,
+            "min_days": 0,
+            "start_date": days[0],
+            "max_positions": 3,
+        }
+    )
+    pool.advance()
+    smaller_result = pool.read(smaller)[0]
+    assert smaller_result["holding_count"] == smaller_result["max_positions"] == 3
+    assert smaller_result["trades_total"] == 5
+    assert result["max_positions"] == 5
+
     # 首次拆状态库后，信号归档与账本仍然可读。
     counts = store.ensure_state_database()
-    assert counts["pool_simulations"] == 1
+    assert counts["pool_simulations"] == 2
     assert counts["pool_simulation_signals"] == 3
     assert pool.read(key)[0] == result
 

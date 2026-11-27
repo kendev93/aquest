@@ -31,7 +31,7 @@ from .simulation_archive import SIGNAL_METRICS, SIGNAL_RANKS
 from .tracking_store import dumps
 
 logger = logging.getLogger(__name__)
-SLOTS = 5
+DEFAULT_SLOTS = 5
 
 
 def _symbol(row: dict[str, Any]) -> str:
@@ -99,6 +99,8 @@ def execute_orders(
     trade_day: str,
     quote: Callable[[str], tuple[float, float] | None],
     version_config: Callable[[dict[str, Any]], PortfolioBacktestConfig | None],
+    *,
+    slots: int = DEFAULT_SLOTS,
 ) -> None:
     """先卖后买；没有卖出成交的仓位不会变成买入名额。"""
 
@@ -134,8 +136,8 @@ def execute_orders(
         del positions[symbol], state["pending"][symbol]
         sold.add(symbol)
 
-    available = SLOTS if initial else len(sold)
-    # 每个空位最多用当前总权益的五分之一，未成交资金继续留在现金中。
+    available = min(slots - len(positions), slots if initial else len(sold))
+    # 每个空位最多用当前总权益的一个目标仓位的额度，未成交资金继续留在现金中。
     open_equity = state["cash"] + sum(
         position["size"] * (prices[0] if (prices := quote(symbol)) else position["mark"])
         for symbol, position in positions.items()
@@ -151,7 +153,7 @@ def execute_orders(
         if prices is None or config is None:
             continue
         price, close = prices
-        budget = min(state["cash"], open_equity / SLOTS)
+        budget = min(state["cash"], open_equity / slots)
         lot = profile_from_config(
             "stock",
             commission=config.commission,
@@ -226,6 +228,7 @@ class PoolSimulations:
             ]
 
     def create(self, config: dict[str, Any]) -> str:
+        config = {"max_positions": DEFAULT_SLOTS, **config}
         days = self.signal_days(config["objective"], config["ranking"])
         if not days or config["start_date"] not in days:
             raise ValueError("该日期没有可回放的完整买入信号榜")
@@ -309,6 +312,7 @@ class PoolSimulations:
                 "max_drawdown": drawdown,
                 "equity": equity,
                 "holding_count": len(state["positions"]),
+                "max_positions": config.get("max_positions", DEFAULT_SLOTS),
                 "total_fees": sum(t["fee"] for t in state["trades"]),
                 "turnover": sum(t["size"] * t["price"] for t in state["trades"])
                 / config["initial_cash"],
@@ -453,7 +457,13 @@ class PoolSimulations:
             )
             row["applied_corporate_actions"] = sorted(position.applied_corporate_actions)
         execute_orders(
-            state, rank_buys(rows, config), str(signal_day), str(trade_day), quote, version
+            state,
+            rank_buys(rows, config),
+            str(signal_day),
+            str(trade_day),
+            quote,
+            version,
+            slots=config.get("max_positions", DEFAULT_SLOTS),
         )
         state["equity"].append(
             {

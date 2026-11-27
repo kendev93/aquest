@@ -6,7 +6,7 @@ from typing import Literal, cast
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from aquest.strategy_pool.simulations import PoolSimulations
+from aquest.strategy_pool.simulations import DEFAULT_SLOTS, PoolSimulations
 
 from ._errors import store_guard
 
@@ -34,6 +34,7 @@ class SimulationCreate(BaseModel):
     direction: Literal["asc", "desc"] = "desc"
     min_days: Literal[0, 5, 20, 60] = 0
     start_date: date
+    max_positions: int = Field(default=DEFAULT_SLOTS, ge=1, le=100)
     initial_cash: float = Field(default=1_000_000, ge=1_000, le=100_000_000, allow_inf_nan=False)
 
 
