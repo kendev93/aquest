@@ -4,6 +4,7 @@ import PageGuide from '../components/PageGuide.vue'
 import IndividualResearchBacktestDetail from '../components/IndividualResearchBacktestDetail.vue'
 import { fetchMetadata } from '../api/formulaScreen'
 import { buildIndicatorNameMap, indicatorDisplayName } from '../utils/indicatorNames'
+import { isTerminalJobStatus } from '../utils/jobStatus'
 import { holdingRiskSummary } from '../utils/strategyPoolStatus'
 import { formatRiskControls, formatTradingRule } from '../utils/strategyRules'
 import type { HoldingRiskDisplay, IndividualResearchFullBacktest, StrategyPoolCandidate, StrategyPoolObjective } from '../types'
@@ -64,6 +65,7 @@ const holdings = computed(
   () => (Array.isArray(summary.value.holding) ? summary.value.holding as TrackedHolding[] : []),
 )
 const error = ref(''); const loading = ref(false); const offset = ref(0); const total = ref(0)
+const initializing = ref(false); const initError = ref('')
 // 每页笔数与 /trades 请求里的 limit 用同一个常量，分页按钮的位移也按它算
 const TRADE_PAGE_SIZE = 50
 const tradePage = computed(() => Math.floor(offset.value / TRADE_PAGE_SIZE) + 1)
@@ -78,6 +80,16 @@ async function get<T>(url: string): Promise<T> {
   const response = await fetch(url)
   const payload = await response.json()
   if (!response.ok) throw new Error(payload.detail ?? '详情加载失败')
+  return payload.data as T
+}
+async function post<T>(url: string, body: unknown): Promise<T> {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const payload = await response.json()
+  if (!response.ok) throw new Error(payload.detail ?? payload.error?.message ?? '任务提交失败')
   return payload.data as T
 }
 function percent(value: unknown) { return typeof value === 'number' && Number.isFinite(value) ? `${(value * 100).toFixed(2)}%` : '—' }
@@ -121,6 +133,38 @@ async function loadVersion() {
     analysis.value = curve.analysis ?? null
   } catch (e) { if (current === requestId) error.value = e instanceof Error ? e.message : '详情加载失败' }
   finally { if (current === requestId) loading.value = false }
+}
+
+/** 只回放这一只股票，给刚研究完、还没有模拟账户快照的版本补一份。 */
+async function initializeAccount(): Promise<void> {
+  if (initializing.value || !selected.value?.is_current) return
+  initializing.value = true
+  initError.value = ''
+  try {
+    const created = await post<{ job_id: string; status: string }>(
+      '/api/v1/strategy-pool/jobs',
+      { mode: 'signals', objective: objective.value, market, code },
+    )
+    if (!created.job_id) throw new Error('初始化任务没有创建成功')
+    let finished = false
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      const state = await get<{ status: string; error?: string }>(
+        `/api/v1/strategy-pool/jobs/${created.job_id}`,
+      )
+      if (isTerminalJobStatus(state.status)) {
+        if (state.status !== 'completed') throw new Error(state.error || '初始化任务失败')
+        finished = true
+        break
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 1_500))
+    }
+    if (!finished) throw new Error('初始化任务超时，请到策略池任务记录里查看进度')
+    await loadVersion()
+  } catch (e) {
+    initError.value = e instanceof Error ? e.message : '初始化失败'
+  } finally {
+    initializing.value = false
+  }
 }
 
 async function refreshTrades(): Promise<void> {
@@ -202,7 +246,12 @@ const scopeLabel = computed(
         <div class="segmented-tabs" role="group" aria-label="收益曲线区间"><button v-for="option in RANGE_OPTIONS" :key="option.key" :aria-pressed="range === option.key" :data-testid="`pool-range-btn-${option.key}`" @click="selectRange(option.key)">{{ option.label }}</button></div>
       </div>
       <!-- 「尚未初始化」只在真的读完且没有数据时说，以前加载途中也会闪这句 -->
-      <p v-if="!loading && !backtest" class="empty-copy" data-testid="pool-detail-not-initialized">账户尚未初始化：研究只生成策略版本，模拟账户要等信号跟踪任务创建。回到全市场策略池点「刷新最新交易日信号」，跟踪任务跑完后这里才会有收益曲线与历史交易。</p>
+      <p v-if="!loading && !backtest" class="empty-copy" data-testid="pool-detail-not-initialized">账户尚未初始化：研究只生成策略版本，模拟账户由信号跟踪任务创建。可以点下方按钮只初始化这一只，或回全市场策略池点「刷新最新交易日信号」刷新全市场。</p>
+      <div v-if="!loading && !backtest && selected?.is_current" class="detail-initialize">
+        <button class="button-secondary" data-testid="pool-init-account" type="button" :disabled="initializing" @click="initializeAccount">{{ initializing ? '正在初始化…' : '初始化该股模拟账户' }}</button>
+        <small>只回放这一只，通常几秒到一分钟；初始化后本页会显示收益曲线与历史交易。</small>
+      </div>
+      <p v-if="initError" class="notice error" role="alert">{{ initError }}</p>
       <IndividualResearchBacktestDetail v-if="backtest" :backtest="backtest" :launch-date="selected.created_at" :baseline-date="String(summary.baseline_date ?? '')" hide-metrics return-curve>
         <template #after-chart>
         <div class="detail-metrics">
@@ -273,6 +322,7 @@ const scopeLabel = computed(
 .panel-card { padding:22px; border:1px solid #25364f; background:rgba(12,20,36,.78); }
 .detail-head { display:grid; gap:8px; }
 .detail-note, .empty-copy { margin:0; color:#8798b1; font-size:.9rem; line-height:1.6; }
+.detail-initialize { display:flex; flex-wrap:wrap; align-items:center; gap:10px 14px; margin-top:10px; color:var(--muted); font-size:12px; }
 .detail-controls { display:flex; flex-wrap:wrap; align-items:end; gap:14px 24px; padding:16px; border:1px solid #25364f; background:rgba(12,20,36,.6); }
 .detail-controls label { display:grid; gap:6px; color:var(--muted); font-size:.88rem; }
 .detail-controls select { width:auto; min-width:240px; }

@@ -215,6 +215,60 @@ it('does not claim the account is uninitialized while the first read is still in
   } finally { wrapper.unmount() }
 })
 
+it('initializes only this stock from the detail page', async () => {
+  window.history.replaceState({}, '', '/strategy-pool/SH/600000?objective=annual_return')
+  const version = { version_id: 'v1', created_at: '2026-09-02T06:00:00+00:00', source: 'automatic',
+    is_current: true, status: 'pending', summary: {},
+    candidate: { candidate_id: 'v1', buy_rule: { conditions: [] }, sell_rule: { signals: [] }, config: {} } }
+  let initialized = false
+  const ready = {
+    start_date: '2026-01-02', end_date: '2026-09-03', bars: 2,
+    performance: { total_return: 0.2 },
+    equity_curve: [
+      { date: '2026-01-02', return_pct: 0, total: 1_000_000 },
+      { date: '2026-09-03', return_pct: 0.2, total: 1_200_000 },
+    ],
+    trades: [],
+  }
+  const fetch = vi.fn(async (url: string, init?: RequestInit) => {
+    const path = String(url)
+    if (path.endsWith('/detail')) {
+      return { ok: true, json: async () => ({ data: { name: '测试股', objectives: { annual_return: [version], sharpe: [] } } }) }
+    }
+    if (init?.method === 'POST' && path.endsWith('/jobs')) {
+      initialized = true
+      return { ok: true, json: async () => ({ data: { job_id: 'job-1', status: 'queued' } }) }
+    }
+    if (path.includes('/jobs/job-1')) {
+      return { ok: true, json: async () => ({ data: { job_id: 'job-1', status: 'completed', progress: 1 } }) }
+    }
+    if (path.includes('/curve')) {
+      return { ok: true, json: async () => ({ data: initialized ? { backtest: ready, summary: {}, ranges: [], exits: [], analysis: null } : { backtest: null, summary: {} } }) }
+    }
+    if (path.includes('/trades')) {
+      return { ok: true, json: async () => ({ data: { items: [], total: 0 } }) }
+    }
+    return { ok: true, json: async () => ({ data: {} }) }
+  })
+  vi.stubGlobal('fetch', fetch)
+  const wrapper = mount(StrategyPoolDetailPage)
+  try {
+    await flushPromises()
+    expect(wrapper.find('[data-testid="pool-detail-not-initialized"]').exists()).toBe(true)
+
+    await wrapper.get('[data-testid="pool-init-account"]').trigger('click')
+    await flushPromises()
+    await flushPromises()
+
+    const posted = fetch.mock.calls.find(([, init]) => init?.method === 'POST')
+    expect(JSON.parse(String(posted?.[1]?.body))).toEqual({
+      mode: 'signals', objective: 'annual_return', market: 'SH', code: '600000',
+    })
+    expect(wrapper.find('[data-testid="pool-detail-not-initialized"]').exists()).toBe(false)
+    expect(wrapper.find('.individual-full-detail').exists()).toBe(true)
+  } finally { wrapper.unmount(); vi.unstubAllGlobals() }
+})
+
 it('prints the risk lines and the holding deadline of the tracked position', async () => {
   // 风控线只有引擎那份才算数：界面上标的价格、判定日期和到期日必须同源，
   // 否则用户按一个算不出来的价位挂单。
