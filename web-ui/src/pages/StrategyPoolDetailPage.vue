@@ -202,7 +202,7 @@ const scopeLabel = computed(
         <div class="segmented-tabs" role="group" aria-label="收益曲线区间"><button v-for="option in RANGE_OPTIONS" :key="option.key" :aria-pressed="range === option.key" :data-testid="`pool-range-btn-${option.key}`" @click="selectRange(option.key)">{{ option.label }}</button></div>
       </div>
       <!-- 「尚未初始化」只在真的读完且没有数据时说，以前加载途中也会闪这句 -->
-      <p v-if="!loading && !backtest" class="empty-copy" data-testid="pool-detail-not-initialized">账户尚未初始化，等待后台跟踪任务完成。</p>
+      <p v-if="!loading && !backtest" class="empty-copy" data-testid="pool-detail-not-initialized">账户尚未初始化：研究只生成策略版本，模拟账户要等信号跟踪任务创建。回到全市场策略池点「刷新最新交易日信号」，跟踪任务跑完后这里才会有收益曲线与历史交易。</p>
       <IndividualResearchBacktestDetail v-if="backtest" :backtest="backtest" :launch-date="selected.created_at" :baseline-date="String(summary.baseline_date ?? '')" hide-metrics return-curve>
         <template #after-chart>
         <div class="detail-metrics">
