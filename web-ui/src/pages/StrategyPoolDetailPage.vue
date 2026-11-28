@@ -65,7 +65,7 @@ const holdings = computed(
   () => (Array.isArray(summary.value.holding) ? summary.value.holding as TrackedHolding[] : []),
 )
 const error = ref(''); const loading = ref(false); const offset = ref(0); const total = ref(0)
-const initializing = ref(false); const initError = ref('')
+const initializing = ref(false); const initError = ref(''); const autoInitFor = ref('')
 // 每页笔数与 /trades 请求里的 limit 用同一个常量，分页按钮的位移也按它算
 const TRADE_PAGE_SIZE = 50
 const tradePage = computed(() => Math.floor(offset.value / TRADE_PAGE_SIZE) + 1)
@@ -133,6 +133,17 @@ async function loadVersion() {
     analysis.value = curve.analysis ?? null
   } catch (e) { if (current === requestId) error.value = e instanceof Error ? e.message : '详情加载失败' }
   finally { if (current === requestId) loading.value = false }
+  // 研究只生成策略版本；当前版本还没有模拟账户快照时，打开详情就自动为这一只
+  // 补一次初始化（通常几秒），同一个版本每次打开只自动试一次，失败可手动重试。
+  if (
+    current === requestId
+    && !backtest.value
+    && selected.value?.is_current
+    && autoInitFor.value !== selected.value.version_id
+  ) {
+    autoInitFor.value = selected.value.version_id
+    void initializeAccount()
+  }
 }
 
 /** 只回放这一只股票，给刚研究完、还没有模拟账户快照的版本补一份。 */
@@ -249,7 +260,7 @@ const scopeLabel = computed(
       <p v-if="!loading && !backtest" class="empty-copy" data-testid="pool-detail-not-initialized">账户尚未初始化：研究只生成策略版本，模拟账户由信号跟踪任务创建。可以点下方按钮只初始化这一只，或回全市场策略池点「刷新最新交易日信号」刷新全市场。</p>
       <div v-if="!loading && !backtest && selected?.is_current" class="detail-initialize">
         <button class="button-secondary" data-testid="pool-init-account" type="button" :disabled="initializing" @click="initializeAccount">{{ initializing ? '正在初始化…' : '初始化该股模拟账户' }}</button>
-        <small>只回放这一只，通常几秒到一分钟；初始化后本页会显示收益曲线与历史交易。</small>
+        <small>{{ initializing ? '正在为该股创建模拟账户，通常几秒到一分钟…' : '打开详情时会自动初始化这一只；若失败可点按钮重试，或回策略池刷新全市场信号。' }}</small>
       </div>
       <p v-if="initError" class="notice error" role="alert">{{ initError }}</p>
       <IndividualResearchBacktestDetail v-if="backtest" :backtest="backtest" :launch-date="selected.created_at" :baseline-date="String(summary.baseline_date ?? '')" hide-metrics return-curve>

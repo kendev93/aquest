@@ -215,7 +215,7 @@ it('does not claim the account is uninitialized while the first read is still in
   } finally { wrapper.unmount() }
 })
 
-it('initializes only this stock from the detail page', async () => {
+it('initializes the account automatically when the detail opens without a snapshot', async () => {
   window.history.replaceState({}, '', '/strategy-pool/SH/600000?objective=annual_return')
   const version = { version_id: 'v1', created_at: '2026-09-02T06:00:00+00:00', source: 'automatic',
     is_current: true, status: 'pending', summary: {},
@@ -253,12 +253,7 @@ it('initializes only this stock from the detail page', async () => {
   vi.stubGlobal('fetch', fetch)
   const wrapper = mount(StrategyPoolDetailPage)
   try {
-    await flushPromises()
-    expect(wrapper.find('[data-testid="pool-detail-not-initialized"]').exists()).toBe(true)
-
-    await wrapper.get('[data-testid="pool-init-account"]').trigger('click')
-    await flushPromises()
-    await flushPromises()
+    for (let round = 0; round < 5; round += 1) await flushPromises()
 
     const posted = fetch.mock.calls.find(([, init]) => init?.method === 'POST')
     expect(JSON.parse(String(posted?.[1]?.body))).toEqual({
